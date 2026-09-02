@@ -1,0 +1,178 @@
+- set:
+    interface:
+      eth0:
+        ipv4:
+          address:
+            {{ d.eth0_ip }}: {}
+          gateway:
+            {{ d.eth0_gw }}: {}
+        type: eth
+        vrf: mgmt
+{% if d.has_eth1 %}
+      eth1:
+        ipv4:
+          address:
+            {{ d.eth1_ip }}: {}
+          gateway:
+            {{ d.eth1_gw }}: {}
+        type: eth
+{% endif %}
+      lo:
+        ipv4:
+          address:
+            {{ d.lo_ip }}: {}
+        type: loopback
+{% for swp in d.bgp_plain_uplinks %}
+      {{ swp }}:
+        type: swp
+{% endfor %}
+{% for swp_name, swp_info in d.bgp_uplink_parents.items() %}
+      {{ swp_name }}:
+        link:
+          breakout:
+            {{ swp_info.breakout }}x:
+              lanes-per-port: '{{ swp_info.lanes }}'
+        type: swp
+{% for s in swp_info.subs %}
+      {{ swp_name }}s{{ s }}:
+        type: swp
+{% endfor %}
+{% endfor %}
+    router:
+      bfd:
+        profile:
+          bgp-underlay-bfd:
+            detect-multiplier: {{ g.vrf.default.router.bfd.profile['bgp-underlay-bfd']['detect-multiplier'] }}
+            min-rx-interval: {{ g.vrf.default.router.bfd.profile['bgp-underlay-bfd']['min-rx-interval'] }}
+            min-tx-interval: {{ g.vrf.default.router.bfd.profile['bgp-underlay-bfd']['min-tx-interval'] }}
+        state: enabled
+      bgp:
+        graceful-restart:
+          mode: helper-only
+        state: enabled
+      policy:
+        route-map:
+          lo-to-bgp:
+            rule:
+              '10':
+                action:
+                  permit: {}
+                match:
+                  interface: lo
+                  type: ipv4
+      vrr:
+        state: enabled
+    system:
+      aaa:
+        class:
+          nvapply:
+            action: allow
+            command-path:
+              /:
+                permission: all
+          nvshow:
+            action: allow
+            command-path:
+              /:
+                permission: ro
+          sudo:
+            action: allow
+            command-path:
+              /:
+                permission: all
+        role:
+          nvue-admin:
+            class:
+              nvapply: {}
+          nvue-monitor:
+            class:
+              nvshow: {}
+          system-admin:
+            class:
+              nvapply: {}
+              sudo: {}
+        user:
+          cumulus:
+            full-name: cumulus
+            hashed-password: {{ g.system.aaa.user.cumulus['hashed-password'] }}
+            role: system-admin
+{% include '_extra_aaa_users.yaml.j2' %}
+      api:
+        state: enabled
+      config:
+        auto-save:
+          state: enabled
+      control-plane:
+        acl:
+          acl-default-dos:
+            inbound: {}
+          acl-default-whitelist:
+            inbound: {}
+      date-time:
+        timezone: {{ g.system['date-time'].timezone }}
+      dns:
+        server:
+{% for srv in g.system.dns.server %}
+          {{ srv }}:
+            vrf: mgmt
+{% endfor %}
+      docker:
+        state: enabled
+        vrf: mgmt
+      hostname: {{ d.hostname }}
+      ntp:
+        server:
+{% for srv in g.system.ntp.server %}
+          {{ srv }}:
+            iburst: enabled
+{% endfor %}
+        vrf: mgmt
+      ssh-server:
+        state: enabled
+      wjh:
+        channel:
+          forwarding:
+            trigger:
+              l2: {}
+              l3: {}
+              tunnel: {}
+        state: enabled
+    vrf:
+      default:
+        router:
+          bgp:
+            address-family:
+              ipv4-unicast:
+                redistribute:
+                  connected:
+                    route-map: lo-to-bgp
+                    state: enabled
+                state: enabled
+            autonomous-system: {{ d.bgp_asn }}
+            neighbor:
+{% for nbr in d.bgp_neighbors %}
+              {{ nbr }}:
+                peer-group: underlay
+                type: unnumbered
+{% endfor %}
+            path-selection:
+              multipath:
+                aspath-ignore: enabled
+            peer-group:
+              underlay:
+                address-family:
+                  l2vpn-evpn:
+                    state: enabled
+                bfd:
+                  profile: bgp-underlay-bfd
+                remote-as: external
+            router-id: {{ d.lo_ip | replace('/32', '') }}
+            state: enabled
+      mgmt:
+        router:
+          static:
+            default:
+              address-family: ipv4-unicast
+              via:
+                {{ d.eth0_gw }}:
+                  type: ipv4-address

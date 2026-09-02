@@ -1,0 +1,26 @@
+{% for vrf in d.vrfs %}
+{% for l2 in vrf.l2vlans %}
+{% if l2.vlan_id is not none and (l2.emit_svi | default(true)) %}
+      vlan{{ l2.vlan_id }}:
+{% if l2.svi_ip or l2.vrr_ip %}
+        ipv4:
+{% if l2.svi_ip %}
+          address:
+            {{ l2.svi_ip }}: {}
+{% endif %}
+{% if l2.vrr_ip %}
+          vrr:
+            address:
+              {{ l2.vrr_ip }}: {}
+            mac-address: {{ l2.vrr_mac }}
+            state: enabled
+            vrr-state:
+              up: {}
+{% endif %}
+{% endif %}
+        type: svi
+        vlan: {{ l2.vlan_id }}
+        vrf: {{ vrf.evpn_vrf }}
+{% endif %}
+{% endfor %}
+{% endfor %}

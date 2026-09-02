@@ -1,0 +1,41 @@
+- set:
+    system:
+      aaa:
+        class:
+          nvapply:
+            action: allow
+            command-path:
+              /:
+                permission: all
+          sudo:
+            action: allow
+            command-path:
+              /:
+                permission: all
+        role:
+          system-admin:
+            class:
+              nvapply: {}
+              sudo: {}
+        user:
+          cumulus:
+            full-name: cumulus,,,
+            hashed-password: '*'
+            role: system-admin
+      date-time:
+        timezone: Etc/UTC
+      dns:
+        server:
+          1.1.1.1:
+            vrf: mgmt
+          9.9.9.9:
+            vrf: mgmt
+      ntp:
+        server:
+          time.cloudflare.com: {}
+          ntp.ubuntu.com: {}
+        state: enabled
+        vrf: mgmt
+      config:
+        auto-save:
+          state: enabled

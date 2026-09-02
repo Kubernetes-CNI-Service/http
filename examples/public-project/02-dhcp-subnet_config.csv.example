@@ -1,0 +1,4 @@
+shared_network,subnet,netmask,range_start,range_end,routers,ztp_service_ip,cumulus_profile,nvos_ztp
+example-oobofoob,192.0.2.0,255.255.255.0,192.0.2.100,192.0.2.149,192.0.2.1,192.0.2.10,oobofoob,no
+example-oob,198.51.100.0,255.255.255.0,198.51.100.100,198.51.100.149,198.51.100.1,192.0.2.10,oob,no
+example-nvos,203.0.113.0,255.255.255.0,203.0.113.100,203.0.113.149,203.0.113.1,192.0.2.10,oob,yes

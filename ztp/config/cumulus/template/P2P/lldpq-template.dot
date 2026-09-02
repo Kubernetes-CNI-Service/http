@@ -1,0 +1,15 @@
+/*
+ * Synthetic LLDP topology template.
+ *
+ * The P2P converter preserves this comment and replaces the graph body with
+ * the topology generated from the selected workbook.  Device and interface
+ * tokens use GraphViz DOT edge syntax:
+ *   "DeviceA":"InterfaceX" -- "DeviceB":"InterfaceY"
+ */
+
+graph "EXAMPLE" {
+
+"EXAMPLE-SERVER01":"eth0" -- "EXAMPLE-LEAF01":"swp1"
+"EXAMPLE-LEAF01":"swp49" -- "EXAMPLE-SPINE01":"swp1"
+
+}

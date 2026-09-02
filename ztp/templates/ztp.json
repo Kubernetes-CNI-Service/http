@@ -1,0 +1,22 @@
+{
+    "ztp": {
+        "01-connectivity-check": {
+            "ping-hosts": [
+                "127.0.0.1",
+                "localhost"
+            ],
+            "ping-count": 3,
+            "ignore-result": false
+        },
+        "02-commands-list": {
+            "url": "http://127.0.0.1/ztp/config/nvos/disable-password-hardening.nv",
+            "clear-config": false
+        },
+        "03-provisioning-script": {
+            "url": "http://127.0.0.1/ztp/ztp-bootstrap_oob.sh",
+            "timeout": 600,
+            "halt-on-failure": true,
+            "restart-ztp-on-failure": false
+        }
+    }
+}

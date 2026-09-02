@@ -1,0 +1,72 @@
+# Normalise source and documentation so scripts behave identically after a
+# clone on macOS, Linux or Windows.
+* text=auto
+
+.gitattributes text eol=lf
+.gitignore text eol=lf
+*.py text eol=lf
+*.pyi text eol=lf
+*.sh text eol=lf
+*.bash text eol=lf
+*.cgi text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.rst text eol=lf
+*.html text eol=lf
+*.css text eol=lf
+*.js text eol=lf
+*.json text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.j2 text eol=lf
+*.csv text eol=lf
+*.tsv text eol=lf
+*.log text eol=lf
+*.dot text eol=lf
+*.conf text eol=lf
+*.hosts text eol=lf
+*.nv text eol=lf
+*.spx text eol=lf
+*.pub text eol=lf
+
+# Binary assets must never receive line-ending conversion or textual diffs.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.pdf binary
+*.doc binary
+*.docx binary
+*.xls binary
+*.xlsx binary
+*.xlsm binary
+*.ppt binary
+*.pptx binary
+*.tar binary
+*.gz binary
+*.bz2 binary
+*.xz binary
+*.zip binary
+*.7z binary
+*.rar binary
+*.deb binary
+*.rpm binary
+*.cab binary
+*.vme binary
+*.bin binary
+*.img binary
+*.iso binary
+*.qcow binary
+*.qcow2 binary
+*.vmdk binary
+*.o binary
+*.a binary
+*.so binary
+*.dylib binary
+*.dll binary
+*.exe binary
+*.class binary
+*.jar binary
+*.war binary

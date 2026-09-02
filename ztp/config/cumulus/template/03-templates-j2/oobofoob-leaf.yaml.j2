@@ -1,0 +1,197 @@
+- set:
+    bridge:
+      domain:
+        br_default:
+          vlan:
+{% if d.vlan_spec | default('') %}
+            '{{ d.vlan_spec }}': {}
+{% endif %}
+{% include '_bridge_l2vlans.yaml.j2' %}
+    interface:
+      eth0:
+        ipv4:
+{% if d.eth0_ip == 'dhcp-client' %}
+          dhcp-client:
+            state: enabled
+{% else %}
+          address:
+            {{ d.eth0_ip }}: {}
+          gateway:
+            {{ d.eth0_gw }}: {}
+{% endif %}
+        type: eth
+        vrf: mgmt
+{% if d.has_eth1 %}
+      eth1:
+        ipv4:
+          address:
+            {{ d.eth1_ip }}: {}
+          gateway:
+            {{ d.eth1_gw }}: {}
+        type: eth
+{% endif %}
+{% if d.lo_ip and d.lo_ip not in ['NA', 'None'] %}
+      lo:
+        ipv4:
+          address:
+            {{ d.lo_ip }}: {}
+        type: loopback
+{% endif %}
+{% for port in d.computed_vlan_ports %}
+      {{ port.name }}:
+        bridge:
+          domain:
+            br_default:
+{% if port.vlan_mode == 'access' %}
+              access: {{ port.vlan_access }}
+{% else %}
+              vlan:
+                '{{ port.vlan_trunk_range }}': {}
+{% endif %}
+        type: swp
+{% endfor %}
+{% for bond in d.computed_bonds %}
+{% if bond.type == 'localbond' %}
+{% for m in bond.members %}
+      {{ m }}:
+        type: swp
+{% endfor %}
+{% endif %}
+{% endfor %}
+{% for bond in d.computed_bonds %}
+{% if bond.type == 'localbond' %}
+      {{ bond.name }}:
+        bond:
+          lacp-bypass: enabled
+          member:
+{% for m in bond.members %}
+            {{ m }}: {}
+{% endfor %}
+          mode: lacp
+        bridge:
+          domain:
+            br_default:
+{% if bond.vlan_mode == 'access' %}
+              access: {{ bond.vlan_access }}
+{% else %}
+              vlan:
+                '{{ bond.vlan_trunk_range }}': {}
+{% endif %}
+        type: bond
+{% endif %}
+{% endfor %}
+{% include '_l2_svis.yaml.j2' %}
+{% if not d.vrfs and d.vlan_id is defined and d.svi_ip %}
+      vlan{{ d.vlan_id }}:
+        base-interface: br_default
+        ipv4:
+          address:
+            {{ d.svi_ip }}: {}
+{% if d.vrr_ip %}
+          vrr:
+            address:
+              {{ d.vrr_ip }}: {}
+            mac-address: {{ d.vrr_mac }}
+            state: enabled
+            vrr-state:
+              up: {}
+{% endif %}
+        type: svi
+        vlan: {{ d.vlan_id }}
+        vrf: default
+{% endif %}
+{% include '_dhcp_relay.yaml.j2' %}
+    system:
+      aaa:
+        class:
+          nvapply:
+            action: allow
+            command-path:
+              /:
+                permission: all
+          nvshow:
+            action: allow
+            command-path:
+              /:
+                permission: ro
+          sudo:
+            action: allow
+            command-path:
+              /:
+                permission: all
+        role:
+          nvue-admin:
+            class:
+              nvapply: {}
+          nvue-monitor:
+            class:
+              nvshow: {}
+          system-admin:
+            class:
+              nvapply: {}
+              sudo: {}
+        user:
+          cumulus:
+            full-name: cumulus
+            hashed-password: {{ g.system.aaa.user.cumulus['hashed-password'] }}
+            role: system-admin
+{% include '_extra_aaa_users.yaml.j2' %}
+      api:
+        state: enabled
+      config:
+        auto-save:
+          state: enabled
+      control-plane:
+        acl:
+          acl-default-dos:
+            inbound: {}
+          acl-default-whitelist:
+            inbound: {}
+      date-time:
+        timezone: {{ g.system['date-time'].timezone }}
+      dns:
+        server:
+{% for srv in g.system.dns.server %}
+          {{ srv }}:
+            vrf: {{ g.system.dns.vrf }}
+{% endfor %}
+      docker:
+        state: enabled
+        vrf: {{ g.system.dns.vrf }}
+      hostname: {{ d.hostname }}
+      ntp:
+        listen:
+{% for vrf in (d.vrfs | default([])) if vrf.evpn_vrf == g.system.ntp.vrf %}
+{% for l2 in vrf.l2vlans if l2.vlan_id is not none %}
+          vlan{{ l2.vlan_id }}: {}
+{% endfor %}
+{% endfor %}
+        server:
+{% for srv in g.system.ntp.server %}
+          {{ srv }}:
+            iburst: enabled
+{% endfor %}
+        vrf: {{ g.system.ntp.vrf }}
+      ssh-server:
+        state: enabled
+      wjh:
+        channel:
+          forwarding:
+            trigger:
+              l2: {}
+              l3: {}
+              tunnel: {}
+        state: enabled
+    vrf:
+{% for vrf in d.vrfs | default([]) %}
+      {{ vrf.evpn_vrf }}:
+{% for l2 in vrf.l2vlans if l2.svi_ip %}
+        router:
+          static:
+            default:
+              address-family: ipv4-unicast
+              via:
+                {{ l2.svi_ip | subnet_last_usable }}:
+                  type: ipv4-address
+{% endfor %}
+{% endfor %}

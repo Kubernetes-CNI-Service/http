@@ -1,0 +1,13 @@
+{% for vrf in d.vrfs %}
+{% for l2 in vrf.l2vlans %}
+{% if l2.vlan_id is none %}
+            '{{ l2.vlan_spec }}': {}
+{% elif l2.vni is not none %}
+            '{{ l2.vlan_id }}':
+              vni:
+                '{{ l2.vni }}': {}
+{% else %}
+            '{{ l2.vlan_id }}': {}
+{% endif %}
+{% endfor %}
+{% endfor %}

@@ -1,0 +1,84 @@
+schema_version: 1
+common:
+  mgmt:
+    dhcp-server:
+      status: enabled
+      package: isc-dhcp-server
+    http:
+      status: enabled
+      http_root: /var/www/html
+      package: apache2
+    ztp:
+      status: enabled
+      ztp_url_prefix: /ztp
+  switch:
+    system:
+      config:
+        auto-save:
+          state: enabled
+      dns:
+        server:
+          - 192.0.2.53
+      ntp:
+        server:
+          - 192.0.2.123
+      date-time:
+        timezone: UTC
+switches:
+  - eth:
+      version: 5.16.4
+      bridge:
+        domain:
+          br_default:
+            stp:
+              priority: 4096
+      services:
+        dhcp_relay:
+          oob:
+            server_group:
+              - group: example-ztp-server
+                servers:
+                  - 192.0.2.10
+      system:
+        aaa:
+          user:
+            cumulus:
+              full-name: Example account with password login disabled
+              hashed-password: "'*'"
+        ntp:
+          vrf: mgmt
+        dns:
+          vrf: mgmt
+      vrf:
+        default:
+          router:
+            bfd:
+              profile:
+                bgp-underlay-bfd:
+                  detect-multiplier: 3
+                  min-rx-interval: 300
+                  min-tx-interval: 300
+      vrl:
+        - leaking_vrfs: [inband, oob]
+          inband:
+            - example-inband: 198.51.100.0/25
+          oob:
+            - example-oob: 203.0.113.0/24
+              min-prefix-len: 24
+              max-prefix-len: 32
+  - ib:
+      version: 25-02-8008
+      system:
+        security:
+          password-hardening:
+            state: enabled
+        ztp:
+          config-save: enabled
+  - nvl:
+      version: 25.02.4347
+      system:
+        security:
+          password-hardening:
+            state: enabled
+        ztp:
+          config-save: enabled

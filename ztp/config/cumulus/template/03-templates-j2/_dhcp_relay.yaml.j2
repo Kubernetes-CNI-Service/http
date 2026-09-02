@@ -1,0 +1,42 @@
+{% set relays = d.dhcp_relays | default([]) %}
+{% if relays %}
+    service:
+      dhcp-relay:
+{% for relay in relays %}
+        {{ relay.vrf }}:
+{% if relay.mode == 'gateway' %}
+          agent:
+            state: enabled
+            use-pif-circuit-id: {}
+{% endif %}
+          downstream-interface:
+{% for downstream in relay.downstream_interfaces %}
+            {{ downstream.interface }}:
+              server-group-name: {{ downstream.server_group }}
+{% endfor %}
+{% if relay.mode == 'gateway' %}
+          gateway-interface:
+            lo:
+              address: {{ relay.gateway_address }}
+{% endif %}
+          server-group:
+{% for group in relay.server_groups %}
+            {{ group.name }}:
+              server:
+{% for server in group.servers %}
+                {{ server }}: {}
+{% endfor %}
+{% if group.upstream_interfaces %}
+              upstream-interface:
+{% for upstream in group.upstream_interfaces %}
+                {{ upstream }}: {}
+{% endfor %}
+{% endif %}
+{% endfor %}
+{% if relay.mode == 'giaddress' %}
+          source-ip: giaddress
+{% endif %}
+{% endfor %}
+{% else %}
+    service: {}
+{% endif %}

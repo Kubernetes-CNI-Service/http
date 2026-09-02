@@ -1,0 +1,22 @@
+- set:
+    system:
+      aaa:
+        user:
+          admin:
+            password: '*'
+      config:
+        auto-save:
+          state: enabled
+      date-time:
+        timezone: Etc/UTC
+      dns:
+        server:
+          1.1.1.1: {}
+          9.9.9.9: {}
+      ntp:
+        server:
+          time.cloudflare.com: {}
+          ntp.ubuntu.com: {}
+      security:
+        password-hardening:
+          state: disabled

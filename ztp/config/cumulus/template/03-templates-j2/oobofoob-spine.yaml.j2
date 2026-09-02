@@ -1,0 +1,185 @@
+- set:
+    bridge:
+      domain:
+        br_default:
+          stp:
+            priority: {{ g.bridge.domain.br_default.stp.priority }}
+          vlan:
+            '{{ d.vlan_id }}': {}
+    interface:
+      eth0:
+        ipv4:
+{% if d.eth0_ip == 'dhcp-client' %}
+          dhcp-client:
+            state: enabled
+{% else %}
+          address:
+            {{ d.eth0_ip }}: {}
+          gateway:
+            {{ d.eth0_gw }}: {}
+{% endif %}
+        type: eth
+        vrf: mgmt
+{% if d.has_eth1 %}
+      eth1:
+        ipv4:
+          address:
+            {{ d.eth1_ip }}: {}
+          gateway:
+            {{ d.eth1_gw }}: {}
+        type: eth
+{% endif %}
+      lo:
+        ipv4:
+          address:
+            {{ d.lo_ip }}: {}
+        type: loopback
+{% for bond in d.computed_bonds %}
+      {{ bond.name }}:
+        bond:
+          lacp-bypass: enabled
+          member:
+            {{ bond.member }}: {}
+          mlag:
+            id: {{ bond.id }}
+            state: enabled
+          mode: lacp
+        bridge:
+          domain:
+            br_default:
+{% if bond.vlan_mode == 'access' %}
+              access: {{ bond.vlan_access }}
+{% else %}
+              vlan:
+                '{{ bond.vlan_trunk_range }}': {}
+{% endif %}
+        type: bond
+{% endfor %}
+{% if d.peerlink_member_list %}
+      peerlink:
+        bond:
+          member:
+{% for swp in d.peerlink_member_list %}
+            {{ swp }}: {}
+{% endfor %}
+        type: peerlink
+      peerlink.4094:
+        base-interface: peerlink
+        type: sub
+        vlan: 4094
+{% endif %}
+{% for swp in d.member_swps %}
+      {{ swp }}:
+        type: swp
+{% endfor %}
+{% if d.peerlink_member_list %}
+{% for swp in d.peerlink_member_list %}
+      {{ swp }}:
+        type: swp
+{% endfor %}
+{% endif %}
+      vlan{{ d.vlan_id }}:
+        ipv4:
+          address:
+            {{ d.svi_ip }}: {}
+{% if d.vrr_ip %}
+          vrr:
+            address:
+              {{ d.vrr_ip }}: {}
+            mac-address: {{ d.vrr_mac }}
+            state: enabled
+            vrr-state:
+              up: {}
+{% endif %}
+        type: svi
+        vlan: {{ d.vlan_id }}
+        vrf: default
+    mlag:
+      backup:
+        {{ d.mlag_backup }}: {}
+      init-delay: {{ g.mlag['init-delay'] }}
+      mac-address: {{ d.mlag_mac_address }}
+      peer-ip: linklocal
+      priority: {{ d.mlag_priority }}
+      state: enabled
+    router:
+      vrr:
+        state: enabled
+    system:
+      aaa:
+        class:
+          nvapply:
+            action: allow
+            command-path:
+              /:
+                permission: all
+          nvshow:
+            action: allow
+            command-path:
+              /:
+                permission: ro
+          sudo:
+            action: allow
+            command-path:
+              /:
+                permission: all
+        role:
+          nvue-admin:
+            class:
+              nvapply: {}
+          nvue-monitor:
+            class:
+              nvshow: {}
+          system-admin:
+            class:
+              nvapply: {}
+              sudo: {}
+        user:
+          cumulus:
+            full-name: cumulus
+            hashed-password: {{ g.system.aaa.user.cumulus['hashed-password'] }}
+            role: system-admin
+{% include '_extra_aaa_users.yaml.j2' %}
+      api:
+        state: enabled
+      config:
+        auto-save:
+          state: enabled
+      control-plane:
+        acl:
+          acl-default-dos:
+            inbound: {}
+          acl-default-whitelist:
+            inbound: {}
+      date-time:
+        timezone: {{ g.system['date-time'].timezone }}
+      dns:
+        server:
+{% for srv in g.system.dns.server %}
+          {{ srv }}:
+            vrf: {{ g.system.dns.vrf }}
+{% endfor %}
+      docker:
+        state: enabled
+        vrf: {{ g.system.dns.vrf }}
+      global:
+        anycast-mac: {{ d.mlag_mac_address }}
+        system-mac: {{ d.system_mac }}
+      hostname: {{ d.hostname }}
+      ntp:
+        server:
+{% for srv in g.system.ntp.server %}
+          {{ srv }}:
+            iburst: enabled
+{% endfor %}
+        vrf: {{ g.system.ntp.vrf }}
+      ssh-server:
+        state: enabled
+      wjh:
+        channel:
+          forwarding:
+            trigger:
+              l2: {}
+              l3: {}
+              tunnel: {}
+        state: enabled

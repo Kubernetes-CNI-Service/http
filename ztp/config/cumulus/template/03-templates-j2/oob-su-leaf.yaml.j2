@@ -1,0 +1,272 @@
+{% set vrf = d.vrfs[0] %}
+{% set l2 = vrf.l2vlans[0] %}
+- set:
+    bridge:
+      domain:
+        br_default:
+          stp:
+            state:
+              down: {}
+          vlan:
+{% include '_bridge_l2vlans.yaml.j2' %}
+    evpn:
+      multihoming:
+        state: enabled
+      state: enabled
+    interface:
+      eth0:
+        ipv4:
+          address:
+            {{ d.eth0_ip }}: {}
+          gateway:
+            {{ d.eth0_gw }}: {}
+        type: eth
+        vrf: mgmt
+{% if d.has_eth1 %}
+      eth1:
+        ipv4:
+          address:
+            {{ d.eth1_ip }}: {}
+          gateway:
+            {{ d.eth1_gw }}: {}
+        type: eth
+{% endif %}
+      lo:
+        ipv4:
+          address:
+            {{ d.lo_ip }}: {}
+        type: loopback
+{% for bond in d.computed_bonds %}
+      {{ bond.name }}:
+        bond:
+          lacp-bypass: enabled
+          lacp-rate: fast
+          member:
+{% if bond.type == 'localbond' %}
+{% for m in bond.members %}
+            {{ m }}: {}
+{% endfor %}
+{% else %}
+            {{ bond.member }}: {}
+{% endif %}
+          mode: lacp
+        bridge:
+          domain:
+            br_default:
+{% if bond.vlan_mode == 'access' %}
+              untagged: {{ bond.vlan_access }}
+              vlan:
+                '{{ bond.vlan_access }}': {}
+{% else %}
+              vlan:
+                '{{ bond.vlan_trunk_range }}': {}
+{% endif %}
+{% if bond.type == 'localbond' %}
+        description: {{ bond.members[0] }}
+{% else %}
+        description: {{ bond.member }}
+{% endif %}
+        link:
+          mtu: 9216
+        type: bond
+{% if bond.type == 'localbond' %}
+{% for m in bond.members %}
+      {{ m }}:
+        link:
+          fec: auto
+          mtu: 9216
+        type: swp
+{% endfor %}
+{% else %}
+      {{ bond.member }}:
+        link:
+          fec: auto
+          mtu: 9216
+        type: swp
+{% endif %}
+{% endfor %}
+{% for swp in d.bgp_neighbors %}
+      {{ swp }}:
+        link:
+          fec: auto
+          mtu: 9216
+        type: swp
+{% endfor %}
+{% include '_l2_svis.yaml.j2' %}
+    nve:
+      vxlan:
+        arp-nd-suppress: enabled
+        decapsulation:
+          dscp:
+            action: preserve
+        encapsulation:
+          dscp:
+            action: copy
+        source:
+          address: {{ d.lo_ip | replace('/32', '') }}
+        state: enabled
+    router:
+      bfd:
+        profile:
+          bgp-underlay-bfd:
+            detect-multiplier: {{ g.vrf.default.router.bfd.profile['bgp-underlay-bfd']['detect-multiplier'] }}
+            min-rx-interval: {{ g.vrf.default.router.bfd.profile['bgp-underlay-bfd']['min-rx-interval'] }}
+            min-tx-interval: {{ g.vrf.default.router.bfd.profile['bgp-underlay-bfd']['min-tx-interval'] }}
+        state: enabled
+      bgp:
+        graceful-restart:
+          mode: full
+          path-selection-deferral-time: 180
+          restart-time: 180
+          stale-routes-time: 180
+        state: enabled
+      policy:
+        route-map:
+          lo-to-bgp:
+            rule:
+              '10':
+                action:
+                  permit: {}
+                match:
+                  interface: lo
+                  type: ipv4
+      vrr:
+        state: enabled
+{% include '_dhcp_relay.yaml.j2' %}
+    system:
+      aaa:
+        class:
+          nvapply:
+            action: allow
+            command-path:
+              /:
+                permission: all
+          nvshow:
+            action: allow
+            command-path:
+              /:
+                permission: ro
+          sudo:
+            action: allow
+            command-path:
+              /:
+                permission: all
+        role:
+          nvue-admin:
+            class:
+              nvapply: {}
+          nvue-monitor:
+            class:
+              nvshow: {}
+          system-admin:
+            class:
+              nvapply: {}
+              sudo: {}
+        user:
+          cumulus:
+            full-name: '{{ g.system.aaa.user.cumulus["full-name"] }}'
+            hashed-password: {{ g.system.aaa.user.cumulus['hashed-password'] }}
+            role: system-admin
+{% include '_extra_aaa_users.yaml.j2' %}
+      api:
+        state: enabled
+      config:
+        auto-save:
+          state: enabled
+      control-plane:
+        acl:
+          acl-default-dos:
+            inbound: {}
+          acl-default-whitelist:
+            inbound: {}
+      date-time:
+        timezone: {{ g.system['date-time'].timezone }}
+      dns:
+        server:
+{% for srv in g.system.dns.server %}
+          {{ srv }}: {}
+{% endfor %}
+      docker:
+        state: enabled
+        vrf: mgmt
+      hostname: {{ d.hostname }}
+      ntp:
+        server:
+{% for srv in g.system.ntp.server %}
+          {{ srv }}:
+            iburst: enabled
+{% endfor %}
+      ssh-server:
+        state: enabled
+      wjh:
+        channel:
+          forwarding:
+            trigger:
+              l2: {}
+              l3: {}
+              tunnel: {}
+        state: enabled
+    vrf:
+      default:
+        router:
+          bgp:
+            address-family:
+              ipv4-unicast:
+                redistribute:
+                  connected:
+                    route-map: lo-to-bgp
+                    state: enabled
+                state: enabled
+              l2vpn-evpn:
+                state: enabled
+            autonomous-system: {{ d.bgp_asn }}
+            neighbor:
+{% for nbr in d.bgp_neighbors %}
+              {{ nbr }}:
+                peer-group: underlay
+                type: unnumbered
+{% endfor %}
+            path-selection:
+              multipath:
+                aspath-ignore: enabled
+            peer-group:
+              underlay:
+                address-family:
+                  l2vpn-evpn:
+                    state: enabled
+                bfd:
+                  profile: bgp-underlay-bfd
+                remote-as: external
+            router-id: {{ d.lo_ip | replace('/32', '') }}
+            state: enabled
+{% for vrf in d.vrfs %}
+      {{ vrf.evpn_vrf }}:
+        evpn:
+          state: enabled
+{% if vrf.evpn_l3vlan %}
+          vlan: {{ vrf.evpn_l3vlan }}
+{% endif %}
+{% if vrf.evpn_l3vni is not none %}
+          vni:
+            '{{ vrf.evpn_l3vni }}': {}
+{% endif %}
+        router:
+          bgp:
+            address-family:
+              ipv4-unicast:
+                redistribute:
+                  connected:
+                    state: enabled
+                  static:
+                    state: enabled
+                route-export:
+                  to-evpn:
+                    state: enabled
+                state: enabled
+            autonomous-system: {{ d.bgp_asn }}
+            path-selection:
+              multipath:
+                aspath-ignore: enabled
+            router-id: {{ d.lo_ip | replace('/32', '') }}
+            state: enabled
+{% endfor %}

@@ -1,0 +1,127 @@
+# Public bootstrap template.  Documentation IP/MAC values and locked
+# credentials below are deliberately non-production defaults; replace them in
+# each local project before strict setup/load.
+schema_version: 1
+common:
+  mgmt:
+    dhcp-server:
+      status: enabled
+      package: isc-dhcp-server
+    http:
+      status: enabled
+      http_root: /var/www/html
+      package: apache2
+    ztp:
+      status: enabled
+      ztp_url_prefix: /ztp
+  switch:
+    system:
+      config:
+        auto-save:
+          state: enabled
+      dns:
+        server:
+        - 192.0.2.53
+        - 198.51.100.53
+      ntp:
+        server:
+        - 192.0.2.123
+        - 198.51.100.123
+        - 203.0.113.123
+      date-time:
+        timezone: Etc/UTC
+switches:
+- eth:
+    version: 5.16.4
+    mlag:
+      init-delay: 20
+      priority:
+      - 100
+      - 200
+      pairs:
+      - shared-addresses:
+        - 192.0.2.201
+        system-mac:
+        - '02:00:00:22:01:71'
+        - '02:00:00:22:01:72'
+        mac-address:
+        - '02:00:00:ff:01:ff'
+      - shared-addresses:
+        - 192.0.2.202
+        system-mac:
+        - '02:00:00:22:02:71'
+        - '02:00:00:22:02:72'
+        mac-address:
+        - '02:00:00:ff:02:ff'
+    bridge:
+      domain:
+        br_default:
+          stp:
+            priority: 4096
+    services:
+      dhcp_relay:
+        inband:
+          server_group:
+          - group: bcm
+            servers:
+            - 192.0.2.101
+            - 192.0.2.102
+        oob:
+          server_group:
+          - group: bcm
+            servers:
+            - 198.51.100.151
+          - group: ztp-server
+            servers:
+            - 198.51.100.240
+    system:
+      aaa:
+        user:
+          cumulus:
+            full-name: cumulus,,,
+            hashed-password: "'*'"
+      ntp:
+        vrf: mgmt
+      dns:
+        vrf: mgmt
+    vrf:
+      default:
+        router:
+          bfd:
+            profile:
+              bgp-underlay-bfd:
+                detect-multiplier: 3
+                min-rx-interval: 300
+                min-tx-interval: 300
+    vrl:
+    - leaking_vrfs: [inband, oob]
+      inband:
+      - internalnet: 192.0.2.0/25
+      oob:
+      - oobnet: 198.51.100.0/24
+        max-prefix-len: 29
+        min-prefix-len: 20
+- ib:
+    version: 25-02-8008
+    system:
+      aaa:
+        user:
+          admin:
+            password: '*'
+      security:
+        password-hardening:
+          state: disabled
+      ztp:
+        config-save: enabled
+- nvl:
+    version: 25.02.4347
+    system:
+      aaa:
+        user:
+          admin:
+            password: '*'
+      security:
+        password-hardening:
+          state: disabled
+      ztp:
+        config-save: enabled

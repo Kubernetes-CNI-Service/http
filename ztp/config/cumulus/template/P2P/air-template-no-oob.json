@@ -1,0 +1,5008 @@
+{
+    "format": "JSON",
+    "ztp": null,
+    "content": {
+        "model_port_profiles": {
+            "oob-mgmt-switch": [
+                "eth0",
+                "swp1-52"
+            ],
+            "oob-mgmt-server": [
+                "eth0",
+                "eth1-9"
+            ]
+        },
+        "nodes": {
+            "Border01": {
+                "cpu": 2,
+                "memory": 4096,
+                "storage": 20,
+                "positioning": {
+                    "x": 825,
+                    "y": 550
+                },
+                "nic_model": "virtio",
+                "cpu_mode": "custom",
+                "cpu_options": [],
+                "secureboot": false,
+                "os": "cumulus-vx-5.16.4",
+                "labels": {
+                    "group": "SWITCH",
+                    "model": "SN4700"
+                },
+                "management_interfaces": {
+                    "eth0": {
+                        "ip": null,
+                        "mac_address": "02:00:2D:00:07:CB"
+                    }
+                },
+                "oob": false,
+                "storage_pci": null,
+                "pxehost": false,
+                "boot": "hd",
+                "features": {
+                    "uefi": false
+                }
+            },
+            "Border02": {
+                "cpu": 2,
+                "memory": 4096,
+                "storage": 20,
+                "positioning": {
+                    "x": 1375,
+                    "y": 550
+                },
+                "nic_model": "virtio",
+                "cpu_mode": "custom",
+                "cpu_options": [],
+                "secureboot": false,
+                "os": "cumulus-vx-5.16.4",
+                "labels": {
+                    "group": "SWITCH",
+                    "model": "SN4700"
+                },
+                "management_interfaces": {
+                    "eth0": {
+                        "ip": null,
+                        "mac_address": "02:00:2D:00:0A:23"
+                    }
+                },
+                "oob": false,
+                "storage_pci": null,
+                "pxehost": false,
+                "boot": "hd",
+                "features": {
+                    "uefi": false
+                }
+            },
+            "FW": {
+                "cpu": 2,
+                "memory": 2048,
+                "storage": 20,
+                "positioning": {
+                    "x": 1100,
+                    "y": 275
+                },
+                "nic_model": "virtio",
+                "cpu_mode": "custom",
+                "cpu_options": [],
+                "secureboot": false,
+                "os": "cumulus-vx-5.16.4",
+                "labels": {
+                    "group": "SWITCH",
+                    "model": "SN2201"
+                },
+                "management_interfaces": {
+                    "eth0": {
+                        "ip": null,
+                        "mac_address": "02:00:2D:00:05:65"
+                    }
+                },
+                "oob": false,
+                "storage_pci": null,
+                "pxehost": false,
+                "boot": "hd",
+                "features": {
+                    "uefi": false
+                }
+            },
+            "OOB-Leaf": {
+                "cpu": 2,
+                "memory": 2048,
+                "storage": 20,
+                "positioning": {
+                    "x": 1650,
+                    "y": 1100
+                },
+                "nic_model": "virtio",
+                "cpu_mode": "custom",
+                "cpu_options": [],
+                "secureboot": false,
+                "os": "cumulus-vx-5.16.4",
+                "labels": {
+                    "group": "SWITCH",
+                    "model": "SN2201"
+                },
+                "management_interfaces": {
+                    "eth0": {
+                        "ip": null,
+                        "mac_address": "02:00:2D:00:13:E6"
+                    }
+                },
+                "oob": false,
+                "storage_pci": null,
+                "pxehost": false,
+                "boot": "hd",
+                "features": {
+                    "uefi": false
+                }
+            },
+            "ztp-server": {
+                "cpu": 1,
+                "memory": 2048,
+                "storage": 10,
+                "positioning": {
+                    "x": 1925,
+                    "y": 1375
+                },
+                "nic_model": "virtio",
+                "cpu_mode": "custom",
+                "cpu_options": [],
+                "secureboot": false,
+                "os": "oob-mgmt-server",
+                "labels": {
+                    "group": "SERVER",
+                    "model": "oob-mgmt-server"
+                },
+                "management_interfaces": {
+                    "eth0": {
+                        "ip": null,
+                        "mac_address": "02:00:2D:00:00:01"
+                    }
+                },
+                "oob": true,
+                "storage_pci": null,
+                "pxehost": false,
+                "boot": "hd",
+                "features": {
+                    "uefi": false
+                }
+            },
+            "OOB-Spine": {
+                "cpu": 2,
+                "memory": 4096,
+                "storage": 20,
+                "positioning": {
+                    "x": 1650,
+                    "y": 825
+                },
+                "nic_model": "virtio",
+                "cpu_mode": "custom",
+                "cpu_options": [],
+                "secureboot": false,
+                "os": "cumulus-vx-5.16.4",
+                "labels": {
+                    "group": "SWITCH",
+                    "model": "SN4700"
+                },
+                "management_interfaces": {
+                    "eth0": {
+                        "ip": null,
+                        "mac_address": "02:00:2D:00:11:87"
+                    }
+                },
+                "oob": false,
+                "storage_pci": null,
+                "pxehost": false,
+                "boot": "hd",
+                "features": {
+                    "uefi": false
+                }
+            },
+            "OOB-Core": {
+                "cpu": 2,
+                "memory": 4096,
+                "storage": 20,
+                "positioning": {
+                    "x": 1925,
+                    "y": 825
+                },
+                "nic_model": "virtio",
+                "cpu_mode": "custom",
+                "cpu_options": [],
+                "secureboot": false,
+                "os": "cumulus-vx-5.16.4",
+                "labels": {
+                    "group": "SWITCH",
+                    "model": "SN5610"
+                },
+                "management_interfaces": {
+                    "eth0": {
+                        "ip": null,
+                        "mac_address": "02:00:2D:00:11:88"
+                    }
+                },
+                "oob": false,
+                "storage_pci": null,
+                "pxehost": false,
+                "boot": "hd",
+                "features": {
+                    "uefi": false
+                }
+            },
+            "OOBofOOB-Leaf": {
+                "cpu": 5,
+                "memory": 5120,
+                "storage": 10,
+                "positioning": {
+                    "x": 2475,
+                    "y": 275
+                },
+                "nic_model": "virtio",
+                "cpu_mode": "custom",
+                "cpu_options": [],
+                "secureboot": false,
+                "os": "oob-mgmt-switch",
+                "labels": {
+                    "group": "SWITCH",
+                    "model": "oob-mgmt-switch"
+                },
+                "management_interfaces": {
+                    "eth0": {
+                        "ip": null,
+                        "mac_address": "02:00:2D:00:03:06"
+                    }
+                },
+                "oob": true,
+                "storage_pci": null,
+                "pxehost": false,
+                "boot": "hd",
+                "features": {
+                    "uefi": false
+                }
+            },
+            "TAN-Leaf": {
+                "cpu": 2,
+                "memory": 4096,
+                "storage": 20,
+                "positioning": {
+                    "x": 550,
+                    "y": 1100
+                },
+                "nic_model": "virtio",
+                "cpu_mode": "custom",
+                "cpu_options": [],
+                "secureboot": false,
+                "os": "cumulus-vx-5.16.4",
+                "labels": {
+                    "group": "SWITCH",
+                    "model": "SN5610"
+                },
+                "management_interfaces": {
+                    "eth0": {
+                        "ip": null,
+                        "mac_address": "02:00:2D:00:0F:21"
+                    }
+                },
+                "oob": false,
+                "storage_pci": null,
+                "pxehost": false,
+                "boot": "hd",
+                "features": {
+                    "uefi": false
+                }
+            },
+            "TAN-Spine": {
+                "cpu": 2,
+                "memory": 4096,
+                "storage": 20,
+                "positioning": {
+                    "x": 550,
+                    "y": 825
+                },
+                "nic_model": "virtio",
+                "cpu_mode": "custom",
+                "cpu_options": [],
+                "secureboot": false,
+                "os": "cumulus-vx-5.16.4",
+                "labels": {
+                    "group": "SWITCH",
+                    "model": "SN5610"
+                },
+                "management_interfaces": {
+                    "eth0": {
+                        "ip": null,
+                        "mac_address": "02:00:2D:00:0C:A2"
+                    }
+                },
+                "oob": false,
+                "storage_pci": null,
+                "pxehost": false,
+                "boot": "hd",
+                "features": {
+                    "uefi": false
+                }
+            }
+        },
+        "links": [
+            [
+                {
+                    "interface": "eth0",
+                    "node": "Border01",
+                    "mac": "02:00:2D:00:07:CB"
+                },
+                {
+                    "interface": "swp1",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:15"
+                }
+            ],
+            [
+                {
+                    "interface": "swp1",
+                    "node": "Border01",
+                    "mac": "02:00:2D:00:07:C2"
+                },
+                {
+                    "interface": "swp61",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:A6"
+                }
+            ],
+            [
+                {
+                    "interface": "swp2",
+                    "node": "Border01",
+                    "mac": "02:00:2D:00:07:D6"
+                },
+                {
+                    "interface": "swp31",
+                    "node": "OOB-Spine",
+                    "mac": "02:00:2D:00:11:84"
+                }
+            ],
+            [
+                {
+                    "interface": "swp29",
+                    "node": "Border01",
+                    "mac": "02:00:2D:00:07:D9"
+                },
+                {
+                    "interface": "swp1",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:60"
+                }
+            ],
+            [
+                {
+                    "interface": "swp31",
+                    "node": "Border01",
+                    "mac": "02:00:2D:00:07:C8"
+                },
+                {
+                    "interface": "swp31",
+                    "node": "Border02",
+                    "mac": "02:00:2D:00:0A:3C"
+                }
+            ],
+            [
+                {
+                    "interface": "eth0",
+                    "node": "Border02",
+                    "mac": "02:00:2D:00:0A:23"
+                },
+                {
+                    "interface": "swp2",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:68"
+                }
+            ],
+            [
+                {
+                    "interface": "swp1",
+                    "node": "Border02",
+                    "mac": "02:00:2D:00:0A:24"
+                },
+                {
+                    "interface": "swp2",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:B8"
+                }
+            ],
+            [
+                {
+                    "interface": "swp2",
+                    "node": "Border02",
+                    "mac": "02:00:2D:00:0A:2F"
+                },
+                {
+                    "interface": "swp32",
+                    "node": "OOB-Spine",
+                    "mac": "02:00:2D:00:11:7B"
+                }
+            ],
+            [
+                {
+                    "interface": "swp29",
+                    "node": "Border02",
+                    "mac": "02:00:2D:00:0A:39"
+                },
+                {
+                    "interface": "swp2",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:7F"
+                }
+            ],
+            [
+                {
+                    "interface": "swp3",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:67"
+                },
+                {
+                    "interface": "swp11",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:94"
+                }
+            ],
+            [
+                {
+                    "interface": "eth0",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:13:E6"
+                },
+                {
+                    "interface": "swp4",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:FA"
+                }
+            ],
+            [
+                {
+                    "interface": "swp1",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:13:E1"
+                },
+                {
+                    "interface": "eth0",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:A2"
+                }
+            ],
+            [
+                {
+                    "interface": "swp2",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:14:00"
+                },
+                {
+                    "interface": "eth0",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:21"
+                }
+            ],
+            [
+                {
+                    "interface": "swp3",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:13:E8"
+                },
+                {
+                    "interface": "eth1",
+                    "node": "ztp-server",
+                    "mac": "02:00:2D:00:00:00"
+                }
+            ],
+            [
+                {
+                    "interface": "swp51",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:14:05"
+                },
+                {
+                    "interface": "swp1",
+                    "node": "OOB-Spine",
+                    "mac": "02:00:2D:00:11:7E"
+                }
+            ],
+            [
+                {
+                    "interface": "eth2",
+                    "node": "ztp-server",
+                    "mac": "02:00:2D:00:00:02"
+                },
+                {
+                    "interface": "swp5",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:9C"
+                }
+            ],
+            [
+                {
+                    "interface": "eth0",
+                    "node": "OOB-Spine",
+                    "mac": "02:00:2D:00:11:87"
+                },
+                {
+                    "interface": "swp3",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:C2"
+                }
+            ],
+            [
+                {
+                    "interface": "eth0",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:06"
+                },
+                {
+                    "interface": "swp6",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:F1"
+                }
+            ],
+            [
+                {
+                    "interface": "swp61",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:25"
+                },
+                {
+                    "interface": "swp1",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:87"
+                }
+            ],
+            [
+                {
+                    "interface": "eth0",
+                    "node": "ztp-server",
+                    "mac": "02:00:2D:00:00:01"
+                },
+                "outbound"
+            ],
+            [
+                {
+                    "interface": "swp10",
+                    "node": "Border01",
+                    "mac": "02:00:2D:00:07:C6"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp11",
+                    "node": "Border01",
+                    "mac": "02:00:2D:00:07:C5"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp12",
+                    "node": "Border01",
+                    "mac": "02:00:2D:00:07:DA"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp13",
+                    "node": "Border01",
+                    "mac": "02:00:2D:00:07:C4"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp14",
+                    "node": "Border01",
+                    "mac": "02:00:2D:00:07:BD"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp15",
+                    "node": "Border01",
+                    "mac": "02:00:2D:00:07:D4"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp16",
+                    "node": "Border01",
+                    "mac": "02:00:2D:00:07:D1"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp17",
+                    "node": "Border01",
+                    "mac": "02:00:2D:00:07:C1"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp18",
+                    "node": "Border01",
+                    "mac": "02:00:2D:00:07:CA"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp19",
+                    "node": "Border01",
+                    "mac": "02:00:2D:00:07:DD"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp20",
+                    "node": "Border01",
+                    "mac": "02:00:2D:00:07:D8"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp21",
+                    "node": "Border01",
+                    "mac": "02:00:2D:00:07:C0"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp22",
+                    "node": "Border01",
+                    "mac": "02:00:2D:00:07:C7"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp23",
+                    "node": "Border01",
+                    "mac": "02:00:2D:00:07:D2"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp24",
+                    "node": "Border01",
+                    "mac": "02:00:2D:00:07:CF"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp25",
+                    "node": "Border01",
+                    "mac": "02:00:2D:00:07:D5"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp26",
+                    "node": "Border01",
+                    "mac": "02:00:2D:00:07:CC"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp27",
+                    "node": "Border01",
+                    "mac": "02:00:2D:00:07:CE"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp28",
+                    "node": "Border01",
+                    "mac": "02:00:2D:00:07:DC"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp3",
+                    "node": "Border01",
+                    "mac": "02:00:2D:00:07:D7"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp30",
+                    "node": "Border01",
+                    "mac": "02:00:2D:00:07:D0"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp32",
+                    "node": "Border01",
+                    "mac": "02:00:2D:00:07:BF"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp4",
+                    "node": "Border01",
+                    "mac": "02:00:2D:00:07:C3"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp5",
+                    "node": "Border01",
+                    "mac": "02:00:2D:00:07:CD"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp6",
+                    "node": "Border01",
+                    "mac": "02:00:2D:00:07:BE"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp7",
+                    "node": "Border01",
+                    "mac": "02:00:2D:00:07:C9"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp8",
+                    "node": "Border01",
+                    "mac": "02:00:2D:00:07:D3"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp9",
+                    "node": "Border01",
+                    "mac": "02:00:2D:00:07:DB"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp10",
+                    "node": "Border02",
+                    "mac": "02:00:2D:00:0A:25"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp11",
+                    "node": "Border02",
+                    "mac": "02:00:2D:00:0A:26"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp12",
+                    "node": "Border02",
+                    "mac": "02:00:2D:00:0A:27"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp13",
+                    "node": "Border02",
+                    "mac": "02:00:2D:00:0A:28"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp14",
+                    "node": "Border02",
+                    "mac": "02:00:2D:00:0A:29"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp15",
+                    "node": "Border02",
+                    "mac": "02:00:2D:00:0A:2A"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp16",
+                    "node": "Border02",
+                    "mac": "02:00:2D:00:0A:2B"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp17",
+                    "node": "Border02",
+                    "mac": "02:00:2D:00:0A:2C"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp18",
+                    "node": "Border02",
+                    "mac": "02:00:2D:00:0A:2D"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp19",
+                    "node": "Border02",
+                    "mac": "02:00:2D:00:0A:2E"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp20",
+                    "node": "Border02",
+                    "mac": "02:00:2D:00:0A:30"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp21",
+                    "node": "Border02",
+                    "mac": "02:00:2D:00:0A:31"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp22",
+                    "node": "Border02",
+                    "mac": "02:00:2D:00:0A:32"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp23",
+                    "node": "Border02",
+                    "mac": "02:00:2D:00:0A:33"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp24",
+                    "node": "Border02",
+                    "mac": "02:00:2D:00:0A:34"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp25",
+                    "node": "Border02",
+                    "mac": "02:00:2D:00:0A:35"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp26",
+                    "node": "Border02",
+                    "mac": "02:00:2D:00:0A:36"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp27",
+                    "node": "Border02",
+                    "mac": "02:00:2D:00:0A:37"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp28",
+                    "node": "Border02",
+                    "mac": "02:00:2D:00:0A:38"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp3",
+                    "node": "Border02",
+                    "mac": "02:00:2D:00:0A:3A"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp30",
+                    "node": "Border02",
+                    "mac": "02:00:2D:00:0A:3B"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp32",
+                    "node": "Border02",
+                    "mac": "02:00:2D:00:0A:3D"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp4",
+                    "node": "Border02",
+                    "mac": "02:00:2D:00:0A:3E"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp5",
+                    "node": "Border02",
+                    "mac": "02:00:2D:00:0A:3F"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp6",
+                    "node": "Border02",
+                    "mac": "02:00:2D:00:0A:40"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp7",
+                    "node": "Border02",
+                    "mac": "02:00:2D:00:0A:41"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp8",
+                    "node": "Border02",
+                    "mac": "02:00:2D:00:0A:42"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp9",
+                    "node": "Border02",
+                    "mac": "02:00:2D:00:0A:43"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "eth0",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:65"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp10",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:7B"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp11",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:6D"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp12",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:7A"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp13",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:68"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp14",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:5E"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp15",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:75"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp16",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:6C"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp17",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:5F"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp18",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:6B"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp19",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:8E"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp20",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:89"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp21",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:64"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp22",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:92"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp23",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:83"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp24",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:90"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp25",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:7E"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp26",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:7C"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp27",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:63"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp28",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:73"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp29",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:6E"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp30",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:61"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp31",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:8D"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp32",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:6F"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp33",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:78"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp34",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:87"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp35",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:62"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp36",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:8B"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp37",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:8F"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp38",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:91"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp39",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:6A"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp4",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:70"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp40",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:8C"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp41",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:86"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp42",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:77"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp43",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:7D"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp44",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:76"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp45",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:85"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp46",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:79"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp47",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:71"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp48",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:80"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp49",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:8A"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp5",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:66"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp50",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:88"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp51",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:84"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp52",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:72"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp6",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:82"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp7",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:74"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp8",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:69"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp9",
+                    "node": "FW",
+                    "mac": "02:00:2D:00:05:81"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp10",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:13:FC"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp11",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:13:EE"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp12",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:13:FB"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp13",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:13:E9"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp14",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:13:DF"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp15",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:13:F6"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp16",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:13:ED"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp17",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:13:E0"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp18",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:13:EC"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp19",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:14:0F"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp20",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:14:0A"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp21",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:13:E5"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp22",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:14:13"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp23",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:14:04"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp24",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:14:11"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp25",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:13:FF"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp26",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:13:FD"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp27",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:13:E4"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp28",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:13:F4"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp29",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:13:EF"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp30",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:13:E2"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp31",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:14:0E"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp32",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:13:F0"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp33",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:13:F9"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp34",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:14:08"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp35",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:13:E3"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp36",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:14:0C"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp37",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:14:10"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp38",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:14:12"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp39",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:13:EB"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp4",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:13:F1"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp40",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:14:0D"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp41",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:14:07"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp42",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:13:F8"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp43",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:13:FE"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp44",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:13:F7"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp45",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:14:06"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp46",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:13:FA"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp47",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:13:F2"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp48",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:14:01"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp49",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:14:0B"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp5",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:13:E7"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp50",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:14:09"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp52",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:13:F3"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp6",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:14:03"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp7",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:13:F5"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp8",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:13:EA"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp9",
+                    "node": "OOB-Leaf",
+                    "mac": "02:00:2D:00:14:02"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp10",
+                    "node": "OOB-Spine",
+                    "mac": "02:00:2D:00:11:82"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp11",
+                    "node": "OOB-Spine",
+                    "mac": "02:00:2D:00:11:81"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp12",
+                    "node": "OOB-Spine",
+                    "mac": "02:00:2D:00:11:96"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp13",
+                    "node": "OOB-Spine",
+                    "mac": "02:00:2D:00:11:80"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp14",
+                    "node": "OOB-Spine",
+                    "mac": "02:00:2D:00:11:79"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp15",
+                    "node": "OOB-Spine",
+                    "mac": "02:00:2D:00:11:90"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp16",
+                    "node": "OOB-Spine",
+                    "mac": "02:00:2D:00:11:8D"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp17",
+                    "node": "OOB-Spine",
+                    "mac": "02:00:2D:00:11:7D"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp18",
+                    "node": "OOB-Spine",
+                    "mac": "02:00:2D:00:11:86"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp19",
+                    "node": "OOB-Spine",
+                    "mac": "02:00:2D:00:11:99"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp2",
+                    "node": "OOB-Spine",
+                    "mac": "02:00:2D:00:11:92"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp20",
+                    "node": "OOB-Spine",
+                    "mac": "02:00:2D:00:11:94"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp21",
+                    "node": "OOB-Spine",
+                    "mac": "02:00:2D:00:11:7C"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp22",
+                    "node": "OOB-Spine",
+                    "mac": "02:00:2D:00:11:83"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp23",
+                    "node": "OOB-Spine",
+                    "mac": "02:00:2D:00:11:8E"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp24",
+                    "node": "OOB-Spine",
+                    "mac": "02:00:2D:00:11:8B"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp25",
+                    "node": "OOB-Spine",
+                    "mac": "02:00:2D:00:11:91"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp26",
+                    "node": "OOB-Spine",
+                    "mac": "02:00:2D:00:11:88"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp27",
+                    "node": "OOB-Spine",
+                    "mac": "02:00:2D:00:11:8A"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp28",
+                    "node": "OOB-Spine",
+                    "mac": "02:00:2D:00:11:98"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp29",
+                    "node": "OOB-Spine",
+                    "mac": "02:00:2D:00:11:95"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp3",
+                    "node": "OOB-Spine",
+                    "mac": "02:00:2D:00:11:93"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp30",
+                    "node": "OOB-Spine",
+                    "mac": "02:00:2D:00:11:8C"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp4",
+                    "node": "OOB-Spine",
+                    "mac": "02:00:2D:00:11:7F"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp5",
+                    "node": "OOB-Spine",
+                    "mac": "02:00:2D:00:11:89"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp6",
+                    "node": "OOB-Spine",
+                    "mac": "02:00:2D:00:11:7A"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp7",
+                    "node": "OOB-Spine",
+                    "mac": "02:00:2D:00:11:85"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp8",
+                    "node": "OOB-Spine",
+                    "mac": "02:00:2D:00:11:8F"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp9",
+                    "node": "OOB-Spine",
+                    "mac": "02:00:2D:00:11:97"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp10",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:11"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp100",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:59"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp101",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:12"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp102",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:69"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp103",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:F3"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp104",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:79"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp105",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:81"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp106",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:D6"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp107",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:88"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp108",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:10"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp109",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:01"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp110",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:04"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp111",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:F0"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp112",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:C6"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp113",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:1D"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp114",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:C9"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp115",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:8B"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp116",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:64"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp117",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:17"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp118",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:60"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp119",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:F5"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp12",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:BA"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp120",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:DC"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp121",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:D7"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp122",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:5D"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp123",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:72"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp124",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:E7"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp125",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:E9"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp126",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:F7"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp127",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:90"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp128",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:CA"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp129",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:6C"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp13",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:6B"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp130",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:D9"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp131",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:D5"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp132",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:D0"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp133",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:E1"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp134",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:0B"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp135",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:F8"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp136",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:C1"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp137",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:F4"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp138",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:AD"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp139",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:9A"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp14",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:74"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp140",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:B5"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp141",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:D2"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp142",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:03"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp143",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:E4"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp144",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:E8"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp145",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:BB"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp146",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:FB"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp147",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:7A"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp148",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:08"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp149",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:98"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp15",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:EB"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp150",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:D8"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp151",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:0F"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp152",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:DB"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp153",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:DE"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp154",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:DA"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp155",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:8E"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp156",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:0C"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp157",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:8D"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp158",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:E3"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp159",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:05"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp16",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:5E"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp160",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:A0"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp161",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:EE"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp162",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:78"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp163",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:B8"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp164",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:B4"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp165",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:FE"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp166",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:E5"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp167",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:A9"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp168",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:96"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp169",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:B1"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp17",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:B2"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp170",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:1B"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp171",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:76"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp172",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:AE"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp173",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:67"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp174",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:FF"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp175",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:82"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp176",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:B0"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp177",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:BC"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp178",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:91"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp179",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:09"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp18",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:A7"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp180",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:BF"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp181",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:D1"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp182",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:0E"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp183",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:6E"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp184",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:FC"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp185",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:A2"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp186",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:95"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp187",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:ED"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp188",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:13"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp189",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:A1"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp19",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:A6"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp190",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:9D"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp191",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:E6"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp192",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:97"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp193",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:0A"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp194",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:EA"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp195",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:73"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp196",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:70"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp197",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:CD"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp198",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:CE"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp199",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:9E"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp20",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:C4"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp200",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:2C"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp201",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:34"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp202",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:3C"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp203",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:56"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp204",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:4F"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp205",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:27"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp206",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:4D"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp207",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:32"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp208",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:40"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp209",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:45"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp21",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:63"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp210",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:49"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp211",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:47"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp212",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:3E"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp213",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:84"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp214",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:44"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp215",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:46"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp216",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:3D"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp217",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:37"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp218",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:53"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp219",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:30"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp22",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:89"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp220",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:35"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp221",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:48"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp222",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:39"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp223",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:3A"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp224",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:2F"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp225",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:51"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp226",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:36"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp227",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:3F"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp228",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:42"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp229",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:2B"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp23",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:86"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp230",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:43"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp231",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:4B"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp232",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:4E"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp233",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:41"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp234",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:25"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp235",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:4A"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp236",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:2D"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp237",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:33"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp238",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:24"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp239",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:52"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp24",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:6F"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp240",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:28"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp241",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:54"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp242",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:57"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp243",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:50"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp244",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:83"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp245",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:4C"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp246",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:26"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp247",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:3B"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp248",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:2A"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp249",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:58"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp25",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:8C"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp250",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:29"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp251",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:85"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp252",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:31"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp253",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:38"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp254",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:2E"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp255",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:55"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp26",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:F6"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp27",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:CF"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp28",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:A5"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp29",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:5B"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp30",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:AA"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp31",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:5A"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp32",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:21"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp33",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:6A"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp34",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:9B"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp35",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:65"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp36",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:EC"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp37",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:C3"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp38",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:7F"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp39",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:E0"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp40",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:20"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp41",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:A3"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp42",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:75"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp43",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:B3"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp44",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:61"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp45",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:B9"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp46",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:5F"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp47",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:8A"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp48",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:18"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp49",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:77"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp50",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:B6"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp51",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:AB"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp52",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:00"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp53",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:1A"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp54",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:C0"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp55",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:23"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp56",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:99"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp57",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:B7"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp58",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:5C"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp59",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:C5"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp60",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:0D"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp61",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:F9"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp62",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:D3"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp63",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:62"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp64",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:22"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp65",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:A4"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp66",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:93"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp67",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:1E"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp68",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:BD"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp69",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:9F"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp7",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:1F"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp70",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:71"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp71",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:7C"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp72",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:BE"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp73",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:C7"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp74",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:CC"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp75",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:7B"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp76",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:7E"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp77",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:07"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp78",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:14"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp79",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:87"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp8",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:C8"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp80",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:8F"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp81",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:66"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp82",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:80"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp83",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:A8"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp84",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:F2"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp85",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:AC"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp86",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:92"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp87",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:DF"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp88",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:D4"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp89",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:AF"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp9",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:FD"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp90",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:02"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp91",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:7D"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp92",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:19"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp93",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:6D"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp94",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:E2"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp95",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:EF"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp96",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:CB"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp97",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:16"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp98",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:02:DD"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp99",
+                    "node": "OOBofOOB-Leaf",
+                    "mac": "02:00:2D:00:03:1C"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp1",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:06"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp10",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:38"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp11",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:1E"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp12",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:1A"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp13",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:13"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp14",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:39"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp15",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:29"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp16",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:23"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp17",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:22"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp18",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:0E"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp19",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:03"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp2",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:37"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp20",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:04"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp21",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0E:FE"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp22",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0E:FC"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp23",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:17"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp24",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:28"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp25",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0E:FB"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp26",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0E:FF"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp27",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:02"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp28",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:0A"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp29",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:2A"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp3",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0E:FA"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp30",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:26"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp31",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:30"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp32",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:31"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp33",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:20"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp34",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:24"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp35",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:08"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp36",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:2B"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp37",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:1C"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp38",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:0B"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp39",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:35"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp4",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:33"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp40",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:07"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp41",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:0D"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp42",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:2C"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp43",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:2D"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp44",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:12"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp45",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:1B"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp46",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:2F"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp47",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:11"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp48",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:14"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp49",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:34"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp5",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:10"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp50",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:19"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp51",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:36"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp52",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:05"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp53",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:01"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp54",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:09"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp55",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:00"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp56",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:3A"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp57",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:18"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp58",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:16"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp59",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:0F"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp6",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:1D"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp60",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0E:FD"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp62",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:32"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp63",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:15"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp64",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:2E"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp7",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:27"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp8",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:1F"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp9",
+                    "node": "TAN-Leaf",
+                    "mac": "02:00:2D:00:0F:0C"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp10",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:B9"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp11",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:9F"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp12",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:9B"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp13",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:94"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp14",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:BA"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp15",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:AA"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp16",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:A4"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp17",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:A3"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp18",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:8F"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp19",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:84"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp20",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:85"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp21",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:7F"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp22",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:7D"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp23",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:98"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp24",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:A9"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp25",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:7C"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp26",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:80"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp27",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:83"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp28",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:8B"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp29",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:AB"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp3",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:7B"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp30",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:A7"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp31",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:B1"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp32",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:B2"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp33",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:A1"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp34",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:A5"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp35",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:89"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp36",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:AC"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp37",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:9D"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp38",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:8C"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp39",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:B6"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp4",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:B4"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp40",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:88"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp41",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:8E"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp42",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:AD"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp43",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:AE"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp44",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:93"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp45",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:9C"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp46",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:B0"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp47",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:92"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp48",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:95"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp49",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:B5"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp5",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:91"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp50",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:9A"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp51",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:B7"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp52",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:86"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp53",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:82"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp54",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:8A"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp55",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:81"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp56",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:BB"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp57",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:99"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp58",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:97"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp59",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:90"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp6",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:9E"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp60",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:7E"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp62",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:B3"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp63",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:96"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp64",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:AF"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp7",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:A8"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp8",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:A0"
+                },
+                "unconnected"
+            ],
+            [
+                {
+                    "interface": "swp9",
+                    "node": "TAN-Spine",
+                    "mac": "02:00:2D:00:0C:8D"
+                },
+                "unconnected"
+            ]
+        ],
+        "oob": false
+    },
+    "name": "oob-test"
+}

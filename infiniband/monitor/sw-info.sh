@@ -1,0 +1,1 @@
+../../ethernet/monitor/sw-info.sh

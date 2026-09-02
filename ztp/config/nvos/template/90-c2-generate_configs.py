@@ -1,0 +1,1 @@
+../../cumulus/template/90-c2-generate_configs.py

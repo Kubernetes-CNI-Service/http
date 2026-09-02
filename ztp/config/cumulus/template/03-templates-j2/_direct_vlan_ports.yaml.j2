@@ -1,0 +1,13 @@
+{% for port in d.computed_vlan_ports %}
+      {{ port.name }}:
+        bridge:
+          domain:
+            br_default:
+{% if port.vlan_mode == 'access' %}
+              access: {{ port.vlan_access }}
+{% else %}
+              vlan:
+                '{{ port.vlan_trunk_range }}': {}
+{% endif %}
+        type: swp
+{% endfor %}

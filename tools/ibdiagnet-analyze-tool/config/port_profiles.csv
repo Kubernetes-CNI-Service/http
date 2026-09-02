@@ -1,0 +1,11 @@
+Profile,NodeRegex,NodeType,LinkPort,PhysicalPort
+B300_CX8,,host,ibp61s0,mlx5_1
+B300_CX8,,host,ibp95s0,mlx5_0
+B300_CX8,,host,ibp23s0,mlx5_2
+B300_CX8,,host,ibp112s0,mlx5_3
+B300_CX8,,host,ibp220s0,mlx5_11
+B300_CX8,,host,ibp186s0,mlx5_10
+B300_CX8,,host,ibp237s0,mlx5_4
+B300_CX8,,host,ibp151s0,mlx5_9
+,(?i)^ufm[-_]?\d+$,host,IB0,HCA-3
+,(?i)^ufm[-_]?\d+$,host,IB1,HCA-4

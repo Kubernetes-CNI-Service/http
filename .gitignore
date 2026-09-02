@@ -1,0 +1,308 @@
+# Public-repository boundary
+#
+# This working tree is also an HTTP deployment root.  Keep field inputs,
+# rendered configuration, runtime state and redistribution payloads local.
+# Sanitised examples belong under examples/ and must be reviewed before they
+# are staged.
+
+# Workstation, editor and assistant state
+.DS_Store
+._*
+Thumbs.db
+*~
+*.swp
+*.swo
+/.codex/
+/.codex_tmp*/
+/.agents/
+**/.claude/
+.idea/
+.vscode/
+
+# Language caches, local environments and downloaded dependencies
+**/__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+.venv/
+venv/
+node_modules/
+
+# Local credentials and host-specific environment
+.env
+.env.*
+!.env.example
+!.env.sample
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.pub
+id_rsa*
+id_ed25519*
+id_ecdsa*
+**/.ssh/
+
+# Logs, locks, transient output and rebuildable runtime selections
+*.log
+*.lock
+*.pid
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
+*.info
+*.trace
+core
+core.*
+**/collected/
+**/logs/
+**/*-logs
+**/dumps/
+**/old/
+**/latest
+**/latest-*
+**/latest_*
+**/99-output*
+
+# These three historical .log files are versioned production rule sources,
+# not runtime logs.  The NVOS paths are intentional canonical-source links.
+!ztp/config/cumulus/template/P2P/01-inventory.log
+!ztp/config/cumulus/template/P2P/02-port-mapping.log
+!ztp/config/cumulus/template/P2P/03-splitter.log
+!ztp/config/nvos/template/P2P/01-inventory.log
+!ztp/config/nvos/template/P2P/02-port-mapping.log
+!ztp/config/nvos/template/P2P/03-splitter.log
+
+# Archives, packages, firmware, images and field-authored binary documents
+*.tar
+*.tar.gz
+*.tgz
+*.gz
+*.bz2
+*.xz
+*.zip
+*.7z
+*.rar
+*.deb
+*.rpm
+*.cab
+*.vme
+*.bin
+*.img
+*.iso
+*.qcow
+*.qcow2
+*.vmdk
+*.xlsx
+*.xls
+*.xlsm
+*.doc
+*.docx
+*.ppt
+*.pptx
+*.pdf
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.class
+*.jar
+*.war
+
+# Offline mirrors, transfer products and review/render artefacts
+/apps/*/
+/download/
+/package-imports/
+/outputs/
+/firmware/*
+!/firmware/README.md
+!/firmware/README.txt
+/image/*
+!/image/README.md
+!/image/README.txt
+
+# DAY0 project directories contain real inventories, topology, public keys,
+# rendered configurations, backups and evidence.  Only the template's
+# explanatory README files are public; sanitised examples live elsewhere.
+/DAY0-Prepare/*/
+!/DAY0-Prepare/template/
+/DAY0-Prepare/template/**
+!/DAY0-Prepare/template/README.txt
+!/DAY0-Prepare/template/p2p/
+!/DAY0-Prepare/template/p2p/README.txt
+
+# setup/load-owned publication links and rendered entrypoints
+/ztp/.setup_manifest
+/ztp/status
+/ztp/ztp.json
+/ztp/ztp-bootstrap_oob.sh
+/ztp/ztp-bootstrap_oobofoob.sh
+
+# Active project inputs and setup-managed links
+/ethernet/eth.csv
+/ethernet/p2p.xlsx
+/ethernet/monitor/eth.csv
+/ethernet/monitor/eth-info
+/ethernet/monitor/spx-link
+
+/infiniband/ib.csv
+/infiniband/p2p.xlsx
+/infiniband/monitor/ib.csv
+/infiniband/monitor/ib-info
+/infiniband/monitor/ib-link
+/infiniband/bringup/ndr/ndr-upgrade-logs
+/infiniband/bringup/xdr-initial-setup/ib.csv
+/infiniband/bringup/xdr-initial-setup/p2p.xlsx
+/infiniband/bringup/xdr-initial-setup/xdr-initial-setup-logs
+/infiniband/bringup/xdr-upgrade/ib.csv
+/infiniband/bringup/xdr-upgrade/xdr-upgrade-logs
+
+/nvlink/nvsw.csv
+/nvlink/p2p.xlsx
+/nvlink/monitor/nvsw.csv
+/nvlink/monitor/nvsw-info
+/nvlink/monitor/nvsw-link
+
+/infra/01-global.yaml
+/infra/02-devices_config.csv
+/infra/logs/
+
+/monitor/01-global.yaml
+/monitor/02-devices_config.csv
+/monitor/99-output-p2p
+/monitor/ethernet
+/monitor/infiniband
+/monitor/nvlink
+/monitor/status/
+/monitor/ztp-status
+/monitor/monitor.html
+
+# ZTP data and links populated from the active DAY0 project
+/ztp/image/
+/ztp/config/publickey/
+/ztp/backup/02-devices_config.csv
+/ztp/backup/yaml-backup
+
+# Site-derived defaults are runtime deployment material.  Public, neutral
+# examples are maintained separately under examples/public-project.
+/ztp/config/cumulus/default.yaml
+/ztp/config/cumulus/default_5.16.5.yaml
+/ztp/config/nvos/default.yaml
+/ztp/config/nvos/disable-password-hardening.nv
+
+/ztp/config/cumulus/latest_yaml
+/ztp/config/cumulus/template/01-global.yaml
+/ztp/config/cumulus/template/02-devices_config.csv
+/ztp/config/cumulus/template/91-devices.yaml
+/ztp/config/cumulus/template/99-output
+/ztp/config/cumulus/template/P2P/p2p.xlsx
+/ztp/config/cumulus/template/P2P/eth-info
+/ztp/config/cumulus/template/P2P/output-p2p
+/ztp/config/cumulus/template/P2P/air-template.json
+
+/ztp/config/nvos/latest_yaml
+/ztp/config/nvos/template/01-global.yaml
+/ztp/config/nvos/template/02-devices_config.csv
+/ztp/config/nvos/template/99-output-ib_nvl
+/ztp/config/nvos/template/P2P/p2p.xlsx
+/ztp/config/nvos/template/P2P/ib-info
+/ztp/config/nvos/template/P2P/output-p2p
+
+/ztp/config/isc-dhcp-server/01-global.yaml
+/ztp/config/isc-dhcp-server/02-devices_config.csv
+/ztp/config/isc-dhcp-server/02-subnet_config.csv
+/ztp/config/isc-dhcp-server/dhcp-release-manifest.json
+/ztp/config/isc-dhcp-server/dhcpd.conf
+/ztp/config/isc-dhcp-server/dhcpd_eth.hosts
+/ztp/config/isc-dhcp-server/dhcpd_ib.hosts
+/ztp/config/isc-dhcp-server/dhcpd_nvl.hosts
+/ztp/config/isc-dhcp-server/p2p-air.json
+
+# Optimisation samples point back to real projects and collected evidence.
+/ztp/optimize/*-sample/
+/ztp/optimize/comparison/
+/ztp/optimize/reports/
+
+# Tool scratch space and real topology workbooks
+/tools/ib-tool-Jie/var/
+/tools/ib-tool-Jie/*.xlsx
+
+# Site-specific internal documentation.  These files aggregate field project
+# names, hostnames, private addressing and historical evidence.  Keep the
+# precise paths local while retaining generic module and test documentation.
+/README.md
+/USER_MANUAL.md
+/DAY0-Prepare/README.md
+/infra/README.md
+/monitor/README.md
+/tools/README.md
+/tools/ibdiagnet-analyze-tool/README.md
+/tools/lldp-analyze-tool/README.md
+/ztp/README.md
+/ztp/config/cumulus/template/README.md
+/ztp/config/cumulus/template/P2P/README.md
+/ztp/config/nvos/template/P2P/README.md
+/ztp/config/isc-dhcp-server/README.md
+/ztp/optimize/issue-tracker/README.md
+/ztp/optimize/issue-tracker/OPT-*/README.md
+
+# Sanitised canonical bootstrap inputs.  These exact files are safe public
+# source material; all real DAY0 project directories, generated output and
+# runtime publication links above remain ignored.
+!/DAY0-Prepare/template/
+!/DAY0-Prepare/template/01-global.yaml
+!/DAY0-Prepare/template/02-devices_config.csv
+!/DAY0-Prepare/template/02-dhcp-subnet_config.csv
+!/DAY0-Prepare/template/.management-pubkeys
+!/DAY0-Prepare/template/laptop.pub
+!/DAY0-Prepare/template/mgmt-server.pub
+!/DAY0-Prepare/template/cumulus-linux-5.16.4-mlx-amd64.bin
+!/DAY0-Prepare/template/cumulus-linux-5.16.4-mlx-vx.bin
+!/DAY0-Prepare/template/nvosv25-02-7002amd64.bin
+!/DAY0-Prepare/template/nvosv25-02-8008amd64.bin
+!/DAY0-Prepare/template/p2p.xlsx
+
+# Git cannot retain empty directories.  Only these zero-content sentinels are
+# public; files later written into the output trees still match **/99-output*.
+!/DAY0-Prepare/template/99-output-backup/
+!/DAY0-Prepare/template/99-output-backup/.gitkeep
+!/DAY0-Prepare/template/99-output-dhcp/
+!/DAY0-Prepare/template/99-output-dhcp/.gitkeep
+!/DAY0-Prepare/template/99-output-eth/
+!/DAY0-Prepare/template/99-output-eth/.gitkeep
+!/DAY0-Prepare/template/99-output-ib_nvl/
+!/DAY0-Prepare/template/99-output-ib_nvl/.gitkeep
+!/DAY0-Prepare/template/99-output-ib_nvl/bringup/
+!/DAY0-Prepare/template/99-output-ib_nvl/bringup/ndr-upgrade-logs/
+!/DAY0-Prepare/template/99-output-ib_nvl/bringup/ndr-upgrade-logs/.gitkeep
+!/DAY0-Prepare/template/99-output-ib_nvl/bringup/xdr-initial-setup-logs/
+!/DAY0-Prepare/template/99-output-ib_nvl/bringup/xdr-initial-setup-logs/.gitkeep
+!/DAY0-Prepare/template/99-output-ib_nvl/bringup/xdr-upgrade-logs/
+!/DAY0-Prepare/template/99-output-ib_nvl/bringup/xdr-upgrade-logs/.gitkeep
+!/DAY0-Prepare/template/99-output-monitor/
+!/DAY0-Prepare/template/99-output-monitor/.gitkeep
+!/DAY0-Prepare/template/99-output-p2p/
+!/DAY0-Prepare/template/99-output-p2p/.gitkeep
+!/DAY0-Prepare/template/99-output-ztp/
+!/DAY0-Prepare/template/99-output-ztp/.gitkeep
+
+!/ztp/config/cumulus/default.yaml
+!/ztp/config/cumulus/default_5.16.5.yaml
+!/ztp/config/nvos/default.yaml
+!/ztp/config/nvos/disable-password-hardening.nv
+!/ztp/config/cumulus/template/P2P/air-template.json
+!/ztp/config/cumulus/template/P2P/air-template-no-oob.json

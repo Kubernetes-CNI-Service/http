@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Staging 服务器</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         background: #f4f6f9; margin: 0; padding: 40px 20px; color: #222; }
+  h1 { font-size: 20px; margin-bottom: 8px; }
+  p  { color: #555; margin-bottom: 24px; }
+  .cards { display: flex; gap: 16px; flex-wrap: wrap; }
+  .card { background: #fff; border: 1px solid #dde1e8; border-radius: 8px;
+          padding: 20px 24px; width: 260px; text-decoration: none; color: inherit;
+          transition: box-shadow .15s; }
+  .card:hover { box-shadow: 0 4px 16px rgba(0,0,0,.1); }
+  .card h2 { font-size: 16px; margin: 0 0 6px; color: #1a6ebf; }
+  .card p  { font-size: 13px; color: #666; margin: 0; }
+</style>
+</head>
+<body>
+<h1>Staging HTTP/HTTPS 服务器</h1>
+<p>以下工具页面位于 <code>monitor/</code> 目录下，点击即可访问：</p>
+<div class="cards">
+  <a class="card" href="monitor/monitor.html">
+    <h2>网络监控面板</h2>
+    <p>查看以太网 &amp; InfiniBand 交换机状态、SPX 链路与 IB 链路历史数据。</p>
+  </a>
+  <a class="card" href="monitor/monitor.html#panel-ztp">
+    <h2>ZTP 信息</h2>
+    <p>查看 ZTP 配置与交换机信息。</p>
+  </a>
+</div>
+</body>
+</html>

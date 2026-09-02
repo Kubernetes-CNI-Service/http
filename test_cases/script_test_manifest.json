@@ -1,0 +1,286 @@
+{
+  "schema_version": 1,
+  "policy": "Tests and assertions are human-reviewed; only approved hashes are updated automatically after a passing run.",
+  "baseline_tests": [
+    "test_cases.test_all_script_entrypoints",
+    "test_cases.test_change_aware_test_runner",
+    "test_cases.test_public_repository_contract",
+    "test_cases.test_test_case_repository"
+  ],
+  "tracked_support": [
+    ".gitattributes",
+    ".github/workflows/tests.yml",
+    ".gitignore",
+    "requirements-dev.txt",
+    "test_cases/audit_public_tree.py",
+    "test_cases/run_related_tests.py",
+    "ztp/templates/ztp.json"
+  ],
+  "scripts": {
+    "DAY0-Prepare/01-a-setup.py": "DAY0-Prepare/01-a-setup.py",
+    "DAY0-Prepare/02-unsetup.py": "DAY0-Prepare/02-unsetup.py",
+    "DAY0-Prepare/11-load.py": "DAY0-Prepare/11-load.py",
+    "DAY0-Prepare/12-ztp-monitor.py": "DAY0-Prepare/12-ztp-monitor.py",
+    "DAY0-Prepare/13-unload.py": "DAY0-Prepare/13-unload.py",
+    "ethernet/monitor/cron.sh": "ethernet/monitor/cron.sh",
+    "ethernet/monitor/post-collect.py": "ethernet/monitor/post-collect.py",
+    "ethernet/monitor/sw-info.sh": "ethernet/monitor/sw-info.sh",
+    "ethernet/monitor/sw-link.sh": "ethernet/monitor/sw-link.sh",
+    "infiniband/bringup/ndr/OS-CPLD-upgrade.sh": "infiniband/bringup/ndr/OS-CPLD-upgrade.sh",
+    "infiniband/bringup/ndr/data-collect-IB.sh": "infiniband/bringup/ndr/data-collect-IB.sh",
+    "infiniband/bringup/xdr-initial-setup/initial-setup.py": "infiniband/bringup/xdr-initial-setup/initial-setup.py",
+    "infiniband/bringup/xdr-upgrade/upgrade.sh": "infiniband/bringup/xdr-upgrade/upgrade.sh",
+    "infiniband/monitor/cron.sh": "ethernet/monitor/cron.sh",
+    "infiniband/monitor/sw-info.sh": "ethernet/monitor/sw-info.sh",
+    "infiniband/monitor/sw-link.sh": "ethernet/monitor/sw-link.sh",
+    "infra/check_infra.py": "infra/check_infra.py",
+    "infra/deploy_infra.py": "infra/deploy_infra.py",
+    "infra/infra-setup.sh": "infra/infra-setup.sh",
+    "infra/infra-teardown.sh": "infra/infra-teardown.sh",
+    "monitor/dot_to_html.py": "monitor/dot_to_html.py",
+    "monitor/generate-monitor-html.py": "monitor/generate-monitor-html.py",
+    "monitor/manual-ztp-control.cgi": "monitor/manual-ztp-control.cgi",
+    "monitor/manual-ztp-worker.py": "monitor/manual-ztp-worker.py",
+    "monitor/switch-collection-control.cgi": "monitor/switch-collection-control.cgi",
+    "monitor/switch-collection-worker.py": "monitor/switch-collection-worker.py",
+    "monitor/switch_collection_gate.py": "monitor/switch_collection_gate.py",
+    "monitor/ztp-monitor-control.cgi": "monitor/ztp-monitor-control.cgi",
+    "nvlink/monitor/cron.sh": "ethernet/monitor/cron.sh",
+    "nvlink/monitor/sw-info.sh": "ethernet/monitor/sw-info.sh",
+    "nvlink/monitor/sw-link.sh": "ethernet/monitor/sw-link.sh",
+    "tools/_package_common.py": "tools/_package_common.py",
+    "tools/collect-ztp-diagnostics.py": "tools/collect-ztp-diagnostics.py",
+    "tools/deployment_lock.py": "tools/deployment_lock.py",
+    "tools/ib-tool-Jie/ib_tool_box/lib/__init__.py": "tools/ib-tool-Jie/ib_tool_box/lib/__init__.py",
+    "tools/ib-tool-Jie/ib_tool_box/lib/connection.py": "tools/ib-tool-Jie/ib_tool_box/lib/connection.py",
+    "tools/ib-tool-Jie/ib_tool_box/lib/excel.py": "tools/ib-tool-Jie/ib_tool_box/lib/excel.py",
+    "tools/ib-tool-Jie/ib_tool_box/lib/inventory.py": "tools/ib-tool-Jie/ib_tool_box/lib/inventory.py",
+    "tools/ib-tool-Jie/ib_tool_box/lib/link_errors.py": "tools/ib-tool-Jie/ib_tool_box/lib/link_errors.py",
+    "tools/ib-tool-Jie/ib_tool_box/lib/parsers/__init__.py": "tools/ib-tool-Jie/ib_tool_box/lib/parsers/__init__.py",
+    "tools/ib-tool-Jie/ib_tool_box/lib/parsers/db_csv.py": "tools/ib-tool-Jie/ib_tool_box/lib/parsers/db_csv.py",
+    "tools/ib-tool-Jie/ib_tool_box/lib/parsers/net_dump.py": "tools/ib-tool-Jie/ib_tool_box/lib/parsers/net_dump.py",
+    "tools/ib-tool-Jie/ib_tool_box/lib/parsers/net_dump_ext.py": "tools/ib-tool-Jie/ib_tool_box/lib/parsers/net_dump_ext.py",
+    "tools/ib-tool-Jie/ib_tool_box/lib/parsers/partitions_conf.py": "tools/ib-tool-Jie/ib_tool_box/lib/parsers/partitions_conf.py",
+    "tools/ib-tool-Jie/ib_tool_box/lib/parsers/smdb.py": "tools/ib-tool-Jie/ib_tool_box/lib/parsers/smdb.py",
+    "tools/ib-tool-Jie/ib_tool_box/lib/reporting.py": "tools/ib-tool-Jie/ib_tool_box/lib/reporting.py",
+    "tools/ib-tool-Jie/ib_tool_box/scripts/check_hca_ooo_sl_mask.py": "tools/ib-tool-Jie/ib_tool_box/scripts/check_hca_ooo_sl_mask.py",
+    "tools/ib-tool-Jie/ib_tool_box/scripts/check_ib_link_errors.py": "tools/ib-tool-Jie/ib_tool_box/scripts/check_ib_link_errors.py",
+    "tools/ib-tool-Jie/ib_tool_box/scripts/parse_ib_partition_config.py": "tools/ib-tool-Jie/ib_tool_box/scripts/parse_ib_partition_config.py",
+    "tools/ib-tool-Jie/ib_tool_box/scripts/parse_ib_smdb.py": "tools/ib-tool-Jie/ib_tool_box/scripts/parse_ib_smdb.py",
+    "tools/ib-tool-Jie/ib_tool_box/scripts/parse_m_keys.py": "tools/ib-tool-Jie/ib_tool_box/scripts/parse_m_keys.py",
+    "tools/ib-tool-Jie/ib_tool_box/scripts/show_ib_inventory.py": "tools/ib-tool-Jie/ib_tool_box/scripts/show_ib_inventory.py",
+    "tools/ib-tool-Jie/ib_tool_box/scripts/trace_ib_path.py": "tools/ib-tool-Jie/ib_tool_box/scripts/trace_ib_path.py",
+    "tools/ib-tool-Jie/ib_tool_box/scripts/validate_ib_topology.py": "tools/ib-tool-Jie/ib_tool_box/scripts/validate_ib_topology.py",
+    "tools/ibdiagnet-analyze-tool/analyze.py": "tools/ibdiagnet-analyze-tool/analyze.py",
+    "tools/ibdiagnet-analyze-tool/lib/__init__.py": "tools/ibdiagnet-analyze-tool/lib/__init__.py",
+    "tools/ibdiagnet-analyze-tool/lib/connection.py": "tools/ibdiagnet-analyze-tool/lib/connection.py",
+    "tools/ibdiagnet-analyze-tool/lib/excel.py": "tools/ibdiagnet-analyze-tool/lib/excel.py",
+    "tools/ibdiagnet-analyze-tool/lib/inventory.py": "tools/ibdiagnet-analyze-tool/lib/inventory.py",
+    "tools/ibdiagnet-analyze-tool/lib/link_errors.py": "tools/ibdiagnet-analyze-tool/lib/link_errors.py",
+    "tools/ibdiagnet-analyze-tool/lib/parsers/__init__.py": "tools/ibdiagnet-analyze-tool/lib/parsers/__init__.py",
+    "tools/ibdiagnet-analyze-tool/lib/parsers/db_csv.py": "tools/ibdiagnet-analyze-tool/lib/parsers/db_csv.py",
+    "tools/ibdiagnet-analyze-tool/lib/parsers/iblinkinfo.py": "tools/ibdiagnet-analyze-tool/lib/parsers/iblinkinfo.py",
+    "tools/ibdiagnet-analyze-tool/lib/parsers/net_dump.py": "tools/ibdiagnet-analyze-tool/lib/parsers/net_dump.py",
+    "tools/ibdiagnet-analyze-tool/lib/parsers/net_dump_ext.py": "tools/ibdiagnet-analyze-tool/lib/parsers/net_dump_ext.py",
+    "tools/ibdiagnet-analyze-tool/lib/parsers/partitions_conf.py": "tools/ibdiagnet-analyze-tool/lib/parsers/partitions_conf.py",
+    "tools/ibdiagnet-analyze-tool/lib/parsers/smdb.py": "tools/ibdiagnet-analyze-tool/lib/parsers/smdb.py",
+    "tools/ibdiagnet-analyze-tool/lib/reporting.py": "tools/ibdiagnet-analyze-tool/lib/reporting.py",
+    "tools/ibdiagnet-analyze-tool/lib/snapshot.py": "tools/ibdiagnet-analyze-tool/lib/snapshot.py",
+    "tools/ibdiagnet-analyze-tool/lib/topology.py": "tools/ibdiagnet-analyze-tool/lib/topology.py",
+    "tools/ibdiagnet-analyze-tool/scripts/check_hca_ooo_sl_mask.py": "tools/ibdiagnet-analyze-tool/scripts/check_hca_ooo_sl_mask.py",
+    "tools/ibdiagnet-analyze-tool/scripts/check_ib_link_errors.py": "tools/ibdiagnet-analyze-tool/scripts/check_ib_link_errors.py",
+    "tools/ibdiagnet-analyze-tool/scripts/parse_ib_partition_config.py": "tools/ibdiagnet-analyze-tool/scripts/parse_ib_partition_config.py",
+    "tools/ibdiagnet-analyze-tool/scripts/parse_ib_smdb.py": "tools/ibdiagnet-analyze-tool/scripts/parse_ib_smdb.py",
+    "tools/ibdiagnet-analyze-tool/scripts/parse_m_keys.py": "tools/ibdiagnet-analyze-tool/scripts/parse_m_keys.py",
+    "tools/ibdiagnet-analyze-tool/scripts/show_ib_inventory.py": "tools/ibdiagnet-analyze-tool/scripts/show_ib_inventory.py",
+    "tools/ibdiagnet-analyze-tool/scripts/trace_ib_path.py": "tools/ibdiagnet-analyze-tool/scripts/trace_ib_path.py",
+    "tools/ibdiagnet-analyze-tool/scripts/validate_ib_topology.py": "tools/ibdiagnet-analyze-tool/scripts/validate_ib_topology.py",
+    "tools/import-from-download.py": "tools/import-from-download.py",
+    "tools/lldp-analyze-tool/analyze_lldp.py": "tools/lldp-analyze-tool/analyze_lldp.py",
+    "tools/lldp-analyze-tool/build_report.py": "tools/lldp-analyze-tool/build_report.py",
+    "tools/project_contract.py": "tools/project_contract.py",
+    "tools/sync-code.py": "tools/sync-code.py",
+    "tools/tar-for-download.py": "tools/tar-for-download.py",
+    "tools/tar-for-upload.py": "tools/tar-for-upload.py",
+    "tools/update-root-readme.py": "tools/update-root-readme.py",
+    "ztp/backup/yaml-collect.py": "ztp/backup/yaml-collect.py",
+    "ztp/config/cumulus/d-hostname2mac.py": "ztp/config/cumulus/d-hostname2mac.py",
+    "ztp/config/cumulus/template/90-c2-generate_configs.py": "ztp/config/cumulus/template/90-c2-generate_configs.py",
+    "ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py": "ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py",
+    "ztp/config/isc-dhcp-server/c1-generate_dhcp.py": "ztp/config/isc-dhcp-server/c1-generate_dhcp.py",
+    "ztp/config/nvos/d-hostname2mac.py": "ztp/config/cumulus/d-hostname2mac.py",
+    "ztp/config/nvos/template/90-c2-generate_configs.py": "ztp/config/cumulus/template/90-c2-generate_configs.py",
+    "ztp/config/nvos/template/P2P/p2p-to-validation.py": "ztp/config/nvos/template/P2P/p2p-to-validation.py",
+    "ztp/dhcp_runtime_inventory.py": "ztp/dhcp_runtime_inventory.py",
+    "ztp/dynamic_air_inventory.py": "ztp/dynamic_air_inventory.py",
+    "ztp/environment_probe.py": "ztp/environment_probe.py",
+    "ztp/manual-reset.py": "ztp/manual-reset.py",
+    "ztp/manual-ztp.py": "ztp/manual-ztp.py",
+    "ztp/nvue_normalizer.py": "ztp/nvue_normalizer.py",
+    "ztp/optimize/feedback.py": "ztp/optimize/feedback.py",
+    "ztp/optimize/sample_links.py": "ztp/optimize/sample_links.py",
+    "ztp/templates/ztp-bootstrap.sh": "ztp/templates/ztp-bootstrap.sh"
+  },
+  "test_rules": [
+    {
+      "id": "day0_release_operations",
+      "paths": ["DAY0-Prepare/01-a-setup.py", "DAY0-Prepare/02-unsetup.py", "DAY0-Prepare/11-load.py", "DAY0-Prepare/13-unload.py"],
+      "tests": ["test_cases.test_ops_deployment_review", "test_cases.test_load_release_transaction", "test_cases.test_flow_release_platform_matrix", "test_cases.test_project_contracts"]
+    },
+    {
+      "id": "ztp_monitor_runtime",
+      "paths": ["DAY0-Prepare/12-ztp-monitor.py"],
+      "tests": ["test_cases.test_monitor_stack_review", "test_cases.test_project_contracts", "test_cases.test_full_flow_integration", "test_cases.test_ztp_http_identity_binding", "test_cases.test_ztp_group_handoff", "test_cases.test_ztp_group_handoff_display"]
+    },
+    {
+      "id": "shared_switch_collectors",
+      "paths": ["ethernet/monitor/*", "infiniband/monitor/*", "nvlink/monitor/*"],
+      "tests": ["test_cases.test_monitor_stack_review", "test_cases.test_project_contracts"]
+    },
+    {
+      "id": "ib_nvos_bringup",
+      "paths": ["infiniband/bringup/*"],
+      "tests": ["test_cases.test_monitor_stack_review"]
+    },
+    {
+      "id": "infra_lifecycle",
+      "paths": ["infra/*"],
+      "tests": ["test_cases.test_ops_deployment_review", "test_cases.test_apache_publication_boundary", "test_cases.test_infra_check_and_manual_reset"]
+    },
+    {
+      "id": "monitor_controls_workers",
+      "paths": ["monitor/*"],
+      "tests": ["test_cases.test_monitor_stack_review", "test_cases.test_project_contracts", "test_cases.test_ztp_group_handoff", "test_cases.test_ztp_group_handoff_display"]
+    },
+    {
+      "id": "package_transfer_and_locking",
+      "paths": ["tools/_package_common.py", "tools/deployment_lock.py", "tools/import-from-download.py", "tools/sync-code.py", "tools/tar-for-download.py", "tools/tar-for-upload.py"],
+      "tests": ["test_cases.test_ops_deployment_review", "test_cases.test_deployment_writer_lock", "test_cases.test_upload_package_contract", "test_cases.test_download_cli_contract", "test_cases.test_import_from_download_target", "test_cases.test_predeploy_test_gate"]
+    },
+    {
+      "id": "diagnostic_bundle",
+      "paths": ["tools/collect-ztp-diagnostics.py"],
+      "tests": ["test_cases.test_diagnostic_bundle"]
+    },
+    {
+      "id": "repository_governance",
+      "paths": ["tools/project_contract.py", "tools/update-root-readme.py"],
+      "tests": ["test_cases.test_project_contracts", "test_cases.test_documentation_catalog", "test_cases.test_change_aware_test_runner", "test_cases.test_test_case_repository"]
+    },
+    {
+      "id": "network_analysis_tools",
+      "paths": ["tools/ib-tool-Jie/*", "tools/ibdiagnet-analyze-tool/*", "tools/lldp-analyze-tool/*"],
+      "tests": ["test_cases.test_ops_deployment_review", "test_cases.test_project_contracts", "test_cases.test_ib_analysis_domain"]
+    },
+    {
+      "id": "ztp_backup",
+      "paths": ["ztp/backup/*"],
+      "tests": ["test_cases.test_ztp_release_core_review", "test_cases.test_project_contracts"]
+    },
+    {
+      "id": "ztp_config_generation",
+      "paths": ["ztp/config/*"],
+      "tests": ["test_cases.test_ztp_release_core_review", "test_cases.test_project_contracts", "test_cases.test_load_release_transaction", "test_cases.test_ztp_prefix_runtime_boundary", "test_cases.test_flow_release_platform_matrix"]
+    },
+    {
+      "id": "dhcp_runtime_identity",
+      "paths": ["ztp/dhcp_runtime_inventory.py", "ztp/dynamic_air_inventory.py"],
+      "tests": ["test_cases.test_dhcp_runtime_reassignment", "test_cases.test_project_contracts", "test_cases.test_full_flow_integration", "test_cases.test_load_release_transaction", "test_cases.test_flow_release_platform_matrix"]
+    },
+    {
+      "id": "environment_probe",
+      "paths": ["ztp/environment_probe.py"],
+      "tests": ["test_cases.test_ztp_http_identity_binding", "test_cases.test_project_contracts"]
+    },
+    {
+      "id": "manual_ztp_reset",
+      "paths": ["ztp/manual-reset.py", "ztp/manual-ztp.py"],
+      "tests": ["test_cases.test_monitor_stack_review", "test_cases.test_manual_applied_config", "test_cases.test_ztp_applied_receipt", "test_cases.test_project_contracts", "test_cases.test_infra_check_and_manual_reset"]
+    },
+    {
+      "id": "nvue_normalization",
+      "paths": ["ztp/nvue_normalizer.py"],
+      "tests": ["test_cases.test_nvue_normalizer", "test_cases.test_manual_applied_config"]
+    },
+    {
+      "id": "optimization_feedback",
+      "paths": ["ztp/optimize/*"],
+      "tests": ["test_cases.test_optimize_output_layout", "test_cases.test_nvue_normalizer", "test_cases.test_ztp_release_core_review", "test_cases.test_project_contracts"]
+    },
+    {
+      "id": "bootstrap_runtime",
+      "paths": ["ztp/templates/ztp-bootstrap.sh"],
+      "tests": ["test_cases.test_ztp_applied_receipt", "test_cases.test_ztp_release_core_review", "test_cases.test_ztp_prefix_runtime_boundary"]
+    }
+  ],
+  "workflows": [
+    {
+      "id": "deployment_release_transaction",
+      "members": ["DAY0-Prepare/01-a-setup.py", "DAY0-Prepare/02-unsetup.py", "DAY0-Prepare/11-load.py", "DAY0-Prepare/13-unload.py", "infra/*", "tools/deployment_lock.py", "ztp/config/*"],
+      "tests": ["test_cases.test_ops_deployment_review", "test_cases.test_load_release_transaction", "test_cases.test_apache_publication_boundary", "test_cases.test_flow_release_platform_matrix"]
+    },
+    {
+      "id": "dhcp_to_ztp_identity",
+      "members": ["DAY0-Prepare/12-ztp-monitor.py", "ztp/config/isc-dhcp-server/c1-generate_dhcp.py", "ztp/dhcp_runtime_inventory.py", "ztp/dynamic_air_inventory.py", "ztp/environment_probe.py", "ztp/templates/ztp-bootstrap.sh"],
+      "tests": ["test_cases.test_full_flow_integration", "test_cases.test_ztp_http_identity_binding", "test_cases.test_dhcp_runtime_reassignment", "test_cases.test_ztp_prefix_runtime_boundary", "test_cases.test_flow_release_platform_matrix"]
+    },
+    {
+      "id": "manual_ztp_monitor_compare",
+      "members": ["DAY0-Prepare/12-ztp-monitor.py", "monitor/*", "ztp/manual-reset.py", "ztp/manual-ztp.py", "ztp/nvue_normalizer.py", "ztp/templates/ztp-bootstrap.sh"],
+      "tests": ["test_cases.test_monitor_stack_review", "test_cases.test_manual_applied_config", "test_cases.test_nvue_normalizer", "test_cases.test_ztp_applied_receipt"]
+    },
+    {
+      "id": "switch_collection_publication",
+      "members": ["DAY0-Prepare/12-ztp-monitor.py", "monitor/*", "ethernet/monitor/*", "infiniband/monitor/*", "nvlink/monitor/*"],
+      "tests": ["test_cases.test_monitor_stack_review", "test_cases.test_project_contracts", "test_cases.test_ztp_http_identity_binding", "test_cases.test_ztp_group_handoff", "test_cases.test_ztp_group_handoff_display"]
+    },
+    {
+      "id": "package_sync_load",
+      "members": ["DAY0-Prepare/01-a-setup.py", "DAY0-Prepare/11-load.py", "infra/*", "tools/_package_common.py", "tools/collect-ztp-diagnostics.py", "tools/deployment_lock.py", "tools/import-from-download.py", "tools/sync-code.py", "tools/tar-for-download.py", "tools/tar-for-upload.py"],
+      "tests": ["test_cases.test_ops_deployment_review", "test_cases.test_deployment_writer_lock", "test_cases.test_upload_package_contract", "test_cases.test_download_cli_contract", "test_cases.test_import_from_download_target", "test_cases.test_diagnostic_bundle", "test_cases.test_predeploy_test_gate"]
+    },
+    {
+      "id": "config_generate_publish_compare",
+      "members": ["DAY0-Prepare/11-load.py", "ztp/backup/*", "ztp/config/*", "ztp/dhcp_runtime_inventory.py", "ztp/dynamic_air_inventory.py", "ztp/manual-ztp.py", "ztp/nvue_normalizer.py", "ztp/optimize/*"],
+      "tests": ["test_cases.test_load_release_transaction", "test_cases.test_ztp_release_core_review", "test_cases.test_manual_applied_config", "test_cases.test_nvue_normalizer", "test_cases.test_optimize_output_layout", "test_cases.test_flow_release_platform_matrix"]
+    },
+    {
+      "id": "ib_nvl_bringup_observability",
+      "members": ["infiniband/bringup/*", "ethernet/monitor/*", "infiniband/monitor/*", "nvlink/monitor/*", "monitor/dot_to_html.py", "monitor/generate-monitor-html.py"],
+      "tests": ["test_cases.test_monitor_stack_review", "test_cases.test_project_contracts"]
+    },
+    {
+      "id": "offline_network_analysis",
+      "members": ["tools/ib-tool-Jie/*", "tools/ibdiagnet-analyze-tool/*", "tools/lldp-analyze-tool/*"],
+      "tests": ["test_cases.test_ops_deployment_review", "test_cases.test_project_contracts", "test_cases.test_ib_analysis_domain"]
+    },
+    {
+      "id": "test_and_documentation_governance",
+      "members": ["tools/project_contract.py", "tools/update-root-readme.py"],
+      "tests": ["test_cases.test_change_aware_test_runner", "test_cases.test_test_case_repository", "test_cases.test_documentation_catalog", "test_cases.test_project_contracts"]
+    }
+  ],
+  "path_rules": [
+    {
+      "paths": ["test_cases/script_test_manifest.json", "test_cases/run_related_tests.py"],
+      "tests": [],
+      "full_suite": true
+    },
+    {
+      "paths": [".gitattributes", ".gitignore", ".github/README.md", ".github/workflows/tests.yml", "PUBLIC_REPOSITORY.md", "SECURITY.md", "examples/public-project/*", "requirements-dev.txt", "test_cases/audit_public_tree.py"],
+      "tests": ["test_cases.test_public_repository_contract"]
+    },
+    {
+      "paths": ["README.md", "USER_MANUAL.md", "*/README.md", "*/*/README.md", "*/*/*/README.md"],
+      "tests": ["test_cases.test_documentation_catalog", "test_cases.test_project_contracts"]
+    },
+    {
+      "paths": ["infra/apache/*"],
+      "tests": ["test_cases.test_apache_publication_boundary", "test_cases.test_ops_deployment_review"]
+    },
+    {
+      "paths": ["ztp/templates/ztp.json"],
+      "tests": ["test_cases.test_project_contracts", "test_cases.test_ztp_release_core_review"]
+    }
+  ]
+}

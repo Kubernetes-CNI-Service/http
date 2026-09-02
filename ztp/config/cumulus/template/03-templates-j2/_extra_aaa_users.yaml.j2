@@ -1,0 +1,8 @@
+{% for account in extra_aaa_users(g) %}
+          {{ account.username | yaml_string }}:
+{% if account.full_name is not none %}
+            full-name: {{ account.full_name | yaml_string }}
+{% endif %}
+            hashed-password: {{ account.hashed_password | yaml_string }}
+            role: {{ account.role | yaml_string }}
+{% endfor %}
