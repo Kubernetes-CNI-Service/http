@@ -180,7 +180,7 @@
     {
       "id": "ztp_config_generation",
       "paths": ["ztp/config/*"],
-      "tests": ["test_cases.test_ztp_release_core_review", "test_cases.test_project_contracts", "test_cases.test_load_release_transaction", "test_cases.test_ztp_prefix_runtime_boundary", "test_cases.test_flow_release_platform_matrix"]
+      "tests": ["test_cases.test_ztp_release_core_review", "test_cases.test_project_contracts", "test_cases.test_load_release_transaction", "test_cases.test_ztp_prefix_runtime_boundary", "test_cases.test_flow_release_platform_matrix", "test_cases.test_cumulus_snippet_rendering"]
     },
     {
       "id": "dhcp_runtime_identity",
@@ -242,7 +242,7 @@
     {
       "id": "config_generate_publish_compare",
       "members": ["DAY0-Prepare/11-load.py", "ztp/backup/*", "ztp/config/*", "ztp/dhcp_runtime_inventory.py", "ztp/dynamic_air_inventory.py", "ztp/manual-ztp.py", "ztp/nvue_normalizer.py", "ztp/optimize/*"],
-      "tests": ["test_cases.test_load_release_transaction", "test_cases.test_ztp_release_core_review", "test_cases.test_manual_applied_config", "test_cases.test_nvue_normalizer", "test_cases.test_optimize_output_layout", "test_cases.test_flow_release_platform_matrix"]
+      "tests": ["test_cases.test_load_release_transaction", "test_cases.test_ztp_release_core_review", "test_cases.test_manual_applied_config", "test_cases.test_nvue_normalizer", "test_cases.test_optimize_output_layout", "test_cases.test_flow_release_platform_matrix", "test_cases.test_cumulus_snippet_rendering"]
     },
     {
       "id": "ib_nvl_bringup_observability",

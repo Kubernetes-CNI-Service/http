@@ -161,6 +161,71 @@ class _UniqueKeyLoader(yaml.SafeLoader):
     """Safe YAML loader that rejects duplicate keys instead of overwriting."""
 
 
+class _LiteralYamlString(str):
+    """String serialized as a YAML literal block without changing its value."""
+
+
+class _GeneratedYamlDumper(yaml.SafeDumper):
+    """Safe dumper for generated NVUE documents."""
+
+
+def _represent_literal_yaml_string(dumper, value):
+    return dumper.represent_scalar(
+        "tag:yaml.org,2002:str", str(value), style="|",
+    )
+
+
+_GeneratedYamlDumper.add_representer(
+    _LiteralYamlString, _represent_literal_yaml_string,
+)
+
+
+def _dump_generated_yaml(document, stream=None):
+    """Serialize NVUE YAML with readable, lossless ifupdown2 snippets.
+
+    PyYAML normally renders a one-line string with a trailing newline as a
+    single-quoted scalar followed by an indented blank line.  NVUE snippets
+    are line-oriented, so use a literal block only at the documented
+    ``ifupdown2_eni`` node while preserving the exact scalar value.
+    """
+    rendered_document = copy.deepcopy(document)
+    documents = (
+        rendered_document if isinstance(rendered_document, list)
+        else [rendered_document]
+    )
+    for item in documents:
+        if not isinstance(item, dict):
+            continue
+        operation = item.get("set")
+        if not isinstance(operation, dict):
+            operation = item
+        system = operation.get("system")
+        if not isinstance(system, dict):
+            continue
+        config = system.get("config")
+        if not isinstance(config, dict):
+            continue
+        snippet = config.get("snippet")
+        if not isinstance(snippet, dict):
+            continue
+        ifupdown = snippet.get("ifupdown2_eni")
+        if not isinstance(ifupdown, dict):
+            continue
+        for interface, value in list(ifupdown.items()):
+            if isinstance(value, str):
+                ifupdown[interface] = _LiteralYamlString(value)
+
+    return yaml.dump(
+        rendered_document,
+        stream=stream,
+        Dumper=_GeneratedYamlDumper,
+        allow_unicode=True,
+        sort_keys=False,
+        default_flow_style=False,
+        width=120,
+    )
+
+
 def _construct_unique_mapping(loader, node, deep=False):
     seen = {}
     for key_node, _value_node in node.value:
@@ -2637,9 +2702,7 @@ def generate_all(target=None, verify=False, ref_dir=None, fail_on_diff=False):
         if dhcp_relay_injected:
             print(f"  [SVI/VRR] {name}: 已合并 VRF loopback/ifupdown2 辅助配置")
         if removed_nulls or vrl_injected or dhcp_relay_injected:
-            rendered = yaml.safe_dump(
-                rendered_doc, allow_unicode=True, sort_keys=False, width=120
-            )
+            rendered = _dump_generated_yaml(rendered_doc)
         null_paths = _nvue_null_paths(rendered_doc)
         if null_paths:
             print(
@@ -3285,9 +3348,7 @@ def _filter_air_yaml(filepath, air_ports, mgmt_ip=None, hostname=None):
         return False
     with open(filepath, "w", encoding="utf-8") as f:
         if removed_dependencies:
-            yaml.safe_dump(
-                filtered_doc, f, allow_unicode=True, sort_keys=False, width=120
-            )
+            _dump_generated_yaml(filtered_doc, stream=f)
         else:
             f.writelines(result)
     return True

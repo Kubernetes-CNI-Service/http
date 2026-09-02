@@ -1,5 +1,5 @@
 {
-  "impact_manifest_sha256": "5d3c66cf7cd2de6f6dfcffe3ff1b572333f509b01ba017e6d06a13c657f46154",
+  "impact_manifest_sha256": "d01ab0c2ee87730ea7a22bef126dff41498db77857596b6f26f95a35727b4eb3",
   "schema_version": 1,
   "scripts": {
     "DAY0-Prepare/01-a-setup.py": {
@@ -356,7 +356,7 @@
     },
     "ztp/config/cumulus/template/90-c2-generate_configs.py": {
       "canonical": "ztp/config/cumulus/template/90-c2-generate_configs.py",
-      "sha256": "469367de8e2f3c79ea266b48c214aed0b823895fffb4a47f57e0a22739fa2712"
+      "sha256": "bb3a1ea895ee52700bf6954624990fba6c0a1892bf83065b1e54cbc5eef79aa7"
     },
     "ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py": {
       "canonical": "ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py",
@@ -372,7 +372,7 @@
     },
     "ztp/config/nvos/template/90-c2-generate_configs.py": {
       "canonical": "ztp/config/cumulus/template/90-c2-generate_configs.py",
-      "sha256": "469367de8e2f3c79ea266b48c214aed0b823895fffb4a47f57e0a22739fa2712"
+      "sha256": "bb3a1ea895ee52700bf6954624990fba6c0a1892bf83065b1e54cbc5eef79aa7"
     },
     "ztp/config/nvos/template/P2P/p2p-to-validation.py": {
       "canonical": "ztp/config/nvos/template/P2P/p2p-to-validation.py",
@@ -428,6 +428,7 @@
     "test_cases.test_all_script_entrypoints": "842a7386af2f9ac4fc9a7521e644ccde7afbc833fa955d666221928b77aa1ac0",
     "test_cases.test_apache_publication_boundary": "b0ec8878f71b62551cef86b5b57182db837a606e8680a780f4ea12d01edc1b63",
     "test_cases.test_change_aware_test_runner": "c1345da7d10825cf935792d0500587d3a6aa565bb054b9edd1876e9c53f1a97a",
+    "test_cases.test_cumulus_snippet_rendering": "8b7111c20de81b7c6e9e74fdf99b5089cc50b84bc632018a8c80e0f54efcdb60",
     "test_cases.test_deployment_writer_lock": "eca747b91fb5606d22ddb97f64887d08e9d31eacbfa20999225da4ae8f850a86",
     "test_cases.test_dhcp_runtime_reassignment": "e4fe46c5cd8d4cd7f3225f66a6683e3ba88a35dfec938fba45d95f9e7ff73cef",
     "test_cases.test_diagnostic_bundle": "e0b83c2ee40b3a4564c17f05232fe441e53021e1063b8ec597e73adbe62f44a5",
