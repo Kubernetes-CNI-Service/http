@@ -116,10 +116,7 @@
         vrf: default
 {% endif %}
 {% include '_dhcp_relay.yaml.j2' %}
-    evpn:
-      multihoming:
-        state: enabled
-      state: enabled
+{% include '_global_evpn.yaml.j2' %}
     nve:
       vxlan:
         arp-nd-suppress: enabled

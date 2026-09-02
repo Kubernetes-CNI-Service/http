@@ -3,10 +3,7 @@
       domain:
         br_default:
           vlan: {}
-    evpn:
-      multihoming:
-        state: enabled
-      state: enabled
+{% include '_global_evpn.yaml.j2' %}
     interface:
       eth0:
         ipv4:

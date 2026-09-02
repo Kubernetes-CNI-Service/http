@@ -460,12 +460,52 @@ def _csv_normalize_bond_type(value):
     )
 
 
+def _device_bond_types(device):
+    """Return normalized bond redundancy modes declared for one device."""
+    result = set()
+
+    def add_type(value):
+        normalized = str(value or "").strip().casefold()
+        if normalized == "mlagbond":
+            normalized = "mlag"
+        if normalized:
+            result.add(normalized)
+
+    for group in device.get("bond_groups", []):
+        if isinstance(group, dict):
+            add_type(group.get("type"))
+    for vrf in device.get("vrfs", []):
+        if not isinstance(vrf, dict):
+            continue
+        for l2 in vrf.get("l2vlans", []):
+            if not isinstance(l2, dict):
+                continue
+            for port in l2.get("vlan_ports", []):
+                bonds = port.get("bonds") if isinstance(port, dict) else None
+                if isinstance(bonds, dict):
+                    add_type(bonds.get("type"))
+    for bond in device.get("computed_bonds", []):
+        if isinstance(bond, dict):
+            add_type(bond.get("type"))
+    return result
+
+
+def _validate_device_bond_types(bond_types, context=""):
+    """Reject mutually exclusive MLAG and EVPN-MH on the same switch."""
+    if {"mlag", "evpn_multihoming"}.issubset(set(bond_types)):
+        prefix = f"{context}: " if context else ""
+        raise ValueError(
+            prefix + "MLAG 与 EVPN multihoming 不能在同一设备同时启用"
+        )
+
+
 def _csv_parse_bond_groups(bond_ports, bond_types, macs, context="", errors=None):
     """Parse aligned ``|``-separated bond profiles.
 
     A single bond_type/bond_mac remains backward compatible and applies to
-    every bond_ports group.  Multiple values must align one-to-one so a device
-    can faithfully represent a mix of local, MLAG, and EVPN-MH bonds.
+    every bond_ports group.  Multiple values must align one-to-one. Local
+    bonds can coexist with either redundancy mode, but MLAG and EVPN-MH are
+    mutually exclusive on one switch.
     """
     if _csv_na(bond_ports):
         return []
@@ -494,6 +534,9 @@ def _csv_parse_bond_groups(bond_ports, bond_types, macs, context="", errors=None
         if not _csv_na(mac):
             bi["mac-address"] = mac
         groups.append(bi)
+    _validate_device_bond_types(
+        {group["type"] for group in groups}, context=context,
+    )
     return groups
 
 def _csv_to_int_opt(val):
@@ -1785,15 +1828,16 @@ def _generate_devices_yaml():
     mlag_pairs    = mlag_global.get("pairs", [])
     mlag_priority = mlag_global.get("priority", [])
 
-    def _is_mlag_dev(d):
-        if any(isinstance(p, dict) and p.get("bonds", {}).get("type") == "mlag"
-               for vrf in d.get("vrfs", [])
-               for l2 in vrf.get("l2vlans", [])
-               for p in l2.get("vlan_ports", [])):
-            return True
-        return any(bg.get("type") == "mlag" for bg in d.get("bond_groups", []))
-
-    mlag_hosts = [h for h, d in devices_data.items() if _is_mlag_dev(d)]
+    mlag_hosts = []
+    for hostname, device in devices_data.items():
+        bond_types = _device_bond_types(device)
+        try:
+            _validate_device_bond_types(bond_types, context=hostname)
+        except ValueError as exc:
+            _dup_errs.append(f"  {exc}")
+            continue
+        if "mlag" in bond_types:
+            mlag_hosts.append(hostname)
     for i, hostname in enumerate(mlag_hosts):
         pair_idx = i // 2; role_idx = i % 2
         peer = mlag_hosts[i ^ 1] if (i ^ 1) < len(mlag_hosts) else None
@@ -2013,6 +2057,8 @@ def _breakout_info(max_sub: int) -> tuple:
 
 def preprocess_device(dev: dict) -> dict:
     """Compute computed_bonds / parent_swps / member_swps from bond_list data."""
+    bond_types = _device_bond_types(dev)
+    _validate_device_bond_types(bond_types)
     bond_vlans: dict = {}
     bond_attrs: dict = {}
     direct_port_vlans: dict = {}
@@ -2078,6 +2124,7 @@ def preprocess_device(dev: dict) -> dict:
                 }
 
     dev = dict(dev)
+    dev['is_mlag'] = 'mlag' in bond_types
     dev.setdefault('bgp_neighbors', [])
     dev['computed_vlan_ports'] = []
     for port in sorted(direct_port_vlans, key=_bond_sort_key):
@@ -2452,6 +2499,79 @@ def _nvue_null_paths(value, path="$"):
     return errors
 
 
+def _redundancy_mode_errors(document, expected_bond_types=None):
+    """Validate one switch's MLAG/EVPN-MH mode across every NVUE set.
+
+    A source receipt can contain more than one set operation, so evidence must
+    be aggregated for the whole switch.  For an MLAG device the generated
+    document must contain an actual MLAG construct, and it must contain no
+    global or per-interface EVPN multihoming node, even if marked disabled.
+    """
+    documents = document if isinstance(document, list) else [document]
+    mlag_evidence = []
+    core_mlag_evidence = []
+    multihoming_evidence = []
+
+    for index, item in enumerate(documents):
+        block = item.get("set") if isinstance(item, dict) else None
+        if not isinstance(block, dict):
+            continue
+        prefix = f"$[{index}].set"
+
+        if isinstance(block.get("mlag"), dict):
+            mlag_evidence.append(f"{prefix}.mlag")
+            core_mlag_evidence.append(f"{prefix}.mlag")
+
+        interfaces = block.get("interface")
+        if isinstance(interfaces, dict):
+            for interface_name, config in interfaces.items():
+                if not isinstance(config, dict):
+                    continue
+                interface_path = f"{prefix}.interface.{interface_name}"
+                if str(config.get("type") or "").casefold() == "peerlink":
+                    mlag_evidence.append(interface_path)
+                    core_mlag_evidence.append(interface_path)
+                bond = config.get("bond")
+                if isinstance(bond, dict) and isinstance(
+                        bond.get("mlag"), dict):
+                    path = f"{interface_path}.bond.mlag"
+                    mlag_evidence.append(path)
+                    core_mlag_evidence.append(path)
+                interface_evpn = config.get("evpn")
+                if isinstance(interface_evpn, dict) and isinstance(
+                        interface_evpn.get("multihoming"), dict):
+                    multihoming_evidence.append(
+                        f"{interface_path}.evpn.multihoming"
+                    )
+
+        nve = block.get("nve")
+        vxlan = nve.get("vxlan") if isinstance(nve, dict) else None
+        if isinstance(vxlan, dict) and isinstance(vxlan.get("mlag"), dict):
+            mlag_evidence.append(f"{prefix}.nve.vxlan.mlag")
+
+        global_evpn = block.get("evpn")
+        if isinstance(global_evpn, dict) and isinstance(
+                global_evpn.get("multihoming"), dict):
+            multihoming_evidence.append(f"{prefix}.evpn.multihoming")
+
+    errors = []
+    if mlag_evidence and multihoming_evidence:
+        errors.append(
+            "$.set: MLAG 与 EVPN multihoming 不能在同一设备同时启用"
+        )
+
+    normalized_expected = {
+        "mlag" if str(value).strip().casefold() == "mlagbond"
+        else str(value).strip().casefold()
+        for value in (expected_bond_types or ())
+    }
+    if "mlag" in normalized_expected and not core_mlag_evidence:
+        errors.append(
+            "$.set: 输入声明 MLAG，但生成的 NVUE YAML 没有生成 MLAG 配置"
+        )
+    return errors
+
+
 def _merge_vrl_mapping(target, addition, path="set"):
     """Merge VRL config without overwriting a different existing NVUE value."""
     for key, value in addition.items():
@@ -2688,6 +2808,17 @@ def generate_all(target=None, verify=False, ref_dir=None, fail_on_diff=False):
             )
         except ValueError as e:
             print(f"[ERROR] {name}: {e}")
+            errors += 1
+            continue
+        redundancy_errors = _redundancy_mode_errors(
+            rendered_doc,
+            expected_bond_types=_device_bond_types(device_vars),
+        )
+        if redundancy_errors:
+            print(
+                f"[ERROR] {name}: 生成的 NVUE YAML 冗余模式冲突："
+                + ", ".join(redundancy_errors[:8])
+            )
             errors += 1
             continue
         rendered_doc, removed_nulls = _prune_nvue_nulls(rendered_doc)

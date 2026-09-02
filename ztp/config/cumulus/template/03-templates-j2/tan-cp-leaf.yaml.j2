@@ -7,10 +7,7 @@
             priority: {{ g.bridge.domain.br_default.stp.priority }}
           vlan:
 {% include '_bridge_l2vlans.yaml.j2' %}
-    evpn:
-      multihoming:
-        state: enabled
-      state: enabled
+{% include '_global_evpn.yaml.j2' %}
     interface:
 {% for bond in d.computed_bonds %}
       {{ bond.name }}:

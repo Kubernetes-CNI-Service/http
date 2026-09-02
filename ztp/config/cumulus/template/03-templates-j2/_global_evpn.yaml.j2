@@ -1,0 +1,6 @@
+    evpn:
+{% if not d.is_mlag %}
+      multihoming:
+        state: enabled
+{% endif %}
+      state: enabled

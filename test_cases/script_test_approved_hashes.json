@@ -1,5 +1,5 @@
 {
-  "impact_manifest_sha256": "d01ab0c2ee87730ea7a22bef126dff41498db77857596b6f26f95a35727b4eb3",
+  "impact_manifest_sha256": "6fd50c4a811b97bdf6e39188d6f73ca93c391807b112aca4068088d1cacd2c69",
   "schema_version": 1,
   "scripts": {
     "DAY0-Prepare/01-a-setup.py": {
@@ -356,7 +356,7 @@
     },
     "ztp/config/cumulus/template/90-c2-generate_configs.py": {
       "canonical": "ztp/config/cumulus/template/90-c2-generate_configs.py",
-      "sha256": "bb3a1ea895ee52700bf6954624990fba6c0a1892bf83065b1e54cbc5eef79aa7"
+      "sha256": "0b0128d8f008ba45c5e6cd4583047469ed267c8711890003293d7f3e40d21f55"
     },
     "ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py": {
       "canonical": "ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py",
@@ -372,7 +372,7 @@
     },
     "ztp/config/nvos/template/90-c2-generate_configs.py": {
       "canonical": "ztp/config/cumulus/template/90-c2-generate_configs.py",
-      "sha256": "bb3a1ea895ee52700bf6954624990fba6c0a1892bf83065b1e54cbc5eef79aa7"
+      "sha256": "0b0128d8f008ba45c5e6cd4583047469ed267c8711890003293d7f3e40d21f55"
     },
     "ztp/config/nvos/template/P2P/p2p-to-validation.py": {
       "canonical": "ztp/config/nvos/template/P2P/p2p-to-validation.py",
@@ -441,6 +441,7 @@
     "test_cases.test_infra_check_and_manual_reset": "f12485c976471de81c6be125a2f4f2c8455deea2e50acd4d2611352ccc835143",
     "test_cases.test_load_release_transaction": "0ee9ff3159f242859e47484b50168fabf641aa1c358c41330cecc6a863fae849",
     "test_cases.test_manual_applied_config": "31476144d5ed1b08af040dbc96dc6364aa47bef59a4a65e907a93d1b38d12e8c",
+    "test_cases.test_mlag_evpn_generation": "379365dee9d2663256ca224dcd90c846f8366e7f8d7966d39584cba7e59e4517",
     "test_cases.test_monitor_stack_review": "21ed323a68f5ab65ca69c9872ff654d01925fdbb9c93b26d076af99f97220d69",
     "test_cases.test_nvue_normalizer": "6e22f0f89353d0042391330675e4cce387931e896f4b44f57911e2dccb85b230",
     "test_cases.test_ops_deployment_review": "be5c6ab99601907b46cd21e9b6c41d2730dd177c7336e530dc93f5b700f61743",

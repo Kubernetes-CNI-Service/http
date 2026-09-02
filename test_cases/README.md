@@ -66,6 +66,12 @@ Cumulus/NVOS 子 manifest 的设备身份、真实 YAML hash、完整 MAC 链接
 current。由于 child manifest 尚无输入来源证明，非 dry-run `--skip-generate` 必须在任何状态
 修改前失败。
 
+`test_mlag_evpn_generation.py` 覆盖 Cumulus MLAG 与 EVPN-MH 的互斥边界：MLAG 设备只保留
+EVPN 控制平面，非 MLAG 设备继续启用 EVPN multihoming；同设备混合两种冗余模式会在 CSV、
+legacy/nested bond 预处理及跨 `set` 的最终 YAML 门禁中失败。跨模块案例通过真实 Border 父模板
+和 `generate_all()` 验证 MLAG 输出，再经过发布规范化并与 `nv config show` 比较；MLAG 输入若
+选到不能生成 MLAG 配置的模板也会在发布前失败。
+
 覆盖内容：DAY0 模板输出骨架和 DHCP 唯一性、setup 管理的 monitor global 链接、项目时区、
 ibdiagnet 报告发现、首页本地链接、upload/sync 人工备份过滤，以及 Ubuntu 24.04 双架构离线
 仓库布局。
