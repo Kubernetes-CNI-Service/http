@@ -2055,6 +2055,49 @@ def _breakout_info(max_sub: int) -> tuple:
     return count, 8 // count
 
 
+def _device_bridge_vlan_selectors(device):
+    """Return br_default VLAN selector keys in rendered template order."""
+    selectors = []
+    seen = set()
+
+    def add(value):
+        selector = str(value or "").strip()
+        if selector and selector not in seen:
+            seen.add(selector)
+            selectors.append(selector)
+
+    # This legacy template renders only d.vlan_id into the global bridge,
+    # even when reverse-parsed EVPN groups are also present in the device
+    # record.  The peerlink must mirror what the selected parent template
+    # actually renders, not unrelated VRF metadata.
+    template = str(device.get("template") or "").strip().casefold()
+    if template == "oobofoob-spine":
+        if device.get("vlan_id") is not None:
+            add(device["vlan_id"])
+        return selectors
+
+    for vrf in device.get("vrfs", []):
+        if not isinstance(vrf, dict):
+            continue
+        for l2 in vrf.get("l2vlans", []):
+            if not isinstance(l2, dict):
+                continue
+            vlan_id = l2.get("vlan_id")
+            if vlan_id is not None:
+                add(vlan_id)
+                continue
+            selector = l2.get("vlan_spec")
+            if not selector and l2.get("vlan_ids"):
+                selector = _compress_vlan_ids(l2["vlan_ids"])
+            add(selector)
+
+    # Simple/legacy MLAG templates render one global bridge VLAN directly
+    # from d.vlan_id rather than from d.vrfs.
+    if not selectors and device.get("vlan_id") is not None:
+        add(device["vlan_id"])
+    return selectors
+
+
 def preprocess_device(dev: dict) -> dict:
     """Compute computed_bonds / parent_swps / member_swps from bond_list data."""
     bond_types = _device_bond_types(dev)
@@ -2125,6 +2168,7 @@ def preprocess_device(dev: dict) -> dict:
 
     dev = dict(dev)
     dev['is_mlag'] = 'mlag' in bond_types
+    dev['bridge_vlan_selectors'] = _device_bridge_vlan_selectors(dev)
     dev.setdefault('bgp_neighbors', [])
     dev['computed_vlan_ports'] = []
     for port in sorted(direct_port_vlans, key=_bond_sort_key):
@@ -2572,6 +2616,139 @@ def _redundancy_mode_errors(document, expected_bond_types=None):
     return errors
 
 
+def _bridge_vlan_ids(mapping, path, errors, *, keys_only=False):
+    """Expand one NVUE bridge VLAN mapping into numeric VLAN IDs."""
+    if mapping is None:
+        return set()
+    if not isinstance(mapping, dict):
+        errors.append(f"{path} 必须是 VLAN mapping")
+        return set()
+    result = set()
+    for selector, value in mapping.items():
+        if keys_only and value != {}:
+            errors.append(f"{path}.{selector} 必须是空 mapping")
+        try:
+            _single, _spec, vlan_ids = _csv_parse_numeric_selector(
+                str(selector), field=path, minimum=1, maximum=4094,
+            )
+        except ValueError as exc:
+            errors.append(str(exc))
+            continue
+        result.update(vlan_ids)
+    return result
+
+
+def _peerlink_vlan_errors(document, expected_bond_types=None):
+    """Require MLAG peerlink VLAN membership to mirror br_default exactly."""
+    normalized_expected = {
+        "mlag" if str(value).strip().casefold() == "mlagbond"
+        else str(value).strip().casefold()
+        for value in (expected_bond_types or ())
+    }
+
+    errors = []
+    global_vlans = set()
+    actual_mlag = False
+    interface_fragments = {}
+    peerlink_names = set()
+    documents = document if isinstance(document, list) else [document]
+    for index, item in enumerate(documents):
+        block = item.get("set") if isinstance(item, dict) else None
+        if not isinstance(block, dict):
+            continue
+        prefix = f"$[{index}].set"
+        bridge = block.get("bridge")
+        domains = bridge.get("domain") if isinstance(bridge, dict) else None
+        br_default = domains.get("br_default") if isinstance(domains, dict) else None
+        global_mapping = (
+            br_default.get("vlan") if isinstance(br_default, dict) else None
+        )
+        global_vlans.update(_bridge_vlan_ids(
+            global_mapping,
+            f"{prefix}.bridge.domain.br_default.vlan",
+            errors,
+        ))
+
+        if isinstance(block.get("mlag"), dict):
+            actual_mlag = True
+        nve = block.get("nve")
+        vxlan = nve.get("vxlan") if isinstance(nve, dict) else None
+        if isinstance(vxlan, dict) and isinstance(vxlan.get("mlag"), dict):
+            actual_mlag = True
+
+        interfaces = block.get("interface")
+        if not isinstance(interfaces, dict):
+            continue
+        for interface_name, config in interfaces.items():
+            if not isinstance(config, dict):
+                continue
+            interface_path = f"{prefix}.interface.{interface_name}"
+            name = str(interface_name)
+            interface_fragments.setdefault(name, []).append(
+                (interface_path, config)
+            )
+            if str(config.get("type") or "").casefold() == "peerlink":
+                actual_mlag = True
+                peerlink_names.add(name)
+            bond = config.get("bond")
+            if isinstance(bond, dict) and isinstance(bond.get("mlag"), dict):
+                actual_mlag = True
+
+    if "mlag" not in normalized_expected and not actual_mlag:
+        return []
+    if not peerlink_names:
+        errors.append("$.set.interface: 输入声明 MLAG，但没有生成 peerlink 接口")
+        return errors
+    if 4094 in global_vlans:
+        errors.append(
+            "$.set.bridge.domain.br_default.vlan: VLAN 4094 只能用于 peerlink.4094，"
+            "不能加入 bridge VLAN"
+        )
+
+    for interface_name in sorted(peerlink_names):
+        fragments = interface_fragments[interface_name]
+        path = f"$.set.interface.{interface_name}"
+        has_vlan_node = False
+        peer_vlans = set()
+        for fragment_path, config in fragments:
+            peer_bridge = config.get("bridge")
+            peer_domains = (
+                peer_bridge.get("domain")
+                if isinstance(peer_bridge, dict) else None
+            )
+            peer_default = (
+                peer_domains.get("br_default")
+                if isinstance(peer_domains, dict) else None
+            )
+            if not isinstance(peer_default, dict) or "vlan" not in peer_default:
+                continue
+            has_vlan_node = True
+            peer_vlans.update(_bridge_vlan_ids(
+                peer_default.get("vlan"),
+                f"{fragment_path}.bridge.domain.br_default.vlan",
+                errors,
+                keys_only=True,
+            ))
+        if 4094 in peer_vlans:
+            errors.append(
+                f"{path}.bridge.domain.br_default.vlan: "
+                "VLAN 4094 只能用于 peerlink.4094"
+            )
+        if peer_vlans != global_vlans:
+            missing = sorted(global_vlans - peer_vlans)
+            extra = sorted(peer_vlans - global_vlans)
+            errors.append(
+                f"{path}.bridge.domain.br_default.vlan 与全局 br_default 不一致："
+                f"缺少 {missing}，额外 {extra}"
+            )
+        if not global_vlans and has_vlan_node:
+            errors.append(
+                f"{path}.bridge.domain.br_default.vlan: "
+                "没有业务 VLAN 时不得生成空 VLAN 节点"
+            )
+    return errors
+
+
 def _merge_vrl_mapping(target, addition, path="set"):
     """Merge VRL config without overwriting a different existing NVUE value."""
     for key, value in addition.items():
@@ -2810,10 +2987,13 @@ def generate_all(target=None, verify=False, ref_dir=None, fail_on_diff=False):
             print(f"[ERROR] {name}: {e}")
             errors += 1
             continue
+        expected_bond_types = _device_bond_types(device_vars)
         redundancy_errors = _redundancy_mode_errors(
-            rendered_doc,
-            expected_bond_types=_device_bond_types(device_vars),
+            rendered_doc, expected_bond_types=expected_bond_types,
         )
+        redundancy_errors.extend(_peerlink_vlan_errors(
+            rendered_doc, expected_bond_types=expected_bond_types,
+        ))
         if redundancy_errors:
             print(
                 f"[ERROR] {name}: 生成的 NVUE YAML 冗余模式冲突："

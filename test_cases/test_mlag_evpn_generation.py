@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import importlib.util
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
@@ -17,6 +18,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES = ROOT / "ztp/config/cumulus/template/03-templates-j2"
 GLOBAL_EVPN_TEMPLATE = "_global_evpn.yaml.j2"
+MLAG_PEERLINK_TEMPLATE = "_mlag_peerlink.yaml.j2"
 GLOBAL_EVPN_PARENTS = {
     "border.yaml.j2",
     "oob-core.yaml.j2",
@@ -108,14 +110,15 @@ def border_globals() -> dict:
                 "hashed-password": "'*'",
             }}},
             "date-time": {"timezone": "UTC"},
-            "dns": {"server": ["192.0.2.53"]},
-            "ntp": {"server": ["192.0.2.123"]},
+            "dns": {"server": ["192.0.2.53"], "vrf": "mgmt"},
+            "ntp": {"server": ["192.0.2.123"], "vrf": "mgmt"},
         },
     }
 
 
 def border_mlag_device() -> dict:
     device = bond_device("mlag")
+    mlag_bond = copy.deepcopy(device["bond_groups"][0])
     device.update({
         "template": "border",
         "hostname": "EXAMPLE-MLAG01",
@@ -127,7 +130,40 @@ def border_mlag_device() -> dict:
         "bgp_neighbors": ["swp49"],
         "peerlink_ports": "swp50-51",
         "vlan_ports": [],
-        "vrfs": [],
+        "vrfs": [
+            {
+                "evpn_vrf": "BLUE",
+                "evpn_l3vlan": None,
+                "evpn_l3vni": None,
+                "l2vlans": [{
+                    "vlan_id": None,
+                    "vlan_spec": "10-12,20",
+                    "vlan_ids": [10, 11, 12, 20],
+                    "vni": None,
+                    "emit_svi": False,
+                    "svi_ip": "",
+                    "vrr_ip": "",
+                    "vrr_mac": "",
+                    "vlan_ports": [{"bonds": mlag_bond}],
+                }],
+            },
+            {
+                "evpn_vrf": "RED",
+                "evpn_l3vlan": None,
+                "evpn_l3vni": None,
+                "l2vlans": [{
+                    "vlan_id": 30,
+                    "vlan_spec": "30",
+                    "vlan_ids": [30],
+                    "vni": 1030,
+                    "emit_svi": False,
+                    "svi_ip": "",
+                    "vrr_ip": "",
+                    "vrr_mac": "",
+                    "vlan_ports": [],
+                }],
+            },
+        ],
         "mlag_backup": "192.0.2.11",
         "mlag_priority": 1000,
         "mlag_mac_address": "02:00:00:00:10:01",
@@ -137,7 +173,21 @@ def border_mlag_device() -> dict:
     return device
 
 
+def set_block(document: list[dict]) -> dict:
+    blocks = [item["set"] for item in document if isinstance(item, dict) and "set" in item]
+    if len(blocks) != 1:
+        raise AssertionError(f"expected one set block, found {len(blocks)}")
+    return blocks[0]
+
+
 class MlagEvpnDirectTests(unittest.TestCase):
+    def test_preprocess_builds_one_keys_only_peerlink_vlan_selector_list(self):
+        processed = GENERATOR.preprocess_device(border_mlag_device())
+        self.assertEqual(
+            ["10-12,20", "30"],
+            processed["bridge_vlan_selectors"],
+        )
+
     def test_preprocess_marks_mlag_and_rejects_same_device_mlag_evpn_mh_mix(self):
         mlag = GENERATOR.preprocess_device(bond_device("mlag"))
         self.assertIs(mlag["is_mlag"], True)
@@ -259,6 +309,109 @@ class MlagEvpnDirectTests(unittest.TestCase):
             "声明 MLAG.*没有生成 MLAG",
         )
 
+    def test_peerlink_vlan_gate_rejects_missing_extra_vni_and_vlan_4094(self):
+        base = [{"set": {
+            "bridge": {"domain": {"br_default": {"vlan": {
+                "10-12,20": {}, "30": {"vni": {"1030": {}}},
+            }}}},
+            "interface": {"peerlink": {
+                "bond": {"member": {"swp50": {}, "swp51": {}}},
+                "bridge": {"domain": {"br_default": {"vlan": {
+                    "10-12,20": {}, "30": {},
+                }}}},
+                "type": "peerlink",
+            }},
+            "mlag": {"state": "enabled"},
+        }}]
+        self.assertEqual(
+            [],
+            GENERATOR._peerlink_vlan_errors(
+                base, expected_bond_types={"mlag"},
+            ),
+        )
+        for label, mutate in {
+            "missing": lambda vlan: vlan.pop("30"),
+            "extra": lambda vlan: vlan.__setitem__("40", {}),
+            "vni": lambda vlan: vlan["30"].update({"vni": {"1030": {}}}),
+            "4094": lambda vlan: vlan.__setitem__("4094", {}),
+        }.items():
+            with self.subTest(label=label):
+                invalid = copy.deepcopy(base)
+                peer_vlan = set_block(invalid)["interface"]["peerlink"]["bridge"]["domain"]["br_default"]["vlan"]
+                mutate(peer_vlan)
+                self.assertTrue(
+                    GENERATOR._peerlink_vlan_errors(
+                        invalid, expected_bond_types={"mlag"},
+                    )
+                )
+
+    def test_peerlink_vlan_gate_allows_no_business_vlan_without_empty_node(self):
+        no_vlans = [{"set": {
+            "bridge": {"domain": {"br_default": {}}},
+            "interface": {"peerlink": {
+                "bond": {"member": {"swp50": {}, "swp51": {}}},
+                "type": "peerlink",
+            }},
+            "mlag": {"state": "enabled"},
+        }}]
+        self.assertEqual(
+            [],
+            GENERATOR._peerlink_vlan_errors(
+                no_vlans, expected_bond_types={"mlag"},
+            ),
+        )
+
+    def test_source_yaml_mlag_cannot_bypass_peerlink_vlan_or_4094_gate(self):
+        missing_peer_vlan = [{"set": {
+            "bridge": {"domain": {"br_default": {"vlan": {"10": {}}}}},
+            "interface": {"peerlink": {
+                "bond": {"member": {"swp50": {}, "swp51": {}}},
+                "type": "peerlink",
+            }},
+            "mlag": {"state": "enabled"},
+        }}]
+        self.assertTrue(
+            GENERATOR._peerlink_vlan_errors(missing_peer_vlan),
+            "MLAG evidence in source YAML must activate the final VLAN gate",
+        )
+
+        forbidden_4094 = copy.deepcopy(missing_peer_vlan)
+        block = set_block(forbidden_4094)
+        block["bridge"]["domain"]["br_default"]["vlan"] = {"4094": {}}
+        block["interface"]["peerlink"]["bridge"] = {
+            "domain": {"br_default": {"vlan": {"4094": {}}}},
+        }
+        self.assertTrue(any(
+            "4094" in error
+            for error in GENERATOR._peerlink_vlan_errors(forbidden_4094)
+        ))
+
+    def test_peerlink_vlan_gate_merges_same_interface_across_set_operations(self):
+        split_source = [
+            {"set": {
+                "bridge": {"domain": {"br_default": {"vlan": {"10": {}}}}},
+                "interface": {"peerlink": {
+                    "bond": {"member": {"swp50": {}, "swp51": {}}},
+                    "type": "peerlink",
+                }},
+                "mlag": {"state": "enabled"},
+            }},
+            {"set": {
+                "bridge": {"domain": {"br_default": {"vlan": {"20": {}}}}},
+                "interface": {"peerlink": {
+                    "bridge": {"domain": {"br_default": {
+                        "vlan": {"10": {}, "20": {}},
+                    }}},
+                }},
+            }},
+        ]
+        self.assertEqual(
+            [],
+            GENERATOR._peerlink_vlan_errors(
+                split_source, expected_bond_types={"mlag"},
+            ),
+        )
+
     def test_all_parent_templates_use_the_single_conditional_global_evpn_fragment(self):
         old_unconditional = (
             "    evpn:\n"
@@ -282,6 +435,60 @@ class MlagEvpnDirectTests(unittest.TestCase):
                     old_unconditional,
                     template_path.read_text(encoding="utf-8"),
                 )
+
+    def test_all_mlag_peerlink_parents_use_one_shared_fragment(self):
+        actual = {
+            path.name
+            for path in TEMPLATES.glob("*.yaml.j2")
+            if not path.name.startswith("_")
+            and (
+                "type: peerlink" in path.read_text(encoding="utf-8")
+                or f"{{% include '{MLAG_PEERLINK_TEMPLATE}' %}}"
+                in path.read_text(encoding="utf-8")
+            )
+        }
+        self.assertEqual({"border.yaml.j2", "oobofoob-spine.yaml.j2"}, actual)
+        for template_name in sorted(actual):
+            source = (TEMPLATES / template_name).read_text(encoding="utf-8")
+            with self.subTest(template=template_name):
+                self.assertEqual(
+                    1,
+                    source.count(f"{{% include '{MLAG_PEERLINK_TEMPLATE}' %}}"),
+                )
+                self.assertNotIn("      peerlink:\n", source)
+
+    def test_legacy_oobofoob_mlag_peerlink_copies_its_single_bridge_vlan(self):
+        device = border_mlag_device()
+        device.update({
+            "template": "oobofoob-spine",
+            "vrfs": [{
+                "evpn_vrf": "EXAMPLE-IGNORED",
+                "l2vlans": [{
+                    "vlan_id": 30,
+                    "vlan_spec": "30",
+                    "vlan_ids": [30],
+                    "vni": 1030,
+                    "vlan_ports": [],
+                }],
+            }],
+            "vlan_id": 13,
+            "svi_ip": "198.51.100.13/24",
+            "vrr_ip": "",
+            "vrr_mac": "",
+        })
+        rendered = GENERATOR.render(
+            GENERATOR.build_env(), border_globals(),
+            "EXAMPLE-OOB-SPINE01", device,
+        )
+        block = set_block(yaml.safe_load(rendered))
+        self.assertEqual(
+            {"13"},
+            set(block["bridge"]["domain"]["br_default"]["vlan"]),
+        )
+        self.assertEqual(
+            {"13": {}},
+            block["interface"]["peerlink"]["bridge"]["domain"]["br_default"]["vlan"],
+        )
 
 
 class MlagEvpnGeneratePublishCompareWorkflowTests(unittest.TestCase):
@@ -318,10 +525,19 @@ class MlagEvpnGeneratePublishCompareWorkflowTests(unittest.TestCase):
             published = PUBLISHER._canonical_yaml(str(source))
 
         published_document = yaml.safe_load(published)
+        block = set_block(published_document)
         self.assertEqual(
             {"state": "enabled"},
-            published_document[0]["set"]["evpn"],
+            block["evpn"],
         )
+        global_vlans = block["bridge"]["domain"]["br_default"]["vlan"]
+        peerlink_vlans = block["interface"]["peerlink"]["bridge"]["domain"]["br_default"]["vlan"]
+        self.assertEqual({"10-12,20", "30"}, set(global_vlans))
+        self.assertEqual(set(global_vlans), set(peerlink_vlans))
+        self.assertEqual({}, global_vlans["10-12,20"])
+        self.assertEqual({"vni": {"1030": {}}}, global_vlans["30"])
+        self.assertTrue(all(value == {} for value in peerlink_vlans.values()))
+        self.assertNotIn("4094", peerlink_vlans)
         current = yaml.safe_dump(
             [
                 {"header": {"model": "vx", "nvue-api-version": "nvue_v1"}},
@@ -337,6 +553,33 @@ class MlagEvpnGeneratePublishCompareWorkflowTests(unittest.TestCase):
                 current, label="MLAG nv config show",
             ),
         )
+        drifted_document = copy.deepcopy(published_document)
+        del set_block(drifted_document)["interface"]["peerlink"]["bridge"]["domain"]["br_default"]["vlan"]["30"]
+        drifted = yaml.safe_dump(
+            [
+                {"header": {"model": "vx", "nvue-api-version": "nvue_v1"}},
+                {"set": set_block(drifted_document)},
+            ],
+            sort_keys=False,
+        )
+        drifted_comparable, _drifted_rendered, _drifted_digest = (
+            MANUAL.runtime_comparable_nvue_config(
+                drifted, label="drifted MLAG nv config show",
+            )
+        )
+        published_comparable, _published_rendered, _published_digest = (
+            MANUAL.runtime_comparable_nvue_config(
+                published, label="published MLAG latest",
+            )
+        )
+        changed_paths = MANUAL._changed_config_paths(
+            drifted_comparable,
+            published_comparable,
+        )
+        self.assertTrue(any(
+            path.startswith("interface.peerlink.bridge.domain.br_default.vlan")
+            for path in changed_paths
+        ), changed_paths)
 
 
 if __name__ == "__main__":

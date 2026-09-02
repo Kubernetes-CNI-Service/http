@@ -14,6 +14,9 @@
     "requirements-dev.txt",
     "test_cases/audit_public_tree.py",
     "test_cases/run_related_tests.py",
+    "ztp/config/cumulus/template/03-templates-j2/_mlag_peerlink.yaml.j2",
+    "ztp/config/cumulus/template/03-templates-j2/border.yaml.j2",
+    "ztp/config/cumulus/template/03-templates-j2/oobofoob-spine.yaml.j2",
     "ztp/templates/ztp.json"
   ],
   "scripts": {
@@ -281,6 +284,18 @@
     {
       "paths": ["ztp/templates/ztp.json"],
       "tests": ["test_cases.test_project_contracts", "test_cases.test_ztp_release_core_review"]
+    },
+    {
+      "paths": [
+        "ztp/config/cumulus/template/03-templates-j2/_mlag_peerlink.yaml.j2",
+        "ztp/config/cumulus/template/03-templates-j2/border.yaml.j2",
+        "ztp/config/cumulus/template/03-templates-j2/oobofoob-spine.yaml.j2"
+      ],
+      "tests": [
+        "test_cases.test_mlag_evpn_generation",
+        "test_cases.test_project_contracts",
+        "test_cases.test_ztp_release_core_review"
+      ]
     }
   ]
 }

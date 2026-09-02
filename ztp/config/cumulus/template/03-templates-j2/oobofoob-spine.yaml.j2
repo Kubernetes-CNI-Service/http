@@ -55,19 +55,7 @@
 {% endif %}
         type: bond
 {% endfor %}
-{% if d.peerlink_member_list %}
-      peerlink:
-        bond:
-          member:
-{% for swp in d.peerlink_member_list %}
-            {{ swp }}: {}
-{% endfor %}
-        type: peerlink
-      peerlink.4094:
-        base-interface: peerlink
-        type: sub
-        vlan: 4094
-{% endif %}
+{% include '_mlag_peerlink.yaml.j2' %}
 {% for swp in d.member_swps %}
       {{ swp }}:
         type: swp
