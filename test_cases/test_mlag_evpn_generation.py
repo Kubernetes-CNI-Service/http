@@ -181,10 +181,10 @@ def set_block(document: list[dict]) -> dict:
 
 
 class MlagEvpnDirectTests(unittest.TestCase):
-    def test_preprocess_builds_one_keys_only_peerlink_vlan_selector_list(self):
+    def test_preprocess_builds_one_consolidated_peerlink_vlan_selector(self):
         processed = GENERATOR.preprocess_device(border_mlag_device())
         self.assertEqual(
-            ["10-12,20", "30"],
+            ["10-12,20,30"],
             processed["bridge_vlan_selectors"],
         )
 
@@ -317,7 +317,7 @@ class MlagEvpnDirectTests(unittest.TestCase):
             "interface": {"peerlink": {
                 "bond": {"member": {"swp50": {}, "swp51": {}}},
                 "bridge": {"domain": {"br_default": {"vlan": {
-                    "10-12,20": {}, "30": {},
+                    "10-12,20,30": {},
                 }}}},
                 "type": "peerlink",
             }},
@@ -330,10 +330,18 @@ class MlagEvpnDirectTests(unittest.TestCase):
             ),
         )
         for label, mutate in {
-            "missing": lambda vlan: vlan.pop("30"),
-            "extra": lambda vlan: vlan.__setitem__("40", {}),
-            "vni": lambda vlan: vlan["30"].update({"vni": {"1030": {}}}),
-            "4094": lambda vlan: vlan.__setitem__("4094", {}),
+            "missing": lambda vlan: (
+                vlan.clear(), vlan.__setitem__("10-12,20", {})
+            ),
+            "extra": lambda vlan: (
+                vlan.clear(), vlan.__setitem__("10-12,20,30,40", {})
+            ),
+            "vni": lambda vlan: vlan["10-12,20,30"].update(
+                {"vni": {"1030": {}}}
+            ),
+            "4094": lambda vlan: (
+                vlan.clear(), vlan.__setitem__("10-12,20,30,4094", {})
+            ),
         }.items():
             with self.subTest(label=label):
                 invalid = copy.deepcopy(base)
@@ -400,7 +408,7 @@ class MlagEvpnDirectTests(unittest.TestCase):
                 "bridge": {"domain": {"br_default": {"vlan": {"20": {}}}}},
                 "interface": {"peerlink": {
                     "bridge": {"domain": {"br_default": {
-                        "vlan": {"10": {}, "20": {}},
+                        "vlan": {"10,20": {}},
                     }}},
                 }},
             }},
@@ -411,6 +419,49 @@ class MlagEvpnDirectTests(unittest.TestCase):
                 split_source, expected_bond_types={"mlag"},
             ),
         )
+
+        fragmented = copy.deepcopy(split_source)
+        fragmented[1]["set"]["interface"]["peerlink"]["bridge"]["domain"][
+            "br_default"
+        ]["vlan"] = {"10": {}}
+        fragmented.append({"set": {"interface": {"peerlink": {
+            "bridge": {"domain": {"br_default": {"vlan": {"20": {}}}}},
+        }}}})
+        self.assertTrue(
+            GENERATOR._peerlink_vlan_errors(
+                fragmented, expected_bond_types={"mlag"},
+            )
+        )
+
+    def test_peerlink_vlan_gate_requires_exact_normalized_single_selector(self):
+        base = [{"set": {
+            "bridge": {"domain": {"br_default": {"vlan": {
+                "10-12,20": {}, "30": {"vni": {"1030": {}}},
+            }}}},
+            "interface": {"peerlink": {
+                "bridge": {"domain": {"br_default": {"vlan": {}}}},
+                "type": "peerlink",
+            }},
+            "mlag": {"state": "enabled"},
+        }}]
+        invalid_selectors = [
+            {"10-12,20": {}, "30": {}},
+            {"30,20,10-12": {}},
+            {"10-11,12,20,30": {}},
+            {"10-12/20/30": {}},
+            {"010-012,020,030": {}},
+        ]
+        for mapping in invalid_selectors:
+            with self.subTest(mapping=mapping):
+                invalid = copy.deepcopy(base)
+                set_block(invalid)["interface"]["peerlink"]["bridge"][
+                    "domain"
+                ]["br_default"]["vlan"] = mapping
+                self.assertTrue(
+                    GENERATOR._peerlink_vlan_errors(
+                        invalid, expected_bond_types={"mlag"},
+                    )
+                )
 
     def test_all_parent_templates_use_the_single_conditional_global_evpn_fragment(self):
         old_unconditional = (
@@ -533,10 +584,9 @@ class MlagEvpnGeneratePublishCompareWorkflowTests(unittest.TestCase):
         global_vlans = block["bridge"]["domain"]["br_default"]["vlan"]
         peerlink_vlans = block["interface"]["peerlink"]["bridge"]["domain"]["br_default"]["vlan"]
         self.assertEqual({"10-12,20", "30"}, set(global_vlans))
-        self.assertEqual(set(global_vlans), set(peerlink_vlans))
+        self.assertEqual({"10-12,20,30": {}}, peerlink_vlans)
         self.assertEqual({}, global_vlans["10-12,20"])
         self.assertEqual({"vni": {"1030": {}}}, global_vlans["30"])
-        self.assertTrue(all(value == {} for value in peerlink_vlans.values()))
         self.assertNotIn("4094", peerlink_vlans)
         current = yaml.safe_dump(
             [
@@ -554,7 +604,12 @@ class MlagEvpnGeneratePublishCompareWorkflowTests(unittest.TestCase):
             ),
         )
         drifted_document = copy.deepcopy(published_document)
-        del set_block(drifted_document)["interface"]["peerlink"]["bridge"]["domain"]["br_default"]["vlan"]["30"]
+        drifted_peerlink_vlans = (
+            set_block(drifted_document)["interface"]["peerlink"]
+            ["bridge"]["domain"]["br_default"]["vlan"]
+        )
+        drifted_peerlink_vlans.clear()
+        drifted_peerlink_vlans["10-12,20"] = {}
         drifted = yaml.safe_dump(
             [
                 {"header": {"model": "vx", "nvue-api-version": "nvue_v1"}},

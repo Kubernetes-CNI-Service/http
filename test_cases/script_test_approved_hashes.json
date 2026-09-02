@@ -356,7 +356,7 @@
     },
     "ztp/config/cumulus/template/90-c2-generate_configs.py": {
       "canonical": "ztp/config/cumulus/template/90-c2-generate_configs.py",
-      "sha256": "ce26aadbb3e4493c2bdd6427b06bf3da24a63abeaf61843f8efcd4f7d3a7078b"
+      "sha256": "34d449f2c1ed0c142b5f4af3fca8968d9cf897fbdf267de440fdc0c890204639"
     },
     "ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py": {
       "canonical": "ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py",
@@ -372,7 +372,7 @@
     },
     "ztp/config/nvos/template/90-c2-generate_configs.py": {
       "canonical": "ztp/config/cumulus/template/90-c2-generate_configs.py",
-      "sha256": "ce26aadbb3e4493c2bdd6427b06bf3da24a63abeaf61843f8efcd4f7d3a7078b"
+      "sha256": "34d449f2c1ed0c142b5f4af3fca8968d9cf897fbdf267de440fdc0c890204639"
     },
     "ztp/config/nvos/template/P2P/p2p-to-validation.py": {
       "canonical": "ztp/config/nvos/template/P2P/p2p-to-validation.py",
@@ -444,7 +444,7 @@
     "test_cases.test_infra_check_and_manual_reset": "f12485c976471de81c6be125a2f4f2c8455deea2e50acd4d2611352ccc835143",
     "test_cases.test_load_release_transaction": "0ee9ff3159f242859e47484b50168fabf641aa1c358c41330cecc6a863fae849",
     "test_cases.test_manual_applied_config": "31476144d5ed1b08af040dbc96dc6364aa47bef59a4a65e907a93d1b38d12e8c",
-    "test_cases.test_mlag_evpn_generation": "5d9ba00b70b2c861b5e1dccac418149ed869d43ba3ff63c833b213e8af7833bc",
+    "test_cases.test_mlag_evpn_generation": "bbf48bc7ae9b54862bfabca4bd95c6ad1d8fac835184872c6e12b47917d6905a",
     "test_cases.test_monitor_stack_review": "21ed323a68f5ab65ca69c9872ff654d01925fdbb9c93b26d076af99f97220d69",
     "test_cases.test_nvue_normalizer": "6e22f0f89353d0042391330675e4cce387931e896f4b44f57911e2dccb85b230",
     "test_cases.test_ops_deployment_review": "be5c6ab99601907b46cd21e9b6c41d2730dd177c7336e530dc93f5b700f61743",

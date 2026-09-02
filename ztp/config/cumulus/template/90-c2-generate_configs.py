@@ -2056,15 +2056,20 @@ def _breakout_info(max_sub: int) -> tuple:
 
 
 def _device_bridge_vlan_selectors(device):
-    """Return br_default VLAN selector keys in rendered template order."""
-    selectors = []
-    seen = set()
+    """Return one normalized selector covering every rendered bridge VLAN."""
+    vlan_ids = set()
 
     def add(value):
         selector = str(value or "").strip()
-        if selector and selector not in seen:
-            seen.add(selector)
-            selectors.append(selector)
+        if not selector:
+            return
+        _single, _normalized, values = _csv_parse_numeric_selector(
+            selector,
+            field="peerlink bridge VLAN",
+            minimum=1,
+            maximum=4094,
+        )
+        vlan_ids.update(values)
 
     # This legacy template renders only d.vlan_id into the global bridge,
     # even when reverse-parsed EVPN groups are also present in the device
@@ -2074,7 +2079,7 @@ def _device_bridge_vlan_selectors(device):
     if template == "oobofoob-spine":
         if device.get("vlan_id") is not None:
             add(device["vlan_id"])
-        return selectors
+        return [_compress_vlan_ids(vlan_ids)] if vlan_ids else []
 
     for vrf in device.get("vrfs", []):
         if not isinstance(vrf, dict):
@@ -2093,9 +2098,9 @@ def _device_bridge_vlan_selectors(device):
 
     # Simple/legacy MLAG templates render one global bridge VLAN directly
     # from d.vlan_id rather than from d.vrfs.
-    if not selectors and device.get("vlan_id") is not None:
+    if not vlan_ids and device.get("vlan_id") is not None:
         add(device["vlan_id"])
-    return selectors
+    return [_compress_vlan_ids(vlan_ids)] if vlan_ids else []
 
 
 def preprocess_device(dev: dict) -> dict:
@@ -2710,6 +2715,7 @@ def _peerlink_vlan_errors(document, expected_bond_types=None):
         path = f"$.set.interface.{interface_name}"
         has_vlan_node = False
         peer_vlans = set()
+        peer_selectors = []
         for fragment_path, config in fragments:
             peer_bridge = config.get("bridge")
             peer_domains = (
@@ -2723,8 +2729,11 @@ def _peerlink_vlan_errors(document, expected_bond_types=None):
             if not isinstance(peer_default, dict) or "vlan" not in peer_default:
                 continue
             has_vlan_node = True
+            mapping = peer_default.get("vlan")
+            if isinstance(mapping, dict):
+                peer_selectors.extend(mapping)
             peer_vlans.update(_bridge_vlan_ids(
-                peer_default.get("vlan"),
+                mapping,
                 f"{fragment_path}.bridge.domain.br_default.vlan",
                 errors,
                 keys_only=True,
@@ -2741,6 +2750,15 @@ def _peerlink_vlan_errors(document, expected_bond_types=None):
                 f"{path}.bridge.domain.br_default.vlan 与全局 br_default 不一致："
                 f"缺少 {missing}，额外 {extra}"
             )
+        if global_vlans:
+            expected_selector = _compress_vlan_ids(global_vlans)
+            if (len(peer_selectors) != 1
+                    or not isinstance(peer_selectors[0], str)
+                    or peer_selectors[0] != expected_selector):
+                errors.append(
+                    f"{path}.bridge.domain.br_default.vlan 必须只包含一个规范化 "
+                    f"selector {expected_selector!r}"
+                )
         if not global_vlans and has_vlan_node:
             errors.append(
                 f"{path}.bridge.domain.br_default.vlan: "
