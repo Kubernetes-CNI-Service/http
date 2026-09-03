@@ -70,10 +70,9 @@ current。由于 child manifest 尚无输入来源证明，非 dry-run `--skip-g
 EVPN 控制平面，非 MLAG 设备继续启用 EVPN multihoming；同设备混合两种冗余模式会在 CSV、
 legacy/nested bond 预处理及跨 `set` 的最终 YAML 门禁中失败。跨模块案例通过真实 Border 父模板
 和 `generate_all()` 验证 MLAG 输出，再经过发布规范化并与 `nv config show` 比较；MLAG 输入若
-选到不能生成 MLAG 配置的模板也会在发布前失败。测试还覆盖 MLAG `peerlink` 将
-`br_default` 的全部业务 VLAN 合并成一个规范化 selector：接口侧只生成空 mapping，不复制
-全局 VNI 属性；展开后两侧 VLAN 集合必须完全一致，且 VLAN 4094 只能用于独立的
-`peerlink.4094` 子接口。
+选到不能生成 MLAG 配置的模板也会在发布前失败。
+MLAG `peerlink` 只生成成员和接口类型，不显式配置 `bridge`/`vlan`，依靠 VLAN-aware bridge
+默认继承 `br_default` 的全部 VLAN。
 
 覆盖内容：DAY0 模板输出骨架和 DHCP 唯一性、setup 管理的 monitor global 链接、项目时区、
 ibdiagnet 报告发现、首页本地链接、upload/sync 人工备份过滤，以及 Ubuntu 24.04 双架构离线

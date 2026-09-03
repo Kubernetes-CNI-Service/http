@@ -79,7 +79,6 @@ class ImpactManifestTests(unittest.TestCase):
                 "requirements-dev.txt",
                 "test_cases/audit_public_tree.py",
                 "test_cases/run_related_tests.py",
-                "ztp/config/cumulus/template/03-templates-j2/_mlag_peerlink.yaml.j2",
                 "ztp/config/cumulus/template/03-templates-j2/border.yaml.j2",
                 "ztp/config/cumulus/template/03-templates-j2/oobofoob-spine.yaml.j2",
                 "ztp/templates/ztp.json",
