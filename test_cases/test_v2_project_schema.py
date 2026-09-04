@@ -67,6 +67,32 @@ FEEDBACK = load_script(
 )
 
 
+class GeneratedYamlMacScalarTests(unittest.TestCase):
+    """MAC-shaped YAML scalars must survive render/load/dump as strings."""
+
+    def test_digit_only_mac_stays_string_without_changing_numbers(self):
+        mac = "46:38:39:01:01:01"
+        rendered = GENERATOR.build_env().from_string(
+            "mac-address: {{ mac }}\nautonomous-system: {{ asn }}\n"
+            "elapsed: 12:34:56\n"
+        ).render(mac=mac, asn=65001)
+
+        self.assertIn(f'mac-address: "{mac}"', rendered)
+        document = GENERATOR._load_generated_yaml(rendered)
+        self.assertEqual(mac, document["mac-address"])
+        self.assertIsInstance(document["mac-address"], str)
+        self.assertEqual(65001, document["autonomous-system"])
+        self.assertIsInstance(document["autonomous-system"], int)
+        self.assertEqual(45296, document["elapsed"])
+        self.assertIsInstance(document["elapsed"], int)
+
+        reparsed = yaml.safe_load(GENERATOR._dump_generated_yaml(document))
+        self.assertEqual(mac, reparsed["mac-address"])
+        self.assertIsInstance(reparsed["mac-address"], str)
+        self.assertEqual(65001, reparsed["autonomous-system"])
+        self.assertIsInstance(reparsed["autonomous-system"], int)
+
+
 def v2_header(*, vlan_groups: int = 1, evpn_groups: int = 1) -> list[str]:
     return (
         list(CONTRACT.DEVICE_BASE_COLUMNS)
@@ -228,6 +254,10 @@ class SchemaSelectionTests(unittest.TestCase):
         layout = CONTRACT.parse_device_csv_layout(header, 2)
         self.assertEqual(2, len(layout.vlan_group_starts))
         self.assertEqual(4, len(layout.evpn_group_starts))
+        self.assertEqual(
+            {"terminal_l2_ports": layout.fixed_start + 7},
+            layout.policy_indices,
+        )
         self.assertNotIn("vrf_default", header)
         self.assertNotIn("vrr_ip", header)
         self.assertNotIn("vrr_mac", header)
@@ -685,6 +715,31 @@ class V2VrrTests(unittest.TestCase):
         self.assertEqual(
             "hwaddress 02:00:5e:01:01:00\n",
             relay[0]["ifupdown_snippets"]["vlan100"],
+        )
+        self.assertEqual({}, relay[0]["svi_link_macs"])
+
+    def test_shared_gateway_svi_uses_native_link_mac_for_cumulus_518(self):
+        devices = {
+            "leaf01": l2_device("leaf01", "192.0.2.254/24"),
+            "leaf02": l2_device("leaf02", "192.0.2.254/24"),
+        }
+        policy = GENERATOR._normalize_v2_vrr_policy({
+            "vrr": {"base_mac": "02:00:5e:01:00:00"},
+        })
+        GENERATOR._apply_v2_vrr_policy(devices, policy)
+        l2 = devices["leaf01"]["vrfs"][0]["l2vlans"][0]
+        l2.update({"dhcp_relay": True, "dhcp_server": "servers"})
+        catalog = {"BLUE": {"servers": {
+            "servers": ["203.0.113.10"], "upstream_interface": "vlan4001_l3",
+        }}}
+        relay = GENERATOR._resolve_device_dhcp_relays(
+            devices["leaf01"], catalog, native_svi_link_mac=True,
+        )
+        self.assertEqual("gateway", relay[0]["mode"])
+        self.assertEqual({}, relay[0]["ifupdown_snippets"])
+        self.assertEqual(
+            {"vlan100": "02:00:5e:01:01:00"},
+            relay[0]["svi_link_macs"],
         )
 
     def test_single_non_gateway_svi_remains_standalone(self):
@@ -1291,6 +1346,50 @@ class NativeVlanAndBondTests(unittest.TestCase):
 
 
 class V2FeedbackTests(unittest.TestCase):
+    def test_feedback_runtime_loader_keeps_digit_only_bond_mac_canonical(self):
+        mac = ":".join(("46", "38", "39", "01", "01", "01"))
+        runtime = (
+            "- set:\n"
+            "    mlag:\n"
+            f"      mac-address: {mac}\n"
+            "    interface:\n"
+            "      bond1:\n"
+            "        type: bond\n"
+            "        bond:\n"
+            "          member:\n"
+            "            swp1: {}\n"
+            "          mlag:\n"
+            "            id: 1\n"
+            "            state: enabled\n"
+            "    vrf:\n"
+            "      default:\n"
+            "        router:\n"
+            "          bgp:\n"
+            "            autonomous-system: 65001\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "leaf01.yaml"
+            source.write_text(runtime, encoding="utf-8")
+            cfg = FEEDBACK.load_yaml(source)
+
+        self.assertEqual(mac, cfg["mlag"]["mac-address"])
+        self.assertIsInstance(cfg["mlag"]["mac-address"], str)
+        self.assertEqual(
+            65001,
+            cfg["vrf"]["default"]["router"]["bgp"]["autonomous-system"],
+        )
+        _base, _ordinary, fixed, _evpn = FEEDBACK.parse_device_v2(
+            cfg,
+            "leaf01",
+            "eth",
+            {
+                "template": "border", "eth0_ip": "NA", "netmask": "NA",
+                "eth0_gw": "NA", "eth0_mac": "NA", "eth1_ip": "NA",
+                "eth1_nm": "NA", "eth1_gw": "NA", "eth1_mac": "NA",
+            },
+        )
+        self.assertEqual(mac, fixed[4])
+
     def test_feedback_v2_recovers_mlag_bond_mac_from_runtime(self):
         cfg = {
             "mlag": {"mac-address": MLAG_MAC_A},

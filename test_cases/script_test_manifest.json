@@ -16,6 +16,7 @@
     "test_cases/run_related_tests.py",
     "DAY0-Prepare/template/01-global.yaml",
     "DAY0-Prepare/template/02-devices_config.csv",
+    "ztp/config/cumulus/template/P2P/01-inventory.log",
     "ztp/config/cumulus/template/03-templates-j2/_direct_vlan_ports.yaml.j2",
     "ztp/config/cumulus/template/03-templates-j2/_l2_svis.yaml.j2",
     "ztp/config/cumulus/template/03-templates-j2/border.yaml.j2",
@@ -143,7 +144,7 @@
     {
       "id": "day0_release_operations",
       "paths": ["DAY0-Prepare/01-a-setup.py", "DAY0-Prepare/02-unsetup.py", "DAY0-Prepare/11-load.py", "DAY0-Prepare/13-unload.py"],
-      "tests": ["test_cases.test_ops_deployment_review", "test_cases.test_load_release_transaction", "test_cases.test_flow_release_platform_matrix", "test_cases.test_project_contracts", "test_cases.test_v2_project_schema", "test_cases.test_v2_generation_flow"]
+      "tests": ["test_cases.test_ops_deployment_review", "test_cases.test_load_release_transaction", "test_cases.test_flow_release_platform_matrix", "test_cases.test_project_contracts", "test_cases.test_terminal_l2_stp_generation", "test_cases.test_v2_project_schema", "test_cases.test_v2_generation_flow"]
     },
     {
       "id": "ztp_monitor_runtime",
@@ -183,7 +184,7 @@
     {
       "id": "repository_governance",
       "paths": ["tools/project_contract.py", "tools/update-root-readme.py"],
-      "tests": ["test_cases.test_project_contracts", "test_cases.test_documentation_catalog", "test_cases.test_change_aware_test_runner", "test_cases.test_test_case_repository", "test_cases.test_v2_project_schema", "test_cases.test_v2_generation_flow"]
+      "tests": ["test_cases.test_project_contracts", "test_cases.test_documentation_catalog", "test_cases.test_change_aware_test_runner", "test_cases.test_test_case_repository", "test_cases.test_terminal_l2_stp_generation", "test_cases.test_v2_project_schema", "test_cases.test_v2_generation_flow"]
     },
     {
       "id": "network_analysis_tools",
@@ -223,7 +224,7 @@
     {
       "id": "optimization_feedback",
       "paths": ["ztp/optimize/*"],
-      "tests": ["test_cases.test_optimize_output_layout", "test_cases.test_nvue_normalizer", "test_cases.test_ztp_release_core_review", "test_cases.test_project_contracts", "test_cases.test_v2_project_schema", "test_cases.test_v2_generation_flow"]
+      "tests": ["test_cases.test_optimize_output_layout", "test_cases.test_nvue_normalizer", "test_cases.test_ztp_release_core_review", "test_cases.test_project_contracts", "test_cases.test_terminal_l2_stp_generation", "test_cases.test_v2_project_schema", "test_cases.test_v2_generation_flow"]
     },
     {
       "id": "bootstrap_runtime",
@@ -235,7 +236,7 @@
     {
       "id": "deployment_release_transaction",
       "members": ["DAY0-Prepare/01-a-setup.py", "DAY0-Prepare/02-unsetup.py", "DAY0-Prepare/11-load.py", "DAY0-Prepare/13-unload.py", "infra/*", "tools/deployment_lock.py", "ztp/config/*"],
-      "tests": ["test_cases.test_ops_deployment_review", "test_cases.test_load_release_transaction", "test_cases.test_apache_publication_boundary", "test_cases.test_flow_release_platform_matrix", "test_cases.test_v2_generation_flow"]
+      "tests": ["test_cases.test_ops_deployment_review", "test_cases.test_load_release_transaction", "test_cases.test_apache_publication_boundary", "test_cases.test_flow_release_platform_matrix", "test_cases.test_terminal_l2_stp_generation", "test_cases.test_v2_generation_flow"]
     },
     {
       "id": "dhcp_to_ztp_identity",
@@ -275,7 +276,7 @@
     {
       "id": "test_and_documentation_governance",
       "members": ["tools/project_contract.py", "tools/update-root-readme.py"],
-      "tests": ["test_cases.test_change_aware_test_runner", "test_cases.test_test_case_repository", "test_cases.test_documentation_catalog", "test_cases.test_project_contracts"]
+      "tests": ["test_cases.test_change_aware_test_runner", "test_cases.test_test_case_repository", "test_cases.test_documentation_catalog", "test_cases.test_project_contracts", "test_cases.test_terminal_l2_stp_generation"]
     }
   ],
   "path_rules": [
@@ -299,6 +300,10 @@
     {
       "paths": ["ztp/templates/ztp.json"],
       "tests": ["test_cases.test_project_contracts", "test_cases.test_ztp_release_core_review"]
+    },
+    {
+      "paths": ["ztp/config/cumulus/template/P2P/01-inventory.log"],
+      "tests": ["test_cases.test_ztp_release_core_review", "test_cases.test_load_release_transaction"]
     },
     {
       "paths": [

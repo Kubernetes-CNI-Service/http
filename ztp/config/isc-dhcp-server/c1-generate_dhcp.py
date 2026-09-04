@@ -305,8 +305,10 @@ def inherit_air_records_from_production(path, air_records, *, skip_missing=False
     """Fill AIR management fields from the corresponding production CSV row.
 
     ``AIR-<hostname>`` first matches production ``<hostname>`` exactly.  A
-    unique suffix match is accepted for site-prefixed AIR names.  AIR rows are
-    never used as their own production source.
+    one-way suffix match is accepted for site-prefixed AIR names only when the
+    production hostname starts immediately after a ``-`` separator; when
+    several production names are suffixes, the longest (most specific) one
+    wins.  AIR rows are never used as their own production source.
     """
     target = os.path.realpath(path)
     with open(target, newline="", encoding="utf-8-sig") as f:
@@ -346,11 +348,19 @@ def inherit_air_records_from_production(path, air_records, *, skip_missing=False
         ]
         candidates = exact
         if not candidates and not placeholder:
-            candidates = [
+            base_key = base.casefold()
+            suffix_candidates = [
                 item for item in production
-                if base.casefold().endswith(item[0].casefold())
-                or item[0].casefold().endswith(base.casefold())
+                if base_key.endswith(f"-{item[0].casefold()}")
             ]
+            if suffix_candidates:
+                most_specific_length = max(
+                    len(item[0].casefold()) for item in suffix_candidates
+                )
+                candidates = [
+                    item for item in suffix_candidates
+                    if len(item[0].casefold()) == most_specific_length
+                ]
         if not candidates:
             if skip_missing:
                 rec["production_missing"] = True

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Usage: python3 b-xlsx_to_dot.py [-y] [--air-template FILE]
+Usage: python3 b-xlsx_to_dot.py [-y] [--air-template FILE] [--os-version VERSION]
+                                    [--air-link-policy FILE]
 
 The inventory and port-mapping files are loaded automatically from the same
 directory as this script. Breakout fanout is inferred globally from all P2P
@@ -518,6 +519,78 @@ DEVICES_CONFIG    = os.path.abspath(
 )
 LLDPQ_TEMPLATE    = os.path.join(SCRIPT_DIR, "lldpq-template.dot")
 AIR_JSON_TEMPLATE = os.path.join(SCRIPT_DIR, "air-template-no-oob.json")
+_AIR_DEFAULT_OS_VERSION = "5.16.4"
+_AIR_OS_VERSION_RE = re.compile(
+    r"^[0-9][0-9A-Za-z]{0,31}(?:[._+-][0-9A-Za-z]{1,32})*$"
+)
+_MAX_AIR_POLICY_BYTES = 1024 * 1024
+_MAX_AIR_POLICY_REWRITES = 256
+
+
+def _usage():
+    return (
+        f"Usage: {sys.argv[0]} [-y] [--air-template FILE] "
+        "[--os-version VERSION] [--air-link-policy FILE]"
+    )
+
+
+def _parse_cli_args(args):
+    """Parse value options without weakening unknown-option checks."""
+    air_template = AIR_JSON_TEMPLATE
+    os_version = None
+    air_link_policy = None
+    seen = set()
+    index = 0
+    while index < len(args):
+        argument = args[index]
+        if argument in {
+            "--air-template", "--os-version", "--air-link-policy",
+        }:
+            option = argument
+            index += 1
+            if index >= len(args) or not args[index]:
+                raise ValueError(f"{option} requires a non-empty value")
+            value = args[index]
+        elif argument.startswith("--air-template="):
+            option = "--air-template"
+            value = argument.split("=", 1)[1]
+            if not value:
+                raise ValueError("--air-template requires a non-empty value")
+        elif argument.startswith("--os-version="):
+            option = "--os-version"
+            value = argument.split("=", 1)[1]
+            if not value:
+                raise ValueError("--os-version requires a non-empty value")
+        elif argument.startswith("--air-link-policy="):
+            option = "--air-link-policy"
+            value = argument.split("=", 1)[1]
+            if not value:
+                raise ValueError(
+                    "--air-link-policy requires a non-empty value"
+                )
+        else:
+            raise ValueError(f"unknown argument: {argument}")
+        if option in seen:
+            raise ValueError(f"duplicate argument: {option}")
+        seen.add(option)
+        if option == "--air-template":
+            air_template = value
+        elif option == "--os-version":
+            os_version = value
+        else:
+            air_link_policy = value
+        index += 1
+    return air_template, os_version, air_link_policy
+
+
+def _validate_air_os_version(value):
+    """Return a DOT-safe AIR Cumulus version or reject it fail closed."""
+    version = str(value or "").strip()
+    if len(version) > 96 or not _AIR_OS_VERSION_RE.fullmatch(version):
+        raise ValueError(
+            f"AIR OS version {version!r} is invalid; expected a version such as 5.18"
+        )
+    return version
 
 
 def _missing_required_files(paths):
@@ -609,6 +682,387 @@ def _validate_dot_token(value, *, context):
     return text
 
 
+def _normalized_device_name(name):
+    """Return the comparison identity used for P2P device endpoints."""
+    return str(name or "").strip().casefold()
+
+
+def _find_duplicate_or_conflicting_links(
+    records, *, allowed_self_link_indices=(),
+):
+    """Return indices and messages for unsafe P2P link records.
+
+    Besides repeated links and reused ports, a record whose two endpoint
+    device names normalize to the same identity is always invalid, even when
+    the ports differ.  Self-link diagnostics contain only that record number
+    and its two endpoints.
+    """
+    port_peer = {}   # (normalized device, port) -> (idx, peer device, peer port)
+    link_seen = {}   # frozenset endpoint pair -> first idx
+    conflict_indices = set()
+    messages = []
+    allowed_self_link_indices = set(allowed_self_link_indices)
+
+    for idx, (src_dev, src_port, dst_dev, dst_port) in enumerate(records):
+        src_name = _normalized_device_name(src_dev)
+        dst_name = _normalized_device_name(dst_dev)
+
+        if (not _placeholder_device(src_dev)
+                and not _placeholder_device(dst_dev)
+                and src_name == dst_name
+                and idx not in allowed_self_link_indices):
+            messages.append(
+                f"  [自连接] 记录 #{idx+1}: "
+                f"{str(src_dev).strip()}:{str(src_port).strip()} -- "
+                f"{str(dst_dev).strip()}:{str(dst_port).strip()}"
+            )
+            conflict_indices.add(idx)
+            continue
+
+        link_key = frozenset({
+            (src_name, src_port),
+            (dst_name, dst_port),
+        })
+
+        # Case 1: exact duplicate link
+        if link_key in link_seen:
+            first = link_seen[link_key]
+            messages.append(
+                f"  [重复链路] {src_dev}:{src_port} -- {dst_dev}:{dst_port}"
+                f"  (记录 #{first+1} 与 #{idx+1})"
+            )
+            conflict_indices.add(first)
+            conflict_indices.add(idx)
+        else:
+            link_seen[link_key] = idx
+
+        # Case 2: same port -> different peer
+        for (dev, port), (peer_dev, peer_port) in [
+            ((src_dev, src_port), (dst_dev, dst_port)),
+            ((dst_dev, dst_port), (src_dev, src_port)),
+        ]:
+            if _placeholder_device(dev):
+                continue
+            ep_key = (_normalized_device_name(dev), port)
+            if ep_key in port_peer:
+                first_idx, first_peer_dev, first_peer_port = port_peer[ep_key]
+                if (
+                    _normalized_device_name(first_peer_dev), first_peer_port
+                ) != (_normalized_device_name(peer_dev), peer_port):
+                    messages.append(
+                        f"  [端口冲突] {dev}:{port}"
+                        f"  记录 #{first_idx+1}: -- "
+                        f"{first_peer_dev}:{first_peer_port}"
+                        f"  记录 #{idx+1}: -- {peer_dev}:{peer_port}"
+                    )
+                    conflict_indices.add(first_idx)
+                    conflict_indices.add(idx)
+            else:
+                port_peer[ep_key] = (idx, peer_dev, peer_port)
+
+    return conflict_indices, messages
+
+
+def _reject_duplicate_json_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _unknown_policy_keys(value, allowed, *, context):
+    unknown = sorted(set(value) - set(allowed))
+    if unknown:
+        raise ValueError(
+            f"AIR topology policy {context} has unknown key: {unknown[0]}"
+        )
+
+
+def _policy_endpoint(value, *, context):
+    if not isinstance(value, dict):
+        raise ValueError(f"AIR topology policy {context} must be an object")
+    _unknown_policy_keys(value, {"device", "port"}, context=context)
+    missing = [key for key in ("device", "port") if key not in value]
+    if missing:
+        raise ValueError(
+            f"AIR topology policy {context} is missing {missing[0]}"
+        )
+    if not isinstance(value["device"], str) or not isinstance(value["port"], str):
+        raise ValueError(
+            f"AIR topology policy {context} device and port must be strings"
+        )
+    device = value["device"].strip()
+    port = value["port"].strip()
+    if _placeholder_device(device) or not port:
+        raise ValueError(
+            f"AIR topology policy {context} device and port must be non-empty"
+        )
+    _validate_dot_token(device, context=f"AIR topology policy {context} device")
+    _validate_dot_token(port, context=f"AIR topology policy {context} port")
+    return {"device": device, "port": port}
+
+
+def _policy_edge_signature(edge):
+    return frozenset({
+        (
+            _normalized_device_name(edge[0]),
+            str(edge[1]).strip().casefold(),
+        ),
+        (
+            _normalized_device_name(edge[2]),
+            str(edge[3]).strip().casefold(),
+        ),
+    })
+
+
+def _policy_rule_edge(rule, field):
+    endpoints = rule[field]
+    return (
+        endpoints[0]["device"], endpoints[0]["port"],
+        endpoints[1]["device"], endpoints[1]["port"],
+    )
+
+
+def load_air_topology_policy(path):
+    """Load a strict project-scoped policy for AIR-only topology changes."""
+    policy_path = os.path.abspath(os.fspath(path))
+    if not os.path.isfile(policy_path):
+        raise ValueError(f"AIR topology policy file not found: {policy_path}")
+    if os.path.getsize(policy_path) > _MAX_AIR_POLICY_BYTES:
+        raise ValueError("AIR topology policy exceeds the 1 MiB size limit")
+    try:
+        with open(policy_path, encoding="utf-8") as stream:
+            document = json.load(
+                stream, object_pairs_hook=_reject_duplicate_json_keys,
+            )
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid AIR topology policy JSON: {exc}") from exc
+    if not isinstance(document, dict):
+        raise ValueError("AIR topology policy root must be an object")
+    _unknown_policy_keys(
+        document, {"node_allowlist", "link_rewrites"}, context="root",
+    )
+
+    raw_allowlist = document.get("node_allowlist", {})
+    if not isinstance(raw_allowlist, dict):
+        raise ValueError("AIR topology policy node_allowlist must be an object")
+    node_allowlist = {}
+    seen_allowed_nodes = set()
+    for inventory_type, raw_names in raw_allowlist.items():
+        if not isinstance(inventory_type, str) or not inventory_type.strip():
+            raise ValueError(
+                "AIR topology policy node_allowlist keys must be non-empty strings"
+            )
+        inventory_type = inventory_type.strip()
+        if not isinstance(raw_names, list):
+            raise ValueError(
+                f"AIR topology policy node_allowlist.{inventory_type} must be a list"
+            )
+        names = []
+        for index, raw_name in enumerate(raw_names, start=1):
+            if not isinstance(raw_name, str) or _placeholder_device(raw_name):
+                raise ValueError(
+                    f"AIR topology policy node_allowlist.{inventory_type}[{index}] "
+                    "must be a non-empty device name"
+                )
+            name = raw_name.strip()
+            _validate_dot_token(
+                name,
+                context=(
+                    f"AIR topology policy node_allowlist.{inventory_type}"
+                    f"[{index}]"
+                ),
+            )
+            identity = _normalized_device_name(name)
+            if identity in seen_allowed_nodes:
+                raise ValueError(
+                    f"duplicate AIR topology policy allowlist device: {name}"
+                )
+            seen_allowed_nodes.add(identity)
+            names.append(name)
+        node_allowlist[inventory_type] = names
+
+    raw_rewrites = document.get("link_rewrites", [])
+    if not isinstance(raw_rewrites, list):
+        raise ValueError("AIR topology policy link_rewrites must be a list")
+    if len(raw_rewrites) > _MAX_AIR_POLICY_REWRITES:
+        raise ValueError(
+            "AIR topology policy has too many link_rewrites (maximum 256)"
+        )
+    link_rewrites = []
+    seen_matches = set()
+    for rule_number, raw_rule in enumerate(raw_rewrites, start=1):
+        context = f"link_rewrites rule #{rule_number}"
+        if not isinstance(raw_rule, dict):
+            raise ValueError(f"AIR topology policy {context} must be an object")
+        _unknown_policy_keys(
+            raw_rule, {"scope", "match", "replacement"}, context=context,
+        )
+        missing = [
+            key for key in ("scope", "match", "replacement")
+            if key not in raw_rule
+        ]
+        if missing:
+            raise ValueError(
+                f"AIR topology policy {context} is missing {missing[0]}"
+            )
+        if raw_rule["scope"] != "air":
+            raise ValueError(
+                f"AIR topology policy {context} scope must be 'air'"
+            )
+        rule = {"scope": "air"}
+        for field in ("match", "replacement"):
+            raw_endpoints = raw_rule[field]
+            if not isinstance(raw_endpoints, list) or len(raw_endpoints) != 2:
+                raise ValueError(
+                    f"AIR topology policy {context}.{field} must have 2 endpoints"
+                )
+            rule[field] = [
+                _policy_endpoint(
+                    endpoint,
+                    context=f"{context}.{field}[{endpoint_index}]",
+                )
+                for endpoint_index, endpoint in enumerate(raw_endpoints, start=1)
+            ]
+        match_edge = _policy_rule_edge(rule, "match")
+        match_signature = _policy_edge_signature(match_edge)
+        if len(match_signature) != 2:
+            raise ValueError(
+                f"AIR topology policy {context}.match repeats one endpoint"
+            )
+        if match_signature in seen_matches:
+            raise ValueError(
+                f"duplicate AIR topology policy link match in {context}"
+            )
+        seen_matches.add(match_signature)
+
+        replacement_edge = _policy_rule_edge(rule, "replacement")
+        if (
+            _normalized_device_name(replacement_edge[0])
+            == _normalized_device_name(replacement_edge[2])
+        ):
+            raise ValueError(
+                f"AIR topology policy {context} replacement is a self-link"
+            )
+        link_rewrites.append(rule)
+
+    return {
+        "node_allowlist": node_allowlist,
+        "link_rewrites": link_rewrites,
+    }
+
+
+def _air_policy_rewrite_matches(policy, edges):
+    matches = []
+    used_indices = set()
+    edge_signatures = [_policy_edge_signature(edge) for edge in edges]
+    for rule_number, rule in enumerate(
+        policy.get("link_rewrites", []), start=1,
+    ):
+        signature = _policy_edge_signature(_policy_rule_edge(rule, "match"))
+        indices = [
+            index for index, edge_signature in enumerate(edge_signatures)
+            if edge_signature == signature
+        ]
+        if len(indices) != 1:
+            raise ValueError(
+                f"AIR topology policy link_rewrites rule #{rule_number} "
+                f"matched {len(indices)} links; expected exactly 1"
+            )
+        index = indices[0]
+        if index in used_indices:
+            raise ValueError(
+                f"AIR topology policy link_rewrites rule #{rule_number} "
+                "matches an edge already rewritten by another rule"
+            )
+        used_indices.add(index)
+        matches.append((rule, index))
+    return matches
+
+
+def _rewritten_air_edges(edges, matches):
+    replacements = {
+        index: _policy_rule_edge(rule, "replacement")
+        for rule, index in matches
+    }
+    rewritten = [replacements.get(index, edge) for index, edge in enumerate(edges)]
+    conflicts, messages = _find_duplicate_or_conflicting_links(rewritten)
+    if conflicts:
+        detail = messages[0].strip() if messages else "unknown conflict"
+        raise ValueError(
+            f"AIR topology policy produces an unsafe link topology: {detail}"
+        )
+    return rewritten
+
+
+def _validate_air_topology_policy(policy, edges, inv_patterns, type_order):
+    """Bind every explicit policy selector to exactly one current topology."""
+    if not policy:
+        return set()
+    nodes = {}
+    for src, _src_port, dst, _dst_port in edges:
+        for device in (src, dst):
+            nodes.setdefault(_normalized_device_name(device), str(device).strip())
+
+    for inventory_type, names in policy.get("node_allowlist", {}).items():
+        if inventory_type not in inv_patterns:
+            raise ValueError(
+                "AIR topology policy node_allowlist references unknown inventory "
+                f"type: {inventory_type}"
+            )
+        for name in names:
+            identity = _normalized_device_name(name)
+            if identity not in nodes:
+                raise ValueError(
+                    "AIR topology policy node_allowlist device matched 0 nodes: "
+                    f"{name}"
+                )
+            actual_type = get_device_type(
+                nodes[identity], inv_patterns, type_order,
+            )
+            if actual_type != inventory_type:
+                raise ValueError(
+                    f"AIR topology policy allowlist device {name} has inventory "
+                    f"type {actual_type}, expected {inventory_type}"
+                )
+
+    matches = _air_policy_rewrite_matches(policy, edges)
+    for rule_number, (rule, _index) in enumerate(matches, start=1):
+        for endpoint in rule["replacement"]:
+            if _normalized_device_name(endpoint["device"]) not in nodes:
+                raise ValueError(
+                    f"AIR topology policy link_rewrites rule #{rule_number} "
+                    "replacement device matched 0 nodes: "
+                    f"{endpoint['device']}"
+                )
+    _rewritten_air_edges(edges, matches)
+    return {index for _rule, index in matches}
+
+
+def _apply_air_topology_policy(edges, policy):
+    if not policy or not policy.get("link_rewrites"):
+        return list(edges)
+    return _rewritten_air_edges(
+        edges, _air_policy_rewrite_matches(policy, edges),
+    )
+
+
+def _air_policy_allows_node(name, inv_patterns, type_order, policy):
+    if not policy:
+        return True
+    inventory_type = get_device_type(name, inv_patterns, type_order)
+    allowlist = policy.get("node_allowlist", {})
+    if inventory_type not in allowlist:
+        return True
+    allowed = {
+        _normalized_device_name(device)
+        for device in allowlist[inventory_type]
+    }
+    return _normalized_device_name(name) in allowed
+
+
 def main():
     global _AUTO_YES
     args = sys.argv[1:]
@@ -617,37 +1071,45 @@ def main():
         args = [a for a in args if a != "-y"]
 
     if args in (["-h"], ["--help"]):
-        print(f"Usage: {sys.argv[0]} [-y] [--air-template FILE]")
+        print(_usage())
         return
 
-    air_json_template = AIR_JSON_TEMPLATE
-    if args:
-        if len(args) == 2 and args[0] == "--air-template":
-            air_json_template = args[1]
-        elif len(args) == 1 and args[0].startswith("--air-template="):
-            air_json_template = args[0].split("=", 1)[1]
-        else:
-            print(
-                f"Usage: {sys.argv[0]} [-y] [--air-template FILE]",
-                file=sys.stderr,
+    try:
+        (
+            air_json_template,
+            explicit_os_version,
+            air_link_policy_file,
+        ) = _parse_cli_args(args)
+        if explicit_os_version is not None:
+            explicit_os_version = _validate_air_os_version(explicit_os_version)
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        print(_usage(), file=sys.stderr)
+        sys.exit(1)
+    if not os.path.isabs(air_json_template):
+        air_json_template = os.path.join(SCRIPT_DIR, air_json_template)
+    air_json_template = os.path.abspath(air_json_template)
+    if air_link_policy_file is not None:
+        if not os.path.isabs(air_link_policy_file):
+            air_link_policy_file = os.path.join(
+                SCRIPT_DIR, air_link_policy_file,
             )
-            sys.exit(1)
-        if not os.path.isabs(air_json_template):
-            air_json_template = os.path.join(SCRIPT_DIR, air_json_template)
-        air_json_template = os.path.abspath(air_json_template)
+        air_link_policy_file = os.path.abspath(air_link_policy_file)
 
     xlsx_path = os.path.join(SCRIPT_DIR, "p2p.xlsx")
     print("使用固定输入：p2p.xlsx")
 
     inv_file, port_map_file = DEFAULT_INV, DEFAULT_PORT_MAP
 
-    required_inputs = (
+    required_inputs = [
         xlsx_path,
         inv_file,
         port_map_file,
         air_json_template,
         DEVICES_CONFIG,
-    )
+    ]
+    if air_link_policy_file is not None:
+        required_inputs.append(air_link_policy_file)
     missing_inputs = _missing_required_files(required_inputs)
     if missing_inputs:
         for path in missing_inputs:
@@ -660,6 +1122,16 @@ def main():
         sys.exit(1)
 
     print(f"使用 AIR JSON 模板：{air_json_template}")
+    air_topology_policy = None
+    if air_link_policy_file is not None:
+        try:
+            air_topology_policy = load_air_topology_policy(
+                air_link_policy_file
+            )
+        except ValueError as exc:
+            print(f"[ERROR] {exc}", file=sys.stderr)
+            sys.exit(1)
+        print(f"使用 AIR 拓扑策略：{air_link_policy_file}")
 
     out_dir = os.path.join(SCRIPT_DIR, "output-p2p")
     os.makedirs(out_dir, exist_ok=True)
@@ -729,55 +1201,50 @@ def main():
             print("已中止。")
             sys.exit(1)
 
+    # AIR policy selectors use resolved OS ports (for example raw ``32`` is
+    # matched as ``swp32``) while diagnostics keep the original record index.
+    policy_edges = []
+    policy_record_indices = []
+    for record_index, (src_dev, src_port, dst_dev, dst_port) in enumerate(records):
+        if _placeholder_device(src_dev) or _placeholder_device(dst_dev):
+            continue
+        policy_edges.append((
+            src_dev,
+            resolve_port(
+                src_dev, src_port, inv_patterns, type_order,
+                port_direct, port_switch, splitter_profiles,
+            ),
+            dst_dev,
+            resolve_port(
+                dst_dev, dst_port, inv_patterns, type_order,
+                port_direct, port_switch, splitter_profiles,
+            ),
+        ))
+        policy_record_indices.append(record_index)
+    try:
+        policy_match_indices = _validate_air_topology_policy(
+            air_topology_policy, policy_edges, inv_patterns, type_order,
+        )
+    except ValueError as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        sys.exit(1)
+    allowed_self_link_indices = {
+        policy_record_indices[index] for index in policy_match_indices
+    }
+
     # ── Detect duplicate / conflicting port usage ─────────────────────────────
+    # Case 0: same normalized device on both endpoints, unless AIR rewrites it
     # Case 1: exact same link appears twice (A:p -- B:q and again A:p -- B:q)
     # Case 2: same port connected to two different peers (A:p -- B:q and A:p -- C:r)
-    # Both cases: warn and exclude ALL involved records from the dot file.
-    port_peer    = {}   # (dev_lower, port) → (idx, peer_dev, peer_port)
-    link_seen    = {}   # frozenset endpoint pair → first idx
-    dup_indices  = set()
-    dup_messages = []   # collected warnings, printed as a summary at the end
-
-    for idx, (src_dev, src_port, dst_dev, dst_port) in enumerate(records):
-        link_key = frozenset({(src_dev.lower(), src_port), (dst_dev.lower(), dst_port)})
-
-        # Case 1: exact duplicate link
-        if link_key in link_seen:
-            first = link_seen[link_key]
-            dup_messages.append(
-                f"  [重复链路] {src_dev}:{src_port} -- {dst_dev}:{dst_port}"
-                f"  (记录 #{first+1} 与 #{idx+1})"
-            )
-            dup_indices.add(first)
-            dup_indices.add(idx)
-        else:
-            link_seen[link_key] = idx
-
-        # Case 2: same port → different peer
-        for (dev, port), (peer_dev, peer_port) in [
-            ((src_dev, src_port), (dst_dev, dst_port)),
-            ((dst_dev, dst_port), (src_dev, src_port)),
-        ]:
-            if _placeholder_device(dev):
-                continue
-            ep_key = (dev.lower(), port)
-            if ep_key in port_peer:
-                first_idx, first_peer_dev, first_peer_port = port_peer[ep_key]
-                if (first_peer_dev.lower(), first_peer_port) != (peer_dev.lower(), peer_port):
-                    dup_messages.append(
-                        f"  [端口冲突] {dev}:{port}"
-                        f"  记录 #{first_idx+1}: -- {first_peer_dev}:{first_peer_port}"
-                        f"  记录 #{idx+1}: -- {peer_dev}:{peer_port}"
-                    )
-                    dup_indices.add(first_idx)
-                    dup_indices.add(idx)
-            else:
-                port_peer[ep_key] = (idx, peer_dev, peer_port)
+    # Every case fails closed before generation; no record is silently omitted.
+    dup_indices, dup_messages = _find_duplicate_or_conflicting_links(
+        records, allowed_self_link_indices=allowed_self_link_indices,
+    )
 
     if dup_indices:
         print(
-            f"[ERROR] P2P 存在 {len(dup_indices)} 条重复或端口冲突记录；"
-            "不会排除后继续生成，请先修正 XLSX：",
+            f"[ERROR] P2P 存在 {len(dup_indices)} 条自连接、重复或端口冲突记录；"
+            "不会排除后继续生成，请先修正 XLSX 或显式 AIR 策略：",
             file=sys.stderr,
         )
         for msg in dup_messages:
@@ -831,16 +1298,25 @@ def main():
     # ── Generate AIR dot file ─────────────────────────────────────────────────
     air_file = os.path.join(out_dir, base + "-air.dot")
     air_json_file = os.path.join(out_dir, base + "-air.json")
-    try:
-        os_ver = _timed_input(
-            "\n请输入 Cumulus OS 版本（用于 AIR simulation dot 文件中各节点的 os= 字段，"
-            f"直接回车默认 {_AIR_DEFAULT_OS_VERSION}）：",
-            default="",
-        ).strip()
-    except EOFError:
-        os_ver = ""
-    if not os_ver:
-        os_ver = _AIR_DEFAULT_OS_VERSION
+    if explicit_os_version is not None:
+        os_ver = explicit_os_version
+        print(f"使用显式 AIR Cumulus OS 版本：{os_ver}")
+    else:
+        try:
+            os_ver = _timed_input(
+                "\n请输入 Cumulus OS 版本（用于 AIR simulation dot 文件中各节点的 os= 字段，"
+                f"直接回车默认 {_AIR_DEFAULT_OS_VERSION}）：",
+                default="",
+            ).strip()
+        except EOFError:
+            os_ver = ""
+        try:
+            os_ver = _validate_air_os_version(
+                os_ver or _AIR_DEFAULT_OS_VERSION
+            )
+        except ValueError as exc:
+            print(f"[ERROR] {exc}", file=sys.stderr)
+            sys.exit(1)
     generate_air_dot(
         output_file,
         air_file,
@@ -850,12 +1326,14 @@ def main():
         template_file=air_json_template,
         ztp_bmc_endpoints=ztp_bmc_endpoints,
         required_unconnected_ports=required_unconnected_ports,
+        air_topology_policy=air_topology_policy,
     )
     generate_air_json(
         air_file,
         air_json_file,
         air_json_template,
         lldpq_file=output_file,
+        air_topology_policy=air_topology_policy,
     )
 
     print(f"DOT and AIR JSON files are ready in: {out_dir}")
@@ -873,17 +1351,21 @@ _AIR_ATTR_RE = re.compile(
 def _is_eth_sw(name, inv_patterns, type_order):
     """True if device is a network switch.
 
-    Checks the inventory first (Eth-SW type), then falls back to _dev_rank
-    so devices like fw that are missing from inventory are still recognised.
+    An explicit PDU inventory match vetoes name-based switch heuristics.  This
+    matters for names such as ``example-oob-corepod-pdu01`` which otherwise look
+    like an OOB core.  Other legacy names still fall back to ``_dev_rank`` so
+    firewalls continue to be represented in AIR.
     """
-    if get_device_type(name, inv_patterns, type_order) == "Eth-SW":
+    device_type = get_device_type(name, inv_patterns, type_order)
+    if device_type == "Eth-SW":
         return True
+    if device_type == "PDU":
+        return False
     return _dev_rank(name) < 9   # fw / border / spine / leaf / core / oobofoob
 
 
 # Model lookup: ordered list of (regex_pattern, model_string).
 # First match wins.
-_AIR_DEFAULT_OS_VERSION = "5.16.4"
 _AIR_MEMORY_MB = 4096
 _AIR_CPUS = 4
 _AIR_HOSTNAME_PREFIX = "AIR-"
@@ -1052,6 +1534,7 @@ def generate_air_dot(
     template_file=AIR_JSON_TEMPLATE,
     ztp_bmc_endpoints=None,
     required_unconnected_ports=None,
+    air_topology_policy=None,
 ):
     """Create an AIR-format dot file from a lldpq dot file.
 
@@ -1086,9 +1569,18 @@ def generate_air_dot(
             m = _DOT_EDGE_RE.match(line.strip())
             if m:
                 edges.append((m.group(1), m.group(2), m.group(3), m.group(4)))
+    _validate_air_topology_policy(
+        air_topology_policy, edges, inv_patterns, type_order,
+    )
+    edges = _apply_air_topology_policy(edges, air_topology_policy)
 
     def is_net(name):
-        return _is_eth_sw(name, inv_patterns, type_order)
+        return (
+            _is_eth_sw(name, inv_patterns, type_order)
+            and _air_policy_allows_node(
+                name, inv_patterns, type_order, air_topology_policy,
+            )
+        )
 
     # Collect Eth-SW devices, sorted by type rank then name
     net_devs_seen = set()
@@ -1279,7 +1771,9 @@ def _parse_air_dot(air_file):
     return nodes, links
 
 
-def _air_json_links_from_lldpq(lldpq_file, nodes, air_links):
+def _air_json_links_from_lldpq(
+    lldpq_file, nodes, air_links, *, air_topology_policy=None,
+):
     """Build JSON links from the full LLDPQ graph and an AIR node allowlist.
 
     AIR DOT owns node selection and simulation attributes.  LLDPQ DOT owns the
@@ -1319,6 +1813,9 @@ def _air_json_links_from_lldpq(lldpq_file, nodes, air_links):
         source_links = [
             match.groups() for match in _DOT_EDGE_RE.finditer(stream.read())
         ]
+    source_links = _apply_air_topology_policy(
+        source_links, air_topology_policy,
+    )
 
     def selected_name(source_name):
         if _air_is_ztp_server(source_name):
@@ -1560,6 +2057,7 @@ def generate_air_json(
     template_file=AIR_JSON_TEMPLATE,
     *,
     lldpq_file=None,
+    air_topology_policy=None,
 ):
     """Build AIR JSON from AIR nodes and, when supplied, full LLDPQ links."""
     nodes, air_links = _parse_air_dot(air_file)
@@ -1568,7 +2066,8 @@ def generate_air_json(
         lldpq_unconnected = []
     else:
         links, lldpq_unconnected = _air_json_links_from_lldpq(
-            lldpq_file, nodes, air_links
+            lldpq_file, nodes, air_links,
+            air_topology_policy=air_topology_policy,
         )
     with open(template_file, encoding="utf-8") as stream:
         template = json.load(stream)
@@ -1614,8 +2113,11 @@ def generate_air_json(
             node["cpu"] = cpu
             node["memory"] = memory
         node["positioning"] = positions[name]
-        if not inherit_oob_leaf:
-            node["os"] = attrs.get("os", node.get("os", "")).strip()
+        # OOBofOOB inherits the OOB leaf's VM shape and model inventory, not
+        # its template image version.  The DOT value carries the explicit
+        # project --os-version selected by load and must win for every
+        # generated Cumulus node.
+        node["os"] = attrs.get("os", node.get("os", "")).strip()
         # The ZTP server template deliberately carries a fixed eth0 MAC so
         # AIR can expose its outbound management connection predictably.
         # Other nodes keep their deterministic per-host management MAC.

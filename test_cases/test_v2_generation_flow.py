@@ -170,6 +170,41 @@ class V2MlagSetupPreflightTests(unittest.TestCase):
         finally:
             temporary.cleanup()
 
+    def test_direct_peerlink_port_parsers_accept_only_safe_swp_lists(self):
+        accepted = {
+            "swp31": ["swp31"],
+            "swp31-32": ["swp31", "swp32"],
+            "swp31-32/swp35/swp40-41": [
+                "swp31", "swp32", "swp35", "swp40", "swp41",
+            ],
+        }
+        parsers = (
+            SETUP._expand_v2_peerlink_ports,
+            GENERATOR._expand_swp_range,
+        )
+        for parser in parsers:
+            for value, expected in accepted.items():
+                with self.subTest(parser=parser.__module__, value=value):
+                    self.assertEqual(expected, parser(value))
+
+        invalid = (
+            "swp31/",
+            "/swp31",
+            "swp31//swp32",
+            "swp32-31",
+            "swp31/swp31",
+            "swp31-32/swp32",
+            "eth31",
+            "swp31s0",
+            "swp31-swp32",
+            "swp1-4097",
+        )
+        for parser in parsers:
+            for value in invalid:
+                with self.subTest(parser=parser.__module__, value=value):
+                    with self.assertRaises(ValueError):
+                        parser(value)
+
     def test_direct_preflight_accepts_complete_active_plain_and_evpn_groups(self):
         active = self.pair()
         plain = [
@@ -337,6 +372,44 @@ class V2MlagSetupPreflightTests(unittest.TestCase):
             ) = old_state
             temporary.cleanup()
 
+    def test_workflow_rejects_invalid_peerlink_before_link_transaction(self):
+        temporary, root, _errors, _warnings = run_v2_mlag_setup_preflight(
+            self.pair(peerlink="swp31//swp32"),
+        )
+        p2p = root / "p2p.xlsx"
+        p2p.write_bytes(b"fixture")
+        old_state = (
+            SETUP._P2P_SOURCE, SETUP._LINK_TRANSACTION, SETUP._STRICT,
+            SETUP._DRY_RUN, SETUP._AUTO_YES, SETUP._FORCE,
+        )
+        try:
+            SETUP._P2P_SOURCE = None
+            SETUP._LINK_TRANSACTION = None
+            SETUP._STRICT = False
+            SETUP._DRY_RUN = True
+            SETUP._AUTO_YES = True
+            SETUP._FORCE = False
+            with mock.patch.object(
+                SETUP, "_initialize_project_from_template",
+            ), mock.patch.object(
+                SETUP, "_select_p2p_source", return_value=str(p2p),
+            ), mock.patch.object(
+                SETUP, "_validate_global_yaml", return_value=([], []),
+            ), mock.patch.object(
+                SETUP, "_validate_xlsx", return_value=([], []),
+            ), mock.patch.object(
+                SETUP, "_SetupLinkTransaction",
+            ) as transaction, redirect_stdout(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    SETUP._setup_impl(str(root))
+            transaction.assert_not_called()
+        finally:
+            (
+                SETUP._P2P_SOURCE, SETUP._LINK_TRANSACTION, SETUP._STRICT,
+                SETUP._DRY_RUN, SETUP._AUTO_YES, SETUP._FORCE,
+            ) = old_state
+            temporary.cleanup()
+
 
 class V2GenerationWorkflowTests(unittest.TestCase):
     """Run the new declarative schema through all local production consumers."""
@@ -454,7 +527,7 @@ switches:
                 + ["201-202", "", "", "bond49"]
                 + [
                     "NA", "NA", "bond49", "mlag",
-                    "02:00:00:ff:00:45", "swp50-51",
+                    "02:00:00:ff:00:45", "swp50/swp51",
                     "false",
                 ]
                 + [""] * (len(EVPN_HEADER) * 2)
@@ -592,7 +665,9 @@ switches:
 
     def test_setup_load_dhcp_and_nvos_share_the_same_v2_layout(self):
         self.assertEqual([], self.setup_errors)
-        self.assertEqual([], self.setup_warnings)
+        self.assertEqual(1, len(self.setup_warnings), self.setup_warnings)
+        self.assertIn("terminal_l2_ports", self.setup_warnings[0])
+        self.assertIn("不会自动启用终端 STP", self.setup_warnings[0])
         self.assertEqual(2, self.settings.schema_version)
         self.assertEqual({"air", "eth", "ib"}, set(self.device_types))
         self.assertEqual([], self.nvos_errors)
@@ -605,7 +680,9 @@ switches:
         pair_a_mac = "02:00:00:ff:00:12"
         pair_b_mac = "02:00:00:ff:00:34"
         pair_c_mac = "02:00:00:ff:00:45"
-        evpn_mac = "02:00:00:ff:00:56"
+        # All-numeric octets exercise YAML 1.1's sexagesimal ambiguity through
+        # setup, the real Jinja template, final YAML, and publisher parsing.
+        evpn_mac = "46:38:39:01:01:01"
         header = BASE_HEADER + FIXED_HEADER + EVPN_HEADER
 
         def row(
@@ -1039,6 +1116,54 @@ switches:
         )
         self.assertNotIn("source-ip", relays["RED"])
 
+    def test_cumulus_518_renders_shared_svi_mac_as_native_link_property(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            global_file = root / "01-global.yaml"
+            intermediate = root / "91-devices.yaml"
+            output = root / "generated"
+            global_document = yaml.safe_load(
+                self.global_file.read_text(encoding="utf-8")
+            )
+            eth = next(
+                item["eth"] for item in global_document["switches"]
+                if "eth" in item
+            )
+            eth["version"] = "5.18.0"
+            global_file.write_text(
+                yaml.safe_dump(
+                    global_document, allow_unicode=True, sort_keys=False,
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch.multiple(
+                GENERATOR,
+                _CSV_FILE=str(self.devices_file),
+                _GLOBAL_FILE=str(global_file),
+                DEVICES_FILE=str(intermediate),
+                TEMPLATES_DIR=str(TEMPLATES),
+            ), mock.patch.object(
+                GENERATOR, "_refresh_cumulus_defaults_from_global",
+            ):
+                GENERATOR._generate_devices_yaml()
+                with mock.patch.object(GENERATOR, "OUTPUT_DIR", str(output)):
+                    GENERATOR.generate_all()
+
+            leaf = yaml.safe_load(PUBLISHER._canonical_yaml(
+                str(output / "EXAMPLE-Leaf01.yaml"),
+            ))
+            block = set_block(leaf)
+            self.assertEqual(
+                "02:00:5e:01:01:11",
+                block["interface"]["vlan111"]["link"]["mac-address"],
+            )
+            snippets = (
+                block.get("system", {}).get("config", {})
+                .get("snippet", {}).get("ifupdown2_eni", {})
+            )
+            self.assertNotIn("vlan111", snippets)
+
     def test_oobofoob_spine_consumes_every_normalized_vlan_block(self):
         spine = set_block(self.outputs["EXAMPLE-OOB-Spine01"])
         bridge_vlans = spine["bridge"]["domain"]["br_default"]["vlan"]
@@ -1049,6 +1174,11 @@ switches:
             {"200-202": {}}, bond["bridge"]["domain"]["br_default"]["vlan"],
         )
         self.assertNotIn("bridge", spine["interface"]["peerlink"])
+        self.assertEqual(
+            {"swp50": {}, "swp51": {}},
+            spine["interface"]["peerlink"]["bond"]["member"],
+        )
+        self.assertNotIn("swp50/swp51", spine["interface"])
         for vlan in (200, 201, 202):
             self.assertNotIn(f"vlan{vlan}", spine["interface"])
 

@@ -76,9 +76,10 @@
 
 ## TC-REAL-STP-001 — 终端二层端口 Edge 与 BPDU Guard
 
-- 在隔离 Cumulus 5.18 交换机上分别选择一个独立二层 `swp` 和一个带两个 member 的二层 bond。
+- 在 schema v2 CSV 的 `terminal_l2_ports` 中显式列出一个连接终端的独立二层 `swp` 和一个
+  带两个 member 的终端二层 bond；另准备一个未列出的交换机互联二层 bond 作为负向样本。
 - 应用生成配置后，确认独立 swp 与逻辑 bond 的 `admin-edge=on`、`bpdu-guard=on`，bond member
-  本身没有这两个 bridge STP 配置。
+  本身没有这两个 bridge STP 配置；未列出的交换机互联 bond 也不得出现 Edge/Guard。
 - 正常终端接入后端口立即 forwarding；使用隔离测试交换机向端口发送 BPDU，确认对应逻辑
   bridge port 进入 `protodown`，reason 为 `bpduguard`，且没有形成广播环路。
 - 移除错误接线后运行 NVUE `bpduguardviolation` clear action，确认端口恢复；记录
@@ -98,6 +99,19 @@
   PFC watchdog 没有异常触发。
 - 清理与证据：保存生成 YAML、`nv config show`、BGP/EVPN/PFC 状态和 ZTP applied receipt；
   如有异常立即 apply/save 上一版配置并保存回退日志。
+
+## TC-REAL-CUMULUS-518-001 — 5.18 SVI MAC 与 AIR 拓扑策略
+
+- 前置：隔离的 Cumulus 5.18 交换机、同版本 AIR image，以及一份经审批的 AIR-only
+  link policy；保留未修改的原始 P2P 和旧配置用于回退。
+- 生成并发布一个相同 SVI IP、没有 `vrr_ip`、但有派生 `vrr_mac` 的 schema-v2 配置；确认
+  5.18 使用 `interface.vlan*.link.mac-address`，不生成旧的 ifupdown2 snippet，设备 apply/save
+  后运行值与 latest 一致。再用一个 5.16 对照确认仍使用旧 snippet。
+- AIR 转换应使用 global 中的 Cumulus 版本；获准的唯一错误链路只在 AIR DOT/JSON 中被
+  替换，原 P2P 和 LLDPQ 输出逐字节不变。节点 allowlist 之外的防火墙、PDU 和计算节点
+  不得进入 AIR；零命中、多命中、自连接或端口复用必须中止。
+- 证据：保存源文件 SHA-256、AIR DOT/JSON、设备 `nv config show`、apply receipt、P2P/LLDPQ
+  前后 hash。异常时恢复旧配置并销毁 AIR 仿真实例；该案例不得在生产端口直接执行。
 
 ## TC-REAL-CRASH-001 — 断电与磁盘故障
 

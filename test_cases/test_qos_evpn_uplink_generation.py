@@ -84,6 +84,66 @@ def base_document(*, multihoming=True):
     }}]
 
 
+def oob_core_evpn_device():
+    """Return an OOB core sharing one breakout parent across BGP and bonds."""
+    evpn_bond = {
+        "type": "evpn_multihoming",
+        "bond_list": ["bond15s4", "bond15s5"],
+        "lacp-bypass": "enabled",
+        "mac-address": "02:00:00:00:40:01",
+    }
+    return {
+        "_project_schema_version": 2,
+        "template": "oob-core",
+        "hostname": "EXAMPLE-OOB-CORE01",
+        "eth0_ip": "192.0.2.10/24",
+        "eth0_gw": "192.0.2.1",
+        "has_eth1": False,
+        "lo_ip": "198.51.100.10/32",
+        "bgp_asn": 65101,
+        # One physical parent legitimately mixes routed lanes s0-s3 and
+        # server-facing EVPN-MH lanes s4-s5.  The parent must be rendered once
+        # in 8x mode; empty lanes s6-s7 stay plain interfaces.
+        "bgp_neighbors": [
+            "swp15s0", "swp15s1", "swp15s2", "swp15s3",
+            "peerlink.4094",
+        ],
+        "peerlink_ports": "",
+        "vlan_ports": [],
+        "bond_groups": [copy.deepcopy(evpn_bond)],
+        "vrfs": [{
+            "evpn_vrf": "OOB",
+            "evpn_l3vlan": 4001,
+            "evpn_l3vni": 4001,
+            "l2vlans": [{
+                "vlan_id": 10,
+                "vlan_spec": "10",
+                "vlan_ids": [10],
+                "vni": 400010,
+                "emit_svi": False,
+                "svi_ip": "",
+                "vrr_ip": "",
+                "vrr_mac": "",
+                "vlan_ports": [{"bonds": copy.deepcopy(evpn_bond)}],
+            }],
+        }],
+    }
+
+
+def evpn_uplink_interfaces(block):
+    """Return expanded interface names carrying the MH uplink leaf."""
+    result = set()
+    for selector, interface in block.get("interface", {}).items():
+        uplink = (
+            interface.get("evpn", {})
+            .get("multihoming", {})
+            .get("uplink")
+        )
+        if uplink == "enabled":
+            result.update(GENERATOR.expand_nvue_selector(selector))
+    return result
+
+
 class QosDirectTests(unittest.TestCase):
     def test_border_qos_targets_parent_physical_ports_only(self):
         document = base_document()
@@ -167,6 +227,39 @@ class EvpnMhUplinkDirectTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "selector.*swp1-2"):
             GENERATOR._inject_evpn_mh_uplinks(document, ["swp2"], True)
 
+    def test_oob_core_v2_marks_only_breakout_bgp_interfaces(self):
+        from test_cases.test_mlag_evpn_generation import border_globals
+
+        device = oob_core_evpn_device()
+        prepared = GENERATOR.preprocess_device(device)
+        rendered = GENERATOR.render(
+            GENERATOR.build_env(), border_globals(), device["hostname"], prepared,
+        )
+        document = GENERATOR._load_generated_yaml(rendered)
+        self.assertTrue(GENERATOR._inject_evpn_mh_uplinks(
+            document, device["bgp_neighbors"], True,
+        ))
+        block = config(document)
+
+        self.assertEqual(
+            {"swp15s0", "swp15s1", "swp15s2", "swp15s3"},
+            evpn_uplink_interfaces(block),
+        )
+        self.assertEqual(
+            {"8x": {"lanes-per-port": "1"}},
+            block["interface"]["swp15"]["link"]["breakout"],
+        )
+        for bond in ("bond15s4", "bond15s5"):
+            bond_mh = block["interface"][bond]["evpn"]["multihoming"]
+            self.assertIn("segment", bond_mh)
+            self.assertNotIn("uplink", bond_mh)
+        for name in ("swp15", "swp15s4", "swp15s5", "swp15s6", "swp15s7"):
+            self.assertNotIn("evpn", block["interface"][name])
+        self.assertNotIn("peerlink.4094", block["interface"])
+        self.assertEqual([], GENERATOR._evpn_mh_uplink_errors(
+            document, device["bgp_neighbors"], True,
+        ))
+
 
 class QosEvpnWorkflowTests(unittest.TestCase):
     def test_real_border_generate_publish_compare_combines_all_policies(self):
@@ -220,6 +313,41 @@ class QosEvpnWorkflowTests(unittest.TestCase):
             MANUAL.runtime_comparable_nvue_config(published, label="latest"),
             MANUAL.runtime_comparable_nvue_config(current, label="runtime"),
         )
+
+    def test_oob_core_v2_generate_publish_marks_only_bgp_breakout_interfaces(self):
+        from test_cases.test_mlag_evpn_generation import border_globals
+
+        device = oob_core_evpn_device()
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "generated"
+            with mock.patch.object(
+                GENERATOR, "load_devices",
+                return_value=(border_globals(), {device["hostname"]: device}),
+            ), mock.patch.object(GENERATOR, "OUTPUT_DIR", str(output)):
+                GENERATOR.generate_all()
+            published = PUBLISHER._canonical_yaml(
+                str(output / f"{device['hostname']}.yaml")
+            )
+
+        block = config(yaml.safe_load(published))
+        self.assertEqual(
+            {"swp15s0", "swp15s1", "swp15s2", "swp15s3"},
+            evpn_uplink_interfaces(block),
+        )
+        self.assertEqual(
+            {"8x": {"lanes-per-port": "1"}},
+            block["interface"]["swp15"]["link"]["breakout"],
+        )
+        for bond in ("bond15s4", "bond15s5"):
+            bond_mh = block["interface"][bond]["evpn"]["multihoming"]
+            self.assertIn("segment", bond_mh)
+            self.assertNotIn("uplink", bond_mh)
+        for name in ("swp15", "swp15s4", "swp15s5", "swp15s6", "swp15s7"):
+            self.assertNotIn("evpn", block["interface"][name])
+        self.assertNotIn("peerlink.4094", block["interface"])
+        self.assertEqual([], GENERATOR._evpn_mh_uplink_errors(
+            yaml.safe_load(published), device["bgp_neighbors"], True,
+        ))
 
 
 if __name__ == "__main__":

@@ -40,6 +40,14 @@ assert DOWNLOAD_SPEC and DOWNLOAD_SPEC.loader
 download_tool = importlib.util.module_from_spec(DOWNLOAD_SPEC)
 DOWNLOAD_SPEC.loader.exec_module(download_tool)
 
+LOAD_SPEC = importlib.util.spec_from_file_location(
+    "upload_package_real_load_contract", ROOT / "DAY0-Prepare/11-load.py"
+)
+assert LOAD_SPEC and LOAD_SPEC.loader
+load_tool = importlib.util.module_from_spec(LOAD_SPEC)
+sys.modules[LOAD_SPEC.name] = load_tool
+LOAD_SPEC.loader.exec_module(load_tool)
+
 
 REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 OFFICE_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -89,6 +97,10 @@ def file_digest(path: Path) -> str:
 
 
 class UploadPackageContractTests(unittest.TestCase):
+    def test_help_documents_optional_air_topology_policy(self):
+        self.assertIn("03-air-topology-policy.json", upload_tool.HELP_EPILOG)
+        self.assertIn("存在时", upload_tool.HELP_EPILOG)
+
     @staticmethod
     def upload_args(**overrides):
         values = {
@@ -250,8 +262,33 @@ class UploadPackageContractTests(unittest.TestCase):
                 target.write_text("# deployable\n", encoding="utf-8")
             (workspace / "README.md").write_text("operator documentation\n", encoding="utf-8")
             (workspace / ".deployment.lock").touch()
+            root_local_artifacts = (
+                ".git", "outputs", ".codex", ".agents", ".codex_tmp_analysis",
+            )
+            for name in root_local_artifacts:
+                local_artifact = workspace / name
+                local_artifact.mkdir()
+                (local_artifact / "private.txt").write_text(
+                    "workstation only\n", encoding="utf-8",
+                )
+            for name in (".git", ".codex", ".agents", ".codex_tmp_analysis"):
+                nested_metadata = (
+                    workspace / "tools/lldp-analyze-tool" / name / "private.py"
+                )
+                nested_metadata.parent.mkdir(parents=True, exist_ok=True)
+                nested_metadata.write_text("# workstation only\n", encoding="utf-8")
+            # Root-only exclusions must not turn into an unanchored filter for
+            # a legitimate same-named directory in a deployable code tree.
+            nested_runtime = workspace / "ethernet/outputs/runtime.py"
+            nested_runtime.parent.mkdir(parents=True)
+            nested_runtime.write_text("# deployable\n", encoding="utf-8")
+            (workspace / "ztp/ztp.json").write_text(
+                '{"service_ip": "192.0.2.99"}\n', encoding="utf-8",
+            )
             for name in package.PROJECT_DEPLOYMENT_INPUTS:
                 (project / name).write_text("input\n", encoding="utf-8")
+            policy_payload = b'{"node_allowlist": ["AIR-example-leaf01"]}\n'
+            (project / "03-air-topology-policy.json").write_bytes(policy_payload)
             selected = project / "Customer P2P.xlsx"
             write_picture_workbook(selected)
             (project / "p2p.xlsx").symlink_to(selected.name)
@@ -284,6 +321,7 @@ class UploadPackageContractTests(unittest.TestCase):
                 self.assertIn(prefix + "01-global.yaml", names)
                 self.assertIn(prefix + "02-devices_config.csv", names)
                 self.assertIn(prefix + "02-dhcp-subnet_config.csv", names)
+                self.assertIn(prefix + "03-air-topology-policy.json", names)
                 self.assertIn(prefix + "laptop.pub", names)
                 self.assertIn(prefix + "switch.bin", names)
                 self.assertNotIn(prefix + "p2p.xlsx", names)
@@ -291,7 +329,21 @@ class UploadPackageContractTests(unittest.TestCase):
                 self.assertNotIn(prefix + "README.txt", names)
                 self.assertNotIn("./README.md", names)
                 self.assertNotIn("./.deployment.lock", names)
+                for root_name in root_local_artifacts:
+                    with self.subTest(root_local_artifact=root_name):
+                        prefix_name = f"./{root_name}"
+                        self.assertFalse(any(
+                            name == prefix_name or name.startswith(prefix_name + "/")
+                            for name in names
+                        ))
+                self.assertFalse(any(
+                    part in {".git", ".codex", ".agents"}
+                    or part.startswith(".codex_tmp")
+                    for name in names for part in Path(name).parts
+                ))
+                self.assertIn("./ethernet/outputs/runtime.py", names)
                 self.assertIn("./ztp/templates/ztp.json", names)
+                self.assertNotIn("./ztp/ztp.json", names)
                 self.assertFalse(
                     any(Path(name).name.startswith(".http-air-package-") for name in names)
                 )
@@ -301,6 +353,138 @@ class UploadPackageContractTests(unittest.TestCase):
                     self.assertFalse(
                         any(name.startswith("xl/media/") for name in workbook.namelist())
                     )
+                reopened_project = workspace / "reopened-project"
+                reopened_project.mkdir()
+                policy_member = archive.extractfile(
+                    prefix + "03-air-topology-policy.json"
+                )
+                self.assertIsNotNone(policy_member)
+                (reopened_project / "03-air-topology-policy.json").write_bytes(
+                    policy_member.read()
+                )
+
+            discovered = load_tool.project_air_topology_policy(reopened_project)
+            self.assertEqual(
+                reopened_project / "03-air-topology-policy.json", discovered,
+            )
+            self.assertEqual(policy_payload, discovered.read_bytes())
+
+    def test_upload_succeeds_without_optional_air_topology_policy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = (Path(directory) / "http").resolve()
+            day0 = workspace / "DAY0-Prepare"
+            project = day0 / "customer"
+            project.mkdir(parents=True)
+            for relative in REQUIRED_UPLOAD_SOURCES:
+                target = workspace / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("# deployable\n", encoding="utf-8")
+            for name in package.PROJECT_DEPLOYMENT_INPUTS:
+                (project / name).write_text("input\n", encoding="utf-8")
+            write_picture_workbook(project / "Customer P2P.xlsx")
+            output = workspace / "upload.tar.gz"
+            args = argparse.Namespace(
+                project=str(project), output=output, force=False,
+                max_file_size_mib=50, include_images=False, include_apps=False,
+                apps_platform=None, apps_platforms=set(), include_firmware=False,
+            )
+            with mock.patch.multiple(
+                package,
+                ROOT=workspace,
+                DAY0=day0,
+                MANIFEST=workspace / "ztp/.setup_manifest",
+                TOOLS_DIR=workspace / "tools",
+            ):
+                package.create_package(args, day0_all=False)
+
+            with tarfile.open(output, "r:gz") as archive:
+                names = set(archive.getnames())
+            self.assertNotIn(
+                "./DAY0-Prepare/customer/03-air-topology-policy.json", names,
+            )
+
+    def test_upload_reopen_requires_policy_when_source_contains_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = (Path(directory) / "http").resolve()
+            day0 = workspace / "DAY0-Prepare"
+            project = day0 / "customer"
+            project.mkdir(parents=True)
+            for relative in REQUIRED_UPLOAD_SOURCES:
+                target = workspace / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("# deployable\n", encoding="utf-8")
+            for name in package.PROJECT_DEPLOYMENT_INPUTS:
+                (project / name).write_text("input\n", encoding="utf-8")
+            write_picture_workbook(project / "Customer P2P.xlsx")
+            (project / "03-air-topology-policy.json").write_text(
+                "{}\n", encoding="utf-8",
+            )
+            output = workspace / "upload.tar.gz"
+            args = argparse.Namespace(
+                project=str(project), output=output, force=False,
+                max_file_size_mib=50, include_images=False, include_apps=False,
+                apps_platform=None, apps_platforms=set(), include_firmware=False,
+            )
+            original_filter = package.PackageFilter.__call__
+
+            def omit_policy(filter_self, info):
+                if Path(info.name).name == "03-air-topology-policy.json":
+                    filter_self.reject(info, "injected policy omission")
+                    return None
+                return original_filter(filter_self, info)
+
+            with mock.patch.multiple(
+                package,
+                ROOT=workspace,
+                DAY0=day0,
+                MANIFEST=workspace / "ztp/.setup_manifest",
+                TOOLS_DIR=workspace / "tools",
+            ), mock.patch.object(
+                package.PackageFilter, "__call__", omit_policy,
+            ), self.assertRaisesRegex(
+                RuntimeError,
+                r"package verification missing: .*03-air-topology-policy\.json",
+            ):
+                package.create_package(args, day0_all=False)
+
+            self.assertFalse(output.exists())
+
+    def test_upload_rejects_nonregular_air_topology_policy_path(self):
+        for path_kind in ("symlink", "directory"):
+            with self.subTest(path_kind=path_kind), tempfile.TemporaryDirectory() as directory:
+                workspace = (Path(directory) / "http").resolve()
+                day0 = workspace / "DAY0-Prepare"
+                project = day0 / "customer"
+                project.mkdir(parents=True)
+                for relative in REQUIRED_UPLOAD_SOURCES:
+                    target = workspace / relative
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text("# deployable\n", encoding="utf-8")
+                for name in package.PROJECT_DEPLOYMENT_INPUTS:
+                    (project / name).write_text("input\n", encoding="utf-8")
+                write_picture_workbook(project / "Customer P2P.xlsx")
+                policy = project / "03-air-topology-policy.json"
+                if path_kind == "symlink":
+                    (project / "policy-target.json").write_text("{}\n", encoding="utf-8")
+                    policy.symlink_to("policy-target.json")
+                else:
+                    policy.mkdir()
+                args = argparse.Namespace(
+                    project=str(project), output=workspace / "upload.tar.gz",
+                    force=False, max_file_size_mib=50, include_images=False,
+                    include_apps=False, apps_platform=None, apps_platforms=set(),
+                    include_firmware=False,
+                )
+                with mock.patch.multiple(
+                    package,
+                    ROOT=workspace,
+                    DAY0=day0,
+                    MANIFEST=workspace / "ztp/.setup_manifest",
+                    TOOLS_DIR=workspace / "tools",
+                ), self.assertRaisesRegex(
+                    ValueError, r"03-air-topology-policy\.json.*regular file",
+                ):
+                    package.create_package(args, day0_all=False)
 
     def test_upload_fails_closed_without_canonical_nvos_ztp_template(self):
         with tempfile.TemporaryDirectory() as directory:

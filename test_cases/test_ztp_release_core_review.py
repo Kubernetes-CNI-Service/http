@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import datetime as dt
 import importlib.util
+import io
+import json
 import os
 from pathlib import Path
 import re
@@ -381,12 +383,305 @@ class OptimizeAndTopologySafetyTests(unittest.TestCase):
         )
         self.assertEqual(0, help_result.returncode, help_result.stderr)
         self.assertIn("Usage:", help_result.stdout)
+        self.assertIn("--os-version VERSION", help_result.stdout)
         bad_result = subprocess.run(
             [sys.executable, str(script), "--definitely-unknown"], cwd=ROOT,
             text=True, capture_output=True, check=False,
         )
         self.assertNotEqual(0, bad_result.returncode)
         self.assertIn("Usage:", bad_result.stderr)
+
+    def test_cumulus_p2p_inventory_keeps_pdu_out_of_air_switches(self):
+        patterns, order = self.topology.load_inventory(
+            self.topology.DEFAULT_INV
+        )
+        pdu = "example-oob-corepod-pdu01"
+        self.assertEqual("PDU", self.topology.get_device_type(
+            pdu, patterns, order,
+        ))
+        self.assertFalse(self.topology._is_eth_sw(pdu, patterns, order))
+        self.assertEqual("Eth-SW", self.topology.get_device_type(
+            "example-oob-core01", patterns, order,
+        ))
+
+    def test_cumulus_p2p_os_version_option_is_explicit_and_fail_closed(self):
+        template, version, policy = self.topology._parse_cli_args([
+            "--os-version", "5.18", "--air-template=air-template-no-oob.json",
+            "--air-link-policy", "03-air-topology-policy.json",
+        ])
+        self.assertEqual("air-template-no-oob.json", template)
+        self.assertEqual("5.18", version)
+        self.assertEqual("03-air-topology-policy.json", policy)
+        self.assertEqual("5.18", self.topology._validate_air_os_version(version))
+        self.assertEqual(
+            (self.topology.AIR_JSON_TEMPLATE, None, None),
+            self.topology._parse_cli_args([]),
+        )
+        with self.assertRaisesRegex(ValueError, "AIR OS version"):
+            self.topology._validate_air_os_version('5.18" malicious=true')
+        with self.assertRaises(ValueError):
+            self.topology._parse_cli_args(["--os-version"])
+
+    def test_air_policy_rewrites_only_air_and_filters_inventory_type(self):
+        leaf = "example-oobofoob-leaf10"
+        ztp_server = "example-x86-mgmt-server01(ztp-server)"
+        allowed_fw = "example-fgt-7081f-fw01"
+        excluded_fw = "example-pa-3420-fw01"
+        edges = [
+            (leaf, "eth0", leaf, "swp32"),
+            (allowed_fw, "swp1", leaf, "swp1"),
+            (excluded_fw, "swp1", leaf, "swp2"),
+            (ztp_server, "eth1", leaf, "swp3"),
+        ]
+        document = {
+            "node_allowlist": {"FW": [allowed_fw]},
+            "link_rewrites": [{
+                "scope": "air",
+                "match": [
+                    {"device": leaf, "port": "eth0"},
+                    {"device": leaf, "port": "swp32"},
+                ],
+                "replacement": [
+                    {"device": ztp_server, "port": "eth2"},
+                    {"device": leaf, "port": "eth0"},
+                ],
+            }],
+        }
+        patterns, order = self.topology.load_inventory(self.topology.DEFAULT_INV)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            policy_file = root / "03-air-topology-policy.json"
+            policy_file.write_text(json.dumps(document), encoding="utf-8")
+            policy = self.topology.load_air_topology_policy(policy_file)
+            self.assertEqual(
+                {0},
+                self.topology._validate_air_topology_policy(
+                    policy, edges, patterns, order,
+                ),
+            )
+
+            lldpq = root / "source-lldpq.dot"
+            lldpq.write_text(
+                "graph synthetic {\n"
+                + "\n".join(
+                    f'"{left}":"{left_port}" -- '
+                    f'"{right}":"{right_port}"'
+                    for left, left_port, right, right_port in edges
+                )
+                + "\n}\n",
+                encoding="utf-8",
+            )
+            air_dot = root / "air.dot"
+            air_json = root / "air.json"
+            self.topology.generate_air_dot(
+                lldpq,
+                air_dot,
+                patterns,
+                order,
+                os_version="5.18",
+                template_file=self.topology.AIR_JSON_TEMPLATE,
+                air_topology_policy=policy,
+            )
+            air_source = air_dot.read_text(encoding="utf-8")
+            self.assertIn(f'"AIR-{allowed_fw}" [', air_source)
+            self.assertNotIn(f'"AIR-{excluded_fw}" [', air_source)
+            self.assertIn(
+                f'"AIR-{leaf}":"eth0" -- "ztp-server":"eth2"',
+                air_source,
+            )
+            self.assertNotIn(
+                f'"AIR-{leaf}":"eth0" -- "AIR-{leaf}":"swp32"',
+                air_source,
+            )
+
+            # The physical/LLDPQ source remains unchanged; only AIR is rewritten.
+            self.assertIn(
+                f'"{leaf}":"eth0" -- "{leaf}":"swp32"',
+                lldpq.read_text(encoding="utf-8"),
+            )
+            self.topology.generate_air_json(
+                air_dot,
+                air_json,
+                self.topology.AIR_JSON_TEMPLATE,
+                lldpq_file=lldpq,
+                air_topology_policy=policy,
+            )
+            generated = json.loads(air_json.read_text(encoding="utf-8"))
+            leaf_node = generated["content"]["nodes"][f"AIR-{leaf}"]
+            template = json.loads(
+                Path(self.topology.AIR_JSON_TEMPLATE).read_text(encoding="utf-8")
+            )["content"]["nodes"]["OOB-Leaf"]
+            # OOBofOOB inherits the OOB leaf hardware shape, but the explicit
+            # project OS version must replace the prototype's stale image.
+            self.assertEqual("cumulus-vx-5.18", leaf_node["os"])
+            for field in ("cpu", "memory", "storage", "nic_model", "labels"):
+                self.assertEqual(template[field], leaf_node[field], field)
+            connected = [
+                link for link in generated["content"]["links"]
+                if len(link) == 2 and all(isinstance(item, dict) for item in link)
+            ]
+            endpoints = {
+                frozenset(
+                    (item["node"], item["interface"])
+                    for item in link
+                )
+                for link in connected
+            }
+            self.assertIn(
+                frozenset({(f"AIR-{leaf}", "eth0"), ("ztp-server", "eth2")}),
+                endpoints,
+            )
+            self.assertNotIn(
+                frozenset({
+                    (f"AIR-{leaf}", "eth0"),
+                    (f"AIR-{leaf}", "swp32"),
+                }),
+                endpoints,
+            )
+
+    def test_air_policy_schema_and_edge_matching_fail_closed(self):
+        leaf = "leaf01"
+        base = {
+            "node_allowlist": {},
+            "link_rewrites": [{
+                "scope": "air",
+                "match": [
+                    {"device": leaf, "port": "swp1"},
+                    {"device": leaf, "port": "swp2"},
+                ],
+                "replacement": [
+                    {"device": "ztp-server", "port": "eth2"},
+                    {"device": leaf, "port": "swp1"},
+                ],
+            }],
+        }
+        patterns = {"Eth-SW": ["leaf*"]}
+        order = ["Eth-SW"]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            unknown = root / "unknown.json"
+            unknown.write_text(
+                json.dumps({**base, "unexpected": True}), encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "unknown key"):
+                self.topology.load_air_topology_policy(unknown)
+
+            policy_file = root / "policy.json"
+            policy_file.write_text(json.dumps(base), encoding="utf-8")
+            policy = self.topology.load_air_topology_policy(policy_file)
+            with self.assertRaisesRegex(ValueError, "matched 0"):
+                self.topology._validate_air_topology_policy(
+                    policy,
+                    [(leaf, "swp3", "peer01", "swp4")],
+                    patterns,
+                    order,
+                )
+            with self.assertRaisesRegex(ValueError, "matched 2"):
+                self.topology._validate_air_topology_policy(
+                    policy,
+                    [
+                        (leaf, "swp1", leaf, "swp2"),
+                        (" LEAF01 ", "swp2", "leaf01", "swp1"),
+                    ],
+                    patterns,
+                    order,
+                )
+
+            self_replacement = json.loads(json.dumps(base))
+            self_replacement["link_rewrites"][0]["replacement"] = [
+                {"device": leaf, "port": "swp10"},
+                {"device": " LEAF01 ", "port": "swp11"},
+            ]
+            policy_file.write_text(
+                json.dumps(self_replacement), encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "replacement.*self-link"):
+                self.topology.load_air_topology_policy(policy_file)
+
+            with self.assertRaisesRegex(ValueError, "unsafe.*\u7aef\u53e3\u51b2\u7a81"):
+                self.topology._validate_air_topology_policy(
+                    policy,
+                    [
+                        (leaf, "swp1", leaf, "swp2"),
+                        ("ztp-server", "eth2", "peer01", "swp4"),
+                    ],
+                    patterns,
+                    order,
+                )
+
+    def test_cumulus_p2p_rejects_normalized_device_self_link(self):
+        records = [
+            (" Leaf01 ", "swp1", "leaf01", "swp2"),
+            ("unrelated-private-node", "swp3", "peer02", "swp4"),
+        ]
+
+        conflict_indices, messages = (
+            self.topology._find_duplicate_or_conflicting_links(records)
+        )
+
+        self.assertEqual({0}, conflict_indices)
+        self.assertEqual(
+            ["  [自连接] 记录 #1: Leaf01:swp1 -- leaf01:swp2"],
+            messages,
+        )
+        self.assertNotIn("unrelated-private-node", "\n".join(messages))
+
+    def test_cumulus_p2p_main_fails_closed_on_self_link_workbook(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workbook = self.topology.openpyxl.Workbook()
+            sheet = workbook.active
+            sheet.title = "TAN synthetic"
+            sheet.append(["Source", "", "Dest", ""])
+            sheet.append(["name", "port", "name", "port"])
+            sheet.append(["Leaf01", "swp1", "leaf01", "swp2"])
+            workbook.save(root / "p2p.xlsx")
+            workbook.close()
+
+            inventory = root / "01-inventory.log"
+            inventory.write_text("[Eth-SW]\n*leaf*\n", encoding="utf-8")
+            port_map = root / "02-port-mapping.log"
+            port_map.write_text("", encoding="utf-8")
+            devices = root / "02-devices_config.csv"
+            devices.write_text(DEVICE_HEADER, encoding="utf-8")
+            lldpq = root / "lldpq-template.dot"
+            lldpq.write_text("/* synthetic */\n", encoding="utf-8")
+            air_template = root / "air-template-no-oob.json"
+            air_template.write_text("{}\n", encoding="utf-8")
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            patches = (
+                mock.patch.object(self.topology, "SCRIPT_DIR", str(root)),
+                mock.patch.object(self.topology, "DEFAULT_INV", str(inventory)),
+                mock.patch.object(self.topology, "DEFAULT_PORT_MAP", str(port_map)),
+                mock.patch.object(self.topology, "DEVICES_CONFIG", str(devices)),
+                mock.patch.object(self.topology, "LLDPQ_TEMPLATE", str(lldpq)),
+                mock.patch.object(
+                    self.topology, "AIR_JSON_TEMPLATE", str(air_template),
+                ),
+                mock.patch.object(self.topology, "_AUTO_YES", False),
+                mock.patch.object(
+                    self.topology.sys,
+                    "argv",
+                    ["b-xlsx_to_dot.py", "-y", "--os-version", "5.18"],
+                ),
+                mock.patch.object(self.topology.sys, "stdout", stdout),
+                mock.patch.object(self.topology.sys, "stderr", stderr),
+            )
+            with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                    patches[5], patches[6], patches[7], patches[8], patches[9]:
+                with self.assertRaises(SystemExit) as raised:
+                    self.topology.main()
+
+            self.assertEqual(1, raised.exception.code)
+            error = stderr.getvalue()
+            self.assertIn("记录 #1", error)
+            self.assertIn("Leaf01:swp1 -- leaf01:swp2", error)
+            self.assertNotIn("Generated:", stdout.getvalue())
+            self.assertFalse(any((root / "output-p2p").glob("*.dot")))
 
 
 if __name__ == "__main__":

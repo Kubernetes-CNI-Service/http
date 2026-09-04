@@ -56,6 +56,7 @@ _AUTO_YES = False  # 由 -y 参数设置
 _EXCLUDED_CONFIG_TYPES = frozenset({"air"})
 _SAFE_HOSTNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")
 _SAFE_AAA_USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+_MAC_SCALAR_RE = re.compile(r"^(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
 _V2_MLAG_CAPABLE_TEMPLATES = frozenset({"border", "oobofoob-spine"})
 _EXPECTED_DEVICE_HEADER_PREFIX = (
     "hostname", "type", "template", "eth0_ip", "netmask", "eth0_gw",
@@ -77,6 +78,7 @@ from project_contract import (
     normalize_v2_mlag_policy,
     normalize_v2_vrr_policy,
     parse_device_csv_layout,
+    parse_terminal_l2_ports,
     require_device_csv_row_width,
     v2_vrr_ipv4_plan,
 )
@@ -176,7 +178,26 @@ def _exclude_config_type(device_type):
     return (device_type or "").strip().casefold() in _EXCLUDED_CONFIG_TYPES
 
 
-class _UniqueKeyLoader(yaml.SafeLoader):
+class _MacStringSafeLoader(yaml.SafeLoader):
+    """Safe loader that keeps exact colon-form MAC addresses as strings."""
+
+
+# PyYAML's YAML 1.1 integer resolver treats an all-numeric colon-form MAC as
+# sexagesimal.  Copy the resolver table before adding a more specific rule so
+# importing this generator never changes PyYAML behavior in other modules.
+_MacStringSafeLoader.yaml_implicit_resolvers = copy.deepcopy(
+    yaml.SafeLoader.yaml_implicit_resolvers
+)
+for _first_mac_character in "0123456789abcdefABCDEF":
+    _MacStringSafeLoader.yaml_implicit_resolvers.setdefault(
+        _first_mac_character, [],
+    ).insert(
+        0,
+        (yaml.resolver.BaseResolver.DEFAULT_SCALAR_TAG, _MAC_SCALAR_RE),
+    )
+
+
+class _UniqueKeyLoader(_MacStringSafeLoader):
     """Safe YAML loader that rejects duplicate keys instead of overwriting."""
 
 
@@ -324,7 +345,7 @@ def _load_global_document():
     """Load and schema-check the authoritative project global document."""
     try:
         with open(_GLOBAL_FILE, encoding="utf-8") as f:
-            data = yaml.safe_load(f)
+            data = yaml.load(f, Loader=_MacStringSafeLoader)
     except FileNotFoundError:
         print(f"[ERROR] 找不到配置文件: {_GLOBAL_FILE}"); sys.exit(1)
     except yaml.YAMLError as e:
@@ -1176,13 +1197,29 @@ def _v2_vrr_mac(policy, vlan_id):
     return ":".join(raw[index:index + 2] for index in range(0, 12, 2))
 
 
+def _cumulus_uses_native_svi_link_mac(version):
+    """Return whether the target release supports an SVI link MAC in NVUE.
+
+    Cumulus Linux 5.18 introduced EVPN-MH operation without a unique SVI IP.
+    For that shared-gateway scenario, use the native
+    ``interface.<svi>.link.mac-address`` representation.  Older or
+    unrecognised versions deliberately retain the compatible ifupdown2
+    snippet representation.
+    """
+    match = re.match(r"^\s*(\d+)\.(\d+)(?:[.\-+_]|$)", str(version or ""))
+    if not match:
+        return False
+    return (int(match.group(1)), int(match.group(2))) >= (5, 18)
+
+
 def _apply_v2_vrr_policy(devices, policy):
     """Infer and populate the two supported SVI/VRR scenarios project-wide.
 
     Only single-VLAN entries with an SVI participate.  Pure L2 membership does
     not influence inference.  Claims are scoped by VRF plus VLAN.  Two or more
     unique physical SVIs use the derived gateway as VRR; shared gateway SVIs
-    use the snippet-MAC form.  A lone non-gateway SVI remains standalone.
+    use one common link MAC.  The renderer chooses the version-specific MAC
+    representation.  A lone non-gateway SVI remains standalone.
     """
     claims = {}
     seen_device_vlan = set()
@@ -1573,7 +1610,8 @@ def _normalize_vrl_config(global_data):
     }
 
 
-def _resolve_device_dhcp_relays(dev, server_catalog):
+def _resolve_device_dhcp_relays(
+        dev, server_catalog, *, native_svi_link_mac=False):
     """Build one render-ready DHCP relay entry per VRF."""
     resolved = []
     for vrf in dev.get("vrfs", []):
@@ -1593,6 +1631,7 @@ def _resolve_device_dhcp_relays(dev, server_catalog):
         used_groups = []
         relay_modes = set()
         ifupdown_snippets = {}
+        svi_link_macs = {}
         for l2 in relay_l2:
             vlan_id = l2.get("vlan_id")
             if vlan_id is None:
@@ -1623,9 +1662,12 @@ def _resolve_device_dhcp_relays(dev, server_catalog):
                 relay_modes.add("giaddress")
             elif combination == (True, False, True):
                 relay_modes.add("gateway")
-                ifupdown_snippets[interface] = (
-                    f"hwaddress {l2['vrr_mac']}\n"
-                )
+                if native_svi_link_mac:
+                    svi_link_macs[interface] = l2["vrr_mac"]
+                else:
+                    ifupdown_snippets[interface] = (
+                        f"hwaddress {l2['vrr_mac']}\n"
+                    )
             elif combination == (False, True, True):
                 raise ValueError(
                     f"evpn_vrf={vrf_name} {interface} 使用已废弃的方案 2："
@@ -1731,18 +1773,20 @@ def _resolve_device_dhcp_relays(dev, server_catalog):
             "gateway_address": gateway_address,
             "loopback_address": loopback_address,
             "ifupdown_snippets": ifupdown_snippets,
+            "svi_link_macs": svi_link_macs,
         })
     return resolved
 
 
-def _resolve_device_svi_vrr_support(dev):
-    """Build VRF/system support from SVI/VRR fields, independent of relay.
+def _resolve_device_svi_vrr_support(dev, *, native_svi_link_mac=False):
+    """Build version-specific SVI/VRR support, independent of relay.
 
     A gateway-style SVI needs the device loopback installed in the tenant VRF.
     When ``svi_ip`` and ``vrr_mac`` exist but ``vrr_ip`` does not, NVUE must
-    not receive an incomplete ``ipv4.vrr`` object; ifupdown2 owns the VLAN MAC
-    through a snippet instead.  These interface requirements apply even when
-    DHCP relay itself is disabled for the VLAN.
+    not receive an incomplete ``ipv4.vrr`` object.  Cumulus 5.18 and later own
+    the MAC through ``link.mac-address``; older releases use an ifupdown2
+    snippet.  These interface requirements apply even when DHCP relay itself
+    is disabled for the VLAN.
     """
     resolved = []
     raw_lo = str(dev.get("lo_ip") or "").strip()
@@ -1750,6 +1794,7 @@ def _resolve_device_svi_vrr_support(dev):
 
     for vrf in dev.get("vrfs", []):
         snippets = {}
+        svi_link_macs = {}
         needs_loopback = False
         for l2 in vrf.get("l2vlans", []):
             has_svi = bool(l2.get("svi_ip"))
@@ -1772,9 +1817,11 @@ def _resolve_device_svi_vrr_support(dev):
                         "组合缺少 evpn_l2vlan"
                     )
                 needs_loopback = True
-                snippets[f"vlan{vlan_id}"] = (
-                    f"hwaddress {l2['vrr_mac']}\n"
-                )
+                interface = f"vlan{vlan_id}"
+                if native_svi_link_mac:
+                    svi_link_macs[interface] = l2["vrr_mac"]
+                else:
+                    snippets[interface] = f"hwaddress {l2['vrr_mac']}\n"
 
         if not needs_loopback:
             continue
@@ -1795,6 +1842,7 @@ def _resolve_device_svi_vrr_support(dev):
             "vrf": vrf["evpn_vrf"],
             "loopback_address": str(lo_interface),
             "ifupdown_snippets": snippets,
+            "svi_link_macs": svi_link_macs,
         })
     return resolved
 
@@ -1984,7 +2032,7 @@ def _decode_source_yaml(source_b64, expected_sha256):
 
     try:
         source_text = source_bytes.decode("utf-8")
-        source_doc = yaml.safe_load(source_text)
+        source_doc = yaml.load(source_text, Loader=_MacStringSafeLoader)
     except (UnicodeDecodeError, yaml.YAMLError) as exc:
         raise ValueError(f"source YAML 无法解析: {exc}") from exc
     if not (isinstance(source_doc, list) and any(
@@ -2240,6 +2288,9 @@ def _generate_devices_yaml():
     _tmpl_map = _load_devices_template(_CSV_FILE)
     global_data = load_global()  # handles merged format extraction
     schema_version = global_data.get("_project_schema_version", 1)
+    native_svi_link_mac = _cumulus_uses_native_svi_link_mac(
+        global_data.get("version"),
+    )
     v2_vrr_policy = None
     v2_mlag_policy = None
     if schema_version == 2:
@@ -2297,6 +2348,14 @@ def _generate_devices_yaml():
         ) if i is not None]
         _fixed = _layout.fixed_indices
         _vrl_col = _fixed.get("vrl")
+        _terminal_l2_ports_col = _layout.policy_indices.get(
+            "terminal_l2_ports",
+        )
+        if schema_version == 2 and _terminal_l2_ports_col is None:
+            print(
+                "[WARN] schema 2 devices_config.csv 未包含 terminal_l2_ports；"
+                "不会自动启用终端 STP，请迁移到显式 allowlist"
+            )
         _evpn_width = len(
             _EVPN_V2_COLUMNS if schema_version == 2 else _EVPN_COLUMNS
         )
@@ -2304,7 +2363,10 @@ def _generate_devices_yaml():
         _evpn_base = (
             _layout.evpn_group_starts[0]
             if _layout.evpn_group_starts
-            else _layout.fixed_start + len(_fixed)
+            else (
+                _layout.fixed_start + len(_fixed)
+                + len(_layout.policy_columns)
+            )
         )
         _evpn_end = _layout.metadata_start
 
@@ -2403,6 +2465,16 @@ def _generate_devices_yaml():
             except ValueError as exc:
                 _dup_errs.append(f"  {hostname}: {exc}")
                 continue
+            if _terminal_l2_ports_col is not None:
+                try:
+                    dev["terminal_l2_ports"] = list(
+                        parse_terminal_l2_ports(
+                            row[_terminal_l2_ports_col],
+                        )
+                    )
+                except ValueError as exc:
+                    _dup_errs.append(f"  {hostname}: {exc}")
+                    continue
             if _source_yaml_col is not None and not _csv_na(row[_source_yaml_col]):
                 source_sha256 = (row[_source_sha256_col]
                                   if _source_sha256_col is not None else "")
@@ -2611,9 +2683,12 @@ def _generate_devices_yaml():
                     )
                     continue
             try:
-                dev["svi_vrr_support"] = _resolve_device_svi_vrr_support(dev)
+                dev["svi_vrr_support"] = _resolve_device_svi_vrr_support(
+                    dev, native_svi_link_mac=native_svi_link_mac,
+                )
                 dev["dhcp_relays"] = _resolve_device_dhcp_relays(
                     dev, dhcp_server_catalog,
+                    native_svi_link_mac=native_svi_link_mac,
                 )
             except ValueError as exc:
                 _dup_errs.append(f"  {hostname}: SVI/VRR/DHCP relay 配置: {exc}")
@@ -2804,12 +2879,41 @@ def _bond_sort_key(name: str) -> list:
 
 
 def _expand_swp_range(spec: str) -> list:
-    """Expand 'swp31-32' → ['swp31','swp32'], or 'swp31' → ['swp31']."""
-    spec = spec.strip()
-    m = re.match(r'^swp(\d+)-(\d+)$', spec)
-    if m:
-        return [f"swp{i}" for i in range(int(m.group(1)), int(m.group(2)) + 1)]
-    return [spec] if spec else []
+    """Expand a strict slash-separated list of ``swpN``/``swpN-M`` tokens."""
+    value = str(spec or '').strip()
+    if not value:
+        return []
+
+    members = []
+    seen = set()
+    max_members = 4096
+    token_pattern = re.compile(r'^swp([1-9]\d*)(?:-([1-9]\d*))?$')
+    for raw_token in value.split('/'):
+        token = raw_token.strip()
+        if not token:
+            raise ValueError("peerlink_ports 包含空 token")
+        match = token_pattern.fullmatch(token)
+        if match is None:
+            raise ValueError(
+                "peerlink_ports 仅支持 swpN 或 swpN-M，以 / 分隔："
+                f"{token!r}"
+            )
+        start = int(match.group(1))
+        end = int(match.group(2) or start)
+        if end < start:
+            raise ValueError(f"peerlink_ports 范围倒序：{token!r}")
+        if len(members) + end - start + 1 > max_members:
+            raise ValueError(
+                "peerlink_ports 展开后接口数量超过安全上限 "
+                f"{max_members}"
+            )
+        for number in range(start, end + 1):
+            member = f"swp{number}"
+            if member in seen:
+                raise ValueError(f"peerlink_ports 接口重复：{member}")
+            seen.add(member)
+            members.append(member)
+    return members
 
 
 def _bond_id(name: str) -> int:
@@ -2846,6 +2950,40 @@ def _breakout_info(max_sub: int) -> tuple:
         raise ValueError(f"breakout sub-port index must be 0..7, got {max_sub}")
     count = 2 if max_sub < 2 else 4 if max_sub < 4 else 8
     return count, 8 // count
+
+
+def _merge_overlapping_breakout_parents(parent_swps, bgp_uplink_parents):
+    """Render a physical breakout parent once when lane roles are mixed.
+
+    A physical cage can legitimately use some lanes for routed BGP links and
+    other lanes for a server-facing bond or direct VLAN.  Templates render the
+    two parent maps in separate loops, so leaving the same parent in both maps
+    creates a duplicate YAML key.  Keep the parent in ``parent_swps``, expand
+    it to the largest required breakout mode, and remove only the duplicate
+    parent declaration from the BGP map.  Exact BGP child interfaces remain in
+    ``bgp_neighbors`` and are still used by uplink tracking and BGP rendering.
+    """
+    for swp_name in sorted(
+        set(parent_swps).intersection(bgp_uplink_parents),
+        key=_bond_sort_key,
+    ):
+        parent = parent_swps[swp_name]
+        bgp_parent = bgp_uplink_parents.pop(swp_name)
+        subs = {
+            int(sub)
+            for info in (parent, bgp_parent)
+            for sub in info.get("subs", [])
+        }
+        if not subs:
+            raise ValueError(
+                f"breakout parent {swp_name} has no configured child lanes"
+            )
+        count, lanes = _breakout_info(max(subs))
+        parent.update({
+            "breakout": count,
+            "lanes": lanes,
+            "subs": list(range(count)),
+        })
 
 
 def _device_bridge_vlan_selectors(device):
@@ -3054,6 +3192,9 @@ def preprocess_device(dev: dict) -> dict:
                 'breakout': count, 'lanes': lanes,
                 'subs': list(range(count)), 'evpn_uplink': is_evpn,
             }
+        _merge_overlapping_breakout_parents(
+            dev['parent_swps'], dev['bgp_uplink_parents'],
+        )
         pp = dev.get('peerlink_ports', '') or ''
         dev['peerlink_member_list'] = _expand_swp_range(pp) if pp else []
         return dev
@@ -3167,6 +3308,8 @@ def preprocess_device(dev: dict) -> dict:
             'evpn_uplink': is_evpn,
         }
 
+    _merge_overlapping_breakout_parents(parent_swps, bgp_uplink_parents)
+
     dev['bgp_plain_uplinks']  = bgp_plain_uplinks
     dev['bgp_uplink_parents'] = bgp_uplink_parents
 
@@ -3178,7 +3321,7 @@ def preprocess_device(dev: dict) -> dict:
 
 def load_devices():
     with open(DEVICES_FILE, encoding="utf-8") as f:
-        data = yaml.safe_load(f)
+        data = yaml.load(f, Loader=_MacStringSafeLoader)
     return data.get("global", {}), data.get("devices", {})
 
 
@@ -3273,10 +3416,18 @@ def _yaml_string(value):
     return json.dumps(value, ensure_ascii=False)
 
 
+def _yaml_scalar_finalize(value):
+    """Quote exact MAC scalars before Jinja emits YAML 1.1-ambiguous text."""
+    if isinstance(value, str) and _MAC_SCALAR_RE.fullmatch(value):
+        return _yaml_string(value)
+    return value
+
+
 def build_env():
     env = Environment(
         loader=FileSystemLoader(TEMPLATES_DIR),
         undefined=StrictUndefined,
+        finalize=_yaml_scalar_finalize,
         trim_blocks=True,
         lstrip_blocks=True,
         keep_trailing_newline=True,
@@ -3854,22 +4005,123 @@ def _stp_values(domain_fragments, setting):
     return values
 
 
-def _inject_terminal_l2_stp(document):
-    """Apply terminal Edge + BPDU Guard to standalone L2 swp/bond ports.
+def _normalize_terminal_l2_policy(terminal_l2_ports):
+    """Return a strict explicit interface set; missing policy means empty."""
+    if terminal_l2_ports is None:
+        return frozenset()
+    if not isinstance(terminal_l2_ports, (list, tuple, set)):
+        raise ValueError(
+            "terminal_l2_ports 内部值必须是 interface list"
+        )
+    normalized = []
+    seen = set()
+    for value in terminal_l2_ports:
+        for interface in parse_terminal_l2_ports(value):
+            if interface in seen:
+                raise ValueError(
+                    f"terminal_l2_ports 接口重复：{interface}"
+                )
+            seen.add(interface)
+            normalized.append(interface)
+    return frozenset(normalized)
 
-    Existing conflicting values are never overwritten.  Bond member physical
-    interfaces are deliberately excluded; STP belongs on the logical L2 bond
-    bridge port.
-    """
-    targets, _fragments, _members, mixed_selectors = (
+
+def _select_terminal_l2_targets(document, terminal_l2_ports):
+    """Resolve the exact bridge selectors governed by terminal STP policy."""
+    targets, fragments_by_name, bond_members, mixed_selectors = (
         _terminal_l2_bridge_domains(document)
     )
-    if mixed_selectors:
-        details = "; ".join(
-            f"{selector} 同时包含独立端口和 bond member {','.join(members)}"
-            for selector, members in mixed_selectors
+    requested = _normalize_terminal_l2_policy(terminal_l2_ports)
+    selected = {}
+    covered = set()
+    mixed_by_selector = dict(mixed_selectors)
+    for selector, members in mixed_selectors:
+        expanded = {
+            str(name).casefold() for name in expand_nvue_selector(selector)
+        }
+        if expanded & requested:
+            raise ValueError(
+                f"接口 selector {selector} 同时包含独立端口和 bond member "
+                f"{','.join(members)}"
+            )
+    for key, domain_fragments in targets.items():
+        selector, _domain_name = key
+        expanded = {
+            str(name).casefold() for name in expand_nvue_selector(selector)
+        }
+        overlap = expanded & requested
+        if not overlap:
+            continue
+        if overlap != expanded:
+            raise ValueError(
+                f"接口 selector {selector} 同时包含 terminal_l2_ports 和未列出接口；"
+                "必须拆分 selector 后再配置 STP"
+            )
+        if selector in mixed_by_selector:
+            raise ValueError(
+                f"接口 selector {selector} 同时包含独立端口和 bond member "
+                f"{','.join(mixed_by_selector[selector])}"
+            )
+        selected[key] = domain_fragments
+        covered.update(expanded)
+
+    logical_fragments = {}
+    for selector, fragments in fragments_by_name.items():
+        for name in expand_nvue_selector(selector):
+            logical_fragments.setdefault(str(name).casefold(), []).extend(
+                fragments,
+            )
+
+    missing = sorted(requested - covered)
+    normalized_bond_members = {
+        str(member).casefold() for member in bond_members
+    }
+    for interface in missing:
+        if interface in normalized_bond_members:
+            raise ValueError(
+                f"terminal_l2_ports={interface} 是 bond member，"
+                "STP 只能配置在逻辑 bond 上"
+            )
+        fragments = logical_fragments.get(interface, [])
+        types = {
+            str(fragment.get("type") or "").strip().casefold()
+            for fragment in fragments
+            if isinstance(fragment, dict)
+        }
+        types.discard("")
+        if interface.startswith("peerlink") or "peerlink" in types:
+            raise ValueError(
+                f"terminal_l2_ports 不允许 peerlink：{interface}"
+            )
+        if not fragments:
+            raise ValueError(
+                f"terminal_l2_ports 接口不存在：{interface}"
+            )
+        if not types.issubset({"swp", "bond"}) or not types:
+            raise ValueError(
+                f"terminal_l2_ports={interface} 不是 swp/bond 接口"
+            )
+        raise ValueError(
+            f"terminal_l2_ports={interface} 没有独立二层 bridge domain"
         )
-        raise ValueError(f"二层 swp selector 不能混合 bond member：{details}")
+    return (
+        selected, targets, fragments_by_name, bond_members,
+        mixed_selectors, requested,
+    )
+
+
+def _inject_terminal_l2_stp(document, terminal_l2_ports=None):
+    """Apply terminal Edge + BPDU Guard to selected L2 swp/bond ports.
+
+    Existing conflicting values are never overwritten.  Bond member physical
+    interfaces are deliberately excluded; STP belongs on the logical L2 bond.
+    A missing value and an empty list both select no interfaces.  This
+    fail-safe default prevents an unclassified switch-facing link from being
+    converted into an STP edge port.
+    """
+    targets, _all_targets, _fragments, _members, _mixed, _requested = (
+        _select_terminal_l2_targets(document, terminal_l2_ports)
+    )
     changed = False
     for (interface_name, domain_name), domain_fragments in sorted(targets.items()):
         target_stp = domain_fragments[0].get("stp")
@@ -3899,17 +4151,16 @@ def _inject_terminal_l2_stp(document):
     return changed
 
 
-def _terminal_l2_stp_errors(document):
+def _terminal_l2_stp_errors(document, terminal_l2_ports=None):
     """Validate exact Edge + BPDU Guard placement on terminal L2 ports."""
-    targets, fragments_by_name, bond_members, mixed_selectors = (
-        _terminal_l2_bridge_domains(document)
-    )
-    errors = []
-    for selector, members in mixed_selectors:
-        errors.append(
-            f"$.set.interface.{selector}: 二层 swp selector 同时包含独立端口和 "
-            f"bond member {','.join(members)}，必须拆分后再配置 STP"
+    try:
+        (targets, all_targets, fragments_by_name, bond_members,
+         mixed_selectors, requested) = _select_terminal_l2_targets(
+            document, terminal_l2_ports,
         )
+    except ValueError as exc:
+        return [str(exc)]
+    errors = []
     for (interface_name, domain_name), domain_fragments in sorted(targets.items()):
         for setting, expected in _TERMINAL_L2_STP_POLICY.items():
             values = _stp_values(domain_fragments, setting)
@@ -3924,6 +4175,21 @@ def _terminal_l2_stp_errors(document):
                     f"{path}: 必须为 {expected!r}，实际为 "
                     + ", ".join(repr(value) for value in values)
                 )
+
+    for key, domain_fragments in sorted(all_targets.items()):
+        if key in targets:
+            continue
+        interface_name, domain_name = key
+        configured = sorted(
+            setting for setting in _TERMINAL_L2_STP_POLICY
+            if _stp_values(domain_fragments, setting)
+        )
+        if configured:
+            errors.append(
+                f"$.set.interface.{interface_name}.bridge.domain."
+                f"{domain_name}.stp: 未在 terminal_l2_ports 列出，"
+                f"不得配置 {', '.join(configured)}"
+            )
 
     for selector, configs in sorted(fragments_by_name.items()):
         selected_members = set(expand_nvue_selector(selector)) & bond_members
@@ -4092,7 +4358,7 @@ def _merge_dhcp_relay_mapping(target, addition, path="set"):
 
 
 def _inject_dhcp_relay_support(document, device_vars):
-    """Merge SVI/VRR loopbacks and ifupdown snippets into one ``set``.
+    """Merge SVI/VRR loopbacks and version-specific MACs into one ``set``.
 
     Templates already own the top-level ``system`` and ``vrf`` mappings.  A
     second mapping with the same YAML key would either fail strict parsing or
@@ -4121,6 +4387,7 @@ def _inject_dhcp_relay_support(document, device_vars):
 
     vrfs = {}
     snippets = {}
+    svi_link_macs = {}
     for item in support:
         vrfs[item["vrf"]] = {"loopback": {"ip": {"address": {
             item["loopback_address"]: {},
@@ -4132,8 +4399,20 @@ def _inject_dhcp_relay_support(document, device_vars):
                     f"DHCP relay {interface} 需要两个不同的 ifupdown2_eni 配置"
                 )
             snippets[interface] = value
+        for interface, value in item.get("svi_link_macs", {}).items():
+            previous = svi_link_macs.get(interface)
+            if previous is not None and previous != value:
+                raise ValueError(
+                    f"DHCP relay {interface} 需要两个不同的 SVI link MAC"
+                )
+            svi_link_macs[interface] = value
 
     addition = {"vrf": vrfs}
+    if svi_link_macs:
+        addition["interface"] = {
+            interface: {"link": {"mac-address": mac}}
+            for interface, mac in svi_link_macs.items()
+        }
     if snippets:
         addition["system"] = {"config": {"snippet": {
             "ifupdown2_eni": snippets,
@@ -4281,6 +4560,7 @@ def generate_all(target=None, verify=False, ref_dir=None, fail_on_diff=False):
     ok = skipped = errors = diffs = 0
 
     for name, device_vars in devices.items():
+        terminal_l2_ports = device_vars.get("terminal_l2_ports", ())
         try:
             rendered = render(env, global_vars, name, device_vars)
         except Exception as e:
@@ -4306,7 +4586,7 @@ def generate_all(target=None, verify=False, ref_dir=None, fail_on_diff=False):
             evpn_uplink_injected = False
             if not device_vars.get("source_yaml_b64"):
                 terminal_l2_stp_injected = _inject_terminal_l2_stp(
-                    rendered_doc,
+                    rendered_doc, terminal_l2_ports,
                 )
                 qos_injected = _inject_qos_policy(
                     rendered_doc, device_vars.get("template"),
@@ -4331,7 +4611,9 @@ def generate_all(target=None, verify=False, ref_dir=None, fail_on_diff=False):
             )
             errors += 1
             continue
-        terminal_l2_stp_errors = _terminal_l2_stp_errors(rendered_doc)
+        terminal_l2_stp_errors = _terminal_l2_stp_errors(
+            rendered_doc, terminal_l2_ports,
+        )
         if terminal_l2_stp_errors:
             print(
                 f"[ERROR] {name}: 终端二层接口 STP 配置无效："
@@ -4376,7 +4658,7 @@ def generate_all(target=None, verify=False, ref_dir=None, fail_on_diff=False):
         if vrl_injected:
             print(f"  [VRL] {name}: 已合并到原有单一 set 操作")
         if dhcp_relay_injected:
-            print(f"  [SVI/VRR] {name}: 已合并 VRF loopback/ifupdown2 辅助配置")
+            print(f"  [SVI/VRR] {name}: 已合并 VRF loopback/版本化 SVI MAC 配置")
         if terminal_l2_stp_injected:
             print(f"  [STP] {name}: 已为独立二层 swp/bond 启用 Edge + BPDU Guard")
         if qos_injected:

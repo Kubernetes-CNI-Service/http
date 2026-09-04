@@ -55,7 +55,8 @@ HELP_EPILOG = """
      与目标 OS/架构匹配的 apps/ 离线 APT 仓库，能访问时排除。非交互上传必须明确指定
      --include-apps 或 --exclude-apps；dry-run 默认排除，可用 --include-apps 预览。
   3. 部署包保留源代码、模板和指定项目中代码实际消费的输入：三份固定配置、
-     setup/load 当前选择的 P2P XLSX、项目公钥和镜像文件。P2P 在临时副本中删除
+     存在时的 03-air-topology-policy.json、setup/load 当前选择的 P2P XLSX、
+     项目公钥和镜像文件。P2P 在临时副本中删除
      xl/media、图片关系和 drawing anchor 后以原文件名入包，源文件不会修改。
      其他规划附件、其他 XLSX、项目说明、Markdown/README/用户手册、
      其他 DAY0 项目和全部

@@ -81,6 +81,7 @@ class ImpactManifestTests(unittest.TestCase):
                 "test_cases/run_related_tests.py",
                 "DAY0-Prepare/template/01-global.yaml",
                 "DAY0-Prepare/template/02-devices_config.csv",
+                "ztp/config/cumulus/template/P2P/01-inventory.log",
                 "ztp/config/cumulus/template/03-templates-j2/_direct_vlan_ports.yaml.j2",
                 "ztp/config/cumulus/template/03-templates-j2/_l2_svis.yaml.j2",
                 "ztp/config/cumulus/template/03-templates-j2/border.yaml.j2",

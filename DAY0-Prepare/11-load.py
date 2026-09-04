@@ -84,6 +84,7 @@ DEPLOYMENT_LOCK = HTTP_ROOT / ".deployment.lock"
 ZTP_PREFIX_MARKER = HTTP_ROOT / ".ztp-prefix-publication.json"
 PROMPT_TIMEOUT = 15
 DEFAULT_ZTP_MONITOR_INTERVAL = 30
+AIR_TOPOLOGY_POLICY_NAME = "03-air-topology-policy.json"
 VALID_TYPES = {"eth", "eth_spx", "spx", "ib", "nvl", "server", "air"}
 BOOTSTRAP_BY_ROLE = {
     "air_oobofoob": "ztp-bootstrap_oobofoob.sh",
@@ -182,6 +183,7 @@ class ProjectInputs:
     device_types: frozenset[str]
     pubkeys: tuple[Path, ...]
     settings: GlobalSettings
+    air_topology_policy: Path | None = None
 
 
 def section(title: str) -> None:
@@ -317,6 +319,15 @@ def _nonempty_file(path: Path, label: str) -> None:
         raise LoadError(f"缺少 {label}：{path.name}")
     if path.stat().st_size == 0:
         raise LoadError(f"{label} 大小为 0：{path.name}；请准备真实内容后再次执行 load")
+
+
+def project_air_topology_policy(project: Path) -> Path | None:
+    """Return the fixed optional AIR topology policy for one project."""
+    path = project / AIR_TOPOLOGY_POLICY_NAME
+    if not os.path.lexists(path):
+        return None
+    _nonempty_file(path, "AIR 拓扑策略")
+    return path
 
 
 def _nonempty_release_file(path: Path, label: str) -> None:
@@ -2393,6 +2404,8 @@ def validate_and_publish_release(
         "subnet": inputs.subnet_file,
         "p2p": inputs.p2p_file,
     }
+    if inputs.air_topology_policy is not None:
+        input_files["air_topology_policy"] = inputs.air_topology_policy
     input_hashes = {name: _sha256_path(path) for name, path in input_files.items()}
     release_basis = {
         "project": project.name,
@@ -2542,9 +2555,18 @@ def restore_release_links(snapshot: dict[Path, Optional[str]]) -> None:
 def generate_configs(
     device_types: frozenset[str], *, install_dhcp: bool, dry_run: bool = False,
     schema_version: int = GLOBAL_SCHEMA_VERSION,
+    eth_version: str | None = None,
+    air_topology_policy: Path | None = None,
 ) -> None:
     p2p_dir = ZTP_DIR / "config/cumulus/template/P2P"
-    run([sys.executable, "b-xlsx_to_dot.py", "-y"], cwd=p2p_dir, dry_run=dry_run)
+    p2p_command = [sys.executable, "b-xlsx_to_dot.py", "-y"]
+    if eth_version:
+        p2p_command.extend(["--os-version", eth_version])
+    if air_topology_policy is not None:
+        p2p_command.extend([
+            "--air-link-policy", str(air_topology_policy),
+        ])
+    run(p2p_command, cwd=p2p_dir, dry_run=dry_run)
 
     # AIR node identity/MAC comes from p2p-air.json. c1-generate_dhcp.py copies
     # template/IP/netmask/gateway from the matching production CSV row. It must
@@ -3689,6 +3711,7 @@ def validate_inputs(
     validation_errors = []
     device_types: frozenset[str] = frozenset()
     p2p_file = project / (args.p2p_file or "p2p.xlsx")
+    air_topology_policy = None
     try:
         settings = apply_subnet_service_ips(settings, subnet_file)
     except LoadError as exc:
@@ -3703,6 +3726,10 @@ def validate_inputs(
         validation_errors.append(str(exc))
     try:
         validate_subnet_file(subnet_file, settings)
+    except LoadError as exc:
+        validation_errors.append(str(exc))
+    try:
+        air_topology_policy = project_air_topology_policy(project)
     except LoadError as exc:
         validation_errors.append(str(exc))
     if device_types and not args.no_upgrade:
@@ -3742,6 +3769,7 @@ def validate_inputs(
             device_types=device_types,
             pubkeys=pubkeys,
             settings=settings,
+            air_topology_policy=air_topology_policy,
         ),
         images,
     )
@@ -3949,6 +3977,8 @@ def main(argv: list[str] | None = None) -> int:
                 install_dhcp=service_available,
                 dry_run=args.dry_run,
                 schema_version=inputs.settings.schema_version,
+                eth_version=inputs.settings.versions.get("eth"),
+                air_topology_policy=inputs.air_topology_policy,
             )
         else:
             warn(

@@ -49,6 +49,7 @@ from project_contract import (
     normalize_v2_mlag_policy,
     normalize_v2_vrr_policy,
     parse_device_csv_layout,
+    parse_terminal_l2_ports,
     require_device_csv_row_width,
     validate_ztp_url_prefix,
     v2_vrr_ipv4_plan,
@@ -920,6 +921,48 @@ def _remove_legacy_nvos_output_links():
 def _vna(val):
     """判断 CSV 字段是否为空 / NA。"""
     return not val or val.strip().lower() in ("na", "n/a", "none", "-", "")
+
+
+_V2_PEERLINK_PORT_TOKEN_RE = re.compile(
+    r"^swp([1-9]\d*)(?:-([1-9]\d*))?$"
+)
+_MAX_V2_PEERLINK_PORTS = 4096
+
+
+def _expand_v2_peerlink_ports(spec):
+    """Expand one strict slash-separated schema-v2 peerlink port list."""
+    value = str(spec or "").strip()
+    if not value:
+        return []
+
+    members = []
+    seen = set()
+    for raw_token in value.split("/"):
+        token = raw_token.strip()
+        if not token:
+            raise ValueError("peerlink_ports 包含空 token")
+        match = _V2_PEERLINK_PORT_TOKEN_RE.fullmatch(token)
+        if match is None:
+            raise ValueError(
+                "peerlink_ports 仅支持 swpN 或 swpN-M，以 / 分隔："
+                f"{token!r}"
+            )
+        start = int(match.group(1))
+        end = int(match.group(2) or start)
+        if end < start:
+            raise ValueError(f"peerlink_ports 范围倒序：{token!r}")
+        if len(members) + end - start + 1 > _MAX_V2_PEERLINK_PORTS:
+            raise ValueError(
+                "peerlink_ports 展开后接口数量超过安全上限 "
+                f"{_MAX_V2_PEERLINK_PORTS}"
+            )
+        for number in range(start, end + 1):
+            member = f"swp{number}"
+            if member in seen:
+                raise ValueError(f"peerlink_ports 接口重复：{member}")
+            seen.add(member)
+            members.append(member)
+    return members
 
 
 def _valid_ip(s, allow_prefix=False):
@@ -1795,13 +1838,20 @@ def _is_matching_production_air_pair(left_hostname, left_type,
         return air_base == production_key
 
     exact = [name for name in candidates if name == air_base]
-    matches = exact or [
-        name for name in candidates
-        if air_base.endswith(name) or name.endswith(air_base)
-    ]
-    # Site-prefix matching is allowed only when it resolves to one Production
-    # identity, matching the DHCP generator's inheritance contract.
-    return len(set(matches)) == 1 and matches[0] == production_key
+    matches = exact
+    if not matches:
+        suffix_matches = [
+            name for name in candidates
+            if air_base.endswith(f"-{name}")
+        ]
+        if suffix_matches:
+            longest = max(len(name) for name in suffix_matches)
+            matches = [
+                name for name in suffix_matches if len(name) == longest
+            ]
+    # Site-prefix matching is one-way, requires a hyphen boundary, and selects
+    # the same longest unique Production identity as the DHCP generator.
+    return len(matches) == 1 and matches[0] == production_key
 
 
 def _validate_eth_csv(path):
@@ -1861,6 +1911,14 @@ def _validate_eth_csv(path):
                 return errors, warnings
             fixed_indices = layout.fixed_indices
             vrl_col = fixed_indices.get("vrl")
+            terminal_l2_ports_col = layout.policy_indices.get(
+                "terminal_l2_ports",
+            )
+            if schema_version == 2 and terminal_l2_ports_col is None:
+                warnings.append(
+                    "  schema 2 devices_config.csv 未包含 terminal_l2_ports；"
+                    "不会自动启用终端 STP，请迁移到显式 allowlist"
+                )
             evpn_group_width = 9 if schema_version == 2 else len(_EVPN_COLUMNS)
             evpn_starts = layout.evpn_group_starts
 
@@ -1918,6 +1976,20 @@ def _validate_eth_csv(path):
                 is_nvos  = row_type in _NVOS_TYPES
                 is_server = row_type in _SERVER_TYPES
                 is_air = row_type in _AIR_TYPES
+
+                if terminal_l2_ports_col is not None:
+                    try:
+                        terminal_l2_ports = parse_terminal_l2_ports(
+                            row[terminal_l2_ports_col],
+                        )
+                    except ValueError as exc:
+                        e(row_n, hn, str(exc))
+                        terminal_l2_ports = ()
+                    if terminal_l2_ports and row_type not in _ETH_TYPES:
+                        e(
+                            row_n, hn,
+                            "terminal_l2_ports 只允许 Ethernet 交换机填写",
+                        )
 
                 # ── 共有字段校验（eth0、eth1 管理接口、MAC）────────────────────
                 if len(row) < _COL_ETH0_IP + 1:
@@ -2111,6 +2183,15 @@ def _validate_eth_csv(path):
                     bgp_asn = row[fixed_indices["bgp_asn"]].strip()
                     if not _vna(bgp_asn) and not _valid_asn(bgp_asn):
                         e(row_n, hn, f"bgp_asn 无效：'{bgp_asn}'")
+
+                    peerlink_raw = row[
+                        fixed_indices["peerlink_ports"]
+                    ].strip()
+                    if not _vna(peerlink_raw):
+                        try:
+                            _expand_v2_peerlink_ports(peerlink_raw)
+                        except ValueError as exc:
+                            e(row_n, hn, str(exc))
 
                     if vrl_col is not None:
                         vrl_value = row[vrl_col].strip().casefold()

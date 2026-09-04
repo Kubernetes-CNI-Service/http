@@ -43,6 +43,15 @@ assert DHCP_SPEC.loader is not None
 sys.modules[DHCP_SPEC.name] = DHCP
 DHCP_SPEC.loader.exec_module(DHCP)
 
+TOPOLOGY_SPEC = importlib.util.spec_from_file_location(
+    "air_topology_release_contract",
+    ROOT / "ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py",
+)
+TOPOLOGY = importlib.util.module_from_spec(TOPOLOGY_SPEC)
+assert TOPOLOGY_SPEC.loader is not None
+sys.modules[TOPOLOGY_SPEC.name] = TOPOLOGY
+TOPOLOGY_SPEC.loader.exec_module(TOPOLOGY)
+
 SETUP_SPEC = importlib.util.spec_from_file_location(
     "day0_setup_release_contract", ROOT / "DAY0-Prepare/01-a-setup.py"
 )
@@ -399,6 +408,28 @@ class ReleaseTransactionTests(unittest.TestCase):
             self.ztp / "config/isc-dhcp-server/dhcp-release-manifest.json",
         ), self.assertRaisesRegex(MANUAL.ManualZtpError, "p2p.xlsx 已变化"):
             MANUAL.validate_parent_release_binding(self.project, device)
+
+    def test_manual_preflight_binds_optional_air_policy_from_parent_release(self) -> None:
+        policy = self.project / "03-air-topology-policy.json"
+        policy.write_text("{}\n", encoding="utf-8")
+        inputs = LOAD.replace(self.inputs, air_topology_policy=policy)
+        LOAD.validate_and_publish_release(self.project, inputs)
+        device = {
+            "hostname": "leaf01", "type": "eth",
+            "mac_plain": "020000000001",
+            "identity_macs": {"eth0": "020000000001"},
+        }
+        with mock.patch.object(
+            MANUAL, "DHCP_RELEASE_MANIFEST",
+            self.ztp / "config/isc-dhcp-server/dhcp-release-manifest.json",
+        ):
+            MANUAL.validate_parent_release_binding(self.project, device)
+            policy.write_text('{"changed": true}\n', encoding="utf-8")
+            with self.assertRaisesRegex(MANUAL.ManualZtpError, "AIR.*已变化"):
+                MANUAL.validate_parent_release_binding(self.project, device)
+            policy.unlink()
+            with self.assertRaisesRegex(MANUAL.ManualZtpError, "AIR.*无法读取"):
+                MANUAL.validate_parent_release_binding(self.project, device)
 
     def test_manual_preflight_rejects_aliased_child_release_controls(self) -> None:
         LOAD.validate_and_publish_release(self.project, self.inputs)
@@ -959,6 +990,245 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertEqual(quiesce.call_count, 2)
         release_lock.assert_called_once_with(91)
 
+    def test_generate_configs_passes_global_eth_version_to_air_topology(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            LOAD, "ZTP_DIR", Path(directory),
+        ), mock.patch.object(LOAD, "run") as runner:
+            LOAD.generate_configs(
+                frozenset({"eth"}), install_dhcp=False, dry_run=True,
+                eth_version="5.18",
+            )
+
+        self.assertEqual(
+            [
+                sys.executable, "b-xlsx_to_dot.py", "-y",
+                "--os-version", "5.18",
+            ],
+            runner.call_args_list[0].args[0],
+        )
+
+    def test_global_eth_version_reaches_oobofoob_air_json(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            global_file = root / "01-global.yaml"
+            global_file.write_text(
+                "schema_version: 2\n"
+                "common:\n"
+                "  mgmt:\n"
+                "    dhcp-server: {status: enabled, package: isc-dhcp-server}\n"
+                "    http: {status: enabled, package: apache2, http_root: /srv/http}\n"
+                "    ztp: {status: enabled, ztp_url_prefix: /ztp}\n"
+                "  switch:\n"
+                "    system:\n"
+                "      dns: {}\n"
+                "      ntp: {}\n"
+                "      date-time: {}\n"
+                "switches:\n"
+                "  - eth:\n"
+                "      version: '5.18'\n"
+                "      vrr: {base_mac: '02:00:5e:01:00:00'}\n",
+                encoding="utf-8",
+            )
+            settings = LOAD.load_global(global_file)
+            lldpq = root / "source-lldpq.dot"
+            lldpq.write_text(
+                'graph synthetic {\n'
+                '"example-oobofoob-leaf10":"swp1" -- '
+                '"example-oob-core01":"swp1"\n'
+                '}\n',
+                encoding="utf-8",
+            )
+            air_dot = root / "air.dot"
+            air_json = root / "air.json"
+
+            def run_and_materialize_air(command, **_kwargs):
+                if len(command) < 2 or command[1] != "b-xlsx_to_dot.py":
+                    return
+                version = command[command.index("--os-version") + 1]
+                patterns = {"Eth-SW": ["example-*"]}
+                order = ["Eth-SW"]
+                TOPOLOGY.generate_air_dot(
+                    lldpq, air_dot, patterns, order,
+                    os_version=version,
+                    template_file=TOPOLOGY.AIR_JSON_TEMPLATE,
+                )
+                TOPOLOGY.generate_air_json(
+                    air_dot, air_json, TOPOLOGY.AIR_JSON_TEMPLATE,
+                    lldpq_file=lldpq,
+                )
+
+            with mock.patch.object(
+                LOAD, "ZTP_DIR", root / "ztp",
+            ), mock.patch.object(
+                LOAD, "run", side_effect=run_and_materialize_air,
+            ) as runner:
+                LOAD.generate_configs(
+                    frozenset({"eth"}), install_dhcp=False, dry_run=True,
+                    eth_version=settings.versions["eth"],
+                )
+
+            self.assertEqual(
+                "5.18",
+                runner.call_args_list[0].args[0][
+                    runner.call_args_list[0].args[0].index("--os-version") + 1
+                ],
+            )
+            nodes = json.loads(
+                air_json.read_text(encoding="utf-8")
+            )["content"]["nodes"]
+            self.assertEqual(
+                {"cumulus-vx-5.18"},
+                {node["os"] for node in nodes.values()},
+            )
+
+    def test_load_dhcp_workflow_uses_most_specific_air_production_suffix(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ztp = root / "ztp"
+            dhcp_dir = ztp / "config/isc-dhcp-server"
+            dhcp_dir.mkdir(parents=True)
+            global_file = dhcp_dir / "01-global.yaml"
+            global_file.write_text(
+                "common:\n"
+                "  mgmt:\n"
+                "    ztp:\n"
+                "      ztp_url_prefix: /ztp\n",
+                encoding="utf-8",
+            )
+            devices_file = dhcp_dir / "02-devices_config.csv"
+            devices_file.write_text(
+                "hostname,type,template,eth0_ip,netmask,eth0_gw,eth0_mac,"
+                "eth1_ip,netmask,eth1_gw,eth1_mac\n"
+                "oob-pod3-leaf03,eth,leaf,192.0.2.10,24,192.0.2.1,"
+                "02:00:00:00:00:10,,,,\n"
+                "oobofoob-pod3-leaf03,eth,leaf,192.0.2.11,24,192.0.2.1,"
+                "02:00:00:00:00:11,,,,\n"
+                "border01,eth,leaf,192.0.2.12,24,192.0.2.1,"
+                "02:00:00:00:00:12,,,,\n",
+                encoding="utf-8",
+            )
+            subnet_file = dhcp_dir / "02-subnet_config.csv"
+            subnet_file.write_text(
+                "shared_network,subnet,netmask,range_start,range_end,routers,"
+                "ztp_service_ip,cumulus_profile,nvos_ztp\n"
+                "oob,192.0.2.0,255.255.255.0,192.0.2.200,192.0.2.220,"
+                "192.0.2.1,192.0.2.2,oob,no\n",
+                encoding="utf-8",
+            )
+            air_json = dhcp_dir / "p2p-air.json"
+            air_json.write_text(json.dumps({
+                "content": {"nodes": {
+                    "AIR-example-site-oobofoob-pod3-leaf03": {
+                        "os": "cumulus-vx-5.18",
+                        "management_interfaces": {
+                            "eth0": {"mac_address": "02:00:00:00:01:11"},
+                        },
+                    },
+                    "AIR-evilborder01": {
+                        "os": "cumulus-vx-5.18",
+                        "management_interfaces": {
+                            "eth0": {"mac_address": "02:00:00:00:01:12"},
+                        },
+                    },
+                }},
+            }), encoding="utf-8")
+            manifest = dhcp_dir / "dhcp-release-manifest.json"
+
+            def run_real_dhcp(command, **_kwargs):
+                if len(command) < 2 or command[1] != "c1-generate_dhcp.py":
+                    return
+                with mock.patch.object(
+                    sys, "argv", ["c1-generate_dhcp.py", "-y"],
+                ):
+                    DHCP.main()
+
+            with mock.patch.object(
+                LOAD, "ZTP_DIR", ztp,
+            ), mock.patch.object(
+                LOAD, "run", side_effect=run_real_dhcp,
+            ), mock.patch.multiple(
+                DHCP,
+                SCRIPT_DIR=str(dhcp_dir),
+                OUTPUT_ETH=str(dhcp_dir / "dhcpd_eth.hosts"),
+                OUTPUT_IB=str(dhcp_dir / "dhcpd_ib.hosts"),
+                OUTPUT_NVL=str(dhcp_dir / "dhcpd_nvl.hosts"),
+                OUTPUT_CONF=str(dhcp_dir / "dhcpd.conf"),
+                OUTPUT_MANIFEST=str(manifest),
+                SUBNET_CSV=str(subnet_file),
+                GLOBAL_YAML=str(global_file),
+                P2P_AIR_JSON=str(air_json),
+                DEVICES_CSV=str(devices_file),
+                _AUTO_YES=False,
+            ):
+                LOAD.generate_configs(
+                    frozenset({"eth"}), install_dhcp=False, dry_run=True,
+                )
+
+            devices = json.loads(
+                manifest.read_text(encoding="utf-8")
+            )["devices"]
+            production_hostnames = [
+                "oob-pod3-leaf03", "oobofoob-pod3-leaf03", "border01",
+            ]
+            self.assertTrue(SETUP._is_matching_production_air_pair(
+                "oobofoob-pod3-leaf03", "eth",
+                "AIR-example-site-oobofoob-pod3-leaf03", "air",
+                production_hostnames,
+            ))
+            self.assertFalse(SETUP._is_matching_production_air_pair(
+                "oob-pod3-leaf03", "eth",
+                "AIR-example-site-oobofoob-pod3-leaf03", "air",
+                production_hostnames,
+            ))
+            self.assertFalse(SETUP._is_matching_production_air_pair(
+                "border01", "eth", "AIR-evilborder01", "air",
+                production_hostnames,
+            ))
+            air_device = next(
+                item for item in devices
+                if item["hostname"] == "AIR-example-site-oobofoob-pod3-leaf03"
+            )
+            self.assertEqual("192.0.2.11", air_device["planned_ip"])
+            self.assertEqual("fixed", air_device["dhcp_assignment"])
+            boundary_device = next(
+                item for item in devices
+                if item["hostname"] == "AIR-evilborder01"
+            )
+            self.assertIsNone(boundary_device["planned_ip"])
+            self.assertIsNone(boundary_device["fixed_address"])
+            self.assertEqual("dynamic_known", boundary_device["dhcp_assignment"])
+
+    def test_generate_configs_passes_project_air_topology_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            LOAD, "ZTP_DIR", Path(directory),
+        ), mock.patch.object(LOAD, "run") as runner:
+            policy = Path(directory) / "03-air-topology-policy.json"
+            policy.write_text("{}\n", encoding="utf-8")
+            LOAD.generate_configs(
+                frozenset({"eth"}), install_dhcp=False, dry_run=True,
+                eth_version="5.18", air_topology_policy=policy,
+            )
+
+        self.assertEqual(
+            [
+                sys.executable, "b-xlsx_to_dot.py", "-y",
+                "--os-version", "5.18",
+                "--air-link-policy", str(policy),
+            ],
+            runner.call_args_list[0].args[0],
+        )
+
+    def test_project_air_topology_policy_uses_fixed_optional_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            self.assertIsNone(LOAD.project_air_topology_policy(project))
+            policy = project / "03-air-topology-policy.json"
+            policy.write_text("{}\n", encoding="utf-8")
+            self.assertEqual(policy, LOAD.project_air_topology_policy(project))
+            policy.write_text("", encoding="utf-8")
+            with self.assertRaisesRegex(LOAD.LoadError, "大小为 0"):
+                LOAD.project_air_topology_policy(project)
+
     def test_macos_preparation_does_not_publish_runtime_ztp_prefix(self) -> None:
         """Remote Linux HTTP paths are declarative input on a macOS workstation."""
         args = SimpleNamespace(
@@ -972,8 +1242,14 @@ class ReleaseTransactionTests(unittest.TestCase):
             self.inputs.settings,
             http_root=Path("/var/www/html"),
             ztp_prefix="/day0/project-ztp",
+            versions={"eth": "5.18"},
         )
-        remote_inputs = LOAD.replace(self.inputs, settings=remote_settings)
+        air_policy = self.project / "03-air-topology-policy.json"
+        remote_inputs = LOAD.replace(
+            self.inputs,
+            settings=remote_settings,
+            air_topology_policy=air_policy,
+        )
         configure_prefix = mock.Mock()
         snapshot_prefix = mock.Mock()
         render_runtime = mock.Mock()
@@ -1033,7 +1309,14 @@ class ReleaseTransactionTests(unittest.TestCase):
         snapshot_prefix.assert_not_called()
         configure_prefix.assert_not_called()
         render_runtime.assert_called_once()
-        generate_configs.assert_called_once()
+        generate_configs.assert_called_once_with(
+            remote_inputs.device_types,
+            install_dhcp=False,
+            dry_run=False,
+            schema_version=remote_inputs.settings.schema_version,
+            eth_version="5.18",
+            air_topology_policy=air_policy,
+        )
         release_lock.assert_called_once_with(73)
 
     def test_linux_without_local_service_does_not_publish_runtime_ztp_prefix(self) -> None:
@@ -1192,10 +1475,13 @@ class ReleaseTransactionTests(unittest.TestCase):
 
         def generate_dhcp(
             _device_types, *, install_dhcp, dry_run, schema_version,
+            eth_version, air_topology_policy,
         ):
             self.assertFalse(install_dhcp)
             self.assertFalse(dry_run)
             self.assertEqual(1, schema_version)
+            self.assertIsNone(eth_version)
+            self.assertIsNone(air_topology_policy)
             DHCP.write_dhcpd_conf(runtime_paths["dhcpd.conf"], subnets)
             DHCP.write_hosts(runtime_paths["dhcpd_eth.hosts"], records)
             DHCP.write_hosts(runtime_paths["dhcpd_ib.hosts"], [])

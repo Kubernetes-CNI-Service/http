@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import contextlib
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 import gzip
 import importlib.util
 from importlib.machinery import SourceFileLoader
@@ -328,6 +328,74 @@ class TemplateContractTests(unittest.TestCase):
             (root / "guide.md").write_text("included\n", encoding="utf-8")
             selected = sync.matching_files(root, ("*.md", "*.txt"))
             self.assertEqual((root / "guide.md",), selected)
+
+    def test_workspace_artifact_scope_is_explicit_and_never_transferred(self):
+        contract = load_module(
+            "project_contract_root_workspace_exclude",
+            ROOT / "tools/project_contract.py",
+        )
+        for relative in (
+            ".git/objects/private",
+            "outputs/private-plan.xlsx",
+            ".codex/session.json",
+            ".agents/state.json",
+            ".codex_tmp_analysis/node_modules",
+        ):
+            with self.subTest(root_artifact=relative):
+                self.assertIsNotNone(contract.transfer_exclude_reason(relative))
+
+        self.assertIsNone(contract.transfer_exclude_reason(
+            "ethernet/outputs/runtime.py"
+        ))
+        for relative in (
+            "ethernet/.git/runtime.py",
+            "DAY0-Prepare/customer/.codex/project.json",
+            "DAY0-Prepare/customer/.agents/project.json",
+            "ethernet/.codex_tmp_component/runtime.py",
+        ):
+            with self.subTest(nested_metadata=relative):
+                self.assertIsNotNone(contract.transfer_exclude_reason(relative))
+
+        excludes = contract.rsync_excludes()
+        for pattern in (".git/", ".codex/", ".agents/", ".codex_tmp*/"):
+            with self.subTest(rsync_pattern=pattern):
+                self.assertIn(pattern, excludes)
+        self.assertNotIn("outputs/", excludes)
+
+    def test_sync_root_file_selection_uses_shared_transfer_boundary(self):
+        sync = load_module(
+            "sync_code_root_workspace_exclude", ROOT / "tools/sync-code.py",
+        )
+        for pattern in (".git/", ".codex/", ".agents/", ".codex_tmp*/"):
+            with self.subTest(sync_rsync_pattern=pattern):
+                self.assertIn(pattern, sync.COMMON_EXCLUDES)
+        self.assertNotIn("outputs/", sync.COMMON_EXCLUDES)
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            keep = workspace / "deploy.py"
+            root_scratch = workspace / ".codex_tmp_generated.py"
+            nested_root = workspace / "ethernet"
+            nested_scratch = nested_root / ".codex_tmp_component.py"
+            nested_outputs = nested_root / "outputs"
+            nested_outputs.mkdir(parents=True)
+            nested_runtime = nested_outputs / "runtime.py"
+            keep.write_text("pass\n", encoding="utf-8")
+            root_scratch.write_text("private\n", encoding="utf-8")
+            nested_scratch.write_text("pass\n", encoding="utf-8")
+            nested_runtime.write_text("pass\n", encoding="utf-8")
+
+            with mock.patch.object(sync, "ROOT", workspace):
+                self.assertEqual(
+                    (keep,), sync.matching_files(workspace, ("*.py",)),
+                )
+                self.assertEqual(
+                    (),
+                    sync.matching_files(nested_root, ("*.py",)),
+                )
+                self.assertEqual(
+                    (nested_runtime,),
+                    sync.matching_files(nested_outputs, ("*.py",)),
+                )
 
     def test_existing_project_is_completed_from_template_without_overwrite(self):
         load = load_module("day0_load_template_completion", ROOT / "DAY0-Prepare/11-load.py")
@@ -3287,6 +3355,102 @@ class DhcpUnifiedInventoryContractTests(unittest.TestCase):
         )
         return self.dhcp.load_subnet_csv(source, prefix)
 
+    def write_air_production_inventory(self, root: Path, hostnames: list[str]):
+        inventory = root / "02-devices_config.csv"
+        lines = [
+            "hostname,type,template,eth0_ip,netmask,eth0_gw,eth0_mac",
+        ]
+        for index, hostname in enumerate(hostnames, start=10):
+            lines.append(
+                f"{hostname},eth,leaf,192.0.2.{index},24,192.0.2.1,"
+                f"02:00:00:00:00:{index:02x}"
+            )
+        inventory.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return inventory
+
+    @staticmethod
+    def air_record(hostname: str):
+        return {
+            "src": f"p2p-air.json:content.nodes.{hostname}",
+            "hostname": hostname,
+            "ip": "192.0.2.200",
+            "mac": "02:00:00:00:01:01",
+            "type": "eth",
+            "iface": "eth0",
+            "netmask": "24",
+        }
+
+    def test_air_production_resolution_prefers_exact_match(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inventory = self.write_air_production_inventory(root, [
+                "oobofoob-pod3-leaf03",
+                "example-site-oobofoob-pod3-leaf03",
+            ])
+            resolved = self.dhcp.inherit_air_records_from_production(
+                inventory,
+                [self.air_record("AIR-example-site-oobofoob-pod3-leaf03")],
+            )
+
+        self.assertEqual(
+            "example-site-oobofoob-pod3-leaf03",
+            resolved[0]["production_hostname"],
+        )
+        self.assertEqual("192.0.2.11", resolved[0]["ip"])
+
+    def test_air_production_resolution_uses_longest_one_way_suffix(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inventory = self.write_air_production_inventory(root, [
+                "oob-pod3-leaf03",
+                "oobofoob-pod3-leaf03",
+            ])
+            resolved = self.dhcp.inherit_air_records_from_production(
+                inventory,
+                [self.air_record("AIR-example-site-oobofoob-pod3-leaf03")],
+            )
+
+        self.assertEqual(
+            "oobofoob-pod3-leaf03",
+            resolved[0]["production_hostname"],
+        )
+        self.assertEqual("192.0.2.11", resolved[0]["ip"])
+
+    def test_air_production_resolution_rejects_longest_suffix_tie(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inventory = self.write_air_production_inventory(root, [
+                "oobofoob-pod3-leaf03",
+                "OOBofOOB-POD3-LEAF03",
+            ])
+            with self.assertRaisesRegex(ValueError, "匹配到多个 production"):
+                self.dhcp.inherit_air_records_from_production(
+                    inventory,
+                    [self.air_record("AIR-example-site-oobofoob-pod3-leaf03")],
+                )
+
+    def test_air_production_resolution_rejects_reverse_or_missing_match(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inventory = self.write_air_production_inventory(
+                root, ["site01-oobofoob-pod3-leaf03"],
+            )
+            with self.assertRaisesRegex(ValueError, "找不到同名 production"):
+                self.dhcp.inherit_air_records_from_production(
+                    inventory,
+                    [self.air_record("AIR-oobofoob-pod3-leaf03")],
+                )
+
+    def test_air_production_resolution_requires_hyphen_suffix_boundary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inventory = self.write_air_production_inventory(root, ["border01"])
+            with self.assertRaisesRegex(ValueError, "找不到同名 production"):
+                self.dhcp.inherit_air_records_from_production(
+                    inventory,
+                    [self.air_record("AIR-evilborder01")],
+                )
+
     def test_air_rows_are_rebuilt_at_eof_atomically_and_idempotently(self):
         with tempfile.TemporaryDirectory() as directory:
             inventory = Path(directory) / "02-devices_config.csv"
@@ -3627,6 +3791,27 @@ class SetupUnifiedInventoryContractTests(unittest.TestCase):
             ["EXAMPLE-Leaf01", "SITE01-Leaf01"],
         ))
 
+    def test_shared_ip_pair_uses_longest_one_way_hyphen_suffix(self):
+        production = ["border01", "site-border01"]
+        self.assertTrue(self.setup._is_matching_production_air_pair(
+            "site-border01", "eth", "AIR-example-site-border01", "air",
+            production,
+        ))
+        self.assertFalse(self.setup._is_matching_production_air_pair(
+            "border01", "eth", "AIR-example-site-border01", "air",
+            production,
+        ))
+
+    def test_shared_ip_pair_rejects_reverse_and_unbounded_suffixes(self):
+        self.assertFalse(self.setup._is_matching_production_air_pair(
+            "site-border01", "eth", "AIR-border01", "air",
+            ["site-border01"],
+        ))
+        self.assertFalse(self.setup._is_matching_production_air_pair(
+            "border01", "eth", "AIR-evilborder01", "air",
+            ["border01"],
+        ))
+
 
 class AirTopologyZtpInterfaceContractTests(unittest.TestCase):
     @classmethod
@@ -3677,9 +3862,13 @@ class MonitorContractTests(unittest.TestCase):
             root = Path(directory)
             data = root / "eth-info"
             data.mkdir()
-            old_day = (date.today() - timedelta(days=8)).strftime("%Y%m%d")
-            recent_day = (date.today() - timedelta(days=1)).strftime("%Y%m%d")
-            today = date.today().strftime("%Y%m%d")
+            # cron.sh deliberately evaluates retention dates in UTC.  A local
+            # date fixture crosses the boundary several hours too early in
+            # positive-offset timezones and becomes flaky around midnight.
+            utc_today = datetime.now(timezone.utc).date()
+            old_day = (utc_today - timedelta(days=8)).strftime("%Y%m%d")
+            recent_day = (utc_today - timedelta(days=1)).strftime("%Y%m%d")
+            today = utc_today.strftime("%Y%m%d")
             old_batch = data / f"{old_day}-1200-air"
             recent_batch = data / f"{recent_day}-1200-air"
             current_batch = data / f"{today}-1200-air"
@@ -4519,6 +4708,27 @@ class TransferContractTests(unittest.TestCase):
         sys.path.insert(0, str(ROOT / "tools"))
         import project_contract
         cls.contract = project_contract
+
+    def test_mac_preserving_yaml_loader_is_local_and_keeps_numeric_semantics(self):
+        mac = ":".join(("46", "38", "39", "01", "01", "01"))
+        payload = (
+            f"mac-address: {mac}\n"
+            f"quoted-mac: '{mac}'\n"
+            "autonomous-system: 65001\n"
+            "elapsed: 12:34:56\n"
+        )
+        document = self.contract.safe_load_yaml_preserving_mac(payload)
+
+        self.assertEqual(mac, document["mac-address"])
+        self.assertIsInstance(document["mac-address"], str)
+        self.assertEqual(mac, document["quoted-mac"])
+        self.assertEqual(65001, document["autonomous-system"])
+        self.assertIsInstance(document["autonomous-system"], int)
+        self.assertEqual(45296, document["elapsed"])
+        self.assertIsInstance(document["elapsed"], int)
+
+        # The isolated loader must not mutate PyYAML's process-wide resolver.
+        self.assertIsInstance(yaml.safe_load(payload)["mac-address"], int)
 
     def test_manual_backup_names_are_excluded_from_deploy(self):
         for name in ("01-global_副本.yaml", "global_copy.yaml", "global_bak.yaml"):

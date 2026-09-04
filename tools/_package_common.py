@@ -15,6 +15,7 @@ import io
 import os
 from pathlib import Path, PurePosixPath
 import posixpath
+import stat
 import tarfile
 import tempfile
 import xml.etree.ElementTree as ET
@@ -43,6 +44,7 @@ PROJECT_DEPLOYMENT_INPUTS = {
     "02-devices_config.csv",
     "02-dhcp-subnet_config.csv",
 }
+AIR_TOPOLOGY_POLICY_NAME = "03-air-topology-policy.json"
 
 RELATIONSHIP_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 OFFICE_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -213,6 +215,22 @@ def select_upload_p2p(project: Path) -> Path:
         if archive.testzip() is not None or "xl/workbook.xml" not in archive.namelist():
             raise ValueError(f"selected P2P XLSX is corrupt or incomplete: {selected}")
     return selected
+
+
+def optional_air_topology_policy(project: Path) -> Path | None:
+    """Return the optional deployable AIR policy without following aliases."""
+    policy = project / AIR_TOPOLOGY_POLICY_NAME
+    try:
+        mode = policy.lstat().st_mode
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ValueError(f"cannot inspect {AIR_TOPOLOGY_POLICY_NAME}: {exc}") from exc
+    if not stat.S_ISREG(mode):
+        raise ValueError(
+            f"{AIR_TOPOLOGY_POLICY_NAME} must be a regular file: {policy}"
+        )
+    return policy
 
 
 def _relationship_owner(name: str) -> str:
@@ -480,6 +498,14 @@ class PackageFilter:
             self.reject(info, "host runtime lock")
             return None
 
+        # Apply the shared metadata/development boundary before any subtree
+        # allowlist returns early. In particular, deployable tool subtrees
+        # must never carry a nested .git/.codex/.agents/Codex scratch tree.
+        shared_reason = transfer_exclude_reason(path)
+        if shared_reason:
+            self.reject(info, shared_reason)
+            return None
+
         # tools/ normally contributes only top-level runtime source files.
         # README files are excluded by the shared transfer contract.
         # lldp-analyze-tool is the exception because Ethernet cron invokes it
@@ -504,13 +530,12 @@ class PackageFilter:
             self.reject(info, "non-deployable tools content")
             return None
 
-        if name in {"ztp/ztp-bootstrap_oob.sh", "ztp/ztp-bootstrap_oobofoob.sh"}:
+        if name in {
+            "ztp/ztp-bootstrap_oob.sh",
+            "ztp/ztp-bootstrap_oobofoob.sh",
+            "ztp/ztp.json",
+        }:
             self.reject(info, "load-rendered ZTP runtime")
-            return None
-
-        shared_reason = transfer_exclude_reason(path)
-        if shared_reason:
-            self.reject(info, shared_reason)
             return None
 
         # Manual planning-file copies are useful in a downloaded project
@@ -704,7 +729,10 @@ class PackageFilter:
                 return None
             if len(project_relative.parts) == 1:
                 filename = project_relative.name
-                if filename in PROJECT_DEPLOYMENT_INPUTS:
+                if (
+                    filename in PROJECT_DEPLOYMENT_INPUTS
+                    or filename == AIR_TOPOLOGY_POLICY_NAME
+                ):
                     return info
                 if filename.casefold().endswith(".pub"):
                     return info
@@ -805,6 +833,9 @@ def remote_locked_shell_argv(
 def create_package(args: argparse.Namespace, *, day0_all: bool = True) -> Path:
     project = resolve_project(args.project)
     selected_p2p = select_upload_p2p(project) if not day0_all else None
+    air_topology_policy = (
+        optional_air_topology_policy(project) if not day0_all else None
+    )
     selected_p2p_relative = (
         PurePosixPath(selected_p2p.relative_to(project).as_posix())
         if selected_p2p is not None else None
@@ -911,9 +942,22 @@ def create_package(args: argparse.Namespace, *, day0_all: bool = True) -> Path:
                 required.add(
                     f"./{package_filter.project_rel}/{selected_p2p_relative.as_posix()}"
                 )
+            policy_member_name = None
+            if air_topology_policy is not None:
+                policy_member_name = (
+                    f"./{package_filter.project_rel}/{AIR_TOPOLOGY_POLICY_NAME}"
+                )
+                required.add(policy_member_name)
             missing = sorted(required - names)
             if missing:
                 raise RuntimeError("package verification missing: " + ", ".join(missing))
+            if policy_member_name is not None:
+                policy_member = archive.getmember(policy_member_name)
+                if not policy_member.isfile():
+                    raise RuntimeError(
+                        "packaged AIR topology policy is not a regular file: "
+                        f"{policy_member_name}"
+                    )
             if selected_p2p_relative is not None:
                 member_name = (
                     f"./{package_filter.project_rel}/{selected_p2p_relative.as_posix()}"

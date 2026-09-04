@@ -74,11 +74,12 @@ legacy/nested bond 预处理及跨 `set` 的最终 YAML 门禁中失败。跨模
 成员和 `type: peerlink`，不显式配置 `bridge`/`vlan`；它依靠 VLAN-aware bridge 的默认行为
 继承 `br_default` 的全部业务 VLAN，`peerlink.4094` 仍作为独立控制子接口生成。
 
-`test_terminal_l2_stp_generation.py` 覆盖终端二层端口的 STP 防环策略：独立 `swp` 与逻辑
-二层 `bond` 必须生成 `admin-edge: on` 和 `bpdu-guard: on`，routed swp、peerlink 以及跨
-多个 `set` 声明的 bond member 均不得被误配。冲突值不会被覆盖，缺失策略或 member 级策略
-会被最终门禁拒绝；workflow 使用真实配置生成器、MAC 发布规范化和 `nv config show` 比较验证
-策略在 latest 链路中保持一致。
+`test_terminal_l2_stp_generation.py` 覆盖终端二层端口的 STP 防环策略：schema v2 通过
+`terminal_l2_ports` 显式列出预期连接服务器、PDU、CDU 等终端的独立 `swp` 或逻辑二层
+`bond`，只有这些接口生成 `admin-edge: on` 和 `bpdu-guard: on`。缺列或空值均不自动选择
+任何接口；routed swp、peerlink、bond member、未列出的交换机互联 bond 及冲突值都会安全
+拒绝或保持无 Edge/Guard。workflow 覆盖真实 CSV→91-devices→配置生成、发布规范化、
+`nv config show` 比较以及 Feedback 对显式策略的无推断回写。
 
 `test_qos_evpn_uplink_generation.py` 覆盖 Border/TAN RoCE QoS 与 EVPN-MH BGP uplink：
 Border 只选择普通父物理口，TAN（排除 `tan-cp-1gleaf`）只选择 breakout 子接口，逻辑
@@ -120,6 +121,12 @@ IP 落入动态 range 必须失败。IB/NVL 的 eth0/eth1 MAC 都参与 lease �
 MAC 出现后，当前 hostname 覆盖旧别名并过滤旧 archive 成员。lease 文件先按地址取最后一个
 状态块再按 MAC 合并，地址 release/free 或重分配后不会让旧 MAC 继续保留同一 live IP；
 `test_dhcp_runtime_reassignment.py` 独立覆盖重分配、无 MAC free 块和 lease 过期。
+
+P2P/AIR 契约还覆盖项目级 `03-air-topology-policy.json`：源 P2P 自连接默认失败关闭，只有
+AIR policy 中唯一精确命中的 rewrite 可以替换 AIR edge；LLDPQ 仍保留原始设计链路，节点
+allowlist、replacement 和端口集合都必须通过冲突检查。load 把 global 的 Cumulus 版本传入
+AIR 生成器，并把 policy hash 纳入 parent release；manual-ZTP 会拒绝发布后新增、修改或删除
+该 policy。inventory 中 PDU 的显式分类必须优先于交换机名称启发式，不能生成假 AIR 交换机。
 
 今日监控回归还覆盖：ZTP 多轮次与 30 秒持续间隔、同网段 SVI fallback、
 独立 ZTP/Switch 按钮和 worker、页签独立 Auto-Refresh、AIR scope 保留 Ethernet

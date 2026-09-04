@@ -38,7 +38,11 @@ if str(HTTP_ROOT) not in sys.path:
 TOOLS_DIR = HTTP_ROOT / "tools"
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
-from project_contract import validate_ztp_url_prefix
+from project_contract import (
+    safe_load_all_yaml_preserving_mac,
+    safe_load_yaml_preserving_mac,
+    validate_ztp_url_prefix,
+)
 from deployment_lock import (
     DeploymentLockError,
     acquire_lock_descriptor,
@@ -60,6 +64,7 @@ DEPLOYMENT_LOCK = HTTP_ROOT / ".deployment.lock"
 DHCP_RELEASE_MANIFEST = (
     HTTP_ROOT / "ztp/config/isc-dhcp-server/dhcp-release-manifest.json"
 )
+AIR_TOPOLOGY_POLICY_NAME = "03-air-topology-policy.json"
 SUPPORTED_TYPES = {"eth", "eth_spx", "spx", "air", "ib", "nvl"}
 ETHERNET_TYPES = {"eth", "eth_spx", "spx", "air"}
 SAFE_HOSTNAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")
@@ -136,6 +141,42 @@ def sha256_path(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def validate_parent_release_input_hashes(
+    project: Path, expected_inputs: dict,
+) -> None:
+    """Require current project inputs to match the committed parent release."""
+    input_paths = {
+        "global": (project / "01-global.yaml", "01-global.yaml"),
+        "devices": (project / "02-devices_config.csv", "02-devices_config.csv"),
+        "subnet": (
+            project / "02-dhcp-subnet_config.csv",
+            "02-dhcp-subnet_config.csv",
+        ),
+        "p2p": (project / "p2p.xlsx", "p2p.xlsx"),
+    }
+    policy_path = project / AIR_TOPOLOGY_POLICY_NAME
+    if (
+        "air_topology_policy" in expected_inputs
+        or os.path.lexists(policy_path)
+    ):
+        input_paths["air_topology_policy"] = (
+            policy_path, "AIR 拓扑策略",
+        )
+
+    for name, (path, label) in input_paths.items():
+        expected = str(expected_inputs.get(name) or "")
+        try:
+            actual = sha256_path(path)
+        except OSError as exc:
+            raise ManualZtpError(
+                f"统一 release 输入 {label} 无法读取: {exc}"
+            ) from exc
+        if not expected or actual != expected:
+            raise ManualZtpError(
+                f"统一 release 输入 {label} 已变化；请先完整执行 11-load.py"
+            )
 
 
 def require_bound_regular_file(path: Path, label: str) -> None:
@@ -525,22 +566,7 @@ def validate_parent_release_binding(project: Path, device: dict) -> dict[str, st
     expected_inputs = parent.get("inputs")
     if not isinstance(expected_inputs, dict):
         raise ManualZtpError("统一 current-release 缺少 inputs hash")
-    input_paths = {
-        "global": project / "01-global.yaml",
-        "devices": project / "02-devices_config.csv",
-        "subnet": project / "02-dhcp-subnet_config.csv",
-        "p2p": project / "p2p.xlsx",
-    }
-    for name, path in input_paths.items():
-        expected = str(expected_inputs.get(name) or "")
-        try:
-            actual = sha256_path(path)
-        except OSError as exc:
-            raise ManualZtpError(f"统一 release 输入 {path.name} 无法读取: {exc}") from exc
-        if not expected or actual != expected:
-            raise ManualZtpError(
-                f"统一 release 输入 {path.name} 已变化；请先完整执行 11-load.py"
-            )
+    validate_parent_release_input_hashes(project, expected_inputs)
 
     components = parent.get("components")
     if not isinstance(components, dict):
@@ -811,7 +837,7 @@ def normalized_nvue_config(text: str, *, label: str) -> tuple[object, str, str]:
     report a permanent false difference.  Only ``set`` is configuration state.
     """
     try:
-        documents = list(yaml.safe_load_all(text))
+        documents = list(safe_load_all_yaml_preserving_mac(text))
     except yaml.YAMLError as exc:
         raise ManualZtpError(f"{label} 不是可解析的 YAML: {exc}") from exc
     blocks = []
@@ -1258,7 +1284,9 @@ def display_preflight_diff(target_dir: Path, *, limit: int = 240) -> None:
 def global_ztp_url_prefix(global_yaml: Path) -> str:
     """Return the validated project-owned URL prefix used by all ZTP URLs."""
     try:
-        document = yaml.safe_load(global_yaml.read_text(encoding="utf-8"))
+        document = safe_load_yaml_preserving_mac(
+            global_yaml.read_text(encoding="utf-8")
+        )
         prefix = str(document["common"]["mgmt"]["ztp"]["ztp_url_prefix"]).strip()
     except (OSError, KeyError, TypeError, yaml.YAMLError) as exc:
         raise ManualZtpError(

@@ -14,6 +14,9 @@ IB-*-Leaf*
 [NVL-SW]
 *NVSW*
 
+[PDU]
+*PDU*
+
 [Eth-SW]
 *Border*
 *TAN-*Spine*

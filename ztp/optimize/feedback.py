@@ -57,11 +57,13 @@ from tools.project_contract import (
     DEVICE_BASE_COLUMNS,
     DEVICE_FIXED_COLUMNS,
     DEVICE_SOURCE_METADATA_COLUMNS,
+    DEVICE_V2_OPTIONAL_POLICY_COLUMNS,
     DEVICE_V2_EVPN_COLUMNS,
     DEVICE_V2_VLAN_COLUMNS,
     detect_global_schema_version,
     normalize_v2_mlag_policy,
     parse_device_csv_layout,
+    safe_load_yaml_preserving_mac,
 )
 
 NA = "NA"
@@ -86,7 +88,7 @@ MAX_ARCHIVE_BYTES = 4 * 1024 * 1024 * 1024
 def load_yaml(path):
     """加载 NVUE startup.yaml，返回 set 段的 dict。"""
     with open(path) as f:
-        doc = yaml.safe_load(f)   # 文件是 YAML list，不是多文档
+        doc = safe_load_yaml_preserving_mac(f)   # 文件是 YAML list，不是多文档
     if isinstance(doc, list):
         for item in doc:
             if isinstance(item, dict) and "set" in item:
@@ -237,7 +239,7 @@ def extract_yaml_from_info(path):
         return None
     payload = text.encode("utf-8")
     try:
-        document = yaml.safe_load(payload)
+        document = safe_load_yaml_preserving_mac(payload)
     except yaml.YAMLError as exc:
         raise ValueError(f"{path}: nv config show YAML 无效: {exc}") from exc
     if not isinstance(document, list) or not any(
@@ -604,7 +606,8 @@ def svi_vrr_info(svi_cfg, cfg, vlan_id):
     优先级：
       svi_ip  = ipv4.address（设备自身 IP）
       vrr_ip  = ipv4.vrr.address（若有 vrr 字段）；否则 NA
-      vrr_mac = ipv4.vrr.mac-address（若有）；否则从 ifupdown2_eni snippet 的 hwaddress 读取
+      vrr_mac = ipv4.vrr.mac-address（若有）；否则读取 SVI link.mac-address，
+                再兼容 ifupdown2_eni snippet 的 hwaddress
 
     例：
       vlan106:
@@ -627,8 +630,10 @@ def svi_vrr_info(svi_cfg, cfg, vlan_id):
     vrr_addrs = list(vrr_cfg.get("address", {}).keys())
     vrr_ip, _ = split_cidr(vrr_addrs[0]) if vrr_addrs else (NA, NA)
 
-    # vrr_mac：优先 vrr.mac-address，其次 ifupdown2_eni snippet
+    # vrr_mac：依次兼容普通 VRR、Cumulus 5.18+ SVI link MAC 和旧版 snippet。
     vrr_mac = vrr_cfg.get("mac-address", NA)
+    if not vrr_mac or vrr_mac == NA:
+        vrr_mac = (svi_cfg.get("link") or {}).get("mac-address", NA)
     if not vrr_mac or vrr_mac == NA:
         snippet = (cfg.get("system", {})
                       .get("config", {})
@@ -1299,7 +1304,11 @@ def read_v2_format_header(format_path=None, devices_config_path=None):
             raise ValueError(f"v2 格式文件为空: {path}")
         header = [str(column).strip() for column in rows[0]]
     else:
-        header = list(DEVICE_BASE_COLUMNS) + list(DEVICE_FIXED_COLUMNS)
+        header = (
+            list(DEVICE_BASE_COLUMNS)
+            + list(DEVICE_FIXED_COLUMNS)
+            + list(DEVICE_V2_OPTIONAL_POLICY_COLUMNS)
+        )
     try:
         layout = parse_device_csv_layout(header, 2)
     except ValueError as exc:
@@ -1318,7 +1327,7 @@ def read_project_schema_version(global_config_path):
     path = Path(global_config_path)
     try:
         with path.open(encoding="utf-8") as stream:
-            document = yaml.safe_load(stream)
+            document = safe_load_yaml_preserving_mac(stream)
     except yaml.YAMLError as exc:
         raise ValueError(f"全局 YAML 语法错误: {path}: {exc}") from exc
     try:
@@ -1750,7 +1759,7 @@ def write_global_yaml(csv_path, configs, global_config_path=None,
     baseline = None
     if global_config_path:
         with Path(global_config_path).open(encoding="utf-8") as stream:
-            baseline = yaml.safe_load(stream)
+            baseline = safe_load_yaml_preserving_mac(stream)
         if baseline is not None and not isinstance(baseline, dict):
             raise ValueError(f"全局 YAML 顶层必须是 mapping: {global_config_path}")
     document = build_global_document(configs, baseline)
@@ -1874,6 +1883,13 @@ def convert_one(input_value=None, output_value=None, format_path=None,
         with open(collected_csv, encoding="utf-8-sig") as f:
             lines = list(csv.reader(f))
         raw_hdr = lines[0]
+        normalized_header = [
+            str(column or "").strip().casefold() for column in raw_hdr
+        ]
+        terminal_l2_ports_index = (
+            normalized_header.index("terminal_l2_ports")
+            if normalized_header.count("terminal_l2_ports") == 1 else None
+        )
         for line in lines[1:]:
             row = dict(zip(raw_hdr, line))
             # 两个 netmask 列：第5列(index4)=eth0 netmask, 第9列(index8)=eth1 netmask
@@ -1895,6 +1911,11 @@ def convert_one(input_value=None, output_value=None, format_path=None,
                 "eth1_nm":  nm_vals[1] if len(nm_vals) > 1 else NA,
                 "eth1_gw":  row.get("eth1_gw", NA),
                 "eth1_mac": row.get("eth1_mac", NA),
+                "terminal_l2_ports": (
+                    line[terminal_l2_ports_index]
+                    if (terminal_l2_ports_index is not None
+                        and terminal_l2_ports_index < len(line)) else NA
+                ),
             }
     else:
         inventory_logs = sorted(
@@ -1919,6 +1940,7 @@ def convert_one(input_value=None, output_value=None, format_path=None,
         else:
             print(f"[INFO] 未找到 *devices_config*.csv 或 hostname-ip-mac.log，eth 相关信息填 NA")
 
+    v2_policy_columns = ()
     try:
         collected_global = find_global_config(
             backup_dir, explicit_path=global_config_path,
@@ -1936,6 +1958,9 @@ def convert_one(input_value=None, output_value=None, format_path=None,
             base_header, existing_vlan_groups, existing_groups = (
                 read_v2_format_header(format_path, collected_csv)
             )
+            v2_policy_columns = parse_device_csv_layout(
+                base_header, 2,
+            ).policy_columns
             print(
                 "格式文件   : schema v2，现有普通 VLAN groups="
                 f"{existing_vlan_groups}，EVPN groups={existing_groups}"
@@ -2031,6 +2056,9 @@ def convert_one(input_value=None, output_value=None, format_path=None,
                 parsed.append({
                     "base": base_values, "ordinary": [],
                     "fixed": [NA] * len(DEVICE_FIXED_COLUMNS), "evpn": [],
+                    "policy": [
+                        info.get(column, NA) for column in v2_policy_columns
+                    ],
                     "source_b64": source_b64, "source_sha256": source_sha256,
                 })
             else:
@@ -2051,6 +2079,9 @@ def convert_one(input_value=None, output_value=None, format_path=None,
                 )
                 parsed.append({
                     "base": base, "ordinary": ordinary, "fixed": fixed,
+                    "policy": [
+                        info.get(column, NA) for column in v2_policy_columns
+                    ],
                     "evpn": groups, "source_b64": source_b64,
                     "source_sha256": source_sha256,
                 })
@@ -2097,6 +2128,7 @@ def convert_one(input_value=None, output_value=None, format_path=None,
             list(DEVICE_BASE_COLUMNS)
             + list(DEVICE_V2_VLAN_COLUMNS) * n_vlan_groups
             + list(DEVICE_FIXED_COLUMNS)
+            + list(v2_policy_columns)
             + list(DEVICE_V2_EVPN_COLUMNS) * n_groups
         )
         header = data_header + list(METADATA_COLS)
@@ -2109,6 +2141,7 @@ def convert_one(input_value=None, output_value=None, format_path=None,
                 * len(DEVICE_V2_VLAN_COLUMNS)
             )
             row.extend(item["fixed"])
+            row.extend(item["policy"])
             for group in item["evpn"]:
                 row.extend(group)
             row.extend(
@@ -2315,6 +2348,8 @@ def _semantic_headers(header):
                 result[start + offset] = f"vlan[{group_index}].{column}"
         for column, index in layout.fixed_indices.items():
             result[index] = column
+        for column, index in layout.policy_indices.items():
+            result[index] = column
         for group_index, start in enumerate(
                 layout.evpn_group_starts, start=1):
             for offset, column in enumerate(DEVICE_V2_EVPN_COLUMNS):
@@ -2359,7 +2394,7 @@ def _decode_source_config(value):
             payload = gzip.decompress(payload)
         else:
             payload = base64.b64decode(value)
-        document = yaml.safe_load(payload.decode("utf-8"))
+        document = safe_load_yaml_preserving_mac(payload.decode("utf-8"))
     except (ValueError, OSError, UnicodeDecodeError, yaml.YAMLError):
         return {}
     items = document if isinstance(document, list) else [document]

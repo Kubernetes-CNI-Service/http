@@ -40,6 +40,10 @@ MANUAL = load_script(
     "cumulus_snippet_manual_compare_under_test",
     ROOT / "ztp/manual-ztp.py",
 )
+FEEDBACK = load_script(
+    "cumulus_svi_mac_feedback_under_test",
+    ROOT / "ztp/optimize/feedback.py",
+)
 
 MAC = "02:00:00:00:00:13"
 SNIPPET = f"hwaddress {MAC}\n"
@@ -79,11 +83,60 @@ def inject_scenario(snippet: str = SNIPPET) -> list[dict]:
 
 
 class CumulusSnippetDirectTests(unittest.TestCase):
+    def test_native_svi_link_mac_version_boundary(self):
+        for version in ("5.18", "5.18.0", "5.19.1", "6.0"):
+            with self.subTest(version=version):
+                self.assertTrue(
+                    GENERATOR._cumulus_uses_native_svi_link_mac(version),
+                )
+        for version in ("5.17.99", "5.16.4", "", None, "latest"):
+            with self.subTest(version=version):
+                self.assertFalse(
+                    GENERATOR._cumulus_uses_native_svi_link_mac(version),
+                )
+
     def test_scenario_three_resolves_exact_ifupdown2_hwaddress_text(self):
         support = GENERATOR._resolve_device_svi_vrr_support(scenario_device())
         self.assertEqual(1, len(support))
         self.assertEqual(
             {"vlan13": SNIPPET}, support[0]["ifupdown_snippets"],
+        )
+        self.assertEqual({}, support[0]["svi_link_macs"])
+
+    def test_cumulus_518_renders_mac_under_svi_link(self):
+        support = GENERATOR._resolve_device_svi_vrr_support(
+            scenario_device(), native_svi_link_mac=True,
+        )
+        self.assertEqual({}, support[0]["ifupdown_snippets"])
+        self.assertEqual(
+            {"vlan13": MAC}, support[0]["svi_link_macs"],
+        )
+        document = [{"set": {
+            "system": {"hostname": "EXAMPLE-Leaf13"},
+            "interface": {"vlan13": {
+                "type": "svi",
+                "ipv4": {"address": {"198.51.100.13/24": {}}},
+            }},
+        }}]
+        self.assertTrue(GENERATOR._inject_dhcp_relay_support(
+            document, {"svi_vrr_support": support},
+        ))
+        block = document[0]["set"]
+        self.assertEqual("svi", block["interface"]["vlan13"]["type"])
+        self.assertEqual(
+            MAC,
+            block["interface"]["vlan13"]["link"]["mac-address"],
+        )
+        self.assertNotIn("config", block["system"])
+
+    def test_feedback_reads_cumulus_518_svi_link_mac(self):
+        svi = {
+            "ipv4": {"address": {"198.51.100.13/24": {}}},
+            "link": {"mac-address": MAC},
+        }
+        self.assertEqual(
+            ("198.51.100.13", "24", FEEDBACK.NA, MAC),
+            FEEDBACK.svi_vrr_info(svi, {"interface": {"vlan13": svi}}, 13),
         )
 
     def test_generated_yaml_uses_literal_block_and_round_trips_exactly(self):

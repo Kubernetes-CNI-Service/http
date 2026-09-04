@@ -18,6 +18,13 @@ MANUAL = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(MANUAL)
 
+FEEDBACK_SPEC = importlib.util.spec_from_file_location(
+    "manual_feedback_mac_contract_under_test", ROOT / "ztp/optimize/feedback.py",
+)
+FEEDBACK = importlib.util.module_from_spec(FEEDBACK_SPEC)
+assert FEEDBACK_SPEC.loader is not None
+FEEDBACK_SPEC.loader.exec_module(FEEDBACK)
+
 
 MAC = "02:00:00:00:00:01"
 DEVICE = {
@@ -50,6 +57,88 @@ def protocol(
         lines.append(f"failed_raw_sha256={failed_raw_sha256}")
     return "\n".join(lines) + "\n---\n" + raw_yaml
 
+
+class ParentReleaseInputContractTests(unittest.TestCase):
+    def test_optional_air_policy_is_hash_bound_and_backward_compatible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            inputs = {
+                "global": project / "01-global.yaml",
+                "devices": project / "02-devices_config.csv",
+                "subnet": project / "02-dhcp-subnet_config.csv",
+                "p2p": project / "p2p.xlsx",
+            }
+            for name, path in inputs.items():
+                path.write_text(f"{name}\n", encoding="utf-8")
+            expected = {
+                name: MANUAL.sha256_path(path) for name, path in inputs.items()
+            }
+
+            # Old/current projects without a policy keep the original contract.
+            MANUAL.validate_parent_release_input_hashes(project, expected)
+
+            policy = project / "03-air-topology-policy.json"
+            policy.write_text("{}\n", encoding="utf-8")
+            with self.assertRaisesRegex(MANUAL.ManualZtpError, "AIR.*已变化"):
+                MANUAL.validate_parent_release_input_hashes(project, expected)
+
+            expected["air_topology_policy"] = MANUAL.sha256_path(policy)
+            MANUAL.validate_parent_release_input_hashes(project, expected)
+            policy.write_text('{"changed": true}\n', encoding="utf-8")
+            with self.assertRaisesRegex(MANUAL.ManualZtpError, "AIR.*已变化"):
+                MANUAL.validate_parent_release_input_hashes(project, expected)
+            policy.unlink()
+            with self.assertRaisesRegex(MANUAL.ManualZtpError, "AIR.*无法读取"):
+                MANUAL.validate_parent_release_input_hashes(project, expected)
+
+
+class RuntimeMacYamlWorkflowTests(unittest.TestCase):
+    def test_manual_and_feedback_agree_on_quoted_and_unquoted_digit_mac(self):
+        mac = ":".join(("46", "38", "39", "01", "01", "01"))
+
+        def payload(rendered_mac):
+            return (
+                "- set:\n"
+                "    system:\n"
+                "      global:\n"
+                f"        anycast-mac: {rendered_mac}\n"
+                "    vrf:\n"
+                "      default:\n"
+                "        router:\n"
+                "          bgp:\n"
+                "            autonomous-system: 65001\n"
+                "    metadata:\n"
+                "      elapsed: 12:34:56\n"
+            )
+
+        unquoted = payload(mac)
+        quoted = payload(f"'{mac}'")
+        manual_unquoted = MANUAL.normalized_nvue_config(
+            unquoted, label="runtime",
+        )
+        manual_quoted = MANUAL.normalized_nvue_config(
+            quoted, label="latest",
+        )
+        self.assertEqual(manual_quoted, manual_unquoted)
+
+        encoded = FEEDBACK.encode_source_yaml(
+            unquoted.encode("utf-8"), "leaf01",
+        )
+        feedback = FEEDBACK._decode_source_config(encoded)
+        self.assertEqual(manual_unquoted[0], feedback)
+        self.assertEqual(
+            mac, feedback["system"]["global"]["anycast-mac"],
+        )
+        self.assertIsInstance(
+            feedback["system"]["global"]["anycast-mac"], str,
+        )
+        self.assertEqual(
+            65001,
+            feedback["vrf"]["default"]["router"]["bgp"][
+                "autonomous-system"
+            ],
+        )
+        self.assertEqual(45296, feedback["metadata"]["elapsed"])
 
 class AppliedHelperProtocolTests(unittest.TestCase):
     def client(self, result):

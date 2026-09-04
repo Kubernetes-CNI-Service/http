@@ -83,14 +83,21 @@ setup 会把它们链接到 ztp/image/cumulus/ 和 ztp/image/nvos/。
 02-devices_config.csv
   作用：统一保存 eth、eth_spx、spx、ib、nvl、server、air 设备及其 hostname、类型、管理IP、MAC、模板和网络参数。
   非 AIR 行由用户维护；DHCP 生成器每次原子重建全部 type=air 行并放在文件末尾。
+  AIR 名称先精确匹配 Production；带站点/机柜前缀时只采用最长、最具体且唯一的
+  Production hostname 后缀，最长候选并列时停止生成，避免相似短名称错误继承地址。
   schema v2 的列顺序为：
     1) 固定 12 列 hostname..lo_ip；
     2) 零到多个 vlan_id,svi_ip,netmask,vlan_ports 普通 VLAN 组；
     3) 固定 7 列 bgp_asn,bgp_ports,bond_ports,bond_type,bond_mac,peerlink_ports,vrl；
-    4) 零到多个 evpn_vrf,evpn_l3vni,evpn_l3vlan,dhcp_relay,evpn_l2vni,
+    4) 可选安全策略列 terminal_l2_ports（公开模板默认包含）；
+    5) 零到多个 evpn_vrf,evpn_l3vni,evpn_l3vlan,dhcp_relay,evpn_l2vni,
        evpn_l2vlan,svi_ip,netmask,vlan_ports EVPN 组。
   v2 每行列数必须与表头完全一致；普通 VLAN 组可以完全没有，也可重复任意次。
   范围 VLAN 只做二层成员，带单值 SVI 的 VLAN 必须拆成自己的组。
+  terminal_l2_ports 只列预期连接服务器/PDU/CDU 等终端的独立二层 swp 或逻辑
+  二层 bond，以 / 分隔；bond member、peerlink、routed 接口和交换机互联 bond 不得填写。
+  只有显式列出的接口才生成 admin-edge 与 bpdu-guard。缺列或单元格为空都不会自动
+  选择接口；缺列项目会收到迁移 warning。
 
   VRR 是项目级策略，不再逐设备填写：
     switches.eth.vrr.base_mac: 02:00:5e:01:00:00
@@ -116,8 +123,9 @@ setup 会把它们链接到 ztp/image/cumulus/ 和 ztp/image/nvos/。
   历史项目仍按原 mlag.pairs 合同兼容读取；不能在 schema v2 中混用旧结构。
   同 VRF + VLAN 的 SVI 网段必须相同。所有设备 SVI 地址互异且不占 gateway 时，gateway
   作为共同 vrr_ip、MAC 写在 ipv4.vrr 下，DHCP relay 用 giaddress；所有 SVI 都等于
-  gateway 时，不生成 vrr_ip，MAC 写入该 vlan 的 ifupdown2_eni snippet，DHCP relay
-  使用设备 loopback 的 gateway-interface。只在一台设备出现且 SVI 不是 gateway
+  gateway 时不生成 vrr_ip：Cumulus 5.18 及以上把 MAC 写入该 SVI 的 link.mac-address，
+  更早版本写入该 vlan 的 ifupdown2_eni snippet；DHCP relay 使用设备 loopback 的
+  gateway-interface，输入字段名仍为 vrr_mac。只在一台设备出现且 SVI 不是 gateway
   时视为 standalone 普通 SVI，不派生 VRR IP/MAC；其他混合输入拒绝生成。
   Border 模板的 /29 SVI 另采用严格三地址分区。subnet_maximum 时本端物理地址为
   N+4/N+5、VRR 为 N+6、对端 next-hop 为 N+3（VRR-3）；subnet_minimum 时
@@ -174,6 +182,15 @@ p2p.xlsx
     ztp/config/cumulus/template/P2P/output-p2p -----> DAY0-Prepare/<项目>/99-output-p2p/
     ztp/config/nvos/template/P2P/output-p2p    -----> DAY0-Prepare/<项目>/99-output-p2p/
   P2P 派生结果统一写入项目的 99-output-p2p/。
+
+03-air-topology-policy.json（可选）
+  作用：只调整由 P2P 派生的 AIR 拓扑，不改写原始 P2P、LLDPQ DOT 或生产设备配置。
+        当前支持按 inventory 类型精确限制 AIR 节点，以及用完整的设备名和端口匹配一条
+        已知错误链路后替换为获准链路。规则必须唯一命中；零命中、多命中、未知字段、
+        自连接或端口冲突都会 fail closed。没有该文件时维持严格默认行为。
+  load 会把 01-global.yaml 的 Cumulus 版本显式传给 AIR 转换器；例如版本 5.18 会生成
+  cumulus-vx-5.18 节点。策略文件存在时，其 SHA-256 也进入统一 release，manual-ztp
+  preflight 会检查新增、删除或内容漂移，防止发布后静默改变 AIR 拓扑。
 
 laptop.pub
   作用：项目电脑 SSH Ed25519 公钥。setup 会复制到真实项目，并作为 ZTP/bootstrap 安装到交换机 authorized_keys 的公钥。

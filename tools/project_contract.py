@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import fnmatch
 import ipaddress
 import json
@@ -11,10 +12,41 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 import re
 
+import yaml
+
 GLOBAL_SCHEMA_VERSION = 1
 CURRENT_GLOBAL_SCHEMA_VERSION = 2
 SUPPORTED_GLOBAL_SCHEMA_VERSIONS = frozenset({1, 2})
 _MAC_ADDRESS = re.compile(r"^[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}$")
+
+
+class MacStringSafeLoader(yaml.SafeLoader):
+    """SafeLoader variant that keeps exact colon-form MACs as strings."""
+
+
+# YAML 1.1 resolves an all-numeric colon-form MAC as a sexagesimal integer.
+# Copy before adding the exact MAC resolver so importing this module never
+# changes ``yaml.safe_load`` or another consumer's loader behavior.
+MacStringSafeLoader.yaml_implicit_resolvers = copy.deepcopy(
+    yaml.SafeLoader.yaml_implicit_resolvers
+)
+for _first_mac_character in "0123456789abcdefABCDEF":
+    MacStringSafeLoader.yaml_implicit_resolvers.setdefault(
+        _first_mac_character, [],
+    ).insert(
+        0,
+        (yaml.resolver.BaseResolver.DEFAULT_SCALAR_TAG, _MAC_ADDRESS),
+    )
+
+
+def safe_load_yaml_preserving_mac(stream):
+    """Safely load one YAML document while preserving MAC-shaped scalars."""
+    return yaml.load(stream, Loader=MacStringSafeLoader)
+
+
+def safe_load_all_yaml_preserving_mac(stream):
+    """Safely load YAML documents while preserving MAC-shaped scalars."""
+    return yaml.load_all(stream, Loader=MacStringSafeLoader)
 
 DEVICE_BASE_COLUMNS = (
     "hostname", "type", "template", "eth0_ip", "netmask", "eth0_gw",
@@ -24,6 +56,7 @@ DEVICE_FIXED_COLUMNS = (
     "bgp_asn", "bgp_ports", "bond_ports", "bond_type", "bond_mac",
     "peerlink_ports", "vrl",
 )
+DEVICE_V2_OPTIONAL_POLICY_COLUMNS = ("terminal_l2_ports",)
 DEVICE_V1_VLAN_COLUMNS = (
     "vrf_default", "vlan_id", "svi_ip", "netmask", "vrr_ip", "vrr_mac",
     "vlan_ports",
@@ -53,6 +86,7 @@ class DeviceCsvLayout:
     evpn_group_starts: tuple[int, ...]
     metadata_start: int
     fixed_columns: tuple[str, ...] = DEVICE_FIXED_COLUMNS
+    policy_columns: tuple[str, ...] = ()
 
     @property
     def fixed_indices(self) -> dict[str, int]:
@@ -60,6 +94,105 @@ class DeviceCsvLayout:
             name: self.fixed_start + offset
             for offset, name in enumerate(self.fixed_columns)
         }
+
+    @property
+    def policy_indices(self) -> dict[str, int]:
+        start = self.fixed_start + len(self.fixed_columns)
+        return {
+            name: start + offset
+            for offset, name in enumerate(self.policy_columns)
+        }
+
+
+def parse_terminal_l2_ports(value: object) -> tuple[str, ...]:
+    """Expand one strict terminal-facing L2 interface allowlist.
+
+    The schema-v2 cell is a slash-separated list of logical ``swp`` or
+    ``bond`` interface selectors.  Compact local-bond names such as
+    ``bond49b51`` remain one logical interface.  Peerlink, empty tokens,
+    duplicate expansions, reversed ranges, and unknown interface families are
+    rejected so endpoint safety can never depend on a hostname or port-number
+    guess.
+    """
+    raw = str(value or "").strip()
+    if not raw or raw.casefold() in {"na", "n/a"}:
+        return ()
+
+    result: list[str] = []
+    seen: set[str] = set()
+    expanded_limit = 10_000
+    selector_re = re.compile(
+        r"^(swp|bond)([1-9]\d*)(?:-([1-9]\d*))?"
+        r"(?:s(0|[1-9]\d*)(?:-(0|[1-9]\d*))?)?$",
+        re.IGNORECASE,
+    )
+    compact_bond_re = re.compile(
+        r"^bond\d+(?:(?:b\d+)|(?:bond\d+))+$", re.IGNORECASE,
+    )
+
+    def add(interface: str) -> None:
+        normalized = interface.casefold()
+        if len(normalized) > 15:
+            raise ValueError(
+                "terminal_l2_ports 接口名称超过 15 字符："
+                f"{normalized!r}"
+            )
+        if normalized in seen:
+            raise ValueError(
+                f"terminal_l2_ports 接口重复：{normalized}"
+            )
+        if len(result) >= expanded_limit:
+            raise ValueError(
+                "terminal_l2_ports 展开超过 10000 个接口"
+            )
+        seen.add(normalized)
+        result.append(normalized)
+
+    for raw_token in raw.split("/"):
+        token = raw_token.strip()
+        if not token:
+            raise ValueError("terminal_l2_ports 包含空 token")
+        normalized = token.casefold()
+        if normalized.startswith("peerlink"):
+            raise ValueError(
+                "terminal_l2_ports 不允许 peerlink 或 peerlink 子接口"
+            )
+        if compact_bond_re.fullmatch(normalized):
+            add(normalized)
+            continue
+        match = selector_re.fullmatch(normalized)
+        if match is None:
+            raise ValueError(
+                "terminal_l2_ports 仅支持 swpN、swpN-M、swpNsP-Q、"
+                "bondN、bondN-M、bondNsP-Q 或 compact local bond，"
+                f"以 / 分隔：{token!r}"
+            )
+        prefix = match.group(1).casefold()
+        port_start = int(match.group(2))
+        port_end = int(match.group(3) or port_start)
+        lane_start = int(match.group(4)) if match.group(4) is not None else None
+        lane_end = (
+            int(match.group(5) or lane_start)
+            if lane_start is not None else None
+        )
+        if port_end < port_start or (
+                lane_start is not None and lane_end < lane_start):
+            raise ValueError(
+                f"terminal_l2_ports 范围倒序：{token!r}"
+            )
+        if (port_end - port_start + 1) * (
+                (lane_end - lane_start + 1) if lane_start is not None else 1
+        ) > expanded_limit:
+            raise ValueError(
+                f"terminal_l2_ports 范围过大：{token!r}"
+            )
+        for port in range(port_start, port_end + 1):
+            if lane_start is None:
+                add(f"{prefix}{port}")
+            else:
+                for lane in range(lane_start, lane_end + 1):
+                    add(f"{prefix}{port}s{lane}")
+    return tuple(result)
 
 
 def detect_global_schema_version(data: object) -> int:
@@ -342,12 +475,31 @@ def parse_device_csv_layout(
             "schema 2 devices_config.csv 固定列必须为："
             + ",".join(DEVICE_FIXED_COLUMNS)
         )
+    policy_columns = ()
+    policy_occurrences = [
+        index for index, column in enumerate(body)
+        if column in DEVICE_V2_OPTIONAL_POLICY_COLUMNS
+    ]
+    if policy_occurrences:
+        expected = list(range(
+            fixed_end,
+            fixed_end + len(DEVICE_V2_OPTIONAL_POLICY_COLUMNS),
+        ))
+        if (policy_occurrences != expected
+                or tuple(body[index] for index in policy_occurrences)
+                != DEVICE_V2_OPTIONAL_POLICY_COLUMNS):
+            raise ValueError(
+                "schema 2 devices_config.csv 的 terminal_l2_ports "
+                "只能出现一次，且必须紧跟在 vrl 后"
+            )
+        policy_columns = DEVICE_V2_OPTIONAL_POLICY_COLUMNS
+    evpn_start = fixed_end + len(policy_columns)
     vlan_starts = _repeated_group_starts(
         body, len(DEVICE_BASE_COLUMNS), fixed_start, DEVICE_V2_VLAN_COLUMNS,
         "普通 VLAN v2", allow_empty=True,
     )
     evpn_starts = _repeated_group_starts(
-        body, fixed_end, len(body), DEVICE_V2_EVPN_COLUMNS,
+        body, evpn_start, len(body), DEVICE_V2_EVPN_COLUMNS,
         "EVPN v2", allow_empty=True,
     )
     return DeviceCsvLayout(
@@ -356,6 +508,7 @@ def parse_device_csv_layout(
         fixed_start=fixed_start,
         evpn_group_starts=evpn_starts,
         metadata_start=metadata_start,
+        policy_columns=policy_columns,
     )
 
 
@@ -406,6 +559,8 @@ DEPLOYABLE_TOOL_SUBTREES = frozenset({"lldp-analyze-tool"})
 NON_DEPLOYMENT_DIR_NAMES = frozenset({
     "test", "tests", "test_cases", "test-results", "__pycache__", ".pytest_cache",
 })
+ROOT_LOCAL_PLANNING_DIR_NAMES = frozenset({"outputs"})
+LOCAL_METADATA_DIR_NAMES = frozenset({".git", ".codex", ".agents"})
 
 # tools/ is primarily an entrypoint directory.  Top-level runtime source files
 # are transferred; README files are documentation-only and always excluded.
@@ -556,9 +711,16 @@ def is_tools_deployable_file(path: PurePosixPath | str) -> bool:
 
 
 def transfer_exclude_reason(path: PurePosixPath | str) -> str | None:
-    """Return why a path is not deployable, or None when it may be transferred."""
+    """Return why a workspace-relative path is not deployable, if applicable."""
     value = PurePosixPath(path)
     parts = value.parts
+    if parts and parts[0] in ROOT_LOCAL_PLANNING_DIR_NAMES:
+        return "local workspace metadata/planning data"
+    if any(
+        part in LOCAL_METADATA_DIR_NAMES or part.startswith(".codex_tmp")
+        for part in parts
+    ):
+        return "local workspace metadata/planning data"
     if is_readme_name(value.name):
         return "README documentation"
     if any(part in ANALYSIS_TOOL_NAMES for part in parts):
@@ -581,9 +743,17 @@ def transfer_exclude_reason(path: PurePosixPath | str) -> str | None:
 
 
 def rsync_excludes() -> tuple[str, ...]:
-    """Patterns shared by every sync-code job."""
+    """Unanchored patterns shared by every sync-code job.
+
+    ``outputs`` is deliberately absent because only the workspace-root
+    planning directory has that meaning; each sync job has its own transfer
+    root. Repository metadata names are unsafe at any depth and can therefore
+    use shared basename patterns. ``sync-code.py`` additionally applies
+    :func:`transfer_exclude_reason` to dynamically matched files.
+    """
     return (
         ".DS_Store", "._*", "~$*", "DEPRECATED-*", "deprecated-*", "*.pyc", "*.bak",
+        ".git/", ".codex/", ".agents/", ".codex_tmp*/",
         "*_副本.*", "*_copy.*", "*_bak.*",
         "__pycache__/", ".pytest_cache/", "test/", "tests/", "test_cases/", "test-results/",
         "ib-tool-Jie/", "ibdiagnet-analyze-tool/",

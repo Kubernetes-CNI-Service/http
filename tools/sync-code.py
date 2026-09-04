@@ -24,7 +24,12 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 import _package_common as project_contract
-from project_contract import is_readme_name, is_tools_deployable_file, rsync_excludes
+from project_contract import (
+    is_readme_name,
+    is_tools_deployable_file,
+    rsync_excludes,
+    transfer_exclude_reason,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 DAY0 = ROOT / "DAY0-Prepare"
@@ -293,8 +298,21 @@ def run_predeploy_test_gate() -> None:
 
 
 def matching_files(root: Path, patterns: tuple[str, ...]) -> tuple[Path, ...]:
-    return tuple(sorted({path for pattern in patterns for path in root.glob(pattern)
-                         if path.is_file() and not is_readme_name(path.name)}))
+    def is_deployable(path: Path) -> bool:
+        if not path.is_file() or is_readme_name(path.name):
+            return False
+        try:
+            relative = path.relative_to(ROOT)
+        except ValueError:
+            # This helper is also useful for isolated external fixtures; the
+            # repository-root contract cannot classify those paths.
+            return True
+        return transfer_exclude_reason(PurePosixPath(relative.as_posix())) is None
+
+    return tuple(sorted({
+        path for pattern in patterns for path in root.glob(pattern)
+        if is_deployable(path)
+    }))
 
 
 def build_jobs(
