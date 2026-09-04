@@ -70,10 +70,36 @@ current。由于 child manifest 尚无输入来源证明，非 dry-run `--skip-g
 EVPN 控制平面，非 MLAG 设备继续启用 EVPN multihoming；同设备混合两种冗余模式会在 CSV、
 legacy/nested bond 预处理及跨 `set` 的最终 YAML 门禁中失败。跨模块案例通过真实 Border 父模板
 和 `generate_all()` 验证 MLAG 输出，再经过发布规范化并与 `nv config show` 比较；MLAG 输入若
-选到不能生成 MLAG 配置的模板也会在发布前失败。测试还覆盖 MLAG `peerlink` 将
-`br_default` 的全部业务 VLAN 合并成一个规范化 selector：接口侧只生成空 mapping，不复制
-全局 VNI 属性；展开后两侧 VLAN 集合必须完全一致，且 VLAN 4094 只能用于独立的
-`peerlink.4094` 子接口。
+选到不能生成 MLAG 配置的模板也会在发布前失败。测试还确认 MLAG `peerlink` 只生成
+成员和 `type: peerlink`，不显式配置 `bridge`/`vlan`；它依靠 VLAN-aware bridge 的默认行为
+继承 `br_default` 的全部业务 VLAN，`peerlink.4094` 仍作为独立控制子接口生成。
+
+`test_terminal_l2_stp_generation.py` 覆盖终端二层端口的 STP 防环策略：独立 `swp` 与逻辑
+二层 `bond` 必须生成 `admin-edge: on` 和 `bpdu-guard: on`，routed swp、peerlink 以及跨
+多个 `set` 声明的 bond member 均不得被误配。冲突值不会被覆盖，缺失策略或 member 级策略
+会被最终门禁拒绝；workflow 使用真实配置生成器、MAC 发布规范化和 `nv config show` 比较验证
+策略在 latest 链路中保持一致。
+
+`test_qos_evpn_uplink_generation.py` 覆盖 Border/TAN RoCE QoS 与 EVPN-MH BGP uplink：
+Border 只选择普通父物理口，TAN（排除 `tan-cp-1gleaf`）只选择 breakout 子接口，逻辑
+bond 不得配置 PFC watchdog；任何启用 EVPN-MH 的模板都必须为每个接口型 BGP neighbor
+配置 uplink，并排除 `peerlink.4094`。该模块同时运行真实 Border generator → publisher →
+manual runtime/latest 比较；`test_v2_generation_flow.py` 还覆盖真实 v2 TAN breakout 流程。
+
+`test_v2_project_schema.py` 是 schema v2 的单模块合同：版本选择、零到多个普通/EVPN
+重复字段组、严格行宽、全局 VRR 按 VRF+VLAN 推导与四位十进制 VLAN-to-MAC 编码、
+locally-administered/低 16 bit 基址门禁、standalone SVI、
+两种 SVI/VRR + DHCP relay 模式、
+Border-only `/29` 高低三地址分区与 VRR±3 next-hop、`/native` 语义、local/MLAG/EVPN
+bond 分组以及引用完整性都必须 fail closed；非 Border 模板不受 `/29` 半区策略约束。
+`test_v2_generation_flow.py` 在临时项目中串联真实 setup、load、DHCP、Cumulus/NVOS 解析器、
+全部具体 Jinja 模板与发布规范化，验证重复 VLAN 不被模板丢弃、单 native VLAN 仍为 trunk、
+设备可以没有任何 VLAN 组，并要求等价 v1/v2 管理清单生成逐字节相同的 DHCP 运行文件。
+该流程还把真实生成 YAML 再送入 Feedback，验证重复组、native、bond 与派生 VRR 运行态证据
+能够回环；Border 只把唯一 `/29` SVI 用于自动默认路由，非 `/29` SVI 不触发规则，
+错误半区、多个 `/29` 候选或无效默认下一跳必须在发布目录创建前阻断，
+maximum/minimum 两种方向必须分别渲染 N+3/N+4。setup 的 direct case 同时
+覆盖未声明 bond 引用、`|` 对齐/MAC 规则和未使用声明 warning。
 
 覆盖内容：DAY0 模板输出骨架和 DHCP 唯一性、setup 管理的 monitor global 链接、项目时区、
 ibdiagnet 报告发现、首页本地链接、upload/sync 人工备份过滤，以及 Ubuntu 24.04 双架构离线

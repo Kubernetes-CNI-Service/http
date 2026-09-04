@@ -56,12 +56,31 @@ _AUTO_YES = False  # 由 -y 参数设置
 _EXCLUDED_CONFIG_TYPES = frozenset({"air"})
 _SAFE_HOSTNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")
 _SAFE_AAA_USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+_V2_MLAG_CAPABLE_TEMPLATES = frozenset({"border", "oobofoob-spine"})
 _EXPECTED_DEVICE_HEADER_PREFIX = (
     "hostname", "type", "template", "eth0_ip", "netmask", "eth0_gw",
     "eth0_mac", "eth1_ip", "netmask", "eth1_gw", "eth1_mac",
 )
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+TOOLS_DIR = str(Path(SCRIPT_DIR).parents[3] / "tools")
+if TOOLS_DIR not in sys.path:
+    sys.path.insert(0, TOOLS_DIR)
+ZTP_DIR = str(Path(SCRIPT_DIR).parents[2])
+if ZTP_DIR not in sys.path:
+    sys.path.insert(0, ZTP_DIR)
+from project_contract import (
+    DEVICE_V1_EVPN_COLUMNS,
+    DEVICE_V2_EVPN_COLUMNS,
+    detect_global_schema_version,
+    normalize_redundancy_mac,
+    normalize_v2_mlag_policy,
+    normalize_v2_vrr_policy,
+    parse_device_csv_layout,
+    require_device_csv_row_width,
+    v2_vrr_ipv4_plan,
+)
+from nvue_normalizer import expand_nvue_selector
 
 
 def _parse_branch(argv):
@@ -301,12 +320,8 @@ def _validate_final_yaml_outputs(*directories):
         print(f"[OK] 最终 YAML 严格校验通过：{checked} 个输出目录")
 
 
-def load_global(section_key=None):
-    """加载 01-global.yaml，支持合并格式（switches 列表），按 section_key 提取对应区段。
-
-    section_key 默认根据分支自动判断（eth 分支 → "eth"，ib 分支 → "ib"）。
-    IB 分支可显式传入 "ib" 或 "nvl" 以加载对应区段。
-    """
+def _load_global_document():
+    """Load and schema-check the authoritative project global document."""
     try:
         with open(_GLOBAL_FILE, encoding="utf-8") as f:
             data = yaml.safe_load(f)
@@ -314,6 +329,22 @@ def load_global(section_key=None):
         print(f"[ERROR] 找不到配置文件: {_GLOBAL_FILE}"); sys.exit(1)
     except yaml.YAMLError as e:
         print(f"[ERROR] {_GLOBAL_FILE} YAML 语法错误: {e}"); sys.exit(1)
+    try:
+        schema_version = detect_global_schema_version(data)
+    except ValueError as exc:
+        print(f"[ERROR] {_GLOBAL_FILE}: {exc}"); sys.exit(1)
+    if "schema_version" not in data:
+        print("[WARN] 01-global.yaml 缺少 schema_version；按旧版 schema 1 兼容读取")
+    return data, schema_version
+
+
+def load_global(section_key=None):
+    """加载 01-global.yaml，支持合并格式（switches 列表），按 section_key 提取对应区段。
+
+    section_key 默认根据分支自动判断（eth 分支 → "eth"，ib 分支 → "ib"）。
+    IB 分支可显式传入 "ib" 或 "nvl" 以加载对应区段。
+    """
+    data, schema_version = _load_global_document()
 
     if isinstance(data, dict) and "switches" in data:
         if section_key is None:
@@ -323,8 +354,13 @@ def load_global(section_key=None):
         if section is None:
             print(f"[ERROR] 合并格式 {_GLOBAL_FILE} 缺少 '{section_key}' 部分"); sys.exit(1)
         common = data.get("common", {}).get("switch", {})
-        return _deep_merge(common, section) if common else section
-    return data
+        merged = _deep_merge(common, section) if common else copy.deepcopy(section)
+    else:
+        merged = copy.deepcopy(data)
+    if not isinstance(merged, dict):
+        print(f"[ERROR] {_GLOBAL_FILE} 对应平台配置必须是 mapping"); sys.exit(1)
+    merged["_project_schema_version"] = schema_version
+    return merged
 
 
 def _refresh_cumulus_defaults_from_global():
@@ -361,11 +397,8 @@ _SOURCE_YAML_GZIP_PREFIX = "gzip+base64:"
 
 _SIMPLE_TEMPLATES = {"oobofoob-leaf", "oobofoob-spine", "tan-cp-1gleaf"}
 _BOND_MARKERS     = {"bond", "mlagbond", "evpnbond"}
-_EVPN_COLUMNS = (
-    "evpn_vrf", "evpn_l3vni", "evpn_l3vlan", "dhcp_relay",
-    "evpn_l2vni", "evpn_l2vlan", "svi_ip", "netmask", "vrr_ip",
-    "vrr_mac", "vlan_ports",
-)
+_EVPN_COLUMNS = DEVICE_V1_EVPN_COLUMNS
+_EVPN_V2_COLUMNS = DEVICE_V2_EVPN_COLUMNS
 
 
 def _load_devices_template(csv_file):
@@ -414,7 +447,8 @@ def _csv_combine_ip(ip, prefix):
         return ip
     return f"{ip}/{prefix}"
 
-def _csv_expand_prefixed(spec, prefix, context="", errors=None):
+def _csv_expand_prefixed(
+        spec, prefix, context="", errors=None, *, allow_compact_bond=False):
     if _csv_na(spec):
         return []
     items = []
@@ -422,7 +456,10 @@ def _csv_expand_prefixed(spec, prefix, context="", errors=None):
         group = group.strip()
         if not group:
             continue
-        if group == "peerlink.4094" or re.match(r'^(bond\d+)+$', group):
+        if (group == "peerlink.4094"
+                or re.fullmatch(r'(?:bond\d+)+', group)
+                or (allow_compact_bond
+                    and re.fullmatch(r'bond\d+(?:b\d+)+', group))):
             items.append(group)
             continue
         m = re.match(rf"^{prefix}(\d+)(?:-(\d+))?(?:s(\d+)(?:-(\d+))?)?$", group)
@@ -447,13 +484,13 @@ def _csv_expand_prefixed(spec, prefix, context="", errors=None):
 def _csv_expand_ports(spec, context="", errors=None):
     return _csv_expand_prefixed(spec, "swp", context, errors)
 
-def _csv_normalize_bond_type(value):
+def _csv_normalize_bond_type(value, *, schema_version=1):
     value = (value or "").strip().lower()
     if value in ("mlag", "mlagbond"):
         return "mlag"
-    if value == "localbond":
+    if value == "localbond" or (schema_version == 2 and value == "local"):
         return "localbond"
-    if value == "evpn_multihoming":
+    if value == "evpn_multihoming" or (schema_version == 2 and value == "evpn"):
         return "evpn_multihoming"
     raise ValueError(
         f"无法识别的 bond_type {value!r}（支持 localbond、mlagbond、evpn_multihoming）"
@@ -499,7 +536,9 @@ def _validate_device_bond_types(bond_types, context=""):
         )
 
 
-def _csv_parse_bond_groups(bond_ports, bond_types, macs, context="", errors=None):
+def _csv_parse_bond_groups(
+        bond_ports, bond_types, macs, context="", errors=None, *,
+        schema_version=1):
     """Parse aligned ``|``-separated bond profiles.
 
     A single bond_type/bond_mac remains backward compatible and applies to
@@ -520,23 +559,112 @@ def _csv_parse_bond_groups(bond_ports, bond_types, macs, context="", errors=None
         raise ValueError(
             f"bond_mac 有 {len(mac_specs)} 个分组，bond_ports 有 {len(port_specs)} 个分组"
         )
-    groups = []
-    for index, spec in enumerate(port_specs):
-        btype = _csv_normalize_bond_type(
-            type_specs[index] if len(type_specs) > 1 else type_specs[0]
+    normalized_types = [
+        _csv_normalize_bond_type(
+            type_specs[index] if len(type_specs) > 1 else type_specs[0],
+            schema_version=schema_version,
         )
-        mac = mac_specs[index] if len(mac_specs) > 1 else mac_specs[0]
-        bl = _csv_expand_prefixed(spec, "bond", context, errors)
+        for index in range(len(port_specs))
+    ]
+
+    if schema_version == 2:
+        if len(mac_specs) == 1:
+            shared_mac = mac_specs[0]
+            if not _csv_na(shared_mac):
+                redundancy_types = {
+                    value for value in normalized_types
+                    if value in {"mlag", "evpn_multihoming"}
+                }
+                if not redundancy_types:
+                    raise ValueError(
+                        "bond_mac 已填写，但设备没有 MLAG 或 EVPN multihoming bond"
+                    )
+                aligned_macs = [
+                    shared_mac if btype in redundancy_types else ""
+                    for btype in normalized_types
+                ]
+            else:
+                aligned_macs = ["" for _ in normalized_types]
+        else:
+            aligned_macs = mac_specs
+    else:
+        aligned_macs = [
+            mac_specs[index] if len(mac_specs) > 1 else mac_specs[0]
+            for index in range(len(port_specs))
+        ]
+
+    groups = []
+    seen_bonds = set()
+    seen_members = set()
+    for index, spec in enumerate(port_specs):
+        btype = normalized_types[index]
+        mac = aligned_macs[index]
+        normalized_profile_mac = None
+        bl = _csv_expand_prefixed(
+            spec, "bond", context, errors,
+            allow_compact_bond=(schema_version == 2 and btype == "localbond"),
+        )
+        if schema_version == 2:
+            for name in bl:
+                if len(name) > 15:
+                    raise ValueError(f"bond interface 名称超过 15 字符：{name}")
+                if name in seen_bonds:
+                    raise ValueError(f"bond_ports 重复定义：{name}")
+                if ((re.fullmatch(r'bond\d+(?:b\d+)+', name)
+                     or re.fullmatch(r'(?:bond\d+){2,}', name))
+                        and btype != "localbond"):
+                    raise ValueError(
+                        f"多成员 bond {name} 只允许 bond_type=local"
+                    )
+                if btype == "localbond":
+                    if (re.fullmatch(r'bond\d+(?:b\d+)+', name)
+                            or re.fullmatch(r'(?:bond\d+){2,}', name)):
+                        member_numbers = re.findall(r'\d+', name)
+                        members = [f"swp{number}" for number in member_numbers]
+                    else:
+                        members = [_bond_member(name)]
+                else:
+                    members = [_bond_member(name)]
+                overlap = seen_members.intersection(members)
+                if overlap:
+                    raise ValueError(
+                        "多个 bond 重复使用物理成员：" + ",".join(sorted(overlap))
+                    )
+                seen_bonds.add(name)
+                seen_members.update(members)
+            if btype in {"mlag", "evpn_multihoming"}:
+                try:
+                    normalized_mac = normalize_redundancy_mac(mac)
+                except ValueError as exc:
+                    label = "MLAG" if btype == "mlag" else "EVPN multihoming"
+                    raise ValueError(
+                        f"{label} bond 必须配置非零 unicast bond_mac"
+                    ) from exc
+                normalized_profile_mac = normalized_mac
+            elif not _csv_na(mac):
+                raise ValueError("local bond 的 bond_mac 必须为空或 NA")
         bi = {"type": btype, "bond_list": bl}
         # LACP bypass is the project-wide default for every bond type.  This
         # keeps a host-facing link usable while its peer has not formed LACP.
         bi["lacp-bypass"] = "enabled"
-        if not _csv_na(mac):
+        if normalized_profile_mac is not None:
+            bi["mac-address"] = normalized_profile_mac
+        elif schema_version == 1 and not _csv_na(mac):
             bi["mac-address"] = mac
         groups.append(bi)
     _validate_device_bond_types(
         {group["type"] for group in groups}, context=context,
     )
+    if schema_version == 2:
+        redundancy_macs = {
+            str(group.get("mac-address") or "").strip().lower()
+            for group in groups
+            if group["type"] in {"mlag", "evpn_multihoming"}
+        }
+        if len(redundancy_macs) > 1:
+            raise ValueError(
+                "同一设备所有 MLAG 或 EVPN multihoming bond 必须使用相同 bond_mac"
+            )
     return groups
 
 def _csv_to_int_opt(val):
@@ -574,24 +702,62 @@ def _csv_parse_vlan_selector(val):
     )
 
 
+def _csv_parse_vlan_selector_with_native(val, field="vlan_id"):
+    """Parse a v2 VLAN selector plus its optional single-VLAN native marker."""
+    raw = str(val or "").strip()
+    folded = raw.casefold()
+    native = folded.endswith("/native")
+    if native:
+        selector = raw[:-len("/native")].strip()
+        if not re.fullmatch(r"\d+", selector):
+            raise ValueError(
+                f"{field} 的 /native 只允许单个 VLAN，例如 100/native"
+            )
+    else:
+        if "/native" in folded or folded == "native":
+            raise ValueError(
+                f"{field} 的 native 标记格式无效；请使用 VLAN_ID/native"
+            )
+        selector = raw
+    value, spec, values = _csv_parse_numeric_selector(
+        selector, field=field, minimum=1, maximum=4094,
+    )
+    if native and len(values) != 1:
+        raise ValueError(f"{field} 的 /native 不能用于 VLAN 范围")
+    return value, spec, values, native
+
+
 def _csv_parse_vni_selector(val):
     return _csv_parse_numeric_selector(
         val, field="evpn_l2vni", minimum=1, maximum=16777215,
     )
 
 
-def _csv_parse_evpn_group(cols):
+def _csv_parse_evpn_group(cols, *, schema_version=1):
     if len(cols) < 6 or _csv_na(cols[0]):
         return None
     l2vni_idx = 4
     l2vlan_idx = 5
     svi_idx = 6
     netmask_idx = 7
-    vrr_idx = 8
-    vrr_mac_idx = 9
-    ports_idx = 10
+    if schema_version == 2:
+        vrr_idx = None
+        vrr_mac_idx = None
+        ports_idx = 8
+    else:
+        vrr_idx = 8
+        vrr_mac_idx = 9
+        ports_idx = 10
     svi_nm = cols[netmask_idx].strip() if len(cols) > netmask_idx else ""
-    vlan_id, vlan_spec, vlan_ids = _csv_parse_vlan_selector(cols[l2vlan_idx])
+    if schema_version == 2:
+        vlan_id, vlan_spec, vlan_ids, native = (
+            _csv_parse_vlan_selector_with_native(
+                cols[l2vlan_idx], "evpn_l2vlan",
+            )
+        )
+    else:
+        vlan_id, vlan_spec, vlan_ids = _csv_parse_vlan_selector(cols[l2vlan_idx])
+        native = False
     vni_id, vni_spec, vni_ids = _csv_parse_vni_selector(cols[l2vni_idx])
     relay_value = cols[3].strip() if len(cols) > 3 else ""
     relay_folded = relay_value.casefold()
@@ -623,17 +789,74 @@ def _csv_parse_evpn_group(cols):
         "svi_ip":     (_csv_combine_ip(cols[svi_idx], svi_nm)
                        if len(cols) > svi_idx and not _csv_na(cols[svi_idx]) else ""),
         "vrr_ip":     (_csv_combine_ip(cols[vrr_idx], svi_nm)
-                       if len(cols) > vrr_idx and not _csv_na(cols[vrr_idx]) else ""),
+                       if vrr_idx is not None and len(cols) > vrr_idx
+                       and not _csv_na(cols[vrr_idx]) else ""),
         "vrr_mac":    (cols[vrr_mac_idx].strip()
-                       if len(cols) > vrr_mac_idx and not _csv_na(cols[vrr_mac_idx]) else ""),
+                       if vrr_mac_idx is not None and len(cols) > vrr_mac_idx
+                       and not _csv_na(cols[vrr_mac_idx]) else ""),
         "vlan_ports": cols[ports_idx].strip() if len(cols) > ports_idx else "",
+        "native": native,
     }
+    if schema_version == 2:
+        if g["svi_ip"] and _csv_na(svi_nm):
+            raise ValueError("svi_ip 出现时 netmask 不能为空")
+        if not g["svi_ip"] and not _csv_na(svi_nm):
+            raise ValueError("netmask 出现时 svi_ip 不能为空")
     if relay_enabled:
         g["dhcp_relay"] = True
     return g
 
-def _csv_build_vrfs(groups, bond_groups=None):
+
+def _csv_parse_v2_vlan_group(cols):
+    """Parse one optional v2 ordinary VLAN quartet into the shared L2 model."""
+    if len(cols) != 4:
+        raise ValueError("普通 VLAN v2 字段组必须正好包含 4 列")
+    if all(_csv_na(value) for value in cols):
+        return None
+    if _csv_na(cols[0]):
+        raise ValueError("普通 VLAN 组只要填写任一字段，vlan_id 就不能为空")
+    vlan_id, vlan_spec, vlan_ids, native = (
+        _csv_parse_vlan_selector_with_native(cols[0], "vlan_id")
+    )
+    svi_raw = cols[1].strip()
+    netmask = cols[2].strip()
+    if not _csv_na(svi_raw) and _csv_na(netmask):
+        raise ValueError("普通 VLAN 的 svi_ip 出现时 netmask 不能为空")
+    if _csv_na(svi_raw) and not _csv_na(netmask):
+        raise ValueError("普通 VLAN 的 netmask 出现时 svi_ip 不能为空")
+    svi_ip = (
+        _csv_combine_ip(svi_raw, netmask) if not _csv_na(svi_raw) else ""
+    )
+    if len(vlan_ids) > 1 and svi_ip:
+        raise ValueError(
+            f"vlan_id={vlan_spec} 是 VLAN 范围，不能同时配置单值 svi_ip"
+        )
+    return {
+        "vrf": "default",
+        "l3vni": None,
+        "l3vlan": None,
+        "l2vni": None,
+        "l2vni_spec": "",
+        "l2vni_ids": [],
+        "l2vlan": vlan_id,
+        "l2vlan_spec": vlan_spec,
+        "l2vlan_ids": vlan_ids,
+        "dhcp_server": "",
+        "svi_ip": svi_ip,
+        "vrr_ip": "",
+        "vrr_mac": "",
+        "vlan_ports": cols[3].strip(),
+        "native": native,
+        # A v2 ordinary block with no SVI address is an explicit bridge-only
+        # membership.  Do not synthesize an empty ``vlan<ID>`` SVI merely
+        # because the selector contains one VLAN.
+        "bridge_only": not bool(svi_ip),
+    }
+
+
+def _csv_build_vrfs(groups, bond_groups=None, *, schema_version=1):
     seen = {}; order = []; bond_idx = 0
+    claimed_v2_vlans = set()
     multi = bond_groups and len(bond_groups) > 1
     l3vni_by_vrf = {}
     l3vlan_by_vrf = {}
@@ -660,6 +883,14 @@ def _csv_build_vrfs(groups, bond_groups=None):
         vlan_spec = g.get("l2vlan_spec") or (
             _compress_vlan_ids(vlan_ids) if vlan_ids else ""
         )
+        if schema_version == 2:
+            overlap = sorted(claimed_v2_vlans.intersection(vlan_ids))
+            if overlap:
+                raise ValueError(
+                    "schema 2 的重复字段组不能重复定义 VLAN："
+                    + ",".join(str(value) for value in overlap)
+                )
+            claimed_v2_vlans.update(vlan_ids)
         vni_ids = g.get("l2vni_ids")
         if vni_ids is None:
             vni_ids = [g["l2vni"]] if g.get("l2vni") is not None else []
@@ -687,7 +918,16 @@ def _csv_build_vrfs(groups, bond_groups=None):
         vp_raw = g.get("vlan_ports", "").strip()
         vp_spec = vp_raw.lower()
         is_exact_marker = vp_spec in _BOND_MARKERS or _csv_na(vp_spec)
-        if bond_groups and is_exact_marker:
+        if schema_version == 2 and vp_spec in _BOND_MARKERS:
+            raise ValueError(
+                "schema 2 的 vlan_ports 不再支持 bond/mlagbond/evpnbond "
+                "位置标记；请填写 bond_ports 中已定义的显式 bond interface"
+            )
+        if schema_version == 2 and _csv_na(vp_spec):
+            # In v2, an empty vlan_ports means the VLAN/SVI has no physical
+            # L2 attachment.  Never consume a bond profile by column order.
+            ports = []
+        elif bond_groups and is_exact_marker:
             if multi and bond_idx >= len(bond_groups):
                 raise ValueError(
                     f"bond_ports 中有 {len(bond_groups)} 个分组，但 EVPN 组引用了第 {bond_idx + 1} 个"
@@ -711,12 +951,17 @@ def _csv_build_vrfs(groups, bond_groups=None):
             for token in direct_tokens:
                 ports.extend(_csv_expand_ports(token))
             if expanded and not bond_groups:
+                if schema_version == 2:
+                    raise ValueError(
+                        "vlan_ports 中的 bond 未在 bond_ports 定义："
+                        + "/".join(expanded)
+                    )
                 # Preserve legacy parsing so the later schema validations can
                 # report the more specific SVI/VNI error first. Project input
                 # should normally define bond_ports/bond_type for these names.
                 ports.extend(expanded)
                 expanded = []
-            if expanded and len(bond_groups) == 1:
+            if expanded and len(bond_groups) == 1 and schema_version == 1:
                 # Backward compatibility: a single device-wide profile applies
                 # to explicit EVPN bond ranges even when bond_ports is narrower.
                 profile = bond_groups[0]
@@ -794,6 +1039,7 @@ def _csv_build_vrfs(groups, bond_groups=None):
                 "vlan_ids": [vlan_id], "vni": vni_id,
                 "emit_svi": not g.get("bridge_only", False),
                 "svi_ip": "", "vrr_ip": "", "vrr_mac": "",
+                "native": False,
             } for vlan_id, vni_id in zip(vlan_ids, expanded_vnis)]
         else:
             l2_items = [{
@@ -803,18 +1049,19 @@ def _csv_build_vrfs(groups, bond_groups=None):
                              and not g.get("bridge_only", False)),
                 "svi_ip": g["svi_ip"], "vrr_ip": g["vrr_ip"],
                 "vrr_mac": g["vrr_mac"],
+                "native": bool(g.get("native")),
             }]
         for l2 in l2_items:
             l2["dhcp_relay"] = bool(g.get("dhcp_relay"))
             l2["dhcp_server"] = g.get("dhcp_server", "")
-            if ports:
-                l2["vlan_ports"] = copy.deepcopy(ports)
+            l2["vlan_ports"] = copy.deepcopy(ports)
             seen[vn]["l2vlans"].append(l2)
     return [seen[v] for v in order]
 
 
 def _csv_collect_evpn_groups(
-        row, group_count, hostname, errors, base=25, width=11):
+        row, group_count, hostname, errors, base=25, width=11, *,
+        schema_version=1):
     """Parse all EVPN groups and append selector failures to CSV errors."""
     groups = []
     invalid = False
@@ -832,7 +1079,9 @@ def _csv_collect_evpn_groups(
         if inherited_l2_only:
             group_cols[0] = last_vrf or "default"
         try:
-            group = _csv_parse_evpn_group(group_cols)
+            group = _csv_parse_evpn_group(
+                group_cols, schema_version=schema_version,
+            )
         except ValueError as exc:
             errors.append(f"  {hostname}: EVPN 组 {group_idx + 1}: {exc}")
             invalid = True
@@ -876,10 +1125,13 @@ def _csv_collect_evpn_groups(
     return None if invalid else groups
 
 
-def _csv_build_vrfs_checked(groups, bond_groups, hostname, errors):
+def _csv_build_vrfs_checked(
+        groups, bond_groups, hostname, errors, *, schema_version=1):
     """Build VRFs and append cross-field range failures to CSV errors."""
     try:
-        return _csv_build_vrfs(groups, bond_groups or None)
+        return _csv_build_vrfs(
+            groups, bond_groups or None, schema_version=schema_version,
+        )
     except ValueError as exc:
         errors.append(f"  {hostname}: EVPN 配置: {exc}")
         return None
@@ -897,6 +1149,223 @@ def _detect_evpn_schema(header, start, end):
         "固定列后必须重复使用 EVPN 字段组：" +
         ",".join(_EVPN_COLUMNS)
     )
+
+
+def _normalize_v2_vrr_policy(global_data):
+    """Validate schema-v2 derived VRR policy from the merged ETH globals."""
+    return normalize_v2_vrr_policy(global_data)
+
+
+def _v2_vrr_mac(policy, vlan_id):
+    """Encode a four-digit decimal VLAN ID in the MAC's low 16 bits.
+
+    The decimal digits are used as hexadecimal nibbles for readability:
+    VLAN 110 becomes suffix ``01:10`` and VLAN 4094 becomes ``40:94``.
+    """
+    try:
+        vlan = int(vlan_id)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"VLAN ID 不是整数：{vlan_id!r}") from exc
+    if not 1 <= vlan <= 4094:
+        raise ValueError(f"VLAN ID 超出 1-4094：{vlan}")
+    vlan_suffix = int(f"{vlan:04d}", 16)
+    value = int(policy["base_value"]) + vlan_suffix
+    if value > 0xFFFFFFFFFFFF:
+        raise ValueError("VRR base_mac + VLAN 编码溢出 48 bit")
+    raw = f"{value:012x}"
+    return ":".join(raw[index:index + 2] for index in range(0, 12, 2))
+
+
+def _apply_v2_vrr_policy(devices, policy):
+    """Infer and populate the two supported SVI/VRR scenarios project-wide.
+
+    Only single-VLAN entries with an SVI participate.  Pure L2 membership does
+    not influence inference.  Claims are scoped by VRF plus VLAN.  Two or more
+    unique physical SVIs use the derived gateway as VRR; shared gateway SVIs
+    use the snippet-MAC form.  A lone non-gateway SVI remains standalone.
+    """
+    claims = {}
+    seen_device_vlan = set()
+    for hostname, device in devices.items():
+        if device.get("source_yaml_b64"):
+            raise ValueError(
+                f"{hostname}: schema 2 不支持 source_yaml 无损回环行；"
+                "请删除 source_yaml_* 元数据后使用规范化 v2 字段"
+            )
+        for vrf in device.get("vrfs", []):
+            vrf_name = str(vrf.get("evpn_vrf") or "default")
+            for l2 in vrf.get("l2vlans", []):
+                raw_svi = str(l2.get("svi_ip") or "").strip()
+                vlan_id = l2.get("vlan_id")
+                if not raw_svi:
+                    continue
+                if vlan_id is None:
+                    raise ValueError(
+                        f"{hostname}: VLAN 范围不能携带 svi_ip"
+                    )
+                identity = (hostname, int(vlan_id))
+                if identity in seen_device_vlan:
+                    raise ValueError(
+                        f"{hostname}: vlan{vlan_id} 被多个字段组重复定义 SVI"
+                    )
+                seen_device_vlan.add(identity)
+                try:
+                    interface = ipaddress.ip_interface(raw_svi)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"{hostname}: vlan{vlan_id} svi_ip 无效：{raw_svi!r}"
+                    ) from exc
+                if interface.version != 4:
+                    raise ValueError(
+                        f"{hostname}: vlan{vlan_id} v2 VRR 只支持 IPv4 SVI"
+                    )
+                network = interface.network
+                if network.prefixlen >= 31:
+                    raise ValueError(
+                        f"{hostname}: vlan{vlan_id} 网段 {network} 没有可用的"
+                        " subnet_minimum/subnet_maximum gateway"
+                    )
+                if interface.ip in {network.network_address, network.broadcast_address}:
+                    raise ValueError(
+                        f"{hostname}: vlan{vlan_id} svi_ip={interface.ip} 不是可用主机地址"
+                    )
+                claims.setdefault((vrf_name, int(vlan_id)), []).append({
+                    "hostname": hostname,
+                    "l2": l2,
+                    "interface": interface,
+                    "network": network,
+                })
+
+    for (vrf_name, vlan_id), vlan_claims in sorted(claims.items()):
+        networks = {str(item["network"]) for item in vlan_claims}
+        if len(networks) != 1:
+            details = ", ".join(sorted(networks))
+            raise ValueError(
+                f"evpn_vrf={vrf_name} vlan{vlan_id} 的 SVI 网段不一致："
+                f"{details}"
+            )
+        network = vlan_claims[0]["network"]
+        gateway = (
+            network.network_address + 1
+            if policy["gateway_ip"] == "subnet_minimum"
+            else network.broadcast_address - 1
+        )
+        addresses = [item["interface"].ip for item in vlan_claims]
+        unique = set(addresses)
+        if len(addresses) == 1 and gateway not in unique:
+            scenario = "standalone"
+        elif len(unique) == len(addresses) and gateway not in unique:
+            scenario = "vrr"
+        elif len(unique) == 1 and next(iter(unique)) == gateway:
+            scenario = "snippet"
+        else:
+            details = ", ".join(
+                f"{item['hostname']}={item['interface'].ip}"
+                for item in vlan_claims
+            )
+            raise ValueError(
+                f"evpn_vrf={vrf_name} vlan{vlan_id} 的 SVI 地址既非全部唯一"
+                "且避开 gateway，"
+                f"也非全部相同且等于 gateway {gateway}：{details}"
+            )
+        mac = (
+            "" if scenario == "standalone"
+            else _v2_vrr_mac(policy, vlan_id)
+        )
+        for item in vlan_claims:
+            l2 = item["l2"]
+            l2["vrr_mac"] = mac
+            l2["vrr_gateway_ip"] = (
+                "" if scenario == "standalone"
+                else f"{gateway}/{network.prefixlen}"
+            )
+            l2["vrr_gateway_mode"] = (
+                "" if scenario == "standalone"
+                else policy["gateway_ip"]
+            )
+            l2["vrr_ip"] = (
+                f"{gateway}/{network.prefixlen}" if scenario == "vrr" else ""
+            )
+            l2["vrr_mode"] = scenario
+
+
+def _assign_v2_border_default_routes(devices):
+    """Apply the strict /29 opposite-triplet route plan to Border VRFs only."""
+    for hostname, device in devices.items():
+        if str(device.get("template") or "").strip().casefold() != "border":
+            continue
+        for vrf in device.get("vrfs", []):
+            vrf.pop("default_route_next_hop", None)
+            candidates = []
+            for l2 in vrf.get("l2vlans", []):
+                l2.pop("peer_gateway_ip", None)
+                svi_raw = str(l2.get("svi_ip") or "").strip()
+                if not svi_raw:
+                    continue
+                try:
+                    svi_interface = ipaddress.ip_interface(svi_raw)
+                except ValueError as exc:
+                    vrf_name = str(vrf.get("evpn_vrf") or "default")
+                    raise ValueError(
+                        f"{hostname}: VRF {vrf_name} 的 Border SVI 地址无效"
+                    ) from exc
+                if (svi_interface.version == 4
+                        and svi_interface.network.prefixlen == 29):
+                    candidates.append(l2)
+            if not candidates:
+                continue
+            vrf_name = str(vrf.get("evpn_vrf") or "default")
+            if len(candidates) != 1:
+                vlans = ", ".join(
+                    f"vlan{item.get('vlan_id')}" for item in candidates
+                )
+                raise ValueError(
+                    f"{hostname}: VRF {vrf_name} 有多个 /29 可用于默认路由的"
+                    f" SVI（{vlans}）；Border v2 必须唯一"
+                )
+            l2 = candidates[0]
+            gateway_raw = str(l2.get("vrr_gateway_ip") or "").strip()
+            gateway_mode = str(l2.get("vrr_gateway_mode") or "").strip()
+            if not gateway_raw or not gateway_mode:
+                raise ValueError(
+                    f"{hostname}: VRF {vrf_name} 缺少 v2 VRR gateway 推导结果"
+                )
+            try:
+                gateway_interface = ipaddress.ip_interface(gateway_raw)
+                svi_interface = ipaddress.ip_interface(str(l2["svi_ip"]))
+            except ValueError as exc:
+                raise ValueError(
+                    f"{hostname}: VRF {vrf_name} 的 Border SVI/VRR 地址无效"
+                ) from exc
+            plan = v2_vrr_ipv4_plan(
+                gateway_interface.network, gateway_mode,
+            )
+            if str(gateway_interface.ip) != plan["gateway_ip"]:
+                raise ValueError(
+                    f"{hostname}: VRF {vrf_name} 的 gateway "
+                    f"{gateway_interface.ip} 与 {gateway_mode} 推导值 "
+                    f"{plan['gateway_ip']} 不一致"
+                )
+            if l2.get("vrr_mode") == "vrr":
+                allowed = plan["device_ips"]
+                if str(svi_interface.ip) not in allowed:
+                    raise ValueError(
+                        f"{hostname}: VRF {vrf_name} 使用 {gateway_mode} 时，"
+                        f"Border SVI 必须使用 {allowed[0]} 或 {allowed[1]}，"
+                        f"实际为 {svi_interface.ip}"
+                    )
+            elif l2.get("vrr_mode") == "snippet":
+                if str(svi_interface.ip) != plan["gateway_ip"]:
+                    raise ValueError(
+                        f"{hostname}: VRF {vrf_name} 的共享 SVI 必须等于 "
+                        f"gateway {plan['gateway_ip']}"
+                    )
+            else:
+                raise ValueError(
+                    f"{hostname}: VRF {vrf_name} 缺少可识别的 v2 VRR 场景"
+                )
+            l2["peer_gateway_ip"] = plan["peer_gateway_ip"]
+            vrf["default_route_next_hop"] = plan["peer_gateway_ip"]
 
 
 def _normalize_dhcp_server_groups(global_data):
@@ -1394,26 +1863,49 @@ def _validate_project_svi_vrr(devices):
                 "vrr_ip": dev.get("vrr_ip", ""),
                 "vrr_mac": dev.get("vrr_mac", ""),
             }]
+        for vrf in dev.get("vrfs", []):
+            vrf_name = str(vrf.get("evpn_vrf") or "default")
+            for l2 in vrf.get("l2vlans", []):
+                vlan_id = l2.get("vlan_id")
+                if vlan_id is None:
+                    continue
+                key = (vrf_name, vlan_id)
+                svi_ip = (l2.get("svi_ip") or "").split("/", 1)[0]
+                vrr_ip = (l2.get("vrr_ip") or "").split("/", 1)[0]
+                vrr_mac = (l2.get("vrr_mac") or "").lower()
+                if svi_ip:
+                    vlan_svi_ips.setdefault(key, {}).setdefault(svi_ip, []).append({
+                        "hostname": hostname,
+                        "vrr_mac": vrr_mac,
+                        "has_vrr_ip": bool(vrr_ip),
+                    })
+                if vrr_ip and vrr_mac:
+                    vlan_vrr_pairs.setdefault(key, {}).setdefault(
+                        (vrr_ip, vrr_mac), []
+                    ).append(hostname)
+        if dev.get("vrfs"):
+            continue
         for l2 in l2_items:
             vlan_id = l2.get("vlan_id")
             if vlan_id is None:
                 continue
+            key = ("default", vlan_id)
             svi_ip = (l2.get("svi_ip") or "").split("/", 1)[0]
             vrr_ip = (l2.get("vrr_ip") or "").split("/", 1)[0]
             vrr_mac = (l2.get("vrr_mac") or "").lower()
             if svi_ip:
-                vlan_svi_ips.setdefault(vlan_id, {}).setdefault(svi_ip, []).append({
+                vlan_svi_ips.setdefault(key, {}).setdefault(svi_ip, []).append({
                     "hostname": hostname,
                     "vrr_mac": vrr_mac,
                     "has_vrr_ip": bool(vrr_ip),
                 })
             if vrr_ip and vrr_mac:
-                vlan_vrr_pairs.setdefault(vlan_id, {}).setdefault(
+                vlan_vrr_pairs.setdefault(key, {}).setdefault(
                     (vrr_ip, vrr_mac), []
                 ).append(hostname)
 
     errors = []
-    for vlan_id, ip_claims in sorted(vlan_svi_ips.items()):
+    for (vrf_name, vlan_id), ip_claims in sorted(vlan_svi_ips.items()):
         for svi_ip, claims in ip_claims.items():
             unique_hosts = sorted({claim["hostname"] for claim in claims})
             if len(unique_hosts) > 1:
@@ -1422,7 +1914,8 @@ def _validate_project_svi_vrr(devices):
                 has_vrr_ip = any(claim["has_vrr_ip"] for claim in claims)
                 if has_vrr_ip:
                     errors.append(
-                        f"  vlan{vlan_id} 已配置 vrr_ip，svi_ip={svi_ip!r} "
+                        f"  evpn_vrf={vrf_name} vlan{vlan_id} 已配置 vrr_ip，"
+                        f"svi_ip={svi_ip!r} "
                         "不能被多台设备重复使用：" + ", ".join(unique_hosts)
                     )
                 elif missing_mac or len(macs) != 1:
@@ -1431,17 +1924,19 @@ def _validate_project_svi_vrr(devices):
                         for claim in claims
                     )
                     errors.append(
-                        f"  vlan{vlan_id} 重复 svi_ip={svi_ip!r} 时，所有设备必须使用"
+                        f"  evpn_vrf={vrf_name} vlan{vlan_id} 重复 svi_ip={svi_ip!r} "
+                        "时，所有设备必须使用"
                         f"同一个 vrr_mac：{details}"
                     )
-    for vlan_id, pair_hosts in sorted(vlan_vrr_pairs.items()):
+    for (vrf_name, vlan_id), pair_hosts in sorted(vlan_vrr_pairs.items()):
         if len(pair_hosts) > 1:
             details = "; ".join(
                 f"{ip}/{mac}: {', '.join(sorted(set(hosts)))}"
                 for (ip, mac), hosts in sorted(pair_hosts.items())
             )
             errors.append(
-                f"  vlan{vlan_id} 的 vrr_ip/vrr_mac 在设备间不一致：{details}"
+                f"  evpn_vrf={vrf_name} vlan{vlan_id} 的 vrr_ip/vrr_mac "
+                f"在设备间不一致：{details}"
             )
     return errors
 
@@ -1499,12 +1994,261 @@ def _decode_source_yaml(source_b64, expected_sha256):
     return source_text
 
 
+def _device_redundancy_mac(device, mode):
+    """Return the single normalized v2 redundancy MAC for ``mode``."""
+    values = {
+        str(group.get("mac-address") or "").strip().lower()
+        for group in device.get("bond_groups", [])
+        if isinstance(group, dict) and group.get("type") == mode
+        and not _csv_na(group.get("mac-address"))
+    }
+    if len(values) != 1:
+        label = "MLAG" if mode == "mlag" else "EVPN multihoming"
+        raise ValueError(
+            f"{device.get('hostname', '?')}: {label} bond 必须共用一个 bond_mac"
+        )
+    return next(iter(values))
+
+
+def _device_uses_vxlan(device):
+    """Return whether one generated device owns at least one L2/L3 VNI."""
+    for vrf in device.get("vrfs", []):
+        if not isinstance(vrf, dict):
+            continue
+        if vrf.get("evpn_l3vni") is not None:
+            return True
+        for l2 in vrf.get("l2vlans", []):
+            if isinstance(l2, dict) and l2.get("vni") is not None:
+                return True
+    return False
+
+
+def _device_vxlan_inventory(device):
+    """Return the normalized L2/L3 VNI inventory that MLAG peers must share."""
+    inventory = set()
+    for vrf in device.get("vrfs", []):
+        if not isinstance(vrf, dict):
+            continue
+        name = str(vrf.get("evpn_vrf") or "default")
+        l3vni = vrf.get("evpn_l3vni")
+        l3vlan = vrf.get("evpn_l3vlan")
+        if l3vni is not None or l3vlan is not None:
+            inventory.add(("l3", name, l3vlan, l3vni))
+        for l2 in vrf.get("l2vlans", []):
+            if not isinstance(l2, dict) or l2.get("vni") is None:
+                continue
+            vlan_ids = l2.get("vlan_ids") or [l2.get("vlan_id")]
+            for vlan_id in vlan_ids:
+                inventory.add(("l2", name, vlan_id, l2.get("vni")))
+    return inventory
+
+
+def _device_owned_ip_addresses(device):
+    """Yield normalized IPs owned by a device for shared-address collision checks."""
+    values = []
+    for field in ("eth0_ip", "eth1_ip", "lo_ip", "svi_ip", "vrr_ip"):
+        values.append((field, device.get(field)))
+    for vrf in device.get("vrfs", []):
+        if not isinstance(vrf, dict):
+            continue
+        for l2 in vrf.get("l2vlans", []):
+            if not isinstance(l2, dict):
+                continue
+            vlan = l2.get("vlan_spec") or l2.get("vlan_id") or "?"
+            values.extend((
+                (f"vlan{vlan}.svi_ip", l2.get("svi_ip")),
+                (f"vlan{vlan}.vrr_ip", l2.get("vrr_ip")),
+            ))
+    for field, raw in values:
+        text = str(raw or "").strip()
+        if _csv_na(text) or text.casefold() == "dhcp-client":
+            continue
+        try:
+            yield str(ipaddress.ip_interface(text).ip), field
+        except ValueError:
+            continue
+
+
+def _v2_loopback_interface(device):
+    text = str(device.get("lo_ip") or "").strip()
+    try:
+        interface = ipaddress.ip_interface(text)
+    except ValueError as exc:
+        raise ValueError(
+            f"{device.get('hostname', '?')}: VXLAN active-active MLAG "
+            "要求合法 IPv4 /32 loopback"
+        ) from exc
+    if not isinstance(interface, ipaddress.IPv4Interface) or interface.network.prefixlen != 32:
+        raise ValueError(
+            f"{device.get('hostname', '?')}: VXLAN active-active MLAG "
+            "要求合法 IPv4 /32 loopback"
+        )
+    return interface
+
+
+def _apply_v2_mlag_attributes(devices_data, mlag_global, policy):
+    """Derive schema-v2 MLAG pairs and optional VXLAN shared addresses."""
+    priorities = mlag_global.get("priority", []) if isinstance(mlag_global, dict) else []
+    overrides = dict((policy or {}).get("shared_addresses", {}))
+    groups = {}
+    mac_modes = {}
+    for hostname, device in devices_data.items():
+        if device.get("source_yaml_b64"):
+            continue
+        bond_types = _device_bond_types(device)
+        for mode in ("mlag", "evpn_multihoming"):
+            if mode not in bond_types:
+                continue
+            mac = _device_redundancy_mac(device, mode)
+            mac_modes.setdefault(mac, set()).add(mode)
+            if mode == "mlag":
+                template = str(device.get("template") or "").strip().casefold()
+                if template not in _V2_MLAG_CAPABLE_TEMPLATES:
+                    raise ValueError(
+                        f"{hostname}: schema v2 MLAG 模板 {template or '<empty>'!r} "
+                        "不会生成完整 peerlink/top-level MLAG 配置；"
+                        "只支持 border 或 oobofoob-spine"
+                    )
+                groups.setdefault(mac, []).append(hostname)
+
+    for mac, modes in sorted(mac_modes.items()):
+        if len(modes) > 1:
+            raise ValueError(
+                f"bond_mac {mac} 不能同时用于 MLAG 与 EVPN multihoming"
+            )
+
+    owned_ips = {}
+    for hostname, device in devices_data.items():
+        for address, field in _device_owned_ip_addresses(device):
+            owned_ips.setdefault(address, []).append(f"{hostname}.{field}")
+
+    selected_shared = {}
+    used_overrides = set()
+    for mac in sorted(groups):
+        members = sorted(set(groups[mac]), key=str.casefold)
+        if len(members) != 2:
+            raise ValueError(
+                f"MLAG bond_mac {mac} 必须恰好对应 2 台设备，实际为 "
+                f"{len(members)}：{', '.join(members)}"
+            )
+        first, second = (devices_data[name] for name in members)
+        for hostname, device in zip(members, (first, second)):
+            if not str(device.get("peerlink_ports") or "").strip():
+                raise ValueError(f"{hostname}: MLAG 设备必须配置 peerlink_ports")
+        first_bonds = {
+            name for group in first.get("bond_groups", [])
+            if group.get("type") == "mlag" for name in group.get("bond_list", [])
+        }
+        second_bonds = {
+            name for group in second.get("bond_groups", [])
+            if group.get("type") == "mlag" for name in group.get("bond_list", [])
+        }
+        if first_bonds != second_bonds:
+            raise ValueError(
+                f"MLAG bond_mac {mac} 两端 bond 集合不一致："
+                f"{members[0]}={sorted(first_bonds)}, {members[1]}={sorted(second_bonds)}"
+            )
+
+        active_flags = [_device_uses_vxlan(first), _device_uses_vxlan(second)]
+        if active_flags[0] != active_flags[1]:
+            raise ValueError(
+                f"MLAG bond_mac {mac} 两端 VXLAN active-active 状态不一致"
+            )
+        active_active = active_flags[0]
+        if active_active:
+            first_inventory = _device_vxlan_inventory(first)
+            second_inventory = _device_vxlan_inventory(second)
+            if first_inventory != second_inventory:
+                raise ValueError(
+                    f"MLAG bond_mac {mac} 两端 VLAN/VNI inventory 不一致："
+                    f"{members[0]}={sorted(first_inventory, key=repr)!r}, "
+                    f"{members[1]}={sorted(second_inventory, key=repr)!r}"
+                )
+            templates = {
+                str(device.get("template") or "").strip().casefold()
+                for device in (first, second)
+            }
+            if templates != {"border"}:
+                raise ValueError(
+                    f"MLAG bond_mac {mac} 启用 VNI 时只支持 border 模板；"
+                    f"实际为 {', '.join(sorted(templates))}"
+                )
+        loopbacks = None
+        if active_active:
+            loopbacks = [_v2_loopback_interface(first), _v2_loopback_interface(second)]
+            members = [
+                name for _interface, name in sorted(
+                    zip(loopbacks, members), key=lambda item: int(item[0].ip),
+                )
+            ]
+            first, second = (devices_data[name] for name in members)
+            loopbacks = [_v2_loopback_interface(first), _v2_loopback_interface(second)]
+
+        for role, hostname in enumerate(members):
+            device = devices_data[hostname]
+            peer = devices_data[members[role ^ 1]]
+            backup = str(peer.get("eth0_ip") or "").split("/", 1)[0]
+            if not backup or _csv_na(backup) or backup.casefold() == "dhcp-client":
+                raise ValueError(f"{hostname}: MLAG peer 缺少静态 eth0_ip backup 地址")
+            device["mlag_backup"] = backup
+            if role < len(priorities):
+                device["mlag_priority"] = priorities[role]
+            device["mlag_mac_address"] = mac
+            device["mlag_vxlan_active_active"] = active_active
+            device.pop("system_mac", None)
+
+        if not active_active:
+            continue
+        if mac in overrides:
+            shared = overrides[mac]
+            used_overrides.add(mac)
+        else:
+            assert loopbacks is not None
+            addresses = sorted((item.ip for item in loopbacks), key=int)
+            try:
+                shared = str(addresses[1] + 1)
+            except ipaddress.AddressValueError as exc:
+                raise ValueError(
+                    f"MLAG bond_mac {mac} 自动推导 shared-address 溢出"
+                ) from exc
+        if shared in owned_ips:
+            raise ValueError(
+                f"MLAG bond_mac {mac} 的 anycast-ip {shared} 与现有地址冲突："
+                + ", ".join(owned_ips[shared])
+            )
+        if shared in selected_shared:
+            raise ValueError(
+                f"MLAG anycast-ip {shared} 被多个 bond_mac 使用："
+                f"{selected_shared[shared]}, {mac}"
+            )
+        selected_shared[shared] = mac
+        for hostname in members:
+            devices_data[hostname]["mlag_shared_address"] = shared
+
+    unused = sorted(set(overrides) - used_overrides)
+    if unused:
+        raise ValueError(
+            "mlag.shared-addresses 包含未对应 VXLAN active-active MLAG pair "
+            "的 bond-mac：" + ", ".join(unused)
+        )
+
+
 # ── ETH: csv_to_yaml main function ───────────────────────────────────────────
 
 def _generate_devices_yaml():
     """Read 02-devices_config.csv + 01-global.yaml and write 91-devices.yaml."""
     _tmpl_map = _load_devices_template(_CSV_FILE)
     global_data = load_global()  # handles merged format extraction
+    schema_version = global_data.get("_project_schema_version", 1)
+    v2_vrr_policy = None
+    v2_mlag_policy = None
+    if schema_version == 2:
+        try:
+            v2_vrr_policy = _normalize_v2_vrr_policy(global_data)
+            v2_mlag_policy = normalize_v2_mlag_policy(global_data)
+        except ValueError as exc:
+            print(f"[ERROR] 01-global.yaml schema v2 配置无效：{exc}")
+            sys.exit(1)
     try:
         _refresh_cumulus_defaults_from_global()
     except (OSError, ValueError, yaml.YAMLError) as exc:
@@ -1537,11 +2281,10 @@ def _generate_devices_yaml():
         reader   = csv.reader(f)
         header   = next(reader, [])
         h_lower  = [c.strip().lower() for c in header]
-        if tuple(h_lower[:len(_EXPECTED_DEVICE_HEADER_PREFIX)]) != _EXPECTED_DEVICE_HEADER_PREFIX:
-            print(
-                "[ERROR] 02-devices_config.csv 前 11 列顺序必须为："
-                + ",".join(_EXPECTED_DEVICE_HEADER_PREFIX)
-            )
+        try:
+            _layout = parse_device_csv_layout(h_lower, schema_version)
+        except ValueError as exc:
+            print(f"[ERROR] {_CSV_FILE} 列结构无效：{exc}")
             sys.exit(1)
         _type_col = h_lower.index("type") if "type" in h_lower else None
 
@@ -1552,31 +2295,35 @@ def _generate_devices_yaml():
         _metadata_positions = [i for i in (
             _source_yaml_col, _source_sha256_col, _source_fields_sha256_col
         ) if i is not None]
-        _vrl_col = h_lower.index("vrl") if "vrl" in h_lower else None
-        if _vrl_col is not None and _vrl_col != 25:
-            print("[ERROR] 02-devices_config.csv 的可选 vrl 列必须紧跟 peerlink_ports")
-            sys.exit(1)
-        try:
-            _evpn_base = h_lower.index("evpn_vrf", 25)
-        except ValueError:
-            print("[ERROR] 02-devices_config.csv 缺少 EVPN 字段组")
-            sys.exit(1)
-        _evpn_end = min(_metadata_positions) if _metadata_positions else len(header)
-        try:
-            _evpn_width, _evpn_group_count = (
-                _detect_evpn_schema(h_lower, _evpn_base, _evpn_end)
-            )
-        except ValueError as exc:
-            print(f"[ERROR] {_CSV_FILE} EVPN 列结构无效：{exc}")
-            sys.exit(1)
+        _fixed = _layout.fixed_indices
+        _vrl_col = _fixed.get("vrl")
+        _evpn_width = len(
+            _EVPN_V2_COLUMNS if schema_version == 2 else _EVPN_COLUMNS
+        )
+        _evpn_group_count = len(_layout.evpn_group_starts)
+        _evpn_base = (
+            _layout.evpn_group_starts[0]
+            if _layout.evpn_group_starts
+            else _layout.fixed_start + len(_fixed)
+        )
+        _evpn_end = _layout.metadata_start
 
         def _row_type(row):
             if _type_col is not None and len(row) > _type_col:
                 return row[_type_col].strip().lower()
             return "ib" if row[0].strip().lower().startswith("ib") else "eth"
 
-        for raw in reader:
+        for lineno, raw in enumerate(reader, start=2):
             row = [c.strip() for c in raw]
+            if not any(row):
+                continue
+            try:
+                require_device_csv_row_width(
+                    raw, len(header), schema_version, lineno=lineno,
+                )
+            except ValueError as exc:
+                _dup_errs.append(f"  {exc}")
+                continue
             if len(row) < len(header):
                 row.extend([""] * (len(header) - len(row)))
             row.extend([""] * 47)
@@ -1643,7 +2390,12 @@ def _generate_devices_yaml():
             template = resolved_tmpl_file[: -len(".yaml.j2")]
             # vrfs 表示非 default/mgmt 的业务 VRF。没有业务 VRF 的设备也保持
             # 稳定的空列表数据结构，供模板安全遍历。
-            dev = {"template": template, "hostname": hostname, "vrfs": []}
+            dev = {
+                "template": template,
+                "hostname": hostname,
+                "vrfs": [],
+                "_project_schema_version": schema_version,
+            }
             try:
                 dev["vrl"] = _csv_vrl_enabled(
                     row[_vrl_col] if _vrl_col is not None else ""
@@ -1698,7 +2450,24 @@ def _generate_devices_yaml():
             else:
                 ip_part = lo_ip.split("/")[0]
                 dev["lo_ip"] = lo_ip if not _csv_na(ip_part) else ip_part
-            if template in _SIMPLE_TEMPLATES:
+            ordinary_groups = []
+            if schema_version == 2:
+                invalid_ordinary = False
+                for group_index, start in enumerate(
+                        _layout.vlan_group_starts, start=1):
+                    try:
+                        ordinary = _csv_parse_v2_vlan_group(row[start:start + 4])
+                    except ValueError as exc:
+                        _dup_errs.append(
+                            f"  {hostname}: 普通 VLAN 组 {group_index}: {exc}"
+                        )
+                        invalid_ordinary = True
+                        continue
+                    if ordinary is not None:
+                        ordinary_groups.append(ordinary)
+                if invalid_ordinary:
+                    continue
+            elif template in _SIMPLE_TEMPLATES:
                 if not _csv_na(row[13]):
                     try:
                         vlan_id, vlan_spec, vlan_ids = _csv_parse_vlan_selector(row[13])
@@ -1745,37 +2514,57 @@ def _generate_devices_yaml():
                     dev["legacy_vlan_bonds"] = _csv_expand_prefixed(
                         vp, "bond", f"{hostname}.vlan_ports", _port_errors
                     )
-            dev["bgp_asn"] = _csv_to_int(row[19]) if not _csv_na(row[19]) else None
-            if not _csv_na(row[20]):
-                dev["bgp_neighbors"] = _csv_expand_ports(row[20], f"{hostname}.bgp_ports", _port_errors)
+            dev["bgp_asn"] = (
+                _csv_to_int(row[_fixed["bgp_asn"]])
+                if not _csv_na(row[_fixed["bgp_asn"]]) else None
+            )
+            if not _csv_na(row[_fixed["bgp_ports"]]):
+                dev["bgp_neighbors"] = _csv_expand_ports(
+                    row[_fixed["bgp_ports"]],
+                    f"{hostname}.bgp_ports", _port_errors,
+                )
             bond_groups = []
-            if not _csv_na(row[21]) and not _csv_na(row[22]):
+            if (not _csv_na(row[_fixed["bond_ports"]])
+                    and not _csv_na(row[_fixed["bond_type"]])):
                 try:
                     bond_groups = _csv_parse_bond_groups(
-                        row[21], row[22], row[23],
+                        row[_fixed["bond_ports"]], row[_fixed["bond_type"]],
+                        row[_fixed["bond_mac"]],
                         f"{hostname}.bond_ports", _port_errors,
+                        schema_version=schema_version,
                     )
                 except ValueError as exc:
                     _dup_errs.append(f"  {hostname}: {exc}")
                     continue
-            if template in _SIMPLE_TEMPLATES and bond_groups:
+            elif schema_version == 2 and any(not _csv_na(row[_fixed[name]]) for name in (
+                    "bond_ports", "bond_type", "bond_mac")):
+                _dup_errs.append(
+                    f"  {hostname}: bond_ports 与 bond_type 必须同时填写"
+                )
+                continue
+            if (schema_version == 2 or template in _SIMPLE_TEMPLATES) and bond_groups:
                 dev["bond_groups"] = bond_groups
-            if not _csv_na(row[24]):
-                dev["peerlink_ports"] = row[24].strip()
+            if not _csv_na(row[_fixed["peerlink_ports"]]):
+                dev["peerlink_ports"] = row[_fixed["peerlink_ports"]].strip()
             groups = _csv_collect_evpn_groups(
                 row, _evpn_group_count, hostname, _dup_errs,
                 base=_evpn_base, width=_evpn_width,
+                schema_version=schema_version,
             )
             if groups is None:
                 continue
+            if schema_version == 2:
+                groups = ordinary_groups + groups
             if groups:
                 vrfs = _csv_build_vrfs_checked(
                     groups, bond_groups, hostname, _dup_errs,
+                    schema_version=schema_version,
                 )
                 if vrfs is None:
                     continue
                 dev["vrfs"] = vrfs
-            if template in _SIMPLE_TEMPLATES and dev.get("vrfs"):
+            if (schema_version == 1 and template in _SIMPLE_TEMPLATES
+                    and dev.get("vrfs")):
                 first_l2 = dev["vrfs"][0].get("l2vlans", [])
                 if first_l2:
                     l2 = first_l2[0]
@@ -1793,6 +2582,12 @@ def _generate_devices_yaml():
     # Same-named VRFs are a project-wide object: validate their explicit L3
     # identifiers and fill omissions before resolving DHCP upstream interfaces.
     _dup_errs.extend(_validate_and_inherit_project_vrfs(devices_data))
+    if not _dup_errs and schema_version == 2:
+        try:
+            _apply_v2_vrr_policy(devices_data, v2_vrr_policy)
+            _assign_v2_border_default_routes(devices_data)
+        except ValueError as exc:
+            _dup_errs.append(f"  VRR v2 推导失败：{exc}")
     if not _dup_errs:
         for hostname, dev in devices_data.items():
             if dev.get("source_yaml_b64"):
@@ -1825,37 +2620,38 @@ def _generate_devices_yaml():
                 continue
     # MLAG attributes
     mlag_global   = global_data.get("mlag") or {}
-    mlag_pairs    = mlag_global.get("pairs", [])
-    mlag_priority = mlag_global.get("priority", [])
-
-    mlag_hosts = []
-    for hostname, device in devices_data.items():
-        bond_types = _device_bond_types(device)
+    mlag_hosts = [
+        hostname for hostname, device in devices_data.items()
+        if not device.get("source_yaml_b64") and "mlag" in _device_bond_types(device)
+    ]
+    if schema_version == 2:
         try:
-            _validate_device_bond_types(bond_types, context=hostname)
+            _apply_v2_mlag_attributes(
+                devices_data, mlag_global, v2_mlag_policy,
+            )
         except ValueError as exc:
             _dup_errs.append(f"  {exc}")
-            continue
-        if "mlag" in bond_types:
-            mlag_hosts.append(hostname)
-    for i, hostname in enumerate(mlag_hosts):
-        pair_idx = i // 2; role_idx = i % 2
-        peer = mlag_hosts[i ^ 1] if (i ^ 1) < len(mlag_hosts) else None
-        if peer:
-            devices_data[hostname]["mlag_backup"] = devices_data[peer]["eth0_ip"].split("/")[0]
-        if mlag_priority and role_idx < len(mlag_priority):
-            devices_data[hostname]["mlag_priority"] = mlag_priority[role_idx]
-        if pair_idx < len(mlag_pairs):
-            pair = mlag_pairs[pair_idx]
-            sys_macs = pair.get("system-mac", [])
-            if role_idx < len(sys_macs):
-                devices_data[hostname]["system_mac"] = sys_macs[role_idx]
-            shared = pair.get("shared-addresses", [])
-            if shared:
-                devices_data[hostname]["mlag_shared_address"] = shared[0]
-            mlag_mac = pair.get("mac-address", [])
-            if mlag_mac:
-                devices_data[hostname]["mlag_mac_address"] = mlag_mac[0]
+    else:
+        mlag_pairs = mlag_global.get("pairs", [])
+        mlag_priority = mlag_global.get("priority", [])
+        for i, hostname in enumerate(mlag_hosts):
+            pair_idx = i // 2; role_idx = i % 2
+            peer = mlag_hosts[i ^ 1] if (i ^ 1) < len(mlag_hosts) else None
+            if peer:
+                devices_data[hostname]["mlag_backup"] = devices_data[peer]["eth0_ip"].split("/")[0]
+            if mlag_priority and role_idx < len(mlag_priority):
+                devices_data[hostname]["mlag_priority"] = mlag_priority[role_idx]
+            if pair_idx < len(mlag_pairs):
+                pair = mlag_pairs[pair_idx]
+                sys_macs = pair.get("system-mac", [])
+                if role_idx < len(sys_macs):
+                    devices_data[hostname]["system_mac"] = sys_macs[role_idx]
+                shared = pair.get("shared-addresses", [])
+                if shared:
+                    devices_data[hostname]["mlag_shared_address"] = shared[0]
+                mlag_mac = pair.get("mac-address", [])
+                if mlag_mac:
+                    devices_data[hostname]["mlag_mac_address"] = mlag_mac[0]
 
     # ── 重复值检查 ────────────────────────────────────────────────────────────
     _dup_val_errs = []
@@ -1872,9 +2668,10 @@ def _generate_devices_yaml():
     _svi_vrrmac  = {}
     _vrr_vrrmac  = {}
 
-    def _record_vrrmac(ip_map, ip_val, mac_val, label):
+    def _record_vrrmac(ip_map, scope, ip_val, mac_val, label):
         if ip_val and not _csv_na(ip_val) and mac_val and not _csv_na(mac_val):
-            ip_map.setdefault(ip_val, {}).setdefault(mac_val, []).append(label)
+            key = (*scope, ip_val)
+            ip_map.setdefault(key, {}).setdefault(mac_val, []).append(label)
 
     for hn, dev in devices_data.items():
         v = dev.get("eth0_ip", "")
@@ -1886,30 +2683,34 @@ def _generate_devices_yaml():
             _lo_ip_map.setdefault(v, []).append(hn)
 
         for vrf in dev.get("vrfs", []):
+            vrf_name = str(vrf.get("evpn_vrf") or "default")
             for l2 in vrf.get("l2vlans", []):
                 vlan_id = l2.get("vlan_id")
                 label = f"{hn}(vlan{vlan_id if vlan_id is not None else '?'})"
                 svi_ip  = (l2.get("svi_ip")  or "").split("/")[0]
                 vrr_ip  = (l2.get("vrr_ip")  or "").split("/")[0]
                 vrr_mac = (l2.get("vrr_mac", "") or "").lower()
-                _record_vrrmac(_svi_vrrmac, svi_ip, vrr_mac, label)
-                _record_vrrmac(_vrr_vrrmac, vrr_ip, vrr_mac, label)
+                scope = (vrf_name, vlan_id)
+                _record_vrrmac(_svi_vrrmac, scope, svi_ip, vrr_mac, label)
+                _record_vrrmac(_vrr_vrrmac, scope, vrr_ip, vrr_mac, label)
 
     _collect_dup("eth0_ip",  _eth0_ip_map)
     _collect_dup("eth0_mac", _mac_map)
     _collect_dup("lo_ip",    _lo_ip_map)
 
-    for svi_ip, mac_hosts in _svi_vrrmac.items():
+    for (vrf_name, vlan_id, svi_ip), mac_hosts in _svi_vrrmac.items():
         if len(mac_hosts) > 1:
             details = "; ".join(f"{m}:[{', '.join(hs)}]" for m, hs in mac_hosts.items())
             _dup_val_errs.append(
-                f"  svi_ip={svi_ip!r} 对应多个 vrr_mac：{details}"
+                f"  evpn_vrf={vrf_name} vlan{vlan_id} svi_ip={svi_ip!r} "
+                f"对应多个 vrr_mac：{details}"
             )
-    for vrr_ip, mac_hosts in _vrr_vrrmac.items():
+    for (vrf_name, vlan_id, vrr_ip), mac_hosts in _vrr_vrrmac.items():
         if len(mac_hosts) > 1:
             details = "; ".join(f"{m}:[{', '.join(hs)}]" for m, hs in mac_hosts.items())
             _dup_val_errs.append(
-                f"  vrr_ip={vrr_ip!r} 对应多个 vrr_mac：{details}"
+                f"  evpn_vrf={vrf_name} vlan{vlan_id} vrr_ip={vrr_ip!r} "
+                f"对应多个 vrr_mac：{details}"
             )
 
     _dup_val_errs.extend(_validate_project_svi_vrr(devices_data))
@@ -1971,7 +2772,7 @@ def _generate_devices_yaml():
                 if l2.get("vni") is not None:
                     _chk(1 <= l2["vni"] <= 16777215,         hostname, "l2vni",   l2["vni"])
 
-    if len(mlag_hosts) % 2 != 0:
+    if schema_version == 1 and len(mlag_hosts) % 2 != 0:
         _errs.append(f"  MLAG 设备数量为奇数 ({len(mlag_hosts)})，无法配对: {mlag_hosts}")
     _errs.extend(_dup_errs)
     _errs.extend(_port_errors)
@@ -1997,14 +2798,6 @@ def _generate_devices_yaml():
 
 
 # ── ETH: config generation (Jinja2) ──────────────────────────────────────────
-
-EVPN_UPLINK_TEMPLATE_CONFIG = {
-    "tan-su-leaf":  "all",
-    "tan-cp-leaf":  "all",
-    "tan-hps-leaf": "all",
-    "tan-spine":    {"swp41", "swp42"},
-}
-
 
 def _bond_sort_key(name: str) -> list:
     return [int(x) for x in re.findall(r'\d+', name)]
@@ -2065,18 +2858,17 @@ def _device_bridge_vlan_selectors(device):
             return
         _single, _normalized, values = _csv_parse_numeric_selector(
             selector,
-            field="peerlink bridge VLAN",
+            field="bridge VLAN",
             minimum=1,
             maximum=4094,
         )
         vlan_ids.update(values)
 
-    # This legacy template renders only d.vlan_id into the global bridge,
-    # even when reverse-parsed EVPN groups are also present in the device
-    # record.  The peerlink must mirror what the selected parent template
-    # actually renders, not unrelated VRF metadata.
+    # The legacy oobofoob-spine v1 shape renders only d.vlan_id into its
+    # global bridge.  Schema v2 uses the normalized repeated VLAN groups.
     template = str(device.get("template") or "").strip().casefold()
-    if template == "oobofoob-spine":
+    if (template == "oobofoob-spine"
+            and device.get("_project_schema_version", 1) == 1):
         if device.get("vlan_id") is not None:
             add(device["vlan_id"])
         return [_compress_vlan_ids(vlan_ids)] if vlan_ids else []
@@ -2096,8 +2888,6 @@ def _device_bridge_vlan_selectors(device):
                 selector = _compress_vlan_ids(l2["vlan_ids"])
             add(selector)
 
-    # Simple/legacy MLAG templates render one global bridge VLAN directly
-    # from d.vlan_id rather than from d.vrfs.
     if not vlan_ids and device.get("vlan_id") is not None:
         add(device["vlan_id"])
     return [_compress_vlan_ids(vlan_ids)] if vlan_ids else []
@@ -2110,6 +2900,16 @@ def preprocess_device(dev: dict) -> dict:
     bond_vlans: dict = {}
     bond_attrs: dict = {}
     direct_port_vlans: dict = {}
+    bond_native: dict = {}
+    direct_port_native: dict = {}
+
+    def record_native(target, name, vlan_id):
+        previous = target.get(name)
+        if previous is not None and previous != vlan_id:
+            raise ValueError(
+                f"接口 {name} 同时配置了多个 native VLAN：{previous}, {vlan_id}"
+            )
+        target[name] = vlan_id
 
     for vrf in dev.get('vrfs', []):
         for l2 in vrf.get('l2vlans', []):
@@ -2118,12 +2918,19 @@ def preprocess_device(dev: dict) -> dict:
                 vlan_ids = [l2['vlan_id']] if l2.get('vlan_id') is not None else []
             if not vlan_ids:
                 continue
+            native_vlan = None
+            if l2.get('native'):
+                if len(vlan_ids) != 1:
+                    raise ValueError("native VLAN 必须是单个 VLAN ID")
+                native_vlan = vlan_ids[0]
             for port in l2.get('vlan_ports', []):
                 if isinstance(port, str):
                     direct_port_vlans.setdefault(port, [])
                     for vid in vlan_ids:
                         if vid not in direct_port_vlans[port]:
                             direct_port_vlans[port].append(vid)
+                    if native_vlan is not None:
+                        record_native(direct_port_native, port, native_vlan)
                     continue
                 if not isinstance(port, dict) or 'bonds' not in port:
                     continue
@@ -2134,6 +2941,8 @@ def preprocess_device(dev: dict) -> dict:
                     for vid in vlan_ids:
                         if vid not in bond_vlans[bn]:
                             bond_vlans[bn].append(vid)
+                    if native_vlan is not None:
+                        record_native(bond_native, bn, native_vlan)
                     if bn not in bond_attrs:
                         bond_attrs[bn] = {
                             'type':        btype,
@@ -2153,6 +2962,12 @@ def preprocess_device(dev: dict) -> dict:
     for bg in dev.get('bond_groups', []):
         btype = bg.get('type', 'localbond')
         for bn in bg.get('bond_list', []):
+            if (dev.get('_project_schema_version') == 2
+                    and bn not in bond_vlans):
+                # In v2, vlan_ports is the sole attachment source.  A declared
+                # but unused bond profile is inert; never attach the first VLAN
+                # implicitly as the v1 compatibility path did.
+                continue
             bond_vlans.setdefault(bn, [])
             # vlan_id is a legacy single-VLAN compatibility field.  Explicit
             # vlan_ports assignments are authoritative.  If legacy vlan_ports
@@ -2180,12 +2995,17 @@ def preprocess_device(dev: dict) -> dict:
         vlans = sorted(direct_port_vlans[port])
         if not vlans:
             continue
+        native_vlan = direct_port_native.get(port)
         dev['computed_vlan_ports'].append({
             'name': port,
-            'vlan_mode': 'access' if len(vlans) == 1 else 'trunk',
-            'vlan_access': vlans[0] if len(vlans) == 1 else None,
+            'vlan_mode': ('access' if len(vlans) == 1 and native_vlan is None
+                          else 'trunk'),
+            'vlan_access': (vlans[0]
+                            if len(vlans) == 1 and native_vlan is None else None),
+            'vlan_native': native_vlan,
             'vlan_trunk_range': (_compress_vlan_ids(vlans)
-                                 if len(vlans) > 1 else None),
+                                 if len(vlans) > 1 or native_vlan is not None
+                                 else None),
         })
     dev['computed_vlan_port_names'] = {
         item['name'] for item in dev['computed_vlan_ports']
@@ -2224,8 +3044,9 @@ def preprocess_device(dev: dict) -> dict:
                 bgp_parent_maxsub[parent] = max(bgp_parent_maxsub.get(parent, 0), sub)
             else:
                 dev['bgp_plain_uplinks'].append(nbr)
-        template = dev.get('template', '')
-        evpn_cfg = EVPN_UPLINK_TEMPLATE_CONFIG.get(template)
+        # Uplink tracking is injected from the exact BGP neighbor set after
+        # rendering.  Parent breakout metadata must never mark unused lanes.
+        evpn_cfg = None
         for swp_name in sorted(bgp_parent_maxsub.keys(), key=_bond_sort_key):
             count, lanes = _breakout_info(bgp_parent_maxsub[swp_name])
             is_evpn = (evpn_cfg == "all") or (isinstance(evpn_cfg, set) and swp_name in evpn_cfg)
@@ -2258,14 +3079,17 @@ def preprocess_device(dev: dict) -> dict:
         btype = attrs['type']
         vlans = sorted(bond_vlans[bn])
 
-        if len(vlans) == 1:
+        native_vlan = bond_native.get(bn)
+        if len(vlans) == 1 and native_vlan is None:
             vlan_mode, vlan_access, vlan_trunk_range = 'access', vlans[0], None
         else:
             vlan_mode, vlan_access = 'trunk', None
             vlan_trunk_range = _compress_vlan_ids(vlans)
 
         if btype == 'localbond':
-            if re.match(r'^bond\d+[a-zA-Z]\d+$', bn):
+            if re.fullmatch(r'bond\d+(?:b\d+)+', bn):
+                members = [f"swp{number}" for number in re.findall(r'\d+', bn)]
+            elif re.match(r'^bond\d+[a-zA-Z]\d+$', bn):
                 members = [_bond_member(bn)]
             else:
                 nums = re.findall(r'\d+', bn)
@@ -2276,6 +3100,7 @@ def preprocess_device(dev: dict) -> dict:
                 'type':             btype,
                 'vlan_mode':        vlan_mode,
                 'vlan_access':      vlan_access,
+                'vlan_native':      native_vlan,
                 'vlan_trunk_range': vlan_trunk_range,
             })
         else:
@@ -2290,6 +3115,7 @@ def preprocess_device(dev: dict) -> dict:
                 'lacp_bypass':      attrs['lacp_bypass'],
                 'vlan_mode':        vlan_mode,
                 'vlan_access':      vlan_access,
+                'vlan_native':      native_vlan,
                 'vlan_trunk_range': vlan_trunk_range,
             })
             m = re.match(r'^swp(\d+)s(\d+)$', member)
@@ -2327,8 +3153,9 @@ def preprocess_device(dev: dict) -> dict:
         else:
             bgp_plain_uplinks.append(nbr)
 
-    template = dev.get('template', '')
-    evpn_cfg = EVPN_UPLINK_TEMPLATE_CONFIG.get(template)
+    # Uplink tracking is injected from the exact BGP neighbor set after
+    # rendering.  Parent breakout metadata must never mark unused lanes.
+    evpn_cfg = None
     bgp_uplink_parents: dict = {}
     for swp_name in sorted(bgp_parent_maxsub.keys(), key=_bond_sort_key):
         count, lanes = _breakout_info(bgp_parent_maxsub[swp_name])
@@ -2362,7 +3189,7 @@ def _subnet_last_usable(ip_cidr: str) -> str:
 
 
 def _vrr_gateway(vrr_ip: str) -> str:
-    """Return the gateway IP: vrr_ip's last octet + 3. e.g. 192.0.2.131/29 → 192.0.2.134"""
+    """Return the legacy schema-v1 gateway (last octet + 3)."""
     ip = vrr_ip.split('/')[0]
     prefix, last = ip.rsplit('.', 1)
     return f"{prefix}.{int(last) + 3}"
@@ -2621,149 +3448,622 @@ def _redundancy_mode_errors(document, expected_bond_types=None):
     return errors
 
 
-def _bridge_vlan_ids(mapping, path, errors, *, keys_only=False):
-    """Expand one NVUE bridge VLAN mapping into numeric VLAN IDs."""
-    if mapping is None:
-        return set()
-    if not isinstance(mapping, dict):
-        errors.append(f"{path} 必须是 VLAN mapping")
-        return set()
-    result = set()
-    for selector, value in mapping.items():
-        if keys_only and value != {}:
-            errors.append(f"{path}.{selector} 必须是空 mapping")
-        try:
-            _single, _spec, vlan_ids = _csv_parse_numeric_selector(
-                str(selector), field=path, minimum=1, maximum=4094,
-            )
-        except ValueError as exc:
-            errors.append(str(exc))
+_TERMINAL_L2_STP_POLICY = {
+    "admin-edge": "on",
+    "bpdu-guard": "on",
+}
+
+_ROCE_QOS_POLICY = {"mode": "lossless", "state": "enabled"}
+_PFC_WATCHDOG_POLICY = {"state": "enable"}
+
+
+def _nvue_set_operations(document):
+    """Return every mapping-valued NVUE ``set`` operation."""
+    documents = document if isinstance(document, list) else [document]
+    return [
+        item["set"] for item in documents
+        if isinstance(item, dict) and isinstance(item.get("set"), dict)
+    ]
+
+
+def _interface_fragments(document):
+    """Collect interface fragments across all set operations by name."""
+    result = {}
+    for block in _nvue_set_operations(document):
+        interfaces = block.get("interface")
+        if not isinstance(interfaces, dict):
             continue
-        result.update(vlan_ids)
+        for raw_name, config in interfaces.items():
+            if isinstance(config, dict):
+                result.setdefault(str(raw_name), []).append(config)
     return result
 
 
-def _peerlink_vlan_errors(document, expected_bond_types=None):
-    """Require MLAG peerlink VLAN membership to mirror br_default exactly."""
-    normalized_expected = {
-        "mlag" if str(value).strip().casefold() == "mlagbond"
-        else str(value).strip().casefold()
-        for value in (expected_bond_types or ())
-    }
+def _policy_template_class(template):
+    """Return the physical-port QoS class for a supported template."""
+    normalized = str(template or "").strip().casefold()
+    if normalized == "border":
+        return "parent"
+    if normalized.startswith("tan-") and normalized != "tan-cp-1gleaf":
+        return "breakout"
+    return None
 
+
+def _qos_interface_targets(document, template):
+    """Select physical ports for the template-specific PFC watchdog policy."""
+    policy_class = _policy_template_class(template)
+    if policy_class is None:
+        return {}, _interface_fragments(document)
+    fragments = _interface_fragments(document)
+    targets = {}
+    for selector, configs in fragments.items():
+        types = {
+            str(item.get("type") or "").strip().casefold()
+            for item in configs if item.get("type") is not None
+        }
+        types.discard("")
+        if types != {"swp"}:
+            continue
+        expanded = set(expand_nvue_selector(selector))
+        if not expanded:
+            continue
+        has_breakout_mode = any(
+            isinstance(item.get("link"), dict)
+            and isinstance(item["link"].get("breakout"), dict)
+            for item in configs
+        )
+        if policy_class == "parent":
+            selected = all(re.fullmatch(r"swp\d+", name) for name in expanded)
+            selected = selected and not has_breakout_mode
+        else:
+            selected = all(re.fullmatch(r"swp\d+s\d+", name) for name in expanded)
+        if selected:
+            targets[selector] = configs
+    return targets, fragments
+
+
+def _mapping_policy_values(fragments, *path):
+    values = []
+    for fragment in fragments:
+        current = fragment
+        for key in path:
+            if not isinstance(current, dict) or key not in current:
+                break
+            current = current[key]
+        else:
+            values.append(current)
+    return values
+
+
+def _merge_exact_policy(target, expected, label):
+    """Merge a small generated policy without overwriting conflicting input."""
+    if target is None:
+        target = {}
+    if not isinstance(target, dict):
+        raise ValueError(f"{label} 必须是 mapping")
+    for key, value in expected.items():
+        if key in target and target[key] != value:
+            raise ValueError(
+                f"{label}.{key} 与生成策略冲突：{target[key]!r}，应为 {value!r}"
+            )
+        target.setdefault(key, value)
+    return target
+
+
+def _inject_qos_policy(document, template):
+    """Inject global lossless RoCE and physical-port PFC watchdog settings."""
+    policy_class = _policy_template_class(template)
+    if policy_class is None:
+        return False
+    blocks = _nvue_set_operations(document)
+    if not blocks:
+        raise ValueError("NVUE YAML 缺少 set 操作，无法生成 QoS")
+    changed = False
+    qos_values = [block["qos"] for block in blocks if "qos" in block]
+    if qos_values:
+        qos = qos_values[0]
+        if any(value is not qos and value != qos for value in qos_values[1:]):
+            raise ValueError("qos 在多个 set 操作中存在冲突")
+    else:
+        qos = {}
+        blocks[0]["qos"] = qos
+        changed = True
+    if not isinstance(qos, dict):
+        raise ValueError("qos 必须是 mapping")
+    before = copy.deepcopy(qos.get("roce"))
+    qos["roce"] = _merge_exact_policy(qos.get("roce"), _ROCE_QOS_POLICY, "qos.roce")
+    changed = changed or before != qos["roce"]
+
+    targets, _fragments = _qos_interface_targets(document, template)
+    for selector, configs in sorted(targets.items()):
+        values = _mapping_policy_values(configs, "qos", "pfc-watchdog")
+        for value in values:
+            if value != _PFC_WATCHDOG_POLICY:
+                raise ValueError(
+                    f"interface.{selector}.qos.pfc-watchdog 与生成策略冲突"
+                )
+        if values:
+            continue
+        interface_qos = configs[0].get("qos")
+        if interface_qos is None:
+            interface_qos = {}
+            configs[0]["qos"] = interface_qos
+        if not isinstance(interface_qos, dict):
+            raise ValueError(f"interface.{selector}.qos 必须是 mapping")
+        interface_qos["pfc-watchdog"] = copy.deepcopy(_PFC_WATCHDOG_POLICY)
+        changed = True
+    return changed
+
+
+def _qos_policy_errors(document, template):
+    """Validate exact global/per-port QoS policy and reject wrong placement."""
+    policy_class = _policy_template_class(template)
+    if policy_class is None:
+        return []
+    blocks = _nvue_set_operations(document)
     errors = []
-    global_vlans = set()
-    actual_mlag = False
-    interface_fragments = {}
-    peerlink_names = set()
+    roce_values = [
+        block.get("qos", {}).get("roce")
+        for block in blocks if isinstance(block.get("qos"), dict)
+        and "roce" in block["qos"]
+    ]
+    if roce_values != [_ROCE_QOS_POLICY]:
+        errors.append(f"$.set.qos.roce: 必须精确为 {_ROCE_QOS_POLICY!r}")
+    targets, fragments = _qos_interface_targets(document, template)
+    for selector, configs in sorted(targets.items()):
+        values = _mapping_policy_values(configs, "qos", "pfc-watchdog")
+        if values != [_PFC_WATCHDOG_POLICY]:
+            errors.append(
+                f"$.set.interface.{selector}.qos.pfc-watchdog: "
+                f"必须精确为 {_PFC_WATCHDOG_POLICY!r}"
+            )
+    for selector, configs in sorted(fragments.items()):
+        if selector in targets:
+            continue
+        values = _mapping_policy_values(configs, "qos", "pfc-watchdog")
+        if values:
+            errors.append(
+                f"$.set.interface.{selector}.qos.pfc-watchdog: "
+                f"该接口不得配置模板生成的 PFC watchdog"
+            )
+    return errors
+
+
+def _document_bgp_interface_neighbors(document):
+    """Return expanded interface-valued BGP neighbors across every VRF/set."""
+    result = set()
+
+    def walk(value, path=()):
+        if not isinstance(value, dict):
+            return
+        for key, child in value.items():
+            next_path = path + (str(key),)
+            if str(key) == "neighbor" and isinstance(child, dict) and "bgp" in path:
+                for selector in child:
+                    if str(selector) == "peerlink.4094":
+                        continue
+                    expanded = expand_nvue_selector(str(selector))
+                    if expanded and all(
+                        re.fullmatch(r"swp\d+(?:s\d+)?", name)
+                        for name in expanded
+                    ):
+                        result.update(expanded)
+            walk(child, next_path)
+
+    for block in _nvue_set_operations(document):
+        walk(block)
+    return result
+
+
+def _requested_bgp_interfaces(document, bgp_neighbors=None):
+    result = _document_bgp_interface_neighbors(document)
+    for selector in bgp_neighbors or ():
+        if str(selector) == "peerlink.4094":
+            continue
+        expanded = expand_nvue_selector(str(selector))
+        if expanded and all(
+            re.fullmatch(r"swp\d+(?:s\d+)?", name) for name in expanded
+        ):
+            result.update(expanded)
+    return result
+
+
+def _document_evpn_mh_enabled(document):
+    """Return true when any set operation enables global EVPN multihoming."""
+    for block in _nvue_set_operations(document):
+        evpn = block.get("evpn")
+        multihoming = evpn.get("multihoming") if isinstance(evpn, dict) else None
+        if isinstance(multihoming, dict) and multihoming.get("state") == "enabled":
+            return True
+    return False
+
+
+def _evpn_uplink_targets(document, bgp_neighbors=None):
+    requested = _requested_bgp_interfaces(document, bgp_neighbors)
+    fragments = _interface_fragments(document)
+    targets = {}
+    covered = set()
+    mixed = []
+    for selector, configs in fragments.items():
+        expanded = set(expand_nvue_selector(selector))
+        selected = expanded & requested
+        if not selected:
+            continue
+        if expanded - requested:
+            mixed.append((selector, tuple(sorted(selected)), tuple(sorted(expanded - requested))))
+            continue
+        targets[selector] = configs
+        covered.update(selected)
+    return requested, targets, covered, mixed, fragments
+
+
+def _inject_evpn_mh_uplinks(document, bgp_neighbors=None, expected_mh=False):
+    """Mark all interface BGP neighbors as EVPN-MH uplinks for MH devices."""
+    if not expected_mh:
+        return False
+    requested, targets, covered, mixed, _fragments = _evpn_uplink_targets(
+        document, bgp_neighbors,
+    )
+    if mixed:
+        selector, selected, others = mixed[0]
+        raise ValueError(
+            f"BGP uplink selector {selector} 同时包含 BGP 端口 "
+            f"{','.join(selected)} 和非 BGP 端口 {','.join(others)}，必须拆分"
+        )
+    missing = sorted(requested - covered)
+    if missing:
+        raise ValueError(f"BGP uplink 接口未在 NVUE interface 中生成：{','.join(missing)}")
+    changed = False
+    expected = {"uplink": "enabled"}
+    for selector, configs in sorted(targets.items()):
+        values = _mapping_policy_values(configs, "evpn", "multihoming")
+        for value in values:
+            if not isinstance(value, dict):
+                raise ValueError(f"interface.{selector}.evpn.multihoming 必须是 mapping")
+            if "uplink" in value and value["uplink"] != "enabled":
+                raise ValueError(f"interface.{selector}.evpn.multihoming.uplink 必须为 enabled")
+        if any(isinstance(value, dict) and value.get("uplink") == "enabled" for value in values):
+            continue
+        evpn = configs[0].setdefault("evpn", {})
+        if not isinstance(evpn, dict):
+            raise ValueError(f"interface.{selector}.evpn 必须是 mapping")
+        multihoming = evpn.setdefault("multihoming", {})
+        evpn["multihoming"] = _merge_exact_policy(
+            multihoming, expected, f"interface.{selector}.evpn.multihoming",
+        )
+        changed = True
+    return changed
+
+
+def _evpn_mh_uplink_errors(document, bgp_neighbors=None, expected_mh=False):
+    requested, targets, covered, mixed, fragments = _evpn_uplink_targets(
+        document, bgp_neighbors,
+    )
+    errors = []
+    for selector, selected, others in mixed:
+        errors.append(
+            f"$.set.interface.{selector}: BGP selector 混合 BGP "
+            f"{','.join(selected)} 与非 BGP {','.join(others)}"
+        )
+    uplink_selectors = set()
+    for selector, configs in sorted(fragments.items()):
+        values = _mapping_policy_values(configs, "evpn", "multihoming", "uplink")
+        if values:
+            uplink_selectors.add(selector)
+            if values != ["enabled"]:
+                errors.append(
+                    f"$.set.interface.{selector}.evpn.multihoming.uplink: 必须为 'enabled'"
+                )
+    if not expected_mh:
+        for selector in sorted(uplink_selectors):
+            errors.append(
+                f"$.set.interface.{selector}.evpn.multihoming.uplink: "
+                "非 EVPN-MH 设备不得配置 uplink"
+            )
+        return errors
+    for interface_name in sorted(requested - covered):
+        errors.append(f"$.set.interface.{interface_name}: 缺少 BGP 接口")
+    for selector in sorted(targets):
+        values = _mapping_policy_values(
+            targets[selector], "evpn", "multihoming", "uplink",
+        )
+        if values != ["enabled"]:
+            errors.append(
+                f"$.set.interface.{selector}.evpn.multihoming.uplink: "
+                "EVPN-MH BGP 接口必须启用 uplink"
+            )
+    for selector in sorted(uplink_selectors - set(targets)):
+        errors.append(
+            f"$.set.interface.{selector}.evpn.multihoming.uplink: 非 BGP 接口不得启用 uplink"
+        )
+    return errors
+
+
+def _bond_member_names(interface_fragments):
+    """Return physical member names declared by every bond-like interface."""
+    members = set()
+
+    def add(value):
+        if isinstance(value, dict):
+            for name in value:
+                add(str(name))
+        elif isinstance(value, (list, tuple, set)):
+            for item in value:
+                add(item)
+        elif isinstance(value, str):
+            for selector in re.split(r"\s+", value.strip()):
+                if selector:
+                    members.update(expand_nvue_selector(selector))
+
+    for fragments in interface_fragments.values():
+        for config in fragments:
+            bond = config.get("bond")
+            if isinstance(bond, dict):
+                add(bond.get("member"))
+    return members
+
+
+def _terminal_l2_bridge_domains(document):
+    """Find standalone L2 swp/bond bridge domains and their source mappings.
+
+    Interface type, bond membership, and bridge configuration can be split
+    across multiple ``set`` operations in an imported NVUE document.  Classify
+    the whole device before selecting targets so a bond member is never
+    mistaken for an independent terminal-facing bridge port.
+    """
+    fragments_by_name = _interface_fragments(document)
+    bond_members = _bond_member_names(fragments_by_name)
+    targets = {}
+    mixed_selectors = []
+    for name, fragments in fragments_by_name.items():
+        types = {
+            str(config.get("type") or "").strip().casefold()
+            for config in fragments if config.get("type") is not None
+        }
+        types.discard("")
+        if len(types) != 1:
+            continue
+        interface_type = next(iter(types))
+        if interface_type not in {"swp", "bond"}:
+            continue
+        if interface_type == "swp":
+            expanded_names = set(expand_nvue_selector(name))
+            member_names = expanded_names & bond_members
+            if member_names:
+                if expanded_names - bond_members:
+                    mixed_selectors.append((name, tuple(sorted(member_names))))
+                continue
+        for config in fragments:
+            bridge = config.get("bridge")
+            domains = bridge.get("domain") if isinstance(bridge, dict) else None
+            if not isinstance(domains, dict):
+                continue
+            for raw_domain, domain_config in domains.items():
+                if isinstance(domain_config, dict):
+                    key = (name, str(raw_domain))
+                    targets.setdefault(key, []).append(domain_config)
+    return targets, fragments_by_name, bond_members, mixed_selectors
+
+
+def _stp_values(domain_fragments, setting):
+    values = []
+    for domain_config in domain_fragments:
+        stp = domain_config.get("stp")
+        if isinstance(stp, dict) and setting in stp:
+            values.append(stp[setting])
+    return values
+
+
+def _inject_terminal_l2_stp(document):
+    """Apply terminal Edge + BPDU Guard to standalone L2 swp/bond ports.
+
+    Existing conflicting values are never overwritten.  Bond member physical
+    interfaces are deliberately excluded; STP belongs on the logical L2 bond
+    bridge port.
+    """
+    targets, _fragments, _members, mixed_selectors = (
+        _terminal_l2_bridge_domains(document)
+    )
+    if mixed_selectors:
+        details = "; ".join(
+            f"{selector} 同时包含独立端口和 bond member {','.join(members)}"
+            for selector, members in mixed_selectors
+        )
+        raise ValueError(f"二层 swp selector 不能混合 bond member：{details}")
+    changed = False
+    for (interface_name, domain_name), domain_fragments in sorted(targets.items()):
+        target_stp = domain_fragments[0].get("stp")
+        if target_stp is None:
+            # Some legacy Jinja templates render an empty ``stp:`` placeholder
+            # when the global bridge has no inheritable per-port settings.
+            # Treat that generated null as an absent mapping and replace it
+            # before the general null-pruning pass.
+            target_stp = {}
+            domain_fragments[0]["stp"] = target_stp
+            changed = True
+        if not isinstance(target_stp, dict):
+            raise ValueError(
+                f"接口 {interface_name} bridge domain {domain_name} stp 必须是 mapping"
+            )
+        for setting, expected in _TERMINAL_L2_STP_POLICY.items():
+            values = _stp_values(domain_fragments, setting)
+            if any(value != expected for value in values):
+                actual = ", ".join(repr(value) for value in values)
+                raise ValueError(
+                    f"接口 {interface_name} bridge domain {domain_name} "
+                    f"{setting} 与终端二层端口策略冲突：{actual}"
+                )
+            if not values:
+                target_stp[setting] = expected
+                changed = True
+    return changed
+
+
+def _terminal_l2_stp_errors(document):
+    """Validate exact Edge + BPDU Guard placement on terminal L2 ports."""
+    targets, fragments_by_name, bond_members, mixed_selectors = (
+        _terminal_l2_bridge_domains(document)
+    )
+    errors = []
+    for selector, members in mixed_selectors:
+        errors.append(
+            f"$.set.interface.{selector}: 二层 swp selector 同时包含独立端口和 "
+            f"bond member {','.join(members)}，必须拆分后再配置 STP"
+        )
+    for (interface_name, domain_name), domain_fragments in sorted(targets.items()):
+        for setting, expected in _TERMINAL_L2_STP_POLICY.items():
+            values = _stp_values(domain_fragments, setting)
+            path = (
+                f"$.set.interface.{interface_name}.bridge.domain."
+                f"{domain_name}.stp.{setting}"
+            )
+            if not values:
+                errors.append(f"{path}: 独立二层接口缺少 {setting}: {expected}")
+            elif any(value != expected for value in values):
+                errors.append(
+                    f"{path}: 必须为 {expected!r}，实际为 "
+                    + ", ".join(repr(value) for value in values)
+                )
+
+    for selector, configs in sorted(fragments_by_name.items()):
+        selected_members = set(expand_nvue_selector(selector)) & bond_members
+        if not selected_members:
+            continue
+        for config in configs:
+            bridge = config.get("bridge")
+            domains = bridge.get("domain") if isinstance(bridge, dict) else None
+            if not isinstance(domains, dict):
+                continue
+            for domain_name, domain_config in domains.items():
+                stp = domain_config.get("stp") if isinstance(domain_config, dict) else None
+                if not isinstance(stp, dict):
+                    continue
+                forbidden = sorted(set(stp) & set(_TERMINAL_L2_STP_POLICY))
+                if forbidden:
+                    errors.append(
+                        f"$.set.interface.{selector}.bridge.domain.{domain_name}.stp: "
+                        f"bond member {','.join(sorted(selected_members))} 不得配置 "
+                        f"{', '.join(forbidden)}"
+                    )
+    return errors
+
+
+def _vrf_default_route_errors(document):
+    """Validate that each VRF default next hop is a distinct connected host.
+
+    The Border template historically derived its upstream next hop by adding
+    three to the configured VRR address.  That happened to fit the original
+    address plan, but it can leave the subnet (or collide with the anycast
+    address) when schema v2 derives VRR from subnet minimum/maximum.  Validate
+    the rendered result instead of accepting an invalid static route.
+    """
     documents = document if isinstance(document, list) else [document]
+    interface_fragments = {}
+    route_blocks = []
     for index, item in enumerate(documents):
         block = item.get("set") if isinstance(item, dict) else None
         if not isinstance(block, dict):
             continue
-        prefix = f"$[{index}].set"
-        bridge = block.get("bridge")
-        domains = bridge.get("domain") if isinstance(bridge, dict) else None
-        br_default = domains.get("br_default") if isinstance(domains, dict) else None
-        global_mapping = (
-            br_default.get("vlan") if isinstance(br_default, dict) else None
-        )
-        global_vlans.update(_bridge_vlan_ids(
-            global_mapping,
-            f"{prefix}.bridge.domain.br_default.vlan",
-            errors,
-        ))
-
-        if isinstance(block.get("mlag"), dict):
-            actual_mlag = True
-        nve = block.get("nve")
-        vxlan = nve.get("vxlan") if isinstance(nve, dict) else None
-        if isinstance(vxlan, dict) and isinstance(vxlan.get("mlag"), dict):
-            actual_mlag = True
-
         interfaces = block.get("interface")
-        if not isinstance(interfaces, dict):
+        if isinstance(interfaces, dict):
+            for name, config in interfaces.items():
+                if isinstance(config, dict):
+                    interface_fragments.setdefault(str(name), []).append(config)
+        vrfs = block.get("vrf")
+        if isinstance(vrfs, dict):
+            route_blocks.append((index, vrfs))
+
+    interface_vrfs = {}
+    for name, fragments in interface_fragments.items():
+        explicit = {
+            str(fragment.get("vrf") or "").strip()
+            for fragment in fragments if fragment.get("vrf") is not None
+        }
+        explicit.discard("")
+        if len(explicit) == 1:
+            interface_vrfs[name] = next(iter(explicit))
+        elif not explicit:
+            interface_vrfs[name] = "default"
+
+    networks_by_vrf = {}
+    local_by_vrf = {}
+    errors = []
+    for name, fragments in interface_fragments.items():
+        vrf_name = interface_vrfs.get(name)
+        if not vrf_name:
             continue
-        for interface_name, config in interfaces.items():
-            if not isinstance(config, dict):
+        for fragment in fragments:
+            ipv4 = fragment.get("ipv4")
+            if not isinstance(ipv4, dict):
                 continue
-            interface_path = f"{prefix}.interface.{interface_name}"
-            name = str(interface_name)
-            interface_fragments.setdefault(name, []).append(
-                (interface_path, config)
-            )
-            if str(config.get("type") or "").casefold() == "peerlink":
-                actual_mlag = True
-                peerlink_names.add(name)
-            bond = config.get("bond")
-            if isinstance(bond, dict) and isinstance(bond.get("mlag"), dict):
-                actual_mlag = True
+            address_maps = []
+            if isinstance(ipv4.get("address"), dict):
+                address_maps.append(ipv4["address"])
+            vrr = ipv4.get("vrr")
+            if isinstance(vrr, dict) and isinstance(vrr.get("address"), dict):
+                address_maps.append(vrr["address"])
+            for address_map in address_maps:
+                for raw_address in address_map:
+                    try:
+                        interface = ipaddress.ip_interface(str(raw_address))
+                    except ValueError:
+                        # The general generated-YAML validation reports the
+                        # malformed interface address separately.
+                        continue
+                    if interface.version != 4:
+                        continue
+                    networks_by_vrf.setdefault(vrf_name, set()).add(
+                        interface.network
+                    )
+                    local_by_vrf.setdefault(vrf_name, set()).add(interface.ip)
 
-    if "mlag" not in normalized_expected and not actual_mlag:
-        return []
-    if not peerlink_names:
-        errors.append("$.set.interface: 输入声明 MLAG，但没有生成 peerlink 接口")
-        return errors
-    if 4094 in global_vlans:
-        errors.append(
-            "$.set.bridge.domain.br_default.vlan: VLAN 4094 只能用于 peerlink.4094，"
-            "不能加入 bridge VLAN"
-        )
-
-    for interface_name in sorted(peerlink_names):
-        fragments = interface_fragments[interface_name]
-        path = f"$.set.interface.{interface_name}"
-        has_vlan_node = False
-        peer_vlans = set()
-        peer_selectors = []
-        for fragment_path, config in fragments:
-            peer_bridge = config.get("bridge")
-            peer_domains = (
-                peer_bridge.get("domain")
-                if isinstance(peer_bridge, dict) else None
+    for document_index, vrfs in route_blocks:
+        for vrf_name, vrf_config in vrfs.items():
+            router = (
+                vrf_config.get("router") if isinstance(vrf_config, dict) else None
             )
-            peer_default = (
-                peer_domains.get("br_default")
-                if isinstance(peer_domains, dict) else None
-            )
-            if not isinstance(peer_default, dict) or "vlan" not in peer_default:
+            static = router.get("static") if isinstance(router, dict) else None
+            default = static.get("default") if isinstance(static, dict) else None
+            via = default.get("via") if isinstance(default, dict) else None
+            if not isinstance(via, dict):
                 continue
-            has_vlan_node = True
-            mapping = peer_default.get("vlan")
-            if isinstance(mapping, dict):
-                peer_selectors.extend(mapping)
-            peer_vlans.update(_bridge_vlan_ids(
-                mapping,
-                f"{fragment_path}.bridge.domain.br_default.vlan",
-                errors,
-                keys_only=True,
-            ))
-        if 4094 in peer_vlans:
-            errors.append(
-                f"{path}.bridge.domain.br_default.vlan: "
-                "VLAN 4094 只能用于 peerlink.4094"
-            )
-        if peer_vlans != global_vlans:
-            missing = sorted(global_vlans - peer_vlans)
-            extra = sorted(peer_vlans - global_vlans)
-            errors.append(
-                f"{path}.bridge.domain.br_default.vlan 与全局 br_default 不一致："
-                f"缺少 {missing}，额外 {extra}"
-            )
-        if global_vlans:
-            expected_selector = _compress_vlan_ids(global_vlans)
-            if (len(peer_selectors) != 1
-                    or not isinstance(peer_selectors[0], str)
-                    or peer_selectors[0] != expected_selector):
-                errors.append(
-                    f"{path}.bridge.domain.br_default.vlan 必须只包含一个规范化 "
-                    f"selector {expected_selector!r}"
+            networks = networks_by_vrf.get(str(vrf_name), set())
+            local_addresses = local_by_vrf.get(str(vrf_name), set())
+            for raw_next_hop in via:
+                path = (
+                    f"$[{document_index}].set.vrf.{vrf_name}.router.static."
+                    f"default.via.{raw_next_hop}"
                 )
-        if not global_vlans and has_vlan_node:
-            errors.append(
-                f"{path}.bridge.domain.br_default.vlan: "
-                "没有业务 VLAN 时不得生成空 VLAN 节点"
-            )
+                try:
+                    next_hop = ipaddress.ip_address(str(raw_next_hop))
+                except ValueError:
+                    errors.append(f"{path}: 默认路由 next-hop 不是合法 IP")
+                    continue
+                if next_hop.version != 4:
+                    errors.append(f"{path}: 默认路由目前只支持 IPv4 next-hop")
+                    continue
+                if next_hop in local_addresses:
+                    errors.append(
+                        f"{path}: next-hop {next_hop} 与本机 SVI/VRR 地址冲突"
+                    )
+                    continue
+                connected = [
+                    network for network in networks
+                    if next_hop in network
+                    and next_hop not in {
+                        network.network_address, network.broadcast_address,
+                    }
+                ]
+                if not connected:
+                    expected = ", ".join(
+                        str(network) for network in sorted(
+                            networks, key=lambda item: (int(item.network_address), item.prefixlen)
+                        )
+                    ) or "无可用 SVI 网段"
+                    errors.append(
+                        f"{path}: next-hop {next_hop} 不在 VRF {vrf_name} 的"
+                        f"直连接口网段 {expected}"
+                    )
     return errors
 
 
@@ -3001,21 +4301,68 @@ def generate_all(target=None, verify=False, ref_dir=None, fail_on_diff=False):
             vrl_injected = _inject_vrl_into_document(
                 rendered_doc, device_vars, global_vars,
             )
+            terminal_l2_stp_injected = False
+            qos_injected = False
+            evpn_uplink_injected = False
+            if not device_vars.get("source_yaml_b64"):
+                terminal_l2_stp_injected = _inject_terminal_l2_stp(
+                    rendered_doc,
+                )
+                qos_injected = _inject_qos_policy(
+                    rendered_doc, device_vars.get("template"),
+                )
+                evpn_uplink_injected = _inject_evpn_mh_uplinks(
+                    rendered_doc,
+                    device_vars.get("bgp_neighbors", ()),
+                    "evpn_multihoming" in _device_bond_types(device_vars),
+                )
         except ValueError as e:
             print(f"[ERROR] {name}: {e}")
             errors += 1
             continue
-        expected_bond_types = _device_bond_types(device_vars)
         redundancy_errors = _redundancy_mode_errors(
-            rendered_doc, expected_bond_types=expected_bond_types,
+            rendered_doc,
+            expected_bond_types=_device_bond_types(device_vars),
         )
-        redundancy_errors.extend(_peerlink_vlan_errors(
-            rendered_doc, expected_bond_types=expected_bond_types,
-        ))
         if redundancy_errors:
             print(
                 f"[ERROR] {name}: 生成的 NVUE YAML 冗余模式冲突："
                 + ", ".join(redundancy_errors[:8])
+            )
+            errors += 1
+            continue
+        terminal_l2_stp_errors = _terminal_l2_stp_errors(rendered_doc)
+        if terminal_l2_stp_errors:
+            print(
+                f"[ERROR] {name}: 终端二层接口 STP 配置无效："
+                + ", ".join(terminal_l2_stp_errors[:8])
+            )
+            errors += 1
+            continue
+        qos_errors = _qos_policy_errors(
+            rendered_doc, device_vars.get("template"),
+        )
+        if qos_errors:
+            print(
+                f"[ERROR] {name}: QoS 配置无效："
+                + ", ".join(qos_errors[:8])
+            )
+            errors += 1
+            continue
+        expected_evpn_mh = (
+            _document_evpn_mh_enabled(rendered_doc)
+            if device_vars.get("source_yaml_b64")
+            else "evpn_multihoming" in _device_bond_types(device_vars)
+        )
+        evpn_uplink_errors = _evpn_mh_uplink_errors(
+            rendered_doc,
+            device_vars.get("bgp_neighbors", ()),
+            expected_evpn_mh,
+        )
+        if evpn_uplink_errors:
+            print(
+                f"[ERROR] {name}: EVPN-MH BGP uplink 配置无效："
+                + ", ".join(evpn_uplink_errors[:8])
             )
             errors += 1
             continue
@@ -3030,7 +4377,15 @@ def generate_all(target=None, verify=False, ref_dir=None, fail_on_diff=False):
             print(f"  [VRL] {name}: 已合并到原有单一 set 操作")
         if dhcp_relay_injected:
             print(f"  [SVI/VRR] {name}: 已合并 VRF loopback/ifupdown2 辅助配置")
-        if removed_nulls or vrl_injected or dhcp_relay_injected:
+        if terminal_l2_stp_injected:
+            print(f"  [STP] {name}: 已为独立二层 swp/bond 启用 Edge + BPDU Guard")
+        if qos_injected:
+            print(f"  [QOS] {name}: 已生成全局 lossless RoCE 与物理端口 PFC watchdog")
+        if evpn_uplink_injected:
+            print(f"  [EVPN-MH] {name}: 已为全部 BGP 物理接口启用 uplink tracking")
+        if (removed_nulls or vrl_injected or dhcp_relay_injected
+                or terminal_l2_stp_injected or qos_injected
+                or evpn_uplink_injected):
             rendered = _dump_generated_yaml(rendered_doc)
         null_paths = _nvue_null_paths(rendered_doc)
         if null_paths:
@@ -3045,6 +4400,14 @@ def generate_all(target=None, verify=False, ref_dir=None, fail_on_diff=False):
             print(
                 f"[ERROR] {name}: 生成的接口引用无效："
                 + ", ".join(reference_errors[:8])
+            )
+            errors += 1
+            continue
+        route_errors = _vrf_default_route_errors(rendered_doc)
+        if route_errors:
+            print(
+                f"[ERROR] {name}: 生成的 VRF 默认路由无效："
+                + ", ".join(route_errors[:8])
             )
             errors += 1
             continue
@@ -4266,6 +5629,7 @@ def _load_csv_ib():
     devices = []
     errors  = []
     skipped_excluded = 0
+    _global_document, schema_version = _load_global_document()
 
     try:
         f = open(_CSV_FILE, newline="", encoding="utf-8")
@@ -4277,6 +5641,12 @@ def _load_csv_ib():
         reader = csv.reader(f)
         header   = next(reader, [])
         h_lower  = [c.strip().lower() for c in header]
+        if schema_version == 2:
+            try:
+                parse_device_csv_layout(h_lower, schema_version)
+            except ValueError as exc:
+                errors.append(f"  {exc}")
+                return devices, errors
         if tuple(h_lower[:len(_EXPECTED_DEVICE_HEADER_PREFIX)]) != _EXPECTED_DEVICE_HEADER_PREFIX:
             errors.append(
                 "  02-devices_config.csv 前 11 列顺序必须为："
@@ -4288,6 +5658,13 @@ def _load_csv_ib():
         for lineno, raw in enumerate(reader, start=2):
             row = [c.strip() for c in raw]
             if not any(row):
+                continue
+            try:
+                require_device_csv_row_width(
+                    raw, len(header), schema_version, lineno=lineno,
+                )
+            except ValueError as exc:
+                errors.append(f"  {exc}")
                 continue
             dev_type = _row_type_ib(row, type_col)
             if _exclude_config_type(dev_type):

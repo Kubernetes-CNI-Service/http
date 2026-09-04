@@ -46,7 +46,11 @@
         bridge:
           domain:
             br_default:
-{% if bond.vlan_mode == 'access' %}
+{% if (bond.vlan_native | default(none)) is not none %}
+              untagged: {{ bond.vlan_native }}
+              vlan:
+                '{{ bond.vlan_trunk_range }}': {}
+{% elif bond.vlan_mode == 'access' %}
               access: {{ bond.vlan_access }}
 {% else %}
               vlan:
@@ -73,7 +77,20 @@
           address:
             {{ d.lo_ip }}: {}
         type: loopback
-{% include '_mlag_peerlink.yaml.j2' %}
+{% include '_direct_vlan_ports.yaml.j2' %}
+{% if d.peerlink_member_list %}
+      peerlink:
+        bond:
+          member:
+{% for swp in d.peerlink_member_list %}
+            {{ swp }}: {}
+{% endfor %}
+        type: peerlink
+      peerlink.4094:
+        base-interface: peerlink
+        type: sub
+        vlan: 4094
+{% endif %}
 {% for swp in d.bgp_plain_uplinks %}
       {{ swp }}:
         link:
@@ -208,10 +225,17 @@
       docker:
         state: enabled
         vrf: mgmt
-{% if d.mlag_mac_address is defined %}
+{% set schema_v2 = (d._project_schema_version|default(1)) == 2 %}
+{% set emit_mlag_anycast = ((not schema_v2 and d.mlag_mac_address is defined) or (schema_v2 and d.mlag_vxlan_active_active|default(false))) %}
+{% set emit_system_mac = (not schema_v2 and d.system_mac is defined and d.system_mac) %}
+{% if emit_mlag_anycast or emit_system_mac %}
       global:
+{% if emit_mlag_anycast %}
         anycast-mac: {{ d.mlag_mac_address }}
+{% endif %}
+{% if emit_system_mac %}
         system-mac: {{ d.system_mac }}
+{% endif %}
 {% endif %}
       hostname: {{ d.hostname }}
       ntp:
@@ -263,7 +287,7 @@
                 remote-as: external
             router-id: {{ d.lo_ip | replace('/32', '') }}
             state: enabled
-{% for vrf in d.vrfs %}
+{% for vrf in d.vrfs if vrf.evpn_vrf != 'default' %}
       {{ vrf.evpn_vrf }}:
         evpn:
           state: enabled
@@ -293,7 +317,14 @@
                 aspath-ignore: enabled
             router-id: {{ d.lo_ip | replace('/32', '') }}
             state: enabled
-{% if vrf.l2vlans and vrf.l2vlans[0].vrr_ip %}
+{% if d.get('_project_schema_version', 1) == 2 and vrf.get('default_route_next_hop') %}
+          static:
+            default:
+              address-family: ipv4-unicast
+              via:
+                {{ vrf.default_route_next_hop }}:
+                  type: ipv4-address
+{% elif d.get('_project_schema_version', 1) != 2 and vrf.l2vlans and vrf.l2vlans[0].vrr_ip %}
           static:
             default:
               address-family: ipv4-unicast

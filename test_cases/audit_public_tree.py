@@ -308,6 +308,12 @@ SYNTHETIC_MAC_LITERAL_EXCEPTIONS = {
     "ztp/optimize/feedback.py": frozenset({b"00:00:5e:00:01:06"}),
 }
 
+VRR_MAC_FIELD_RE = re.compile(
+    rb"(?i)(?:base[_-]?mac|vrr[_-]?mac|mac-address|hwaddress)"
+)
+VRR_MAC_BASE = int("00005e000000", 16)
+VRR_MAC_MAX = VRR_MAC_BASE + 4094
+
 
 @dataclass(frozen=True)
 class Finding:
@@ -438,12 +444,34 @@ def non_synthetic_mac_matches(data: bytes) -> list[re.Match[bytes]]:
     matches: list[re.Match[bytes]] = []
     for pattern in (MAC_RE, COMPACT_MAC_RE):
         for match in pattern.finditer(data):
-            first_octet = int(match.group(0)[:2], 16)
+            compact = match.group(0).replace(b":", b"").replace(b"-", b"")
+            if int(compact, 16) == 0:
+                # The all-zero value is a non-routable negative-test sentinel,
+                # never a copied device identity.
+                continue
+            first_octet = int(compact[:2], 16)
             # Locally administered unicast addresses are synthetic fixtures.
             # Group addresses are protocol constants rather than identities.
             if not (first_octet & 0x02) and not (first_octet & 0x01):
                 matches.append(match)
     return matches
+
+
+def explicit_vrr_protocol_mac(line: bytes, match: re.Match[bytes]) -> bool:
+    """Allow only the configured VRR base and its VLAN-derived address space.
+
+    The 00:00:5e values are protocol configuration, not device identities.  A
+    value from the same range under an arbitrary identity field remains
+    rejected, so this exception cannot mask a copied switch MAC.
+    """
+    if not VRR_MAC_FIELD_RE.search(line):
+        return False
+    compact = match.group(0).lower().replace(b":", b"").replace(b"-", b"")
+    try:
+        value = int(compact, 16)
+    except ValueError:
+        return False
+    return VRR_MAC_BASE <= value <= VRR_MAC_MAX
 
 
 def sensitive_path_finding(relative: str) -> Finding | None:
@@ -597,8 +625,11 @@ def scan_content(relative: str, data: bytes) -> list[Finding]:
             mac_matches = [
                 match
                 for match in non_synthetic_mac_matches(line)
-                if match.group(0).lower()
-                not in SYNTHETIC_MAC_LITERAL_EXCEPTIONS.get(relative, frozenset())
+                if (
+                    match.group(0).lower()
+                    not in SYNTHETIC_MAC_LITERAL_EXCEPTIONS.get(relative, frozenset())
+                    and not explicit_vrr_protocol_mac(line, match)
+                )
             ]
             if mac_matches:
                 findings.append(

@@ -1,5 +1,3 @@
-{% set vrf = d.vrfs[0] %}
-{% set l2 = vrf.l2vlans[0] %}
 - set:
     bridge:
       domain:
@@ -49,7 +47,11 @@
         bridge:
           domain:
             br_default:
-{% if bond.vlan_mode == 'access' %}
+{% if (bond.vlan_native | default(none)) is not none %}
+              untagged: {{ bond.vlan_native }}
+              vlan:
+                '{{ bond.vlan_trunk_range }}': {}
+{% elif bond.vlan_mode == 'access' %}
               access: {{ bond.vlan_access }}
 {% else %}
               vlan:
@@ -243,7 +245,7 @@
                 remote-as: external
             router-id: {{ d.lo_ip | replace('/32', '') }}
             state: enabled
-{% for vrf in d.vrfs %}
+{% for vrf in d.vrfs if vrf.evpn_vrf != 'default' %}
       {{ vrf.evpn_vrf }}:
         evpn:
           state: enabled

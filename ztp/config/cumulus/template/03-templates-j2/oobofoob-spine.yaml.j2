@@ -5,7 +5,11 @@
           stp:
             priority: {{ g.bridge.domain.br_default.stp.priority }}
           vlan:
+{% if (d._project_schema_version | default(1)) == 2 %}
+{% include '_bridge_l2vlans.yaml.j2' %}
+{% else %}
             '{{ d.vlan_id }}': {}
+{% endif %}
     interface:
       eth0:
         ipv4:
@@ -34,28 +38,69 @@
           address:
             {{ d.lo_ip }}: {}
         type: loopback
+{% if (d._project_schema_version | default(1)) == 2 %}
+{% include '_direct_vlan_ports.yaml.j2' %}
+{% endif %}
 {% for bond in d.computed_bonds %}
       {{ bond.name }}:
         bond:
           lacp-bypass: enabled
           member:
+{% if bond.type == 'localbond' %}
+{% for m in bond.members %}
+            {{ m }}: {}
+{% endfor %}
+{% else %}
             {{ bond.member }}: {}
+{% endif %}
+{% if bond.type == 'mlag' %}
           mlag:
             id: {{ bond.id }}
             state: enabled
+{% endif %}
           mode: lacp
         bridge:
           domain:
             br_default:
-{% if bond.vlan_mode == 'access' %}
+{% if (bond.vlan_native | default(none)) is not none %}
+              untagged: {{ bond.vlan_native }}
+              vlan:
+                '{{ bond.vlan_trunk_range }}': {}
+{% elif bond.vlan_mode == 'access' %}
               access: {{ bond.vlan_access }}
 {% else %}
               vlan:
                 '{{ bond.vlan_trunk_range }}': {}
 {% endif %}
         type: bond
+{% if bond.type == 'evpn_multihoming' %}
+        evpn:
+          multihoming:
+            segment:
+              local-id: {{ bond.id }}
+              mac-address: {{ bond.mac_address }}
+              state: enabled
+{% endif %}
+{% if bond.type == 'localbond' %}
+{% for m in bond.members %}
+      {{ m }}:
+        type: swp
 {% endfor %}
-{% include '_mlag_peerlink.yaml.j2' %}
+{% endif %}
+{% endfor %}
+{% if d.peerlink_member_list %}
+      peerlink:
+        bond:
+          member:
+{% for swp in d.peerlink_member_list %}
+            {{ swp }}: {}
+{% endfor %}
+        type: peerlink
+      peerlink.4094:
+        base-interface: peerlink
+        type: sub
+        vlan: 4094
+{% endif %}
 {% for swp in d.member_swps %}
       {{ swp }}:
         type: swp
@@ -66,6 +111,9 @@
         type: swp
 {% endfor %}
 {% endif %}
+{% if (d._project_schema_version | default(1)) == 2 %}
+{% include '_l2_svis.yaml.j2' %}
+{% else %}
       vlan{{ d.vlan_id }}:
         ipv4:
           address:
@@ -82,6 +130,7 @@
         type: svi
         vlan: {{ d.vlan_id }}
         vrf: default
+{% endif %}
     mlag:
       backup:
         {{ d.mlag_backup }}: {}
@@ -93,6 +142,7 @@
     router:
       vrr:
         state: enabled
+{% include '_dhcp_relay.yaml.j2' %}
     system:
       aaa:
         class:
@@ -150,9 +200,18 @@
       docker:
         state: enabled
         vrf: {{ g.system.dns.vrf }}
+{% set schema_v2 = (d._project_schema_version|default(1)) == 2 %}
+{% set emit_mlag_anycast = ((not schema_v2 and d.mlag_mac_address is defined) or (schema_v2 and d.mlag_vxlan_active_active|default(false))) %}
+{% set emit_system_mac = (not schema_v2 and d.system_mac is defined and d.system_mac) %}
+{% if emit_mlag_anycast or emit_system_mac %}
       global:
+{% if emit_mlag_anycast %}
         anycast-mac: {{ d.mlag_mac_address }}
+{% endif %}
+{% if emit_system_mac %}
         system-mac: {{ d.system_mac }}
+{% endif %}
+{% endif %}
       hostname: {{ d.hostname }}
       ntp:
         server:

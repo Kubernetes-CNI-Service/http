@@ -53,6 +53,9 @@ setup 会把它们链接到 ztp/image/cumulus/ 和 ztp/image/nvos/。
 01-global.yaml
   作用：Cumulus 和 NVOS 配置生成器共用的全局参数，包括 DNS、NTP、BGP、
         VLAN、VRF、MLAG 等项目级配置。
+  新项目固定使用 schema_version: 2。缺少该字段或写 1 的历史项目仍按 v1 兼容；
+  声明 v2 后，02-devices_config.csv 必须采用下面的 v2 列布局，不能混入 v1 的
+  vrf_default/vrr_ip/vrr_mac 列。
   公开模板中的 DNS/NTP、relay、VRL、MLAG 地址及 MAC 均为脱敏示例，必须按
   项目替换；`*` 表示锁定登录，不是可用的默认密码。
   load 前必须补充：
@@ -80,6 +83,63 @@ setup 会把它们链接到 ztp/image/cumulus/ 和 ztp/image/nvos/。
 02-devices_config.csv
   作用：统一保存 eth、eth_spx、spx、ib、nvl、server、air 设备及其 hostname、类型、管理IP、MAC、模板和网络参数。
   非 AIR 行由用户维护；DHCP 生成器每次原子重建全部 type=air 行并放在文件末尾。
+  schema v2 的列顺序为：
+    1) 固定 12 列 hostname..lo_ip；
+    2) 零到多个 vlan_id,svi_ip,netmask,vlan_ports 普通 VLAN 组；
+    3) 固定 7 列 bgp_asn,bgp_ports,bond_ports,bond_type,bond_mac,peerlink_ports,vrl；
+    4) 零到多个 evpn_vrf,evpn_l3vni,evpn_l3vlan,dhcp_relay,evpn_l2vni,
+       evpn_l2vlan,svi_ip,netmask,vlan_ports EVPN 组。
+  v2 每行列数必须与表头完全一致；普通 VLAN 组可以完全没有，也可重复任意次。
+  范围 VLAN 只做二层成员，带单值 SVI 的 VLAN 必须拆成自己的组。
+
+  VRR 是项目级策略，不再逐设备填写：
+    switches.eth.vrr.base_mac: 02:00:5e:01:00:00
+    switches.eth.vrr.gateway_ip: subnet_maximum
+  gateway_ip 可为 subnet_maximum/subnet_minimum/YAML null/省略；null 和省略默认
+  subnet_maximum，字符串 none 会被拒绝。base_mac 必须是低 16 bit 为零的非零
+  locally-administered unicast MAC。VLAN ID 补足为四位十进制数字，并将四个数字编码到
+  MAC 的最后四个十六进制半字节；Fabric 1 下 VLAN 110 得到 02:00:5e:01:01:10，
+  VLAN 4094 得到 02:00:5e:01:40:94。Fabric 2 可使用 02:00:5e:02:00:00。
+  schema v2 不再使用 mlag.pairs，也不生成 system.global.system-mac；设备使用自身
+  唯一的系统 MAC。MLAG 成员关系由 devices CSV 中规范化后的 bond_mac 建立，两个
+  MLAG peer 必须使用同一个值。所有 MLAG 设备都把 bond_mac 用作
+  mlag.mac-address；只有同时承载 VNI/VXLAN 时，才额外生成
+  system.global.anycast-mac 和 nve.vxlan.mlag.shared-address。普通二层 MLAG
+  不生成 global anycast 或 shared-address。
+  shared-address 默认取两个 peer loopback 中较大地址的下一个 IPv4。自动值冲突时可在
+  switches.eth.mlag.shared-addresses 中按 bond-mac 显式覆盖：
+    shared-addresses:
+    - bond-mac: '02:00:00:ff:01:ff'
+      anycast-ip: 192.0.2.201
+  bond-mac 匹配不区分大小写，anycast-ip 不带 CIDR。重复 bond-mac/IP、找不到对应
+  MLAG pair、地址冲突或给非 MLAG+VNI pair 配置 override 都会停止生成。schema v1
+  历史项目仍按原 mlag.pairs 合同兼容读取；不能在 schema v2 中混用旧结构。
+  同 VRF + VLAN 的 SVI 网段必须相同。所有设备 SVI 地址互异且不占 gateway 时，gateway
+  作为共同 vrr_ip、MAC 写在 ipv4.vrr 下，DHCP relay 用 giaddress；所有 SVI 都等于
+  gateway 时，不生成 vrr_ip，MAC 写入该 vlan 的 ifupdown2_eni snippet，DHCP relay
+  使用设备 loopback 的 gateway-interface。只在一台设备出现且 SVI 不是 gateway
+  时视为 standalone 普通 SVI，不派生 VRR IP/MAC；其他混合输入拒绝生成。
+  Border 模板的 /29 SVI 另采用严格三地址分区。subnet_maximum 时本端物理地址为
+  N+4/N+5、VRR 为 N+6、对端 next-hop 为 N+3（VRR-3）；subnet_minimum 时
+  本端物理地址为 N+2/N+3、VRR 为 N+1、对端 next-hop 为 N+4（VRR+3）。
+  该规则只用于 Border 的 /29 SVI；其他交换机及 Border 上的其他掩码
+  均不触发此地址策略。一个 Border VRF 最多只能有一个 /29 transit
+  VLAN，否则默认路由来源不明确并拒绝生成；没有 /29 时不自动生成该默认路由。
+
+  单 VLAN 可写 100/native；它同时保留在 trunk vlan 列表并配置为 untagged。
+  vlan_id 与 evpn_l2vlan 都支持该后缀，范围或组合 selector 不允许 /native，同一接口
+  不能从不同 VLAN 组获得多个 native VLAN。
+
+  bond_ports、bond_type、bond_mac 可用 | 表示对齐的多组 bond。v2 类型别名为
+  local、mlag、evpn；local 名称 bond49b51b53 表示一个本地 bond，成员为
+  swp49/swp51/swp53。bond_mac 按类型解释：local 必须为空或 NA；MLAG 必须填写，
+  同一设备的全部 MLAG bond 及两个 peer 必须使用相同值，该值也用来识别 pair；EVPN-MH
+  必须填写并生成 segment.mac-address，同一冗余组的不同 bond 可以复用该值，由各 bond
+  的 local-id 形成不同 ESI。EVPN-MH 不从 bond_mac 生成 system.global.anycast-mac。
+  例如 local|mlag 对应的 bond_mac 应写成 NA|02:00:00:ff:01:ff。MLAG 与 EVPN-MH
+  不能在同一设备共存。vlan_ports 中引用的每个 bond 都必须已在 bond_ports 声明，
+  仅声明但未引用的 bond 不会被隐式配置，setup 会输出 warning 要求确认它是预留项还是
+  迁移时漏写了 vlan_ports 引用。
   可能创建的连接：
     ztp/config/cumulus/template/02-devices_config.csv -----> DAY0-Prepare/<项目>/02-devices_config.csv
     ztp/config/nvos/template/02-devices_config.csv -----> DAY0-Prepare/<项目>/02-devices_config.csv

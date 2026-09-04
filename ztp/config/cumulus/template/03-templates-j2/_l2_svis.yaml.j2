@@ -2,6 +2,9 @@
 {% for l2 in vrf.l2vlans %}
 {% if l2.vlan_id is not none and (l2.emit_svi | default(true)) %}
       vlan{{ l2.vlan_id }}:
+{% if (d._project_schema_version | default(1)) == 2 %}
+        base-interface: br_default
+{% endif %}
 {% if l2.svi_ip or l2.vrr_ip %}
         ipv4:
 {% if l2.svi_ip %}

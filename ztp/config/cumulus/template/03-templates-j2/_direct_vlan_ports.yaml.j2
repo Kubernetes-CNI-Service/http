@@ -3,7 +3,11 @@
         bridge:
           domain:
             br_default:
-{% if port.vlan_mode == 'access' %}
+{% if (port.vlan_native | default(none)) is not none %}
+              untagged: {{ port.vlan_native }}
+              vlan:
+                '{{ port.vlan_trunk_range }}': {}
+{% elif port.vlan_mode == 'access' %}
               access: {{ port.vlan_access }}
 {% else %}
               vlan:

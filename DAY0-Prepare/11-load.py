@@ -43,7 +43,15 @@ HTTP_ROOT = HERE.parent
 TOOLS_DIR = HTTP_ROOT / "tools"
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
-from project_contract import GLOBAL_SCHEMA_VERSION, validate_ztp_url_prefix
+from project_contract import (
+    GLOBAL_SCHEMA_VERSION,
+    detect_global_schema_version,
+    normalize_v2_mlag_policy,
+    normalize_v2_vrr_policy,
+    parse_device_csv_layout,
+    require_device_csv_row_width,
+    validate_ztp_url_prefix,
+)
 from deployment_lock import (
     DeploymentLockError,
     acquire_lock_path_descriptor,
@@ -151,6 +159,7 @@ class GlobalSettings:
     ztp_ips: dict[str, tuple[str, ...]]
     versions: dict[str, str]
     boot_ips: tuple[str, ...] = ()
+    schema_version: int = GLOBAL_SCHEMA_VERSION
 
     @property
     def service_ips(self) -> tuple[str, ...]:
@@ -432,17 +441,12 @@ def load_global(path: Path) -> GlobalSettings:
         raise LoadError(f"global YAML 语法错误：{exc}") from exc
     if not isinstance(data, dict):
         raise LoadError("global.yaml 顶层必须是 mapping")
-    schema_version = data.get("schema_version")
-    if schema_version is None:
+    try:
+        schema_version = detect_global_schema_version(data)
+    except ValueError as exc:
+        raise LoadError(str(exc)) from exc
+    if "schema_version" not in data:
         print("[WARN] 01-global.yaml 缺少 schema_version；按旧版 schema 1 兼容读取")
-        schema_version = GLOBAL_SCHEMA_VERSION
-    if isinstance(schema_version, bool) or not isinstance(schema_version, int):
-        raise LoadError("global.yaml 的 schema_version 必须是整数")
-    if schema_version != GLOBAL_SCHEMA_VERSION:
-        raise LoadError(
-            f"不支持的 global schema_version={schema_version}；"
-            f"当前脚本仅支持 schema {GLOBAL_SCHEMA_VERSION}"
-        )
     try:
         common = data["common"]
         mgmt = common["mgmt"]
@@ -492,6 +496,16 @@ def load_global(path: Path) -> GlobalSettings:
         if version:
             _version_key(version)
             versions[kind] = version
+    if schema_version == 2:
+        eth_config = next(
+            (entry["eth"] for entry in switches if isinstance(entry, dict) and "eth" in entry),
+            None,
+        )
+        try:
+            normalize_v2_mlag_policy(eth_config)
+            normalize_v2_vrr_policy(eth_config)
+        except ValueError as exc:
+            raise LoadError(str(exc)) from exc
     return GlobalSettings(
         dhcp_enabled=dhcp_enabled,
         dhcp_package=dhcp_package,
@@ -502,6 +516,7 @@ def load_global(path: Path) -> GlobalSettings:
         ztp_prefix=prefix,
         ztp_ips=ztp_ips,
         versions=versions,
+        schema_version=schema_version,
     )
 
 
@@ -575,12 +590,20 @@ def apply_subnet_service_ips(
     return updated
 
 
-def load_device_types(path: Path) -> frozenset[str]:
+def load_device_types(
+    path: Path, schema_version: int = GLOBAL_SCHEMA_VERSION,
+) -> frozenset[str]:
     _nonempty_file(path, "devices_config.csv")
     try:
         with path.open(newline="", encoding="utf-8-sig") as stream:
-            reader = csv.DictReader(stream)
-            fields = [str(field or "").strip().casefold() for field in (reader.fieldnames or [])]
+            reader = csv.reader(stream)
+            raw_header = next(reader, [])
+            fields = [str(field or "").strip().casefold() for field in raw_header]
+            if schema_version == 2:
+                try:
+                    parse_device_csv_layout(fields, schema_version)
+                except ValueError as exc:
+                    raise LoadError(str(exc)) from exc
             if tuple(fields[:len(DEVICE_HEADER_PREFIX)]) != DEVICE_HEADER_PREFIX:
                 raise LoadError(
                     "devices_config.csv 前 11 列顺序必须为："
@@ -592,14 +615,21 @@ def load_device_types(path: Path) -> frozenset[str]:
             types: set[str] = set()
             seen_hostnames: set[str] = set()
             rows = 0
-            for lineno, row in enumerate(reader, start=2):
-                if not any(str(value or "").strip() for value in row.values()):
+            for lineno, raw_row in enumerate(reader, start=2):
+                if not any(str(value or "").strip() for value in raw_row):
                     continue
+                try:
+                    require_device_csv_row_width(
+                        raw_row, len(fields), schema_version, lineno=lineno,
+                    )
+                except ValueError as exc:
+                    raise LoadError(str(exc)) from exc
+                row = list(raw_row)
                 rows += 1
-                hostname = str(row.get("hostname") or "").strip()
-                kind = str(row.get("type") or "").strip().casefold()
-                template = str(row.get("template") or "").strip()
-                address = str(row.get("eth0_ip") or "").strip().split("/", 1)[0]
+                hostname = str(row[fields.index("hostname")] or "").strip()
+                kind = str(row[fields.index("type")] or "").strip().casefold()
+                template = str(row[fields.index("template")] or "").strip()
+                address = str(row[fields.index("eth0_ip")] or "").strip().split("/", 1)[0]
                 if not hostname:
                     raise LoadError(f"devices_config.csv 第 {lineno} 行 hostname 为空")
                 if not SAFE_HOSTNAME.fullmatch(hostname):
@@ -1922,6 +1952,7 @@ def mount_and_test_dhcp(
 
 def _device_types_after_dhcp(
     device_types: frozenset[str], *, dry_run: bool,
+    schema_version: int = GLOBAL_SCHEMA_VERSION,
 ) -> frozenset[str]:
     # A clean project may intentionally contain no type=air rows. The DHCP
     # generator creates those rows from p2p-air.json, so do not keep using the
@@ -1932,7 +1963,7 @@ def _device_types_after_dhcp(
     devices_csv = ZTP_DIR / "config/isc-dhcp-server/02-devices_config.csv"
     p2p_air_json = ZTP_DIR / "config/isc-dhcp-server/p2p-air.json"
     if not dry_run:
-        effective_types = set(load_device_types(devices_csv))
+        effective_types = set(load_device_types(devices_csv, schema_version))
     # AIR-only nodes intentionally stay out of the unified CSV, but they still
     # require baseline Cumulus YAML and MAC-link publication.  Inspect the
     # actual topology nodes in both normal and dry-run paths rather than using
@@ -2510,6 +2541,7 @@ def restore_release_links(snapshot: dict[Path, Optional[str]]) -> None:
 
 def generate_configs(
     device_types: frozenset[str], *, install_dhcp: bool, dry_run: bool = False,
+    schema_version: int = GLOBAL_SCHEMA_VERSION,
 ) -> None:
     p2p_dir = ZTP_DIR / "config/cumulus/template/P2P"
     run([sys.executable, "b-xlsx_to_dot.py", "-y"], cwd=p2p_dir, dry_run=dry_run)
@@ -2523,7 +2555,9 @@ def generate_configs(
         cwd=ZTP_DIR / "config/isc-dhcp-server",
         dry_run=dry_run,
     )
-    device_types = _device_types_after_dhcp(device_types, dry_run=dry_run)
+    device_types = _device_types_after_dhcp(
+        device_types, dry_run=dry_run, schema_version=schema_version,
+    )
 
     if device_types & {"eth", "eth_spx", "spx", "air"}:
         template_dir = ZTP_DIR / "config/cumulus/template"
@@ -3660,7 +3694,7 @@ def validate_inputs(
     except LoadError as exc:
         validation_errors.append(str(exc))
     try:
-        device_types = load_device_types(devices_file)
+        device_types = load_device_types(devices_file, settings.schema_version)
     except LoadError as exc:
         validation_errors.append(str(exc))
     try:
@@ -3914,6 +3948,7 @@ def main(argv: list[str] | None = None) -> int:
                 inputs.device_types,
                 install_dhcp=service_available,
                 dry_run=args.dry_run,
+                schema_version=inputs.settings.schema_version,
             )
         else:
             warn(

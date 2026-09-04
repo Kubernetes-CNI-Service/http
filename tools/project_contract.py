@@ -4,12 +4,381 @@
 from __future__ import annotations
 
 import fnmatch
+import ipaddress
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 import re
 
 GLOBAL_SCHEMA_VERSION = 1
+CURRENT_GLOBAL_SCHEMA_VERSION = 2
+SUPPORTED_GLOBAL_SCHEMA_VERSIONS = frozenset({1, 2})
+_MAC_ADDRESS = re.compile(r"^[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}$")
+
+DEVICE_BASE_COLUMNS = (
+    "hostname", "type", "template", "eth0_ip", "netmask", "eth0_gw",
+    "eth0_mac", "eth1_ip", "netmask", "eth1_gw", "eth1_mac", "lo_ip",
+)
+DEVICE_FIXED_COLUMNS = (
+    "bgp_asn", "bgp_ports", "bond_ports", "bond_type", "bond_mac",
+    "peerlink_ports", "vrl",
+)
+DEVICE_V1_VLAN_COLUMNS = (
+    "vrf_default", "vlan_id", "svi_ip", "netmask", "vrr_ip", "vrr_mac",
+    "vlan_ports",
+)
+DEVICE_V1_EVPN_COLUMNS = (
+    "evpn_vrf", "evpn_l3vni", "evpn_l3vlan", "dhcp_relay",
+    "evpn_l2vni", "evpn_l2vlan", "svi_ip", "netmask", "vrr_ip",
+    "vrr_mac", "vlan_ports",
+)
+DEVICE_V2_VLAN_COLUMNS = ("vlan_id", "svi_ip", "netmask", "vlan_ports")
+DEVICE_V2_EVPN_COLUMNS = (
+    "evpn_vrf", "evpn_l3vni", "evpn_l3vlan", "dhcp_relay",
+    "evpn_l2vni", "evpn_l2vlan", "svi_ip", "netmask", "vlan_ports",
+)
+DEVICE_SOURCE_METADATA_COLUMNS = (
+    "source_yaml_b64", "source_yaml_sha256", "source_fields_sha256",
+)
+
+
+@dataclass(frozen=True)
+class DeviceCsvLayout:
+    """Validated column offsets for one devices_config schema."""
+
+    schema_version: int
+    vlan_group_starts: tuple[int, ...]
+    fixed_start: int
+    evpn_group_starts: tuple[int, ...]
+    metadata_start: int
+    fixed_columns: tuple[str, ...] = DEVICE_FIXED_COLUMNS
+
+    @property
+    def fixed_indices(self) -> dict[str, int]:
+        return {
+            name: self.fixed_start + offset
+            for offset, name in enumerate(self.fixed_columns)
+        }
+
+
+def detect_global_schema_version(data: object) -> int:
+    """Return the explicit project schema, defaulting only a missing key to v1.
+
+    ``None`` is deliberately not treated like a missing key.  A present key is
+    an operator decision and therefore must be an exact supported integer;
+    booleans are rejected even though ``bool`` is a Python ``int`` subclass.
+    """
+    if not isinstance(data, dict):
+        raise ValueError("global YAML 顶层必须是 mapping")
+    if "schema_version" not in data:
+        return GLOBAL_SCHEMA_VERSION
+    value = data["schema_version"]
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("global.yaml 的 schema_version 必须是整数 1 或 2")
+    if value not in SUPPORTED_GLOBAL_SCHEMA_VERSIONS:
+        raise ValueError(
+            f"不支持的 global schema_version={value}；当前支持 1 和 2"
+        )
+    return value
+
+
+def normalize_v2_vrr_policy(eth_config: object) -> dict[str, object]:
+    """Validate and normalize the schema-v2 project-wide VRR policy."""
+    if not isinstance(eth_config, dict):
+        raise ValueError("schema 2 要求 switches.eth 为 mapping")
+    raw = eth_config.get("vrr")
+    if not isinstance(raw, dict):
+        raise ValueError("schema 2 要求 switches.eth.vrr 为 mapping")
+    base_mac = str(raw.get("base_mac") or "").strip().lower()
+    if not _MAC_ADDRESS.fullmatch(base_mac):
+        raise ValueError("switches.eth.vrr.base_mac 必须是合法 48-bit MAC")
+    base_value = int(base_mac.replace(":", ""), 16)
+    first_octet = int(base_mac[:2], 16)
+    if base_value == 0 or first_octet & 0x01:
+        raise ValueError(
+            "switches.eth.vrr.base_mac 必须是非零 unicast MAC"
+        )
+    if not first_octet & 0x02:
+        raise ValueError(
+            "switches.eth.vrr.base_mac 必须使用 locally administered MAC"
+        )
+    if base_value & 0xFFFF:
+        raise ValueError(
+            "switches.eth.vrr.base_mac 的低 16 bit 必须为 0，"
+            "用于编码四位十进制 VLAN ID"
+        )
+    if base_value + 0x4094 > 0xFFFFFFFFFFFF:
+        raise ValueError("switches.eth.vrr.base_mac 加 VLAN 编码后会溢出")
+    gateway = raw.get("gateway_ip")
+    if gateway is None:
+        gateway_mode = "subnet_maximum"
+    elif isinstance(gateway, str):
+        gateway_mode = gateway.strip().casefold()
+    else:
+        gateway_mode = ""
+    if gateway_mode not in {"subnet_maximum", "subnet_minimum"}:
+        raise ValueError(
+            "switches.eth.vrr.gateway_ip 只允许 subnet_maximum、"
+            "subnet_minimum、null 或省略"
+        )
+    return {
+        "base_mac": base_mac,
+        "base_value": base_value,
+        "gateway_ip": gateway_mode,
+    }
+
+
+def normalize_redundancy_mac(value: object, *, label: str = "bond_mac") -> str:
+    """Return one canonical non-zero unicast redundancy MAC."""
+    mac = str(value or "").strip().lower()
+    if not _MAC_ADDRESS.fullmatch(mac):
+        raise ValueError(f"{label} 必须是合法 48-bit MAC")
+    numeric = int(mac.replace(":", ""), 16)
+    if numeric == 0 or int(mac[:2], 16) & 0x01:
+        raise ValueError(f"{label} 必须是非零 unicast MAC")
+    return mac
+
+
+def normalize_v2_mlag_policy(eth_config: object) -> dict[str, object]:
+    """Validate schema-v2 MLAG globals and index explicit IP overrides.
+
+    Schema v2 derives MLAG membership from the device CSV ``bond_mac``.  The
+    global document therefore no longer owns positional ``pairs``.  It can
+    only provide an optional, MAC-keyed override for the VXLAN active-active
+    shared address when automatic loopback derivation is unsuitable.
+    """
+    if not isinstance(eth_config, dict):
+        raise ValueError("schema 2 要求 switches.eth 为 mapping")
+    raw = eth_config.get("mlag")
+    if raw is None:
+        return {"shared_addresses": {}}
+    if not isinstance(raw, dict):
+        raise ValueError("schema 2 要求 switches.eth.mlag 为 mapping")
+    if "pairs" in raw:
+        raise ValueError(
+            "schema 2 已删除 switches.eth.mlag.pairs；"
+            "请将例外地址迁移到 mlag.shared-addresses[].bond-mac/anycast-ip"
+        )
+
+    entries = raw.get("shared-addresses", [])
+    if not isinstance(entries, list):
+        raise ValueError(
+            "switches.eth.mlag.shared-addresses 必须是 list"
+        )
+    by_mac: dict[str, str] = {}
+    by_ip: dict[str, str] = {}
+    expected_keys = {"bond-mac", "anycast-ip"}
+    for index, entry in enumerate(entries, 1):
+        label = f"switches.eth.mlag.shared-addresses[{index}]"
+        if not isinstance(entry, dict):
+            raise ValueError(f"{label} 必须是 mapping")
+        keys = set(entry)
+        if keys != expected_keys:
+            missing = sorted(expected_keys - keys)
+            extra = sorted(keys - expected_keys)
+            details = []
+            if missing:
+                details.append("缺少 " + ", ".join(missing))
+            if extra:
+                details.append("未知字段 " + ", ".join(extra))
+            raise ValueError(f"{label} 字段无效：" + "；".join(details))
+
+        bond_mac = normalize_redundancy_mac(
+            entry.get("bond-mac"), label=f"{label}.bond-mac",
+        )
+
+        raw_ip = entry.get("anycast-ip")
+        if not isinstance(raw_ip, str) or not raw_ip.strip() or "/" in raw_ip:
+            raise ValueError(f"{label}.anycast-ip 必须是无 CIDR 的 IPv4 地址")
+        try:
+            parsed_ip = ipaddress.ip_address(raw_ip.strip())
+        except ValueError as exc:
+            raise ValueError(f"{label}.anycast-ip 必须是无 CIDR 的 IPv4 地址") from exc
+        if not isinstance(parsed_ip, ipaddress.IPv4Address):
+            raise ValueError(f"{label}.anycast-ip 必须是无 CIDR 的 IPv4 地址")
+        anycast_ip = str(parsed_ip)
+
+        if bond_mac in by_mac:
+            raise ValueError(
+                f"{label}.bond-mac 重复：{bond_mac}"
+            )
+        if anycast_ip in by_ip:
+            raise ValueError(
+                f"{label}.anycast-ip 重复：{anycast_ip}"
+            )
+        by_mac[bond_mac] = anycast_ip
+        by_ip[anycast_ip] = bond_mac
+    return {"shared_addresses": by_mac}
+
+
+def v2_vrr_ipv4_plan(network: object, gateway_mode: str) -> dict[str, object]:
+    """Return the strict two-sided three-address plan for one Border /29.
+
+    A maximum-side Border owns N+4/N+5 with VRR N+6 and routes to the
+    low-side peer gateway N+3.  A minimum-side Border owns N+2/N+3 with VRR
+    N+1 and routes to the high-side peer gateway N+4.  This is deliberately
+    a Border transit convention, not a generic rule for other switches.
+    """
+    try:
+        parsed = ipaddress.ip_network(str(network), strict=False)
+    except ValueError as exc:
+        raise ValueError(f"Border VRR 网段无效：{network!r}") from exc
+    if parsed.version != 4 or parsed.prefixlen != 29:
+        raise ValueError(
+            f"Border 三地址分区只适用于 /29 IPv4 网段：{parsed}"
+        )
+    if gateway_mode not in {"subnet_maximum", "subnet_minimum"}:
+        raise ValueError(f"未知 VRR gateway_ip 模式：{gateway_mode!r}")
+
+    start = parsed.network_address
+    if gateway_mode == "subnet_maximum":
+        gateway = start + 6
+        device_ips = (start + 4, start + 5)
+        peer_gateway = start + 3
+    else:
+        gateway = start + 1
+        device_ips = (start + 2, start + 3)
+        peer_gateway = start + 4
+    return {
+        "network": str(parsed),
+        "gateway_ip": str(gateway),
+        "device_ips": tuple(str(item) for item in device_ips),
+        "peer_gateway_ip": str(peer_gateway),
+    }
+
+
+def _repeated_group_starts(
+    columns: tuple[str, ...], start: int, end: int,
+    group: tuple[str, ...], label: str,
+    *, allow_empty: bool,
+) -> tuple[int, ...]:
+    selected = columns[start:end]
+    if not selected:
+        if allow_empty:
+            return ()
+        raise ValueError(f"devices_config.csv 缺少 {label} 字段组")
+    width = len(group)
+    if len(selected) % width:
+        raise ValueError(
+            f"devices_config.csv 的 {label} 列数不是 {width} 的整数倍"
+        )
+    starts = tuple(range(start, end, width))
+    for offset in starts:
+        if columns[offset:offset + width] != group:
+            raise ValueError(
+                f"devices_config.csv 的 {label} 必须重复字段组："
+                + ",".join(group)
+            )
+    return starts
+
+
+def parse_device_csv_layout(
+    header: object, schema_version: int,
+) -> DeviceCsvLayout:
+    """Validate a complete v1/v2 devices CSV header and return its offsets.
+
+    Schema v2 intentionally has no compatibility guessing: a project declaring
+    v2 must use the v2 repeated VLAN/EVPN blocks and must not retain v1-only
+    ``vrf_default``/``vrr_ip``/``vrr_mac`` input columns.
+    """
+    if schema_version not in SUPPORTED_GLOBAL_SCHEMA_VERSIONS:
+        raise ValueError(f"不支持的 devices_config schema {schema_version}")
+    if not isinstance(header, (list, tuple)):
+        raise ValueError("devices_config.csv 表头必须是 sequence")
+    columns = tuple(str(item or "").strip().casefold() for item in header)
+    if columns[:len(DEVICE_BASE_COLUMNS)] != DEVICE_BASE_COLUMNS:
+        raise ValueError(
+            "devices_config.csv 前 12 列顺序必须为："
+            + ",".join(DEVICE_BASE_COLUMNS)
+        )
+
+    metadata_start = len(columns)
+    for index, name in enumerate(columns):
+        if name in DEVICE_SOURCE_METADATA_COLUMNS:
+            metadata_start = index
+            break
+    metadata = columns[metadata_start:]
+    if metadata and metadata != DEVICE_SOURCE_METADATA_COLUMNS:
+        raise ValueError(
+            "devices_config.csv source metadata 必须完整且位于末尾："
+            + ",".join(DEVICE_SOURCE_METADATA_COLUMNS)
+        )
+    body = columns[:metadata_start]
+
+    if schema_version == 1:
+        legacy_fixed = DEVICE_FIXED_COLUMNS[:-1]
+        expected_prefix = DEVICE_BASE_COLUMNS + DEVICE_V1_VLAN_COLUMNS + legacy_fixed
+        if body[:len(expected_prefix)] != expected_prefix:
+            raise ValueError(
+                "schema 1 devices_config.csv 固定列顺序无效"
+            )
+        fixed_start = len(DEVICE_BASE_COLUMNS) + len(DEVICE_V1_VLAN_COLUMNS)
+        evpn_start = len(expected_prefix)
+        fixed_columns = legacy_fixed
+        if body[evpn_start:evpn_start + 1] == ("vrl",):
+            fixed_columns = DEVICE_FIXED_COLUMNS
+            evpn_start += 1
+        evpn_starts = _repeated_group_starts(
+            body, evpn_start, len(body), DEVICE_V1_EVPN_COLUMNS, "EVPN v1",
+            allow_empty=False,
+        )
+        return DeviceCsvLayout(
+            schema_version=1,
+            vlan_group_starts=(len(DEVICE_BASE_COLUMNS) + 1,),
+            fixed_start=fixed_start,
+            evpn_group_starts=evpn_starts,
+            metadata_start=metadata_start,
+            fixed_columns=fixed_columns,
+        )
+
+    try:
+        fixed_start = body.index(DEVICE_FIXED_COLUMNS[0], len(DEVICE_BASE_COLUMNS))
+    except ValueError as exc:
+        raise ValueError("schema 2 devices_config.csv 缺少 bgp_asn 固定列") from exc
+    fixed_end = fixed_start + len(DEVICE_FIXED_COLUMNS)
+    if body[fixed_start:fixed_end] != DEVICE_FIXED_COLUMNS:
+        raise ValueError(
+            "schema 2 devices_config.csv 固定列必须为："
+            + ",".join(DEVICE_FIXED_COLUMNS)
+        )
+    vlan_starts = _repeated_group_starts(
+        body, len(DEVICE_BASE_COLUMNS), fixed_start, DEVICE_V2_VLAN_COLUMNS,
+        "普通 VLAN v2", allow_empty=True,
+    )
+    evpn_starts = _repeated_group_starts(
+        body, fixed_end, len(body), DEVICE_V2_EVPN_COLUMNS,
+        "EVPN v2", allow_empty=True,
+    )
+    return DeviceCsvLayout(
+        schema_version=2,
+        vlan_group_starts=vlan_starts,
+        fixed_start=fixed_start,
+        evpn_group_starts=evpn_starts,
+        metadata_start=metadata_start,
+    )
+
+
+def require_device_csv_row_width(
+    row: object, header_width: int, schema_version: int, *, lineno: int | None = None,
+) -> None:
+    """Require exact positional row width for schema v2.
+
+    V1 keeps its historical tolerance for omitted trailing empty cells.  V2
+    uses repeated positional groups, so accepting a short or over-wide row
+    could silently move a value into the wrong VLAN/EVPN group.
+    """
+    if schema_version != 2:
+        return
+    if not isinstance(row, (list, tuple)):
+        raise ValueError("devices_config.csv 数据行必须是 sequence")
+    actual = len(row)
+    if actual != header_width:
+        location = f"第 {lineno} 行" if lineno is not None else "数据行"
+        raise ValueError(
+            f"devices_config.csv {location}列数必须与 schema 2 表头完全一致："
+            f"{actual} != {header_width}"
+        )
 ZTP_PREFIX_PUBLICATION_MARKER = ".ztp-prefix-publication.json"
 _SAFE_ZTP_PREFIX = re.compile(
     r"/[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)*"

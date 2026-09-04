@@ -7,6 +7,7 @@ import ast
 import importlib.util
 import os
 from pathlib import Path
+import sys
 import unittest
 
 
@@ -108,7 +109,11 @@ class TestCaseRepositoryTests(unittest.TestCase):
         self.assertIsNotNone(spec)
         self.assertIsNotNone(spec.loader)
         contract = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(contract)
+        sys.modules[spec.name] = contract
+        try:
+            spec.loader.exec_module(contract)
+        finally:
+            sys.modules.pop(spec.name, None)
         self.assertIsNotNone(
             contract.transfer_exclude_reason("test_cases/test_example.py")
         )

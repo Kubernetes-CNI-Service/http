@@ -20,6 +20,35 @@ AIR/Production 的期望状态与实际状态。upload/sync 会部署两个顶�
 `feedback.py` 解包 tar/zip 时只接受普通文件/目录，拒绝路径穿越、链接、超限的成员数/解压
 字节以及 symlink 目标目录；归档验证失败时不生成比较输入。
 
+## schema v2 输出与比较
+
+`feedback.py` 读取同一项目的 `01-global.yaml` 决定 schema。v2 输出使用清单中的严格布局：
+12 个基础列、零到多个四列普通 VLAN 组、固定七列和零到多个九列 EVPN 组；当设备实际配置
+需要更多组时只向右完整扩展重复组，不移动已有字段。反向解析保留单 VLAN 的 `/native`、
+实际 bond interface 名称及 `local|mlag|evpn` 对齐关系。若一个 VLAN 在不同成员端口上的
+native/tagged 状态不一致，单个 v2 VLAN 组无法无损表达，转换会 fail closed。
+
+v2 不再输出逐设备 `vrr_ip`、`vrr_mac`。比较阶段仍从受保护的原始 NVUE YAML 提取按 VLAN
+排序的 VRR IP/MAC 运行态签名，因此全局策略推导值在交换机上发生漂移时不会被忽略。
+`source_yaml_b64/source_yaml_sha256/source_fields_sha256` 是只读审计元数据；生成器拒绝带原始
+YAML 回环内容的 v2 行，防止它绕过规范字段、全局 VRR 推导和 native/bond 校验。
+
+v2 反向解析会把设备全局 `mlag.mac-address` 写回该设备每个 MLAG profile 的
+`bond_mac`，从而保留以 MAC 建立 peer 关系的新合同；EVPN-MH 仍从各 bond 的
+`segment.mac-address` 回填。`system.global.system-mac` 是设备自身身份，不写回 global。
+若运行配置含 `nve.vxlan.mlag.shared-address`，对应 sidecar/global 使用 MLAG MAC 作为键：
+
+```yaml
+mlag:
+  shared-addresses:
+  - bond-mac: 44:38:39:ff:00:12
+    anycast-ip: 172.16.21.201
+```
+
+Feedback 不为普通二层 MLAG 伪造 shared-address override，也不把 EVPN-MH segment MAC
+解释为 `system.global.anycast-mac`。schema v1 来源继续按旧 `mlag.pairs` 结构兼容输出；
+schema v2 sidecar 不输出 `pairs`、`system-mac` 或旧的 `mac-address` 列表。
+
 ## 在整体流程中的位置
 
 1. setup 在事务 staging 区调用 `sample_links.py`，为所选项目生成

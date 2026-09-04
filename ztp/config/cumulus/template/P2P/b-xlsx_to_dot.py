@@ -442,6 +442,15 @@ def _configured_bond_member_inventory(csv_file):
                     token = token.strip()
                     if not token:
                         continue
+                    # Schema v2 compact local-bond syntax uses one ``bond``
+                    # prefix followed by ``b``-separated member numbers, for
+                    # example bond49b51b53 -> swp49 + swp51 + swp53.
+                    if re.fullmatch(r"bond\d+(?:b\d+)+", token, re.IGNORECASE):
+                        for member in re.findall(r"\d+", token):
+                            inventory.setdefault(device, set()).add(
+                                f"swp{member}"
+                            )
+                        continue
                     # A local bond may concatenate multiple member numbers in
                     # its name (for example bond50bond52 -> swp50 + swp52).
                     if re.fullmatch(r"(?:bond\d+(?:s\d+)?){2,}", token):

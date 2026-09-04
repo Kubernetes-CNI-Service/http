@@ -36,7 +36,12 @@ SCRIPT_DIR   = os.path.dirname(os.path.abspath(__file__))
 TOOLS_DIR    = os.path.normpath(os.path.join(SCRIPT_DIR, "..", "..", "..", "tools"))
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
-from project_contract import validate_ztp_url_prefix
+from project_contract import (
+    detect_global_schema_version,
+    parse_device_csv_layout,
+    require_device_csv_row_width,
+    validate_ztp_url_prefix,
+)
 OUTPUT_ETH   = os.path.join(SCRIPT_DIR, "dhcpd_eth.hosts")
 OUTPUT_IB    = os.path.join(SCRIPT_DIR, "dhcpd_ib.hosts")
 OUTPUT_NVL   = os.path.join(SCRIPT_DIR, "dhcpd_nvl.hosts")
@@ -104,8 +109,8 @@ def _validate_ztp_url_prefix(value):
     return validate_ztp_url_prefix(value)
 
 
-def load_ztp_url_prefix(path):
-    """Read the single URL path policy used to derive every DHCP ZTP URL."""
+def load_project_global(path):
+    """Read the URL prefix and authoritative input schema from global YAML."""
     if yaml is None:
         raise ValueError("缺少 PyYAML，无法读取 01-global.yaml")
     if not os.path.isfile(path):
@@ -114,13 +119,19 @@ def load_ztp_url_prefix(path):
         with open(path, encoding="utf-8") as stream:
             data = yaml.safe_load(stream)
         value = data["common"]["mgmt"]["ztp"]["ztp_url_prefix"]
+        schema_version = detect_global_schema_version(data)
     except (OSError, yaml.YAMLError) as exc:
         raise ValueError(f"01-global.yaml 无法读取：{exc}") from exc
     except (KeyError, TypeError) as exc:
         raise ValueError(
             "01-global.yaml 缺少 common.mgmt.ztp.ztp_url_prefix"
         ) from exc
-    return _validate_ztp_url_prefix(value)
+    return _validate_ztp_url_prefix(value), schema_version
+
+
+def load_ztp_url_prefix(path):
+    """Read the URL path policy (legacy public helper)."""
+    return load_project_global(path)[0]
 
 
 def _ztp_url(service_ip, prefix, filename):
@@ -133,7 +144,7 @@ def _fallback_fmt(hostname):
     """无 type 列时的兜底判断：主机名以 ib 开头 → ib，否则 → eth。"""
     return "ib" if hostname.strip().lower().startswith("ib") else "eth"
 
-def load_csv(path):
+def load_csv(path, schema_version=1):
     """
     统一读取 devices_config CSV，每行按 type 列判断 eth/eth_spx/spx/air/ib/nvl；server 供 infra 使用并跳过。
     无 type 列时用表头兜底（lo_ip 存在 → eth，否则 ib）。
@@ -144,6 +155,8 @@ def load_csv(path):
         reader = csv.reader(f)
         header = next(reader, [])
         h_lower  = [c.strip().lower() for c in header]
+        if schema_version == 2:
+            parse_device_csv_layout(h_lower, schema_version)
         if tuple(h_lower[:len(_EXPECTED_DEVICE_HEADER_PREFIX)]) != _EXPECTED_DEVICE_HEADER_PREFIX:
             raise ValueError(
                 "devices_config.csv 前 11 列顺序必须为："
@@ -155,6 +168,9 @@ def load_csv(path):
             row = [c.strip() for c in raw]
             if not any(row):
                 continue
+            require_device_csv_row_width(
+                raw, len(header), schema_version, lineno=lineno,
+            )
             if len(row) < 11:
                 raise ValueError(
                     f"{os.path.basename(path)} 第 {lineno} 行列数不足（{len(row)} < 11）"
@@ -1165,7 +1181,7 @@ def main():
         print(f"[ERROR] 找不到 {os.path.basename(SUBNET_CSV)}")
         sys.exit(1)
     try:
-        ztp_prefix = load_ztp_url_prefix(GLOBAL_YAML)
+        ztp_prefix, schema_version = load_project_global(GLOBAL_YAML)
     except ValueError as exc:
         print(f"[ERROR] {exc}")
         sys.exit(1)
@@ -1184,7 +1200,7 @@ def main():
     for path in csv_files:
         print(f"读取：{os.path.basename(path)}")
         try:
-            recs = load_csv(path)
+            recs = load_csv(path, schema_version=schema_version)
         except (OSError, ValueError, csv.Error) as exc:
             print(f"[ERROR] 设备 CSV 无法安全读取：{exc}")
             sys.exit(1)

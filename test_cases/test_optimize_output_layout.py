@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import csv
 import importlib.util
 import ipaddress
 import os
@@ -13,9 +14,16 @@ import tempfile
 import unittest
 from unittest import mock
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[1]
 OPTIMIZE = ROOT / "ztp/optimize"
+TOOLS = ROOT / "tools"
+if str(TOOLS) not in sys.path:
+    sys.path.insert(0, str(TOOLS))
+
+import project_contract as CONTRACT
 
 
 def load_module(name: str, path: Path):
@@ -38,6 +46,107 @@ FEEDBACK = load_module("optimize_output_feedback", OPTIMIZE / "feedback.py")
 
 
 class OptimizeOutputLayoutTests(unittest.TestCase):
+    def test_v2_comparison_detects_mlag_runtime_identity_drift_across_sets(self):
+        mlag_mac_a = "02:00:00:ff:00:12"
+        mlag_mac_b = "02:00:00:ff:00:34"
+        header = (
+            list(CONTRACT.DEVICE_BASE_COLUMNS)
+            + list(CONTRACT.DEVICE_FIXED_COLUMNS)
+            + list(CONTRACT.DEVICE_SOURCE_METADATA_COLUMNS)
+        )
+        editable = [
+            "leaf01", "eth", "border", "192.0.2.10", "24",
+            "192.0.2.1", "02:00:00:00:00:10", "NA", "NA", "NA",
+            "NA", "198.51.100.10", "65001", "swp1", "bond1", "mlag",
+            mlag_mac_a, "swp49-50", "false",
+        ]
+
+        def source_document(mac=mlag_mac_a, shared="198.51.100.201",
+                            anycast=mlag_mac_a):
+            document = []
+            if mac is not None:
+                document.append({"set": {"mlag": {"mac-address": mac}}})
+            if shared is not None:
+                document.append({"set": {"nve": {"vxlan": {"mlag": {
+                    "shared-address": shared,
+                }}}}})
+            if anycast is not None:
+                document.append({"set": {"system": {"global": {
+                    "anycast-mac": anycast,
+                }}}})
+            return yaml.safe_dump(document, sort_keys=False).encode("utf-8")
+
+        def write_csv(path, source):
+            encoded = FEEDBACK.encode_source_yaml(source, "leaf01")
+            with path.open("w", newline="", encoding="utf-8") as stream:
+                csv.writer(stream).writerows([
+                    header,
+                    editable + [encoded, "NA", "NA"],
+                ])
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            expected = root / "expected.csv"
+            equivalent = root / "equivalent.csv"
+            write_csv(
+                expected,
+                source_document(
+                    mac=mlag_mac_a.upper(), anycast=mlag_mac_a.upper(),
+                ),
+            )
+            write_csv(equivalent, source_document())
+
+            same = FEEDBACK.analyze_comparison(
+                [expected, equivalent], ["expected", "equivalent"],
+            )
+            self.assertEqual("same", same["summary"][0]["overall"])
+            signature = next(
+                detail for detail in same["details"]
+                if detail["field"] == "mlag_runtime_signature"
+            )
+            self.assertEqual("same", signature["status"])
+            self.assertIn(
+                "mlag.mac-address=02:00:00:ff:00:12",
+                signature["values"]["expected"],
+            )
+            self.assertIn(
+                "nve.vxlan.mlag.shared-address=198.51.100.201",
+                signature["values"]["expected"],
+            )
+            self.assertIn(
+                "system.global.anycast-mac=02:00:00:ff:00:12",
+                signature["values"]["expected"],
+            )
+
+            variants = {
+                "different MLAG MAC": source_document(mac=mlag_mac_b),
+                "missing MLAG MAC": source_document(mac=None),
+                "different shared address": source_document(
+                    shared="198.51.100.202",
+                ),
+                "missing shared address": source_document(shared=None),
+                "different anycast MAC": source_document(anycast=mlag_mac_b),
+                "missing anycast MAC": source_document(anycast=None),
+            }
+            for label, source in variants.items():
+                with self.subTest(label=label):
+                    actual = root / "actual.csv"
+                    write_csv(actual, source)
+                    comparison = FEEDBACK.analyze_comparison(
+                        [expected, actual], ["expected", "actual"],
+                    )
+                    self.assertEqual(
+                        "different", comparison["summary"][0]["overall"],
+                    )
+                    details = {
+                        detail["field"]: detail
+                        for detail in comparison["details"]
+                    }
+                    self.assertEqual(
+                        "different",
+                        details["mlag_runtime_signature"]["status"],
+                    )
+
     def test_split_cidr_docstring_uses_reserved_documentation_address(self):
         docstring = FEEDBACK.split_cidr.__doc__ or ""
         addresses = {

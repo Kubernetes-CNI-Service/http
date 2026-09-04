@@ -38,7 +38,11 @@
         bridge:
           domain:
             br_default:
-{% if port.vlan_mode == 'access' %}
+{% if (port.vlan_native | default(none)) is not none %}
+              untagged: {{ port.vlan_native }}
+              vlan:
+                '{{ port.vlan_trunk_range }}': {}
+{% elif port.vlan_mode == 'access' %}
               access: {{ port.vlan_access }}
 {% else %}
               vlan:
@@ -74,7 +78,11 @@
         bridge:
           domain:
             br_default:
-{% if bond.vlan_mode == 'access' %}
+{% if (bond.vlan_native | default(none)) is not none %}
+              untagged: {{ bond.vlan_native }}
+              vlan:
+                '{{ bond.vlan_trunk_range }}': {}
+{% elif bond.vlan_mode == 'access' %}
               untagged: {{ bond.vlan_access }}
               vlan:
                 '{{ bond.vlan_access }}': {}
@@ -267,7 +275,7 @@
             router-id: {{ d.lo_ip | replace('/32', '') }}
             state: enabled
 {% endif %}
-{% for vrf in d.vrfs %}
+{% for vrf in d.vrfs if vrf.evpn_vrf != 'default' %}
       {{ vrf.evpn_vrf }}:
         evpn:
           state: enabled

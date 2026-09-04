@@ -74,6 +74,31 @@
 - marker 清除前 load 必须拒绝；失败 marker 保留供人工诊断。
 - 成功后重新 load，确认 worker、monitor 页面、Apache policy 和 bootstrap 都加载新版本。
 
+## TC-REAL-STP-001 — 终端二层端口 Edge 与 BPDU Guard
+
+- 在隔离 Cumulus 5.18 交换机上分别选择一个独立二层 `swp` 和一个带两个 member 的二层 bond。
+- 应用生成配置后，确认独立 swp 与逻辑 bond 的 `admin-edge=on`、`bpdu-guard=on`，bond member
+  本身没有这两个 bridge STP 配置。
+- 正常终端接入后端口立即 forwarding；使用隔离测试交换机向端口发送 BPDU，确认对应逻辑
+  bridge port 进入 `protodown`，reason 为 `bpduguard`，且没有形成广播环路。
+- 移除错误接线后运行 NVUE `bpduguardviolation` clear action，确认端口恢复；记录
+  `nv show interface ... bridge domain ... stp`、`ip -p -j link show` 和 syslog 作为证据。
+- 该案例会中断被测端口，具有破坏性，只能在无生产流量且已确认 console/OOB 管理可用时执行。
+
+## TC-REAL-QOS-EVPN-001 — Border/TAN QoS 与 EVPN-MH uplink
+
+- 风险：会在真实交换机上 apply QoS/PFC 与 EVPN-MH uplink tracking，需在维护窗口执行，
+  并准备已验证的上一版 NVUE 配置用于回退。
+- 前置：至少一台 Border（普通父物理口）、一台非 1G TAN（breakout BGP 子接口），其中
+  一台启用 EVPN-MH；另准备一台 MLAG 或非 MH 设备作为负向对照。
+- 步骤：用 v2 项目生成、发布并执行 ZTP；检查全局 RoCE lossless、目标物理端口
+  PFC watchdog、所有接口型 BGP neighbor 的 MH uplink，以及 `peerlink.4094`/bond/非目标端口。
+- 预期：Border 只在普通父口、TAN 只在 breakout 子口启用 watchdog；MH 的所有 BGP
+  物理口均启用 uplink；非 MH 与 `peerlink.4094` 不出现 uplink。BGP/EVPN 邻接保持稳定，
+  PFC watchdog 没有异常触发。
+- 清理与证据：保存生成 YAML、`nv config show`、BGP/EVPN/PFC 状态和 ZTP applied receipt；
+  如有异常立即 apply/save 上一版配置并保存回退日志。
+
 ## TC-REAL-CRASH-001 — 断电与磁盘故障
 
 - 仅在隔离实验服务器执行磁盘满、SIGKILL 和断电注入。

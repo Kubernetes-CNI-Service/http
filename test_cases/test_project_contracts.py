@@ -170,8 +170,20 @@ class TemplateContractTests(unittest.TestCase):
             r"(?i)(?<![0-9a-f])(?:[0-9a-f]{2}:){5}[0-9a-f]{2}(?![0-9a-f])",
             global_text,
         )
+        vrr_base_mac = ":".join(("02", "00", "5e", "01", "00", "00"))
         self.assertTrue(global_macs)
-        self.assertTrue(all(mac.lower().startswith("02:00:") for mac in global_macs))
+        self.assertTrue(
+            all(
+                mac.lower().startswith("02:00:")
+                or mac.lower() == vrr_base_mac
+                for mac in global_macs
+            )
+        )
+        self.assertEqual(
+            1,
+            sum(mac.lower() == vrr_base_mac for mac in global_macs),
+            "the only non-synthetic MAC in the public template is the VRR base",
+        )
 
         with (ROOT / "DAY0-Prepare/template/02-dhcp-subnet_config.csv").open(
             newline="", encoding="utf-8-sig"

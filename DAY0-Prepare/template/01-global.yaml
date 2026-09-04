@@ -1,7 +1,7 @@
 # Public bootstrap template.  Documentation IP/MAC values and locked
 # credentials below are deliberately non-production defaults; replace them in
 # each local project before strict setup/load.
-schema_version: 1
+schema_version: 2
 common:
   mgmt:
     dhcp-server:
@@ -38,26 +38,19 @@ switches:
       priority:
       - 100
       - 200
-      pairs:
-      - shared-addresses:
-        - 192.0.2.201
-        system-mac:
-        - '02:00:00:22:01:71'
-        - '02:00:00:22:01:72'
-        mac-address:
-        - '02:00:00:ff:01:ff'
-      - shared-addresses:
-        - 192.0.2.202
-        system-mac:
-        - '02:00:00:22:02:71'
-        - '02:00:00:22:02:72'
-        mac-address:
-        - '02:00:00:ff:02:ff'
+      shared-addresses:
+      - bond-mac: '02:00:00:ff:01:ff'
+        anycast-ip: 192.0.2.201
+      - bond-mac: '02:00:00:ff:02:ff'
+        anycast-ip: 192.0.2.202
     bridge:
       domain:
         br_default:
           stp:
             priority: 4096
+    vrr:
+      base_mac: 02:00:5e:01:00:00
+      gateway_ip: subnet_maximum
     services:
       dhcp_relay:
         inband:

@@ -1,4 +1,11 @@
 - set:
+{% if d.bridge_vlan_selectors %}
+    bridge:
+      domain:
+        br_default:
+          vlan:
+{% include '_bridge_l2vlans.yaml.j2' %}
+{% endif %}
     interface:
       eth0:
         ipv4:
@@ -22,6 +29,8 @@
           address:
             {{ d.lo_ip }}: {}
         type: loopback
+{% include '_direct_vlan_ports.yaml.j2' %}
+{% include '_l2_svis.yaml.j2' %}
 {% for swp in d.bgp_plain_uplinks %}
       {{ swp }}:
         type: swp
@@ -62,6 +71,7 @@
                   type: ipv4
       vrr:
         state: enabled
+{% include '_dhcp_relay.yaml.j2' %}
     system:
       aaa:
         class:

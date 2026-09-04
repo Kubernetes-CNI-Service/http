@@ -139,9 +139,25 @@ class PublicRepositoryAuditContractTest(unittest.TestCase):
         self.write(
             "src/examples.py",
             "hosts = ['192.0.2.10', '198.51.100.8', '203.0.113.7', "
-            "'127.0.0.1', '02:00:00:00:00:01']\n",
+            "'127.0.0.1', '02:00:00:00:00:01', "
+            "'00:00:00:00:00:00']\n",
         )
         self.assertEqual(0, self.audit().returncode)
+
+    def test_vrr_protocol_mac_is_allowed_only_with_explicit_vrr_semantics(self):
+        vrr_base = ":".join(("00", "00", "5e", "00", "00", "00"))
+        vrr_vlan = ":".join(("00", "00", "5e", "00", "00", "64"))
+        source = self.write(
+            "src/vrr.yaml",
+            f"base_mac: {vrr_base}\nvrr_mac: {vrr_vlan}\n",
+        )
+        result = self.audit()
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
+        source.write_text(f"device_mac: {vrr_vlan}\n", encoding="utf-8")
+        result = self.audit()
+        self.assert_rejected(result, "non-synthetic-mac")
+        self.assertNotIn(vrr_vlan, result.stdout + result.stderr)
 
     def test_sensitive_path_components_are_rejected_without_value_leak(self):
         private_ip = ".".join(("172", "20", "1", "5"))

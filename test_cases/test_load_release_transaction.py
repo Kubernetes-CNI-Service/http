@@ -1190,9 +1190,12 @@ class ReleaseTransactionTests(unittest.TestCase):
             "bootfile_name": "", "_network": ipaddress.ip_network("192.0.2.0/24"),
         }]
 
-        def generate_dhcp(_device_types, *, install_dhcp, dry_run):
+        def generate_dhcp(
+            _device_types, *, install_dhcp, dry_run, schema_version,
+        ):
             self.assertFalse(install_dhcp)
             self.assertFalse(dry_run)
+            self.assertEqual(1, schema_version)
             DHCP.write_dhcpd_conf(runtime_paths["dhcpd.conf"], subnets)
             DHCP.write_hosts(runtime_paths["dhcpd_eth.hosts"], records)
             DHCP.write_hosts(runtime_paths["dhcpd_ib.hosts"], [])

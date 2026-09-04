@@ -1,4 +1,3 @@
-{% set vrf = d.vrfs[0] %}
 - set:
     bridge:
       domain:
@@ -15,12 +14,27 @@
           lacp-bypass: enabled
           lacp-rate: fast
           member:
+{% if bond.type == 'localbond' %}
+{% for m in bond.members %}
+            {{ m }}: {}
+{% endfor %}
+{% else %}
             {{ bond.member }}: {}
+{% endif %}
+{% if bond.type == 'mlag' %}
+          mlag:
+            id: {{ bond.id }}
+            state: enabled
+{% endif %}
           mode: lacp
         bridge:
           domain:
             br_default:
-{% if bond.vlan_mode == 'access' %}
+{% if (bond.vlan_native | default(none)) is not none %}
+              untagged: {{ bond.vlan_native }}
+              vlan:
+                '{{ bond.vlan_trunk_range }}': {}
+{% elif bond.vlan_mode == 'access' %}
               access: {{ bond.vlan_access }}
 {% else %}
               vlan:
@@ -30,15 +44,26 @@
 {% for k, v in g.bridge.domain.br_default.stp.items() if k != 'priority' %}
                 {{ k }}: {{ v }}
 {% endfor %}
+{% if bond.type == 'evpn_multihoming' %}
         evpn:
           multihoming:
             segment:
               local-id: {{ bond.id }}
               mac-address: {{ bond.mac_address }}
               state: enabled
+{% endif %}
         link:
           mtu: 9216
         type: bond
+{% if bond.type == 'localbond' %}
+{% for m in bond.members %}
+      {{ m }}:
+        link:
+          fec: auto
+          mtu: 9216
+        type: swp
+{% endfor %}
+{% endif %}
 {% endfor %}
       eth0:
         ipv4:
@@ -62,6 +87,7 @@
           address:
             {{ d.lo_ip }}: {}
         type: loopback
+{% include '_direct_vlan_ports.yaml.j2' %}
 {% for swp_name, swp_info in d.parent_swps.items() %}
       {{ swp_name }}:
         link:
@@ -240,7 +266,7 @@
                 remote-as: external
             router-id: {{ d.lo_ip | replace('/32', '') }}
             state: enabled
-{% for vrf in d.vrfs %}
+{% for vrf in d.vrfs if vrf.evpn_vrf != 'default' %}
       {{ vrf.evpn_vrf }}:
         evpn:
           state: enabled

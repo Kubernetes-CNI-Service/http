@@ -2,7 +2,12 @@
     bridge:
       domain:
         br_default:
-          vlan: {}
+          vlan:
+{% if d.bridge_vlan_selectors %}
+{% include '_bridge_l2vlans.yaml.j2' %}
+{% else %}
+            {}
+{% endif %}
 {% include '_global_evpn.yaml.j2' %}
     interface:
       eth0:
@@ -27,6 +32,8 @@
           address:
             {{ d.lo_ip }}: {}
         type: loopback
+{% include '_direct_vlan_ports.yaml.j2' %}
+{% include '_l2_svis.yaml.j2' %}
 {% for swp_name, swp_info in d.bgp_uplink_parents.items() %}
       {{ swp_name }}:
         link:
@@ -83,7 +90,7 @@
                   type: ipv4
       vrr:
         state: enabled
-    service: {}
+{% include '_dhcp_relay.yaml.j2' %}
     system:
       aaa:
         class:

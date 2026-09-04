@@ -1,10 +1,10 @@
 {
-  "impact_manifest_sha256": "fd78be6f4048d4d2365f8f1e7de5b726c761c3fc68f2fa012ed7656a437ea164",
+  "impact_manifest_sha256": "2ef71f171ec464fe0a3c302ed0adac0efe874649d616b64b7b1d454254295503",
   "schema_version": 1,
   "scripts": {
     "DAY0-Prepare/01-a-setup.py": {
       "canonical": "DAY0-Prepare/01-a-setup.py",
-      "sha256": "066fdcfead0c024ad8e04965a3b5fcd30557321ddd76218bfb816e96ebed1c33"
+      "sha256": "ba25931ac5f893ba48d1cd6b80c3bead0ee83ee045a44f61bfb74008a5cfe0b1"
     },
     "DAY0-Prepare/02-unsetup.py": {
       "canonical": "DAY0-Prepare/02-unsetup.py",
@@ -12,7 +12,7 @@
     },
     "DAY0-Prepare/11-load.py": {
       "canonical": "DAY0-Prepare/11-load.py",
-      "sha256": "75790010110213293ac03d06eb05114898338455b406c95d48a056092facdb58"
+      "sha256": "367735f2d8d756507e714f6a6bc3804687fb651f349c25d447160edaeb15b148"
     },
     "DAY0-Prepare/12-ztp-monitor.py": {
       "canonical": "DAY0-Prepare/12-ztp-monitor.py",
@@ -328,7 +328,7 @@
     },
     "tools/project_contract.py": {
       "canonical": "tools/project_contract.py",
-      "sha256": "52e138a2f6bd3f97f7ef1274d7c33fcd401f48166dbfaca94923bbf51ee87ddf"
+      "sha256": "6d298b83a20ef868afad929b44a868e10675651162f6d20b5d6b3ca8c289ab48"
     },
     "tools/sync-code.py": {
       "canonical": "tools/sync-code.py",
@@ -356,15 +356,15 @@
     },
     "ztp/config/cumulus/template/90-c2-generate_configs.py": {
       "canonical": "ztp/config/cumulus/template/90-c2-generate_configs.py",
-      "sha256": "34d449f2c1ed0c142b5f4af3fca8968d9cf897fbdf267de440fdc0c890204639"
+      "sha256": "d1f6efed643d5f7fd16c8be091a001a4f2a249249df23fc8f9208b6ccc81b48a"
     },
     "ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py": {
       "canonical": "ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py",
-      "sha256": "e98fb63bc87e9a5655fb2fc4da4bb66b30fd18295db5b6d56d66d0154484efd7"
+      "sha256": "ae7a0e8cda62bdc2cc1c7ed3136d8023e57c2e35e5837ec078942c8ad0e0ce03"
     },
     "ztp/config/isc-dhcp-server/c1-generate_dhcp.py": {
       "canonical": "ztp/config/isc-dhcp-server/c1-generate_dhcp.py",
-      "sha256": "a0fa424459866cfd96bc65730f1abb23ee28bd5ee1ac580a8932780e86786769"
+      "sha256": "225436a9540ea2c50200b134b7748bf2b6ced2868a2fc364005771835ea5187b"
     },
     "ztp/config/nvos/d-hostname2mac.py": {
       "canonical": "ztp/config/cumulus/d-hostname2mac.py",
@@ -372,7 +372,7 @@
     },
     "ztp/config/nvos/template/90-c2-generate_configs.py": {
       "canonical": "ztp/config/cumulus/template/90-c2-generate_configs.py",
-      "sha256": "34d449f2c1ed0c142b5f4af3fca8968d9cf897fbdf267de440fdc0c890204639"
+      "sha256": "d1f6efed643d5f7fd16c8be091a001a4f2a249249df23fc8f9208b6ccc81b48a"
     },
     "ztp/config/nvos/template/P2P/p2p-to-validation.py": {
       "canonical": "ztp/config/nvos/template/P2P/p2p-to-validation.py",
@@ -404,7 +404,7 @@
     },
     "ztp/optimize/feedback.py": {
       "canonical": "ztp/optimize/feedback.py",
-      "sha256": "fb10e0ac2f8f720cc48a2afac97cf2acfa654936e4816f84441009e6713914a0"
+      "sha256": "99af8b066528986a140f78ed70f8a2a83702b36a0c91c9d3d67ec999e6d8d7d0"
     },
     "ztp/optimize/sample_links.py": {
       "canonical": "ztp/optimize/sample_links.py",
@@ -419,18 +419,33 @@
     ".gitattributes": "d7bfa1a8596479c7b28ac39bb094b2a389fc8dcf9c3cd923b66a95eff96d9f97",
     ".github/workflows/tests.yml": "a0db50165094f82ef45b87d7dfe42c4f6ed91bb7fa7b4060b6f22a03a9e02335",
     ".gitignore": "4d11c6b477d369c2d495ce88712fff2e0eb2c90ec83f2a4d2192d72fed680f19",
+    "DAY0-Prepare/template/01-global.yaml": "7ef0c60d873d85ce9508bb989d05603c594a0fc1e9ce38c3fc93169c6f96302b",
+    "DAY0-Prepare/template/02-devices_config.csv": "3f0f797ccdf4a9c8103ab92d0edcd9e77ec29718f29c33ffef7637a6604a92cb",
     "requirements-dev.txt": "97241cb3a39422f8a8863e513e9e98d81239db844adb691b63f93c40421c254b",
-    "test_cases/audit_public_tree.py": "ac96064acacca981c1a5b67352faafe15bd23a0608edac799fac039fa6d94759",
+    "test_cases/audit_public_tree.py": "cb84551ea7f79af71fc240cf1612b56d95a40e8cdd7cbfb9f56846b924abe11b",
     "test_cases/run_related_tests.py": "e4d496737cb2b805b20ef45f43a9e0fca3a074009046d1992037b3dc1a5d4e33",
-    "ztp/config/cumulus/template/03-templates-j2/_mlag_peerlink.yaml.j2": "b6cef252bc09fb68f2796009d1d9d5e90a18de848c4f32228ad3d4be5917f76a",
-    "ztp/config/cumulus/template/03-templates-j2/border.yaml.j2": "ad55ca7fd626d998fb7c7fa17aa7266f22c10071156c80a396db96a6e05b1364",
-    "ztp/config/cumulus/template/03-templates-j2/oobofoob-spine.yaml.j2": "7dc326e86f70d45e1dc81a888b5e3691e856a3161d7c46cf2ea83c17716eb1fd",
+    "ztp/config/cumulus/template/03-templates-j2/_direct_vlan_ports.yaml.j2": "7c31727ac5f644df0a97e703db373171b8a7f6a8a7bba08e756403c3316ded16",
+    "ztp/config/cumulus/template/03-templates-j2/_l2_svis.yaml.j2": "b10ddea576c7e06b3e094e26558daf0f1bd546c83b2dc14cc7e35c4e875aa83b",
+    "ztp/config/cumulus/template/03-templates-j2/border.yaml.j2": "ed15f1fc63acfef59bc332bc26ed4e183efd7a3aab71aa868ca75366e0b3cf6e",
+    "ztp/config/cumulus/template/03-templates-j2/oob-core.yaml.j2": "67d800f3be10eb421a2aa4ad7008395d00f534eb64d8a38ac416bfd0d7231120",
+    "ztp/config/cumulus/template/03-templates-j2/oob-leaf.yaml.j2": "61698de8dfebad5ccfc161ff6e175dfe0ce8629511abae4bef135a6ec03db164",
+    "ztp/config/cumulus/template/03-templates-j2/oob-rack-tor.yaml.j2": "bab3fb6486b9defbf42b606e6d22f8704c3e3c7b91cb0168615a66f14a8ae0da",
+    "ztp/config/cumulus/template/03-templates-j2/oob-su-leaf.yaml.j2": "040afcb1b166c73b1f2f95e4f7e765f9f2299228e6670a5c6dae9af3e7c3ccd8",
+    "ztp/config/cumulus/template/03-templates-j2/oob-su-spine.yaml.j2": "fd41b8b43807e9508c36929b3d16958b96a1009e70632ae71095eae135ff1cc1",
+    "ztp/config/cumulus/template/03-templates-j2/oobofoob-leaf.yaml.j2": "458244d2b1b92ce6686b11cff5dd1517edf8f0f9f04642369aebc259ec006853",
+    "ztp/config/cumulus/template/03-templates-j2/oobofoob-spine.yaml.j2": "31717858cb898cd01f7ec598eb89ccde16ab608d8928b149f952021ffc0e7dad",
+    "ztp/config/cumulus/template/03-templates-j2/tan-cp-1gleaf.yaml.j2": "0d7bc02119441532dc995346daa41aec06bc741bdb80d3657a7413a9bd62d4fd",
+    "ztp/config/cumulus/template/03-templates-j2/tan-cp-leaf.yaml.j2": "dc1979bccbfe1d47e699c2465067f34354168a602a10c68e67ada4aff45f2725",
+    "ztp/config/cumulus/template/03-templates-j2/tan-hps-leaf.yaml.j2": "88a0867fbd1dfb580c7f0dadd5e04b94c2958f241315105aba675ddcfb0b2b10",
+    "ztp/config/cumulus/template/03-templates-j2/tan-leaf.yaml.j2": "80819cf71ed67868956f758733669ffa4cd2ca37384994c406861d6d0e7aae95",
+    "ztp/config/cumulus/template/03-templates-j2/tan-spine.yaml.j2": "d7ac787e7512e88b0fc3b96a25562a49a4b91f5dc48d8f049cfe4b8c136b2819",
+    "ztp/config/cumulus/template/03-templates-j2/tan-su-leaf.yaml.j2": "ce7e139940663fd947992d4801242ea4ded4bdf1beea57afdfb1d65b1277651d",
     "ztp/templates/ztp.json": "1a2c06ee0b25a657e0718698ebc3b7177c00e10d062471a6bcc6909a186abf83"
   },
   "tests": {
     "test_cases.test_all_script_entrypoints": "842a7386af2f9ac4fc9a7521e644ccde7afbc833fa955d666221928b77aa1ac0",
     "test_cases.test_apache_publication_boundary": "b0ec8878f71b62551cef86b5b57182db837a606e8680a780f4ea12d01edc1b63",
-    "test_cases.test_change_aware_test_runner": "4f44caea137f9eb1f2f92ba242f40d016e2d48cc6def78b19e646b5c1fd40476",
+    "test_cases.test_change_aware_test_runner": "d27fa6aa09b4c65a801589282db4d4b1b619c7c98c358ac2abe7b957dd261621",
     "test_cases.test_cumulus_snippet_rendering": "8b7111c20de81b7c6e9e74fdf99b5089cc50b84bc632018a8c80e0f54efcdb60",
     "test_cases.test_deployment_writer_lock": "eca747b91fb5606d22ddb97f64887d08e9d31eacbfa20999225da4ae8f850a86",
     "test_cases.test_dhcp_runtime_reassignment": "e4fe46c5cd8d4cd7f3225f66a6683e3ba88a35dfec938fba45d95f9e7ff73cef",
@@ -442,18 +457,22 @@
     "test_cases.test_ib_analysis_domain": "c896a53389d652a220835e0e1ccfbacd2bfb165b515c006fd21b82bd04ec1686",
     "test_cases.test_import_from_download_target": "a6ce0e5dc9c7dfe21b1a5f9bd2572c820caa579e49ef7ea46c2b522d7950db49",
     "test_cases.test_infra_check_and_manual_reset": "f12485c976471de81c6be125a2f4f2c8455deea2e50acd4d2611352ccc835143",
-    "test_cases.test_load_release_transaction": "0ee9ff3159f242859e47484b50168fabf641aa1c358c41330cecc6a863fae849",
+    "test_cases.test_load_release_transaction": "ce496c61fb94ad7a7707cc6eb6fd3c496c7f7b5206fc266771e1882c3582c69f",
     "test_cases.test_manual_applied_config": "31476144d5ed1b08af040dbc96dc6364aa47bef59a4a65e907a93d1b38d12e8c",
-    "test_cases.test_mlag_evpn_generation": "bbf48bc7ae9b54862bfabca4bd95c6ad1d8fac835184872c6e12b47917d6905a",
+    "test_cases.test_mlag_evpn_generation": "cb36a12c34d179d516f448a6921855571ec501cfe110eb8a84910a7b1a39bc5c",
     "test_cases.test_monitor_stack_review": "21ed323a68f5ab65ca69c9872ff654d01925fdbb9c93b26d076af99f97220d69",
     "test_cases.test_nvue_normalizer": "6e22f0f89353d0042391330675e4cce387931e896f4b44f57911e2dccb85b230",
     "test_cases.test_ops_deployment_review": "be5c6ab99601907b46cd21e9b6c41d2730dd177c7336e530dc93f5b700f61743",
-    "test_cases.test_optimize_output_layout": "c8edae2bb031745d83df14007a27cf0764f267ccb063a972bafe47d63a433464",
+    "test_cases.test_optimize_output_layout": "c67375cd03ac67415dfa3e888fce42b9881aa78d27900e1dee87ea9b526dabf5",
     "test_cases.test_predeploy_test_gate": "04528a1573c1f2d5d6ac7a004952fdaeff2864c138d39b5b4d25801b3e1aa965",
-    "test_cases.test_project_contracts": "50e6dcefc177a37d477950067f247ffe7b0ae479e33407e91be56bcfd4030668",
-    "test_cases.test_public_repository_contract": "d6638b6dcb026cc59bcef5bfc2dfe1899849a13e81988c982ee26d538bc2f09c",
-    "test_cases.test_test_case_repository": "358501d91b17f32ef9f115fffcbc0dc8df057052d07433670c514ce7b4c47301",
+    "test_cases.test_project_contracts": "1ed2750a29c6832b86aa06c59c5eddadf5198f4ae4f569a71e6874fac4aa2576",
+    "test_cases.test_public_repository_contract": "287ab73c22d3c050296255aa346bf6661cf03fbd54d4827198b92909e0db8bad",
+    "test_cases.test_qos_evpn_uplink_generation": "14d8932a258694685d49141e82f4a329d9ea1065208e81c31058f3c8768ff481",
+    "test_cases.test_terminal_l2_stp_generation": "35f7852841b917063479314e919b0d7e7928ccdb3261f9840cfac04537ec6f8d",
+    "test_cases.test_test_case_repository": "15e9a65a30e0f4053b7b53baaf4900eb9cd29b9beb054a58363ee4ce0193459d",
     "test_cases.test_upload_package_contract": "28acc2cf2fe51f4c4b5b8410cb2cf43c8c319f4faf6c91ca7e9fa35970df5641",
+    "test_cases.test_v2_generation_flow": "e76f0d746bdbc7927026f05909658a98358b109b58e97616a00fec53d3bf3413",
+    "test_cases.test_v2_project_schema": "691f6d4458bb89999b94fc00c878a27726bddb197029fbafa86ae80d5beefd8d",
     "test_cases.test_ztp_applied_receipt": "9153d4fbe9473f725d738d86613d09f7e980ab3232f226c74fa7b0d88c9a0ec9",
     "test_cases.test_ztp_group_handoff": "f1deed53e7f74abe02dba0109546068d3d3b80f5ded355d355f88ff616897c96",
     "test_cases.test_ztp_group_handoff_display": "444194b9d8c256de3552d7220fa299c75bd9bede49d290d6f19a3694c0ceb3c5",
