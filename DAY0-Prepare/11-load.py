@@ -10,19 +10,23 @@ starts the detached ZTP status monitor after the load flow succeeds.
 from __future__ import annotations
 
 import argparse
+import base64
 import csv
 from dataclasses import dataclass, replace
 from datetime import datetime
 import getpass
 import hashlib
+import hmac
+import importlib.util
 import ipaddress
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import platform
 import re
 import secrets
 import select
+import selectors
 import signal
 import shutil
 import stat
@@ -31,6 +35,37 @@ import sys
 import tempfile
 import time
 import zipfile
+
+
+def _preflight_macos_generation_imports() -> None:
+    """Give a clean install hint before shared modules import third-party code."""
+    if (platform.system() or "").casefold() != "darwin":
+        return
+    required = (("PyYAML", "yaml"), ("Jinja2", "jinja2"), ("openpyxl", "openpyxl"))
+    missing = []
+    for label, module in required:
+        try:
+            available = importlib.util.find_spec(module) is not None
+        except (AttributeError, ImportError, ValueError):
+            available = False
+        if not available:
+            missing.append(label)
+    if not missing:
+        return
+    print(
+        "[ERROR] macOS 配置生成缺少必需依赖："
+        f"{', '.join(missing)}",
+        file=sys.stderr,
+    )
+    print(
+        "[INSTALL] python3 -m pip install -r requirements-dev.txt "
+        "Jinja2==3.1.6",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
+
+_preflight_macos_generation_imports()
 
 try:
     import yaml
@@ -55,8 +90,19 @@ from project_contract import (
 from deployment_lock import (
     DeploymentLockError,
     acquire_lock_path_descriptor,
+    deployment_lock,
     inherited_lock_subprocess_kwargs,
     release_lock_descriptor,
+)
+from ztp_service_runtime import (
+    DhcpRuntimePlan,
+    RuntimeContractError,
+    ServiceRuntimeBackend,
+    monitor_pid_lock,
+    plan_dhcp_runtime,
+    runtime_backend_from_environment,
+    stop_native_ztp_monitors,
+    write_monitor_pid_record_locked,
 )
 TEMPLATE_DIR = HERE / "template"
 IMAGE_DIR = HTTP_ROOT / "image"
@@ -73,18 +119,36 @@ SWITCH_COLLECTION_CONTROL_DEST = Path("/usr/lib/cgi-bin/switch-collection-contro
 MANUAL_ZTP_WORKER = HTTP_ROOT / "monitor/manual-ztp-worker.py"
 MANUAL_ZTP_CONTROL_SOURCE = HTTP_ROOT / "monitor/manual-ztp-control.cgi"
 MANUAL_ZTP_CONTROL_DEST = Path("/usr/lib/cgi-bin/manual-ztp-control")
+PASSWORD_UPDATE_SCRIPT = TOOLS_DIR / "password-update.py"
+CONTROL_AUTH_SOURCE = TOOLS_DIR / "control-auth.py"
+CONTROL_AUTH_NATIVE_HELPER = Path("/usr/local/lib/http-ztp/control-auth.py")
+CONTROL_AUTH_CONTAINER_HELPER = Path("/opt/http-ztp/control-auth.py")
+CONTROL_AUTH_SOURCE_SHA256 = (
+    "5a133a353cb7ac7af5be0be71b4ef85b41345716103d6e28590140638ee11038"
+)
+CONTROL_AUTH_HELPER_MAX_BYTES = 256 * 1024
+CONTROL_AUTH_STATUS_MAX_BYTES = 4096
 APACHE_PUBLIC_BOUNDARY_CONF = Path(
     "/etc/apache2/conf-enabled/http-ztp-public-boundary.conf"
 )
+NATIVE_APACHE_LISTENER_CONF = Path(
+    "/etc/apache2/conf-enabled/http-ztp-listeners.conf"
+)
 APACHE_PUBLIC_BOUNDARY_SHA256 = (
-    "bcb8cb2cd56a15e0415225dd7ed80546c78767ffcea16bbde68e985ecd40aee1"
+    "616629333ac16e4bc0c076a499d98864959372b5a24bee3c0d4257c1aa9d15fb"
 )
 MANIFEST = ZTP_DIR / ".setup_manifest"
 DEPLOYMENT_LOCK = HTTP_ROOT / ".deployment.lock"
+LOCAL_TEST_RUNNER = HTTP_ROOT / "test_cases/run_related_tests.py"
 ZTP_PREFIX_MARKER = HTTP_ROOT / ".ztp-prefix-publication.json"
 PROMPT_TIMEOUT = 15
 DEFAULT_ZTP_MONITOR_INTERVAL = 30
 AIR_TOPOLOGY_POLICY_NAME = "03-air-topology-policy.json"
+MINI_AIR_DEVICES_NAME = "04-air-mini-devices.txt"
+SHARED_ARTIFACT_RECEIPT_DIR = ".shared-artifact-receipts"
+SHARED_ARTIFACT_RECEIPT_MAX_BYTES = 64 * 1024 * 1024
+SHARED_ARTIFACT_RECEIPT_MAX_ENTRIES = 10_000
+SHARED_ARTIFACT_MAX_BYTES = 16 * 1024 * 1024 * 1024
 VALID_TYPES = {"eth", "eth_spx", "spx", "ib", "nvl", "server", "air"}
 BOOTSTRAP_BY_ROLE = {
     "air_oobofoob": "ztp-bootstrap_oobofoob.sh",
@@ -94,6 +158,25 @@ BOOTSTRAP_BY_ROLE = {
 }
 SERVICE_IP_PRIORITY = (
     "air_oob", "air_oobofoob", "prod_oob", "prod_oobofoob",
+)
+MACOS_MIN_PYTHON = (3, 9)
+MACOS_GENERATION_MODULES = (
+    ("PyYAML", "yaml"),
+    ("Jinja2", "jinja2"),
+    ("openpyxl", "openpyxl"),
+)
+MACOS_VALIDATION_MODULES = (
+    ("pandas", "pandas"),
+    ("XlsxWriter", "xlsxwriter"),
+)
+MACOS_TRANSFER_COMMANDS = ("git", "ssh", "scp", "ssh-keygen", "rsync")
+MACOS_HOMEBREW_CANDIDATES = (
+    Path("/opt/homebrew/bin/brew"),
+    Path("/usr/local/bin/brew"),
+)
+MACOS_LIBXCRYPT_CANDIDATES = (
+    Path("/opt/homebrew/opt/libxcrypt/lib/libcrypt.2.dylib"),
+    Path("/usr/local/opt/libxcrypt/lib/libcrypt.2.dylib"),
 )
 ROLES_BY_BOOTSTRAP = {
     "ztp-bootstrap_oob.sh": ("air_oob", "prod_oob"),
@@ -116,10 +199,33 @@ DEVICE_HEADER_PREFIX = (
     "hostname", "type", "template", "eth0_ip", "netmask", "eth0_gw",
     "eth0_mac", "eth1_ip", "netmask", "eth1_gw", "eth1_mac",
 )
+DHCP_INTERFACE_ALLOWLIST_ENV = "HTTP_ZTP_DHCP_INTERFACE_ALLOWLIST"
+DHCP_RELAY_INGRESS_ENV = "HTTP_ZTP_DHCP_RELAY_INGRESS"
+SUPERVISOR_QUIESCE_SERVICES = (
+    "ztp-monitor", "switch-collection", "manual-ztp",
+    "isc-dhcp-server", "apache2",
+)
+_DEPLOYMENT_LOCK_CONTEXTS: dict[int, object] = {}
+_MINI_GENERATION_AUTHORITIES: dict[
+    tuple[str, str], tuple[str, str, str | None]
+] = {}
 
 
 class LoadError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class MacOSClientRequirementStatus:
+    """Detected client-side prerequisites shown before a macOS load mutates state."""
+
+    python_version: str
+    python_supported: bool
+    missing_generation_modules: tuple[str, ...]
+    missing_commands: tuple[str, ...]
+    missing_validation_modules: tuple[str, ...]
+    password_backend: str | None
+    homebrew: str | None
 
 
 @dataclass
@@ -184,6 +290,11 @@ class ProjectInputs:
     pubkeys: tuple[Path, ...]
     settings: GlobalSettings
     air_topology_policy: Path | None = None
+    mini_devices_file: Path | None = None
+    mini_source_file: Path | None = None
+    deployment_scope: str = "all"
+    switch_scope: str = "all"
+    source_identities: dict[str, str] | None = None
 
 
 def section(title: str) -> None:
@@ -202,6 +313,41 @@ def warn(message: str) -> None:
     print(f"[WARN] {message}")
 
 
+def _run_local_test_runner(arguments: list[str], label: str) -> None:
+    try:
+        runner_info = LOCAL_TEST_RUNNER.lstat()
+    except FileNotFoundError as exc:
+        raise LoadError(f"本机 load 测试门禁不存在：{LOCAL_TEST_RUNNER}") from exc
+    if (
+        not stat.S_ISREG(runner_info.st_mode)
+        or runner_info.st_nlink != 1
+        or LOCAL_TEST_RUNNER.is_symlink()
+    ):
+        raise LoadError(
+            f"本机 load 测试门禁必须是单链接普通文件：{LOCAL_TEST_RUNNER}"
+        )
+    command = [sys.executable, "-B", str(LOCAL_TEST_RUNNER), *arguments]
+    info(f"{label}：" + " ".join(shlex_quote(item) for item in command))
+    completed = _run_subprocess(
+        command, cwd=HTTP_ROOT, shell=False, check=False,
+    )
+    if completed.returncode != 0:
+        raise LoadError(f"{label}失败（exit={completed.returncode}）")
+
+
+def run_local_full_test_gate() -> None:
+    """Run the canonical full suite and issue an exact local attestation."""
+    _run_local_test_runner(["--all"], "本机正式 load 前全量测试")
+    verify_local_full_test_attestation()
+
+
+def verify_local_full_test_attestation() -> None:
+    """Require the exact full-suite attestation without running tests."""
+    _run_local_test_runner(
+        ["--check", "--require-full"], "本机 load 全量测试证明复核",
+    )
+
+
 def acquire_deployment_lock(*, exclusive: bool = True) -> int:
     """Acquire the process-wide deployment gate without waiting.
 
@@ -209,11 +355,28 @@ def acquire_deployment_lock(*, exclusive: bool = True) -> int:
     ``current-release.json`` commit.  Holding this lock across the whole load
     keeps every cooperating manual/GUI operation outside that short window.
     """
+    lock_context = None
+    lock_entered = False
     try:
-        return acquire_lock_path_descriptor(
-            DEPLOYMENT_LOCK, exclusive=exclusive, create=True,
-        )
+        if not exclusive:
+            return acquire_lock_path_descriptor(
+                DEPLOYMENT_LOCK, exclusive=False, create=True,
+            )
+        # A container management wrapper may already hold this exact lock and
+        # pass its open descriptor through HTTP_DEPLOYMENT_LOCK_FD.  Reuse the
+        # shared contract so the descriptor is validated against the lock path
+        # and the child closes its copy without unlocking the parent's open
+        # file description.  Opening the path again here would self-deadlock.
+        lock_context = deployment_lock(DEPLOYMENT_LOCK.parent)
+        descriptor = lock_context.__enter__()
+        lock_entered = True
+        if descriptor is None:  # actual load never requests a dry-run lock
+            raise DeploymentLockError("deployment lock descriptor is absent")
+        _DEPLOYMENT_LOCK_CONTEXTS[descriptor] = lock_context
+        return descriptor
     except DeploymentLockError as exc:
+        if lock_context is not None and lock_entered:
+            lock_context.__exit__(type(exc), exc, exc.__traceback__)
         raise LoadError(
             "另一个 load 或人工 ZTP/重置操作正在使用部署 release；"
             "请等待其完成后重试"
@@ -221,6 +384,12 @@ def acquire_deployment_lock(*, exclusive: bool = True) -> int:
 
 
 def release_deployment_lock(descriptor: int | None) -> None:
+    if descriptor is None:
+        return
+    lock_context = _DEPLOYMENT_LOCK_CONTEXTS.pop(descriptor, None)
+    if lock_context is not None:
+        lock_context.__exit__(None, None, None)
+        return
     release_lock_descriptor(descriptor)
 
 
@@ -229,9 +398,189 @@ def runtime_os() -> str:
     return platform.system() or "Unknown"
 
 
+def _default_regular_file(path: Path) -> bool:
+    try:
+        metadata = path.stat()
+    except OSError:
+        return False
+    return stat.S_ISREG(metadata.st_mode)
+
+
+def macos_client_requirement_status(
+    *,
+    command_resolver=None,
+    module_resolver=None,
+    regular_file=None,
+    python_version=None,
+) -> MacOSClientRequirementStatus:
+    """Inspect every supported macOS client dependency without changing state."""
+    command_resolver = command_resolver or shutil.which
+    module_resolver = module_resolver or importlib.util.find_spec
+    regular_file = regular_file or _default_regular_file
+    version = tuple(python_version or sys.version_info[:3])
+
+    def module_present(name: str) -> bool:
+        try:
+            return module_resolver(name) is not None
+        except (AttributeError, ImportError, ValueError):
+            return False
+
+    missing_generation = tuple(
+        label for label, module in MACOS_GENERATION_MODULES
+        if not module_present(module)
+    )
+    missing_validation = tuple(
+        label for label, module in MACOS_VALIDATION_MODULES
+        if not module_present(module)
+    )
+    missing_commands = tuple(
+        command for command in MACOS_TRANSFER_COMMANDS
+        if not command_resolver(command)
+    )
+
+    brew_path = command_resolver("brew")
+    if not brew_path:
+        brew_path = next(
+            (str(path) for path in MACOS_HOMEBREW_CANDIDATES if regular_file(path)),
+            None,
+        )
+    mkpasswd = command_resolver("mkpasswd")
+    libxcrypt = next(
+        (str(path) for path in MACOS_LIBXCRYPT_CANDIDATES if regular_file(path)),
+        None,
+    )
+    backend = (
+        f"mkpasswd ({mkpasswd})" if mkpasswd
+        else f"Homebrew libxcrypt ({libxcrypt})" if libxcrypt
+        else None
+    )
+    normalized_version = tuple(int(item) for item in version[:3])
+    return MacOSClientRequirementStatus(
+        python_version=".".join(str(item) for item in normalized_version),
+        python_supported=normalized_version[:2] >= MACOS_MIN_PYTHON,
+        missing_generation_modules=missing_generation,
+        missing_commands=missing_commands,
+        missing_validation_modules=missing_validation,
+        password_backend=backend,
+        homebrew=str(brew_path) if brew_path else None,
+    )
+
+
+def print_macos_client_requirements(
+    *, update_passwords: bool, printer=print, **probe_overrides,
+) -> MacOSClientRequirementStatus:
+    """Print tiered macOS client status and hints only for missing tools."""
+    status = macos_client_requirement_status(**probe_overrides)
+    printer("")
+    printer("── macOS 客户端依赖检查（load / tar-for-upload / sync-code）")
+    python_mark = "[OK]" if status.python_supported else "[MISSING]"
+    printer(
+        f"{python_mark} Python 3.9+：当前 {status.python_version}"
+    )
+
+    generation_all = ", ".join(label for label, _ in MACOS_GENERATION_MODULES)
+    if status.missing_generation_modules:
+        printer(
+            "[MISSING] 配置生成模块："
+            f"{', '.join(status.missing_generation_modules)}"
+            f"（完整要求：{generation_all}）"
+        )
+    else:
+        printer(f"[OK] 配置生成模块：{generation_all}")
+
+    command_all = "Git/git, OpenSSH/ssh/scp/ssh-keygen, rsync"
+    if status.missing_commands:
+        printer(
+            "[MISSING] 上传/同步命令："
+            f"{', '.join(status.missing_commands)}"
+            f"（完整要求：{command_all}）"
+        )
+    else:
+        printer(f"[OK] 上传/同步命令：{command_all}")
+
+    validation_all = ", ".join(label for label, _ in MACOS_VALIDATION_MODULES)
+    if status.missing_validation_modules:
+        printer(
+            "[MISSING] 全量测试/报表模块："
+            f"{', '.join(status.missing_validation_modules)}"
+            f"（完整要求：{validation_all}）"
+        )
+    else:
+        printer(f"[OK] 全量测试/报表模块：{validation_all}")
+
+    if status.password_backend:
+        printer(
+            "[OK] 密码更新后端（仅 --update-passwords）："
+            f"{status.password_backend}"
+        )
+    else:
+        password_mark = "[MISSING]" if update_passwords else "[OPTIONAL]"
+        printer(
+            f"{password_mark} 密码更新后端（仅 --update-passwords）："
+            "whois/mkpasswd 或 Homebrew libxcrypt"
+        )
+    if status.homebrew:
+        printer(f"[OK] Homebrew：{status.homebrew}")
+    else:
+        printer("[OPTIONAL] Homebrew：仅安装 libxcrypt 等可选工具时需要")
+
+    if not status.python_supported:
+        printer("[INSTALL] brew install python@3.12")
+    developer_commands = {"git", "ssh", "scp", "ssh-keygen"}
+    if developer_commands.intersection(status.missing_commands):
+        printer("[INSTALL] xcode-select --install")
+    if "rsync" in status.missing_commands:
+        printer("[INSTALL] brew install rsync")
+    if status.missing_generation_modules or status.missing_validation_modules:
+        printer(
+            "[INSTALL] python3 -m pip install -r requirements-dev.txt "
+            "Jinja2==3.1.6"
+        )
+    if status.password_backend is None:
+        printer("[INSTALL] brew install libxcrypt  # 仅 --update-passwords")
+    printer(
+        "[INFO] Apache、ISC DHCP、systemd、iproute2 只安装在 Ubuntu 管理服务器；"
+        "VirtualBox/Docker/Excel 不是代码必需依赖。"
+    )
+    return status
+
+
+def validate_macos_client_requirements(
+    status: MacOSClientRequirementStatus,
+) -> None:
+    """Fail before mutation only when local configuration generation is unsafe."""
+    missing = []
+    if not status.python_supported:
+        missing.append("Python 3.9+")
+    missing.extend(status.missing_generation_modules)
+    if missing:
+        raise LoadError(
+            "macOS 配置生成缺少必需依赖："
+            f"{', '.join(missing)}；请先安装上方 [INSTALL] 项后重试"
+        )
+
+
 def supports_local_ztp_services(os_name: str | None = None) -> bool:
     """Apache/ISC DHCP/infra service management is intentionally Linux-only."""
     return (os_name or runtime_os()).casefold() == "linux"
+
+
+def _flush_operator_output() -> None:
+    """Commit buffered narration before a direct child can emit output."""
+    sys.stdout.flush()
+    sys.stderr.flush()
+
+
+def _run_subprocess(*args, **kwargs):
+    """Run one direct child after preserving transcript causal order."""
+    _flush_operator_output()
+    return subprocess.run(*args, **kwargs)
+
+
+def _popen_subprocess(*args, **kwargs):
+    """Start one direct child after preserving transcript causal order."""
+    _flush_operator_output()
+    return subprocess.Popen(*args, **kwargs)
 
 
 def run(
@@ -243,7 +592,7 @@ def run(
         print(f"[DRY] ({cwd or Path.cwd()}) {display}")
         return
     print(f"[RUN] ({cwd or Path.cwd()}) {display}")
-    result = subprocess.run(
+    result = _run_subprocess(
         command, cwd=cwd,
         **inherited_lock_subprocess_kwargs(inherited_lock_descriptor),
     )
@@ -326,8 +675,52 @@ def project_air_topology_policy(project: Path) -> Path | None:
     path = project / AIR_TOPOLOGY_POLICY_NAME
     if not os.path.lexists(path):
         return None
-    _nonempty_file(path, "AIR 拓扑策略")
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise LoadError(f"无法检查 AIR 拓扑策略：{path.name}: {exc}") from exc
+    if stat.S_ISLNK(metadata.st_mode):
+        raise LoadError(f"AIR 拓扑策略不得为 symlink：{path.name}")
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise LoadError(
+            f"AIR 拓扑策略必须是 single-link regular file：{path.name}"
+        )
+    if metadata.st_size == 0:
+        raise LoadError(f"AIR 拓扑策略大小为 0：{path.name}")
+    if metadata.st_size > 1024 * 1024:
+        raise LoadError(f"AIR 拓扑策略超过 1 MiB：{path.name}")
     return path
+
+
+def project_mini_air_devices(
+    project: Path, value: str | None,
+) -> tuple[Path | None, Path | None]:
+    """Resolve the optional customer mini list and its canonical output."""
+    if value is None:
+        return None, None
+    project_root = project.resolve()
+    source = Path(value)
+    if not source.is_absolute():
+        source = project_root / source
+    if source.parent.resolve() != project_root or source.suffix.casefold() != ".txt":
+        raise LoadError("--mini 设备清单必须是项目根目录下的 .txt 文件")
+    canonical = project_root / MINI_AIR_DEVICES_NAME
+    if source != canonical and not os.path.lexists(source):
+        raise LoadError(f"--mini 设备清单不存在：{source.name}")
+    if os.path.lexists(source):
+        try:
+            metadata = source.lstat()
+        except OSError as exc:
+            raise LoadError(f"无法检查 --mini 设备清单：{source.name}: {exc}") from exc
+        if stat.S_ISLNK(metadata.st_mode):
+            target = os.readlink(source)
+            if source == canonical or Path(target).is_absolute() or target != canonical.name:
+                raise LoadError(
+                    f"--mini 设备清单链接必须相对指向 {canonical.name}"
+                )
+        elif not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise LoadError("--mini 设备清单必须是 single-link regular file")
+    return source, canonical
 
 
 def _nonempty_release_file(path: Path, label: str) -> None:
@@ -364,10 +757,37 @@ def _version_key(value: str) -> tuple[int, ...]:
 
 
 def _version_filename(value: str) -> str:
-    parts = re.findall(r"\d+", value)
-    if not parts:
+    text = str(value or "").strip()
+    match = re.fullmatch(
+        r"[0-9]+(?P<separator>[.-])[0-9]+(?P=separator)[0-9]+",
+        text,
+    )
+    if match is None:
         raise LoadError(f"无法识别版本号：{value!r}")
-    return "-".join(parts)
+    return text.replace(".", "-")
+
+
+_NVOS_LEGACY_IMAGE_RE = re.compile(
+    r"^nvosv(?P<version>[0-9]+-[0-9]+-[0-9]+)amd64\.bin$"
+)
+_NVOS_MODERN_IMAGE_RE = re.compile(
+    r"^nvos-amd64-(?P<version>[0-9]+\.[0-9]+\.[0-9]+)\.bin$"
+)
+
+
+def _image_filename_candidates(expected_name: str) -> tuple[str, ...]:
+    """Return exact accepted aliases, ordered by deterministic preference."""
+    legacy = _NVOS_LEGACY_IMAGE_RE.fullmatch(expected_name)
+    if legacy is not None:
+        version = legacy.group("version")
+        modern = f"nvos-amd64-{version.replace('-', '.')}.bin"
+        return modern, expected_name
+    modern = _NVOS_MODERN_IMAGE_RE.fullmatch(expected_name)
+    if modern is not None:
+        version = modern.group("version")
+        legacy_name = f"nvosv{version.replace('.', '-')}amd64.bin"
+        return expected_name, legacy_name
+    return (expected_name,)
 
 
 def _validate_ztp_prefix(value: object) -> str:
@@ -603,7 +1023,11 @@ def apply_subnet_service_ips(
 
 def load_device_types(
     path: Path, schema_version: int = GLOBAL_SCHEMA_VERSION,
+    switch_scope: str = "all",
 ) -> frozenset[str]:
+    selected_scope = str(switch_scope or "").strip().casefold()
+    if selected_scope not in SWITCH_SCOPE_TYPES:
+        raise LoadError(f"无法识别 switch scope：{switch_scope!r}")
     _nonempty_file(path, "devices_config.csv")
     try:
         with path.open(newline="", encoding="utf-8-sig") as stream:
@@ -654,6 +1078,12 @@ def load_device_types(
                 seen_hostnames.add(hostname_key)
                 if kind not in VALID_TYPES:
                     raise LoadError(f"devices_config.csv 第 {lineno} 行 type={kind!r} 无效")
+                selected_kind = (
+                    selected_scope == "all"
+                    or kind in SWITCH_SCOPE_TYPES[selected_scope]
+                )
+                if not selected_kind:
+                    continue
                 if kind in {"eth", "eth_spx", "spx"} and (
                     not template or template.casefold() in {"na", "none", "null"}
                 ):
@@ -791,7 +1221,7 @@ def validate_pubkey(path: Path) -> None:
         raise LoadError(f"SSH 公钥格式无效：{path.name}")
     keygen = shutil.which("ssh-keygen")
     if keygen:
-        result = subprocess.run([keygen, "-l", "-f", str(path)], capture_output=True, text=True)
+        result = _run_subprocess([keygen, "-l", "-f", str(path)], capture_output=True, text=True)
         if result.returncode != 0:
             raise LoadError(f"ssh-keygen 校验失败 {path.name}：{result.stderr.strip()}")
 
@@ -803,6 +1233,600 @@ def _default_ssh_dir() -> Path:
 MANAGEMENT_PUBKEY_MARKER = ".management-pubkeys"
 LAPTOP_PUBKEY_NAME = "laptop.pub"
 MANAGEMENT_PUBKEY_NAME = "mgmt-server.pub"
+MANAGEMENT_PRIVATE_KEY_NAME = "id_ed25519"
+MANAGEMENT_PUBLIC_KEY_NAME = "id_ed25519.pub"
+MANAGEMENT_KEY_MAX_BYTES = 64 * 1024
+MANAGEMENT_KEYGEN = Path("/usr/bin/ssh-keygen")
+
+
+@dataclass
+class _HeldManagementDirectory:
+    path: Path
+    descriptor: int
+    identity: tuple[int, ...]
+    uid: int
+    gid: int
+    allowed_modes: tuple[int, ...]
+    label: str
+
+    def close(self) -> None:
+        if self.descriptor >= 0:
+            os.close(self.descriptor)
+            self.descriptor = -1
+
+
+@dataclass
+class _HeldManagementLeaf:
+    directory: _HeldManagementDirectory
+    name: str
+    descriptor: int
+    identity: tuple[int, ...]
+    payload: bytes
+    mode: int
+    label: str
+
+    def close(self) -> None:
+        if self.descriptor >= 0:
+            os.close(self.descriptor)
+            self.descriptor = -1
+
+
+@dataclass
+class _HeldManagementPair:
+    directory: _HeldManagementDirectory
+    private: _HeldManagementLeaf
+    public: _HeldManagementLeaf
+    identity: tuple[bytes, bytes]
+
+    def close(self) -> None:
+        self.private.close()
+        self.public.close()
+        self.directory.close()
+
+
+@dataclass(frozen=True)
+class _ManagementCommandResult:
+    returncode: int
+    stdout: bytes
+    stderr: bytes
+
+
+def _management_key_checkpoint(_stage: str) -> None:
+    """Deterministic direct-test checkpoint; production performs no action."""
+
+
+def _terminate_management_command(process: subprocess.Popen[bytes]) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except OSError:
+        try:
+            process.kill()
+        except OSError:
+            pass
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired as exc:
+        try:
+            process.kill()
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired as final:
+            raise LoadError("management ssh-keygen process could not be reaped") from final
+
+
+def _run_bounded_management_command(
+    argv: list[str], *, pass_fds: tuple[int, ...] = (), timeout: float = 10,
+) -> _ManagementCommandResult:
+    if not argv or not argv[0] or any(type(item) is not str for item in argv):
+        raise LoadError("management ssh-keygen argv 不安全")
+    validation_shape = (
+        len(argv) == 6
+        and argv[:5] == [os.fspath(MANAGEMENT_KEYGEN), "-y", "-P", "", "-f"]
+        and argv[5] in {f"/proc/self/fd/{fd}" for fd in pass_fds}
+        | {f"/dev/fd/{fd}" for fd in pass_fds}
+        and len(pass_fds) == 1
+    )
+    generation_shape = (
+        len(argv) == 10
+        and argv[:7] == [
+            os.fspath(MANAGEMENT_KEYGEN), "-q", "-t", "ed25519", "-N", "", "-f",
+        ]
+        and argv[8:] == ["-C", "root@management-server"]
+        and pass_fds == ()
+    )
+    if not (validation_shape or generation_shape):
+        raise LoadError("management ssh-keygen argv 不符合固定 validate/generate schema")
+    process: subprocess.Popen[bytes] | None = None
+    selector: selectors.BaseSelector | None = None
+    owned_streams: list[object] = []
+    streams: dict[int, tuple[object, bytearray]] = {}
+    completed = False
+    try:
+        process = _popen_subprocess(
+            argv,
+            env={
+                "HOME": "/root", "LANG": "C", "LC_ALL": "C",
+                "PATH": "/usr/bin:/bin", "PYTHONNOUSERSITE": "1",
+                "PYTHONDONTWRITEBYTECODE": "1",
+            },
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            close_fds=True,
+            pass_fds=pass_fds,
+            start_new_session=True,
+            bufsize=0,
+        )
+        if process.stdout is None or process.stderr is None:
+            raise LoadError("management ssh-keygen pipe unavailable")
+        owned_streams = [process.stdout, process.stderr]
+        selector = selectors.DefaultSelector()
+        stdout_descriptor = process.stdout.fileno()
+        stderr_descriptor = process.stderr.fileno()
+        os.set_blocking(stdout_descriptor, False)
+        os.set_blocking(stderr_descriptor, False)
+        streams = {
+            stdout_descriptor: (process.stdout, bytearray()),
+            stderr_descriptor: (process.stderr, bytearray()),
+        }
+        for descriptor in streams:
+            selector.register(descriptor, selectors.EVENT_READ)
+        deadline = time.monotonic() + float(timeout)
+        failure = ""
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                failure = "management ssh-keygen timeout"
+                break
+            for key, _mask in selector.select(min(remaining, 0.1)):
+                stream, payload = streams[key.fd]
+                try:
+                    chunk = os.read(
+                        key.fd,
+                        min(16384, MANAGEMENT_KEY_MAX_BYTES + 1 - len(payload)),
+                    )
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    selector.unregister(key.fd)
+                    stream.close()
+                    continue
+                payload.extend(chunk)
+                if len(payload) > MANAGEMENT_KEY_MAX_BYTES:
+                    failure = "management ssh-keygen bounded output exceeded limit"
+                    break
+            if failure:
+                break
+        if failure:
+            raise LoadError(failure)
+        try:
+            returncode = process.wait(timeout=max(0.01, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired as exc:
+            raise LoadError("management ssh-keygen timeout") from exc
+        result = _ManagementCommandResult(
+            returncode=int(returncode),
+            stdout=bytes(streams[stdout_descriptor][1]),
+            stderr=bytes(streams[stderr_descriptor][1]),
+        )
+        completed = True
+        return result
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        raise LoadError(f"management ssh-keygen bounded capture failed：{exc}") from exc
+    finally:
+        try:
+            if process is not None and not completed:
+                _terminate_management_command(process)
+        finally:
+            try:
+                if selector is not None:
+                    selector.close()
+            finally:
+                for stream in owned_streams:
+                    try:
+                        stream.close()
+                    except (OSError, ValueError):
+                        pass
+
+
+def _management_metadata_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_uid,
+        metadata.st_gid,
+        metadata.st_nlink,
+        metadata.st_size,
+        getattr(metadata, "st_mtime_ns", int(metadata.st_mtime * 1_000_000_000)),
+        getattr(metadata, "st_ctime_ns", int(metadata.st_ctime * 1_000_000_000)),
+    )
+
+
+def _management_directory_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_uid,
+        metadata.st_gid,
+        metadata.st_nlink,
+        getattr(metadata, "st_mtime_ns", int(metadata.st_mtime * 1_000_000_000)),
+        getattr(metadata, "st_ctime_ns", int(metadata.st_ctime * 1_000_000_000)),
+    )
+
+
+def _management_directory_flags() -> int:
+    required = ("O_DIRECTORY", "O_NOFOLLOW", "O_CLOEXEC")
+    if any(not hasattr(os, name) for name in required):
+        raise LoadError("当前平台缺少安全打开管理 SSH 目录所需的能力")
+    return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+def _open_management_directory(
+    path: Path, *, label: str, allowed_modes: tuple[int, ...],
+) -> _HeldManagementDirectory:
+    descriptor = -1
+    try:
+        direct = os.lstat(path)
+        if stat.S_ISLNK(direct.st_mode) or not stat.S_ISDIR(direct.st_mode):
+            raise LoadError(f"{label} 必须是非 symlink 的安全 directory")
+        if direct.st_uid != os.geteuid() or direct.st_gid != os.getegid():
+            raise LoadError(f"{label} owner uid/gid 不安全")
+        if stat.S_IMODE(direct.st_mode) not in allowed_modes:
+            expected = "/".join(f"{mode:04o}" for mode in allowed_modes)
+            raise LoadError(f"{label} mode 必须是 {expected}")
+        descriptor = os.open(os.fspath(path), _management_directory_flags())
+        held = os.fstat(descriptor)
+        if _management_directory_identity(direct) != _management_directory_identity(held):
+            raise LoadError(f"{label} identity changed while opening")
+        return _HeldManagementDirectory(
+            path=path,
+            descriptor=descriptor,
+            identity=_management_directory_identity(held),
+            uid=held.st_uid,
+            gid=held.st_gid,
+            allowed_modes=allowed_modes,
+            label=label,
+        )
+    except LoadError:
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise
+    except OSError as exc:
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise LoadError(f"无法安全打开 {label}：{exc}") from exc
+
+
+def _revalidate_management_directory(directory: _HeldManagementDirectory) -> None:
+    try:
+        held = os.fstat(directory.descriptor)
+        rebound = os.lstat(directory.path)
+    except OSError as exc:
+        raise LoadError(f"{directory.label} canonical binding disappeared：{exc}") from exc
+    if (
+        _management_directory_identity(held) != directory.identity
+        or _management_directory_identity(rebound) != directory.identity
+    ):
+        raise LoadError(f"{directory.label} directory identity changed or rebound")
+
+
+def _management_read_bounded(descriptor: int, limit: int, label: str) -> bytes:
+    payload = bytearray()
+    offset = 0
+    while True:
+        try:
+            chunk = os.pread(descriptor, min(8192, limit + 1 - len(payload)), offset)
+        except OSError as exc:
+            raise LoadError(f"无法读取 {label}：{exc}") from exc
+        if not chunk:
+            return bytes(payload)
+        payload.extend(chunk)
+        offset += len(chunk)
+        if len(payload) > limit:
+            raise LoadError(f"{label} exceeds bounded size limit")
+
+
+def _validate_management_leaf_metadata(
+    metadata: os.stat_result, *, label: str, mode: int,
+    uid: int, gid: int,
+) -> None:
+    if not stat.S_ISREG(metadata.st_mode):
+        raise LoadError(f"{label} 必须是 regular file，不能是 symlink/FIFO/special")
+    if metadata.st_nlink != 1:
+        raise LoadError(f"{label} 必须是 single-link file")
+    if metadata.st_uid != uid or metadata.st_gid != gid:
+        raise LoadError(f"{label} owner uid/gid 不安全")
+    if stat.S_IMODE(metadata.st_mode) != mode:
+        raise LoadError(f"{label} mode 必须是 {mode:04o}")
+
+
+def _open_management_leaf(
+    directory: _HeldManagementDirectory,
+    name: str,
+    *,
+    label: str,
+    mode: int,
+    writable: bool = False,
+) -> _HeldManagementLeaf:
+    descriptor = -1
+    required = ("O_NOFOLLOW", "O_NONBLOCK", "O_CLOEXEC")
+    if any(not hasattr(os, item) for item in required):
+        raise LoadError("当前平台缺少安全打开管理 SSH 文件所需的能力")
+    flags = (os.O_RDWR if writable else os.O_RDONLY)
+    flags |= os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    try:
+        direct = os.stat(name, dir_fd=directory.descriptor, follow_symlinks=False)
+        _validate_management_leaf_metadata(
+            direct,
+            label=label,
+            mode=mode,
+            uid=directory.uid,
+            gid=directory.gid,
+        )
+        descriptor = os.open(name, flags, dir_fd=directory.descriptor)
+        held = os.fstat(descriptor)
+        _validate_management_leaf_metadata(
+            held,
+            label=label,
+            mode=mode,
+            uid=directory.uid,
+            gid=directory.gid,
+        )
+        if _management_metadata_identity(direct) != _management_metadata_identity(held):
+            raise LoadError(f"{label} identity changed while opening")
+        payload = _management_read_bounded(descriptor, MANAGEMENT_KEY_MAX_BYTES, label)
+        after = os.fstat(descriptor)
+        rebound = os.stat(name, dir_fd=directory.descriptor, follow_symlinks=False)
+        identity = _management_metadata_identity(held)
+        if (
+            _management_metadata_identity(after) != identity
+            or _management_metadata_identity(rebound) != identity
+        ):
+            raise LoadError(f"{label} changed or rebound while held")
+        return _HeldManagementLeaf(
+            directory=directory,
+            name=name,
+            descriptor=descriptor,
+            identity=identity,
+            payload=payload,
+            mode=mode,
+            label=label,
+        )
+    except LoadError:
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise
+    except OSError as exc:
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise LoadError(f"无法安全打开 {label}：{exc}") from exc
+
+
+def _revalidate_management_leaf(leaf: _HeldManagementLeaf) -> None:
+    try:
+        held = os.fstat(leaf.descriptor)
+        rebound = os.stat(
+            leaf.name,
+            dir_fd=leaf.directory.descriptor,
+            follow_symlinks=False,
+        )
+    except OSError as exc:
+        raise LoadError(f"{leaf.label} canonical binding disappeared：{exc}") from exc
+    if (
+        _management_metadata_identity(held) != leaf.identity
+        or _management_metadata_identity(rebound) != leaf.identity
+        or _management_read_bounded(
+            leaf.descriptor, MANAGEMENT_KEY_MAX_BYTES, leaf.label,
+        ) != leaf.payload
+    ):
+        raise LoadError(f"{leaf.label} changed, drifted, or rebound")
+
+
+def _parse_management_ed25519(payload: bytes, label: str) -> tuple[bytes, bytes]:
+    if not payload or len(payload) > MANAGEMENT_KEY_MAX_BYTES:
+        raise LoadError(f"{label} 为空或过大")
+    if not payload.endswith(b"\n") or payload.endswith(b"\n\n") or b"\r" in payload:
+        raise LoadError(f"{label} 必须是单行 canonical Ed25519 public key")
+    line = payload[:-1]
+    if b"\n" in line or any(byte < 0x20 or byte > 0x7e for byte in line):
+        raise LoadError(f"{label} 必须是单行 canonical Ed25519 public key")
+    fields = line.split(b" ", 2)
+    if len(fields) < 2 or fields[0] != b"ssh-ed25519" or not fields[1]:
+        raise LoadError(f"{label} 必须是 ssh-ed25519 public key")
+    try:
+        blob = base64.b64decode(fields[1], validate=True)
+    except (ValueError, TypeError) as exc:
+        raise LoadError(f"{label} base64 格式无效") from exc
+    expected_prefix = len(b"ssh-ed25519").to_bytes(4, "big") + b"ssh-ed25519"
+    if (
+        not blob.startswith(expected_prefix)
+        or len(blob) != len(expected_prefix) + 4 + 32
+        or int.from_bytes(blob[len(expected_prefix):len(expected_prefix) + 4], "big") != 32
+    ):
+        raise LoadError(f"{label} Ed25519 blob 结构无效")
+    return b"ssh-ed25519", fields[1]
+
+
+def _parse_held_project_public_identity(
+    payload: bytes, label: str,
+) -> tuple[bytes, bytes]:
+    if not payload or len(payload) > MANAGEMENT_KEY_MAX_BYTES:
+        raise LoadError(f"{label} 为空或过大")
+    if not payload.endswith(b"\n") or payload.endswith(b"\n\n") or b"\r" in payload:
+        raise LoadError(f"{label} 必须是单行 canonical SSH public key")
+    line = payload[:-1]
+    if b"\n" in line or any(byte < 0x20 or byte > 0x7e for byte in line):
+        raise LoadError(f"{label} 含有不安全控制字符")
+    fields = line.split(b" ", 2)
+    if len(fields) < 2 or not re.fullmatch(
+        rb"(?:ssh-(?:ed25519|rsa)|ecdsa-sha2-nistp(?:256|384|521)|"
+        rb"sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com)",
+        fields[0],
+    ):
+        raise LoadError(f"{label} SSH public key type 无效")
+    try:
+        blob = base64.b64decode(fields[1], validate=True)
+    except (ValueError, TypeError) as exc:
+        raise LoadError(f"{label} base64 格式无效") from exc
+    offset = 0
+
+    def ssh_string() -> bytes:
+        nonlocal offset
+        if offset + 4 > len(blob):
+            raise LoadError(f"{label} SSH public key blob truncated")
+        size = int.from_bytes(blob[offset:offset + 4], "big")
+        offset += 4
+        if size <= 0 or offset + size > len(blob):
+            raise LoadError(f"{label} SSH public key blob field 无效")
+        value = blob[offset:offset + size]
+        offset += size
+        return value
+
+    if ssh_string() != fields[0]:
+        raise LoadError(f"{label} textual type 与 SSH blob type 不匹配")
+    if fields[0] == b"ssh-ed25519":
+        if len(ssh_string()) != 32:
+            raise LoadError(f"{label} Ed25519 key length 无效")
+    elif fields[0] == b"ssh-rsa":
+        exponent = ssh_string()
+        modulus = ssh_string()
+        if not exponent or not modulus:
+            raise LoadError(f"{label} RSA key fields 无效")
+    elif fields[0].startswith(b"ecdsa-sha2-"):
+        curve = ssh_string()
+        point = ssh_string()
+        if fields[0] != b"ecdsa-sha2-" + curve or not point:
+            raise LoadError(f"{label} ECDSA key fields 无效")
+    elif fields[0] == b"sk-ssh-ed25519@openssh.com":
+        if len(ssh_string()) != 32 or not ssh_string():
+            raise LoadError(f"{label} security-key fields 无效")
+    elif fields[0] == b"sk-ecdsa-sha2-nistp256@openssh.com":
+        if ssh_string() != b"nistp256" or not ssh_string() or not ssh_string():
+            raise LoadError(f"{label} security-key fields 无效")
+    if offset != len(blob):
+        raise LoadError(f"{label} SSH public key blob 含 trailing data")
+    return fields[0], fields[1]
+
+
+def _management_fd_path(descriptor: int) -> str:
+    for root in ("/proc/self/fd", "/dev/fd"):
+        if os.path.isdir(root):
+            return f"{root}/{descriptor}"
+    raise LoadError("当前平台无法把 held management private key 交给 ssh-keygen")
+
+
+def _open_management_pair(ssh_dir: Path) -> _HeldManagementPair:
+    directory = _open_management_directory(
+        ssh_dir, label="管理服务器 SSH 目录", allowed_modes=(0o700,),
+    )
+    private: _HeldManagementLeaf | None = None
+    public: _HeldManagementLeaf | None = None
+    try:
+        present = []
+        for name in (MANAGEMENT_PRIVATE_KEY_NAME, MANAGEMENT_PUBLIC_KEY_NAME):
+            try:
+                os.stat(name, dir_fd=directory.descriptor, follow_symlinks=False)
+            except FileNotFoundError:
+                present.append(False)
+            except OSError as exc:
+                raise LoadError(f"无法检查管理服务器密钥对：{exc}") from exc
+            else:
+                present.append(True)
+        if present == [False, False]:
+            raise LoadError("管理服务器 SSH key 尚未由 host helper prepared")
+        if present[0] != present[1]:
+            raise LoadError("管理服务器 SSH key pair 不完整，未进行自动修复")
+        private = _open_management_leaf(
+            directory,
+            MANAGEMENT_PRIVATE_KEY_NAME,
+            label="管理服务器 private key",
+            mode=0o600,
+        )
+        public = _open_management_leaf(
+            directory,
+            MANAGEMENT_PUBLIC_KEY_NAME,
+            label="管理服务器 public key",
+            mode=0o644,
+        )
+        public_identity = _parse_management_ed25519(public.payload, public.label)
+        if not MANAGEMENT_KEYGEN.is_file():
+            raise LoadError("固定 /usr/bin/ssh-keygen 不存在，无法校验管理服务器 key")
+        result = _run_bounded_management_command(
+            [
+                os.fspath(MANAGEMENT_KEYGEN), "-y", "-P", "", "-f",
+                _management_fd_path(private.descriptor),
+            ],
+            pass_fds=(private.descriptor,),
+        )
+        if result.returncode != 0:
+            raise LoadError("管理服务器 private key 无法用空口令校验或已加密")
+        stdout = bytes(result.stdout)
+        stderr = bytes(result.stderr)
+        if stderr or len(stdout) > MANAGEMENT_KEY_MAX_BYTES:
+            raise LoadError("管理服务器 private key 校验输出不符合 bounded canonical contract")
+        derived_payload = stdout
+        if not derived_payload.endswith(b"\n"):
+            derived_payload += b"\n"
+        derived_identity = _parse_management_ed25519(
+            derived_payload, "管理服务器 derived public key",
+        )
+        if derived_identity != public_identity:
+            raise LoadError("管理服务器公私钥不匹配 mismatch，未覆盖任何文件")
+        _revalidate_management_leaf(private)
+        _revalidate_management_leaf(public)
+        _revalidate_management_directory(directory)
+        return _HeldManagementPair(
+            directory=directory,
+            private=private,
+            public=public,
+            identity=public_identity,
+        )
+    except BaseException:
+        if private is not None:
+            private.close()
+        if public is not None:
+            public.close()
+        directory.close()
+        raise
+
+
+def _attest_management_project_objects(project: Path) -> None:
+    directory = _open_management_directory(
+        project, label="项目 SSH key directory", allowed_modes=(0o700, 0o755),
+    )
+    marker: _HeldManagementLeaf | None = None
+    placeholder: _HeldManagementLeaf | None = None
+    try:
+        marker = _open_management_leaf(
+            directory,
+            MANAGEMENT_PUBKEY_MARKER,
+            label="management marker",
+            mode=0o644,
+        )
+        if marker.payload != b"mgmt-server.pub\n":
+            raise LoadError("management marker 必须 exact 为 mgmt-server.pub\\n")
+        placeholder = _open_management_leaf(
+            directory,
+            MANAGEMENT_PUBKEY_NAME,
+            label="management placeholder",
+            mode=0o644,
+        )
+        if placeholder.payload:
+            _parse_management_ed25519(placeholder.payload, placeholder.label)
+        _revalidate_management_leaf(marker)
+        _revalidate_management_leaf(placeholder)
+        _revalidate_management_directory(directory)
+    finally:
+        if marker is not None:
+            marker.close()
+        if placeholder is not None:
+            placeholder.close()
+        directory.close()
 
 
 def _pubkey_sort_key(path: Path) -> tuple[int, str]:
@@ -825,227 +1849,352 @@ def _public_key_identity(path: Path) -> str:
     return " ".join(fields[:2])
 
 
-def ensure_management_key(ssh_dir: Path, *, dry_run: bool = False) -> Path:
-    """Create or validate a distinct management-host Ed25519 key pair."""
-    private_key = ssh_dir / "id_ed25519"
-    public_key = ssh_dir / "id_ed25519.pub"
-    private_exists = private_key.is_file() and private_key.stat().st_size > 0
-    public_exists = public_key.is_file() and public_key.stat().st_size > 0
-    keygen = shutil.which("ssh-keygen")
-    if not keygen:
-        raise LoadError("未找到 ssh-keygen，无法准备管理服务器 SSH key")
+def _management_pair_presence(ssh_dir: Path) -> tuple[bool, bool]:
+    try:
+        directory = _open_management_directory(
+            ssh_dir, label="管理服务器 SSH 目录", allowed_modes=(0o700,),
+        )
+    except FileNotFoundError:
+        return False, False
+    except LoadError:
+        raise
+    try:
+        result = []
+        for name in (MANAGEMENT_PRIVATE_KEY_NAME, MANAGEMENT_PUBLIC_KEY_NAME):
+            try:
+                os.stat(name, dir_fd=directory.descriptor, follow_symlinks=False)
+            except FileNotFoundError:
+                result.append(False)
+            except OSError as exc:
+                raise LoadError(f"无法检查管理服务器 key pair：{exc}") from exc
+            else:
+                result.append(True)
+        _revalidate_management_directory(directory)
+        return result[0], result[1]
+    finally:
+        directory.close()
 
-    if not private_exists and not public_exists:
-        if dry_run:
-            raise LoadError(
-                f"管理服务器密钥对不存在：{private_key}；dry-run 不会自动生成，"
-                "请先正式执行一次 load 或手工运行 ssh-keygen"
-            )
-        ssh_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        ssh_dir.chmod(0o700)
-        result = subprocess.run(
+
+def _generate_native_management_key(ssh_dir: Path) -> None:
+    private_key = ssh_dir / MANAGEMENT_PRIVATE_KEY_NAME
+    public_key = ssh_dir / MANAGEMENT_PUBLIC_KEY_NAME
+    created_directory = False
+    try:
+        os.lstat(ssh_dir)
+    except FileNotFoundError:
+        try:
+            ssh_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
+            created_directory = True
+        except OSError as exc:
+            raise LoadError(f"无法创建管理服务器 SSH 目录：{exc}") from exc
+    directory = _open_management_directory(
+        ssh_dir, label="管理服务器 SSH 目录", allowed_modes=(0o700,),
+    )
+    directory.close()
+    if not MANAGEMENT_KEYGEN.is_file():
+        raise LoadError("固定 /usr/bin/ssh-keygen 不存在，无法生成管理服务器 key")
+    try:
+        result = _run_bounded_management_command(
             [
-                keygen, "-q", "-t", "ed25519", "-N", "", "-f",
-                str(private_key), "-C", f"{getpass.getuser()}@management-server",
+                os.fspath(MANAGEMENT_KEYGEN), "-q", "-t", "ed25519", "-N", "",
+                "-f", os.fspath(private_key), "-C", "root@management-server",
             ],
-            capture_output=True, text=True,
         )
         if result.returncode != 0:
-            raise LoadError(f"自动生成管理服务器 SSH key 失败：{result.stderr.strip()}")
-        private_key.chmod(0o600)
-        public_key.chmod(0o644)
-        print(f"[KEY] 已生成管理服务器专用 SSH key：{public_key}")
-        private_exists = public_exists = True
+            raise LoadError("自动生成管理服务器 SSH key 失败")
+        os.chmod(private_key, 0o600, follow_symlinks=False)
+        os.chmod(public_key, 0o644, follow_symlinks=False)
+    except BaseException:
+        for path in (private_key, public_key):
+            try:
+                metadata = os.lstat(path)
+            except OSError:
+                continue
+            if stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+        if created_directory:
+            try:
+                ssh_dir.rmdir()
+            except OSError:
+                pass
+        raise
 
-    if private_exists and not public_exists:
+
+def ensure_management_key(
+    ssh_dir: Path, *, dry_run: bool = False, allow_generation: bool,
+) -> Path:
+    """Validate a held Ed25519 pair; only the native caller may generate it."""
+    if type(allow_generation) is not bool:
+        raise LoadError("allow_generation 必须是调用者提供的 literal bool")
+    try:
+        private_exists, public_exists = _management_pair_presence(ssh_dir)
+    except LoadError as exc:
+        if "无法安全打开" in str(exc) and not ssh_dir.exists():
+            private_exists = public_exists = False
+        else:
+            raise
+    if private_exists != public_exists:
+        raise LoadError("管理服务器 SSH key pair 不完整，未自动修复")
+    if not private_exists:
+        if not allow_generation:
+            raise LoadError("管理服务器 SSH key 尚未由 host helper prepared；Supervisor 不会生成")
         if dry_run:
-            raise LoadError(
-                f"管理服务器私钥存在但公钥缺失：{public_key}；dry-run 不会修复"
-            )
-        result = subprocess.run(
-            [keygen, "-y", "-P", "", "-f", str(private_key)],
-            capture_output=True, text=True,
-        )
-        if result.returncode != 0 or not result.stdout.strip():
-            raise LoadError(
-                f"无法从管理服务器私钥恢复公钥：{result.stderr.strip()}"
-            )
-        public_key.write_text(
-            result.stdout.strip() + f" {getpass.getuser()}@management-server\n",
-            encoding="utf-8",
-        )
-        public_key.chmod(0o644)
-        print(f"[KEY] 已从现有管理服务器私钥恢复公钥：{public_key}")
-        public_exists = True
-
-    if public_exists and not private_exists:
-        raise LoadError(
-            f"管理服务器公钥存在但私钥缺失：{private_key}；"
-            "为避免生成不匹配的密钥对，未覆盖现有公钥"
-        )
-
-    validate_pubkey(public_key)
-    derived = subprocess.run(
-        [keygen, "-y", "-P", "", "-f", str(private_key)],
-        capture_output=True, text=True,
-    )
-    if derived.returncode != 0 or len(derived.stdout.split()) < 2:
-        raise LoadError(
-            f"无法校验管理服务器私钥：{private_key}：{derived.stderr.strip()}"
-        )
-    public_fields = public_key.read_text(encoding="utf-8").split()
-    derived_fields = derived.stdout.split()
-    if public_fields[:2] != derived_fields[:2]:
-        raise LoadError(
-            f"管理服务器公私钥不匹配：{private_key} / {public_key}；"
-            "为避免失去交换机访问权限，未覆盖任何文件"
-        )
-    return public_key
+            raise LoadError("管理服务器 SSH key 不存在；dry-run 不会生成")
+        _generate_native_management_key(ssh_dir)
+        print(f"[KEY] 已生成管理服务器专用 SSH key：{ssh_dir / MANAGEMENT_PUBLIC_KEY_NAME}")
+    pair = _open_management_pair(ssh_dir)
+    try:
+        return ssh_dir / MANAGEMENT_PUBLIC_KEY_NAME
+    finally:
+        pair.close()
 
 
-def prepare_pubkeys(
-    project: Path, *, ssh_dir: Path, dry_run: bool = False,
-    inject_management_key: bool = True,
+def _prepare_pubkeys_without_management_injection(
+    project: Path, *, dry_run: bool,
 ) -> tuple[Path, ...]:
+    """Preserve the configuration-only behavior on platforms without services."""
     pubs = sorted(project.glob("*.pub"))
     marker = project / MANAGEMENT_PUBKEY_MARKER
     managed_names = {
         line.strip() for line in marker.read_text(encoding="utf-8").splitlines()
         if line.strip().endswith(".pub")
     } if marker.is_file() else set()
-    canonical_management = project / MANAGEMENT_PUBKEY_NAME
-    legacy_managed = {
-        name for name in managed_names if name != MANAGEMENT_PUBKEY_NAME
-    }
-    if canonical_management.exists() and legacy_managed:
-        populated_legacy = [
-            project / name for name in legacy_managed
-            if (project / name).is_file() and (project / name).stat().st_size > 0
-        ]
-        if populated_legacy:
-            warn(
-                "检测到已有内容的旧管理公钥，未自动改名："
-                + ", ".join(item.name for item in populated_legacy)
-                + f"；请确认后手工迁移到 {MANAGEMENT_PUBKEY_NAME}"
-            )
-        else:
-            managed_names = {MANAGEMENT_PUBKEY_NAME}
-            if dry_run:
-                print(
-                    f"[DRY] 将管理公钥 marker 从 {','.join(sorted(legacy_managed))} "
-                    f"迁移到 {MANAGEMENT_PUBKEY_NAME}"
-                )
-            else:
-                marker.write_text(MANAGEMENT_PUBKEY_NAME + "\n", encoding="utf-8")
-                marker.chmod(0o644)
-                print(
-                    f"[KEY] 已把空的旧管理公钥 marker 迁移到 {MANAGEMENT_PUBKEY_NAME}"
-                )
-    # A downloaded package deliberately omits the management-server key but
-    # retains this marker, so recreate its placeholder before resolving keys.
-    for name in managed_names:
-        candidate = project / name
-        if not candidate.exists() and not dry_run:
-            candidate.touch()
-            pubs.append(candidate)
-    pubs = sorted(set(pubs))
     empty = [item for item in pubs if not item.is_file() or item.stat().st_size == 0]
     static = [item for item in pubs if item not in empty and item.name not in managed_names]
     if not static:
-        raise LoadError(
-            "项目必须至少包含一个非空 *.pub（例如模板中的电脑公钥）"
-        )
+        raise LoadError("项目必须至少包含一个非空 *.pub（例如模板中的电脑公钥）")
     for item in static:
         validate_pubkey(item)
-
-    if not inject_management_key:
-        planned_management = sorted(
-            project / name for name in managed_names
-            if (project / name).is_file()
-        )
-        if not planned_management:
-            planned_management = sorted(empty)
-        preserved = sorted(
-            item for item in planned_management if item.stat().st_size > 0
-        )
-        for item in preserved:
-            validate_pubkey(item)
-        static_identities = {_public_key_identity(item) for item in static}
-        if any(_public_key_identity(item) in static_identities for item in preserved):
-            raise LoadError("项目中的管理服务器公钥与项目电脑公钥相同")
-        if preserved:
-            print(
-                "[SKIP] 当前平台仅准备配置，保留项目中已标记的管理服务器公钥："
-                + ", ".join(item.name for item in preserved)
-            )
-        else:
-            warn(
-                "当前平台仅准备配置，项目中的管理服务器公钥尚未注入；"
-                "保留计划公钥路径但不发布空文件。请在 Linux 管理服务器正式 load 时注入管理 key"
-            )
-        valid = static + planned_management
-        if len(valid) < 2:
-            raise LoadError(
-                "ZTP 需要一个电脑公钥和一个管理服务器公钥占位路径；"
-                f"请在项目中增加空的 {MANAGEMENT_PUBKEY_NAME}"
-            )
-        return tuple(sorted(valid, key=_pubkey_sort_key))
-
-    managed_placeholders = sorted(
-        {project / name for name in managed_names} if managed_names else set(empty)
+    planned_management = sorted(
+        project / name for name in managed_names if (project / name).is_file()
     )
-    if not managed_placeholders:
-        raise LoadError(
-            "项目必须包含一个空 *.pub 占位文件，用于注入管理服务器公钥"
-        )
+    if not planned_management:
+        planned_management = sorted(empty)
+    preserved = sorted(item for item in planned_management if item.stat().st_size > 0)
+    for item in preserved:
+        validate_pubkey(item)
     static_identities = {_public_key_identity(item) for item in static}
-    empty_managed = [
-        item for item in managed_placeholders
-        if not item.is_file() or item.stat().st_size == 0
-    ]
-    management_key = None
-    if empty_managed:
-        management_key = ensure_management_key(ssh_dir, dry_run=dry_run)
-        if _public_key_identity(management_key) in static_identities:
-            raise LoadError("管理服务器公钥与项目电脑公钥相同，无法保证两个独立 key")
-    for placeholder in managed_placeholders:
-        if placeholder.is_file() and placeholder.stat().st_size > 0:
-            validate_pubkey(placeholder)
-            if _public_key_identity(placeholder) in static_identities:
-                raise LoadError("管理服务器公钥与项目电脑公钥相同，无法保证两个独立 key")
-            print(f"[SKIP] 管理服务器公钥已存在，不覆盖：{placeholder.name}")
-            continue
-        assert management_key is not None
-        if dry_run:
-            print(f"[DRY] 将注入管理服务器公钥：{management_key} → {placeholder}")
-            continue
-        shutil.copy2(management_key, placeholder)
-        placeholder.chmod(0o644)
-        print(f"[KEY] 已注入管理服务器公钥：{placeholder.name}")
-    if not dry_run:
-        marker.write_text(
-            "".join(f"{item.name}\n" for item in managed_placeholders), encoding="utf-8"
+    if any(_public_key_identity(item) in static_identities for item in preserved):
+        raise LoadError("项目中的管理服务器公钥与项目电脑公钥相同")
+    if preserved:
+        print(
+            "[SKIP] 当前平台仅准备配置，保留项目中已标记的管理服务器公钥："
+            + ", ".join(item.name for item in preserved)
         )
-        marker.chmod(0o644)
-    valid = static + managed_placeholders
-    for item in valid:
-        if not dry_run:
-            validate_pubkey(item)
-    if not valid:
-        raise LoadError("项目没有合法 SSH 公钥")
-    preferred = sorted(valid, key=_pubkey_sort_key)
-    return tuple(preferred)
+    else:
+        warn(
+            "当前平台仅准备配置，项目中的管理服务器公钥尚未注入；"
+            "保留计划公钥路径但不发布空文件。请在 Linux 管理服务器正式 load 时注入管理 key"
+        )
+    valid = static + planned_management
+    if len(valid) < 2:
+        raise LoadError(
+            "ZTP 需要一个电脑公钥和一个管理服务器公钥占位路径；"
+            f"请在项目中增加空的 {MANAGEMENT_PUBKEY_NAME}"
+        )
+    return tuple(sorted(valid, key=_pubkey_sort_key))
 
 
-def expected_images(settings: GlobalSettings, device_types: frozenset[str]) -> dict[str, str]:
+def prepare_pubkeys(
+    project: Path, *, ssh_dir: Path, dry_run: bool = False,
+    inject_management_key: bool = True,
+    allow_management_key_generation: bool,
+) -> tuple[Path, ...]:
+    if type(allow_management_key_generation) is not bool:
+        raise LoadError("allow_management_key_generation 必须是 literal bool")
+    if not inject_management_key:
+        return _prepare_pubkeys_without_management_injection(project, dry_run=dry_run)
+
+    project_directory = _open_management_directory(
+        project, label="项目 SSH key directory", allowed_modes=(0o700, 0o755),
+    )
+    marker: _HeldManagementLeaf | None = None
+    placeholder: _HeldManagementLeaf | None = None
+    pair: _HeldManagementPair | None = None
+    static_leaves: list[_HeldManagementLeaf] = []
+    try:
+        marker = _open_management_leaf(
+            project_directory,
+            MANAGEMENT_PUBKEY_MARKER,
+            label="management marker",
+            mode=0o644,
+        )
+        if marker.payload != b"mgmt-server.pub\n":
+            raise LoadError("management marker 必须 exact 为 mgmt-server.pub\\n")
+        placeholder = _open_management_leaf(
+            project_directory,
+            MANAGEMENT_PUBKEY_NAME,
+            label="management placeholder",
+            mode=0o644,
+            writable=True,
+        )
+        placeholder_identity = None
+        if placeholder.payload:
+            placeholder_identity = _parse_management_ed25519(
+                placeholder.payload, placeholder.label,
+            )
+        pub_names = sorted(
+            name for name in os.listdir(project_directory.descriptor)
+            if name.endswith(".pub") and name != MANAGEMENT_PUBKEY_NAME
+        )
+        if not pub_names:
+            raise LoadError("项目必须至少包含一个非空 *.pub（例如模板中的电脑公钥）")
+        for name in pub_names:
+            static_leaves.append(_open_management_leaf(
+                project_directory,
+                name,
+                label=f"项目公钥 {name}",
+                mode=0o644,
+            ))
+        static = [project / leaf.name for leaf in static_leaves]
+        static_identities = {
+            _parse_held_project_public_identity(leaf.payload, leaf.label)
+            for leaf in static_leaves
+        }
+
+        ensure_management_key(
+            ssh_dir,
+            dry_run=dry_run,
+            allow_generation=allow_management_key_generation,
+        )
+        pair = _open_management_pair(ssh_dir)
+        if pair.identity in static_identities:
+            raise LoadError("管理服务器公钥与项目电脑公钥相同，无法保证两个独立 key")
+        if placeholder_identity is not None:
+            if placeholder_identity != pair.identity:
+                raise LoadError("项目管理服务器公钥与 prepared service key 不匹配 mismatch")
+            _revalidate_management_leaf(marker)
+            _revalidate_management_leaf(placeholder)
+            for leaf in static_leaves:
+                _revalidate_management_leaf(leaf)
+            _revalidate_management_leaf(pair.private)
+            _revalidate_management_leaf(pair.public)
+            _revalidate_management_directory(pair.directory)
+            _revalidate_management_directory(project_directory)
+            print(f"[SKIP] 管理服务器公钥已存在且匹配，不覆盖：{placeholder.name}")
+            return tuple(sorted(static + [project / MANAGEMENT_PUBKEY_NAME], key=_pubkey_sort_key))
+
+        _management_key_checkpoint("service-public-held")
+        _revalidate_management_leaf(pair.private)
+        _revalidate_management_leaf(pair.public)
+        _revalidate_management_directory(pair.directory)
+        _management_key_checkpoint("project-placeholder-held")
+        _revalidate_management_leaf(marker)
+        _revalidate_management_leaf(placeholder)
+        for leaf in static_leaves:
+            _revalidate_management_leaf(leaf)
+        _revalidate_management_directory(project_directory)
+        _revalidate_management_leaf(pair.private)
+        _revalidate_management_leaf(pair.public)
+        _revalidate_management_directory(pair.directory)
+        if dry_run:
+            print(f"[DRY] 将注入 prepared service management public key → {placeholder.name}")
+            return tuple(sorted(static + [project / MANAGEMENT_PUBKEY_NAME], key=_pubkey_sort_key))
+        try:
+            os.ftruncate(placeholder.descriptor, 0)
+            written = 0
+            while written < len(pair.public.payload):
+                count = os.pwrite(
+                    placeholder.descriptor, pair.public.payload[written:], written,
+                )
+                if count <= 0:
+                    raise OSError("short management public-key write")
+                written += count
+            os.ftruncate(placeholder.descriptor, len(pair.public.payload))
+            os.fsync(placeholder.descriptor)
+        except OSError as exc:
+            raise LoadError(f"写入 management placeholder 失败：{exc}") from exc
+        _management_key_checkpoint("project-management-published")
+        try:
+            held = os.fstat(placeholder.descriptor)
+            rebound = os.stat(
+                placeholder.name,
+                dir_fd=project_directory.descriptor,
+                follow_symlinks=False,
+            )
+        except OSError as exc:
+            raise LoadError(f"management placeholder post-write revalidation 失败：{exc}") from exc
+        _validate_management_leaf_metadata(
+            held,
+            label=placeholder.label,
+            mode=0o644,
+            uid=project_directory.uid,
+            gid=project_directory.gid,
+        )
+        if (
+            (held.st_dev, held.st_ino) != (placeholder.identity[0], placeholder.identity[1])
+            or _management_metadata_identity(held) != _management_metadata_identity(rebound)
+            or _management_read_bounded(
+                placeholder.descriptor, MANAGEMENT_KEY_MAX_BYTES, placeholder.label,
+            ) != pair.public.payload
+        ):
+            raise LoadError("management placeholder changed or rebound after publication")
+        _revalidate_management_leaf(marker)
+        for leaf in static_leaves:
+            _revalidate_management_leaf(leaf)
+        _revalidate_management_leaf(pair.private)
+        _revalidate_management_leaf(pair.public)
+        _revalidate_management_directory(pair.directory)
+        _revalidate_management_directory(project_directory)
+        print(f"[KEY] 已注入 prepared service management public key：{placeholder.name}")
+        return tuple(sorted(static + [project / MANAGEMENT_PUBKEY_NAME], key=_pubkey_sort_key))
+    finally:
+        if pair is not None:
+            pair.close()
+        if marker is not None:
+            marker.close()
+        if placeholder is not None:
+            placeholder.close()
+        for leaf in static_leaves:
+            leaf.close()
+        project_directory.close()
+
+
+SWITCH_SCOPE_TYPES = {
+    "all": frozenset({"eth", "eth_spx", "spx", "air", "ib", "nvl"}),
+    "eth": frozenset({"eth", "eth_spx", "spx", "air"}),
+    "ib": frozenset({"ib"}),
+    "nvl": frozenset({"nvl"}),
+}
+
+
+def filter_device_types_for_switch_scope(
+    device_types: frozenset[str] | set[str], switch_scope: str,
+) -> frozenset[str]:
+    """Return the exact platform family selected for this release."""
+    selected = str(switch_scope or "").strip().casefold()
+    allowed = SWITCH_SCOPE_TYPES.get(selected)
+    if allowed is None:
+        raise LoadError(f"无法识别 switch scope：{switch_scope!r}")
+    return frozenset(str(item).casefold() for item in device_types) & allowed
+
+
+def expected_images(
+    settings: GlobalSettings, device_types: frozenset[str], *,
+    deployment_scope: str = "all", switch_scope: str = "all",
+) -> dict[str, str]:
+    if deployment_scope == "air":
+        image_device_types = frozenset({"eth"})
+    elif deployment_scope == "prod":
+        image_device_types = device_types - {"air"}
+    elif deployment_scope == "all":
+        image_device_types = device_types | ({"eth"} if "air" in device_types else set())
+    else:
+        raise LoadError(f"无法识别 deployment scope：{deployment_scope!r}")
+    image_device_types = filter_device_types_for_switch_scope(
+        image_device_types, switch_scope,
+    )
     expected: dict[str, str] = {}
-    if device_types & {"eth", "eth_spx", "spx"}:
+    if image_device_types & {"eth", "eth_spx", "spx"}:
         version = settings.versions.get("eth")
         if not version:
             raise LoadError("devices CSV 有 eth/eth_spx/spx，但 global 缺少 switches.eth.version")
         expected["eth"] = f"cumulus-linux-{version}-mlx-amd64.bin"
     for kind in ("ib", "nvl"):
-        if kind not in device_types:
+        if kind not in image_device_types:
             continue
         version = settings.versions.get(kind)
         if not version:
@@ -1058,11 +2207,33 @@ def expected_images(settings: GlobalSettings, device_types: frozenset[str]) -> d
 def validate_image(path: Path, expected_name: str) -> None:
     if path.name != expected_name:
         raise LoadError(f"镜像 {path.name} 与 global 期望 {expected_name} 不一致")
-    if path.stat().st_size < 1024 * 1024:
-        raise LoadError(f"镜像过小或为空：{path}（{path.stat().st_size} 字节）")
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise LoadError(f"无法读取镜像：{path}: {exc}") from exc
+    if not stat.S_ISREG(metadata.st_mode):
+        raise LoadError(f"镜像必须是普通文件，不允许符号链接或其他文件类型：{path}")
+    if metadata.st_size < 1024 * 1024:
+        raise LoadError(f"镜像过小或为空：{path}（{metadata.st_size} 字节）")
     with path.open("rb") as stream:
         if stream.read(9) != b"#!/bin/sh":
             raise LoadError(f"镜像头无效（预期 self-extracting shell）：{path}")
+
+
+def _image_has_payload(path: Path, expected_name: str) -> bool:
+    """Return whether an exact candidate is populated; reject unsafe path types."""
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise LoadError(f"无法检查镜像候选：{path}: {exc}") from exc
+    if not stat.S_ISREG(metadata.st_mode):
+        raise LoadError(f"镜像必须是普通文件，不允许符号链接或其他文件类型：{path}")
+    if metadata.st_size == 0:
+        return False
+    validate_image(path, expected_name)
+    return True
 
 
 def _sha256(path: Path) -> str:
@@ -1073,22 +2244,513 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _stable_regular_bytes(
+    path: Path, label: str, *, maximum_size: int,
+    required_uid: int | None = None, exact_mode: int | None = None,
+) -> tuple[bytes, os.stat_result]:
+    """Read one trust anchor without following or racing its pathname."""
+    descriptor = -1
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+        before = os.fstat(descriptor)
+        direct = os.lstat(path)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or before.st_size <= 0
+            or before.st_size > maximum_size
+            or before.st_mode & 0o022
+            or (required_uid is not None and before.st_uid != required_uid)
+            or (exact_mode is not None and stat.S_IMODE(before.st_mode) != exact_mode)
+            or (before.st_dev, before.st_ino) != (direct.st_dev, direct.st_ino)
+        ):
+            raise LoadError(f"{label} 必须是安全的 single-link 普通文件：{path}")
+        remaining = before.st_size
+        blocks: list[bytes] = []
+        while remaining:
+            block = os.read(descriptor, min(remaining, 4 * 1024 * 1024))
+            if not block:
+                raise LoadError(f"{label} 在读取时被截断：{path}")
+            blocks.append(block)
+            remaining -= len(block)
+        if os.read(descriptor, 1):
+            raise LoadError(f"{label} 在读取时增长：{path}")
+        after = os.fstat(descriptor)
+        current = os.lstat(path)
+        identity_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if any(
+            getattr(before, field) != getattr(after, field)
+            for field in identity_fields
+        ) or (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino):
+            raise LoadError(f"{label} 在读取期间发生变化：{path}")
+        return b"".join(blocks), before
+    except OSError as exc:
+        raise LoadError(f"无法安全读取{label}：{path}: {exc}") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _stable_regular_identity(
+    path: Path, label: str, *, maximum_size: int | None = None,
+    required_uid: int | None = None, exact_mode: int | None = None,
+) -> dict[str, object]:
+    """Hash a regular file through one stable descriptor."""
+    descriptor = -1
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+        before = os.fstat(descriptor)
+        direct = os.lstat(path)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or before.st_size <= 0
+            or before.st_mode & 0o022
+            or (maximum_size is not None and before.st_size > maximum_size)
+            or (required_uid is not None and before.st_uid != required_uid)
+            or (exact_mode is not None and stat.S_IMODE(before.st_mode) != exact_mode)
+            or (before.st_dev, before.st_ino) != (direct.st_dev, direct.st_ino)
+        ):
+            raise LoadError(f"{label} 必须是安全的 single-link 普通文件：{path}")
+        digest = hashlib.sha256()
+        total = 0
+        while True:
+            block = os.read(descriptor, 4 * 1024 * 1024)
+            if not block:
+                break
+            digest.update(block)
+            total += len(block)
+        after = os.fstat(descriptor)
+        current = os.lstat(path)
+        identity_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if (
+            total != before.st_size
+            or any(
+                getattr(before, field) != getattr(after, field)
+                for field in identity_fields
+            )
+            or (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            raise LoadError(f"{label} 在读取期间发生变化：{path}")
+        return {"sha256": digest.hexdigest(), "size": before.st_size}
+    except OSError as exc:
+        raise LoadError(f"无法安全读取{label}：{path}: {exc}") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _reject_duplicate_receipt_keys(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise LoadError(f"共享制品 receipt 重复 JSON key：{key}")
+        value[key] = item
+    return value
+
+
+def _shared_receipt_target(value: object) -> str:
+    if not isinstance(value, str) or not value or "\\" in value:
+        raise LoadError("共享制品 receipt target 非法")
+    parts = PurePosixPath(value).parts
+    if (
+        PurePosixPath(value).is_absolute()
+        or not parts
+        or parts[0] not in {"image", "apps", "firmware"}
+        or any(part in {"", ".", ".."} for part in parts)
+        or "/".join(parts) != value
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise LoadError("共享制品 receipt target 非法")
+    return value
+
+
+def _parse_shared_artifact_receipt(payload: bytes) -> dict[str, object]:
+    try:
+        value = json.loads(
+            payload.decode("ascii"), object_pairs_hook=_reject_duplicate_receipt_keys,
+        )
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise LoadError(f"共享制品 receipt JSON 非法：{exc}") from exc
+    expected = {
+        "archive_sha256", "artifact_type", "artifacts", "metadata_sha256",
+        "project", "schema_version", "selection",
+    }
+    digest_pattern = re.compile(r"^[0-9a-f]{64}$")
+    if (
+        not isinstance(value, dict)
+        or set(value) != expected
+        or value.get("artifact_type") != "http-ztp-shared-artifact-receipt"
+        or type(value.get("schema_version")) is not int
+        or value.get("schema_version") != 1
+        or not isinstance(value.get("project"), str)
+        or not value["project"]
+        or "/" in value["project"]
+        or "\\" in value["project"]
+        or any(
+            ord(character) < 32 or ord(character) == 127
+            for character in value["project"]
+        )
+        or not isinstance(value.get("archive_sha256"), str)
+        or not digest_pattern.fullmatch(value["archive_sha256"])
+        or not isinstance(value.get("metadata_sha256"), str)
+        or not digest_pattern.fullmatch(value["metadata_sha256"])
+        or not isinstance(value.get("selection"), dict)
+        or not isinstance(value.get("artifacts"), list)
+        or not value["artifacts"]
+        or len(value["artifacts"]) > SHARED_ARTIFACT_RECEIPT_MAX_ENTRIES
+    ):
+        raise LoadError("共享制品 receipt schema 非法")
+    selection = value["selection"]
+    if (
+        set(selection) != {
+            "deployment_scope", "inputs", "mini", "mini_input",
+            "switch_scope", "upgrade_policy",
+        }
+        or selection.get("deployment_scope") not in {"all", "prod", "air"}
+        or selection.get("switch_scope") not in {"all", "eth", "ib", "nvl"}
+        or selection.get("upgrade_policy") not in {"enabled", "disabled"}
+        or not isinstance(selection.get("mini"), bool)
+        or selection.get("mini_input") is not None
+        and not isinstance(selection.get("mini_input"), str)
+        or not isinstance(selection.get("inputs"), dict)
+        or len(selection["inputs"]) not in {2, 3}
+    ):
+        raise LoadError("共享制品 receipt selection 非法")
+    for name, identity in selection["inputs"].items():
+        if (
+            not isinstance(name, str) or not name
+            or "/" in name or "\\" in name
+            or any(
+                ord(character) < 32 or ord(character) == 127
+                for character in name
+            )
+            or not isinstance(identity, dict)
+            or set(identity) != {"sha256", "size"}
+            or not isinstance(identity.get("sha256"), str)
+            or not digest_pattern.fullmatch(identity["sha256"])
+            or type(identity.get("size")) is not int
+            or identity["size"] <= 0
+        ):
+            raise LoadError("共享制品 receipt 输入身份非法")
+    base_inputs = {"01-global.yaml", "02-devices_config.csv"}
+    if selection["mini"]:
+        mini_name = selection["mini_input"]
+        if (
+            selection["deployment_scope"] != "air"
+            or selection["switch_scope"] != "eth"
+            or not isinstance(mini_name, str)
+            or not mini_name
+            or "/" in mini_name or "\\" in mini_name
+            or set(selection["inputs"]) != base_inputs | {mini_name}
+        ):
+            raise LoadError("共享制品 receipt mini selection 非法")
+    elif (
+        selection["mini_input"] is not None
+        or set(selection["inputs"]) != base_inputs
+    ):
+        raise LoadError("共享制品 receipt 输入集合非法")
+    if (
+        selection["deployment_scope"] == "air"
+        and selection["switch_scope"] != "eth"
+    ):
+        raise LoadError("共享制品 receipt AIR 范围必须选择 eth")
+    seen_targets: set[str] = set()
+    seen_families: set[str] = set()
+    allowed_families = (
+        {"eth", "ib", "nvl"}
+        if selection["switch_scope"] == "all"
+        else {selection["switch_scope"]}
+    )
+    apps_platforms = {
+        "ubuntu-22.04/amd64", "ubuntu-22.04/arm64",
+        "ubuntu-24.04/amd64", "ubuntu-24.04/arm64",
+    }
+    for artifact in value["artifacts"]:
+        if (
+            not isinstance(artifact, dict)
+            or set(artifact) != {
+                "consumers", "kind", "platform", "sha256", "size", "target",
+            }
+            or artifact.get("kind") not in {"switch-image", "apps", "firmware"}
+            or not isinstance(artifact.get("consumers"), list)
+            or not isinstance(artifact.get("sha256"), str)
+            or not digest_pattern.fullmatch(artifact["sha256"])
+            or type(artifact.get("size")) is not int
+            or artifact["size"] <= 0
+            or artifact["size"] > SHARED_ARTIFACT_MAX_BYTES
+        ):
+            raise LoadError("共享制品 receipt artifact 非法")
+        target = _shared_receipt_target(artifact.get("target"))
+        if target in seen_targets:
+            raise LoadError("共享制品 receipt 包含重复 target")
+        seen_targets.add(target)
+        consumers = []
+        for consumer in artifact["consumers"]:
+            if (
+                not isinstance(consumer, dict)
+                or set(consumer) != {"family", "version"}
+                or consumer.get("family") not in {"eth", "ib", "nvl"}
+                or not isinstance(consumer.get("version"), str)
+                or not re.fullmatch(
+                    r"[0-9]+(?P<separator>[.-])[0-9]+(?P=separator)[0-9]+",
+                    consumer["version"],
+                )
+            ):
+                raise LoadError("共享制品 receipt consumer/版本非法")
+            consumers.append((consumer["family"], consumer["version"]))
+        if consumers != sorted(set(consumers)):
+            raise LoadError("共享制品 receipt consumer 必须排序且不可重复")
+        if artifact["kind"] == "switch-image" and (
+            not consumers or not target.startswith("image/")
+            or artifact.get("platform") is not None
+        ):
+            raise LoadError("共享制品 receipt switch-image 非法")
+        target_parts = PurePosixPath(target).parts
+        if artifact["kind"] == "switch-image":
+            if len(target_parts) != 2:
+                raise LoadError("共享制品 receipt switch-image target 非法")
+            for family, version in consumers:
+                normalized = version.replace(".", "-")
+                accepted = (
+                    {f"cumulus-linux-{version}-mlx-amd64.bin"}
+                    if family == "eth" else {
+                        f"nvosv{normalized}amd64.bin",
+                        f"nvos-amd64-{normalized.replace('-', '.')}.bin",
+                    }
+                )
+                if target_parts[1] not in accepted:
+                    raise LoadError("共享制品 receipt 镜像文件名与 consumer/版本不一致")
+                if family not in allowed_families or family in seen_families:
+                    raise LoadError("共享制品 receipt consumer 与 switch scope 冲突")
+                seen_families.add(family)
+        elif consumers:
+            raise LoadError("共享制品 receipt 非镜像 artifact 不得声明 consumer")
+        elif artifact["kind"] == "apps":
+            platform_name = artifact.get("platform")
+            if (
+                target_parts[0] != "apps"
+                or len(target_parts) < 4
+                or platform_name not in apps_platforms
+                or "/".join(target_parts[1:3]) != platform_name
+            ):
+                raise LoadError("共享制品 receipt apps artifact 非法")
+        elif (
+            target_parts[0] != "firmware"
+            or len(target_parts) < 2
+            or artifact.get("platform") is not None
+        ):
+            raise LoadError("共享制品 receipt firmware artifact 非法")
+    if selection["upgrade_policy"] == "disabled" and seen_families:
+        raise LoadError("共享制品 receipt no-upgrade 不得包含交换机镜像")
+    return value
+
+
+def validate_shared_artifact_receipts(
+    project: Path, inputs: ProjectInputs, images: dict[str, Path], *,
+    upgrade_enabled: bool, root: Path = HTTP_ROOT,
+) -> Path | None:
+    """Bind receipt-managed switch images to this exact load selection.
+
+    A deployment that predates shared bundles remains supported when the
+    receipt namespace is absent.  Once a selected image is named by a receipt,
+    however, at least one receipt must match the current project inputs,
+    selection, family/version, and live payload bytes.
+    """
+    if not upgrade_enabled or not images:
+        return None
+    receipt_dir = root / SHARED_ARTIFACT_RECEIPT_DIR
+    try:
+        root_status = root.lstat()
+        directory_status = receipt_dir.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise LoadError(f"无法检查共享制品 receipt 目录：{exc}") from exc
+    if (
+        not stat.S_ISDIR(root_status.st_mode)
+        or stat.S_ISLNK(root_status.st_mode)
+        or root.resolve(strict=True) != root.absolute()
+        or root_status.st_uid != os.geteuid()
+        or stat.S_IMODE(root_status.st_mode) != 0o755
+    ):
+        raise LoadError("共享制品 live root 不安全")
+    if (
+        not stat.S_ISDIR(directory_status.st_mode)
+        or stat.S_ISLNK(directory_status.st_mode)
+        or directory_status.st_uid != root_status.st_uid
+        or stat.S_IMODE(directory_status.st_mode) != 0o755
+    ):
+        raise LoadError("共享制品 receipt 目录不安全")
+    receipts: list[tuple[Path, dict[str, object]]] = []
+    try:
+        entries = sorted(receipt_dir.iterdir(), key=lambda item: item.name)
+    except OSError as exc:
+        raise LoadError(f"无法枚举共享制品 receipt：{exc}") from exc
+    if not entries:
+        raise LoadError("共享制品 receipt 目录为空")
+    if len(entries) > SHARED_ARTIFACT_RECEIPT_MAX_ENTRIES:
+        raise LoadError("共享制品 receipt 数量超过安全上限")
+    for path in entries:
+        if not re.fullmatch(r"[0-9a-f]{64}\.json", path.name):
+            raise LoadError(f"共享制品 receipt 文件名非法：{path.name}")
+        payload, _status = _stable_regular_bytes(
+            path, "共享制品 receipt",
+            maximum_size=SHARED_ARTIFACT_RECEIPT_MAX_BYTES,
+            required_uid=root_status.st_uid, exact_mode=0o600,
+        )
+        receipt = _parse_shared_artifact_receipt(payload)
+        if path.stem != receipt["archive_sha256"]:
+            raise LoadError("共享制品 receipt 文件名与 archive SHA 不一致")
+        receipts.append((path, receipt))
+
+    expected_input_paths = {
+        inputs.global_file.name: inputs.global_file,
+        inputs.devices_file.name: inputs.devices_file,
+    }
+    mini_input = inputs.mini_source_file or inputs.mini_devices_file
+    if mini_input is not None:
+        try:
+            if stat.S_ISLNK(mini_input.lstat().st_mode):
+                mini_input = inputs.mini_devices_file
+        except OSError as exc:
+            raise LoadError(f"无法检查共享制品 mini 输入：{exc}") from exc
+        if mini_input is None:
+            raise LoadError("共享制品 mini 输入缺少 canonical 文件")
+        expected_input_paths[mini_input.name] = mini_input
+    expected_inputs = {
+        name: _stable_regular_identity(
+            path, f"共享制品绑定输入 {name}",
+            maximum_size=64 * 1024 * 1024,
+        )
+        for name, path in expected_input_paths.items()
+    }
+    expected_selection = {
+        "deployment_scope": inputs.deployment_scope,
+        "inputs": expected_inputs,
+        "mini": mini_input is not None,
+        "mini_input": mini_input.name if mini_input is not None else None,
+        "switch_scope": inputs.switch_scope,
+        "upgrade_policy": "enabled",
+    }
+    selected_targets = {
+        family: f"image/{path.name}" for family, path in images.items()
+    }
+    expected_versions = {
+        family: str(inputs.settings.versions.get(family) or "").replace("-", ".")
+        for family in images
+    }
+    relevant = []
+    for path, receipt in receipts:
+        artifacts = receipt["artifacts"]
+        if any(
+            artifact["target"] in selected_targets.values()
+            or any(
+                consumer["family"] in expected_versions
+                and consumer["version"].replace("-", ".")
+                == expected_versions[consumer["family"]]
+                for consumer in artifact["consumers"]
+            )
+            for artifact in artifacts
+        ):
+            relevant.append((path, receipt))
+    if not relevant:
+        return None
+
+    identity_cache: dict[str, dict[str, object]] = {}
+    expected_artifacts: dict[str, dict[str, object]] = {}
+    for family, target in selected_targets.items():
+        identity = identity_cache.get(target)
+        if identity is None:
+            identity = _stable_regular_identity(
+                root / target, f"共享制品镜像 {family}",
+                required_uid=root_status.st_uid, exact_mode=0o644,
+            )
+            identity_cache[target] = identity
+        record = expected_artifacts.setdefault(target, {
+            "consumers": [],
+            "kind": "switch-image",
+            "platform": None,
+            "sha256": identity["sha256"],
+            "size": identity["size"],
+            "target": target,
+        })
+        record["consumers"].append({
+            "family": family,
+            "version": expected_versions[family],
+        })
+    for record in expected_artifacts.values():
+        record["consumers"].sort(key=lambda item: (item["family"], item["version"]))
+    expected_switch_authority = sorted(
+        expected_artifacts.values(), key=lambda item: item["target"],
+    )
+    matching_receipts: list[Path] = []
+    for path, receipt in relevant:
+        if (
+            receipt["project"] != project.name
+            or receipt["selection"] != expected_selection
+        ):
+            continue
+        actual_switch_authority = []
+        for artifact in receipt["artifacts"]:
+            if artifact["kind"] != "switch-image":
+                continue
+            normalized = dict(artifact)
+            normalized["consumers"] = sorted(
+                [
+                    {
+                        "family": item["family"],
+                        "version": item["version"].replace("-", "."),
+                    }
+                    for item in artifact["consumers"]
+                ],
+                key=lambda item: (item["family"], item["version"]),
+            )
+            actual_switch_authority.append(normalized)
+        actual_switch_authority.sort(key=lambda item: item["target"])
+        if actual_switch_authority == expected_switch_authority:
+            matching_receipts.append(path)
+    if not matching_receipts:
+        raise LoadError(
+            "共享制品 receipt 与当前项目、部署范围、输入、镜像 hash/大小或 consumer/版本不一致"
+        )
+    selected_receipt = sorted(matching_receipts)[0]
+    ok(f"共享制品 receipt 与当前 load 输入及镜像身份一致：{selected_receipt.name}")
+    return selected_receipt
+
+
 def prepare_images(
     project: Path, expected: dict[str, str], *, dry_run: bool = False, quiet: bool = False,
 ) -> dict[str, Path]:
     if not dry_run:
         IMAGE_DIR.mkdir(parents=True, exist_ok=True)
-    expected_names = set(expected.values())
+    expected_names = {
+        candidate
+        for filename in expected.values()
+        for candidate in _image_filename_candidates(filename)
+    }
     project_bins = sorted(project.glob("*.bin"))
     # The complete project template intentionally carries zero-byte .bin files
     # for every supported image as preparation reminders.  They are metadata,
     # not candidate payloads, so only a non-empty unexpected image is a version
     # conflict.  Exact expected placeholders are resolved from the shared store.
-    unexpected = [
-        item.name for item in project_bins
-        if item.name not in expected_names and item.stat().st_size > 0
-    ]
     errors = []
+    unexpected = []
+    for item in project_bins:
+        try:
+            metadata = item.lstat()
+        except OSError as exc:
+            errors.append(f"无法检查项目镜像：{item}: {exc}")
+            continue
+        if not stat.S_ISREG(metadata.st_mode):
+            errors.append(f"镜像必须是普通文件，不允许符号链接或其他文件类型：{item}")
+            continue
+        if item.name not in expected_names and metadata.st_size > 0:
+            unexpected.append(item.name)
     if unexpected:
         errors.append(
             "项目镜像不符合当前 global/device type："
@@ -1096,42 +2758,76 @@ def prepare_images(
             + f"；期望：{', '.join(sorted(expected_names)) or 'none'}"
         )
     resolved: dict[str, Path] = {}
-    copy_pairs: list[tuple[Path, Path]] = []
+    copy_pairs: dict[Path, Path] = {}
+    resolution_cache: dict[str, tuple[Path, bool]] = {}
     for kind, filename in expected.items():
-        project_image = project / filename
-        shared_image = IMAGE_DIR / filename
+        cached = resolution_cache.get(filename)
+        if cached is not None:
+            resolved[kind] = cached[0]
+            continue
+        candidate_names = _image_filename_candidates(filename)
         try:
-            if project_image.is_file() and project_image.stat().st_size > 0:
-                validate_image(project_image, filename)
-                if shared_image.exists() and shared_image.stat().st_size > 0:
-                    validate_image(shared_image, filename)
-                    if project_image.stat().st_size != shared_image.stat().st_size or _sha256(
-                        project_image
-                    ) != _sha256(shared_image):
-                        raise LoadError(f"项目和共享目录中的同名镜像内容不同：{filename}")
+            payloads: list[tuple[str, str, Path]] = []
+            for candidate in candidate_names:
+                for origin, root in (("project", project), ("shared", IMAGE_DIR)):
+                    path = root / candidate
+                    if not _image_has_payload(path, candidate):
+                        continue
+                    payloads.append((candidate, origin, path))
+            if not payloads:
+                if len(candidate_names) == 1:
+                    message = f"缺少 {kind} {candidate_names[0]}"
                 else:
-                    copy_pairs.append((project_image, shared_image))
-                resolved[kind] = shared_image
-            elif shared_image.is_file() and shared_image.stat().st_size > 0:
-                validate_image(shared_image, filename)
-                resolved[kind] = shared_image
-            else:
+                    message = (
+                        f"缺少 {kind} NVOS 镜像：接受 " + " 或 ".join(candidate_names)
+                    )
                 raise LoadError(
-                    f"缺少 {kind} {filename}：项目占位文件为空，且 {IMAGE_DIR} 中没有合法镜像"
+                    message + f"；项目占位文件为空，且 {IMAGE_DIR} 中没有合法镜像"
                 )
+            if len(payloads) > 1:
+                fingerprints: dict[tuple[int, str], list[tuple[str, str, Path]]] = {}
+                for candidate, origin, path in payloads:
+                    fingerprint = (path.stat().st_size, _sha256(path))
+                    fingerprints.setdefault(fingerprint, []).append((candidate, origin, path))
+                if len(fingerprints) > 1:
+                    sources = ", ".join(
+                        f"{origin}:{candidate}" for candidate, origin, _path in payloads
+                    )
+                    raise LoadError(
+                        f"{kind} 同一版本存在内容不同的镜像别名：{sources}"
+                    )
+
+            selected: Path | None = None
+            project_has_payload = any(origin == "project" for _name, origin, _path in payloads)
+            for candidate in candidate_names:
+                shared_image = IMAGE_DIR / candidate
+                project_image = project / candidate
+                if any(path == shared_image for _name, _origin, path in payloads):
+                    selected = shared_image
+                    break
+                if any(path == project_image for _name, _origin, path in payloads):
+                    copy_pairs[shared_image] = project_image
+                    # A dry-run must validate the existing source.  The shared
+                    # destination is only a projected path until the real copy.
+                    selected = project_image if dry_run else shared_image
+                    break
+            assert selected is not None
+            resolved[kind] = selected
+            resolution_cache[filename] = (selected, project_has_payload)
         except LoadError as exc:
             errors.append(str(exc))
     if errors:
         raise LoadError("镜像检查失败：\n  - " + "\n  - ".join(errors))
-    for project_image, shared_image in copy_pairs:
+    for shared_image, project_image in copy_pairs.items():
         if not quiet:
             print(f"[IMAGE] {project_image} → {shared_image}")
         if not dry_run:
             shutil.copy2(project_image, shared_image)
     for kind, filename in expected.items():
-        if not (project / filename).is_file() or (project / filename).stat().st_size == 0:
+        _selected, project_has_payload = resolution_cache[filename]
+        if not project_has_payload:
             if not quiet:
-                info(f"项目镜像为空/缺失，复用共享镜像：image/{filename}")
+                info(f"项目镜像为空/缺失，复用共享镜像：image/{resolved[kind].name}")
     return resolved
 
 
@@ -1162,7 +2858,9 @@ def activate_project(
         info(f"活动项目将从 {current.name} 切换到 {project.name}")
     else:
         info(f"当前没有有效活动项目；将激活 {project.name}")
-    command = [sys.executable, str(SETUP_SCRIPT), "-y"]
+    command = [
+        sys.executable, str(SETUP_SCRIPT), "-y", "--confirm-project-switch",
+    ]
     if strict:
         command.append("--strict")
     try:
@@ -1178,16 +2876,151 @@ def activate_project(
         raise LoadError("01-a-setup.py 返回成功，但活动项目清单未指向目标项目")
 
 
-def active_managed_services() -> tuple[str, ...]:
+def _runtime_interface_names(raw_value: str) -> tuple[str, ...]:
+    """Parse one operator-scoped interface setting without inventing NIC roles."""
+    return tuple(dict.fromkeys(
+        value for value in re.split(r"[,\s]+", str(raw_value or "").strip())
+        if value
+    ))
+
+
+def service_runtime_backend(
+    environment=None, *, command_runner=None,
+) -> ServiceRuntimeBackend:
+    """Resolve exactly one supported runtime; unknown values fail before mutation."""
+    try:
+        return runtime_backend_from_environment(
+            os.environ if environment is None else environment,
+            command_runner=command_runner,
+        )
+    except RuntimeContractError as exc:
+        raise LoadError(f"服务运行后端无效：{exc}") from exc
+
+
+def validate_runtime_options(
+    args: argparse.Namespace, runtime_backend: ServiceRuntimeBackend,
+) -> None:
+    """Keep container execution out of the host-systemd infra lifecycle."""
+    if runtime_backend.name == "supervisor" and not args.skip_infra:
+        raise LoadError(
+            "Supervisor/container backend 必须使用 --skip-infra；"
+            "请由 infra/docker/deploy.sh 管理容器依赖，不能在容器内运行 host infra setup"
+        )
+
+
+def _local_ip_json_snapshots(*, command_runner=None) -> tuple[object, object]:
+    """Capture the Linux link/address records consumed by the DHCP planner."""
+    runner = command_runner or _run_subprocess
+    snapshots = []
+    for label, command in (
+        ("link", ["ip", "-d", "-j", "link", "show"]),
+        ("IPv4 address", ["ip", "-j", "-4", "address", "show"]),
+    ):
+        try:
+            result = runner(
+                command, capture_output=True, text=True, check=False,
+            )
+        except OSError as exc:
+            raise LoadError(f"无法读取本机 {label} JSON：{exc}") from exc
+        if result.returncode != 0:
+            detail = str(result.stderr or "").strip()
+            raise LoadError(
+                f"无法读取本机 {label} JSON（exit={result.returncode}）"
+                + (f"：{detail}" if detail else "")
+            )
+        snapshots.append(result.stdout)
+    return snapshots[0], snapshots[1]
+
+
+def plan_local_dhcp_runtime(
+    inputs: ProjectInputs, *, environment=None,
+    link_snapshot=None, address_snapshot=None, command_runner=None,
+) -> DhcpRuntimePlan:
+    """Derive the exact 0..N DHCP listeners from CSV plus live Linux state.
+
+    The two optional interface environment variables are restrictions only;
+    neither can create a listener which the project rows and live addresses do
+    not justify.  No Global/CSV schema extension is involved.
+    """
+    if (link_snapshot is None) != (address_snapshot is None):
+        raise LoadError("DHCP listener 规划必须同时提供 link/address 快照")
+    if link_snapshot is None:
+        link_snapshot, address_snapshot = _local_ip_json_snapshots(
+            command_runner=command_runner,
+        )
+    source = os.environ if environment is None else environment
+    allowlist = _runtime_interface_names(
+        source.get(DHCP_INTERFACE_ALLOWLIST_ENV, "")
+    )
+    relay_ingress = _runtime_interface_names(
+        source.get(DHCP_RELAY_INGRESS_ENV, "")
+    )
+    try:
+        plan = plan_dhcp_runtime(
+            inputs.subnet_file,
+            link_snapshot=link_snapshot,
+            address_snapshot=address_snapshot,
+            allowlist=allowlist,
+            relay_ingress=relay_ingress,
+        )
+    except RuntimeContractError as exc:
+        raise LoadError(f"DHCP listener 动态规划失败：{exc}") from exc
+    if plan.listener_names:
+        ok(
+            "DHCP listener 动态规划通过："
+            + ", ".join(
+                f"{name}(ifindex={ifindex})" for name, ifindex in zip(
+                    plan.listener_names, plan.listener_ifindexes,
+                )
+            )
+        )
+    else:
+        info("DHCP listener 动态规划结果为 0；DHCP 必须保持停止")
+    return plan
+
+
+def _runtime_service_active(
+    runtime_backend: ServiceRuntimeBackend, service: str,
+) -> bool:
+    try:
+        return runtime_backend.is_active(service)
+    except RuntimeContractError as exc:
+        raise LoadError(f"无法检查服务 {service}：{exc}") from exc
+
+
+def _runtime_service_action(
+    runtime_backend: ServiceRuntimeBackend, action: str, service: str,
+    *, dry_run: bool = False,
+) -> None:
+    if dry_run:
+        print(f"[DRY] {runtime_backend.name} {action} {service}")
+        return
+    try:
+        getattr(runtime_backend, action)(service)
+    except RuntimeContractError as exc:
+        raise LoadError(
+            f"{runtime_backend.name} {action} {service} 失败：{exc}"
+        ) from exc
+
+
+def active_managed_services(
+    runtime_backend: ServiceRuntimeBackend | None = None,
+) -> tuple[str, ...]:
     """Return the managed units that are currently active, without mutation."""
     if not supports_local_ztp_services():
         return ()
+    backend = runtime_backend or service_runtime_backend()
+    if backend.name == "supervisor":
+        return tuple(
+            service for service in SUPERVISOR_QUIESCE_SERVICES
+            if _runtime_service_active(backend, service)
+        )
     systemctl = shutil.which("systemctl")
     if not systemctl:
         return ()
     active = []
     for service in ("isc-dhcp-server", "apache2"):
-        result = subprocess.run(
+        result = _run_subprocess(
             [systemctl, "is-active", "--quiet", service],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
@@ -1196,11 +3029,14 @@ def active_managed_services() -> tuple[str, ...]:
     return tuple(active)
 
 
-def require_artifact_builder_services_inactive(dry_run: bool = False) -> None:
+def require_artifact_builder_services_inactive(
+    dry_run: bool = False, *,
+    runtime_backend: ServiceRuntimeBackend | None = None,
+) -> None:
     """Never stop unrelated live services for a configuration-only Linux run."""
     if dry_run:
         return
-    active = active_managed_services()
+    active = active_managed_services(runtime_backend)
     if active:
         raise LoadError(
             "本机不具备当前项目 service_ip，且以下服务正在运行："
@@ -1211,24 +3047,54 @@ def require_artifact_builder_services_inactive(dry_run: bool = False) -> None:
     ok("本机不具备当前项目 service_ip，且 Apache/DHCP 均未运行；可以只生成制品")
 
 
-def quiesce_services(dry_run: bool = False) -> None:
+def quiesce_services(
+    dry_run: bool = False, *, inputs: ProjectInputs | None = None,
+    dhcp_runtime_plan: DhcpRuntimePlan | None = None,
+    runtime_backend: ServiceRuntimeBackend | None = None,
+    native_monitor_already_quiesced: bool = False,
+    link_snapshot=None, address_snapshot=None,
+) -> DhcpRuntimePlan | None:
     """Stop services before changing project links; failed loads remain safely stopped."""
     if not supports_local_ztp_services():
         info(f"{runtime_os()} 不管理 Apache/ISC DHCP，跳过旧服务状态检查")
-        return
-    if not shutil.which("systemctl"):
+        return None
+    # This is deliberately the first executable gate in this function.  A
+    # listener ambiguity must not stop even one currently healthy service.
+    if inputs is not None and dhcp_runtime_plan is not None:
+        raise LoadError(
+            "quiesce_services 不能同时接收 inputs 和预生成 DHCP plan"
+        )
+    dhcp_plan = dhcp_runtime_plan
+    if inputs is not None:
+        dhcp_plan = plan_local_dhcp_runtime(
+            inputs, link_snapshot=link_snapshot,
+            address_snapshot=address_snapshot,
+        )
+    backend = runtime_backend or service_runtime_backend()
+    if (
+        backend.name == "systemd" and not dry_run
+        and not native_monitor_already_quiesced
+    ):
+        stop_native_ztp_monitors(HTTP_ROOT)
+    if backend.name == "systemd" and not shutil.which("systemctl"):
         info("未找到 systemctl，跳过旧服务状态检查")
-        return
-    active = list(active_managed_services())
+        return dhcp_plan
+    active = list(active_managed_services(backend))
     if not active:
         ok("Apache/DHCP 当前均未运行，可以安全切换项目")
-        return
+        return dhcp_plan
     warn(
         "切换/重建期间将停止正在运行的服务：" + ", ".join(active)
         + "；流程失败时保持停止，避免发布半成品"
     )
     for service in active:
-        run(sudo_command("systemctl", "stop", service), dry_run=dry_run)
+        if backend.name == "systemd":
+            run(sudo_command("systemctl", "stop", service), dry_run=dry_run)
+        else:
+            _runtime_service_action(
+                backend, "stop", service, dry_run=dry_run,
+            )
+    return dhcp_plan
 
 
 def _atomic_replace(path: Path, transform: object, dry_run: bool = False) -> None:
@@ -1709,7 +3575,7 @@ def management_has_mellanox_nic() -> bool:
     lspci = shutil.which("lspci")
     if not lspci:
         return False
-    result = subprocess.run(
+    result = _run_subprocess(
         [lspci], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         check=False,
     )
@@ -1919,14 +3785,14 @@ def mount_and_test_dhcp(
             warn("DHCP 安装或最终语法检查失败；正在恢复本次操作前的四个文件")
             restore_errors = []
             for destination in mappings.values():
-                result = subprocess.run(
+                result = _run_subprocess(
                     sudo_command("rm", "-f", "--", str(destination)), check=False,
                 )
                 if result.returncode != 0:
                     restore_errors.append(str(destination))
                     continue
                 if existed[destination]:
-                    result = subprocess.run(
+                    result = _run_subprocess(
                         sudo_command(
                             "cp", "-a", "--", str(backup_dir / destination.name),
                             str(destination),
@@ -1946,13 +3812,13 @@ def mount_and_test_dhcp(
             cleanup_failed = False
             for directory in (staged_dir, backup_dir):
                 for name in mappings:
-                    result = subprocess.run(
+                    result = _run_subprocess(
                         sudo_command("rm", "-f", "--", str(directory / name.name)),
                         check=False,
                     )
                     cleanup_failed = cleanup_failed or result.returncode != 0
             for directory in (backup_dir, staged_dir, transaction_dir):
-                result = subprocess.run(
+                result = _run_subprocess(
                     sudo_command("rmdir", "--", str(directory)), check=False,
                 )
                 cleanup_failed = cleanup_failed or result.returncode != 0
@@ -1964,6 +3830,8 @@ def mount_and_test_dhcp(
 def _device_types_after_dhcp(
     device_types: frozenset[str], *, dry_run: bool,
     schema_version: int = GLOBAL_SCHEMA_VERSION,
+    deployment_scope: str = "all",
+    switch_scope: str = "all",
 ) -> frozenset[str]:
     # A clean project may intentionally contain no type=air rows. The DHCP
     # generator creates those rows from p2p-air.json, so do not keep using the
@@ -1974,7 +3842,9 @@ def _device_types_after_dhcp(
     devices_csv = ZTP_DIR / "config/isc-dhcp-server/02-devices_config.csv"
     p2p_air_json = ZTP_DIR / "config/isc-dhcp-server/p2p-air.json"
     if not dry_run:
-        effective_types = set(load_device_types(devices_csv, schema_version))
+        effective_types = set(load_device_types(
+            devices_csv, schema_version, switch_scope=switch_scope,
+        ))
     # AIR-only nodes intentionally stay out of the unified CSV, but they still
     # require baseline Cumulus YAML and MAC-link publication.  Inspect the
     # actual topology nodes in both normal and dry-run paths rather than using
@@ -1984,7 +3854,13 @@ def _device_types_after_dhcp(
         for item in _augment_air_json_inventory([], p2p_air_json)
     ):
         effective_types.add("air")
-    return frozenset(effective_types)
+    if deployment_scope == "air":
+        effective_types &= {"air"}
+    elif deployment_scope == "prod":
+        effective_types.discard("air")
+    elif deployment_scope != "all":
+        raise LoadError(f"无法识别 deployment scope：{deployment_scope!r}")
+    return filter_device_types_for_switch_scope(effective_types, switch_scope)
 
 
 def _sha256_path(path: Path) -> str:
@@ -1993,6 +3869,41 @@ def _sha256_path(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _project_source_identities(inputs: ProjectInputs) -> dict[str, str]:
+    sources = {
+        "global": inputs.global_file,
+        "devices": inputs.devices_file,
+        "subnet": inputs.subnet_file,
+        "p2p": inputs.p2p_file,
+    }
+    if inputs.air_topology_policy is not None:
+        sources["air_topology_policy"] = inputs.air_topology_policy
+    if inputs.mini_devices_file is not None:
+        sources["mini_air_devices"] = inputs.mini_devices_file
+    try:
+        return {name: _sha256_path(path) for name, path in sources.items()}
+    except OSError as exc:
+        raise LoadError(f"无法读取 release 输入 authority：{exc}") from exc
+
+
+def _require_mini_sampling_policy(path: Path | None) -> None:
+    if path is None:
+        raise LoadError(
+            "--mini requires 03-air-topology-policy.json field mini_sampling"
+        )
+    try:
+        with path.open(encoding="utf-8") as stream:
+            document = json.load(stream)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise LoadError(f"AIR 拓扑策略 JSON 无效：{exc}") from exc
+    if not isinstance(document, dict) or not isinstance(
+        document.get("mini_sampling"), dict,
+    ):
+        raise LoadError(
+            "03-air-topology-policy.json is missing required mini_sampling"
+        )
 
 
 def _normalized_mac(value: object) -> str:
@@ -2046,6 +3957,29 @@ def _release_inventory(path: Path) -> list[dict[str, object]]:
                 "identity_source": "devices_config",
             })
     return records
+
+
+def _inventory_for_release_scope(
+    inventory: list[dict[str, object]], *,
+    deployment_scope: str, switch_scope: str,
+) -> list[dict[str, object]]:
+    """Apply environment and platform selectors to one release inventory."""
+    if deployment_scope == "air":
+        scoped = [item for item in inventory if item["type"] == "air"]
+    elif deployment_scope == "prod":
+        scoped = [item for item in inventory if item["type"] != "air"]
+    elif deployment_scope == "all":
+        scoped = list(inventory)
+    else:
+        raise LoadError(
+            f"无法识别 parent release deployment scope：{deployment_scope!r}"
+        )
+    allowed = SWITCH_SCOPE_TYPES.get(switch_scope)
+    if allowed is None:
+        raise LoadError(
+            f"无法识别 parent release switch scope：{switch_scope!r}"
+        )
+    return [item for item in scoped if str(item["type"]) in allowed]
 
 
 def _augment_air_json_inventory(
@@ -2305,12 +4239,107 @@ def validate_and_publish_release(
         )
         return None
 
+    if inputs.mini_devices_file is not None:
+        _require_mini_sampling_policy(inputs.air_topology_policy)
+    current_identities = _project_source_identities(inputs)
+    if inputs.source_identities is not None and any(
+        current_identities.get(name) != digest
+        for name, digest in inputs.source_identities.items()
+        if name != "mini_air_customer_source"
+    ):
+        raise LoadError(
+            "project input authority changed after validation and before "
+            "release_basis"
+        )
+    if (
+        inputs.air_topology_policy is not None
+        and inputs.mini_devices_file is not None
+    ):
+        generation_key = (
+            os.path.realpath(os.fspath(inputs.air_topology_policy)),
+            os.path.realpath(os.fspath(inputs.mini_devices_file)),
+        )
+        generated = _MINI_GENERATION_AUTHORITIES.get(generation_key)
+        if inputs.source_identities is not None and generated is None:
+            raise LoadError(
+                "mini generation authority is missing before release_basis"
+            )
+        expected_customer = (
+            inputs.source_identities or {}
+        ).get("mini_air_customer_source")
+        if expected_customer is not None:
+            customer = inputs.mini_source_file
+            if customer is None:
+                raise LoadError(
+                    "mini AIR customer source authority is missing before "
+                    "release_basis"
+                )
+            try:
+                customer_stat = customer.lstat()
+                if stat.S_ISLNK(customer_stat.st_mode):
+                    expected_target = inputs.mini_devices_file.name
+                    if os.readlink(customer) != expected_target:
+                        raise LoadError(
+                            "mini AIR customer source changed after generation"
+                        )
+                elif (
+                    not stat.S_ISREG(customer_stat.st_mode)
+                    or customer_stat.st_nlink != 1
+                    or _sha256_path(customer) != expected_customer
+                ):
+                    raise LoadError(
+                        "mini AIR customer source changed after validation"
+                    )
+            except LoadError:
+                raise
+            except OSError as exc:
+                raise LoadError(
+                    "mini AIR customer source changed after validation: "
+                    f"{exc}"
+                ) from exc
+        if generated is not None and (
+            generated[:2] != (
+                current_identities["air_topology_policy"],
+                current_identities["mini_air_devices"],
+            )
+            or (
+                expected_customer is not None
+                and generated[2] != expected_customer
+            )
+        ):
+            raise LoadError(
+                "AIR topology policy or mini device selection changed after "
+                "generation and before release_basis"
+            )
+
     inventory = _augment_air_json_inventory(
         _release_inventory(inputs.devices_file),
         ZTP_DIR / "config/isc-dhcp-server/p2p-air.json",
     )
+    inventory = _inventory_for_release_scope(
+        inventory,
+        deployment_scope=inputs.deployment_scope,
+        switch_scope=inputs.switch_scope,
+    )
+    if not inventory:
+        raise LoadError(
+            f"deployment scope={inputs.deployment_scope}, "
+            f"switch scope={inputs.switch_scope} 没有可发布设备"
+        )
     dhcp_path = ZTP_DIR / "config/isc-dhcp-server/dhcp-release-manifest.json"
     dhcp = _load_release_json(dhcp_path, "DHCP release manifest")
+    if str(dhcp.get("deployment_scope") or "all") != inputs.deployment_scope:
+        raise LoadError(
+            "DHCP release deployment scope 与本次 load 不一致："
+            f"manifest={dhcp.get('deployment_scope') or 'all'} "
+            f"requested={inputs.deployment_scope}"
+        )
+    if str(dhcp.get("switch_scope") or "all") != inputs.switch_scope:
+        raise LoadError(
+            "DHCP release switch scope 与本次 load 不一致："
+            f"manifest={dhcp.get('switch_scope') or 'all'} "
+            f"requested={inputs.switch_scope}"
+        )
     dhcp_rows = dhcp.get("devices")
     if not isinstance(dhcp_rows, list):
         raise LoadError("DHCP release manifest.devices 必须是 list")
@@ -2387,6 +4416,18 @@ def validate_and_publish_release(
         manifest_path = release_dir / "release-manifest.json"
         _nonempty_release_file(manifest_path, f"{label} release manifest")
         manifest = _load_release_json(manifest_path, f"{label} release manifest")
+        if str(manifest.get("deployment_scope") or "all") != inputs.deployment_scope:
+            raise LoadError(
+                f"{label} release deployment scope 与本次 load 不一致："
+                f"manifest={manifest.get('deployment_scope') or 'all'} "
+                f"requested={inputs.deployment_scope}"
+            )
+        if str(manifest.get("switch_scope") or "all") != inputs.switch_scope:
+            raise LoadError(
+                f"{label} release switch scope 与本次 load 不一致："
+                f"manifest={manifest.get('switch_scope') or 'all'} "
+                f"requested={inputs.switch_scope}"
+            )
         _validate_manifest_devices(label=label, manifest=manifest, expected=expected)
         _validate_child_artifacts(
             label=label, release_dir=release_dir, manifest=manifest,
@@ -2406,9 +4447,13 @@ def validate_and_publish_release(
     }
     if inputs.air_topology_policy is not None:
         input_files["air_topology_policy"] = inputs.air_topology_policy
+    if inputs.mini_devices_file is not None:
+        input_files["mini_air_devices"] = inputs.mini_devices_file
     input_hashes = {name: _sha256_path(path) for name, path in input_files.items()}
     release_basis = {
         "project": project.name,
+        "deployment_scope": inputs.deployment_scope,
+        "switch_scope": inputs.switch_scope,
         "inputs": input_hashes,
         "components": components,
         "inventory": [{
@@ -2531,6 +4576,29 @@ def snapshot_release_links(project: Path) -> dict[Path, Optional[str]]:
     return snapshot
 
 
+def retire_unselected_release_links(
+    project: Path, switch_scope: str, *, dry_run: bool,
+) -> None:
+    """Prevent an old platform release from remaining live after a scoped load."""
+    selected = str(switch_scope or "").strip().casefold()
+    if selected not in SWITCH_SCOPE_TYPES:
+        raise LoadError(f"无法识别 switch scope：{switch_scope!r}")
+    if selected == "all":
+        return
+    paths = {
+        "eth": project / "99-output-eth/latest",
+        "nvos": project / "99-output-ib_nvl/latest",
+    }
+    retire = (paths["nvos"],) if selected == "eth" else (paths["eth"],)
+    for path in retire:
+        if dry_run:
+            info(f"dry-run：选择 --switch {selected} 时将退役旧发布入口 {path}")
+            continue
+        if os.path.lexists(path) and not path.is_symlink():
+            raise LoadError(f"拒绝退役非软链接 release 入口：{path}")
+        path.unlink(missing_ok=True)
+
+
 def restore_release_links(snapshot: dict[Path, Optional[str]]) -> None:
     """Restore logical latest links after a pre-commit generation/install failure."""
     errors = []
@@ -2557,34 +4625,101 @@ def generate_configs(
     schema_version: int = GLOBAL_SCHEMA_VERSION,
     eth_version: str | None = None,
     air_topology_policy: Path | None = None,
+    mini_air: bool = False,
+    mini_devices_file: Path | None = None,
+    deployment_scope: str = "all",
+    switch_scope: str = "all",
+    deployment_lock_descriptor: int | None = None,
+    source_identities: dict[str, str] | None = None,
 ) -> None:
+    mini_policy_hash_before: str | None = None
+    mini_customer_hash: str | None = None
+    mini_generation_key: tuple[str, str] | None = None
+    if mini_air:
+        if air_topology_policy is None:
+            raise LoadError(
+                "--mini requires project 03-air-topology-policy.json with "
+                "mini_sampling"
+            )
+        if mini_devices_file is None:
+            raise LoadError("--mini 缺少项目设备清单路径")
+        canonical = Path(mini_devices_file).parent / MINI_AIR_DEVICES_NAME
+        mini_generation_key = (
+            os.path.realpath(os.fspath(air_topology_policy)),
+            os.path.realpath(os.fspath(canonical)),
+        )
+        # A failed/retried generation must never inherit an authority receipt
+        # from an earlier call in the same long-lived load process.
+        _MINI_GENERATION_AUTHORITIES.pop(mini_generation_key, None)
+        try:
+            mini_policy_hash_before = _sha256_path(air_topology_policy)
+            if Path(mini_devices_file).name != MINI_AIR_DEVICES_NAME:
+                mini_customer_hash = _sha256_path(Path(mini_devices_file))
+        except OSError as exc:
+            raise LoadError(f"无法读取 --mini AIR 拓扑策略：{exc}") from exc
+        expected_customer = (source_identities or {}).get(
+            "mini_air_customer_source"
+        )
+        if expected_customer is not None and mini_customer_hash != expected_customer:
+            raise LoadError("mini AIR customer source changed before generation")
+    scope_args = (
+        [] if deployment_scope == "all"
+        else ["--deployment-scope", deployment_scope]
+    )
+    selected_switch = str(switch_scope or "").strip().casefold()
+    if selected_switch not in SWITCH_SCOPE_TYPES:
+        raise LoadError(f"无法识别 switch scope：{switch_scope!r}")
+    switch_args = (
+        [] if selected_switch == "all"
+        else ["--switch", selected_switch]
+    )
     p2p_dir = ZTP_DIR / "config/cumulus/template/P2P"
-    p2p_command = [sys.executable, "b-xlsx_to_dot.py", "-y"]
+    inherited_lock = (
+        {}
+        if deployment_lock_descriptor is None
+        else {"inherited_lock_descriptor": deployment_lock_descriptor}
+    )
+    p2p_command = [
+        sys.executable, "b-xlsx_to_dot.py", "-y", *scope_args,
+    ]
     if eth_version:
         p2p_command.extend(["--os-version", eth_version])
     if air_topology_policy is not None:
         p2p_command.extend([
             "--air-link-policy", str(air_topology_policy),
         ])
-    run(p2p_command, cwd=p2p_dir, dry_run=dry_run)
+    if mini_air:
+        p2p_command.extend(["--mini", str(mini_devices_file)])
+    if selected_switch in {"all", "eth"}:
+        run(
+            p2p_command, cwd=p2p_dir, dry_run=dry_run,
+            **inherited_lock,
+        )
 
     # AIR node identity/MAC comes from p2p-air.json. c1-generate_dhcp.py copies
     # template/IP/netmask/gateway from the matching production CSV row. It must
     # run before hostname2mac validates each pair and points both MACs at the
     # same production full-config YAML.
     run(
-        [sys.executable, "c1-generate_dhcp.py", "-y"],
+        [
+            sys.executable, "c1-generate_dhcp.py", "-y",
+            *scope_args, *switch_args,
+        ],
         cwd=ZTP_DIR / "config/isc-dhcp-server",
         dry_run=dry_run,
+        **inherited_lock,
     )
     device_types = _device_types_after_dhcp(
         device_types, dry_run=dry_run, schema_version=schema_version,
+        deployment_scope=deployment_scope,
+        switch_scope=selected_switch,
     )
 
     if device_types & {"eth", "eth_spx", "spx", "air"}:
         template_dir = ZTP_DIR / "config/cumulus/template"
         run(
-            [sys.executable, "90-c2-generate_configs.py", "--branch", "eth", "-y"],
+            [sys.executable, "90-c2-generate_configs.py", "--branch", "eth", "-y",
+             *scope_args, *switch_args],
             cwd=template_dir, dry_run=dry_run,
         )
         if not dry_run:
@@ -2595,14 +4730,17 @@ def generate_configs(
             with_desc = output_root / (generated.name + "_with_desc")
             publish = with_desc if with_desc.is_dir() else generated
             run(
-                [sys.executable, "d-hostname2mac.py", "-y", str(publish)],
+                [sys.executable, "d-hostname2mac.py", "-y", *scope_args,
+                 *switch_args,
+                 str(publish)],
                 cwd=ZTP_DIR / "config/cumulus",
             )
 
-    if device_types & {"ib", "nvl"}:
+    if deployment_scope != "air" and device_types & {"ib", "nvl"}:
         template_dir = ZTP_DIR / "config/nvos/template"
         run(
-            [sys.executable, "90-c2-generate_configs.py", "--branch", "ib", "-y"],
+            [sys.executable, "90-c2-generate_configs.py", "--branch", "ib", "-y",
+             *scope_args, *switch_args],
             cwd=template_dir, dry_run=dry_run,
         )
         if not dry_run:
@@ -2618,7 +4756,9 @@ def generate_configs(
                     raise LoadError(f"NVOS 生成器执行成功但没有找到 {kind} 输出目录")
                 kinds.append(directory)
             run(
-                [sys.executable, "d-hostname2mac.py", "-y", *map(str, kinds)],
+                [sys.executable, "d-hostname2mac.py", "-y", *scope_args,
+                 *switch_args,
+                 *map(str, kinds)],
                 cwd=ZTP_DIR / "config/nvos",
             )
 
@@ -2626,6 +4766,25 @@ def generate_configs(
         info("DHCP 安装已延后到统一 release 验证通过之后")
     else:
         warn("本机没有可用 service_ip：已生成 DHCP 文件，但不复制到 /etc/dhcp，也不执行 dhcpd -t")
+    if mini_air:
+        canonical = Path(mini_devices_file).parent / MINI_AIR_DEVICES_NAME
+        try:
+            policy_hash_after = _sha256_path(Path(air_topology_policy))
+            canonical_hash = _sha256_path(canonical)
+        except OSError:
+            # A normal dry-run executes no generators and creates no canonical
+            # selection.  A materializing test or real run must bind both.
+            if not dry_run:
+                raise LoadError(
+                    "--mini generation did not produce its canonical authority"
+                )
+        else:
+            if policy_hash_after != mini_policy_hash_before:
+                raise LoadError("AIR topology policy changed during mini generation")
+            assert mini_generation_key is not None
+            _MINI_GENERATION_AUTHORITIES[mini_generation_key] = (
+                policy_hash_after, canonical_hash, mini_customer_hash,
+            )
 
 
 def confirm_service_start() -> bool:
@@ -2704,36 +4863,14 @@ def ztp_monitor_running(pid_file: Path, project: Path) -> tuple[bool, int | None
 
 
 def stop_other_ztp_monitors(project: Path) -> list[int]:
-    """Stop detached monitors for another project before starting the active one."""
-    stopped: list[int] = []
-    proc_root = Path("/proc")
-    if not proc_root.is_dir():
-        return stopped
-    current_pid = os.getpid()
-    for entry in proc_root.iterdir():
-        if not entry.name.isdigit():
-            continue
-        pid = int(entry.name)
-        if pid == current_pid:
-            continue
-        try:
-            cmdline = [token.decode("utf-8", errors="replace") for token in
-                       (entry / "cmdline").read_bytes().split(b"\0") if token]
-        except OSError:
-            continue
-        if (str(ZTP_MONITOR_SCRIPT) not in cmdline or "--watch" not in cmdline
-                or str(project) in cmdline):
-            continue
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except (OSError, ProcessLookupError):
-            continue
-        stopped.append(pid)
-    return stopped
+    """Stop every detached Native monitor through the canonical PID authority."""
+    del project  # The canonical stop validates and quiesces every active project.
+    return list(stop_native_ztp_monitors(HTTP_ROOT))
 
 
 def resolve_ztp_monitor_scope(
-    project: Path, requested: str, *, prompt_fn=None,
+    project: Path, requested: str, *, deployment_scope: str = "all",
+    prompt_fn=None,
 ) -> str:
     """Resolve the environment reachable from this management server.
 
@@ -2741,8 +4878,17 @@ def resolve_ztp_monitor_scope(
     management server normally reaches only one environment.  Do not guess an
     environment for collection or completion handling.
     """
+    if deployment_scope not in {"all", "prod", "air"}:
+        raise LoadError(f"无法识别 deployment scope：{deployment_scope!r}")
     if requested != "auto":
+        if deployment_scope in {"prod", "air"} and requested != deployment_scope:
+            raise LoadError(
+                f"部署范围 {deployment_scope} 与监控范围 {requested} 冲突"
+            )
         return requested
+    if deployment_scope in {"prod", "air"}:
+        info(f"ZTP 监控采集范围继承部署范围：{deployment_scope}")
+        return deployment_scope
     if prompt_fn is None:
         if not sys.stdin.isatty():
             raise LoadError(
@@ -2771,7 +4917,262 @@ def print_ztp_monitor_access(service_ips: tuple[str, ...]) -> None:
         info(f"ZTP 状态页面：http://{address}/monitor/monitor.html")
 
 
-def start_switch_collection_worker(scope: str, *, dry_run: bool = False) -> None:
+def _canonical_apache_listener_addresses(
+    service_ips: tuple[str, ...],
+) -> tuple[str, ...]:
+    addresses = []
+    for raw in service_ips:
+        raw_text = str(raw)
+        try:
+            parsed = ipaddress.IPv4Address(raw_text)
+        except ipaddress.AddressValueError as exc:
+            raise LoadError(f"Apache service IPv4 无效：{raw!r}") from exc
+        canonical = str(parsed)
+        if (
+            raw_text != canonical
+            or parsed.is_unspecified
+            or parsed.is_multicast
+            or int(parsed) == 0xFFFFFFFF
+        ):
+            raise LoadError(f"Apache service IPv4 无效：{raw!r}")
+        if canonical in addresses:
+            raise LoadError(f"Apache service IPv4 重复：{canonical}")
+        addresses.append(canonical)
+    if not addresses:
+        raise LoadError("Apache exact listener 缺少 service IPv4")
+    return tuple(addresses)
+
+
+def render_native_apache_listener_config(
+    service_ips: tuple[str, ...],
+) -> str:
+    """Render Native Apache listeners bound only to canonical service IPv4s."""
+    addresses = _canonical_apache_listener_addresses(service_ips)
+    lines = [
+        "# Generated by DAY0-Prepare/11-load.py; do not edit.",
+        "# Exact service-IP listeners only; wildcard binds are forbidden.",
+    ]
+    for address in addresses:
+        lines.append(f"Listen {address}:80")
+    for address in addresses:
+        lines.extend((
+            "",
+            f"<VirtualHost {address}:80>",
+            f"    ServerName {address}",
+            "    DocumentRoot /var/www/html",
+            "    ErrorLog /var/log/apache2/error.log",
+            "    CustomLog /var/log/apache2/access.log combined",
+            "</VirtualHost>",
+        ))
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _fsync_parent_directory(path: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def publish_native_apache_listener_config(
+    service_ips: tuple[str, ...], *,
+    destination: Path = NATIVE_APACHE_LISTENER_CONF,
+    command_runner=run,
+    dry_run: bool = False,
+) -> None:
+    """Atomically publish exact Native listeners and roll back failed syntax."""
+    rendered = render_native_apache_listener_config(service_ips).encode("utf-8")
+    destination = Path(destination)
+    if dry_run:
+        info(
+            "dry-run：将原子发布 Apache exact listener："
+            + ", ".join(_canonical_apache_listener_addresses(service_ips))
+        )
+        return
+    try:
+        parent = destination.parent
+        parent_metadata = parent.lstat()
+    except OSError as exc:
+        raise LoadError(f"Apache listener 目录不可用：{destination.parent}: {exc}") from exc
+    if not stat.S_ISDIR(parent_metadata.st_mode) or parent.is_symlink():
+        raise LoadError(f"Apache listener 目录不安全：{parent}")
+
+    original_exists = False
+    original_metadata = None
+    try:
+        original_metadata = destination.lstat()
+        original_exists = True
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise LoadError(f"无法检查 Apache listener：{destination}: {exc}") from exc
+    if original_exists and (
+        original_metadata is None
+        or not stat.S_ISREG(original_metadata.st_mode)
+        or original_metadata.st_nlink != 1
+    ):
+        raise LoadError(f"Apache listener 不是 single-link regular file：{destination}")
+
+    stale_authorities = sorted(
+        (
+            *parent.glob(f".{destination.name}.*.rollback"),
+            *parent.glob(f".{destination.name}.*.recovery"),
+        ),
+        key=lambda path: path.name,
+    )
+    if stale_authorities:
+        raise LoadError(
+            "Apache listener 存在滞留 rollback/recovery authority；"
+            "请停止 Apache 并人工处理后重试："
+            + ", ".join(path.name for path in stale_authorities)
+        )
+
+    candidate_fd, candidate_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.", dir=parent,
+    )
+    candidate = Path(candidate_name)
+    backup = parent / f".{destination.name}.{secrets.token_hex(16)}.rollback"
+    recovery = parent / f".{destination.name}.{secrets.token_hex(16)}.recovery"
+    backup_linked = False
+    recovery_linked = False
+    published = False
+    committed = False
+    try:
+        with os.fdopen(candidate_fd, "wb") as stream:
+            stream.write(rendered)
+            stream.flush()
+            os.fchmod(stream.fileno(), 0o644)
+            if original_metadata is not None and hasattr(os, "fchown"):
+                os.fchown(
+                    stream.fileno(), original_metadata.st_uid,
+                    original_metadata.st_gid,
+                )
+            os.fsync(stream.fileno())
+        if original_exists:
+            os.link(destination, backup, follow_symlinks=False)
+            backup_linked = True
+        os.replace(candidate, destination)
+        published = True
+        _fsync_parent_directory(parent)
+        try:
+            command_runner(sudo_command("apache2ctl", "configtest"))
+        except BaseException:
+            if backup_linked:
+                os.replace(backup, destination)
+                backup_linked = False
+            else:
+                destination.unlink(missing_ok=True)
+            published = False
+            _fsync_parent_directory(parent)
+            raise
+        if backup_linked:
+            os.link(backup, recovery, follow_symlinks=False)
+            recovery_linked = True
+            backup.unlink()
+            backup_linked = False
+        _fsync_parent_directory(parent)
+        committed = True
+        if recovery_linked:
+            recovery.unlink()
+            recovery_linked = False
+            try:
+                _fsync_parent_directory(parent)
+            except OSError as exc:
+                raise LoadError(
+                    "Apache listener 新配置已提交；"
+                    "rollback/recovery cleanup durability unknown："
+                    f"{exc}"
+                ) from exc
+    except BaseException:
+        if published and not committed:
+            try:
+                if recovery_linked:
+                    os.replace(recovery, destination)
+                    recovery_linked = False
+                elif backup_linked:
+                    os.replace(backup, destination)
+                    backup_linked = False
+                elif not original_exists:
+                    destination.unlink(missing_ok=True)
+                _fsync_parent_directory(parent)
+            except OSError as rollback_error:
+                raise LoadError(
+                    "Apache listener 发布失败且旧配置回滚失败；Apache 必须保持停止："
+                    f"{rollback_error}"
+                ) from rollback_error
+        raise
+    finally:
+        candidate.unlink(missing_ok=True)
+        if backup_linked:
+            backup.unlink(missing_ok=True)
+        if recovery_linked:
+            recovery.unlink(missing_ok=True)
+
+
+def _reload_apache_if_active(
+    runtime_backend: ServiceRuntimeBackend | None = None,
+) -> None:
+    backend = runtime_backend or service_runtime_backend()
+    verify_control_auth(runtime_backend=backend)
+    verify_apache_publication_boundary()
+    if backend.name == "systemd":
+        if _run_subprocess(
+            ["systemctl", "is-active", "--quiet", "apache2"], check=False,
+        ).returncode == 0:
+            run(sudo_command("apache2ctl", "configtest"))
+            run(sudo_command("systemctl", "reload", "apache2"))
+        return
+    if _runtime_service_active(backend, "apache2"):
+        run(sudo_command("apache2ctl", "configtest"))
+        _runtime_service_action(backend, "reload", "apache2")
+
+
+def _start_supervisor_program(
+    service: str, scope: str, *,
+    runtime_backend: ServiceRuntimeBackend | None = None,
+    monitor_interval: int | None = None,
+) -> bool:
+    """Start/restart a long-running worker only when Supervisor owns it."""
+    backend = runtime_backend or service_runtime_backend()
+    if backend.name != "supervisor":
+        return False
+    configured_scope = str(os.environ.get("HTTP_ZTP_SCOPE") or "").strip().casefold()
+    if configured_scope not in {"air", "prod"}:
+        raise LoadError(
+            "Supervisor worker 启动需要 HTTP_ZTP_SCOPE=air 或 prod"
+        )
+    if configured_scope != scope:
+        raise LoadError(
+            f"请求的 monitor scope={scope} 与容器 HTTP_ZTP_SCOPE="
+            f"{configured_scope} 不一致"
+        )
+    if monitor_interval is not None:
+        raw_interval = str(
+            os.environ.get("HTTP_ZTP_MONITOR_INTERVAL") or "30"
+        ).strip()
+        try:
+            configured_interval = int(raw_interval)
+        except ValueError as exc:
+            raise LoadError(
+                "HTTP_ZTP_MONITOR_INTERVAL 必须是整数"
+            ) from exc
+        if configured_interval != monitor_interval:
+            raise LoadError(
+                f"请求的 monitor interval={monitor_interval} 与容器 "
+                f"HTTP_ZTP_MONITOR_INTERVAL={configured_interval} 不一致"
+            )
+    action = "restart" if _runtime_service_active(backend, service) else "start"
+    _runtime_service_action(backend, action, service)
+    return True
+
+
+def start_switch_collection_worker(
+    scope: str, *, dry_run: bool = False,
+    runtime_backend: ServiceRuntimeBackend | None = None,
+) -> None:
     """Start the Switch Status collector with resources separate from ZTP control."""
     status_dir = HTTP_ROOT / "monitor/status"
     request_file = status_dir / "switch-collection.request"
@@ -2781,6 +5182,9 @@ def start_switch_collection_worker(scope: str, *, dry_run: bool = False) -> None
         sys.executable, "-u", str(SWITCH_COLLECTION_WORKER), "--scope", scope,
     ]
     display = " ".join(shlex_quote(item) for item in command)
+    backend = runtime_backend or service_runtime_backend()
+    verify_control_auth(runtime_backend=backend, dry_run=dry_run)
+    verify_apache_publication_boundary(dry_run=dry_run)
     if dry_run:
         print(
             f"[DRY] 安装 Switch 收集控制端点：{SWITCH_COLLECTION_CONTROL_SOURCE} -> "
@@ -2808,11 +5212,12 @@ def start_switch_collection_worker(scope: str, *, dry_run: bool = False) -> None
             "install", "-m", "0664", "-o", "root", "-g", "www-data",
             request_source.name, str(request_file),
         ))
-    if subprocess.run(
-        ["systemctl", "is-active", "--quiet", "apache2"], check=False,
-    ).returncode == 0:
-        run(sudo_command("apache2ctl", "configtest"))
-        run(sudo_command("systemctl", "reload", "apache2"))
+    _reload_apache_if_active(backend)
+    if _start_supervisor_program(
+        "switch-collection", scope, runtime_backend=backend,
+    ):
+        ok(f"Supervisor Switch 收集 worker 已启动：scope={scope}")
+        return
 
     old_pid = None
     try:
@@ -2840,7 +5245,7 @@ def start_switch_collection_worker(scope: str, *, dry_run: bool = False) -> None
     with log_file.open("a", encoding="utf-8") as output:
         output.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] load.py starting: {display}\n")
         output.flush()
-        process = subprocess.Popen(
+        process = _popen_subprocess(
             command, cwd=HTTP_ROOT, stdin=subprocess.DEVNULL,
             stdout=output, stderr=subprocess.STDOUT, start_new_session=True,
         )
@@ -2851,7 +5256,10 @@ def start_switch_collection_worker(scope: str, *, dry_run: bool = False) -> None
     ok(f"独立 Switch 收集 worker 已启动：PID={process.pid}，scope={scope}，日志={log_file}")
 
 
-def start_manual_ztp_worker(scope: str, *, dry_run: bool = False) -> None:
+def start_manual_ztp_worker(
+    scope: str, *, dry_run: bool = False,
+    runtime_backend: ServiceRuntimeBackend | None = None,
+) -> None:
     """Start the restricted per-device manual ZTP GUI worker."""
     if scope not in {"air", "prod"}:
         raise LoadError("手工 ZTP worker 必须使用 air 或 prod scope")
@@ -2861,6 +5269,9 @@ def start_manual_ztp_worker(scope: str, *, dry_run: bool = False) -> None:
     log_file = status_dir / "manual-ztp.log"
     command = [sys.executable, "-u", str(MANUAL_ZTP_WORKER), "--scope", scope]
     display = " ".join(shlex_quote(item) for item in command)
+    backend = runtime_backend or service_runtime_backend()
+    verify_control_auth(runtime_backend=backend, dry_run=dry_run)
+    verify_apache_publication_boundary(dry_run=dry_run)
     if dry_run:
         print(
             f"[DRY] 安装手工 ZTP 控制端点：{MANUAL_ZTP_CONTROL_SOURCE} -> "
@@ -2890,11 +5301,12 @@ def start_manual_ztp_worker(scope: str, *, dry_run: bool = False) -> None:
             "install", "-m", "0664", "-o", "root", "-g", "www-data",
             request_source.name, str(request_file),
         ))
-    if subprocess.run(
-        ["systemctl", "is-active", "--quiet", "apache2"], check=False,
-    ).returncode == 0:
-        run(sudo_command("apache2ctl", "configtest"))
-        run(sudo_command("systemctl", "reload", "apache2"))
+    _reload_apache_if_active(backend)
+    if _start_supervisor_program(
+        "manual-ztp", scope, runtime_backend=backend,
+    ):
+        ok(f"Supervisor 手工 ZTP worker 已启动：scope={scope}")
+        return
 
     old_pid = None
     try:
@@ -2922,7 +5334,7 @@ def start_manual_ztp_worker(scope: str, *, dry_run: bool = False) -> None:
     with log_file.open("a", encoding="utf-8") as output:
         output.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] load.py starting: {display}\n")
         output.flush()
-        process = subprocess.Popen(
+        process = _popen_subprocess(
             command, cwd=HTTP_ROOT, stdin=subprocess.DEVNULL,
             stdout=output, stderr=subprocess.STDOUT, start_new_session=True,
         )
@@ -2933,11 +5345,32 @@ def start_manual_ztp_worker(scope: str, *, dry_run: bool = False) -> None:
     ok(f"手工 ZTP worker 已启动：PID={process.pid}，scope={scope}，日志={log_file}")
 
 
+def _terminate_failed_ztp_monitor_start(process: subprocess.Popen) -> None:
+    try:
+        process.terminate()
+    except (OSError, ProcessLookupError):
+        pass
+    try:
+        process.wait(timeout=5)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        process.kill()
+    except (OSError, ProcessLookupError):
+        pass
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 def start_ztp_monitor(
     project: Path, *, interval: int = DEFAULT_ZTP_MONITOR_INTERVAL,
     scope: str = "all",
     service_ips: tuple[str, ...] = (),
     dry_run: bool = False,
+    runtime_backend: ServiceRuntimeBackend | None = None,
 ) -> None:
     if interval < 5:
         raise LoadError("ZTP 监控间隔不能小于 5 秒")
@@ -2951,11 +5384,14 @@ def start_ztp_monitor(
     command = [
         sys.executable, "-u", str(ZTP_MONITOR_SCRIPT), str(project),
         "--watch", str(interval), "--generate-html",
-        "--exit-on-complete",
+        "--collect-on-complete",
         "--known-hosts", str(known_hosts),
         "--scope", scope,
     ]
     display = " ".join(shlex_quote(item) for item in command)
+    backend = runtime_backend or service_runtime_backend()
+    verify_control_auth(runtime_backend=backend, dry_run=dry_run)
+    verify_apache_publication_boundary(dry_run=dry_run)
     if dry_run:
         print(
             f"[DRY] 安装 ZTP 页面控制端点：{ZTP_MONITOR_CONTROL_SOURCE} -> "
@@ -2974,7 +5410,6 @@ def start_ztp_monitor(
         "install", "-m", "0755", str(ZTP_MONITOR_CONTROL_SOURCE),
         str(ZTP_MONITOR_CONTROL_DEST),
     ))
-    run(sudo_command("a2enmod", "cgid"))
     run(sudo_command("a2enconf", "serve-cgi-bin"))
     with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as control_source:
         control_source.write("running\n")
@@ -2983,12 +5418,17 @@ def start_ztp_monitor(
             "install", "-m", "0664", "-o", "root", "-g", "www-data",
             control_source.name, str(control_file),
         ))
-    apache_active = subprocess.run(
-        ["systemctl", "is-active", "--quiet", "apache2"], check=False,
-    ).returncode == 0
-    if apache_active:
-        run(sudo_command("apache2ctl", "configtest"))
-        run(sudo_command("systemctl", "reload", "apache2"))
+    _reload_apache_if_active(backend)
+    if _start_supervisor_program(
+        "ztp-monitor", scope, runtime_backend=backend,
+        monitor_interval=interval,
+    ):
+        ok(
+            "Supervisor ZTP 后台监控已启动："
+            f"间隔由容器运行态管理，scope={scope}"
+        )
+        print_ztp_monitor_access(service_ips)
+        return
     stopped = stop_other_ztp_monitors(project)
     if stopped:
         warn("已停止其他项目的旧 ZTP 监控进程：" + ", ".join(map(str, stopped)))
@@ -3012,27 +5452,33 @@ def start_ztp_monitor(
                     f"同项目旧 ZTP 监控进程 PID={pid} 在 5 秒内未退出；"
                     "为避免重复采集，本次不启动新进程"
                 )
-    if pid_file.exists():
-        pid_file.unlink()
-
     with log_file.open("a", encoding="utf-8") as output:
         output.write(
             f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] "
             f"load.py starting: {display}\n"
         )
         output.flush()
-        process = subprocess.Popen(
-            command,
-            cwd=HTTP_ROOT,
-            stdin=subprocess.DEVNULL,
-            stdout=output,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-    pid_file.write_text(f"{process.pid}\n", encoding="utf-8")
-    if process.poll() is not None:
-        pid_file.unlink(missing_ok=True)
-        raise LoadError(f"ZTP 后台监控启动后立即退出；请检查 {log_file}")
+        with monitor_pid_lock(pid_file):
+            if pid_file.exists():
+                pid_file.unlink()
+            process = _popen_subprocess(
+                command,
+                cwd=HTTP_ROOT,
+                stdin=subprocess.DEVNULL,
+                stdout=output,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+            try:
+                write_monitor_pid_record_locked(pid_file, process.pid)
+            except BaseException:
+                _terminate_failed_ztp_monitor_start(process)
+                raise
+            if process.poll() is not None:
+                pid_file.unlink(missing_ok=True)
+                raise LoadError(
+                    f"ZTP 后台监控启动后立即退出；请检查 {log_file}"
+                )
     ok(
         f"ZTP 后台监控已启动：PID={process.pid}，间隔={interval}s，"
         f"scope={scope}，日志={log_file}；停止命令：kill $(cat {pid_file})"
@@ -3043,13 +5489,13 @@ def start_ztp_monitor(
 def local_ipv4_addresses() -> set[str]:
     addresses: set[str] = set()
     if shutil.which("ip"):
-        result = subprocess.run(
+        result = _run_subprocess(
             ["ip", "-4", "-o", "addr", "show"], capture_output=True, text=True
         )
         if result.returncode == 0:
             addresses.update(re.findall(r"\binet\s+(\d+\.\d+\.\d+\.\d+)/", result.stdout))
     if not addresses and shutil.which("ifconfig"):
-        result = subprocess.run(["ifconfig"], capture_output=True, text=True)
+        result = _run_subprocess(["ifconfig"], capture_output=True, text=True)
         if result.returncode == 0:
             addresses.update(re.findall(r"\binet\s+(\d+\.\d+\.\d+\.\d+)\b", result.stdout))
     return {address for address in addresses if not address.startswith("127.")}
@@ -3119,7 +5565,7 @@ def _local_ipv4_assignments() -> dict[str, set[tuple[str, int]]]:
     """Return every IPv4 -> {(interface, prefix length), ...} assignment."""
     if not shutil.which("ip"):
         raise LoadError("本机没有 ip 命令，无法配置 service_ip")
-    result = subprocess.run(
+    result = _run_subprocess(
         ["ip", "-4", "-o", "address", "show"],
         capture_output=True, text=True,
     )
@@ -3168,7 +5614,7 @@ def configure_service_ips(
         if not shutil.which("ip"):
             raise LoadError("本机没有 ip 命令，无法配置 service_ip")
         for interface_name in sorted({item[1] for item in normalized}):
-            check = subprocess.run(
+            check = _run_subprocess(
                 ["ip", "link", "show", "dev", interface_name],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
@@ -3232,7 +5678,7 @@ def configure_service_ips(
     except LoadError:
         if not dry_run:
             for binding, interface_name in reversed(added):
-                subprocess.run(
+                _run_subprocess(
                     sudo_command(
                         "ip", "address", "del", binding, "dev", interface_name
                     ),
@@ -3287,7 +5733,7 @@ def configure_static_routes(
     pending = []
     for destination, gateway in normalized:
         if not dry_run:
-            current = subprocess.run(
+            current = _run_subprocess(
                 ["ip", "-4", "route", "show", "exact", destination],
                 capture_output=True, text=True,
             )
@@ -3323,7 +5769,7 @@ def configure_static_routes(
     except LoadError:
         if not dry_run:
             for destination, gateway in reversed(added):
-                subprocess.run(
+                _run_subprocess(
                     sudo_command(
                         "ip", "route", "del", destination, "via", gateway,
                     ),
@@ -3370,6 +5816,38 @@ def validate_management_host(settings: GlobalSettings, dry_run: bool = False) ->
     warn("服务不可用，不能在本机部署/启动 Apache 与 DHCP：" + message)
     info("load 将继续完成项目 setup、bootstrap 渲染和配置文件生成")
     return False
+
+
+def supervisor_service_availability(
+    inputs: ProjectInputs, plan: DhcpRuntimePlan, dry_run: bool = False,
+) -> tuple[bool, bool]:
+    """Return independent HTTP and DHCP availability for one container plan.
+
+    A DHCP-only shared network deliberately has no ZTP service endpoint.  The
+    legacy management-host gate couples Apache, DHCP, and ZTP and therefore
+    cannot classify that valid Supervisor case.  The live planner is already
+    the authority for local endpoint/listener ownership; this adapter keeps
+    the legacy systemd decision unchanged while allowing only the services
+    explicitly justified by the container plan.
+    """
+    http_available = bool(plan.endpoint_ips)
+    dhcp_available = bool(plan.listener_names)
+    if http_available and not validate_management_host(inputs.settings, dry_run):
+        raise LoadError(
+            "Supervisor runtime 需要启动 Apache，但 HTTP/ZTP 管理服务器门禁未通过"
+        )
+    if dhcp_available and not inputs.settings.dhcp_enabled:
+        raise LoadError(
+            "DHCP listener 规划非空，但 global 中 dhcp-server 未启用"
+        )
+    if dhcp_available:
+        info(
+            "Supervisor DHCP 服务可用：listeners="
+            + ", ".join(plan.listener_names)
+        )
+    if not http_available and dhcp_available:
+        info("当前为 DHCP-only/relay 运行态；没有 HTTP endpoint，不启动 Apache")
+    return http_available, dhcp_available
 
 
 def verify_http_publication(inputs: ProjectInputs, images: dict[str, Path], dry_run: bool) -> None:
@@ -3421,6 +5899,190 @@ def verify_published_files(
     ok("公钥与 HTTP 发布文件检查通过：" + ", ".join(runtime_keys))
 
 
+def _verified_control_auth_payload(path: Path, label: str) -> bytes:
+    """Read one single-link regular helper and bind it to the frozen source."""
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    if no_follow is None:
+        raise LoadError("Monitor control auth helper 校验要求 O_NOFOLLOW")
+    flags = (
+        os.O_RDONLY
+        | no_follow
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise LoadError(f"{label}不可用：{path}: {exc}") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise LoadError(f"{label}必须是 single-link regular file：{path}")
+        if metadata.st_size <= 0 or metadata.st_size > CONTROL_AUTH_HELPER_MAX_BYTES:
+            raise LoadError(f"{label}大小超出安全范围：{path}")
+        chunks = []
+        total = 0
+        while True:
+            chunk = os.read(
+                descriptor,
+                min(65536, CONTROL_AUTH_HELPER_MAX_BYTES + 1 - total),
+            )
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > CONTROL_AUTH_HELPER_MAX_BYTES:
+                raise LoadError(f"{label}大小超出安全范围：{path}")
+        payload = b"".join(chunks)
+        after = os.fstat(descriptor)
+    except OSError as exc:
+        raise LoadError(f"{label}读取失败：{path}: {exc}") from exc
+    finally:
+        os.close(descriptor)
+
+    def identity(value: os.stat_result) -> tuple[int, ...]:
+        return (
+            value.st_dev, value.st_ino, value.st_mode, value.st_nlink,
+            value.st_uid, value.st_gid, value.st_size,
+            getattr(value, "st_mtime_ns", 0),
+            getattr(value, "st_ctime_ns", 0),
+        )
+
+    try:
+        named = path.lstat()
+    except OSError as exc:
+        raise LoadError(f"{label}在校验期间发生变化：{path}") from exc
+    if (
+        identity(metadata) != identity(after)
+        or identity(after) != identity(named)
+        or len(payload) != after.st_size
+    ):
+        raise LoadError(f"{label}在校验期间发生变化：{path}")
+    actual = hashlib.sha256(payload).hexdigest()
+    if actual != CONTROL_AUTH_SOURCE_SHA256:
+        raise LoadError(
+            f"{label} source/helper hash 不一致：{path} sha256={actual}，"
+            f"期望={CONTROL_AUTH_SOURCE_SHA256}"
+        )
+    return payload
+
+
+def verify_control_auth(
+    *, runtime_backend: ServiceRuntimeBackend | None = None,
+    dry_run: bool = False,
+) -> None:
+    """Bind source + installed helper bytes and validate persistent auth state."""
+    backend = runtime_backend or service_runtime_backend()
+    helpers = {
+        "systemd": CONTROL_AUTH_NATIVE_HELPER,
+        "supervisor": CONTROL_AUTH_CONTAINER_HELPER,
+    }
+    try:
+        helper = helpers[backend.name]
+    except KeyError as exc:
+        raise LoadError(f"不支持的 control auth runtime backend：{backend.name}") from exc
+    if dry_run:
+        print(
+            f"[DRY] 校验 Monitor control auth：source={CONTROL_AUTH_SOURCE}，"
+            f"helper={helper}，sha256={CONTROL_AUTH_SOURCE_SHA256}"
+        )
+        return
+    source_payload = _verified_control_auth_payload(
+        CONTROL_AUTH_SOURCE, "Monitor control auth 源码",
+    )
+    installed_payload = _verified_control_auth_payload(
+        helper, "Monitor control auth 已安装 helper",
+    )
+    if not hmac.compare_digest(source_payload, installed_payload):
+        raise LoadError("Monitor control auth source/helper bytes 不一致")
+    run(sudo_command(str(helper), "validate"), dry_run=False)
+    ok(f"Monitor control auth 已验证：{helper}")
+
+
+def verify_monitor_authority(
+    *, runtime_backend: ServiceRuntimeBackend | None = None,
+    dry_run: bool = False,
+) -> None:
+    """Attest only; lifecycle setup owns all Monitor authority provisioning."""
+    backend = runtime_backend or service_runtime_backend()
+    helpers = {
+        "systemd": CONTROL_AUTH_NATIVE_HELPER,
+        "supervisor": CONTROL_AUTH_CONTAINER_HELPER,
+    }
+    try:
+        helper = helpers[backend.name]
+    except KeyError as exc:
+        raise LoadError(
+            f"不支持的 Monitor authority runtime backend：{backend.name}"
+        ) from exc
+    if dry_run:
+        print(f"[DRY] 只读校验 Monitor cache authority：helper={helper}")
+        return
+    source_payload = _verified_control_auth_payload(
+        CONTROL_AUTH_SOURCE, "Monitor control auth 源码",
+    )
+    installed_payload = _verified_control_auth_payload(
+        helper, "Monitor control auth 已安装 helper",
+    )
+    if not hmac.compare_digest(source_payload, installed_payload):
+        raise LoadError("Monitor control auth source/helper bytes 不一致")
+    command = sudo_command(str(helper), "monitor-authority-attest")
+    print(f"[RUN] ({Path.cwd()}) {' '.join(shlex_quote(item) for item in command)}")
+    result = _run_subprocess(
+        command, capture_output=True, text=True, check=False,
+    )
+    stdout = str(getattr(result, "stdout", "") or "")
+    stderr = str(getattr(result, "stderr", "") or "")
+    unsafe_output = (
+        len(stdout.encode("utf-8", errors="replace")) > CONTROL_AUTH_STATUS_MAX_BYTES
+        or len(stderr.encode("utf-8", errors="replace")) > CONTROL_AUTH_STATUS_MAX_BYTES
+        or "\x00" in stdout
+        or "\x00" in stderr
+    )
+    returncode = int(getattr(result, "returncode", 1))
+    if not unsafe_output and returncode == 4:
+        try:
+            payload = json.loads(stdout)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            payload = None
+        if (
+            isinstance(payload, dict)
+            and set(payload) == {"classification", "valid"}
+            and payload.get("valid") is False
+            and payload.get("classification") in {
+                "recovery-in-progress",
+                "recovery-committed-cleanup-pending",
+            }
+            and stdout == (
+                json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
+            )
+        ):
+            classification = str(payload["classification"])
+            recovery_command = {
+                "systemd": (
+                    "sudo ./infra/infra-setup.sh --recover-monitor-authority"
+                ),
+                "supervisor": (
+                    "sudo ./infra/docker/deploy.sh recover-monitor-authority"
+                ),
+            }[backend.name]
+            if classification == "recovery-committed-cleanup-pending":
+                raise LoadError(
+                    "classification=recovery-committed-cleanup-pending；previous "
+                    "Monitor authority recovery COMPLETED；the repaired authority "
+                    "itself is not in question；仅需重新只读验证并完成 marker cleanup："
+                    f"{recovery_command}"
+                )
+            raise LoadError(
+                "classification=recovery-in-progress；Monitor authority recovery "
+                "尚未提交，服务必须保持停止；请严格运行："
+                f"{recovery_command}"
+            )
+    if unsafe_output or returncode != 0 or stdout or stderr:
+        raise LoadError("Monitor cache authority 只读验证失败；服务保持停止")
+    ok(f"Monitor cache authority 已只读验证：{helper}")
+
+
 def verify_apache_publication_boundary(*, dry_run: bool = False) -> None:
     """Require the exact infra-managed static publication policy before start."""
     if dry_run:
@@ -3447,13 +6109,43 @@ def verify_apache_publication_boundary(*, dry_run: bool = False) -> None:
 
 
 def preflight_services(
-    inputs: ProjectInputs, images: dict[str, Path], dry_run: bool = False,
+    inputs: ProjectInputs, images: dict[str, Path], dry_run: bool = False, *,
+    dhcp_runtime_plan: DhcpRuntimePlan | None = None,
+    runtime_backend: ServiceRuntimeBackend | None = None,
 ) -> None:
+    backend = runtime_backend or service_runtime_backend()
+    if backend.name == "supervisor":
+        plan = dhcp_runtime_plan or plan_local_dhcp_runtime(inputs)
+        http_required = bool(plan.endpoint_ips)
+        dhcp_required = bool(plan.listener_names)
+        if http_required:
+            verify_control_auth(runtime_backend=backend, dry_run=dry_run)
+            verify_published_files(inputs, images, dry_run=dry_run)
+            verify_apache_publication_boundary(dry_run=dry_run)
+            run(sudo_command("apache2ctl", "configtest"), dry_run=dry_run)
+        if dhcp_required:
+            for source in dhcp_file_mappings():
+                _nonempty_file(source, f"DHCP 输出 {source.name}")
+            run(
+                sudo_command("dhcpd", "-t", "-cf", "/etc/dhcp/dhcpd.conf"),
+                dry_run=dry_run,
+            )
+        if not http_required and not dhcp_required:
+            info("Supervisor runtime plan 不需要启动 Apache/DHCP")
+        else:
+            labels = [
+                name for required, name in (
+                    (http_required, "Apache"), (dhcp_required, "DHCP"),
+                ) if required
+            ]
+            ok("启动前检查通过：" + "/".join(labels) + " 配置有效")
+        return
     if not inputs.settings.ztp_enabled:
         info("global 中 ZTP status=disabled，不启动服务")
         return
     if not validate_management_host(inputs.settings, dry_run):
         raise LoadError("本机服务启动条件不满足")
+    verify_control_auth(runtime_backend=backend, dry_run=dry_run)
     verify_published_files(inputs, images, dry_run=dry_run)
     verify_apache_publication_boundary(dry_run=dry_run)
     for source in dhcp_file_mappings():
@@ -3613,19 +6305,29 @@ def ensure_ztp_url_network_ready(
 
 
 def snapshot_service_states(
-    services: tuple[str, ...],
+    services: tuple[str, ...], *,
+    runtime_backend: ServiceRuntimeBackend | None = None,
 ) -> dict[str, ServiceRuntimeState]:
     """Capture service state after all read-only gates and before first mutation."""
+    backend = runtime_backend or service_runtime_backend()
+    if backend.name == "supervisor":
+        return {
+            service: ServiceRuntimeState(
+                enabled=True,
+                active=_runtime_service_active(backend, service),
+            )
+            for service in services
+        }
     systemctl = shutil.which("systemctl")
     if not systemctl:
         raise LoadError("服务启动门禁失败：未找到 systemctl")
     states: dict[str, ServiceRuntimeState] = {}
     for service in services:
-        active = subprocess.run(
+        active = _run_subprocess(
             [systemctl, "is-active", "--quiet", service],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         ).returncode == 0
-        enabled = subprocess.run(
+        enabled = _run_subprocess(
             [systemctl, "is-enabled", "--quiet", service],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         ).returncode == 0
@@ -3633,8 +6335,31 @@ def snapshot_service_states(
     return states
 
 
-def restore_service_states(states: dict[str, ServiceRuntimeState]) -> None:
+def restore_service_states(
+    states: dict[str, ServiceRuntimeState], *,
+    runtime_backend: ServiceRuntimeBackend | None = None,
+) -> None:
     """Best-effort restoration after a partial service activation failure."""
+    backend = runtime_backend or service_runtime_backend()
+    if backend.name == "supervisor":
+        errors = []
+        for service in states:
+            try:
+                if _runtime_service_active(backend, service):
+                    _runtime_service_action(backend, "stop", service)
+            except (LoadError, OSError, subprocess.SubprocessError) as exc:
+                errors.append(str(exc))
+        for service, state in states.items():
+            if not state.active:
+                continue
+            try:
+                _runtime_service_action(backend, "start", service)
+            except (LoadError, OSError, subprocess.SubprocessError) as exc:
+                errors.append(str(exc))
+        if errors:
+            raise LoadError("服务状态回滚失败：" + "；".join(errors))
+        warn("服务启动未完成；已恢复进入启动阶段前的 Supervisor 运行状态")
+        return
     commands: list[list[str]] = []
     # Stop both units first so an enable/disable rollback cannot leave a
     # half-started Apache/DHCP pair serving different releases.
@@ -3662,18 +6387,111 @@ def restore_service_states(states: dict[str, ServiceRuntimeState]) -> None:
     warn("服务启动未完成；已恢复进入启动阶段前的 enabled/active 状态")
 
 
-def start_services(inputs: ProjectInputs, images: dict[str, Path], dry_run: bool = False) -> None:
+def start_services(
+    inputs: ProjectInputs, images: dict[str, Path], dry_run: bool = False, *,
+    dhcp_runtime_plan: DhcpRuntimePlan | None = None,
+    runtime_backend: ServiceRuntimeBackend | None = None,
+) -> None:
     services = ("apache2", "isc-dhcp-server")
-    # This network/interface check can prompt the operator, so it must finish
-    # before the first enable/start/restart action.
+    plan = dhcp_runtime_plan or plan_local_dhcp_runtime(inputs)
+    backend = runtime_backend or service_runtime_backend()
+    if backend.name == "supervisor":
+        http_required = bool(plan.endpoint_ips)
+        dhcp_required = bool(plan.listener_names)
+        # This endpoint check can prompt the operator, so it must finish before
+        # the first Supervisor mutation.  DHCP-only plans have no URL endpoint
+        # and must not be forced through an Apache-specific gate.
+        if http_required:
+            ensure_ztp_url_network_ready(inputs, dry_run=dry_run)
+        if dry_run:
+            if http_required:
+                _runtime_service_action(
+                    backend, "start", "apache2", dry_run=True,
+                )
+            if dhcp_required:
+                _runtime_service_action(
+                    backend, "restart", "isc-dhcp-server", dry_run=True,
+                )
+            if not http_required:
+                info("dry-run：没有 HTTP endpoint，Apache 保持停止")
+            if not dhcp_required:
+                info("dry-run：DHCP listener 为 0，DHCP 保持停止")
+            if http_required:
+                verify_http_publication(inputs, images, True)
+        else:
+            states = snapshot_service_states(
+                services, runtime_backend=backend,
+            )
+            try:
+                desired = {
+                    "apache2": http_required,
+                    "isc-dhcp-server": dhcp_required,
+                }
+                # First remove services which the new release no longer owns;
+                # then activate only the exact services selected by the plan.
+                for service in services:
+                    if not desired[service] and states[service].active:
+                        _runtime_service_action(backend, "stop", service)
+                if http_required and not states["apache2"].active:
+                    _runtime_service_action(backend, "start", "apache2")
+                if dhcp_required:
+                    action = (
+                        "restart" if states["isc-dhcp-server"].active else "start"
+                    )
+                    _runtime_service_action(
+                        backend, action, "isc-dhcp-server",
+                    )
+                if http_required:
+                    verify_http_publication(inputs, images, False)
+            except BaseException as exc:
+                rollback_error = ""
+                try:
+                    restore_service_states(states, runtime_backend=backend)
+                except (
+                    LoadError, OSError, subprocess.SubprocessError,
+                ) as rollback_exc:
+                    rollback_error = str(rollback_exc)
+                if rollback_error:
+                    print(f"[ERROR] {rollback_error}", file=sys.stderr)
+                    if isinstance(exc, Exception):
+                        raise LoadError(
+                            "服务启动失败且状态回滚不完整："
+                            f"{exc}；{rollback_error}"
+                        ) from exc
+                raise
+        selected = []
+        if http_required:
+            selected.append("Apache")
+        if dhcp_required:
+            selected.append(
+                "DHCP(" + ",".join(plan.listener_names) + ")"
+            )
+        ok(
+            "Supervisor 服务已收敛："
+            + (", ".join(selected) if selected else "全部保持停止")
+        )
+        return
+    # Preserve the established systemd gate and activation semantics.
     ensure_ztp_url_network_ready(inputs, dry_run=dry_run)
+    if not plan.listener_names:
+        if dry_run:
+            info("dry-run：DHCP listener 为 0，Apache/DHCP 保持停止")
+            return
+        states = snapshot_service_states(services, runtime_backend=backend)
+        for service, state in states.items():
+            if state.active:
+                run(sudo_command("systemctl", "stop", service))
+        ok("DHCP listener 为 0；Apache/DHCP 已保持停止，未执行宽泛 DHCP 监听")
+        return
     if dry_run:
         run(sudo_command("systemctl", "enable", "--now", "apache2"), dry_run=True)
         run(sudo_command("systemctl", "enable", "isc-dhcp-server"), dry_run=True)
         run(sudo_command("systemctl", "restart", "isc-dhcp-server"), dry_run=True)
         verify_http_publication(inputs, images, True)
     else:
-        states = snapshot_service_states(services)
+        states = snapshot_service_states(
+            services, runtime_backend=backend,
+        )
         try:
             run(sudo_command("systemctl", "enable", "--now", "apache2"))
             run(sudo_command("systemctl", "enable", "isc-dhcp-server"))
@@ -3684,7 +6502,7 @@ def start_services(inputs: ProjectInputs, images: dict[str, Path], dry_run: bool
         except BaseException as exc:
             rollback_error = ""
             try:
-                restore_service_states(states)
+                restore_service_states(states, runtime_backend=backend)
             except (LoadError, OSError, subprocess.SubprocessError) as rollback_exc:
                 rollback_error = str(rollback_exc)
             if rollback_error:
@@ -3702,7 +6520,8 @@ def start_services(inputs: ProjectInputs, images: dict[str, Path], dry_run: bool
 
 
 def validate_inputs(
-    project: Path, args: argparse.Namespace,
+    project: Path, args: argparse.Namespace, *,
+    allow_management_key_generation: bool,
 ) -> tuple[ProjectInputs, dict[str, Path]]:
     global_file = project / "01-global.yaml"
     devices_file = project / "02-devices_config.csv"
@@ -3712,12 +6531,19 @@ def validate_inputs(
     device_types: frozenset[str] = frozenset()
     p2p_file = project / (args.p2p_file or "p2p.xlsx")
     air_topology_policy = None
+    mini_devices_file = None
+    mini_source_file = None
+    preview_images: dict[str, Path] = {}
+    deployment_scope = str(getattr(args, "deployment_scope", "all") or "all")
+    switch_scope = str(getattr(args, "switch_scope", "all") or "all")
     try:
         settings = apply_subnet_service_ips(settings, subnet_file)
     except LoadError as exc:
         validation_errors.append(str(exc))
     try:
-        device_types = load_device_types(devices_file, settings.schema_version)
+        device_types = load_device_types(
+            devices_file, settings.schema_version, switch_scope=switch_scope,
+        )
     except LoadError as exc:
         validation_errors.append(str(exc))
     try:
@@ -3732,53 +6558,285 @@ def validate_inputs(
         air_topology_policy = project_air_topology_policy(project)
     except LoadError as exc:
         validation_errors.append(str(exc))
+    try:
+        mini_source_file, mini_devices_file = project_mini_air_devices(
+            project, getattr(args, "mini", None),
+        )
+    except LoadError as exc:
+        validation_errors.append(str(exc))
+    if getattr(args, "mini", None):
+        try:
+            _require_mini_sampling_policy(air_topology_policy)
+        except LoadError as exc:
+            validation_errors.append(str(exc))
     if device_types and not args.no_upgrade:
         try:
             # First pass is read-only so all customer-input errors are reported
             # together before a project image is copied into the shared store.
-            prepare_images(
-                project, expected_images(settings, device_types), dry_run=True, quiet=True
+            preview_images = prepare_images(
+                project,
+                expected_images(
+                    settings, device_types,
+                    deployment_scope=deployment_scope, switch_scope=switch_scope,
+                ),
+                dry_run=True, quiet=True,
             )
         except LoadError as exc:
             validation_errors.append(str(exc))
     if validation_errors:
         raise LoadError("项目输入检查失败：\n  - " + "\n  - ".join(validation_errors))
+    provisional_inputs = ProjectInputs(
+        global_file=global_file,
+        devices_file=devices_file,
+        subnet_file=subnet_file,
+        p2p_file=p2p_file,
+        device_types=device_types,
+        pubkeys=(),
+        settings=settings,
+        air_topology_policy=air_topology_policy,
+        mini_devices_file=mini_devices_file,
+        mini_source_file=mini_source_file,
+        deployment_scope=deployment_scope,
+        switch_scope=switch_scope,
+    )
+    customer_source: Path | None = None
+    if (
+        mini_source_file is not None
+        and mini_source_file.name != MINI_AIR_DEVICES_NAME
+    ):
+        try:
+            customer_stat = mini_source_file.lstat()
+        except OSError as exc:
+            raise LoadError(f"无法读取 mini AIR customer source：{exc}") from exc
+        if stat.S_ISREG(customer_stat.st_mode) and customer_stat.st_nlink == 1:
+            customer_source = mini_source_file
+        elif not stat.S_ISLNK(customer_stat.st_mode):
+            raise LoadError("mini AIR customer source 必须是 single-link regular file")
+    source_identities = {
+        name: _sha256_path(path)
+        for name, path in {
+            "global": global_file,
+            "devices": devices_file,
+            "subnet": subnet_file,
+            "p2p": p2p_file,
+            **(
+                {"air_topology_policy": air_topology_policy}
+                if air_topology_policy is not None else {}
+            ),
+            **(
+                {"mini_air_customer_source": customer_source}
+                if customer_source is not None
+                else {}
+            ),
+        }.items()
+    }
+    provisional_inputs = replace(
+        provisional_inputs, source_identities=source_identities,
+    )
+    # A receipt-managed image must be bound before management-key injection or
+    # any project image copy can mutate live state.
+    validate_shared_artifact_receipts(
+        project,
+        provisional_inputs,
+        preview_images,
+        upgrade_enabled=not args.no_upgrade,
+    )
     pubkeys = prepare_pubkeys(
         project,
         ssh_dir=args.ssh_dir,
         dry_run=args.dry_run,
         inject_management_key=supports_local_ztp_services(),
+        allow_management_key_generation=allow_management_key_generation,
     )
     if args.no_upgrade:
         images: dict[str, Path] = {}
         info("--no-upgrade：跳过项目及共享 image 目录中的全部 .bin 检查")
     else:
         images = prepare_images(
-            project, expected_images(settings, device_types), dry_run=args.dry_run
+            project,
+            expected_images(
+                settings, device_types,
+                deployment_scope=deployment_scope, switch_scope=switch_scope,
+            ),
+            dry_run=args.dry_run,
         )
     ok(
         f"输入检查通过：types={','.join(sorted(device_types))}，"
         f"P2P={p2p_file.name}，keys={','.join(item.name for item in pubkeys[:2])}"
     )
-    return (
-        ProjectInputs(
-            global_file=global_file,
-            devices_file=devices_file,
-            subnet_file=subnet_file,
-            p2p_file=p2p_file,
-            device_types=device_types,
-            pubkeys=pubkeys,
-            settings=settings,
-            air_topology_policy=air_topology_policy,
-        ),
-        images,
+    return replace(provisional_inputs, pubkeys=pubkeys), images
+
+
+def validate_password_update_options(args: argparse.Namespace) -> None:
+    """Reject password-rotation combinations with misleading load semantics."""
+    if bool(getattr(args, "update_passwords", False)) and bool(
+        getattr(args, "dry_run", False)
+    ):
+        raise LoadError(
+            "--update-passwords 不能与 11-load.py --dry-run 同时使用；"
+            "请先单独运行 tools/password-update.py --dry-run"
+        )
+
+
+def validate_deployment_scope_options(args: argparse.Namespace) -> str:
+    """Validate the end-to-end generation scope before the first mutation."""
+    scope = str(getattr(args, "deployment_scope", "all") or "").casefold()
+    if scope not in {"all", "prod", "air"}:
+        raise LoadError(f"无法识别 deployment scope：{scope!r}")
+    if getattr(args, "mini", None) is not None:
+        if scope == "all":
+            scope = "air"
+        elif scope != "air":
+            raise LoadError("--mini 已隐含 AIR 部署范围，不能与 --prod 同时使用")
+    monitor_scope = str(
+        getattr(args, "ztp_monitor_scope", "auto") or "auto"
+    ).casefold()
+    if (
+        monitor_scope != "auto"
+        and scope in {"prod", "air"}
+        and monitor_scope != scope
+    ):
+        raise LoadError(
+            f"部署范围 {scope} 与监控范围 {monitor_scope} 冲突"
+        )
+    return scope
+
+
+def validate_switch_scope_options(
+    args: argparse.Namespace, deployment_scope: str,
+) -> str:
+    """Resolve the platform selector before the deployment lock or any write."""
+    requested = getattr(args, "switch_scope", None)
+    selected = str(requested or ("eth" if deployment_scope == "air" else "all"))
+    selected = selected.strip().casefold()
+    if selected not in SWITCH_SCOPE_TYPES:
+        raise LoadError(f"无法识别 switch scope：{selected!r}")
+    if deployment_scope == "air" and selected != "eth":
+        raise LoadError("AIR 环境目前只支持 Cumulus；请使用 --switch eth")
+    return selected
+
+
+def prompt_password_update_selection(*, reader=input, printer=print) -> tuple[str, bool]:
+    """Prompt for one of the five operator-visible password rotation scopes."""
+    options = {
+        "1": ("Cumulus Ethernet", "cumulus"),
+        "2": ("NVOS IB", "ib"),
+        "3": ("NVOS NVLink", "nvl"),
+        "4": ("NVOS IB/NVLink", "nvos"),
+        "5": ("ALL", "all"),
+    }
+    printer("请选择要更新的密码：")
+    for choice, (label, _platform) in options.items():
+        printer(f"  {choice}) {label}")
+    while True:
+        try:
+            choice = reader("选择 [1-5]: ").strip()
+        except EOFError as exc:
+            raise LoadError("未能从终端读取密码更新范围") from exc
+        if choice in options:
+            break
+        warn("请输入 1、2、3、4 或 5")
+
+    platform = options[choice][1]
+    if platform not in {"nvos", "all"}:
+        return platform, False
+    while True:
+        try:
+            answer = reader("所选系统是否使用同一个密码？[y/N]: ").strip().casefold()
+        except EOFError as exc:
+            raise LoadError("未能从终端读取共用密码选择") from exc
+        if answer in {"", "n", "no"}:
+            return platform, False
+        if answer in {"y", "yes"}:
+            return platform, True
+        warn("请输入 y 或 n")
+
+
+def _load_password_update_module():
+    """Load the packaged password tool without duplicating credential logic."""
+    module_name = "_http_password_update_for_load"
+    existing = sys.modules.get(module_name)
+    if existing is not None:
+        return existing
+    try:
+        metadata = PASSWORD_UPDATE_SCRIPT.lstat()
+    except OSError as exc:
+        raise LoadError(f"缺少密码更新脚本：{PASSWORD_UPDATE_SCRIPT}") from exc
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise LoadError("tools/password-update.py 必须是 single-link regular file")
+    spec = importlib.util.spec_from_file_location(module_name, PASSWORD_UPDATE_SCRIPT)
+    if spec is None or spec.loader is None:
+        raise LoadError(f"无法加载密码更新脚本：{PASSWORD_UPDATE_SCRIPT}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(module_name, None)
+        raise
+    if not callable(getattr(module, "rotate_project_passwords", None)):
+        sys.modules.pop(module_name, None)
+        raise LoadError("tools/password-update.py 缺少 rotate_project_passwords 接口")
+    if not callable(getattr(module, "validate_hash_backend", None)):
+        sys.modules.pop(module_name, None)
+        raise LoadError("tools/password-update.py 缺少 validate_hash_backend 接口")
+    return module
+
+
+def preflight_password_update_backend() -> str:
+    """Prove both required hash methods before lock, prompts, or writes."""
+    module = _load_password_update_module()
+    try:
+        return module.validate_hash_backend(("eth", "ib", "nvl"))
+    except module.PasswordUpdateError as exc:
+        raise LoadError(f"密码哈希更新失败：{exc}") from exc
+
+
+def update_passwords_before_load(
+    project: Path,
+    *,
+    platform: str,
+    same_password: bool,
+    root: Path = HTTP_ROOT,
+    day0: Path = HERE,
+    reader=None,
+):
+    """Rotate project hashes while the caller holds the load deployment lock."""
+    module = _load_password_update_module()
+    try:
+        result = module.rotate_project_passwords(
+            project,
+            platform=platform,
+            same_password=same_password,
+            dry_run=False,
+            root=root,
+            day0=day0,
+            lock_already_held=True,
+            reader=reader,
+        )
+    except module.PasswordUpdateError as exc:
+        raise LoadError(f"密码哈希更新失败：{exc}") from exc
+    ok(f"密码哈希已原子更新：{result.path.name}")
+    info(
+        "系统映射：Cumulus=SHA-512 crypt；NVOS IB/NVLink=yescrypt；"
+        "本次 load 将使用更新后的 global"
     )
+    return result
 
 
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("project", help="DAY0-Prepare 下的部署项目目录或其绝对路径")
     parser.add_argument("--p2p-file", help="明确选择项目根目录或 p2p/ 下的 P2P XLSX")
+    parser.add_argument(
+        "--mini", nargs="?", const=MINI_AIR_DEVICES_NAME,
+        metavar="DEVICES.txt",
+        help=(
+            "自动选择 AIR/eth，仅为 AIR DOT/JSON 保留代表性小拓扑；"
+            "可选指定项目根目录下的客户设备清单"
+            "（默认 04-air-mini-devices.txt）"
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true", help="仅显示动作，不安装、生成或启动")
     parser.add_argument(
         "--no-upgrade", action="store_true",
@@ -3795,6 +6853,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--skip-generate", action="store_true", help="跳过配置生成（调试用）")
     parser.add_argument(
+        "--update-passwords",
+        action="store_true",
+        help="load 开始时显示五项菜单，并交互更新所选 global 密码",
+    )
+    parser.add_argument(
         "--start-services", action="store_true",
         help="验证通过后明确启动 Apache/DHCP；不指定时最终交互确认，默认启动",
     )
@@ -3807,41 +6870,104 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--ztp-monitor-interval", type=int, default=DEFAULT_ZTP_MONITOR_INTERVAL,
         metavar="SECONDS", help="后台 ZTP 监控间隔（默认 30 秒，最小 5 秒）",
     )
-    environment = parser.add_mutually_exclusive_group()
-    environment.add_argument(
+    deployment = parser.add_mutually_exclusive_group()
+    deployment.add_argument(
+        "--deployment-scope", choices=("all", "prod", "air"),
+        help="端到端生成范围；默认 all 同时生成 Production 与 AIR",
+    )
+    deployment.add_argument(
+        "--air", action="store_const", const="air", dest="deployment_scope",
+        help="仅生成并发布 AIR；monitor scope=auto 时自动继承 air",
+    )
+    deployment.add_argument(
+        "--prod", action="store_const", const="prod", dest="deployment_scope",
+        help="仅生成并发布 Production；monitor scope=auto 时自动继承 prod",
+    )
+    parser.add_argument(
+        "--switch", choices=("eth", "ib", "nvl"), dest="switch_scope",
+        help=("只校验、生成并发布一个设备族；eth 包含 eth/eth_spx/spx/AIR。"
+              "不指定时处理全部设备族；--air 未指定本项时自动选择 eth"),
+    )
+    monitor_environment = parser.add_mutually_exclusive_group()
+    monitor_environment.add_argument(
         "--ztp-monitor-scope", choices=("auto", "prod", "air"),
         dest="ztp_monitor_scope",
         help=("本管理服务器可达的 ZTP 环境：auto 在交互终端询问；"
               "prod/air 仅采集指定环境"),
     )
-    environment.add_argument(
+    monitor_environment.add_argument(
         "--type", choices=("auto", "prod", "air"), dest="ztp_monitor_scope",
-        help="ZTP 监控环境；等价于 --ztp-monitor-scope",
+        help="旧的 monitor-only 别名；等价于 --ztp-monitor-scope",
     )
-    environment.add_argument(
-        "--air", action="store_const", const="air", dest="ztp_monitor_scope",
-        help="本管理服务器监控 AIR；等价于 --type air",
+    parser.set_defaults(
+        deployment_scope="all", switch_scope=None, ztp_monitor_scope="auto",
     )
-    environment.add_argument(
-        "--prod", action="store_const", const="prod", dest="ztp_monitor_scope",
-        help="本管理服务器监控 Production；等价于 --type prod",
-    )
-    parser.set_defaults(ztp_monitor_scope="auto")
     parser.add_argument(
         "--ssh-dir", type=Path, default=_default_ssh_dir(), help=argparse.SUPPRESS,
     )
+    parser.epilog = (
+        "AIR inventory 说明：生成阶段以 p2p-air.json 为权威来源，原子重建 "
+        "02-devices_config.csv 末尾的 type=air 行。\n"
+        "完整、受支持的操作流程见仓库根目录 USER_MANUAL.md。"
+    )
+    return parser
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = _build_parser()
     return parser.parse_args(argv)
 
 
+def actual_run_command(requested_argv: list[str]) -> list[str]:
+    """Return the exact non-preview rerun while preserving all other intent."""
+    actual_argv = [item for item in requested_argv if item != "--dry-run"]
+    return sudo_command(
+        sys.executable, str(Path(__file__).resolve()), *actual_argv,
+    )
+
+
+def dry_run_next_step(requested_argv: list[str]) -> str:
+    """Render the exact non-preview command without dropping other options."""
+    return (
+        "[NEXT] dry-run 已完成；确认输出后执行实际事务："
+        + " ".join(
+            shlex_quote(part) for part in actual_run_command(requested_argv)
+        )
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
+    requested_argv = list(sys.argv[1:] if argv is None else argv)
     args = parse_args(argv)
     release_link_snapshot: dict[Path, Optional[str]] = {}
     release_committed = False
     deployment_lock_descriptor: int | None = None
     parent_candidate: PreparedParentRelease | None = None
     prefix_publication_snapshot: ZtpPrefixPublicationSnapshot | None = None
+    dhcp_runtime_plan: DhcpRuntimePlan | None = None
+    runtime_backend_instance: ServiceRuntimeBackend | None = None
+    http_service_available = False
+    dhcp_service_available = False
     services_must_remain_stopped = False
+    native_monitor_quiesced = False
+    allow_management_key_generation=False
+    should_monitor = False
+    monitor_scope: str | None = None
+    failure_phase = "启动前参数检查"
     try:
+        host_os = runtime_os()
+        deployment_scope = validate_deployment_scope_options(args)
+        switch_scope = validate_switch_scope_options(args, deployment_scope)
+        args.deployment_scope = deployment_scope
+        args.switch_scope = switch_scope
+        if host_os.casefold() == "darwin":
+            macos_requirements = print_macos_client_requirements(
+                update_passwords=bool(getattr(args, "update_passwords", False)),
+            )
+            validate_macos_client_requirements(macos_requirements)
+        validate_password_update_options(args)
+        if bool(getattr(args, "update_passwords", False)):
+            preflight_password_update_backend()
         if args.skip_doca and args.download_doca:
             raise LoadError("--skip-doca 和 --download-doca 不能同时使用")
         if args.skip_generate and not args.dry_run:
@@ -3850,16 +6976,30 @@ def main(argv: list[str] | None = None) -> int:
                 "global/devices/subnet/p2p 来源证明，不能把旧制品重新签名为当前输入；"
                 "请执行完整配置生成"
             )
+        local_services_supported = supports_local_ztp_services(host_os)
+        if local_services_supported:
+            runtime_backend_instance = service_runtime_backend()
+            validate_runtime_options(args, runtime_backend_instance)
+            allow_management_key_generation = (
+                runtime_backend_instance.name != "supervisor"
+            )
+            if (
+                runtime_backend_instance.name == "supervisor"
+                and args.ssh_dir != Path("/root/.ssh")
+            ):
+                raise LoadError(
+                    "Supervisor management SSH authority 固定为 /root/.ssh；"
+                    "不接受 --ssh-dir override"
+                )
         if not args.dry_run:
             deployment_lock_descriptor = acquire_deployment_lock(exclusive=True)
-        host_os = runtime_os()
-        local_services_supported = supports_local_ztp_services(host_os)
         info(f"运行平台：{host_os}")
         if not local_services_supported:
             warn(
                 f"{host_os} 配置准备模式：继续 setup 和配置生成；跳过 infra、"
                 "Apache/ISC DHCP 文件安装、语法检查及服务启停"
             )
+        failure_phase = "项目解析与同步状态检查"
         project = resolve_project(args.project)
         sync_marker = HERE.parent / ".sync-code-in-progress"
         if sync_marker_present(sync_marker):
@@ -3867,6 +7007,26 @@ def main(argv: list[str] | None = None) -> int:
                 f"检测到代码/项目同步尚未完成：{sync_marker}\n"
                 "请等待 sync-code.py 打印 [OK] 同步完成后再执行 load；"
                 "若同步进程已异常退出，请先重新完成一次 sync-code.py"
+            )
+        if (
+            local_services_supported
+            and runtime_backend_instance.name == "systemd"
+            and not args.dry_run
+        ):
+            failure_phase = "停止旧 Native Monitor"
+            stop_native_ztp_monitors(HTTP_ROOT)
+            native_monitor_quiesced = True
+        if (
+            local_services_supported
+            and runtime_backend_instance is not None
+            and runtime_backend_instance.name == "supervisor"
+        ):
+            # The fixed container authority is attested before *any* project
+            # template/password mutation, including the empty-project branch.
+            ensure_management_key(
+                args.ssh_dir,
+                dry_run=args.dry_run,
+                allow_generation=False,
             )
         if not project.exists() or not _meaningful_entries(project):
             section("初始化空项目")
@@ -3885,27 +7045,98 @@ def main(argv: list[str] | None = None) -> int:
         if not project.is_dir():
             raise LoadError(f"参数不是目录：{project}")
 
+        if (
+            local_services_supported
+            and runtime_backend_instance is not None
+            and runtime_backend_instance.name == "supervisor"
+        ):
+            # This gate precedes template/password/project mutation.  The host
+            # locked helper is the only Supervisor key writer; 11-load merely
+            # holds and attests its exact service pair and project placeholders.
+            prepare_pubkeys(
+                project,
+                ssh_dir=args.ssh_dir,
+                dry_run=True,
+                inject_management_key=True,
+                allow_management_key_generation=False,
+            )
+
+        failure_phase = "补齐项目模板合同"
         section("补齐项目模板合同")
         initialize_from_template(project, args.dry_run)
 
+        if bool(getattr(args, "update_passwords", False)):
+            section("更新 Cumulus/NVOS 登录密码")
+            password_platform, same_password = prompt_password_update_selection()
+            update_passwords_before_load(
+                project,
+                platform=password_platform,
+                same_password=same_password,
+            )
+
+        failure_phase = "项目输入合法性与制品检查"
         section("项目输入合法性与制品检查")
-        inputs, images = validate_inputs(project, args)
+        inputs, images = validate_inputs(
+            project,
+            args,
+            allow_management_key_generation=allow_management_key_generation,
+        )
 
         section("活动项目 setup 检查/切换")
-        service_available = (
-            validate_management_host(inputs.settings, args.dry_run)
-            if local_services_supported else False
-        )
-        # Set the cleanup obligation before the first stop: an interrupt in the
-        # middle of quiescing must retry the stop rather than leave one old
-        # service active against links which may already be changing.
-        services_must_remain_stopped = (
-            local_services_supported and service_available and not args.dry_run
-        )
-        if service_available:
-            quiesce_services(args.dry_run)
+        if local_services_supported and runtime_backend_instance.name == "supervisor":
+            # The exact listener/ifindex plan is a pre-mutation gate.  If this
+            # fails, the catch path must leave currently healthy services alone.
+            dhcp_runtime_plan = plan_local_dhcp_runtime(inputs)
+            (
+                http_service_available,
+                dhcp_service_available,
+            ) = supervisor_service_availability(
+                inputs, dhcp_runtime_plan, args.dry_run,
+            )
         elif local_services_supported:
-            require_artifact_builder_services_inactive(args.dry_run)
+            legacy_service_available = validate_management_host(
+                inputs.settings, args.dry_run,
+            )
+            http_service_available = legacy_service_available
+            dhcp_service_available = legacy_service_available
+            if legacy_service_available:
+                dhcp_runtime_plan = plan_local_dhcp_runtime(inputs)
+        runtime_services_available = (
+            http_service_available or dhcp_service_available
+        )
+        if (
+            local_services_supported
+            and http_service_available
+            and dhcp_service_available
+        ):
+            failure_phase = "ZTP 后台监控启动意图与范围预检"
+            should_monitor = args.start_ztp_monitor or (
+                not args.dry_run and confirm_ztp_monitor_start()
+            )
+            if should_monitor:
+                monitor_scope = resolve_ztp_monitor_scope(
+                    project, args.ztp_monitor_scope,
+                    deployment_scope=deployment_scope,
+                )
+        if runtime_services_available:
+            # Set the cleanup obligation only after the planner passes but
+            # before the first stop: an interrupt partway through quiescing
+            # must retry the stop rather than leave a split old runtime.
+            services_must_remain_stopped = (
+                local_services_supported and not args.dry_run
+            )
+            failure_phase = "停止旧运行态服务"
+            quiesce_services(
+                args.dry_run,
+                dhcp_runtime_plan=dhcp_runtime_plan,
+                runtime_backend=runtime_backend_instance,
+                native_monitor_already_quiesced=native_monitor_quiesced,
+            )
+        elif local_services_supported:
+            require_artifact_builder_services_inactive(
+                args.dry_run, runtime_backend=runtime_backend_instance,
+            )
+        failure_phase = "活动项目 setup 检查/切换"
         activate_project(
             project, inputs.p2p_file,
             # Configuration-only platforms cannot inject the management-host
@@ -3915,8 +7146,9 @@ def main(argv: list[str] | None = None) -> int:
             deployment_lock_descriptor=deployment_lock_descriptor,
         )
 
+        failure_phase = "同步 ZTP 运行时参数"
         section("同步 ZTP 运行时参数")
-        if service_available:
+        if http_service_available:
             if not args.dry_run:
                 prefix_publication_snapshot = snapshot_ztp_prefix_publication(
                     inputs.settings
@@ -3943,7 +7175,13 @@ def main(argv: list[str] | None = None) -> int:
                 f"{inputs.settings.ztp_prefix}，跳过 prefix 运行态"
             )
         render_ztp_runtime(
-            inputs.settings, inputs.pubkeys, inputs.device_types,
+            inputs.settings, inputs.pubkeys,
+            _device_types_after_dhcp(
+                inputs.device_types, dry_run=True,
+                schema_version=inputs.settings.schema_version,
+                deployment_scope=deployment_scope,
+                switch_scope=switch_scope,
+            ),
             upgrade_enabled=not args.no_upgrade,
             dry_run=args.dry_run,
         )
@@ -3955,7 +7193,8 @@ def main(argv: list[str] | None = None) -> int:
 
         if not local_services_supported:
             warn(f"{host_os} 跳过 infra 安装；不会安装 Apache/ISC DHCP")
-        elif service_available and not args.skip_infra:
+        elif runtime_services_available and not args.skip_infra:
+            failure_phase = "安装/检查 ZTP 管理服务器"
             section("安装/检查 ZTP 管理服务器")
             prepare_infra(
                 inputs,
@@ -3963,22 +7202,48 @@ def main(argv: list[str] | None = None) -> int:
                 skip_doca=args.skip_doca,
                 download_doca=args.download_doca,
             )
-        elif not service_available:
+        elif not runtime_services_available:
             warn("本机不具备服务地址，跳过 infra 部署；load 继续")
         else:
             warn("已按参数跳过 infra 安装")
 
+        if local_services_supported and http_service_available:
+            failure_phase = "只读校验 Monitor cache authority"
+            verify_monitor_authority(
+                runtime_backend=runtime_backend_instance,
+                dry_run=args.dry_run,
+            )
+
         if not args.skip_generate:
+            failure_phase = "生成 P2P、YAML 和 DHCP 配置"
             section("生成 P2P、YAML 和 DHCP 配置")
             if not args.dry_run:
                 release_link_snapshot = snapshot_release_links(project)
+            generation_options = {
+                "install_dhcp": dhcp_service_available,
+                "dry_run": args.dry_run,
+                "schema_version": inputs.settings.schema_version,
+                "eth_version": inputs.settings.versions.get("eth"),
+                "air_topology_policy": inputs.air_topology_policy,
+                "deployment_scope": deployment_scope,
+                "switch_scope": switch_scope,
+            }
+            # Keep the established full-topology call contract byte-for-byte
+            # compatible for embedders which wrap generate_configs().
+            if getattr(args, "mini", False):
+                generation_options["mini_air"] = True
+                mini_source, _mini_canonical = project_mini_air_devices(
+                    project, args.mini,
+                )
+                generation_options["mini_devices_file"] = mini_source
+                generation_options["source_identities"] = inputs.source_identities
             generate_configs(
                 inputs.device_types,
-                install_dhcp=service_available,
-                dry_run=args.dry_run,
-                schema_version=inputs.settings.schema_version,
-                eth_version=inputs.settings.versions.get("eth"),
-                air_topology_policy=inputs.air_topology_policy,
+                deployment_lock_descriptor=deployment_lock_descriptor,
+                **generation_options,
+            )
+            retire_unselected_release_links(
+                project, switch_scope, dry_run=args.dry_run,
             )
         else:
             warn(
@@ -3986,6 +7251,7 @@ def main(argv: list[str] | None = None) -> int:
                 "--skip-generate"
             )
 
+        failure_phase = "统一 release 一致性与 DHCP 事务安装"
         section("统一 release 一致性与 DHCP 事务安装")
         parent_release = validate_and_publish_release(
             project, inputs, dry_run=args.dry_run, publish=False,
@@ -3995,7 +7261,7 @@ def main(argv: list[str] | None = None) -> int:
             # remaining commit is one os.replace performed while DHCP backups
             # and the global deployment lock are still held.
             parent_candidate = prepare_current_release(project, parent_release)
-        if local_services_supported and service_available:
+        if local_services_supported and dhcp_service_available:
             mount_and_test_dhcp(
                 args.dry_run, parent_candidate=parent_candidate,
             )
@@ -4012,46 +7278,59 @@ def main(argv: list[str] | None = None) -> int:
             commit_prepared_release(parent_candidate)
             release_committed = True
 
+        failure_phase = "服务启动门禁"
         section("服务启动门禁")
         if not local_services_supported:
             if args.start_services:
                 warn(f"{host_os} 不支持本流程的 --start-services，已忽略")
             info(f"{host_os} 配置准备完成；未检查或启动 Apache/ISC DHCP")
-        elif not service_available:
-            warn("service_ip 与本机不匹配：本次仅完成 load，不能部署或启动服务")
+        elif not runtime_services_available:
+            warn("当前 runtime plan 没有本机可启动的 HTTP/DHCP 服务")
         else:
-            preflight_services(inputs, images, args.dry_run)
+            if runtime_backend_instance.name == "systemd":
+                publish_native_apache_listener_config(
+                    inputs.settings.service_ips, dry_run=args.dry_run,
+                )
+            preflight_services(
+                inputs, images, args.dry_run,
+                dhcp_runtime_plan=dhcp_runtime_plan,
+                runtime_backend=runtime_backend_instance,
+            )
             should_start = args.start_services or (
                 not args.dry_run and confirm_service_start()
             )
             if should_start:
-                start_services(inputs, images, args.dry_run)
+                start_services(
+                    inputs, images, args.dry_run,
+                    dhcp_runtime_plan=dhcp_runtime_plan,
+                    runtime_backend=runtime_backend_instance,
+                )
             else:
                 info("Apache/DHCP 未启动。确认输出后可重新执行并加 --start-services。")
 
         if local_services_supported:
             section("ZTP 状态后台监控")
-            if not service_available:
-                warn("本机不具备 service_ip，不启动 ZTP 后台监控")
+            if not (http_service_available and dhcp_service_available):
+                warn("当前 runtime plan 不同时具备 HTTP endpoint 与 DHCP listener，不启动 ZTP 后台监控")
             else:
-                should_monitor = args.start_ztp_monitor or (
-                    not args.dry_run and confirm_ztp_monitor_start()
-                )
                 if should_monitor:
-                    monitor_scope = resolve_ztp_monitor_scope(
-                        project, args.ztp_monitor_scope
-                    )
+                    if monitor_scope is None:
+                        raise LoadError("ZTP 后台监控范围未在事务开始前完成预检")
+                    failure_phase = "启动 ZTP 后台监控与控制 worker"
                     start_ztp_monitor(
                         project, interval=args.ztp_monitor_interval,
                         scope=monitor_scope,
                         service_ips=inputs.settings.service_ips,
                         dry_run=args.dry_run,
+                        runtime_backend=runtime_backend_instance,
                     )
                     start_switch_collection_worker(
                         monitor_scope, dry_run=args.dry_run,
+                        runtime_backend=runtime_backend_instance,
                     )
                     start_manual_ztp_worker(
                         monitor_scope, dry_run=args.dry_run,
+                        runtime_backend=runtime_backend_instance,
                     )
                 else:
                     info(
@@ -4060,6 +7339,8 @@ def main(argv: list[str] | None = None) -> int:
                     )
         elif args.start_ztp_monitor:
             warn(f"{host_os} 不运行 ZTP 后台监控，已忽略 --start-ztp-monitor")
+        if args.dry_run:
+            print(dry_run_next_step(requested_argv))
         ok(f"load 流程完成：{project}")
         return 0
     except BaseException as exc:
@@ -4069,7 +7350,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         if services_must_remain_stopped:
             try:
-                quiesce_services(False)
+                quiesce_services(
+                    False,
+                    dhcp_runtime_plan=dhcp_runtime_plan,
+                    runtime_backend=runtime_backend_instance,
+                    native_monitor_already_quiesced=native_monitor_quiesced,
+                )
             except (LoadError, OSError, subprocess.SubprocessError) as cleanup_exc:
                 cleanup_errors.append(f"服务停止清理失败：{cleanup_exc}")
         if release_link_snapshot and not release_committed:
@@ -4082,6 +7368,30 @@ def main(argv: list[str] | None = None) -> int:
                 restore_ztp_prefix_publication(prefix_publication_snapshot)
             except (LoadError, OSError) as rollback_exc:
                 cleanup_errors.append(str(rollback_exc))
+        print(f"[FAILED] load 阶段失败：{failure_phase}", file=sys.stderr)
+        if services_must_remain_stopped:
+            print(
+                "[SAFE] 受管服务保持停止，避免运行未完成或跨代配置",
+                file=sys.stderr,
+            )
+            if not release_committed and not cleanup_errors:
+                print(
+                    "[SAFE] 未提交 release 的发布状态已回滚",
+                    file=sys.stderr,
+                )
+            elif release_committed:
+                print(
+                    "[STATE] release 已提交，但受管服务因后续失败保持停止",
+                    file=sys.stderr,
+                )
+        rerun = sudo_command(
+            sys.executable, str(Path(__file__).resolve()), *requested_argv,
+        )
+        print(
+            "[NEXT] 修复上述错误后完整重跑："
+            + " ".join(shlex_quote(part) for part in rerun),
+            file=sys.stderr,
+        )
         if isinstance(exc, KeyboardInterrupt):
             print("[CANCEL] load 被用户中断；已执行事务清理", file=sys.stderr)
         elif isinstance(exc, Exception):
@@ -4101,5 +7411,26 @@ def main(argv: list[str] | None = None) -> int:
         release_deployment_lock(deployment_lock_descriptor)
 
 
+def cli(argv: list[str] | None = None) -> int:
+    """Own the workstation test gate while keeping Linux production load lean."""
+    requested_argv = list(sys.argv[1:] if argv is None else argv)
+    try:
+        args = parse_args(requested_argv)
+        deployment_scope = validate_deployment_scope_options(args)
+        validate_switch_scope_options(args, deployment_scope)
+        local_formal_load = (
+            runtime_os().casefold() == "darwin" and not args.dry_run
+        )
+        if local_formal_load:
+            run_local_full_test_gate()
+        result = main(requested_argv)
+        if result == 0 and local_formal_load:
+            verify_local_full_test_attestation()
+        return result
+    except (LoadError, OSError, ValueError, RuntimeError) as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 1
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(cli())

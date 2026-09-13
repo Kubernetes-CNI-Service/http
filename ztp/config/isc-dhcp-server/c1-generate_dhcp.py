@@ -3,8 +3,22 @@
 读取当前目录下的 CSV 文件，生成 dhcpd.conf、dhcpd_eth.hosts、
 dhcpd_ib.hosts 和 dhcpd_nvl.hosts。
 
+本脚本只生成当前项目的候选文件，不直接写入 /etc/dhcp；独立生成仅用于开发预览。
+生产发布必须按当前后端执行统一事务：Native/systemd 使用
+DAY0-Prepare/11-load.py；Docker/Supervisor 在 source write 后使用
+infra/docker/deploy.sh deploy，或对与 live 来源身份链匹配且经验证的镜像使用
+infra/docker/deploy.sh deploy-preloaded <IMAGE_ID>。Docker load 仅用于没有 source write
+且已有运行中的 inactive 控制容器。
+
 用法：
-  python3 c1-generate_dhcp.py [-y]
+  python3 c1-generate_dhcp.py [-y] [--deployment-scope all|prod|air]
+      [--switch eth|ib|nvl]
+
+默认 `all` 同时生成 Production 与 AIR host；`prod` 排除 AIR，`air` 只生成 AIR host。
+`--switch` 只保留对应平台族；AIR 未指定时由 11-load 默认选择 eth。
+shared-network/subnet 声明是两个环境复用的管理网络合同，不按设备范围裁剪。
+
+完整、受支持的操作流程见仓库根目录 USER_MANUAL.md。
 
 输入文件：
   01-global.yaml          — 提供 common.mgmt.ztp.ztp_url_prefix
@@ -22,7 +36,7 @@ import os
 import re
 import select
 import shutil
-import subprocess
+import stat
 import sys
 import tempfile
 from datetime import datetime
@@ -42,6 +56,9 @@ from project_contract import (
     require_device_csv_row_width,
     validate_ztp_url_prefix,
 )
+from deployment_lock import DeploymentLockError, deployment_lock
+from ztp_service_runtime import RuntimeContractError, stop_native_ztp_monitors
+HTTP_ROOT    = os.path.dirname(TOOLS_DIR)
 OUTPUT_ETH   = os.path.join(SCRIPT_DIR, "dhcpd_eth.hosts")
 OUTPUT_IB    = os.path.join(SCRIPT_DIR, "dhcpd_ib.hosts")
 OUTPUT_NVL   = os.path.join(SCRIPT_DIR, "dhcpd_nvl.hosts")
@@ -390,19 +407,18 @@ def inherit_air_records_from_production(path, air_records, *, skip_missing=False
     return resolved
 
 
-def exclude_air_records(existing_records, hostnames):
-    """Remove selected type=air rows from the in-memory DHCP record set."""
-    unresolved = {
-        str(hostname).strip().casefold() for hostname in hostnames
-        if str(hostname).strip()
-    }
-    if not unresolved:
-        return list(existing_records), 0
+def exclude_all_air_records(existing_records):
+    """Remove the previous generated AIR inventory before applying current JSON.
+
+    ``type=air`` rows are generated state maintained from ``p2p-air.json``.
+    A reduced topology (for example ``--mini``) therefore replaces, rather
+    than overlays, the previous full AIR set.  Production and NVOS records are
+    retained byte-for-byte in memory.
+    """
     filtered = []
     removed = 0
     for rec in existing_records:
-        key = rec["hostname"].strip().casefold()
-        if rec.get("type", "").strip().casefold() == "air" and key in unresolved:
+        if rec.get("type", "").strip().casefold() == "air":
             removed += 1
             continue
         filtered.append(rec)
@@ -711,23 +727,81 @@ def plan_dhcp_assignments(records, subnets):
             rec["dhcp_assignment"] = "fixed"
     return errors
 
+
+def records_for_deployment_scope(records, deployment_scope):
+    """Return the exact device-interface inventory published for one scope."""
+    scope = str(deployment_scope or "").strip().casefold()
+    if scope == "all":
+        return list(records)
+    if scope == "air":
+        return [
+            item for item in records
+            if str(item.get("type") or "").strip().casefold() == "air"
+        ]
+    if scope == "prod":
+        return [
+            item for item in records
+            if str(item.get("type") or "").strip().casefold() != "air"
+        ]
+    raise ValueError(f"unsupported deployment scope: {deployment_scope!r}")
+
+
+def records_for_release_scope(
+    records, *, deployment_scope="all", switch_scope="all",
+):
+    """Filter DHCP inventory by environment and selected switch family."""
+    scoped = records_for_deployment_scope(records, deployment_scope)
+    families = {
+        "all": {"eth", "eth_spx", "spx", "air", "ib", "nvl"},
+        "eth": {"eth", "eth_spx", "spx", "air"},
+        "ib": {"ib"},
+        "nvl": {"nvl"},
+    }
+    allowed = families.get(str(switch_scope or "").strip().casefold())
+    if allowed is None:
+        raise ValueError(f"unsupported switch scope: {switch_scope!r}")
+    return [
+        item for item in scoped
+        if str(item.get("type") or "").strip().casefold() in allowed
+    ]
+
 # ── 生成输出文件 ──────────────────────────────────────────────────────────────
 
 def write_hosts(path, records):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     declarations = [r for r in records if not r.get("identity_pending")]
+    order_key = lambda r: (
+        str(r.get("hostname") or "").casefold(),
+        str(r.get("iface") or "").casefold(),
+        str(r.get("mac_norm") or ""),
+    )
+    production = sorted(
+        (r for r in declarations if str(r.get("type") or "").casefold() != "air"),
+        key=order_key,
+    )
+    air = sorted(
+        (r for r in declarations if str(r.get("type") or "").casefold() == "air"),
+        key=order_key,
+    )
     with open(path, "w", encoding="utf-8") as f:
         f.write(f"##### Generated at {now}\n\n")
-        for r in declarations:
-            dhcp_label = (f"{r['hostname']}-{r['iface']}"
-                          if r["type"] in ("ib", "nvl") else r["hostname"])
-            f.write(f"host {dhcp_label} {{\n")
-            f.write(f"        hardware ethernet {r['mac_norm']};\n")
-            if r.get("dhcp_assignment") == "fixed":
-                f.write(f"        fixed-address {r['ip'].strip()};\n")
-            f.write(f"        option host-name \"{r['hostname']}\";\n")
-            f.write("}\n\n")
-        f.write(f"##### {len(declarations)} entries\n")
+        for label, grouped in (("Production", production), ("AIR", air)):
+            if not grouped:
+                continue
+            f.write(f"##### {label} reservations\n\n")
+            for r in grouped:
+                dhcp_label = (f"{r['hostname']}-{r['iface']}"
+                              if r["type"] in ("ib", "nvl") else r["hostname"])
+                f.write(f"host {dhcp_label} {{\n")
+                f.write(f"        hardware ethernet {r['mac_norm']};\n")
+                if r.get("dhcp_assignment") == "fixed":
+                    f.write(f"        fixed-address {r['ip'].strip()};\n")
+                f.write(f"        option host-name \"{r['hostname']}\";\n")
+                f.write("}\n\n")
+        f.write(
+            f"##### Production {len(production)} entries; "
+            f"AIR {len(air)} entries\n"
+        )
     pending = len(records) - len(declarations)
     suffix = f"，identity_pending {pending} 条未声明" if pending else ""
     print(f"[OK] {os.path.basename(path)}：{len(declarations)} 条记录{suffix}")
@@ -741,7 +815,10 @@ def _sha256_file(path):
     return digest.hexdigest()
 
 
-def write_release_manifest(path, records, subnets, output_paths):
+def write_release_manifest(
+    path, records, subnets, output_paths, *, deployment_scope="all",
+    switch_scope="all", host_declarations_by_family=None,
+):
     """Atomically publish machine-readable planned identity/DHCP metadata."""
     devices = []
     for rec in sorted(
@@ -789,6 +866,8 @@ def write_release_manifest(path, records, subnets, output_paths):
     } for item in subnets]
     release_basis = {
         "schema_version": 1,
+        "deployment_scope": deployment_scope,
+        "switch_scope": switch_scope,
         "subnets": subnet_items,
         "devices": devices,
         "platform_routing": {
@@ -815,6 +894,11 @@ def write_release_manifest(path, records, subnets, output_paths):
             item["dhcp_assignment"] == "dynamic_known" for item in devices
         ),
     }
+    if host_declarations_by_family is not None:
+        counts["host_declarations_by_family"] = {
+            family: int(host_declarations_by_family[family])
+            for family in ("eth", "ib", "nvl")
+        }
     manifest = {
         **release_basis,
         "release_id": hashlib.sha256(canonical).hexdigest()[:20],
@@ -845,6 +929,149 @@ def write_release_manifest(path, records, subnets, output_paths):
         f"identity_pending={counts['identity_pending']}"
     )
     return manifest
+
+
+_HOST_DECLARATION_RE = re.compile(
+    r"(?m)^\s*host\s+[A-Za-z0-9][A-Za-z0-9._-]*\s*\{\s*$"
+)
+
+
+def _count_preserved_host_declarations(path):
+    """Count declarations in a host file owned by another switch family."""
+    try:
+        info = os.lstat(path)
+    except OSError as exc:
+        raise OSError(
+            f"scoped DHCP generation requires preserved host file {path}: {exc}"
+        ) from exc
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise OSError(
+            f"scoped DHCP preserved host file must be single-link regular: {path}"
+        )
+    with open(path, "r", encoding="utf-8") as stream:
+        text = stream.read()
+    return len(_HOST_DECLARATION_RE.findall(text))
+
+
+def _candidate_mode(candidate, target, default=0o644):
+    """Retain an existing output mode without touching its inode before commit."""
+    try:
+        current = os.lstat(target)
+    except FileNotFoundError:
+        mode = default
+    else:
+        if not stat.S_ISREG(current.st_mode) or current.st_nlink != 1:
+            raise OSError(f"DHCP output must be a single-link regular file: {target}")
+        mode = stat.S_IMODE(current.st_mode)
+    os.chmod(candidate, mode)
+
+
+def _publish_dhcp_candidates(candidates, transaction_dir):
+    """Publish a prepared output set, restoring original inodes on any failure."""
+    backup_dir = os.path.join(transaction_dir, "backup")
+    os.mkdir(backup_dir, 0o700)
+    states = []
+    try:
+        for index, (candidate, target) in enumerate(candidates):
+            backup = os.path.join(backup_dir, f"{index}-{os.path.basename(target)}")
+            existed = os.path.lexists(target)
+            state = {
+                "target": target,
+                "backup": backup,
+                "existed": existed,
+                "installed": False,
+            }
+            states.append(state)
+            if existed:
+                os.replace(target, backup)
+            try:
+                os.replace(candidate, target)
+                state["installed"] = True
+            except BaseException:
+                if existed and not os.path.lexists(target):
+                    os.replace(backup, target)
+                raise
+        directory_fd = os.open(
+            os.path.dirname(os.path.realpath(candidates[0][1])),
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except BaseException:
+        rollback_errors = []
+        for state in reversed(states):
+            target = state["target"]
+            backup = state["backup"]
+            try:
+                if state["installed"] and os.path.lexists(target):
+                    os.unlink(target)
+                if state["existed"] and os.path.lexists(backup):
+                    os.replace(backup, target)
+            except OSError as rollback_exc:
+                rollback_errors.append(f"{target}: {rollback_exc}")
+        if rollback_errors:
+            raise OSError(
+                "DHCP candidate publication failed and rollback was incomplete: "
+                + "; ".join(rollback_errors)
+            )
+        raise
+
+
+def _prepare_dhcp_output_transaction(*, family_records, switch_scope):
+    """Allocate paths and preserved-family metadata for one generation."""
+    targets = {
+        "conf": os.path.realpath(OUTPUT_CONF),
+        "eth": os.path.realpath(OUTPUT_ETH),
+        "ib": os.path.realpath(OUTPUT_IB),
+        "nvl": os.path.realpath(OUTPUT_NVL),
+        "manifest": os.path.realpath(OUTPUT_MANIFEST),
+    }
+    parent = os.path.dirname(targets["conf"])
+    for target in targets.values():
+        if os.path.dirname(target) != parent:
+            raise OSError("DHCP outputs must share one transaction directory")
+    owned_families = (
+        {"eth", "ib", "nvl"} if switch_scope == "all" else {switch_scope}
+    )
+    declaration_counts = {}
+    for family in ("eth", "ib", "nvl"):
+        if family in owned_families:
+            declaration_counts[family] = sum(
+                not item.get("identity_pending") for item in family_records[family]
+            )
+        else:
+            declaration_counts[family] = _count_preserved_host_declarations(
+                targets[family]
+            )
+
+    transaction_dir = tempfile.mkdtemp(prefix=".dhcp-generate-", dir=parent)
+    stage = {
+        label: os.path.join(transaction_dir, os.path.basename(target))
+        for label, target in targets.items()
+    }
+    manifest_outputs = tuple(
+        stage[label] if label == "conf" or label in owned_families
+        else targets[label]
+        for label in ("conf", "eth", "ib", "nvl")
+    )
+    publish = [(stage["conf"], targets["conf"])]
+    publish.extend(
+        (stage[family], targets[family])
+        for family in ("eth", "ib", "nvl")
+        if family in owned_families
+    )
+    publish.append((stage["manifest"], targets["manifest"]))
+    return {
+        "directory": transaction_dir,
+        "targets": targets,
+        "stage": stage,
+        "owned_families": owned_families,
+        "declaration_counts": declaration_counts,
+        "manifest_outputs": manifest_outputs,
+        "publish": publish,
+    }
 
 # ── Subnet 配置 ───────────────────────────────────────────────────────────────
 
@@ -1173,6 +1400,21 @@ def write_dhcpd_conf(path, subnets):
 
 # ── 入口 ──────────────────────────────────────────────────────────────────────
 
+def _production_handoff_text():
+    """Return runtime-neutral guidance after standalone candidate generation."""
+    return (
+        "[NEXT] 已生成项目内 DHCP 候选；独立生成仅用于开发预览，不构成生产发布\n"
+        "[NEXT] Native/systemd：sudo python3 DAY0-Prepare/11-load.py "
+        "DAY0-Prepare/<project>\n"
+        "[NEXT] Docker/Supervisor 首次部署或 source write 后："
+        "sudo ./infra/docker/deploy.sh deploy\n"
+        "[NEXT] 已有与 live 来源身份链匹配且经验证的镜像："
+        "sudo ./infra/docker/deploy.sh deploy-preloaded <IMAGE_ID>\n"
+        "[NEXT] 没有 source write 且已有运行中的 inactive 控制容器："
+        "sudo ./infra/docker/deploy.sh load"
+    )
+
+
 def main():
     global _AUTO_YES
     args = sys.argv[1:]
@@ -1182,6 +1424,49 @@ def main():
     if "-y" in args:
         _AUTO_YES = True
         args = [a for a in args if a != "-y"]
+    deployment_scope = "all"
+    switch_scope = "all"
+    remaining = []
+    index = 0
+    while index < len(args):
+        argument = args[index]
+        if argument.startswith("--deployment-scope="):
+            deployment_scope = argument.split("=", 1)[1]
+        elif argument == "--deployment-scope":
+            index += 1
+            if index >= len(args):
+                print("[ERROR] --deployment-scope requires all, prod, or air", file=sys.stderr)
+                sys.exit(2)
+            deployment_scope = args[index]
+        elif argument.startswith("--switch="):
+            switch_scope = argument.split("=", 1)[1]
+        elif argument == "--switch":
+            index += 1
+            if index >= len(args):
+                print("[ERROR] --switch requires eth, ib, or nvl", file=sys.stderr)
+                sys.exit(2)
+            switch_scope = args[index]
+        else:
+            remaining.append(argument)
+        index += 1
+    args = remaining
+    if deployment_scope not in {"all", "prod", "air"}:
+        print(
+            f"[ERROR] unsupported deployment scope: {deployment_scope!r}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if switch_scope not in {"all", "eth", "ib", "nvl"}:
+        print(
+            f"[ERROR] unsupported switch scope: {switch_scope!r}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if deployment_scope == "air" and switch_scope not in {"all", "eth"}:
+        print("[ERROR] AIR environment requires --switch eth", file=sys.stderr)
+        sys.exit(2)
+    if deployment_scope == "air" and switch_scope == "all":
+        switch_scope = "eth"
     if args:
         print(f"[ERROR] 不支持的参数：{' '.join(args)}", file=sys.stderr)
         print("使用 -h 或 --help 查看用法", file=sys.stderr)
@@ -1221,13 +1506,23 @@ def main():
               f"共 {len(recs)} 条记录（含 eth1）")
         all_records.extend(recs)
 
-    if os.path.isfile(P2P_AIR_JSON):
+    if (
+        switch_scope in {"all", "eth"}
+        and deployment_scope != "prod"
+        and os.path.isfile(P2P_AIR_JSON)
+    ):
         print(f"读取：{os.path.basename(P2P_AIR_JSON)}")
         try:
             raw_air_records = load_p2p_air_json(P2P_AIR_JSON)
             air_records = inherit_air_records_from_production(
                 DEVICES_CSV, raw_air_records, skip_missing=True
             )
+            all_records, previous_air = exclude_all_air_records(all_records)
+            if previous_air:
+                print(
+                    f"  [INFO] 当前 AIR JSON 作为权威清单；从内存移除 "
+                    f"{previous_air} 条上一轮 type=air 记录后重建"
+                )
             unresolved_air = {
                 rec["hostname"] for rec in raw_air_records
                 if rec.get("production_missing")
@@ -1239,22 +1534,10 @@ def main():
                 rec["type"] = "air"
                 rec["dynamic"] = True
                 dynamic_air_records.append(rec)
-            all_records, removed_static = exclude_air_records(
-                all_records, unresolved_air
-            )
             if unresolved_air:
                 print(
                     f"  [INFO] {len(unresolved_air)} 台 AIR 设备改用动态 DHCP range；"
-                    f"本次忽略 CSV 中 {removed_static} 条同名静态 AIR 记录"
-                )
-            resolved_air = {rec["hostname"] for rec in air_records}
-            all_records, replaced_static = exclude_air_records(
-                all_records, resolved_air
-            )
-            if replaced_static:
-                print(
-                    f"  [INFO] 使用 production 继承值替换内存中的 "
-                    f"{replaced_static} 条已有 AIR 静态记录"
+                    "不写入静态 AIR CSV 行"
                 )
         except ValueError as exc:
             print(f"[ERROR] {exc}")
@@ -1278,7 +1561,12 @@ def main():
     else:
         print(f"[INFO] 当前目录未找到 {os.path.basename(P2P_AIR_JSON)}，跳过 AIR 节点")
 
-    valid_records, errors = validate(all_records)
+    selected_records = records_for_release_scope(
+        all_records,
+        deployment_scope=deployment_scope,
+        switch_scope=switch_scope,
+    )
+    valid_records, errors = validate(selected_records)
     errors.extend(validate_records_against_subnets(valid_records, subnets))
     errors.extend(plan_dhcp_assignments(valid_records, subnets))
 
@@ -1288,9 +1576,16 @@ def main():
             print(e)
         sys.exit(1)
 
-    eth_records = [r for r in valid_records if r["type"] in ("eth", "eth_spx", "spx", "air")]
-    ib_records  = [r for r in valid_records if r["type"] == "ib"]
-    nvl_records = [r for r in valid_records if r["type"] == "nvl"]
+    scoped_records = valid_records
+    if not scoped_records:
+        print(
+            f"[ERROR] deployment scope={deployment_scope}, "
+            f"switch scope={switch_scope} 没有可生成的设备记录"
+        )
+        sys.exit(1)
+    eth_records = [r for r in scoped_records if r["type"] in ("eth", "eth_spx", "spx", "air")]
+    ib_records  = [r for r in scoped_records if r["type"] == "ib"]
+    nvl_records = [r for r in scoped_records if r["type"] == "nvl"]
 
     print(f"\n验证通过：eth/eth_spx/spx/air {len(eth_records)} 条，ib {len(ib_records)} 条，"
           f"nvl {len(nvl_records)} 条")
@@ -1312,60 +1607,91 @@ def main():
         print("已取消")
         sys.exit(0)
 
-    print()
-    write_dhcpd_conf(OUTPUT_CONF, subnets)
-    write_hosts(OUTPUT_ETH, eth_records)
-    write_hosts(OUTPUT_IB,  ib_records)
-    write_hosts(OUTPUT_NVL, nvl_records)
-    write_release_manifest(
-        OUTPUT_MANIFEST, valid_records, subnets,
-        (OUTPUT_CONF, OUTPUT_ETH, OUTPUT_IB, OUTPUT_NVL),
-    )
-
-    print()
-    if _confirm("[y/N] 是否复制配置文件到 /etc/dhcp/？", default="n"):
-        for src_path, destination in [(OUTPUT_CONF, "/etc/dhcp/dhcpd.conf"),
-                                      (OUTPUT_ETH,  "/etc/dhcp/dhcpd_eth.hosts"),
-                                      (OUTPUT_IB,   "/etc/dhcp/dhcpd_ib.hosts"),
-                                      (OUTPUT_NVL,  "/etc/dhcp/dhcpd_nvl.hosts")]:
-            result = subprocess.run(["sudo", "install", "-m", "0644", src_path, destination],
-                                    capture_output=True, text=True)
-            if result.returncode == 0:
-                print(f"[COPY] {src_path} -> {destination}")
-            else:
-                print(f"[WARN] 无法复制到 {destination}：{result.stderr.strip()}")
-    else:
-        print("跳过复制到 /etc/dhcp")
-
-    generated_air = {
-        (
-            r["hostname"].strip().casefold(),
-            r["ip"].strip(),
-            r.get("mac_norm") or normalize_mac(r["mac"]) or "",
-        )
-        for r in air_records
-    } & {
-        (r["hostname"].strip().casefold(), r["ip"].strip(), r.get("mac_norm") or "")
-        for r in eth_records if not r.get("identity_pending")
-    }
-    if os.path.isfile(P2P_AIR_JSON):
-        print(f"\n检测到 {len(generated_air)} 台 AIR Cumulus 设备已写入 dhcpd_eth.hosts。")
-        if _confirm(
-            "[Y/n] 是否原子重建 02-devices_config.csv 末尾的 type=air 行？",
-        ):
-            try:
-                added, updated, existed = append_air_records_to_csv(
-                    DEVICES_CSV, air_records, subnets,
-                )
-            except (OSError, ValueError) as exc:
-                print(f"[ERROR] 更新 02-devices_config.csv 的 AIR 行失败：{exc}")
-                sys.exit(1)
-            print(
-                f"[OK] 02-devices_config.csv 末尾 AIR 行：新增 {added} 台，"
-                f"更新 {updated} 台，内容不变 {existed} 台"
+    try:
+        with deployment_lock(HTTP_ROOT):
+            stop_native_ztp_monitors(HTTP_ROOT)
+            print()
+            transaction = _prepare_dhcp_output_transaction(
+                family_records={
+                    "eth": eth_records,
+                    "ib": ib_records,
+                    "nvl": nvl_records,
+                },
+                switch_scope=switch_scope,
             )
-        else:
-            print("跳过更新 02-devices_config.csv 的 AIR 行")
+            try:
+                stage = transaction["stage"]
+                targets = transaction["targets"]
+                write_dhcpd_conf(stage["conf"], subnets)
+                _candidate_mode(stage["conf"], targets["conf"])
+                family_records = {
+                    "eth": eth_records,
+                    "ib": ib_records,
+                    "nvl": nvl_records,
+                }
+                for family in ("eth", "ib", "nvl"):
+                    if family in transaction["owned_families"]:
+                        write_hosts(stage[family], family_records[family])
+                        _candidate_mode(stage[family], targets[family])
+                write_release_manifest(
+                    stage["manifest"], scoped_records, subnets,
+                    transaction["manifest_outputs"],
+                    deployment_scope=deployment_scope,
+                    switch_scope=switch_scope,
+                    host_declarations_by_family=(
+                        transaction["declaration_counts"]
+                    ),
+                )
+                _candidate_mode(stage["manifest"], targets["manifest"])
+                _publish_dhcp_candidates(
+                    transaction["publish"], transaction["directory"]
+                )
+            finally:
+                shutil.rmtree(transaction["directory"], ignore_errors=True)
+
+            print("\n" + _production_handoff_text())
+
+            generated_air = {
+                (
+                    r["hostname"].strip().casefold(),
+                    r["ip"].strip(),
+                    r.get("mac_norm") or normalize_mac(r["mac"]) or "",
+                )
+                for r in air_records
+            } & {
+                (
+                    r["hostname"].strip().casefold(), r["ip"].strip(),
+                    r.get("mac_norm") or "",
+                )
+                for r in eth_records if not r.get("identity_pending")
+            }
+            if deployment_scope != "prod" and os.path.isfile(P2P_AIR_JSON):
+                print(
+                    f"\n检测到 {len(generated_air)} 台 AIR Cumulus 设备已写入 "
+                    "dhcpd_eth.hosts。"
+                )
+                if _confirm(
+                    "[Y/n] 是否原子重建 02-devices_config.csv 末尾的 type=air 行？",
+                ):
+                    try:
+                        added, updated, existed = append_air_records_to_csv(
+                            DEVICES_CSV, air_records, subnets,
+                        )
+                    except (OSError, ValueError) as exc:
+                        print(
+                            "[ERROR] 更新 02-devices_config.csv 的 AIR 行失败："
+                            f"{exc}"
+                        )
+                        sys.exit(1)
+                    print(
+                        f"[OK] 02-devices_config.csv 末尾 AIR 行：新增 {added} 台，"
+                        f"更新 {updated} 台，内容不变 {existed} 台"
+                    )
+                else:
+                    print("跳过更新 02-devices_config.csv 的 AIR 行")
+    except (DeploymentLockError, RuntimeContractError) as exc:
+        print(f"[ERROR] 部署/Monitor 写前保护失败：{exc}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

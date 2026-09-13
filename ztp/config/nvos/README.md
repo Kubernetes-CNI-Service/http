@@ -27,3 +27,7 @@ python3 d-hostname2mac.py -y template/99-output-ib_nvl/<时间戳>-combine
 
 在标准 NVOS template 路径内可省略 `--branch ib`；`11-load.py` 会始终显式传入它。把共享
 生成器复制到其他目录调试时不可依赖目录名推断分支。
+
+`template/P2P/01-inventory.log` 是指向 Cumulus P2P inventory 的受管软链接。NVOS 转换器
+通过 `ztp/config/topology_rules.py` 按 section-first 规则解析它；不会使用“最长 glob 胜出”
+的另一套优先级。修改分类 section 或顺序时必须同时通过三 consumer 的 topology workflow。

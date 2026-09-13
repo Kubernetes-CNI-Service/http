@@ -1,0 +1,57 @@
+name: Monitor authority root namespace evidence
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  root-entrypoint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out exact source tree
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Select the governed Python runtime
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Bind the clean committed tree and approved proof
+        shell: bash
+        run: |
+          set -euo pipefail
+          python_bin="$(command -v python3)"
+          test -n "$python_bin"
+          tree_id=$(/usr/bin/git rev-parse --verify 'HEAD^{tree}')
+          "$python_bin" -m pip install --disable-pip-version-check -r requirements-dev.txt
+          PYTHONPYCACHEPREFIX=/tmp/http-test-pyc PYTHONDONTWRITEBYTECODE=1 \
+            "$python_bin" -B test_cases/run_related_tests.py --all --no-approve -v
+          PYTHONPYCACHEPREFIX=/tmp/http-test-pyc PYTHONDONTWRITEBYTECODE=1 \
+            "$python_bin" -B test_cases/run_related_tests.py --check
+          current_tree_id=$(/usr/bin/git rev-parse --verify 'HEAD^{tree}')
+          test "$current_tree_id" = "$tree_id"
+          /usr/bin/git diff --quiet --exit-code
+          /usr/bin/git diff --cached --quiet --exit-code
+          test -z "$(/usr/bin/git ls-files --others --exclude-standard)"
+          "$python_bin" -B test_cases/monitor_authority_source_guard.py check \
+            --repository "$PWD" --tree-id "$tree_id"
+          sudo --non-interactive /usr/bin/env -i \
+            HOME=/root LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+            PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 \
+            HTTP_ZTP_MONITOR_ROOT_NAMESPACE=1 \
+            /bin/bash -c '
+              set -euo pipefail
+              repository=$1
+              python_bin=$2
+              expected_tree_id=$3
+              [[ "$expected_tree_id" =~ ^[0-9a-f]{40}$ ]]
+              cd "$repository"
+              exec 9</proc/self/ns/mnt
+              HTTP_ZTP_MONITOR_EXPECTED_TREE_ID="$expected_tree_id" \
+                exec "$python_bin" -B -m unittest -v test_cases.test_monitor_authority_entrypoints.MonitorAuthorityRootNamespaceScenario.test_real_root_entrypoint_workflow
+            ' monitor-authority-root "$PWD" "$python_bin" "$tree_id"

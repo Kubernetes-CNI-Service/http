@@ -65,6 +65,40 @@ class DownloadCliContractTests(unittest.TestCase):
                 DOWNLOAD.create_day0_archive(args)
             self.assertEqual(0o644, stat.S_IMODE(output.stat().st_mode))
 
+    def test_full_workspace_uses_download_artifact_without_deployment_gate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "full-workspace.tar.gz"
+            args = DOWNLOAD.parse_args([
+                "--full-workspace", "-o", str(output),
+            ])
+            events = []
+
+            def create_download(
+                actual_args, *, day0_all, artifact_kind,
+            ):
+                self.assertIs(args, actual_args)
+                self.assertTrue(day0_all)
+                self.assertEqual("download", artifact_kind)
+                events.append("package:download")
+                return output
+
+            with mock.patch.object(
+                DOWNLOAD, "parse_args", return_value=args,
+            ), mock.patch.object(
+                DOWNLOAD.package_core, "create_package",
+                side_effect=create_download,
+            ), mock.patch.object(
+                DOWNLOAD, "run_predeploy_test_gate", create=True,
+                side_effect=AssertionError(
+                    "download recovery artifacts must not require deployment gate",
+                ),
+            ) as deployment_gate, redirect_stdout(io.StringIO()), \
+                    redirect_stderr(io.StringIO()):
+                self.assertEqual(0, DOWNLOAD.main([]))
+
+            self.assertEqual(["package:download"], events)
+            deployment_gate.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

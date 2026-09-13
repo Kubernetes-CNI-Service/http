@@ -28,6 +28,8 @@ DAY0 = ROOT / "DAY0-Prepare"
 DEFAULT_REVIEW_ROOT = ROOT / "package-imports"
 MAX_MEMBERS = 500_000
 SAFE_PROJECT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+GLOBAL_SYNC_STATE = Path("99-output-ztp/.sync-code-global.sha256")
+SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 HELP_EPILOG = """
@@ -47,6 +49,8 @@ HELP_EPILOG = """
      恢复归档中的安全权限；相同或冲突的本地项不改权限。
   5. 使用 --review-only 时只创建审核快照和报告，完全不修改 DAY0-Prepare。
   6. import-report.json 和 import-report.md 记录新增、相同、冲突和错误明细。
+     对 01-global.yaml 会列出 Mac 与 VM/归档 SHA-256；若归档携带旧版
+     sync-code 共同基线，仅作历史取证信息。报告不自动选择或覆盖任一版本。
   7. 99-output-*/latest 属于运行态控制链接，不从归档导入。普通导入完成后，
      若发现更新且完整的 ZTP report.json，会打印原子切换 latest 并刷新页面的命令。
 
@@ -72,7 +76,9 @@ HELP_EPILOG = """
 
 说明：
   * 本工具只用于把管理服务器的 download 项目数据带回本地。管理服务器部署
-    upload 包时不要运行本工具，直接把归档解压到 HTTP 根目录即可。
+    upload 包时不要运行本工具；应在本地使用 tools/tar-for-upload.py --deploy，
+    并显式选择 --runtime native 或 --runtime docker，由归档内 source manifest 绑定的
+    deployment_prewrite_guard.py 受控写入。禁止对 live HTTP 根目录手工解压。
   * 本工具刻意不提供覆盖开关。确认确实需要采用管理服务器版本后，请先查看
     conflict 报告，再手工复制具体文件。
   * package-imports/ 不会被 tools/tar-for-upload.py、tools/tar-for-download.py
@@ -452,6 +458,79 @@ def digest(path: Path) -> str:
     return result.hexdigest()
 
 
+def _optional_regular_digest(path: Path) -> tuple[str | None, str | None]:
+    """Return one safe file digest plus an optional inspection error."""
+    if not os.path.lexists(path):
+        return None, None
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        return None, str(exc)
+    if path.is_symlink() or not path.is_file() or metadata.st_nlink != 1:
+        return None, "不是单链接普通文件"
+    try:
+        return digest(path), None
+    except OSError as exc:
+        return None, str(exc)
+
+
+def compare_project_global_authority(
+    archive_project: Path, local_project: Path,
+) -> dict[str, Any] | None:
+    """Describe Mac/archive divergence and retain any legacy baseline evidence."""
+    archive_global = archive_project / "01-global.yaml"
+    local_global = local_project / "01-global.yaml"
+    archive_sha256, archive_error = _optional_regular_digest(archive_global)
+    local_sha256, local_error = _optional_regular_digest(local_global)
+    if archive_sha256 is None and local_sha256 is None and not (
+        archive_error or local_error
+    ):
+        return None
+
+    baseline_path = archive_project / GLOBAL_SYNC_STATE
+    baseline = None
+    baseline_error = None
+    if os.path.lexists(baseline_path):
+        try:
+            metadata = baseline_path.lstat()
+            if (
+                baseline_path.is_symlink()
+                or not baseline_path.is_file()
+                or metadata.st_nlink != 1
+            ):
+                raise ValueError("不是单链接普通文件")
+            raw = baseline_path.read_text(encoding="ascii")
+            if raw.endswith("\n"):
+                raw = raw[:-1]
+            if not SHA256_PATTERN.fullmatch(raw):
+                raise ValueError("内容不是单个 SHA-256")
+            baseline = raw
+        except (OSError, UnicodeError, ValueError) as exc:
+            baseline_error = str(exc)
+
+    if archive_error or local_error or baseline_error:
+        classification = "unsafe"
+    elif archive_sha256 == local_sha256:
+        classification = "identical"
+    elif baseline is None:
+        classification = "unbased-conflict"
+    elif local_sha256 == baseline and archive_sha256 != baseline:
+        classification = "remote-only"
+    elif archive_sha256 == baseline and local_sha256 != baseline:
+        classification = "local-only"
+    else:
+        classification = "diverged"
+    return {
+        "classification": classification,
+        "local_sha256": local_sha256,
+        "archive_sha256": archive_sha256,
+        "sync_baseline_sha256": baseline,
+        "local_error": local_error,
+        "archive_error": archive_error,
+        "sync_baseline_error": baseline_error,
+    }
+
+
 def sanitized_import_mode(mode: int, *, directory: bool = False) -> int:
     """Return a safe local mode derived from an archive member mode."""
     # Never import special bits or group/other write permission.  Keep useful
@@ -614,8 +693,11 @@ def post_import_actions(targets: dict[str, Path]) -> list[dict[str, str]]:
     return actions
 
 
-def new_project_report() -> dict[str, list[str]]:
-    return {"added": [], "identical": [], "conflicts": [], "errors": []}
+def new_project_report() -> dict[str, Any]:
+    return {
+        "added": [], "identical": [], "conflicts": [], "errors": [],
+        "global_sync": None,
+    }
 
 
 def write_report(review: Path, report: dict[str, Any]) -> None:
@@ -674,6 +756,17 @@ def write_report(review: Path, report: dict[str, Any]) -> None:
                   f"- Identical: {len(result['identical'])}",
                   f"- Conflicts (not overwritten): {len(result['conflicts'])}",
                   f"- Errors: {len(result['errors'])}", ""]
+        comparison = result.get("global_sync")
+        if comparison is not None:
+            lines += [
+                "### 01-global.yaml comparison", "",
+                f"- Classification: `{comparison['classification']}`",
+                f"- Mac/local SHA-256: `{comparison['local_sha256'] or '<missing>'}`",
+                f"- VM/archive SHA-256: `{comparison['archive_sha256'] or '<missing>'}`",
+                "- Legacy sync baseline SHA-256 (forensics only): "
+                f"`{comparison['sync_baseline_sha256'] or '<missing>'}`",
+                "- Existing Mac files are never overwritten by import.", "",
+            ]
         if result["conflicts"]:
             lines += ["### Conflicts", ""] + [f"- `{item}`" for item in result["conflicts"]] + [""]
         if result["errors"]:
@@ -712,7 +805,7 @@ def main(argv: list[str] | None = None) -> int:
             review = unique_review_dir(review_root, archive_path)
             safe_extract(archive, chosen, review)
         report: dict[str, Any] = {
-            "schema_version": 4,
+            "schema_version": 5,
             "archive": str(archive_path),
             "review": str(review),
             "mode": "review-only" if args.review_only else "merge-new-only",
@@ -723,6 +816,12 @@ def main(argv: list[str] | None = None) -> int:
             "target_name_mismatches": target_name_mismatches(targets),
             "projects": {name: new_project_report() for name in selected},
         }
+        for name, target in targets.items():
+            report["projects"][name]["global_sync"] = (
+                compare_project_global_authority(
+                    review / "DAY0-Prepare" / name, target,
+                )
+            )
         proceed = True
         if not args.review_only:
             proceed = confirm_mismatched_targets(
@@ -750,6 +849,19 @@ def main(argv: list[str] | None = None) -> int:
                 f"identical={len(result['identical'])}, "
                 f"conflicts={len(result['conflicts'])}, errors={len(result['errors'])}"
             )
+            comparison = result.get("global_sync")
+            if comparison and comparison["classification"] == "remote-only":
+                print(
+                    "[WARN] 01-global.yaml：VM/归档端单边修改；"
+                    "Mac 本地版本保持不变，请先审核两个 SHA-256"
+                )
+            elif comparison and comparison["classification"] in {
+                "diverged", "unbased-conflict", "unsafe",
+            }:
+                print(
+                    "[WARN] 01-global.yaml 权威来源无法自动判定；"
+                    "Mac 本地版本保持不变，请查看 import-report"
+                )
         print(f"[OK] 导入报告：{review / 'import-report.md'}")
         if newer_non_project:
             print(

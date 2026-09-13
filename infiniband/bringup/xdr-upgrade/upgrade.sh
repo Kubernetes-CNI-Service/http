@@ -1053,10 +1053,22 @@ detect_mgmt_server_ip() {
 
 # ─── Version Extraction from Filenames ─────────────────────────────────────────
 
-# nvosv25-02-7002amd64.bin → 25.02.7002
+# Supported examples:
+#   nvosv25-02-7002amd64.bin  → 25.02.7002
+#   nvos-amd64-25.03.1010.bin → 25.03.1010
 os_ver_from_file() {
-    basename "$1" | grep -oE 'nvosv[0-9]+-[0-9]+-[0-9]+' \
-        | sed 's/nvosv//; s/-/./g'
+    local file version
+    file=$(basename "$1")
+    if [[ "$file" =~ ^nvosv([0-9]+-[0-9]+-[0-9]+)amd64[.]bin$ ]]; then
+        version=${BASH_REMATCH[1]}
+        printf '%s\n' "${version//-/.}"
+        return 0
+    fi
+    if [[ "$file" =~ ^nvos-amd64-([0-9]+[.][0-9]+[.][0-9]+)[.]bin$ ]]; then
+        printf '%s\n' "${BASH_REMATCH[1]}"
+        return 0
+    fi
+    return 1
 }
 
 # FUI000557_BURN_BM_... → FUI000557
@@ -2581,16 +2593,19 @@ main() {
     LOG_INDENT="  "
 
     # Derive targets
-    local target_os_final target_bios cpld_fui
+    local target_os_final target_bios cpld_fui os_file os_version
+    local -a os_path_versions=()
     target_os_final=$(os_ver_from_file "${TARGET_OS_FILES[$(( ${#TARGET_OS_FILES[@]} - 1 ))]}")
     target_bios="$TARGET_BIOS_VERSION"
     TARGET_CPLD_PAIRS=$(cpld_pairs_from_file "$TARGET_CPLD_BURN_FILE")
     cpld_fui=$(cpld_fui_from_file "$TARGET_CPLD_BURN_FILE")
 
     if $RUN_OS; then
-        log "OS upgrade path:  $(printf '%s  ' "${TARGET_OS_FILES[@]}" \
-                                   | grep -oE 'nvosv[0-9]+-[0-9]+-[0-9]+' \
-                                   | sed 's/nvosv//; s/-/./g' | tr '\n' ' ')"
+        for os_file in "${TARGET_OS_FILES[@]}"; do
+            os_version=$(os_ver_from_file "$os_file")
+            os_path_versions+=("$os_version")
+        done
+        log "OS upgrade path:  ${os_path_versions[*]}"
         log "Target OS final:  ${target_os_final}"
     fi
     $RUN_BIOS && log "Target BIOS:      ${target_bios}  (upgrade only from ${BIOS_UPGRADE_FROM_VERSION} with ${TARGET_BIOS_FILE})"

@@ -1,0 +1,70 @@
+services:
+  ztp-services:
+    container_name: http-ztp
+    labels:
+      com.nvidia.http-ztp.managed: "true"
+      com.nvidia.http-ztp.http-root: /var/www/html
+    image: http-ztp:ubuntu-24.04
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile
+    network_mode: host
+    user: "0:0"
+    environment:
+      HTTP_ZTP_PROJECT: ${HTTP_ZTP_PROJECT}
+      HTTP_ZTP_SCOPE: ${HTTP_ZTP_SCOPE}
+      HTTP_ZTP_SWITCH_SCOPE: ${HTTP_ZTP_SWITCH_SCOPE}
+      HTTP_ZTP_MINI: ${HTTP_ZTP_MINI}
+      HTTP_ZTP_MONITOR_INTERVAL: ${HTTP_ZTP_MONITOR_INTERVAL}
+      HTTP_ZTP_DHCP_INTERFACE_ALLOWLIST: ${HTTP_ZTP_DHCP_INTERFACE_ALLOWLIST:-}
+      HTTP_ZTP_DHCP_RELAY_INGRESS: ${HTTP_ZTP_DHCP_RELAY_INGRESS:-}
+      TZ: ${TZ}
+      HTTP_ZTP_RUNTIME_BACKEND: supervisor
+      HTTP_ZTP_ROOT: /var/www/html
+      HTTP_ZTP_STATE_ROOT: /var/lib/http-ztp
+      HTTP_ZTP_LOG_ROOT: /var/log/http-ztp
+      HTTP_ZTP_DHCP_CONFIG: /etc/dhcp/dhcpd.conf
+      HTTP_ZTP_DHCP_LEASES: /var/lib/dhcp/dhcpd.leases
+      HTTP_ZTP_APACHE_LISTENERS: /etc/apache2/conf-enabled/http-ztp-listeners.conf
+      HTTP_ZTP_ASKPASS_TMPDIR: /run/http-ztp/askpass
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - /var/www/html:/var/www/html
+      - /var/lib/http-ztp-container/runtime:/var/lib/http-ztp
+      - /var/lib/http-ztp-container/dhcp-etc:/etc/dhcp
+      - /var/lib/http-ztp-container/dhcp-lib:/var/lib/dhcp
+      - /var/lib/http-ztp-container/ssh:/root/.ssh
+      - /var/lib/http-ztp-container/logs:/var/log/http-ztp
+      - /var/lib/http-ztp-container/apache-logs:/var/log/apache2
+      - type: bind
+        source: /var/lib/http-ztp-container/control-auth
+        target: /etc/http-ztp
+        read_only: true
+      - type: bind
+        source: /var/lib/http-ztp-container/monitor-auth
+        target: /var/lib/http-ztp-monitor-auth
+        read_only: false
+    tmpfs:
+      - /run:rw,nosuid,nodev,exec,size=16m
+      - /tmp:rw,nosuid,nodev,noexec,size=1g
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - KILL
+      - NET_BIND_SERVICE
+      - NET_RAW
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "/opt/http-ztp/healthcheck.py"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 30s

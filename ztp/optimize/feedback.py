@@ -21,6 +21,7 @@ import base64
 import copy
 import csv
 from datetime import datetime
+import fcntl
 import glob
 import gzip
 import hashlib
@@ -29,7 +30,9 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import secrets
 import shutil
+import stat
 import sys
 import tarfile
 import tempfile
@@ -45,6 +48,7 @@ if HTTP_ROOT_IMPORT_DIR not in sys.path:
 from sample_links import (
     LINK_NAMES,
     is_air_comparison_source,
+    plan_sample_mutations,
     project_from_sample_path,
     update_sample_links,
 )
@@ -57,13 +61,17 @@ from tools.project_contract import (
     DEVICE_BASE_COLUMNS,
     DEVICE_FIXED_COLUMNS,
     DEVICE_SOURCE_METADATA_COLUMNS,
-    DEVICE_V2_OPTIONAL_POLICY_COLUMNS,
     DEVICE_V2_EVPN_COLUMNS,
     DEVICE_V2_VLAN_COLUMNS,
     detect_global_schema_version,
     normalize_v2_mlag_policy,
     parse_device_csv_layout,
     safe_load_yaml_preserving_mac,
+)
+from tools.deployment_lock import DeploymentLockError, deployment_lock
+from tools.ztp_service_runtime import (
+    RuntimeContractError,
+    stop_native_ztp_monitors,
 )
 
 NA = "NA"
@@ -80,6 +88,143 @@ MAX_SPREADSHEET_CELL_CHARS = 32_000
 YAML_DEVICE_TYPES = {"eth", "spx", "eth_spx", "air"}
 MAX_ARCHIVE_FILES = 20_000
 MAX_ARCHIVE_BYTES = 4 * 1024 * 1024 * 1024
+MAX_GLOBAL_CONFIG_BYTES = 8 * 1024 * 1024
+MAX_PROVENANCE_RECORD_BYTES = 4096
+MAX_GLOBAL_WRITEBACK_STATE_BYTES = 4096
+GLOBAL_WRITEBACK_STATE_NAME = ".feedback-global-writeback-state.json"
+GLOBAL_WRITEBACK_STATE_SCHEMA = 1
+STATE_DIRECTORY_FSYNC_WARNING = (
+    "feedback-warning category=storage-health publication=succeeded "
+    "message=writeback-succeeded-but-state-directory-fsync-failed;"
+    "published-state-marker-may-reappear-after-crash "
+    "storage_health=state-directory-fsync-failed "
+    "consequence=published-state-marker-may-reappear-after-crash"
+)
+
+_SAFE_FEEDBACK_MESSAGES = frozenset({
+    "manual-recovery=validate-live-sha-and-state; automatic-retry=forbidden",
+    "全局 YAML 含 alias/anchor，无法安全执行字节补丁",
+    "全局 YAML 顶层必须是 mapping",
+    "全局 YAML mapping key 必须是 scalar",
+    "全局 YAML mapping key 必须是 string",
+    "全局 YAML 含重复 key",
+    "deployment lock 无效",
+    "deployment lock 未持有",
+    "short write returned zero",
+    "目录 identity 不稳定",
+    "仅允许 sample_links 管理的全局 YAML 软链接",
+    "全局 YAML 软链接不是受管 sample authority",
+    "全局 YAML 软链接目标越出受管项目",
+    "受管 sample authority 必须是软链接",
+    "全局 YAML authority 必须是普通文件",
+    "受管项目根 identity 不稳定",
+    "全局 YAML authority 不得有硬链接",
+    "全局 YAML authority identity 不稳定",
+    "全局 YAML authority snapshot 不稳定",
+    "全局 YAML 必须是有效 UTF-8",
+    "全局 YAML 软链接身份已改变",
+    "writeback state 目录不安全",
+    "retained PREPARED/published state blocks automatic writeback",
+    "全局 YAML transaction 未进入或已经提交",
+    "全局 YAML candidate 顶层必须是 mapping",
+    "source_scope 必须是 prod 或 air",
+    "非 allowlisted 反推路径",
+    "全局 YAML parent CAS identity changed",
+    "全局 YAML CAS identity changed",
+    "全局 YAML CAS bytes changed",
+    "全局 YAML CAS version changed",
+    "全局 YAML transaction 未进入",
+    "没有可恢复的 state",
+    "PREPARED 或 live SHA mismatch 必须人工验证，不得清除",
+    "project root 必须是实际目录",
+    "project discovery identity 已改变",
+    "sample path 在加锁前后改变",
+    "sample discovery identity 已改变",
+    "sample path 必须是实际目录",
+    "现有 sample global authority 不可信",
+    "全局 YAML authority 必须是单链接普通文件",
+    "sample_links 返回了非计划路径",
+    "一次 invocation 发现多个全局 YAML authority",
+    "recovery 必须只提供显式 --global-config",
+})
+
+
+class FeedbackError(ValueError):
+    """A bounded diagnostic that is safe to cross the CLI boundary."""
+
+    def __init__(self, category, *, message=None, published=False, line=None,
+                 column=None, ordinal=None, serialized_bytes=None, limit=None,
+                 expected_after_sha256=None):
+        raw_category = category if isinstance(category, str) else ""
+        self.category = (
+            raw_category if re.fullmatch(r"[a-z0-9-]{1,64}", raw_category)
+            else "bounded-error"
+        )
+        self.published = bool(published)
+        self.message = message if message in _SAFE_FEEDBACK_MESSAGES else None
+        self.line = line if isinstance(line, int) and line >= 0 else None
+        self.column = column if isinstance(column, int) and column >= 0 else None
+        self.ordinal = ordinal if isinstance(ordinal, int) and ordinal >= 0 else None
+        self.serialized_bytes = (
+            serialized_bytes
+            if isinstance(serialized_bytes, int) and serialized_bytes >= 0 else None
+        )
+        self.limit = limit if isinstance(limit, int) and limit >= 0 else None
+        self.expected_after_sha256 = (
+            expected_after_sha256
+            if isinstance(expected_after_sha256, str)
+            and re.fullmatch(r"[0-9a-f]{64}", expected_after_sha256)
+            else None
+        )
+        fields = [
+            "feedback-error", f"category={self.category}",
+            f"published={'true' if self.published else 'false'}",
+        ]
+        if self.message:
+            fields.append(self.message)
+        for key, value in (
+            ("line", self.line), ("column", self.column),
+            ("ordinal", self.ordinal),
+            ("serialized_bytes", self.serialized_bytes), ("limit", self.limit),
+            ("expected_after_sha256", self.expected_after_sha256),
+        ):
+            if value is not None:
+                fields.append(f"{key}={value}")
+        super().__init__(" ".join(fields))
+
+
+class PublicationIndeterminateError(FeedbackError):
+    """The live rename happened, so automatic retry is forbidden."""
+
+    def __init__(self, expected_after_sha256):
+        super().__init__(
+            "publication-indeterminate", published=True,
+            message=("manual-recovery=validate-live-sha-and-state; "
+                     "automatic-retry=forbidden"),
+            expected_after_sha256=expected_after_sha256,
+        )
+
+
+def _feedback_boundary(category, operation):
+    """Sanitize every parse/edit/render exception at one structural boundary."""
+    try:
+        return operation()
+    except FeedbackError as exc:
+        raise FeedbackError(
+            exc.category, message=exc.message, published=exc.published,
+            line=exc.line, column=exc.column, ordinal=exc.ordinal,
+            serialized_bytes=exc.serialized_bytes, limit=exc.limit,
+            expected_after_sha256=exc.expected_after_sha256,
+        ) from None
+    except Exception as exc:
+        mark = getattr(exc, "problem_mark", None)
+        line = getattr(mark, "line", None)
+        column = getattr(mark, "column", None)
+        raise FeedbackError(
+            category,
+            line=(int(line) + 1 if isinstance(line, int) else None),
+            column=(int(column) + 1 if isinstance(column, int) else None),
+        ) from None
 
 # CSV_HEADER 和 MAX_EVPN_GROUPS 在 main() 中从格式文件动态读取
 
@@ -1307,7 +1452,6 @@ def read_v2_format_header(format_path=None, devices_config_path=None):
         header = (
             list(DEVICE_BASE_COLUMNS)
             + list(DEVICE_FIXED_COLUMNS)
-            + list(DEVICE_V2_OPTIONAL_POLICY_COLUMNS)
         )
     try:
         layout = parse_device_csv_layout(header, 2)
@@ -1369,23 +1513,1353 @@ def find_devices_config(backup_dir, explicit_path=None):
 
 
 def find_global_config(backup_dir, explicit_path=None):
-    """Find the project global YAML used as the reverse-conversion baseline."""
+    """Find only an explicit or exact same-directory global authority."""
     if explicit_path:
         path = Path(explicit_path).expanduser().absolute()
-        if not path.is_file():
+        if not os.path.lexists(path):
             raise FileNotFoundError(f"全局 YAML 不存在: {path}")
         return path
 
     current = Path(backup_dir).resolve()
-    for _ in range(5):
-        for name in ("01-global.yaml", "global.yaml"):
-            path = current / name
-            if path.is_file():
-                return path
-        if current.parent == current:
+    matches = [
+        current / name for name in ("01-global.yaml", "global.yaml")
+        if os.path.lexists(current / name)
+    ]
+    if len(matches) > 1:
+        raise ValueError(
+            "发现多个同目录全局 YAML，请用 --global-config 明确指定: "
+            + ", ".join(str(path) for path in matches)
+        )
+    return matches[0] if matches else None
+
+
+def _stat_identity(value):
+    return (
+        value.st_dev, value.st_ino, value.st_mode,
+        value.st_nlink, value.st_uid, value.st_gid,
+    )
+
+
+def _directory_identity(value):
+    """Directory authority fields; child creation may legitimately change nlink."""
+    return (
+        value.st_dev, value.st_ino, value.st_mode,
+        value.st_uid, value.st_gid,
+    )
+
+
+def _snapshot_version(value):
+    return _stat_identity(value) + (
+        value.st_size, value.st_mtime_ns, value.st_ctime_ns,
+    )
+
+
+def _read_bounded_fd(descriptor, *, limit=MAX_GLOBAL_CONFIG_BYTES):
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    chunks = []
+    total = 0
+    while True:
+        chunk = os.read(descriptor, min(1024 * 1024, limit + 1 - total))
+        if not chunk:
             break
-        current = current.parent
-    return None
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > limit:
+            raise ValueError(f"全局 YAML 超过安全上限 {limit} bytes")
+    data = b"".join(chunks)
+    if not data:
+        raise ValueError("全局 YAML 不能为空")
+    return data
+
+
+def _validate_yaml_nodes_unchecked(text):
+    """Parse one document; callers must enter ``_feedback_boundary``."""
+    for token in yaml.scan(text):
+        if isinstance(token, (yaml.tokens.AnchorToken, yaml.tokens.AliasToken)):
+            raise FeedbackError(
+                "yaml-alias-anchor",
+                message="全局 YAML 含 alias/anchor，无法安全执行字节补丁",
+            )
+    root = yaml.compose(text)
+    if not isinstance(root, yaml.MappingNode):
+        raise FeedbackError(
+            "yaml-top-level", message="全局 YAML 顶层必须是 mapping",
+        )
+
+    def visit(node, path=()):
+        if isinstance(node, yaml.MappingNode):
+            seen = set()
+            for key, value in node.value:
+                if not isinstance(key, yaml.ScalarNode):
+                    raise FeedbackError(
+                        "yaml-key-type",
+                        message="全局 YAML mapping key 必须是 scalar",
+                    )
+                if key.tag != "tag:yaml.org,2002:str":
+                    raise FeedbackError(
+                        "yaml-key-type",
+                        message="全局 YAML mapping key 必须是 string",
+                    )
+                marker = (key.tag, key.value)
+                if marker in seen:
+                    raise FeedbackError(
+                        "yaml-duplicate-key", message="全局 YAML 含重复 key",
+                    )
+                seen.add(marker)
+                visit(value, path + (key.value,))
+        elif isinstance(node, yaml.SequenceNode):
+            for index, value in enumerate(node.value):
+                visit(value, path + (index,))
+
+    visit(root)
+    document = safe_load_yaml_preserving_mac(text)
+    if not isinstance(document, dict):
+        raise FeedbackError(
+            "yaml-top-level", message="全局 YAML 顶层必须是 mapping",
+        )
+    return root, document
+
+
+def _validate_yaml_nodes(text):
+    """Return a composed document through the one secret-safe boundary."""
+    return _feedback_boundary(
+        "yaml-parse", lambda: _validate_yaml_nodes_unchecked(text),
+    )
+
+
+def _node_index(root):
+    result = {(): root}
+
+    def visit(node, path):
+        if isinstance(node, yaml.MappingNode):
+            for key, value in node.value:
+                child_path = path + (key.value,)
+                result[child_path] = value
+                visit(value, child_path)
+        elif isinstance(node, yaml.SequenceNode):
+            for index, value in enumerate(node.value):
+                child_path = path + (index,)
+                result[child_path] = value
+                visit(value, child_path)
+
+    visit(root, ())
+    return result
+
+
+_MISSING = object()
+
+
+def _semantic_get(document, parts):
+    value = document
+    for part in parts:
+        if isinstance(part, int):
+            if not isinstance(value, list) or not 0 <= part < len(value):
+                return _MISSING
+            value = value[part]
+        else:
+            if not isinstance(value, dict) or part not in value:
+                return _MISSING
+            value = value[part]
+    return value
+
+
+def _semantic_set(document, parts, value):
+    current = document
+    for index, part in enumerate(parts[:-1]):
+        following = parts[index + 1]
+        if isinstance(part, int):
+            if not isinstance(current, list) or not 0 <= part < len(current):
+                raise ValueError(
+                    "缺失路径含无法安全创建的 sequence index: "
+                    + ".".join(str(item) for item in parts)
+                )
+            current = current[part]
+            continue
+        if not isinstance(current, dict):
+            raise ValueError(
+                "缺失路径的父节点不是 block mapping: "
+                + ".".join(str(item) for item in parts)
+            )
+        if part not in current:
+            if isinstance(following, int):
+                raise ValueError(
+                    "缺失路径不能创建未知 sequence: "
+                    + ".".join(str(item) for item in parts)
+                )
+            current[part] = {}
+        current = current[part]
+    leaf = parts[-1]
+    if isinstance(leaf, int):
+        if not isinstance(current, list) or not 0 <= leaf < len(current):
+            raise ValueError(
+                "缺失路径含无法安全创建的 sequence index: "
+                + ".".join(str(item) for item in parts)
+            )
+        current[leaf] = copy.deepcopy(value)
+    else:
+        if not isinstance(current, dict):
+            raise ValueError(
+                "缺失路径的父节点不是 block mapping: "
+                + ".".join(str(item) for item in parts)
+            )
+        current[leaf] = copy.deepcopy(value)
+
+
+def _allowed_inference_path(parts):
+    parts = tuple(parts)
+    fixed = {
+        ("common", "switch", "system", "config", "auto-save", "state"),
+        ("common", "switch", "system", "date-time", "timezone"),
+        ("common", "switch", "system", "dns", "server"),
+        ("common", "switch", "system", "ntp", "server"),
+    }
+    if parts in fixed:
+        return True
+    if len(parts) < 4 or parts[0] != "switches" or not isinstance(parts[1], int):
+        return False
+    if parts[2] != "eth":
+        return False
+    tail = parts[3:]
+    if tail in {
+        ("services", "dhcp_relay"),
+        ("bridge", "domain", "br_default", "stp", "priority"),
+        ("system", "ntp", "vrf"),
+        ("vrf", "default", "router", "bfd", "profile"),
+        ("mlag", "init-delay"),
+        ("mlag", "priority"),
+        ("mlag", "shared-addresses"),
+        ("mlag", "pairs"),
+    }:
+        return True
+    if len(tail) == 5 and tail[:3] == ("system", "aaa", "user"):
+        return all(isinstance(item, str) and item for item in tail[3:])
+    return (
+        len(tail) == 6
+        and tail[0] == "services" and tail[1] == "dhcp_relay"
+        and isinstance(tail[2], str) and tail[3] == "server_group"
+        and isinstance(tail[4], int) and tail[5] == "servers"
+    )
+
+
+def _flow_yaml(value):
+    rendered = yaml.safe_dump(
+        value, allow_unicode=True, sort_keys=False,
+        default_flow_style=True, width=1_000_000,
+    ).rstrip("\n")
+    if rendered.endswith("\n..."):
+        rendered = rendered[:-4]
+    return rendered
+
+
+def _patch_global_yaml(snapshot_text, snapshot_root, snapshot_document, staged):
+    """Patch only staged inference spans; unrelated source bytes stay intact."""
+    desired = copy.deepcopy(snapshot_document)
+    for path, item in staged.items():
+        _semantic_set(desired, path, item["value"])
+    index = _node_index(snapshot_root)
+    replacement_paths = set()
+    insertion_groups = {}
+
+    for path in staged:
+        node = index.get(path)
+        if node is not None:
+            if not _is_global_placeholder(_semantic_get(snapshot_document, path)):
+                raise ValueError("待补丁路径已不再是占位: " + ".".join(map(str, path)))
+            replacement_paths.add(path)
+            continue
+        placeholder_ancestor = None
+        for length in range(len(path) - 1, 0, -1):
+            ancestor = path[:length]
+            if ancestor in index and _is_global_placeholder(
+                    _semantic_get(snapshot_document, ancestor)):
+                placeholder_ancestor = ancestor
+                break
+        if placeholder_ancestor is not None:
+            replacement_paths.add(placeholder_ancestor)
+            continue
+        parent = None
+        for length in range(len(path) - 1, -1, -1):
+            candidate = path[:length]
+            if isinstance(index.get(candidate), yaml.MappingNode):
+                parent = candidate
+                break
+        if parent is None:
+            raise ValueError("缺失路径没有可安全插入的 block mapping")
+        remaining = path[len(parent):]
+        if not remaining or not isinstance(remaining[0], str):
+            raise ValueError("缺失路径不能安全插入 sequence")
+        insertion_groups.setdefault(parent, set()).add(remaining[0])
+
+    # A placeholder ancestor absorbs every descendant patch into one span.
+    replacement_paths = {
+        path for path in replacement_paths
+        if not any(path[:length] in replacement_paths for length in range(1, len(path)))
+    }
+    edits = []
+    for path in replacement_paths:
+        node = index[path]
+        value = _semantic_get(desired, path)
+        start = node.start_mark.index
+        end = node.end_mark.index
+        if isinstance(node, yaml.SequenceNode) and node.flow_style is False:
+            # ``- {}`` is an explicit placeholder form. Replace only its YAML
+            # token span, leaving the operator's inline comment and newline
+            # byte-for-byte intact. More complex block sequences are
+            # ambiguous and must be rewritten manually by the operator.
+            if (
+                len(node.value) != 1
+                or not isinstance(node.value[0], yaml.MappingNode)
+                or node.value[0].value
+            ):
+                raise ValueError("复杂 block sequence 占位无法安全执行字节补丁")
+            end = node.value[0].end_mark.index
+        edits.append((start, end, _flow_yaml(value)))
+
+    for parent, keys in insertion_groups.items():
+        if any(parent[:length] in replacement_paths
+               for length in range(1, len(parent) + 1)):
+            continue
+        node = index[parent]
+        if node.flow_style is not False:
+            raise ValueError(
+                "缺失路径只能插入无歧义的 block mapping: "
+                + ".".join(map(str, parent))
+            )
+        position = node.end_mark.index
+        if node.end_mark.column <= node.start_mark.column:
+            # PyYAML places a nested block mapping's end mark after the
+            # indentation preceding its next sibling. Move back to that line
+            # start so the sibling's bytes and indentation remain untouched.
+            position -= node.end_mark.column
+        elif position != len(snapshot_text):
+            raise ValueError("block mapping 插入位置不安全")
+        fragment = {
+            key: _semantic_get(desired, parent + (key,))
+            for key in sorted(keys, key=_natural_key)
+        }
+        rendered = yaml.safe_dump(
+            fragment, allow_unicode=True, sort_keys=False,
+            default_flow_style=False, width=120,
+        )
+        indentation = " " * node.start_mark.column
+        rendered = "".join(
+            indentation + line if line.strip() else line
+            for line in rendered.splitlines(keepends=True)
+        )
+        if position and snapshot_text[position - 1] != "\n":
+            rendered = "\n" + rendered
+        edits.append((position, position, rendered))
+
+    edits.sort(reverse=True)
+    previous_start = len(snapshot_text) + 1
+    candidate_text = snapshot_text
+    for start, end, replacement in edits:
+        if end > previous_start:
+            raise ValueError("全局 YAML 补丁 span 重叠")
+        candidate_text = candidate_text[:start] + replacement + candidate_text[end:]
+        previous_start = start
+    candidate_root, candidate_document = _validate_yaml_nodes(candidate_text)
+    del candidate_root
+    if candidate_document != desired:
+        raise ValueError("全局 YAML 补丁语义超出 allowlist")
+    return candidate_text.encode("utf-8")
+
+
+class GlobalWritebackTransaction:
+    """One held-snapshot, byte-preserving commit for a global YAML authority."""
+
+    def __init__(self, authority_path, *, workspace_root=None,
+                 managed_project_root=None, managed_sample_path=None,
+                 held_lock_fd=None, recovery_mode=False,
+                 defer_state_directory=False):
+        self.authority_path = Path(authority_path).expanduser().absolute()
+        self.workspace_root = Path(
+            workspace_root or Path(__file__).resolve().parents[2]
+        ).expanduser().absolute()
+        self.managed_project_root = (
+            Path(managed_project_root).expanduser().absolute()
+            if managed_project_root is not None else None
+        )
+        self.managed_sample_path = (
+            Path(managed_sample_path).expanduser().absolute()
+            if managed_sample_path is not None else None
+        )
+        if self.managed_project_root is not None and self.managed_sample_path is None:
+            # Compatibility for direct callers: the supplied authority path is
+            # still checked against the independently supplied project root.
+            self.managed_sample_path = self.authority_path.parent
+        self._held_lock_fd = held_lock_fd
+        self._recovery_mode = recovery_mode
+        self._defer_state_directory = defer_state_directory
+        self.commit_count = 0
+        self.published = False
+        self.storage_health_warning = None
+        self._staged = {}
+        self._entered = False
+        self._committed = False
+        self._lock_context = None
+        self._target_fd = None
+        self._parent_fd = None
+        self._link_parent_fd = None
+        self._state_root_fd = None
+        self._state_dir_fd = None
+        self._state_identity = None
+        self._state_version = None
+        self._state_bytes = None
+
+    def __enter__(self):
+        if self._held_lock_fd is None:
+            self._lock_context = deployment_lock(self.workspace_root)
+            self._held_lock_fd = self._lock_context.__enter__()
+        else:
+            lock_stat = os.fstat(self._held_lock_fd)
+            lock_path_stat = os.lstat(self.workspace_root / ".deployment.lock")
+            if (
+                not stat.S_ISREG(lock_stat.st_mode)
+                or lock_stat.st_nlink != 1
+                or _stat_identity(lock_stat) != _stat_identity(lock_path_stat)
+            ):
+                raise FeedbackError("deployment-lock", message="deployment lock 无效")
+            try:
+                fcntl.flock(self._held_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise FeedbackError(
+                    "deployment-lock", message="deployment lock 未持有",
+                ) from None
+        try:
+            def enter_authority():
+                self._snapshot_authority()
+                if self._defer_state_directory:
+                    if os.path.lexists(
+                        self.target_path.parent / "99-output-ztp/optimize"
+                        / GLOBAL_WRITEBACK_STATE_NAME
+                    ):
+                        raise FeedbackError(
+                            "state-blocked",
+                            message=("retained PREPARED/published state blocks "
+                                     "automatic writeback"),
+                        )
+                else:
+                    self._open_state_directory(create=not self._recovery_mode)
+                    if not self._recovery_mode:
+                        self._assert_state_absent()
+            _feedback_boundary("authority-snapshot", enter_authority)
+        except Exception:
+            self.close()
+            raise
+        self._entered = True
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        try:
+            if exc_type is None and not self._recovery_mode:
+                self.commit()
+        finally:
+            self.close()
+        return False
+
+    def prepare_state_directory(self):
+        """Finish deferred state binding after real sample refresh/migration."""
+        if not self._entered or self._recovery_mode:
+            raise FeedbackError("transaction-state")
+        self._assert_parent_stable()
+        if self._state_dir_fd is None:
+            self._open_state_directory(create=True)
+        self._assert_parent_stable()
+        self._assert_state_absent()
+
+    @staticmethod
+    def _directory_flags():
+        return (
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        )
+
+    @staticmethod
+    def _read_flags():
+        return (
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        )
+
+    @staticmethod
+    def _write_all(descriptor, payload):
+        view = memoryview(payload)
+        written = 0
+        while written < len(view):
+            count = os.write(descriptor, view[written:])
+            if count <= 0:
+                raise FeedbackError(
+                    "candidate-write", message="short write returned zero",
+                )
+            written += count
+
+    def _open_bound_directory(self, path):
+        before = os.lstat(path)
+        descriptor = os.open(path, self._directory_flags())
+        after = os.fstat(descriptor)
+        if (not stat.S_ISDIR(after.st_mode)
+                or _stat_identity(before) != _stat_identity(after)):
+            os.close(descriptor)
+            raise FeedbackError(
+                "directory-authority", message="目录 identity 不稳定",
+            )
+        return descriptor, after
+
+    def _snapshot_authority(self):
+        requested_lstat = os.lstat(self.authority_path)
+        self._link_identity = None
+        self._link_text = None
+        if stat.S_ISLNK(requested_lstat.st_mode):
+            if self.managed_project_root is None or self.managed_sample_path is None:
+                raise FeedbackError(
+                    "unmanaged-symlink",
+                    message="仅允许 sample_links 管理的全局 YAML 软链接",
+                )
+            expected_link = self.managed_sample_path / "01-global.yaml"
+            expected_target = self.managed_project_root / "01-global.yaml"
+            if (
+                self.authority_path != expected_link
+                or self.managed_sample_path.name
+                != f"{self.managed_project_root.name}-sample"
+            ):
+                raise FeedbackError(
+                    "managed-link-path",
+                    message="全局 YAML 软链接不是受管 sample authority",
+                )
+            self._link_parent_fd, link_parent = self._open_bound_directory(
+                self.managed_sample_path,
+            )
+            link_stat = os.stat(
+                "01-global.yaml", dir_fd=self._link_parent_fd,
+                follow_symlinks=False,
+            )
+            link_text = os.readlink("01-global.yaml", dir_fd=self._link_parent_fd)
+            expected_text = os.path.relpath(
+                str(expected_target), str(self.managed_sample_path),
+            )
+            if (
+                not stat.S_ISLNK(link_stat.st_mode)
+                or _stat_identity(link_stat) != _stat_identity(requested_lstat)
+                or os.path.isabs(link_text) or link_text != expected_text
+            ):
+                raise FeedbackError(
+                    "managed-link-target",
+                    message="全局 YAML 软链接目标越出受管项目",
+                )
+            self._link_parent_identity = _directory_identity(link_parent)
+            self._link_identity = _stat_identity(link_stat)
+            self._link_text = link_text
+            self.target_path = expected_target
+        elif stat.S_ISREG(requested_lstat.st_mode):
+            if self.managed_project_root is not None:
+                raise FeedbackError(
+                    "managed-link-type",
+                    message="受管 sample authority 必须是软链接",
+                )
+            self.target_path = self.authority_path
+        else:
+            raise FeedbackError(
+                "authority-type", message="全局 YAML authority 必须是普通文件",
+            )
+
+        self._parent_fd, parent_fstat = self._open_bound_directory(
+            self.target_path.parent,
+        )
+        if self.managed_project_root is not None:
+            project_lstat = os.lstat(self.managed_project_root)
+            if (
+                self.target_path.parent != self.managed_project_root
+                or _stat_identity(project_lstat) != _stat_identity(parent_fstat)
+            ):
+                raise FeedbackError(
+                    "trusted-project-root",
+                    message="受管项目根 identity 不稳定",
+                )
+        self._parent_identity = _directory_identity(parent_fstat)
+        self._parent_device = parent_fstat.st_dev
+
+        self._target_fd = os.open(
+            self.target_path.name, self._read_flags(), dir_fd=self._parent_fd,
+        )
+        target_stat = os.fstat(self._target_fd)
+        path_stat = os.stat(
+            self.target_path.name, dir_fd=self._parent_fd,
+            follow_symlinks=False,
+        )
+        if not stat.S_ISREG(target_stat.st_mode):
+            raise FeedbackError(
+                "authority-type", message="全局 YAML authority 必须是普通文件",
+            )
+        if target_stat.st_nlink != 1:
+            raise FeedbackError(
+                "authority-hardlink", message="全局 YAML authority 不得有硬链接",
+            )
+        if _stat_identity(target_stat) != _stat_identity(path_stat):
+            raise FeedbackError(
+                "authority-identity", message="全局 YAML authority identity 不稳定",
+            )
+        self._mode = stat.S_IMODE(target_stat.st_mode)
+        self._uid = target_stat.st_uid
+        self._gid = target_stat.st_gid
+        self.snapshot_bytes = _read_bounded_fd(self._target_fd)
+        target_after = os.fstat(self._target_fd)
+        path_after = os.stat(
+            self.target_path.name, dir_fd=self._parent_fd,
+            follow_symlinks=False,
+        )
+        if (
+            _snapshot_version(target_after) != _snapshot_version(target_stat)
+            or _stat_identity(path_after) != _stat_identity(target_after)
+        ):
+            raise FeedbackError(
+                "authority-snapshot", message="全局 YAML authority snapshot 不稳定",
+            )
+        self._target_identity = _stat_identity(target_after)
+        self._target_version = _snapshot_version(target_after)
+        try:
+            self.snapshot_text = self.snapshot_bytes.decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            raise FeedbackError(
+                "yaml-utf8", message="全局 YAML 必须是有效 UTF-8",
+            ) from None
+        self.snapshot_root, self.baseline = _validate_yaml_nodes(self.snapshot_text)
+        self.before_sha256 = hashlib.sha256(self.snapshot_bytes).hexdigest()
+        self._assert_link_stable()
+
+    def _assert_link_stable(self):
+        if self._link_identity is None:
+            return
+        parent_stat = os.fstat(self._link_parent_fd)
+        parent_named = os.lstat(self.managed_sample_path)
+        link_stat = os.stat(
+            "01-global.yaml", dir_fd=self._link_parent_fd,
+            follow_symlinks=False,
+        )
+        link_text = os.readlink("01-global.yaml", dir_fd=self._link_parent_fd)
+        if (
+            _directory_identity(parent_stat) != self._link_parent_identity
+            or _directory_identity(parent_named) != self._link_parent_identity
+            or _stat_identity(link_stat) != self._link_identity
+            or not stat.S_ISLNK(link_stat.st_mode)
+            or link_text != self._link_text
+        ):
+            raise FeedbackError(
+                "managed-link-identity", message="全局 YAML 软链接身份已改变",
+            )
+
+    def bind_managed_link(self, authority_path, *, managed_project_root,
+                          managed_sample_path, held_sample_fd=None):
+        """Bind the refreshed sample link to the already-held target snapshot."""
+        if not self._entered or self._link_identity is not None:
+            raise FeedbackError("managed-link-state")
+        project = Path(managed_project_root).expanduser().absolute()
+        sample = Path(managed_sample_path).expanduser().absolute()
+        link = Path(authority_path).expanduser().absolute()
+        expected_target = project / "01-global.yaml"
+        if (
+            project != self.target_path.parent
+            or expected_target != self.target_path
+            or link != sample / "01-global.yaml"
+            or sample.name != f"{project.name}-sample"
+        ):
+            raise FeedbackError("managed-link-path")
+        link_lstat = os.lstat(link)
+        if not stat.S_ISLNK(link_lstat.st_mode):
+            raise FeedbackError("managed-link-type")
+        if held_sample_fd is None:
+            descriptor, parent_stat = self._open_bound_directory(sample)
+        else:
+            descriptor = held_sample_fd
+            try:
+                parent_stat = os.fstat(descriptor)
+                parent_named = os.lstat(sample)
+            except OSError:
+                os.close(descriptor)
+                raise FeedbackError("managed-link-identity") from None
+            if (
+                not stat.S_ISDIR(parent_stat.st_mode)
+                or _directory_identity(parent_stat)
+                != _directory_identity(parent_named)
+            ):
+                os.close(descriptor)
+                raise FeedbackError("managed-link-identity")
+        try:
+            named = os.stat(
+                "01-global.yaml", dir_fd=descriptor, follow_symlinks=False,
+            )
+            link_text = os.readlink("01-global.yaml", dir_fd=descriptor)
+            expected_text = os.path.relpath(str(expected_target), str(sample))
+            if (
+                _stat_identity(named) != _stat_identity(link_lstat)
+                or not stat.S_ISLNK(named.st_mode)
+                or os.path.isabs(link_text) or link_text != expected_text
+            ):
+                raise FeedbackError("managed-link-target")
+        except Exception:
+            os.close(descriptor)
+            raise
+        self.authority_path = link
+        self.managed_project_root = project
+        self.managed_sample_path = sample
+        self._link_parent_fd = descriptor
+        self._link_parent_identity = _directory_identity(parent_stat)
+        self._link_identity = _stat_identity(named)
+        self._link_text = link_text
+        self._assert_link_stable()
+        self._assert_cas()
+
+    def _open_state_directory(self, *, create):
+        self._assert_parent_stable()
+        descriptor = os.dup(self._parent_fd)
+        opened = []
+        try:
+            for component in ("99-output-ztp", "optimize"):
+                created = False
+                if create:
+                    try:
+                        os.mkdir(component, 0o755, dir_fd=descriptor)
+                        created = True
+                    except FileExistsError:
+                        pass
+                child = os.open(component, self._directory_flags(), dir_fd=descriptor)
+                child_stat = os.fstat(child)
+                named_stat = os.stat(
+                    component, dir_fd=descriptor, follow_symlinks=False,
+                )
+                if (
+                    not stat.S_ISDIR(child_stat.st_mode)
+                    or _stat_identity(child_stat) != _stat_identity(named_stat)
+                    or child_stat.st_dev != self._parent_device
+                    or child_stat.st_uid != os.geteuid()
+                    or stat.S_IMODE(child_stat.st_mode) & 0o022
+                ):
+                    os.close(child)
+                    raise FeedbackError(
+                        "state-directory-authority",
+                        message="writeback state 目录不安全",
+                    )
+                if created:
+                    os.fsync(child)
+                    os.fsync(descriptor)
+                os.close(descriptor)
+                descriptor = child
+                opened.append(os.dup(descriptor))
+            self._state_root_fd, self._state_dir_fd = opened
+            self._state_root_identity = _directory_identity(
+                os.fstat(self._state_root_fd),
+            )
+            self._state_dir_identity = _directory_identity(
+                os.fstat(self._state_dir_fd),
+            )
+            opened = []
+            os.close(descriptor)
+            descriptor = None
+            self._assert_parent_stable()
+        finally:
+            for child in opened:
+                os.close(child)
+            if descriptor is not None:
+                os.close(descriptor)
+
+    def _assert_state_directory_stable(self):
+        root_held = os.fstat(self._state_root_fd)
+        root_named = os.stat(
+            "99-output-ztp", dir_fd=self._parent_fd,
+            follow_symlinks=False,
+        )
+        state_held = os.fstat(self._state_dir_fd)
+        state_named = os.stat(
+            "optimize", dir_fd=self._state_root_fd,
+            follow_symlinks=False,
+        )
+        if (
+            _directory_identity(root_held) != self._state_root_identity
+            or _directory_identity(root_named) != self._state_root_identity
+            or _directory_identity(state_held) != self._state_dir_identity
+            or _directory_identity(state_named) != self._state_dir_identity
+        ):
+            raise FeedbackError("state-directory-identity")
+
+    def _state_named_stat(self):
+        self._assert_state_directory_stable()
+        return os.stat(
+            GLOBAL_WRITEBACK_STATE_NAME, dir_fd=self._state_dir_fd,
+            follow_symlinks=False,
+        )
+
+    def _assert_state_absent(self):
+        try:
+            self._state_named_stat()
+        except FileNotFoundError:
+            return
+        raise FeedbackError(
+            "state-blocked",
+            message="retained PREPARED/published state blocks automatic writeback",
+        )
+
+    def matches(self, path):
+        candidate = Path(path).expanduser().absolute()
+        return candidate in {self.authority_path, self.target_path}
+
+    def stage(self, candidate, evidence_paths, *, source_scope, source_ref):
+        if not self._entered or self._committed or self.published:
+            raise FeedbackError(
+                "transaction-state", message="全局 YAML transaction 未进入或已经提交",
+            )
+        if not isinstance(candidate, dict):
+            raise FeedbackError(
+                "candidate-type", message="全局 YAML candidate 顶层必须是 mapping",
+            )
+        if source_scope not in {"prod", "air"}:
+            raise FeedbackError(
+                "source-scope", message="source_scope 必须是 prod 或 air",
+            )
+        try:
+            ordered_paths = sorted(
+                set(evidence_paths), key=lambda value: tuple(map(str, value)),
+            )
+            source_ref_bytes = str(source_ref).encode("utf-8")
+        except Exception:
+            raise FeedbackError("staging-metadata") from None
+        source_ref_sha256 = hashlib.sha256(source_ref_bytes).hexdigest()
+        for raw_path in ordered_paths:
+            path = tuple(raw_path)
+            if not _allowed_inference_path(path):
+                raise FeedbackError(
+                    "non-allowlisted-path", message="非 allowlisted 反推路径",
+                )
+            value = _semantic_get(candidate, path)
+            if value is _MISSING or value is None or _is_global_placeholder(value):
+                continue
+            live_value = _semantic_get(self.baseline, path)
+            if live_value is not _MISSING and not _is_global_placeholder(live_value):
+                continue
+            if path in self._staged:
+                continue
+            self._staged[path] = {
+                "value": copy.deepcopy(value),
+                "scope": source_scope,
+                "source_ref_sha256": source_ref_sha256,
+            }
+
+    def _provenance_lines(self, after_sha256):
+        result = []
+        for ordinal, (path, item) in enumerate(self._staged.items(), 1):
+            record = {
+                "after_sha256": after_sha256,
+                "before_sha256": self.before_sha256,
+                "path": list(path),
+                "source_ref_sha256": item["source_ref_sha256"],
+                "source_scope": item["scope"],
+            }
+            try:
+                line = json.dumps(
+                    record, ensure_ascii=True, sort_keys=True,
+                    separators=(",", ":"),
+                )
+                serialized_bytes = len((line + "\n").encode("ascii"))
+            except Exception:
+                raise FeedbackError(
+                    "provenance-serialization", ordinal=ordinal,
+                ) from None
+            if serialized_bytes > MAX_PROVENANCE_RECORD_BYTES:
+                raise FeedbackError(
+                    "provenance-bound", ordinal=ordinal,
+                    serialized_bytes=serialized_bytes,
+                    limit=MAX_PROVENANCE_RECORD_BYTES,
+                )
+            result.append(line)
+        return result
+
+    def _assert_parent_stable(self):
+        parent_stat = os.fstat(self._parent_fd)
+        parent_named = os.lstat(self.target_path.parent)
+        if (
+            _directory_identity(parent_stat) != self._parent_identity
+            or _directory_identity(parent_named) != self._parent_identity
+        ):
+            raise FeedbackError(
+                "cas-parent", message="全局 YAML parent CAS identity changed",
+            )
+
+    def _assert_cas(self):
+        self._assert_parent_stable()
+        live_stat = os.stat(
+            self.target_path.name, dir_fd=self._parent_fd,
+            follow_symlinks=False,
+        )
+        held_stat = os.fstat(self._target_fd)
+        if (
+            _snapshot_version(live_stat) != self._target_version
+            or _snapshot_version(held_stat) != self._target_version
+        ):
+            raise FeedbackError(
+                "cas-identity", message="全局 YAML CAS identity changed",
+            )
+        if _read_bounded_fd(self._target_fd) != self.snapshot_bytes:
+            raise FeedbackError("cas-bytes", message="全局 YAML CAS bytes changed")
+        if _snapshot_version(os.fstat(self._target_fd)) != self._target_version:
+            raise FeedbackError("cas-version", message="全局 YAML CAS version changed")
+        self._assert_link_stable()
+
+    def _assert_candidate(self, name, descriptor, candidate_bytes):
+        first = os.fstat(descriptor)
+        named = os.stat(name, dir_fd=self._parent_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(first.st_mode) or first.st_nlink != 1
+            or _stat_identity(first) != _stat_identity(named)
+            or first.st_size != len(candidate_bytes)
+            or stat.S_IMODE(first.st_mode) != self._mode
+            or (first.st_uid, first.st_gid) != (self._uid, self._gid)
+        ):
+            raise FeedbackError("candidate-authority")
+        if _read_bounded_fd(descriptor) != candidate_bytes:
+            raise FeedbackError("candidate-bytes")
+        second = os.fstat(descriptor)
+        named_after = os.stat(
+            name, dir_fd=self._parent_fd, follow_symlinks=False,
+        )
+        if (
+            _snapshot_version(second) != _snapshot_version(first)
+            or _snapshot_version(named_after) != _snapshot_version(second)
+        ):
+            raise FeedbackError("candidate-identity")
+        return _stat_identity(second)
+
+    @staticmethod
+    def _state_payload(record):
+        return (json.dumps(
+            record, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ) + "\n").encode("utf-8")
+
+    def _identity_bound_unlink(self, name, descriptor, directory_fd):
+        try:
+            named = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        held = os.fstat(descriptor)
+        if (named.st_dev, named.st_ino) != (held.st_dev, held.st_ino):
+            return False
+        os.unlink(name, dir_fd=directory_fd)
+        return True
+
+    def _assert_state_current(self):
+        named = self._state_named_stat()
+        if (
+            self._state_identity is None
+            or _snapshot_version(named) != self._state_version
+        ):
+            raise FeedbackError("state-identity")
+        descriptor = os.open(
+            GLOBAL_WRITEBACK_STATE_NAME, self._read_flags(),
+            dir_fd=self._state_dir_fd,
+        )
+        try:
+            held = os.fstat(descriptor)
+            if (
+                _snapshot_version(held) != self._state_version
+                or stat.S_IMODE(held.st_mode) != 0o600
+                or held.st_nlink != 1 or held.st_uid != os.geteuid()
+                or _read_bounded_fd(
+                    descriptor, limit=MAX_GLOBAL_WRITEBACK_STATE_BYTES,
+                ) != self._state_bytes
+            ):
+                raise FeedbackError("state-authority")
+            held_after = os.fstat(descriptor)
+            named_after = self._state_named_stat()
+            if (
+                _snapshot_version(held_after) != self._state_version
+                or _snapshot_version(named_after) != self._state_version
+            ):
+                raise FeedbackError("state-authority")
+        finally:
+            os.close(descriptor)
+
+    def _write_state_record(self, record, *, replacing):
+        self._assert_state_directory_stable()
+        payload = self._state_payload(record)
+        if not payload or len(payload) > MAX_GLOBAL_WRITEBACK_STATE_BYTES:
+            raise FeedbackError("state-record-bound")
+        if replacing:
+            self._assert_state_current()
+        else:
+            self._assert_state_absent()
+        name = (
+            f".{GLOBAL_WRITEBACK_STATE_NAME}.tmp.{os.getpid()}."
+            f"{secrets.token_hex(16)}"
+        )
+        descriptor = None
+        try:
+            flags = (
+                os.O_RDWR | os.O_CREAT | os.O_EXCL
+                | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0)
+            )
+            descriptor = os.open(name, flags, 0o600, dir_fd=self._state_dir_fd)
+            self._write_all(descriptor, payload)
+            os.fchmod(descriptor, 0o600)
+            os.fsync(descriptor)
+            candidate_stat = os.fstat(descriptor)
+            named_stat = os.stat(
+                name, dir_fd=self._state_dir_fd, follow_symlinks=False,
+            )
+            candidate_payload = _read_bounded_fd(
+                descriptor, limit=MAX_GLOBAL_WRITEBACK_STATE_BYTES,
+            )
+            candidate_after = os.fstat(descriptor)
+            named_after = os.stat(
+                name, dir_fd=self._state_dir_fd, follow_symlinks=False,
+            )
+            if (
+                not stat.S_ISREG(candidate_stat.st_mode)
+                or candidate_stat.st_nlink != 1
+                or candidate_stat.st_uid != os.geteuid()
+                or stat.S_IMODE(candidate_stat.st_mode) != 0o600
+                or candidate_stat.st_size != len(payload)
+                or _stat_identity(candidate_stat) != _stat_identity(named_stat)
+                or candidate_payload != payload
+                or _snapshot_version(candidate_after)
+                != _snapshot_version(candidate_stat)
+                or _stat_identity(named_after) != _stat_identity(candidate_after)
+            ):
+                raise FeedbackError("state-candidate-authority")
+            if replacing:
+                self._assert_state_current()
+            else:
+                self._assert_state_absent()
+            os.replace(
+                name, GLOBAL_WRITEBACK_STATE_NAME,
+                src_dir_fd=self._state_dir_fd, dst_dir_fd=self._state_dir_fd,
+            )
+            name = None
+            published_stat = self._state_named_stat()
+            held_stat = os.fstat(descriptor)
+            held_payload = _read_bounded_fd(
+                descriptor, limit=MAX_GLOBAL_WRITEBACK_STATE_BYTES,
+            )
+            held_after = os.fstat(descriptor)
+            named_after = self._state_named_stat()
+            if (
+                _stat_identity(published_stat) != _stat_identity(held_stat)
+                or not stat.S_ISREG(held_stat.st_mode)
+                or held_stat.st_nlink != 1 or held_stat.st_uid != os.geteuid()
+                or stat.S_IMODE(held_stat.st_mode) != 0o600
+                or held_stat.st_size != len(payload) or held_payload != payload
+                or _snapshot_version(held_after) != _snapshot_version(held_stat)
+                or _stat_identity(named_after) != _stat_identity(held_after)
+            ):
+                raise FeedbackError("state-postverify")
+            self._state_identity = _stat_identity(held_stat)
+            self._state_version = _snapshot_version(held_stat)
+            self._state_bytes = payload
+            os.fsync(self._state_dir_fd)
+        finally:
+            if name is not None and descriptor is not None:
+                try:
+                    self._identity_bound_unlink(name, descriptor, self._state_dir_fd)
+                except OSError:
+                    pass
+            if descriptor is not None:
+                os.close(descriptor)
+
+    def _prepare_publication_state(self, after_sha256):
+        self._state_record = {
+            "authority_path": str(self.target_path),
+            "expected_after_sha256": after_sha256,
+            "published": False,
+            "schema": GLOBAL_WRITEBACK_STATE_SCHEMA,
+            "timestamp": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+        }
+        self._write_state_record(self._state_record, replacing=False)
+
+    def _advance_publication_state(self):
+        self._state_record = dict(self._state_record, published=True)
+        self._write_state_record(self._state_record, replacing=True)
+
+    def _fsync_live_parent(self):
+        os.fsync(self._parent_fd)
+
+    def _verify_published_candidate(self, descriptor, candidate_bytes):
+        self._assert_parent_stable()
+        held_stat = os.fstat(descriptor)
+        named_stat = os.stat(
+            self.target_path.name, dir_fd=self._parent_fd,
+            follow_symlinks=False,
+        )
+        held_bytes = _read_bounded_fd(descriptor)
+        held_after = os.fstat(descriptor)
+        named_after = os.stat(
+            self.target_path.name, dir_fd=self._parent_fd,
+            follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISREG(held_stat.st_mode) or held_stat.st_nlink != 1
+            or _snapshot_version(held_stat) != _snapshot_version(named_stat)
+            or stat.S_IMODE(held_stat.st_mode) != self._mode
+            or (held_stat.st_uid, held_stat.st_gid) != (self._uid, self._gid)
+            or held_stat.st_size != len(candidate_bytes)
+            or held_bytes != candidate_bytes
+            or _snapshot_version(held_after) != _snapshot_version(held_stat)
+            or _snapshot_version(named_after) != _snapshot_version(held_after)
+        ):
+            raise FeedbackError("postreplace-authority")
+        self._assert_link_stable()
+        self._assert_parent_stable()
+
+    def _remove_publication_state(self):
+        self._assert_state_directory_stable()
+        self._assert_state_current()
+        descriptor = os.open(
+            GLOBAL_WRITEBACK_STATE_NAME, self._read_flags(),
+            dir_fd=self._state_dir_fd,
+        )
+        try:
+            if not self._identity_bound_unlink(
+                    GLOBAL_WRITEBACK_STATE_NAME, descriptor, self._state_dir_fd):
+                raise FeedbackError("state-remove-identity")
+        finally:
+            os.close(descriptor)
+        try:
+            os.fsync(self._state_dir_fd)
+        except Exception:
+            # Publication is already durable and held-fd verified.  A failed
+            # fsync after the unlink is a storage-health warning, not an
+            # indeterminate publication.  Attempting another marker write
+            # cannot restore a durability guarantee on the failing filesystem.
+            self._state_identity = None
+            self._state_version = None
+            self._state_bytes = None
+            self.storage_health_warning = {
+                "publication": "succeeded",
+                "storage_health": "state-directory-fsync-failed",
+                "consequence": (
+                    "published-state-marker-may-reappear-after-crash"
+                ),
+            }
+            try:
+                print(STATE_DIRECTORY_FSYNC_WARNING)
+            except Exception:
+                # A failed diagnostic sink cannot reverse a durable, verified
+                # publication or turn it into an unsafe retry signal.
+                pass
+            return False
+        self._state_identity = None
+        self._state_version = None
+        self._state_bytes = None
+        return True
+
+    def commit(self):
+        if self._committed:
+            return self.commit_count
+        if not self._entered or self._recovery_mode:
+            raise FeedbackError(
+                "transaction-state", message="全局 YAML transaction 未进入",
+            )
+        if self.published:
+            raise PublicationIndeterminateError(self._after_sha256)
+        if not self._staged:
+            self._committed = True
+            return 0
+
+        temporary_name = None
+        descriptor = None
+        after_sha256 = None
+        try:
+            candidate_bytes = _feedback_boundary(
+                "semantic-patch-block-mapping",
+                lambda: _patch_global_yaml(
+                    self.snapshot_text, self.snapshot_root,
+                    self.baseline, self._staged,
+                ),
+            )
+            after_sha256 = hashlib.sha256(candidate_bytes).hexdigest()
+            self._after_sha256 = after_sha256
+            provenance_lines = self._provenance_lines(after_sha256)
+            self._assert_parent_stable()
+            temporary_name = (
+                f".{self.target_path.name}.feedback-tmp.{os.getpid()}."
+                f"{secrets.token_hex(16)}"
+            )
+            flags = (
+                os.O_RDWR | os.O_CREAT | os.O_EXCL
+                | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0)
+            )
+            descriptor = os.open(
+                temporary_name, flags, 0o600, dir_fd=self._parent_fd,
+            )
+            self._write_all(descriptor, candidate_bytes)
+            os.fsync(descriptor)
+            current = os.fstat(descriptor)
+            if (current.st_uid, current.st_gid) != (self._uid, self._gid):
+                os.fchown(descriptor, self._uid, self._gid)
+            os.fchmod(descriptor, self._mode)
+            os.fsync(descriptor)
+            self._assert_candidate(temporary_name, descriptor, candidate_bytes)
+            self._assert_cas()
+            self._prepare_publication_state(after_sha256)
+            self._assert_candidate(temporary_name, descriptor, candidate_bytes)
+            self._assert_cas()
+
+            # The implementation must not claim impossible compare-and-swap semantics from portable rename.
+            try:
+                os.replace(
+                    temporary_name, self.target_path.name,
+                    src_dir_fd=self._parent_fd, dst_dir_fd=self._parent_fd,
+                )
+            except Exception:
+                # A wrapper/fault injector can report failure after the rename.
+                # Bind the live name to the still-held fd before classifying it.
+                try:
+                    live_after_error = os.stat(
+                        self.target_path.name, dir_fd=self._parent_fd,
+                        follow_symlinks=False,
+                    )
+                    candidate_after_error = os.fstat(descriptor)
+                except OSError:
+                    live_after_error = None
+                    candidate_after_error = None
+                if (
+                    live_after_error is not None
+                    and candidate_after_error is not None
+                    and _stat_identity(live_after_error)
+                    == _stat_identity(candidate_after_error)
+                ):
+                    temporary_name = None
+                    self.published = True
+                    self.commit_count = 1
+                    raise PublicationIndeterminateError(after_sha256) from None
+                raise
+            temporary_name = None
+            self.published = True
+            self.commit_count = 1
+            try:
+                self._advance_publication_state()
+                self._fsync_live_parent()
+                self._verify_published_candidate(descriptor, candidate_bytes)
+                for line in provenance_lines:
+                    print(line)
+                self._remove_publication_state()
+            except Exception:
+                raise PublicationIndeterminateError(after_sha256) from None
+            self._committed = True
+            return self.commit_count
+        except PublicationIndeterminateError:
+            raise
+        except FeedbackError:
+            raise
+        except Exception:
+            if self.published and after_sha256 is not None:
+                raise PublicationIndeterminateError(after_sha256) from None
+            raise FeedbackError("writeback-prepublication") from None
+        finally:
+            if temporary_name is not None and descriptor is not None:
+                try:
+                    self._identity_bound_unlink(
+                        temporary_name, descriptor, self._parent_fd,
+                    )
+                except OSError:
+                    pass
+            if descriptor is not None:
+                os.close(descriptor)
+
+    def _load_state_record(self):
+        descriptor = os.open(
+            GLOBAL_WRITEBACK_STATE_NAME, self._read_flags(),
+            dir_fd=self._state_dir_fd,
+        )
+        try:
+            before = os.fstat(descriptor)
+            named = self._state_named_stat()
+            if (
+                not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                or before.st_uid != os.geteuid()
+                or stat.S_IMODE(before.st_mode) != 0o600
+                or _stat_identity(before) != _stat_identity(named)
+            ):
+                raise FeedbackError("state-authority")
+            payload = _read_bounded_fd(
+                descriptor, limit=MAX_GLOBAL_WRITEBACK_STATE_BYTES,
+            )
+            after = os.fstat(descriptor)
+            named_after = self._state_named_stat()
+            if (
+                _snapshot_version(after) != _snapshot_version(before)
+                or _snapshot_version(named_after) != _snapshot_version(after)
+            ):
+                raise FeedbackError("state-authority")
+            try:
+                text = payload.decode("utf-8", errors="strict")
+                record = json.loads(text)
+            except Exception:
+                raise FeedbackError("state-record") from None
+            expected_keys = {
+                "authority_path", "expected_after_sha256", "published",
+                "schema", "timestamp",
+            }
+            if (
+                not isinstance(record, dict) or set(record) != expected_keys
+                or record.get("schema") != GLOBAL_WRITEBACK_STATE_SCHEMA
+                or record.get("authority_path") != str(self.target_path)
+                or not isinstance(record.get("published"), bool)
+                or not isinstance(record.get("timestamp"), str)
+                or not re.fullmatch(
+                    r"[0-9a-f]{64}", str(record.get("expected_after_sha256", "")),
+                )
+                or self._state_payload(record) != payload
+            ):
+                raise FeedbackError("state-record")
+            self._state_identity = _stat_identity(after)
+            self._state_version = _snapshot_version(after)
+            self._state_bytes = payload
+            self._state_record = record
+            return record
+        finally:
+            os.close(descriptor)
+
+    def recover_state(self):
+        if not self._entered or not self._recovery_mode:
+            raise FeedbackError("recovery-state")
+        try:
+            record = self._load_state_record()
+        except FileNotFoundError:
+            raise FeedbackError("state-blocked", message="没有可恢复的 state") from None
+        if (
+            record["published"] is not True
+            or record["expected_after_sha256"] != self.before_sha256
+        ):
+            raise FeedbackError(
+                "state-blocked",
+                message="PREPARED 或 live SHA mismatch 必须人工验证，不得清除",
+            )
+        self._remove_publication_state()
+        return True
+
+    def close(self):
+        for attribute in (
+            "_state_dir_fd", "_state_root_fd", "_target_fd", "_parent_fd",
+            "_link_parent_fd",
+        ):
+            descriptor = getattr(self, attribute)
+            if descriptor is not None:
+                os.close(descriptor)
+                setattr(self, attribute, None)
+        if self._lock_context is not None:
+            self._lock_context.__exit__(None, None, None)
+            self._lock_context = None
+            self._held_lock_fd = None
+        self._entered = False
+
+
+def recover_global_writeback_state(authority_path, *, workspace_root=None,
+                                   held_lock_fd=None):
+    """Clear only a validated successful ``published=true`` state marker."""
+    with GlobalWritebackTransaction(
+        authority_path, workspace_root=workspace_root,
+        held_lock_fd=held_lock_fd, recovery_mode=True,
+    ) as transaction:
+        return transaction.recover_state()
 
 
 def _path_get(mapping, *parts):
@@ -1427,40 +2901,6 @@ def _set_inferred(mapping, parts, value):
         _path_set(mapping, parts, value)
         return True
     return False
-
-
-def _fill_global_placeholders(target, candidate, path=()):
-    """Fill only explicit ``{}`` placeholders and return changed YAML paths."""
-    if isinstance(target, dict) and isinstance(candidate, dict):
-        changed = []
-        for key in list(target):
-            if key not in candidate:
-                continue
-            target_value = target[key]
-            candidate_value = candidate[key]
-            if _is_global_placeholder(target_value):
-                if not _is_global_placeholder(candidate_value):
-                    target[key] = copy.deepcopy(candidate_value)
-                    changed.append(".".join(str(part) for part in path + (key,)))
-            else:
-                changed.extend(_fill_global_placeholders(
-                    target_value, candidate_value, path + (key,),
-                ))
-        return changed
-    if isinstance(target, list) and isinstance(candidate, list):
-        changed = []
-        for index, (target_value, candidate_value) in enumerate(
-                zip(target, candidate)):
-            if _is_global_placeholder(target_value):
-                if not _is_global_placeholder(candidate_value):
-                    target[index] = copy.deepcopy(candidate_value)
-                    changed.append(".".join(str(part) for part in path + (index,)))
-            else:
-                changed.extend(_fill_global_placeholders(
-                    target_value, candidate_value, path + (index,),
-                ))
-        return changed
-    return []
 
 
 def _natural_key(value):
@@ -1550,11 +2990,24 @@ def _eth_global_section(document):
     return entry["eth"]
 
 
-def build_global_document(configs, baseline=None):
+def build_global_document(configs, baseline=None, evidence_paths=None):
     """Build global.yaml-shaped data, using the project file for missing values."""
     document = copy.deepcopy(baseline) if isinstance(baseline, dict) else {}
     document.setdefault("common", {}).setdefault("switch", {})
     eth = _eth_global_section(document)
+    eth_index = next(
+        index for index, item in enumerate(document["switches"])
+        if isinstance(item, dict) and item.get("eth") is eth
+    )
+    eth_prefix = ("switches", eth_index, "eth")
+
+    def infer(mapping, local_path, value, global_path):
+        if _set_inferred(mapping, local_path, value):
+            if evidence_paths is not None:
+                evidence_paths.add(tuple(global_path))
+            return True
+        return False
+
     schema_version = detect_global_schema_version(document)
     v2_mlag_policy = None
     if schema_version == 2:
@@ -1571,7 +3024,7 @@ def build_global_document(configs, baseline=None):
     )
     for source, destination, transform in mappings:
         value = _consensus(configs, source, transform)
-        _set_inferred(document, destination, value)
+        infer(document, destination, value, destination)
 
     for source, destination in (
         (("system", "dns", "server"),
@@ -1579,11 +3032,14 @@ def build_global_document(configs, baseline=None):
         (("system", "ntp", "server"),
          ("common", "switch", "system", "ntp", "server")),
     ):
-        _set_inferred(document, destination, _collect_server_names(configs, source))
+        infer(
+            document, destination, _collect_server_names(configs, source), destination,
+        )
 
-    _set_inferred(
+    infer(
         eth, ("services", "dhcp_relay"),
         _collect_dhcp_relay_global(configs),
+        eth_prefix + ("services", "dhcp_relay"),
     )
 
     eth_mappings = (
@@ -1595,7 +3051,7 @@ def build_global_document(configs, baseline=None):
     )
     for source, destination in eth_mappings:
         value = _consensus(configs, source)
-        _set_inferred(eth, destination, value)
+        infer(eth, destination, value, eth_prefix + destination)
 
     # AAA is compared one user/field at a time: an extra local account must not
     # prevent stable global credentials from being recovered.
@@ -1612,7 +3068,8 @@ def build_global_document(configs, baseline=None):
         }, key=_natural_key)
         for field in fields:
             value = _consensus(configs, ("system", "aaa", "user", user, field))
-            _set_inferred(eth, ("system", "aaa", "user", user, field), value)
+            destination = ("system", "aaa", "user", user, field)
+            infer(eth, destination, value, eth_prefix + destination)
 
     # global.yaml uses a compact list shape for DHCP relay groups, while NVUE
     # stores them as mappings. A placeholder server list is populated only from
@@ -1646,17 +3103,25 @@ def build_global_document(configs, baseline=None):
                 servers = sorted(exact, key=_natural_key)
                 if servers:
                     group["servers"] = servers
+                    if evidence_paths is not None:
+                        evidence_paths.add(eth_prefix + destination)
 
     mlag_configs = [cfg for cfg in configs if isinstance(cfg.get("mlag"), dict)]
     if mlag_configs:
         init_delay = _consensus(mlag_configs, ("mlag", "init-delay"))
-        _set_inferred(eth, ("mlag", "init-delay"), init_delay)
+        infer(
+            eth, ("mlag", "init-delay"), init_delay,
+            eth_prefix + ("mlag", "init-delay"),
+        )
         priorities = sorted({
             _path_get(cfg, "mlag", "priority") for cfg in mlag_configs
             if _path_get(cfg, "mlag", "priority") is not None
         }, key=lambda value: (isinstance(value, str), str(value)))
         if priorities:
-            _set_inferred(eth, ("mlag", "priority"), priorities)
+            infer(
+                eth, ("mlag", "priority"), priorities,
+                eth_prefix + ("mlag", "priority"),
+            )
 
         if schema_version == 2:
             shared_by_mac = dict(v2_mlag_policy["shared_addresses"])
@@ -1699,10 +3164,13 @@ def build_global_document(configs, baseline=None):
                 mac_by_shared[normalized_ip] = normalized_mac
 
             if shared_by_mac:
+                can_fill_shared = _path_can_fill(eth, ("mlag", "shared-addresses"))
                 eth.setdefault("mlag", {})["shared-addresses"] = [
                     {"bond-mac": mac, "anycast-ip": shared_by_mac[mac]}
                     for mac in sorted(shared_by_mac, key=_natural_key)
                 ]
+                if can_fill_shared and evidence_paths is not None:
+                    evidence_paths.add(eth_prefix + ("mlag", "shared-addresses"))
         else:
             # Schema v1 retains its positional pair representation, including
             # optional per-device system MAC recovery.
@@ -1750,34 +3218,51 @@ def build_global_document(configs, baseline=None):
                     for key in sorted(rendered_by_shared, key=_natural_key)
                 ]
                 _path_set(eth, ("mlag", "pairs"), rendered)
+                if evidence_paths is not None:
+                    evidence_paths.add(eth_prefix + ("mlag", "pairs"))
     return document
 
 
 def write_global_yaml(csv_path, configs, global_config_path=None,
-                      update_global_config=True):
+                      update_global_config=True, *, global_writeback=None,
+                      source_scope="prod", source_ref="unknown"):
     """Write ``<csv-stem>-global.yaml`` next to the generated CSV."""
     baseline = None
-    if global_config_path:
+    if global_writeback is not None:
+        if global_config_path and not global_writeback.matches(global_config_path):
+            raise ValueError("全局 YAML transaction 与请求 authority 不一致")
+        baseline = copy.deepcopy(global_writeback.baseline)
+    elif global_config_path and not update_global_config:
         with Path(global_config_path).open(encoding="utf-8") as stream:
             baseline = safe_load_yaml_preserving_mac(stream)
         if baseline is not None and not isinstance(baseline, dict):
             raise ValueError(f"全局 YAML 顶层必须是 mapping: {global_config_path}")
-    document = build_global_document(configs, baseline)
+    elif global_config_path:
+        # Standalone callers still receive the same locked, held-descriptor
+        # transaction. CLI invocations create one earlier and share it across
+        # every Production/AIR source so this branch commits at most once.
+        candidate_path = Path(global_config_path).expanduser().absolute()
+        with GlobalWritebackTransaction(
+            candidate_path,
+        ) as transaction:
+            return write_global_yaml(
+                csv_path, configs, global_config_path, update_global_config,
+                global_writeback=transaction, source_scope=source_scope,
+                source_ref=source_ref,
+            )
+    evidence_paths = set()
+    document = build_global_document(configs, baseline, evidence_paths)
     output = Path(csv_path).with_name(f"{Path(csv_path).stem}-global.yaml")
     with output.open("w", encoding="utf-8") as stream:
         yaml.safe_dump(document, stream, allow_unicode=True, sort_keys=False, width=120)
-    if update_global_config and global_config_path and isinstance(baseline, dict):
-        changed = _fill_global_placeholders(baseline, document)
-        if changed:
-            # Opening the path follows the sample symlink and updates the
-            # project file; replacing the path would incorrectly replace the
-            # symlink itself.
-            with Path(global_config_path).open("w", encoding="utf-8") as stream:
-                yaml.safe_dump(baseline, stream, allow_unicode=True,
-                               sort_keys=False, width=120)
-            print(f"[UPDATE] 全局基线回填 {len(changed)} 个字段 → {global_config_path}")
-            for item in changed:
-                print(f"         {item}")
+    if (
+        update_global_config and global_writeback is not None
+        and isinstance(baseline, dict)
+    ):
+        global_writeback.stage(
+            document, evidence_paths, source_scope=source_scope,
+            source_ref=source_ref,
+        )
     unresolved = []
     def find_unresolved(value, path=()):
         if value == {}:
@@ -1825,7 +3310,8 @@ def _conversion_error(message):
 
 def convert_one(input_value=None, output_value=None, format_path=None,
                 devices_config_path=None, yaml_only=False,
-                global_config_path=None, environment_scope=None):
+                global_config_path=None, environment_scope=None,
+                global_writeback=None):
     """Convert one YAML collection and return the generated CSV path."""
     script_dir = os.path.dirname(os.path.abspath(__file__))
     if input_value:
@@ -1883,13 +3369,6 @@ def convert_one(input_value=None, output_value=None, format_path=None,
         with open(collected_csv, encoding="utf-8-sig") as f:
             lines = list(csv.reader(f))
         raw_hdr = lines[0]
-        normalized_header = [
-            str(column or "").strip().casefold() for column in raw_hdr
-        ]
-        terminal_l2_ports_index = (
-            normalized_header.index("terminal_l2_ports")
-            if normalized_header.count("terminal_l2_ports") == 1 else None
-        )
         for line in lines[1:]:
             row = dict(zip(raw_hdr, line))
             # 两个 netmask 列：第5列(index4)=eth0 netmask, 第9列(index8)=eth1 netmask
@@ -1911,11 +3390,6 @@ def convert_one(input_value=None, output_value=None, format_path=None,
                 "eth1_nm":  nm_vals[1] if len(nm_vals) > 1 else NA,
                 "eth1_gw":  row.get("eth1_gw", NA),
                 "eth1_mac": row.get("eth1_mac", NA),
-                "terminal_l2_ports": (
-                    line[terminal_l2_ports_index]
-                    if (terminal_l2_ports_index is not None
-                        and terminal_l2_ports_index < len(line)) else NA
-                ),
             }
     else:
         inventory_logs = sorted(
@@ -1940,7 +3414,6 @@ def convert_one(input_value=None, output_value=None, format_path=None,
         else:
             print(f"[INFO] 未找到 *devices_config*.csv 或 hostname-ip-mac.log，eth 相关信息填 NA")
 
-    v2_policy_columns = ()
     try:
         collected_global = find_global_config(
             backup_dir, explicit_path=global_config_path,
@@ -1948,19 +3421,44 @@ def convert_one(input_value=None, output_value=None, format_path=None,
     except FileNotFoundError as exc:
         _conversion_error(str(exc))
     if collected_global:
+        if global_writeback is not None and not global_writeback.matches(collected_global):
+            _conversion_error("全局 YAML transaction 与转换 authority 不一致")
         print(f"全局基线   : {collected_global}")
     else:
         print("[INFO] 未找到 01-global.yaml/global.yaml，将仅输出可从设备配置反推的全局信息")
 
+    # Public callers of convert_one(), not only the CLI, must validate and bind
+    # the write authority before CSV/sidecar output. Re-enter with the held
+    # transaction so the remainder consumes only its frozen baseline. A global
+    # found inside a validated archive extraction is transient input, not a
+    # writable project authority.
+    transient_archive_global = (
+        temporary is not None and global_config_path is None
+    )
+    if (
+        collected_global is not None and global_writeback is None
+        and not transient_archive_global
+    ):
+        if temporary is not None:
+            temporary.cleanup()
+        with GlobalWritebackTransaction(collected_global) as transaction:
+            return convert_one(
+                input_value, output_value, format_path, devices_config_path,
+                yaml_only=yaml_only, global_config_path=global_config_path,
+                environment_scope=environment_scope,
+                global_writeback=transaction,
+            )
+
     try:
-        schema_version = read_project_schema_version(collected_global)
+        schema_version = (
+            detect_global_schema_version(global_writeback.baseline)
+            if global_writeback is not None and collected_global
+            else read_project_schema_version(collected_global)
+        )
         if schema_version == 2:
             base_header, existing_vlan_groups, existing_groups = (
                 read_v2_format_header(format_path, collected_csv)
             )
-            v2_policy_columns = parse_device_csv_layout(
-                base_header, 2,
-            ).policy_columns
             print(
                 "格式文件   : schema v2，现有普通 VLAN groups="
                 f"{existing_vlan_groups}，EVPN groups={existing_groups}"
@@ -2056,9 +3554,6 @@ def convert_one(input_value=None, output_value=None, format_path=None,
                 parsed.append({
                     "base": base_values, "ordinary": [],
                     "fixed": [NA] * len(DEVICE_FIXED_COLUMNS), "evpn": [],
-                    "policy": [
-                        info.get(column, NA) for column in v2_policy_columns
-                    ],
                     "source_b64": source_b64, "source_sha256": source_sha256,
                 })
             else:
@@ -2079,9 +3574,6 @@ def convert_one(input_value=None, output_value=None, format_path=None,
                 )
                 parsed.append({
                     "base": base, "ordinary": ordinary, "fixed": fixed,
-                    "policy": [
-                        info.get(column, NA) for column in v2_policy_columns
-                    ],
                     "evpn": groups, "source_b64": source_b64,
                     "source_sha256": source_sha256,
                 })
@@ -2128,7 +3620,6 @@ def convert_one(input_value=None, output_value=None, format_path=None,
             list(DEVICE_BASE_COLUMNS)
             + list(DEVICE_V2_VLAN_COLUMNS) * n_vlan_groups
             + list(DEVICE_FIXED_COLUMNS)
-            + list(v2_policy_columns)
             + list(DEVICE_V2_EVPN_COLUMNS) * n_groups
         )
         header = data_header + list(METADATA_COLS)
@@ -2141,7 +3632,6 @@ def convert_one(input_value=None, output_value=None, format_path=None,
                 * len(DEVICE_V2_VLAN_COLUMNS)
             )
             row.extend(item["fixed"])
-            row.extend(item["policy"])
             for group in item["evpn"]:
                 row.extend(group)
             row.extend(
@@ -2207,7 +3697,13 @@ def convert_one(input_value=None, output_value=None, format_path=None,
         writer.writerows(output_rows)
 
     print(f"已写入 {len(output_rows)} 行，{n_groups} 个 EVPN group，{total_cols} 列 → {out_path}")
-    global_path = write_global_yaml(out_path, global_configs, collected_global)
+    global_path = write_global_yaml(
+        out_path, global_configs, collected_global,
+        update_global_config=not transient_archive_global,
+        global_writeback=global_writeback,
+        source_scope=environment_scope or "prod",
+        source_ref=str(input_location),
+    )
     print(f"全局信息   : {len(global_configs)} 台设备参与反推 → {global_path}")
     info_temporary.cleanup()
     if temporary is not None:
@@ -2347,8 +3843,6 @@ def _semantic_headers(header):
             for offset, column in enumerate(DEVICE_V2_VLAN_COLUMNS):
                 result[start + offset] = f"vlan[{group_index}].{column}"
         for column, index in layout.fixed_indices.items():
-            result[index] = column
-        for column, index in layout.policy_indices.items():
             result[index] = column
         for group_index, start in enumerate(
                 layout.evpn_group_starts, start=1):
@@ -2933,8 +4427,32 @@ def sample_inventory_for_source(
     return str(candidate) if candidate.is_file() else None
 
 
-def prepare_sample_inputs(raw_inputs):
-    """Refresh the applicable sample directory before conversion/comparison."""
+class SampleInputPlan:
+    """Read-only discovery result carried across the outer deployment lock."""
+
+    def __init__(self, http_base, optimize_dir, candidates, project, selected):
+        self.http_base = Path(http_base).absolute()
+        self.optimize_dir = Path(optimize_dir).absolute()
+        self.candidates = tuple(candidates)
+        self.project = Path(project).absolute() if project is not None else None
+        self.selected = selected
+        self.mutation_plan = None
+        self.sample = (
+            self.optimize_dir / f"{self.project.name}-sample"
+            if self.project is not None else None
+        )
+        self.project_version = (
+            _snapshot_version(os.lstat(self.project))
+            if self.project is not None else None
+        )
+        self.sample_version = (
+            _snapshot_version(os.lstat(self.sample))
+            if self.sample is not None and os.path.lexists(self.sample) else None
+        )
+
+
+def discover_sample_inputs(raw_inputs):
+    """Discover a project and exact sample path without changing the tree."""
     http_base = Path(__file__).resolve().parents[2]
     day0_prepare = http_base / "DAY0-Prepare"
     optimize_dir = Path(__file__).resolve().parent
@@ -2942,7 +4460,16 @@ def prepare_sample_inputs(raw_inputs):
     project = None
     selected = candidates[0] if len(candidates) == 1 else None
     for path in candidates:
-        project = project_from_sample_path(path, day0_prepare)
+        try:
+            path.relative_to(optimize_dir.absolute())
+        except ValueError:
+            inside_managed_optimize = False
+        else:
+            inside_managed_optimize = True
+        project = (
+            project_from_sample_path(path, day0_prepare)
+            if inside_managed_optimize else None
+        )
         if project:
             break
         if ((path / "02-devices_config.csv").is_file()
@@ -2966,18 +4493,150 @@ def prepare_sample_inputs(raw_inputs):
             if (possible_project / "02-devices_config.csv").is_file():
                 project = possible_project
     if project is None:
+        return SampleInputPlan(
+            http_base, optimize_dir, candidates, None, selected,
+        )
+
+    project = Path(project).absolute()
+    project_lstat = os.lstat(project)
+    if not stat.S_ISDIR(project_lstat.st_mode):
+        raise FeedbackError(
+            "project-authority", message="project root 必须是实际目录",
+        )
+    return SampleInputPlan(
+        http_base, optimize_dir, candidates, project, selected,
+    )
+
+
+def _revalidate_sample_plan(plan):
+    if plan.project is None:
+        return
+    if _snapshot_version(os.lstat(plan.project)) != plan.project_version:
+        raise FeedbackError(
+            "project-plan-changed", message="project discovery identity 已改变",
+        )
+    if plan.sample_version is None:
+        if os.path.lexists(plan.sample):
+            raise FeedbackError(
+                "sample-plan-changed", message="sample path 在加锁前后改变",
+            )
+    elif _snapshot_version(os.lstat(plan.sample)) != plan.sample_version:
+        raise FeedbackError(
+            "sample-plan-changed", message="sample discovery identity 已改变",
+        )
+
+
+def _validate_existing_managed_link(plan):
+    """Reject an existing invalid global link before sample refresh mutates."""
+    if plan.project is None or not os.path.lexists(plan.sample):
+        return
+    sample_stat = os.lstat(plan.sample)
+    if not stat.S_ISDIR(sample_stat.st_mode):
+        raise FeedbackError(
+            "managed-sample-authority", message="sample path 必须是实际目录",
+        )
+    link = plan.sample / "01-global.yaml"
+    if not os.path.lexists(link):
+        return
+    link_stat = os.lstat(link)
+    expected = os.path.relpath(
+        str(plan.project / "01-global.yaml"), str(plan.sample),
+    )
+    if (
+        not stat.S_ISLNK(link_stat.st_mode)
+        or os.path.isabs(os.readlink(link))
+        or os.readlink(link) != expected
+    ):
+        raise FeedbackError(
+            "managed-link-target",
+            message="现有 sample global authority 不可信",
+        )
+
+
+def prepare_sample_inputs(raw_inputs, *, plan=None, mutation_plan=None):
+    """Apply one already validated sample plan while the outer lock is held."""
+    plan = plan or discover_sample_inputs(raw_inputs)
+    candidates = list(plan.candidates)
+    project = plan.project
+    selected = plan.selected
+    if project is None:
         return candidates, None
 
     print(f"准备比较样例: {project.name}")
-    sample = update_sample_links(optimize_dir, project)
+    sample = Path(update_sample_links(
+        plan.optimize_dir, project, mutation_plan=mutation_plan,
+    )).absolute()
+    if sample != plan.sample:
+        raise FeedbackError(
+            "sample-refresh-path", message="sample_links 返回了非计划路径",
+        )
     if not candidates or (selected and (
-            selected.resolve() == project.resolve()
+            selected.absolute() == project
             or selected.name == f"{project.name}-sample")):
         candidates = [sample.absolute()]
     return candidates, sample
 
 
-def main(argv=None):
+def _bounded_parser_error(parser, exc=None, *, category="cli-operation"):
+    """The CLI renders only an already bounded Feedback diagnostic."""
+    if isinstance(exc, FeedbackError):
+        safe = FeedbackError(
+            exc.category, message=exc.message, published=exc.published,
+            line=exc.line, column=exc.column, ordinal=exc.ordinal,
+            serialized_bytes=exc.serialized_bytes, limit=exc.limit,
+            expected_after_sha256=exc.expected_after_sha256,
+        )
+        parser.error(str(safe))
+    if isinstance(exc, DeploymentLockError):
+        parser.error("feedback-error category=deployment-lock published=false")
+    parser.error(f"feedback-error category={category} published=false")
+
+
+def _implicit_global_authority(inputs):
+    implicit = []
+    for source in inputs:
+        source = Path(source).expanduser().absolute()
+        if source.is_dir():
+            candidate = find_global_config(source)
+        elif source.suffix.casefold() in {".yaml", ".yml", ".info"}:
+            candidate = find_global_config(source.parent)
+        else:
+            candidate = None
+        if candidate is not None:
+            implicit.append(Path(candidate).absolute())
+    identities = set(implicit)
+    if len(identities) > 1:
+        raise FeedbackError(
+            "multiple-authorities",
+            message="一次 invocation 发现多个全局 YAML authority",
+        )
+    return implicit[0] if implicit else None
+
+
+def _planned_authority(args, plan, inputs, prepared_sample):
+    """Return authority path and independently discovered managed authority."""
+    if args.global_config_path:
+        authority = find_global_config(
+            Path.cwd(), explicit_path=args.global_config_path,
+        )
+        if (
+            plan.project is not None
+            and authority == plan.sample / "01-global.yaml"
+        ):
+            return authority, plan.project, plan.sample
+        return authority, None, None
+    if plan.project is not None:
+        target = plan.project / "01-global.yaml"
+        if not os.path.lexists(target):
+            return None, None, None
+        if prepared_sample is None:
+            return target, plan.project, plan.sample
+        return prepared_sample / "01-global.yaml", plan.project, plan.sample
+    return _implicit_global_authority(inputs), None, None
+
+
+def main(argv=None, _global_writeback=None, _prepared_inputs=None,
+         _held_lock_fd=None):
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(
         description=("将 NVUE YAML/采集归档转换成 CSV；也可对目录中的2到5个"
@@ -3021,6 +4680,11 @@ def main(argv=None):
         "--global-config", dest="global_config_path",
         help="显式指定用于补全缺失全局字段的 01-global.yaml/global.yaml",
     )
+    parser.add_argument(
+        "--recover-global-writeback-state", action="store_true",
+        help=("人工验证后仅清除 published=true 且 live SHA 匹配的 writeback state；"
+              "必须同时显式指定 --global-config"),
+    )
     args = parser.parse_args(raw_argv)
     if args.air and args.comparison_type not in {None, "air"}:
         parser.error("--air 不能与 --type prod 同时使用")
@@ -3032,14 +4696,124 @@ def main(argv=None):
         "air" if args.air else "prod" if args.prod else (args.comparison_type or "all")
     )
 
-    try:
-        inputs, prepared_sample = prepare_sample_inputs(args.inputs)
-    except (OSError, ValueError) as exc:
-        parser.error(f"准备 sample 链接失败: {exc}")
+    # One top-level lock precedes every sample/output mutation. The prepared
+    # tuple and held descriptor are explicitly reused by prod/AIR recursion.
+    if _prepared_inputs is None and _global_writeback is None:
+        mutation_plan = None
+        try:
+            plan = discover_sample_inputs(args.inputs)
+            with deployment_lock(plan.http_base) as held_lock_fd:
+                _revalidate_sample_plan(plan)
+                stop_native_ztp_monitors(plan.http_base)
+                if args.recover_global_writeback_state:
+                    if not args.global_config_path or args.inputs:
+                        raise FeedbackError(
+                            "recovery-cli",
+                            message=("recovery 必须只提供显式 --global-config"),
+                        )
+                    authority = find_global_config(
+                        Path.cwd(), explicit_path=args.global_config_path,
+                    )
+                    recover_global_writeback_state(
+                        authority, workspace_root=plan.http_base,
+                        held_lock_fd=held_lock_fd,
+                    )
+                    print("[RECOVER] validated published state cleared")
+                    return 0
+
+                if plan.project is not None:
+                    mutation_plan = plan_sample_mutations(
+                        plan.optimize_dir, plan.project, plan.http_base,
+                    )
+                    plan.mutation_plan = mutation_plan
+
+                pre_authority, _managed_root, _sample_path = _planned_authority(
+                    args, plan, list(plan.candidates), None,
+                )
+                if plan.project is not None:
+                    _validate_existing_managed_link(plan)
+                if pre_authority is None:
+                    inputs, prepared_sample = prepare_sample_inputs(
+                        args.inputs, plan=plan, mutation_plan=mutation_plan,
+                    )
+                    authority, _managed_root, _sample_path = _planned_authority(
+                        args, plan, inputs, prepared_sample,
+                    )
+                    if authority is not None:
+                        raise FeedbackError("authority-plan-changed")
+                    prepared = (inputs, prepared_sample, plan)
+                    status = main(
+                        raw_argv, _prepared_inputs=prepared,
+                        _held_lock_fd=held_lock_fd,
+                    )
+                    if mutation_plan is not None:
+                        mutation_plan.assert_stable()
+                    return status
+
+                snapshot_path = (
+                    _managed_root / "01-global.yaml"
+                    if _managed_root is not None else pre_authority
+                )
+                with GlobalWritebackTransaction(
+                    snapshot_path, workspace_root=plan.http_base,
+                    held_lock_fd=held_lock_fd,
+                    defer_state_directory=True,
+                ) as transaction:
+                    inputs, prepared_sample = prepare_sample_inputs(
+                        args.inputs, plan=plan, mutation_plan=mutation_plan,
+                    )
+                    authority, managed_root, sample_path = _planned_authority(
+                        args, plan, inputs, prepared_sample,
+                    )
+                    if authority is None:
+                        raise FeedbackError("authority-plan-changed")
+                    if managed_root is not None:
+                        transaction.bind_managed_link(
+                            authority, managed_project_root=managed_root,
+                            managed_sample_path=sample_path,
+                            held_sample_fd=mutation_plan.duplicate_sample_fd(),
+                        )
+                    elif Path(authority).absolute() != transaction.target_path:
+                        raise FeedbackError("authority-plan-changed")
+                    transaction.prepare_state_directory()
+                    prepared = (inputs, prepared_sample, plan)
+                    status = main(
+                        raw_argv, _global_writeback=transaction,
+                        _prepared_inputs=prepared,
+                        _held_lock_fd=held_lock_fd,
+                    )
+                    if mutation_plan is not None:
+                        mutation_plan.assert_stable()
+                    return status
+        except SystemExit:
+            raise
+        except Exception as exc:
+            _bounded_parser_error(parser, exc, category="feedback-invocation")
+        finally:
+            if mutation_plan is not None:
+                mutation_plan.close()
+
+    if args.recover_global_writeback_state:
+        _bounded_parser_error(parser, category="recovery-recursion")
+    _plan = None
+    if _prepared_inputs is not None:
+        inputs, prepared_sample, _plan = _prepared_inputs
+        inputs = list(inputs)
+    else:
+        try:
+            inputs, prepared_sample = prepare_sample_inputs(args.inputs)
+        except Exception as exc:
+            _bounded_parser_error(parser, exc, category="sample-refresh")
+
     if requested_type == "all" and prepared_sample:
+        managed_output = (
+            _plan.project / "99-output-ztp" / "optimize"
+            if _plan is not None and _plan.project is not None
+            else prepared_sample / LINK_NAMES["comparison_output"]
+        )
         base_output = (Path(args.output_dir).expanduser().absolute()
                        if args.output_dir
-                       else prepared_sample / LINK_NAMES["comparison_output"])
+                       else managed_output)
         forwarded = []
         index = 0
         while index < len(raw_argv):
@@ -3063,7 +4837,10 @@ def main(argv=None):
             print(f"\n{'=' * 20} {environment.upper()} 独立比较 {'=' * 20}\n")
             statuses.append(main(
                 forwarded + ["--type", environment, "--output-dir",
-                             str(base_output / environment)]
+                             str(base_output / environment)],
+                _global_writeback=_global_writeback,
+                _prepared_inputs=_prepared_inputs,
+                _held_lock_fd=_held_lock_fd,
             ))
         return max(statuses)
     if requested_type == "all":
@@ -3091,11 +4868,13 @@ def main(argv=None):
             parser.error("比较模式不使用 -o/--output，请改用 --output-dir")
         if not 2 <= len(inputs) <= 5:
             parser.error(f"比较模式要求 2 到 5 个来源，实际发现 {len(inputs)} 个")
-        missing = [str(path) for path in inputs if not path.exists()]
+        missing = [path for path in inputs if not path.exists()]
         if missing:
-            parser.error("输入不存在或软链接失效: " + ", ".join(missing))
+            _bounded_parser_error(parser, category="missing-comparison-input")
         labels = _unique_labels(inputs)
         effective_global_config = args.global_config_path
+        if not effective_global_config and _global_writeback is not None:
+            effective_global_config = str(_global_writeback.authority_path)
         if not effective_global_config and prepared_sample:
             sample_global = prepared_sample / "01-global.yaml"
             if sample_global.is_file():
@@ -3104,7 +4883,9 @@ def main(argv=None):
             output_dir = Path(args.output_dir).expanduser().absolute()
         elif prepared_sample:
             output_dir = (
-                prepared_sample / LINK_NAMES["comparison_output"] / requested_type
+                _plan.project / "99-output-ztp" / "optimize" / requested_type
+                if _plan is not None and _plan.project is not None
+                else prepared_sample / LINK_NAMES["comparison_output"] / requested_type
             )
         elif discovered_container:
             output_dir = discovered_container
@@ -3112,7 +4893,14 @@ def main(argv=None):
             output_dir = inputs[0].parent
         else:
             output_dir = Path.cwd()
-        output_dir.mkdir(parents=True, exist_ok=True)
+        if (
+            _plan is not None and _plan.mutation_plan is not None
+            and output_dir
+            == _plan.mutation_plan.output / requested_type
+        ):
+            _plan.mutation_plan.ensure_output_subdirectory(requested_type)
+        else:
+            output_dir.mkdir(parents=True, exist_ok=True)
 
         print(f"比较模式    : {len(inputs)} 方")
         generated = []
@@ -3141,6 +4929,9 @@ def main(argv=None):
                     else:
                         generated_global = write_global_yaml(
                             destination, [], effective_global_config,
+                            global_writeback=_global_writeback,
+                            source_scope=requested_type,
+                            source_ref=str(source),
                         )
                         print(f"全局信息   : CSV 无设备 YAML，使用 global 基线 → {generated_global}")
                     generated.append(destination)
@@ -3150,14 +4941,15 @@ def main(argv=None):
                         source_devices_config, yaml_only=True,
                         global_config_path=effective_global_config,
                         environment_scope=requested_type,
+                        global_writeback=_global_writeback,
                     ))
             analysis = analyze_comparison(generated, labels)
             report, lifecycle = write_report(
                 analysis, generated, inputs, output_dir,
                 report_type=requested_type,
             )
-        except ValueError as exc:
-            parser.error(str(exc))
+        except Exception as exc:
+            _bounded_parser_error(parser, exc, category="comparison")
         print(f"\n比较报告    : {report}")
         print(f"问题状态    : 已修复 {len(lifecycle['fixed'])}，"
               f"仍存在 {len(lifecycle['remaining'])}，新增 {len(lifecycle['new'])}")
@@ -3169,6 +4961,8 @@ def main(argv=None):
         parser.error("只能提供一个转换来源，或者两个/三个比较来源")
     try:
         effective_global_config = args.global_config_path
+        if not effective_global_config and _global_writeback is not None:
+            effective_global_config = str(_global_writeback.authority_path)
         effective_devices_config = sample_inventory_for_source(
             prepared_sample, inputs[0] if inputs else None,
             args.devices_config_path,
@@ -3188,10 +4982,19 @@ def main(argv=None):
             single_output_dir = Path(args.output_dir).expanduser().absolute()
         elif not single_output and prepared_sample and inputs:
             single_output_dir = (
-                prepared_sample / LINK_NAMES["comparison_output"] / requested_type
+                _plan.project / "99-output-ztp" / "optimize" / requested_type
+                if _plan is not None and _plan.project is not None
+                else prepared_sample / LINK_NAMES["comparison_output"] / requested_type
             )
         if single_output_dir is not None:
-            single_output_dir.mkdir(parents=True, exist_ok=True)
+            if (
+                _plan is not None and _plan.mutation_plan is not None
+                and single_output_dir
+                == _plan.mutation_plan.output / requested_type
+            ):
+                _plan.mutation_plan.ensure_output_subdirectory(requested_type)
+            else:
+                single_output_dir.mkdir(parents=True, exist_ok=True)
             single_output = str(
                 single_output_dir / f"{source_label(inputs[0])}.csv"
             )
@@ -3200,9 +5003,10 @@ def main(argv=None):
             single_output, args.format_path, effective_devices_config,
             global_config_path=effective_global_config,
             environment_scope=requested_type,
+            global_writeback=_global_writeback,
         )
-    except ValueError as exc:
-        parser.error(str(exc))
+    except Exception as exc:
+        _bounded_parser_error(parser, exc, category="conversion")
     return 0
 
 

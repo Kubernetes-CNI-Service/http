@@ -6,6 +6,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import re
+import secrets
+import stat
 import tarfile
 
 
@@ -30,6 +32,547 @@ LEGACY_ROOT_OUTPUT_NAMES = (
     "generated-latest.csv",
     "generated-latest-global.yaml",
 )
+
+
+def _directory_flags():
+    return (
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    )
+
+
+def _directory_identity(value):
+    """Stable directory authority, excluding child-dependent metadata."""
+    return (
+        value.st_dev, value.st_ino, stat.S_IFMT(value.st_mode),
+        stat.S_IMODE(value.st_mode), value.st_uid, value.st_gid,
+    )
+
+
+def _node_version(value):
+    return (
+        value.st_dev, value.st_ino, value.st_mode, value.st_nlink,
+        value.st_uid, value.st_gid, value.st_size,
+        value.st_mtime_ns, value.st_ctime_ns,
+    )
+
+
+def _node_identity(value):
+    return (
+        value.st_dev, value.st_ino, value.st_mode, value.st_nlink,
+        value.st_uid, value.st_gid,
+    )
+
+
+class HeldSampleMutationPlan:
+    """Bind Feedback's managed roots before changing any sample/output name.
+
+    The workspace deployment lock supplies exclusion between cooperating
+    processes.  This object supplies pathname authority: every existing
+    component below that workspace is opened without following symlinks and
+    retained until the complete Feedback invocation returns.  Missing managed
+    children are created only relative to an already-held parent descriptor.
+    """
+
+    def __init__(self, optimize_dir, project_dir, workspace_root):
+        self.workspace_root = Path(workspace_root).expanduser().absolute()
+        self.optimize_dir = Path(optimize_dir).expanduser().absolute()
+        self.project_dir = Path(project_dir).expanduser().absolute()
+        self.sample = sample_directory(self.optimize_dir, self.project_dir).absolute()
+        self.output = self.project_dir / "99-output-ztp" / "optimize"
+        self._fds = set()
+        self._anchors = []
+        self._missing = []
+        self._source_versions = []
+        self._applied = False
+        self._closed = False
+        self._sample_fd = None
+        self._output_root_fd = None
+        self._output_fd = None
+        self._legacy_fd = None
+        self._output_subdirs = {}
+        try:
+            self._bind_initial_tree()
+        except BaseException:
+            self.close()
+            raise
+
+    @staticmethod
+    def _unsafe():
+        raise ValueError("unsafe held sample/output mutation authority")
+
+    @staticmethod
+    def _safe_directory(value):
+        return (
+            stat.S_ISDIR(value.st_mode)
+            and value.st_uid == os.geteuid()
+            and not (stat.S_IMODE(value.st_mode) & 0o022)
+        )
+
+    def _remember_fd(self, descriptor):
+        self._fds.add(descriptor)
+        return descriptor
+
+    def _open_root(self, path):
+        descriptor = None
+        try:
+            named = os.lstat(path)
+            descriptor = os.open(path, _directory_flags())
+            held = os.fstat(descriptor)
+        except OSError:
+            if descriptor is not None:
+                os.close(descriptor)
+            self._unsafe()
+        if (
+            _directory_identity(named) != _directory_identity(held)
+            or not self._safe_directory(held)
+        ):
+            os.close(descriptor)
+            self._unsafe()
+        self._remember_fd(descriptor)
+        self._root_identity = _directory_identity(held)
+        return descriptor
+
+    def _open_child(self, parent_fd, name, *, required=True):
+        try:
+            named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            if required:
+                self._unsafe()
+            self._missing.append((parent_fd, name))
+            return None
+        except OSError:
+            self._unsafe()
+        descriptor = None
+        try:
+            descriptor = os.open(name, _directory_flags(), dir_fd=parent_fd)
+            held = os.fstat(descriptor)
+        except OSError:
+            if descriptor is not None:
+                os.close(descriptor)
+            self._unsafe()
+        if (
+            _directory_identity(named) != _directory_identity(held)
+            or not self._safe_directory(held)
+            or held.st_dev != self._workspace_device
+        ):
+            os.close(descriptor)
+            self._unsafe()
+        self._remember_fd(descriptor)
+        self._anchors.append(
+            [parent_fd, name, descriptor, _directory_identity(held)],
+        )
+        return descriptor
+
+    def _bind_chain(self, relative):
+        descriptor = self._workspace_fd
+        for component in relative.parts:
+            descriptor = self._open_child(descriptor, component)
+        return descriptor
+
+    def _remove_missing(self, parent_fd, name):
+        self._missing = [
+            item for item in self._missing if item != (parent_fd, name)
+        ]
+
+    def _detach_anchor(self, descriptor, *, close):
+        self._anchors = [
+            item for item in self._anchors if item[2] != descriptor
+        ]
+        if close and descriptor in self._fds:
+            os.close(descriptor)
+            self._fds.remove(descriptor)
+
+    def _anchor_existing_fd(self, parent_fd, name, descriptor):
+        held = os.fstat(descriptor)
+        named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            _directory_identity(held) != _directory_identity(named)
+            or not self._safe_directory(held)
+        ):
+            self._unsafe()
+        self._anchors.append(
+            [parent_fd, name, descriptor, _directory_identity(held)],
+        )
+
+    def _bind_initial_tree(self):
+        try:
+            optimize_relative = self.optimize_dir.relative_to(self.workspace_root)
+            project_relative = self.project_dir.relative_to(self.workspace_root)
+        except ValueError:
+            self._unsafe()
+        if not optimize_relative.parts or not project_relative.parts:
+            self._unsafe()
+
+        self._workspace_fd = self._open_root(self.workspace_root)
+        self._workspace_device = os.fstat(self._workspace_fd).st_dev
+        self._optimize_fd = self._bind_chain(optimize_relative)
+        self._project_fd = self._bind_chain(project_relative)
+
+        if self.sample.parent != self.optimize_dir:
+            self._unsafe()
+        self._sample_fd = self._open_child(
+            self._optimize_fd, self.sample.name, required=False,
+        )
+        self._output_root_fd = self._open_child(
+            self._project_fd, "99-output-ztp", required=False,
+        )
+        if self._output_root_fd is not None:
+            self._output_fd = self._open_child(
+                self._output_root_fd, "optimize", required=False,
+            )
+
+        # All other source/output roots participating in link selection are
+        # read-only, but binding their existing top-level components prevents
+        # a same-name replacement from changing the mutation plan later.
+        for name in ("99-output-eth", "99-output-monitor", "99-output-backup"):
+            self._open_child(self._project_fd, name, required=False)
+
+        self.retained_state = False
+        if self._output_fd is not None:
+            try:
+                os.stat(
+                    ".feedback-global-writeback-state.json",
+                    dir_fd=self._output_fd, follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                pass
+            else:
+                self.retained_state = True
+
+        self._legacy_has_data = False
+        self._target_has_data = False
+        if self._output_fd is not None:
+            self._target_has_data = any(
+                name != ".feedback-global-writeback-state.json"
+                for name in os.listdir(self._output_fd)
+            )
+        self._unknown_symlinks = []
+        self._legacy_regular_outputs = []
+        self._legacy_unmanaged_outputs = []
+        if self._sample_fd is not None:
+            names = os.listdir(self._sample_fd)
+            managed_names = set(LINK_NAMES.values())
+            for name in names:
+                node = os.stat(
+                    name, dir_fd=self._sample_fd, follow_symlinks=False,
+                )
+                if name == LINK_NAMES["comparison_output"] and stat.S_ISDIR(
+                        node.st_mode):
+                    self._legacy_fd = self._open_child(self._sample_fd, name)
+                    self._legacy_has_data = bool(os.listdir(self._legacy_fd))
+                    continue
+                if name in managed_names and not stat.S_ISLNK(node.st_mode):
+                    self._unsafe()
+                if name not in managed_names and stat.S_ISLNK(node.st_mode):
+                    self._unknown_symlinks.append((name, _node_version(node)))
+                if name in LEGACY_ROOT_OUTPUT_NAMES:
+                    if stat.S_ISREG(node.st_mode):
+                        self._legacy_regular_outputs.append(
+                            (name, _node_version(node)),
+                        )
+                    elif not stat.S_ISLNK(node.st_mode):
+                        self._legacy_unmanaged_outputs.append(name)
+        if self._legacy_has_data and self._target_has_data:
+            self._unsafe()
+
+        self.targets = sample_link_targets(self.project_dir)
+        self.targets[LINK_NAMES["comparison_output"]] = self.output
+        for name, target in self.targets.items():
+            if target is None or name == LINK_NAMES["comparison_output"]:
+                continue
+            target = Path(target).expanduser().absolute()
+            try:
+                target.relative_to(self.project_dir)
+            except ValueError:
+                self._unsafe()
+            try:
+                value = os.lstat(target)
+            except OSError:
+                self._unsafe()
+            if stat.S_ISLNK(value.st_mode):
+                self._unsafe()
+            self.targets[name] = target
+            self._source_versions.append((target, _node_version(value)))
+        self._assert_stable()
+
+    def _assert_stable(self):
+        if self._closed:
+            self._unsafe()
+        try:
+            root_named = os.lstat(self.workspace_root)
+            root_held = os.fstat(self._workspace_fd)
+        except OSError:
+            self._unsafe()
+        if (
+            _directory_identity(root_named) != self._root_identity
+            or _directory_identity(root_held) != self._root_identity
+            or not self._safe_directory(root_held)
+        ):
+            self._unsafe()
+        for parent_fd, name, descriptor, expected in self._anchors:
+            try:
+                named = os.stat(
+                    name, dir_fd=parent_fd, follow_symlinks=False,
+                )
+                held = os.fstat(descriptor)
+            except OSError:
+                self._unsafe()
+            if (
+                _directory_identity(named) != expected
+                or _directory_identity(held) != expected
+                or not self._safe_directory(held)
+            ):
+                self._unsafe()
+        for parent_fd, name in self._missing:
+            try:
+                os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            self._unsafe()
+        for path, expected in self._source_versions:
+            try:
+                current = os.lstat(path)
+            except OSError:
+                self._unsafe()
+            if _node_version(current) != expected:
+                self._unsafe()
+
+    def _mkdir_child(self, parent_fd, name):
+        self._assert_stable()
+        try:
+            os.mkdir(name, 0o755, dir_fd=parent_fd)
+            os.fsync(parent_fd)
+        except OSError:
+            self._unsafe()
+        self._remove_missing(parent_fd, name)
+        descriptor = self._open_child(parent_fd, name)
+        try:
+            os.fsync(descriptor)
+        except OSError:
+            self._unsafe()
+        return descriptor
+
+    def _ensure_output(self, report):
+        if self._output_root_fd is None:
+            self._output_root_fd = self._mkdir_child(
+                self._project_fd, "99-output-ztp",
+            )
+
+        if self._legacy_fd is not None:
+            self._assert_stable()
+            self._detach_anchor(self._legacy_fd, close=False)
+            if self._legacy_has_data:
+                if self._output_fd is not None:
+                    self._detach_anchor(self._output_fd, close=True)
+                    try:
+                        os.rmdir("optimize", dir_fd=self._output_root_fd)
+                    except OSError:
+                        self._unsafe()
+                else:
+                    self._remove_missing(self._output_root_fd, "optimize")
+                try:
+                    os.replace(
+                        LINK_NAMES["comparison_output"], "optimize",
+                        src_dir_fd=self._sample_fd,
+                        dst_dir_fd=self._output_root_fd,
+                    )
+                    os.fsync(self._sample_fd)
+                    os.fsync(self._output_root_fd)
+                except OSError:
+                    self._unsafe()
+                self._output_fd = self._legacy_fd
+                self._anchor_existing_fd(
+                    self._output_root_fd, "optimize", self._output_fd,
+                )
+                report(f"[MIGRATE] {self.sample / LINK_NAMES['comparison_output']} -> {self.output}")
+            else:
+                self._detach_anchor(self._legacy_fd, close=True)
+                try:
+                    os.rmdir(
+                        LINK_NAMES["comparison_output"], dir_fd=self._sample_fd,
+                    )
+                    os.fsync(self._sample_fd)
+                except OSError:
+                    self._unsafe()
+                if self._output_fd is None:
+                    self._output_fd = self._mkdir_child(
+                        self._output_root_fd, "optimize",
+                    )
+                report(f"[CLEAN] 移除空旧 comparison 目录: {self.sample / LINK_NAMES['comparison_output']}")
+            self._legacy_fd = None
+        elif self._output_fd is None:
+            self._output_fd = self._mkdir_child(
+                self._output_root_fd, "optimize",
+            )
+
+    @staticmethod
+    def _identity_bound_unlink(parent_fd, name, expected):
+        try:
+            current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        if _node_version(current) != expected:
+            HeldSampleMutationPlan._unsafe()
+        os.unlink(name, dir_fd=parent_fd)
+        return True
+
+    def _replace_link(self, name, target):
+        relative = os.path.relpath(str(Path(target).absolute()), str(self.sample))
+        try:
+            existing = os.stat(
+                name, dir_fd=self._sample_fd, follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            existing = None
+        if existing is not None:
+            if not stat.S_ISLNK(existing.st_mode):
+                self._unsafe()
+            try:
+                if os.readlink(name, dir_fd=self._sample_fd) == relative:
+                    confirmed = os.stat(
+                        name, dir_fd=self._sample_fd,
+                        follow_symlinks=False,
+                    )
+                    if _node_version(confirmed) != _node_version(existing):
+                        self._unsafe()
+                    return "skipped"
+            except OSError:
+                self._unsafe()
+        temporary = f".{name}.tmp.{os.getpid()}.{secrets.token_hex(16)}"
+        temporary_identity = None
+        try:
+            os.symlink(relative, temporary, dir_fd=self._sample_fd)
+            created = os.stat(
+                temporary, dir_fd=self._sample_fd, follow_symlinks=False,
+            )
+            if (
+                not stat.S_ISLNK(created.st_mode)
+                or os.readlink(temporary, dir_fd=self._sample_fd) != relative
+            ):
+                self._unsafe()
+            temporary_identity = _node_version(created)
+            self._assert_stable()
+            os.rename(
+                temporary, name,
+                src_dir_fd=self._sample_fd, dst_dir_fd=self._sample_fd,
+            )
+            temporary = None
+            published = os.stat(
+                name, dir_fd=self._sample_fd, follow_symlinks=False,
+            )
+            if (
+                _node_identity(published) != temporary_identity[:6]
+                or not stat.S_ISLNK(published.st_mode)
+                or os.readlink(name, dir_fd=self._sample_fd) != relative
+            ):
+                self._unsafe()
+            os.fsync(self._sample_fd)
+            published_after = os.stat(
+                name, dir_fd=self._sample_fd, follow_symlinks=False,
+            )
+            if (
+                _node_identity(published_after) != temporary_identity[:6]
+                or os.readlink(name, dir_fd=self._sample_fd) != relative
+            ):
+                self._unsafe()
+        except OSError:
+            self._unsafe()
+        finally:
+            if temporary is not None and temporary_identity is not None:
+                try:
+                    self._identity_bound_unlink(
+                        self._sample_fd, temporary, temporary_identity,
+                    )
+                except (OSError, ValueError):
+                    pass
+        return "linked"
+
+    def apply(self, *, dry_run=False, report=print):
+        if dry_run or self._applied:
+            self._unsafe()
+        self._assert_stable()
+        self._ensure_output(report)
+        if self._sample_fd is None:
+            self._sample_fd = self._mkdir_child(
+                self._optimize_fd, self.sample.name,
+            )
+
+        for name, expected in self._unknown_symlinks:
+            self._identity_bound_unlink(self._sample_fd, name, expected)
+            report(f"[CLEAN] 删除旧 sample 链接: {self.sample / name}")
+        for name, expected in self._legacy_regular_outputs:
+            self._identity_bound_unlink(self._sample_fd, name, expected)
+            report(f"[CLEAN] 删除 sample 根目录重复输出: {self.sample / name}")
+        for name in self._legacy_unmanaged_outputs:
+            report(f"[WARN] 保留非普通 legacy optimize 路径: {self.sample / name}")
+
+        self.targets[LINK_NAMES["comparison_output"]] = self.output
+        for name, target in self.targets.items():
+            link = self.sample / name
+            if target is None:
+                report(f"[WARN] {name}: 当前项目没有可用目标")
+                try:
+                    existing = os.stat(
+                        name, dir_fd=self._sample_fd, follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    continue
+                if not stat.S_ISLNK(existing.st_mode):
+                    self._unsafe()
+                self._identity_bound_unlink(
+                    self._sample_fd, name, _node_version(existing),
+                )
+                report(f"[CLEAN] 删除失效 sample 链接: {link}")
+                continue
+            result = self._replace_link(name, target)
+            report(f"[{'LINK' if result == 'linked' else 'SKIP'}] {link} -> {target}")
+        self._assert_stable()
+        self._applied = True
+        return self.sample
+
+    def duplicate_sample_fd(self):
+        if not self._applied or self._sample_fd is None:
+            self._unsafe()
+        self._assert_stable()
+        return os.dup(self._sample_fd)
+
+    def assert_stable(self):
+        """Reassert every held canonical directory/source before success."""
+        self._assert_stable()
+
+    def ensure_output_subdirectory(self, name):
+        """Create a fixed comparison scope below the held output directory."""
+        if not self._applied or name not in {"prod", "air"}:
+            self._unsafe()
+        self._assert_stable()
+        descriptor = self._output_subdirs.get(name)
+        if descriptor is None:
+            descriptor = self._open_child(
+                self._output_fd, name, required=False,
+            )
+            if descriptor is None:
+                descriptor = self._mkdir_child(self._output_fd, name)
+            self._output_subdirs[name] = descriptor
+        self._assert_stable()
+        return self.output / name
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        for descriptor in tuple(self._fds):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        self._fds.clear()
+        self._anchors.clear()
+
+
+def plan_sample_mutations(optimize_dir, project_dir, workspace_root):
+    """Return a read-only, held-fd mutation plan for Feedback's real CLI."""
+    return HeldSampleMutationPlan(optimize_dir, project_dir, workspace_root)
 
 
 def sample_directory(optimize_dir, project_dir):
@@ -360,8 +903,19 @@ def cleanup_legacy_root_outputs(sample, dry_run=False, report=print):
             report(f"[CLEAN] 删除 sample 根目录重复输出: {path}")
 
 
-def update_sample_links(optimize_dir, project_dir, dry_run=False, report=print):
+def update_sample_links(
+        optimize_dir, project_dir, dry_run=False, report=print,
+        mutation_plan=None):
     """Refresh all available sample links and return the sample directory."""
+    if mutation_plan is not None:
+        if (
+            Path(optimize_dir).expanduser().absolute()
+            != mutation_plan.optimize_dir
+            or Path(project_dir).expanduser().absolute()
+            != mutation_plan.project_dir
+        ):
+            raise ValueError("unsafe held sample/output mutation authority")
+        return mutation_plan.apply(dry_run=dry_run, report=report)
     sample = sample_directory(optimize_dir, project_dir)
     prepare_comparison_output(
         sample, project_dir, dry_run=dry_run, report=report,

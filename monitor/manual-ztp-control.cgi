@@ -4,6 +4,7 @@
 from datetime import datetime
 import errno
 import fcntl
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -11,7 +12,7 @@ import re
 import stat
 import sys
 import uuid
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs
 
 
 STATUS_DIR = Path("/var/www/html/monitor/status")
@@ -27,6 +28,26 @@ PREVIEW_BUSY_STATES = {
     "preview_queued", "previewing", "confirm_queued", "cancel_queued",
 }
 ACTIVE_STATES = BUSY_STATES | PREVIEW_BUSY_STATES
+CONTROL_USERS = frozenset(("nvis", "cumulus"))
+CONTROL_SCRIPT_NAMES = frozenset((
+    "/monitor/control/manual-ztp",
+    "/cgi-bin/manual-ztp-control",
+))
+
+
+def control_request_guard():
+    """Require exact upstream authentication and routing for every request."""
+    if os.environ.get("CONTROL_REQUIRE_AUTH") != "1":
+        return False, "control authentication is not enforced"
+    if os.environ.get("AUTH_TYPE") != "Basic":
+        return False, "invalid authentication type"
+    if os.environ.get("REMOTE_USER") not in CONTROL_USERS:
+        return False, "invalid control user"
+    if os.environ.get("PATH_INFO", "") != "":
+        return False, "path info is not allowed"
+    if os.environ.get("SCRIPT_NAME") not in CONTROL_SCRIPT_NAMES:
+        return False, "invalid control route"
+    return True, ""
 
 
 def timestamp():
@@ -34,25 +55,35 @@ def timestamp():
 
 
 def post_control_guard():
-    """Enforce browser same-origin and optional upstream authentication."""
-    host = os.environ.get("HTTP_HOST", "").strip().casefold()
-    origin = os.environ.get("HTTP_ORIGIN", "").strip()
-    fetch_site = os.environ.get("HTTP_SEC_FETCH_SITE", "").strip().casefold()
-    require_auth = os.environ.get("CONTROL_REQUIRE_AUTH", "").strip().casefold() \
-        in {"1", "true", "yes", "on"}
+    """Bind POST to the exact Apache HTTP service-IPv4 authority."""
+    server_addr = os.environ.get("SERVER_ADDR", "")
     try:
-        parsed = urlsplit(origin)
-    except ValueError:
-        return False, "invalid Origin header"
+        address = ipaddress.IPv4Address(server_addr)
+    except ipaddress.AddressValueError:
+        return False, "invalid service address"
+    canonical = str(address)
     if (
-        not host or not origin or parsed.scheme not in {"http", "https"}
-        or parsed.netloc.casefold() != host
+        server_addr != canonical
+        or address.is_unspecified
+        or address.is_multicast
+        or int(address) == 0xFFFFFFFF
     ):
+        return False, "invalid service address"
+    if os.environ.get("SERVER_PORT") != "80":
+        return False, "invalid service port"
+    if os.environ.get("REQUEST_SCHEME") != "http":
+        return False, "invalid request scheme"
+    if os.environ.get("HTTPS") not in {None, "off"}:
+        return False, "TLS is not enabled on the control listener"
+    host = os.environ.get("HTTP_HOST", "")
+    if host not in {canonical, f"{canonical}:80"}:
+        return False, "invalid Host header"
+    origin = os.environ.get("HTTP_ORIGIN", "")
+    fetch_site = os.environ.get("HTTP_SEC_FETCH_SITE", "").strip().casefold()
+    if origin not in {f"http://{canonical}", f"http://{canonical}:80"}:
         return False, "same-origin POST is required"
     if fetch_site and fetch_site != "same-origin":
         return False, "cross-site control request rejected"
-    if require_auth and not os.environ.get("REMOTE_USER", "").strip():
-        return False, "authenticated control user is required"
     return True, ""
 
 
@@ -224,21 +255,26 @@ def exact_preview_matches(device_status, operation_id, trigger_id):
 
 
 def main():
+    allowed, _reason = control_request_guard()
+    if not allowed:
+        respond({"error": "forbidden"}, "403 Forbidden")
+        return
     method = os.environ.get("REQUEST_METHOD", "GET").upper()
+    if method == "POST":
+        if os.environ.get("HTTP_X_REQUESTED_WITH") != "ManualZTPControl":
+            respond({"error": "missing control request header"}, "403 Forbidden")
+            return
+        allowed, reason = post_control_guard()
+        if not allowed:
+            respond({"error": reason}, "403 Forbidden")
+            return
+    elif method != "GET":
+        respond({"error": "method not allowed"}, "405 Method Not Allowed")
+        return
     alive, pid = process_state()
     current = status_with_queue()
     if method == "GET":
         respond({**current, "process_alive": alive})
-        return
-    if method != "POST":
-        respond({"error": "method not allowed"}, "405 Method Not Allowed")
-        return
-    if os.environ.get("HTTP_X_REQUESTED_WITH") != "ManualZTPControl":
-        respond({"error": "missing control request header"}, "403 Forbidden")
-        return
-    allowed, reason = post_control_guard()
-    if not allowed:
-        respond({"error": reason}, "403 Forbidden")
         return
     try:
         length = max(0, min(int(os.environ.get("CONTENT_LENGTH", "0")), 1024))

@@ -256,6 +256,131 @@ class EnvironmentDisplayTests(unittest.TestCase):
         self.assertIn("Unknown / 未归类（1）", unknown)
         self.assertIn(hostname, unknown)
 
+    def test_release_identity_flows_from_report_to_dashboard_banner(self):
+        release_id = "0123456789abcdefabcd"
+        release_time = "2026-09-06T12:00:00+08:00"
+        report_time = "2026-09-06T12:01:00+08:00"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inventory = root / "devices.csv"
+            inventory.write_text("hostname,type,template\n", encoding="utf-8")
+            run = root / "20260906_120100"
+            run.mkdir()
+            device = runtime_device("AIR-EXAMPLE-Leaf01", environment="air")
+            (run / "report.json").write_text(json.dumps({
+                "project": "sample",
+                "scope": "air",
+                "release_id": release_id,
+                "release_generated_at": release_time,
+                "generated_at": report_time,
+                "devices": [device],
+            }), encoding="utf-8")
+
+            status = HTML.load_ztp_status(root, inventory, scope="air")
+            self.assertEqual(release_id, status["release_id"])
+            self.assertEqual(release_time, status["release_generated_at"])
+
+            empty = root / "empty"
+            empty.mkdir()
+            output = root / "monitor.html"
+            with mock.patch.object(
+                HTML, "load_ztp_status", return_value=status,
+            ), mock.patch.object(
+                HTML, "load_dynamic_air_inventory", return_value=[],
+            ), mock.patch.multiple(
+                HTML,
+                ETH_INFO_DIR=empty, SPX_LINK_DIR=empty,
+                IB_INFO_DIR=empty, IBL_LINK_DIR=empty,
+                NV_INFO_DIR=empty, NVL_LINK_DIR=empty,
+                P2P_OUTPUT_DIR=empty, OUTPUT=output,
+                LOG_FILE=root / "generate-monitor.log",
+            ):
+                HTML.main("air")
+            document = output.read_text(encoding="utf-8")
+        toolbar = document.split('<div class="ztp-toolbar">', 1)[1].split(
+            "</div>", 1,
+        )[0]
+        self.assertIn(f"Release：<strong>{release_id}</strong>", toolbar)
+        self.assertIn("2026-09-06 12:00:00 UTC+08:00", toolbar)
+
+    def test_full_dashboard_emits_stable_sort_protocol_for_ztp_and_link_rows(self):
+        class FrozenDateTime(dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                value = cls(2026, 9, 8, 12, 0)
+                if tz is None:
+                    return value
+                return value.replace(tzinfo=HTML.DISPLAY_TZ).astimezone(tz)
+
+        status = {
+            "available": True,
+            "source": "fixture",
+            "project": "sample",
+            "generated_at": "2026-09-07T14:28:28+08:00",
+            "counts": {"pending": 2},
+            "devices": [
+                {
+                    **runtime_device("AIR-h05-oobofoob-leaf10", environment="air"),
+                    "type": "air", "ip": "192.0.2.185",
+                },
+                {
+                    **runtime_device("AIR-h05-oobofoob-leaf2", environment="air"),
+                    "type": "air", "ip": "192.0.2.177",
+                },
+            ],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            empty = root / "empty"
+            empty.mkdir()
+            spx = root / "spx-link"
+            spx.mkdir()
+            (spx / "20260907-1428.csv").write_text(
+                "Hostname,Interface,Effective-BER,Effective-Error,"
+                "Carrier-Transitions,Date,Time,ECN-Marked,PFC-Receive,"
+                "PFC-Send,Oper-Status,Peer,Peer-Interface\n"
+                "leaf10,swp10,1E-8,0.01,10,2026-09-07,14:28:00,0,0,0,up,leaf2,swp2\n"
+                "leaf2,swp2,9E-9,0.001,2,2026-09-07,14:28:00,0,0,0,up,leaf10,swp10\n",
+                encoding="utf-8",
+            )
+            output = root / "monitor.html"
+            with mock.patch.object(
+                HTML, "load_ztp_status", return_value=status,
+            ), mock.patch.object(
+                HTML, "load_dynamic_air_inventory", return_value=[],
+            ), mock.patch.object(
+                HTML, "datetime", FrozenDateTime,
+            ), mock.patch.multiple(
+                HTML,
+                ETH_INFO_DIR=empty, SPX_LINK_DIR=spx,
+                IB_INFO_DIR=empty, IBL_LINK_DIR=empty,
+                NV_INFO_DIR=empty, NVL_LINK_DIR=empty,
+                P2P_OUTPUT_DIR=empty, OUTPUT=output,
+                LOG_FILE=root / "generate-monitor.log",
+            ):
+                HTML.main("all")
+            document = output.read_text(encoding="utf-8")
+
+        ztp_body = document.split('<table id="ztp-tbl"', 1)[1].split(
+            "</tbody>", 1,
+        )[0]
+        self.assertLess(
+            ztp_body.index("AIR-h05-oobofoob-leaf2"),
+            ztp_body.index("AIR-h05-oobofoob-leaf10"),
+        )
+        self.assertIn(
+            'class="ztp-ip-cell" data-sort-kind="ip" '
+            'data-sort-value="3221226161" data-sort-missing="false"',
+            ztp_body,
+        )
+        self.assertIn(
+            'data-sort-kind="number" data-sort-value="9E-9" '
+            'data-sort-missing="false">9E-9</td>',
+            document,
+        )
+        self.assertIn("environment.groups.sort", document)
+        self.assertIn("restoreSortState();", document)
+
 
 if __name__ == "__main__":
     unittest.main()

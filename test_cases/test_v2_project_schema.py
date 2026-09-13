@@ -254,10 +254,7 @@ class SchemaSelectionTests(unittest.TestCase):
         layout = CONTRACT.parse_device_csv_layout(header, 2)
         self.assertEqual(2, len(layout.vlan_group_starts))
         self.assertEqual(4, len(layout.evpn_group_starts))
-        self.assertEqual(
-            {"terminal_l2_ports": layout.fixed_start + 7},
-            layout.policy_indices,
-        )
+        self.assertNotIn("terminal_l2_ports", header)
         self.assertNotIn("vrf_default", header)
         self.assertNotIn("vrr_ip", header)
         self.assertNotIn("vrr_mac", header)
@@ -494,6 +491,59 @@ switches:
             any("bond49b51" in warning and "未在任何 vlan_ports 使用" in warning
                 for warning in warnings),
             warnings,
+        )
+
+    def test_setup_warns_when_v2_bond_metadata_has_no_ports(self):
+        header = v2_header(vlan_groups=0, evpn_groups=0)
+        row = [
+            "tan-hps-leaf05", "eth", "tan-leaf", "192.0.2.10", "24",
+            "192.0.2.1", "02:00:00:00:00:10", "NA", "NA", "NA",
+            "NA", "198.51.100.10", "65001", "swp49", "NA", "evpn",
+            "46:38:39:20:00:03", "NA", "false",
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "01-global.yaml").write_text(
+                "schema_version: 2\n", encoding="utf-8",
+            )
+            csv_path = root / "02-devices_config.csv"
+            with csv_path.open("w", newline="", encoding="utf-8") as stream:
+                csv.writer(stream).writerows([header, row])
+            errors, warnings = SETUP._validate_eth_csv(str(csv_path))
+
+        self.assertEqual([], errors)
+        self.assertEqual(1, sum(
+            "bond_type 已填写，但 bond_ports 为空" in warning
+            for warning in warnings
+        ))
+        self.assertEqual(1, sum(
+            "bond_mac 已填写，但 bond_ports 为空" in warning
+            for warning in warnings
+        ))
+
+    def test_generator_warns_and_ignores_bond_metadata_without_ports(self):
+        row = [
+            "tan-hps-leaf05", "eth", "tan-leaf", "192.0.2.50", "24",
+            "192.0.2.1", "02:00:00:00:00:50", "NA", "NA", "NA",
+            "NA", "198.51.100.50", "65001", "swp49", "NA", "evpn",
+            "46:38:39:20:00:03", "NA", "false",
+            *([""] * len(CONTRACT.DEVICE_V2_EVPN_COLUMNS)),
+        ]
+
+        model, output = generate_v2_redundancy_project(
+            [row], v2_mlag_global(),
+        )
+
+        self.assertEqual(
+            [], model["devices"]["tan-hps-leaf05"].get("bond_groups", []),
+        )
+        self.assertIn(
+            "[WARN] 行2 [tan-hps-leaf05] bond_type 已填写，但 bond_ports 为空",
+            output,
+        )
+        self.assertIn(
+            "[WARN] 行2 [tan-hps-leaf05] bond_mac 已填写，但 bond_ports 为空",
+            output,
         )
 
     def test_setup_rejects_v2_bond_alignment_and_mac_semantics(self):
@@ -802,8 +852,55 @@ class V2VrrTests(unittest.TestCase):
             "leaf02": l2_device("leaf02", "192.0.2.2/24"),
             "leaf03": l2_device("leaf03", "192.0.2.3/24"),
         }
-        with self.assertRaisesRegex(ValueError, "既非全部唯一.*也非全部相同"):
+        with self.assertRaisesRegex(
+                ValueError,
+                r"(?s)SVI 地址模式冲突.*共享网关模式.*独立 SVI 模式"):
             GENERATOR._apply_v2_vrr_policy(ambiguous, minimum)
+
+    def test_mixed_shared_gateway_error_identifies_outlier_without_mutation(self):
+        policy = GENERATOR._normalize_v2_vrr_policy({
+            "vrr": {
+                "base_mac": "02:00:5e:01:00:00",
+                "gateway_ip": "subnet_maximum",
+            },
+        })
+        devices = {}
+        for hostname, line, vlan114_svi in (
+                ("oob-core01", 1516, "192.0.2.254/24"),
+                ("oob-leaf12", 1529, "192.0.2.247/24"),
+                ("oob-leaf13", 1530, "192.0.2.254/24")):
+            device = l2_device(hostname, "198.51.100.254/24", vlan=113)
+            device["vrfs"][0]["evpn_vrf"] = "oob"
+            device["vrfs"][0]["l2vlans"].append({
+                "vlan_id": 114,
+                "vlan_ids": [114],
+                "vlan_spec": "114",
+                "svi_ip": vlan114_svi,
+                "vrr_ip": "",
+                "vrr_mac": "",
+                "vlan_ports": [],
+                "_csv_source": {
+                    "line": line,
+                    "group": "EVPN 组 2",
+                },
+            })
+            devices[hostname] = device
+        original = copy.deepcopy(devices)
+
+        with self.assertRaises(ValueError) as raised:
+            GENERATOR._apply_v2_vrr_policy(devices, policy)
+
+        message = str(raised.exception)
+        self.assertIn("evpn_vrf=oob vlan114 的 SVI 地址模式冲突", message)
+        self.assertIn("网段 192.0.2.0/24", message)
+        self.assertIn("共享网关模式要求所有设备使用 192.0.2.254/24", message)
+        self.assertIn(
+            "行1529 [oob-leaf12] EVPN 组 2 svi_ip=192.0.2.247/24",
+            message,
+        )
+        self.assertIn("不符合共享网关模式", message)
+        self.assertIn("独立 SVI 模式要求每台设备地址互不重复", message)
+        self.assertEqual(original, devices)
 
     def test_29_svis_must_use_the_selected_local_triplet(self):
         maximum = GENERATOR._normalize_v2_vrr_policy({

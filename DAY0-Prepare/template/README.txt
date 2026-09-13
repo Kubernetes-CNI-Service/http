@@ -44,7 +44,10 @@ setup 会把它们链接到 ztp/image/cumulus/ 和 ztp/image/nvos/。
 可能创建的连接：
   ztp/image/cumulus/<Cumulus镜像名>.bin -----> http/image/<Cumulus镜像名>.bin
   ztp/image/nvos/<NVOS镜像名>.bin       -----> http/image/<NVOS镜像名>.bin
-镜像归属由文件名识别；无法识别为 Cumulus 或 NVOS 的 .bin 文件只告警，不创建链接。
+NVOS 镜像精确支持 `nvos-amd64-<A.B.C>.bin` 和
+`nvosv<A-B-C>amd64.bin` 两种名称；同版本两种名称内容不同时 load 会拒绝，内容相同时
+固定优先前一种新名称。镜像归属由文件名识别；无法识别为 Cumulus 或 NVOS 的 .bin
+文件只告警，不创建链接。
 
 
 一、项目输入文件
@@ -89,15 +92,17 @@ setup 会把它们链接到 ztp/image/cumulus/ 和 ztp/image/nvos/。
     1) 固定 12 列 hostname..lo_ip；
     2) 零到多个 vlan_id,svi_ip,netmask,vlan_ports 普通 VLAN 组；
     3) 固定 7 列 bgp_asn,bgp_ports,bond_ports,bond_type,bond_mac,peerlink_ports,vrl；
-    4) 可选安全策略列 terminal_l2_ports（公开模板默认包含）；
-    5) 零到多个 evpn_vrf,evpn_l3vni,evpn_l3vlan,dhcp_relay,evpn_l2vni,
+    4) 零到多个 evpn_vrf,evpn_l3vni,evpn_l3vlan,dhcp_relay,evpn_l2vni,
        evpn_l2vlan,svi_ip,netmask,vlan_ports EVPN 组。
   v2 每行列数必须与表头完全一致；普通 VLAN 组可以完全没有，也可重复任意次。
   范围 VLAN 只做二层成员，带单值 SVI 的 VLAN 必须拆成自己的组。
-  terminal_l2_ports 只列预期连接服务器/PDU/CDU 等终端的独立二层 swp 或逻辑
-  二层 bond，以 / 分隔；bond member、peerlink、routed 接口和交换机互联 bond 不得填写。
-  只有显式列出的接口才生成 admin-edge 与 bpdu-guard。缺列或单元格为空都不会自动
-  选择接口；缺列项目会收到迁移 warning。
+  终端二层 STP 防护不占用 CSV 字段。生成器自动为带 bridge 配置的独立二层 swp
+  和逻辑二层 bond 生成与 Cumulus 版本匹配的枚举：5.14 及以前为
+  admin-edge=on 与 bpdu-guard=on，5.15 及以后为 admin-edge=enabled 与
+  bpdu-guard=enabled；bond member、peerlink、routed BGP
+  接口不会生成这两个参数。固定的 OOBofOOB 交换机互联例外也保持普通 STP：
+  oobofoob-leaf 的 bond49b51，以及 oobofoob-spine 的 bond1..bond11 均不生成
+  admin-edge/bpdu-guard；同设备的其他合格独立二层接口仍自动启用防护。
 
   VRR 是项目级策略，不再逐设备填写：
     switches.eth.vrr.base_mac: 02:00:5e:01:00:00
@@ -147,7 +152,8 @@ setup 会把它们链接到 ztp/image/cumulus/ 和 ztp/image/nvos/。
   例如 local|mlag 对应的 bond_mac 应写成 NA|02:00:00:ff:01:ff。MLAG 与 EVPN-MH
   不能在同一设备共存。vlan_ports 中引用的每个 bond 都必须已在 bond_ports 声明，
   仅声明但未引用的 bond 不会被隐式配置，setup 会输出 warning 要求确认它是预留项还是
-  迁移时漏写了 vlan_ports 引用。
+  迁移时漏写了 vlan_ports 引用。bond_ports 为空时，遗留的 bond_type/bond_mac 仅告警
+  并被生成器忽略；vlan_ports 引用了未声明 bond 时仍会停止 load。
   可能创建的连接：
     ztp/config/cumulus/template/02-devices_config.csv -----> DAY0-Prepare/<项目>/02-devices_config.csv
     ztp/config/nvos/template/02-devices_config.csv -----> DAY0-Prepare/<项目>/02-devices_config.csv

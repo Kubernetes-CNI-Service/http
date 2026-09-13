@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 import csv
+from decimal import Decimal, InvalidOperation
 import fcntl
 import json
 import os
@@ -65,6 +66,13 @@ GENERATION_LOCK = BASE_DIR / ".generate-monitor-html.lock"
 DEVICES_CSV  = BASE_DIR / "02-devices_config.csv"
 P2P_OUTPUT_DIR = BASE_DIR / "99-output-p2p"
 ZTP_STATUS_DIR = BASE_DIR / "ztp-status"
+ZTP_WATCH_STATE_NAME = ".ztp-monitor-watch-state.json"
+ZTP_WATCH_STATE_KEYS = {
+    "schema_version", "project", "scope", "pid", "state",
+    "consecutive_failures", "last_success_at", "last_failure_at",
+    "next_retry_at", "category", "message",
+}
+ZTP_WATCH_STATE_MAX_BYTES = 16 * 1024
 ACTIVE_AIR_JSON = BASE_DIR.parent / "ztp/config/isc-dhcp-server/p2p-air.json"
 P2P_INPUT_LINK = (
     BASE_DIR.parent / "ztp/config/cumulus/template/P2P/p2p.xlsx"
@@ -129,6 +137,89 @@ def selected_ztp_environments(scope: str) -> tuple[str, ...]:
     if scope == "all":
         return ("air", "production", "unknown")
     return selected_environments(scope)
+
+
+ZTP_SORT_STATUS_RANK = {
+    "failed": 0,
+    "warning": 1,
+    "running": 2,
+    "pending": 3,
+    "unknown": 4,
+    "skipped": 5,
+    "not_applicable": 6,
+    "success": 7,
+}
+
+LINK_NUMERIC_HEADERS = frozenset({
+    "Effective-BER",
+    "Effective-Error",
+    "Carrier-Transitions",
+    "ECN-Marked",
+    "PFC-Receive",
+    "PFC-Send",
+    "Carrier-Down-Count",
+    "QP1-Drops-Receive",
+    "QP1-Drops-Transmit",
+    "RX-Physical-Errors",
+    "TX-Physical-Errors",
+    "Link-Downed",
+    "QP1-Drops",
+    "Transceiver Temp",
+})
+
+
+def natural_text_key(value: object) -> list[tuple[int, object]]:
+    """Return a case-insensitive natural key without conflating decimals."""
+    return [
+        (0, int(part)) if part.isdigit() else (1, part.casefold())
+        for part in re.split(r"(\d+)", str(value))
+    ]
+
+
+def ipv4_sort_number(value: object) -> Optional[int]:
+    """Return the unsigned IPv4 integer used by the browser sort protocol."""
+    parts = str(value).strip().split(".")
+    if len(parts) != 4 or any(not re.fullmatch(r"\d+", part) for part in parts):
+        return None
+    octets = [int(part) for part in parts]
+    if any(octet < 0 or octet > 255 for octet in octets):
+        return None
+    result = 0
+    for octet in octets:
+        result = result * 256 + octet
+    return result
+
+
+def _sort_attributes(kind: str, value: object, *, missing: bool = False) -> str:
+    return (
+        f'data-sort-kind="{escape(kind, quote=True)}" '
+        f'data-sort-value="{escape(str(value), quote=True)}" '
+        f'data-sort-missing="{str(bool(missing)).lower()}"'
+    )
+
+
+def _status_sort_attributes(status: object) -> str:
+    safe = str(status) if str(status) in ZTP_SORT_STATUS_RANK else "unknown"
+    return (
+        f'{_sort_attributes("status", ZTP_SORT_STATUS_RANK[safe])} '
+        f'data-sort-status="{safe}"'
+    )
+
+
+def link_sort_kind(header: str) -> str:
+    return "number" if header in LINK_NUMERIC_HEADERS else "text"
+
+
+def _link_sort_attributes(header: str, raw_value: object) -> str:
+    value = str(raw_value).strip()
+    kind = link_sort_kind(header)
+    missing = value == ""
+    if kind == "number" and not missing:
+        try:
+            missing = not Decimal(value).is_finite()
+        except InvalidOperation:
+            missing = True
+    return _sort_attributes(kind, value if not missing else "", missing=missing)
 
 # ── SPX 链路配置（以太网 SPX 交换机）──────────────────────────────────────────
 SPX_DIFF_HOURS   = [1, 4, 12, 24, 48, 72, 168]
@@ -300,6 +391,69 @@ def load_dynamic_air_inventory(path: Path = DEVICES_CSV) -> list[dict[str, str]]
         )
     except (OSError, UnicodeError, csv.Error, ValueError):
         return []
+
+
+def _load_ztp_watch_state(
+    directory: Path, *, projects: list[str], scope: str,
+) -> Optional[dict]:
+    path = directory / ZTP_WATCH_STATE_NAME
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or before.st_size <= 0
+            or before.st_size > ZTP_WATCH_STATE_MAX_BYTES
+        ):
+            return None
+        remaining = before.st_size
+        chunks = []
+        while remaining:
+            chunk = os.read(descriptor, min(4096, remaining))
+            if not chunk:
+                return None
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        after = os.fstat(descriptor)
+        if (
+            (before.st_dev, before.st_ino, before.st_size)
+            != (after.st_dev, after.st_ino, after.st_size)
+        ):
+            return None
+        payload = json.loads(b"".join(chunks).decode("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if not isinstance(payload, dict) or set(payload) != ZTP_WATCH_STATE_KEYS:
+        return None
+    if payload.get("schema_version") != 1:
+        return None
+    if payload.get("state") not in {"healthy", "unhealthy"}:
+        return None
+    if payload.get("project") not in projects:
+        return None
+    if scope != "all" and payload.get("scope") != scope:
+        return None
+    if not isinstance(payload.get("pid"), int) or not isinstance(
+        payload.get("consecutive_failures"), int,
+    ):
+        return None
+    for key in (
+        "project", "scope", "state", "last_success_at", "last_failure_at",
+        "next_retry_at", "category", "message",
+    ):
+        if not isinstance(payload.get(key), str):
+            return None
+    return payload
 
 
 def load_ztp_status(
@@ -508,6 +662,7 @@ def load_ztp_status(
     devices = []
     sources = {}
     environment_updates = {}
+    environment_releases = {}
     projects = []
     for environment in environments:
         if environment not in selected:
@@ -516,6 +671,10 @@ def load_ztp_status(
         generated_at = str(report.get("generated_at") or "—")
         sources[environment] = str(report_path)
         environment_updates[environment] = generated_at
+        environment_releases[environment] = {
+            "release_id": str(report.get("release_id") or "—"),
+            "generated_at": str(report.get("release_generated_at") or "—"),
+        }
         project = str(report.get("project") or "")
         if project and project not in projects:
             projects.append(project)
@@ -582,24 +741,42 @@ def load_ztp_status(
         key=lambda value: format_ztp_write_time(value),
         default="—",
     )
-    return {
+    release_ids = list(dict.fromkeys(
+        value["release_id"] for value in environment_releases.values()
+        if value["release_id"] != "—"
+    ))
+    release_times = list(dict.fromkeys(
+        value["generated_at"] for value in environment_releases.values()
+        if value["generated_at"] != "—"
+    ))
+    result = {
         "available": True,
         "source": "；".join(
             f"{environment.upper()}: {path}"
             for environment, path in sources.items()
         ),
         "sources": sources, "environment_updates": environment_updates,
+        "environment_releases": environment_releases,
         "generated_at": newest_update,
+        "release_id": " / ".join(release_ids) or "—",
+        "release_generated_at": " / ".join(release_times) or "—",
         "project": " / ".join(projects) or "—", "devices": devices,
         "counts": counts,
     }
+    watch_state = _load_ztp_watch_state(
+        directory, projects=projects, scope=scope,
+    )
+    if watch_state is not None:
+        result["watch_state"] = watch_state
+    return result
 
 
 ZTP_DEVICE_GROUPS = (
     ("oobofoob", "OOBofOOB"),
     ("border_oob", "OOB / Border"),
     ("tan", "TAN"),
-    ("ib_nvl", "IB / NVL"),
+    ("ib", "IB"),
+    ("nvl", "NVL"),
     ("other", "其他"),
 )
 ZTP_ENVIRONMENTS = (
@@ -647,8 +824,10 @@ def ztp_device_group(device: dict) -> str:
         return "oobofoob"
     if "tan" in hostname or "tan" in template:
         return "tan"
-    if device_type in {"ib", "nvl"}:
-        return "ib_nvl"
+    if device_type == "ib":
+        return "ib"
+    if device_type == "nvl":
+        return "nvl"
     if ("oob" in hostname or "border" in hostname
             or "oob" in template or "border" in template):
         return "border_oob"
@@ -722,7 +901,7 @@ def render_ztp_status_rows(status: dict) -> str:
             group_id = f"{environment}__{group_name}"
             devices = sorted(
                 grouped[environment][group_name],
-                key=lambda device: str(device.get("hostname", "")).casefold(),
+                key=lambda device: natural_text_key(device.get("hostname", "")),
             )
             group_completed = sum(ztp_completed(device) for device in devices)
             rows.append(
@@ -764,7 +943,7 @@ def _render_ztp_device_row(
             str(value).strip() for value in device.get("ztp_transport_ips", [])
             if str(value).strip()
         }
-        def state(name: str) -> str:
+        def state(name: str) -> tuple[str, str]:
             item = stages.get(name, {})
             has_success_index = "success_index" in item
             try:
@@ -798,8 +977,11 @@ def _render_ztp_device_row(
                 ))
                 and raw_status == "success" and not stale_success
             )
+            display_status = "pending" if stale_success else raw_status
+            if display_status not in ZTP_SORT_STATUS_RANK:
+                display_status = "unknown"
             status_badge = badge(
-                "pending" if stale_success else raw_status,
+                display_status,
                 badge_index,
                 "ztp-dhcp-dynamic" if dynamic_success else "",
             )
@@ -824,11 +1006,12 @@ def _render_ztp_device_row(
             if dynamic_success:
                 title_parts.append("地址由动态 DHCP 分配")
             if not title_parts:
-                return status_badge + event_time_html
+                return status_badge + event_time_html, display_status
             return (
                 f'<span class="ztp-stage-event" title="'
                 f'{escape("；".join(title_parts), quote=True)}">{status_badge}</span>'
-                f'{event_time_html}'
+                f'{event_time_html}',
+                display_status,
             )
         issues = device.get("issues", [])
         issue_text = []
@@ -914,6 +1097,9 @@ def _render_ztp_device_row(
                     *device.get("ssh_ips", []), *sorted(ztp_transport_ips),
                 ]))
             )
+        candidate_values = list(dict.fromkeys(
+            str(value).strip() for value in candidates if str(value).strip()
+        ))
         attempts = ip_probe.get("attempts") if isinstance(ip_probe.get("attempts"), list) else []
         interfaces = (
             ip_probe.get("interfaces")
@@ -925,7 +1111,7 @@ def _render_ztp_device_row(
         }
         connected_ip = str(ip_probe.get("connected_ip") or "")
         rendered_ips = []
-        for candidate in dict.fromkeys(str(value) for value in candidates if value):
+        for candidate in candidate_values:
             transit_candidate = candidate in ztp_transport_ips
             interface_name = str(interfaces.get(candidate) or (
                 "ZTP transit" if transit_candidate else
@@ -959,9 +1145,12 @@ def _render_ztp_device_row(
                         if candidate == connected_ip or attempted.get(candidate) == "success"
                         else "管理地址由动态 DHCP 分配，尚未记录探测结果"
                     )
-            elif candidate == connected_ip or attempted.get(candidate) == "success":
+            elif candidate == connected_ip:
                 css_class = "ztp-ip-success"
-                title = "该地址探测成功并用于采集"
+                title = "该地址 SSH 可达、身份验证成功并用于本轮采集"
+            elif attempted.get(candidate) == "success":
+                css_class = "ztp-ip-standby"
+                title = "该地址 SSH 可达且设备身份验证成功，可作为备用管理地址"
             else:
                 css_class = "ztp-ip-neutral"
                 title = "该地址尚未探测或报告未记录结果"
@@ -980,6 +1169,9 @@ def _render_ztp_device_row(
             )
         else:
             ip_html = "—"
+        primary_ip_sort = (
+            ipv4_sort_number(candidate_values[0]) if candidate_values else None
+        )
         search = " ".join(str(value) for value in (
             device.get("hostname", ""), device.get("type", ""), *candidates,
             device.get("mac", ""), overall, f"round {ztp_round}",
@@ -1003,7 +1195,11 @@ def _render_ztp_device_row(
                 "DHCP 重新获取（先绑定）" if is_managed_discovery else "需要人工识别"
             )
             action_title = (
-                "设备已由平台指纹进入默认 ZTP；先把 MAC 绑定到真实设备并重新 load"
+                "设备已由平台指纹进入默认 ZTP；把 MAC 绑定到真实设备属于 source write；"
+                "请按当前后端重新发布：Native/systemd 执行 DAY0-Prepare/11-load.py；"
+                "Docker/Supervisor 执行 infra/docker/deploy.sh deploy，或对与 live 来源"
+                "身份链匹配且经验证的镜像执行 infra/docker/deploy.sh deploy-preloaded "
+                "<IMAGE_ID>；source write 后不得 load"
                 if is_managed_discovery else
                 "平台指纹未知，管理服务器未下发 ZTP；请通过 console/物理连接人工识别"
             )
@@ -1045,6 +1241,17 @@ def _render_ztp_device_row(
                 f'data-device-type="{escape(str(device.get("type", "")), quote=True)}" '
                 f'onclick="requestTimeSync(this)">时间同步</button>'
             )
+        stage_names = (
+            "dhcp", "bootstrap", "config_http", "ssh", "network", "version",
+            "config_apply", "ssh_keys", "complete",
+        )
+        stage_cells = {name: state(name) for name in stage_names}
+        overall_sort_status = (
+            overall if overall in ZTP_SORT_STATUS_RANK else "unknown"
+        )
+        time_sort_status = (
+            time_status if time_status in ZTP_SORT_STATUS_RANK else "unknown"
+        )
         return (
             f'<tr class="ztp-row" data-environment="{environment}" '
             f'data-group="{group_name}" '
@@ -1059,21 +1266,23 @@ def _render_ztp_device_row(
             f'data-search="{escape(search, quote=True)}">'
             f'<td>{escape(str(device.get("hostname", "")))}</td>'
             f'<td>{escape(str(device.get("type", "")))}</td>'
-            f'<td class="ztp-ip-cell">{ip_html}</td>'
+            f'<td class="ztp-ip-cell" '
+            f'{_sort_attributes("ip", primary_ip_sort if primary_ip_sort is not None else "", missing=primary_ip_sort is None)}>'
+            f'{ip_html}</td>'
             f'<td>{escape(str(device.get("mac", "")))}</td>'
-            f'<td data-ztp-stage="dhcp">{state("dhcp")}</td>'
-            f'<td data-ztp-stage="bootstrap">{state("bootstrap")}</td>'
-            f'<td data-ztp-stage="config_http">{state("config_http")}</td>'
-            f'<td data-ztp-stage="ssh">{state("ssh")}</td>'
-            f'<td data-ztp-stage="network">{state("network")}</td>'
-            f'<td data-ztp-stage="version">{state("version")}</td>'
-            f'<td data-ztp-stage="config_apply">{state("config_apply")}</td>'
-            f'<td data-ztp-stage="ssh_keys">{state("ssh_keys")}</td>'
-            f'<td data-ztp-stage="complete">{state("complete")}</td>'
-            f'<td data-ztp-stage="progress"><strong>{escape(str(progress))}%</strong><div class="ztp-progress">'
+            f'<td data-ztp-stage="dhcp" {_status_sort_attributes(stage_cells["dhcp"][1])}>{stage_cells["dhcp"][0]}</td>'
+            f'<td data-ztp-stage="bootstrap" {_status_sort_attributes(stage_cells["bootstrap"][1])}>{stage_cells["bootstrap"][0]}</td>'
+            f'<td data-ztp-stage="config_http" {_status_sort_attributes(stage_cells["config_http"][1])}>{stage_cells["config_http"][0]}</td>'
+            f'<td data-ztp-stage="ssh" {_status_sort_attributes(stage_cells["ssh"][1])}>{stage_cells["ssh"][0]}</td>'
+            f'<td data-ztp-stage="network" {_status_sort_attributes(stage_cells["network"][1])}>{stage_cells["network"][0]}</td>'
+            f'<td data-ztp-stage="version" {_status_sort_attributes(stage_cells["version"][1])}>{stage_cells["version"][0]}</td>'
+            f'<td data-ztp-stage="config_apply" {_status_sort_attributes(stage_cells["config_apply"][1])}>{stage_cells["config_apply"][0]}</td>'
+            f'<td data-ztp-stage="ssh_keys" {_status_sort_attributes(stage_cells["ssh_keys"][1])}>{stage_cells["ssh_keys"][0]}</td>'
+            f'<td data-ztp-stage="complete" {_status_sort_attributes(stage_cells["complete"][1])}>{stage_cells["complete"][0]}</td>'
+            f'<td data-ztp-stage="progress" {_sort_attributes("number", progress)}><strong>{escape(str(progress))}%</strong><div class="ztp-progress">'
             f'<i style="width:{max(0, min(100, int(progress or 0)))}%"></i></div></td>'
-            f'<td data-time-sync="status">{time_sync_html}</td>'
-            f'<td data-ztp-stage="overall"><div class="ztp-overall-meta">'
+            f'<td data-time-sync="status" {_status_sort_attributes(time_sort_status)}>{time_sync_html}</td>'
+            f'<td data-ztp-stage="overall" {_status_sort_attributes(overall_sort_status)}><div class="ztp-overall-meta">'
             f'<div class="ztp-meta-row ztp-overall-result">{badge(overall, ztp_round)}'
             f'<span class="ztp-write-time">来源：{escape(trigger_source_label)}</span></div>'
             f'<div class="ztp-meta-row"><span class="ztp-write-time">检查：{escape(device_observed_time)}</span>'
@@ -2486,26 +2695,43 @@ def parse_inventory(text: str) -> dict:
       PSU1/FAN1   ...         ...    ...     ok     fan
       FAN1        ...         ...    ...     ok     fan
     """
-    psu_ok = 0; psu_fail = 0
-    fan_ok = 0; fan_fail = 0
-    for line in text.splitlines():
-        s = line.strip()
-        if not s or re.match(r"^[-\s]+$", s):
+    lines = text.splitlines()
+    header_index = None
+    for index, line in enumerate(lines):
+        fields = line.split()
+        try:
+            component_index = fields.index("Component")
+            state_index = fields.index("State")
+            type_index = fields.index("Type")
+        except ValueError:
             continue
-        parts = s.split()
-        if not parts:
-            continue
-        first = parts[0]
-        if not first[-1].isdigit():         # 第一字段必须以数字结尾
-            continue
-        ok = bool(re.search(r"\bok\b", s, re.IGNORECASE))
-        if first.startswith("PSU"):         # 大写 PSU 才算真正 PSU
-            if ok: psu_ok += 1
-            else:  psu_fail += 1
-        elif first.upper().startswith("FAN"):
-            if ok: fan_ok += 1
-            else:  fan_fail += 1
-    return {"psu_ok": psu_ok, "psu_fail": psu_fail, "fan_ok": fan_ok, "fan_fail": fan_fail}
+        if component_index < state_index < type_index:
+            header_index = index
+            break
+
+    components = []
+    if header_index is not None:
+        for line in lines[header_index + 1:]:
+            if not line.strip() or re.match(r"^[-\s]+$", line):
+                continue
+            fields = line.split()
+            if len(fields) < 6:
+                continue
+            state_value = fields[-2].casefold()
+            type_value = fields[-1].casefold()
+            if type_value not in {"psu", "fan"} or not state_value:
+                continue
+            components.append({
+                "name": fields[0],
+                "type": type_value,
+                "state": state_value,
+            })
+
+    counts = {"psu_ok": 0, "psu_fail": 0, "fan_ok": 0, "fan_fail": 0}
+    for component in components:
+        state_group = "ok" if component["state"] == "ok" else "fail"
+        counts[f'{component["type"]}_{state_group}'] += 1
+    return {"inventory_components": components, **counts}
 
 
 def parse_info_file(
@@ -2561,6 +2787,7 @@ def parse_info_file(
         "psu_fail":          0,
         "fan_ok":            0,
         "fan_fail":          0,
+        "inventory_components": [],
     }
 
     # ── 文件头块 ──────────────────────────────────────────────────────────────
@@ -2602,6 +2829,7 @@ def parse_info_file(
     info["psu_fail"] = inv["psu_fail"]
     info["fan_ok"]   = inv["fan_ok"]
     info["fan_fail"] = inv["fan_fail"]
+    info["inventory_components"] = inv["inventory_components"]
 
     # ── nv show system version ────────────────────────────────────────────────
     # 实际格式（多空格分隔）：
@@ -2935,6 +3163,9 @@ def render_eth_card(sw: dict) -> str:
         psu_html = f'<span class="{psu_cls}">{psu_ok}/{psu_total} ok</span>'
         if psu_fail:
             psu_html += f' <span class="i-down">({psu_fail} FAIL)</span>'
+            failed_psus = render_failed_inventory_components(sw, "psu")
+            if failed_psus:
+                psu_html += f" {failed_psus}"
     else:
         psu_html = "—"
 
@@ -3177,6 +3408,28 @@ def render_use_percent(value: Optional[float | int]) -> str:
     return f'<span class="{css_class}">{text}</span>'
 
 
+def render_failed_inventory_components(sw: dict, component_type: str) -> str:
+    """Render retained failed component names without trusting archive HTML."""
+    failures = []
+    components = sw.get("inventory_components", [])
+    if not isinstance(components, list):
+        return ""
+    for component in components:
+        if not isinstance(component, dict):
+            continue
+        kind = str(component.get("type", "")).casefold()
+        state = str(component.get("state", "")).casefold()
+        if kind != component_type or not state or state == "ok":
+            continue
+        name = str(component.get("name", ""))
+        if not name:
+            continue
+        failures.append(f"{escape(name)} ({escape(state)})")
+    if not failures:
+        return ""
+    return '<span class="component-failures">' + " / ".join(failures) + "</span>"
+
+
 def render_sw_list_row(sw: dict) -> str:
     """生成列表视图的单行 <tr>。"""
     hostname  = escape(sw["hostname"])
@@ -3278,6 +3531,9 @@ def render_sw_list_row(sw: dict) -> str:
         psu_html = f'<span class="{psu_cls}">{psu_ok}/{psu_total}</span>'
         if psu_fail:
             psu_html += f' <span class="i-down">({psu_fail}↓)</span>'
+            failed_psus = render_failed_inventory_components(sw, "psu")
+            if failed_psus:
+                psu_html += f" {failed_psus}"
     else:
         psu_html = "—"
 
@@ -3289,6 +3545,9 @@ def render_sw_list_row(sw: dict) -> str:
         fan_html = f'<span class="{fan_cls}">{fan_ok}/{fan_total}</span>'
         if fan_fail:
             fan_html += f' <span class="i-down">({fan_fail}↓)</span>'
+            failed_fans = render_failed_inventory_components(sw, "fan")
+            if failed_fans:
+                fan_html += f" {failed_fans}"
     else:
         fan_html = "—"
 
@@ -3635,9 +3894,7 @@ def get_inc(old, cur, col_idx):
 
 
 def nat_key(k: tuple) -> list:
-    def _nat(s: str) -> list:
-        return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", s)]
-    return [_nat(p) for p in k]
+    return [natural_text_key(part) for part in k]
 
 
 def build_link_content(snaps, headers, latest, latest_ts,
@@ -3683,18 +3940,23 @@ def build_link_content(snaps, headers, latest, latest_ts,
     # ── 表头 ─────────────────────────────────────────────────────────────────
     extra_key_cols = 1 if show_transceiver_temp else 0
     temp_th = (
-        '<th rowspan="2" class="sc" onclick="srt(this,1)">Transceiver Temp</th>'
+        '<th rowspan="2" class="sc" data-sort-kind="number" aria-sort="none" '
+        'onclick="srt(this,1)" title="在每台设备内排序">Transceiver Temp</th>'
         if show_transceiver_temp else ""
     )
     key_ths = (
-        f'<th rowspan="2" class="sc" onclick="srt(this,0)">{escape(headers[0])}</th>'
+        f'<th rowspan="2" class="sc" data-sort-kind="text" aria-sort="none" '
+        f'onclick="srt(this,0)" title="在当前环境内排序设备组">{escape(headers[0])}</th>'
         f'{temp_th}'
-        f'<th rowspan="2" class="sc" onclick="srt(this,{1 + extra_key_cols})">'
+        f'<th rowspan="2" class="sc" data-sort-kind="text" aria-sort="none" '
+        f'onclick="srt(this,{1 + extra_key_cols})" title="在每台设备内排序">'
         f'{escape(headers[1])}</th>'
     )
     data_ths = "".join(
-        f'<th rowspan="2" class="sc{"  wf-th" if h in watch_fields else ""}" '
-        f'onclick="srt(this,{key_cols+extra_key_cols+i})">{escape(h)}</th>'
+        f'<th rowspan="2" class="sc{" wf-th" if h in watch_fields else ""}" '
+        f'data-sort-kind="{link_sort_kind(h)}" aria-sort="none" '
+        f'onclick="srt(this,{key_cols+extra_key_cols+i})" '
+        f'title="在每台设备内排序">{escape(h)}</th>'
         for i, h in enumerate(data_hdrs)
     )
     time_ths = "".join(
@@ -3759,7 +4021,8 @@ def build_link_content(snaps, headers, latest, latest_ts,
         if dev != prev_dev:
             ncol = key_cols + extra_key_cols + len(data_hdrs) + len(diff_hours) * n_wf
             rows.append(
-                f'<tr class="grp" data-environment="{environment}" data-dev="{escape(dev)}">'
+                f'<tr class="grp" data-environment="{environment}" '
+                f'data-dev="{escape(dev)}" data-sort-value="{escape(dev, quote=True)}">'
                 f'<td colspan="{ncol}">{escape(dev)}</td></tr>'
             )
             prev_dev = dev
@@ -3768,34 +4031,41 @@ def build_link_content(snaps, headers, latest, latest_ts,
         if show_transceiver_temp:
             reading = transceiver_reading_for_interface(dev, port, transceiver_temps)
             if reading is None:
-                temp_td = '<td class="c-temp temp-na">—</td>'
+                temp_td = (
+                    '<td class="c-temp temp-na" data-sort-kind="number" '
+                    'data-sort-value="" data-sort-missing="true">—</td>'
+                )
             else:
                 module_temp, high_threshold = reading
                 temp_text = f"{module_temp:.0f}°C"
+                temp_sort = _sort_attributes("number", module_temp)
                 if high_threshold is None:
                     temp_td = (
-                        f'<td class="c-temp temp-no-threshold" '
+                        f'<td class="c-temp temp-no-threshold" {temp_sort} '
                         f'title="High alarm threshold unavailable">{temp_text}</td>'
                     )
                 else:
                     temp_class = "temp-alarm" if module_temp >= high_threshold else "temp-ok"
                     temp_td = (
-                        f'<td class="c-temp {temp_class}" '
+                        f'<td class="c-temp {temp_class}" {temp_sort} '
                         f'title="High alarm threshold: {high_threshold:.0f}°C">'
                         f'{temp_text}</td>'
                     )
         key_tds = (
-            f'<td class="c-dev">{escape(dev)}</td>'
+            f'<td class="c-dev" {_link_sort_attributes(headers[0], dev)}>{escape(dev)}</td>'
             f'{temp_td}'
-            f'<td class="c-port">{escape(port)}</td>'
+            f'<td class="c-port" {_link_sort_attributes(headers[1], port)}>{escape(port)}</td>'
         )
         if alive:
             data_tds = "".join(
-                f"<td>{escape(format_link_value(headers[i], cur[i] if i < len(cur) else ''))}</td>"
+                f'<td {_link_sort_attributes(headers[i], cur[i] if i < len(cur) else "")}>{escape(format_link_value(headers[i], cur[i] if i < len(cur) else ""))}</td>'
                 for i in data_indexes
             )
         else:
-            data_tds = "".join('<td class="na">—</td>' for _ in data_hdrs)
+            data_tds = "".join(
+                f'<td class="na" {_sort_attributes(link_sort_kind(header), "", missing=True)}>—</td>'
+                for header in data_hdrs
+            )
 
         diff_tds: list[str] = []
         row_changed = False
@@ -3931,6 +4201,23 @@ def build_html(
         f"{label}: {format_ztp_write_time(ztp_status.get('environment_updates', {}).get(environment))}"
         for environment, label in ZTP_ENVIRONMENTS
     )
+    ztp_release_id = str(ztp_status.get("release_id") or "—")
+    ztp_release_time = format_ztp_write_time(
+        ztp_status.get("release_generated_at")
+    )
+    ztp_watch_banner = ""
+    watch_state = ztp_status.get("watch_state")
+    if isinstance(watch_state, dict) and watch_state.get("state") == "unhealthy":
+        category = escape(str(watch_state.get("category") or "unknown"))
+        message = escape(str(watch_state.get("message") or "未知错误"))
+        failures = escape(str(watch_state.get("consecutive_failures") or 0))
+        ztp_watch_banner = (
+            '<div id="ztp-watch-unhealthy-banner" class="ztp-watch-unhealthy-banner" '
+            'role="alert">'
+            '<strong>监控刷新异常：页面显示的是上次成功结果，可能已过期。</strong> '
+            f'类别：{category}；连续失败：{failures}；详情：{message}'
+            '</div>'
+        )
     switch_list_headers = (
         "<th>主机名</th><th>SN</th><th>型号</th><th>SW 版本</th>"
         "<th>BIOS 版本</th><th>SSD 版本</th><th>ASIC 版本</th>"
@@ -4122,6 +4409,10 @@ body {{
 }}
 #topbar h1 {{ font-size: 16px; font-weight: 700; letter-spacing: .02em; }}
 #topbar .meta {{ font-size: 11px; color: #6d9ed4; flex: 1; }}
+.factory-credentials-warning {{
+  flex-shrink: 0; padding: 5px 20px; border-bottom: 1px solid #e4cf91;
+  background: #fff9df; color: #6f5700; font-size: 11px; line-height: 1.35;
+}}
 .auto-refresh {{
   display:inline-flex; align-items:center; gap:6px; padding:4px 8px;
   border:1px solid #c7d0db; border-radius:5px; background:#f8fafc;
@@ -4165,6 +4456,7 @@ body {{
   display: flex;
   align-items: center;
   gap: 12px;
+  flex-wrap: wrap;
   flex-shrink: 0;
 }}
 #eth-toolbar .eth-meta {{ font-size: 12px; color: #6c757d; flex: 1; }}
@@ -4509,10 +4801,12 @@ select {{
   text-align: center;
   white-space: nowrap;
   border-right: 1px solid #3a4f63;
-  cursor: pointer;
+  cursor: default;
   user-select: none;
   z-index: 2;
 }}
+.link-tbl thead th.sc {{ cursor: pointer; }}
+.link-tbl thead th:not(.sc) {{ cursor: default; }}
 .col-resizer {{
   position: absolute;
   top: 0;
@@ -4529,7 +4823,7 @@ select {{
 body.col-resizing {{ cursor: col-resize; user-select: none; }}
 .link-tbl thead tr:first-child th {{ top: 0;    z-index: 3; height: 36px; }}
 .link-tbl thead tr:last-child  th {{ top: 36px; z-index: 2; font-size: 11px; font-weight: 500; }}
-.link-tbl thead th:hover {{ background: #3a4f63; }}
+.link-tbl thead th.sc:hover {{ background: #3a4f63; }}
 .link-tbl thead th.sa::after {{ content: ' ▲'; font-size: 9px; }}
 .link-tbl thead th.sd::after {{ content: ' ▼'; font-size: 9px; }}
 .diff-th  {{ background: #1c2e42 !important; border-right-color: #2c4058 !important;
@@ -4688,17 +4982,34 @@ tr.grp-hidden {{ display: none; }}
   height: 100%; display: grid; place-items: center; color: #6c757d; background: #f4f6f8;
 }}
 /* ═══════ ZTP Status ═══════ */
+.ztp-watch-unhealthy-banner {{
+  margin:12px 12px 0; padding:10px 12px; border:1px solid #d97706;
+  border-radius:5px; background:#fff7ed; color:#8a3d00; font-size:12px;
+}}
 .ztp-toolbar {{ background:#fff; border-bottom:1px solid var(--border); padding:9px 16px;
   display:flex; align-items:center; gap:16px; flex-wrap:wrap; font-size:12px; color:#5b6570; }}
 .ztp-toolbar .ztp-meta {{ flex:1; min-width:360px; }}
 .ztp-toolbar input {{ width:280px; padding:6px 9px; border:1px solid #ccd2da; border-radius:4px; }}
-.ztp-monitor-control {{ display:flex; align-items:center; gap:7px; }}
+.ztp-monitor-control {{ display:flex; align-items:flex-start; gap:9px; flex-wrap:wrap; }}
+.monitor-control-item {{ display:inline-flex; flex-direction:column; align-items:flex-start;
+  gap:3px; padding:5px 7px; border:1px solid #d7dde5; border-radius:5px;
+  background:#f8fafc; }}
+.monitor-control-actions {{ display:flex; align-items:center; gap:6px; min-height:30px; }}
+.monitor-control-help {{ color:#667085; font-size:10px; line-height:1.25; white-space:nowrap; }}
+.monitor-control-item .ztp-monitor-state {{ max-width:260px; white-space:normal; }}
 .ztp-monitor-control button {{ border:1px solid #8290a3; border-radius:4px; padding:6px 10px;
   background:#fff; color:#26364a; cursor:pointer; font-weight:600; }}
 .ztp-monitor-control button.running {{ border-color:#c33; color:#a31515; }}
 .ztp-monitor-control button.paused {{ border-color:#27834c; color:#176b39; }}
 .ztp-monitor-control button:disabled {{ opacity:.55; cursor:not-allowed; }}
 .ztp-monitor-state {{ min-width:64px; font-weight:600; color:#5b6570; }}
+.continuous-interval {{ display:inline-flex; align-items:center; gap:4px; white-space:nowrap; }}
+.continuous-interval input {{ width:58px !important; padding:5px 6px !important; }}
+.yaml-backup-dialog {{ border:0; border-radius:8px; padding:0; box-shadow:0 12px 40px #0005; }}
+.yaml-backup-dialog::backdrop {{ background:#15203380; }}
+.yaml-backup-dialog form {{ min-width:360px; padding:20px; display:grid; gap:12px; }}
+.yaml-backup-dialog input {{ padding:7px 9px; border:1px solid #aab3bf; border-radius:4px; }}
+.yaml-backup-dialog menu {{ display:flex; justify-content:flex-end; gap:8px; margin:0; padding:0; }}
 .manual-ztp-button {{ border:1px solid #b36b00; border-radius:4px; padding:5px 8px;
   background:#fff8e8; color:#8a4d00; cursor:pointer; font-weight:700; white-space:nowrap; }}
 .manual-ztp-button:disabled {{ opacity:.5; cursor:not-allowed; }}
@@ -4725,6 +5036,7 @@ tr.grp-hidden {{ display: none; }}
 .ztp-ip {{ display:block; width:max-content; padding:2px 6px; margin:1px auto;
   border-radius:9px; font-weight:700; line-height:1.35; }}
 .ztp-ip-success {{ color:#08783e; background:#dff7e9; border:1px solid #a8e3c2; }}
+.ztp-ip-standby {{ color:#276749; background:#edf9f1; border:1px solid #b8dec7; }}
 .ztp-ip-dynamic {{ color:#805800; background:#fff0c2; border:1px solid #e2c35d; }}
 .ztp-ip-failed {{ color:#b42318; background:#fee4e2; border:1px solid #f5b7b1; }}
 .ztp-ip-neutral {{ color:#59636e; background:#eef1f4; border:1px solid #d5dbe1; }}
@@ -4775,6 +5087,10 @@ tr.grp-hidden {{ display: none; }}
   <h1>Network Monitor Dashboard</h1>
   <span class="meta">生成时间：{gen_time}</span>
 </div>
+<div id="factory-credentials-warning" class="factory-credentials-warning hidden"
+     role="status" aria-live="polite">
+  Monitor 仍在使用初始认证凭据，请尽快轮换。
+</div>
 
 <div id="tabs">
   <button class="tab"        onclick="switchTab('ztp')">ZTP Status</button>
@@ -4802,8 +5118,40 @@ tr.grp-hidden {{ display: none; }}
       <br>ETH 数据源：<strong>{escape(eth_source)}</strong>
     </span>
     <span class="ztp-monitor-control">
-      <button id="switch-collect-button" type="button" onclick="requestSwitchCollection()" disabled>检查中…</button>
-      <span id="switch-collect-state" class="ztp-monitor-state" aria-live="polite">未知</span>
+      <span class="monitor-control-item">
+        <span class="monitor-control-actions">
+          <button id="switch-collect-button" type="button" onclick="requestSwitchCollection()" disabled>信息收集</button>
+        </span>
+        <small class="monitor-control-help">单次执行；开始后不可中断</small>
+        <span id="switch-collect-state" class="ztp-monitor-state" aria-live="polite">未知</span>
+      </span>
+      <span class="monitor-control-item">
+        <span class="monitor-control-actions">
+          <label class="continuous-interval">收集周期
+            <input id="continuous-collection-interval" type="number" min="10" max="1440" step="10" value="10"> 分钟
+          </label>
+          <button id="continuous-collection-button" type="button" onclick="toggleContinuousCollection()" disabled>持续收集</button>
+        </span>
+        <small class="monitor-control-help">周期执行；停止只取消后续轮次</small>
+        <span id="continuous-collection-state" class="ztp-monitor-state" aria-live="polite">持续收集：未知</span>
+      </span>
+      <span class="monitor-control-item">
+        <span class="monitor-control-actions">
+          <button id="yaml-backup-button" type="button" onclick="openYamlBackupDialog('manual')" disabled>配置备份</button>
+        </span>
+        <small class="monitor-control-help">单次执行；开始后不可中断</small>
+        <span id="yaml-backup-state" class="ztp-monitor-state" aria-live="polite">备份：未知</span>
+      </span>
+      <span class="monitor-control-item">
+        <span class="monitor-control-actions">
+          <label class="continuous-interval">备份周期
+            <input id="continuous-backup-interval" type="number" min="10" max="1440" step="10" value="60"> 分钟
+          </label>
+          <button id="continuous-backup-button" type="button" onclick="toggleContinuousBackup()" disabled>持续备份</button>
+        </span>
+        <small class="monitor-control-help">周期执行；停止只取消后续轮次</small>
+        <span id="continuous-backup-state" class="ztp-monitor-state" aria-live="polite">持续备份：未知</span>
+      </span>
     </span>
     {auto_refresh_control('eth')}
     <input id="eth-search" type="text" placeholder="按主机名筛选…" oninput="filterCards()">
@@ -4812,6 +5160,20 @@ tr.grp-hidden {{ display: none; }}
       <button id="btn-list" class="vtbtn"        onclick="setView('list')">列表</button>
     </div>
   </div>
+  <dialog id="yaml-backup-dialog" class="yaml-backup-dialog">
+    <form onsubmit="submitYamlBackupDialog(event)">
+      <strong id="yaml-backup-dialog-title">配置备份</strong>
+      <label>交换机共享密码
+        <input id="yaml-backup-password" type="password" autocomplete="current-password" maxlength="1024">
+      </label>
+      <small>密码通过当前 HTTP 页面提交；持续备份时留在 root worker 内存，
+        单轮 SSH 认证期间会交给短生命子进程；留空时仅尝试 SSH key/免密 sudo。</small>
+      <menu>
+        <button type="button" onclick="closeYamlBackupDialog()">取消</button>
+        <button type="submit">开始</button>
+      </menu>
+    </form>
+  </dialog>
   <div id="card-grid">
     {switch_cards_html}
   </div>
@@ -4958,6 +5320,8 @@ tr.grp-hidden {{ display: none; }}
   <div class="ztp-toolbar">
     <span class="ztp-meta">
       项目：<strong>{escape(str(ztp_status.get('project', '—')))}</strong>
+      &nbsp;·&nbsp; Release：<strong>{escape(ztp_release_id)}</strong>
+      &nbsp;·&nbsp; 发布：<strong>{escape(ztp_release_time)}</strong>
       &nbsp;·&nbsp; 写入时间：<strong>{escape(ztp_update_summary)}</strong>
       &nbsp;·&nbsp; {ztp_summary}
     </span>
@@ -4969,25 +5333,26 @@ tr.grp-hidden {{ display: none; }}
     {auto_refresh_control('ztp')}
     <input id="ztp-search" type="text" placeholder="设备 / IP / MAC / 问题…" oninput="filterZtpStatus()">
   </div>
+  {ztp_watch_banner}
   <div class="ztp-wrap">
     <table id="ztp-tbl" class="ztp-tbl">
       <thead><tr>
-        <th class="ztp-sortable" onclick="sortZtpStatus(0,'text')">设备</th>
-        <th class="ztp-sortable" onclick="sortZtpStatus(1,'text')">类型</th>
-        <th class="ztp-sortable" onclick="sortZtpStatus(2,'ip')">IP</th>
-        <th class="ztp-sortable" onclick="sortZtpStatus(3,'text')">MAC</th>
-        <th class="ztp-sortable" onclick="sortZtpStatus(4,'status')">DHCP</th>
-        <th class="ztp-sortable" onclick="sortZtpStatus(5,'status')">Bootstrap</th>
-        <th class="ztp-sortable" onclick="sortZtpStatus(6,'status')">YAML 下载</th>
-        <th class="ztp-sortable" onclick="sortZtpStatus(7,'status')">SSH</th>
-        <th class="ztp-sortable" onclick="sortZtpStatus(8,'status')">网络</th>
-        <th class="ztp-sortable" onclick="sortZtpStatus(9,'status')">版本</th>
-        <th class="ztp-sortable" onclick="sortZtpStatus(10,'status')">YAML Apply</th>
-        <th class="ztp-sortable" onclick="sortZtpStatus(11,'status')">SSH Key</th>
-        <th class="ztp-sortable" onclick="sortZtpStatus(12,'status')">完成</th>
-        <th class="ztp-sortable" onclick="sortZtpStatus(13,'number')">进度</th>
-        <th class="ztp-sortable" onclick="sortZtpStatus(14,'status')">时间同步</th>
-        <th class="ztp-sortable" onclick="sortZtpStatus(15,'status')">总体 / 诊断</th>
+        <th class="ztp-sortable" data-sort-kind="text" aria-sort="none" title="在每个设备分组内排序" onclick="sortZtpStatus(0,'text')">设备</th>
+        <th class="ztp-sortable" data-sort-kind="text" aria-sort="none" title="在每个设备分组内排序" onclick="sortZtpStatus(1,'text')">类型</th>
+        <th class="ztp-sortable" data-sort-kind="ip" aria-sort="none" title="在每个设备分组内排序；多地址取第一个显示地址" onclick="sortZtpStatus(2,'ip')">IP</th>
+        <th class="ztp-sortable" data-sort-kind="text" aria-sort="none" title="在每个设备分组内排序" onclick="sortZtpStatus(3,'text')">MAC</th>
+        <th class="ztp-sortable" data-sort-kind="status" aria-sort="none" title="在每个设备分组内排序" onclick="sortZtpStatus(4,'status')">DHCP</th>
+        <th class="ztp-sortable" data-sort-kind="status" aria-sort="none" title="在每个设备分组内排序" onclick="sortZtpStatus(5,'status')">Bootstrap</th>
+        <th class="ztp-sortable" data-sort-kind="status" aria-sort="none" title="在每个设备分组内排序" onclick="sortZtpStatus(6,'status')">YAML 下载</th>
+        <th class="ztp-sortable" data-sort-kind="status" aria-sort="none" title="在每个设备分组内排序" onclick="sortZtpStatus(7,'status')">SSH</th>
+        <th class="ztp-sortable" data-sort-kind="status" aria-sort="none" title="在每个设备分组内排序" onclick="sortZtpStatus(8,'status')">网络</th>
+        <th class="ztp-sortable" data-sort-kind="status" aria-sort="none" title="在每个设备分组内排序" onclick="sortZtpStatus(9,'status')">版本</th>
+        <th class="ztp-sortable" data-sort-kind="status" aria-sort="none" title="在每个设备分组内排序" onclick="sortZtpStatus(10,'status')">YAML Apply</th>
+        <th class="ztp-sortable" data-sort-kind="status" aria-sort="none" title="在每个设备分组内排序" onclick="sortZtpStatus(11,'status')">SSH Key</th>
+        <th class="ztp-sortable" data-sort-kind="status" aria-sort="none" title="在每个设备分组内排序" onclick="sortZtpStatus(12,'status')">完成</th>
+        <th class="ztp-sortable" data-sort-kind="number" aria-sort="none" title="在每个设备分组内排序" onclick="sortZtpStatus(13,'number')">进度</th>
+        <th class="ztp-sortable" data-sort-kind="status" aria-sort="none" title="在每个设备分组内排序" onclick="sortZtpStatus(14,'status')">时间同步</th>
+        <th class="ztp-sortable" data-sort-kind="status" aria-sort="none" title="在每个设备分组内排序" onclick="sortZtpStatus(15,'status')">总体 / 诊断</th>
         <th>操作</th>
       </tr></thead>
       <tbody>{ztp_rows}</tbody>
@@ -5009,24 +5374,35 @@ const AUTO_REFRESH_KEY = 'network-monitor:auto-refresh';
 const ACTIVE_TAB_KEY = 'network-monitor:active-tab';
 const SWITCH_VIEW_KEY = 'network-monitor:switch-view:' + window.location.pathname;
 const COLLAPSE_STATE_KEY = 'network-monitor:collapse-state:' + window.location.pathname;
+const SORT_STATE_KEY = 'network-monitor:sort-state:' + window.location.pathname;
 const COLLAPSE_TOGGLE_SELECTOR = [
   '.ztp-environment', '.ztp-group', '.section-divider', '.card-env',
   '.card-cat', '.lst-env', '.lst-sec', '.lst-cat', '.topo-section > h3',
   'tr.grp',
 ].join(',');
 const autoRefreshSettings = Object.fromEntries(
-  Array.from(AUTO_REFRESH_TABS, tab => [tab, {{enabled: true, seconds: 15}}])
+  Array.from(AUTO_REFRESH_TABS, tab => [tab, {{enabled: tab !== 'eth', seconds: 15}}])
 );
 let autoRefreshTimer = null;
 let autoRefreshCountdownTimer = null;
 let autoRefreshDeadline = 0;
-const ZTP_CONTROL_URL = '/cgi-bin/ztp-monitor-control';
-const SWITCH_COLLECTION_URL = '/cgi-bin/switch-collection-control';
-const MANUAL_ZTP_URL = '/cgi-bin/manual-ztp-control';
+const ZTP_CONTROL_URL = '/monitor/control/ztp-monitor';
+const SWITCH_COLLECTION_URL = '/monitor/control/switch-collection';
+const MANUAL_ZTP_URL = '/monitor/control/manual-ztp';
 const MANUAL_ZTP_INTENTS_KEY = 'monitor.manualZtpIntents.v1:'
   + {json.dumps(f"{ENVIRONMENT_SCOPE}|{ztp_status.get('project', '')}")};
 let ztpMonitorState = 'unknown';
 let switchCollectionState = 'unknown';
+let switchCollectionCooling = false;
+let yamlBackupState = 'unknown';
+let yamlBackupCooling = false;
+let continuousCollectionEnabled = false;
+let continuousCollectionState = 'unknown';
+let continuousCollectionStartPending = false;
+let continuousBackupEnabled = false;
+let continuousBackupState = 'unknown';
+let continuousBackupStartPending = false;
+let yamlBackupDialogMode = 'manual';
 let manualZtpStates = {{}};
 let manualZtpIntents = loadManualZtpIntents();
 let manualZtpPollTimer = null;
@@ -5321,6 +5697,10 @@ function initAutoRefresh() {{
 function renderZtpMonitorControl(payload) {{
   const button = document.getElementById('ztp-monitor-toggle');
   const label = document.getElementById('ztp-monitor-state');
+  const warning = document.querySelector('.factory-credentials-warning');
+  const factoryActive = payload?.control_auth?.factory_records_active;
+  if (warning && typeof factoryActive === 'boolean')
+    warning.classList.toggle('hidden', factoryActive !== true);
   const alive = payload?.process_alive === true;
   ztpMonitorState = alive ? (payload?.state === 'paused' ? 'paused' : 'running') : 'stopped';
   if (button) button.classList.remove('running', 'paused');
@@ -5332,13 +5712,15 @@ function renderZtpMonitorControl(payload) {{
     if (label) label.textContent = '已暂停';
   }} else {{
     if (button) {{ button.textContent = '监控未运行'; button.disabled = true; }}
-    if (label) label.textContent = '需运行 load';
+    if (label) label.textContent = '需按当前后端恢复';
   }}
 }}
 
 async function refreshZtpMonitorControl() {{
   try {{
-    const response = await fetch(ZTP_CONTROL_URL, {{cache: 'no-store'}});
+    const response = await fetch(ZTP_CONTROL_URL, {{
+      credentials: 'same-origin', cache: 'no-store',
+    }});
     if (!response.ok) throw new Error(`HTTP ${{response.status}}`);
     renderZtpMonitorControl(await response.json());
     return true;
@@ -5358,6 +5740,7 @@ async function toggleZtpMonitor() {{
   const action = ztpMonitorState === 'running' ? 'stop' : 'start';
   try {{
     const response = await fetch(ZTP_CONTROL_URL, {{
+      credentials: 'same-origin',
       method: 'POST',
       headers: {{
         'Content-Type': 'application/x-www-form-urlencoded',
@@ -5377,12 +5760,14 @@ async function toggleZtpMonitor() {{
 
 async function requestSwitchCollection() {{
   const button = document.getElementById('switch-collect-button');
-  if (!button || ['stopped', 'stopping'].includes(switchCollectionState)) return;
-  const action = ['queued', 'collecting'].includes(switchCollectionState) ? 'stop' : 'collect';
+  if (!button || continuousCollectionEnabled || switchCollectionCooling
+      || ['queued', 'collecting', 'stopped'].includes(switchCollectionState)) return;
+  const action = 'collect';
   button.disabled = true;
-  button.textContent = action === 'stop' ? '停止中…' : '提交中…';
+  button.textContent = '提交中…';
   try {{
     const response = await fetch(SWITCH_COLLECTION_URL, {{
+      credentials: 'same-origin',
       method: 'POST',
       headers: {{
         'Content-Type': 'application/x-www-form-urlencoded',
@@ -5396,9 +5781,19 @@ async function requestSwitchCollection() {{
     renderSwitchCollectionControl(payload);
     window.setTimeout(pollSwitchCollection, 1000);
   }} catch (error) {{
-    window.alert(`Switch Status 收集失败：${{error.message || error}}`);
+    window.alert(`信息收集失败：${{error.message || error}}`);
     await refreshSwitchCollectionControl();
   }}
+}}
+
+function failedDeviceSummary(payload) {{
+  const failures = Array.isArray(payload?.failed_devices)
+    ? payload.failed_devices : [];
+  const names = failures.map(item => String(item?.hostname || '').trim())
+    .filter(Boolean);
+  const count = Number.isInteger(payload?.failed_count)
+    ? payload.failed_count : names.length;
+  return `${{count}} 台失败${{names.length ? `：${{names.join('、')}}` : ''}}`;
 }}
 
 function renderSwitchCollectionControl(payload) {{
@@ -5407,40 +5802,52 @@ function renderSwitchCollectionControl(payload) {{
   if (!button || !label) return;
   const alive = payload?.process_alive === true;
   switchCollectionState = alive ? (payload?.state || 'idle') : 'stopped';
+  const remaining = Math.max(0, Number(payload?.remaining_seconds) || 0);
+  switchCollectionCooling = remaining > 0;
   if (['queued', 'collecting'].includes(switchCollectionState)) {{
-    button.textContent = '停止收集';
-    button.disabled = false;
-    label.textContent = '收集中';
-  }} else if (switchCollectionState === 'stopping') {{
-    button.textContent = '停止中…';
+    button.textContent = '信息收集中…';
     button.disabled = true;
-    label.textContent = '正在停止管理服务器上的收集任务';
+    label.textContent = '收集中';
   }} else if (switchCollectionState === 'stopped') {{
     button.textContent = '收集服务未运行';
     button.disabled = true;
-    label.textContent = '需运行 load';
+    label.textContent = '需按当前后端恢复';
+  }} else if (switchCollectionCooling) {{
+    button.textContent = '信息收集冷却中';
+    button.disabled = true;
+    label.textContent = switchCollectionState === 'partial'
+      ? `完成但有警告（${{failedDeviceSummary(payload)}}）；10 分钟冷却中，约 ${{Math.ceil(remaining / 60)}} 分钟后可用`
+      : `Switch：10 分钟冷却中，约 ${{Math.ceil(remaining / 60)}} 分钟后可用`;
+    window.setTimeout(refreshSwitchCollectionControl, Math.min(remaining, 60) * 1000);
   }} else {{
-    button.textContent = '立即收集 Switch Status';
+    button.textContent = '信息收集';
     button.disabled = false;
     if (switchCollectionState === 'success') {{
       if (payload?.cooldown_skipped) {{
-        label.textContent = `30 分钟冷却中：复用 ${{payload?.last_success_at || '最近成功结果'}}；`
+        label.textContent = `10 分钟冷却中：复用 ${{payload?.last_success_at || '最近成功结果'}}；`
           + `下次允许 ${{payload?.next_allowed_at || '—'}}`;
       }} else {{
         label.textContent = `上次成功：${{payload?.finished_at || payload?.updated_at || '—'}}`;
       }}
+    }} else if (switchCollectionState === 'partial') {{
+      label.textContent = `完成但有警告：${{failedDeviceSummary(payload)}}`;
     }} else if (switchCollectionState === 'failed') {{
-      label.textContent = `上次失败：${{payload?.reason || '未知原因'}}`;
+      const detail = payload?.failed_count ? failedDeviceSummary(payload)
+        : (payload?.reason || '未知原因');
+      label.textContent = `上次失败：${{detail}}`;
     }} else {{
       label.textContent = '可手工采集';
     }}
   }}
   convertDisplayedTimes(label);
+  renderCollectionControls();
 }}
 
 async function refreshSwitchCollectionControl() {{
   try {{
-    const response = await fetch(SWITCH_COLLECTION_URL, {{cache: 'no-store'}});
+    const response = await fetch(SWITCH_COLLECTION_URL, {{
+      credentials: 'same-origin', cache: 'no-store',
+    }});
     if (!response.ok) throw new Error(`HTTP ${{response.status}}`);
     renderSwitchCollectionControl(await response.json());
     return true;
@@ -5456,11 +5863,397 @@ async function refreshSwitchCollectionControl() {{
 
 async function pollSwitchCollection() {{
   if (!await refreshSwitchCollectionControl()) return;
-  if (['queued', 'collecting', 'stopping'].includes(switchCollectionState)) {{
+  if (['queued', 'collecting'].includes(switchCollectionState)) {{
     window.setTimeout(pollSwitchCollection, 2000);
-  }} else if (switchCollectionState === 'success') {{
+  }} else if (['success', 'partial'].includes(switchCollectionState)) {{
     reloadActiveTab();
   }}
+}}
+
+function openYamlBackupDialog(mode = 'manual') {{
+  if (continuousBackupEnabled && mode === 'manual') return;
+  yamlBackupDialogMode = mode;
+  const dialog = document.getElementById('yaml-backup-dialog');
+  const input = document.getElementById('yaml-backup-password');
+  const title = document.getElementById('yaml-backup-dialog-title');
+  if (!dialog || !input) return;
+  input.value = '';
+  if (title) title.textContent = mode === 'continuous'
+    ? '启动持续备份' : '配置备份';
+  dialog.showModal();
+  input.focus();
+}}
+
+function closeYamlBackupDialog() {{
+  const dialog = document.getElementById('yaml-backup-dialog');
+  const input = document.getElementById('yaml-backup-password');
+  if (input) input.value = '';
+  if (dialog?.open) dialog.close();
+}}
+
+async function submitYamlBackupDialog(event) {{
+  event.preventDefault();
+  const input = document.getElementById('yaml-backup-password');
+  const password = input?.value || '';
+  if (input) input.value = '';
+  const dialog = document.getElementById('yaml-backup-dialog');
+  if (dialog?.open) dialog.close();
+  if (yamlBackupDialogMode === 'continuous') await requestContinuousBackupStart(password);
+  else await requestYamlBackup(password);
+}}
+
+async function requestYamlBackup(password) {{
+  const button = document.getElementById('yaml-backup-button');
+  if (!button || continuousBackupEnabled || yamlBackupCooling
+      || ['queued', 'collecting'].includes(yamlBackupState)) return;
+  button.disabled = true;
+  button.textContent = '提交中…';
+  try {{
+    const body = new URLSearchParams({{action: 'yaml_backup'}});
+    body.set('password', password);
+    const response = await fetch(SWITCH_COLLECTION_URL, {{
+      credentials: 'same-origin',
+      method: 'POST',
+      headers: {{
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-Requested-With': 'SwitchCollectionControl',
+      }},
+      body: body.toString(), cache: 'no-store',
+    }});
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || `HTTP ${{response.status}}`);
+    renderYamlBackupControl(payload);
+    window.setTimeout(pollYamlBackup, 1000);
+  }} catch (error) {{
+    window.alert(`配置备份失败：${{error.message || error}}`);
+    await refreshYamlBackupControl();
+  }}
+}}
+
+function renderYamlBackupControl(payload) {{
+  const button = document.getElementById('yaml-backup-button');
+  const label = document.getElementById('yaml-backup-state');
+  if (!button || !label) return;
+  const alive = payload?.process_alive === true;
+  yamlBackupState = alive ? (payload?.state || 'idle') : 'stopped';
+  const remaining = Math.max(0, Number(payload?.remaining_seconds) || 0);
+  yamlBackupCooling = remaining > 0;
+  if (['queued', 'collecting'].includes(yamlBackupState)) {{
+    button.textContent = '配置备份运行中…';
+    label.textContent = 'YAML：收集中';
+  }} else if (yamlBackupState === 'stopped') {{
+    button.textContent = '配置备份不可用';
+    label.textContent = 'YAML：服务未运行';
+  }} else if (yamlBackupCooling) {{
+    button.textContent = '配置备份冷却中';
+    label.textContent = yamlBackupState === 'partial'
+      ? `YAML：完成但有警告（${{failedDeviceSummary(payload)}}）；10 分钟冷却中，约 ${{Math.ceil(remaining / 60)}} 分钟后可用`
+      : `YAML：10 分钟冷却中，约 ${{Math.ceil(remaining / 60)}} 分钟后可用`;
+    window.setTimeout(refreshYamlBackupControl, Math.min(remaining, 60) * 1000);
+  }} else {{
+    button.textContent = '配置备份';
+    label.textContent = yamlBackupState === 'partial'
+      ? `YAML：完成但有警告（${{failedDeviceSummary(payload)}}）`
+      : (yamlBackupState === 'failed'
+        ? `YAML：上次失败（${{payload?.failed_count ? failedDeviceSummary(payload) : (payload?.reason || '未知原因')}}）`
+        : `YAML：${{yamlBackupState === 'success' ? '上次成功' : '可手工备份'}}`);
+  }}
+  renderCollectionControls();
+  convertDisplayedTimes(label);
+}}
+
+async function refreshYamlBackupControl() {{
+  try {{
+    const response = await fetch(
+      `${{SWITCH_COLLECTION_URL}}?view=yaml_backup`, {{
+        credentials: 'same-origin', cache: 'no-store',
+      }}
+    );
+    if (!response.ok) throw new Error(`HTTP ${{response.status}}`);
+    renderYamlBackupControl(await response.json());
+    return true;
+  }} catch (error) {{
+    yamlBackupState = 'stopped';
+    const label = document.getElementById('yaml-backup-state');
+    if (label) label.textContent = `YAML：${{error.message || error}}`;
+    renderCollectionControls();
+    return false;
+  }}
+}}
+
+async function pollYamlBackup() {{
+  if (!await refreshYamlBackupControl()) return;
+  if (['queued', 'collecting'].includes(yamlBackupState))
+    window.setTimeout(pollYamlBackup, 2000);
+  else if (['success', 'partial'].includes(yamlBackupState))
+    reloadActiveTab();
+}}
+
+function renderContinuousCollectionControl(payload) {{
+  const label = document.getElementById('continuous-collection-state');
+  const alive = payload?.process_alive === true;
+  const reportedEnabled = alive && payload?.enabled === true;
+  if (reportedEnabled) continuousCollectionStartPending = false;
+  continuousCollectionEnabled = reportedEnabled
+    || (alive && continuousCollectionStartPending);
+  continuousCollectionState = alive
+    ? (reportedEnabled ? (payload?.state || 'scheduled')
+      : (continuousCollectionStartPending ? 'waiting' : (payload?.state || 'stopped')))
+    : 'stopped';
+  if (label) {{
+    if (continuousCollectionEnabled) {{
+      if (continuousCollectionState === 'running') {{
+        label.textContent = '持续收集：本轮运行中';
+      }} else if (continuousCollectionState === 'stopping') {{
+        label.textContent = '持续收集：停止中，等待当前信息收集完成';
+      }} else if (continuousCollectionState === 'waiting') {{
+        const remaining = Math.max(0, Number(payload?.remaining_seconds) || 0);
+        label.textContent = remaining > 0
+          ? `持续收集：等待收集冷却结束（约 ${{Math.ceil(remaining / 60)}} 分钟）`
+          : '持续收集：已排队，等待信息收集完成';
+      }} else {{
+        label.textContent = `持续收集：已启用（${{payload?.interval_minutes || 10}} 分钟）`;
+      }}
+    }} else {{
+      label.textContent = '持续收集：未启用';
+    }}
+  }}
+  renderCollectionControls();
+  convertDisplayedTimes(label);
+}}
+
+function renderContinuousBackupControl(payload) {{
+  const label = document.getElementById('continuous-backup-state');
+  const alive = payload?.process_alive === true;
+  const reportedEnabled = alive && payload?.enabled === true;
+  if (reportedEnabled) continuousBackupStartPending = false;
+  continuousBackupEnabled = reportedEnabled || (alive && continuousBackupStartPending);
+  continuousBackupState = alive
+    ? (reportedEnabled ? (payload?.state || 'scheduled')
+      : (continuousBackupStartPending ? 'waiting' : (payload?.state || 'stopped')))
+    : 'stopped';
+  if (label) {{
+    if (continuousBackupEnabled) {{
+      if (continuousBackupState === 'running') {{
+        label.textContent = '持续备份：本轮运行中';
+      }} else if (continuousBackupState === 'stopping') {{
+        label.textContent = '持续备份：停止中，等待当前配置备份完成';
+      }} else if (continuousBackupState === 'waiting') {{
+        const remaining = Math.max(0, Number(payload?.remaining_seconds) || 0);
+        label.textContent = remaining > 0
+          ? `持续备份：等待备份冷却结束（约 ${{Math.ceil(remaining / 60)}} 分钟）`
+          : '持续备份：已排队，等待配置备份完成';
+      }} else {{
+        label.textContent = `持续备份：已启用（${{payload?.interval_minutes || 60}} 分钟）`;
+      }}
+    }} else {{
+      label.textContent = '持续备份：未启用';
+    }}
+  }}
+  renderCollectionControls();
+  convertDisplayedTimes(label);
+}}
+
+function renderCollectionControls() {{
+  const collectButton = document.getElementById('switch-collect-button');
+  const backupButton = document.getElementById('yaml-backup-button');
+  const continuousCollectionButton = document.getElementById('continuous-collection-button');
+  const continuousBackupButton = document.getElementById('continuous-backup-button');
+  const collectionInterval = document.getElementById('continuous-collection-interval');
+  const backupInterval = document.getElementById('continuous-backup-interval');
+  const collectionBusy = ['queued', 'collecting', 'stopping'].includes(switchCollectionState);
+  const backupBusy = ['queued', 'collecting'].includes(yamlBackupState);
+  if (collectButton) {{
+    collectButton.disabled = continuousCollectionEnabled || collectionBusy
+      || switchCollectionCooling || switchCollectionState === 'stopped';
+  }}
+  if (backupButton) backupButton.disabled = continuousBackupEnabled
+    || yamlBackupCooling || backupBusy || yamlBackupState === 'stopped';
+  if (continuousCollectionButton) {{
+    continuousCollectionButton.textContent = continuousCollectionState === 'stopping'
+      ? '停止中…' : (continuousCollectionEnabled ? '停止后续持续收集' : '持续收集');
+    continuousCollectionButton.disabled = continuousCollectionState === 'unknown'
+      || continuousCollectionState === 'stopping'
+      || (!continuousCollectionEnabled && collectionBusy);
+  }}
+  if (continuousBackupButton) {{
+    continuousBackupButton.textContent = continuousBackupState === 'stopping'
+      ? '停止中…' : (continuousBackupEnabled ? '停止后续持续备份' : '持续备份');
+    continuousBackupButton.disabled = continuousBackupState === 'unknown'
+      || continuousBackupState === 'stopping'
+      || (!continuousBackupEnabled && backupBusy);
+  }}
+  if (collectionInterval) collectionInterval.disabled = continuousCollectionEnabled;
+  if (backupInterval) backupInterval.disabled = continuousBackupEnabled;
+}}
+
+function continuousInterval(inputId) {{
+  const intervalNode = document.getElementById(inputId);
+  const interval = Number.parseInt(intervalNode?.value || '', 10);
+  if (!Number.isInteger(interval) || interval < 10 || interval > 1440) {{
+    window.alert('循环间隔必须是 10 到 1440 分钟的整数');
+    return null;
+  }}
+  return interval;
+}}
+
+async function requestContinuousCollectionStart() {{
+  const interval = continuousInterval('continuous-collection-interval');
+  if (interval === null) return;
+  const body = new URLSearchParams({{
+    action: 'continuous_collection_start', interval_minutes: String(interval),
+  }});
+  try {{
+    const response = await fetch(SWITCH_COLLECTION_URL, {{
+      credentials: 'same-origin',
+      method: 'POST', headers: {{
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-Requested-With': 'SwitchCollectionControl',
+      }}, body: body.toString(), cache: 'no-store',
+    }});
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || `HTTP ${{response.status}}`);
+    continuousCollectionStartPending = true;
+    renderContinuousCollectionControl(payload);
+    window.setTimeout(pollContinuousCollection, 1000);
+  }} catch (error) {{
+    window.alert(`持续收集启动失败：${{error.message || error}}`);
+    await refreshContinuousCollectionControl();
+  }}
+}}
+
+async function requestContinuousBackupStart(password) {{
+  const interval = continuousInterval('continuous-backup-interval');
+  if (interval === null) return;
+  const body = new URLSearchParams({{
+    action: 'continuous_backup_start', interval_minutes: String(interval),
+  }});
+  body.set('password', password);
+  try {{
+    const response = await fetch(SWITCH_COLLECTION_URL, {{
+      credentials: 'same-origin',
+      method: 'POST', headers: {{
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-Requested-With': 'SwitchCollectionControl',
+      }}, body: body.toString(), cache: 'no-store',
+    }});
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || `HTTP ${{response.status}}`);
+    continuousBackupStartPending = true;
+    renderContinuousBackupControl(payload);
+    window.setTimeout(pollContinuousBackup, 1000);
+  }} catch (error) {{
+    window.alert(`持续备份启动失败：${{error.message || error}}`);
+    await refreshContinuousBackupControl();
+  }}
+}}
+
+async function toggleContinuousCollection() {{
+  if (!continuousCollectionEnabled) {{
+    await requestContinuousCollectionStart();
+    return;
+  }}
+  try {{
+    const body = new URLSearchParams({{action: 'continuous_collection_stop'}});
+    const response = await fetch(SWITCH_COLLECTION_URL, {{
+      credentials: 'same-origin',
+      method: 'POST', headers: {{
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-Requested-With': 'SwitchCollectionControl',
+      }}, body: body.toString(), cache: 'no-store',
+    }});
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || `HTTP ${{response.status}}`);
+    continuousCollectionStartPending = false;
+    renderContinuousCollectionControl(payload);
+    window.setTimeout(pollContinuousCollection, 1000);
+  }} catch (error) {{
+    window.alert(`持续收集停止失败：${{error.message || error}}`);
+  }}
+}}
+
+async function refreshContinuousCollectionControl() {{
+  try {{
+    const response = await fetch(
+      `${{SWITCH_COLLECTION_URL}}?view=continuous_collection`, {{
+        credentials: 'same-origin', cache: 'no-store',
+      }}
+    );
+    if (!response.ok) throw new Error(`HTTP ${{response.status}}`);
+    renderContinuousCollectionControl(await response.json());
+    return true;
+  }} catch (error) {{
+    continuousCollectionStartPending = false;
+    continuousCollectionEnabled = false;
+    continuousCollectionState = 'stopped';
+    const label = document.getElementById('continuous-collection-state');
+    if (label) label.textContent = `持续收集：${{error.message || error}}`;
+    renderCollectionControls();
+    return false;
+  }}
+}}
+
+async function pollContinuousCollection() {{
+  if (!await refreshContinuousCollectionControl()) return;
+  if (continuousCollectionEnabled || continuousCollectionState === 'stopping')
+    window.setTimeout(
+      pollContinuousCollection,
+      continuousCollectionState === 'running' ? 2000 : 30000,
+    );
+}}
+
+async function toggleContinuousBackup() {{
+  if (!continuousBackupEnabled) {{
+    openYamlBackupDialog('continuous');
+    return;
+  }}
+  try {{
+    const body = new URLSearchParams({{action: 'continuous_backup_stop'}});
+    const response = await fetch(SWITCH_COLLECTION_URL, {{
+      credentials: 'same-origin',
+      method: 'POST', headers: {{
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-Requested-With': 'SwitchCollectionControl',
+      }}, body: body.toString(), cache: 'no-store',
+    }});
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || `HTTP ${{response.status}}`);
+    continuousBackupStartPending = false;
+    renderContinuousBackupControl(payload);
+    window.setTimeout(pollContinuousBackup, 1000);
+  }} catch (error) {{
+    window.alert(`持续备份停止失败：${{error.message || error}}`);
+  }}
+}}
+
+async function refreshContinuousBackupControl() {{
+  try {{
+    const response = await fetch(
+      `${{SWITCH_COLLECTION_URL}}?view=continuous_backup`, {{
+        credentials: 'same-origin', cache: 'no-store',
+      }}
+    );
+    if (!response.ok) throw new Error(`HTTP ${{response.status}}`);
+    renderContinuousBackupControl(await response.json());
+    return true;
+  }} catch (error) {{
+    continuousBackupStartPending = false;
+    continuousBackupEnabled = false;
+    continuousBackupState = 'stopped';
+    const label = document.getElementById('continuous-backup-state');
+    if (label) label.textContent = `持续备份：${{error.message || error}}`;
+    renderCollectionControls();
+    return false;
+  }}
+}}
+
+async function pollContinuousBackup() {{
+  if (!await refreshContinuousBackupControl()) return;
+  if (continuousBackupEnabled || continuousBackupState === 'stopping')
+    window.setTimeout(
+      pollContinuousBackup,
+      continuousBackupState === 'running' ? 2000 : 30000,
+    );
 }}
 
 const MANUAL_ZTP_PREVIEW_STATES = new Set([
@@ -5770,7 +6563,7 @@ function renderManualZtpControl(payload) {{
     if (canceling) cancellingDevices.push({{button, device, intent}});
   }});
   if (!label) return;
-  if (!alive) label.textContent = '手工 ZTP：需运行 load';
+  if (!alive) label.textContent = '手工 ZTP：需按当前后端恢复';
   else if (activeDevices.length) {{
     const names = activeDevices.map(device => device.hostname).filter(Boolean);
       const resetting = activeDevices.filter(device => String(device.operation || '') === 'reset').length;
@@ -5806,7 +6599,9 @@ function renderManualZtpControl(payload) {{
 
 async function refreshManualZtpControl() {{
   try {{
-    const response = await fetch(MANUAL_ZTP_URL, {{cache: 'no-store'}});
+    const response = await fetch(MANUAL_ZTP_URL, {{
+      credentials: 'same-origin', cache: 'no-store',
+    }});
     if (!response.ok) throw new Error(`HTTP ${{response.status}}`);
     renderManualZtpControl(await response.json());
     return true;
@@ -5853,6 +6648,7 @@ async function requestTimeSync(button) {{
 
 async function postManualZtpControl(body) {{
   const response = await fetch(MANUAL_ZTP_URL, {{
+    credentials: 'same-origin',
     method: 'POST',
     headers: {{
       'Content-Type': 'application/x-www-form-urlencoded',
@@ -6100,41 +6896,63 @@ function handleZtpToggleKey(event, header, level) {{
   else toggleZtpGroup(header);
 }}
 
-function sortZtpStatus(column, type) {{
+function naturalCompare(left, right) {{
+  return String(left).localeCompare(String(right), undefined, {{
+    numeric: true, sensitivity: 'base',
+  }});
+}}
+
+function cellSortValue(cell, fallbackKind = 'text') {{
+  if (!cell) return {{kind: fallbackKind, value: '', missing: true}};
+  const kind = cell.dataset.sortKind || fallbackKind;
+  const raw = cell.dataset.sortValue !== undefined
+    ? cell.dataset.sortValue : cell.textContent.trim();
+  let missing = cell.dataset.sortMissing === 'true'
+    || raw === '' || raw === '—' || raw.toLowerCase() === 'n/a';
+  if (kind === 'number' || kind === 'ip' || kind === 'status') {{
+    const numeric = Number(raw);
+    if (!Number.isFinite(numeric)) missing = true;
+    return {{kind, value: numeric, missing}};
+  }}
+  return {{kind, value: raw, missing}};
+}}
+
+function compareSortValues(left, right, direction) {{
+  if (left.missing !== right.missing)
+    return left.missing ? 1 : -1;
+  if (left.missing) return 0;
+  const result = (left.kind === 'number' || left.kind === 'ip' || left.kind === 'status')
+    ? left.value - right.value
+    : naturalCompare(left.value, right.value);
+  return result * direction;
+}}
+
+function readSortState() {{
+  try {{
+    const parsed = JSON.parse(storageGet(SORT_STATE_KEY) || '{{}}');
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {{}};
+  }} catch (_error) {{ return {{}}; }}
+}}
+
+function saveSortState(tableName, column, kind, direction) {{
+  const state = readSortState();
+  state[tableName] = {{column, kind, direction}};
+  storageSet(SORT_STATE_KEY, JSON.stringify(state));
+}}
+
+function sortZtpStatus(column, type, requestedDirection = null, persist = true) {{
   const table = document.getElementById('ztp-tbl');
   if (!table) return;
   const header = table.tHead?.rows[0]?.cells[column];
-  if (!header) return;
-  const ascending = header.getAttribute('aria-sort') !== 'ascending';
-  table.querySelectorAll('thead th').forEach(th => th.removeAttribute('aria-sort'));
-  header.setAttribute('aria-sort', ascending ? 'ascending' : 'descending');
+  if (!header || !header.classList.contains('ztp-sortable')) return;
+  const directionName = requestedDirection === 'ascending' || requestedDirection === 'descending'
+    ? requestedDirection
+    : header.getAttribute('aria-sort') === 'ascending' ? 'descending' : 'ascending';
+  const direction = directionName === 'ascending' ? 1 : -1;
+  table.querySelectorAll('thead th.ztp-sortable')
+    .forEach(th => th.setAttribute('aria-sort', 'none'));
+  header.setAttribute('aria-sort', directionName);
 
-  const statusRank = {{'失败':0, '警告':1, '进行中':2, '等待':3,
-                      '未知':4, '不适用':5, '成功':6}};
-  const valueOf = row => {{
-    const cell = row.cells[column];
-    if (!cell) return '';
-    if (type === 'status') {{
-      const state = cell.querySelector('.ztp-state');
-      if (state?.classList.contains('ztp-failed')) return statusRank['失败'];
-      if (state?.classList.contains('ztp-warning')) return statusRank['警告'];
-      if (state?.classList.contains('ztp-running')) return statusRank['进行中'];
-      if (state?.classList.contains('ztp-pending')) return statusRank['等待'];
-      if (state?.classList.contains('ztp-unknown')) return statusRank['未知'];
-      if (state?.classList.contains('ztp-success')) return statusRank['成功'];
-      const label = state?.textContent.trim() || '';
-      return statusRank[label] ?? 99;
-    }}
-    const value = cell.textContent.trim();
-    if (type === 'number') return Number.parseFloat(value) || 0;
-    if (type === 'ip') {{
-      const parts = value.split('.');
-      return parts.length === 4 && parts.every(part => /^\\d+$/.test(part))
-        ? parts.reduce((number, part) => number * 256 + Number(part), 0)
-        : Number.MAX_SAFE_INTEGER;
-    }}
-    return value;
-  }};
   const body = table.tBodies[0];
   const groups = Array.from(body.querySelectorAll('.ztp-group'));
   groups.forEach(group => {{
@@ -6143,21 +6961,24 @@ function sortZtpStatus(column, type) {{
     ));
     rows.forEach((row, index) => row.dataset.sortIndex ??= String(index));
     rows.sort((left, right) => {{
-      const leftAir = left.cells[0]?.textContent.trim().toUpperCase().startsWith('AIR-') ? 0 : 1;
-      const rightAir = right.cells[0]?.textContent.trim().toUpperCase().startsWith('AIR-') ? 0 : 1;
-      if (leftAir !== rightAir) return leftAir - rightAir;
-      const a = valueOf(left), b = valueOf(right);
-      let result = typeof a === 'number'
-        ? a - b
-        : String(a).localeCompare(String(b), undefined, {{numeric:true, sensitivity:'base'}});
-      if (!result) result = Number(left.dataset.sortIndex) - Number(right.dataset.sortIndex);
-      return ascending ? result : -result;
+      const result = compareSortValues(
+        cellSortValue(left.cells[column], type),
+        cellSortValue(right.cells[column], type),
+        direction,
+      );
+      if (result) return result;
+      const hostnameResult = naturalCompare(
+        left.dataset.hostname || '', right.dataset.hostname || '',
+      );
+      if (hostnameResult) return hostnameResult;
+      return Number(left.dataset.sortIndex) - Number(right.dataset.sortIndex);
     }});
     let cursor = group;
     rows.forEach(row => {{ cursor.after(row); cursor = row; }});
   }});
   const empty = document.getElementById('ztp-no-match');
   if (empty) body.appendChild(empty);
+  if (persist) saveSortState('ztp', column, type, directionName);
 }}
 
 function toggleTopologySection(header) {{
@@ -6542,25 +7363,19 @@ function makeCtx(pfx) {{
       `${{vis}} / ${{total}} 端口`;
   }}
 
-  function natCmp(a, b) {{
-    const re = /(\\d+)|(\\D+)/g;
-    const pa = a.match(re) || [], pb = b.match(re) || [];
-    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {{
-      if (i >= pa.length) return -1;
-      if (i >= pb.length) return  1;
-      const na = parseInt(pa[i], 10), nb = parseInt(pb[i], 10);
-      if (!isNaN(na) && !isNaN(nb)) {{ if (na !== nb) return na - nb; }}
-      else {{ const c = pa[i].localeCompare(pb[i]); if (c) return c; }}
-    }}
-    return 0;
-  }}
-
-  function doSort(th, col) {{
-    sdir = (scol === col) ? -sdir : 1;
+  function doSort(th, col, requestedDirection = null, persist = true) {{
+    const directionName = requestedDirection === 'ascending' || requestedDirection === 'descending'
+      ? requestedDirection
+      : scol === col && sdir === 1 ? 'descending' : 'ascending';
+    sdir = directionName === 'ascending' ? 1 : -1;
     scol = col;
-    document.getElementById(pfx + '-tbl').querySelectorAll('thead th')
-      .forEach(t => t.classList.remove('sa','sd'));
+    document.getElementById(pfx + '-tbl').querySelectorAll('thead th.sc')
+      .forEach(t => {{
+        t.classList.remove('sa','sd');
+        t.setAttribute('aria-sort', 'none');
+      }});
     th.classList.add(sdir === 1 ? 'sa' : 'sd');
+    th.setAttribute('aria-sort', directionName);
     const tbody = document.getElementById(pfx + '-tbody');
     const environments = [];
     let currentEnvironment = null, cur = null;
@@ -6574,19 +7389,37 @@ function makeCtx(pfx) {{
           currentEnvironment = {{header:null, groups:[]}};
           environments.push(currentEnvironment);
         }}
-        cur = {{grp:tr, rows:[]}};
+        cur = {{grp:tr, rows:[], originalIndex:currentEnvironment.groups.length}};
         currentEnvironment.groups.push(cur);
       }}
       else if (cur) cur.rows.push(tr);
     }});
     environments.forEach(environment => {{
-      environment.groups.forEach(g => {{
-        g.rows.sort((a,b) => {{
-          const ta = a.querySelectorAll('td')[col]?.textContent || '';
-          const tb = b.querySelectorAll('td')[col]?.textContent || '';
-          return natCmp(ta, tb) * sdir;
+      if (col === 0) {{
+        environment.groups.sort((left, right) => {{
+          const result = compareSortValues(
+            {{kind:'text', value:left.grp.dataset.sortValue || '', missing:false}},
+            {{kind:'text', value:right.grp.dataset.sortValue || '', missing:false}},
+            sdir,
+          );
+          return result || left.originalIndex - right.originalIndex;
         }});
-      }});
+      }} else {{
+        environment.groups.forEach(group => {{
+          group.rows.forEach((row, index) => row.dataset.sortIndex ??= String(index));
+          group.rows.sort((left, right) => {{
+            const result = compareSortValues(
+              cellSortValue(left.querySelectorAll('td')[col], th.dataset.sortKind || 'text'),
+              cellSortValue(right.querySelectorAll('td')[col], th.dataset.sortKind || 'text'),
+              sdir,
+            );
+            if (result) return result;
+            const portResult = naturalCompare(left.dataset.port || '', right.dataset.port || '');
+            if (portResult) return portResult;
+            return Number(left.dataset.sortIndex) - Number(right.dataset.sortIndex);
+          }});
+        }});
+      }}
     }});
     while (tbody.firstChild) tbody.removeChild(tbody.firstChild);
     environments.forEach(environment => {{
@@ -6596,6 +7429,17 @@ function makeCtx(pfx) {{
         g.rows.forEach(r => tbody.appendChild(r));
       }});
     }});
+    if (persist)
+      saveSortState(pfx, col, th.dataset.sortKind || 'text', directionName);
+  }}
+
+  function restoreSort(state) {{
+    if (!state || !Number.isInteger(state.column)) return;
+    const th = Array.from(document.querySelectorAll('#' + pfx + '-tbl thead th.sc'))
+      .find(item => item.getAttribute('onclick') === `srt(this,${{state.column}})`);
+    if (!th || th.dataset.sortKind !== state.kind
+        || !['ascending', 'descending'].includes(state.direction)) return;
+    doSort(th, state.column, state.direction, false);
   }}
 
   function downloadCsv(changesOnly) {{
@@ -6641,12 +7485,31 @@ function makeCtx(pfx) {{
     }});
   }}
 
-  return {{ filterBadge, toggleDown, applyFilters, srt: doSort, downloadCsv, initCollapse }};
+  return {{
+    filterBadge, toggleDown, applyFilters, srt: doSort, downloadCsv,
+    initCollapse, restoreSort,
+  }};
 }}
 
 const spx = makeCtx('spx');
 const ibl = makeCtx('ibl');
 const nvl = makeCtx('nvl');
+
+function restoreSortState() {{
+  const state = readSortState();
+  const ztp = state.ztp;
+  if (ztp && Number.isInteger(ztp.column)
+      && ztp.column >= 0 && ztp.column <= 15
+      && ['text', 'ip', 'status', 'number'].includes(ztp.kind)
+      && ['ascending', 'descending'].includes(ztp.direction)) {{
+    const header = document.getElementById('ztp-tbl')?.tHead?.rows[0]?.cells[ztp.column];
+    if (header?.dataset.sortKind === ztp.kind)
+      sortZtpStatus(ztp.column, ztp.kind, ztp.direction, false);
+  }}
+  spx.restoreSort(state.spx);
+  ibl.restoreSort(state.ibl);
+  nvl.restoreSort(state.nvl);
+}}
 
 // ── 列排序入口（被 thead onclick="srt(this,N)" 调用）─────────────────────────
 function srt(th, col) {{
@@ -6708,6 +7571,9 @@ initAutoRefresh();
 setView(storageGet(SWITCH_VIEW_KEY) === 'list' ? 'list' : 'card', false);
 refreshZtpMonitorControl();
 refreshSwitchCollectionControl();
+refreshYamlBackupControl();
+refreshContinuousCollectionControl();
+refreshContinuousBackupControl();
 refreshManualZtpControl();
 convertDisplayedTimes();
 document.querySelectorAll('iframe').forEach(frame => {{
@@ -6721,6 +7587,7 @@ spx.initCollapse();
 ibl.initCollapse();
 nvl.initCollapse();
 initCollapsePersistence();
+restoreSortState();
 spx.applyFilters();
 ibl.applyFilters();
 nvl.applyFilters();

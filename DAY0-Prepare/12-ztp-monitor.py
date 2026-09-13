@@ -15,6 +15,7 @@ import math
 import os
 from pathlib import Path
 import re
+import signal
 import shlex
 import shutil
 import stat
@@ -31,6 +32,9 @@ HERE = Path(__file__).resolve().parent
 HTTP_ROOT = HERE.parent
 if str(HTTP_ROOT) not in sys.path:
     sys.path.insert(0, str(HTTP_ROOT))
+TOOLS_DIR = HTTP_ROOT / "tools"
+if str(TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(TOOLS_DIR))
 
 from ztp.dynamic_air_inventory import (
     dynamic_air_devices,
@@ -42,10 +46,19 @@ from monitor.switch_collection_gate import (
     CollectionGateError,
     DEFAULT_STATUS_DIR as SWITCH_COLLECTION_STATUS_DIR,
 )
+from ztp_service_runtime import (  # noqa: E402
+    RuntimeContractError,
+    ServiceRuntimeBackend,
+    monitor_pid_lock,
+    runtime_backend_from_environment,
+    write_monitor_pid_record_locked,
+)
 
 
 ZTP_STATUS_DIR = HTTP_ROOT / "ztp" / "status"
 ZTP_CONTROL_FILE = ZTP_STATUS_DIR / "ztp-monitor.control"
+SETUP_MANIFEST = HTTP_ROOT / "ztp" / ".setup_manifest"
+ACTIVE_INVENTORY = HTTP_ROOT / "ztp/config/isc-dhcp-server/02-devices_config.csv"
 DEFAULT_HTML_SCRIPT = HERE.parent / "monitor" / "generate-monitor-html.py"
 DEFAULT_APACHE_LOG = Path("/var/log/apache2/access.log")
 ACTIVE_AIR_JSON = HTTP_ROOT / "ztp/config/isc-dhcp-server/p2p-air.json"
@@ -92,6 +105,204 @@ _SNAPSHOT_NAME_RE = re.compile(r"^\d{8}_\d{6}(?:_\d+)?$")
 _ZTP_LOG_LINE_RE = re.compile(
     r"^\[\d{4}-\d{2}-\d{2}(?:T|\s)[^\]\r\n]+\]\s.*$"
 )
+MAX_RUNTIME_METADATA_BYTES = 4 * 1024 * 1024
+DEFAULT_STALL_WARNING_MINUTES = 60
+WATCH_STATE_NAME = ".ztp-monitor-watch-state.json"
+WATCH_STATE_SCHEMA = 1
+WATCH_FAILURE_LIMIT = 5
+WATCH_FAILURE_SUMMARY_SECONDS = 300.0
+WATCH_MESSAGE_MAX_BYTES = 1024
+
+RUNTIME_REPUBLISH_GUIDANCE = (
+    "若修复会更新项目清单、配置或 release 输入，则属于 source write："
+    "Native/systemd 执行 DAY0-Prepare/11-load.py；Docker/Supervisor 执行 "
+    "infra/docker/deploy.sh deploy，或对与 live 来源身份链匹配且经验证的镜像执行 "
+    "infra/docker/deploy.sh deploy-preloaded <IMAGE_ID>；source write 后不得 load。"
+    "仅在没有 source write 且已有运行中的 inactive 控制容器时，Docker/Supervisor "
+    "才可执行 infra/docker/deploy.sh load。"
+)
+
+ISSUE_REMEDIATIONS = {
+    "AIR_BASELINE_CONFIG_USED": (
+        "将设备纳入正式项目清单并生成专属业务配置。" + RUNTIME_REPUBLISH_GUIDANCE
+    ),
+    "CONSOLE_INITIAL_PASSWORD_REQUIRED": "通过设备控制台完成首次密码设置，再确认 SSH 登录。",
+    "DEFAULT_CONFIG_USED": (
+        "核对设备 MAC 与发布链接并生成专属 YAML。" + RUNTIME_REPUBLISH_GUIDANCE
+    ),
+    "DHCP_LEASE_NOT_ACTIVE": "核对 DHCP listener、租约和设备 eth0 MAC 后重新触发 DHCP。",
+    "DHCP_PLATFORM_UNKNOWN": "核对设备 type、vendor/client/user class 与 DHCP 平台匹配规则。",
+    "DHCP_TRANSITION_IP_CONFLICT": "清理冲突租约并确认同一 IP 只有一个当前 MAC holder。",
+    "HOSTNAME_TRANSITION": "等待本轮专属配置完成；若长期不变，核对 MAC YAML 发布。",
+    "MAC_CONFIG_NOT_FOUND": (
+        "核对 MAC 软链接与 current release。" + RUNTIME_REPUBLISH_GUIDANCE
+    ),
+    "MANAGEMENT_VIA_ZTP_TRANSIT": "确认过渡地址的 DHCP holder，等待管理地址切换完成。",
+    "SSH_HOST_KEY_CHANGED": "仅在控制台核对新指纹后执行报告列出的精确刷新命令。",
+    "STALE_ZTP_LOG_AFTER_REBOOT": "等待本次启动产生新的 latest-log，不要复用上一轮完成证据。",
+    "STATIC_PROMOTION_PENDING": (
+        "完成静态清单发布，随后确认旧动态租约退役。" + RUNTIME_REPUBLISH_GUIDANCE
+    ),
+    "YAML_APPLY_FAILED": (
+        "检查报告中的 retained YAML 与 NVUE/ifreload 诊断并修正。"
+        + RUNTIME_REPUBLISH_GUIDANCE
+    ),
+    "ZTP_LOG_NOT_FOUND": "确认设备本轮已启动 ZTP，并检查持久 latest-log 发布。",
+    "ZTP_LOG_POINTER_INVALID": "修复设备端 latest-log 的安全相对链接后重新采集。",
+    "dynamic_address_conflict": "核对 AIR MAC 与活动租约，消除重复地址归属后重新采集。",
+    "HOSTNAME_NOT_OBTAINED": "从控制台核对设备身份与 hostname 命令可用性。",
+    "HOSTNAME_MISMATCH": "核对连接 IP、项目清单 hostname 与实际设备是否属于同一台设备。",
+    "MANAGEMENT_MAC_MISMATCH": "核对远端管理接口 MAC 与项目/DHCP 权威 MAC。",
+    "ZTP_TRANSIT_HOLDER_MAC_MISMATCH": "核对 transit IP 当前租约 holder 与远端接口 MAC。",
+    "NETWORK_ERROR": "核对管理网络连通性和设备 SSH 服务后重试采集。",
+    "SSH_TIMEOUT": "核对路由、防火墙和设备负载，再按报告地址重试 SSH。",
+    "SSH_UNREACHABLE": "核对设备地址、DHCP 租约与管理网络可达性。",
+    "SSH_AUTH_FAILED": "核对项目公钥发布、设备 authorized_keys 与管理端 identity。",
+    "ZTP_MANAGED_IDENTITY_PENDING": (
+        "核对设备型号与 MAC 后，将设备加入项目清单。" + RUNTIME_REPUBLISH_GUIDANCE
+    ),
+    "UNMANAGED_DHCP_DEVICE": (
+        "核对设备型号与 MAC；如决定把它加入当前项目清单，"
+        + RUNTIME_REPUBLISH_GUIDANCE
+    ),
+    "SSH_DISABLED": (
+        "先把设备身份绑定到受支持平台和项目清单，再启用 SSH 采集。"
+        + RUNTIME_REPUBLISH_GUIDANCE
+    ),
+    "SSH_FAILED": "查看报告中的各候选地址错误，核对路由、租约和 SSH 服务后重试。",
+    "AUTHENTICATION_FAILED": "核对项目公钥发布、设备 authorized_keys 与管理端 identity。",
+    "UNREACHABLE": "核对设备地址、DHCP 租约、路由和防火墙后重试采集。",
+    "COLLECTOR_ERROR": "查看采集器错误详情并修复本机依赖；不要据此自动判定设备失败。",
+    "PROGRESS_STALLED": "检查最后证据之后的 DHCP、HTTP 和设备 ZTP 日志，再决定是否重触发。",
+}
+
+
+def issue_remediation(code: str) -> str:
+    return ISSUE_REMEDIATIONS.get(
+        str(code),
+        "查看该设备的 stage 时间戳、采集日志与 current release 后再采取操作。",
+    )
+
+
+class TailRead:
+    """A bounded log snapshot with explicit evidence-loss metadata.
+
+    Iteration preserves the historic ``text, error = result`` call pattern;
+    named fields make a shortened evidence window visible to report writers.
+    """
+
+    __slots__ = (
+        "text", "error", "source", "source_bytes", "read_bytes",
+        "dropped_bytes", "truncated",
+    )
+
+    def __init__(
+        self, text: str, error: str, source: str, source_bytes: int = 0,
+        read_bytes: int = 0, dropped_bytes: int = 0,
+        truncated: bool = False,
+    ) -> None:
+        self.text = text
+        self.error = error
+        self.source = source
+        self.source_bytes = source_bytes
+        self.read_bytes = read_bytes
+        self.dropped_bytes = dropped_bytes
+        self.truncated = truncated
+
+    def __iter__(self):
+        yield self.text
+        yield self.error
+
+    def metadata(self) -> dict[str, Any]:
+        return {
+            "source": self.source,
+            "source_bytes": self.source_bytes,
+            "read_bytes": self.read_bytes,
+            "dropped_bytes": self.dropped_bytes,
+            "truncated": self.truncated,
+        }
+
+
+class MonitorTransientCycleError(Exception):
+    """A failure at one explicitly retryable monitor-cycle boundary."""
+
+    def __init__(self, category: str, message: str) -> None:
+        self.category = str(category)
+        self.message = str(message)
+        super().__init__(self.message)
+
+
+def _bounded_watch_message(message: object) -> str:
+    """Return one credential-free, valid UTF-8 watch-state message."""
+    rendered = str(message or "").splitlines()[0] if str(message or "") else ""
+    rendered = re.sub(
+        r"(?i)\bauthorization\s*:\s*(?:bearer|basic)\s+\S+",
+        "Authorization: [redacted]",
+        rendered,
+    )
+    rendered = re.sub(
+        r"(?i)([a-z][a-z0-9+.-]*://[^/\s:@]+:)[^@\s/]+@",
+        r"\1[redacted]@",
+        rendered,
+    )
+    rendered = re.sub(
+        r"(?i)\b(?:password|passwd|secret|token)\s*[:=]\s*\S+",
+        "[redacted]",
+        rendered,
+    )
+    raw = rendered.encode("utf-8")[:WATCH_MESSAGE_MAX_BYTES]
+    while raw:
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError:
+            raw = raw[:-1]
+    return ""
+
+
+class WatchFailureLogLimiter:
+    """Bound repeated failure logs within this process only."""
+
+    def __init__(self, watch_seconds: int) -> None:
+        self.watch_seconds = max(int(watch_seconds), 1)
+        self.summary_seconds = max(
+            WATCH_FAILURE_SUMMARY_SECONDS,
+            10.0 * max(self.watch_seconds, 5),
+        )
+        self._fingerprint: tuple[str, str] | None = None
+        self._last_emitted = 0.0
+        self._suppressed = 0
+        self._failed = False
+
+    def record_failure(
+        self, category: str, message: object, *, now: float,
+    ) -> str | None:
+        safe = _bounded_watch_message(message)
+        fingerprint = (str(category), safe)
+        self._failed = True
+        if fingerprint != self._fingerprint:
+            self._fingerprint = fingerprint
+            self._last_emitted = now
+            self._suppressed = 0
+            return f"watch cycle failure category={category}: {safe}"
+        if now - self._last_emitted < self.summary_seconds:
+            self._suppressed += 1
+            return None
+        summary = (
+            f"watch cycle failure category={category}: {safe}; "
+            f"suppressed_count={self._suppressed}"
+        )
+        self._last_emitted = now
+        self._suppressed = 0
+        return summary
+
+    def record_recovery(self, *, now: float) -> str | None:
+        del now
+        if not self._failed:
+            return None
+        self._failed = False
+        self._fingerprint = None
+        self._suppressed = 0
+        return "watch cycle recovered"
 
 
 def now_local() -> dt.datetime:
@@ -371,7 +582,32 @@ def run_command(command: list[str], timeout: int = 20) -> dict[str, Any]:
         return {"returncode": 124, "stdout": "", "stderr": str(exc)}
 
 
-def service_state(name: str) -> dict[str, str]:
+def service_runtime_backend() -> ServiceRuntimeBackend:
+    try:
+        return runtime_backend_from_environment(os.environ)
+    except RuntimeContractError as exc:
+        raise ValueError(f"服务运行后端无效：{exc}") from exc
+
+
+def service_state(
+    name: str, *, runtime_backend: ServiceRuntimeBackend | None = None,
+) -> dict[str, str]:
+    backend = runtime_backend or service_runtime_backend()
+    if backend.name == "supervisor":
+        try:
+            active = "active" if backend.is_active(name) else "inactive"
+            enabled_value = backend.is_enabled(name)
+            enabled = (
+                "enabled" if enabled_value is True
+                else "disabled" if enabled_value is False
+                else "not-applicable"
+            )
+        except RuntimeContractError as exc:
+            return {
+                "active": "unknown", "enabled": "not-applicable",
+                "error": str(exc),
+            }
+        return {"active": active, "enabled": enabled, "error": ""}
     active = run_command(["systemctl", "is-active", name], timeout=8)
     enabled = run_command(["systemctl", "is-enabled", name], timeout=8)
     return {
@@ -671,7 +907,11 @@ def runtime_unknown_devices(
                     "DHCP 无法识别该设备平台，因此只分配地址、不下发任何 ZTP 引导；"
                 )
                 + "尚未把 MAC 绑定到项目设备清单。请先核对物理连接/型号，"
-                "更新 02-devices_config.csv 后重新 load。"
+                "更新 02-devices_config.csv 属于 source write；请按当前后端重新发布："
+                "Native/systemd 执行 DAY0-Prepare/11-load.py；Docker/Supervisor 执行 "
+                "infra/docker/deploy.sh deploy，或对与 live 来源身份链匹配且经验证的"
+                "镜像执行 infra/docker/deploy.sh deploy-preloaded <IMAGE_ID>；"
+                "source write 后不得 load。"
                 f" 当前指纹：{identity_detail}"
             ),
             "timestamp": last_seen,
@@ -1149,30 +1389,112 @@ def bind_apache_ztp_identities(
     return claims
 
 
-def read_tail(path: Path, max_bytes: int = 20 * 1024 * 1024) -> tuple[str, str]:
+def read_tail(path: Path, max_bytes: int = 20 * 1024 * 1024) -> TailRead:
+    """Read at most ``max_bytes`` from one regular, single-link log file.
+
+    The initial partial line is discarded when a tail starts mid-file.  The
+    returned sizes describe that exact snapshot, so callers must not claim the
+    requested time window was complete when ``truncated`` is true.
+    """
+    source = str(path)
+    descriptor = -1
+    if max_bytes <= 0:
+        return TailRead("", "max_bytes must be positive", source)
     try:
-        with path.open("rb") as handle:
-            size = path.stat().st_size
-            if size > max_bytes:
-                handle.seek(-max_bytes, os.SEEK_END)
-                handle.readline()
-            return handle.read().decode("utf-8", errors="replace"), ""
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(path, flags)
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            raise OSError("log source must be a single-link regular file")
+        source_bytes = before.st_size
+        offset = max(0, source_bytes - max_bytes)
+        os.lseek(descriptor, offset, os.SEEK_SET)
+        remaining = min(max_bytes, source_bytes - offset)
+        chunks = []
+        while remaining:
+            chunk = os.read(descriptor, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        after = os.fstat(descriptor)
+        if (
+            (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino)
+            or not stat.S_ISREG(after.st_mode)
+            or after.st_nlink != 1
+            or after.st_size < before.st_size
+        ):
+            raise OSError("log source changed unsafely while reading")
+        truncated = offset > 0
+        retained = raw
+        if truncated:
+            separator = raw.find(b"\n")
+            retained = raw[separator + 1:] if separator >= 0 else b""
+        return TailRead(
+            retained.decode("utf-8", errors="replace"),
+            "",
+            source,
+            source_bytes=source_bytes,
+            read_bytes=len(raw),
+            dropped_bytes=source_bytes - len(retained),
+            truncated=truncated,
+        )
     except OSError as exc:
-        return "", str(exc)
+        return TailRead("", str(exc), source)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
-def collect_dhcp(since_minutes: int, fixture: Optional[Path] = None) -> tuple[str, str]:
+def _tail_with_error(result: TailRead, error: str) -> TailRead:
+    return TailRead(
+        result.text,
+        "; ".join(filter(None, [error, result.error])),
+        result.source,
+        result.source_bytes,
+        result.read_bytes,
+        result.dropped_bytes,
+        result.truncated,
+    )
+
+
+def collect_dhcp(
+    since_minutes: int, fixture: Optional[Path] = None, *,
+    runtime_backend: ServiceRuntimeBackend | None = None,
+) -> TailRead:
     if fixture:
         return read_tail(fixture)
+    backend = runtime_backend or service_runtime_backend()
+    if backend.name == "supervisor":
+        try:
+            text = backend.read_log("isc-dhcp-server")
+            size = len(text.encode("utf-8", errors="replace"))
+            return TailRead(
+                text, "", "supervisor:isc-dhcp-server",
+                source_bytes=size, read_bytes=size,
+            )
+        except RuntimeContractError as exc:
+            raise MonitorTransientCycleError(
+                "runtime-transport", str(exc),
+            ) from exc
     result = run_command([
         "journalctl", "-u", "isc-dhcp-server", "--since",
         f"{since_minutes} minutes ago", "--no-pager", "-o", "short-iso",
     ], timeout=30)
     if result["returncode"] == 0:
-        return result["stdout"], result["stderr"]
+        text = result["stdout"]
+        size = len(text.encode("utf-8", errors="replace"))
+        return TailRead(
+            text, result["stderr"], "journalctl:isc-dhcp-server",
+            source_bytes=size, read_bytes=size,
+        )
     fallback = Path("/var/log/syslog")
-    text, error = read_tail(fallback)
-    return text, "; ".join(filter(None, [result["stderr"].strip(), error]))
+    return _tail_with_error(read_tail(fallback), result["stderr"].strip())
 
 
 def set_stage(device: dict[str, Any], name: str, status: str, detail: str,
@@ -1446,6 +1768,29 @@ printf '__REMOTE_TIME_END_END__\n'
 '''
 
 
+REMOTE_IDENTITY_PROBE_SCRIPT = r'''
+set +e
+printf '__HOSTNAME_BEGIN__\n'
+hostname 2>/dev/null || true
+printf '__HOSTNAME_END__\n'
+printf '__ETH0_MAC_BEGIN__\n'
+cat /sys/class/net/eth0/address 2>/dev/null || true
+printf '__ETH0_MAC_END__\n'
+printf '__ETH1_MAC_BEGIN__\n'
+cat /sys/class/net/eth1/address 2>/dev/null || true
+printf '__ETH1_MAC_END__\n'
+printf '__INTERFACE_MACS_BEGIN__\n'
+for mac_file in /sys/class/net/*/address; do
+    [ -f "$mac_file" ] || continue
+    interface=${mac_file%/address}
+    interface=${interface##*/}
+    mac=$(cat "$mac_file" 2>/dev/null || true)
+    [ -n "$interface" ] && [ -n "$mac" ] && printf '%s=%s\n' "$interface" "$mac"
+done
+printf '__INTERFACE_MACS_END__\n'
+'''
+
+
 def marker(text: str, name: str) -> str:
     match = re.search(
         rf"__{re.escape(name)}_BEGIN__\n(.*?)__{re.escape(name)}_END__", text, re.S
@@ -1467,6 +1812,35 @@ def parse_remote_interface_macs(text: str) -> dict[str, str]:
         ):
             parsed[interface] = mac_plain
     return parsed
+
+
+def static_secondary_probe_error(
+    device: dict[str, Any], candidate: str, result: dict[str, Any],
+) -> str:
+    """Return a bounded reason unless a static alternate belongs to this device."""
+    if result.get("returncode") != 0:
+        return str(result.get("stderr") or "SSH failed").strip() or "SSH failed"
+    remote_hostname = marker(str(result.get("stdout") or ""), "HOSTNAME")
+    remote_short = remote_hostname.splitlines()[0].strip().split(".", 1)[0].casefold() \
+        if remote_hostname else ""
+    expected_short = str(device.get("hostname") or "").strip().split(
+        ".", 1,
+    )[0].casefold()
+    if not remote_short or (expected_short and remote_short != expected_short):
+        return "hostname mismatch"
+    expected_interface, expected_mac = (device.get("candidate_identity") or {}).get(
+        candidate, ("", ""),
+    )
+    expected_interface = str(expected_interface or "")
+    expected_mac = normalize_mac(str(expected_mac or ""))
+    if expected_interface not in {"eth0", "eth1"} or not expected_mac:
+        return "missing static management identity"
+    remote_mac = normalize_mac(marker(
+        str(result.get("stdout") or ""), expected_interface.upper() + "_MAC",
+    ))
+    if remote_mac != expected_mac:
+        return f"{expected_interface} MAC mismatch"
+    return ""
 
 
 def host_key_commands(device: dict[str, Any], stderr: str, known_hosts: Path) -> list[str]:
@@ -1522,7 +1896,7 @@ def collect_switch(device: dict[str, Any], timeout: int, identity: Optional[Path
             "refreshed_host_key_targets": [], "host_key_commands": [],
         }
 
-    def connect(host: str) -> dict[str, Any]:
+    def connect(host: str, remote_script: str = REMOTE_SCRIPT) -> dict[str, Any]:
         target = f"{device['ssh_user']}@{host}"
         command = [
             "ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={timeout}",
@@ -1533,8 +1907,10 @@ def collect_switch(device: dict[str, Any], timeout: int, identity: Optional[Path
             command += ["-i", str(identity)]
         # OpenSSH concatenates arguments into one remote shell command. Send the
         # script as a single safely quoted argument so `sh -c` receives it intact.
-        remote_script = REMOTE_SCRIPT.replace("__MAC_PLAIN__", device["mac_plain"])
-        command += [target, "sh -c " + shlex.quote(remote_script)]
+        rendered_script = remote_script.replace(
+            "__MAC_PLAIN__", device["mac_plain"],
+        )
+        command += [target, "sh -c " + shlex.quote(rendered_script)]
         local_started = time.time()
         result = run_command(command, timeout=timeout + 12)
         result["local_started_epoch"] = local_started
@@ -1549,7 +1925,12 @@ def collect_switch(device: dict[str, Any], timeout: int, identity: Optional[Path
     refreshed_targets: list[str] = []
     attempt_errors: list[str] = []
     attempts: list[dict[str, str]] = []
-    for candidate in device.get("ssh_ips", [device["ip"]]):
+    candidates = list(dict.fromkeys(
+        candidate for candidate in device.get("ssh_ips", [device["ip"]])
+        if candidate
+    ))
+    connected_index = -1
+    for index, candidate in enumerate(candidates):
         if not candidate:
             continue
         result = connect(candidate)
@@ -1565,12 +1946,35 @@ def collect_switch(device: dict[str, Any], timeout: int, identity: Optional[Path
             host_key_refreshed = result["returncode"] == 0
         if result["returncode"] == 0:
             connected_ip = candidate
+            connected_index = index
             attempts.append({"ip": candidate, "status": "success", "error": ""})
             break
         attempt_errors.append(f"{candidate}: {stderr or 'SSH failed'}")
         attempts.append({
             "ip": candidate, "status": "failed", "error": stderr or "SSH failed",
         })
+    if connected_ip:
+        dynamic_addresses = set(device.get("dynamic_lease_ips") or [])
+        transit_addresses = set(device.get("ztp_transport_ips") or [])
+        static_identity = device.get("candidate_identity") or {}
+        for candidate in candidates[connected_index + 1:]:
+            if (
+                device.get("dynamic_dhcp") or device.get("unbound_identity")
+                or candidate in dynamic_addresses or candidate in transit_addresses
+                or candidate not in static_identity
+            ):
+                continue
+            probe = connect(candidate, REMOTE_IDENTITY_PROBE_SCRIPT)
+            error = static_secondary_probe_error(device, candidate, probe)
+            if error:
+                attempt_errors.append(f"{candidate}: {error}")
+                attempts.append({
+                    "ip": candidate, "status": "failed", "error": error,
+                })
+            else:
+                attempts.append({
+                    "ip": candidate, "status": "success", "error": "",
+                })
     stderr = result["stderr"].strip() if connected_ip else "\n".join(attempt_errors)
     lowered = stderr.lower()
     kind = "ok" if result["returncode"] == 0 else "ssh_failed"
@@ -2133,6 +2537,57 @@ def analyze_switch(
     device["ztp_log_stage_names"] = sorted(log_stage_names)
 
 
+def annotate_progress_stall(
+    device: dict[str, Any], *, now: dt.datetime,
+    threshold_minutes: int = DEFAULT_STALL_WARNING_MINUTES,
+) -> None:
+    """Add an evidence-based warning without changing any stage to failed."""
+    issues = device.setdefault("issues", [])
+    issues[:] = [
+        item for item in issues if item.get("code") != "PROGRESS_STALLED"
+    ]
+    statuses = {
+        str(stage_value.get("status") or "")
+        for stage_value in (device.get("stages") or {}).values()
+        if isinstance(stage_value, dict)
+    }
+    if "failed" in statuses or (
+        (device.get("stages") or {}).get("complete", {}).get("status")
+        in {"success", "warning"}
+    ):
+        return
+    candidates = []
+    for stage_value in (device.get("stages") or {}).values():
+        if isinstance(stage_value, dict):
+            parsed = _aware_event_time(stage_value.get("timestamp"))
+            if parsed is not None:
+                candidates.append(parsed)
+    for event in device.get("events") or []:
+        if isinstance(event, dict):
+            parsed = _aware_event_time(event.get("timestamp"))
+            if parsed is not None:
+                candidates.append(parsed)
+    if not candidates:
+        return
+    last_evidence = max(candidates)
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("stall warning 的 now 必须包含时区")
+    elapsed = max(0, int((now - last_evidence).total_seconds() // 60))
+    if elapsed < max(1, int(threshold_minutes)):
+        return
+    issues.append({
+        "code": "PROGRESS_STALLED",
+        "severity": "warning",
+        "message": (
+            f"最后一条可解析进度证据已过去 {elapsed} 分钟；"
+            "这是观察告警，不会自动判定设备失败。"
+        ),
+        "timestamp": now.isoformat(timespec="seconds"),
+        "last_evidence_at": last_evidence.isoformat(timespec="seconds"),
+        "elapsed_minutes": elapsed,
+    })
+
+
 def finalize_device(device: dict[str, Any]) -> None:
     statuses = [device["stages"][name]["status"] for name in STAGE_NAMES]
     try:
@@ -2167,13 +2622,33 @@ def md_cell(value: Any) -> str:
 
 def render_markdown(report: dict[str, Any]) -> str:
     services = report["services"]
+    evidence_window = report.get("evidence_window") or {}
+    earliest = str(evidence_window.get("earliest_observed_at") or "无可解析时间戳")
     lines = [
         f"# ZTP 监控报告：{report['project']}", "",
         f"生成时间：{report['generated_at']}  ",
-        f"观察窗口：最近 {report['since_minutes']} 分钟", "",
+        f"Release ID：{report.get('release_id', '—')}  ",
+        f"Release 生成时间：{report.get('release_generated_at', '—')}  ",
+        f"观察窗口（请求）：最近 {report['since_minutes']} 分钟  ",
+        f"实际最早证据：{earliest}", "",
         "## 管理服务", "",
         "| 服务 | active | enabled |", "|---|---|---|",
     ]
+    if evidence_window.get("incomplete"):
+        lines[8:8] = [
+            "⚠️ **证据不完整**：至少一个日志超过读取上限；"
+            "请求时间窗早期的事件可能未包含在本报告中。",
+            "",
+        ]
+        for name, metadata in (evidence_window.get("sources") or {}).items():
+            if not isinstance(metadata, dict) or not metadata.get("truncated"):
+                continue
+            read_mib = int(metadata.get("read_bytes") or 0) / (1024 * 1024)
+            source_mib = int(metadata.get("source_bytes") or 0) / (1024 * 1024)
+            lines[9:9] = [
+                f"- {name}：读取最后 {read_mib:.1f} MiB / "
+                f"源文件 {source_mib:.1f} MiB。",
+            ]
     for name, value in services.items():
         lines.append(f"| {name} | {md_cell(value['active'])} | {md_cell(value['enabled'])} |")
     lines += ["", "## 设备进度", "",
@@ -2203,6 +2678,7 @@ def render_markdown(report: dict[str, Any]) -> str:
                 lines += ["  - 核对设备控制台显示的新指纹后执行：", "", "```bash"]
                 lines.extend(issue["commands"])
                 lines += ["```", ""]
+            lines.append(f"  - 下一步：{issue_remediation(issue['code'])}")
     if report.get("unmatched_interactions"):
         lines += ["", "## 未在设备清单中匹配的 ZTP 交互", "",
                   "| 标识 | 来源 | 事件 | 最后时间 |", "|---|---|---|---|"]
@@ -2213,6 +2689,19 @@ def render_markdown(report: dict[str, Any]) -> str:
         lines += ["", "## 采集警告", ""]
         lines.extend(f"- {item}" for item in report["collection_errors"])
     return "\n".join(lines).rstrip() + "\n"
+
+
+def earliest_observed_timestamp(*event_groups: list[dict[str, Any]]) -> str:
+    """Return the normalized earliest timestamp present in retained evidence."""
+    observed = []
+    for events in event_groups:
+        for event in events:
+            parsed = _aware_event_time(event.get("timestamp"))
+            if parsed is not None:
+                observed.append(parsed)
+    if not observed:
+        return ""
+    return min(observed).isoformat(timespec="seconds")
 
 
 def snapshot_device_state(report: dict[str, Any]) -> dict[str, Any]:
@@ -2988,7 +3477,8 @@ def write_report(report: dict[str, Any], output_root: Path,
     for name, content in (server_logs or {}).items():
         (server_dir / f"{name}.log").write_text(content, encoding="utf-8")
     (run_dir / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    (run_dir / "report.md").write_text(render_markdown(report), encoding="utf-8")
+    markdown = render_markdown(report) if "services" in report else ""
+    (run_dir / "report.md").write_text(markdown, encoding="utf-8")
     with (run_dir / "devices.csv").open("w", newline="", encoding="utf-8") as handle:
         fields = ["hostname", "type", "ip", "mac", "ztp_round", "overall", "progress"] + list(STAGE_NAMES) + ["issues"]
         writer = csv.DictWriter(handle, fieldnames=fields)
@@ -3015,7 +3505,9 @@ def write_report(report: dict[str, Any], output_root: Path,
         temporary.replace(latest)
     except OSError as exc:
         shutil.rmtree(run_dir, ignore_errors=True)
-        raise ValueError(f"无法原子更新 ZTP latest：{exc}") from exc
+        raise MonitorTransientCycleError(
+            "report-publication", f"无法原子更新 ZTP latest：{exc}",
+        ) from exc
 
     if unchanged and previous_dir is not None and previous_dir != run_dir:
         shutil.rmtree(previous_dir)
@@ -3037,33 +3529,35 @@ def write_report(report: dict[str, Any], output_root: Path,
 def monitor_once(args: argparse.Namespace, project: Path) -> Path:
     scope = getattr(args, "scope", "all")
     output_root = args.output_dir or ZTP_STATUS_DIR
+    offline = bool(getattr(args, "offline", False))
+    runtime_backend = None if offline else service_runtime_backend()
+    release = load_release_identity(project)
     previous_report = _previous_report(output_root)
     switch_timezone = project_timezone(project)
+    air_json = args.air_json if offline else ACTIVE_AIR_JSON
+    dhcp_leases = args.dhcp_leases
     identity_devices = read_devices(
         project / "02-devices_config.csv",
         "all",
-        air_json=ACTIVE_AIR_JSON if ACTIVE_AIR_JSON.is_file() else None,
-        dhcp_leases=getattr(
-            args, "dhcp_leases", Path("/var/lib/dhcp/dhcpd.leases"),
-        ),
+        air_json=air_json if air_json and air_json.is_file() else None,
+        dhcp_leases=dhcp_leases,
     )
-    dhcp_text, dhcp_error = collect_dhcp(args.since, args.dhcp_log)
+    dhcp_read = collect_dhcp(
+        args.since, args.dhcp_log, runtime_backend=runtime_backend,
+    )
+    dhcp_text, dhcp_error = dhcp_read
     dhcp_events = parse_dhcp(dhcp_text)
     apply_static_runtime_lease_fallbacks(
         identity_devices,
         project / "02-devices_config.csv",
         dhcp_text,
-        dhcp_leases=getattr(
-            args, "dhcp_leases", Path("/var/lib/dhcp/dhcpd.leases"),
-        ),
+        dhcp_leases=dhcp_leases,
     )
     identity_devices.extend(runtime_unknown_devices(
         project / "02-devices_config.csv",
         dhcp_text,
         scope=scope,
-        dhcp_leases=getattr(
-            args, "dhcp_leases", Path("/var/lib/dhcp/dhcpd.leases"),
-        ),
+        dhcp_leases=dhcp_leases,
     ))
     apply_dynamic_dhcp_addresses(identity_devices, dhcp_events)
     if scope == "air":
@@ -3081,7 +3575,8 @@ def monitor_once(args: argparse.Namespace, project: Path) -> Path:
     if not devices:
         raise ValueError(f"监控范围 --scope {scope} 没有匹配任何设备")
     previous_report = merge_previous_unbound_identities(previous_report, devices)
-    apache_text, apache_error = read_tail(args.apache_log)
+    apache_read = read_tail(args.apache_log)
+    apache_text, apache_error = apache_read
     apache_events = parse_apache(apache_text)
     cutoff = now_local() - dt.timedelta(minutes=args.since)
     recent_apache = []
@@ -3174,18 +3669,63 @@ def monitor_once(args: argparse.Namespace, project: Path) -> Path:
     )
     assign_stage_success_indices(devices, previous_report)
     for device in devices:
+        annotate_progress_stall(
+            device, now=now_local(),
+            threshold_minutes=getattr(
+                args, "stall_warning_minutes", DEFAULT_STALL_WARNING_MINUTES,
+            ),
+        )
         finalize_device(device)
+    earliest_evidence = earliest_observed_timestamp(
+        dhcp_events, recent_apache,
+    )
+    evidence_sources = {
+        "dhcp": dhcp_read.metadata(),
+        "apache": apache_read.metadata(),
+    }
+    truncation_warnings = [
+        f"{name} 日志已截断：读取 {metadata['read_bytes']} / "
+        f"{metadata['source_bytes']} 字节，证据时间窗可能短于请求值"
+        for name, metadata in evidence_sources.items()
+        if metadata.get("truncated")
+    ]
+    if offline:
+        services = {
+            name: {"active": "offline", "enabled": "not-applicable", "error": ""}
+            for name in ("apache2", "isc-dhcp-server")
+        }
+    else:
+        assert runtime_backend is not None
+        services = {
+            "apache2": service_state(
+                "apache2", runtime_backend=runtime_backend,
+            ),
+            "isc-dhcp-server": service_state(
+                "isc-dhcp-server", runtime_backend=runtime_backend,
+            ),
+        }
     report = {
         "schema_version": 1, "project": project.name, "scope": scope,
+        "mode": "offline" if offline else "live",
+        "release_id": release["release_id"],
+        "release_generated_at": release["generated_at"],
         "generated_at": now_local().isoformat(timespec="seconds"),
         "since_minutes": args.since,
-        "services": {"apache2": service_state("apache2"),
-                     "isc-dhcp-server": service_state("isc-dhcp-server")},
+        "evidence_window": {
+            "requested_minutes": args.since,
+            "earliest_observed_at": earliest_evidence,
+            "incomplete": any(
+                metadata.get("truncated") for metadata in evidence_sources.values()
+            ),
+            "sources": evidence_sources,
+        },
+        "services": services,
         "devices": devices,
         "unmatched_interactions": unmatched[-200:],
         "collection_errors": [item for item in (
             f"DHCP 日志: {dhcp_error}" if dhcp_error else "",
             f"Apache 日志: {apache_error}" if apache_error else "",
+            *truncation_warnings,
         ) if item],
     }
     return write_report(
@@ -3695,11 +4235,328 @@ def process_ready_completion_handoffs(
 
 
 def remove_own_pid_file(pid_file: Path) -> None:
+    """Remove only the still-identical PID record owned by this process."""
     try:
-        if int(pid_file.read_text(encoding="utf-8").strip()) == os.getpid():
+        with monitor_pid_lock(pid_file):
+            before = pid_file.lstat()
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+                return
+            if int(pid_file.read_text(encoding="utf-8").strip()) != os.getpid():
+                return
+            after = pid_file.lstat()
+            if (
+                not stat.S_ISREG(after.st_mode)
+                or after.st_nlink != 1
+                or (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino)
+            ):
+                return
             pid_file.unlink(missing_ok=True)
-    except (OSError, ValueError):
+    except (OSError, ValueError, RuntimeContractError):
         pass
+
+
+def _watch_state_bytes(payload: dict[str, Any]) -> bytes:
+    return (
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n"
+    ).encode("utf-8")
+
+
+def _replace_bytes_durably(path: Path, content: bytes) -> None:
+    descriptor = -1
+    temporary: Path | None = None
+    try:
+        descriptor, raw_name = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent,
+        )
+        temporary = Path(raw_name)
+        os.fchmod(descriptor, 0o644)
+        offset = 0
+        while offset < len(content):
+            offset += os.write(descriptor, content[offset:])
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+
+
+def _write_watch_state_atomic(path: Path, payload: dict[str, Any]) -> None:
+    """Publish the watch sidecar atomically and roll back failed durability."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    previous: bytes | None = None
+    if path.exists() or path.is_symlink():
+        metadata = path.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise OSError(f"unsafe existing watch-state path: {path}")
+        previous = path.read_bytes()
+    published = False
+    directory_fd = -1
+    try:
+        _replace_bytes_durably(path, _watch_state_bytes(payload))
+        published = True
+        directory_fd = os.open(
+            path.parent,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+        os.fsync(directory_fd)
+    except BaseException:
+        if published:
+            try:
+                if previous is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    _replace_bytes_durably(path, previous)
+                if directory_fd < 0:
+                    directory_fd = os.open(
+                        path.parent,
+                        os.O_RDONLY
+                        | getattr(os, "O_DIRECTORY", 0)
+                        | getattr(os, "O_CLOEXEC", 0),
+                    )
+                os.fsync(directory_fd)
+            except OSError:
+                pass
+        raise
+    finally:
+        if directory_fd >= 0:
+            os.close(directory_fd)
+
+
+def _read_bounded_regular_text(
+    path: Path, *, label: str, max_bytes: int = MAX_RUNTIME_METADATA_BYTES,
+) -> str:
+    """Read immutable runtime metadata from one no-follow, stable descriptor."""
+    descriptor = -1
+    try:
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(path, flags)
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or before.st_size > max_bytes
+        ):
+            raise ValueError(
+                f"{label} 必须是 single-link 普通文件且不超过 {max_bytes} 字节: {path}"
+            )
+        remaining = before.st_size
+        chunks = []
+        while remaining:
+            chunk = os.read(descriptor, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        after = os.fstat(descriptor)
+        identity = lambda item: (
+            item.st_dev, item.st_ino, item.st_size,
+            getattr(item, "st_mtime_ns", int(item.st_mtime * 1_000_000_000)),
+        )
+        if identity(after) != identity(before) or remaining:
+            raise ValueError(f"{label} 在读取期间发生变化: {path}")
+        try:
+            return b"".join(chunks).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"{label} 不是 UTF-8 文本: {path}") from exc
+    except OSError as exc:
+        raise ValueError(f"无法安全读取{label}: {path}: {exc}") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _require_exact_runtime_link(
+    link: Path, target: Path, *, label: str, target_directory: bool = False,
+) -> None:
+    """Require setup's direct relative link, rejecting equivalent detours."""
+    try:
+        metadata = link.lstat()
+        target_metadata = target.lstat()
+        raw_target = os.readlink(link)
+        resolved = link.resolve(strict=True)
+        expected_target = target.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError(f"活动项目身份无效（{label}）: {exc}") from exc
+    expected_raw = os.path.relpath(target, link.parent)
+    target_ok = (
+        stat.S_ISDIR(target_metadata.st_mode)
+        if target_directory else
+        stat.S_ISREG(target_metadata.st_mode) and target_metadata.st_nlink == 1
+    )
+    if (
+        not stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or raw_target != expected_raw
+        or resolved != expected_target
+        or not target_ok
+    ):
+        raise ValueError(
+            f"活动项目身份无效（{label}）；expected={expected_raw}, actual={raw_target}"
+        )
+
+
+def require_active_project(project: Path) -> None:
+    """Bind live logs and publications to the exact setup-managed project."""
+    try:
+        canonical = project.resolve(strict=True)
+        day0 = HERE.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError(f"无法解析活动项目身份: {exc}") from exc
+    if canonical.parent != day0 or canonical.name == "template":
+        raise ValueError(f"live 监控项目不属于 DAY0-Prepare: {canonical}")
+    manifest_text = _read_bounded_regular_text(
+        SETUP_MANIFEST, label="setup manifest",
+    )
+    lines = manifest_text.splitlines()
+    expected_header = f"# setup manifest — proj: {canonical}"
+    if not lines or lines[0] != expected_header:
+        active = lines[0] if lines else "missing"
+        raise ValueError(
+            f"请求项目不是 active-project；requested={canonical}, active={active}"
+        )
+    manifest_links = set(lines[1:])
+    required_links = {str(ACTIVE_INVENTORY), str(ZTP_STATUS_DIR)}
+    if not required_links.issubset(manifest_links):
+        raise ValueError("活动项目身份无效：setup manifest 缺少监控关键链接")
+    _require_exact_runtime_link(
+        ACTIVE_INVENTORY,
+        project / "02-devices_config.csv",
+        label="active inventory",
+    )
+    _require_exact_runtime_link(
+        ZTP_STATUS_DIR,
+        project / "99-output-ztp",
+        label="status publication",
+        target_directory=True,
+    )
+
+
+def load_release_identity(project: Path) -> dict[str, str]:
+    """Load the content-addressed release named by a monitor report."""
+    path = project / "99-output-ztp/current-release.json"
+    text = _read_bounded_regular_text(path, label="current release")
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"current release JSON 无效: {path}: {exc}") from exc
+    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        raise ValueError(f"current release schema 无效: {path}")
+    release_id = str(payload.get("release_id") or "")
+    generated_at = str(payload.get("generated_at") or "")
+    if payload.get("project") != project.name:
+        raise ValueError(
+            f"current release 项目身份不匹配: expected={project.name}, "
+            f"actual={payload.get('project')!r}"
+        )
+    if payload.get("validation") != "passed" or not re.fullmatch(
+        r"[0-9a-f]{20}", release_id,
+    ):
+        raise ValueError(f"current release 身份或 validation 无效: {path}")
+    try:
+        generated = dt.datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"current release generated_at 无效: {generated_at!r}") from exc
+    if generated.tzinfo is None or generated.utcoffset() is None:
+        raise ValueError(f"current release generated_at 必须包含时区: {generated_at!r}")
+    return {"release_id": release_id, "generated_at": generated_at}
+
+
+def _governed_watch_identity(
+    args: argparse.Namespace, project: Path,
+) -> tuple[str, ...]:
+    """Capture the live setup and exact four per-cycle governed inputs."""
+    require_active_project(project)
+    release = load_release_identity(project)
+    paths = (
+        SETUP_MANIFEST,
+        project / "01-global.yaml",
+        project / "02-devices_config.csv",
+        project / "99-output-ztp/current-release.json",
+        ACTIVE_AIR_JSON,
+    )
+    digests = tuple(
+        hashlib.sha256(
+            _read_bounded_regular_text(path, label=f"monitor identity {path.name}")
+            .encode("utf-8")
+        ).hexdigest()
+        for path in paths
+    )
+    try:
+        active_link = os.readlink(ACTIVE_INVENTORY)
+        active_resolved = str(ACTIVE_INVENTORY.resolve(strict=True))
+    except OSError as exc:
+        raise ValueError(f"活动 inventory 身份无效: {exc}") from exc
+    return (
+        str(project.resolve(strict=True)), str(args.scope),
+        release["release_id"], active_link, active_resolved, *digests,
+    )
+
+
+def _path_within(path: Path, root: Path) -> bool:
+    try:
+        os.path.commonpath((str(path), str(root))) == str(root)
+    except ValueError:
+        return False
+    return os.path.commonpath((str(path), str(root))) == str(root)
+
+
+def validate_monitor_mode(args: argparse.Namespace, project: Path) -> None:
+    """Separate active live observation from explicit, inert offline analysis."""
+    if not args.offline:
+        if args.dhcp_log is not None or args.air_json is not None:
+            raise ValueError("自定义 DHCP/AIR 证据必须使用 --offline")
+        args.apache_log = DEFAULT_APACHE_LOG
+        args.dhcp_leases = Path("/var/lib/dhcp/dhcpd.leases")
+        require_active_project(project)
+        if args.watch:
+            args._validated_live_watch = True
+        return
+
+    missing = [
+        option for option, value in (
+            ("--apache-log", args.apache_log),
+            ("--dhcp-log", args.dhcp_log),
+            ("--dhcp-leases", args.dhcp_leases),
+            ("--air-json", args.air_json),
+            ("--output-dir", args.output_dir),
+        ) if value is None
+    ]
+    if missing or not args.no_ssh:
+        detail = ", ".join(missing + ([] if args.no_ssh else ["--no-ssh"]))
+        raise ValueError(f"--offline 必须显式指定 {detail}")
+    if args.watch or args.generate_html or completion_handoff_requested(args):
+        raise ValueError("--offline 仅允许一次性分析，不允许 watch/HTML/完成交接")
+    live_root = ZTP_STATUS_DIR.resolve(strict=False)
+    output = args.output_dir.expanduser().resolve(strict=False)
+    if _path_within(output, live_root):
+        raise ValueError("--offline 输出不得位于 live ztp/status 发布目录")
+    for label, path in (
+        ("Apache log", args.apache_log),
+        ("DHCP log", args.dhcp_log),
+        ("DHCP leases", args.dhcp_leases),
+        ("AIR JSON", args.air_json),
+    ):
+        try:
+            metadata = path.lstat()
+        except OSError as exc:
+            raise ValueError(f"--offline {label} 无法读取: {path}: {exc}") from exc
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise ValueError(f"--offline {label} 必须是 single-link 普通文件: {path}")
 
 
 def resolve_project(value: str) -> Path:
@@ -3712,18 +4569,47 @@ def resolve_project(value: str) -> Path:
     return candidate
 
 
+def completion_handoff_requested(args: argparse.Namespace) -> bool:
+    """Support older embedders while exposing one canonical CLI destination."""
+    return bool(getattr(
+        args, "collect_on_complete", getattr(args, "exit_on_complete", False),
+    ))
+
+
+def _positive_minutes(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("必须至少为 1 分钟")
+    return parsed
+
+
 def parser() -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser(description="关联 DHCP、Apache 与交换机日志，生成逐设备 ZTP 进度报告")
+    result = argparse.ArgumentParser(
+        description="关联 DHCP、Apache 与交换机日志，生成逐设备 ZTP 进度报告",
+        epilog="完整、受支持的操作流程见仓库根目录 USER_MANUAL.md。",
+    )
     result.add_argument("project", help="项目名或项目目录")
     result.add_argument("--since", type=int, default=1440, help="服务端日志观察窗口（分钟，默认 1440）")
     result.add_argument("--watch", type=int, metavar="SECONDS", help="持续监控间隔；未指定则只运行一次")
+    result.add_argument(
+        "--stall-warning-minutes", type=_positive_minutes,
+        default=DEFAULT_STALL_WARNING_MINUTES, metavar="MINUTES",
+        help="最后一条可解析进度证据超过此时间时仅发出 warning（默认 60）",
+    )
     result.add_argument("--output-dir", type=Path, help="报告根目录（默认 /var/www/html/ztp/status）")
-    result.add_argument("--apache-log", type=Path, default=DEFAULT_APACHE_LOG)
+    result.add_argument(
+        "--offline", action="store_true",
+        help="仅用显式本地证据做一次性分析；不读取 active runtime 或连接设备",
+    )
+    result.add_argument("--apache-log", type=Path)
     result.add_argument("--dhcp-log", type=Path, help="从指定文件读取 DHCP 日志（测试/离线分析）")
     result.add_argument(
         "--dhcp-leases", type=Path,
-        default=Path("/var/lib/dhcp/dhcpd.leases"),
         help="ISC DHCP lease 文件（用于解析 AIR-only 动态地址）",
+    )
+    result.add_argument(
+        "--air-json", type=Path,
+        help="离线分析使用的显式 AIR inventory JSON",
     )
     result.add_argument("--no-ssh", action="store_true", help="只分析管理服务器日志，不连接交换机")
     result.add_argument("--ssh-timeout", type=int, default=8)
@@ -3757,9 +4643,15 @@ def parser() -> argparse.ArgumentParser:
         help="HTML 生成脚本路径（默认 /var/www/html/monitor/generate-monitor-html.py）",
     )
     result.add_argument(
-        "--exit-on-complete", action="store_true",
-        help=("兼容参数：每个采集类型各自全部达到 100%% 后独立运行一次 cron.sh "
+        "--collect-on-complete", action="store_true",
+        dest="collect_on_complete",
+        help=("每个采集类型各自全部达到 100%% 后独立运行一次 cron.sh "
               "并继续监控；失败仅重试该类型"),
+    )
+    result.add_argument(
+        "--exit-on-complete", action="store_true",
+        dest="collect_on_complete",
+        help="废弃别名；等价于 --collect-on-complete",
     )
     result.add_argument(
         "--collector-timeout", type=int, default=1200, metavar="SECONDS",
@@ -3768,44 +4660,199 @@ def parser() -> argparse.ArgumentParser:
     return result
 
 
+def monitor_signal_handler(signum: int, _frame: object) -> None:
+    if signum == signal.SIGINT:
+        raise KeyboardInterrupt
+    if signum == signal.SIGTERM:
+        raise SystemExit(128 + signal.SIGTERM)
+
+
+def _watch_state_payload(
+    *, project: Path, scope: str, state: str, consecutive_failures: int,
+    last_success_at: str, last_failure_at: str, next_retry_at: str,
+    category: str, message: object,
+) -> dict[str, Any]:
+    return {
+        "schema_version": WATCH_STATE_SCHEMA,
+        "project": project.name,
+        "scope": scope,
+        "pid": os.getpid(),
+        "state": state,
+        "consecutive_failures": consecutive_failures,
+        "last_success_at": last_success_at,
+        "last_failure_at": last_failure_at,
+        "next_retry_at": next_retry_at,
+        "category": str(category),
+        "message": _bounded_watch_message(message),
+    }
+
+
+def _best_effort_watch_state(path: Path, payload: dict[str, Any]) -> None:
+    try:
+        _write_watch_state_atomic(path, payload)
+    except OSError as exc:
+        log(
+            f"[WARN] watch-state sidecar 写入失败：{_bounded_watch_message(exc)}",
+            file=sys.stderr,
+        )
+
+
+def _best_effort_failure_html(args: argparse.Namespace) -> None:
+    if not args.generate_html:
+        return
+    try:
+        generate_monitor_html(args.html_script, args.scope)
+    except Exception as exc:
+        log(
+            f"[WARN] unhealthy monitor.html 刷新失败：{_bounded_watch_message(exc)}",
+            file=sys.stderr,
+        )
+
+
+def _next_monitor_control_state(current: str = "running") -> str:
+    try:
+        return monitor_control_state()
+    except StopIteration:
+        # A finite embedded state provider has no new decision; retain the
+        # last explicit state rather than turning iterator exhaustion into a
+        # monitor-cycle failure.
+        return current
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     args = parser().parse_args(argv)
+    signal.signal(signal.SIGINT, monitor_signal_handler)
+    signal.signal(signal.SIGTERM, monitor_signal_handler)
     pause_announced = False
     handoff_retry_signatures: dict[
         str, tuple[tuple[str, str, str], ...]
     ] = {}
     handoff_retry_after: dict[str, float] = {}
+    output_root = args.output_dir or ZTP_STATUS_DIR
+    watch_state_path: Path | None = None
+    project: Path | None = None
+    initialized = False
+    watch_mode = args.watch is not None
+    watch_seconds = max(args.watch or 5, 5)
+    last_success_at = ""
+    last_failure_at = ""
+    consecutive_failures = 0
+    limiter = WatchFailureLogLimiter(args.watch or 5)
     try:
         project = resolve_project(args.project)
+        validate_monitor_mode(args, project)
         output_root = args.output_dir or ZTP_STATUS_DIR
+        watch_state_path = output_root / WATCH_STATE_NAME
         handoff_state_path = output_root / HANDOFF_STATE_NAME
-        handed_off_signatures = load_completion_handoff_signatures(
-            handoff_state_path, project,
+        handed_off_signatures = (
+            {} if args.offline else
+            load_completion_handoff_signatures(handoff_state_path, project)
         )
         if handed_off_signatures:
             log(
                 f"[INFO] 已恢复 {len(handed_off_signatures)} 个类型的 "
                 "ZTP→Switch 交接签名；相同完成轮次不会因 monitor/load 重启而重复采集"
             )
+        governed_identity = (
+            _governed_watch_identity(args, project)
+            if getattr(args, "_validated_live_watch", False)
+            else None
+        )
+        initialized = True
+        control_state = (
+            "running" if args.offline else _next_monitor_control_state()
+        )
         while True:
-            control_state = monitor_control_state()
             if args.watch and control_state == "paused":
                 if not pause_announced:
                     log("[INFO] 页面控制已暂停 ZTP 采集；进程保留并等待恢复")
                     pause_announced = True
                 paused_sleep(max(args.watch or 5, 5))
+                control_state = (
+                    "running" if args.offline else
+                    _next_monitor_control_state(control_state)
+                )
                 continue
             if pause_announced:
                 log("[INFO] 页面控制已恢复 ZTP 采集")
                 pause_announced = False
-            run_dir = monitor_once(args, project)
+            try:
+                if governed_identity is not None:
+                    current_identity = _governed_watch_identity(args, project)
+                    if current_identity != governed_identity:
+                        raise ValueError("同一监控进程的 governed identity 已变化")
+                run_dir = monitor_once(args, project)
+            except MonitorTransientCycleError as exc:
+                if not watch_mode:
+                    log(
+                        f"[ERROR] {exc.category}: {_bounded_watch_message(exc.message)}",
+                        file=sys.stderr,
+                    )
+                    return 2
+                consecutive_failures += 1
+                failed_at = now_local()
+                last_failure_at = failed_at.isoformat()
+                terminal = consecutive_failures >= WATCH_FAILURE_LIMIT
+                retry_seconds = watch_seconds
+                next_retry_at = (
+                    "" if terminal else
+                    (failed_at + dt.timedelta(seconds=retry_seconds)).isoformat()
+                )
+                payload = _watch_state_payload(
+                    project=project, scope=args.scope, state="unhealthy",
+                    consecutive_failures=consecutive_failures,
+                    last_success_at=last_success_at,
+                    last_failure_at=last_failure_at,
+                    next_retry_at=next_retry_at,
+                    category=exc.category, message=exc.message,
+                )
+                _best_effort_watch_state(watch_state_path, payload)
+                _best_effort_failure_html(args)
+                failure_log = limiter.record_failure(
+                    exc.category, exc.message, now=time.monotonic(),
+                )
+                if failure_log:
+                    log(f"[WARN] {failure_log}", file=sys.stderr)
+                if terminal:
+                    return 2
+                controlled_sleep(retry_seconds)
+                continue
+            except Exception as exc:
+                if initialized and watch_mode and watch_state_path is not None:
+                    failed_at = now_local()
+                    last_failure_at = failed_at.isoformat()
+                    payload = _watch_state_payload(
+                        project=project, scope=args.scope, state="unhealthy",
+                        consecutive_failures=consecutive_failures,
+                        last_success_at=last_success_at,
+                        last_failure_at=last_failure_at,
+                        next_retry_at="", category="permanent-cycle",
+                        message=exc,
+                    )
+                    _best_effort_watch_state(watch_state_path, payload)
+                    _best_effort_failure_html(args)
+                log(f"[ERROR] {_bounded_watch_message(exc)}", file=sys.stderr)
+                return 2
             log(f"[OK] ZTP 监控报告: {run_dir / 'report.md'}")
             log(f"[OK] JSON: {run_dir / 'report.json'}")
             report = read_report(run_dir)
             print_environment_summary(report)
+            if watch_mode and watch_state_path is not None:
+                last_success_at = now_local().isoformat()
+                consecutive_failures = 0
+                payload = _watch_state_payload(
+                    project=project, scope=args.scope, state="healthy",
+                    consecutive_failures=0, last_success_at=last_success_at,
+                    last_failure_at=last_failure_at, next_retry_at="",
+                    category="", message="",
+                )
+                _best_effort_watch_state(watch_state_path, payload)
+                recovery_log = limiter.record_recovery(now=time.monotonic())
+                if recovery_log:
+                    log(f"[INFO] {recovery_log}")
             if args.generate_html:
                 generate_monitor_html(args.html_script, args.scope)
-            if args.exit_on_complete:
+            if completion_handoff_requested(args):
                 (
                     handed_off_signatures,
                     handoff_retry_signatures,
@@ -3818,14 +4865,36 @@ def main(argv: Optional[list[str]] = None) -> int:
             if not args.watch:
                 return 0
             controlled_sleep(max(args.watch, 5))
+            control_state = (
+                "running" if args.offline else
+                _next_monitor_control_state(control_state)
+            )
     except KeyboardInterrupt:
         log("[INFO] 监控已停止")
         return 130
-    except (FileNotFoundError, json.JSONDecodeError, ValueError) as exc:
-        log(f"[ERROR] {exc}", file=sys.stderr)
+    except Exception as exc:
+        if (
+            initialized and watch_mode and project is not None
+            and watch_state_path is not None
+        ):
+            failed_at = now_local().isoformat()
+            last_failure_at = failed_at
+            _best_effort_watch_state(
+                watch_state_path,
+                _watch_state_payload(
+                    project=project, scope=args.scope, state="unhealthy",
+                    consecutive_failures=consecutive_failures,
+                    last_success_at=last_success_at,
+                    last_failure_at=last_failure_at,
+                    next_retry_at="", category="permanent-cycle", message=exc,
+                ),
+            )
+            _best_effort_failure_html(args)
+        log(f"[ERROR] {_bounded_watch_message(exc)}", file=sys.stderr)
         return 2
     finally:
-        remove_own_pid_file(ZTP_STATUS_DIR / "ztp-monitor.pid")
+        if not args.offline:
+            remove_own_pid_file(ZTP_STATUS_DIR / "ztp-monitor.pid")
 
 
 if __name__ == "__main__":

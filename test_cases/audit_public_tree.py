@@ -204,6 +204,23 @@ EXACT_TEST_FIXTURE_EXCEPTIONS = frozenset(
     }
 )
 
+# Owner-authorized public bootstrap verifier authority (Q-V2-08).  These are
+# deliberately public bcrypt verifiers for two already-public first-install
+# passwords; they never attest that an installation is secure.  The audit
+# contains only complete-source-line digests, not another copy of either
+# verifier.  Every other password hash, including live/rotated state, remains
+# prohibited.  Exactly two line authorities is a fail-closed invariant.
+PUBLIC_FACTORY_VERIFIER_PATH = "tools/control-auth.py"
+PUBLIC_FACTORY_VERIFIER_LINE_AUTHORITIES = (
+    (37, "a413f1a3384e97dec91a9e4922d249208698c44286f8f9261e9000d40765dfff"),
+    (38, "503d66d2392e60e24306ed201cf57f9ce8117a0dbcdd05a361de712002199ee6"),
+)
+PUBLIC_FACTORY_VERIFIER_CONTEXT_START = 36
+PUBLIC_FACTORY_VERIFIER_CONTEXT_END = 39
+PUBLIC_FACTORY_VERIFIER_CONTEXT_DIGEST = (
+    "e3be7cb0122e5b189744e1133a955a40be4a8c2254a37bffa942298f9a15032a"
+)
+
 PRIVATE_KEY_RE = re.compile(
     rb"-----BEGIN[ \t]+(?:(?:RSA|DSA|EC|OPENSSH|ENCRYPTED)[ \t]+)?PRIVATE[ \t]+KEY-----"
 )
@@ -331,6 +348,31 @@ class IndexEntry:
 
 class AuditError(RuntimeError):
     """The audit could not establish a trustworthy candidate set."""
+
+
+def _validate_factory_verifier_authority() -> dict[int, str]:
+    authorities = PUBLIC_FACTORY_VERIFIER_LINE_AUTHORITIES
+    if len(authorities) != 2:
+        raise AuditError(
+            "public factory verifier authority must contain exactly two line digests"
+        )
+    line_map = dict(authorities)
+    if len(line_map) != 2 or tuple(sorted(line_map)) != (37, 38):
+        raise AuditError(
+            "public factory verifier authority must bind exactly lines 37 and 38"
+        )
+    if any(re.fullmatch(r"[0-9a-f]{64}", digest) is None for digest in line_map.values()):
+        raise AuditError("public factory verifier line digest is malformed")
+    if len(set(line_map.values())) != 2:
+        raise AuditError("public factory verifier line digests must be distinct")
+    if re.fullmatch(r"[0-9a-f]{64}", PUBLIC_FACTORY_VERIFIER_CONTEXT_DIGEST) is None:
+        raise AuditError("public factory verifier context digest is malformed")
+    if (
+        PUBLIC_FACTORY_VERIFIER_CONTEXT_START,
+        PUBLIC_FACTORY_VERIFIER_CONTEXT_END,
+    ) != (36, 39):
+        raise AuditError("public factory verifier context range changed")
+    return line_map
 
 
 def git_candidates(root: Path) -> list[str]:
@@ -557,9 +599,83 @@ def exception_allowed(
     return False
 
 
+def public_factory_verifier_allowed(
+    relative: str,
+    line_number: int,
+    lines_with_endings: Sequence[bytes],
+) -> tuple[bool, bool]:
+    """Return ``(allowed, known_factory_position)`` for one hash line.
+
+    Acceptance requires the exact path, exact two line positions, exact
+    complete-line bytes, exact surrounding factory block and exactly two hash
+    matches in the whole file.  A mismatch at the known position remains a
+    rejection, but receives the actionable factory-line diagnostic required by
+    Q-V2-08 instead of being confused with an unrelated leaked verifier.
+    """
+    line_authorities = _validate_factory_verifier_authority()
+    known_position = (
+        relative == PUBLIC_FACTORY_VERIFIER_PATH
+        and line_number in line_authorities
+    )
+    if not known_position:
+        return False, False
+
+    if not _public_factory_verifier_file_exact(lines_with_endings):
+        return False, True
+    return True, True
+
+
+def _public_factory_verifier_file_exact(
+    lines_with_endings: Sequence[bytes],
+) -> bool:
+    line_authorities = _validate_factory_verifier_authority()
+    hash_positions: list[int] = []
+    for current_line_number, raw_line in enumerate(lines_with_endings, 1):
+        line = raw_line.rstrip(b"\r\n")
+        for pattern in PASSWORD_HASH_RES:
+            hash_positions.extend(
+                current_line_number for _match in pattern.finditer(line)
+            )
+    if sorted(hash_positions) != [37, 38]:
+        return False
+    if len(lines_with_endings) < PUBLIC_FACTORY_VERIFIER_CONTEXT_END:
+        return False
+    for line_number, expected_digest in line_authorities.items():
+        raw_line = lines_with_endings[line_number - 1]
+        if hashlib.sha256(raw_line).hexdigest() != expected_digest:
+            return False
+    context = b"".join(
+        lines_with_endings[
+            PUBLIC_FACTORY_VERIFIER_CONTEXT_START - 1 :
+            PUBLIC_FACTORY_VERIFIER_CONTEXT_END
+        ]
+    )
+    if hashlib.sha256(context).hexdigest() != PUBLIC_FACTORY_VERIFIER_CONTEXT_DIGEST:
+        return False
+    return True
+
+
 def scan_content(relative: str, data: bytes) -> list[Finding]:
+    _validate_factory_verifier_authority()
     findings: list[Finding] = []
     lines_with_endings = data.splitlines(keepends=True)
+    factory_file_changed = (
+        relative == PUBLIC_FACTORY_VERIFIER_PATH
+        and not _public_factory_verifier_file_exact(lines_with_endings)
+    )
+    factory_change_message = (
+        "known factory record line changed; if this change was intentional, "
+        "update the allowlist digest AND re-run the semantic factory tests"
+    )
+    if factory_file_changed:
+        findings.append(
+            Finding(
+                "password-hash",
+                relative,
+                factory_change_message,
+                PUBLIC_FACTORY_VERIFIER_CONTEXT_START,
+            )
+        )
     for line_number, raw_line in enumerate(lines_with_endings, 1):
         line = raw_line.rstrip(b"\r\n")
         if PRIVATE_KEY_RE.search(line):
@@ -570,9 +686,19 @@ def scan_content(relative: str, data: bytes) -> list[Finding]:
                     Finding("private-key", relative, "private-key material is not public", line_number)
                 )
         if any(pattern.search(line) for pattern in PASSWORD_HASH_RES):
-            findings.append(
-                Finding("password-hash", relative, "reusable password hash is not public", line_number)
+            allowed, known_factory_position = public_factory_verifier_allowed(
+                relative, line_number, lines_with_endings
             )
+            if not allowed:
+                if known_factory_position:
+                    if factory_file_changed:
+                        continue
+                    message = factory_change_message
+                else:
+                    message = "unknown reusable password hash is not public"
+                findings.append(
+                    Finding("password-hash", relative, message, line_number)
+                )
         if any(pattern.search(line) for pattern in TOKEN_RES):
             findings.append(Finding("token", relative, "access token is not public", line_number))
         credential = CLEARTEXT_CREDENTIAL_RE.search(line)

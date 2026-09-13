@@ -20,6 +20,7 @@ IB 分支（nvos/template/）：
 """
 
 # ── Imports (union of both scripts) ──────────────────────────────────────────
+import argparse
 import base64
 import binascii
 import copy
@@ -37,6 +38,7 @@ from pathlib import Path
 import re
 import select
 import shutil
+import stat
 import sys
 import yaml
 from datetime import datetime
@@ -57,13 +59,14 @@ _EXCLUDED_CONFIG_TYPES = frozenset({"air"})
 _SAFE_HOSTNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")
 _SAFE_AAA_USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 _MAC_SCALAR_RE = re.compile(r"^(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
-_V2_MLAG_CAPABLE_TEMPLATES = frozenset({"border", "oobofoob-spine"})
 _EXPECTED_DEVICE_HEADER_PREFIX = (
     "hostname", "type", "template", "eth0_ip", "netmask", "eth0_gw",
     "eth0_mac", "eth1_ip", "netmask", "eth1_gw", "eth1_mac",
 )
+AIR_EFFECTIVE_DEFAULT_ARTIFACT = "effective-default.runtime"
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_SYNC_HELPER = str(Path(__file__).resolve().parents[1] / "d-hostname2mac.py")
 TOOLS_DIR = str(Path(SCRIPT_DIR).parents[3] / "tools")
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
@@ -78,7 +81,6 @@ from project_contract import (
     normalize_v2_mlag_policy,
     normalize_v2_vrr_policy,
     parse_device_csv_layout,
-    parse_terminal_l2_ports,
     require_device_csv_row_width,
     v2_vrr_ipv4_plan,
 )
@@ -93,8 +95,12 @@ def _parse_branch(argv):
     while index < len(argv):
         value = argv[index]
         if value.startswith("--branch="):
+            if explicit is not None:
+                raise SystemExit("[ERROR] --branch may be specified only once")
             explicit = value.split("=", 1)[1]
         elif value == "--branch":
+            if explicit is not None:
+                raise SystemExit("[ERROR] --branch may be specified only once")
             index += 1
             if index >= len(argv):
                 raise SystemExit("[ERROR] --branch requires eth or ib")
@@ -115,6 +121,88 @@ def _parse_branch(argv):
         "[ERROR] cannot infer generator branch outside config/cumulus/template or "
         "config/nvos/template; pass --branch eth|ib"
     )
+
+
+def generation_parser(branch):
+    """Build the authoritative parser for one generator branch."""
+    if branch not in {"eth", "ib"}:
+        raise ValueError(f"unsupported generator branch: {branch!r}")
+    description = (
+        "从 CSV 生成 NVUE YAML（ETH 分支）。"
+        if branch == "eth" else
+        "从 CSV 生成 NVOS YAML（IB/NVLink 分支）。"
+    )
+    parser = argparse.ArgumentParser(
+        prog="90-c2-generate_configs.py",
+        description=description,
+        epilog="完整、受支持的操作流程见仓库根目录 USER_MANUAL.md。",
+        allow_abbrev=False,
+    )
+    parser.add_argument("-y", action="store_true", dest="auto_yes")
+    parser.add_argument(
+        "--deployment-scope", choices=("all", "prod", "air"), default="all",
+        help="生成范围；all=Production+AIR，prod=Production，air=AIR",
+    )
+    parser.add_argument(
+        "--switch", choices=("eth", "ib", "nvl"), default=None,
+        dest="switch_scope",
+        help="只生成指定设备族；ETH 分支仅接受 eth，NVOS 分支接受 ib 或 nvl",
+    )
+    if branch == "eth":
+        parser.add_argument("--csv", dest="csv_file")
+        parser.add_argument("--verify", action="store_true")
+        parser.add_argument("--fail-on-diff", action="store_true")
+        parser.add_argument(
+            "--ref-dir", action="append", dest="ref_dirs",
+            type=_reference_directory,
+        )
+        parser.add_argument(
+            "--skip-descriptions", action="store_true",
+            help="显式跳过 LLDP 描述 patch 交互；不改变完整发布门禁",
+        )
+    parser.add_argument("hostname", nargs="?")
+    return parser
+
+
+def _reference_directory(value):
+    """Accept one existing real directory for reference comparisons."""
+    if not value:
+        raise argparse.ArgumentTypeError("--ref-dir must not be empty")
+    try:
+        metadata = os.lstat(value)
+    except OSError as exc:
+        raise argparse.ArgumentTypeError(
+            f"--ref-dir is not readable: {value}: {exc}"
+        ) from exc
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise argparse.ArgumentTypeError(
+            f"--ref-dir must be one real directory: {value}"
+        )
+    return value
+
+
+def parse_generation_args(argv, *, branch):
+    parser = generation_parser(branch)
+    args = parser.parse_args(list(argv))
+    selected = args.switch_scope
+    if branch == "eth" and selected not in {None, "eth"}:
+        parser.error("ETH generator only accepts --switch eth")
+    if branch == "ib" and selected == "eth":
+        parser.error("NVOS generator only accepts --switch ib or --switch nvl")
+    if args.deployment_scope == "air" and selected not in {None, "eth"}:
+        parser.error("AIR environment requires --switch eth")
+    if branch == "eth":
+        references = args.ref_dirs or []
+        if len(references) > 1:
+            parser.error("--ref-dir may be specified only once")
+        args.ref_dir = references[0] if references else None
+        del args.ref_dirs
+    return args
+
+
+def should_prompt_descriptions(args):
+    """Keep prompting explicit and independently testable."""
+    return not bool(args.verify) and not bool(args.skip_descriptions)
 
 
 _BRANCH, _SCRIPT_ARGS = _parse_branch(sys.argv[1:])
@@ -178,7 +266,19 @@ def _exclude_config_type(device_type):
     return (device_type or "").strip().casefold() in _EXCLUDED_CONFIG_TYPES
 
 
-class _MacStringSafeLoader(yaml.SafeLoader):
+_YamlSafeLoaderBase = (
+    yaml.CSafeLoader
+    if getattr(yaml, "__with_libyaml__", False)
+    else yaml.SafeLoader
+)
+_YamlSafeDumperBase = (
+    yaml.CSafeDumper
+    if getattr(yaml, "__with_libyaml__", False)
+    else yaml.SafeDumper
+)
+
+
+class _MacStringSafeLoader(_YamlSafeLoaderBase):
     """Safe loader that keeps exact colon-form MAC addresses as strings."""
 
 
@@ -186,7 +286,7 @@ class _MacStringSafeLoader(yaml.SafeLoader):
 # sexagesimal.  Copy the resolver table before adding a more specific rule so
 # importing this generator never changes PyYAML behavior in other modules.
 _MacStringSafeLoader.yaml_implicit_resolvers = copy.deepcopy(
-    yaml.SafeLoader.yaml_implicit_resolvers
+    _YamlSafeLoaderBase.yaml_implicit_resolvers
 )
 for _first_mac_character in "0123456789abcdefABCDEF":
     _MacStringSafeLoader.yaml_implicit_resolvers.setdefault(
@@ -205,7 +305,7 @@ class _LiteralYamlString(str):
     """String serialized as a YAML literal block without changing its value."""
 
 
-class _GeneratedYamlDumper(yaml.SafeDumper):
+class _GeneratedYamlDumper(_YamlSafeDumperBase):
     """Safe dumper for generated NVUE documents."""
 
 
@@ -291,18 +391,30 @@ def _construct_unique_mapping(loader, node, deep=False):
         except TypeError:
             # Let SafeLoader produce its standard error for unhashable keys.
             pass
-    return yaml.SafeLoader.construct_mapping(loader, node, deep=deep)
+    return _YamlSafeLoaderBase.construct_mapping(loader, node, deep=deep)
 
 
+_MacStringSafeLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_mapping,
+)
 _UniqueKeyLoader.add_constructor(
     yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
     _construct_unique_mapping,
 )
 
 
+def _load_yaml_bounded_nesting(stream, *, Loader):
+    """Translate pure-Python loader recursion into one controlled YAML error."""
+    try:
+        return yaml.load(stream, Loader=Loader)
+    except RecursionError as exc:
+        raise yaml.YAMLError("YAML 嵌套层级超过支持上限") from exc
+
+
 def _load_generated_yaml(text):
     """Parse generated YAML safely and fail on any same-level duplicate key."""
-    return yaml.load(text, Loader=_UniqueKeyLoader)
+    return _load_yaml_bounded_nesting(text, Loader=_UniqueKeyLoader)
 
 
 def _validate_yaml_directory(directory):
@@ -314,6 +426,43 @@ def _validate_yaml_directory(directory):
                 _load_generated_yaml(stream.read())
         except (OSError, UnicodeError, yaml.YAMLError) as exc:
             errors.append(f"{os.path.basename(path)}: {exc}")
+    return errors
+
+
+def _validate_cached_yaml_directory(directory, cached_documents):
+    """Validate final staging bytes against documents parsed in this run.
+
+    ``generate_all`` has already parsed and semantically checked each rendered
+    document before writing it.  Re-parsing every file here doubles the hot
+    YAML load cost, so retain the exact rendered text beside that parsed
+    document and prove the staging directory still contains those bytes.
+    """
+    expected = set(cached_documents)
+    actual = {
+        os.path.basename(path)
+        for path in glob.glob(os.path.join(directory, "*.yaml"))
+    }
+    errors = []
+    if actual != expected:
+        missing = sorted(expected - actual)
+        unexpected = sorted(actual - expected)
+        errors.append(
+            f"输出集合不一致: missing={missing!r}, unexpected={unexpected!r}"
+        )
+    for name in sorted(expected & actual):
+        rendered, document = cached_documents[name]
+        if document is _DROP_NVUE_NODE:
+            errors.append(f"{name}: 已缓存文档为空")
+            continue
+        path = os.path.join(directory, name)
+        try:
+            with open(path, encoding="utf-8") as stream:
+                written = stream.read()
+        except (OSError, UnicodeError) as exc:
+            errors.append(f"{name}: {exc}")
+            continue
+        if written != rendered:
+            errors.append(f"{name}: 写入字节与已验证渲染结果不一致")
     return errors
 
 
@@ -345,7 +494,7 @@ def _load_global_document():
     """Load and schema-check the authoritative project global document."""
     try:
         with open(_GLOBAL_FILE, encoding="utf-8") as f:
-            data = yaml.load(f, Loader=_MacStringSafeLoader)
+            data = _load_yaml_bounded_nesting(f, Loader=_MacStringSafeLoader)
     except FileNotFoundError:
         print(f"[ERROR] 找不到配置文件: {_GLOBAL_FILE}"); sys.exit(1)
     except yaml.YAMLError as e:
@@ -384,14 +533,9 @@ def load_global(section_key=None):
     return merged
 
 
-def _refresh_cumulus_defaults_from_global():
-    """在生成配置前，用当前项目 global 同步服务端 default*.yaml。
-
-    default YAML 的规范化和原子写入统一由 d-hostname2mac.py 实现，避免
-    load、配置生成和最终发布采用三套不同的密码同步规则。
-    """
-    service_dir = os.path.dirname(SCRIPT_DIR)
-    helper_file = os.path.join(service_dir, "d-hostname2mac.py")
+def _default_sync_module():
+    """Load the shared default normalization rules without mutating source."""
+    helper_file = DEFAULT_SYNC_HELPER
     if not os.path.isfile(helper_file):
         raise ValueError(f"未找到默认配置同步模块：{helper_file}")
     spec = importlib.util.spec_from_file_location(
@@ -401,9 +545,36 @@ def _refresh_cumulus_defaults_from_global():
         raise ValueError(f"无法加载默认配置同步模块：{helper_file}")
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
-    helper._refresh_cumulus_defaults(
-        service_dir=service_dir,
-        global_file=_GLOBAL_FILE,
+    return helper
+
+
+def _render_cumulus_default_from_global(default_file, global_file):
+    """Render one site default in memory while preserving the neutral source."""
+    service_dir = os.path.dirname(os.path.abspath(default_file))
+    helper = _default_sync_module()
+    with open(global_file, encoding="utf-8") as stream:
+        global_data = helper._strict_yaml_load(stream)
+    with open(default_file, encoding="utf-8") as stream:
+        default_data = helper._strict_yaml_load(stream)
+    updated = helper._default_document_with_global(
+        default_data, helper._eth_global_system(global_data),
+    )
+    rendered = yaml.dump(
+        updated, allow_unicode=True, sort_keys=False,
+        default_flow_style=False, width=120, Dumper=_YamlSafeDumperBase,
+    )
+    return os.path.basename(default_file), rendered
+
+
+def _refresh_cumulus_defaults_from_global():
+    """Validate and render site defaults without writing tracked baselines."""
+    service_dir = os.path.dirname(SCRIPT_DIR)
+    defaults = sorted(glob.glob(os.path.join(service_dir, "default*.yaml")))
+    if not defaults:
+        raise ValueError(f"未找到默认配置：{service_dir}/default*.yaml")
+    return dict(
+        _render_cumulus_default_from_global(path, _GLOBAL_FILE)
+        for path in defaults
     )
 
 
@@ -420,6 +591,85 @@ _SIMPLE_TEMPLATES = {"oobofoob-leaf", "oobofoob-spine", "tan-cp-1gleaf"}
 _BOND_MARKERS     = {"bond", "mlagbond", "evpnbond"}
 _EVPN_COLUMNS = DEVICE_V1_EVPN_COLUMNS
 _EVPN_V2_COLUMNS = DEVICE_V2_EVPN_COLUMNS
+
+_NO_BOND_MODE_SETS = frozenset({frozenset()})
+_LOCAL_BOND_MODE_SETS = frozenset({
+    frozenset(), frozenset({"localbond"}),
+})
+_EVPN_BOND_MODE_SETS = frozenset({
+    frozenset(),
+    frozenset({"localbond"}),
+    frozenset({"evpn_multihoming"}),
+    frozenset({"localbond", "evpn_multihoming"}),
+})
+_V2_TEMPLATE_BOND_MODE_COMBINATIONS = {
+    "border": frozenset({
+        frozenset(),
+        frozenset({"localbond"}),
+        frozenset({"evpn_multihoming"}),
+        frozenset({"localbond", "evpn_multihoming"}),
+        frozenset({"mlag"}),
+        frozenset({"localbond", "mlag"}),
+    }),
+    "oob-core": _EVPN_BOND_MODE_SETS,
+    "oob-leaf": _EVPN_BOND_MODE_SETS,
+    "oob-su-leaf": _LOCAL_BOND_MODE_SETS,
+    "oob-rack-tor": _LOCAL_BOND_MODE_SETS,
+    "oobofoob-leaf": _LOCAL_BOND_MODE_SETS,
+    "tan-cp-1gleaf": _LOCAL_BOND_MODE_SETS,
+    "tan-cp-leaf": _EVPN_BOND_MODE_SETS,
+    "tan-hps-leaf": _EVPN_BOND_MODE_SETS,
+    "tan-leaf": _EVPN_BOND_MODE_SETS,
+    "tan-su-leaf": _EVPN_BOND_MODE_SETS,
+    "tan-spine": _NO_BOND_MODE_SETS,
+    "oob-su-spine": _NO_BOND_MODE_SETS,
+    "oobofoob-spine": frozenset({
+        frozenset({"mlag"}),
+        frozenset({"localbond", "mlag"}),
+    }),
+}
+
+# This set is consumed by the MLAG pair derivation and is deliberately derived
+# from the semantic mode-set policy above.  A role cannot become MLAG-capable in
+# one validation layer while remaining unsupported in another.
+_V2_MLAG_CAPABLE_TEMPLATES = frozenset(
+    template
+    for template, combinations in _V2_TEMPLATE_BOND_MODE_COMBINATIONS.items()
+    if any("mlag" in combination for combination in combinations)
+)
+
+
+def _format_bond_mode_set(modes):
+    normalized = sorted(str(mode) for mode in modes)
+    return "{" + ",".join(normalized) + "}"
+
+
+def _validate_template_bond_modes(
+        template, bond_types, *, hostname, source_line):
+    """Fail closed unless a schema-v2 role supports the complete mode set."""
+    normalized_template = str(template or "").strip().casefold()
+    allowed = _V2_TEMPLATE_BOND_MODE_COMBINATIONS.get(normalized_template)
+    location = f"行{source_line} [{hostname}]"
+    if allowed is None:
+        raise ValueError(
+            f"{location} template={normalized_template or '<empty>'} "
+            "未登记 bond 语义；允许组合=未登记"
+        )
+    normalized_modes = frozenset({
+        "mlag" if str(mode or "").strip().casefold() == "mlagbond"
+        else str(mode or "").strip().casefold()
+        for mode in bond_types
+        if str(mode or "").strip()
+    })
+    if normalized_modes not in allowed:
+        allowed_text = ",".join(
+            sorted(_format_bond_mode_set(item) for item in allowed)
+        )
+        raise ValueError(
+            f"{location} template={normalized_template} "
+            f"mode组合={_format_bond_mode_set(normalized_modes)} 不受支持；"
+            f"允许组合={allowed_text}"
+        )
 
 
 def _load_devices_template(csv_file):
@@ -569,7 +819,9 @@ def _csv_parse_bond_groups(
     """
     if _csv_na(bond_ports):
         return []
-    port_specs = [part.strip() for part in bond_ports.strip().split("|") if part.strip()]
+    port_specs = [part.strip() for part in bond_ports.strip().split("|")]
+    if any(not part for part in port_specs):
+        raise ValueError("bond_ports 的 | 分组不能为空")
     type_specs = [part.strip() for part in str(bond_types or "").split("|")]
     mac_specs = [part.strip() for part in str(macs or "").split("|")]
     if len(type_specs) not in (1, len(port_specs)):
@@ -1076,13 +1328,15 @@ def _csv_build_vrfs(groups, bond_groups=None, *, schema_version=1):
             l2["dhcp_relay"] = bool(g.get("dhcp_relay"))
             l2["dhcp_server"] = g.get("dhcp_server", "")
             l2["vlan_ports"] = copy.deepcopy(ports)
+            if g.get("_csv_source"):
+                l2["_csv_source"] = copy.deepcopy(g["_csv_source"])
             seen[vn]["l2vlans"].append(l2)
     return [seen[v] for v in order]
 
 
 def _csv_collect_evpn_groups(
         row, group_count, hostname, errors, base=25, width=11, *,
-        schema_version=1):
+        schema_version=1, source_line=None):
     """Parse all EVPN groups and append selector failures to CSV errors."""
     groups = []
     invalid = False
@@ -1108,6 +1362,11 @@ def _csv_collect_evpn_groups(
             invalid = True
             continue
         if group is not None:
+            if source_line is not None:
+                group["_csv_source"] = {
+                    "line": source_line,
+                    "group": f"EVPN 组 {group_idx + 1}",
+                }
             if inherited_l2_only:
                 group["bridge_only"] = True
             groups.append(group)
@@ -1273,14 +1532,31 @@ def _apply_v2_vrr_policy(devices, policy):
                     "network": network,
                 })
 
+    plans = []
+    errors = []
+
+    def claim_label(item, current_vlan_id):
+        source = item["l2"].get("_csv_source") or {}
+        location = (
+            f"行{source['line']} [{item['hostname']}] "
+            f"{source.get('group') or f'vlan{current_vlan_id}'}"
+            if source.get("line") is not None
+            else f"[{item['hostname']}] vlan{current_vlan_id}"
+        )
+        return f"{location} svi_ip={item['interface'].with_prefixlen}"
+
     for (vrf_name, vlan_id), vlan_claims in sorted(claims.items()):
         networks = {str(item["network"]) for item in vlan_claims}
         if len(networks) != 1:
-            details = ", ".join(sorted(networks))
-            raise ValueError(
-                f"evpn_vrf={vrf_name} vlan{vlan_id} 的 SVI 网段不一致："
-                f"{details}"
+            details = "; ".join(
+                claim_label(item, vlan_id) for item in vlan_claims
             )
+            errors.append(
+                f"evpn_vrf={vrf_name} vlan{vlan_id} 的 SVI 网段不一致："
+                f"{', '.join(sorted(networks))}\n"
+                f"    当前输入：{details}"
+            )
+            continue
         network = vlan_claims[0]["network"]
         gateway = (
             network.network_address + 1
@@ -1296,19 +1572,52 @@ def _apply_v2_vrr_policy(devices, policy):
         elif len(unique) == 1 and next(iter(unique)) == gateway:
             scenario = "snippet"
         else:
-            details = ", ".join(
-                f"{item['hostname']}={item['interface'].ip}"
-                for item in vlan_claims
-            )
-            raise ValueError(
-                f"evpn_vrf={vrf_name} vlan{vlan_id} 的 SVI 地址既非全部唯一"
-                "且避开 gateway，"
-                f"也非全部相同且等于 gateway {gateway}：{details}"
-            )
+            gateway_claims = [
+                item for item in vlan_claims if item["interface"].ip == gateway
+            ]
+            outliers = [
+                item for item in vlan_claims if item["interface"].ip != gateway
+            ]
+            lines = [
+                f"evpn_vrf={vrf_name} vlan{vlan_id} 的 SVI 地址模式冲突"
+                f"（网段 {network}）",
+                f"    共享网关模式要求所有设备使用 "
+                f"{gateway}/{network.prefixlen}",
+                "    独立 SVI 模式要求每台设备地址互不重复，且都不能使用"
+                f"共享网关 {gateway}",
+                "    当前输入：" + "; ".join(
+                    claim_label(item, vlan_id) for item in vlan_claims
+                ),
+            ]
+            if gateway_claims and outliers:
+                lines.append(
+                    "    不符合共享网关模式："
+                    + "; ".join(
+                        claim_label(item, vlan_id) for item in outliers
+                    )
+                )
+                lines.append(
+                    "    已使用共享网关："
+                    + "; ".join(
+                        claim_label(item, vlan_id) for item in gateway_claims
+                    )
+                )
+            errors.append("\n".join(lines))
+            continue
         mac = (
             "" if scenario == "standalone"
             else _v2_vrr_mac(policy, vlan_id)
         )
+        plans.append(
+            (vlan_claims, network, gateway, scenario, mac)
+        )
+
+    if errors:
+        raise ValueError("\n".join(errors))
+
+    # Apply derived fields only after every VRF/VLAN claim has passed.  This
+    # prevents a later invalid group from leaving earlier groups half-mutated.
+    for vlan_claims, network, gateway, scenario, mac in plans:
         for item in vlan_claims:
             l2 = item["l2"]
             l2["vrr_mac"] = mac
@@ -2032,7 +2341,9 @@ def _decode_source_yaml(source_b64, expected_sha256):
 
     try:
         source_text = source_bytes.decode("utf-8")
-        source_doc = yaml.load(source_text, Loader=_MacStringSafeLoader)
+        source_doc = _load_yaml_bounded_nesting(
+            source_text, Loader=_MacStringSafeLoader,
+        )
     except (UnicodeDecodeError, yaml.YAMLError) as exc:
         raise ValueError(f"source YAML 无法解析: {exc}") from exc
     if not (isinstance(source_doc, list) and any(
@@ -2321,6 +2632,7 @@ def _generate_devices_yaml():
     _port_errors = []
     _mac_map = {}   # eth0_mac → [hostname, ...]（CSV col 5，解析时收集）
     _hostname_owners = {}
+    _source_lines = {}
 
     try:
         _csv_f = open(_CSV_FILE, newline="", encoding="utf-8")
@@ -2348,14 +2660,6 @@ def _generate_devices_yaml():
         ) if i is not None]
         _fixed = _layout.fixed_indices
         _vrl_col = _fixed.get("vrl")
-        _terminal_l2_ports_col = _layout.policy_indices.get(
-            "terminal_l2_ports",
-        )
-        if schema_version == 2 and _terminal_l2_ports_col is None:
-            print(
-                "[WARN] schema 2 devices_config.csv 未包含 terminal_l2_ports；"
-                "不会自动启用终端 STP，请迁移到显式 allowlist"
-            )
         _evpn_width = len(
             _EVPN_V2_COLUMNS if schema_version == 2 else _EVPN_COLUMNS
         )
@@ -2363,10 +2667,7 @@ def _generate_devices_yaml():
         _evpn_base = (
             _layout.evpn_group_starts[0]
             if _layout.evpn_group_starts
-            else (
-                _layout.fixed_start + len(_fixed)
-                + len(_layout.policy_columns)
-            )
+            else _layout.fixed_start + len(_layout.fixed_columns)
         )
         _evpn_end = _layout.metadata_start
 
@@ -2458,6 +2759,7 @@ def _generate_devices_yaml():
                 "vrfs": [],
                 "_project_schema_version": schema_version,
             }
+            _source_lines[hostname] = lineno
             try:
                 dev["vrl"] = _csv_vrl_enabled(
                     row[_vrl_col] if _vrl_col is not None else ""
@@ -2465,16 +2767,6 @@ def _generate_devices_yaml():
             except ValueError as exc:
                 _dup_errs.append(f"  {hostname}: {exc}")
                 continue
-            if _terminal_l2_ports_col is not None:
-                try:
-                    dev["terminal_l2_ports"] = list(
-                        parse_terminal_l2_ports(
-                            row[_terminal_l2_ports_col],
-                        )
-                    )
-                except ValueError as exc:
-                    _dup_errs.append(f"  {hostname}: {exc}")
-                    continue
             if _source_yaml_col is not None and not _csv_na(row[_source_yaml_col]):
                 source_sha256 = (row[_source_sha256_col]
                                   if _source_sha256_col is not None else "")
@@ -2528,7 +2820,9 @@ def _generate_devices_yaml():
                 for group_index, start in enumerate(
                         _layout.vlan_group_starts, start=1):
                     try:
-                        ordinary = _csv_parse_v2_vlan_group(row[start:start + 4])
+                        ordinary = _csv_parse_v2_vlan_group(
+                            row[start:start + 4]
+                        )
                     except ValueError as exc:
                         _dup_errs.append(
                             f"  {hostname}: 普通 VLAN 组 {group_index}: {exc}"
@@ -2536,6 +2830,10 @@ def _generate_devices_yaml():
                         invalid_ordinary = True
                         continue
                     if ordinary is not None:
+                        ordinary["_csv_source"] = {
+                            "line": lineno,
+                            "group": f"普通 VLAN 组 {group_index}",
+                        }
                         ordinary_groups.append(ordinary)
                 if invalid_ordinary:
                     continue
@@ -2608,12 +2906,34 @@ def _generate_devices_yaml():
                 except ValueError as exc:
                     _dup_errs.append(f"  {hostname}: {exc}")
                     continue
+            elif schema_version == 2 and _csv_na(row[_fixed["bond_ports"]]):
+                if not _csv_na(row[_fixed["bond_type"]]):
+                    print(
+                        f"[WARN] 行{lineno} [{hostname}] bond_type 已填写，"
+                        "但 bond_ports 为空"
+                    )
+                if not _csv_na(row[_fixed["bond_mac"]]):
+                    print(
+                        f"[WARN] 行{lineno} [{hostname}] bond_mac 已填写，"
+                        "但 bond_ports 为空"
+                    )
             elif schema_version == 2 and any(not _csv_na(row[_fixed[name]]) for name in (
                     "bond_ports", "bond_type", "bond_mac")):
                 _dup_errs.append(
                     f"  {hostname}: bond_ports 与 bond_type 必须同时填写"
                 )
                 continue
+            if schema_version == 2:
+                try:
+                    _validate_template_bond_modes(
+                        template,
+                        {group["type"] for group in bond_groups},
+                        hostname=hostname,
+                        source_line=lineno,
+                    )
+                except ValueError as exc:
+                    _dup_errs.append(f"  {exc}")
+                    continue
             if (schema_version == 2 or template in _SIMPLE_TEMPLATES) and bond_groups:
                 dev["bond_groups"] = bond_groups
             if not _csv_na(row[_fixed["peerlink_ports"]]):
@@ -2621,7 +2941,7 @@ def _generate_devices_yaml():
             groups = _csv_collect_evpn_groups(
                 row, _evpn_group_count, hostname, _dup_errs,
                 base=_evpn_base, width=_evpn_width,
-                schema_version=schema_version,
+                schema_version=schema_version, source_line=lineno,
             )
             if groups is None:
                 continue
@@ -2657,9 +2977,15 @@ def _generate_devices_yaml():
     if not _dup_errs and schema_version == 2:
         try:
             _apply_v2_vrr_policy(devices_data, v2_vrr_policy)
+        except ValueError as exc:
+            print("[ERROR] 02-devices_config.csv 的 SVI/VRR 地址策略冲突：")
+            for line in str(exc).splitlines():
+                print(f"  {line}")
+            sys.exit(1)
+        try:
             _assign_v2_border_default_routes(devices_data)
         except ValueError as exc:
-            _dup_errs.append(f"  VRR v2 推导失败：{exc}")
+            _dup_errs.append(f"  Border 默认路由推导失败：{exc}")
     if not _dup_errs:
         for hostname, dev in devices_data.items():
             if dev.get("source_yaml_b64"):
@@ -2788,7 +3114,11 @@ def _generate_devices_yaml():
                 f"对应多个 vrr_mac：{details}"
             )
 
-    _dup_val_errs.extend(_validate_project_svi_vrr(devices_data))
+    # When an earlier parse/cross-field error prevented VRR derivation, empty
+    # derived vrr_mac values are not independent duplicate errors.  Reporting
+    # them would hide the actionable source error from the operator.
+    if not _dup_errs:
+        _dup_val_errs.extend(_validate_project_svi_vrr(devices_data))
 
     if _dup_val_errs:
         print("[ERROR] 02-devices_config.csv 中存在重复值，请修正后重新运行：")
@@ -2805,6 +3135,25 @@ def _generate_devices_yaml():
     for hostname, dev in devices_data.items():
         if dev.get("source_yaml_b64"):
             continue
+        if schema_version == 2:
+            try:
+                _expected_active_bond_descriptors(dev)
+            except ValueError as exc:
+                _errs.append(
+                    f"  行{_source_lines.get(hostname, '?')} [{hostname}] "
+                    f"template={dev.get('template') or '<empty>'}: {exc}"
+                )
+        else:
+            # Schema v1 derives bond IDs during preprocessing.  Run that same
+            # deterministic check before 91-devices.yaml is staged or replaced;
+            # generate_all repeats it later as defense in depth.
+            try:
+                preprocess_device(copy.deepcopy(dev))
+            except ValueError as exc:
+                _errs.append(
+                    f"  行{_source_lines.get(hostname, '?')} [{hostname}] "
+                    f"template={dev.get('template') or '<empty>'}: {exc}"
+                )
         _chk(_csv_valid_ip(dev.get("eth0_ip", ""), allow_dhcp=True), hostname, "eth0_ip", dev.get("eth0_ip"))
         if not _csv_na(dev.get("eth0_gw", "")):
             _chk(_csv_valid_ip(dev.get("eth0_gw", ""), allow_dhcp=True), hostname, "eth0_gw", dev.get("eth0_gw"))
@@ -2858,6 +3207,10 @@ def _generate_devices_yaml():
             print(e)
         sys.exit(1)
 
+    for dev in devices_data.values():
+        for vrf in dev.get("vrfs", []):
+            for l2 in vrf.get("l2vlans", []):
+                l2.pop("_csv_source", None)
     output = {"global": global_data, "devices": devices_data}
     # DEVICES_FILE is normally a setup-managed symlink into the active project.
     # Atomic replacement must happen beside the target, otherwise os.replace()
@@ -2866,8 +3219,10 @@ def _generate_devices_yaml():
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     tmp_path = f"{output_path}.tmp.{os.getpid()}"
     with open(tmp_path, "w", encoding="utf-8") as f:
-        yaml.dump(output, f, default_flow_style=False, allow_unicode=True,
-                  sort_keys=False, width=120)
+        yaml.dump(
+            output, f, default_flow_style=False, allow_unicode=True,
+            sort_keys=False, width=120, Dumper=_YamlSafeDumperBase,
+        )
     os.replace(tmp_path, output_path)
     print(f"Generated {DEVICES_FILE}: {len(global_data)} global keys, {len(devices_data)} devices")
 
@@ -3215,6 +3570,23 @@ def preprocess_device(dev: dict) -> dict:
                 parent_swp_maxsub.get(swp_name, 0), sub
             )
 
+    derived_id_names = {}
+    for bond_name in bond_vlans:
+        if bond_attrs[bond_name]['type'] == 'localbond':
+            continue
+        derived_id_names.setdefault(_bond_id(bond_name), set()).add(bond_name)
+    collisions = [
+        (bond_id, sorted(names, key=lambda name: (name.casefold(), name)))
+        for bond_id, names in derived_id_names.items()
+        if len(names) > 1
+    ]
+    if collisions:
+        details = "; ".join(
+            f"ID {bond_id}: {', '.join(names)}"
+            for bond_id, names in sorted(collisions)
+        )
+        raise ValueError(f"同一设备的 bond 派生 ID 冲突：{details}")
+
     for bn in sorted(bond_vlans.keys(), key=_bond_sort_key):
         attrs = bond_attrs[bn]
         btype = attrs['type']
@@ -3319,9 +3691,57 @@ def preprocess_device(dev: dict) -> dict:
     return dev
 
 
+def _expected_active_bond_descriptors(device):
+    """Return immutable schema-v2 intent consumed by the final render gate."""
+    prepared = preprocess_device(copy.deepcopy(device))
+    template = str(prepared.get("template") or "").strip().casefold()
+    peerlink_members = tuple(prepared.get("peerlink_member_list") or ())
+    descriptors = []
+    for bond in prepared.get("computed_bonds", ()):
+        if not isinstance(bond, dict):
+            raise ValueError("computed_bonds 中的 bond descriptor 必须是 mapping")
+        mode = str(bond.get("type") or "").strip().casefold()
+        descriptor = {
+            "name": str(bond.get("name") or ""),
+            "type": mode,
+            "vlan_mode": bond.get("vlan_mode"),
+            "vlan_access": bond.get("vlan_access"),
+            "vlan_native": bond.get("vlan_native"),
+            "vlan_trunk_range": bond.get("vlan_trunk_range"),
+            "template": template,
+            "peerlink_members": peerlink_members,
+        }
+        if mode == "localbond":
+            descriptor["members"] = tuple(bond.get("members") or ())
+        elif mode in {"mlag", "evpn_multihoming"}:
+            descriptor.update({
+                "member": bond.get("member"),
+                "id": bond.get("id"),
+                "mac_address": str(bond.get("mac_address") or "").strip(),
+            })
+        else:
+            raise ValueError(f"computed bond type 不受支持：{mode!r}")
+        descriptors.append(descriptor)
+    if prepared.get("_project_schema_version") == 2:
+        declared = {
+            str(name)
+            for group in prepared.get("bond_groups", ())
+            if isinstance(group, dict)
+            for name in group.get("bond_list", ())
+        }
+        rendered = {descriptor["name"] for descriptor in descriptors}
+        if declared != rendered:
+            raise ValueError(
+                "schema v2 active bond 未关联可渲染的 VLAN attachment；"
+                f"未生成 render descriptor={sorted(declared - rendered)!r}，"
+                f"额外={sorted(rendered - declared)!r}"
+            )
+    return tuple(descriptors)
+
+
 def load_devices():
     with open(DEVICES_FILE, encoding="utf-8") as f:
-        data = yaml.load(f, Loader=_MacStringSafeLoader)
+        data = _load_yaml_bounded_nesting(f, Loader=_MacStringSafeLoader)
     return data.get("global", {}), data.get("devices", {})
 
 
@@ -3353,7 +3773,9 @@ def _legacy_yaml_scalar_string(value, field):
         raise ValueError(f"AAA {field} 不能为空")
     if len(text) >= 2 and text[0] in {"'", '"'} and text[-1] == text[0]:
         try:
-            decoded = yaml.safe_load(text)
+            decoded = _load_yaml_bounded_nesting(
+                text, Loader=_YamlSafeLoaderBase,
+            )
         except yaml.YAMLError as exc:
             raise ValueError(f"AAA {field} 引号格式无效") from exc
         if not isinstance(decoded, str):
@@ -3526,18 +3948,47 @@ def _nvue_null_paths(value, path="$"):
     return errors
 
 
-def _redundancy_mode_errors(document, expected_bond_types=None):
-    """Validate one switch's MLAG/EVPN-MH mode across every NVUE set.
+def _redundancy_mode_errors(
+        document, expected_bond_types=None, *, expected_bonds=None):
+    """Prove generated bond intent across all NVUE set operations.
 
-    A source receipt can contain more than one set operation, so evidence must
-    be aggregated for the whole switch.  For an MLAG device the generated
-    document must contain an actual MLAG construct, and it must contain no
-    global or per-interface EVPN multihoming node, even if marked disabled.
+    ``expected_bonds=None`` retains the source-receipt compatibility check: it
+    only detects mutually exclusive MLAG/EVPN-MH evidence and the legacy
+    expected-mode assertion.  A tuple (including an empty tuple) is the
+    schema-v2 generated contract and requires exact per-bond semantics before
+    publication.
     """
     documents = document if isinstance(document, list) else [document]
+    if expected_bonds is not None:
+        structure_errors = []
+        mapping_set_count = 0
+        for index, item in enumerate(documents):
+            if not isinstance(item, dict) or "set" not in item:
+                continue
+            if not isinstance(item["set"], dict):
+                structure_errors.append(
+                    f"$[{index}].set: schema v2 generated set operation "
+                    f"必须是 mapping，实际={type(item['set']).__name__}"
+                )
+                continue
+            mapping_set_count += 1
+        if mapping_set_count != 1:
+            structure_errors.append(
+                "$.set: schema v2 generated NVUE YAML 必须恰好包含 1 个 "
+                "mapping-valued set operation，"
+                f"实际={mapping_set_count}"
+            )
+        if structure_errors:
+            return structure_errors
+
     mlag_evidence = []
     core_mlag_evidence = []
     multihoming_evidence = []
+    actual_mlag_bonds = set()
+    actual_evpn_bonds = set()
+    actual_bond_interfaces = set()
+    top_level_mlag = []
+    global_evpn_blocks = []
 
     for index, item in enumerate(documents):
         block = item.get("set") if isinstance(item, dict) else None
@@ -3548,6 +3999,11 @@ def _redundancy_mode_errors(document, expected_bond_types=None):
         if isinstance(block.get("mlag"), dict):
             mlag_evidence.append(f"{prefix}.mlag")
             core_mlag_evidence.append(f"{prefix}.mlag")
+            top_level_mlag.append(block["mlag"])
+
+        evpn = block.get("evpn")
+        if isinstance(evpn, dict):
+            global_evpn_blocks.append(evpn)
 
         interfaces = block.get("interface")
         if isinstance(interfaces, dict):
@@ -3555,6 +4011,8 @@ def _redundancy_mode_errors(document, expected_bond_types=None):
                 if not isinstance(config, dict):
                     continue
                 interface_path = f"{prefix}.interface.{interface_name}"
+                if str(config.get("type") or "").casefold() == "bond":
+                    actual_bond_interfaces.add(str(interface_name))
                 if str(config.get("type") or "").casefold() == "peerlink":
                     mlag_evidence.append(interface_path)
                     core_mlag_evidence.append(interface_path)
@@ -3564,12 +4022,17 @@ def _redundancy_mode_errors(document, expected_bond_types=None):
                     path = f"{interface_path}.bond.mlag"
                     mlag_evidence.append(path)
                     core_mlag_evidence.append(path)
+                    actual_mlag_bonds.add(str(interface_name))
                 interface_evpn = config.get("evpn")
                 if isinstance(interface_evpn, dict) and isinstance(
                         interface_evpn.get("multihoming"), dict):
                     multihoming_evidence.append(
                         f"{interface_path}.evpn.multihoming"
                     )
+                    if isinstance(
+                            interface_evpn["multihoming"].get("segment"),
+                            dict):
+                        actual_evpn_bonds.add(str(interface_name))
 
         nve = block.get("nve")
         vxlan = nve.get("vxlan") if isinstance(nve, dict) else None
@@ -3596,13 +4059,361 @@ def _redundancy_mode_errors(document, expected_bond_types=None):
         errors.append(
             "$.set: 输入声明 MLAG，但生成的 NVUE YAML 没有生成 MLAG 配置"
         )
+    if expected_bonds is None:
+        return errors
+
+    descriptors = tuple(expected_bonds)
+    expected_names = []
+    expected_mlag_names = set()
+    expected_evpn_names = set()
+
+    def fragments_for(interface_name):
+        matches = []
+        for selector, fragments in _interface_fragments(document).items():
+            expanded = set(expand_nvue_selector(selector))
+            if selector == interface_name or interface_name in expanded:
+                matches.extend(fragments)
+        return matches
+
+    def mapping_keys(values, label):
+        result = set()
+        if not values:
+            errors.append(f"{label}: 缺少 mapping")
+            return result
+        for value in values:
+            if not isinstance(value, dict):
+                errors.append(f"{label}: 必须是 mapping")
+                continue
+            result.update(str(key) for key in value)
+        return result
+
+    def require_scalar(fragments, path, expected, label):
+        values = _mapping_policy_values(fragments, *path)
+        if values != [expected]:
+            errors.append(f"{label}: 实际={values!r}，应为 {expected!r}")
+
+    def validate_bridge(descriptor, fragments):
+        name = descriptor["name"]
+        prefix = f"$.set.interface.{name}.bridge.domain.br_default"
+        access = _mapping_policy_values(
+            fragments, "bridge", "domain", "br_default", "access",
+        )
+        untagged = _mapping_policy_values(
+            fragments, "bridge", "domain", "br_default", "untagged",
+        )
+        vlans = _mapping_policy_values(
+            fragments, "bridge", "domain", "br_default", "vlan",
+        )
+        native = descriptor.get("vlan_native")
+        mode = descriptor.get("vlan_mode")
+        if native is not None:
+            if access or untagged != [native]:
+                errors.append(
+                    f"{prefix}: native attachment 实际 access={access!r}, "
+                    f"untagged={untagged!r}，应为 untagged={native!r}"
+                )
+            expected_selector = str(descriptor.get("vlan_trunk_range"))
+        elif mode == "access":
+            expected_access = descriptor.get("vlan_access")
+            native_equivalent = (
+                not access
+                and untagged == [expected_access]
+                and len(vlans) == 1
+                and isinstance(vlans[0], dict)
+                and {str(key) for key in vlans[0]} == {str(expected_access)}
+            )
+            if not (
+                    (access == [expected_access] and not untagged and not vlans)
+                    or native_equivalent):
+                errors.append(
+                    f"{prefix}: access attachment 实际 access={access!r}, "
+                    f"untagged={untagged!r}, vlan={vlans!r}，"
+                    f"应为 access={expected_access!r}"
+                )
+            return
+        else:
+            if access or untagged:
+                errors.append(
+                    f"{prefix}: trunk attachment 不得含 access/untagged"
+                )
+            expected_selector = str(descriptor.get("vlan_trunk_range"))
+        vlan_keys = mapping_keys(vlans, f"{prefix}.vlan")
+        if vlan_keys != {expected_selector}:
+            errors.append(
+                f"{prefix}.vlan: 实际={sorted(vlan_keys)!r}，"
+                f"应为 {[expected_selector]!r}"
+            )
+
+    for descriptor in descriptors:
+        if not isinstance(descriptor, dict):
+            errors.append("$.set.interface: expected bond descriptor 必须是 mapping")
+            continue
+        name = str(descriptor.get("name") or "")
+        mode = str(descriptor.get("type") or "").strip().casefold()
+        if not name or name in expected_names:
+            errors.append(f"$.set.interface: expected bond 名称无效或重复：{name!r}")
+            continue
+        expected_names.append(name)
+        fragments = fragments_for(name)
+        if not fragments:
+            errors.append(f"$.set.interface.{name}: 输入 bond 未生成")
+            continue
+        require_scalar(fragments, ("type",), "bond", f"$.set.interface.{name}.type")
+        require_scalar(
+            fragments, ("bond", "mode"), "lacp",
+            f"$.set.interface.{name}.bond.mode",
+        )
+        expected_members = (
+            descriptor.get("members", ())
+            if mode == "localbond"
+            else (descriptor.get("member"),)
+        )
+        expected_members = {
+            str(member) for member in expected_members if member
+        }
+        actual_members = mapping_keys(
+            _mapping_policy_values(fragments, "bond", "member"),
+            f"$.set.interface.{name}.bond.member",
+        )
+        if actual_members != expected_members:
+            errors.append(
+                f"$.set.interface.{name}.bond.member: "
+                f"实际={sorted(actual_members)!r}，"
+                f"应为 {sorted(expected_members)!r}"
+            )
+        validate_bridge(descriptor, fragments)
+
+        mlag_values = _mapping_policy_values(fragments, "bond", "mlag")
+        segment_values = _mapping_policy_values(
+            fragments, "evpn", "multihoming", "segment",
+        )
+        if mode == "mlag":
+            expected_mlag_names.add(name)
+            expected_mlag = {
+                "id": descriptor.get("id"), "state": "enabled",
+            }
+            if mlag_values != [expected_mlag]:
+                errors.append(
+                    f"$.set.interface.{name}.bond.mlag: "
+                    f"实际={mlag_values!r}，应为 {expected_mlag!r}"
+                )
+            if segment_values:
+                errors.append(
+                    f"$.set.interface.{name}: MLAG bond 不得生成 EVPN-MH segment"
+                )
+        elif mode == "evpn_multihoming":
+            expected_evpn_names.add(name)
+            if mlag_values:
+                errors.append(
+                    f"$.set.interface.{name}: EVPN-MH bond 不得生成 MLAG"
+                )
+            if len(segment_values) != 1 or not isinstance(segment_values[0], dict):
+                errors.append(
+                    f"$.set.interface.{name}.evpn.multihoming.segment: "
+                    "必须生成一个 mapping"
+                )
+            else:
+                segment = segment_values[0]
+                if segment.get("local-id") != descriptor.get("id"):
+                    errors.append(
+                        f"$.set.interface.{name}.evpn.multihoming.segment.local-id: "
+                        f"实际={segment.get('local-id')!r}，"
+                        f"应为 {descriptor.get('id')!r}"
+                    )
+                if segment.get("state") != "enabled":
+                    errors.append(
+                        f"$.set.interface.{name}.evpn.multihoming.segment.state: "
+                        "必须为 'enabled'"
+                    )
+                expected_mac = str(descriptor.get("mac_address") or "").strip()
+                if expected_mac:
+                    try:
+                        actual_mac = normalize_redundancy_mac(
+                            segment.get("mac-address")
+                        )
+                    except ValueError:
+                        actual_mac = None
+                    if actual_mac != normalize_redundancy_mac(expected_mac):
+                        errors.append(
+                            f"$.set.interface.{name}.evpn.multihoming.segment."
+                            f"mac-address: 实际={segment.get('mac-address')!r}，"
+                            f"应为 {expected_mac!r}"
+                        )
+        elif mode == "localbond":
+            if mlag_values or segment_values:
+                errors.append(
+                    f"$.set.interface.{name}: local bond 不得生成 MLAG/EVPN-MH"
+                )
+        else:
+            errors.append(f"$.set.interface.{name}: 未知 expected bond type={mode!r}")
+
+    expected_name_set = set(expected_names)
+    if actual_bond_interfaces != expected_name_set:
+        errors.append(
+            "$.set.interface: 实际 bond interface="
+            f"{sorted(actual_bond_interfaces)!r}，应为 {sorted(expected_name_set)!r}"
+        )
+    if actual_mlag_bonds != expected_mlag_names:
+        errors.append(
+            "$.set.interface: MLAG 证据属于错误 bond；"
+            f"实际={sorted(actual_mlag_bonds)!r}，"
+            f"应为 {sorted(expected_mlag_names)!r}"
+        )
+    if actual_evpn_bonds != expected_evpn_names:
+        errors.append(
+            "$.set.interface: EVPN-MH 证据属于错误 bond；"
+            f"实际={sorted(actual_evpn_bonds)!r}，"
+            f"应为 {sorted(expected_evpn_names)!r}"
+        )
+
+    global_evpn_states = [
+        item.get("state") for item in global_evpn_blocks if "state" in item
+    ]
+    global_mh_values = [
+        item.get("multihoming") for item in global_evpn_blocks
+        if "multihoming" in item
+    ]
+    if expected_evpn_names:
+        if "enabled" not in global_evpn_states or not any(
+                isinstance(item, dict) and item.get("state") == "enabled"
+                for item in global_mh_values):
+            errors.append(
+                "$.set.evpn: EVPN-MH bond 必须启用全局 EVPN multihoming policy"
+            )
+    elif multihoming_evidence:
+        errors.append(
+            "$.set: 没有 active EVPN-MH bond 时不得生成 multihoming 证据"
+        )
+
+    if expected_mlag_names:
+        peerlink_members = {
+            tuple(descriptor.get("peerlink_members", ()))
+            for descriptor in descriptors
+            if descriptor.get("type") == "mlag"
+        }
+        if len(peerlink_members) != 1:
+            errors.append("$.set.interface.peerlink: MLAG descriptors 的成员不一致")
+        else:
+            expected_peerlink = set(next(iter(peerlink_members)))
+            peerlink_fragments = fragments_for("peerlink")
+            require_scalar(
+                peerlink_fragments, ("type",), "peerlink",
+                "$.set.interface.peerlink.type",
+            )
+            actual_peerlink = mapping_keys(
+                _mapping_policy_values(peerlink_fragments, "bond", "member"),
+                "$.set.interface.peerlink.bond.member",
+            )
+            if actual_peerlink != expected_peerlink:
+                errors.append(
+                    "$.set.interface.peerlink.bond.member: "
+                    f"实际={sorted(actual_peerlink)!r}，"
+                    f"应为 {sorted(expected_peerlink)!r}"
+                )
+            sublink = fragments_for("peerlink.4094")
+            require_scalar(
+                sublink, ("base-interface",), "peerlink",
+                "$.set.interface.peerlink.4094.base-interface",
+            )
+            require_scalar(
+                sublink, ("vlan",), 4094,
+                "$.set.interface.peerlink.4094.vlan",
+            )
+        if not any(
+                isinstance(item, dict) and item.get("state") == "enabled"
+                and isinstance(item.get("backup"), dict) and item["backup"]
+                for item in top_level_mlag):
+            errors.append(
+                "$.set.mlag: MLAG bond 必须生成 enabled top-level MLAG backup"
+            )
+    elif mlag_evidence:
+        errors.append("$.set: 没有 active MLAG bond 时不得生成 MLAG/peerlink 证据")
     return errors
 
 
-_TERMINAL_L2_STP_POLICY = {
+_TERMINAL_L2_STP_SETTINGS = frozenset({
+    "admin-edge",
+    "bpdu-guard",
+})
+_TERMINAL_L2_STP_LEGACY_POLICY = {
     "admin-edge": "on",
     "bpdu-guard": "on",
 }
+_TERMINAL_L2_STP_CURRENT_POLICY = {
+    "admin-edge": "enabled",
+    "bpdu-guard": "enabled",
+}
+
+
+def _terminal_l2_stp_policy(cumulus_version):
+    """Return the NVUE Edge/BPDU Guard enum for the target CL release.
+
+    NVUE changed both settings from ``on|off`` to ``enabled|disabled`` in
+    Cumulus Linux 5.15.  Never guess when the project version is absent or
+    malformed because the wrong enum makes the generated replacement fail on
+    the switch.
+    """
+    if not isinstance(cumulus_version, str):
+        raise ValueError("Cumulus version 必须是 major.minor 字符串")
+    match = re.fullmatch(
+        r"\s*(\d+)\.(\d+)(?:\.\d+)?(?:[-+_][0-9A-Za-z][0-9A-Za-z._-]*)?\s*",
+        cumulus_version,
+    )
+    if not match:
+        raise ValueError(
+            f"Cumulus version 无法识别：{cumulus_version!r}"
+        )
+    release = (int(match.group(1)), int(match.group(2)))
+    policy = (
+        _TERMINAL_L2_STP_CURRENT_POLICY
+        if release >= (5, 15)
+        else _TERMINAL_L2_STP_LEGACY_POLICY
+    )
+    return dict(policy)
+
+
+def _terminal_l2_stp_shape_errors(document):
+    """Reject non-mapping STP fragments before automatic mutation.
+
+    A single generated ``stp:`` null placeholder is supported and replaced by
+    the injector.  In a multi-``set`` interface/domain, however, a later null
+    or scalar could override the injected mapping, so every explicit fragment
+    must already be a mapping.
+    """
+    occurrences = {}
+    for block in _nvue_set_operations(document):
+        interfaces = block.get("interface")
+        if not isinstance(interfaces, dict):
+            continue
+        for raw_selector, config in interfaces.items():
+            if not isinstance(config, dict):
+                continue
+            bridge = config.get("bridge")
+            domains = bridge.get("domain") if isinstance(bridge, dict) else None
+            if not isinstance(domains, dict):
+                continue
+            for raw_domain, domain_config in domains.items():
+                if not isinstance(domain_config, dict):
+                    continue
+                key = (str(raw_selector), str(raw_domain))
+                occurrences.setdefault(key, []).append(domain_config)
+
+    errors = []
+    for (selector, domain_name), fragments in sorted(occurrences.items()):
+        for fragment in fragments:
+            if "stp" not in fragment:
+                continue
+            stp = fragment["stp"]
+            if isinstance(stp, dict):
+                continue
+            if stp is None and len(fragments) == 1:
+                continue
+            errors.append(
+                f"$.set.interface.{selector}.bridge.domain.{domain_name}.stp: "
+                "必须是 mapping"
+            )
+    return errors
+
 
 _ROCE_QOS_POLICY = {"mode": "lossless", "state": "enabled"}
 _PFC_WATCHDOG_POLICY = {"state": "enable"}
@@ -3829,6 +4640,31 @@ def _document_evpn_mh_enabled(document):
     return False
 
 
+def _normalize_generated_redundancy_policy(document, *, expected_evpn_mh):
+    """Remove template-global EVPN-MH state when no active MH bond exists.
+
+    Several roles share a legacy global EVPN fragment.  Schema-v2 bond intent
+    is now authoritative, so an empty or local-only profile must not inherit a
+    global multihoming enable solely from that shared fragment.
+    """
+    if expected_evpn_mh:
+        return False
+    changed = False
+    for index, block in enumerate(_nvue_set_operations(document)):
+        evpn = block.get("evpn")
+        if evpn is None:
+            continue
+        if not isinstance(evpn, dict):
+            raise ValueError(f"set[{index}].evpn 必须是 mapping")
+        if "multihoming" not in evpn:
+            continue
+        if not isinstance(evpn["multihoming"], dict):
+            raise ValueError(f"set[{index}].evpn.multihoming 必须是 mapping")
+        del evpn["multihoming"]
+        changed = True
+    return changed
+
+
 def _evpn_uplink_targets(document, bgp_neighbors=None):
     requested = _requested_bgp_interfaces(document, bgp_neighbors)
     fragments = _interface_fragments(document)
@@ -4005,123 +4841,130 @@ def _stp_values(domain_fragments, setting):
     return values
 
 
-def _normalize_terminal_l2_policy(terminal_l2_ports):
-    """Return a strict explicit interface set; missing policy means empty."""
-    if terminal_l2_ports is None:
-        return frozenset()
-    if not isinstance(terminal_l2_ports, (list, tuple, set)):
-        raise ValueError(
-            "terminal_l2_ports 内部值必须是 interface list"
-        )
-    normalized = []
-    seen = set()
-    for value in terminal_l2_ports:
-        for interface in parse_terminal_l2_ports(value):
-            if interface in seen:
-                raise ValueError(
-                    f"terminal_l2_ports 接口重复：{interface}"
+def _oobofoob_stp_transit_interfaces(template):
+    """Return the fixed OOB-of-OOB switch transit bonds that run normal STP."""
+    normalized = str(template or "").strip().casefold()
+    if normalized == "oobofoob-leaf":
+        return frozenset({"bond49b51"})
+    if normalized == "oobofoob-spine":
+        return frozenset(f"bond{index}" for index in range(1, 12))
+    return frozenset()
+
+
+def _peerlink_terminal_stp_conflicts(interface_fragments):
+    """Find Edge/BPDU Guard settings that must never appear on peerlinks."""
+    conflicts = []
+    for selector, fragments in sorted(interface_fragments.items()):
+        normalized = str(selector).strip().casefold()
+        types = {
+            str(fragment.get("type") or "").strip().casefold()
+            for fragment in fragments if isinstance(fragment, dict)
+        }
+        if not (
+            normalized == "peerlink"
+            or normalized.startswith("peerlink.")
+            or "peerlink" in types
+        ):
+            continue
+        for fragment in fragments:
+            bridge = fragment.get("bridge") if isinstance(fragment, dict) else None
+            domains = bridge.get("domain") if isinstance(bridge, dict) else None
+            if not isinstance(domains, dict):
+                continue
+            for domain_name, domain_config in domains.items():
+                stp = domain_config.get("stp") if isinstance(domain_config, dict) else None
+                if not isinstance(stp, dict):
+                    continue
+                forbidden = sorted(
+                    set(stp) & _TERMINAL_L2_STP_SETTINGS
                 )
-            seen.add(interface)
-            normalized.append(interface)
-    return frozenset(normalized)
+                if forbidden:
+                    conflicts.append((selector, str(domain_name), forbidden))
+    return conflicts
 
 
-def _select_terminal_l2_targets(document, terminal_l2_ports):
-    """Resolve the exact bridge selectors governed by terminal STP policy."""
+def _select_terminal_l2_targets(document, template=None, bgp_neighbors=None):
+    """Select automatic Edge ports and fixed OOB-of-OOB STP transit ports."""
     targets, fragments_by_name, bond_members, mixed_selectors = (
         _terminal_l2_bridge_domains(document)
     )
-    requested = _normalize_terminal_l2_policy(terminal_l2_ports)
+    if mixed_selectors:
+        details = "; ".join(
+            f"{selector} 同时包含独立端口和 bond member {','.join(members)}"
+            for selector, members in mixed_selectors
+        )
+        raise ValueError(f"二层 swp selector 不能混合 bond member：{details}")
+
+    transit_interfaces = _oobofoob_stp_transit_interfaces(template)
+    bgp_interfaces = {
+        str(name).casefold()
+        for name in _requested_bgp_interfaces(document, bgp_neighbors)
+    }
     selected = {}
-    covered = set()
-    mixed_by_selector = dict(mixed_selectors)
-    for selector, members in mixed_selectors:
-        expanded = {
-            str(name).casefold() for name in expand_nvue_selector(selector)
-        }
-        if expanded & requested:
-            raise ValueError(
-                f"接口 selector {selector} 同时包含独立端口和 bond member "
-                f"{','.join(members)}"
-            )
+    transit = {}
     for key, domain_fragments in targets.items():
         selector, _domain_name = key
         expanded = {
             str(name).casefold() for name in expand_nvue_selector(selector)
         }
-        overlap = expanded & requested
-        if not overlap:
-            continue
-        if overlap != expanded:
+        bgp_overlap = expanded & bgp_interfaces
+        if bgp_overlap:
             raise ValueError(
-                f"接口 selector {selector} 同时包含 terminal_l2_ports 和未列出接口；"
-                "必须拆分 selector 后再配置 STP"
+                f"接口 selector {selector} 同时配置 BGP 和二层 bridge；"
+                f"冲突接口 {','.join(sorted(bgp_overlap))}"
             )
-        if selector in mixed_by_selector:
-            raise ValueError(
-                f"接口 selector {selector} 同时包含独立端口和 bond member "
-                f"{','.join(mixed_by_selector[selector])}"
-            )
-        selected[key] = domain_fragments
-        covered.update(expanded)
-
-    logical_fragments = {}
-    for selector, fragments in fragments_by_name.items():
-        for name in expand_nvue_selector(selector):
-            logical_fragments.setdefault(str(name).casefold(), []).extend(
-                fragments,
-            )
-
-    missing = sorted(requested - covered)
-    normalized_bond_members = {
-        str(member).casefold() for member in bond_members
-    }
-    for interface in missing:
-        if interface in normalized_bond_members:
-            raise ValueError(
-                f"terminal_l2_ports={interface} 是 bond member，"
-                "STP 只能配置在逻辑 bond 上"
-            )
-        fragments = logical_fragments.get(interface, [])
-        types = {
-            str(fragment.get("type") or "").strip().casefold()
-            for fragment in fragments
-            if isinstance(fragment, dict)
-        }
-        types.discard("")
-        if interface.startswith("peerlink") or "peerlink" in types:
-            raise ValueError(
-                f"terminal_l2_ports 不允许 peerlink：{interface}"
-            )
-        if not fragments:
-            raise ValueError(
-                f"terminal_l2_ports 接口不存在：{interface}"
-            )
-        if not types.issubset({"swp", "bond"}) or not types:
-            raise ValueError(
-                f"terminal_l2_ports={interface} 不是 swp/bond 接口"
-            )
-        raise ValueError(
-            f"terminal_l2_ports={interface} 没有独立二层 bridge domain"
-        )
+        transit_overlap = expanded & transit_interfaces
+        if transit_overlap:
+            if transit_overlap != expanded:
+                raise ValueError(
+                    f"接口 selector {selector} 同时包含 OOB-of-OOB STP 互联端口 "
+                    f"{','.join(sorted(transit_overlap))} 和终端端口；必须拆分 selector"
+                )
+            transit[key] = domain_fragments
+        else:
+            selected[key] = domain_fragments
     return (
-        selected, targets, fragments_by_name, bond_members,
-        mixed_selectors, requested,
+        selected, transit, targets, fragments_by_name, bond_members,
+        mixed_selectors,
     )
 
 
-def _inject_terminal_l2_stp(document, terminal_l2_ports=None):
-    """Apply terminal Edge + BPDU Guard to selected L2 swp/bond ports.
+def _inject_terminal_l2_stp(
+        document, template=None, bgp_neighbors=None, schema_version=2,
+        cumulus_version=None):
+    """Apply Edge + BPDU Guard to independent L2 ports except STP transits.
 
-    Existing conflicting values are never overwritten.  Bond member physical
-    interfaces are deliberately excluded; STP belongs on the logical L2 bond.
-    A missing value and an empty list both select no interfaces.  This
-    fail-safe default prevents an unclassified switch-facing link from being
-    converted into an STP edge port.
+    Bond members and peerlink are excluded structurally.  The OOB-of-OOB
+    Leaf-to-Spine logical bonds remain normal STP ports so BPDUs can traverse
+    that topology.  Existing conflicting values are never overwritten.
     """
-    targets, _all_targets, _fragments, _members, _mixed, _requested = (
-        _select_terminal_l2_targets(document, terminal_l2_ports)
+    if schema_version != 2:
+        return False
+    policy = _terminal_l2_stp_policy(cumulus_version)
+    shape_errors = _terminal_l2_stp_shape_errors(document)
+    if shape_errors:
+        raise ValueError(shape_errors[0])
+    targets, transit, _all_targets, fragments, _members, _mixed = (
+        _select_terminal_l2_targets(document, template, bgp_neighbors)
     )
+    peerlink_conflicts = _peerlink_terminal_stp_conflicts(fragments)
+    if peerlink_conflicts:
+        details = "; ".join(
+            f"{selector}.{domain_name} 不得配置 {', '.join(forbidden)}"
+            for selector, domain_name, forbidden in peerlink_conflicts
+        )
+        raise ValueError(f"peerlink STP 互联端口 {details}")
+    for (interface_name, domain_name), domain_fragments in sorted(transit.items()):
+        configured = sorted(
+            setting for setting in _TERMINAL_L2_STP_SETTINGS
+            if _stp_values(domain_fragments, setting)
+        )
+        if configured:
+            raise ValueError(
+                f"接口 {interface_name} bridge domain {domain_name} 是 "
+                "OOB-of-OOB STP 互联端口，不得配置 "
+                + ", ".join(configured)
+            )
     changed = False
     for (interface_name, domain_name), domain_fragments in sorted(targets.items()):
         target_stp = domain_fragments[0].get("stp")
@@ -4137,7 +4980,7 @@ def _inject_terminal_l2_stp(document, terminal_l2_ports=None):
             raise ValueError(
                 f"接口 {interface_name} bridge domain {domain_name} stp 必须是 mapping"
             )
-        for setting, expected in _TERMINAL_L2_STP_POLICY.items():
+        for setting, expected in policy.items():
             values = _stp_values(domain_fragments, setting)
             if any(value != expected for value in values):
                 actual = ", ".join(repr(value) for value in values)
@@ -4151,18 +4994,32 @@ def _inject_terminal_l2_stp(document, terminal_l2_ports=None):
     return changed
 
 
-def _terminal_l2_stp_errors(document, terminal_l2_ports=None):
-    """Validate exact Edge + BPDU Guard placement on terminal L2 ports."""
+def _terminal_l2_stp_errors(
+        document, template=None, bgp_neighbors=None, schema_version=2,
+        cumulus_version=None):
+    """Validate automatic Edge policy and OOB-of-OOB normal-STP exceptions."""
+    if schema_version != 2:
+        return []
     try:
-        (targets, all_targets, fragments_by_name, bond_members,
-         mixed_selectors, requested) = _select_terminal_l2_targets(
-            document, terminal_l2_ports,
+        policy = _terminal_l2_stp_policy(cumulus_version)
+        shape_errors = _terminal_l2_stp_shape_errors(document)
+        if shape_errors:
+            return shape_errors
+        (targets, transit, _all_targets, fragments_by_name, bond_members,
+         _mixed_selectors) = _select_terminal_l2_targets(
+            document, template, bgp_neighbors,
         )
     except ValueError as exc:
         return [str(exc)]
     errors = []
+    for selector, domain_name, forbidden in _peerlink_terminal_stp_conflicts(
+            fragments_by_name):
+        errors.append(
+            f"$.set.interface.{selector}.bridge.domain.{domain_name}.stp: "
+            f"peerlink STP 互联端口不得配置 {', '.join(forbidden)}"
+        )
     for (interface_name, domain_name), domain_fragments in sorted(targets.items()):
-        for setting, expected in _TERMINAL_L2_STP_POLICY.items():
+        for setting, expected in policy.items():
             values = _stp_values(domain_fragments, setting)
             path = (
                 f"$.set.interface.{interface_name}.bridge.domain."
@@ -4176,18 +5033,15 @@ def _terminal_l2_stp_errors(document, terminal_l2_ports=None):
                     + ", ".join(repr(value) for value in values)
                 )
 
-    for key, domain_fragments in sorted(all_targets.items()):
-        if key in targets:
-            continue
-        interface_name, domain_name = key
+    for (interface_name, domain_name), domain_fragments in sorted(transit.items()):
         configured = sorted(
-            setting for setting in _TERMINAL_L2_STP_POLICY
+            setting for setting in _TERMINAL_L2_STP_SETTINGS
             if _stp_values(domain_fragments, setting)
         )
         if configured:
             errors.append(
                 f"$.set.interface.{interface_name}.bridge.domain."
-                f"{domain_name}.stp: 未在 terminal_l2_ports 列出，"
+                f"{domain_name}.stp: OOB-of-OOB STP 互联端口"
                 f"不得配置 {', '.join(configured)}"
             )
 
@@ -4204,7 +5058,7 @@ def _terminal_l2_stp_errors(document, terminal_l2_ports=None):
                 stp = domain_config.get("stp") if isinstance(domain_config, dict) else None
                 if not isinstance(stp, dict):
                     continue
-                forbidden = sorted(set(stp) & set(_TERMINAL_L2_STP_POLICY))
+                forbidden = sorted(set(stp) & _TERMINAL_L2_STP_SETTINGS)
                 if forbidden:
                     errors.append(
                         f"$.set.interface.{selector}.bridge.domain.{domain_name}.stp: "
@@ -4494,6 +5348,45 @@ def _inject_vrl_into_document(document, device_vars, global_vars):
     return True
 
 
+def _normalize_management_docker_config(document, *, cumulus_version):
+    """Remove the Docker state leaf for Cumulus 5.17.x and 5.18.x."""
+    version_match = re.fullmatch(
+        r"\s*(\d+)\.(\d+)(?:\.\d+)?(?:[-+_][0-9A-Za-z][0-9A-Za-z._-]*)?\s*",
+        str(cumulus_version or ""),
+    )
+    if not version_match or (
+        int(version_match.group(1)), int(version_match.group(2))
+    ) not in {(5, 17), (5, 18)}:
+        return False
+    changed = False
+    operations = document if isinstance(document, list) else []
+    for index, operation in enumerate(operations):
+        if not isinstance(operation, dict) or "set" not in operation:
+            continue
+        set_block = operation["set"]
+        if not isinstance(set_block, dict):
+            raise ValueError(f"set[{index}] 必须是 mapping")
+        system = set_block.get("system")
+        if system is None:
+            continue
+        if not isinstance(system, dict):
+            raise ValueError(f"set[{index}].system 必须是 mapping")
+        docker = system.get("docker")
+        if docker is None:
+            continue
+        if not isinstance(docker, dict):
+            raise ValueError(f"set[{index}].system.docker 必须是 mapping")
+        if "state" not in docker:
+            continue
+        if docker["state"] != "enabled":
+            raise ValueError(
+                f"set[{index}].system.docker.state 必须是 enabled 或省略"
+            )
+        del docker["state"]
+        changed = True
+    return changed
+
+
 _DROP_NVUE_NODE = object()
 
 
@@ -4538,9 +5431,72 @@ def _build_ref_index(ref_dir: str) -> dict:
     return index
 
 
-def generate_all(target=None, verify=False, ref_dir=None, fail_on_diff=False):
+def select_cumulus_generation_devices(
+    devices, *, deployment_scope="all", air_source_hostnames=(),
+):
+    """Select Production render sources for one deployment scope."""
+    if deployment_scope in {"all", "prod"}:
+        return devices
+    if deployment_scope != "air":
+        raise ValueError(f"unsupported deployment scope: {deployment_scope!r}")
+    requested = {str(item).casefold() for item in air_source_hostnames}
+    available = {str(name).casefold(): name for name in devices}
+    missing = sorted(requested - set(available))
+    if missing:
+        raise ValueError(
+            "AIR 配置来源设备不存在: " + ", ".join(missing)
+        )
+    return {
+        available[key]: devices[available[key]] for key in sorted(requested)
+    }
+
+
+def _air_source_hostnames_for_devices(devices):
+    """Derive exact Production sources represented by the active AIR JSON."""
+    air_files = _topology_air_json_files()
+    if not air_files:
+        raise ValueError("AIR deployment scope 缺少当前 *-air.json")
+    air_json = max(air_files, key=os.path.getmtime)
+    try:
+        document = json.loads(Path(air_json).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"无法读取 AIR JSON {air_json}: {exc}") from exc
+    container = document.get("content", document) if isinstance(document, dict) else None
+    nodes = container.get("nodes") if isinstance(container, dict) else None
+    if not isinstance(nodes, dict):
+        raise ValueError(f"AIR JSON 缺少 object 类型 content.nodes: {air_json}")
+    air_info = {
+        str(hostname).casefold(): {"hostname": str(hostname)}
+        for hostname, node in nodes.items()
+        if isinstance(node, dict)
+        and (
+            str(node.get("os") or "").strip().casefold().startswith("cumulus")
+            or str(node.get("os") or "").strip().casefold() == "oob-mgmt-switch"
+        )
+    }
+    selected = set()
+    for name in devices:
+        if _lookup_air_device(air_info, name) is not None:
+            selected.add(name)
+    return selected
+
+
+def generate_all(
+    target=None, verify=False, ref_dir=None, fail_on_diff=False,
+    deployment_scope="all",
+):
     global_vars, devices = load_devices()
     env = build_env()
+
+    air_sources = (
+        _air_source_hostnames_for_devices(devices)
+        if deployment_scope == "air" else set()
+    )
+    devices = select_cumulus_generation_devices(
+        devices,
+        deployment_scope=deployment_scope,
+        air_source_hostnames=air_sources,
+    )
 
     if target:
         match = next((k for k in devices if k.lower() == target.lower()), None)
@@ -4551,6 +5507,33 @@ def generate_all(target=None, verify=False, ref_dir=None, fail_on_diff=False):
 
     ref_index = _build_ref_index(ref_dir) if ref_dir else {}
 
+    # Prove all generated bond intent before creating the staging directory.
+    # In particular, two names can collapse to the same numeric MLAG/EVPN ID
+    # (for example bond1s0 and bond10).  Such a project must leave no partial
+    # output for a publisher to observe.
+    expected_bonds_by_name = {}
+    preflight_errors = 0
+    for name, device_vars in devices.items():
+        if device_vars.get("source_yaml_b64"):
+            continue
+        try:
+            if device_vars.get("_project_schema_version", 1) == 2:
+                expected_bonds_by_name[name] = (
+                    _expected_active_bond_descriptors(device_vars)
+                )
+            else:
+                preprocess_device(copy.deepcopy(device_vars))
+        except ValueError as exc:
+            print(f"[ERROR] {name}: bond intent 无效: {exc}")
+            preflight_errors += 1
+    if preflight_errors:
+        print(
+            "\n完成：生成 0 台，跳过 0 台，差异 0 台，"
+            f"错误 {preflight_errors} 台"
+        )
+        print("[ABORT] bond intent 预检失败，未创建或发布输出目录")
+        sys.exit(1)
+
     staging_dir = OUTPUT_DIR + ".tmp"
     if not verify:
         if os.path.exists(staging_dir):
@@ -4558,9 +5541,14 @@ def generate_all(target=None, verify=False, ref_dir=None, fail_on_diff=False):
         os.makedirs(staging_dir, exist_ok=True)
 
     ok = skipped = errors = diffs = 0
+    validated_outputs = {}
 
     for name, device_vars in devices.items():
-        terminal_l2_ports = device_vars.get("terminal_l2_ports", ())
+        source_yaml_receipt = bool(device_vars.get("source_yaml_b64"))
+        project_schema_version = device_vars.get("_project_schema_version", 1)
+        device_template = device_vars.get("template")
+        bgp_neighbors = device_vars.get("bgp_neighbors", ())
+        expected_bonds = expected_bonds_by_name.get(name)
         try:
             rendered = render(env, global_vars, name, device_vars)
         except Exception as e:
@@ -4581,19 +5569,38 @@ def generate_all(target=None, verify=False, ref_dir=None, fail_on_diff=False):
             vrl_injected = _inject_vrl_into_document(
                 rendered_doc, device_vars, global_vars,
             )
+            docker_config_normalized = False
             terminal_l2_stp_injected = False
             qos_injected = False
             evpn_uplink_injected = False
-            if not device_vars.get("source_yaml_b64"):
-                terminal_l2_stp_injected = _inject_terminal_l2_stp(
-                    rendered_doc, terminal_l2_ports,
+            redundancy_policy_normalized = False
+            if not source_yaml_receipt:
+                docker_config_normalized = _normalize_management_docker_config(
+                    rendered_doc,
+                    cumulus_version=global_vars.get("version"),
                 )
+                if project_schema_version == 2:
+                    terminal_l2_stp_injected = _inject_terminal_l2_stp(
+                        rendered_doc, device_template, bgp_neighbors,
+                        schema_version=project_schema_version,
+                        cumulus_version=global_vars.get("version"),
+                    )
                 qos_injected = _inject_qos_policy(
-                    rendered_doc, device_vars.get("template"),
+                    rendered_doc, device_template,
                 )
+                if project_schema_version == 2:
+                    redundancy_policy_normalized = (
+                        _normalize_generated_redundancy_policy(
+                            rendered_doc,
+                            expected_evpn_mh=any(
+                                item.get("type") == "evpn_multihoming"
+                                for item in expected_bonds
+                            ),
+                        )
+                    )
                 evpn_uplink_injected = _inject_evpn_mh_uplinks(
                     rendered_doc,
-                    device_vars.get("bgp_neighbors", ()),
+                    bgp_neighbors,
                     "evpn_multihoming" in _device_bond_types(device_vars),
                 )
         except ValueError as e:
@@ -4603,6 +5610,7 @@ def generate_all(target=None, verify=False, ref_dir=None, fail_on_diff=False):
         redundancy_errors = _redundancy_mode_errors(
             rendered_doc,
             expected_bond_types=_device_bond_types(device_vars),
+            expected_bonds=expected_bonds,
         )
         if redundancy_errors:
             print(
@@ -4611,8 +5619,13 @@ def generate_all(target=None, verify=False, ref_dir=None, fail_on_diff=False):
             )
             errors += 1
             continue
-        terminal_l2_stp_errors = _terminal_l2_stp_errors(
-            rendered_doc, terminal_l2_ports,
+        terminal_l2_stp_errors = (
+            [] if (source_yaml_receipt or project_schema_version != 2)
+            else _terminal_l2_stp_errors(
+                rendered_doc, device_template, bgp_neighbors,
+                schema_version=project_schema_version,
+                cumulus_version=global_vars.get("version"),
+            )
         )
         if terminal_l2_stp_errors:
             print(
@@ -4657,6 +5670,11 @@ def generate_all(target=None, verify=False, ref_dir=None, fail_on_diff=False):
             print(f"  [CLEAN] {name}: 已省略 {removed_nulls} 个 null NVUE 空操作")
         if vrl_injected:
             print(f"  [VRL] {name}: 已合并到原有单一 set 操作")
+        if docker_config_normalized:
+            print(
+                f"  [DOCKER] {name}: Cumulus {global_vars.get('version')} "
+                "已省略 docker.state"
+            )
         if dhcp_relay_injected:
             print(f"  [SVI/VRR] {name}: 已合并 VRF loopback/版本化 SVI MAC 配置")
         if terminal_l2_stp_injected:
@@ -4665,9 +5683,12 @@ def generate_all(target=None, verify=False, ref_dir=None, fail_on_diff=False):
             print(f"  [QOS] {name}: 已生成全局 lossless RoCE 与物理端口 PFC watchdog")
         if evpn_uplink_injected:
             print(f"  [EVPN-MH] {name}: 已为全部 BGP 物理接口启用 uplink tracking")
-        if (removed_nulls or vrl_injected or dhcp_relay_injected
+        if redundancy_policy_normalized:
+            print(f"  [BOND] {name}: 已移除无 active EVPN-MH bond 的全局 multihoming")
+        if (removed_nulls or vrl_injected or docker_config_normalized
+                or dhcp_relay_injected
                 or terminal_l2_stp_injected or qos_injected
-                or evpn_uplink_injected):
+                or evpn_uplink_injected or redundancy_policy_normalized):
             rendered = _dump_generated_yaml(rendered_doc)
         null_paths = _nvue_null_paths(rendered_doc)
         if null_paths:
@@ -4721,13 +5742,18 @@ def generate_all(target=None, verify=False, ref_dir=None, fail_on_diff=False):
             out_file = os.path.join(staging_dir, f"{name}.yaml")
             with open(out_file, "w", encoding="utf-8") as f:
                 f.write(rendered)
+            validated_outputs[os.path.basename(out_file)] = (
+                rendered, rendered_doc,
+            )
             ok += 1
 
     print(f"\n完成：生成 {ok} 台，跳过 {skipped} 台，差异 {diffs} 台，错误 {errors} 台")
 
     if not verify:
         if errors == 0:
-            directory_errors = _validate_yaml_directory(staging_dir)
+            directory_errors = _validate_cached_yaml_directory(
+                staging_dir, validated_outputs,
+            )
             if directory_errors:
                 errors += len(directory_errors)
                 for detail in directory_errors:
@@ -4843,6 +5869,99 @@ def _grep_dot_descriptions(dot_lines, hostname):
     return desc
 
 
+_P2P_EMPTY_DESCRIPTION = "P2P:----UNUSED-----NO-PEER"
+_DESCRIPTION_INTENT_SUFFIX = "-description-intent.json"
+
+
+def _description_intent_path(dot_file):
+    path = Path(dot_file)
+    suffix = "-lldpq.dot"
+    if not path.name.endswith(suffix):
+        raise ValueError(f"LLDPQ filename must end with {suffix}: {path}")
+    return path.with_name(path.name[:-len(suffix)] + _DESCRIPTION_INTENT_SUFFIX)
+
+
+def _load_description_intent(dot_file):
+    """Load an optional P2P empty-endpoint sidecar bound to this exact DOT."""
+    path = _description_intent_path(dot_file)
+    if not os.path.lexists(path):
+        return []
+    metadata = path.lstat()
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise ValueError(
+            f"description intent must be a single-link regular file: {path}"
+        )
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot read description intent {path}: {exc}") from exc
+    expected_keys = {
+        "schema_version", "source_workbook", "lldpq_sha256", "empty_endpoints",
+    }
+    if not isinstance(document, dict) or set(document) != expected_keys:
+        raise ValueError(f"invalid description intent document: {path}")
+    if document["schema_version"] != 1:
+        raise ValueError(f"unsupported description intent schema: {path}")
+    if (not isinstance(document["source_workbook"], str)
+            or not document["source_workbook"].strip()
+            or Path(document["source_workbook"]).name
+            != document["source_workbook"]):
+        raise ValueError(f"invalid description intent source workbook: {path}")
+    expected_sha256 = hashlib.sha256(Path(dot_file).read_bytes()).hexdigest()
+    if document["lldpq_sha256"] != expected_sha256:
+        raise ValueError(
+            f"description intent does not match current LLDPQ DOT: {path}"
+        )
+    endpoints = document["empty_endpoints"]
+    if not isinstance(endpoints, list):
+        raise ValueError(f"description intent endpoints must be a list: {path}")
+    validated = []
+    seen = set()
+    endpoint_keys = {"device", "port", "source_port", "sheet", "row"}
+    for index, endpoint in enumerate(endpoints, start=1):
+        if not isinstance(endpoint, dict) or set(endpoint) != endpoint_keys:
+            raise ValueError(
+                f"invalid description intent endpoint #{index}: {path}"
+            )
+        if (not all(isinstance(endpoint[key], str) and endpoint[key].strip()
+                    for key in ("device", "port", "source_port", "sheet"))
+                or isinstance(endpoint["row"], bool)
+                or not isinstance(endpoint["row"], int)
+                or endpoint["row"] < 1):
+            raise ValueError(
+                f"invalid description intent endpoint #{index}: {path}"
+            )
+        if any(
+            any(character in endpoint[key] for character in ('"', "\\", "\r", "\n", "\0"))
+            for key in ("device", "port")
+        ):
+            raise ValueError(
+                f"unsafe description intent endpoint #{index}: {path}"
+            )
+        key = (endpoint["device"].casefold(), endpoint["port"].casefold())
+        if key in seen:
+            raise ValueError(f"duplicate description intent endpoint: {path}")
+        seen.add(key)
+        validated.append(endpoint)
+    return validated
+
+
+def _empty_intent_descriptions(endpoints, hostname):
+    host_lower = hostname.casefold()
+    descriptions = {}
+    for endpoint in endpoints:
+        device = endpoint["device"].casefold()
+        if device != host_lower and not device.endswith(f"-{host_lower}"):
+            continue
+        port = endpoint["port"]
+        if port in descriptions:
+            raise ValueError(
+                f"multiple P2P empty intents match {hostname}:{port}"
+            )
+        descriptions[port] = _P2P_EMPTY_DESCRIPTION
+    return descriptions
+
+
 def _load_csv_hostnames():
     csv_path = _CSV_FILE
     if not os.path.isfile(csv_path):
@@ -4920,12 +6039,94 @@ def _patch_yaml(filepath, host_descriptions):
     return patched, missing_in_dot, all_swp_ports
 
 
+def _count_exact_yaml_token(value, target):
+    """Count an interface token in keys and scalar values without coercion."""
+    if isinstance(value, dict):
+        return sum(
+            (1 if key == target else 0)
+            + _count_exact_yaml_token(item, target)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return sum(_count_exact_yaml_token(item, target) for item in value)
+    return 1 if value == target else 0
+
+
+def _is_generated_breakout_filler_config(config):
+    """Recognize only the minimal child config emitted for unused lanes."""
+    if not isinstance(config, dict) or config.get("type") != "swp":
+        return False
+    extra = {key: value for key, value in config.items() if key != "type"}
+    return not extra or extra == {
+        "qos": {"pfc-watchdog": {"state": "enable"}},
+    }
+
+
+def _unused_breakout_filler_ports(filepath, candidates):
+    """Return missing-DOT ports that only exist to complete a breakout mode.
+
+    A port remains a warning unless it is a child of an explicitly configured
+    2x/4x/8x parent, has only the generator's minimal filler configuration,
+    and is not referenced anywhere else in the generated document.
+    """
+    try:
+        with open(filepath, encoding="utf-8") as stream:
+            document = _load_generated_yaml(stream.read())
+    except (OSError, UnicodeError, yaml.YAMLError):
+        return set()
+
+    fragments = document if isinstance(document, list) else [document]
+    interfaces = {}
+    for fragment in fragments:
+        if not isinstance(fragment, dict):
+            continue
+        set_fragment = fragment.get("set")
+        if not isinstance(set_fragment, dict):
+            continue
+        interface_fragment = set_fragment.get("interface")
+        if not isinstance(interface_fragment, dict):
+            continue
+        for name, config in interface_fragment.items():
+            interfaces.setdefault(name, []).append(config)
+
+    filler_ports = set()
+    for port in candidates:
+        child = _SWP_SUB_RE.fullmatch(port)
+        if child is None:
+            continue
+        parent, sub_index = child.group(1), int(child.group(2))
+        child_configs = interfaces.get(port, [])
+        if (
+            len(child_configs) != 1
+            or not _is_generated_breakout_filler_config(child_configs[0])
+            or _count_exact_yaml_token(document, port) != 1
+        ):
+            continue
+
+        breakout_counts = set()
+        for parent_config in interfaces.get(parent, []):
+            if not isinstance(parent_config, dict):
+                continue
+            link = parent_config.get("link")
+            breakout = link.get("breakout") if isinstance(link, dict) else None
+            if not isinstance(breakout, dict):
+                continue
+            for mode in breakout:
+                match = re.fullmatch(r"(2|4|8)x", str(mode))
+                if match:
+                    breakout_counts.add(int(match.group(1)))
+        if any(sub_index < count for count in breakout_counts):
+            filler_ports.add(port)
+    return filler_ports
+
+
 def _port_sort_key(p):
     return [int(c) if c.isdigit() else c for c in re.split(r'(\d+)', p)]
 
 
 def _run_patch_descriptions(dot_file, output_dir):
     """Inline equivalent of patch_descriptions.main()."""
+    empty_intents = _load_description_intent(dot_file)
     dest_dir = output_dir + "_with_desc"
     if os.path.exists(dest_dir):
         shutil.rmtree(dest_dir)
@@ -4949,6 +6150,9 @@ def _run_patch_descriptions(dot_file, output_dir):
     patched_count    = 0
     skipped_count    = 0
     no_desc          = {}
+    unused_breakout  = {}
+    p2p_empty_patched = {}
+    p2p_empty_missing = {}
     no_desc_skipped  = []
     yaml_swp_ports   = {}
     host_dot_ports   = {}
@@ -4958,10 +6162,31 @@ def _run_patch_descriptions(dot_file, output_dir):
             continue
         hostname     = fname[:-5]
         fpath        = os.path.join(dest_dir, fname)
-        host_descs   = _grep_dot_descriptions(dot_lines, hostname)
+        physical_descs = _grep_dot_descriptions(dot_lines, hostname)
+        empty_descs = _empty_intent_descriptions(empty_intents, hostname)
+        overlap = sorted(set(physical_descs) & set(empty_descs), key=_port_sort_key)
+        if overlap:
+            raise ValueError(
+                f"P2P port has both a physical peer and empty intent: "
+                f"{hostname}:{overlap[0]}"
+            )
+        host_descs = dict(physical_descs)
+        host_descs.update(empty_descs)
         patched, missing, swp_ports = _patch_yaml(fpath, host_descs)
         yaml_swp_ports[hostname.lower()] = swp_ports
-        host_dot_ports[hostname.lower()] = set(host_descs.keys())
+        host_dot_ports[hostname.lower()] = set(physical_descs.keys())
+        patched_empty = sorted(set(empty_descs) & swp_ports, key=_port_sort_key)
+        missing_empty = sorted(set(empty_descs) - swp_ports, key=_port_sort_key)
+        if patched_empty:
+            p2p_empty_patched[hostname] = patched_empty
+        if missing_empty:
+            p2p_empty_missing[hostname] = missing_empty
+        filler_ports = _unused_breakout_filler_ports(fpath, missing)
+        if filler_ports:
+            unused_breakout[hostname] = sorted(
+                filler_ports, key=_port_sort_key,
+            )
+            missing = [port for port in missing if port not in filler_ports]
         if patched:
             patched_count += 1
         else:
@@ -4988,6 +6213,22 @@ def _run_patch_descriptions(dot_file, output_dir):
             if port not in yaml_swp_ports[host_lower]:
                 extra_in_dot.setdefault(host_lower, []).append(port)
 
+    # Report an empty-peer intent even when no YAML file exists for its
+    # device.  Per-file checks above already cover a matching device whose
+    # individual port is absent.
+    yaml_hostnames = set(yaml_swp_ports)
+    for endpoint in empty_intents:
+        device = endpoint["device"].casefold()
+        if any(
+            device == hostname or device.endswith(f"-{hostname}")
+            for hostname in yaml_hostnames
+        ):
+            continue
+        hostname = endpoint["device"]
+        ports = p2p_empty_missing.setdefault(hostname, [])
+        if endpoint["port"] not in ports:
+            ports.append(endpoint["port"])
+
     print(f"\nPatched:  {patched_count} files")
     print(f"Skipped:  {skipped_count} files (no matching descriptions)")
     print(f"Output:   {dest_dir}")
@@ -4996,6 +6237,25 @@ def _run_patch_descriptions(dot_file, output_dir):
         print(f"\n[已忽略] swp1-48（1G 接入口）有部分未在 dot 文件中出现（端口未使用），已跳过（共 {len(no_desc_skipped)} 台）：")
         for h in sorted(no_desc_skipped):
             print(f"  {h}")
+
+    if p2p_empty_patched or unused_breakout:
+        print("\n[INFO] breakout 模式自动补齐的未使用子端口：")
+    if p2p_empty_patched:
+        print("  P2P 空对端，已添加 description：")
+        for hostname, ports in sorted(p2p_empty_patched.items()):
+            compressed = _compress_ports(ports)
+            print(f"    {hostname}: {', '.join(compressed)}")
+    if unused_breakout:
+        print("  P2P 无记录，未添加 description：")
+        for hostname, ports in sorted(unused_breakout.items()):
+            compressed = _compress_ports(ports)
+            print(f"    {hostname}: {', '.join(compressed)}")
+
+    if p2p_empty_missing:
+        print("\n[WARNING] P2P 标记为空的接口未出现在 yaml 中，无法添加 description：")
+        for hostname, ports in sorted(p2p_empty_missing.items()):
+            compressed = _compress_ports(ports)
+            print(f"  {hostname}: {', '.join(compressed)}")
 
     if no_desc:
         print("\n[WARNING] yaml 中有此接口但 dot 中无连接记录，未添加 description：")
@@ -5719,7 +6979,14 @@ def generate_air_hostname_configs(source_dir, output_dir):
     default_file = version_default if target_version and os.path.isfile(version_default) else os.path.join(service_dir, "default.yaml")
     if not os.path.isfile(default_file):
         raise ValueError(f"找不到 AIR baseline 默认配置: {default_file}")
-    default_text = Path(default_file).read_text(encoding="utf-8")
+    rendered_defaults = _refresh_cumulus_defaults_from_global()
+    default_name = os.path.basename(default_file)
+    try:
+        default_text = rendered_defaults[default_name]
+    except KeyError as exc:
+        raise ValueError(
+            f"AIR baseline 站点默认配置未生成: {default_name}"
+        ) from exc
     default_document = _load_generated_yaml(default_text)
     if not isinstance(default_document, list):
         raise ValueError(f"AIR baseline 默认配置顶层必须是 list: {default_file}")
@@ -5765,6 +7032,9 @@ def generate_air_hostname_configs(source_dir, output_dir):
     targets = set()
     manifest_devices = []
     try:
+        artifact = Path(temporary, AIR_EFFECTIVE_DEFAULT_ARTIFACT)
+        artifact.write_text(default_text, encoding="utf-8")
+        shutil.copymode(default_file, artifact)
         for source in sorted(glob.glob(os.path.join(source_dir, "*.yaml"))):
             if os.path.islink(source):
                 continue
@@ -5801,9 +7071,10 @@ def generate_air_hostname_configs(source_dir, output_dir):
             baseline = baseline_document(device["hostname"])
             target_path = Path(temporary, target_name)
             target_path.write_text(
-                yaml.safe_dump(
+                yaml.dump(
                     baseline, allow_unicode=True, sort_keys=False,
                     default_flow_style=False, width=120,
+                    Dumper=_YamlSafeDumperBase,
                 ),
                 encoding="utf-8",
             )
@@ -5834,7 +7105,8 @@ def generate_air_hostname_configs(source_dir, output_dir):
             "environment": "air",
             "source_json": os.path.basename(air_json),
             "target_cumulus_version": target_version,
-            "effective_default": os.path.basename(default_file),
+            "effective_default": default_name,
+            "effective_default_artifact": AIR_EFFECTIVE_DEFAULT_ARTIFACT,
             "effective_default_sha256": default_sha256,
             "devices": sorted(manifest_devices, key=lambda item: item["hostname"].casefold()),
         }
@@ -6095,6 +7367,7 @@ def _write_yaml_ib(data, path):
         allow_unicode=True,
         sort_keys=False,
         width=120,
+        Dumper=_GeneratedYamlDumper,
     )
     _load_generated_yaml(rendered)
     with open(tmp, "w", encoding="utf-8") as f:
@@ -6125,7 +7398,6 @@ def _generate_group_ib(devices, global_cfg, out_dir, target=None):
         out_path = os.path.join(staging_dir, f"{hostname}.yaml")
         try:
             data = _build_yaml_ib(dev, global_cfg)
-            yaml.dump(data)
             _write_yaml_ib(data, out_path)
             eth1_info = f"  eth1={dev['eth1_ip']}/{dev['eth1_pfx']}" if dev["has_eth1"] else ""
             print(f"[OK] {hostname}.yaml  (eth0={dev['eth0_ip']}/{dev['eth0_pfx']}{eth1_info})")
@@ -6153,7 +7425,7 @@ def _generate_group_ib(devices, global_cfg, out_dir, target=None):
     return generated, errors
 
 
-def _generate_all_ib(target=None):
+def _generate_all_ib(target=None, *, switch_scope="all"):
     devices, parse_errors = _load_csv_ib()
 
     if parse_errors:
@@ -6162,8 +7434,15 @@ def _generate_all_ib(target=None):
             print(e)
         sys.exit(1)
 
-    ib_devices  = [d for d in devices if d["type"] == "ib"]
-    nvl_devices = [d for d in devices if d["type"] == "nvl"]
+    selected = str(switch_scope or "all").strip().casefold()
+    if selected not in {"all", "ib", "nvl"}:
+        raise ValueError(f"unsupported NVOS switch scope: {switch_scope!r}")
+    ib_devices = [
+        d for d in devices if d["type"] == "ib" and selected in {"all", "ib"}
+    ]
+    nvl_devices = [
+        d for d in devices if d["type"] == "nvl" and selected in {"all", "nvl"}
+    ]
 
     # 按类型独立校验，互不干扰
     ib_errors  = _validate_fields_ib(ib_devices)  + _check_duplicates_ib(ib_devices)
@@ -6212,6 +7491,25 @@ def _generate_all_ib(target=None):
     return total_gen
 
 
+def _production_handoff_rows(row):
+    """Describe the preview/production boundary after standalone generation."""
+    return [
+        row(),
+        row("2. 本独立生成流程仅用于隔离开发预览，不激活生产发布或服务"),
+        row("   生产不得逐步复制 DHCP/YAML，也不得手工重启服务"),
+        row(),
+        row("3. 生产请回到仓库根目录，按既定后端执行统一事务："),
+        row("   Native/systemd："),
+        row("     sudo python3 DAY0-Prepare/11-load.py DAY0-Prepare/<project>"),
+        row("   Docker/Supervisor，首次部署或 source write 后："),
+        row("     sudo ./infra/docker/deploy.sh deploy"),
+        row("   已有与 live 来源身份链匹配且经验证的镜像："),
+        row("     sudo ./infra/docker/deploy.sh deploy-preloaded <IMAGE_ID>"),
+        row("   没有 source write 且已有运行中的 inactive 控制容器："),
+        row("     sudo ./infra/docker/deploy.sh load"),
+    ]
+
+
 def _print_info_block_ib():
     ts = _TS
     W  = 72
@@ -6244,15 +7542,51 @@ def _print_info_block_ib():
         row("   （在 nvos/ 目录下执行；两个目录放在同一条命令中）："),
         *publish_steps,
         row("   并原子更新 99-output-ib_nvl/latest；未完成时保留上一版本"),
-        row(),
-        row("2. 准备 ZTP 服务器的 DHCP 配置，"),
-        row("   完成后重启 isc-dhcp-server 服务："),
-        row("   sudo systemctl restart isc-dhcp-server"),
-        row(),
-        row("3. 开始 ZTP 流程，Provision IB/NVL 交换机"),
+        *_production_handoff_rows(row),
         "╚" + "═" * W + "╝",
     ]
     print("\n" + "\n".join(lines) + "\n")
+
+
+def eth_followup_text(ts, *, has_patch, target=None):
+    """Render an actionable next step without offering an impossible publish."""
+    width = 72
+
+    def display_len(value):
+        return sum(2 if ord(character) > 0x7F else 1 for character in value)
+
+    def row(text=""):
+        padding = width - 2 - display_len(text)
+        return f"║  {text}{' ' * max(0, padding)}║"
+
+    lines = [
+        "╔" + "═" * width + "╗",
+        row("后续操作步骤"),
+        "╠" + "═" * width + "╣",
+    ]
+    if target:
+        lines.extend([
+            row(f"仅生成了单台设备：{target}"),
+            row("该输出不满足完整发布门禁，不能作为完整发布输入。"),
+            row("请不带 HOSTNAME 重新运行 90-c2-generate_configs.py："),
+            row("python3 90-c2-generate_configs.py -y"),
+            row("完整生成成功后，再按该次输出显示的步骤发布。"),
+            "╚" + "═" * width + "╝",
+        ])
+        return "\n" + "\n".join(lines) + "\n"
+
+    lines.extend([
+        row("1. 执行 d-hostname2mac.py 生成 MAC 软链接并发布"),
+        row("   （在 cumulus/ 目录下执行）："),
+        row(f"   python3 d-hostname2mac.py template/99-output/{ts}"),
+        row(f"   自动优先使用 patch：{'是' if has_patch else '否'}"),
+        row("   Production/AIR 各自链接到独立 YAML；两份配置仅 hostname 不同"),
+        row(f"   发布目录：{ts}_combine/；AIR 输入为 {ts}_air/"),
+        row(f"   源目录归档为 {ts}_combine_sources.tar.gz 后删除"),
+        *_production_handoff_rows(row),
+        "╚" + "═" * width + "╝",
+    ])
+    return "\n" + "\n".join(lines) + "\n"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -6262,35 +7596,26 @@ def _print_info_block_ib():
 if __name__ == "__main__":
     if _BRANCH == "eth":
         # ── ETH argument parsing and main flow ──
-        _args = list(_SCRIPT_ARGS)
-        if "-h" in _args or "--help" in _args:
-            print("""usage: 90-c2-generate_configs.py [--branch eth] [-y] [--csv=PATH] [--verify]
-                              [--ref-dir=DIR] [--fail-on-diff] [HOSTNAME]
-
-从 CSV 生成 NVUE YAML（ETH 分支）。带 source_yaml_b64/source_yaml_sha256/source_fields_sha256
-元数据的 yaml_to_csv.py 输出会进行完整性校验并采用无损回环；普通 CSV 继续使用 Jinja 模板。""")
-            sys.exit(0)
+        parsed = parse_generation_args(_SCRIPT_ARGS, branch="eth")
         if not _HAS_JINJA2:
             print("[ERROR] ETH 分支依赖 Jinja2，请先执行 pip install jinja2")
             sys.exit(1)
-        if "-y" in _args:
-            _AUTO_YES = True
-            _args = [a for a in _args if a != "-y"]
-        _csv_override = next((a.split("=", 1)[1] for a in _args if a.startswith("--csv=")), None)
-        if _csv_override:
-            _CSV_FILE = os.path.abspath(_csv_override)
-            _args = [a for a in _args if not a.startswith("--csv=")]
+        _AUTO_YES = parsed.auto_yes
+        if parsed.csv_file:
+            _CSV_FILE = os.path.abspath(parsed.csv_file)
             print(f"[INFO] 使用指定 CSV: {_CSV_FILE}")
         _generate_devices_yaml()
-        args = _args
-        verify       = "--verify" in args
-        fail_on_diff = "--fail-on-diff" in args
-        ref_dir = next((a.split("=", 1)[1] for a in args if a.startswith("--ref-dir=")), None)
-        args = [a for a in args if not a.startswith("--")]
-        target = args[0] if args else None
-        generate_all(target=target, verify=verify, ref_dir=ref_dir, fail_on_diff=fail_on_diff)
-        if not verify:
-            prompt_patch_descriptions(OUTPUT_DIR)
+        target = parsed.hostname
+        generate_all(
+            target=target, verify=parsed.verify, ref_dir=parsed.ref_dir,
+            fail_on_diff=parsed.fail_on_diff,
+            deployment_scope=parsed.deployment_scope,
+        )
+        if not parsed.verify:
+            if should_prompt_descriptions(parsed):
+                prompt_patch_descriptions(OUTPUT_DIR)
+            else:
+                print("[INFO] --skip-descriptions：已显式跳过 LLDP 描述 patch")
 
             ts            = os.path.basename(OUTPUT_DIR)
             with_desc_dir = OUTPUT_DIR + "_with_desc"
@@ -6300,61 +7625,25 @@ if __name__ == "__main__":
                     OUTPUT_DIR, with_desc_dir if has_patch else None,
                 )
                 air_source_dir = with_desc_dir if has_patch else OUTPUT_DIR
-                generate_air_hostname_configs(air_source_dir, OUTPUT_DIR + "_air")
+                if parsed.deployment_scope != "prod":
+                    generate_air_hostname_configs(
+                        air_source_dir, OUTPUT_DIR + "_air",
+                    )
             except ValueError as exc:
                 print(f"[ABORT] {exc}")
                 sys.exit(1)
 
-            W = 72
-            def _display_len(s):
-                n = 0
-                for c in s:
-                    n += 2 if ord(c) > 0x7F else 1
-                return n
-            def row(text=""):
-                pad = W - 2 - _display_len(text)
-                return f"║  {text}{' ' * max(0, pad)}║"
-
-            lines = [
-                "╔" + "═" * W + "╗",
-                row("后续操作步骤"),
-                "╠" + "═" * W + "╣",
-            ]
-            lines.extend([
-                row(f"1. 执行 d-hostname2mac.py 生成 MAC 软链接并发布"),
-                row(f"   （在 cumulus/ 目录下执行）："),
-                row(f"   python3 d-hostname2mac.py template/99-output/{ts}"),
-                row(f"   自动优先使用 patch：{'是' if has_patch else '否'}"),
-                row(f"   Production/AIR 各自链接到独立 YAML；两份配置仅 hostname 不同"),
-            ])
-            lines.extend([
-                row(f"   发布目录：{ts}_combine/；AIR 输入为 {ts}_air/"),
-                row(f"   源目录归档为 {ts}_combine_sources.tar.gz 后删除"),
-            ])
-            lines.extend([
-                row(),
-                row(f"2. 准备 ZTP 服务器的 DHCP 配置（DSCP），"),
-                row(f"   完成后重启 isc-dhcp-server 服务："),
-                row(f"   sudo systemctl restart isc-dhcp-server"),
-                row(),
-                row(f"3. 开始 ZTP 流程，Provision 以太交换机"),
-                "╚" + "═" * W + "╝",
-            ])
-            print("\n" + "\n".join(lines) + "\n")
+            print(eth_followup_text(
+                ts, has_patch=has_patch, target=target,
+            ))
 
     else:
         # ── IB argument parsing and main flow ──
-        args = list(_SCRIPT_ARGS)
-        if "-h" in args or "--help" in args:
-            print("""usage: 90-c2-generate_configs.py [--branch ib] [-y] [HOSTNAME]
-
-从 CSV 生成 NVOS YAML（IB 分支）。处理 type==ib 和 type==nvl 的行。""")
-            sys.exit(0)
-        if "-y" in args:
-            _AUTO_YES = True
-            args = [a for a in args if a != "-y"]
-
-        target = args[0] if args else None
-        n = _generate_all_ib(target=target)
+        parsed = parse_generation_args(_SCRIPT_ARGS, branch="ib")
+        _AUTO_YES = parsed.auto_yes
+        target = parsed.hostname
+        n = _generate_all_ib(
+            target=target, switch_scope=parsed.switch_scope or "all",
+        )
         if n > 0:
             _print_info_block_ib()

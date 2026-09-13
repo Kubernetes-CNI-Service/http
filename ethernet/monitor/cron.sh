@@ -125,6 +125,8 @@ SPX=$(mktemp)   # eth_spx/spx only (sw-link.sh)
 IB=$(mktemp)    # populated from ib.csv: type=ib
 NV=$(mktemp)    # populated from nvsw.csv: type=nvl
 DYNAMIC_AIR_IDENTITIES=$(mktemp)  # runtime hostname|authoritative eth0 MAC|runtime source (AIR + unbound Production)
+PLANNED_DEVICES=$(mktemp)  # immutable hostname set before per-device filtering
+DEVICE_FAILURES=$(mktemp)  # hostname<TAB>operation<TAB>bounded reason
 DYNAMIC_AIR_HELPER=${BASE}/../../ztp/dynamic_air_inventory.py
 DHCP_RUNTIME_HELPER=${BASE}/../../ztp/dhcp_runtime_inventory.py
 AIR_JSON_FILE=${BASE}/../../ztp/config/isc-dhcp-server/p2p-air.json
@@ -151,7 +153,7 @@ if ! flock "${lock_args[@]}" 200; then
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] 采集锁等待超时或另一实例正在运行（$LOCK_FILE）" >&2
     exit 1
 fi
-trap 'rm -f "$ETH" "$SPX" "$IB" "$NV" "$DYNAMIC_AIR_IDENTITIES" ${ASKPASS_FILE:+"$ASKPASS_FILE"}' EXIT
+trap 'rm -f "$ETH" "$SPX" "$IB" "$NV" "$DYNAMIC_AIR_IDENTITIES" "$PLANNED_DEVICES" "$DEVICE_FAILURES" ${ASKPASS_FILE:+"$ASKPASS_FILE"}' EXIT
 SWSH=${BASE}/sw-info.sh          # unified info script for ETH and IB switches
 SWLSH=${BASE}/sw-link.sh         # unified link script for SPX and IB switches
 POST_COLLECT=${BASE}/post-collect.py  # exact-archive validation + HTML refresh
@@ -182,9 +184,20 @@ NV_REMOTE_DIR="/home/${NV_SSH_USER}/monitor"
 # Shared public key deployed to all switch types.  It must come from the active
 # project; embedding a former management server's key would silently authorize
 # the wrong host after a project migration.
-ACTIVE_INVENTORY=$(readlink -f "${BASE}/eth.csv" 2>/dev/null || true)
+_collector_area=$(basename "$(dirname "$BASE")")
+case "$_collector_area" in
+    ethernet)   _inventory_name="eth.csv" ;;
+    infiniband) _inventory_name="ib.csv" ;;
+    nvlink)     _inventory_name="nvsw.csv" ;;
+    *)
+        echo "[ERROR] unsupported collector entrypoint area: ${_collector_area}" >&2
+        exit 1
+        ;;
+esac
+_inventory="${BASE}/${_inventory_name}"
+ACTIVE_INVENTORY=$(readlink -f "$_inventory" 2>/dev/null || true)
 ACTIVE_PROJECT_DIR=${ACTIVE_INVENTORY%/*}
-MGMT_PUBKEY_FILE=${MGMT_PUBKEY_FILE:-${ACTIVE_PROJECT_DIR}/mgmt-server.pub}
+MGMT_PUBKEY_FILE=${ACTIVE_PROJECT_DIR}/mgmt-server.pub
 if [[ -z "$ACTIVE_INVENTORY" || ! -s "$MGMT_PUBKEY_FILE" ]]; then
     echo "[ERROR] active project mgmt-server.pub is missing or empty: ${MGMT_PUBKEY_FILE}" >&2
     exit 1
@@ -218,6 +231,66 @@ log() {
     else
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
     fi
+}
+
+# Create the executable OpenSSH askpass helper outside Docker's noexec /tmp.
+# Container startup owns the fixed 0700 directory; this function only accepts
+# an existing, canonical, caller-owned private directory before placing code in
+# it. Native deployments retain their normal TMPDIR fallback.
+create_ssh_askpass_helper() {
+    local askpass_dir="${HTTP_ZTP_ASKPASS_TMPDIR:-}"
+    local require_private_dir=0
+    if [[ -n "$askpass_dir" ]]; then
+        require_private_dir=1
+    elif [[ "${HTTP_ZTP_RUNTIME_BACKEND:-}" == "supervisor" ]]; then
+        askpass_dir="/run/http-ztp/askpass"
+        require_private_dir=1
+    else
+        askpass_dir="${TMPDIR:-/tmp}"
+    fi
+
+    if (( require_private_dir )); then
+        if ! python3 - "$askpass_dir" <<'PY'
+import os
+import stat
+import sys
+
+directory = sys.argv[1]
+canonical = os.path.abspath(directory)
+try:
+    metadata = os.lstat(directory)
+except OSError as exc:
+    raise SystemExit(f"cannot inspect private askpass directory: {exc}")
+if directory != canonical or os.path.realpath(directory) != canonical:
+    raise SystemExit("private askpass directory must be an absolute canonical path")
+if not stat.S_ISDIR(metadata.st_mode):
+    raise SystemExit("private askpass path is not a directory")
+if metadata.st_uid != os.geteuid():
+    raise SystemExit("private askpass directory has the wrong owner")
+if stat.S_IMODE(metadata.st_mode) != 0o700:
+    raise SystemExit("private askpass directory mode must be 0700")
+PY
+        then
+            log "[KEY] ERROR: unsafe executable SSH askpass directory: ${askpass_dir}"
+            return 1
+        fi
+    fi
+
+    ASKPASS_FILE=$(mktemp "${askpass_dir%/}/monitor-ssh-askpass.XXXXXX") || {
+        log "[KEY] ERROR: could not create the temporary SSH askpass helper"
+        return 1
+    }
+    if ! printf '%s\n' '#!/bin/sh' \
+        'printf "%s\n" "$MONITOR_SSH_PASSWORD"' > "$ASKPASS_FILE" \
+        || ! chmod 700 "$ASKPASS_FILE"
+    then
+        log "[KEY] ERROR: could not prepare the temporary SSH askpass helper"
+        rm -f "$ASKPASS_FILE"
+        ASKPASS_FILE=""
+        return 1
+    fi
+    export SSH_ASKPASS="$ASKPASS_FILE" SSH_ASKPASS_REQUIRE=force
+    export DISPLAY="${DISPLAY:-:0}"
 }
 
 detect_eth_environment() {
@@ -538,15 +611,91 @@ archive_collection_dir() {
     rm -r -- "$dir"
 }
 
-# run_parallel <hosts_file> <cmd_template>
+# Record one device-scoped problem without turning a surviving batch into a
+# global collector failure. Inputs have already passed valid_host_entry().
+record_device_failure() {
+    local operation="$1" entry="$2" reason="$3" name host
+    IFS='|' read -r name host <<< "$entry"
+    [[ -n "$name" ]] || name="$host"
+    reason=$(printf '%s' "$reason" | tr '\t\r\n' '   ' | cut -c1-500)
+    printf '%s\t%s\t%s\n' "$name" "$operation" "${reason:-operation failed}" \
+        >> "$DEVICE_FAILURES"
+}
+
+record_planned_devices() {
+    awk -F'|' '
+        /^[[:space:]]*(#|$)/ { next }
+        {
+            key=tolower($1)
+            if (key != "" && !seen[key]++) print $1
+        }
+    ' "$ETH" "$IB" "$NV" > "$PLANNED_DEVICES"
+}
+
+# Emit exactly one bounded machine result for the root worker. Device failures
+# are deduplicated by hostname; one device can carry several failed operations.
+emit_collection_result() {
+    python3 - "$PLANNED_DEVICES" "$DEVICE_FAILURES" <<'PY'
+import json
+import sys
+
+planned_path, failures_path = sys.argv[1:]
+with open(planned_path, encoding="utf-8") as stream:
+    planned = [line.strip() for line in stream if line.strip()]
+planned_by_key = {name.casefold(): name for name in planned}
+failures = {}
+with open(failures_path, encoding="utf-8") as stream:
+    for raw in stream:
+        fields = raw.rstrip("\n").split("\t", 2)
+        if len(fields) != 3:
+            raise SystemExit("invalid device failure record")
+        hostname, operation, reason = fields
+        key = hostname.casefold()
+        if key not in planned_by_key:
+            raise SystemExit("failure references an unplanned device")
+        item = failures.setdefault(key, {"operations": [], "reasons": []})
+        if operation not in item["operations"]:
+            item["operations"].append(operation)
+        if reason not in item["reasons"]:
+            item["reasons"].append(reason)
+failed_devices = [
+    {
+        "hostname": planned_by_key[key],
+        "operation": ",".join(sorted(value["operations"])),
+        "reason": "; ".join(value["reasons"])[:1024],
+    }
+    for key, value in sorted(failures.items())
+]
+failed_count = len(failed_devices)
+succeeded = len(planned) - failed_count
+state = "success" if not failed_count else ("partial" if succeeded else "failed")
+payload = {
+    "schema_version": 1,
+    "task": "switch_collection",
+    "state": state,
+    "planned": len(planned),
+    "succeeded": succeeded,
+    "failed_count": failed_count,
+    "failed_devices": failed_devices,
+}
+print("[HTTP_ZTP_TASK_RESULT] " + json.dumps(
+    payload, ensure_ascii=False, separators=(",", ":"),
+))
+raise SystemExit(1 if state == "failed" else 0)
+PY
+}
+
+# run_parallel <hosts_file> <cmd_template> <operation>
 # Runs cmd_template for every host in hosts_file, at most MAX_PARALLEL at a time.
 # Host-list rows use "expected_hostname|ssh_target". __NAME__ is replaced with
 # the CSV hostname and __HOST__ with the required eth0_ip address.
-# Returns 1 if any individual command failed, 0 if all succeeded.
+# Individual failures are removed from hosts_file and recorded for the final
+# summary. Return 1 only for an unsafe row or an internal bookkeeping failure.
 run_parallel() {
-    local hosts_file="$1" cmd_tmpl="$2"
-    local pids=() failed=0
+    local hosts_file="$1" cmd_tmpl="$2" operation="${3:-collection}"
+    local pids=() unsafe=0 successful
     local entry name host command
+    successful=$(mktemp) || return 1
     while IFS= read -r entry; do
         [[ -z "$entry" || "$entry" =~ ^[[:space:]]*# ]] && continue
         IFS='|' read -r name host <<< "$entry"
@@ -554,28 +703,35 @@ run_parallel() {
         [[ -n "$host" ]] || host="$name"
         if ! valid_host_entry "$name" "$host"; then
             echo "[PARALLEL][REJECT] unsafe hostname/IP entry: ${name}|${host}" >&2
-            failed=$((failed + 1))
+            unsafe=1
             continue
         fi
         command=${cmd_tmpl//__NAME__/$name}
         command=${command//__HOST__/$host}
         (
-            bash -c "$command" </dev/null
-            rc=$?
-            if (( rc != 0 )); then
+            if bash -c "$command" </dev/null; then
+                printf '%s\n' "$entry" >> "$successful"
+            else
+                rc=$?
                 echo "[PARALLEL][FAIL] ${name} (${host}, exit=${rc})" >&2
+                record_device_failure "$operation" "$entry" "command exit=${rc}"
             fi
-            exit "$rc"
+            exit 0
         ) &
         pids+=("$!")
         # 达到并发上限时，先等待本批全部结束再继续
         if (( ${#pids[@]} >= MAX_PARALLEL )); then
-            for pid in "${pids[@]}"; do wait "$pid" || failed=$((failed + 1)); done
+            for pid in "${pids[@]}"; do wait "$pid" || unsafe=1; done
             pids=()
         fi
     done < "$hosts_file"
-    for pid in "${pids[@]}"; do wait "$pid" || failed=$((failed + 1)); done
-    return $((failed > 0 ? 1 : 0))
+    for pid in "${pids[@]}"; do wait "$pid" || unsafe=1; done
+    if (( unsafe )); then
+        rm -f "$successful"
+        return 1
+    fi
+    mv "$successful" "$hosts_file"
+    return 0
 }
 
 # parse_csv_hosts — find the *.csv in $BASE, select device types from its filename
@@ -802,14 +958,7 @@ deploy_ssh_keys_legacy() {
         return 1
     fi
 
-    ASKPASS_FILE=$(mktemp "${TMPDIR:-/tmp}/monitor-ssh-askpass.XXXXXX") || {
-        log "[KEY] ERROR: could not create the temporary SSH askpass helper"
-        return 1
-    }
-    printf '%s\n' '#!/bin/sh' 'printf "%s\n" "$MONITOR_SSH_PASSWORD"' > "$ASKPASS_FILE"
-    chmod 700 "$ASKPASS_FILE"
-    export SSH_ASKPASS="$ASKPASS_FILE" SSH_ASKPASS_REQUIRE=force
-    export DISPLAY="${DISPLAY:-:0}"
+    create_ssh_askpass_helper || return 1
     command=${prepare_template/__SSH_OPTIONS__/$SSH_PASSWORD_OPTS}
 
     for attempt in 1 2 3; do
@@ -1001,14 +1150,10 @@ deploy_ssh_keys() {
     fi
 
     if hosts_file_has_entries "$auth_failed"; then
-        ASKPASS_FILE=$(mktemp "${TMPDIR:-/tmp}/monitor-ssh-askpass.XXXXXX") || {
+        create_ssh_askpass_helper || {
             rm -f "$ready" "$auth_failed" "$unavailable"
             return 1
         }
-        printf '%s\n' '#!/bin/sh' 'printf "%s\n" "$MONITOR_SSH_PASSWORD"' > "$ASKPASS_FILE"
-        chmod 700 "$ASKPASS_FILE"
-        export SSH_ASKPASS="$ASKPASS_FILE" SSH_ASKPASS_REQUIRE=force
-        export DISPLAY="${DISPLAY:-:0}"
     fi
 
     for attempt in 1 2 3; do
@@ -1048,13 +1193,17 @@ deploy_ssh_keys() {
     mv "$ready" "$hosts_file"
     prepared_count=$(hosts_file_entry_count "$hosts_file")
     unavailable_count=$(hosts_file_entry_count "$unavailable")
+    while IFS= read -r entry; do
+        [[ -z "$entry" || "$entry" =~ ^[[:space:]]*# ]] && continue
+        record_device_failure "ssh_prepare" "$entry" "SSH authentication or transport unavailable"
+    done < "$unavailable"
     rm -f "$auth_failed" "$unavailable"
     if (( unavailable_count > 0 )); then
         log "[KEY] WARN: ${unavailable_count} ${label} host(s) unavailable; continuing with ${prepared_count} reachable host(s)"
     fi
     if (( prepared_count == 0 )); then
-        log "[KEY] ERROR: no reachable ${label} hosts remain"
-        return 1
+        log "[KEY] WARN: no reachable ${label} hosts remain; other device families continue"
+        return 0
     fi
     log "[KEY] ── ${label}: done; prepared=${prepared_count}, unavailable=${unavailable_count} ──"
 }
@@ -1073,7 +1222,11 @@ collect_eth_info() {
     log "[ETH] deploying sw-info.sh"
     if ! run_parallel "$ETH" \
         "scp $SSH_OPTS $SWSH ${ETH_SSH_USER}@__HOST__:${ETH_REMOTE_DIR}/ 2>&1" \
+        "eth_info_deploy" \
     ; then log "[ETH] ERROR: one or more deploys failed; skipping this phase"; return 1; fi
+    if ! hosts_file_has_entries "$ETH"; then
+        log "[ETH] WARN: no device survived script deployment"; rm -r -- "$dir"; return 0
+    fi
 
     log "[ETH] triggering remote collection"
     if ! run_parallel "$ETH" \
@@ -1082,7 +1235,11 @@ collect_eth_info() {
               rm -f monitor/*.info
               test -s monitor/sw-info.sh || exit 1
               nohup bash monitor/sw-info.sh </dev/null >/dev/null 2>&1 &'" \
+        "eth_info_trigger" \
     ; then log "[ETH] ERROR: one or more triggers failed; skipping wait/retrieval"; return 1; fi
+    if ! hosts_file_has_entries "$ETH"; then
+        log "[ETH] WARN: no device survived collection trigger"; rm -r -- "$dir"; return 0
+    fi
 
     log "[ETH] waiting ${ETH_WAIT}s for remote jobs"
     sleep "$ETH_WAIT"
@@ -1090,7 +1247,11 @@ collect_eth_info() {
     log "[ETH] retrieving *.info files"
     if ! run_parallel "$ETH" \
         "scp $SSH_OPTS ${ETH_SSH_USER}@__HOST__:${ETH_REMOTE_DIR}/*.info ${dir}/__NAME__.info 2>&1" \
+        "eth_info_retrieve" \
     ; then log "[ETH] ERROR: some hosts returned no *.info files"; return 1; fi
+    if ! hosts_file_has_entries "$ETH"; then
+        log "[ETH] WARN: no device returned an info file"; rm -r -- "$dir"; return 0
+    fi
 
     local count expected
     count=$(find "$dir" -name "*.info" 2>/dev/null | wc -l | tr -d '[:space:]')
@@ -1117,7 +1278,11 @@ collect_spx_link() {
     log "[SPX] deploying sw-link.sh"
     if ! run_parallel "$SPX" \
         "scp $SSH_OPTS $SWLSH ${ETH_SSH_USER}@__HOST__:${ETH_REMOTE_DIR}/ 2>&1" \
+        "spx_link_deploy" \
     ; then log "[SPX] ERROR: one or more deploys failed; skipping this phase"; return 1; fi
+    if ! hosts_file_has_entries "$SPX"; then
+        log "[SPX] WARN: no device survived script deployment"; rm -r -- "$dir"; return 0
+    fi
 
     log "[SPX] triggering remote collection"
     if ! run_parallel "$SPX" \
@@ -1126,7 +1291,11 @@ collect_spx_link() {
               rm -f monitor/*.link
               test -s monitor/sw-link.sh || exit 1
               nohup bash monitor/sw-link.sh </dev/null >/dev/null 2>&1 &'" \
+        "spx_link_trigger" \
     ; then log "[SPX] ERROR: one or more triggers failed; skipping wait/retrieval"; return 1; fi
+    if ! hosts_file_has_entries "$SPX"; then
+        log "[SPX] WARN: no device survived collection trigger"; rm -r -- "$dir"; return 0
+    fi
 
     log "[SPX] waiting ${SPX_WAIT}s for remote jobs"
     sleep "$SPX_WAIT"
@@ -1134,7 +1303,11 @@ collect_spx_link() {
     log "[SPX] retrieving *.link files"
     if ! run_parallel "$SPX" \
         "scp $SSH_OPTS ${ETH_SSH_USER}@__HOST__:${ETH_REMOTE_DIR}/*.link ${dir}/__NAME__.link 2>&1" \
+        "spx_link_retrieve" \
     ; then log "[SPX] ERROR: some hosts returned no *.link files"; return 1; fi
+    if ! hosts_file_has_entries "$SPX"; then
+        log "[SPX] WARN: no device returned a link file"; rm -r -- "$dir"; return 0
+    fi
 
     local count expected csv
     count=$(find "$dir" -name "*.link" 2>/dev/null | wc -l | tr -d '[:space:]')
@@ -1163,7 +1336,11 @@ collect_ib_info() {
     log "[IB]  deploying sw-info.sh"
     if ! run_parallel "$IB" \
         "scp $SSH_OPTS $SWSH ${IB_SSH_USER}@__HOST__:${IB_REMOTE_DIR}/ 2>&1" \
+        "ib_info_deploy" \
     ; then log "[IB]  ERROR: one or more deploys failed; skipping this phase"; return 1; fi
+    if ! hosts_file_has_entries "$IB"; then
+        log "[IB] WARN: no device survived script deployment"; rm -r -- "$dir"; return 0
+    fi
 
     log "[IB]  triggering remote collection"
     if ! run_parallel "$IB" \
@@ -1172,7 +1349,11 @@ collect_ib_info() {
               rm -f monitor/*.info
               test -s monitor/sw-info.sh || exit 1
               nohup bash monitor/sw-info.sh </dev/null >/dev/null 2>&1 &'" \
+        "ib_info_trigger" \
     ; then log "[IB]  ERROR: one or more triggers failed; skipping wait/retrieval"; return 1; fi
+    if ! hosts_file_has_entries "$IB"; then
+        log "[IB] WARN: no device survived collection trigger"; rm -r -- "$dir"; return 0
+    fi
 
     log "[IB]  waiting ${IB_WAIT}s for remote jobs"
     sleep "$IB_WAIT"
@@ -1180,7 +1361,11 @@ collect_ib_info() {
     log "[IB]  retrieving *.info files"
     if ! run_parallel "$IB" \
         "scp $SSH_OPTS ${IB_SSH_USER}@__HOST__:${IB_REMOTE_DIR}/*.info ${dir}/__NAME__.info 2>&1" \
+        "ib_info_retrieve" \
     ; then log "[IB]  ERROR: some hosts returned no *.info files"; return 1; fi
+    if ! hosts_file_has_entries "$IB"; then
+        log "[IB] WARN: no device returned an info file"; rm -r -- "$dir"; return 0
+    fi
 
     local count expected
     count=$(find "$dir" -name "*.info" 2>/dev/null | wc -l | tr -d '[:space:]')
@@ -1203,7 +1388,11 @@ collect_ib_link() {
     log "[IBL] deploying sw-link.sh"
     if ! run_parallel "$IB" \
         "scp $SSH_OPTS $SWLSH ${IB_SSH_USER}@__HOST__:${IB_REMOTE_DIR}/ 2>&1" \
+        "ib_link_deploy" \
     ; then log "[IBL] ERROR: one or more deploys failed; skipping this phase"; return 1; fi
+    if ! hosts_file_has_entries "$IB"; then
+        log "[IBL] WARN: no device survived script deployment"; rm -r -- "$dir"; return 0
+    fi
 
     log "[IBL] triggering remote collection"
     if ! run_parallel "$IB" \
@@ -1212,7 +1401,11 @@ collect_ib_link() {
               rm -f monitor/*.link
               test -s monitor/sw-link.sh || exit 1
               nohup bash monitor/sw-link.sh </dev/null >/dev/null 2>&1 &'" \
+        "ib_link_trigger" \
     ; then log "[IBL] ERROR: one or more triggers failed; skipping wait/retrieval"; return 1; fi
+    if ! hosts_file_has_entries "$IB"; then
+        log "[IBL] WARN: no device survived collection trigger"; rm -r -- "$dir"; return 0
+    fi
 
     log "[IBL] waiting ${IBL_WAIT}s for remote jobs"
     sleep "$IBL_WAIT"
@@ -1220,7 +1413,11 @@ collect_ib_link() {
     log "[IBL] retrieving *.link files"
     if ! run_parallel "$IB" \
         "scp $SSH_OPTS ${IB_SSH_USER}@__HOST__:${IB_REMOTE_DIR}/*.link ${dir}/__NAME__.link 2>&1" \
+        "ib_link_retrieve" \
     ; then log "[IBL] ERROR: some hosts returned no *.link files"; return 1; fi
+    if ! hosts_file_has_entries "$IB"; then
+        log "[IBL] WARN: no device returned a link file"; rm -r -- "$dir"; return 0
+    fi
 
     local count expected csv
     count=$(find "$dir" -name "*.link" 2>/dev/null | wc -l | tr -d '[:space:]')
@@ -1249,7 +1446,11 @@ collect_nv_info() {
     log "[NV]  deploying sw-info.sh"
     if ! run_parallel "$NV" \
         "scp $SSH_OPTS $SWSH ${NV_SSH_USER}@__HOST__:${NV_REMOTE_DIR}/ 2>&1" \
+        "nv_info_deploy" \
     ; then log "[NV]  ERROR: one or more deploys failed; skipping this phase"; return 1; fi
+    if ! hosts_file_has_entries "$NV"; then
+        log "[NV] WARN: no device survived script deployment"; rm -r -- "$dir"; return 0
+    fi
 
     log "[NV]  triggering remote collection"
     if ! run_parallel "$NV" \
@@ -1258,7 +1459,11 @@ collect_nv_info() {
               rm -f monitor/*.info
               test -s monitor/sw-info.sh || exit 1
               nohup bash monitor/sw-info.sh </dev/null >/dev/null 2>&1 &'" \
+        "nv_info_trigger" \
     ; then log "[NV]  ERROR: one or more triggers failed; skipping wait/retrieval"; return 1; fi
+    if ! hosts_file_has_entries "$NV"; then
+        log "[NV] WARN: no device survived collection trigger"; rm -r -- "$dir"; return 0
+    fi
 
     log "[NV]  waiting ${NV_WAIT}s for remote jobs"
     sleep "$NV_WAIT"
@@ -1266,7 +1471,11 @@ collect_nv_info() {
     log "[NV]  retrieving *.info files"
     if ! run_parallel "$NV" \
         "scp $SSH_OPTS ${NV_SSH_USER}@__HOST__:${NV_REMOTE_DIR}/*.info ${dir}/__NAME__.info 2>&1" \
+        "nv_info_retrieve" \
     ; then log "[NV]  ERROR: some hosts returned no *.info files"; return 1; fi
+    if ! hosts_file_has_entries "$NV"; then
+        log "[NV] WARN: no device returned an info file"; rm -r -- "$dir"; return 0
+    fi
 
     local count expected
     count=$(find "$dir" -name "*.info" 2>/dev/null | wc -l | tr -d '[:space:]')
@@ -1289,7 +1498,11 @@ collect_nv_link() {
     log "[NVL] deploying sw-link.sh"
     if ! run_parallel "$NV" \
         "scp $SSH_OPTS $SWLSH ${NV_SSH_USER}@__HOST__:${NV_REMOTE_DIR}/ 2>&1" \
+        "nv_link_deploy" \
     ; then log "[NVL] ERROR: one or more deploys failed; skipping this phase"; return 1; fi
+    if ! hosts_file_has_entries "$NV"; then
+        log "[NVL] WARN: no device survived script deployment"; rm -r -- "$dir"; return 0
+    fi
 
     log "[NVL] triggering remote collection"
     if ! run_parallel "$NV" \
@@ -1298,7 +1511,11 @@ collect_nv_link() {
               rm -f monitor/*.link
               test -s monitor/sw-link.sh || exit 1
               nohup bash monitor/sw-link.sh </dev/null >/dev/null 2>&1 &'" \
+        "nv_link_trigger" \
     ; then log "[NVL] ERROR: one or more triggers failed; skipping wait/retrieval"; return 1; fi
+    if ! hosts_file_has_entries "$NV"; then
+        log "[NVL] WARN: no device survived collection trigger"; rm -r -- "$dir"; return 0
+    fi
 
     log "[NVL] waiting ${NVL_WAIT}s for remote jobs"
     sleep "$NVL_WAIT"
@@ -1306,7 +1523,11 @@ collect_nv_link() {
     log "[NVL] retrieving *.link files"
     if ! run_parallel "$NV" \
         "scp $SSH_OPTS ${NV_SSH_USER}@__HOST__:${NV_REMOTE_DIR}/*.link ${dir}/__NAME__.link 2>&1" \
+        "nv_link_retrieve" \
     ; then log "[NVL] ERROR: some hosts returned no *.link files"; return 1; fi
+    if ! hosts_file_has_entries "$NV"; then
+        log "[NVL] WARN: no device returned a link file"; rm -r -- "$dir"; return 0
+    fi
 
     local count expected csv
     count=$(find "$dir" -name "*.link" 2>/dev/null | wc -l | tr -d '[:space:]')
@@ -1443,6 +1664,7 @@ if ! parse_csv_hosts; then
     log "[CSV] ERROR: host parsing failed, aborting"
     exit 1
 fi
+record_planned_devices
 
 # Validate key login and prepare remote directories before starting any timed job.
 # Abort on failure so the script does not wait for jobs that could not be deployed.
@@ -1529,6 +1751,14 @@ cleanup_data_dirs \
 if (( collection_failed )); then
     log "========== cron finish with errors =========="
     exit 1
+fi
+if ! emit_collection_result; then
+    log "========== cron finish: every selected device failed =========="
+    exit 1
+fi
+if [[ -s "$DEVICE_FAILURES" ]]; then
+    log "========== cron finish with device warnings =========="
+    exit 0
 fi
 log "========== cron finish =========="
 

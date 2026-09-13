@@ -59,7 +59,7 @@ canonical 模板；`load` 会按当前项目渲染出被 Git 忽略的 `ztp/ztp-
 PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B \
   test_cases/run_related_tests.py --all -v
 PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B \
-  test_cases/run_related_tests.py --check
+  test_cases/run_related_tests.py --check --require-full
 ```
 
 测试成功不代表示例适合某个真实网络。首次部署仍应在隔离实验环境完成配置审查、身份核验、
@@ -72,7 +72,7 @@ PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B \
 1. `git status --short` 只列出预期的源码、公开文档、示例和测试；
 2. `git diff --cached` 中没有真实地址、MAC、hostname、客户名、密钥或密码哈希；
 3. 没有大文件、绝对路径软链接、运行日志、生成输出或第三方受限二进制；
-4. 全量测试与批准状态检查均通过；
+4. 全量测试与 `--check --require-full` 批准/证明检查均通过；
 5. 在一个干净 clone 中重复测试，确认测试没有依赖本机的真实项目数据。
 
 如果敏感信息曾经进入 commit，仅删除当前文件不够：应立即轮换凭据，并从完整 Git 历史中清除

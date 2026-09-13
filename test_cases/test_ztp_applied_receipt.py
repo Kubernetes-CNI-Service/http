@@ -9,6 +9,7 @@ import stat
 import subprocess
 import tempfile
 import textwrap
+from typing import Optional
 import unittest
 
 
@@ -50,6 +51,163 @@ def library_harness(directory: Path, body: str) -> Path:
         encoding="utf-8",
     )
     return harness
+
+
+def run_cumulus_mode_bootstrap(
+    root: Path,
+    *,
+    mode_behavior: str,
+    release_dir: Optional[Path] = None,
+    mac: str = MAC,
+    template_source: Optional[str] = None,
+) -> tuple[subprocess.CompletedProcess[str], list[str], dict[str, str]]:
+    """Run the real Cumulus bootstrap with hermetic HTTP/NVUE shims."""
+    root.mkdir(parents=True, exist_ok=True)
+    runtime_root = root / "run"
+    state = root / "state"
+    home = root / "home/cumulus"
+    fake_bin = root / "bin"
+    events = root / "events.log"
+    runtime_root.mkdir()
+    home.mkdir(parents=True)
+    fake_bin.mkdir()
+
+    def executable(name: str, content: str) -> None:
+        path = fake_bin / name
+        path.write_text(textwrap.dedent(content), encoding="utf-8")
+        path.chmod(0o755)
+
+    executable("ip", """
+        #!/bin/sh
+        if [ "$1" = vrf ] && [ "$2" = exec ]; then
+            shift 3
+            exec "$@"
+        fi
+        exit 1
+    """)
+    executable("chown", """
+        #!/bin/sh
+        exit 0
+    """)
+    executable("curl", """
+        #!/bin/sh
+        url=
+        output=
+        while [ "$#" -gt 0 ]; do
+            case "$1" in
+                -o) output=$2; shift 2 ;;
+                -*) shift ;;
+                *) url=$1; shift ;;
+            esac
+        done
+        printf 'curl:%s\n' "$url" >> "$EVENTS"
+        case "$url" in
+            *.spx) exit 22 ;;
+            *.mode)
+                case "$MODE_BEHAVIOR" in
+                    missing) rm -f -- "$output"; exit 22 ;;
+                    empty) : > "$output" ;;
+                    unreadable)
+                        printf 'patch\n' > "$output"
+                        chmod 000 "$output"
+                        ;;
+                    invalid) printf 'invalid-mode\n' > "$output" ;;
+                    published)
+                        source="$RELEASE_DIR/${url##*/}"
+                        [ -e "$source" ] || exit 22
+                        cp -- "$source" "$output"
+                        ;;
+                    replace|patch) printf '%s\n' "$MODE_BEHAVIOR" > "$output" ;;
+                    *) exit 64 ;;
+                esac
+                ;;
+            *.pub)
+                printf 'ssh-ed25519 AAAATEST ztp-test\n' > "$output"
+                ;;
+            *.yaml)
+                source="$RELEASE_DIR/${url##*/}"
+                if [ -n "$RELEASE_DIR" ] && [ -e "$source" ]; then
+                    cp -- "$source" "$output"
+                else
+                    printf '%s\n' '- set:' '    system:' '      hostname: leaf01' > "$output"
+                fi
+                ;;
+            *) exit 22 ;;
+        esac
+    """)
+    executable("nv", """
+        #!/bin/sh
+        printf 'nv:%s\n' "$*" >> "$EVENTS"
+        exit 0
+    """)
+
+    source = (TEMPLATE if template_source is None else template_source).replace(
+        'RUNTIME_WORK_ROOT="/run"',
+        f"RUNTIME_WORK_ROOT={shlex.quote(str(runtime_root))}", 1,
+    ).replace(
+        'APPLIED_STATE_DIR="/var/lib/nvidia-ztp"',
+        f"APPLIED_STATE_DIR={shlex.quote(str(state))}", 1,
+    ).replace(
+        "PROD_NAME=$(decode-syseeprom 2>/dev/null | grep '^Product Name' | awk '{print $NF}' || echo \"unknown\")",
+        'PROD_NAME="SN5600"', 1,
+    ).replace(
+        "IMG_VER=$(grep '^IMAGE_RELEASE=' /etc/image-release | awk -F'=' '{print $2}')",
+        'IMG_VER="5.16.4"', 1,
+    ).replace(
+        "RUN_VER=$(grep '^DISTRIB_RELEASE=' /etc/lsb-release | awk -F'=' '{print $2}')",
+        'RUN_VER="5.16.4"', 1,
+    ).replace(
+        'ETH0_RAW_MAC=$(cat /sys/class/net/eth0/address)',
+        f'ETH0_RAW_MAC="{mac}"', 1,
+    ).replace(
+        'USER_HOME=/home/${USER_NAME}', 'USER_HOME="${TEST_HOME}"', 1,
+    ).replace(
+        '        install_manual_ztp_helper\n',
+        '        : # helper installation covered separately\n', 1,
+    ).replace(
+        '        install_applied_config_helper "${USER_NAME}"\n',
+        '        : # helper installation covered separately\n', 1,
+    ).replace(
+        '        install_time_sync_helper "${USER_NAME}"\n',
+        '        : # helper installation covered separately\n', 1,
+    )
+    source = re.sub(
+        r'if ! select_ztp_network_path; then\n.*?\nfi\n\n'
+        r'if ! check_network "\$\{ZTP_SERVER##\*/\}"; then\n.*?\nfi',
+        'ZTP_VRF="default"\nZTP_INTERFACE="eth0"',
+        source, count=1, flags=re.S,
+    )
+    source = re.sub(
+        r'if ! sync_management_clock_for_ztp; then\n.*?\nfi\n'
+        r'log "\[ZTP\] Network check passed after management-server time sync:.*?"',
+        'log "[ZTP] Network/time prerequisites mocked for mode-sidecar test"',
+        source, count=1, flags=re.S,
+    )
+    script = root / "bootstrap.sh"
+    script.write_text(source, encoding="utf-8")
+    script.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}",
+        "EVENTS": str(events),
+        "MODE_BEHAVIOR": mode_behavior,
+        "RELEASE_DIR": str(release_dir or ""),
+        "TEST_HOME": str(home),
+    }
+    result = run_bash(script, env=env)
+    event_lines = (
+        events.read_text(encoding="utf-8").splitlines()
+        if events.exists() else []
+    )
+    receipt_path = state / "receipt.env"
+    receipt = (
+        dict(
+            line.split("=", 1)
+            for line in receipt_path.read_text(encoding="utf-8").splitlines()
+        )
+        if receipt_path.exists() else {}
+    )
+    return result, event_lines, receipt
 
 
 def helper_source() -> str:
@@ -301,6 +459,197 @@ class AppliedReceiptPersistenceTests(unittest.TestCase):
             self.assertEqual("survived\n", result.stdout)
 
 
+class ModeSidecarFailClosedTests(unittest.TestCase):
+    def test_mode_sidecar_parser_bounds_raw_input_before_exact_hex_match(self):
+        replace_hex = b"replace\n".hex()
+        patch_hex = b"patch\n".hex()
+        self.assertRegex(
+            TEMPLATE,
+            r'head -c 17 -- "\$\{MAC_MODE_LOCAL\}" \|\s*'
+            r'od -An -tx1 -v',
+        )
+        replace_match = re.search(
+            r"^REPLACE_MODE_HEX='([0-9a-f]+)'$", TEMPLATE, re.M,
+        )
+        self.assertIsNotNone(replace_match)
+        self.assertEqual(replace_hex, replace_match.group(1))
+        fragments = re.findall(
+            r"^PATCH_MODE_HEX_FRAGMENT_[12]='([0-9a-f]+)'$", TEMPLATE, re.M,
+        )
+        self.assertEqual(2, len(fragments))
+        self.assertIn(
+            "# These fragments compose the hexadecimal form of the six raw "
+            "bytes `patch\\n`.\nPATCH_MODE_HEX_FRAGMENT_1=",
+            TEMPLATE,
+        )
+        self.assertTrue(all(fragment for fragment in fragments))
+        self.assertTrue(all(len(fragment) < 12 for fragment in fragments))
+        self.assertEqual(patch_hex, "".join(fragments))
+        self.assertNotIn(patch_hex, TEMPLATE)
+        for name in ("PATCH_MODE_HEX_FRAGMENT_1", "PATCH_MODE_HEX_FRAGMENT_2"):
+            self.assertNotIn("${" + name + ":-}", TEMPLATE)
+        replace_comparison = (
+            '[[ "${MODE_SIDECAR_HEX}" == "${REPLACE_MODE_HEX}" ]]'
+        )
+        patch_comparison = (
+            '[[ "${MODE_SIDECAR_HEX}" == "${PATCH_MODE_HEX}" ]]'
+        )
+        self.assertIn(replace_comparison, TEMPLATE)
+        self.assertIn(patch_comparison, TEMPLATE)
+        length_guard = TEMPLATE.index('"${#PATCH_MODE_HEX}" -ne 12')
+        self.assertIn('"${#REPLACE_MODE_HEX}" -ne 16', TEMPLATE)
+        self.assertLess(length_guard, TEMPLATE.index(replace_comparison))
+        self.assertLess(length_guard, TEMPLATE.index(patch_comparison))
+        self.assertNotIn(
+            "APPLY_MODE=$(tr -d '[:space:]' < \"${MAC_MODE_LOCAL}\")",
+            TEMPLATE,
+        )
+
+    def test_empty_unset_or_wrong_length_mode_hex_constants_abort_before_nv(self):
+        def replace_assignment(source: str, name: str, replacement) -> str:
+            updated, count = re.subn(
+                rf"^{name}='[^']*'$", replacement, source,
+                count=1, flags=re.M,
+            )
+            self.assertEqual(1, count, name)
+            return updated
+
+        mutations = {
+            "empty-fragment": replace_assignment(
+                TEMPLATE, "PATCH_MODE_HEX_FRAGMENT_1",
+                "PATCH_MODE_HEX_FRAGMENT_1=''",
+            ),
+            "unset-fragment": replace_assignment(
+                TEMPLATE, "PATCH_MODE_HEX_FRAGMENT_2",
+                "# PATCH_MODE_HEX_FRAGMENT_2 intentionally unset by test",
+            ),
+            "wrong-patch-length": replace_assignment(
+                TEMPLATE, "PATCH_MODE_HEX_FRAGMENT_2",
+                lambda match: match.group(0)[:-1] + "0'",
+            ),
+            "wrong-replace-length": replace_assignment(
+                TEMPLATE, "REPLACE_MODE_HEX",
+                lambda match: match.group(0)[:-1] + "0'",
+            ),
+        }
+        for label, source in mutations.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as name:
+                result, events, receipt = run_cumulus_mode_bootstrap(
+                    Path(name),
+                    mode_behavior="patch",
+                    template_source=source,
+                )
+                self.assertNotEqual(0, result.returncode)
+                self.assertFalse(any(event.startswith("nv:") for event in events))
+                self.assertEqual({}, receipt)
+
+    def test_unavailable_or_invalid_sidecar_never_applies_dedicated_yaml(self):
+        for behavior in ("missing", "empty", "unreadable", "invalid"):
+            with self.subTest(behavior=behavior), tempfile.TemporaryDirectory() as name:
+                root = Path(name)
+                result, events, receipt = run_cumulus_mode_bootstrap(
+                    root, mode_behavior=behavior,
+                )
+                self.assertEqual(
+                    0, result.returncode, result.stderr + result.stdout,
+                )
+                dedicated_name = MAC.replace(":", "") + ".yaml"
+                dedicated_calls = [
+                    event for event in events
+                    if event.startswith("nv:config ") and dedicated_name in event
+                ]
+                self.assertEqual([], dedicated_calls)
+                self.assertTrue(
+                    any(event.startswith("nv:config patch ") for event in events),
+                    events,
+                )
+                self.assertEqual("fallback_default", receipt["source_kind"])
+                self.assertEqual("patch", receipt["apply_mode"])
+                self.assertEqual(
+                    MAC.replace(":", "") + ".mode",
+                    receipt["failed_source_name"],
+                )
+                self.assertIn("mode-sidecar-unavailable", result.stdout)
+                self.assertIn(receipt["failed_source_name"], result.stdout)
+                self.assertNotIn("legacy action: replace", result.stdout)
+                self.assertEqual(
+                    1,
+                    sum(event.endswith(".mode") for event in events if event.startswith("curl:")),
+                )
+
+    def test_noncanonical_raw_sidecar_bytes_never_apply_dedicated_yaml(self):
+        invalid_payloads = {
+            "nul": b"re\x00place\n",
+            "crlf": b"replace\r\n",
+            "missing-final-newline": b"replace",
+            "other-ascii-control": b"re\x01place\n",
+            "non-ascii": b"re\xc3\xa9place\n",
+            "leading-whitespace": b" replace\n",
+            "trailing-whitespace": b"replace \n",
+            "embedded-whitespace": b"re place\n",
+            "multiple-lines": b"replace\npatch\n",
+            "over-17-bytes": b"replace\n" + (b" " * 11),
+        }
+        mode_name = MAC.replace(":", "") + ".mode"
+        dedicated_name = MAC.replace(":", "") + ".yaml"
+        for label, payload in invalid_payloads.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as name:
+                root = Path(name)
+                release = root / "release"
+                release.mkdir()
+                (release / mode_name).write_bytes(payload)
+                result, events, receipt = run_cumulus_mode_bootstrap(
+                    root / "consumer",
+                    mode_behavior="published",
+                    release_dir=release,
+                )
+                self.assertEqual(
+                    0, result.returncode, result.stderr + result.stdout,
+                )
+                self.assertFalse(
+                    any(
+                        event.startswith(("nv:config replace ", "nv:config patch "))
+                        and dedicated_name in event
+                        for event in events
+                    ),
+                    (label, events),
+                )
+                self.assertTrue(
+                    any(event.startswith("nv:config patch ") for event in events),
+                    (label, events),
+                )
+                self.assertEqual("fallback_default", receipt["source_kind"])
+                self.assertEqual("patch", receipt["apply_mode"])
+                self.assertEqual(mode_name, receipt["failed_source_name"])
+                self.assertIn("mode-sidecar-unavailable", result.stdout)
+                self.assertIn("invalid raw bytes", result.stdout)
+                self.assertNotIn("invalid value '", result.stdout)
+
+    def test_valid_replace_and_patch_sidecars_keep_dedicated_behavior(self):
+        for mode in ("replace", "patch"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as name:
+                root = Path(name)
+                result, events, receipt = run_cumulus_mode_bootstrap(
+                    root, mode_behavior=mode,
+                )
+                self.assertEqual(
+                    0, result.returncode, result.stderr + result.stdout,
+                )
+                dedicated_name = MAC.replace(":", "") + ".yaml"
+                self.assertTrue(
+                    any(
+                        event.startswith(f"nv:config {mode} ")
+                        and dedicated_name in event
+                        for event in events
+                    ),
+                    events,
+                )
+                self.assertEqual("dedicated", receipt["source_kind"])
+                self.assertEqual(mode, receipt["apply_mode"])
+                self.assertNotIn("failed_source_name", receipt)
+                self.assertFalse(any(event == "nv:config detach" for event in events))
+
+
 class AppliedConfigHelperTests(unittest.TestCase):
     def write_helper(self, root: Path) -> Path:
         state = root / "state"
@@ -396,6 +745,28 @@ class AppliedConfigHelperTests(unittest.TestCase):
             result = run_bash(helper)
             self.assertNotEqual(0, result.returncode)
             self.assertIn("unknown receipt key", result.stderr)
+
+    def test_helper_validates_optional_failed_mode_source_name(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            raw = b"- set:\n    system:\n      timezone: Etc/UTC\n"
+            receipt, _applied = self.prepare_state(root, raw, fallback=True)
+            helper = self.write_helper(root)
+            exact_name = MAC.replace(":", "") + ".mode"
+            with receipt.open("a", encoding="utf-8") as stream:
+                stream.write(f"failed_source_name={exact_name}\n")
+            result = run_bash(helper)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn(f"failed_source_name={exact_name}\n", result.stdout)
+
+            text = receipt.read_text(encoding="utf-8").replace(
+                exact_name, "020000000002.mode",
+            )
+            receipt.write_text(text, encoding="utf-8")
+            receipt.chmod(0o600)
+            result = run_bash(helper)
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("failed mode source does not match eth0 MAC", result.stderr)
 
 
 class PrefetchBeforeApplyTests(unittest.TestCase):

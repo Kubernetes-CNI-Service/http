@@ -23,6 +23,7 @@ TOOLS_DIR     = os.path.join(HTTP_BASE, "tools")
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
 from deployment_lock import DeploymentLockError, deployment_lock
+from ztp_service_runtime import RuntimeContractError, stop_native_ztp_monitors
 
 _AUTO_YES = False
 _DRY_RUN  = False
@@ -302,9 +303,11 @@ def main(argv=None):
     _DRY_RUN = args.dry_run
     try:
         with deployment_lock(HTTP_BASE, dry_run=_DRY_RUN):
+            if not _DRY_RUN:
+                stop_native_ztp_monitors(HTTP_BASE)
             return _main_locked(args)
-    except (DeploymentLockError, OSError) as exc:
-        print(_c(RED, f"[ERROR] 部署锁不可用：{exc}"))
+    except (DeploymentLockError, RuntimeContractError, OSError) as exc:
+        print(_c(RED, f"[ERROR] 部署/Monitor 写前保护失败：{exc}"))
         return 1
 
 

@@ -40,6 +40,9 @@ bootstrap、YAML 和公钥也不是加密通道。
 
 ## 部署后检查
 
+以下 `apache2ctl`、配置路径和 `127.0.0.1` URL 是原生（Native/systemd）专用检查。该后端的
+Apache 可按宿主 vhost 绑定响应 loopback。
+
 ```bash
 sudo apache2ctl configtest
 sudo sha256sum /etc/apache2/conf-enabled/http-ztp-public-boundary.conf
@@ -53,3 +56,9 @@ curl -sSI http://127.0.0.1/DAY0-Prepare/11-load.py
 curl -sSI http://127.0.0.1/monitor/status/manual-ztp.status.json
 curl -sSI http://127.0.0.1/ztp/config/isc-dhcp-server/dhcpd.conf
 ```
+
+Docker/Supervisor 使用另一条运行边界：Apache 只监听 runtime plan 推导的精确
+`<ztp-service-ip>:80`，容器内 loopback 或宿主管理口并不等价。使用
+`infra/docker/deploy.sh health` 核对 listener、配置 hash 和 CGI，再从有权到达服务网段的受控
+客户端把上面的公开/拒绝矩阵改为 `http://<ztp-service-ip>/...` 执行。不要为了让 curl 成功改成
+`0.0.0.0`、启用宿主 Apache，或跳过 403 内容边界。

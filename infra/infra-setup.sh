@@ -13,6 +13,7 @@ force_power_cycle=false
 mgmt_mode=false
 offline_mode=false
 defer_services=false
+recover_monitor_authority=false
 prompt_timeout=15
 doca_prompt_timeout=10
 explicit_policy=""
@@ -35,6 +36,8 @@ Usage: infra-setup.sh [options]
   --offline               With --mgmt, require a matching ../apps repository; never use Internet
   --defer-services        Install/configure Apache and DHCP but never start/restart them
                           Intended for transactional load; activation happens only after commit
+  --recover-monitor-authority
+                          Stop Apache and explicitly repair invalid Monitor cache content
   -h, --help              Show this help
 EOF
 }
@@ -49,6 +52,7 @@ select_policy() {
   execution_policy="$requested"
 }
 
+original_argument_count=$#
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --non-interactive) non_interactive=true ;;
@@ -64,11 +68,17 @@ while [[ $# -gt 0 ]]; do
     --mgmt) mgmt_mode=true ;;
     --offline) offline_mode=true ;;
     --defer-services) defer_services=true ;;
+    --recover-monitor-authority) recover_monitor_authority=true ;;
     -h|--help) usage; exit 0 ;;
     *) echo "ERROR: Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
   shift
 done
+
+if [[ "$recover_monitor_authority" == "true" && "$original_argument_count" != "1" ]]; then
+  echo "ERROR: --recover-monitor-authority must be the only option." >&2
+  exit 2
+fi
 
 if $force_doca && $skip_doca; then
   echo "ERROR: --download-doca and --skip-doca are mutually exclusive." >&2
@@ -113,8 +123,13 @@ $force_bluefield && bluefield_mode="yes"
 $force_power_cycle && power_cycle_mode="yes"
 
 script_source="${BASH_SOURCE[0]:-}"
-if [[ "$mgmt_mode" == "true" && ( -z "$script_source" || ! -f "$script_source" ) ]]; then
-  echo "ERROR: --mgmt requires executing a downloaded script file; stdin execution has no script directory." >&2
+control_auth_source_sha256="5a133a353cb7ac7af5be0be71b4ef85b41345716103d6e28590140638ee11038"
+MONITOR_AUTHORITY_RECOVERY_WARNING='WARNING: explicit Monitor authority recovery reset invalid cache state; review the accepted www-data denial residual.'
+control_auth_source=""
+control_auth_helper="/usr/local/lib/http-ztp/control-auth.py"
+if [[ ( "$mgmt_mode" == "true" || "$recover_monitor_authority" == "true" ) && \
+      ( -z "$script_source" || ! -f "$script_source" ) ]]; then
+  echo "ERROR: this operation requires executing infra-setup.sh from its governed file." >&2
   exit 2
 fi
 if [[ -z "$script_source" ]]; then
@@ -132,10 +147,304 @@ fi
 apps_root=""
 apps_dir=""
 mgmt_http_root=""
-if [[ "$mgmt_mode" == "true" ]]; then
-  mgmt_http_root=$(cd -- "$(dirname -- "$script_source")/.." && pwd)
-  apps_root="${mgmt_http_root}/apps"
+if [[ "$mgmt_mode" == "true" || "$recover_monitor_authority" == "true" ]]; then
+  mgmt_http_root=$(cd -P -- "$(dirname -- "$script_source")/.." && pwd)
+  control_auth_source="${mgmt_http_root}/tools/control-auth.py"
 fi
+if [[ "$mgmt_mode" == "true" ]]; then
+  apps_root="${mgmt_http_root}/apps"
+  if [[ ! -f "$control_auth_source" || -L "$control_auth_source" || \
+        ! -x "$control_auth_source" || \
+        "$(stat -c '%h' "$control_auth_source" 2>/dev/null || true)" != "1" ]]; then
+    echo "ERROR: --mgmt requires canonical sibling tools/control-auth.py: $control_auth_source" >&2
+    exit 2
+  fi
+  control_auth_source_actual=$(sha256sum "$control_auth_source" | awk '{print $1}')
+  if [[ "$control_auth_source_actual" != "$control_auth_source_sha256" ]]; then
+    echo "ERROR: Control auth helper source hash mismatch: $control_auth_source" >&2
+    exit 2
+  fi
+fi
+
+systemd_is_operational() {
+  command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]
+}
+
+monitor_authority_result_directory() {
+  printf '%s\n' /run
+}
+
+terminate_monitor_authority_capture_holders() {
+  local holder_file=$1 stdout_pipe=$2 stderr_pipe=$3
+  local stdout_reader=$4 stderr_reader=$5 report_file=$6
+  local pass descriptor holder_pid pass_file="${report_file}.pass"
+  [[ -d /proc/self/fd ]] || return 0
+  for pass in 1 2 3 4 5 6 7 8; do
+    rm -f -- "$pass_file"
+    for descriptor in /proc/[0-9]*/fd/[0-9]*; do
+      [[ -e "$descriptor" ]] || continue
+      if [[ "$descriptor" -ef "$holder_file" || \
+            "$descriptor" -ef "$stdout_pipe" || \
+            "$descriptor" -ef "$stderr_pipe" ]]; then
+        holder_pid=${descriptor#/proc/}
+        holder_pid=${holder_pid%%/*}
+        case "$holder_pid" in
+          ''|*[!0-9]*) continue ;;
+        esac
+        if [[ "$holder_pid" != "$stdout_reader" && \
+              "$holder_pid" != "$stderr_reader" ]]; then
+          : >"$report_file"
+          : >"$pass_file"
+          kill -KILL "$holder_pid" 2>/dev/null || true
+        fi
+      fi
+    done
+    [[ -e "$pass_file" ]] || break
+  done
+  rm -f -- "$pass_file"
+  [[ ! -e "$report_file" ]]
+}
+
+capture_monitor_authority_decision() {
+  local result_parent result_dir stdout_file stderr_file stdout_pipe stderr_pipe
+  local holder_file residual_file cleanup_file
+  local command_rc=125 token stdout_reader stderr_reader command_pid
+  local command_uses_timeout=false
+  monitor_authority_decision=""
+  IFS= read -r result_parent < <(monitor_authority_result_directory) || return 1
+  IFS= read -r result_dir < <(
+    mktemp -d "${result_parent%/}/http-ztp-monitor-decision.XXXXXX"
+  ) || return 1
+  stdout_file="$result_dir/stdout"
+  stderr_file="$result_dir/stderr"
+  stdout_pipe="$result_dir/stdout.pipe"
+  stderr_pipe="$result_dir/stderr.pipe"
+  holder_file="$result_dir/holder"
+  residual_file="$result_dir/residual-holder"
+  cleanup_file="$result_dir/cleanup-holder"
+  if ! mkfifo -- "$stdout_pipe" "$stderr_pipe"; then
+    rm -rf -- "$result_dir"
+    return 1
+  fi
+  : >"$holder_file"
+  /usr/bin/timeout --signal=KILL 11 \
+    head -c 4097 <"$stdout_pipe" >"$stdout_file" &
+  stdout_reader=$!
+  /usr/bin/timeout --signal=KILL 11 \
+    head -c 4097 <"$stderr_pipe" >"$stderr_file" &
+  stderr_reader=$!
+  if command -v /usr/bin/timeout >/dev/null 2>&1; then
+    command_uses_timeout=true
+  fi
+  (
+    exec 8<"$holder_file"
+    if [[ "$command_uses_timeout" == true ]]; then
+      exec /usr/bin/timeout --signal=KILL 11 \
+        "$@" >"$stdout_pipe" 2>"$stderr_pipe"
+    else
+      : >"$stdout_pipe"
+      : >"$stderr_pipe"
+      exit 124
+    fi
+  ) &
+  command_pid=$!
+  if wait "$command_pid" 2>/dev/null; then
+    command_rc=0
+  else
+    command_rc=$?
+  fi
+  if [[ "$command_uses_timeout" == true ]] && \
+      kill -KILL -- "-$command_pid" 2>/dev/null; then
+    : >"$residual_file"
+    command_rc=125
+  fi
+  if ! terminate_monitor_authority_capture_holders \
+      "$holder_file" "$stdout_pipe" "$stderr_pipe" \
+      "$stdout_reader" "$stderr_reader" "$residual_file"; then
+    command_rc=125
+  fi
+  if ! wait "$stdout_reader" 2>/dev/null; then
+    command_rc=125
+  fi
+  if ! wait "$stderr_reader" 2>/dev/null; then
+    command_rc=125
+  fi
+  if ! terminate_monitor_authority_capture_holders \
+      "$holder_file" "$stdout_pipe" "$stderr_pipe" 0 0 "$cleanup_file"; then
+    command_rc=125
+  fi
+  if [[ "$command_rc" == 0 && ! -s "$stderr_file" ]]; then
+    for token in \
+      "attest-valid" \
+      "recovery-in-progress" \
+      "recovery-committed-cleanup-pending" \
+      "restart-allowed:complete;reset-invalid-cache=false" \
+      "restart-allowed:complete;reset-invalid-cache=true" \
+      "restart-allowed:marker-removal-durability-unknown;reset-invalid-cache=false" \
+      "restart-allowed:marker-removal-durability-unknown;reset-invalid-cache=true" \
+      "restart-blocked:marker-retained;reset-invalid-cache=false" \
+      "restart-blocked:marker-retained;reset-invalid-cache=true" \
+      "restart-blocked:marker-authority-uncertain;reset-invalid-cache=false" \
+      "restart-blocked:marker-authority-uncertain;reset-invalid-cache=true"
+    do
+      if cmp -s "$stdout_file" <(printf '%s' "$token"); then
+        monitor_authority_decision=$token
+        break
+      fi
+    done
+  fi
+  if ! rm -f -- "$stdout_file" "$stderr_file" "$stdout_pipe" "$stderr_pipe" \
+      "$holder_file" "$residual_file" "$cleanup_file" ||
+      ! rmdir -- "$result_dir"; then
+    monitor_authority_decision=""
+    return 1
+  fi
+  [[ -n "$monitor_authority_decision" ]]
+}
+
+run_native_monitor_authority_routine() {
+  local operation=${1:-} decision_command
+  if [[ "$operation" != "monitor-authority-provision" && \
+        "$operation" != "monitor-authority-attest" ]]; then
+    echo "ERROR: invalid routine Monitor authority operation; service must remain stopped." >&2
+    return 1
+  fi
+  decision_command="${operation}-decision"
+  if ! capture_monitor_authority_decision \
+      "$control_auth_helper" "$decision_command"; then
+    echo "ERROR: routine Monitor cache authority validation failed; Apache must remain stopped." >&2
+    return 1
+  fi
+  case "$monitor_authority_decision" in
+    'attest-valid')
+      return 0
+      ;;
+    'recovery-in-progress')
+      echo "ERROR: classification=recovery-in-progress; Monitor authority recovery has not been committed; Apache must remain stopped. Run exactly: sudo ./infra/infra-setup.sh --recover-monitor-authority" >&2
+      return 1
+      ;;
+    'recovery-committed-cleanup-pending')
+      echo "ERROR: classification=recovery-committed-cleanup-pending; previous Monitor authority recovery COMPLETED and the repaired authority itself is not in question; Apache must remain stopped. Re-run exactly to reattest and finish marker cleanup: sudo ./infra/infra-setup.sh --recover-monitor-authority" >&2
+      return 1
+      ;;
+    *)
+      echo "ERROR: routine Monitor cache authority validation failed; Apache must remain stopped." >&2
+      return 1
+      ;;
+  esac
+}
+
+recover_monitor_authority_action() {
+  local apache_initial_state apache_stopped_state apache_started_state
+  if ! systemd_is_operational; then
+    echo "ERROR: systemd state is unavailable; Monitor authority was not repaired." >&2
+    return 1
+  fi
+  if ! apache_initial_state=$(systemctl show --property=ActiveState --value apache2) ||
+      [[ "$apache_initial_state" != "active" && \
+         "$apache_initial_state" != "inactive" && \
+         "$apache_initial_state" != "failed" ]]; then
+    echo "ERROR: Apache state cannot be proven; Monitor authority was not repaired." >&2
+    return 1
+  fi
+  if ! systemctl stop apache2; then
+    echo "ERROR: Apache could not be stopped; Monitor authority was not repaired." >&2
+    return 1
+  fi
+  if ! apache_stopped_state=$(systemctl show --property=ActiveState --value apache2) ||
+      [[ "$apache_stopped_state" != "inactive" && \
+         "$apache_stopped_state" != "failed" ]]; then
+    echo "ERROR: Apache is not provably stopped; Monitor authority was not repaired." >&2
+    return 1
+  fi
+  echo "[WARN] Apache stopped for explicit Monitor cache authority recovery." >&2
+  echo "[WARN] Apache stopped for explicit Monitor cache authority recovery." >&3
+  if [[ ! -f "$control_auth_source" || -L "$control_auth_source" || \
+        ! -x "$control_auth_source" || \
+        "$(stat -c '%h' "$control_auth_source" 2>/dev/null || true)" != "1" ]]; then
+    echo "ERROR: recovery requires canonical sibling tools/control-auth.py; Apache remains stopped." >&2
+    return 1
+  fi
+  control_auth_source_actual=$(sha256sum "$control_auth_source" | awk '{print $1}')
+  if [[ "$control_auth_source_actual" != "$control_auth_source_sha256" ]]; then
+    echo "ERROR: recovery helper source hash mismatch; Apache remains stopped." >&2
+    return 1
+  fi
+  if [[ ! -f "$control_auth_helper" || -L "$control_auth_helper" || \
+        ! -x "$control_auth_helper" || \
+        "$(stat -c '%h' "$control_auth_helper" 2>/dev/null || true)" != "1" ]]; then
+    echo "ERROR: installed recovery helper is missing or unsafe; Apache remains stopped." >&2
+    return 1
+  fi
+  control_auth_installed_actual=$(sha256sum "$control_auth_helper" | awk '{print $1}')
+  if [[ "$control_auth_installed_actual" != "$control_auth_source_sha256" ]]; then
+    echo "ERROR: installed recovery helper hash mismatch; Apache remains stopped." >&2
+    return 1
+  fi
+  if ! "$control_auth_helper" validate; then
+    echo "ERROR: Monitor credentials are invalid; Apache remains stopped." >&2
+    return 1
+  fi
+  if ! capture_monitor_authority_decision \
+      "$control_auth_helper" monitor-authority-recover-decision; then
+    echo "ERROR: explicit Monitor authority recovery returned an invalid structured result; Apache remains stopped." >&2
+    return 1
+  fi
+  case "$monitor_authority_decision" in
+    *';reset-invalid-cache=true')
+      printf '%s\n' "$MONITOR_AUTHORITY_RECOVERY_WARNING" >&2
+      printf '%s\n' "$MONITOR_AUTHORITY_RECOVERY_WARNING" >&3
+      ;;
+    *';reset-invalid-cache=false')
+      ;;
+    *)
+      echo "ERROR: explicit Monitor authority recovery returned an invalid warning decision; Apache remains stopped." >&2
+      return 1
+      ;;
+  esac
+  case "$monitor_authority_decision" in
+    'restart-allowed:complete;reset-invalid-cache=false'|\
+    'restart-allowed:complete;reset-invalid-cache=true')
+      ;;
+    'restart-allowed:marker-removal-durability-unknown;reset-invalid-cache=false'|\
+    'restart-allowed:marker-removal-durability-unknown;reset-invalid-cache=true')
+      echo "WARNING: previous Monitor authority recovery COMPLETED, but marker removal durability is unknown; a stale completed marker may reappear after crash." >&2
+      ;;
+    'restart-blocked:marker-retained;reset-invalid-cache=false'|\
+    'restart-blocked:marker-retained;reset-invalid-cache=true')
+      echo "ERROR: previous Monitor authority recovery COMPLETED and the repaired authority itself is not in question, but marker cleanup remains; Apache remains stopped. Re-run exactly: sudo ./infra/infra-setup.sh --recover-monitor-authority" >&2
+      return 1
+      ;;
+    'restart-blocked:marker-authority-uncertain;reset-invalid-cache=false'|\
+    'restart-blocked:marker-authority-uncertain;reset-invalid-cache=true')
+      echo "ERROR: Monitor recovery marker authority is uncertain after semantic commit; Apache remains stopped. Re-run exactly: sudo ./infra/infra-setup.sh --recover-monitor-authority" >&2
+      return 1
+      ;;
+    *)
+      echo "ERROR: explicit Monitor authority recovery returned an invalid structured result; Apache remains stopped." >&2
+      return 1
+      ;;
+  esac
+  if ! run_native_monitor_authority_routine monitor-authority-attest; then
+    echo "ERROR: recovered Monitor authority did not attest; Apache remains stopped." >&2
+    return 1
+  fi
+  if [[ "$apache_initial_state" == "active" ]]; then
+    if ! systemctl start apache2; then
+      echo "ERROR: Apache could not be restored after recovery; it remains stopped." >&2
+      return 1
+    fi
+    if ! apache_started_state=$(systemctl show --property=ActiveState --value apache2) ||
+        [[ "$apache_started_state" != "active" ]]; then
+      systemctl stop apache2 || true
+      echo "ERROR: Apache restart could not be attested; it remains stopped." >&2
+      return 1
+    fi
+  fi
+  echo "[OK] explicit Monitor cache authority recovery completed." >&2
+  echo "[OK] explicit Monitor cache authority recovery completed." >&3
+}
+
 if [[ $EUID -ne 0 ]]; then
   echo "ERROR: infra-setup.sh must be run as root." >&2
   exit 1
@@ -150,6 +459,13 @@ mkdir -p "$log_dir"
 log_file="${log_dir}/infra-setup-$(date +%Y%m%d_%H%M%S)-$$.log"
 exec 3>>"$log_file"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] infra-setup.sh started" >&3
+
+if [[ "$recover_monitor_authority" == "true" ]]; then
+  if ! recover_monitor_authority_action; then
+    exit 1
+  fi
+  exit 0
+fi
 
 # Detect the supported Ubuntu release and CPU architecture before choosing a
 # repository.  Never mix packages from different Ubuntu releases/architectures.
@@ -211,6 +527,9 @@ timesyncd_unit_state_file="${state_dir}/original-timesyncd-unit-state"
 run_info_file="${state_dir}/run-info"
 public_status_file="${runtime_dir}/infra-status"
 apache_public_boundary_conf="/etc/apache2/conf-enabled/http-ztp-public-boundary.conf"
+apache_listener_conf="/etc/apache2/conf-enabled/http-ztp-listeners.conf"
+apache_ports_conf="/etc/apache2/ports.conf"
+apache_default_site_state="${state_dir}/apache-default-site-enabled"
 
 mkdir -p "$state_dir"
 touch "$state_file"
@@ -257,11 +576,49 @@ track_managed_file() {
   mv -f "$tmp" "$managed_files_file"
 }
 
+install_control_auth_helper() {
+  local helper_dir candidate actual status_json
+  helper_dir=$(dirname -- "$control_auth_helper")
+  if [[ -L "$helper_dir" || ( -e "$helper_dir" && ! -d "$helper_dir" ) ]]; then
+    error "Unsafe control auth helper directory: $helper_dir"
+    return 1
+  fi
+  install -d -m 0755 -o root -g root -- "$helper_dir"
+  if [[ -L "$helper_dir" ]]; then
+    error "Control auth helper directory became a symbolic link: $helper_dir"
+    return 1
+  fi
+  candidate=$(mktemp "${control_auth_helper}.tmp.XXXXXX")
+  install -m 0755 -o root -g root -- "$control_auth_source" "$candidate"
+  actual=$(sha256sum "$candidate" | awk '{print $1}')
+  if [[ "$actual" != "$control_auth_source_sha256" ]]; then
+    rm -f -- "$candidate"
+    error "Installed control auth helper candidate hash mismatch."
+    return 1
+  fi
+  mv -f -- "$candidate" "$control_auth_helper"
+  actual=$(sha256sum "$control_auth_helper" | awk '{print $1}')
+  if [[ "$actual" != "$control_auth_source_sha256" ]]; then
+    error "Installed control auth helper hash mismatch."
+    return 1
+  fi
+
+  # Create only a missing factory file, then validate the complete persistent
+  # state before publishing any Apache policy which references it.
+  run_native_monitor_authority_routine monitor-authority-provision
+  run_native_monitor_authority_routine monitor-authority-attest
+  "$control_auth_helper" ensure
+  "$control_auth_helper" validate
+  status_json=$("$control_auth_helper" status)
+  info "Monitor control auth status: $status_json"
+  success "Monitor control auth helper and credential state validated."
+}
+
 render_apache_publication_boundary() {
   cat <<'APACHE_PUBLIC_BOUNDARY_EOF'
 # Managed by http/infra/infra-setup.sh.  Keep the marker and bytes stable:
 # DAY0 load verifies this exact policy before Apache can be started.
-# HTTP-ZTP-PUBLIC-BOUNDARY-V1
+# HTTP-ZTP-PUBLIC-BOUNDARY-V2
 
 # Direct URLs remain usable, but Apache must not enumerate DocumentRoot.
 <Directory "/var/www/html">
@@ -279,6 +636,50 @@ render_apache_publication_boundary() {
         Require all denied
     </FilesMatch>
 </Directory>
+
+# The Monitor landing page is the browser authentication entry point.  The
+# browser reuses this Basic-auth protection space for subsequent control calls,
+# while Apache still authenticates every request server-side.
+<Directory "/var/www/html/monitor">
+    <Files "monitor.html">
+        AuthType Basic
+        AuthName "HTTP ZTP Monitor Control"
+        AuthBasicProvider file
+        AuthUserFile /etc/http-ztp/control-users.htpasswd
+        Require user nvis cumulus
+        Header always set Cache-Control "no-store"
+    </Files>
+</Directory>
+
+# Bind both canonical and compatibility URLs to the same three exact CGI
+# filesystem targets.  Anchors plus AcceptPathInfo Off reject suffix paths.
+ScriptAliasMatch "^/monitor/control/ztp-monitor$" "/usr/lib/cgi-bin/ztp-monitor-control"
+ScriptAliasMatch "^/monitor/control/switch-collection$" "/usr/lib/cgi-bin/switch-collection-control"
+ScriptAliasMatch "^/monitor/control/manual-ztp$" "/usr/lib/cgi-bin/manual-ztp-control"
+
+<Directory "/usr/lib/cgi-bin">
+    <FilesMatch "^(?:ztp-monitor-control|switch-collection-control|manual-ztp-control)$">
+        AuthType Basic
+        AuthName "HTTP ZTP Monitor Control"
+        AuthBasicProvider file
+        AuthUserFile /etc/http-ztp/control-users.htpasswd
+        Require user nvis cumulus
+        SetEnv CONTROL_REQUIRE_AUTH 1
+        AcceptPathInfo Off
+    </FilesMatch>
+</Directory>
+
+# Authenticate the canonical and legacy URL spaces as well as their rejected
+# PATH_INFO variants, so an invalid suffix can never bypass the challenge.
+<LocationMatch "^/(?:monitor/control/(?:ztp-monitor|switch-collection|manual-ztp)|cgi-bin/(?:ztp-monitor-control|switch-collection-control|manual-ztp-control))(?:/.*)?$">
+    AuthType Basic
+    AuthName "HTTP ZTP Monitor Control"
+    AuthBasicProvider file
+    AuthUserFile /etc/http-ztp/control-users.htpasswd
+    Require user nvis cumulus
+    SetEnv CONTROL_REQUIRE_AUTH 1
+    AcceptPathInfo Off
+</LocationMatch>
 
 # Protect the real filesystem targets even when another URL maps to them.
 <DirectoryMatch "^/var/www/html/(?:DAY0-Prepare|monitor/status|ztp/(?:status|backup|optimize)|ztp/config/(?:isc-dhcp-server|cumulus/template|nvos/template))(?:/|$)">
@@ -336,7 +737,10 @@ install_apache_publication_boundary() {
       rm -f -- "$destination"
     fi
     rm -f -- "$rollback"
-    error "Apache publication boundary failed configtest; previous configuration restored."
+    if systemd_is_operational; then
+      systemctl stop apache2 || true
+    fi
+    error "Apache publication boundary failed configtest; previous configuration restored and Apache remains stopped."
     return 1
   fi
   rm -f -- "$rollback"
@@ -501,7 +905,18 @@ ztp_dependency_packages=(
   openssh-client
   curl
 )
-optional_service_packages=(apache2 ssl-cert isc-dhcp-server)
+optional_service_packages=(apache2 apache2-utils ssl-cert isc-dhcp-server)
+apache_auth_modules=(
+  auth_basic
+  authn_file
+  authn_core
+  authz_user
+  authz_core
+  env
+  alias
+  cgid
+  headers
+)
 mgmt_cache_packages=(
   "${base_packages[@]}"
   "${common_packages[@]}"
@@ -1397,62 +1812,82 @@ else
 fi
 
 if [[ "$configure_apache2" == "true" ]]; then
-  if ! dpkg -s apache2 &>/dev/null; then
-    ssl_cert_preexisting=false
-    if dpkg -s ssl-cert &>/dev/null; then
-      ssl_cert_preexisting=true
-    fi
-    begin_package_install apache2
-    if ! $ssl_cert_preexisting; then begin_package_install ssl-cert; fi
-    apt_update_once
-    apt_install apache2 ssl-cert
-    commit_package_install apache2
-    if ! $ssl_cert_preexisting; then
-      commit_package_install ssl-cert
-    fi
+  if [[ "$mgmt_mode" != "true" ]]; then
+    error "Authenticated Monitor Apache configuration requires --mgmt and its canonical control-auth helper."
+    exit 1
   fi
-  if ! dpkg -s ssl-cert &>/dev/null; then
-    begin_package_install ssl-cert
+  apache_packages_to_install=()
+  for pkg in apache2 apache2-utils ssl-cert; do
+    if ! dpkg -s "$pkg" &>/dev/null; then
+      apache_packages_to_install+=("$pkg")
+    fi
+  done
+  if [[ ${#apache_packages_to_install[@]} -gt 0 ]]; then
+    for pkg in "${apache_packages_to_install[@]}"; do
+      begin_package_install "$pkg"
+    done
     apt_update_once
-    apt_install ssl-cert
-    commit_package_install ssl-cert
+    apt_install "${apache_packages_to_install[@]}"
+    for pkg in "${apache_packages_to_install[@]}"; do
+      commit_package_install "$pkg"
+    done
   fi
 
+  for pkg in apache2 apache2-utils ssl-cert; do
+    if ! dpkg -s "$pkg" &>/dev/null; then
+      error "Required Apache package is unavailable after installation: $pkg"
+      exit 1
+    fi
+  done
+
   info "Configuring apache2..."
+  if systemd_is_operational && systemctl is-active --quiet apache2; then
+    systemctl stop apache2
+    warn "Stopped Apache before replacing its authenticated Monitor boundary."
+  fi
+  install_control_auth_helper
   track_managed_file /etc/apache2/conf-available/servername.conf
   server_name=$(hostname -f 2>/dev/null || hostname)
   echo "ServerName ${server_name}" > /etc/apache2/conf-available/servername.conf
   a2enconf servername >&3 2>&3
-  a2enmod ssl >&3 2>&3
+  for module in "${apache_auth_modules[@]}"; do
+    a2enmod "$module" >&3 2>&3
+  done
 
-  # Append HTTPS VirtualHost only if not already present
-  if ! grep -q 'VirtualHost \*:443' /etc/apache2/sites-enabled/000-default.conf; then
-    track_managed_file /etc/apache2/sites-enabled/000-default.conf
-    cat >> /etc/apache2/sites-enabled/000-default.conf << 'EOF'
-<VirtualHost *:443>
-    ServerAdmin webmaster@localhost
-    DocumentRoot /var/www/html
-
-    SSLEngine on
-    SSLCertificateFile      /etc/ssl/certs/ssl-cert-snakeoil.pem
-    SSLCertificateKeyFile   /etc/ssl/private/ssl-cert-snakeoil.key
-
-    ErrorLog  ${APACHE_LOG_DIR}/error.log
-    CustomLog ${APACHE_LOG_DIR}/access.log combined
-</VirtualHost>
+  # Native Apache has no authority until load publishes the current project's
+  # exact service-IPv4 listeners.  Disable both distro wildcard sources first.
+  track_managed_file /etc/apache2/ports.conf
+  ports_candidate=$(mktemp "${apache_ports_conf}.tmp.XXXXXX")
+  cat > "$ports_candidate" <<'EOF'
+# Managed by http/infra/infra-setup.sh.
+# DAY0-Prepare/11-load.py owns every exact service-IPv4 Listen directive.
 EOF
+  chmod 0644 "$ports_candidate"
+  chown root:root "$ports_candidate"
+  mv -f -- "$ports_candidate" "$apache_ports_conf"
+
+  if [[ -L /etc/apache2/sites-enabled/000-default.conf ]]; then
+    printf 'enabled\n' > "$apache_default_site_state"
+  elif [[ ! -e /etc/apache2/sites-enabled/000-default.conf ]]; then
+    printf 'disabled\n' > "$apache_default_site_state"
   else
-    warn "HTTPS VirtualHost already present in 000-default.conf, skipping append."
+    error "Unsafe non-symlink Apache default-site authority."
+    exit 1
   fi
+  chmod 0600 "$apache_default_site_state"
+  a2dissite 000-default >&3 2>&3 || true
+
+  if [[ -L "$apache_listener_conf" || ( -e "$apache_listener_conf" && ! -f "$apache_listener_conf" ) ]]; then
+    error "Unsafe Apache exact-listener authority: $apache_listener_conf"
+    exit 1
+  fi
+  track_managed_file "$apache_listener_conf"
+  rm -f -- "$apache_listener_conf"
 
   install_apache_publication_boundary
+  apache2ctl configtest >&3 2>&3
 
-  if [[ "$defer_services" == "true" ]]; then
-    success "apache2 configuration applied; service activation deferred until load commit."
-  else
-    restart_systemd_service apache2
-    success "apache2 configuration applied."
-  fi
+  success "apache2 wildcard listeners disabled; service activation deferred until load publishes exact listeners."
 fi
 
 if dpkg -s isc-dhcp-server &>/dev/null; then
@@ -1521,6 +1956,8 @@ for f in \
   /etc/systemd/timesyncd.conf \
   /etc/lldpd.d/lldpcli.conf \
   /etc/apache2/conf-available/servername.conf \
+  /etc/apache2/ports.conf \
+  /etc/apache2/conf-enabled/http-ztp-listeners.conf \
   /etc/apache2/conf-enabled/http-ztp-public-boundary.conf \
   /etc/apache2/sites-enabled/000-default.conf; do
   if [[ -f "$f" ]]; then

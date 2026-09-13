@@ -39,6 +39,9 @@ import sys
 import tarfile
 import tempfile
 
+AIR_EFFECTIVE_DEFAULT_ARTIFACT = "effective-default.runtime"
+MAX_EFFECTIVE_DEFAULT_BYTES = 1024 * 1024
+
 try:
     import yaml
 except ImportError:
@@ -77,7 +80,10 @@ _StrictSafeLoader.add_constructor(
 
 
 def _strict_yaml_load(stream):
-    return yaml.load(stream, Loader=_StrictSafeLoader)
+    try:
+        return yaml.load(stream, Loader=_StrictSafeLoader)
+    except RecursionError as exc:
+        raise yaml.YAMLError("YAML 嵌套层级超过支持上限") from exc
 
 # CSV 列索引
 _COL_HOSTNAME = 0
@@ -168,8 +174,18 @@ def _row_type(row, type_col):
         return row[type_col].strip().lower()
     return "ib" if row[_COL_HOSTNAME].strip().lower().startswith("ib") else "eth"
 
-def load_csv(csv_file):
-    """返回 {hostname.lower(): {...}}，eth 和 ib 设备均加载。"""
+def load_csv(csv_file, *, switch_scope="all"):
+    """Return only devices belonging to the selected publication family."""
+    selected = str(switch_scope or "").strip().casefold()
+    families = {
+        "all": {"eth", "eth_spx", "spx", "air", "ib", "nvl"},
+        "eth": {"eth", "eth_spx", "spx", "air"},
+        "ib": {"ib"},
+        "nvl": {"nvl"},
+    }
+    allowed = families.get(selected)
+    if allowed is None:
+        raise ValueError(f"unsupported switch scope: {switch_scope!r}")
     devices = {}
     with open(csv_file, newline="", encoding="utf-8") as f:
         reader  = csv.reader(f)
@@ -195,6 +211,8 @@ def load_csv(csv_file):
                 continue
             if dev_type not in {"eth", "eth_spx", "spx", "air", "ib", "nvl"}:
                 raise ValueError(f"第 {lineno} 行 type={dev_type!r} 无效")
+            if dev_type not in allowed:
+                continue
             hostname = row[_COL_HOSTNAME]
             eth0_ip  = row[_COL_ETH0_IP]
             eth0_pfx = row[_COL_ETH0_PFX]
@@ -316,29 +334,8 @@ def _default_document_with_global(default_data, global_system):
     raise ValueError("default YAML 缺少 set.system")
 
 
-def _atomic_write_yaml(path, data):
-    """在原目录生成临时文件并原子替换，保留原文件权限。"""
-    mode = stat.S_IMODE(os.stat(path).st_mode)
-    fd, tmp_path = tempfile.mkstemp(prefix=f".{os.path.basename(path)}.",
-                                    suffix=".tmp", dir=os.path.dirname(path))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            yaml.safe_dump(data, stream, allow_unicode=True, sort_keys=False,
-                           default_flow_style=False, width=120)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.chmod(tmp_path, mode)
-        # 写入后再次解析，确认不会用损坏文件替换现有默认配置。
-        with open(tmp_path, encoding="utf-8") as stream:
-            _strict_yaml_load(stream)
-        os.replace(tmp_path, path)
-    finally:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-
-
 def _refresh_cumulus_defaults(service_dir=None, global_file=None):
-    """根据 01-global.yaml 同步 default*.yaml，以实际内容而非时间判定。"""
+    """Render site defaults in memory; never mutate neutral source files."""
     service_dir = os.path.abspath(service_dir or _SCRIPT_DIR)
     global_file = os.path.abspath(
         global_file or os.path.join(service_dir, "template", "01-global.yaml")
@@ -352,15 +349,16 @@ def _refresh_cumulus_defaults(service_dir=None, global_file=None):
     with open(global_file, encoding="utf-8") as stream:
         global_data = _strict_yaml_load(stream)
     global_system = _eth_global_system(global_data)
+    rendered = {}
     for default_file in defaults:
         with open(default_file, encoding="utf-8") as stream:
             default_data = _strict_yaml_load(stream)
         updated = _default_document_with_global(default_data, global_system)
-        if updated == default_data:
-            print(f"[OK] 默认配置已是最新：{default_file}")
-            continue
-        _atomic_write_yaml(default_file, updated)
-        print(f"[UPDATE] 已根据 {global_file} 更新：{default_file}")
+        rendered[os.path.basename(default_file)] = yaml.safe_dump(
+            updated, allow_unicode=True, sort_keys=False,
+            default_flow_style=False, width=120,
+        )
+    return rendered
 
 
 # ── YAML 验证 ─────────────────────────────────────────────────────────────────
@@ -776,6 +774,52 @@ def _sha256_file(path):
     return digest.hexdigest()
 
 
+def _read_effective_default_artifact(path):
+    """Read one stable, bounded generated default without following aliases."""
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0),
+        )
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or before.st_size <= 0
+            or before.st_size > MAX_EFFECTIVE_DEFAULT_BYTES
+        ):
+            raise ValueError(
+                "AIR effective default artifact 必须是非空 single-link 普通文件"
+            )
+        remaining = before.st_size
+        chunks = []
+        while remaining:
+            chunk = os.read(descriptor, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        after = os.fstat(descriptor)
+        identity = lambda item: (
+            item.st_dev, item.st_ino, item.st_size,
+            getattr(item, "st_mtime_ns", int(item.st_mtime * 1_000_000_000)),
+        )
+        if remaining or identity(before) != identity(after):
+            raise ValueError("AIR effective default artifact 在读取期间发生变化")
+        return b"".join(chunks)
+    except OSError as exc:
+        raise ValueError(
+            f"无法安全读取 AIR effective default artifact {path}: {exc}"
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
 def _target_cumulus_version(global_file):
     with open(global_file, encoding="utf-8") as stream:
         data = _strict_yaml_load(stream)
@@ -803,6 +847,25 @@ def _effective_cumulus_default(service_dir):
     if not os.path.isfile(selected):
         raise ValueError(f"未找到有效 Cumulus default YAML: {selected}")
     return selected, version
+
+
+def _rendered_effective_cumulus_default(service_dir):
+    """Return the site-rendered default bytes without mutating neutral input."""
+    default_path, version = _effective_cumulus_default(service_dir)
+    rendered_defaults = _refresh_cumulus_defaults(service_dir=service_dir)
+    default_name = os.path.basename(default_path)
+    try:
+        default_text = rendered_defaults[default_name]
+    except KeyError as exc:
+        raise ValueError(
+            f"站点 effective default 未生成：{default_name}"
+        ) from exc
+    document = _strict_yaml_load(default_text)
+    if not isinstance(document, list):
+        raise ValueError(
+            f"站点 effective default 顶层必须是 list：{default_name}"
+        )
+    return default_name, default_text.encode("utf-8"), version
 
 
 def _load_air_generation_manifest(air_context):
@@ -915,9 +978,12 @@ def _validate_air_production_yaml_pairs(staging_dir, devices, profiles=None):
     return checked
 
 
-def _validate_air_baselines(staging_dir, profiles, default_path):
+def _validate_air_baselines(staging_dir, profiles, default_text, default_name):
     """Require every baseline YAML to equal effective default plus hostname."""
-    canonical_default = _canonical_yaml(default_path)
+    document = _strict_yaml_load(default_text)
+    canonical_default = yaml.safe_dump(
+        document, sort_keys=True, allow_unicode=True,
+    )
     checked = 0
     for profile in sorted(profiles.values(), key=lambda item: item["hostname"].casefold()):
         if profile.get("profile") != "baseline":
@@ -933,7 +999,7 @@ def _validate_air_baselines(staging_dir, profiles, default_path):
         if _normalized_cumulus_without_hostname(path) != canonical_default:
             raise ValueError(
                 f"AIR baseline 除 hostname 外发生漂移: {profile['hostname']}.yaml "
-                f"!= {os.path.basename(default_path)}"
+                f"!= {default_name}"
             )
         checked += 1
     return checked
@@ -1129,6 +1195,51 @@ def _missing_expected_hosts(devices, kinds, hosts):
     )
 
 
+def scope_cumulus_publish_inventory(
+    devices, profiles, *, deployment_scope="all",
+):
+    """Return exact child-release inventory for one deployment scope."""
+    if deployment_scope == "all":
+        allowed = {"eth", "eth_spx", "spx", "air"}
+    elif deployment_scope == "prod":
+        allowed = {"eth", "eth_spx", "spx"}
+    elif deployment_scope == "air":
+        allowed = {"air"}
+    else:
+        raise ValueError(f"unsupported deployment scope: {deployment_scope!r}")
+    scoped_devices = {
+        key: value for key, value in devices.items()
+        if value.get("dev_type") in allowed
+    }
+    scoped_profiles = {
+        key: value for key, value in profiles.items() if key in scoped_devices
+    }
+    return scoped_devices, scoped_profiles
+
+
+def missing_expected_hosts_text(missing, *, limit=10):
+    """Explain a closed completeness gate without flooding the terminal."""
+    ordered = sorted(str(hostname) for hostname in missing)
+    shown = ordered[:max(0, limit)]
+    lines = [
+        f"[ERROR] 以下 {len(ordered)} 台 Cumulus/AIR 设备缺少 hostname YAML；"
+        "即使 identity_pending 也必须先生成可审核配置，拒绝切换 latest：",
+    ]
+    lines.extend(f"  {hostname}.yaml" for hostname in shown)
+    remaining = len(ordered) - len(shown)
+    if remaining:
+        lines.append(f"  (+{remaining} more)")
+    lines.append(
+        "[NEXT] 先不带 HOSTNAME 重新运行 90-c2-generate_configs.py，"
+        "完整生成全部配置后再运行 d-hostname2mac.py。"
+    )
+    return "\n".join(lines)
+
+
+def print_missing_expected_hosts(missing, *, limit=10):
+    print(missing_expected_hosts_text(missing, limit=limit))
+
+
 def _confirm_replace(path):
     if not os.path.exists(path):
         return True
@@ -1144,7 +1255,10 @@ def _confirm_replace(path):
     return answer in ("y", "yes")
 
 
-def _write_nvos_release_manifest(directory, timestamp, devices, hosts, kinds):
+def _write_nvos_release_manifest(
+    directory, timestamp, devices, hosts, kinds, *, deployment_scope="all",
+    switch_scope="all",
+):
     release_devices = []
     for hostname_key in sorted(hosts):
         dev = devices[hostname_key]
@@ -1168,6 +1282,8 @@ def _write_nvos_release_manifest(directory, timestamp, devices, hosts, kinds):
     )
     manifest = {
         "schema_version": 1,
+        "deployment_scope": deployment_scope,
+        "switch_scope": switch_scope,
         "release_id": f"{timestamp}-nvos",
         "types": sorted(kinds),
         "identity_pending": pending,
@@ -1182,7 +1298,14 @@ def _write_nvos_release_manifest(directory, timestamp, devices, hosts, kinds):
     return pending
 
 
-def _publish_single_nvos(ctx, devices):
+def _publish_single_nvos(
+    ctx, devices, *, deployment_scope="all", switch_scope="all",
+):
+    if switch_scope not in {"all", ctx["kind"]}:
+        print(
+            f"[ERROR] --switch {switch_scope} 与 {ctx['kind'].upper()} 发布目录冲突"
+        )
+        return False
     print(f"处理目录：{ctx['path']}\n")
     ok, counters, hosts = _process_yaml_files(ctx["path"], devices, {ctx["kind"]})
     missing = _missing_expected_hosts(devices, {ctx["kind"]}, hosts)
@@ -1196,7 +1319,8 @@ def _publish_single_nvos(ctx, devices):
         print("[ERROR] 输入目录校验失败，latest_yaml 保持不变")
         return False
     pending = _write_nvos_release_manifest(
-        ctx["path"], ctx["timestamp"], devices, hosts, {ctx["kind"]}
+        ctx["path"], ctx["timestamp"], devices, hosts, {ctx["kind"]},
+        deployment_scope=deployment_scope, switch_scope=switch_scope,
     )
     marker = os.path.join(ctx["path"], ".published-complete")
     with open(marker, "w", encoding="utf-8") as f:
@@ -1208,7 +1332,12 @@ def _publish_single_nvos(ctx, devices):
     return _set_latest_yaml(ctx["service_dir"], ctx["path"])
 
 
-def _publish_combined_nvos(contexts, devices):
+def _publish_combined_nvos(
+    contexts, devices, *, deployment_scope="all", switch_scope="all",
+):
+    if switch_scope != "all":
+        print("[ERROR] IB+NVL 合并发布只接受 switch scope=all")
+        return False
     timestamps = {ctx["timestamp"] for ctx in contexts}
     kinds = {ctx["kind"] for ctx in contexts}
     roots = {ctx["published_root"] for ctx in contexts}
@@ -1269,7 +1398,8 @@ def _publish_combined_nvos(contexts, devices):
             return False
 
         pending = _write_nvos_release_manifest(
-            staging_dir, timestamp, devices, processed_hosts, kinds
+            staging_dir, timestamp, devices, processed_hosts, kinds,
+            deployment_scope=deployment_scope, switch_scope=switch_scope,
         )
         with open(os.path.join(staging_dir, ".published-complete"), "w", encoding="utf-8") as f:
             f.write(
@@ -1301,7 +1431,170 @@ def _publish_combined_nvos(contexts, devices):
             shutil.rmtree(staging_dir)
 
 
-def _publish_combined_cumulus(contexts, devices):
+def _publish_production_cumulus(ctx, devices, *, switch_scope="all"):
+    """Atomically publish a Production-only Cumulus child release."""
+    scoped_devices, profiles = scope_cumulus_publish_inventory(
+        devices,
+        {
+            key: {
+                "hostname": dev["hostname"],
+                "environment": "production",
+                "profile": "full",
+                "apply_mode": "replace",
+                "source_hostname": dev["hostname"],
+            }
+            for key, dev in devices.items()
+            if dev.get("dev_type") in {"eth", "eth_spx", "spx"}
+        },
+        deployment_scope="prod",
+    )
+    final_dir = ctx["combine_dir"]
+    staging_dir = os.path.join(
+        ctx["published_root"], f".{ctx['timestamp']}_combine.tmp.{os.getpid()}"
+    )
+    if os.path.lexists(staging_dir):
+        shutil.rmtree(staging_dir)
+    os.makedirs(staging_dir)
+    try:
+        copied_hosts = set()
+        for src in sorted(glob.glob(os.path.join(ctx["path"], "*.yaml"))):
+            if os.path.islink(src):
+                continue
+            hostname = os.path.splitext(os.path.basename(src))[0]
+            key = hostname.casefold()
+            device = scoped_devices.get(key)
+            if device is None:
+                print(f"[ERROR] {src} 不属于 Production deployment scope")
+                return False
+            shutil.copy2(src, os.path.join(staging_dir, os.path.basename(src)))
+            copied_hosts.add(key)
+        missing = _missing_expected_hosts(
+            scoped_devices, {"eth", "eth_spx", "spx"}, copied_hosts,
+        )
+        if missing:
+            print_missing_expected_hosts(missing)
+            return False
+        ok, counters, processed_hosts = _process_yaml_files(
+            staging_dir, scoped_devices, {"eth", "eth_spx", "spx"},
+            profiles=profiles,
+        )
+        _print_process_summary(counters)
+        if not ok or processed_hosts != copied_hosts:
+            print("[ERROR] Production Cumulus 发布目录校验失败")
+            return False
+        try:
+            default_name, default_bytes, target_version = (
+                _rendered_effective_cumulus_default(
+                    ctx["service_dir"]
+                )
+            )
+            _strict_yaml_load(default_bytes.decode("utf-8"))
+            default_hash = hashlib.sha256(default_bytes).hexdigest()
+            destination = os.path.join(staging_dir, default_name)
+            if os.path.lexists(destination):
+                raise ValueError(
+                    f"release 默认文件名与设备配置冲突：{default_name}"
+                )
+            Path(destination).write_bytes(default_bytes)
+            os.chmod(destination, 0o644)
+            mode_count = _write_cumulus_mode_sidecars(
+                staging_dir, scoped_devices, profiles,
+            )
+        except (OSError, ValueError, yaml.YAMLError) as exc:
+            print(f"[ERROR] Production Cumulus 默认配置校验失败：{exc}")
+            return False
+        release_devices = []
+        for key in sorted(processed_hosts):
+            device = scoped_devices[key]
+            config_name = f"{device['hostname']}.yaml"
+            release_devices.append({
+                "hostname": device["hostname"],
+                "environment": "production",
+                "profile": "full",
+                "apply_mode": "replace",
+                "macs": [
+                    value for value in (
+                        device.get("eth0_mac"), device.get("eth1_mac")
+                    ) if value
+                ],
+                "config": config_name,
+                "config_sha256": _sha256_file(
+                    os.path.join(staging_dir, config_name)
+                ),
+                "source_hostname": device["hostname"],
+                "source_default": None,
+                "identity_state": (
+                    "identity_pending"
+                    if device.get("identity_pending") else "managed"
+                ),
+            })
+        release_manifest = {
+            "schema_version": 1,
+            "deployment_scope": "prod",
+            "switch_scope": switch_scope,
+            "release_id": f"{ctx['timestamp']}-cumulus-prod",
+            "target_cumulus_version": target_version,
+            "effective_default": default_name,
+            "effective_default_sha256": default_hash,
+            "mode_sidecars": mode_count,
+            "identity_pending": sum(
+                item["identity_state"] == "identity_pending"
+                for item in release_devices
+            ),
+            "devices": release_devices,
+        }
+        with open(
+            os.path.join(staging_dir, "release-manifest.json"),
+            "w", encoding="utf-8",
+        ) as stream:
+            json.dump(release_manifest, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+        with open(
+            os.path.join(staging_dir, ".published-complete"),
+            "w", encoding="utf-8",
+        ) as stream:
+            stream.write(
+                f"{ctx['timestamp']} cumulus-prod\n"
+                f"production_yaml={len(release_devices)}\n"
+                f"mode_sidecars={mode_count}\n"
+                f"effective_default={default_name}\n"
+            )
+        if not _confirm_replace(final_dir):
+            return False
+        backup_dir = None
+        if os.path.exists(final_dir):
+            backup_dir = f"{final_dir}.old.{os.getpid()}"
+            if os.path.lexists(backup_dir):
+                shutil.rmtree(backup_dir)
+            os.replace(final_dir, backup_dir)
+        try:
+            os.replace(staging_dir, final_dir)
+        except Exception:
+            if backup_dir and os.path.exists(backup_dir) and not os.path.exists(final_dir):
+                os.replace(backup_dir, final_dir)
+            raise
+        if backup_dir:
+            shutil.rmtree(backup_dir)
+        if not _set_latest_yaml(ctx["service_dir"], final_dir):
+            return False
+        try:
+            _archive_combined_sources([ctx])
+        except (OSError, ValueError, tarfile.TarError) as exc:
+            print(f"[ERROR] Production 发布后源目录归档失败：{exc}")
+            return False
+        print(
+            f"[OK] Production Cumulus 发布目录：{final_dir}"
+            f"（{len(release_devices)} 台设备）"
+        )
+        return True
+    finally:
+        if os.path.lexists(staging_dir):
+            shutil.rmtree(staging_dir)
+
+
+def _publish_combined_cumulus(
+    contexts, devices, *, deployment_scope="all", switch_scope="all",
+):
     """Stage and atomically publish Production/full and AIR full/baseline YAML."""
     timestamps = {ctx["timestamp"] for ctx in contexts}
     kinds = {ctx["kind"] for ctx in contexts}
@@ -1320,9 +1613,25 @@ def _publish_combined_cumulus(contexts, devices):
     service_dir = contexts[0]["service_dir"]
     air_context = next(ctx for ctx in contexts if ctx["kind"] == "air")
     try:
-        _refresh_cumulus_defaults(service_dir=service_dir)
-        default_path, target_version = _effective_cumulus_default(service_dir)
         generation_manifest, air_profiles = _load_air_generation_manifest(air_context)
+        neutral_default, target_version = _effective_cumulus_default(service_dir)
+        default_name = str(
+            generation_manifest.get("effective_default") or ""
+        ).strip()
+        if default_name != os.path.basename(neutral_default):
+            raise ValueError(
+                "AIR manifest effective_default 与当前目标版本基线不一致"
+            )
+        artifact_name = str(
+            generation_manifest.get("effective_default_artifact") or ""
+        ).strip()
+        if artifact_name != AIR_EFFECTIVE_DEFAULT_ARTIFACT:
+            raise ValueError("AIR manifest effective_default_artifact 无效")
+        default_bytes = _read_effective_default_artifact(
+            os.path.join(air_context["path"], artifact_name)
+        )
+        default_text = default_bytes.decode("utf-8")
+        _strict_yaml_load(default_text)
     except (OSError, ValueError, yaml.YAMLError) as exc:
         print(f"[ERROR] Cumulus release 输入校验失败：{exc}")
         return False
@@ -1330,13 +1639,13 @@ def _publish_combined_cumulus(contexts, devices):
     expected_default_hash = str(
         generation_manifest.get("effective_default_sha256") or ""
     ).strip().lower()
-    current_default_hash = _sha256_file(default_path)
+    current_default_hash = hashlib.sha256(default_bytes).hexdigest()
     if expected_default_hash != current_default_hash:
         print(
             "[ERROR] AIR baseline 生成后 effective default 已变化；"
             "请重新运行配置生成器再发布\n"
             f"        manifest={expected_default_hash or 'missing'}\n"
-            f"        current ={current_default_hash} ({default_path})"
+            f"        current ={current_default_hash} ({artifact_name})"
         )
         return False
     manifest_version = str(
@@ -1399,7 +1708,10 @@ def _publish_combined_cumulus(contexts, devices):
         shutil.rmtree(staging_dir)
     os.makedirs(staging_dir)
     allowed_by_kind = {"production": {"eth", "eth_spx", "spx"}, "air": {"air"}}
-    expected_types = {"eth", "eth_spx", "spx", "air"}
+    expected_types = (
+        {"air"} if deployment_scope == "air"
+        else {"eth", "eth_spx", "spx", "air"}
+    )
     try:
         copied_hosts = set()
         for ctx in sorted(contexts, key=lambda item: item["kind"]):
@@ -1441,7 +1753,7 @@ def _publish_combined_cumulus(contexts, devices):
                 staging_dir, publish_devices, profiles
             )
             baseline_count = _validate_air_baselines(
-                staging_dir, profiles, default_path
+                staging_dir, profiles, default_text, default_name
             )
         except ValueError as exc:
             print(f"[ERROR] {exc}")
@@ -1449,8 +1761,22 @@ def _publish_combined_cumulus(contexts, devices):
         print(f"[OK] Production/AIR 配置一致性：{pair_count} 对，仅 hostname 不同")
         print(
             f"[OK] AIR baseline 一致性：{baseline_count} 份，仅在 "
-            f"{os.path.basename(default_path)} 上增加 hostname"
+            f"{default_name} 上增加 hostname"
         )
+
+        if deployment_scope == "air":
+            for hostname_key, device in list(publish_devices.items()):
+                if device.get("dev_type") not in {"eth", "eth_spx", "spx"}:
+                    continue
+                path = os.path.join(
+                    staging_dir, f"{device['hostname']}.yaml",
+                )
+                if os.path.lexists(path):
+                    os.unlink(path)
+                copied_hosts.discard(hostname_key)
+            publish_devices, profiles = scope_cumulus_publish_inventory(
+                publish_devices, profiles, deployment_scope="air",
+            )
 
         print(f"\n在合并目录中校验配置并创建 MAC 链接：{staging_dir}\n")
         ok, counters, processed_hosts = _process_yaml_files(
@@ -1463,12 +1789,7 @@ def _publish_combined_cumulus(contexts, devices):
 
         missing = _missing_expected_hosts(publish_devices, expected_types, processed_hosts)
         if missing:
-            print(
-                f"[ERROR] 以下 {len(missing)} 台 Cumulus/AIR 设备缺少 hostname YAML；"
-                "即使 identity_pending 也必须先生成可审核配置，拒绝切换 latest："
-            )
-            for hostname in missing:
-                print(f"  {hostname}.yaml")
+            print_missing_expected_hosts(missing)
             return False
 
         try:
@@ -1479,11 +1800,12 @@ def _publish_combined_cumulus(contexts, devices):
             print(f"[ERROR] apply-mode sidecar 校验失败：{exc}")
             return False
 
-        release_default = os.path.join(staging_dir, os.path.basename(default_path))
+        release_default = os.path.join(staging_dir, default_name)
         if os.path.lexists(release_default):
             print(f"[ERROR] release 默认文件名与设备配置冲突：{release_default}")
             return False
-        shutil.copy2(default_path, release_default)
+        Path(release_default).write_bytes(default_bytes)
+        os.chmod(release_default, 0o644)
         if _sha256_file(release_default) != current_default_hash:
             print("[ERROR] release 默认配置复制校验失败")
             return False
@@ -1529,6 +1851,8 @@ def _publish_combined_cumulus(contexts, devices):
         )
         release_manifest = {
             "schema_version": 1,
+            "deployment_scope": deployment_scope,
+            "switch_scope": switch_scope,
             "release_id": f"{timestamp}-cumulus-air",
             "target_cumulus_version": target_version,
             "effective_default": os.path.basename(release_default),
@@ -1755,6 +2079,8 @@ def main():
 
     # --csv=<path> 或 --csv <path>
     explicit_csv = None
+    deployment_scope = "all"
+    switch_scope = "all"
     new_args = []
     i = 0
     while i < len(args):
@@ -1763,13 +2089,35 @@ def main():
         elif args[i] == "--csv" and i + 1 < len(args):
             explicit_csv = args[i + 1]
             i += 1
+        elif args[i].startswith("--deployment-scope="):
+            deployment_scope = args[i].split("=", 1)[1]
+        elif args[i] == "--deployment-scope" and i + 1 < len(args):
+            deployment_scope = args[i + 1]
+            i += 1
+        elif args[i].startswith("--switch="):
+            switch_scope = args[i].split("=", 1)[1]
+        elif args[i] == "--switch" and i + 1 < len(args):
+            switch_scope = args[i + 1]
+            i += 1
         else:
             new_args.append(args[i])
         i += 1
     args = new_args
+    if deployment_scope not in {"all", "prod", "air"}:
+        print(
+            f"[ERROR] unsupported deployment scope: {deployment_scope!r}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if switch_scope not in {"all", "eth", "ib", "nvl"}:
+        print(
+            f"[ERROR] unsupported switch scope: {switch_scope!r}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     if "-h" in args or "--help" in args:
-        print("""usage: d-hostname2mac.py [-y] [--csv PATH] YAML_DIR [YAML_DIR]
+        print("""usage: d-hostname2mac.py [-y] [--csv PATH] [--deployment-scope all|prod|air] [--switch eth|ib|nvl] YAML_DIR [YAML_DIR]
 
 一个 Cumulus 目录：自动补齐同时间戳 Production 与 _air 两个目录后发布。
           两套 YAML 除 set.system.hostname 外必须完全一致，各自 MAC 链接只指向
@@ -1799,7 +2147,7 @@ Cumulus 发布成功后归档并删除生成源目录。""")
 
     print(f"\n正在读取 CSV：{csv_file}")
     try:
-        devices = load_csv(csv_file)
+        devices = load_csv(csv_file, switch_scope=switch_scope)
     except (OSError, ValueError) as exc:
         print(f"[ERROR] 设备 CSV 无法安全读取：{exc}")
         sys.exit(1)
@@ -1814,14 +2162,35 @@ Cumulus 发布成功后归档并删除生成源目录。""")
 
     nvos_contexts = [_nvos_dir_context(path) for path in yaml_dirs]
     cumulus_contexts = [_cumulus_dir_context(path) for path in yaml_dirs]
+    if any(ctx is not None for ctx in cumulus_contexts) and switch_scope not in {
+        "all", "eth",
+    }:
+        print("[ERROR] Cumulus 发布只接受 --switch eth", file=sys.stderr)
+        sys.exit(2)
+    if any(ctx is not None for ctx in nvos_contexts) and switch_scope == "eth":
+        print("[ERROR] NVOS 发布只接受 --switch ib 或 --switch nvl", file=sys.stderr)
+        sys.exit(2)
     if any(ctx is not None for ctx in cumulus_contexts):
         cumulus_contexts = _preferred_cumulus_contexts(cumulus_contexts)
         yaml_dirs = [ctx["path"] for ctx in cumulus_contexts]
+    if deployment_scope == "air" and any(
+        ctx is not None for ctx in nvos_contexts
+    ):
+        print("[ERROR] AIR deployment scope 不接受 NVOS 发布目录")
+        sys.exit(1)
     if len(yaml_dirs) == 2:
         if all(ctx is not None for ctx in nvos_contexts):
-            published = _publish_combined_nvos(nvos_contexts, devices)
+            published = _publish_combined_nvos(
+                nvos_contexts, devices,
+                deployment_scope=deployment_scope,
+                switch_scope=switch_scope,
+            )
         elif all(ctx is not None for ctx in cumulus_contexts):
-            published = _publish_combined_cumulus(cumulus_contexts, devices)
+            published = _publish_combined_cumulus(
+                cumulus_contexts, devices,
+                deployment_scope=deployment_scope,
+                switch_scope=switch_scope,
+            )
         else:
             print("[ERROR] 双目录模式只接受同时间戳的 Cumulus+AIR 或 IB+NVL 目录")
             sys.exit(1)
@@ -1831,7 +2200,11 @@ Cumulus 发布成功后归档并删除生成源目录。""")
 
     yaml_dir = yaml_dirs[0]
     if nvos_contexts[0] is not None:
-        if not _publish_single_nvos(nvos_contexts[0], devices):
+        if not _publish_single_nvos(
+            nvos_contexts[0], devices,
+            deployment_scope=deployment_scope,
+            switch_scope=switch_scope,
+        ):
             sys.exit(1)
         return
 
@@ -1842,6 +2215,12 @@ Cumulus 发布成功后归档并删除生成源目录。""")
         sys.exit(1)
 
     if cumulus_contexts[0] is not None:
+        if deployment_scope == "prod":
+            if not _publish_production_cumulus(
+                cumulus_contexts[0], devices, switch_scope=switch_scope,
+            ):
+                sys.exit(1)
+            return
         print("[ERROR] Cumulus 发布需要同时间戳的 Production 和 _air 两个目录")
         if len(cumulus_contexts) == 1:
             print("        请重新运行配置生成器创建 hostname-only AIR YAML")

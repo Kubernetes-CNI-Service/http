@@ -14,11 +14,11 @@ CPU 架构隔离，不再在 `apps/` 根目录混放 deb：
 ```text
 apps/
 ├── ubuntu-24.04/
-│   ├── amd64/{*.deb,Packages,Packages.gz}
-│   └── arm64/{*.deb,Packages,Packages.gz}
+│   ├── amd64/{*.deb,Packages,Packages.gz,repository.meta}
+│   └── arm64/{*.deb,Packages,Packages.gz,repository.meta}
 └── ubuntu-22.04/                 # 只在对应系统上构建后出现
-    ├── amd64/{*.deb,Packages,Packages.gz}
-    └── arm64/{*.deb,Packages,Packages.gz}
+    ├── amd64/{*.deb,Packages,Packages.gz,repository.meta}
+    └── arm64/{*.deb,Packages,Packages.gz,repository.meta}
 ```
 
 client 会探测：
@@ -27,9 +27,12 @@ client 会探测：
 http://<mgmt>/apps/ubuntu-<VERSION_ID>/<amd64|arm64>/Packages.gz
 ```
 
-当前 Ubuntu 24.04 的 amd64/arm64 仓库已分开生成，`Architecture: all` 包在两个目录
-中均可用。`Packages` 与 `Packages.gz` 必须与同目录 deb 同步；手工增删包后不要只
-复制 deb，应在对应系统/架构的管理服务器上重跑：
+目录存在不代表仓库已经可部署。每个 OS/架构目录只有在 `repository.meta` 的版本/架构与路径
+一致、`Packages` 和 `Packages.gz` 同步、索引中的包都存在且依赖闭包完整时才可使用；
+`Architecture: all` 包也必须被目标目录索引。`tar-for-upload.py --include-apps` 会 fail closed
+检查这些条件，不能根据当前目录里的 DEB 数量宣称仓库 ready。
+
+手工增删包后不要只复制 deb，应在对应系统/架构的管理服务器上重跑：
 
 ```bash
 sudo ./infra/infra-setup.sh --mgmt --all

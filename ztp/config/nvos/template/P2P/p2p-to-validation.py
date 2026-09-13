@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import fnmatch
 import os
 import re
 import sys
@@ -22,6 +21,15 @@ from pathlib import Path, PurePosixPath
 from typing import Optional
 from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape, quoteattr
+
+CONFIG_ROOT = Path(__file__).resolve().parents[3]
+if str(CONFIG_ROOT) not in sys.path:
+    sys.path.insert(0, str(CONFIG_ROOT))
+
+from topology_rules import (  # noqa: E402
+    load_inventory_sections,
+    resolve_inventory_device_type,
+)
 
 
 CSV_HEADER = [
@@ -250,31 +258,14 @@ def find_endpoint_columns(rows: list[tuple[int, dict[int, str]]]) -> tuple[int, 
 
 
 def parse_inventory(path: Path) -> tuple[list[str], list[tuple[str, str]]]:
-    type_order: list[str] = []
-    patterns: list[tuple[str, str]] = []
-    current_type = ""
-    in_meta = False
-    for raw_line in path.read_text(encoding="utf-8-sig").splitlines():
-        line = raw_line.strip()
-        if not line:
-            in_meta = False
-            continue
-        if line.startswith("#"):
-            continue
-        if re.fullmatch(r"\[\[.*\]\]", line):
-            in_meta = True
-            current_type = ""
-            continue
-        if re.fullmatch(r"\[.*\]", line):
-            if in_meta:
-                continue
-            current_type = line[1:-1]
-            if current_type.casefold() not in {item.casefold() for item in type_order}:
-                type_order.append(current_type)
-            continue
-        if current_type and not in_meta:
-            patterns.append((current_type, line.casefold()))
-    return type_order, patterns
+    sections = load_inventory_sections(path)
+    return (
+        [section.name for section in sections],
+        [
+            (section.name, pattern.casefold())
+            for section in sections for pattern in section.patterns
+        ],
+    )
 
 
 def parse_port_map(path: Path) -> tuple[dict[tuple[str, str], str], OrderedDict[tuple[str, str], str]]:
@@ -322,27 +313,17 @@ def parse_splitters(path: Path) -> tuple[dict[tuple[str, str], str], dict[str, s
 
 class RuleSet:
     def __init__(self, inventory: Path, port_map: Path, splitter: Path) -> None:
-        self.type_order, self.inventory_patterns = parse_inventory(inventory)
+        self.inventory_sections = load_inventory_sections(inventory)
+        self.type_order = [section.name for section in self.inventory_sections]
+        self.inventory_patterns = [
+            (section.name, pattern.casefold())
+            for section in self.inventory_sections for pattern in section.patterns
+        ]
         self.port_direct, self.port_switch = parse_port_map(port_map)
         self.splitter_exact, self.splitter_default = parse_splitters(splitter)
 
     def device_type(self, device: str) -> str:
-        value = device.casefold()
-        matches: list[tuple[int, int, str]] = []
-        order = {name.casefold(): index for index, name in enumerate(self.type_order)}
-        for device_type in self.type_order:
-            for pattern_type, pattern in self.inventory_patterns:
-                if (pattern_type.casefold() == device_type.casefold()
-                        and fnmatch.fnmatchcase(value, pattern)):
-                    # A hostname can match a broad rule such as ``*GPU*`` and a
-                    # more precise platform rule such as ``*gpusrv*``. Prefer
-                    # the rule with more literal characters; preserve inventory
-                    # section order only as the tie breaker.
-                    specificity = len(pattern.replace("*", "").replace("?", ""))
-                    matches.append((specificity, -order[device_type.casefold()], device_type))
-        if matches:
-            return max(matches)[2]
-        return "unknown"
+        return resolve_inventory_device_type(device, self.inventory_sections)
 
     @staticmethod
     def protocol(device_type: str) -> str:

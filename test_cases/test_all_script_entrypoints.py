@@ -30,7 +30,7 @@ GENERATED_RUNTIME_SCRIPTS = {
     "ztp/ztp-bootstrap_oob.sh",
     "ztp/ztp-bootstrap_oobofoob.sh",
 }
-NON_SOURCE_ROOTS = {".git", ".codex", ".agents"}
+NON_SOURCE_ROOTS = {".git", ".codex", ".agents", "outputs"}
 NON_DEPLOYMENT_DIR_NAMES = {
     "test", "tests", "test_cases", "test-results", "__pycache__",
     ".pytest_cache", "node_modules",
@@ -237,6 +237,7 @@ class AllScriptEntrypointTests(unittest.TestCase):
             path.relative_to(ROOT).as_posix() for path in source_scripts()
         }
         self.assertTrue(GENERATED_RUNTIME_SCRIPTS.isdisjoint(discovered))
+        self.assertFalse(any(path.startswith("outputs/") for path in discovered))
         source = template.read_text(encoding="utf-8")
         self.assertIn('ZTP_SERVER="http://127.0.0.1"', source)
         self.assertIn('ZTP_UPGRADE_ENABLED="false"', source)

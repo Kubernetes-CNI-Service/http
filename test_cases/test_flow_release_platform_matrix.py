@@ -17,12 +17,15 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import sys
 import tempfile
 import unittest
 from unittest import mock
 
 import yaml
+
+from test_cases.test_ztp_applied_receipt import run_cumulus_mode_bootstrap
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -95,6 +98,52 @@ def mac_filename(mac: str) -> str:
     return re.sub(r"[^0-9a-f]", "", mac.casefold()) + ".yaml"
 
 
+class OperatorGuidanceWorkflowTests(unittest.TestCase):
+    def test_generator_routes_native_and_docker_to_real_orchestrators(self):
+        guidance = "\n".join(
+            CUMULUS_GENERATOR._production_handoff_rows(lambda text="": text)
+        )
+        dhcp_guidance = DHCP._production_handoff_text()
+        load_source = (ROOT / "DAY0-Prepare/11-load.py").read_text(encoding="utf-8")
+        deploy_source = (ROOT / "infra/docker/deploy.sh").read_text(encoding="utf-8")
+        dhcp_source = (
+            ROOT / "ztp/config/isc-dhcp-server/c1-generate_dhcp.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("DAY0-Prepare/11-load.py", guidance)
+        self.assertIn("infra/docker/deploy.sh deploy", guidance)
+        self.assertIn("deploy-preloaded <IMAGE_ID>", guidance)
+        self.assertIn(
+            "没有 source write 且已有运行中的 inactive 控制容器", guidance,
+        )
+        self.assertNotIn(
+            "Docker/Supervisor：sudo ./infra/docker/deploy.sh load", guidance,
+        )
+        self.assertIn("def main(", load_source)
+        deploy_argument_gate = deploy_source.split(
+            "  deploy)", 1
+        )[1].split("    ;;", 1)[0]
+        self.assertIn("--no-upgrade", deploy_argument_gate)
+        self.assertNotIn("build_image", deploy_argument_gate)
+        deploy_branch = deploy_source.rsplit(
+            "  deploy)", 1
+        )[1].split("    ;;", 1)[0]
+        preloaded_branch = deploy_source.rsplit(
+            "  deploy-preloaded)", 1
+        )[1].split("    ;;", 1)[0]
+        load_branch = deploy_source.rsplit("  load)", 1)[1].split("    ;;", 1)[0]
+        self.assertIn("build_image", deploy_branch)
+        self.assertIn("run_load", deploy_branch)
+        self.assertIn("verify_preloaded_image", preloaded_branch)
+        self.assertIn("run_load", preloaded_branch)
+        self.assertIn("owned_container_id true true false", load_branch)
+        self.assertIn("run_load", load_branch)
+        self.assertIn("DAY0-Prepare/11-load.py", dhcp_guidance)
+        self.assertIn("infra/docker/deploy.sh deploy", dhcp_guidance)
+        self.assertIn("deploy-preloaded <IMAGE_ID>", dhcp_guidance)
+        self.assertIn("print(\"\\n\" + _production_handoff_text())", dhcp_source)
+        self.assertNotIn("systemctl", guidance)
+
+
 class PlatformReleaseFlowTests(unittest.TestCase):
     """Run one real four-device release and inspect each platform boundary."""
 
@@ -128,6 +177,14 @@ class PlatformReleaseFlowTests(unittest.TestCase):
         fragment = CUMULUS_GENERATOR.build_env().get_template(
             "_extra_aaa_users.yaml.j2"
         ).render(g=global_config)
+        self.assertEqual(
+            '          "ops-reader":\n'
+            '            full-name: "Operations: read only #1"\n'
+            '            hashed-password: "$6$example"\n'
+            '            role: "nvue-monitor"\n',
+            fragment,
+            "the complete AAA fragment must be locked before publisher parsing",
+        )
         document = (
             "- set:\n"
             "    system:\n"
@@ -160,6 +217,25 @@ class PlatformReleaseFlowTests(unittest.TestCase):
             CUMULUS_GENERATOR.build_env().get_template(
                 "_extra_aaa_users.yaml.j2"
             ).render(g=malicious)
+
+    def test_site_default_is_release_bound_without_mutating_neutral_source(self):
+        self.assertEqual(
+            self.cumulus_neutral_default,
+            self.cumulus_default.read_bytes(),
+        )
+        manifest = self.cumulus_air_manifest
+        self.assertEqual(
+            "effective-default.runtime",
+            manifest["effective_default_artifact"],
+        )
+        self.assertEqual(
+            hashlib.sha256(self.cumulus_runtime_default).hexdigest(),
+            manifest["effective_default_sha256"],
+        )
+        self.assertEqual(
+            self.cumulus_runtime_default,
+            (self.cumulus_release / manifest["effective_default"]).read_bytes(),
+        )
 
     @classmethod
     def _build_flow(cls, root: Path) -> None:
@@ -263,6 +339,7 @@ switches:
     @classmethod
     def _run_dhcp_generator(cls) -> None:
         bindings = {
+            "HTTP_ROOT": str(cls.root),
             "SCRIPT_DIR": str(cls.dhcp),
             "OUTPUT_ETH": str(cls.dhcp / "dhcpd_eth.hosts"),
             "OUTPUT_IB": str(cls.dhcp / "dhcpd_ib.hosts"),
@@ -288,9 +365,11 @@ switches:
             "- set:\n"
             "    system:\n"
             "      date-time:\n"
-            "        timezone: UTC\n",
+            "        timezone: Etc/UTC\n",
             encoding="utf-8",
         )
+        cls.cumulus_default = default
+        cls.cumulus_neutral_default = default.read_bytes()
         raw_yaml = (
             "- set:\n"
             "    interface:\n"
@@ -335,6 +414,12 @@ switches:
             CUMULUS_GENERATOR.generate_air_hostname_configs(
                 str(production), str(air),
             )
+        cls.cumulus_air_manifest = json.loads(
+            (air / "air-config-manifest.json").read_text(encoding="utf-8")
+        )
+        cls.cumulus_runtime_default = (
+            air / cls.cumulus_air_manifest["effective_default_artifact"]
+        ).read_bytes()
 
         devices = PUBLISHER.load_csv(cls.devices_file)
         contexts = [
@@ -421,6 +506,91 @@ switches:
             manifest["release_id"],
             self.parent["components"]["cumulus"]["release_id"],
         )
+
+    def test_cumulus_mode_sidecars_cross_real_publisher_and_bootstrap_consumer(self):
+        manifest = json.loads(
+            (self.cumulus_release / "release-manifest.json").read_text()
+        )
+        devices = {item["hostname"]: item for item in manifest["devices"]}
+        for hostname, mac in ((PROD_HOST, PROD_MAC), (AIR_HOST, AIR_MAC)):
+            mode_name = mac_filename(mac).removesuffix(".yaml") + ".mode"
+            sidecar = self.cumulus_release / mode_name
+            self.assertTrue(sidecar.is_file(), (hostname, sidecar))
+            self.assertEqual(
+                (devices[hostname]["apply_mode"] + "\n").encode("ascii"),
+                sidecar.read_bytes(),
+            )
+
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            intact = root / "intact"
+            shutil.copytree(self.cumulus_release, intact, symlinks=True)
+            result, events, receipt = run_cumulus_mode_bootstrap(
+                root / "intact-consumer",
+                mode_behavior="published",
+                release_dir=intact,
+                mac=PROD_MAC,
+            )
+            self.assertEqual(0, result.returncode, result.stderr + result.stdout)
+            self.assertTrue(
+                any(event.startswith("nv:config replace ") for event in events),
+                events,
+            )
+            self.assertEqual("dedicated", receipt["source_kind"])
+            self.assertEqual("replace", receipt["apply_mode"])
+
+            missing = root / "missing"
+            shutil.copytree(self.cumulus_release, missing, symlinks=True)
+            mode_name = mac_filename(PROD_MAC).removesuffix(".yaml") + ".mode"
+            (missing / mode_name).unlink()
+            result, events, receipt = run_cumulus_mode_bootstrap(
+                root / "missing-consumer",
+                mode_behavior="published",
+                release_dir=missing,
+                mac=PROD_MAC,
+            )
+            self.assertEqual(0, result.returncode, result.stderr + result.stdout)
+            self.assertFalse(
+                any(
+                    event.startswith(("nv:config replace ", "nv:config patch "))
+                    and mac_filename(PROD_MAC) in event
+                    for event in events
+                ),
+                events,
+            )
+            self.assertTrue(
+                any(event.startswith("nv:config patch ") for event in events),
+                events,
+            )
+            self.assertEqual("fallback_default", receipt["source_kind"])
+            self.assertEqual(mode_name, receipt["failed_source_name"])
+
+            hostile = root / "hostile"
+            shutil.copytree(self.cumulus_release, hostile, symlinks=True)
+            (hostile / mode_name).write_bytes(b"re\x00place\n")
+            result, events, receipt = run_cumulus_mode_bootstrap(
+                root / "hostile-consumer",
+                mode_behavior="published",
+                release_dir=hostile,
+                mac=PROD_MAC,
+            )
+            self.assertEqual(0, result.returncode, result.stderr + result.stdout)
+            self.assertFalse(
+                any(
+                    event.startswith(("nv:config replace ", "nv:config patch "))
+                    and mac_filename(PROD_MAC) in event
+                    for event in events
+                ),
+                events,
+            )
+            self.assertTrue(
+                any(event.startswith("nv:config patch ") for event in events),
+                events,
+            )
+            self.assertEqual("fallback_default", receipt["source_kind"])
+            self.assertEqual(mode_name, receipt["failed_source_name"])
+            self.assertIn("mode-sidecar-unavailable", result.stdout)
+            self.assertIn("invalid raw bytes", result.stdout)
 
     def test_nvos_ib_and_nvl_are_generated_published_and_consumed(self):
         manifest = json.loads(

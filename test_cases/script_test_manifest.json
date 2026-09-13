@@ -7,11 +7,149 @@
     "test_cases.test_public_repository_contract",
     "test_cases.test_test_case_repository"
   ],
+  "test_suites": [
+    {
+      "id": "repository-governance",
+      "description": "仓库入口、测试治理、公开边界和文档目录合同",
+      "tests": [
+        "test_cases.test_all_script_entrypoints",
+        "test_cases.test_change_aware_test_runner",
+        "test_cases.test_documentation_catalog",
+        "test_cases.test_private_documentation_contract",
+        "test_cases.test_public_clean_clone_contract",
+        "test_cases.test_public_clean_clone_workflow",
+        "test_cases.test_public_repository_contract",
+        "test_cases.test_test_case_repository",
+        "test_cases.test_reference_only_path_disposition",
+        "test_cases.test_public_s_phase_contract",
+        "test_cases.test_public_s_phase_workflow"
+      ]
+    },
+    {
+      "id": "packaging-sync",
+      "description": "上传、下载、同步、诊断、密码更新和部署前门禁",
+      "tests": [
+        "test_cases.test_deployment_writer_lock",
+        "test_cases.test_deploy_upload_archive",
+        "test_cases.test_diagnostic_bundle",
+        "test_cases.test_download_cli_contract",
+        "test_cases.test_import_from_download_target",
+        "test_cases.test_password_update",
+        "test_cases.test_predeploy_test_gate",
+        "test_cases.test_project_image_bundle",
+        "test_cases.test_public_project_fixture_contract",
+        "test_cases.test_public_project_fixture_workflow",
+        "test_cases.test_shared_artifact_bundle",
+        "test_cases.test_upload_package_contract",
+        "test_cases.test_reference_only_selector_workflow"
+      ]
+    },
+    {
+      "id": "deployment-runtime",
+      "description": "宿主及容器部署、发布事务、Apache、DHCP 和服务运行时",
+      "tests": [
+        "test_cases.test_apache_publication_boundary",
+        "test_cases.test_control_auth",
+        "test_cases.test_docker_destructive_confirmation",
+        "test_cases.test_docker_destructive_confirmation_workflow",
+        "test_cases.test_docker_management_ssh_key",
+        "test_cases.test_infra_check_and_manual_reset",
+        "test_cases.test_load_release_transaction",
+        "test_cases.test_monitor_authority_entrypoints",
+        "test_cases.test_monitor_authority_semantic_workflow",
+        "test_cases.test_monitor_authority_source_guard",
+        "test_cases.test_monitor_writer_quiesce",
+        "test_cases.test_monitor_writer_quiesce_workflow",
+        "test_cases.test_ops_deployment_review",
+        "test_cases.test_ztp_container_runtime",
+        "test_cases.test_ztp_service_runtime"
+      ]
+    },
+    {
+      "id": "configuration-generation",
+      "description": "项目 schema、Cumulus/NVUE、MLAG/EVPN、QoS、STP 和配置生成",
+      "tests": [
+        "test_cases.test_cumulus_snippet_rendering",
+        "test_cases.test_dhcp_switch_scope_preservation",
+        "test_cases.test_dhcp_switch_scope_preservation_workflow",
+        "test_cases.test_feedback_global_writeback",
+        "test_cases.test_feedback_global_writeback_workflow",
+        "test_cases.test_flow_release_platform_matrix",
+        "test_cases.test_mlag_evpn_generation",
+        "test_cases.test_nvue_normalizer",
+        "test_cases.test_optimize_output_layout",
+        "test_cases.test_project_contracts",
+        "test_cases.test_qos_evpn_uplink_generation",
+        "test_cases.test_terminal_l2_stp_generation",
+        "test_cases.test_topology_consistency",
+        "test_cases.test_v2_generation_flow",
+        "test_cases.test_v2_project_schema",
+        "test_cases.test_xlsx_zero_row_fail_closed",
+        "test_cases.test_xlsx_zero_row_workflow"
+      ]
+    },
+    {
+      "id": "monitoring-collection",
+      "description": "监控页面、采集 worker、IB 分析、手工比对和分组交接",
+      "tests": [
+        "test_cases.test_backup_auth_transport_workflow",
+        "test_cases.test_collector_inventory_pubkey",
+        "test_cases.test_collector_inventory_pubkey_workflow",
+        "test_cases.test_ib_analysis_domain",
+        "test_cases.test_manual_applied_config",
+        "test_cases.test_monitor_stack_review",
+        "test_cases.test_ztp_monitor_watch_resilience",
+        "test_cases.test_ztp_monitor_watch_runtime_workflow",
+        "test_cases.test_ztp_group_handoff",
+        "test_cases.test_ztp_group_handoff_display"
+      ]
+    },
+    {
+      "id": "ztp-runtime",
+      "description": "DHCP 租约、ZTP 身份、前缀边界、应用回执和端到端运行流",
+      "tests": [
+        "test_cases.test_bootstrap_config_fetch_contract",
+        "test_cases.test_bootstrap_config_fetch_workflow",
+        "test_cases.test_dhcp_runtime_reassignment",
+        "test_cases.test_full_flow_integration",
+        "test_cases.test_ztp_applied_receipt",
+        "test_cases.test_ztp_http_identity_binding",
+        "test_cases.test_ztp_prefix_runtime_boundary",
+        "test_cases.test_ztp_release_core_review"
+      ]
+    },
+    {
+      "id": "vm-validation",
+      "description": "Ubuntu 管理 VM 只读验收器自身的本地合同",
+      "tests": [
+        "test_cases.test_vm_validation_runner"
+      ]
+    }
+  ],
   "tracked_support": [
+    ".dockerignore",
     ".gitattributes",
+    ".github/workflows/monitor-authority-root.yml",
     ".github/workflows/tests.yml",
     ".gitignore",
     "AGENTS.md",
+    "PUBLIC_REPOSITORY.md",
+    "SECURITY.md",
+    "examples/public-project/01-global.yaml.example",
+    "examples/public-project/02-devices_config.csv.example",
+    "examples/public-project/02-dhcp-subnet_config.csv.example",
+    "index.html",
+    "requirements-container-top-level.lock",
+    "requirements-dev.txt",
+    "test_cases/audit_public_tree.py",
+    "test_cases/REAL_ENVIRONMENT.md",
+    "test_cases/monitor_authority_root_warden.py",
+    "test_cases/monitor_authority_source_guard.py",
+    "test_cases/public_project_fixture.py",
+    "test_cases/run_monitor_authority_entrypoints.sh",
+    "test_cases/run_related_tests.py",
+    "test_cases/run_vm_validation.py",
+    "user-manual.html",
     "DAY0-Prepare/template/.management-pubkeys",
     "DAY0-Prepare/template/01-global.yaml",
     "DAY0-Prepare/template/02-devices_config.csv",
@@ -33,19 +171,27 @@
     "DAY0-Prepare/template/nvosv25-02-7002amd64.bin",
     "DAY0-Prepare/template/nvosv25-02-8008amd64.bin",
     "DAY0-Prepare/template/p2p.xlsx",
-    "PUBLIC_REPOSITORY.md",
-    "SECURITY.md",
-    "examples/public-project/01-global.yaml.example",
-    "examples/public-project/02-devices_config.csv.example",
-    "examples/public-project/02-dhcp-subnet_config.csv.example",
-    "index.html",
-    "requirements-dev.txt",
-    "test_cases/REAL_ENVIRONMENT.md",
-    "test_cases/audit_public_tree.py",
-    "test_cases/run_related_tests.py",
+    "infra/docker/.dockerignore",
+    "infra/docker/.gitignore",
+    "infra/docker/Dockerfile",
+    "infra/docker/Dockerfile.dockerignore",
+    "infra/docker/apache-ztp.conf",
+    "infra/docker/compose.yaml",
+    "infra/docker/container.env.example",
+    "infra/docker/logrotate-http-ztp.conf",
+    "infra/docker/rsyslog-dhcp.conf",
+    "infra/docker/runtime-contract.json",
+    "infra/docker/supervisord.conf",
+    "tools/lldp-analyze-tool/04-lldp-device-aliases.json",
     "ztp/config/cumulus/ar_profile_custom.conf",
     "ztp/config/cumulus/default.yaml",
     "ztp/config/cumulus/default_5.16.5.yaml",
+    "ztp/config/cumulus/template/P2P/01-inventory.log",
+    "ztp/config/cumulus/template/P2P/02-port-mapping.log",
+    "ztp/config/cumulus/template/P2P/03-splitter.log",
+    "ztp/config/cumulus/template/P2P/air-template-no-oob.json",
+    "ztp/config/cumulus/template/P2P/air-template.json",
+    "ztp/config/cumulus/template/P2P/lldpq-template.dot",
     "ztp/config/cumulus/template/03-templates-j2/_bridge_l2vlans.yaml.j2",
     "ztp/config/cumulus/template/03-templates-j2/_dhcp_relay.yaml.j2",
     "ztp/config/cumulus/template/03-templates-j2/_direct_vlan_ports.yaml.j2",
@@ -66,12 +212,6 @@
     "ztp/config/cumulus/template/03-templates-j2/tan-leaf.yaml.j2",
     "ztp/config/cumulus/template/03-templates-j2/tan-spine.yaml.j2",
     "ztp/config/cumulus/template/03-templates-j2/tan-su-leaf.yaml.j2",
-    "ztp/config/cumulus/template/P2P/01-inventory.log",
-    "ztp/config/cumulus/template/P2P/02-port-mapping.log",
-    "ztp/config/cumulus/template/P2P/03-splitter.log",
-    "ztp/config/cumulus/template/P2P/air-template-no-oob.json",
-    "ztp/config/cumulus/template/P2P/air-template.json",
-    "ztp/config/cumulus/template/P2P/lldpq-template.dot",
     "ztp/config/nvos/default.yaml",
     "ztp/config/nvos/disable-password-hardening.nv",
     "ztp/config/nvos/template/P2P/01-inventory.log",
@@ -98,6 +238,13 @@
     "infiniband/monitor/sw-link.sh": "ethernet/monitor/sw-link.sh",
     "infra/check_infra.py": "infra/check_infra.py",
     "infra/deploy_infra.py": "infra/deploy_infra.py",
+    "infra/docker/activate.py": "infra/docker/activate.py",
+    "infra/docker/deploy.sh": "infra/docker/deploy.sh",
+    "infra/docker/entrypoint.py": "infra/docker/entrypoint.py",
+    "infra/docker/healthcheck.py": "infra/docker/healthcheck.py",
+    "infra/docker/hostlock.py": "infra/docker/hostlock.py",
+    "infra/docker/hostctl.py": "infra/docker/hostctl.py",
+    "infra/docker/management_ssh_key.py": "infra/docker/management_ssh_key.py",
     "infra/infra-setup.sh": "infra/infra-setup.sh",
     "infra/infra-teardown.sh": "infra/infra-teardown.sh",
     "monitor/dot_to_html.py": "monitor/dot_to_html.py",
@@ -113,6 +260,10 @@
     "nvlink/monitor/sw-link.sh": "ethernet/monitor/sw-link.sh",
     "tools/_package_common.py": "tools/_package_common.py",
     "tools/collect-ztp-diagnostics.py": "tools/collect-ztp-diagnostics.py",
+    "tools/control-auth.py": "tools/control-auth.py",
+    "tools/deployment_prewrite_guard.py": "tools/deployment_prewrite_guard.py",
+    "tools/deploy-shared-artifacts.py": "tools/deploy-shared-artifacts.py",
+    "tools/deploy-upload-archive.py": "tools/deploy-upload-archive.py",
     "tools/deployment_lock.py": "tools/deployment_lock.py",
     "tools/ib-tool-Jie/ib_tool_box/lib/__init__.py": "tools/ib-tool-Jie/ib_tool_box/lib/__init__.py",
     "tools/ib-tool-Jie/ib_tool_box/lib/connection.py": "tools/ib-tool-Jie/ib_tool_box/lib/connection.py",
@@ -161,11 +312,16 @@
     "tools/import-from-download.py": "tools/import-from-download.py",
     "tools/lldp-analyze-tool/analyze_lldp.py": "tools/lldp-analyze-tool/analyze_lldp.py",
     "tools/lldp-analyze-tool/build_report.py": "tools/lldp-analyze-tool/build_report.py",
+    "tools/password-update.py": "tools/password-update.py",
+    "tools/package-project-image.py": "tools/package-project-image.py",
+    "tools/package-shared-artifacts.py": "tools/package-shared-artifacts.py",
     "tools/project_contract.py": "tools/project_contract.py",
     "tools/sync-code.py": "tools/sync-code.py",
     "tools/tar-for-download.py": "tools/tar-for-download.py",
     "tools/tar-for-upload.py": "tools/tar-for-upload.py",
     "tools/update-root-readme.py": "tools/update-root-readme.py",
+    "tools/update-user-manual.py": "tools/update-user-manual.py",
+    "tools/ztp_service_runtime.py": "tools/ztp_service_runtime.py",
     "ztp/backup/yaml-collect.py": "ztp/backup/yaml-collect.py",
     "ztp/config/cumulus/d-hostname2mac.py": "ztp/config/cumulus/d-hostname2mac.py",
     "ztp/config/cumulus/template/90-c2-generate_configs.py": "ztp/config/cumulus/template/90-c2-generate_configs.py",
@@ -174,6 +330,7 @@
     "ztp/config/nvos/d-hostname2mac.py": "ztp/config/cumulus/d-hostname2mac.py",
     "ztp/config/nvos/template/90-c2-generate_configs.py": "ztp/config/cumulus/template/90-c2-generate_configs.py",
     "ztp/config/nvos/template/P2P/p2p-to-validation.py": "ztp/config/nvos/template/P2P/p2p-to-validation.py",
+    "ztp/config/topology_rules.py": "ztp/config/topology_rules.py",
     "ztp/dhcp_runtime_inventory.py": "ztp/dhcp_runtime_inventory.py",
     "ztp/dynamic_air_inventory.py": "ztp/dynamic_air_inventory.py",
     "ztp/environment_probe.py": "ztp/environment_probe.py",
@@ -196,11 +353,23 @@
       "tests": [
         "test_cases.test_ops_deployment_review",
         "test_cases.test_load_release_transaction",
+        "test_cases.test_dhcp_switch_scope_preservation",
+        "test_cases.test_dhcp_switch_scope_preservation_workflow",
+        "test_cases.test_bootstrap_config_fetch_contract",
+        "test_cases.test_bootstrap_config_fetch_workflow",
         "test_cases.test_flow_release_platform_matrix",
         "test_cases.test_project_contracts",
         "test_cases.test_terminal_l2_stp_generation",
         "test_cases.test_v2_project_schema",
-        "test_cases.test_v2_generation_flow"
+        "test_cases.test_v2_generation_flow",
+        "test_cases.test_ztp_service_runtime",
+        "test_cases.test_ztp_container_runtime",
+        "test_cases.test_docker_management_ssh_key",
+        "test_cases.test_docker_destructive_confirmation",
+        "test_cases.test_docker_destructive_confirmation_workflow",
+        "test_cases.test_ztp_monitor_watch_runtime_workflow",
+        "test_cases.test_xlsx_zero_row_fail_closed",
+        "test_cases.test_xlsx_zero_row_workflow"
       ]
     },
     {
@@ -214,7 +383,11 @@
         "test_cases.test_full_flow_integration",
         "test_cases.test_ztp_http_identity_binding",
         "test_cases.test_ztp_group_handoff",
-        "test_cases.test_ztp_group_handoff_display"
+        "test_cases.test_ztp_group_handoff_display",
+        "test_cases.test_ztp_service_runtime",
+        "test_cases.test_ztp_container_runtime",
+        "test_cases.test_ztp_monitor_watch_resilience",
+        "test_cases.test_ztp_monitor_watch_runtime_workflow"
       ]
     },
     {
@@ -226,7 +399,9 @@
       ],
       "tests": [
         "test_cases.test_monitor_stack_review",
-        "test_cases.test_project_contracts"
+        "test_cases.test_project_contracts",
+        "test_cases.test_collector_inventory_pubkey",
+        "test_cases.test_collector_inventory_pubkey_workflow"
       ]
     },
     {
@@ -246,7 +421,29 @@
       "tests": [
         "test_cases.test_ops_deployment_review",
         "test_cases.test_apache_publication_boundary",
-        "test_cases.test_infra_check_and_manual_reset"
+        "test_cases.test_infra_check_and_manual_reset",
+        "test_cases.test_monitor_authority_entrypoints",
+        "test_cases.test_monitor_authority_semantic_workflow"
+      ]
+    },
+    {
+      "id": "container_ztp_runtime",
+      "paths": [
+        "infra/docker/*.py",
+        "infra/docker/*.sh"
+      ],
+      "tests": [
+        "test_cases.test_ztp_container_runtime",
+        "test_cases.test_ztp_service_runtime",
+        "test_cases.test_deployment_writer_lock",
+        "test_cases.test_load_release_transaction",
+        "test_cases.test_monitor_authority_entrypoints",
+        "test_cases.test_monitor_authority_semantic_workflow",
+        "test_cases.test_docker_management_ssh_key",
+        "test_cases.test_docker_destructive_confirmation",
+        "test_cases.test_docker_destructive_confirmation_workflow",
+        "test_cases.test_ztp_monitor_watch_runtime_workflow",
+        "test_cases.test_reference_only_selector_workflow"
       ]
     },
     {
@@ -258,14 +455,20 @@
         "test_cases.test_monitor_stack_review",
         "test_cases.test_project_contracts",
         "test_cases.test_ztp_group_handoff",
-        "test_cases.test_ztp_group_handoff_display"
+        "test_cases.test_ztp_group_handoff_display",
+        "test_cases.test_monitor_authority_entrypoints",
+        "test_cases.test_monitor_authority_semantic_workflow",
+        "test_cases.test_ztp_monitor_watch_resilience",
+        "test_cases.test_ztp_monitor_watch_runtime_workflow"
       ]
     },
     {
       "id": "package_transfer_and_locking",
       "paths": [
         "tools/_package_common.py",
+        "tools/deploy-upload-archive.py",
         "tools/deployment_lock.py",
+        "tools/deployment_prewrite_guard.py",
         "tools/import-from-download.py",
         "tools/sync-code.py",
         "tools/tar-for-download.py",
@@ -274,10 +477,28 @@
       "tests": [
         "test_cases.test_ops_deployment_review",
         "test_cases.test_deployment_writer_lock",
+        "test_cases.test_deploy_upload_archive",
         "test_cases.test_upload_package_contract",
         "test_cases.test_download_cli_contract",
         "test_cases.test_import_from_download_target",
-        "test_cases.test_predeploy_test_gate"
+        "test_cases.test_predeploy_test_gate",
+        "test_cases.test_reference_only_selector_workflow"
+      ]
+    },
+    {
+      "id": "deployment_artifact_bundles",
+      "paths": [
+        "tools/deploy-shared-artifacts.py",
+        "tools/package-project-image.py",
+        "tools/package-shared-artifacts.py"
+      ],
+      "tests": [
+        "test_cases.test_project_image_bundle",
+        "test_cases.test_shared_artifact_bundle",
+        "test_cases.test_deploy_upload_archive",
+        "test_cases.test_upload_package_contract",
+        "test_cases.test_load_release_transaction",
+        "test_cases.test_ztp_container_runtime"
       ]
     },
     {
@@ -290,10 +511,65 @@
       ]
     },
     {
+      "id": "control_auth",
+      "paths": [
+        "tools/control-auth.py"
+      ],
+      "tests": [
+        "test_cases.test_control_auth",
+        "test_cases.test_monitor_authority_semantic_workflow",
+        "test_cases.test_monitor_authority_entrypoints",
+        "test_cases.test_apache_publication_boundary",
+        "test_cases.test_ztp_container_runtime"
+      ]
+    },
+    {
+      "id": "ztp_service_runtime",
+      "paths": [
+        "tools/ztp_service_runtime.py"
+      ],
+      "tests": [
+        "test_cases.test_ztp_service_runtime",
+        "test_cases.test_ztp_container_runtime",
+        "test_cases.test_load_release_transaction",
+        "test_cases.test_monitor_stack_review",
+        "test_cases.test_monitor_writer_quiesce",
+        "test_cases.test_ztp_monitor_watch_resilience",
+        "test_cases.test_ztp_monitor_watch_runtime_workflow"
+      ]
+    },
+    {
+      "id": "monitor_governed_writer_quiesce",
+      "paths": [
+        "DAY0-Prepare/01-a-setup.py",
+        "DAY0-Prepare/02-unsetup.py",
+        "DAY0-Prepare/11-load.py",
+        "DAY0-Prepare/13-unload.py",
+        "ztp/config/isc-dhcp-server/c1-generate_dhcp.py",
+        "ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py",
+        "tools/password-update.py",
+        "ztp/optimize/feedback.py",
+        "tools/deployment_prewrite_guard.py"
+      ],
+      "tests": [
+        "test_cases.test_monitor_writer_quiesce"
+      ]
+    },
+    {
+      "id": "password_update",
+      "paths": [
+        "tools/password-update.py"
+      ],
+      "tests": [
+        "test_cases.test_password_update"
+      ]
+    },
+    {
       "id": "repository_governance",
       "paths": [
         "tools/project_contract.py",
-        "tools/update-root-readme.py"
+        "tools/update-root-readme.py",
+        "tools/update-user-manual.py"
       ],
       "tests": [
         "test_cases.test_project_contracts",
@@ -302,7 +578,8 @@
         "test_cases.test_test_case_repository",
         "test_cases.test_terminal_l2_stp_generation",
         "test_cases.test_v2_project_schema",
-        "test_cases.test_v2_generation_flow"
+        "test_cases.test_v2_generation_flow",
+        "test_cases.test_reference_only_path_disposition"
       ]
     },
     {
@@ -325,7 +602,22 @@
       ],
       "tests": [
         "test_cases.test_ztp_release_core_review",
-        "test_cases.test_project_contracts"
+        "test_cases.test_backup_auth_transport_workflow",
+        "test_cases.test_project_contracts",
+        "test_cases.test_monitor_stack_review",
+        "test_cases.test_ztp_container_runtime"
+      ]
+    },
+    {
+      "id": "topology_consistency",
+      "paths": [
+        "ztp/config/topology_rules.py",
+        "ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py",
+        "ztp/config/nvos/template/P2P/p2p-to-validation.py",
+        "tools/lldp-analyze-tool/analyze_lldp.py"
+      ],
+      "tests": [
+        "test_cases.test_topology_consistency"
       ]
     },
     {
@@ -337,6 +629,8 @@
         "test_cases.test_ztp_release_core_review",
         "test_cases.test_project_contracts",
         "test_cases.test_load_release_transaction",
+        "test_cases.test_dhcp_switch_scope_preservation",
+        "test_cases.test_dhcp_switch_scope_preservation_workflow",
         "test_cases.test_ztp_prefix_runtime_boundary",
         "test_cases.test_flow_release_platform_matrix",
         "test_cases.test_cumulus_snippet_rendering",
@@ -344,7 +638,9 @@
         "test_cases.test_terminal_l2_stp_generation",
         "test_cases.test_qos_evpn_uplink_generation",
         "test_cases.test_v2_project_schema",
-        "test_cases.test_v2_generation_flow"
+        "test_cases.test_v2_generation_flow",
+        "test_cases.test_xlsx_zero_row_fail_closed",
+        "test_cases.test_xlsx_zero_row_workflow"
       ]
     },
     {
@@ -401,6 +697,8 @@
         "ztp/optimize/*"
       ],
       "tests": [
+        "test_cases.test_feedback_global_writeback",
+        "test_cases.test_feedback_global_writeback_workflow",
         "test_cases.test_optimize_output_layout",
         "test_cases.test_nvue_normalizer",
         "test_cases.test_ztp_release_core_review",
@@ -416,6 +714,8 @@
         "ztp/templates/ztp-bootstrap.sh"
       ],
       "tests": [
+        "test_cases.test_bootstrap_config_fetch_contract",
+        "test_cases.test_bootstrap_config_fetch_workflow",
         "test_cases.test_ztp_applied_receipt",
         "test_cases.test_ztp_release_core_review",
         "test_cases.test_ztp_prefix_runtime_boundary"
@@ -424,6 +724,60 @@
   ],
   "workflows": [
     {
+      "id": "monitor_authority_lifecycle_to_cgi",
+      "members": [
+        "tools/control-auth.py",
+        "monitor/ztp-monitor-control.cgi",
+        "infra/infra-setup.sh",
+        "infra/infra-teardown.sh",
+        "infra/docker/deploy.sh",
+        "infra/docker/hostlock.py",
+        "infra/docker/entrypoint.py",
+        "infra/docker/activate.py",
+        "infra/docker/healthcheck.py",
+        "infra/docker/hostctl.py"
+      ],
+      "tests": [
+        "test_cases.test_monitor_authority_semantic_workflow",
+        "test_cases.test_monitor_authority_entrypoints",
+        "test_cases.test_monitor_authority_source_guard",
+        "test_cases.test_control_auth",
+        "test_cases.test_monitor_stack_review",
+        "test_cases.test_apache_publication_boundary",
+        "test_cases.test_ztp_container_runtime"
+      ]
+    },
+    {
+      "id": "docker_management_ssh_key_lifecycle",
+      "members": [
+        ".dockerignore",
+        "infra/docker/Dockerfile.dockerignore",
+        "infra/docker/deploy.sh",
+        "infra/docker/entrypoint.py",
+        "infra/docker/hostctl.py",
+        "infra/docker/hostlock.py",
+        "infra/docker/management_ssh_key.py",
+        "DAY0-Prepare/11-load.py",
+        "tools/_package_common.py",
+        "tools/package-project-image.py",
+        "tools/project_contract.py",
+        "tools/sync-code.py",
+        "tools/tar-for-upload.py",
+        "tools/collect-ztp-diagnostics.py"
+      ],
+      "tests": [
+        "test_cases.test_docker_management_ssh_key",
+        "test_cases.test_project_contracts",
+        "test_cases.test_ztp_container_runtime",
+        "test_cases.test_upload_package_contract",
+        "test_cases.test_diagnostic_bundle",
+        "test_cases.test_project_image_bundle",
+        "test_cases.test_public_repository_contract",
+        "test_cases.test_deployment_writer_lock",
+        "test_cases.test_reference_only_selector_workflow"
+      ]
+    },
+    {
       "id": "deployment_release_transaction",
       "members": [
         "DAY0-Prepare/01-a-setup.py",
@@ -431,6 +785,7 @@
         "DAY0-Prepare/11-load.py",
         "DAY0-Prepare/13-unload.py",
         "infra/*",
+        "tools/control-auth.py",
         "tools/deployment_lock.py",
         "ztp/config/*"
       ],
@@ -441,6 +796,76 @@
         "test_cases.test_flow_release_platform_matrix",
         "test_cases.test_terminal_l2_stp_generation",
         "test_cases.test_v2_generation_flow"
+      ]
+    },
+    {
+      "id": "containerized_ztp_lifecycle",
+      "members": [
+        ".dockerignore",
+        "requirements-container-top-level.lock",
+        "infra/docker/Dockerfile.dockerignore",
+        "infra/docker/activate.py",
+        "infra/docker/deploy.sh",
+        "infra/docker/entrypoint.py",
+        "infra/docker/healthcheck.py",
+        "infra/docker/hostlock.py",
+        "infra/docker/hostctl.py",
+        "DAY0-Prepare/11-load.py",
+        "DAY0-Prepare/12-ztp-monitor.py",
+        "DAY0-Prepare/13-unload.py",
+        "tools/_package_common.py",
+        "tools/control-auth.py",
+        "tools/deploy-shared-artifacts.py",
+        "tools/deploy-upload-archive.py",
+        "tools/deployment_lock.py",
+        "tools/deployment_prewrite_guard.py",
+        "tools/package-project-image.py",
+        "tools/package-shared-artifacts.py",
+        "tools/sync-code.py",
+        "tools/tar-for-upload.py",
+        "tools/ztp_service_runtime.py",
+        "monitor/switch-collection-worker.py",
+        "monitor/manual-ztp-worker.py"
+      ],
+      "tests": [
+        "test_cases.test_ztp_container_runtime",
+        "test_cases.test_ztp_service_runtime",
+        "test_cases.test_deployment_writer_lock",
+        "test_cases.test_deploy_upload_archive",
+        "test_cases.test_project_image_bundle",
+        "test_cases.test_shared_artifact_bundle",
+        "test_cases.test_upload_package_contract",
+        "test_cases.test_load_release_transaction",
+        "test_cases.test_monitor_stack_review",
+        "test_cases.test_ztp_monitor_watch_runtime_workflow",
+        "test_cases.test_reference_only_selector_workflow"
+      ]
+    },
+    {
+      "id": "docker_destructive_confirmation",
+      "members": [
+        "infra/docker/deploy.sh",
+        "infra/docker/hostlock.py",
+        "infra/docker/hostctl.py",
+        "DAY0-Prepare/13-unload.py"
+      ],
+      "tests": [
+        "test_cases.test_docker_destructive_confirmation",
+        "test_cases.test_docker_destructive_confirmation_workflow"
+      ]
+    },
+    {
+      "id": "ztp_monitor_watch_resilience",
+      "members": [
+        "DAY0-Prepare/11-load.py",
+        "DAY0-Prepare/12-ztp-monitor.py",
+        "infra/docker/activate.py",
+        "monitor/generate-monitor-html.py",
+        "tools/ztp_service_runtime.py"
+      ],
+      "tests": [
+        "test_cases.test_ztp_monitor_watch_resilience",
+        "test_cases.test_ztp_monitor_watch_runtime_workflow"
       ]
     },
     {
@@ -460,6 +885,17 @@
         "test_cases.test_ztp_prefix_runtime_boundary",
         "test_cases.test_flow_release_platform_matrix",
         "test_cases.test_v2_generation_flow"
+      ]
+    },
+    {
+      "id": "bootstrap_config_fetch",
+      "members": [
+        "DAY0-Prepare/11-load.py",
+        "ztp/templates/ztp-bootstrap.sh"
+      ],
+      "tests": [
+        "test_cases.test_bootstrap_config_fetch_contract",
+        "test_cases.test_bootstrap_config_fetch_workflow"
       ]
     },
     {
@@ -486,14 +922,33 @@
         "monitor/*",
         "ethernet/monitor/*",
         "infiniband/monitor/*",
-        "nvlink/monitor/*"
+        "nvlink/monitor/*",
+        "ztp/backup/*"
       ],
       "tests": [
+        "test_cases.test_backup_auth_transport_workflow",
         "test_cases.test_monitor_stack_review",
         "test_cases.test_project_contracts",
+        "test_cases.test_ztp_container_runtime",
         "test_cases.test_ztp_http_identity_binding",
         "test_cases.test_ztp_group_handoff",
-        "test_cases.test_ztp_group_handoff_display"
+        "test_cases.test_ztp_group_handoff_display",
+        "test_cases.test_collector_inventory_pubkey",
+        "test_cases.test_collector_inventory_pubkey_workflow"
+      ]
+    },
+    {
+      "id": "switch_backup_authentication",
+      "members": [
+        "monitor/switch-collection-control.cgi",
+        "monitor/switch-collection-worker.py",
+        "ztp/backup/yaml-collect.py"
+      ],
+      "tests": [
+        "test_cases.test_backup_auth_transport_workflow",
+        "test_cases.test_monitor_stack_review",
+        "test_cases.test_ztp_container_runtime",
+        "test_cases.test_ztp_release_core_review"
       ]
     },
     {
@@ -504,8 +959,14 @@
         "infra/*",
         "tools/_package_common.py",
         "tools/collect-ztp-diagnostics.py",
+        "tools/control-auth.py",
+        "tools/deploy-shared-artifacts.py",
+        "tools/deploy-upload-archive.py",
         "tools/deployment_lock.py",
+        "tools/deployment_prewrite_guard.py",
         "tools/import-from-download.py",
+        "tools/package-project-image.py",
+        "tools/package-shared-artifacts.py",
         "tools/sync-code.py",
         "tools/tar-for-download.py",
         "tools/tar-for-upload.py"
@@ -513,17 +974,23 @@
       "tests": [
         "test_cases.test_ops_deployment_review",
         "test_cases.test_deployment_writer_lock",
+        "test_cases.test_deploy_upload_archive",
+        "test_cases.test_project_image_bundle",
+        "test_cases.test_shared_artifact_bundle",
         "test_cases.test_upload_package_contract",
         "test_cases.test_download_cli_contract",
         "test_cases.test_import_from_download_target",
         "test_cases.test_diagnostic_bundle",
-        "test_cases.test_predeploy_test_gate"
+        "test_cases.test_predeploy_test_gate",
+        "test_cases.test_load_release_transaction",
+        "test_cases.test_reference_only_selector_workflow"
       ]
     },
     {
       "id": "config_generate_publish_compare",
       "members": [
         "DAY0-Prepare/11-load.py",
+        "tools/deployment_lock.py",
         "ztp/backup/*",
         "ztp/config/*",
         "ztp/dhcp_runtime_inventory.py",
@@ -533,7 +1000,11 @@
         "ztp/optimize/*"
       ],
       "tests": [
+        "test_cases.test_feedback_global_writeback",
+        "test_cases.test_feedback_global_writeback_workflow",
         "test_cases.test_load_release_transaction",
+        "test_cases.test_dhcp_switch_scope_preservation",
+        "test_cases.test_dhcp_switch_scope_preservation_workflow",
         "test_cases.test_ztp_release_core_review",
         "test_cases.test_manual_applied_config",
         "test_cases.test_nvue_normalizer",
@@ -544,7 +1015,31 @@
         "test_cases.test_terminal_l2_stp_generation",
         "test_cases.test_qos_evpn_uplink_generation",
         "test_cases.test_v2_project_schema",
-        "test_cases.test_v2_generation_flow"
+        "test_cases.test_v2_generation_flow",
+        "test_cases.test_xlsx_zero_row_fail_closed",
+        "test_cases.test_xlsx_zero_row_workflow"
+      ]
+    },
+    {
+      "id": "password_rotation_config_generation",
+      "members": [
+        "DAY0-Prepare/11-load.py",
+        "tools/password-update.py",
+        "ztp/config/cumulus/template/90-c2-generate_configs.py"
+      ],
+      "tests": [
+        "test_cases.test_password_update"
+      ]
+    },
+    {
+      "id": "password_rotation_sync_preservation",
+      "members": [
+        "tools/password-update.py",
+        "tools/sync-code.py"
+      ],
+      "tests": [
+        "test_cases.test_password_update",
+        "test_cases.test_deployment_writer_lock"
       ]
     },
     {
@@ -576,17 +1071,68 @@
       ]
     },
     {
+      "id": "topology_inventory_and_lldp_identity",
+      "members": [
+        "ztp/config/topology_rules.py",
+        "ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py",
+        "ztp/config/nvos/template/P2P/p2p-to-validation.py",
+        "tools/lldp-analyze-tool/analyze_lldp.py"
+      ],
+      "tests": [
+        "test_cases.test_topology_consistency",
+        "test_cases.test_upload_package_contract"
+      ]
+    },
+    {
+      "id": "user_manual_publication",
+      "members": [
+        "tools/update-user-manual.py",
+        "tools/_package_common.py",
+        "tools/sync-code.py",
+        "user-manual.html"
+      ],
+      "tests": [
+        "test_cases.test_documentation_catalog",
+        "test_cases.test_project_contracts",
+        "test_cases.test_upload_package_contract",
+        "test_cases.test_deployment_writer_lock"
+      ]
+    },
+    {
       "id": "test_and_documentation_governance",
       "members": [
         "tools/project_contract.py",
-        "tools/update-root-readme.py"
+        "tools/update-root-readme.py",
+        "tools/update-user-manual.py"
       ],
       "tests": [
         "test_cases.test_change_aware_test_runner",
         "test_cases.test_test_case_repository",
         "test_cases.test_documentation_catalog",
         "test_cases.test_project_contracts",
-        "test_cases.test_terminal_l2_stp_generation"
+        "test_cases.test_terminal_l2_stp_generation",
+        "test_cases.test_reference_only_path_disposition",
+        "test_cases.test_reference_only_selector_workflow"
+      ]
+    },
+    {
+      "id": "monitor_governed_writer_quiesce",
+      "members": [
+        "tools/ztp_service_runtime.py",
+        "DAY0-Prepare/01-a-setup.py",
+        "DAY0-Prepare/02-unsetup.py",
+        "DAY0-Prepare/11-load.py",
+        "DAY0-Prepare/12-ztp-monitor.py",
+        "DAY0-Prepare/13-unload.py",
+        "ztp/config/isc-dhcp-server/c1-generate_dhcp.py",
+        "ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py",
+        "tools/password-update.py",
+        "ztp/optimize/feedback.py",
+        "tools/deployment_prewrite_guard.py",
+        "tools/import-from-download.py"
+      ],
+      "tests": [
+        "test_cases.test_monitor_writer_quiesce_workflow"
       ]
     }
   ],
@@ -601,6 +1147,37 @@
     },
     {
       "paths": [
+        "test_cases/run_vm_validation.py"
+      ],
+      "tests": [
+        "test_cases.test_vm_validation_runner"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/public_project_fixture.py"
+      ],
+      "tests": [
+        "test_cases.test_public_project_fixture_contract",
+        "test_cases.test_public_project_fixture_workflow"
+      ]
+    },
+    {
+      "paths": [
+        ".github/workflows/monitor-authority-root.yml",
+        "test_cases/monitor_authority_root_warden.py",
+        "test_cases/monitor_authority_source_guard.py",
+        "test_cases/run_monitor_authority_entrypoints.sh",
+        "test_cases/REAL_ENVIRONMENT.md"
+      ],
+      "tests": [
+        "test_cases.test_monitor_authority_entrypoints",
+        "test_cases.test_monitor_authority_semantic_workflow",
+        "test_cases.test_monitor_authority_source_guard"
+      ]
+    },
+    {
+      "paths": [
         ".gitattributes",
         ".gitignore",
         ".github/README.md",
@@ -608,22 +1185,46 @@
         "PUBLIC_REPOSITORY.md",
         "SECURITY.md",
         "examples/public-project/*",
+        "requirements-container-top-level.lock",
         "requirements-dev.txt",
         "test_cases/audit_public_tree.py"
       ],
       "tests": [
-        "test_cases.test_public_repository_contract"
+        "test_cases.test_public_repository_contract",
+        "test_cases.test_ztp_container_runtime",
+        "test_cases.test_change_aware_test_runner",
+        "test_cases.test_reference_only_path_disposition",
+        "test_cases.test_reference_only_selector_workflow",
+        "test_cases.test_public_s_phase_contract",
+        "test_cases.test_public_s_phase_workflow"
       ]
     },
     {
       "paths": [
+        "AGENTS.md",
+        "index.html",
+        "user-manual.html",
         "*/README.md",
         "*/*/README.md",
         "*/*/*/README.md"
       ],
       "tests": [
         "test_cases.test_documentation_catalog",
-        "test_cases.test_project_contracts"
+        "test_cases.test_project_contracts",
+        "test_cases.test_upload_package_contract",
+        "test_cases.test_deployment_writer_lock"
+      ]
+    },
+    {
+      "paths": [
+        ".dockerignore",
+        "infra/docker/*"
+      ],
+      "tests": [
+        "test_cases.test_ztp_container_runtime",
+        "test_cases.test_ztp_service_runtime",
+        "test_cases.test_deployment_writer_lock",
+        "test_cases.test_upload_package_contract"
       ]
     },
     {
@@ -646,15 +1247,73 @@
     },
     {
       "paths": [
-        "DAY0-Prepare/template/01-global.yaml",
-        "DAY0-Prepare/template/02-devices_config.csv",
-        "ztp/config/cumulus/template/03-templates-j2/*.yaml.j2"
+        "tools/lldp-analyze-tool/04-lldp-device-aliases.json"
       ],
       "tests": [
+        "test_cases.test_topology_consistency",
+        "test_cases.test_upload_package_contract"
+      ]
+    },
+    {
+      "paths": [
+        "DAY0-Prepare/template/*",
+        "ztp/config/cumulus/ar_profile_custom.conf",
+        "ztp/config/cumulus/template/P2P/*.log",
+        "ztp/config/cumulus/template/P2P/*.json",
+        "ztp/config/cumulus/template/P2P/*.dot",
+        "ztp/config/nvos/disable-password-hardening.nv",
+        "ztp/config/nvos/template/P2P/*.log"
+      ],
+      "tests": [
+        "test_cases.test_ztp_container_runtime",
+        "test_cases.test_load_release_transaction",
+        "test_cases.test_project_contracts",
+        "test_cases.test_upload_package_contract",
+        "test_cases.test_v2_generation_flow",
+        "test_cases.test_v2_project_schema"
+      ]
+    },
+    {
+      "paths": [
+        "DAY0-Prepare/template/01-global.yaml",
+        "DAY0-Prepare/template/02-devices_config.csv"
+      ],
+      "tests": [
+        "test_cases.test_ztp_container_runtime",
         "test_cases.test_project_contracts",
         "test_cases.test_v2_project_schema",
         "test_cases.test_v2_generation_flow"
       ]
+    },
+    {
+      "paths": [
+        "ztp/config/cumulus/template/03-templates-j2/*.yaml.j2"
+      ],
+      "tests": [
+        "test_cases.test_ztp_container_runtime",
+        "test_cases.test_project_contracts",
+        "test_cases.test_v2_project_schema",
+        "test_cases.test_v2_generation_flow",
+        "test_cases.test_change_aware_test_runner",
+        "test_cases.test_flow_release_platform_matrix"
+      ],
+      "complete_tracked_support": true
+    },
+    {
+      "paths": [
+        "ztp/config/cumulus/default*.yaml",
+        "ztp/config/nvos/default*.yaml"
+      ],
+      "tests": [
+        "test_cases.test_ztp_container_runtime",
+        "test_cases.test_load_release_transaction",
+        "test_cases.test_project_contracts",
+        "test_cases.test_upload_package_contract",
+        "test_cases.test_v2_generation_flow",
+        "test_cases.test_v2_project_schema",
+        "test_cases.test_change_aware_test_runner"
+      ],
+      "complete_tracked_support": true
     },
     {
       "paths": [
@@ -664,83 +1323,6 @@
       "tests": [
         "test_cases.test_mlag_evpn_generation",
         "test_cases.test_project_contracts",
-        "test_cases.test_ztp_release_core_review"
-      ]
-    }
-  ],
-  "test_suites": [
-    {
-      "id": "repository-governance",
-      "description": "仓库入口、测试治理、公开边界和文档目录合同",
-      "tests": [
-        "test_cases.test_all_script_entrypoints",
-        "test_cases.test_change_aware_test_runner",
-        "test_cases.test_documentation_catalog",
-        "test_cases.test_private_documentation_contract",
-        "test_cases.test_public_clean_clone_contract",
-        "test_cases.test_public_clean_clone_workflow",
-        "test_cases.test_public_repository_contract",
-        "test_cases.test_test_case_repository"
-      ]
-    },
-    {
-      "id": "packaging-sync",
-      "description": "上传、下载、同步、诊断和部署前门禁",
-      "tests": [
-        "test_cases.test_deployment_writer_lock",
-        "test_cases.test_diagnostic_bundle",
-        "test_cases.test_download_cli_contract",
-        "test_cases.test_import_from_download_target",
-        "test_cases.test_predeploy_test_gate",
-        "test_cases.test_upload_package_contract"
-      ]
-    },
-    {
-      "id": "deployment-runtime",
-      "description": "宿主部署、发布事务、Apache、DHCP 和服务运行时",
-      "tests": [
-        "test_cases.test_apache_publication_boundary",
-        "test_cases.test_infra_check_and_manual_reset",
-        "test_cases.test_load_release_transaction",
-        "test_cases.test_ops_deployment_review"
-      ]
-    },
-    {
-      "id": "configuration-generation",
-      "description": "项目 schema、Cumulus/NVUE、MLAG/EVPN、QoS、STP 和配置生成",
-      "tests": [
-        "test_cases.test_cumulus_snippet_rendering",
-        "test_cases.test_flow_release_platform_matrix",
-        "test_cases.test_mlag_evpn_generation",
-        "test_cases.test_nvue_normalizer",
-        "test_cases.test_optimize_output_layout",
-        "test_cases.test_project_contracts",
-        "test_cases.test_qos_evpn_uplink_generation",
-        "test_cases.test_terminal_l2_stp_generation",
-        "test_cases.test_v2_generation_flow",
-        "test_cases.test_v2_project_schema"
-      ]
-    },
-    {
-      "id": "monitoring-collection",
-      "description": "监控页面、IB 分析、手工比对和分组交接",
-      "tests": [
-        "test_cases.test_ib_analysis_domain",
-        "test_cases.test_manual_applied_config",
-        "test_cases.test_monitor_stack_review",
-        "test_cases.test_ztp_group_handoff",
-        "test_cases.test_ztp_group_handoff_display"
-      ]
-    },
-    {
-      "id": "ztp-runtime",
-      "description": "DHCP 租约、ZTP 身份、前缀边界、应用回执和端到端运行流",
-      "tests": [
-        "test_cases.test_dhcp_runtime_reassignment",
-        "test_cases.test_full_flow_integration",
-        "test_cases.test_ztp_applied_receipt",
-        "test_cases.test_ztp_http_identity_binding",
-        "test_cases.test_ztp_prefix_runtime_boundary",
         "test_cases.test_ztp_release_core_review"
       ]
     }

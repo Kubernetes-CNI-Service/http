@@ -446,6 +446,36 @@ class CollectionGateScopeTests(unittest.TestCase):
                 "project-a", "prod", collection_keys=(),
             )
 
+    def test_yaml_backup_has_independent_ten_minute_cooldown(self):
+        self.assertEqual(600, GATE.COOLDOWN_SECONDS)
+        clock = [1000.0]
+        with tempfile.TemporaryDirectory() as directory:
+            status = Path(directory)
+            with GATE.CollectionGate(
+                "project-a", "prod", collection_keys=("yaml-backup",),
+                status_dir=status, cooldown_seconds=600,
+                clock=lambda: clock[0],
+            ) as backup:
+                self.assertTrue(backup.decision.allowed)
+                backup.mark_success()
+
+            clock[0] += 599
+            with GATE.CollectionGate(
+                "project-a", "prod", collection_keys=("yaml-backup",),
+                status_dir=status, cooldown_seconds=600,
+                clock=lambda: clock[0],
+            ) as cooling:
+                self.assertFalse(cooling.decision.allowed)
+                self.assertEqual("cooldown", cooling.decision.reason)
+                self.assertEqual(1, cooling.decision.remaining_seconds)
+
+            with GATE.CollectionGate(
+                "project-a", "prod", collection_keys=("prod-ethernet",),
+                status_dir=status, cooldown_seconds=600,
+                clock=lambda: clock[0],
+            ) as switch_status:
+                self.assertTrue(switch_status.decision.allowed)
+
     def test_successful_group_does_not_cool_down_sibling_group(self):
         clock = [1000.0]
         with tempfile.TemporaryDirectory() as directory:
@@ -746,13 +776,14 @@ class SwitchCollectionWorkerTests(unittest.TestCase):
         write_status = mock.Mock()
         with mock.patch.object(WORKER, "CollectionGate", CancelledGate), \
                 mock.patch.object(WORKER, "active_project_identity", return_value="/project"), \
-                mock.patch.object(WORKER, "claim_request", return_value="stop"), \
-                mock.patch.object(WORKER, "stop_all_collectors", return_value=[91001]), \
+                mock.patch.object(WORKER, "lane_cancelled", return_value=True), \
+                mock.patch.object(WORKER, "stop_all_collectors") as stop_all, \
                 mock.patch.object(WORKER, "write_status", write_status):
             self.assertFalse(WORKER.collect("prod", 60, 10))
         states = [call.args[0] for call in write_status.call_args_list]
         self.assertEqual(["collecting", "idle"], states)
-        self.assertEqual([91001], write_status.call_args.kwargs["stopped_pids"])
+        self.assertEqual([], write_status.call_args.kwargs["stopped_pids"])
+        stop_all.assert_not_called()
 
 
 if __name__ == "__main__":

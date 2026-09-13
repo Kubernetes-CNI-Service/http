@@ -35,6 +35,12 @@ from deployment_lock import (  # noqa: E402
     deployment_lock,
     inherited_lock_subprocess_kwargs,
 )
+from ztp_service_runtime import (  # noqa: E402
+    RuntimeContractError,
+    ServiceRuntimeBackend,
+    runtime_backend_from_environment,
+    stop_native_ztp_monitors,
+)
 
 MANIFEST_FILE = ZTP_DIR / ".setup_manifest"
 UNSETUP_SCRIPT = HERE / "02-unsetup.py"
@@ -67,6 +73,45 @@ def ok(message: str) -> None:
 
 def warn(message: str) -> None:
     print(f"[WARN]  {message}")
+
+
+def service_runtime_backend() -> ServiceRuntimeBackend:
+    try:
+        return runtime_backend_from_environment(os.environ)
+    except RuntimeContractError as exc:
+        raise UnloadError(f"服务运行后端无效：{exc}") from exc
+
+
+def validate_runtime_options(
+    args: argparse.Namespace, runtime_backend: ServiceRuntimeBackend,
+) -> None:
+    """Prevent a Supervisor container from invoking host systemd teardown."""
+    if runtime_backend.name == "supervisor" and args.teardown_infra:
+        raise UnloadError(
+            "Supervisor/container backend 不支持 --teardown-infra；"
+            "请由 infra/docker/deploy.sh 管理容器生命周期"
+        )
+
+
+def _runtime_active(
+    runtime_backend: ServiceRuntimeBackend, service: str,
+) -> bool:
+    try:
+        return runtime_backend.is_active(service)
+    except RuntimeContractError as exc:
+        raise UnloadError(f"无法检查服务 {service}：{exc}") from exc
+
+
+def _runtime_stop(
+    runtime_backend: ServiceRuntimeBackend, service: str, *, dry_run: bool,
+) -> None:
+    if dry_run:
+        print(f"[DRY]   {runtime_backend.name} stop {service}")
+        return
+    try:
+        runtime_backend.stop(service)
+    except RuntimeContractError as exc:
+        raise UnloadError(f"停止服务 {service} 失败：{exc}") from exc
 
 
 def run(
@@ -150,54 +195,51 @@ def monitor_pid_files(project: Path | None) -> list[Path]:
     return result
 
 
-def stop_monitor(project: Path | None, *, dry_run: bool) -> None:
-    for pid_file in monitor_pid_files(project):
-        if not pid_file.is_file():
-            continue
-        try:
-            pid = int(pid_file.read_text(encoding="utf-8").strip())
-            os.kill(pid, 0)
-        except (ProcessLookupError, ValueError):
-            if dry_run:
-                print(f"[DRY]   删除失效 PID 文件：{pid_file}")
-            else:
-                pid_file.unlink(missing_ok=True)
-                info(f"已删除失效 PID 文件：{pid_file}")
-            continue
-        except PermissionError as exc:
-            raise UnloadError(f"无权检查 ZTP monitor PID={pid}：{exc}") from exc
-
-        cmdline = process_cmdline(pid)
-        expected = [MONITOR_SCRIPT_NAME]
-        if project:
-            expected.append(project.name)
-        if cmdline is None:
-            raise UnloadError(f"无法读取 PID={pid} 的命令行，拒绝终止未知进程")
-        if not all(item in cmdline for item in expected):
-            raise UnloadError(
-                f"PID 文件指向非目标监控进程，拒绝终止 PID={pid}：{cmdline}"
+def stop_monitor(
+    project: Path | None, *, dry_run: bool,
+    runtime_backend: ServiceRuntimeBackend | None = None,
+) -> None:
+    backend = runtime_backend or service_runtime_backend()
+    if backend.name == "supervisor":
+        if _runtime_active(backend, "ztp-monitor"):
+            _runtime_stop(backend, "ztp-monitor", dry_run=dry_run)
+            ok(
+                "ZTP monitor 已停止（Supervisor）" if not dry_run
+                else "将停止 ZTP monitor（Supervisor）"
             )
-        if dry_run:
-            print(f"[DRY]   SIGTERM ZTP monitor PID={pid}")
-            continue
-
-        info(f"停止 ZTP 后台监控：PID={pid}")
-        os.kill(pid, signal.SIGTERM)
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            try:
-                os.kill(pid, 0)
-            except OSError:
-                break
-            time.sleep(0.1)
         else:
-            raise UnloadError(f"ZTP monitor PID={pid} 在 5 秒内未退出；未强制杀死")
-        pid_file.unlink(missing_ok=True)
-        ok(f"ZTP monitor 已停止：PID={pid}")
+            info("ZTP monitor 未运行（Supervisor）")
+        return
+    if dry_run:
+        print("[DRY]   通过 canonical PID authority 停止全部 Native ZTP monitor")
+        return
+    try:
+        stopped = stop_native_ztp_monitors(HTTP_ROOT)
+    except RuntimeContractError as exc:
+        raise UnloadError(f"无法安全停止 Native ZTP monitor：{exc}") from exc
+    if stopped:
+        ok("已停止 Native ZTP monitor：PID=" + ",".join(map(str, stopped)))
+    else:
+        info("Native ZTP monitor 未运行")
 
 
-def stop_monitor_workers(*, dry_run: bool) -> None:
+def stop_monitor_workers(
+    *, dry_run: bool,
+    runtime_backend: ServiceRuntimeBackend | None = None,
+) -> None:
     """Stop only worker processes named by their own validated PID files."""
+    backend = runtime_backend or service_runtime_backend()
+    if backend.name == "supervisor":
+        for service in ("switch-collection", "manual-ztp"):
+            if _runtime_active(backend, service):
+                _runtime_stop(backend, service, dry_run=dry_run)
+                ok(
+                    f"worker 已停止：{service}（Supervisor）" if not dry_run
+                    else f"将停止 worker：{service}（Supervisor）"
+                )
+            else:
+                info(f"worker 未运行：{service}（Supervisor）")
+        return
     for pid_file, script_name in MONITOR_WORKERS:
         if not pid_file.is_file():
             continue
@@ -230,7 +272,22 @@ def stop_monitor_workers(*, dry_run: bool) -> None:
         pid_file.unlink(missing_ok=True)
 
 
-def stop_services(*, dry_run: bool) -> None:
+def stop_services(
+    *, dry_run: bool,
+    runtime_backend: ServiceRuntimeBackend | None = None,
+) -> None:
+    backend = runtime_backend or service_runtime_backend()
+    if backend.name == "supervisor":
+        for service in SERVICES:
+            if _runtime_active(backend, service):
+                _runtime_stop(backend, service, dry_run=dry_run)
+                ok(
+                    f"服务已停止：{service}" if not dry_run
+                    else f"将停止服务：{service}"
+                )
+            else:
+                info(f"服务未运行：{service}")
+        return
     systemctl = shutil.which("systemctl")
     if not systemctl:
         warn("未找到 systemctl，无法检查 Apache/DHCP")
@@ -440,13 +497,16 @@ def confirm(args: argparse.Namespace, project: Path | None) -> bool:
     if args.teardown_infra:
         print("  - 额外执行 infra 完整回滚并卸载其记录的软件")
     try:
-        return input("\n输入 yes 继续 [no]：").strip().casefold() == "yes"
+        return input("\n输入 yes 继续 [no]：") == "yes"
     except EOFError:
         return False
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        epilog="完整、受支持的操作流程见仓库根目录 USER_MANUAL.md。",
+    )
     parser.add_argument("project", nargs="?", help="活动项目名/目录；默认读取 setup manifest")
     parser.add_argument("-y", "--yes", action="store_true", help="不询问，直接执行")
     parser.add_argument("--dry-run", action="store_true", help="只显示将执行的动作")
@@ -474,6 +534,8 @@ def main(argv: list[str] | None = None) -> int:
         if not confirm(args, project):
             info("已取消，没有修改任何内容")
             return 0
+        runtime_backend = service_runtime_backend()
+        validate_runtime_options(args, runtime_backend)
 
         with deployment_lock(HTTP_ROOT, dry_run=args.dry_run) as lock_descriptor:
             if not args.dry_run:
@@ -488,9 +550,16 @@ def main(argv: list[str] | None = None) -> int:
                         + ", ".join(str(path) for path in unmanaged)
                     )
 
-            stop_monitor(project, dry_run=args.dry_run)
-            stop_monitor_workers(dry_run=args.dry_run)
-            stop_services(dry_run=args.dry_run)
+            stop_monitor(
+                project, dry_run=args.dry_run,
+                runtime_backend=runtime_backend,
+            )
+            stop_monitor_workers(
+                dry_run=args.dry_run, runtime_backend=runtime_backend,
+            )
+            stop_services(
+                dry_run=args.dry_run, runtime_backend=runtime_backend,
+            )
             remove_ztp_prefix_publication(dry_run=args.dry_run)
             retained = remove_dhcp_runtime_files(
                 force=args.force_dhcp, dry_run=args.dry_run
@@ -504,7 +573,10 @@ def main(argv: list[str] | None = None) -> int:
             if args.teardown_infra:
                 teardown_infra(dry_run=args.dry_run)
                 # infra teardown may restart a retained pre-existing Apache.
-                stop_services(dry_run=args.dry_run)
+                stop_services(
+                    dry_run=args.dry_run,
+                    runtime_backend=runtime_backend,
+                )
 
         if retained:
             raise UnloadError(

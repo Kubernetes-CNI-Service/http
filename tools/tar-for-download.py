@@ -279,7 +279,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.full_workspace:
             if args.output is None:
                 args.output = default_output("http-air-full-workspace")
-            package_core.create_package(args, day0_all=True)
+            package_core.create_package(
+                args, day0_all=True, artifact_kind="download",
+            )
         else:
             create_day0_archive(args)
         return 0

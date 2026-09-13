@@ -65,6 +65,7 @@ DHCP_RELEASE_MANIFEST = (
     HTTP_ROOT / "ztp/config/isc-dhcp-server/dhcp-release-manifest.json"
 )
 AIR_TOPOLOGY_POLICY_NAME = "03-air-topology-policy.json"
+MINI_AIR_DEVICES_NAME = "04-air-mini-devices.txt"
 SUPPORTED_TYPES = {"eth", "eth_spx", "spx", "air", "ib", "nvl"}
 ETHERNET_TYPES = {"eth", "eth_spx", "spx", "air"}
 SAFE_HOSTNAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")
@@ -86,6 +87,13 @@ SAFE_RECEIPT_VALUE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9@%+,:._/-]{0,511}$")
 SAFE_SOURCE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$")
 ZTP_LOG_LINE = re.compile(
     r"^\[\d{4}-\d{2}-\d{2}(?:T|\s)[^\]\r\n]+\]\s.*$"
+)
+UNIFIED_LOAD_RECOVERY = (
+    "请按当前后端重新执行统一 load 事务：Native/systemd 使用 "
+    "DAY0-Prepare/11-load.py；Docker/Supervisor 如有 source/input/release write，使用 "
+    "infra/docker/deploy.sh deploy，或对与 live 来源身份链匹配且经验证的镜像使用 "
+    "infra/docker/deploy.sh deploy-preloaded <IMAGE_ID>；仅在没有 source write 且已有"
+    "运行中的 inactive 控制容器时使用 infra/docker/deploy.sh load"
 )
 
 
@@ -164,6 +172,10 @@ def validate_parent_release_input_hashes(
         input_paths["air_topology_policy"] = (
             policy_path, "AIR 拓扑策略",
         )
+    if "mini_air_devices" in expected_inputs:
+        input_paths["mini_air_devices"] = (
+            project / MINI_AIR_DEVICES_NAME, "mini AIR 设备清单",
+        )
 
     for name, (path, label) in input_paths.items():
         expected = str(expected_inputs.get(name) or "")
@@ -175,7 +187,7 @@ def validate_parent_release_input_hashes(
             ) from exc
         if not expected or actual != expected:
             raise ManualZtpError(
-                f"统一 release 输入 {label} 已变化；请先完整执行 11-load.py"
+                f"统一 release 输入 {label} 已变化；{UNIFIED_LOAD_RECOVERY}"
             )
 
 
@@ -550,6 +562,8 @@ def validate_parent_release_binding(project: Path, device: dict) -> dict[str, st
         raise ManualZtpError("统一 current-release schema/project/validation 门禁未通过")
     release_basis = {
         "project": parent.get("project"),
+        "deployment_scope": parent.get("deployment_scope", "all"),
+        "switch_scope": parent.get("switch_scope", "all"),
         "inputs": parent.get("inputs"),
         "components": parent.get("components"),
         "inventory": parent.get("inventory"),
@@ -583,7 +597,8 @@ def validate_parent_release_binding(project: Path, device: dict) -> dict[str, st
         or dhcp_hash != str(dhcp_component.get("manifest_sha256") or "")
     ):
         raise ManualZtpError(
-            "当前 DHCP manifest 未绑定到统一 current-release；请重新执行 11-load.py"
+            "当前 DHCP manifest 未绑定到统一 current-release；"
+            + UNIFIED_LOAD_RECOVERY
         )
     dhcp_outputs = dhcp.get("outputs")
     if not isinstance(dhcp_outputs, dict):
@@ -601,7 +616,8 @@ def validate_parent_release_binding(project: Path, device: dict) -> dict[str, st
             raise ManualZtpError(f"DHCP release 输出 {name} 无法读取: {exc}") from exc
         if not expected_hash or actual_hash != expected_hash:
             raise ManualZtpError(
-                f"DHCP release 输出 {name} 与 manifest hash 不一致；请重新执行 11-load.py"
+                f"DHCP release 输出 {name} 与 manifest hash 不一致；"
+                + UNIFIED_LOAD_RECOVERY
             )
         verified_dhcp_outputs[name] = (output_path, actual_hash)
 
@@ -625,7 +641,7 @@ def validate_parent_release_binding(project: Path, device: dict) -> dict[str, st
     if current_release_dir != committed_release_dir:
         raise ManualZtpError(
             f"{component_name} latest 与统一 current-release 不属于同一代；"
-            "请等待或重新执行 11-load.py"
+            + UNIFIED_LOAD_RECOVERY
         )
 
     manifest_path = current_release_dir / "release-manifest.json"
@@ -2072,7 +2088,8 @@ def main(argv: list[str] | None = None) -> int:
             raise ManualZtpError(
                 "以下设备缺少 eth0 MAC，无法严格校验 SSH 身份："
                 + ", ".join(unsafe_identity)
-                + "。请先更新 02-devices_config.csv 并完整执行 11-load.py"
+                + "。请先更新 02-devices_config.csv；"
+                + UNIFIED_LOAD_RECOVERY
             )
         lease_conflicts = [
             f"{device['hostname']}: {device['lease_transition_issue']}"
@@ -2136,7 +2153,8 @@ def main(argv: list[str] | None = None) -> int:
             raise ManualZtpError(
                 "专属 YAML 当前发布门禁未通过，拒绝触发："
                 + "；".join(unready)
-                + "。请先修复生成问题并完整执行 11-load.py"
+                + "。请先修复生成问题；"
+                + UNIFIED_LOAD_RECOVERY
             )
         if args.non_interactive and args.url:
             raise ManualZtpError("非交互/GUI 模式不允许调用者指定 URL")

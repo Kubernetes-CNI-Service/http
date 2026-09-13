@@ -63,7 +63,19 @@ FEEDBACK = load_script(
 )
 
 
-EDGE_STP = {"admin-edge": "on", "bpdu-guard": "on"}
+CURRENT_CUMULUS_VERSION = "5.18.1"
+EDGE_STP = {"admin-edge": "enabled", "bpdu-guard": "enabled"}
+LEGACY_EDGE_STP = {"admin-edge": "on", "bpdu-guard": "on"}
+
+
+def inject_terminal_l2_stp(document, **kwargs):
+    kwargs.setdefault("cumulus_version", CURRENT_CUMULUS_VERSION)
+    return GENERATOR._inject_terminal_l2_stp(document, **kwargs)
+
+
+def terminal_l2_stp_errors(document, **kwargs):
+    kwargs.setdefault("cumulus_version", CURRENT_CUMULUS_VERSION)
+    return GENERATOR._terminal_l2_stp_errors(document, **kwargs)
 
 
 def set_block(document):
@@ -114,6 +126,7 @@ def border_globals():
     return {
         "bridge": {"domain": {"br_default": {"stp": {"priority": 4096}}}},
         "mlag": {"init-delay": 180},
+        "version": CURRENT_CUMULUS_VERSION,
         "vrf": {"default": {"router": {"bfd": {"profile": {
             "bgp-underlay-bfd": {
                 "detect-multiplier": 3,
@@ -141,6 +154,7 @@ def border_device():
         "mac-address": "",
     }
     return {
+        "_project_schema_version": 2,
         "template": "border",
         "hostname": "EXAMPLE-BORDER01",
         "eth0_ip": "192.0.2.10/24",
@@ -176,134 +190,175 @@ def border_device():
     }
 
 
-def v2_header(*, terminal_policy=True):
-    header = (
+def v2_header():
+    return (
         list(CONTRACT.DEVICE_BASE_COLUMNS)
         + list(CONTRACT.DEVICE_V2_VLAN_COLUMNS)
         + list(CONTRACT.DEVICE_FIXED_COLUMNS)
     )
-    if terminal_policy:
-        header.append("terminal_l2_ports")
-    return header
 
 
-def v2_row(*, terminal_ports="swp5/bond1"):
+def v2_row():
     return [
         "leaf01", "eth", "tan-leaf", "192.0.2.10", "24",
         "192.0.2.1", "02:00:00:00:00:10", "NA", "NA", "NA",
         "NA", "198.51.100.10", "100", "NA", "NA", "swp5/bond1",
         "65001", "swp49", "bond1", "local", "NA", "NA", "false",
-    ] + ([terminal_ports] if terminal_ports is not None else [])
+    ]
 
 
 class TerminalL2StpDirectTests(unittest.TestCase):
-    def test_missing_policy_does_not_automatically_mark_l2_interfaces_terminal(self):
+    def test_all_standalone_l2_swp_and_bonds_are_automatic_edge_targets(self):
         document = direct_document()
 
-        self.assertFalse(GENERATOR._inject_terminal_l2_stp(document))
+        self.assertTrue(inject_terminal_l2_stp(document))
+        interfaces = set_block(document)["interface"]
+        for name in ("swp1", "bond1", "bond8"):
+            self.assertEqual(
+                EDGE_STP,
+                interfaces[name]["bridge"]["domain"]["br_default"]["stp"],
+            )
+        for name in ("swp2", "swp3"):
+            self.assertNotIn(
+                "stp", interfaces[name]["bridge"]["domain"]["br_default"],
+            )
+        self.assertNotIn("bridge", interfaces["swp4"])
+        self.assertNotIn("bridge", interfaces["peerlink"])
+        self.assertEqual([], terminal_l2_stp_errors(document))
+
+    def test_current_nvue_edge_values_are_strings_at_the_exact_interface_path(self):
+        document = direct_document()
+
+        inject_terminal_l2_stp(document)
+
+        stp = (
+            set_block(document)["interface"]["swp1"]
+            ["bridge"]["domain"]["br_default"]["stp"]
+        )
+        self.assertEqual(
+            {"admin-edge": "enabled", "bpdu-guard": "enabled"}, stp,
+        )
+        self.assertTrue(all(isinstance(value, str) for value in stp.values()))
+        round_trip = yaml.safe_load(yaml.safe_dump(stp, sort_keys=True))
+        self.assertEqual(stp, round_trip)
+        self.assertTrue(all(isinstance(value, str) for value in round_trip.values()))
+
+    def test_terminal_stp_enum_changes_at_cumulus_5_15_boundary(self):
+        cases = (
+            ("5.14.99", LEGACY_EDGE_STP),
+            ("5.15", EDGE_STP),
+            ("5.16.4", EDGE_STP),
+            ("5.18.1", EDGE_STP),
+            ("6.0", EDGE_STP),
+        )
+        for version, expected in cases:
+            with self.subTest(version=version):
+                self.assertEqual(
+                    expected,
+                    GENERATOR._terminal_l2_stp_policy(version),
+                )
+
+        for invalid in (None, "", "latest", "5", "v5.18.1", 5.18, True):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "Cumulus.*version"):
+                    GENERATOR._terminal_l2_stp_policy(invalid)
+
+    def test_legacy_nvue_uses_on_and_rejects_current_enum(self):
+        document = direct_document()
+
+        self.assertTrue(GENERATOR._inject_terminal_l2_stp(
+            document, cumulus_version="5.14.99",
+        ))
+        self.assertEqual(
+            LEGACY_EDGE_STP,
+            set_block(document)["interface"]["swp1"]
+            ["bridge"]["domain"]["br_default"]["stp"],
+        )
+        self.assertEqual([], GENERATOR._terminal_l2_stp_errors(
+            document, cumulus_version="5.14.99",
+        ))
+
+        conflict = direct_document()
+        conflict[0]["set"]["interface"]["swp1"]["bridge"]["domain"] \
+            ["br_default"]["stp"] = {"admin-edge": "enabled"}
+        with self.assertRaisesRegex(ValueError, "swp1.*admin-edge"):
+            GENERATOR._inject_terminal_l2_stp(
+                conflict, cumulus_version="5.14.99",
+            )
+
+    def test_every_stp_fragment_must_be_a_mapping_before_any_injection(self):
+        for invalid in ("enabled", 1, [], True, None):
+            document = [
+                {"set": {"interface": {"swp1": {
+                    "bridge": {"domain": {"br_default": {"access": 10}}},
+                    "type": "swp",
+                }}}},
+                {"set": {"interface": {"swp1": {
+                    "bridge": {"domain": {"br_default": {"stp": invalid}}},
+                }}}},
+            ]
+            before = copy.deepcopy(document)
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "swp1.*stp.*mapping"):
+                    inject_terminal_l2_stp(document)
+                self.assertEqual(before, document)
+                errors = terminal_l2_stp_errors(document)
+                self.assertTrue(
+                    any("swp1" in error and "stp" in error
+                        and "mapping" in error for error in errors),
+                    errors,
+                )
+
+    def test_schema_v1_does_not_enable_automatic_edge_policy(self):
+        document = direct_document()
+
+        self.assertFalse(inject_terminal_l2_stp(
+            document, schema_version=1,
+        ))
+        self.assertEqual([], terminal_l2_stp_errors(
+            document, schema_version=1,
+        ))
         interfaces = set_block(document)["interface"]
         for name in ("swp1", "bond1", "bond8", "swp2", "swp3"):
             self.assertNotIn(
                 "stp", interfaces[name]["bridge"]["domain"]["br_default"],
             )
-        for name in ("swp4", "peerlink"):
-            self.assertNotIn("bridge", interfaces[name])
-        self.assertEqual([], GENERATOR._terminal_l2_stp_errors(document))
 
-    def test_explicit_policy_only_injects_listed_terminal_interfaces(self):
+    def test_bgp_interface_with_bridge_fragment_is_rejected_as_role_conflict(self):
         document = direct_document()
 
-        self.assertTrue(
-            GENERATOR._inject_terminal_l2_stp(document, ["swp1", "bond1"]),
-        )
-        interfaces = set_block(document)["interface"]
-        for name in ("swp1", "bond1"):
-            self.assertEqual(
-                EDGE_STP,
-                interfaces[name]["bridge"]["domain"]["br_default"]["stp"],
+        with self.assertRaisesRegex(ValueError, "swp1.*BGP.*bridge"):
+            inject_terminal_l2_stp(
+                document, template="tan-cp-leaf", bgp_neighbors=["swp1"],
             )
-        self.assertNotIn(
-            "stp", interfaces["bond8"]["bridge"]["domain"]["br_default"],
+        errors = terminal_l2_stp_errors(
+            document, template="tan-cp-leaf", bgp_neighbors=["swp1"],
         )
-        self.assertEqual(
-            [],
-            GENERATOR._terminal_l2_stp_errors(
-                document, ["swp1", "bond1"],
-            ),
-        )
+        self.assertTrue(any("swp1" in error and "BGP" in error for error in errors))
 
-    def test_explicit_empty_policy_leaves_all_l2_interfaces_unmodified(self):
+    def test_gate_requires_edge_policy_on_every_automatic_target(self):
         document = direct_document()
 
-        self.assertFalse(GENERATOR._inject_terminal_l2_stp(document, []))
-        self.assertEqual([], GENERATOR._terminal_l2_stp_errors(document, []))
-        interfaces = set_block(document)["interface"]
+        errors = terminal_l2_stp_errors(document)
+
         for name in ("swp1", "bond1", "bond8"):
-            self.assertNotIn(
-                "stp", interfaces[name]["bridge"]["domain"]["br_default"],
+            self.assertTrue(
+                any(name in error and "admin-edge" in error for error in errors),
+                errors,
             )
 
-    def test_explicit_policy_rejects_missing_nonbridge_member_and_peerlink(self):
-        variants = {
-            "missing": ("bond999", "不存在"),
-            "routed": ("swp4", "二层 bridge"),
-            "bond member": ("swp2", "bond member"),
-            "peerlink": ("peerlink", "peerlink"),
-        }
-        for label, (target, expected) in variants.items():
-            with self.subTest(label=label), self.assertRaisesRegex(
-                ValueError, expected,
-            ):
-                GENERATOR._inject_terminal_l2_stp(
-                    direct_document(), [target],
-                )
+    def test_v2_layout_has_no_terminal_l2_policy_column(self):
+        layout = CONTRACT.parse_device_csv_layout(v2_header(), 2)
+        self.assertEqual(len(v2_header()), layout.metadata_start)
 
-    def test_explicit_gate_rejects_terminal_stp_on_unlisted_l2_interface(self):
-        document = direct_document()
-        domain = (
-            document[0]["set"]["interface"]["bond8"]
-            ["bridge"]["domain"]["br_default"]
-        )
-        domain["stp"] = copy.deepcopy(EDGE_STP)
+        for index in (12, len(v2_header())):
+            with self.subTest(index=index):
+                forbidden = v2_header()
+                forbidden.insert(index, "terminal_l2_ports")
+                with self.assertRaisesRegex(ValueError, "terminal_l2_ports"):
+                    CONTRACT.parse_device_csv_layout(forbidden, 2)
 
-        errors = GENERATOR._terminal_l2_stp_errors(
-            document, ["swp1", "bond1"],
-        )
-
-        self.assertTrue(
-            any("bond8" in error and "未在 terminal_l2_ports" in error
-                for error in errors),
-            errors,
-        )
-
-    def test_shared_v2_layout_and_terminal_selector_contract(self):
-        explicit = CONTRACT.parse_device_csv_layout(v2_header(), 2)
-        self.assertEqual(
-            {"terminal_l2_ports": 23}, explicit.policy_indices,
-        )
-        legacy = CONTRACT.parse_device_csv_layout(
-            v2_header(terminal_policy=False), 2,
-        )
-        self.assertEqual({}, legacy.policy_indices)
-        self.assertEqual(
-            ("swp1", "swp2", "swp3s0", "swp3s1", "bond49b51"),
-            CONTRACT.parse_terminal_l2_ports(
-                "swp1-2/swp3s0-1/bond49b51",
-            ),
-        )
-        for value in (
-            "peerlink", "peerlink.4094", "swp2-1", "swp1//bond1",
-            "swp1/swp1", "eth1", "bond1|bond2",
-        ):
-            with self.subTest(value=value), self.assertRaises(ValueError):
-                CONTRACT.parse_terminal_l2_ports(value)
-
-        misplaced = v2_header(terminal_policy=False)
-        misplaced.insert(12, "terminal_l2_ports")
-        with self.assertRaisesRegex(ValueError, "terminal_l2_ports"):
-            CONTRACT.parse_device_csv_layout(misplaced, 2)
-
-    def test_setup_validates_explicit_column_and_warns_when_column_missing(self):
+    def test_setup_accepts_column_free_schema_and_rejects_terminal_policy_column(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "01-global.yaml").write_text(
@@ -319,27 +374,14 @@ class TerminalL2StpDirectTests(unittest.TestCase):
                 warnings,
             )
 
-            invalid = v2_row(terminal_ports="peerlink")
+            forbidden_header = v2_header() + ["terminal_l2_ports"]
+            invalid = v2_row() + ["swp5"]
             with devices.open("w", newline="", encoding="utf-8") as stream:
-                csv.writer(stream).writerows([v2_header(), invalid])
+                csv.writer(stream).writerows([forbidden_header, invalid])
             errors, _warnings = SETUP._validate_eth_csv(str(devices))
             self.assertTrue(
-                any("terminal_l2_ports" in error and "peerlink" in error
-                    for error in errors),
+                any("terminal_l2_ports" in error for error in errors),
                 errors,
-            )
-
-            with devices.open("w", newline="", encoding="utf-8") as stream:
-                csv.writer(stream).writerows([
-                    v2_header(terminal_policy=False),
-                    v2_row(terminal_ports=None),
-                ])
-            errors, warnings = SETUP._validate_eth_csv(str(devices))
-            self.assertEqual([], errors)
-            self.assertTrue(
-                any("terminal_l2_ports" in warning and "不会自动" in warning
-                    for warning in warnings),
-                warnings,
             )
 
     def test_bond_members_are_excluded_even_when_definitions_span_set_operations(self):
@@ -357,7 +399,7 @@ class TerminalL2StpDirectTests(unittest.TestCase):
             }}},
         ]
 
-        self.assertTrue(GENERATOR._inject_terminal_l2_stp(document, ["bond7"]))
+        self.assertTrue(inject_terminal_l2_stp(document))
         self.assertEqual(
             EDGE_STP,
             document[1]["set"]["interface"]["bond7"]
@@ -369,16 +411,27 @@ class TerminalL2StpDirectTests(unittest.TestCase):
             ["bridge"]["domain"]["br_default"],
         )
         self.assertEqual(
-            [], GENERATOR._terminal_l2_stp_errors(document, ["bond7"]),
+            [], terminal_l2_stp_errors(document),
         )
 
     def test_existing_conflicting_terminal_stp_is_rejected_not_overwritten(self):
-        document = direct_document()
-        domain = document[0]["set"]["interface"]["swp1"]["bridge"]["domain"]["br_default"]
-        domain["stp"] = {"admin-edge": "off"}
+        for invalid in ("on", "disabled", True):
+            document = direct_document()
+            domain = (
+                document[0]["set"]["interface"]["swp1"]
+                ["bridge"]["domain"]["br_default"]
+            )
+            domain["stp"] = {"admin-edge": invalid}
 
-        with self.assertRaisesRegex(ValueError, "swp1.*admin-edge"):
-            GENERATOR._inject_terminal_l2_stp(document, ["swp1"])
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "swp1.*admin-edge"):
+                    inject_terminal_l2_stp(document)
+
+        document = direct_document()
+        self.assertTrue(inject_terminal_l2_stp(document))
+        after_first_injection = copy.deepcopy(document)
+        self.assertFalse(inject_terminal_l2_stp(document))
+        self.assertEqual(after_first_injection, document)
 
     def test_compact_bridge_selector_mixing_terminal_and_bond_members_is_rejected(self):
         document = [{"set": {"interface": {
@@ -394,19 +447,13 @@ class TerminalL2StpDirectTests(unittest.TestCase):
         }}}]
 
         with self.assertRaisesRegex(ValueError, "swp1-3.*bond member.*swp2"):
-            GENERATOR._inject_terminal_l2_stp(
-                document, ["swp1", "swp2", "swp3"],
-            )
-        errors = GENERATOR._terminal_l2_stp_errors(
-            document, ["swp1", "swp2", "swp3"],
-        )
+            inject_terminal_l2_stp(document)
+        errors = terminal_l2_stp_errors(document)
         self.assertTrue(any("swp1-3" in error and "swp2" in error for error in errors))
 
     def test_gate_rejects_missing_edge_setting_and_member_level_setting(self):
         missing = direct_document()
-        errors = GENERATOR._terminal_l2_stp_errors(
-            missing, ["swp1", "bond1", "bond8"],
-        )
+        errors = terminal_l2_stp_errors(missing)
         self.assertTrue(any("swp1" in error and "admin-edge" in error for error in errors))
         self.assertTrue(any("bond1" in error and "bpdu-guard" in error for error in errors))
 
@@ -415,17 +462,130 @@ class TerminalL2StpDirectTests(unittest.TestCase):
         invalid_member[0]["set"]["interface"]["swp2"]["bridge"] = {
             "domain": {"br_default": member_domain},
         }
-        GENERATOR._inject_terminal_l2_stp(
-            invalid_member, ["swp1", "bond1", "bond8"],
-        )
-        errors = GENERATOR._terminal_l2_stp_errors(
-            invalid_member, ["swp1", "bond1", "bond8"],
-        )
+        inject_terminal_l2_stp(invalid_member)
+        errors = terminal_l2_stp_errors(invalid_member)
         self.assertTrue(any("swp2" in error and "bond member" in error for error in errors))
+
+    def test_oobofoob_leaf_keeps_spine_bond_in_normal_stp_mode(self):
+        document = [{"set": {"interface": {
+            "bond49b51": {
+                "bond": {"member": {"swp49": {}, "swp51": {}}},
+                "bridge": {"domain": {"br_default": {"vlan": {"10": {}}}}},
+                "type": "bond",
+            },
+            "bond2": {
+                "bond": {"member": {"swp2": {}}},
+                "bridge": {"domain": {"br_default": {"access": 10}}},
+                "type": "bond",
+            },
+            "swp3": {
+                "bridge": {"domain": {"br_default": {"access": 10}}},
+                "type": "swp",
+            },
+            "swp2": {"type": "swp"},
+            "swp49": {"type": "swp"},
+            "swp51": {"type": "swp"},
+        }}}]
+
+        self.assertTrue(inject_terminal_l2_stp(
+            document, template="oobofoob-leaf",
+        ))
+        interfaces = set_block(document)["interface"]
+        self.assertNotIn(
+            "stp",
+            interfaces["bond49b51"]["bridge"]["domain"]["br_default"],
+        )
+        for name in ("bond2", "swp3"):
+            self.assertEqual(
+                EDGE_STP,
+                interfaces[name]["bridge"]["domain"]["br_default"]["stp"],
+            )
+        self.assertEqual([], terminal_l2_stp_errors(
+            document, template="oobofoob-leaf",
+        ))
+
+    def test_oobofoob_spine_excludes_only_leaf_facing_bonds_1_through_11(self):
+        interfaces = {}
+        for bond_id in range(1, 13):
+            member = f"swp{bond_id}"
+            interfaces[f"bond{bond_id}"] = {
+                "bond": {"member": {member: {}}},
+                "bridge": {"domain": {"br_default": {"vlan": {"10": {}}}}},
+                "type": "bond",
+            }
+            interfaces[member] = {"type": "swp"}
+        document = [{"set": {"interface": interfaces}}]
+
+        self.assertTrue(inject_terminal_l2_stp(
+            document, template="oobofoob-spine",
+        ))
+        for bond_id in range(1, 12):
+            self.assertNotIn(
+                "stp",
+                interfaces[f"bond{bond_id}"]["bridge"]["domain"]["br_default"],
+            )
+        self.assertEqual(
+            EDGE_STP,
+            interfaces["bond12"]["bridge"]["domain"]["br_default"]["stp"],
+        )
+        self.assertEqual([], terminal_l2_stp_errors(
+            document, template="oobofoob-spine",
+        ))
+
+    def test_gate_rejects_edge_settings_on_oobofoob_stp_transit_bond(self):
+        document = [{"set": {"interface": {
+            "bond49b51": {
+                "bond": {"member": {"swp49": {}, "swp51": {}}},
+                "bridge": {"domain": {"br_default": {
+                    "stp": copy.deepcopy(EDGE_STP),
+                    "vlan": {"10": {}},
+                }}},
+                "type": "bond",
+            },
+            "swp49": {"type": "swp"},
+            "swp51": {"type": "swp"},
+        }}}]
+
+        errors = terminal_l2_stp_errors(
+            document, template="oobofoob-leaf",
+        )
+        self.assertTrue(
+            any("bond49b51" in error and "不得配置" in error for error in errors),
+            errors,
+        )
+
+    def test_gate_rejects_edge_settings_on_peerlink(self):
+        document = [{"set": {"interface": {
+            "peerlink": {
+                "bond": {"member": {"swp49": {}, "swp51": {}}},
+                "bridge": {"domain": {"br_default": {
+                    "stp": copy.deepcopy(EDGE_STP),
+                    "vlan": {"10": {}},
+                }}},
+                "type": "peerlink",
+            },
+            "peerlink.4094": {
+                "base-interface": "peerlink",
+                "bridge": {"domain": {"br_default": {
+                    "stp": copy.deepcopy(EDGE_STP),
+                }}},
+                "type": "sub",
+                "vlan": 4094,
+            },
+            "swp49": {"type": "swp"},
+            "swp51": {"type": "swp"},
+        }}}]
+
+        errors = terminal_l2_stp_errors(document)
+        for name in ("peerlink", "peerlink.4094"):
+            self.assertTrue(
+                any(name in error and "不得配置" in error for error in errors),
+                errors,
+            )
 
 
 class TerminalL2StpWorkflowTests(unittest.TestCase):
-    def test_v2_csv_policy_flows_through_intermediate_yaml_and_renderer(self):
+    def test_column_free_v2_csv_automatically_protects_standalone_l2_ports(self):
         global_document = {
             "schema_version": 2,
             "common": {
@@ -480,7 +640,7 @@ class TerminalL2StpWorkflowTests(unittest.TestCase):
             )
             with devices_file.open("w", newline="", encoding="utf-8") as stream:
                 csv.writer(stream).writerows([
-                    v2_header(), v2_row(terminal_ports="swp5"),
+                    v2_header(), v2_row(),
                 ])
 
             with mock.patch.multiple(
@@ -495,10 +655,9 @@ class TerminalL2StpWorkflowTests(unittest.TestCase):
                 intermediate_document = yaml.safe_load(
                     intermediate.read_text(encoding="utf-8"),
                 )
-                self.assertEqual(
-                    ["swp5"],
-                    intermediate_document["devices"]["leaf01"]
-                    ["terminal_l2_ports"],
+                self.assertNotIn(
+                    "terminal_l2_ports",
+                    intermediate_document["devices"]["leaf01"],
                 )
                 with mock.patch.object(GENERATOR, "OUTPUT_DIR", str(output)):
                     GENERATOR.generate_all()
@@ -511,13 +670,113 @@ class TerminalL2StpWorkflowTests(unittest.TestCase):
                 EDGE_STP,
                 interfaces["swp5"]["bridge"]["domain"]["br_default"]["stp"],
             )
-            self.assertNotIn(
-                "stp", interfaces["bond1"]["bridge"]["domain"]["br_default"],
+            self.assertEqual(
+                EDGE_STP,
+                interfaces["bond1"]["bridge"]["domain"]["br_default"]["stp"],
             )
 
-    def test_generate_publish_and_runtime_compare_preserve_terminal_stp_policy(self):
+    def test_column_free_v2_oobofoob_workflow_preserves_stp_transit_bonds(self):
+        eth_global = border_globals()
+        eth_global.update({
+            "version": "5.18.0",
+            "vrr": {
+                "base_mac": "02:00:5e:01:00:00",
+                "gateway_ip": "subnet_maximum",
+            },
+            "mlag": {
+                "init-delay": 20,
+                "priority": [100, 200],
+                "shared-addresses": [],
+            },
+            "services": {"dhcp_relay": {}},
+        })
+        global_document = {
+            "schema_version": 2,
+            "common": {"mgmt": {"ztp": {"ztp_url_prefix": "/ztp"}}},
+            "switches": [{"eth": eth_global}],
+        }
+
+        def row(hostname, host_id, template, vlan_ports, bond_ports,
+                bond_type, bond_mac="NA", peerlink="NA"):
+            return [
+                hostname, "eth", template, f"192.0.2.{host_id}", "24",
+                "192.0.2.1", f"02:00:00:00:00:{host_id:02x}",
+                "NA", "NA", "NA", "NA", f"198.51.100.{host_id}",
+                "10", "NA", "NA", vlan_ports,
+                "NA", "NA", bond_ports, bond_type, bond_mac,
+                peerlink, "false",
+            ]
+
+        rows = [
+            row(
+                "oobofoob-pod1-leaf01", 10, "oobofoob-leaf",
+                "bond49b51/bond2", "bond49b51|bond2", "local|local",
+            ),
+            row(
+                "oobofoob-spine01", 20, "oobofoob-spine",
+                "bond1-12", "bond1-12", "mlag",
+                "02:00:00:ff:00:12", "swp49-50",
+            ),
+            row(
+                "oobofoob-spine02", 21, "oobofoob-spine",
+                "bond1-12", "bond1-12", "mlag",
+                "02:00:00:ff:00:12", "swp49-50",
+            ),
+        ]
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            global_file = root / "01-global.yaml"
+            devices_file = root / "02-devices_config.csv"
+            intermediate = root / "91-devices.yaml"
+            output = root / "generated"
+            global_file.write_text(
+                yaml.safe_dump(global_document, sort_keys=False),
+                encoding="utf-8",
+            )
+            with devices_file.open("w", newline="", encoding="utf-8") as stream:
+                csv.writer(stream).writerows([v2_header(), *rows])
+
+            with mock.patch.multiple(
+                GENERATOR,
+                _CSV_FILE=str(devices_file),
+                _GLOBAL_FILE=str(global_file),
+                DEVICES_FILE=str(intermediate),
+            ), mock.patch.object(
+                GENERATOR, "_refresh_cumulus_defaults_from_global",
+            ):
+                GENERATOR._generate_devices_yaml()
+                with mock.patch.object(GENERATOR, "OUTPUT_DIR", str(output)):
+                    GENERATOR.generate_all()
+
+            leaf = set_block(yaml.safe_load(
+                (output / "oobofoob-pod1-leaf01.yaml").read_text(
+                    encoding="utf-8",
+                )
+            ))["interface"]
+            self.assertNotIn(
+                "stp", leaf["bond49b51"]["bridge"]["domain"]["br_default"],
+            )
+            self.assertEqual(
+                EDGE_STP,
+                leaf["bond2"]["bridge"]["domain"]["br_default"]["stp"],
+            )
+
+            spine = set_block(yaml.safe_load(
+                (output / "oobofoob-spine01.yaml").read_text(encoding="utf-8")
+            ))["interface"]
+            for bond_id in range(1, 12):
+                self.assertNotIn(
+                    "stp",
+                    spine[f"bond{bond_id}"]["bridge"]["domain"]["br_default"],
+                )
+            self.assertEqual(
+                EDGE_STP,
+                spine["bond12"]["bridge"]["domain"]["br_default"]["stp"],
+            )
+
+    def test_generate_publish_and_runtime_compare_preserve_automatic_stp_policy(self):
         device = border_device()
-        device["terminal_l2_ports"] = ["swp5"]
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "generated"
             with mock.patch.object(
@@ -535,8 +794,9 @@ class TerminalL2StpWorkflowTests(unittest.TestCase):
             EDGE_STP,
             interfaces["swp5"]["bridge"]["domain"]["br_default"]["stp"],
         )
-        self.assertNotIn(
-            "stp", interfaces["bond1"]["bridge"]["domain"]["br_default"],
+        self.assertEqual(
+            EDGE_STP,
+            interfaces["bond1"]["bridge"]["domain"]["br_default"]["stp"],
         )
         for member in ("swp1", "swp49", "swp50"):
             self.assertNotIn("bridge", interfaces[member])
@@ -550,10 +810,64 @@ class TerminalL2StpWorkflowTests(unittest.TestCase):
             MANUAL.runtime_comparable_nvue_config(current, label="nv config show"),
         )
 
-    def test_source_yaml_is_not_rewritten_when_missing_policy_means_no_targets(self):
+    def test_pre_5_15_generate_publish_and_compare_preserve_legacy_stp_enum(self):
+        device = border_device()
+        global_vars = border_globals()
+        global_vars["version"] = "5.14.99"
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "generated"
+            with mock.patch.object(
+                GENERATOR,
+                "load_devices",
+                return_value=(global_vars, {device["hostname"]: device}),
+            ), mock.patch.object(GENERATOR, "OUTPUT_DIR", str(output)):
+                GENERATOR.generate_all()
+            source = output / f"{device['hostname']}.yaml"
+            published = PUBLISHER._canonical_yaml(str(source))
+
+        published_document = yaml.safe_load(published)
+        stp = (
+            set_block(published_document)["interface"]["swp5"]
+            ["bridge"]["domain"]["br_default"]["stp"]
+        )
+        self.assertEqual(LEGACY_EDGE_STP, stp)
+        current = yaml.safe_dump([
+            {"header": {"model": "vx", "nvue-api-version": "nvue_v1"}},
+            published_document[0],
+        ], sort_keys=False)
+        self.assertEqual(
+            MANUAL.runtime_comparable_nvue_config(published, label="latest"),
+            MANUAL.runtime_comparable_nvue_config(current, label="nv config show"),
+        )
+
+    def test_schema_v1_generate_all_keeps_existing_l2_stp_output_unchanged(self):
+        device = border_device()
+        device["_project_schema_version"] = 1
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "generated"
+            with mock.patch.object(
+                GENERATOR,
+                "load_devices",
+                return_value=(border_globals(), {device["hostname"]: device}),
+            ), mock.patch.object(GENERATOR, "OUTPUT_DIR", str(output)):
+                GENERATOR.generate_all()
+
+            document = yaml.safe_load(
+                (output / f"{device['hostname']}.yaml").read_text(
+                    encoding="utf-8",
+                )
+            )
+        interfaces = set_block(document)["interface"]
+        for name in ("swp5", "bond1"):
+            self.assertNotIn(
+                "stp", interfaces[name]["bridge"]["domain"]["br_default"],
+            )
+
+    def test_source_yaml_receipt_is_not_rewritten_by_automatic_policy(self):
         source = yaml.safe_dump(direct_document(), sort_keys=False)
         source_bytes = source.encode("utf-8")
         device = {
+            "_project_schema_version": 2,
             "template": "source-receipt",
             "hostname": "EXAMPLE-SOURCE01",
             "source_yaml_b64": base64.b64encode(source_bytes).decode("ascii"),
@@ -585,7 +899,7 @@ class TerminalL2StpWorkflowTests(unittest.TestCase):
                 ),
             )
 
-    def test_feedback_preserves_explicit_terminal_policy_without_inference(self):
+    def test_feedback_keeps_v2_csv_free_of_terminal_policy_column(self):
         runtime = {
             "bridge": {"domain": {"br_default": {"vlan": {"100": {}}}}},
             "interface": {
@@ -637,11 +951,8 @@ class TerminalL2StpWorkflowTests(unittest.TestCase):
 
             with output.open(newline="", encoding="utf-8") as stream:
                 rows = list(csv.reader(stream))
-            layout = CONTRACT.parse_device_csv_layout(rows[0], 2)
-            self.assertEqual(
-                "swp5/bond1",
-                rows[1][layout.policy_indices["terminal_l2_ports"]],
-            )
+            CONTRACT.parse_device_csv_layout(rows[0], 2)
+            self.assertNotIn("terminal_l2_ports", rows[0])
 
 
 if __name__ == "__main__":

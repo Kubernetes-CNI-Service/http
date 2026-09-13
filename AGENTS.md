@@ -24,12 +24,19 @@ PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B test_cases/run_related_tests.p
 PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B test_cases/run_related_tests.py --watch --interval 2 -v
 ```
 
-正式同步、打包或部署前必须先全量执行，再确认当前源码、测试、manifest 与批准状态逐字节一致：
+正式同步、打包或部署前必须具备绑定当前源码、测试、manifest 以及 Python/平台身份的全量测试
+证明。本机 macOS 上的正式 `DAY0-Prepare/11-load.py` 会在生成项目文件之前执行全量测试，
+成功完成 load 后再次确认当前状态仍逐字节一致。开发者也可以显式执行以下治理命令：
 
 ```bash
 PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B test_cases/run_related_tests.py --all -v
-PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B test_cases/run_related_tests.py --check
+PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B test_cases/run_related_tests.py --check --require-full
 ```
+
+`sync-code.py` 与 `tar-for-upload.py` 只验证这份精确证明，绝不自行执行全量测试。证明缺失、
+过期、源码发生变化或执行环境不一致时，它们必须在任何打包、网络或远端写入前停止，并要求
+操作员先在当前工作树重新完成本机正式 load。Linux 管理服务器 load 与 macOS `--dry-run`
+不运行开发测试。不得提供或使用无条件跳过证明检查的发布参数。
 
 任何失败、未批准变更或 runner 安全检查错误都必须阻断发布。禁止通过删除、跳过、弱化测试，手工编辑批准 ledger，或让测试从当前实现复制结果来绕过失败。若需求确实改变，应先独立确认新合同并更新相应预期，再修正实现并重新运行测试。
 

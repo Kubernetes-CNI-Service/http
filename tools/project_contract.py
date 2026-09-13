@@ -56,7 +56,6 @@ DEVICE_FIXED_COLUMNS = (
     "bgp_asn", "bgp_ports", "bond_ports", "bond_type", "bond_mac",
     "peerlink_ports", "vrl",
 )
-DEVICE_V2_OPTIONAL_POLICY_COLUMNS = ("terminal_l2_ports",)
 DEVICE_V1_VLAN_COLUMNS = (
     "vrf_default", "vlan_id", "svi_ip", "netmask", "vrr_ip", "vrr_mac",
     "vlan_ports",
@@ -86,7 +85,6 @@ class DeviceCsvLayout:
     evpn_group_starts: tuple[int, ...]
     metadata_start: int
     fixed_columns: tuple[str, ...] = DEVICE_FIXED_COLUMNS
-    policy_columns: tuple[str, ...] = ()
 
     @property
     def fixed_indices(self) -> dict[str, int]:
@@ -94,106 +92,6 @@ class DeviceCsvLayout:
             name: self.fixed_start + offset
             for offset, name in enumerate(self.fixed_columns)
         }
-
-    @property
-    def policy_indices(self) -> dict[str, int]:
-        start = self.fixed_start + len(self.fixed_columns)
-        return {
-            name: start + offset
-            for offset, name in enumerate(self.policy_columns)
-        }
-
-
-def parse_terminal_l2_ports(value: object) -> tuple[str, ...]:
-    """Expand one strict terminal-facing L2 interface allowlist.
-
-    The schema-v2 cell is a slash-separated list of logical ``swp`` or
-    ``bond`` interface selectors.  Compact local-bond names such as
-    ``bond49b51`` remain one logical interface.  Peerlink, empty tokens,
-    duplicate expansions, reversed ranges, and unknown interface families are
-    rejected so endpoint safety can never depend on a hostname or port-number
-    guess.
-    """
-    raw = str(value or "").strip()
-    if not raw or raw.casefold() in {"na", "n/a"}:
-        return ()
-
-    result: list[str] = []
-    seen: set[str] = set()
-    expanded_limit = 10_000
-    selector_re = re.compile(
-        r"^(swp|bond)([1-9]\d*)(?:-([1-9]\d*))?"
-        r"(?:s(0|[1-9]\d*)(?:-(0|[1-9]\d*))?)?$",
-        re.IGNORECASE,
-    )
-    compact_bond_re = re.compile(
-        r"^bond\d+(?:(?:b\d+)|(?:bond\d+))+$", re.IGNORECASE,
-    )
-
-    def add(interface: str) -> None:
-        normalized = interface.casefold()
-        if len(normalized) > 15:
-            raise ValueError(
-                "terminal_l2_ports 接口名称超过 15 字符："
-                f"{normalized!r}"
-            )
-        if normalized in seen:
-            raise ValueError(
-                f"terminal_l2_ports 接口重复：{normalized}"
-            )
-        if len(result) >= expanded_limit:
-            raise ValueError(
-                "terminal_l2_ports 展开超过 10000 个接口"
-            )
-        seen.add(normalized)
-        result.append(normalized)
-
-    for raw_token in raw.split("/"):
-        token = raw_token.strip()
-        if not token:
-            raise ValueError("terminal_l2_ports 包含空 token")
-        normalized = token.casefold()
-        if normalized.startswith("peerlink"):
-            raise ValueError(
-                "terminal_l2_ports 不允许 peerlink 或 peerlink 子接口"
-            )
-        if compact_bond_re.fullmatch(normalized):
-            add(normalized)
-            continue
-        match = selector_re.fullmatch(normalized)
-        if match is None:
-            raise ValueError(
-                "terminal_l2_ports 仅支持 swpN、swpN-M、swpNsP-Q、"
-                "bondN、bondN-M、bondNsP-Q 或 compact local bond，"
-                f"以 / 分隔：{token!r}"
-            )
-        prefix = match.group(1).casefold()
-        port_start = int(match.group(2))
-        port_end = int(match.group(3) or port_start)
-        lane_start = int(match.group(4)) if match.group(4) is not None else None
-        lane_end = (
-            int(match.group(5) or lane_start)
-            if lane_start is not None else None
-        )
-        if port_end < port_start or (
-                lane_start is not None and lane_end < lane_start):
-            raise ValueError(
-                f"terminal_l2_ports 范围倒序：{token!r}"
-            )
-        if (port_end - port_start + 1) * (
-                (lane_end - lane_start + 1) if lane_start is not None else 1
-        ) > expanded_limit:
-            raise ValueError(
-                f"terminal_l2_ports 范围过大：{token!r}"
-            )
-        for port in range(port_start, port_end + 1):
-            if lane_start is None:
-                add(f"{prefix}{port}")
-            else:
-                for lane in range(lane_start, lane_end + 1):
-                    add(f"{prefix}{port}s{lane}")
-    return tuple(result)
-
 
 def detect_global_schema_version(data: object) -> int:
     """Return the explicit project schema, defaulting only a missing key to v1.
@@ -475,25 +373,12 @@ def parse_device_csv_layout(
             "schema 2 devices_config.csv 固定列必须为："
             + ",".join(DEVICE_FIXED_COLUMNS)
         )
-    policy_columns = ()
-    policy_occurrences = [
-        index for index, column in enumerate(body)
-        if column in DEVICE_V2_OPTIONAL_POLICY_COLUMNS
-    ]
-    if policy_occurrences:
-        expected = list(range(
-            fixed_end,
-            fixed_end + len(DEVICE_V2_OPTIONAL_POLICY_COLUMNS),
-        ))
-        if (policy_occurrences != expected
-                or tuple(body[index] for index in policy_occurrences)
-                != DEVICE_V2_OPTIONAL_POLICY_COLUMNS):
-            raise ValueError(
-                "schema 2 devices_config.csv 的 terminal_l2_ports "
-                "只能出现一次，且必须紧跟在 vrl 后"
-            )
-        policy_columns = DEVICE_V2_OPTIONAL_POLICY_COLUMNS
-    evpn_start = fixed_end + len(policy_columns)
+    if "terminal_l2_ports" in body:
+        raise ValueError(
+            "schema 2 devices_config.csv 不再支持 terminal_l2_ports；"
+            "终端二层 STP 由生成器按接口角色自动处理"
+        )
+    evpn_start = fixed_end
     vlan_starts = _repeated_group_starts(
         body, len(DEVICE_BASE_COLUMNS), fixed_start, DEVICE_V2_VLAN_COLUMNS,
         "普通 VLAN v2", allow_empty=True,
@@ -508,7 +393,6 @@ def parse_device_csv_layout(
         fixed_start=fixed_start,
         evpn_group_starts=evpn_starts,
         metadata_start=metadata_start,
-        policy_columns=policy_columns,
     )
 
 
@@ -558,9 +442,16 @@ DEPLOYABLE_TOOL_SUBTREES = frozenset({"lldp-analyze-tool"})
 
 NON_DEPLOYMENT_DIR_NAMES = frozenset({
     "test", "tests", "test_cases", "test-results", "__pycache__", ".pytest_cache",
+    "node_modules",
 })
+REFERENCE_ONLY_SUBTREES = frozenset({"monitor/cabletracker-main"})
 ROOT_LOCAL_PLANNING_DIR_NAMES = frozenset({"outputs"})
-LOCAL_METADATA_DIR_NAMES = frozenset({".git", ".codex", ".agents"})
+LOCAL_METADATA_DIR_NAMES = frozenset({
+    ".git", ".codex", ".agents", ".claude", ".ssh",
+})
+DEPLOYMENT_CODE_TREE_NAMES = frozenset({
+    "infra", "ztp", "monitor", "ethernet", "infiniband", "nvlink",
+})
 
 # tools/ is primarily an entrypoint directory.  Top-level runtime source files
 # are transferred; README files are documentation-only and always excluded.
@@ -573,6 +464,34 @@ MANUAL_BACKUP_PATTERNS = (
     "*_copy.*",
     "*_bak.*",
 )
+
+
+def path_disposition(path: PurePosixPath | str) -> str:
+    """Classify one canonical workspace-relative path for deployment.
+
+    The vocabulary is deliberately centralized so archive, transfer, image,
+    and governance discovery cannot drift on reference-only or test data.
+    """
+    if not isinstance(path, (str, PurePosixPath)):
+        raise TypeError("workspace path must be a string or PurePosixPath")
+    raw = path if isinstance(path, str) else path.as_posix()
+    if (
+        not raw
+        or "\x00" in raw
+        or "\\" in raw
+        or raw.startswith("/")
+        or any(part in {"", ".", ".."} for part in raw.split("/"))
+    ):
+        raise ValueError(f"workspace path must be canonical and relative: {raw!r}")
+    value = PurePosixPath(raw)
+    parts = value.parts
+    for subtree in REFERENCE_ONLY_SUBTREES:
+        subtree_parts = PurePosixPath(subtree).parts
+        if parts[:len(subtree_parts)] == subtree_parts:
+            return "reference-only"
+    if any(part in NON_DEPLOYMENT_DIR_NAMES for part in parts):
+        return "nondeployment"
+    return "production"
 
 
 def validate_ztp_url_prefix(value: object) -> str:
@@ -714,10 +633,18 @@ def transfer_exclude_reason(path: PurePosixPath | str) -> str | None:
     """Return why a workspace-relative path is not deployable, if applicable."""
     value = PurePosixPath(path)
     parts = value.parts
+    disposition = path_disposition(path)
+    if disposition == "reference-only":
+        return "reference-only input"
+    if disposition == "nondeployment":
+        return "test/development data"
     if parts and parts[0] in ROOT_LOCAL_PLANNING_DIR_NAMES:
         return "local workspace metadata/planning data"
+    if value == PurePosixPath("cross-review.log"):
+        return "local workspace metadata/planning data"
     if any(
-        part in LOCAL_METADATA_DIR_NAMES or part.startswith(".codex_tmp")
+        part.casefold() in LOCAL_METADATA_DIR_NAMES
+        or part.startswith(".codex_tmp")
         for part in parts
     ):
         return "local workspace metadata/planning data"
@@ -725,8 +652,6 @@ def transfer_exclude_reason(path: PurePosixPath | str) -> str | None:
         return "README documentation"
     if any(part in ANALYSIS_TOOL_NAMES for part in parts):
         return "offline analysis tool"
-    if any(part in NON_DEPLOYMENT_DIR_NAMES for part in parts):
-        return "test/development data"
     if any(part == ".DS_Store" or part.startswith("._") for part in parts):
         return "macOS metadata"
     if value.name.startswith("~$"):
@@ -735,6 +660,22 @@ def transfer_exclude_reason(path: PurePosixPath | str) -> str | None:
         return "deprecated input"
     if value.name == "infra-runtime.conf":
         return "host-specific infra runtime"
+    if parts and parts[0] in DEPLOYMENT_CODE_TREE_NAMES and (
+        value.suffix.casefold() in {".docx", ".pdf", ".xlsx"}
+        or (
+            value.suffix.casefold() == ".log"
+            and parts[:3] == ("infiniband", "bringup", "ndr")
+        )
+    ):
+        return "non-code reference artifact"
+    if (
+        len(parts) >= 3
+        and parts[0:2] == ("infra", "docker")
+        and value.name in {
+            "container.env", ".env", "desired-state.json", "runtime-state.json",
+        }
+    ):
+        return "host-specific container runtime"
     if value.name == ZTP_PREFIX_PUBLICATION_MARKER:
         return "host-specific ZTP prefix runtime"
     if value.suffix == ".pyc":
@@ -753,10 +694,13 @@ def rsync_excludes() -> tuple[str, ...]:
     """
     return (
         ".DS_Store", "._*", "~$*", "DEPRECATED-*", "deprecated-*", "*.pyc", "*.bak",
-        ".git/", ".codex/", ".agents/", ".codex_tmp*/",
+        ".git/", ".codex/", ".agents/", ".claude/", ".[Ss][Ss][Hh]/",
+        ".codex_tmp*/",
         "*_副本.*", "*_copy.*", "*_bak.*",
         "__pycache__/", ".pytest_cache/", "test/", "tests/", "test_cases/", "test-results/",
         "ib-tool-Jie/", "ibdiagnet-analyze-tool/",
         "[Rr][Ee][Aa][Dd][Mm][Ee]*",
-        "infra-runtime.conf", ZTP_PREFIX_PUBLICATION_MARKER,
+        "infra-runtime.conf", "container.env", ".env",
+        "desired-state.json", "runtime-state.json",
+        ZTP_PREFIX_PUBLICATION_MARKER,
     )

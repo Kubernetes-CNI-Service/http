@@ -8,14 +8,17 @@ packaging workflows live in tools/tar-for-upload.py and tools/tar-for-download.p
 from __future__ import annotations
 
 import argparse
-from datetime import datetime
 import fnmatch
+import gzip
 import hashlib
 import io
+import json
 import os
 from pathlib import Path, PurePosixPath
 import posixpath
 import stat
+import subprocess
+import sys
 import tarfile
 import tempfile
 import xml.etree.ElementTree as ET
@@ -24,6 +27,7 @@ import zipfile
 from project_contract import (
     is_manual_backup_name,
     is_tools_deployable_file,
+    path_disposition,
     transfer_exclude_reason,
     ztp_prefix_publication_relative,
 )
@@ -33,6 +37,27 @@ TOOLS_DIR = Path(__file__).resolve().parent
 ROOT = TOOLS_DIR.parent
 DAY0 = ROOT / "DAY0-Prepare"
 MANIFEST = ROOT / "ztp/.setup_manifest"
+STATIC_SETUP_MANAGED_LINKS = frozenset({
+    "ethernet/monitor/eth.csv",
+    "infiniband/monitor/ib.csv",
+    "nvlink/monitor/nvsw.csv",
+    "infiniband/bringup/xdr-upgrade/ib.csv",
+    "infiniband/bringup/xdr-initial-setup/ib.csv",
+})
+DEPLOYMENT_PREWRITE_GUARD = TOOLS_DIR / "deployment_prewrite_guard.py"
+DEPLOYMENT_SOURCE_MANIFEST_RELATIVE = PurePosixPath(
+    "infra/docker/deployment-source-manifest.json"
+)
+DEPLOYMENT_AUTHORITY_RELATIVES = frozenset({
+    DEPLOYMENT_SOURCE_MANIFEST_RELATIVE,
+    PurePosixPath("tools/deployment_prewrite_guard.py"),
+    PurePosixPath("tools/deploy-upload-archive.py"),
+})
+ARTIFACT_KINDS = frozenset({"upload", "preview", "download"})
+CONTAINER_TOPLEVEL_LOCK_RELATIVE = PurePosixPath(
+    "requirements-container-top-level.lock"
+)
+DEPLOYMENT_SOURCE_MANIFEST_BUILDER = ROOT / "infra/docker/activate.py"
 DEFAULT_MAX_FILE_MIB = 50
 MANAGEMENT_PUBKEY_MARKER = ".management-pubkeys"
 PROJECT_RESULT_PREFIX = "99-output-"
@@ -45,11 +70,627 @@ PROJECT_DEPLOYMENT_INPUTS = {
     "02-dhcp-subnet_config.csv",
 }
 AIR_TOPOLOGY_POLICY_NAME = "03-air-topology-policy.json"
+MINI_AIR_DEVICES_NAME = "04-air-mini-devices.txt"
+REPRODUCIBLE_ARCHIVE_MTIME = 0
+
+
+def _reproducible_tarinfo(info: tarfile.TarInfo) -> tarfile.TarInfo:
+    """Remove host- and clock-specific metadata from one archive member."""
+    info.mtime = REPRODUCIBLE_ARCHIVE_MTIME
+    info.uid = 0
+    info.gid = 0
+    info.uname = ""
+    info.gname = ""
+    if info.islnk():
+        # A tar hardlink is an inode-layout optimization, not source content
+        # authority.  Emit the member as an independent regular file so two
+        # byte-identical trees do not produce different archives merely
+        # because one filesystem happened to share an inode.
+        info.type = tarfile.REGTYPE
+        info.linkname = ""
+        info.mode = 0o755 if info.mode & 0o111 else 0o644
+    elif info.isdir():
+        info.mode = 0o755
+    elif info.issym():
+        info.mode = 0o777
+    elif info.isfile():
+        # Preserve the semantic executable bit, not host umask particulars.
+        info.mode = 0o755 if info.mode & 0o111 else 0o644
+    else:
+        raise ValueError(f"unsupported archive source type: {info.name!r}")
+    return info
+
+
+def _materialize_reproducible_tarinfo(
+    info: tarfile.TarInfo, metadata: os.stat_result,
+) -> tarfile.TarInfo:
+    """Materialize a held regular source independently of host inode layout."""
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ValueError(
+            f"archive source is not a regular file: {info.name!r}",
+        )
+    if info.islnk():
+        info.type = tarfile.REGTYPE
+        info.linkname = ""
+    elif not info.isfile():
+        raise ValueError(
+            f"archive source type changed before read: {info.name!r}",
+        )
+    info.size = metadata.st_size
+    info.mode = metadata.st_mode
+    return _reproducible_tarinfo(info)
+
+
+def _source_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    """Return the fields that bind one selected source filesystem object."""
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _require_source_identity(
+    source: Path, expected: os.stat_result, *, label: str,
+) -> os.stat_result:
+    """Require the lexical source still names the exact expected object."""
+    try:
+        current = source.lstat()
+    except OSError as exc:
+        raise ValueError(
+            f"archive source changed {label}: {source}",
+        ) from exc
+    if _source_identity(current) != _source_identity(expected):
+        raise ValueError(f"archive source changed {label}: {source}")
+    return current
+
+
+def _entry_lstat(
+    source: Path, *, parent_fd: int | None, entry_name: str | None,
+) -> os.stat_result:
+    """Inspect an entry without following it or falling back from a dirfd."""
+    if parent_fd is None:
+        return source.lstat()
+    if not entry_name:
+        raise ValueError(f"archive child name is missing: {source}")
+    return os.stat(entry_name, dir_fd=parent_fd, follow_symlinks=False)
+
+
+def _require_entry_identity(
+    source: Path,
+    expected: os.stat_result,
+    *,
+    parent_fd: int | None,
+    entry_name: str | None,
+    label: str,
+) -> os.stat_result:
+    """Require the same entry through its held parent authority."""
+    try:
+        current = _entry_lstat(
+            source, parent_fd=parent_fd, entry_name=entry_name,
+        )
+    except OSError as exc:
+        raise ValueError(
+            f"archive source changed {label}: {source}",
+        ) from exc
+    if _source_identity(current) != _source_identity(expected):
+        raise ValueError(f"archive source changed {label}: {source}")
+    return current
+
+
+def _entry_open(
+    source: Path,
+    flags: int,
+    *,
+    parent_fd: int | None,
+    entry_name: str | None,
+) -> int:
+    """Open a top-level path or a child relative to its held parent."""
+    if parent_fd is None:
+        return os.open(source, flags)
+    if not entry_name:
+        raise ValueError(f"archive child name is missing: {source}")
+    return os.open(entry_name, flags, dir_fd=parent_fd)
+
+
+def _entry_readlink(
+    source: Path, *, parent_fd: int | None, entry_name: str | None,
+) -> str:
+    """Read a symlink only through the same authority used for lstat."""
+    if parent_fd is None:
+        return os.readlink(source)
+    if not entry_name:
+        raise ValueError(f"archive child name is missing: {source}")
+    return os.readlink(entry_name, dir_fd=parent_fd)
+
+
+def _tarinfo_from_metadata(
+    metadata: os.stat_result, arcname: str, *, linkname: str = "",
+) -> tarfile.TarInfo:
+    """Build one TarInfo solely from metadata bound by lstat/fstat."""
+    info = tarfile.TarInfo(arcname)
+    info.mode = metadata.st_mode
+    info.uid = metadata.st_uid
+    info.gid = metadata.st_gid
+    info.mtime = metadata.st_mtime
+    if stat.S_ISREG(metadata.st_mode):
+        info.type = tarfile.REGTYPE
+        info.size = metadata.st_size
+    elif stat.S_ISDIR(metadata.st_mode):
+        info.type = tarfile.DIRTYPE
+    elif stat.S_ISLNK(metadata.st_mode):
+        info.type = tarfile.SYMTYPE
+        info.linkname = linkname
+    elif stat.S_ISFIFO(metadata.st_mode):
+        info.type = tarfile.FIFOTYPE
+    elif stat.S_ISCHR(metadata.st_mode):
+        info.type = tarfile.CHRTYPE
+    elif stat.S_ISBLK(metadata.st_mode):
+        info.type = tarfile.BLKTYPE
+    else:
+        raise ValueError(f"unsupported archive source type: {arcname!r}")
+    return info
+
+
+def _digest_held_regular(stream, expected_size: int) -> tuple[int, str]:
+    """Hash exactly one bounded held-file snapshot without buffering it."""
+    if expected_size < 0:
+        raise ValueError("archive source size cannot be negative")
+    stream.seek(0)
+    digest = hashlib.sha256()
+    total = 0
+    while total < expected_size:
+        chunk = stream.read(min(1024 * 1024, expected_size - total))
+        if not chunk:
+            raise ValueError("archive source ended before its bound size")
+        total += len(chunk)
+        digest.update(chunk)
+    if stream.read(1):
+        raise ValueError("archive source exceeded its bound size")
+    return total, digest.hexdigest()
+
+
+class _HashingBoundedReader:
+    """Expose at most the bound bytes while hashing what tar actually reads."""
+
+    def __init__(self, stream, expected_size: int) -> None:
+        self._stream = stream
+        self._expected_size = expected_size
+        self._total = 0
+        self._digest = hashlib.sha256()
+
+    def fileno(self) -> int:
+        return self._stream.fileno()
+
+    def read(self, size: int = -1) -> bytes:
+        remaining = self._expected_size - self._total
+        if remaining <= 0:
+            return b""
+        if size is None or size < 0:
+            bounded_size = remaining
+        else:
+            bounded_size = min(size, remaining)
+        chunk = self._stream.read(bounded_size)
+        if len(chunk) > bounded_size:
+            raise ValueError("archive source reader exceeded its bound")
+        self._total += len(chunk)
+        self._digest.update(chunk)
+        return chunk
+
+    @property
+    def result(self) -> tuple[int, str]:
+        return self._total, self._digest.hexdigest()
+
+
+def _add_reproducible_source(
+    archive: tarfile.TarFile,
+    source: Path,
+    arcname: str,
+    package_filter: "PackageFilter",
+    *,
+    recursive: bool = True,
+    parent_fd: int | None = None,
+    entry_name: str | None = None,
+) -> None:
+    """Add one entry while retaining its parent/entry filesystem authority."""
+    try:
+        initial = _entry_lstat(
+            source, parent_fd=parent_fd, entry_name=entry_name,
+        )
+    except OSError as exc:
+        raise ValueError(f"cannot inspect archive source: {source}") from exc
+    linkname = ""
+    if stat.S_ISLNK(initial.st_mode):
+        try:
+            linkname = _entry_readlink(
+                source, parent_fd=parent_fd, entry_name=entry_name,
+            )
+        except OSError as exc:
+            raise ValueError(f"cannot inspect archive symlink: {source}") from exc
+    _require_entry_identity(
+        source, initial, parent_fd=parent_fd, entry_name=entry_name,
+        label="during inspection",
+    )
+    info = _tarinfo_from_metadata(initial, arcname, linkname=linkname)
+    selected = package_filter(info)
+    if selected is None:
+        return
+
+    if stat.S_ISREG(initial.st_mode):
+        flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+        try:
+            descriptor = _entry_open(
+                source, flags, parent_fd=parent_fd, entry_name=entry_name,
+            )
+        except OSError as exc:
+            raise ValueError(f"cannot bind archive source: {source}") from exc
+        try:
+            stream = os.fdopen(descriptor, "rb", closefd=True)
+        except BaseException:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+            raise
+        with stream:
+            opened = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or _source_identity(opened) != _source_identity(initial)
+            ):
+                raise ValueError(
+                    f"archive source changed before read: {source}",
+                )
+            _require_entry_identity(
+                source, opened,
+                parent_fd=parent_fd, entry_name=entry_name,
+                label="before read",
+            )
+            before_digest = _digest_held_regular(
+                stream, opened.st_size,
+            )
+            before_add = os.fstat(stream.fileno())
+            if _source_identity(before_add) != _source_identity(opened):
+                raise ValueError(
+                    f"archive source changed during pre-read: {source}",
+                )
+            _require_entry_identity(
+                source, before_add,
+                parent_fd=parent_fd, entry_name=entry_name,
+                label="after pre-read",
+            )
+            stream.seek(0)
+            held_info = _tarinfo_from_metadata(opened, arcname)
+            held_info = _materialize_reproducible_tarinfo(held_info, opened)
+            selected_held = package_filter(held_info)
+            if selected_held is None:
+                return
+
+            archive_reader = _HashingBoundedReader(
+                stream, opened.st_size,
+            )
+            archive.addfile(selected_held, fileobj=archive_reader)
+            if archive_reader.result != before_digest:
+                raise ValueError(
+                    f"archive source content changed during read: {source}",
+                )
+            after_read = os.fstat(stream.fileno())
+            if _source_identity(after_read) != _source_identity(opened):
+                raise ValueError(
+                    f"archive source changed during read: {source}",
+                )
+            _require_entry_identity(
+                source, after_read,
+                parent_fd=parent_fd, entry_name=entry_name,
+                label="after read",
+            )
+            after_digest = _digest_held_regular(
+                stream, opened.st_size,
+            )
+            final = os.fstat(stream.fileno())
+            if (
+                after_digest != before_digest
+                or _source_identity(final) != _source_identity(opened)
+            ):
+                raise ValueError(
+                    f"archive source changed during verification: {source}",
+                )
+            _require_entry_identity(
+                source, final,
+                parent_fd=parent_fd, entry_name=entry_name,
+                label="after verification",
+            )
+        return
+
+    normalized = _reproducible_tarinfo(selected)
+    if normalized.isdir():
+        flags = (
+            os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+            | os.O_NOFOLLOW | os.O_NONBLOCK
+        )
+        try:
+            descriptor = _entry_open(
+                source, flags, parent_fd=parent_fd, entry_name=entry_name,
+            )
+        except OSError as exc:
+            raise ValueError(
+                f"cannot bind archive source directory: {source}",
+            ) from exc
+        try:
+            opened = os.fstat(descriptor)
+            if (
+                not stat.S_ISDIR(opened.st_mode)
+                or _source_identity(opened) != _source_identity(initial)
+            ):
+                raise ValueError(
+                    f"archive source directory changed before read: {source}",
+                )
+            _require_entry_identity(
+                source, opened,
+                parent_fd=parent_fd, entry_name=entry_name,
+                label="before directory read",
+            )
+            archive.addfile(normalized)
+            _require_entry_identity(
+                source, opened,
+                parent_fd=parent_fd, entry_name=entry_name,
+                label="after directory header",
+            )
+            if recursive:
+                try:
+                    children = sorted(os.listdir(descriptor))
+                except OSError as exc:
+                    raise ValueError(
+                        f"cannot enumerate archive source directory: {source}",
+                    ) from exc
+                for child in children:
+                    _add_reproducible_source(
+                        archive,
+                        source / child,
+                        os.path.join(arcname, child),
+                        package_filter,
+                        recursive=True,
+                        parent_fd=descriptor,
+                        entry_name=child,
+                    )
+            after = os.fstat(descriptor)
+            if _source_identity(after) != _source_identity(opened):
+                raise ValueError(
+                    f"archive source directory changed during read: {source}",
+                )
+            _require_entry_identity(
+                source, after,
+                parent_fd=parent_fd, entry_name=entry_name,
+                label="after directory read",
+            )
+        finally:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        return
+
+    archive.addfile(normalized)
+    _require_entry_identity(
+        source, initial, parent_fd=parent_fd, entry_name=entry_name,
+        label="after symlink read",
+    )
+    if normalized.issym():
+        try:
+            final_linkname = _entry_readlink(
+                source, parent_fd=parent_fd, entry_name=entry_name,
+            )
+        except OSError as exc:
+            raise ValueError(f"archive symlink changed: {source}") from exc
+        if final_linkname != linkname:
+            raise ValueError(f"archive symlink changed: {source}")
+
+
+def _special_tarinfo(relative: str, metadata: os.stat_result) -> tarfile.TarInfo:
+    """Build the minimal filter input for a non-regular filesystem object."""
+    info = tarfile.TarInfo(f"./{relative}")
+    info.mode = stat.S_IMODE(metadata.st_mode)
+    info.size = metadata.st_size
+    if stat.S_ISFIFO(metadata.st_mode):
+        info.type = tarfile.FIFOTYPE
+    elif stat.S_ISCHR(metadata.st_mode):
+        info.type = tarfile.CHRTYPE
+    elif stat.S_ISBLK(metadata.st_mode):
+        info.type = tarfile.BLKTYPE
+    else:
+        info.type = b"?"
+    return info
+
+
+def _reject_selected_special_sources(package_filter: "PackageFilter") -> None:
+    """Fail before creating an archive temp when policy selects a special node."""
+    root = ROOT.resolve(strict=True)
+
+    def walk_error(exc: OSError) -> None:
+        raise ValueError(f"cannot inspect archive source tree: {exc}") from exc
+
+    for directory, dirnames, filenames in os.walk(
+        root, topdown=True, followlinks=False, onerror=walk_error,
+    ):
+        dirnames.sort()
+        filenames.sort()
+        parent = Path(directory)
+        for name in (*dirnames, *filenames):
+            source = parent / name
+            try:
+                metadata = source.lstat()
+            except OSError as exc:
+                raise ValueError(
+                    f"cannot inspect archive source: {source}",
+                ) from exc
+            if (
+                stat.S_ISREG(metadata.st_mode)
+                or stat.S_ISDIR(metadata.st_mode)
+                or stat.S_ISLNK(metadata.st_mode)
+            ):
+                continue
+            relative = source.relative_to(root).as_posix()
+            info = _special_tarinfo(relative, metadata)
+            prior_files = package_filter.excluded_files
+            prior_bytes = package_filter.excluded_bytes
+            prior_reasons = dict(package_filter.reasons)
+            try:
+                selected = package_filter(info)
+            finally:
+                package_filter.excluded_files = prior_files
+                package_filter.excluded_bytes = prior_bytes
+                package_filter.reasons = prior_reasons
+            if selected is not None:
+                raise ValueError(
+                    f"unsupported selected archive source type: {relative}",
+                )
+
+
+def _package_uses_stored_gzip(
+    args: argparse.Namespace, project: Path, *, day0_all: bool,
+) -> bool:
+    """Return whether an included already-compressed payload forbids deflate.
+
+    A gzip container with level-zero stored blocks preserves the established
+    ``.tar.gz`` transport contract while avoiding minutes of futile deflate
+    work for switch images, firmware, offline packages, and project ``.bin``
+    images.
+    """
+    if args.include_images or args.include_apps or args.include_firmware:
+        return True
+    if getattr(args, "exclude_project_images", False):
+        return False
+    projects = (
+        (item for item in DAY0.iterdir() if item.is_dir())
+        if day0_all else (project,)
+    )
+    return any(
+        any(
+            candidate.is_file() and candidate.stat().st_size > 0
+            for candidate in item.glob("*.bin")
+        )
+        for item in projects
+    )
+
+
+def _read_frozen_regular_bytes(
+    path: Path, label: str, *, maximum_size: int = 4 * 1024 * 1024,
+) -> bytes:
+    """Read one local authority file from a single no-follow descriptor."""
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        before_path = path.lstat()
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ValueError(f"cannot open {label}: {exc}") from exc
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before_path.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or before_path.st_nlink != 1
+            or before.st_nlink != 1
+            or (before_path.st_dev, before_path.st_ino)
+            != (before.st_dev, before.st_ino)
+            or before.st_size <= 0
+            or before.st_size > maximum_size
+        ):
+            raise ValueError(f"{label} must be one bounded regular file")
+        chunks = []
+        remaining = before.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 65536))
+            if not chunk:
+                raise ValueError(f"{label} changed while reading")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise ValueError(f"{label} grew while reading")
+        after = os.fstat(descriptor)
+        if (
+            (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+            != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+        ):
+            raise ValueError(f"{label} changed while reading")
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def deployment_prewrite_guard_source(authority_manifest: Path) -> str:
+    """Freeze the guard bytes and verify them against the release authority."""
+    manifest_bytes = _read_frozen_regular_bytes(
+        authority_manifest, "deployment source manifest",
+    )
+    try:
+        payload = json.loads(manifest_bytes.decode("ascii"))
+        records = payload["files"]
+    except (UnicodeError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise ValueError(f"deployment source manifest is invalid: {exc}") from exc
+    matches = [
+        record for record in records
+        if isinstance(record, dict)
+        and record.get("path") == "tools/deployment_prewrite_guard.py"
+    ]
+    if len(matches) != 1 or matches[0].get("type") != "file":
+        raise ValueError("deployment source manifest does not bind the prewrite guard")
+    source = _read_frozen_regular_bytes(
+        DEPLOYMENT_PREWRITE_GUARD, "deployment prewrite guard",
+    )
+    if hashlib.sha256(source).hexdigest() != matches[0].get("sha256"):
+        raise ValueError(
+            "deployment prewrite guard changed after source manifest generation"
+        )
+    try:
+        return source.decode("utf-8")
+    except UnicodeError as exc:
+        raise ValueError(f"deployment prewrite guard is not UTF-8: {exc}") from exc
 
 RELATIONSHIP_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 OFFICE_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 DRAWING_NS = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
 VML_NS = "urn:schemas-microsoft-com:vml"
+
+
+def write_deployment_source_manifest(destination: Path) -> Path:
+    """Generate the local authority receipt that a remote image may verify.
+
+    The remote overlay must never generate this receipt for itself: stale
+    dynamically discovered source would otherwise become trusted at build
+    time.  Both sync and tar call this helper before contacting the server.
+    """
+    if not DEPLOYMENT_SOURCE_MANIFEST_BUILDER.is_file():
+        raise RuntimeError(
+            f"deployment source manifest builder missing: "
+            f"{DEPLOYMENT_SOURCE_MANIFEST_BUILDER}"
+        )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(
+        [
+            sys.executable, "-B", os.fspath(DEPLOYMENT_SOURCE_MANIFEST_BUILDER),
+            "build-source-manifest", "--source-root", os.fspath(ROOT),
+            "--manifest", os.fspath(destination),
+        ],
+        cwd=ROOT, capture_output=True, text=True, check=False,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+    )
+    if result.returncode != 0:
+        detail = str(result.stderr or result.stdout or "").strip()
+        raise RuntimeError(
+            "cannot generate local deployment source manifest"
+            + (f": {detail}" if detail else f" (exit={result.returncode})")
+        )
+    try:
+        metadata = destination.lstat()
+    except OSError as exc:
+        raise RuntimeError(f"deployment source manifest was not created: {exc}") from exc
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or metadata.st_size == 0:
+        raise RuntimeError("deployment source manifest must be one non-empty regular file")
+    return destination
 
 
 def is_transport_archive_name(name: str) -> bool:
@@ -94,7 +735,7 @@ def project_directories() -> list[Path]:
 
 def setup_managed_links() -> set[str]:
     """Return manifest-owned and detectable project-runtime links."""
-    result: set[str] = set()
+    result: set[str] = set(STATIC_SETUP_MANAGED_LINKS)
     root = ROOT.resolve()
     if MANIFEST.is_file():
         for line in MANIFEST.read_text(
@@ -231,6 +872,24 @@ def optional_air_topology_policy(project: Path) -> Path | None:
             f"{AIR_TOPOLOGY_POLICY_NAME} must be a regular file: {policy}"
         )
     return policy
+
+
+def optional_mini_air_devices(project: Path) -> Path | None:
+    """Return the optional canonical mini AIR list without following aliases."""
+    devices = project / MINI_AIR_DEVICES_NAME
+    try:
+        metadata = devices.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ValueError(f"cannot inspect {MINI_AIR_DEVICES_NAME}: {exc}") from exc
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise ValueError(
+            f"{MINI_AIR_DEVICES_NAME} must be a single-link regular file: {devices}"
+        )
+    if metadata.st_size == 0:
+        raise ValueError(f"{MINI_AIR_DEVICES_NAME} must not be empty: {devices}")
+    return devices
 
 
 def _relationship_owner(name: str) -> str:
@@ -427,6 +1086,25 @@ def directory_size(root: Path) -> int:
     return total
 
 
+def deployment_archive_source_paths(source_root: Path) -> tuple[str, ...]:
+    """Return deployable source paths selected specifically by archive policy."""
+    try:
+        root = source_root.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError(f"cannot inspect archive source root: {exc}") from exc
+    selected: set[str] = set()
+    tools_root = root / "tools"
+    if not tools_root.is_dir():
+        raise ValueError("archive source tree is incomplete: tools")
+    for candidate in tools_root.rglob("*"):
+        if not candidate.is_file() or candidate.is_symlink():
+            continue
+        relative = candidate.relative_to(root)
+        if transfer_exclude_reason(relative) is None and is_tools_deployable_file(relative):
+            selected.add(relative.as_posix())
+    return tuple(sorted(selected))
+
+
 class PackageFilter:
     def __init__(
         self,
@@ -441,6 +1119,8 @@ class PackageFilter:
         max_file_size: int,
         day0_all: bool = True,
         selected_p2p_relative: PurePosixPath | None = None,
+        exclude_project_images: bool = False,
+        artifact_kind: str = "upload",
     ) -> None:
         self.project_rel = project.relative_to(ROOT).as_posix()
         self.output = output.resolve()
@@ -454,6 +1134,8 @@ class PackageFilter:
         self.max_file_size = max_file_size
         self.day0_all = day0_all
         self.selected_p2p_relative = selected_p2p_relative
+        self.exclude_project_images = exclude_project_images
+        self.artifact_kind = artifact_kind
         projects = [
             item for item in DAY0.iterdir() if item.is_dir()
         ] if day0_all else [project]
@@ -487,6 +1169,29 @@ class PackageFilter:
         if not name:
             return info
 
+        disposition = path_disposition(path)
+        if disposition != "production":
+            self.reject(
+                info,
+                "reference-only input"
+                if disposition == "reference-only"
+                else "test/development data",
+            )
+            return None
+
+        if path == DEPLOYMENT_SOURCE_MANIFEST_RELATIVE:
+            # A possibly stale worktree copy is never authoritative.  The
+            # freshly generated local receipt is injected exactly once below.
+            self.reject(info, "generated deployment source manifest")
+            return None
+
+        if (
+            self.artifact_kind != "upload"
+            and path in DEPLOYMENT_AUTHORITY_RELATIVES
+        ):
+            self.reject(info, "deployment authority reserved for upload")
+            return None
+
         if not self.day0_all and (
             path.suffix.casefold() == ".md"
             or path.name.casefold().startswith("readme")
@@ -495,6 +1200,14 @@ class PackageFilter:
             self.reject(info, "documentation not consumed at runtime")
             return None
         if not self.day0_all and name == ".deployment.lock":
+            self.reject(info, "host runtime lock")
+            return None
+        if path == CONTAINER_TOPLEVEL_LOCK_RELATIVE:
+            if info.isfile() and 0 < info.size <= 64 * 1024:
+                return info
+            self.reject(info, "unsafe container top-level lock")
+            return None
+        if path.suffix.casefold() == ".lock":
             self.reject(info, "host runtime lock")
             return None
 
@@ -521,6 +1234,13 @@ class PackageFilter:
                        for part in parts[2:]):
                     self.reject(info, "lldp analyzer runtime/output")
                     return None
+                if (
+                    path == PurePosixPath(
+                        "tools/lldp-analyze-tool/04-lldp-device-aliases.json"
+                    )
+                    and info.isfile()
+                ):
+                    return info
                 if info.isdir() or (info.isfile() and is_tools_deployable_file(path)):
                     return info
                 self.reject(info, "non-deployable lldp analyzer content")
@@ -732,11 +1452,15 @@ class PackageFilter:
                 if (
                     filename in PROJECT_DEPLOYMENT_INPUTS
                     or filename == AIR_TOPOLOGY_POLICY_NAME
+                    or filename == MINI_AIR_DEVICES_NAME
                 ):
                     return info
                 if filename.casefold().endswith(".pub"):
                     return info
                 if filename.casefold().endswith(".bin"):
+                    if self.exclude_project_images:
+                        self.reject(info, "shared switch image externalized")
+                        return None
                     return info
             self.reject(info, "unused project planning attachment")
             return None
@@ -809,32 +1533,97 @@ def validate_deployment_archive_members(members: list[tarfile.TarInfo]) -> None:
 
 def remote_locked_shell_argv(
     lock_path: str, script: str, *, use_sudo: bool,
+    http_root: str | None = None, protect_docker: bool = False,
+    runtime: str = "native", guard_source: str | None = None,
 ) -> list[str]:
-    """Run a payload under a validated util-linux flock descriptor.
+    """Run a payload under the embedded, no-follow deployment-lock helper.
 
-    The management workspace is expected to be root/operator owned.  The
-    descriptor/path identity checks additionally reject static symlinks,
-    non-regular files, hard links, and path replacement before acquisition.
+    The helper source travels inside the already quoted SSH argv rather than
+    being loaded from the destination tree.  This permits a safe first deploy
+    and prevents an older/drifted remote helper from authorizing its own
+    replacement.  Docker protection runs after lock acquisition and before
+    the first byte of the shell payload.
     """
-    lock_script = (
-        "set -eu; lock=$1; exec 9>>\"$lock\"; fd=/proc/self/fd/9; "
-        "if [ -L \"$lock\" ] || [ ! -f \"$fd\" ] || "
-        "[ \"$(stat -Lc %h -- \"$fd\")\" != 1 ] || "
-        "[ \"$(stat -Lc '%d:%i' -- \"$fd\")\" != "
-        "\"$(stat -Lc '%d:%i' -- \"$lock\")\" ]; then "
-        "echo 'unsafe deployment lock path' >&2; exit 74; fi; "
-        "flock -n -E 75 9; " + script
-    )
+    if protect_docker and http_root is None:
+        raise ValueError("Docker-protected remote writer requires http_root")
+    if runtime not in {"native", "docker"}:
+        raise ValueError(f"unsupported runtime backend: {runtime!r}")
+    helper_source = guard_source
+    if helper_source is None:
+        helper_source = _read_frozen_regular_bytes(
+            DEPLOYMENT_PREWRITE_GUARD, "deployment prewrite guard",
+        ).decode("utf-8")
+    root = http_root or posixpath.dirname(lock_path.rstrip("/")) or "/"
+    command = ([] if not use_sudo else ["sudo", "-n"]) + [
+        "python3", "-c", helper_source,
+        "--lock", lock_path, "--root", root,
+    ]
+    if protect_docker:
+        command.append("--protect-docker")
+    command += ["--runtime", runtime]
+    command.append(script)
+    return command
+
+
+def remote_lock_holder_argv(
+    lock_path: str, *, http_root: str, use_sudo: bool,
+    runtime: str = "native", guard_source: str | None = None,
+    source_manifest_sha256: str = "",
+) -> list[str]:
+    """Start the embedded two-phase holder used by multi-SSH rsync."""
+    if runtime not in {"native", "docker"}:
+        raise ValueError(f"unsupported runtime backend: {runtime!r}")
+    helper_source = guard_source
+    if helper_source is None:
+        helper_source = _read_frozen_regular_bytes(
+            DEPLOYMENT_PREWRITE_GUARD, "deployment prewrite guard",
+        ).decode("utf-8")
+    if not __import__("re").fullmatch(r"[0-9a-f]{64}", source_manifest_sha256):
+        raise ValueError("verified source manifest SHA-256 is required")
     return ([] if not use_sudo else ["sudo", "-n"]) + [
-        "sh", "-c", lock_script, "http-deployment-lock", lock_path,
+        "python3", "-c", helper_source,
+        "--lock", lock_path, "--root", http_root, "--holder",
+        "--runtime", runtime,
+        "--source-manifest-sha256", source_manifest_sha256,
     ]
 
 
-def create_package(args: argparse.Namespace, *, day0_all: bool = True) -> Path:
+def remote_locked_archive_argv(
+    lock_path: str, archive_path: str, expected_sha256: str, *,
+    use_sudo: bool, http_root: str, runtime: str,
+    guard_source: str, source_manifest_sha256: str,
+) -> list[str]:
+    """Apply one verified archive through the embedded safe overlay engine."""
+    if runtime not in {"native", "docker"}:
+        raise ValueError(f"unsupported runtime backend: {runtime!r}")
+    if not __import__("re").fullmatch(r"[0-9a-f]{64}", expected_sha256):
+        raise ValueError("expected archive SHA-256 must contain 64 lowercase hex digits")
+    if not guard_source:
+        raise ValueError("verified archive deployment guard source is required")
+    if not __import__("re").fullmatch(r"[0-9a-f]{64}", source_manifest_sha256):
+        raise ValueError("verified source manifest SHA-256 is required")
+    return ([] if not use_sudo else ["sudo", "-n"]) + [
+        "python3", "-c", guard_source,
+        "--lock", lock_path, "--root", http_root,
+        "--runtime", runtime,
+        "--archive", archive_path,
+        "--archive-sha256", expected_sha256,
+        "--source-manifest-sha256", source_manifest_sha256,
+    ]
+
+
+def create_package(
+    args: argparse.Namespace, *, day0_all: bool = True, artifact_kind: str,
+) -> Path:
+    if artifact_kind not in ARTIFACT_KINDS:
+        raise ValueError(f"unsupported artifact kind: {artifact_kind!r}")
     project = resolve_project(args.project)
     selected_p2p = select_upload_p2p(project) if not day0_all else None
     air_topology_policy = (
         optional_air_topology_policy(project) if not day0_all else None
+    )
+    mini_air_devices = (
+        optional_mini_air_devices(project) if not day0_all else None
     )
     selected_p2p_relative = (
         PurePosixPath(selected_p2p.relative_to(project).as_posix())
@@ -852,7 +1641,6 @@ def create_package(args: argparse.Namespace, *, day0_all: bool = True) -> Path:
         raise ValueError(f"output must be a regular file: {output}")
     if args.max_file_size_mib < 0:
         raise ValueError("--max-file-size-mib cannot be negative")
-    output.parent.mkdir(parents=True, exist_ok=True)
 
     package_filter = PackageFilter(
         project,
@@ -865,7 +1653,11 @@ def create_package(args: argparse.Namespace, *, day0_all: bool = True) -> Path:
         max_file_size=args.max_file_size_mib * 1024 * 1024,
         day0_all=day0_all,
         selected_p2p_relative=selected_p2p_relative,
+        exclude_project_images=getattr(args, "exclude_project_images", False),
+        artifact_kind=artifact_kind,
     )
+    _reject_selected_special_sources(package_filter)
+    output.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=".http-air-package-", suffix=".tar.gz", dir=output.parent
     )
@@ -876,6 +1668,11 @@ def create_package(args: argparse.Namespace, *, day0_all: bool = True) -> Path:
     try:
         with tempfile.TemporaryDirectory(prefix="http-air-p2p-") as p2p_stage_name:
             p2p_staged = Path(p2p_stage_name) / "p2p-image-free.xlsx"
+            deployment_manifest = None
+            if artifact_kind == "upload":
+                deployment_manifest = write_deployment_source_manifest(
+                    Path(p2p_stage_name) / DEPLOYMENT_SOURCE_MANIFEST_RELATIVE.name,
+                )
             if selected_p2p is not None:
                 p2p_stats = strip_xlsx_images(selected_p2p, p2p_staged)
                 if (
@@ -886,25 +1683,48 @@ def create_package(args: argparse.Namespace, *, day0_all: bool = True) -> Path:
                         "image-free P2P workbook exceeds --max-file-size-mib: "
                         f"{human_size(p2p_staged.stat().st_size)}"
                     )
-            with tarfile.open(temporary, "w:gz", dereference=False) as archive:
+            compression_level = (
+                0 if _package_uses_stored_gzip(
+                    args, project, day0_all=day0_all,
+                ) else 6
+            )
+            with temporary.open("wb") as raw_archive, gzip.GzipFile(
+                filename="", mode="wb", fileobj=raw_archive,
+                compresslevel=compression_level,
+                mtime=REPRODUCIBLE_ARCHIVE_MTIME,
+            ) as compressed_archive, tarfile.open(
+                fileobj=compressed_archive, mode="w", dereference=False,
+                format=tarfile.PAX_FORMAT,
+            ) as archive:
                 # Add workspace children, not ROOT itself. Archiving a top-level "."
                 # entry preserves the local directory owner/mode and root extraction
                 # can then change /var/www/html itself (for example to macOS UID 501
                 # and mode 0700). Child-only archives never alter target-root metadata.
                 for source in sorted(ROOT.iterdir(), key=lambda item: item.name):
-                    archive.add(
-                        source, arcname=f"./{source.name}", recursive=True,
-                        filter=package_filter,
+                    _add_reproducible_source(
+                        archive,
+                        source,
+                        arcname=f"./{source.name}",
+                        package_filter=package_filter,
+                        recursive=True,
                     )
+                if deployment_manifest is not None:
+                    manifest_info = archive.gettarinfo(
+                        os.fspath(deployment_manifest),
+                        arcname=f"./{DEPLOYMENT_SOURCE_MANIFEST_RELATIVE.as_posix()}",
+                    )
+                    manifest_info.mode = 0o644
+                    _reproducible_tarinfo(manifest_info)
+                    with deployment_manifest.open("rb") as stream:
+                        archive.addfile(manifest_info, stream)
                 if selected_p2p is not None and selected_p2p_relative is not None:
                     archive_name = (
                         f"./{package_filter.project_rel}/"
                         f"{selected_p2p_relative.as_posix()}"
                     )
                     info = archive.gettarinfo(str(p2p_staged), arcname=archive_name)
-                    source_stat = selected_p2p.stat()
-                    info.mode = source_stat.st_mode & 0o777
-                    info.mtime = int(source_stat.st_mtime)
+                    info.mode = selected_p2p.stat().st_mode & 0o777
+                    _reproducible_tarinfo(info)
                     with p2p_staged.open("rb") as stream:
                         archive.addfile(info, stream)
                 # Preserve the project contract as an empty placeholder while never
@@ -912,20 +1732,36 @@ def create_package(args: argparse.Namespace, *, day0_all: bool = True) -> Path:
                 for relative in sorted(package_filter.managed_pubkeys):
                     placeholder = tarfile.TarInfo(f"./{relative}")
                     placeholder.mode = 0o644
-                    placeholder.mtime = int(datetime.now().timestamp())
                     placeholder.size = 0
-                    archive.addfile(placeholder)
+                    archive.addfile(_reproducible_tarinfo(placeholder))
         # Reopen the result so a truncated/corrupt archive is never published.
         with tarfile.open(temporary, "r:gz") as archive:
             members = archive.getmembers()
             validate_deployment_archive_members(members)
             names = {member.name for member in members}
             required = {
+                "./.dockerignore",
+                "./infra/docker/Dockerfile",
+                "./infra/docker/Dockerfile.dockerignore",
+                "./infra/docker/compose.yaml",
+                "./infra/docker/activate.py",
+                "./infra/docker/entrypoint.py",
+                "./infra/docker/healthcheck.py",
+                "./infra/docker/hostctl.py",
+                "./infra/docker/hostlock.py",
+                "./infra/docker/management_ssh_key.py",
+                "./infra/docker/deploy.sh",
+                "./infra/docker/supervisord.conf",
+                "./infra/docker/apache-ztp.conf",
+                "./infra/docker/rsyslog-dhcp.conf",
+                "./infra/docker/logrotate-http-ztp.conf",
+                "./infra/docker/container.env.example",
                 "./tools/_package_common.py",
                 "./tools/deployment_lock.py",
                 "./tools/tar-for-upload.py",
                 "./tools/tar-for-download.py",
                 "./tools/sync-code.py",
+                "./tools/password-update.py",
                 "./DAY0-Prepare/11-load.py",
                 "./DAY0-Prepare/12-ztp-monitor.py",
                 "./DAY0-Prepare/13-unload.py",
@@ -938,6 +1774,11 @@ def create_package(args: argparse.Namespace, *, day0_all: bool = True) -> Path:
                 f"./{package_filter.project_rel}/02-devices_config.csv",
                 f"./{package_filter.project_rel}/02-dhcp-subnet_config.csv",
             }
+            if artifact_kind == "upload":
+                required.update(
+                    f"./{relative.as_posix()}"
+                    for relative in DEPLOYMENT_AUTHORITY_RELATIVES
+                )
             if selected_p2p_relative is not None:
                 required.add(
                     f"./{package_filter.project_rel}/{selected_p2p_relative.as_posix()}"
@@ -948,6 +1789,12 @@ def create_package(args: argparse.Namespace, *, day0_all: bool = True) -> Path:
                     f"./{package_filter.project_rel}/{AIR_TOPOLOGY_POLICY_NAME}"
                 )
                 required.add(policy_member_name)
+            mini_member_name = None
+            if mini_air_devices is not None:
+                mini_member_name = (
+                    f"./{package_filter.project_rel}/{MINI_AIR_DEVICES_NAME}"
+                )
+                required.add(mini_member_name)
             missing = sorted(required - names)
             if missing:
                 raise RuntimeError("package verification missing: " + ", ".join(missing))
@@ -957,6 +1804,13 @@ def create_package(args: argparse.Namespace, *, day0_all: bool = True) -> Path:
                     raise RuntimeError(
                         "packaged AIR topology policy is not a regular file: "
                         f"{policy_member_name}"
+                    )
+            if mini_member_name is not None:
+                mini_member = archive.getmember(mini_member_name)
+                if not mini_member.isfile() or mini_member.size == 0:
+                    raise RuntimeError(
+                        "packaged mini AIR device list is not a non-empty regular file: "
+                        f"{mini_member_name}"
                     )
             if selected_p2p_relative is not None:
                 member_name = (

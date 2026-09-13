@@ -180,8 +180,11 @@ Production 未绑定 Cumulus 也使用同一条 MAC 身份门禁，但与 AIR �
 仅用于 SSH 传输，远端 `/sys/class/net/eth0/address` 必须与 DHCP runtime
 记录完全一致；默认 hostname `cumulus` 只有在 MAC 校验成功后才接受。公钥认证失败时，cron
 等非交互执行将其标记 unavailable，不猜默认密码、不触发初始改密，也不会因此采集到同 IP 的
-错误设备。操作员完成物理/链路识别并把 MAC 写入 `02-devices_config.csv`、重新 load 后，runtime
-helper 会按 MAC 去重，该临时行消失，后续归档使用正式 hostname。
+错误设备。操作员完成物理/链路识别并把 MAC 写入 `02-devices_config.csv` 属于 source write，
+必须按当前后端重新发布：Native/systemd 执行 `DAY0-Prepare/11-load.py`；Docker/Supervisor
+执行 `infra/docker/deploy.sh deploy`，或对与 live 来源身份链匹配且经验证的镜像执行
+`infra/docker/deploy.sh deploy-preloaded <IMAGE_ID>`；source write 后不得 load。发布完成后，
+runtime helper 会按 MAC 去重，该临时行消失，后续归档使用正式 hostname。
 
 `dhcp_runtime_inventory.py` 同时识别 Cumulus、NVOS 和真正 unknown，但本 Ethernet collector
 只接收 Cumulus；NVOS 的运行时设备由 ZTP/NVOS 流程处理。NVOS 可能从 eth0 或 eth1 发出 DHCP，

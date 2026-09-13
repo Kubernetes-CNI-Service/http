@@ -41,6 +41,10 @@ node_modules/
 .env.*
 !.env.example
 !.env.sample
+/infra/docker/container.env
+/infra/docker/.env
+/infra/docker/desired-state.json
+/infra/docker/runtime-state.json
 *.key
 *.pem
 *.p12
@@ -56,6 +60,7 @@ id_ecdsa*
 # Logs, locks, transient output and rebuildable runtime selections
 *.log
 *.lock
+!requirements-container-top-level.lock
 *.pid
 *.tmp
 *.temp

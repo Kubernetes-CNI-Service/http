@@ -31,6 +31,7 @@ import tarfile
 import tempfile
 import time
 from typing import Any, Iterable, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 try:
     import yaml  # type: ignore
@@ -41,6 +42,14 @@ except ImportError:  # pragma: no cover - production load installs PyYAML
 ROOT = Path(__file__).resolve().parents[1]
 DAY0_ROOT = ROOT / "DAY0-Prepare"
 HTTP_ROOT = ROOT
+TOOLS_DIR = ROOT / "tools"
+if str(TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(TOOLS_DIR))
+from ztp_service_runtime import (  # noqa: E402
+    RuntimeContractError,
+    ServiceRuntimeBackend,
+    runtime_backend_from_environment,
+)
 DEFAULT_OUTPUT_ROOT = Path("/var/tmp/ztp-diagnostics")
 SCHEMA_VERSION = 1
 MAX_COMMAND_BYTES = 8 * 1024 * 1024
@@ -59,6 +68,12 @@ SENSITIVE_KEY = re.compile(
     r"credential|private[_-]?key|shared[_-]?key|preshared[_-]?key|psk|"
     r"auth(?:entication)?[_-]?(?:key|token|secret)|api[_-]?key)(?:$|[_-])",
     re.IGNORECASE,
+)
+SENSITIVE_COMPACT_KEY_SUFFIXES = (
+    "password", "passwd", "passphrase", "hashedpassword", "secret", "token",
+    "credential", "privatekey", "sharedkey", "presharedkey", "psk",
+    "authenticationkey", "authenticationtoken", "authenticationsecret",
+    "authkey", "authtoken", "authsecret", "apikey",
 )
 PASSWORD_HASH = re.compile(r"\$(?:1|2[abxy]?|5|6|y)\$[^\s\"']+")
 PRIVATE_PEM = re.compile(
@@ -81,14 +96,33 @@ SECRET_ASSIGNMENT = re.compile(
 INLINE_SECRET_ASSIGNMENT = re.compile(
     r"(?i)([\"']?(?:password|passwd|passphrase|hashed[-_ ]?password|secret|"
     r"token|credential|private[-_ ]?key|shared[-_ ]?key|preshared[-_ ]?key|"
-    r"auth[-_ ]?key|api[-_ ]?key)[\"']?\s*[:=]\s*)"
+    r"auth[-_ ]?key|api[-_. ]?key)[\"']?\s*[:=]\s*)"
     r"(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;\]}]+)"
 )
+DHCP_SECRET_DIRECTIVE = re.compile(
+    r"(?i)(?<![-_A-Za-z0-9])((?:secret|key-secret)[ \t]+)"
+    r"(?![:=])(?:\"[^\"\r\n]*\"|'[^'\r\n]*')"
+)
+DHCP_KEY_SECRET_UNQUOTED = re.compile(
+    r"(?i)(?<![-_A-Za-z0-9])(key-secret[ \t]+)(?![:=])[^\s;{}]+"
+)
+APACHE_SETENV = re.compile(
+    r"(?im)^(?P<prefix>[ \t]*SetEnv[ \t]+)(?P<body>[^\n]*)$"
+)
+APACHE_SETENV_KEYWORD = re.compile(
+    r"(?i)^(?P<indent>[ \t]*)SetEnv(?=$|[ \t=])"
+)
+APACHE_SETENV_BODY = re.compile(
+    r"^(?P<name>[^ \t=]+)(?P<separator>[ \t]+|=)(?P<value>.*)$"
+)
+BENIGN_APACHE_SETENV_LINE = "SetEnv CONTROL_REQUIRE_AUTH 1"
+SENSITIVE_AUTHORIZATION_KEYS = frozenset({
+    "authorization", "proxy-authorization", "proxyauthorization",
+})
 SNMP_COMMUNITY_VALUE = re.compile(
     r"(?i)(\bsnmp(?:-server)?\s+community\s+)\S+"
 )
-URL_CREDENTIAL = re.compile(r"(?i)(https?://)[^/@\s:]+:[^/@\s]+@")
-URL_QUERY = re.compile(r"(?i)(https?://[^\s?#]+)\?[^\s#]*?(?:#[^\s]*)?(?=\s|$)")
+HTTP_URL = re.compile(r"(?i)https?://[^\s\"'<>]+")
 SSH_PUBLIC_LINE = re.compile(
     r"(?m)^\s*(?:ssh-(?:rsa|ed25519)|ecdsa-[^\s]+)\s+[A-Za-z0-9+/=]+(?:\s+.*)?$"
 )
@@ -144,22 +178,82 @@ def safe_relative(value: str) -> PurePosixPath:
     return relative
 
 
+def sanitize_url(value: str) -> str:
+    """Return a fixed-shape, credential-free rendering of one HTTP(S) URL."""
+    try:
+        parsed = urlsplit(value)
+        if parsed.scheme.casefold() not in {"http", "https"}:
+            raise ValueError("unsupported URL scheme")
+        hostname = parsed.hostname
+        port = parsed.port
+        if not hostname:
+            raise ValueError("URL has no hostname")
+        host_port = parsed.netloc.rsplit("@", 1)[-1]
+        if port is None and host_port.endswith(":"):
+            raise ValueError("empty URL port")
+        if parsed.username is not None:
+            host_port = "%3Credacted%3Auserinfo%3E@" + host_port
+        query = ""
+        if parsed.query or "?" in value:
+            components = []
+            for component in parsed.query.split("&"):
+                key = component.split("=", 1)[0]
+                components.append(key + "=%3Credacted%3Aquery-value%3E")
+            query = "&".join(components)
+        fragment = "%3Credacted%3Afragment%3E" if parsed.fragment else ""
+        return urlunsplit((parsed.scheme, host_port, parsed.path, query, fragment))
+    except (UnicodeError, ValueError):
+        return "<redacted:url>"
+
+
+def sanitize_urls_to_placeholders(text: str) -> tuple[str, list[tuple[str, str]]]:
+    """Redact URLs before generic assignment rules inspect their labels."""
+    prefix = "__ZTP_SANITIZED_URL_PLACEHOLDER_"
+    while prefix in text:
+        prefix += "_"
+    sanitized_urls: list[tuple[str, str]] = []
+
+    def replace(match: re.Match[str]) -> str:
+        placeholder = f"{prefix}{len(sanitized_urls)}__"
+        sanitized_urls.append((placeholder, sanitize_url(match.group(0))))
+        return placeholder
+
+    return HTTP_URL.sub(replace, text), sanitized_urls
+
+
 def sanitize_text(text: str) -> str:
     """Best-effort fallback for logs and command output (never raw configs)."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text, sanitized_urls = sanitize_urls_to_placeholders(text)
+    text = "\n".join(redact_apache_setenv_line(line) for line in text.split("\n"))
     text = CONTROL_CHARS.sub("", text)
     text = PRIVATE_PEM.sub("<redacted:private-key>", text)
     text = AUTHORIZATION.sub(r"\1<redacted:authorization>", text)
     text = AUTHORIZATION_VALUE.sub(r"\1<redacted:authorization>", text)
     text = SECRET_ASSIGNMENT.sub(
-        lambda match: match.group("prefix") + "<redacted:secret>", text
+        lambda match: (
+            match.group(0)
+            if "__ZTP_SANITIZED_URL_PLACEHOLDER_" in match.group(0)
+            else match.group("prefix") + "<redacted:secret>"
+        ),
+        text,
     )
-    text = INLINE_SECRET_ASSIGNMENT.sub(r"\1<redacted:secret>", text)
+    text = INLINE_SECRET_ASSIGNMENT.sub(
+        lambda match: (
+            match.group(0)
+            if "__ZTP_SANITIZED_URL_PLACEHOLDER_" in match.group(0)
+            else match.group(1) + "<redacted:secret>"
+        ),
+        text,
+    )
+    text = DHCP_SECRET_DIRECTIVE.sub(r"\1<redacted:secret>", text)
+    text = DHCP_KEY_SECRET_UNQUOTED.sub(r"\1<redacted:secret>", text)
     text = SNMP_COMMUNITY_VALUE.sub(r"\1<redacted:community>", text)
-    text = URL_CREDENTIAL.sub(r"\1<redacted>@", text)
-    text = URL_QUERY.sub(r"\1?<redacted:query>", text)
     text = PASSWORD_HASH.sub("<redacted:password-hash>", text)
     text = SSH_PUBLIC_LINE.sub("<redacted:ssh-public-key>", text)
     text = SSH_PUBLIC_VALUE.sub(r"\1 <redacted:ssh-public-key>", text)
+    for placeholder, sanitized_url in sanitized_urls:
+        text = text.replace(placeholder, sanitized_url)
     return text
 
 
@@ -169,6 +263,37 @@ def redact_scalar(value: Any) -> Any:
     return sanitize_text(value)
 
 
+def redact_apache_setenv_line(line: str) -> str:
+    normalized = CONTROL_CHARS.sub("", line)
+    match = APACHE_SETENV.fullmatch(normalized)
+    if match is None:
+        keyword = APACHE_SETENV_KEYWORD.match(normalized)
+        if keyword is None:
+            return line
+        return keyword.group("indent") + "SetEnv <redacted:secret>"
+    if line == BENIGN_APACHE_SETENV_LINE:
+        return line
+    body = APACHE_SETENV_BODY.fullmatch(match.group("body"))
+    if body is None:
+        return match.group("prefix") + "<redacted:secret>"
+    return (
+        match.group("prefix")
+        + body.group("name")
+        + body.group("separator")
+        + "<redacted:secret>"
+    )
+
+
+def is_sensitive_key(name: str) -> bool:
+    lowered = re.sub(r"[^a-z0-9]+", "-", str(name).casefold()).strip("-")
+    if lowered in SENSITIVE_AUTHORIZATION_KEYS:
+        return True
+    if SENSITIVE_KEY.search(lowered):
+        return True
+    compact = re.sub(r"[^a-z0-9]+", "", lowered)
+    return any(compact.endswith(suffix) for suffix in SENSITIVE_COMPACT_KEY_SUFFIXES)
+
+
 def redact_object(value: Any, *, parent_key: str = "") -> Any:
     if isinstance(value, dict):
         result = {}
@@ -176,7 +301,7 @@ def redact_object(value: Any, *, parent_key: str = "") -> Any:
         for key, child in value.items():
             name = str(key)
             lowered = name.casefold().replace(" ", "-")
-            sensitive = bool(SENSITIVE_KEY.search(lowered))
+            sensitive = is_sensitive_key(name)
             # SNMP communities are credentials; BGP route communities are not.
             if lowered in {"community", "communities"} and snmp_context:
                 sensitive = True
@@ -440,6 +565,7 @@ class BundleBuilder:
             f"Partial: {'yes' if self.warnings else 'no'}", "",
             "Raw private keys, authorized_keys, known_hosts, environment, shell ",
             "history and unredacted manual/preflight evidence are never collected.",
+            "Sanitized text converts CRLF and lone CR to LF.",
         ]
         if self.warnings:
             summary.extend(["", "## Warnings", ""])
@@ -453,6 +579,11 @@ class BundleBuilder:
             **metadata, "partial": bool(self.warnings),
             "warnings": self.warnings, "commands": self.commands,
             "entries": list(self.entries),
+            "text_normalization": {
+                "applies_to": "sanitized_text_members",
+                "line_endings": "LF",
+                "source_line_endings_preserved": False,
+            },
             "limits": {
                 "member_bytes": MAX_MEMBER_BYTES,
                 "total_bytes": MAX_TOTAL_BYTES,
@@ -1401,10 +1532,49 @@ def collect_public_key_fingerprints(builder: BundleBuilder) -> None:
         )
 
 
+def service_runtime_backend() -> ServiceRuntimeBackend:
+    try:
+        return runtime_backend_from_environment(os.environ)
+    except RuntimeContractError as exc:
+        raise DiagnosticError(f"invalid service runtime backend: {exc}") from exc
+
+
+def collect_supervisor_runtime_evidence(
+    builder: BundleBuilder, runtime_backend: ServiceRuntimeBackend,
+) -> None:
+    """Capture bounded Supervisor state/logs through the shared backend."""
+    for service in (
+        "apache2", "isc-dhcp-server", "ztp-monitor",
+        "switch-collection", "manual-ztp",
+    ):
+        try:
+            active = runtime_backend.is_active(service)
+            enabled = runtime_backend.is_enabled(service)
+            builder.write_json(
+                f"server/runtime/{safe_component(service)}.status.json",
+                {
+                    "backend": runtime_backend.name,
+                    "service": service,
+                    "active": active,
+                    "enabled": enabled,
+                },
+                source=f"runtime:{service}:status",
+            )
+            log_text = runtime_backend.read_log(service)
+            builder.write(
+                f"server/runtime/{safe_component(service)}.log.txt",
+                sanitize_text(log_text).encode("utf-8"),
+                source=f"runtime:{service}:log", redacted=True,
+            )
+        except RuntimeContractError as exc:
+            builder.warn(f"runtime evidence {service}: {exc}")
+
+
 def collect_server_commands(
     builder: BundleBuilder, since_minutes: int, project: Path,
 ) -> None:
     since_epoch = int(time.time()) - since_minutes * 60
+    runtime_backend = service_runtime_backend()
     commands = [
         ("date", ["date", "-Is"]),
         ("date_epoch", ["date", "+%s"]),
@@ -1429,30 +1599,46 @@ def collect_server_commands(
         ("apache_vhosts", ["apache2ctl", "-S"]),
         ("apache_configtest", ["apache2ctl", "configtest"]),
         ("dhcp_configtest", ["dhcpd", "-t", "-cf", "/etc/dhcp/dhcpd.conf"]),
-        ("dhcp_runtime_inventory", [
-            "python3", str(ROOT / "ztp/dhcp_runtime_inventory.py"),
-            "--journal", "--journal-since", f"@{since_epoch}",
-            "--leases", "/var/lib/dhcp/dhcpd.leases",
-            "--inventory", str(project / "02-devices_config.csv"),
-            "--include-known", "--stdout",
-        ]),
-        ("apache_active", ["systemctl", "is-active", "apache2"]),
-        ("apache_enabled", ["systemctl", "is-enabled", "apache2"]),
-        ("dhcp_active", ["systemctl", "is-active", "isc-dhcp-server"]),
-        ("dhcp_enabled", ["systemctl", "is-enabled", "isc-dhcp-server"]),
-        ("apache_status", ["systemctl", "status", "apache2", "--no-pager", "-l"]),
-        ("dhcp_status", ["systemctl", "status", "isc-dhcp-server", "--no-pager", "-l"]),
-        ("dhcp_journal", [
-            "journalctl", "-u", "isc-dhcp-server", "--since", f"@{since_epoch}",
-            "--no-pager", "-o", "short-iso-precise", "-n", "10000",
-        ]),
-        ("apache_journal", [
-            "journalctl", "-u", "apache2", "--since", f"@{since_epoch}",
-            "--no-pager", "-o", "short-iso-precise", "-n", "5000",
-        ]),
     ]
+    inventory_command = [
+        "python3", str(ROOT / "ztp/dhcp_runtime_inventory.py"),
+    ]
+    if runtime_backend.name == "systemd":
+        inventory_command.extend([
+            "--journal", "--journal-since", f"@{since_epoch}",
+        ])
+    inventory_command.extend([
+        "--leases", "/var/lib/dhcp/dhcpd.leases",
+        "--inventory", str(project / "02-devices_config.csv"),
+        "--include-known", "--stdout",
+    ])
+    commands.append(("dhcp_runtime_inventory", inventory_command))
+    if runtime_backend.name == "systemd":
+        commands.extend([
+            ("apache_active", ["systemctl", "is-active", "apache2"]),
+            ("apache_enabled", ["systemctl", "is-enabled", "apache2"]),
+            ("dhcp_active", ["systemctl", "is-active", "isc-dhcp-server"]),
+            ("dhcp_enabled", ["systemctl", "is-enabled", "isc-dhcp-server"]),
+            ("apache_status", [
+                "systemctl", "status", "apache2", "--no-pager", "-l",
+            ]),
+            ("dhcp_status", [
+                "systemctl", "status", "isc-dhcp-server", "--no-pager", "-l",
+            ]),
+            ("dhcp_journal", [
+                "journalctl", "-u", "isc-dhcp-server", "--since",
+                f"@{since_epoch}", "--no-pager", "-o", "short-iso-precise",
+                "-n", "10000",
+            ]),
+            ("apache_journal", [
+                "journalctl", "-u", "apache2", "--since", f"@{since_epoch}",
+                "--no-pager", "-o", "short-iso-precise", "-n", "5000",
+            ]),
+        ])
     for command_id, argv in commands:
         builder.capture_command(command_id, argv)
+    if runtime_backend.name == "supervisor":
+        collect_supervisor_runtime_evidence(builder, runtime_backend)
 
 
 def create_archive(staging: Path, destination: Path, top_level: str) -> None:
@@ -1553,8 +1739,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     return args
 
 
-def main(argv: Optional[list[str]] = None) -> int:
-    os.umask(0o077)
+def _main(argv: Optional[list[str]] = None) -> int:
     try:
         args = parse_args(argv)
         project = resolve_project(args.project)
@@ -1626,6 +1811,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     except (DiagnosticError, OSError, ValueError, tarfile.TarError) as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 1
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    previous_umask = os.umask(0o077)
+    try:
+        return _main(argv)
+    finally:
+        os.umask(previous_umask)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,87 @@
+**
+
+# Container lifecycle and resident production trees.  activate.py derives an
+# exact type/target/hash receipt from this curated context at image build time.
+!infra/
+!infra/**
+infra/logs/**
+infra/docker/infra-runtime.conf
+infra/docker/.env
+infra/docker/.env.*
+infra/docker/container.env
+infra/docker/desired-state.json
+infra/docker/runtime-state.json
+
+!monitor/
+!monitor/**
+monitor/status/**
+!ethernet/
+!ethernet/**
+!infiniband/
+!infiniband/**
+infiniband/bringup/**
+!nvlink/
+!nvlink/**
+!ztp/
+!ztp/**
+ztp/image/**
+ztp/backup/**
+ztp/config/publickey/**
+ztp/config/cumulus/template/.claude/**
+ztp/status
+ztp/.setup_manifest
+ztp/ztp-bootstrap_oob.sh
+ztp/ztp-bootstrap_oobofoob.sh
+ztp/ztp.json
+ztp/config/isc-dhcp-server/01-global.yaml
+ztp/config/isc-dhcp-server/02-devices_config.csv
+ztp/config/isc-dhcp-server/02-subnet_config.csv
+ztp/config/isc-dhcp-server/dhcp-release-manifest.json
+ztp/config/isc-dhcp-server/dhcpd.conf
+ztp/config/isc-dhcp-server/p2p-air.json
+ztp/config/isc-dhcp-server/dhcpd_*.hosts
+ztp/config/cumulus/template/01-global.yaml
+ztp/config/cumulus/template/02-devices_config.csv
+ztp/config/cumulus/template/91-devices.yaml
+ztp/config/cumulus/template/P2P/p2p.xlsx
+ztp/config/nvos/template/01-global.yaml
+ztp/config/nvos/template/02-devices_config.csv
+ztp/config/nvos/template/P2P/p2p.xlsx
+ztp/optimize/2026-12-vb-gb300-sample/**
+ztp/optimize/*-sample/**
+
+!tools/
+!tools/**
+tools/ib-tool-Jie/**
+tools/ibdiagnet-analyze-tool/**
+
+# Runtime publications, credentials, and host-local state must never enter a
+# build layer even when they happen to exist in the bind-mounted repository.
+**/99-output*
+**/99-output*/**
+**/.ssh/**
+**/.[Ss][Ss][Hh]/**
+**/*.key
+**/*.pem
+**/*.lock
+!requirements-container-top-level.lock
+**/.env
+**/.env.*
+
+# Projects and output are mutable data mounted from /var/www/html.  Only the
+# lifecycle entrypoints and neutral bootstrap template belong in the image.
+!DAY0-Prepare/
+!DAY0-Prepare/*.py
+!DAY0-Prepare/template/
+!DAY0-Prepare/template/**
+DAY0-Prepare/template/**/README*
+DAY0-Prepare/template/**/*.md
+
+# control-auth candidate/recovery state uses the first prefix; the second
+# covers the canonical htpasswd name and every operator-created copy.
+**/.control-users.*
+**/*.htpasswd*
+
+**/__pycache__/**
+**/*.pyc
+**/.DS_Store

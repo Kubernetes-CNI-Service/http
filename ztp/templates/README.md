@@ -83,8 +83,20 @@ root-owned `/var/lib/nvidia-ztp/last-success.yaml`，并把对应
 SHA-256。`status` 固定为 `success`；专属配置（包括 patch baseline）使用
 `source_kind=dedicated`，直接使用默认配置为 `default`，专属 YAML apply 失败并成功回退默认配置
 则为 `fallback_default`，同时以 root-owned `0600` `last-failed-dedicated.yaml` 保存失败字节并记录
-其 SHA-256。`fallback` 作为 V1 兼容来源值保留。receipt 写入失败只产生 WARN，不会把
-已经成功的设备配置改判失败；读取方会用 hash 对不完整的两文件切换 fail closed。
+其 SHA-256。设备专属 YAML 只有在同 MAC 的 `.mode` sidecar 非空、可读且原始字节严格为
+ASCII `replace\n` 或 `patch\n` 时才允许进入 NVUE；消费者会在 `od` 前把读取限制为 17 字节，
+只做完整十六进制字符串相等比较，不做去空白、换行转换或文本解码。实现保留单一 16 位
+`replace\n` 期望值，仅将会触发公开仓库 MAC 扫描器的 12 位 `patch\n` 期望值拆成两个非空短片段；
+组合后会在比较前强制校验期望值长度分别为 16 和 12，片段未设置、为空或长度异常都会立即终止。
+NUL、其他控制/非 ASCII 字节、
+CRLF、缺少结尾 LF、任何额外空白/行或超长内容均非法，日志也不会包含 sidecar 原始字节。
+sidecar 缺失、空、不可读或非法都会把该 YAML
+标记为不可用并安全回退到默认 patch，绝不再隐式使用 `replace`。这类 receipt 还会用可选
+`failed_source_name=<去冒号MAC>.mode` 精确指出失败的是 mode sidecar；已存在的旧 receipt
+没有该可选字段仍可读取。该失败目前只在设备持久日志和 receipt 中可见，监控侧主动展示及
+下载重试仍属于后续 blocked-open 工作。`fallback` 作为 V1 兼容来源值保留。receipt 写入失败
+只产生 WARN，不会把已经成功的设备配置改判失败；读取方会用 hash 对不完整的两文件切换
+fail closed。
 
 Cumulus 与 NVOS 都会安装固定零参数
 `/usr/local/sbin/http-manual-ztp-applied-config` 以及独立 sudoers。该 helper 不接受路径或参数，
@@ -109,7 +121,9 @@ applied_at=...
 任意文件读取、shell 或通用 sudo 权限。
 
 渲染产物属于管理服务器运行态，`sync-code.py` 默认保护，不会用本地默认副本覆盖；只有明确
-使用 `--include-ztp-runtime` 才同步，随后必须在交换机开始 ZTP 前重新运行 load。
+使用 `--include-ztp-runtime` 才同步，随后必须在交换机开始 ZTP 前按 runtime 重新发布：Native
+重新运行 `11-load.py`；Docker source write 后重新运行 `deploy.sh deploy`（或重新验证身份链后
+运行 `deploy-preloaded`），不得直接运行 `deploy.sh load`。
 
 维护模板后至少执行：
 

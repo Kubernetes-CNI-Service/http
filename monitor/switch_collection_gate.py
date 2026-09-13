@@ -18,10 +18,13 @@ from typing import Callable, Optional
 
 HTTP_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_STATUS_DIR = HTTP_ROOT / "monitor/status"
-COOLDOWN_SECONDS = 30 * 60
+COOLDOWN_SECONDS = 10 * 60
+YAML_BACKUP_COLLECTION_KEY = "yaml-backup"
 STATE_SCHEMA = 2
 STATE_NAME = ".switch-collection-cooldown.json"
 LOCK_NAME = ".switch-collection-cooldown.lock"
+YAML_BACKUP_STATE_NAME = ".yaml-backup-cooldown.json"
+YAML_BACKUP_LOCK_NAME = ".yaml-backup-cooldown.lock"
 COLLECTION_KEYS_BY_SCOPE = {
     "air": ("air-ethernet",),
     "prod": ("prod-ethernet", "prod-infiniband", "prod-nvlink"),
@@ -29,7 +32,9 @@ COLLECTION_KEYS_BY_SCOPE = {
         "air-ethernet", "prod-ethernet", "prod-infiniband", "prod-nvlink",
     ),
 }
-VALID_COLLECTION_KEYS = frozenset(COLLECTION_KEYS_BY_SCOPE["all"])
+VALID_COLLECTION_KEYS = frozenset(
+    (*COLLECTION_KEYS_BY_SCOPE["all"], YAML_BACKUP_COLLECTION_KEY)
+)
 
 
 class CollectionGateError(RuntimeError):
@@ -147,7 +152,7 @@ def _read_state(path: Path) -> Optional[dict]:
 
 def _write_state(path: Path, payload: dict) -> None:
     descriptor, temporary_name = tempfile.mkstemp(
-        prefix=".switch-collection-cooldown.", dir=path.parent,
+        prefix="." + path.name.removeprefix(".") + ".", dir=path.parent,
     )
     temporary = Path(temporary_name)
     try:
@@ -168,7 +173,7 @@ def _write_state(path: Path, payload: dict) -> None:
 
 
 class CollectionGate:
-    """Serialize collectors globally while cooling down collection domains independently."""
+    """Serialize one collection lane while cooling down its domains independently."""
 
     def __init__(
         self,
@@ -186,6 +191,7 @@ class CollectionGate:
         sleeper: Callable[[float], None] = time.sleep,
         poll_seconds: float = 1.0,
         monotonic: Callable[[], float] = time.monotonic,
+        lane: Optional[str] = None,
     ) -> None:
         if not project:
             raise CollectionGateError("collection project identity is empty")
@@ -194,17 +200,29 @@ class CollectionGate:
             raise CollectionGateError("collection cooldown cannot be negative")
         requested_keys = scope_keys if collection_keys is None else collection_keys
         selected = tuple(dict.fromkeys(requested_keys))
-        if (
-            not selected
-            or any(key not in VALID_COLLECTION_KEYS for key in selected)
-            or any(key not in scope_keys for key in selected)
-        ):
+        regular_selection = bool(selected) and all(key in scope_keys for key in selected)
+        yaml_backup_selection = selected == (YAML_BACKUP_COLLECTION_KEY,)
+        if not (regular_selection or yaml_backup_selection):
             raise CollectionGateError(
                 f"invalid collection keys for scope {scope}: {selected}"
             )
         self.project = project
         self.scope = scope
         self.collection_keys = selected
+        inferred_lane = "backup" if yaml_backup_selection else "collection"
+        self.lane = inferred_lane if lane is None else lane
+        if self.lane not in {"collection", "backup"}:
+            raise CollectionGateError(f"invalid collection gate lane: {self.lane}")
+        if self.lane != inferred_lane:
+            raise CollectionGateError(
+                f"collection keys {selected} do not belong to {self.lane} lane"
+            )
+        self.state_name = (
+            YAML_BACKUP_STATE_NAME if self.lane == "backup" else STATE_NAME
+        )
+        self.lock_name = (
+            YAML_BACKUP_LOCK_NAME if self.lane == "backup" else LOCK_NAME
+        )
         self.enforce_cooldown = bool(enforce_cooldown)
         self.status_dir = Path(status_dir)
         self.cooldown_seconds = int(cooldown_seconds)
@@ -238,7 +256,7 @@ class CollectionGate:
             self.wait_callback(self.decision)
 
     def __enter__(self) -> "CollectionGate":
-        lock_path = self.status_dir / LOCK_NAME
+        lock_path = self.status_dir / self.lock_name
         flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         try:
             self.status_dir.mkdir(parents=True, exist_ok=True)
@@ -266,7 +284,23 @@ class CollectionGate:
                     self._check_cancelled()
                     self.sleeper(min(self.poll_seconds, wait_remaining))
 
-            state = _read_state(self.status_dir / STATE_NAME)
+            state = _read_state(self.status_dir / self.state_name)
+            if state is None and self.lane == "backup":
+                # Schema 2 originally stored YAML backup success beside Switch
+                # collection successes.  Read that record once as a migration
+                # fallback so an upgrade cannot erase an active backup cooldown.
+                legacy = _read_state(self.status_dir / STATE_NAME)
+                if (
+                    legacy is not None
+                    and YAML_BACKUP_COLLECTION_KEY in legacy["successes"]
+                ):
+                    state = {
+                        **legacy,
+                        "successes": {
+                            YAML_BACKUP_COLLECTION_KEY:
+                                legacy["successes"][YAML_BACKUP_COLLECTION_KEY],
+                        },
+                    }
             if (
                 self.enforce_cooldown
                 and state is not None
@@ -333,7 +367,21 @@ class CollectionGate:
         try:
             epoch = float(self.clock())
             successful_at = _iso_at(epoch)
-            state = _read_state(self.status_dir / STATE_NAME)
+            state_path = self.status_dir / self.state_name
+            state = _read_state(state_path)
+            if state is None and self.lane == "backup":
+                legacy = _read_state(self.status_dir / STATE_NAME)
+                if (
+                    legacy is not None
+                    and YAML_BACKUP_COLLECTION_KEY in legacy["successes"]
+                ):
+                    state = {
+                        **legacy,
+                        "successes": {
+                            YAML_BACKUP_COLLECTION_KEY:
+                                legacy["successes"][YAML_BACKUP_COLLECTION_KEY],
+                        },
+                    }
             successes = {}
             if state is not None and state["project"] == self.project:
                 successes.update(state["successes"])
@@ -343,7 +391,7 @@ class CollectionGate:
                     "successful_at": successful_at,
                 }
             _write_state(
-                self.status_dir / STATE_NAME,
+                state_path,
                 {
                     "schema_version": STATE_SCHEMA,
                     "project": self.project,

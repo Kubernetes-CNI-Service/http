@@ -3,12 +3,14 @@
 
 from __future__ import annotations
 
+import base64
 import copy
 from contextlib import redirect_stdout
 import csv
 import hashlib
 import importlib.util
 import io
+import json
 from pathlib import Path
 import shutil
 import sys
@@ -68,6 +70,50 @@ EVPN_HEADER = [
     "evpn_vrf", "evpn_l3vni", "evpn_l3vlan", "dhcp_relay",
     "evpn_l2vni", "evpn_l2vlan", "svi_ip", "netmask", "vlan_ports",
 ]
+
+WORKFLOW_BOND_MODES = frozenset({
+    "localbond", "mlag", "evpn_multihoming",
+})
+WORKFLOW_BOND_MODE_COMBINATIONS = tuple(
+    frozenset(
+        mode for index, mode in enumerate(sorted(WORKFLOW_BOND_MODES))
+        if mask & (1 << index)
+    )
+    for mask in range(1 << len(WORKFLOW_BOND_MODES))
+)
+WORKFLOW_ALLOWED_MODE_COMBINATIONS = {
+    "border": frozenset({
+        frozenset(), frozenset({"localbond"}),
+        frozenset({"evpn_multihoming"}),
+        frozenset({"localbond", "evpn_multihoming"}),
+        frozenset({"mlag"}), frozenset({"localbond", "mlag"}),
+    }),
+    **{
+        template: frozenset({
+            frozenset(), frozenset({"localbond"}),
+            frozenset({"evpn_multihoming"}),
+            frozenset({"localbond", "evpn_multihoming"}),
+        })
+        for template in (
+            "oob-core", "oob-leaf", "tan-cp-leaf", "tan-hps-leaf",
+            "tan-leaf", "tan-su-leaf",
+        )
+    },
+    **{
+        template: frozenset({
+            frozenset(), frozenset({"localbond"}),
+        })
+        for template in (
+            "oob-su-leaf", "oob-rack-tor", "oobofoob-leaf",
+            "tan-cp-1gleaf",
+        )
+    },
+    "tan-spine": frozenset({frozenset()}),
+    "oob-su-spine": frozenset({frozenset()}),
+    "oobofoob-spine": frozenset({
+        frozenset({"mlag"}), frozenset({"localbond", "mlag"}),
+    }),
+}
 
 
 def set_block(document):
@@ -332,6 +378,195 @@ class V2MlagSetupPreflightTests(unittest.TestCase):
             errors,
         )
 
+    def test_workflow_ignores_stale_bond_metadata_when_ports_are_empty(self):
+        header = BASE_HEADER + FIXED_HEADER + EVPN_HEADER
+        row = v2_mlag_preflight_row(
+            "tan-hps-leaf05", 50, "198.51.100.50",
+            bond_ports="NA", bond_type="evpn",
+            bond_mac="46:38:39:20:00:03", peerlink="NA",
+            vrf="NA", l3vni="NA", l3vlan="NA", l2vni="NA",
+            l2vlan="NA", svi_ip="NA", netmask="NA",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "01-global.yaml").write_text(
+                "schema_version: 2\n", encoding="utf-8",
+            )
+            csv_path = root / "02-devices_config.csv"
+            with csv_path.open("w", newline="", encoding="utf-8") as stream:
+                csv.writer(stream).writerows([header, row])
+
+            errors, warnings = SETUP._validate_eth_csv(str(csv_path))
+            device_types = LOAD.load_device_types(csv_path, 2)
+            with csv_path.open(newline="", encoding="utf-8") as stream:
+                parsed = next(csv.DictReader(stream))
+            bond_groups = GENERATOR._csv_parse_bond_groups(
+                parsed["bond_ports"], parsed["bond_type"],
+                parsed["bond_mac"], schema_version=2,
+            )
+
+        self.assertEqual([], errors)
+        self.assertEqual(frozenset({"eth"}), device_types)
+        self.assertEqual([], bond_groups)
+        self.assertTrue(any(
+            "[tan-hps-leaf05] bond_type 已填写，但 bond_ports 为空"
+            in warning for warning in warnings
+        ))
+        self.assertTrue(any(
+            "[tan-hps-leaf05] bond_mac 已填写，但 bond_ports 为空"
+            in warning for warning in warnings
+        ))
+
+    def test_setup_to_generator_workflow_keeps_stale_bond_metadata_nonblocking(self):
+        header = BASE_HEADER + FIXED_HEADER + EVPN_HEADER
+        row = v2_mlag_preflight_row(
+            "tan-hps-leaf05", 50, "198.51.100.50",
+            bond_ports="NA", bond_type="evpn",
+            bond_mac="46:38:39:20:00:03", peerlink="NA",
+            vrf="NA", l3vni="NA", l3vlan="NA", l2vni="NA",
+            l2vlan="NA", svi_ip="NA", netmask="NA",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            global_file = root / "01-global.yaml"
+            devices_file = root / "02-devices_config.csv"
+            intermediate = root / "91-devices.yaml"
+            generated = root / "generated"
+            global_document = v2_mlag_preflight_global()
+            eth = next(
+                item["eth"] for item in global_document["switches"]
+                if "eth" in item
+            )
+            eth.update({
+                "version": "5.16.4",
+                "bridge": {
+                    "domain": {"br_default": {"stp": {"priority": 4096}}},
+                },
+                "system": {
+                    "aaa": {"user": {"cumulus": {
+                        "full-name": "cumulus,,,,",
+                        "hashed-password": "'*'",
+                    }}},
+                    "date-time": {"timezone": "Etc/UTC"},
+                    "dns": {"server": ["192.0.2.53"], "vrf": "mgmt"},
+                    "ntp": {"server": ["192.0.2.123"], "vrf": "mgmt"},
+                },
+                "vrf": {"default": {"router": {"bfd": {"profile": {
+                    "bgp-underlay-bfd": {
+                        "detect-multiplier": 3,
+                        "min-rx-interval": 300,
+                        "min-tx-interval": 300,
+                    },
+                }}}}},
+            })
+            global_file.write_text(
+                yaml.safe_dump(global_document, sort_keys=False),
+                encoding="utf-8",
+            )
+            with devices_file.open("w", newline="", encoding="utf-8") as stream:
+                csv.writer(stream).writerows([header, row])
+            errors, warnings = SETUP._validate_eth_csv(str(devices_file))
+            output = io.StringIO()
+            with mock.patch.multiple(
+                GENERATOR,
+                _CSV_FILE=str(devices_file),
+                _GLOBAL_FILE=str(global_file),
+                DEVICES_FILE=str(intermediate),
+                TEMPLATES_DIR=str(TEMPLATES),
+            ), mock.patch.object(
+                GENERATOR, "_refresh_cumulus_defaults_from_global",
+            ), redirect_stdout(output):
+                GENERATOR._generate_devices_yaml()
+                with mock.patch.object(
+                    GENERATOR, "OUTPUT_DIR", str(generated),
+                ):
+                    GENERATOR.generate_all()
+            intermediate_text = intermediate.read_text(encoding="utf-8")
+            model = yaml.safe_load(intermediate_text)
+            rendered = yaml.safe_load(
+                (generated / "tan-hps-leaf05.yaml").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual([], errors)
+        self.assertEqual(2, len([
+            warning for warning in warnings if "bond_ports 为空" in warning
+        ]))
+        self.assertEqual(
+            [], model["devices"]["tan-hps-leaf05"].get("bond_groups", []),
+        )
+        self.assertNotIn("_csv_source", intermediate_text)
+        self.assertIn("bond_type 已填写，但 bond_ports 为空", output.getvalue())
+        self.assertIn("bond_mac 已填写，但 bond_ports 为空", output.getvalue())
+        self.assertFalse(GENERATOR._document_evpn_mh_enabled(rendered))
+        self.assertEqual(
+            [], GENERATOR._evpn_mh_uplink_errors(
+                rendered, bgp_neighbors=("swp53",), expected_mh=False,
+            ),
+        )
+
+    def test_generator_reports_primary_svi_outlier_instead_of_missing_vrr_mac(self):
+        header = BASE_HEADER + FIXED_HEADER + EVPN_HEADER
+        rows = [
+            v2_mlag_preflight_row(
+                hostname, host_id, f"198.51.100.{host_id}",
+                bond_ports="NA", bond_type="NA", bond_mac="NA",
+                peerlink="NA", vrf="oob", l3vni="4001",
+                l3vlan="4001", l2vni="400114", l2vlan="114",
+                svi_ip=svi_ip, netmask="24",
+            )
+            for hostname, host_id, svi_ip in (
+                ("oob-core01", 10, "192.0.2.254"),
+                ("oob-leaf12", 12, "192.0.2.247"),
+                ("oob-leaf13", 13, "192.0.2.254"),
+            )
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            global_file = root / "01-global.yaml"
+            devices_file = root / "02-devices_config.csv"
+            intermediate = root / "91-devices.yaml"
+            global_document = v2_mlag_preflight_global()
+            eth = next(
+                item["eth"] for item in global_document["switches"]
+                if "eth" in item
+            )
+            eth["version"] = "5.18.1"
+            global_file.write_text(
+                yaml.safe_dump(global_document, sort_keys=False),
+                encoding="utf-8",
+            )
+            with devices_file.open("w", newline="", encoding="utf-8") as stream:
+                csv.writer(stream).writerows([header, *rows])
+
+            captured = io.StringIO()
+            with mock.patch.multiple(
+                GENERATOR,
+                _CSV_FILE=str(devices_file),
+                _GLOBAL_FILE=str(global_file),
+                DEVICES_FILE=str(intermediate),
+            ), mock.patch.object(
+                GENERATOR, "_refresh_cumulus_defaults_from_global",
+            ), redirect_stdout(captured), self.assertRaises(SystemExit) as raised:
+                GENERATOR._generate_devices_yaml()
+            intermediate_created = intermediate.exists()
+
+        output = captured.getvalue()
+        self.assertEqual(1, raised.exception.code)
+        self.assertIn(
+            "[ERROR] 02-devices_config.csv 的 SVI/VRR 地址策略冲突",
+            output,
+        )
+        self.assertIn(
+            "行3 [oob-leaf12] EVPN 组 1 svi_ip=192.0.2.247/24",
+            output,
+        )
+        self.assertIn(
+            "共享网关模式要求所有设备使用 192.0.2.254/24",
+            output,
+        )
+        self.assertNotIn("缺少 vrr_mac", output)
+        self.assertFalse(intermediate_created)
+
     def test_workflow_stops_before_link_transaction_on_cross_file_error(self):
         temporary, root, _errors, _warnings = run_v2_mlag_setup_preflight(
             self.pair()[:1],
@@ -411,6 +646,172 @@ class V2MlagSetupPreflightTests(unittest.TestCase):
             temporary.cleanup()
 
 
+class ManagementDockerVersionContractTests(unittest.TestCase):
+    def test_cumulus_517_and_518_remove_only_docker_state(self):
+        for version in ("5.17.0", "5.17.3", "5.18.0", "5.18.1"):
+            with self.subTest(version=version):
+                document = [{"set": {
+                    "system": {
+                        "docker": {"state": "enabled", "vrf": "mgmt"},
+                        "ssh-server": {"state": "enabled"},
+                    },
+                    "service": {"lldp": {"state": "enabled"}},
+                }}]
+                changed = GENERATOR._normalize_management_docker_config(
+                    document, cumulus_version=version,
+                )
+                self.assertTrue(changed)
+                block = set_block(document)
+                self.assertEqual(
+                    {"vrf": "mgmt"}, block["system"]["docker"],
+                )
+                self.assertEqual(
+                    {"state": "enabled"}, block["system"]["ssh-server"],
+                )
+                self.assertEqual(
+                    {"state": "enabled"}, block["service"]["lldp"],
+                )
+
+    def test_versions_outside_517_and_518_keep_existing_docker_state(self):
+        for version in ("5.16.4", "5.19.0"):
+            with self.subTest(version=version):
+                document = [{"set": {"system": {
+                    "docker": {"state": "enabled", "vrf": "mgmt"},
+                }}}]
+                changed = GENERATOR._normalize_management_docker_config(
+                    document, cumulus_version=version,
+                )
+                self.assertFalse(changed)
+                self.assertEqual(
+                    {"state": "enabled", "vrf": "mgmt"},
+                    set_block(document)["system"]["docker"],
+                )
+
+
+class DeepYamlFailClosedWorkflowTests(unittest.TestCase):
+    """Deep YAML must stop real generation/publication without residue."""
+
+    @staticmethod
+    def _deep_flow_sequence() -> str:
+        return "[" * 500 + "0" + "]" * 500
+
+    def test_source_receipt_nesting_stops_devices_generation_before_publish(self):
+        with mock.patch.object(yaml, "__with_libyaml__", False):
+            fallback = load_module(
+                "v2_deep_yaml_fallback_generator",
+                ROOT / "ztp/config/cumulus/template/90-c2-generate_configs.py",
+            )
+        header = (
+            BASE_HEADER
+            + [
+                "vrf_default", "vlan_id", "svi_ip", "netmask",
+                "vrr_ip", "vrr_mac", "vlan_ports",
+            ]
+            + FIXED_HEADER
+            + [
+                "evpn_vrf", "evpn_l3vni", "evpn_l3vlan", "dhcp_relay",
+                "evpn_l2vni", "evpn_l2vlan", "svi_ip", "netmask",
+                "vrr_ip", "vrr_mac", "vlan_ports",
+            ]
+            + [
+                "source_yaml_b64", "source_yaml_sha256",
+                "source_fields_sha256",
+            ]
+        )
+        row = [
+            "DeepLeaf01", "eth", "border", "192.0.2.70", "24",
+            "192.0.2.1", "02:00:00:00:00:70",
+            "NA", "NA", "NA", "NA", "198.51.100.70",
+        ]
+        row += [""] * (len(header) - 3 - len(row))
+        source = (
+            "- set:\n    interface:\n      deep: "
+            + self._deep_flow_sequence()
+            + "\n"
+        ).encode("utf-8")
+        source_fields_sha256 = hashlib.sha256(json.dumps(
+            row, ensure_ascii=False, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
+        row += [
+            base64.b64encode(source).decode("ascii"),
+            hashlib.sha256(source).hexdigest(),
+            source_fields_sha256,
+        ]
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            global_file = root / "01-global.yaml"
+            devices_file = root / "02-devices_config.csv"
+            generated = root / "91-devices.yaml"
+            global_file.write_text(
+                yaml.safe_dump(
+                    {
+                        **v2_mlag_preflight_global(),
+                        "schema_version": 1,
+                    },
+                    sort_keys=False,
+                ),
+                encoding="utf-8",
+            )
+            with devices_file.open("w", newline="", encoding="utf-8") as stream:
+                csv.writer(stream).writerows([header, row])
+            captured = io.StringIO()
+            with mock.patch.multiple(
+                fallback,
+                _CSV_FILE=str(devices_file),
+                _GLOBAL_FILE=str(global_file),
+                DEVICES_FILE=str(generated),
+                TEMPLATES_DIR=str(TEMPLATES),
+            ), mock.patch.object(
+                fallback, "_refresh_cumulus_defaults_from_global",
+            ), redirect_stdout(captured), self.assertRaises(SystemExit) as stopped:
+                fallback._generate_devices_yaml()
+            self.assertEqual(1, stopped.exception.code)
+            self.assertIn("YAML 嵌套层级超过支持上限", captured.getvalue())
+            self.assertFalse(generated.exists())
+            self.assertEqual([], list(root.glob("91-devices.yaml.tmp.*")))
+
+    def test_publisher_validate_returns_controlled_deep_yaml_error(self):
+        rendered = (
+            "- set:\n    interface:\n      deep: "
+            + self._deep_flow_sequence()
+            + "\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            authority = Path(directory) / "DeepLeaf01.yaml"
+            authority.write_text(rendered, encoding="utf-8")
+            ok, document, diagnostic = PUBLISHER.validate_yaml(authority)
+        self.assertFalse(ok)
+        self.assertIsNone(document)
+        self.assertIn("YAML 嵌套层级超过支持上限", diagnostic)
+
+    def test_publisher_process_deep_yaml_creates_no_link_or_publish_marker(self):
+        rendered = (
+            "- set:\n    interface:\n      deep: "
+            + self._deep_flow_sequence()
+            + "\n"
+        )
+        devices = {"deepleaf01": {
+            "hostname": "DeepLeaf01",
+            "dev_type": "eth",
+            "eth0_mac": "02:00:00:00:00:70",
+            "eth1_mac": "",
+            "eth0_ip_cidr": "192.0.2.70/24",
+            "eth0_gw": "192.0.2.1",
+        }}
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            (output / "DeepLeaf01.yaml").write_text(rendered, encoding="utf-8")
+            ok, counters, hosts = PUBLISHER._process_yaml_files(
+                directory, devices, {"eth"},
+            )
+            self.assertFalse(ok)
+            self.assertEqual(1, counters["yaml_error"])
+            self.assertEqual({"deepleaf01"}, hosts)
+            self.assertFalse((output / "02:00:00:00:00:70.yaml").exists())
+            self.assertFalse((output / ".published-complete").exists())
+
+
 class V2GenerationWorkflowTests(unittest.TestCase):
     """Run the new declarative schema through all local production consumers."""
 
@@ -426,6 +827,356 @@ class V2GenerationWorkflowTests(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.temporary.cleanup()
+
+    def test_filtered_generation_guidance_matches_publisher_completeness_gate(self):
+        guidance = GENERATOR.eth_followup_text(
+            "20260906_120000", has_patch=False, target="EXAMPLE-Leaf01",
+        )
+        blocked = PUBLISHER.missing_expected_hosts_text(
+            ["EXAMPLE-Leaf02"], limit=10,
+        )
+        remedy = "不带 HOSTNAME 重新运行 90-c2-generate_configs.py"
+        self.assertIn(remedy, guidance)
+        self.assertIn(remedy, blocked)
+        self.assertNotIn("d-hostname2mac.py", guidance)
+
+    def test_load_generator_argv_is_accepted_by_the_same_strict_cli_parser(self):
+        commands = []
+
+        def record(command, **_kwargs):
+            commands.append(command)
+
+        with mock.patch.object(LOAD, "run", side_effect=record), \
+                mock.patch.object(
+                    LOAD, "_device_types_after_dhcp",
+                    return_value=frozenset({"eth"}),
+                ):
+            LOAD.generate_configs(
+                frozenset({"eth"}), install_dhcp=False, dry_run=True,
+                schema_version=2, eth_version="5.18.1",
+            )
+
+        generator_argv = next(
+            command[2:]
+            for command in commands
+            if "90-c2-generate_configs.py" in command
+        )
+        branch, remaining = GENERATOR._parse_branch(generator_argv)
+        parsed = GENERATOR.parse_generation_args(remaining, branch=branch)
+        self.assertEqual("eth", branch)
+        self.assertTrue(parsed.auto_yes)
+        self.assertIsNone(parsed.hostname)
+
+    def test_csv_generator_rejects_bonds_unsupported_by_the_device_template(self):
+        header = BASE_HEADER + FIXED_HEADER + EVPN_HEADER
+        variants = (
+            ("Rack01", "oob-rack-tor", "evpn", "evpn_multihoming"),
+            ("OobLeaf01", "oobofoob-leaf", "evpn", "evpn_multihoming"),
+            ("Cp1gLeaf01", "tan-cp-1gleaf", "evpn", "evpn_multihoming"),
+            ("OobSuLeaf01", "oob-su-leaf", "evpn", "evpn_multihoming"),
+            ("TanSpine01", "tan-spine", "local", "localbond"),
+            ("OobSuSpine01", "oob-su-spine", "local", "localbond"),
+            ("OobOfOobSpineLocal", "oobofoob-spine", "local", "localbond"),
+            ("OobOfOobSpineEvpn", "oobofoob-spine", "evpn", "evpn_multihoming"),
+        )
+        for host_id, (hostname, template, input_mode, normalized) in enumerate(
+                variants, start=50):
+            with self.subTest(template=template), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                global_file = root / "01-global.yaml"
+                devices_file = root / "02-devices_config.csv"
+                intermediate = root / "91-devices.yaml"
+                global_file.write_bytes(self.global_file.read_bytes())
+                row = v2_mlag_preflight_row(
+                    hostname,
+                    host_id,
+                    f"198.51.100.{host_id}",
+                    template=template,
+                    bond_type=input_mode,
+                    bond_mac=(
+                        f"02:00:00:ff:01:{host_id:02x}"
+                        if input_mode == "evpn" else "NA"
+                    ),
+                    peerlink="NA",
+                    vrf="PLAIN",
+                    l3vni="NA",
+                    l3vlan="NA",
+                    l2vni="NA",
+                    l2vlan="200",
+                )
+                with devices_file.open("w", newline="", encoding="utf-8") as stream:
+                    csv.writer(stream).writerows([header, row])
+                output = io.StringIO()
+                with mock.patch.multiple(
+                    GENERATOR,
+                    _CSV_FILE=str(devices_file),
+                    _GLOBAL_FILE=str(global_file),
+                    DEVICES_FILE=str(intermediate),
+                    TEMPLATES_DIR=str(TEMPLATES),
+                ), mock.patch.object(
+                    GENERATOR, "_refresh_cumulus_defaults_from_global",
+                ), redirect_stdout(output):
+                    with self.assertRaises(SystemExit):
+                        GENERATOR._generate_devices_yaml()
+
+                diagnostic = output.getvalue()
+                self.assertIn("行2", diagnostic)
+                self.assertIn(hostname, diagnostic)
+                self.assertIn(f"template={template}", diagnostic)
+                self.assertIn(normalized, diagnostic)
+                self.assertIn("mode组合=", diagnostic)
+                self.assertIn("允许组合=", diagnostic)
+                self.assertFalse(
+                    intermediate.exists(),
+                    "invalid input must not publish the intermediate model",
+                )
+
+    def test_oobofoob_spine_without_required_mlag_stops_before_intermediate_publish(self):
+        header = BASE_HEADER + FIXED_HEADER + EVPN_HEADER
+        row = v2_mlag_preflight_row(
+            "OobOfOobSpineEmpty", 62, "198.51.100.62",
+            template="oobofoob-spine", bond_ports="NA", bond_type="NA",
+            bond_mac="NA", peerlink="NA", vrf="NA", l3vni="NA",
+            l3vlan="NA", l2vni="NA", l2vlan="NA",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            global_file = root / "01-global.yaml"
+            devices_file = root / "02-devices_config.csv"
+            intermediate = root / "91-devices.yaml"
+            global_file.write_bytes(self.global_file.read_bytes())
+            with devices_file.open("w", newline="", encoding="utf-8") as stream:
+                csv.writer(stream).writerows([header, row])
+            captured = io.StringIO()
+            with mock.patch.multiple(
+                GENERATOR,
+                _CSV_FILE=str(devices_file),
+                _GLOBAL_FILE=str(global_file),
+                DEVICES_FILE=str(intermediate),
+                TEMPLATES_DIR=str(TEMPLATES),
+            ), mock.patch.object(
+                GENERATOR, "_refresh_cumulus_defaults_from_global",
+            ), redirect_stdout(captured), self.assertRaises(SystemExit):
+                GENERATOR._generate_devices_yaml()
+
+        diagnostic = captured.getvalue()
+        self.assertIn("OobOfOobSpineEmpty", diagnostic)
+        self.assertIn("template=oobofoob-spine", diagnostic)
+        self.assertIn("mode组合={}", diagnostic)
+        self.assertIn("允许组合=", diagnostic)
+        self.assertFalse(intermediate.exists())
+
+    def test_declared_bond_without_vlan_attachment_stops_before_intermediate_publish(self):
+        header = BASE_HEADER + FIXED_HEADER + EVPN_HEADER
+        row = v2_mlag_preflight_row(
+            "UnattachedLeaf01", 63, "198.51.100.63",
+            template="tan-leaf", bond_ports="bond1", bond_type="local",
+            bond_mac="NA", peerlink="NA", vrf="NA", l3vni="NA",
+            l3vlan="NA", l2vni="NA", l2vlan="NA",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            global_file = root / "01-global.yaml"
+            devices_file = root / "02-devices_config.csv"
+            intermediate = root / "91-devices.yaml"
+            global_file.write_bytes(self.global_file.read_bytes())
+            with devices_file.open("w", newline="", encoding="utf-8") as stream:
+                csv.writer(stream).writerows([header, row])
+            captured = io.StringIO()
+            with mock.patch.multiple(
+                GENERATOR,
+                _CSV_FILE=str(devices_file),
+                _GLOBAL_FILE=str(global_file),
+                DEVICES_FILE=str(intermediate),
+                TEMPLATES_DIR=str(TEMPLATES),
+            ), mock.patch.object(
+                GENERATOR, "_refresh_cumulus_defaults_from_global",
+            ), redirect_stdout(captured), self.assertRaises(SystemExit):
+                GENERATOR._generate_devices_yaml()
+
+        diagnostic = captured.getvalue()
+        self.assertIn("行2", diagnostic)
+        self.assertIn("UnattachedLeaf01", diagnostic)
+        self.assertIn("template=tan-leaf", diagnostic)
+        self.assertIn("active bond", diagnostic)
+        self.assertFalse(intermediate.exists())
+
+    def test_every_role_mode_set_runs_real_parse_render_and_final_semantic_gate(self):
+        """Every advertised set renders; every other set is rejected pre-render."""
+
+        def parsed_device(template, modes):
+            device = copy.deepcopy(self.generated_devices["EXAMPLE-NoVlan"])
+            device.update({
+                "hostname": f"MATRIX-{template}",
+                "template": template,
+                "bgp_neighbors": [],
+                "vrfs": [],
+                "vlan_id": 200,
+                "svi_ip": "",
+                "vrr_ip": "",
+                "vrr_mac": "",
+            })
+            for key in (
+                "bond_groups", "computed_bonds", "parent_swps", "member_swps",
+                "peerlink_member_list", "is_mlag", "mlag_backup",
+                "mlag_priority", "mlag_mac_address", "mlag_shared_address",
+                "mlag_vxlan_active_active",
+            ):
+                device.pop(key, None)
+
+            definitions = {
+                "localbond": ("bond1b2", "local", "NA"),
+                "mlag": ("bond3", "mlag", "02:00:00:00:00:33"),
+                "evpn_multihoming": (
+                    "bond4", "evpn", "02:00:00:00:00:44",
+                ),
+            }
+            ordered = [
+                mode for mode in (
+                    "localbond", "mlag", "evpn_multihoming",
+                ) if mode in modes
+            ]
+            if ordered:
+                groups = GENERATOR._csv_parse_bond_groups(
+                    "|".join(definitions[mode][0] for mode in ordered),
+                    "|".join(definitions[mode][1] for mode in ordered),
+                    "|".join(definitions[mode][2] for mode in ordered),
+                    context=f"{device['hostname']}.bond_ports",
+                    schema_version=2,
+                )
+                device["bond_groups"] = groups
+                device["vrfs"] = [{
+                    "evpn_vrf": "PLAIN",
+                    "evpn_l3vlan": None,
+                    "evpn_l3vni": None,
+                    "l2vlans": [{
+                        "vlan_id": 200,
+                        "vlan_spec": "200",
+                        "vlan_ids": [200],
+                        "vni": None,
+                        "emit_svi": False,
+                        "svi_ip": "",
+                        "vrr_ip": "",
+                        "vrr_mac": "",
+                        "vlan_ports": [
+                            {"bonds": copy.deepcopy(group)} for group in groups
+                        ],
+                    }],
+                }]
+            if "mlag" in modes:
+                device.update({
+                    "peerlink_ports": "swp49-50",
+                    "mlag_backup": "192.0.2.99",
+                    "mlag_priority": 100,
+                    "mlag_mac_address": "02:00:00:00:00:33",
+                    "mlag_vxlan_active_active": False,
+                })
+            else:
+                device["peerlink_ports"] = ""
+            return device
+
+        environment = GENERATOR.build_env()
+        global_vars = self.intermediate_document["global"]
+        for template, allowed_sets in WORKFLOW_ALLOWED_MODE_COMBINATIONS.items():
+            for modes in WORKFLOW_BOND_MODE_COMBINATIONS:
+                with self.subTest(template=template, modes=sorted(modes)):
+                    try:
+                        device = parsed_device(template, modes)
+                        GENERATOR._validate_template_bond_modes(
+                            template, modes,
+                            hostname=device["hostname"], source_line=27,
+                        )
+                    except ValueError:
+                        if modes in allowed_sets:
+                            raise
+                        continue
+                    self.assertIn(modes, allowed_sets)
+
+                    expected_bonds = GENERATOR._expected_active_bond_descriptors(
+                        device,
+                    )
+                    rendered = GENERATOR._load_generated_yaml(GENERATOR.render(
+                        environment, global_vars, device["hostname"], device,
+                    ))
+                    set_entries = [
+                        item["set"] for item in rendered
+                        if isinstance(item, dict) and "set" in item
+                    ]
+                    self.assertEqual(1, len(set_entries))
+                    self.assertIsInstance(set_entries[0], dict)
+                    GENERATOR._normalize_generated_redundancy_policy(
+                        rendered,
+                        expected_evpn_mh=("evpn_multihoming" in modes),
+                    )
+                    GENERATOR._inject_evpn_mh_uplinks(
+                        rendered,
+                        device.get("bgp_neighbors", ()),
+                        "evpn_multihoming" in modes,
+                    )
+                    self.assertEqual(
+                        [],
+                        GENERATOR._redundancy_mode_errors(
+                            rendered, expected_bonds=expected_bonds,
+                        ),
+                    )
+                    self.assertEqual(
+                        [],
+                        GENERATOR._evpn_mh_uplink_errors(
+                            rendered,
+                            device.get("bgp_neighbors", ()),
+                            "evpn_multihoming" in modes,
+                        ),
+                    )
+
+    def test_csv_generator_renders_valid_rack_tor_localbond_member_shape(self):
+        header = BASE_HEADER + FIXED_HEADER + EVPN_HEADER
+        row = v2_mlag_preflight_row(
+            "Rack01",
+            60,
+            "198.51.100.60",
+            template="oob-rack-tor",
+            bond_type="local",
+            bond_mac="NA",
+            peerlink="NA",
+            vrf="PLAIN",
+            l3vni="NA",
+            l3vlan="NA",
+            l2vni="NA",
+            l2vlan="200",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            global_file = root / "01-global.yaml"
+            devices_file = root / "02-devices_config.csv"
+            intermediate = root / "91-devices.yaml"
+            generated = root / "generated"
+            global_file.write_bytes(self.global_file.read_bytes())
+            with devices_file.open("w", newline="", encoding="utf-8") as stream:
+                csv.writer(stream).writerows([header, row])
+            with mock.patch.multiple(
+                GENERATOR,
+                _CSV_FILE=str(devices_file),
+                _GLOBAL_FILE=str(global_file),
+                DEVICES_FILE=str(intermediate),
+                TEMPLATES_DIR=str(TEMPLATES),
+            ), mock.patch.object(
+                GENERATOR, "_refresh_cumulus_defaults_from_global",
+            ):
+                GENERATOR._generate_devices_yaml()
+                with mock.patch.object(GENERATOR, "OUTPUT_DIR", str(generated)):
+                    GENERATOR.generate_all()
+
+            rack = set_block(yaml.safe_load(PUBLISHER._canonical_yaml(
+                str(generated / "Rack01.yaml"),
+            )))
+            bond = rack["interface"]["bond1"]
+            self.assertEqual("bond", bond["type"])
+            self.assertEqual("lacp", bond["bond"]["mode"])
+            self.assertEqual({"swp1": {}}, bond["bond"]["member"])
+            self.assertEqual(
+                200,
+                bond["bridge"]["domain"]["br_default"]["access"],
+            )
 
     @classmethod
     def _build(cls, root: Path):
@@ -606,6 +1357,7 @@ switches:
         )
 
         bindings = {
+            "HTTP_ROOT": str(root),
             "SCRIPT_DIR": str(cls.dhcp_dir),
             "OUTPUT_ETH": str(cls.dhcp_dir / "dhcpd_eth.hosts"),
             "OUTPUT_IB": str(cls.dhcp_dir / "dhcpd_ib.hosts"),
@@ -665,9 +1417,7 @@ switches:
 
     def test_setup_load_dhcp_and_nvos_share_the_same_v2_layout(self):
         self.assertEqual([], self.setup_errors)
-        self.assertEqual(1, len(self.setup_warnings), self.setup_warnings)
-        self.assertIn("terminal_l2_ports", self.setup_warnings[0])
-        self.assertIn("不会自动启用终端 STP", self.setup_warnings[0])
+        self.assertEqual([], self.setup_warnings)
         self.assertEqual(2, self.settings.schema_version)
         self.assertEqual({"air", "eth", "ib"}, set(self.device_types))
         self.assertEqual([], self.nvos_errors)
@@ -880,13 +1630,13 @@ switches:
             ),
             v2_mlag_preflight_row(
                 "P1", 20, "198.51.100.20", template="oobofoob-spine",
-                bond_mac=plain_mac, vrf="NA", l3vni="NA", l3vlan="NA",
-                l2vni="NA", l2vlan="NA",
+                bond_mac=plain_mac, vrf="default", l3vni="NA", l3vlan="NA",
+                l2vni="NA", l2vlan="200",
             ),
             v2_mlag_preflight_row(
                 "P2", 21, "198.51.100.21", template="oobofoob-spine",
-                bond_mac=plain_mac, vrf="NA", l3vni="NA", l3vlan="NA",
-                l2vni="NA", l2vlan="NA",
+                bond_mac=plain_mac, vrf="default", l3vni="NA", l3vlan="NA",
+                l2vni="NA", l2vlan="200",
             ),
             v2_mlag_preflight_row(
                 "EVPN1", 40, "198.51.100.40", template="tan-leaf",
@@ -1164,6 +1914,58 @@ switches:
             )
             self.assertNotIn("vlan111", snippets)
 
+    def test_cumulus_517_and_518_generation_omit_docker_state(self):
+        for version in ("5.17.3", "5.18.1"):
+            with self.subTest(version=version), \
+                    tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                global_file = root / "01-global.yaml"
+                intermediate = root / "91-devices.yaml"
+                output = root / "generated"
+                global_document = yaml.safe_load(
+                    self.global_file.read_text(encoding="utf-8")
+                )
+                eth = next(
+                    item["eth"] for item in global_document["switches"]
+                    if "eth" in item
+                )
+                eth["version"] = version
+                global_file.write_text(
+                    yaml.safe_dump(
+                        global_document, allow_unicode=True, sort_keys=False,
+                    ),
+                    encoding="utf-8",
+                )
+
+                with mock.patch.multiple(
+                    GENERATOR,
+                    _CSV_FILE=str(self.devices_file),
+                    _GLOBAL_FILE=str(global_file),
+                    DEVICES_FILE=str(intermediate),
+                    TEMPLATES_DIR=str(TEMPLATES),
+                ), mock.patch.object(
+                    GENERATOR, "_refresh_cumulus_defaults_from_global",
+                ):
+                    GENERATOR._generate_devices_yaml()
+                    with mock.patch.object(
+                        GENERATOR, "OUTPUT_DIR", str(output),
+                    ):
+                        GENERATOR.generate_all()
+
+                checked = []
+                for path in sorted(output.glob("*.yaml")):
+                    document = yaml.safe_load(
+                        PUBLISHER._canonical_yaml(str(path))
+                    )
+                    system = set_block(document).get("system", {})
+                    if "docker" not in system:
+                        continue
+                    checked.append(path.stem)
+                    self.assertEqual(
+                        {"vrf": "mgmt"}, system["docker"], path.name,
+                    )
+                self.assertGreaterEqual(len(checked), 7)
+
     def test_oobofoob_spine_consumes_every_normalized_vlan_block(self):
         spine = set_block(self.outputs["EXAMPLE-OOB-Spine01"])
         bridge_vlans = spine["bridge"]["domain"]["br_default"]["vlan"]
@@ -1388,7 +2190,20 @@ switches:
                     rows[0], next(row for row in rows[1:] if row[0] == "EXAMPLE-Leaf01"),
                 ])
             global_file = root / "01-global.yaml"
-            shutil.copy2(self.global_file, global_file)
+            baseline = self.global_file.read_text(encoding="utf-8")
+            flow_user = (
+                "            cumulus: {full-name: 'cumulus,,,', "
+                "hashed-password: \"'*'\"}\n"
+            )
+            block_user = (
+                "            cumulus:\n"
+                "              full-name: 'cumulus,,,'\n"
+                "              hashed-password: \"'*'\"\n"
+            )
+            self.assertEqual(1, baseline.count(flow_user))
+            global_file.write_text(
+                baseline.replace(flow_user, block_user), encoding="utf-8",
+            )
             output = root / "feedback.csv"
 
             FEEDBACK.convert_one(
@@ -1454,8 +2269,8 @@ switches:
                         },
                         "bridge": {"domain": {"br_default": {
                             "stp": {
-                                "admin-edge": "on",
-                                "bpdu-guard": "on",
+                                "admin-edge": "enabled",
+                                "bpdu-guard": "enabled",
                             },
                             "vlan": {"100": {}},
                         }}},
@@ -1644,6 +2459,7 @@ switches:
                 target = root / label
                 target.mkdir()
                 bindings = {
+                    "HTTP_ROOT": str(root),
                     "SCRIPT_DIR": str(target),
                     "OUTPUT_ETH": str(target / "dhcpd_eth.hosts"),
                     "OUTPUT_IB": str(target / "dhcpd_ib.hosts"),

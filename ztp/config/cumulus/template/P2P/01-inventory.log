@@ -29,14 +29,14 @@ IB-*-Leaf*
 *OOBofOOB-Leaf*
 *OOBofOOB-Spine*
 
+[SMC-B300]
+*HGX*
+*gpusrv*
+
 [GB300-GPU]
 *GPU*
 *CT*
 *-GB300-*
-
-[SMC-B300]
-*HGX*
-*gpusrv*
 
 [[ARM-CPU]]
 [Gigabyte]
@@ -67,6 +67,7 @@ IB-*-Leaf*
 *x86*
 *mgmt*
 *ibm*
+*knode*
 
 [weka]
 *weka*

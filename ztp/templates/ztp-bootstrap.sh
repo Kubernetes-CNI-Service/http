@@ -21,6 +21,22 @@ PUBKEY_PATHS=(
     "${ZTP_URL_PREFIX}/config/publickey/mgmt-server.pub"
 )
 
+REPLACE_MODE_HEX='7265706c6163650a'
+# These fragments compose the hexadecimal form of the six raw bytes `patch\n`.
+PATCH_MODE_HEX_FRAGMENT_1='70617463'
+PATCH_MODE_HEX_FRAGMENT_2='680a'
+if [[ -z "${PATCH_MODE_HEX_FRAGMENT_1}" ||
+      -z "${PATCH_MODE_HEX_FRAGMENT_2}" ]]; then
+    echo "[ZTP] ERROR: Empty mode-sidecar comparison fragment" >&2
+    exit 1
+fi
+PATCH_MODE_HEX="${PATCH_MODE_HEX_FRAGMENT_1}${PATCH_MODE_HEX_FRAGMENT_2}"
+if [[ "${#PATCH_MODE_HEX}" -ne 12 ||
+      "${#REPLACE_MODE_HEX}" -ne 16 ]]; then
+    echo "[ZTP] ERROR: Invalid mode-sidecar comparison constant length" >&2
+    exit 1
+fi
+
 RUNTIME_WORK_ROOT="/run"
 TMP_DIR=""
 LOG_FILE_NAME="ztp-result.log"
@@ -190,6 +206,96 @@ ztp_net_exec() {
 
 ztp_curl() {
     ztp_net_exec curl "$@"
+}
+
+# Every configuration fetch uses one bounded curl retry policy.  Curl's
+# --retry value is the number of retries after the initial request, so this is
+# at most six HTTP attempts.  Do not use --retry-all-errors: permanent 4xx
+# responses (especially authentication failures) must not be retried.
+ztp_config_curl() {
+    ztp_net_exec curl \
+        --retry 5 \
+        --retry-delay 3 \
+        --retry-connrefused \
+        --connect-timeout 5 \
+        --max-time 120 \
+        "$@"
+}
+
+# Fetch the required per-device YAML and preserve the final HTTP class.  A
+# genuine 404 means the device is not published and is the sole condition
+# allowed to select the baseline default.  Transport/5xx exhaustion,
+# authentication failures, other permanent HTTP errors, and unsafe/empty
+# payloads fail closed before any NVUE or SSH mutation.
+# Return 44 only for HTTP 404; return 0 for a safe payload and 1 otherwise.
+fetch_required_device_config() {
+    local source_url="$1"
+    local destination="$2"
+    local http_status="" curl_status=0 payload_size=""
+
+    if [[ -L "${destination}" ]]; then
+        log "[ZTP] CONFIG_FETCH_V1 class=integrity attempts=0 url=${source_url} reason=unsafe-destination"
+        return 1
+    fi
+    rm -f -- "${destination}"
+    if http_status=$(ztp_config_curl -sf -o "${destination}" \
+        -w '%{http_code}' "${source_url}"); then
+        curl_status=0
+    else
+        curl_status=$?
+    fi
+    http_status=${http_status//$'\r'/}
+    http_status=${http_status//$'\n'/}
+    if [[ ! "${http_status}" =~ ^[0-9]{3}$ ]]; then
+        # Some bounded embedded/factory curl wrappers do not implement
+        # --write-out even though they preserve curl's exit status.  A zero
+        # exit remains acceptable only after the strict local payload checks
+        # below; a nonzero exit without a status is transport failure.
+        if (( curl_status == 0 )); then
+            http_status="200"
+        else
+            http_status="000"
+        fi
+    fi
+
+    if (( curl_status != 0 )); then
+        rm -f -- "${destination}"
+        case "${http_status}" in
+            404)
+                log "[ZTP] CONFIG_FETCH_V1 class=not-found attempts=1 http=404 url=${source_url}"
+                return 44
+                ;;
+            401|403)
+                log "[ZTP] CONFIG_FETCH_V1 class=auth attempts=1 http=${http_status} url=${source_url}"
+                return 1
+                ;;
+            000|408|429|5??)
+                log "[ZTP] CONFIG_FETCH_V1 class=transient-exhausted attempts=6 http=${http_status} curl=${curl_status} url=${source_url}"
+                return 1
+                ;;
+            *)
+                log "[ZTP] CONFIG_FETCH_V1 class=permanent attempts=1 http=${http_status} curl=${curl_status} url=${source_url}"
+                return 1
+                ;;
+        esac
+    fi
+
+    if [[ ! "${http_status}" =~ ^2[0-9]{2}$ || -L "${destination}" ||
+          ! -f "${destination}" || ! -s "${destination}" ||
+          ! -r "${destination}" ]]; then
+        rm -f -- "${destination}"
+        log "[ZTP] CONFIG_FETCH_V1 class=integrity attempts=1 http=${http_status} url=${source_url} reason=empty-or-unsafe"
+        return 1
+    fi
+    if ! payload_size=$(wc -c < "${destination}" | tr -d '[:space:]') ||
+       [[ ! "${payload_size}" =~ ^[0-9]+$ ]] ||
+       (( payload_size <= 0 || payload_size > APPLIED_CONFIG_MAX_BYTES )); then
+        rm -f -- "${destination}"
+        log "[ZTP] CONFIG_FETCH_V1 class=integrity attempts=1 http=${http_status} url=${source_url} reason=unsafe-size"
+        return 1
+    fi
+    log "[ZTP] CONFIG_FETCH_V1 class=success http=${http_status} url=${source_url}"
+    return 0
 }
 
 # Establish one management-server-derived clock before version/config stages.
@@ -511,6 +617,7 @@ source_name=
 eth0_mac=
 applied_at=
 failed_raw_sha256=
+failed_source_name=
 seen_schema=
 seen_status=
 seen_source_kind=
@@ -520,6 +627,7 @@ seen_source_name=
 seen_eth0_mac=
 seen_applied_at=
 seen_failed_raw_sha256=
+seen_failed_source_name=
 while IFS= read -r receipt_line || [ -n "${receipt_line}" ]; do
     case "${receipt_line}" in
         *=*) ;;
@@ -556,6 +664,9 @@ while IFS= read -r receipt_line || [ -n "${receipt_line}" ]; do
         failed_raw_sha256)
             [ -z "${seen_failed_raw_sha256}" ] || fail "duplicate receipt key ${receipt_key}"
             failed_raw_sha256=${receipt_value}; seen_failed_raw_sha256=1 ;;
+        failed_source_name)
+            [ -z "${seen_failed_source_name}" ] || fail "duplicate receipt key ${receipt_key}"
+            failed_source_name=${receipt_value}; seen_failed_source_name=1 ;;
         *) fail "unknown receipt key ${receipt_key}" ;;
     esac
 done < "${RECEIPT_PATH}"
@@ -581,6 +692,20 @@ case "${status}|${source_kind}|${apply_mode}" in
     success\|dedicated\|replace|success\|dedicated\|patch|success\|default\|patch|success\|fallback\|patch) ;;
     success\|fallback_default\|patch)
         valid_hash "${failed_raw_sha256}" || fail "invalid failed dedicated hash"
+        if [ -n "${failed_source_name}" ]; then
+            case "${failed_source_name}" in
+                [A-Za-z0-9]*) ;;
+                *) fail "unsafe failed source name" ;;
+            esac
+            case "${failed_source_name}" in
+                *[!A-Za-z0-9._-]*) fail "unsafe failed source name" ;;
+            esac
+            [ "${#failed_source_name}" -le 255 ] || fail "unsafe failed source name"
+            expected_mode_name=$(printf '%s' "${eth0_mac}" | tr -d ':').mode ||
+                fail "cannot derive failed mode source name"
+            [ "${failed_source_name}" = "${expected_mode_name}" ] ||
+                fail "failed mode source does not match eth0 MAC"
+        fi
         check_root_file "${FAILED_YAML_PATH}"
         failed_size=$(file_size "${FAILED_YAML_PATH}") || fail "cannot size failed dedicated YAML"
         [ "${failed_size}" -gt 0 ] && [ "${failed_size}" -le "${MAX_YAML_BYTES}" ] || fail "failed dedicated YAML size out of range"
@@ -592,6 +717,9 @@ case "${status}|${source_kind}|${apply_mode}" in
 esac
 if [ "${source_kind}" != "fallback_default" ] && [ -n "${seen_failed_raw_sha256}" ]; then
     fail "unexpected failed dedicated hash"
+fi
+if [ "${source_kind}" != "fallback_default" ] && [ -n "${seen_failed_source_name}" ]; then
+    fail "unexpected failed source name"
 fi
 
 actual_sha256=$(sha256sum "${YAML_PATH}" 2>/dev/null) || fail "cannot hash applied YAML"
@@ -737,6 +865,7 @@ persist_applied_receipt() {
     local source_name="$5"
     local eth0_mac="$6"
     local failed_source="${7:-}"
+    local failed_source_name="${8:-}"
     local source_size raw_sha256 copied_sha256 applied_at
     local failed_size failed_raw_sha256 failed_copied_sha256=""
     local yaml_tmp="" receipt_tmp="" failed_tmp=""
@@ -813,9 +942,19 @@ persist_applied_receipt() {
             log "[ZTP] WARN: Failed dedicated source returned an invalid SHA-256"
             return 0
         fi
+        if [[ -n "${failed_source_name}" ]] &&
+           [[ ! "${failed_source_name}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$ ||
+              "${failed_source_name}" != "${eth0_mac//:/}.mode" ]]; then
+            log "[ZTP] WARN: Refusing applied-config receipt with mismatched failed mode source"
+            return 0
+        fi
     elif [[ -n "${failed_source}" ]]; then
         log "[ZTP] WARN: Ignoring unexpected failed source for successful dedicated/default receipt"
         failed_source=""
+        failed_source_name=""
+    elif [[ -n "${failed_source_name}" ]]; then
+        log "[ZTP] WARN: Ignoring unexpected failed source name for successful dedicated/default receipt"
+        failed_source_name=""
     fi
 
     if [[ -L "${APPLIED_STATE_DIR}" || ( -e "${APPLIED_STATE_DIR}" && ! -d "${APPLIED_STATE_DIR}" ) ]]; then
@@ -894,6 +1033,9 @@ persist_applied_receipt() {
         if [[ -n "${failed_raw_sha256}" ]]; then
             printf 'failed_raw_sha256=%s\n' "${failed_raw_sha256}"
         fi
+        if [[ -n "${failed_source_name}" ]]; then
+            printf 'failed_source_name=%s\n' "${failed_source_name}"
+        fi
     } > "${receipt_tmp}" || ! chown root:root "${receipt_tmp}" || ! chmod 0600 "${receipt_tmp}"; then
         cleanup_applied_receipt_temps
         log "[ZTP] WARN: Could not stage applied-config receipt"
@@ -944,7 +1086,7 @@ prefetch_config_candidate() {
         log "[ZTP] WARN: Could not create default-config cache (${priority_label}): ${source_url}"
         return 1
     fi
-    if ! ztp_curl -sf "${source_url}" -o "${cache_tmp}" ||
+    if ! ztp_config_curl -sf "${source_url}" -o "${cache_tmp}" ||
        [[ -L "${cache_tmp}" || ! -f "${cache_tmp}" || ! -s "${cache_tmp}" ]]; then
         rm -f -- "${cache_tmp}" || true
         log "[ZTP] WARN: Default-config prefetch unavailable (${priority_label}): ${source_url}"
@@ -1266,6 +1408,7 @@ if [[ "${PROD_NAME}" == ${EthSW} || "${PROD_NAME}" == ${EthVX} ]]; then
         LEGACY_GLOBAL_DEF_CACHE="${TMP_DIR}/default.legacy-global.yaml"
         DEDICATED_APPLY_FAILED="false"
         FAILED_DEDICATED_SOURCE=""
+        FAILED_DEDICATED_SOURCE_NAME=""
 
 
         ## 定义加载“版本部分默认配置”或者“全局部分默认配置”函数, 在“设备特定配置”不存在的情况下调用
@@ -1273,6 +1416,7 @@ if [[ "${PROD_NAME}" == ${EthSW} || "${PROD_NAME}" == ${EthVX} ]]; then
         ## “全局部分默认配置”是只有预设置密码的部分默认配置，需要用nv config patch
         load_default_cfg(){
             local selected_url selected_local receipt_source_kind failed_source
+            local failed_source_name
             if [[ ! -L "${RELEASE_VER_DEF_CACHE}" && -s "${RELEASE_VER_DEF_CACHE}" ]]; then
                 selected_url="${RELEASE_DEFAULT_VER_CFG}"
                 selected_local="${RELEASE_VER_DEF_CACHE}"
@@ -1296,13 +1440,16 @@ if [[ "${PROD_NAME}" == ${EthSW} || "${PROD_NAME}" == ${EthVX} ]]; then
             log "[ZTP] Default config:${selected_local} patch and save complete"
             receipt_source_kind="default"
             failed_source=""
+            failed_source_name=""
             if [[ "${DEDICATED_APPLY_FAILED}" == "true" ]]; then
                 receipt_source_kind="fallback_default"
                 failed_source="${FAILED_DEDICATED_SOURCE}"
+                failed_source_name="${FAILED_DEDICATED_SOURCE_NAME}"
             fi
             persist_applied_receipt \
                 "${selected_local}" "success" "${receipt_source_kind}" "patch" \
-                "${selected_url##*/}" "${ETH0_RAW_MAC}" "${failed_source}"
+                "${selected_url##*/}" "${ETH0_RAW_MAC}" "${failed_source}" \
+                "${failed_source_name}"
         }
 
         CUMULUS_DEFAULT_PREFETCHED=0
@@ -1325,9 +1472,9 @@ if [[ "${PROD_NAME}" == ${EthSW} || "${PROD_NAME}" == ${EthVX} ]]; then
         fi
 
         ## d-hostname2mac.py 为 CSV type=eth_spx/spx（含对应 AIR 节点）发布 MAC 标记。
-        if ztp_curl -sf "${SPX_MARKER}" -o /dev/null; then
+        if ztp_config_curl -sf "${SPX_MARKER}" -o /dev/null; then
             log "[ZTP] SPX marker found for ${ETH0_RAW_MAC}; download AR custom config."
-            if ztp_curl -sf  "${AR_FILE_PATH}" -o "${TMP_DIR}/${AR_FILE_NAME}"; then
+            if ztp_config_curl -sf  "${AR_FILE_PATH}" -o "${TMP_DIR}/${AR_FILE_NAME}"; then
                 cp -f "${TMP_DIR}/${AR_FILE_NAME}" "${AR_FILE_LOCAL}"
                 log "[ZTP] AR custom config copied to ${AR_FILE_LOCAL}"
             else
@@ -1338,27 +1485,52 @@ if [[ "${PROD_NAME}" == ${EthSW} || "${PROD_NAME}" == ${EthVX} ]]; then
         fi
 
         ## 尝试加载“设备特定配置”，如果不存在或者加载失败，加载默认配置
-        if ztp_curl -sf "${MAC_CFG}" -o "${MAC_LOCAL}";then
-            APPLY_MODE="replace"
-            PROFILE_NAME="full"
-            if ztp_curl -sf "${MAC_MODE}" -o "${MAC_MODE_LOCAL}"; then
-                APPLY_MODE=$(tr -d '[:space:]' < "${MAC_MODE_LOCAL}")
-                case "${APPLY_MODE}" in
-                    replace) PROFILE_NAME="full" ;;
-                    patch) PROFILE_NAME="baseline" ;;
-                    *)
-                        log "[ZTP] ERROR: Invalid per-MAC apply mode '${APPLY_MODE}' from ${MAC_MODE}; use default cfg"
-                        APPLY_MODE="invalid"
-                        ;;
-                esac
+        MAC_FETCH_STATUS=0
+        fetch_required_device_config "${MAC_CFG}" "${MAC_LOCAL}" || MAC_FETCH_STATUS=$?
+        if (( MAC_FETCH_STATUS == 0 )); then
+            APPLY_MODE="invalid"
+            PROFILE_NAME="unavailable"
+            MODE_SIDECAR_ERROR=""
+            MODE_SIDECAR_HEX=""
+            if ! ztp_config_curl -sf "${MAC_MODE}" -o "${MAC_MODE_LOCAL}"; then
+                MODE_SIDECAR_ERROR="fetch failed"
+            elif [[ -L "${MAC_MODE_LOCAL}" || ! -f "${MAC_MODE_LOCAL}" ||
+                    ! -s "${MAC_MODE_LOCAL}" || ! -r "${MAC_MODE_LOCAL}" ]]; then
+                MODE_SIDECAR_ERROR="missing, empty, unreadable, or unsafe local result"
+            # Bound hostile input before od expands each byte to hexadecimal.
+            # Seventeen bytes always observes a trailing byte after either
+            # complete publisher token while keeping the parser bounded.
+            elif ! MODE_SIDECAR_HEX=$(
+                head -c 17 -- "${MAC_MODE_LOCAL}" |
+                    od -An -tx1 -v |
+                    tr -d '[:space:]'
+            ); then
+                MODE_SIDECAR_ERROR="unreadable local result"
             else
-                log "[ZTP] WARN: Per-MAC mode sidecar missing; use legacy action: replace"
+                if [[ "${MODE_SIDECAR_HEX}" == "${REPLACE_MODE_HEX}" ]]; then
+                    APPLY_MODE="replace"
+                    PROFILE_NAME="full"
+                elif [[ "${MODE_SIDECAR_HEX}" == "${PATCH_MODE_HEX}" ]]; then
+                    APPLY_MODE="patch"
+                    PROFILE_NAME="baseline"
+                else
+                    MODE_SIDECAR_ERROR="invalid raw bytes"
+                fi
             fi
-            log "[ZTP] Load per-MAC config:${MAC_CFG}, profile=${PROFILE_NAME}, action=${APPLY_MODE}"
+            if [[ -n "${MODE_SIDECAR_ERROR}" ]]; then
+                FAILED_DEDICATED_SOURCE_NAME="${MAC_MODE##*/}"
+                log "[ZTP] ERROR: mode-sidecar-unavailable: ${MAC_MODE} (${MODE_SIDECAR_ERROR}); dedicated config will not be applied; use default cfg"
+            else
+                log "[ZTP] Load per-MAC config:${MAC_CFG}, profile=${PROFILE_NAME}, action=${APPLY_MODE}"
+            fi
             if [[ "${APPLY_MODE}" == "invalid" ]] ||
                ! nv config "${APPLY_MODE}" "${MAC_LOCAL}" || ! nv config apply -y;then
                 persist_failed_config "${MAC_LOCAL}" "${USER_HOME}" "${USER_NAME}"
-                if [[ -n "${FAILED_CFG_PATH}" ]]; then
+                if [[ -n "${MODE_SIDECAR_ERROR}" && -n "${FAILED_CFG_PATH}" ]]; then
+                    log "[ZTP] WARN: Dedicated config skipped because mode sidecar is unavailable; config preserved at ${FAILED_CFG_PATH}; switch to default cfg"
+                elif [[ -n "${MODE_SIDECAR_ERROR}" ]]; then
+                    log "[ZTP] WARN: Dedicated config skipped because mode sidecar is unavailable and could not be preserved; switch to default cfg"
+                elif [[ -n "${FAILED_CFG_PATH}" ]]; then
                     log "[ZTP] WARN: MAC config apply failed; config preserved at ${FAILED_CFG_PATH}; switch to default cfg"
                 else
                     log "[ZTP] WARN: MAC config apply failed and could not be preserved; switch to default cfg"
@@ -1366,6 +1538,7 @@ if [[ "${PROD_NAME}" == ${EthSW} || "${PROD_NAME}" == ${EthVX} ]]; then
                 DEDICATED_APPLY_FAILED="true"
                 FAILED_DEDICATED_SOURCE="${MAC_LOCAL}"
                 nv config detach
+                log "[ZTP] PROVISION_DEGRADED reason=dedicated-config-or-mode-failure source=${FAILED_DEDICATED_SOURCE_NAME:-${MAC_CFG##*/}}"
                 load_default_cfg
             else
                 nv config save
@@ -1381,9 +1554,14 @@ if [[ "${PROD_NAME}" == ${EthSW} || "${PROD_NAME}" == ${EthVX} ]]; then
                         "${MAC_CFG##*/}" "${ETH0_RAW_MAC}"
                 fi
             fi
-        else
+        elif (( MAC_FETCH_STATUS == 44 )); then
+            log "[ZTP] PROVISION_DEGRADED reason=device-config-not-published source=${MAC_CFG##*/}"
             log "[ZTP] MAC cfg not found, load default cfg"
             load_default_cfg
+        else
+            log "[ZTP] ERROR: Required per-MAC config fetch failed; refusing default fallback"
+            log "======================== ZTP FINISH ========================"
+            exit 1
         fi
 
 
@@ -1438,7 +1616,9 @@ elif [[ "${PROD_NAME}" == ${IBSW} || "${PROD_NAME}" == ${NVLSW} ]]; then
     fi
 
     ## 尝试加载“设备特定配置”，如果不存在或者加载失败，加载默认配置
-    if ztp_curl -sf "${MAC_CFG}" -o "${MAC_LOCAL}";then
+    MAC_FETCH_STATUS=0
+    fetch_required_device_config "${MAC_CFG}" "${MAC_LOCAL}" || MAC_FETCH_STATUS=$?
+    if (( MAC_FETCH_STATUS == 0 )); then
         log "[ZTP] Load per-MAC config:${MAC_CFG}"
         if ! nv config replace "${MAC_LOCAL}" || ! nv config apply -y;then
             persist_failed_config "${MAC_LOCAL}" "${USER_HOME}" "${USER_NAME}"
@@ -1448,6 +1628,7 @@ elif [[ "${PROD_NAME}" == ${IBSW} || "${PROD_NAME}" == ${NVLSW} ]]; then
                 log "[ZTP] WARN: MAC config apply failed and could not be preserved; switch to default cfg"
             fi
             nv config detach
+            log "[ZTP] PROVISION_DEGRADED reason=dedicated-config-apply-failure source=${MAC_CFG##*/}"
             load_nvos_default_cfg "fallback_default" "${MAC_LOCAL}"
         else
             nv set system ztp config-save enabled
@@ -1458,9 +1639,14 @@ elif [[ "${PROD_NAME}" == ${IBSW} || "${PROD_NAME}" == ${NVLSW} ]]; then
                 "${MAC_LOCAL}" "success" "dedicated" "replace" \
                 "${MAC_CFG##*/}" "${ETH0_RAW_MAC}"
         fi
-    else
+    elif (( MAC_FETCH_STATUS == 44 )); then
+        log "[ZTP] PROVISION_DEGRADED reason=device-config-not-published source=${MAC_CFG##*/}"
         log "[ZTP] MAC cfg not found, load default cfg"
         load_nvos_default_cfg "default"
+    else
+        log "[ZTP] ERROR: Required per-MAC config fetch failed; refusing default fallback"
+        log "======================== ZTP FINISH ========================"
+        exit 1
     fi
 
 

@@ -18,6 +18,15 @@ class DeploymentLockError(RuntimeError):
     """The deployment lock is unsafe, invalid, or already held."""
 
 
+def _busy_lock_message(lock_path: Path) -> str:
+    """Return actionable diagnostics without claiming a possibly stale owner."""
+    return (
+        "another load/setup/unsetup/unload or deployment operation is active; "
+        f"lock={lock_path}; inspect without modifying it: "
+        f"lsof {lock_path} || fuser {lock_path}"
+    )
+
+
 def _validate_regular_fd(descriptor: int, lock_path: Path) -> None:
     try:
         descriptor_stat = os.fstat(descriptor)
@@ -87,9 +96,7 @@ def acquire_lock_path_descriptor(
         fcntl.flock(descriptor, operation | fcntl.LOCK_NB)
     except BlockingIOError as exc:
         os.close(descriptor)
-        raise DeploymentLockError(
-            "another load/setup/unsetup/unload or deployment operation is active"
-        ) from exc
+        raise DeploymentLockError(_busy_lock_message(lock_path)) from exc
     return descriptor
 
 
@@ -141,9 +148,7 @@ def deployment_lock(
         try:
             fcntl.flock(descriptor, operation | fcntl.LOCK_NB)
         except BlockingIOError as exc:
-            raise DeploymentLockError(
-                "another load/setup/unsetup/unload or deployment operation is active"
-            ) from exc
+            raise DeploymentLockError(_busy_lock_message(lock_path)) from exc
     try:
         yield descriptor
     finally:

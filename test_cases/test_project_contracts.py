@@ -51,6 +51,40 @@ def load_module(name: str, path: Path):
 
 
 class TemplateContractTests(unittest.TestCase):
+    def test_standalone_dhcp_guidance_routes_each_runtime_without_mixing(self):
+        generator = load_module(
+            "dhcp_operator_guidance_contract",
+            ROOT / "ztp/config/isc-dhcp-server/c1-generate_dhcp.py",
+        )
+        guidance = generator._production_handoff_text()
+        self.assertIn("独立生成仅用于开发预览", guidance)
+        self.assertIn("DAY0-Prepare/11-load.py", guidance)
+        self.assertIn("infra/docker/deploy.sh deploy", guidance)
+        self.assertIn("deploy-preloaded <IMAGE_ID>", guidance)
+        self.assertIn(
+            "没有 source write 且已有运行中的 inactive 控制容器", guidance,
+        )
+        self.assertNotIn("统一由 DAY0-Prepare/11-load.py", guidance)
+
+    def test_standalone_generator_guidance_returns_to_one_production_transaction(self):
+        generator = load_module(
+            "operator_guidance_contract",
+            ROOT / "ztp/config/cumulus/template/90-c2-generate_configs.py",
+        )
+        guidance = "\n".join(generator._production_handoff_rows(lambda text="": text))
+        self.assertIn("仅用于隔离开发预览", guidance)
+        self.assertIn("生产不得逐步", guidance)
+        self.assertIn("DAY0-Prepare/11-load.py", guidance)
+        self.assertIn("infra/docker/deploy.sh deploy", guidance)
+        self.assertIn("deploy-preloaded <IMAGE_ID>", guidance)
+        self.assertIn(
+            "没有 source write 且已有运行中的 inactive 控制容器", guidance,
+        )
+        self.assertNotIn(
+            "Docker/Supervisor：sudo ./infra/docker/deploy.sh load", guidance,
+        )
+        self.assertNotIn("systemctl", guidance)
+
     def test_extra_aaa_users_are_generic_and_reject_unsafe_names(self):
         generator = load_module(
             "generic_aaa_user_contract",
@@ -200,23 +234,89 @@ class TemplateContractTests(unittest.TestCase):
                     (row["shared_network"], field),
                 )
 
-        default_contracts = {
-            ROOT / "ztp/config/cumulus/default.yaml": ("hashed-password", "cumulus"),
+        expected_cumulus_default = [{"set": {"system": {
+            "aaa": {
+                "class": {
+                    "nvapply": {
+                        "action": "allow",
+                        "command-path": {"/": {"permission": "all"}},
+                    },
+                    "sudo": {
+                        "action": "allow",
+                        "command-path": {"/": {"permission": "all"}},
+                    },
+                },
+                "role": {"system-admin": {"class": {"nvapply": {}, "sudo": {}}}},
+                "user": {"cumulus": {
+                    "full-name": "cumulus,,,",
+                    "hashed-password": "*",
+                    "role": "system-admin",
+                }},
+            },
+            "config": {"auto-save": {"state": "enabled"}},
+            "date-time": {"timezone": "Etc/UTC"},
+            "dns": {"server": {
+                "1.1.1.1": {"vrf": "mgmt"},
+                "9.9.9.9": {"vrf": "mgmt"},
+            }},
+            "ntp": {
+                "server": {"time.cloudflare.com": {}, "ntp.ubuntu.com": {}},
+                "state": "enabled",
+                "vrf": "mgmt",
+            },
+        }}}]
+        expected_cumulus_5165_default = [{"set": {"system": {
+            "aaa": {
+                "class": {
+                    "nvapply": {
+                        "action": "allow",
+                        "command-path": {"/": {"permission": "all"}},
+                    },
+                    "sudo": {
+                        "action": "allow",
+                        "command-path": {"/": {"permission": "all"}},
+                    },
+                },
+                "role": {"system-admin": {"class": {"nvapply": {}, "sudo": {}}}},
+                "user": {"cumulus": {
+                    "full-name": "cumulus,,,",
+                    "hashed-password": "*",
+                    "role": "system-admin",
+                }},
+            },
+            "config": {"auto-save": {"state": "enabled"}},
+            "date-time": {"timezone": "Etc/UTC"},
+            "dns": {"server": {
+                "1.1.1.1": {"vrf": "mgmt"},
+                "9.9.9.9": {"vrf": "mgmt"},
+            }},
+            "ntp": {
+                "server": {"time.cloudflare.com": {}, "ntp.ubuntu.com": {}},
+                "state": "enabled",
+                "vrf": "mgmt",
+            },
+        }}}]
+        expected_nvos_default = [{"set": {"system": {
+            "aaa": {"user": {"admin": {"password": "*"}}},
+            "config": {"auto-save": {"state": "enabled"}},
+            "date-time": {"timezone": "Etc/UTC"},
+            "dns": {"server": {"1.1.1.1": {}, "9.9.9.9": {}}},
+            "ntp": {"server": {
+                "time.cloudflare.com": {}, "ntp.ubuntu.com": {},
+            }},
+            "security": {"password-hardening": {"state": "disabled"}},
+        }}}]
+        expected_defaults = {
+            ROOT / "ztp/config/cumulus/default.yaml": expected_cumulus_default,
             ROOT / "ztp/config/cumulus/default_5.16.5.yaml": (
-                "hashed-password", "cumulus"
+                expected_cumulus_5165_default
             ),
-            ROOT / "ztp/config/nvos/default.yaml": ("password", "admin"),
+            ROOT / "ztp/config/nvos/default.yaml": expected_nvos_default,
         }
-        for path, (password_key, username) in default_contracts.items():
-            document = yaml.safe_load(path.read_text(encoding="utf-8"))
-            system = document[0]["set"]["system"]
-            self.assertEqual("*", system["aaa"]["user"][username][password_key], path)
+        for path, expected in expected_defaults.items():
             self.assertEqual(
-                {"1.1.1.1", "9.9.9.9"}, set(system["dns"]["server"]), path
-            )
-            self.assertEqual(
-                {"time.cloudflare.com", "ntp.ubuntu.com"},
-                set(system["ntp"]["server"]),
+                expected,
+                yaml.safe_load(path.read_text(encoding="utf-8")),
                 path,
             )
 
@@ -337,9 +437,15 @@ class TemplateContractTests(unittest.TestCase):
         for relative in (
             ".git/objects/private",
             "outputs/private-plan.xlsx",
+            "cross-review.log",
             ".codex/session.json",
             ".agents/state.json",
+            ".claude/settings.local.json",
             ".codex_tmp_analysis/node_modules",
+            ".ssh/id_ed25519",
+            ".SSH/id_ed25519",
+            "infra/.Ssh/id_ed25519",
+            "DAY0-Prepare/customer/.ssh/id_ed25519",
         ):
             with self.subTest(root_artifact=relative):
                 self.assertIsNotNone(contract.transfer_exclude_reason(relative))
@@ -351,22 +457,92 @@ class TemplateContractTests(unittest.TestCase):
             "ethernet/.git/runtime.py",
             "DAY0-Prepare/customer/.codex/project.json",
             "DAY0-Prepare/customer/.agents/project.json",
+            "ztp/config/cumulus/template/.claude/settings.local.json",
             "ethernet/.codex_tmp_component/runtime.py",
         ):
             with self.subTest(nested_metadata=relative):
                 self.assertIsNotNone(contract.transfer_exclude_reason(relative))
 
         excludes = contract.rsync_excludes()
-        for pattern in (".git/", ".codex/", ".agents/", ".codex_tmp*/"):
+        for pattern in (
+            ".git/", ".codex/", ".agents/", ".claude/", ".codex_tmp*/",
+            ".[Ss][Ss][Hh]/",
+        ):
             with self.subTest(rsync_pattern=pattern):
                 self.assertIn(pattern, excludes)
         self.assertNotIn("outputs/", excludes)
+        self.assertIsNone(contract.transfer_exclude_reason(".ssh-config/runtime.py"))
+        self.assertIsNone(contract.transfer_exclude_reason("infra/my.ssh/runtime.py"))
+
+    def test_field_reference_artifacts_are_not_sync_runtime_sources(self):
+        contract = load_module(
+            "project_contract_field_reference_exclude",
+            ROOT / "tools/project_contract.py",
+        )
+        reference_files = (
+            "infiniband/bringup/ndr/How to do initial config for IB switches.log",
+            "infiniband/bringup/ndr/IB-SW-show-2024-10-15.log",
+            "infiniband/bringup/ndr/IB-switches-IP.log",
+            "infiniband/bringup/ndr/MLNX-OS_IB_switch_wizard_initialization_quick_guide_EN.docx",
+        )
+        for relative in reference_files:
+            with self.subTest(relative=relative):
+                self.assertEqual(
+                    "non-code reference artifact",
+                    contract.transfer_exclude_reason(relative),
+                )
+        for relative in (
+            "infiniband/bringup/ndr/data-collect-IB.sh",
+            "infiniband/bringup/ndr/OS-CPLD-upgrade.sh",
+        ):
+            with self.subTest(runtime=relative):
+                self.assertIsNone(contract.transfer_exclude_reason(relative))
+
+    def test_container_host_runtime_state_is_never_transferred(self):
+        contract = load_module(
+            "project_contract_container_runtime_exclude",
+            ROOT / "tools/project_contract.py",
+        )
+        runtime_files = (
+            "infra/docker/container.env",
+            "infra/docker/.env",
+            "infra/docker/desired-state.json",
+            "infra/docker/runtime-state.json",
+        )
+        for relative in runtime_files:
+            with self.subTest(runtime_file=relative):
+                self.assertEqual(
+                    "host-specific container runtime",
+                    contract.transfer_exclude_reason(relative),
+                )
+
+        for relative in (
+            "infra/docker/container.env.example",
+            "infra/docker/compose.yaml",
+            "infra/docker/entrypoint.py",
+        ):
+            with self.subTest(static_asset=relative):
+                self.assertIsNone(contract.transfer_exclude_reason(relative))
+
+        excludes = contract.rsync_excludes()
+        for name in (
+            "container.env", ".env", "desired-state.json", "runtime-state.json",
+        ):
+            with self.subTest(rsync_pattern=name):
+                self.assertIn(name, excludes)
+
+        ignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+        for path in runtime_files:
+            self.assertIn(f"/{path}", ignore)
 
     def test_sync_root_file_selection_uses_shared_transfer_boundary(self):
         sync = load_module(
             "sync_code_root_workspace_exclude", ROOT / "tools/sync-code.py",
         )
-        for pattern in (".git/", ".codex/", ".agents/", ".codex_tmp*/"):
+        for pattern in (
+            ".git/", ".codex/", ".agents/", ".claude/", ".codex_tmp*/",
+            ".[Ss][Ss][Hh]/",
+        ):
             with self.subTest(sync_rsync_pattern=pattern):
                 self.assertIn(pattern, sync.COMMON_EXCLUDES)
         self.assertNotIn("outputs/", sync.COMMON_EXCLUDES)
@@ -379,10 +555,14 @@ class TemplateContractTests(unittest.TestCase):
             nested_outputs = nested_root / "outputs"
             nested_outputs.mkdir(parents=True)
             nested_runtime = nested_outputs / "runtime.py"
+            private_directory = workspace / ".Ssh"
+            private_directory.mkdir()
+            private_key = private_directory / "id_ed25519"
             keep.write_text("pass\n", encoding="utf-8")
             root_scratch.write_text("private\n", encoding="utf-8")
             nested_scratch.write_text("pass\n", encoding="utf-8")
             nested_runtime.write_text("pass\n", encoding="utf-8")
+            private_key.write_text("private key sentinel\n", encoding="utf-8")
 
             with mock.patch.object(sync, "ROOT", workspace):
                 self.assertEqual(
@@ -391,6 +571,10 @@ class TemplateContractTests(unittest.TestCase):
                 self.assertEqual(
                     (),
                     sync.matching_files(nested_root, ("*.py",)),
+                )
+                self.assertEqual(
+                    (),
+                    sync.matching_files(private_directory, ("*",)),
                 )
                 self.assertEqual(
                     (nested_runtime,),
@@ -512,6 +696,19 @@ class TemplateContractTests(unittest.TestCase):
                 load.activate_project(project, p2p)
             command = run.call_args.args[0]
             self.assertIn("--p2p-file=p2p/Customer-P2P-v2.xlsx", command)
+            self.assertIn("--confirm-project-switch", command)
+
+    def test_setup_parser_separates_creation_and_automation_switch_ack(self):
+        setup = load_module(
+            "day0_setup_explicit_project_actions",
+            ROOT / "DAY0-Prepare/01-a-setup.py",
+        )
+        args = setup._parse_args([
+            "--create", "--confirm-project-switch", "new-project",
+        ])
+        self.assertTrue(args.create)
+        self.assertTrue(args.confirm_project_switch)
+        self.assertFalse(args.auto_yes)
 
     def test_load_has_no_entry_dependency_gate_before_auto_infra(self):
         source = (ROOT / "DAY0-Prepare/11-load.py").read_text(encoding="utf-8")
@@ -712,8 +909,12 @@ class TemplateContractTests(unittest.TestCase):
             self.assertEqual(
                 "air", monitor.parser().parse_args([str(project), "--type", "air"]).scope
             )
-            self.assertEqual("air", load.parse_args([str(project), "--air"]).ztp_monitor_scope)
-            self.assertEqual("prod", load.parse_args([str(project), "--prod"]).ztp_monitor_scope)
+            air_load = load.parse_args([str(project), "--air"])
+            prod_load = load.parse_args([str(project), "--prod"])
+            self.assertEqual("air", air_load.deployment_scope)
+            self.assertEqual("prod", prod_load.deployment_scope)
+            self.assertEqual("auto", air_load.ztp_monitor_scope)
+            self.assertEqual("auto", prod_load.ztp_monitor_scope)
             self.assertEqual(
                 "prod", load.parse_args([str(project), "--type", "prod"]).ztp_monitor_scope
             )
@@ -915,6 +1116,16 @@ class TemplateContractTests(unittest.TestCase):
             self.assertTrue(managed["ssh_collect_enabled"])
             self.assertEqual("pending_eth", managed["type"])
             self.assertEqual("192.0.2.21", managed["ip"])
+            managed_issue = next(
+                issue for issue in managed["issues"]
+                if issue["code"] == "ZTP_MANAGED_IDENTITY_PENDING"
+            )["message"]
+            self.assertIn("Native/systemd", managed_issue)
+            self.assertIn("DAY0-Prepare/11-load.py", managed_issue)
+            self.assertIn("Docker/Supervisor", managed_issue)
+            self.assertIn("infra/docker/deploy.sh deploy", managed_issue)
+            self.assertIn("deploy-preloaded <IMAGE_ID>", managed_issue)
+            self.assertIn("source write 后不得 load", managed_issue)
             self.assertFalse(unknown["managed_ztp"])
             self.assertFalse(unknown["ssh_collect_enabled"])
             self.assertEqual("unknown", unknown["type"])
@@ -955,6 +1166,12 @@ class TemplateContractTests(unittest.TestCase):
             self.assertIn('ztp-success ztp-dhcp-dynamic">成功1', rendered)
             self.assertIn("DHCP 重新获取（先绑定）", rendered)
             self.assertIn("需要人工识别", rendered)
+            self.assertIn("Native/systemd", rendered)
+            self.assertIn("DAY0-Prepare/11-load.py", rendered)
+            self.assertIn("Docker/Supervisor", rendered)
+            self.assertIn("infra/docker/deploy.sh deploy", rendered)
+            self.assertIn("deploy-preloaded &lt;IMAGE_ID&gt;", rendered)
+            self.assertIn("source write 后不得 load", rendered)
 
             inventory.write_text(
                 "hostname,type,template,eth0_ip,netmask,eth0_mac\n"
@@ -2284,6 +2501,129 @@ class TemplateContractTests(unittest.TestCase):
             {"ip": "192.0.2.145", "status": "success", "error": ""},
         ], result["attempts"])
 
+    def test_ztp_monitor_probes_all_static_same_subnet_addresses_after_first_success(self):
+        monitor = load_module(
+            "day0_ztp_monitor_multi_address_probe",
+            ROOT / "DAY0-Prepare/12-ztp-monitor.py",
+        )
+        html = load_module(
+            "monitor_ztp_multi_address_green",
+            ROOT / "monitor/generate-monitor-html.py",
+        )
+        calls = []
+
+        def fake_run(command, timeout=20):
+            calls.append(command)
+            return {
+                "returncode": 0,
+                "stdout": (
+                    "__HOSTNAME_BEGIN__\nEXAMPLE-Leaf03\n__HOSTNAME_END__\n"
+                    "__ETH0_MAC_BEGIN__\n02:00:00:00:00:30\n__ETH0_MAC_END__\n"
+                    "__ETH1_MAC_BEGIN__\n\n__ETH1_MAC_END__\n"
+                    "__INTERFACE_MACS_BEGIN__\n"
+                    "eth0=02:00:00:00:00:30\n"
+                    "vlan100=02:00:00:00:00:30\n"
+                    "__INTERFACE_MACS_END__\n"
+                ),
+                "stderr": "",
+            }
+
+        device = {
+            "hostname": "EXAMPLE-Leaf03", "type": "eth", "template": "leaf",
+            "ip": "192.0.2.150", "ssh_user": "cumulus",
+            "ssh_ips": ["192.0.2.150", "192.0.2.145"],
+            "ssh_interfaces": {
+                "192.0.2.150": "eth0", "192.0.2.145": "vlan100",
+            },
+            "mac": "02:00:00:00:00:30", "mac_plain": "020000000030",
+            "candidate_identity": {
+                "192.0.2.150": ("eth0", "020000000030"),
+                "192.0.2.145": ("eth0", "020000000030"),
+            },
+            "stages": {name: monitor.stage() for name in monitor.STAGE_NAMES},
+            "issues": [], "events": [],
+        }
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            monitor, "run_command", side_effect=fake_run,
+        ):
+            result = monitor.collect_switch(
+                device, 2, None, Path(directory) / "known_hosts",
+            )
+
+        self.assertEqual("192.0.2.150", result["connected_ip"])
+        self.assertEqual([
+            {"ip": "192.0.2.150", "status": "success", "error": ""},
+            {"ip": "192.0.2.145", "status": "success", "error": ""},
+        ], result["attempts"])
+        self.assertEqual(2, len(calls))
+        self.assertIn("__ZTP_LOG_BEGIN__", calls[0][-1])
+        self.assertNotIn("__ZTP_LOG_BEGIN__", calls[1][-1])
+
+        monitor.analyze_switch(device, result)
+        device.update({"overall": "success", "progress": {"percent": 100}})
+        rendered = html.render_ztp_status_rows({
+            "available": True,
+            "generated_at": "2026-09-08T12:00:00+08:00",
+            "devices": [device],
+        })
+        self.assertRegex(
+            rendered,
+            r'ztp-ip-success[^>]*>.*eth0:</span> 192\.0\.2\.150</span>',
+        )
+        self.assertRegex(
+            rendered,
+            r'ztp-ip-standby[^>]*>.*vlan100:</span> 192\.0\.2\.145</span>',
+        )
+        self.assertIn("备用管理地址", rendered)
+
+    def test_ztp_secondary_address_must_match_device_identity_before_green(self):
+        monitor = load_module(
+            "day0_ztp_monitor_secondary_identity",
+            ROOT / "DAY0-Prepare/12-ztp-monitor.py",
+        )
+        calls = []
+
+        def fake_run(command, timeout=20):
+            calls.append(command)
+            target = next(part for part in command if part.startswith("cumulus@"))
+            hostname = "EXAMPLE-Leaf03" if target.endswith("192.0.2.150") else "OTHER-Leaf99"
+            return {
+                "returncode": 0,
+                "stdout": (
+                    f"__HOSTNAME_BEGIN__\n{hostname}\n__HOSTNAME_END__\n"
+                    "__ETH0_MAC_BEGIN__\n02:00:00:00:00:30\n__ETH0_MAC_END__\n"
+                    "__ETH1_MAC_BEGIN__\n\n__ETH1_MAC_END__\n"
+                    "__INTERFACE_MACS_BEGIN__\n"
+                    "eth0=02:00:00:00:00:30\n"
+                    "__INTERFACE_MACS_END__\n"
+                ),
+                "stderr": "",
+            }
+
+        device = {
+            "hostname": "EXAMPLE-Leaf03", "type": "eth",
+            "ip": "192.0.2.150", "ssh_user": "cumulus",
+            "ssh_ips": ["192.0.2.150", "192.0.2.145"],
+            "mac_plain": "020000000030",
+            "candidate_identity": {
+                "192.0.2.150": ("eth0", "020000000030"),
+                "192.0.2.145": ("eth0", "020000000030"),
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            monitor, "run_command", side_effect=fake_run,
+        ):
+            result = monitor.collect_switch(
+                device, 2, None, Path(directory) / "known_hosts",
+            )
+
+        self.assertEqual("192.0.2.150", result["connected_ip"])
+        self.assertEqual("success", result["attempts"][0]["status"])
+        self.assertEqual("failed", result["attempts"][1]["status"])
+        self.assertIn("hostname mismatch", result["attempts"][1]["error"])
+        self.assertEqual("EXAMPLE-Leaf03", result["remote_hostname"])
+        self.assertEqual(2, len(calls))
+
     def test_ztp_ip_cell_colors_failed_and_connected_candidates(self):
         html = load_module(
             "monitor_ztp_ip_probe_colors", ROOT / "monitor/generate-monitor-html.py",
@@ -2589,23 +2929,70 @@ class TemplateContractTests(unittest.TestCase):
         self.assertEqual(first, same)
         self.assertNotEqual(first, second)
 
-    def test_monitor_page_has_restricted_start_stop_control(self):
+    def test_monitor_page_separates_ztp_start_stop_from_collection_controls(self):
         html = (ROOT / "monitor/generate-monitor-html.py").read_text(encoding="utf-8")
         ztp_cgi = (ROOT / "monitor/ztp-monitor-control.cgi").read_text(encoding="utf-8")
         switch_cgi = (ROOT / "monitor/switch-collection-control.cgi").read_text(encoding="utf-8")
-        self.assertIn("/cgi-bin/ztp-monitor-control", html)
-        self.assertIn("/cgi-bin/switch-collection-control", html)
+        self.assertIn("/monitor/control/ztp-monitor", html)
+        self.assertIn("/monitor/control/switch-collection", html)
+        self.assertIn("/monitor/control/manual-ztp", html)
+        self.assertNotIn("/cgi-bin/ztp-monitor-control", html)
+        self.assertNotIn("/cgi-bin/switch-collection-control", html)
+        self.assertNotIn("/cgi-bin/manual-ztp-control", html)
+        self.assertIn("credentials: 'same-origin'", html)
         self.assertIn("结束 ZTP 监控", html)
         self.assertIn("开始 ZTP 监控", html)
         self.assertIn("X-Requested-With", html)
         self.assertIn("action not in {\"start\", \"stop\"}", ztp_cgi)
         self.assertNotIn("collect", ztp_cgi)
-        self.assertIn('action not in {"collect", "stop"}', switch_cgi)
+        self.assertIn('len(actions) != 1 or actions[0] not in {', switch_cgi)
+        for action in (
+            "collect", "yaml_backup",
+            "continuous_collection_start", "continuous_collection_stop",
+            "continuous_backup_start", "continuous_backup_stop",
+        ):
+            self.assertIn(f'"{action}"', switch_cgi)
+        self.assertNotIn('"stop"', switch_cgi)
+        self.assertIn(
+            "only a non-interrupting collection request is supported",
+            switch_cgi,
+        )
         self.assertIn("body: `action=${{action}}`", html)
-        self.assertIn("立即收集 Switch Status", html)
-        self.assertIn("停止收集", html)
+        for label in ("信息收集", "配置备份", "持续收集", "持续备份"):
+            self.assertIn(label, html)
         self.assertIn("label.textContent = '收集中'", html)
-        self.assertNotIn("subprocess", ztp_cgi)
+        self.assertIn(
+            'CONTROL_AUTH_PYTHON = Path("/usr/bin/python3")', ztp_cgi,
+        )
+        self.assertIn(
+            'CONTROL_AUTH_HELPER = Path("/usr/local/lib/http-ztp/control-auth.py")',
+            ztp_cgi,
+        )
+        self.assertIn(
+            'CONTROL_AUTH_CACHE_ROOT = Path("/var/lib/http-ztp-monitor-auth")',
+            ztp_cgi,
+        )
+        self.assertIn(
+            'CONTROL_AUTH_CACHE_DIRECTORY_NAME = "monitor-auth"', ztp_cgi,
+        )
+        self.assertNotIn('CONTROL_AUTH_CACHE_ROOT = Path("/tmp")', ztp_cgi)
+        self.assertIn("subprocess.Popen(", ztp_cgi)
+        self.assertIn(
+            'os.fspath(CONTROL_AUTH_PYTHON), "-I", "-B", "-c", capsule,',
+            ztp_cgi,
+        )
+        self.assertIn("pass_fds=(helper_descriptor,)", ztp_cgi)
+        self.assertIn("stdin=subprocess.DEVNULL", ztp_cgi)
+        self.assertIn("env=dict(CONTROL_AUTH_SAFE_ENV)", ztp_cgi)
+        self.assertIn("close_fds=True", ztp_cgi)
+        self.assertIn("CONTROL_AUTH_OUTPUT_LIMIT", ztp_cgi)
+        self.assertIn("CONTROL_AUTH_TIMEOUT_SECONDS", ztp_cgi)
+        self.assertNotIn("shell=True", ztp_cgi)
+        self.assertNotIn("os.system(", ztp_cgi)
+        self.assertNotIn(
+            "[os.fspath(CONTROL_AUTH_PYTHON), os.fspath(CONTROL_AUTH_HELPER)",
+            ztp_cgi,
+        )
         self.assertNotIn("subprocess", switch_cgi)
 
     def test_ztp_control_does_not_recognize_switch_collection_request(self):
@@ -2663,11 +3050,21 @@ class TemplateContractTests(unittest.TestCase):
             self.assertIn('flock "${lock_args[@]}" 200', source)
             self.assertIn("LOCK_WAIT=0", source)
 
-    def test_switch_stop_targets_only_known_collection_scripts(self):
+    def test_switch_stop_boundaries_preserve_continuous_work_until_drain(self):
         source = (ROOT / "monitor/switch-collection-worker.py").read_text(encoding="utf-8")
         self.assertIn("def stop_all_collectors", source)
         self.assertIn("any(argument in scripts for argument in argv)", source)
-        self.assertIn('if claim_request("stop") == "stop"', source)
+        self.assertIn("lane_cancelled(COLLECTION_LANE)", source)
+        self.assertNotIn(
+            'request_lane_stop(COLLECTION_LANE, origin="manual")', source,
+        )
+        self.assertIn("def _finalize_continuous_stop_if_requested", source)
+        self.assertNotIn(
+            'request_lane_stop(COLLECTION_LANE, origin="continuous")', source,
+        )
+        self.assertNotIn(
+            'request_lane_stop(BACKUP_LANE, origin="continuous")', source,
+        )
         self.assertNotIn("pkill", source)
 
     def test_switch_collection_column_reports_success_and_failure(self):
@@ -3493,6 +3890,27 @@ class DhcpUnifiedInventoryContractTests(unittest.TestCase):
             )
             self.assertEqual(first, inventory.read_bytes())
 
+    def test_current_air_topology_replaces_all_previous_air_records(self):
+        records = [
+            {
+                "hostname": "EXAMPLE-Leaf01", "type": "eth",
+                "iface": "eth0", "ip": "192.0.2.10",
+            },
+            {
+                "hostname": "AIR-EXAMPLE-Leaf01", "type": "air",
+                "iface": "eth0", "ip": "192.0.2.10",
+            },
+            {
+                "hostname": "AIR-EXAMPLE-Stale01", "type": "air",
+                "iface": "eth0", "ip": "192.0.2.10",
+            },
+        ]
+
+        retained, removed = self.dhcp.exclude_all_air_records(records)
+
+        self.assertEqual(2, removed)
+        self.assertEqual(["EXAMPLE-Leaf01"], [item["hostname"] for item in retained])
+
     def test_site_prefixed_air_device_may_reuse_resolved_production_ip(self):
         production = {
             "hostname": "EXAMPLE-Staging-Border01", "type": "eth",
@@ -3957,7 +4375,7 @@ class MonitorContractTests(unittest.TestCase):
                 self.assertTrue(first.decision.allowed)
                 first.mark_success()
 
-            clock[0] += 1799
+            clock[0] += 599
             with gate_module.CollectionGate(
                 "/project/a", "air", collection_keys=("air-ethernet",),
                 status_dir=status_dir,
@@ -4414,6 +4832,44 @@ PSU1-Temp-Sensor           28.0           85         63.0      5         ok
         })
         self.assertIn(">成功2</span>", html)
 
+    def test_ztp_status_renders_ib_and_nvl_as_separate_groups(self):
+        def device(hostname, device_type):
+            return {
+                "hostname": hostname,
+                "type": device_type,
+                "ip": "192.0.2.10",
+                "mac": "02:00:00:00:00:10",
+                "stages": {},
+                "overall": "pending",
+                "progress": {"percent": 0},
+                "issues": [],
+            }
+
+        rendered = self.monitor.render_ztp_status_rows({
+            "available": True,
+            "generated_at": "2026-09-06T12:00:00+08:00",
+            "devices": [
+                device("EXAMPLE-IB01", "ib"),
+                device("EXAMPLE-NVL01", "nvl"),
+            ],
+        })
+
+        self.assertEqual("ib", self.monitor.ztp_device_group({"type": "ib"}))
+        self.assertEqual("nvl", self.monitor.ztp_device_group({"type": "nvl"}))
+        self.assertIn('data-group="production__ib"', rendered)
+        self.assertIn('data-group="production__nvl"', rendered)
+        self.assertRegex(
+            rendered,
+            r'data-group="production__ib"[^>]*data-hostname="EXAMPLE-IB01"',
+        )
+        self.assertRegex(
+            rendered,
+            r'data-group="production__nvl"[^>]*data-hostname="EXAMPLE-NVL01"',
+        )
+        self.assertIn(">IB <span>0/1 台</span>", rendered)
+        self.assertIn(">NVL <span>0/1 台</span>", rendered)
+        self.assertNotIn("IB / NVL", rendered)
+
     def test_manual_ztp_dhcp_stage_renders_skipped_round(self):
         html = self.monitor.render_ztp_status_rows({
             "available": True, "generated_at": "2026-08-24T10:00:00+08:00",
@@ -4446,8 +4902,14 @@ PSU1-Temp-Sensor           28.0           85         63.0      5         ok
                 "overall": "running", "progress": {"percent": 10}, "issues": [],
             }],
         })
-        self.assertIn('data-ztp-stage="dhcp"><span class="ztp-state ztp-success">成功3</span>', html)
-        self.assertIn('data-ztp-stage="bootstrap"><span class="ztp-stage-event"', html)
+        self.assertRegex(
+            html,
+            r'data-ztp-stage="dhcp"[^>]*><span class="ztp-state ztp-success">成功3</span>',
+        )
+        self.assertRegex(
+            html,
+            r'data-ztp-stage="bootstrap"[^>]*><span class="ztp-stage-event"',
+        )
         self.assertIn('>等待</span></span>', html)
         self.assertIn('上一轮成功 index=2；等待第 3 轮新证据', html)
 
@@ -4467,7 +4929,7 @@ PSU1-Temp-Sensor           28.0           85         63.0      5         ok
         self.assertNotIn('完成：', html)
         self.assertRegex(
             html,
-            r'data-ztp-stage="complete">.*?ztp-pending">\u7b49\u5f85</span></span>'
+            r'data-ztp-stage="complete"[^>]*>.*?ztp-pending">\u7b49\u5f85</span></span>'
             r'<span class="ztp-event-time">—</span>',
         )
 
@@ -4496,6 +4958,277 @@ PSU1-Temp-Sensor           28.0           85         63.0      5         ok
                 continue
             self.assertTrue((ROOT / target).exists(), href)
         self.assertEqual(runtime_targets, referenced_runtime)
+
+    def test_index_exposes_the_versioned_user_manual(self):
+        text = (ROOT / "index.html").read_text(encoding="utf-8")
+        self.assertIn('href="user-manual.html"', text)
+        self.assertIn("User Manual", text)
+
+    def test_user_manual_has_offline_versioned_chapter_navigation(self):
+        path = ROOT / "user-manual.html"
+        self.assertTrue(path.is_file(), "versioned User Manual page is missing")
+        text = path.read_text(encoding="utf-8")
+        self.assertIn('<input id="manual-search"', text)
+        self.assertIn('<select id="manual-version"', text)
+        self.assertIn('aria-label="用户手册章节"', text)
+        self.assertIn('aria-label="本页目录"', text)
+        self.assertNotRegex(text, r'<(?:script|link)[^>]+(?:src|href)=["\']https?://')
+
+        expected_versions = {
+            "v1": ("V1", "历史版本"),
+            "v2": ("V2", "当前稳定版"),
+            "v3-dev": ("V3-dev", "开发预览"),
+        }
+        self.assertEqual(
+            set(expected_versions),
+            set(re.findall(r'<article[^>]+data-manual-version="([^"]+)"', text)),
+        )
+        for version, (label, state) in expected_versions.items():
+            with self.subTest(version=version):
+                self.assertIn(f'value="{version}"', text)
+                self.assertIn(label, text)
+                self.assertIn(state, text)
+                self.assertGreaterEqual(
+                    len(re.findall(rf'<section[^>]+id="{re.escape(version)}-[^"]+"', text)),
+                    7,
+                )
+
+        self.assertIn("Native/systemd", text)
+        self.assertIn("Docker/Supervisor", text)
+        self.assertIn("Finished-projects", text)
+        self.assertIn("V3-dev 内容不能作为 V2 生产操作依据", text)
+
+    def test_user_manual_left_navigation_has_accessible_subsection_trees(self):
+        text = (ROOT / "user-manual.html").read_text(encoding="utf-8")
+        self.assertIn('data-tree-action="expand"', text)
+        self.assertIn('data-tree-action="collapse"', text)
+        self.assertIn('className = "chapter-subtree"', text)
+        self.assertIn('toggle.setAttribute("aria-expanded"', text)
+        self.assertIn('toggle.setAttribute("aria-controls"', text)
+        self.assertIn("subtree.hidden = !expanded", text)
+
+        anchors = re.findall(
+            r'<[^>]+id="([^"]+)"[^>]+data-nav-title="([^"]+)"[^>]*>',
+            text,
+        )
+        anchor_ids = [anchor_id for anchor_id, _title in anchors]
+        self.assertEqual(len(anchor_ids), len(set(anchor_ids)))
+        self.assertGreaterEqual(len(anchor_ids), 35)
+
+        expected_targets = {
+            "v1-local-prepare", "v1-native-bootstrap", "v1-native-update",
+            "v2-file-catalog", "v2-file-group-day0-prepare",
+            "v2-file-group-infra", "v2-file-group-tools",
+            "v2-script-reference", "v2-script-group-infra",
+            "v2-script-group-tools", "v2-runbook-project-create",
+            "v2-runbook-local-load-proof", "v2-runbook-direct-native-upload",
+            "v2-runbook-relay-native-upload", "v2-runbook-remote-native-load",
+            "v2-runbook-native-acceptance", "v2-runbook-collection-and-backup",
+            "v2-runbook-native-update", "v2-runbook-download-and-import",
+            "v2-runbook-native-unload", "v2-runbook-docker-admission",
+            "v3-finish-native", "v3-finish-docker", "v3-finished-import",
+            "v3-legacy-deployment",
+        }
+        self.assertTrue(expected_targets.issubset(set(anchor_ids)))
+
+        for version in ("v1", "v2", "v3-dev"):
+            start = text.index(f'data-manual-version="{version}"')
+            end = text.index("</article>", start)
+            article = text[start:end]
+            self.assertRegex(article, r'id="[^"]+"[^>]+data-nav-title="[^"]+"')
+
+        self.assertIn("自动展开当前定位项所属章节", text)
+
+    def test_user_manual_orders_directory_scripts_workflows_and_tests(self):
+        text = (ROOT / "user-manual.html").read_text(encoding="utf-8")
+        required_order = {
+            "v1": (
+                "overview", "directories", "scripts", "workflow",
+                "scenario-local", "scenario-deploy", "scenario-operate",
+                "scenario-update", "testing", "troubleshoot",
+            ),
+            "v2": (
+                "overview", "directories", "scripts", "workflow",
+                "scenario-prepare", "scenario-native", "scenario-docker",
+                "scenario-air", "scenario-update", "scenario-results",
+                "testing", "troubleshoot",
+            ),
+            "v3-dev": (
+                "overview", "directories", "scripts", "workflow",
+                "architecture", "finish", "import", "sharing", "report",
+                "compatibility", "validation",
+            ),
+        }
+        for version, suffixes in required_order.items():
+            with self.subTest(version=version):
+                positions = [text.index(f'id="{version}-{suffix}"') for suffix in suffixes]
+                self.assertEqual(sorted(positions), positions)
+
+        for version in required_order:
+            start = text.index(f'data-manual-version="{version}"')
+            end = text.index("</article>", start)
+            article = text[start:end]
+            for path in ("DAY0-Prepare/", "tools/", "monitor/", "test_cases/"):
+                with self.subTest(version=version, path=path):
+                    self.assertIn(path, article)
+
+    def test_user_manual_starts_each_version_with_release_notes(self):
+        text = (ROOT / "user-manual.html").read_text(encoding="utf-8")
+        predecessors = {"v1": "初始基线", "v2": "相对 V1", "v3-dev": "相对 V2"}
+        categories = (
+            "修复的问题", "架构变化", "新增功能或场景",
+            "裁剪或废弃", "依然存在的问题",
+        )
+        for version, predecessor in predecessors.items():
+            start = text.index(f'data-manual-version="{version}"')
+            end = text.index("</article>", start)
+            article = text[start:end]
+            first_section = article.split("<section", 1)[1].split("</section>", 1)[0]
+            with self.subTest(version=version):
+                self.assertIn("Release Notes", first_section)
+                self.assertIn(predecessor, first_section)
+                for category in categories:
+                    self.assertIn(category, first_section)
+
+    def test_user_manual_names_each_supported_scenario_and_its_boundary(self):
+        text = (ROOT / "user-manual.html").read_text(encoding="utf-8")
+        expected = {
+            "v1": {
+                "local-prepare", "native-bootstrap", "native-update",
+                "results-unload",
+            },
+            "v2": {
+                "local-proof", "native-bootstrap", "docker-bootstrap",
+                "air-ethernet", "scoped-production", "native-update",
+                "docker-update", "relay-deploy", "results-unload",
+            },
+            "v3-dev": {
+                "finish-native", "finish-docker", "finished-import",
+                "legacy-without-footprint",
+            },
+        }
+        for version, scenarios in expected.items():
+            start = text.index(f'data-manual-version="{version}"')
+            end = text.index("</article>", start)
+            article = text[start:end]
+            actual = set(re.findall(r'data-scenario="([^"]+)"', article))
+            with self.subTest(version=version):
+                self.assertEqual(scenarios, actual)
+
+        self.assertIn("预期结果", text)
+        self.assertIn("失败恢复", text)
+        self.assertIn("验收证据", text)
+
+    def test_user_manual_documents_each_operator_script_with_usage_metadata(self):
+        text = (ROOT / "user-manual.html").read_text(encoding="utf-8")
+        expected = {
+            "v1": {
+                "DAY0-Prepare/01-a-setup.py", "DAY0-Prepare/02-unsetup.py",
+                "DAY0-Prepare/11-load.py", "DAY0-Prepare/12-ztp-monitor.py",
+                "DAY0-Prepare/13-unload.py", "tools/tar-for-upload.py",
+                "tools/sync-code.py", "tools/tar-for-download.py",
+                "tools/import-from-download.py", "tools/collect-ztp-diagnostics.py",
+                "infra/deploy_infra.py", "infra/check_infra.py",
+                "ztp/manual-ztp.py", "ztp/manual-reset.py",
+            },
+            "v2": {
+                "DAY0-Prepare/01-a-setup.py", "DAY0-Prepare/02-unsetup.py",
+                "DAY0-Prepare/11-load.py", "DAY0-Prepare/12-ztp-monitor.py",
+                "DAY0-Prepare/13-unload.py", "tools/tar-for-upload.py",
+                "tools/deploy-upload-archive.py", "tools/sync-code.py",
+                "tools/tar-for-download.py", "tools/import-from-download.py",
+                "tools/collect-ztp-diagnostics.py", "tools/password-update.py",
+                "tools/package-project-image.py", "tools/package-shared-artifacts.py",
+                "tools/deploy-shared-artifacts.py", "infra/deploy_infra.py",
+                "infra/check_infra.py", "infra/infra-setup.sh",
+                "infra/infra-teardown.sh", "infra/docker/deploy.sh",
+                "ztp/manual-ztp.py", "ztp/manual-reset.py",
+                "ztp/backup/yaml-collect.py", "test_cases/run_related_tests.py",
+                "test_cases/run_vm_validation.py",
+            },
+            "v3-dev": {
+                "tools/finish-project.py", "tools/tar-for-download.py",
+                "tools/import-from-download.py", "DAY0-Prepare/13-unload.py",
+                "infra/docker/deploy.sh",
+            },
+        }
+        for version, scripts in expected.items():
+            start = text.index(f'data-manual-version="{version}"')
+            end = text.index("</article>", start)
+            article = text[start:end]
+            actual = set(re.findall(r'data-script="([^"]+)"', article))
+            with self.subTest(version=version):
+                self.assertEqual(scripts, actual)
+            for script in scripts:
+                row_match = re.search(
+                    rf'<tr data-script="{re.escape(script)}">(.*?)</tr>',
+                    article,
+                    flags=re.DOTALL,
+                )
+                with self.subTest(version=version, script=script):
+                    self.assertIsNotNone(row_match)
+                row = row_match.group(1)
+                for field in ("用途", "运行位置", "使用场景", "典型用法", "直接执行"):
+                    with self.subTest(version=version, script=script, field=field):
+                        self.assertIn(field, row)
+
+    def test_v2_user_manual_has_copyable_end_to_end_operator_runbooks(self):
+        text = (ROOT / "user-manual.html").read_text(encoding="utf-8")
+        start = text.index('data-manual-version="v2"')
+        end = text.index("</article>", start)
+        article = text[start:end]
+        expected = {
+            "project-create", "local-load-proof", "direct-native-upload",
+            "relay-native-upload", "remote-native-load", "native-acceptance",
+            "native-update", "collection-and-backup", "download-and-import",
+            "native-unload", "docker-admission",
+        }
+        runbooks = {
+            match.group(1): match.group(2)
+            for match in re.finditer(
+                r'<div[^>]*data-runbook="([^"]+)"[^>]*>(.*?)</div>\s*<!-- end runbook -->',
+                article,
+                flags=re.DOTALL,
+            )
+        }
+        self.assertEqual(expected, set(runbooks))
+        for runbook, body in runbooks.items():
+            plain = " ".join(re.sub(r"<[^>]+>", " ", body).split())
+            with self.subTest(runbook=runbook):
+                for field in (
+                    "执行位置", "前置条件", "操作命令", "成功判据",
+                    "失败处理", "下一步",
+                ):
+                    self.assertIn(field, plain)
+                self.assertGreaterEqual(len(plain), 260)
+
+        required_commands = (
+            "01-a-setup.py DAY0-Prepare/&lt;project&gt; --create",
+            "11-load.py DAY0-Prepare/&lt;project&gt; --prod --switch eth",
+            "run_related_tests.py --check --require-full",
+            "tar-for-upload.py DAY0-Prepare/&lt;project&gt;",
+            "--deploy-uploaded DAY0-Prepare/dumps/",
+            "deploy-upload-archive.py /tmp/&lt;relay-directory&gt;/",
+            "cd /var/www/html",
+            "--start-services --start-ztp-monitor",
+            "sync-code.py DAY0-Prepare/&lt;project&gt;",
+            "tar-for-download.py DAY0-Prepare/&lt;project&gt;",
+            "import-from-download.py &lt;download.tar.gz&gt; --review-only",
+            "13-unload.py DAY0-Prepare/&lt;project&gt; --dry-run",
+        )
+        for command in required_commands:
+            with self.subTest(command=command):
+                self.assertIn(command, article)
+
+        self.assertEqual(
+            [str(number) for number in range(1, 11)],
+            re.findall(r"<h3>Runbook (\d+)：", article),
+            "operator runbooks must read in the same numbered order as the page",
+        )
+
+        docker = runbooks["docker-admission"]
+        self.assertIn("尚未完成成功的端到端真机验收", docker)
+        self.assertIn("禁止作为已支持生产流程复制执行", docker)
 
     def test_eth_archive_environment_metadata_is_authoritative(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -4860,6 +5593,28 @@ class ManualZtpContractTests(unittest.TestCase):
             {"hostname": "EXAMPLE-TAN-Leaf01", "type": "eth"},
             {"hostname": "EXAMPLE-IB-Leaf01", "type": "ib"},
         ]
+
+    def test_runtime_recovery_guidance_does_not_force_native_load(self):
+        guidance = self.manual.UNIFIED_LOAD_RECOVERY
+        self.assertIn("按当前后端重新执行统一 load 事务", guidance)
+        self.assertIn("Native/systemd", guidance)
+        self.assertIn("DAY0-Prepare/11-load.py", guidance)
+        self.assertIn("Docker/Supervisor", guidance)
+        self.assertIn("infra/docker/deploy.sh deploy", guidance)
+        self.assertIn("deploy-preloaded <IMAGE_ID>", guidance)
+        self.assertIn("infra/docker/deploy.sh load", guidance)
+        self.assertIn("没有 source write", guidance)
+        source = (ROOT / "ztp/manual-ztp.py").read_text(encoding="utf-8")
+        self.assertGreaterEqual(source.count("UNIFIED_LOAD_RECOVERY"), 7)
+        for stale in (
+            "请先完整执行 11-load.py",
+            "请重新执行 11-load.py",
+            "请等待或重新执行 11-load.py",
+            "请先更新 02-devices_config.csv 并完整执行 11-load.py",
+            "请先修复生成问题并完整执行 11-load.py",
+        ):
+            with self.subTest(stale=stale):
+                self.assertNotIn(stale, source)
 
     def test_positional_patterns_and_type_expand_to_deduplicated_devices(self):
         selected = self.manual.select_devices(
@@ -5245,7 +6000,7 @@ class ManualZtpContractTests(unittest.TestCase):
                 self.manual.validate_host_key_refresh_policy(args, devices)
 
     def test_refresh_host_key_help_states_production_identity_risk(self):
-        help_text = self.manual.parser().format_help()
+        help_text = " ".join(self.manual.parser().format_help().split())
         self.assertIn("--refresh-host-key", help_text)
         self.assertIn("高风险显式授权", help_text)
         self.assertIn("Production", help_text)
@@ -6062,9 +6817,15 @@ class ManualZtpContractTests(unittest.TestCase):
         command = self.worker.command_for(
             "AIR-EXAMPLE-Leaf01", "air", "time-sync", "op-1", "trigger-1",
         )
+        self.assertEqual(str(ROOT / "ztp/manual-ztp.py"), command[1])
         self.assertIn("--operation", command)
         self.assertIn("time-sync", command)
-        self.assertNotIn("date", " ".join(command))
+        self.assertEqual([
+            "--operation", "time-sync",
+            "--operation-id", "op-1",
+            "--trigger-id", "trigger-1",
+        ], command[-6:])
+        self.assertNotIn("date", {Path(argument).name for argument in command})
 
     def test_time_sync_helper_discovers_and_validates_runtime_vrfs(self):
         source = (ROOT / "ztp/templates/ztp-bootstrap.sh").read_text(
@@ -6133,11 +6894,11 @@ class ManualZtpContractTests(unittest.TestCase):
         self.assertIn('data-reset-reboot-observed="false"', html)
         self.assertRegex(
             html,
-            r'data-ztp-stage="dhcp">.*?ztp-pending">等待1</span>',
+            r'data-ztp-stage="dhcp"[^>]*>.*?ztp-pending">等待1</span>',
         )
         self.assertRegex(
             html,
-            r'data-ztp-stage="complete">.*?ztp-pending">等待1</span>',
+            r'data-ztp-stage="complete"[^>]*>.*?ztp-pending">等待1</span>',
         )
         self.assertNotIn("完成：", html)
         self.assertIn("来源：页面重置", html)
@@ -6157,11 +6918,11 @@ class ManualZtpContractTests(unittest.TestCase):
         })
         self.assertRegex(
             html,
-            r'data-ztp-stage="dhcp">.*?ztp-success">成功1</span>',
+            r'data-ztp-stage="dhcp"[^>]*>.*?ztp-success">成功1</span>',
         )
         self.assertRegex(
             html,
-            r'data-ztp-stage="bootstrap">.*?ztp-pending">等待1</span>',
+            r'data-ztp-stage="bootstrap"[^>]*>.*?ztp-pending">等待1</span>',
         )
 
         legacy_device = {

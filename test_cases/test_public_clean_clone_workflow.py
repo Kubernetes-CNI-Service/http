@@ -131,6 +131,8 @@ Q02 公开提交的测试边界遵循以下五点合同：
 5. `tracked_support` 仅列出已跟踪且未被 ignore 的支持文件，不得吸收 ignored 或 untracked 路径。
 """
 Q02_BASE_REVISION = "133f985ad4b5bd2d8d90713a51bb01f23bc7d89c"
+Q02_PHASE_REVISION = "623bf4ec48203c3c02a3d0bf79271d6c4c637a2a"
+Q02_PHASE_MANIFEST_SHA256 = "320e6489cf041eca71af44b192657b10d5bf06c27391d179739a4b57f33dfd54"
 Q02_BASE_README_SHA256 = "ecad054661280bdfe5d92a300ca44b17a861c674bff77042a45a5b00de321795"
 Q02_PHASE_README_SHA256 = "9df3ef0f9851c7b4622ca358bbfb9d2abca2fea2884b4023c0245fedc4b46c47"
 Q02_PHASE_MAPPING_DIGESTS = {
@@ -364,21 +366,29 @@ def _expected_q02_staged_overlay_paths(indexed_readme_snapshot) -> set[str]:
     return expected
 
 
+def _fixed_q02_overlay_snapshot(repository: Path) -> dict[str, bytes]:
+    snapshot = {
+        relative: _tree_blob_bytes(repository, relative, Q02_PHASE_REVISION)
+        for relative in Q02_PHASE_OVERLAY_PATHS
+    }
+    if hashlib.sha256(
+        snapshot["test_cases/script_test_manifest.json"]
+    ).hexdigest() != Q02_PHASE_MANIFEST_SHA256:
+        raise AssertionError("fixed Q02 manifest bytes drift")
+    if hashlib.sha256(
+        snapshot["test_cases/README.md"]
+    ).hexdigest() != Q02_PHASE_README_SHA256:
+        raise AssertionError("fixed Q02 README bytes drift")
+    return snapshot
+
+
 def _copy_candidate_overlay(
-    destination: Path, relative: Path, indexed_readme_snapshot=None,
+    destination: Path, relative: Path, overlay_snapshot: dict[str, bytes],
 ) -> None:
     target = destination / relative
     target.parent.mkdir(parents=True, exist_ok=True)
-    if relative.as_posix() == "test_cases/README.md":
-        if indexed_readme_snapshot is None:
-            raise AssertionError("Q02 README overlay requires one stable index snapshot")
-        _record, indexed_readme = indexed_readme_snapshot
-        target.write_bytes(indexed_readme)
-        target.chmod(0o644)
-        return
-    source = ROOT / relative
-    shutil.copyfile(source, target, follow_symlinks=False)
-    target.chmod(stat.S_IMODE(source.lstat().st_mode))
+    target.write_bytes(overlay_snapshot[relative.as_posix()])
+    target.chmod(0o644)
 
 
 def _tree_paths(repository: Path, revision: str = "HEAD") -> set[str]:
@@ -982,12 +992,10 @@ class PublicCleanCloneWorkflowTests(unittest.TestCase):
                 check=True,
             )
             self.assertEqual(Q02_BASE_REVISION, base_revision.stdout.strip())
-            indexed_readme_snapshot = _index_regular_blob(
-                ROOT, "test_cases/README.md",
-            )
+            overlay_snapshot = _fixed_q02_overlay_snapshot(ROOT)
             for relative in Q02_PHASE_OVERLAY_PATHS:
                 _copy_candidate_overlay(
-                    candidate, Path(relative), indexed_readme_snapshot,
+                    candidate, Path(relative), overlay_snapshot,
                 )
             subprocess.run(
                 ["git", "add", "--", *Q02_PHASE_OVERLAY_PATHS], cwd=candidate,
@@ -999,7 +1007,7 @@ class PublicCleanCloneWorkflowTests(unittest.TestCase):
                 check=True,
             )
             self.assertEqual(
-                _expected_q02_staged_overlay_paths(indexed_readme_snapshot),
+                set(Q02_PHASE_OVERLAY_PATHS),
                 set(staged.stdout.splitlines()),
             )
             subprocess.run(
@@ -1218,17 +1226,25 @@ class PublicCleanCloneWorkflowTests(unittest.TestCase):
                 cwd=candidate, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 check=True,
             )
-            indexed_readme_snapshot = _index_regular_blob(
-                ROOT, "test_cases/README.md",
-            )
+            overlay_snapshot = _fixed_q02_overlay_snapshot(ROOT)
             for relative in Q02_PHASE_OVERLAY_PATHS:
                 _copy_candidate_overlay(
-                    candidate, Path(relative), indexed_readme_snapshot,
+                    candidate, Path(relative), overlay_snapshot,
                 )
             phase_manifest = _q02_phase_manifest_fixture(candidate)
-            (candidate / "test_cases/script_test_manifest.json").write_text(
-                json.dumps(phase_manifest, indent=2, ensure_ascii=False) + "\n",
-                encoding="utf-8",
+            phase_manifest_bytes = (
+                json.dumps(phase_manifest, indent=2, ensure_ascii=False) + "\n"
+            ).encode("utf-8")
+            self.assertEqual(
+                overlay_snapshot["test_cases/script_test_manifest.json"],
+                phase_manifest_bytes,
+            )
+            self.assertEqual(
+                Q02_PHASE_MANIFEST_SHA256,
+                hashlib.sha256(phase_manifest_bytes).hexdigest(),
+            )
+            (candidate / "test_cases/script_test_manifest.json").write_bytes(
+                phase_manifest_bytes,
             )
             subprocess.run(
                 ["git", "add", "--", *Q02_PHASE_OVERLAY_PATHS], cwd=candidate,
@@ -1240,7 +1256,7 @@ class PublicCleanCloneWorkflowTests(unittest.TestCase):
                 check=True,
             )
             self.assertEqual(
-                _expected_q02_staged_overlay_paths(indexed_readme_snapshot),
+                set(Q02_PHASE_OVERLAY_PATHS),
                 set(staged.stdout.splitlines()),
             )
             subprocess.run(

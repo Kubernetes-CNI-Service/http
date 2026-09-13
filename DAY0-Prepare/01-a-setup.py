@@ -10,6 +10,7 @@
   python3 01-a-setup.py --dry-run <...>      # 只显示操作，不实际创建
   python3 01-a-setup.py --strict --dry-run <...>  # 部署前严格校验占位文件
   python3 01-a-setup.py --p2p-file=<文件名> <...> # 多个 P2P XLSX 时明确选择 P2P 源
+  python3 01-a-setup.py --create <项目文件夹名>   # 只初始化新项目，不激活
 
 映射规则（输入文件用文件链接，输出目录用目录链接，输出文件先在项目中创建空文件再链接）。
 """
@@ -20,8 +21,10 @@ import csv
 import glob
 import ipaddress
 import os
+from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -49,12 +52,12 @@ from project_contract import (
     normalize_v2_mlag_policy,
     normalize_v2_vrr_policy,
     parse_device_csv_layout,
-    parse_terminal_l2_ports,
     require_device_csv_row_width,
     validate_ztp_url_prefix,
     v2_vrr_ipv4_plan,
 )
 from deployment_lock import DeploymentLockError, deployment_lock
+from ztp_service_runtime import RuntimeContractError, stop_native_ztp_monitors
 ZTP          = os.path.normpath(os.path.join(HERE, "..", "ztp"))
 TEMPLATE_DIR = os.path.join(HERE, "template")                # DAY0-Prepare/template/
 IMAGE_DIR    = os.path.join(HTTP_BASE, "image")               # 项目无关的共享系统镜像
@@ -162,8 +165,11 @@ _P2P_FILE = None   # --p2p-file 指定的项目根目录 XLSX
 _P2P_SOURCE = None # 本次 setup 选定的唯一 P2P 源
 _LINK_ERRORS = 0   # 本次 setup 中所有固定/动态链接错误数
 _LINK_TRANSACTION = None  # 当前 setup 的整批链接回滚快照
+_CONFIRM_PROJECT_SWITCH = False  # 自动化对跨项目切换的独立显式确认
 
 MANIFEST_FILE = os.path.join(ZTP, ".setup_manifest")  # setup 创建的链接清单
+MAX_DISCOVERY_METADATA_BYTES = 4 * 1024 * 1024
+OUTPUT_USAGE_WARNING_BYTES = 10 * 1024 * 1024 * 1024
 
 RESET = "\033[0m"
 GREEN = "\033[32m"
@@ -433,7 +439,9 @@ def _image_platform(filename):
     lower = filename.lower()
     if "cumulus" in lower:
         return "cumulus"
-    if "nvos" in lower:
+    if re.fullmatch(r"nvosv[0-9]+-[0-9]+-[0-9]+amd64[.]bin", filename):
+        return "nvos"
+    if re.fullmatch(r"nvos-amd64-[0-9]+[.][0-9]+[.][0-9]+[.]bin", filename):
         return "nvos"
     return None
 
@@ -443,13 +451,18 @@ def _shared_image_pairs():
     pairs = []
     for src in sorted(glob.glob(os.path.join(IMAGE_DIR, "*.bin"))):
         platform = _image_platform(os.path.basename(src))
-        if platform:
+        try:
+            regular = stat.S_ISREG(os.lstat(src).st_mode)
+        except OSError:
+            regular = False
+        if platform and regular:
             pairs.append((os.path.join(ZTP, "image", platform, os.path.basename(src)), src))
     return pairs
 
 
 def _process_bin_files():
     """把 http/image/ 中的共享镜像链接到 ztp/image/cumulus|nvos/。"""
+    global _LINK_ERRORS
     bins = sorted(glob.glob(os.path.join(IMAGE_DIR, "*.bin")))
     if not bins:
         print(_c(YELLOW, f"  [MISS] {IMAGE_DIR}/ 下未找到 .bin 镜像文件"))
@@ -459,6 +472,16 @@ def _process_bin_files():
         platform = _image_platform(fname)
         if not platform:
             print(_c(YELLOW, f"  [WARN] 无法识别镜像平台，跳过：image/{fname}"))
+            continue
+        try:
+            metadata = os.lstat(src)
+        except OSError as exc:
+            print(_c(RED, f"  [ERROR] 无法检查共享镜像 image/{fname}：{exc}"))
+            _LINK_ERRORS += 1
+            continue
+        if not stat.S_ISREG(metadata.st_mode):
+            print(_c(RED, f"  [ERROR] 共享镜像必须是普通文件，跳过：image/{fname}"))
+            _LINK_ERRORS += 1
             continue
         img_dir = os.path.join(ZTP, "image", platform)
         if not _DRY_RUN:
@@ -761,6 +784,17 @@ _MONITOR_SPECS = [
 ]
 
 
+def _monitor_inventory_link_pairs():
+    """Return fixed collector aliases pointing at the active network CSV links."""
+    return [
+        (
+            os.path.join(HTTP_BASE, net_type, "monitor", csv_name),
+            os.path.join(HTTP_BASE, net_type, csv_name),
+        )
+        for net_type, csv_name, *_outputs in _MONITOR_SPECS
+    ]
+
+
 def _process_net_csv_links(proj_dir):
     """在 ethernet/、infiniband/、nvlink/ 目录下创建 CSV 符号链接，指向项目 CSV 文件。"""
     csv_base = _CSV_DIR or proj_dir
@@ -809,6 +843,18 @@ def _legacy_project_monitor_csv_links(proj_dir):
 
 def _process_monitor_links(proj_dir):
     """创建当前项目的监控目录、日志和所有项目相关监控链接。"""
+    global _LINK_ERRORS
+    for link_path, target_path in _monitor_inventory_link_pairs():
+        if not os.path.isfile(target_path):
+            print(_c(
+                RED,
+                f"  [ERROR] 监控清单入口不存在："
+                f"{os.path.relpath(target_path, HTTP_BASE)}",
+            ))
+            _LINK_ERRORS += 1
+            continue
+        _make_exact_link(link_path, target_path)
+
     monitor_root = os.path.join(proj_dir, "99-output-monitor")
     ztp_status = os.path.join(proj_dir, "99-output-ztp")
     if _DRY_RUN:
@@ -1082,9 +1128,9 @@ def _validate_v2_bond_contract(bond_ports, bond_types, bond_macs,
         port_specs = []
     if not port_specs:
         if not _vna(raw_types):
-            errors.append("bond_type 已填写，但 bond_ports 为空")
+            warnings.append("bond_type 已填写，但 bond_ports 为空")
         if not _vna(raw_macs):
-            errors.append("bond_mac 已填写，但 bond_ports 为空")
+            warnings.append("bond_mac 已填写，但 bond_ports 为空")
         normalized_types = []
         aligned_macs = []
     else:
@@ -1911,14 +1957,6 @@ def _validate_eth_csv(path):
                 return errors, warnings
             fixed_indices = layout.fixed_indices
             vrl_col = fixed_indices.get("vrl")
-            terminal_l2_ports_col = layout.policy_indices.get(
-                "terminal_l2_ports",
-            )
-            if schema_version == 2 and terminal_l2_ports_col is None:
-                warnings.append(
-                    "  schema 2 devices_config.csv 未包含 terminal_l2_ports；"
-                    "不会自动启用终端 STP，请迁移到显式 allowlist"
-                )
             evpn_group_width = 9 if schema_version == 2 else len(_EVPN_COLUMNS)
             evpn_starts = layout.evpn_group_starts
 
@@ -1976,20 +2014,6 @@ def _validate_eth_csv(path):
                 is_nvos  = row_type in _NVOS_TYPES
                 is_server = row_type in _SERVER_TYPES
                 is_air = row_type in _AIR_TYPES
-
-                if terminal_l2_ports_col is not None:
-                    try:
-                        terminal_l2_ports = parse_terminal_l2_ports(
-                            row[terminal_l2_ports_col],
-                        )
-                    except ValueError as exc:
-                        e(row_n, hn, str(exc))
-                        terminal_l2_ports = ()
-                    if terminal_l2_ports and row_type not in _ETH_TYPES:
-                        e(
-                            row_n, hn,
-                            "terminal_l2_ports 只允许 Ethernet 交换机填写",
-                        )
 
                 # ── 共有字段校验（eth0、eth1 管理接口、MAC）────────────────────
                 if len(row) < _COL_ETH0_IP + 1:
@@ -2827,6 +2851,7 @@ def _unsetup_previous(proj_dir):
     candidates.extend(lp for lp, _ in _bringup_link_pairs(proj_dir))
     candidates.extend(lp for lp, _ in _analyzer_input_pairs(proj_dir))
     candidates.extend(lp for lp, _ in _analyzer_output_pairs(proj_dir))
+    candidates.extend(lp for lp, _ in _monitor_inventory_link_pairs())
     legacy_monitor_csv = set(_legacy_project_monitor_csv_links(proj_dir))
     candidates.extend(legacy_monitor_csv)
     candidates.extend(lp for lp, _ in _NET_CSV_LINKS)
@@ -2855,28 +2880,15 @@ def _unsetup_previous(proj_dir):
     seen = set(); to_del = [lp for lp in to_del if not (lp in seen or seen.add(lp))]
 
     if not to_del:
-        return
+        return True
 
     print(_c(YELLOW, f"\n── 清理上一个项目遗留链接（共 {len(to_del)} 个）────────────────────"))
     for lp in to_del:
         rel = os.path.relpath(lp, HTTP_BASE)
         print(f"  {rel}  →  {os.readlink(lp)}")
 
-    if _DRY_RUN or _AUTO_YES:
-        if not _DRY_RUN:
-            print(_c(YELLOW, "自动删除（-y 模式）…"))
-    else:
-        if not sys.stdin.isatty():
-            print(_c(YELLOW, "非交互终端不删除遗留链接；请使用 -y 明确确认"))
-            return
-        try:
-            ans = input(f"\n删除以上 {len(to_del)} 个遗留链接？[Y/n] ").strip().lower()
-        except EOFError:
-            print(_c(YELLOW, "未获得确认，保留遗留链接"))
-            return
-        if ans in ("n", "no"):
-            print(_c(YELLOW, "已跳过清理，继续 setup…"))
-            return
+    if not _authorize_project_switch(proj_dir, len(to_del)):
+        return False
 
     for lp in to_del:
         rel = os.path.relpath(lp, HTTP_BASE)
@@ -2885,6 +2897,49 @@ def _unsetup_previous(proj_dir):
         else:
             os.remove(lp)
             print(_c(GREEN, f"  [DEL] {rel}"))
+    return True
+
+
+def _authorize_project_switch(proj_dir, affected_count):
+    """Require a distinct acknowledgement before deleting another project.
+
+    ``-y`` remains appropriate for repairing links which already belong to the
+    selected project, but it is deliberately not authority to retire links for
+    a different project.  The load orchestrator supplies the dedicated flag
+    after naming and validating its target; an interactive operator must type
+    the complete word ``yes``.
+    """
+    if _DRY_RUN:
+        print(_c(
+            CYAN,
+            "  [DRY] 跨项目切换需要完整输入 yes；当前仅预览，不删除链接",
+        ))
+        return True
+    if _CONFIRM_PROJECT_SWITCH:
+        print(_c(
+            YELLOW,
+            "已收到独立的跨项目切换确认；"
+            f"将为 {os.path.basename(proj_dir)} 更新 {affected_count} 个链接",
+        ))
+        return True
+    if not sys.stdin.isatty():
+        print(_c(
+            RED,
+            "非交互终端拒绝跨项目切换；完整 load 必须显式传递 "
+            "--confirm-project-switch",
+        ))
+        return False
+    try:
+        answer = input(
+            f"\n确认切换到 {os.path.basename(proj_dir)} 并更新 "
+            f"{affected_count} 个其他项目链接？请输入 yes："
+        ).strip().casefold()
+    except EOFError:
+        answer = ""
+    if answer != "yes":
+        print(_c(RED, "未输入完整 yes，已取消跨项目切换"))
+        return False
+    return True
 
 
 # ── 冲突检测 ──────────────────────────────────────────────────────────────────
@@ -2928,6 +2983,7 @@ def _collect_expected_links(proj_dir):
     # 网络类型 CSV 链接
     for link_path, _ in _NET_CSV_LINKS:
         links.append(link_path)
+    links.extend(link_path for link_path, _ in _monitor_inventory_link_pairs())
 
     # 项目监控归档、采集目录和汇总页面链接
     links.extend(link_path for link_path, _ in _monitor_link_paths(proj_dir))
@@ -2966,23 +3022,8 @@ def _check_conflicts(proj_dir):
         print(f"  {os.path.relpath(link_path, HTTP_BASE)}")
         print(f"      → {cur_target}")
 
-    if _DRY_RUN or _AUTO_YES:
-        if not _DRY_RUN:
-            print(_c(YELLOW, "自动删除（-y 模式）…"))
-        do_delete = True
-    else:
-        if not sys.stdin.isatty():
-            print(_c(RED, "非交互终端不删除冲突链接；请使用 -y 明确确认"))
-            return False
-        try:
-            ans = input("\n是否先删除这些链接再为当前项目创建新链接？[Y/n] ").strip().lower()
-        except EOFError:
-            print(_c(RED, "未获得确认，已取消"))
-            return False
-        do_delete = ans not in ("n", "no")
-
-    if not do_delete:
-        print(_c(RED, "已取消，请手动处理冲突链接后重新运行 setup.py"))
+    if not _authorize_project_switch(proj_dir, len(conflicts)):
+        print(_c(RED, "已取消，请确认目标项目后重新运行 setup.py"))
         return False
 
     for link_path, _, _ in conflicts:
@@ -3105,7 +3146,8 @@ def _setup_impl(proj_dir):
     canonical_p2p = _ensure_project_p2p_link(proj_dir, _P2P_SOURCE)
     if not canonical_p2p:
         sys.exit(1)
-    _unsetup_previous(proj_dir)
+    if not _unsetup_previous(proj_dir):
+        sys.exit(1)
 
     if not _check_conflicts(proj_dir):
         sys.exit(1)
@@ -3177,6 +3219,11 @@ def _setup_impl(proj_dir):
     errors = _LINK_ERRORS
     print(f"\n完成：固定映射创建 {linked} 个、跳过 {skipped} 个、"
           f"缺失 {missing} 个、错误 {errors} 个；动态文件和监控链接已逐项处理")
+    try:
+        usage = measure_output_usage(Path(proj_dir))
+        print(format_output_usage(proj_dir, usage))
+    except ValueError as exc:
+        print(_c(YELLOW, f"[WARN] 无法安全统计 99-output-* 容量：{exc}"))
     if missing:
         print(_c(YELLOW, "提示：缺失的可选文件可后续补充后重新运行 setup.py"))
     if errors:
@@ -3300,13 +3347,365 @@ def _print_next_steps(proj_dir):
         print(_c(CYAN, "\n  填写完成后，请再次执行 01-a-setup.py 确保所有项目文件被正确链接。"))
 
 
+def _read_bounded_regular_text(path, label, maximum=MAX_DISCOVERY_METADATA_BYTES):
+    """Read one stable single-link regular file without following aliases."""
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0),
+        )
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or before.st_size > maximum
+        ):
+            raise ValueError(
+                f"{label} 必须是 single-link 普通文件且不超过 {maximum} 字节"
+            )
+        remaining = before.st_size
+        chunks = []
+        while remaining:
+            chunk = os.read(descriptor, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        after = os.fstat(descriptor)
+        identity = lambda item: (
+            item.st_dev, item.st_ino, item.st_size,
+            getattr(item, "st_mtime_ns", int(item.st_mtime * 1_000_000_000)),
+        )
+        if remaining or identity(before) != identity(after):
+            raise ValueError(f"{label} 在读取期间发生变化")
+        try:
+            return b"".join(chunks).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"{label} 不是 UTF-8 文本") from exc
+    except OSError as exc:
+        raise ValueError(f"无法安全读取 {label} {path}: {exc}") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _require_project_contract(project):
+    """Return one direct real DAY0 project with the three canonical inputs."""
+    day0 = Path(HERE)
+    candidate = Path(project)
+    try:
+        day0_meta = day0.lstat()
+        project_meta = candidate.lstat()
+        canonical_day0 = day0.resolve(strict=True)
+        canonical = candidate.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(f"项目合同无效：{candidate}: {exc}") from exc
+    if not stat.S_ISDIR(day0_meta.st_mode):
+        raise ValueError(f"DAY0-Prepare 必须是真实目录：{day0}")
+    if (
+        not stat.S_ISDIR(project_meta.st_mode)
+        or canonical.parent != canonical_day0
+        or candidate.absolute() != canonical
+        or canonical.name == "template"
+    ):
+        raise ValueError(f"项目必须是 DAY0-Prepare 的直接真实子目录：{candidate}")
+    for name in (
+        "01-global.yaml", "02-devices_config.csv",
+        "02-dhcp-subnet_config.csv",
+    ):
+        path = canonical / name
+        try:
+            metadata = path.lstat()
+            resolved = path.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise ValueError(f"项目缺少安全核心输入 {name}: {exc}") from exc
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or resolved.parent != canonical
+        ):
+            raise ValueError(f"项目核心输入必须是目录内 single-link 普通文件：{path}")
+    return canonical
+
+
+def _require_exact_identity_link(link, target, label, target_directory=False):
+    try:
+        link_meta = link.lstat()
+        target_meta = target.lstat()
+        raw = os.readlink(link)
+        resolved = link.resolve(strict=True)
+        expected = target.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(f"活动项目身份无效（{label}）：{exc}") from exc
+    target_ok = (
+        stat.S_ISDIR(target_meta.st_mode)
+        if target_directory else
+        stat.S_ISREG(target_meta.st_mode) and target_meta.st_nlink == 1
+    )
+    expected_raw = os.path.relpath(target, link.parent)
+    if (
+        not stat.S_ISLNK(link_meta.st_mode)
+        or link_meta.st_nlink != 1
+        or raw != expected_raw
+        or resolved != expected
+        or not target_ok
+    ):
+        raise ValueError(
+            f"活动项目身份无效（{label}）：expected={expected_raw}, actual={raw}"
+        )
+
+
+def inspect_active_project():
+    """Validate and return the exact setup-managed active project identity."""
+    text = _read_bounded_regular_text(MANIFEST_FILE, "setup manifest")
+    lines = text.splitlines()
+    prefix = "# setup manifest — proj: "
+    if not lines or not lines[0].startswith(prefix):
+        raise ValueError("活动项目身份无效：setup manifest header 缺失")
+    project = _require_project_contract(Path(lines[0][len(prefix):]))
+    root = Path(HTTP_BASE).resolve(strict=True)
+    manifest_links = []
+    seen = set()
+    for value in lines[1:]:
+        if not value or value in seen:
+            raise ValueError("活动项目身份无效：setup manifest 含空行或重复链接")
+        link = Path(value)
+        if not link.is_absolute() or os.path.normpath(value) != value:
+            raise ValueError(f"活动项目身份无效：manifest 链接不是规范绝对路径：{value}")
+        try:
+            link.parent.resolve(strict=True).relative_to(root)
+            metadata = link.lstat()
+            raw = os.readlink(link)
+            resolved = link.resolve(strict=True)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise ValueError(f"活动项目身份无效（managed link {link}）：{exc}") from exc
+        if (
+            not stat.S_ISLNK(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or os.path.isabs(raw)
+            or os.path.normpath(raw) != raw
+        ):
+            raise ValueError(f"活动项目身份无效：managed link 不安全：{link}")
+        shared_targets = {
+            Path(source).resolve(strict=True)
+            for _published, source in _shared_image_pairs()
+        }
+        if not (
+            resolved == project
+            or project in resolved.parents
+            or resolved in shared_targets
+        ):
+            raise ValueError(f"活动项目身份无效：managed link 逃逸目标项目：{link}")
+        seen.add(value)
+        manifest_links.append(link)
+
+    ztp = Path(ZTP)
+    anchors = {
+        ztp / "config/cumulus/template/01-global.yaml": (
+            project / "01-global.yaml", "global", False,
+        ),
+        ztp / "config/cumulus/template/02-devices_config.csv": (
+            project / "02-devices_config.csv", "inventory", False,
+        ),
+        ztp / "config/isc-dhcp-server/02-subnet_config.csv": (
+            project / "02-dhcp-subnet_config.csv", "DHCP subnet", False,
+        ),
+        ztp / "status": (project / "99-output-ztp", "status", True),
+    }
+    manifest_set = set(manifest_links)
+    if not set(anchors).issubset(manifest_set):
+        raise ValueError("活动项目身份无效：setup manifest 缺少核心身份链接")
+    for link, (target, label, is_directory) in anchors.items():
+        _require_exact_identity_link(
+            link, target, label, target_directory=is_directory,
+        )
+    return {
+        "project": project,
+        "managed_link_count": len(manifest_links),
+    }
+
+
+def _measure_directory(descriptor, display, result):
+    with os.scandir(descriptor) as entries:
+        for entry in entries:
+            relative = f"{display}/{entry.name}" if display else entry.name
+            try:
+                metadata = entry.stat(follow_symlinks=False)
+            except OSError as exc:
+                result["unsafe"].append(f"{relative}: {exc}")
+                continue
+            if stat.S_ISLNK(metadata.st_mode):
+                result["skipped_links"] += 1
+            elif stat.S_ISREG(metadata.st_mode):
+                if metadata.st_nlink != 1:
+                    result["unsafe"].append(f"{relative}: hardlink count={metadata.st_nlink}")
+                else:
+                    result["bytes"] += metadata.st_size
+                    result["files"] += 1
+            elif stat.S_ISDIR(metadata.st_mode):
+                child = -1
+                try:
+                    child = os.open(
+                        entry.name,
+                        os.O_RDONLY
+                        | getattr(os, "O_DIRECTORY", 0)
+                        | getattr(os, "O_CLOEXEC", 0)
+                        | getattr(os, "O_NOFOLLOW", 0),
+                        dir_fd=descriptor,
+                    )
+                    _measure_directory(child, relative, result)
+                except OSError as exc:
+                    result["unsafe"].append(f"{relative}: {exc}")
+                finally:
+                    if child >= 0:
+                        os.close(child)
+            else:
+                result["unsafe"].append(f"{relative}: special file")
+
+
+def measure_output_usage(project):
+    """Measure 99-output-* trees via no-follow directory descriptors."""
+    canonical = _require_project_contract(Path(project))
+    result = {"bytes": 0, "files": 0, "skipped_links": 0, "unsafe": []}
+    for child in sorted(canonical.iterdir(), key=lambda item: item.name.casefold()):
+        if not child.name.startswith("99-output"):
+            continue
+        try:
+            metadata = child.lstat()
+        except OSError as exc:
+            result["unsafe"].append(f"{child.name}: {exc}")
+            continue
+        if stat.S_ISLNK(metadata.st_mode):
+            result["skipped_links"] += 1
+            continue
+        if not stat.S_ISDIR(metadata.st_mode):
+            result["unsafe"].append(f"{child.name}: not a real directory")
+            continue
+        descriptor = -1
+        try:
+            descriptor = os.open(
+                child,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+            )
+            _measure_directory(descriptor, child.name, result)
+        except OSError as exc:
+            result["unsafe"].append(f"{child.name}: {exc}")
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+    return result
+
+
+def _human_bytes(value):
+    if value < 1024:
+        return f"{value} B"
+    for suffix in ("KiB", "MiB", "GiB", "TiB"):
+        value /= 1024
+        if value < 1024 or suffix == "TiB":
+            return f"{value:.1f} {suffix}"
+    raise AssertionError("unreachable")
+
+
+def format_output_usage(project, usage):
+    level = "WARN" if usage["bytes"] >= OUTPUT_USAGE_WARNING_BYTES else "INFO"
+    message = (
+        f"[{level}] {Path(project).name} 的 99-output-* 累计 "
+        f"{_human_bytes(usage['bytes'])} / {usage['files']} files；"
+        f"跳过 {usage['skipped_links']} 个链接。"
+    )
+    if usage["unsafe"]:
+        message += " 未计入不安全对象：" + "；".join(usage["unsafe"])
+    if level == "WARN":
+        message += (
+            f" 已超过容量提示阈值 {_human_bytes(OUTPUT_USAGE_WARNING_BYTES)}；"
+            "本工具不会自动删除任何历史输出。"
+        )
+    return message
+
+
+def discover_projects():
+    """List only direct real children satisfying the runtime project contract."""
+    active = None
+    try:
+        active = inspect_active_project()["project"]
+    except ValueError:
+        pass
+    projects = []
+    with os.scandir(HERE) as iterator:
+        entries = sorted(iterator, key=lambda item: item.name.casefold())
+    for entry in entries:
+        if entry.name == "template" or entry.name.startswith("."):
+            continue
+        if not entry.is_dir(follow_symlinks=False):
+            continue
+        try:
+            project = _require_project_contract(Path(entry.path))
+            usage = measure_output_usage(project)
+        except ValueError:
+            continue
+        projects.append({
+            "name": project.name,
+            "project": project,
+            "active": project == active,
+            "output_usage": usage,
+        })
+    return projects
+
+
+def _print_active_status():
+    identity = inspect_active_project()
+    project = identity["project"]
+    print(
+        f"[ACTIVE] {project.name}: {identity['managed_link_count']} managed links"
+    )
+    print(format_output_usage(project, measure_output_usage(project)))
+
+
+def _print_project_list():
+    projects = discover_projects()
+    if not projects:
+        print("[INFO] 未发现满足完整项目合同的目录")
+        return
+    for item in projects:
+        marker = " [ACTIVE]" if item["active"] else ""
+        print(f"{item['name']}{marker}")
+        print("  " + format_output_usage(item["project"], item["output_usage"]))
+
+
 def _parse_args(argv=None):
     parser = argparse.ArgumentParser(
-        description="校验并激活一个 DAY0 项目，创建全套运行时软链接。"
+        description="校验并激活一个 DAY0 项目，创建全套运行时软链接。",
+        epilog="完整、受支持的操作流程见仓库根目录 USER_MANUAL.md。",
     )
-    parser.add_argument("project", help="DAY0-Prepare 下的项目名或项目绝对路径")
+    parser.add_argument(
+        "project", nargs="?", help="DAY0-Prepare 下的项目名或项目绝对路径",
+    )
+    discovery = parser.add_mutually_exclusive_group()
+    discovery.add_argument(
+        "--status", action="store_true",
+        help="只读验证并显示当前 active 项目和 managed-link 身份",
+    )
+    discovery.add_argument(
+        "--list-projects", action="store_true",
+        help="只读列出满足完整项目合同的项目",
+    )
+    parser.add_argument(
+        "--create", action="store_true",
+        help="只从模板初始化一个不存在的项目并退出，不创建或切换运行时链接",
+    )
     parser.add_argument("-y", action="store_true", dest="auto_yes",
-                        help="自动确认覆盖或删除 setup 管理的旧链接")
+                        help="自动确认目标项目内的普通修复；不授权跨项目切换")
+    parser.add_argument(
+        "--confirm-project-switch", action="store_true",
+        help="显式确认跨项目切换；供已验证目标的完整 load 自动化使用",
+    )
     parser.add_argument("--force", action="store_true",
                         help="忽略输入校验错误继续（独立于 -y）")
     parser.add_argument("--strict", action="store_true",
@@ -3317,7 +3716,16 @@ def _parse_args(argv=None):
                         help="从指定目录读取 devices_config.csv")
     parser.add_argument("--p2p-file",
                         help="明确选择项目根目录或 p2p/ 下的 P2P XLSX")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.status or args.list_projects:
+        if args.project is not None or any((
+            args.create, args.auto_yes, args.confirm_project_switch,
+            args.force, args.strict, args.dry_run, args.csv_dir, args.p2p_file,
+        )):
+            parser.error("--status/--list-projects 是独立只读动作，不能组合变更参数")
+    elif args.project is None:
+        parser.error("必须指定 project，或使用 --status/--list-projects")
+    return args
 
 
 def _main_locked(args):
@@ -3341,31 +3749,71 @@ def _main_locked(args):
 
     proj_dir = os.path.realpath(proj_dir)
     if not os.path.isdir(proj_dir):
+        if not getattr(args, "create", False):
+            print(_c(
+                RED,
+                f"[ERROR] 项目目录不存在：{proj_dir}；"
+                "请核对拼写，或显式使用 --create 只初始化新项目",
+            ))
+            return 1
         if _DRY_RUN:
             print(_c(CYAN, f"  [DRY] mkdir {proj_dir}"))
-            print(_c(YELLOW, "  [DRY] 项目目录不存在，跳过文件校验"))
-            return 0
         else:
-            os.makedirs(proj_dir, exist_ok=True)
+            os.makedirs(proj_dir, exist_ok=False)
             print(_c(GREEN, f"[MKDIR] 项目目录已创建：{proj_dir}"))
+        _initialize_project_from_template(proj_dir)
+        if _DRY_RUN:
+            print(_c(
+                CYAN,
+                "[DRY] 实际 --create 将初始化项目后退出，不会激活或切换任何链接",
+            ))
+        else:
+            print(_c(
+                GREEN,
+                f"[CREATED] 项目已创建但未激活：{proj_dir}",
+            ))
+            print(_c(
+                CYAN,
+                "请补齐并验证项目输入，然后不带 --create 再次运行 01-a-setup.py。",
+            ))
+        return 0
+    if getattr(args, "create", False):
+        print(_c(
+            RED,
+            f"[ERROR] --create 只接受不存在的项目；目录已经存在：{proj_dir}",
+        ))
+        return 1
 
+    if not _DRY_RUN:
+        stop_native_ztp_monitors(HTTP_BASE)
     setup(proj_dir)
     return 0
 
 
 def main(argv=None):
-    global _AUTO_YES, _DRY_RUN, _FORCE, _STRICT
+    global _AUTO_YES, _DRY_RUN, _FORCE, _STRICT, _CONFIRM_PROJECT_SWITCH
 
     args = _parse_args(argv)
+    if getattr(args, "status", False) or getattr(args, "list_projects", False):
+        try:
+            if getattr(args, "status", False):
+                _print_active_status()
+            else:
+                _print_project_list()
+            return 0
+        except (OSError, RuntimeError, ValueError) as exc:
+            print(_c(RED, f"[ERROR] 只读项目发现失败：{exc}"))
+            return 1
     _DRY_RUN = args.dry_run
     _AUTO_YES = args.auto_yes
     _FORCE = args.force
     _STRICT = args.strict
+    _CONFIRM_PROJECT_SWITCH = args.confirm_project_switch
     try:
         with deployment_lock(HTTP_BASE, dry_run=_DRY_RUN):
             return _main_locked(args)
-    except DeploymentLockError as exc:
-        print(_c(RED, f"[ERROR] 部署锁不可用：{exc}"))
+    except (DeploymentLockError, RuntimeContractError) as exc:
+        print(_c(RED, f"[ERROR] 部署/Monitor 写前保护失败：{exc}"))
         return 1
 
 

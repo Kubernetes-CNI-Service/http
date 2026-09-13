@@ -2,6 +2,8 @@
 """Direct contracts for public/private docs and clean-checkout governance."""
 
 import ast
+from contextlib import contextmanager
+import hashlib
 import importlib
 import json
 import os
@@ -14,6 +16,9 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "test_cases/script_test_manifest.json"
+Q02_PHASE_REVISION = "623bf4ec48203c3c02a3d0bf79271d6c4c637a2a"
+Q02_PHASE_MANIFEST_SHA256 = "320e6489cf041eca71af44b192657b10d5bf06c27391d179739a4b57f33dfd54"
+Q02_PHASE_README_SHA256 = "9df3ef0f9851c7b4622ca358bbfb9d2abca2fea2884b4023c0245fedc4b46c47"
 PRIVATE_MODULE = "test_cases/test_private_documentation_contract.py"
 EXPECTED_PRIVATE_DOCUMENT_PATHS = (
     "README.md",
@@ -268,6 +273,42 @@ def _git(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+@contextmanager
+def fixed_q02_checkout():
+    with tempfile.TemporaryDirectory(prefix="http-fixed-q02-") as directory:
+        checkout = Path(directory) / "checkout"
+        cloned = subprocess.run(
+            ["git", "clone", "--quiet", "--no-local", ROOT, checkout],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            check=False,
+        )
+        if cloned.returncode != 0:
+            raise AssertionError(cloned.stderr)
+        selected = subprocess.run(
+            ["git", "checkout", "--quiet", "--detach", Q02_PHASE_REVISION],
+            cwd=checkout, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, check=False,
+        )
+        if selected.returncode != 0:
+            raise AssertionError(selected.stderr)
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=checkout,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            check=True,
+        ).stdout.strip()
+        if head != Q02_PHASE_REVISION:
+            raise AssertionError(f"unexpected Q02 revision: {head}")
+        manifest_bytes = (
+            checkout / "test_cases/script_test_manifest.json"
+        ).read_bytes()
+        readme_bytes = (checkout / "test_cases/README.md").read_bytes()
+        if hashlib.sha256(manifest_bytes).hexdigest() != Q02_PHASE_MANIFEST_SHA256:
+            raise AssertionError("fixed Q02 manifest bytes drift")
+        if hashlib.sha256(readme_bytes).hexdigest() != Q02_PHASE_README_SHA256:
+            raise AssertionError("fixed Q02 README bytes drift")
+        yield checkout, json.loads(manifest_bytes)
+
+
 class _PrivateReadScanner(ast.NodeVisitor):
     READ_METHODS = {"read_text", "read_bytes", "open"}
 
@@ -436,29 +477,29 @@ def individual_skip_calls(source: str) -> list[str]:
 
 class PublicCleanCloneDirectTests(unittest.TestCase):
     def test_q02_phase_modules_have_one_repository_governance_suite(self):
-        manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
-        memberships = {
-            module: [
-                suite["id"] for suite in manifest["test_suites"]
-                if module in suite["tests"]
-            ]
-            for module in Q02_PHASE_TEST_MODULES
-        }
-        self.assertEqual(
-            {module: ["repository-governance"] for module in Q02_PHASE_TEST_MODULES},
-            memberships,
-        )
-        p_memberships = {
-            module: [
-                suite["id"] for suite in manifest["test_suites"]
-                if module in suite["tests"]
-            ]
-            for module in P_PHASE_TEST_MODULES
-        }
-        self.assertEqual(
-            {module: [] for module in P_PHASE_TEST_MODULES}, p_memberships,
-            "P-phase modules must not be registered in the Q02 manifest",
-        )
+        with fixed_q02_checkout() as (_checkout, manifest):
+            memberships = {
+                module: [
+                    suite["id"] for suite in manifest["test_suites"]
+                    if module in suite["tests"]
+                ]
+                for module in Q02_PHASE_TEST_MODULES
+            }
+            self.assertEqual(
+                {module: ["repository-governance"] for module in Q02_PHASE_TEST_MODULES},
+                memberships,
+            )
+            p_memberships = {
+                module: [
+                    suite["id"] for suite in manifest["test_suites"]
+                    if module in suite["tests"]
+                ]
+                for module in P_PHASE_TEST_MODULES
+            }
+            self.assertEqual(
+                {module: [] for module in P_PHASE_TEST_MODULES}, p_memberships,
+                "P-phase modules must not be registered in the Q02 manifest",
+            )
 
     def test_q02_manifest_excludes_private_and_future_publication_paths(self):
         self.assertEqual(8, len(Q01_PUBLIC_DOCUMENT_PATHS))
@@ -470,57 +511,59 @@ class PublicCleanCloneDirectTests(unittest.TestCase):
                 Q02_FUTURE_TRACKED_SUPPORT_PATHS
             ),
         )
-        manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
-        self.assertEqual(
-            set(), q02_manifest_violations(manifest),
-            "Q02 manifest must not publish USER_MANUAL.md, the future 29-path "
-            "support set, or the seven Q05 lifecycle paths",
-        )
+        with fixed_q02_checkout() as (_checkout, manifest):
+            self.assertEqual(
+                set(), q02_manifest_violations(manifest),
+                "Q02 manifest must not publish USER_MANUAL.md, the future 29-path "
+                "support set, or the seven Q05 lifecycle paths",
+            )
 
     def test_q02_manifest_rejects_each_readded_future_authority(self):
-        manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
-        manifest["tracked_support"] = [
-            path for path in manifest["tracked_support"]
-            if path not in {"USER_MANUAL.md", *Q02_FUTURE_TRACKED_SUPPORT_PATHS}
-        ]
-        self.assertEqual(set(), q02_manifest_violations(manifest))
-        for relative in (
-            "USER_MANUAL.md",
-            *Q02_FUTURE_TRACKED_SUPPORT_PATHS,
-            *Q05_V2_FORBIDDEN_LIFECYCLE_PATHS,
-        ):
-            with self.subTest(path=relative):
-                candidate = json.loads(json.dumps(manifest))
-                candidate["tracked_support"].append(relative)
-                self.assertEqual(
-                    {relative}, q02_manifest_violations(candidate),
-                )
+        with fixed_q02_checkout() as (_checkout, manifest):
+            manifest["tracked_support"] = [
+                path for path in manifest["tracked_support"]
+                if path not in {"USER_MANUAL.md", *Q02_FUTURE_TRACKED_SUPPORT_PATHS}
+            ]
+            self.assertEqual(set(), q02_manifest_violations(manifest))
+            for relative in (
+                "USER_MANUAL.md",
+                *Q02_FUTURE_TRACKED_SUPPORT_PATHS,
+                *Q05_V2_FORBIDDEN_LIFECYCLE_PATHS,
+            ):
+                with self.subTest(path=relative):
+                    candidate = json.loads(json.dumps(manifest))
+                    candidate["tracked_support"].append(relative)
+                    self.assertEqual(
+                        {relative}, q02_manifest_violations(candidate),
+                    )
 
     def test_q02_remaining_tracked_support_is_exact_nonignored_and_safe(self):
-        manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
-        remaining = set(manifest["tracked_support"]) - {
-            "USER_MANUAL.md", *Q02_FUTURE_TRACKED_SUPPORT_PATHS,
-        }
-        self.assertEqual(70, len(Q02_REMAINING_TRACKED_SUPPORT_PATHS))
-        self.assertEqual(set(Q02_REMAINING_TRACKED_SUPPORT_PATHS), remaining)
-        self.assertEqual(
-            set(Q02_TRACKED_SUPPORT_SYMLINK_TARGETS),
-            {
-                relative for relative in remaining
-                if (ROOT / relative).is_symlink()
-            },
-        )
-        self.assertEqual(set(), q02_tracked_support_violations(ROOT, manifest))
+        with fixed_q02_checkout() as (checkout, manifest):
+            remaining = set(manifest["tracked_support"]) - {
+                "USER_MANUAL.md", *Q02_FUTURE_TRACKED_SUPPORT_PATHS,
+            }
+            self.assertEqual(70, len(Q02_REMAINING_TRACKED_SUPPORT_PATHS))
+            self.assertEqual(set(Q02_REMAINING_TRACKED_SUPPORT_PATHS), remaining)
+            self.assertEqual(
+                set(Q02_TRACKED_SUPPORT_SYMLINK_TARGETS),
+                {
+                    relative for relative in remaining
+                    if (checkout / relative).is_symlink()
+                },
+            )
+            self.assertEqual(
+                set(), q02_tracked_support_violations(checkout, manifest),
+            )
 
-        swapped = json.loads(json.dumps(manifest))
-        removed = Q02_REMAINING_TRACKED_SUPPORT_PATHS[0]
-        swapped["tracked_support"].remove(removed)
-        swapped["tracked_support"].append(Q02_UNEXPECTED_TRACKED_SUPPORT)
-        self.assertEqual(
-            {removed, Q02_UNEXPECTED_TRACKED_SUPPORT},
-            q02_tracked_support_violations(ROOT, swapped),
-            "same-count replacement by another safe tracked file must fail",
-        )
+            swapped = json.loads(json.dumps(manifest))
+            removed = Q02_REMAINING_TRACKED_SUPPORT_PATHS[0]
+            swapped["tracked_support"].remove(removed)
+            swapped["tracked_support"].append(Q02_UNEXPECTED_TRACKED_SUPPORT)
+            self.assertEqual(
+                {removed, Q02_UNEXPECTED_TRACKED_SUPPORT},
+                q02_tracked_support_violations(checkout, swapped),
+                "same-count replacement by another safe tracked file must fail",
+            )
 
         with tempfile.TemporaryDirectory() as directory:
             hostile = Path(directory)
