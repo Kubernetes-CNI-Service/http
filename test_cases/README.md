@@ -214,3 +214,14 @@ PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -m unittest discover -s test_case
 
 该测试套件只做快速契约检查。发布前还应执行 Python/Bash 语法检查、setup/load dry-run、
 临时目录生成/发布流程，以及 `ubuntu:24.04` 容器中的 infra setup/teardown。
+
+
+## Q02 公开/私有测试分层
+
+Q02 公开提交的测试边界遵循以下五点合同：
+
+1. 公开测试只读取 Git 已跟踪且未被 ignore 的公开文件，不依赖本地私有文档。
+2. 私有层固定精确 23 条文档清单，`PrivateDocumentationContractTests.setUpClass` 是唯一 class-level 整层门禁；全部缺失时仅以 `unittest.SkipTest("private documentation tier absent in public checkout")` 恰好 skip 一次，部分缺失时硬失败，全部存在时全部运行。
+3. 禁止按单个私有文件 skip，也禁止把私有文档复制进公开候选树。
+4. no-local clean clone 是唯一承重语义证据；AST guard 仅用于防御纵深，不能替代 clean clone，也不能单独作为通过证据。
+5. `tracked_support` 仅列出已跟踪且未被 ignore 的支持文件，不得吸收 ignored 或 untracked 路径。
