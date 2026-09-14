@@ -444,8 +444,8 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
         <p>本目录由 <code>tools/update-user-manual.py</code> 从 Git tracked 与非忽略文件生成；每个受维护文件必须有独立说明。大量项目数据、镜像、缓存与运行输出按路径模式说明，不把二进制内容嵌入网页。</p>
         <!-- BEGIN GENERATED USER MANUAL FILE CATALOG -->
         <div class="catalog-summary">
-          <span><strong>322</strong> 个受维护文件</span>
-          <span><strong>22</strong> 个根级分组</span>
+          <span><strong>332</strong> 个受维护文件</span>
+          <span><strong>23</strong> 个根级分组</span>
           <span>清单范围：Git tracked + untracked/nonignored</span>
         </div>
         <h4 id="v2-runtime-data" data-nav-title="运行与大型数据目录">被忽略的大型数据与运行目录</h4>
@@ -507,6 +507,18 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="DAY0-Prepare/template/p2p/README.txt"><td><code>DAY0-Prepare/template/p2p/README.txt</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：将客户提供的多个 P2P Excel 版本放在本目录，文件名必须包含 p2p（忽略大小写）。 <strong>维护/生成责任：</strong>文档维护者随行为变更同步更新；生成索引不得手工改写生成块。</td></tr>
           </tbody></table></div>
         </details>
+        <details id="v2-file-group-docs" data-nav-title="docs/ 文件" class="catalog-group">
+          <summary><code>docs/</code> — 7 个文件</summary>
+          <div><table class="file-catalog"><thead><tr><th>文件</th><th>说明</th></tr></thead><tbody>
+            <tr data-file-path="docs/README.md"><td><code>docs/README.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：文档中心。 <strong>维护/生成责任：</strong>文档维护者随行为变更同步更新；生成索引不得手工改写生成块。</td></tr>
+            <tr data-file-path="docs/architecture/README.md"><td><code>docs/architecture/README.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：架构与数据边界。 <strong>维护/生成责任：</strong>文档维护者随行为变更同步更新；生成索引不得手工改写生成块。</td></tr>
+            <tr data-file-path="docs/deployment/BUNDLE_WORKFLOWS.md"><td><code>docs/deployment/BUNDLE_WORKFLOWS.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：四类交付制品与 2026-12 部署流程。 <strong>维护/生成责任：</strong>文档维护者随行为变更同步更新；生成索引不得手工改写生成块。</td></tr>
+            <tr data-file-path="docs/deployment/README.md"><td><code>docs/deployment/README.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：部署模式与受控发布。 <strong>维护/生成责任：</strong>文档维护者随行为变更同步更新；生成索引不得手工改写生成块。</td></tr>
+            <tr data-file-path="docs/operations/README.md"><td><code>docs/operations/README.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：运行与恢复。 <strong>维护/生成责任：</strong>文档维护者随行为变更同步更新；生成索引不得手工改写生成块。</td></tr>
+            <tr data-file-path="docs/reference/README.md"><td><code>docs/reference/README.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：参考索引。 <strong>维护/生成责任：</strong>文档维护者随行为变更同步更新；生成索引不得手工改写生成块。</td></tr>
+            <tr data-file-path="docs/validation/README.md"><td><code>docs/validation/README.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：验证与验收。 <strong>维护/生成责任：</strong>文档维护者随行为变更同步更新；生成索引不得手工改写生成块。</td></tr>
+          </tbody></table></div>
+        </details>
         <details id="v2-file-group-ethernet" data-nav-title="ethernet/ 文件" class="catalog-group">
           <summary><code>ethernet/</code> — 5 个文件</summary>
           <div><table class="file-catalog"><thead><tr><th>文件</th><th>说明</th></tr></thead><tbody>
@@ -549,7 +561,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </tbody></table></div>
         </details>
         <details id="v2-file-group-infra" data-nav-title="infra/ 文件" class="catalog-group">
-          <summary><code>infra/</code> — 23 个文件</summary>
+          <summary><code>infra/</code> — 24 个文件</summary>
           <div><table class="file-catalog"><thead><tr><th>文件</th><th>说明</th></tr></thead><tbody>
             <tr data-file-path="infra/apache-publication-boundary/README.md"><td><code>infra/apache-publication-boundary/README.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：Apache 静态发布边界与信任模型。 <strong>维护/生成责任：</strong>文档维护者随行为变更同步更新；生成索引不得手工改写生成块。</td></tr>
             <tr data-file-path="infra/check_infra.py"><td><code>infra/check_infra.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Collect infra execution logs and health status from CSV server devices。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
@@ -558,6 +570,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="infra/docker/.gitignore"><td><code>infra/docker/.gitignore</code></td><td><strong>类别：</strong>构建/仓库配置；<strong>作用：</strong>属于“Native 基础设施与 Docker/Supervisor 运行时”的 .gitignore，由该目录的 README、上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infra/docker/Dockerfile"><td><code>infra/docker/Dockerfile</code></td><td><strong>类别：</strong>构建/仓库配置；<strong>作用：</strong>Ubuntu 24.04 HTTP ZTP 容器镜像定义，安装运行依赖并固定镜像合同。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infra/docker/Dockerfile.dockerignore"><td><code>infra/docker/Dockerfile.dockerignore</code></td><td><strong>类别：</strong>仓库支持文件；<strong>作用：</strong>属于“Native 基础设施与 Docker/Supervisor 运行时”的 Dockerfile.dockerignore，由该目录的 README、上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
+            <tr data-file-path="infra/docker/README.md"><td><code>infra/docker/README.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：Ubuntu 22.04/24.04 Docker 管理服务器。 <strong>维护/生成责任：</strong>文档维护者随行为变更同步更新；生成索引不得手工改写生成块。</td></tr>
             <tr data-file-path="infra/docker/activate.py"><td><code>infra/docker/activate.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Fail-closed runtime activation for the host-network ZTP container。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infra/docker/apache-ztp.conf"><td><code>infra/docker/apache-ztp.conf</code></td><td><strong>类别：</strong>配置/模板；<strong>作用：</strong>容器 Apache 虚拟主机、CGI 与公开/私有路径边界。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infra/docker/compose.yaml"><td><code>infra/docker/compose.yaml</code></td><td><strong>类别：</strong>配置/模板；<strong>作用：</strong>Docker Compose 表达的容器用户、网络、bind、tmpfs、capability 和 health 合同。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
@@ -623,7 +636,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </tbody></table></div>
         </details>
         <details id="v2-file-group-test-cases" data-nav-title="test_cases/ 文件" class="catalog-group">
-          <summary><code>test_cases/</code> — 89 个文件</summary>
+          <summary><code>test_cases/</code> — 91 个文件</summary>
           <div><table class="file-catalog"><thead><tr><th>文件</th><th>说明</th></tr></thead><tbody>
             <tr data-file-path="test_cases/CASE_TEMPLATE.md"><td><code>test_cases/CASE_TEMPLATE.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>新增真机/破坏性验证案例时必须填写的证据模板。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/CHANGE_AWARE_TESTING.md"><td><code>test_cases/CHANGE_AWARE_TESTING.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：脚本变更影响测试。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -688,6 +701,8 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="test_cases/test_public_clean_clone_workflow.py"><td><code>test_cases/test_public_clean_clone_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Workflow proof for the public test surface in a private-doc-free checkout。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_public_project_fixture_contract.py"><td><code>test_cases/test_public_project_fixture_contract.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct contracts for the sanitized project fixture used by public tests。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_public_project_fixture_workflow.py"><td><code>test_cases/test_public_project_fixture_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Real packaging workflow driven by the sanitized public project fixture。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_public_publication_contract.py"><td><code>test_cases/test_public_publication_contract.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct contracts for the final Q01 publication phase on v2。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_public_publication_workflow.py"><td><code>test_cases/test_public_publication_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Clean-clone workflow for the final Q01 publication phase on v2。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_public_repository_contract.py"><td><code>test_cases/test_public_repository_contract.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Contract tests for the fail-closed public Git repository audit。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_public_s_phase_contract.py"><td><code>test_cases/test_public_s_phase_contract.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct contracts for the reviewed S integration phase。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_public_s_phase_workflow.py"><td><code>test_cases/test_public_s_phase_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>No-local-clone workflow proof for the reviewed S integration phase。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -932,7 +947,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
         <p>以下参考覆盖当前工作树中的每个 Python、Shell 与 CGI 文件，包括操作入口、内部库、worker、设备端脚本和开发测试。先看“是否直接运行”，再复制示例；内部组件不得脱离所属事务单独执行。</p>
         <!-- BEGIN GENERATED USER MANUAL SCRIPT REFERENCE -->
         <div class="catalog-summary">
-          <span><strong>203</strong> 个脚本型文件</span>
+          <span><strong>205</strong> 个脚本型文件</span>
           <span><strong>9</strong> 个功能分组</span>
           <span>每项均含运行、输入输出、示例与恢复合同</span>
         </div>
@@ -1627,7 +1642,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>readlink nvlink/monitor/sw-link.sh  # 预期解析到 ../../ethernet/monitor/sw-link.sh</code></pre></div>
         </details>
-        <h4 id="v2-script-group-test-cases" data-nav-title="test_cases/ 脚本">test_cases/ — 83 个脚本</h4>
+        <h4 id="v2-script-group-test-cases" data-nav-title="test_cases/ 脚本">test_cases/ — 85 个脚本</h4>
         <details data-script-reference="test_cases/__init__.py" class="script-reference">
           <summary><code>test_cases/__init__.py</code> — Canonical executable regression and integration test case package。</summary>
           <div class="script-body"><dl>
@@ -2653,6 +2668,42 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </dl>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_public_project_fixture_workflow</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_public_publication_contract.py" class="script-reference">
+          <summary><code>test_cases/test_public_publication_contract.py</code> — Direct contracts for the final Q01 publication phase on v2。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Direct contracts for the final Q01 publication phase on v2。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_public_publication_contract</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_public_publication_contract</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_public_publication_workflow.py" class="script-reference">
+          <summary><code>test_cases/test_public_publication_workflow.py</code> — Clean-clone workflow for the final Q01 publication phase on v2。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Clean-clone workflow for the final Q01 publication phase on v2。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_public_publication_workflow</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_public_publication_workflow</code></pre></div>
         </details>
         <details data-script-reference="test_cases/test_public_repository_contract.py" class="script-reference">
           <summary><code>test_cases/test_public_repository_contract.py</code> — Contract tests for the fail-closed public Git repository audit。</summary>
@@ -4886,7 +4937,7 @@ sudo python3 DAY0-Prepare/11-load.py DAY0-Prepare/&lt;project&gt; \
             <div><strong>执行位置</strong>仅限隔离 Docker 验证 VM；不要在当前生产管理服务器照抄部署命令。</div>
             <div><strong>前置条件</strong>必须先有针对当前源码与目标平台重新构建的冻结 image、完整测试门禁、独立批准 runner 和可恢复的 VM 验证计划。</div>
           </div>
-          <p><strong>操作命令</strong>当前没有批准给生产操作员复制执行的 Docker 部署命令。只读审查可以阅读 <code>deploy.sh --help</code> 和 REAL_ENVIRONMENT 案例，但不得据此宣称容器部署成功。</p>
+          <p><strong>操作命令</strong>当前没有批准给生产操作员复制执行的 Docker 部署命令。只读审查可以阅读 <code>infra/docker/README.md</code>、<code>deploy.sh --help</code> 和 REAL_ENVIRONMENT 案例，但不得据此宣称容器部署成功。</p>
           <p><strong>破坏性确认边界</strong>隔离验证中的 <code>unload/down</code> 必须在首个写入前打印 project、scope、immutable container ID 和精确删除/保留范围；交互只接受逐字节小写 <code>yes</code>，EOF、大小写或空格变体均零写入取消，<code>--yes</code> 也不能省略计划事实。<code>down</code> 会在 deployment lock 内复核提示时捕获的 ID；确认期间 A 被替换为 B 或消失时，不得 stop/rm B 或清除 activation。Native <code>13-unload.py</code> 使用相同 literal-confirmation 语义，容器内 hostctl 只在外层确认后传递一次 <code>--yes</code>。</p>
           <p><strong>成功判据</strong>未来准入必须在全新 Ubuntu/arm64 或目标平台上完成 source/image immutable identity、fixed container、Supervisor、Apache/DHCP、HTTP、控制文件、private logs、restart、network snapshot 和清理证据，并由独立 review 明确 GO。</p>
           <p><strong>失败处理</strong>任何失败停在第一个证据点，保留日志并回到 canonical 工作树 tests-first 修复；旧 upload、image tar、metadata、runner、approval 和容器 ID 全部视为 stale。禁止删除身份不匹配容器、启用宿主 Apache/DHCP 或修改 NIC/Netplan。</p>

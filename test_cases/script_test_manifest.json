@@ -22,7 +22,9 @@
         "test_cases.test_test_case_repository",
         "test_cases.test_reference_only_path_disposition",
         "test_cases.test_public_s_phase_contract",
-        "test_cases.test_public_s_phase_workflow"
+        "test_cases.test_public_s_phase_workflow",
+        "test_cases.test_public_publication_contract",
+        "test_cases.test_public_publication_workflow"
       ]
     },
     {
@@ -135,10 +137,18 @@
     "AGENTS.md",
     "PUBLIC_REPOSITORY.md",
     "SECURITY.md",
+    "docs/README.md",
+    "docs/architecture/README.md",
+    "docs/deployment/BUNDLE_WORKFLOWS.md",
+    "docs/deployment/README.md",
+    "docs/operations/README.md",
+    "docs/reference/README.md",
+    "docs/validation/README.md",
     "examples/public-project/01-global.yaml.example",
     "examples/public-project/02-devices_config.csv.example",
     "examples/public-project/02-dhcp-subnet_config.csv.example",
     "index.html",
+    "infra/docker/README.md",
     "requirements-container-top-level.lock",
     "requirements-dev.txt",
     "test_cases/audit_public_tree.py",
@@ -1196,7 +1206,9 @@
         "test_cases.test_reference_only_path_disposition",
         "test_cases.test_reference_only_selector_workflow",
         "test_cases.test_public_s_phase_contract",
-        "test_cases.test_public_s_phase_workflow"
+        "test_cases.test_public_s_phase_workflow",
+        "test_cases.test_public_publication_contract",
+        "test_cases.test_public_publication_workflow"
       ]
     },
     {
@@ -1204,6 +1216,14 @@
         "AGENTS.md",
         "index.html",
         "user-manual.html",
+        "docs/README.md",
+        "docs/architecture/README.md",
+        "docs/deployment/BUNDLE_WORKFLOWS.md",
+        "docs/deployment/README.md",
+        "docs/operations/README.md",
+        "docs/reference/README.md",
+        "docs/validation/README.md",
+        "infra/docker/README.md",
         "*/README.md",
         "*/*/README.md",
         "*/*/*/README.md"
@@ -1212,7 +1232,9 @@
         "test_cases.test_documentation_catalog",
         "test_cases.test_project_contracts",
         "test_cases.test_upload_package_contract",
-        "test_cases.test_deployment_writer_lock"
+        "test_cases.test_deployment_writer_lock",
+        "test_cases.test_public_publication_contract",
+        "test_cases.test_public_publication_workflow"
       ]
     },
     {

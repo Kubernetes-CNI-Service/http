@@ -32,6 +32,31 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCKER_ROOT = ROOT / "infra/docker"
+PUBLISHED_DOCKER_README_SIZE = 37883
+PUBLISHED_DOCKER_README_SHA256 = (
+    "8355b6cf2bea57f072a689da6a4c3e4979cfd3da26c87f585a728c42972fb996"
+)
+
+
+def assert_published_docker_readme(testcase, *phrases: str) -> str:
+    path = DOCKER_ROOT / "README.md"
+    metadata = path.lstat()
+    testcase.assertTrue(stat.S_ISREG(metadata.st_mode))
+    testcase.assertEqual(0o644, stat.S_IMODE(metadata.st_mode))
+    testcase.assertEqual(1, metadata.st_nlink)
+    payload = path.read_bytes()
+    testcase.assertEqual(PUBLISHED_DOCKER_README_SIZE, len(payload))
+    testcase.assertEqual(
+        PUBLISHED_DOCKER_README_SHA256, hashlib.sha256(payload).hexdigest(),
+    )
+    text = payload.decode("utf-8")
+    for phrase in phrases:
+        testcase.assertIn(phrase, text)
+    real = (ROOT / "test_cases/REAL_ENVIRONMENT.md").read_text(encoding="utf-8")
+    testcase.assertIn("Status: OPEN / NOT RUN", real)
+    return text
+
+
 EXPECTED_CONTROL_AUTH_HELPER_SHA256 = (
     "5a133a353cb7ac7af5be0be71b4ef85b41345716103d6e28590140638ee11038"
 )
@@ -1533,7 +1558,10 @@ stable_runtime_env_text "$runtime_env"
         )[0]
         self.assertIn('stable_runtime_env_text "$runtime_env"', load_body)
         self.assertNotIn('done < "$runtime_env"', load_body)
-        self.assertFalse(os.path.lexists(DOCKER_ROOT / "README.md"))
+        assert_published_docker_readme(
+            self, "infra-runtime.conf", "root:root", "mode `0600`",
+            "single-link regular file",
+        )
         documentation = (ROOT / "test_cases/README.md").read_text(
             encoding="utf-8",
         )
@@ -4242,7 +4270,10 @@ def monitor_authority_recovery_decision(_payload, _diagnostics):
         self.assertIn("copytruncate", policy)
 
     def test_docker_readme_states_control_cgi_trust_boundary(self) -> None:
-        self.assertFalse(os.path.lexists(DOCKER_ROOT / "README.md"))
+        assert_published_docker_readme(
+            self, "## 控制 CGI 的安全边界", "same-origin",
+            "固定动作和 request ID", "reload-network",
+        )
         source = (ROOT / "test_cases/REAL_ENVIRONMENT.md").read_text(
             encoding="utf-8",
         )
@@ -7136,7 +7167,10 @@ class ContainerTransactionContractTests(QuietContractTest):
 
     def test_deploy_no_upgrade_is_explicit_and_forwarded_only_to_load(self) -> None:
         source = (DOCKER_ROOT / "deploy.sh").read_text(encoding="utf-8")
-        self.assertFalse(os.path.lexists(DOCKER_ROOT / "README.md"))
+        assert_published_docker_readme(
+            self, "deploy --no-upgrade", "只跳过交换机系统镜像的存在性检查",
+            "不能传给 `doctor`", "`reload-network`",
+        )
         documentation = (ROOT / "test_cases/REAL_ENVIRONMENT.md").read_text(
             encoding="utf-8",
         )
@@ -7709,7 +7743,10 @@ class ContainerTransactionContractTests(QuietContractTest):
         runner = source.split("run_reload_network() {", 1)[1].split("\n}", 1)[0]
         self.assertIn("/opt/http-ztp/hostctl.py reload-network", runner)
         self.assertNotIn("hostctl.py load", runner)
-        self.assertFalse(os.path.lexists(DOCKER_ROOT / "README.md"))
+        assert_published_docker_readme(
+            self, "deploy.sh reload-network", "它不运行 `11-load.py`",
+            "不重新生成", "reload-network → health → status",
+        )
         governance = (ROOT / "test_cases/README.md").read_text(encoding="utf-8")
         real_environment = (ROOT / "test_cases/REAL_ENVIRONMENT.md").read_text(
             encoding="utf-8",

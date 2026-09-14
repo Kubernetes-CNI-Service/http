@@ -4,19 +4,121 @@
 from __future__ import annotations
 
 import copy
+import atexit
+import functools
 import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
 import stat
+import subprocess
 import sys
+import tempfile
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
 Q02_COMMIT = "623bf4ec48203c3c02a3d0bf79271d6c4c637a2a"
+S_COMMIT = "991a64476cfe1de2a0ab45bca8b7b6d75d5e9149"
+S_TREE = "287b1ba2abddccd9c9db216534c74a7b30d1f1c5"
+S_HISTORICAL_BLOBS = {
+    "test_cases/test_public_s_phase_contract.py": (
+        "064f7d14529e1248bb4c5811abf611aba27dbec934d2e6dd3ccc1a0ddce38990"
+    ),
+    "test_cases/test_public_s_phase_workflow.py": (
+        "81c3a2606c66aa1b9cee320bfeb0366fb28ff2b865abd7c7e8f577f1e0766e4f"
+    ),
+    "test_cases/script_test_manifest.json": (
+        "aef45f0621332318af9bc4cb4710b2f5a3062b2bc962964f9b6fd1201d540ed0"
+    ),
+    "user-manual.html": (
+        "516c73b23bc5d74f332c7d649cf99a60fd52585f57db467e97ad53237411ca39"
+    ),
+    "test_cases/script_test_approved_hashes.json": (
+        "9aa3613d1b0232e0b9722a31c8a056c39927f7e09646a2ff5b967ac994b51b56"
+    ),
+}
 MANIFEST = ROOT / "test_cases/script_test_manifest.json"
+
+_S_HISTORY_TEMP = None
+_S_HISTORY_CHECKOUT = None
+
+
+def _historical_s_checkout() -> Path:
+    global _S_HISTORY_TEMP, _S_HISTORY_CHECKOUT
+    if _S_HISTORY_CHECKOUT is not None:
+        return _S_HISTORY_CHECKOUT
+    _S_HISTORY_TEMP = tempfile.TemporaryDirectory(prefix="http-s-direct-history-")
+    atexit.register(_S_HISTORY_TEMP.cleanup)
+    checkout = Path(_S_HISTORY_TEMP.name) / "checkout"
+    clone = subprocess.run(
+        ["git", "clone", "--quiet", "--no-local", ROOT, checkout],
+        cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        check=False, timeout=120,
+    )
+    if clone.returncode != 0:
+        raise AssertionError(clone.stderr)
+    detached = subprocess.run(
+        ["git", "checkout", "--quiet", "--detach", S_COMMIT],
+        cwd=checkout, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        check=False, timeout=60,
+    )
+    if detached.returncode != 0:
+        raise AssertionError(detached.stderr)
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD", "HEAD^{tree}"], cwd=checkout,
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    )
+    if head.returncode != 0 or head.stdout.splitlines() != [S_COMMIT, S_TREE]:
+        raise AssertionError("historical S checkout identity differs")
+    status = subprocess.run(
+        ["git", "status", "--porcelain=v1"], cwd=checkout,
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    )
+    if status.returncode != 0 or status.stdout != "" or status.stderr != "":
+        raise AssertionError("historical S checkout is not clean")
+    for control in (
+        ".git/commondir", ".git/shallow", ".git/info/grafts",
+        ".git/objects/info/alternates", ".git/objects/info/http-alternates",
+    ):
+        if os.path.lexists(checkout / control):
+            raise AssertionError(f"historical S checkout has alternate authority: {control}")
+    for relative, expected in S_HISTORICAL_BLOBS.items():
+        actual = hashlib.sha256((checkout / relative).read_bytes()).hexdigest()
+        if actual != expected:
+            raise AssertionError(f"historical S blob differs: {relative}")
+    _S_HISTORY_CHECKOUT = checkout
+    return checkout
+
+
+def _historical_s_method(method):
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        current = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+        if current == S_HISTORICAL_BLOBS["test_cases/test_public_s_phase_contract.py"]:
+            return method(self, *args, **kwargs)
+        checkout = _historical_s_checkout()
+        ledger = (checkout / "test_cases/script_test_approved_hashes.json").read_bytes()
+        replay = subprocess.run(
+            [sys.executable, "-B", "-m", "unittest", "-v", self.id()],
+            cwd=checkout, text=True, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, check=False, timeout=180,
+        )
+        self.assertEqual(0, replay.returncode, replay.stdout + replay.stderr)
+        self.assertEqual("", replay.stdout)
+        self.assertEqual(1, replay.stderr.count("Ran 1 test in"))
+        self.assertTrue(replay.stderr.rstrip().endswith("OK"), replay.stderr)
+        status = subprocess.run(
+            ["git", "status", "--porcelain=v1"], cwd=checkout,
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        )
+        self.assertEqual((0, "", ""), (status.returncode, status.stdout, status.stderr))
+        self.assertEqual(
+            ledger,
+            (checkout / "test_cases/script_test_approved_hashes.json").read_bytes(),
+        )
+    return wrapper
 
 S_PRODUCTION_PATHS = tuple("""\
 DAY0-Prepare/01-a-setup.py
@@ -546,6 +648,7 @@ def expected_s_manifest_bytes() -> bytes:
 
 
 class PublicSPhaseDirectTests(unittest.TestCase):
+    @_historical_s_method
     def test_literal_inventory_and_current_reviewed_bytes_are_frozen(self):
         self.assertEqual((120, 75, 91, 36), (
             len(S_PRODUCTION_PATHS), len(S_TEST_MODULES),
@@ -620,6 +723,7 @@ class PublicSPhaseDirectTests(unittest.TestCase):
             ),
         )
 
+    @_historical_s_method
     def test_s_manifest_has_exact_forward_and_reverse_closure(self):
         manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
         self.assertEqual(expected_s_manifest(), manifest)
@@ -686,6 +790,7 @@ class PublicSPhaseDirectTests(unittest.TestCase):
                 unknown = set(record.get("tests", ())) - set(S_TEST_MODULES)
                 self.assertEqual(set(), unknown, (table_name, record.get("id")))
 
+    @_historical_s_method
     def test_s_mapping_tables_reject_clear_swap_and_overbroad_mutations(self):
         reviewed = copy.deepcopy(EXPECTED_S_MAPPING_TABLES)
         _assert_exact_mapping_tables(reviewed)
@@ -718,6 +823,7 @@ class PublicSPhaseDirectTests(unittest.TestCase):
                 with self.assertRaises(AssertionError):
                     _assert_exact_mapping_tables(candidate)
 
+    @_historical_s_method
     def test_s_contract_excludes_every_deferred_or_private_family(self):
         self.assertEqual((8, 7, 23, 14, 2), (
             len(Q01_PUBLIC_DOCUMENT_PATHS), len(LIFECYCLE_PATHS),
@@ -736,6 +842,7 @@ class PublicSPhaseDirectTests(unittest.TestCase):
         self.assertNotIn("test_cases.test_public_publication_contract", S_TEST_MODULES)
         self.assertNotIn("test_cases.test_public_publication_workflow", S_TEST_MODULES)
 
+    @_historical_s_method
     def test_s_phase_blobs_are_index_owned_not_worktree_rewrites(self):
         self.assertEqual(5, len(S_PHASE_INDEX_PATHS))
         for relative in S_PHASE_INDEX_PATHS:

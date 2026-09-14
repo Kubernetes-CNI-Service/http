@@ -2883,10 +2883,11 @@ printf 'capture=%s rc=%s token=<%s>\\n' \
             self.assertNotIn(duplicate, assignments)
 
     def test_all_operator_surfaces_state_the_same_n3_denial_runbook(self) -> None:
-        authority = ROOT / "test_cases/REAL_ENVIRONMENT.md"
-        self.assertTrue(authority.is_file())
-        self.assertFalse(os.path.lexists(ROOT / "docs/operations/README.md"))
-        self.assertFalse(os.path.lexists(ROOT / "infra/docker/README.md"))
+        authorities = (
+            ROOT / "test_cases/REAL_ENVIRONMENT.md",
+            ROOT / "docs/operations/README.md",
+            ROOT / "infra/docker/README.md",
+        )
         required = (
             "N=3 is not proof of an attacker",
             "same-identity breaker N=1→2→3",
@@ -2897,10 +2898,14 @@ printf 'capture=%s rc=%s token=<%s>\\n' \
             "exactly one fixed warning",
             "re-wedging remains possible",
         )
-        content = authority.read_text(encoding="utf-8")
-        for fragment in required:
-            with self.subTest(fragment=fragment):
-                self.assertIn(fragment, content)
+        for authority in authorities:
+            with self.subTest(authority=authority):
+                metadata = authority.lstat()
+                self.assertTrue(stat.S_ISREG(metadata.st_mode))
+                self.assertEqual(0o644, stat.S_IMODE(metadata.st_mode))
+                content = authority.read_text(encoding="utf-8")
+                for fragment in required:
+                    self.assertIn(fragment, content)
 
     def test_manifest_has_one_real_lifecycle_to_cgi_authority_workflow(self) -> None:
         manifest = json.loads(
@@ -2943,8 +2948,8 @@ printf 'capture=%s rc=%s token=<%s>\\n' \
             for rule in manifest["path_rules"]
             for path in rule["paths"]
         }
-        self.assertNotIn("docs/operations/README.md", all_paths)
-        self.assertNotIn("infra/docker/README.md", all_paths)
+        self.assertIn("docs/operations/README.md", all_paths)
+        self.assertIn("infra/docker/README.md", all_paths)
 
     def test_no_test_class_scope_patch_can_neutralize_monitor_authority(self) -> None:
         expected_method_fixtures = {

@@ -4,6 +4,7 @@
 import argparse
 from contextlib import contextmanager
 import errno
+import hashlib
 import importlib.util
 import os
 from pathlib import Path
@@ -27,6 +28,11 @@ from test_cases.test_public_clean_clone_contract import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SYSTEM_EXECUTABLE_PATH = os.confstr("CS_PATH") or "/usr/bin:/bin"
+_SYSTEM_GIT = shutil.which("git", path=SYSTEM_EXECUTABLE_PATH)
+if not _SYSTEM_GIT:
+    raise RuntimeError("trusted system Git executable is unavailable")
+GIT_BINARY = str(Path(_SYSTEM_GIT).resolve())
 EXPECTED_PUBLIC_INPUTS = {
     "01-global.yaml.example": "01-global.yaml",
     "02-devices_config.csv.example": "02-devices_config.csv",
@@ -42,6 +48,22 @@ P0_DEFERRED_Q01_PATHS = (
     "docs/reference/README.md",
     "docs/validation/README.md",
     "infra/docker/README.md",
+)
+P_PUBLISHED_Q01_SHA256 = {
+    "docs/README.md": "e646ad967d9bd418451f152fd2c48f41fe3415dc7acea55e434ae610ff1b57fd",
+    "docs/architecture/README.md": "153837bcd62f49edf8591ceec8b1b6ccefe9a3b5638a91bed6452ac87264a0e4",
+    "docs/deployment/BUNDLE_WORKFLOWS.md": "adab10445e130f3335113c5b35072b81b5d7e10d28d3d1214ace45e120199a1b",
+    "docs/deployment/README.md": "f1914024ab82546239f9424abaca44380f22d6c4331c76e3e6ede218333a036e",
+    "docs/operations/README.md": "da1fb0570f8277d7304c1446ab49d7ae49dcf52a320c86b90babdf15e4a6dd05",
+    "docs/reference/README.md": "717f023b3016420b61e8889493fd0e2ab9d0106388483025f8d66dee75c75039",
+    "docs/validation/README.md": "2a2ee457e01074db1994363a2f8ed62029a9febb14d7c4ea92243b93ec61d98f",
+    "infra/docker/README.md": "8355b6cf2bea57f072a689da6a4c3e4979cfd3da26c87f585a728c42972fb996",
+}
+P_V2_FORBIDDEN_PUBLIC_ROOTS = (
+    "docs/v3/finished-project-lifecycle",
+    "Finished-projects",
+    "monitor/cabletracker-main",
+    "v3-requirements.md",
 )
 P0_PUBLIC_OVERLAY = (
     "test_cases/public_project_fixture.py",
@@ -128,33 +150,36 @@ def _safe_repository_path(relative: str) -> bool:
 
 
 def _is_deferred_q01(relative: str) -> bool:
+    if any(
+        relative.startswith(published + "/")
+        for published in P0_DEFERRED_Q01_PATHS
+    ):
+        return True
     return any(
         relative == forbidden or relative.startswith(forbidden + "/")
-        for forbidden in P0_DEFERRED_Q01_PATHS
+        for forbidden in P_V2_FORBIDDEN_PUBLIC_ROOTS
     )
 
 
 def _canonical_git_environment():
     environment = os.environ.copy()
-    exact_controls = {
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_CONFIG",
-        "GIT_CONFIG_COUNT", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM",
-        "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_SYSTEM", "GIT_DIR",
-        "GIT_INDEX_FILE", "GIT_NAMESPACE", "GIT_NO_REPLACE_OBJECTS",
-        "GIT_OBJECT_DIRECTORY", "GIT_REPLACE_REF_BASE", "GIT_WORK_TREE",
-    }
     for key in tuple(environment):
-        if key in exact_controls or key.startswith((
-            "GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_",
-        )):
+        if key == "PATH" or key.startswith(("GIT_", "LD_", "DYLD_")):
             environment.pop(key, None)
-    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
+    environment.update({
+        "PATH": SYSTEM_EXECUTABLE_PATH,
+        "GIT_CONFIG": os.devnull,
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+    })
     return environment
 
 
 def _run_canonical_git(repository: Path, arguments):
     return subprocess.run(
-        ["git", "--no-replace-objects", "-C", str(repository), *arguments],
+        [GIT_BINARY, "--no-replace-objects", "-c",
+         f"core.hooksPath={os.devnull}", "-C", str(repository), *arguments],
         env=_canonical_git_environment(), stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, check=False,
     )
@@ -929,42 +954,99 @@ class PublicProjectFixtureWorkflowTests(unittest.TestCase):
                 self._copy_from(repository, destination)
             self.assertEqual([], list(destination.iterdir()))
 
-    def test_public_candidate_rejects_q01_exact_or_descendant_index_entries(self):
-        self.assertEqual(8, len(P0_DEFERRED_Q01_PATHS))
-        for forbidden in P0_DEFERRED_Q01_PATHS:
-            for shape in ("exact", "descendant"):
-                with self.subTest(
-                    forbidden=forbidden, shape=shape,
-                ), tempfile.TemporaryDirectory(
-                    prefix=f"http-public-q01-{shape}-",
-                ) as directory:
-                    base = Path(directory)
-                    repository = base / "repository"
-                    destination = base / "candidate"
-                    repository.mkdir()
-                    destination.mkdir()
-                    subprocess.run(
-                        ["git", "init", "--quiet"], cwd=repository,
-                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+    def test_public_candidate_accepts_q01_exact8_and_rejects_deferred_v2(self):
+        expected = tuple(P_PUBLISHED_Q01_SHA256)
+        self.assertEqual(8, len(expected))
+        s_tree = _run_canonical_git(
+            ROOT, ["ls-tree", "-r", "--name-only", "991a64476cfe1de2a0ab45bca8b7b6d75d5e9149"],
+        )
+        self.assertEqual(0, s_tree.returncode, s_tree.stderr)
+        self.assertEqual(
+            set(), set(expected).intersection(s_tree.stdout.decode("utf-8").splitlines()),
+        )
+        rejected = tuple(f"{relative}/child.txt" for relative in expected) + tuple(
+            candidate
+            for root in P_V2_FORBIDDEN_PUBLIC_ROOTS
+            for candidate in (root, root + "/future/child.txt")
+        )
+        for relative in rejected:
+            with self.subTest(rejected=relative), tempfile.TemporaryDirectory(
+                prefix="http-public-deferred-v2-",
+            ) as directory:
+                base = Path(directory)
+                repository = base / "repository"
+                destination = base / "candidate"
+                repository.mkdir()
+                subprocess.run(
+                    ["git", "init", "--quiet"], cwd=repository,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+                )
+                path = repository / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"deferred v2 reference\n")
+                subprocess.run(
+                    ["git", "add", "--", relative], cwd=repository,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+                )
+                with self.assertRaisesRegex(
+                    AssertionError, "deferred|public|reference|v2",
+                ):
+                    self._copy_from(repository, destination)
+                self.assertFalse(destination.exists())
+        with tempfile.TemporaryDirectory(prefix="http-public-current-q01-") as directory:
+            base = Path(directory)
+            repository = base / "repository"
+            destination = base / "candidate"
+            repository.mkdir()
+            subprocess.run(
+                ["git", "init", "--quiet"], cwd=repository,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+            )
+            expected_payloads = {}
+            for relative in expected:
+                path = repository / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                payload = (ROOT / relative).read_bytes()
+                self.assertEqual(
+                    P_PUBLISHED_Q01_SHA256[relative],
+                    hashlib.sha256(payload).hexdigest(),
+                )
+                path.write_bytes(payload)
+                expected_payloads[relative] = payload
+            subprocess.run(
+                ["git", "add", "--", *expected], cwd=repository,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+            )
+            with mock.patch.object(sys.modules[__name__], "ROOT", repository):
+                public_paths = set(_public_candidate_paths())
+                self.assertEqual(
+                    {Path(relative) for relative in expected},
+                    {Path(relative) for relative in expected}.intersection(public_paths),
+                )
+                _raw, indexed = _index_snapshot(repository)
+                for relative in expected:
+                    mode, object_id = indexed[relative]
+                    self.assertEqual("100644", mode)
+                    self.assertEqual(
+                        expected_payloads[relative],
+                        _index_blob(repository, object_id),
                     )
-                    injected = (
-                        forbidden if shape == "exact"
-                        else f"{forbidden}/child.txt"
-                    )
-                    path = repository / injected
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_bytes(b"future Q01 authority\n")
-                    subprocess.run(
-                        ["git", "add", "--", injected], cwd=repository,
-                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
-                    )
-                    with self.assertRaisesRegex(
-                        AssertionError, "Q01|deferred|public",
-                    ):
-                        self._copy_from(repository, destination)
-                    self.assertEqual([], list(destination.iterdir()))
+            self._copy_from(repository, destination)
 
-    def test_q01_prefix_siblings_remain_public_candidates(self):
+            self.assertEqual(
+                set(expected),
+                {
+                    path.relative_to(destination).as_posix()
+                    for path in destination.rglob("*") if path.is_file()
+                },
+            )
+            for relative in expected:
+                self.assertEqual(
+                    expected_payloads[relative],
+                    (destination / relative).read_bytes(),
+                )
+
+    def test_deferred_v2_prefix_siblings_remain_public_candidates(self):
         with tempfile.TemporaryDirectory(prefix="http-public-q01-sibling-") as directory:
             base = Path(directory)
             repository = base / "repository"
@@ -975,7 +1057,17 @@ class PublicProjectFixtureWorkflowTests(unittest.TestCase):
                 ["git", "init", "--quiet"], cwd=repository,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
             )
-            siblings = tuple(f"{relative}.public-sibling" for relative in P0_DEFERRED_Q01_PATHS)
+            siblings = (
+                "docs/README.md.public-sibling",
+                "docs/architecture/README.md.public-sibling",
+                "docs/deployment/BUNDLE_WORKFLOWS.md.public-sibling",
+                "docs/deployment/README.md.public-sibling",
+                "docs/operations/README.md.public-sibling",
+                "docs/reference/README.md.public-sibling",
+                "docs/validation/README.md.public-sibling",
+                "infra/docker/README.md.public-sibling",
+                *(root + ".public-sibling" for root in P_V2_FORBIDDEN_PUBLIC_ROOTS),
+            )
             for relative in siblings:
                 path = repository / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -2063,6 +2155,7 @@ class PublicProjectFixtureWorkflowTests(unittest.TestCase):
 
     def test_exact_five_packaging_methods_pass_in_no_local_public_clone(self):
         self.assertEqual(5, len(EXACT_PACKAGING_TESTS))
+        q01_documents = {Path(path) for path in P_PUBLISHED_Q01_SHA256}
         forbidden = {
             Path(path) for path in (
                 "docs/v3/finished-project-lifecycle/ARCHITECTURE.md",
@@ -2072,15 +2165,48 @@ class PublicProjectFixtureWorkflowTests(unittest.TestCase):
                 "docs/v3/finished-project-lifecycle/TEST_PLAN.md",
                 "docs/v3/finished-project-lifecycle/USER_GUIDE.md",
                 "docs/v3/finished-project-lifecycle/WORKFLOWS.md",
+                "Finished-projects/README.txt",
+                "v3-requirements.md",
+                "monitor/cabletracker-main/README.md",
             )
         }
-        self.assertEqual(set(), forbidden.intersection(_public_candidate_paths()))
         with tempfile.TemporaryDirectory(prefix="http-public-h27-") as directory:
             base = Path(directory)
+            authority = base / "authority"
             candidate = base / "candidate"
             checkout = base / "checkout"
             candidate.mkdir()
-            _copy_public_candidate(candidate)
+            subprocess.run(
+                ["git", "clone", "--quiet", "--no-local", ROOT, authority],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+            )
+            for relative in q01_documents:
+                target = authority / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(ROOT / relative, target)
+            subprocess.run(
+                ["git", "add", "--", *(str(path) for path in q01_documents)],
+                cwd=authority, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                check=True,
+            )
+            with mock.patch.object(sys.modules[__name__], "ROOT", authority):
+                candidate_paths = set(_public_candidate_paths())
+                self.assertEqual(
+                    q01_documents, q01_documents.intersection(candidate_paths),
+                )
+                self.assertEqual(set(), forbidden.intersection(candidate_paths))
+                self.assertFalse(any(
+                    relative.as_posix() == root
+                    or relative.as_posix().startswith(root + "/")
+                    for relative in candidate_paths
+                    for root in P_V2_FORBIDDEN_PUBLIC_ROOTS
+                ))
+                _copy_public_candidate(candidate)
+            for relative in q01_documents:
+                self.assertEqual(
+                    (authority / relative).read_bytes(),
+                    (candidate / relative).read_bytes(),
+                )
             subprocess.run(
                 ["git", "init", "--quiet"], cwd=candidate,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,

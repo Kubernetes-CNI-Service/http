@@ -162,11 +162,17 @@ class GateCommandTests(unittest.TestCase):
                 f"runpy.run_path({str(ROOT / 'test_cases/run_related_tests.py')!r}, run_name='__main__')\n",
                 encoding="utf-8",
             )
-            commands = []
+            calls = []
+            results = []
 
             def execute(command, **kwargs):
-                commands.append(command)
-                return real_run(command, **kwargs)
+                calls.append((command, dict(kwargs)))
+                completed = real_run(
+                    command, **kwargs, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, text=True,
+                )
+                results.append(completed)
+                return completed
 
             for module in (SYNC, UPLOAD):
                 with self.subTest(module=module.__name__), \
@@ -178,7 +184,20 @@ class GateCommandTests(unittest.TestCase):
             expected = [
                 sys.executable, "-B", str(wrapper), "--check", "--require-full",
             ]
-            self.assertEqual([expected, expected], commands)
+            expected_kwargs = {
+                "cwd": ROOT, "shell": False, "check": False,
+            }
+            self.assertEqual(
+                [(expected, expected_kwargs), (expected, expected_kwargs)], calls,
+            )
+            self.assertEqual(2, len(results))
+            for completed in results:
+                self.assertEqual(0, completed.returncode)
+                self.assertEqual(
+                    "impact manifest and 120 scripts are approved\n",
+                    completed.stdout,
+                )
+                self.assertEqual("", completed.stderr)
             self.assertEqual(before, approvals.read_bytes())
 
     def test_local_load_full_gate_reaches_a_noninteractive_unittest_child(self):

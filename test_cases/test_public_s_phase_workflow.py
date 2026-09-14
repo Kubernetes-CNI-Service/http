@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import atexit
+import functools
 import hashlib
 import json
 import os
@@ -19,6 +21,25 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 Q02_COMMIT = "623bf4ec48203c3c02a3d0bf79271d6c4c637a2a"
+S_COMMIT = "991a64476cfe1de2a0ab45bca8b7b6d75d5e9149"
+S_TREE = "287b1ba2abddccd9c9db216534c74a7b30d1f1c5"
+S_HISTORICAL_BLOBS = {
+    "test_cases/test_public_s_phase_contract.py": (
+        "064f7d14529e1248bb4c5811abf611aba27dbec934d2e6dd3ccc1a0ddce38990"
+    ),
+    "test_cases/test_public_s_phase_workflow.py": (
+        "81c3a2606c66aa1b9cee320bfeb0366fb28ff2b865abd7c7e8f577f1e0766e4f"
+    ),
+    "test_cases/script_test_manifest.json": (
+        "aef45f0621332318af9bc4cb4710b2f5a3062b2bc962964f9b6fd1201d540ed0"
+    ),
+    "user-manual.html": (
+        "516c73b23bc5d74f332c7d649cf99a60fd52585f57db467e97ad53237411ca39"
+    ),
+    "test_cases/script_test_approved_hashes.json": (
+        "9aa3613d1b0232e0b9722a31c8a056c39927f7e09646a2ff5b967ac994b51b56"
+    ),
+}
 EXPECTED_S_TREE_PATH_COUNT = 322
 EXPECTED_S_TREE_PATH_DIGEST = (
     "ddf77456465cf22b193b87e8c687128e00f710b20466449e2cf8dc4ef805a52c"
@@ -47,6 +68,82 @@ S_PHASE_TEST_PATHS = (
     "test_cases/test_public_s_phase_workflow.py",
 )
 S_SELF_RECORD_PATH = "test_cases/test_public_s_phase_workflow.py"
+
+_S_HISTORY_TEMP = None
+_S_HISTORY_CHECKOUT = None
+
+
+def _historical_s_checkout() -> Path:
+    global _S_HISTORY_TEMP, _S_HISTORY_CHECKOUT
+    if _S_HISTORY_CHECKOUT is not None:
+        return _S_HISTORY_CHECKOUT
+    _S_HISTORY_TEMP = tempfile.TemporaryDirectory(prefix="http-s-workflow-history-")
+    atexit.register(_S_HISTORY_TEMP.cleanup)
+    checkout = Path(_S_HISTORY_TEMP.name) / "checkout"
+    clone = subprocess.run(
+        ["git", "clone", "--quiet", "--no-local", ROOT, checkout],
+        cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        check=False, timeout=120,
+    )
+    if clone.returncode != 0:
+        raise AssertionError(clone.stderr)
+    detached = subprocess.run(
+        ["git", "checkout", "--quiet", "--detach", S_COMMIT],
+        cwd=checkout, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        check=False, timeout=60,
+    )
+    if detached.returncode != 0:
+        raise AssertionError(detached.stderr)
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD", "HEAD^{tree}"], cwd=checkout,
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    )
+    if head.returncode != 0 or head.stdout.splitlines() != [S_COMMIT, S_TREE]:
+        raise AssertionError("historical S checkout identity differs")
+    status = subprocess.run(
+        ["git", "status", "--porcelain=v1"], cwd=checkout,
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    )
+    if status.returncode != 0 or status.stdout != "" or status.stderr != "":
+        raise AssertionError("historical S checkout is not clean")
+    for control in (
+        ".git/commondir", ".git/shallow", ".git/info/grafts",
+        ".git/objects/info/alternates", ".git/objects/info/http-alternates",
+    ):
+        if os.path.lexists(checkout / control):
+            raise AssertionError(f"historical S checkout has alternate authority: {control}")
+    for relative, expected in S_HISTORICAL_BLOBS.items():
+        actual = hashlib.sha256((checkout / relative).read_bytes()).hexdigest()
+        if actual != expected:
+            raise AssertionError(f"historical S blob differs: {relative}")
+    _S_HISTORY_CHECKOUT = checkout
+    return checkout
+
+
+def _historical_s_method(method):
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        current = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+        if current == S_HISTORICAL_BLOBS["test_cases/test_public_s_phase_workflow.py"]:
+            return method(self, *args, **kwargs)
+        checkout = _historical_s_checkout()
+        ledger = (checkout / S_LEDGER_PATH).read_bytes()
+        replay = subprocess.run(
+            [sys.executable, "-B", "-m", "unittest", "-v", self.id()],
+            cwd=checkout, text=True, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, check=False, timeout=180,
+        )
+        self.assertEqual(0, replay.returncode, replay.stdout + replay.stderr)
+        self.assertEqual("", replay.stdout)
+        self.assertEqual(1, replay.stderr.count("Ran 1 test in"))
+        self.assertTrue(replay.stderr.rstrip().endswith("OK"), replay.stderr)
+        status = subprocess.run(
+            ["git", "status", "--porcelain=v1"], cwd=checkout,
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        )
+        self.assertEqual((0, "", ""), (status.returncode, status.stdout, status.stderr))
+        self.assertEqual(ledger, (checkout / S_LEDGER_PATH).read_bytes())
+    return wrapper
 S_PHASE_DOC_TRANSFORMS = {
     ".github/README.md": {
         "source_sha256": "d6ef8e75f5e745c1991bea9c97d41b0f21ceb7653c0e9112faa84bf513dda35a",
@@ -596,6 +693,7 @@ def _copy_worktree_entry(destination: Path, relative: str) -> None:
 
 
 class PublicSPhaseWorkflowTests(unittest.TestCase):
+    @_historical_s_method
     def test_s_stage_delta_is_exact_and_excludes_deferred_families(self):
         candidates = {
             path for path in _status_paths(ROOT)
@@ -631,6 +729,7 @@ class PublicSPhaseWorkflowTests(unittest.TestCase):
         )
         self.assertNotIn(hostile_state, accepted_states)
 
+    @_historical_s_method
     def test_s_index_owns_three_phase_docs_manifest_and_generated_html(self):
         self.assertEqual(5, len(S_PHASE_INDEX_PATHS))
         expected_documents = _expected_phase_documents()
@@ -662,6 +761,7 @@ class PublicSPhaseWorkflowTests(unittest.TestCase):
                         f"S phase blob still equals Q02: {relative}",
                     )
 
+    @_historical_s_method
     def test_phase_document_links_cli_and_deferred_refs_are_fail_closed(self):
         documents = _expected_phase_documents()
         expected_paths = _expected_tree_paths()
@@ -721,6 +821,7 @@ class PublicSPhaseWorkflowTests(unittest.TestCase):
         with self.assertRaises(AssertionError):
             _assert_runner_cli_contract("test_cases/README.md", bad_cli)
 
+    @_historical_s_method
     def test_phase_sources_accept_only_reviewed_source_or_target_bytes(self):
         for relative in S_PHASE_DOC_TRANSFORMS:
             payload = (ROOT / relative).read_bytes()
@@ -739,6 +840,7 @@ class PublicSPhaseWorkflowTests(unittest.TestCase):
         with self.assertRaises(AssertionError):
             _html_contract(html_payload + b"hostile")
 
+    @_historical_s_method
     def test_each_read_only_runner_step_detects_mutate_then_restore(self):
         with tempfile.TemporaryDirectory(prefix="http-s-runner-order-") as directory:
             repository = Path(directory)
@@ -765,6 +867,7 @@ class PublicSPhaseWorkflowTests(unittest.TestCase):
             with self.assertRaises(AssertionError):
                 _ran_count("runner returned success without unittest evidence\n")
 
+    @_historical_s_method
     def test_committed_s_tree_has_exact_partition_and_no_forbidden_entries(self):
         records = _tree_records(ROOT)
         paths = set(records)
@@ -778,6 +881,7 @@ class PublicSPhaseWorkflowTests(unittest.TestCase):
             self.assertEqual(payload, records[relative][3])
             _assert_markdown_links(relative, payload, records)
 
+    @_historical_s_method
     def test_s_exact_overlay_runs_formal_runner_in_no_local_clone(self):
         if _head(ROOT) != Q02_COMMIT:
             with tempfile.TemporaryDirectory(prefix="http-s-replay-") as directory:

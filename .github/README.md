@@ -11,6 +11,7 @@
 - 不含现场身份或凭据的通用模板；
 - `test_cases/` 中可在本机安全执行的测试及合成 fixture；
 - 面向公开使用者的架构、开发和安全说明；
+- `docs/` 中不含现场身份、地址或证据的通用架构、部署和验证导航；
 - `examples/public-project/` 中只使用文档保留地址和本地管理 MAC 的示例输入。
 
 以下内容必须一直留在私有环境，不能提交：
@@ -64,6 +65,9 @@ PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B \
 
 测试成功不代表示例适合某个真实网络。首次部署仍应在隔离实验环境完成配置审查、身份核验、
 回滚和真机测试。
+
+通用文档从 [`docs/README.md`](../docs/README.md) 开始；内部根 README/User Manual 和真实项目
+记录仍受公开边界隔离，不能因为 docs 索引存在而被纳入版本控制。
 
 ## 安全提交检查
 

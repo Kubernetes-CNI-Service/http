@@ -9,6 +9,7 @@ import datetime as dt
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr, redirect_stdout
 import hashlib
+import importlib
 import importlib.util
 import io
 import json
@@ -2631,37 +2632,90 @@ class BackupAuthenticationContractTests(unittest.TestCase):
         ssh = Path("/usr/bin/ssh")
         sshd = Path(shutil.which("sshd") or "/usr/sbin/sshd")
         ssh_keygen = Path("/usr/bin/ssh-keygen")
-        self.assertTrue(all(path.is_file() for path in (ssh, sshd, ssh_keygen)))
+        ssh_keyscan = Path("/usr/bin/ssh-keyscan")
+        self.assertTrue(all(
+            path.is_file() for path in (ssh, sshd, ssh_keygen, ssh_keyscan)
+        ))
+        formal_marker = "HTTP_P_FORMAL_LOOPBACK_SSHD"
+        active_loopback = None
+        consumer = None
+        if formal_marker in os.environ:
+            self.assertEqual("1", os.environ[formal_marker])
+            publication = importlib.import_module(
+                "test_cases.test_public_publication_workflow"
+            )
+            consumer = getattr(
+                publication,
+                "_formal_loopback_sshd_authority_from_environment",
+            )
+            active_loopback = consumer()
+            self.assertIsNotNone(active_loopback)
+            active_snapshot = Path(
+                os.environ["HTTP_P_DEPENDENCY_ACTIVE_SNAPSHOT"]
+            ).resolve()
+            self.assertEqual(
+                active_snapshot.parent / "formal-loopback-sshd",
+                active_loopback.root,
+            )
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
-            host_key = root / "host-ed25519"
-            other_key = root / "host-rsa"
-            for algorithm, key in (("ed25519", host_key), ("rsa", other_key)):
-                generated = subprocess.run(
-                    [str(ssh_keygen), "-q", "-t", algorithm, "-N", "", "-f", str(key)],
-                    text=True, capture_output=True, timeout=10, check=False,
+            if active_loopback is None:
+                host_key = root / "host-ed25519"
+                other_key = root / "host-rsa"
+                for algorithm, key in (("ed25519", host_key), ("rsa", other_key)):
+                    generated = subprocess.run(
+                        [str(ssh_keygen), "-q", "-t", algorithm, "-N", "", "-f", str(key)],
+                        text=True, capture_output=True, timeout=10, check=False,
+                    )
+                    self.assertEqual(0, generated.returncode, generated.stderr)
+                ed_fields = host_key.with_suffix(".pub").read_text().split()
+                rsa_fields = other_key.with_suffix(".pub").read_text().split()
+                fingerprints = {}
+                for label, public_key, expected_bits in (
+                    ("ed25519", host_key.with_suffix(".pub"), "256"),
+                    ("rsa", other_key.with_suffix(".pub"), "3072"),
+                ):
+                    fingerprint = subprocess.run(
+                        [str(ssh_keygen), "-lf", str(public_key), "-E", "sha256"],
+                        text=True, capture_output=True, timeout=10, check=False,
+                    )
+                    self.assertEqual(0, fingerprint.returncode, fingerprint.stderr)
+                    self.assertEqual("", fingerprint.stderr)
+                    fields = fingerprint.stdout.strip().split()
+                    self.assertGreaterEqual(len(fields), 4)
+                    self.assertEqual(expected_bits, fields[0])
+                    self.assertRegex(fields[1], r"\ASHA256:[A-Za-z0-9+/]{43}\Z")
+                    self.assertEqual(f"({label.upper()})", fields[-1])
+                    fingerprints[label] = fields[1]
+                with socket.socket() as reservation:
+                    reservation.bind(("127.0.0.1", 0))
+                    port = reservation.getsockname()[1]
+                config = root / "sshd_config"
+                config.write_text(
+                    f"Port {port}\n"
+                    "ListenAddress 127.0.0.1\n"
+                    f"HostKey {host_key}\n"
+                    f"PidFile {root / 'sshd.pid'}\n"
+                    "AuthorizedKeysFile none\n"
+                    "PasswordAuthentication no\n"
+                    "KbdInteractiveAuthentication no\n"
+                    "UsePAM no\n"
+                    "PermitRootLogin no\n"
+                    "StrictModes no\n"
+                    "MaxStartups 100\n"
+                    "PerSourcePenalties no\n"
+                    "LogLevel ERROR\n",
+                    encoding="utf-8",
                 )
-                self.assertEqual(0, generated.returncode, generated.stderr)
-            ed_fields = host_key.with_suffix(".pub").read_text().split()
-            rsa_fields = other_key.with_suffix(".pub").read_text().split()
-            with socket.socket() as reservation:
-                reservation.bind(("127.0.0.1", 0))
-                port = reservation.getsockname()[1]
-            config = root / "sshd_config"
-            config.write_text(
-                f"Port {port}\n"
-                "ListenAddress 127.0.0.1\n"
-                f"HostKey {host_key}\n"
-                f"PidFile {root / 'sshd.pid'}\n"
-                "AuthorizedKeysFile none\n"
-                "PasswordAuthentication no\n"
-                "KbdInteractiveAuthentication no\n"
-                "UsePAM no\n"
-                "PermitRootLogin no\n"
-                "StrictModes no\n"
-                "LogLevel ERROR\n",
-                encoding="utf-8",
-            )
+            else:
+                port = active_loopback.port
+                ed_fields = active_loopback.public_keys["ed25519"].split()
+                rsa_fields = active_loopback.public_keys["rsa"].split()
+                fingerprints = dict(active_loopback.fingerprints)
+                self.assertEqual(2, len(ed_fields))
+                self.assertEqual(2, len(rsa_fields))
+                self.assertEqual("ssh-ed25519", ed_fields[0])
+                self.assertEqual("ssh-rsa", rsa_fields[0])
             helper = root / "known-hosts-helper.py"
             helper.write_text(
                 "#!/usr/bin/env python3\n"
@@ -2675,25 +2729,91 @@ class BackupAuthenticationContractTests(unittest.TestCase):
             )
             helper.chmod(0o700)
             calls = root / "known-hosts-calls"
-            daemon = subprocess.Popen(
-                [str(sshd), "-D", "-e", "-f", str(config)],
-                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, text=True, start_new_session=True,
+            daemon_log = (
+                root / "sshd.stderr" if active_loopback is None
+                else active_loopback.daemon_log
             )
+            if active_loopback is None:
+                daemon_log.touch(mode=0o600)
+            daemon_log_metadata = daemon_log.lstat()
+            self.assertTrue(stat.S_ISREG(daemon_log_metadata.st_mode))
+            self.assertEqual(0o600, stat.S_IMODE(daemon_log_metadata.st_mode))
+            self.assertEqual(1, daemon_log_metadata.st_nlink)
+            daemon_log_stream = None
+            daemon = None
+            if active_loopback is None:
+                daemon_log_stream = daemon_log.open("w", encoding="utf-8")
+                try:
+                    daemon = subprocess.Popen(
+                        [str(sshd), "-D", "-e", "-f", str(config)],
+                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                        stderr=daemon_log_stream, text=True, start_new_session=True,
+                    )
+                except BaseException:
+                    daemon_log_stream.close()
+                    raise
+
+            def daemon_alive():
+                if daemon is not None:
+                    return daemon.poll() is None
+                try:
+                    os.kill(active_loopback.daemon_pid, 0)
+                except ProcessLookupError:
+                    return False
+                return True
             try:
-                deadline = time.monotonic() + 5
-                while time.monotonic() < deadline:
-                    if daemon.poll() is not None:
-                        self.fail("loopback sshd exited: " + daemon.stderr.read())
+                def daemon_diagnostics():
                     try:
-                        with socket.create_connection(("127.0.0.1", port), timeout=0.1):
-                            break
-                    except OSError:
-                        time.sleep(0.05)
-                else:
-                    self.fail("loopback sshd did not listen")
+                        return daemon_log.read_text(encoding="utf-8")[-4096:]
+                    except OSError as error:
+                        return f"<unavailable sshd diagnostics: {error}>"
 
                 host = f"[127.0.0.1]:{port}"
+                deadline = time.monotonic() + 8
+                readiness_attempts = []
+                ready = False
+                for _attempt in range(3):
+                    if not daemon_alive():
+                        self.fail("loopback sshd exited: " + daemon_diagnostics())
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    scanned = subprocess.run(
+                        [
+                            str(ssh_keyscan), "-T", "2", "-p", str(port),
+                            "-t", "ed25519", "127.0.0.1",
+                        ],
+                        text=True, capture_output=True,
+                        timeout=min(4, remaining), check=False,
+                    )
+                    scan_lines = [
+                        line for line in scanned.stdout.splitlines()
+                        if line and not line.startswith("#")
+                    ]
+                    readiness_attempts.append((scanned.returncode, tuple(scan_lines)))
+                    if scan_lines:
+                        self.assertEqual(0, scanned.returncode, scanned.stderr)
+                        self.assertEqual(1, len(scan_lines), scanned.stdout)
+                        scan_fields = scan_lines[0].split()
+                        self.assertEqual(
+                            [host, ed_fields[0], ed_fields[1]], scan_fields,
+                            scanned.stdout,
+                        )
+                        scanned_fingerprint = "SHA256:" + base64.b64encode(
+                            hashlib.sha256(base64.b64decode(scan_fields[2])).digest(),
+                        ).rstrip(b"=").decode("ascii")
+                        self.assertEqual(
+                            fingerprints["ed25519"], scanned_fingerprint,
+                        )
+                        ready = True
+                        break
+                    time.sleep(0.05)
+                if not ready:
+                    self.fail(
+                        "loopback sshd did not complete a reviewed host-key KEX: "
+                        f"attempts={readiness_attempts!r}; " + daemon_diagnostics()
+                    )
+
                 matching = f"{host} {ed_fields[0]} {ed_fields[1]}"
                 same_algorithm_other_key = (
                     f"{host} {ed_fields[0]} "
@@ -2705,15 +2825,21 @@ class BackupAuthenticationContractTests(unittest.TestCase):
 
                 def connect(
                     mode, record, helper_path=helper, algorithm="ssh-ed25519",
-                    known_hosts_command=None,
+                    known_hosts_command=None, run_timeout=5,
                 ):
+                    if run_timeout <= 0:
+                        raise AssertionError("loopback SSH retry deadline expired")
+                    prior_reasons = (
+                        calls.read_text(encoding="utf-8").splitlines()
+                        if calls.exists() else []
+                    )
                     environment = dict(os.environ)
                     environment.update({
                         "KHC_CALLS": str(calls), "KHC_MODE": mode,
                         "KHC_RECORD": record,
                     })
                     argv = [
-                            str(ssh), "-F", "/dev/null", "-p", str(port),
+                            str(ssh), "-vv", "-F", "/dev/null", "-p", str(port),
                             "-o", "BatchMode=yes",
                             "-o", "PasswordAuthentication=no",
                             "-o", "StrictHostKeyChecking=yes",
@@ -2730,29 +2856,230 @@ class BackupAuthenticationContractTests(unittest.TestCase):
                     ]
                     if algorithm is not None:
                         argv[-2:-2] = ["-o", f"HostKeyAlgorithms={algorithm}"]
-                    return subprocess.run(
+                    completed = subprocess.run(
                         argv,
                         env=environment, text=True, capture_output=True,
-                        timeout=5, check=False,
+                        timeout=min(5, run_timeout), check=False,
+                    )
+                    all_reasons = (
+                        calls.read_text(encoding="utf-8").splitlines()
+                        if calls.exists() else []
+                    )
+                    self.assertEqual(prior_reasons, all_reasons[:len(prior_reasons)])
+                    completed.known_hosts_reasons = all_reasons[len(prior_reasons):]
+                    return completed
+
+                def assert_verified_terminal(
+                    completed, algorithm, fingerprint, *, helper_reasons=True,
+                ):
+                    stderr = completed.stderr.casefold()
+                    host_key_marker = (
+                        f"server host key: {algorithm} {fingerprint}".casefold()
+                    )
+                    match_marker = (
+                        f"is known and matches the {algorithm.removeprefix('ssh-')} host key"
+                    )
+                    helper_marker = "knownhostscommand-hostname"
+                    self.assertNotEqual(0, completed.returncode)
+                    self.assertIn(host_key_marker, stderr)
+                    self.assertIn(match_marker, stderr)
+                    self.assertIn(helper_marker, stderr)
+                    if helper_reasons:
+                        self.assertEqual(
+                            [f"ORDER {host}", f"HOSTNAME {host}"],
+                            completed.known_hosts_reasons,
+                        )
+                    else:
+                        self.assertEqual([], completed.known_hosts_reasons)
+                    self.assertNotIn("host key verification failed", stderr)
+                    accepted_terminals = (
+                        "permission denied",
+                        f"connection closed by 127.0.0.1 port {port}",
+                    )
+                    selected = [
+                        terminal for terminal in accepted_terminals
+                        if terminal in stderr
+                    ]
+                    self.assertEqual(1, len(selected), completed.stderr)
+                    nonempty_lines = [line for line in stderr.splitlines() if line]
+                    self.assertTrue(nonempty_lines, completed.stderr)
+                    self.assertIn(selected[0], nonempty_lines[-1])
+                    positions = (
+                        stderr.index(host_key_marker), stderr.index(match_marker),
+                        stderr.index(helper_marker), stderr.rindex(selected[0]),
+                    )
+                    self.assertEqual(tuple(sorted(positions)), positions, completed.stderr)
+
+                def is_exact_pre_hostkey_transient(completed, daemon_alive):
+                    stderr = completed.stderr.casefold()
+                    terminal = f"connection closed by 127.0.0.1 port {port}"
+                    lines = [line for line in stderr.splitlines() if line]
+                    return (
+                        daemon_alive
+                        and completed.returncode == 255
+                        and completed.stdout == ""
+                        and bool(lines) and lines[-1] == terminal
+                        and stderr.count(terminal) == 1
+                        and "ssh2_msg_kexinit sent" in stderr
+                        and "server host key:" not in stderr
+                        and "is known and matches" not in stderr
+                        and "knownhostscommand-" not in stderr
+                        and "host key verification failed" not in stderr
+                        and "knownhostscommand failed" not in stderr
+                        and "no matching host key type found" not in stderr
+                        and "permission denied" not in stderr
+                        and completed.known_hosts_reasons == []
                     )
 
-                ordered = connect("match", matching, algorithm=None)
-                self.assertNotEqual(0, ordered.returncode)
-                self.assertIn("permission denied", ordered.stderr.casefold())
-                matched = connect("match", matching)
-                self.assertNotEqual(0, matched.returncode)
-                self.assertNotIn("host key verification failed", matched.stderr.casefold())
-                self.assertIn("permission denied", matched.stderr.casefold())
+                def connect_with_verified_retry(
+                    connect_once, *, daemon_alive, now=time.monotonic,
+                    sleeper=time.sleep,
+                ):
+                    retry_deadline = now() + 8
+                    attempts = []
+                    for attempt in range(3):
+                        remaining = retry_deadline - now()
+                        if remaining <= 0:
+                            raise AssertionError(
+                                "loopback SSH retry deadline expired"
+                            )
+                        completed = connect_once(remaining)
+                        attempts.append(completed)
+                        if not is_exact_pre_hostkey_transient(
+                            completed, daemon_alive(),
+                        ):
+                            return completed, attempts
+                        if attempt == 2 or now() >= retry_deadline:
+                            raise AssertionError(
+                                "loopback sshd repeatedly closed before host-key evidence"
+                            )
+                        sleeper(0.05)
+                    raise AssertionError("unreachable loopback retry state")
+
+                def fake_result(stderr, *, reasons=(), returncode=255):
+                    completed = subprocess.CompletedProcess(
+                        [str(ssh)], returncode, "", stderr,
+                    )
+                    completed.known_hosts_reasons = list(reasons)
+                    return completed
+
+                transient = fake_result(
+                    "debug1: SSH2_MSG_KEXINIT sent\n"
+                    f"Connection closed by 127.0.0.1 port {port}\n"
+                )
+                verified = fake_result(
+                    f"debug1: Server host key: ssh-ed25519 {fingerprints['ed25519']}\n"
+                    "debug1: Host is known and matches the ED25519 host key.\n"
+                    "debug3: knownhostscommand-hostname\n"
+                    "Permission denied\n",
+                    reasons=(f"ORDER {host}", f"HOSTNAME {host}"),
+                )
+                fake_sequence = iter((transient, verified))
+                retried, fake_attempts = connect_with_verified_retry(
+                    lambda _remaining: next(fake_sequence), daemon_alive=lambda: True,
+                    now=lambda: 0, sleeper=lambda _delay: None,
+                )
+                self.assertIs(verified, retried)
+                self.assertEqual([transient, verified], fake_attempts)
+                assert_verified_terminal(
+                    retried, "ssh-ed25519", fingerprints["ed25519"],
+                )
+                with self.assertRaisesRegex(
+                    AssertionError, "repeatedly closed before host-key evidence",
+                ):
+                    connect_with_verified_retry(
+                        lambda _remaining: transient, daemon_alive=lambda: True,
+                        now=lambda: 0, sleeper=lambda _delay: None,
+                    )
+                reversed_evidence = fake_result(
+                    f"debug1: Server host key: ssh-ed25519 {fingerprints['ed25519']}\n"
+                    "debug3: knownhostscommand-hostname\n"
+                    "debug1: Host is known and matches the ED25519 host key.\n"
+                    "Permission denied\n",
+                    reasons=(f"ORDER {host}", f"HOSTNAME {host}"),
+                )
+                with self.assertRaises(AssertionError):
+                    assert_verified_terminal(
+                        reversed_evidence, "ssh-ed25519", fingerprints["ed25519"],
+                    )
+                fake_clock = [0.0]
+                deadline_budgets = []
+                def delayed_transient(remaining):
+                    deadline_budgets.append(remaining)
+                    fake_clock[0] += 4.1
+                    return transient
+                with self.assertRaisesRegex(
+                    AssertionError, "retry deadline expired|repeatedly closed",
+                ):
+                    connect_with_verified_retry(
+                        delayed_transient, daemon_alive=lambda: True,
+                        now=lambda: fake_clock[0], sleeper=lambda _delay: None,
+                    )
+                self.assertEqual(2, len(deadline_budgets))
+                self.assertEqual(8, deadline_budgets[0])
+                self.assertGreater(deadline_budgets[1], 0)
+                self.assertLess(deadline_budgets[1], 4)
+                self.assertGreaterEqual(fake_clock[0], 8)
+                non_retryable = (
+                    fake_result(
+                        f"debug1: Server host key: ssh-ed25519 SHA256:{'A' * 43}\n"
+                        f"Connection closed by 127.0.0.1 port {port}\n"
+                    ),
+                    fake_result(
+                        transient.stderr,
+                        reasons=(f"ORDER {host}",),
+                    ),
+                    fake_result("arbitrary ssh failure\n"),
+                )
+                for label, result, alive in (
+                    ("mismatched-host-key", non_retryable[0], True),
+                    ("helper-evidence", non_retryable[1], True),
+                    ("arbitrary-stderr", non_retryable[2], True),
+                    ("daemon-dead", transient, False),
+                ):
+                    calls_made = []
+                    with self.subTest(retry_rejection=label):
+                        returned, attempts = connect_with_verified_retry(
+                            lambda _remaining, result=result: (
+                                calls_made.append(True) or result
+                            ),
+                            daemon_alive=lambda alive=alive: alive,
+                            now=lambda: 0, sleeper=lambda _delay: None,
+                        )
+                        self.assertIs(result, returned)
+                        self.assertEqual([True], calls_made)
+                        self.assertEqual([result], attempts)
+
+                ordered, ordered_attempts = connect_with_verified_retry(
+                    lambda remaining: connect(
+                        "match", matching, algorithm=None, run_timeout=remaining,
+                    ),
+                    daemon_alive=daemon_alive,
+                )
+                self.assertLessEqual(len(ordered_attempts), 3)
+                assert_verified_terminal(ordered, "ssh-ed25519", fingerprints["ed25519"])
+                matched, matched_attempts = connect_with_verified_retry(
+                    lambda remaining: connect(
+                        "match", matching, algorithm=None, run_timeout=remaining,
+                    ),
+                    daemon_alive=daemon_alive,
+                )
+                self.assertLessEqual(len(matched_attempts), 3)
+                assert_verified_terminal(matched, "ssh-ed25519", fingerprints["ed25519"])
                 printf_command = (
                     "/usr/bin/printf '%%s\\n' " + shlex.quote(matching)
                 )
-                printf_matched = connect(
-                    "match", matching, known_hosts_command=printf_command,
+                printf_matched, printf_attempts = connect_with_verified_retry(
+                    lambda remaining: connect(
+                        "match", matching, known_hosts_command=printf_command,
+                        run_timeout=remaining,
+                    ),
+                    daemon_alive=daemon_alive,
                 )
-                self.assertNotEqual(0, printf_matched.returncode)
-                self.assertIn("permission denied", printf_matched.stderr.casefold())
-                self.assertNotIn(
-                    "host key verification failed", printf_matched.stderr.casefold(),
+                self.assertLessEqual(len(printf_attempts), 3)
+                assert_verified_terminal(
+                    printf_matched, "ssh-ed25519", fingerprints["ed25519"],
+                    helper_reasons=False,
                 )
                 reasons = calls.read_text(encoding="utf-8").splitlines()
                 self.assertTrue(
@@ -2762,31 +3089,76 @@ class BackupAuthenticationContractTests(unittest.TestCase):
                     any(line.startswith("HOSTNAME ") for line in reasons), reasons,
                 )
 
-                for label, completed in (
-                    ("same-algorithm", connect("match", same_algorithm_other_key)),
+                for label, completed, rejection in (
+                    (
+                        "same-algorithm", connect("match", same_algorithm_other_key),
+                        "host key verification failed",
+                    ),
                     (
                         "different-algorithm",
                         connect("match", different_algorithm, algorithm="ssh-rsa"),
+                        "no matching host key type found",
                     ),
-                    ("empty", connect("empty", matching)),
-                    ("nonzero", connect("nonzero", matching)),
-                    ("missing", connect("match", matching, root / "missing-helper")),
+                    ("empty", connect("empty", matching), "host key verification failed"),
+                    ("nonzero", connect("nonzero", matching), "knownhostscommand failed"),
+                    (
+                        "missing", connect("match", matching, root / "missing-helper"),
+                        "host key verification failed",
+                    ),
                 ):
                     with self.subTest(label=label):
                         self.assertNotEqual(0, completed.returncode)
                         self.assertNotIn("permission denied", completed.stderr.casefold())
+                        self.assertNotIn(
+                            f"connection closed by 127.0.0.1 port {port}",
+                            completed.stderr.casefold(),
+                        )
+                        self.assertIn(rejection, completed.stderr.casefold())
             finally:
-                try:
-                    os.killpg(daemon.pid, 9)
-                except ProcessLookupError:
-                    pass
-                try:
-                    daemon.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    pass
-                for stream in (daemon.stdout, daemon.stderr):
-                    if stream is not None:
-                        stream.close()
+                if daemon is not None:
+                    try:
+                        os.killpg(daemon.pid, 9)
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        daemon.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            os.killpg(daemon.pid, 9)
+                        except ProcessLookupError:
+                            pass
+                        daemon.wait(timeout=2)
+                    finally:
+                        daemon_log_stream.close()
+                    self.assertIsNotNone(daemon.poll())
+                    self.assertTrue(daemon_log_stream.closed)
+                else:
+                    self.assertTrue(daemon_alive())
+                    active_again = consumer()
+                    self.assertEqual(active_loopback.root, active_again.root)
+                    self.assertEqual(active_loopback.port, active_again.port)
+                    self.assertEqual(
+                        active_loopback.daemon_pid, active_again.daemon_pid,
+                    )
+                    self.assertEqual(
+                        active_loopback.public_keys, active_again.public_keys,
+                    )
+                    self.assertEqual(
+                        active_loopback.fingerprints, active_again.fingerprints,
+                    )
+                    self.assertEqual(
+                        active_loopback.source_fds, active_again.source_fds,
+                    )
+                    for descriptor in active_again.source_fds:
+                        os.fstat(descriptor)
+                closed_log_metadata = daemon_log.lstat()
+                self.assertTrue(stat.S_ISREG(closed_log_metadata.st_mode))
+                self.assertEqual(0o600, stat.S_IMODE(closed_log_metadata.st_mode))
+                self.assertEqual(1, closed_log_metadata.st_nlink)
+                self.assertEqual(
+                    (daemon_log_metadata.st_dev, daemon_log_metadata.st_ino),
+                    (closed_log_metadata.st_dev, closed_log_metadata.st_ino),
+                )
 
     def test_ssh_capability_and_execution_bind_canonical_binary_identity(self):
         require_support = getattr(

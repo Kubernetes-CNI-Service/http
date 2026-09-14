@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import importlib.util
+import fnmatch
 import html
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
+import stat
 import sys
 import tempfile
 import unittest
@@ -193,14 +195,13 @@ class DocumentationCatalogTests(unittest.TestCase):
             self.assertEqual("original\n", target.read_text(encoding="utf-8"))
 
     def test_user_manual_exhaustively_describes_maintained_files_and_scripts(self):
-        inventory = subprocess.run(
-            ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
-            cwd=ROOT,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=True,
-        ).stdout.decode("utf-8").split("\0")
+        from test_cases import test_public_publication_contract as publication
+
+        inventory_result = publication._canonical_git(
+            ROOT, "ls-files", "--cached", "--others", "--exclude-standard", "-z",
+        )
+        self.assertEqual(0, inventory_result.returncode, inventory_result.stderr)
+        inventory = inventory_result.stdout.decode("utf-8").split("\0")
         maintained = {path for path in inventory if path}
         scripts = {
             path for path in maintained
@@ -307,7 +308,9 @@ class DocumentationCatalogTests(unittest.TestCase):
         self.assertNotRegex(test_readme, r"\*\*\d+ 个受管脚本路径\*\*")
 
     def test_documentation_tree_and_manifest_path_governance(self):
-        deferred_q01 = (
+        from test_cases import test_public_publication_contract as publication
+
+        published_q01 = (
             "docs/README.md",
             "docs/architecture/README.md",
             "docs/deployment/BUNDLE_WORKFLOWS.md",
@@ -317,24 +320,40 @@ class DocumentationCatalogTests(unittest.TestCase):
             "docs/validation/README.md",
             "infra/docker/README.md",
         )
-        for relative in deferred_q01:
-            with self.subTest(relative=relative):
-                self.assertFalse(os.path.lexists(ROOT / relative), relative)
-
         manifest = json.loads(
             (ROOT / "test_cases/script_test_manifest.json").read_text(
                 encoding="utf-8"
             )
         )
-        patterns = {
+        patterns = tuple(
             pattern
             for rule in manifest["path_rules"]
             for pattern in rule["paths"]
-        }
-        self.assertNotIn("docs/**/*.md", patterns)
-        self.assertTrue(set(deferred_q01).isdisjoint(manifest["tracked_support"]))
+        )
+        tracked_support = set(manifest["tracked_support"])
+        for relative in published_q01:
+            with self.subTest(relative=relative):
+                result = publication._canonical_git(
+                    ROOT, "ls-files", "--error-unmatch", "-z", "--", relative,
+                )
+                self.assertEqual(relative.encode("utf-8") + b"\0", result.stdout)
+                self.assertEqual(0, result.returncode, result.stderr)
+                metadata = (ROOT / relative).lstat()
+                self.assertTrue(stat.S_ISREG(metadata.st_mode), relative)
+                self.assertEqual(0o644, stat.S_IMODE(metadata.st_mode), relative)
+                ignored = publication._canonical_git(
+                    ROOT, "check-ignore", "--no-index", "--quiet", "--", relative,
+                )
+                self.assertEqual(1, ignored.returncode, relative)
+                self.assertIn(relative, tracked_support)
+                self.assertTrue(
+                    any(fnmatch.fnmatchcase(relative, pattern) for pattern in patterns),
+                    f"published document lacks a path rule: {relative}",
+                )
 
     def test_public_docs_do_not_link_to_ignored_internal_documents(self):
+        from test_cases import test_public_publication_contract as publication
+
         pattern = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
         for source in sorted((ROOT / "docs").rglob("*.md")):
             for raw in pattern.findall(source.read_text(encoding="utf-8")):
@@ -347,9 +366,8 @@ class DocumentationCatalogTests(unittest.TestCase):
                 with self.subTest(source=source.relative_to(ROOT), target=target):
                     self.assertTrue(target.exists())
                     relative = target.relative_to(ROOT).as_posix()
-                    ignored = subprocess.run(
-                        ["git", "-C", str(ROOT), "check-ignore", "--quiet", relative],
-                        check=False,
+                    ignored = publication._canonical_git(
+                        ROOT, "check-ignore", "--quiet", relative,
                     )
                     self.assertNotEqual(0, ignored.returncode, relative)
 
