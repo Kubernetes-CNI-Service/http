@@ -693,6 +693,249 @@ def _copy_worktree_entry(destination: Path, relative: str) -> None:
 
 
 class PublicSPhaseWorkflowTests(unittest.TestCase):
+    def test_v3_genesis_runs_published_v2_proof_before_child_governance(self):
+        """An ordinary V3 child must not be judged as the historical P tree."""
+        from test_cases import test_public_publication_workflow as publication
+        from test_cases import run_related_tests as governed_runner
+
+        head = _run(["git", "rev-parse", "HEAD"], cwd=ROOT)
+        anchor = _run(
+            ["git", "rev-parse", "--verify", "refs/remotes/origin/v2^{commit}"],
+            cwd=ROOT,
+        )
+        self.assertEqual((0, "", ""), (head.returncode, head.stderr, anchor.stderr))
+        self.assertEqual(0, anchor.returncode, anchor.stderr)
+        current_head = head.stdout.strip()
+        published_v2 = anchor.stdout.strip()
+        self.assertNotEqual(published_v2, current_head)
+        self.assertEqual(
+            (S_COMMIT,), publication._raw_commit_parents(ROOT, published_v2),
+        )
+        self.assertNotEqual(
+            publication.P_TREE_RECORD_DIGEST,
+            publication._record_digest(publication._tree_records(ROOT, current_head)),
+        )
+        proof_fqn = (
+            "test_cases.test_public_publication_workflow."
+            "PublicPublicationWorkflowTests."
+            "test_p_phase_exact_commit_runs_catalog_in_private_free_clone"
+        )
+        proof = subprocess.run(
+            [sys.executable, "-B", "-m", "unittest", "-v", proof_fqn],
+            cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            check=False, timeout=300,
+        )
+        self.assertEqual(0, proof.returncode, proof.stdout + proof.stderr)
+        self.assertEqual("", proof.stdout)
+        self.assertEqual(1, proof.stderr.count("Ran 1 test in"), proof.stderr)
+        self.assertTrue(proof.stderr.rstrip().endswith("OK"), proof.stderr)
+
+        selected_anchor, chain = publication._assert_v3_child_authority(ROOT)
+        self.assertEqual(published_v2, selected_anchor)
+        self.assertGreaterEqual(len(chain), 1)
+        self.assertEqual(current_head, chain[0])
+        self.assertEqual(len(chain), len(set(chain)))
+        historical_methods = tuple(sorted(
+            name for name, value in vars(
+                publication.PublicPublicationWorkflowTests
+            ).items()
+            if name.startswith("test_") and hasattr(value, "__wrapped__")
+        ))
+        self.assertEqual(
+            (
+                "test_formal_children_share_one_isolated_dependency_capsule",
+                "test_formal_python_dependency_capsule_is_literal_and_fail_closed",
+                "test_p_phase_exact_commit_runs_catalog_in_private_free_clone",
+                "test_p_staged_overlay_uses_held_index_blobs_and_rejects_rebinding",
+            ),
+            historical_methods,
+        )
+        observed = ["positive-child"]
+
+        def isolated_case(label: str) -> Path:
+            owner = tempfile.TemporaryDirectory(prefix=f"http-v3-genesis-{label}-")
+            self.addCleanup(owner.cleanup)
+            repository = Path(owner.name) / "repository"
+            cloned = _run(
+                ["git", "clone", "--quiet", "--no-local", ROOT, repository],
+                cwd=ROOT, timeout=120,
+            )
+            self.assertEqual(0, cloned.returncode, cloned.stderr)
+            checked = _run(
+                ["git", "checkout", "--quiet", "--detach", current_head],
+                cwd=repository,
+            )
+            self.assertEqual(0, checked.returncode, checked.stderr)
+            bound = _run(
+                ["git", "update-ref", publication.P_PUBLISHED_V2_REMOTE_REF,
+                 published_v2],
+                cwd=repository,
+            )
+            self.assertEqual(0, bound.returncode, bound.stderr)
+            return repository
+
+        missing = isolated_case("missing")
+        deleted = _run(
+            ["git", "update-ref", "-d", publication.P_PUBLISHED_V2_REMOTE_REF],
+            cwd=missing,
+        )
+        self.assertEqual(0, deleted.returncode, deleted.stderr)
+        with self.assertRaisesRegex(
+            publication._PublishedV2RefUnavailable,
+            "remote-tracking ref is absent; authenticated fetch required",
+        ):
+            publication._resolve_published_v2_anchor(missing)
+        observed.append("missing-ref")
+
+        for label, wrong in (("wrong-s", S_COMMIT), ("wrong-child", current_head)):
+            with self.subTest(authority=label):
+                repository = isolated_case(label)
+                changed = _run(
+                    ["git", "update-ref", publication.P_PUBLISHED_V2_REMOTE_REF,
+                     wrong], cwd=repository,
+                )
+                self.assertEqual(0, changed.returncode, changed.stderr)
+                with self.assertRaisesRegex(
+                    publication._PublishedV2AuthorityWrong,
+                    "not the historical P anchor",
+                ):
+                    publication._resolve_published_v2_anchor(repository)
+                observed.append(label)
+
+        with self.assertRaisesRegex(
+            AssertionError, "historical P anchor is not a V3 child",
+        ):
+            publication._raw_v3_first_parent_chain(
+                ROOT, published_v2, published_v2,
+            )
+        observed.append("anchor-not-child")
+        with self.assertRaisesRegex(
+            publication._PublishedV2AuthorityWrong,
+            "not the historical P anchor",
+        ):
+            publication._assert_historical_p_anchor(ROOT, current_head)
+        observed.append("child-not-anchor")
+
+        merge_repository = isolated_case("merge")
+        tree = _run(["git", "rev-parse", "HEAD^{tree}"], cwd=merge_repository)
+        self.assertEqual(0, tree.returncode, tree.stderr)
+        merged = subprocess.run(
+            ["git", "-c", "user.name=V3 Test", "-c",
+             "user.email=v3-test@example.invalid", "commit-tree",
+             tree.stdout.strip(), "-p", current_head,
+             "-p", published_v2],
+            cwd=merge_repository, input="synthetic merge\n", text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        )
+        self.assertEqual(0, merged.returncode, merged.stderr)
+        with self.assertRaisesRegex(AssertionError, "must remain merge-free"):
+            publication._raw_v3_first_parent_chain(
+                merge_repository, merged.stdout.strip(), published_v2,
+            )
+        observed.append("merge-rejected")
+
+        for label, relative in (
+            ("alternate", ".git/objects/info/alternates"),
+            ("graft", ".git/info/grafts"),
+        ):
+            with self.subTest(redirection=label):
+                repository = isolated_case(label)
+                target = repository / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("hostile\n", encoding="utf-8")
+                with self.assertRaisesRegex(
+                    publication._PublishedV2AuthorityWrong,
+                    "not the historical P anchor",
+                ):
+                    publication._resolve_published_v2_anchor(repository)
+                observed.append(f"{label}-rejected")
+
+        dirty_worktree = isolated_case("dirty-worktree")
+        (dirty_worktree / "AGENTS.md").write_text("dirty\n", encoding="utf-8")
+        with self.assertRaisesRegex(
+            AssertionError, "changed or untracked content",
+        ):
+            publication._assert_v3_child_authority(dirty_worktree)
+        observed.append("dirty-worktree")
+
+        dirty_index = isolated_case("dirty-index")
+        (dirty_index / "AGENTS.md").write_text("dirty index\n", encoding="utf-8")
+        staged = _run(["git", "add", "--", "AGENTS.md"], cwd=dirty_index)
+        self.assertEqual(0, staged.returncode, staged.stderr)
+        with self.assertRaisesRegex(
+            AssertionError, "changed or untracked content",
+        ):
+            publication._assert_v3_child_authority(dirty_index)
+        observed.append("dirty-index")
+
+        dirty_untracked = isolated_case("dirty-untracked")
+        (dirty_untracked / "untracked-genesis-probe").write_bytes(b"probe\n")
+        with self.assertRaisesRegex(
+            AssertionError, "changed or untracked content",
+        ):
+            publication._assert_v3_child_authority(dirty_untracked)
+        observed.append("dirty-untracked")
+
+        stale_manual = isolated_case("stale-manual")
+        manual = stale_manual / "user-manual.html"
+        manual_payload = manual.read_text(encoding="utf-8")
+        stale_needle = 'data-file-path="docs/README.md"'
+        self.assertEqual(1, manual_payload.count(stale_needle))
+        manual.write_text(
+            manual_payload.replace(
+                stale_needle, 'data-file-path="docs/README-stale.md"', 1,
+            ),
+            encoding="utf-8",
+        )
+        committed = _run(
+            ["git", "add", "--", "user-manual.html"], cwd=stale_manual,
+        )
+        self.assertEqual(0, committed.returncode, committed.stderr)
+        committed = _run(
+            ["git", "-c", "user.name=V3 Test", "-c",
+             "user.email=v3-test@example.invalid", "commit", "--quiet", "-m",
+             "stale generated manual"], cwd=stale_manual,
+        )
+        self.assertEqual(0, committed.returncode, committed.stderr)
+        with self.assertRaisesRegex(
+            AssertionError, "generated user manual is stale",
+        ):
+            publication._assert_v3_child_authority(stale_manual)
+        observed.append("generated-check")
+
+        invalid_manifest = isolated_case("invalid-manifest")
+        manifest = invalid_manifest / "test_cases/script_test_manifest.json"
+        manifest.write_bytes(b"{}\n")
+        committed = _run(
+            ["git", "add", "--", "test_cases/script_test_manifest.json"],
+            cwd=invalid_manifest,
+        )
+        self.assertEqual(0, committed.returncode, committed.stderr)
+        committed = _run(
+            ["git", "-c", "user.name=V3 Test", "-c",
+             "user.email=v3-test@example.invalid", "commit", "--quiet", "-m",
+             "invalid manifest"], cwd=invalid_manifest,
+        )
+        self.assertEqual(0, committed.returncode, committed.stderr)
+        with self.assertRaisesRegex(
+            governed_runner.ImpactError,
+            "schema_version|scripts|test_rules|test_suites",
+        ):
+            publication._assert_v3_child_authority(invalid_manifest)
+        observed.append("manifest-rejected")
+
+        self.assertEqual(4096, publication.P_V3_FIRST_PARENT_LIMIT)
+        self.assertEqual(
+            (
+                "positive-child", "missing-ref", "wrong-s", "wrong-child",
+                "anchor-not-child", "child-not-anchor", "merge-rejected",
+                "alternate-rejected", "graft-rejected", "dirty-worktree",
+                "dirty-index", "dirty-untracked", "generated-check",
+                "manifest-rejected",
+            ),
+            tuple(observed),
+        )
+
     @_historical_s_method
     def test_s_stage_delta_is_exact_and_excludes_deferred_families(self):
         candidates = {

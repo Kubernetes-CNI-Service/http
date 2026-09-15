@@ -7,6 +7,7 @@ import base64
 import contextlib
 import errno
 import fcntl
+import functools
 import hashlib
 import inspect
 import io
@@ -212,6 +213,11 @@ P_CAPSULE_SANDBOX_EXECUTABLE = "/usr/bin/sandbox-exec"
 P_CAPSULE_FD_ENV = "HTTP_P_DEPENDENCY_ARCHIVE_FD"
 P_CAPSULE_IDENTITY_ENV = "HTTP_P_DEPENDENCY_ARCHIVE_IDENTITY"
 P_FORMAL_LOOPBACK_SSHD_ENV = "HTTP_P_FORMAL_LOOPBACK_SSHD"
+P_PUBLISHED_V2_REMOTE_REF = "refs/remotes/origin/v2"
+P_HISTORICAL_SELF_SHA256 = (
+    "1bb652bb15f97e03e568270a57ee0a56515bc526cecd5034c6a99c031102358e"
+)
+P_V3_FIRST_PARENT_LIMIT = 4096
 P_FORMAL_LOOPBACK_SSHD_RELATIVE = "formal-loopback-sshd"
 P_EXPECTED_FORMAL_LOOPBACK_SSHD_ENV = "HTTP_P_FORMAL_LOOPBACK_SSHD"
 P_EXPECTED_FORMAL_LOOPBACK_SSHD_RELATIVE = "formal-loopback-sshd"
@@ -3991,6 +3997,204 @@ def _head(repository: Path) -> str:
     return result.stdout.strip()
 
 
+class _PublishedV2RefUnavailable(AssertionError):
+    """The clone topology does not contain the required remote-tracking ref."""
+
+
+class _PublishedV2AuthorityWrong(AssertionError):
+    """The remote-tracking ref exists but is not the historical P authority."""
+
+
+def _assert_historical_p_anchor(repository: Path, anchor: str) -> None:
+    """Verify the immutable P facts without trusting the current child tree."""
+    try:
+        _assert_canonical_history_metadata(repository)
+        if _raw_commit_parents(repository, anchor) != (S_COMMIT,):
+            raise AssertionError("published V2 anchor does not have sole parent S")
+        records = _tree_records(repository, anchor)
+        if len(records) != P_TREE_PATH_COUNT:
+            raise AssertionError("published V2 anchor path count differs")
+        if _path_digest(records) != P_TREE_PATH_DIGEST:
+            raise AssertionError("published V2 anchor path set differs")
+        if _forbidden_v2_paths(records):
+            raise AssertionError("published V2 anchor contains forbidden paths")
+        if _record_digest(records) != P_TREE_RECORD_DIGEST:
+            raise AssertionError("published V2 anchor tree records differ")
+        s_records = _tree_records(repository, S_COMMIT)
+        if records.get(P_LEDGER_PATH) != s_records.get(P_LEDGER_PATH):
+            raise AssertionError("published V2 anchor changed the runner ledger")
+    except _PublishedV2AuthorityWrong:
+        raise
+    except AssertionError as error:
+        raise _PublishedV2AuthorityWrong(
+            "published V2 remote-tracking ref is not the historical P anchor"
+        ) from error
+
+
+def _resolve_published_v2_anchor(repository: Path) -> str:
+    """Resolve and validate the fetched origin/v2 authority, without network I/O."""
+    result = _git_run(
+        repository,
+        ["rev-parse", "--verify", "--quiet",
+         f"{P_PUBLISHED_V2_REMOTE_REF}^{{commit}}"],
+        text=True,
+    )
+    if result.returncode:
+        if result.returncode == 1 and result.stdout == "" and result.stderr == "":
+            raise _PublishedV2RefUnavailable(
+                "published V2 remote-tracking ref is absent; authenticated fetch required"
+            )
+        raise _PublishedV2AuthorityWrong(
+            "published V2 remote-tracking ref cannot be resolved"
+        )
+    anchor = result.stdout.strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", anchor):
+        raise _PublishedV2AuthorityWrong(
+            "published V2 remote-tracking ref is not one exact object id"
+        )
+    _assert_historical_p_anchor(repository, anchor)
+    return anchor
+
+
+def _raw_v3_first_parent_chain(
+    repository: Path, head: str, anchor: str,
+) -> tuple[str, ...]:
+    """Return a bounded, merge-free raw first-parent chain from head to V2."""
+    if head == anchor:
+        raise AssertionError("historical P anchor is not a V3 child")
+    current = head
+    chain = []
+    for _distance in range(P_V3_FIRST_PARENT_LIMIT):
+        if current == anchor:
+            return tuple(chain)
+        if current == S_COMMIT:
+            raise AssertionError("V3 history reached S without the published V2 anchor")
+        parents = _raw_commit_parents(repository, current)
+        if len(parents) != 1:
+            raise AssertionError("V3 history must remain merge-free")
+        chain.append(current)
+        current = parents[0]
+    raise AssertionError("V3 first-parent history exceeds the reviewed bound")
+
+
+def _assert_v3_child_authority(repository: Path) -> tuple[str, tuple[str, ...]]:
+    """Bind an ordinary child to fetched V2 and retain non-tree-equality gates."""
+    anchor = _resolve_published_v2_anchor(repository)
+    head = _head(repository)
+    chain = _raw_v3_first_parent_chain(repository, head, anchor)
+    current_records = _tree_records(repository, head)
+    if _record_digest(current_records) == P_TREE_RECORD_DIGEST:
+        raise AssertionError("V3 child still satisfies the historical P tree predicate")
+    ledger = (repository / P_LEDGER_PATH).read_bytes()
+    _assert_clean_and_ledger(repository, ledger, head)
+    from test_cases import run_related_tests as governed_runner
+
+    governed_runner.load_and_validate_manifest(
+        repository, repository / "test_cases/script_test_manifest.json",
+    )
+    environment = {
+        key: value for key, value in os.environ.items()
+        if not key.startswith(("GIT_", "PYTHON"))
+    }
+    generated = subprocess.run(
+        [sys.executable, "-B", "tools/update-user-manual.py", "--check"],
+        cwd=repository, env=environment, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        check=False, timeout=180,
+    )
+    if (
+        generated.returncode
+        or generated.stdout != "user-manual.html exhaustive catalog is current\n"
+        or generated.stderr
+    ):
+        raise AssertionError(
+            "V3 generated user manual is stale: "
+            + generated.stdout + generated.stderr
+        )
+    _assert_clean_and_ledger(repository, ledger, head)
+    return anchor, chain
+
+
+_P_HISTORY_TEMP = None
+_P_HISTORY_CHECKOUT = None
+_P_HISTORY_ANCHOR = None
+
+
+def _historical_p_checkout(repository: Path, anchor: str) -> Path:
+    """Create one private detached checkout of the externally selected V2 P."""
+    global _P_HISTORY_TEMP, _P_HISTORY_CHECKOUT, _P_HISTORY_ANCHOR
+    if _P_HISTORY_CHECKOUT is not None:
+        if _P_HISTORY_ANCHOR != anchor:
+            raise AssertionError("published V2 authority changed during the test process")
+        return _P_HISTORY_CHECKOUT
+    _P_HISTORY_TEMP = tempfile.TemporaryDirectory(
+        prefix="http-p-v2-history-", dir="/private/tmp",
+    )
+    checkout = Path(_P_HISTORY_TEMP.name) / "repository"
+    cloned = _git_run(
+        repository,
+        ["clone", "--quiet", "--no-local", str(repository), str(checkout)],
+        text=True,
+    )
+    if cloned.returncode or cloned.stdout or cloned.stderr:
+        raise AssertionError("cannot create historical P checkout: " + cloned.stderr)
+    detached = _git_run(
+        checkout, ["checkout", "--quiet", "--detach", anchor], text=True,
+    )
+    if detached.returncode or detached.stdout or detached.stderr:
+        raise AssertionError("cannot detach historical P checkout: " + detached.stderr)
+    if _head(checkout) != anchor:
+        raise AssertionError("historical P checkout selected the wrong commit")
+    if hashlib.sha256(
+        (checkout / P_SELF_RECORD_PATH).read_bytes()
+    ).hexdigest() != P_HISTORICAL_SELF_SHA256:
+        raise AssertionError("historical P test module differs from published V2")
+    _assert_clean_and_ledger(
+        checkout, (checkout / P_LEDGER_PATH).read_bytes(), anchor,
+    )
+    _P_HISTORY_CHECKOUT = checkout
+    _P_HISTORY_ANCHOR = anchor
+    return checkout
+
+
+def _run_historical_p_test(repository: Path, anchor: str, fqn: str) -> None:
+    checkout = _historical_p_checkout(repository, anchor)
+    cache_root = Path(_P_HISTORY_TEMP.name) / "pycache"
+    cache_root.mkdir(mode=0o700, exist_ok=True)
+    environment = {
+        key: value for key, value in os.environ.items()
+        if not key.startswith(("GIT_", "PYTHON"))
+    }
+    environment["PYTHONPYCACHEPREFIX"] = str(cache_root)
+    ledger = (checkout / P_LEDGER_PATH).read_bytes()
+    replay = subprocess.run(
+        [sys.executable, "-B", "-m", "unittest", "-v", fqn],
+        cwd=checkout, env=environment, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        check=False, timeout=1500,
+    )
+    if replay.returncode:
+        raise AssertionError(replay.stdout + replay.stderr)
+    if replay.stdout != "" or replay.stderr.count("Ran 1 test in") != 1:
+        raise AssertionError("historical P test emitted an unexpected summary")
+    if not replay.stderr.rstrip().endswith("OK"):
+        raise AssertionError("historical P test did not finish OK")
+    _assert_clean_and_ledger(checkout, ledger, anchor)
+
+
+def _historical_p_method(method):
+    """Replay ce21's exact test bytes when the current checkout is a V3 child."""
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        current = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+        if current == P_HISTORICAL_SELF_SHA256:
+            return method(self, *args, **kwargs)
+        anchor, _chain = _assert_v3_child_authority(ROOT)
+        _run_historical_p_test(ROOT, anchor, self.id())
+        return None
+    return wrapper
+
+
 def _assert_clean_and_ledger(
     repository: Path, ledger: bytes, captured_head: str,
 ) -> None:
@@ -4072,6 +4276,7 @@ def _full_selection_stdout(manifest: dict, approval_path) -> str:
 
 
 class PublicPublicationWorkflowTests(unittest.TestCase):
+    @_historical_p_method
     def test_p_staged_overlay_uses_held_index_blobs_and_rejects_rebinding(self):
         from test_cases import test_public_project_fixture_workflow as fixture
 
@@ -8054,6 +8259,7 @@ class PublicPublicationWorkflowTests(unittest.TestCase):
             ),
         )
 
+    @_historical_p_method
     def test_formal_python_dependency_capsule_is_literal_and_fail_closed(self):
         module = sys.modules[__name__]
         active_fixture = None
@@ -8969,6 +9175,7 @@ class PublicPublicationWorkflowTests(unittest.TestCase):
             archive_outside.joinpath("sentinel").unlink()
             archive_outside.rmdir()
 
+    @_historical_p_method
     def test_formal_children_share_one_isolated_dependency_capsule(self):
         module = sys.modules[__name__]
         loopback_scope = getattr(module, "_formal_loopback_sshd_scope")
@@ -16472,6 +16679,7 @@ runpy.run_module('unittest', run_name='__main__', alter_sys=True)
                 os.fstat(archive_fd)
             self.assertEqual([], list(formal_root.iterdir()))
 
+    @_historical_p_method
     def test_p_phase_exact_commit_runs_catalog_in_private_free_clone(self):
         formal_archive_owner = tempfile.TemporaryDirectory(
             prefix="http-p-formal-archive-owner-",
