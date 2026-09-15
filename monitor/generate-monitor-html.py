@@ -2697,16 +2697,29 @@ def parse_inventory(text: str) -> dict:
     """
     lines = text.splitlines()
     header_index = None
+    header_kind = None
     for index, line in enumerate(lines):
         fields = line.split()
+        explicit_component_header = False
         try:
             component_index = fields.index("Component")
             state_index = fields.index("State")
             type_index = fields.index("Type")
+            explicit_component_header = component_index < state_index < type_index
         except ValueError:
-            continue
-        if component_index < state_index < type_index:
+            pass
+        unnamed_component_header = (
+            fields == ["HW", "Version", "Model", "Serial", "State", "Type"]
+            and index + 1 < len(lines)
+            and len(lines[index + 1].split()) == 6
+            and all(
+                re.fullmatch(r"-+", separator)
+                for separator in lines[index + 1].split()
+            )
+        )
+        if explicit_component_header or unnamed_component_header:
             header_index = index
+            header_kind = "explicit" if explicit_component_header else "unnamed"
             break
 
     components = []
@@ -2715,7 +2728,7 @@ def parse_inventory(text: str) -> dict:
             if not line.strip() or re.match(r"^[-\s]+$", line):
                 continue
             fields = line.split()
-            if len(fields) < 6:
+            if len(fields) < 6 or (header_kind == "unnamed" and len(fields) != 6):
                 continue
             state_value = fields[-2].casefold()
             type_value = fields[-1].casefold()

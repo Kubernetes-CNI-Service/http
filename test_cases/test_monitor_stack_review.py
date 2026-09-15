@@ -32,6 +32,943 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 
 
+CAPTURED_UNNAMED_INVENTORY = (
+    "\n"
+    "          HW Version     Model   Serial             State  Type  \n"
+    "--------  -------------  ------  -----------------  -----  ------\n"
+    "FAN1/1    N/A            N/A     N/A                ok     fan   \n"
+    "FAN1/2    N/A            N/A     N/A                ok     fan   \n"
+    "FAN2/1    N/A            N/A     N/A                ok     fan   \n"
+    "FAN2/2    N/A            N/A     N/A                ok     fan   \n"
+    "FAN3/1    N/A            N/A     N/A                ok     fan   \n"
+    "FAN3/2    N/A            N/A     N/A                ok     fan   \n"
+    "PSU1      N/A            N/A     N/A                ok     psu   \n"
+    "PSU1/FAN  N/A            N/A     N/A                ok     fan   \n"
+    "PSU2      N/A            N/A     N/A                ok     psu   \n"
+    "PSU2/FAN  N/A            N/A     N/A                ok     fan   \n"
+    "SWITCH    pc-i440fx-6.2  5.16.4  02:b7:b0:db:e9:20  ok     switch\n"
+    "\n"
+)
+CAPTURED_UNNAMED_INVENTORY_SHA256 = (
+    "0162f00c56b8d8c6bf56150192f2d8b4ddd2c5a3a7b06e6b86c0f19d74f052dc"
+)
+CAPTURED_UNNAMED_INVENTORY_EXPECTED = {
+    "inventory_components": [
+        {"name": "FAN1/1", "type": "fan", "state": "ok"},
+        {"name": "FAN1/2", "type": "fan", "state": "ok"},
+        {"name": "FAN2/1", "type": "fan", "state": "ok"},
+        {"name": "FAN2/2", "type": "fan", "state": "ok"},
+        {"name": "FAN3/1", "type": "fan", "state": "ok"},
+        {"name": "FAN3/2", "type": "fan", "state": "ok"},
+        {"name": "PSU1", "type": "psu", "state": "ok"},
+        {"name": "PSU1/FAN", "type": "fan", "state": "ok"},
+        {"name": "PSU2", "type": "psu", "state": "ok"},
+        {"name": "PSU2/FAN", "type": "fan", "state": "ok"},
+    ],
+    "psu_ok": 2,
+    "psu_fail": 0,
+    "fan_ok": 8,
+    "fan_fail": 0,
+}
+DEIDENTIFIED_INVENTORY_CORPUS_JSON = r"""
+{
+  "format": "monitor-inventory-deidentified-v2",
+  "private_source_binding_sha256": "cf04b971b2a52b42340cef0fa5bb0392e1121c0dcf22462685a0309020154c34",
+  "selection": {
+    "count": 118,
+    "excluded": "package-import mirrors are outside the root glob; no sampling",
+    "glob": "DAY0-Prepare/**/99-output-monitor/**/*.info"
+  },
+  "profiles": [
+    {
+      "expected": {
+        "fan_fail": 0,
+        "fan_ok": 8,
+        "psu_fail": 0,
+        "psu_ok": 2
+      },
+      "id": "P1",
+      "section": "          HW Version     Model   Serial             State  Type  \n--------  -------------  ------  -----------------  -----  ------\nFAN1/1    N/A            N/A     N/A                ok     fan\nFAN1/2    N/A            N/A     N/A                ok     fan\nFAN2/1    N/A            N/A     N/A                ok     fan\nFAN2/2    N/A            N/A     N/A                ok     fan\nFAN3/1    N/A            N/A     N/A                ok     fan\nFAN3/2    N/A            N/A     N/A                ok     fan\nPSU1      N/A            N/A     N/A                ok     psu\nPSU1/FAN  N/A            N/A     N/A                ok     fan\nPSU2      N/A            N/A     N/A                ok     psu\nPSU2/FAN  N/A            N/A     N/A                ok     fan\nSWITCH    XXXXXXXXXXXXX  XXXXXX  XXXXXXXXXXXXXXXXX  ok     switch\n",
+      "section_sha256": "971380d97a85a248c12b494a6df2efa8dfdfa47eff0e371f4948ed65f72fbe0a"
+    },
+    {
+      "expected": {
+        "fan_fail": 0,
+        "fan_ok": 6,
+        "psu_fail": 0,
+        "psu_ok": 2
+      },
+      "id": "P2",
+      "section": "          HW Version  Model          Serial        State  Type  \n--------  ----------  -------------  ------------  -----  ------\nFAN1/1    N/A         N/A            N/A           ok     fan\nFAN2/1    N/A         N/A            N/A           ok     fan\nFAN3/1    N/A         N/A            N/A           ok     fan\nFAN4/1    N/A         N/A            N/A           ok     fan\nPSU1      XX          XXXXXXXXXXXXX  XXXXXXXXXXXX  ok     psu\nPSU1/FAN  N/A         N/A            N/A           ok     fan\nPSU2      XX          XXXXXXXXXXXXX  XXXXXXXXXXXX  ok     psu\nPSU2/FAN  N/A         N/A            N/A           ok     fan\nSWITCH    XX          XXXXXXXXXXXXX  XXXXXXXXXXXX  ok     switch\n",
+      "section_sha256": "7db3d6751df4cefd4a87a933ee8c45b89b77eb2c3184244a7af087c5faa076f7"
+    },
+    {
+      "expected": {
+        "fan_fail": 0,
+        "fan_ok": 14,
+        "psu_fail": 0,
+        "psu_ok": 2
+      },
+      "id": "P3",
+      "section": "          HW Version  Model          Serial                State  Type  \n--------  ----------  -------------  --------------------  -----  ------\nFAN1/1    N/A         N/A            N/A                   ok     fan\nFAN1/2    N/A         N/A            N/A                   ok     fan\nFAN2/1    N/A         N/A            N/A                   ok     fan\nFAN2/2    N/A         N/A            N/A                   ok     fan\nFAN3/1    N/A         N/A            N/A                   ok     fan\nFAN3/2    N/A         N/A            N/A                   ok     fan\nFAN4/1    N/A         N/A            N/A                   ok     fan\nFAN4/2    N/A         N/A            N/A                   ok     fan\nFAN5/1    N/A         N/A            N/A                   ok     fan\nFAN5/2    N/A         N/A            N/A                   ok     fan\nFAN6/1    N/A         N/A            N/A                   ok     fan\nFAN6/2    N/A         N/A            N/A                   ok     fan\nPSU1      XX          XXXXXXXXXXXXX  XXXXXXXXXXXX          ok     psu\nPSU1/FAN  N/A         N/A            N/A                   ok     fan\nPSU2      XX          XXXXXXXXXXXXX  XXXXXXXXXXXX          ok     psu\nPSU2/FAN  N/A         N/A            N/A                   ok     fan\nSWITCH    XX          XXXXXX         XXXXXXXXXXXXXXXXXXXX  ok     switch\n",
+      "section_sha256": "c527d2759de7f1a48e51ef82db4f28b3e438623667e7a648304302611f7d5960"
+    },
+    {
+      "expected": {
+        "fan_fail": 0,
+        "fan_ok": 14,
+        "psu_fail": 0,
+        "psu_ok": 4
+      },
+      "id": "P4",
+      "section": "          HW Version  Model               Serial                State  Type  \n--------  ----------  ------------------  --------------------  -----  ------\nFAN1/1    N/A         N/A                 N/A                   ok     fan\nFAN1/2    N/A         N/A                 N/A                   ok     fan\nFAN2/1    N/A         N/A                 N/A                   ok     fan\nFAN2/2    N/A         N/A                 N/A                   ok     fan\nFAN3/1    N/A         N/A                 N/A                   ok     fan\nFAN3/2    N/A         N/A                 N/A                   ok     fan\nFAN4/1    N/A         N/A                 N/A                   ok     fan\nFAN4/2    N/A         N/A                 N/A                   ok     fan\nFAN5/1    N/A         N/A                 N/A                   ok     fan\nFAN5/2    N/A         N/A                 N/A                   ok     fan\nPSU1      XX          XXXXXXXXXXXXXXXXXX  XXXXXXXXXXXX          ok     psu\nPSU1/FAN  N/A         N/A                 N/A                   ok     fan\nPSU2      XX          XXXXXXXXXXXXXXXXXX  XXXXXXXXXXXX          ok     psu\nPSU2/FAN  N/A         N/A                 N/A                   ok     fan\nPSU3      XX          XXXXXXXXXXXXXXXXXX  XXXXXXXXXXXX          ok     psu\nPSU3/FAN  N/A         N/A                 N/A                   ok     fan\nPSU4      XX          XXXXXXXXXXXXXXXXXX  XXXXXXXXXXXX          ok     psu\nPSU4/FAN  N/A         N/A                 N/A                   ok     fan\nSWITCH    XX          XXXXXX              XXXXXXXXXXXXXXXXXXXX  ok     switch\n",
+      "section_sha256": "263637a571be8fa67449047e9d4eeca1ba855ff0b95a139628cfc9540dfd6c6b"
+    },
+    {
+      "expected": {
+        "fan_fail": 0,
+        "fan_ok": 4,
+        "psu_fail": 2,
+        "psu_ok": 0
+      },
+      "id": "P5",
+      "section": "        HW Version  Model          Serial        State  Type  \n------  ----------  -------------  ------------  -----  ------\nFAN1/1  N/A         N/A            N/A           ok     fan\nFAN2/1  N/A         N/A            N/A           ok     fan\nFAN3/1  N/A         N/A            N/A           ok     fan\nFAN4/1  N/A         N/A            N/A           ok     fan\nSWITCH  XX          XXXXXXXXXXXXX  XXXXXXXXXXXX  ok     switch\npsu1    N/A         N/A            N/A           n/a    psu\npsu2    N/A         N/A            N/A           n/a    psu\n",
+      "section_sha256": "efa4795841e62605e546e3b0fc67ca470ac3ccbbe466d3de6450b8e47c80b1ff"
+    },
+    {
+      "expected": {
+        "fan_fail": 0,
+        "fan_ok": 20,
+        "psu_fail": 0,
+        "psu_ok": 8
+      },
+      "id": "P6",
+      "section": "         HW Version  Model               Serial        State  Type  \n-------  ----------  ------------------  ------------  -----  ------\nFAN1/1   N/A         N/A                 N/A           ok     fan\nFAN1/2   N/A         N/A                 N/A           ok     fan\nFAN2/1   N/A         N/A                 N/A           ok     fan\nFAN2/2   N/A         N/A                 N/A           ok     fan\nFAN3/1   N/A         N/A                 N/A           ok     fan\nFAN3/2   N/A         N/A                 N/A           ok     fan\nFAN4/1   N/A         N/A                 N/A           ok     fan\nFAN4/2   N/A         N/A                 N/A           ok     fan\nFAN5/1   N/A         N/A                 N/A           ok     fan\nFAN5/2   N/A         N/A                 N/A           ok     fan\nFAN6/1   N/A         N/A                 N/A           ok     fan\nFAN6/2   N/A         N/A                 N/A           ok     fan\nFAN7/1   N/A         N/A                 N/A           ok     fan\nFAN7/2   N/A         N/A                 N/A           ok     fan\nFAN8/1   N/A         N/A                 N/A           ok     fan\nFAN8/2   N/A         N/A                 N/A           ok     fan\nFAN9/1   N/A         N/A                 N/A           ok     fan\nFAN9/2   N/A         N/A                 N/A           ok     fan\nFAN10/1  N/A         N/A                 N/A           ok     fan\nFAN10/2  N/A         N/A                 N/A           ok     fan\nPSU1     XX          XXXXXXXXXXXXXXXXXX  XXXXXXXXXXXX  ok     psu\nPSU2     XX          XXXXXXXXXXXXXXXXXX  XXXXXXXXXXXX  ok     psu\nPSU3     XX          XXXXXXXXXXXXXXXXXX  XXXXXXXXXXXX  ok     psu\nPSU4     XX          XXXXXXXXXXXXXXXXXX  XXXXXXXXXXXX  ok     psu\nPSU5     XX          XXXXXXXXXXXXXXXXXX  XXXXXXXXXXXX  ok     psu\nPSU6     XX          XXXXXXXXXXXXXXXXXX  XXXXXXXXXXXX  ok     psu\nPSU7     XX          XXXXXXXXXXXXXXXXXX  XXXXXXXXXXXX  ok     psu\nPSU8     XX          XXXXXXXXXXXXXXXXXX  XXXXXXXXXXXX  ok     psu\nSWITCH   XX          XXXXXXXXXXXXXXXXXX  XXXXXXXXXXXX  ok     switch\n",
+      "section_sha256": "c3e595248bf2cef477ff2aecf870ecf671a8c1f122369dc358b6df49837569b7"
+    }
+  ],
+  "records": [
+    {
+      "id": "ETH-001",
+      "private_command_block_sha256": "73de4f0ca1cf7ad9ddaf208c4823384ca07ac3e61dca197f8ebe8f5c192eca3e",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-002",
+      "private_command_block_sha256": "2966d12ec120d269f62e9b4baad5eb4538e5bf73e590b684e0334d9d411b0e60",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-003",
+      "private_command_block_sha256": "cc307eae1a393b37d384585e4d1649dbfcfb808d3b5e4e77ba6f1bbc658612a3",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-004",
+      "private_command_block_sha256": "698c3db0084758c355542a3b93fbcb0c700bf3cba78baaa9a26efbee6a5bd52d",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-005",
+      "private_command_block_sha256": "8382d75dfab9fbfdeba49cef8e12f3c930a69de1075aa3e32e7eafd95c37d886",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-006",
+      "private_command_block_sha256": "2129966c847cd21c995a8d7aa824f5d44e82d10e360bd121d09419719ef68ed7",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-007",
+      "private_command_block_sha256": "9c16cd40760185556759cab57b65ee2621932123ed741d52d1ae6baee75d5882",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-008",
+      "private_command_block_sha256": "f469d327cd98e6a74de298666cdcf11279a8bd89af0242cc962cb7a8b75dfcb1",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-009",
+      "private_command_block_sha256": "86fc39b2453c6574070b57dbfb5ef6ead11813136f5daace68816dc15fd58deb",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-010",
+      "private_command_block_sha256": "f3c0c9fa29e650c3368a4aad2e86643bd5f2d903082a67c3e1e91130bb8a8126",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-011",
+      "private_command_block_sha256": "0af9d2840a90a57d68874acdadcbc02f53e1d94bd04abe3491de4578ac18a749",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-012",
+      "private_command_block_sha256": "c0c428ce935ffb5009950ba9237997a09b4eaf42bfda65467d30d4ec0f9c6271",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-013",
+      "private_command_block_sha256": "7db49c0afc764b29dd3ba568e96087b64f0cd9039b38fda820bdf0c6a2dd4a44",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-014",
+      "private_command_block_sha256": "1532c9205358bb05559d502a622568a7e3b8b18dc4853ac4cfee80819eff4fbe",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-015",
+      "private_command_block_sha256": "225193f4b31ba47e21fae5cb085ec0d777ea55448d3173b617ef44398a9c382c",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-016",
+      "private_command_block_sha256": "7f6a54cbfb7bac788d06f66b4c7a77b456077a0a1546d4ff97fba00042ee5de0",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-017",
+      "private_command_block_sha256": "39c013bdb339bcb5b3ee8295a72dbd6ae3874db927ab418ad32a9a3510c70fbc",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-018",
+      "private_command_block_sha256": "982f09870221729baa4dbd93c3c9dd8ddae30ef938ecc844f214f3875876b07e",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-019",
+      "private_command_block_sha256": "43f578742a3a5cdb297b2dc4ab6ad4952e6a44d1ed09196c102cf93563ed398e",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-020",
+      "private_command_block_sha256": "5590dedaff347f37e54cd5f1aea37b64f5220400a1274ccc7aa9ce124f3ae5c5",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-021",
+      "private_command_block_sha256": "b25dd3fa27bd6bbf68ceb4d3c4184c2e9e6e2f0b6fccc82bcb47f134919e4628",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-022",
+      "private_command_block_sha256": "24457f94ab9d7156f995711ceb23544ad7abe401eaa19ffd17fd5972e6f9419a",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-023",
+      "private_command_block_sha256": "faa49d32b0fc42cbceb8e31722bb26ac33754f3840b49d08265a42e5f358c6bf",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-024",
+      "private_command_block_sha256": "ba3b62f02feb29df236c4096ba152fedf586ec4b53b6c440d9fcafc711fd3521",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-025",
+      "private_command_block_sha256": "f9f2f6fd74d46384d6c016b4c722660ec3725b9ea0aeacc7c3e483a287b2fc06",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-026",
+      "private_command_block_sha256": "597561efa35fc0641db94520f206904d08a8ea4b47fb025e5426137d5e3148ac",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-027",
+      "private_command_block_sha256": "0d4610a4cd6031f5cc1a2e7bbc404a593237f47be21fdeecfedf0ba728fc39aa",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-028",
+      "private_command_block_sha256": "ddf8e4c7a8c3461091c776cdc84609bb6fb1168621d5427e438054b2d343d128",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-029",
+      "private_command_block_sha256": "789b70ae4da7ba76bf85c3b267e4b2b8db1cdeb3e43db4deb6b801836bdf63fd",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-030",
+      "private_command_block_sha256": "a21df86c3108264a9649dae65edad8d0edd20fc692613240e0d9536561b59de5",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-031",
+      "private_command_block_sha256": "43ff990d6a45777381d805f284ca6a80e696d5f31882a12f8482173a91e52a94",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-032",
+      "private_command_block_sha256": "c907d8811aaaad14f04e207b275897cd9b507a46a8c11012a27d7dbeeb9a789f",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-033",
+      "private_command_block_sha256": "4735b85fdf4d1d2e3479c2600e00c696dff19e7ad325691e4def3cb6a6f85a76",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-034",
+      "private_command_block_sha256": "2703321b0b27dab1010b0181be07c94d9b73552bb79c651c3f1e5c2279b7b378",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-035",
+      "private_command_block_sha256": "10ed99ce6b3d7347646525e650d1488f3f33bc3f2ed4fcc37472a7867b13aad9",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-036",
+      "private_command_block_sha256": "d92d7af76c3ebf24e5d29f0b6664ee931bea28be81ec2bdedb5ed85427827a97",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-037",
+      "private_command_block_sha256": "eff69a7827399746b0f19d52c22c24bf928fd677fb725153f320ac6d750ba703",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-038",
+      "private_command_block_sha256": "0162f00c56b8d8c6bf56150192f2d8b4ddd2c5a3a7b06e6b86c0f19d74f052dc",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-039",
+      "private_command_block_sha256": "9cec9aa2cb1b65ba80829b76cc5cce60be07270c9ecd232bb5b832594d3a83e7",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-040",
+      "private_command_block_sha256": "bcfa3b59382fbc4966df28cda6668e9ccbe283bae5c68f07b8a2455b151d21bb",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-041",
+      "private_command_block_sha256": "e17e0d66013da758105069c75ca7a9df70c867cce3bc39648e133a8f6e7a7ed6",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-042",
+      "private_command_block_sha256": "247576c94770bc50e346b4c259f369179c79c3ee172228d87595e86af71aa25b",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-043",
+      "private_command_block_sha256": "ffb69a472a19efe2db371cc24c560fe75ed9311ae217bb5408dc02a692f2c8c2",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-044",
+      "private_command_block_sha256": "2086881c868ac2b8824fedfb467a35740dd994ba90c0c3a73afda0e81cb18f70",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-045",
+      "private_command_block_sha256": "361e7f5a9060304967d3a096aaad1e6b36b3a4c7dc4040f799682936f454fcd6",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-046",
+      "private_command_block_sha256": "2aa1bec7cddf4bd0e3a982fe5c900f8445e004f897e3d697ec3a6027b4c1da62",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-047",
+      "private_command_block_sha256": "1667cef1ebb081a71f1cf2ad1c085074db4bbd34d70041b3e95ae87486bbe226",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-048",
+      "private_command_block_sha256": "14bf7ec2fcbb36c88a01263fe5394e755d221ae2eb9fb5bb3449ac39b11c0d77",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-049",
+      "private_command_block_sha256": "ddccf6efa7372beae9ebb5aedc62e482e2fce0bb9a05bbd3bdf5bb5ff32561fb",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-050",
+      "private_command_block_sha256": "2e1058081e23ee86dac118f56266cdff8966642dd74e38f17bcb18433961907f",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-051",
+      "private_command_block_sha256": "dad42908a37b04cb198349aa0a90905aa58a9139998ab1e4e4e6d6b151ff6235",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-052",
+      "private_command_block_sha256": "eae2f9ad071eab1622203695d23e0ddbde317b57f3448a906f69052b3698a874",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-053",
+      "private_command_block_sha256": "0acc93fc567bdbfaca940e0f9c37f5570c414b865cda16cf5dbc156de727de28",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-054",
+      "private_command_block_sha256": "ec469df0c359aa17e8fd074f13e9aed34c2d7e43d91441d221162275f74b339e",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-055",
+      "private_command_block_sha256": "5cf0155b5b25113745ea74f85e0a4c1c630063f851c1453532fbc0b8bd52486b",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-056",
+      "private_command_block_sha256": "e2cf61d57271508488e59167d6d1765e4db32d4c023b59536e6b86f7ae4de31d",
+      "profile": "P2",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-057",
+      "private_command_block_sha256": "69de58ff8b86c541e6ae7f7bf8c9c811d25a53ad69c8160ec768d900e8bbb82f",
+      "profile": "P2",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-058",
+      "private_command_block_sha256": "10933a6a3790fd3be3525bee4e25eed27313a19130600440aa73669ca01fd7f7",
+      "profile": "P2",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-059",
+      "private_command_block_sha256": "962d902133847fc66aa36bf2c8b5560c8d0813bfa8a8ecfc664f4106bb901c07",
+      "profile": "P2",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-060",
+      "private_command_block_sha256": "118c7e2f3c010703b9842d7b9f8e10dc8d9df79a0bee88014e87372b2fb188d5",
+      "profile": "P3",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-061",
+      "private_command_block_sha256": "87a32b5818a77d08fb81334c7b9b1628c64fd41bf302982e970333dafc94eaf3",
+      "profile": "P4",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-062",
+      "private_command_block_sha256": "053deb0f1ec1057ecb79ab645f4b2465c8783cf8d2bd5154b4379d56cc4b493b",
+      "profile": "P4",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-063",
+      "private_command_block_sha256": "cdff138efccc306a66608dcb873594a36015e20a46b380401db892fdb7d158b0",
+      "profile": "P5",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-064",
+      "private_command_block_sha256": "f0eca33534fbc4edca64f028b5ca4eecd675563adacfccfc7b59a8191e5db3b1",
+      "profile": "P5",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-065",
+      "private_command_block_sha256": "962d902133847fc66aa36bf2c8b5560c8d0813bfa8a8ecfc664f4106bb901c07",
+      "profile": "P2",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-066",
+      "private_command_block_sha256": "e2cf61d57271508488e59167d6d1765e4db32d4c023b59536e6b86f7ae4de31d",
+      "profile": "P2",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-067",
+      "private_command_block_sha256": "69de58ff8b86c541e6ae7f7bf8c9c811d25a53ad69c8160ec768d900e8bbb82f",
+      "profile": "P2",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-068",
+      "private_command_block_sha256": "10933a6a3790fd3be3525bee4e25eed27313a19130600440aa73669ca01fd7f7",
+      "profile": "P2",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-069",
+      "private_command_block_sha256": "962d902133847fc66aa36bf2c8b5560c8d0813bfa8a8ecfc664f4106bb901c07",
+      "profile": "P2",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-070",
+      "private_command_block_sha256": "118c7e2f3c010703b9842d7b9f8e10dc8d9df79a0bee88014e87372b2fb188d5",
+      "profile": "P3",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-071",
+      "private_command_block_sha256": "87a32b5818a77d08fb81334c7b9b1628c64fd41bf302982e970333dafc94eaf3",
+      "profile": "P4",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-072",
+      "private_command_block_sha256": "053deb0f1ec1057ecb79ab645f4b2465c8783cf8d2bd5154b4379d56cc4b493b",
+      "profile": "P4",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-073",
+      "private_command_block_sha256": "cdff138efccc306a66608dcb873594a36015e20a46b380401db892fdb7d158b0",
+      "profile": "P5",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-074",
+      "private_command_block_sha256": "f0eca33534fbc4edca64f028b5ca4eecd675563adacfccfc7b59a8191e5db3b1",
+      "profile": "P5",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-075",
+      "private_command_block_sha256": "e2cf61d57271508488e59167d6d1765e4db32d4c023b59536e6b86f7ae4de31d",
+      "profile": "P2",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-076",
+      "private_command_block_sha256": "69de58ff8b86c541e6ae7f7bf8c9c811d25a53ad69c8160ec768d900e8bbb82f",
+      "profile": "P2",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-077",
+      "private_command_block_sha256": "10933a6a3790fd3be3525bee4e25eed27313a19130600440aa73669ca01fd7f7",
+      "profile": "P2",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-078",
+      "private_command_block_sha256": "962d902133847fc66aa36bf2c8b5560c8d0813bfa8a8ecfc664f4106bb901c07",
+      "profile": "P2",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-079",
+      "private_command_block_sha256": "118c7e2f3c010703b9842d7b9f8e10dc8d9df79a0bee88014e87372b2fb188d5",
+      "profile": "P3",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-080",
+      "private_command_block_sha256": "87a32b5818a77d08fb81334c7b9b1628c64fd41bf302982e970333dafc94eaf3",
+      "profile": "P4",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-081",
+      "private_command_block_sha256": "053deb0f1ec1057ecb79ab645f4b2465c8783cf8d2bd5154b4379d56cc4b493b",
+      "profile": "P4",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-082",
+      "private_command_block_sha256": "cdff138efccc306a66608dcb873594a36015e20a46b380401db892fdb7d158b0",
+      "profile": "P5",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-083",
+      "private_command_block_sha256": "f0eca33534fbc4edca64f028b5ca4eecd675563adacfccfc7b59a8191e5db3b1",
+      "profile": "P5",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-084",
+      "private_command_block_sha256": "1c8f87a8fe71ac01b54d9efd990fd8090f8fff2fe312bdfc59a80171779d5739",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-085",
+      "private_command_block_sha256": "141aa2824596db95d57871699da27aaa2b6cb37783a56a6570ea6f4874c35689",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-086",
+      "private_command_block_sha256": "e75c4fbf06920b3ec7108c60ab586a2b77da52d8be6059faa80439b2d11a2c09",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-087",
+      "private_command_block_sha256": "be749391fdded79c93dac61807b5f502664df6eb7c5dcbc50c11671b6912f50d",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-088",
+      "private_command_block_sha256": "8c75ccfffdc81100d52a6091d5233c4360267b7bc9e2449ea847026f46fa73cc",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-089",
+      "private_command_block_sha256": "bf2de03192ae9d415596b64c095923d8b2421ce03ae6911e3f32b1a8a55494d3",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-090",
+      "private_command_block_sha256": "e1e181fb076e94c9d358be42b388ffcfc5661a38d9b58c40e911fedb4a275569",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-091",
+      "private_command_block_sha256": "ed8329eaa186296d3e4672022ffd86f5ae4ef47d8783e9e18b9a972f1f086d18",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-092",
+      "private_command_block_sha256": "9daae87426be7e44a565fc88a6a568002f00be9d0e14cd2812bf22808a28c8ea",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-093",
+      "private_command_block_sha256": "ee8726d8445864ac0b65f436f59887bf6f027b663efb77a60f927efbc2a2fa10",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "ETH-094",
+      "private_command_block_sha256": "23642b0b742e0c480750852fd973ca4ce3b0776bf06d3d37002b34dc79dcaa1b",
+      "profile": "P1",
+      "scope": "ETH"
+    },
+    {
+      "id": "IB-001",
+      "private_command_block_sha256": "1734c8e5782e3066f501e7ebdd73a88b47c739446d204c40b973d8ef876fe0e8",
+      "profile": "P6",
+      "scope": "IB"
+    },
+    {
+      "id": "IB-002",
+      "private_command_block_sha256": "6c3ce3977e6a867052da133468b047cc2f17fe2a14e6782ca736a945fb77b64a",
+      "profile": "P6",
+      "scope": "IB"
+    },
+    {
+      "id": "IB-003",
+      "private_command_block_sha256": "34d02239ad490f00355501cef0100c3e275596c2fae1f3e333e583cf7d5638cb",
+      "profile": "P6",
+      "scope": "IB"
+    },
+    {
+      "id": "IB-004",
+      "private_command_block_sha256": "a3144e4d729bdda16d0ae5b96448e60d4c5c1cf9d5261435c3fe5b5ff140901f",
+      "profile": "P6",
+      "scope": "IB"
+    },
+    {
+      "id": "IB-005",
+      "private_command_block_sha256": "bcaa15cf41b693cfdd9f29aa9aa88e4eae42812a211299dd4ddc73257d6e8bd2",
+      "profile": "P6",
+      "scope": "IB"
+    },
+    {
+      "id": "IB-006",
+      "private_command_block_sha256": "60b612725380ac1e8b85d90297670c721a2afaa4d9756c3065672befd2bd6bc5",
+      "profile": "P6",
+      "scope": "IB"
+    },
+    {
+      "id": "IB-007",
+      "private_command_block_sha256": "9df2865da994aacf317319d7703bd800469e705e9c1b0f7751d333480f1372dd",
+      "profile": "P6",
+      "scope": "IB"
+    },
+    {
+      "id": "IB-008",
+      "private_command_block_sha256": "b20151933ec5329b4e7f508bedb461f0520face658129c7d734cd8ac8ff48bda",
+      "profile": "P6",
+      "scope": "IB"
+    },
+    {
+      "id": "IB-009",
+      "private_command_block_sha256": "59d5d6ce13deb044b0b137af802bedadddb14f8466e7f533939b682124e024af",
+      "profile": "P6",
+      "scope": "IB"
+    },
+    {
+      "id": "IB-010",
+      "private_command_block_sha256": "16446f21b47214565814c6ed8db7ce644748a7d77432e70c739a33dd06c8853e",
+      "profile": "P6",
+      "scope": "IB"
+    },
+    {
+      "id": "IB-011",
+      "private_command_block_sha256": "3d24cba1b7291e839fad4b018812ed797858b0f94a04953829a10153b879495c",
+      "profile": "P6",
+      "scope": "IB"
+    },
+    {
+      "id": "IB-012",
+      "private_command_block_sha256": "d25207749ac7f575bc664444abb650497e0c3fe6119cd82592f7e174a7e60090",
+      "profile": "P6",
+      "scope": "IB"
+    },
+    {
+      "id": "IB-013",
+      "private_command_block_sha256": "dd593df325619212887542f8ed862eb63a497239730a2cf774c5d39cd80d49be",
+      "profile": "P6",
+      "scope": "IB"
+    },
+    {
+      "id": "IB-014",
+      "private_command_block_sha256": "1e4f4cf329b1e5e2211d84221cde56b109dcf72d22899eec845b0c529b852046",
+      "profile": "P6",
+      "scope": "IB"
+    },
+    {
+      "id": "IB-015",
+      "private_command_block_sha256": "e40768e948e3efe1a86bfb9fa8489a1fa4d672cabed3fabff2387ccc70289814",
+      "profile": "P6",
+      "scope": "IB"
+    },
+    {
+      "id": "IB-016",
+      "private_command_block_sha256": "f125923074cc652b0fb1ea79d0d899ae694fdc66189dca8ff63ea9e6a8b03244",
+      "profile": "P6",
+      "scope": "IB"
+    },
+    {
+      "id": "IB-017",
+      "private_command_block_sha256": "72935e5ccf40302e9fa2c653c0183cec2019309250c5e43cfd67dc02b9e12548",
+      "profile": "P6",
+      "scope": "IB"
+    },
+    {
+      "id": "IB-018",
+      "private_command_block_sha256": "7fa13565707c8e14a46113c30313d3bc7f59269411de6050dbd84b9dc54f439f",
+      "profile": "P6",
+      "scope": "IB"
+    },
+    {
+      "id": "IB-019",
+      "private_command_block_sha256": "019f34f307605e011912643debb86fbb71e37a7b1e65b7afd6653b273c01acb2",
+      "profile": "P6",
+      "scope": "IB"
+    },
+    {
+      "id": "IB-020",
+      "private_command_block_sha256": "584fcfad4f23e962587a6637239488d2ca8f07e256d4410ab27fb4da2bf990cc",
+      "profile": "P6",
+      "scope": "IB"
+    },
+    {
+      "id": "IB-021",
+      "private_command_block_sha256": "1c4bce621709c576bde3209b43d504124ac90bb8ef4050849d7fe201af763f23",
+      "profile": "P6",
+      "scope": "IB"
+    },
+    {
+      "id": "IB-022",
+      "private_command_block_sha256": "1aed1a8474e07d8a44f00e4c7834682f870433f7149a04f1af7d156a00c4d885",
+      "profile": "P6",
+      "scope": "IB"
+    },
+    {
+      "id": "IB-023",
+      "private_command_block_sha256": "f850c2a4ca5c63d2423ccf0e1b07f02bcf189dcdbb0cc135f33e87c8b9a0bb10",
+      "profile": "P6",
+      "scope": "IB"
+    },
+    {
+      "id": "IB-024",
+      "private_command_block_sha256": "f56a97dfec5fe2d7ca65f028e5dcf6d4d6aa5e3c3fd22ddbb9a0f0f3f6ae912d",
+      "profile": "P6",
+      "scope": "IB"
+    }
+  ],
+  "redaction": {
+    "preserved": [
+      "header-and-separator-bytes",
+      "component-name",
+      "state",
+      "type",
+      "field-occupancy"
+    ],
+    "replaced": [
+      "source-path",
+      "hw-version-value",
+      "model-value",
+      "serial-value"
+    ],
+    "replacement": "non-N/A characters in ignored hardware fields become X; N/A and whitespace remain"
+  }
+}
+"""[1:]
+DEIDENTIFIED_INVENTORY_CORPUS_SHA256 = (
+    "576dcdc936a63a939f902d53985b4ff5abc18c4b751cee084eccd525065f0507"
+)
+DEIDENTIFIED_INVENTORY_SOURCE_BINDING_SHA256 = (
+    "cf04b971b2a52b42340cef0fa5bb0392e1121c0dcf22462685a0309020154c34"
+)
+DEIDENTIFIED_INVENTORY_PROFILE_COMPONENTS = {'P1': [{'name': 'FAN1/1', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN1/2', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN2/1', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN2/2', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN3/1', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN3/2', 'state': 'ok', 'type': 'fan'},
+        {'name': 'PSU1', 'state': 'ok', 'type': 'psu'},
+        {'name': 'PSU1/FAN', 'state': 'ok', 'type': 'fan'},
+        {'name': 'PSU2', 'state': 'ok', 'type': 'psu'},
+        {'name': 'PSU2/FAN', 'state': 'ok', 'type': 'fan'}],
+ 'P2': [{'name': 'FAN1/1', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN2/1', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN3/1', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN4/1', 'state': 'ok', 'type': 'fan'},
+        {'name': 'PSU1', 'state': 'ok', 'type': 'psu'},
+        {'name': 'PSU1/FAN', 'state': 'ok', 'type': 'fan'},
+        {'name': 'PSU2', 'state': 'ok', 'type': 'psu'},
+        {'name': 'PSU2/FAN', 'state': 'ok', 'type': 'fan'}],
+ 'P3': [{'name': 'FAN1/1', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN1/2', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN2/1', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN2/2', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN3/1', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN3/2', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN4/1', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN4/2', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN5/1', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN5/2', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN6/1', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN6/2', 'state': 'ok', 'type': 'fan'},
+        {'name': 'PSU1', 'state': 'ok', 'type': 'psu'},
+        {'name': 'PSU1/FAN', 'state': 'ok', 'type': 'fan'},
+        {'name': 'PSU2', 'state': 'ok', 'type': 'psu'},
+        {'name': 'PSU2/FAN', 'state': 'ok', 'type': 'fan'}],
+ 'P4': [{'name': 'FAN1/1', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN1/2', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN2/1', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN2/2', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN3/1', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN3/2', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN4/1', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN4/2', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN5/1', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN5/2', 'state': 'ok', 'type': 'fan'},
+        {'name': 'PSU1', 'state': 'ok', 'type': 'psu'},
+        {'name': 'PSU1/FAN', 'state': 'ok', 'type': 'fan'},
+        {'name': 'PSU2', 'state': 'ok', 'type': 'psu'},
+        {'name': 'PSU2/FAN', 'state': 'ok', 'type': 'fan'},
+        {'name': 'PSU3', 'state': 'ok', 'type': 'psu'},
+        {'name': 'PSU3/FAN', 'state': 'ok', 'type': 'fan'},
+        {'name': 'PSU4', 'state': 'ok', 'type': 'psu'},
+        {'name': 'PSU4/FAN', 'state': 'ok', 'type': 'fan'}],
+ 'P5': [{'name': 'FAN1/1', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN2/1', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN3/1', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN4/1', 'state': 'ok', 'type': 'fan'},
+        {'name': 'psu1', 'state': 'n/a', 'type': 'psu'},
+        {'name': 'psu2', 'state': 'n/a', 'type': 'psu'}],
+ 'P6': [{'name': 'FAN1/1', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN1/2', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN2/1', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN2/2', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN3/1', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN3/2', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN4/1', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN4/2', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN5/1', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN5/2', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN6/1', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN6/2', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN7/1', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN7/2', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN8/1', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN8/2', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN9/1', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN9/2', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN10/1', 'state': 'ok', 'type': 'fan'},
+        {'name': 'FAN10/2', 'state': 'ok', 'type': 'fan'},
+        {'name': 'PSU1', 'state': 'ok', 'type': 'psu'},
+        {'name': 'PSU2', 'state': 'ok', 'type': 'psu'},
+        {'name': 'PSU3', 'state': 'ok', 'type': 'psu'},
+        {'name': 'PSU4', 'state': 'ok', 'type': 'psu'},
+        {'name': 'PSU5', 'state': 'ok', 'type': 'psu'},
+        {'name': 'PSU6', 'state': 'ok', 'type': 'psu'},
+        {'name': 'PSU7', 'state': 'ok', 'type': 'psu'},
+        {'name': 'PSU8', 'state': 'ok', 'type': 'psu'}]}
+
+
 def load_module(name: str, path: Path):
     spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:
@@ -632,6 +1569,91 @@ FANok7          A3          ok      S10     fail   fan
             derived,
             "summary counts must be derived from the retained typed components",
         )
+
+    def test_captured_unnamed_component_column_flows_through_both_parsers(self):
+        self.assertEqual(
+            CAPTURED_UNNAMED_INVENTORY_SHA256,
+            hashlib.sha256(CAPTURED_UNNAMED_INVENTORY.encode("utf-8")).hexdigest(),
+        )
+        self.assertEqual(
+            CAPTURED_UNNAMED_INVENTORY_EXPECTED,
+            self.monitor_html.parse_inventory(CAPTURED_UNNAMED_INVENTORY),
+        )
+        framed = (
+            "Switch Type: ETH (VX)\n"
+            "####################################################\n"
+            "# Execute Command: nv show platform inventory\n"
+            "####################################################\n"
+            f"{CAPTURED_UNNAMED_INVENTORY[1:]}"
+        )
+        parsed = self.monitor_html.parse_info_file("captured-air", framed)
+        self.assertEqual(
+            CAPTURED_UNNAMED_INVENTORY_EXPECTED,
+            {key: parsed[key] for key in CAPTURED_UNNAMED_INVENTORY_EXPECTED},
+        )
+
+    def test_unnamed_component_schema_is_exact_and_fails_closed(self):
+        valid = """\
+HW Version Model Serial State Type
+-- ------- ----- ------ ----- ----
+A1 V1 M1 S1 ok fan
+P1 V2 M2 S2 fail psu
+"""
+        expected = {
+            "inventory_components": [
+                {"name": "A1", "type": "fan", "state": "ok"},
+                {"name": "P1", "type": "psu", "state": "fail"},
+            ],
+            "psu_ok": 0,
+            "psu_fail": 1,
+            "fan_ok": 1,
+            "fan_fail": 0,
+        }
+        self.assertEqual(expected, self.monitor_html.parse_inventory(valid))
+        explicit = """\
+Component HW Version Model Serial State Type
+A1 V1 M1 S1 ok fan
+P1 V2 M2 S2 fail psu
+"""
+        self.assertEqual(
+            self.monitor_html.parse_inventory(explicit),
+            self.monitor_html.parse_inventory(valid),
+        )
+        self.assertEqual(
+            {
+                "inventory_components": [
+                    {"name": "A1", "type": "fan", "state": "ok"},
+                ],
+                "psu_ok": 0, "psu_fail": 0, "fan_ok": 1, "fan_fail": 0,
+            },
+            self.monitor_html.parse_inventory(
+                "Component HW Version Model Serial State Type\n"
+                "A1 EXTRA V1 M1 S1 ok fan\n"
+            ),
+        )
+        self.assertEqual(
+            {"inventory_components": [], "psu_ok": 0, "psu_fail": 0,
+             "fan_ok": 0, "fan_fail": 0},
+            self.monitor_html.parse_inventory(
+                "HW Version Model Serial State Type\n"
+                "-- ------- ----- ------ ----- ----\n"
+                "A1 EXTRA V1 M1 S1 ok fan\n"
+            ),
+        )
+        for header in (
+            "Version Model Serial State Type",
+            "HW Version Model Serial Type State",
+            "HW Version Model Serial State State Type",
+            "prose about HW Version Model Serial State Type values",
+        ):
+            with self.subTest(header=header):
+                self.assertEqual(
+                    {"inventory_components": [], "psu_ok": 0, "psu_fail": 0,
+                     "fan_ok": 0, "fan_fail": 0},
+                    self.monitor_html.parse_inventory(
+                        f"{header}\nA1 V1 M1 S1 ok fan\n"
+                    ),
+                )
 
     def test_inventory_compact_rows_use_complete_state_and_type_fields(self):
         inventory = """\
@@ -4518,9 +5540,15 @@ class PublicationAndCollectorTests(unittest.TestCase):
             fake_bin = root / "bin"; fake_bin.mkdir()
             temp_dir = root / "tmp"; temp_dir.mkdir()
             self._write_executable(fake_bin / "hostname", "printf '%s\\n' TestNV\n")
+            inventory_fixture = root / "captured-inventory.txt"
+            inventory_fixture.write_text(
+                CAPTURED_UNNAMED_INVENTORY[1:], encoding="utf-8"
+            )
             self._write_executable(fake_bin / "nv", r'''
 if [ "$1 $2" = "show platform" ] && [ "$#" -eq 2 ]; then
   printf '%s\n' 'system-type MNV4'
+elif [ "$1 $2 $3" = "show platform inventory" ] && [ "$#" -eq 3 ]; then
+  cat "$MONITOR_REAL_INVENTORY_FIXTURE"
 elif [ "$1 $2" = "show interface" ] && [ "$#" -eq 2 ]; then
   printf '%s\n' 'nvl1 up'
 elif [ "$4 $5" = "link phy-detail" ]; then
@@ -4536,6 +5564,7 @@ fi
             environment = dict(os.environ)
             environment.update({
                 "PATH": f"{fake_bin}:/usr/bin:/bin", "TMPDIR": str(temp_dir),
+                "MONITOR_REAL_INVENTORY_FIXTURE": str(inventory_fixture),
             })
             for relative, suffix in (
                 ("ethernet/monitor/sw-info.sh", ".info"),
@@ -4553,8 +5582,144 @@ fi
                 if suffix == ".info":
                     self.assertIn("Switch Type:  NVLINK (MNV4)", text)
                     self.assertIn("# Collect complete", text)
+                    parsed = self.html.parse_info_file("TestNV", text)
+                    self.assertEqual(
+                        CAPTURED_UNNAMED_INVENTORY_EXPECTED,
+                        {
+                            key: parsed[key]
+                            for key in CAPTURED_UNNAMED_INVENTORY_EXPECTED
+                        },
+                    )
                 else:
                     self.assertIn("TestNV,nvl1,1e-12,0,2,3,up", text)
+
+    def test_deidentified_captured_inventory_corpus_parses_nonzero(self):
+        payload = DEIDENTIFIED_INVENTORY_CORPUS_JSON.encode("utf-8")
+        self.assertEqual(
+            DEIDENTIFIED_INVENTORY_CORPUS_SHA256,
+            hashlib.sha256(payload).hexdigest(),
+        )
+        corpus = json.loads(payload)
+        self.assertEqual("monitor-inventory-deidentified-v2", corpus["format"])
+        self.assertEqual(
+            {
+                "count": 118,
+                "excluded": (
+                    "package-import mirrors are outside the root glob; no sampling"
+                ),
+                "glob": "DAY0-Prepare/**/99-output-monitor/**/*.info",
+            },
+            corpus["selection"],
+        )
+        self.assertEqual(
+            {
+                "preserved": [
+                    "header-and-separator-bytes", "component-name",
+                    "state", "type", "field-occupancy",
+                ],
+                "replaced": [
+                    "source-path", "hw-version-value", "model-value",
+                    "serial-value",
+                ],
+                "replacement": (
+                    "non-N/A characters in ignored hardware fields become X; "
+                    "N/A and whitespace remain"
+                ),
+            },
+            corpus["redaction"],
+        )
+        self.assertEqual(
+            DEIDENTIFIED_INVENTORY_SOURCE_BINDING_SHA256,
+            corpus["private_source_binding_sha256"],
+        )
+        profiles = {profile["id"]: profile for profile in corpus["profiles"]}
+        self.assertEqual({"P1", "P2", "P3", "P4", "P5", "P6"}, set(profiles))
+        self.assertEqual(118, len(corpus["records"]))
+
+        observed_scopes = {"ETH": 0, "IB": 0}
+        observed_profiles = {key: 0 for key in profiles}
+        aggregate = {
+            "psu_ok": 0, "psu_fail": 0,
+            "fan_ok": 0, "fan_fail": 0,
+        }
+        profiles_with_non_na_components = set()
+        for profile in profiles.values():
+            section = profile["section"]
+            self.assertEqual(
+                profile["section_sha256"],
+                hashlib.sha256(section.encode("utf-8")).hexdigest(),
+            )
+            for row in section.splitlines()[2:]:
+                fields = row.split()
+                self.assertEqual(6, len(fields), row)
+                self.assertTrue(
+                    all(
+                        value == "N/A" or set(value) == {"X"}
+                        for value in fields[1:4]
+                    ),
+                    row,
+                )
+                if fields[-1] in {"psu", "fan"} and "X" in "".join(fields[1:4]):
+                    profiles_with_non_na_components.add(profile["id"])
+        self.assertEqual({"P2", "P3", "P4", "P6"}, profiles_with_non_na_components)
+
+        source_binding = hashlib.sha256()
+        for record in corpus["records"]:
+            self.assertRegex(
+                record["private_command_block_sha256"], r"^[0-9a-f]{64}$"
+            )
+            self.assertEqual(
+                {"id", "profile", "scope", "private_command_block_sha256"},
+                set(record),
+            )
+            source_binding.update(
+                (
+                    f'{record["id"]}\0{record["scope"]}\0'
+                    f'{record["private_command_block_sha256"]}\0'
+                    f'{record["profile"]}\0'
+                ).encode("ascii")
+            )
+            observed_scopes[record["scope"]] += 1
+            observed_profiles[record["profile"]] += 1
+            profile = profiles[record["profile"]]
+            framed = (
+                "Switch Type: ETH (captured)\n"
+                "####################################################\n"
+                "# Execute Command: nv show platform inventory\n"
+                "####################################################\n"
+                f'{profile["section"]}'
+            )
+            parsed = self.html.parse_info_file(record["id"], framed)
+            expected = profile["expected"]
+            self.assertEqual(
+                expected,
+                {key: parsed[key] for key in expected},
+                record["id"],
+            )
+            self.assertEqual(
+                DEIDENTIFIED_INVENTORY_PROFILE_COMPONENTS[record["profile"]],
+                parsed["inventory_components"],
+                record["id"],
+            )
+            self.assertEqual(sum(expected.values()), len(parsed["inventory_components"]))
+            self.assertGreater(len(parsed["inventory_components"]), 0, record["id"])
+            for key in aggregate:
+                aggregate[key] += parsed[key]
+
+        self.assertEqual({"ETH": 94, "IB": 24}, observed_scopes)
+        self.assertEqual(
+            DEIDENTIFIED_INVENTORY_SOURCE_BINDING_SHA256,
+            source_binding.hexdigest(),
+        )
+        self.assertEqual(
+            {"P1": 66, "P2": 13, "P3": 3, "P4": 6, "P5": 6, "P6": 24},
+            observed_profiles,
+        )
+        self.assertEqual(
+            {"psu_ok": 380, "psu_fail": 12, "fan_ok": 1236, "fan_fail": 0},
+            aggregate,
+        )
+        self.assertEqual(1628, sum(aggregate.values()))
 
     def test_sw_collectors_reject_unknown_platform_and_unsafe_hostname(self):
         for hostname, platform in (("SafeHost", "UNKNOWN"), ("../escape", "MNV4")):
