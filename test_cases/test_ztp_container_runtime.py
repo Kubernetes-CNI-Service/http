@@ -18,7 +18,7 @@ import json
 from contextlib import contextmanager, ExitStack, redirect_stderr, redirect_stdout
 from functools import wraps
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shutil
 import stat
@@ -398,6 +398,49 @@ class ContainerArtifactContractTests(QuietContractTest):
                 self.assertGreater(
                     effective.index(exclusion), effective.index(broad_include),
                 )
+
+    def test_service_account_credentials_are_excluded_from_real_build_contexts(
+        self,
+    ) -> None:
+        ignore_paths = (
+            ROOT / ".dockerignore",
+            DOCKER_ROOT / "Dockerfile.dockerignore",
+        )
+        self.assertEqual(ignore_paths[0].read_bytes(), ignore_paths[1].read_bytes())
+
+        def included(relative: str, rules: list[str]) -> bool:
+            selected = True
+            candidate = PurePosixPath(relative)
+            for raw_rule in rules:
+                rule = raw_rule.strip()
+                if not rule or rule.startswith("#"):
+                    continue
+                negate = rule.startswith("!")
+                pattern = rule[1:] if negate else rule
+                if candidate.match(pattern):
+                    selected = negate
+            return selected
+
+        credentials = (
+            "cre.json",
+            "operator.service-account.json",
+            "monitor/cre.json",
+            "tools/team.service-account.json",
+        )
+        benign = (
+            "monitor/deployment.json",
+            "tools/service-account.json",
+            "tools/team.service-account.json.example",
+        )
+        for ignore_path in ignore_paths:
+            rules = ignore_path.read_text(encoding="utf-8").splitlines()
+            with self.subTest(ignore=ignore_path):
+                for pattern in ("cre.json", "*.service-account.json"):
+                    self.assertIn(pattern, rules)
+                for relative in credentials:
+                    self.assertFalse(included(relative, rules), relative)
+                for relative in benign:
+                    self.assertTrue(included(relative, rules), relative)
 
     def test_auth_state_names_are_excluded_from_both_real_build_contexts(
         self,

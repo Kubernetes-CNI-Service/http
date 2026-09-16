@@ -67,6 +67,8 @@ tools/ibdiagnet-analyze-tool/**
 !requirements-container-top-level.lock
 **/.env
 **/.env.*
+cre.json
+*.service-account.json
 
 # Projects and output are mutable data mounted from /var/www/html.  Only the
 # lifecycle entrypoints and neutral bootstrap template belong in the image.

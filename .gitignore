@@ -41,6 +41,8 @@ node_modules/
 .env.*
 !.env.example
 !.env.sample
+cre.json
+*.service-account.json
 /infra/docker/container.env
 /infra/docker/.env
 /infra/docker/desired-state.json

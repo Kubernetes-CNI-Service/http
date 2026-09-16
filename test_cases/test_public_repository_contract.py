@@ -533,6 +533,51 @@ class PublicRepositoryAuditContractTest(unittest.TestCase):
 
 
 class PublicRepositoryWorkflowContractTest(unittest.TestCase):
+    def test_service_account_credentials_are_git_ignored_at_every_depth(self):
+        ignore_lines = (ROOT / ".gitignore").read_text(
+            encoding="utf-8",
+        ).splitlines()
+        for pattern in ("cre.json", "*.service-account.json"):
+            self.assertIn(pattern, ignore_lines)
+
+        credentials = (
+            "cre.json",
+            "operator.service-account.json",
+            "monitor/cre.json",
+            "tools/team.service-account.json",
+        )
+        benign = (
+            "monitor/deployment.json",
+            "tools/service-account.json",
+            "tools/team.service-account.json.example",
+        )
+        for relative in credentials:
+            with self.subTest(credential=relative):
+                result = subprocess.run(
+                    [
+                        "git", "-C", str(ROOT), "check-ignore", "--no-index",
+                        "--quiet", "--", relative,
+                    ],
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+                self.assertEqual(0, result.returncode, result.stderr or relative)
+        for relative in benign:
+            with self.subTest(benign_json=relative):
+                result = subprocess.run(
+                    [
+                        "git", "-C", str(ROOT), "check-ignore", "--no-index",
+                        "--quiet", "--", relative,
+                    ],
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+                self.assertEqual(1, result.returncode, relative)
+
     def test_ci_is_read_only_and_orders_approval_check_before_full_suite(self):
         workflow = (ROOT / ".github/workflows/tests.yml").read_text(encoding="utf-8")
         check = "test_cases/run_related_tests.py --check"
