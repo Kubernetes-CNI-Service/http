@@ -24,7 +24,7 @@
       "root-entrypoint-workflow": "NOT COVERED (requires Linux EUID 0 private namespace)"
     },
     "schema_version": 1,
-    "snapshot_sha256": "966df8e70a512c423a32277067efc57db97026f823f59b7145108a68b42f396e"
+    "snapshot_sha256": "2640def84ea41b9b47c543605cd75017af97024c7d8fb5a39dd9143ab0aa9577"
   },
   "impact_manifest_sha256": "7123247772f726689dda721bd47dfae811d6b561a3394fb88e7c7b3c4c57b344",
   "schema_version": 1,
@@ -143,7 +143,7 @@
     },
     "monitor/generate-monitor-html.py": {
       "canonical": "monitor/generate-monitor-html.py",
-      "sha256": "f84bf1e418455b54dd4338ce3403e8ce564e0a790dd8c39882330c564df44d52"
+      "sha256": "566192653b6121b1fb690bfe41f12a0c83a82189c3519e7d54efddcf013543d9"
     },
     "monitor/manual-ztp-control.cgi": {
       "canonical": "monitor/manual-ztp-control.cgi",
@@ -682,7 +682,7 @@
     "test_cases.test_password_update": "6609f86c14f10ba6748fcd703bb5d56c3cb40da121fe1328303732a4f632dd36",
     "test_cases.test_predeploy_test_gate": "3d54454ade7f9537ebc03e7f95f980f06d4d852fd22efe4539635e48cc92db22",
     "test_cases.test_private_documentation_contract": "81f8b723393133941b59a90654e55a610fad860cd0551f72508286ffa5e40e42",
-    "test_cases.test_project_contracts": "b2ae7230ffb3b78a0e24fb7c40d5f159b8921dba6bae79ba2ce541f4e5da81a5",
+    "test_cases.test_project_contracts": "c85e9a4ede345794d25ff30475b0c5e865d41c06f9e8741acb52d34acf2f45d1",
     "test_cases.test_project_image_bundle": "3f7fadb5a0ee575cdbbab773ae70e4828c0899ed275ec37b591b9f0206f46682",
     "test_cases.test_public_clean_clone_contract": "f8b978c0c0a29e7dc83590b8306b647e1f191fef26101f093fca34bfe73abb75",
     "test_cases.test_public_clean_clone_workflow": "41f80694e3decc93e03ec4ddc412c11cf856b1060421630328d87d0a7beefea9",
