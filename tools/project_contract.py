@@ -446,6 +446,12 @@ NON_DEPLOYMENT_DIR_NAMES = frozenset({
 })
 REFERENCE_ONLY_SUBTREES = frozenset({"monitor/cabletracker-main"})
 ROOT_LOCAL_PLANNING_DIR_NAMES = frozenset({"outputs"})
+ROOT_LOCAL_PLANNING_FILE_PATTERNS = (
+    "cross-review*.log",
+    "request list*.log",
+    "v3-*.log",
+    "v3-*.md",
+)
 LOCAL_METADATA_DIR_NAMES = frozenset({
     ".git", ".codex", ".agents", ".claude", ".ssh",
 })
@@ -640,7 +646,10 @@ def transfer_exclude_reason(path: PurePosixPath | str) -> str | None:
         return "test/development data"
     if parts and parts[0] in ROOT_LOCAL_PLANNING_DIR_NAMES:
         return "local workspace metadata/planning data"
-    if value == PurePosixPath("cross-review.log"):
+    if len(parts) == 1 and any(
+        fnmatch.fnmatchcase(value.name, pattern)
+        for pattern in ROOT_LOCAL_PLANNING_FILE_PATTERNS
+    ):
         return "local workspace metadata/planning data"
     if any(
         part.casefold() in LOCAL_METADATA_DIR_NAMES

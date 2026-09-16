@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import csv
 import contextlib
 from datetime import date, datetime, timedelta, timezone
@@ -473,6 +474,203 @@ class TemplateContractTests(unittest.TestCase):
         self.assertNotIn("outputs/", excludes)
         self.assertIsNone(contract.transfer_exclude_reason(".ssh-config/runtime.py"))
         self.assertIsNone(contract.transfer_exclude_reason("infra/my.ssh/runtime.py"))
+
+    def test_root_planning_channel_rule_is_pattern_based_and_root_only(self):
+        contract = load_module(
+            "project_contract_root_planning_channels",
+            ROOT / "tools/project_contract.py",
+        )
+        planning_names = (
+            "cross-review.log",
+            "cross-review_claude.log",
+            "cross-review_codex.log",
+            "cross-review_future-reviewer.log",
+            "request list.log",
+            "request list followup.log",
+            "v3-dev.log",
+            "v3-requirements.md",
+            "v3-next-design.md",
+        )
+        for name in planning_names:
+            with self.subTest(root_planning=name):
+                self.assertEqual(
+                    "local workspace metadata/planning data",
+                    contract.transfer_exclude_reason(name),
+                )
+            with self.subTest(nested_production=name):
+                self.assertIsNone(
+                    contract.transfer_exclude_reason(f"docs/customer/{name}"),
+                )
+
+        for name in (
+            "AGENTS.md",
+            "PUBLIC_REPOSITORY.md",
+            "SECURITY.md",
+            "USER_MANUAL.md",
+        ):
+            with self.subTest(legitimate_root_document=name):
+                self.assertIsNone(contract.transfer_exclude_reason(name))
+        self.assertEqual(
+            "README documentation",
+            contract.transfer_exclude_reason("README.md"),
+        )
+
+    def test_real_ignored_root_sync_set_has_only_named_pending_exception(self):
+        sync = load_module(
+            "sync_code_real_ignored_root_set", ROOT / "tools/sync-code.py",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            subprocess.run(
+                ["git", "init", "--quiet"], cwd=workspace, check=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            (workspace / ".gitignore").write_bytes(
+                (ROOT / ".gitignore").read_bytes()
+            )
+            for name, payload in (
+                ("v3-requirements.md", "private design\n"),
+                ("USER_MANUAL.md", "private operator source\n"),
+                ("deploy.md", "ordinary deployment document\n"),
+            ):
+                (workspace / name).write_text(payload, encoding="utf-8")
+            (workspace / "requirements-container-top-level.lock").write_text(
+                "test lock\n", encoding="utf-8",
+            )
+
+            ignored_result = subprocess.run(
+                [
+                    "git", "ls-files", "--others", "--ignored",
+                    "--exclude-standard", "-z",
+                ],
+                cwd=workspace, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(0, ignored_result.returncode, ignored_result.stderr)
+            ignored = {
+                item.decode("utf-8")
+                for item in ignored_result.stdout.split(b"\0") if item
+            }
+            self.assertIn("v3-requirements.md", ignored)
+            self.assertIn("USER_MANUAL.md", ignored)
+
+            with mock.patch.object(sync, "ROOT", workspace):
+                selected = {
+                    path.relative_to(workspace).as_posix()
+                    for path in sync.matching_files(
+                        workspace, sync.ROOT_CODE_PATTERNS,
+                    )
+                }
+            survivors = ignored & selected
+            pending_exceptions = {"USER_MANUAL.md"} & ignored
+            if pending_exceptions:
+                print(
+                    "pending ignored-transfer exceptions: "
+                    + ", ".join(sorted(pending_exceptions))
+                )
+            self.assertEqual(
+                pending_exceptions,
+                survivors,
+                "no ignored root file may survive the composite sync gate "
+                "outside the explicit U-3 pending exception",
+            )
+            self.assertIn("deploy.md", selected)
+
+    def test_all_four_transfer_surfaces_consume_the_shared_boundary(self):
+        expected = {
+            "tools/sync-code.py": {"matching_files.is_deployable"},
+            "tools/tar-for-download.py": {
+                "create_day0_archive.sanitize_project_archive",
+            },
+            "tools/_package_common.py": {
+                "deployment_archive_source_paths", "PackageFilter.__call__",
+            },
+        }
+
+        class SharedBoundaryCalls(ast.NodeVisitor):
+            def __init__(self):
+                self.stack: list[str] = []
+                self.calls: set[str] = set()
+
+            def visit_ClassDef(self, node):
+                self.stack.append(node.name)
+                self.generic_visit(node)
+                self.stack.pop()
+
+            def visit_FunctionDef(self, node):
+                self.stack.append(node.name)
+                self.generic_visit(node)
+                self.stack.pop()
+
+            def visit_Call(self, node):
+                function = node.func
+                name = (
+                    function.attr if isinstance(function, ast.Attribute)
+                    else function.id if isinstance(function, ast.Name)
+                    else ""
+                )
+                if name == "transfer_exclude_reason":
+                    self.calls.add(".".join(self.stack))
+                self.generic_visit(node)
+
+        measured = {}
+        for relative in expected:
+            visitor = SharedBoundaryCalls()
+            visitor.visit(ast.parse(
+                (ROOT / relative).read_text(encoding="utf-8"),
+                filename=relative,
+            ))
+            measured[relative] = visitor.calls
+        self.assertEqual(expected, measured)
+
+    def test_root_planning_channels_are_rejected_by_sync_and_archive(self):
+        sync = load_module(
+            "sync_code_root_planning_workflow", ROOT / "tools/sync-code.py",
+        )
+        package = load_module(
+            "package_root_planning_workflow", ROOT / "tools/_package_common.py",
+        )
+        planning_names = (
+            "cross-review_claude.log",
+            "cross-review_codex.log",
+            "request list.log",
+            "v3-dev.log",
+            "v3-requirements.md",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            for name in (*planning_names, "deploy.md"):
+                (workspace / name).write_text(name + "\n", encoding="utf-8")
+            (workspace / "requirements-container-top-level.lock").write_text(
+                "test lock\n", encoding="utf-8",
+            )
+            with mock.patch.object(sync, "ROOT", workspace):
+                selected = {
+                    path.name for path in sync.matching_files(
+                        workspace, ("*.md", "*.log"),
+                    )
+                }
+            self.assertEqual({"deploy.md"}, selected)
+
+        package_filter = package.PackageFilter(
+            ROOT / "DAY0-Prepare/template",
+            Path(tempfile.gettempdir()) / "pub-fix-3-test.tar.gz",
+            include_images=False,
+            include_apps=False,
+            include_firmware=False,
+            max_file_size=1024,
+        )
+        for name in planning_names:
+            info = tarfile.TarInfo(name)
+            info.size = 1
+            with self.subTest(archive=name):
+                self.assertIsNone(package_filter(info))
+                self.assertEqual(
+                    1, package_filter.reasons[
+                        "local workspace metadata/planning data"
+                    ],
+                )
+                package_filter.reasons.clear()
 
     def test_field_reference_artifacts_are_not_sync_runtime_sources(self):
         contract = load_module(

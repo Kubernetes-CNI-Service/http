@@ -61,6 +61,12 @@ id_ecdsa*
 *.log
 *.lock
 !requirements-container-top-level.lock
+
+# Working design documents kept at repository root.  Sibling *.log files are
+# covered above by extension; a .md working document is not, so it is named
+# explicitly rather than relying on a broad *.md rule that would capture
+# tracked documentation.
+/v3-requirements.md
 *.pid
 *.tmp
 *.temp
