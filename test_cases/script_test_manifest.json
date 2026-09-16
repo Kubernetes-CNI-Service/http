@@ -347,6 +347,7 @@
     "tools/update-root-readme.py": "tools/update-root-readme.py",
     "tools/update-user-manual.py": "tools/update-user-manual.py",
     "tools/ztp_service_runtime.py": "tools/ztp_service_runtime.py",
+    "ztp/backup/permission-sweep.py": "ztp/backup/permission-sweep.py",
     "ztp/backup/yaml-collect.py": "ztp/backup/yaml-collect.py",
     "ztp/config/cumulus/d-hostname2mac.py": "ztp/config/cumulus/d-hostname2mac.py",
     "ztp/config/cumulus/template/90-c2-generate_configs.py": "ztp/config/cumulus/template/90-c2-generate_configs.py",

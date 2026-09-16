@@ -24,6 +24,16 @@
 - 报告：`backup.log`、`devices_config.csv`、`diff.log`。
 - 来源元数据：`collection.json`，记录环境、清单、采集器和带时区时间。
 
+批次及网络子目录固定为当前采集身份拥有的 `0700`，批次内全部文件固定为 `0600`；
+YAML 通过持有的父目录 FD 以 `O_EXCL|O_NOFOLLOW` 创建，既有名字会拒绝而不会截断。
+管理服务器上的采集器与 feedback 必须同为 root，本机必须同为 joeyyang；feedback 遇到
+不可读的受管 YAML 会报告 `backup-identity-mismatch`，不会把权限错误当作缺少证据。
+
+历史权限收敛使用 `permission-sweep.py` 的两阶段接口：先在待扫树之外的 root-private
+目录冻结 manifest 并公布 SHA-256，再携带该摘要显式 apply；中断后只能用同一
+manifest 与 append-only journal 显式 resume。任何新增对象、链接、owner 或内容漂移都要求
+重新 inventory，工具永不自动把权限恢复到更宽模式。
+
 ## 使用
 
 ```bash

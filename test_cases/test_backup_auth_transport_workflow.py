@@ -428,15 +428,52 @@ print(TARGET + " ssh-ed25519 " + blob)
                 "FAKE_SSH_RECORD": str(record),
                 "FAKE_SSH_CHANGED": "0",
             }
-            with mock.patch.dict(os.environ, environment, clear=False):
-                ok, statuses, stdout, stderr = self._run_worker(
-                    collector, SECRET, "prod",
-                )
+            previous_umask = os.umask(0o022)
+            try:
+                with mock.patch.dict(os.environ, environment, clear=False):
+                    ok, statuses, stdout, stderr = self._run_worker(
+                        collector, SECRET, "prod",
+                    )
+            finally:
+                os.umask(previous_umask)
 
             self.assertTrue(ok, stdout + stderr)
             self.assertEqual("success", statuses[-1][0])
             self.assertNotIn(SECRET, stdout + stderr + repr(statuses))
             self.assertNotIn(SECRET, record.read_text(encoding="utf-8"))
+            batches = sorted(
+                path for path in project_output.iterdir()
+                if path.is_dir() and path.name.endswith("-prod-backup")
+            )
+            self.assertEqual(0o700, stat.S_IMODE(project_output.stat().st_mode))
+            self.assertEqual(1, len(batches))
+            yaml_files = []
+            wide_hashed_password = []
+            for current, directories, files in os.walk(batches[0]):
+                current_path = Path(current)
+                self.assertEqual(
+                    0o700, stat.S_IMODE(current_path.stat().st_mode),
+                    str(current_path),
+                )
+                for name in directories:
+                    child = current_path / name
+                    self.assertFalse(child.is_symlink(), str(child))
+                for name in files:
+                    child = current_path / name
+                    self.assertFalse(child.is_symlink(), str(child))
+                    self.assertEqual(
+                        0o600, stat.S_IMODE(child.stat().st_mode), str(child),
+                    )
+                    if child.suffix.casefold() in {".yaml", ".yml"}:
+                        yaml_files.append(child)
+                        if (
+                            stat.S_IMODE(child.stat().st_mode) & 0o077
+                            and b"hashed-password" in child.read_bytes()
+                        ):
+                            wide_hashed_password.append(child)
+            self.assertEqual(1, len(yaml_files))
+            self.assertEqual([], wide_hashed_password)
+            shutil.rmtree(batches[0])
             events = self._events(record)
             key_events = [
                 event for event in events
@@ -531,6 +568,9 @@ print(TARGET + " ssh-ed25519 " + blob)
                     SECRET,
                     failed_stdout + failed_stderr + record.read_text(encoding="utf-8"),
                 )
+                for batch in project_output.glob("*-backup"):
+                    if batch.is_dir():
+                        shutil.rmtree(batch)
             environment.pop("FAKE_KHC_MODE", None)
 
             record.write_text("", encoding="utf-8")
@@ -573,6 +613,9 @@ print(TARGET + " ssh-ed25519 " + blob)
             self.assertFalse(pin.is_symlink())
             self.assertNotIn("*", remedy_lines[0])
             self.assertNotIn(str(pin.parent) + "'", remedy_lines[0])
+            for batch in project_output.glob("*-backup"):
+                if batch.is_dir():
+                    shutil.rmtree(batch)
 
             record.write_text("", encoding="utf-8")
             environment["FAKE_SSH_CHANGED"] = "different-algorithm"

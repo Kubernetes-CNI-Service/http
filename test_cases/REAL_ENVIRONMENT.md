@@ -929,3 +929,20 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 证据、清理与风险：保存脱敏容量估算、df/statvfs、各阶段时长、bundle/component size/SHA、writer 停止
   窗口与最终空间；不保存大 payload 内容。删除仅测试生成的私有 stage/bundle 并恢复 VM 快照，确认项目和
   服务基线；容量耗尽可能影响宿主其他服务，必须使用独立文件系统/VM，禁止在共享管理服务器执行。
+
+## TC-REAL-BACKUP-PERMISSION-001 — 采集器与 feedback 同身份权限边界
+
+- 状态：**NOT RUN / REAL_ENV REQUIRED**。在可回滚的 Ubuntu 管理 VM 与项目电脑各执行一次；不得使用
+  真实生产备份树做首次验证。管理服务器由正式 root worker 驱动采集器并以 root 运行 feedback；本机两者
+  都以 joeyyang 运行。www-data 只读取树外状态 JSON，不授予备份树访问权。
+- 步骤与预期：在 `umask 022` 下完成一轮 AIR 和一轮 Production 备份，验证批次/族目录均为 0700、所有
+  文件均为 0600、每个 YAML 为当前采集身份拥有的 single-link regular file；随后以同一身份通过受管 sample
+  link 运行 feedback 并确认 Production 与 AIR 证据均被读取。再以不同的非特权身份只读运行 feedback，必须
+  明确报告 `backup-identity-mismatch`，不得把不可读 Production 证据当成不存在而让 AIR 静默胜出。
+- 历史清扫：先在树外 root-private 0700 state 目录生成 exact manifest，保存公布的 SHA-256 后再显式 apply；
+  中途终止后只用同一 manifest+journal 显式 resume。保存前后 dev/ino/uid/gid/mode/size/mtime/ctime/hash、逐项
+  append-only journal 和全树独立扫描结果；所有 YAML mode 不得宽于 0600，且“宽于 0600 并含
+  `hashed-password`”计数必须为 0。任何新文件、symlink/hardlink、owner/content 漂移都应在 chmod 前阻断并
+  要求重新 inventory；不得自动 rollback 到更宽权限。
+- 清理与风险：只保留脱敏 manifest/journal 摘要，不保存 YAML 内容或密码散列；从 VM/fixture 快照恢复，
+  不手工修改真实历史树。身份配置错误会改变 feedback 的权威证据选择，因此任何错误都阻断后续优化流程。

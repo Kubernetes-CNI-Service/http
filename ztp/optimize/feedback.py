@@ -102,6 +102,7 @@ STATE_DIRECTORY_FSYNC_WARNING = (
 )
 
 _SAFE_FEEDBACK_MESSAGES = frozenset({
+    "collector/feedback identity mismatch; run both as the same identity",
     "manual-recovery=validate-live-sha-and-state; automatic-retry=forbidden",
     "全局 YAML 含 alias/anchor，无法安全执行字节补丁",
     "全局 YAML 顶层必须是 mapping",
@@ -230,10 +231,30 @@ def _feedback_boundary(category, operation):
 
 # ── 工具函数 ──────────────────────────────────────────────────────────────────
 
+def _backup_identity_mismatch():
+    return FeedbackError(
+        "backup-identity-mismatch",
+        message=(
+            "collector/feedback identity mismatch; "
+            "run both as the same identity"
+        ),
+    )
+
+
+def _read_backup_yaml_bytes(path):
+    try:
+        return Path(path).read_bytes()
+    except PermissionError:
+        raise _backup_identity_mismatch() from None
+
+
 def load_yaml(path):
     """加载 NVUE startup.yaml，返回 set 段的 dict。"""
-    with open(path) as f:
-        doc = safe_load_yaml_preserving_mac(f)   # 文件是 YAML list，不是多文档
+    try:
+        with open(path) as f:
+            doc = safe_load_yaml_preserving_mac(f)   # 文件是 YAML list，不是多文档
+    except PermissionError:
+        raise _backup_identity_mismatch() from None
     if isinstance(doc, list):
         for item in doc:
             if isinstance(item, dict) and "set" in item:
@@ -479,7 +500,10 @@ def discover_yaml_files(
     for path in sorted(candidates, key=priority):
         hostname = hostname_aliases.get(path.stem, path.stem)
         previous = selected.get(hostname)
-        if previous is not None and previous.read_bytes() != path.read_bytes():
+        if (
+            previous is not None
+            and _read_backup_yaml_bytes(previous) != _read_backup_yaml_bytes(path)
+        ):
             print(f"[WARN] 重复 YAML hostname={hostname}，保留 {previous}，跳过 {path}")
             continue
         selected.setdefault(hostname, path)
@@ -3538,8 +3562,7 @@ def convert_one(input_value=None, output_value=None, format_path=None,
         source_b64 = NA
         source_sha256 = NA
         if yaml_path and type_ in YAML_DEVICE_TYPES:
-            with open(yaml_path, "rb") as source_file:
-                source_bytes = source_file.read()
+            source_bytes = _read_backup_yaml_bytes(yaml_path)
             source_b64 = encode_source_yaml(source_bytes, hostname)
             source_sha256 = hashlib.sha256(source_bytes).hexdigest()
 

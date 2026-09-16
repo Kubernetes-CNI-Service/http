@@ -802,6 +802,9 @@ class DhcpAndInventoryBoundaryTests(unittest.TestCase):
 class OptimizeAndTopologySafetyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        cls.backup = load_module(
+            "review_yaml_collect_permissions", "ztp/backup/yaml-collect.py",
+        )
         cls.feedback = load_module("review_feedback", "ztp/optimize/feedback.py")
         cls.links = load_module("review_sample_links", "ztp/optimize/sample_links.py")
         cls.topology = load_module(
@@ -964,6 +967,227 @@ class OptimizeAndTopologySafetyTests(unittest.TestCase):
                     self.feedback.extract_archive(archive_path, root / "output")
             finally:
                 self.feedback.MAX_ARCHIVE_FILES = old_limit
+
+    def test_backup_yaml_permission_failure_names_identity_mismatch(self):
+        denied = Path("/managed/99-output-backup/batch/eth/leaf01.yaml")
+        with mock.patch("builtins.open", side_effect=PermissionError(13, "denied")):
+            with self.assertRaises(self.feedback.FeedbackError) as raised:
+                self.feedback.load_yaml(denied)
+        self.assertEqual("backup-identity-mismatch", raised.exception.category)
+        message = str(raised.exception)
+        self.assertIn("collector", message.casefold())
+        self.assertIn("feedback", message.casefold())
+        self.assertIn("identity", message.casefold())
+
+    @staticmethod
+    def _device():
+        return {
+            "hostname": "leaf01", "fmt": "eth",
+            "eth0_ip": "192.0.2.10", "eth0_pfx": "24",
+            "eth0_gw": "192.0.2.1", "eth0_mac": "02:00:00:00:00:01",
+            "eth1_ip": "", "eth1_pfx": "", "eth1_gw": "",
+            "alternate_ssh_ips": [], "transition_ssh_ips": [],
+            "dynamic_dhcp": False,
+        }
+
+    @staticmethod
+    def _ssh_with_yaml(payload):
+        def fake_ssh(_user, _password, _ip, command, timeout=30, **kwargs):
+            del timeout, kwargs
+            if command.startswith("hostname"):
+                return "leaf01\n", "", 0
+            if command.startswith("sudo "):
+                return payload, "", 0
+            return "", "", 0
+        return fake_ssh
+
+    def test_collection_uses_exclusive_held_dirfd_0600_and_never_truncates(self):
+        payload = "- set:\n    system:\n      aaa:\n        user:\n          admin:\n            hashed-password: secret\n"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            family = root / "eth"
+            family.mkdir(mode=0o700)
+            family.chmod(0o700)
+            previous_umask = os.umask(0o022)
+            try:
+                with mock.patch.object(
+                    self.backup, "_ssh", side_effect=self._ssh_with_yaml(payload),
+                ):
+                    self.backup.collect_device(
+                        self._device(), str(root), "password", "", "",
+                    )
+            finally:
+                os.umask(previous_umask)
+
+            output = family / "leaf01.yaml"
+            metadata = output.stat()
+            self.assertTrue(stat.S_ISREG(metadata.st_mode))
+            self.assertEqual(1, metadata.st_nlink)
+            self.assertEqual(os.geteuid(), metadata.st_uid)
+            self.assertEqual(0o600, stat.S_IMODE(metadata.st_mode))
+            self.assertEqual(payload.encode("utf-8"), output.read_bytes())
+
+            sentinel = b"existing-must-not-be-truncated\n"
+            output.write_bytes(sentinel)
+            output.chmod(0o600)
+            with mock.patch.object(
+                self.backup, "_ssh", side_effect=self._ssh_with_yaml(payload),
+            ), self.assertRaises(FileExistsError):
+                self.backup.collect_device(
+                    self._device(), str(root), "password", "", "",
+                )
+            self.assertEqual(sentinel, output.read_bytes())
+
+            output.unlink()
+            outside = root / "outside"
+            outside.write_bytes(sentinel)
+            output.symlink_to(outside)
+            with mock.patch.object(
+                self.backup, "_ssh", side_effect=self._ssh_with_yaml(payload),
+            ), self.assertRaises(OSError):
+                self.backup.collect_device(
+                    self._device(), str(root), "password", "", "",
+                )
+            self.assertEqual(sentinel, outside.read_bytes())
+
+            output.unlink()
+            oversized = "x" * (self.backup.MAX_SSH_OUTPUT_BYTES + 1)
+            with mock.patch.object(
+                self.backup, "_ssh", side_effect=self._ssh_with_yaml(oversized),
+            ), self.assertRaises(ValueError):
+                self.backup.collect_device(
+                    self._device(), str(root), "password", "", "",
+                )
+            self.assertFalse(output.exists())
+
+    def test_historical_sweep_freezes_exact_manifest_and_resumes_without_widening(self):
+        sweep = load_module(
+            "review_backup_permission_sweep",
+            "ztp/backup/permission-sweep.py",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "project" / "99-output-backup"
+            family = root / "20260831_2137-prod-backup" / "eth"
+            family.mkdir(parents=True, mode=0o700)
+            first = family / "leaf01.yaml"
+            second = family / "leaf02.yaml"
+            first.write_text("hashed-password: one\n", encoding="utf-8")
+            second.write_text("hashed-password: two\n", encoding="utf-8")
+            first.chmod(0o644)
+            second.chmod(0o644)
+            state = base / "root-private-state"
+
+            frozen = sweep.freeze_manifest(
+                root, state, project_name="project",
+            )
+            manifest = Path(frozen["manifest_path"])
+            manifest_bytes = manifest.read_bytes()
+            self.assertEqual(
+                hashlib.sha256(manifest_bytes).hexdigest(), frozen["sha256"],
+            )
+            self.assertFalse(state.is_relative_to(root))
+            self.assertEqual(0o700, stat.S_IMODE(state.stat().st_mode))
+            self.assertEqual(0o600, stat.S_IMODE(manifest.stat().st_mode))
+            records = json.loads(manifest_bytes)["entries"]
+            yaml_records = [item for item in records if item["target_mode"] == "0600"]
+            self.assertEqual(2, len(yaml_records))
+            required = {
+                "canonical_root", "project", "batch", "family", "path",
+                "dev", "ino", "type", "nlink", "uid", "gid", "mode",
+                "size", "mtime_ns", "ctime_ns", "sha256", "target_mode",
+            }
+            self.assertTrue(all(required <= set(item) for item in yaml_records))
+
+            journal = state / "result.jsonl"
+            real_fchmod = sweep.os.fchmod
+            calls = 0
+
+            def fail_second_yaml(descriptor, mode):
+                nonlocal calls
+                calls += 1
+                # The first fchmod secures the new journal, the second tightens
+                # the first YAML, and the third injects the next YAML failure.
+                if calls == 3:
+                    raise OSError("injected chmod failure")
+                return real_fchmod(descriptor, mode)
+
+            with mock.patch.object(sweep.os, "fchmod", side_effect=fail_second_yaml):
+                with self.assertRaises(sweep.SweepError):
+                    sweep.apply_manifest(
+                        manifest, frozen["sha256"], journal, resume=False,
+                    )
+            modes = {stat.S_IMODE(first.stat().st_mode), stat.S_IMODE(second.stat().st_mode)}
+            self.assertEqual({0o600, 0o644}, modes)
+            journal_before = journal.read_bytes()
+            self.assertTrue(journal_before.endswith(b"\n"))
+
+            sweep.apply_manifest(
+                manifest, frozen["sha256"], journal, resume=True,
+            )
+            self.assertEqual(0o600, stat.S_IMODE(first.stat().st_mode))
+            self.assertEqual(0o600, stat.S_IMODE(second.stat().st_mode))
+            self.assertTrue(journal.read_bytes().startswith(journal_before))
+            self.assertEqual(0o600, stat.S_IMODE(journal.stat().st_mode))
+
+    def test_historical_sweep_rejects_tree_drift_before_any_chmod(self):
+        sweep = load_module(
+            "review_backup_permission_sweep_drift",
+            "ztp/backup/permission-sweep.py",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "project" / "99-output-backup"
+            family = root / "20260831_2137-air-backup" / "eth"
+            family.mkdir(parents=True, mode=0o700)
+            original = family / "leaf01.yaml"
+            original.write_text("hashed-password: one\n", encoding="utf-8")
+            original.chmod(0o644)
+            state = base / "state"
+            frozen = sweep.freeze_manifest(root, state, project_name="project")
+            unexpected = family / "leaf02.yaml"
+            unexpected.write_text("hashed-password: two\n", encoding="utf-8")
+            unexpected.chmod(0o644)
+
+            with self.assertRaises(sweep.SweepError):
+                sweep.apply_manifest(
+                    Path(frozen["manifest_path"]), frozen["sha256"],
+                    state / "result.jsonl", resume=False,
+                )
+            self.assertEqual(0o644, stat.S_IMODE(original.stat().st_mode))
+            self.assertEqual(0o644, stat.S_IMODE(unexpected.stat().st_mode))
+
+            unexpected.unlink()
+            original.write_text("hashed-password: two\n", encoding="utf-8")
+            with self.assertRaises(sweep.SweepError):
+                sweep.apply_manifest(
+                    Path(frozen["manifest_path"]), frozen["sha256"],
+                    state / "result.jsonl", resume=False,
+                )
+            self.assertEqual(0o644, stat.S_IMODE(original.stat().st_mode))
+
+    def test_historical_sweep_rejects_symlink_and_hardlink_inventory(self):
+        sweep = load_module(
+            "review_backup_permission_sweep_links",
+            "ztp/backup/permission-sweep.py",
+        )
+        for hostile in ("symlink", "hardlink"):
+            with self.subTest(hostile=hostile), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                root = base / "project" / "99-output-backup"
+                family = root / "20260831_2137-prod-backup" / "eth"
+                family.mkdir(parents=True, mode=0o700)
+                outside = base / "outside.yaml"
+                outside.write_text("hashed-password: outside\n", encoding="utf-8")
+                leaf = family / "leaf01.yaml"
+                if hostile == "symlink":
+                    leaf.symlink_to(outside)
+                else:
+                    os.link(outside, leaf)
+                with self.assertRaises(sweep.SweepError):
+                    sweep.freeze_manifest(
+                        root, base / "state", project_name="project",
+                    )
 
     def test_generated_latest_cannot_escape_project_output(self):
         with tempfile.TemporaryDirectory() as directory:

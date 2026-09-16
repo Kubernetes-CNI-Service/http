@@ -91,6 +91,221 @@ _EXPECTED_DEVICE_CORE_PREFIX = (
     "eth0_mac",
 )
 
+
+def _write_sensitive_backup_yaml(parent_directory, filename, text):
+    """Create one sensitive YAML through a held, private parent directory."""
+    if Path(filename).name != filename or not filename.endswith(".yaml"):
+        raise ValueError("backup YAML filename is invalid")
+    payload = text.encode("utf-8")
+    if len(payload) > MAX_SSH_OUTPUT_BYTES:
+        raise ValueError("backup YAML exceeds the bounded SSH output limit")
+    required = ("O_NOFOLLOW", "O_DIRECTORY", "O_CLOEXEC")
+    if any(not hasattr(os, name) for name in required):
+        raise RuntimeError("secure backup YAML creation requires openat protections")
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+    directory_fd = os.open(parent_directory, directory_flags)
+    try:
+        directory_metadata = os.fstat(directory_fd)
+        named_metadata = os.stat(parent_directory, follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(directory_metadata.st_mode)
+            or (directory_metadata.st_dev, directory_metadata.st_ino)
+            != (named_metadata.st_dev, named_metadata.st_ino)
+            or directory_metadata.st_uid != os.geteuid()
+        ):
+            raise ValueError("backup YAML parent must be an owned, held directory")
+        os.fchmod(
+            directory_fd, stat.S_IMODE(directory_metadata.st_mode) & 0o700,
+        )
+        directory_metadata = os.fstat(directory_fd)
+        if stat.S_IMODE(directory_metadata.st_mode) != 0o700:
+            raise ValueError("backup YAML parent could not be narrowed to 0700")
+        flags = (
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW
+        )
+        descriptor = os.open(filename, flags, 0o600, dir_fd=directory_fd)
+        created_identity = None
+        try:
+            os.fchmod(descriptor, 0o600)
+            metadata = os.fstat(descriptor)
+            created_identity = (metadata.st_dev, metadata.st_ino)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_nlink != 1
+                or metadata.st_uid != os.geteuid()
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+            ):
+                raise ValueError("new backup YAML is not a single-link owned 0600 file")
+            view = memoryview(payload)
+            while view:
+                written = os.write(descriptor, view)
+                if written <= 0:
+                    raise OSError("short write while creating backup YAML")
+                view = view[written:]
+            os.fsync(descriptor)
+        except BaseException:
+            if created_identity is not None:
+                try:
+                    current = os.stat(
+                        filename, dir_fd=directory_fd, follow_symlinks=False,
+                    )
+                    if (current.st_dev, current.st_ino) == created_identity:
+                        os.unlink(filename, dir_fd=directory_fd)
+                        os.fsync(directory_fd)
+                except OSError:
+                    pass
+            raise
+        finally:
+            os.close(descriptor)
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _create_private_backup_tree(output_root, batch_name):
+    """Create a new 0700 batch and its fixed 0700 family directories."""
+    if Path(batch_name).name != batch_name:
+        raise ValueError("backup batch name is invalid")
+    requested_root = Path(output_root)
+    if not requested_root.name or requested_root.name in (".", ".."):
+        raise ValueError("backup root name is invalid")
+    parent = requested_root.parent.resolve(strict=True)
+    root = parent / requested_root.name
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+    parent_fd = os.open(parent, flags)
+    root_fd = None
+    batch_fd = None
+    try:
+        try:
+            root_entry = os.stat(
+                requested_root.name, dir_fd=parent_fd, follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            os.mkdir(requested_root.name, 0o700, dir_fd=parent_fd)
+            os.fsync(parent_fd)
+            root_fd = os.open(requested_root.name, flags, dir_fd=parent_fd)
+        else:
+            if stat.S_ISLNK(root_entry.st_mode):
+                root = requested_root.resolve(strict=True)
+                root_fd = os.open(root, flags)
+                rebound = os.stat(
+                    requested_root.name, dir_fd=parent_fd, follow_symlinks=False,
+                )
+                if (
+                    not stat.S_ISLNK(rebound.st_mode)
+                    or (root_entry.st_dev, root_entry.st_ino)
+                    != (rebound.st_dev, rebound.st_ino)
+                    or requested_root.resolve(strict=True) != root
+                ):
+                    raise ValueError("backup root link changed while being opened")
+            else:
+                root_fd = os.open(requested_root.name, flags, dir_fd=parent_fd)
+        root_metadata = os.fstat(root_fd)
+        if not stat.S_ISDIR(root_metadata.st_mode) or root_metadata.st_uid != os.geteuid():
+            raise ValueError("backup root must be an owned real directory")
+        os.fchmod(root_fd, stat.S_IMODE(root_metadata.st_mode) & 0o700)
+        root_metadata = os.fstat(root_fd)
+        if stat.S_IMODE(root_metadata.st_mode) != 0o700:
+            raise ValueError("backup root could not be narrowed to 0700")
+        os.mkdir(batch_name, 0o700, dir_fd=root_fd)
+        batch_fd = os.open(batch_name, flags, dir_fd=root_fd)
+        os.fchmod(batch_fd, 0o700)
+        batch_metadata = os.fstat(batch_fd)
+        if (
+            not stat.S_ISDIR(batch_metadata.st_mode)
+            or batch_metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(batch_metadata.st_mode) != 0o700
+        ):
+            raise ValueError("new backup batch is not an owned 0700 directory")
+        for family in ("eth", "spx", "ib", "nvl"):
+            os.mkdir(family, 0o700, dir_fd=batch_fd)
+            family_fd = os.open(family, flags, dir_fd=batch_fd)
+            try:
+                os.fchmod(family_fd, 0o700)
+                metadata = os.fstat(family_fd)
+                if (
+                    not stat.S_ISDIR(metadata.st_mode)
+                    or metadata.st_uid != os.geteuid()
+                    or stat.S_IMODE(metadata.st_mode) != 0o700
+                ):
+                    raise ValueError("new backup family is not an owned 0700 directory")
+                os.fsync(family_fd)
+            finally:
+                os.close(family_fd)
+        os.fsync(batch_fd)
+        os.fsync(root_fd)
+    finally:
+        if batch_fd is not None:
+            os.close(batch_fd)
+        if root_fd is not None:
+            os.close(root_fd)
+        os.close(parent_fd)
+    return str(root / batch_name)
+
+
+@contextmanager
+def _private_output_text(parent_directory, filename, *, newline=None):
+    """Exclusively create one owned 0600 text artifact in a held 0700 batch."""
+    if Path(filename).name != filename:
+        raise ValueError("backup output filename is invalid")
+    directory_fd = os.open(
+        parent_directory,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+    )
+    descriptor = None
+    handle = None
+    created_identity = None
+    try:
+        directory_metadata = os.fstat(directory_fd)
+        if (
+            not stat.S_ISDIR(directory_metadata.st_mode)
+            or directory_metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(directory_metadata.st_mode) != 0o700
+        ):
+            raise ValueError("backup output parent must be owned 0700")
+        descriptor = os.open(
+            filename,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=directory_fd,
+        )
+        os.fchmod(descriptor, 0o600)
+        metadata = os.fstat(descriptor)
+        created_identity = (metadata.st_dev, metadata.st_ino)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+        ):
+            raise ValueError("new backup output is not owned single-link 0600")
+        handle = os.fdopen(descriptor, "w", encoding="utf-8", newline=newline)
+        descriptor = None
+        yield handle
+        handle.flush()
+        os.fsync(handle.fileno())
+        handle.close()
+        handle = None
+        os.fsync(directory_fd)
+    except BaseException:
+        if handle is not None:
+            handle.close()
+        if descriptor is not None:
+            os.close(descriptor)
+        if created_identity is not None:
+            try:
+                current = os.stat(
+                    filename, dir_fd=directory_fd, follow_symlinks=False,
+                )
+                if (current.st_dev, current.st_ino) == created_identity:
+                    os.unlink(filename, dir_fd=directory_fd)
+                    os.fsync(directory_fd)
+            except OSError:
+                pass
+        raise
+    finally:
+        os.close(directory_fd)
+
 # ── 交互 ──────────────────────────────────────────────────────────────────────
 
 def _confirm(prompt, default="y"):
@@ -1461,9 +1676,9 @@ def collect_device(dev, out_dir, eth_pass, ib_pass, nvl_pass):
             yaml_error += "；SSH 公钥可用，但 sudo 需要密码，请重新运行并输入 SSH/sudo 共用密码"
         log.append(f"[WARN] 无法获取 startup.yaml：{yaml_error}")
     else:
-        out_file = os.path.join(sub_dir, f"{hostname}.yaml")
-        with open(out_file, "w", encoding="utf-8") as f:
-            f.write(yaml_out)
+        _write_sensitive_backup_yaml(
+            sub_dir, f"{hostname}.yaml", yaml_out,
+        )
         log.append(f"Backup startup.yaml of {hostname}")
         yaml_ok = True
 
@@ -1774,12 +1989,10 @@ prod/air 可显式限定，--air/--prod 分别是 --type air/prod 的短写。�
 
     ts      = datetime.now().strftime("%Y%m%d_%H%M")
     suffix = f"-{_ENVIRONMENT}-backup"
-    out_dir = os.path.join(SCRIPT_DIR, "yaml-backup", f"{ts}{suffix}")
-    os.makedirs(os.path.join(out_dir, "eth"), exist_ok=True)
-    os.makedirs(os.path.join(out_dir, "spx"), exist_ok=True)
-    os.makedirs(os.path.join(out_dir, "ib"),  exist_ok=True)
-    os.makedirs(os.path.join(out_dir, "nvl"), exist_ok=True)
-    with open(os.path.join(out_dir, "collection.json"), "w", encoding="utf-8") as handle:
+    out_dir = _create_private_backup_tree(
+        os.path.join(SCRIPT_DIR, "yaml-backup"), f"{ts}{suffix}",
+    )
+    with _private_output_text(out_dir, "collection.json") as handle:
         json.dump({
             "schema_version": 1,
             "environment": _ENVIRONMENT,
@@ -1846,13 +2059,13 @@ prod/air 可显式限定，--air/--prod 分别是 --type air/prod 的短写。�
 
     # ── 写 backup.log ─────────────────────────────────────────────────────────
     log_file = os.path.join(out_dir, "backup.log")
-    with open(log_file, "w", encoding="utf-8") as f:
+    with _private_output_text(out_dir, "backup.log") as f:
         f.write("\n".join(all_log) + "\n")
     print(f"\n日志：{log_file}")
 
     # ── 写 devices_config.csv（template 列替换为 sn）─────────────────────────
     csv_file = os.path.join(out_dir, "devices_config.csv")
-    with open(csv_file, "w", newline="", encoding="utf-8") as f:
+    with _private_output_text(out_dir, "devices_config.csv", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["hostname", "type", "sn",
                          "eth0_ip", "eth0_pfx", "eth0_gw", "eth0_mac",
@@ -2003,7 +2216,7 @@ def compare_csv_files(src_csv_paths, collected_csv_path, out_dir, expected_devic
     diff_lines.extend(["", summary])
 
     diff_file = os.path.join(out_dir, "diff.log")
-    with open(diff_file, "w", encoding="utf-8") as f:
+    with _private_output_text(out_dir, "diff.log") as f:
         f.write("\n".join(diff_lines) + "\n")
     print(f"差异报告：{diff_file}")
 
