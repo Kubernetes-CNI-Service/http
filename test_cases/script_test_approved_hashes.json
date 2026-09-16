@@ -1,31 +1,4 @@
 {
-  "full_suite_attestation": {
-    "environment": {
-      "container_toplevel_lock_sha256": "3532f5208b462243bab779b01eb4deb21638ac05a9390c17ac997ba8d7f24998",
-      "container_toplevel_versions": [
-        "Jinja2==3.1.6",
-        "openpyxl==3.1.5",
-        "pandas==2.3.3",
-        "PyYAML==6.0.3",
-        "XlsxWriter==3.2.9"
-      ],
-      "machine": "arm64",
-      "platform": "darwin",
-      "python_cache_tag": "cpython-39",
-      "python_executable": "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/bin/python3.9",
-      "python_implementation": "CPython",
-      "python_version": [
-        3,
-        9,
-        6
-      ]
-    },
-    "scenario_coverage": {
-      "root-entrypoint-workflow": "NOT COVERED (requires Linux EUID 0 private namespace)"
-    },
-    "schema_version": 1,
-    "snapshot_sha256": "5fe6dee3301462a10f88e139498a9f647bf07ff261c4114bb0a5d0ff20203482"
-  },
   "impact_manifest_sha256": "b3bd5315bce55679e9aae86336cee77a86af8d97de9fde9088557719e528a964",
   "schema_version": 1,
   "scripts": {
@@ -411,7 +384,7 @@
     },
     "tools/project_contract.py": {
       "canonical": "tools/project_contract.py",
-      "sha256": "06302c0f1047e3d71848a8dd02c3f87cd3cd42ecb001b21f47abb24e7d95b7d6"
+      "sha256": "5f07b98bebf3edb172df6e01b0e8f2f5369593012c9784f296ea9de64c4dba55"
     },
     "tools/sync-code.py": {
       "canonical": "tools/sync-code.py",
@@ -515,7 +488,7 @@
     ".gitattributes": "d7bfa1a8596479c7b28ac39bb094b2a389fc8dcf9c3cd923b66a95eff96d9f97",
     ".github/workflows/monitor-authority-root.yml": "e2149e9b78f70bff197973bebf8609cb923925064671a363072c39e8a7b37e38",
     ".github/workflows/tests.yml": "a0db50165094f82ef45b87d7dfe42c4f6ed91bb7fa7b4060b6f22a03a9e02335",
-    ".gitignore": "f27498ba618e7534119c3836c345656a3428d751257484f6f93dde1399fb3850",
+    ".gitignore": "66bb0ffd08a2b32acb65bc2524679c6059a733c9aefbd17665e53b7df4e28141",
     "AGENTS.md": "2fa721764c7e4e99e046264df79b018dae450470f2e5c0a8732caa4f2147911a",
     "DAY0-Prepare/template/.management-pubkeys": "6bbef498c3d3a8a46290347f0d849048e16de36f906c85f08b49038c97c08f67",
     "DAY0-Prepare/template/01-global.yaml": "7ef0c60d873d85ce9508bb989d05603c594a0fc1e9ce38c3fc93169c6f96302b",
@@ -655,7 +628,7 @@
     "test_cases.test_password_update": "6609f86c14f10ba6748fcd703bb5d56c3cb40da121fe1328303732a4f632dd36",
     "test_cases.test_predeploy_test_gate": "f8077c235ef943fbf8236da80f3461ef1c98231d5c5344696fe5fcecb2d529b5",
     "test_cases.test_private_documentation_contract": "81f8b723393133941b59a90654e55a610fad860cd0551f72508286ffa5e40e42",
-    "test_cases.test_project_contracts": "c0716ecd13a7a5e73d33fb079e2d7f25dcdadcda836a7777fcf9fa61e1734f41",
+    "test_cases.test_project_contracts": "3d449436c6d68590a2931e809acfa01d1239437463694996644af7948903e959",
     "test_cases.test_project_image_bundle": "3f7fadb5a0ee575cdbbab773ae70e4828c0899ed275ec37b591b9f0206f46682",
     "test_cases.test_public_clean_clone_contract": "f8b978c0c0a29e7dc83590b8306b647e1f191fef26101f093fca34bfe73abb75",
     "test_cases.test_public_clean_clone_workflow": "41f80694e3decc93e03ec4ddc412c11cf856b1060421630328d87d0a7beefea9",
