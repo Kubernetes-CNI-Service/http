@@ -446,12 +446,12 @@ NON_DEPLOYMENT_DIR_NAMES = frozenset({
 })
 REFERENCE_ONLY_SUBTREES = frozenset({"monitor/cabletracker-main"})
 ROOT_LOCAL_PLANNING_DIR_NAMES = frozenset({"outputs"})
-ROOT_LOCAL_PLANNING_FILE_PATTERNS = (
-    "cross-review*.log",
-    "request list*.log",
-    "v3-*.log",
-    "v3-*.md",
-)
+ROOT_TRANSFERABLE_DOCUMENT_NAMES = frozenset({
+    "AGENTS.md",
+    "PUBLIC_REPOSITORY.md",
+    "SECURITY.md",
+})
+ROOT_DOCUMENT_SUFFIXES = frozenset({".md", ".markdown", ".log"})
 LOCAL_METADATA_DIR_NAMES = frozenset({
     ".git", ".codex", ".agents", ".claude", ".ssh",
 })
@@ -646,19 +646,22 @@ def transfer_exclude_reason(path: PurePosixPath | str) -> str | None:
         return "test/development data"
     if parts and parts[0] in ROOT_LOCAL_PLANNING_DIR_NAMES:
         return "local workspace metadata/planning data"
-    if len(parts) == 1 and any(
-        fnmatch.fnmatchcase(value.name, pattern)
-        for pattern in ROOT_LOCAL_PLANNING_FILE_PATTERNS
-    ):
-        return "local workspace metadata/planning data"
     if any(
         part.casefold() in LOCAL_METADATA_DIR_NAMES
         or part.startswith(".codex_tmp")
         for part in parts
     ):
         return "local workspace metadata/planning data"
+    if value == PurePosixPath("USER_MANUAL.md"):
+        return "private operator documentation"
     if is_readme_name(value.name):
         return "README documentation"
+    if (
+        len(parts) == 1
+        and value.suffix.casefold() in ROOT_DOCUMENT_SUFFIXES
+        and value.name not in ROOT_TRANSFERABLE_DOCUMENT_NAMES
+    ):
+        return "local workspace metadata/planning data"
     if any(part in ANALYSIS_TOOL_NAMES for part in parts):
         return "offline analysis tool"
     if any(part == ".DS_Store" or part.startswith("._") for part in parts):

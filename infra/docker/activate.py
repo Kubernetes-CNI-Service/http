@@ -37,7 +37,7 @@ sys.path.insert(0, os.fspath(HERE))
 TOOLS_DIRECTORY = HERE.parents[1] / "tools"
 sys.path.insert(0, os.fspath(TOOLS_DIRECTORY))
 import hostlock  # noqa: E402
-from project_contract import path_disposition  # noqa: E402
+from project_contract import path_disposition, transfer_exclude_reason  # noqa: E402
 
 
 DEFAULT_HTTP_ROOT = Path("/var/www/html")
@@ -1087,6 +1087,9 @@ def image_source_paths(source_root: Path) -> Tuple[str, ...]:
                 and path_disposition(
                     (relative_directory / name).as_posix()
                 ) == "production"
+                and transfer_exclude_reason(
+                    (relative_directory / name).as_posix()
+                ) is None
                 and not (
                     relative_directory == Path("DAY0-Prepare")
                     and name != "template"
@@ -1098,6 +1101,8 @@ def image_source_paths(source_root: Path) -> Tuple[str, ...]:
             )
             for name in sorted(filenames):
                 relative = (relative_directory / name).as_posix()
+                if transfer_exclude_reason(relative) is not None:
+                    continue
                 if _source_path_selected(relative):
                     selected.add(relative)
                 elif relative.startswith("DAY0-Prepare/template/"):

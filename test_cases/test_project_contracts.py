@@ -475,7 +475,7 @@ class TemplateContractTests(unittest.TestCase):
         self.assertIsNone(contract.transfer_exclude_reason(".ssh-config/runtime.py"))
         self.assertIsNone(contract.transfer_exclude_reason("infra/my.ssh/runtime.py"))
 
-    def test_root_planning_channel_rule_is_pattern_based_and_root_only(self):
+    def test_root_document_role_policy_is_version_agnostic_and_fail_closed(self):
         contract = load_module(
             "project_contract_root_planning_channels",
             ROOT / "tools/project_contract.py",
@@ -490,6 +490,11 @@ class TemplateContractTests(unittest.TestCase):
             "v3-dev.log",
             "v3-requirements.md",
             "v3-next-design.md",
+            "v4-requirements.md",
+            "requirements-v4.md",
+            "cross-review-notes.md",
+            "release planning notes.md",
+            "future-plan.markdown",
         )
         for name in planning_names:
             with self.subTest(root_planning=name):
@@ -502,22 +507,52 @@ class TemplateContractTests(unittest.TestCase):
                     contract.transfer_exclude_reason(f"docs/customer/{name}"),
                 )
 
-        for name in (
+        transferable = frozenset({
             "AGENTS.md",
             "PUBLIC_REPOSITORY.md",
             "SECURITY.md",
-            "USER_MANUAL.md",
-        ):
-            with self.subTest(legitimate_root_document=name):
+        })
+        self.assertEqual(
+            transferable,
+            contract.ROOT_TRANSFERABLE_DOCUMENT_NAMES,
+        )
+        for name in transferable:
+            with self.subTest(transferable_root_document=name):
                 self.assertIsNone(contract.transfer_exclude_reason(name))
+                self.assertTrue((ROOT / name).is_file())
+                tracked = subprocess.run(
+                    ["git", "ls-files", "--error-unmatch", "--", name],
+                    cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    check=False,
+                )
+                self.assertEqual(0, tracked.returncode, tracked.stderr)
+                ignored = subprocess.run(
+                    ["git", "check-ignore", "--quiet", "--", name],
+                    cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    check=False,
+                )
+                self.assertEqual(1, ignored.returncode, ignored.stderr)
+        self.assertEqual(
+            "private operator documentation",
+            contract.transfer_exclude_reason("USER_MANUAL.md"),
+        )
+        self.assertIsNone(
+            contract.transfer_exclude_reason("docs/customer/USER_MANUAL.md"),
+        )
         self.assertEqual(
             "README documentation",
             contract.transfer_exclude_reason("README.md"),
         )
 
-    def test_real_ignored_root_sync_set_has_only_named_pending_exception(self):
+    def test_real_ignored_deployment_authority_set_is_empty(self):
         sync = load_module(
             "sync_code_real_ignored_root_set", ROOT / "tools/sync-code.py",
+        )
+        activate = load_module(
+            "activate_real_ignored_root_set", ROOT / "infra/docker/activate.py",
+        )
+        package = load_module(
+            "package_real_ignored_root_set", ROOT / "tools/_package_common.py",
         )
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
@@ -528,12 +563,20 @@ class TemplateContractTests(unittest.TestCase):
             (workspace / ".gitignore").write_bytes(
                 (ROOT / ".gitignore").read_bytes()
             )
-            for name, payload in (
+            for scan_root in activate.IMAGE_SOURCE_SCAN_ROOTS:
+                (workspace / scan_root).mkdir(parents=True, exist_ok=True)
+            (workspace / "DAY0-Prepare/template").mkdir(parents=True)
+            fixtures = (
                 ("v3-requirements.md", "private design\n"),
                 ("USER_MANUAL.md", "private operator source\n"),
-                ("deploy.md", "ordinary deployment document\n"),
-            ):
-                (workspace / name).write_text(payload, encoding="utf-8")
+                ("monitor/Issue_Tracker_Template_v1.xlsx", "private workbook\n"),
+                ("DAY0-Prepare/template/.DS_Store", "private metadata\n"),
+                ("AGENTS.md", "public tracked-shape document\n"),
+            )
+            for name, payload in fixtures:
+                target = workspace / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(payload, encoding="utf-8")
             (workspace / "requirements-container-top-level.lock").write_text(
                 "test lock\n", encoding="utf-8",
             )
@@ -551,34 +594,102 @@ class TemplateContractTests(unittest.TestCase):
                 item.decode("utf-8")
                 for item in ignored_result.stdout.split(b"\0") if item
             }
-            self.assertIn("v3-requirements.md", ignored)
-            self.assertIn("USER_MANUAL.md", ignored)
+            blockers = {
+                "DAY0-Prepare/template/.DS_Store",
+                "USER_MANUAL.md",
+                "monitor/Issue_Tracker_Template_v1.xlsx",
+                "v3-requirements.md",
+            }
+            self.assertTrue(blockers.issubset(ignored), ignored)
 
             with mock.patch.object(sync, "ROOT", workspace):
-                selected = {
+                sync_selected = {
                     path.relative_to(workspace).as_posix()
                     for path in sync.matching_files(
                         workspace, sync.ROOT_CODE_PATTERNS,
                     )
                 }
-            survivors = ignored & selected
-            pending_exceptions = {"USER_MANUAL.md"} & ignored
-            if pending_exceptions:
+            image_selected = set(activate.image_source_paths(workspace))
+            archive_selected = set(
+                package.deployment_archive_source_paths(workspace)
+            )
+            deployment_authority = (
+                sync_selected | image_selected | archive_selected
+            )
+            survivors = ignored & deployment_authority
+            if survivors:
                 print(
-                    "pending ignored-transfer exceptions: "
-                    + ", ".join(sorted(pending_exceptions))
+                    "ignored deployment-authority survivors: "
+                    + ", ".join(sorted(survivors))
                 )
             self.assertEqual(
-                pending_exceptions,
+                set(),
                 survivors,
-                "no ignored root file may survive the composite sync gate "
-                "outside the explicit U-3 pending exception",
+                "no Git-ignored file may survive the union of the three "
+                "real deployment selectors",
             )
-            self.assertIn("deploy.md", selected)
+            self.assertIn("AGENTS.md", deployment_authority)
 
-    def test_all_four_transfer_surfaces_consume_the_shared_boundary(self):
-        expected = {
+    def test_deployment_selector_and_transfer_surface_enumerations_are_exact(self):
+        runner = load_module(
+            "related_runner_deployment_selector_enumeration",
+            ROOT / "test_cases/run_related_tests.py",
+        )
+        expected_selectors = (
+            ("tools/sync-code.py", "_impact_sync_selector"),
+            ("infra/docker/activate.py", "_impact_image_selector"),
+            ("tools/_package_common.py", "_impact_archive_selector"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            markers = {
+                expected_selectors[0]: workspace / "sync-selector.marker",
+                expected_selectors[1]: "image-selector.marker",
+                expected_selectors[2]: "archive-selector.marker",
+            }
+            for marker in markers.values():
+                target = marker if isinstance(marker, Path) else workspace / marker
+                target.write_text("selector marker\n", encoding="utf-8")
+
+            sync_selector = mock.Mock()
+            sync_selector.ROOT_CODE_PATTERNS = ("*.marker",)
+            sync_selector.matching_files.return_value = (markers[expected_selectors[0]],)
+            image_selector = mock.Mock()
+            image_selector.image_source_paths.return_value = (
+                markers[expected_selectors[1]],
+            )
+            archive_selector = mock.Mock()
+            archive_selector.deployment_archive_source_paths.return_value = (
+                markers[expected_selectors[2]],
+            )
+            selector_modules = dict(zip(
+                expected_selectors,
+                (sync_selector, image_selector, archive_selector),
+            ))
+            measured_selectors = []
+
+            def load_selector(root, relative, module_name):
+                self.assertEqual(workspace, root)
+                measured_selectors.append((relative, module_name))
+                return selector_modules[(relative, module_name)]
+
+            with mock.patch.object(
+                runner, "_load_deployment_selector", side_effect=load_selector,
+            ):
+                selected = runner.deployment_authority_paths(workspace)
+            self.assertEqual(list(expected_selectors), measured_selectors)
+            self.assertEqual(
+                {
+                    "sync-selector.marker",
+                    "image-selector.marker",
+                    "archive-selector.marker",
+                },
+                selected,
+            )
+
+        expected_boundaries = {
             "tools/sync-code.py": {"matching_files.is_deployable"},
+            "infra/docker/activate.py": {"image_source_paths"},
             "tools/tar-for-download.py": {
                 "create_day0_archive.sanitize_project_archive",
             },
@@ -614,14 +725,43 @@ class TemplateContractTests(unittest.TestCase):
                 self.generic_visit(node)
 
         measured = {}
-        for relative in expected:
+        for relative in expected_boundaries:
             visitor = SharedBoundaryCalls()
             visitor.visit(ast.parse(
                 (ROOT / relative).read_text(encoding="utf-8"),
                 filename=relative,
             ))
             measured[relative] = visitor.calls
-        self.assertEqual(expected, measured)
+        self.assertEqual(expected_boundaries, measured)
+
+    def test_image_selector_consumes_shared_transfer_boundary(self):
+        activate = load_module(
+            "activate_shared_transfer_boundary",
+            ROOT / "infra/docker/activate.py",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            for scan_root in activate.IMAGE_SOURCE_SCAN_ROOTS:
+                (workspace / scan_root).mkdir(parents=True, exist_ok=True)
+            template = workspace / "DAY0-Prepare/template"
+            template.mkdir(parents=True)
+            fixtures = {
+                "DAY0-Prepare/template/.DS_Store": "private metadata\n",
+                "DAY0-Prepare/template/p2p.xlsx": "",
+                "monitor/Issue_Tracker_Template_v1.xlsx": "private workbook\n",
+            }
+            for relative, payload in fixtures.items():
+                target = workspace / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(payload, encoding="utf-8")
+
+            selected = set(activate.image_source_paths(workspace))
+            blockers = {
+                "DAY0-Prepare/template/.DS_Store",
+                "monitor/Issue_Tracker_Template_v1.xlsx",
+            }
+            self.assertTrue(blockers.isdisjoint(selected), blockers & selected)
+            self.assertIn("DAY0-Prepare/template/p2p.xlsx", selected)
 
     def test_root_planning_channels_are_rejected_by_sync_and_archive(self):
         sync = load_module(
@@ -636,10 +776,15 @@ class TemplateContractTests(unittest.TestCase):
             "request list.log",
             "v3-dev.log",
             "v3-requirements.md",
+            "v4-requirements.md",
+            "requirements-v4.md",
+            "cross-review-notes.md",
+            "release planning notes.md",
         )
+        public_names = ("AGENTS.md", "PUBLIC_REPOSITORY.md", "SECURITY.md")
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
-            for name in (*planning_names, "deploy.md"):
+            for name in (*planning_names, *public_names):
                 (workspace / name).write_text(name + "\n", encoding="utf-8")
             (workspace / "requirements-container-top-level.lock").write_text(
                 "test lock\n", encoding="utf-8",
@@ -650,7 +795,7 @@ class TemplateContractTests(unittest.TestCase):
                         workspace, ("*.md", "*.log"),
                     )
                 }
-            self.assertEqual({"deploy.md"}, selected)
+            self.assertEqual(set(public_names), selected)
 
         package_filter = package.PackageFilter(
             ROOT / "DAY0-Prepare/template",
