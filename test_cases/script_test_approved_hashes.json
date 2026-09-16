@@ -1,31 +1,4 @@
 {
-  "full_suite_attestation": {
-    "environment": {
-      "container_toplevel_lock_sha256": "3532f5208b462243bab779b01eb4deb21638ac05a9390c17ac997ba8d7f24998",
-      "container_toplevel_versions": [
-        "Jinja2==3.1.6",
-        "openpyxl==3.1.5",
-        "pandas==2.3.3",
-        "PyYAML==6.0.3",
-        "XlsxWriter==3.2.9"
-      ],
-      "machine": "arm64",
-      "platform": "darwin",
-      "python_cache_tag": "cpython-39",
-      "python_executable": "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/bin/python3.9",
-      "python_implementation": "CPython",
-      "python_version": [
-        3,
-        9,
-        6
-      ]
-    },
-    "scenario_coverage": {
-      "root-entrypoint-workflow": "NOT COVERED (requires Linux EUID 0 private namespace)"
-    },
-    "schema_version": 1,
-    "snapshot_sha256": "64dbc9d9048e65dac12034ae14ab2fa215ed76eddee81ac23bae49c7acb9711d"
-  },
   "impact_manifest_sha256": "b3bd5315bce55679e9aae86336cee77a86af8d97de9fde9088557719e528a964",
   "schema_version": 1,
   "scripts": {
@@ -511,11 +484,11 @@
     }
   },
   "support": {
-    ".dockerignore": "6a475645d852465e4172d3a005e1e952d74004d323dec41a650e959ba773a256",
+    ".dockerignore": "5e8d2064a1908e53550a995be34203da8161136b0bd58628a042fbd68612c420",
     ".gitattributes": "d7bfa1a8596479c7b28ac39bb094b2a389fc8dcf9c3cd923b66a95eff96d9f97",
     ".github/workflows/monitor-authority-root.yml": "e2149e9b78f70bff197973bebf8609cb923925064671a363072c39e8a7b37e38",
     ".github/workflows/tests.yml": "a0db50165094f82ef45b87d7dfe42c4f6ed91bb7fa7b4060b6f22a03a9e02335",
-    ".gitignore": "66bb0ffd08a2b32acb65bc2524679c6059a733c9aefbd17665e53b7df4e28141",
+    ".gitignore": "b45882fad458b2ebfdbfdde3ab29044af5ea2c64c601c66fc764acfdbb200881",
     "AGENTS.md": "2fa721764c7e4e99e046264df79b018dae450470f2e5c0a8732caa4f2147911a",
     "DAY0-Prepare/template/.management-pubkeys": "6bbef498c3d3a8a46290347f0d849048e16de36f906c85f08b49038c97c08f67",
     "DAY0-Prepare/template/01-global.yaml": "7ef0c60d873d85ce9508bb989d05603c594a0fc1e9ce38c3fc93169c6f96302b",
@@ -554,7 +527,7 @@
     "infra/docker/.dockerignore": "cd2db6b089d39af9ebedbf40e70679a5e5e3391128fcb063a1b84b99d6679cca",
     "infra/docker/.gitignore": "03394eeaa859f29613573e39813103ea3c725ef58bfe1843732c976a2cf9f60f",
     "infra/docker/Dockerfile": "576470762515599a7e9e40090f4d6556eb055154d4e2ef6443e2b1a07ddd7aca",
-    "infra/docker/Dockerfile.dockerignore": "6a475645d852465e4172d3a005e1e952d74004d323dec41a650e959ba773a256",
+    "infra/docker/Dockerfile.dockerignore": "5e8d2064a1908e53550a995be34203da8161136b0bd58628a042fbd68612c420",
     "infra/docker/README.md": "8355b6cf2bea57f072a689da6a4c3e4979cfd3da26c87f585a728c42972fb996",
     "infra/docker/apache-ztp.conf": "616629333ac16e4bc0c076a499d98864959372b5a24bee3c0d4257c1aa9d15fb",
     "infra/docker/compose.yaml": "2a4964d1730e5c779a5bb3f376c7f734d006ed2ae3abdb280201562526d60f2b",
@@ -663,7 +636,7 @@
     "test_cases.test_public_project_fixture_workflow": "aae51daa9f67eedd7701764289517c41defe6f264c48268e92faded9ee60849d",
     "test_cases.test_public_publication_contract": "3bc97396dd627830080b3bfcb0b3a340ce6cd9d19fdb377983edd26ca152db64",
     "test_cases.test_public_publication_workflow": "a977719b7857eb760e2e7ee83c6c5907de019d21abc9d8c693b4f53be985ea42",
-    "test_cases.test_public_repository_contract": "06c913dd6f232a0e9ae89fb00c7b789c3798f2c7d468825b7ad6406d1d28f5c7",
+    "test_cases.test_public_repository_contract": "78b385437de4a198a168be37d3b39cf8008a011af912ad950d6e6be8ef8a34ed",
     "test_cases.test_public_s_phase_contract": "78c1f2207f7b7d8a461ed414eae9bb16a803a9acc4dd8f86e3f1aad81aaf9e04",
     "test_cases.test_public_s_phase_workflow": "d0b3845269e8b99a6390f4b36da5ea11726c9edfaa9fd4dfc6d7a5522b4d77e3",
     "test_cases.test_qos_evpn_uplink_generation": "4fccbd6bd2aa1d7eb26a12d0bca4bab305ae036d19d13138bebd5b570088ceb7",
@@ -680,7 +653,7 @@
     "test_cases.test_xlsx_zero_row_fail_closed": "81aca85bd37299734ee0f058abb2d20b973a2564a43046c4e3a6d115e033f1f6",
     "test_cases.test_xlsx_zero_row_workflow": "5b8e2b66b4f98db1cf7d86276db7c7969c0072f4c0015d57d56d812cd20653ce",
     "test_cases.test_ztp_applied_receipt": "0566b7d349c5ff2a5d3d294abd7137b1f45a757f48e85975211c0dc2c0c0dc56",
-    "test_cases.test_ztp_container_runtime": "7c8501d117f5f667f580d82f9da5e9fd44c1796f99fc5ef08052720f55c91c1e",
+    "test_cases.test_ztp_container_runtime": "6f40b18ffcda4aaffc579866b182a458b7d07fdec9e7f636483a8bd515bc5e88",
     "test_cases.test_ztp_group_handoff": "8db38c7ac6060ba28ec1530e02baac81a1156c86d53c3b0ba4cfd85d809caffd",
     "test_cases.test_ztp_group_handoff_display": "e12e5ceaa6d6c782c08b8cae1d2e8ec5c30d13c8cb120f4b705f78445cf839ce",
     "test_cases.test_ztp_http_identity_binding": "304c24916962898a69b2f09d185cbae7a2b56d18777c23905f3ffe04f4581951",
