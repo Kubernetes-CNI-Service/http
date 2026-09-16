@@ -864,3 +864,68 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 前置条件：绑定的 macOS/arm64/CPython 3.9 主机与专用本地会话；没有不受信任的同 UID watch、IDE agent、cron、测试或调试进程。正式 runner 必须在允许 `/usr/bin/sandbox-exec` 应用子 profile 的非嵌套 sandbox 环境运行。只记录脱敏 UID、OS/Python/sandbox identity 与 allowlisted 进程摘要，不保存完整 argv、环境、项目内容或凭据。
 - 步骤与预期：先核对同 UID 进程摘要，再在允许 `/usr/bin/sandbox-exec` 建立顶层 profile 的非嵌套环境中执行正式 full/check/list/list-suites/repository/no-approve 链。保存 archive 的 dev/ino/mode/nlink/size/SHA-256、每个 fresh snapshot 与 `PYTHONHOME` 的 identity、精确三类父进程 loopback scope 的 `/usr/sbin/sshd` identity、临时 key/config/manifest/log 的持久 held identity、经 held root dirfd 对 PID file 执行的短持有 `NOFOLLOW` 双 `pread`/`fstat` 证据、父进程真实 KEX、child exact-seven FD 集合、fixture subtree 写入与重命名拒绝、完整 KnownHostsCommand 正负矩阵、daemon process-group 回收、退出码、ledger 与最终 clean tree；任何意外同 UID 进程、sandbox 不可用、依赖/ABI 漂移、ownership 漂移、daemon 未回收或临时对象残留都使本次证据无效，不能回退或手工批准。
 - 清理与风险：确认所有 archive/snapshot/`PYTHONHOME`/loopback fixture FD 已关闭、受管 sshd process group 已回收且随机 state root 已删除；异常时终止本次证明、以有界 TERM→KILL 流程回收受管 daemon、清理受控临时目录，并在新的专用会话重跑。sshd 不在 child sandbox 内，但该自动化场景只使用 `127.0.0.1` loopback、ephemeral port、临时 key 与禁用交互认证的固定配置，属于非破坏性本机证明；它不发送外部网络流量、不读取真实凭据，也不修改系统 sshd 配置、服务或状态。独立恶意同 UID 进程仍可能在 transient named archive window 内预先取得 writable FD，这是用户明确接受且自动化不覆盖的剩余风险；root/ptrace 或内核级攻击同样不在该证明边界内。
+
+## TC-REAL-FINISH-NATIVE-001 — Native finished-project 完整归档与 stop-only
+
+- 状态：**NOT RUN / REAL_ENV REQUIRED**。仅在可回滚的 Ubuntu 22.04/24.04 Native 管理 VM 上执行；
+  项目须已通过正式 load，Apache、DHCP、Monitor 与 worker 均健康。先冻结 exact source/release/setup、
+  服务 PID/argv、DHCP leases、项目树、日志、`/var/lib/http-ztp-finish` 与可用空间证据。
+- 步骤与预期：先执行只读 `plan`，再以同一 transaction 执行 finish；在 pre-stop 完成后制造一项
+  项目输出和一项日志变化。证明 pending 在共享 deployment lock 内先提交，`13-unload.py --stop-only`
+  只停止四类 writer，final delta 精确记录 create/replace/delete，最终 bundle 可重验且状态为
+  `FINISHED_BACKUP_VERIFIED_RUNTIME_STOPPED`。项目、publication、DHCP 文件、软件包与 infra 均保留；
+  unsetup 只作为未执行的精确建议输出。
+- 证据、清理与风险：保存脱敏 argv/exit、阶段 receipt、服务前后状态、bundle size/SHA-256、component
+  manifest、delta inventory、权限与 deletion plan；不得保存密钥、token 或密码明文。测试后只按受管
+  setup/load 流程恢复 VM 快照，不手工清 pending/lock；错误停止真实服务会中断 ZTP，禁止在生产首测。
+
+## TC-REAL-FINISH-DOCKER-001 — Docker identity-bound deactivate 与持久状态保留
+
+- 状态：**NOT RUN / REAL_ENV REQUIRED**。一次性 Ubuntu 24.04 local-rootful Docker VM，contract-3
+  容器已正式 deploy/load；记录 immutable container/image ID、labels、environment、所有 bind、Supervisor
+  child、activation/precommit、项目与 `/var/lib/http-ztp-finish` 的 stat/hash。不得在外来同名容器上执行。
+- 步骤与预期：验证 Compose 与 plain-run 均只有一个宿主/容器同路径
+  `/var/lib/http-ztp-finish` RW bind；运行 plan/finish，确认 `deploy.sh stop <transaction>` 只对已重验的
+  immutable ID 调用 hostctl deactivate。Supervisor 业务服务停止，activation/precommit 清除；控制容器、
+  image、所有 bind 数据与 finish receipt 保留。逐项替换 CID、managed/http-root label、finish bind source/
+  destination/RW 后重试，必须在首次 stop/clear 前 fail closed。
+- 证据、清理与风险：保存脱敏 inspect、mount、Supervisor、receipt、bundle SHA 与 stop 时间线；不保存
+  auth/cache payload。每个负例从 VM 快照恢复；成功案例只在人工审核后可另行执行建议的 `deploy.sh down`，
+  finish 自身不得执行。容器身份判断错误会停止错误服务，只允许在隔离 VM 验证。
+
+## TC-REAL-FINISH-RELAY-001 — finished bundle 可信中转与本机 import
+
+- 状态：**NOT RUN / REAL_ENV REQUIRED**。准备不可由本机直连的隔离管理 VM、可信中转机和 macOS 审阅机；
+  三端时钟、平台、可用空间和目标路径已记录，传输只使用受控临时目录。
+- 步骤与预期：在管理 VM 完成并重验 bundle；逐跳复制到中转机和本机，每跳记录稳定 reopen 后的 size/
+  SHA-256，不解包、不重打包。macOS 先 review-only，再显式 `--finish` 发布到不可变
+  `Finished-projects/<project>/<record-id>`，确认 reconstructed-final 与冻结 inventory 一致、同 bundle 幂等，
+  单字节篡改或同 record ID 异内容均拒绝且不降级 legacy import。
+- 证据、清理与风险：保存三跳摘要、import report、inventory/mode 与无 Git/upload/sync 泄漏证明；删除
+  中转和本机临时副本但保留受管 finished record。传输对象含私有配置/密码散列，必须使用 ACL 受限路径，
+  不得上传公共制品库或记录 payload 内容。
+
+## TC-REAL-FINISH-RESUME-001 — 阶段故障恢复不重复停止或发布
+
+- 状态：**NOT RUN / REAL_ENV REQUIRED**。在上述 Native 与 Docker disposable VM 各执行一次；为每个阶段
+  准备可审计的一次性 failpoint，先记录服务、component inode/SHA、pending 与 completed receipt。
+- 步骤与预期：分别在 pre-stop archive、pending commit、runtime stop、final delta 和 bundle finalize 后
+  中断进程/SSH；只用原 transaction ID 执行 resume。已提交 component 与最终 bundle 必须逐字节复用，
+  stop 事件只发生一次，no-replace 发布不覆盖既存对象；其他 transaction 必须报告 owner 后阻断。
+  bundle 已发布但 pending 未清的案例只能重验 bundle/runtime 后清理 pending。
+- 证据、清理与风险：保存每次故障前后阶段 JSON、inode/size/SHA、stop counter、服务状态和 resume 输出；
+  不手工改 receipt 或 ledger。每个 failpoint 从快照恢复，确认无临时对象、锁 holder 或错误运行态；断电/
+  kill 可能延长停机，禁止在生产或无回滚环境执行。
+
+## TC-REAL-FINISH-LARGE-001 — 大项目容量预算与有界停机窗口
+
+- 状态：**NOT RUN / REAL_ENV REQUIRED**。一次性 Ubuntu 管理 VM，使用不含真实秘密的代表性大项目副本，
+  覆盖大型 `99-output-*`、backup、日志和可选 shared artifact；记录文件系统类型、free blocks/inodes、吞吐、
+  项目精确 tree hash 和服务基线。
+- 步骤与预期：先制造低于所需 staging+final reserve 的容量，plan/finish 必须在首个正式 component 写入和
+ 任何 stop 前零写入拒绝；恢复足够容量后运行完整 finish，证明大体积 pre-stop archive 在服务在线时完成，
+  停机窗口只含 pending/stop/delta/final verification。显式 include 与默认 inventory-only 两种 shared artifact
+  模式分别核对；临时双份、最终 size 与预测误差均记录。
+- 证据、清理与风险：保存脱敏容量估算、df/statvfs、各阶段时长、bundle/component size/SHA、writer 停止
+  窗口与最终空间；不保存大 payload 内容。删除仅测试生成的私有 stage/bundle 并恢复 VM 快照，确认项目和
+  服务基线；容量耗尽可能影响宿主其他服务，必须使用独立文件系统/VM，禁止在共享管理服务器执行。

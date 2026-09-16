@@ -86,6 +86,10 @@ def validate_runtime_options(
     args: argparse.Namespace, runtime_backend: ServiceRuntimeBackend,
 ) -> None:
     """Prevent a Supervisor container from invoking host systemd teardown."""
+    if getattr(args, "stop_only", False) and runtime_backend.name == "supervisor":
+        raise UnloadError(
+            "Supervisor/container stop-only 必须由 infra/docker/deploy.sh stop 管理"
+        )
     if runtime_backend.name == "supervisor" and args.teardown_infra:
         raise UnloadError(
             "Supervisor/container backend 不支持 --teardown-infra；"
@@ -485,6 +489,15 @@ def teardown_infra(*, dry_run: bool) -> None:
 def confirm(args: argparse.Namespace, project: Path | None) -> bool:
     if args.yes or args.dry_run:
         return True
+    if getattr(args, "stop_only", False):
+        print("\n即将只停止管理服务器 ZTP 运行服务：")
+        print("  - 停止 ZTP monitor、worker、isc-dhcp-server 和 apache2")
+        print("  - 保留 DHCP 文件、publication、setup 链接、项目数据和已安装软件")
+        print(f"  - 项目：{project or '未检测到活动项目'}")
+        try:
+            return input("\n输入 yes 继续 [no]：") == "yes"
+        except EOFError:
+            return False
     print("\n即将撤销管理服务器 ZTP 运行态：")
     print("  - 停止 ZTP monitor、isc-dhcp-server 和 apache2")
     print("  - 删除 load 管理的 /etc/dhcp 配置副本")
@@ -511,6 +524,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("-y", "--yes", action="store_true", help="不询问，直接执行")
     parser.add_argument("--dry-run", action="store_true", help="只显示将执行的动作")
     parser.add_argument(
+        "--stop-only", action="store_true",
+        help="只停止受管服务；保留 DHCP/publication/setup 链接和所有项目数据",
+    )
+    parser.add_argument(
+        "--finish-transaction", metavar="ID",
+        help="仅供 finish-project.py：绑定同一 durable finish-pending transaction",
+    )
+    parser.add_argument(
         "--force-dhcp", action="store_true",
         help="即使 /etc/dhcp 文件与当前输出不同也删除（可能删除非 load 配置）",
     )
@@ -522,7 +543,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--teardown-infra", action="store_true",
         help="执行 infra-teardown.sh，回滚配置并卸载 infra 记录的软件",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.stop_only and (
+        args.force_dhcp or args.clear_ztp_status or args.teardown_infra
+    ):
+        parser.error(
+            "--stop-only 不能与 --force-dhcp、--clear-ztp-status 或 "
+            "--teardown-infra 组合"
+        )
+    if args.finish_transaction and not args.stop_only:
+        parser.error("--finish-transaction 只能与 --stop-only 组合")
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -537,18 +568,22 @@ def main(argv: list[str] | None = None) -> int:
         runtime_backend = service_runtime_backend()
         validate_runtime_options(args, runtime_backend)
 
-        with deployment_lock(HTTP_ROOT, dry_run=args.dry_run) as lock_descriptor:
+        with deployment_lock(
+            HTTP_ROOT, dry_run=args.dry_run,
+            finish_transaction_id=args.finish_transaction,
+        ) as lock_descriptor:
             if not args.dry_run:
                 # Confirmation intentionally happens before locking; re-resolve
                 # after acquisition so no stale active-project snapshot is used.
                 project = resolve_project(args.project)
-                unmanaged = unmanaged_dhcp_runtime_files()
-                if unmanaged and not args.force_dhcp:
-                    raise UnloadError(
-                        "DHCP 运行文件与当前 load 输出不一致；"
-                        "未停止服务也未删除任何文件："
-                        + ", ".join(str(path) for path in unmanaged)
-                    )
+                if not args.stop_only:
+                    unmanaged = unmanaged_dhcp_runtime_files()
+                    if unmanaged and not args.force_dhcp:
+                        raise UnloadError(
+                            "DHCP 运行文件与当前 load 输出不一致；"
+                            "未停止服务也未删除任何文件："
+                            + ", ".join(str(path) for path in unmanaged)
+                        )
 
             stop_monitor(
                 project, dry_run=args.dry_run,
@@ -560,30 +595,36 @@ def main(argv: list[str] | None = None) -> int:
             stop_services(
                 dry_run=args.dry_run, runtime_backend=runtime_backend,
             )
-            remove_ztp_prefix_publication(dry_run=args.dry_run)
-            retained = remove_dhcp_runtime_files(
-                force=args.force_dhcp, dry_run=args.dry_run
-            )
-            remove_project_links(
-                project, dry_run=args.dry_run,
-                deployment_lock_descriptor=lock_descriptor,
-            )
-            if args.clear_ztp_status:
-                clear_ztp_status(project, dry_run=args.dry_run)
-            if args.teardown_infra:
-                teardown_infra(dry_run=args.dry_run)
-                # infra teardown may restart a retained pre-existing Apache.
-                stop_services(
-                    dry_run=args.dry_run,
-                    runtime_backend=runtime_backend,
+            retained: list[Path] = []
+            if not args.stop_only:
+                remove_ztp_prefix_publication(dry_run=args.dry_run)
+                retained = remove_dhcp_runtime_files(
+                    force=args.force_dhcp, dry_run=args.dry_run
                 )
+                remove_project_links(
+                    project, dry_run=args.dry_run,
+                    deployment_lock_descriptor=lock_descriptor,
+                )
+                if args.clear_ztp_status:
+                    clear_ztp_status(project, dry_run=args.dry_run)
+                if args.teardown_infra:
+                    teardown_infra(dry_run=args.dry_run)
+                    # infra teardown may restart a retained pre-existing Apache.
+                    stop_services(
+                        dry_run=args.dry_run,
+                        runtime_backend=runtime_backend,
+                    )
 
         if retained:
             raise UnloadError(
                 "以下 DHCP 文件因内容不匹配而保留："
                 + ", ".join(str(path) for path in retained)
             )
-        if args.dry_run:
+        if args.stop_only and args.dry_run:
+            ok("stop-only dry-run 完成；未修改管理服务器")
+        elif args.stop_only:
+            ok("受管 ZTP 运行服务已停止；文件、publication、setup 链接和软件均保留")
+        elif args.dry_run:
             ok("dry-run 完成；未修改管理服务器")
         else:
             ok("管理服务器 ZTP 运行态已卸载；项目数据和验证证据已保留")

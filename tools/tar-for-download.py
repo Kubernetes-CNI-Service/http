@@ -202,6 +202,7 @@ def create_day0_archive(args: argparse.Namespace) -> Path:
             )
             if entry_class in {
                 "metadata", "legacy", "runtime-security", "transport-artifact",
+                "finished project history link",
             }:
                 omit(entry_class)
                 return None

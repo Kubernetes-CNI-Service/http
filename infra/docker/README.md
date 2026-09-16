@@ -332,7 +332,9 @@ build 读取源码的整个时段
 
 `load`、`reload-network`、`health`、`status`、`unload` 和 `doctor` 会先核对 contract-3
 managed/HTTP-root labels、唯一精确的 `/var/www/html` RW bind、唯一精确的 `/etc/http-ztp` RO
-auth bind 以及当前规范化环境。配置文件与现有容器不一致时必须执行 `deploy` 重建，不能在旧容器
+auth bind、唯一精确的 `/var/lib/http-ztp-finish` RW bind 以及当前规范化环境。finish authority
+由宿主和容器共享同一个绝对路径，避免外层事务提交 pending 后容器内 stop-only 读到另一份状态。
+配置文件与现有容器不一致时必须执行 `deploy` 重建，不能在旧容器
 上混用新配置。`logs` 和 `down` 仍可用于恢复；`down` 可在精确身份下清理 contract-2 旧容器，
 但不会在其中执行任何代码。所有后续 Docker 操作只使用该次验证取得的 immutable container ID，
 不会跟随被复用的名字。
@@ -400,6 +402,7 @@ image 或 diagnostics；authority 不安全时容器和 Apache fail closed。
 | 宿主目录 | 容器目录 | 内容 |
 |---|---|---|
 | `/var/www/html` | `/var/www/html` | upload 项目、公共代码、生成与发布结果 |
+| `/var/lib/http-ztp-finish` | `/var/lib/http-ztp-finish` | root 私有的 finish pending、阶段 receipt 与恢复 authority |
 | `/var/lib/http-ztp-container/runtime` | `/var/lib/http-ztp` | runtime plan、activation marker |
 | `/var/lib/http-ztp-container/control-auth` | `/etc/http-ztp`（只读） | Monitor Basic 用户 bcrypt 状态 |
 | `/var/lib/http-ztp-container/monitor-auth` | `/var/lib/http-ztp-monitor-auth`（读写） | 持久 helper-status cache、breaker 与固定锁 authority |

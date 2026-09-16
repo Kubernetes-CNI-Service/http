@@ -687,6 +687,8 @@ class ImpactManifestTests(unittest.TestCase):
                 ".github/workflows/tests.yml",
                 ".gitignore",
                 "AGENTS.md",
+                "Finished-projects/.gitignore",
+                "Finished-projects/README.txt",
                 "PUBLIC_REPOSITORY.md",
                 "SECURITY.md",
                 "docs/README.md",

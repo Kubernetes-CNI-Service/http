@@ -30,6 +30,7 @@ services:
       PYTHONDONTWRITEBYTECODE: "1"
     volumes:
       - /var/www/html:/var/www/html
+      - /var/lib/http-ztp-finish:/var/lib/http-ztp-finish
       - /var/lib/http-ztp-container/runtime:/var/lib/http-ztp
       - /var/lib/http-ztp-container/dhcp-etc:/etc/dhcp
       - /var/lib/http-ztp-container/dhcp-lib:/var/lib/dhcp

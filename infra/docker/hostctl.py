@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
@@ -46,6 +47,9 @@ GUARDIAN_INTERVAL = 10
 GUARDIAN_FAILURE_THRESHOLD = 3
 GUARDIAN_HEALTH_TIMEOUT = 12
 SUPERVISOR_COMMAND_TIMEOUT = 8
+FINISH_STATE_ROOT = Path("/var/lib/http-ztp-finish")
+FINISH_PENDING_NAME = "finish-pending.json"
+FINISH_TRANSACTION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 
 
 class GuardianState(NamedTuple):
@@ -959,10 +963,46 @@ def transactional_unload(settings: activate.Settings) -> None:
         raise ControllerError(str(exc)) from exc
 
 
-def deactivate(settings: activate.Settings) -> None:
+def validate_finish_pending(
+    settings: activate.Settings, transaction_id: str,
+) -> dict:
+    if not FINISH_TRANSACTION_RE.fullmatch(transaction_id):
+        raise ControllerError("finish transaction ID is invalid")
+    path = FINISH_STATE_ROOT / FINISH_PENDING_NAME
+    try:
+        metadata = path.lstat()
+        if not path.is_file() or path.is_symlink():
+            raise ControllerError("finish pending authority is not a regular file")
+        if metadata.st_uid != 0 or metadata.st_nlink != 1:
+            raise ControllerError("finish pending authority ownership is invalid")
+        if metadata.st_mode & 0o077:
+            raise ControllerError("finish pending authority permissions are not private")
+        if metadata.st_size > 64 * 1024:
+            raise ControllerError("finish pending authority is too large")
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ControllerError("finish pending authority is missing") from exc
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ControllerError(f"finish pending authority is unreadable: {exc}") from exc
+    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        raise ControllerError("finish pending authority has an invalid schema")
+    if payload.get("transaction_id") != transaction_id:
+        raise ControllerError("finish pending authority belongs to another transaction")
+    if payload.get("runtime") != "docker":
+        raise ControllerError("finish pending authority is not for Docker")
+    if payload.get("project") != settings.project_name:
+        raise ControllerError("finish pending authority project does not match runtime")
+    return payload
+
+
+def deactivate(
+    settings: activate.Settings, *, finish_transaction: Optional[str] = None,
+) -> None:
     lock_error, deployment_lock, _inherited_kwargs = _lock_contract(settings)
     try:
         with deployment_lock(settings.http_root):
+            if finish_transaction is not None:
+                validate_finish_pending(settings, finish_transaction)
             # Deactivate remains available during an intentional image/source
             # drift so an old embedded controller can safely stop services.
             errors = []
@@ -1050,6 +1090,7 @@ def parser() -> argparse.ArgumentParser:
         ),
     )
     result.add_argument("--no-upgrade", action="store_true")
+    result.add_argument("--finish-transaction")
     return result
 
 
@@ -1057,6 +1098,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser().parse_args(argv)
     if args.no_upgrade and args.action != "load":
         parser().error("--no-upgrade is valid only with the load action")
+    if args.finish_transaction and args.action != "deactivate":
+        parser().error("--finish-transaction is valid only with deactivate")
     try:
         settings = activate.Settings.from_environment(os.environ)
         if args.action == "ready":
@@ -1072,7 +1115,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         elif args.action == "unload":
             transactional_unload(settings)
         elif args.action == "deactivate":
-            deactivate(settings)
+            deactivate(settings, finish_transaction=args.finish_transaction)
         elif args.action == "rotate-logs":
             rotate_logs(settings)
         elif args.action == "guardian":

@@ -217,6 +217,12 @@ P_PUBLISHED_V2_REMOTE_REF = "refs/remotes/origin/v2"
 P_HISTORICAL_SELF_SHA256 = (
     "1bb652bb15f97e03e568270a57ee0a56515bc526cecd5034c6a99c031102358e"
 )
+P_HISTORICAL_MODULE_SHA256 = {
+    P_SELF_RECORD_PATH: P_HISTORICAL_SELF_SHA256,
+    "test_cases/test_public_publication_contract.py": (
+        "3bc97396dd627830080b3bfcb0b3a340ce6cd9d19fdb377983edd26ca152db64"
+    ),
+}
 P_V3_FIRST_PARENT_LIMIT = 4096
 P_FORMAL_LOOPBACK_SSHD_RELATIVE = "formal-loopback-sshd"
 P_EXPECTED_FORMAL_LOOPBACK_SSHD_ENV = "HTTP_P_FORMAL_LOOPBACK_SSHD"
@@ -4157,8 +4163,31 @@ def _historical_p_checkout(repository: Path, anchor: str) -> Path:
     return checkout
 
 
-def _run_historical_p_test(repository: Path, anchor: str, fqn: str) -> None:
+def _historical_module_path(
+    repository: Path, record_path: str, historical_sha256: str,
+) -> Path:
+    if P_HISTORICAL_MODULE_SHA256.get(record_path) != historical_sha256:
+        raise AssertionError("unreviewed historical P test module authority")
+    path = repository / record_path
+    try:
+        metadata = path.lstat()
+    except OSError as error:
+        raise AssertionError("historical P test module is unavailable") from error
+    if not stat.S_ISREG(metadata.st_mode):
+        raise AssertionError("historical P test module is not a regular file")
+    return path
+
+
+def _run_historical_p_test(
+    repository: Path, anchor: str, fqn: str,
+    record_path: str, historical_sha256: str,
+) -> None:
     checkout = _historical_p_checkout(repository, anchor)
+    replay_module = _historical_module_path(
+        checkout, record_path, historical_sha256,
+    )
+    if hashlib.sha256(replay_module.read_bytes()).hexdigest() != historical_sha256:
+        raise AssertionError("historical P replay module differs from published V2")
     cache_root = Path(_P_HISTORY_TEMP.name) / "pycache"
     cache_root.mkdir(mode=0o700, exist_ok=True)
     environment = {
@@ -4182,17 +4211,29 @@ def _run_historical_p_test(repository: Path, anchor: str, fqn: str) -> None:
     _assert_clean_and_ledger(checkout, ledger, anchor)
 
 
-def _historical_p_method(method):
+def _historical_p_method(record_path: str, historical_sha256: str):
     """Replay ce21's exact test bytes when the current checkout is a V3 child."""
-    @functools.wraps(method)
-    def wrapper(self, *args, **kwargs):
-        current = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
-        if current == P_HISTORICAL_SELF_SHA256:
-            return method(self, *args, **kwargs)
-        anchor, _chain = _assert_v3_child_authority(ROOT)
-        _run_historical_p_test(ROOT, anchor, self.id())
-        return None
-    return wrapper
+    _historical_module_path(
+        ROOT, record_path, historical_sha256,
+    )
+
+    def decorator(method):
+        @functools.wraps(method)
+        def wrapper(self, *args, **kwargs):
+            selected_module = _historical_module_path(
+                ROOT, record_path, historical_sha256,
+            )
+            current = hashlib.sha256(selected_module.read_bytes()).hexdigest()
+            if current == historical_sha256:
+                return method(self, *args, **kwargs)
+            anchor, _chain = _assert_v3_child_authority(ROOT)
+            _run_historical_p_test(
+                ROOT, anchor, self.id(), record_path, historical_sha256,
+            )
+            return None
+        return wrapper
+
+    return decorator
 
 
 def _assert_clean_and_ledger(
@@ -4276,7 +4317,109 @@ def _full_selection_stdout(manifest: dict, approval_path) -> str:
 
 
 class PublicPublicationWorkflowTests(unittest.TestCase):
-    @_historical_p_method
+    def test_historical_p_dispatch_uses_selected_module_identity(self):
+        contract_path = "test_cases/test_public_publication_contract.py"
+        contract_sha256 = P_HISTORICAL_MODULE_SHA256[contract_path]
+        historical = _git_run(
+            ROOT, ["show", f"{P_PUBLISHED_V2_REMOTE_REF}:{contract_path}"],
+        )
+        self.assertEqual(0, historical.returncode, historical.stderr)
+        self.assertEqual(
+            contract_sha256, hashlib.sha256(historical.stdout).hexdigest(),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory)
+            selected = repository / contract_path
+            selected.parent.mkdir(parents=True)
+            selected.write_bytes(historical.stdout)
+            defining = repository / P_SELF_RECORD_PATH
+            defining.write_bytes(b"hostile defining-module bytes\n")
+            calls = []
+            with mock.patch.object(sys.modules[__name__], "ROOT", repository):
+                @_historical_p_method(contract_path, contract_sha256)
+                def probe(_self):
+                    calls.append("direct")
+
+                probe(self)
+            self.assertEqual(["direct"], calls)
+
+    def test_historical_p_dispatch_rejects_unreviewed_module_authority(self):
+        with self.assertRaisesRegex(
+            AssertionError, "unreviewed historical P test module authority",
+        ):
+            _historical_p_method("AGENTS.md", "0" * 64)
+        with self.assertRaisesRegex(
+            AssertionError, "unreviewed historical P test module authority",
+        ):
+            _historical_p_method(P_SELF_RECORD_PATH, "0" * 64)
+
+    def test_historical_p_replay_rejects_hostile_materialized_module_before_child(self):
+        contract_path = "test_cases/test_public_publication_contract.py"
+        contract_sha256 = P_HISTORICAL_MODULE_SHA256[contract_path]
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory)
+            hostile = checkout / contract_path
+            hostile.parent.mkdir(parents=True)
+            hostile.write_bytes(b"hostile materialized contract module\n")
+            with mock.patch.object(
+                sys.modules[__name__], "_historical_p_checkout",
+                return_value=checkout,
+            ), mock.patch.object(subprocess, "run") as replay:
+                with self.assertRaisesRegex(
+                    AssertionError,
+                    "historical P replay module differs from published V2",
+                ):
+                    _run_historical_p_test(
+                        ROOT, "f" * 40,
+                        "test_cases.test_public_publication_contract."
+                        "PublicPublicationDirectTests."
+                        "test_p_phase_modules_have_one_repository_governance_suite",
+                        contract_path, contract_sha256,
+                    )
+            replay.assert_not_called()
+
+    def test_contract_p_tree_methods_dispatch_but_local_detectors_do_not(self):
+        from test_cases import test_public_publication_contract as direct
+
+        historical_names = (
+            "test_p_phase_modules_have_one_repository_governance_suite",
+            "test_p_phase_public_document_exact8_are_tracked_regular_files",
+            "test_p_phase_v2_worktree_and_index_exclude_exact7_lifecycle_documents",
+            "test_p_phase_manifest_tracks_exact8_and_only_git_public_support",
+            "test_p_phase_static_documents_and_html_seed_are_literal",
+            "test_p_public_markdown_links_resolve_only_to_tracked_regular_files",
+        )
+        local_names = (
+            "test_p_markdown_link_detector_covers_valid_and_hostile_shapes",
+        )
+        with mock.patch.object(
+            sys.modules[__name__], "_assert_v3_child_authority",
+            return_value=("a" * 40, ("b" * 40,)),
+        ) as child_authority, mock.patch.object(
+            sys.modules[__name__], "_run_historical_p_test",
+        ) as replay:
+            for name in historical_names:
+                case = direct.PublicPublicationDirectTests(methodName=name)
+                getattr(case, name)()
+            self.assertEqual(len(historical_names), child_authority.call_count)
+            self.assertEqual(len(historical_names), replay.call_count)
+            for call, name in zip(replay.call_args_list, historical_names):
+                self.assertEqual(ROOT, call.args[0])
+                self.assertEqual("a" * 40, call.args[1])
+                self.assertTrue(call.args[2].endswith("." + name), call.args[2])
+                self.assertEqual(
+                    "test_cases/test_public_publication_contract.py", call.args[3],
+                )
+                self.assertEqual(
+                    P_HISTORICAL_MODULE_SHA256[call.args[3]], call.args[4],
+                )
+            for name in local_names:
+                case = direct.PublicPublicationDirectTests(methodName=name)
+                getattr(case, name)()
+            self.assertEqual(len(historical_names), child_authority.call_count)
+            self.assertEqual(len(historical_names), replay.call_count)
+
+    @_historical_p_method(P_SELF_RECORD_PATH, P_HISTORICAL_SELF_SHA256)
     def test_p_staged_overlay_uses_held_index_blobs_and_rejects_rebinding(self):
         from test_cases import test_public_project_fixture_workflow as fixture
 
@@ -8259,7 +8402,7 @@ class PublicPublicationWorkflowTests(unittest.TestCase):
             ),
         )
 
-    @_historical_p_method
+    @_historical_p_method(P_SELF_RECORD_PATH, P_HISTORICAL_SELF_SHA256)
     def test_formal_python_dependency_capsule_is_literal_and_fail_closed(self):
         module = sys.modules[__name__]
         active_fixture = None
@@ -9175,7 +9318,7 @@ class PublicPublicationWorkflowTests(unittest.TestCase):
             archive_outside.joinpath("sentinel").unlink()
             archive_outside.rmdir()
 
-    @_historical_p_method
+    @_historical_p_method(P_SELF_RECORD_PATH, P_HISTORICAL_SELF_SHA256)
     def test_formal_children_share_one_isolated_dependency_capsule(self):
         module = sys.modules[__name__]
         loopback_scope = getattr(module, "_formal_loopback_sshd_scope")
@@ -16679,7 +16822,7 @@ runpy.run_module('unittest', run_name='__main__', alter_sys=True)
                 os.fstat(archive_fd)
             self.assertEqual([], list(formal_root.iterdir()))
 
-    @_historical_p_method
+    @_historical_p_method(P_SELF_RECORD_PATH, P_HISTORICAL_SELF_SHA256)
     def test_p_phase_exact_commit_runs_catalog_in_private_free_clone(self):
         formal_archive_owner = tempfile.TemporaryDirectory(
             prefix="http-p-formal-archive-owner-",

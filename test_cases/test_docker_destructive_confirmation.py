@@ -184,6 +184,9 @@ class DockerDestructiveConfirmationTests(unittest.TestCase):
                 {"Type": "bind",
                  "Source": "/var/lib/http-ztp-container/monitor-auth",
                  "Destination": "/var/lib/http-ztp-monitor-auth", "RW": True},
+                {"Type": "bind",
+                 "Source": "/var/lib/http-ztp-finish",
+                 "Destination": "/var/lib/http-ztp-finish", "RW": True},
             ],
             "State": {
                 "Running": running, "Restarting": False, "Paused": False,

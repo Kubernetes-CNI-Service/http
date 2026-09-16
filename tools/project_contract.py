@@ -446,6 +446,8 @@ NON_DEPLOYMENT_DIR_NAMES = frozenset({
 })
 REFERENCE_ONLY_SUBTREES = frozenset({"monitor/cabletracker-main"})
 ROOT_LOCAL_PLANNING_DIR_NAMES = frozenset({"outputs"})
+FINISHED_PROJECT_ROOT_NAME = "Finished-projects"
+FINISHED_HISTORY_DIR_NAME = "finished-history"
 ROOT_TRANSFERABLE_DOCUMENT_NAMES = frozenset({
     "AGENTS.md",
     "PUBLIC_REPOSITORY.md",
@@ -640,6 +642,14 @@ def transfer_exclude_reason(path: PurePosixPath | str) -> str | None:
     value = PurePosixPath(path)
     parts = value.parts
     disposition = path_disposition(path)
+    if parts and parts[0] == FINISHED_PROJECT_ROOT_NAME:
+        return "finished project archive"
+    if (
+        len(parts) >= 3
+        and parts[0] == "DAY0-Prepare"
+        and parts[2] == FINISHED_HISTORY_DIR_NAME
+    ):
+        return "finished project history link"
     if disposition == "reference-only":
         return "reference-only input"
     if disposition == "nondeployment":
@@ -708,6 +718,7 @@ def rsync_excludes() -> tuple[str, ...]:
         ".DS_Store", "._*", "~$*", "DEPRECATED-*", "deprecated-*", "*.pyc", "*.bak",
         ".git/", ".codex/", ".agents/", ".claude/", ".[Ss][Ss][Hh]/",
         ".codex_tmp*/",
+        "Finished-projects/", "finished-history/",
         "*_副本.*", "*_copy.*", "*_bak.*",
         "__pycache__/", ".pytest_cache/", "test/", "tests/", "test_cases/", "test-results/",
         "ib-tool-Jie/", "ibdiagnet-analyze-tool/",

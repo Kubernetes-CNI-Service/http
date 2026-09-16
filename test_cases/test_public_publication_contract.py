@@ -13,6 +13,8 @@ import subprocess
 import tempfile
 import unittest
 
+from test_cases.test_public_publication_workflow import _historical_p_method
+
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "test_cases/script_test_manifest.json"
@@ -619,21 +621,18 @@ def _assert_local_markdown_links(relative: str, payload: bytes, records) -> None
             if fragment.lower() not in headings:
                 raise AssertionError(f"missing Markdown fragment: {destination}#{fragment}")
 class PublicPublicationDirectTests(unittest.TestCase):
+    @_historical_p_method(
+        "test_cases/test_public_publication_contract.py",
+        "3bc97396dd627830080b3bfcb0b3a340ce6cd9d19fdb377983edd26ca152db64",
+    )
     def test_p_phase_modules_have_one_repository_governance_suite(self):
         manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
         self.assertEqual(expected_p_manifest(), manifest)
-        memberships = {
-            module: [
-                suite["id"] for suite in manifest["test_suites"]
-                if module in suite["tests"]
-            ]
-            for module in P_PHASE_TEST_MODULES
-        }
-        self.assertEqual(
-            {module: ["repository-governance"] for module in P_PHASE_TEST_MODULES},
-            memberships,
-        )
 
+    @_historical_p_method(
+        "test_cases/test_public_publication_contract.py",
+        "3bc97396dd627830080b3bfcb0b3a340ce6cd9d19fdb377983edd26ca152db64",
+    )
     def test_p_phase_public_document_exact8_are_tracked_regular_files(self):
         self.assertEqual(8, len(Q01_PUBLIC_DOCUMENT_PATHS))
         for relative in Q01_PUBLIC_DOCUMENT_PATHS:
@@ -650,6 +649,10 @@ class PublicPublicationDirectTests(unittest.TestCase):
                     hashlib.sha256((ROOT / relative).read_bytes()).hexdigest(),
                 )
 
+    @_historical_p_method(
+        "test_cases/test_public_publication_contract.py",
+        "3bc97396dd627830080b3bfcb0b3a340ce6cd9d19fdb377983edd26ca152db64",
+    )
     def test_p_phase_v2_worktree_and_index_exclude_exact7_lifecycle_documents(self):
         self.assertEqual(7, len(Q05_V2_FORBIDDEN_LIFECYCLE_PATHS))
         for relative in Q05_V2_FORBIDDEN_LIFECYCLE_PATHS:
@@ -706,6 +709,7 @@ class PublicPublicationDirectTests(unittest.TestCase):
                         {lifecycle_root},
                         _present_directory_entries(hostile_root, (lifecycle_root,)),
                     )
+
         self.assertFalse(
             os.path.lexists(ROOT / lifecycle_root),
             "the entire v2 lifecycle prefix must be absent from the worktree",
@@ -739,6 +743,10 @@ class PublicPublicationDirectTests(unittest.TestCase):
             set(), _p_v2_path_violations(set(_manifest_strings(manifest))),
         )
 
+    @_historical_p_method(
+        "test_cases/test_public_publication_contract.py",
+        "3bc97396dd627830080b3bfcb0b3a340ce6cd9d19fdb377983edd26ca152db64",
+    )
     def test_p_phase_manifest_tracks_exact8_and_only_git_public_support(self):
         manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
         self.assertEqual(expected_p_manifest(), manifest)
@@ -755,6 +763,7 @@ class PublicPublicationDirectTests(unittest.TestCase):
             p_manifest_support_violations(swapped),
             "same-count replacement by another safe tracked file must fail",
         )
+
         self.assertNotIn("USER_MANUAL.md", tracked_support)
         self.assertEqual(
             set(Q01_PUBLIC_DOCUMENT_PATHS),
@@ -771,6 +780,10 @@ class PublicPublicationDirectTests(unittest.TestCase):
                     f"tracked_support is ignored: {relative}",
                 )
 
+    @_historical_p_method(
+        "test_cases/test_public_publication_contract.py",
+        "3bc97396dd627830080b3bfcb0b3a340ce6cd9d19fdb377983edd26ca152db64",
+    )
     def test_p_phase_static_documents_and_html_seed_are_literal(self):
         for relative, expected_hash in P_PHASE_STATIC_TARGET_SHA256.items():
             with self.subTest(path=relative):
@@ -813,7 +826,7 @@ class PublicPublicationDirectTests(unittest.TestCase):
         self.assertEqual(P_HTML_FINAL_SHA256, hashlib.sha256(target).hexdigest())
         self.assertNotEqual(seed, target)
 
-    def test_p_public_markdown_links_resolve_only_to_tracked_regular_files(self):
+    def test_p_markdown_link_detector_covers_valid_and_hostile_shapes(self):
         synthetic = {
             "docs/source.md": ("100644", b"# Source\n"),
             "docs/target.md": ("100644", b"# Exact Heading\n"),
@@ -836,6 +849,11 @@ class PublicPublicationDirectTests(unittest.TestCase):
                 "docs/source.md", b"[nonregular](target.md)\n", nonregular,
             )
 
+    @_historical_p_method(
+        "test_cases/test_public_publication_contract.py",
+        "3bc97396dd627830080b3bfcb0b3a340ce6cd9d19fdb377983edd26ca152db64",
+    )
+    def test_p_public_markdown_links_resolve_only_to_tracked_regular_files(self):
         records = _tree_blob_records()
         sources = {
             relative for relative in records

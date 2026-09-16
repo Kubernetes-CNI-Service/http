@@ -35,6 +35,13 @@
         "test_cases.test_deploy_upload_archive",
         "test_cases.test_diagnostic_bundle",
         "test_cases.test_download_cli_contract",
+        "test_cases.test_finished_bundle",
+        "test_cases.test_finish_deployment_interlock",
+        "test_cases.test_finish_project",
+        "test_cases.test_finish_transaction_state",
+        "test_cases.test_finished_project_import",
+        "test_cases.test_finished_project_lifecycle",
+        "test_cases.test_finished_project_rehydrate",
         "test_cases.test_import_from_download_target",
         "test_cases.test_password_update",
         "test_cases.test_predeploy_test_gate",
@@ -54,6 +61,8 @@
         "test_cases.test_control_auth",
         "test_cases.test_docker_destructive_confirmation",
         "test_cases.test_docker_destructive_confirmation_workflow",
+        "test_cases.test_finish_docker_workflow",
+        "test_cases.test_finish_native_workflow",
         "test_cases.test_docker_management_ssh_key",
         "test_cases.test_infra_check_and_manual_reset",
         "test_cases.test_load_release_transaction",
@@ -135,6 +144,8 @@
     ".github/workflows/tests.yml",
     ".gitignore",
     "AGENTS.md",
+    "Finished-projects/.gitignore",
+    "Finished-projects/README.txt",
     "PUBLIC_REPOSITORY.md",
     "SECURITY.md",
     "docs/README.md",
@@ -275,6 +286,10 @@
     "tools/deploy-shared-artifacts.py": "tools/deploy-shared-artifacts.py",
     "tools/deploy-upload-archive.py": "tools/deploy-upload-archive.py",
     "tools/deployment_lock.py": "tools/deployment_lock.py",
+    "tools/finished_bundle.py": "tools/finished_bundle.py",
+    "tools/finish-project.py": "tools/finish-project.py",
+    "tools/finished_project_state.py": "tools/finished_project_state.py",
+    "tools/rehydrate-finished.py": "tools/rehydrate-finished.py",
     "tools/ib-tool-Jie/ib_tool_box/lib/__init__.py": "tools/ib-tool-Jie/ib_tool_box/lib/__init__.py",
     "tools/ib-tool-Jie/ib_tool_box/lib/connection.py": "tools/ib-tool-Jie/ib_tool_box/lib/connection.py",
     "tools/ib-tool-Jie/ib_tool_box/lib/excel.py": "tools/ib-tool-Jie/ib_tool_box/lib/excel.py",
@@ -377,6 +392,8 @@
         "test_cases.test_docker_management_ssh_key",
         "test_cases.test_docker_destructive_confirmation",
         "test_cases.test_docker_destructive_confirmation_workflow",
+        "test_cases.test_finish_docker_workflow",
+        "test_cases.test_finish_native_workflow",
         "test_cases.test_ztp_monitor_watch_runtime_workflow",
         "test_cases.test_xlsx_zero_row_fail_closed",
         "test_cases.test_xlsx_zero_row_workflow"
@@ -473,11 +490,30 @@
       ]
     },
     {
+      "id": "finished_project_lifecycle",
+      "paths": [
+        "tools/finished_bundle.py",
+        "tools/finish-project.py",
+        "tools/finished_project_state.py",
+        "tools/rehydrate-finished.py"
+      ],
+      "tests": [
+        "test_cases.test_finished_bundle",
+        "test_cases.test_finish_deployment_interlock",
+        "test_cases.test_finish_project",
+        "test_cases.test_finish_transaction_state",
+        "test_cases.test_finished_project_import",
+        "test_cases.test_finished_project_lifecycle",
+        "test_cases.test_finished_project_rehydrate"
+      ]
+    },
+    {
       "id": "package_transfer_and_locking",
       "paths": [
         "tools/_package_common.py",
         "tools/deploy-upload-archive.py",
         "tools/deployment_lock.py",
+        "tools/finished_project_state.py",
         "tools/deployment_prewrite_guard.py",
         "tools/import-from-download.py",
         "tools/sync-code.py",
@@ -487,9 +523,13 @@
       "tests": [
         "test_cases.test_ops_deployment_review",
         "test_cases.test_deployment_writer_lock",
+        "test_cases.test_finish_deployment_interlock",
+        "test_cases.test_finish_transaction_state",
         "test_cases.test_deploy_upload_archive",
         "test_cases.test_upload_package_contract",
         "test_cases.test_download_cli_contract",
+        "test_cases.test_finished_project_import",
+        "test_cases.test_finished_project_lifecycle",
         "test_cases.test_import_from_download_target",
         "test_cases.test_predeploy_test_gate",
         "test_cases.test_reference_only_selector_workflow"
@@ -797,6 +837,10 @@
         "infra/*",
         "tools/control-auth.py",
         "tools/deployment_lock.py",
+        "tools/finished_bundle.py",
+        "tools/finish-project.py",
+        "tools/finished_project_state.py",
+        "tools/rehydrate-finished.py",
         "ztp/config/*"
       ],
       "tests": [
@@ -805,7 +849,13 @@
         "test_cases.test_apache_publication_boundary",
         "test_cases.test_flow_release_platform_matrix",
         "test_cases.test_terminal_l2_stp_generation",
-        "test_cases.test_v2_generation_flow"
+        "test_cases.test_v2_generation_flow",
+        "test_cases.test_finished_bundle",
+        "test_cases.test_finish_deployment_interlock",
+        "test_cases.test_finish_project",
+        "test_cases.test_finished_project_import",
+        "test_cases.test_finished_project_lifecycle",
+        "test_cases.test_finished_project_rehydrate"
       ]
     },
     {
@@ -861,7 +911,9 @@
       ],
       "tests": [
         "test_cases.test_docker_destructive_confirmation",
-        "test_cases.test_docker_destructive_confirmation_workflow"
+        "test_cases.test_docker_destructive_confirmation_workflow",
+        "test_cases.test_finish_docker_workflow",
+        "test_cases.test_finish_native_workflow"
       ]
     },
     {
@@ -989,6 +1041,8 @@
         "test_cases.test_shared_artifact_bundle",
         "test_cases.test_upload_package_contract",
         "test_cases.test_download_cli_contract",
+        "test_cases.test_finished_project_import",
+        "test_cases.test_finished_project_lifecycle",
         "test_cases.test_import_from_download_target",
         "test_cases.test_diagnostic_bundle",
         "test_cases.test_predeploy_test_gate",
@@ -1247,6 +1301,16 @@
         "test_cases.test_ztp_service_runtime",
         "test_cases.test_deployment_writer_lock",
         "test_cases.test_upload_package_contract"
+      ]
+    },
+    {
+      "paths": [
+        "Finished-projects/*"
+      ],
+      "tests": [
+        "test_cases.test_finished_project_import",
+        "test_cases.test_finished_project_lifecycle",
+        "test_cases.test_public_repository_contract"
       ]
     },
     {

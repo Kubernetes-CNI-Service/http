@@ -65,6 +65,9 @@ Actions:
             management-server terminal and cannot run unattended
   unload [--yes]
             Clear activation, then run transactional 13-unload --yes
+  stop TRANSACTION_ID
+            Verify the finish transaction and call hostctl deactivate; retain
+            the owned container, image, project data, and persistent binds
   down [--yes]
             Clear activation and remove only the named container; keep data
   health    Run the active-runtime health contract
@@ -586,6 +589,7 @@ clear_activation_for_recreate() {
 prepare_bind_mounts() {
   install -d -m 0755 /var/www/html
   install -d -m 0700 \
+    /var/lib/http-ztp-finish \
     /var/lib/http-ztp-container \
     /var/lib/http-ztp-container/runtime
   install -d -m 0755 \
@@ -1660,6 +1664,7 @@ plain_docker_run() {
     --env HTTP_ZTP_APACHE_LISTENERS=/etc/apache2/conf-enabled/http-ztp-listeners.conf \
     --env PYTHONDONTWRITEBYTECODE=1 \
     --mount type=bind,src=/var/www/html,dst=/var/www/html \
+    --mount type=bind,src=/var/lib/http-ztp-finish,dst=/var/lib/http-ztp-finish \
     --mount type=bind,src=/var/lib/http-ztp-container/runtime,dst=/var/lib/http-ztp \
     --mount type=bind,src=/var/lib/http-ztp-container/dhcp-etc,dst=/etc/dhcp \
     --mount type=bind,src=/var/lib/http-ztp-container/dhcp-lib,dst=/var/lib/dhcp \
@@ -1804,6 +1809,16 @@ run_unload() {
   say "[OK] runtime unloaded; container control plane remains available"
 }
 
+run_finish_stop() {
+  local container_id=$1 transaction_id=$2
+  wait_control_plane recover "$container_id"
+  if ! docker exec "$container_id" /opt/http-ztp/hostctl.py deactivate \
+      --finish-transaction "$transaction_id"; then
+    fail "finish stop-only failed; container and persistent data were retained"
+  fi
+  say "[OK] runtime stopped; container and persistent data remain available"
+}
+
 show_destructive_plan() {
   local action_name=$1 container_id=$2
   say "[PLAN] action=$action_name"
@@ -1903,6 +1918,11 @@ case "$action" in
     elif [[ "$#" != "1" ]]; then
       fail "usage: sudo $0 $action [--yes]"
     fi
+    ;;
+  stop)
+    [[ "$#" == "2" ]] || fail "usage: sudo $0 stop TRANSACTION_ID"
+    [[ "$2" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] ||
+      fail "finish transaction ID is invalid"
     ;;
   -h|--help|help|"")
     [[ "$#" -le 1 ]] || fail "help does not accept additional arguments"
@@ -2023,6 +2043,12 @@ case "$action" in
     container_id=$(owned_container_id true true false)
     confirm_destructive_action unload "$container_id" "$destructive_assume_yes" || exit 0
     run_unload "$container_id"
+    ;;
+  stop)
+    host_preflight
+    load_runtime_env
+    container_id=$(owned_container_id true true false)
+    run_finish_stop "$container_id" "$2"
     ;;
   down)
     host_preflight

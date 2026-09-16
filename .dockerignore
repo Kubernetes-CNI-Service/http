@@ -1,5 +1,9 @@
 **
 
+# Finished records and their DAY0 navigation links are review-only history.
+Finished-projects/**
+**/finished-history/**
+
 # Container lifecycle and resident production trees.  activate.py derives an
 # exact type/target/hash receipt from this curated context at image build time.
 !infra/

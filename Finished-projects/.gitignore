@@ -1,0 +1,6 @@
+# Finished project snapshots can contain private configuration, password hashes,
+# logs and large binary evidence. Keep every imported payload out of Git while
+# retaining this directory's public contract files.
+*
+!.gitignore
+!README.txt

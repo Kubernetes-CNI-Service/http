@@ -32,9 +32,9 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCKER_ROOT = ROOT / "infra/docker"
-PUBLISHED_DOCKER_README_SIZE = 37883
+PUBLISHED_DOCKER_README_SIZE = 38211
 PUBLISHED_DOCKER_README_SHA256 = (
-    "8355b6cf2bea57f072a689da6a4c3e4979cfd3da26c87f585a728c42972fb996"
+    "3c5709c1aa115a36f5ab1e28aea93dfa311b9227d3ea22c32e5f636c65d7abd4"
 )
 
 
@@ -2377,6 +2377,10 @@ build_image
                         "Destination": destination, "RW": writable,
                     },
                     {
+                        "Type": "bind", "Source": "/var/lib/http-ztp-finish",
+                        "Destination": "/var/lib/http-ztp-finish", "RW": True,
+                    },
+                    {
                         "Type": "bind",
                         "Source": "/var/lib/http-ztp-container/control-auth",
                         "Destination": "/etc/http-ztp", "RW": False,
@@ -2442,6 +2446,11 @@ build_image
                 "Type": "bind", "Source": "/var/www/html",
                 "Destination": "/var/www/html", "RW": True,
             }]
+            if contract == "3":
+                mounts.append({
+                    "Type": "bind", "Source": "/var/lib/http-ztp-finish",
+                    "Destination": "/var/lib/http-ztp-finish", "RW": True,
+                })
             if auth:
                 mounts.append({
                     "Type": "bind",
@@ -2485,11 +2494,11 @@ build_image
         missing = record(auth=False)
         mutations.append(missing)
         file_bind = record()
-        file_bind[0]["Mounts"][1]["Source"] += "/control-users.htpasswd"
-        file_bind[0]["Mounts"][1]["Destination"] += "/control-users.htpasswd"
+        file_bind[0]["Mounts"][2]["Source"] += "/control-users.htpasswd"
+        file_bind[0]["Mounts"][2]["Destination"] += "/control-users.htpasswd"
         mutations.append(file_bind)
         duplicate = record()
-        duplicate[0]["Mounts"].append(dict(duplicate[0]["Mounts"][1]))
+        duplicate[0]["Mounts"].append(dict(duplicate[0]["Mounts"][2]))
         mutations.append(duplicate)
         mutations.append(record(monitor=False))
         mutations.append(record(monitor_rw=False))
@@ -2752,6 +2761,8 @@ build_image
             "Mounts": [
                 {"Type": "bind", "Source": "/var/www/html",
                  "Destination": "/var/www/html", "RW": True},
+                {"Type": "bind", "Source": "/var/lib/http-ztp-finish",
+                 "Destination": "/var/lib/http-ztp-finish", "RW": True},
                 {"Type": "bind",
                  "Source": "/var/lib/http-ztp-container/control-auth",
                  "Destination": "/etc/http-ztp", "RW": False},
@@ -3179,6 +3190,10 @@ def monitor_authority_recovery_decision(_payload, _diagnostics):
                     "Destination": "/var/www/html", "RW": True,
                 },
                 {
+                    "Type": "bind", "Source": "/var/lib/http-ztp-finish",
+                    "Destination": "/var/lib/http-ztp-finish", "RW": True,
+                },
+                {
                     "Type": "bind",
                     "Source": "/var/lib/http-ztp-container/control-auth",
                     "Destination": "/etc/http-ztp", "RW": False,
@@ -3243,6 +3258,10 @@ def monitor_authority_recovery_decision(_payload, _diagnostics):
                     {
                         "Type": "bind", "Source": "/var/www/html",
                         "Destination": "/var/www/html", "RW": True,
+                    },
+                    {
+                        "Type": "bind", "Source": "/var/lib/http-ztp-finish",
+                        "Destination": "/var/lib/http-ztp-finish", "RW": True,
                     },
                     {
                         "Type": "bind",

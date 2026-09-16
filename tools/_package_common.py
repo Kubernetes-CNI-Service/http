@@ -25,6 +25,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 
 from project_contract import (
+    FINISHED_HISTORY_DIR_NAME,
     is_manual_backup_name,
     is_tools_deployable_file,
     path_disposition,
@@ -710,6 +711,8 @@ def classify_project_entry(relative: PurePosixPath | str) -> str:
         return "project-root"
     if any(part == ".DS_Store" or part.startswith("._") for part in path.parts):
         return "metadata"
+    if path.parts[0] == FINISHED_HISTORY_DIR_NAME:
+        return "finished project history link"
     if path.parts[0] in PROJECT_LEGACY_DIRS:
         return "legacy"
     if path.name == MANAGEMENT_PUBKEY_MARKER:
@@ -1282,6 +1285,7 @@ class PackageFilter:
                 return None
             if classify_project_entry(PurePosixPath(name).name) in {
                 "metadata", "runtime-security", "transport-artifact",
+                "finished project history link",
             }:
                 self.reject(info, "project metadata/transport artifact")
                 return None
@@ -1429,6 +1433,7 @@ class PackageFilter:
             parts[:len(project_parts)] == project_parts
             and classify_project_entry(project_relative) in {
                 "metadata", "legacy", "runtime-security", "transport-artifact",
+                "finished project history link",
             }
         ):
             self.reject(info, "non-deployable project entry")

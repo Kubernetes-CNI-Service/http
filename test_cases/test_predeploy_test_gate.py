@@ -194,7 +194,7 @@ class GateCommandTests(unittest.TestCase):
             for completed in results:
                 self.assertEqual(0, completed.returncode)
                 self.assertEqual(
-                    "impact manifest and 120 scripts are approved\n",
+                    "impact manifest and 124 scripts are approved\n",
                     completed.stdout,
                 )
                 self.assertEqual("", completed.stderr)

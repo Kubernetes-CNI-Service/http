@@ -30,6 +30,8 @@ CONTAINER_NAME = "http-ztp"
 MANAGED_LABEL = "com.nvidia.http-ztp.managed"
 HTTP_ROOT_LABEL = "com.nvidia.http-ztp.http-root"
 HTTP_ROOT = Path("/var/www/html")
+FINISH_STATE_HOST_ROOT = Path("/var/lib/http-ztp-finish")
+FINISH_STATE_CONTAINER_ROOT = Path("/var/lib/http-ztp-finish")
 CONTROL_AUTH_SOURCE = HERE.parents[1] / "tools/control-auth.py"
 CONTROL_AUTH_HOST_DIRECTORY = Path("/var/lib/http-ztp-container/control-auth")
 CONTROL_AUTH_HOST_FILE = CONTROL_AUTH_HOST_DIRECTORY / "control-users.htpasswd"
@@ -771,6 +773,26 @@ def inspect_owned_container(
     ):
         raise HostLockError(
             "Docker container requires one exact /var/www/html RW bind"
+        )
+    finish_state_mounts = related_mounts(
+        FINISH_STATE_HOST_ROOT, FINISH_STATE_CONTAINER_ROOT,
+    )
+    if image_contract == LEGACY_CLEANUP_IMAGE_CONTRACT:
+        if finish_state_mounts:
+            raise HostLockError(
+                "legacy image contract 2 has a non-canonical finish-state bind"
+            )
+    elif len(finish_state_mounts) != 1 or not (
+        finish_state_mounts[0].get("Type") == "bind"
+        and finish_state_mounts[0].get("Source")
+        == os.fspath(FINISH_STATE_HOST_ROOT)
+        and finish_state_mounts[0].get("Destination")
+        == os.fspath(FINISH_STATE_CONTAINER_ROOT)
+        and finish_state_mounts[0].get("RW") is True
+    ):
+        raise HostLockError(
+            "Docker container requires one exact persistent finish-state RW "
+            "bind at /var/lib/http-ztp-finish"
         )
     auth_mounts = related_mounts(
         CONTROL_AUTH_HOST_DIRECTORY, CONTROL_AUTH_CONTAINER_DIRECTORY,

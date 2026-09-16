@@ -10,6 +10,11 @@ from pathlib import Path
 import stat
 from typing import Iterator
 
+if __package__:
+    from .finished_project_state import FinishStateError, assert_writer_allowed
+else:  # direct script import from the tools directory
+    from finished_project_state import FinishStateError, assert_writer_allowed
+
 
 LOCK_FD_ENV = "HTTP_DEPLOYMENT_LOCK_FD"
 
@@ -122,6 +127,7 @@ def release_lock_descriptor(descriptor: int | None) -> None:
 @contextmanager
 def deployment_lock(
     http_root: str | Path, *, dry_run: bool = False,
+    finish_transaction_id: str | None = None,
 ) -> Iterator[int | None]:
     """Hold the workspace lock, reusing only a validated inherited lock FD.
 
@@ -150,6 +156,13 @@ def deployment_lock(
         except BlockingIOError as exc:
             raise DeploymentLockError(_busy_lock_message(lock_path)) from exc
     try:
+        if not dry_run:
+            try:
+                assert_writer_allowed(
+                    finish_transaction_id=finish_transaction_id,
+                )
+            except FinishStateError as exc:
+                raise DeploymentLockError(str(exc)) from exc
         yield descriptor
     finally:
         if inherited:
