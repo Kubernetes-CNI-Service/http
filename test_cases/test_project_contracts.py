@@ -4880,29 +4880,66 @@ class MonitorContractTests(unittest.TestCase):
         self.assertIn('<span class="i-down">(1 down)</span>', card)
 
     def test_switch_status_use_columns_follow_displayed_percentage_thresholds(self):
-        expected = {
-            30: ("30%", "use-ok"),
-            31: ("31%", "use-warn"),
-            74: ("74%", "use-warn"),
-            75: ("75%", "use-crit"),
-        }
-        for value, result in expected.items():
-            with self.subTest(value=value):
-                self.assertEqual(result, self.monitor.use_percent_display(value))
-
-        switch = self.monitor.parse_info_file(
-            "EXAMPLE-Leaf01", "Device: EXAMPLE-Leaf01\nSwitch Type: ETH (VX)\n",
+        displayed_threshold_cases = (
+            (44.49, ("44%", "use-ok")),
+            (44.5, ("44%", "use-ok")),
+            (44.5001, ("45%", "use-warn")),
+            (74.5, ("74%", "use-warn")),
+            (75.0, ("75%", "use-crit")),
+            (75.5, ("76%", "use-crit")),
         )
-        switch.update({
-            "cpu_use": 30,
-            "mem_use": 31,
-            "disk_use": {"/": 74, "/var": 75},
-        })
-        row = self.monitor.render_sw_list_row(switch)
-        self.assertIn('<span class="use-ok">30%</span>', row)
-        self.assertIn('<span class="use-warn">31%</span>', row)
-        self.assertIn('<span class="disk-use-item use-warn">{ /: 74% }</span>', row)
-        self.assertIn('<span class="disk-use-item use-crit">{ /var: 75% }</span>', row)
+        for value, result in displayed_threshold_cases:
+            with self.subTest(value=value):
+                self.assertEqual(
+                    result,
+                    self.monitor.use_percent_display(value, warn=45),
+                )
+
+        self.assertEqual(
+            '<span class="use-warn">31%</span>',
+            self.monitor.render_use_percent(31, metric="cpu"),
+        )
+        self.assertEqual(
+            '<span class="use-ok">44%</span>',
+            self.monitor.render_use_percent(44, metric="memory"),
+        )
+        with self.assertRaises(TypeError):
+            self.monitor.render_use_percent(31)
+        with self.assertRaises(ValueError):
+            self.monitor.render_use_percent(31, metric="gpu")
+
+        row_cases = (
+            (44, {"/": 44, "/var": 45}, "use-ok", "use-ok", "use-warn"),
+            (45, {"/": 45, "/var": 44}, "use-warn", "use-warn", "use-ok"),
+        )
+        for mem_use, disk_use, mem_class, root_class, var_class in row_cases:
+            with self.subTest(mem_use=mem_use, disk_use=disk_use):
+                switch = self.monitor.parse_info_file(
+                    "EXAMPLE-Leaf01",
+                    "Device: EXAMPLE-Leaf01\nSwitch Type: ETH (VX)\n",
+                )
+                switch.update({
+                    "cpu_use": 31,
+                    "mem_use": mem_use,
+                    "disk_use": disk_use,
+                })
+                row = self.monitor.render_sw_list_row(switch)
+                self.assertIn('<span class="use-warn">31%</span>', row)
+                self.assertIn(
+                    f'<span class="{mem_class}">{mem_use}%</span>', row,
+                )
+                self.assertIn(
+                    '<span class="disk-use-item">'
+                    f'{{ /: <span class="{root_class}">'
+                    f'{disk_use["/"]}%</span> }}</span>',
+                    row,
+                )
+                self.assertIn(
+                    '<span class="disk-use-item">'
+                    f'{{ /var: <span class="{var_class}">'
+                    f'{disk_use["/var"]}%</span> }}</span>',
+                    row,
+                )
 
     def test_switch_status_temperature_uses_collected_max_crit_and_state(self):
         table = """\

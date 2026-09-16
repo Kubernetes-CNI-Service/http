@@ -3402,22 +3402,38 @@ def render_temperature_values(details: list[dict], values: list[float]) -> str:
     )
 
 
-def use_percent_display(value: float | int) -> tuple[str, str]:
-    """Return the displayed percentage and its shared utilization class."""
+USE_PERCENT_THRESHOLDS = {
+    "cpu": (31, 75),
+    "memory": (45, 75),
+    "disk": (45, 75),
+}
+
+
+def use_percent_display(
+    value: float | int,
+    *,
+    warn: int,
+    crit: int = 75,
+) -> tuple[str, str]:
+    """Return the displayed percentage and its configured utilization class."""
     text = f"{float(value):.0f}%"
     displayed = int(text[:-1])
-    if displayed >= 75:
+    if displayed >= crit:
         return text, "use-crit"
-    if displayed >= 31:
+    if displayed >= warn:
         return text, "use-warn"
     return text, "use-ok"
 
 
-def render_use_percent(value: Optional[float | int]) -> str:
-    """Render CPU/memory utilization using the list-view thresholds."""
+def render_use_percent(value: Optional[float | int], *, metric: str) -> str:
+    """Render utilization using the threshold policy for one known metric."""
     if value is None:
         return "—"
-    text, css_class = use_percent_display(value)
+    try:
+        warn, crit = USE_PERCENT_THRESHOLDS[metric]
+    except KeyError as exc:
+        raise ValueError(f"unknown utilization metric: {metric!r}") from exc
+    text, css_class = use_percent_display(value, warn=warn, crit=crit)
     return f'<span class="{css_class}">{text}</span>'
 
 
@@ -3465,8 +3481,8 @@ def render_sw_list_row(sw: dict) -> str:
     )
     cpu_use   = sw.get("cpu_use")
     mem_use   = sw.get("mem_use")
-    cpu_html  = render_use_percent(cpu_use)
-    mem_html  = render_use_percent(mem_use)
+    cpu_html  = render_use_percent(cpu_use, metric="cpu")
+    mem_html  = render_use_percent(mem_use, metric="memory")
     disk_use  = sw.get("disk_use", {})
     disk_paths = sorted(
         disk_use,
@@ -3474,10 +3490,10 @@ def render_sw_list_row(sw: dict) -> str:
     )
     disk_parts = []
     for path in disk_paths:
-        use_text, use_class = use_percent_display(disk_use[path])
+        use_html = render_use_percent(disk_use[path], metric="disk")
         disk_parts.append(
-            f'<span class="disk-use-item {use_class}">'
-            f'{{ {escape(path)}: {use_text} }}</span>'
+            f'<span class="disk-use-item">'
+            f'{{ {escape(path)}: {use_html} }}</span>'
         )
     disk_html = "  ".join(disk_parts) if disk_parts else "—"
     ntp_sync = sw.get("ntp_sync")
