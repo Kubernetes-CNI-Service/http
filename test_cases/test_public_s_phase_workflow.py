@@ -699,14 +699,9 @@ class PublicSPhaseWorkflowTests(unittest.TestCase):
         from test_cases import run_related_tests as governed_runner
 
         head = _run(["git", "rev-parse", "HEAD"], cwd=ROOT)
-        anchor = _run(
-            ["git", "rev-parse", "--verify", "refs/remotes/origin/v2^{commit}"],
-            cwd=ROOT,
-        )
-        self.assertEqual((0, "", ""), (head.returncode, head.stderr, anchor.stderr))
-        self.assertEqual(0, anchor.returncode, anchor.stderr)
+        self.assertEqual((0, ""), (head.returncode, head.stderr))
         current_head = head.stdout.strip()
-        published_v2 = anchor.stdout.strip()
+        published_v2 = publication._resolve_published_v2_anchor(ROOT)
         self.assertNotEqual(published_v2, current_head)
         self.assertEqual(
             (S_COMMIT,), publication._raw_commit_parents(ROOT, published_v2),
@@ -935,6 +930,107 @@ class PublicSPhaseWorkflowTests(unittest.TestCase):
             ),
             tuple(observed),
         )
+
+    def test_v3_genesis_real_entry_distinguishes_published_v2_authority_states(self):
+        """The ordinary genesis entry preserves absent, wrong, and valid authority."""
+        from test_cases import test_public_publication_workflow as publication
+
+        head = _run(["git", "rev-parse", "HEAD"], cwd=ROOT)
+        self.assertEqual(0, head.returncode, head.stderr)
+        current_head = head.stdout.strip()
+        published_v2 = publication._resolve_published_v2_anchor(ROOT)
+
+        def real_case(label: str) -> Path:
+            owner = tempfile.TemporaryDirectory(prefix=f"http-v3-real-{label}-")
+            self.addCleanup(owner.cleanup)
+            repository = Path(owner.name) / "repository"
+            cloned = _run(
+                ["git", "clone", "--quiet", "--no-local", ROOT, repository],
+                cwd=ROOT, timeout=120,
+            )
+            self.assertEqual(0, cloned.returncode, cloned.stderr)
+            checked = _run(
+                ["git", "checkout", "--quiet", "--detach", current_head],
+                cwd=repository,
+            )
+            self.assertEqual(0, checked.returncode, checked.stderr)
+            bound = _run(
+                ["git", "update-ref", publication.P_PUBLISHED_V2_REMOTE_REF,
+                 published_v2],
+                cwd=repository,
+            )
+            self.assertEqual(0, bound.returncode, bound.stderr)
+            return repository
+
+        def invoke_real_entry(repository: Path) -> None:
+            original_root = globals()["ROOT"]
+            globals()["ROOT"] = repository
+            try:
+                self.test_v3_genesis_runs_published_v2_proof_before_child_governance()
+            finally:
+                globals()["ROOT"] = original_root
+
+        negative_cases = (
+            (
+                "missing",
+                None,
+                publication._PublishedV2RefUnavailable,
+                "remote-tracking ref is absent; authenticated fetch required",
+            ),
+            (
+                "wrong-s",
+                S_COMMIT,
+                publication._PublishedV2AuthorityWrong,
+                "not the historical P anchor",
+            ),
+        )
+        for label, authority, exception, message in negative_cases:
+            with self.subTest(authority=label):
+                repository = real_case(label)
+                if authority is None:
+                    changed = _run(
+                        ["git", "update-ref", "-d",
+                         publication.P_PUBLISHED_V2_REMOTE_REF],
+                        cwd=repository,
+                    )
+                else:
+                    changed = _run(
+                        ["git", "update-ref",
+                         publication.P_PUBLISHED_V2_REMOTE_REF, authority],
+                        cwd=repository,
+                    )
+                self.assertEqual(0, changed.returncode, changed.stderr)
+                with self.assertRaisesRegex(exception, message):
+                    invoke_real_entry(repository)
+
+        correct = real_case("correct")
+
+        class CorrectAuthorityReached(Exception):
+            pass
+
+        original_run = subprocess.run
+        proof_fqn = (
+            "test_cases.test_public_publication_workflow."
+            "PublicPublicationWorkflowTests."
+            "test_p_phase_exact_commit_runs_catalog_in_private_free_clone"
+        )
+        proof_command = [
+            sys.executable, "-B", "-m", "unittest", "-v", proof_fqn,
+        ]
+
+        def stop_after_authority(*args, **kwargs):
+            command = args[0] if args else kwargs.get("args")
+            if command == proof_command:
+                self.assertEqual(correct, kwargs.get("cwd"))
+                raise CorrectAuthorityReached
+            return original_run(*args, **kwargs)
+
+        subprocess.run = stop_after_authority
+        try:
+            with self.assertRaises(CorrectAuthorityReached):
+                invoke_real_entry(correct)
+        finally:
+            subprocess.run = original_run
 
     @_historical_s_method
     def test_s_stage_delta_is_exact_and_excludes_deferred_families(self):
