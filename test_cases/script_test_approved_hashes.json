@@ -1,31 +1,4 @@
 {
-  "full_suite_attestation": {
-    "environment": {
-      "container_toplevel_lock_sha256": "3532f5208b462243bab779b01eb4deb21638ac05a9390c17ac997ba8d7f24998",
-      "container_toplevel_versions": [
-        "Jinja2==3.1.6",
-        "openpyxl==3.1.5",
-        "pandas==2.3.3",
-        "PyYAML==6.0.3",
-        "XlsxWriter==3.2.9"
-      ],
-      "machine": "arm64",
-      "platform": "darwin",
-      "python_cache_tag": "cpython-39",
-      "python_executable": "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/bin/python3.9",
-      "python_implementation": "CPython",
-      "python_version": [
-        3,
-        9,
-        6
-      ]
-    },
-    "scenario_coverage": {
-      "root-entrypoint-workflow": "NOT COVERED (requires Linux EUID 0 private namespace)"
-    },
-    "schema_version": 1,
-    "snapshot_sha256": "12d70325c688c23b1241cf92b81041cc324ff955218d6a894da3e564749952c1"
-  },
   "impact_manifest_sha256": "b3bd5315bce55679e9aae86336cee77a86af8d97de9fde9088557719e528a964",
   "schema_version": 1,
   "scripts": {
@@ -665,7 +638,7 @@
     "test_cases.test_public_publication_workflow": "a977719b7857eb760e2e7ee83c6c5907de019d21abc9d8c693b4f53be985ea42",
     "test_cases.test_public_repository_contract": "06c913dd6f232a0e9ae89fb00c7b789c3798f2c7d468825b7ad6406d1d28f5c7",
     "test_cases.test_public_s_phase_contract": "78c1f2207f7b7d8a461ed414eae9bb16a803a9acc4dd8f86e3f1aad81aaf9e04",
-    "test_cases.test_public_s_phase_workflow": "44906f5be3812cc4c6baba37853318db8c39506ae176ddf3b876d5b3020f8f15",
+    "test_cases.test_public_s_phase_workflow": "d0b3845269e8b99a6390f4b36da5ea11726c9edfaa9fd4dfc6d7a5522b4d77e3",
     "test_cases.test_qos_evpn_uplink_generation": "4fccbd6bd2aa1d7eb26a12d0bca4bab305ae036d19d13138bebd5b570088ceb7",
     "test_cases.test_reference_only_path_disposition": "72d6a03a8e5e1464623e1f540128641c9f6cf8dcd36ab283ca15adbb910cc8d5",
     "test_cases.test_reference_only_selector_workflow": "555fecb2632f014176d0790df9a1ac706143161e13118cee038d4a3bd532fe86",
