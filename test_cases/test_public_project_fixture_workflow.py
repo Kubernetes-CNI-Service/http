@@ -25,6 +25,7 @@ from test_cases.test_public_project_fixture_contract import PACKAGING_METHODS
 from test_cases.test_public_clean_clone_contract import (
     EXPECTED_PRIVATE_DOCUMENT_PATHS,
 )
+from test_cases.test_public_publication_workflow import _historical_p_method
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -64,6 +65,18 @@ P_V2_FORBIDDEN_PUBLIC_ROOTS = (
     "Finished-projects",
     "monitor/cabletracker-main",
     "v3-requirements.md",
+)
+HISTORICAL_FIXTURE_RECORD_PATH = "test_cases/test_public_project_fixture_workflow.py"
+HISTORICAL_FIXTURE_SHA256 = (
+    "aae51daa9f67eedd7701764289517c41defe6f264c48268e92faded9ee60849d"
+)
+CURRENT_PRIVATE_PUBLIC_ROOTS = (
+    "monitor/cabletracker-main",
+    "v3-requirements.md",
+)
+CURRENT_LIFECYCLE_PUBLIC_PATHS = (
+    "Finished-projects/.gitignore",
+    "Finished-projects/README.txt",
 )
 P0_PUBLIC_OVERLAY = (
     "test_cases/public_project_fixture.py",
@@ -157,7 +170,7 @@ def _is_deferred_q01(relative: str) -> bool:
         return True
     return any(
         relative == forbidden or relative.startswith(forbidden + "/")
-        for forbidden in P_V2_FORBIDDEN_PUBLIC_ROOTS
+        for forbidden in CURRENT_PRIVATE_PUBLIC_ROOTS
     )
 
 
@@ -954,6 +967,9 @@ class PublicProjectFixtureWorkflowTests(unittest.TestCase):
                 self._copy_from(repository, destination)
             self.assertEqual([], list(destination.iterdir()))
 
+    @_historical_p_method(
+        HISTORICAL_FIXTURE_RECORD_PATH, HISTORICAL_FIXTURE_SHA256,
+    )
     def test_public_candidate_accepts_q01_exact8_and_rejects_deferred_v2(self):
         expected = tuple(P_PUBLISHED_Q01_SHA256)
         self.assertEqual(8, len(expected))
@@ -1045,6 +1061,52 @@ class PublicProjectFixtureWorkflowTests(unittest.TestCase):
                     expected_payloads[relative],
                     (destination / relative).read_bytes(),
                 )
+
+    def test_current_public_candidate_rejects_private_roots_without_partial_output(self):
+        for relative in (
+            "monitor/cabletracker-main/future/child.txt",
+            "v3-requirements.md",
+            "v3-requirements.md/future/child.txt",
+        ):
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory(
+                prefix="http-public-current-private-",
+            ) as directory:
+                base = Path(directory)
+                repository = base / "repository"
+                destination = base / "candidate"
+                repository.mkdir()
+                subprocess.run(
+                    ["git", "init", "--quiet"], cwd=repository,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+                )
+                planted = repository / relative
+                planted.parent.mkdir(parents=True, exist_ok=True)
+                planted.write_bytes(b"private current authority\n")
+                subprocess.run(
+                    ["git", "add", "-f", "--", relative], cwd=repository,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+                )
+                with self.assertRaisesRegex(
+                    AssertionError, "public|reference|v2",
+                ):
+                    self._copy_from(repository, destination)
+                self.assertFalse(destination.exists())
+
+                if relative == "v3-requirements.md":
+                    with mock.patch.object(
+                        sys.modules[__name__],
+                        "CURRENT_PRIVATE_PUBLIC_ROOTS",
+                        ("monitor/cabletracker-main",),
+                    ), mock.patch.object(
+                        sys.modules[__name__],
+                        "P_V2_FORBIDDEN_PUBLIC_ROOTS",
+                        ("monitor/cabletracker-main",),
+                    ):
+                        self._copy_from(repository, destination)
+                    self.assertEqual(
+                        b"private current authority\n",
+                        (destination / relative).read_bytes(),
+                    )
 
     def test_deferred_v2_prefix_siblings_remain_public_candidates(self):
         with tempfile.TemporaryDirectory(prefix="http-public-q01-sibling-") as directory:
@@ -2153,6 +2215,9 @@ class PublicProjectFixtureWorkflowTests(unittest.TestCase):
                         )
         self.assertEqual([], offenders)
 
+    @_historical_p_method(
+        HISTORICAL_FIXTURE_RECORD_PATH, HISTORICAL_FIXTURE_SHA256,
+    )
     def test_exact_five_packaging_methods_pass_in_no_local_public_clone(self):
         self.assertEqual(5, len(EXACT_PACKAGING_TESTS))
         q01_documents = {Path(path) for path in P_PUBLISHED_Q01_SHA256}
@@ -2238,6 +2303,62 @@ class PublicProjectFixtureWorkflowTests(unittest.TestCase):
                 ],
                 cwd=candidate, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 check=True,
+            )
+            subprocess.run(
+                ["git", "clone", "--quiet", "--no-local", candidate, checkout],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+            )
+            result = subprocess.run(
+                [sys.executable, "-B", "-m", "unittest", "-v", *EXACT_PACKAGING_TESTS],
+                cwd=checkout, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, check=False, timeout=180,
+            )
+            combined = result.stdout + result.stderr
+            self.assertEqual(0, result.returncode, combined)
+            self.assertIn("Ran 5 tests", combined)
+            self.assertNotIn(EXPECTED_PRIVATE_SITE_PROJECT, combined)
+
+    def test_current_lifecycle_public_clone_runs_exact_five_packaging_methods(self):
+        self.assertEqual(5, len(EXACT_PACKAGING_TESTS))
+        lifecycle = {Path(path) for path in CURRENT_LIFECYCLE_PUBLIC_PATHS}
+        private = {
+            Path("v3-requirements.md"),
+            Path("monitor/cabletracker-main/README.md"),
+        }
+        with tempfile.TemporaryDirectory(prefix="http-public-current-h27-") as directory:
+            base = Path(directory)
+            candidate = base / "candidate"
+            checkout = base / "checkout"
+            with mock.patch.object(sys.modules[__name__], "ROOT", ROOT):
+                candidate_paths = set(_public_candidate_paths())
+                self.assertEqual(lifecycle, lifecycle.intersection(candidate_paths))
+                self.assertEqual(set(), private.intersection(candidate_paths))
+                _copy_public_candidate(candidate)
+            for relative in lifecycle:
+                self.assertEqual(
+                    (ROOT / relative).read_bytes(), (candidate / relative).read_bytes(),
+                )
+            self.assertEqual(set(), {path for path in private if (candidate / path).exists()})
+            subprocess.run(
+                ["git", "init", "--quiet"], cwd=candidate,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+            )
+            subprocess.run(
+                ["git", "add", "--all"], cwd=candidate,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+            )
+            subprocess.run(
+                ["git", "add", "-f", "--", *P0_PUBLIC_OVERLAY], cwd=candidate,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+            )
+            subprocess.run(
+                [
+                    "git", "-c", "user.name=Current H27 Contract",
+                    "-c", "user.email=current-h27@example.invalid",
+                    "commit", "--quiet", "--no-verify", "-m", "current H27 candidate",
+                ],
+                cwd=candidate, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
             )
             subprocess.run(
                 ["git", "clone", "--quiet", "--no-local", candidate, checkout],

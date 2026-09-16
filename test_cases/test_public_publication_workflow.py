@@ -222,6 +222,9 @@ P_HISTORICAL_MODULE_SHA256 = {
     "test_cases/test_public_publication_contract.py": (
         "3bc97396dd627830080b3bfcb0b3a340ce6cd9d19fdb377983edd26ca152db64"
     ),
+    "test_cases/test_public_project_fixture_workflow.py": (
+        "aae51daa9f67eedd7701764289517c41defe6f264c48268e92faded9ee60849d"
+    ),
 }
 P_V3_FIRST_PARENT_LIMIT = 4096
 P_FORMAL_LOOPBACK_SSHD_RELATIVE = "formal-loopback-sshd"
@@ -4418,6 +4421,42 @@ class PublicPublicationWorkflowTests(unittest.TestCase):
                 getattr(case, name)()
             self.assertEqual(len(historical_names), child_authority.call_count)
             self.assertEqual(len(historical_names), replay.call_count)
+
+    def test_fixture_q01_methods_dispatch_but_child_successors_remain_local(self):
+        from test_cases import test_public_project_fixture_workflow as fixture
+
+        historical_names = (
+            "test_public_candidate_accepts_q01_exact8_and_rejects_deferred_v2",
+            "test_exact_five_packaging_methods_pass_in_no_local_public_clone",
+        )
+        successor_names = (
+            "test_current_public_candidate_rejects_private_roots_without_partial_output",
+            "test_current_lifecycle_public_clone_runs_exact_five_packaging_methods",
+        )
+        with mock.patch.object(
+            sys.modules[__name__], "_assert_v3_child_authority",
+            return_value=("a" * 40, ("b" * 40,)),
+        ) as child_authority, mock.patch.object(
+            sys.modules[__name__], "_run_historical_p_test",
+        ) as replay:
+            for name in historical_names:
+                case = fixture.PublicProjectFixtureWorkflowTests(methodName=name)
+                getattr(case, name)()
+            self.assertEqual(2, child_authority.call_count)
+            self.assertEqual(2, replay.call_count)
+            for call, name in zip(replay.call_args_list, historical_names):
+                self.assertTrue(call.args[2].endswith("." + name), call.args[2])
+                self.assertEqual(
+                    "test_cases/test_public_project_fixture_workflow.py", call.args[3],
+                )
+                self.assertEqual(
+                    P_HISTORICAL_MODULE_SHA256[call.args[3]], call.args[4],
+                )
+        for name in successor_names:
+            self.assertFalse(
+                hasattr(getattr(fixture.PublicProjectFixtureWorkflowTests, name), "__wrapped__"),
+                name,
+            )
 
     @_historical_p_method(P_SELF_RECORD_PATH, P_HISTORICAL_SELF_SHA256)
     def test_p_staged_overlay_uses_held_index_blobs_and_rejects_rebinding(self):
