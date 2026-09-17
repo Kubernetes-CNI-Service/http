@@ -1,31 +1,4 @@
 {
-  "full_suite_attestation": {
-    "environment": {
-      "container_toplevel_lock_sha256": "3532f5208b462243bab779b01eb4deb21638ac05a9390c17ac997ba8d7f24998",
-      "container_toplevel_versions": [
-        "Jinja2==3.1.6",
-        "openpyxl==3.1.5",
-        "pandas==2.3.3",
-        "PyYAML==6.0.3",
-        "XlsxWriter==3.2.9"
-      ],
-      "machine": "arm64",
-      "platform": "darwin",
-      "python_cache_tag": "cpython-39",
-      "python_executable": "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/bin/python3.9",
-      "python_implementation": "CPython",
-      "python_version": [
-        3,
-        9,
-        6
-      ]
-    },
-    "scenario_coverage": {
-      "root-entrypoint-workflow": "NOT COVERED (requires Linux EUID 0 private namespace)"
-    },
-    "schema_version": 1,
-    "snapshot_sha256": "24fb91b1981ae8a40ae353da9049da6d0575e2dd069c7997ae8e4de05d280691"
-  },
   "impact_manifest_sha256": "f1ba11d6dee9488e30b6fb887a5c9ab408eea0f474918825a764db483feb3852",
   "schema_version": 1,
   "scripts": {
@@ -527,7 +500,7 @@
     },
     "ztp/templates/ztp-bootstrap.sh": {
       "canonical": "ztp/templates/ztp-bootstrap.sh",
-      "sha256": "7bbf677af680b01529170a4332dd9d34319e86f357b1d3c11ae9988626737c69"
+      "sha256": "f2ef3d88e3c21609aa9fc671d557ac70a15d6aa0d3e865dc7b3eaca2686bd79f"
     }
   },
   "support": {
@@ -566,7 +539,7 @@
     "docs/architecture/README.md": "153837bcd62f49edf8591ceec8b1b6ccefe9a3b5638a91bed6452ac87264a0e4",
     "docs/deployment/BUNDLE_WORKFLOWS.md": "adab10445e130f3335113c5b35072b81b5d7e10d28d3d1214ace45e120199a1b",
     "docs/deployment/README.md": "f1914024ab82546239f9424abaca44380f22d6c4331c76e3e6ede218333a036e",
-    "docs/operations/README.md": "2e8009aebb94e1098f8e626f60089eb925482edb125cc0679e259493aef97c85",
+    "docs/operations/README.md": "ff254b89ea57ab90ca71a575a912a603c8ae889224420f01271a54a6025ce22b",
     "docs/reference/README.md": "717f023b3016420b61e8889493fd0e2ab9d0106388483025f8d66dee75c75039",
     "docs/validation/README.md": "2a2ee457e01074db1994363a2f8ed62029a9febb14d7c4ea92243b93ec61d98f",
     "examples/public-project/01-global.yaml.example": "539fc9ba304e21c465e2dcbbb1bdb8e2afb1063d421e3f947b05add144733928",
@@ -638,7 +611,7 @@
     "test_cases.test_apache_publication_boundary": "bd11453f333133d55a8a640368b06121ebce65e03d44fda94272248c81ed10de",
     "test_cases.test_backup_auth_transport_workflow": "ce655ad829dc400533f9c7f953c0b6752c1a541974f33a6224f15f2a2a1cdfdd",
     "test_cases.test_bootstrap_config_fetch_contract": "80e6f5058e22c2f7b5afc38984d04635daed2edf4fdc86f5cacf653dbba65dcd",
-    "test_cases.test_bootstrap_config_fetch_workflow": "3828a7603080c503b72691fe19d27e0fc87a91d2501d132c64df6d80855c99a4",
+    "test_cases.test_bootstrap_config_fetch_workflow": "5ee6b791c98a4947739901768236ef578e40280a35dfaaa02cba3aeaa4f55923",
     "test_cases.test_change_aware_test_runner": "afb81a79bd62d56c1016bdb6a02cd634cae8eedd52d6aebde72ed0d4c5dfc0e4",
     "test_cases.test_collector_inventory_pubkey": "e7ba6ebe5f7e17446c2db9eaf0a91ebac09e93b5f35a2b3af340fe3369e1f791",
     "test_cases.test_collector_inventory_pubkey_workflow": "f8aea67074085b49488e58959382e6762d38a4ec3c76b5d94b684d46657d20f5",
@@ -710,7 +683,7 @@
     "test_cases.test_vm_validation_runner": "a06c82020c121098026883ea6031b21f5d0b5578774d2032e31f81b07ecf3a45",
     "test_cases.test_xlsx_zero_row_fail_closed": "81aca85bd37299734ee0f058abb2d20b973a2564a43046c4e3a6d115e033f1f6",
     "test_cases.test_xlsx_zero_row_workflow": "5b8e2b66b4f98db1cf7d86276db7c7969c0072f4c0015d57d56d812cd20653ce",
-    "test_cases.test_ztp_applied_receipt": "0566b7d349c5ff2a5d3d294abd7137b1f45a757f48e85975211c0dc2c0c0dc56",
+    "test_cases.test_ztp_applied_receipt": "404c73ed46c042b35d1a6ed50a1f539c653ccab768df88a4f41ff6b460e6191e",
     "test_cases.test_ztp_container_runtime": "27a969fb326ab3da34670248734cbbb12b08e5bb73635ad7a17f0b6e44e094b8",
     "test_cases.test_ztp_group_handoff": "8db38c7ac6060ba28ec1530e02baac81a1156c86d53c3b0ba4cfd85d809caffd",
     "test_cases.test_ztp_group_handoff_display": "e12e5ceaa6d6c782c08b8cae1d2e8ec5c30d13c8cb120f4b705f78445cf839ce",
