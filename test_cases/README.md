@@ -207,12 +207,19 @@ MAC 出现后，当前 hostname 覆盖旧别名并过滤旧 archive 成员。lea
 
 `test_splitter_profile_breakout.py` 与 `test_splitter_profile_breakout_workflow.py` 约束 REQ-14：
 splitter profile 决定 2x/4x/8x 硬件模式，不能按已连接 lane 数缩小。direct 覆盖 BGP、direct VLAN、
-bond 及混合角色父口；workflow 用已钉 SHA-256 的真实 0915 语料，只匿名化主机名，串联真实 P2P
-推断、物理链路解析、Jinja 渲染和空对端 description patch，要求保留 8x、最小未用 lane 与零虚假
-empty-missing。案例先建立修复前 RED，再覆盖真实 P2P 入口写入、精确文件名选择、四份输入的
-SHA256 绑定、唯一 JSON/profile key、设备归属歧义和失败前零生成 staging。旧独立测试显式提供
-literal profile 输入，不从 maxsub 反推模式。完整 436 端口的前后字节比较是独立的私有证据，不能
-用内存 workflow 或全模型数量替代。设备侧风险登记于
+bond 及混合角色父口；workflow 使用从 0915 工作簿人工转录、主机名匿名化的 literal 语料，
+保留原 sheet/行号与 23 列双行表头位置。源码注释中的 SHA-256 标识转录来源；自动化不读取或
+重新校验私有原工作簿。测试串联真实 P2P 推断、物理链路解析、Jinja 渲染和空对端 description
+patch，要求保留 8x、最小未用 lane 与零虚假 empty-missing，已接线/空 lane 预期均为独立常量。
+案例先建立修复前 RED，再覆盖真实 P2P 入口写入、精确文件名选择、四份输入的 SHA256 绑定、
+唯一 JSON/profile key、设备归属歧义、链接文件拒绝、stale map 清空和失败前零生成 staging。
+load 默认严格表头检查，只有显式 `--p2p-legacy-columns` 才向真实 producer 传入一次
+`--legacy-columns`；携带 AIR policy 不隐含放宽表头。独立测试显式提供 literal profile 输入，
+不从 maxsub 反推模式，bond 与非 bond 分支均约束未使用父口不能生成配置。
+真实工作簿的 main() 发布证据和 436 父端口的 generate_all() 对账属于树外、单独绑定摘要的私有
+证据：前后使用同一当前 consumer，前态仅恢复四处历史模式，后态使用真实 main() sidecar；
+它不是历史版本 executable 的重跑，也不是正式 load/实机 PASS。不得用内存 workflow、历史
+文件总数或 render() 层对账替代 generate_all() 证据。设备侧风险登记于
 `TC-REAL-SPLITTER-PROFILE-001`，owner 接受规则不等于真机 PASS。
 
 `test_air_link_endpoint_contract.py` 同时覆盖 REQ-2 与 REQ-14 的 AIR 依赖合同：
@@ -220,7 +227,8 @@ literal profile 输入，不从 maxsub 反推模式。完整 436 端口的前后
 保留真实 Cumulus `swp` 的接口启动策略，不给 sentinel 或 ZTP server 合成配置。共享 token
 仅在 `tools/project_contract.py` 定义，源码扫描和 AST 检查防止两端重复定义；direct 的
 literal oracle 独立于该实现。未知字符串、大小写/空白变体、错误类型、两个 sentinel 和不完整
-真实 endpoint 必须失败。真实 AIR JSON 的离线验证固定 size/SHA256；历史发布与当前同模型
+真实 endpoint 必须失败。真实 AIR JSON 的离线验证在私有证据中固定 size/SHA256，并非公开
+测试运行时会读取、校验该私有 JSON；历史发布与当前同模型
 前后比较分开记录，REQ-2 防火墙端口策略差异不能算作 REQ-14 拆分模式变化。
 此后变更涉及 producer artifact 的 consumer 时，第一轮须离线运行至少一次最新适用的真实
 artifact 并绑定其摘要；无法安全执行的真机步骤仍登记 REAL_ENVIRONMENT，不能用构造数据冒充。

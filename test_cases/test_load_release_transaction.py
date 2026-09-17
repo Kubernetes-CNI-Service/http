@@ -3989,6 +3989,18 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertRegex(stderr.getvalue(), r"openpyxl.*先安装")
 
     def test_macos_preparation_does_not_publish_runtime_ztp_prefix(self) -> None:
+        self._assert_macos_preparation_runtime_boundary()
+
+    def test_main_forwards_explicit_p2p_legacy_columns_to_generation(self) -> None:
+        self._assert_macos_preparation_runtime_boundary(p2p_legacy_columns=True)
+
+    def test_p2p_legacy_columns_cli_is_explicit_and_repeats_coalesce(self) -> None:
+        self.assertFalse(LOAD.parse_args(["example-project"]).p2p_legacy_columns)
+        for flags in (["--p2p-legacy-columns"], ["--p2p-legacy-columns"] * 2):
+            with self.subTest(flags=flags):
+                self.assertTrue(LOAD.parse_args(["example-project", *flags]).p2p_legacy_columns)
+
+    def _assert_macos_preparation_runtime_boundary(self, *, p2p_legacy_columns=False) -> None:
         """Remote Linux HTTP paths are declarative input on a macOS workstation."""
         args = SimpleNamespace(
             skip_doca=False, download_doca=False, dry_run=False,
@@ -3996,6 +4008,7 @@ class ReleaseTransactionTests(unittest.TestCase):
             skip_infra=True, skip_generate=False, start_services=False,
             start_ztp_monitor=False, ztp_monitor_scope="auto",
             ztp_monitor_interval=30,
+            p2p_legacy_columns=p2p_legacy_columns,
         )
         remote_settings = LOAD.replace(
             self.inputs.settings,
@@ -4078,6 +4091,7 @@ class ReleaseTransactionTests(unittest.TestCase):
             air_topology_policy=air_policy,
             deployment_scope="all",
             switch_scope="all",
+            **({"p2p_legacy_columns": True} if p2p_legacy_columns else {}),
         )
         release_lock.assert_called_once_with(73)
 

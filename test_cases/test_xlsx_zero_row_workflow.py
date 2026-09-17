@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -39,6 +40,67 @@ LOAD = load_module("xlsx_zero_row_day0_load", ROOT / "DAY0-Prepare/11-load.py")
 
 
 class XlsxFailClosedWorkflowTests(unittest.TestCase):
+    def test_explicit_load_legacy_flag_reaches_real_producer_once_for_mixed_workbook(self):
+        import openpyxl
+
+        def write_mixed_workbook(path):
+            book = openpyxl.Workbook()
+            book.active.title = "OOB Fabric"
+            book.active.cell(2, 18)  # no endpoint header: a drawing sheet
+            plan = book.create_sheet("OOB Plan")
+            plan.cell(1, 2, "Core POD")
+            plan.cell(2, 1, "sum")
+            plan.cell(2, 4, "HPS(Weka BMC)")
+            link = book.create_sheet("TAN OBJ-LF")
+            link.cell(1, 5, "Source")
+            link.cell(1, 11, "Dest")
+            for col, label in ((7, "name"), (8, "HCA/port"), (13, "name"), (14, "port")):
+                link.cell(2, col, label)
+            link.cell(2, 23)
+            for col, value in zip((7, 8, 13, 14), ("leaf01", "swp1", "leaf02", "swp1")):
+                link.cell(3, col, value)
+            book.save(path)
+            book.close()
+
+        for flags, succeeds in (([], False), (["--p2p-legacy-columns"] * 2, True)):
+            with self.subTest(flags=flags), tempfile.TemporaryDirectory() as name:
+                root = Path(name)
+                paths = DIRECT.prepare_runtime(root, write_mixed_workbook)
+                policy = root / "03-air-topology-policy.json"
+                policy.write_text('{}\n')
+                args = LOAD.parse_args(["example-project", *flags])
+                commands = []
+
+                def run_producer(command, *, cwd, **_kwargs):
+                    commands.append(list(command))
+                    if command[1] != "b-xlsx_to_dot.py":
+                        self.assertEqual("c1-generate_dhcp.py", command[1])
+                        raise DIRECT.LegacyReached("DHCP reached after real P2P")
+                    self.assertEqual(paths["p2p_dir"], Path(cwd))
+                    caught, stdout, stderr = DIRECT.invoke_main(paths, list(command[2:]))
+                    if caught is not None:
+                        if not succeeds:
+                            self.assertIn("sheet OOB Fabric: 表头自动检测失败", stderr)
+                        raise caught
+
+                with mock.patch.object(LOAD, "ZTP_DIR", root / "ztp"), mock.patch.object(
+                    LOAD, "run", side_effect=run_producer,
+                ), self.assertRaises(DIRECT.LegacyReached if succeeds else SystemExit) as result:
+                    LOAD.generate_configs(
+                        frozenset({"eth"}), install_dhcp=False, deployment_scope="prod",
+                        p2p_legacy_columns=args.p2p_legacy_columns, air_topology_policy=policy,
+                    )
+                self.assertEqual(1 if succeeds else 0, commands[0].count("--legacy-columns"))
+                self.assertEqual(2 if succeeds else 1, len(commands))
+                if succeeds:
+                    doc = json.loads((paths["output"] / "rack-links-splitter-profiles.json").read_text())
+                    self.assertEqual([], doc["profiles"])
+                    self.assertIn('"leaf01":"swp1" -- "leaf02":"swp1"',
+                                  (paths["output"] / "rack-links-lldpq.dot").read_text())
+                else:
+                    self.assertEqual(1, result.exception.code)
+                    self.assertFalse((paths["output"] / "rack-links-splitter-profiles.json").exists())
+
     def test_generate_configs_stops_before_dhcp_generator_and_publication(self):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)

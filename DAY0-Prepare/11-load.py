@@ -5,6 +5,10 @@ The script deliberately separates reversible preparation from the final service
 start. Apache and DHCP start with ``--start-services`` or unless the operator
 declines the default-yes service prompt. A second default-yes bounded prompt
 starts the detached ZTP status monitor after the load flow succeeds.
+
+P2P headers are strict by default. ``--p2p-legacy-columns`` explicitly opts this
+run into the producer's historical column layout; an AIR policy never implies
+that opt-in. It does not bypass topology or splitter-profile validation.
 """
 
 from __future__ import annotations
@@ -4625,6 +4629,7 @@ def generate_configs(
     schema_version: int = GLOBAL_SCHEMA_VERSION,
     eth_version: str | None = None,
     air_topology_policy: Path | None = None,
+    p2p_legacy_columns: bool = False,
     mini_air: bool = False,
     mini_devices_file: Path | None = None,
     deployment_scope: str = "all",
@@ -4682,6 +4687,8 @@ def generate_configs(
     p2p_command = [
         sys.executable, "b-xlsx_to_dot.py", "-y", *scope_args,
     ]
+    if p2p_legacy_columns:
+        p2p_command.append("--legacy-columns")
     if eth_version:
         p2p_command.extend(["--os-version", eth_version])
     if air_topology_policy is not None:
@@ -6829,6 +6836,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("project", help="DAY0-Prepare 下的部署项目目录或其绝对路径")
     parser.add_argument("--p2p-file", help="明确选择项目根目录或 p2p/ 下的 P2P XLSX")
     parser.add_argument(
+        "--p2p-legacy-columns", action="store_true",
+        help="显式允许 P2P 未识别表头使用历史固定列；默认严格检查，不自动回退",
+    )
+    parser.add_argument(
         "--mini", nargs="?", const=MINI_AIR_DEVICES_NAME,
         metavar="DEVICES.txt",
         help=(
@@ -7230,6 +7241,8 @@ def main(argv: list[str] | None = None) -> int:
             }
             # Keep the established full-topology call contract byte-for-byte
             # compatible for embedders which wrap generate_configs().
+            if getattr(args, "p2p_legacy_columns", False):
+                generation_options["p2p_legacy_columns"] = True
             if getattr(args, "mini", False):
                 generation_options["mini_air"] = True
                 mini_source, _mini_canonical = project_mini_air_devices(

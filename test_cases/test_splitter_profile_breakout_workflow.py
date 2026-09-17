@@ -3,6 +3,8 @@
 
 Source: owner-pinned 0915 workbook, SHA256
 15cf6d52ac11ddcab38ca64306fdee04b84ce7bc3dc002176a389d758c559df3.
+This digest documents the manual transcription source; the automated fixture
+does not access or rehash that private workbook at runtime.
 Only hostnames are anonymized below. Port tokens, placeholder capitalization,
 sheet names, row numbers and physical/empty distribution are retained from the
 32 actual records: TAN OBJ-LF 75..82 / 155..162 and OOB LF-SP-CR-BL
@@ -16,8 +18,10 @@ binding. The private 436-port corpus byte comparison is separate evidence.
 from __future__ import annotations
 
 import contextlib
+import csv
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -40,6 +44,18 @@ CASES = (
     ("EXAMPLE-TAN-OBJ-LEAF01", "19", "bond"),
     ("EXAMPLE-TAN-OBJ-LEAF02", "19", "bond"),
 )
+CONNECTED_PORTS = {
+    "EXAMPLE-OOB-CORE01": ["swp9s0", "swp9s1", "swp9s2", "swp9s3"],
+    "EXAMPLE-OOB-CORE02": ["swp9s0", "swp9s1", "swp9s2", "swp9s3"],
+    "EXAMPLE-TAN-OBJ-LEAF01": ["swp19s0"],
+    "EXAMPLE-TAN-OBJ-LEAF02": ["swp19s0"],
+}
+UNUSED_PORTS = {
+    "EXAMPLE-OOB-CORE01": {"swp9s4", "swp9s5", "swp9s6", "swp9s7"},
+    "EXAMPLE-OOB-CORE02": {"swp9s4", "swp9s5", "swp9s6", "swp9s7"},
+    "EXAMPLE-TAN-OBJ-LEAF01": {"swp19s1", "swp19s2", "swp19s3", "swp19s4", "swp19s5", "swp19s6", "swp19s7"},
+    "EXAMPLE-TAN-OBJ-LEAF02": {"swp19s1", "swp19s2", "swp19s3", "swp19s4", "swp19s5", "swp19s6", "swp19s7"},
+}
 
 
 def corpus_rows():
@@ -119,12 +135,20 @@ class SplitterProfileWorkflowTests(unittest.TestCase):
 
         def workbook_writer(path):
             book = Workbook()
-            sheet = book.active
-            sheet.title = "TAN-OOB"
-            sheet.append(["Source", "", "Dest", ""])
-            sheet.append(["name", "port", "name", "port"])
+            book.remove(book.active)
+            # Preserve the real two-row, 23-column endpoint layout and source
+            # row numbers. This is a transcribed fixture, not the private XLSX.
             for row in corpus_rows():
-                sheet.append(row["fields"])
+                if row["sheet"] not in book.sheetnames:
+                    sheet = book.create_sheet(row["sheet"])
+                    sheet.cell(1, 5, "Source")
+                    sheet.cell(1, 11, "Dest")
+                    for col, label in ((7, "name"), (8, "HCA/port"), (13, "name"), (14, "port")):
+                        sheet.cell(2, col, label)
+                    sheet.cell(2, 23)
+                sheet = book[row["sheet"]]
+                for col, value in zip((7, 8, 13, 14), row["fields"]):
+                    sheet.cell(row["row"], col, value)
             book.save(path)
             book.close()
 
@@ -133,7 +157,11 @@ class SplitterProfileWorkflowTests(unittest.TestCase):
             paths = prepare_runtime(root, workbook_writer)
             for key, filename in (("inventory", "01-inventory.log"), ("port_map", "02-port-mapping.log")):
                 paths[key].write_bytes((P2P_DIR / filename).read_bytes())
-            caught, stdout, stderr = invoke_main(paths, ["-y", "--deployment-scope", "prod"])
+            policy = root / "03-air-topology-policy.json"
+            policy.write_text('{}\n', encoding="utf-8")
+            caught, stdout, stderr = invoke_main(paths, [
+                "-y", "--deployment-scope", "prod", "--air-link-policy", str(policy),
+            ])
             self.assertTrue(caught is None or isinstance(caught, SystemExit) and caught.code == 0,
                             (repr(caught), stdout, stderr))
             sidecar = paths["output"] / "rack-links-splitter-profiles.json"
@@ -141,6 +169,10 @@ class SplitterProfileWorkflowTests(unittest.TestCase):
             document = json.loads(sidecar.read_text())
             self.assertEqual(4, len(document["profiles"]))
             self.assertEqual({"1to8"}, {entry["profile"] for entry in document["profiles"]})
+            self.assertEqual({
+                ("example-oob-core01", "swp9"), ("example-oob-core02", "swp9"),
+                ("example-tan-obj-leaf01", "swp19"), ("example-tan-obj-leaf02", "swp19"),
+            }, {(entry["device"], entry["parent"]) for entry in document["profiles"]})
             output = root / "generated"
             device = device_for_ports("EXAMPLE-OOB-CORE01", ["swp9s0"], {})
             with mock.patch.multiple(GENERATOR, P2P_INPUT_DIR=str(paths["p2p_dir"]),
@@ -203,8 +235,29 @@ class SplitterProfileWorkflowTests(unittest.TestCase):
             self.assertEqual({"type": "swp"}, interface["swp9s7"])
 
     def test_disk_binding_and_schema_fail_closed(self):
-        for mutation in ("workbook", "inventory", "mapping", "dot", "missing",
-                         "schema", "source", "duplicate-profile", "ambiguous-host", "duplicate-json"):
+        reasons = {
+            "workbook": "stale splitter profile binding: workbook_sha256",
+            "inventory": "stale splitter profile binding: inventory_sha256",
+            "mapping": "stale splitter profile binding: port_mapping_sha256",
+            "dot": "stale splitter profile binding: lldpq_sha256",
+            "missing": "No such file or directory",
+            "schema": "invalid splitter profile schema/source identity",
+            "source": "invalid splitter profile schema/source identity",
+            "source-case": "invalid splitter profile schema/source identity",
+            "duplicate-profile": "duplicate splitter profile example-",
+            "ambiguous-host": "ambiguous P2P splitter profile device ownership for OOB-CORE01",
+            "duplicate-json": "duplicate splitter profile JSON key: schema_version",
+            "profiles-object": "splitter profiles must be a list",
+            "entry-not-object": "invalid splitter profile entry",
+            "entry-extra-key": "invalid splitter profile entry",
+            "entry-non-string": "invalid splitter profile entry",
+            "entry-invalid-profile": "invalid splitter profile entry",
+            "entry-invalid-parent": "invalid splitter profile entry",
+            "entry-invalid-host": "invalid splitter profile entry",
+            "symlink": "sidecar must be a single-link regular file",
+            "hardlink": "sidecar must be a single-link regular file",
+        }
+        for mutation, reason in reasons.items():
             with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 workbook, inventory, mapping, dot, sidecar = self.disk_fixture(root)
@@ -217,23 +270,126 @@ class SplitterProfileWorkflowTests(unittest.TestCase):
                 elif mutation == "duplicate-json":
                     text = sidecar.read_text()
                     sidecar.write_text(text.replace('"schema_version": 1', '"schema_version": 1, "schema_version": 1'))
+                elif mutation in {"symlink", "hardlink"}:
+                    target = sidecar.with_name("preserved-sidecar.json")
+                    if mutation == "symlink":
+                        sidecar.rename(target)
+                        sidecar.symlink_to(target.name)
+                    else:
+                        os.link(sidecar, target)
                 else:
                     document = json.loads(sidecar.read_text())
                     if mutation == "schema":
                         document["schema_version"] = 2
                     elif mutation == "source":
                         document["source_workbook"] = "other.xlsx"
+                    elif mutation == "source-case":
+                        document["source_workbook"] = "EXAMPLE.xlsx"
                     elif mutation == "duplicate-profile":
                         document["profiles"].append(dict(document["profiles"][0]))
-                    else:
+                    elif mutation == "ambiguous-host":
                         document["profiles"].append(dict(device="SECOND-OOB-CORE01", parent="swp9", profile="1to8"))
+                    elif mutation == "profiles-object":
+                        document["profiles"] = {}
+                    elif mutation == "entry-not-object":
+                        document["profiles"][0] = "invalid"
+                    else:
+                        field, value = {
+                            "entry-extra-key": ("extra", "invalid"),
+                            "entry-non-string": ("device", 123),
+                            "entry-invalid-profile": ("profile", "1to16"),
+                            "entry-invalid-parent": ("parent", "swp9s0"),
+                            "entry-invalid-host": ("device", "host/escape"),
+                        }[mutation]
+                        document["profiles"][0][field] = value
                     sidecar.write_text(json.dumps(document))
                 with mock.patch.object(GENERATOR, "P2P_INPUT_DIR", str(root)), mock.patch.object(
                     GENERATOR, "P2P_OUTPUT_DIR", str(sidecar.parent),
-                ), self.assertRaisesRegex(ValueError, "splitter|profile|P2P"):
+                ), self.assertRaisesRegex(ValueError, reason):
                     GENERATOR._attach_splitter_profiles({"OOB-CORE01": device_for_ports(
                         "OOB-CORE01", ["swp9s0"], {},
                     )})
+
+    def test_bond_only_model_loads_disk_authority_and_does_not_render_unused_parent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, _, _, _, sidecar = self.disk_fixture(root)
+            document = json.loads(sidecar.read_text())
+            document["profiles"].append(dict(device="EXAMPLE-TAN-OBJ-LEAF01", parent="swp20", profile="1to8"))
+            sidecar.write_text(json.dumps(document))
+            device = device_for_ports("TAN-OBJ-LEAF01", ["swp19s0"], {"swp19": "1to2"}, role="bond")
+            with mock.patch.object(GENERATOR, "P2P_INPUT_DIR", str(root)), mock.patch.object(
+                GENERATOR, "P2P_OUTPUT_DIR", str(sidecar.parent),
+            ):
+                GENERATOR._attach_splitter_profiles({"TAN-OBJ-LEAF01": device})
+            self.assertEqual({"swp19": "1to8", "swp20": "1to8"}, device["splitter_profiles"])
+            rendered = GENERATOR.render(GENERATOR.build_env(), border_globals(), "TAN-OBJ-LEAF01", device)
+            interfaces = yaml.safe_load(rendered)[0]["set"]["interface"]
+            self.assertEqual({"8x": {"lanes-per-port": "1"}}, interfaces["swp19"]["link"]["breakout"])
+            self.assertFalse(any(name == "swp20" or name.startswith("swp20s") for name in interfaces))
+
+    def test_missing_owner_clears_cached_authority_and_suffix_requires_hyphen_boundary(self):
+        for unmatched_host in ("EXAMPLEOOB-CORE01", "UNRELATED-HOST"):
+            with self.subTest(host=unmatched_host), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                _, _, _, _, sidecar = self.disk_fixture(root)
+                document = json.loads(sidecar.read_text())
+                document["profiles"] = [dict(device=unmatched_host, parent="swp9", profile="1to8")]
+                sidecar.write_text(json.dumps(document))
+                device = device_for_ports("OOB-CORE01", ["swp9s0"], {"swp9": "1to8"})
+                with mock.patch.object(GENERATOR, "P2P_INPUT_DIR", str(root)), mock.patch.object(
+                    GENERATOR, "P2P_OUTPUT_DIR", str(sidecar.parent),
+                ):
+                    GENERATOR._attach_splitter_profiles({"OOB-CORE01": device})
+                self.assertEqual({}, device["splitter_profiles"])
+                with self.assertRaisesRegex(ValueError, "splitter profile missing/invalid for swp9"):
+                    GENERATOR.preprocess_device(device)
+
+    def test_csv_model_generation_rejects_stale_sidecar_before_intermediate_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, _, _, _, sidecar = self.disk_fixture(root)
+            document = json.loads(sidecar.read_text())
+            document["workbook_sha256"] = "0" * 64
+            sidecar.write_text(json.dumps(document))
+            global_file = root / "01-global.yaml"
+            global_file.write_text(yaml.safe_dump({
+                "schema_version": 2,
+                "common": {"mgmt": {"ztp": {"ztp_url_prefix": "/ztp"}}},
+                "switches": [{"eth": {
+                    "version": "5.18.1", "bridge": {}, "system": {}, "mlag": {},
+                    "vrr": {"base_mac": "02:00:5e:01:00:00", "gateway_ip": "subnet_maximum"},
+                }}],
+            }))
+            devices_file = root / "02-devices_config.csv"
+            header = [
+                "hostname", "type", "template", "eth0_ip", "netmask", "eth0_gw", "eth0_mac",
+                "eth1_ip", "netmask", "eth1_gw", "eth1_mac", "lo_ip",
+                "bgp_asn", "bgp_ports", "bond_ports", "bond_type", "bond_mac", "peerlink_ports", "vrl",
+                "evpn_vrf", "evpn_l3vni", "evpn_l3vlan", "dhcp_relay", "evpn_l2vni", "evpn_l2vlan",
+                "svi_ip", "netmask", "vlan_ports",
+            ]
+            row = [
+                "OOB-CORE01", "eth", "oob-core", "192.0.2.10", "24", "192.0.2.1", "02:00:00:00:00:10",
+                "NA", "NA", "NA", "NA", "198.51.100.10", "65001", "swp9s0",
+                "NA", "NA", "NA", "NA", "false", "BLUE", "NA", "NA", "NA", "NA", "100",
+                "NA", "NA", "NA",
+            ]
+            with devices_file.open("w", newline="") as stream:
+                csv.writer(stream).writerows([header, row])
+            intermediate = root / "91-devices.yaml"
+            intermediate.write_bytes(b"previous model must remain intact\n")
+            output = io.StringIO()
+            with mock.patch.multiple(
+                GENERATOR, _CSV_FILE=str(devices_file), _GLOBAL_FILE=str(global_file),
+                DEVICES_FILE=str(intermediate), P2P_INPUT_DIR=str(root), P2P_OUTPUT_DIR=str(sidecar.parent),
+            ), mock.patch.object(GENERATOR, "_refresh_cumulus_defaults_from_global"), \
+                    contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as caught:
+                GENERATOR._generate_devices_yaml()
+            self.assertEqual(1, caught.exception.code)
+            self.assertIn("stale splitter profile binding: workbook_sha256", output.getvalue())
+            self.assertEqual(b"previous model must remain intact\n", intermediate.read_bytes())
+            self.assertFalse(intermediate.with_suffix(".yaml.tmp").exists())
 
     def test_stale_cleanup_is_exact_stem_and_source_receipts_do_not_require_profiles(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -267,7 +423,6 @@ class SplitterProfileWorkflowTests(unittest.TestCase):
 
     def test_real_partial_lane_records_generate_eight_way_parents_and_fillers(self):
         rows, profiles, arguments, physical = inferred_inputs()
-        self.assertEqual(32, len(rows))
         self.assertEqual(10, len(physical), "empty peers must never create DOT links")
         with tempfile.TemporaryDirectory() as directory:
             for hostname, base, role in CASES:
@@ -275,7 +430,7 @@ class SplitterProfileWorkflowTests(unittest.TestCase):
                     self.assertEqual("1to8", profiles[(hostname.casefold(), base)])
                     ports = [port for link in physical for host, port in
                              ((link[0], link[1]), (link[2], link[3])) if host == hostname]
-                    self.assertEqual(4 if role == "bgp" else 1, len(ports))
+                    self.assertEqual(CONNECTED_PORTS[hostname], sorted(ports))
                     device = device_for_ports(
                         hostname, ports, {f"swp{base}": profiles[(hostname.casefold(), base)]},
                         role=role,
@@ -290,7 +445,7 @@ class SplitterProfileWorkflowTests(unittest.TestCase):
                         {"8x": {"lanes-per-port": "1"}},
                         interfaces[f"swp{base}"]["link"]["breakout"],
                     )
-                    unused = {f"swp{base}s{i}" for i in range(8)} - set(ports)
+                    unused = UNUSED_PORTS[hostname]
                     self.assertEqual(unused, GENERATOR._unused_breakout_filler_ports(path, unused))
                     for port in unused:
                         self.assertEqual({"type": "swp"}, interfaces[port])
@@ -304,6 +459,7 @@ class SplitterProfileWorkflowTests(unittest.TestCase):
             for hostname, base, role in CASES:
                 ports = [port for link in physical for host, port in
                          ((link[0], link[1]), (link[2], link[3])) if host == hostname]
+                self.assertEqual(CONNECTED_PORTS[hostname], sorted(ports))
                 device = device_for_ports(hostname, ports, {f"swp{base}": "1to8"}, role=role)
                 (output / f"{hostname}.yaml").write_text(GENERATOR.render(
                     GENERATOR.build_env(), border_globals(), hostname, device,
@@ -316,6 +472,8 @@ class SplitterProfileWorkflowTests(unittest.TestCase):
                 rows, **arguments, lldpq_bytes=dot.read_bytes(), source_workbook="p2p.xlsx",
             )
             self.assertEqual(22, len(intent["empty_endpoints"]))
+            self.assertEqual({(host, port) for host, ports in UNUSED_PORTS.items() for port in ports},
+                             {(entry["device"], entry["port"]) for entry in intent["empty_endpoints"]})
             P2P._write_description_intent(str(dot), intent)
             stdout = io.StringIO()
             with contextlib.redirect_stdout(stdout), mock.patch.object(

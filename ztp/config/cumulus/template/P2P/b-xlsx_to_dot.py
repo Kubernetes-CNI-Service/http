@@ -1706,7 +1706,7 @@ def main():
                 air_link_policy_file,
                 project_root=(
                     Path(os.path.realpath(DEVICES_CONFIG)).parent
-                    if mini else None
+                    if mini_devices_file is not None else None
                 ),
             )
         except ValueError as exc:

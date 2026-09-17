@@ -117,11 +117,12 @@ def load_script(name: str, path: Path):
     if spec is None or spec.loader is None:
         raise RuntimeError(f"cannot load {path}")
     module = importlib.util.module_from_spec(spec)
+    previous_path = sys.path[:]
     sys.path.insert(0, str(path.parent))
     try:
         spec.loader.exec_module(module)
     finally:
-        sys.path.pop(0)
+        sys.path[:] = previous_path
     return module
 
 

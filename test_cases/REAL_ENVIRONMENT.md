@@ -990,11 +990,19 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   本项只记录尚未执行的可选现场验证与已接受残余，不重新打开 M-14a/M-14b。
 - 自动化：`test_splitter_profile_breakout.py` 与 `test_splitter_profile_breakout_workflow.py`。
   本机只解析 P2P、生成临时 YAML、验证 filler/description，不连接或修改交换机。
+  load 的严格默认/显式 legacy 路径另由 `test_load_release_transaction.py` 与
+  `test_xlsx_zero_row_workflow.py` 覆盖；转录 fixture 与私有真实输入证据分开，不冒充物理验证。
 - 风险与目标：硬件或 OS 若拒绝 8x，会在 apply 时才暴露；模式切换可能中断该 cage 全部现有链路。
   成功标准为目标硬件接受 8x / lanes-per-port=1，已接线 lane 保持预期链路、未接线 lane 不伪造邻居。
 - 前置条件：仅在 owner 另行批准的可回滚实验交换机执行，具备独立 console/OOB；记录型号、OS、
   目标 cage、当前模式、物理接线与配置摘要。输入必须绑定确切 workbook、源码和已审定生成 YAML
   SHA-256，不能以 AIR 支持情况替代实机证据。
+- 生成前置证据：记录 workbook、inventory、port map、LLDPQ DOT 及其 template、description intent、
+  splitter sidecar、AIR policy、所选 AIR JSON、CSV/设备模型及源码摘要。旧列布局必须明确使用
+  load `--p2p-legacy-columns`（producer `--legacy-columns`），不得自动降级或跳过错误 sheet。
+  项目已声明的自连接 rewrite 只改变 AIR edge，LLDPQ 保留设计链路；真实 main()、临时
+  generate_all()、正式 load 与设备 apply 分层记录。合成空 CSV 或显式选择旧 JSON 的离线
+  对账不能关闭真实 CSV、JSON 选择及 basename 绑定残余。
 - 步骤：先只读核对四个目标 cage 的 8 条声明及生成 8x；记录现有接口/邻居状态后，在批准窗口使用
   受管部署流程应用配置；检查全部 8 条子接口、已接线 lane 连通性、未用 lane 的最小配置与无虚假邻居；
   核对保存及重启后的模式（重启须单独获准）。若设备拒绝，保存拒绝与连通性证据，不伪造成功回执。

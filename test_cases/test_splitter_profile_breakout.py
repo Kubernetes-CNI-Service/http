@@ -107,6 +107,26 @@ class SplitterProfileDirectTests(unittest.TestCase):
         self.assertEqual({"swp9"}, set(prepared["bgp_uplink_parents"]))
         self.assertEqual({}, prepared["parent_swps"])
 
+    def test_unused_profile_does_not_materialize_on_bond_path(self):
+        device = device_for_ports(
+            "EXAMPLE-TAN-OBJ-LEAF01", ["swp19s0"],
+            {"swp19": "1to8", "swp20": "1to8"}, role="bond",
+        )
+        prepared = self.assert_parent(device, "swp19", 8, 1)
+        self.assertEqual({"swp19"}, set(prepared["parent_swps"]))
+        self.assertEqual({}, prepared["bgp_uplink_parents"])
+        self.assertEqual(["bond19s0"], [bond["name"] for bond in prepared["computed_bonds"]])
+
+    def test_conflicting_parent_metadata_is_rejected_by_merge_helper(self):
+        # Defensive helper contract; current normal preprocessing uses one
+        # authority and cannot naturally construct these disagreeing maps.
+        for key, conflicting in (("breakout", 4), ("lanes", 2), ("subs", [0, 1])):
+            with self.subTest(key=key):
+                parent = {"breakout": 8, "lanes": 1, "subs": list(range(8))}
+                bgp = dict(parent, **{key: conflicting})
+                with self.assertRaisesRegex(ValueError, "conflicting splitter profile metadata for swp9"):
+                    GENERATOR._merge_overlapping_breakout_parents({"swp9": parent}, {"swp9": bgp})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,6 +9,7 @@ import copy
 import io
 import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -18,10 +19,24 @@ import yaml
 from test_cases.test_flow_release_platform_matrix import CUMULUS_GENERATOR as GENERATOR
 from test_cases.test_splitter_profile_breakout_workflow import P2P
 from test_cases.test_mlag_evpn_generation import border_globals
-import project_contract
+from tools import project_contract
 
 
 class AirLinkEndpointDirectTests(unittest.TestCase):
+    def test_script_loaders_restore_complete_import_path_after_nested_import(self):
+        from test_cases.test_qos_evpn_uplink_generation import load_script as qos_load
+        from test_cases.test_mlag_evpn_generation import load_script as mlag_load
+        for loader in (qos_load, mlag_load):
+            with self.subTest(loader=loader.__module__), tempfile.TemporaryDirectory() as directory:
+                script = Path(directory) / "nested_import.py"
+                script.write_text('import sys\nsys.path.insert(0, "nested-module-path")\n')
+                before = sys.path[:]
+                try:
+                    loader("req14_import_isolation", script)
+                    self.assertEqual(before, sys.path)
+                finally:
+                    sys.path[:] = before
+
     def test_both_scripts_import_one_shared_definition_for_each_literal(self):
         shared = ast.parse(Path(project_contract.__file__).read_text())
         for name, literal in (("AIR_UNCONNECTED_ENDPOINT", "unconnected"),
@@ -72,6 +87,9 @@ class AirLinkEndpointDirectTests(unittest.TestCase):
                    [{"node": "AIR-fw-01"}, "unconnected"],
                    [{"node": [], "interface": "swp7"}, "unconnected"],
                    [{"node": "AIR-fw-01", "interface": ""}, "unconnected"]]
+        for key in ("node", "interface"):
+            for value in ("", " ", "\t\n"):
+                invalid.append([dict(endpoint, **{key: value}), "unconnected"])
         for link in invalid:
             with self.subTest(link=link), self.assertRaisesRegex(ValueError, "AIR JSON link"):
                 GENERATOR._air_link_real_endpoints(link, 7)

@@ -6,6 +6,7 @@ from __future__ import annotations
 from contextlib import nullcontext, redirect_stderr, redirect_stdout
 import importlib.util
 import io
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -149,6 +150,45 @@ def invoke_main(
 
 
 class XlsxFailClosedDirectTests(unittest.TestCase):
+    def test_real_entrypoint_loads_policy_without_mini_and_publishes_profiles(self):
+        def workbook_writer(path):
+            book = openpyxl.Workbook()
+            sheet = book.active
+            sheet.title = "TAN-Links"
+            _detected_headers(sheet)
+            sheet.append(["leaf01", "swp1", "leaf02", "swp1"])
+            book.save(path)
+            book.close()
+
+        with tempfile.TemporaryDirectory() as name:
+            paths = prepare_runtime(Path(name), workbook_writer)
+            policy = Path(name) / "03-air-topology-policy.json"
+            policy.write_text('{}\n', encoding="utf-8")
+            caught, stdout, stderr = invoke_main(paths, [
+                "-y", "--deployment-scope", "prod", "--air-link-policy", str(policy),
+            ])
+            self.assertTrue(caught is None or isinstance(caught, SystemExit) and caught.code == 0,
+                            (repr(caught), stdout, stderr))
+            sidecar = paths["output"] / "rack-links-splitter-profiles.json"
+            self.assertEqual([], json.loads(sidecar.read_text())["profiles"])
+            self.assertIn('"leaf01":"swp1" -- "leaf02":"swp1"',
+                          (paths["output"] / "rack-links-lldpq.dot").read_text())
+
+    def test_real_entrypoint_mini_still_requires_project_sampling_policy(self):
+        with tempfile.TemporaryDirectory() as name:
+            paths = prepare_runtime(Path(name), make_zero_row_workbook)
+            project = paths["devices"].parent.resolve()
+            policy = project / "03-air-topology-policy.json"
+            policy.write_text('{}\n', encoding="utf-8")
+            caught, _stdout, stderr = invoke_main(paths, [
+                "-y", "--deployment-scope", "air", "--mini",
+                "--air-link-policy", str(policy),
+            ])
+            self.assertIsInstance(caught, SystemExit, repr(caught))
+            self.assertEqual(1, caught.code)
+            self.assertIn("mini_sampling is required for --mini", stderr)
+            self.assertEqual([], list(paths["output"].iterdir()))
+
     def test_exact_stale_pair_is_absent_before_workbook_extraction_begins(self):
         with tempfile.TemporaryDirectory() as name:
             paths = prepare_runtime(Path(name), make_zero_row_workbook)

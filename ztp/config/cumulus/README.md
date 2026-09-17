@@ -20,6 +20,18 @@ setup/load 是唯一推荐编排入口；完整场景见根目录 `USER_MANUAL.m
 
 ## 生成与发布
 
+macOS 正式编排使用 `DAY0-Prepare/11-load.py <项目>`。P2P 默认严格识别表头；只有已确认采用
+历史固定列的工作簿才显式加 `--p2p-legacy-columns`，load 会向 P2P producer 传入一次
+`--legacy-columns`，不会因表头失败或存在 AIR policy 而自动回退，也不跳过错误 sheet。
+该选项只作用于本次运行，项目级持久化布局声明仍待后续合同。已有
+`03-air-topology-policy.json` 必须独立通过精确边与端口冲突校验；AIR rewrite 不删除 LLDPQ
+设计链路。不要通过修改工作簿或跳过校验来掩盖未授权的自连接。
+
+拆分模式以同 basename 的 `*-splitter-profiles.json` 为权威，不按已连接 lane 数降为 2x/4x。
+sidecar 必须与精确 workbook、inventory、port map、生成的 LLDPQ DOT 摘要绑定；缺失、陈旧、
+重复键、无效记录或设备归属歧义均在渲染前失败。不要手工生成/修改 sidecar；应重新运行
+受管 P2P producer。未用 lane 只生成最小接口配置，不伪造已接线邻居。
+
 ```bash
 cd template
 python3 90-c2-generate_configs.py -y
