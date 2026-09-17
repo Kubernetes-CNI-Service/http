@@ -976,3 +976,25 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 清理与风险：保留脱敏 report、journal、批次/设备计数与前后 tree digest，销毁两个可写隔离副本；真实树
   只有 owner 另行批准后才可 approve 与执行。错误环境归属或 last-copy 判断会永久删除不可再生配置，任何
   inventory/hash/identity 不一致都必须阻断，禁止手工改 migration inventory 或事务 journal。
+
+## TC-REAL-CONFIG-SYNC-001 — 受保护完整配置同步与会话连续性
+
+- 状态：**NOT RUN / REAL_ENV REQUIRED**。自动化仅在隔离 fixture 中验证规范化门禁、完整回执、
+  preview/confirm 指纹、固定 `nv config replace` 命令与页面状态机；未连接或修改真实交换机，不得把
+  direct/workflow GREEN 当作真机 replace、ACL 连通性或 NVUE 持久化证据。
+- 前置条件：可回滚的 Cumulus/NVOS 实验交换机，已通过能产生 trusted full-replace receipt 的受管 ZTP
+  流程完成配置；管理面有独立 console/OOB 恢复路径。冻结设备身份、当前 `nv config show`、startup、
+  receipt、latest 专属 YAML、release binding、eth0/SSH/全部 AAA 用户和 control-plane ACL 的脱敏摘要。
+  AIR patch/baseline receipt 不得伪造成 full prior；没有完整 B 的设备只验证明确拒绝。
+- 步骤与预期：先生成仅改变 hostname/ACL 等非保护字段的新配置，经 CLI 与页面分别完成只读 preview，
+  核对确认前设备字节和会话均不变；确认文案必须明确“本机手工配置若未出现在新生成配置中，将被删除”。
+  执行一次 `--replace-config`，验证只出现 `nv config replace`、apply、save，状态依次为同步中/已同步，
+  startup 与 latest 规范化一致且原 SSH 会话及新登录可用。随后逐项改变 eth0、ssh-server、AAA role、单/多
+  用户 hash、新增/删除用户，注入 patch receipt、缺失 AAA、损坏 prior、运行态漂移、preview 后 receipt/
+  release/current 变化和设备 ZTP 正在运行；全部必须在首次 replace 前以区分原因拒绝。ACL 变化按 owner
+  已接受风险允许进入执行，但必须通过 console 同时观察 SSH 是否被 ACL 中断。
+- 证据、清理与风险：保存脱敏后的 operation/trigger ID、状态时间线、原因码、value-free changed paths、
+  receipt/release/current/expected SHA-256、NVUE exit、apply/save 与重连结果；不得保存配置值、密码散列或
+  SSH 凭据。每个负例从交换机/VM 快照恢复；成功例使用受管生成/replace 流程恢复原配置并再次验证
+  startup 与登录。完整 replace 会删除未生成的现场配置，ACL 变化可能立即中断 SSH，因此首次只能在有
+  console/OOB 和可回滚快照的实验设备执行，禁止在生产交换机首测。

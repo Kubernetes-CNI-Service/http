@@ -560,7 +560,215 @@ class PreflightAppliedComparisonTests(unittest.TestCase):
         self.assertNotEqual(first["expected_sha256"], second["expected_sha256"])
 
 
+class ReplaceConfigGuardTests(unittest.TestCase):
+    @staticmethod
+    def config(*, eth0="192.0.2.10/24", ssh_port=22,
+               users=None, acl_rule="accept", hostname="leaf01"):
+        users = users or {
+            "cumulus": {"hashed-password": "$6$stable", "role": "system-admin"},
+        }
+        user_lines = []
+        for name, values in users.items():
+            user_lines.extend((
+                f"          {name}:\n",
+                f"            hashed-password: {values['hashed-password']}\n",
+                f"            role: {values['role']}\n",
+            ))
+        return "".join((
+            "- set:\n",
+            "    interface:\n",
+            "      eth0:\n",
+            "        ip:\n",
+            "          address:\n",
+            f"            {eth0}: {{}}\n",
+            "    system:\n",
+            "      aaa:\n",
+            "        user:\n",
+            *user_lines,
+            "      ssh-server:\n",
+            f"        port: {ssh_port}\n",
+            f"      hostname: {hostname}\n",
+            "    acl:\n",
+            "      ipv4:\n",
+            "        web-generated:\n",
+            f"          rule: {acl_rule}\n",
+        ))
+
+    @classmethod
+    def applied(cls, raw_yaml=None, *, trusted=True, mode="replace"):
+        raw_yaml = cls.config() if raw_yaml is None else raw_yaml
+        return {
+            "trusted": trusted,
+            "reason": "fixture-untrusted" if not trusted else "",
+            "raw_yaml": raw_yaml,
+            "receipt": {"apply_mode": mode},
+            "fingerprint": "a" * 64,
+        }
+
+    def guard(self, current=None, applied=None, expected=None):
+        return MANUAL.evaluate_replace_config_guard(
+            current or self.config(),
+            applied or self.applied(),
+            expected or self.config(hostname="leaf01-new"),
+        )
+
+    def assert_refused(self, code, **kwargs):
+        result = self.guard(**kwargs)
+        self.assertFalse(result["allowed"], result)
+        self.assertEqual(code, result["reason_code"], result)
+        return result
+
+    def test_replace_allows_only_unprotected_changes_and_acl_is_not_protected(self):
+        expected = self.config(hostname="leaf01-new", acl_rule="drop")
+        result = self.guard(expected=expected)
+        self.assertTrue(result["allowed"], result)
+        self.assertEqual("ready", result["reason_code"])
+        self.assertEqual([], result["protected_changed_paths"])
+        self.assertTrue(result["runtime_matches_prior"])
+
+    def test_replace_rejects_each_observable_protected_prefix(self):
+        cases = {
+            "interface.eth0": self.config(eth0="198.51.100.10/24"),
+            "system.ssh-server": self.config(ssh_port=2222),
+            "system.aaa.user": self.config(users={
+                "cumulus": {
+                    "hashed-password": "$6$stable", "role": "nvue-monitor",
+                },
+            }),
+        }
+        for prefix, expected in cases.items():
+            with self.subTest(prefix=prefix):
+                result = self.assert_refused(
+                    "protected-prefix-changed", expected=expected,
+                )
+                self.assertTrue(any(
+                    path == prefix or path.startswith(prefix + ".")
+                    for path in result["protected_changed_paths"]
+                ), result)
+
+    def test_hashes_use_prior_full_config_and_cover_multiple_users(self):
+        prior_users = {
+            "cumulus": {"hashed-password": "$6$cumulus", "role": "system-admin"},
+            "operator": {"hashed-password": "$6$operator", "role": "nvue-monitor"},
+        }
+        prior = self.config(users=prior_users)
+        current = prior.replace("$6$cumulus", "'*'").replace("$6$operator", "'*'")
+        for label, users in (
+            ("changed", {**prior_users, "operator": {
+                "hashed-password": "$6$changed", "role": "nvue-monitor",
+            }}),
+            ("removed", {"cumulus": prior_users["cumulus"]}),
+            ("added", {**prior_users, "newuser": {
+                "hashed-password": "$6$new", "role": "nvue-monitor",
+            }}),
+        ):
+            with self.subTest(label=label):
+                result = self.assert_refused(
+                    "protected-prefix-changed",
+                    current=current,
+                    applied=self.applied(prior),
+                    expected=self.config(users=users),
+                )
+                self.assertTrue(any(
+                    path.startswith("system.aaa.user.")
+                    for path in result["protected_changed_paths"]
+                ), result)
+
+    def test_masked_runtime_hashes_do_not_block_unchanged_prior_hashes(self):
+        prior = self.config()
+        current = prior.replace("$6$stable", "'*'")
+        result = self.guard(
+            current=current,
+            applied=self.applied(prior),
+            expected=self.config(hostname="leaf01-new"),
+        )
+        self.assertTrue(result["allowed"], result)
+
+    def test_prior_receipt_and_full_payload_fail_closed_with_distinct_codes(self):
+        self.assert_refused("untrusted-prior", applied=self.applied(trusted=False))
+        self.assert_refused("patch-mode-prior", applied=self.applied(mode="patch"))
+        self.assert_refused(
+            "prior-full-parse-failed", applied=self.applied("not: [valid"),
+        )
+        missing_aaa = "- set:\n    system:\n      hostname: leaf01\n"
+        self.assert_refused(
+            "aaa-subtree-absent", applied=self.applied(missing_aaa),
+        )
+
+    def test_runtime_drift_from_prior_is_rejected_before_replace(self):
+        drifted = self.config().replace("hostname: leaf01", "hostname: drifted")
+        result = self.assert_refused("runtime-drift", current=drifted)
+        self.assertFalse(result["runtime_matches_prior"])
+
+    def test_replace_flag_is_mutually_exclusive_with_original_operations(self):
+        parser = MANUAL.parser()
+        args = parser.parse_args(["leaf01", "--replace-config"])
+        self.assertTrue(args.replace_config)
+        with self.assertRaises(SystemExit):
+            parser.parse_args([
+                "leaf01", "--replace-config", "--operation", "renew",
+            ])
+
+
 class ConfirmAppliedFingerprintTests(unittest.TestCase):
+    def test_replace_config_rechecks_guard_and_uses_full_replace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            release = root / "release"
+            release.mkdir()
+            marker = release / ".published-complete"
+            marker.write_text("ok\n", encoding="utf-8")
+            expected = release / "leaf01.yaml"
+            prior = ReplaceConfigGuardTests.config()
+            expected_text = ReplaceConfigGuardTests.config(
+                hostname="leaf01-new", acl_rule="drop",
+            )
+            expected.write_text(expected_text, encoding="utf-8")
+            applied_output = protocol(prior)
+            applied_reader = mock.Mock(
+                args=SimpleNamespace(command_timeout=20),
+                run=mock.Mock(return_value=completed(applied_output)),
+            )
+            applied_fingerprint = MANUAL.collect_applied_config(
+                applied_reader, DEVICE, "192.0.2.10",
+            )["fingerprint"]
+            client = mock.Mock()
+            client.args = SimpleNamespace(command_timeout=20)
+            client.run.side_effect = [
+                completed(prior), completed(applied_output), completed("saved\n"),
+            ]
+            prepared = {
+                "published_marker": str(marker),
+                "expected_yaml": str(expected),
+                "published_release_dir": str(release.resolve()),
+                "expected_yaml_sha256": MANUAL.normalized_nvue_config(
+                    expected_text, label="expected",
+                )[2],
+                "current_sha256": hashlib.sha256(
+                    prior.encode("utf-8")
+                ).hexdigest(),
+                "applied_fingerprint": applied_fingerprint,
+                "published_mac_links": [],
+            }
+            with mock.patch.object(
+                MANUAL, "connect_and_verify",
+                return_value=("192.0.2.10", "eth0"),
+            ), mock.patch.object(
+                MANUAL, "verify_prepared_release_binding",
+            ):
+                result = MANUAL.trigger_one(
+                    client, DEVICE, "", root / "manual-config-sync/run1",
+                    operation="replace-config", prepared=prepared,
+                )
+            self.assertEqual("triggered", result["state"], result)
+            remote_call = client.run.call_args_list[-1]
+            remote = remote_call.args[2]
+            self.assertIn("nv config replace", remote)
+            self.assertIn("nv config apply -y", remote)
+            self.assertIn("nv config save", remote)
+            self.assertNotIn("nv config patch", remote)
+            self.assertEqual(expected_text, remote_call.kwargs["stdin"])
+
     def test_trigger_rechecks_applied_fingerprint_before_mutation(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

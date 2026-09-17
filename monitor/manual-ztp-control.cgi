@@ -21,9 +21,12 @@ STATUS_FILE = STATUS_DIR / "manual-ztp.status.json"
 PID_FILE = STATUS_DIR / "manual-ztp.pid"
 SAFE_HOSTNAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")
 SAFE_OPERATION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:._-]{0,511}$")
+CONFIG_SYNC_STATES = {
+    "config_sync_queued", "config_sync_running", "config_sync_success",
+}
 BUSY_STATES = {
     "queued", "running", "ztp_running", "time_sync_queued", "time_sync_running",
-}
+} | (CONFIG_SYNC_STATES - {"config_sync_success"})
 PREVIEW_BUSY_STATES = {
     "preview_queued", "previewing", "confirm_queued", "cancel_queued",
 }
@@ -130,7 +133,9 @@ def _decode_queue(raw):
     requests = value.get("requests")
     if isinstance(requests, list):
         return [item for item in requests if isinstance(item, dict)]
-    if value.get("action") in {"trigger", "reset", "renew", "time-sync"} and value.get("hostname"):
+    if value.get("action") in {
+        "trigger", "reset", "renew", "time-sync", "replace-config",
+    } and value.get("hostname"):
         return [value]
     return []
 
@@ -215,7 +220,10 @@ def status_with_queue():
             queued_state = {
                 "confirm": "confirm_queued", "cancel": "cancel_queued",
                 "time_sync": "time_sync_queued",
+                "config_sync": "config_sync_queued",
             }.get(phase, "preview_queued")
+            if phase == "confirm" and request.get("action") == "replace-config":
+                queued_state = "config_sync_queued"
             devices[hostname] = {
                 **(previous if phase in {"confirm", "cancel"} else {}),
                 "state": queued_state,
@@ -225,6 +233,8 @@ def status_with_queue():
                 "operation": (
                     "reset" if request.get("action") == "reset"
                     else "time-sync" if request.get("action") == "time-sync"
+                    else "replace-config"
+                    if request.get("action") == "replace-config"
                     else "ztp"
                 ),
                 "operation_id": str(request.get("operation_id") or ""),
@@ -311,7 +321,7 @@ def main():
             }, "409 Conflict")
             return
         operation = str(device_status.get("requested_operation") or "")
-        if operation not in {"trigger", "reset", "renew"}:
+        if operation not in {"trigger", "reset", "renew", "replace-config"}:
             respond({"error": "preview state has invalid operation"}, "409 Conflict")
             return
         if action == "cancel":
@@ -341,8 +351,13 @@ def main():
         pass
     elif action == "preview":
         operation = form.get("operation", [""])[0].strip().casefold()
-        if operation not in {"trigger", "reset", "renew"}:
-            respond({"error": "preview requires operation=trigger/reset/renew"}, "400 Bad Request")
+        if operation not in {"trigger", "reset", "renew", "replace-config"}:
+            respond({
+                "error": (
+                    "preview requires operation="
+                    "trigger/reset/renew/replace-config"
+                ),
+            }, "400 Bad Request")
             return
         operation_id = f"web:{uuid.uuid4().hex}"
         trigger_id = f"{operation_id}:{hostname}"
@@ -352,6 +367,11 @@ def main():
         operation_id = f"web:{uuid.uuid4().hex}"
         trigger_id = f"{operation_id}:{hostname}"
         phase = "time_sync"
+    elif action == "replace-config":
+        operation = "replace-config"
+        operation_id = f"web:{uuid.uuid4().hex}"
+        trigger_id = f"{operation_id}:{hostname}"
+        phase = "preview"
     elif action in {"trigger", "reset", "renew"}:
         # Compatibility-safe behavior for an older page: the first click now
         # performs preview only and can never mutate a switch.
@@ -360,7 +380,11 @@ def main():
         trigger_id = f"{operation_id}:{hostname}"
         phase = "preview"
     else:
-        respond({"error": "action must be preview/confirm/cancel/time-sync"}, "400 Bad Request")
+        respond({
+            "error": (
+                "action must be preview/confirm/cancel/time-sync/replace-config"
+            ),
+        }, "400 Bad Request")
         return
     if device_status.get("state") in ACTIVE_STATES:
         respond({

@@ -83,6 +83,25 @@ recovery，并要求 `exactly one fixed warning`；随后重复同一个 N=1→2
 
 ## 运行操作轴
 
+### ZTP 后配置同步
+
+设备已由受管 full-replace ZTP 成功配置、随后项目输入重新生成 latest 专属 YAML 时，可在 Monitor
+的交换机状态页选择“配置同步”，或在管理服务器交互运行：
+
+```bash
+python3 ztp/manual-ztp.py <完整主机名> --replace-config --type prod
+```
+
+该入口先只读采集 `nv config show`、核对身份/release/上次完整 replace receipt，并显示规范化差异；
+确认前不会修改设备。`interface.eth0.*`、`system.ssh-server.*`、所有
+`system.aaa.user.*` 必须保持不变，其中不可观测的 `hashed-password` 使用上次已应用完整配置与新配置
+比较。patch/AIR baseline receipt、缺失 AAA、运行态漂移或 preview 后任一指纹变化都会拒绝。
+
+确认后执行整份 `nv config replace`、apply、save；这会删除任何未出现在新生成 YAML 中的现场手工
+配置。control-plane ACL 按 owner 已接受风险不属于保护前缀，仍可能中断当前 SSH。首次真机验证只能
+在有 console/OOB 和可回滚快照的实验设备进行，见 `TC-REAL-CONFIG-SYNC-001`。不得用 patch、伪造
+prior full config、跳过 receipt，或在设备 ZTP/其他人工操作正在运行时强行同步。
+
 ### 同一 Service IP 换接口
 
 这里的“换接口”只表示地址值、项目输入和源码均未变化，宿主网络工具已把同一个地址从接口 A

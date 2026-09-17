@@ -807,6 +807,8 @@ def dedicated_yaml_ready(
 
 def effective_operation(requested: str, device: dict) -> str:
     """Map a user intent to the fixed safe action for this switch state."""
+    if requested == "replace-config":
+        return "replace-config"
     if requested == "reset":
         return "reset" if device.get("type") in ETHERNET_TYPES else "ztp"
     if requested == "renew":
@@ -963,6 +965,127 @@ def _changed_config_paths(current, expected, path=""):
     return [] if current == expected else [path or "<root>"]
 
 
+def _config_value(config, path):
+    value = config
+    for key in path:
+        if not isinstance(value, dict) or key not in value:
+            return _RUNTIME_VALUE_REMOVED
+        value = value[key]
+    return value
+
+
+def _protected_subtree_changes(current, expected):
+    changed = []
+    for path in (
+        ("interface", "eth0"),
+        ("system", "aaa", "user"),
+        ("system", "ssh-server"),
+    ):
+        prefix = ".".join(path)
+        before = _config_value(current, path)
+        after = _config_value(expected, path)
+        if before is _RUNTIME_VALUE_REMOVED or after is _RUNTIME_VALUE_REMOVED:
+            if before is not after:
+                changed.append(prefix)
+            continue
+        changed.extend(_changed_config_paths(before, after, prefix))
+    return changed
+
+
+def evaluate_replace_config_guard(
+    current_text: str, applied: dict, expected_text: str,
+) -> dict:
+    """Fail closed before destructive full NVUE replacement.
+
+    Runtime-readable protected values are compared current -> generated. AAA
+    password hashes are compared prior-applied full input -> generated input
+    because ``nv config show`` masks or omits those leaves.
+    """
+    result = {
+        "allowed": False,
+        "reason_code": "untrusted-prior",
+        "protected_changed_paths": [],
+        "runtime_matches_prior": False,
+    }
+    if not isinstance(applied, dict) or not applied.get("trusted"):
+        return result
+    receipt = applied.get("receipt")
+    if not isinstance(receipt, dict) or receipt.get("apply_mode") != "replace":
+        result["reason_code"] = "patch-mode-prior"
+        return result
+    raw_prior = str(applied.get("raw_yaml") or "")
+    try:
+        prior_full, _prior_json, _prior_digest = normalized_nvue_config(
+            raw_prior, label="上次成功 replace 完整配置",
+        )
+    except ManualZtpError:
+        result["reason_code"] = "prior-full-parse-failed"
+        return result
+    prior_users = _config_value(prior_full, ("system", "aaa", "user"))
+    if not isinstance(prior_users, dict) or not prior_users:
+        result["reason_code"] = "aaa-subtree-absent"
+        return result
+    try:
+        current_runtime, _current_json, _current_digest = (
+            runtime_comparable_nvue_config(current_text, label="当前运行配置")
+        )
+        prior_runtime, _prior_runtime_json, _prior_runtime_digest = (
+            runtime_comparable_nvue_config(
+                raw_prior, label="上次成功 replace 配置",
+            )
+        )
+        expected_full, _expected_json, _expected_digest = normalized_nvue_config(
+            expected_text, label="新生成完整配置",
+        )
+        expected_runtime, _expected_runtime_json, _expected_runtime_digest = (
+            runtime_comparable_nvue_config(
+                expected_text, label="新生成运行态投影",
+            )
+        )
+    except ManualZtpError:
+        result["reason_code"] = "read-normalize-failed"
+        return result
+    result["runtime_matches_prior"] = current_runtime == prior_runtime
+    if not result["runtime_matches_prior"]:
+        result["reason_code"] = "runtime-drift"
+        return result
+
+    protected = _protected_subtree_changes(current_runtime, expected_runtime)
+    expected_users = _config_value(
+        expected_full, ("system", "aaa", "user"),
+    )
+    if not isinstance(expected_users, dict):
+        protected.append("system.aaa.user")
+    else:
+        for name in sorted(set(prior_users) | set(expected_users), key=str):
+            prefix = f"system.aaa.user.{name}"
+            if name not in prior_users or name not in expected_users:
+                protected.append(prefix)
+                continue
+            prior_user = prior_users[name]
+            expected_user = expected_users[name]
+            if not isinstance(prior_user, dict) or not isinstance(
+                expected_user, dict,
+            ):
+                protected.append(prefix)
+                continue
+            prior_hash = prior_user.get(
+                "hashed-password", _RUNTIME_VALUE_REMOVED,
+            )
+            expected_hash = expected_user.get(
+                "hashed-password", _RUNTIME_VALUE_REMOVED,
+            )
+            if prior_hash != expected_hash:
+                protected.append(f"{prefix}.hashed-password")
+    result["protected_changed_paths"] = sorted(set(protected))
+    if result["protected_changed_paths"]:
+        result["reason_code"] = "protected-prefix-changed"
+        return result
+    result["allowed"] = True
+    result["reason_code"] = "ready"
+    return result
+
+
 def normalized_yaml(text: str, *, label: str) -> tuple[object, str, str]:
     """Backward-compatible name for effective NVUE configuration parsing."""
     return normalized_nvue_config(text, label=label)
@@ -1095,6 +1218,7 @@ def _secure_text(path: Path, text: str) -> None:
 
 def preflight_one(
     client: "SshClient", project: Path, device: dict, target_dir: Path,
+    *, replace_config: bool = False,
 ) -> dict:
     """Verify identity and compare normalized current NVUE state with latest.
 
@@ -1149,6 +1273,20 @@ def preflight_one(
     expected_raw_digest = _raw_text_sha256(expected_text)
 
     applied = collect_applied_config(client, device, host)
+    replace_guard = None
+    if replace_config:
+        replace_guard = evaluate_replace_config_guard(
+            current.stdout, applied, expected_text,
+        )
+        if not replace_guard["allowed"]:
+            paths = ", ".join(
+                replace_guard.get("protected_changed_paths") or []
+            )
+            suffix = f" ({paths})" if paths else ""
+            raise ManualZtpError(
+                "配置同步安全门禁拒绝执行: "
+                f"{replace_guard['reason_code']}{suffix}"
+            )
     comparison_warnings = []
     receipt = applied.get("receipt") if applied["trusted"] else {}
     source_kind = str(receipt.get("source_kind") or "")
@@ -1241,6 +1379,7 @@ def preflight_one(
         "applied_source_name": str(receipt.get("source_name") or ""),
         "applied_at": str(receipt.get("applied_at") or ""),
         "failed_payload_matches_latest": False,
+        "replace_guard": replace_guard,
         "diff_summary": {
             "configuration_matches": configuration_matches,
             "comparison_source": comparison_source,
@@ -1794,8 +1933,9 @@ def trigger_one(
                     "用户确认后 latest 发布代际已切换；已拒绝执行，请重新预检"
                 )
             try:
+                expected_text = expected_path.read_text(encoding="utf-8")
                 _value, _rendered, expected_digest = normalized_yaml(
-                    expected_path.read_text(encoding="utf-8"),
+                    expected_text,
                     label=f"{device['hostname']} 确认后 latest 配置",
                 )
             except OSError as exc:
@@ -1838,9 +1978,31 @@ def trigger_one(
                     "用户确认后设备的已应用 ZTP 输入凭据发生变化；"
                     "已拒绝执行，请重新预检"
                 )
+            if operation == "replace-config":
+                replace_guard = evaluate_replace_config_guard(
+                    backup.stdout, applied_now, expected_text,
+                )
+                if not replace_guard["allowed"]:
+                    raise ManualZtpError(
+                        "用户确认后配置同步安全门禁不再成立: "
+                        f"{replace_guard['reason_code']}；请重新预检"
+                    )
         else:
             _secure_text(target_dir / "before.yaml", backup.stdout)
-        if operation == "reset":
+        if operation == "replace-config":
+            if not prepared:
+                raise ManualZtpError("配置同步必须先完成并绑定只读差异预览")
+            remote = (
+                "set -eu; umask 077; "
+                "replace_file=$(mktemp /tmp/http-nvue-replace.XXXXXX); "
+                "trap 'rm -f \"$replace_file\"' EXIT HUP INT TERM; "
+                "cat >\"$replace_file\"; "
+                "nv config replace \"$replace_file\"; "
+                "nv config apply -y; nv config save"
+            )
+            stdin = expected_text
+            action = "nv config replace <latest-hostname.yaml>; nv config apply -y; nv config save"
+        elif operation == "reset":
             if device["type"] not in ETHERNET_TYPES:
                 raise ManualZtpError("手工重置仅支持 Cumulus Ethernet/AIR 交换机")
             # Keep the GUI/CLI boundary fixed: no caller-controlled reset
@@ -1930,13 +2092,18 @@ def parser(operation: str = "ztp") -> argparse.ArgumentParser:
         description="手工触发交换机 ZTP 或 NVUE factory-default 重置；位置参数支持具体 hostname 和通配符",
     )
     result.add_argument("selectors", nargs="+", metavar="DEVICE_OR_PATTERN")
-    result.add_argument(
+    action = result.add_mutually_exclusive_group()
+    action.add_argument(
         "--operation", choices=("ztp", "reset", "renew", "time-sync"),
         default="ztp",
         help=(
             "操作类型：ztp 重新执行配置；reset 执行平台安全恢复；"
             "renew 重新进入 DHCP/ZTP；time-sync 仅调用固定时间同步 helper"
         ),
+    )
+    action.add_argument(
+        "--replace-config", action="store_true",
+        help="预览并确认后，以 latest 专属 YAML 执行完整 nv config replace",
     )
     result.set_defaults(url=None)
     if operation != "reset":
@@ -2029,6 +2196,8 @@ def main(argv: list[str] | None = None) -> int:
         if value == "--operation" and raw_argv[index + 1] in {"ztp", "reset", "renew", "time-sync"}:
             operation_hint = raw_argv[index + 1]
     args = parser(operation_hint).parse_args(raw_argv)
+    if args.replace_config:
+        args.operation = "replace-config"
     # A no-URL CLI call and the GUI both use a root-owned, zero-argument
     # restricted helper.  Caller-controlled URLs deliberately require the
     # broader direct sudo path and therefore an interactive sudo password.
@@ -2057,6 +2226,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         if args.url and any(item["type"] not in ETHERNET_TYPES for item in devices):
             raise ManualZtpError("--url 仅适用于 Cumulus Ethernet/AIR 交换机")
+        if args.replace_config and args.url:
+            raise ManualZtpError("--replace-config 不允许指定 ZTP URL")
         if len(devices) > 1 and not args.dry_run:
             devices = choose_one_device(devices, non_interactive=args.non_interactive)
         validate_host_key_refresh_policy(args, devices)
@@ -2188,7 +2359,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"项目：{project}")
         print(f"匹配设备：{len(plans)} 台")
         for device, url, actual in plans:
-            if actual == "reset":
+            if actual == "replace-config":
+                action = "nv config replace <latest-hostname.yaml>; nv config apply -y; nv config save"
+            elif actual == "reset":
                 action = "nv action reset system factory-default force (后台)"
             else:
                 action = (
@@ -2220,7 +2393,11 @@ def main(argv: list[str] | None = None) -> int:
         if len(actual_operations) != 1:
             raise ManualZtpError("一次操作不能混合 factory reset 和 ZTP")
         actual_operation = next(iter(actual_operations))
-        operation_dir = "manual-reset" if actual_operation == "reset" else "manual-trigger"
+        operation_dir = (
+            "manual-reset" if actual_operation == "reset"
+            else "manual-config-sync" if actual_operation == "replace-config"
+            else "manual-trigger"
+        )
         run_dir = project / "99-output-ztp" / operation_dir / stamp
         known_hosts = project / "99-output-ztp" / operation_dir / "known_hosts"
         known_hosts.parent.mkdir(parents=True, exist_ok=True)
@@ -2232,6 +2409,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         trigger_source = (
             f"manual_reset_{args.origin}" if actual_operation == "reset"
+            else f"manual_config_sync_{args.origin}"
+            if actual_operation == "replace-config"
             else f"manual_{args.origin}"
         )
         trigger_ids = {
@@ -2267,6 +2446,7 @@ def main(argv: list[str] | None = None) -> int:
             for device, _url, _actual in plans:
                 evidence = preflight_one(
                     client, project, device, run_dir / device["hostname"],
+                    replace_config=actual_operation == "replace-config",
                 )
                 evidence["bootstrap_url"] = _url
                 evidence["bootstrap_source_ip"] = str(
@@ -2311,7 +2491,8 @@ def main(argv: list[str] | None = None) -> int:
         if any(confirmed_values):
             if (
                 not all(confirmed_values) or len(plans) != 1
-                or args.confirmed_effective_operation not in {"ztp", "reset"}
+                or args.confirmed_effective_operation
+                not in {"ztp", "reset", "replace-config"}
                 or not args.confirmed_transport_ip
                 or not args.confirmed_interface
             ):
@@ -2353,11 +2534,16 @@ def main(argv: list[str] | None = None) -> int:
             impact = (
                 "系统配置和日志将被清除，交换机随后重启。"
                 if actual_operation == "reset"
-                else "将按 latest 专属 YAML 重新执行 ZTP；版本不符时可能升级或重启。"
+                else (
+                    "本机手工配置若未出现在新生成配置中，将被删除；"
+                    "该操作使用完整 nv config replace。"
+                    if actual_operation == "replace-config" else
+                    "将按 latest 专属 YAML 重新执行 ZTP；版本不符时可能升级或重启。"
+                )
             )
             answer = input(
                 f"\n已保存当前运行配置与 latest 的差异，以及 applied receipt 审计指纹。即将"
-                f"{'执行 factory-default 重置' if actual_operation == 'reset' else '触发 ZTP'}"
+                f"{('执行 factory-default 重置' if actual_operation == 'reset' else '执行配置同步' if actual_operation == 'replace-config' else '触发 ZTP')}"
                 f"以上 {len(plans)} 台交换机；{impact}继续？[y/N] "
             ).strip().casefold()
             if answer not in {"y", "yes"}:

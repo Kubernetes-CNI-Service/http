@@ -36,8 +36,12 @@ PREVIEW_STATES = {
     "cancel_queued",
 }
 TIME_SYNC_STATES = {"time_sync_queued", "time_sync_running"}
+CONFIG_SYNC_STATES = {
+    "config_sync_queued", "config_sync_running", "config_sync_success",
+}
 ACTIVE_REQUEST_STATES = (
-    BUSY_STATES | (PREVIEW_STATES - {"preview_ready"}) | TIME_SYNC_STATES
+    BUSY_STATES | (PREVIEW_STATES - {"preview_ready"})
+    | TIME_SYNC_STATES | (CONFIG_SYNC_STATES - {"config_sync_success"})
 )
 STATUS_LOCK = threading.Lock()
 QUEUE_MAX_BYTES = 1024 * 1024
@@ -175,11 +179,15 @@ def _decode_queue(raw):
         return [
             item for item in requests
             if isinstance(item, dict)
-            and item.get("action") in {"trigger", "reset", "renew", "time-sync"}
+            and item.get("action") in {
+                "trigger", "reset", "renew", "time-sync", "replace-config",
+            }
             and SAFE_HOSTNAME.fullmatch(str(item.get("hostname") or ""))
         ]
     if (
-        value.get("action") in {"trigger", "reset", "renew", "time-sync"}
+        value.get("action") in {
+            "trigger", "reset", "renew", "time-sync", "replace-config",
+        }
         and SAFE_HOSTNAME.fullmatch(str(value.get("hostname") or ""))
     ):
         return [value]
@@ -270,6 +278,8 @@ def command_for(
     ]
     if operation in {"renew", "time-sync"}:
         command += ["--operation", operation]
+    elif operation == "replace-config":
+        command += ["--replace-config"]
     if operation_id:
         command += ["--operation-id", operation_id]
     if trigger_id:
@@ -396,6 +406,10 @@ def latest_cli_operations():
         for directory, source, operation in (
             ("manual-trigger", "manual_cli", "ztp"),
             ("manual-reset", "manual_reset_cli", "reset"),
+            (
+                "manual-config-sync", "manual_config_sync_cli",
+                "replace-config",
+            ),
         )
         for path in (project / "99-output-ztp" / directory).glob("*/summary.json")
     ]
@@ -465,7 +479,7 @@ def accepted_result(trigger_id):
         project = DEVICES_CSV.resolve(strict=True).parent
     except OSError:
         return {}
-    for directory in ("manual-trigger", "manual-reset"):
+    for directory in ("manual-trigger", "manual-reset", "manual-config-sync"):
         for path in (project / "99-output-ztp" / directory).glob("*/*/result.json"):
             result = _read_json(path)
             if str(result.get("trigger_id") or "") == trigger_id:
@@ -482,7 +496,7 @@ def preview_result(operation_id, trigger_id, hostname):
     except OSError:
         return {}
     candidates = []
-    for directory in ("manual-trigger", "manual-reset"):
+    for directory in ("manual-trigger", "manual-reset", "manual-config-sync"):
         for path in (project / "99-output-ztp" / directory).glob("*/summary.json"):
             summary = _read_json(path)
             if (
@@ -540,6 +554,10 @@ def preview_result(operation_id, trigger_id, hostname):
                 ),
                 "comparison_reason": str(
                     evidence.get("comparison_reason") or ""
+                ),
+                "replace_guard": (
+                    evidence.get("replace_guard")
+                    if isinstance(evidence.get("replace_guard"), dict) else None
                 ),
                 "preview_fingerprint": {
                     "current_sha256": str(evidence.get("current_sha256") or ""),
@@ -845,7 +863,9 @@ def execute_preview(
     started = timestamp()
     script_operation = (
         "reset" if requested_operation == "reset"
-        else "renew" if requested_operation == "renew" else "ztp"
+        else "renew" if requested_operation == "renew"
+        else "replace-config" if requested_operation == "replace-config"
+        else "ztp"
     )
     write_device_status(
         hostname, "previewing", scope=scope, started_at=started,
@@ -914,6 +934,7 @@ def execute_preview(
         runtime_matches_latest=preview["runtime_matches_latest"],
         comparison_source=preview["comparison_source"],
         comparison_reason=preview["comparison_reason"],
+        replace_guard=preview.get("replace_guard"),
         preview_fingerprint=preview["preview_fingerprint"],
         diff_summary=preview["diff_summary"],
         evidence_dir=preview["evidence_dir"],
@@ -934,17 +955,27 @@ def execute(
     requested_operation = requested_operation or operation
     started = timestamp()
     baseline_state = latest_device_state(hostname)
+    config_sync = operation == "replace-config"
     baseline_round = 0 if operation == "reset" else int((baseline_state or {}).get("ztp_round") or 0)
-    trigger_source = "manual_reset_web" if operation == "reset" else "manual_web"
+    trigger_source = (
+        "manual_reset_web" if operation == "reset"
+        else "manual_config_sync_web" if config_sync else "manual_web"
+    )
     expected_round = 1 if operation == "reset" else baseline_round + 1
     write_device_status(
-        hostname, "running", scope=scope, started_at=started,
+        hostname, "config_sync_running" if config_sync else "running",
+        scope=scope, started_at=started,
         baseline_round=baseline_round, expected_round=expected_round,
         current_round=baseline_round, progress=0,
         operation_id=operation_id, trigger_id=trigger_id,
         trigger_source=trigger_source, operation=operation,
         requested_operation=requested_operation,
-        message="正在向设备提交手工重置" if operation == "reset" else "正在向设备提交手工 ZTP",
+        phase="config_sync" if config_sync else "confirm",
+        message=(
+            "正在执行受保护的完整配置同步" if config_sync
+            else "正在向设备提交手工重置" if operation == "reset"
+            else "正在向设备提交手工 ZTP"
+        ),
     )
     command = command_for(
         hostname, scope, operation, operation_id, trigger_id,
@@ -964,7 +995,11 @@ def execute(
             operation_id=operation_id, trigger_id=trigger_id,
             trigger_source=trigger_source, operation=operation,
             requested_operation=requested_operation,
-            reason=f"提交{'重置' if operation == 'reset' else ' ZTP'}命令超时（{trigger_timeout}s）",
+            phase="config_sync" if config_sync else "confirm",
+            reason=(
+                f"提交{'配置同步' if config_sync else '重置' if operation == 'reset' else ' ZTP'}"
+                f"命令超时（{trigger_timeout}s）"
+            ),
         )
         return
     if result.stdout:
@@ -981,7 +1016,8 @@ def execute(
             expected_round=expected_round,
             operation_id=operation_id, trigger_id=trigger_id,
             trigger_source=trigger_source, operation=operation,
-            requested_operation=requested_operation, reason=detail,
+            requested_operation=requested_operation,
+            phase="config_sync" if config_sync else "confirm", reason=detail,
         )
         return
     accepted = accepted_result(trigger_id)
@@ -997,6 +1033,18 @@ def execute(
             trigger_id=trigger_id, trigger_source=trigger_source,
             operation=operation, requested_operation=requested_operation, reason=detail,
         )
+        return
+    if config_sync:
+        finished = timestamp()
+        write_device_status(
+            hostname, "config_sync_success", scope=scope, started_at=started,
+            finished_at=finished, operation_id=operation_id,
+            trigger_id=trigger_id, trigger_source=trigger_source,
+            operation=operation, effective_operation=operation,
+            requested_operation=requested_operation, phase="config_sync",
+            message="完整配置同步已应用并保存",
+        )
+        print(f"[{finished}] [OK] {hostname} configuration synchronized", flush=True)
         return
     effective = str(
         accepted.get("effective_operation") or accepted.get("operation") or operation
@@ -1122,6 +1170,7 @@ def main():
             if device_status.get("state") in {
                 "preview_queued", "previewing", "confirm_queued",
                 "time_sync_queued", "time_sync_running",
+                "config_sync_queued", "config_sync_running",
             }:
                 write_device_status(
                     hostname, "failed", scope=args.scope,
@@ -1181,13 +1230,17 @@ def main():
                 operation_id = operation["operation_id"]
                 trigger_id = operation["trigger_id"]
                 same_operation = current.get("operation_id") == operation_id
+                is_config_sync = operation.get("operation") == "replace-config"
                 if operation["state"] == "running":
-                    if not same_operation or current.get("state") != "running":
+                    wanted_state = (
+                        "config_sync_running" if is_config_sync else "running"
+                    )
+                    if not same_operation or current.get("state") != wanted_state:
                         baseline_state = latest_device_state(hostname)
                         is_reset = operation.get("operation") == "reset"
                         baseline_round = 0 if is_reset else int((baseline_state or {}).get("ztp_round") or 0)
                         write_device_status(
-                            hostname, "running", scope=args.scope,
+                            hostname, wanted_state, scope=args.scope,
                             started_at=operation["started_at"],
                             baseline_round=baseline_round,
                             expected_round=1 if is_reset else baseline_round + 1,
@@ -1197,7 +1250,12 @@ def main():
                             operation=operation["operation"],
                             effective_operation=operation["operation"],
                             requested_operation=operation.get("requested_operation") or operation["operation"],
-                            message="命令行正在提交手工重置" if is_reset else "命令行正在提交手工 ZTP",
+                            phase="config_sync" if is_config_sync else "confirm",
+                            message=(
+                                "命令行正在执行配置同步" if is_config_sync
+                                else "命令行正在提交手工重置" if is_reset
+                                else "命令行正在提交手工 ZTP"
+                            ),
                         )
                     continue
                 if operation["state"] == "failed":
@@ -1216,10 +1274,30 @@ def main():
                             operation=operation["operation"],
                             effective_operation=operation["operation"],
                             requested_operation=operation.get("requested_operation") or operation["operation"],
-                            reason=operation["reason"] or ("命令行手工重置失败" if is_reset else "命令行手工 ZTP 触发失败"),
+                            phase="config_sync" if is_config_sync else "confirm",
+                            reason=operation["reason"] or (
+                                "命令行配置同步失败" if is_config_sync
+                                else "命令行手工重置失败" if is_reset
+                                else "命令行手工 ZTP 触发失败"
+                            ),
                         )
                     continue
                 if operation["state"] != "triggered":
+                    continue
+                if is_config_sync:
+                    if not same_operation or current.get("state") != "config_sync_success":
+                        write_device_status(
+                            hostname, "config_sync_success", scope=args.scope,
+                            started_at=operation["started_at"],
+                            finished_at=operation["updated_at"],
+                            operation_id=operation_id, trigger_id=trigger_id,
+                            trigger_source=operation["trigger_source"],
+                            operation="replace-config",
+                            effective_operation="replace-config",
+                            requested_operation="replace-config",
+                            phase="config_sync",
+                            message="命令行完整配置同步已应用并保存",
+                        )
                     continue
                 if same_operation and current.get("state") in {"success", "failed", "ztp_running"}:
                     continue
@@ -1252,6 +1330,7 @@ def main():
                     "reset" if action == "reset"
                     else "renew" if action == "renew"
                     else "time-sync" if action == "time-sync"
+                    else "replace-config" if action == "replace-config"
                     else "ztp"
                 )
                 trigger_source = "manual_reset_web" if operation == "reset" else "manual_web"
@@ -1275,6 +1354,8 @@ def main():
                     else "renew" if operation == "renew"
                     else "time-sync" if operation == "time-sync" else "trigger"
                 )
+                if operation == "replace-config":
+                    requested_operation = "replace-config"
                 if phase == "time_sync":
                     if current.get("state") in ACTIVE_REQUEST_STATES:
                         continue
@@ -1369,7 +1450,9 @@ def main():
                     current.get("effective_operation")
                     or current.get("operation") or operation
                 )
-                if effective_operation not in {"ztp", "reset"}:
+                if effective_operation not in {
+                    "ztp", "reset", "replace-config",
+                }:
                     write_device_status(
                         hostname, "failed", scope=args.scope,
                         operation_id=operation_id, trigger_id=trigger_id,
@@ -1378,17 +1461,30 @@ def main():
                     )
                     continue
                 write_device_status(
-                    hostname, "confirm_queued", scope=args.scope,
+                    hostname,
+                    (
+                        "config_sync_queued"
+                        if effective_operation == "replace-config"
+                        else "confirm_queued"
+                    ),
+                    scope=args.scope,
                     requested_at=requested_at,
                     preview_ready_at=str(current.get("preview_ready_at") or ""),
                     operation_id=operation_id, trigger_id=trigger_id,
                     trigger_source=(
                         "manual_reset_web"
                         if effective_operation == "reset" else "manual_web"
+                        if effective_operation != "replace-config"
+                        else "manual_config_sync_web"
                     ),
                     operation=effective_operation,
                     effective_operation=effective_operation,
-                    requested_operation=requested_operation, phase="confirm",
+                    requested_operation=requested_operation,
+                    phase=(
+                        "config_sync"
+                        if effective_operation == "replace-config"
+                        else "confirm"
+                    ),
                     diff_summary=(
                         current.get("diff_summary")
                         if isinstance(current.get("diff_summary"), dict) else {}

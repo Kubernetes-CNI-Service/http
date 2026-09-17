@@ -860,7 +860,7 @@ def ztp_completed(device: dict) -> bool:
 def render_ztp_status_rows(status: dict) -> str:
     if not status.get("available"):
         detail = status.get("error", "ztp/status 下尚无监控报告。")
-        return (f'<tr class="ztp-empty"><td colspan="17">'
+        return (f'<tr class="ztp-empty"><td colspan="18">'
                 f'{escape(str(detail))}</td></tr>')
     labels = {
         "pending": "等待", "running": "进行中", "success": "成功",
@@ -894,7 +894,7 @@ def render_ztp_status_rows(status: dict) -> str:
             f'role="button" tabindex="0" aria-expanded="true" '
             f'onclick="toggleZtpEnvironment(this)" '
             f'onkeydown="handleZtpToggleKey(event,this,\'environment\')">'
-            f'<td colspan="17">{escape(environment_label)} '
+            f'<td colspan="18">{escape(environment_label)} '
             f'<span>{environment_completed}/{environment_count} 台</span></td></tr>'
         )
         for group_name, group_label in ZTP_DEVICE_GROUPS:
@@ -909,14 +909,14 @@ def render_ztp_status_rows(status: dict) -> str:
                 f'data-group="{group_id}" role="button" tabindex="0" '
                 f'aria-expanded="true" onclick="toggleZtpGroup(this)" '
                 f'onkeydown="handleZtpToggleKey(event,this,\'group\')">'
-                f'<td colspan="17">{escape(group_label)} '
+                f'<td colspan="18">{escape(group_label)} '
                 f'<span>{group_completed}/{len(devices)} 台</span></td></tr>'
             )
             for device in devices:
                 rows.append(_render_ztp_device_row(
                     device, group_id, labels, badge, environment, write_time,
                 ))
-    rows.append('<tr id="ztp-no-match" class="ztp-empty hidden"><td colspan="17">没有符合筛选条件的设备。</td></tr>')
+    rows.append('<tr id="ztp-no-match" class="ztp-empty hidden"><td colspan="18">没有符合筛选条件的设备。</td></tr>')
     return "".join(rows)
 
 
@@ -1031,6 +1031,8 @@ def _render_ztp_device_row(
             "manual_cli": "CLI 手工",
             "manual_reset_web": "页面重置",
             "manual_reset_cli": "CLI 重置",
+            "manual_config_sync_web": "页面配置同步",
+            "manual_config_sync_cli": "CLI 配置同步",
             "automatic": "自动",
             "inventory_promotion": "静态转正",
         }.get(trigger_source, trigger_source)
@@ -1087,6 +1089,12 @@ def _render_ztp_device_row(
             f'<span class="ztp-state ztp-{time_badge_status}">{escape(time_label)}</span>'
             '</span>'
             f'<span class="ztp-event-time">{escape(time_checked_at)}</span>'
+        )
+        config_sync_label = "未知（未绑定身份）" if is_unbound_identity else "未同步"
+        config_sync_sort = "unknown" if is_unbound_identity else "pending"
+        config_sync_html = (
+            f'<span class="ztp-state ztp-{config_sync_sort}">'
+            f'{escape(config_sync_label)}</span>'
         )
         ip_probe = device.get("ip_probe") if isinstance(device.get("ip_probe"), dict) else {}
         candidates = ip_probe.get("candidates") if isinstance(ip_probe.get("candidates"), list) else []
@@ -1212,6 +1220,8 @@ def _render_ztp_device_row(
                 f'title="{escape(action_title, quote=True)}">{action_text}</button>'
                 '<button class="time-sync-button" type="button" disabled '
                 'title="设备尚未绑定可信身份，不能远程修改时间">时间同步</button>'
+                '<button class="config-sync-button" type="button" disabled '
+                'title="设备尚未绑定可信身份，不能执行配置同步">配置同步</button>'
             )
         else:
             primary_action = "renew" if promotion_pending else "trigger"
@@ -1240,6 +1250,10 @@ def _render_ztp_device_row(
                 f'data-hostname="{escape(str(device.get("hostname", "")), quote=True)}" '
                 f'data-device-type="{escape(str(device.get("type", "")), quote=True)}" '
                 f'onclick="requestTimeSync(this)">时间同步</button>'
+                f'<button class="config-sync-button" type="button" disabled '
+                f'data-hostname="{escape(str(device.get("hostname", "")), quote=True)}" '
+                f'data-device-type="{escape(str(device.get("type", "")), quote=True)}" '
+                f'onclick="requestConfigSync(this)">配置同步</button>'
             )
         stage_names = (
             "dhcp", "bootstrap", "config_http", "ssh", "network", "version",
@@ -1282,6 +1296,7 @@ def _render_ztp_device_row(
             f'<td data-ztp-stage="progress" {_sort_attributes("number", progress)}><strong>{escape(str(progress))}%</strong><div class="ztp-progress">'
             f'<i style="width:{max(0, min(100, int(progress or 0)))}%"></i></div></td>'
             f'<td data-time-sync="status" {_status_sort_attributes(time_sort_status)}>{time_sync_html}</td>'
+            f'<td data-config-sync="status" {_status_sort_attributes(config_sync_sort)}>{config_sync_html}</td>'
             f'<td data-ztp-stage="overall" {_status_sort_attributes(overall_sort_status)}><div class="ztp-overall-meta">'
             f'<div class="ztp-meta-row ztp-overall-result">{badge(overall, ztp_round)}'
             f'<span class="ztp-write-time">来源：{escape(trigger_source_label)}</span></div>'
@@ -5051,6 +5066,10 @@ tr.grp-hidden {{ display: none; }}
   margin-left:5px; background:#eef7ff; color:#155a8a; cursor:pointer; font-weight:700; white-space:nowrap; }}
 .time-sync-button:disabled {{ opacity:.5; cursor:not-allowed; }}
 .time-sync-button.running {{ background:#dceeff; }}
+.config-sync-button {{ border:1px solid #397847; border-radius:4px; padding:5px 8px;
+  margin-left:5px; background:#eef9f0; color:#246232; cursor:pointer; font-weight:700; white-space:nowrap; }}
+.config-sync-button:disabled {{ opacity:.5; cursor:not-allowed; }}
+.config-sync-button.running {{ background:#d9f0dd; }}
 .ztp-wrap {{ flex:1; overflow:auto; padding:12px; }}
 .ztp-tbl {{ width:100%; border-collapse:collapse; background:#fff; font-size:12px; white-space:nowrap; }}
 .ztp-tbl th {{ position:sticky; top:0; z-index:2; background:var(--th-bg); color:var(--th-fg);
@@ -5381,7 +5400,8 @@ tr.grp-hidden {{ display: none; }}
         <th class="ztp-sortable" data-sort-kind="status" aria-sort="none" title="在每个设备分组内排序" onclick="sortZtpStatus(12,'status')">完成</th>
         <th class="ztp-sortable" data-sort-kind="number" aria-sort="none" title="在每个设备分组内排序" onclick="sortZtpStatus(13,'number')">进度</th>
         <th class="ztp-sortable" data-sort-kind="status" aria-sort="none" title="在每个设备分组内排序" onclick="sortZtpStatus(14,'status')">时间同步</th>
-        <th class="ztp-sortable" data-sort-kind="status" aria-sort="none" title="在每个设备分组内排序" onclick="sortZtpStatus(15,'status')">总体 / 诊断</th>
+        <th class="ztp-sortable" data-sort-kind="status" aria-sort="none" title="在每个设备分组内排序" onclick="sortZtpStatus(15,'status')">配置同步</th>
+        <th class="ztp-sortable" data-sort-kind="status" aria-sort="none" title="在每个设备分组内排序" onclick="sortZtpStatus(16,'status')">总体 / 诊断</th>
         <th>操作</th>
       </tr></thead>
       <tbody>{ztp_rows}</tbody>
@@ -6294,9 +6314,12 @@ const MANUAL_ZTP_OPERATION_STATES = new Set([
 const TIME_SYNC_BUSY_STATES = new Set([
   'time_sync_queued', 'time_sync_running'
 ]);
+const CONFIG_SYNC_BUSY_STATES = new Set([
+  'config_sync_queued', 'config_sync_running'
+]);
 const MANUAL_ZTP_BUSY_STATES = new Set([
   ...MANUAL_ZTP_PREVIEW_STATES, ...MANUAL_ZTP_OPERATION_STATES,
-  ...TIME_SYNC_BUSY_STATES
+  ...TIME_SYNC_BUSY_STATES, ...CONFIG_SYNC_BUSY_STATES
 ]);
 const manualPreviewPromptKeys = new Set();
 
@@ -6478,6 +6501,7 @@ function renderManualZtpControl(payload) {{
   manualZtpStates = alive && payload?.devices ? payload.devices : {{}};
   const activeDevices = [];
   const timeSyncDevices = [];
+  const configSyncDevices = [];
   const previewDevices = [];
   const cancellingDevices = [];
   buttons.forEach(button => {{
@@ -6487,18 +6511,24 @@ function renderManualZtpControl(payload) {{
     const row = button.closest('.ztp-row');
     const resetButton = row?.querySelector('.manual-reset-button');
     const timeSyncButton = row?.querySelector('.time-sync-button');
+    const configSyncButton = row?.querySelector('.config-sync-button');
+    const configSyncCell = row?.querySelector('[data-config-sync="status"]');
     const renderedRound = Number(row?.dataset.ztpRound || 0);
     const device = manualZtpDeviceState(hostname);
     const workerBusy = MANUAL_ZTP_BUSY_STATES.has(device?.state);
     const previewBusy = MANUAL_ZTP_PREVIEW_STATES.has(device?.state);
     const operationBusy = MANUAL_ZTP_OPERATION_STATES.has(device?.state);
     const timeSyncBusy = TIME_SYNC_BUSY_STATES.has(device?.state);
+    const configSyncBusy = CONFIG_SYNC_BUSY_STATES.has(device?.state);
     const previewReady = device?.state === 'preview_ready';
     const canceling = device?.state === 'cancel_queued';
     let intent = manualZtpIntent(hostname);
     const timeSyncOperation = timeSyncBusy
       || String(device?.operation || '') === 'time-sync'
       || String(device?.requested_operation || '') === 'time-sync';
+    const configSyncOperation = configSyncBusy
+      || String(device?.operation || '') === 'replace-config'
+      || String(device?.requested_operation || '') === 'replace-config';
     // Time synchronization is an independent maintenance action: it must not
     // create or retain a manual-ZTP intent, otherwise resetManualZtpRow() will
     // incorrectly blank the completed round and render every stage as the next
@@ -6532,17 +6562,22 @@ function renderManualZtpControl(payload) {{
       const expected = Number(intent.expected_round || 0);
       const completed = Number(device?.completed_round || 0);
       const statusExpected = Number(device?.expected_round || 0);
-      if ((device?.state === 'success' && completed >= expected)
+      if (((device?.state === 'success' && completed >= expected)
+          || device?.state === 'config_sync_success')
           || ['failed', 'cancelled'].includes(device?.state)) {{
         setManualZtpIntent(hostname, null);
         intent = null;
       }}
     }}
-    const intentConfirmed = String(intent?.phase || '') === 'confirm';
+    const intentIsConfigSync = String(intent?.operation || '') === 'replace-config'
+      || String(intent?.requested_operation || '') === 'replace-config';
+    const intentConfirmed = String(intent?.phase || '') === 'confirm'
+      && !intentIsConfigSync;
     const active = operationBusy || intentConfirmed;
     const previewing = previewBusy
       || (String(intent?.phase || '') === 'preview' && !previewReady);
-    button.disabled = !alive || !manualEligible || active || previewing || timeSyncBusy;
+    button.disabled = !alive || !manualEligible || active || previewing
+      || timeSyncBusy || configSyncBusy;
     button.classList.toggle('running', active);
     if (resetButton) {{
       resetButton.disabled = !alive || active || previewing || previewReady || timeSyncBusy;
@@ -6555,6 +6590,29 @@ function renderManualZtpControl(payload) {{
         : (device?.state === 'time_sync_success' ? '再次同步'
           : (device?.state === 'failed' && device?.operation === 'time-sync'
             ? '重试时间同步' : '时间同步'));
+    }}
+    if (configSyncButton) {{
+      configSyncButton.disabled = !alive || !manualEligible || workerBusy
+        || previewReady;
+      configSyncButton.classList.toggle('running', configSyncBusy);
+      configSyncButton.textContent = configSyncBusy ? '同步中…'
+        : (device?.state === 'config_sync_success' ? '再次同步'
+          : (device?.state === 'failed' && configSyncOperation
+            ? '重试配置同步' : '配置同步'));
+    }}
+    if (configSyncCell) {{
+      const label = !manualEligible ? '未知（未绑定身份）'
+        : configSyncBusy ? '同步中'
+        : device?.state === 'config_sync_success' ? '已同步'
+        : (device?.state === 'failed' && configSyncOperation) ? '失败'
+        : '未同步';
+      const badge = !manualEligible ? 'unknown'
+        : configSyncBusy ? 'running'
+        : device?.state === 'config_sync_success' ? 'success'
+        : (device?.state === 'failed' && configSyncOperation) ? 'failed'
+        : 'pending';
+      configSyncCell.innerHTML = `<span class="ztp-state ztp-${{badge}}">${{label}}</span>`;
+      configSyncCell.dataset.sortStatus = badge;
     }}
     const failedAttempt = (
       device?.state === 'failed'
@@ -6585,6 +6643,8 @@ function renderManualZtpControl(payload) {{
       activeDevices.push({{...view, hostname}});
     }} else if (timeSyncBusy) {{
       timeSyncDevices.push({{...device, hostname}});
+    }} else if (configSyncBusy) {{
+      configSyncDevices.push({{...device, hostname}});
     }} else if (failedAttempt) renderManualZtpFailureRow(hostname, device);
     if (previewReady) {{
       previewDevices.push({{button, device, intent}});
@@ -6599,6 +6659,8 @@ function renderManualZtpControl(payload) {{
       label.textContent = `${{resetting ? '重置/ZTP' : 'ZTP'}} 执行中：${{activeDevices.length}} 台（${{names.join('、')}}）`;
   }} else if (timeSyncDevices.length) {{
     label.textContent = `交换机时间同步中：${{timeSyncDevices.map(item => item.hostname).join('、')}}`;
+  }} else if (configSyncDevices.length) {{
+    label.textContent = `交换机配置同步中：${{configSyncDevices.map(item => item.hostname).join('、')}}`;
   }} else if (cancellingDevices.length) {{
     label.textContent = `正在取消配置差异预检：${{cancellingDevices.length}} 台`;
   }} else if (previewDevices.length) {{
@@ -6723,6 +6785,8 @@ async function confirmManualPreview(button, suppliedDevice = null, force = false
   const requested = String(device.requested_operation || 'trigger');
   const effectText = effective === 'reset'
     ? '实际操作：nv action reset system factory-default force；系统配置和日志会被清除，设备随后重启。'
+    : effective === 'replace-config'
+    ? '实际操作：完整 nv config replace；本机手工配置若未出现在新生成配置中，将被删除。'
     : (['ib', 'nvl'].includes(String(button.dataset.deviceType || '').toLowerCase())
       ? '实际操作：NVOS ZTP force；会重新经历 DHCP/NVOS bootstrap。'
       : '实际操作：Cumulus 手工 bootstrap；不会伪造 DHCP 阶段。');
@@ -6765,11 +6829,14 @@ async function confirmManualPreview(button, suppliedDevice = null, force = false
     const row = button.closest('.ztp-row');
     const isReset = effective === 'reset';
     const renderedRound = Number(row?.dataset.ztpRound || 0);
+    const configSync = effective === 'replace-config';
     const intent = {{
-      state: 'confirm_queued', phase: 'confirm',
+      state: configSync ? 'config_sync_queued' : 'confirm_queued',
+      phase: configSync ? 'config_sync' : 'confirm',
       baseline_round: isReset ? 0 : renderedRound,
       expected_round: isReset ? 1 : renderedRound + 1,
-      trigger_source: isReset ? 'manual_reset_web' : 'manual_web',
+      trigger_source: isReset ? 'manual_reset_web'
+        : configSync ? 'manual_config_sync_web' : 'manual_web',
       operation: effective, requested_operation: requested,
       operation_id: operationId, trigger_id: triggerId,
       requested_at: device.requested_at || new Date().toISOString(),
@@ -6778,7 +6845,7 @@ async function confirmManualPreview(button, suppliedDevice = null, force = false
       prior_trigger_id: String(row?.dataset?.triggerId || ''),
     }};
     setManualZtpIntent(hostname, intent);
-    resetManualZtpRow(hostname, intent, true);
+    if (!configSync) resetManualZtpRow(hostname, intent, true);
     renderManualZtpControl(payload);
     scheduleManualZtpPoll(1000);
   }} catch (error) {{
@@ -6798,7 +6865,7 @@ async function requestManualOperation(button, action) {{
   const approximateEffective = (
     action === 'reset'
     || (action === 'renew' && button.dataset.renewEffective === 'reset')
-  ) ? 'reset' : 'ztp';
+  ) ? 'reset' : action === 'replace-config' ? 'replace-config' : 'ztp';
   const isReset = approximateEffective === 'reset';
   const row = button.closest('.ztp-row');
   const priorStatusUpdatedAt = String(
@@ -6807,23 +6874,26 @@ async function requestManualOperation(button, action) {{
   const priorManualCycleMarker = String(row?.dataset?.manualCycleMarker || '');
   const priorTriggerId = String(row?.dataset?.triggerId || '');
   const operationLabel = action === 'renew' ? '重新获取 DHCP/ZTP'
-    : action === 'reset' ? '手工重置' : '手工 ZTP';
+    : action === 'reset' ? '手工重置'
+    : action === 'replace-config' ? '配置同步' : '手工 ZTP';
   if (!window.confirm(
       `即将对 ${{hostname}} 开始只读预检（${{operationLabel}}）。\n`
       + '本阶段只核验 release/MAC/SSH 并比较 nv config show，不会修改或重启设备。继续？'
   )) return;
   button.disabled = true;
   try {{
-    const payload = await postManualZtpControl(
-      `action=preview&operation=${{action}}&hostname=${{encodeURIComponent(hostname)}}`
-    );
+    const body = action === 'replace-config'
+      ? `action=replace-config&hostname=${{encodeURIComponent(hostname)}}`
+      : `action=preview&operation=${{action}}&hostname=${{encodeURIComponent(hostname)}}`;
+    const payload = await postManualZtpControl(body);
     const request = payload.request || {{}};
     const renderedRound = Number(row?.dataset.ztpRound || 0);
     const baselineRound = isReset ? 0 : renderedRound;
     const intent = {{
       state: 'preview_queued', phase: 'preview', baseline_round: baselineRound,
       expected_round: isReset ? 1 : baselineRound + 1,
-      trigger_source: isReset ? 'manual_reset_web' : 'manual_web',
+      trigger_source: isReset ? 'manual_reset_web'
+        : action === 'replace-config' ? 'manual_config_sync_web' : 'manual_web',
       operation: approximateEffective, requested_operation: action,
       operation_id: String(request.operation_id || ''),
       trigger_id: String(request.trigger_id || ''),
@@ -6839,6 +6909,10 @@ async function requestManualOperation(button, action) {{
     window.alert(`${{operationLabel}}预检提交失败：${{error.message || error}}`);
     await refreshManualZtpControl();
   }}
+}}
+
+async function requestConfigSync(button) {{
+  return requestManualOperation(button, 'replace-config');
 }}
 
 async function pollManualZtp() {{

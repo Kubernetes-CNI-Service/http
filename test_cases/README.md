@@ -287,6 +287,11 @@ Production host-key mismatch 默认 fail closed，只有单台完整 hostname �
 `--refresh-host-key` 才允许替换，AIR 公钥模式兼容 rebuild，GUI/密码隐式刷新均禁止。
 `trigger`、Cumulus factory reset、NVOS ZTP force 与 `renew` recovery intent 分别验证；测试必须
 确认 renew 不会写 ISC lease，服务端 lease release 也不会被当成客户端已重新 DHCP 的证据。
+配置同步另以 `--replace-config` 与原 ZTP 操作互斥：只读 preview 后才允许完整
+`nv config replace`/apply/save；eth0、ssh-server、全部 AAA 用户使用当前运行态与 latest 比较，
+不可观测 password hash 则必须使用 trusted full-replace prior。patch receipt、缺失 AAA、prior 解析
+失败、运行态/确认后指纹漂移均按独立原因 fail closed；ACL 明确不受该门禁保护。CGI、worker、页面
+按钮/状态列与 JS 状态名由同一 workflow 对账，未绑定身份按钮可见但 disabled，并发上限仍为 8。
 测试不会连接或触发真实交换机。
 
 `test_ztp_applied_receipt.py` 覆盖 bootstrap 的 root-owned `/run` 独立工作区、原子

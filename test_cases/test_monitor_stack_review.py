@@ -4992,6 +4992,119 @@ print('{{"factory_records_active":true,"valid":true}}')
         for _state, values in writes:
             self.assertTrue({"ztp_round", "baseline_round", "expected_round"}.isdisjoint(values))
 
+    def test_replace_config_action_is_bound_across_cgi_worker_and_cli(self):
+        request = json.dumps({
+            "action": "replace-config",
+            "hostname": "EXAMPLE-Leaf01",
+            "phase": "config_sync",
+        }).encode("utf-8")
+        self.assertEqual(
+            "replace-config",
+            self.manual_cgi._decode_queue(request)[0]["action"],
+        )
+        self.assertEqual(
+            "replace-config",
+            self.manual_worker._decode_queue(request)[0]["action"],
+        )
+        command = self.manual_worker.command_for(
+            "EXAMPLE-Leaf01", "prod", operation="replace-config",
+            operation_id="operation-1", trigger_id="trigger-1",
+        )
+        self.assertIn("--replace-config", command)
+        self.assertNotIn("--operation", command)
+        self.assertEqual(8, self.manual_worker.parser().parse_args([
+            "--scope", "prod",
+        ]).max_workers)
+
+    def test_replace_config_worker_has_distinct_running_and_success_states(self):
+        writes = []
+
+        def record(_hostname, state, **values):
+            writes.append((state, values))
+
+        completed = subprocess.CompletedProcess(
+            ["replace-config"], 0, stdout="accepted\n", stderr="",
+        )
+        accepted = {
+            "state": "triggered", "operation": "replace-config",
+            "effective_operation": "replace-config",
+            "trigger_source": "manual_config_sync_web",
+        }
+        with mock.patch.object(
+            self.manual_worker, "write_device_status", side_effect=record,
+        ), mock.patch.object(
+            self.manual_worker, "latest_device_state", return_value={},
+        ), mock.patch.object(
+            self.manual_worker, "command_for", return_value=["fixed-helper"],
+        ), mock.patch.object(
+            self.manual_worker.subprocess, "run", return_value=completed,
+        ), mock.patch.object(
+            self.manual_worker, "accepted_result", return_value=accepted,
+        ), mock.patch.object(
+            self.manual_worker, "wait_for_completion",
+        ) as wait_for_completion:
+            self.manual_worker.execute(
+                "EXAMPLE-Leaf01", "prod", 30, 60, 1,
+                operation="replace-config", operation_id="operation-1",
+                trigger_id="trigger-1", requested_operation="replace-config",
+                preview_fingerprint={"current_sha256": "a" * 64},
+            )
+        self.assertEqual("config_sync_running", writes[0][0])
+        self.assertEqual("config_sync_success", writes[-1][0])
+        self.assertEqual("config_sync", writes[-1][1]["phase"])
+        wait_for_completion.assert_not_called()
+
+    def test_replace_config_page_contract_reconciles_button_column_and_states(self):
+        html_source = (ROOT / "monitor/generate-monitor-html.py").read_text(
+            encoding="utf-8",
+        )
+        cgi_source = (ROOT / "monitor/manual-ztp-control.cgi").read_text(
+            encoding="utf-8",
+        )
+        worker_source = (ROOT / "monitor/manual-ztp-worker.py").read_text(
+            encoding="utf-8",
+        )
+
+        time_header = html_source.index(">时间同步</th>")
+        config_header = html_source.index(">配置同步</th>")
+        overall_header = html_source.index(">总体 / 诊断</th>")
+        self.assertLess(time_header, config_header)
+        self.assertLess(config_header, overall_header)
+        self.assertIn('data-config-sync="status"', html_source)
+        self.assertGreaterEqual(html_source.count('class="config-sync-button"'), 2)
+        self.assertRegex(
+            html_source,
+            r'class="config-sync-button"[^>]*disabled[^>]*>'
+            r'配置同步</button>',
+        )
+        self.assertIn('onclick="requestConfigSync(this)"', html_source)
+        for label in (
+            "未同步", "同步中", "已同步", "失败", "未知（未绑定身份）",
+        ):
+            self.assertIn(label, html_source)
+        for state in (
+            "config_sync_queued", "config_sync_running", "config_sync_success",
+        ):
+            self.assertIn(state, html_source)
+            self.assertIn(state, cgi_source)
+            self.assertIn(state, worker_source)
+        self.assertIn("action=replace-config", html_source)
+        self.assertIn('"replace-config"', cgi_source)
+        self.assertIn('"replace-config"', worker_source)
+
+    def test_replace_config_confirmation_warns_about_destructive_full_replace(self):
+        html_source = (ROOT / "monitor/generate-monitor-html.py").read_text(
+            encoding="utf-8",
+        )
+        manual_source = (ROOT / "ztp/manual-ztp.py").read_text(
+            encoding="utf-8",
+        )
+        warning = "本机手工配置若未出现在新生成配置中，将被删除"
+        self.assertIn(warning, html_source)
+        self.assertIn(warning, manual_source)
+        self.assertIn("nv config replace", manual_source)
+        self.assertNotIn("nv config patch", manual_source)
+
     def test_time_sync_rejects_high_measurement_uncertainty(self):
         client = mock.Mock()
         client.args = SimpleNamespace(command_timeout=30, connect_timeout=5)

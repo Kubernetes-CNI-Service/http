@@ -4843,7 +4843,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <dt>使用场景：</dt><dd>执行“设备 bootstrap、配置生成、DHCP、手工 ZTP、备份和运行态辅助”中的明确操作步骤；不要把一次子步骤当作完整发布。</dd>
             <dt>前置条件：</dt><dd>项目、设备范围、运行后端、权限和输入身份已确认；任何 destructive/remote 动作先完成本地 proof 和只读检查。</dd>
             <dt>语法/调用方式：</dt><dd>python3 -B ztp/manual-ztp.py [options]</dd>
-            <dt>主要参数：</dt><dd>--operation, -p, --project, --dhcp-leases, --type, --air, --prod, -y, --yes, --dry-run, --non-interactive, --preflight-only, --origin, --operation-id, --trigger-id, --confirmed-current-sha256, --confirmed-expected-sha256, --confirmed-release-dir</dd>
+            <dt>主要参数：</dt><dd>--operation, --replace-config, -p, --project, --dhcp-leases, --type, --air, --prod, -y, --yes, --dry-run, --non-interactive, --preflight-only, --origin, --operation-id, --trigger-id, --confirmed-current-sha256, --confirmed-expected-sha256</dd>
             <dt>输入：</dt><dd>所属场景的项目输入、设备清单、受信 archive/制品或运行日志；正式写入前必须完成 preflight。</dd>
             <dt>输出/状态：</dt><dd>命令日志、退出码以及该脚本声明的配置、报告、归档或运行状态；输出需按 receipt/SHA/health 复核。</dd>
             <dt>成功判据：</dt><dd>退出码 0，并且脚本打印的后置检查、receipt、状态或生成清单全部通过；仅生成文件不等于部署完成。</dd>
