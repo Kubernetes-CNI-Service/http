@@ -74,6 +74,8 @@ ZTP_DIR = str(Path(SCRIPT_DIR).parents[2])
 if ZTP_DIR not in sys.path:
     sys.path.insert(0, ZTP_DIR)
 from project_contract import (
+    AIR_OUTBOUND_ENDPOINT,
+    AIR_UNCONNECTED_ENDPOINT,
     DEVICE_V1_EVPN_COLUMNS,
     DEVICE_V2_EVPN_COLUMNS,
     detect_global_schema_version,
@@ -7029,6 +7031,27 @@ def prompt_air_configs(output_dir):
     print(f"输出目录：{dest_dir}")
 
 
+def _air_link_real_endpoints(link, index):
+    """Validate the AIR link protocol without treating a sentinel as a node."""
+    label = f"AIR JSON link[{index}]"
+    if not isinstance(link, list) or len(link) != 2:
+        raise ValueError(f"{label} 必须包含两个 endpoint")
+    endpoints = []
+    for endpoint in link:
+        if isinstance(endpoint, str) and endpoint in (AIR_UNCONNECTED_ENDPOINT, AIR_OUTBOUND_ENDPOINT):
+            continue
+        if not isinstance(endpoint, dict):
+            raise ValueError(f"{label} endpoint 类型或协议标记非法")
+        for field in ("node", "interface"):
+            value = endpoint.get(field)
+            if not isinstance(value, str) or not value.strip() or value != value.strip():
+                raise ValueError(f"{label} endpoint.{field} 必须是非空字符串")
+        endpoints.append(endpoint)
+    if not endpoints:
+        raise ValueError(f"{label} 必须包含至少一个真实 endpoint")
+    return endpoints
+
+
 def generate_air_hostname_configs(source_dir, output_dir):
     """Create the complete AIR YAML set from the authoritative AIR JSON.
 
@@ -7122,11 +7145,7 @@ def generate_air_hostname_configs(source_dir, output_dir):
     if not isinstance(links, list):
         raise ValueError(f"AIR JSON content.links 必须是 list: {air_json}")
     for index, link in enumerate(links):
-        if not isinstance(link, list) or len(link) != 2:
-            raise ValueError(f"AIR JSON link[{index}] 必须包含两个 endpoint")
-        for endpoint in link:
-            if not isinstance(endpoint, dict):
-                raise ValueError(f"AIR JSON link[{index}] endpoint 必须是 object")
+        for endpoint in _air_link_real_endpoints(link, index):
             key = str(endpoint.get("node") or "").strip().casefold()
             if key not in air_info:
                 continue

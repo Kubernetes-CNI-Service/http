@@ -17,6 +17,8 @@ import yaml
 GLOBAL_SCHEMA_VERSION = 1
 CURRENT_GLOBAL_SCHEMA_VERSION = 2
 SUPPORTED_GLOBAL_SCHEMA_VERSIONS = frozenset({1, 2})
+AIR_UNCONNECTED_ENDPOINT = "unconnected"
+AIR_OUTBOUND_ENDPOINT = "outbound"
 _MAC_ADDRESS = re.compile(r"^[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}$")
 
 

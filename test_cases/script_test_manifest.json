@@ -93,6 +93,7 @@
         "test_cases.test_qos_evpn_uplink_generation",
         "test_cases.test_splitter_profile_breakout",
         "test_cases.test_splitter_profile_breakout_workflow",
+        "test_cases.test_air_link_endpoint_contract",
         "test_cases.test_terminal_l2_stp_generation",
         "test_cases.test_topology_consistency",
         "test_cases.test_v2_generation_flow",
@@ -631,6 +632,18 @@
       ]
     },
     {
+      "id": "air_link_endpoint_protocol",
+      "paths": [
+        "tools/project_contract.py",
+        "ztp/config/cumulus/template/90-c2-generate_configs.py",
+        "ztp/config/nvos/template/90-c2-generate_configs.py",
+        "ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py"
+      ],
+      "tests": [
+        "test_cases.test_air_link_endpoint_contract"
+      ]
+    },
+    {
       "id": "repository_governance",
       "paths": [
         "tools/project_contract.py",
@@ -1120,6 +1133,18 @@
       ],
       "tests": [
         "test_cases.test_splitter_profile_breakout_workflow"
+      ]
+    },
+    {
+      "id": "air_link_endpoint_to_baseline_yaml",
+      "members": [
+        "tools/project_contract.py",
+        "ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py",
+        "ztp/config/cumulus/template/90-c2-generate_configs.py",
+        "ztp/config/nvos/template/90-c2-generate_configs.py"
+      ],
+      "tests": [
+        "test_cases.test_air_link_endpoint_contract"
       ]
     },
     {

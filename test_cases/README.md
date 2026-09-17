@@ -215,6 +215,16 @@ literal profile 输入，不从 maxsub 反推模式。完整 436 端口的前后
 用内存 workflow 或全模型数量替代。设备侧风险登记于
 `TC-REAL-SPLITTER-PROFILE-001`，owner 接受规则不等于真机 PASS。
 
+`test_air_link_endpoint_contract.py` 同时覆盖 REQ-2 与 REQ-14 的 AIR 依赖合同：
+真实 P2P producer 的 `unconnected` / `outbound` 单端链路必须进入真实 YAML consumer，
+保留真实 Cumulus `swp` 的接口启动策略，不给 sentinel 或 ZTP server 合成配置。共享 token
+仅在 `tools/project_contract.py` 定义，源码扫描和 AST 检查防止两端重复定义；direct 的
+literal oracle 独立于该实现。未知字符串、大小写/空白变体、错误类型、两个 sentinel 和不完整
+真实 endpoint 必须失败。真实 AIR JSON 的离线验证固定 size/SHA256；历史发布与当前同模型
+前后比较分开记录，REQ-2 防火墙端口策略差异不能算作 REQ-14 拆分模式变化。
+此后变更涉及 producer artifact 的 consumer 时，第一轮须离线运行至少一次最新适用的真实
+artifact 并绑定其摘要；无法安全执行的真机步骤仍登记 REAL_ENVIRONMENT，不能用构造数据冒充。
+
 P2P/AIR 契约还覆盖项目级 `03-air-topology-policy.json`：源 P2P 自连接默认失败关闭，只有
 AIR policy 中唯一精确命中的 rewrite 可以替换 AIR edge；LLDPQ 仍保留原始设计链路，节点
 allowlist、replacement 和端口集合都必须通过冲突检查。load 把 global 的 Cumulus 版本传入

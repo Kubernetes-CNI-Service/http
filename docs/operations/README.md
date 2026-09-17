@@ -100,6 +100,13 @@ direct VLAN、bond、BGP 和混合角色共用该规则；仅生成实际配置�
 改变硬件模式可能导致链路中断；规则验收不是设备侧测试结果，真机证据与风险见
 `test_cases/REAL_ENVIRONMENT.md` 中的 `TC-REAL-SPLITTER-PROFILE-001`。
 
+AIR JSON 单端链路可使用精确的 `unconnected`（未连接）或 `outbound`（外部出口）标记。
+consumer 仍校验并收集另一端的真实端口；这些标记不生成虚假对端或配置。只接受两个真实
+endpoint，或一个真实 endpoint 加一个合法标记；未知字符串、空白/大小写变体、两个标记及
+缺失 node/interface 的 endpoint 会在创建输出目录前失败。不得手工删去合法单端链路来绕过
+失败；应重新生成输入并核对 producer/consumer 版本。离线对比应显式绑定 AIR JSON 的 SHA256，
+不能把目录中最新 mtime 当作来源证明；当前 AIR JSON 选择的 glob/mtime 回退尚属未关闭残留项。
+
 ### ZTP 后配置同步
 
 设备已由受管 full-replace ZTP 成功配置、随后项目输入重新生成 latest 专属 YAML 时，可在 Monitor

@@ -55,6 +55,7 @@ from topology_rules import (  # noqa: E402
     resolve_inventory_device_type,
 )
 from deployment_lock import DeploymentLockError, deployment_lock  # noqa: E402
+from project_contract import AIR_OUTBOUND_ENDPOINT, AIR_UNCONNECTED_ENDPOINT  # noqa: E402
 from ztp_service_runtime import (  # noqa: E402
     RuntimeContractError,
     stop_native_ztp_monitors,
@@ -3676,7 +3677,7 @@ def generate_air_json(
             used_macs.add(mac)
         json_links.append([
             {"interface": interface, "node": name, "mac": mac},
-            "unconnected",
+            AIR_UNCONNECTED_ENDPOINT,
         ])
         unconnected_count += 1
 
@@ -3714,7 +3715,7 @@ def generate_air_json(
                 used_macs.add(mac)
             json_links.append([
                 {"interface": interface, "node": name, "mac": mac},
-                "unconnected",
+                AIR_UNCONNECTED_ENDPOINT,
             ])
             unconnected_count += 1
 
@@ -3728,7 +3729,7 @@ def generate_air_json(
         if not (
             isinstance(template_link, list)
             and len(template_link) == 2
-            and template_link[1] == "outbound"
+            and template_link[1] == AIR_OUTBOUND_ENDPOINT
             and isinstance(template_link[0], dict)
         ):
             continue
@@ -3760,7 +3761,7 @@ def generate_air_json(
         connected_by_node.setdefault(node_name.casefold(), set()).add(interface)
         json_links.append([
             {"interface": interface, "node": node_name, "mac": mac},
-            "outbound",
+            AIR_OUTBOUND_ENDPOINT,
         ])
 
     # Complete each generated node from its hardware model inventory. Template
@@ -3802,7 +3803,7 @@ def generate_air_json(
                 used_macs.add(mac)
             json_links.append([
                 {"interface": interface, "node": name, "mac": mac},
-                "unconnected",
+                AIR_UNCONNECTED_ENDPOINT,
             ])
             unconnected_count += 1
 

@@ -222,6 +222,11 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   NVUE 配置仅为 effective default、hostname 及这两个端口的 `type: swp`/`link.state.up`；零端口
   防火墙无接口片段，`myfwbox` 不被识别为防火墙。随后分别加入 splitter/breakout、重复端口和无效
   端口名，必须在 staging 发布前 fail closed；显式非 `fw` CSV template 必须按模板分派而不因名称覆盖。
+- 单端链路（REQ-2 / REQ-14 依赖修复）：用真实 P2P producer 生成一个 `swp` 对
+  `unconnected`，以及 ZTP server 对 `outbound` 的链路；固定 AIR JSON size/SHA256 后执行
+  consumer。前者仍须生成该真实端口的 `type: swp`/`link.state.up`，后者不能合成交换机或
+  ZTP server YAML；未知标记或双 sentinel 必须失败。离线 direct/workflow PASS 不替代 VM
+  内应用后的 link-state 验证。与 9/10 历史发布比较时单列 REQ-2 接口策略差异，不混入 REQ-14。
 - 证据、清理与风险：保存脱敏 generator/publisher 输出、air-config-manifest、最终 YAML hash、VM 内
   `nv config show` 与端口 link-state；不得保存凭据或真实 Production 地址。负例后从 VM 快照恢复并销毁
   staging/release。错误地启动未声明端口可能改变仿真连通性，只允许在隔离 AIR VM 验证。
