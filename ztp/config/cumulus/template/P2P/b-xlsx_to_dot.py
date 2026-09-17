@@ -744,7 +744,8 @@ def _source_workbook_stem(xlsx_path):
 
 def _remove_stale_workbook_outputs(output_file):
     """Remove only the prior primary artifacts for this exact workbook."""
-    stale_paths = (output_file, _description_intent_path(output_file))
+    stale_paths = (output_file, _description_intent_path(output_file),
+                   _splitter_profiles_path(output_file))
     for stale_path in stale_paths:
         try:
             os.unlink(stale_path)
@@ -1004,6 +1005,46 @@ def _write_description_intent(lldpq_file, document):
         document, ensure_ascii=False, sort_keys=True, indent=2,
     ) + "\n").encode("utf-8")
     _mini_air_atomic_write(destination, payload)
+    return destination
+
+
+def _splitter_profiles_path(lldpq_file):
+    path = os.fspath(lldpq_file)
+    if not path.endswith("-lldpq.dot"):
+        raise ValueError("splitter profiles require an exact -lldpq.dot output")
+    return path[:-len("-lldpq.dot")] + "-splitter-profiles.json"
+
+
+def _splitter_source_hashes(workbook, inventory, port_mapping):
+    return {
+        key: hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        for key, path in (("workbook_sha256", workbook),
+                          ("inventory_sha256", inventory),
+                          ("port_mapping_sha256", port_mapping))
+    }
+
+
+def _write_splitter_profiles(lldpq_file, profiles, workbook, inventory,
+                             port_mapping, *, expected_hashes=None):
+    """Persist the already inferred authority; never infer mode a second time."""
+    hashes = _splitter_source_hashes(workbook, inventory, port_mapping)
+    if expected_hashes is not None and hashes != expected_hashes:
+        raise ValueError("P2P splitter profile inputs changed during generation; rerun P2P")
+    entries = []
+    for (device, base), profile in sorted(profiles.items()):
+        if (not re.fullmatch(r"[0-9]+", base)
+                or profile not in {"1to2", "1to4", "1to8"}):
+            raise ValueError(f"invalid splitter profile: {device}:{base}={profile}")
+        entries.append(dict(device=device, parent="swp" + base, profile=profile))
+    document = dict(
+        schema_version=1, source_workbook=Path(os.path.realpath(workbook)).name,
+        lldpq_sha256=hashlib.sha256(Path(lldpq_file).read_bytes()).hexdigest(),
+        profiles=entries, **hashes,
+    )
+    destination = _splitter_profiles_path(lldpq_file)
+    _mini_air_atomic_write(destination, (json.dumps(
+        document, ensure_ascii=False, sort_keys=True, indent=2,
+    ) + "\n").encode("utf-8"))
     return destination
 
 
@@ -1689,6 +1730,9 @@ def main():
             # ── Extract p2p records from xlsx ────────────────────────────────────────
             print(f"Reading: {xlsx_path}")
             try:
+                splitter_input_hashes = _splitter_source_hashes(
+                    xlsx_path, inv_file, port_map_file,
+                )
                 if legacy_columns:
                     source_rows = _extract_xlsx_rows(
                         xlsx_path, legacy_columns=True,
@@ -1872,6 +1916,10 @@ def main():
                 )
                 description_intent_file = _write_description_intent(
                     output_file, description_intent,
+                )
+                _write_splitter_profiles(
+                    output_file, splitter_profiles, xlsx_path, inv_file,
+                    port_map_file, expected_hashes=splitter_input_hashes,
                 )
             except ValueError as exc:
                 print(f"[ERROR] {exc}", file=sys.stderr)

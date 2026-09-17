@@ -205,6 +205,16 @@ MAC 出现后，当前 hostname 覆盖旧别名并过滤旧 archive 成员。lea
 状态块再按 MAC 合并，地址 release/free 或重分配后不会让旧 MAC 继续保留同一 live IP；
 `test_dhcp_runtime_reassignment.py` 独立覆盖重分配、无 MAC free 块和 lease 过期。
 
+`test_splitter_profile_breakout.py` 与 `test_splitter_profile_breakout_workflow.py` 约束 REQ-14：
+splitter profile 决定 2x/4x/8x 硬件模式，不能按已连接 lane 数缩小。direct 覆盖 BGP、direct VLAN、
+bond 及混合角色父口；workflow 用已钉 SHA-256 的真实 0915 语料，只匿名化主机名，串联真实 P2P
+推断、物理链路解析、Jinja 渲染和空对端 description patch，要求保留 8x、最小未用 lane 与零虚假
+empty-missing。案例先建立修复前 RED，再覆盖真实 P2P 入口写入、精确文件名选择、四份输入的
+SHA256 绑定、唯一 JSON/profile key、设备归属歧义和失败前零生成 staging。旧独立测试显式提供
+literal profile 输入，不从 maxsub 反推模式。完整 436 端口的前后字节比较是独立的私有证据，不能
+用内存 workflow 或全模型数量替代。设备侧风险登记于
+`TC-REAL-SPLITTER-PROFILE-001`，owner 接受规则不等于真机 PASS。
+
 P2P/AIR 契约还覆盖项目级 `03-air-topology-policy.json`：源 P2P 自连接默认失败关闭，只有
 AIR policy 中唯一精确命中的 rewrite 可以替换 AIR edge；LLDPQ 仍保留原始设计链路，节点
 allowlist、replacement 和端口集合都必须通过冲突检查。load 把 global 的 Cumulus 版本传入

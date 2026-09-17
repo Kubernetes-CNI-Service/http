@@ -23,6 +23,7 @@ import unittest
 from unittest import mock
 
 import yaml
+from test_cases.splitter_profile_fixture import splitter_fixture, write_splitter_fixture
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -220,6 +221,7 @@ def prepare_schema_v1_collision_generator(root: Path) -> tuple[Path, Path, Path]
             schema_v1_collision_row(),
         ))
     devices = template_dir / "91-devices.yaml"
+    write_splitter_fixture(template_dir / "P2P", {SCHEMA_V1_COLLISION_HOSTNAME: {"swp1": "1to2"}})
     devices.write_bytes(b"sentinel-91-before-collision\n")
     devices.chmod(0o640)
     os.utime(devices, ns=(1_650_000_000_000_000_000,) * 2)
@@ -470,6 +472,7 @@ class MlagEvpnDirectTests(unittest.TestCase):
         }
         return {
             "_project_schema_version": 2,
+            "splitter_profiles": {"swp1": "1to2"},
             "template": "tan-leaf",
             "vlan_ports": [],
             "bond_groups": [copy.deepcopy(group)],
@@ -1120,7 +1123,9 @@ class MlagEvpnGeneratePublishCompareWorkflowTests(unittest.TestCase):
         )
         bad["hostname"] = "BAD-MLAG01"
 
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory() as directory, splitter_fixture(
+            GENERATOR, {"BAD-MLAG01": {"swp1": "1to2"}},
+        ):
             output = Path(directory) / "generated"
             captured = io.StringIO()
             write_paths = []
@@ -1163,7 +1168,9 @@ class MlagEvpnGeneratePublishCompareWorkflowTests(unittest.TestCase):
         device["_project_schema_version"] = 2
         device = self._replace_bonds(device, "bond1s0", "bond10")
 
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory() as directory, splitter_fixture(
+            GENERATOR, {"EXAMPLE-MLAG01": {"swp1": "1to2"}},
+        ):
             output = Path(directory) / "generated"
             captured = io.StringIO()
             with mock.patch.object(

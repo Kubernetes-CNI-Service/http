@@ -13,6 +13,7 @@ import unittest
 from unittest import mock
 
 import yaml
+from test_cases.splitter_profile_fixture import splitter_fixture
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -96,6 +97,7 @@ def oob_core_evpn_device():
         "_project_schema_version": 2,
         "template": "oob-core",
         "hostname": "EXAMPLE-OOB-CORE01",
+        "splitter_profiles": {"swp15": "1to8"},
         "eth0_ip": "192.0.2.10/24",
         "eth0_gw": "192.0.2.1",
         "has_eth1": False,
@@ -318,7 +320,9 @@ class QosEvpnWorkflowTests(unittest.TestCase):
         from test_cases.test_mlag_evpn_generation import border_globals
 
         device = oob_core_evpn_device()
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory() as directory, splitter_fixture(
+            GENERATOR, {"EXAMPLE-OOB-CORE01": {"swp15": "1to8"}},
+        ):
             output = Path(directory) / "generated"
             with mock.patch.object(
                 GENERATOR, "load_devices",

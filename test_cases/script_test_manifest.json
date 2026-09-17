@@ -91,6 +91,8 @@
         "test_cases.test_optimize_output_layout",
         "test_cases.test_project_contracts",
         "test_cases.test_qos_evpn_uplink_generation",
+        "test_cases.test_splitter_profile_breakout",
+        "test_cases.test_splitter_profile_breakout_workflow",
         "test_cases.test_terminal_l2_stp_generation",
         "test_cases.test_topology_consistency",
         "test_cases.test_v2_generation_flow",
@@ -167,6 +169,7 @@
     "test_cases/monitor_authority_root_warden.py",
     "test_cases/monitor_authority_source_guard.py",
     "test_cases/public_project_fixture.py",
+    "test_cases/splitter_profile_fixture.py",
     "test_cases/run_monitor_authority_entrypoints.sh",
     "test_cases/run_related_tests.py",
     "test_cases/run_vm_validation.py",
@@ -613,6 +616,18 @@
       ],
       "tests": [
         "test_cases.test_password_update"
+      ]
+    },
+    {
+      "id": "splitter_profile_breakout",
+      "paths": [
+        "ztp/config/cumulus/template/90-c2-generate_configs.py",
+        "ztp/config/nvos/template/90-c2-generate_configs.py",
+        "ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py"
+      ],
+      "tests": [
+        "test_cases.test_splitter_profile_breakout",
+        "test_cases.test_splitter_profile_breakout_workflow"
       ]
     },
     {
@@ -1097,6 +1112,17 @@
       ]
     },
     {
+      "id": "splitter_profile_to_nvue",
+      "members": [
+        "ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py",
+        "ztp/config/cumulus/template/90-c2-generate_configs.py",
+        "ztp/config/nvos/template/90-c2-generate_configs.py"
+      ],
+      "tests": [
+        "test_cases.test_splitter_profile_breakout_workflow"
+      ]
+    },
+    {
       "id": "password_rotation_sync_preservation",
       "members": [
         "tools/password-update.py",
@@ -1202,6 +1228,17 @@
     }
   ],
   "path_rules": [
+    {
+      "paths": [
+        "test_cases/splitter_profile_fixture.py"
+      ],
+      "tests": [
+        "test_cases.test_mlag_evpn_generation",
+        "test_cases.test_qos_evpn_uplink_generation",
+        "test_cases.test_v2_generation_flow",
+        "test_cases.test_load_release_transaction"
+      ]
+    },
     {
       "paths": [
         "test_cases/script_test_manifest.json",

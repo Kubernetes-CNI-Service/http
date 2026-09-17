@@ -2307,6 +2307,11 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
                  side_effect=lambda *_a, **_k: events.append("mkdir"),
              ),
             mock.patch.object(p2p, "_source_workbook_stem", return_value="fabric"),
+            mock.patch.object(p2p, "_splitter_source_hashes", return_value={
+                "workbook_sha256": "1" * 64,
+                "inventory_sha256": "2" * 64,
+                "port_mapping_sha256": "3" * 64,
+            }),
             mock.patch.object(p2p, "_extract_xlsx_rows", return_value=source_rows),
             mock.patch.object(p2p, "load_inventory", return_value=({}, [])),
             mock.patch.object(p2p, "load_port_map", return_value=({}, {})),
@@ -2325,6 +2330,10 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
                  p2p, "_write_description_intent",
                  side_effect=lambda *_a, **_k: events.append("description") or "intent.json",
              ),
+            mock.patch.object(
+                p2p, "_write_splitter_profiles",
+                side_effect=lambda *_a, **_k: events.append("splitter-profiles") or "profiles.json",
+            ),
             mock.patch.object(p2p, "_complete_splitter_interface_inventory", return_value={}),
             mock.patch.object(p2p, "_configured_bond_member_inventory", return_value={}),
             mock.patch.object(p2p, "_merge_port_inventories", return_value={}),
@@ -2344,11 +2353,14 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
         self.assertEqual("lock-enter", events[0])
         self.assertEqual("monitor-stop", events[1])
         self.assertIn("description", events)
+        self.assertIn("splitter-profiles", events)
         self.assertIn("air-dot", events)
         self.assertIn("air-json", events)
         self.assertEqual("lock-exit", events[-1])
         self.assertLess(events.index("monitor-stop"), events.index("mkdir"))
         self.assertLess(events.index("mkdir"), events.index("air-dot"))
+        self.assertLess(events.index("description"), events.index("splitter-profiles"))
+        self.assertLess(events.index("splitter-profiles"), events.index("air-dot"))
         self.assertLess(events.index("air-dot"), events.index("air-json"))
 
     def test_generator_lock_scope_contains_stop_and_every_identity_mutation(self) -> None:
@@ -2365,7 +2377,7 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
                 "ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py",
                 {
                     "stop_native_ztp_monitors", "makedirs",
-                    "_write_description_intent", "generate_air_dot",
+                    "_write_description_intent", "_write_splitter_profiles", "generate_air_dot",
                     "generate_air_json",
                 },
             ),

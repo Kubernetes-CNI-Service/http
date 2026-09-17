@@ -977,6 +977,27 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   只有 owner 另行批准后才可 approve 与执行。错误环境归属或 last-copy 判断会永久删除不可再生配置，任何
   inventory/hash/identity 不一致都必须阻断，禁止手工改 migration inventory 或事务 journal。
 
+## TC-REAL-SPLITTER-PROFILE-001 — 部分 lane 接线下的 8x 硬件接受性
+
+- 类型：real-environment；需求：REQ-14 / D-32。状态：**NOT RUN / OWNER-RULE ACCEPTED**。
+  M-14a 由 owner「P2P 已写出 8 个子接口即默认设备接受」规则关闭；M-14b 已按该规则以工作簿测量
+  关闭。二者不再构成实现或发布的新硬件窗口门禁，但不得把该规则或本机自动化标为物理验证 PASS。
+  本项只记录尚未执行的可选现场验证与已接受残余，不重新打开 M-14a/M-14b。
+- 自动化：`test_splitter_profile_breakout.py` 与 `test_splitter_profile_breakout_workflow.py`。
+  本机只解析 P2P、生成临时 YAML、验证 filler/description，不连接或修改交换机。
+- 风险与目标：硬件或 OS 若拒绝 8x，会在 apply 时才暴露；模式切换可能中断该 cage 全部现有链路。
+  成功标准为目标硬件接受 8x / lanes-per-port=1，已接线 lane 保持预期链路、未接线 lane 不伪造邻居。
+- 前置条件：仅在 owner 另行批准的可回滚实验交换机执行，具备独立 console/OOB；记录型号、OS、
+  目标 cage、当前模式、物理接线与配置摘要。输入必须绑定确切 workbook、源码和已审定生成 YAML
+  SHA-256，不能以 AIR 支持情况替代实机证据。
+- 步骤：先只读核对四个目标 cage 的 8 条声明及生成 8x；记录现有接口/邻居状态后，在批准窗口使用
+  受管部署流程应用配置；检查全部 8 条子接口、已接线 lane 连通性、未用 lane 的最小配置与无虚假邻居；
+  核对保存及重启后的模式（重启须单独获准）。若设备拒绝，保存拒绝与连通性证据，不伪造成功回执。
+- 证据：脱敏型号/版本、前后模式、接口和邻居状态、NVUE 返回码、生成/运行态配置摘要及回滚结果；
+  不在公共测试仓库保存客户拓扑、配置值或凭据。
+- 故障与清理：在实验环境保留不支持模式的拒绝案例；通过独立 console 恢复原配置并核对全部原链路。
+  仅清理本项生成的临时制品，保留脱敏报告。不在生产设备首测，也不由测试 runner 自动下发。
+
 ## TC-REAL-CONFIG-SYNC-001 — 受保护完整配置同步与会话连续性
 
 - 状态：**NOT RUN / REAL_ENV REQUIRED**。自动化仅在隔离 fixture 中验证规范化门禁、完整回执、

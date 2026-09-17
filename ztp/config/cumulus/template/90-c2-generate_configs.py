@@ -3126,6 +3126,13 @@ def _generate_devices_yaml():
             print(e)
         sys.exit(1)
 
+    # Profile authority must be current before the intermediate model is staged.
+    try:
+        _attach_splitter_profiles(devices_data)
+    except ValueError as exc:
+        print(f"[ERROR] {exc}")
+        sys.exit(1)
+
     # Validation
     _errs = []
     def _chk(ok, hostname, field, val):
@@ -3295,15 +3302,17 @@ def _compress_vlan_ids(vlan_ids) -> str:
     return ','.join(ranges)
 
 
-def _breakout_info(max_sub: int) -> tuple:
-    """Return a valid 2/4/8-way mode for the highest configured sub-port.
-
-    Device input may list only lanes that are actually used. Round up to a
-    supported hardware mode instead of emitting invalid 1x/3x/5x breakouts.
-    """
-    if not 0 <= max_sub <= 7:
-        raise ValueError(f"breakout sub-port index must be 0..7, got {max_sub}")
-    count = 2 if max_sub < 2 else 4 if max_sub < 4 else 8
+def _breakout_info(device: dict, parent: str, max_sub: int) -> tuple:
+    """P2P profile owns mode. Connected lanes only validate its bounds."""
+    profiles = device.get("splitter_profiles", {})
+    profile = profiles.get(parent) if isinstance(profiles, dict) else None
+    count = {"1to2": 2, "1to4": 4, "1to8": 8}.get(profile) if isinstance(profile, str) else None
+    if count is None:
+        raise ValueError(
+            f"splitter profile missing/invalid for {parent}; rerun P2P before generation"
+        )
+    if not 0 <= max_sub < count:
+        raise ValueError(f"splitter profile {parent}={profile} cannot contain lane s{max_sub}")
     return count, 8 // count
 
 
@@ -3313,8 +3322,8 @@ def _merge_overlapping_breakout_parents(parent_swps, bgp_uplink_parents):
     A physical cage can legitimately use some lanes for routed BGP links and
     other lanes for a server-facing bond or direct VLAN.  Templates render the
     two parent maps in separate loops, so leaving the same parent in both maps
-    creates a duplicate YAML key.  Keep the parent in ``parent_swps``, expand
-    it to the largest required breakout mode, and remove only the duplicate
+    creates a duplicate YAML key. Keep the authoritative mode unchanged in
+    ``parent_swps`` and remove only the duplicate
     parent declaration from the BGP map.  Exact BGP child interfaces remain in
     ``bgp_neighbors`` and are still used by uplink tracking and BGP rendering.
     """
@@ -3324,21 +3333,9 @@ def _merge_overlapping_breakout_parents(parent_swps, bgp_uplink_parents):
     ):
         parent = parent_swps[swp_name]
         bgp_parent = bgp_uplink_parents.pop(swp_name)
-        subs = {
-            int(sub)
-            for info in (parent, bgp_parent)
-            for sub in info.get("subs", [])
-        }
-        if not subs:
-            raise ValueError(
-                f"breakout parent {swp_name} has no configured child lanes"
-            )
-        count, lanes = _breakout_info(max(subs))
-        parent.update({
-            "breakout": count,
-            "lanes": lanes,
-            "subs": list(range(count)),
-        })
+        if any(parent.get(key) != bgp_parent.get(key)
+               for key in ("breakout", "lanes", "subs")):
+            raise ValueError(f"conflicting splitter profile metadata for {swp_name}")
 
 
 def _device_bridge_vlan_selectors(device):
@@ -3516,7 +3513,7 @@ def preprocess_device(dev: dict) -> dict:
                 )
         dev['parent_swps'] = {}
         for swp_name in sorted(direct_parent_maxsub, key=_bond_sort_key):
-            count, lanes = _breakout_info(direct_parent_maxsub[swp_name])
+            count, lanes = _breakout_info(dev, swp_name, direct_parent_maxsub[swp_name])
             dev['parent_swps'][swp_name] = {
                 'breakout': count,
                 'lanes': lanes,
@@ -3541,7 +3538,7 @@ def preprocess_device(dev: dict) -> dict:
         # rendering.  Parent breakout metadata must never mark unused lanes.
         evpn_cfg = None
         for swp_name in sorted(bgp_parent_maxsub.keys(), key=_bond_sort_key):
-            count, lanes = _breakout_info(bgp_parent_maxsub[swp_name])
+            count, lanes = _breakout_info(dev, swp_name, bgp_parent_maxsub[swp_name])
             is_evpn = (evpn_cfg == "all") or (isinstance(evpn_cfg, set) and swp_name in evpn_cfg)
             dev['bgp_uplink_parents'][swp_name] = {
                 'breakout': count, 'lanes': lanes,
@@ -3642,7 +3639,7 @@ def preprocess_device(dev: dict) -> dict:
 
     parent_swps = {}
     for swp_name in sorted(parent_swp_maxsub.keys(), key=_bond_sort_key):
-        count, lanes = _breakout_info(parent_swp_maxsub[swp_name])
+        count, lanes = _breakout_info(dev, swp_name, parent_swp_maxsub[swp_name])
         parent_swps[swp_name] = {
             'breakout': count,
             'lanes':    lanes,
@@ -3671,7 +3668,7 @@ def preprocess_device(dev: dict) -> dict:
     evpn_cfg = None
     bgp_uplink_parents: dict = {}
     for swp_name in sorted(bgp_parent_maxsub.keys(), key=_bond_sort_key):
-        count, lanes = _breakout_info(bgp_parent_maxsub[swp_name])
+        count, lanes = _breakout_info(dev, swp_name, bgp_parent_maxsub[swp_name])
         is_evpn = (evpn_cfg == "all") or (isinstance(evpn_cfg, set) and swp_name in evpn_cfg)
         bgp_uplink_parents[swp_name] = {
             'breakout':    count,
@@ -3737,6 +3734,86 @@ def _expected_active_bond_descriptors(device):
                 f"额外={sorted(rendered - declared)!r}"
             )
     return tuple(descriptors)
+
+
+def _load_splitter_profiles():
+    """Read only the active workbook's exact, source-bound profile sidecar."""
+    workbook = Path(os.path.realpath(os.path.join(P2P_INPUT_DIR, "p2p.xlsx")))
+    sidecar = Path(P2P_OUTPUT_DIR) / (workbook.stem + "-splitter-profiles.json")
+
+    def unique_keys(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate splitter profile JSON key: {key}")
+            result[key] = value
+        return result
+
+    try:
+        metadata = sidecar.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise ValueError("splitter profile sidecar must be a single-link regular file")
+        document = json.loads(sidecar.read_text(encoding="utf-8"), object_pairs_hook=unique_keys)
+        keys = {"schema_version", "source_workbook", "workbook_sha256",
+                "inventory_sha256", "port_mapping_sha256", "lldpq_sha256", "profiles"}
+        if (not isinstance(document, dict) or set(document) != keys
+                or type(document["schema_version"]) is not int
+                or document["schema_version"] != 1
+                or document["source_workbook"] != workbook.name):
+            raise ValueError("invalid splitter profile schema/source identity")
+        bindings = {
+            "workbook_sha256": workbook,
+            "inventory_sha256": Path(P2P_INPUT_DIR) / "01-inventory.log",
+            "port_mapping_sha256": Path(P2P_INPUT_DIR) / "02-port-mapping.log",
+            "lldpq_sha256": Path(P2P_OUTPUT_DIR) / (workbook.stem + "-lldpq.dot"),
+        }
+        for key, path in bindings.items():
+            if document[key] != hashlib.sha256(path.read_bytes()).hexdigest():
+                raise ValueError(f"stale splitter profile binding: {key}")
+        if not isinstance(document["profiles"], list):
+            raise ValueError("splitter profiles must be a list")
+        profiles = {}
+        for entry in document["profiles"]:
+            if (not isinstance(entry, dict) or set(entry) != {"device", "parent", "profile"}
+                    or not all(isinstance(entry[key], str) for key in entry)
+                    or not _SAFE_HOSTNAME_RE.fullmatch(entry["device"])
+                    or not re.fullmatch(r"swp[0-9]+", entry["parent"])
+                    or entry["profile"] not in {"1to2", "1to4", "1to8"}):
+                raise ValueError("invalid splitter profile entry")
+            host = entry["device"].casefold()
+            parent = entry["parent"]
+            host_profiles = profiles.setdefault(host, {})
+            if parent in host_profiles:
+                raise ValueError(f"duplicate splitter profile {host}:{parent}")
+            host_profiles[parent] = entry["profile"]
+        return profiles
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ValueError(f"P2P splitter profiles unavailable/invalid ({sidecar}): {exc}; rerun P2P") from exc
+
+
+def _attach_splitter_profiles(devices):
+    """Refresh cached model authority, but do not alter source-YAML receipts."""
+    def has_breakout(value):
+        if isinstance(value, str):
+            return re.fullmatch(r"(?:swp|bond)[0-9]+s[0-9]+", value) is not None
+        if isinstance(value, list):
+            return any(has_breakout(item) for item in value)
+        if isinstance(value, dict):
+            return any(has_breakout(item) for key, item in value.items()
+                       if key != "splitter_profiles")
+        return False
+
+    required = {name: device for name, device in devices.items()
+                if not device.get("source_yaml_b64") and has_breakout(device)}
+    if not required:
+        return
+    profiles = _load_splitter_profiles()
+    for name, device in required.items():
+        matches = [host for host in profiles
+                   if host == name.casefold() or host.endswith("-" + name.casefold())]
+        if len(matches) > 1:
+            raise ValueError(f"ambiguous P2P splitter profile device ownership for {name}: {matches}")
+        device["splitter_profiles"] = dict(profiles[matches[0]]) if matches else {}
 
 
 def load_devices():
@@ -5505,6 +5582,7 @@ def generate_all(
             sys.exit(1)
         devices = {match: devices[match]}
 
+    _attach_splitter_profiles(devices)
     ref_index = _build_ref_index(ref_dir) if ref_dir else {}
 
     # Prove all generated bond intent before creating the staging directory.

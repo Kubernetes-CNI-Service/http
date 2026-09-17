@@ -23,6 +23,8 @@ from unittest import mock
 
 import yaml
 
+from test_cases.splitter_profile_fixture import write_splitter_fixture
+
 
 ROOT = Path(__file__).resolve().parents[1]
 H04_SCHEMA_V1_HEADER = (
@@ -377,6 +379,9 @@ class ReleaseTransactionTests(unittest.TestCase):
         (template_dir / "91-devices.yaml").symlink_to(devices)
         (template_dir / "99-output").symlink_to(self.project / "99-output-eth")
         (template_dir / "P2P").mkdir()
+        write_splitter_fixture(template_dir / "P2P", {
+            H04_COLLISION_HOSTNAME: {"swp1": "1to2"},
+        })
         return template_dir, devices
 
     def _exercise_main_transaction_failure(

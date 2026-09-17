@@ -19,6 +19,7 @@ import unittest
 from unittest import mock
 
 import yaml
+from test_cases.splitter_profile_fixture import splitter_fixture
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -818,14 +819,25 @@ class V2GenerationWorkflowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.temporary = tempfile.TemporaryDirectory()
+        # Literal two-way profile inputs for this suite's s0-only BGP examples.
+        # Wider-mode semantics and disk failure paths have dedicated REQ-14 tests.
+        cls.profile_fixture = splitter_fixture(GENERATOR, {
+            name: {"swp53": "1to2"} for name in (
+                "EXAMPLE-Leaf01", "EXAMPLE-Leaf02", "A1", "A2", "B1", "B2",
+                "C1", "C2", "EVPN1",
+            )
+        })
+        cls.profile_fixture.__enter__()
         try:
             cls._build(Path(cls.temporary.name))
         except BaseException:
+            cls.profile_fixture.__exit__(*sys.exc_info())
             cls.temporary.cleanup()
             raise
 
     @classmethod
     def tearDownClass(cls):
+        cls.profile_fixture.__exit__(None, None, None)
         cls.temporary.cleanup()
 
     def test_filtered_generation_guidance_matches_publisher_completeness_gate(self):

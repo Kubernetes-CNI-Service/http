@@ -83,6 +83,23 @@ recovery，并要求 `exactly one fixed warning`；随后重复同一个 N=1→2
 
 ## 运行操作轴
 
+### P2P 拆分模式与生成配置
+
+P2P 推断出的 splitter profile 是硬件拆分模式的唯一来源：`1to2 → 2x/4 lanes`、
+`1to4 → 4x/2 lanes`、`1to8 → 8x/1 lane`。只接一部分支路不能缩小父口模式。
+direct VLAN、bond、BGP 和混合角色共用该规则；仅生成实际配置使用的父口，未使用的子口保持
+最小声明，不增加虚假物理链路。超过 profile 范围的 lane 会阻止生成。
+
+运行项目 P2P 生成器后，`output-p2p/<实际工作簿名>-splitter-profiles.json` 与 LLDPQ DOT
+一起生成。它绑定 workbook、`01-inventory.log`、`02-port-mapping.log` 和 LLDPQ DOT 的 SHA256。
+配置生成器只接受固定输入 `p2p.xlsx` 所指真实文件名的 sidecar，不会选择最新或其他同类文件。
+输入变化、缺失 profile、无效 schema、重复条目或设备归属歧义都要求先重新生成 P2P，再生成配置；
+不要手工填写 sidecar 或用 `03-splitter.log` 的静态示例代替它。
+
+带有经过校验的 `source_yaml_*` receipt 的导入行仍逐字节透传，不会自动增加拆分声明。
+改变硬件模式可能导致链路中断；规则验收不是设备侧测试结果，真机证据与风险见
+`test_cases/REAL_ENVIRONMENT.md` 中的 `TC-REAL-SPLITTER-PROFILE-001`。
+
 ### ZTP 后配置同步
 
 设备已由受管 full-replace ZTP 成功配置、随后项目输入重新生成 latest 专属 YAML 时，可在 Monitor
