@@ -318,6 +318,143 @@ class AppliedReceiptPersistenceTests(unittest.TestCase):
             self.assertEqual(0o644, stat.S_IMODE(pointer.stat().st_mode))
             self.assertEqual(log_file.name, pointer.read_text(encoding="utf-8").strip())
 
+    def test_last_run_hardlink_tracks_live_log_and_is_replaced_next_run(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            first_harness = library_harness(root, """
+                initialize_persistent_log
+                printf '%s\n' '[ZTP] live-after-publish' >> "$LOG_FILE_PATH"
+                printf '%s\n' "$LOG_FILE_PATH"
+            """)
+            first = run_bash(first_harness)
+            self.assertEqual(0, first.returncode, first.stderr)
+
+            logs = root / "state/logs"
+            alias = logs / "ztp-last-run.log"
+            first_log = Path(first.stdout.strip())
+            self.assertTrue(alias.is_file())
+            self.assertFalse(alias.is_symlink())
+            self.assertEqual(first_log.stat().st_dev, alias.stat().st_dev)
+            self.assertEqual(first_log.stat().st_ino, alias.stat().st_ino)
+            self.assertEqual(0o644, stat.S_IMODE(alias.stat().st_mode))
+            self.assertIn("live-after-publish", alias.read_text(encoding="utf-8"))
+
+            second_harness = library_harness(root, """
+                initialize_persistent_log
+                printf '%s\n' "$LOG_FILE_PATH"
+            """)
+            second = run_bash(second_harness)
+            self.assertEqual(0, second.returncode, second.stderr)
+            second_log = Path(second.stdout.strip())
+            self.assertNotEqual(first_log, second_log)
+            self.assertNotEqual(first_log.stat().st_ino, alias.stat().st_ino)
+            self.assertEqual(second_log.stat().st_ino, alias.stat().st_ino)
+            self.assertTrue(first_log.is_file(), "replacing alias must retain timestamped log")
+            pointer_name = (logs / "latest-log").read_text(encoding="utf-8").strip()
+            self.assertEqual(second_log.name, pointer_name)
+
+    def test_last_run_unsafe_target_is_preserved_and_nonfatal(self):
+        for unsafe_kind in ("symlink", "directory"):
+            with self.subTest(unsafe_kind=unsafe_kind), tempfile.TemporaryDirectory() as name:
+                root = Path(name)
+                logs = root / "state/logs"
+                logs.mkdir(parents=True)
+                alias = logs / "ztp-last-run.log"
+                outside = root / "outside"
+                if unsafe_kind == "symlink":
+                    outside.write_text("do-not-touch", encoding="utf-8")
+                    alias.symlink_to(outside)
+                else:
+                    alias.mkdir()
+                    (alias / "sentinel").write_text("do-not-touch", encoding="utf-8")
+
+                harness = library_harness(root, """
+                    initialize_persistent_log
+                    printf '%s\n' "$LOG_FILE_PATH"
+                """)
+                result = run_bash(harness)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertIn("Refusing unsafe persistent ZTP last-run link", result.stderr)
+                self.assertTrue((logs / "latest-log").is_file())
+                self.assertTrue(Path(result.stdout.strip()).is_file())
+                if unsafe_kind == "symlink":
+                    self.assertTrue(alias.is_symlink())
+                    self.assertTrue(alias.samefile(outside))
+                    self.assertEqual("do-not-touch", outside.read_text(encoding="utf-8"))
+                else:
+                    self.assertTrue(alias.is_dir())
+                    self.assertEqual(
+                        "do-not-touch",
+                        (alias / "sentinel").read_text(encoding="utf-8"),
+                    )
+
+    def test_last_run_link_failure_is_nonfatal_and_cleans_only_private_stage(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            harness = library_harness(root, """
+                ln() { return 1; }
+                initialize_persistent_log
+                printf '%s\n' "$LOG_FILE_PATH"
+            """)
+            result = run_bash(harness)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn("Could not publish persistent ZTP last-run link", result.stderr)
+            logs = root / "state/logs"
+            log_file = Path(result.stdout.strip())
+            self.assertTrue(log_file.is_file())
+            self.assertEqual(
+                log_file.name,
+                (logs / "latest-log").read_text(encoding="utf-8").strip(),
+            )
+            self.assertFalse((logs / "ztp-last-run.log").exists())
+            self.assertEqual([], list(logs.glob(".ztp-last-run.*")))
+
+    def test_last_run_target_rebind_before_publish_is_preserved(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            outside = root / "outside"
+            outside.write_text("do-not-touch", encoding="utf-8")
+            harness = library_harness(root, f"""
+                ln() {{
+                    command ln "$@"
+                    command ln -s {shlex.quote(str(outside))} "$PERSISTENT_LOG_ALIAS"
+                }}
+                initialize_persistent_log
+                printf '%s\n' "$LOG_FILE_PATH"
+            """)
+            result = run_bash(harness)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn("Refusing unsafe persistent ZTP last-run link", result.stderr)
+            logs = root / "state/logs"
+            alias = logs / "ztp-last-run.log"
+            self.assertTrue(alias.is_symlink())
+            self.assertTrue(alias.samefile(outside))
+            self.assertEqual("do-not-touch", outside.read_text(encoding="utf-8"))
+            self.assertTrue(Path(result.stdout.strip()).is_file())
+            self.assertTrue((logs / "latest-log").is_file())
+            self.assertEqual([], list(logs.glob(".ztp-last-run.*")))
+
+    def test_last_run_link_is_atomic_nonfatal_and_after_latest_pointer(self):
+        self.assertIn(
+            'PERSISTENT_LOG_ALIAS="${PERSISTENT_LOG_DIR}/ztp-last-run.log"',
+            TEMPLATE,
+        )
+        self.assertIn("publish_persistent_log_alias", TEMPLATE)
+        self.assertIn(
+            'mktemp -d "${PERSISTENT_LOG_DIR}/.ztp-last-run.XXXXXX"',
+            TEMPLATE,
+        )
+        self.assertIn('ln -- "${LOG_FILE_PATH}" "${alias_tmp}"', TEMPLATE)
+        self.assertIn(
+            'mv -f -- "${alias_tmp}" "${PERSISTENT_LOG_ALIAS}"',
+            TEMPLATE,
+        )
+        self.assertNotIn('ln -f', TEMPLATE)
+        self.assertLess(
+            TEMPLATE.index('mv -f -- "${pointer_tmp}" "${PERSISTENT_LOG_POINTER}"'),
+            TEMPLATE.index("\n    publish_persistent_log_alias\n"),
+        )
+
     def test_runtime_workspace_ignores_precreated_names_and_is_private(self):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)

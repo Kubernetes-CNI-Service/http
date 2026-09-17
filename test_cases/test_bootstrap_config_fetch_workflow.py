@@ -115,6 +115,34 @@ class RenderedBootstrapFetchWorkflowTests(unittest.TestCase):
                 (state / "receipt.env").read_text(encoding="utf-8"),
             )
 
+    def test_both_rendered_entrypoints_preserve_single_source_last_run_link_contract(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            canonical = (ROOT / "ztp/templates/ztp-bootstrap.sh").read_text(
+                encoding="utf-8"
+            )
+            for rendered in self.render(root):
+                text = rendered.read_text(encoding="utf-8")
+                self.assertEqual(
+                    1,
+                    canonical.count('PERSISTENT_LOG_ALIAS="${PERSISTENT_LOG_DIR}/ztp-last-run.log"'),
+                )
+                self.assertEqual(
+                    canonical.count('PERSISTENT_LOG_ALIAS="${PERSISTENT_LOG_DIR}/ztp-last-run.log"'),
+                    text.count('PERSISTENT_LOG_ALIAS="${PERSISTENT_LOG_DIR}/ztp-last-run.log"'),
+                )
+                self.assertEqual(2, canonical.count("publish_persistent_log_alias"))
+                self.assertEqual(
+                    canonical.count("publish_persistent_log_alias"),
+                    text.count("publish_persistent_log_alias"),
+                )
+                self.assertIn(
+                    'PERSISTENT_LOG_POINTER="${PERSISTENT_LOG_DIR}/latest-log"',
+                    text,
+                )
+                self.assertNotIn("ztp-bootstrap_oob.sh/ztp-last-run.log", text)
+                self.assertNotIn("ztp-bootstrap_oobofoob.sh/ztp-last-run.log", text)
+
 
 if __name__ == "__main__":
     unittest.main()

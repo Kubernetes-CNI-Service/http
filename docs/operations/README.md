@@ -173,6 +173,11 @@ Supervisor 和服务日志，再决定是否重试。只读支持包入口是
 `tools/collect-ztp-diagnostics.py`。不要以重建或清理容器作为第一步，
 尤其不要删除标签或 bind 不匹配的同名 foreign container。
 
+交换机上的 `/var/lib/nvidia-ztp/logs/ztp-last-run.log` 是当前一次 ZTP 时间戳日志的固定名硬链接，
+可直接 `tail -f` 查看正在追加的内容；下一次运行会原子切换到新的日志 inode，旧时间戳文件仍保留。
+`latest-log` 仍是监控和诊断脚本使用的单行文件名指针，不得改成链接或手工重写。固定名目标若为
+符号链接/目录等不安全类型，bootstrap 只告警并保持原样，不能为了便利入口阻断配置应用。
+
 ## 恢复原则
 
 统一事务失败后，从第一个未通过的 checkpoint 恢复；已经证明且不可变的 upload、OCI tar、image

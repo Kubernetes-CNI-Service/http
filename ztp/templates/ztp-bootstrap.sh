@@ -43,6 +43,7 @@ LOG_FILE_NAME="ztp-result.log"
 APPLIED_STATE_DIR="/var/lib/nvidia-ztp"
 PERSISTENT_LOG_DIR="${APPLIED_STATE_DIR}/logs"
 PERSISTENT_LOG_POINTER="${PERSISTENT_LOG_DIR}/latest-log"
+PERSISTENT_LOG_ALIAS="${PERSISTENT_LOG_DIR}/ztp-last-run.log"
 LOG_FILE_PATH=""
 APPLIED_YAML_PATH="${APPLIED_STATE_DIR}/last-success.yaml"
 APPLIED_RECEIPT_PATH="${APPLIED_STATE_DIR}/receipt.env"
@@ -127,6 +128,53 @@ cleanup_runtime_workspace_on_exit() {
 # first message is emitted.  Do not reuse /tmp/ztp/ztp-result.log: that fixed
 # path can be inherited, symlinked or truncated while ZTP is running, and an
 # end-of-run copy then loses the only structured stage evidence.
+publish_persistent_log_alias() {
+    local old_umask alias_stage alias_tmp
+    if [[ -L "${PERSISTENT_LOG_ALIAS}" ||
+          ( -e "${PERSISTENT_LOG_ALIAS}" && ! -f "${PERSISTENT_LOG_ALIAS}" ) ]]; then
+        echo "[ZTP] WARN: Refusing unsafe persistent ZTP last-run link" >&2
+        return 0
+    fi
+
+    old_umask=$(umask)
+    umask 077
+    if ! alias_stage=$(mktemp -d "${PERSISTENT_LOG_DIR}/.ztp-last-run.XXXXXX"); then
+        umask "${old_umask}"
+        echo "[ZTP] WARN: Could not publish persistent ZTP last-run link" >&2
+        return 0
+    fi
+    umask "${old_umask}"
+    alias_tmp="${alias_stage}/ztp-last-run.log"
+
+    if ! ln -- "${LOG_FILE_PATH}" "${alias_tmp}" ||
+       [[ -L "${alias_tmp}" || ! -f "${alias_tmp}" ]] ||
+       [[ ! "${LOG_FILE_PATH}" -ef "${alias_tmp}" ]] ||
+       ! chown root:root "${alias_tmp}" || ! chmod 0644 "${alias_tmp}"; then
+        rm -f -- "${alias_tmp}" 2>/dev/null || true
+        rmdir -- "${alias_stage}" 2>/dev/null || true
+        echo "[ZTP] WARN: Could not publish persistent ZTP last-run link" >&2
+        return 0
+    fi
+
+    # Recheck immediately before replacement so a pre-existing unsafe target
+    # is never deliberately removed or followed.
+    if [[ -L "${PERSISTENT_LOG_ALIAS}" ||
+          ( -e "${PERSISTENT_LOG_ALIAS}" && ! -f "${PERSISTENT_LOG_ALIAS}" ) ]]; then
+        rm -f -- "${alias_tmp}" 2>/dev/null || true
+        rmdir -- "${alias_stage}" 2>/dev/null || true
+        echo "[ZTP] WARN: Refusing unsafe persistent ZTP last-run link" >&2
+        return 0
+    fi
+    if ! mv -f -- "${alias_tmp}" "${PERSISTENT_LOG_ALIAS}"; then
+        rm -f -- "${alias_tmp}" 2>/dev/null || true
+        rmdir -- "${alias_stage}" 2>/dev/null || true
+        echo "[ZTP] WARN: Could not publish persistent ZTP last-run link" >&2
+        return 0
+    fi
+    rmdir -- "${alias_stage}" 2>/dev/null || true
+    return 0
+}
+
 initialize_persistent_log() {
     local old_umask timestamp pointer_tmp log_basename
     if [[ -L "${APPLIED_STATE_DIR}" ||
@@ -193,6 +241,7 @@ initialize_persistent_log() {
         echo "[ZTP] ERROR: Could not publish persistent ZTP latest-log pointer" >&2
         return 1
     fi
+    publish_persistent_log_alias
 }
 
 # 在本次 DHCP ZTP 实际选择的 VRF 中执行网络命令。

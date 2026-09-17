@@ -295,8 +295,11 @@ Production host-key mismatch 默认 fail closed，只有单台完整 hostname �
 测试不会连接或触发真实交换机。
 
 `test_ztp_applied_receipt.py` 覆盖 bootstrap 的 root-owned `/run` 独立工作区、原子
-`latest-log` 指针、未来 mtime 旧日志反例、apply/save receipt、原始 YAML 字节/hash、失败后
-默认回退和固定只读 helper。`test_manual_applied_config.py` 覆盖手工操作始终把 selector-normalized
+`latest-log` 指针，以及在该指针成功发布后非致命创建的 `ztp-last-run.log` 固定名硬链接；测试验证
+同 device/inode、0644、实时追加、下次运行原子替换、旧时间戳日志保留、不安全目标原样保留和失败
+只清理私有暂存目录。真实 `11-load.py` 渲染 workflow 另证明 `_oob`/`_oobofoob` 只继承唯一模板源，
+不会生成第二套固定名逻辑。该套件还覆盖未来 mtime 旧日志反例、apply/save receipt、原始 YAML
+字节/hash、失败后默认回退和固定只读 helper。`test_manual_applied_config.py` 覆盖手工操作始终把 selector-normalized
 的当前 `nv config show` 与 current latest 比较，包括 breakout `swp1s0-3`/组合 selector；receipt
 只用于审计和 preview/confirm TOCTOU 指纹，可信 receipt 也不能掩盖后续运行态漂移。该套件还
 覆盖 `system.aaa.user.<用户名>.hashed-password` 在 show 中缺失/显示 `*` 时不产生假 diff，
