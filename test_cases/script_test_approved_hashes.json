@@ -24,7 +24,7 @@
       "root-entrypoint-workflow": "NOT COVERED (requires Linux EUID 0 private namespace)"
     },
     "schema_version": 1,
-    "snapshot_sha256": "17231368d0957df1022d0d016530982505e48f1820d9fc986997670d6dd7a07f"
+    "snapshot_sha256": "481595da16644581d1ddb092d2b4ce2357a5c808609db46c0bfa304e05f41755"
   },
   "impact_manifest_sha256": "7d10f58f2e121c8e526eed509d5d3a51066a533c4c2a136584e71ab8f7abd7ec",
   "schema_version": 1,
@@ -39,7 +39,7 @@
     },
     "DAY0-Prepare/11-load.py": {
       "canonical": "DAY0-Prepare/11-load.py",
-      "sha256": "fd006bdc915c0f1ca5b0ad5bef818454452b19dafbd95172ea1fc88a81b170a6"
+      "sha256": "5f492e134a8751349762cb4db9f30ffaea70d0a392a08219e7890d6504563b89"
     },
     "DAY0-Prepare/12-ztp-monitor.py": {
       "canonical": "DAY0-Prepare/12-ztp-monitor.py",
@@ -471,7 +471,7 @@
     },
     "ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py": {
       "canonical": "ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py",
-      "sha256": "a48d1560e7ece68f96abefb9de710e31da834a4d11e0fecd7feb7a6d6926f458"
+      "sha256": "b441385ab8f4dd50c39a775bbac4da92ba100ff3c18ce8a89023c4c216ef56d5"
     },
     "ztp/config/isc-dhcp-server/c1-generate_dhcp.py": {
       "canonical": "ztp/config/isc-dhcp-server/c1-generate_dhcp.py",
@@ -587,7 +587,7 @@
     "infra/docker/supervisord.conf": "368f60a2510fa3126eef58098ce5287d70e4b30b662e421f29aa80c007957b01",
     "requirements-container-top-level.lock": "3532f5208b462243bab779b01eb4deb21638ac05a9390c17ac997ba8d7f24998",
     "requirements-dev.txt": "2047cfeb6e7d7c3b02380624cd212528fb8416cf3e76dd924d2e2cba8567a50a",
-    "test_cases/REAL_ENVIRONMENT.md": "15f8943030645bd912e966abc0a8b0e0830e4d2cfc5bf65b2fdf2b8444e9d757",
+    "test_cases/REAL_ENVIRONMENT.md": "f20e9408ca812ebf169b128590ea72ba9849920e6fdf7e0f685c5ec27eb27232",
     "test_cases/audit_public_tree.py": "0426abb0b3ebe6f88ea63600771f2fc7574faf3584dbb39588f5e540f86b72de",
     "test_cases/monitor_authority_root_warden.py": "3ff032300deb61d40e12f7eebf43f3915abb06cc241341b198cd4d04170df6f8",
     "test_cases/monitor_authority_source_guard.py": "4c3a6a668c98c01fb7822085c2aaffcbafa024fcdbf04b04f6a6566d78797c7b",
@@ -597,7 +597,7 @@
     "test_cases/run_vm_validation.py": "65391bcc2a1178d7efbcc36d7af0e3e533303f4e19fac405f74ad2fc6732863c",
     "test_cases/splitter_profile_fixture.py": "7b0548d7d15b855278e21456d1ec2b667072d874ba68d527348f185f85d6d75f",
     "tools/lldp-analyze-tool/04-lldp-device-aliases.json": "595529fac28098b504d67809026a59ecfa0345375ada9b16057ff069e5179250",
-    "user-manual.html": "ea0a3527ba38a54b8174452b238029575dbd39f816956a632b77b6aac5c592f3",
+    "user-manual.html": "d9f191822f06dd0cf6ea345ec034bf1a30a8a8ddb1d6e0b1207abe70063cae9e",
     "ztp/config/cumulus/ar_profile_custom.conf": "9316fe81c3238ef99076ee598abf303c955dc38343df4176ba22bc4c27729c1c",
     "ztp/config/cumulus/default.yaml": "d5be6765745d96c7449c2f3dc550213247def7ab2b40fa33be14c250c14d6dfe",
     "ztp/config/cumulus/default_5.16.5.yaml": "d5be6765745d96c7449c2f3dc550213247def7ab2b40fa33be14c250c14d6dfe",
@@ -635,7 +635,7 @@
     "ztp/templates/ztp.json": "1a2c06ee0b25a657e0718698ebc3b7177c00e10d062471a6bcc6909a186abf83"
   },
   "tests": {
-    "test_cases.test_air_link_endpoint_contract": "6497eec8fc695ca7f2644a0f1335b2a0e9d5ee16ebf3a52c1345763549fc3eca",
+    "test_cases.test_air_link_endpoint_contract": "854117b7c1cdb856554748d6f1aeacce216f30d60c4812ce99226906ac7f1a4c",
     "test_cases.test_all_script_entrypoints": "24293e35b57c5e6c2d3c5596132dd726e34031923d6adb9cbe39b2c5c0203dc5",
     "test_cases.test_apache_publication_boundary": "bd11453f333133d55a8a640368b06121ebce65e03d44fda94272248c81ed10de",
     "test_cases.test_backup_auth_transport_workflow": "ce655ad829dc400533f9c7f953c0b6752c1a541974f33a6224f15f2a2a1cdfdd",
@@ -673,9 +673,9 @@
     "test_cases.test_ib_analysis_domain": "c896a53389d652a220835e0e1ccfbacd2bfb165b515c006fd21b82bd04ec1686",
     "test_cases.test_import_from_download_target": "d2296b575c77b2f7f0a59eb6c2d875ce71d89ac6e25029b468a08dbc13a76245",
     "test_cases.test_infra_check_and_manual_reset": "f12485c976471de81c6be125a2f4f2c8455deea2e50acd4d2611352ccc835143",
-    "test_cases.test_load_release_transaction": "f0375ec434606cc2645dde86d1ca790f76572912f7860278470fde15bb4f2714",
+    "test_cases.test_load_release_transaction": "2fb0d50fa1169dedd67d038abf1d03ecc357212bd73dc8dea74b6dde1e7ed130",
     "test_cases.test_manual_applied_config": "62657aa18a18c0ba556c424d30d86522d1043004b3cc1ec30a023d2ddd87fbf6",
-    "test_cases.test_mlag_evpn_generation": "da7f0594b3b4f505bf9cdb2a1ce552494f3559b934c34f1b11cafb72dfcb26b2",
+    "test_cases.test_mlag_evpn_generation": "045abaf5a26015f44adc390e90ce3f8d996b9c50ce47ec26e731ce44e24e7c3c",
     "test_cases.test_monitor_authority_entrypoints": "ff441c7863f6a529cb493590a49a693c76c131a2dc75a0269014a4fa0cf2dfc7",
     "test_cases.test_monitor_authority_semantic_workflow": "b0753af14ebb0059a69798ed2fc1a4918133ae0ebde37c1db67d7c3850f71cd1",
     "test_cases.test_monitor_authority_source_guard": "bb1fd10fc83f7e4de2ae8c87c39cb5c3fd304fdfbc8a8404087e271d25db156e",
@@ -699,12 +699,12 @@
     "test_cases.test_public_repository_contract": "78b385437de4a198a168be37d3b39cf8008a011af912ad950d6e6be8ef8a34ed",
     "test_cases.test_public_s_phase_contract": "78c1f2207f7b7d8a461ed414eae9bb16a803a9acc4dd8f86e3f1aad81aaf9e04",
     "test_cases.test_public_s_phase_workflow": "d0b3845269e8b99a6390f4b36da5ea11726c9edfaa9fd4dfc6d7a5522b4d77e3",
-    "test_cases.test_qos_evpn_uplink_generation": "bda9268d2ad9d51ef6a09e128648383658151551cec45f9ff1e91de5e0a830a3",
+    "test_cases.test_qos_evpn_uplink_generation": "91217e7fe60914a7d017a61be3819fe3717fe23490d339eb9e41f0d888c5908e",
     "test_cases.test_reference_only_path_disposition": "72d6a03a8e5e1464623e1f540128641c9f6cf8dcd36ab283ca15adbb910cc8d5",
     "test_cases.test_reference_only_selector_workflow": "555fecb2632f014176d0790df9a1ac706143161e13118cee038d4a3bd532fe86",
     "test_cases.test_shared_artifact_bundle": "d3de6c12af5f9008745cdadc1fc120f1d625e1287834abb50644085dcbfe473f",
-    "test_cases.test_splitter_profile_breakout": "663207045de6b792246cdfa60f40cd51e0c17cad51dcec001ff779f503daf991",
-    "test_cases.test_splitter_profile_breakout_workflow": "62c35fd5e096297d036aa9bf9c02fdca9f9da4d564cfc4142d8f0ca313439d1a",
+    "test_cases.test_splitter_profile_breakout": "4390b5da384cdd8b3c76d361475a405e381b81f8c69c886d975da02efe0eea72",
+    "test_cases.test_splitter_profile_breakout_workflow": "6f12acec85f5540bde3de1ddf9670df2eeb3af56c150d8d52c6f6ba341285e75",
     "test_cases.test_terminal_l2_stp_generation": "fa322a659446400a75ae877a5badf73bfc939ad0345aa7717098bedd7689aa6e",
     "test_cases.test_test_case_repository": "78bab9b8e415ce9744276e08b7332fc0eaec52217736485a5511eba97c3785a2",
     "test_cases.test_topology_consistency": "abd9a57fac0c132977b7f9e0d8e01279b3a901382a2a44858c5a16da214ca69a",
@@ -712,8 +712,8 @@
     "test_cases.test_v2_generation_flow": "53f05319808cda870b26423d18507b2b8f3692de83cbb23bda978ecc46e7709a",
     "test_cases.test_v2_project_schema": "bed45a0bacee1f1b860e7a2e95122a6cf4bf5848bdecb49097b7b9826aa34aa9",
     "test_cases.test_vm_validation_runner": "a06c82020c121098026883ea6031b21f5d0b5578774d2032e31f81b07ecf3a45",
-    "test_cases.test_xlsx_zero_row_fail_closed": "81aca85bd37299734ee0f058abb2d20b973a2564a43046c4e3a6d115e033f1f6",
-    "test_cases.test_xlsx_zero_row_workflow": "5b8e2b66b4f98db1cf7d86276db7c7969c0072f4c0015d57d56d812cd20653ce",
+    "test_cases.test_xlsx_zero_row_fail_closed": "9280ac4b9d6afdc24f5a09954e0736a4d56fd7c54d633338c78a9fe4ff8f1248",
+    "test_cases.test_xlsx_zero_row_workflow": "2b8d7da1ed8eef6547f22ab229d716bca3f9e0723495257a8c65de2950463a2a",
     "test_cases.test_ztp_applied_receipt": "404c73ed46c042b35d1a6ed50a1f539c653ccab768df88a4f41ff6b460e6191e",
     "test_cases.test_ztp_container_runtime": "27a969fb326ab3da34670248734cbbb12b08e5bb73635ad7a17f0b6e44e094b8",
     "test_cases.test_ztp_group_handoff": "8db38c7ac6060ba28ec1530e02baac81a1156c86d53c3b0ba4cfd85d809caffd",
