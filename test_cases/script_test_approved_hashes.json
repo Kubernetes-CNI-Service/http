@@ -1,31 +1,4 @@
 {
-  "full_suite_attestation": {
-    "environment": {
-      "container_toplevel_lock_sha256": "3532f5208b462243bab779b01eb4deb21638ac05a9390c17ac997ba8d7f24998",
-      "container_toplevel_versions": [
-        "Jinja2==3.1.6",
-        "openpyxl==3.1.5",
-        "pandas==2.3.3",
-        "PyYAML==6.0.3",
-        "XlsxWriter==3.2.9"
-      ],
-      "machine": "arm64",
-      "platform": "darwin",
-      "python_cache_tag": "cpython-39",
-      "python_executable": "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/bin/python3.9",
-      "python_implementation": "CPython",
-      "python_version": [
-        3,
-        9,
-        6
-      ]
-    },
-    "scenario_coverage": {
-      "root-entrypoint-workflow": "NOT COVERED (requires Linux EUID 0 private namespace)"
-    },
-    "schema_version": 1,
-    "snapshot_sha256": "43357c85f6df4b4f2137738c1ae7ca3c82bf4259c13553998f5b49b12ea334ee"
-  },
   "impact_manifest_sha256": "f1ba11d6dee9488e30b6fb887a5c9ab408eea0f474918825a764db483feb3852",
   "schema_version": 1,
   "scripts": {
@@ -666,7 +639,7 @@
     "test_cases.test_finished_project_import": "0c3f88e5066e5c8fae203d2522d40bd8b3007569dfc1fab5db89625027dbfe1d",
     "test_cases.test_finished_project_lifecycle": "3cc8a504a2e6fbd2615a18382c38c3972c1ae3ca6c63a8abead2905afab2185c",
     "test_cases.test_finished_project_rehydrate": "3b2ace459957af9a5ea8dd81572dba0312e436635f6b1b10df2cdf83917d5f15",
-    "test_cases.test_flow_release_platform_matrix": "f4180cb00cf2272d3e7c9d943da08bdcdb2764bbc357729d1be1e89e11a6f7bc",
+    "test_cases.test_flow_release_platform_matrix": "94e7a2739f526ac524d237bcee907a1d92e19b0445a63a89db19db35a349a822",
     "test_cases.test_full_flow_integration": "f0029a79e910594c1d5630977754e92dae7ad61d49d6d6090a626e7644f473cf",
     "test_cases.test_ib_analysis_domain": "c896a53389d652a220835e0e1ccfbacd2bfb165b515c006fd21b82bd04ec1686",
     "test_cases.test_import_from_download_target": "d2296b575c77b2f7f0a59eb6c2d875ce71d89ac6e25029b468a08dbc13a76245",
