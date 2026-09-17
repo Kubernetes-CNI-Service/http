@@ -40,11 +40,16 @@ def load_module(name: str, path: Path):
     module = importlib.util.module_from_spec(spec)
     previous = sys.modules.get(name)
     sys.modules[name] = module
-    sys.path[:0] = [str(path.parent), str(TOOLS), str(ROOT)]
+    helper_paths = [str(path.parent), str(TOOLS), str(ROOT)]
+    sys.path[:0] = helper_paths
     try:
         spec.loader.exec_module(module)
     finally:
-        del sys.path[:3]
+        for helper_path in helper_paths:
+            for index, current in enumerate(sys.path):
+                if current is helper_path:
+                    del sys.path[index]
+                    break
         if previous is None:
             # Dataclasses keep the defining module name.  Leave the module
             # registered for the duration of this test process.
@@ -78,6 +83,30 @@ LOAD = load_module(
     "flow_release_parent_consumer",
     ROOT / "DAY0-Prepare/11-load.py",
 )
+
+
+class LoadModulePathIsolationTests(unittest.TestCase):
+    def test_loader_removes_only_its_entries_and_preserves_module_paths(self):
+        original = sys.path[:]
+        equal_root = (" " + str(ROOT)).strip()
+        sys.path.insert(0, equal_root)
+        before = sys.path[:]
+        module_name = "flow_release_path_isolation_probe"
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                module_path = Path(directory) / "probe.py"
+                module_owned = str(Path(directory) / "module-owned")
+                module_path.write_text(
+                    "import sys\n"
+                    f"sys.path.insert(0, {module_owned!r})\n",
+                    encoding="utf-8",
+                )
+                load_module(module_name, module_path)
+                self.assertEqual([module_owned, *before], sys.path)
+                self.assertTrue(any(item is equal_root for item in sys.path))
+        finally:
+            sys.path[:] = original
+            sys.modules.pop(module_name, None)
 
 
 TIMESTAMP = "20260901_120000"
