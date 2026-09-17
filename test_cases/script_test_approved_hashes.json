@@ -1,31 +1,4 @@
 {
-  "full_suite_attestation": {
-    "environment": {
-      "container_toplevel_lock_sha256": "3532f5208b462243bab779b01eb4deb21638ac05a9390c17ac997ba8d7f24998",
-      "container_toplevel_versions": [
-        "Jinja2==3.1.6",
-        "openpyxl==3.1.5",
-        "pandas==2.3.3",
-        "PyYAML==6.0.3",
-        "XlsxWriter==3.2.9"
-      ],
-      "machine": "arm64",
-      "platform": "darwin",
-      "python_cache_tag": "cpython-39",
-      "python_executable": "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/bin/python3.9",
-      "python_implementation": "CPython",
-      "python_version": [
-        3,
-        9,
-        6
-      ]
-    },
-    "scenario_coverage": {
-      "root-entrypoint-workflow": "NOT COVERED (requires Linux EUID 0 private namespace)"
-    },
-    "schema_version": 1,
-    "snapshot_sha256": "736018e2b1bda925ae42d7a46438fd206608bc6c730a8fe7d192a160fba47f56"
-  },
   "impact_manifest_sha256": "f1ba11d6dee9488e30b6fb887a5c9ab408eea0f474918825a764db483feb3852",
   "schema_version": 1,
   "scripts": {
@@ -459,7 +432,7 @@
     },
     "ztp/backup/yaml-collect.py": {
       "canonical": "ztp/backup/yaml-collect.py",
-      "sha256": "3570c5fc77898568e2f8765cbb906080e6a1c23ff66fda7f6c2ac6115f6ccedd"
+      "sha256": "ec5b1ef9d816bc10f81d652857129b2aaec49e53bd5299b87a8fb460a4c47acd"
     },
     "ztp/config/cumulus/d-hostname2mac.py": {
       "canonical": "ztp/config/cumulus/d-hostname2mac.py",
@@ -587,7 +560,7 @@
     "infra/docker/supervisord.conf": "368f60a2510fa3126eef58098ce5287d70e4b30b662e421f29aa80c007957b01",
     "requirements-container-top-level.lock": "3532f5208b462243bab779b01eb4deb21638ac05a9390c17ac997ba8d7f24998",
     "requirements-dev.txt": "2047cfeb6e7d7c3b02380624cd212528fb8416cf3e76dd924d2e2cba8567a50a",
-    "test_cases/REAL_ENVIRONMENT.md": "d1d9fcb728c2d682111f119b09fe7dee7d8247e4a2b52a2c4ccd603bd48e4d3d",
+    "test_cases/REAL_ENVIRONMENT.md": "ddfd2512521a4a6005b51b33b8c8fab8e61cebdb570fcf5e30b2d8ecda28a034",
     "test_cases/audit_public_tree.py": "0426abb0b3ebe6f88ea63600771f2fc7574faf3584dbb39588f5e540f86b72de",
     "test_cases/monitor_authority_root_warden.py": "3ff032300deb61d40e12f7eebf43f3915abb06cc241341b198cd4d04170df6f8",
     "test_cases/monitor_authority_source_guard.py": "4c3a6a668c98c01fb7822085c2aaffcbafa024fcdbf04b04f6a6566d78797c7b",
@@ -636,7 +609,7 @@
   "tests": {
     "test_cases.test_all_script_entrypoints": "24293e35b57c5e6c2d3c5596132dd726e34031923d6adb9cbe39b2c5c0203dc5",
     "test_cases.test_apache_publication_boundary": "bd11453f333133d55a8a640368b06121ebce65e03d44fda94272248c81ed10de",
-    "test_cases.test_backup_auth_transport_workflow": "150a931a4ceffc1e55e9c409164186645ab0b583d2589878f5f0d5974136da4c",
+    "test_cases.test_backup_auth_transport_workflow": "ce655ad829dc400533f9c7f953c0b6752c1a541974f33a6224f15f2a2a1cdfdd",
     "test_cases.test_bootstrap_config_fetch_contract": "80e6f5058e22c2f7b5afc38984d04635daed2edf4fdc86f5cacf653dbba65dcd",
     "test_cases.test_bootstrap_config_fetch_workflow": "3828a7603080c503b72691fe19d27e0fc87a91d2501d132c64df6d80855c99a4",
     "test_cases.test_change_aware_test_runner": "afb81a79bd62d56c1016bdb6a02cd634cae8eedd52d6aebde72ed0d4c5dfc0e4",
@@ -718,7 +691,7 @@
     "test_cases.test_ztp_monitor_watch_resilience": "b9b54960fe96bfc388753787cb3576daf80e26f514a733fbb1968a0fe948c1c9",
     "test_cases.test_ztp_monitor_watch_runtime_workflow": "f68fa02c79056f29d9c1f9ae78c30a0e716fc055cbf67224015688baca1aac4c",
     "test_cases.test_ztp_prefix_runtime_boundary": "76a0c556fe2d570b60241a6d43e34aa591787596833d5a894deef19f7853bf90",
-    "test_cases.test_ztp_release_core_review": "88b99962e5c64fa259ad353aeeda6d87ab2ccb796b58a0b05d80a578ed79fab1",
+    "test_cases.test_ztp_release_core_review": "68e34b213e7c65f08a21f1333d16e943aa56a4273fe670c99691cb63093d68f7",
     "test_cases.test_ztp_service_runtime": "f9509ab3344fbd4e80d854ed86aac9c01941301de9dfcc0dc7fa7f0cfb27ed31"
   }
 }
