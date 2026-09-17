@@ -1,4 +1,31 @@
 {
+  "full_suite_attestation": {
+    "environment": {
+      "container_toplevel_lock_sha256": "3532f5208b462243bab779b01eb4deb21638ac05a9390c17ac997ba8d7f24998",
+      "container_toplevel_versions": [
+        "Jinja2==3.1.6",
+        "openpyxl==3.1.5",
+        "pandas==2.3.3",
+        "PyYAML==6.0.3",
+        "XlsxWriter==3.2.9"
+      ],
+      "machine": "arm64",
+      "platform": "darwin",
+      "python_cache_tag": "cpython-39",
+      "python_executable": "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/bin/python3.9",
+      "python_implementation": "CPython",
+      "python_version": [
+        3,
+        9,
+        6
+      ]
+    },
+    "scenario_coverage": {
+      "root-entrypoint-workflow": "NOT COVERED (requires Linux EUID 0 private namespace)"
+    },
+    "schema_version": 1,
+    "snapshot_sha256": "e91efe0a149cb091b7abada81e2ab767ede879759552746d6d897f74b0c78230"
+  },
   "impact_manifest_sha256": "f1ba11d6dee9488e30b6fb887a5c9ab408eea0f474918825a764db483feb3852",
   "schema_version": 1,
   "scripts": {
