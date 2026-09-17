@@ -303,6 +303,53 @@ elif "platform inventory" in command:
         path.write_text(source, encoding="utf-8")
         path.chmod(0o755)
 
+    def test_collection_publish_dedup_and_prune_share_atomic_lifecycle(self):
+        backup = load_module(
+            "backup_retention_real_collector",
+            ROOT / "ztp/backup/yaml-collect.py",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "99-output-backup"
+            root.mkdir(mode=0o700)
+            previous = root / "20260824_1542-prod-backup"
+            (previous / "eth").mkdir(parents=True, mode=0o700)
+            previous.chmod(0o700)
+            (previous / "eth").chmod(0o700)
+            old = previous / "eth/leaf01.yaml"
+            old.write_bytes(b"same bytes\n")
+            old.chmod(0o600)
+
+            staging, final = backup._stage_private_backup_tree(
+                root, "20260831_2137-prod-backup",
+            )
+            backup._write_sensitive_backup_yaml(
+                Path(staging) / "eth", "leaf01.yaml", "same bytes\n",
+            )
+            report = backup._publish_and_retain_backup_batch(
+                root, staging, final.name, environment="prod",
+            )
+
+            self.assertEqual("publish", report["events"][0])
+            self.assertIn("deduplicate", report["events"])
+            self.assertFalse(Path(staging).exists())
+            self.assertTrue((final / "eth/leaf01.yaml").is_file())
+            self.assertFalse(old.exists())
+            self.assertEqual(0o600, stat.S_IMODE((final / "eth/leaf01.yaml").stat().st_mode))
+
+            conflicting_stage, conflicting_final = backup._stage_private_backup_tree(
+                root, "20260901_1200-prod-backup",
+            )
+            conflicting_final.mkdir(mode=0o700)
+            sentinel = conflicting_final / "sentinel"
+            sentinel.write_text("do not replace\n", encoding="utf-8")
+            with self.assertRaises(FileExistsError):
+                backup._publish_and_retain_backup_batch(
+                    root, conflicting_stage, conflicting_final.name,
+                    environment="prod",
+                )
+            self.assertEqual("do not replace\n", sentinel.read_text(encoding="utf-8"))
+            self.assertTrue(Path(conflicting_stage).is_dir())
+
     @staticmethod
     def _write_fake_keyscan(path: Path) -> None:
         source = f'''#!/usr/bin/env python3

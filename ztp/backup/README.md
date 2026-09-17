@@ -34,6 +34,35 @@ YAML 通过持有的父目录 FD 以 `O_EXCL|O_NOFOLLOW` 创建，既有名字�
 manifest 与 append-only journal 显式 resume。任何新增对象、链接、owner 或内容漂移都要求
 重新 inventory，工具永不自动把权限恢复到更宽模式。
 
+每轮采集先写入同一备份根下的私有 `.partial-*` 目录；全部 YAML、报告与目录完成
+`fsync` 后，才以 no-replace 原子 rename 发布规范批次名。一个根级排他锁连续覆盖发布、
+逐设备去重、每设备版本封顶与批次封顶。去重只比较同环境紧邻两批中相同
+`family/hostname` 的字节：相同则删除旧副本，不同或任一侧缺失均保留。每设备默认最多
+保留 100 个不同版本；批次也以 100 为目标，但含某设备最后存活副本的批次不会删除，
+会打印 `retention_blocked_by_last_copy`。没有时间保留参数，也没有 production CLI cap
+覆盖参数。每次删除先把目标相对路径与完整对象身份写入私有 append-only journal 并
+`fsync`；中断后的下一轮只完成同一身份的待办删除，名字已被替换时拒绝。已批准的 legacy
+inventory 保持只读；后续树变化只有能由该 journal 中已完成删除完整解释时才继续获准。
+
+历史无后缀批次（如 `20260624_111542`）第一次参与 retention 前必须执行两步人工审核。
+inventory 只能放在备份树之外的当前身份私有路径；prepare 记录 canonical root、每批
+环境与包含 type/mode 的 exact tree SHA-256，审核后用同一参数 approve。树在两步之间
+发生任何变化都会拒绝批准：
+
+```bash
+python3 yaml-collect.py \
+  --prepare-retention-migration-inventory /srv/ztp/.99-output-backup.retention-migration.json \
+  --legacy-environment 20260624_111542=prod
+# 人工审核 JSON 与历史批次归属后：
+python3 yaml-collect.py \
+  --approve-retention-migration-inventory /srv/ztp/.99-output-backup.retention-migration.json \
+  --legacy-environment 20260624_111542=prod
+```
+
+正常采集读取 canonical backup root 的 sibling
+`.99-output-backup.retention-migration.json`；prepare 与 approve 应直接使用该路径，禁止手工
+移动、复制或修改 inventory（包括 `allow_retention`）。
+
 ## 使用
 
 ```bash

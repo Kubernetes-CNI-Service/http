@@ -4743,6 +4743,521 @@ class BackupAuthenticationContractTests(unittest.TestCase):
             self.assertTrue(result and result["yaml_ok"])
             self.assertEqual(1, scan.call_count)
 
+    @staticmethod
+    def _retention_batch(root, name, files):
+        batch = root / name
+        batch.mkdir(mode=0o700)
+        batch.chmod(0o700)
+        for family, hostname, payload in files:
+            family_dir = batch / family
+            family_dir.mkdir(mode=0o700, exist_ok=True)
+            family_dir.chmod(0o700)
+            leaf = family_dir / f"{hostname}.yaml"
+            leaf.write_bytes(payload)
+            leaf.chmod(0o600)
+        return batch
+
+    def test_backup_batch_parser_accepts_all_observed_forms_and_rejects_ambiguity(self):
+        cases = {
+            "20260824_1542-prod-backup": ("2026-08-24T15:42:00", "prod", False),
+            "20260831_2137-air-backup": ("2026-08-31T21:37:00", "air", False),
+            "20260624_111542": ("2026-06-24T11:15:42", None, True),
+        }
+        for name, expected in cases.items():
+            with self.subTest(name=name):
+                parsed = self.backup._parse_backup_batch_name(name)
+                self.assertEqual(expected[0], parsed["timestamp"].isoformat())
+                self.assertEqual(expected[1], parsed["environment"])
+                self.assertEqual(expected[2], parsed["legacy_requires_inventory"])
+        for name in (
+            "20260831_2137", "20260831_213700-prod-backup",
+            "20260831_2137-stage-backup", "not-a-batch", "20261301_0000-backup",
+        ):
+            with self.subTest(invalid=name), self.assertRaises(ValueError):
+                self.backup._parse_backup_batch_name(name)
+        source = (ROOT / "ztp/backup/yaml-collect.py").read_text(encoding="utf-8")
+        self.assertNotIn("RETAIN_DAYS", source)
+
+    def test_per_device_dedup_is_byte_exact_and_preserves_either_side_missing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            known_hosts = root / ".ssh-known-hosts"
+            known_hosts.mkdir(mode=0o700)
+            pin = known_hosts / ("a" * 64 + ".known_hosts")
+            pin.write_text("example ssh-ed25519 AAAA\n", encoding="utf-8")
+            pin.chmod(0o600)
+            previous = self._retention_batch(root, "20260824_1542-prod-backup", [
+                ("eth", "equal", b"same\n"),
+                ("eth", "changed", b"old\n"),
+                ("eth", "offline", b"only-old\n"),
+            ])
+            current = self._retention_batch(root, "20260831_2137-prod-backup", [
+                ("eth", "equal", b"same\n"),
+                ("eth", "changed", b"new\n"),
+                ("eth", "new-device", b"only-new\n"),
+            ])
+            metadata = previous / "legacy-report.log"
+            metadata.write_bytes(b"schema varies\n")
+            metadata.chmod(0o600)
+
+            report = self.backup._apply_backup_retention(
+                root, current.name, environment="prod",
+            )
+
+            self.assertFalse((previous / "eth/equal.yaml").exists())
+            self.assertTrue((current / "eth/equal.yaml").is_file())
+            self.assertTrue((previous / "eth/changed.yaml").is_file())
+            self.assertTrue((current / "eth/changed.yaml").is_file())
+            self.assertTrue((previous / "eth/offline.yaml").is_file())
+            self.assertTrue((current / "eth/new-device.yaml").is_file())
+            self.assertEqual(b"schema varies\n", metadata.read_bytes())
+            self.assertEqual(
+                "example ssh-ed25519 AAAA\n", pin.read_text(encoding="utf-8"),
+            )
+            self.assertEqual(["20260824_1542-prod-backup/eth/equal.yaml"], report["deduplicated"])
+            for leaf in root.glob("*/*/*.yaml"):
+                self.assertEqual(0o600, stat.S_IMODE(leaf.stat().st_mode))
+            for path in [root, previous, current, previous / "eth", current / "eth"]:
+                if path.exists():
+                    self.assertLessEqual(stat.S_IMODE(path.stat().st_mode), 0o700)
+
+    def test_previous_batch_is_selected_within_environment_stream(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            prod_previous = self._retention_batch(
+                root, "20260824_1542-prod-backup", [("eth", "leaf", b"same\n")],
+            )
+            air_middle = self._retention_batch(
+                root, "20260825_1542-air-backup", [("eth", "leaf", b"air\n")],
+            )
+            prod_current = self._retention_batch(
+                root, "20260831_2137-prod-backup", [("eth", "leaf", b"same\n")],
+            )
+            report = self.backup._apply_backup_retention(
+                root, prod_current.name, environment="prod",
+            )
+            self.assertFalse((prod_previous / "eth/leaf.yaml").exists())
+            self.assertEqual(b"air\n", (air_middle / "eth/leaf.yaml").read_bytes())
+            self.assertEqual(
+                ["20260824_1542-prod-backup/eth/leaf.yaml"],
+                report["deduplicated"],
+            )
+
+    def test_setup_managed_root_symlink_is_preserved_and_bound_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            root = parent / "project/99-output-backup"
+            root.mkdir(parents=True, mode=0o700)
+            root.chmod(0o700)
+            link = parent / "yaml-backup"
+            link.symlink_to(root)
+            previous = self._retention_batch(
+                root, "20260824_1542-prod-backup", [("eth", "leaf", b"same\n")],
+            )
+            current = self._retention_batch(
+                root, "20260831_2137-prod-backup", [("eth", "leaf", b"same\n")],
+            )
+            self.backup._apply_backup_retention(
+                link, current.name, environment="prod",
+            )
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(root.resolve(strict=True), link.resolve(strict=True))
+            self.assertFalse((previous / "eth/leaf.yaml").exists())
+
+    def test_publication_refuses_a_rebound_private_staging_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "99-output-backup"
+            root.mkdir(mode=0o700)
+            staging, final = self.backup._stage_private_backup_tree(
+                root, "20260831_2137-prod-backup",
+            )
+            staging = Path(staging)
+            self.backup._write_sensitive_backup_yaml(
+                staging / "eth", "leaf.yaml", "reviewed bytes\n",
+            )
+            parked = root / ".partial-parked-reviewed-staging"
+            original_fsync = self.backup._fsync_backup_staging
+
+            def rebind_after_fsync(*args, **kwargs):
+                result = original_fsync(*args, **kwargs)
+                staging.rename(parked)
+                replacement = root / staging.name
+                replacement.mkdir(mode=0o700)
+                for family in ("eth", "spx", "ib", "nvl"):
+                    (replacement / family).mkdir(mode=0o700)
+                hostile = replacement / "eth/leaf.yaml"
+                hostile.write_bytes(b"hostile replacement\n")
+                hostile.chmod(0o600)
+                return result
+
+            with mock.patch.object(
+                self.backup, "_fsync_backup_staging",
+                side_effect=rebind_after_fsync,
+            ), self.assertRaisesRegex(
+                self.backup.BackupRetentionError, "staging.*rebound",
+            ):
+                self.backup._publish_and_retain_backup_batch(
+                    root, staging, final.name, environment="prod",
+                )
+
+            self.assertFalse(final.exists())
+            self.assertEqual(
+                b"reviewed bytes\n", (parked / "eth/leaf.yaml").read_bytes(),
+            )
+            self.assertEqual(
+                b"hostile replacement\n",
+                (staging / "eth/leaf.yaml").read_bytes(),
+            )
+
+    def test_publication_removes_a_rebound_tree_from_the_final_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "99-output-backup"
+            root.mkdir(mode=0o700)
+            staging, final = self.backup._stage_private_backup_tree(
+                root, "20260831_2137-prod-backup",
+            )
+            staging = Path(staging)
+            self.backup._write_sensitive_backup_yaml(
+                staging / "eth", "leaf.yaml", "reviewed bytes\n",
+            )
+            parked = root / ".partial-parked-at-rename"
+            original_rename = self.backup._rename_directory_noreplace
+            rebound = [False]
+
+            def rebind_at_rename(source, destination, **kwargs):
+                if not rebound[0]:
+                    rebound[0] = True
+                    staging.rename(parked)
+                    replacement = root / staging.name
+                    replacement.mkdir(mode=0o700)
+                    for family in ("eth", "spx", "ib", "nvl"):
+                        (replacement / family).mkdir(mode=0o700)
+                    hostile = replacement / "eth/leaf.yaml"
+                    hostile.write_bytes(b"hostile replacement\n")
+                    hostile.chmod(0o600)
+                return original_rename(source, destination, **kwargs)
+
+            with mock.patch.object(
+                self.backup, "_rename_directory_noreplace",
+                side_effect=rebind_at_rename,
+            ), self.assertRaisesRegex(
+                self.backup.BackupRetentionError, "staging.*rebound",
+            ):
+                self.backup._publish_and_retain_backup_batch(
+                    root, staging, final.name, environment="prod",
+                )
+
+            self.assertFalse(final.exists())
+            self.assertEqual(
+                b"hostile replacement\n",
+                (staging / "eth/leaf.yaml").read_bytes(),
+            )
+            self.assertEqual(
+                b"reviewed bytes\n", (parked / "eth/leaf.yaml").read_bytes(),
+            )
+
+    def test_measured_46_equal_8_changed_shape_deduplicates_per_device(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            previous_files = []
+            current_files = []
+            for index in range(46):
+                payload = f"equal-{index}\n".encode("ascii")
+                previous_files.append(("eth", f"equal-{index:02d}", payload))
+                current_files.append(("eth", f"equal-{index:02d}", payload))
+            for index in range(8):
+                previous_files.append(("eth", f"changed-{index:02d}", b"old\n"))
+                current_files.append(("eth", f"changed-{index:02d}", b"new\n"))
+            previous_files.append(("eth", "offline", b"old-only\n"))
+            current_files.append(("eth", "new-device", b"new-only\n"))
+            previous = self._retention_batch(
+                root, "20260824_1542-prod-backup", previous_files,
+            )
+            current = self._retention_batch(
+                root, "20260831_2137-prod-backup", current_files,
+            )
+            report = self.backup._apply_backup_retention(
+                root, current.name, environment="prod",
+            )
+            self.assertEqual(46, len(report["deduplicated"]))
+            self.assertEqual(0, len(list(previous.glob("eth/equal-*.yaml"))))
+            self.assertEqual(8, len(list(previous.glob("eth/changed-*.yaml"))))
+            self.assertEqual(8, len(list(current.glob("eth/changed-*.yaml"))))
+            self.assertTrue((previous / "eth/offline.yaml").is_file())
+            self.assertTrue((current / "eth/new-device.yaml").is_file())
+
+    def test_count_caps_remove_old_versions_but_pin_last_copy_with_warning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            names = [
+                "20260820_1200-prod-backup", "20260821_1200-prod-backup",
+                "20260822_1200-prod-backup", "20260823_1200-prod-backup",
+            ]
+            self._retention_batch(root, names[0], [
+                ("eth", "legacy-only", b"unique\n"),
+                ("eth", "leaf", b"v0\n"),
+            ])
+            for index, name in enumerate(names[1:], start=1):
+                self._retention_batch(root, name, [
+                    ("eth", "leaf", f"v{index}\n".encode("ascii")),
+                ])
+
+            with mock.patch.object(self.backup, "BACKUP_RETENTION_CAP", 3):
+                report = self.backup._apply_backup_retention(
+                    root, names[-1], environment="prod",
+                )
+
+            self.assertTrue((root / names[0] / "eth/legacy-only.yaml").is_file())
+            self.assertFalse((root / names[0] / "eth/leaf.yaml").exists())
+            self.assertTrue(any(
+                item["batch"] == names[0]
+                and item["devices"] == ["eth/legacy-only"]
+                for item in report["retention_blocked_by_last_copy"]
+            ))
+            surviving_leaf_versions = list(root.glob("*/eth/leaf.yaml"))
+            self.assertEqual(2, len(surviving_leaf_versions))
+            self.assertEqual([names[1]], report["batch_pruned"])
+            self.assertEqual(3, len([p for p in root.iterdir() if p.is_dir()]))
+
+    def test_legacy_last_copy_has_no_warning_at_100_and_is_pinned_at_cap_3(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "99-output-backup"
+            root.mkdir(mode=0o700)
+            legacy_files = [
+                ("eth", f"old-device-{index:03d}", f"unique-{index}\n".encode("ascii"))
+                for index in range(104)
+            ] + [("eth", "shared", b"v0\n")]
+            legacy = self._retention_batch(root, "20260624_111542", legacy_files)
+            names = [
+                "20260823_2128-prod-backup", "20260824_1542-prod-backup",
+                "20260831_2137-prod-backup",
+            ]
+            for index, name in enumerate(names, start=1):
+                self._retention_batch(root, name, [
+                    ("eth", "shared", f"v{index}\n".encode("ascii")),
+                ])
+            inventory = root.parent / ".99-output-backup.retention-migration.json"
+            self.backup._write_legacy_retention_inventory(
+                root, inventory, {legacy.name: "prod"}, approve=False,
+            )
+            self.backup._write_legacy_retention_inventory(
+                root, inventory, {legacy.name: "prod"}, approve=True,
+            )
+            report_100 = self.backup._apply_backup_retention(
+                root, names[-1], environment="prod", migration_inventory=inventory,
+            )
+            self.assertEqual([], report_100["retention_blocked_by_last_copy"])
+
+            with mock.patch.object(self.backup, "BACKUP_RETENTION_CAP", 3):
+                report_3 = self.backup._apply_backup_retention(
+                    root, names[-1], environment="prod", migration_inventory=inventory,
+                )
+            warning = report_3["retention_blocked_by_last_copy"]
+            self.assertEqual(1, len(warning))
+            self.assertEqual(legacy.name, warning[0]["batch"])
+            self.assertEqual(104, len(warning[0]["devices"]))
+            self.assertEqual("eth/old-device-000", warning[0]["devices"][0])
+            self.assertEqual("eth/old-device-103", warning[0]["devices"][-1])
+            self.assertTrue(legacy.is_dir())
+            with mock.patch.object(self.backup, "BACKUP_RETENTION_CAP", 3):
+                repeated = self.backup._apply_backup_retention(
+                    root, names[-1], environment="prod",
+                    migration_inventory=inventory,
+                )
+            self.assertEqual([], repeated["version_pruned"])
+            self.assertTrue(legacy.is_dir())
+
+    def test_retention_rejects_unreviewed_legacy_links_and_ambiguous_identities(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            legacy = self._retention_batch(root, "20260624_111542", [
+                ("eth", "Border01", b"legacy\n"),
+            ])
+            current = self._retention_batch(root, "20260831_2137-prod-backup", [
+                ("eth", "leaf", b"current\n"),
+            ])
+            with self.assertRaises(self.backup.BackupRetentionError):
+                self.backup._apply_backup_retention(
+                    root, current.name, environment="prod",
+                )
+
+            shutil.rmtree(legacy)
+            with self.assertRaises(self.backup.BackupRetentionError):
+                self.backup._validate_backup_leaf_names(["Leaf.yaml", "leaf.yaml"])
+
+            hostile = root / "20260824_1542-prod-backup" / "eth"
+            hostile.mkdir(parents=True, mode=0o700)
+            outside = root.parent / "outside.yaml"
+            outside.write_text("outside\n", encoding="utf-8")
+            (hostile / "leaf.yaml").symlink_to(outside)
+            with self.assertRaises(self.backup.BackupRetentionError):
+                self.backup._apply_backup_retention(
+                    root, current.name, environment="prod",
+                )
+            self.assertEqual("outside\n", outside.read_text(encoding="utf-8"))
+            (hostile / "leaf.yaml").unlink()
+            hardlink = hostile / "hardlink.yaml"
+            os.link(outside, hardlink)
+            with self.assertRaises(self.backup.BackupRetentionError):
+                self.backup._apply_backup_retention(
+                    root, current.name, environment="prod",
+                )
+            self.assertEqual("outside\n", outside.read_text(encoding="utf-8"))
+
+    def test_retention_journal_recovers_exact_identity_and_refuses_rebound_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "99-output-backup"
+            root.mkdir(mode=0o700)
+            old = self._retention_batch(root, "20260824_1542-prod-backup", [
+                ("eth", "leaf", b"old\n"),
+            ])
+            current = self._retention_batch(root, "20260831_2137-prod-backup", [
+                ("eth", "leaf", b"new\n"),
+            ])
+            target = old / "eth/leaf.yaml"
+            record = {
+                "path": target,
+                "relative": "20260824_1542-prod-backup/eth/leaf.yaml",
+                "identity": self.backup._retention_identity(os.lstat(target)),
+            }
+            journal_path = root.parent / ".99-output-backup.retention.jsonl"
+            journal_fd = self.backup._open_private_retention_file(journal_path)
+            with os.fdopen(journal_fd, "r+", encoding="utf-8") as journal:
+                self.backup._plan_retention_delete(journal, record, "regular")
+            self.backup._apply_backup_retention(
+                root, current.name, environment="prod",
+            )
+            self.assertFalse(target.exists())
+            events = [
+                json.loads(line)["event"]
+                for line in journal_path.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(["delete-planned", "delete-recovered"], events[:2])
+
+            target.write_bytes(b"replacement\n")
+            target.chmod(0o600)
+            stale_identity = list(record["identity"])
+            stale_identity[1] += 1
+            stale_record = {**record, "identity": tuple(stale_identity)}
+            journal_path.unlink()
+            journal_fd = self.backup._open_private_retention_file(journal_path)
+            with os.fdopen(journal_fd, "r+", encoding="utf-8") as journal:
+                self.backup._plan_retention_delete(journal, stale_record, "regular")
+            with self.assertRaisesRegex(
+                self.backup.BackupRetentionError, "recovery target rebound",
+            ):
+                self.backup._apply_backup_retention(
+                    root, current.name, environment="prod",
+                )
+            self.assertEqual(b"replacement\n", target.read_bytes())
+
+    def test_retention_refuses_widened_yaml_and_partial_directory_modes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            current = self._retention_batch(root, "20260831_2137-prod-backup", [
+                ("eth", "leaf", b"current\n"),
+            ])
+            leaf = current / "eth/leaf.yaml"
+            leaf.chmod(0o644)
+            with self.assertRaisesRegex(
+                self.backup.BackupRetentionError, "unsafe backup YAML",
+            ):
+                self.backup._apply_backup_retention(
+                    root, current.name, environment="prod",
+                )
+            leaf.chmod(0o600)
+            partial = root / ".partial-hostile"
+            partial.mkdir(mode=0o700)
+            partial.chmod(0o755)
+            with self.assertRaisesRegex(
+                self.backup.BackupRetentionError, "unsafe partial backup entry",
+            ):
+                self.backup._apply_backup_retention(
+                    root, current.name, environment="prod",
+                )
+
+    def test_legacy_migration_inventory_requires_separate_exact_tree_approval(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "99-output-backup"
+            root.mkdir(mode=0o700)
+            legacy = self._retention_batch(root, "20260624_111542", [
+                ("eth", "Border01", b"legacy\n"),
+            ])
+            current = self._retention_batch(root, "20260831_2137-prod-backup", [
+                ("eth", "leaf", b"current\n"),
+            ])
+            inventory = root.parent / ".99-output-backup.retention-migration.json"
+            generated = self.backup._write_legacy_retention_inventory(
+                root, inventory, {legacy.name: "prod"}, approve=False,
+            )
+            self.assertEqual(inventory, generated)
+            self.assertEqual(0o600, stat.S_IMODE(inventory.stat().st_mode))
+            document = json.loads(inventory.read_text(encoding="utf-8"))
+            self.assertEqual(False, document["batches"][0]["allow_retention"])
+            self.assertEqual("prod", document["batches"][0]["environment"])
+            self.assertRegex(document["batches"][0]["tree_sha256"], r"^[0-9a-f]{64}$")
+            objects = document["batches"][0]["objects"]
+            self.assertEqual("directory", objects[0]["type"])
+            self.assertEqual("0700", objects[0]["mode"])
+            self.assertTrue(any(
+                row["path"].endswith("/eth/Border01.yaml")
+                and row["type"] == "regular" and row["mode"] == "0600"
+                and re.fullmatch(r"[0-9a-f]{64}", row["sha256"])
+                for row in objects
+            ))
+            nested_inventory = root / "inventory.json"
+            with self.assertRaises(self.backup.BackupRetentionError):
+                self.backup._write_legacy_retention_inventory(
+                    root, nested_inventory, {legacy.name: "prod"}, approve=False,
+                )
+            with self.assertRaises(self.backup.BackupRetentionError):
+                self.backup._apply_backup_retention(
+                    root, current.name, environment="prod",
+                    migration_inventory=inventory,
+                )
+
+            self.backup._write_legacy_retention_inventory(
+                root, inventory, {legacy.name: "prod"}, approve=True,
+            )
+            self.assertTrue(json.loads(inventory.read_text(encoding="utf-8"))[
+                "batches"
+            ][0]["allow_retention"])
+            self.backup._apply_backup_retention(
+                root, current.name, environment="prod",
+                migration_inventory=inventory,
+            )
+
+            changed = legacy / "eth/Border01.yaml"
+            changed.write_bytes(b"changed after approval\n")
+            changed.chmod(0o600)
+            with self.assertRaises(self.backup.BackupRetentionError):
+                self.backup._apply_backup_retention(
+                    root, current.name, environment="prod",
+                    migration_inventory=inventory,
+                )
+
+    def test_legacy_inventory_cli_is_explicit_and_exposes_no_retention_cap(self):
+        prepared = self.backup._parse_retention_inventory_command([
+            "--prepare-retention-migration-inventory", "/private/state.json",
+            "--legacy-environment", "20260624_111542=prod",
+        ])
+        self.assertEqual("prepare", prepared["action"])
+        self.assertEqual("/private/state.json", prepared["destination"])
+        self.assertEqual({"20260624_111542": "prod"}, prepared["assignments"])
+        approved = self.backup._parse_retention_inventory_command([
+            "--approve-retention-migration-inventory=/private/state.json",
+            "--legacy-environment=20260624_111542=prod",
+        ])
+        self.assertEqual("approve", approved["action"])
+        for argv in (
+            ["--prepare-retention-migration-inventory", "/private/state.json"],
+            ["--prepare-retention-migration-inventory", "/private/state.json",
+             "--legacy-environment", "bad"],
+            ["--retention-cap", "3"],
+        ):
+            with self.subTest(argv=argv), self.assertRaises(ValueError):
+                self.backup._parse_retention_inventory_command(argv)
+
 
 if __name__ == "__main__":
     unittest.main()

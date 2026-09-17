@@ -27,6 +27,9 @@ import csv
 import atexit
 import base64
 from contextlib import contextmanager
+import ctypes
+import errno
+import fcntl
 import getpass
 import hashlib
 import json
@@ -44,7 +47,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from threading import Lock
@@ -90,6 +93,786 @@ _EXPECTED_DEVICE_CORE_PREFIX = (
     "hostname", "type", "template", "eth0_ip", "netmask", "eth0_gw",
     "eth0_mac",
 )
+BACKUP_RETENTION_CAP = 100
+_BACKUP_FAMILIES = frozenset({"eth", "spx", "ib", "nvl"})
+_CANONICAL_BATCH_RE = re.compile(
+    r"^(?P<date>\d{8})_(?P<time>\d{4})-(?:(?P<environment>prod|air)-)?backup$"
+)
+_LEGACY_BATCH_RE = re.compile(r"^(?P<date>\d{8})_(?P<time>\d{6})$")
+_KNOWN_HOSTS_PIN_RE = re.compile(r"^[0-9a-f]{64}\.known_hosts$")
+
+
+class BackupRetentionError(RuntimeError):
+    """The backup tree cannot be safely deduplicated or retained."""
+
+
+def _parse_backup_batch_name(name):
+    """Parse every observed batch grammar without lexicographic guessing."""
+    if Path(name).name != name:
+        raise ValueError("backup batch name is not a direct child")
+    match = _CANONICAL_BATCH_RE.fullmatch(name)
+    legacy = False
+    if match is None:
+        match = _LEGACY_BATCH_RE.fullmatch(name)
+        legacy = True
+    if match is None:
+        raise ValueError(f"unparseable backup batch name: {name}")
+    try:
+        timestamp = datetime.strptime(
+            match.group("date") + match.group("time"),
+            "%Y%m%d%H%M%S" if legacy else "%Y%m%d%H%M",
+        )
+    except ValueError as exc:
+        raise ValueError(f"invalid backup batch timestamp: {name}") from exc
+    environment = None if legacy else (match.group("environment") or "prod")
+    return {
+        "name": name,
+        "timestamp": timestamp,
+        "environment": environment,
+        "legacy_requires_inventory": legacy,
+    }
+
+
+def _retention_identity(metadata):
+    return (
+        metadata.st_dev, metadata.st_ino, stat.S_IFMT(metadata.st_mode),
+        metadata.st_nlink, metadata.st_uid, metadata.st_gid,
+        stat.S_IMODE(metadata.st_mode), metadata.st_size,
+        metadata.st_mtime_ns, metadata.st_ctime_ns,
+    )
+
+
+def _same_directory_authority(expected, current):
+    actual = _retention_identity(current)
+    # Child deletion changes nlink/size/timestamps.  The held directory
+    # authority is its dev/inode/type/owner/mode, not mutable child counters.
+    indexes = (0, 1, 2, 4, 5, 6)
+    return all(expected[index] == actual[index] for index in indexes)
+
+
+def _validate_backup_leaf_names(names):
+    seen = {}
+    for name in names:
+        if not name.endswith(".yaml"):
+            raise BackupRetentionError(f"backup leaf is not YAML: {name}")
+        hostname = name[:-5]
+        if not _SAFE_HOSTNAME_RE.fullmatch(hostname):
+            raise BackupRetentionError(f"invalid backup hostname: {hostname}")
+        folded = hostname.casefold()
+        if folded in seen:
+            raise BackupRetentionError(
+                f"casefold backup identity collision: {seen[folded]}/{hostname}"
+            )
+        seen[folded] = hostname
+    return seen
+
+
+def _hash_regular_file(path, expected):
+    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        opened = os.fstat(descriptor)
+        if _retention_identity(opened) != expected:
+            raise BackupRetentionError(f"backup object changed while opening: {path.name}")
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(descriptor, 64 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+        if _retention_identity(os.fstat(descriptor)) != expected:
+            raise BackupRetentionError(f"backup object changed while reading: {path.name}")
+        return digest.hexdigest()
+    finally:
+        os.close(descriptor)
+
+
+def _validate_retention_known_hosts_directory(entry, root_device):
+    """Validate the one managed non-batch directory retained beside batches."""
+    metadata = entry.stat(follow_symlinks=False)
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or metadata.st_dev != root_device
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+    ):
+        raise BackupRetentionError("unsafe .ssh-known-hosts directory")
+    for pin in sorted(os.scandir(entry.path), key=lambda item: item.name):
+        pin_metadata = pin.stat(follow_symlinks=False)
+        if (
+            _KNOWN_HOSTS_PIN_RE.fullmatch(pin.name) is None
+            or not stat.S_ISREG(pin_metadata.st_mode)
+            or pin_metadata.st_nlink != 1
+            or pin_metadata.st_uid != os.geteuid()
+            or pin_metadata.st_dev != root_device
+            or stat.S_IMODE(pin_metadata.st_mode) != 0o600
+        ):
+            raise BackupRetentionError(f"unsafe SSH host-key pin: {pin.name}")
+        identity = _retention_identity(pin_metadata)
+        _hash_regular_file(pin.path, identity)
+
+
+def _scan_backup_tree(canonical_root):
+    root_metadata = os.lstat(canonical_root)
+    if (
+        not stat.S_ISDIR(root_metadata.st_mode)
+        or root_metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(root_metadata.st_mode) != 0o700
+    ):
+        raise BackupRetentionError("backup root must be an owned real 0700 directory")
+    root_device = root_metadata.st_dev
+    batches = []
+    for entry in sorted(os.scandir(canonical_root), key=lambda item: item.name):
+        if entry.name == ".ssh-known-hosts":
+            _validate_retention_known_hosts_directory(entry, root_device)
+            continue
+        if entry.name.startswith(".partial-"):
+            metadata = entry.stat(follow_symlinks=False)
+            if (
+                not stat.S_ISDIR(metadata.st_mode) or metadata.st_dev != root_device
+                or metadata.st_uid != os.geteuid()
+                or stat.S_IMODE(metadata.st_mode) != 0o700
+            ):
+                raise BackupRetentionError("unsafe partial backup entry")
+            continue
+        try:
+            parsed = _parse_backup_batch_name(entry.name)
+        except ValueError as exc:
+            raise BackupRetentionError(str(exc)) from exc
+        metadata = entry.stat(follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_dev != root_device
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+        ):
+            raise BackupRetentionError(f"unsafe backup batch: {entry.name}")
+        batch = {
+            **parsed, "path": Path(entry.path), "identity": _retention_identity(metadata),
+            "files": {}, "metadata": [], "families": {},
+        }
+        for child in sorted(os.scandir(entry.path), key=lambda item: item.name):
+            child_metadata = child.stat(follow_symlinks=False)
+            if child_metadata.st_dev != root_device or child_metadata.st_uid != os.geteuid():
+                raise BackupRetentionError(f"backup child crosses authority: {entry.name}/{child.name}")
+            if stat.S_ISDIR(child_metadata.st_mode):
+                if child.name not in _BACKUP_FAMILIES:
+                    raise BackupRetentionError(f"unknown backup family: {child.name}")
+                if stat.S_IMODE(child_metadata.st_mode) != 0o700:
+                    raise BackupRetentionError(
+                        f"unsafe backup family mode: {entry.name}/{child.name}"
+                    )
+                family = {"path": Path(child.path), "identity": _retention_identity(child_metadata)}
+                leaves = sorted(os.scandir(child.path), key=lambda item: item.name)
+                _validate_backup_leaf_names([leaf.name for leaf in leaves])
+                for leaf in leaves:
+                    leaf_metadata = leaf.stat(follow_symlinks=False)
+                    if (
+                        not stat.S_ISREG(leaf_metadata.st_mode)
+                        or leaf_metadata.st_nlink != 1
+                        or leaf_metadata.st_uid != os.geteuid()
+                        or leaf_metadata.st_dev != root_device
+                        or stat.S_IMODE(leaf_metadata.st_mode) != 0o600
+                        or not leaf.name.endswith(".yaml")
+                    ):
+                        raise BackupRetentionError(
+                            f"unsafe backup YAML: {entry.name}/{child.name}/{leaf.name}"
+                        )
+                    hostname = leaf.name[:-5]
+                    folded = hostname.casefold()
+                    identity = _retention_identity(leaf_metadata)
+                    relative = f"{entry.name}/{child.name}/{leaf.name}"
+                    batch["files"][(child.name, folded)] = {
+                        "path": Path(leaf.path), "relative": relative,
+                        "family": child.name, "hostname": hostname,
+                        "identity": identity,
+                        "sha256": _hash_regular_file(leaf.path, identity),
+                    }
+                batch["families"][child.name] = family
+            elif stat.S_ISREG(child_metadata.st_mode) and child_metadata.st_nlink == 1:
+                if stat.S_IMODE(child_metadata.st_mode) != 0o600:
+                    raise BackupRetentionError(
+                        f"unsafe backup metadata mode: {entry.name}/{child.name}"
+                    )
+                identity = _retention_identity(child_metadata)
+                digest = _hash_regular_file(child.path, identity)
+                batch["metadata"].append({
+                    "path": Path(child.path), "identity": identity,
+                    "sha256": digest,
+                })
+            else:
+                raise BackupRetentionError(f"unsafe backup metadata: {entry.name}/{child.name}")
+        batches.append(batch)
+    return batches
+
+
+def _tree_inventory_sha256(batch):
+    rows = []
+    rows.append([batch["name"], list(batch["identity"])])
+    for family, record in sorted(batch["families"].items()):
+        rows.append([family, list(record["identity"])])
+    for key, record in sorted(batch["files"].items()):
+        rows.append([list(key), list(record["identity"]), record["sha256"]])
+    for record in sorted(batch["metadata"], key=lambda item: item["path"].name):
+        rows.append([
+            record["path"].name, list(record["identity"]), record["sha256"],
+        ])
+    payload = json.dumps(rows, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _tree_inventory_objects(batch):
+    """Return reviewable type/mode metadata for an already validated tree."""
+    rows = [{
+        "path": batch["name"], "type": "directory",
+        "mode": f"{batch['identity'][6]:04o}",
+        "identity": list(batch["identity"]),
+    }]
+    for family, record in sorted(batch["families"].items()):
+        rows.append({
+            "path": f"{batch['name']}/{family}", "type": "directory",
+            "mode": f"{record['identity'][6]:04o}",
+            "identity": list(record["identity"]),
+        })
+    for record in sorted(batch["files"].values(), key=lambda item: item["relative"]):
+        rows.append({
+            "path": record["relative"], "type": "regular", "mode":
+            f"{record['identity'][6]:04o}", "sha256": record["sha256"],
+            "identity": list(record["identity"]),
+        })
+    for record in sorted(batch["metadata"], key=lambda item: item["path"].name):
+        rows.append({
+            "path": f"{batch['name']}/{record['path'].name}",
+            "type": "regular", "mode": f"{record['identity'][6]:04o}",
+            "sha256": record["sha256"], "identity": list(record["identity"]),
+        })
+    return rows
+
+
+def _inventory_object_matches(approved, current):
+    if any(approved.get(key) != current.get(key) for key in ("path", "type", "mode")):
+        return False
+    approved_identity = approved.get("identity")
+    current_identity = current.get("identity")
+    if (
+        not isinstance(approved_identity, list) or len(approved_identity) != 10
+        or not isinstance(current_identity, list) or len(current_identity) != 10
+    ):
+        return False
+    if current["type"] == "directory":
+        indexes = (0, 1, 2, 4, 5, 6)
+        return all(approved_identity[index] == current_identity[index] for index in indexes)
+    return (
+        approved.get("sha256") == current.get("sha256")
+        and approved_identity == current_identity
+    )
+
+
+def _load_legacy_retention_inventory(path, canonical_root, batches, deleted_paths):
+    if path is None:
+        raise BackupRetentionError(
+            "suffixless legacy backup requires an operator-reviewed migration inventory"
+        )
+    inventory_path = Path(path)
+    descriptor = os.open(
+        inventory_path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+    )
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+            or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_size > 16 * 1024 * 1024
+        ):
+            raise BackupRetentionError(
+                "migration inventory must be a bounded owned 0600 regular file"
+            )
+        payload = bytearray()
+        while True:
+            chunk = os.read(descriptor, min(64 * 1024, 16 * 1024 * 1024 + 1 - len(payload)))
+            if not chunk:
+                break
+            payload.extend(chunk)
+            if len(payload) > 16 * 1024 * 1024:
+                raise BackupRetentionError("migration inventory is oversized")
+        if _retention_identity(os.fstat(descriptor)) != _retention_identity(metadata):
+            raise BackupRetentionError("migration inventory changed while reading")
+        document = json.loads(payload.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise BackupRetentionError("migration inventory is unreadable") from exc
+    finally:
+        os.close(descriptor)
+    if document.get("schema_version") != 1 or document.get("canonical_root") != str(canonical_root):
+        raise BackupRetentionError("migration inventory root binding is invalid")
+    rows = document.get("batches")
+    if not isinstance(rows, list):
+        raise BackupRetentionError("migration inventory batch list is invalid")
+    by_name = {row.get("name"): row for row in rows if isinstance(row, dict)}
+    for batch in batches:
+        if not batch["legacy_requires_inventory"]:
+            continue
+        row = by_name.get(batch["name"])
+        authorized = (
+            row is not None and row.get("environment") in {"prod", "air"}
+            and row.get("allow_retention") is True
+        )
+        if authorized and row.get("tree_sha256") != _tree_inventory_sha256(batch):
+            approved_rows = row.get("objects")
+            current_rows = _tree_inventory_objects(batch)
+            if not isinstance(approved_rows, list):
+                authorized = False
+            else:
+                approved = {
+                    item.get("path"): item for item in approved_rows
+                    if isinstance(item, dict) and isinstance(item.get("path"), str)
+                }
+                current = {item["path"]: item for item in current_rows}
+                authorized = (
+                    len(approved) == len(approved_rows)
+                    and set(current).issubset(approved)
+                    and all(_inventory_object_matches(approved[name], item)
+                            for name, item in current.items())
+                    and (set(approved) - set(current)).issubset(deleted_paths)
+                )
+        if not authorized:
+            raise BackupRetentionError(
+                f"legacy migration inventory does not authorize exact tree: {batch['name']}"
+            )
+        batch["environment"] = row["environment"]
+
+
+def _write_legacy_retention_inventory(output_root, destination, assignments, *,
+                                      approve=False):
+    """Prepare, then separately approve, an exact suffixless-batch inventory."""
+    canonical_root = Path(output_root).resolve(strict=True)
+    batches = _scan_backup_tree(canonical_root)
+    legacy = [batch for batch in batches if batch["legacy_requires_inventory"]]
+    expected_names = {batch["name"] for batch in legacy}
+    if set(assignments) != expected_names or any(
+        value not in {"prod", "air"} for value in assignments.values()
+    ):
+        raise BackupRetentionError(
+            "migration inventory needs one explicit prod/air assignment per legacy batch"
+        )
+    rows = [
+        {
+            "name": batch["name"],
+            "timestamp": batch["timestamp"].isoformat(),
+            "environment": assignments[batch["name"]],
+            "tree_sha256": _tree_inventory_sha256(batch),
+            "objects": _tree_inventory_objects(batch),
+            "allow_retention": bool(approve),
+        }
+        for batch in sorted(legacy, key=lambda item: (item["timestamp"], item["name"]))
+    ]
+    document = {
+        "schema_version": 1,
+        "canonical_root": str(canonical_root),
+        "batches": rows,
+    }
+    destination = Path(destination)
+    parent = destination.parent.resolve(strict=True)
+    if parent == canonical_root or canonical_root in parent.parents:
+        raise BackupRetentionError("migration inventory must be outside the backup root")
+    existing_identity = None
+    if approve:
+        try:
+            metadata = os.lstat(destination)
+        except FileNotFoundError as exc:
+            raise BackupRetentionError(
+                "prepare the migration inventory before approving it"
+            ) from exc
+        if (
+            not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+            or metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o600
+        ):
+            raise BackupRetentionError("prepared migration inventory is unsafe")
+        existing_identity = _retention_identity(metadata)
+        try:
+            prepared = json.loads(destination.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise BackupRetentionError("prepared migration inventory is unreadable") from exc
+        expected_prepared = {
+            **document,
+            "batches": [{**row, "allow_retention": False} for row in rows],
+        }
+        if prepared != expected_prepared:
+            raise BackupRetentionError(
+                "prepared migration inventory no longer binds the exact tree"
+            )
+    elif destination.exists() or destination.is_symlink():
+        raise BackupRetentionError("migration inventory already exists; review it explicitly")
+
+    payload = (
+        json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
+    parent_fd = os.open(
+        parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+    )
+    temporary_name = f".{destination.name}.tmp-{secrets.token_hex(16)}"
+    descriptor = None
+    try:
+        descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+            0o600, dir_fd=parent_fd,
+        )
+        os.fchmod(descriptor, 0o600)
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("short write while publishing migration inventory")
+            view = view[written:]
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = None
+        if approve:
+            current = os.lstat(destination)
+            if _retention_identity(current) != existing_identity:
+                raise BackupRetentionError("migration inventory rebound before approval")
+        os.replace(temporary_name, destination.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        os.fsync(parent_fd)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        try:
+            os.unlink(temporary_name, dir_fd=parent_fd)
+        except FileNotFoundError:
+            pass
+        os.close(parent_fd)
+    return destination
+
+
+def _append_retention_journal(handle, event, record, **fields):
+    row = {
+        "event": event, "path": record.get("relative", record["path"].name),
+        **fields,
+    }
+    handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+
+
+def _plan_retention_delete(journal, record, kind):
+    transaction = secrets.token_hex(16)
+    _append_retention_journal(
+        journal, "delete-planned", record, transaction=transaction, kind=kind,
+        identity=list(record["identity"]),
+    )
+    return transaction
+
+
+def _finish_retention_delete(journal, record, transaction, *, recovered=False):
+    _append_retention_journal(
+        journal, "delete-recovered" if recovered else "delete-applied", record,
+        transaction=transaction,
+    )
+
+
+def _validated_retention_relative(path, kind):
+    relative = PurePosixPath(path)
+    parts = relative.parts
+    if (
+        relative.is_absolute() or not parts or ".." in parts or "." in parts
+        or any(Path(part).name != part for part in parts)
+    ):
+        raise BackupRetentionError("retention journal path is unsafe")
+    try:
+        _parse_backup_batch_name(parts[0])
+    except ValueError as exc:
+        raise BackupRetentionError("retention journal batch is invalid") from exc
+    if kind == "directory":
+        if len(parts) == 2 and parts[1] not in _BACKUP_FAMILIES:
+            raise BackupRetentionError("retention journal family is invalid")
+        if len(parts) not in {1, 2}:
+            raise BackupRetentionError("retention journal directory depth is invalid")
+    elif kind == "regular":
+        if len(parts) == 3:
+            if parts[1] not in _BACKUP_FAMILIES:
+                raise BackupRetentionError("retention journal family is invalid")
+            _validate_backup_leaf_names([parts[2]])
+        elif len(parts) != 2:
+            raise BackupRetentionError("retention journal file depth is invalid")
+    else:
+        raise BackupRetentionError("retention journal object kind is invalid")
+    return parts
+
+
+@contextmanager
+def _held_retention_parent(root_fd, relative, kind):
+    parts = _validated_retention_relative(relative, kind)
+    descriptor = os.dup(root_fd)
+    try:
+        for component in parts[:-1]:
+            child = os.open(
+                component,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=descriptor,
+            )
+            os.close(descriptor)
+            descriptor = child
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid():
+                raise BackupRetentionError("retention deletion parent is unsafe")
+        yield descriptor, parts[-1]
+    finally:
+        os.close(descriptor)
+
+
+def _recover_retention_journal(canonical_root, root_fd, journal):
+    """Finish exact identity-bound deletions that stopped after durable intent."""
+    journal.flush()
+    journal.seek(0)
+    pending = {}
+    seen = set()
+    completed_paths = set()
+    for line_number, line in enumerate(journal, start=1):
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise BackupRetentionError(
+                f"retention journal line {line_number} is invalid"
+            ) from exc
+        transaction = row.get("transaction")
+        event = row.get("event")
+        if not isinstance(transaction, str) or not re.fullmatch(r"[0-9a-f]{32}", transaction):
+            raise BackupRetentionError("retention journal transaction is invalid")
+        if event == "delete-planned":
+            if transaction in seen:
+                raise BackupRetentionError("retention journal transaction is duplicated")
+            identity = row.get("identity")
+            if (
+                not isinstance(row.get("path"), str)
+                or not isinstance(identity, list) or len(identity) != 10
+                or any(not isinstance(value, int) for value in identity)
+            ):
+                raise BackupRetentionError("retention journal plan is invalid")
+            _validated_retention_relative(row["path"], row.get("kind"))
+            pending[transaction] = row
+            seen.add(transaction)
+        elif event in {"delete-applied", "delete-recovered"}:
+            if transaction not in pending:
+                raise BackupRetentionError("retention journal completion has no plan")
+            planned = pending.pop(transaction)
+            if row.get("path") != planned["path"]:
+                raise BackupRetentionError("retention journal completion path changed")
+            completed_paths.add(row["path"])
+        else:
+            raise BackupRetentionError("retention journal event is invalid")
+    journal.seek(0, os.SEEK_END)
+    for transaction, row in pending.items():
+        parts = _validated_retention_relative(row["path"], row["kind"])
+        target = canonical_root.joinpath(*parts)
+        record = {
+            "path": target, "relative": row["path"],
+            "identity": tuple(row["identity"]),
+        }
+        with _held_retention_parent(root_fd, row["path"], row["kind"]) as (
+            parent_fd, name,
+        ):
+            try:
+                current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                _finish_retention_delete(journal, record, transaction, recovered=True)
+                completed_paths.add(row["path"])
+                continue
+            matches = (
+                _same_directory_authority(record["identity"], current)
+                if row["kind"] == "directory"
+                else _retention_identity(current) == record["identity"]
+            )
+            if not matches:
+                raise BackupRetentionError(
+                    f"retention recovery target rebound: {row['path']}"
+                )
+            if row["kind"] == "directory":
+                os.rmdir(name, dir_fd=parent_fd)
+            else:
+                os.unlink(name, dir_fd=parent_fd)
+        _finish_retention_delete(journal, record, transaction, recovered=True)
+        completed_paths.add(row["path"])
+    return completed_paths
+
+
+def _unlink_retention_file(record, journal, root_fd):
+    with _held_retention_parent(root_fd, record["relative"], "regular") as (
+        parent_fd, name,
+    ):
+        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if _retention_identity(current) != record["identity"]:
+            raise BackupRetentionError(f"backup deletion target rebound: {name}")
+        transaction = _plan_retention_delete(journal, record, "regular")
+        os.unlink(name, dir_fd=parent_fd)
+    _finish_retention_delete(journal, record, transaction)
+
+
+def _delete_retention_batch(batch, journal, root_fd):
+    for record in sorted(batch["files"].values(), key=lambda item: item["relative"]):
+        if record["path"].exists():
+            _unlink_retention_file(record, journal, root_fd)
+    for record in sorted(batch["metadata"], key=lambda item: item["path"].name):
+        if record["path"].exists():
+            record = {**record, "relative": f"{batch['name']}/{record['path'].name}"}
+            _unlink_retention_file(record, journal, root_fd)
+    for family in sorted(batch["families"]):
+        family_record = batch["families"][family]
+        record = {
+            **family_record, "relative": f"{batch['name']}/{family}",
+        }
+        with _held_retention_parent(root_fd, record["relative"], "directory") as (
+            parent_fd, name,
+        ):
+            current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            if not _same_directory_authority(family_record["identity"], current):
+                raise BackupRetentionError(
+                    f"backup family rebound: {batch['name']}/{family}"
+                )
+            transaction = _plan_retention_delete(journal, record, "directory")
+            os.rmdir(name, dir_fd=parent_fd)
+        _finish_retention_delete(journal, record, transaction)
+    with _held_retention_parent(root_fd, batch["name"], "directory") as (
+        parent_fd, name,
+    ):
+        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if not _same_directory_authority(batch["identity"], current):
+            raise BackupRetentionError(f"backup batch rebound: {batch['name']}")
+        transaction = _plan_retention_delete(journal, batch, "directory")
+        os.rmdir(name, dir_fd=parent_fd)
+    _finish_retention_delete(journal, batch, transaction)
+
+
+def _open_private_retention_file(path):
+    flags = os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        descriptor = os.open(path, flags)
+    metadata = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+        or metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o600
+    ):
+        os.close(descriptor)
+        raise BackupRetentionError(f"unsafe retention state file: {Path(path).name}")
+    return descriptor
+
+
+def _open_retention_lock(canonical_root):
+    lock_path = canonical_root.parent / f".{canonical_root.name}.retention.lock"
+    return _open_private_retention_file(lock_path)
+
+
+def _apply_backup_retention(output_root, current_batch_name, *, environment,
+                            migration_inventory=None, _held_lock_fd=None):
+    """Deduplicate and count-prune one fully published backup stream."""
+    if environment not in {"prod", "air"}:
+        raise BackupRetentionError("backup retention environment is invalid")
+    requested = Path(output_root)
+    link_before = os.lstat(requested)
+    canonical_root = requested.resolve(strict=True)
+    if stat.S_ISLNK(link_before.st_mode):
+        link_after = os.lstat(requested)
+        if _retention_identity(link_before) != _retention_identity(link_after):
+            raise BackupRetentionError("backup root link changed during binding")
+    root_fd = os.open(
+        canonical_root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+    )
+    owns_lock = _held_lock_fd is None
+    lock_fd = _open_retention_lock(canonical_root) if owns_lock else _held_lock_fd
+    journal_path = canonical_root.parent / f".{canonical_root.name}.retention.jsonl"
+    journal_fd = None
+    try:
+        root_metadata = os.fstat(root_fd)
+        if (root_metadata.st_dev, root_metadata.st_ino) != (
+            os.lstat(canonical_root).st_dev, os.lstat(canonical_root).st_ino,
+        ):
+            raise BackupRetentionError("backup root changed during binding")
+        if owns_lock:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        journal_fd = _open_private_retention_file(journal_path)
+        report = {
+            "deduplicated": [], "version_pruned": [], "batch_pruned": [],
+            "retention_blocked_by_last_copy": [], "events": [],
+        }
+        with os.fdopen(journal_fd, "r+", encoding="utf-8", closefd=False) as journal:
+            deleted_paths = _recover_retention_journal(
+                canonical_root, root_fd, journal,
+            )
+            batches = _scan_backup_tree(canonical_root)
+            if any(batch["legacy_requires_inventory"] for batch in batches):
+                _load_legacy_retention_inventory(
+                    migration_inventory, canonical_root, batches, deleted_paths,
+                )
+            stream = sorted(
+                (batch for batch in batches if batch["environment"] == environment),
+                key=lambda batch: (batch["timestamp"], batch["name"]),
+            )
+            names = [batch["name"] for batch in stream]
+            if current_batch_name not in names:
+                raise BackupRetentionError(
+                    "current backup batch is not a valid published batch"
+                )
+            by_name = {batch["name"]: batch for batch in stream}
+            current_index = names.index(current_batch_name)
+            if current_index:
+                previous = stream[current_index - 1]
+                current = stream[current_index]
+                for key in sorted(set(previous["files"]) & set(current["files"])):
+                    older = previous["files"][key]
+                    newer = current["files"][key]
+                    if older["sha256"] == newer["sha256"]:
+                        _unlink_retention_file(older, journal, root_fd)
+                        report["deduplicated"].append(older["relative"])
+                        report["events"].append("deduplicate")
+                        del previous["files"][key]
+
+            versions = {}
+            for batch in stream:
+                for key, record in batch["files"].items():
+                    versions.setdefault(key, []).append((batch, record))
+            for key in sorted(versions):
+                ordered = sorted(
+                    versions[key], key=lambda item: (item[0]["timestamp"], item[0]["name"]),
+                )
+                for batch, record in ordered[:-BACKUP_RETENTION_CAP]:
+                    _unlink_retention_file(record, journal, root_fd)
+                    report["version_pruned"].append(record["relative"])
+                    report["events"].append("version-prune")
+                    batch["files"].pop(key, None)
+
+            while len(stream) > BACKUP_RETENTION_CAP:
+                removed = False
+                for batch in list(stream):
+                    blockers = []
+                    for key, record in batch["files"].items():
+                        if not any(key in other["files"] for other in stream if other is not batch):
+                            blockers.append(f"{record['family']}/{record['hostname']}")
+                    if blockers:
+                        warning = {"batch": batch["name"], "devices": sorted(blockers)}
+                        if warning not in report["retention_blocked_by_last_copy"]:
+                            report["retention_blocked_by_last_copy"].append(warning)
+                        continue
+                    _delete_retention_batch(batch, journal, root_fd)
+                    report["batch_pruned"].append(batch["name"])
+                    report["events"].append("batch-prune")
+                    stream.remove(batch)
+                    by_name.pop(batch["name"], None)
+                    removed = True
+                    break
+                if not removed:
+                    break
+        return report
+    except (OSError, ValueError) as exc:
+        if isinstance(exc, BackupRetentionError):
+            raise
+        raise BackupRetentionError(str(exc)) from exc
+    finally:
+        if journal_fd is not None:
+            os.close(journal_fd)
+        if owns_lock:
+            os.close(lock_fd)
+        os.close(root_fd)
 
 
 def _write_sensitive_backup_yaml(parent_directory, filename, text):
@@ -241,6 +1024,204 @@ def _create_private_backup_tree(output_root, batch_name):
             os.close(root_fd)
         os.close(parent_fd)
     return str(root / batch_name)
+
+
+def _stage_private_backup_tree(output_root, final_batch_name):
+    """Create an unpublished same-root batch and return it with its final path."""
+    parsed = _parse_backup_batch_name(final_batch_name)
+    if parsed["legacy_requires_inventory"]:
+        raise ValueError("new backup batches must use the canonical suffixed grammar")
+    partial_name = f".partial-{secrets.token_hex(16)}"
+    staging = Path(_create_private_backup_tree(output_root, partial_name))
+    return str(staging), staging.parent / final_batch_name
+
+
+def _fsync_backup_staging(staging_fd, root_device):
+    """Validate and durably flush a private batch through held descriptors."""
+    metadata = os.fstat(staging_fd)
+    if (
+        not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid()
+        or metadata.st_dev != root_device or stat.S_IMODE(metadata.st_mode) != 0o700
+    ):
+        raise BackupRetentionError("backup staging directory is unsafe")
+    staging_identity = _retention_identity(metadata)
+    children = sorted(os.scandir(staging_fd), key=lambda item: item.name)
+    families = {entry.name for entry in children if entry.is_dir(follow_symlinks=False)}
+    if families != _BACKUP_FAMILIES:
+        raise BackupRetentionError("backup staging families are incomplete or unknown")
+    for child in children:
+        child_metadata = child.stat(follow_symlinks=False)
+        if child_metadata.st_dev != root_device or child_metadata.st_uid != os.geteuid():
+            raise BackupRetentionError("backup staging child crosses authority")
+        if stat.S_ISDIR(child_metadata.st_mode):
+            directory_fd = os.open(
+                child.name,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=staging_fd,
+            )
+            try:
+                if _retention_identity(os.fstat(directory_fd)) != _retention_identity(
+                    child_metadata
+                ):
+                    raise BackupRetentionError("backup staging family rebound")
+                leaves = sorted(os.scandir(directory_fd), key=lambda item: item.name)
+                _validate_backup_leaf_names([leaf.name for leaf in leaves])
+                for leaf in leaves:
+                    leaf_metadata = leaf.stat(follow_symlinks=False)
+                    if (
+                        not stat.S_ISREG(leaf_metadata.st_mode) or leaf_metadata.st_nlink != 1
+                        or leaf_metadata.st_uid != os.geteuid() or leaf_metadata.st_dev != root_device
+                        or stat.S_IMODE(leaf_metadata.st_mode) != 0o600
+                    ):
+                        raise BackupRetentionError("backup staging YAML is unsafe")
+                    expected = _retention_identity(leaf_metadata)
+                    descriptor = os.open(
+                        leaf.name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                        dir_fd=directory_fd,
+                    )
+                    try:
+                        if _retention_identity(os.fstat(descriptor)) != expected:
+                            raise BackupRetentionError("backup staging YAML rebound")
+                        os.fsync(descriptor)
+                        if _retention_identity(os.fstat(descriptor)) != expected:
+                            raise BackupRetentionError("backup staging YAML changed")
+                    finally:
+                        os.close(descriptor)
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        elif stat.S_ISREG(child_metadata.st_mode) and child_metadata.st_nlink == 1:
+            expected = _retention_identity(child_metadata)
+            descriptor = os.open(
+                child.name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=staging_fd,
+            )
+            try:
+                opened = os.fstat(descriptor)
+                if (
+                    opened.st_uid != os.geteuid()
+                    or stat.S_IMODE(opened.st_mode) != 0o600
+                    or _retention_identity(opened) != expected
+                ):
+                    raise BackupRetentionError("backup staging metadata is unsafe")
+                os.fsync(descriptor)
+                if _retention_identity(os.fstat(descriptor)) != expected:
+                    raise BackupRetentionError("backup staging metadata changed")
+            finally:
+                os.close(descriptor)
+        else:
+            raise BackupRetentionError("backup staging contains an unsafe object")
+    os.fsync(staging_fd)
+    if not _same_directory_authority(staging_identity, os.fstat(staging_fd)):
+        raise BackupRetentionError("backup staging changed while flushing")
+
+
+def _rename_directory_noreplace(source, destination, *,
+                                source_dir_fd=None, destination_dir_fd=None):
+    libc = ctypes.CDLL(None, use_errno=True)
+    source_bytes = os.fsencode(source)
+    destination_bytes = os.fsencode(destination)
+    source_parent = -2 if source_dir_fd is None else source_dir_fd
+    destination_parent = -2 if destination_dir_fd is None else destination_dir_fd
+    if sys.platform == "darwin" and hasattr(libc, "renameatx_np"):
+        result = libc.renameatx_np(
+            source_parent, source_bytes,
+            destination_parent, destination_bytes, 0x00000004,
+        )
+    elif hasattr(libc, "renameat2"):
+        result = libc.renameat2(
+            source_parent, source_bytes,
+            destination_parent, destination_bytes, 0x00000001,
+        )
+    else:
+        raise RuntimeError("atomic no-replace directory publication is unavailable")
+    if result != 0:
+        error = ctypes.get_errno()
+        if error == errno.EEXIST:
+            raise FileExistsError(error, os.strerror(error), str(destination))
+        raise OSError(error, os.strerror(error), str(destination))
+
+
+def _publish_and_retain_backup_batch(output_root, staging, final_batch_name, *,
+                                     environment, migration_inventory=None):
+    """Publish, deduplicate, and prune while one root lock remains held."""
+    requested = Path(output_root)
+    canonical_root = requested.resolve(strict=True)
+    staging_path = Path(staging).resolve(strict=True)
+    if staging_path.parent != canonical_root or not staging_path.name.startswith(".partial-"):
+        raise BackupRetentionError("backup staging path is outside the canonical root")
+    parsed = _parse_backup_batch_name(final_batch_name)
+    if parsed["legacy_requires_inventory"] or parsed["environment"] != environment:
+        raise BackupRetentionError("published batch name does not bind the environment")
+    final = canonical_root / final_batch_name
+    root_fd = os.open(
+        canonical_root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+    )
+    lock_fd = _open_retention_lock(canonical_root)
+    staging_fd = None
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        root_metadata = os.fstat(root_fd)
+        if (root_metadata.st_dev, root_metadata.st_ino) != (
+            os.lstat(canonical_root).st_dev, os.lstat(canonical_root).st_ino,
+        ):
+            raise BackupRetentionError("backup root rebound before publication")
+        staging_fd = os.open(
+            staging_path.name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+            dir_fd=root_fd,
+        )
+        staging_identity = _retention_identity(os.fstat(staging_fd))
+        _fsync_backup_staging(staging_fd, root_metadata.st_dev)
+        rebound = os.lstat(canonical_root)
+        if (rebound.st_dev, rebound.st_ino) != (
+            root_metadata.st_dev, root_metadata.st_ino,
+        ):
+            raise BackupRetentionError("backup root rebound during staging fsync")
+        named_staging = os.stat(
+            staging_path.name, dir_fd=root_fd, follow_symlinks=False,
+        )
+        if _retention_identity(named_staging) != staging_identity:
+            raise BackupRetentionError("backup staging name rebound before publication")
+        _rename_directory_noreplace(
+            staging_path.name, final.name,
+            source_dir_fd=root_fd, destination_dir_fd=root_fd,
+        )
+        published = os.stat(final.name, dir_fd=root_fd, follow_symlinks=False)
+        if not _same_directory_authority(staging_identity, published):
+            quarantine_names = [
+                staging_path.name,
+                f".partial-rejected-{secrets.token_hex(16)}",
+            ]
+            rollback_error = None
+            for quarantine_name in quarantine_names:
+                try:
+                    _rename_directory_noreplace(
+                        final.name, quarantine_name,
+                        source_dir_fd=root_fd, destination_dir_fd=root_fd,
+                    )
+                    os.fsync(root_fd)
+                    rollback_error = None
+                    break
+                except FileExistsError as exc:
+                    rollback_error = exc
+            if rollback_error is not None:
+                raise BackupRetentionError(
+                    "backup staging rebound and final-name quarantine failed"
+                ) from rollback_error
+            raise BackupRetentionError("backup staging rebound during publication")
+        os.fsync(root_fd)
+        report = _apply_backup_retention(
+            canonical_root, final_batch_name, environment=environment,
+            migration_inventory=migration_inventory, _held_lock_fd=lock_fd,
+        )
+        report["events"].insert(0, "publish")
+        return report
+    finally:
+        if staging_fd is not None:
+            os.close(staging_fd)
+        os.close(lock_fd)
+        os.close(root_fd)
 
 
 @contextmanager
@@ -1808,6 +2789,73 @@ def _resolve_backup_passwords(eth_count, ib_count, nvl_count, shared_password):
     )
     return eth_password or "", ib_password or "", nvl_password or ""
 
+def _parse_retention_inventory_command(argv):
+    """Parse the isolated read-only prepare / explicit approve workflow."""
+    mode_flags = (
+        "--prepare-retention-migration-inventory",
+        "--approve-retention-migration-inventory",
+    )
+    if not any(
+        arg == flag or arg.startswith(flag + "=")
+        for arg in argv for flag in mode_flags
+    ):
+        if any(arg == "--retention-cap" or arg.startswith("--retention-cap=") for arg in argv):
+            raise ValueError("production CLI does not expose a retention cap override")
+        return None
+    action = None
+    destination = None
+    assignments = {}
+    index = 0
+    while index < len(argv):
+        arg = argv[index]
+        matched_mode = None
+        for flag, candidate in (
+            (mode_flags[0], "prepare"), (mode_flags[1], "approve"),
+        ):
+            if arg == flag or arg.startswith(flag + "="):
+                matched_mode = (flag, candidate)
+                break
+        if matched_mode is not None:
+            flag, candidate = matched_mode
+            if action is not None:
+                raise ValueError("retention migration action may be selected only once")
+            action = candidate
+            if arg == flag:
+                index += 1
+                if index >= len(argv):
+                    raise ValueError(f"{flag} requires a destination")
+                destination = argv[index]
+            else:
+                destination = arg.split("=", 1)[1]
+            if not destination:
+                raise ValueError(f"{flag} requires a destination")
+        elif arg == "--legacy-environment" or arg.startswith("--legacy-environment="):
+            if arg == "--legacy-environment":
+                index += 1
+                if index >= len(argv):
+                    raise ValueError("--legacy-environment requires BATCH=prod|air")
+                value = argv[index]
+            else:
+                value = arg.split("=", 1)[1]
+            if "=" not in value:
+                raise ValueError("--legacy-environment requires BATCH=prod|air")
+            name, environment = value.rsplit("=", 1)
+            parsed = _parse_backup_batch_name(name)
+            if not parsed["legacy_requires_inventory"] or environment not in {"prod", "air"}:
+                raise ValueError("legacy assignment must bind a suffixless batch to prod or air")
+            if name in assignments:
+                raise ValueError("legacy batch environment was assigned more than once")
+            assignments[name] = environment
+        else:
+            raise ValueError(f"unsupported retention migration argument: {arg}")
+        index += 1
+    if action is None or not destination or not assignments:
+        raise ValueError("retention migration needs an action, destination, and assignments")
+    return {
+        "action": action, "destination": destination, "assignments": assignments,
+    }
+
+
 def _parse_args(argv):
     """Parse the intentionally small CLI without accepting silent typos."""
     auto_yes = False
@@ -1873,6 +2921,28 @@ def _inventory_paths(script_dir, environment):
 def main():
     global _AUTO_YES, _ENVIRONMENT
     try:
+        migration_command = _parse_retention_inventory_command(sys.argv[1:])
+    except ValueError as exc:
+        print(f"[ERROR] {exc}")
+        sys.exit(2)
+    if migration_command is not None:
+        backup_root = os.path.join(SCRIPT_DIR, "yaml-backup")
+        try:
+            written = _write_legacy_retention_inventory(
+                backup_root,
+                migration_command["destination"],
+                migration_command["assignments"],
+                approve=migration_command["action"] == "approve",
+            )
+        except (OSError, ValueError, BackupRetentionError) as exc:
+            print(f"[ERROR] retention migration inventory: {exc}")
+            sys.exit(1)
+        print(
+            f"[OK] retention migration inventory {migration_command['action']}: "
+            f"{written}"
+        )
+        return
+    try:
         _AUTO_YES, requested_environment, show_help, password_fd = _parse_args(
             sys.argv[1:]
         )
@@ -1888,6 +2958,10 @@ def main():
             except OSError:
                 pass
         print("""usage: yaml-collect.py [-y] [--air | --prod | --type auto|prod|air]
+       yaml-collect.py --prepare-retention-migration-inventory PATH \\
+         --legacy-environment BATCH=prod|air [...]
+       yaml-collect.py --approve-retention-migration-inventory PATH \\
+         --legacy-environment BATCH=prod|air [...]
 
 读取 setup 链接的 devices_config.csv，优先使用 SSH 公钥，必要时提示输入各类型
 设备的共享密码，并把配置备份到带 prod/air 来源标记的时间戳目录。
@@ -1989,8 +3063,9 @@ prod/air 可显式限定，--air/--prod 分别是 --type air/prod 的短写。�
 
     ts      = datetime.now().strftime("%Y%m%d_%H%M")
     suffix = f"-{_ENVIRONMENT}-backup"
-    out_dir = _create_private_backup_tree(
-        os.path.join(SCRIPT_DIR, "yaml-backup"), f"{ts}{suffix}",
+    backup_root = os.path.join(SCRIPT_DIR, "yaml-backup")
+    out_dir, final_out_dir = _stage_private_backup_tree(
+        backup_root, f"{ts}{suffix}",
     )
     with _private_output_text(out_dir, "collection.json") as handle:
         json.dump({
@@ -2061,7 +3136,7 @@ prod/air 可显式限定，--air/--prod 分别是 --type air/prod 的短写。�
     log_file = os.path.join(out_dir, "backup.log")
     with _private_output_text(out_dir, "backup.log") as f:
         f.write("\n".join(all_log) + "\n")
-    print(f"\n日志：{log_file}")
+    print(f"\n日志：{final_out_dir / 'backup.log'}")
 
     # ── 写 devices_config.csv（template 列替换为 sn）─────────────────────────
     csv_file = os.path.join(out_dir, "devices_config.csv")
@@ -2087,7 +3162,7 @@ prod/air 可显式限定，--air/--prod 分别是 --type air/prod 的短写。�
             "[HINT] 本次未输入密码；若 SSH 公钥登录正常但设备没有免密 sudo，"
             "请重新运行并输入对应设备类型的 SSH/sudo 共用密码。"
         )
-    print(f"设备信息：{csv_file}")
+    print(f"设备信息：{final_out_dir / 'devices_config.csv'}")
 
     # ── 全部收集完成后，读取两个 CSV 文件进行比对 ────────────────────────────
     compare_csv_files(csv_files, csv_file, out_dir, expected_devices=all_devices)
@@ -2105,6 +3180,24 @@ prod/air 可显式限定，--air/--prod 分别是 --type air/prod 的短写。�
         "failed_count": len(failed_devices),
         "failed_devices": failed_devices,
     }
+    if state != "failed":
+        migration_inventory = (
+            Path(backup_root).resolve(strict=True).parent
+            / f".{Path(backup_root).resolve(strict=True).name}.retention-migration.json"
+        )
+        retention = _publish_and_retain_backup_batch(
+            backup_root, out_dir, final_out_dir.name,
+            environment=_ENVIRONMENT,
+            migration_inventory=(
+                migration_inventory if migration_inventory.exists() else None
+            ),
+        )
+        for warning in retention["retention_blocked_by_last_copy"]:
+            print(
+                "[WARN] retention_blocked_by_last_copy "
+                f"batch={warning['batch']} devices={','.join(warning['devices'])}"
+            )
+        print(f"[OK] 已发布配置备份：{final_out_dir}")
     print(
         "[HTTP_ZTP_TASK_RESULT] "
         + json.dumps(task_result, ensure_ascii=False, separators=(",", ":"))

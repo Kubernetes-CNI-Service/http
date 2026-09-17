@@ -946,3 +946,20 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   要求重新 inventory；不得自动 rollback 到更宽权限。
 - 清理与风险：只保留脱敏 manifest/journal 摘要，不保存 YAML 内容或密码散列；从 VM/fixture 快照恢复，
   不手工修改真实历史树。身份配置错误会改变 feedback 的权威证据选择，因此任何错误都阻断后续优化流程。
+
+## TC-REAL-BACKUP-RETENTION-001 — 历史批次迁移、逐设备去重与 last-copy 封顶
+
+- 状态：**NOT RUN / REAL_ENV REQUIRED**。只在现网备份树的只读快照及其隔离可写副本上执行；真实树
+  首次只允许 prepare migration inventory，不执行 approve、dedup 或 prune。记录 canonical root、顶层
+  symlink identity、三类历史批次名、环境归属、批次/family/YAML 的 type/dev/ino/uid/gid/mode/nlink 与
+  exact tree digest；不得记录 YAML 内容或密码散列。
+- 步骤与预期：在隔离副本上 prepare 后人工核对 `20260624_111542` 的 Production 归属，再 approve；两步
+  间分别注入内容、mode、link 与 owner 漂移，必须拒绝。用 `20260824_1542`/`20260831_2137` 实测关系证明
+  46 个相同设备只删除旧副本、8 个不同设备双份保留，新增/离线两方向均不删除。以 cap=100 对四批运行时
+  不得产生 last-copy 告警；仅在第二份隔离副本的测试常量 cap=3 下，必须钉住并命名
+  `20260624_111542` 及其 104 个唯一旧设备身份，同时删除可淘汰批次。production CLI 不得出现 cap 参数。
+  中断 journal 后重跑必须只调和已记录 identity，不能删除 rebound 路径；所有剩余 YAML 不宽于 0600，
+  所有受管目录不宽于 0700，owner 不变。
+- 清理与风险：保留脱敏 report、journal、批次/设备计数与前后 tree digest，销毁两个可写隔离副本；真实树
+  只有 owner 另行批准后才可 approve 与执行。错误环境归属或 last-copy 判断会永久删除不可再生配置，任何
+  inventory/hash/identity 不一致都必须阻断，禁止手工改 migration inventory 或事务 journal。
