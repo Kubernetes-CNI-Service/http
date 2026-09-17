@@ -85,7 +85,6 @@ from project_contract import (
     v2_vrr_ipv4_plan,
 )
 from nvue_normalizer import expand_nvue_selector
-from dynamic_air_inventory import air_device_template
 
 
 def _parse_branch(argv):
@@ -6961,6 +6960,11 @@ def generate_air_hostname_configs(source_dir, output_dir):
     (``patch`` mode).  The latter deliberately contains no synthesized static
     management address.
     """
+    # The canonical generator can still be copied into an isolated non-AIR
+    # preflight fixture.  Resolve the shared AIR classifier only on the AIR
+    # path so those existing schema checks remain self-contained.
+    from dynamic_air_inventory import air_device_template
+
     inventory_path = os.path.join(SCRIPT_DIR, "02-devices_config.csv")
     inventory_templates = {}
     if os.path.isfile(inventory_path):
