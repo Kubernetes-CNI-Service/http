@@ -85,6 +85,7 @@ from project_contract import (
     v2_vrr_ipv4_plan,
 )
 from nvue_normalizer import expand_nvue_selector
+from dynamic_air_inventory import air_device_template
 
 
 def _parse_branch(argv):
@@ -6467,6 +6468,67 @@ def _replace_air_hostname(lines, hostname):
     return result
 
 
+def _air_firewall_interface_fragment(ports, *, hostname):
+    interfaces = {}
+    for value in sorted({str(port).strip() for port in ports}, key=_port_sort_key):
+        errors = []
+        expanded = _csv_expand_ports(
+            value, f"AIR {hostname} topology interface", errors,
+        )
+        if errors or expanded != [value] or not re.fullmatch(r"swp\d+(?:s\d+)?", value):
+            detail = errors[0].strip() if errors else repr(value)
+            raise ValueError(f"AIR {hostname} 的 P2P swp 接口无效: {detail}")
+        interfaces[value] = {
+            "link": {"state": {"up": {}}},
+            "type": "swp",
+        }
+    return [{"set": {"interface": interfaces}}] if interfaces else []
+
+
+_AIR_TEMPLATE_INTERFACE_RENDERERS = {
+    "fw": _air_firewall_interface_fragment,
+}
+
+
+def _air_template_interface_fragment(template, ports, *, hostname):
+    """Dispatch optional AIR interface policy through the CSV template value."""
+    renderer = _AIR_TEMPLATE_INTERFACE_RENDERERS.get(
+        str(template or "").strip().casefold()
+    )
+    return renderer(ports, hostname=hostname) if renderer is not None else []
+
+
+def _reject_air_non_switch_splitters(templates, splitter_path):
+    """Reject the reviewed no-breakout premise for data-driven AIR classes."""
+    managed = {
+        str(hostname).casefold(): str(template).strip().casefold()
+        for hostname, template in templates.items()
+        if str(template).strip().casefold() in _AIR_TEMPLATE_INTERFACE_RENDERERS
+    }
+    path = Path(splitter_path)
+    if not managed or not path.is_file():
+        return
+    conflicts = set()
+    with path.open(encoding="utf-8-sig", newline="") as stream:
+        for raw_line in stream:
+            if not raw_line.strip() or raw_line.lstrip().startswith("#"):
+                continue
+            fields = next(csv.reader([raw_line]))
+            if not fields:
+                continue
+            key = fields[0].strip().casefold()
+            if key in managed:
+                conflicts.add(key)
+    if conflicts:
+        names = ", ".join(sorted(
+            hostname for hostname in templates
+            if str(hostname).casefold() in conflicts
+        ))
+        raise ValueError(
+            f"{names} 出现在 03-splitter.log；AIR 非交换机不得使用拆分口"
+        )
+
+
 def _filter_air_yaml(filepath, air_ports, mgmt_ip=None, hostname=None):
     """Filter AIR ports/address and optionally replace system.hostname."""
     with open(filepath, encoding="utf-8") as f:
@@ -6900,7 +6962,7 @@ def generate_air_hostname_configs(source_dir, output_dir):
     management address.
     """
     inventory_path = os.path.join(SCRIPT_DIR, "02-devices_config.csv")
-    inventory_hosts = set()
+    inventory_templates = {}
     if os.path.isfile(inventory_path):
         with open(inventory_path, newline="", encoding="utf-8-sig") as stream:
             reader = csv.DictReader(stream)
@@ -6908,7 +6970,14 @@ def generate_air_hostname_configs(source_dir, output_dir):
                 hostname = str(row.get("hostname") or "").strip()
                 dev_type = str(row.get("type") or "").strip().casefold()
                 if hostname and dev_type == "air":
-                    inventory_hosts.add(hostname.casefold())
+                    key = hostname.casefold()
+                    template = str(row.get("template") or "").strip()
+                    previous = inventory_templates.get(key)
+                    if previous is not None and previous.casefold() != template.casefold():
+                        raise ValueError(f"AIR inventory template 冲突: {hostname}")
+                    inventory_templates[key] = template
+
+    inventory_hosts = set(inventory_templates)
 
     air_json_files = _topology_air_json_files()
     if not air_json_files:
@@ -6962,7 +7031,39 @@ def generate_air_hostname_configs(source_dir, output_dir):
             "mac": raw_mac,
             "ports": set(),
             "mgmt_ip": None,
+            "template": air_device_template(
+                hostname, inventory_templates.get(key, ""),
+            ),
         }
+
+    links = container.get("links", [])
+    if not isinstance(links, list):
+        raise ValueError(f"AIR JSON content.links 必须是 list: {air_json}")
+    for index, link in enumerate(links):
+        if not isinstance(link, list) or len(link) != 2:
+            raise ValueError(f"AIR JSON link[{index}] 必须包含两个 endpoint")
+        for endpoint in link:
+            if not isinstance(endpoint, dict):
+                raise ValueError(f"AIR JSON link[{index}] endpoint 必须是 object")
+            key = str(endpoint.get("node") or "").strip().casefold()
+            if key not in air_info:
+                continue
+            interface = str(endpoint.get("interface") or "").strip()
+            if not interface.casefold().startswith("swp"):
+                continue
+            errors = []
+            parsed = _csv_expand_ports(
+                interface, f"AIR JSON link[{index}] {air_info[key]['hostname']}", errors,
+            )
+            if errors or parsed != [interface]:
+                detail = errors[0].strip() if errors else repr(interface)
+                raise ValueError(f"AIR JSON swp 接口不是已解析端口: {detail}")
+            air_info[key]["ports"].add(interface)
+
+    _reject_air_non_switch_splitters(
+        {item["hostname"]: item["template"] for item in air_info.values()},
+        Path(P2P_INPUT_DIR) / "03-splitter.log",
+    )
 
     json_hosts = set(air_info)
     missing_inventory = sorted(inventory_hosts - json_hosts)
@@ -7069,6 +7170,10 @@ def generate_air_hostname_configs(source_dir, output_dir):
             device = air_info[target_key]
             target_name = f"{device['hostname']}.yaml"
             baseline = baseline_document(device["hostname"])
+            interface_fragment = _air_template_interface_fragment(
+                device["template"], device["ports"], hostname=device["hostname"],
+            )
+            baseline.extend(interface_fragment)
             target_path = Path(temporary, target_name)
             target_path.write_text(
                 yaml.dump(
@@ -7086,6 +7191,9 @@ def generate_air_hostname_configs(source_dir, output_dir):
                 "apply_mode": "patch",
                 "source_default": os.path.basename(default_file),
                 "source_default_sha256": default_sha256,
+                "template": device["template"],
+                "topology_ports": sorted(device["ports"], key=_port_sort_key)
+                if interface_fragment else [],
             })
             targets.add(target_key)
             generated += 1

@@ -52,6 +52,78 @@ def load_module(name: str, path: Path):
 
 
 class TemplateContractTests(unittest.TestCase):
+    def test_dynamic_air_firewall_classifier_uses_separator_boundaries(self):
+        resolver = load_module(
+            "dynamic_air_firewall_boundary_contract",
+            ROOT / "ztp/dynamic_air_inventory.py",
+        )
+        required = (
+            "core-fw-01", "edge_fw_2", "fw1", "fw-01", "fw_01",
+            "fw", "core-fw", "FW-01", "sw-fw-leaf", "oob.fw.2",
+            "fw-01-north", "fw01x",
+        )
+        excluded = ("spine-fwd-1", "myfwbox", "FWAAA", "fwd", "software-1")
+        nodes = {}
+        for index, hostname in enumerate(required + excluded, start=1):
+            nodes[hostname] = {
+                "os": "cumulus-vx-5.16.4",
+                "management_interfaces": {"eth0": {
+                    "mac_address": f"02:00:00:00:{index // 256:02x}:{index % 256:02x}",
+                }},
+            }
+        with tempfile.TemporaryDirectory() as directory:
+            topology = Path(directory) / "boundary-air.json"
+            topology.write_text(
+                json.dumps({"content": {"nodes": nodes}}), encoding="utf-8",
+            )
+            classified = {
+                item["hostname"]: item["template"]
+                for item in resolver.topology_nodes(topology)
+            }
+        for hostname in required:
+            self.assertEqual("fw", classified[hostname], hostname)
+        for hostname in excluded:
+            self.assertEqual("", classified[hostname], hostname)
+
+    def test_air_non_switch_template_dispatch_renders_up_and_rejects_splitter(self):
+        generator = load_module(
+            "air_non_switch_template_dispatch_contract",
+            ROOT / "ztp/config/cumulus/template/90-c2-generate_configs.py",
+        )
+        self.assertEqual(
+            [{"set": {"interface": {
+                "swp1": {"link": {"state": {"up": {}}}, "type": "swp"},
+                "swp7": {"link": {"state": {"up": {}}}, "type": "swp"},
+            }}}],
+            generator._air_template_interface_fragment(
+                "fw", {"swp7", "swp1"}, hostname="core-fw-01",
+            ),
+        )
+        self.assertEqual(
+            [],
+            generator._air_template_interface_fragment(
+                "fw", set(), hostname="fw-empty",
+            ),
+        )
+        self.assertEqual(
+            [],
+            generator._air_template_interface_fragment(
+                "oob-leaf", {"swp1"}, hostname="spine-fwd-1",
+            ),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            splitter = Path(directory) / "03-splitter.log"
+            splitter.write_text(
+                "# generated switch splitter inventory\n"
+                "leaf01,*,1to4\n"
+                "CORE-FW-01,7,1to2\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "core-fw-01.*03-splitter"):
+                generator._reject_air_non_switch_splitters(
+                    {"core-fw-01": "fw", "leaf01": "oob-leaf"}, splitter,
+                )
+
     def test_standalone_dhcp_guidance_routes_each_runtime_without_mixing(self):
         generator = load_module(
             "dhcp_operator_guidance_contract",

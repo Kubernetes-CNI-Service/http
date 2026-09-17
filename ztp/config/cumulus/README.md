@@ -37,9 +37,13 @@ CSV 中没有专属 YAML 的设备会明确告警，并在 ZTP 时回退到默�
 NVUE mapping。更新采用同目录临时文件原子替换，任一文件解析或写入失败都会中止发布。
 
 同时间戳存在 `_with_desc` 时自动优先使用。脚本从统一 `02-devices_config.csv` 读取
-Production 与 `type=air` 记录，校验每条 AIR 记录都能唯一匹配同名 Production 记录，
-并在 `_combine` 中让两套 MAC 分别指向本环境 YAML。找不到 Production 对应项的 AIR 防火墙/服务器不创建专属 MAC
-链接，设备通过 DHCP range 和 `default.yaml` 启动。发布前会对整个批次执行严格 YAML
+Production 与 `type=air` 记录，校验需要 full profile 的 AIR 记录都能唯一匹配同名
+Production 记录，并在 `_combine` 中让两套 MAC 分别指向本环境 YAML。没有 Production
+对应项的动态 AIR 设备使用 baseline profile：普通设备得到 effective default 与本机 hostname；
+名称匹配 `(?:^|[-_.])fw(?:[-_.]|\d|$)` 的防火墙还会把 P2P 拓扑中实际存在的每个 `swp`
+接口渲染为 `type: swp`、`link.state.up`。防火墙零 `swp` 时不生成接口片段；任何 splitter/
+breakout 记录、无效或重复端口都会在发布前 fail closed。接口策略由 CSV `template` 分派，
+名称识别只负责为没有显式模板的动态节点选择 `fw`，不会代替模板分派。发布前会对整个批次执行严格 YAML
 重复-key、MAC 目标和完整性门禁，通过后才原子更新 `latest_yaml`。所有交互等待时间为
 15 秒；采用 `_with_desc` 发布后，原始 `<时间戳>/` 目录直接删除且不打包。
 

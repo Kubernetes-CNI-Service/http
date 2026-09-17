@@ -23,6 +23,15 @@ from typing import Iterable
 
 SAFE_HOSTNAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")
 LEASE_BLOCK = re.compile(r"(?ms)^lease\s+(\S+)\s*\{(.*?)^[ \t]*\}")
+AIR_FIREWALL_NAME = re.compile(r"(?:^|[-_.])fw(?:[-_.]|\d|$)", re.I)
+
+
+def air_device_template(name: object, explicit: object = "") -> str:
+    """Return the data-driven AIR template for one topology hostname."""
+    configured = str(explicit or "").strip()
+    if configured:
+        return configured
+    return "fw" if AIR_FIREWALL_NAME.search(str(name or "").strip()) else ""
 
 
 def normalize_mac(value: object) -> str:
@@ -109,7 +118,7 @@ def topology_nodes(path: Path | None) -> list[dict[str, str]]:
         )
         if not mac:
             continue
-        template = "fw" if re.search(r"(?:^|[-_.])FW(?:[-_.]?\d+)?$", name, re.I) else ""
+        template = air_device_template(name)
         result.append({
             "hostname": name,
             "type": "air",

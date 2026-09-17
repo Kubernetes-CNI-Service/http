@@ -15,8 +15,9 @@
   nvos/latest_yaml                   → template/99-output-ib_nvl/latest（固定）
 
 Cumulus 规则：同时间戳存在 _with_desc 时优先使用；Production 与 AIR 分别使用
-独立 YAML，AIR 文件仅允许 system.hostname 与配对的 Production 文件不同。最终发布为
-*_combine，生成源目录归档为 *_combine_sources.tar.gz 后删除。
+独立 YAML。full profile 的 AIR 文件仅允许 system.hostname 与配对的 Production 文件不同；
+baseline profile 只允许 effective default、hostname 与 manifest 声明的受管模板接口片段。
+最终发布为 *_combine，生成源目录归档为 *_combine_sources.tar.gz 后删除。
 
 CSV 格式（含表头，11 列）：
   hostname, type, template, eth0_ip, netmask, eth0_gw, eth0_mac,
@@ -915,6 +916,20 @@ def _load_air_generation_manifest(air_context):
             "hostname": hostname, "profile": profile,
             "apply_mode": mode, "mac": mac,
         })
+        template = str(row.get("template") or "").strip().casefold()
+        ports = row.get("topology_ports", [])
+        if not isinstance(ports, list) or any(
+                not isinstance(port, str)
+                or not re.fullmatch(r"swp\d+(?:s\d+)?", port)
+                for port in ports):
+            raise ValueError(f"AIR manifest {hostname}: topology_ports 无效")
+        if len(set(ports)) != len(ports):
+            raise ValueError(f"AIR manifest {hostname}: topology_ports 重复")
+        if template != "fw" and ports:
+            raise ValueError(
+                f"AIR manifest {hostname}: template={template or '空'} 不得声明 topology_ports"
+            )
+        normalized.update({"template": template, "topology_ports": ports})
         by_host[key] = normalized
     return manifest, by_host
 
@@ -981,9 +996,6 @@ def _validate_air_production_yaml_pairs(staging_dir, devices, profiles=None):
 def _validate_air_baselines(staging_dir, profiles, default_text, default_name):
     """Require every baseline YAML to equal effective default plus hostname."""
     document = _strict_yaml_load(default_text)
-    canonical_default = yaml.safe_dump(
-        document, sort_keys=True, allow_unicode=True,
-    )
     checked = 0
     for profile in sorted(profiles.values(), key=lambda item: item["hostname"].casefold()):
         if profile.get("profile") != "baseline":
@@ -996,10 +1008,23 @@ def _validate_air_baselines(staging_dir, profiles, default_text, default_name):
             raise ValueError(
                 f"{path}: set.system.hostname={configured!r}，应为 {profile['hostname']!r}"
             )
-        if _normalized_cumulus_without_hostname(path) != canonical_default:
+        expected = copy.deepcopy(document)
+        template_renderers = {
+            "fw": lambda ports: [{"set": {"interface": {
+                port: {"link": {"state": {"up": {}}}, "type": "swp"}
+                for port in sorted(ports)
+            }}}] if ports else [],
+        }
+        renderer = template_renderers.get(profile.get("template", ""))
+        if renderer is not None:
+            expected.extend(renderer(profile.get("topology_ports", [])))
+        canonical_expected = yaml.safe_dump(
+            expected, sort_keys=True, allow_unicode=True,
+        )
+        if _normalized_cumulus_without_hostname(path) != canonical_expected:
             raise ValueError(
-                f"AIR baseline 除 hostname 外发生漂移: {profile['hostname']}.yaml "
-                f"!= {default_name}"
+                f"AIR baseline 除 hostname/受管模板接口外发生漂移: "
+                f"{profile['hostname']}.yaml != {default_name}"
             )
         checked += 1
     return checked
@@ -1761,7 +1786,7 @@ def _publish_combined_cumulus(
         print(f"[OK] Production/AIR 配置一致性：{pair_count} 对，仅 hostname 不同")
         print(
             f"[OK] AIR baseline 一致性：{baseline_count} 份，仅在 "
-            f"{default_name} 上增加 hostname"
+            f"{default_name} 上增加 hostname/受管模板接口"
         )
 
         if deployment_scope == "air":

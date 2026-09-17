@@ -83,11 +83,13 @@ LOAD = load_module(
 TIMESTAMP = "20260901_120000"
 PROD_HOST = "Prod-Leaf01"
 AIR_HOST = "AIR-Prod-Leaf01"
+AIR_FW_HOST = "AIR-core-fw-01-north"
 IB_HOST = "IB-Leaf01"
 NVL_HOST = "NVL-Leaf01"
 
 PROD_MAC = "02:00:00:00:00:10"
 AIR_MAC = "02:00:00:00:00:11"
+AIR_FW_MAC = "02:00:00:00:00:12"
 IB_MAC0 = "02:00:00:00:00:20"
 IB_MAC1 = "02:00:00:00:00:21"
 NVL_MAC = "02:00:00:00:00:30"
@@ -327,7 +329,22 @@ switches:
                         "eth0": {"mac_address": AIR_MAC},
                     },
                 },
-            }},
+                AIR_FW_HOST: {
+                    "os": "cumulus-vx-5.16.4",
+                    "management_interfaces": {
+                        "eth0": {"mac_address": AIR_FW_MAC},
+                    },
+                },
+            }, "links": [
+                [
+                    {"node": AIR_FW_HOST, "interface": "swp7"},
+                    {"node": AIR_HOST, "interface": "swp48"},
+                ],
+                [
+                    {"node": AIR_FW_HOST, "interface": "swp8"},
+                    {"node": AIR_HOST, "interface": "swp49"},
+                ],
+            ]},
         }), encoding="utf-8")
         (cls.dhcp / "p2p-air.json").symlink_to(cls.air_json)
 
@@ -493,15 +510,33 @@ switches:
             (self.cumulus_release / "release-manifest.json").read_text()
         )
         devices = {item["hostname"]: item for item in manifest["devices"]}
-        self.assertEqual({PROD_HOST, AIR_HOST}, set(devices))
+        self.assertEqual({PROD_HOST, AIR_HOST, AIR_FW_HOST}, set(devices))
         self.assertEqual("production", devices[PROD_HOST]["environment"])
         self.assertEqual("air", devices[AIR_HOST]["environment"])
         self.assertEqual("replace", devices[PROD_HOST]["apply_mode"])
         self.assertEqual("replace", devices[AIR_HOST]["apply_mode"])
-        for hostname, mac in ((PROD_HOST, PROD_MAC), (AIR_HOST, AIR_MAC)):
+        self.assertEqual("patch", devices[AIR_FW_HOST]["apply_mode"])
+        for hostname, mac in (
+            (PROD_HOST, PROD_MAC), (AIR_HOST, AIR_MAC),
+            (AIR_FW_HOST, AIR_FW_MAC),
+        ):
             link = self.cumulus_release / mac_filename(mac)
             self.assertTrue(link.is_symlink())
             self.assertEqual(f"{hostname}.yaml", os.readlink(link))
+        firewall = yaml.safe_load(
+            (self.cumulus_release / f"{AIR_FW_HOST}.yaml").read_text(
+                encoding="utf-8",
+            )
+        )
+        interfaces = {}
+        for operation in firewall:
+            block = operation.get("set") if isinstance(operation, dict) else None
+            if isinstance(block, dict):
+                interfaces.update(block.get("interface") or {})
+        self.assertEqual({"swp7", "swp8"}, set(interfaces))
+        for name in ("swp7", "swp8"):
+            self.assertEqual({}, interfaces[name]["link"]["state"]["up"])
+            self.assertEqual("swp", interfaces[name]["type"])
         self.assertEqual(
             manifest["release_id"],
             self.parent["components"]["cumulus"]["release_id"],
@@ -648,7 +683,10 @@ switches:
         self.assertEqual("192.0.2.150", observed[0]["ip"])
 
         inventory_hosts = {item["hostname"] for item in self.parent["inventory"]}
-        self.assertEqual({PROD_HOST, AIR_HOST, IB_HOST, NVL_HOST}, inventory_hosts)
+        self.assertEqual(
+            {PROD_HOST, AIR_HOST, AIR_FW_HOST, IB_HOST, NVL_HOST},
+            inventory_hosts,
+        )
         for name in ("dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts"):
             self.assertNotIn(UNKNOWN_MAC, (self.dhcp / name).read_text())
 

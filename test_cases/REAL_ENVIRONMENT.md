@@ -213,6 +213,19 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 清理与证据：保存命令、输入/输出 SHA-256、逐设备 selected/omitted 原因和容量对照；删除本轮
   AIR 实例并恢复旧输入/release。不得在 Production 端口执行容量或漂移注入。
 
+## TC-REAL-AIR-FW-PORTS-001 — 动态 AIR 防火墙端口启动策略
+
+- 状态：**NOT RUN / REAL_ENV REQUIRED**。准备一次性 AIR VM，节点名至少覆盖 `fw-01-north`、
+  一个非防火墙 `myfwbox` 和一个零 `swp` 防火墙；P2P 拓扑由受管导入流程生成，保存 CSV、P2P、
+  AIR JSON/DOT 与 effective default 的 size/SHA-256，不连接 Production 数据面。
+- 步骤与预期：对 `fw-01-north` 配置两个实际 `swp` 链路，执行正式 AIR 生成与发布，确认最终
+  NVUE 配置仅为 effective default、hostname 及这两个端口的 `type: swp`/`link.state.up`；零端口
+  防火墙无接口片段，`myfwbox` 不被识别为防火墙。随后分别加入 splitter/breakout、重复端口和无效
+  端口名，必须在 staging 发布前 fail closed；显式非 `fw` CSV template 必须按模板分派而不因名称覆盖。
+- 证据、清理与风险：保存脱敏 generator/publisher 输出、air-config-manifest、最终 YAML hash、VM 内
+  `nv config show` 与端口 link-state；不得保存凭据或真实 Production 地址。负例后从 VM 快照恢复并销毁
+  staging/release。错误地启动未声明端口可能改变仿真连通性，只允许在隔离 AIR VM 验证。
+
 ## TC-REAL-CRASH-001 — 断电与磁盘故障
 
 - 仅在隔离实验服务器执行磁盘满、SIGKILL 和断电注入。
