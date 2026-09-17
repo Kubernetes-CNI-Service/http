@@ -103,7 +103,7 @@ RUN python3 -m venv --system-site-packages /opt/http-ztp/venv \
     && install -m 0644 \
         /opt/http-ztp/source-tree/infra/docker/deployment-source-manifest.json \
         /opt/http-ztp/image-source.sha256 \
-    && /opt/http-ztp/activate.py verify-source-manifest \
+    && /opt/http-ztp/activate.py verify-image-source-manifest \
         --source-root /opt/http-ztp/source-tree \
         --manifest /opt/http-ztp/image-source.sha256 \
     && /opt/http-ztp/activate.py verify-control-auth-image \

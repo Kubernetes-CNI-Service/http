@@ -444,7 +444,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
         <p>本目录由 <code>tools/update-user-manual.py</code> 从 Git tracked 与非忽略文件生成；每个受维护文件必须有独立说明。大量项目数据、镜像、缓存与运行输出按路径模式说明，不把二进制内容嵌入网页。</p>
         <!-- BEGIN GENERATED USER MANUAL FILE CATALOG -->
         <div class="catalog-summary">
-          <span><strong>352</strong> 个受维护文件</span>
+          <span><strong>354</strong> 个受维护文件</span>
           <span><strong>24</strong> 个根级分组</span>
           <span>清单范围：Git tracked + untracked/nonignored</span>
         </div>
@@ -643,7 +643,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </tbody></table></div>
         </details>
         <details id="v2-file-group-test-cases" data-nav-title="test_cases/ 文件" class="catalog-group">
-          <summary><code>test_cases/</code> — 104 个文件</summary>
+          <summary><code>test_cases/</code> — 106 个文件</summary>
           <div><table class="file-catalog"><thead><tr><th>文件</th><th>说明</th></tr></thead><tbody>
             <tr data-file-path="test_cases/CASE_TEMPLATE.md"><td><code>test_cases/CASE_TEMPLATE.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>新增真机/破坏性验证案例时必须填写的证据模板。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/CHANGE_AWARE_TESTING.md"><td><code>test_cases/CHANGE_AWARE_TESTING.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：脚本变更影响测试。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -651,6 +651,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="test_cases/REAL_ENVIRONMENT.md"><td><code>test_cases/REAL_ENVIRONMENT.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>无法在本机安全自动化的 VM、AIR、Docker、服务和物理设备验收案例。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/__init__.py"><td><code>test_cases/__init__.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Canonical executable regression and integration test case package。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/audit_public_tree.py"><td><code>test_cases/audit_public_tree.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Fail closed when a Git publication candidate crosses the public boundary。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/module_loader.py"><td><code>test_cases/module_loader.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Shared source loader: remove only helper-owned paths, not module authority。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/monitor_authority_root_warden.py"><td><code>test_cases/monitor_authority_root_warden.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>PID-1 warden for the Linux Monitor authority lifecycle proof。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/monitor_authority_source_guard.py"><td><code>test_cases/monitor_authority_source_guard.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Export and attest one immutable Git tree for the root authority workflow。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/public_project_fixture.py"><td><code>test_cases/public_project_fixture.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Materialize the tracked, sanitized public project for packaging tests。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -696,6 +697,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="test_cases/test_flow_release_platform_matrix.py"><td><code>test_cases/test_flow_release_platform_matrix.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Isolated producer-to-consumer release flow for every managed ZTP platform。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_full_flow_integration.py"><td><code>test_cases/test_full_flow_integration.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Cross-module integration scenarios built from real ISC/Apache log formats。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_ib_analysis_domain.py"><td><code>test_cases/test_ib_analysis_domain.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Domain fixtures for both bundled InfiniBand analysis tool trees。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_image_context_safety.py"><td><code>test_cases/test_image_context_safety.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>H1-H4: independent synthetic image membership and live/image separation。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_import_from_download_target.py"><td><code>test_cases/test_import_from_download_target.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Archive project selection and local import-target consistency contracts。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_infra_check_and_manual_reset.py"><td><code>test_cases/test_infra_check_and_manual_reset.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Functional cases for infra health collection and the reset wrapper。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_load_release_transaction.py"><td><code>test_cases/test_load_release_transaction.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Unified release validation, DHCP installation, and rollback transactions。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -972,7 +974,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
         <p>以下参考覆盖当前工作树中的每个 Python、Shell 与 CGI 文件，包括操作入口、内部库、worker、设备端脚本和开发测试。先看“是否直接运行”，再复制示例；内部组件不得脱离所属事务单独执行。</p>
         <!-- BEGIN GENERATED USER MANUAL SCRIPT REFERENCE -->
         <div class="catalog-summary">
-          <span><strong>223</strong> 个脚本型文件</span>
+          <span><strong>225</strong> 个脚本型文件</span>
           <span><strong>9</strong> 个功能分组</span>
           <span>每项均含运行、输入输出、示例与恢复合同</span>
         </div>
@@ -1023,7 +1025,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <dt>使用场景：</dt><dd>执行“项目创建、输入校验、统一 load、监控与 unload 生命周期”中的明确操作步骤；不要把一次子步骤当作完整发布。</dd>
             <dt>前置条件：</dt><dd>项目、设备范围、运行后端、权限和输入身份已确认；任何 destructive/remote 动作先完成本地 proof 和只读检查。</dd>
             <dt>语法/调用方式：</dt><dd>python3 -B DAY0-Prepare/11-load.py [options]</dd>
-            <dt>主要参数：</dt><dd>--p2p-file, --p2p-legacy-columns, --mini, --dry-run, --no-upgrade, --skip-infra, --skip-doca, --download-doca, --skip-generate, --update-passwords, --start-services, --start-ztp-monitor, --ztp-monitor-interval, --deployment-scope, --air, --prod, --switch, --ztp-monitor-scope</dd>
+            <dt>主要参数：</dt><dd>--p2p-file, --p2p-legacy-columns, --mini, --dry-run, --no-upgrade, --skip-infra, --skip-doca, --download-doca, --skip-generate, --update-passwords, --start-services, --start-ztp-monitor, --ztp-monitor-interval, --deployment-scope, --air, --prod, --switch, --ztp-monitor-scope, --type, --ssh-dir</dd>
             <dt>输入：</dt><dd>所属场景的项目输入、设备清单、受信 archive/制品或运行日志；正式写入前必须完成 preflight。</dd>
             <dt>输出/状态：</dt><dd>命令日志、退出码以及该脚本声明的配置、报告、归档或运行状态；输出需按 receipt/SHA/health 复核。</dd>
             <dt>成功判据：</dt><dd>退出码 0，并且脚本打印的后置检查、receipt、状态或生成清单全部通过；仅生成文件不等于部署完成。</dd>
@@ -1041,7 +1043,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <dt>使用场景：</dt><dd>执行“项目创建、输入校验、统一 load、监控与 unload 生命周期”中的明确操作步骤；不要把一次子步骤当作完整发布。</dd>
             <dt>前置条件：</dt><dd>项目、设备范围、运行后端、权限和输入身份已确认；任何 destructive/remote 动作先完成本地 proof 和只读检查。</dd>
             <dt>语法/调用方式：</dt><dd>python3 -B DAY0-Prepare/12-ztp-monitor.py [options]</dd>
-            <dt>主要参数：</dt><dd>--since, --watch, --stall-warning-minutes, --output-dir, --offline, --apache-log, --dhcp-log, --dhcp-leases, --air-json, --no-ssh, --ssh-timeout, --jobs, --scope, --type, --air, --prod, --identity, --known-hosts</dd>
+            <dt>主要参数：</dt><dd>--since, --watch, --stall-warning-minutes, --output-dir, --offline, --apache-log, --dhcp-log, --dhcp-leases, --air-json, --no-ssh, --ssh-timeout, --jobs, --scope, --type, --air, --prod, --identity, --known-hosts, --generate-html, --html-script, --collect-on-complete, --exit-on-complete, --collector-timeout</dd>
             <dt>输入：</dt><dd>所属场景的项目输入、设备清单、受信 archive/制品或运行日志；正式写入前必须完成 preflight。</dd>
             <dt>输出/状态：</dt><dd>命令日志、退出码以及该脚本声明的配置、报告、归档或运行状态；输出需按 receipt/SHA/health 复核。</dd>
             <dt>成功判据：</dt><dd>退出码 0，并且脚本打印的后置检查、receipt、状态或生成清单全部通过；仅生成文件不等于部署完成。</dd>
@@ -1205,7 +1207,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <dt>使用场景：</dt><dd>执行“InfiniBand 采集、分析、初始化与升级”中的明确操作步骤；不要把一次子步骤当作完整发布。</dd>
             <dt>前置条件：</dt><dd>项目、设备范围、运行后端、权限和输入身份已确认；任何 destructive/remote 动作先完成本地 proof 和只读检查。</dd>
             <dt>语法/调用方式：</dt><dd>bash infiniband/bringup/xdr-upgrade/upgrade.sh [options]</dd>
-            <dt>主要参数：</dt><dd>--method, --os, --bios, --dry-run, --phase-wait, --help, --yes, --all, --cpld, --os-first, --scripts-only, --verify-only, --ib-csv, --ib-log, --public-key, --mgmt-server, --mgmt-user, --scp-root</dd>
+            <dt>主要参数：</dt><dd>--method, --os, --bios, --dry-run, --phase-wait, --help, --yes, --all, --cpld, --os-first, --scripts-only, --verify-only, --ib-csv, --ib-log, --public-key, --mgmt-server, --mgmt-user, --scp-root, --source-root, --local-dir, --http-server, --http-scheme, --parallel-limit, --retry, --retry-delay</dd>
             <dt>输入：</dt><dd>所属场景的项目输入、设备清单、受信 archive/制品或运行日志；正式写入前必须完成 preflight。</dd>
             <dt>输出/状态：</dt><dd>命令日志、退出码以及该脚本声明的配置、报告、归档或运行状态；输出需按 receipt/SHA/health 复核。</dd>
             <dt>成功判据：</dt><dd>退出码 0，并且脚本打印的后置检查、receipt、状态或生成清单全部通过；仅生成文件不等于部署完成。</dd>
@@ -1332,7 +1334,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <dt>使用场景：</dt><dd>验证容器 build/deploy/load/health/restart/unload/down 的实现合同；尚未取得成功端到端真机证据前不服务生产项目。</dd>
             <dt>前置条件：</dt><dd>当前源码 full gate、fresh image/upload、immutable identity、批准 runner、回滚和证据目录全部就绪；旧 artifact 一律 stale。</dd>
             <dt>语法/调用方式：</dt><dd>bash infra/docker/deploy.sh --help；生产部署命令在 Docker 正式准入前不提供</dd>
-            <dt>主要参数：</dt><dd>--project, --scope, --no-upgrade, --yes, --switch, --mini, --monitor-interval, --dhcp-interface-allowlist, --dhcp-relay-ingress, --timezone, --validate-local-daemon, --print-architecture, --wait, --inspect-owned-id, --require-running, --allow-absent, --expect-env, --expect-owned-or-absent</dd>
+            <dt>主要参数：</dt><dd>--project, --scope, --no-upgrade, --yes, --switch, --mini, --monitor-interval, --dhcp-interface-allowlist, --dhcp-relay-ingress, --timezone, --validate-local-daemon, --print-architecture, --wait, --inspect-owned-id, --require-running, --allow-absent, --expect-env, --expect-owned-or-absent, --expected-owned-id, --owned-action, --prepare-control-auth, --prepare-monitor-authority, --attest-monitor-authority, --signal, --recover-monitor-authority-decision, --tag, --file, --iidfile, --format, --output, --check, --input, --expected-image-flavor, --expected-project, --expected-upgrade-policy, --verify-preloaded-image, --expected-architecture, --require-owned-or-absent, --detach, --name, --label, --network, --user, --env, --mount, --tmpfs, --cap-drop, --cap-add, --security-opt, --restart, --stop-timeout, --health-cmd, --health-interval, --health-timeout, --health-start-period, --health-retries, --project-directory, --no-build, --force-recreate, --tail, --finish-transaction, --filter, --help, --rotate-control-auth, --require-active, --follow</dd>
             <dt>输入：</dt><dd>fresh source manifest、upload、镜像、runtime config 和目标 VM 只读基线；不得复用历史 image ID。</dd>
             <dt>输出/状态：</dt><dd>容器/image/CID/receipt/Supervisor/health/restart 证据；任何单项成功都不能单独构成生产准入。</dd>
             <dt>成功判据：</dt><dd>完整 VM 场景零失败、清理可恢复且独立 review 明确 GO；在此之前一律保持未准入。</dd>
@@ -1404,7 +1406,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <dt>使用场景：</dt><dd>上层生命周期启动后执行后台采集、恢复、健康检查、配置应用或容器激活。</dd>
             <dt>前置条件：</dt><dd>上层入口已验证 release/receipt、路径类型、权限、锁和依赖服务；当前身份必须匹配。</dd>
             <dt>语法/调用方式：</dt><dd>由所属上层配置调用 infra/docker/hostlock.py；人工只使用对应 deploy/load/status/CGI 入口</dd>
-            <dt>主要参数：</dt><dd>--lock, --wait, --clear-activation, --require-owned-or-absent, --owned-action, --expected-owned-id, --expect-owned-or-absent, --inspect-owned-id, --allow-absent, --require-running, --expect-env, --validate-local-daemon, --prepare-control-auth, --prepare-monitor-authority, --attest-monitor-authority, --recover-monitor-authority, --recover-monitor-authority-decision, --rotate-control-auth</dd>
+            <dt>主要参数：</dt><dd>--lock, --wait, --clear-activation, --require-owned-or-absent, --owned-action, --expected-owned-id, --expect-owned-or-absent, --inspect-owned-id, --allow-absent, --require-running, --expect-env, --validate-local-daemon, --prepare-control-auth, --prepare-monitor-authority, --attest-monitor-authority, --recover-monitor-authority, --recover-monitor-authority-decision, --rotate-control-auth, --verify-preloaded-image, --expected-architecture, --expected-image-flavor, --expected-project, --expected-upgrade-policy</dd>
             <dt>输入：</dt><dd>已发布 release、受管配置/请求、日志或设备端 HTTP 资源。</dd>
             <dt>输出/状态：</dt><dd>受管状态、日志、配置、health 或设备应用回执；所有写入应留在规定根目录。</dd>
             <dt>成功判据：</dt><dd>上层 health/status、PID/退出码、receipt 与输出身份同时满足合同。</dd>
@@ -1440,7 +1442,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <dt>使用场景：</dt><dd>执行“Native 基础设施与 Docker/Supervisor 运行时”中的明确操作步骤；不要把一次子步骤当作完整发布。</dd>
             <dt>前置条件：</dt><dd>项目、设备范围、运行后端、权限和输入身份已确认；任何 destructive/remote 动作先完成本地 proof 和只读检查。</dd>
             <dt>语法/调用方式：</dt><dd>bash infra/infra-setup.sh [options]</dd>
-            <dt>主要参数：</dt><dd>--client, --interactive, --non-interactive, --all, --install-apache, --install-dhcp, --download-doca, --skip-doca, --enable-bluefield-nic, --power-cycle, --mgmt, --offline, --defer-services, --recover-monitor-authority, --help, --signal, --property, --value</dd>
+            <dt>主要参数：</dt><dd>--client, --interactive, --non-interactive, --all, --install-apache, --install-dhcp, --download-doca, --skip-doca, --enable-bluefield-nic, --power-cycle, --mgmt, --offline, --defer-services, --recover-monitor-authority, --help, --signal, --property, --value, --download-only, --spider, --max-time, --now, --quiet</dd>
             <dt>输入：</dt><dd>所属场景的项目输入、设备清单、受信 archive/制品或运行日志；正式写入前必须完成 preflight。</dd>
             <dt>输出/状态：</dt><dd>命令日志、退出码以及该脚本声明的配置、报告、归档或运行状态；输出需按 receipt/SHA/health 复核。</dd>
             <dt>成功判据：</dt><dd>退出码 0，并且脚本打印的后置检查、receipt、状态或生成清单全部通过；仅生成文件不等于部署完成。</dd>
@@ -1667,7 +1669,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>readlink nvlink/monitor/sw-link.sh  # 预期解析到 ../../ethernet/monitor/sw-link.sh</code></pre></div>
         </details>
-        <h4 id="v2-script-group-test-cases" data-nav-title="test_cases/ 脚本">test_cases/ — 98 个脚本</h4>
+        <h4 id="v2-script-group-test-cases" data-nav-title="test_cases/ 脚本">test_cases/ — 100 个脚本</h4>
         <details data-script-reference="test_cases/__init__.py" class="script-reference">
           <summary><code>test_cases/__init__.py</code> — Canonical executable regression and integration test case package。</summary>
           <div class="script-body"><dl>
@@ -1703,6 +1705,24 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </dl>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.audit_public_tree</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/module_loader.py" class="script-reference">
+          <summary><code>test_cases/module_loader.py</code> — Shared source loader: remove only helper-owned paths, not module authority。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Shared source loader: remove only helper-owned paths, not module authority。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.module_loader</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.module_loader</code></pre></div>
         </details>
         <details data-script-reference="test_cases/monitor_authority_root_warden.py" class="script-reference">
           <summary><code>test_cases/monitor_authority_root_warden.py</code> — PID-1 warden for the Linux Monitor authority lifecycle proof。</summary>
@@ -2477,6 +2497,24 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </dl>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_ib_analysis_domain</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_image_context_safety.py" class="script-reference">
+          <summary><code>test_cases/test_image_context_safety.py</code> — H1-H4: independent synthetic image membership and live/image separation。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>H1-H4: independent synthetic image membership and live/image separation。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_image_context_safety</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_image_context_safety</code></pre></div>
         </details>
         <details data-script-reference="test_cases/test_import_from_download_target.py" class="script-reference">
           <summary><code>test_cases/test_import_from_download_target.py</code> — Archive project selection and local import-target consistency contracts。</summary>
@@ -4594,7 +4632,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <dt>使用场景：</dt><dd>执行“跨主机打包、同步、导入、诊断、制品与分析工具”中的明确操作步骤；不要把一次子步骤当作完整发布。</dd>
             <dt>前置条件：</dt><dd>项目、设备范围、运行后端、权限和输入身份已确认；任何 destructive/remote 动作先完成本地 proof 和只读检查。</dd>
             <dt>语法/调用方式：</dt><dd>python3 -B tools/tar-for-upload.py [options]</dd>
-            <dt>主要参数：</dt><dd>-p, --project, --host, --port, --identity, --transport, --upload-retries, --transfer-timeout, --remote-dir, --remote-root, --runtime, --deploy, --deploy-uploaded, --no-sudo, -o, --output, --relay-bundle, --include-images</dd>
+            <dt>主要参数：</dt><dd>-p, --project, --host, --port, --identity, --transport, --upload-retries, --transfer-timeout, --remote-dir, --remote-root, --runtime, --deploy, --deploy-uploaded, --no-sudo, -o, --output, --relay-bundle, --include-images, --include-apps, --exclude-apps, --no-include-apps, --target-os, --target-arch, --client-platform, --include-firmware, --max-file-size-mib, --force, -n, --dry-run, --list-only</dd>
             <dt>输入：</dt><dd>所属场景的项目输入、设备清单、受信 archive/制品或运行日志；正式写入前必须完成 preflight。</dd>
             <dt>输出/状态：</dt><dd>命令日志、退出码以及该脚本声明的配置、报告、归档或运行状态；输出需按 receipt/SHA/health 复核。</dd>
             <dt>成功判据：</dt><dd>退出码 0，并且脚本打印的后置检查、receipt、状态或生成清单全部通过；仅生成文件不等于部署完成。</dd>
@@ -4919,7 +4957,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <dt>使用场景：</dt><dd>执行“设备 bootstrap、配置生成、DHCP、手工 ZTP、备份和运行态辅助”中的明确操作步骤；不要把一次子步骤当作完整发布。</dd>
             <dt>前置条件：</dt><dd>项目、设备范围、运行后端、权限和输入身份已确认；任何 destructive/remote 动作先完成本地 proof 和只读检查。</dd>
             <dt>语法/调用方式：</dt><dd>python3 -B ztp/manual-ztp.py [options]</dd>
-            <dt>主要参数：</dt><dd>--operation, --replace-config, -p, --project, --dhcp-leases, --type, --air, --prod, -y, --yes, --dry-run, --non-interactive, --preflight-only, --origin, --operation-id, --trigger-id, --confirmed-current-sha256, --confirmed-expected-sha256</dd>
+            <dt>主要参数：</dt><dd>--operation, --replace-config, -p, --project, --dhcp-leases, --type, --air, --prod, -y, --yes, --dry-run, --non-interactive, --preflight-only, --origin, --operation-id, --trigger-id, --confirmed-current-sha256, --confirmed-expected-sha256, --confirmed-release-dir, --confirmed-effective-operation, --confirmed-transport-ip, --confirmed-interface, --confirmed-bootstrap-url, --confirmed-bootstrap-source-ip, --confirmed-bootstrap-source-network, --identity, --ssh-password, --refresh-host-key, --connect-timeout, --command-timeout, --url, --sudo-password, --no-sudo-password, --http-timeout</dd>
             <dt>输入：</dt><dd>所属场景的项目输入、设备清单、受信 archive/制品或运行日志；正式写入前必须完成 preflight。</dd>
             <dt>输出/状态：</dt><dd>命令日志、退出码以及该脚本声明的配置、报告、归档或运行状态；输出需按 receipt/SHA/health 复核。</dd>
             <dt>成功判据：</dt><dd>退出码 0，并且脚本打印的后置检查、receipt、状态或生成清单全部通过；仅生成文件不等于部署完成。</dd>

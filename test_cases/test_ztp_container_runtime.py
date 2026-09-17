@@ -10,7 +10,6 @@ from __future__ import annotations
 import ast
 import configparser
 import copy
-import fnmatch
 import importlib.util
 import hashlib
 import io
@@ -18,7 +17,7 @@ import json
 from contextlib import contextmanager, ExitStack, redirect_stderr, redirect_stdout
 from functools import wraps
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 import re
 import shutil
 import stat
@@ -32,9 +31,9 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCKER_ROOT = ROOT / "infra/docker"
-PUBLISHED_DOCKER_README_SIZE = 38211
+PUBLISHED_DOCKER_README_SIZE = 39502
 PUBLISHED_DOCKER_README_SHA256 = (
-    "3c5709c1aa115a36f5ab1e28aea93dfa311b9227d3ea22c32e5f636c65d7abd4"
+    "6b4cdc5cbb09380a2aa26cea8a0f834fb09d70ea8de52b9e9b8156682c5d4d44"
 )
 
 
@@ -399,119 +398,33 @@ class ContainerArtifactContractTests(QuietContractTest):
                     effective.index(exclusion), effective.index(broad_include),
                 )
 
-    def test_service_account_credentials_are_excluded_from_real_build_contexts(
-        self,
-    ) -> None:
-        ignore_paths = (
-            ROOT / ".dockerignore",
-            DOCKER_ROOT / "Dockerfile.dockerignore",
-        )
-        self.assertEqual(ignore_paths[0].read_bytes(), ignore_paths[1].read_bytes())
-
-        def included(relative: str, rules: list[str]) -> bool:
-            selected = True
-            candidate = PurePosixPath(relative)
-            for raw_rule in rules:
-                rule = raw_rule.strip()
-                if not rule or rule.startswith("#"):
-                    continue
-                negate = rule.startswith("!")
-                pattern = rule[1:] if negate else rule
-                if candidate.match(pattern):
-                    selected = negate
-            return selected
-
-        credentials = (
-            "cre.json",
-            "operator.service-account.json",
-            "monitor/cre.json",
-            "tools/team.service-account.json",
-        )
-        benign = (
-            "monitor/deployment.json",
-            "tools/service-account.json",
-            "tools/team.service-account.json.example",
-        )
+    def test_service_account_and_auth_rules_are_final_depth_independent_denials(self) -> None:
+        # Pin rule text/order, NOT Docker matching. Actual COPY membership has
+        # a synthetic-only opt-in oracle in test_image_context_safety.
+        ignore_paths = (ROOT / ".dockerignore", DOCKER_ROOT / ".dockerignore",
+                        DOCKER_ROOT / "Dockerfile.dockerignore")
         for ignore_path in ignore_paths:
-            rules = ignore_path.read_text(encoding="utf-8").splitlines()
-            with self.subTest(ignore=ignore_path):
-                for pattern in ("cre.json", "*.service-account.json"):
+            rules = [line for line in ignore_path.read_text().splitlines()
+                     if line and not line.startswith("#")]
+            self.assertEqual(ignore_paths[0].read_bytes(), ignore_path.read_bytes())
+            last_include = max(i for i, line in enumerate(rules) if line.startswith("!"))
+            for pattern in ("**/cre.json", "**/*.service-account.json",
+                            "**/.control-users.*", "**/*.htpasswd*",
+                            "**/.[Ss][Ss][Hh]/**"):
+                with self.subTest(ignore=ignore_path, pattern=pattern):
                     self.assertIn(pattern, rules)
-                for relative in credentials:
-                    self.assertFalse(included(relative, rules), relative)
-                for relative in benign:
-                    self.assertTrue(included(relative, rules), relative)
-
-    def test_auth_state_names_are_excluded_from_both_real_build_contexts(
-        self,
-    ) -> None:
-        helper_source = (ROOT / "tools/control-auth.py").read_text(
-            encoding="utf-8",
-        )
+                    self.assertGreater(rules.index(pattern), last_include)
+        helper_source = (ROOT / "tools/control-auth.py").read_text(encoding="utf-8")
         constants = {}
         for node in ast.parse(helper_source).body:
-            if not isinstance(node, ast.Assign) or len(node.targets) != 1:
-                continue
-            target = node.targets[0]
-            if isinstance(target, ast.Name) and target.id in {
-                "_CANDIDATE_PREFIX", "_RECOVERY_PREFIX",
-            }:
-                constants[target.id] = ast.literal_eval(node.value)
-        self.assertEqual(
-            {"_CANDIDATE_PREFIX", "_RECOVERY_PREFIX"}, set(constants),
-        )
+            if isinstance(node, ast.Assign) and len(node.targets) == 1:
+                target = node.targets[0]
+                if isinstance(target, ast.Name) and target.id in {"_CANDIDATE_PREFIX", "_RECOVERY_PREFIX"}:
+                    constants[target.id] = ast.literal_eval(node.value)
+        self.assertEqual({"_CANDIDATE_PREFIX", "_RECOVERY_PREFIX"}, set(constants))
+        for prefix in constants.values():
+            self.assertTrue(prefix.startswith(".control-users."))
 
-        ignore_paths = (
-            ROOT / ".dockerignore",
-            DOCKER_ROOT / "Dockerfile.dockerignore",
-        )
-        self.assertEqual(ignore_paths[0].read_bytes(), ignore_paths[1].read_bytes())
-
-        def included(relative: str, rules: list[str]) -> bool:
-            selected = True
-            for raw_rule in rules:
-                rule = raw_rule.strip()
-                if not rule or rule.startswith("#"):
-                    continue
-                negate = rule.startswith("!")
-                pattern = rule[1:] if negate else rule
-                if fnmatch.fnmatchcase(relative, pattern):
-                    selected = negate
-            return selected
-
-        with tempfile.TemporaryDirectory() as temporary:
-            context = Path(temporary)
-            inventory = {
-                "tools/control-auth.py": helper_source,
-                "tools/" + constants["_CANDIDATE_PREFIX"] + "012345": "candidate",
-                (
-                    "DAY0-Prepare/template/private/"
-                    + constants["_RECOVERY_PREFIX"] + "abcdef"
-                ): "recovery",
-                "infra/docker/control-users.htpasswd": "canonical",
-                "monitor/control-users.htpasswd.operator-copy": "copy",
-                "infra/.SSH/id_ed25519": "docker-management-private-sentinel",
-            }
-            for relative, content in inventory.items():
-                target = context / relative
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(content, encoding="utf-8")
-            observed = sorted(
-                path.relative_to(context).as_posix()
-                for path in context.rglob("*") if path.is_file()
-            )
-            self.assertEqual(sorted(inventory), observed)
-
-            for ignore_path in ignore_paths:
-                rules = ignore_path.read_text(encoding="utf-8").splitlines()
-                with self.subTest(ignore=ignore_path.name):
-                    self.assertIn("**/.control-users.*", rules)
-                    self.assertIn("**/*.htpasswd*", rules)
-                    self.assertIn("**/.[Ss][Ss][Hh]/**", rules)
-                    self.assertTrue(included("tools/control-auth.py", rules))
-                    for relative in observed:
-                        if relative != "tools/control-auth.py":
-                            self.assertFalse(included(relative, rules), relative)
 
     def test_dockerfile_is_ubuntu_2404_and_installs_foreground_runtime(self) -> None:
         source = (DOCKER_ROOT / "Dockerfile").read_text(encoding="utf-8")
@@ -566,7 +479,7 @@ class ContainerArtifactContractTests(QuietContractTest):
         self.assertIn("HEALTHCHECK", source)
         self.assertIn("image-source.sha256", source)
         self.assertIn("deployment-source-manifest.json", source)
-        self.assertIn("verify-source-manifest", source)
+        self.assertIn("verify-image-source-manifest", source)
         self.assertNotIn("build-source-manifest", source)
         self.assertIn("infra/docker/hostlock.py", source)
         for label in (
@@ -6345,8 +6258,14 @@ class ActivationContractTests(QuietContractTest):
             )
             os_release.symlink_to("../usr/lib/os-release")
 
+            embedded = base / "embedded-image"
+            shutil.copytree(source_root, embedded)
+            live_project = source_root / "DAY0-Prepare/site-a/01-global.yaml"
+            live_project.parent.mkdir()
+            live_project.write_text("synthetic live project\n")
+
             verified = activate.verify_deployment_image(
-                source_root, image_manifest, os_release=os_release,
+                source_root, image_manifest, os_release=os_release, image_source_root=embedded,
             )
             self.assertGreater(len(verified), 3)
 
@@ -6355,7 +6274,7 @@ class ActivationContractTests(QuietContractTest):
                 activate.ActivationError, "deployment source manifest.*authority",
             ):
                 activate.verify_deployment_image(
-                    source_root, image_manifest, os_release=os_release,
+                    source_root, image_manifest, os_release=os_release, image_source_root=embedded,
                 )
             live_manifest.write_bytes(image_manifest.read_bytes())
 
@@ -6364,12 +6283,12 @@ class ActivationContractTests(QuietContractTest):
             )
             with self.assertRaisesRegex(activate.ActivationError, "source.*drift"):
                 activate.verify_deployment_image(
-                    source_root, image_manifest, os_release=os_release,
+                    source_root, image_manifest, os_release=os_release, image_source_root=embedded,
                 )
 
             activate.write_image_source_manifest(source_root, live_manifest)
             compatible = activate.verify_deployment_image(
-                source_root, image_manifest, os_release=os_release,
+                source_root, image_manifest, os_release=os_release, image_source_root=embedded,
             )
             self.assertGreater(len(compatible), 3)
 
@@ -6381,7 +6300,7 @@ class ActivationContractTests(QuietContractTest):
                 activate.ActivationError, "image-coupled|compatible image",
             ):
                 activate.verify_deployment_image(
-                    source_root, image_manifest, os_release=os_release,
+                    source_root, image_manifest, os_release=os_release, image_source_root=embedded,
                 )
             coupled.write_bytes(original_coupled)
 
@@ -6394,7 +6313,7 @@ class ActivationContractTests(QuietContractTest):
                 activate.ActivationError, "image contract|compatible",
             ):
                 activate.verify_deployment_image(
-                    source_root, image_manifest, os_release=os_release,
+                    source_root, image_manifest, os_release=os_release, image_source_root=embedded,
                 )
 
             for malformed_contracts in (
@@ -6417,7 +6336,7 @@ class ActivationContractTests(QuietContractTest):
                         activate.ActivationError, "compatibility contract.*invalid",
                     ):
                         activate.verify_deployment_image(
-                            source_root, image_manifest, os_release=os_release,
+                            source_root, image_manifest, os_release=os_release, image_source_root=embedded,
                         )
 
             (source_root / "monitor/fixture.py").write_text(
@@ -6429,7 +6348,7 @@ class ActivationContractTests(QuietContractTest):
             )
             with self.assertRaisesRegex(activate.ActivationError, "Ubuntu 24.04"):
                 activate.verify_deployment_image(
-                    source_root, image_manifest, os_release=os_release,
+                    source_root, image_manifest, os_release=os_release, image_source_root=embedded,
                 )
 
     def test_container_os_release_allows_only_the_canonical_safe_alias(self) -> None:

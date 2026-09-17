@@ -339,7 +339,7 @@ def script_options(path: Path) -> tuple[str, ...]:
         for option in re.findall(r"(?<![\w-])--[a-z][a-z0-9-]*", text):
             if option not in options:
                 options.append(option)
-    return tuple(options[:18])
+    return tuple(options)
 
 
 def is_python_main(path: Path) -> bool:

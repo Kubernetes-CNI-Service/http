@@ -7,6 +7,37 @@
 [《四类交付制品与 2026-12 部署流程》](../docs/deployment/BUNDLE_WORKFLOWS.md)；下面只登记必须在
 Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
+## TC-REAL-IMAGE-CONTEXT-001 — 镜像 COPY 成员与物理树拒绝边界
+
+- 类型：integration / real-environment；对应 IMAGE-CONTEXT-SAFETY H1–H4。
+- Status: OPEN / NOT RUN（legacy builder、Ubuntu 双架构正式镜像；本机最小合成 BuildKit 证据另记，不能代替准入）。
+- 自动化：`test_image_context_safety.py` 独立 literal ALLOWED/DENIED 清单、镜像专用 physical guard、
+  Dockerfile → activate CLI、live 项目允许、preloaded 内嵌树检查。禁止从实现选择结果生成预期。
+- 前置：只允许专用本机 Docker context 的 Unix socket 与内建 docker driver；权限不足、远端
+  context、缺少 buildx 必须失败，不回退真实仓库构建。不得提供私钥、项目输入或生产目录。
+- 本机步骤：显式执行 `HTTP_TEST_SYNTHETIC_DOCKER=1 python3 -B -m unittest -v
+  test_cases.test_image_context_safety.SyntheticDockerMembershipTests`。测试临时生成无害文件名
+  marker，分别读取三份 ignore 规则；外置 Dockerfile 仅 `FROM scratch` 和 `COPY . /`。
+  本地输出成员必须精确等于 ALLOWED；任一 DAY0 项目或多层凭据名进入结果都失败。
+  BuildKit 专用 ignore 分支故意把 root ignore 设置为全排除，验证专用文件确实生效。
+- legacy：在支持 legacy builder 的专用本机复用同一合成目录与两份 root ignore 副本；使用
+  `DOCKER_BUILDKIT=0`，记录 builder/engine/OS/架构、构建及导出退出码和实际成员清单。
+  不支持 legacy 的新引擎不是 PASS；不得为验证它而改宿主配置或降级 Docker。
+- 正式 Ubuntu：经授权的干净公开 source tree 构建必须通过镜像专用 gate；另在合成镜像树中
+  加入 manifest 未列出的项目目录或凭据名，要求 physical gate 在 live 比较之前拒绝。
+  live 同路径中合法 DAY0 项目不能被 image-only 规则误拒绝。两架构、镜像/source exact digest
+  及验证日志必须独立绑定；本机合成 COPY 不证明正式依赖安装、服务或真实设备工作。
+- 证据：完整命令/退出码、三份 ignore 与 candidate SHA256、输入 literal 清单、实际导出清单、
+  engine/buildx/平台身份、拒绝与正向结果。默认 unittest skip 明确是未执行，不是准入证据。
+- 本机记录（2026-09-17）：Docker Desktop Engine 29.4.2，buildx v0.33.0-desktop.1，内建
+  docker driver / BuildKit v0.29.0，Unix socket context `desktop-linux`；三个合成上下文的
+  精确文件成员断言通过（1 test / 3 subtests）。原始证据由双日志绑定，不作为 legacy、Ubuntu
+  双架构正式镜像或服务准入 PASS。上下文名选择错误、inspect 不支持 format 的两次前置失败
+  已单独保留，未放宽任何文件成员断言。
+- 清理/风险：临时上下文和 local export 由 TemporaryDirectory 回收；不启动容器、不打业务 tag、
+  不使用网络。可能留下本机仅含合成 marker 的 build cache；不得执行全局 prune。
+  历史 image/export 的潜在污染仍待逐对象清点，任何重建、删除或撤回另需精确授权。
+
 ## TC-REAL-DHCP-001 — AppArmor 与 DHCP 事务安装
 
 - Ubuntu 管理服务器启用 AppArmor enforcement。

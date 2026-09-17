@@ -1120,6 +1120,47 @@ def image_source_paths(source_root: Path) -> Tuple[str, ...]:
     return tuple(sorted(selected))
 
 
+def verify_image_source_tree(source_root: Path) -> None:
+    """Reject forbidden *physical* image members, including unmanifested ones.
+
+    This is an image-only name boundary, not a content-based secret detector.
+    Never call it on the live tree: live DAY0 projects are legitimate authority.
+    Scan without selector pruning so excluded/unknown suffixes cannot hide
+    credential names or project directories from this independent gate.
+    """
+    root = Path(source_root)
+    if root.is_symlink() or not root.is_dir():
+        raise ActivationError("image source tree must be a physical directory")
+
+    def scan_error(error):
+        raise ActivationError(f"cannot inspect image source tree: {error}") from error
+
+    for directory, dirs, files in os.walk(root, followlinks=False, onerror=scan_error):
+        for name in sorted(dirs + files):
+            path = Path(directory) / name
+            relative = path.relative_to(root).as_posix()
+            parts = relative.split("/")
+            credential = (
+                name == "cre.json" or name.endswith(".service-account.json")
+                or name.endswith((".key", ".pem")) or name.casefold() == ".ssh"
+                or name == ".env" or name.startswith(".env.")
+                or name.startswith(".control-users.") or ".htpasswd" in name
+            )
+            project = (
+                parts[0] == "Finished-projects" or "finished-history" in parts
+                or (parts[0] == "DAY0-Prepare" and len(parts) >= 2
+                    and parts[1] != "template"
+                    and not (len(parts) == 2 and name.endswith(".py") and name in files))
+            )
+            generated = (
+                relative in IMAGE_SOURCE_EXCLUDED_PATHS
+                and relative != "infra/docker/deployment-source-manifest.json"
+            ) or any(relative.startswith(prefix)
+                     for prefix in IMAGE_SOURCE_EXCLUDED_PREFIXES)
+            if credential or project or generated:
+                raise ActivationError(f"forbidden image source member: {relative}")
+
+
 def image_source_identity(source_root: Path) -> list:
     return [_source_record(source_root, name) for name in image_source_paths(source_root)]
 
@@ -2136,12 +2177,15 @@ def verify_deployment_image(
     image_manifest: Path = DEFAULT_IMAGE_SOURCE_MANIFEST,
     *,
     os_release: Path = Path("/etc/os-release"),
+    image_source_root: Path = DEFAULT_IMAGE_SOURCE_TREE,
 ) -> list:
     """Verify an imported image against Ubuntu and the locked live source."""
 
     release = _container_os_release(os_release)
     if release.get("ID") != "ubuntu" or release.get("VERSION_ID") != "24.04":
         raise ActivationError("preloaded image must contain Ubuntu 24.04")
+    verify_image_source_tree(image_source_root)
+    verify_image_source_manifest(image_source_root, image_manifest)
     return verify_compatible_live_source(source_root, image_manifest)
 
 
@@ -3378,7 +3422,7 @@ def parser() -> argparse.ArgumentParser:
         "action",
         choices=(
             "plan", "status", "exec-service", "build-source-manifest",
-            "verify-source-manifest", "verify-control-auth-image",
+            "verify-source-manifest", "verify-image-source-manifest", "verify-control-auth-image",
             "verify-deployment-image", "verify-python-runtime",
         ),
     )
@@ -3402,9 +3446,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 raise ActivationError("build-source-manifest takes only named options")
             _print_json(write_image_source_manifest(args.source_root, args.manifest))
             return 0
-        if args.action == "verify-source-manifest":
+        if args.action in {"verify-source-manifest", "verify-image-source-manifest"}:
             if args.service is not None:
-                raise ActivationError("verify-source-manifest takes only named options")
+                raise ActivationError(f"{args.action} takes only named options")
+            if args.action == "verify-image-source-manifest":
+                verify_image_source_tree(args.source_root)
             verified = verify_image_source_manifest(args.source_root, args.manifest)
             _print_json({"verified": True, "files": len(verified)})
             return 0

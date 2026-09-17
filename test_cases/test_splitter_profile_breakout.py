@@ -86,15 +86,15 @@ class SplitterProfileDirectTests(unittest.TestCase):
         self.assertEqual(["swp9s1"], prepared["bgp_neighbors"])
 
     def test_missing_invalid_or_narrower_authority_fails_closed(self):
-        for profiles, ports in (
-            ({}, ["swp9s0"]),
-            ({"swp9": "1to16"}, ["swp9s0"]),
-            ({"swp9": "1to2"}, ["swp9s2"]),
-            ({"swp9": "1to8"}, ["swp9s8"]),
+        for profiles, ports, reason in (
+            ({}, ["swp9s0"], "splitter profile missing/invalid for swp9"),
+            ({"swp9": "1to16"}, ["swp9s0"], "splitter profile missing/invalid for swp9"),
+            ({"swp9": "1to2"}, ["swp9s2"], "splitter profile swp9=1to2 cannot contain lane s2"),
+            ({"swp9": "1to8"}, ["swp9s8"], "splitter profile swp9=1to8 cannot contain lane s8"),
         ):
             for role in ("direct", "bond", "bgp"):
                 with self.subTest(profiles=profiles, ports=ports, role=role):
-                    with self.assertRaisesRegex(ValueError, "splitter|profile|拆分"):
+                    with self.assertRaisesRegex(ValueError, reason):
                         GENERATOR.preprocess_device(device_for_ports(
                             "EXAMPLE-OOB-CORE01", ports, profiles, role=role,
                         ))

@@ -63,20 +63,11 @@ tools/ibdiagnet-analyze-tool/**
 # build layer even when they happen to exist in the bind-mounted repository.
 **/99-output*
 **/99-output*/**
-**/.ssh/**
-**/.[Ss][Ss][Hh]/**
-**/*.key
-**/*.pem
 **/*.lock
 !requirements-container-top-level.lock
-**/.env
-**/.env.*
-cre.json
-*.service-account.json
 
 # Projects and output are mutable data mounted from /var/www/html.  Only the
 # lifecycle entrypoints and neutral bootstrap template belong in the image.
-!DAY0-Prepare/
 !DAY0-Prepare/*.py
 !DAY0-Prepare/template/
 !DAY0-Prepare/template/**
@@ -85,6 +76,15 @@ DAY0-Prepare/template/**/*.md
 
 # control-auth candidate/recovery state uses the first prefix; the second
 # covers the canonical htpasswd name and every operator-created copy.
+# Final depth-independent credential denials must follow EVERY re-include.
+**/cre.json
+**/*.service-account.json
+**/.ssh/**
+**/.[Ss][Ss][Hh]/**
+**/*.key
+**/*.pem
+**/.env
+**/.env.*
 **/.control-users.*
 **/*.htpasswd*
 

@@ -57,6 +57,7 @@
       "id": "deployment-runtime",
       "description": "宿主及容器部署、发布事务、Apache、DHCP 和服务运行时",
       "tests": [
+        "test_cases.test_image_context_safety",
         "test_cases.test_apache_publication_boundary",
         "test_cases.test_control_auth",
         "test_cases.test_docker_destructive_confirmation",
@@ -171,6 +172,7 @@
     "test_cases/monitor_authority_source_guard.py",
     "test_cases/public_project_fixture.py",
     "test_cases/splitter_profile_fixture.py",
+    "test_cases/module_loader.py",
     "test_cases/run_monitor_authority_entrypoints.sh",
     "test_cases/run_related_tests.py",
     "test_cases/run_vm_validation.py",
@@ -465,6 +467,7 @@
         "infra/docker/*.sh"
       ],
       "tests": [
+        "test_cases.test_image_context_safety",
         "test_cases.test_ztp_container_runtime",
         "test_cases.test_ztp_service_runtime",
         "test_cases.test_deployment_writer_lock",
@@ -891,6 +894,8 @@
       "id": "containerized_ztp_lifecycle",
       "members": [
         ".dockerignore",
+        "infra/docker/.dockerignore",
+        "infra/docker/Dockerfile",
         "requirements-container-top-level.lock",
         "infra/docker/Dockerfile.dockerignore",
         "infra/docker/activate.py",
@@ -917,6 +922,7 @@
         "monitor/manual-ztp-worker.py"
       ],
       "tests": [
+        "test_cases.test_image_context_safety",
         "test_cases.test_ztp_container_runtime",
         "test_cases.test_ztp_service_runtime",
         "test_cases.test_deployment_writer_lock",
@@ -1253,6 +1259,17 @@
     }
   ],
   "path_rules": [
+    {
+      "paths": ["test_cases/module_loader.py"],
+      "tests": [
+        "test_cases.test_image_context_safety",
+        "test_cases.test_air_link_endpoint_contract",
+        "test_cases.test_flow_release_platform_matrix",
+        "test_cases.test_mlag_evpn_generation",
+        "test_cases.test_qos_evpn_uplink_generation",
+        "test_cases.test_cumulus_snippet_rendering"
+      ]
+    },
     {
       "paths": [
         "test_cases/splitter_profile_fixture.py"

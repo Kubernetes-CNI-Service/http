@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -32,31 +31,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TOOLS = ROOT / "tools"
 
 
-def load_module(name: str, path: Path):
-    """Load one production source under an isolated module identity."""
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot import {path}")
-    module = importlib.util.module_from_spec(spec)
-    previous = sys.modules.get(name)
-    sys.modules[name] = module
-    helper_paths = [str(path.parent), str(TOOLS), str(ROOT)]
-    sys.path[:0] = helper_paths
-    try:
-        spec.loader.exec_module(module)
-    finally:
-        for helper_path in helper_paths:
-            for index, current in enumerate(sys.path):
-                if current is helper_path:
-                    del sys.path[index]
-                    break
-        if previous is None:
-            # Dataclasses keep the defining module name.  Leave the module
-            # registered for the duration of this test process.
-            pass
-        else:
-            sys.modules[name] = previous
-    return module
+from test_cases.module_loader import load_script as load_module
 
 
 CUMULUS_GENERATOR = load_module(

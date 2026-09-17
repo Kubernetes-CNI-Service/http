@@ -417,6 +417,21 @@ sync-code 和 tar upload 共同排除；只有无拓扑信息的 `container.env.
 
 ## 构建与离线边界
 
+### 镜像上下文与 live 项目边界（H1–H4）
+
+三份 `.dockerignore` 只重包含 DAY0 顶层 Python 脚本和中性模板，不重开整个 DAY0 目录。
+凭据文件名（含任意深度的 `cre.json`、`*.service-account.json`、key/pem、环境文件、SSH
+目录和认证临时文件）在所有重包含之后统一排除。非秘密示例与模板继续保留；这不是对任意
+文件内容的秘密扫描。Dockerfile 使用 `verify-image-source-manifest`，先遍历实际 image
+source-tree 拒绝项目/凭据，再校验源码 manifest；仅从 manifest 中省略文件不能让检查通过。
+导入镜像核验也单独检查内嵌 source-tree，随后才比较挂载 live 源码。普通
+`verify-source-manifest` 保留 live DAY0 项目合同，不得拿镜像专用入口检查 live 项目树。
+
+Docker ignore 匹配以最小合成上下文的真实 COPY 成员为验收依据，不以 Python glob 推测。
+本机与 legacy/BuildKit 的证据边界、复现和清理见 `TC-REAL-IMAGE-CONTEXT-001`；缺失证据
+不得宣称准入。历史 image/export 在精确清点实际构建输入前保持潜在污染待核实状态，不能
+推断每个历史制品都已检查。重新构建、撤销发布或删除历史镜像须另行确认精确对象与授权。
+
 `deploy.sh build` 默认从本机 Docker cache/registry 取得 `ubuntu:24.04`，并在 build 中通过 APT
 安装依赖。完全离线服务器应事先在同架构联网主机从准备上传的同一份源码 build，并用组织批准的
 OCI image 传输流程导入；当前仓库的离线 APT 快照尚不能替代 Docker base image 和缺少的

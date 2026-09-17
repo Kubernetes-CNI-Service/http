@@ -150,6 +150,32 @@ def invoke_main(
 
 
 class XlsxFailClosedDirectTests(unittest.TestCase):
+    def test_profile_writer_rejects_invalid_parent_and_mode_without_replacement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs = [root / name for name in ("design.xlsx", "inventory.log", "mapping.log", "design-lldpq.dot")]
+            for path in inputs:
+                path.write_bytes(b"synthetic input only\n")
+            workbook, inventory, mapping, dot = inputs
+            destination = root / "design-splitter-profiles.json"
+            destination.write_bytes(b"previous authority\n")
+            for parent, profile in (("swp9", "1to8"), ("9", "1to16")):
+                with self.subTest(parent=parent, profile=profile), self.assertRaisesRegex(
+                    ValueError, "invalid splitter profile: EXAMPLE:"
+                ):
+                    P2P._write_splitter_profiles(dot, {("EXAMPLE", parent): profile}, workbook, inventory, mapping)
+                self.assertEqual(b"previous authority\n", destination.read_bytes())
+
+    def test_duplicate_legacy_switch_is_rejected_before_extraction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            paths = prepare_runtime(Path(directory), make_legacy_column_workbook)
+            extractor = mock.Mock(side_effect=AssertionError("must not extract"))
+            caught, stdout, stderr = invoke_main(paths, ["-y", "--legacy-columns", "--legacy-columns"], extractor=extractor)
+            self.assertIsInstance(caught, SystemExit)
+            self.assertNotEqual(0, caught.code)
+            self.assertRegex(stdout + stderr, r"(?i)duplicate.*legacy-columns")
+            extractor.assert_not_called()
+
     def test_real_entrypoint_loads_policy_without_mini_and_publishes_profiles(self):
         def workbook_writer(path):
             book = openpyxl.Workbook()

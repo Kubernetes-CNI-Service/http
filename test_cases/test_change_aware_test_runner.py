@@ -711,6 +711,7 @@ class ImpactManifestTests(unittest.TestCase):
                 "test_cases/monitor_authority_source_guard.py",
                 "test_cases/public_project_fixture.py",
                 "test_cases/splitter_profile_fixture.py",
+                "test_cases/module_loader.py",
                 "test_cases/run_monitor_authority_entrypoints.sh",
                 "test_cases/run_related_tests.py",
                 "test_cases/run_vm_validation.py",

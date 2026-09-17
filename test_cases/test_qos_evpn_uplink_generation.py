@@ -4,10 +4,7 @@
 from __future__ import annotations
 
 import copy
-import importlib.util
-from importlib.machinery import SourceFileLoader
 from pathlib import Path
-import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -19,20 +16,7 @@ from test_cases.splitter_profile_fixture import splitter_fixture
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def load_script(name: str, path: Path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        spec = importlib.util.spec_from_loader(name, SourceFileLoader(name, str(path)))
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load {path}")
-    module = importlib.util.module_from_spec(spec)
-    previous_path = sys.path[:]
-    sys.path.insert(0, str(path.parent))
-    try:
-        spec.loader.exec_module(module)
-    finally:
-        sys.path[:] = previous_path
-    return module
+from test_cases.module_loader import load_script
 
 
 GENERATOR = load_script(

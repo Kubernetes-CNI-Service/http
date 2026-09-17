@@ -23,17 +23,19 @@ from tools import project_contract
 
 
 class AirLinkEndpointDirectTests(unittest.TestCase):
-    def test_script_loaders_restore_complete_import_path_after_nested_import(self):
+    def test_script_loaders_preserve_module_owned_import_paths(self):
         from test_cases.test_qos_evpn_uplink_generation import load_script as qos_load
         from test_cases.test_mlag_evpn_generation import load_script as mlag_load
-        for loader in (qos_load, mlag_load):
+        from test_cases.test_cumulus_snippet_rendering import load_script as snippet_load
+        from test_cases.test_flow_release_platform_matrix import load_module as flow_load
+        for loader in (qos_load, mlag_load, snippet_load, flow_load):
             with self.subTest(loader=loader.__module__), tempfile.TemporaryDirectory() as directory:
                 script = Path(directory) / "nested_import.py"
                 script.write_text('import sys\nsys.path.insert(0, "nested-module-path")\n')
                 before = sys.path[:]
                 try:
                     loader("req14_import_isolation", script)
-                    self.assertEqual(before, sys.path)
+                    self.assertEqual(["nested-module-path", *before], sys.path)
                 finally:
                     sys.path[:] = before
 
@@ -88,7 +90,7 @@ class AirLinkEndpointDirectTests(unittest.TestCase):
                    [{"node": [], "interface": "swp7"}, "unconnected"],
                    [{"node": "AIR-fw-01", "interface": ""}, "unconnected"]]
         for key in ("node", "interface"):
-            for value in ("", " ", "\t\n"):
+            for value in ("", " ", "\t\n", " swp1", "swp1 ", "AIR-x\t"):
                 invalid.append([dict(endpoint, **{key: value}), "unconnected"])
         for link in invalid:
             with self.subTest(link=link), self.assertRaisesRegex(ValueError, "AIR JSON link"):
@@ -96,6 +98,35 @@ class AirLinkEndpointDirectTests(unittest.TestCase):
 
 
 class AirLinkEndpointWorkflowTests(unittest.TestCase):
+    def test_every_shared_loader_keeps_real_lazy_air_import_reachable(self):
+        from test_cases.test_qos_evpn_uplink_generation import load_script as qos_load
+        from test_cases.test_mlag_evpn_generation import load_script as mlag_load
+        from test_cases.test_cumulus_snippet_rendering import load_script as snippet_load
+        from test_cases.test_flow_release_platform_matrix import load_module as flow_load
+        source = Path(GENERATOR.__file__)
+        ztp = str(source.parents[3])
+        for index, loader in enumerate((qos_load, mlag_load, snippet_load, flow_load)):
+            with self.subTest(loader=loader.__module__), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                _air_json, sources, bindings = self.fixture(root)
+                before = sys.path[:]
+                old_air = sys.modules.pop("dynamic_air_inventory", None)
+                name = f"lazy_air_loader_probe_{index}"
+                try:
+                    sys.path[:] = [item for item in before if item != ztp]
+                    generator = loader(name, source)
+                    with mock.patch.multiple(generator, **bindings), redirect_stdout(io.StringIO()):
+                        generator.generate_air_hostname_configs(str(sources), str(root / "air"))
+                    document = yaml.safe_load((root / "air/AIR-fw-01.yaml").read_text())
+                    interfaces = {key for block in document for key in block.get("set", {}).get("interface", {})}
+                    self.assertEqual({"swp7", "swp8"}, interfaces)
+                finally:
+                    sys.path[:] = before
+                    sys.modules.pop(name, None)
+                    sys.modules.pop("dynamic_air_inventory", None)
+                    if old_air is not None:
+                        sys.modules["dynamic_air_inventory"] = old_air
+
     def fixture(self, root):
         service = root / "cumulus"
         template = service / "template"

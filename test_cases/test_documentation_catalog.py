@@ -261,6 +261,20 @@ class DocumentationCatalogTests(unittest.TestCase):
             },
         )
 
+    def test_user_manual_does_not_truncate_options_or_hide_load_type_alias(self):
+        updater = load_path("manual_complete_options", USER_MANUAL_SCRIPT)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "synthetic.py"
+            expected = tuple(f"--option-{i}" for i in range(24))
+            path.write_text("\n".join(f"parser.add_argument({option!r})" for option in expected))
+            self.assertEqual(expected, updater.script_options(path))
+        for option in ("--p2p-legacy-columns", "--ztp-monitor-scope", "--type"):
+            self.assertIn(option, updater.script_options(ROOT / "DAY0-Prepare/11-load.py"))
+        manual = (ROOT / "user-manual.html").read_text(encoding="utf-8")
+        entry = re.search(r'<details[^>]*data-script-reference="DAY0-Prepare/11-load.py"[^>]*>(.*?)</details>', manual, re.DOTALL)
+        self.assertIsNotNone(entry)
+        self.assertIn("--type", html.unescape(entry.group(1)))
+
     def test_user_manual_validation_entrypoints_use_their_real_cli(self):
         manual = (ROOT / "user-manual.html").read_text(encoding="utf-8")
 

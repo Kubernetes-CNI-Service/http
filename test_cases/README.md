@@ -7,6 +7,18 @@
 本目录中的自动化测试不连接设备、不修改项目运行数据，重点检查跨目录接口，而不是替代
 真实交换机、Docker 或端到端部署测试。
 
+`test_image_context_safety.py` 约束 H1–H4：三份 Docker ignore 的最终、任意深度凭据规则与
+DAY0 最小重包含；镜像专用入口扫描物理目录，不能用 manifest 的选择结果证明不存在项目或
+凭据文件。普通 live manifest 校验仍允许 DAY0 项目。测试使用独立允许/拒绝文件名清单，
+不再用 Python glob 模拟 Docker。显式设置 `HTTP_TEST_SYNTHETIC_DOCKER=1` 时，仅把新建
+临时目录中的无害 marker 和一份 ignore 文本送入本机 BuildKit 的 `FROM scratch / COPY`，
+比较真实导出成员；绝不把仓库、项目数据或凭据作为构建上下文。默认不执行 Docker，此项
+skip 是 `TC-REAL-IMAGE-CONTEXT-001` 的未执行证据，不是通过；legacy builder 另行验收。
+
+Cumulus QoS、MLAG、snippet 与跨平台 workflow 共用 `module_loader.py`：只按对象身份移除
+loader 自己插入的 sys.path 项，保留模块自己声明的路径，保证真实 lazy AIR import 仍可达。
+手册参数清单无数量截断；独立测试同时固定 load 的 `--type` 兼容别名不会因增加参数而消失。
+
 四类交付制品的自动化与真实环境分工见
 [《四类交付制品与 2026-12 部署流程》](../docs/deployment/BUNDLE_WORKFLOWS.md)。
 
