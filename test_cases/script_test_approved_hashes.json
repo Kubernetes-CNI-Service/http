@@ -1,31 +1,4 @@
 {
-  "full_suite_attestation": {
-    "environment": {
-      "container_toplevel_lock_sha256": "3532f5208b462243bab779b01eb4deb21638ac05a9390c17ac997ba8d7f24998",
-      "container_toplevel_versions": [
-        "Jinja2==3.1.6",
-        "openpyxl==3.1.5",
-        "pandas==2.3.3",
-        "PyYAML==6.0.3",
-        "XlsxWriter==3.2.9"
-      ],
-      "machine": "arm64",
-      "platform": "darwin",
-      "python_cache_tag": "cpython-39",
-      "python_executable": "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/bin/python3.9",
-      "python_implementation": "CPython",
-      "python_version": [
-        3,
-        9,
-        6
-      ]
-    },
-    "scenario_coverage": {
-      "root-entrypoint-workflow": "NOT COVERED (requires Linux EUID 0 private namespace)"
-    },
-    "schema_version": 1,
-    "snapshot_sha256": "508d5548dd5f53a0bfc4a55b86973923d87dcc9c9fa573588169ae91bc107856"
-  },
   "impact_manifest_sha256": "f1ba11d6dee9488e30b6fb887a5c9ab408eea0f474918825a764db483feb3852",
   "schema_version": 1,
   "scripts": {
@@ -143,15 +116,15 @@
     },
     "monitor/generate-monitor-html.py": {
       "canonical": "monitor/generate-monitor-html.py",
-      "sha256": "566192653b6121b1fb690bfe41f12a0c83a82189c3519e7d54efddcf013543d9"
+      "sha256": "1155efbaf049cad53d367f57f1ba9f9010e29edc8f871241f23035a212233409"
     },
     "monitor/manual-ztp-control.cgi": {
       "canonical": "monitor/manual-ztp-control.cgi",
-      "sha256": "83fce0e3c3d0f0e0f2ae38edc1cc2e776e0e68f20c3cda054a8cf123248be2d7"
+      "sha256": "059d19068177aca8e2c0698ebccc92263597c578ac48db09ebee1715a5957cc0"
     },
     "monitor/manual-ztp-worker.py": {
       "canonical": "monitor/manual-ztp-worker.py",
-      "sha256": "68efa7b42cab6e1ff3f6da43eef572873d821af255b5284bc8edfdbd18c52f5d"
+      "sha256": "a896fbf1fdc55d5a6a87ebb8b0d4b8f4b384559681c7a5b862402c2614fb3ce5"
     },
     "monitor/switch-collection-control.cgi": {
       "canonical": "monitor/switch-collection-control.cgi",
@@ -511,7 +484,7 @@
     },
     "ztp/manual-ztp.py": {
       "canonical": "ztp/manual-ztp.py",
-      "sha256": "deafc4f311bdc2c0ea8b887089df4a70c8be0a35be80f4394d3984b8b9aca3f5"
+      "sha256": "05032adda7bdef4066b07b781f835db4737917fcb88c736a094b49fc7a5bd945"
     },
     "ztp/nvue_normalizer.py": {
       "canonical": "ztp/nvue_normalizer.py",
@@ -566,7 +539,7 @@
     "docs/architecture/README.md": "153837bcd62f49edf8591ceec8b1b6ccefe9a3b5638a91bed6452ac87264a0e4",
     "docs/deployment/BUNDLE_WORKFLOWS.md": "adab10445e130f3335113c5b35072b81b5d7e10d28d3d1214ace45e120199a1b",
     "docs/deployment/README.md": "f1914024ab82546239f9424abaca44380f22d6c4331c76e3e6ede218333a036e",
-    "docs/operations/README.md": "da1fb0570f8277d7304c1446ab49d7ae49dcf52a320c86b90babdf15e4a6dd05",
+    "docs/operations/README.md": "2e8009aebb94e1098f8e626f60089eb925482edb125cc0679e259493aef97c85",
     "docs/reference/README.md": "717f023b3016420b61e8889493fd0e2ab9d0106388483025f8d66dee75c75039",
     "docs/validation/README.md": "2a2ee457e01074db1994363a2f8ed62029a9febb14d7c4ea92243b93ec61d98f",
     "examples/public-project/01-global.yaml.example": "539fc9ba304e21c465e2dcbbb1bdb8e2afb1063d421e3f947b05add144733928",
@@ -587,7 +560,7 @@
     "infra/docker/supervisord.conf": "368f60a2510fa3126eef58098ce5287d70e4b30b662e421f29aa80c007957b01",
     "requirements-container-top-level.lock": "3532f5208b462243bab779b01eb4deb21638ac05a9390c17ac997ba8d7f24998",
     "requirements-dev.txt": "2047cfeb6e7d7c3b02380624cd212528fb8416cf3e76dd924d2e2cba8567a50a",
-    "test_cases/REAL_ENVIRONMENT.md": "9c57915c4cf65c53975445cb125ead3c3e7b7b27db63548ea4e092a3d2ac0ded",
+    "test_cases/REAL_ENVIRONMENT.md": "67f0c85de11b748006e120d7ca25387aaa5697202176aa9d404c520bb8b00c7b",
     "test_cases/audit_public_tree.py": "0426abb0b3ebe6f88ea63600771f2fc7574faf3584dbb39588f5e540f86b72de",
     "test_cases/monitor_authority_root_warden.py": "3ff032300deb61d40e12f7eebf43f3915abb06cc241341b198cd4d04170df6f8",
     "test_cases/monitor_authority_source_guard.py": "4c3a6a668c98c01fb7822085c2aaffcbafa024fcdbf04b04f6a6566d78797c7b",
@@ -596,7 +569,7 @@
     "test_cases/run_related_tests.py": "8607e1a739d4a5d78d37801a5c747b156530cda80abc10b7ffe36d70597ccad1",
     "test_cases/run_vm_validation.py": "65391bcc2a1178d7efbcc36d7af0e3e533303f4e19fac405f74ad2fc6732863c",
     "tools/lldp-analyze-tool/04-lldp-device-aliases.json": "595529fac28098b504d67809026a59ecfa0345375ada9b16057ff069e5179250",
-    "user-manual.html": "4f5d387ce08cebc19b135f9f3176839650eed70a3abb90e3b3ab6743f4e953ff",
+    "user-manual.html": "7cb13afea0f7208e869bc6aff56894fb5390533c570ae1da7b153bb43258ed65",
     "ztp/config/cumulus/ar_profile_custom.conf": "9316fe81c3238ef99076ee598abf303c955dc38343df4176ba22bc4c27729c1c",
     "ztp/config/cumulus/default.yaml": "d5be6765745d96c7449c2f3dc550213247def7ab2b40fa33be14c250c14d6dfe",
     "ztp/config/cumulus/default_5.16.5.yaml": "d5be6765745d96c7449c2f3dc550213247def7ab2b40fa33be14c250c14d6dfe",
@@ -672,12 +645,12 @@
     "test_cases.test_import_from_download_target": "d2296b575c77b2f7f0a59eb6c2d875ce71d89ac6e25029b468a08dbc13a76245",
     "test_cases.test_infra_check_and_manual_reset": "f12485c976471de81c6be125a2f4f2c8455deea2e50acd4d2611352ccc835143",
     "test_cases.test_load_release_transaction": "1f16b9e4d3aa4884f85f0cf0437a5ec39fb4dff6a1d2212e7c871077abf20248",
-    "test_cases.test_manual_applied_config": "119e9668c9d36a53d19cb74c305fcba854b6a97bfc05181c5e9d578201c2acb4",
+    "test_cases.test_manual_applied_config": "62657aa18a18c0ba556c424d30d86522d1043004b3cc1ec30a023d2ddd87fbf6",
     "test_cases.test_mlag_evpn_generation": "24163cf238ddbe1b236ac37ba6e6162f0f038de09b45204fce42fabaef0e8621",
     "test_cases.test_monitor_authority_entrypoints": "ff441c7863f6a529cb493590a49a693c76c131a2dc75a0269014a4fa0cf2dfc7",
     "test_cases.test_monitor_authority_semantic_workflow": "b0753af14ebb0059a69798ed2fc1a4918133ae0ebde37c1db67d7c3850f71cd1",
     "test_cases.test_monitor_authority_source_guard": "bb1fd10fc83f7e4de2ae8c87c39cb5c3fd304fdfbc8a8404087e271d25db156e",
-    "test_cases.test_monitor_stack_review": "82485d8fb39525631067abe3d3d936384c50c3b3592a3042dc98bdcd98f94d89",
+    "test_cases.test_monitor_stack_review": "a8831acaeff921d81f11923f4a628991006df28b398dbd5d09a590b2fdfee05c",
     "test_cases.test_monitor_writer_quiesce": "5efe4499c9ccb4f051d914a8584abcc0fc56023ac0bbc734c9c659a8967bed99",
     "test_cases.test_monitor_writer_quiesce_workflow": "da47872a83afc9b41d0182b51c78bcddf6cc6b7ce6531249714d28aa6d62a2b2",
     "test_cases.test_nvue_normalizer": "6e22f0f89353d0042391330675e4cce387931e896f4b44f57911e2dccb85b230",
