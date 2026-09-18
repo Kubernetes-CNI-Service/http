@@ -590,7 +590,9 @@ def _terminate_process(process: subprocess.Popen[bytes]) -> None:
     try:
         process.wait(timeout=max(0.0, deadline - time.monotonic()))
     except subprocess.TimeoutExpired as exc:
-        raise ManagementKeyError("bounded cleanup deadline exceeded reaping direct child") from exc
+        raise ManagementKeyError(
+            "bounded cleanup deadline exceeded reaping direct child"
+        ) from (cleanup_error if cleanup_error is not None else exc)
     except OSError as exc:
         raise ManagementKeyError("bounded cleanup could not reap direct child") from exc
     while True:

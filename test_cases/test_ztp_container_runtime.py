@@ -32,9 +32,9 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 DOCKER_ROOT = ROOT / "infra/docker"
 # Reviewed AM-1..AM-6 plus PK1/M1/M2 contract; prior trust-boundary prose retained.
-PUBLISHED_DOCKER_README_SIZE = 41950
+PUBLISHED_DOCKER_README_SIZE = 43651
 PUBLISHED_DOCKER_README_SHA256 = (
-    "06e355f0e58d2dd9541d742e299923db340624551db8eff08aeacde14e54d9f6"
+    "9d09a5d800778cc8d830b7b68ea5c4a0aae7dbf9a470a05450e232b99ef89ddd"
 )
 
 

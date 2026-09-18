@@ -47,6 +47,11 @@ TOOLS_DIR    = os.path.join(HTTP_BASE, "tools")
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
 from project_contract import (
+    SETUP_ZTP_MAPPINGS, SETUP_WORKSPACE_INPUT_MAPPINGS,
+    P2P_INPUT_PATHS, P2P_OUTPUT_PATHS, P2P_AIR_PATH,
+    BRINGUP_OUTPUT_SPECS, ANALYZER_INPUT_SPECS, ANALYZER_OUTPUT_SPECS,
+    NETWORK_MONITOR_SPECS, NETWORK_CSV_MAPPINGS, NETWORK_INVENTORY_LINKS,
+    MONITOR_RUNTIME_MAPPINGS, LATEST_YAML_SPECS,
     detect_global_schema_version,
     normalize_redundancy_mac,
     normalize_v2_mlag_policy,
@@ -69,90 +74,27 @@ IMAGE_DIR    = os.path.join(HTTP_BASE, "image")               # 项目无关的�
 #   "dir"        - 源目录必须存在（会自动创建），建目录符号链接
 #   "output"     - 输出文件：在项目中创建空文件（若不存在），然后建文件符号链接
 
-MAPPINGS = [
-    # Cumulus（eth）
-    ("config/cumulus/template/01-global.yaml",       "01-global.yaml",                "file"),
-    ("config/cumulus/template/02-devices_config.csv","02-devices_config.csv",          "file_csv"),
-    ("config/cumulus/template/91-devices.yaml",      "99-output-eth/91-devices.yaml", "output"),
-    ("config/cumulus/template/99-output",            "99-output-eth",                  "dir"),
-
-    # NVOS（ib + nvl）
-    ("config/nvos/template/01-global.yaml",          "01-global.yaml",                "file"),
-    ("config/nvos/template/02-devices_config.csv",   "02-devices_config.csv",          "file_csv"),
-    ("config/nvos/template/99-output-ib_nvl",        "99-output-ib_nvl",               "dir"),
-
-    # DHCP 配置输入
-    ("config/isc-dhcp-server/01-global.yaml",              "01-global.yaml",               "file"),
-    ("config/isc-dhcp-server/02-subnet_config.csv",        "02-dhcp-subnet_config.csv",     "file"),
-    ("config/isc-dhcp-server/02-devices_config.csv",       "02-devices_config.csv",         "file_csv"),
-
-    # DHCP 输出文件（写到项目的 99-output-dhcp/ 下）
-    ("config/isc-dhcp-server/dhcpd_eth.hosts",       "99-output-dhcp/dhcpd_eth.hosts","output"),
-    ("config/isc-dhcp-server/dhcpd_ib.hosts",        "99-output-dhcp/dhcpd_ib.hosts", "output"),
-    ("config/isc-dhcp-server/dhcpd_nvl.hosts",       "99-output-dhcp/dhcpd_nvl.hosts","output"),
-    ("config/isc-dhcp-server/dhcpd.conf",            "99-output-dhcp/dhcpd.conf",     "output"),
-    ("config/isc-dhcp-server/dhcp-release-manifest.json",
-                                                     "99-output-dhcp/dhcp-release-manifest.json",
-                                                                                       "output"),
-
-    # yaml-collect.py 输入 CSV
-    ("backup/02-devices_config.csv",                 "02-devices_config.csv",          "file_csv"),
-
-    # yaml-collect.py 输出目录（写到项目的 99-output-backup/ 下）
-    ("backup/yaml-backup",                           "99-output-backup",               "dir"),
-]
+MAPPINGS = list(SETUP_ZTP_MAPPINGS)
 
 # ZTP 目录之外、同样随当前部署项目切换的输入链接。
-WORKSPACE_INPUT_MAPPINGS = [
-    ("infra/01-global.yaml",        "01-global.yaml",         "file"),
-    ("infra/02-devices_config.csv", "02-devices_config.csv", "file_csv"),
-    ("monitor/01-global.yaml",      "01-global.yaml",         "file"),
-]
+WORKSPACE_INPUT_MAPPINGS = list(SETUP_WORKSPACE_INPUT_MAPPINGS)
 
 # 所有 P2P 消费工具只使用固定文件名 p2p.xlsx；setup 将同一个项目源文件
 # 挂载到以下五个输入入口，并让两个转换流程共享同一个输出目录。
-P2P_INPUT_LINKS = [
-    os.path.join(ZTP, "config", "cumulus", "template", "P2P", "p2p.xlsx"),
-    os.path.join(ZTP, "config", "nvos", "template", "P2P", "p2p.xlsx"),
-    os.path.join(HTTP_BASE, "ethernet", "p2p.xlsx"),
-    os.path.join(HTTP_BASE, "infiniband", "p2p.xlsx"),
-    os.path.join(HTTP_BASE, "nvlink", "p2p.xlsx"),
-]
-P2P_OUTPUT_LINKS = [
-    os.path.join(ZTP, "config", "cumulus", "template", "P2P", "output-p2p"),
-    os.path.join(ZTP, "config", "nvos", "template", "P2P", "output-p2p"),
-]
-P2P_AIR_JSON_LINK = os.path.join(
-    ZTP, "config", "isc-dhcp-server", "p2p-air.json"
-)
+P2P_INPUT_LINKS = [os.path.join(HTTP_BASE, name) for name in P2P_INPUT_PATHS]
+P2P_OUTPUT_LINKS = [os.path.join(HTTP_BASE, name) for name in P2P_OUTPUT_PATHS]
+P2P_AIR_JSON_LINK = os.path.join(HTTP_BASE, P2P_AIR_PATH)
 
 # InfiniBand bringup 工具的项目归档目录。工具仍使用自己目录下的固定名称，
 # setup 负责将其切换到当前项目的统一 IB/NVLink 输出树。
-BRINGUP_OUTPUT_MAPPINGS = [
-    (os.path.join(HTTP_BASE, "infiniband", "bringup", "ndr", "ndr-upgrade-logs"),
-     os.path.join("99-output-ib_nvl", "bringup", "ndr-upgrade-logs")),
-    (os.path.join(HTTP_BASE, "infiniband", "bringup", "xdr-initial-setup", "xdr-initial-setup-logs"),
-     os.path.join("99-output-ib_nvl", "bringup", "xdr-initial-setup-logs")),
-    (os.path.join(HTTP_BASE, "infiniband", "bringup", "xdr-upgrade", "xdr-upgrade-logs"),
-     os.path.join("99-output-ib_nvl", "bringup", "xdr-upgrade-logs")),
-]
+BRINGUP_OUTPUT_MAPPINGS = [(os.path.join(HTTP_BASE, name), target)
+                            for name, target in BRINGUP_OUTPUT_SPECS]
 
 # P2P 校验工具读取当前项目监控采集原始数据的固定入口。
-ANALYZER_INPUT_MAPPINGS = [
-    (os.path.join(ZTP, "config", "cumulus", "template", "P2P", "eth-info"),
-     os.path.join("99-output-monitor", "ethernet", "eth-info")),
-    (os.path.join(ZTP, "config", "nvos", "template", "P2P", "ib-info"),
-     os.path.join("99-output-monitor", "infiniband", "ib-info")),
-]
-ANALYZER_OUTPUT_MAPPINGS = [
-    (os.path.join(HTTP_BASE, "monitor", "99-output-p2p"), "99-output-p2p"),
-    (os.path.join(HTTP_BASE, "tools", "lldp-analyze-tool", "99-output-p2p"),
-     "99-output-p2p"),
-    (os.path.join(HTTP_BASE, "tools", "lldp-analyze-tool", "99-output-monitor"),
-     "99-output-monitor"),
-    (os.path.join(HTTP_BASE, "tools", "ibdiagnet-analyze-tool", "99-output-p2p"),
-     "99-output-p2p"),
-]
+ANALYZER_INPUT_MAPPINGS = [(os.path.join(HTTP_BASE, name), target)
+                            for name, target in ANALYZER_INPUT_SPECS]
+ANALYZER_OUTPUT_MAPPINGS = [(os.path.join(HTTP_BASE, name), target)
+                            for name, target in ANALYZER_OUTPUT_SPECS]
 
 # ── 辅助 ──────────────────────────────────────────────────────────────────────
 
@@ -770,29 +712,17 @@ def _latest_nvos_publish_dir(parent):
 
 
 # 网络类型目录下的 CSV 链接：(symlink路径, 项目中源文件名)
-_NET_CSV_LINKS = [
-    (os.path.join(HTTP_BASE, "ethernet",   "eth.csv"),  "02-devices_config.csv"),
-    (os.path.join(HTTP_BASE, "infiniband", "ib.csv"),   "02-devices_config.csv"),
-    (os.path.join(HTTP_BASE, "nvlink",     "nvsw.csv"), "02-devices_config.csv"),
-]
+_NET_CSV_LINKS = [(os.path.join(HTTP_BASE, name), target)
+                  for name, target in NETWORK_CSV_MAPPINGS]
 
 # 监控类型：(类型目录, CSV 文件名, 采集输出目录...)
-_MONITOR_SPECS = [
-    ("ethernet",   "eth.csv",  "eth-info",  "spx-link"),
-    ("infiniband", "ib.csv",   "ib-info",   "ib-link"),
-    ("nvlink",     "nvsw.csv", "nvsw-info", "nvsw-link"),
-]
+_MONITOR_SPECS = list(NETWORK_MONITOR_SPECS)
 
 
 def _monitor_inventory_link_pairs():
     """Return fixed collector aliases pointing at the active network CSV links."""
-    return [
-        (
-            os.path.join(HTTP_BASE, net_type, "monitor", csv_name),
-            os.path.join(HTTP_BASE, net_type, csv_name),
-        )
-        for net_type, csv_name, *_outputs in _MONITOR_SPECS
-    ]
+    return [(os.path.join(HTTP_BASE, name), os.path.join(HTTP_BASE, target))
+            for name, target in NETWORK_INVENTORY_LINKS]
 
 
 def _process_net_csv_links(proj_dir):
@@ -807,30 +737,12 @@ def _process_net_csv_links(proj_dir):
 
 
 def _monitor_link_paths(proj_dir):
-    """返回监控相关的 (链接路径, 目标路径)，不包含仓库内部固定链接。"""
-    csv_base = _CSV_DIR or proj_dir
-    src_csv = os.path.join(csv_base, "02-devices_config.csv")
-    monitor_root = os.path.join(proj_dir, "99-output-monitor")
-    # HTML 汇总只需要一份统一设备清单，再按 type 过滤 eth/eth_spx/spx、ib、nvl。
-    ztp_status = os.path.join(ZTP, "status")
-    project_ztp_status = os.path.join(proj_dir, "99-output-ztp")
-    pairs = [
-        (os.path.join(HTTP_BASE, "monitor", "02-devices_config.csv"), src_csv),
-        # 采集脚本固定写 ztp/status；项目切换时数据仍归档到项目目录。
-        (ztp_status, project_ztp_status),
-        # HTML 汇总通过 monitor/ztp-status 读取同一份数据。
-        (os.path.join(HTTP_BASE, "monitor", "ztp-status"), ztp_status),
-    ]
-    for net_type, _csv_name, *output_names in _MONITOR_SPECS:
-        project_net_dir = os.path.join(monitor_root, net_type)
-        # 采集脚本从各类型 monitor/ 目录读写当前项目的输出。
-        for output_name in output_names:
-            pairs.append((os.path.join(HTTP_BASE, net_type, "monitor", output_name),
-                          os.path.join(project_net_dir, output_name)))
-        pairs.append((os.path.join(HTTP_BASE, net_type, "monitor", "cronjob.log"),
-                      os.path.join(project_net_dir, "cronjob.log")))
-        # 汇总页面通过 http/monitor/<type> 访问三个项目监控目录。
-        pairs.append((os.path.join(HTTP_BASE, "monitor", net_type), project_net_dir))
+    """Return the shared live monitor mappings, retaining external CSV authority."""
+    pairs = []
+    for name, target, alias in MONITOR_RUNTIME_MAPPINGS:
+        base = (_CSV_DIR or proj_dir) if target == "02-devices_config.csv" else proj_dir
+        target_path = os.path.join(HTTP_BASE, alias) if alias else os.path.join(base, target)
+        pairs.append((os.path.join(HTTP_BASE, name), target_path))
     return pairs
 
 
@@ -892,10 +804,9 @@ def _process_latest_yaml(_proj_dir):
     有完整发布目录时 ``latest_yaml`` 保持固定入口；没有对应设备或发布结果时
     删除 setup 管理的旧入口，避免留下指向不存在 ``latest`` 的断链。
     """
-    pairs = [
-        (os.path.join(ZTP, "config", "cumulus"), "99-output", _latest_cumulus_publish_dir),
-        (os.path.join(ZTP, "config", "nvos"), "99-output-ib_nvl", _latest_nvos_publish_dir),
-    ]
+    resolvers = {"cumulus": _latest_cumulus_publish_dir, "nvos": _latest_nvos_publish_dir}
+    pairs = [(os.path.join(ZTP, "config", platform), output, resolvers[platform])
+             for platform, output in LATEST_YAML_SPECS]
     for ztp_dir, output_name, resolver in pairs:
         out_base = os.path.join(ztp_dir, "template", output_name)
         latest = resolver(out_base)

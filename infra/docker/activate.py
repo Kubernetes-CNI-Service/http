@@ -38,7 +38,10 @@ TOOLS_DIRECTORY = HERE.parents[1] / "tools"
 sys.path.insert(0, os.fspath(TOOLS_DIRECTORY))
 import hostlock  # noqa: E402
 from project_contract import (  # noqa: E402
-    is_image_credential_name, path_disposition, transfer_exclude_reason,
+    is_image_credential_name, is_image_host_state_path,
+    IMAGE_HOST_STATE_PATHS, IMAGE_HOST_STATE_SUBTREES, IMAGE_MANIFEST_CARRIER,
+    PUBLISHED_RUNTIME_FILE_PATHS, published_runtime_link_specs, P2P_INPUT_PATHS, P2P_AIR_PATH,
+    path_disposition, transfer_exclude_reason,
 )
 
 
@@ -95,73 +98,11 @@ CONTROL_CGI = (
     (Path("monitor/switch-collection-control.cgi"), "switch-collection-control"),
     (Path("monitor/manual-ztp-control.cgi"), "manual-ztp-control"),
 )
-PUBLISHED_RUNTIME_FILES = (
-    Path("ztp/ztp-bootstrap_oob.sh"),
-    Path("ztp/ztp-bootstrap_oobofoob.sh"),
-    Path("ztp/ztp.json"),
-)
-PUBLISHED_RUNTIME_LINKS = (
-    (Path("monitor/01-global.yaml"),
-     "../DAY0-Prepare/{project}/01-global.yaml", Path("01-global.yaml")),
-    (Path("monitor/02-devices_config.csv"),
-     "../DAY0-Prepare/{project}/02-devices_config.csv", Path("02-devices_config.csv")),
-    (Path("monitor/99-output-p2p"),
-     "../DAY0-Prepare/{project}/99-output-p2p", Path("99-output-p2p")),
-    (Path("monitor/ethernet"),
-     "../DAY0-Prepare/{project}/99-output-monitor/ethernet",
-     Path("99-output-monitor/ethernet")),
-    (Path("monitor/infiniband"),
-     "../DAY0-Prepare/{project}/99-output-monitor/infiniband",
-     Path("99-output-monitor/infiniband")),
-    (Path("monitor/nvlink"),
-     "../DAY0-Prepare/{project}/99-output-monitor/nvlink",
-     Path("99-output-monitor/nvlink")),
-    (Path("monitor/ztp-status"), "../ztp/status", Path("99-output-ztp")),
-    (Path("ztp/status"),
-     "../DAY0-Prepare/{project}/99-output-ztp", Path("99-output-ztp")),
-    (Path("ethernet/eth.csv"),
-     "../DAY0-Prepare/{project}/02-devices_config.csv", Path("02-devices_config.csv")),
-    (Path("ethernet/monitor/eth.csv"), "../eth.csv", Path("02-devices_config.csv")),
-    (Path("infiniband/ib.csv"),
-     "../DAY0-Prepare/{project}/02-devices_config.csv", Path("02-devices_config.csv")),
-    (Path("infiniband/monitor/ib.csv"), "../ib.csv", Path("02-devices_config.csv")),
-    (Path("nvlink/nvsw.csv"),
-     "../DAY0-Prepare/{project}/02-devices_config.csv", Path("02-devices_config.csv")),
-    (Path("nvlink/monitor/nvsw.csv"), "../nvsw.csv", Path("02-devices_config.csv")),
-    (Path("ethernet/monitor/eth-info"),
-     "../../DAY0-Prepare/{project}/99-output-monitor/ethernet/eth-info",
-     Path("99-output-monitor/ethernet/eth-info")),
-    (Path("ethernet/monitor/spx-link"),
-     "../../DAY0-Prepare/{project}/99-output-monitor/ethernet/spx-link",
-     Path("99-output-monitor/ethernet/spx-link")),
-    (Path("ethernet/monitor/cronjob.log"),
-     "../../DAY0-Prepare/{project}/99-output-monitor/ethernet/cronjob.log",
-     Path("99-output-monitor/ethernet/cronjob.log")),
-    (Path("infiniband/monitor/ib-info"),
-     "../../DAY0-Prepare/{project}/99-output-monitor/infiniband/ib-info",
-     Path("99-output-monitor/infiniband/ib-info")),
-    (Path("infiniband/monitor/ib-link"),
-     "../../DAY0-Prepare/{project}/99-output-monitor/infiniband/ib-link",
-     Path("99-output-monitor/infiniband/ib-link")),
-    (Path("infiniband/monitor/cronjob.log"),
-     "../../DAY0-Prepare/{project}/99-output-monitor/infiniband/cronjob.log",
-     Path("99-output-monitor/infiniband/cronjob.log")),
-    (Path("nvlink/monitor/nvsw-info"),
-     "../../DAY0-Prepare/{project}/99-output-monitor/nvlink/nvsw-info",
-     Path("99-output-monitor/nvlink/nvsw-info")),
-    (Path("nvlink/monitor/nvsw-link"),
-     "../../DAY0-Prepare/{project}/99-output-monitor/nvlink/nvsw-link",
-     Path("99-output-monitor/nvlink/nvsw-link")),
-    (Path("nvlink/monitor/cronjob.log"),
-     "../../DAY0-Prepare/{project}/99-output-monitor/nvlink/cronjob.log",
-     Path("99-output-monitor/nvlink/cronjob.log")),
-    (Path("tools/lldp-analyze-tool/99-output-p2p"),
-     "../../DAY0-Prepare/{project}/99-output-p2p", Path("99-output-p2p")),
-    (Path("tools/lldp-analyze-tool/99-output-monitor"),
-     "../../DAY0-Prepare/{project}/99-output-monitor", Path("99-output-monitor")),
-)
-PUBLISHED_P2P_INPUT_LINK = Path("ztp/config/cumulus/template/P2P/p2p.xlsx")
-PUBLISHED_P2P_AIR_LINK = Path("ztp/config/isc-dhcp-server/p2p-air.json")
+PUBLISHED_RUNTIME_FILES = tuple(Path(name) for name in PUBLISHED_RUNTIME_FILE_PATHS)
+PUBLISHED_RUNTIME_LINKS = tuple((Path(name), target, Path(project_target))
+                                for name, target, project_target in published_runtime_link_specs())
+PUBLISHED_P2P_INPUT_LINK = Path(P2P_INPUT_PATHS[0])
+PUBLISHED_P2P_AIR_LINK = Path(P2P_AIR_PATH)
 # The receipt is intentionally directory-derived rather than a hand-maintained
 # entrypoint list.  Several lifecycle generators discover Python modules,
 # Jinja templates and default*.yaml files by glob; exact membership therefore
@@ -177,60 +118,8 @@ IMAGE_SOURCE_SUFFIXES = frozenset({
 IMAGE_SOURCE_EXACT_NAMES = frozenset({
     "Dockerfile", "Dockerfile.dockerignore",
 })
-IMAGE_SOURCE_EXCLUDED_PREFIXES = (
-    "infra/logs/",
-    "infiniband/bringup/",
-    "monitor/status/",
-    "ztp/backup/",
-    "ztp/config/cumulus/template/.claude/",
-    "ztp/config/publickey/",
-    "ztp/image/",
-    "ztp/optimize/2026-12-vb-gb300-sample/",
-    "tools/ib-tool-Jie/",
-    "tools/ibdiagnet-analyze-tool/",
-)
-IMAGE_SOURCE_EXCLUDED_PATHS = frozenset({
-    "infra/01-global.yaml",
-    "infra/02-devices_config.csv",
-    "infra/docker/infra-runtime.conf",
-    "infra/docker/deployment-source-manifest.json",
-    "monitor/01-global.yaml",
-    "monitor/02-devices_config.csv",
-    "monitor/generate-monitor.log",
-    "ethernet/eth.csv",
-    "ethernet/p2p.xlsx",
-    "ethernet/monitor/eth.csv",
-    "ethernet/monitor/cronjob.log",
-    "infiniband/ib.csv",
-    "infiniband/p2p.xlsx",
-    "infiniband/monitor/ib.csv",
-    "infiniband/monitor/cronjob.log",
-    "infiniband/bringup/xdr-upgrade/ib.csv",
-    "infiniband/bringup/xdr-initial-setup/ib.csv",
-    "infiniband/bringup/xdr-initial-setup/p2p.xlsx",
-    "nvlink/nvsw.csv",
-    "nvlink/p2p.xlsx",
-    "nvlink/monitor/nvsw.csv",
-    "nvlink/monitor/cronjob.log",
-    "ztp/ztp-bootstrap_oob.sh",
-    "ztp/ztp-bootstrap_oobofoob.sh",
-    "ztp/ztp.json",
-    "ztp/config/isc-dhcp-server/01-global.yaml",
-    "ztp/config/isc-dhcp-server/02-devices_config.csv",
-    "ztp/config/isc-dhcp-server/02-subnet_config.csv",
-    "ztp/config/isc-dhcp-server/dhcp-release-manifest.json",
-    "ztp/config/isc-dhcp-server/dhcpd.conf",
-    "ztp/config/isc-dhcp-server/p2p-air.json",
-    "ztp/config/publickey/laptop.pub",
-    "ztp/backup/02-devices_config.csv",
-    "ztp/config/cumulus/template/01-global.yaml",
-    "ztp/config/cumulus/template/02-devices_config.csv",
-    "ztp/config/cumulus/template/91-devices.yaml",
-    "ztp/config/cumulus/template/P2P/p2p.xlsx",
-    "ztp/config/nvos/template/01-global.yaml",
-    "ztp/config/nvos/template/02-devices_config.csv",
-    "ztp/config/nvos/template/P2P/p2p.xlsx",
-})
+IMAGE_SOURCE_EXCLUDED_PREFIXES = tuple(name + "/" for name in sorted(IMAGE_HOST_STATE_SUBTREES))
+IMAGE_SOURCE_EXCLUDED_PATHS = IMAGE_HOST_STATE_PATHS | {IMAGE_MANIFEST_CARRIER}
 MUTABLE_IMAGE_SOURCE_PATTERNS = (
     re.compile(r"^ztp/config/(?:cumulus|nvos)/default[^/]*[.]yaml$"),
 )
@@ -1040,6 +929,8 @@ def _source_record(source_root: Path, relative_name: str) -> dict:
 def _image_runtime_or_credential_path(relative_name: str) -> bool:
     if relative_name == CONTAINER_TOPLEVEL_LOCK_NAME:
         return False
+    if is_image_host_state_path(relative_name):
+        return True
     return any(
         is_image_credential_name(part) or part.startswith("99-output")
         or part.endswith(".lock") or part == "finished-history"
@@ -1109,10 +1000,6 @@ def image_source_paths(source_root: Path) -> Tuple[str, ...]:
                     relative_directory == Path("DAY0-Prepare")
                     and name != "template"
                 )
-                and not any(
-                    (relative_directory / name).as_posix().startswith(prefix.rstrip("/"))
-                    for prefix in IMAGE_SOURCE_EXCLUDED_PREFIXES
-                )
             )
             for name in sorted(filenames):
                 relative = (relative_directory / name).as_posix()
@@ -1163,11 +1050,7 @@ def verify_image_source_tree(source_root: Path) -> None:
                     and parts[1] != "template"
                     and not (len(parts) == 2 and name.endswith(".py") and name in files))
             )
-            generated = (
-                relative in IMAGE_SOURCE_EXCLUDED_PATHS
-                and relative != "infra/docker/deployment-source-manifest.json"
-            ) or any(relative.startswith(prefix)
-                     for prefix in IMAGE_SOURCE_EXCLUDED_PREFIXES)
+            generated = is_image_host_state_path(relative)
             if credential_or_runtime or project or generated:
                 raise ActivationError(f"forbidden image source member: {relative}")
 

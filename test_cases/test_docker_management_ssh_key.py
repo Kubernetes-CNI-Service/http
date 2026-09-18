@@ -1191,6 +1191,38 @@ class DockerManagementSshKeyDirectTests(unittest.TestCase):
                 launch.assert_not_called()
                 change_disposition.assert_not_called()
 
+        # The invariant also covers the successful launch window, not only
+        # rejected preflight calls. Never change this process's real handler.
+        with mock.patch.object(helper.signal, "signal") as change_disposition, \
+             mock.patch.object(helper.subprocess, "Popen", wraps=subprocess.Popen) as launch:
+            result = helper._run_bounded_command(["/usr/bin/true"])
+        self.assertEqual(0, result.returncode)
+        launch.assert_called_once()
+        change_disposition.assert_not_called()
+
+    @unittest.skipUnless(sys.platform == "darwin", "Darwin shared observer deadline")
+    def test_darwin_control_timeout_is_remaining_shared_deadline(self) -> None:
+        helper = self.helper()
+        child = SimpleNamespace(pid=123456, returncode=None)
+        queue = mock.Mock()
+        queue.control.return_value = [SimpleNamespace(
+            ident=child.pid, filter=select.KQ_FILTER_PROC, flags=0,
+            fflags=select.KQ_NOTE_EXIT, data=0,
+        )]
+        with mock.patch.object(helper.select, "kqueue", return_value=queue), \
+             mock.patch.object(helper.time, "monotonic", return_value=100.005):
+            helper._wait_child_exit_without_reaping(child, 100.020)
+        queue.control.assert_called_once()
+        registrations, max_events, timeout = queue.control.call_args.args
+        self.assertEqual(1, len(registrations))
+        self.assertEqual(child.pid, registrations[0].ident)
+        self.assertEqual(1, max_events)
+        self.assertGreater(timeout, 0)
+        self.assertLessEqual(timeout, 100.020 - 100.005)
+        self.assertAlmostEqual(0.015, timeout)
+        queue.close.assert_called_once()
+        self.assertIsNone(child.returncode)
+
     def test_native_exit_observer_preserves_running_and_exited_child_anchor(self) -> None:
         helper = self.helper()
         for already_exited in (False, True):
@@ -1360,15 +1392,19 @@ class DockerManagementSshKeyDirectTests(unittest.TestCase):
 
     def test_cleanup_group_signal_esrch_stops_signals_and_other_errors_fail_closed(self) -> None:
         helper = self.helper()
-        for signal_count, error, pattern in (
-            (1, ProcessLookupError(errno.ESRCH, "fixture absent"), None),
-            (2, ProcessLookupError(errno.ESRCH, "fixture absent"), None),
-            (2, PermissionError(errno.EPERM, "fixture zombies"), None),
-            (2, OSError(errno.EIO, "fixture failure"), "cannot terminate process group"),
+        for error_at, signal_count, observations, error, pattern in (
+            (1, 1, 0, ProcessLookupError(errno.ESRCH, "fixture absent"), None),
+            (2, 2, 1, ProcessLookupError(errno.ESRCH, "fixture absent"), None),
+            (1, 2, 1, PermissionError(errno.EPERM, "fixture zombies"), None),
+            (2, 2, 1, PermissionError(errno.EPERM, "fixture zombies"), None),
+            (2, 2, 1, OSError(errno.EIO, "fixture failure"), "cannot terminate process group"),
         ):
-            with self.subTest(signal_count=signal_count, error=error):
+            with self.subTest(error_at=error_at, signal_count=signal_count, error=error):
                 process = SimpleNamespace(pid=123456, returncode=None, wait=mock.Mock(return_value=0))
-                with mock.patch.object(helper.os, "killpg", side_effect=[None] * (signal_count - 1) + [error]) as kill_group, \
+                # Surplus responses deliberately keep an extra signal observable
+                # by the call-count assertion rather than a StopIteration error.
+                outcomes = [None] * (error_at - 1) + [error] + [None] * 4
+                with mock.patch.object(helper.os, "killpg", side_effect=outcomes) as kill_group, \
                      mock.patch.object(helper.os, "kill"), \
                      mock.patch.object(helper, "_process_group_is_observable", side_effect=(True, False)), \
                      mock.patch.object(helper, "_wait_child_exit_without_reaping") as observe_exit:
@@ -1378,8 +1414,33 @@ class DockerManagementSshKeyDirectTests(unittest.TestCase):
                     else:
                         helper._terminate_process(process)
                 self.assertEqual([mock.call(process.pid, signal.SIGKILL)] * signal_count, kill_group.call_args_list)
-                self.assertEqual(signal_count - 1, observe_exit.call_count)
+                self.assertEqual(observations, observe_exit.call_count)
                 process.wait.assert_called_once()
+
+    def test_reap_timeout_keeps_original_cleanup_failure_as_cause(self) -> None:
+        helper = self.helper()
+        clock_value = [100.0]
+        failure = helper.ManagementKeyError("fixture bounded cleanup observer failed")
+        process = SimpleNamespace(
+            pid=123456, returncode=None,
+            wait=mock.Mock(side_effect=subprocess.TimeoutExpired("fixture", 0)),
+        )
+        def observe_exit(_process, deadline):
+            self.assertIs(process, _process)
+            self.assertEqual(102.0, deadline)
+            clock_value[0] = deadline
+            raise failure
+        with mock.patch.object(helper.os, "killpg") as kill_group, \
+             mock.patch.object(helper.os, "kill") as kill_child, \
+             mock.patch.object(helper, "_process_group_is_observable", return_value=True), \
+             mock.patch.object(helper, "_wait_child_exit_without_reaping", side_effect=observe_exit), \
+             mock.patch.object(helper.time, "monotonic", side_effect=lambda: clock_value[0]), \
+             self.assertRaisesRegex(helper.ManagementKeyError, "deadline.*reaping") as raised:
+            helper._terminate_process(process)
+        self.assertIs(failure, raised.exception.__cause__)
+        kill_group.assert_called_once_with(process.pid, signal.SIGKILL)
+        kill_child.assert_not_called()
+        process.wait.assert_called_once_with(timeout=0.0)
 
     def test_cleanup_second_real_kill_removes_late_member_before_reaping_anchor(self) -> None:
         helper = self.helper()
@@ -3694,7 +3755,8 @@ class DockerManagementSshKeyWorkflowTests(unittest.TestCase):
         }.issubset(ssh_workflow["tests"]))
         real = (ROOT / "test_cases/REAL_ENVIRONMENT.md").read_text(encoding="utf-8")
         self.assertIn("TC-REAL-DOCKER-MANAGEMENT-SSH-KEY-001", real)
-        for phrase in ("WEXITED|WNOWAIT|WNOHANG", "sole reaper", "SIGCHLD=SIG_DFL", "未回收锚点"):
+        for phrase in ("WEXITED|WNOWAIT|WNOHANG", "sole reaper", "SIGCHLD=SIG_DFL", "未回收锚点",
+                       "Popen.wait", "post-link"):
             self.assertIn(phrase, real)
             self.assertIn(phrase, (ROOT / "infra/docker/README.md").read_text(encoding="utf-8"))
         self.assertIn("host→service", real)

@@ -9,19 +9,28 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-IMAGE-CONTEXT-001 — 镜像 COPY 成员与物理树拒绝边界
 
-- 类型：integration / real-environment；对应 IMAGE-CONTEXT-SAFETY H1–H4 / AM-1–AM-6。
+- 类型：integration / real-environment；对应 IMAGE-CONTEXT-SAFETY H1–H4 / AM-1–AM-9。
 - Status: OPEN / NOT RUN（legacy builder、Ubuntu 双架构正式镜像；本机最小合成 BuildKit 证据另记，不能代替准入）。
-- 自动化：`test_image_context_safety.py` 独立 literal ALLOWED/DENIED 清单、镜像专用 physical guard、
+- 自动化：`test_image_context_safety.py` 独立 literal ALLOWED controls、producer 表驱动的 runtime
+  fixture（与实际 setup/activation 消费者核对）、镜像专用 physical guard、
   Dockerfile → activate CLI、live 项目允许、preloaded 内嵌树检查。禁止从实现选择结果生成预期。
 - 前置：只允许专用本机 Docker context 的 Unix socket 与内建 docker driver；权限不足、远端
   context、缺少 buildx 必须失败，不回退真实仓库构建。不得提供私钥、项目输入或生产目录。
 - 本机步骤：显式执行 `HTTP_TEST_SYNTHETIC_DOCKER=1 python3 -B -m unittest -v
   test_cases.test_image_context_safety.SyntheticDockerMembershipTests`。测试临时生成无害文件名
-  marker，分别读取三份 ignore 规则；每份各测试 17 个 live 运行时绑定的普通文件和 dangling
-  symlink 形态，同时放入模板 `99-output*`、lock、history、多层/混合大小写凭据与空 `.ssh`。
+  marker，分别读取三份 ignore 规则；每份各测试全部声明运行时绑定的普通文件、指向合成
+  项目的 resolving symlink 和 dangling symlink 三种形态，名字/目标字符串来自 producer
+  表，不读取 live project/target 内容。同时放入模板 `99-output*`、lock、history、多层/
+  混合大小写凭据与空 `.ssh`、`*-sample`、日志/状态子树。
+  generated 边界：同一 image-only host-state 词表驱动 ignore 和 gate；`.setup_manifest`、
+  container/desired/runtime state、DHCP hosts、monitor/monitor.html、REFERENCE_ONLY_SUBTREES
+  及 zip 均拒绝。named 子树入口和后代均拒绝，中性父目录不算 manifest 成员；无项目身份
+  的空 `__pycache__` 壳是 directory-only residual，文件/链接不能借后缀不入选而获豁免。
   真实 package helper → activate 生成该合成 live tree 的 manifest；外置 Dockerfile 仅
-  `FROM scratch` 和 `COPY . /`。本地输出文件/软链接成员必须精确等于独立 ALLOWED 加
-  `infra/docker/deployment-source-manifest.json`；空 `.ssh` 也不得保留。随后真实 activate CLI
+  `FROM scratch` 和 `COPY . /`。本地输出 terminal（文件/软链接对象，不含目录壳）扣除
+  唯一载体 `infra/docker/deployment-source-manifest.json` 后，必须同时精确等于 package
+  manifest 的路径集合与独立 ALLOWED；空 `.ssh` 及所有 named 禁止子树入口也不得保留。
+  随后真实 activate CLI
   必须通过 physical + manifest 检查，且 manifest 字节不变。任一额外成员都失败。
   BuildKit 专用 ignore 分支故意把 root ignore 设置为全排除，验证专用文件确实生效。
 - legacy：在支持 legacy builder 的专用本机复用同一合成目录与两份 root ignore 副本；使用
@@ -39,7 +48,8 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   精确文件成员断言通过（1 test / 3 subtests）。原始证据由双日志绑定，不作为 legacy、Ubuntu
   双架构正式镜像或服务准入 PASS。上下文名选择错误、inspect 不支持 format 的两次前置失败
   已单独保留，未放宽任何文件成员断言。
-- 本机修订记录（2026-09-18）：独立 17 路径普通文件/软链接矩阵共六组，真实 COPY 成员与
+- 历史本机修订记录（2026-09-18；仅旧 17 路径 fixture，不证明 producer 完整性或 AM-7–AM-9）：
+  独立 17 路径普通文件/软链接矩阵共六组，真实 COPY 成员与
   导出树 physical + manifest 校验均通过。首次发现 `finished-history/**` 留下空目录导致
   六组 gate 拒绝；补充目录本身拒绝后重跑，保留失败与成功原始日志。
   大小写 marker 使用不同父目录，先断言全部 75 个 literal 输入真实存在，防止 macOS
@@ -843,10 +853,14 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   kqueue 的 exact ident/filter/EV_ERROR 与晚注册 ESRCH+正向 PID0 锚点，以及 zombie-only 组
   kill#2 返回 EPERM 后仍须完成 reap+ESRCH。错误事件/锚点丢失/过期时禁止第二次组信号。
   确认父进程已退出但后代仍持有 pipe 时，超时后直接子进程已 wait、整个
-  owned process group 的 signal0 返回 ESRCH；观察退出、两次信号、wait 与 10ms 轮询共用最多 2 秒期限。EPERM 是未确认，
+  owned process group 的 signal0 返回 ESRCH；观察退出、两次信号、wait 与 helper 自身 10ms 轮询
+  共用最多 2 秒期限。Darwin kqueue 使用剩余期限；reap 使用 `Popen.wait`（内部退避可达 50ms），
+  不是整个流程都以至多 10ms 间隔检查。EPERM 是未确认，
   不能算 group 消失；持续 EPERM/group 可见至期限，或其它观察错误，都必须报 bounded-cleanup
-  错误，同时证明 selector/pipes 关闭且未发布完整 canonical
-  key pair。macOS fixed100 仅证明本机进程语义，不替代本 Linux/root 门禁；不因失败增加等待阈值、
+  错误，同时证明 selector/pipes 关闭；首次 publication 前的 bounded-command 失败必须证明
+  未发布 canonical key pair。post-link 验证或稳定性复核失败可能留下 canonical leaves，须记录
+  具体阶段并保留现场，不自动 unlink/回滚，不以失败退出证明零写入。退出观察失败后 reap 再超时
+  时须保留最初 cleanup 原因的异常链。macOS fixed100 仅证明本机进程语义，不替代本 Linux/root 门禁；不因失败增加等待阈值、
   跳过原断言或反复跑到绿色。清理仅限本 fixture 的已确认 PID/group，保留失败证据，不碰其它进程。
   group SIGKILL 返回 ESRCH 后不再发组信号；锚点回收后亦只观察，不向可能复用的数字 PGID
   发信号。POSIX 只在 group 非空期间保留 PGID；此保证不覆盖主动切换 session 的后代。

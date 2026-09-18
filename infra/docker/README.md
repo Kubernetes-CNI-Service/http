@@ -122,7 +122,9 @@ action 与 fingerprint，不包含 private bytes。
 helper 遇到 keygen timeout、输出超限或捕获初始化失败时，会先终止自己创建的 process group，
 保留直接子进程的未回收锚点，确认其已退出后再发送第二次 group SIGKILL，随后才 wait 回收并
 确认整个 group 的 signal0 返回 ESRCH。父进程先退出不等于后代已消失。退出观察、两次信号、
-wait 与 group 检查共用最长 2 秒的单一 monotonic deadline，每次最多间隔 10ms 检查，不重置期限。
+wait 与 group 检查共用最长 2 秒的单一 monotonic deadline，不重置期限。helper 自身轮询循环
+间隔上限为 10ms；Darwin kqueue 观察受剩余期限约束，回收使用同一期限约束的 `Popen.wait`，
+其内部退避可达 50ms，不能将整个回收流程描述为每隔至多 10ms 检查。
 helper 必须是私有 Popen 的 sole reaper；启动前要求 SIGCHLD=SIG_DFL，绝不修改其 disposition。
 模块导入时固定平台观察器：Linux 用 WEXITED|WNOWAIT|WNOHANG 的 waitid；Darwin 用 kqueue 的
 PROC/NOTE_EXIT，验证 exact ident/filter 且 EV_ERROR 为零。Darwin 晚注册返回 EV_ERROR/ESRCH
@@ -130,7 +132,10 @@ PROC/NOTE_EXIT，验证 exact ident/filter 且 EV_ERROR 为零。Darwin 晚注�
 不能仅因回显 NOTE_EXIT 就继续。平台缺少接口在启动前拒绝，其它观察错误或过期事件不得触发
 第二次 group 信号。group SIGKILL 返回 EPERM 仍为待确认，返回 ESRCH 后不再发送 group 信号；
 只有最终 signal0 的 ESRCH 是完成，持续 EPERM/group 可见至期限或其它错误均 fail closed。
-异常离开前仍关闭观察队列、selector/pipes，不发布完整 key pair、不继续 container lifecycle。
+异常离开前仍关闭观察队列、selector/pipes，不继续 container lifecycle。首次 publication 前的
+bounded-command 失败不发布 canonical key pair；post-link 验证或稳定性复核失败则可能已留下
+canonical leaves，helper 不自动 unlink/回滚它们。保留现场，按上述受信恢复流程处置，不把
+失败退出当作「未写入」证明。退出观察失败后若 reap 再超时，异常链保留最初 cleanup 原因。
 POSIX 仅在 group 非空期间保留 PGID；回收锚点后只观察、不再向可能复用的数字 PGID 发信号。
 这里只处理自己的受管 group，不扫描其它进程，也不声称能围堵主动切换 session 的后代。
 
@@ -439,18 +444,29 @@ sync-code 和 tar upload 共同排除；只有无拓扑信息的 `container.env.
 不敏感：含任意深度的 `cre.json` 及备份后缀、`*.service-account.json`、key/pem/p12/pfx/jks/
 keystore、`id_rsa*`/`id_ed25519*`/`id_ecdsa*`、环境文件、SSH 目录本身及后代、认证临时文件。
 这些规则在所有重包含之后统一排除；普通 `.pub` 公钥和 `*.service-account.json.example`
-不是新增凭据类别。非秘密示例与模板继续保留；这不是对任意
+不是新增凭据类别，但 `id_rsa*`/`id_ed25519*`/`id_ecdsa*` 的保守名称排除也包含对应的
+`id_*.pub`，不因其扩展名为 `.pub` 而重新包含。非秘密示例与模板继续保留；这不是对任意
 文件内容的秘密扫描。Dockerfile 使用 `verify-image-source-manifest`，先遍历实际 image
 source-tree 拒绝项目、凭据和 generated 路径，再校验源码 manifest；仅从 manifest 中省略
 文件不能让检查通过。generated 精确路径/前缀与三份 ignore 的最终排除对应，唯独保留
-`infra/docker/deployment-source-manifest.json` 作为 manifest 载体。17 个 live 运行时绑定无论
-普通文件还是软链接均不得进入镜像；模板中的 `99-output*`、`*.lock` 和 `finished-history`
+`infra/docker/deployment-source-manifest.json` 作为 manifest 载体。运行时链接由 setup 和
+activation 实际消费的共享 producer 表推导，包含 network-monitor、P2P、latest_yaml；
+不以历史 17 路径 fixture 当作完整清单。普通文件、指向合成项目的可解析链接及 dangling
+链接均须排除。同一 image-only host-state 词表生成三份 ignore 的最终拒绝块并驱动物理
+gate，包含 `.setup_manifest`、container/desired/runtime state、动态 DHCP hosts 与
+`*-sample`。named 子树的入口和后代均拒绝；generated `monitor/monitor.html`、reference-only
+子树及其 zip 不作为新增镜像源码。中性父目录不属于 manifest 成员；非项目的空
+`__pycache__` 壳仅为 directory-only residual，不允许以此豁免文件或链接。
+模板中的 `99-output*`、`*.lock` 和 `finished-history`
 也排除。唯一 lock 例外为仓库根 `requirements-container-top-level.lock`。live manifest
 生成同样排除这些名字，不能让合法 live 残留被纳入镜像源码身份。
 导入镜像核验也单独检查内嵌 source-tree，随后才比较挂载 live 源码。普通
 `verify-source-manifest` 保留 live DAY0 项目合同，不得拿镜像专用入口检查 live 项目树。
 
 Docker ignore 匹配以最小合成上下文的真实 COPY 成员为验收依据，不以 Python glob 推测。
+合成上下文的名字和目标字符串取自 producer 表，不读取 live target 内容；三入口 × 三种
+形态的实际 terminal 成员（普通文件和链接对象）扣除唯一 manifest 载体后，须同时等于
+package 生成的 manifest 路径集合与独立允许 controls 集合。额外成员即失败，不能重写基线。
 本机与 legacy/BuildKit 的证据边界、复现和清理见 `TC-REAL-IMAGE-CONTEXT-001`；缺失证据
 不得宣称准入。历史 image/export 在精确清点实际构建输入前保持潜在污染待核实状态，不能
 推断每个历史制品都已检查。重新构建、撤销发布或删除历史镜像须另行确认精确对象与授权。

@@ -8,6 +8,7 @@ import fnmatch
 import ipaddress
 import json
 import os
+import posixpath
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 import re
@@ -49,6 +50,124 @@ def image_credential_docker_patterns() -> tuple[str, ...]:
                           for char in pattern)
                   for pattern in IMAGE_CREDENTIAL_NAME_PATTERNS)
     return tuple("**/" + name for name in names) + ("**/.[sS][sS][hH]/**",)
+
+
+# Declarative producer authority: setup consumes these mappings to create live
+# links; activation consumes the published subset; image policy derives names
+# from the entire authority. Paths here never inspect a live project/target.
+SETUP_ZTP_MAPPINGS = (
+    ("config/cumulus/template/01-global.yaml", "01-global.yaml", "file"),
+    ("config/cumulus/template/02-devices_config.csv", "02-devices_config.csv", "file_csv"),
+    ("config/cumulus/template/91-devices.yaml", "99-output-eth/91-devices.yaml", "output"),
+    ("config/cumulus/template/99-output", "99-output-eth", "dir"),
+    ("config/nvos/template/01-global.yaml", "01-global.yaml", "file"),
+    ("config/nvos/template/02-devices_config.csv", "02-devices_config.csv", "file_csv"),
+    ("config/nvos/template/99-output-ib_nvl", "99-output-ib_nvl", "dir"),
+    ("config/isc-dhcp-server/01-global.yaml", "01-global.yaml", "file"),
+    ("config/isc-dhcp-server/02-subnet_config.csv", "02-dhcp-subnet_config.csv", "file"),
+    ("config/isc-dhcp-server/02-devices_config.csv", "02-devices_config.csv", "file_csv"),
+    ("config/isc-dhcp-server/dhcpd_eth.hosts", "99-output-dhcp/dhcpd_eth.hosts", "output"),
+    ("config/isc-dhcp-server/dhcpd_ib.hosts", "99-output-dhcp/dhcpd_ib.hosts", "output"),
+    ("config/isc-dhcp-server/dhcpd_nvl.hosts", "99-output-dhcp/dhcpd_nvl.hosts", "output"),
+    ("config/isc-dhcp-server/dhcpd.conf", "99-output-dhcp/dhcpd.conf", "output"),
+    ("config/isc-dhcp-server/dhcp-release-manifest.json", "99-output-dhcp/dhcp-release-manifest.json", "output"),
+    ("backup/02-devices_config.csv", "02-devices_config.csv", "file_csv"),
+    ("backup/yaml-backup", "99-output-backup", "dir"),
+)
+SETUP_WORKSPACE_INPUT_MAPPINGS = (
+    ("infra/01-global.yaml", "01-global.yaml", "file"),
+    ("infra/02-devices_config.csv", "02-devices_config.csv", "file_csv"),
+    ("monitor/01-global.yaml", "01-global.yaml", "file"),
+)
+P2P_INPUT_PATHS = (
+    "ztp/config/cumulus/template/P2P/p2p.xlsx",
+    "ztp/config/nvos/template/P2P/p2p.xlsx",
+    "ethernet/p2p.xlsx", "infiniband/p2p.xlsx", "nvlink/p2p.xlsx",
+)
+P2P_OUTPUT_PATHS = (
+    "ztp/config/cumulus/template/P2P/output-p2p",
+    "ztp/config/nvos/template/P2P/output-p2p",
+)
+P2P_AIR_PATH = "ztp/config/isc-dhcp-server/p2p-air.json"
+BRINGUP_OUTPUT_SPECS = tuple(
+    ("infiniband/bringup/" + tool + "/" + name, "99-output-ib_nvl/bringup/" + name)
+    for tool, name in (("ndr", "ndr-upgrade-logs"),
+                       ("xdr-initial-setup", "xdr-initial-setup-logs"),
+                       ("xdr-upgrade", "xdr-upgrade-logs"))
+)
+ANALYZER_INPUT_SPECS = (
+    ("ztp/config/cumulus/template/P2P/eth-info", "99-output-monitor/ethernet/eth-info"),
+    ("ztp/config/nvos/template/P2P/ib-info", "99-output-monitor/infiniband/ib-info"),
+)
+ANALYZER_OUTPUT_SPECS = (
+    ("monitor/99-output-p2p", "99-output-p2p"),
+    ("tools/lldp-analyze-tool/99-output-p2p", "99-output-p2p"),
+    ("tools/lldp-analyze-tool/99-output-monitor", "99-output-monitor"),
+    ("tools/ibdiagnet-analyze-tool/99-output-p2p", "99-output-p2p"),
+)
+NETWORK_MONITOR_SPECS = (
+    ("ethernet", "eth.csv", "eth-info", "spx-link"),
+    ("infiniband", "ib.csv", "ib-info", "ib-link"),
+    ("nvlink", "nvsw.csv", "nvsw-info", "nvsw-link"),
+)
+NETWORK_CSV_MAPPINGS = tuple((network + "/" + csv, "02-devices_config.csv")
+                             for network, csv, *_outputs in NETWORK_MONITOR_SPECS)
+NETWORK_INVENTORY_LINKS = tuple((network + "/monitor/" + csv, network + "/" + csv)
+                               for network, csv, *_outputs in NETWORK_MONITOR_SPECS)
+# (repository name, project target, optional repository-internal alias target).
+MONITOR_RUNTIME_MAPPINGS = (
+    ("monitor/02-devices_config.csv", "02-devices_config.csv", None),
+    ("ztp/status", "99-output-ztp", None),
+    ("monitor/ztp-status", "99-output-ztp", "ztp/status"),
+) + tuple(
+    (network + "/monitor/" + name, "99-output-monitor/" + network + "/" + name, None)
+    for network, _csv, *outputs in NETWORK_MONITOR_SPECS
+    for name in (*outputs, "cronjob.log")
+) + tuple(("monitor/" + network, "99-output-monitor/" + network, None)
+          for network, *_rest in NETWORK_MONITOR_SPECS)
+LATEST_YAML_SPECS = (("cumulus", "99-output"), ("nvos", "99-output-ib_nvl"))
+PUBLISHED_RUNTIME_FILE_PATHS = (
+    "ztp/ztp-bootstrap_oob.sh", "ztp/ztp-bootstrap_oobofoob.sh", "ztp/ztp.json",
+)
+
+
+def _runtime_relative_target(name, project_target, repository_target=None):
+    target = repository_target or "DAY0-Prepare/{project}/" + project_target
+    return posixpath.relpath(target, posixpath.dirname(name))
+
+
+def published_runtime_link_specs():
+    """Activation's live publication contract, derived from producer mappings."""
+    mappings = tuple((name, target, None) for name, target, _kind in SETUP_WORKSPACE_INPUT_MAPPINGS
+                     if name.startswith("monitor/"))
+    mappings += MONITOR_RUNTIME_MAPPINGS
+    mappings += tuple((name, target, None) for name, target in NETWORK_CSV_MAPPINGS)
+    mappings += tuple((name, "02-devices_config.csv", target) for name, target in NETWORK_INVENTORY_LINKS)
+    mappings += tuple((name, target, None) for name, target in ANALYZER_OUTPUT_SPECS
+                      if not name.startswith("tools/ibdiagnet-analyze-tool/"))
+    return tuple((name, _runtime_relative_target(name, target, alias), target)
+                 for name, target, alias in mappings)
+
+
+def runtime_link_specs():
+    """All fixed live link names and target templates; no image selector input.
+
+    Dynamic key/image names and project-internal pointers live under fully
+    denied families; the fixed outer latest_yaml pointer is included here.
+    P2P input/air targets use setup's canonical p2p.xlsx example (the chosen
+    source stem is variable in a live project, never needed to classify names).
+    """
+    specs = {name: target for name, target, _project in published_runtime_link_specs()}
+    project_mappings = [("ztp/" + name, target) for name, target, _kind in SETUP_ZTP_MAPPINGS]
+    project_mappings += [(name, target) for name, target, _kind in SETUP_WORKSPACE_INPUT_MAPPINGS]
+    project_mappings += list(BRINGUP_OUTPUT_SPECS + ANALYZER_INPUT_SPECS + ANALYZER_OUTPUT_SPECS)
+    project_mappings += [(name, "p2p.xlsx") for name in P2P_INPUT_PATHS]
+    project_mappings += [(name, "99-output-p2p") for name in P2P_OUTPUT_PATHS]
+    project_mappings += [(P2P_AIR_PATH, "99-output-p2p/p2p-air.json")]
+    specs.update((name, _runtime_relative_target(name, target)) for name, target in project_mappings)
+    specs.update(("ztp/config/" + platform + "/latest_yaml", "template/" + output + "/latest")
+                 for platform, output in LATEST_YAML_SPECS)
+    return tuple(sorted(specs.items()))
 
 
 class MacStringSafeLoader(yaml.SafeLoader):
@@ -476,6 +595,49 @@ NON_DEPLOYMENT_DIR_NAMES = frozenset({
     "node_modules",
 })
 REFERENCE_ONLY_SUBTREES = frozenset({"monitor/cabletracker-main"})
+
+# Image-only host state. Do not use this vocabulary to decide live transfers.
+# Each pattern denies its entry AND descendants, including symlink objects;
+# glob stars match one path component only. Dynamic producer families (keys,
+# images, generated output and optimize samples) are denied as entire families.
+IMAGE_MANIFEST_CARRIER = "infra/docker/deployment-source-manifest.json"
+IMAGE_HOST_STATE_PATHS = frozenset(name for name, _target in runtime_link_specs()) | frozenset(
+    PUBLISHED_RUNTIME_FILE_PATHS
+) | frozenset({
+    "infra/docker/infra-runtime.conf", "infra/docker/container.env",
+    "infra/docker/desired-state.json", "infra/docker/runtime-state.json",
+    "monitor/generate-monitor.log", "monitor/monitor.html", "ztp/.setup_manifest",
+    "infiniband/bringup/xdr-upgrade/ib.csv",
+    "infiniband/bringup/xdr-initial-setup/ib.csv",
+    "infiniband/bringup/xdr-initial-setup/p2p.xlsx",
+}) | frozenset(name + ".zip" for name in REFERENCE_ONLY_SUBTREES)
+IMAGE_HOST_STATE_SUBTREES = frozenset({
+    "Finished-projects", "infra/logs", "infiniband/bringup", "monitor/status",
+    "ztp/backup", "ztp/config/cumulus/template/.claude", "ztp/config/publickey",
+    "ztp/image", "tools/ib-tool-Jie", "tools/ibdiagnet-analyze-tool",
+}) | REFERENCE_ONLY_SUBTREES
+IMAGE_HOST_STATE_DYNAMIC_PATTERNS = (
+    "ztp/config/isc-dhcp-server/dhcpd_*.hosts", "ztp/optimize/*-sample",
+)
+
+
+def image_host_state_docker_patterns():
+    """Generate final denials, checked byte-for-byte in all three ignore files."""
+    patterns = sorted(IMAGE_HOST_STATE_PATHS | IMAGE_HOST_STATE_SUBTREES
+                      | frozenset(IMAGE_HOST_STATE_DYNAMIC_PATTERNS))
+    return tuple(rule for pattern in patterns for rule in (pattern, pattern + "/**"))
+
+
+def is_image_host_state_path(relative_name):
+    """Name-only predicate; never follow a live link or read project bytes."""
+    parts = relative_name.split("/")
+    for pattern in IMAGE_HOST_STATE_PATHS | IMAGE_HOST_STATE_SUBTREES | frozenset(IMAGE_HOST_STATE_DYNAMIC_PATTERNS):
+        expected = pattern.split("/")
+        if len(parts) >= len(expected) and all(fnmatch.fnmatchcase(value, glob)
+                                              for value, glob in zip(parts, expected)):
+            return True
+    return False
+
 ROOT_LOCAL_PLANNING_DIR_NAMES = frozenset({"outputs"})
 FINISHED_PROJECT_ROOT_NAME = "Finished-projects"
 FINISHED_HISTORY_DIR_NAME = "finished-history"

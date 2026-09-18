@@ -34,15 +34,15 @@ ALLOWED = (
     "requirements-container-top-level.lock",
     "DAY0-Prepare/template/laptop.pub",
 )
-# Independently transcribed live bindings from R-0132, not gate-derived values.
-RUNTIME_MEMBERS = (
-    "infra/01-global.yaml", "infra/02-devices_config.csv",
-    "monitor/01-global.yaml", "monitor/02-devices_config.csv", "monitor/generate-monitor.log",
-    "ethernet/eth.csv", "ethernet/p2p.xlsx", "ethernet/monitor/eth.csv",
-    "ethernet/monitor/cronjob.log", "infiniband/ib.csv", "infiniband/p2p.xlsx",
-    "infiniband/monitor/ib.csv", "infiniband/monitor/cronjob.log",
-    "nvlink/nvsw.csv", "nvlink/p2p.xlsx", "nvlink/monitor/nvsw.csv",
-    "nvlink/monitor/cronjob.log",
+# Fixture membership/target strings come from producer authority, never from
+# the image deny predicate. The permitted controls above remain independent.
+PRODUCER_CONTRACT = load_source("image_context_producers", ROOT / "tools/project_contract.py")
+RUNTIME_TARGETS = dict(PRODUCER_CONTRACT.runtime_link_specs())
+RUNTIME_MEMBERS = tuple(RUNTIME_TARGETS)
+RUNTIME_FORMS = ("regular", "resolving", "dangling")
+EMPTY_DENIED_DIRS = (
+    "DAY0-Prepare/template/empty/.sSh", "ztp/optimize/site-a-sample",
+    "infra/logs", "monitor/status",
 )
 DENIED = (
     "DAY0-Prepare/site-a/01-global.yaml", "DAY0-Prepare/site-a/notes.txt",
@@ -69,6 +69,11 @@ DENIED = (
     "DAY0-Prepare/template/private/uppercase/KEY.PEM", "monitor/mixed/SECRET.KEY",
     "DAY0-Prepare/template/private/key.P12", "tools/key.PFX",
     "DAY0-Prepare/template/private/key.JkS", "infra/key.KEYSTORE",
+    "infra/docker/container.env", "infra/docker/desired-state.json",
+    "infra/docker/runtime-state.json", "ztp/.setup_manifest",
+    "ztp/config/isc-dhcp-server/dhcpd_synthetic.hosts",
+    "monitor/generate-monitor.log", "monitor/monitor.html",
+    "monitor/cabletracker-main/fixture.js", "monitor/cabletracker-main.zip",
     "DAY0-Prepare/template/id_ed25519", "DAY0-Prepare/template/id_rsa.backup",
     "DAY0-Prepare/template/ID_ECDSA.old", "DAY0-Prepare/template/.ENV.dev",
     "DAY0-Prepare/template/.CONTROL-USERS.backup", "monitor/a.HTPASSWD.copy",
@@ -83,6 +88,7 @@ SECRET_BASENAMES = (
     "cre.json", "CrE.JsOn.BAK", "operator.SERVICE-ACCOUNT.JSON", "key.KEY", "key.PEM",
     "key.P12", "key.PFX", "key.JKS", "key.KEYSTORE", "ID_RSA.backup", "id_ed25519",
     "id_ecdsa.old", ".sSh", ".ENV", ".ENV.dev", ".CONTROL-USERS.backup", "a.HTPASSWD.copy",
+    "id_rsa.pub", "id_ed25519.pub", "id_ecdsa.pub",
 )
 PUBLIC_BASENAMES = (
     "laptop.pub", "service-account.json", "team.service-account.json.example",
@@ -97,21 +103,42 @@ def synthetic_tree(root):
         path.write_bytes(b"synthetic public marker\n")
 
 
-def live_shaped_tree(root, runtime_symlinks=False):
+def live_shaped_tree(root, runtime_form="regular"):
+    if runtime_form not in RUNTIME_FORMS:
+        raise AssertionError("unknown runtime fixture form")
     synthetic_tree(root)
-    for name in DENIED:
+    expected = set(ALLOWED) | set(DENIED)
+    for name in sorted(set(DENIED)):
         path = root / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        if runtime_symlinks and name in RUNTIME_MEMBERS:
-            path.symlink_to("synthetic-missing-runtime-target")
+        if runtime_form != "regular" and name in RUNTIME_TARGETS:
+            project = "site-a" if runtime_form == "resolving" else "missing-site"
+            path.symlink_to(RUNTIME_TARGETS[name].format(project=project))
         else:
             path.write_bytes(b"synthetic denied marker\n")
-    (root / "DAY0-Prepare/template/empty/.sSh").mkdir(parents=True)
+    if runtime_form == "resolving":
+        project_root = (root / "DAY0-Prepare/site-a").resolve()
+        for name in RUNTIME_MEMBERS:
+            target = (root / name).resolve(strict=False)
+            target.relative_to(project_root)  # fail before writes if the fixture escapes
+            if target.suffix:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if not target.exists():
+                    target.write_bytes(b"synthetic project marker\n")
+                expected.add(target.relative_to(root.resolve()).as_posix())
+            else:
+                target.mkdir(parents=True, exist_ok=True)
+        if not all((root / name).exists() for name in RUNTIME_MEMBERS):
+            raise AssertionError("resolving fixture contains a dangling producer binding")
+    if runtime_form == "dangling" and any((root / name).exists() for name in RUNTIME_MEMBERS):
+        raise AssertionError("dangling fixture contains a resolving producer binding")
+    for name in EMPTY_DENIED_DIRS:
+        (root / name).mkdir(parents=True, exist_ok=True)
     observed = {path.relative_to(root).as_posix() for path in root.rglob("*")
                 if path.is_file() or path.is_symlink()}
-    expected = set(ALLOWED) | set(DENIED)
     if observed != expected:
-        raise AssertionError(f"live fixture lost literal members: {sorted(expected - observed)}")
+        raise AssertionError(f"live fixture terminal mismatch: {sorted(expected ^ observed)}")
+    return expected
 
 
 def build_live_manifest(root):
@@ -132,15 +159,111 @@ def verify_cli(command, root, manifest):
 
 
 class ImageContextSafetyDirectTests(unittest.TestCase):
+    def test_every_declared_producer_binding_is_denied_independently_of_suffix(self):
+        activate = load_script("activate.py")
+        setup = load_source("image_context_setup", ROOT / "DAY0-Prepare/01-a-setup.py")
+        names = {path.as_posix() for path, _target, _project in activate.PUBLISHED_RUNTIME_LINKS}
+        names.update("ztp/" + name for name, _target, _kind in setup.MAPPINGS)
+        names.update(name for name, _target, _kind in setup.WORKSPACE_INPUT_MAPPINGS)
+        for mappings in (setup.BRINGUP_OUTPUT_MAPPINGS, setup.ANALYZER_INPUT_MAPPINGS,
+                         setup.ANALYZER_OUTPUT_MAPPINGS, setup._NET_CSV_LINKS):
+            names.update(Path(path).relative_to(ROOT).as_posix() for path, _target in mappings)
+        names.update(Path(path).relative_to(ROOT).as_posix()
+                     for path in setup.P2P_INPUT_LINKS + setup.P2P_OUTPUT_LINKS)
+        names.add(Path(setup.P2P_AIR_JSON_LINK).relative_to(ROOT).as_posix())
+        for pairs in (setup._monitor_inventory_link_pairs(), setup._monitor_link_paths(str(ROOT / "DAY0-Prepare/site-a"))):
+            names.update(Path(path).relative_to(ROOT).as_posix() for path, _target in pairs)
+        # Independent acceptance cases for the publication-pointer family.
+        names.update(("ztp/config/cumulus/latest_yaml", "ztp/config/nvos/latest_yaml"))
+        self.assertTrue(names.issubset(RUNTIME_MEMBERS), sorted(names - set(RUNTIME_MEMBERS)))
+        for name, form in product(sorted(names), ("file", "directory", "dangling")):
+            with self.subTest(name=name, form=form), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                synthetic_tree(root)
+                member = root / name
+                member.parent.mkdir(parents=True, exist_ok=True)
+                if form == "directory":
+                    member.mkdir()
+                elif form == "dangling":
+                    member.symlink_to("synthetic-missing-project-target")
+                else:
+                    member.write_bytes(b"synthetic runtime marker\n")
+                with self.assertRaisesRegex(activate.ActivationError, "forbidden image source member"):
+                    activate.verify_image_source_tree(root)
+
+    def test_host_state_generated_reference_and_excluded_subtree_entries_are_denied(self):
+        activate = load_script("activate.py")
+        names = (
+            "Finished-projects", "infra/docker/container.env", "infra/docker/desired-state.json",
+            "infra/docker/runtime-state.json", "ztp/status", "ztp/.setup_manifest",
+            "ztp/config/isc-dhcp-server/dhcpd_synthetic.hosts", "ztp/optimize/site-a-sample",
+            "monitor/monitor.html", "monitor/cabletracker-main", "monitor/cabletracker-main.zip",
+            "infra/logs", "infiniband/bringup", "monitor/status", "ztp/backup",
+            "ztp/config/cumulus/template/.claude", "ztp/config/publickey", "ztp/image",
+            "tools/ib-tool-Jie", "tools/ibdiagnet-analyze-tool",
+        )
+        for name, form in product(names, ("file", "directory", "dangling", "descendant")):
+            with self.subTest(name=name, form=form), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                synthetic_tree(root)
+                member = root / name
+                member.parent.mkdir(parents=True, exist_ok=True)
+                if form == "directory":
+                    member.mkdir()
+                elif form == "descendant":
+                    member.mkdir()
+                    (member / "unmanifested.opaque").write_bytes(b"synthetic nested marker\n")
+                elif form == "dangling":
+                    member.symlink_to("synthetic-missing-project-target")
+                else:
+                    member.write_bytes(b"synthetic host state\n")
+                with self.assertRaisesRegex(activate.ActivationError, "forbidden image source member"):
+                    activate.verify_image_source_tree(root)
+
+    def test_host_state_family_matching_preserves_neutral_prefix_neighbors(self):
+        for name in ("infra/logs-extra/source.py", "monitor/status-code.py",
+                     "monitor/cabletracker-mainland/source.py", "ztp/optimize/site-sample-extra/source.py",
+                     "ztp/optimize/neutral/site-sample/source.py", "infra/docker/container.env.example"):
+            with self.subTest(name=name):
+                self.assertFalse(PRODUCER_CONTRACT.is_image_host_state_path(name))
+
+    def test_shared_producer_contract_retains_independent_target_examples(self):
+        expected = {
+            "monitor/ethernet": "../DAY0-Prepare/{project}/99-output-monitor/ethernet",
+            "monitor/ztp-status": "../ztp/status",
+            "ethernet/monitor/eth.csv": "../eth.csv",
+            "ethernet/monitor/eth-info": "../../DAY0-Prepare/{project}/99-output-monitor/ethernet/eth-info",
+            "ztp/config/cumulus/latest_yaml": "template/99-output/latest",
+            "ztp/config/nvos/latest_yaml": "template/99-output-ib_nvl/latest",
+            "ztp/config/cumulus/template/P2P/output-p2p": "../../../../../DAY0-Prepare/{project}/99-output-p2p",
+            "ztp/config/nvos/template/P2P/ib-info": "../../../../../DAY0-Prepare/{project}/99-output-monitor/infiniband/ib-info",
+        }
+        for name, target in expected.items():
+            with self.subTest(name=name):
+                self.assertEqual(target, RUNTIME_TARGETS[name])
+
+    def test_image_host_state_ignore_block_is_generated_from_shared_vocabulary(self):
+        contract = load_source("image_context_contract", ROOT / "tools/project_contract.py")
+        self.assertTrue(hasattr(contract, "image_host_state_docker_patterns"))
+        expected = list(contract.image_host_state_docker_patterns())
+        for path in IGNORE_FILES:
+            lines = path.read_text().splitlines()
+            self.assertIn("# BEGIN generated image host-state denials", lines)
+            self.assertIn("# END generated image host-state denials", lines)
+            start = lines.index("# BEGIN generated image host-state denials")
+            end = lines.index("# END generated image host-state denials")
+            self.assertEqual(expected, lines[start + 1:end])
+            self.assertGreater(start, max(i for i, line in enumerate(lines) if line.startswith("!")))
+
     def test_live_fixture_preserves_every_literal_name_on_the_host_filesystem(self):
         expected = set(ALLOWED) | set(DENIED)
         # Case variants need different parent directories on default macOS;
         # overwriting an earlier marker is not mixed-case COPY coverage.
         self.assertEqual(len(expected), len({name.casefold() for name in expected}))
-        for symlinks in (False, True):
-            with self.subTest(symlinks=symlinks), tempfile.TemporaryDirectory() as directory:
+        for runtime_form in RUNTIME_FORMS:
+            with self.subTest(runtime_form=runtime_form), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
-                live_shaped_tree(root, symlinks)
+                expected = live_shaped_tree(root, runtime_form)
                 observed = {p.relative_to(root).as_posix() for p in root.rglob("*")
                             if p.is_file() or p.is_symlink()}
                 self.assertEqual(expected, observed)
@@ -163,7 +286,19 @@ class ImageContextSafetyDirectTests(unittest.TestCase):
                 for denied in FINAL_RUNTIME_DENIES:
                     self.assertIn(denied, rules)
                     self.assertGreater(rules.index(denied), broad_include)
+                self.assertIn("!requirements-container-top-level.lock", rules)
                 self.assertGreater(rules.index("!requirements-container-top-level.lock"), rules.index("**/*.lock"))
+
+    def test_ignore_change_rule_includes_management_key_pins(self):
+        manifest = json.loads((ROOT / "test_cases/script_test_manifest.json").read_text())
+        paths = {".dockerignore", "infra/docker/.dockerignore",
+                 "infra/docker/Dockerfile.dockerignore", "infra/docker/Dockerfile"}
+        matching = [rule for rule in manifest["path_rules"] if set(rule["paths"]) == paths]
+        self.assertEqual(1, len(matching))
+        self.assertTrue({
+            "test_cases.test_image_context_safety", "test_cases.test_ztp_container_runtime",
+            "test_cases.test_docker_management_ssh_key",
+        }.issubset(matching[0]["tests"]))
 
     def test_shared_credential_vocabulary_has_independent_positive_and_negative_cases(self):
         contract = load_source("image_context_contract", ROOT / "tools/project_contract.py")
@@ -190,16 +325,16 @@ class ImageContextSafetyDirectTests(unittest.TestCase):
 
     def test_live_manifest_excludes_all_forbidden_names_without_following_runtime_links(self):
         activate = load_script("activate.py")
-        for symlinks in (False, True):
-            with self.subTest(symlinks=symlinks), tempfile.TemporaryDirectory() as directory:
+        for runtime_form in RUNTIME_FORMS:
+            with self.subTest(runtime_form=runtime_form), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
-                live_shaped_tree(root, symlinks)
+                live_shaped_tree(root, runtime_form)
                 manifest = root / MANIFEST_MEMBER
                 payload = activate.write_image_source_manifest(root, manifest)
                 self.assertEqual(set(ALLOWED), {record["path"] for record in payload["files"]})
                 activate.verify_image_source_manifest(root, manifest)
                 for name in RUNTIME_MEMBERS:
-                    self.assertEqual(symlinks, (root / name).is_symlink())
+                    self.assertEqual(runtime_form != "regular", (root / name).is_symlink())
                     self.assertTrue(os.path.lexists(root / name))
 
     def test_runtime_member_symlinks_are_physically_rejected(self):
@@ -265,6 +400,26 @@ class ImageContextSafetyDirectTests(unittest.TestCase):
 
 
 class ImageContextSafetyWorkflowTests(unittest.TestCase):
+    def test_setup_real_monitor_and_latest_producers_consume_the_shared_contract(self):
+        setup = load_source("image_context_setup", ROOT / "DAY0-Prepare/01-a-setup.py")
+        project = ROOT / "DAY0-Prepare/site-a"
+        for name, target in setup._monitor_link_paths(str(project)) + setup._monitor_inventory_link_pairs():
+            relative = Path(name).relative_to(ROOT).as_posix()
+            self.assertIn(relative, RUNTIME_TARGETS)
+            self.assertEqual(RUNTIME_TARGETS[relative].format(project="site-a"),
+                             os.path.relpath(target, os.path.dirname(name)))
+        with mock.patch.object(setup, "_latest_cumulus_publish_dir", return_value="synthetic-cumulus-release"), \
+                mock.patch.object(setup, "_latest_nvos_publish_dir", return_value="synthetic-nvos-release"), \
+                mock.patch.object(setup, "_make_exact_link") as link:
+            setup._process_latest_yaml(str(project))
+        self.assertEqual(4, link.call_count)
+        outer = {Path(call.args[0]).relative_to(ROOT).as_posix():
+                 os.path.relpath(call.args[1], os.path.dirname(call.args[0]))
+                 for call in link.call_args_list if Path(call.args[0]).name == "latest_yaml"}
+        self.assertEqual({"ztp/config/cumulus/latest_yaml": "template/99-output/latest",
+                          "ztp/config/nvos/latest_yaml": "template/99-output-ib_nvl/latest"}, outer)
+        self.assertTrue(set(outer).issubset(RUNTIME_MEMBERS))
+
     def test_dockerfile_uses_image_only_gate_and_live_gate_allows_project_data(self):
         dockerfile = (DOCKER_ROOT / "Dockerfile").read_text()
         logical = re.sub(r"\\\n\s*", " ", dockerfile)
@@ -277,10 +432,10 @@ class ImageContextSafetyWorkflowTests(unittest.TestCase):
         clauses = [" ".join(clause.split()) for clause in gate_runs[0].split("&&")]
         self.assertIn("/opt/http-ztp/activate.py verify-image-source-manifest "
                       "--source-root " + copies[0] + " --manifest /opt/http-ztp/image-source.sha256", clauses)
-        for symlinks in (False, True):
-            with self.subTest(symlinks=symlinks), tempfile.TemporaryDirectory() as directory:
+        for runtime_form in RUNTIME_FORMS:
+            with self.subTest(runtime_form=runtime_form), tempfile.TemporaryDirectory() as directory:
                 root, exported = Path(directory) / "live", Path(directory) / "image"
-                live_shaped_tree(root, symlinks)
+                live_shaped_tree(root, runtime_form)
                 # Exercise the real package helper -> activate builder -> image/live
                 # CLI chain. Only filesystem roots change; no subprocess is mocked.
                 manifest = build_live_manifest(root)
@@ -301,7 +456,7 @@ class ImageContextSafetyWorkflowTests(unittest.TestCase):
                 self.assertEqual(manifest_before, manifest.read_bytes())
                 self.assertEqual(b"synthetic denied marker\n", (root / "DAY0-Prepare/site-a/01-global.yaml").read_bytes())
                 for name in RUNTIME_MEMBERS:
-                    self.assertEqual(symlinks, (root / name).is_symlink())
+                    self.assertEqual(runtime_form != "regular", (root / name).is_symlink())
 
     def test_preloaded_gate_checks_embedded_tree_not_mounted_live_tree(self):
         activate = load_script("activate.py")
@@ -340,11 +495,11 @@ class SyntheticDockerMembershipTests(unittest.TestCase):
         self.assertEqual(["docker"], re.findall(r"(?m)^Driver:\s+(\S+)\s*$", builder),
                          "use only the local daemon's built-in builder")
         self.assertEqual([context_name], re.findall(r"(?m)^Endpoint:\s+(\S+)\s*$", builder))
-        for ignore, symlinks in product(IGNORE_FILES, (False, True)):
-            with self.subTest(ignore=ignore, symlinks=symlinks), tempfile.TemporaryDirectory() as directory:
+        for ignore, runtime_form in product(IGNORE_FILES, RUNTIME_FORMS):
+            with self.subTest(ignore=ignore, runtime_form=runtime_form), tempfile.TemporaryDirectory() as directory:
                 base = Path(directory)
                 context, result = base / "context", base / "result"
-                live_shaped_tree(context, symlinks)
+                input_members = live_shaped_tree(context, runtime_form)
                 manifest = build_live_manifest(context)
                 manifest_before = manifest.read_bytes()
                 self.assertEqual(set(ALLOWED), {r["path"] for r in json.loads(manifest_before)["files"]})
@@ -365,9 +520,13 @@ class SyntheticDockerMembershipTests(unittest.TestCase):
                 observed = {path.relative_to(result).as_posix() for path in result.rglob("*")
                             if path.is_file() or path.is_symlink()}
                 self.assertEqual(set(ALLOWED) | {MANIFEST_MEMBER}, observed)
+                self.assertEqual({r["path"] for r in json.loads(manifest_before)["files"]},
+                                 observed - {MANIFEST_MEMBER})
                 self.assertFalse((result / "DAY0-Prepare/site-a").exists())
                 self.assertFalse((result / "DAY0-Prepare/template/empty/.sSh").exists())
                 self.assertFalse((result / "DAY0-Prepare/template/finished-history").exists())
+                for name in EMPTY_DENIED_DIRS:
+                    self.assertFalse(os.path.lexists(result / name), name)
                 verified = verify_cli("verify-image-source-manifest", result, result / MANIFEST_MEMBER)
                 self.assertEqual(0, verified.returncode, verified.stderr)
                 self.assertEqual(manifest_before, (result / MANIFEST_MEMBER).read_bytes())
@@ -375,9 +534,9 @@ class SyntheticDockerMembershipTests(unittest.TestCase):
                 print(json.dumps({
                     "ignore": ignore.relative_to(ROOT).as_posix(),
                     "ignore_sha256": hashlib.sha256(ignore.read_bytes()).hexdigest(),
-                    "runtime_form": "dangling-symlinks" if symlinks else "regular-files",
+                    "runtime_form": runtime_form,
                     "runtime_members": len(RUNTIME_MEMBERS), "observed": sorted(observed),
-                    "literal_input_members": len(set(ALLOWED) | set(DENIED)),
+                    "input_terminal_members": len(input_members),
                     "manifest_sha256": hashlib.sha256(manifest_before).hexdigest(),
                     "copy_returncode": completed.returncode, "image_gate_returncode": verified.returncode,
                 }, sort_keys=True), flush=True)

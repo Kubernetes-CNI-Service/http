@@ -383,6 +383,7 @@
         "DAY0-Prepare/13-unload.py"
       ],
       "tests": [
+        "test_cases.test_image_context_safety",
         "test_cases.test_ops_deployment_review",
         "test_cases.test_load_release_transaction",
         "test_cases.test_dhcp_switch_scope_preservation",
@@ -894,6 +895,7 @@
     {
       "id": "containerized_ztp_lifecycle",
       "members": [
+        "DAY0-Prepare/01-a-setup.py",
         ".dockerignore",
         "infra/docker/.dockerignore",
         "infra/docker/Dockerfile",
@@ -1382,7 +1384,8 @@
       ],
       "tests": [
         "test_cases.test_image_context_safety",
-        "test_cases.test_ztp_container_runtime"
+        "test_cases.test_ztp_container_runtime",
+        "test_cases.test_docker_management_ssh_key"
       ]
     },
     {

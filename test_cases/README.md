@@ -13,10 +13,15 @@ DAY0 最小重包含；镜像专用入口扫描物理目录，不能用 manifest
 文件的 path_rules 必须实际选中本模块；DAY0 重包含精确限定三个规则。共享凭据词表覆盖
 ASCII 大小写变体、备份、私钥容器及 SSH 私钥名字；模板 output/lock/history 不能被重包含。
 普通 live manifest 校验仍允许 DAY0 项目，并在生成时排除运行时与凭据名字。
-测试使用独立允许/拒绝文件名清单，包含 17 个 live 绑定的普通文件和 dangling symlink 形态，
+AM-7–AM-9 从 setup/activation 共用的 producer 表生成全部固定运行时绑定 fixture，并对实际
+producer 的名称/目标消费做覆盖断言；允许 controls 仍为独立清单。共享 image-only host-state
+词表生成三份 ignore 最终拒绝块并驱动物理 gate，拒绝 named 子树入口及后代、动态 sample、
+generated monitor HTML 和 reference-only 内容。测试覆盖普通文件、合成项目 resolving 与
+dangling symlink 三种形态，不把历史 17 路径清单视作完整性证明；
 不再用 Python glob 模拟 Docker。显式设置 `HTTP_TEST_SYNTHETIC_DOCKER=1` 时，仅把新建
 临时目录中的无害 marker、一份 ignore 文本与其 package/activate 生成的 manifest 送入
-本机 BuildKit 的 `FROM scratch / COPY`；三入口 × 两形态逐个比较真实导出成员，再执行
+本机 BuildKit 的 `FROM scratch / COPY`；三入口 × 三形态的 terminal 集合扣除唯一 manifest
+载体，须同时等于 package-generated 路径集和独立允许集合；named 子树空入口也必须消失。再执行
 physical + manifest gate。绝不把仓库、项目数据或凭据作为构建上下文。默认不执行 Docker，此项
 skip 是 `TC-REAL-IMAGE-CONTEXT-001` 的未执行证据，不是通过；legacy builder 另行验收。
 
@@ -113,7 +118,12 @@ M2 另外固定 kill#1→非回收退出观察→保留锚点的 kill#2→wait�
 same-session 晚加入子进程证明第二次信号不可省略。Linux waitid 必须同时携带 WNOWAIT/WNOHANG；
 Darwin 验证 kevent 身份、EV_ERROR 和晚注册 ESRCH 的正向 PID0 锚点，不能只认回显 NOTE_EXIT。
 所有观察/等待共用单一期限；不支持的平台与非默认 SIGCHLD 在 Popen 前拒绝，helper 必须是 sole
-reaper。异常路径仍在真实 reconcile 链证明资源关闭与无 key publication，回收后禁止再次组信号。
+reaper。成功启动窗口同样断言不调用 signal.signal；kqueue 的 timeout 参数不得超过共享期限剩余量，
+首个 SIGKILL 返回 EPERM 仍须经过退出观察与第二个 SIGKILL，首个 ESRCH 则以调用次数断言禁止
+后续组信号。reap 超时保留此前 cleanup 失败的异常 cause。helper 自身轮询上限 10ms，
+Popen.wait 的内部退避不是同一轮询承诺，但仍受同一期限约束。
+异常路径在真实 reconcile 的 pre-publication 链证明资源关闭与无 key publication；post-link
+验证失败可留下 canonical leaves，保留现场而不自动删除。回收后禁止再次组信号。
 
 本目录验证公共模块之间的静态合同和安全边界，适合每次代码同步前快速执行；它不替代
 管理服务器 load、Docker infra、AIR simulation 或真实设备闭环。用户流程以
