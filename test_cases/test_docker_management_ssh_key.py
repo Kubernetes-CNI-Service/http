@@ -1842,11 +1842,16 @@ class DockerManagementSshKeyWorkflowTests(unittest.TestCase):
     def test_private_pair_is_excluded_from_image_package_sync_diagnostics_and_evidence(self) -> None:
         for ignore_path in (
             ROOT / ".dockerignore",
+            ROOT / "infra/docker/.dockerignore",
             ROOT / "infra/docker/Dockerfile.dockerignore",
         ):
             rules = ignore_path.read_text(encoding="utf-8").splitlines()
-            self.assertIn("**/.ssh/**", rules)
-            self.assertIn("**/.[Ss][Ss][Hh]/**", rules)
+            # AM-6 shared case-insensitive vocabulary covers the directory
+            # entry as well as descendants, including an empty .ssh tree.
+            last_include = max(i for i, rule in enumerate(rules) if rule.startswith("!"))
+            for pattern in ("**/.[sS][sS][hH]", "**/.[sS][sS][hH]/**"):
+                self.assertIn(pattern, rules)
+                self.assertGreater(rules.index(pattern), last_include)
         private_paths = (
             "/root/.ssh/id_ed25519",
             "/var/lib/http-ztp-container/ssh/id_ed25519",
