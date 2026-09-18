@@ -63,10 +63,10 @@ DENIED = (
     "DAY0-Prepare/template/99-output-backup/notes.txt",
     "DAY0-Prepare/template/p2p/foo.lock",
     "DAY0-Prepare/template/finished-history/x.txt",
-    "DAY0-Prepare/template/CRE.JSON", "DAY0-Prepare/template/cre.json.bak",
+    "DAY0-Prepare/template/mixed/exact/CRE.JSON", "DAY0-Prepare/template/cre.json.bak",
     "DAY0-Prepare/template/mixed/CrE.JsOn.BAK",
-    "DAY0-Prepare/template/OPERATOR.SERVICE-ACCOUNT.JSON",
-    "DAY0-Prepare/template/private/KEY.PEM", "monitor/SECRET.KEY",
+    "DAY0-Prepare/template/mixed/service/OPERATOR.SERVICE-ACCOUNT.JSON",
+    "DAY0-Prepare/template/private/uppercase/KEY.PEM", "monitor/mixed/SECRET.KEY",
     "DAY0-Prepare/template/private/key.P12", "tools/key.PFX",
     "DAY0-Prepare/template/private/key.JkS", "infra/key.KEYSTORE",
     "DAY0-Prepare/template/id_ed25519", "DAY0-Prepare/template/id_rsa.backup",
@@ -107,6 +107,11 @@ def live_shaped_tree(root, runtime_symlinks=False):
         else:
             path.write_bytes(b"synthetic denied marker\n")
     (root / "DAY0-Prepare/template/empty/.sSh").mkdir(parents=True)
+    observed = {path.relative_to(root).as_posix() for path in root.rglob("*")
+                if path.is_file() or path.is_symlink()}
+    expected = set(ALLOWED) | set(DENIED)
+    if observed != expected:
+        raise AssertionError(f"live fixture lost literal members: {sorted(expected - observed)}")
 
 
 def build_live_manifest(root):
@@ -127,6 +132,19 @@ def verify_cli(command, root, manifest):
 
 
 class ImageContextSafetyDirectTests(unittest.TestCase):
+    def test_live_fixture_preserves_every_literal_name_on_the_host_filesystem(self):
+        expected = set(ALLOWED) | set(DENIED)
+        # Case variants need different parent directories on default macOS;
+        # overwriting an earlier marker is not mixed-case COPY coverage.
+        self.assertEqual(len(expected), len({name.casefold() for name in expected}))
+        for symlinks in (False, True):
+            with self.subTest(symlinks=symlinks), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                live_shaped_tree(root, symlinks)
+                observed = {p.relative_to(root).as_posix() for p in root.rglob("*")
+                            if p.is_file() or p.is_symlink()}
+                self.assertEqual(expected, observed)
+
     def test_three_ignore_files_pin_final_depth_independent_secret_denials(self):
         for path in IGNORE_FILES:
             with self.subTest(path=path):
@@ -359,6 +377,7 @@ class SyntheticDockerMembershipTests(unittest.TestCase):
                     "ignore_sha256": hashlib.sha256(ignore.read_bytes()).hexdigest(),
                     "runtime_form": "dangling-symlinks" if symlinks else "regular-files",
                     "runtime_members": len(RUNTIME_MEMBERS), "observed": sorted(observed),
+                    "literal_input_members": len(set(ALLOWED) | set(DENIED)),
                     "manifest_sha256": hashlib.sha256(manifest_before).hexdigest(),
                     "copy_returncode": completed.returncode, "image_gate_returncode": verified.returncode,
                 }, sort_keys=True), flush=True)

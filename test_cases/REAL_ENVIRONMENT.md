@@ -41,7 +41,10 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   已单独保留，未放宽任何文件成员断言。
 - 本机修订记录（2026-09-18）：独立 17 路径普通文件/软链接矩阵共六组，真实 COPY 成员与
   导出树 physical + manifest 校验均通过。首次发现 `finished-history/**` 留下空目录导致
-  六组 gate 拒绝；补充目录本身拒绝后重跑，保留失败与成功原始日志。此证据仍不关闭
+  六组 gate 拒绝；补充目录本身拒绝后重跑，保留失败与成功原始日志。
+  大小写 marker 使用不同父目录，先断言全部 75 个 literal 输入真实存在，防止 macOS
+  大小写别名合并；该 fixture 断言曾复现 75 对 71 的碰撞，修正后须重新测量 COPY。
+  最终矩阵证据不关闭
   legacy、Ubuntu 双架构正式镜像或生产服务门禁，exact candidate 与证据 hash 由双日志绑定。
 - 清理/风险：临时上下文和 local export 由 TemporaryDirectory 回收；不启动容器、不打业务 tag、
   不使用网络。可能留下本机仅含合成 marker 的 build cache；不得执行全局 prune。
