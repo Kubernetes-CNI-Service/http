@@ -37,7 +37,9 @@ sys.path.insert(0, os.fspath(HERE))
 TOOLS_DIRECTORY = HERE.parents[1] / "tools"
 sys.path.insert(0, os.fspath(TOOLS_DIRECTORY))
 import hostlock  # noqa: E402
-from project_contract import path_disposition, transfer_exclude_reason  # noqa: E402
+from project_contract import (  # noqa: E402
+    is_image_credential_name, path_disposition, transfer_exclude_reason,
+)
 
 
 DEFAULT_HTTP_ROOT = Path("/var/www/html")
@@ -1035,7 +1037,19 @@ def _source_record(source_root: Path, relative_name: str) -> dict:
     }
 
 
+def _image_runtime_or_credential_path(relative_name: str) -> bool:
+    if relative_name == CONTAINER_TOPLEVEL_LOCK_NAME:
+        return False
+    return any(
+        is_image_credential_name(part) or part.startswith("99-output")
+        or part.endswith(".lock") or part == "finished-history"
+        for part in relative_name.split("/")
+    )
+
+
 def _source_path_selected(relative_name: str) -> bool:
+    if _image_runtime_or_credential_path(relative_name):
+        return False
     if path_disposition(relative_name) != "production":
         return False
     if relative_name in IMAGE_SOURCE_EXCLUDED_PATHS:
@@ -1084,6 +1098,7 @@ def image_source_paths(source_root: Path) -> Tuple[str, ...]:
             dirnames[:] = sorted(
                 name for name in dirnames
                 if name not in {"__pycache__", ".git"}
+                and not _image_runtime_or_credential_path((relative_directory / name).as_posix())
                 and path_disposition(
                     (relative_directory / name).as_posix()
                 ) == "production"
@@ -1101,7 +1116,8 @@ def image_source_paths(source_root: Path) -> Tuple[str, ...]:
             )
             for name in sorted(filenames):
                 relative = (relative_directory / name).as_posix()
-                if transfer_exclude_reason(relative) is not None:
+                if (_image_runtime_or_credential_path(relative)
+                        or transfer_exclude_reason(relative) is not None):
                     continue
                 if _source_path_selected(relative):
                     selected.add(relative)
@@ -1140,12 +1156,7 @@ def verify_image_source_tree(source_root: Path) -> None:
             path = Path(directory) / name
             relative = path.relative_to(root).as_posix()
             parts = relative.split("/")
-            credential = (
-                name == "cre.json" or name.endswith(".service-account.json")
-                or name.endswith((".key", ".pem")) or name.casefold() == ".ssh"
-                or name == ".env" or name.startswith(".env.")
-                or name.startswith(".control-users.") or ".htpasswd" in name
-            )
+            credential_or_runtime = _image_runtime_or_credential_path(relative)
             project = (
                 parts[0] == "Finished-projects" or "finished-history" in parts
                 or (parts[0] == "DAY0-Prepare" and len(parts) >= 2
@@ -1157,7 +1168,7 @@ def verify_image_source_tree(source_root: Path) -> None:
                 and relative != "infra/docker/deployment-source-manifest.json"
             ) or any(relative.startswith(prefix)
                      for prefix in IMAGE_SOURCE_EXCLUDED_PREFIXES)
-            if credential or project or generated:
+            if credential_or_runtime or project or generated:
                 raise ActivationError(f"forbidden image source member: {relative}")
 
 

@@ -31,9 +31,10 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCKER_ROOT = ROOT / "infra/docker"
-PUBLISHED_DOCKER_README_SIZE = 39502
+# Reviewed AM-1..AM-6 documentation contract; all prior trust-boundary prose retained.
+PUBLISHED_DOCKER_README_SIZE = 40306
 PUBLISHED_DOCKER_README_SHA256 = (
-    "6b4cdc5cbb09380a2aa26cea8a0f834fb09d70ea8de52b9e9b8156682c5d4d44"
+    "66acb8cecc4563299d0b56d847eba41288da02da90704929b24ac4a70ea4e464"
 )
 
 
@@ -408,9 +409,13 @@ class ContainerArtifactContractTests(QuietContractTest):
                      if line and not line.startswith("#")]
             self.assertEqual(ignore_paths[0].read_bytes(), ignore_path.read_bytes())
             last_include = max(i for i, line in enumerate(rules) if line.startswith("!"))
-            for pattern in ("**/cre.json", "**/*.service-account.json",
-                            "**/.control-users.*", "**/*.htpasswd*",
-                            "**/.[Ss][Ss][Hh]/**"):
+            for pattern in (
+                "**/[cC][rR][eE].[jJ][sS][oO][nN]",
+                "**/*.[sS][eE][rR][vV][iI][cC][eE]-[aA][cC][cC][oO][uU][nN][tT].[jJ][sS][oO][nN]",
+                "**/.[cC][oO][nN][tT][rR][oO][lL]-[uU][sS][eE][rR][sS].*",
+                "**/*.[hH][tT][pP][aA][sS][sS][wW][dD]*",
+                "**/.[sS][sS][hH]", "**/.[sS][sS][hH]/**",
+            ):
                 with self.subTest(ignore=ignore_path, pattern=pattern):
                     self.assertIn(pattern, rules)
                     self.assertGreater(rules.index(pattern), last_include)
@@ -1230,8 +1235,8 @@ prepare_control_auth
         required_exclusions = (
             "infra/logs/**",
             "infra/docker/infra-runtime.conf",
-            "infra/docker/.env",
-            "infra/docker/.env.*",
+            "**/.[eE][nN][vV]",
+            "**/.[eE][nN][vV].*",
             "infra/docker/container.env",
             "infra/docker/desired-state.json",
             "infra/docker/runtime-state.json",
@@ -1243,10 +1248,10 @@ prepare_control_auth
             "ztp/status",
             "**/99-output*",
             "**/99-output*/**",
-            "**/.ssh/**",
-            "**/.[Ss][Ss][Hh]/**",
-            "**/*.key",
-            "**/*.pem",
+            "**/.[sS][sS][hH]",
+            "**/.[sS][sS][hH]/**",
+            "**/*.[kK][eE][yY]",
+            "**/*.[pP][eE][mM]",
             "**/*.lock",
         )
         for pattern in required_exclusions:

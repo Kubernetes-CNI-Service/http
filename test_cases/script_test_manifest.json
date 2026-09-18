@@ -463,6 +463,7 @@
     {
       "id": "container_ztp_runtime",
       "paths": [
+        "tools/project_contract.py",
         "infra/docker/*.py",
         "infra/docker/*.sh"
       ],
@@ -909,6 +910,7 @@
         "DAY0-Prepare/13-unload.py",
         "tools/_package_common.py",
         "tools/control-auth.py",
+        "tools/project_contract.py",
         "tools/deploy-shared-artifacts.py",
         "tools/deploy-upload-archive.py",
         "tools/deployment_lock.py",
@@ -1369,6 +1371,18 @@
         "test_cases.test_deployment_writer_lock",
         "test_cases.test_public_publication_contract",
         "test_cases.test_public_publication_workflow"
+      ]
+    },
+    {
+      "paths": [
+        ".dockerignore",
+        "infra/docker/.dockerignore",
+        "infra/docker/Dockerfile.dockerignore",
+        "infra/docker/Dockerfile"
+      ],
+      "tests": [
+        "test_cases.test_image_context_safety",
+        "test_cases.test_ztp_container_runtime"
       ]
     },
     {

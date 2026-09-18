@@ -420,10 +420,18 @@ sync-code 和 tar upload 共同排除；只有无拓扑信息的 `container.env.
 ### 镜像上下文与 live 项目边界（H1–H4）
 
 三份 `.dockerignore` 只重包含 DAY0 顶层 Python 脚本和中性模板，不重开整个 DAY0 目录。
-凭据文件名（含任意深度的 `cre.json`、`*.service-account.json`、key/pem、环境文件、SSH
-目录和认证临时文件）在所有重包含之后统一排除。非秘密示例与模板继续保留；这不是对任意
+凭据文件名由 `tools/project_contract.py` 的同一词表驱动 gate 和 Docker 规则，ASCII 大小写
+不敏感：含任意深度的 `cre.json` 及备份后缀、`*.service-account.json`、key/pem/p12/pfx/jks/
+keystore、`id_rsa*`/`id_ed25519*`/`id_ecdsa*`、环境文件、SSH 目录本身及后代、认证临时文件。
+这些规则在所有重包含之后统一排除；普通 `.pub` 公钥和 `*.service-account.json.example`
+不是新增凭据类别。非秘密示例与模板继续保留；这不是对任意
 文件内容的秘密扫描。Dockerfile 使用 `verify-image-source-manifest`，先遍历实际 image
-source-tree 拒绝项目/凭据，再校验源码 manifest；仅从 manifest 中省略文件不能让检查通过。
+source-tree 拒绝项目、凭据和 generated 路径，再校验源码 manifest；仅从 manifest 中省略
+文件不能让检查通过。generated 精确路径/前缀与三份 ignore 的最终排除对应，唯独保留
+`infra/docker/deployment-source-manifest.json` 作为 manifest 载体。17 个 live 运行时绑定无论
+普通文件还是软链接均不得进入镜像；模板中的 `99-output*`、`*.lock` 和 `finished-history`
+也排除。唯一 lock 例外为仓库根 `requirements-container-top-level.lock`。live manifest
+生成同样排除这些名字，不能让合法 live 残留被纳入镜像源码身份。
 导入镜像核验也单独检查内嵌 source-tree，随后才比较挂载 live 源码。普通
 `verify-source-manifest` 保留 live DAY0 项目合同，不得拿镜像专用入口检查 live 项目树。
 

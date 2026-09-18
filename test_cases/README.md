@@ -9,10 +9,15 @@
 
 `test_image_context_safety.py` 约束 H1–H4：三份 Docker ignore 的最终、任意深度凭据规则与
 DAY0 最小重包含；镜像专用入口扫描物理目录，不能用 manifest 的选择结果证明不存在项目或
-凭据文件。普通 live manifest 校验仍允许 DAY0 项目。测试使用独立允许/拒绝文件名清单，
+凭据文件。AM-1–AM-6 将 gate 的 generated 路径/前缀与最终 ignore 排除绑定，四个构建支持
+文件的 path_rules 必须实际选中本模块；DAY0 重包含精确限定三个规则。共享凭据词表覆盖
+ASCII 大小写变体、备份、私钥容器及 SSH 私钥名字；模板 output/lock/history 不能被重包含。
+普通 live manifest 校验仍允许 DAY0 项目，并在生成时排除运行时与凭据名字。
+测试使用独立允许/拒绝文件名清单，包含 17 个 live 绑定的普通文件和 dangling symlink 形态，
 不再用 Python glob 模拟 Docker。显式设置 `HTTP_TEST_SYNTHETIC_DOCKER=1` 时，仅把新建
-临时目录中的无害 marker 和一份 ignore 文本送入本机 BuildKit 的 `FROM scratch / COPY`，
-比较真实导出成员；绝不把仓库、项目数据或凭据作为构建上下文。默认不执行 Docker，此项
+临时目录中的无害 marker、一份 ignore 文本与其 package/activate 生成的 manifest 送入
+本机 BuildKit 的 `FROM scratch / COPY`；三入口 × 两形态逐个比较真实导出成员，再执行
+physical + manifest gate。绝不把仓库、项目数据或凭据作为构建上下文。默认不执行 Docker，此项
 skip 是 `TC-REAL-IMAGE-CONTEXT-001` 的未执行证据，不是通过；legacy builder 另行验收。
 
 Cumulus QoS、MLAG、snippet 与跨平台 workflow 共用 `module_loader.py`：只按对象身份移除

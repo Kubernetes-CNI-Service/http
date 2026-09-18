@@ -9,7 +9,7 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-IMAGE-CONTEXT-001 — 镜像 COPY 成员与物理树拒绝边界
 
-- 类型：integration / real-environment；对应 IMAGE-CONTEXT-SAFETY H1–H4。
+- 类型：integration / real-environment；对应 IMAGE-CONTEXT-SAFETY H1–H4 / AM-1–AM-6。
 - Status: OPEN / NOT RUN（legacy builder、Ubuntu 双架构正式镜像；本机最小合成 BuildKit 证据另记，不能代替准入）。
 - 自动化：`test_image_context_safety.py` 独立 literal ALLOWED/DENIED 清单、镜像专用 physical guard、
   Dockerfile → activate CLI、live 项目允许、preloaded 内嵌树检查。禁止从实现选择结果生成预期。
@@ -17,8 +17,12 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   context、缺少 buildx 必须失败，不回退真实仓库构建。不得提供私钥、项目输入或生产目录。
 - 本机步骤：显式执行 `HTTP_TEST_SYNTHETIC_DOCKER=1 python3 -B -m unittest -v
   test_cases.test_image_context_safety.SyntheticDockerMembershipTests`。测试临时生成无害文件名
-  marker，分别读取三份 ignore 规则；外置 Dockerfile 仅 `FROM scratch` 和 `COPY . /`。
-  本地输出成员必须精确等于 ALLOWED；任一 DAY0 项目或多层凭据名进入结果都失败。
+  marker，分别读取三份 ignore 规则；每份各测试 17 个 live 运行时绑定的普通文件和 dangling
+  symlink 形态，同时放入模板 `99-output*`、lock、history、多层/混合大小写凭据与空 `.ssh`。
+  真实 package helper → activate 生成该合成 live tree 的 manifest；外置 Dockerfile 仅
+  `FROM scratch` 和 `COPY . /`。本地输出文件/软链接成员必须精确等于独立 ALLOWED 加
+  `infra/docker/deployment-source-manifest.json`；空 `.ssh` 也不得保留。随后真实 activate CLI
+  必须通过 physical + manifest 检查，且 manifest 字节不变。任一额外成员都失败。
   BuildKit 专用 ignore 分支故意把 root ignore 设置为全排除，验证专用文件确实生效。
 - legacy：在支持 legacy builder 的专用本机复用同一合成目录与两份 root ignore 副本；使用
   `DOCKER_BUILDKIT=0`，记录 builder/engine/OS/架构、构建及导出退出码和实际成员清单。
@@ -29,11 +33,16 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   及验证日志必须独立绑定；本机合成 COPY 不证明正式依赖安装、服务或真实设备工作。
 - 证据：完整命令/退出码、三份 ignore 与 candidate SHA256、输入 literal 清单、实际导出清单、
   engine/buildx/平台身份、拒绝与正向结果。默认 unittest skip 明确是未执行，不是准入证据。
-- 本机记录（2026-09-17）：Docker Desktop Engine 29.4.2，buildx v0.33.0-desktop.1，内建
+- 历史本机记录（2026-09-17；仅旧 clean-shaped fixture，不证明上述 live-shaped 矩阵）：
+  Docker Desktop Engine 29.4.2，buildx v0.33.0-desktop.1，内建
   docker driver / BuildKit v0.29.0，Unix socket context `desktop-linux`；三个合成上下文的
   精确文件成员断言通过（1 test / 3 subtests）。原始证据由双日志绑定，不作为 legacy、Ubuntu
   双架构正式镜像或服务准入 PASS。上下文名选择错误、inspect 不支持 format 的两次前置失败
   已单独保留，未放宽任何文件成员断言。
+- 本机修订记录（2026-09-18）：独立 17 路径普通文件/软链接矩阵共六组，真实 COPY 成员与
+  导出树 physical + manifest 校验均通过。首次发现 `finished-history/**` 留下空目录导致
+  六组 gate 拒绝；补充目录本身拒绝后重跑，保留失败与成功原始日志。此证据仍不关闭
+  legacy、Ubuntu 双架构正式镜像或生产服务门禁，exact candidate 与证据 hash 由双日志绑定。
 - 清理/风险：临时上下文和 local export 由 TemporaryDirectory 回收；不启动容器、不打业务 tag、
   不使用网络。可能留下本机仅含合成 marker 的 build cache；不得执行全局 prune。
   历史 image/export 的潜在污染仍待逐对象清点，任何重建、删除或撤回另需精确授权。

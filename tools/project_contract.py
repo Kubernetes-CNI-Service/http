@@ -21,6 +21,35 @@ AIR_UNCONNECTED_ENDPOINT = "unconnected"
 AIR_OUTBOUND_ENDPOINT = "outbound"
 _MAC_ADDRESS = re.compile(r"^[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}$")
 
+# Image-only filename boundary. Keep generic public .pub keys and explicit
+# *.service-account.json.example files; private-key basenames include copies.
+# This is not a content classifier, nor the live project's transfer policy.
+IMAGE_CREDENTIAL_NAME_PATTERNS = (
+    "cre.json", "cre.json.*", "*.service-account.json",
+    "*.key", "*.pem", "*.p12", "*.pfx", "*.jks", "*.keystore",
+    "id_rsa*", "id_ed25519*", "id_ecdsa*", ".ssh", ".env", ".env.*",
+    ".control-users.*", "*.htpasswd*",
+)
+
+
+def is_image_credential_name(name: str) -> bool:
+    """Match one basename without opening or following its filesystem entry."""
+    normalized = name.lower()
+    return any(fnmatch.fnmatchcase(normalized, pattern)
+               for pattern in IMAGE_CREDENTIAL_NAME_PATTERNS)
+
+
+def image_credential_docker_patterns() -> tuple[str, ...]:
+    """Spell the same ASCII case-insensitive vocabulary for Docker's matcher.
+
+    Consumers pin these ordered final denials; actual Docker COPY, not this
+    conversion or Python globbing, proves context membership.
+    """
+    names = tuple("".join(f"[{char}{char.upper()}]" if "a" <= char <= "z" else char
+                          for char in pattern)
+                  for pattern in IMAGE_CREDENTIAL_NAME_PATTERNS)
+    return tuple("**/" + name for name in names) + ("**/.[sS][sS][hH]/**",)
+
 
 class MacStringSafeLoader(yaml.SafeLoader):
     """SafeLoader variant that keeps exact colon-form MACs as strings."""

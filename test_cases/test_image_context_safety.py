@@ -4,6 +4,8 @@ No Python glob emulates Docker's ignore engine. Static checks pin ordered
 rules; the opt-in synthetic BuildKit test measures COPY membership itself.
 An unexecuted Docker test is REAL_ENV debt, never a context-validation PASS.
 """
+import hashlib
+from itertools import product
 import json
 import os
 from pathlib import Path
@@ -30,6 +32,17 @@ ALLOWED = (
     "infra/docker/container.env.example", "ztp/fixture.py",
     "ethernet/fixture.py", "infiniband/fixture.py", "nvlink/fixture.py",
     "requirements-container-top-level.lock",
+    "DAY0-Prepare/template/laptop.pub",
+)
+# Independently transcribed live bindings from R-0132, not gate-derived values.
+RUNTIME_MEMBERS = (
+    "infra/01-global.yaml", "infra/02-devices_config.csv",
+    "monitor/01-global.yaml", "monitor/02-devices_config.csv", "monitor/generate-monitor.log",
+    "ethernet/eth.csv", "ethernet/p2p.xlsx", "ethernet/monitor/eth.csv",
+    "ethernet/monitor/cronjob.log", "infiniband/ib.csv", "infiniband/p2p.xlsx",
+    "infiniband/monitor/ib.csv", "infiniband/monitor/cronjob.log",
+    "nvlink/nvsw.csv", "nvlink/p2p.xlsx", "nvlink/monitor/nvsw.csv",
+    "nvlink/monitor/cronjob.log",
 )
 DENIED = (
     "DAY0-Prepare/site-a/01-global.yaml", "DAY0-Prepare/site-a/notes.txt",
@@ -46,11 +59,34 @@ DENIED = (
     "DAY0-Prepare/template/.control-users.recovery.synthetic",
     "infra/docker/control-users.htpasswd", "monitor/control-users.htpasswd.copy",
     "ztp/config/cumulus/template/01-global.yaml", "ztp/image/fixture.bin",
+    "DAY0-Prepare/template/99-output/91-devices.yaml",
+    "DAY0-Prepare/template/99-output-backup/notes.txt",
+    "DAY0-Prepare/template/p2p/foo.lock",
+    "DAY0-Prepare/template/finished-history/x.txt",
+    "DAY0-Prepare/template/CRE.JSON", "DAY0-Prepare/template/cre.json.bak",
+    "DAY0-Prepare/template/mixed/CrE.JsOn.BAK",
+    "DAY0-Prepare/template/OPERATOR.SERVICE-ACCOUNT.JSON",
+    "DAY0-Prepare/template/private/KEY.PEM", "monitor/SECRET.KEY",
+    "DAY0-Prepare/template/private/key.P12", "tools/key.PFX",
+    "DAY0-Prepare/template/private/key.JkS", "infra/key.KEYSTORE",
+    "DAY0-Prepare/template/id_ed25519", "DAY0-Prepare/template/id_rsa.backup",
+    "DAY0-Prepare/template/ID_ECDSA.old", "DAY0-Prepare/template/.ENV.dev",
+    "DAY0-Prepare/template/.CONTROL-USERS.backup", "monitor/a.HTPASSWD.copy",
+) + RUNTIME_MEMBERS
+FINAL_RUNTIME_DENIES = (
+    "**/99-output*", "**/99-output*/**", "**/*.lock",
+    "**/finished-history", "**/finished-history/**",
 )
-FINAL_DENIES = (
-    "**/cre.json", "**/*.service-account.json", "**/*.key", "**/*.pem",
-    "**/.env", "**/.env.*", "**/.[Ss][Ss][Hh]/**",
-    "**/.control-users.*", "**/*.htpasswd*",
+MANIFEST_MEMBER = "infra/docker/deployment-source-manifest.json"
+DAY0_INCLUDES = {"!DAY0-Prepare/*.py", "!DAY0-Prepare/template/", "!DAY0-Prepare/template/**"}
+SECRET_BASENAMES = (
+    "cre.json", "CrE.JsOn.BAK", "operator.SERVICE-ACCOUNT.JSON", "key.KEY", "key.PEM",
+    "key.P12", "key.PFX", "key.JKS", "key.KEYSTORE", "ID_RSA.backup", "id_ed25519",
+    "id_ecdsa.old", ".sSh", ".ENV", ".ENV.dev", ".CONTROL-USERS.backup", "a.HTPASSWD.copy",
+)
+PUBLIC_BASENAMES = (
+    "laptop.pub", "service-account.json", "team.service-account.json.example",
+    "container.env.example", "mapping.log", "cream.json", "key.pem.example",
 )
 
 
@@ -61,6 +97,35 @@ def synthetic_tree(root):
         path.write_bytes(b"synthetic public marker\n")
 
 
+def live_shaped_tree(root, runtime_symlinks=False):
+    synthetic_tree(root)
+    for name in DENIED:
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if runtime_symlinks and name in RUNTIME_MEMBERS:
+            path.symlink_to("synthetic-missing-runtime-target")
+        else:
+            path.write_bytes(b"synthetic denied marker\n")
+    (root / "DAY0-Prepare/template/empty/.sSh").mkdir(parents=True)
+
+
+def build_live_manifest(root):
+    package = load_source("image_context_package_common", ROOT / "tools/_package_common.py")
+    manifest = root / MANIFEST_MEMBER
+    with mock.patch.object(package, "ROOT", root), mock.patch.object(
+        package, "DEPLOYMENT_SOURCE_MANIFEST_BUILDER", DOCKER_ROOT / "activate.py"
+    ):
+        if package.write_deployment_source_manifest(manifest) != manifest:
+            raise AssertionError("real package helper returned a different manifest")
+    return manifest
+
+
+def verify_cli(command, root, manifest):
+    return subprocess.run([sys.executable, "-B", str(DOCKER_ROOT / "activate.py"), command,
+                           "--source-root", str(root), "--manifest", str(manifest)],
+                          capture_output=True, text=True)
+
+
 class ImageContextSafetyDirectTests(unittest.TestCase):
     def test_three_ignore_files_pin_final_depth_independent_secret_denials(self):
         for path in IGNORE_FILES:
@@ -69,13 +134,78 @@ class ImageContextSafetyDirectTests(unittest.TestCase):
                 rules = [line.strip() for line in path.read_text().splitlines()
                          if line.strip() and not line.startswith("#")]
                 self.assertEqual("**", rules[0])
-                self.assertNotIn("!DAY0-Prepare/", rules)
-                self.assertIn("!DAY0-Prepare/*.py", rules)
-                self.assertIn("!DAY0-Prepare/template/**", rules)
+                self.assertEqual(DAY0_INCLUDES, {r for r in rules if r.startswith("!DAY0-Prepare/")})
                 last_include = max(i for i, line in enumerate(rules) if line.startswith("!"))
-                for denied in FINAL_DENIES:
+                contract = load_source("image_context_contract", ROOT / "tools/project_contract.py")
+                for denied in contract.image_credential_docker_patterns():
                     self.assertIn(denied, rules)
                     self.assertGreater(rules.index(denied), last_include)
+                broad_include = max(i for i, r in enumerate(rules)
+                                    if r.startswith("!") and r != "!requirements-container-top-level.lock")
+                for denied in FINAL_RUNTIME_DENIES:
+                    self.assertIn(denied, rules)
+                    self.assertGreater(rules.index(denied), broad_include)
+                self.assertGreater(rules.index("!requirements-container-top-level.lock"), rules.index("**/*.lock"))
+
+    def test_shared_credential_vocabulary_has_independent_positive_and_negative_cases(self):
+        contract = load_source("image_context_contract", ROOT / "tools/project_contract.py")
+        for name in SECRET_BASENAMES:
+            with self.subTest(name=name):
+                self.assertTrue(contract.is_image_credential_name(name))
+        for name in PUBLIC_BASENAMES:
+            with self.subTest(name=name):
+                self.assertFalse(contract.is_image_credential_name(name))
+
+    def test_final_ignore_denials_cover_every_physical_gate_exclusion(self):
+        activate = load_script("activate.py")
+        forbidden = (set(activate.IMAGE_SOURCE_EXCLUDED_PATHS) - {MANIFEST_MEMBER}) | {
+            prefix + "**" for prefix in activate.IMAGE_SOURCE_EXCLUDED_PREFIXES
+        }
+        for path in IGNORE_FILES:
+            rules = [line.strip() for line in path.read_text().splitlines()
+                     if line.strip() and not line.startswith("#")]
+            last_include = max(i for i, line in enumerate(rules) if line.startswith("!"))
+            for name in sorted(forbidden):
+                with self.subTest(ignore=path, name=name):
+                    self.assertIn(name, rules)
+                    self.assertGreater(rules.index(name), last_include)
+
+    def test_live_manifest_excludes_all_forbidden_names_without_following_runtime_links(self):
+        activate = load_script("activate.py")
+        for symlinks in (False, True):
+            with self.subTest(symlinks=symlinks), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                live_shaped_tree(root, symlinks)
+                manifest = root / MANIFEST_MEMBER
+                payload = activate.write_image_source_manifest(root, manifest)
+                self.assertEqual(set(ALLOWED), {record["path"] for record in payload["files"]})
+                activate.verify_image_source_manifest(root, manifest)
+                for name in RUNTIME_MEMBERS:
+                    self.assertEqual(symlinks, (root / name).is_symlink())
+                    self.assertTrue(os.path.lexists(root / name))
+
+    def test_runtime_member_symlinks_are_physically_rejected(self):
+        activate = load_script("activate.py")
+        for name in RUNTIME_MEMBERS:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                synthetic_tree(root)
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.symlink_to("synthetic-missing-runtime-target")
+                with self.assertRaisesRegex(activate.ActivationError, "forbidden image source member"):
+                    activate.verify_image_source_tree(root)
+
+    def test_changed_context_support_files_select_the_membership_tests(self):
+        runner = load_source("image_context_runner", ROOT / "test_cases/run_related_tests.py")
+        manifest = runner.load_and_validate_manifest(ROOT, ROOT / "test_cases/script_test_manifest.json")
+        for relative in (".dockerignore", "infra/docker/.dockerignore", "infra/docker/Dockerfile.dockerignore",
+                         "infra/docker/Dockerfile"):
+            with self.subTest(path=relative):
+                selected = runner.select_tests(ROOT, manifest, [relative], runner.PendingChanges())
+                self.assertFalse(selected.full_suite, selected.reasons)
+                self.assertIn("test_cases.test_image_context_safety", selected.tests)
+                self.assertIn("test_cases.test_ztp_container_runtime", selected.tests)
 
     def test_physical_image_guard_rejects_unmanifested_project_and_secret_names(self):
         activate = load_script("activate.py")
@@ -105,7 +235,9 @@ class ImageContextSafetyDirectTests(unittest.TestCase):
 
     def test_even_empty_project_or_credential_directories_are_rejected(self):
         activate = load_script("activate.py")
-        for name in ("DAY0-Prepare/site-a", "DAY0-Prepare/template/.sSh", "Finished-projects"):
+        for name in ("DAY0-Prepare/site-a", "DAY0-Prepare/template/.sSh", "Finished-projects",
+                     "DAY0-Prepare/template/finished-history", "DAY0-Prepare/template/99-output",
+                     "DAY0-Prepare/template/foo.lock"):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 synthetic_tree(root)
@@ -116,36 +248,42 @@ class ImageContextSafetyDirectTests(unittest.TestCase):
 
 class ImageContextSafetyWorkflowTests(unittest.TestCase):
     def test_dockerfile_uses_image_only_gate_and_live_gate_allows_project_data(self):
-        package = load_source("image_context_package_common", ROOT / "tools/_package_common.py")
         dockerfile = (DOCKER_ROOT / "Dockerfile").read_text()
-        self.assertIn("activate.py verify-image-source-manifest", dockerfile)
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            synthetic_tree(root)
-            manifest = root / "infra/docker/deployment-source-manifest.json"
-            # Exercise the real package helper -> activate builder -> image/live
-            # CLI chain. Only filesystem roots change; no subprocess is mocked.
-            with mock.patch.object(package, "ROOT", root), mock.patch.object(
-                package, "DEPLOYMENT_SOURCE_MANIFEST_BUILDER", DOCKER_ROOT / "activate.py"
-            ):
-                self.assertEqual(manifest, package.write_deployment_source_manifest(manifest))
-            base = [sys.executable, "-B", str(DOCKER_ROOT / "activate.py")]
-            options = ["--source-root", str(root), "--manifest", str(manifest)]
-            clean_image = subprocess.run(
-                base + ["verify-image-source-manifest", *options], capture_output=True, text=True
-            )
-            self.assertEqual(0, clean_image.returncode, clean_image.stderr)
-            project = root / "DAY0-Prepare/site-a/01-global.yaml"
-            project.parent.mkdir()
-            project.write_bytes(b"synthetic legitimate live project\n")
-            manifest_before = manifest.read_bytes()
-            live = subprocess.run(base + ["verify-source-manifest", *options], capture_output=True, text=True)
-            image = subprocess.run(base + ["verify-image-source-manifest", *options], capture_output=True, text=True)
-            self.assertEqual(0, live.returncode, live.stderr)
-            self.assertEqual(2, image.returncode, image.stderr)
-            self.assertIn("forbidden image source member", image.stderr)
-            self.assertEqual(manifest_before, manifest.read_bytes())
-            self.assertEqual(b"synthetic legitimate live project\n", project.read_bytes())
+        logical = re.sub(r"\\\n\s*", " ", dockerfile)
+        copies = re.findall(r"(?m)^COPY \. (\S+)/$", logical)
+        self.assertEqual(["/opt/http-ztp/source-tree"], copies)
+        gate_runs = [line for line in logical.splitlines()
+                     if line.startswith("RUN ") and " verify-image-source-manifest " in line]
+        self.assertEqual(1, len(gate_runs))
+        self.assertNotRegex(gate_runs[0], r"\|\||;|(?<!&)&(?!&)")
+        clauses = [" ".join(clause.split()) for clause in gate_runs[0].split("&&")]
+        self.assertIn("/opt/http-ztp/activate.py verify-image-source-manifest "
+                      "--source-root " + copies[0] + " --manifest /opt/http-ztp/image-source.sha256", clauses)
+        for symlinks in (False, True):
+            with self.subTest(symlinks=symlinks), tempfile.TemporaryDirectory() as directory:
+                root, exported = Path(directory) / "live", Path(directory) / "image"
+                live_shaped_tree(root, symlinks)
+                # Exercise the real package helper -> activate builder -> image/live
+                # CLI chain. Only filesystem roots change; no subprocess is mocked.
+                manifest = build_live_manifest(root)
+                manifest_before = manifest.read_bytes()
+                self.assertEqual(set(ALLOWED), {r["path"] for r in json.loads(manifest_before)["files"]})
+                live = verify_cli("verify-source-manifest", root, manifest)
+                image = verify_cli("verify-image-source-manifest", root, manifest)
+                self.assertEqual(0, live.returncode, live.stderr)
+                self.assertEqual(2, image.returncode, image.stderr)
+                self.assertIn("forbidden image source member", image.stderr)
+                # Independently constructed allowed tree, not a Python simulation
+                # of Docker filtering. The opt-in test below measures actual COPY.
+                synthetic_tree(exported)
+                image_manifest = exported / MANIFEST_MEMBER
+                image_manifest.write_bytes(manifest_before)
+                clean_image = verify_cli("verify-image-source-manifest", exported, image_manifest)
+                self.assertEqual(0, clean_image.returncode, clean_image.stderr)
+                self.assertEqual(manifest_before, manifest.read_bytes())
+                self.assertEqual(b"synthetic denied marker\n", (root / "DAY0-Prepare/site-a/01-global.yaml").read_bytes())
+                for name in RUNTIME_MEMBERS:
+                    self.assertEqual(symlinks, (root / name).is_symlink())
 
     def test_preloaded_gate_checks_embedded_tree_not_mounted_live_tree(self):
         activate = load_script("activate.py")
@@ -180,18 +318,18 @@ class SyntheticDockerMembershipTests(unittest.TestCase):
         builder = subprocess.check_output([
             "docker", "--context", context_name, "buildx", "inspect", context_name,
         ], env=environment, text=True)
+        self.assertNotRegex(builder, r"(?m)^Error:", builder)
         self.assertEqual(["docker"], re.findall(r"(?m)^Driver:\s+(\S+)\s*$", builder),
                          "use only the local daemon's built-in builder")
         self.assertEqual([context_name], re.findall(r"(?m)^Endpoint:\s+(\S+)\s*$", builder))
-        for ignore in IGNORE_FILES:
-            with self.subTest(ignore=ignore), tempfile.TemporaryDirectory() as directory:
+        for ignore, symlinks in product(IGNORE_FILES, (False, True)):
+            with self.subTest(ignore=ignore, symlinks=symlinks), tempfile.TemporaryDirectory() as directory:
                 base = Path(directory)
                 context, result = base / "context", base / "result"
-                synthetic_tree(context)
-                for name in DENIED:
-                    path = context / name
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_bytes(b"synthetic denied marker\n")
+                live_shaped_tree(context, symlinks)
+                manifest = build_live_manifest(context)
+                manifest_before = manifest.read_bytes()
+                self.assertEqual(set(ALLOWED), {r["path"] for r in json.loads(manifest_before)["files"]})
                 # Never use the repository as Docker's context, nor copy any
                 # repository content other than this one ignore-rules file.
                 (context / ".dockerignore").write_bytes(ignore.read_bytes())
@@ -206,9 +344,24 @@ class SyntheticDockerMembershipTests(unittest.TestCase):
                     "--file", str(dockerfile), "--output", f"type=local,dest={result}", str(context),
                 ], capture_output=True, text=True, timeout=120, env=environment)
                 self.assertEqual(0, completed.returncode, completed.stderr)
-                observed = {path.relative_to(result).as_posix() for path in result.rglob("*") if path.is_file()}
-                self.assertEqual(set(ALLOWED), observed)
+                observed = {path.relative_to(result).as_posix() for path in result.rglob("*")
+                            if path.is_file() or path.is_symlink()}
+                self.assertEqual(set(ALLOWED) | {MANIFEST_MEMBER}, observed)
                 self.assertFalse((result / "DAY0-Prepare/site-a").exists())
+                self.assertFalse((result / "DAY0-Prepare/template/empty/.sSh").exists())
+                self.assertFalse((result / "DAY0-Prepare/template/finished-history").exists())
+                verified = verify_cli("verify-image-source-manifest", result, result / MANIFEST_MEMBER)
+                self.assertEqual(0, verified.returncode, verified.stderr)
+                self.assertEqual(manifest_before, (result / MANIFEST_MEMBER).read_bytes())
+                self.assertEqual(manifest_before, manifest.read_bytes())
+                print(json.dumps({
+                    "ignore": ignore.relative_to(ROOT).as_posix(),
+                    "ignore_sha256": hashlib.sha256(ignore.read_bytes()).hexdigest(),
+                    "runtime_form": "dangling-symlinks" if symlinks else "regular-files",
+                    "runtime_members": len(RUNTIME_MEMBERS), "observed": sorted(observed),
+                    "manifest_sha256": hashlib.sha256(manifest_before).hexdigest(),
+                    "copy_returncode": completed.returncode, "image_gate_returncode": verified.returncode,
+                }, sort_keys=True), flush=True)
 
 
 if __name__ == "__main__":
