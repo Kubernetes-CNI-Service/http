@@ -24,9 +24,9 @@
       "root-entrypoint-workflow": "NOT COVERED (requires Linux EUID 0 private namespace)"
     },
     "schema_version": 1,
-    "snapshot_sha256": "4ea87c28dfb18d56e59885c7ffd49e7797d349d3ff36c26503a04410833d64e8"
+    "snapshot_sha256": "333a4514052e64fc9c5b1234e4c318e61c2f17b87b989473353aa6696f82ead2"
   },
-  "impact_manifest_sha256": "c28374b241599ed25285f7285380aeaca8eb6406cc20921f66452013897f53e5",
+  "impact_manifest_sha256": "c4c612b91762b8c8769b01667896dc1dfe41035f5e64d06eb799990d519d37fc",
   "schema_version": 1,
   "scripts": {
     "DAY0-Prepare/01-a-setup.py": {
@@ -103,7 +103,7 @@
     },
     "infra/docker/activate.py": {
       "canonical": "infra/docker/activate.py",
-      "sha256": "3e50ef8973fea6356b1e2773647825b473c0a06f47398caf1d725c3bbb1e08d0"
+      "sha256": "b425c069d1f239b0aa68ba9b6e96a2e3a94e54858669cfe5bc84cef6b10807bf"
     },
     "infra/docker/deploy.sh": {
       "canonical": "infra/docker/deploy.sh",
@@ -127,7 +127,7 @@
     },
     "infra/docker/management_ssh_key.py": {
       "canonical": "infra/docker/management_ssh_key.py",
-      "sha256": "d055dd6754e629c7903131bfdbb23c708468bdd55c41f42f27855ad0b48635d3"
+      "sha256": "3c022480f7f899d6f10e14f1f2671b4a9966656234115513e64a0f199bf074c5"
     },
     "infra/infra-setup.sh": {
       "canonical": "infra/infra-setup.sh",
@@ -423,7 +423,7 @@
     },
     "tools/project_contract.py": {
       "canonical": "tools/project_contract.py",
-      "sha256": "d6535b0dca37b28c0806ec6d609971c198bc3c9b83a29d46b95825d67cfb11bc"
+      "sha256": "ef63bc36feedb1694fa0a020d8d8a343e42ee94d2f9e24d71806f7883cca250f"
     },
     "tools/rehydrate-finished.py": {
       "canonical": "tools/rehydrate-finished.py",
@@ -531,7 +531,7 @@
     }
   },
   "support": {
-    ".dockerignore": "d36070501a350732d9cead31efdd1b4fb9d9a3991c1fbeb8aa6c3b9b5d069e9c",
+    ".dockerignore": "118eb7b48faaecf6e529e1c132d1073dbca6ed1bd5e3272a083602ec52501379",
     ".gitattributes": "d7bfa1a8596479c7b28ac39bb094b2a389fc8dcf9c3cd923b66a95eff96d9f97",
     ".github/workflows/monitor-authority-root.yml": "e2149e9b78f70bff197973bebf8609cb923925064671a363072c39e8a7b37e38",
     ".github/workflows/tests.yml": "a0db50165094f82ef45b87d7dfe42c4f6ed91bb7fa7b4060b6f22a03a9e02335",
@@ -573,11 +573,11 @@
     "examples/public-project/02-devices_config.csv.example": "29be52a23309b415d8cbd9b314844aa4a4e6a0ad70f32b7bcce510a13fa39fd1",
     "examples/public-project/02-dhcp-subnet_config.csv.example": "f99e2e7e1ff7b7fb2089c1fe6bda42ac24394c0d04f89bfab3cc0dacd72b097c",
     "index.html": "10c6efe01148b08298618419e2a0a2a82c156737f0ec6c73548521d23ed26ade",
-    "infra/docker/.dockerignore": "d36070501a350732d9cead31efdd1b4fb9d9a3991c1fbeb8aa6c3b9b5d069e9c",
+    "infra/docker/.dockerignore": "118eb7b48faaecf6e529e1c132d1073dbca6ed1bd5e3272a083602ec52501379",
     "infra/docker/.gitignore": "03394eeaa859f29613573e39813103ea3c725ef58bfe1843732c976a2cf9f60f",
     "infra/docker/Dockerfile": "404407c6cf7db6ff403df68d27d1f46cb5a2e554e253ead26971a65ecc42c34c",
-    "infra/docker/Dockerfile.dockerignore": "d36070501a350732d9cead31efdd1b4fb9d9a3991c1fbeb8aa6c3b9b5d069e9c",
-    "infra/docker/README.md": "6b4cdc5cbb09380a2aa26cea8a0f834fb09d70ea8de52b9e9b8156682c5d4d44",
+    "infra/docker/Dockerfile.dockerignore": "118eb7b48faaecf6e529e1c132d1073dbca6ed1bd5e3272a083602ec52501379",
+    "infra/docker/README.md": "06e355f0e58d2dd9541d742e299923db340624551db8eff08aeacde14e54d9f6",
     "infra/docker/apache-ztp.conf": "616629333ac16e4bc0c076a499d98864959372b5a24bee3c0d4257c1aa9d15fb",
     "infra/docker/compose.yaml": "05903d374662f26e82ac10910f56d58c3fa8eb08528c40e2fd179dbd2fc72d2b",
     "infra/docker/container.env.example": "05dd7f35d66bd865550e14e3a91759ef906071679144988284ef25f80bbf1b8f",
@@ -587,7 +587,7 @@
     "infra/docker/supervisord.conf": "368f60a2510fa3126eef58098ce5287d70e4b30b662e421f29aa80c007957b01",
     "requirements-container-top-level.lock": "3532f5208b462243bab779b01eb4deb21638ac05a9390c17ac997ba8d7f24998",
     "requirements-dev.txt": "2047cfeb6e7d7c3b02380624cd212528fb8416cf3e76dd924d2e2cba8567a50a",
-    "test_cases/REAL_ENVIRONMENT.md": "567d48f88e7eca58420f21922ea3dfc3a48239401aadc91af335b682aa0830e9",
+    "test_cases/REAL_ENVIRONMENT.md": "693fe3d2cd6b5abdecb38c6c1548aa9696b37c3805051adede1b46e09d914bc5",
     "test_cases/audit_public_tree.py": "0426abb0b3ebe6f88ea63600771f2fc7574faf3584dbb39588f5e540f86b72de",
     "test_cases/module_loader.py": "ef1e9b44f0272209378788ed6682b8a6a68c95a76a6d545c001ddc4762471ecf",
     "test_cases/monitor_authority_root_warden.py": "3ff032300deb61d40e12f7eebf43f3915abb06cc241341b198cd4d04170df6f8",
@@ -655,7 +655,7 @@
     "test_cases.test_diagnostic_bundle": "7495a05868e12edfa0c994068810f0477e086e74b194927cfaa9748a36f1b346",
     "test_cases.test_docker_destructive_confirmation": "0a41cfc2e16992f8a3435db62e86672179ee94531f23fee36c60fafc0ad61c8b",
     "test_cases.test_docker_destructive_confirmation_workflow": "b470ede5b50261700ab5bed68e5abe7c5b5caa4f296b6eac270672fdf21d5b54",
-    "test_cases.test_docker_management_ssh_key": "b25655cd798fbf1ca0a3832ea9b8a6b9647ea2ea5ab71bf8abe1b41861b1baa8",
+    "test_cases.test_docker_management_ssh_key": "ea2d8808ffbefc1f2e85c49a452e37cb9a76d261b97eec895ce78068e9293f82",
     "test_cases.test_documentation_catalog": "42a260edb5ecbd538490039892a3513a700d0354e89803b542a036bc4d908a09",
     "test_cases.test_download_cli_contract": "22b5a53e42431fa1c886e41aa5292bbb119d6aaa811b5342507c340d601c200d",
     "test_cases.test_feedback_global_writeback": "1e907e02385425c106d3ffa0007103e032f9a6a7b5311148047ab9ac36430e9f",
@@ -672,7 +672,7 @@
     "test_cases.test_flow_release_platform_matrix": "8a1c4a152a389e02bd9cd4ab706b98a9a456e8b93c5be6e26cf74fee7bee9d1a",
     "test_cases.test_full_flow_integration": "f0029a79e910594c1d5630977754e92dae7ad61d49d6d6090a626e7644f473cf",
     "test_cases.test_ib_analysis_domain": "c896a53389d652a220835e0e1ccfbacd2bfb165b515c006fd21b82bd04ec1686",
-    "test_cases.test_image_context_safety": "3cd7e66402192a81837d6230639eb373dc73a74f458fa37083a880b8650b0bbd",
+    "test_cases.test_image_context_safety": "c1d6088a76b3a2aa8ab2ef5aa9c8ddcc02261409d4fbdb45fbdb4df514bd22b3",
     "test_cases.test_import_from_download_target": "d2296b575c77b2f7f0a59eb6c2d875ce71d89ac6e25029b468a08dbc13a76245",
     "test_cases.test_infra_check_and_manual_reset": "f12485c976471de81c6be125a2f4f2c8455deea2e50acd4d2611352ccc835143",
     "test_cases.test_load_release_transaction": "2fb0d50fa1169dedd67d038abf1d03ecc357212bd73dc8dea74b6dde1e7ed130",
@@ -717,7 +717,7 @@
     "test_cases.test_xlsx_zero_row_fail_closed": "35f8ce99b16df677082d97aa7c8b8bf64dbebc56b7d79627d05d342b14e3ed79",
     "test_cases.test_xlsx_zero_row_workflow": "2b8d7da1ed8eef6547f22ab229d716bca3f9e0723495257a8c65de2950463a2a",
     "test_cases.test_ztp_applied_receipt": "404c73ed46c042b35d1a6ed50a1f539c653ccab768df88a4f41ff6b460e6191e",
-    "test_cases.test_ztp_container_runtime": "25507baf9b4c5a1a541f6ccf86e5fe25957db6791b7c13e2e6b719709cfcddc2",
+    "test_cases.test_ztp_container_runtime": "f81327ce498d0e21dca6b48e42c24b1f3dd1fbc901805d179754bf3fabf5d5a8",
     "test_cases.test_ztp_group_handoff": "8db38c7ac6060ba28ec1530e02baac81a1156c86d53c3b0ba4cfd85d809caffd",
     "test_cases.test_ztp_group_handoff_display": "e12e5ceaa6d6c782c08b8cae1d2e8ec5c30d13c8cb120f4b705f78445cf839ce",
     "test_cases.test_ztp_http_identity_binding": "304c24916962898a69b2f09d185cbae7a2b56d18777c23905f3ffe04f4581951",
