@@ -7,12 +7,14 @@ import argparse
 import base64
 import ctypes
 from dataclasses import dataclass
+import errno
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import secrets
+import select
 import selectors
 import signal
 import stat
@@ -34,6 +36,20 @@ MAX_PRIVATE_KEY_BYTES = 64 * 1024
 MAX_PUBLIC_KEY_BYTES = 64 * 1024
 MAX_TOOL_OUTPUT_BYTES = 64 * 1024
 SSH_KEYGEN_TIMEOUT_SECONDS = 10
+PROCESS_CLEANUP_TIMEOUT_SECONDS = 2.0
+PROCESS_CLEANUP_POLL_SECONDS = 0.010
+if sys.platform == "darwin" and all(hasattr(select, name) for name in (
+    "kqueue", "kevent", "KQ_FILTER_PROC", "KQ_NOTE_EXIT", "KQ_EV_ADD",
+    "KQ_EV_ONESHOT", "KQ_EV_ERROR",
+)):
+    _EXIT_OBSERVER_KIND = "darwin"
+elif sys.platform.startswith("linux") and all(hasattr(os, name) for name in (
+    "waitid", "P_PID", "WEXITED", "WNOWAIT", "WNOHANG",
+    "CLD_EXITED", "CLD_KILLED", "CLD_DUMPED",
+)):
+    _EXIT_OBSERVER_KIND = "linux"
+else:
+    _EXIT_OBSERVER_KIND = "unsupported"
 STAGING_UMASK = 0o077
 AT_EMPTY_PATH = 0x1000
 _FINGERPRINT = re.compile(r"^SHA256:[A-Za-z0-9+/]{43}$")
@@ -433,27 +449,162 @@ def _decode_public(payload: bytes, label: str) -> tuple[tuple[bytes, bytes], str
     return (fields[0], fields[1]), fingerprint
 
 
-def _terminate_process(process: subprocess.Popen[bytes]) -> None:
+def _process_group_is_observable(pgid: int) -> bool:
+    """Probe the owned session's group; leader exit alone is not completion."""
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError as exc:
+        if exc.errno == errno.EPERM:
+            # Darwin also reports EPERM for an exited, unreaped group. It is
+            # uncertainty/presence, never absence: wait only to the deadline.
+            return True
+        raise ManagementKeyError("bounded cleanup cannot inspect process group") from exc
+    return True
+
+
+def _require_cleanup_authority() -> None:
+    if _EXIT_OBSERVER_KIND not in ("darwin", "linux"):
+        raise ManagementKeyError("bounded cleanup exit observer is unsupported")
+    if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
+        raise ManagementKeyError("bounded cleanup requires default SIGCHLD disposition")
+
+
+def _assert_unreaped_anchor(process: subprocess.Popen[bytes]) -> None:
+    # This private Popen has exactly one reaper: this helper. Other threads or
+    # external waitpid handlers reaping its child are outside that contract.
+    if (process.returncode is not None or type(process.pid) is not int or process.pid <= 1
+            or signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL):
+        raise ManagementKeyError("bounded cleanup child anchor is unavailable")
+
+
+def _cleanup_remaining(deadline: float, phase: str) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise ManagementKeyError(f"bounded cleanup deadline exceeded {phase}")
+    return remaining
+
+
+def _wait_child_exit_without_reaping(process: subprocess.Popen[bytes], deadline: float) -> None:
+    """Confirm exit while retaining the private child as the numeric-ID anchor."""
+    _require_cleanup_authority()
+    _assert_unreaped_anchor(process)
+    if _EXIT_OBSERVER_KIND == "linux":
+        while True:
+            _cleanup_remaining(deadline, "observing direct child exit")
+            try:
+                result = os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOWAIT | os.WNOHANG)
+            except OSError as exc:
+                raise ManagementKeyError("bounded cleanup exit observer failed") from exc
+            remaining = _cleanup_remaining(deadline, "observing direct child exit")
+            if result is not None:
+                if result.si_pid != process.pid or result.si_code not in (
+                    os.CLD_EXITED, os.CLD_KILLED, os.CLD_DUMPED,
+                ):
+                    raise ManagementKeyError("bounded cleanup exit observer returned an invalid event")
+                _assert_unreaped_anchor(process)
+                return
+            time.sleep(min(PROCESS_CLEANUP_POLL_SECONDS, remaining))
+
+    queue = None
+    try:
+        queue = select.kqueue()
+        registration = select.kevent(
+            process.pid, filter=select.KQ_FILTER_PROC,
+            flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT, fflags=select.KQ_NOTE_EXIT,
+        )
+        remaining = _cleanup_remaining(deadline, "observing direct child exit")
+        events = queue.control([registration], 1, remaining)
+        _cleanup_remaining(deadline, "observing direct child exit")
+        if len(events) != 1:
+            raise ManagementKeyError("bounded cleanup deadline exceeded observing direct child exit")
+        event = events[0]
+        if event.ident != process.pid or event.filter != select.KQ_FILTER_PROC:
+            raise ManagementKeyError("bounded cleanup exit observer returned an invalid event")
+        if event.flags & select.KQ_EV_ERROR:
+            # Registration echoes NOTE_EXIT even on error. ESRCH is ambiguous
+            # until our retained, sole-reaper/default-SIGCHLD PID anchor holds.
+            if event.data != errno.ESRCH:
+                raise ManagementKeyError("bounded cleanup exit observer registration failed")
+            _assert_unreaped_anchor(process)
+            try:
+                os.kill(process.pid, 0)
+            except OSError as exc:
+                raise ManagementKeyError("bounded cleanup child anchor is unavailable") from exc
+        elif not event.fflags & select.KQ_NOTE_EXIT:
+            raise ManagementKeyError("bounded cleanup exit observer returned an invalid event")
+        _assert_unreaped_anchor(process)
+        _cleanup_remaining(deadline, "observing direct child exit")
+    except OSError as exc:
+        raise ManagementKeyError("bounded cleanup exit observer failed") from exc
+    finally:
+        if queue is not None:
+            try:
+                queue.close()
+            except OSError as exc:
+                raise ManagementKeyError("bounded cleanup exit observer could not close") from exc
+
+
+def _signal_owned_group(process: subprocess.Popen[bytes]) -> bool:
+    _assert_unreaped_anchor(process)
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
-        pass
-    except OSError:
-        try:
-            process.kill()
-        except OSError:
-            pass
+        return False
+    except OSError as exc:
+        if exc.errno != errno.EPERM:
+            raise ManagementKeyError("bounded cleanup cannot terminate process group") from exc
+        # A Darwin zombie-only group can return EPERM. It remains unconfirmed.
+    return True
+
+
+def _terminate_process(process: subprocess.Popen[bytes]) -> None:
+    """Kill twice while anchored, then reap and require group ESRCH.
+
+    POSIX reserves a group ID only while it is nonempty; after anchor release
+    we only observe, never re-signal a numeric group that could have been reused.
+    This is not containment of descendants that deliberately change session.
+    """
+    deadline = time.monotonic() + PROCESS_CLEANUP_TIMEOUT_SECONDS
+    cleanup_error = None
     try:
-        process.wait(timeout=2)
+        _require_cleanup_authority()
+        _assert_unreaped_anchor(process)
+        _cleanup_remaining(deadline, "terminating process group")
+        if _process_group_is_observable(process.pid) and _signal_owned_group(process):
+            _wait_child_exit_without_reaping(process, deadline)
+            _cleanup_remaining(deadline, "terminating process group")
+            _signal_owned_group(process)
+    except ManagementKeyError as exc:
+        cleanup_error = exc
+        # Abort path: no second group signal on an unconfirmed exit. Reap our
+        # direct child where possible, without Popen.kill/poll's implicit reap.
+        if time.monotonic() < deadline:
+            try:
+                _assert_unreaped_anchor(process)
+                os.kill(process.pid, 0)
+                os.kill(process.pid, signal.SIGKILL)
+            except (OSError, ManagementKeyError):
+                pass
+    try:
+        process.wait(timeout=max(0.0, deadline - time.monotonic()))
     except subprocess.TimeoutExpired as exc:
-        try:
-            process.kill()
-        except OSError:
-            pass
-        try:
-            process.wait(timeout=2)
-        except subprocess.TimeoutExpired as final:
-            raise ManagementKeyError("bounded subprocess could not be reaped") from final
+        raise ManagementKeyError("bounded cleanup deadline exceeded reaping direct child") from exc
+    except OSError as exc:
+        raise ManagementKeyError("bounded cleanup could not reap direct child") from exc
+    while True:
+        if time.monotonic() >= deadline:
+            raise ManagementKeyError("bounded cleanup deadline exceeded observing process group")
+        observable = _process_group_is_observable(process.pid)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ManagementKeyError("bounded cleanup deadline exceeded observing process group")
+        if not observable:
+            if cleanup_error is not None:
+                raise cleanup_error
+            return
+        time.sleep(min(PROCESS_CLEANUP_POLL_SECONDS, remaining))
 
 
 def _run_bounded_command(
@@ -471,6 +622,7 @@ def _run_bounded_command(
         raise ManagementKeyError("bounded command argv is invalid")
     if working_directory_fd is not None and working_directory_fd not in pass_fds:
         raise ManagementKeyError("held working-directory descriptor must be passed explicitly")
+    _require_cleanup_authority()
 
     def enter_held_working_directory() -> None:
         if working_directory_fd is not None:

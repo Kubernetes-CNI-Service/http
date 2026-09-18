@@ -834,6 +834,22 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   fsync 与 no-replace 冲突。确认失败保持目标未覆盖、子进程与 FD 全部回收。向 project `.ssh` 植入唯一
   sentinel，实际执行 upload/package、project image、sync exclude、public audit 与 diagnostics；所有
   archive/member/output/evidence 都不得出现 sentinel、固定私钥路径或私有内容。
+- PK1 清理完成：在同一 disposable Linux root fixture 上保留原 held-pipe 子进程断言，固定重复
+  100 次并保存全部结果。启动前要求 SIGCHLD=SIG_DFL，helper 是私有 Popen 的 sole reaper；不得
+  自行改变 disposition。Linux WEXITED|WNOWAIT|WNOHANG waitid 在同一期限内观察退出，不能
+  poll/wait/communicate/waitpid 提前回收锚点；缺少平台接口在启动前拒绝。增加真实 same-session
+  晚加入子进程：kill#1 后、未回收锚点仍在时加入 leader group，确认 kill#2 真正终止它，之后才 wait。
+  保存两个组信号、非回收退出事件、reap、最终 signal0 ESRCH 的顺序证据。macOS 对照还验证
+  kqueue 的 exact ident/filter/EV_ERROR 与晚注册 ESRCH+正向 PID0 锚点，以及 zombie-only 组
+  kill#2 返回 EPERM 后仍须完成 reap+ESRCH。错误事件/锚点丢失/过期时禁止第二次组信号。
+  确认父进程已退出但后代仍持有 pipe 时，超时后直接子进程已 wait、整个
+  owned process group 的 signal0 返回 ESRCH；观察退出、两次信号、wait 与 10ms 轮询共用最多 2 秒期限。EPERM 是未确认，
+  不能算 group 消失；持续 EPERM/group 可见至期限，或其它观察错误，都必须报 bounded-cleanup
+  错误，同时证明 selector/pipes 关闭且未发布完整 canonical
+  key pair。macOS fixed100 仅证明本机进程语义，不替代本 Linux/root 门禁；不因失败增加等待阈值、
+  跳过原断言或反复跑到绿色。清理仅限本 fixture 的已确认 PID/group，保留失败证据，不碰其它进程。
+  group SIGKILL 返回 ESRCH 后不再发组信号；锚点回收后亦只观察，不向可能复用的数字 PGID
+  发信号。POSIX 只在 group 非空期间保留 PGID；此保证不覆盖主动切换 session 的后代。
 - R1-D 边界：正式 fault matrix 必须证明 root:root、`0700`、随机命名的 generation stage 只由
   `hostlock` 串行化的官方 writer 使用；在 pre-publication、两次 leaf publication 之间和
   pre-cleanup 分别替换 private/public stage leaf，并注入 stage directory rebind、unexpected child、

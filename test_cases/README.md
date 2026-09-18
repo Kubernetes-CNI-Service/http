@@ -104,6 +104,17 @@ fail closed，`--check --require-full`、`--list` 与 `--list-suites` 也不能�
 
 ## 在整体架构中的位置
 
+`test_docker_management_ssh_key.py` 同时覆盖固定管理密钥的 direct 与多脚本 lifecycle workflow。
+进程清理的 group-observer 案例将 ESRCH 与 EPERM/EIO/EACCES 分开：只有 ESRCH 是完成，EPERM
+只允许在原有单一 2 秒期限内继续确认，其它错误立即 fail closed。持续未确认的实际 reconcile
+失败路径必须在同一案例中证明 selector/pipes 关闭且未发布 canonical key pair。原有真实
+endless/oversize/held-pipe 断言不放宽；单项通过不代表 fixed100、全量或 Linux/root 门禁已完成。
+M2 另外固定 kill#1→非回收退出观察→保留锚点的 kill#2→wait→最终 ESRCH 顺序，并使用真实
+same-session 晚加入子进程证明第二次信号不可省略。Linux waitid 必须同时携带 WNOWAIT/WNOHANG；
+Darwin 验证 kevent 身份、EV_ERROR 和晚注册 ESRCH 的正向 PID0 锚点，不能只认回显 NOTE_EXIT。
+所有观察/等待共用单一期限；不支持的平台与非默认 SIGCHLD 在 Popen 前拒绝，helper 必须是 sole
+reaper。异常路径仍在真实 reconcile 链证明资源关闭与无 key publication，回收后禁止再次组信号。
+
 本目录验证公共模块之间的静态合同和安全边界，适合每次代码同步前快速执行；它不替代
 管理服务器 load、Docker infra、AIR simulation 或真实设备闭环。用户流程以
 根目录 `USER_MANUAL.md` 为准，失败时再回到对应模块 README 定位接口。

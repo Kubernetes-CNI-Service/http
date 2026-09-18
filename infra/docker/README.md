@@ -119,6 +119,21 @@ RSA、加密 key、public/private 不匹配或两边 fingerprint 不同都会 fa
 image 与诊断/evidence 都排除任意大小写的 `.ssh` 目录和 private key 内容，输出只允许 bounded
 action 与 fingerprint，不包含 private bytes。
 
+helper 遇到 keygen timeout、输出超限或捕获初始化失败时，会先终止自己创建的 process group，
+保留直接子进程的未回收锚点，确认其已退出后再发送第二次 group SIGKILL，随后才 wait 回收并
+确认整个 group 的 signal0 返回 ESRCH。父进程先退出不等于后代已消失。退出观察、两次信号、
+wait 与 group 检查共用最长 2 秒的单一 monotonic deadline，每次最多间隔 10ms 检查，不重置期限。
+helper 必须是私有 Popen 的 sole reaper；启动前要求 SIGCHLD=SIG_DFL，绝不修改其 disposition。
+模块导入时固定平台观察器：Linux 用 WEXITED|WNOWAIT|WNOHANG 的 waitid；Darwin 用 kqueue 的
+PROC/NOTE_EXIT，验证 exact ident/filter 且 EV_ERROR 为零。Darwin 晚注册返回 EV_ERROR/ESRCH
+时，只有上述未回收锚点、sole reaper、默认 SIGCHLD 均成立且 kill(child_pid, 0) 成功才可认定已退出；
+不能仅因回显 NOTE_EXIT 就继续。平台缺少接口在启动前拒绝，其它观察错误或过期事件不得触发
+第二次 group 信号。group SIGKILL 返回 EPERM 仍为待确认，返回 ESRCH 后不再发送 group 信号；
+只有最终 signal0 的 ESRCH 是完成，持续 EPERM/group 可见至期限或其它错误均 fail closed。
+异常离开前仍关闭观察队列、selector/pipes，不发布完整 key pair、不继续 container lifecycle。
+POSIX 仅在 group 非空期间保留 PGID；回收锚点后只观察、不再向可能复用的数字 PGID 发信号。
+这里只处理自己的受管 group，不扫描其它进程，也不声称能围堵主动切换 session 的后代。
+
 该保证的 trust boundary 是由 `hostlock` 串行化的官方 writer，以及 root:root、`0700`、随机命名的
 generation staging 目录。helper 会在 pre-publication、两次 leaf publication 之间和 pre-cleanup
 重验 held stage 的 exact set 与 identity。Linux 没有 conditional unlink-by-inode API；因此

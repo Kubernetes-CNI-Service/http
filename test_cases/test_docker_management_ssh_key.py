@@ -19,6 +19,7 @@ import json
 import os
 from pathlib import Path
 import re
+import select
 import signal
 import shutil
 import socket
@@ -1172,6 +1173,591 @@ class DockerManagementSshKeyDirectTests(unittest.TestCase):
             child_pid = int(pid_file.read_text(encoding="ascii"))
             with self.assertRaises(ProcessLookupError):
                 os.kill(child_pid, 0)
+
+    def test_cleanup_authority_is_checked_before_launch_and_never_changes_sigchld(self) -> None:
+        helper = self.helper()
+        for backend, disposition, pattern in (
+            ("unsupported", signal.SIG_DFL, "exit observer.*unsupported"),
+            ("darwin", signal.SIG_IGN, "SIGCHLD"),
+            ("darwin", lambda *_args: None, "SIGCHLD"),
+        ):
+            with self.subTest(backend=backend, disposition=disposition), \
+                 mock.patch.object(helper, "_EXIT_OBSERVER_KIND", backend, create=True), \
+                 mock.patch.object(helper.signal, "getsignal", return_value=disposition), \
+                 mock.patch.object(helper.signal, "signal") as change_disposition, \
+                 mock.patch.object(helper.subprocess, "Popen") as launch:
+                with self.assertRaisesRegex(helper.ManagementKeyError, pattern):
+                    helper._run_bounded_command(["/usr/bin/true"])
+                launch.assert_not_called()
+                change_disposition.assert_not_called()
+
+    def test_native_exit_observer_preserves_running_and_exited_child_anchor(self) -> None:
+        helper = self.helper()
+        for already_exited in (False, True):
+            with self.subTest(already_exited=already_exited):
+                argv = ["/usr/bin/true"] if already_exited else ["/bin/sleep", "0.03"]
+                child = subprocess.Popen(argv, start_new_session=True)
+                try:
+                    if already_exited:
+                        time.sleep(0.03)
+                    helper._wait_child_exit_without_reaping(child, time.monotonic() + 1.0)
+                    self.assertIsNone(child.returncode)
+                    os.kill(child.pid, 0)
+                finally:
+                    child.wait(timeout=2)
+
+    def test_exit_observer_rejects_reaped_anchor(self) -> None:
+        helper = self.helper()
+        child = subprocess.Popen(["/usr/bin/true"], start_new_session=True)
+        child.wait(timeout=2)
+        with self.assertRaisesRegex(helper.ManagementKeyError, "anchor"):
+            helper._wait_child_exit_without_reaping(child, time.monotonic() + 1.0)
+
+    @unittest.skipUnless(sys.platform == "darwin", "Darwin kevent error contract")
+    def test_darwin_exit_observer_checks_error_identity_deadline_and_closes_queue(self) -> None:
+        helper = self.helper()
+        pid = 123456
+        def event(**changes):
+            fields = dict(ident=pid, filter=select.KQ_FILTER_PROC, flags=0,
+                          fflags=select.KQ_NOTE_EXIT, data=0)
+            fields.update(changes)
+            return SimpleNamespace(**fields)
+
+        cases = (
+            ("wrong-pid", [event(ident=pid + 1)], None, "event"),
+            ("wrong-filter", [event(filter=select.KQ_FILTER_READ)], None, "event"),
+            ("missing-exit", [event(fflags=0)], None, "event"),
+            ("echoed-exit-on-error", [event(flags=select.KQ_EV_ERROR, data=errno.EIO)], None, "observer"),
+            ("registration-denied", PermissionError(errno.EACCES, "fixture"), None, "observer"),
+            ("lost-anchor", [event(flags=select.KQ_EV_ERROR, data=errno.ESRCH)],
+             ProcessLookupError(errno.ESRCH, "fixture"), "anchor"),
+            ("empty-event-timeout", [], None, "deadline"),
+        )
+        for label, result, pid_error, pattern in cases:
+            with self.subTest(case=label):
+                queue = mock.Mock()
+                if isinstance(result, BaseException):
+                    queue.control.side_effect = result
+                else:
+                    queue.control.return_value = result
+                child = SimpleNamespace(pid=pid, returncode=None)
+                with mock.patch.object(helper.select, "kqueue", return_value=queue), \
+                     mock.patch.object(helper.os, "kill", side_effect=pid_error), \
+                     self.assertRaisesRegex(helper.ManagementKeyError, pattern):
+                    helper._wait_child_exit_without_reaping(child, time.monotonic() + 1.0)
+                queue.close.assert_called_once()
+
+    def test_linux_exit_observer_uses_nonblocking_wnowait_and_one_deadline(self) -> None:
+        helper = self.helper()
+        child = SimpleNamespace(pid=123456, returncode=None)
+        clock_value = [100.0]
+        sleeps = []
+        def sleep(delay):
+            self.assertGreater(delay, 0)
+            self.assertEqual(min(0.010, 100.020 - clock_value[0]), delay)
+            sleeps.append(delay)
+            clock_value[0] += delay
+        constants = dict(P_PID=1, WEXITED=4, WNOWAIT=0x01000000, WNOHANG=1,
+                         CLD_EXITED=1, CLD_KILLED=2, CLD_DUMPED=3)
+        for permanent in (False, True):
+            with self.subTest(permanent=permanent):
+                clock_value[0] = 100.0
+                sleeps.clear()
+                waiter = mock.Mock(return_value=None) if permanent else mock.Mock(
+                    side_effect=(None, SimpleNamespace(si_pid=child.pid, si_code=2)),
+                )
+                with mock.patch.object(helper, "_EXIT_OBSERVER_KIND", "linux", create=True), \
+                     mock.patch.multiple(helper.os, create=True, **constants), \
+                     mock.patch.object(helper.os, "waitid", waiter, create=True), \
+                     mock.patch.object(helper.time, "monotonic", side_effect=lambda: clock_value[0]), \
+                     mock.patch.object(helper.time, "sleep", side_effect=sleep):
+                    if permanent:
+                        with self.assertRaisesRegex(helper.ManagementKeyError, "deadline"):
+                            helper._wait_child_exit_without_reaping(child, 100.020)
+                    else:
+                        helper._wait_child_exit_without_reaping(child, 100.020)
+                for call in waiter.call_args_list:
+                    self.assertEqual(mock.call(1, child.pid, 4 | 0x01000000 | 1), call)
+                self.assertIsNone(child.returncode)
+                self.assertAlmostEqual(100.020 if permanent else 100.010, clock_value[0])
+
+    def test_linux_exit_observer_rejects_wrong_identity_status_and_wait_errors(self) -> None:
+        helper = self.helper()
+        child = SimpleNamespace(pid=123456, returncode=None)
+        constants = dict(P_PID=1, WEXITED=4, WNOWAIT=0x01000000, WNOHANG=1,
+                         CLD_EXITED=1, CLD_KILLED=2, CLD_DUMPED=3)
+        for result in (
+            SimpleNamespace(si_pid=123457, si_code=1),
+            SimpleNamespace(si_pid=123456, si_code=4),
+            ChildProcessError(errno.ECHILD, "fixture child no longer waitable"),
+            OSError(errno.EIO, "fixture wait failure"),
+        ):
+            with self.subTest(result=result):
+                waiter = mock.Mock()
+                if isinstance(result, BaseException):
+                    waiter.side_effect = result
+                else:
+                    waiter.return_value = result
+                with mock.patch.object(helper, "_EXIT_OBSERVER_KIND", "linux"), \
+                     mock.patch.multiple(helper.os, create=True, **constants), \
+                     mock.patch.object(helper.os, "waitid", waiter, create=True), \
+                     self.assertRaisesRegex(helper.ManagementKeyError, "exit observer"):
+                    helper._wait_child_exit_without_reaping(child, time.monotonic() + 1)
+                waiter.assert_called_once_with(1, child.pid, 4 | 0x01000000 | 1)
+                self.assertIsNone(child.returncode)
+
+    @unittest.skipUnless(sys.platform == "darwin", "Darwin kevent anchor contract")
+    def test_darwin_exit_observer_validates_late_anchor_and_closes_queue_on_close_error(self) -> None:
+        helper = self.helper()
+        child = SimpleNamespace(pid=123456, returncode=None)
+        for late, close_error in ((False, False), (True, False), (False, True)):
+            with self.subTest(late=late, close_error=close_error):
+                queue = mock.Mock()
+                queue.control.return_value = [SimpleNamespace(
+                    ident=child.pid, filter=select.KQ_FILTER_PROC,
+                    flags=select.KQ_EV_ERROR if late else 0,
+                    fflags=select.KQ_NOTE_EXIT, data=errno.ESRCH if late else 0,
+                )]
+                if close_error:
+                    queue.close.side_effect = OSError(errno.EIO, "fixture close failure")
+                with mock.patch.object(helper.select, "kqueue", return_value=queue), \
+                     mock.patch.object(helper.os, "kill") as anchor_probe:
+                    if close_error:
+                        with self.assertRaisesRegex(helper.ManagementKeyError, "exit observer.*close"):
+                            helper._wait_child_exit_without_reaping(child, time.monotonic() + 1)
+                    else:
+                        helper._wait_child_exit_without_reaping(child, time.monotonic() + 1)
+                self.assertEqual([mock.call(child.pid, 0)] if late else [], anchor_probe.call_args_list)
+                queue.close.assert_called_once()
+                self.assertIsNone(child.returncode)
+
+    def test_cleanup_observer_failure_or_expired_deadline_forbids_second_group_signal(self) -> None:
+        helper = self.helper()
+        for expired in (False, True):
+            with self.subTest(expired=expired):
+                clock_value = [100.0]
+                process = SimpleNamespace(pid=123456, returncode=None, wait=mock.Mock(return_value=0))
+                def observe_exit(_process, deadline):
+                    self.assertIs(process, _process)
+                    self.assertEqual(102.0, deadline)
+                    if expired:
+                        clock_value[0] = 102.0
+                        return
+                    raise helper.ManagementKeyError("bounded cleanup exit observer failed")
+                with mock.patch.object(helper.os, "killpg") as kill_group, \
+                     mock.patch.object(helper.os, "kill") as kill_child, \
+                     mock.patch.object(helper, "_process_group_is_observable", side_effect=(True, False)), \
+                     mock.patch.object(helper, "_wait_child_exit_without_reaping", side_effect=observe_exit), \
+                     mock.patch.object(helper.time, "monotonic", side_effect=lambda: clock_value[0]), \
+                     self.assertRaisesRegex(helper.ManagementKeyError, "bounded cleanup.*deadline|exit observer"):
+                    helper._terminate_process(process)
+                kill_group.assert_called_once_with(process.pid, signal.SIGKILL)
+                process.wait.assert_called_once_with(timeout=0.0 if expired else 2.0)
+                self.assertEqual(
+                    [] if expired else [mock.call(process.pid, 0), mock.call(process.pid, signal.SIGKILL)],
+                    kill_child.call_args_list,
+                )
+
+    def test_cleanup_group_signal_esrch_stops_signals_and_other_errors_fail_closed(self) -> None:
+        helper = self.helper()
+        for signal_count, error, pattern in (
+            (1, ProcessLookupError(errno.ESRCH, "fixture absent"), None),
+            (2, ProcessLookupError(errno.ESRCH, "fixture absent"), None),
+            (2, PermissionError(errno.EPERM, "fixture zombies"), None),
+            (2, OSError(errno.EIO, "fixture failure"), "cannot terminate process group"),
+        ):
+            with self.subTest(signal_count=signal_count, error=error):
+                process = SimpleNamespace(pid=123456, returncode=None, wait=mock.Mock(return_value=0))
+                with mock.patch.object(helper.os, "killpg", side_effect=[None] * (signal_count - 1) + [error]) as kill_group, \
+                     mock.patch.object(helper.os, "kill"), \
+                     mock.patch.object(helper, "_process_group_is_observable", side_effect=(True, False)), \
+                     mock.patch.object(helper, "_wait_child_exit_without_reaping") as observe_exit:
+                    if pattern:
+                        with self.assertRaisesRegex(helper.ManagementKeyError, pattern):
+                            helper._terminate_process(process)
+                    else:
+                        helper._terminate_process(process)
+                self.assertEqual([mock.call(process.pid, signal.SIGKILL)] * signal_count, kill_group.call_args_list)
+                self.assertEqual(signal_count - 1, observe_exit.call_count)
+                process.wait.assert_called_once()
+
+    def test_cleanup_second_real_kill_removes_late_member_before_reaping_anchor(self) -> None:
+        helper = self.helper()
+        real_killpg = os.killpg
+        observer = getattr(helper, "_wait_child_exit_without_reaping", None)
+        ready = self.root / "late-member-ready"
+        joined = self.root / "late-member-joined"
+        read_fd, write_fd = os.pipe()
+        script = (
+            "import os,sys,time\n"
+            "leader=os.getpid()\n"
+            "child=os.fork()\n"
+            "if child == 0:\n"
+            "    os.setpgid(0,0)\n"
+            "    with open(sys.argv[1]+'.tmp','w') as marker: marker.write(str(os.getpid()))\n"
+            "    os.replace(sys.argv[1]+'.tmp',sys.argv[1])\n"
+            "    if os.read(int(sys.argv[3]),1) != b'J': os._exit(4)\n"
+            "    os.setpgid(0,leader)\n"
+            "    with open(sys.argv[2]+'.tmp','w') as marker: marker.write(str(os.getpgrp()))\n"
+            "    os.replace(sys.argv[2]+'.tmp',sys.argv[2])\n"
+            "time.sleep(30)\n"
+        )
+        child = subprocess.Popen(
+            [sys.executable, "-c", script, str(ready), str(joined), str(read_fd)],
+            start_new_session=True, pass_fds=(read_fd,),
+        )
+        os.close(read_fd)
+        original_wait = child.wait
+        signals = []
+        late_pid = None
+        completed = False
+
+        def await_file(path):
+            deadline = time.monotonic() + 0.7
+            while not path.is_file() and time.monotonic() < deadline:
+                time.sleep(0.005)
+            self.assertTrue(path.is_file(), str(path))
+
+        def observe(process, deadline):
+            observer(process, deadline)
+            self.assertIsNone(process.returncode)
+            os.write(write_fd, b"J")
+            await_file(joined)
+            self.assertEqual(child.pid, int(joined.read_text()))
+            os.kill(late_pid, 0)
+
+        def kill_group(pgid, sig):
+            if sig == signal.SIGKILL:
+                self.assertIsNone(child.returncode, "signal after anchor release")
+                signals.append(pgid)
+                if len(signals) == 2:
+                    self.assertTrue(joined.is_file())
+                    os.kill(late_pid, 0)
+            return real_killpg(pgid, sig)
+
+        def wait(*, timeout):
+            self.assertEqual([child.pid, child.pid], signals, "reap before second group kill")
+            return original_wait(timeout=timeout)
+
+        try:
+            await_file(ready)
+            late_pid = int(ready.read_text())
+            with mock.patch.object(helper.os, "killpg", side_effect=kill_group), \
+                 mock.patch.object(helper, "_wait_child_exit_without_reaping", side_effect=observe, create=True), \
+                 mock.patch.object(child, "wait", side_effect=wait):
+                helper._terminate_process(child)
+            with self.assertRaises(ProcessLookupError):
+                real_killpg(child.pid, 0)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(late_pid, 0)
+            completed = True
+        finally:
+            os.close(write_fd)
+            if not completed and child.returncode is None:
+                # The guarded wait preserves the leader anchor on a RED run.
+                if late_pid is not None:
+                    try:
+                        if os.getsid(late_pid) == child.pid and os.getpgid(late_pid) == late_pid:
+                            real_killpg(late_pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                try:
+                    real_killpg(child.pid, signal.SIGKILL)
+                except OSError as exc:
+                    if exc.errno not in (errno.ESRCH, errno.EPERM):
+                        raise
+            original_wait(timeout=2)
+
+    @unittest.skipUnless(sys.platform == "darwin", "Darwin zombie-only killpg EPERM")
+    def test_cleanup_second_kill_eperm_on_native_zombie_group_remains_pending(self) -> None:
+        helper = self.helper()
+        child = subprocess.Popen(["/usr/bin/true"], start_new_session=True)
+        time.sleep(0.03)
+        real_killpg = os.killpg
+        killed = []
+        def kill_group(pgid, sig):
+            if sig == signal.SIGKILL:
+                self.assertIsNone(child.returncode)
+                killed.append(pgid)
+            return real_killpg(pgid, sig)
+        try:
+            with mock.patch.object(helper.os, "killpg", side_effect=kill_group):
+                helper._terminate_process(child)
+            self.assertEqual([child.pid, child.pid], killed)
+            with self.assertRaises(ProcessLookupError):
+                real_killpg(child.pid, 0)
+        finally:
+            child.wait(timeout=2)
+
+    def test_cleanup_observer_probes_group_and_accepts_only_esrch(self) -> None:
+        helper = self.helper()
+        for outcome, expected in (
+            (None, True),
+            (ProcessLookupError(errno.ESRCH, "fixture group absent"), False),
+            (PermissionError(errno.EPERM, "fixture observation denied"), True),
+            (PermissionError(errno.EACCES, "fixture unexpected access error"), None),
+            (OSError(errno.EIO, "fixture observation failed"), None),
+        ):
+            with self.subTest(outcome=type(outcome).__name__), mock.patch.object(
+                helper.os, "killpg", side_effect=outcome,
+            ) as probe:
+                if expected is None:
+                    with self.assertRaisesRegex(
+                        helper.ManagementKeyError, "bounded cleanup.*inspect.*group",
+                    ):
+                        helper._process_group_is_observable(123456)
+                else:
+                    self.assertIs(expected, helper._process_group_is_observable(123456))
+                probe.assert_called_once_with(123456, 0)
+
+    def test_cleanup_eperm_remains_pending_until_esrch_within_same_deadline(self) -> None:
+        helper = self.helper()
+        clock_value = [100.0]
+        events = []
+        outcomes = iter((
+            PermissionError(errno.EPERM, "fixture zombie group"),
+            PermissionError(errno.EPERM, "fixture zombie group"),
+            ProcessLookupError(errno.ESRCH, "fixture group gone"),
+        ))
+
+        def kill_group(pgid, sig):
+            self.assertEqual(123456, pgid)
+            events.append(sig)
+            if sig == 0 and len(events) > 1:
+                raise next(outcomes)
+
+        def sleep(delay):
+            self.assertAlmostEqual(0.010, delay)
+            clock_value[0] += delay
+
+        process = SimpleNamespace(pid=123456, returncode=None, wait=mock.Mock(return_value=0))
+        with mock.patch.object(helper.os, "killpg", side_effect=kill_group), \
+             mock.patch.object(helper, "_wait_child_exit_without_reaping", create=True), \
+             mock.patch.object(helper.time, "monotonic", side_effect=lambda: clock_value[0]), \
+             mock.patch.object(helper.time, "sleep", side_effect=sleep):
+            helper._terminate_process(process)
+        self.assertEqual([0, signal.SIGKILL, signal.SIGKILL, 0, 0, 0], events)
+        self.assertAlmostEqual(100.020, clock_value[0])
+        process.wait.assert_called_once_with(timeout=2.0)
+
+    def test_cleanup_persistent_eperm_cannot_complete_or_reset_deadline(self) -> None:
+        helper = self.helper()
+        clock_value = [100.0]
+        probes = []
+        sleeps = []
+
+        def kill_group(pgid, sig):
+            self.assertEqual(123456, pgid)
+            if sig == 0:
+                probes.append(pgid)
+                raise PermissionError(errno.EPERM, "fixture persistent uncertainty")
+
+        def wait(*, timeout):
+            self.assertEqual(2.0, timeout)
+            clock_value[0] += 1.985
+
+        def sleep(delay):
+            self.assertGreater(delay, 0)
+            self.assertLessEqual(delay, 0.010)
+            sleeps.append(delay)
+            clock_value[0] += delay
+
+        process = SimpleNamespace(pid=123456, returncode=None, wait=mock.Mock(side_effect=wait))
+        with mock.patch.object(helper.os, "killpg", side_effect=kill_group), \
+             mock.patch.object(helper, "_wait_child_exit_without_reaping", create=True), \
+             mock.patch.object(helper.time, "monotonic", side_effect=lambda: clock_value[0]), \
+             mock.patch.object(helper.time, "sleep", side_effect=sleep), \
+             self.assertRaisesRegex(helper.ManagementKeyError, "bounded cleanup deadline.*group"):
+            helper._terminate_process(process)
+        self.assertEqual(3, len(probes))
+        self.assertEqual(2, len(sleeps))
+        self.assertAlmostEqual(0.015, sum(sleeps))
+        self.assertAlmostEqual(102.0, clock_value[0])
+
+    def test_cleanup_wait_and_group_observation_share_one_deadline(self) -> None:
+        helper = self.helper()
+        clock_value = [100.0]
+        events = []
+        sleeps = []
+        process = SimpleNamespace(pid=123456, returncode=None)
+
+        def wait(*, timeout):
+            self.assertEqual(["observe", "exit"], events, "reap before exit observation")
+            self.assertEqual([mock.call(123456, signal.SIGKILL)] * 2, kill_group.call_args_list)
+            events.append("wait")
+            self.assertGreater(timeout, 0)
+            self.assertLessEqual(timeout, 2.0)
+            clock_value[0] += 1.975
+            process.returncode = 0
+            return 0
+
+        def sleep(delay):
+            self.assertGreater(delay, 0)
+            self.assertLessEqual(delay, 0.020)
+            sleeps.append(delay)
+            clock_value[0] += delay
+
+        outcomes = iter((True, True, True, False))
+
+        def observe(pgid):
+            self.assertEqual(123456, pgid)
+            events.append("observe")
+            return next(outcomes)
+
+        process.wait = mock.Mock(side_effect=wait)
+        with mock.patch.object(helper.os, "killpg") as kill_group, \
+             mock.patch.object(helper, "_wait_child_exit_without_reaping", create=True,
+                               side_effect=lambda *_args: events.append("exit")), \
+             mock.patch.object(helper.time, "monotonic", side_effect=lambda: clock_value[0]), \
+             mock.patch.object(helper.time, "sleep", side_effect=sleep), \
+             mock.patch.object(helper, "_process_group_is_observable", side_effect=observe, create=True):
+            helper._terminate_process(process)
+        self.assertEqual([mock.call(123456, signal.SIGKILL)] * 2, kill_group.call_args_list)
+        self.assertEqual(["observe", "exit", "wait", "observe", "observe", "observe"], events)
+        self.assertEqual(2, len(sleeps))
+        self.assertAlmostEqual(0.010, sleeps[0])
+        self.assertAlmostEqual(0.010, sleeps[1])
+        self.assertLess(clock_value[0] - 100.0, 2.0)
+
+    def test_cleanup_deadline_is_not_reset_after_direct_child_wait(self) -> None:
+        helper = self.helper()
+        clock_value = [100.0]
+        sleeps = []
+
+        def wait(*, timeout):
+            self.assertLessEqual(timeout, 2.0)
+            clock_value[0] += 1.985
+            return 0
+
+        def sleep(delay):
+            self.assertGreater(delay, 0)
+            self.assertLessEqual(delay, 0.020)
+            sleeps.append(delay)
+            clock_value[0] += delay
+
+        process = SimpleNamespace(pid=123456, returncode=None, wait=mock.Mock(side_effect=wait))
+        with mock.patch.object(helper.os, "killpg"), \
+             mock.patch.object(helper, "_wait_child_exit_without_reaping", create=True), \
+             mock.patch.object(helper.time, "monotonic", side_effect=lambda: clock_value[0]), \
+             mock.patch.object(helper.time, "sleep", side_effect=sleep), \
+             mock.patch.object(helper, "_process_group_is_observable", return_value=True, create=True), \
+             self.assertRaisesRegex(helper.ManagementKeyError, "bounded cleanup deadline.*group"):
+            helper._terminate_process(process)
+        self.assertEqual(2, len(sleeps))
+        self.assertAlmostEqual(0.015, sum(sleeps))
+        self.assertAlmostEqual(102.0, clock_value[0])
+        process.wait.assert_called_once()
+
+    def test_cleanup_child_wait_failure_cannot_start_a_second_timeout(self) -> None:
+        helper = self.helper()
+        for failure in (
+            subprocess.TimeoutExpired("fixture-child", 1.75),
+            OSError(errno.EIO, "fixture wait failure"),
+        ):
+            with self.subTest(failure=type(failure).__name__):
+                process = SimpleNamespace(pid=123456, returncode=None, wait=mock.Mock(side_effect=failure))
+                clock_value = [100.0]
+                def observe_exit(*_args):
+                    clock_value[0] += 0.25
+                with mock.patch.object(helper.os, "killpg"), \
+                     mock.patch.object(helper.time, "monotonic", side_effect=lambda: clock_value[0]), \
+                     mock.patch.object(helper, "_wait_child_exit_without_reaping", side_effect=observe_exit, create=True), \
+                     mock.patch.object(helper, "_process_group_is_observable", return_value=True) as observe, \
+                     self.assertRaisesRegex(helper.ManagementKeyError, "bounded cleanup.*direct child"):
+                    helper._terminate_process(process)
+                process.wait.assert_called_once_with(timeout=1.75)
+                observe.assert_called_once_with(process.pid)
+
+    def test_cleanup_failure_closes_resources_and_never_publishes_keys(self) -> None:
+        # Exercise the real reconciliation -> bounded runner -> cleanup chain.
+        # Only the disposable producer and the ordinary observer boundary are
+        # replaced; no production test mode or complete-command result is used.
+        helper = self.helper()
+        real_popen = subprocess.Popen
+        real_selector = helper.selectors.DefaultSelector
+        real_killpg = os.killpg
+        real_exit_observer = helper._wait_child_exit_without_reaping
+        for label, observation, pattern in (
+            ("never-disappears", None, "bounded cleanup deadline.*group"),
+            (
+                "persistent-eperm", helper._process_group_is_observable,
+                "bounded cleanup deadline.*group",
+            ),
+            (
+                "inspection-error",
+                helper.ManagementKeyError("bounded cleanup cannot inspect process group"),
+                "bounded cleanup.*inspect.*group",
+            ),
+            (
+                "exit-observer-error", helper._process_group_is_observable,
+                "bounded cleanup exit observer failed",
+            ),
+        ):
+            with self.subTest(case=label):
+                processes = []
+                selectors_seen = []
+                group_signals = []
+
+                def launch(_argv, **kwargs):
+                    process = real_popen(["/bin/sleep", "60"], **kwargs)
+                    processes.append(process)
+                    return process
+
+                def kill_group(pgid, sig):
+                    if sig == signal.SIGKILL:
+                        group_signals.append(pgid)
+                    if label == "persistent-eperm" and sig == 0:
+                        raise PermissionError(errno.EPERM, "fixture group still unconfirmed")
+                    return real_killpg(pgid, sig)
+
+                def observe_exit(process, deadline):
+                    real_exit_observer(process, deadline)
+                    if label == "exit-observer-error":
+                        raise helper.ManagementKeyError("bounded cleanup exit observer failed")
+
+                class BrokenRegister:
+                    def __init__(self):
+                        self.inner = real_selector()
+                        self.closed = False
+                        selectors_seen.append(self)
+
+                    def register(self, *_args, **_kwargs):
+                        raise OSError("fixture register failure before key publication")
+
+                    def close(self):
+                        self.inner.close()
+                        self.closed = True
+
+                before_fds = len(os.listdir("/dev/fd"))
+                failure = None
+                started = time.monotonic()
+                with mock.patch.object(helper.subprocess, "Popen", side_effect=launch), \
+                     mock.patch.object(helper.selectors, "DefaultSelector", BrokenRegister), \
+                     mock.patch.object(helper.os, "killpg", side_effect=kill_group), \
+                     mock.patch.object(helper, "_wait_child_exit_without_reaping", side_effect=observe_exit), \
+                     mock.patch.object(
+                         helper, "_process_group_is_observable", return_value=True,
+                         side_effect=observation, create=True,
+                     ):
+                    try:
+                        helper.synchronize_management_key(**self.operation_arguments())
+                    except helper.ManagementKeyError as exc:
+                        failure = exc
+                self.assertLess(time.monotonic() - started, 2.5)
+                self.assertEqual(1, len(processes))
+                if label == "exit-observer-error":
+                    self.assertEqual([processes[0].pid], group_signals)
+                self.assertIsNotNone(processes[0].poll())
+                self.assertTrue(processes[0].stdout.closed)
+                self.assertTrue(processes[0].stderr.closed)
+                self.assertEqual(1, len(selectors_seen))
+                self.assertTrue(selectors_seen[0].closed)
+                self.assertEqual(before_fds, len(os.listdir("/dev/fd")))
+                for directory in (self.host_home / ".ssh", self.service):
+                    for name in ("id_ed25519", "id_ed25519.pub"):
+                        self.assertFalse((directory / name).exists(), "cleanup failure published a key")
+                self.assertIsNotNone(failure)
+                self.assertRegex(str(failure), pattern)
 
     def test_bounded_runner_setup_faults_close_pipes_kill_and_reap(self) -> None:
         helper = self.helper()
@@ -3108,6 +3694,9 @@ class DockerManagementSshKeyWorkflowTests(unittest.TestCase):
         }.issubset(ssh_workflow["tests"]))
         real = (ROOT / "test_cases/REAL_ENVIRONMENT.md").read_text(encoding="utf-8")
         self.assertIn("TC-REAL-DOCKER-MANAGEMENT-SSH-KEY-001", real)
+        for phrase in ("WEXITED|WNOWAIT|WNOHANG", "sole reaper", "SIGCHLD=SIG_DFL", "未回收锚点"):
+            self.assertIn(phrase, real)
+            self.assertIn(phrase, (ROOT / "infra/docker/README.md").read_text(encoding="utf-8"))
         self.assertIn("host→service", real)
         self.assertIn("service→host", real)
         self.assertIn("fingerprint", real.casefold())
