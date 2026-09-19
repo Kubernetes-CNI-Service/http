@@ -1238,6 +1238,56 @@ def _load_preflight_authority(root: Path):
     return module
 
 
+def _git_blob_oid(payload: bytes, oid_width: int) -> str:
+    framed = b"blob " + str(len(payload)).encode("ascii") + b"\0" + payload
+    if oid_width == 40:
+        return hashlib.sha1(framed).hexdigest()
+    if oid_width == 64:
+        return hashlib.sha256(framed).hexdigest()
+    raise ValueError("unsupported Git object identity width")
+
+
+def _worktree_differs_from_index(root: Path, authority) -> bool:
+    """Compare reported worktree candidates to index blobs without refreshing it."""
+    candidates = authority._git_run(
+        root, ["diff-files", "--name-only", "-z", "--"],
+    )
+    if candidates.returncode != 0:
+        raise ValueError("Git worktree candidate scan failed")
+    for encoded in filter(None, candidates.stdout.split(b"\0")):
+        relative = os.fsdecode(encoded)
+        staged = authority._git_run(
+            root, ["ls-files", "--stage", "-z", "--", relative],
+        )
+        records = [record for record in staged.stdout.split(b"\0") if record]
+        if staged.returncode != 0 or len(records) != 1 or b"\t" not in records[0]:
+            return True
+        header, listed = records[0].split(b"\t", 1)
+        fields = header.split()
+        if len(fields) != 3 or fields[2] != b"0" or listed != encoded:
+            return True
+        index_mode = fields[0].decode("ascii", "strict")
+        index_oid = fields[1].decode("ascii", "strict")
+        path = root / relative
+        try:
+            metadata = path.lstat()
+            if stat.S_ISLNK(metadata.st_mode):
+                worktree_mode = "120000"
+                payload = os.fsencode(os.readlink(path))
+            elif stat.S_ISREG(metadata.st_mode):
+                worktree_mode = "100755" if metadata.st_mode & 0o111 else "100644"
+                payload = path.read_bytes()
+            else:
+                return True
+        except OSError:
+            return True
+        if worktree_mode != index_mode:
+            return True
+        if _git_blob_oid(payload, len(index_oid)) != index_oid:
+            return True
+    return False
+
+
 def _preflight_clean_candidate(root: Path, selected: set[str]) -> None:
     git_entry = root / ".git"
     try:
@@ -1279,25 +1329,37 @@ def _preflight_clean_candidate(root: Path, selected: set[str]) -> None:
         authority._assert_clean_and_ledger(root, ledger, captured_head)
     except Exception as exc:
         try:
-            tracked = authority._git_run(
-                root, ["diff", "--quiet", captured_head, "--"],
+            index_path = root / ".git/index"
+            index_before = index_path.read_bytes()
+            index_metadata = index_path.lstat()
+            staged = authority._git_run(
+                root, ["diff-index", "--cached", "--quiet", captured_head, "--"],
             )
+            unstaged = _worktree_differs_from_index(root, authority)
             untracked = authority._git_run(
                 root, ["ls-files", "--others", "--exclude-standard", "-z"],
             )
+            index_after = index_path.read_bytes()
+            after_metadata = index_path.lstat()
         except Exception as probe_exc:
             raise ImpactError(
                 "EFF E-3: selected public authority or Git metadata is unavailable; "
                 "repair the main checkout's Git metadata and rerun this preflight; "
                 f"required Git/authority checks must succeed ({probe_exc})"
             ) from probe_exc
-        if tracked.returncode not in (0, 1) or untracked.returncode != 0:
+        if (
+            staged.returncode not in (0, 1) or untracked.returncode != 0
+            or index_before != index_after
+            or (index_metadata.st_dev, index_metadata.st_ino, index_metadata.st_mode)
+            != (after_metadata.st_dev, after_metadata.st_ino, after_metadata.st_mode)
+            or authority._head(root) != captured_head
+        ):
             raise ImpactError(
                 "EFF E-3: selected public authority or Git metadata is unavailable; "
                 "repair the main checkout's Git metadata and rerun this preflight; "
                 "required Git/authority checks must succeed"
             ) from exc
-        if tracked.returncode or untracked.stdout:
+        if staged.returncode or unstaged or untracked.stdout:
             raise ImpactError(
                 "EFF E-3: selected public authority found staged, unstaged, "
                 "untracked, or ledger changes; commit the reviewed source/test "

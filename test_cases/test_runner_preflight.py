@@ -138,7 +138,8 @@ class PreflightFixture(unittest.TestCase):
             audit = (
                 "import runpy, sys\n"
                 "def audit(event, args):\n"
-                "    if event == 'socket.bind' or (event == 'subprocess.Popen' and 'diff-index' in args[1]):\n"
+                "    if event == 'socket.bind' or (event == 'subprocess.Popen' and "
+                "'diff-index' in args[1] and '--cached' not in args[1]):\n"
                 f"        with open({str(self.base / 'probe-events')!r}, 'a') as trace: trace.write(event + '\\n')\n"
                 f"    if event == 'socket.bind' and {deny_bind!r}: raise PermissionError('PF fixture bind denied')\n"
                 "sys.addaudithook(audit)\n"
@@ -288,14 +289,28 @@ class PreflightRunnerWorkflowTests(PreflightFixture):
         self.assertEqual(before, self.ledger.read_bytes())
 
     def test_dirty_variants_fail_before_child_with_commit_remedy(self):
-        for kind in ("staged", "unstaged", "untracked", "ledger-only"):
+        for kind in (
+            "staged", "staged-worktree-restored", "unstaged", "untracked",
+            "ledger-only",
+        ):
             with self.subTest(kind=kind):
                 path = self.ledger if kind == "ledger-only" else self.root / (
                     "untracked.txt" if kind == "untracked" else "tools/project_contract.py")
                 original = path.read_bytes() if path.exists() else None
                 path.write_bytes((original or b"") + b"\n")
-                if kind == "staged":
+                if kind in ("staged", "staged-worktree-restored"):
                     self.git("add", str(path.relative_to(self.root)))
+                if kind == "staged-worktree-restored":
+                    path.write_bytes(original)
+                    self.assertEqual(
+                        b"MM tools/project_contract.py\n",
+                        self.git("status", "--porcelain=v1"),
+                    )
+                    index = self.root / ".git/index"
+                    index_before = (
+                        index.stat().st_ino,
+                        hashlib.sha256(index.read_bytes()).hexdigest(),
+                    )
                 before = self.ledger.read_bytes()
                 result = self.cli("--suite", "authority")
                 self.assert_no_child_or_approval(before, result, "EFF E-3")
@@ -304,6 +319,16 @@ class PreflightRunnerWorkflowTests(PreflightFixture):
                 )
                 self.assertIn("commit the reviewed source/test candidate", result.stderr)
                 self.assertNotIn("content-identical stat dirt", result.stderr)
+                if kind == "staged-worktree-restored":
+                    self.assertEqual(
+                        index_before,
+                        (index.stat().st_ino,
+                         hashlib.sha256(index.read_bytes()).hexdigest()),
+                    )
+                    self.assertEqual(
+                        b"MM tools/project_contract.py\n",
+                        self.git("status", "--porcelain=v1"),
+                    )
                 if original is None:
                     path.unlink()
                 else:
@@ -315,14 +340,26 @@ class PreflightRunnerWorkflowTests(PreflightFixture):
         original = path.read_bytes()
         metadata = path.stat()
         os.utime(path, ns=(metadata.st_atime_ns, metadata.st_mtime_ns + 2_000_000_000))
-        before = self.ledger.read_bytes()
-        refused = self.cli("--suite", "authority")
-        self.assert_no_child_or_approval(before, refused, "EFF E-3")
-        self.assertIn("content-identical stat dirt", refused.stderr)
-        self.assertIn("run `git status` to refresh the index", refused.stderr)
-        self.assertNotIn(
-            "staged, unstaged, untracked, or ledger changes", refused.stderr,
+        index = self.root / ".git/index"
+        index_before = (
+            index.stat().st_ino,
+            hashlib.sha256(index.read_bytes()).hexdigest(),
         )
+        before = self.ledger.read_bytes()
+        for attempt in range(2):
+            with self.subTest(attempt=attempt):
+                refused = self.cli("--suite", "authority")
+                self.assert_no_child_or_approval(before, refused, "EFF E-3")
+                self.assertIn("content-identical stat dirt", refused.stderr)
+                self.assertIn("run `git status` to refresh the index", refused.stderr)
+                self.assertNotIn(
+                    "staged, unstaged, untracked, or ledger changes", refused.stderr,
+                )
+                self.assertEqual(
+                    index_before,
+                    (index.stat().st_ino,
+                     hashlib.sha256(index.read_bytes()).hexdigest()),
+                )
         status = subprocess.run(
             [GIT, "status", "--porcelain=v1"], cwd=self.root, env=self.env,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False,
@@ -419,7 +456,8 @@ class PreflightRunnerWorkflowTests(PreflightFixture):
             sys.executable, "-B", "-c",
             "import runpy,sys\n"
             "def audit(event,args):\n"
-            "    if event == 'subprocess.Popen' and 'diff-index' in args[1]:\n"
+            "    if event == 'subprocess.Popen' and 'diff-index' in args[1] and "
+            "'--cached' not in args[1]:\n"
             f"        open({str(self.base / 'probe-events')!r},'a').write(event+'\\n')\n"
             "sys.addaudithook(audit)\n"
             "sys.argv=['test_cases/run_related_tests.py']+sys.argv[1:]\n"
