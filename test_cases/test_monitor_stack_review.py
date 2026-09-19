@@ -4157,7 +4157,10 @@ print('{{"factory_records_active":true,"valid":true}}')
                     ):
                         local_floor_assignments.append(node)
                 if isinstance(node, ast.ImportFrom) and node.module == "project_contract":
-                    imported_floor.extend(alias.name for alias in node.names)
+                    imported_floor.extend(
+                        alias.name for alias in node.names
+                        if alias.name == "MIN_CONTINUOUS_INTERVAL_MINUTES"
+                    )
                 if isinstance(node, ast.Try) and any(
                     isinstance(child, ast.ImportFrom)
                     and child.module == "project_contract"
@@ -4948,6 +4951,16 @@ print('{{"factory_records_active":true,"valid":true}}')
             ["bash", str(ROOT / "ethernet/monitor/cron.sh")],
             ["bash", str(ROOT / "infiniband/monitor/cron.sh")],
         ]
+        cycle_result = {
+            "identity": {},
+            "outcomes": [
+                {"source_slot": "ethernet/prod", "outcome": "accepted",
+                 "child_result": partial, "evidence": {}},
+                {"source_slot": "infiniband/prod", "outcome": "accepted",
+                 "child_result": success, "evidence": {}},
+            ],
+            "summary": None,
+        }
         with mock.patch.object(
             self.switch_worker, "active_project_identity", return_value="project-a",
         ), mock.patch.object(
@@ -4956,6 +4969,9 @@ print('{{"factory_records_active":true,"valid":true}}')
             self.switch_worker, "commands_for_scope", return_value=commands,
         ), mock.patch.object(
             self.switch_worker, "run_interruptible", side_effect=results,
+        ), mock.patch.object(
+            self.switch_worker, "run_collection_cycle_coordinator",
+            return_value=cycle_result,
         ), mock.patch.object(
             self.switch_worker.subprocess, "run",
             return_value=subprocess.CompletedProcess([], 0, "", ""),
@@ -5024,6 +5040,16 @@ print('{{"factory_records_active":true,"valid":true}}')
             ["bash", str(ROOT / "ethernet/monitor/cron.sh")],
             ["bash", str(ROOT / "infiniband/monitor/cron.sh")],
         ]
+        cycle_result = {
+            "identity": {},
+            "outcomes": [
+                {"source_slot": "ethernet/prod", "outcome": "accepted",
+                 "child_result": failed, "evidence": {}},
+                {"source_slot": "infiniband/prod", "outcome": "accepted",
+                 "child_result": success, "evidence": {}},
+            ],
+            "summary": None,
+        }
         with mock.patch.object(
             self.switch_worker, "active_project_identity", return_value="project-a",
         ), mock.patch.object(
@@ -5032,6 +5058,9 @@ print('{{"factory_records_active":true,"valid":true}}')
             self.switch_worker, "commands_for_scope", return_value=commands,
         ), mock.patch.object(
             self.switch_worker, "run_interruptible", side_effect=results,
+        ), mock.patch.object(
+            self.switch_worker, "run_collection_cycle_coordinator",
+            return_value=cycle_result,
         ), mock.patch.object(
             self.switch_worker.subprocess, "run",
             return_value=subprocess.CompletedProcess([], 0, "", ""),

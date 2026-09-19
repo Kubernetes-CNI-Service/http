@@ -697,6 +697,10 @@ class CollectionGateScopeTests(unittest.TestCase):
         with mock.patch.object(WORKER, "CollectionGate", FakeGate), \
                 mock.patch.object(WORKER, "active_project_identity", return_value="/project"), \
                 mock.patch.object(WORKER, "commands_for_scope", return_value=[]), \
+                mock.patch.object(
+                    WORKER, "run_collection_cycle_coordinator",
+                    return_value={"identity": {}, "outcomes": [], "summary": None},
+                ), \
                 mock.patch.object(WORKER, "write_status"), \
                 mock.patch.object(WORKER.subprocess, "run", return_value=completed):
             self.assertTrue(WORKER.collect("all", 60, 37))

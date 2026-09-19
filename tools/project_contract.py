@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import fnmatch
+import hashlib
 import ipaddress
 import json
 import os
@@ -12,6 +13,7 @@ import posixpath
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 import re
+from types import MappingProxyType
 
 import yaml
 
@@ -24,6 +26,474 @@ AIR_OUTBOUND_ENDPOINT = "outbound"
 _MAC_ADDRESS = re.compile(r"^[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}$")
 _ISSUE_TRACKER_SPREADSHEET_ID = re.compile(r"^[A-Za-z0-9_-]{20,}$")
 _ISSUE_TRACKER_PATH = "common.mgmt.issue-tracker"
+
+# A collection cycle has one immutable, ordered set of child authorities for
+# each supported scope.  The mapping proxy is intentional: slot order is part
+# of the evidence contract and must not be process-global mutable state.
+COLLECTION_CYCLE_SOURCE_SLOTS = MappingProxyType({
+    "air": ("ethernet/air",),
+    "prod": (
+        "ethernet/prod",
+        "infiniband/prod",
+        "nvlink/prod",
+    ),
+    "all": (
+        "ethernet/air",
+        "ethernet/prod",
+        "infiniband/prod",
+        "nvlink/prod",
+    ),
+})
+
+# Machine-readable reasons only.  Consumers must branch on these values, not
+# on prose or substrings.  Keep the tuple ordered for deterministic summaries.
+COLLECTION_CYCLE_QUALIFICATION_REASONS = (
+    "legacy",
+    "partial",
+    "failed",
+)
+
+# Pure-layer authority for the nested durable failed-device schema.  The
+# worker retains interim parity assertions while its existing constants are
+# migrated to consume these names during B3 worker implementation.
+COLLECTION_CYCLE_FAILED_DEVICE_OPERATIONS = (
+    "collection",
+    "ssh_prepare",
+)
+COLLECTION_CYCLE_MAX_FAILED_DEVICES = 10000
+COLLECTION_CYCLE_MAX_FAILED_DEVICE_TEXT_BYTES = 1024
+# Persistence renders sequences as fixed-width decimal filenames.  Keep the
+# numeric authority here so every consumer shares the same value space.
+COLLECTION_CYCLE_MAX_SEQUENCE = 10**20 - 1
+
+_COLLECTION_CYCLE_IDENTITY_KEYS = frozenset({
+    "project_key",
+    "scope",
+    "source",
+    "sequence",
+    "run_token",
+    "cycle_id",
+})
+_COLLECTION_CYCLE_RESULT_KEYS = frozenset({
+    "schema_version",
+    "task",
+    *_COLLECTION_CYCLE_IDENTITY_KEYS,
+    "source_slot",
+    "state",
+    "planned",
+    "succeeded",
+    "failed_count",
+    "failed_devices",
+    "evidence",
+    "envelope",
+    "input_inventory_sha256",
+})
+_COLLECTION_CYCLE_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_COLLECTION_CYCLE_UUID4_HEX = re.compile(
+    r"^[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$"
+)
+_EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
+
+
+def collection_cycle_source_slots(scope: object) -> tuple[str, ...]:
+    """Return the immutable ordered child slots for one exact scope."""
+    if not isinstance(scope, str) or scope not in COLLECTION_CYCLE_SOURCE_SLOTS:
+        raise ValueError("collection cycle scope must be air, prod, or all")
+    return COLLECTION_CYCLE_SOURCE_SLOTS[scope]
+
+
+def canonical_collection_cycle_json(value: object) -> bytes:
+    """Serialize collection evidence as compact sorted UTF-8 JSON bytes."""
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def collection_cycle_project_key(active_identity: object) -> str:
+    """Hash the active project identity without normalizing its bytes."""
+    if not isinstance(active_identity, str):
+        raise TypeError("active project identity must be text")
+    return hashlib.sha256(active_identity.encode("utf-8")).hexdigest()
+
+
+def validate_collection_cycle_sequence(value: object) -> int:
+    """Validate a strictly positive, non-boolean cycle sequence."""
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value <= 0
+        or value > COLLECTION_CYCLE_MAX_SEQUENCE
+    ):
+        raise ValueError("collection cycle sequence is outside the supported range")
+    return value
+
+
+def validate_collection_cycle_run_token(value: object) -> str:
+    """Validate the canonical lowercase UUIDv4 token representation."""
+    if not isinstance(value, str) or not _COLLECTION_CYCLE_UUID4_HEX.fullmatch(value):
+        raise ValueError("collection cycle token must be lowercase UUIDv4 hex")
+    return value
+
+
+def _require_collection_cycle_sha256(value: object, field: str) -> str:
+    if not isinstance(value, str) or not _COLLECTION_CYCLE_SHA256.fullmatch(value):
+        raise ValueError(f"{field} must be a lowercase SHA-256 digest")
+    return value
+
+
+def build_collection_cycle_identity(
+    active_identity: object,
+    scope: object,
+    sequence: object,
+    token: object,
+) -> dict[str, object]:
+    """Build a content-bound cycle identity from worker-owned inputs.
+
+    The token argument is deliberately a pure/testable seam.  Production
+    request and worker boundaries remain responsible for generating it and
+    refusing caller-, environment-, CGI-, and child-supplied token authority.
+    """
+    body = {
+        "project_key": collection_cycle_project_key(active_identity),
+        "run_token": validate_collection_cycle_run_token(token),
+        "scope": scope,
+        "sequence": validate_collection_cycle_sequence(sequence),
+        "source": "switch_collection",
+    }
+    collection_cycle_source_slots(scope)
+    return {
+        **body,
+        "cycle_id": hashlib.sha256(
+            canonical_collection_cycle_json(body)
+        ).hexdigest(),
+    }
+
+
+def validate_collection_cycle_identity(document: object) -> dict[str, object]:
+    """Validate an exact collection identity and recompute its cycle id."""
+    if not isinstance(document, dict) or set(document) != _COLLECTION_CYCLE_IDENTITY_KEYS:
+        raise ValueError("collection cycle identity has invalid keys")
+    _require_collection_cycle_sha256(document["project_key"], "project_key")
+    collection_cycle_source_slots(document["scope"])
+    if document["source"] != "switch_collection":
+        raise ValueError("collection cycle identity has invalid source")
+    validate_collection_cycle_sequence(document["sequence"])
+    validate_collection_cycle_run_token(document["run_token"])
+    _require_collection_cycle_sha256(document["cycle_id"], "cycle_id")
+    body = {key: document[key] for key in (
+        "project_key", "run_token", "scope", "sequence", "source"
+    )}
+    expected_cycle_id = hashlib.sha256(
+        canonical_collection_cycle_json(body)
+    ).hexdigest()
+    if document["cycle_id"] != expected_cycle_id:
+        raise ValueError("collection cycle identity digest mismatch")
+    return copy.deepcopy(document)
+
+
+def _validate_collection_cycle_artifact(value: object, field: str) -> None:
+    if not isinstance(value, dict) or set(value) != {"sha256", "size_bytes"}:
+        raise ValueError(f"{field} must contain exact digest and size keys")
+    digest = _require_collection_cycle_sha256(value["sha256"], f"{field}.sha256")
+    size = value["size_bytes"]
+    if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+        raise ValueError(f"{field}.size_bytes must be a nonnegative integer")
+    if size == 0 and digest != _EMPTY_SHA256:
+        raise ValueError(f"{field} zero-byte digest must be SHA-256 of empty bytes")
+
+
+def _validate_collection_cycle_failed_device_text(
+    value: object,
+    field: str,
+    *,
+    truncate: bool = False,
+) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or any(character in value for character in "\x00\r\n")
+    ):
+        raise ValueError(f"failed device {field} has invalid text")
+    encoded = value.encode("utf-8")
+    if len(encoded) <= COLLECTION_CYCLE_MAX_FAILED_DEVICE_TEXT_BYTES:
+        return value
+    if not truncate:
+        raise ValueError(f"failed device {field} has invalid text")
+    # Legacy evidence was historically sliced by characters.  Preserve as
+    # much as can fit without cutting a UTF-8 code point; v2 never truncates.
+    return encoded[:COLLECTION_CYCLE_MAX_FAILED_DEVICE_TEXT_BYTES].decode(
+        "utf-8", errors="ignore"
+    )
+
+
+def _validate_collection_cycle_failed_devices_v2(
+    value: object,
+) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        raise ValueError("failed_devices must be a list")
+    if len(value) > COLLECTION_CYCLE_MAX_FAILED_DEVICES:
+        raise ValueError("failed_devices exceeds the device limit")
+
+    normalized: list[dict[str, object]] = []
+    seen_hostnames: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {
+            "hostname", "operations", "reason"
+        }:
+            raise ValueError("failed device must contain exact nested keys")
+        hostname = _validate_collection_cycle_failed_device_text(
+            item["hostname"], "hostname"
+        )
+        reason = _validate_collection_cycle_failed_device_text(
+            item["reason"], "reason"
+        )
+        operations = item["operations"]
+        if not isinstance(operations, list) or not operations:
+            raise ValueError("failed device operations must be a nonempty list")
+        if not all(
+            isinstance(operation, str)
+            and operation in COLLECTION_CYCLE_FAILED_DEVICE_OPERATIONS
+            for operation in operations
+        ):
+            raise ValueError("failed device operation is invalid")
+        hostname_key = hostname.casefold()
+        if hostname_key in seen_hostnames:
+            raise ValueError("failed device hostnames must be casefold-unique")
+        seen_hostnames.add(hostname_key)
+        normalized.append({
+            "hostname": hostname,
+            "operations": sorted(set(operations)),
+            "reason": reason,
+        })
+
+    return sorted(normalized, key=lambda item: item["hostname"].casefold())
+
+
+def _validate_collection_cycle_failed_devices_v1(
+    value: object,
+) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        raise ValueError("failed_devices must be a list")
+    if len(value) > COLLECTION_CYCLE_MAX_FAILED_DEVICES:
+        raise ValueError("failed_devices exceeds the device limit")
+
+    normalized: list[dict[str, str]] = []
+    seen_hostnames: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {
+            "hostname", "operation", "reason"
+        }:
+            raise ValueError("legacy failed device must contain exact nested keys")
+        hostname = _validate_collection_cycle_failed_device_text(
+            item["hostname"], "hostname"
+        )
+        operation = _validate_collection_cycle_failed_device_text(
+            item["operation"], "operation"
+        )
+        operations = operation.split(",")
+        if (
+            not operations
+            or operations != sorted(operations)
+            or len(operations) != len(set(operations))
+            or any(
+                value not in COLLECTION_CYCLE_FAILED_DEVICE_OPERATIONS
+                for value in operations
+            )
+        ):
+            raise ValueError("legacy failed device operation is invalid")
+        reason = _validate_collection_cycle_failed_device_text(
+            item["reason"], "reason", truncate=True
+        )
+        hostname_key = hostname.casefold()
+        if hostname_key in seen_hostnames:
+            raise ValueError("failed device hostnames must be casefold-unique")
+        seen_hostnames.add(hostname_key)
+        normalized.append({
+            "hostname": hostname,
+            "operation": operation,
+            "reason": reason,
+        })
+    return sorted(normalized, key=lambda item: item["hostname"].casefold())
+
+
+def _validate_collection_cycle_counts(
+    payload: dict[str, object],
+    *,
+    legacy: bool = False,
+) -> None:
+    for field in ("planned", "succeeded", "failed_count"):
+        value = payload[field]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"{field} must be a nonnegative integer")
+    validator = (
+        _validate_collection_cycle_failed_devices_v1
+        if legacy else _validate_collection_cycle_failed_devices_v2
+    )
+    failures = validator(payload["failed_devices"])
+    payload["failed_devices"] = failures
+    if payload["failed_count"] != len(failures):
+        raise ValueError("failed_count does not match failed_devices")
+    if payload["succeeded"] + payload["failed_count"] != payload["planned"]:
+        raise ValueError("collection result counts do not add up")
+
+    state = payload["state"]
+    if state not in {"success", "partial", "failed"}:
+        raise ValueError("collection child state is invalid")
+    if state == "success" and payload["failed_count"] != 0:
+        raise ValueError("successful collection result cannot contain failures")
+    if state == "partial" and (
+        payload["succeeded"] <= 0 or payload["failed_count"] <= 0
+    ):
+        raise ValueError("partial collection result requires successes and failures")
+    if state == "failed" and payload["succeeded"] != 0:
+        raise ValueError("failed collection result cannot contain successes")
+
+
+def validate_collection_cycle_result(
+    payload: object,
+    *,
+    expected_identity: object,
+    expected_slot: object,
+) -> dict[str, object]:
+    """Validate one exact schema-v2 child result against worker authority."""
+    identity = validate_collection_cycle_identity(expected_identity)
+    if expected_slot not in collection_cycle_source_slots(identity["scope"]):
+        raise ValueError("expected collection source slot is outside scope")
+    if not isinstance(payload, dict) or set(payload) != _COLLECTION_CYCLE_RESULT_KEYS:
+        raise ValueError("collection cycle result has invalid keys")
+    if type(payload["schema_version"]) is not int or payload["schema_version"] != 2:
+        raise ValueError("collection cycle result schema must be version 2")
+    if payload["task"] != "switch_collection":
+        raise ValueError("collection cycle result has invalid task")
+    normalized = copy.deepcopy(payload)
+    embedded_identity = {
+        key: normalized[key] for key in _COLLECTION_CYCLE_IDENTITY_KEYS
+    }
+    validate_collection_cycle_identity(embedded_identity)
+    for key in _COLLECTION_CYCLE_IDENTITY_KEYS:
+        if (type(normalized[key]) is not type(identity[key])
+                or normalized[key] != identity[key]):
+            raise ValueError(f"collection cycle result identity mismatch: {key}")
+    if normalized["source_slot"] != expected_slot:
+        raise ValueError("collection cycle source slot mismatch")
+    _validate_collection_cycle_counts(normalized)
+    _validate_collection_cycle_artifact(normalized["evidence"], "evidence")
+    _validate_collection_cycle_artifact(normalized["envelope"], "envelope")
+    _require_collection_cycle_sha256(
+        normalized["input_inventory_sha256"], "input_inventory_sha256"
+    )
+    return normalized
+
+
+def _validate_collection_cycle_legacy_result(payload: object) -> dict[str, object]:
+    """Validate the bounded legacy shape retained only as nonqualifying evidence."""
+    keys = {
+        "schema_version", "task", "state", "planned", "succeeded",
+        "failed_count", "failed_devices",
+    }
+    if not isinstance(payload, dict) or set(payload) != keys:
+        raise ValueError("legacy collection result has invalid keys")
+    if type(payload["schema_version"]) is not int or payload["schema_version"] != 1:
+        raise ValueError("legacy collection result schema must be version 1")
+    if payload["task"] != "switch_collection":
+        raise ValueError("legacy collection result has invalid task")
+    normalized = copy.deepcopy(payload)
+    _validate_collection_cycle_counts(normalized, legacy=True)
+    return normalized
+
+
+def _validate_collection_cycle_html_annotation(value: object) -> dict[str, object]:
+    if not isinstance(value, dict) or set(value) != {
+        "attempted", "state", "error_sha256"
+    }:
+        raise ValueError("HTML annotation has invalid keys")
+    attempted = value["attempted"]
+    state = value["state"]
+    error = value["error_sha256"]
+    if not isinstance(attempted, bool) or state not in {
+        "success", "failed", "not_attempted"
+    }:
+        raise ValueError("HTML annotation has invalid attempted/state values")
+    if attempted != (state != "not_attempted"):
+        raise ValueError("HTML attempted and state fields disagree")
+    if state == "failed":
+        _require_collection_cycle_sha256(error, "html error_sha256")
+    elif error is not None:
+        raise ValueError("only failed HTML annotations may contain an error digest")
+    return copy.deepcopy(value)
+
+
+def summarize_collection_cycle_results(
+    identity: object,
+    results: object,
+    *,
+    html_annotation: object,
+) -> dict[str, object]:
+    """Validate and canonically order raw child results, then qualify them."""
+    validated_identity = validate_collection_cycle_identity(identity)
+    slots = collection_cycle_source_slots(validated_identity["scope"])
+    if not isinstance(results, (list, tuple)) or len(results) != len(slots):
+        raise ValueError("collection cycle result set does not match scope")
+
+    ordered: dict[str, dict[str, object]] = {}
+    reason_set: set[str] = set()
+    for index, raw in enumerate(results):
+        if isinstance(raw, dict) and raw.get("schema_version") == 1:
+            slot = slots[index]
+            if slot in ordered:
+                raise ValueError("duplicate collection cycle source slot")
+            ordered[slot] = _validate_collection_cycle_legacy_result(raw)
+            reason_set.add("legacy")
+            continue
+        if not isinstance(raw, dict):
+            raise ValueError("collection cycle child result must be a mapping")
+        slot = raw.get("source_slot")
+        if slot not in slots or slot in ordered:
+            raise ValueError("unknown or duplicate collection cycle source slot")
+        validated = validate_collection_cycle_result(
+            raw,
+            expected_identity=validated_identity,
+            expected_slot=slot,
+        )
+        ordered[slot] = validated
+        state = validated["state"]
+        if state in {"partial", "failed"}:
+            reason_set.add(state)
+
+    if set(ordered) != set(slots):
+        raise ValueError("collection cycle result set is missing a source slot")
+    canonical_results = [ordered[slot] for slot in slots]
+    reasons = [
+        reason for reason in COLLECTION_CYCLE_QUALIFICATION_REASONS
+        if reason in reason_set
+    ]
+    slot_counts = {
+        slot: {
+            "planned": ordered[slot]["planned"],
+            "succeeded": ordered[slot]["succeeded"],
+            "failed_count": ordered[slot]["failed_count"],
+        }
+        for slot in slots
+    }
+    qualifying = not reasons
+    complete_empty = qualifying and all(
+        slot_counts[slot]["planned"] == 0 for slot in slots
+    )
+    return {
+        "identity": validated_identity,
+        "results": canonical_results,
+        "qualifying": qualifying,
+        "qualification_reasons": reasons,
+        "complete_empty": complete_empty,
+        "slot_counts": slot_counts,
+        "html_annotation": _validate_collection_cycle_html_annotation(
+            html_annotation
+        ),
+    }
 
 # Image-only filename boundary. Keep generic public .pub keys and explicit
 # *.service-account.json.example files; private-key basenames include copies.

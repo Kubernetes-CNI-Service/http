@@ -147,6 +147,7 @@ class ApachePublicationBoundaryTests(unittest.TestCase):
             "/DAY0-Prepare/11-load.py",
             "/day0-prepare/project/01-global.yaml",
             "/monitor/status/manual-ztp.status.json",
+            "/monitor/status/collection-cycles/2026-09-19T00-00-00Z.json",
             "/monitor/ztp-status/latest/report.json",
             "/ztp/status/latest/devices.csv",
             "/ztp/backup/yaml-backup/device.yaml",
@@ -291,6 +292,7 @@ class ApachePublicationBoundaryTests(unittest.TestCase):
         real_targets = (
             "/var/www/html/DAY0-Prepare/project/11-load.py",
             "/var/www/html/monitor/status/manual-ztp.status.json",
+            "/var/www/html/monitor/status/collection-cycles/air/ethernet/0001.json",
             "/var/www/html/ztp/status/latest/report.json",
             "/var/www/html/ztp/config/isc-dhcp-server/dhcpd.conf",
             "/var/www/html/ztp/config/cumulus/template/01-global.yaml",

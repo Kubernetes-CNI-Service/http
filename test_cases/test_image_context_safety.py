@@ -72,6 +72,7 @@ DENIED = (
     "infra/docker/container.env", "infra/docker/desired-state.json",
     "infra/docker/runtime-state.json", "ztp/.setup_manifest",
     "ztp/config/isc-dhcp-server/dhcpd_synthetic.hosts",
+    "monitor/status/collection-cycles/air/ethernet/0001.json",
     "monitor/generate-monitor.log", "monitor/monitor.html",
     "monitor/cabletracker-main/fixture.js", "monitor/cabletracker-main.zip",
     "DAY0-Prepare/template/id_ed25519", "DAY0-Prepare/template/id_rsa.backup",

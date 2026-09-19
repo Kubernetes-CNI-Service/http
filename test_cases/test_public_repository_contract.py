@@ -533,6 +533,22 @@ class PublicRepositoryAuditContractTest(unittest.TestCase):
 
 
 class PublicRepositoryWorkflowContractTest(unittest.TestCase):
+    def test_collection_cycle_records_inherit_monitor_status_git_ignore(self):
+        relative = (
+            "monitor/status/collection-cycles/air/ethernet/0001.json"
+        )
+        result = subprocess.run(
+            [
+                "git", "-C", str(ROOT), "check-ignore", "--no-index",
+                "--quiet", "--", relative,
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stderr or relative)
+
     def test_service_account_credentials_are_git_ignored_at_every_depth(self):
         ignore_lines = (ROOT / ".gitignore").read_text(
             encoding="utf-8",

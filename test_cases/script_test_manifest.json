@@ -109,6 +109,10 @@
       "description": "监控页面、采集 worker、IB 分析、手工比对和分组交接",
       "tests": [
         "test_cases.test_backup_auth_transport_workflow",
+        "test_cases.test_collection_cycle_contract",
+        "test_cases.test_collection_cycle_handoff_workflow",
+        "test_cases.test_collection_cycle_persistence",
+        "test_cases.test_collection_cycle_worker_contract",
         "test_cases.test_collector_inventory_pubkey",
         "test_cases.test_collector_inventory_pubkey_workflow",
         "test_cases.test_continuous_interval_handoff_workflow",
@@ -491,6 +495,8 @@
         "monitor/*"
       ],
       "tests": [
+        "test_cases.test_collection_cycle_persistence",
+        "test_cases.test_collection_cycle_worker_contract",
         "test_cases.test_monitor_stack_review",
         "test_cases.test_project_contracts",
         "test_cases.test_ztp_group_handoff",
@@ -1043,6 +1049,8 @@
       ],
       "tests": [
         "test_cases.test_backup_auth_transport_workflow",
+        "test_cases.test_collection_cycle_handoff_workflow",
+        "test_cases.test_collection_cycle_persistence",
         "test_cases.test_monitor_stack_review",
         "test_cases.test_project_contracts",
         "test_cases.test_ztp_container_runtime",
@@ -1051,6 +1059,28 @@
         "test_cases.test_ztp_group_handoff_display",
         "test_cases.test_collector_inventory_pubkey",
         "test_cases.test_collector_inventory_pubkey_workflow"
+      ]
+    },
+    {
+      "id": "collection_cycle_handoff",
+      "members": [
+        "tools/project_contract.py",
+        "monitor/switch-collection-worker.py",
+        "monitor/switch_collection_gate.py",
+        "monitor/generate-monitor-html.py",
+        "ethernet/monitor/cron.sh",
+        "ethernet/monitor/post-collect.py",
+        "infiniband/monitor/cron.sh",
+        "nvlink/monitor/cron.sh",
+        "tools/lldp-analyze-tool/analyze_lldp.py"
+      ],
+      "tests": [
+        "test_cases.test_collection_cycle_contract",
+        "test_cases.test_collection_cycle_handoff_workflow",
+        "test_cases.test_collection_cycle_persistence",
+        "test_cases.test_collection_cycle_worker_contract",
+        "test_cases.test_project_contracts",
+        "test_cases.test_monitor_stack_review"
       ]
     },
     {

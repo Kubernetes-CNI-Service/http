@@ -1135,3 +1135,24 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   SSH 凭据。每个负例从交换机/VM 快照恢复；成功例使用受管生成/replace 流程恢复原配置并再次验证
   startup 与登录。完整 replace 会删除未生成的现场配置，ACL 变化可能立即中断 SSH，因此首次只能在有
   console/OOB 和可回滚快照的实验设备执行，禁止在生产交换机首测。
+
+## TC-REAL-COLLECTION-CYCLE-001 — AIR/Production cycle、进程绑定与真实制品
+
+- 状态：**NOT RUN / REAL_ENV REQUIRED**。本机自动化已用真实 coordinator 子进程、匿名 context/result
+  FD、私有 lifecycle records 和 SIGKILL 验证 live-HOLD→dead-`cycle_crashed`→下一 sequence；fixture
+  collector 及合成 inventory/sidecar 不构成真实交换机、真实 archive 数量或真实 IB/NVLink 内容证据。
+- 前置条件：仅在隔离管理 VM 与批准的可回滚实验交换机执行，冻结源码/测试/manifest SHA-256、项目
+  identity、scope、所选 inventory 和 `monitor/status/collection-cycles` 前置树摘要；为 coordinator 及
+  全部 family child 提供独立进程观测和有界 TERM/KILL 清理能力，不使用生产设备或生产凭据。
+- 步骤与预期：分别运行 AIR、Production 和 all scope，证明实际 slot 顺序、每个真实 collector 的一次
+  执行、archive/CSV/info/link 的真实数量和内容类别、inventory binding、专用 coordinator PID/boot/start
+  identity，以及 completion 早于 cooldown/UI success。另在 launch 后分别保持 coordinator 存活、令
+  process inspection 不可用、再 SIGKILL；前两者必须 HOLD 且所有 durable bytes 不变，只有精确 dead
+  binding 才能发布 `cycle_crashed`，其后新 cycle 使用下一 sequence。busy/cooldown/取消须证明 witness、
+  records 与 sidecar 逐字节不变。
+- 证据：只保存脱敏 identity、sequence、cycle_id、PID/boot/start 摘要、record/tree SHA-256、slot/outcome
+  计数、archive 成员类别与退出码；不得保存设备输出、拓扑正文、密码、私钥或客户地址。AIR 无 IB/NVLink
+  的事实不得推广为 Production 内容为空，fixture v1 nonqualifying 结果不得宣称 artifact authority。
+- 清理与风险：停止 coordinator 进程组并核对无遗留 collector，保留只读脱敏 records 报告后销毁隔离
+  status/artifact 副本，从 VM/交换机快照恢复。错误 kill 目标、PID 复用或不完整 archive 可能造成错误
+  crash 判定或证据丢失；任何 process binding/cleanup/真实制品不确定均记 BLOCKED，不得降级为 PASS。

@@ -534,6 +534,18 @@ DHCP `INTERFACESv4` 策略（空值代表自动发现；显式值须与实际 cm
 
 直接 unittest discovery 只用于开发定位，不更新批准哈希，也不替代上面的发布门禁：
 
+`test_collection_cycle_contract.py`、`test_collection_cycle_worker_contract.py`、
+`test_collection_cycle_persistence.py` 与 `test_collection_cycle_handoff_workflow.py`
+共同约束 Switch collection cycle：纯层固定 scope/slot/identity/result；worker 对每个 slot 只产生一个
+终态 wrapper；只有持有 allowed collection gate 的 store 才能分配 sequence，并用私有 0700/0600、
+write-ahead witness 与不可覆盖 start/launch/completion 记录持久化。真实 collector 由专用 coordinator
+子进程运行，identity 只经匿名 context FD 进入，result 经匿名 FD 返回；父进程在放行子进程前先发布
+精确 PID/boot/start launch，验证完整 result 后先发布 completion，再允许 cooldown/UI success。
+busy/cooldown/取消和直接 internal-mode 调用不分配 sequence；SIGKILL 工作流必须先对 live binding HOLD，
+随后只在确认 dead 后写入 `cycle_crashed` 并分配下一 sequence。现有 v1 collector 可以操作成功，但其
+cycle 始终 nonqualifying；v2 artifact authority 属后续独立 emitter 批次，不能由本组测试伪造。
+真机/AIR/Production 边界登记于 `TC-REAL-COLLECTION-CYCLE-001`。
+
 ```bash
 PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -m unittest discover -s test_cases -t . -p 'test_*.py' -v
 ```
