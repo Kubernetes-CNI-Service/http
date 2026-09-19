@@ -809,6 +809,19 @@
   ],
   "workflows": [
     {
+      "id": "issue_tracker_policy_handoff",
+      "members": [
+        "tools/project_contract.py",
+        "DAY0-Prepare/01-a-setup.py",
+        "DAY0-Prepare/11-load.py",
+        "DAY0-Prepare/template/01-global.yaml"
+      ],
+      "tests": [
+        "test_cases.test_v2_project_schema",
+        "test_cases.test_v2_generation_flow"
+      ]
+    },
+    {
       "id": "monitor_authority_lifecycle_to_cgi",
       "members": [
         "tools/control-auth.py",

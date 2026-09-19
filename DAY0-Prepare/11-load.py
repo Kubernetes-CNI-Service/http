@@ -85,10 +85,12 @@ if str(TOOLS_DIR) not in sys.path:
 from project_contract import (
     GLOBAL_SCHEMA_VERSION,
     detect_global_schema_version,
+    normalize_issue_tracker_policy,
     normalize_v2_mlag_policy,
     normalize_v2_vrr_policy,
     parse_device_csv_layout,
     require_device_csv_row_width,
+    safe_load_global_yaml,
     validate_ztp_url_prefix,
 )
 from deployment_lock import (
@@ -871,13 +873,14 @@ def _parse_subnet_ztp_fields(
 def load_global(path: Path) -> GlobalSettings:
     _nonempty_file(path, "global.yaml")
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except yaml.YAMLError as exc:
+        data = safe_load_global_yaml(path.read_text(encoding="utf-8"))
+    except (yaml.YAMLError, ValueError) as exc:
         raise LoadError(f"global YAML 语法错误：{exc}") from exc
     if not isinstance(data, dict):
         raise LoadError("global.yaml 顶层必须是 mapping")
     try:
         schema_version = detect_global_schema_version(data)
+        normalize_issue_tracker_policy(data)
     except ValueError as exc:
         raise LoadError(str(exc)) from exc
     if "schema_version" not in data:

@@ -4,6 +4,11 @@
 schema_version: 2
 common:
   mgmt:
+    # Optional online publishing policy. It is disabled by default.
+    # publish_every_cycles defaults to 1; enabled also requires a
+    # spreadsheet_id matching [A-Za-z0-9_-]{20,}.
+    issue-tracker:
+      status: disabled
     dhcp-server:
       status: enabled
       package: isc-dhcp-server

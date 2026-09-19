@@ -21,6 +21,8 @@ SUPPORTED_GLOBAL_SCHEMA_VERSIONS = frozenset({1, 2})
 AIR_UNCONNECTED_ENDPOINT = "unconnected"
 AIR_OUTBOUND_ENDPOINT = "outbound"
 _MAC_ADDRESS = re.compile(r"^[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}$")
+_ISSUE_TRACKER_SPREADSHEET_ID = re.compile(r"^[A-Za-z0-9_-]{20,}$")
+_ISSUE_TRACKER_PATH = "common.mgmt.issue-tracker"
 
 # Image-only filename boundary. Keep generic public .pub keys and explicit
 # *.service-account.json.example files; private-key basenames include copies.
@@ -198,6 +200,41 @@ def safe_load_all_yaml_preserving_mac(stream):
     """Safely load YAML documents while preserving MAC-shaped scalars."""
     return yaml.load_all(stream, Loader=MacStringSafeLoader)
 
+
+class GlobalSafeLoader(yaml.SafeLoader):
+    """Plain SafeLoader semantics with recursive duplicate-key refusal."""
+
+
+def _construct_unique_global_mapping(loader, node, deep=False):
+    seen = set()
+    for key_node, _value_node in node.value:
+        # SafeLoader resolves YAML merge keys before constructing the final
+        # mapping.  They are composition directives, not literal mapping keys;
+        # keep their standard override semantics while checking every mapping
+        # that supplies the merged values through this same constructor.
+        if key_node.tag == "tag:yaml.org,2002:merge":
+            continue
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            duplicate = key in seen
+        except TypeError as exc:
+            raise ValueError("global YAML mapping key must be hashable") from exc
+        if duplicate:
+            raise ValueError(f"global YAML duplicate mapping key: {key!r}")
+        seen.add(key)
+    return yaml.SafeLoader.construct_mapping(loader, node, deep=deep)
+
+
+GlobalSafeLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_global_mapping,
+)
+
+
+def safe_load_global_yaml(stream):
+    """Match ``yaml.safe_load`` except recursively rejecting duplicate keys."""
+    return yaml.load(stream, Loader=GlobalSafeLoader)
+
 DEVICE_BASE_COLUMNS = (
     "hostname", "type", "template", "eth0_ip", "netmask", "eth0_gw",
     "eth0_mac", "eth1_ip", "netmask", "eth1_gw", "eth1_mac", "lo_ip",
@@ -262,6 +299,88 @@ def detect_global_schema_version(data: object) -> int:
             f"不支持的 global schema_version={value}；当前支持 1 和 2"
         )
     return value
+
+
+def normalize_issue_tracker_policy(
+        global_document: object) -> dict[str, object]:
+    """Validate and normalize ``common.mgmt.issue-tracker`` without mutation.
+
+    This setup/load handoff does not discharge the nonvacuous L2b integration
+    gate: the eventual real publisher must re-read and normalize on every
+    publish attempt. No placeholder publisher belongs in this module.
+    """
+    path = _ISSUE_TRACKER_PATH
+    if not isinstance(global_document, dict):
+        raise ValueError(f"{path}: global document must be a mapping")
+    try:
+        schema_version = detect_global_schema_version(global_document)
+    except ValueError as exc:
+        raise ValueError(f"{path}: {exc}") from exc
+
+    if "common" not in global_document:
+        block_present = False
+        block = None
+    else:
+        common = global_document["common"]
+        if not isinstance(common, dict):
+            raise ValueError(f"{path}: common must be a mapping")
+        if "mgmt" not in common:
+            block_present = False
+            block = None
+        else:
+            mgmt = common["mgmt"]
+            if not isinstance(mgmt, dict):
+                raise ValueError(f"{path}: common.mgmt must be a mapping")
+            block_present = "issue-tracker" in mgmt
+            block = mgmt.get("issue-tracker")
+
+    if not block_present:
+        return {
+            "status": "disabled",
+            "presence": "absent",
+            "spreadsheet_id": None,
+            "publish_every_cycles": 1,
+        }
+    if schema_version != CURRENT_GLOBAL_SCHEMA_VERSION:
+        raise ValueError(f"{path}: schema v1 documents forbid this block")
+    if not isinstance(block, dict):
+        raise ValueError(f"{path}: block must be a mapping")
+
+    allowed = {"status", "spreadsheet_id", "publish_every_cycles"}
+    unexpected = set(block) - allowed
+    if unexpected:
+        names = sorted(repr(key) for key in unexpected)
+        raise ValueError(f"{path}: unsupported keys: {names!r}")
+
+    status = block.get("status")
+    if not isinstance(status, str) or status not in {"disabled", "enabled"}:
+        raise ValueError(f"{path}.status must be exactly disabled or enabled")
+    cycles = block.get("publish_every_cycles", 1)
+    if isinstance(cycles, bool) or not isinstance(cycles, int) or cycles < 1:
+        raise ValueError(
+            f"{path}.publish_every_cycles must be an integer >= 1, excluding bool"
+        )
+
+    if status == "disabled":
+        if "spreadsheet_id" in block:
+            raise ValueError(f"{path}.spreadsheet_id is forbidden when disabled")
+        spreadsheet_id = None
+    else:
+        spreadsheet_id = block.get("spreadsheet_id")
+        if (
+            not isinstance(spreadsheet_id, str)
+            or _ISSUE_TRACKER_SPREADSHEET_ID.fullmatch(spreadsheet_id) is None
+        ):
+            raise ValueError(
+                f"{path}.spreadsheet_id must fullmatch [A-Za-z0-9_-]{{20,}}"
+            )
+
+    return {
+        "status": status,
+        "presence": "explicit",
+        "spreadsheet_id": spreadsheet_id,
+        "publish_every_cycles": cycles,
+    }
 
 
 def normalize_v2_vrr_policy(eth_config: object) -> dict[str, object]:

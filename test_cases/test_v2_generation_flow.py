@@ -647,6 +647,119 @@ class V2MlagSetupPreflightTests(unittest.TestCase):
             temporary.cleanup()
 
 
+class IssueTrackerSetupLoadWorkflowTests(unittest.TestCase):
+    """Setup and load share C-4 parsing before any link transaction."""
+
+    @staticmethod
+    def duplicate_policy_yaml():
+        return """schema_version: 2
+common:
+  mgmt:
+    issue-tracker: {status: disabled}
+    issue-tracker: {status: enabled, spreadsheet_id: AAAAAAAAAAAAAAAAAAAA}
+"""
+
+    def test_real_setup_and_load_both_reject_recursive_duplicate_keys(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            global_file = root / "01-global.yaml"
+            global_file.write_text(self.duplicate_policy_yaml(), encoding="utf-8")
+            setup_errors, _warnings = SETUP._validate_v2_mlag_project(
+                str(global_file), str(root / "02-devices_config.csv"),
+            )
+            self.assertTrue(
+                any("duplicate" in message for message in setup_errors),
+                setup_errors,
+            )
+            with self.assertRaisesRegex(LOAD.LoadError, "duplicate"):
+                LOAD.load_global(global_file)
+
+    def test_all_three_measured_global_call_sites_share_both_authorities(self):
+        setup_source = (ROOT / "DAY0-Prepare/01-a-setup.py").read_text(
+            encoding="utf-8",
+        )
+        load_source = (ROOT / "DAY0-Prepare/11-load.py").read_text(
+            encoding="utf-8",
+        )
+        self.assertEqual(2, setup_source.count("safe_load_global_yaml(stream)"))
+        self.assertEqual(2, setup_source.count(
+            "normalize_issue_tracker_policy(global_document)"
+        ))
+        self.assertEqual(1, load_source.count(
+            "safe_load_global_yaml(path.read_text(encoding=\"utf-8\"))"
+        ))
+        self.assertEqual(1, load_source.count(
+            "normalize_issue_tracker_policy(data)"
+        ))
+
+    def test_invalid_policy_stops_setup_before_link_transaction(self):
+        temporary, root, _errors, _warnings = run_v2_mlag_setup_preflight(
+            V2MlagSetupPreflightTests().pair(),
+        )
+        try:
+            document = yaml.safe_load(
+                (root / "01-global.yaml").read_text(encoding="utf-8")
+            )
+            document.setdefault("common", {}).setdefault("mgmt", {})[
+                "issue-tracker"
+            ] = {
+                "status": "enabled", "spreadsheet_id": "A" * 19,
+            }
+            (root / "01-global.yaml").write_text(
+                yaml.safe_dump(document, sort_keys=False), encoding="utf-8",
+            )
+            p2p = root / "p2p.xlsx"
+            p2p.write_bytes(b"fixture")
+            old_state = (
+                SETUP._P2P_SOURCE, SETUP._LINK_TRANSACTION, SETUP._STRICT,
+                SETUP._DRY_RUN, SETUP._AUTO_YES, SETUP._FORCE,
+            )
+            SETUP._P2P_SOURCE = None
+            SETUP._LINK_TRANSACTION = None
+            SETUP._STRICT = False
+            SETUP._DRY_RUN = True
+            SETUP._AUTO_YES = True
+            SETUP._FORCE = False
+            try:
+                with mock.patch.object(
+                    SETUP, "_initialize_project_from_template",
+                ), mock.patch.object(
+                    SETUP, "_select_p2p_source", return_value=str(p2p),
+                ), mock.patch.object(
+                    SETUP, "_validate_global_yaml", return_value=([], []),
+                ), mock.patch.object(
+                    SETUP, "_validate_eth_csv", return_value=([], []),
+                ), mock.patch.object(
+                    SETUP, "_validate_xlsx", return_value=([], []),
+                ), mock.patch.object(
+                    SETUP, "_SetupLinkTransaction",
+                ) as transaction, redirect_stdout(io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        SETUP._setup_impl(str(root))
+                transaction.assert_not_called()
+            finally:
+                (
+                    SETUP._P2P_SOURCE, SETUP._LINK_TRANSACTION, SETUP._STRICT,
+                    SETUP._DRY_RUN, SETUP._AUTO_YES, SETUP._FORCE,
+                ) = old_state
+        finally:
+            temporary.cleanup()
+
+    def test_template_declares_explicit_disabled_default_and_cadence_comment(self):
+        source = (ROOT / "DAY0-Prepare/template/01-global.yaml").read_text(
+            encoding="utf-8",
+        )
+        document = yaml.safe_load(source)
+        policy = __import__("project_contract").normalize_issue_tracker_policy(
+            document,
+        )
+        self.assertEqual("disabled", policy["status"])
+        self.assertEqual("explicit", policy["presence"])
+        self.assertEqual(1, policy["publish_every_cycles"])
+        self.assertIn("publish_every_cycles", source)
+        self.assertIn("spreadsheet_id", source)
+
+
 class ManagementDockerVersionContractTests(unittest.TestCase):
     def test_cumulus_517_and_518_remove_only_docker_state(self):
         for version in ("5.17.0", "5.17.3", "5.18.0", "5.18.1"):

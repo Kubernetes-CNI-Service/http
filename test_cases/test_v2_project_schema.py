@@ -10,6 +10,7 @@ import importlib.util
 from importlib.machinery import SourceFileLoader
 import io
 from pathlib import Path
+import re
 import sys
 import tempfile
 import unittest
@@ -661,6 +662,185 @@ switches:
                 csv.writer(stream).writerows([header, row("tan-leaf", "192.0.2.137")])
             errors, _warnings = SETUP._validate_eth_csv(str(csv_path))
             self.assertEqual([], errors)
+
+
+class SchemaSelectionAndIssueTrackerPolicyContractTests(unittest.TestCase):
+    """Schema selection plus C-4's strict normalizer and global loader."""
+
+    PATH = "common.mgmt.issue-tracker"
+
+    @staticmethod
+    def document(block=... , *, schema_version=2):
+        document = {
+            "schema_version": schema_version,
+            "common": {"mgmt": {}},
+        }
+        if block is not ...:
+            document["common"]["mgmt"]["issue-tracker"] = block
+        return document
+
+    def test_four_key_canonical_states_and_defaults(self):
+        cases = (
+            (
+                self.document(),
+                {
+                    "status": "disabled", "presence": "absent",
+                    "spreadsheet_id": None, "publish_every_cycles": 1,
+                },
+            ),
+            (
+                self.document({"status": "disabled"}),
+                {
+                    "status": "disabled", "presence": "explicit",
+                    "spreadsheet_id": None, "publish_every_cycles": 1,
+                },
+            ),
+            (
+                self.document({
+                    "status": "disabled", "publish_every_cycles": 7,
+                }),
+                {
+                    "status": "disabled", "presence": "explicit",
+                    "spreadsheet_id": None, "publish_every_cycles": 7,
+                },
+            ),
+            (
+                self.document({
+                    "status": "enabled",
+                    "spreadsheet_id": "A_b-0123456789abcdef0",
+                    "publish_every_cycles": 3,
+                }),
+                {
+                    "status": "enabled", "presence": "explicit",
+                    "spreadsheet_id": "A_b-0123456789abcdef0",
+                    "publish_every_cycles": 3,
+                },
+            ),
+        )
+        for document, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertEqual(
+                    expected, CONTRACT.normalize_issue_tracker_policy(document),
+                )
+                self.assertEqual(
+                    tuple(expected),
+                    tuple(CONTRACT.normalize_issue_tracker_policy(document)),
+                )
+
+    def test_twenty_character_spreadsheet_id_is_the_boundary(self):
+        accepted = "Ab_0123456789-cdefgh"
+        self.assertEqual(20, len(accepted))
+        result = CONTRACT.normalize_issue_tracker_policy(self.document({
+            "status": "enabled", "spreadsheet_id": accepted,
+        }))
+        self.assertEqual(accepted, result["spreadsheet_id"])
+
+    def test_all_frozen_validation_edges_fail_closed(self):
+        invalid_blocks = (
+            None,
+            {},
+            {"status": " enabled", "spreadsheet_id": "A" * 20},
+            {"status": "ENABLED", "spreadsheet_id": "A" * 20},
+            {"status": "enabled"},
+            {"status": "enabled", "spreadsheet_id": "A" * 19},
+            {"status": "enabled", "spreadsheet_id": "A" * 19 + "."},
+            {"status": "enabled", "spreadsheet_id": 12345678901234567890},
+            {"status": "disabled", "spreadsheet_id": None},
+            {"status": "disabled", "unexpected": 1},
+            {"status": "enabled", "spreadsheet_id": "A" * 20,
+             "publish_every_cycles": True},
+            {"status": "disabled", "publish_every_cycles": False},
+            {"status": "disabled", "publish_every_cycles": 1.0},
+            {"status": "disabled", "publish_every_cycles": "1"},
+            {"status": "disabled", "publish_every_cycles": 0},
+            {"status": []},
+            {"status": "disabled", 7: "unexpected"},
+        )
+        for block in invalid_blocks:
+            with self.subTest(block=block), self.assertRaisesRegex(
+                ValueError, re.escape(self.PATH),
+            ):
+                CONTRACT.normalize_issue_tracker_policy(self.document(block))
+
+        malformed_documents = (
+            None,
+            {"schema_version": 2, "common": None},
+            {"schema_version": 2, "common": {"mgmt": []}},
+        )
+        for document in malformed_documents:
+            with self.subTest(document=document), self.assertRaisesRegex(
+                ValueError, re.escape(self.PATH),
+            ):
+                CONTRACT.normalize_issue_tracker_policy(document)
+
+    def test_schema_v1_prohibits_the_block_but_absence_stays_disabled(self):
+        self.assertEqual(
+            "absent",
+            CONTRACT.normalize_issue_tracker_policy(
+                self.document(schema_version=1),
+            )["presence"],
+        )
+        for document in (
+            self.document({"status": "disabled"}, schema_version=1),
+            {"common": {"mgmt": {"issue-tracker": {"status": "disabled"}}}},
+        ):
+            with self.subTest(document=document), self.assertRaisesRegex(
+                ValueError, re.escape(self.PATH),
+            ):
+                CONTRACT.normalize_issue_tracker_policy(document)
+
+    def test_normalization_never_mutates_the_complete_input_document(self):
+        document = self.document({
+            "status": "enabled",
+            "spreadsheet_id": "A_b-0123456789abcdef0",
+            "publish_every_cycles": 9,
+        })
+        before = copy.deepcopy(document)
+        CONTRACT.normalize_issue_tracker_policy(document)
+        self.assertEqual(before, document)
+
+    def test_global_loader_equals_plain_safe_load_for_real_documents(self):
+        corpus = (
+            ROOT / "DAY0-Prepare/template/01-global.yaml",
+            ROOT / "examples/public-project/01-global.yaml.example",
+        )
+        for path in corpus:
+            with self.subTest(path=path):
+                source = path.read_text(encoding="utf-8")
+                self.assertEqual(
+                    yaml.safe_load(source),
+                    CONTRACT.safe_load_global_yaml(source),
+                )
+
+    def test_global_loader_preserves_safe_load_merge_key_semantics(self):
+        fixtures = (
+            "defaults: &defaults {status: disabled}\n"
+            "policy: {<<: *defaults, publish_every_cycles: 2}\n",
+            "defaults: &defaults\n"
+            "  status: disabled\n"
+            "policy:\n"
+            "  <<: *defaults\n"
+            "  status: enabled\n",
+        )
+        for source in fixtures:
+            with self.subTest(source=source):
+                self.assertEqual(
+                    yaml.safe_load(source),
+                    CONTRACT.safe_load_global_yaml(source),
+                )
+
+    def test_global_loader_recursively_rejects_duplicate_mapping_keys(self):
+        fixtures = (
+            "schema_version: 2\nschema_version: 2\n",
+            "common:\n  mgmt:\n    issue-tracker: {status: disabled}\n"
+            "    issue-tracker: {status: enabled, spreadsheet_id: "
+            + "A" * 20 + "}\n",
+        )
+        for source in fixtures:
+            with self.subTest(source=source):
+                self.assertIsNotNone(yaml.safe_load(source))
+                with self.assertRaisesRegex(ValueError, "duplicate"):
+                    CONTRACT.safe_load_global_yaml(source)
 
 
 class V2VrrTests(unittest.TestCase):

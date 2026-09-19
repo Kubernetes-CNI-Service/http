@@ -53,11 +53,13 @@ from project_contract import (
     NETWORK_MONITOR_SPECS, NETWORK_CSV_MAPPINGS, NETWORK_INVENTORY_LINKS,
     MONITOR_RUNTIME_MAPPINGS, LATEST_YAML_SPECS,
     detect_global_schema_version,
+    normalize_issue_tracker_policy,
     normalize_redundancy_mac,
     normalize_v2_mlag_policy,
     normalize_v2_vrr_policy,
     parse_device_csv_layout,
     require_device_csv_row_width,
+    safe_load_global_yaml,
     validate_ztp_url_prefix,
     v2_vrr_ipv4_plan,
 )
@@ -1417,8 +1419,10 @@ def _validate_v2_mlag_project(global_path, csv_path):
     try:
         import yaml
         with open(global_path, encoding="utf-8") as stream:
-            global_document = yaml.safe_load(stream)
-        if detect_global_schema_version(global_document) != 2:
+            global_document = safe_load_global_yaml(stream)
+        schema_version = detect_global_schema_version(global_document)
+        normalize_issue_tracker_policy(global_document)
+        if schema_version != 2:
             return errors, warnings
         eth_section = next((
             item.get("eth") for item in global_document.get("switches", [])
@@ -1821,8 +1825,9 @@ def _validate_eth_csv(path):
     try:
         import yaml
         with open(global_path, encoding="utf-8") as stream:
-            global_document = yaml.safe_load(stream)
+            global_document = safe_load_global_yaml(stream)
         schema_version = detect_global_schema_version(global_document)
+        normalize_issue_tracker_policy(global_document)
         if schema_version == 2 and isinstance(global_document, dict):
             eth_config = next((
                 item["eth"] for item in global_document.get("switches", [])
