@@ -35,6 +35,13 @@ loader 自己插入的 sys.path 项，保留模块自己声明的路径，保证
 ## 变更感知测试治理
 
 完整机制和退出码见 [CHANGE_AWARE_TESTING.md](CHANGE_AWARE_TESTING.md)。
+`test_runner_preflight.py` 覆盖 PF1–4：复用 public authority 的同一干净提交判定，保留固定
+历史模块的原合同，并按有效选测做本机 loopback bind/close 能力检查。独立 direct 与真实
+临时 Git 仓库的 runner CLI workflow 验证失败先于子进程和 ledger 写入；只读模式不增加
+网络要求。内容相同但 Git stat 信息陈旧时须显式运行 `git status` 后重跑；linked worktree
+须回到 main checkout。watch 不重试同一失败字节状态，权限或 Git 状态修复后必须重启。
+`--preflight` 不是测试证明或验收；H 及发布门禁保留。真实 OS 完整矩阵是 macOS/Linux 各自
+允许/拒绝 loopback，未执行的行保持 REAL_ENV OPEN。
 受管脚本、canonical 目标和软链接 alias 的数量由当前 manifest 与工作树动态推导；使用
 `run_related_tests.py --list` 查看当前值，不在文档中维护容易过期的快照。
 runner 每次运行都会重新发现生产脚本，并实时校验每个路径都有 direct 测试

@@ -19,6 +19,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import socket
 import stat
 import subprocess
 import sys
@@ -59,6 +60,26 @@ GENERATED_RUNTIME_SCRIPTS = frozenset({
 NON_SOURCE_ROOTS = frozenset({".git", ".codex", ".agents", "outputs"})
 # Keep this aligned with tools/project_contract.py.  These names describe
 # development/test data wherever they occur; they are not deployable scripts.
+
+# Exact historical test identities, not a stage-name or environment bypass.
+# Those unchanged modules keep their original staged-proof contracts. Any other
+# bytes select the ordinary V3 clean-candidate gate. Tests pin the historical
+# Git blobs independently; never refresh these hashes from current test output.
+PREFLIGHT_HISTORICAL_TESTS = {
+    "test_cases.test_public_publication_workflow":
+        "1bb652bb15f97e03e568270a57ee0a56515bc526cecd5034c6a99c031102358e",
+    "test_cases.test_public_publication_contract":
+        "3bc97396dd627830080b3bfcb0b3a340ce6cd9d19fdb377983edd26ca152db64",
+    "test_cases.test_public_project_fixture_workflow":
+        "aae51daa9f67eedd7701764289517c41defe6f264c48268e92faded9ee60849d",
+    "test_cases.test_public_s_phase_workflow":
+        "81c3a2606c66aa1b9cee320bfeb0366fb28ff2b865abd7c7e8f577f1e0766e4f",
+}
+PREFLIGHT_INET_TESTS = frozenset({
+    "test_cases.test_public_publication_workflow",
+    "test_cases.test_ztp_release_core_review",
+    "test_cases.test_runner_preflight",
+})
 
 
 class ImpactError(RuntimeError):
@@ -1195,7 +1216,135 @@ def atomic_write_approvals(
             pass
 
 
+def _load_preflight_authority(root: Path):
+    """Import the existing authority predicate without executing its tests."""
+    path = root / "test_cases/test_public_publication_workflow.py"
+    if not stat.S_ISREG(path.lstat().st_mode):
+        raise ImpactError("public clean-state authority is not a regular file")
+    name = "_impact_preflight_authority"
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise ImpactError("public clean-state authority cannot be imported")
+    module = importlib.util.module_from_spec(spec)
+    previous = sys.modules.get(name)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        if previous is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = previous
+    return module
+
+
+def _preflight_clean_candidate(root: Path, selected: set[str]) -> None:
+    git_entry = root / ".git"
+    try:
+        git_mode = git_entry.lstat().st_mode
+    except OSError:
+        git_mode = 0
+    if stat.S_ISREG(git_mode):
+        raise ImpactError(
+            "EFF E-3: linked Git worktree cannot supply the public authority's "
+            ".git/index proof; run this proof from the repository's main checkout"
+        )
+    current_candidate = False
+    for test_id in sorted(selected):
+        path = root / (test_id.replace(".", "/") + ".py")
+        if not stat.S_ISREG(path.lstat().st_mode):
+            raise ImpactError(
+                "EFF E-3: selected public authority is unavailable; restore the "
+                f"regular authority module {test_id} and rerun this preflight"
+            )
+        if sha256_file(path) != PREFLIGHT_HISTORICAL_TESTS[test_id]:
+            current_candidate = True
+    if not current_candidate:
+        # This is only dispatch, not a successful staged-proof attestation.
+        # The unchanged historical tests still check their full contract.
+        return
+    try:
+        authority = _load_preflight_authority(root)
+        captured_head = authority._head(root)
+        ledger = (root / authority.P_LEDGER_PATH).read_bytes()
+    except Exception as exc:
+        raise ImpactError(
+            "EFF E-3: selected public authority or Git metadata is unavailable; "
+            "repair the main checkout's Git metadata and rerun this preflight; "
+            f"required Git/authority checks must succeed ({exc})"
+        ) from exc
+    try:
+        # The SAME predicate used by public/historical authority tests. In
+        # particular, ledger-only dirt is not a special preflight exception.
+        authority._assert_clean_and_ledger(root, ledger, captured_head)
+    except Exception as exc:
+        try:
+            tracked = authority._git_run(
+                root, ["diff", "--quiet", captured_head, "--"],
+            )
+            untracked = authority._git_run(
+                root, ["ls-files", "--others", "--exclude-standard", "-z"],
+            )
+        except Exception as probe_exc:
+            raise ImpactError(
+                "EFF E-3: selected public authority or Git metadata is unavailable; "
+                "repair the main checkout's Git metadata and rerun this preflight; "
+                f"required Git/authority checks must succeed ({probe_exc})"
+            ) from probe_exc
+        if tracked.returncode not in (0, 1) or untracked.returncode != 0:
+            raise ImpactError(
+                "EFF E-3: selected public authority or Git metadata is unavailable; "
+                "repair the main checkout's Git metadata and rerun this preflight; "
+                "required Git/authority checks must succeed"
+            ) from exc
+        if tracked.returncode or untracked.stdout:
+            raise ImpactError(
+                "EFF E-3: selected public authority found staged, unstaged, "
+                "untracked, or ledger changes; commit the reviewed source/test "
+                "candidate after review and rerun this preflight; "
+                f"required Git/authority checks must succeed ({exc})"
+            ) from exc
+        if str(exc) != "P clean checkout has changed or untracked content":
+            raise ImpactError(
+                "EFF E-3: selected public authority or Git metadata is unavailable; "
+                "repair the main checkout's Git metadata and rerun this preflight; "
+                f"required Git/authority checks must succeed ({exc})"
+            ) from exc
+        raise ImpactError(
+            "EFF E-3: selected public authority found content-identical stat dirt; "
+            "run `git status` to refresh the index, then rerun this preflight; "
+            "commit only if Git still reports reviewed source/test changes; "
+            f"required Git/authority checks must succeed ({exc})"
+        ) from exc
+
+
+def _preflight_loopback_bind() -> None:
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            probe.bind(("127.0.0.1", 0))
+        finally:
+            probe.close()
+    except OSError as exc:
+        raise ImpactError(
+            "EFF E-1: local AF_INET TCP bind capability unavailable; use a scoped "
+            "rerun in an environment permitting 127.0.0.1 loopback bind "
+            f"for the selected fixtures ({exc})"
+        ) from exc
+
+
+def preflight_selection(root: Path, selection: Selection) -> None:
+    """Read-only capability checks for the effective modules, never approval."""
+    effective = set(discover_tests(root)) if selection.full_suite else selection.tests
+    public_authorities = set(effective).intersection(PREFLIGHT_HISTORICAL_TESTS)
+    if public_authorities:
+        _preflight_clean_candidate(root, public_authorities)
+    if PREFLIGHT_INET_TESTS.intersection(effective):
+        _preflight_loopback_bind()
+
+
 def run_selection(root: Path, selection: Selection, verbose: bool) -> int:
+    preflight_selection(root, selection)
     if selection.full_suite:
         command = [
             sys.executable, "-B", "-m", "unittest", "discover", "-b",
@@ -1268,6 +1417,10 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument("--list", action="store_true", help="show selection without running or approving")
     result.add_argument(
+        "--preflight", action="store_true",
+        help="validate the effective selection's capabilities without tests or approvals",
+    )
+    result.add_argument(
         "--suite", action="append", default=[], metavar="ID",
         help="run one logical test suite; repeat to combine suites (never updates approvals)",
     )
@@ -1326,6 +1479,21 @@ def _one_cycle(args: argparse.Namespace, *, watch: bool = False) -> tuple[int, s
         selection = select_tests(root, manifest, explicit, pending)
 
     state_key = json.dumps(snapshot_as_json(before), sort_keys=True)
+    if args.preflight:
+        print_selection(selection)
+        try:
+            preflight_selection(root, selection)
+        except ImpactError as exc:
+            print(
+                f"preflight failed; approved hashes were not changed: {exc}",
+                file=sys.stderr,
+            )
+            return 2, state_key
+        print(
+            "Git/capability preflight passed; full-suite runtime environment not "
+            "checked; tests not run; approval ledger unchanged"
+        )
+        return 0, state_key
     if not selection.changed_paths and not pending.any() and not explicit and not args.all:
         if not watch:
             print(f"no script or test changes; {len(before.scripts)} mappings valid")
@@ -1341,7 +1509,13 @@ def _one_cycle(args: argparse.Namespace, *, watch: bool = False) -> tuple[int, s
     print_selection(selection)
     if args.list:
         return 0, state_key
-    result = run_selection(root, selection, args.verbose)
+    try:
+        result = run_selection(root, selection, args.verbose)
+    except ImpactError as exc:
+        # Keep the failed source fingerprint for watch as well. A capability
+        # refusal is an attempted selection, not a reason to busy-retry Git.
+        print(f"preflight failed; approved hashes were not changed: {exc}", file=sys.stderr)
+        return 2, state_key
     if result:
         print("related tests failed; approved hashes were not changed", file=sys.stderr)
         return result, state_key
@@ -1407,6 +1581,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
     if args.interval < 0.2:
         parser().error("--interval must be at least 0.2 seconds")
+    if args.preflight and (args.check or args.list or args.list_suites or args.watch):
+        parser().error("--preflight cannot be combined with --check, --list, --list-suites, or --watch")
     if args.watch and (
         args.check or args.require_full or args.list or args.all or args.changed or args.changed_file
         or args.git or args.git_base
@@ -1437,8 +1613,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 0
             selection = select_test_suites(manifest, args.suite)
             print_selection(selection)
-            print("approval ledger: unchanged (logical suite run)")
-            return run_selection(ROOT, selection, args.verbose)
+            try:
+                if args.preflight:
+                    preflight_selection(ROOT, selection)
+                    print(
+                        "Git/capability preflight passed; full-suite runtime "
+                        "environment not checked; tests not run; approval ledger unchanged"
+                    )
+                    return 0
+                print("approval ledger: unchanged (logical suite run)")
+                return run_selection(ROOT, selection, args.verbose)
+            except ImpactError as exc:
+                print(
+                    f"preflight failed; approved hashes were not changed: {exc}",
+                    file=sys.stderr,
+                )
+                return 2
         if not args.watch:
             code, _state = _one_cycle(args)
             return code

@@ -12,6 +12,7 @@
       "id": "repository-governance",
       "description": "仓库入口、测试治理、公开边界和文档目录合同",
       "tests": [
+        "test_cases.test_runner_preflight",
         "test_cases.test_all_script_entrypoints",
         "test_cases.test_change_aware_test_runner",
         "test_cases.test_documentation_catalog",
@@ -1232,6 +1233,7 @@
         "tools/update-user-manual.py"
       ],
       "tests": [
+        "test_cases.test_runner_preflight",
         "test_cases.test_change_aware_test_runner",
         "test_cases.test_test_case_repository",
         "test_cases.test_documentation_catalog",

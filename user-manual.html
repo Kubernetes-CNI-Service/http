@@ -444,7 +444,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
         <p>本目录由 <code>tools/update-user-manual.py</code> 从 Git tracked 与非忽略文件生成；每个受维护文件必须有独立说明。大量项目数据、镜像、缓存与运行输出按路径模式说明，不把二进制内容嵌入网页。</p>
         <!-- BEGIN GENERATED USER MANUAL FILE CATALOG -->
         <div class="catalog-summary">
-          <span><strong>354</strong> 个受维护文件</span>
+          <span><strong>355</strong> 个受维护文件</span>
           <span><strong>24</strong> 个根级分组</span>
           <span>清单范围：Git tracked + untracked/nonignored</span>
         </div>
@@ -643,7 +643,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </tbody></table></div>
         </details>
         <details id="v2-file-group-test-cases" data-nav-title="test_cases/ 文件" class="catalog-group">
-          <summary><code>test_cases/</code> — 106 个文件</summary>
+          <summary><code>test_cases/</code> — 107 个文件</summary>
           <div><table class="file-catalog"><thead><tr><th>文件</th><th>说明</th></tr></thead><tbody>
             <tr data-file-path="test_cases/CASE_TEMPLATE.md"><td><code>test_cases/CASE_TEMPLATE.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>新增真机/破坏性验证案例时必须填写的证据模板。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/CHANGE_AWARE_TESTING.md"><td><code>test_cases/CHANGE_AWARE_TESTING.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：脚本变更影响测试。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -729,6 +729,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="test_cases/test_qos_evpn_uplink_generation.py"><td><code>test_cases/test_qos_evpn_uplink_generation.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>QoS and EVPN-MH BGP-uplink generation/workflow contracts。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_reference_only_path_disposition.py"><td><code>test_cases/test_reference_only_path_disposition.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct contracts for the central repository path-disposition authority。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_reference_only_selector_workflow.py"><td><code>test_cases/test_reference_only_selector_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Workflow contracts binding every deployment selector to one disposition。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_runner_preflight.py"><td><code>test_cases/test_runner_preflight.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>PF1–4: selection-aware capability gates, before children or approvals。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_shared_artifact_bundle.py"><td><code>test_cases/test_shared_artifact_bundle.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct and workflow contracts for independent shared-artifact bundles。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_splitter_profile_breakout.py"><td><code>test_cases/test_splitter_profile_breakout.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>REQ-14 direct contracts: splitter intent, not connected-lane count, owns mode。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_splitter_profile_breakout_workflow.py"><td><code>test_cases/test_splitter_profile_breakout_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>REQ-14 P2P inference -&gt; bound disk authority -&gt; real NVUE template workflow。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -974,7 +975,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
         <p>以下参考覆盖当前工作树中的每个 Python、Shell 与 CGI 文件，包括操作入口、内部库、worker、设备端脚本和开发测试。先看“是否直接运行”，再复制示例；内部组件不得脱离所属事务单独执行。</p>
         <!-- BEGIN GENERATED USER MANUAL SCRIPT REFERENCE -->
         <div class="catalog-summary">
-          <span><strong>225</strong> 个脚本型文件</span>
+          <span><strong>226</strong> 个脚本型文件</span>
           <span><strong>9</strong> 个功能分组</span>
           <span>每项均含运行、输入输出、示例与恢复合同</span>
         </div>
@@ -1669,7 +1670,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>readlink nvlink/monitor/sw-link.sh  # 预期解析到 ../../ethernet/monitor/sw-link.sh</code></pre></div>
         </details>
-        <h4 id="v2-script-group-test-cases" data-nav-title="test_cases/ 脚本">test_cases/ — 100 个脚本</h4>
+        <h4 id="v2-script-group-test-cases" data-nav-title="test_cases/ 脚本">test_cases/ — 101 个脚本</h4>
         <details data-script-reference="test_cases/__init__.py" class="script-reference">
           <summary><code>test_cases/__init__.py</code> — Canonical executable regression and integration test case package。</summary>
           <div class="script-body"><dl>
@@ -1805,7 +1806,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <dt>使用场景：</dt><dd>开发时选择受影响的 direct/workflow，或在正式 load 前签发并复核绑定当前字节的 full proof。</dd>
             <dt>前置条件：</dt><dd>工作树暂时冻结；manifest 映射完整；测试预期已独立评审；禁止手工修改批准 ledger。</dd>
             <dt>语法/调用方式：</dt><dd>python3 -B test_cases/run_related_tests.py [options]</dd>
-            <dt>主要参数：</dt><dd>--manifest, --approvals, --changed, --changed-file, --git-base, --git, --all, --check, --require-full, --list, --suite, --list-suites, --no-approve, --watch, --interval, -v, --verbose</dd>
+            <dt>主要参数：</dt><dd>--manifest, --approvals, --changed, --changed-file, --git-base, --git, --all, --check, --require-full, --list, --preflight, --suite, --list-suites, --no-approve, --watch, --interval, -v, --verbose</dd>
             <dt>输入：</dt><dd>当前生产脚本、测试、script_test_manifest.json、批准状态以及 Python/平台身份。</dd>
             <dt>输出/状态：</dt><dd>选测清单、unittest 结果和退出码；只有成功的 related/full 才能按合同原子更新批准状态。</dd>
             <dt>成功判据：</dt><dd>所有选中测试零 failure/error；正式发布还必须让 --all 成功，并让 --check --require-full 返回 0。</dd>
@@ -3073,6 +3074,24 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </dl>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_reference_only_selector_workflow</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_runner_preflight.py" class="script-reference">
+          <summary><code>test_cases/test_runner_preflight.py</code> — PF1–4: selection-aware capability gates, before children or approvals。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>PF1–4: selection-aware capability gates, before children or approvals。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_runner_preflight</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_runner_preflight</code></pre></div>
         </details>
         <details data-script-reference="test_cases/test_shared_artifact_bundle.py" class="script-reference">
           <summary><code>test_cases/test_shared_artifact_bundle.py</code> — Direct and workflow contracts for independent shared-artifact bundles。</summary>

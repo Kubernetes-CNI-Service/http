@@ -40,7 +40,7 @@ python3 -B test_cases/run_related_tests.py --suite packaging-sync --suite reposi
 `configuration-generation`、`monitoring-collection`、`ztp-runtime` 和 `vm-validation`。分类是
 互斥且完备的；新增、删除或重复归类测试模块都会使 manifest 校验失败。
 
-无 Git 环境直接比较批准哈希并运行受影响测试；通过后自动更新哈希：
+不需要 public authority 的选测在无 Git 环境也可比较批准哈希并运行；通过后自动更新哈希：
 
 ```bash
 PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B test_cases/run_related_tests.py -v
@@ -72,6 +72,39 @@ python3 -B test_cases/run_related_tests.py --watch --interval 2 -v
 `--list` 不执行且不写批准文件；`--no-approve` 执行但不更新哈希。`--watch` 对同一失败
 指纹只执行一次，文件再次变化后才重试。
 
+## PF1–4 选测预检
+
+```bash
+python3 -B test_cases/run_related_tests.py --all --preflight
+python3 -B test_cases/run_related_tests.py --suite repository-governance --preflight
+```
+
+`--preflight` 在 manifest 校验和实际选测后，只检查能力，不启动 unittest、不改 ledger；
+不能与 `--list`、`--list-suites`、`--check` 或 `--watch` 合用。预检通过不是测试通过，
+不产生或刷新 full-suite attestation，也不代替完整 Python/依赖环境、历史谱系或真实 fixture 验证。
+实际执行的 all、广泛回退、suite、related 和 watch 自动执行相同预检。全量按实际 discovery
+模块计算能力，不能只看 baseline 或命令行是否出现 `--all`。
+
+- public publication workflow/contract、public project fixture workflow、public S workflow
+  选中普通 V3 字节时，复用 `test_public_publication_workflow._assert_clean_and_ledger`。
+  staged、unstaged、untracked、仅 ledger 脏或必需的 Git/authority 不可用都报 `EFF E-3`，
+  要求先提交已审阅的源码/测试候选。不另写 porcelain 判定，不豁免 ledger。
+- 精确匹配固定已批准历史模块哈希时，保留该模块自己的 staged-proof 合同；历史同伴文件不能
+  豁免另一个已选中的当前模块。此分流不证明历史验收成功，也不修改冻结 P capsule。
+- public publication workflow、ztp release core review 和 runner preflight 的真实 loopback
+  测试需要 AF_INET/TCP `127.0.0.1:0` bind；探针在 finally 中关闭，不 listen、不 connect、
+  不启动 sshd。失败报 `EFF E-1`，要求仅对相应 fixture 在允许 loopback 的环境中 scoped rerun。
+  AF_UNIX-only 和其他无关 direct 选测不增加此要求。
+- 能力失败退出 `2`，不启动测试子进程，不改变批准文件，不算 skip。若内容未变但 Git stat
+  信息陈旧，先显式运行 `git status` 刷新 index、重跑预检，再提交仍报告的变化；预检本身不做
+  隐式 index 刷新。linked worktree 不满足当前 P 的 `.git/index` 权威，须回 main checkout。
+  watch 保留失败状态指纹；同一字节状态不自动重试，环境/Git 修复后必须退出并重启 watch。
+  真正 fixture 后续失败仍然阻断批准。
+
+`--list`、`--list-suites`、`--check --require-full` 不执行上述 Git/绑定预检，保留原有只读
+语义和证明检查。真实操作系统限制的证据见 `TC-REAL-RUNNER-PREFLIGHT-001`，H 和最终发布
+门禁均不因 PF 能力通过而关闭。
+
 当前 complete authorities 是 Cumulus `03-templates-j2` 的全部直接子 `.yaml.j2`，以及
 Cumulus/NVOS 配置根的全部直接子 `default*.yaml`；生成输出目录不属于这些正向 authority
 roots。Jinja 全量合同还逐项解析 include/import/from-import/extends 的单个静态 basename
@@ -100,7 +133,7 @@ macOS dry-run 不运行开发测试。正式 `sync-code` 或 `tar-for-upload` �
 
 - `0`：映射有效且测试通过，或没有变化。
 - `1`：相关/全量 unittest 失败；批准哈希保持不变。
-- `2`：manifest、路径、安全检查或测试期间 TOCTOU 失败。
+- `2`：manifest、路径、安全/能力预检或测试期间 TOCTOU 失败。
 - `3`：显式请求的 Git 变更发现失败。
 - `4`：`--check` 发现尚未批准的脚本、测试或 manifest 变化。
 - `5`：`--check --require-full` 未找到与当前精确字节和执行环境一致的全量测试证明。

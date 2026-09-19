@@ -617,7 +617,7 @@ class ImpactManifestTests(unittest.TestCase):
             with self.subTest(full_suite=selection.full_suite), mock.patch.object(
                 RUNNER.subprocess, "run",
                 return_value=subprocess.CompletedProcess([], 0),
-            ) as execute:
+            ) as execute, mock.patch.object(RUNNER, "preflight_selection"):
                 self.assertEqual(0, RUNNER.run_selection(ROOT, selection, False))
 
             call = execute.call_args

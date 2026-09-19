@@ -221,9 +221,10 @@ class GateCommandTests(unittest.TestCase):
                 return subprocess.CompletedProcess(command, 0)
             raise AssertionError(f"unexpected subprocess: {command!r}")
 
-        with mock.patch.object(
-            LOAD.subprocess, "run", side_effect=dispatch,
-        ), redirect_stdout(io.StringIO()):
+        with mock.patch.object(RUNNER, "preflight_selection"), \
+                mock.patch.object(
+                    LOAD.subprocess, "run", side_effect=dispatch,
+                ), redirect_stdout(io.StringIO()):
             LOAD.run_local_full_test_gate()
 
         self.assertEqual(1, len(unittest_calls))

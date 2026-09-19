@@ -7,6 +7,29 @@
 [《四类交付制品与 2026-12 部署流程》](../docs/deployment/BUNDLE_WORKFLOWS.md)；下面只登记必须在
 Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
+## TC-REAL-RUNNER-PREFLIGHT-001 — 操作系统 loopback 限制与选测早拒绝
+
+- 类型：scenario / real-environment；对应 PF1–4；完整真实 OS 矩阵是 macOS 与 Linux 各自一份
+  loopback 允许证据和一份拒绝证据；单一 OS 的两种权限状态不能关闭另一 OS 的行。
+- Status: OPEN / NOT RUN（真实 sandbox/namespace 权限切换；合成 audit-hook 拒绝不冒充 OS 证据）。
+- 自动化：`test_runner_preflight.py`，固定历史 Git blob、真实 throwaway Git 和 runner CLI，
+  clean/staged/unstaged/untracked/ledger-only、Git 失败、bind 成功/拒绝/关闭、只读/suite/fallback/watch。
+- 风险与目标：防止长测试运行后才发现必需的 loopback 权限缺失；涉及 runner → shared authority →
+  unittest → ledger 边界。不连接设备、远端、生产服务；不创建持久 listener 或 sshd。
+- 前置条件：双方绑定的已审阅干净候选、受管 Python/依赖环境、独立临时 clone；记录候选/测试/
+  manifest/ledger SHA256。由操作员提供一份拒绝 AF_INET bind 和一份允许 loopback 的本机环境，
+  不修改生产防火墙或全局安全策略；不得用 skip/force、ledger-only 例外或削弱断言代替。
+- 步骤：分别在两种环境对相同候选执行 `--suite ztp-runtime --preflight`；记录完整 argv、平台/
+  sandbox 身份、exit/stdout/stderr。拒绝环境再执行该 suite 的实际 runner；必须在 unittest 子进程
+  出现前报 EFF E-1。对 `--list-suites`、`--all --list`、`--check --require-full` 记录无新增 bind。
+- 预期与证据：允许环境只完成一次 `127.0.0.1:0` AF_INET/TCP bind 后关闭；预检不启动测试，
+  ledger 前后逐字节一致。拒绝环境退出 2、明确 scoped rerun，不算通过/skip；子进程与 socket
+  观察证据由本机外部观察器提供。check 的原证明结果独立保留；能力通过不能关闭 full/check、H 或 R2。
+- linked-worktree 行：在真实 `git worktree` 运行会以独立 EFF E-3 要求回到 main checkout；不把
+  authority 的 `.git/index` 合同改写为 linked-worktree 支持，也不以此结果冒充 clean PASS。
+- 故障注入与清理：分别使用 OS 权限拒绝与允许，不连接/监听；检查探针 FD 无残留，仅清理本案
+  自建临时 clone、外部观察记录与缓存。保留哈希绑定证据；重复执行不改变源码或批准文件。
+
 ## TC-REAL-IMAGE-CONTEXT-001 — 镜像 COPY 成员与物理树拒绝边界
 
 - 类型：integration / real-environment；对应 IMAGE-CONTEXT-SAFETY H1–H4 / AM-1–AM-9。
