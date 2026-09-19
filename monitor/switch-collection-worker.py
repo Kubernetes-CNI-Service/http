@@ -39,6 +39,7 @@ TOOLS_ROOT = HTTP_ROOT / "tools"
 if str(TOOLS_ROOT) not in sys.path:
     sys.path.insert(0, str(TOOLS_ROOT))
 
+from project_contract import MIN_CONTINUOUS_INTERVAL_MINUTES
 from project_contract import (
     COLLECTION_CYCLE_MAX_SEQUENCE,
     COLLECTION_CYCLE_MAX_FAILED_DEVICES,
@@ -53,7 +54,6 @@ from project_contract import (
     validate_collection_cycle_identity,
     validate_collection_cycle_result,
 )
-from project_contract import MIN_CONTINUOUS_INTERVAL_MINUTES
 
 
 STATUS_DIR = HTTP_ROOT / "monitor/status"
