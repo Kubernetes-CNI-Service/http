@@ -446,6 +446,13 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   归档和 YAML backup，随后各自进入下一轮 scheduled。确认四个按钮的解释与按钮相邻：手工项
   为“单次执行；开始后不可中断”，持续项为“周期执行；停止只取消后续轮次”。两个手工按钮在
   点击后均显示运行中且不可用，直到各自任务收口；不得出现手工停止动作。
+- 周期 authority 与边界证据：分别在 Native 服务和 container worker 中记录实际加载的
+  `<HTTP_ROOT>/tools/project_contract.py` 路径、owner、mode、size/SHA-256，并证明 worker 消费其
+  `MIN_CONTINUOUS_INTERVAL_MINUTES`，不存在本地 fallback。对收集与备份两种 start 请求各自实测
+  9、10、1440、1441：9 与 1441 fail closed，10 与 1440 接受并精确转换为分钟乘 60；同时证明
+  `switch_collection_gate.py` 的 collection cooldown、worker 的 YAML backup cooldown 和这个
+  admission floor 是三个独立量，不能互相派生或共享状态。`generate-monitor-html.py` 中的输入提示
+  值只是非权威 UX 副本；CGI 静态 pin 与 worker admission 才是 fail-closed 边界。
 - 互斥与安全证据：持续模式只禁用同类型手工按钮。直接构造同类型的同源 POST 必须返回 409，
   跨类型 POST 必须仍可下发。记录 collector argv、`/proc/<pid>/environ`、worker 状态/日志和 Unix socket
   元数据，确认密码不在 worker/collector argv、任何子进程 environment、状态文件、日志

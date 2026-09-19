@@ -111,6 +111,7 @@
         "test_cases.test_backup_auth_transport_workflow",
         "test_cases.test_collector_inventory_pubkey",
         "test_cases.test_collector_inventory_pubkey_workflow",
+        "test_cases.test_continuous_interval_handoff_workflow",
         "test_cases.test_ib_analysis_domain",
         "test_cases.test_manual_applied_config",
         "test_cases.test_monitor_stack_review",
@@ -1064,6 +1065,20 @@
         "test_cases.test_monitor_stack_review",
         "test_cases.test_ztp_container_runtime",
         "test_cases.test_ztp_release_core_review"
+      ]
+    },
+    {
+      "id": "continuous_interval_authority_handoff",
+      "members": [
+        "tools/project_contract.py",
+        "monitor/switch-collection-worker.py",
+        "monitor/switch_collection_gate.py",
+        "monitor/switch-collection-control.cgi"
+      ],
+      "tests": [
+        "test_cases.test_project_contracts",
+        "test_cases.test_monitor_stack_review",
+        "test_cases.test_continuous_interval_handoff_workflow"
       ]
     },
     {

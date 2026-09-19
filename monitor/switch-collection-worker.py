@@ -29,8 +29,14 @@ from switch_collection_gate import (
     collection_keys_for_scope,
 )
 
-
 HTTP_ROOT = Path(__file__).resolve().parent.parent
+TOOLS_ROOT = HTTP_ROOT / "tools"
+if str(TOOLS_ROOT) not in sys.path:
+    sys.path.insert(0, str(TOOLS_ROOT))
+
+from project_contract import MIN_CONTINUOUS_INTERVAL_MINUTES
+
+
 STATUS_DIR = HTTP_ROOT / "monitor/status"
 REQUEST_FILE = STATUS_DIR / "switch-collection.request"
 STATUS_FILE = STATUS_DIR / "switch-collection.status.json"
@@ -41,7 +47,6 @@ CONTINUOUS_BACKUP_STATUS_FILE = STATUS_DIR / "continuous-backup.status.json"
 YAML_BACKUP_SOCKET = STATUS_DIR / ".yaml-backup.sock"
 YAML_BACKUP_SCRIPT = HTTP_ROOT / "ztp/backup/yaml-collect.py"
 YAML_BACKUP_COOLDOWN_SECONDS = 10 * 60
-MIN_CONTINUOUS_INTERVAL_MINUTES = 10
 MAX_CONTINUOUS_INTERVAL_MINUTES = 24 * 60
 MAX_PASSWORD_BYTES = 1024
 MAX_MEMORY_REQUEST_BYTES = 2048

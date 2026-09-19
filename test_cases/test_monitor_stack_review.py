@@ -4116,6 +4116,207 @@ print('{{"factory_records_active":true,"valid":true}}')
         )
         self.assertEqual("400 Bad Request", response.call_args.args[1])
 
+    def test_worker_imports_interval_floor_and_keeps_timing_quantities_distinct(self):
+        worker_source = (
+            ROOT / "monitor/switch-collection-worker.py"
+        ).read_text(encoding="utf-8")
+        gate_source = (
+            ROOT / "monitor/switch_collection_gate.py"
+        ).read_text(encoding="utf-8")
+        def authority_errors(source):
+            tree = ast.parse(source)
+            local_floor_assignments = []
+            imported_floor = []
+            guarded_imports = []
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                    if any(
+                        isinstance(target, ast.Name)
+                        and target.id == "MIN_CONTINUOUS_INTERVAL_MINUTES"
+                        for target in targets
+                    ):
+                        local_floor_assignments.append(node)
+                if isinstance(node, ast.ImportFrom) and node.module == "project_contract":
+                    imported_floor.extend(alias.name for alias in node.names)
+                if isinstance(node, ast.Try) and any(
+                    isinstance(child, ast.ImportFrom)
+                    and child.module == "project_contract"
+                    for child in ast.walk(node)
+                ):
+                    guarded_imports.append(node)
+            errors = []
+            if local_floor_assignments:
+                errors.append("worker has a local floor or fallback")
+            if imported_floor != ["MIN_CONTINUOUS_INTERVAL_MINUTES"]:
+                errors.append("worker lacks one exact canonical import")
+            if guarded_imports:
+                errors.append("canonical import is hidden behind a fallback")
+            if 'HTTP_ROOT / "tools"' not in source:
+                errors.append("worker lacks deterministic tools provenance")
+            gate_position = source.find("from switch_collection_gate import")
+            tools_position = source.find('TOOLS_ROOT = HTTP_ROOT / "tools"')
+            contract_position = source.find(
+                "from project_contract import MIN_CONTINUOUS_INTERVAL_MINUTES"
+            )
+            if not 0 <= gate_position < tools_position < contract_position:
+                errors.append("tools path can shadow the local collection gate")
+            return errors
+
+        self.assertEqual([], authority_errors(worker_source))
+        self.assertTrue(authority_errors(worker_source.replace(
+            "from project_contract import MIN_CONTINUOUS_INTERVAL_MINUTES\n",
+            "",
+            1,
+        )))
+        self.assertTrue(authority_errors(
+            worker_source + "\nMIN_CONTINUOUS_INTERVAL_MINUTES = 10\n",
+        ))
+        self.assertTrue(authority_errors(worker_source.replace(
+            "from project_contract import MIN_CONTINUOUS_INTERVAL_MINUTES\n",
+            "try:\n"
+            "    from project_contract import MIN_CONTINUOUS_INTERVAL_MINUTES\n"
+            "except ImportError:\n"
+            "    MIN_CONTINUOUS_INTERVAL_MINUTES = 10\n",
+            1,
+        )))
+        self.assertIn('HTTP_ROOT / "tools"', worker_source)
+        self.assertIn("YAML_BACKUP_COOLDOWN_SECONDS = 10 * 60", worker_source)
+        self.assertIn("COOLDOWN_SECONDS = 10 * 60", gate_source)
+        self.assertNotIn(
+            "MIN_CONTINUOUS_INTERVAL_MINUTES = 10", worker_source,
+        )
+
+    def test_worker_continuous_interval_boundaries_use_the_canonical_floor(self):
+        test_value = "-".join(("fixed", "secret"))
+        for action in (
+            "continuous_collection_start", "continuous_backup_start",
+        ):
+            for interval in (10, 1440):
+                with self.subTest(action=action, interval=interval):
+                    encoded = {
+                        "action": action,
+                        "interval_minutes": interval,
+                    }
+                    if action == "continuous_backup_start":
+                        encoded["password"] = test_value
+                    decoded = self.switch_worker.decode_yaml_backup_request(
+                        json.dumps(encoded).encode("utf-8"),
+                    )
+                    self.assertEqual(interval, decoded["interval_minutes"])
+                    self.assertEqual(
+                        interval,
+                        self.switch_worker._validated_interval(
+                            {"action": action, "interval_minutes": interval},
+                            action,
+                        ),
+                    )
+            for interval in (9, 1441, True, False, 10.0, "10", None):
+                with self.subTest(action=action, interval=interval):
+                    encoded = {
+                        "action": action,
+                        "interval_minutes": interval,
+                    }
+                    if action == "continuous_backup_start":
+                        encoded["password"] = test_value
+                    with self.assertRaises(ValueError):
+                        self.switch_worker.decode_yaml_backup_request(
+                            json.dumps(encoded).encode("utf-8"),
+                        )
+                    with self.assertRaises(ValueError):
+                        self.switch_worker._validated_interval(
+                            {"action": action, "interval_minutes": interval},
+                            action,
+                        )
+
+    def test_worker_continuous_interval_conversion_is_exact_minutes_to_seconds(self):
+        worker = self.switch_worker
+        test_value = "-".join(("fixed", "secret"))
+        with (
+            mock.patch.object(worker, "write_continuous_status"),
+            mock.patch.object(worker, "write_continuous_backup_status"),
+            mock.patch.object(worker.time, "monotonic", return_value=42.0),
+        ):
+            worker.configure_continuous_collection({
+                "action": "continuous_collection_start",
+                "interval_minutes": 10,
+            })
+            worker.configure_continuous_backup({
+                "action": "continuous_backup_start",
+                "password": test_value,
+                "interval_minutes": 1440,
+            })
+        self.assertEqual(10 * 60, worker._CONTINUOUS_COLLECTION_INTERVAL_SECONDS)
+        self.assertEqual(1440 * 60, worker._CONTINUOUS_BACKUP_INTERVAL_SECONDS)
+        worker.stop_continuous_collection_mode("test cleanup")
+        worker.stop_continuous_backup_mode("test cleanup")
+
+    def test_cgi_static_interval_pin_is_bidirectional_and_mutation_proven(self):
+        # generate-monitor-html.py keeps non-authoritative UX hints; the CGI
+        # static pin and worker admission remain the fail-closed authorities.
+        contract_source = (ROOT / "tools/project_contract.py").read_text(
+            encoding="utf-8",
+        )
+        cgi_source = (
+            ROOT / "monitor/switch-collection-control.cgi"
+        ).read_text(encoding="utf-8")
+
+        def assigned_integers(source, predicate):
+            result = []
+            for node in ast.walk(ast.parse(source)):
+                if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                    continue
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                value = node.value
+                for target in targets:
+                    if (
+                        isinstance(target, ast.Name) and predicate(target.id)
+                        and isinstance(value, ast.Constant)
+                        and type(value.value) is int
+                    ):
+                        result.append((target.id, value.value))
+            return result
+
+        def parity_errors(canonical, cgi):
+            errors = []
+            canonical_values = assigned_integers(
+                canonical, lambda name: name == "MIN_CONTINUOUS_INTERVAL_MINUTES",
+            )
+            cgi_values = assigned_integers(
+                cgi, lambda name: "CONTINUOUS_INTERVAL_MINUTES" in name,
+            )
+            cgi_ten_literals = [
+                node for node in ast.walk(ast.parse(cgi))
+                if isinstance(node, ast.Constant)
+                and type(node.value) is int and node.value == 10
+            ]
+            if len(canonical_values) != 1:
+                errors.append("canonical authority must be singular")
+            if len(cgi_values) != 1:
+                errors.append("CGI ten-minute source must remain singular")
+            if len(cgi_ten_literals) != 1:
+                errors.append("CGI has an independent ten-minute literal")
+            minimums = [value for name, value in cgi_values if name.startswith("MIN_")]
+            if len(minimums) != 1 or not canonical_values or minimums[0] != canonical_values[0][1]:
+                errors.append("CGI minimum differs from canonical authority")
+            if "from project_contract import" in cgi or "import project_contract" in cgi:
+                errors.append("CGI must not gain a runtime authority import")
+            return errors
+
+        self.assertEqual([], parity_errors(contract_source, cgi_source))
+        self.assertTrue(parity_errors(
+            contract_source.replace(
+                "MIN_CONTINUOUS_INTERVAL_MINUTES = 10",
+                "MIN_CONTINUOUS_INTERVAL_MINUTES = 11",
+                1,
+            ),
+            cgi_source,
+        ))
+        self.assertTrue(parity_errors(
+            contract_source,
+            cgi_source + "\nFLOOR = 10\n",
+        ))
+
     def test_continuous_start_rejects_same_type_manual_work_only(self):
         with mock.patch.object(
             self.switch_cgi, "send_memory_request",
@@ -6089,9 +6290,11 @@ class SwitchWorkerProcessLifecycleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             monitor = root / "monitor"
+            tools = root / "tools"
             ethernet = root / "ethernet/monitor"
             project = root / "project"
             monitor.mkdir(parents=True)
+            tools.mkdir()
             ethernet.mkdir(parents=True)
             project.mkdir()
             shutil.copy2(
@@ -6101,6 +6304,10 @@ class SwitchWorkerProcessLifecycleTests(unittest.TestCase):
             shutil.copy2(
                 ROOT / "monitor/switch_collection_gate.py",
                 monitor / "switch_collection_gate.py",
+            )
+            shutil.copy2(
+                ROOT / "tools/project_contract.py",
+                tools / "project_contract.py",
             )
             inventory = project / "02-devices_config.csv"
             inventory.write_text("hostname,type\n", encoding="utf-8")

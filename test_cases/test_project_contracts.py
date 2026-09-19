@@ -5894,6 +5894,14 @@ class TransferContractTests(unittest.TestCase):
         import project_contract
         cls.contract = project_contract
 
+    def test_continuous_interval_floor_is_one_exact_integer_authority(self):
+        self.assertIs(
+            type(self.contract.MIN_CONTINUOUS_INTERVAL_MINUTES), int,
+        )
+        self.assertEqual(
+            10, self.contract.MIN_CONTINUOUS_INTERVAL_MINUTES,
+        )
+
     def test_mac_preserving_yaml_loader_is_local_and_keeps_numeric_semantics(self):
         mac = ":".join(("46", "38", "39", "01", "01", "01"))
         payload = (
