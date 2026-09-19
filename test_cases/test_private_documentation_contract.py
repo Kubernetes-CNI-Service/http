@@ -10,6 +10,8 @@ import unittest
 
 from test_cases.test_documentation_catalog import *  # public catalog helpers
 from test_cases.test_documentation_catalog import DocumentationCatalogTests
+from monitor.switch_collection_gate import COOLDOWN_SECONDS
+from tools.project_contract import MIN_CONTINUOUS_INTERVAL_MINUTES
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1151,14 +1153,23 @@ class PrivateDocumentationContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         combined = "\n".join((monitor_doc, user_doc, backup_doc, real_cases))
+        cooldown_minutes, cooldown_remainder = divmod(COOLDOWN_SECONDS, 60)
+        self.assertEqual(0, cooldown_remainder)
         self.assertIn("Switch Status 默认关闭", combined)
         self.assertIn("信息收集", combined)
         self.assertIn("配置备份", combined)
         self.assertIn("持续收集", combined)
         self.assertIn("持续备份", combined)
-        self.assertIn("最小 10 分钟", combined)
+        self.assertIn(
+            f"最小 {MIN_CONTINUOUS_INTERVAL_MINUTES} 分钟", backup_doc,
+        )
         self.assertIn("收集与备份可以同时运行", combined)
-        self.assertIn("同类型共用 10 分钟冷却", combined)
+        # The continuous admission floor and same-type gate cooldown happen to
+        # render as 10 minutes today, but remain independent quantities.
+        self.assertIn("独立状态、周期和冷却", backup_doc)
+        self.assertIn(
+            f"同类型共用 {cooldown_minutes} 分钟冷却", backup_doc,
+        )
         self.assertIn("停止持续收集不会停止配置备份", combined)
         self.assertIn("停止中，等待当前任务完成", combined)
         self.assertIn("单次执行；开始后不可中断", combined)

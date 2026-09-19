@@ -23,10 +23,14 @@ sys.path.insert(0, str(root / "monitor"))
 worker = runpy.run_path(str(root / "monitor/switch-collection-worker.py"))
 import project_contract
 test_value = "-".join(("fixed", "secret"))
+authority = project_contract.MIN_CONTINUOUS_INTERVAL_MINUTES
 checks = {}
 for action in ("continuous_collection_start", "continuous_backup_start"):
     action_checks = {}
-    for value in (9, 10, 1440, 1441, True, 10.0, "10"):
+    for value in (
+        9, 10, authority - 1, authority, 1440, 1441,
+        True, float(authority), str(authority),
+    ):
         message = {"action": action, "interval_minutes": value}
         if action == "continuous_backup_start":
             message["password"] = test_value
@@ -41,7 +45,7 @@ for action in ("continuous_collection_start", "continuous_backup_start"):
         action_checks[repr(value)] = observed
     checks[action] = action_checks
 worker["configure_continuous_collection"]({
-    "action": "continuous_collection_start", "interval_minutes": 10,
+    "action": "continuous_collection_start", "interval_minutes": authority,
 })
 worker["configure_continuous_backup"]({
     "action": "continuous_backup_start", "password": test_value,
@@ -100,6 +104,47 @@ print(json.dumps({
             self.assertEqual("rejected", checks["'10'"])
         self.assertEqual(10 * 60, payload["collection_seconds"])
         self.assertEqual(1440 * 60, payload["backup_seconds"])
+
+    def test_temp_authority_change_to_fifteen_is_consumed_by_real_worker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.make_layout(directory)
+            authority = root / "tools/project_contract.py"
+            source = authority.read_text(encoding="utf-8")
+            self.assertEqual(
+                1, source.count("MIN_CONTINUOUS_INTERVAL_MINUTES = 10"),
+            )
+            authority.write_text(
+                source.replace(
+                    "MIN_CONTINUOUS_INTERVAL_MINUTES = 10",
+                    "MIN_CONTINUOUS_INTERVAL_MINUTES = 15",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            result = self.run_layout(root)
+            self.assertEqual(0, result.returncode, result.stderr)
+            payload = json.loads(result.stdout)
+
+        self.assertEqual(15, payload["authority"])
+        self.assertEqual("rejected", payload["checks"][
+            "continuous_collection_start"
+        ]["10"])
+        self.assertEqual("rejected", payload["checks"][
+            "continuous_collection_start"
+        ]["14"])
+        self.assertEqual([15, 15], payload["checks"][
+            "continuous_collection_start"
+        ]["15"])
+        self.assertEqual("rejected", payload["checks"][
+            "continuous_backup_start"
+        ]["10"])
+        self.assertEqual("rejected", payload["checks"][
+            "continuous_backup_start"
+        ]["14"])
+        self.assertEqual([15, 15], payload["checks"][
+            "continuous_backup_start"
+        ]["15"])
+        self.assertEqual(15 * 60, payload["collection_seconds"])
 
     def test_missing_or_incomplete_authority_fails_worker_import_closed(self):
         with tempfile.TemporaryDirectory() as directory:

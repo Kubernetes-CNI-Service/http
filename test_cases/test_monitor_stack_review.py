@@ -1748,6 +1748,9 @@ class ControlPlaneTests(unittest.TestCase):
         cls.switch_worker = load_module(
             "review_switch_worker", ROOT / "monitor/switch-collection-worker.py"
         )
+        cls.project_contract = load_module(
+            "review_project_contract", ROOT / "tools/project_contract.py"
+        )
         cls.yaml_backup = load_module(
             "review_yaml_backup", ROOT / "ztp/backup/yaml-collect.py"
         )
@@ -3835,8 +3838,14 @@ print('{{"factory_records_active":true,"valid":true}}')
             encoding="utf-8"
         )
         self.assertIn("enabled: tab !== 'eth'", source)
-        self.assertIn('id="continuous-collection-interval"', source)
-        self.assertIn('min="10"', source)
+        for control_id in (
+            "continuous-collection-interval", "continuous-backup-interval",
+        ):
+            self.assertRegex(
+                source,
+                rf'id="{control_id}"[^>]*\bmin="'
+                rf'{self.project_contract.MIN_CONTINUOUS_INTERVAL_MINUTES}"',
+            )
         self.assertIn('id="continuous-collection-button"', source)
         self.assertIn("continuousCollectionEnabled", source)
         self.assertIn("continuousCollectionStartPending", source)
@@ -4261,20 +4270,32 @@ print('{{"factory_records_active":true,"valid":true}}')
             ROOT / "monitor/switch-collection-control.cgi"
         ).read_text(encoding="utf-8")
 
+        def integer_expression(node):
+            # Keep this intentionally narrow: the guard mirrors the current
+            # literal-or-product constant shape. If production adopts a new
+            # expression form, maintaining this AST pin is an explicit cost.
+            if isinstance(node, ast.Constant) and type(node.value) is int:
+                return node.value
+            if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
+                left = integer_expression(node.left)
+                right = integer_expression(node.right)
+                if left is not None and right is not None:
+                    return left * right
+            return None
+
         def assigned_integers(source, predicate):
             result = []
             for node in ast.walk(ast.parse(source)):
                 if not isinstance(node, (ast.Assign, ast.AnnAssign)):
                     continue
                 targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-                value = node.value
+                value = integer_expression(node.value)
                 for target in targets:
                     if (
                         isinstance(target, ast.Name) and predicate(target.id)
-                        and isinstance(value, ast.Constant)
-                        and type(value.value) is int
+                        and value is not None
                     ):
-                        result.append((target.id, value.value))
+                        result.append((target.id, value))
             return result
 
         def parity_errors(canonical, cgi):
@@ -4282,8 +4303,11 @@ print('{{"factory_records_active":true,"valid":true}}')
             canonical_values = assigned_integers(
                 canonical, lambda name: name == "MIN_CONTINUOUS_INTERVAL_MINUTES",
             )
-            cgi_values = assigned_integers(
-                cgi, lambda name: "CONTINUOUS_INTERVAL_MINUTES" in name,
+            cgi_minimums = assigned_integers(
+                cgi, lambda name: name == "MIN_CONTINUOUS_INTERVAL_MINUTES",
+            )
+            cgi_maximums = assigned_integers(
+                cgi, lambda name: name == "MAX_CONTINUOUS_INTERVAL_MINUTES",
             )
             cgi_ten_literals = [
                 node for node in ast.walk(ast.parse(cgi))
@@ -4292,13 +4316,30 @@ print('{{"factory_records_active":true,"valid":true}}')
             ]
             if len(canonical_values) != 1:
                 errors.append("canonical authority must be singular")
-            if len(cgi_values) != 1:
+            if len(cgi_minimums) != 1:
                 errors.append("CGI ten-minute source must remain singular")
+            if len(cgi_maximums) != 1:
+                errors.append("CGI maximum source must remain singular")
             if len(cgi_ten_literals) != 1:
                 errors.append("CGI has an independent ten-minute literal")
-            minimums = [value for name, value in cgi_values if name.startswith("MIN_")]
-            if len(minimums) != 1 or not canonical_values or minimums[0] != canonical_values[0][1]:
+            if (
+                len(cgi_minimums) != 1 or not canonical_values
+                or cgi_minimums[0][1] != canonical_values[0][1]
+            ):
                 errors.append("CGI minimum differs from canonical authority")
+            if canonical_values and cgi_maximums:
+                expected_error = (
+                    "interval_minutes must be between "
+                    f"{canonical_values[0][1]} and {cgi_maximums[0][1]}"
+                )
+                operator_errors = [
+                    node.value for node in ast.walk(ast.parse(cgi))
+                    if isinstance(node, ast.Constant)
+                    and isinstance(node.value, str)
+                    and node.value.startswith("interval_minutes must be between ")
+                ]
+                if operator_errors != [expected_error]:
+                    errors.append("CGI operator-facing interval error is stale")
             if "from project_contract import" in cgi or "import project_contract" in cgi:
                 errors.append("CGI must not gain a runtime authority import")
             return errors
@@ -4315,6 +4356,14 @@ print('{{"factory_records_active":true,"valid":true}}')
         self.assertTrue(parity_errors(
             contract_source,
             cgi_source + "\nFLOOR = 10\n",
+        ))
+        self.assertTrue(parity_errors(
+            contract_source,
+            cgi_source.replace(
+                "interval_minutes must be between 10 and 1440",
+                "interval_minutes must be between 11 and 1440",
+                1,
+            ),
         ))
 
     def test_continuous_start_rejects_same_type_manual_work_only(self):
