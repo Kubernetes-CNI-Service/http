@@ -4120,6 +4120,16 @@ print('{{"factory_records_active":true,"valid":true}}')
         for interval in ("9", "0", "1441", "not-a-number"):
             with self.subTest(interval=interval), self.assertRaises(ValueError):
                 self.switch_cgi.validate_continuous_interval(interval)
+        with (
+            mock.patch.object(
+                self.switch_cgi, "MIN_CONTINUOUS_INTERVAL_MINUTES", 15,
+            ),
+            mock.patch.object(
+                self.switch_cgi, "MAX_CONTINUOUS_INTERVAL_MINUTES", 30,
+            ),
+            self.assertRaisesRegex(ValueError, "between 15 and 30"),
+        ):
+            self.switch_cgi.validate_continuous_interval("14")
         response = self._post_switch_action(
             "action=continuous_start&password=sentinel&interval_minutes=10"
         )
@@ -4327,19 +4337,29 @@ print('{{"factory_records_active":true,"valid":true}}')
                 or cgi_minimums[0][1] != canonical_values[0][1]
             ):
                 errors.append("CGI minimum differs from canonical authority")
-            if canonical_values and cgi_maximums:
-                expected_error = (
-                    "interval_minutes must be between "
-                    f"{canonical_values[0][1]} and {cgi_maximums[0][1]}"
+            operator_error_fields = []
+            for node in ast.walk(ast.parse(cgi)):
+                if not isinstance(node, ast.JoinedStr):
+                    continue
+                literal_text = "".join(
+                    part.value for part in node.values
+                    if isinstance(part, ast.Constant)
+                    and isinstance(part.value, str)
                 )
-                operator_errors = [
-                    node.value for node in ast.walk(ast.parse(cgi))
-                    if isinstance(node, ast.Constant)
-                    and isinstance(node.value, str)
-                    and node.value.startswith("interval_minutes must be between ")
-                ]
-                if operator_errors != [expected_error]:
-                    errors.append("CGI operator-facing interval error is stale")
+                if not literal_text.startswith(
+                    "interval_minutes must be between "
+                ):
+                    continue
+                operator_error_fields.append([
+                    part.value.id for part in node.values
+                    if isinstance(part, ast.FormattedValue)
+                    and isinstance(part.value, ast.Name)
+                ])
+            if operator_error_fields != [[
+                "MIN_CONTINUOUS_INTERVAL_MINUTES",
+                "MAX_CONTINUOUS_INTERVAL_MINUTES",
+            ]]:
+                errors.append("CGI operator-facing interval error is stale")
             if "from project_contract import" in cgi or "import project_contract" in cgi:
                 errors.append("CGI must not gain a runtime authority import")
             return errors
@@ -4360,8 +4380,8 @@ print('{{"factory_records_active":true,"valid":true}}')
         self.assertTrue(parity_errors(
             contract_source,
             cgi_source.replace(
-                "interval_minutes must be between 10 and 1440",
-                "interval_minutes must be between 11 and 1440",
+                "{MIN_CONTINUOUS_INTERVAL_MINUTES} and ",
+                "{MAX_CONTINUOUS_INTERVAL_MINUTES} and ",
                 1,
             ),
         ))

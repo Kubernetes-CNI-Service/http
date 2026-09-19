@@ -165,7 +165,11 @@ def validate_continuous_interval(value):
         raise ValueError("interval_minutes must be a decimal integer")
     interval = int(value)
     if not MIN_CONTINUOUS_INTERVAL_MINUTES <= interval <= MAX_CONTINUOUS_INTERVAL_MINUTES:
-        raise ValueError("interval_minutes must be between 10 and 1440")
+        raise ValueError(
+            "interval_minutes must be between "
+            f"{MIN_CONTINUOUS_INTERVAL_MINUTES} and "
+            f"{MAX_CONTINUOUS_INTERVAL_MINUTES}"
+        )
     return interval
 
 
