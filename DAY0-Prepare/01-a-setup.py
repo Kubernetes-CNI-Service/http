@@ -2425,7 +2425,7 @@ def _validate_global_yaml(path, section_key="eth"):
         return errors, warnings
     try:
         with open(path, encoding="utf-8") as f:
-            data = yaml.safe_load(f)
+            data = safe_load_global_yaml(f)
         if data is None:
             warnings.append("  文件为空或仅含注释，跳过内容校验")
             return errors, warnings

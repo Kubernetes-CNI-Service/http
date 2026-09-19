@@ -842,6 +842,29 @@ class SchemaSelectionAndIssueTrackerPolicyContractTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "duplicate"):
                     CONTRACT.safe_load_global_yaml(source)
 
+    def test_setup_validator_reports_duplicate_global_key_before_schema_errors(self):
+        source = (
+            "schema_version: 2\n"
+            "common:\n"
+            "  mgmt:\n"
+            "    issue-tracker:\n"
+            "      status: disabled\n"
+            "      status: enabled\n"
+            "switches: []\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "01-global.yaml"
+            path.write_text(source, encoding="utf-8")
+            errors, warnings = SETUP._validate_global_yaml(str(path), "eth")
+
+        self.assertEqual([], warnings)
+        self.assertEqual(1, len(errors), errors)
+        self.assertIn("duplicate mapping key: 'status'", errors[0])
+        for phantom in (
+            "ztp_url_prefix", "缺少 'eth'", "bridge", "system", "vrr",
+        ):
+            self.assertNotIn(phantom, errors[0])
+
 
 class V2VrrTests(unittest.TestCase):
     def test_29_triplet_plan_uses_the_nearest_peer_address(self):

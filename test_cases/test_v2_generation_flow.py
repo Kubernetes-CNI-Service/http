@@ -664,6 +664,17 @@ common:
             root = Path(directory)
             global_file = root / "01-global.yaml"
             global_file.write_text(self.duplicate_policy_yaml(), encoding="utf-8")
+            validator_errors, validator_warnings = SETUP._validate_global_yaml(
+                str(global_file), "eth",
+            )
+            self.assertEqual(
+                [
+                    "  YAML 语法错误：global YAML duplicate mapping key: "
+                    "'issue-tracker'"
+                ],
+                validator_errors,
+            )
+            self.assertEqual([], validator_warnings)
             setup_errors, _warnings = SETUP._validate_v2_mlag_project(
                 str(global_file), str(root / "02-devices_config.csv"),
             )
@@ -673,6 +684,18 @@ common:
             )
             with self.assertRaisesRegex(LOAD.LoadError, "duplicate"):
                 LOAD.load_global(global_file)
+
+    def test_global_document_reader_census_has_no_strict_loader_bypass(self):
+        setup_source = (ROOT / "DAY0-Prepare/01-a-setup.py").read_text(
+            encoding="utf-8",
+        )
+        load_source = (ROOT / "DAY0-Prepare/11-load.py").read_text(
+            encoding="utf-8",
+        )
+        self.assertEqual(3, setup_source.count("safe_load_global_yaml("))
+        self.assertEqual(1, load_source.count("safe_load_global_yaml("))
+        self.assertNotIn("yaml.safe_load(f)", setup_source)
+        self.assertNotIn("yaml.safe_load(", load_source)
 
     def test_all_three_measured_global_call_sites_share_both_authorities(self):
         setup_source = (ROOT / "DAY0-Prepare/01-a-setup.py").read_text(
