@@ -715,6 +715,7 @@ class ImpactManifestTests(unittest.TestCase):
                 "test_cases/run_monitor_authority_entrypoints.sh",
                 "test_cases/run_related_tests.py",
                 "test_cases/run_vm_validation.py",
+                "test_cases/user_manual_contract.json",
                 "user-manual.html",
                 "DAY0-Prepare/template/.management-pubkeys",
                 "DAY0-Prepare/template/01-global.yaml",
