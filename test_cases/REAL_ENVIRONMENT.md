@@ -1205,3 +1205,22 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 证据、清理与风险：只保存脱敏后的 rsyslog 语法退出码、消息类别/计数、窗口总字节与横幅字节、探针
   argv/退出码和配置摘要，不保存原始租约或设备身份。恢复日志与服务快照并确认无测试消息残留。过滤过宽
   会删除故障证据，过滤失效会重新造成噪声与轮转压力；任一类别无法证明时保持 OPEN/BLOCKED。
+
+## TC-REAL-REQ11-SHARED-ATTRIBUTION-001 — 共用地址事后身份归属与持久缓存
+
+- 状态：**NOT RUN / REAL_ENV REQUIRED**。本机自动化仅用合成 SSH 身份结果验证每周期每个不同共用
+  地址至多一次未决探测、恰一清单行匹配、逐行缓存调和、第三方来源往返与原子私有写入；不得把这些
+  fixture 宣称为真实 AIR/Production 共址设备、第三方 provider 或现场 SSH 认证 PASS。
+- 前置条件：仅在 owner 批准的隔离管理 VM 和一对可回滚的 AIR/Production 实验交换机执行；两台设备
+  使用相同管理地址但具有不同 hostname 与管理接口 MAC，并有独立 console/OOB。冻结源码、测试、
+  manifest、两份清单输入、known_hosts 与设备身份的 SHA-256；凭据只经受管 SSH agent/identity 使用，
+  不写入证据。
+- 步骤与预期：先清空本项私有归属 sidecar，在两行均缺少 HTTP/DHCP 所有权时运行一轮，证明只对共用
+  地址发起一次未决身份探测，远端 hostname、指定接口与 MAC 精确匹配恰一行后才允许该行完整采集并
+  原子持久化 provenance。切换地址实际 holder 后，较新的精确事后证据必须推翻旧绑定；注入 hostname
+  与 MAC 分属两行、零匹配、多匹配、SSH 失败和第三方来源时，均须显式显示失败且不得把结果写入他行。
+  修改无关清单行须保留仍成立绑定；删除、改 MAC 或改地址须逐行丢弃冲突绑定，mtime-only 变化不得失效。
+- 证据、清理与风险：仅保存脱敏的 source/source_kind、输入与 sidecar 摘要、观测时间、地址代号、匹配
+  行代号、探测次数与失败类别，不保存客户地址、hostname、MAC、设备输出或凭据正文。结束后停止隔离
+  monitor，核对无遗留 SSH/collector 进程，删除本项隔离 sidecar 并恢复 VM/交换机快照。错误归属会造成
+  AIR/Production 串写，是 fail-closed 门禁；任一真实身份信号或清理不确定即保持 BLOCKED。

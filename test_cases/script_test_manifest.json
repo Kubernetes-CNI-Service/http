@@ -431,7 +431,8 @@
         "test_cases.test_ztp_service_runtime",
         "test_cases.test_ztp_container_runtime",
         "test_cases.test_ztp_monitor_watch_resilience",
-        "test_cases.test_ztp_monitor_watch_runtime_workflow"
+        "test_cases.test_ztp_monitor_watch_runtime_workflow",
+        "test_cases.test_ztp_collection_attribution"
       ]
     },
     {
@@ -1061,6 +1062,8 @@
         "test_cases.test_ztp_http_identity_binding",
         "test_cases.test_ztp_group_handoff",
         "test_cases.test_ztp_group_handoff_display",
+        "test_cases.test_ztp_collection_attribution",
+        "test_cases.test_ztp_collection_attribution_workflow",
         "test_cases.test_collector_inventory_pubkey",
         "test_cases.test_collector_inventory_pubkey_workflow"
       ]

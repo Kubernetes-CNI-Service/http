@@ -3197,9 +3197,15 @@ class TemplateContractTests(unittest.TestCase):
                         "provisioning_relationship": "unknown",
                         "missing_evidence": [
                             "http_identity_claim", "unique_inventory_address",
-                            "dhcp_mac_owner",
+                            "dhcp_mac_owner", "posthoc_device_identity",
                         ],
-                        "paths": {},
+                        "paths": {
+                            "posthoc_identity": {
+                                "status": "identity_mismatch",
+                                "source": "ssh-posthoc",
+                                "source_kind": "device_reported",
+                            },
+                        },
                     }],
                 },
                 "ip_probe": {
@@ -3214,8 +3220,10 @@ class TemplateContractTests(unittest.TestCase):
         self.assertIn("HTTP 身份声明", insufficient)
         self.assertIn("清单地址唯一性", insufficient)
         self.assertIn("DHCP MAC owner", insufficient)
+        self.assertIn("设备事后身份", insufficient)
         self.assertIn("可能尚未产生，或设备不经本系统配置", insufficient)
         self.assertIn("共享地址需由设备自报或其他可信来源验证", insufficient)
+        self.assertIn("设备事后身份与唯一清单行不匹配", insufficient)
         self.assertNotIn("配置错误", insufficient)
         self.assertNotIn("请修复", insufficient)
         self.assertNotIn("该地址尚未探测或报告未记录结果", insufficient)
@@ -3294,7 +3302,7 @@ class TemplateContractTests(unittest.TestCase):
             self.assertEqual(
                 [
                     "http_identity_claim", "unique_inventory_address",
-                    "dhcp_mac_owner",
+                    "dhcp_mac_owner", "posthoc_device_identity",
                 ],
                 address["missing_evidence"],
             )
