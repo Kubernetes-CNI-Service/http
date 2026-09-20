@@ -258,6 +258,18 @@
         <li><a href="#v2-troubleshoot">12. 排错与安全</a></li>
       </ol>
       <ol class="chapter-tree" data-version-nav="v3-dev" hidden>
+        <li><a href="#v2-overview">V2 · 1. Release Notes</a></li>
+        <li><a href="#v2-directories">V2 · 2. 目录与文件</a></li>
+        <li><a href="#v2-scripts">V2 · 3. 脚本使用</a></li>
+        <li><a href="#v2-workflow">V2 · 4. 总体流程</a></li>
+        <li><a href="#v2-scenario-prepare">V2 · 5. 本机准备与证明</a></li>
+        <li><a href="#v2-scenario-native">V2 · 6. Native 场景</a></li>
+        <li><a href="#v2-scenario-docker">V2 · 7. Docker 场景</a></li>
+        <li><a href="#v2-scenario-air">V2 · 8. AIR 与范围</a></li>
+        <li><a href="#v2-scenario-update">V2 · 9. 增量更新</a></li>
+        <li><a href="#v2-scenario-results">V2 · 10. 结果与卸载</a></li>
+        <li><a href="#v2-testing">V2 · 11. 测试与验收</a></li>
+        <li><a href="#v2-troubleshoot">V2 · 12. 排错与安全</a></li>
         <li><a href="#v3-dev-overview">1. Release Notes</a></li>
         <li><a href="#v3-dev-directories">2. 目录与文件</a></li>
         <li><a href="#v3-dev-scripts">3. 拟议脚本</a></li>
@@ -276,7 +288,7 @@
   <main id="manual-content" tabindex="-1">
     <p class="empty-search" id="empty-search">当前版本没有匹配章节。请缩短关键词或切换版本。</p>
 
-    <article data-manual-version="v1" hidden>
+    <article data-manual-version="v1" data-visible-in="v1" hidden>
       <div class="breadcrumb"><a href="index.html">首页</a> / User Manual / V1</div>
       <div class="version-kicker"><span class="version-badge legacy">V1</span><span>历史版本</span></div>
       <h1>HTTP ZTP V1 User Manual</h1>
@@ -338,7 +350,7 @@
 
       <section id="v1-scenario-local" data-chapter>
         <h2>5. 场景：本机项目准备</h2>
-        <div id="v1-local-prepare" data-nav-title="本机项目准备流程" class="scenario" data-scenario="local-prepare"><h3>Local prepare</h3><div class="scenario-grid">
+        <div id="v1-local-prepare" data-nav-title="本机项目准备流程" class="scenario" data-scenario="local-prepare"><span id="v1-local-prepare-steps" class="manual-contract-anchor" data-manual-role="steps" aria-label="操作步骤"></span><span id="v1-local-prepare-risk" class="manual-contract-anchor" data-manual-role="risk" aria-label="风险"></span><span id="v1-local-prepare-rollback" class="manual-contract-anchor" data-manual-role="rollback" aria-label="回滚与恢复"></span><h3>Local prepare</h3><div class="scenario-grid">
           <div><h4>前置条件</h4><p>从 template 创建独立项目并填写 global、CSV、P2P 和受信镜像。</p></div>
           <div><h4>操作步骤</h4><pre><code>python3 DAY0-Prepare/11-load.py DAY0-Prepare/&lt;project&gt; --dry-run
 python3 DAY0-Prepare/11-load.py DAY0-Prepare/&lt;project&gt;</code></pre></div>
@@ -350,7 +362,7 @@ python3 DAY0-Prepare/11-load.py DAY0-Prepare/&lt;project&gt;</code></pre></div>
 
       <section id="v1-scenario-deploy" data-chapter>
         <h2>6. 场景：Native 首次部署</h2>
-        <div id="v1-native-bootstrap" data-nav-title="Native 首次部署流程" class="scenario" data-scenario="native-bootstrap"><h3>Native bootstrap</h3><div class="scenario-grid">
+        <div id="v1-native-bootstrap" data-nav-title="Native 首次部署流程" class="scenario" data-scenario="native-bootstrap"><span id="v1-native-bootstrap-steps" class="manual-contract-anchor" data-manual-role="steps" aria-label="操作步骤"></span><span id="v1-native-bootstrap-risk" class="manual-contract-anchor" data-manual-role="risk" aria-label="风险"></span><span id="v1-native-bootstrap-rollback" class="manual-contract-anchor" data-manual-role="rollback" aria-label="回滚与恢复"></span><h3>Native bootstrap</h3><div class="scenario-grid">
           <div><h4>前置条件</h4><p>管理服务器可达，宿主端口和服务归属明确，本机生成已通过。</p></div>
           <div><h4>操作步骤</h4><pre><code>python3 tools/tar-for-upload.py &lt;project&gt; &lt;host&gt; --deploy
 ssh &lt;host&gt;
@@ -370,7 +382,7 @@ sudo python3 DAY0-Prepare/11-load.py &lt;project&gt;</code></pre></div>
 
       <section id="v1-scenario-update" data-chapter>
         <h2>8. 场景：更新与结果回收</h2>
-        <div id="v1-native-update" data-nav-title="Native 增量更新" class="scenario" data-scenario="native-update"><h3>Native update</h3><div class="scenario-grid">
+        <div id="v1-native-update" data-nav-title="Native 增量更新" class="scenario" data-scenario="native-update"><span id="v1-native-update-steps" class="manual-contract-anchor" data-manual-role="steps" aria-label="操作步骤"></span><span id="v1-native-update-risk" class="manual-contract-anchor" data-manual-role="risk" aria-label="风险"></span><span id="v1-native-update-rollback" class="manual-contract-anchor" data-manual-role="rollback" aria-label="回滚与恢复"></span><h3>Native update</h3><div class="scenario-grid">
           <div><h4>前置条件</h4><p>现有 active project 身份明确，本机改动已完成生成验证。</p></div>
           <div><h4>操作步骤</h4><pre><code>python3 tools/sync-code.py &lt;project&gt; &lt;host&gt;
 ssh &lt;host&gt; 'cd /var/www/html &amp;&amp; sudo python3 DAY0-Prepare/11-load.py &lt;project&gt;'</code></pre></div>
@@ -378,7 +390,7 @@ ssh &lt;host&gt; 'cd /var/www/html &amp;&amp; sudo python3 DAY0-Prepare/11-load.
           <div><h4>失败恢复</h4><p>停止继续同步；检查远端错误与 receipt 后再完整重跑。</p></div>
           <div><h4>验收证据</h4><p>同步 diff、load release 身份和服务健康。</p></div>
         </div></div>
-        <div id="v1-results-unload" data-nav-title="结果回收与卸载" class="scenario" data-scenario="results-unload"><h3>Results backup and unload</h3><div class="scenario-grid">
+        <div id="v1-results-unload" data-nav-title="结果回收与卸载" class="scenario" data-scenario="results-unload"><span id="v1-results-unload-steps" class="manual-contract-anchor" data-manual-role="steps" aria-label="操作步骤"></span><span id="v1-results-unload-risk" class="manual-contract-anchor" data-manual-role="risk" aria-label="风险"></span><span id="v1-results-unload-rollback" class="manual-contract-anchor" data-manual-role="rollback" aria-label="回滚与恢复"></span><h3>Results backup and unload</h3><div class="scenario-grid">
           <div><h4>前置条件</h4><p>明确项目和要保留的输入、输出、日志及状态。</p></div>
           <div><h4>操作步骤</h4><pre><code>sudo python3 tools/tar-for-download.py &lt;project&gt;
 sudo python3 DAY0-Prepare/13-unload.py &lt;project&gt; --dry-run</code></pre></div>
@@ -408,7 +420,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
       </section>
     </article>
 
-    <article data-manual-version="v2">
+    <article data-manual-version="v2" data-visible-in="v2 v3-dev">
       <div class="breadcrumb"><a href="index.html">首页</a> / User Manual / V2</div>
       <div class="version-kicker"><span class="version-badge">V2</span><span>当前稳定版</span></div>
       <h1>HTTP ZTP V2 User Manual</h1>
@@ -423,7 +435,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <tr><td>裁剪或废弃</td><td>取消生产手工 <code>tar -x</code> 覆盖 live root、独立 DHCP generator + systemctl 的发布方式、Docker source write 后直接 load，以及把测试目录带入生产包。</td></tr>
           <tr><td>依然存在的问题</td><td>Docker 尚无成功的端到端部署证据，不能作为已支持生产流程；物理交换机场景仍必须逐环境留证；本机生成不能替代 Linux 现场 load；V2 的 download 与 unload 不是“封存后停止”的单一原子事务。</td></tr>
         </tbody></table>
-        <div class="callout"><strong>文档权威</strong>本页给出可复制的主路径。遇到参数或现场差异时，以当前工作树 <code>USER_MANUAL.md</code>、模块 README 和命令 <code>--help</code> 为详细依据。</div>
+        <div class="callout"><strong>文档权威</strong>本页给出可复制的主路径。遇到参数或现场差异时，以当前受管脚本、Git 已跟踪的模块文档和命令 <code>--help</code> 为详细依据。</div>
       </section>
 
       <section id="v2-directories" data-chapter>
@@ -444,7 +456,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
         <p>本目录由 <code>tools/update-user-manual.py</code> 从 Git tracked 与非忽略文件生成；每个受维护文件必须有独立说明。大量项目数据、镜像、缓存与运行输出按路径模式说明，不把二进制内容嵌入网页。</p>
         <!-- BEGIN GENERATED USER MANUAL FILE CATALOG -->
         <div class="catalog-summary">
-          <span><strong>360</strong> 个受维护文件</span>
+          <span><strong>361</strong> 个受维护文件</span>
           <span><strong>24</strong> 个根级分组</span>
           <span>清单范围：Git tracked + untracked/nonignored</span>
         </div>
@@ -482,7 +494,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="DAY0-Prepare/11-load.py"><td><code>DAY0-Prepare/11-load.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Validate, activate and prepare one DAY0 deployment project end to end。 <strong>维护/生成责任：</strong>项目输入由项目维护者编辑；发布链接、receipt、状态和输出只允许对应事务/worker 生成。</td></tr>
             <tr data-file-path="DAY0-Prepare/12-ztp-monitor.py"><td><code>DAY0-Prepare/12-ztp-monitor.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Correlate DHCP, Apache and switch-side logs into a per-device ZTP report。 <strong>维护/生成责任：</strong>项目输入由项目维护者编辑；发布链接、receipt、状态和输出只允许对应事务/worker 生成。</td></tr>
             <tr data-file-path="DAY0-Prepare/13-unload.py"><td><code>DAY0-Prepare/13-unload.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>撤销 11-load.py 创建的管理服务器 ZTP 运行态。 <strong>维护/生成责任：</strong>项目输入由项目维护者编辑；发布链接、receipt、状态和输出只允许对应事务/worker 生成。</td></tr>
-            <tr data-file-path="DAY0-Prepare/template/.management-pubkeys"><td><code>DAY0-Prepare/template/.management-pubkeys</code></td><td><strong>类别：</strong>仓库支持文件；<strong>作用：</strong>属于“项目创建、输入校验、统一 load、监控与 unload 生命周期”的 .management-pubkeys，由该目录的 README、上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>模板/示例维护者修改；真实项目和生成输出不得反向覆盖模板。</td></tr>
+            <tr data-file-path="DAY0-Prepare/template/.management-pubkeys"><td><code>DAY0-Prepare/template/.management-pubkeys</code></td><td><strong>类别：</strong>仓库支持文件；<strong>作用：</strong>属于“项目创建、输入校验、统一 load、监控与 unload 生命周期”的 .management-pubkeys；具体边界由当前文件、已跟踪的上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>模板/示例维护者修改；真实项目和生成输出不得反向覆盖模板。</td></tr>
             <tr data-file-path="DAY0-Prepare/template/01-global.yaml"><td><code>DAY0-Prepare/template/01-global.yaml</code></td><td><strong>类别：</strong>配置/模板；<strong>作用：</strong>项目创建、输入校验、统一 load、监控与 unload 生命周期使用的声明式配置或模板；由所属模块校验后消费，不能脱离对应事务随意覆盖。 <strong>维护/生成责任：</strong>模板/示例维护者修改；真实项目和生成输出不得反向覆盖模板。</td></tr>
             <tr data-file-path="DAY0-Prepare/template/02-devices_config.csv"><td><code>DAY0-Prepare/template/02-devices_config.csv</code></td><td><strong>类别：</strong>数据/合同；<strong>作用：</strong>项目创建、输入校验、统一 load、监控与 unload 生命周期使用的表格输入、映射或测试夹具；保留表头、类型和来源语义。 <strong>维护/生成责任：</strong>模板/示例维护者修改；真实项目和生成输出不得反向覆盖模板。</td></tr>
             <tr data-file-path="DAY0-Prepare/template/02-dhcp-subnet_config.csv"><td><code>DAY0-Prepare/template/02-dhcp-subnet_config.csv</code></td><td><strong>类别：</strong>数据/合同；<strong>作用：</strong>项目创建、输入校验、统一 load、监控与 unload 生命周期使用的表格输入、映射或测试夹具；保留表头、类型和来源语义。 <strong>维护/生成责任：</strong>模板/示例维护者修改；真实项目和生成输出不得反向覆盖模板。</td></tr>
@@ -499,8 +511,8 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="DAY0-Prepare/template/README.txt"><td><code>DAY0-Prepare/template/README.txt</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：DAY0 项目完整目录模板说明。 <strong>维护/生成责任：</strong>文档维护者随行为变更同步更新；生成索引不得手工改写生成块。</td></tr>
             <tr data-file-path="DAY0-Prepare/template/cumulus-linux-5.16.4-mlx-amd64.bin"><td><code>DAY0-Prepare/template/cumulus-linux-5.16.4-mlx-amd64.bin</code></td><td><strong>类别：</strong>制品/占位；<strong>作用：</strong>项目创建、输入校验、统一 load、监控与 unload 生命周期使用的二进制制品或受控空占位；不能仅凭文件名判断为可部署 payload。 <strong>维护/生成责任：</strong>模板/示例维护者修改；真实项目和生成输出不得反向覆盖模板。</td></tr>
             <tr data-file-path="DAY0-Prepare/template/cumulus-linux-5.16.4-mlx-vx.bin"><td><code>DAY0-Prepare/template/cumulus-linux-5.16.4-mlx-vx.bin</code></td><td><strong>类别：</strong>制品/占位；<strong>作用：</strong>项目创建、输入校验、统一 load、监控与 unload 生命周期使用的二进制制品或受控空占位；不能仅凭文件名判断为可部署 payload。 <strong>维护/生成责任：</strong>模板/示例维护者修改；真实项目和生成输出不得反向覆盖模板。</td></tr>
-            <tr data-file-path="DAY0-Prepare/template/laptop.pub"><td><code>DAY0-Prepare/template/laptop.pub</code></td><td><strong>类别：</strong>仓库支持文件；<strong>作用：</strong>属于“项目创建、输入校验、统一 load、监控与 unload 生命周期”的 laptop.pub，由该目录的 README、上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>模板/示例维护者修改；真实项目和生成输出不得反向覆盖模板。</td></tr>
-            <tr data-file-path="DAY0-Prepare/template/mgmt-server.pub"><td><code>DAY0-Prepare/template/mgmt-server.pub</code></td><td><strong>类别：</strong>仓库支持文件；<strong>作用：</strong>属于“项目创建、输入校验、统一 load、监控与 unload 生命周期”的 mgmt-server.pub，由该目录的 README、上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>模板/示例维护者修改；真实项目和生成输出不得反向覆盖模板。</td></tr>
+            <tr data-file-path="DAY0-Prepare/template/laptop.pub"><td><code>DAY0-Prepare/template/laptop.pub</code></td><td><strong>类别：</strong>仓库支持文件；<strong>作用：</strong>属于“项目创建、输入校验、统一 load、监控与 unload 生命周期”的 laptop.pub；具体边界由当前文件、已跟踪的上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>模板/示例维护者修改；真实项目和生成输出不得反向覆盖模板。</td></tr>
+            <tr data-file-path="DAY0-Prepare/template/mgmt-server.pub"><td><code>DAY0-Prepare/template/mgmt-server.pub</code></td><td><strong>类别：</strong>仓库支持文件；<strong>作用：</strong>属于“项目创建、输入校验、统一 load、监控与 unload 生命周期”的 mgmt-server.pub；具体边界由当前文件、已跟踪的上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>模板/示例维护者修改；真实项目和生成输出不得反向覆盖模板。</td></tr>
             <tr data-file-path="DAY0-Prepare/template/nvosv25-02-7002amd64.bin"><td><code>DAY0-Prepare/template/nvosv25-02-7002amd64.bin</code></td><td><strong>类别：</strong>制品/占位；<strong>作用：</strong>项目创建、输入校验、统一 load、监控与 unload 生命周期使用的二进制制品或受控空占位；不能仅凭文件名判断为可部署 payload。 <strong>维护/生成责任：</strong>模板/示例维护者修改；真实项目和生成输出不得反向覆盖模板。</td></tr>
             <tr data-file-path="DAY0-Prepare/template/nvosv25-02-8008amd64.bin"><td><code>DAY0-Prepare/template/nvosv25-02-8008amd64.bin</code></td><td><strong>类别：</strong>制品/占位；<strong>作用：</strong>项目创建、输入校验、统一 load、监控与 unload 生命周期使用的二进制制品或受控空占位；不能仅凭文件名判断为可部署 payload。 <strong>维护/生成责任：</strong>模板/示例维护者修改；真实项目和生成输出不得反向覆盖模板。</td></tr>
             <tr data-file-path="DAY0-Prepare/template/p2p.xlsx"><td><code>DAY0-Prepare/template/p2p.xlsx</code></td><td><strong>类别：</strong>数据/合同；<strong>作用：</strong>项目创建、输入校验、统一 load、监控与 unload 生命周期使用的 Excel 输入或空模板；正式项目源需要经过 parser、图片剥离和摘要校验。 <strong>维护/生成责任：</strong>模板/示例维护者修改；真实项目和生成输出不得反向覆盖模板。</td></tr>
@@ -532,16 +544,16 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
         <details id="v2-file-group-examples" data-nav-title="examples/ 文件" class="catalog-group">
           <summary><code>examples/</code> — 4 个文件</summary>
           <div><table class="file-catalog"><thead><tr><th>文件</th><th>说明</th></tr></thead><tbody>
-            <tr data-file-path="examples/public-project/01-global.yaml.example"><td><code>examples/public-project/01-global.yaml.example</code></td><td><strong>类别：</strong>仓库支持文件；<strong>作用：</strong>属于“不含客户秘密的公开项目示例”的 01-global.yaml.example，由该目录的 README、上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>模板/示例维护者修改；真实项目和生成输出不得反向覆盖模板。</td></tr>
-            <tr data-file-path="examples/public-project/02-devices_config.csv.example"><td><code>examples/public-project/02-devices_config.csv.example</code></td><td><strong>类别：</strong>仓库支持文件；<strong>作用：</strong>属于“不含客户秘密的公开项目示例”的 02-devices_config.csv.example，由该目录的 README、上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>模板/示例维护者修改；真实项目和生成输出不得反向覆盖模板。</td></tr>
-            <tr data-file-path="examples/public-project/02-dhcp-subnet_config.csv.example"><td><code>examples/public-project/02-dhcp-subnet_config.csv.example</code></td><td><strong>类别：</strong>仓库支持文件；<strong>作用：</strong>属于“不含客户秘密的公开项目示例”的 02-dhcp-subnet_config.csv.example，由该目录的 README、上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>模板/示例维护者修改；真实项目和生成输出不得反向覆盖模板。</td></tr>
+            <tr data-file-path="examples/public-project/01-global.yaml.example"><td><code>examples/public-project/01-global.yaml.example</code></td><td><strong>类别：</strong>仓库支持文件；<strong>作用：</strong>属于“不含客户秘密的公开项目示例”的 01-global.yaml.example；具体边界由当前文件、已跟踪的上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>模板/示例维护者修改；真实项目和生成输出不得反向覆盖模板。</td></tr>
+            <tr data-file-path="examples/public-project/02-devices_config.csv.example"><td><code>examples/public-project/02-devices_config.csv.example</code></td><td><strong>类别：</strong>仓库支持文件；<strong>作用：</strong>属于“不含客户秘密的公开项目示例”的 02-devices_config.csv.example；具体边界由当前文件、已跟踪的上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>模板/示例维护者修改；真实项目和生成输出不得反向覆盖模板。</td></tr>
+            <tr data-file-path="examples/public-project/02-dhcp-subnet_config.csv.example"><td><code>examples/public-project/02-dhcp-subnet_config.csv.example</code></td><td><strong>类别：</strong>仓库支持文件；<strong>作用：</strong>属于“不含客户秘密的公开项目示例”的 02-dhcp-subnet_config.csv.example；具体边界由当前文件、已跟踪的上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>模板/示例维护者修改；真实项目和生成输出不得反向覆盖模板。</td></tr>
             <tr data-file-path="examples/public-project/README.md"><td><code>examples/public-project/README.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：脱敏项目输入示例。 <strong>维护/生成责任：</strong>文档维护者随行为变更同步更新；生成索引不得手工改写生成块。</td></tr>
           </tbody></table></div>
         </details>
         <details id="v2-file-group-finished-projects" data-nav-title="Finished-projects/ 文件" class="catalog-group">
           <summary><code>Finished-projects/</code> — 2 个文件</summary>
           <div><table class="file-catalog"><thead><tr><th>文件</th><th>说明</th></tr></thead><tbody>
-            <tr data-file-path="Finished-projects/.gitignore"><td><code>Finished-projects/.gitignore</code></td><td><strong>类别：</strong>构建/仓库配置；<strong>作用：</strong>属于“V3-dev finished project 只读记录入口”的 .gitignore，由该目录的 README、上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>仓库维护者按公开边界和测试治理修改；不得绕过 Git/manifest/发布检查。</td></tr>
+            <tr data-file-path="Finished-projects/.gitignore"><td><code>Finished-projects/.gitignore</code></td><td><strong>类别：</strong>构建/仓库配置；<strong>作用：</strong>属于“V3-dev finished project 只读记录入口”的 .gitignore；具体边界由当前文件、已跟踪的上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>仓库维护者按公开边界和测试治理修改；不得绕过 Git/manifest/发布检查。</td></tr>
             <tr data-file-path="Finished-projects/README.txt"><td><code>Finished-projects/README.txt</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：Finished-projects。 <strong>维护/生成责任：</strong>文档维护者随行为变更同步更新；生成索引不得手工改写生成块。</td></tr>
           </tbody></table></div>
         </details>
@@ -573,10 +585,10 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="infra/apache-publication-boundary/README.md"><td><code>infra/apache-publication-boundary/README.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：Apache 静态发布边界与信任模型。 <strong>维护/生成责任：</strong>文档维护者随行为变更同步更新；生成索引不得手工改写生成块。</td></tr>
             <tr data-file-path="infra/check_infra.py"><td><code>infra/check_infra.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Collect infra execution logs and health status from CSV server devices。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infra/deploy_infra.py"><td><code>infra/deploy_infra.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Prepare infra shell scripts and deploy them to CSV devices of type=server。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
-            <tr data-file-path="infra/docker/.dockerignore"><td><code>infra/docker/.dockerignore</code></td><td><strong>类别：</strong>构建/仓库配置；<strong>作用：</strong>属于“Native 基础设施与 Docker/Supervisor 运行时”的 .dockerignore，由该目录的 README、上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
-            <tr data-file-path="infra/docker/.gitignore"><td><code>infra/docker/.gitignore</code></td><td><strong>类别：</strong>构建/仓库配置；<strong>作用：</strong>属于“Native 基础设施与 Docker/Supervisor 运行时”的 .gitignore，由该目录的 README、上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
+            <tr data-file-path="infra/docker/.dockerignore"><td><code>infra/docker/.dockerignore</code></td><td><strong>类别：</strong>构建/仓库配置；<strong>作用：</strong>属于“Native 基础设施与 Docker/Supervisor 运行时”的 .dockerignore；具体边界由当前文件、已跟踪的上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
+            <tr data-file-path="infra/docker/.gitignore"><td><code>infra/docker/.gitignore</code></td><td><strong>类别：</strong>构建/仓库配置；<strong>作用：</strong>属于“Native 基础设施与 Docker/Supervisor 运行时”的 .gitignore；具体边界由当前文件、已跟踪的上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infra/docker/Dockerfile"><td><code>infra/docker/Dockerfile</code></td><td><strong>类别：</strong>构建/仓库配置；<strong>作用：</strong>Ubuntu 24.04 HTTP ZTP 容器镜像定义，安装运行依赖并固定镜像合同。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
-            <tr data-file-path="infra/docker/Dockerfile.dockerignore"><td><code>infra/docker/Dockerfile.dockerignore</code></td><td><strong>类别：</strong>仓库支持文件；<strong>作用：</strong>属于“Native 基础设施与 Docker/Supervisor 运行时”的 Dockerfile.dockerignore，由该目录的 README、上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
+            <tr data-file-path="infra/docker/Dockerfile.dockerignore"><td><code>infra/docker/Dockerfile.dockerignore</code></td><td><strong>类别：</strong>仓库支持文件；<strong>作用：</strong>属于“Native 基础设施与 Docker/Supervisor 运行时”的 Dockerfile.dockerignore；具体边界由当前文件、已跟踪的上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infra/docker/README.md"><td><code>infra/docker/README.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：Ubuntu 22.04/24.04 Docker 管理服务器。 <strong>维护/生成责任：</strong>文档维护者随行为变更同步更新；生成索引不得手工改写生成块。</td></tr>
             <tr data-file-path="infra/docker/activate.py"><td><code>infra/docker/activate.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Fail-closed runtime activation for the host-network ZTP container。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infra/docker/apache-ztp.conf"><td><code>infra/docker/apache-ztp.conf</code></td><td><strong>类别：</strong>配置/模板；<strong>作用：</strong>容器 Apache 虚拟主机、CGI 与公开/私有路径边界。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
@@ -592,8 +604,8 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="infra/docker/rsyslog-dhcp.conf"><td><code>infra/docker/rsyslog-dhcp.conf</code></td><td><strong>类别：</strong>配置/模板；<strong>作用：</strong>Native 基础设施与 Docker/Supervisor 运行时使用的声明式配置或模板；由所属模块校验后消费，不能脱离对应事务随意覆盖。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infra/docker/runtime-contract.json"><td><code>infra/docker/runtime-contract.json</code></td><td><strong>类别：</strong>数据/合同；<strong>作用：</strong>Docker 容器运行身份、路径、服务和安全设置的机器可读合同。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infra/docker/supervisord.conf"><td><code>infra/docker/supervisord.conf</code></td><td><strong>类别：</strong>配置/模板；<strong>作用：</strong>容器内 Supervisor 程序、依赖顺序、日志与自动重启配置。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
-            <tr data-file-path="infra/infra-setup.sh"><td><code>infra/infra-setup.sh</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>属于“Native 基础设施与 Docker/Supervisor 运行时”的 infra-setup.sh，由该目录的 README、上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
-            <tr data-file-path="infra/infra-teardown.sh"><td><code>infra/infra-teardown.sh</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>属于“Native 基础设施与 Docker/Supervisor 运行时”的 infra-teardown.sh，由该目录的 README、上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
+            <tr data-file-path="infra/infra-setup.sh"><td><code>infra/infra-setup.sh</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>属于“Native 基础设施与 Docker/Supervisor 运行时”的 infra-setup.sh；具体边界由当前文件、已跟踪的上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
+            <tr data-file-path="infra/infra-teardown.sh"><td><code>infra/infra-teardown.sh</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>属于“Native 基础设施与 Docker/Supervisor 运行时”的 infra-teardown.sh；具体边界由当前文件、已跟踪的上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
           </tbody></table></div>
         </details>
         <details id="v2-file-group-monitor" data-nav-title="monitor/ 文件" class="catalog-group">
@@ -627,7 +639,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
         <details id="v2-file-group-requirements-container-top-level-lock" class="catalog-group">
           <summary><code>requirements-container-top-level.lock/</code> — 1 个文件</summary>
           <div><table class="file-catalog"><thead><tr><th>文件</th><th>说明</th></tr></thead><tbody>
-            <tr data-file-path="requirements-container-top-level.lock"><td><code>requirements-container-top-level.lock</code></td><td><strong>类别：</strong>仓库支持文件；<strong>作用：</strong>属于“HTTP ZTP 仓库根级支持”的 requirements-container-top-level.lock，由该目录的 README、上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>仓库维护者按公开边界和测试治理修改；不得绕过 Git/manifest/发布检查。</td></tr>
+            <tr data-file-path="requirements-container-top-level.lock"><td><code>requirements-container-top-level.lock</code></td><td><strong>类别：</strong>仓库支持文件；<strong>作用：</strong>属于“HTTP ZTP 仓库根级支持”的 requirements-container-top-level.lock；具体边界由当前文件、已跟踪的上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>仓库维护者按公开边界和测试治理修改；不得绕过 Git/manifest/发布检查。</td></tr>
           </tbody></table></div>
         </details>
         <details id="v2-file-group-requirements-dev-txt" class="catalog-group">
@@ -643,7 +655,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </tbody></table></div>
         </details>
         <details id="v2-file-group-test-cases" data-nav-title="test_cases/ 文件" class="catalog-group">
-          <summary><code>test_cases/</code> — 112 个文件</summary>
+          <summary><code>test_cases/</code> — 113 个文件</summary>
           <div><table class="file-catalog"><thead><tr><th>文件</th><th>说明</th></tr></thead><tbody>
             <tr data-file-path="test_cases/CASE_TEMPLATE.md"><td><code>test_cases/CASE_TEMPLATE.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>新增真机/破坏性验证案例时必须填写的证据模板。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/CHANGE_AWARE_TESTING.md"><td><code>test_cases/CHANGE_AWARE_TESTING.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：脚本变更影响测试。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -757,6 +769,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="test_cases/test_ztp_prefix_runtime_boundary.py"><td><code>test_cases/test_ztp_prefix_runtime_boundary.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Targeted tests for custom ZTP prefix runtime ownership boundaries。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_ztp_release_core_review.py"><td><code>test_cases/test_ztp_release_core_review.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Focused regression tests for the ZTP/release core review。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_ztp_service_runtime.py"><td><code>test_cases/test_ztp_service_runtime.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Dynamic DHCP listeners and explicit service-runtime backend contracts。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/user_manual_contract.json"><td><code>test_cases/user_manual_contract.json</code></td><td><strong>类别：</strong>数据/合同；<strong>作用：</strong>direct、workflow、治理、真机计划与批准状态测试使用的机器可读合同、状态或夹具；字段身份由生产脚本或测试严格验证。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
           </tbody></table></div>
         </details>
         <details id="v2-file-group-tools" data-nav-title="tools/ 文件" class="catalog-group">
@@ -773,13 +786,13 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="tools/finished_bundle.py"><td><code>tools/finished_bundle.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Deterministic, fail-closed finished-project bundle construction。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/finished_project_state.py"><td><code>tools/finished_project_state.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Strict shared authority for finished-project deployment interlocks。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/ib-tool-Jie/ib_tool_box/lib/README.md"><td><code>tools/ib-tool-Jie/ib_tool_box/lib/README.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：IB Tool Box 共享库。 <strong>维护/生成责任：</strong>文档维护者随行为变更同步更新；生成索引不得手工改写生成块。</td></tr>
-            <tr data-file-path="tools/ib-tool-Jie/ib_tool_box/lib/__init__.py"><td><code>tools/ib-tool-Jie/ib_tool_box/lib/__init__.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>属于“跨主机打包、同步、导入、诊断、制品与分析工具”的 __init__.py，由该目录的 README、上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
+            <tr data-file-path="tools/ib-tool-Jie/ib_tool_box/lib/__init__.py"><td><code>tools/ib-tool-Jie/ib_tool_box/lib/__init__.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>属于“跨主机打包、同步、导入、诊断、制品与分析工具”的 __init__.py；具体边界由当前文件、已跟踪的上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/ib-tool-Jie/ib_tool_box/lib/connection.py"><td><code>tools/ib-tool-Jie/ib_tool_box/lib/connection.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Shared connection table builders — reusable by all scripts。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/ib-tool-Jie/ib_tool_box/lib/excel.py"><td><code>tools/ib-tool-Jie/ib_tool_box/lib/excel.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Shared xlsxwriter helpers for IB health check scripts。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/ib-tool-Jie/ib_tool_box/lib/inventory.py"><td><code>tools/ib-tool-Jie/ib_tool_box/lib/inventory.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Build inventory DataFrames from ibdiagnet2 dump files。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/ib-tool-Jie/ib_tool_box/lib/link_errors.py"><td><code>tools/ib-tool-Jie/ib_tool_box/lib/link_errors.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Build link-error DataFrames from ibdiagnet2 dump files。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/ib-tool-Jie/ib_tool_box/lib/parsers/README.md"><td><code>tools/ib-tool-Jie/ib_tool_box/lib/parsers/README.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：IB Tool Box 解析器。 <strong>维护/生成责任：</strong>文档维护者随行为变更同步更新；生成索引不得手工改写生成块。</td></tr>
-            <tr data-file-path="tools/ib-tool-Jie/ib_tool_box/lib/parsers/__init__.py"><td><code>tools/ib-tool-Jie/ib_tool_box/lib/parsers/__init__.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>属于“跨主机打包、同步、导入、诊断、制品与分析工具”的 __init__.py，由该目录的 README、上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
+            <tr data-file-path="tools/ib-tool-Jie/ib_tool_box/lib/parsers/__init__.py"><td><code>tools/ib-tool-Jie/ib_tool_box/lib/parsers/__init__.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>属于“跨主机打包、同步、导入、诊断、制品与分析工具”的 __init__.py；具体边界由当前文件、已跟踪的上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/ib-tool-Jie/ib_tool_box/lib/parsers/db_csv.py"><td><code>tools/ib-tool-Jie/ib_tool_box/lib/parsers/db_csv.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Parser for ibdiagnet2.db_csv — a multi-section CSV database file。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/ib-tool-Jie/ib_tool_box/lib/parsers/net_dump.py"><td><code>tools/ib-tool-Jie/ib_tool_box/lib/parsers/net_dump.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Parsers for ibdiagnet2.net_dump — unified for NDR and XDR。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/ib-tool-Jie/ib_tool_box/lib/parsers/net_dump_ext.py"><td><code>tools/ib-tool-Jie/ib_tool_box/lib/parsers/net_dump_ext.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Parser for ibdiagnet2.net_dump_ext — unified for NDR and XDR。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
@@ -798,13 +811,13 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="tools/ibdiagnet-analyze-tool/analyze.py"><td><code>tools/ibdiagnet-analyze-tool/analyze.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>User-facing entry point for single and directory-batch analysis。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/ibdiagnet-analyze-tool/config/port_profiles.csv"><td><code>tools/ibdiagnet-analyze-tool/config/port_profiles.csv</code></td><td><strong>类别：</strong>数据/合同；<strong>作用：</strong>跨主机打包、同步、导入、诊断、制品与分析工具使用的表格输入、映射或测试夹具；保留表头、类型和来源语义。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/ibdiagnet-analyze-tool/lib/README.md"><td><code>tools/ibdiagnet-analyze-tool/lib/README.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：ibdiagnet 分析库。 <strong>维护/生成责任：</strong>文档维护者随行为变更同步更新；生成索引不得手工改写生成块。</td></tr>
-            <tr data-file-path="tools/ibdiagnet-analyze-tool/lib/__init__.py"><td><code>tools/ibdiagnet-analyze-tool/lib/__init__.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>属于“跨主机打包、同步、导入、诊断、制品与分析工具”的 __init__.py，由该目录的 README、上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
+            <tr data-file-path="tools/ibdiagnet-analyze-tool/lib/__init__.py"><td><code>tools/ibdiagnet-analyze-tool/lib/__init__.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>属于“跨主机打包、同步、导入、诊断、制品与分析工具”的 __init__.py；具体边界由当前文件、已跟踪的上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/ibdiagnet-analyze-tool/lib/connection.py"><td><code>tools/ibdiagnet-analyze-tool/lib/connection.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Shared connection table builders — reusable by all scripts。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/ibdiagnet-analyze-tool/lib/excel.py"><td><code>tools/ibdiagnet-analyze-tool/lib/excel.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Shared xlsxwriter helpers for IB health check scripts。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/ibdiagnet-analyze-tool/lib/inventory.py"><td><code>tools/ibdiagnet-analyze-tool/lib/inventory.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Build inventory DataFrames from ibdiagnet2 dump files。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/ibdiagnet-analyze-tool/lib/link_errors.py"><td><code>tools/ibdiagnet-analyze-tool/lib/link_errors.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Build link-error DataFrames from ibdiagnet2 dump files。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/ibdiagnet-analyze-tool/lib/parsers/README.md"><td><code>tools/ibdiagnet-analyze-tool/lib/parsers/README.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：ibdiagnet 原始格式解析器。 <strong>维护/生成责任：</strong>文档维护者随行为变更同步更新；生成索引不得手工改写生成块。</td></tr>
-            <tr data-file-path="tools/ibdiagnet-analyze-tool/lib/parsers/__init__.py"><td><code>tools/ibdiagnet-analyze-tool/lib/parsers/__init__.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>属于“跨主机打包、同步、导入、诊断、制品与分析工具”的 __init__.py，由该目录的 README、上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
+            <tr data-file-path="tools/ibdiagnet-analyze-tool/lib/parsers/__init__.py"><td><code>tools/ibdiagnet-analyze-tool/lib/parsers/__init__.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>属于“跨主机打包、同步、导入、诊断、制品与分析工具”的 __init__.py；具体边界由当前文件、已跟踪的上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/ibdiagnet-analyze-tool/lib/parsers/db_csv.py"><td><code>tools/ibdiagnet-analyze-tool/lib/parsers/db_csv.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Parser for ibdiagnet2.db_csv — a multi-section CSV database file。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/ibdiagnet-analyze-tool/lib/parsers/iblinkinfo.py"><td><code>tools/ibdiagnet-analyze-tool/lib/parsers/iblinkinfo.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Parser for the human-readable output produced by ``iblinkinfo``。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/ibdiagnet-analyze-tool/lib/parsers/net_dump.py"><td><code>tools/ibdiagnet-analyze-tool/lib/parsers/net_dump.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Parsers for ibdiagnet2.net_dump — unified for NDR and XDR。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
@@ -886,7 +899,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="ztp/config/cumulus/template/P2P/air-template.json"><td><code>ztp/config/cumulus/template/P2P/air-template.json</code></td><td><strong>类别：</strong>数据/合同；<strong>作用：</strong>设备 bootstrap、配置生成、DHCP、手工 ZTP、备份和运行态辅助使用的机器可读合同、状态或夹具；字段身份由生产脚本或测试严格验证。 <strong>维护/生成责任：</strong>模板/示例维护者修改；真实项目和生成输出不得反向覆盖模板。</td></tr>
             <tr data-file-path="ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py"><td><code>ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Usage: python3 b-xlsx_to_dot.py [-y] [--deployment-scope all|prod|air]。 <strong>维护/生成责任：</strong>模板/示例维护者修改；真实项目和生成输出不得反向覆盖模板。</td></tr>
             <tr data-file-path="ztp/config/cumulus/template/P2P/lldp-analyze-tool"><td><code>ztp/config/cumulus/template/P2P/lldp-analyze-tool</code></td><td><strong>类别：</strong>仓库支持文件；<strong>作用：</strong>相对软链接入口，canonical target 为 ../../../../../tools/lldp-analyze-tool。 <strong>维护/生成责任：</strong>模板/示例维护者修改；真实项目和生成输出不得反向覆盖模板。</td></tr>
-            <tr data-file-path="ztp/config/cumulus/template/P2P/lldpq-template.dot"><td><code>ztp/config/cumulus/template/P2P/lldpq-template.dot</code></td><td><strong>类别：</strong>仓库支持文件；<strong>作用：</strong>属于“设备 bootstrap、配置生成、DHCP、手工 ZTP、备份和运行态辅助”的 lldpq-template.dot，由该目录的 README、上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>模板/示例维护者修改；真实项目和生成输出不得反向覆盖模板。</td></tr>
+            <tr data-file-path="ztp/config/cumulus/template/P2P/lldpq-template.dot"><td><code>ztp/config/cumulus/template/P2P/lldpq-template.dot</code></td><td><strong>类别：</strong>仓库支持文件；<strong>作用：</strong>属于“设备 bootstrap、配置生成、DHCP、手工 ZTP、备份和运行态辅助”的 lldpq-template.dot；具体边界由当前文件、已跟踪的上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>模板/示例维护者修改；真实项目和生成输出不得反向覆盖模板。</td></tr>
             <tr data-file-path="ztp/config/isc-dhcp-server/c1-generate_dhcp.py"><td><code>ztp/config/isc-dhcp-server/c1-generate_dhcp.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>读取当前目录下的 CSV 文件，生成 dhcpd.conf、dhcpd_eth.hosts、。 <strong>维护/生成责任：</strong>项目输入由项目维护者编辑；发布链接、receipt、状态和输出只允许对应事务/worker 生成。</td></tr>
             <tr data-file-path="ztp/config/nvos/README.md"><td><code>ztp/config/nvos/README.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：NVOS 配置发布。 <strong>维护/生成责任：</strong>文档维护者随行为变更同步更新；生成索引不得手工改写生成块。</td></tr>
             <tr data-file-path="ztp/config/nvos/d-hostname2mac.py"><td><code>ztp/config/nvos/d-hostname2mac.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>相对软链接入口，canonical target 为 ../cumulus/d-hostname2mac.py。 <strong>维护/生成责任：</strong>项目输入由项目维护者编辑；发布链接、receipt、状态和输出只允许对应事务/worker 生成。</td></tr>
@@ -1440,9 +1453,9 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <pre><code>sudo ./infra/docker/deploy.sh status</code></pre></div>
         </details>
         <details data-script-reference="infra/infra-setup.sh" class="script-reference">
-          <summary><code>infra/infra-setup.sh</code> — 属于“Native 基础设施与 Docker/Supervisor 运行时”的 infra-setup.sh，由该目录的 README、上层入口和测试合同共同约束。</summary>
+          <summary><code>infra/infra-setup.sh</code> — 属于“Native 基础设施与 Docker/Supervisor 运行时”的 infra-setup.sh；具体边界由当前文件、已跟踪的上层入口和测试合同共同约束。</summary>
           <div class="script-body"><dl>
-            <dt>作用：</dt><dd>属于“Native 基础设施与 Docker/Supervisor 运行时”的 infra-setup.sh，由该目录的 README、上层入口和测试合同共同约束。</dd>
+            <dt>作用：</dt><dd>属于“Native 基础设施与 Docker/Supervisor 运行时”的 infra-setup.sh；具体边界由当前文件、已跟踪的上层入口和测试合同共同约束。</dd>
             <dt>是否直接运行：</dt><dd>是，但仅在本节场景和权限边界内；先运行 --help、dry-run、verify-only、doctor 或 status（若提供）。</dd>
             <dt>运行环境：</dt><dd>项目电脑或 Linux 管理服务器；Native 与 Docker 后端不得混用。</dd>
             <dt>使用场景：</dt><dd>执行“Native 基础设施与 Docker/Supervisor 运行时”中的明确操作步骤；不要把一次子步骤当作完整发布。</dd>
@@ -1458,9 +1471,9 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <pre><code>sudo bash infra/infra-setup.sh --help</code></pre></div>
         </details>
         <details data-script-reference="infra/infra-teardown.sh" class="script-reference">
-          <summary><code>infra/infra-teardown.sh</code> — 属于“Native 基础设施与 Docker/Supervisor 运行时”的 infra-teardown.sh，由该目录的 README、上层入口和测试合同共同约束。</summary>
+          <summary><code>infra/infra-teardown.sh</code> — 属于“Native 基础设施与 Docker/Supervisor 运行时”的 infra-teardown.sh；具体边界由当前文件、已跟踪的上层入口和测试合同共同约束。</summary>
           <div class="script-body"><dl>
-            <dt>作用：</dt><dd>属于“Native 基础设施与 Docker/Supervisor 运行时”的 infra-teardown.sh，由该目录的 README、上层入口和测试合同共同约束。</dd>
+            <dt>作用：</dt><dd>属于“Native 基础设施与 Docker/Supervisor 运行时”的 infra-teardown.sh；具体边界由当前文件、已跟踪的上层入口和测试合同共同约束。</dd>
             <dt>是否直接运行：</dt><dd>是，但仅在本节场景和权限边界内；先运行 --help、dry-run、verify-only、doctor 或 status（若提供）。</dd>
             <dt>运行环境：</dt><dd>项目电脑或 Linux 管理服务器；Native 与 Docker 后端不得混用。</dd>
             <dt>使用场景：</dt><dd>执行“Native 基础设施与 Docker/Supervisor 运行时”中的明确操作步骤；不要把一次子步骤当作完整发布。</dd>
@@ -3766,9 +3779,9 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <pre><code>python3 -B -m py_compile tools/finished_project_state.py  # 仅语法验证；实际运行由上层流程负责</code></pre></div>
         </details>
         <details data-script-reference="tools/ib-tool-Jie/ib_tool_box/lib/__init__.py" class="script-reference">
-          <summary><code>tools/ib-tool-Jie/ib_tool_box/lib/__init__.py</code> — 属于“跨主机打包、同步、导入、诊断、制品与分析工具”的 __init__.py，由该目录的 README、上层入口和测试合同共同约束。</summary>
+          <summary><code>tools/ib-tool-Jie/ib_tool_box/lib/__init__.py</code> — 属于“跨主机打包、同步、导入、诊断、制品与分析工具”的 __init__.py；具体边界由当前文件、已跟踪的上层入口和测试合同共同约束。</summary>
           <div class="script-body"><dl>
-            <dt>作用：</dt><dd>属于“跨主机打包、同步、导入、诊断、制品与分析工具”的 __init__.py，由该目录的 README、上层入口和测试合同共同约束。</dd>
+            <dt>作用：</dt><dd>属于“跨主机打包、同步、导入、诊断、制品与分析工具”的 __init__.py；具体边界由当前文件、已跟踪的上层入口和测试合同共同约束。</dd>
             <dt>是否直接运行：</dt><dd>否；这是共享库/安全边界，由其列出的生产入口导入。</dd>
             <dt>运行环境：</dt><dd>随所属 Native、Docker、打包、监控或分析流程运行，不单独取得运行权限。</dd>
             <dt>使用场景：</dt><dd>上层入口需要路径校验、锁、解析、事务、状态投影或分析算法时调用。</dd>
@@ -3856,9 +3869,9 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <pre><code>rg -n &quot;link_errors&quot; DAY0-Prepare infra monitor tools ztp  # 查找受支持调用者</code></pre></div>
         </details>
         <details data-script-reference="tools/ib-tool-Jie/ib_tool_box/lib/parsers/__init__.py" class="script-reference">
-          <summary><code>tools/ib-tool-Jie/ib_tool_box/lib/parsers/__init__.py</code> — 属于“跨主机打包、同步、导入、诊断、制品与分析工具”的 __init__.py，由该目录的 README、上层入口和测试合同共同约束。</summary>
+          <summary><code>tools/ib-tool-Jie/ib_tool_box/lib/parsers/__init__.py</code> — 属于“跨主机打包、同步、导入、诊断、制品与分析工具”的 __init__.py；具体边界由当前文件、已跟踪的上层入口和测试合同共同约束。</summary>
           <div class="script-body"><dl>
-            <dt>作用：</dt><dd>属于“跨主机打包、同步、导入、诊断、制品与分析工具”的 __init__.py，由该目录的 README、上层入口和测试合同共同约束。</dd>
+            <dt>作用：</dt><dd>属于“跨主机打包、同步、导入、诊断、制品与分析工具”的 __init__.py；具体边界由当前文件、已跟踪的上层入口和测试合同共同约束。</dd>
             <dt>是否直接运行：</dt><dd>否；这是共享库/安全边界，由其列出的生产入口导入。</dd>
             <dt>运行环境：</dt><dd>随所属 Native、Docker、打包、监控或分析流程运行，不单独取得运行权限。</dd>
             <dt>使用场景：</dt><dd>上层入口需要路径校验、锁、解析、事务、状态投影或分析算法时调用。</dd>
@@ -4144,9 +4157,9 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <pre><code>python3 -B tools/ibdiagnet-analyze-tool/analyze.py --help</code></pre></div>
         </details>
         <details data-script-reference="tools/ibdiagnet-analyze-tool/lib/__init__.py" class="script-reference">
-          <summary><code>tools/ibdiagnet-analyze-tool/lib/__init__.py</code> — 属于“跨主机打包、同步、导入、诊断、制品与分析工具”的 __init__.py，由该目录的 README、上层入口和测试合同共同约束。</summary>
+          <summary><code>tools/ibdiagnet-analyze-tool/lib/__init__.py</code> — 属于“跨主机打包、同步、导入、诊断、制品与分析工具”的 __init__.py；具体边界由当前文件、已跟踪的上层入口和测试合同共同约束。</summary>
           <div class="script-body"><dl>
-            <dt>作用：</dt><dd>属于“跨主机打包、同步、导入、诊断、制品与分析工具”的 __init__.py，由该目录的 README、上层入口和测试合同共同约束。</dd>
+            <dt>作用：</dt><dd>属于“跨主机打包、同步、导入、诊断、制品与分析工具”的 __init__.py；具体边界由当前文件、已跟踪的上层入口和测试合同共同约束。</dd>
             <dt>是否直接运行：</dt><dd>否；这是共享库/安全边界，由其列出的生产入口导入。</dd>
             <dt>运行环境：</dt><dd>随所属 Native、Docker、打包、监控或分析流程运行，不单独取得运行权限。</dd>
             <dt>使用场景：</dt><dd>上层入口需要路径校验、锁、解析、事务、状态投影或分析算法时调用。</dd>
@@ -4234,9 +4247,9 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <pre><code>rg -n &quot;link_errors&quot; DAY0-Prepare infra monitor tools ztp  # 查找受支持调用者</code></pre></div>
         </details>
         <details data-script-reference="tools/ibdiagnet-analyze-tool/lib/parsers/__init__.py" class="script-reference">
-          <summary><code>tools/ibdiagnet-analyze-tool/lib/parsers/__init__.py</code> — 属于“跨主机打包、同步、导入、诊断、制品与分析工具”的 __init__.py，由该目录的 README、上层入口和测试合同共同约束。</summary>
+          <summary><code>tools/ibdiagnet-analyze-tool/lib/parsers/__init__.py</code> — 属于“跨主机打包、同步、导入、诊断、制品与分析工具”的 __init__.py；具体边界由当前文件、已跟踪的上层入口和测试合同共同约束。</summary>
           <div class="script-body"><dl>
-            <dt>作用：</dt><dd>属于“跨主机打包、同步、导入、诊断、制品与分析工具”的 __init__.py，由该目录的 README、上层入口和测试合同共同约束。</dd>
+            <dt>作用：</dt><dd>属于“跨主机打包、同步、导入、诊断、制品与分析工具”的 __init__.py；具体边界由当前文件、已跟踪的上层入口和测试合同共同约束。</dd>
             <dt>是否直接运行：</dt><dd>否；这是共享库/安全边界，由其列出的生产入口导入。</dd>
             <dt>运行环境：</dt><dd>随所属 Native、Docker、打包、监控或分析流程运行，不单独取得运行权限。</dd>
             <dt>使用场景：</dt><dd>上层入口需要路径校验、锁、解析、事务、状态投影或分析算法时调用。</dd>
@@ -5169,7 +5182,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
 
       <section id="v2-scenario-prepare" data-chapter>
         <h2>5. 场景：本机准备与全量证明</h2>
-        <div id="v2-runbook-project-create" data-nav-title="Runbook 1 · 创建项目" class="runbook" data-runbook="project-create">
+        <div id="v2-runbook-project-create" data-nav-title="Runbook 1 · 创建项目" class="runbook" data-runbook="project-create"><span id="v2-runbook-project-create-steps" class="manual-contract-anchor" data-manual-role="steps" aria-label="操作步骤"></span><span id="v2-runbook-project-create-risk" class="manual-contract-anchor" data-manual-role="risk" aria-label="风险"></span><span id="v2-runbook-project-create-rollback" class="manual-contract-anchor" data-manual-role="rollback" aria-label="回滚与恢复"></span>
           <h3>Runbook 1：从模板创建并填写项目</h3>
           <div class="runbook-meta">
             <div><strong>执行位置</strong>唯一可信的项目电脑，工作目录为当前 <code>http</code> 仓库根。</div>
@@ -5192,7 +5205,7 @@ $EDITOR DAY0-Prepare/&lt;project&gt;/02-dhcp-subnet_config.csv
         </div>
         <!-- end runbook -->
 
-        <div id="v2-runbook-local-load-proof" data-nav-title="Runbook 2 · 本机 load 与全量证明" class="runbook" data-runbook="local-load-proof">
+        <div id="v2-runbook-local-load-proof" data-nav-title="Runbook 2 · 本机 load 与全量证明" class="runbook" data-runbook="local-load-proof"><span id="v2-runbook-local-load-proof-steps" class="manual-contract-anchor" data-manual-role="steps" aria-label="操作步骤"></span><span id="v2-runbook-local-load-proof-risk" class="manual-contract-anchor" data-manual-role="risk" aria-label="风险"></span><span id="v2-runbook-local-load-proof-rollback" class="manual-contract-anchor" data-manual-role="rollback" aria-label="回滚与恢复"></span>
           <h3>Runbook 2：本机生成、审阅并签发全量测试证明</h3>
           <div class="runbook-meta">
             <div><strong>执行位置</strong>canonical 项目电脑；必须使用即将打包/同步的同一工作树和 Python 环境。</div>
@@ -5219,7 +5232,7 @@ python3 -B test_cases/run_related_tests.py --check --require-full</code></pre>
           <p><strong>下一步</strong>首次交付走 Runbook 3（直连）或 Runbook 4（中转）；目标已有可信部署时走 Runbook 8（增量更新）。</p>
         </div>
         <!-- end runbook -->
-        <div id="v2-scenario-local-proof" data-nav-title="本机生成与证明边界" class="scenario" data-scenario="local-proof"><h3>Local generation and proof</h3>
+        <div id="v2-scenario-local-proof" data-nav-title="本机生成与证明边界" class="scenario" data-scenario="local-proof"><span id="v2-scenario-local-proof-steps" class="manual-contract-anchor" data-manual-role="steps" aria-label="操作步骤"></span><span id="v2-scenario-local-proof-risk" class="manual-contract-anchor" data-manual-role="risk" aria-label="风险"></span><span id="v2-scenario-local-proof-rollback" class="manual-contract-anchor" data-manual-role="rollback" aria-label="回滚与恢复"></span><h3>Local generation and proof</h3>
         <p>每次正式 upload/sync 前，先在 canonical 工作树执行本机正式 load。它会在生成前运行全量测试，成功后签发绑定源码、测试、manifest、Python 和平台的证明：</p>
         <pre><code>python3 DAY0-Prepare/11-load.py DAY0-Prepare/&lt;project&gt; --air
 
@@ -5239,7 +5252,7 @@ python3 DAY0-Prepare/11-load.py DAY0-Prepare/&lt;project&gt; --prod</code></pre>
 
       <section id="v2-scenario-native" data-chapter>
         <h2>6. 场景：Native 首发与中转</h2>
-        <div id="v2-runbook-direct-native-upload" data-nav-title="Runbook 3 · 直连上传与部署" class="runbook" data-runbook="direct-native-upload">
+        <div id="v2-runbook-direct-native-upload" data-nav-title="Runbook 3 · 直连上传与部署" class="runbook" data-runbook="direct-native-upload"><span id="v2-runbook-direct-native-upload-steps" class="manual-contract-anchor" data-manual-role="steps" aria-label="操作步骤"></span><span id="v2-runbook-direct-native-upload-risk" class="manual-contract-anchor" data-manual-role="risk" aria-label="风险"></span><span id="v2-runbook-direct-native-upload-rollback" class="manual-contract-anchor" data-manual-role="rollback" aria-label="回滚与恢复"></span>
           <h3>Runbook 3：项目电脑直连管理服务器，先上传再受控部署</h3>
           <div class="runbook-meta">
             <div><strong>执行位置</strong>canonical 项目电脑；命令负责本地打包、SSH 传输和远端 guard。</div>
@@ -5267,7 +5280,7 @@ python3 -B tools/tar-for-upload.py DAY0-Prepare/&lt;project&gt; \
         </div>
         <!-- end runbook -->
 
-        <div id="v2-runbook-relay-native-upload" data-nav-title="Runbook 4 · 中转部署" class="runbook" data-runbook="relay-native-upload">
+        <div id="v2-runbook-relay-native-upload" data-nav-title="Runbook 4 · 中转部署" class="runbook" data-runbook="relay-native-upload"><span id="v2-runbook-relay-native-upload-steps" class="manual-contract-anchor" data-manual-role="steps" aria-label="操作步骤"></span><span id="v2-runbook-relay-native-upload-risk" class="manual-contract-anchor" data-manual-role="risk" aria-label="风险"></span><span id="v2-runbook-relay-native-upload-rollback" class="manual-contract-anchor" data-manual-role="rollback" aria-label="回滚与恢复"></span>
           <h3>Runbook 4：通过中间设备传输 relay bundle</h3>
           <div class="runbook-meta">
             <div><strong>执行位置</strong>项目电脑生成；中间设备只做字节传输；最终部署命令在管理服务器运行。</div>
@@ -5292,7 +5305,7 @@ sudo python3 -B tools/deploy-upload-archive.py /tmp/&lt;relay-directory&gt;/&lt;
         </div>
         <!-- end runbook -->
 
-        <div id="v2-runbook-remote-native-load" data-nav-title="Runbook 5 · 远端 Native load" class="runbook" data-runbook="remote-native-load">
+        <div id="v2-runbook-remote-native-load" data-nav-title="Runbook 5 · 远端 Native load" class="runbook" data-runbook="remote-native-load"><span id="v2-runbook-remote-native-load-steps" class="manual-contract-anchor" data-manual-role="steps" aria-label="操作步骤"></span><span id="v2-runbook-remote-native-load-risk" class="manual-contract-anchor" data-manual-role="risk" aria-label="风险"></span><span id="v2-runbook-remote-native-load-rollback" class="manual-contract-anchor" data-manual-role="rollback" aria-label="回滚与恢复"></span>
           <h3>Runbook 5：管理服务器执行统一 Native load</h3>
           <div class="runbook-meta">
             <div><strong>执行位置</strong>Linux Native 管理服务器的 <code>/var/www/html</code>。</div>
@@ -5317,7 +5330,7 @@ sudo python3 -B DAY0-Prepare/11-load.py DAY0-Prepare/&lt;project&gt; \
         </div>
         <!-- end runbook -->
 
-        <div id="v2-runbook-native-acceptance" data-nav-title="Runbook 6 · Native 验收" class="runbook" data-runbook="native-acceptance">
+        <div id="v2-runbook-native-acceptance" data-nav-title="Runbook 6 · Native 验收" class="runbook" data-runbook="native-acceptance"><span id="v2-runbook-native-acceptance-steps" class="manual-contract-anchor" data-manual-role="steps" aria-label="操作步骤"></span><span id="v2-runbook-native-acceptance-risk" class="manual-contract-anchor" data-manual-role="risk" aria-label="风险"></span><span id="v2-runbook-native-acceptance-rollback" class="manual-contract-anchor" data-manual-role="rollback" aria-label="回滚与恢复"></span>
           <h3>Runbook 6：Native 部署后验收</h3>
           <div class="runbook-meta">
             <div><strong>执行位置</strong>管理服务器；HTTP 检查使用真实 ZTP service IP，不只测试 loopback。</div>
@@ -5346,19 +5359,19 @@ sudo python3 -B tools/collect-ztp-diagnostics.py \
           <p><strong>下一步</strong>交付日常操作使用 Runbook 7；代码/输入变化走 Runbook 8；阶段结束先 Runbook 9 回收数据，再按 Runbook 10 unload。</p>
         </div>
         <!-- end runbook -->
-        <div id="v2-scenario-native-bootstrap" data-nav-title="Native bootstrap 边界" class="scenario" data-scenario="native-bootstrap"><h3>Native bootstrap</h3>
+        <div id="v2-scenario-native-bootstrap" data-nav-title="Native bootstrap 边界" class="scenario" data-scenario="native-bootstrap"><span id="v2-scenario-native-bootstrap-steps" class="manual-contract-anchor" data-manual-role="steps" aria-label="操作步骤"></span><span id="v2-scenario-native-bootstrap-risk" class="manual-contract-anchor" data-manual-role="risk" aria-label="风险"></span><span id="v2-scenario-native-bootstrap-rollback" class="manual-contract-anchor" data-manual-role="rollback" aria-label="回滚与恢复"></span><h3>Native bootstrap</h3>
         <p>Native 首次发布：</p>
         <pre><code>python3 tools/tar-for-upload.py DAY0-Prepare/&lt;project&gt; \
   &lt;user&gt;@&lt;management-server&gt; --runtime native --deploy --exclude-apps</code></pre>
         <div class="scenario-grid"><div><h4>前置条件</h4><p>宿主端口/服务归属明确，Docker 未占用服务，本机 proof 当前有效。</p></div><div><h4>预期结果</h4><p>guard 应用 overlay，服务器 load 以同一 release 收敛 Apache/DHCP/worker。</p></div><div><h4>失败恢复</h4><p>保留 marker/receipt；不要手工发布片段或单独重启 DHCP。</p></div><div><h4>验收证据</h4><p>archive SHA、source receipt、release、systemd、监听、HTTP 和设备证据。</p></div></div></div>
-        <div id="v2-scenario-relay-deploy" data-nav-title="Relay/offline 边界" class="scenario" data-scenario="relay-deploy"><h3>Relay/offline archive deployment</h3>
+        <div id="v2-scenario-relay-deploy" data-nav-title="Relay/offline 边界" class="scenario" data-scenario="relay-deploy"><span id="v2-scenario-relay-deploy-steps" class="manual-contract-anchor" data-manual-role="steps" aria-label="操作步骤"></span><span id="v2-scenario-relay-deploy-risk" class="manual-contract-anchor" data-manual-role="risk" aria-label="风险"></span><span id="v2-scenario-relay-deploy-rollback" class="manual-contract-anchor" data-manual-role="rollback" aria-label="回滚与恢复"></span><h3>Relay/offline archive deployment</h3>
           <pre><code>sudo python3 tools/deploy-upload-archive.py /tmp/&lt;archive&gt; --verify-only
 sudo python3 tools/deploy-upload-archive.py /tmp/&lt;archive&gt; --runtime native</code></pre>
           <div class="scenario-grid"><div><h4>前置条件</h4><p>archive/helper 已逐跳核对，目标端源码与权限满足合同。</p></div><div><h4>预期结果</h4><p>在 deployment lock 和 no-follow guard 下应用 overlay。</p></div><div><h4>失败恢复</h4><p>identity/member/freshness 错误立即停止；禁止改用 <code>tar -x</code>。</p></div><div><h4>验收证据</h4><p>逐跳 SHA、verify-only、目标 receipt 和后续 load。</p></div></div>
         </div>
       </section>
 
-      <div id="v2-runbook-collection-and-backup" data-nav-title="Runbook 7 · 状态收集与 YAML Backup" class="runbook" data-runbook="collection-and-backup">
+      <div id="v2-runbook-collection-and-backup" data-nav-title="Runbook 7 · 状态收集与 YAML Backup" class="runbook" data-runbook="collection-and-backup"><span id="v2-runbook-collection-and-backup-steps" class="manual-contract-anchor" data-manual-role="steps" aria-label="操作步骤"></span><span id="v2-runbook-collection-and-backup-risk" class="manual-contract-anchor" data-manual-role="risk" aria-label="风险"></span><span id="v2-runbook-collection-and-backup-rollback" class="manual-contract-anchor" data-manual-role="rollback" aria-label="回滚与恢复"></span>
         <h3>Runbook 7：日常状态收集、持续任务与 YAML Backup</h3>
         <div class="runbook-meta">
           <div><strong>执行位置</strong>浏览器访问管理服务器 <code>monitor/monitor.html</code>；只读诊断和 CLI backup 在当前 Native 管理服务器运行。</div>
@@ -5433,7 +5446,7 @@ sudo python3 DAY0-Prepare/11-load.py DAY0-Prepare/&lt;project&gt; \
 
       <section id="v2-scenario-docker" data-chapter>
         <h2>7. 场景：Docker/Supervisor 准入状态</h2>
-        <div id="v2-runbook-docker-admission" data-nav-title="Docker 当前准入状态" class="runbook" data-runbook="docker-admission">
+        <div id="v2-runbook-docker-admission" data-nav-title="Docker 当前准入状态" class="runbook" data-runbook="docker-admission"><span id="v2-runbook-docker-admission-steps" class="manual-contract-anchor" data-manual-role="steps" aria-label="操作步骤"></span><span id="v2-runbook-docker-admission-risk" class="manual-contract-anchor" data-manual-role="risk" aria-label="风险"></span><span id="v2-runbook-docker-admission-rollback" class="manual-contract-anchor" data-manual-role="rollback" aria-label="回滚与恢复"></span>
           <h3>Runbook：Docker 当前不是已支持生产路径</h3>
           <div class="runbook-meta">
             <div><strong>执行位置</strong>仅限隔离 Docker 验证 VM；不要在当前生产管理服务器照抄部署命令。</div>
@@ -5446,14 +5459,14 @@ sudo python3 DAY0-Prepare/11-load.py DAY0-Prepare/&lt;project&gt; \
           <p><strong>下一步</strong>在 Docker 尚未完成成功的端到端真机验收之前，实际项目部署统一返回 Runbook 3–6 的 Native 流程。本框中的内容禁止作为已支持生产流程复制执行。</p>
         </div>
         <!-- end runbook -->
-        <div id="v2-scenario-docker-bootstrap" data-nav-title="Docker bootstrap（未准入）" class="scenario" data-scenario="docker-bootstrap"><h3>Docker bootstrap（未准入）</h3>
+        <div id="v2-scenario-docker-bootstrap" data-nav-title="Docker bootstrap（未准入）" class="scenario" data-scenario="docker-bootstrap"><span id="v2-scenario-docker-bootstrap-steps" class="manual-contract-anchor" data-manual-role="steps" aria-label="操作步骤"></span><span id="v2-scenario-docker-bootstrap-risk" class="manual-contract-anchor" data-manual-role="risk" aria-label="风险"></span><span id="v2-scenario-docker-bootstrap-rollback" class="manual-contract-anchor" data-manual-role="rollback" aria-label="回滚与恢复"></span><h3>Docker bootstrap（未准入）</h3>
         <div class="callout danger"><strong>尚未完成成功验证</strong>仓库包含 Docker/Supervisor 实现和测试，但当前没有可作为生产依据的成功端到端部署证据。本手册故意不提供可复制的 deploy/deploy-preloaded 命令。</div>
         <div class="scenario-grid"><div><h4>前置条件</h4><p>只在隔离 VM、fresh artifact 和审批 runner 均已就绪后开展验证。</p></div><div><h4>预期结果</h4><p>取得完整 image/CID/runtime/restart/HTTP/DHCP 证据后再提请准入。</p></div><div><h4>失败恢复</h4><p>第一处失败即停止并返回 canonical 工作树修复，所有旧 artifact 作废。</p></div><div><h4>验收证据</h4><p>以 REAL_ENVIRONMENT 的 Docker 案例和独立审查为准；静态测试不能替代真机。</p></div></div></div>
       </section>
 
       <section id="v2-scenario-air" data-chapter>
         <h2>8. 场景：平台与 AIR 范围</h2>
-        <div id="v2-scenario-air-ethernet" data-nav-title="AIR Ethernet simulation" class="scenario" data-scenario="air-ethernet"><h3>AIR Ethernet simulation</h3>
+        <div id="v2-scenario-air-ethernet" data-nav-title="AIR Ethernet simulation" class="scenario" data-scenario="air-ethernet"><span id="v2-scenario-air-ethernet-steps" class="manual-contract-anchor" data-manual-role="steps" aria-label="操作步骤"></span><span id="v2-scenario-air-ethernet-risk" class="manual-contract-anchor" data-manual-role="risk" aria-label="风险"></span><span id="v2-scenario-air-ethernet-rollback" class="manual-contract-anchor" data-manual-role="rollback" aria-label="回滚与恢复"></span><h3>AIR Ethernet simulation</h3>
         <p><strong>前置条件：</strong>AIR policy/mini 清单有效；AIR 当前只模拟 Ethernet。<strong>预期结果：</strong>只生成/发布 AIR Ethernet。<strong>失败恢复：</strong>修 policy/输入后完整重跑。<strong>验收证据：</strong>AIR DOT/JSON、选择报告、HTTP 和仿真证据。</p>
         <p><code>--mini</code> 只接受项目固定 <code>03-air-topology-policy.json</code> 中严格的
         <code>mini_sampling</code>，代码没有 GB300 角色 fallback。策略必须显式声明 location、互不
@@ -5465,7 +5478,7 @@ sudo python3 DAY0-Prepare/11-load.py DAY0-Prepare/&lt;project&gt; \
         <p>load 固定客户 mini 源，允许本轮生成器刷新旧 canonical 04，随后再次核对源身份；成功
         parent release 同时绑定 policy 和最终 04 的 SHA-256。请用选择报告、真实角色容量和
         <code>TC-REAL-AIR-MINI-H19-001</code> 证明异构 AIR 结果，不得用同质 fixture 替代。</p></div>
-        <div id="v2-scenario-scoped-production" data-nav-title="按交换机类型生成" class="scenario" data-scenario="scoped-production"><h3>Scoped production generation</h3>
+        <div id="v2-scenario-scoped-production" data-nav-title="按交换机类型生成" class="scenario" data-scenario="scoped-production"><span id="v2-scenario-scoped-production-steps" class="manual-contract-anchor" data-manual-role="steps" aria-label="操作步骤"></span><span id="v2-scenario-scoped-production-risk" class="manual-contract-anchor" data-manual-role="risk" aria-label="风险"></span><span id="v2-scenario-scoped-production-rollback" class="manual-contract-anchor" data-manual-role="rollback" aria-label="回滚与恢复"></span><h3>Scoped production generation</h3>
         <p>Production 可以生成全部平台，也可以显式限制一个平台：</p>
         <pre><code>python3 DAY0-Prepare/11-load.py DAY0-Prepare/&lt;project&gt; --prod --switch eth
 python3 DAY0-Prepare/11-load.py DAY0-Prepare/&lt;project&gt; --prod --switch ib
@@ -5492,7 +5505,7 @@ python3 DAY0-Prepare/11-load.py DAY0-Prepare/&lt;project&gt; --prod --switch nvl
 
       <section id="v2-scenario-update" data-chapter>
         <h2>9. 场景：增量更新</h2>
-        <div id="v2-runbook-native-update" data-nav-title="Runbook 8 · 增量更新" class="runbook" data-runbook="native-update">
+        <div id="v2-runbook-native-update" data-nav-title="Runbook 8 · 增量更新" class="runbook" data-runbook="native-update"><span id="v2-runbook-native-update-steps" class="manual-contract-anchor" data-manual-role="steps" aria-label="操作步骤"></span><span id="v2-runbook-native-update-risk" class="manual-contract-anchor" data-manual-role="risk" aria-label="风险"></span><span id="v2-runbook-native-update-rollback" class="manual-contract-anchor" data-manual-role="rollback" aria-label="回滚与恢复"></span>
           <h3>Runbook 8：代码或项目输入更新</h3>
           <div class="runbook-meta">
             <div><strong>执行位置</strong>先在 canonical 项目电脑验证和 sync，再登录 Native 管理服务器重新 load。</div>
@@ -5526,7 +5539,7 @@ sudo python3 -B DAY0-Prepare/11-load.py DAY0-Prepare/&lt;project&gt; \
           <p><strong>下一步</strong>重复 Runbook 6；只有新 release、服务、HTTP 和设备证据一致，更新才完成。</p>
         </div>
         <!-- end runbook -->
-        <div id="v2-scenario-native-update" data-nav-title="Native update 边界" class="scenario" data-scenario="native-update"><h3>Native update</h3>
+        <div id="v2-scenario-native-update" data-nav-title="Native update 边界" class="scenario" data-scenario="native-update"><span id="v2-scenario-native-update-steps" class="manual-contract-anchor" data-manual-role="steps" aria-label="操作步骤"></span><span id="v2-scenario-native-update-risk" class="manual-contract-anchor" data-manual-role="risk" aria-label="风险"></span><span id="v2-scenario-native-update-rollback" class="manual-contract-anchor" data-manual-role="rollback" aria-label="回滚与恢复"></span><h3>Native update</h3>
         <p>代码或输入变化后，先重新执行本机正式 load 和全量门禁，再同步：</p>
         <pre><code># Native
 python3 tools/sync-code.py DAY0-Prepare/&lt;project&gt; \
@@ -5534,14 +5547,14 @@ python3 tools/sync-code.py DAY0-Prepare/&lt;project&gt; \
 
 # Native 同步后在服务器完整重跑 11-load.py</code></pre>
         <p><strong>前置条件：</strong>本机 proof 当前有效。<strong>预期结果：</strong>差异同步后原子发布新 release。<strong>失败恢复：</strong>保留 CAS/receipt 错误，不覆盖远端密码轮换。<strong>验收证据：</strong>sync diff、receipt、generation 和服务健康。</p></div>
-        <div id="v2-scenario-docker-update" data-nav-title="Docker update（未准入）" class="scenario" data-scenario="docker-update"><h3>Docker update</h3>
+        <div id="v2-scenario-docker-update" data-nav-title="Docker update（未准入）" class="scenario" data-scenario="docker-update"><span id="v2-scenario-docker-update-steps" class="manual-contract-anchor" data-manual-role="steps" aria-label="操作步骤"></span><span id="v2-scenario-docker-update-risk" class="manual-contract-anchor" data-manual-role="risk" aria-label="风险"></span><span id="v2-scenario-docker-update-rollback" class="manual-contract-anchor" data-manual-role="rollback" aria-label="回滚与恢复"></span><h3>Docker update</h3>
           <p><strong>前置条件：</strong>仅限隔离验证环境，且 Docker bootstrap 已先取得未来的正式准入。<strong>预期结果：</strong>当前 V2 不提供生产操作命令；验证设计要求 source write 设置 rebuild-required，并由 fresh image 完成全链路重部署。<strong>失败恢复：</strong>不得在生产现场尝试 <code>sync --runtime docker</code>、<code>deploy</code> 或 <code>load</code>。<strong>验收证据：</strong>未来必须重新取得 receipt、marker、image ID、health/restart 和物理网络证据。</p>
         </div>
       </section>
 
       <section id="v2-scenario-results" data-chapter>
         <h2>10. 场景：结果回收与卸载</h2>
-        <div id="v2-runbook-download-and-import" data-nav-title="Runbook 9 · 下载与导入" class="runbook" data-runbook="download-and-import">
+        <div id="v2-runbook-download-and-import" data-nav-title="Runbook 9 · 下载与导入" class="runbook" data-runbook="download-and-import"><span id="v2-runbook-download-and-import-steps" class="manual-contract-anchor" data-manual-role="steps" aria-label="操作步骤"></span><span id="v2-runbook-download-and-import-risk" class="manual-contract-anchor" data-manual-role="risk" aria-label="风险"></span><span id="v2-runbook-download-and-import-rollback" class="manual-contract-anchor" data-manual-role="rollback" aria-label="回滚与恢复"></span>
           <h3>Runbook 9：回收生产项目数据并在本机安全导入</h3>
           <div class="runbook-meta">
             <div><strong>执行位置</strong>先在 Native 管理服务器打包，再把 archive 下载到项目电脑 review；两个阶段不能混用 upload archive。</div>
@@ -5568,7 +5581,7 @@ python3 -B tools/import-from-download.py &lt;download.tar.gz&gt;</code></pre>
         </div>
         <!-- end runbook -->
 
-        <div id="v2-runbook-native-unload" data-nav-title="Runbook 10 · Native unload" class="runbook" data-runbook="native-unload">
+        <div id="v2-runbook-native-unload" data-nav-title="Runbook 10 · Native unload" class="runbook" data-runbook="native-unload"><span id="v2-runbook-native-unload-steps" class="manual-contract-anchor" data-manual-role="steps" aria-label="操作步骤"></span><span id="v2-runbook-native-unload-risk" class="manual-contract-anchor" data-manual-role="risk" aria-label="风险"></span><span id="v2-runbook-native-unload-rollback" class="manual-contract-anchor" data-manual-role="rollback" aria-label="回滚与恢复"></span>
           <h3>Runbook 10：备份确认后停止 Native 项目运行态</h3>
           <div class="runbook-meta">
             <div><strong>执行位置</strong>Native 管理服务器 <code>/var/www/html</code>，以能读取当前 receipt 和管理 systemd 的用户运行。</div>
@@ -5589,7 +5602,7 @@ sudo python3 -B DAY0-Prepare/02-unsetup.py DAY0-Prepare/&lt;project&gt; --dry-ru
           <p><strong>下一步</strong>保留服务器上的数据直到客户确认；需要重新部署时从 Runbook 5 完整 load，而不是手工恢复单个链接或服务。</p>
         </div>
         <!-- end runbook -->
-        <div id="v2-scenario-results-unload" data-nav-title="结果回收与卸载边界" class="scenario" data-scenario="results-unload"><h3>Download, review and unload</h3>
+        <div id="v2-scenario-results-unload" data-nav-title="结果回收与卸载边界" class="scenario" data-scenario="results-unload"><span id="v2-scenario-results-unload-steps" class="manual-contract-anchor" data-manual-role="steps" aria-label="操作步骤"></span><span id="v2-scenario-results-unload-risk" class="manual-contract-anchor" data-manual-role="risk" aria-label="风险"></span><span id="v2-scenario-results-unload-rollback" class="manual-contract-anchor" data-manual-role="rollback" aria-label="回滚与恢复"></span><h3>Download, review and unload</h3>
         <p>先在管理服务器生成 download bundle，再在项目电脑 review/import。任何 import 默认先比较，不应覆盖 canonical 项目输入。</p>
         <pre><code>sudo python3 tools/tar-for-download.py DAY0-Prepare/&lt;project&gt;
 
@@ -5625,11 +5638,11 @@ PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B test_cases/run_related_tests.p
       </section>
     </article>
 
-    <article data-manual-version="v3-dev" hidden>
+    <article data-manual-version="v3-dev" data-visible-in="v3-dev" hidden>
       <div class="breadcrumb"><a href="index.html">首页</a> / User Manual / V3-dev</div>
       <div class="version-kicker"><span class="version-badge preview">V3-dev</span><span>开发预览</span></div>
       <h1>HTTP ZTP V3-dev User Manual</h1>
-      <p class="lede">V3-dev 聚焦“完整封存项目后安全停止运行态”，并把生产记录导入只读 Finished-projects。它是评审中的未来流程，不替代 V2。</p>
+      <p class="lede">选择 V3-dev 时，本页先完整显示 V2 生产基线，再按顺序显示以下 V3 增量。V3-dev 聚焦“完整封存项目后安全停止运行态”，并把生产记录导入只读 Finished-projects；它是评审中的未来流程，不替代 V2。</p>
       <div class="callout danger"><strong>不可执行边界</strong>V3-dev 内容不能作为 V2 生产操作依据。标为“拟议”的命令、状态名和目录合同必须在 V3 门禁与真机验收完成后才能使用。</div>
 
       <section id="v3-dev-overview" data-chapter>
@@ -5700,13 +5713,13 @@ sudo python3 tools/finish-project.py finish \
 # 中断恢复
 sudo python3 tools/finish-project.py status &lt;transaction-id&gt;
 sudo python3 tools/finish-project.py resume &lt;transaction-id&gt;</code></pre>
-        <div id="v3-finish-native" data-nav-title="Finish Native" class="scenario" data-scenario="finish-native"><h3>Finish Native</h3><p><strong>前置条件：</strong>活动项目、服务、空间与 archive 范围可验证。<strong>预期结果：</strong>bundle 验证后停止身份匹配的 Native runtime。<strong>失败恢复：</strong>按 transaction ID resume，未验证 bundle 不停止。<strong>验收证据：</strong>pre/final manifests、service before/after、lock 和 bundle SHA。</p></div>
-        <div id="v3-finish-docker" data-nav-title="Finish Docker" class="scenario" data-scenario="finish-docker"><h3>Finish Docker</h3><p>Docker 使用相同接口但传 <code>--runtime docker</code>。<strong>前置条件：</strong>immutable CID、labels、binds、user 和持久目录全部匹配。<strong>预期结果：</strong>只停止受管容器并保留数据。<strong>失败恢复：</strong>identity 漂移即阻断，不按名称删除。<strong>验收证据：</strong>CID/image/inspect、stop exit、final delta 和 bundle SHA。</p></div>
+        <div id="v3-finish-native" data-nav-title="Finish Native" class="scenario" data-scenario="finish-native"><span id="v3-finish-native-steps" class="manual-contract-anchor" data-manual-role="steps" aria-label="操作步骤"></span><span id="v3-finish-native-risk" class="manual-contract-anchor" data-manual-role="risk" aria-label="风险"></span><span id="v3-finish-native-rollback" class="manual-contract-anchor" data-manual-role="rollback" aria-label="回滚与恢复"></span><h3>Finish Native</h3><p><strong>前置条件：</strong>活动项目、服务、空间与 archive 范围可验证。<strong>预期结果：</strong>bundle 验证后停止身份匹配的 Native runtime。<strong>失败恢复：</strong>按 transaction ID resume，未验证 bundle 不停止。<strong>验收证据：</strong>pre/final manifests、service before/after、lock 和 bundle SHA。</p></div>
+        <div id="v3-finish-docker" data-nav-title="Finish Docker" class="scenario" data-scenario="finish-docker"><span id="v3-finish-docker-steps" class="manual-contract-anchor" data-manual-role="steps" aria-label="操作步骤"></span><span id="v3-finish-docker-risk" class="manual-contract-anchor" data-manual-role="risk" aria-label="风险"></span><span id="v3-finish-docker-rollback" class="manual-contract-anchor" data-manual-role="rollback" aria-label="回滚与恢复"></span><h3>Finish Docker</h3><p>Docker 使用相同接口但传 <code>--runtime docker</code>。<strong>前置条件：</strong>immutable CID、labels、binds、user 和持久目录全部匹配。<strong>预期结果：</strong>只停止受管容器并保留数据。<strong>失败恢复：</strong>identity 漂移即阻断，不按名称删除。<strong>验收证据：</strong>CID/image/inspect、stop exit、final delta 和 bundle SHA。</p></div>
       </section>
 
       <section id="v3-dev-import" data-chapter>
         <h2>7. Finished bundle 导入</h2>
-        <div id="v3-finished-import" data-nav-title="Finished bundle 导入" class="scenario" data-scenario="finished-import"><h3>Finished import</h3>
+        <div id="v3-finished-import" data-nav-title="Finished bundle 导入" class="scenario" data-scenario="finished-import"><span id="v3-finished-import-steps" class="manual-contract-anchor" data-manual-role="steps" aria-label="操作步骤"></span><span id="v3-finished-import-risk" class="manual-contract-anchor" data-manual-role="risk" aria-label="风险"></span><span id="v3-finished-import-rollback" class="manual-contract-anchor" data-manual-role="rollback" aria-label="回滚与恢复"></span><h3>Finished import</h3>
         <p>finished bundle 默认 review-only；显式确认后才以 no-replace 方式发布：</p>
         <pre><code># 拟议/开发分支接口
 python3 tools/import-from-download.py ~/Downloads/&lt;bundle&gt;.tar.gz
@@ -5751,7 +5764,7 @@ python3 tools/import-from-download.py ~/Downloads/&lt;bundle&gt;.tar.gz --finish
 
       <section id="v3-dev-compatibility" data-chapter>
         <h2>10. 兼容与迁移</h2>
-        <div id="v3-legacy-deployment" data-nav-title="旧部署兼容路径" class="scenario" data-scenario="legacy-without-footprint"><h3>Legacy deployment without footprint</h3><p><strong>前置条件：</strong>找不到 V3 footprint，但能独立证明项目、runtime 和数据范围。<strong>预期结果：</strong>允许 archive + stop-only，删除建议仅作为人工条件项。<strong>失败恢复：</strong>身份或范围不明确就停止，不猜测、不清理。<strong>验收证据：</strong>legacy inventory、推导依据、bundle SHA、服务前后状态和未执行删除清单。</p></div>
+        <div id="v3-legacy-deployment" data-nav-title="旧部署兼容路径" class="scenario" data-scenario="legacy-without-footprint"><span id="v3-legacy-deployment-steps" class="manual-contract-anchor" data-manual-role="steps" aria-label="操作步骤"></span><span id="v3-legacy-deployment-risk" class="manual-contract-anchor" data-manual-role="risk" aria-label="风险"></span><span id="v3-legacy-deployment-rollback" class="manual-contract-anchor" data-manual-role="rollback" aria-label="回滚与恢复"></span><h3>Legacy deployment without footprint</h3><p><strong>前置条件：</strong>找不到 V3 footprint，但能独立证明项目、runtime 和数据范围。<strong>预期结果：</strong>允许 archive + stop-only，删除建议仅作为人工条件项。<strong>失败恢复：</strong>身份或范围不明确就停止，不猜测、不清理。<strong>验收证据：</strong>legacy inventory、推导依据、bundle SHA、服务前后状态和未执行删除清单。</p></div>
         <ul>
           <li>V2 的 tar-for-download、import、unload 和 Docker down 默认语义保持不变。</li>
           <li>没有 deployment footprint 的旧部署可以归档和 stop-only，但删除建议只能是条件项。</li>
@@ -5806,11 +5819,13 @@ python3 tools/import-from-download.py ~/Downloads/&lt;bundle&gt;.tar.gz --finish
   function versionForHash(hash) {
     const target = hash ? document.getElementById(hash.replace(/^#/, "")) : null;
     const article = target && target.closest("article[data-manual-version]");
-    return article ? article.dataset.manualVersion : null;
+    if (!article) return null;
+    if (article.dataset.visibleIn.split(/\s+/).includes(currentVersion)) return currentVersion;
+    return article.dataset.manualVersion;
   }
 
-  function currentArticle() {
-    return articles.find(article => article.dataset.manualVersion === currentVersion);
+  function currentArticles() {
+    return articles.filter(article => article.dataset.visibleIn.split(/\s+/).includes(currentVersion));
   }
 
   function setBranchExpanded(toggle, expanded) {
@@ -5898,7 +5913,7 @@ python3 tools/import-from-download.py ~/Downloads/&lt;bundle&gt;.tar.gz --finish
   }
 
   function visibleSections() {
-    return Array.from(currentArticle().querySelectorAll("section[data-chapter]"))
+    return currentArticles().flatMap(article => Array.from(article.querySelectorAll("section[data-chapter]")))
       .filter(section => !section.hidden);
   }
 
@@ -5932,12 +5947,13 @@ python3 tools/import-from-download.py ~/Downloads/&lt;bundle&gt;.tar.gz --finish
 
   function applySearch() {
     const query = search.value.trim().toLocaleLowerCase("zh-CN");
-    const article = currentArticle();
     let matches = 0;
-    article.querySelectorAll("section[data-chapter]").forEach(section => {
-      const match = !query || section.textContent.toLocaleLowerCase("zh-CN").includes(query);
-      section.hidden = !match;
-      if (match) matches += 1;
+    currentArticles().forEach(article => {
+      article.querySelectorAll("section[data-chapter]").forEach(section => {
+        const match = !query || section.textContent.toLocaleLowerCase("zh-CN").includes(query);
+        section.hidden = !match;
+        if (match) matches += 1;
+      });
     });
     empty.style.display = matches ? "none" : "block";
     syncTreeToSearch(query);
@@ -5949,7 +5965,7 @@ python3 tools/import-from-download.py ~/Downloads/&lt;bundle&gt;.tar.gz --finish
     currentVersion = version;
     selector.value = version;
     articles.forEach(article => {
-      article.hidden = article.dataset.manualVersion !== version;
+      article.hidden = !article.dataset.visibleIn.split(/\s+/).includes(version);
     });
     trees.forEach(tree => {
       tree.hidden = tree.dataset.versionNav !== version;
@@ -5957,7 +5973,7 @@ python3 tools/import-from-download.py ~/Downloads/&lt;bundle&gt;.tar.gz --finish
     search.value = "";
     applySearch();
     if (!preserveHash) {
-      const first = currentArticle().querySelector("section[data-chapter]");
+      const first = visibleSections()[0];
       history.replaceState(null, "", first ? `#${first.id}` : window.location.pathname);
     }
   }
@@ -5997,7 +6013,7 @@ python3 tools/import-from-download.py ~/Downloads/&lt;bundle&gt;.tar.gz --finish
   });
 
   setVersion(versionForHash(window.location.hash) || "v2", true);
-  setCurrentNavigation(window.location.hash || `#${currentArticle().querySelector("section[data-chapter]").id}`);
+  setCurrentNavigation(window.location.hash || `#${visibleSections()[0].id}`);
 })();
 </script>
 </body>

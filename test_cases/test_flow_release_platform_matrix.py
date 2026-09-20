@@ -700,7 +700,8 @@ switches:
     def test_parent_refuses_hostile_nvos_release_defaults(self):
         cases = (
             "missing", "wrong-name", "undeclared", "symlink", "hardlink",
-            "hash-drift", "malformed-yaml",
+            "hash-drift", "same-size-hash-drift", "extra-family",
+            "malformed-yaml",
         )
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -725,6 +726,15 @@ switches:
                         os.link(release / f"{IB_HOST}.yaml", target)
                     elif case == "hash-drift":
                         target.write_bytes(target.read_bytes() + b"\n")
+                    elif case == "same-size-hash-drift":
+                        mutated = bytearray(target.read_bytes())
+                        self.assertTrue(mutated)
+                        mutated[0] ^= 1
+                        target.write_bytes(mutated)
+                    elif case == "extra-family":
+                        manifest["effective_defaults"]["eth"] = dict(
+                            manifest["effective_defaults"]["ib"]
+                        )
                     else:
                         target.write_text("- set: [\n", encoding="utf-8")
                         row = manifest["effective_defaults"]["ib"]

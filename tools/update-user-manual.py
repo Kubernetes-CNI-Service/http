@@ -90,7 +90,6 @@ FILE_PURPOSE_OVERRIDES = {
     ".gitignore": "公开仓库边界，隔离客户项目、生成物、运行状态、大制品和本机缓存。",
     "AGENTS.md": "仓库级测试治理合同，规定 tests-first、direct/workflow、manifest、full proof 与真机证据要求。",
     "README.md": "仓库首页与受支持入口索引，帮助用户先选择 Native 或 Docker 生命周期。",
-    "USER_MANUAL.md": "详细文字版操作手册和部署边界；网页 UM 对其关键流程进行结构化呈现。",
     "user-manual.html": "可离线打开并随 upload/sync 发布的版本化网页用户手册。",
     "index.html": "HTTP 文档入口页，链接 Switch Status、ZTP Status 与 User Manual。",
     "PUBLIC_REPOSITORY.md": "公开仓库内容、敏感信息和发布边界说明。",
@@ -238,7 +237,7 @@ def generic_file_purpose(relative: str) -> str:
         return f"{area}使用的二进制制品或受控空占位；不能仅凭文件名判断为可部署 payload。"
     if suffix == ".html":
         return f"{area}的本地/HTTP 页面；由相应生成器或文档流程维护并接受链接与发布测试。"
-    return f"属于“{area}”的 {name}，由该目录的 README、上层入口和测试合同共同约束。"
+    return f"属于“{area}”的 {name}；具体边界由当前文件、已跟踪的上层入口和测试合同共同约束。"
 
 
 def file_responsibility(relative: str) -> str:

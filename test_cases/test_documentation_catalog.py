@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 import fnmatch
 import html
+from html.parser import HTMLParser
 import json
 import os
 from pathlib import Path
@@ -15,11 +16,87 @@ import stat
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "tools/update-root-readme.py"
 USER_MANUAL_SCRIPT = ROOT / "tools/update-user-manual.py"
+USER_MANUAL_CONTRACT = ROOT / "test_cases/user_manual_contract.json"
+
+
+class _ManualNode:
+    """Small HTML tree used to keep the manual contract tests dependency-free."""
+
+    def __init__(self, tag="root", attrs=(), parent=None):
+        self.tag = tag
+        self.attrs = dict(attrs)
+        self.parent = parent
+        self.children = []
+        self.fragments = []
+
+    def walk(self):
+        yield self
+        for child in self.children:
+            yield from child.walk()
+
+    def text(self):
+        pieces = list(self.fragments)
+        for child in self.children:
+            pieces.append(child.text())
+        return " ".join(" ".join(pieces).split())
+
+    def ancestor(self, tag=None, attr=None):
+        node = self.parent
+        while node is not None:
+            if (tag is None or node.tag == tag) and (
+                attr is None or attr[0] in node.attrs
+            ):
+                return node
+            node = node.parent
+        return None
+
+
+class _ManualParser(HTMLParser):
+    _VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.root = _ManualNode()
+        self.stack = [self.root]
+
+    def handle_starttag(self, tag, attrs):
+        node = _ManualNode(tag, attrs, self.stack[-1])
+        self.stack[-1].children.append(node)
+        if tag not in self._VOID:
+            self.stack.append(node)
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+        if tag not in self._VOID:
+            self.stack.pop()
+
+    def handle_endtag(self, tag):
+        for index in range(len(self.stack) - 1, 0, -1):
+            if self.stack[index].tag == tag:
+                del self.stack[index:]
+                return
+
+    def handle_data(self, data):
+        if data.strip():
+            self.stack[-1].fragments.append(data)
+
+
+def _strict_json(path: Path):
+    def reject_duplicates(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON key: {key}")
+            result[key] = value
+        return result
+
+    return json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=reject_duplicates)
 
 
 def load_script():
@@ -175,6 +252,215 @@ class DocumentationCatalogTests(unittest.TestCase):
                 updater.FILE_END,
                 "x",
             )
+
+    def test_user_manual_full_render_preserves_registered_sentinels(self):
+        updater = load_path("update_user_manual_sentinel", USER_MANUAL_SCRIPT)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manual = root / "user-manual.html"
+            original = (
+                '<article data-manual-version="v2" data-visible-in="v2 v3-dev">\n'
+                '<section id="permanent-chapter" data-chapter>sentinel</section>\n'
+                f"{updater.FILE_BEGIN}\nold files\n{updater.FILE_END}\n"
+                '<div id="permanent-feature"><span id="permanent-feature-steps"></span></div>\n'
+                f"{updater.SCRIPT_BEGIN}\nold scripts\n{updater.SCRIPT_END}\n"
+                "</article>\n"
+            )
+            manual.write_text(original, encoding="utf-8")
+            with mock.patch.object(updater, "repository_inventory", return_value=[]):
+                with mock.patch.object(updater, "render_file_catalog", return_value="new files"):
+                    with mock.patch.object(updater, "render_script_reference", return_value="new scripts"):
+                        rendered = updater.render_manual(root)
+            self.assertEqual(1, rendered.count("permanent-chapter"))
+            self.assertEqual(1, rendered.count("permanent-feature-steps"))
+            self.assertEqual(
+                original.replace("old files", "new files").replace("old scripts", "new scripts"),
+                rendered,
+            )
+
+    def test_user_manual_registry_is_strict_complete_and_bidirectional(self):
+        contract = _strict_json(USER_MANUAL_CONTRACT)
+        self.assertEqual(1, contract["schema_version"])
+        self.assertEqual("user-manual.html", contract["manual"])
+
+        parser = _ManualParser()
+        parser.feed((ROOT / contract["manual"]).read_text(encoding="utf-8"))
+        nodes = list(parser.root.walk())
+        ids = [node.attrs["id"] for node in nodes if node.attrs.get("id")]
+        self.assertEqual(len(ids), len(set(ids)), "manual ids must be globally unique")
+        by_id = {node.attrs["id"]: node for node in nodes if node.attrs.get("id")}
+
+        articles = {
+            node.attrs["data-manual-version"]: node
+            for node in nodes
+            if node.tag == "article" and node.attrs.get("data-manual-version")
+        }
+        article_rows = {row["id"]: row for row in contract["articles"]}
+        self.assertEqual(3, len(article_rows))
+        self.assertEqual(set(article_rows), set(articles))
+
+        chapter_rows = {row["id"]: row for row in contract["chapters"]}
+        self.assertEqual(33, len(chapter_rows))
+        actual_chapters = {
+            node.attrs["id"]: node
+            for node in nodes
+            if node.tag == "section" and "data-chapter" in node.attrs
+        }
+        self.assertEqual(set(chapter_rows), set(actual_chapters))
+        for chapter_id, row in chapter_rows.items():
+            with self.subTest(chapter=chapter_id):
+                self.assertEqual("active", row["status"])
+                self.assertIn(row["introduced_in"], article_rows)
+                node = actual_chapters[chapter_id]
+                article = node.ancestor("article", ("data-manual-version", None))
+                self.assertIsNotNone(article)
+                self.assertEqual(row["article"], article.attrs["data-manual-version"])
+                heading = next(child for child in node.children if child.tag == "h2")
+                self.assertEqual(row["title"], heading.text())
+
+        feature_rows = {row["id"]: row for row in contract["features"]}
+        self.assertEqual(28, len(feature_rows))
+        actual_features = {
+            node.attrs["id"]: node
+            for node in nodes
+            if node.attrs.get("id")
+            and ({"runbook", "scenario"} & set(node.attrs.get("class", "").split()))
+        }
+        self.assertEqual(set(feature_rows), set(actual_features))
+        for feature_id, row in feature_rows.items():
+            with self.subTest(feature=feature_id):
+                node = actual_features[feature_id]
+                article = node.ancestor("article", ("data-manual-version", None))
+                self.assertIsNotNone(article)
+                self.assertEqual(row["article"], article.attrs["data-manual-version"])
+                self.assertEqual(row["title"], node.attrs["data-nav-title"])
+                self.assertIn(row["introduced_in"], article_rows)
+                self.assertIn(row["status"], {"active", "deprecated"})
+                anchors = row["anchors"]
+                self.assertEqual({"steps", "risk", "rollback"}, set(anchors))
+                self.assertEqual(3, len(set(anchors.values())))
+                descendants = {
+                    descendant.attrs.get("id") for descendant in node.walk()
+                }
+                self.assertLessEqual(set(anchors.values()), descendants)
+                for role, anchor_id in anchors.items():
+                    self.assertIn(anchor_id, by_id, role)
+                    self.assertEqual(role, by_id[anchor_id].attrs.get("data-manual-role"))
+                    self.assertTrue(by_id[anchor_id].attrs.get("aria-label"))
+                if row["status"] == "deprecated":
+                    replacement = row.get("replacement")
+                    self.assertIn(replacement, feature_rows)
+                    self.assertEqual("active", feature_rows[replacement]["status"])
+                    self.assertIn(row["deprecation_notice"], node.text())
+
+    def test_user_manual_profiles_compose_articles_and_complete_navigation(self):
+        contract = _strict_json(USER_MANUAL_CONTRACT)
+        parser = _ManualParser()
+        parser.feed((ROOT / contract["manual"]).read_text(encoding="utf-8"))
+        nodes = list(parser.root.walk())
+        profiles = {row["id"]: row["articles"] for row in contract["profiles"]}
+        self.assertEqual(
+            {"v1": ["v1"], "v2": ["v2"], "v3-dev": ["v2", "v3-dev"]},
+            profiles,
+        )
+        articles = {
+            node.attrs["data-manual-version"]: node
+            for node in nodes
+            if node.tag == "article" and node.attrs.get("data-manual-version")
+        }
+        for article_id, article in articles.items():
+            expected = {
+                profile_id
+                for profile_id, members in profiles.items()
+                if article_id in members
+            }
+            self.assertEqual(
+                expected,
+                set(article.attrs.get("data-visible-in", "").split()),
+                article_id,
+            )
+
+        chapters = contract["chapters"]
+        trees = {
+            node.attrs["data-version-nav"]: node
+            for node in nodes
+            if node.attrs.get("data-version-nav")
+        }
+        for profile_id, article_ids in profiles.items():
+            expected = [
+                row["id"] for article_id in article_ids
+                for row in chapters if row["article"] == article_id
+            ]
+            actual = [
+                descendant.attrs["href"].removeprefix("#")
+                for descendant in trees[profile_id].walk()
+                if descendant.tag == "a" and descendant.attrs.get("href", "").startswith("#")
+            ]
+            self.assertEqual(expected, actual, profile_id)
+
+        article_profiles = {
+            article_id: {
+                profile_id for profile_id, members in profiles.items()
+                if article_id in members
+            }
+            for article_id in articles
+        }
+        by_id = {node.attrs["id"]: node for node in nodes if node.attrs.get("id")}
+        for link in (node for node in nodes if node.tag == "a"):
+            href = link.attrs.get("href", "")
+            if not href.startswith("#"):
+                continue
+            target = by_id.get(href[1:])
+            self.assertIsNotNone(target, href)
+            source_article = link.ancestor("article", ("data-manual-version", None))
+            target_article = target.ancestor("article", ("data-manual-version", None))
+            if source_article is not None and target_article is not None:
+                self.assertLessEqual(
+                    article_profiles[source_article.attrs["data-manual-version"]],
+                    article_profiles[target_article.attrs["data-manual-version"]],
+                    href,
+                )
+
+    def test_user_manual_javascript_uses_profile_composition_everywhere(self):
+        manual = (ROOT / "user-manual.html").read_text(encoding="utf-8")
+        script = re.search(r"<script>\s*(.*?)\s*</script>", manual, re.DOTALL)
+        self.assertIsNotNone(script)
+        source = script.group(1)
+        self.assertIn("function currentArticles()", source)
+        self.assertIn("article.dataset.visibleIn.split", source)
+        self.assertIn("currentArticles().flatMap", source)
+        self.assertIn("currentArticles().forEach", source)
+        self.assertIn("const first = visibleSections()[0]", source)
+        self.assertNotIn("function currentArticle()", source)
+        self.assertNotIn("article.dataset.manualVersion !== version", source)
+
+    def test_user_manual_cites_no_git_ignored_document_as_authority(self):
+        from test_cases import test_public_publication_contract as publication
+
+        parser = _ManualParser()
+        manual = (ROOT / "user-manual.html").read_text(encoding="utf-8")
+        parser.feed(manual)
+        authority_words = ("权威", "依据", "约束")
+        for node in parser.root.walk():
+            text = node.text()
+            if node.tag not in {"p", "td", "dd", "div", "summary"}:
+                continue
+            if not any(word in text for word in authority_words):
+                continue
+            for code in (item for item in node.walk() if item.tag == "code"):
+                candidate = code.text().strip()
+                if not candidate or any(mark in candidate for mark in "<>*[] "):
+                    continue
+                if not candidate.lower().endswith((".md", "readme")):
+                    continue
+                ignored = publication._canonical_git(
+                    ROOT, "check-ignore", "--no-index", "--quiet", "--", candidate,
+                )
+                self.assertNotEqual(
+                    0, ignored.returncode,
+                    f"manual cites git-ignored authority {candidate!r}: {text}",
+                )
+        self.assertNotIn("由该目录的 README", manual)
 
     def test_user_manual_atomic_writer_rejects_symlink_and_hardlink_targets(self):
         updater = load_path("update_user_manual_writer", USER_MANUAL_SCRIPT)

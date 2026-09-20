@@ -1,0 +1,613 @@
+{
+  "schema_version": 1,
+  "manual": "user-manual.html",
+  "articles": [
+    {
+      "id": "v1",
+      "introduced_in": "v1",
+      "status": "active"
+    },
+    {
+      "id": "v2",
+      "introduced_in": "v2",
+      "status": "active"
+    },
+    {
+      "id": "v3-dev",
+      "introduced_in": "v3-dev",
+      "status": "active"
+    }
+  ],
+  "profiles": [
+    {
+      "id": "v1",
+      "articles": [
+        "v1"
+      ]
+    },
+    {
+      "id": "v2",
+      "articles": [
+        "v2"
+      ]
+    },
+    {
+      "id": "v3-dev",
+      "articles": [
+        "v2",
+        "v3-dev"
+      ]
+    }
+  ],
+  "chapters": [
+    {
+      "id": "v1-overview",
+      "article": "v1",
+      "title": "1. Release Notes — 初始基线",
+      "introduced_in": "v1",
+      "status": "active"
+    },
+    {
+      "id": "v1-directories",
+      "article": "v1",
+      "title": "2. 目录与关键文件",
+      "introduced_in": "v1",
+      "status": "active"
+    },
+    {
+      "id": "v1-scripts",
+      "article": "v1",
+      "title": "3. 操作脚本使用说明",
+      "introduced_in": "v1",
+      "status": "active"
+    },
+    {
+      "id": "v1-workflow",
+      "article": "v1",
+      "title": "4. 总体流程",
+      "introduced_in": "v1",
+      "status": "active"
+    },
+    {
+      "id": "v1-scenario-local",
+      "article": "v1",
+      "title": "5. 场景：本机项目准备",
+      "introduced_in": "v1",
+      "status": "active"
+    },
+    {
+      "id": "v1-scenario-deploy",
+      "article": "v1",
+      "title": "6. 场景：Native 首次部署",
+      "introduced_in": "v1",
+      "status": "active"
+    },
+    {
+      "id": "v1-scenario-operate",
+      "article": "v1",
+      "title": "7. 场景：运行、监控与设备操作",
+      "introduced_in": "v1",
+      "status": "active"
+    },
+    {
+      "id": "v1-scenario-update",
+      "article": "v1",
+      "title": "8. 场景：更新与结果回收",
+      "introduced_in": "v1",
+      "status": "active"
+    },
+    {
+      "id": "v1-testing",
+      "article": "v1",
+      "title": "9. 测试与验收",
+      "introduced_in": "v1",
+      "status": "active"
+    },
+    {
+      "id": "v1-troubleshoot",
+      "article": "v1",
+      "title": "10. 排错、恢复与升级",
+      "introduced_in": "v1",
+      "status": "active"
+    },
+    {
+      "id": "v2-overview",
+      "article": "v2",
+      "title": "1. Release Notes — 相对 V1",
+      "introduced_in": "v2",
+      "status": "active"
+    },
+    {
+      "id": "v2-directories",
+      "article": "v2",
+      "title": "2. 目录、文件与数据权威",
+      "introduced_in": "v2",
+      "status": "active"
+    },
+    {
+      "id": "v2-scripts",
+      "article": "v2",
+      "title": "3. 操作脚本完整索引",
+      "introduced_in": "v2",
+      "status": "active"
+    },
+    {
+      "id": "v2-workflow",
+      "article": "v2",
+      "title": "4. 总体流程与入口选择",
+      "introduced_in": "v2",
+      "status": "active"
+    },
+    {
+      "id": "v2-scenario-prepare",
+      "article": "v2",
+      "title": "5. 场景：本机准备与全量证明",
+      "introduced_in": "v2",
+      "status": "active"
+    },
+    {
+      "id": "v2-scenario-native",
+      "article": "v2",
+      "title": "6. 场景：Native 首发与中转",
+      "introduced_in": "v2",
+      "status": "active"
+    },
+    {
+      "id": "v2-scenario-docker",
+      "article": "v2",
+      "title": "7. 场景：Docker/Supervisor 准入状态",
+      "introduced_in": "v2",
+      "status": "active"
+    },
+    {
+      "id": "v2-scenario-air",
+      "article": "v2",
+      "title": "8. 场景：平台与 AIR 范围",
+      "introduced_in": "v2",
+      "status": "active"
+    },
+    {
+      "id": "v2-scenario-update",
+      "article": "v2",
+      "title": "9. 场景：增量更新",
+      "introduced_in": "v2",
+      "status": "active"
+    },
+    {
+      "id": "v2-scenario-results",
+      "article": "v2",
+      "title": "10. 场景：结果回收与卸载",
+      "introduced_in": "v2",
+      "status": "active"
+    },
+    {
+      "id": "v2-testing",
+      "article": "v2",
+      "title": "11. 测试、证明与验收",
+      "introduced_in": "v2",
+      "status": "active"
+    },
+    {
+      "id": "v2-troubleshoot",
+      "article": "v2",
+      "title": "12. 排错与安全",
+      "introduced_in": "v2",
+      "status": "active"
+    },
+    {
+      "id": "v3-dev-overview",
+      "article": "v3-dev",
+      "title": "1. Release Notes — 相对 V2（开发预览）",
+      "introduced_in": "v3-dev",
+      "status": "active"
+    },
+    {
+      "id": "v3-dev-directories",
+      "article": "v3-dev",
+      "title": "2. 目录与文件模型",
+      "introduced_in": "v3-dev",
+      "status": "active"
+    },
+    {
+      "id": "v3-dev-scripts",
+      "article": "v3-dev",
+      "title": "3. V3-dev 拟议脚本与扩展",
+      "introduced_in": "v3-dev",
+      "status": "active"
+    },
+    {
+      "id": "v3-dev-workflow",
+      "article": "v3-dev",
+      "title": "4. 总体流程",
+      "introduced_in": "v3-dev",
+      "status": "active"
+    },
+    {
+      "id": "v3-dev-architecture",
+      "article": "v3-dev",
+      "title": "5. 生命周期架构",
+      "introduced_in": "v3-dev",
+      "status": "active"
+    },
+    {
+      "id": "v3-dev-finish",
+      "article": "v3-dev",
+      "title": "6. Finish 事务",
+      "introduced_in": "v3-dev",
+      "status": "active"
+    },
+    {
+      "id": "v3-dev-import",
+      "article": "v3-dev",
+      "title": "7. Finished bundle 导入",
+      "introduced_in": "v3-dev",
+      "status": "active"
+    },
+    {
+      "id": "v3-dev-sharing",
+      "article": "v3-dev",
+      "title": "8. 生产数据共享",
+      "introduced_in": "v3-dev",
+      "status": "active"
+    },
+    {
+      "id": "v3-dev-report",
+      "article": "v3-dev",
+      "title": "9. 差异报告与冻结",
+      "introduced_in": "v3-dev",
+      "status": "active"
+    },
+    {
+      "id": "v3-dev-compatibility",
+      "article": "v3-dev",
+      "title": "10. 兼容与迁移",
+      "introduced_in": "v3-dev",
+      "status": "active"
+    },
+    {
+      "id": "v3-dev-validation",
+      "article": "v3-dev",
+      "title": "11. 测试、验证与发布准入",
+      "introduced_in": "v3-dev",
+      "status": "active"
+    }
+  ],
+  "features": [
+    {
+      "id": "v1-local-prepare",
+      "article": "v1",
+      "title": "本机项目准备流程",
+      "introduced_in": "v1",
+      "status": "active",
+      "anchors": {
+        "steps": "v1-local-prepare-steps",
+        "risk": "v1-local-prepare-risk",
+        "rollback": "v1-local-prepare-rollback"
+      }
+    },
+    {
+      "id": "v1-native-bootstrap",
+      "article": "v1",
+      "title": "Native 首次部署流程",
+      "introduced_in": "v1",
+      "status": "active",
+      "anchors": {
+        "steps": "v1-native-bootstrap-steps",
+        "risk": "v1-native-bootstrap-risk",
+        "rollback": "v1-native-bootstrap-rollback"
+      }
+    },
+    {
+      "id": "v1-native-update",
+      "article": "v1",
+      "title": "Native 增量更新",
+      "introduced_in": "v1",
+      "status": "active",
+      "anchors": {
+        "steps": "v1-native-update-steps",
+        "risk": "v1-native-update-risk",
+        "rollback": "v1-native-update-rollback"
+      }
+    },
+    {
+      "id": "v1-results-unload",
+      "article": "v1",
+      "title": "结果回收与卸载",
+      "introduced_in": "v1",
+      "status": "active",
+      "anchors": {
+        "steps": "v1-results-unload-steps",
+        "risk": "v1-results-unload-risk",
+        "rollback": "v1-results-unload-rollback"
+      }
+    },
+    {
+      "id": "v2-runbook-project-create",
+      "article": "v2",
+      "title": "Runbook 1 · 创建项目",
+      "introduced_in": "v2",
+      "status": "active",
+      "anchors": {
+        "steps": "v2-runbook-project-create-steps",
+        "risk": "v2-runbook-project-create-risk",
+        "rollback": "v2-runbook-project-create-rollback"
+      }
+    },
+    {
+      "id": "v2-runbook-local-load-proof",
+      "article": "v2",
+      "title": "Runbook 2 · 本机 load 与全量证明",
+      "introduced_in": "v2",
+      "status": "active",
+      "anchors": {
+        "steps": "v2-runbook-local-load-proof-steps",
+        "risk": "v2-runbook-local-load-proof-risk",
+        "rollback": "v2-runbook-local-load-proof-rollback"
+      }
+    },
+    {
+      "id": "v2-scenario-local-proof",
+      "article": "v2",
+      "title": "本机生成与证明边界",
+      "introduced_in": "v2",
+      "status": "active",
+      "anchors": {
+        "steps": "v2-scenario-local-proof-steps",
+        "risk": "v2-scenario-local-proof-risk",
+        "rollback": "v2-scenario-local-proof-rollback"
+      }
+    },
+    {
+      "id": "v2-runbook-direct-native-upload",
+      "article": "v2",
+      "title": "Runbook 3 · 直连上传与部署",
+      "introduced_in": "v2",
+      "status": "active",
+      "anchors": {
+        "steps": "v2-runbook-direct-native-upload-steps",
+        "risk": "v2-runbook-direct-native-upload-risk",
+        "rollback": "v2-runbook-direct-native-upload-rollback"
+      }
+    },
+    {
+      "id": "v2-runbook-relay-native-upload",
+      "article": "v2",
+      "title": "Runbook 4 · 中转部署",
+      "introduced_in": "v2",
+      "status": "active",
+      "anchors": {
+        "steps": "v2-runbook-relay-native-upload-steps",
+        "risk": "v2-runbook-relay-native-upload-risk",
+        "rollback": "v2-runbook-relay-native-upload-rollback"
+      }
+    },
+    {
+      "id": "v2-runbook-remote-native-load",
+      "article": "v2",
+      "title": "Runbook 5 · 远端 Native load",
+      "introduced_in": "v2",
+      "status": "active",
+      "anchors": {
+        "steps": "v2-runbook-remote-native-load-steps",
+        "risk": "v2-runbook-remote-native-load-risk",
+        "rollback": "v2-runbook-remote-native-load-rollback"
+      }
+    },
+    {
+      "id": "v2-runbook-native-acceptance",
+      "article": "v2",
+      "title": "Runbook 6 · Native 验收",
+      "introduced_in": "v2",
+      "status": "active",
+      "anchors": {
+        "steps": "v2-runbook-native-acceptance-steps",
+        "risk": "v2-runbook-native-acceptance-risk",
+        "rollback": "v2-runbook-native-acceptance-rollback"
+      }
+    },
+    {
+      "id": "v2-scenario-native-bootstrap",
+      "article": "v2",
+      "title": "Native bootstrap 边界",
+      "introduced_in": "v2",
+      "status": "active",
+      "anchors": {
+        "steps": "v2-scenario-native-bootstrap-steps",
+        "risk": "v2-scenario-native-bootstrap-risk",
+        "rollback": "v2-scenario-native-bootstrap-rollback"
+      }
+    },
+    {
+      "id": "v2-scenario-relay-deploy",
+      "article": "v2",
+      "title": "Relay/offline 边界",
+      "introduced_in": "v2",
+      "status": "active",
+      "anchors": {
+        "steps": "v2-scenario-relay-deploy-steps",
+        "risk": "v2-scenario-relay-deploy-risk",
+        "rollback": "v2-scenario-relay-deploy-rollback"
+      }
+    },
+    {
+      "id": "v2-runbook-collection-and-backup",
+      "article": "v2",
+      "title": "Runbook 7 · 状态收集与 YAML Backup",
+      "introduced_in": "v2",
+      "status": "active",
+      "anchors": {
+        "steps": "v2-runbook-collection-and-backup-steps",
+        "risk": "v2-runbook-collection-and-backup-risk",
+        "rollback": "v2-runbook-collection-and-backup-rollback"
+      }
+    },
+    {
+      "id": "v2-runbook-docker-admission",
+      "article": "v2",
+      "title": "Docker 当前准入状态",
+      "introduced_in": "v2",
+      "status": "active",
+      "anchors": {
+        "steps": "v2-runbook-docker-admission-steps",
+        "risk": "v2-runbook-docker-admission-risk",
+        "rollback": "v2-runbook-docker-admission-rollback"
+      }
+    },
+    {
+      "id": "v2-scenario-docker-bootstrap",
+      "article": "v2",
+      "title": "Docker bootstrap（未准入）",
+      "introduced_in": "v2",
+      "status": "active",
+      "anchors": {
+        "steps": "v2-scenario-docker-bootstrap-steps",
+        "risk": "v2-scenario-docker-bootstrap-risk",
+        "rollback": "v2-scenario-docker-bootstrap-rollback"
+      }
+    },
+    {
+      "id": "v2-scenario-air-ethernet",
+      "article": "v2",
+      "title": "AIR Ethernet simulation",
+      "introduced_in": "v2",
+      "status": "active",
+      "anchors": {
+        "steps": "v2-scenario-air-ethernet-steps",
+        "risk": "v2-scenario-air-ethernet-risk",
+        "rollback": "v2-scenario-air-ethernet-rollback"
+      }
+    },
+    {
+      "id": "v2-scenario-scoped-production",
+      "article": "v2",
+      "title": "按交换机类型生成",
+      "introduced_in": "v2",
+      "status": "active",
+      "anchors": {
+        "steps": "v2-scenario-scoped-production-steps",
+        "risk": "v2-scenario-scoped-production-risk",
+        "rollback": "v2-scenario-scoped-production-rollback"
+      }
+    },
+    {
+      "id": "v2-runbook-native-update",
+      "article": "v2",
+      "title": "Runbook 8 · 增量更新",
+      "introduced_in": "v2",
+      "status": "active",
+      "anchors": {
+        "steps": "v2-runbook-native-update-steps",
+        "risk": "v2-runbook-native-update-risk",
+        "rollback": "v2-runbook-native-update-rollback"
+      }
+    },
+    {
+      "id": "v2-scenario-native-update",
+      "article": "v2",
+      "title": "Native update 边界",
+      "introduced_in": "v2",
+      "status": "active",
+      "anchors": {
+        "steps": "v2-scenario-native-update-steps",
+        "risk": "v2-scenario-native-update-risk",
+        "rollback": "v2-scenario-native-update-rollback"
+      }
+    },
+    {
+      "id": "v2-scenario-docker-update",
+      "article": "v2",
+      "title": "Docker update（未准入）",
+      "introduced_in": "v2",
+      "status": "active",
+      "anchors": {
+        "steps": "v2-scenario-docker-update-steps",
+        "risk": "v2-scenario-docker-update-risk",
+        "rollback": "v2-scenario-docker-update-rollback"
+      }
+    },
+    {
+      "id": "v2-runbook-download-and-import",
+      "article": "v2",
+      "title": "Runbook 9 · 下载与导入",
+      "introduced_in": "v2",
+      "status": "active",
+      "anchors": {
+        "steps": "v2-runbook-download-and-import-steps",
+        "risk": "v2-runbook-download-and-import-risk",
+        "rollback": "v2-runbook-download-and-import-rollback"
+      }
+    },
+    {
+      "id": "v2-runbook-native-unload",
+      "article": "v2",
+      "title": "Runbook 10 · Native unload",
+      "introduced_in": "v2",
+      "status": "active",
+      "anchors": {
+        "steps": "v2-runbook-native-unload-steps",
+        "risk": "v2-runbook-native-unload-risk",
+        "rollback": "v2-runbook-native-unload-rollback"
+      }
+    },
+    {
+      "id": "v2-scenario-results-unload",
+      "article": "v2",
+      "title": "结果回收与卸载边界",
+      "introduced_in": "v2",
+      "status": "active",
+      "anchors": {
+        "steps": "v2-scenario-results-unload-steps",
+        "risk": "v2-scenario-results-unload-risk",
+        "rollback": "v2-scenario-results-unload-rollback"
+      }
+    },
+    {
+      "id": "v3-finish-native",
+      "article": "v3-dev",
+      "title": "Finish Native",
+      "introduced_in": "v3-dev",
+      "status": "active",
+      "anchors": {
+        "steps": "v3-finish-native-steps",
+        "risk": "v3-finish-native-risk",
+        "rollback": "v3-finish-native-rollback"
+      }
+    },
+    {
+      "id": "v3-finish-docker",
+      "article": "v3-dev",
+      "title": "Finish Docker",
+      "introduced_in": "v3-dev",
+      "status": "active",
+      "anchors": {
+        "steps": "v3-finish-docker-steps",
+        "risk": "v3-finish-docker-risk",
+        "rollback": "v3-finish-docker-rollback"
+      }
+    },
+    {
+      "id": "v3-finished-import",
+      "article": "v3-dev",
+      "title": "Finished bundle 导入",
+      "introduced_in": "v3-dev",
+      "status": "active",
+      "anchors": {
+        "steps": "v3-finished-import-steps",
+        "risk": "v3-finished-import-risk",
+        "rollback": "v3-finished-import-rollback"
+      }
+    },
+    {
+      "id": "v3-legacy-deployment",
+      "article": "v3-dev",
+      "title": "旧部署兼容路径",
+      "introduced_in": "v3-dev",
+      "status": "active",
+      "anchors": {
+        "steps": "v3-legacy-deployment-steps",
+        "risk": "v3-legacy-deployment-risk",
+        "rollback": "v3-legacy-deployment-rollback"
+      }
+    }
+  ]
+}
