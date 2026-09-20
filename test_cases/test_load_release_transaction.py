@@ -410,6 +410,8 @@ class ReleaseTransactionTests(unittest.TestCase):
                 "switches": [
                     {"nvl": {"system": {
                         "date-time": {"timezone": "Asia/Tokyo"},
+                        "dns": {"server": ["192.0.2.71"]},
+                        "ntp": {"server": ["192.0.2.71"]},
                         "aaa": {"user": {"admin": {"password": "$y$nvl"}}},
                     }}},
                     {"ib": {"system": {
@@ -433,6 +435,8 @@ class ReleaseTransactionTests(unittest.TestCase):
             self.assertNotIn("hashed-password", ib)
             self.assertEqual("$y$nvl", nvl_system["aaa"]["user"]["admin"]["password"])
             self.assertEqual("Asia/Tokyo", nvl_system["date-time"]["timezone"])
+            self.assertEqual({"192.0.2.71": {}}, nvl_system["dns"]["server"])
+            self.assertEqual({"192.0.2.71": {}}, nvl_system["ntp"]["server"])
             self.assertNotIn("$y$ib", nvl)
             self.assertNotIn("null", ib.casefold())
             self.assertEqual(source_before, (service / "default.yaml").read_bytes())
@@ -468,6 +472,28 @@ class ReleaseTransactionTests(unittest.TestCase):
             duplicate["switches"] = [*global_data["switches"], {"ib": {"system": {}}}]
             with self.assertRaisesRegex(ValueError, "ib"):
                 PUBLISHER._global_system(duplicate, "ib")
+
+            cumulus_neutral = yaml.safe_load(
+                (ROOT / "ztp/config/cumulus/default.yaml").read_text(encoding="utf-8")
+            )
+            cumulus_global = {
+                "common": {"switch": {"system": {
+                    "dns": {"server": ["8.8.8.8", "192.0.2.53"]},
+                }}},
+                "switches": [
+                    {"eth": {"system": {"dns": {"vrf": "mgmt"}}}},
+                ],
+            }
+            normalized = PUBLISHER._default_document_with_global(
+                cumulus_neutral,
+                PUBLISHER._global_system(cumulus_global, "eth"),
+            )[0]["set"]["system"]
+            self.assertEqual(
+                {"8.8.8.8": {"vrf": "mgmt"}, "192.0.2.53": {"vrf": "mgmt"}},
+                normalized["dns"]["server"],
+            )
+            self.assertEqual(1, tuple(normalized["dns"]["server"]).count("8.8.8.8"))
+            self.assertNotIn("vrf", normalized["dns"])
 
     def test_single_nvos_publish_binds_family_default_and_collision_keeps_latest(self):
         service = self.root / "single-nvos"
