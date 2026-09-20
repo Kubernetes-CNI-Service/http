@@ -1690,30 +1690,106 @@ def _validate_collection_input_digests(value: Any) -> dict[str, str]:
     return dict(sorted(validated.items()))
 
 
+def _set_collection_attribution_status(
+    status: Optional[dict[str, Any]], *, state: str, reason: str,
+    message: str, records_seen: int = 0, records_retained: int = 0,
+) -> None:
+    if status is None:
+        return
+    status.clear()
+    status.update({
+        "status": state,
+        "reason": reason,
+        "message": message,
+        "records_seen": records_seen,
+        "records_retained": records_retained,
+    })
+
+
+def collection_attribution_status_warning(status: dict[str, Any]) -> str:
+    """Render a stable cycle warning for a discarded attribution cache."""
+    if not isinstance(status, dict) or status.get("status") != "discarded":
+        return ""
+    reason = str(status.get("reason") or "unknown")
+    message = str(status.get("message") or "归属缓存已整库丢弃")
+    return f"归属缓存 [{reason}]: {message}"
+
+
 def load_collection_attribution(
     path: Path, devices: list[dict[str, Any]], input_digests: dict[str, str],
+    *, status: Optional[dict[str, Any]] = None,
 ) -> list[dict[str, Any]]:
     """Load and row-reconcile cache state against current authoritative input."""
     current_digests = _validate_collection_input_digests(input_digests)
+    try:
+        state_metadata = path.lstat()
+    except FileNotFoundError:
+        _set_collection_attribution_status(
+            status, state="discarded", reason="absent",
+            message="归属缓存不存在，本周期从空缓存继续",
+        )
+        return []
+    except OSError:
+        _set_collection_attribution_status(
+            status, state="discarded", reason="unreadable",
+            message="归属缓存无法读取，已整库丢弃",
+        )
+        return []
+    if state_metadata.st_size > MAX_COLLECTION_ATTRIBUTION_BYTES:
+        _set_collection_attribution_status(
+            status, state="discarded", reason="over_capacity",
+            message=(
+                "归属缓存超过容量上限 "
+                f"{MAX_COLLECTION_ATTRIBUTION_BYTES} 字节，已整库丢弃"
+            ),
+        )
+        return []
     try:
         raw_payload = _read_bounded_regular_text(
             path, label="collection attribution state",
             max_bytes=MAX_COLLECTION_ATTRIBUTION_BYTES,
         )
-        payload = json.loads(raw_payload)
-        if (
-            not isinstance(payload, dict)
-            or set(payload) != {"schema_version", "input_digests", "records"}
-            or payload.get("schema_version") != COLLECTION_ATTRIBUTION_STATE_SCHEMA
-            or not isinstance(payload.get("records"), list)
-        ):
-            raise ValueError("collection attribution state has invalid structure")
-        _validate_collection_input_digests(payload.get("input_digests"))
-        raw_records = payload["records"]
-    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+    except (OSError, ValueError):
         # This file is only a cache.  An integrity failure discards it whole;
         # current-cycle evidence still has to re-establish an exact binding.
+        _set_collection_attribution_status(
+            status, state="discarded", reason="unreadable",
+            message="归属缓存无法安全读取，已整库丢弃",
+        )
         return []
+    try:
+        payload = json.loads(raw_payload)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        _set_collection_attribution_status(
+            status, state="discarded", reason="corrupt",
+            message="归属缓存不是有效 JSON，已整库丢弃",
+        )
+        return []
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"schema_version", "input_digests", "records"}
+        or not isinstance(payload.get("records"), list)
+    ):
+        _set_collection_attribution_status(
+            status, state="discarded", reason="corrupt",
+            message="归属缓存结构无效，已整库丢弃",
+        )
+        return []
+    if payload.get("schema_version") != COLLECTION_ATTRIBUTION_STATE_SCHEMA:
+        _set_collection_attribution_status(
+            status, state="discarded", reason="schema_mismatch",
+            message="归属缓存 schema 不受支持，已整库丢弃且不迁移",
+        )
+        return []
+    try:
+        _validate_collection_input_digests(payload.get("input_digests"))
+    except (TypeError, ValueError):
+        _set_collection_attribution_status(
+            status, state="discarded", reason="corrupt",
+            message="归属缓存输入摘要无效，已整库丢弃",
+        )
+        return []
+    raw_records = payload["records"]
     # A digest change triggers this complete reconciliation.  It is not a
     # global flush: independent rows that remain byte-for-byte true survive.
     current_rows = {
@@ -1746,13 +1822,27 @@ def load_collection_attribution(
             if key in current_rows:
                 validated.append(record)
     except (TypeError, ValueError):
+        _set_collection_attribution_status(
+            status, state="discarded", reason="corrupt",
+            message="归属缓存记录无效，已整库丢弃",
+        )
         return []
     if duplicate_addresses:
+        _set_collection_attribution_status(
+            status, state="discarded", reason="corrupt",
+            message="归属缓存包含重复地址，已整库丢弃",
+        )
         return []
     # Referencing current_digests here is intentional: callers must supply a
     # well-formed current fingerprint even though row truth, not equality with
     # an old whole-file digest, determines which independent records survive.
     assert isinstance(current_digests, dict)
+    _set_collection_attribution_status(
+        status, state="loaded",
+        reason=("reconciled" if len(validated) != len(raw_records) else "current"),
+        message="归属缓存已按本周期当前清单逐行核对",
+        records_seen=len(raw_records), records_retained=len(validated),
+    )
     return sorted(validated, key=lambda item: (
         item["address"], item["input_row_identity"]["hostname"].casefold(),
     ))
@@ -4163,8 +4253,10 @@ def monitor_once(args: argparse.Namespace, project: Path) -> Path:
         attribution_inputs,
     )
     attribution_state_path = output_root / COLLECTION_ATTRIBUTION_STATE_NAME
+    attribution_state_status: dict[str, Any] = {}
     attribution_records = load_collection_attribution(
         attribution_state_path, identity_devices, attribution_digests,
+        status=attribution_state_status,
     )
     dhcp_read = collect_dhcp(
         args.since, args.dhcp_log, runtime_backend=runtime_backend,
@@ -4378,11 +4470,13 @@ def monitor_once(args: argparse.Namespace, project: Path) -> Path:
             "sources": evidence_sources,
         },
         "services": services,
+        "collection_attribution_state": attribution_state_status,
         "devices": devices,
         "unmatched_interactions": unmatched[-200:],
         "collection_errors": [item for item in (
             f"DHCP 日志: {dhcp_error}" if dhcp_error else "",
             f"Apache 日志: {apache_error}" if apache_error else "",
+            collection_attribution_status_warning(attribution_state_status),
             *truncation_warnings,
         ) if item],
     }

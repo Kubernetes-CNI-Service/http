@@ -123,6 +123,26 @@ class CollectionAttributionWorkflowTests(unittest.TestCase):
             self.assertFalse(verdict["eligible"])
             self.assertEqual("probe_failed", verdict["paths"]["posthoc_identity"]["status"])
 
+    def test_cache_discard_reason_is_visible_in_cycle_report_warning(self):
+        status = {
+            "status": "discarded",
+            "reason": "over_capacity",
+            "message": "归属缓存超过容量上限，已整库丢弃",
+        }
+        warning = self.monitor.collection_attribution_status_warning(status)
+        self.assertIn("over_capacity", warning)
+        self.assertIn("容量", warning)
+        report = {
+            "project": "example", "generated_at": "now",
+            "release_id": "0123456789abcdefabcd",
+            "release_generated_at": "then", "since_minutes": 60,
+            "services": {}, "devices": [], "unmatched_interactions": [],
+            "collection_errors": [warning],
+        }
+        rendered = self.monitor.render_markdown(report)
+        self.assertIn("采集警告", rendered)
+        self.assertIn("over_capacity", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

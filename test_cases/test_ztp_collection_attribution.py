@@ -255,6 +255,76 @@ class CollectionAttributionDirectTests(unittest.TestCase):
                         ),
                     )
 
+    def test_cache_discard_status_distinguishes_capacity_and_integrity_reasons(self):
+        row = device("leaf-status", "020000000093", "192.0.2.93")
+        digests = {"inventory.csv": "a" * 64}
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "collection-attribution.json"
+            cases = (
+                ("absent", None),
+                ("schema_mismatch", json.dumps({
+                    "schema_version": 999,
+                    "input_digests": digests,
+                    "records": [],
+                }).encode("utf-8")),
+                ("corrupt", b"{not-json\n"),
+                (
+                    "over_capacity",
+                    b" " * (self.monitor.MAX_COLLECTION_ATTRIBUTION_BYTES + 1),
+                ),
+            )
+            for expected_reason, payload in cases:
+                with self.subTest(reason=expected_reason):
+                    state.unlink(missing_ok=True)
+                    if payload is not None:
+                        state.write_bytes(payload)
+                    status = {}
+                    self.assertEqual(
+                        [],
+                        self.monitor.load_collection_attribution(
+                            state, [row], digests, status=status,
+                        ),
+                    )
+                    self.assertEqual("discarded", status["status"])
+                    self.assertEqual(expected_reason, status["reason"])
+                    self.assertIn("message", status)
+            target = Path(directory) / "target.json"
+            target.write_text("{}", encoding="utf-8")
+            state.unlink(missing_ok=True)
+            state.symlink_to(target)
+            status = {}
+            self.assertEqual(
+                [],
+                self.monitor.load_collection_attribution(
+                    state, [row], digests, status=status,
+                ),
+            )
+            self.assertEqual("unreadable", status["reason"])
+
+    def test_cache_status_reports_row_reconciliation_on_every_load(self):
+        first = device("leaf-current", "020000000094", "192.0.2.94")
+        removed = device("leaf-removed", "020000000095", "192.0.2.95")
+        digests = {"inventory.csv": "a" * 64}
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "collection-attribution.json"
+            self.monitor.persist_collection_attribution(
+                state, digests,
+                [record(self.monitor, first), record(self.monitor, removed)],
+            )
+            status = {}
+            self.assertEqual(
+                [self.monitor.validate_collection_attribution_record(
+                    record(self.monitor, first)
+                )],
+                self.monitor.load_collection_attribution(
+                    state, [first], digests, status=status,
+                ),
+            )
+            self.assertEqual("loaded", status["status"])
+            self.assertEqual("reconciled", status["reason"])
+            self.assertEqual(2, status["records_seen"])
+            self.assertEqual(1, status["records_retained"])
+
     def test_atomic_private_state_replaces_previous_complete_document(self):
         row = device("leaf-06", "020000000041", "192.0.2.50")
         with tempfile.TemporaryDirectory() as directory:
