@@ -40,11 +40,16 @@ class InfraNeutralDefaultsTests(unittest.TestCase):
             global_file = temp / "01-global.yaml"
             global_file.write_text(
                 "common:\n  switch:\n    system:\n"
+                "      dns:\n        server: [8.8.8.8, 192.0.2.53]\n"
                 "      ntp:\n        server: [ntp.ubuntu.com, ntp.site.example]\n",
                 encoding="utf-8",
             )
             self.assertEqual(
-                (["8.8.8.8"], ["ntp.ubuntu.com", "ntp.site.example"], "Etc/UTC"),
+                (
+                    ["8.8.8.8", "192.0.2.53"],
+                    ["ntp.ubuntu.com", "ntp.site.example"],
+                    "Etc/UTC",
+                ),
                 DEPLOY.load_common(global_file, neutral_file),
             )
             global_file.write_text(

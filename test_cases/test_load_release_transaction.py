@@ -4670,12 +4670,15 @@ class InfraNeutralFallbackWorkflowTests(unittest.TestCase):
             global_file = temp / "01-global.yaml"
             global_file.write_text(
                 "common:\n  switch:\n    system:\n"
+                "      dns:\n"
+                "        server: [8.8.8.8, 192.0.2.53]\n"
                 "      ntp:\n"
                 "        server: [ntp.ubuntu.com, ntp.site.example]\n",
                 encoding="utf-8",
             )
             dns, ntp, timezone_name = deploy.load_common(global_file)
-            self.assertEqual(["8.8.8.8"], dns)
+            self.assertEqual(["8.8.8.8", "192.0.2.53"], dns)
+            self.assertEqual(1, dns.count("8.8.8.8"))
             self.assertEqual(["ntp.ubuntu.com", "ntp.site.example"], ntp)
             self.assertEqual(1, ntp.count("ntp.ubuntu.com"))
             self.assertEqual("Etc/UTC", timezone_name)
@@ -4697,7 +4700,7 @@ class InfraNeutralFallbackWorkflowTests(unittest.TestCase):
                 check=True, text=True, capture_output=True,
             )
             self.assertEqual(
-                "8.8.8.8|ntp.ubuntu.com ntp.site.example|Etc/UTC\n",
+                "8.8.8.8 192.0.2.53|ntp.ubuntu.com ntp.site.example|Etc/UTC\n",
                 result.stdout,
             )
 
