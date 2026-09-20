@@ -1594,12 +1594,15 @@ def devices_for_switch_collection(
         }
 
     def evidence(
-        *, status: str, source: str, address: str,
+        *, status: str, source: str, source_kind: str,
+        applicability: str, address: str,
         observed_identity: Any = None, observation_time: Any = None,
     ) -> dict[str, Any]:
         return {
             "status": status,
             "source": source,
+            "source_kind": source_kind,
+            "applicability": applicability,
             "address": address,
             "observed_identity": observed_identity,
             "observation_time": observation_time,
@@ -1668,18 +1671,21 @@ def devices_for_switch_collection(
             paths = {
                 "http_claim": evidence(
                     status="not_evaluated" if disabled else http_status,
-                    source="http_claim", address=address,
+                    source="http_claim", source_kind="local_observation",
+                    applicability="unknown", address=address,
                     observed_identity=http_identity,
                     observation_time=http_time,
                 ),
                 "ip_uniqueness": evidence(
                     status="not_evaluated" if disabled else uniqueness_status,
-                    source="inventory", address=address,
+                    source="inventory", source_kind="inventory",
+                    applicability="applicable", address=address,
                     observed_identity=unique_identity,
                 ),
                 "dhcp_owner": evidence(
                     status="not_evaluated" if disabled else owner_status,
-                    source="dhcp", address=address,
+                    source="dhcp", source_kind="local_observation",
+                    applicability="unknown", address=address,
                     observed_identity=owner_identity,
                 ),
             }
@@ -1702,6 +1708,7 @@ def devices_for_switch_collection(
             address_verdicts.append({
                 "address": address,
                 "eligible": address_eligible,
+                "provisioning_relationship": "unknown",
                 "paths": paths,
                 "missing_evidence": missing_evidence,
             })

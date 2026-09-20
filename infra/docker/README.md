@@ -381,6 +381,16 @@ config/database/PID 三个固定路径），但保留 `Listening on`、`Sending 
 回归窗口要求残留横幅字节不超过 5%；未知的横幅式新文案必须被 stale-filter 检测器显式指出，
 不能用更宽的通配规则吞掉运行证据。
 
+项目显式提供 `switches[].eth.system.dns.domain` 时，setup、正式 load 和 Cumulus 生成器都会在模板
+渲染前要求它是非空字符串；省略该键仍表示不生成 `domain`。空值、布尔、数字、list 或 mapping
+都会 fail closed，不能依赖 Jinja 的字符串化把错误类型写入设备配置。
+
+Switch Status 的共享地址准入把“观察结果”和“证据适用性”分开记录。HTTP/DHCP 证据未出现时，
+其适用性保持 `unknown`；日志缺失绝不能被推断成设备必然不经过本系统配置，也不能在页面上显示为
+配置故障。页面仍逐项列出当前缺少的本地证据，并说明设备可能由外部路径配置；共享地址最终需要
+设备自报身份或其他可信来源。后续持久证据的 `source` 为开放词汇，来源类别须能区分本地观察、
+设备自报与第三方提供者，不能把第三方数据强制重标为本地 DHCP/HTTP。
+
 常驻 runtime guardian 每 10 秒只读检查运行态。普通检查采用“短锁读取 activation generation →
 锁外限时 serving/liveness health → 短锁确认 generation”，不会让卡住的外部命令长期占用
 deployment lock。该快速探针仍核对 activation、Supervisor 状态、dhcpd argv、Apache listener bytes

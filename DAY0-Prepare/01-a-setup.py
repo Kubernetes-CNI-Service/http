@@ -60,6 +60,7 @@ from project_contract import (
     parse_device_csv_layout,
     require_device_csv_row_width,
     safe_load_global_yaml,
+    validate_cumulus_dns_domain,
     validate_ztp_url_prefix,
     v2_vrr_ipv4_plan,
 )
@@ -2479,6 +2480,10 @@ def _validate_global_yaml(path, section_key="eth"):
                     normalize_v2_vrr_policy(data)
                 except ValueError as exc:
                     errors.append(f"  {exc}")
+            try:
+                validate_cumulus_dns_domain(data)
+            except ValueError as exc:
+                errors.append(f"  {exc}")
             sys_node = data.get("system", {})
             if isinstance(sys_node, dict):
                 for key in ("aaa", "ntp", "dns"):

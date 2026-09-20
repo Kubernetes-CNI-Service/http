@@ -94,6 +94,7 @@ from project_contract import (
     parse_device_csv_layout,
     require_device_csv_row_width,
     safe_load_global_yaml,
+    validate_cumulus_dns_domain,
     validate_ztp_url_prefix,
 )
 from deployment_lock import (
@@ -956,6 +957,15 @@ def load_global(
             normalize_v2_vrr_policy(eth_config)
         except ValueError as exc:
             raise LoadError(str(exc)) from exc
+    else:
+        eth_config = next(
+            (entry["eth"] for entry in switches if isinstance(entry, dict) and "eth" in entry),
+            None,
+        )
+    try:
+        validate_cumulus_dns_domain(eth_config)
+    except ValueError as exc:
+        raise LoadError(str(exc)) from exc
     return GlobalSettings(
         dhcp_enabled=dhcp_enabled,
         dhcp_package=dhcp_package,

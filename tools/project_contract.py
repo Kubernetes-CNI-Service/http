@@ -784,6 +784,24 @@ def detect_global_schema_version(data: object) -> int:
     return value
 
 
+def validate_cumulus_dns_domain(eth_config: object) -> str | None:
+    """Validate an explicitly configured Cumulus DNS domain without coercion."""
+    if not isinstance(eth_config, dict):
+        return None
+    system = eth_config.get("system")
+    if not isinstance(system, dict):
+        return None
+    dns = system.get("dns")
+    if not isinstance(dns, dict) or "domain" not in dns:
+        return None
+    value = dns["domain"]
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            "switches.eth.system.dns.domain 必须是非空字符串"
+        )
+    return value.strip()
+
+
 def normalize_issue_tracker_policy(
         global_document: object) -> dict[str, object]:
     """Validate and normalize ``common.mgmt.issue-tracker`` without mutation.

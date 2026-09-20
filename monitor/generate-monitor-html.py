@@ -1165,7 +1165,11 @@ def _render_ztp_device_row(
                         "missing_evidence", []
                     )
                 ]
-                title = "身份取证不足，缺少：" + "、".join(missing)
+                title = (
+                    "当前身份归属证据不足，缺少：" + "、".join(missing)
+                    + "；这些证据可能尚未产生，或设备不经本系统配置；"
+                    "共享地址需由设备自报或其他可信来源验证"
+                )
             elif dynamic_candidate:
                 css_class = "ztp-ip-dynamic"
                 if transit_candidate:

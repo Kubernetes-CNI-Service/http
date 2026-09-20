@@ -3194,6 +3194,7 @@ class TemplateContractTests(unittest.TestCase):
                     },
                     "addresses": [{
                         "address": "192.0.2.44", "eligible": False,
+                        "provisioning_relationship": "unknown",
                         "missing_evidence": [
                             "http_identity_claim", "unique_inventory_address",
                             "dhcp_mac_owner",
@@ -3213,6 +3214,10 @@ class TemplateContractTests(unittest.TestCase):
         self.assertIn("HTTP 身份声明", insufficient)
         self.assertIn("清单地址唯一性", insufficient)
         self.assertIn("DHCP MAC owner", insufficient)
+        self.assertIn("可能尚未产生，或设备不经本系统配置", insufficient)
+        self.assertIn("共享地址需由设备自报或其他可信来源验证", insufficient)
+        self.assertNotIn("配置错误", insufficient)
+        self.assertNotIn("请修复", insufficient)
         self.assertNotIn("该地址尚未探测或报告未记录结果", insufficient)
 
         status["devices"][0]["collection_admission"]["eligible"] = True
@@ -3285,6 +3290,7 @@ class TemplateContractTests(unittest.TestCase):
             address = verdict["addresses"][0]
             self.assertEqual("192.0.2.10", address["address"])
             self.assertFalse(address["eligible"])
+            self.assertEqual("unknown", address["provisioning_relationship"])
             self.assertEqual(
                 [
                     "http_identity_claim", "unique_inventory_address",
@@ -3295,6 +3301,24 @@ class TemplateContractTests(unittest.TestCase):
             self.assertEqual("missing", address["paths"]["http_claim"]["status"])
             self.assertEqual("ambiguous", address["paths"]["ip_uniqueness"]["status"])
             self.assertEqual("missing", address["paths"]["dhcp_owner"]["status"])
+            self.assertEqual(
+                "unknown", address["paths"]["http_claim"]["applicability"],
+            )
+            self.assertEqual(
+                "applicable", address["paths"]["ip_uniqueness"]["applicability"],
+            )
+            self.assertEqual(
+                "unknown", address["paths"]["dhcp_owner"]["applicability"],
+            )
+            self.assertEqual(
+                "local_observation", address["paths"]["http_claim"]["source_kind"],
+            )
+            self.assertEqual(
+                "inventory", address["paths"]["ip_uniqueness"]["source_kind"],
+            )
+            self.assertEqual(
+                "local_observation", address["paths"]["dhcp_owner"]["source_kind"],
+            )
             for path in address["paths"].values():
                 self.assertEqual("192.0.2.10", path["address"])
                 self.assertIn("source", path)

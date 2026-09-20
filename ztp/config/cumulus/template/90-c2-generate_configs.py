@@ -84,6 +84,7 @@ from project_contract import (
     normalize_v2_vrr_policy,
     parse_device_csv_layout,
     require_device_csv_row_width,
+    validate_cumulus_dns_domain,
     v2_vrr_ipv4_plan,
 )
 from nvue_normalizer import expand_nvue_selector
@@ -531,6 +532,12 @@ def load_global(section_key=None):
         merged = copy.deepcopy(data)
     if not isinstance(merged, dict):
         print(f"[ERROR] {_GLOBAL_FILE} 对应平台配置必须是 mapping"); sys.exit(1)
+    if section_key == "eth":
+        try:
+            validate_cumulus_dns_domain(merged)
+        except ValueError as exc:
+            print(f"[ERROR] {_GLOBAL_FILE}: {exc}")
+            sys.exit(1)
     merged["_project_schema_version"] = schema_version
     return merged
 

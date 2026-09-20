@@ -2279,6 +2279,68 @@ switches:
                         configured["system"]["docker"]["vrf"],
                     )
 
+    def test_eth_dns_domain_is_strictly_validated_before_render(self):
+        """REQ-10: explicit domain must be a non-empty string on every entry path."""
+        original = yaml.safe_load(self.global_file.read_text(encoding="utf-8"))
+
+        def eth_section(document):
+            return next(
+                entry["eth"] for entry in document["switches"]
+                if isinstance(entry, dict) and "eth" in entry
+            )
+
+        invalid_values = (None, "", "   ", True, 7, ["a", "b"], {"name": "a"})
+        for value in invalid_values:
+            with self.subTest(invalid=value), tempfile.TemporaryDirectory() as directory:
+                document = copy.deepcopy(original)
+                eth_section(document)["system"]["dns"]["domain"] = value
+                global_file = Path(directory) / "01-global.yaml"
+                global_file.write_text(
+                    yaml.safe_dump(document, sort_keys=False), encoding="utf-8",
+                )
+
+                errors, _warnings = SETUP._validate_global_yaml(
+                    str(global_file), "eth",
+                )
+                self.assertTrue(
+                    any("system.dns.domain" in error for error in errors),
+                    errors,
+                )
+                with self.assertRaisesRegex(LOAD.LoadError, "system.dns.domain"):
+                    LOAD.load_global(global_file)
+                with mock.patch.object(GENERATOR, "_GLOBAL_FILE", str(global_file)):
+                    with self.assertRaises(SystemExit):
+                        GENERATOR.load_global("eth")
+
+        for mode in ("absent", "valid"):
+            with self.subTest(valid=mode), tempfile.TemporaryDirectory() as directory:
+                document = copy.deepcopy(original)
+                dns = eth_section(document)["system"]["dns"]
+                if mode == "absent":
+                    dns.pop("domain", None)
+                else:
+                    dns["domain"] = "fabric.example"
+                global_file = Path(directory) / "01-global.yaml"
+                global_file.write_text(
+                    yaml.safe_dump(document, sort_keys=False), encoding="utf-8",
+                )
+                errors, _warnings = SETUP._validate_global_yaml(
+                    str(global_file), "eth",
+                )
+                self.assertFalse(
+                    any("system.dns.domain" in error for error in errors),
+                    errors,
+                )
+                LOAD.load_global(global_file)
+                with mock.patch.object(GENERATOR, "_GLOBAL_FILE", str(global_file)):
+                    loaded = GENERATOR.load_global("eth")
+                if mode == "absent":
+                    self.assertNotIn("domain", loaded["system"]["dns"])
+                else:
+                    self.assertEqual(
+                        "fabric.example", loaded["system"]["dns"]["domain"],
+                    )
+
     def test_intermediate_model_has_no_v1_first_vlan_copy(self):
         leaf = self.generated_devices["EXAMPLE-Leaf01"]
         self.assertEqual(2, leaf["_project_schema_version"])

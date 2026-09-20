@@ -31,10 +31,11 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCKER_ROOT = ROOT / "infra/docker"
-# Reviewed AM-1..AM-6 plus PK1/M1/M2 contract; prior trust-boundary prose retained.
-PUBLISHED_DOCKER_README_SIZE = 44318
+# Reviewed AM-1..AM-6 plus PK1/M1/M2, strict DNS-domain, and admission-evidence
+# contracts; prior trust-boundary prose retained.
+PUBLISHED_DOCKER_README_SIZE = 45277
 PUBLISHED_DOCKER_README_SHA256 = (
-    "996bb4fa1fa6a492d753f739ae077a9ba01992c8bf361f10a1104f928f0b2930"
+    "494905f7e7ba0ef8ec88038236b2a744f4c3116a1b9f495fef6378e2557c3c27"
 )
 
 
@@ -7000,6 +7001,90 @@ class HealthContractTests(QuietContractTest):
             ],
             runner.call_args_list,
         )
+
+    def test_check_runtime_serving_only_controls_both_validator_effects(self) -> None:
+        """D-53: the serving_only flag must reach the real command boundary."""
+        health = load_script("healthcheck.py")
+        selected = plan(
+            names=("eno2",), indexes=(7,), endpoints=("192.0.2.10",),
+        )
+        expected_argv = (
+            "/usr/sbin/dhcpd", "-4", "-f", "-cf", "/etc/dhcp/dhcpd.conf",
+            "-lf", "/var/lib/dhcp/dhcpd.leases", "eno2",
+        )
+        runtime = SimpleNamespace(
+            build_dhcpd_argv=mock.Mock(return_value=expected_argv),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            listeners = root / "apache-listeners.conf"
+            listeners.write_text("Listen 192.0.2.10:80\n", encoding="utf-8")
+            settings = SimpleNamespace(
+                rebuild_required=root / "rebuild-required.json",
+                guardian_fault=root / "guardian-fault.json",
+                quarantine_marker=root / "quarantine.json",
+                dhcp_config=Path("/etc/dhcp/dhcpd.conf"),
+                dhcp_leases=Path("/var/lib/dhcp/dhcpd.leases"),
+                apache_listeners=listeners,
+            )
+            services = tuple(health.activate.expected_services(selected))
+            states = {
+                "rsyslog": "RUNNING", "logrotate": "RUNNING",
+                "runtime-guardian": "RUNNING",
+                **{service: "RUNNING" for service in services},
+            }
+            common = (
+                mock.patch.object(
+                    health.activate.Settings, "from_environment", return_value=settings,
+                ),
+                mock.patch.object(health.activate, "validate_python_runtime"),
+                mock.patch.object(health.activate, "require_monitor_authority"),
+                mock.patch.object(health.activate, "validate_image_source_contract"),
+                mock.patch.object(
+                    health.activate, "observe_runtime",
+                    return_value=(
+                        selected, runtime, {"plan": "current"},
+                        "Listen 192.0.2.10:80\n",
+                    ),
+                ),
+                mock.patch.object(
+                    health, "_load_runtime_state", return_value={"plan": "current"},
+                ),
+                mock.patch.object(health, "_supervisor_states", return_value=states),
+                mock.patch.object(health.activate, "validate_control_cgi"),
+                mock.patch.object(
+                    health.activate, "read_activation_marker", return_value=None,
+                ),
+                mock.patch.object(health, "_dhcp_pid", return_value=73),
+                mock.patch.object(health, "_process_argv", return_value=expected_argv),
+            )
+            for serving_only in (True, False):
+                with self.subTest(serving_only=serving_only), ExitStack() as stack:
+                    for patcher in common:
+                        stack.enter_context(patcher)
+                    runner = stack.enter_context(mock.patch.object(health, "_run"))
+                    endpoint_check = stack.enter_context(
+                        mock.patch.object(health, "_check_tcp_endpoints")
+                    )
+                    message = health.check_runtime(
+                        expected_services=services, serving_only=serving_only,
+                    )
+                    self.assertIn("healthy activated runtime", message)
+                    endpoint_check.assert_called_once_with(("192.0.2.10",))
+                    validator_commands = [call.args[0] for call in runner.call_args_list]
+                    if serving_only:
+                        self.assertEqual([], validator_commands)
+                    else:
+                        self.assertEqual(
+                            [
+                                (
+                                    "/usr/sbin/dhcpd", "-4", "-t", "-cf",
+                                    "/etc/dhcp/dhcpd.conf",
+                                ),
+                                ("/usr/sbin/apache2ctl", "configtest"),
+                            ],
+                            validator_commands,
+                        )
 
     def test_entrypoint_and_healthcheck_have_no_host_service_manager_fallback(self) -> None:
         combined = "\n".join(
