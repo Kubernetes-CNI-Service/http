@@ -49,6 +49,9 @@ class InfraCheckFunctionalTests(unittest.TestCase):
                 "run_info.status=completed",
                 "packages.missing=",
                 "privileged.available=true",
+                "effective.dns=8.8.8.8",
+                "effective.ntp=ntp.ubuntu.com",
+                "effective.timezone=Etc/UTC",
             ))
         )
         self.assertEqual(("OK", []), CHECK.classify(healthy))
@@ -63,6 +66,30 @@ class InfraCheckFunctionalTests(unittest.TestCase):
         self.assertEqual("ERROR", severity)
         self.assertTrue(any("exit_code=7" in issue for issue in issues))
         self.assertTrue(any("jq chrony" in issue for issue in issues))
+
+    def test_probe_reports_and_classifies_effective_network_values(self):
+        script = CHECK.remote_probe_script()
+        self.assertIn("effective.dns=", script)
+        self.assertIn("effective.ntp=", script)
+        self.assertIn("effective.timezone=", script)
+        healthy = {
+            "public.status": "completed",
+            "public.last_action": "setup",
+            "public.exit_code": "0",
+            "system.os_id": "ubuntu",
+            "system.os_version": "24.04",
+            "run_info.status": "completed",
+            "packages.missing": "",
+            "privileged.available": "true",
+            "effective.dns": "8.8.8.8",
+            "effective.ntp": "ntp.ubuntu.com",
+            "effective.timezone": "Etc/UTC",
+        }
+        self.assertEqual(("OK", []), CHECK.classify(healthy))
+        mismatched = dict(healthy, **{"effective.dns": "208.67.220.220"})
+        severity, issues = CHECK.classify(mismatched)
+        self.assertEqual("ERROR", severity)
+        self.assertTrue(any("DNS" in issue for issue in issues))
 
     def test_main_collects_local_and_remote_results_and_writes_reports(self):
         with tempfile.TemporaryDirectory() as directory:

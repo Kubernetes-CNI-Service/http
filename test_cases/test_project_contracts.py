@@ -329,11 +329,10 @@ class TemplateContractTests(unittest.TestCase):
             "config": {"auto-save": {"state": "enabled"}},
             "date-time": {"timezone": "Etc/UTC"},
             "dns": {"server": {
-                "1.1.1.1": {"vrf": "mgmt"},
-                "9.9.9.9": {"vrf": "mgmt"},
+                "8.8.8.8": {"vrf": "mgmt"},
             }},
             "ntp": {
-                "server": {"time.cloudflare.com": {}, "ntp.ubuntu.com": {}},
+                "server": {"ntp.ubuntu.com": {}},
                 "state": "enabled",
                 "vrf": "mgmt",
             },
@@ -360,11 +359,10 @@ class TemplateContractTests(unittest.TestCase):
             "config": {"auto-save": {"state": "enabled"}},
             "date-time": {"timezone": "Etc/UTC"},
             "dns": {"server": {
-                "1.1.1.1": {"vrf": "mgmt"},
-                "9.9.9.9": {"vrf": "mgmt"},
+                "8.8.8.8": {"vrf": "mgmt"},
             }},
             "ntp": {
-                "server": {"time.cloudflare.com": {}, "ntp.ubuntu.com": {}},
+                "server": {"ntp.ubuntu.com": {}},
                 "state": "enabled",
                 "vrf": "mgmt",
             },
@@ -373,10 +371,8 @@ class TemplateContractTests(unittest.TestCase):
             "aaa": {"user": {"admin": {"password": "*"}}},
             "config": {"auto-save": {"state": "enabled"}},
             "date-time": {"timezone": "Etc/UTC"},
-            "dns": {"server": {"1.1.1.1": {}, "9.9.9.9": {}}},
-            "ntp": {"server": {
-                "time.cloudflare.com": {}, "ntp.ubuntu.com": {},
-            }},
+            "dns": {"server": {"8.8.8.8": {}}},
+            "ntp": {"server": {"ntp.ubuntu.com": {}}},
             "security": {"password-hardening": {"state": "disabled"}},
         }}}]
         expected_defaults = {

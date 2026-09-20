@@ -32,6 +32,7 @@ DEFAULT_GLOBAL = SCRIPT_DIR / "01-global.yaml"
 DEFAULT_DEVICES = SCRIPT_DIR / "02-devices_config.csv"
 DEFAULT_SETUP = SCRIPT_DIR / "infra-setup.sh"
 DEFAULT_TEARDOWN = SCRIPT_DIR / "infra-teardown.sh"
+DEFAULT_NEUTRAL = SCRIPT_DIR / "infra-neutral.conf"
 MANAGED_BEGIN = "# BEGIN managed by deploy_infra.py"
 MANAGED_END = "# END managed by deploy_infra.py"
 NA_VALUES = {"", "na", "n/a", "none", "null", "-"}
@@ -99,7 +100,41 @@ def _required_list(value: object, label: str) -> list[str]:
     return result
 
 
-def load_common(global_file: Path) -> tuple[list[str], list[str], str]:
+def load_neutral_defaults(
+    neutral_file: Path = DEFAULT_NEUTRAL,
+) -> tuple[list[str], list[str], str]:
+    try:
+        lines = neutral_file.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError as exc:
+        raise DeployError(f"中性默认值权威文件不存在：{neutral_file}") from exc
+    expected_keys = ("DNS", "NTP", "TIMEZONE")
+    if len(lines) != len(expected_keys):
+        raise DeployError("中性默认值权威文件必须恰好包含 DNS/NTP/TIMEZONE 三行")
+    values: dict[str, str] = {}
+    for expected_key, line in zip(expected_keys, lines):
+        match = re.fullmatch(r"([A-Z]+)=([A-Za-z0-9][A-Za-z0-9._:/+-]*)", line)
+        if match is None or match.group(1) != expected_key:
+            raise DeployError(f"中性默认值权威文件行无效：{line!r}")
+        values[expected_key] = match.group(2)
+    try:
+        if ipaddress.ip_address(values["DNS"]).version != 4:
+            raise ValueError
+    except ValueError as exc:
+        raise DeployError("中性 DNS 必须是单个 IPv4 地址") from exc
+    if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?", values["NTP"]):
+        raise DeployError("中性 NTP 必须是单个安全主机名")
+    if not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9_+.-]*(?:/[A-Za-z0-9][A-Za-z0-9_+.-]*)*",
+        values["TIMEZONE"],
+    ):
+        raise DeployError("中性 timezone 必须是安全 IANA 名称")
+    return [values["DNS"]], [values["NTP"]], values["TIMEZONE"]
+
+
+def load_common(
+    global_file: Path, neutral_file: Path = DEFAULT_NEUTRAL,
+) -> tuple[list[str], list[str], str]:
+    neutral_dns, neutral_ntp, neutral_timezone = load_neutral_defaults(neutral_file)
     try:
         data = yaml.safe_load(global_file.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
@@ -109,11 +144,31 @@ def load_common(global_file: Path) -> tuple[list[str], list[str], str]:
 
     try:
         system = data["common"]["switch"]["system"]
-        dns = _required_list(system["dns"]["server"], "common.switch.system.dns.server")
-        ntp = _required_list(system["ntp"]["server"], "common.switch.system.ntp.server")
-        timezone = _clean(system["date-time"]["timezone"])
+        if not isinstance(system, dict):
+            raise TypeError("system")
     except (KeyError, TypeError) as exc:
-        raise DeployError(f"global 缺少 common.switch.system 的 DNS/NTP/timezone 字段：{exc}") from exc
+        raise DeployError(f"global 缺少 common.switch.system 映射：{exc}") from exc
+    if "dns" in system:
+        try:
+            dns = _required_list(system["dns"]["server"], "common.switch.system.dns.server")
+        except (KeyError, TypeError) as exc:
+            raise DeployError("global 的 dns 键存在但缺少有效 server 列表") from exc
+    else:
+        dns = neutral_dns
+    if "ntp" in system:
+        try:
+            ntp = _required_list(system["ntp"]["server"], "common.switch.system.ntp.server")
+        except (KeyError, TypeError) as exc:
+            raise DeployError("global 的 ntp 键存在但缺少有效 server 列表") from exc
+    else:
+        ntp = neutral_ntp
+    if "date-time" in system:
+        try:
+            timezone = _clean(system["date-time"]["timezone"])
+        except (KeyError, TypeError) as exc:
+            raise DeployError("global 的 date-time 键存在但缺少有效 timezone") from exc
+    else:
+        timezone = neutral_timezone
     if not timezone or any(ch.isspace() for ch in timezone):
         raise DeployError("common.switch.system.date-time.timezone 无效")
     return dns, ntp, timezone
@@ -527,7 +582,8 @@ def confirm_teardown_targets(
 
 def deploy_server(
     server: dict[str, str], username: str, identity: Path | None,
-    setup_script: Path, teardown_script: Path, runtime_config: Path, client_log: Path,
+    setup_script: Path, teardown_script: Path, runtime_config: Path,
+    neutral_config: Path, client_log: Path,
     sudo_password: str | None = None,
     action: str = "setup",
 ) -> None:
@@ -562,29 +618,36 @@ def deploy_server(
         setup_stage = f"{release_dir}/infra-setup.sh"
         teardown_stage = f"{release_dir}/infra-teardown.sh"
         runtime_stage = f"{release_dir}/infra-runtime.conf"
+        neutral_stage = f"{release_dir}/infra-neutral.conf"
         if action == "setup":
             setup_hash = hashlib.sha256(setup_script.read_bytes()).hexdigest()
             teardown_hash = hashlib.sha256(teardown_script.read_bytes()).hexdigest()
             runtime_hash = hashlib.sha256(runtime_config.read_bytes()).hexdigest()
+            neutral_hash = hashlib.sha256(neutral_config.read_bytes()).hexdigest()
             logged_run([*ssh_base, target, f"install -d -m 0755 -- {shlex.quote(release_dir)}"])
             logged_run([*scp_base, str(setup_script), f"{target}:{setup_stage}"])
             logged_run([*scp_base, str(teardown_script), f"{target}:{teardown_stage}"])
             logged_run([*scp_base, str(runtime_config), f"{target}:{runtime_stage}"])
+            logged_run([*scp_base, str(neutral_config), f"{target}:{neutral_stage}"])
             current_stage = f"{remote_dir}/.current-{os.getpid()}"
             current_link = f"{remote_dir}/current"
             setup_link = f"{remote_dir}/infra-setup.sh"
             teardown_link = f"{remote_dir}/infra-teardown.sh"
+            neutral_link = f"{remote_dir}/infra-neutral.conf"
             setup_check = shlex.quote(f"{setup_hash}  {setup_stage}")
             teardown_check = shlex.quote(f"{teardown_hash}  {teardown_stage}")
             runtime_check = shlex.quote(f"{runtime_hash}  {runtime_stage}")
+            neutral_check = shlex.quote(f"{neutral_hash}  {neutral_stage}")
             activate_command = (
                 f"bash -n {shlex.quote(setup_stage)} && bash -n {shlex.quote(teardown_stage)} && "
                 f"bash -n {shlex.quote(runtime_stage)} && "
-                f"printf '%s\\n' {setup_check} {teardown_check} {runtime_check} | sha256sum -c - && "
+                f"printf '%s\\n' {setup_check} {teardown_check} {runtime_check} {neutral_check} | sha256sum -c - && "
                 f"chmod 0755 -- {shlex.quote(setup_stage)} {shlex.quote(teardown_stage)} && "
                 f"chmod 0600 -- {shlex.quote(runtime_stage)} && "
+                f"chmod 0644 -- {shlex.quote(neutral_stage)} && "
                 f"ln -sfn -- current/infra-setup.sh {shlex.quote(setup_link)} && "
                 f"ln -sfn -- current/infra-teardown.sh {shlex.quote(teardown_link)} && "
+                f"ln -sfn -- current/infra-neutral.conf {shlex.quote(neutral_link)} && "
                 f"ln -sfn -- {shlex.quote('releases/' + release_name)} {shlex.quote(current_stage)} && "
                 f"mv -Tf -- {shlex.quote(current_stage)} {shlex.quote(current_link)}"
             )
@@ -679,6 +742,8 @@ def main() -> int:
     args = parse_args()
     try:
         action = "teardown" if args.teardown else "setup"
+        if args.prepare_only and args.teardown:
+            raise DeployError("--prepare-only 仅用于准备 setup，不能与 --teardown 同时使用")
         teardown_path_explicit = any(
             item == "--teardown-script" or item.startswith("--teardown-script=")
             for item in sys.argv[1:]
@@ -697,16 +762,17 @@ def main() -> int:
             unmatched = sorted(set(args.hosts).difference(matched))
             if unmatched:
                 raise DeployError(f"--host 未匹配到有效的 type=server：{', '.join(unmatched)}")
+        if not servers and not args.prepare_only:
+            raise DeployError("devices CSV 中没有可部署的 type=server 设备")
         local_http_enabled = False
         http_ip: str | None = None
         if action == "setup":
             if not servers and not args.http_server_ip:
-                print(
-                    "[WARN] devices CSV 中没有有效的 type=server 设备，"
-                    "无法通过目标路由更新 HTTP Server，未修改脚本"
-                )
-                return 0
-            dns, ntp, timezone_name = load_common(args.global_file.resolve())
+                raise DeployError("零目标 --prepare-only 必须显式指定 --http-server-ip")
+            neutral_config = args.setup_script.resolve().with_name("infra-neutral.conf")
+            dns, ntp, timezone_name = load_common(
+                args.global_file.resolve(), neutral_config,
+            )
             http_ip = determine_http_source_ip(servers, args.http_server_ip)
             local_http_enabled = http_service_works(http_ip)
             if local_http_enabled:
@@ -875,7 +941,8 @@ def main() -> int:
                     future = executor.submit(
                         deploy_server, server, username, identity, args.setup_script.resolve(),
                         args.teardown_script.resolve(),
-                        args.setup_script.resolve().with_name("infra-runtime.conf"), client_log,
+                        args.setup_script.resolve().with_name("infra-runtime.conf"),
+                        args.setup_script.resolve().with_name("infra-neutral.conf"), client_log,
                         sudo_password if needs_password else None,
                         action,
                     )

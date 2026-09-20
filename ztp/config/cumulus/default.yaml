@@ -26,13 +26,10 @@
         timezone: Etc/UTC
       dns:
         server:
-          1.1.1.1:
-            vrf: mgmt
-          9.9.9.9:
+          8.8.8.8:
             vrf: mgmt
       ntp:
         server:
-          time.cloudflare.com: {}
           ntp.ubuntu.com: {}
         state: enabled
         vrf: mgmt

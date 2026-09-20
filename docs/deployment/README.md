@@ -16,6 +16,15 @@ generic image、项目 upload release、共享大制品和可选 project image �
 Native/systemd 的详细操作见私有工作区中的 `DAY0-Prepare/README.md`；
 Docker/Supervisor 的完整命令和限制见 [`infra/docker/README.md`](../../infra/docker/README.md)。
 
+Native infra 的 DNS、NTP 与 timezone 中性值只有一个权威：
+[`infra/infra-neutral.conf`](../../infra/infra-neutral.conf)。该文件是严格的惰性 `KEY=VALUE`
+数据，不可执行也不可 `source`。`infra-setup.sh` 独立运行时使用其中的
+`8.8.8.8`、`ntp.ubuntu.com`、`Etc/UTC`；`deploy_infra.py` 读取同一文件，并只在 global
+中的整个 `dns`、`ntp` 或 `date-time` 可选键缺席时逐键回退。键一旦存在，其列表或值会完整
+替换中性值，不做追加、并集或逐元素补齐；存在但为空或结构错误会 fail closed。
+零目标的普通部署和显式 `--host` 未匹配均失败。仅 `--prepare-only` 可不选设备，但此时必须
+给出 `--http-server-ip`，并仍会校验 global、写入且验证 `infra-runtime.conf`。
+
 两种后端都默认保护 `/monitor/monitor.html`。首次打开时使用固定用户名 `nvis` 或 `cumulus`
 认证；canonical 控制 URL 与页面同在 `/monitor/` protection path，支持的浏览器会复用凭据，
 因此后续操作不再弹出登录框。Apache 仍认证每个控制请求，旧 `/cgi-bin/*-control` 只是受认证的

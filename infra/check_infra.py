@@ -17,12 +17,14 @@ import sys
 
 from deploy_infra import (
     DEFAULT_DEVICES,
+    DEFAULT_NEUTRAL,
     DeployError,
     _identity_args,
     _ssh_options,
     _validate_username,
     find_public_key,
     key_login_works,
+    load_neutral_defaults,
     load_servers,
     run_with_log,
     sudo_password_works,
@@ -145,6 +147,15 @@ for service in systemd-resolved systemd-timesyncd lldpd apache2 isc-dhcp-server;
 done
 if sudo -n true 2>/dev/null; then
   printf 'privileged.available=true\n'
+  effective_dns=$(sudo -n awk -F= '/^[[:space:]]*DNS[[:space:]]*=/{value=$0; sub(/^[^=]*=/,"",value); gsub(/^[[:space:]]+|[[:space:]]+$/,"",value); print value; exit}' /etc/systemd/resolved.conf 2>/dev/null || true)
+  effective_ntp=$(sudo -n awk -F= '/^[[:space:]]*NTP[[:space:]]*=/{value=$0; sub(/^[^=]*=/,"",value); gsub(/^[[:space:]]+|[[:space:]]+$/,"",value); print value; exit}' /etc/systemd/timesyncd.conf 2>/dev/null || true)
+  effective_timezone=$(timedatectl show -p Timezone --value 2>/dev/null || true)
+  if [ -z "$effective_timezone" ]; then
+    effective_timezone=$(sudo -n awk 'NF { print; exit }' /etc/timezone 2>/dev/null || true)
+  fi
+  printf 'effective.dns=%s\n' "$effective_dns"
+  printf 'effective.ntp=%s\n' "$effective_ntp"
+  printf 'effective.timezone=%s\n' "$effective_timezone"
   if sudo -n test -r /var/lib/http-infra/run-info; then
     sudo -n awk -F= '{ printf "run_info.%s=%s\n", $1, substr($0, index($0,"=")+1) }' /var/lib/http-infra/run-info
   fi
@@ -211,6 +222,24 @@ def classify(values: dict[str, str]) -> tuple[str, list[str]]:
     if action == "setup" and missing:
         severity = "ERROR"
         issues.append(f"清单中的包未安装：{missing}")
+    if action == "setup" and values.get("privileged.available") == "true":
+        neutral_dns, neutral_ntp, neutral_timezone = load_neutral_defaults(DEFAULT_NEUTRAL)
+        expected_values = {
+            "DNS": values.get("run_info.expected_dns", " ".join(neutral_dns)),
+            "NTP": values.get("run_info.expected_ntp", " ".join(neutral_ntp)),
+            "timezone": values.get("run_info.expected_timezone", neutral_timezone),
+        }
+        for label, key in (
+            ("DNS", "effective.dns"),
+            ("NTP", "effective.ntp"),
+            ("timezone", "effective.timezone"),
+        ):
+            if values.get(key, "") != expected_values[label]:
+                severity = "ERROR"
+                issues.append(
+                    f"{label} 生效值不匹配：{values.get(key, '<missing>')} "
+                    f"!= {expected_values[label]}"
+                )
     if values.get("privileged.available") == "false":
         if severity == "OK":
             severity = "WARN"
@@ -257,6 +286,9 @@ def print_result_details(
             values.get("public.local_http_enabled", values.get("run_info.local_http_enabled", "unknown")),
         ),
         ("APT reachable now", values.get("repository.reachable", "unknown")),
+        ("Effective DNS", values.get("effective.dns", "unknown")),
+        ("Effective NTP", values.get("effective.ntp", "unknown")),
+        ("Effective timezone", values.get("effective.timezone", "unknown")),
         ("Privileged check", values.get("privileged.available", "unknown")),
         ("Recorded packages", format_recorded_packages(values)),
         ("Missing packages", values.get("packages.missing", "").strip() or "none"),

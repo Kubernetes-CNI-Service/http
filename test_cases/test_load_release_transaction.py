@@ -4655,5 +4655,64 @@ class ReleaseTransactionTests(unittest.TestCase):
             )
 
 
+class InfraNeutralFallbackWorkflowTests(unittest.TestCase):
+    def test_global_key_replacement_flows_to_bash_and_family_defaults(self):
+        spec = importlib.util.spec_from_file_location(
+            "infra_neutral_workflow_deploy", ROOT / "infra/deploy_infra.py",
+        )
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        deploy = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = deploy
+        spec.loader.exec_module(deploy)
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            global_file = temp / "01-global.yaml"
+            global_file.write_text(
+                "common:\n  switch:\n    system:\n"
+                "      ntp:\n"
+                "        server: [ntp.ubuntu.com, ntp.site.example]\n",
+                encoding="utf-8",
+            )
+            dns, ntp, timezone_name = deploy.load_common(global_file)
+            self.assertEqual(["8.8.8.8"], dns)
+            self.assertEqual(["ntp.ubuntu.com", "ntp.site.example"], ntp)
+            self.assertEqual(1, ntp.count("ntp.ubuntu.com"))
+            self.assertEqual("Etc/UTC", timezone_name)
+            runtime = temp / "infra-runtime.conf"
+            deploy.update_runtime_config(
+                runtime,
+                deploy.render_managed_block(
+                    "192.0.2.10", dns, ntp, timezone_name,
+                    local_http_enabled=False,
+                ),
+            )
+            result = subprocess.run(
+                [
+                    "bash", "-c",
+                    'source "$1"; printf "%s|%s|%s\\n" '
+                    '"${dns_servers[*]}" "${ntp_servers[*]}" "$time_zone"',
+                    "bash", str(runtime),
+                ],
+                check=True, text=True, capture_output=True,
+            )
+            self.assertEqual(
+                "8.8.8.8|ntp.ubuntu.com ntp.site.example|Etc/UTC\n",
+                result.stdout,
+            )
+
+        for relative in (
+            "ztp/config/cumulus/default.yaml",
+            "ztp/config/cumulus/default_5.16.5.yaml",
+            "ztp/config/nvos/default.yaml",
+        ):
+            rendered = (ROOT / relative).read_text(encoding="utf-8")
+            self.assertNotIn("null", rendered.casefold(), relative)
+            system = yaml.safe_load(rendered)[0]["set"]["system"]
+            self.assertEqual("Etc/UTC", system["date-time"]["timezone"], relative)
+            self.assertEqual(["8.8.8.8"], list(system["dns"]["server"]), relative)
+            self.assertEqual(["ntp.ubuntu.com"], list(system["ntp"]["server"]), relative)
+
+
 if __name__ == "__main__":
     unittest.main()

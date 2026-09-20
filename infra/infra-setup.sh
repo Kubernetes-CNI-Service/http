@@ -136,6 +136,7 @@ if [[ -z "$script_source" ]]; then
   # For `curl URL | sudo bash`, run from the target user's home directory so the
   # default becomes $HOME/http-infra and remains discoverable by check_infra.py.
   runtime_dir="${HTTP_INFRA_RUNTIME_DIR:-${PWD}/http-infra}"
+  source_dir="$runtime_dir"
 else
   source_dir=$(dirname -- "$script_source")
   if [[ "$(basename -- "$source_dir")" == "current" ]]; then
@@ -506,9 +507,54 @@ fi
 # ─── Configuration ────────────────────────────────────────────────────────────
 http_server=http://127.0.0.1/apps
 local_http_enabled=false
-dns_servers=(208.67.220.220 8.8.8.8)
-ntp_servers=(118.163.81.61 time.stdtime.gov.tw ntp.ubuntu.com)
-time_zone=Etc/UTC
+dns_servers=()
+ntp_servers=()
+time_zone=""
+neutral_config="${source_dir}/infra-neutral.conf"
+if [[ ! -r "$neutral_config" ]]; then
+  echo "ERROR: governed neutral defaults are missing: $neutral_config" >&2
+  exit 2
+fi
+neutral_dns=""
+neutral_ntp=""
+neutral_timezone=""
+neutral_line_count=0
+while IFS="=" read -r key value; do
+  neutral_line_count=$((neutral_line_count + 1))
+  if [[ ! "$key" =~ ^(DNS|NTP|TIMEZONE)$ || \
+        ! "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._:/+-]*$ ]]; then
+    echo "ERROR: invalid neutral defaults line $neutral_line_count" >&2
+    exit 2
+  fi
+  case "$key:$neutral_line_count" in
+    DNS:1) neutral_dns="$value" ;;
+    NTP:2) neutral_ntp="$value" ;;
+    TIMEZONE:3) neutral_timezone="$value" ;;
+    *) echo "ERROR: neutral defaults must be ordered DNS/NTP/TIMEZONE" >&2; exit 2 ;;
+  esac
+done < "$neutral_config"
+neutral_dns_valid=true
+if [[ "$neutral_dns" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+  IFS=. read -r dns_octet_1 dns_octet_2 dns_octet_3 dns_octet_4 <<< "$neutral_dns"
+  for dns_octet in "$dns_octet_1" "$dns_octet_2" "$dns_octet_3" "$dns_octet_4"; do
+    if [[ ( "$dns_octet" != "0" && "$dns_octet" == 0* ) ]] ||
+       (( 10#$dns_octet > 255 )); then
+      neutral_dns_valid=false
+    fi
+  done
+else
+  neutral_dns_valid=false
+fi
+if [[ "$neutral_line_count" != "3" || \
+      "$neutral_dns_valid" != "true" || \
+      ! "$neutral_ntp" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ || \
+      ! "$neutral_timezone" =~ ^[A-Za-z0-9][A-Za-z0-9_+.-]*(/[A-Za-z0-9][A-Za-z0-9_+.-]*)*$ ]]; then
+  echo "ERROR: neutral defaults are incomplete or invalid" >&2
+  exit 2
+fi
+dns_servers=("$neutral_dns")
+ntp_servers=("$neutral_ntp")
+time_zone="$neutral_timezone"
 if [[ -n "$script_source" ]]; then
   runtime_config="$(dirname -- "$script_source")/infra-runtime.conf"
   if [[ -s "$runtime_config" ]]; then
@@ -763,6 +809,9 @@ write_run_info() {
     printf 'http_server=%s\n' "$http_server"
     printf 'local_http_enabled=%s\n' "$local_http_enabled"
     printf 'mgmt_mode=%s\n' "$mgmt_mode"
+    printf 'expected_dns=%s\n' "${dns_servers[*]}"
+    printf 'expected_ntp=%s\n' "${ntp_servers[*]}"
+    printf 'expected_timezone=%s\n' "$time_zone"
   } > "$tmp"
   chmod 0600 "$tmp"
   mv -f "$tmp" "$run_info_file"

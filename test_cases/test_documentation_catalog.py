@@ -389,10 +389,20 @@ class DocumentationCatalogTests(unittest.TestCase):
             )
 
         deprecated_replacement = copy.deepcopy(contract)
-        deprecated_replacement["features"][1]["status"] = "deprecated"
+        second = deprecated_replacement["features"][1]
+        third = deprecated_replacement["features"][2]
+        second_notice = "此替代功能也已弃用，请改用第三项功能。"
+        second["status"] = "deprecated"
+        second["replacement"] = third["id"]
+        second["deprecation_notice"] = second_notice
+        second_pattern = rf'(<[^>]+\bid="{re.escape(second["id"])}"[^>]*>)'
+        deprecated_rendered, count = re.subn(
+            second_pattern, rf"\1<span>{second_notice}</span>", rendered, count=1,
+        )
+        self.assertEqual(1, count)
         with self.assertRaises(AssertionError):
             self._assert_user_manual_registry(
-                deprecated_replacement, rendered, use_subtests=False,
+                deprecated_replacement, deprecated_rendered, use_subtests=False,
             )
 
         with self.assertRaises(AssertionError):
