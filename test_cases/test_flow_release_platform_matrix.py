@@ -727,9 +727,10 @@ switches:
                     elif case == "hash-drift":
                         target.write_bytes(target.read_bytes() + b"\n")
                     elif case == "same-size-hash-drift":
-                        mutated = bytearray(target.read_bytes())
-                        self.assertTrue(mutated)
-                        mutated[0] ^= 1
+                        original = target.read_bytes()
+                        mutated = original.replace(b"192.0.2.53", b"192.0.2.54", 1)
+                        self.assertNotEqual(original, mutated)
+                        self.assertEqual(len(original), len(mutated))
                         target.write_bytes(mutated)
                     elif case == "extra-family":
                         manifest["effective_defaults"]["eth"] = dict(

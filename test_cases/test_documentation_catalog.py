@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import importlib.util
+import copy
+import contextlib
 import fnmatch
 import html
 from html.parser import HTMLParser
@@ -278,13 +280,12 @@ class DocumentationCatalogTests(unittest.TestCase):
                 rendered,
             )
 
-    def test_user_manual_registry_is_strict_complete_and_bidirectional(self):
-        contract = _strict_json(USER_MANUAL_CONTRACT)
+    def _assert_user_manual_registry(self, contract, manual, *, use_subtests=True):
         self.assertEqual(1, contract["schema_version"])
         self.assertEqual("user-manual.html", contract["manual"])
 
         parser = _ManualParser()
-        parser.feed((ROOT / contract["manual"]).read_text(encoding="utf-8"))
+        parser.feed(manual)
         nodes = list(parser.root.walk())
         ids = [node.attrs["id"] for node in nodes if node.attrs.get("id")]
         self.assertEqual(len(ids), len(set(ids)), "manual ids must be globally unique")
@@ -308,7 +309,11 @@ class DocumentationCatalogTests(unittest.TestCase):
         }
         self.assertEqual(set(chapter_rows), set(actual_chapters))
         for chapter_id, row in chapter_rows.items():
-            with self.subTest(chapter=chapter_id):
+            context = (
+                self.subTest(chapter=chapter_id)
+                if use_subtests else contextlib.nullcontext()
+            )
+            with context:
                 self.assertEqual("active", row["status"])
                 self.assertIn(row["introduced_in"], article_rows)
                 node = actual_chapters[chapter_id]
@@ -328,7 +333,11 @@ class DocumentationCatalogTests(unittest.TestCase):
         }
         self.assertEqual(set(feature_rows), set(actual_features))
         for feature_id, row in feature_rows.items():
-            with self.subTest(feature=feature_id):
+            context = (
+                self.subTest(feature=feature_id)
+                if use_subtests else contextlib.nullcontext()
+            )
+            with context:
                 node = actual_features[feature_id]
                 article = node.ancestor("article", ("data-manual-version", None))
                 self.assertIsNotNone(article)
@@ -352,6 +361,42 @@ class DocumentationCatalogTests(unittest.TestCase):
                     self.assertIn(replacement, feature_rows)
                     self.assertEqual("active", feature_rows[replacement]["status"])
                     self.assertIn(row["deprecation_notice"], node.text())
+
+    def test_user_manual_registry_is_strict_complete_and_bidirectional(self):
+        contract = _strict_json(USER_MANUAL_CONTRACT)
+        manual = (ROOT / contract["manual"]).read_text(encoding="utf-8")
+        self._assert_user_manual_registry(contract, manual)
+
+    def test_user_manual_deprecation_contract_accepts_and_rejects_synthetic_states(self):
+        contract = _strict_json(USER_MANUAL_CONTRACT)
+        manual = (ROOT / contract["manual"]).read_text(encoding="utf-8")
+        deprecated = contract["features"][0]
+        replacement = contract["features"][1]
+        notice = "此功能已弃用，请改用替代功能。"
+        deprecated["status"] = "deprecated"
+        deprecated["replacement"] = replacement["id"]
+        deprecated["deprecation_notice"] = notice
+        pattern = rf'(<[^>]+\bid="{re.escape(deprecated["id"])}"[^>]*>)'
+        rendered, count = re.subn(pattern, rf"\1<span>{notice}</span>", manual, count=1)
+        self.assertEqual(1, count)
+        self._assert_user_manual_registry(contract, rendered, use_subtests=False)
+
+        missing_replacement = copy.deepcopy(contract)
+        missing_replacement["features"][0].pop("replacement")
+        with self.assertRaises(AssertionError):
+            self._assert_user_manual_registry(
+                missing_replacement, rendered, use_subtests=False,
+            )
+
+        deprecated_replacement = copy.deepcopy(contract)
+        deprecated_replacement["features"][1]["status"] = "deprecated"
+        with self.assertRaises(AssertionError):
+            self._assert_user_manual_registry(
+                deprecated_replacement, rendered, use_subtests=False,
+            )
+
+        with self.assertRaises(AssertionError):
+            self._assert_user_manual_registry(contract, manual, use_subtests=False)
 
     def test_user_manual_profiles_compose_articles_and_complete_navigation(self):
         contract = _strict_json(USER_MANUAL_CONTRACT)
@@ -437,6 +482,13 @@ class DocumentationCatalogTests(unittest.TestCase):
     def test_user_manual_cites_no_git_ignored_document_as_authority(self):
         from test_cases import test_public_publication_contract as publication
 
+        known_ignored = publication._canonical_git(
+            ROOT, "check-ignore", "--no-index", "--quiet", "--", "USER_MANUAL.md",
+        )
+        self.assertEqual(
+            0, known_ignored.returncode,
+            "git check-ignore must be available and recognize a known ignored path",
+        )
         parser = _ManualParser()
         manual = (ROOT / "user-manual.html").read_text(encoding="utf-8")
         parser.feed(manual)
@@ -451,10 +503,16 @@ class DocumentationCatalogTests(unittest.TestCase):
                 candidate = code.text().strip()
                 if not candidate or any(mark in candidate for mark in "<>*[] "):
                     continue
-                if not candidate.lower().endswith((".md", "readme")):
+                if not candidate.lower().endswith(
+                    (".md", ".markdown", ".txt", ".rst", "readme")
+                ):
                     continue
                 ignored = publication._canonical_git(
                     ROOT, "check-ignore", "--no-index", "--quiet", "--", candidate,
+                )
+                self.assertIn(
+                    ignored.returncode, {0, 1},
+                    f"git check-ignore failed for {candidate!r}",
                 )
                 self.assertNotEqual(
                     0, ignored.returncode,
