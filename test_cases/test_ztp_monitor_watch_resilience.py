@@ -179,6 +179,13 @@ class MonitorWatchResilienceDirectTests(unittest.TestCase):
             base = Path(directory)
             project = base / "site-a"
             project.mkdir()
+            (project / "02-devices_config.csv").write_text(
+                "hostname,type,environment,mac\n"
+                "switch-a,eth,prod,02:00:00:00:00:10\n",
+                encoding="utf-8",
+            )
+            runtime_air = base / "p2p-air.json"
+            runtime_air.write_text("{}\n", encoding="utf-8")
             output_root = base / "status"
             args = self._args(output_root)
             args.no_ssh = True
@@ -214,6 +221,7 @@ class MonitorWatchResilienceDirectTests(unittest.TestCase):
             with mock.patch.multiple(
                 MONITOR,
                 parser=mock.Mock(return_value=parser_driver),
+                ACTIVE_AIR_JSON=runtime_air,
                 resolve_project=mock.Mock(return_value=project),
                 validate_monitor_mode=mock.Mock(),
                 load_completion_handoff_signatures=mock.Mock(return_value={}),
