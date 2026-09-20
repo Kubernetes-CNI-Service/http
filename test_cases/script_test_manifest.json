@@ -122,6 +122,8 @@
         "test_cases.test_monitor_stack_review",
         "test_cases.test_ztp_monitor_watch_resilience",
         "test_cases.test_ztp_monitor_watch_runtime_workflow",
+        "test_cases.test_ztp_collection_attribution",
+        "test_cases.test_ztp_collection_attribution_workflow",
         "test_cases.test_ztp_group_handoff",
         "test_cases.test_ztp_group_handoff_display"
       ]
