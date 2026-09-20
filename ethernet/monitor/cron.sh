@@ -881,7 +881,7 @@ parse_csv_hosts() {
         append_unbound_prod_cumulus_hosts "$csv"
     fi
 
-    local selected_count=0
+    local selected_count=0 selected_types=""
     case "$mode" in
         eth)
             selected_types=${TYPE_FILTER:-ethernet}
@@ -890,24 +890,28 @@ parse_csv_hosts() {
             log "[CSV] ${csv_name} selected type=${selected_types}; loaded ${selected_count} info host(s), $(wc -l < "$SPX" | tr -d ' ') SPX link host(s)"
             ;;
         ib)
+            selected_types=${TYPE_FILTER:-ib}
             selected_count=$(wc -l < "$IB" | tr -d ' ')
-            log "[CSV] ${csv_name} selected type=${TYPE_FILTER:-ib}; loaded ${selected_count} IB host(s)"
+            log "[CSV] ${csv_name} selected type=${selected_types}; loaded ${selected_count} IB host(s)"
             ;;
         nvl)
+            selected_types=${TYPE_FILTER:-nvl}
             selected_count=$(wc -l < "$NV" | tr -d ' ')
-            log "[CSV] ${csv_name} selected type=${TYPE_FILTER:-nvl}; loaded ${selected_count} NVL host(s)"
+            log "[CSV] ${csv_name} selected type=${selected_types}; loaded ${selected_count} NVL host(s)"
             ;;
     esac
 
-    # An explicit category request that selects no targets is almost always a
-    # stale code/link or missing derived inventory.  Treat it as an error so a
-    # manual run and the ZTP monitor handoff cannot report a false success.
-    if [[ -n "$TYPE_FILTER" && "$selected_count" -eq 0 ]]; then
+    # An empty lane is almost always a stale code/link or missing derived
+    # inventory.  Treat it as an error so a manual run and the ZTP monitor
+    # handoff cannot report a false success.  The one deliberate exception is
+    # a dynamic AIR inventory whose known devices currently have no resolved
+    # address and therefore cannot yet enter the host file.
+    if [[ "$selected_count" -eq 0 ]]; then
         if [[ "$TYPE_FILTER" == "air" && "$DYNAMIC_AIR_DISCOVERED" -gt 0 ]]; then
             log "[AIR-DYNAMIC] WARN: no AIR target currently has a resolved address; SSH collection skipped without failing the round"
             return 0
         fi
-        log "[CSV] ERROR: --type ${TYPE_FILTER} selected 0 devices from ${csv}; verify the active project inventory and rerun setup/load"
+        log "[CSV] ERROR: lane type ${selected_types} selected 0 devices from ${csv}; verify the active project inventory and rerun setup/load"
         return 1
     fi
 }

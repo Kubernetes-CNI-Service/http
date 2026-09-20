@@ -760,6 +760,28 @@ class CollectionCycleHandoffWorkflowTests(unittest.TestCase):
             for item in result["outcomes"]
         ))
 
+    def test_real_ib_and_nvlink_entrypoints_reject_an_empty_selected_lane(self):
+        for area, inventory_name, slot in (
+            ("infiniband", "ib.csv", "infiniband/prod"),
+            ("nvlink", "nvsw.csv", "nvlink/prod"),
+        ):
+            with self.subTest(slot=slot), tempfile.TemporaryDirectory() as directory:
+                root = self.make_layout(directory)
+                (root / area / "monitor" / inventory_name).write_text(
+                    "hostname,type,eth0_ip\n", encoding="utf-8",
+                )
+                completed, payload, _traces = self.run_workflow(root, "prod")
+
+                self.assertEqual(0, completed.returncode, completed.stderr)
+                self.assertIsNotNone(payload, completed.stdout)
+                assert payload is not None
+                outcomes = {
+                    item["source_slot"]: item
+                    for item in payload["result"]["outcomes"]
+                }
+                self.assertNotEqual("accepted", outcomes[slot]["outcome"])
+                self.assertIsNone(outcomes[slot]["child_result"])
+
     def test_all_scope_order_and_every_slot_echo_mutation_fail_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.make_layout(directory)

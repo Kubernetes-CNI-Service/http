@@ -1454,6 +1454,8 @@ def parse_task_result(output: str, expected_task: str) -> dict:
         raise ValueError("failed_count does not match failed_devices")
     if payload["succeeded"] + payload["failed_count"] != payload["planned"]:
         raise ValueError("task result counts do not match planned")
+    if expected_task == "yaml_backup" and payload["planned"] == 0:
+        raise ValueError("yaml backup task reported zero planned devices")
     state = payload["state"]
     if state == "success" and payload["failed_count"] != 0:
         raise ValueError("success task result contains failures")
@@ -2589,6 +2591,14 @@ def collect(scope: str, timeout: int, lock_wait: int) -> bool:
             succeeded = sum(task_result["succeeded"] for task_result in task_results)
             failed_count = len(failed_devices)
             finished_at = timestamp()
+            if not errors and planned == 0:
+                write_status(
+                    "failed", scope=scope, started_at=started_at,
+                    finished_at=finished_at, reason="no devices selected",
+                    planned=0, succeeded=0, failed_count=0,
+                    failed_devices=[], summary="no devices selected",
+                )
+                return False
             if not errors and planned > 0 and succeeded == 0:
                 write_status(
                     "failed", scope=scope, started_at=started_at,

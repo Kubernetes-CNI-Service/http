@@ -448,6 +448,25 @@ print(TARGET + " ssh-ed25519 " + blob)
             result = self.worker.run_yaml_backup(password, scope, 30, 1)
         return result, statuses, stdout.getvalue(), stderr.getvalue()
 
+    def test_real_zero_device_backup_is_rejected_by_the_worker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            collector, _project_output = self._stage_real_collector(root)
+            inventory = (collector.parent / "02-devices_config.csv").resolve()
+            inventory.write_text(
+                "hostname,type,template,eth0_ip,netmask,eth0_gw,eth0_mac,"
+                "eth1_ip,netmask,eth1_gw,eth1_mac\n",
+                encoding="utf-8",
+            )
+
+            result, statuses, stdout, stderr = self._run_worker(
+                collector, SECRET, "prod",
+            )
+
+        self.assertFalse(result, (stdout, stderr))
+        self.assertEqual("failed", statuses[-1][0])
+        self.assertIn("ValueError", statuses[-1][1]["reason"])
+
     def test_real_worker_collector_fake_ssh_fifo_tofu_and_changed_key(self):
         secret_hash = hashlib.sha256(SECRET.encode("utf-8")).hexdigest()
         sudo_hash = hashlib.sha256((SECRET + "\n").encode("utf-8")).hexdigest()

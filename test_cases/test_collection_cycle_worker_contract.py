@@ -108,6 +108,18 @@ def v2(slot: str) -> dict:
 
 
 class CollectionCycleWorkerContractTests(unittest.TestCase):
+    def test_backup_task_parser_rejects_zero_planned_without_rejecting_empty_collection_slot(self):
+        zero = legacy()
+        zero["task"] = "yaml_backup"
+        with self.assertRaisesRegex(ValueError, "zero planned devices"):
+            WORKER.parse_task_result(marker(zero), "yaml_backup")
+
+        zero["task"] = "switch_collection"
+        self.assertEqual(
+            zero,
+            WORKER.parse_task_result(marker(zero), "switch_collection"),
+        )
+
     def test_shared_legacy_parser_consumes_only_bounds_and_preserves_backup_operations(self):
         source = (MONITOR / "switch-collection-worker.py").read_text(encoding="utf-8")
         self.assertNotIn("MAX_TASK_RESULT_DEVICES = 10000", source)

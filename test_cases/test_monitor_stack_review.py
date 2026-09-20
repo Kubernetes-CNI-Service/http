@@ -4985,6 +4985,65 @@ print('{{"factory_records_active":true,"valid":true}}')
         self.assertEqual(1, statuses[-1][1]["failed_count"])
         self.assertEqual("leaf02", statuses[-1][1]["failed_devices"][0]["hostname"])
 
+    def test_worker_collection_rejects_zero_aggregate_before_html_or_cooldown(self):
+        zero = {
+            "schema_version": 1,
+            "task": "switch_collection",
+            "state": "success",
+            "planned": 0,
+            "succeeded": 0,
+            "failed_count": 0,
+            "failed_devices": [],
+        }
+        statuses = []
+
+        class Gate:
+            cooldown_seconds = 600
+            decision = SimpleNamespace(allowed=True, reason="allowed")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def mark_success(self):
+                raise AssertionError("zero-target collection armed the cooldown")
+
+        cycle_result = {
+            "identity": {},
+            "outcomes": [
+                {
+                    "source_slot": slot,
+                    "outcome": "accepted",
+                    "child_result": dict(zero),
+                    "evidence": {},
+                }
+                for slot in ("ethernet/prod", "infiniband/prod", "nvlink/prod")
+            ],
+            "summary": None,
+        }
+        with mock.patch.object(
+            self.switch_worker, "active_project_identity", return_value="project-a",
+        ), mock.patch.object(
+            self.switch_worker, "CollectionGate", return_value=Gate(),
+        ), mock.patch.object(
+            self.switch_worker, "run_collection_cycle_coordinator",
+            return_value=cycle_result,
+        ), mock.patch.object(
+            self.switch_worker.subprocess, "run",
+            return_value=subprocess.CompletedProcess([], 0, "", ""),
+        ) as html, mock.patch.object(
+            self.switch_worker, "write_status",
+            side_effect=lambda state, **extra: statuses.append((state, extra)),
+        ):
+            self.assertFalse(self.switch_worker.collect("prod", 60, 7))
+
+        html.assert_not_called()
+        self.assertEqual("failed", statuses[-1][0])
+        self.assertEqual("no devices selected", statuses[-1][1]["reason"])
+        self.assertEqual(0, statuses[-1][1]["planned"])
+
     def test_worker_collection_keeps_a_successful_family_when_another_fails(self):
         failed = {
             "schema_version": 1,
@@ -5498,6 +5557,56 @@ class PublicationAndCollectorTests(unittest.TestCase):
         cls.gate = load_module(
             "review_collection_gate", ROOT / "monitor/switch_collection_gate.py"
         )
+
+    def test_shared_collector_rejects_every_empty_lane_and_keeps_dynamic_air_exemption(self):
+        source = (ROOT / "ethernet/monitor/cron.sh").read_text(encoding="utf-8")
+        start = source.index("parse_csv_hosts() {")
+        end = source.index("\n# ── Phase 1:", start)
+        parse_csv_hosts = source[start:end]
+
+        def run_case(inventory_name: str, type_filter: str, dynamic_air: bool):
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / inventory_name).write_text(
+                    "hostname,type,eth0_ip\n", encoding="utf-8",
+                )
+                paths = {
+                    name: root / name.lower()
+                    for name in ("ETH", "SPX", "IB", "NV")
+                }
+                for path in paths.values():
+                    path.write_text("", encoding="utf-8")
+                script = "\n".join((
+                    "set -u",
+                    f"BASE={shlex.quote(str(root))}",
+                    f"TYPE_FILTER={shlex.quote(type_filter)}",
+                    'COLLECTION_ENV="prod"',
+                    "DYNAMIC_AIR_DISCOVERED=0",
+                    *(f"{name}={shlex.quote(str(path))}" for name, path in paths.items()),
+                    'log() { printf "%s\\n" "$*"; }',
+                    (
+                        "append_dynamic_air_hosts() { "
+                        + ("DYNAMIC_AIR_DISCOVERED=1;" if dynamic_air else ":;")
+                        + " }"
+                    ),
+                    "append_unbound_prod_cumulus_hosts() { :; }",
+                    parse_csv_hosts,
+                    "parse_csv_hosts",
+                ))
+                return subprocess.run(
+                    ["bash", "-c", script], text=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+                )
+
+        for inventory_name in ("eth.csv", "ib.csv", "nvsw.csv"):
+            with self.subTest(inventory=inventory_name):
+                completed = run_case(inventory_name, "", False)
+                self.assertEqual(1, completed.returncode, completed.stdout)
+                self.assertIn("selected 0 devices", completed.stdout)
+
+        air = run_case("eth.csv", "air", True)
+        self.assertEqual(0, air.returncode, air.stderr)
+        self.assertIn("no AIR target currently has a resolved address", air.stdout)
 
     def test_shared_collector_keeps_reachable_devices_and_emits_one_summary(self):
         source = (ROOT / "ethernet/monitor/cron.sh").read_text(encoding="utf-8")
