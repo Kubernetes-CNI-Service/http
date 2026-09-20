@@ -456,7 +456,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
         <p>本目录由 <code>tools/update-user-manual.py</code> 从 Git tracked 与非忽略文件生成；每个受维护文件必须有独立说明。大量项目数据、镜像、缓存与运行输出按路径模式说明，不把二进制内容嵌入网页。</p>
         <!-- BEGIN GENERATED USER MANUAL FILE CATALOG -->
         <div class="catalog-summary">
-          <span><strong>361</strong> 个受维护文件</span>
+          <span><strong>363</strong> 个受维护文件</span>
           <span><strong>24</strong> 个根级分组</span>
           <span>清单范围：Git tracked + untracked/nonignored</span>
         </div>
@@ -580,7 +580,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </tbody></table></div>
         </details>
         <details id="v2-file-group-infra" data-nav-title="infra/ 文件" class="catalog-group">
-          <summary><code>infra/</code> — 24 个文件</summary>
+          <summary><code>infra/</code> — 25 个文件</summary>
           <div><table class="file-catalog"><thead><tr><th>文件</th><th>说明</th></tr></thead><tbody>
             <tr data-file-path="infra/apache-publication-boundary/README.md"><td><code>infra/apache-publication-boundary/README.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：Apache 静态发布边界与信任模型。 <strong>维护/生成责任：</strong>文档维护者随行为变更同步更新；生成索引不得手工改写生成块。</td></tr>
             <tr data-file-path="infra/check_infra.py"><td><code>infra/check_infra.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Collect infra execution logs and health status from CSV server devices。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
@@ -604,6 +604,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="infra/docker/rsyslog-dhcp.conf"><td><code>infra/docker/rsyslog-dhcp.conf</code></td><td><strong>类别：</strong>配置/模板；<strong>作用：</strong>Native 基础设施与 Docker/Supervisor 运行时使用的声明式配置或模板；由所属模块校验后消费，不能脱离对应事务随意覆盖。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infra/docker/runtime-contract.json"><td><code>infra/docker/runtime-contract.json</code></td><td><strong>类别：</strong>数据/合同；<strong>作用：</strong>Docker 容器运行身份、路径、服务和安全设置的机器可读合同。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infra/docker/supervisord.conf"><td><code>infra/docker/supervisord.conf</code></td><td><strong>类别：</strong>配置/模板；<strong>作用：</strong>容器内 Supervisor 程序、依赖顺序、日志与自动重启配置。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
+            <tr data-file-path="infra/infra-neutral.conf"><td><code>infra/infra-neutral.conf</code></td><td><strong>类别：</strong>配置/模板；<strong>作用：</strong>Native 基础设施与 Docker/Supervisor 运行时使用的声明式配置或模板；由所属模块校验后消费，不能脱离对应事务随意覆盖。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infra/infra-setup.sh"><td><code>infra/infra-setup.sh</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>属于“Native 基础设施与 Docker/Supervisor 运行时”的 infra-setup.sh；具体边界由当前文件、已跟踪的上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infra/infra-teardown.sh"><td><code>infra/infra-teardown.sh</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>属于“Native 基础设施与 Docker/Supervisor 运行时”的 infra-teardown.sh；具体边界由当前文件、已跟踪的上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
           </tbody></table></div>
@@ -655,7 +656,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </tbody></table></div>
         </details>
         <details id="v2-file-group-test-cases" data-nav-title="test_cases/ 文件" class="catalog-group">
-          <summary><code>test_cases/</code> — 113 个文件</summary>
+          <summary><code>test_cases/</code> — 114 个文件</summary>
           <div><table class="file-catalog"><thead><tr><th>文件</th><th>说明</th></tr></thead><tbody>
             <tr data-file-path="test_cases/CASE_TEMPLATE.md"><td><code>test_cases/CASE_TEMPLATE.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>新增真机/破坏性验证案例时必须填写的证据模板。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/CHANGE_AWARE_TESTING.md"><td><code>test_cases/CHANGE_AWARE_TESTING.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：脚本变更影响测试。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -717,6 +718,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="test_cases/test_image_context_safety.py"><td><code>test_cases/test_image_context_safety.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>H1-H4: independent synthetic image membership and live/image separation。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_import_from_download_target.py"><td><code>test_cases/test_import_from_download_target.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Archive project selection and local import-target consistency contracts。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_infra_check_and_manual_reset.py"><td><code>test_cases/test_infra_check_and_manual_reset.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Functional cases for infra health collection and the reset wrapper。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_infra_neutral_defaults.py"><td><code>test_cases/test_infra_neutral_defaults.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct contracts for the unified infra DNS/NTP/timezone fallback。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_load_release_transaction.py"><td><code>test_cases/test_load_release_transaction.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Unified release validation, DHCP installation, and rollback transactions。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_manual_applied_config.py"><td><code>test_cases/test_manual_applied_config.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Runtime NVUE normalization and manual ZTP preview/confirm comparisons。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_mlag_evpn_generation.py"><td><code>test_cases/test_mlag_evpn_generation.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>MLAG versus EVPN multihoming generation and publication contracts。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -993,7 +995,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
         <p>以下参考覆盖当前工作树中的每个 Python、Shell 与 CGI 文件，包括操作入口、内部库、worker、设备端脚本和开发测试。先看“是否直接运行”，再复制示例；内部组件不得脱离所属事务单独执行。</p>
         <!-- BEGIN GENERATED USER MANUAL SCRIPT REFERENCE -->
         <div class="catalog-summary">
-          <span><strong>231</strong> 个脚本型文件</span>
+          <span><strong>232</strong> 个脚本型文件</span>
           <span><strong>9</strong> 个功能分组</span>
           <span>每项均含运行、输入输出、示例与恢复合同</span>
         </div>
@@ -1688,7 +1690,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>readlink nvlink/monitor/sw-link.sh  # 预期解析到 ../../ethernet/monitor/sw-link.sh</code></pre></div>
         </details>
-        <h4 id="v2-script-group-test-cases" data-nav-title="test_cases/ 脚本">test_cases/ — 106 个脚本</h4>
+        <h4 id="v2-script-group-test-cases" data-nav-title="test_cases/ 脚本">test_cases/ — 107 个脚本</h4>
         <details data-script-reference="test_cases/__init__.py" class="script-reference">
           <summary><code>test_cases/__init__.py</code> — Canonical executable regression and integration test case package。</summary>
           <div class="script-body"><dl>
@@ -2660,6 +2662,24 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </dl>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_infra_check_and_manual_reset</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_infra_neutral_defaults.py" class="script-reference">
+          <summary><code>test_cases/test_infra_neutral_defaults.py</code> — Direct contracts for the unified infra DNS/NTP/timezone fallback。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Direct contracts for the unified infra DNS/NTP/timezone fallback。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_infra_neutral_defaults</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_infra_neutral_defaults</code></pre></div>
         </details>
         <details data-script-reference="test_cases/test_load_release_transaction.py" class="script-reference">
           <summary><code>test_cases/test_load_release_transaction.py</code> — Unified release validation, DHCP installation, and rollback transactions。</summary>
