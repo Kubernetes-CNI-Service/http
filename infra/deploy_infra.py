@@ -92,6 +92,8 @@ def _clean(value: object) -> str:
 def _required_list(value: object, label: str) -> list[str]:
     if not isinstance(value, list):
         raise DeployError(f"{label} 必须是非空列表")
+    if any(not isinstance(item, str) for item in value):
+        raise DeployError(f"{label} 的单个值必须是字符串")
     result = [_clean(item) for item in value if _clean(item)]
     if not result:
         raise DeployError(f"{label} 不能为空")
@@ -164,7 +166,10 @@ def load_common(
         ntp = neutral_ntp
     if "date-time" in system:
         try:
-            timezone = _clean(system["date-time"]["timezone"])
+            timezone_value = system["date-time"]["timezone"]
+            if not isinstance(timezone_value, str):
+                raise TypeError("timezone")
+            timezone = _clean(timezone_value)
         except (KeyError, TypeError) as exc:
             raise DeployError("global 的 date-time 键存在但缺少有效 timezone") from exc
     else:

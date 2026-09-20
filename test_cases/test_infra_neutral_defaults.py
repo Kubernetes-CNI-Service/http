@@ -13,6 +13,8 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
@@ -141,6 +143,37 @@ class InfraNeutralDefaultsTests(unittest.TestCase):
             self.assertIn("dns_servers=(8.8.8.8)", rendered)
             self.assertIn("ntp_servers=(ntp.ubuntu.com)", rendered)
             self.assertIn("time_zone=Etc/UTC", rendered)
+
+    def test_present_invalid_global_keys_never_fall_back_to_neutral(self):
+        invalid_system_values = (
+            {"dns": {}},
+            {"dns": {"server": []}},
+            {"dns": {"server": "192.0.2.53"}},
+            {"dns": {"server": [["192.0.2.53"]]}},
+            {"dns": {"server": [53]}},
+            {"ntp": {}},
+            {"ntp": {"server": []}},
+            {"ntp": {"server": "ntp.site.example"}},
+            {"ntp": {"server": [["ntp.site.example"]]}},
+            {"ntp": {"server": [1234]}},
+            {"date-time": {}},
+            {"date-time": {"timezone": ""}},
+            {"date-time": {"timezone": ["Etc/UTC"]}},
+            {"date-time": {"timezone": 8}},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            global_file = Path(directory) / "01-global.yaml"
+            for system in invalid_system_values:
+                with self.subTest(system=system):
+                    global_file.write_text(
+                        yaml.safe_dump(
+                            {"common": {"switch": {"system": system}}},
+                            sort_keys=False,
+                        ),
+                        encoding="utf-8",
+                    )
+                    with self.assertRaises(DEPLOY.DeployError):
+                        DEPLOY.load_common(global_file)
 
 
 if __name__ == "__main__":
