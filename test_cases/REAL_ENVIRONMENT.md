@@ -1188,3 +1188,20 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   receipt source_kind、配置字段存在性和登录成功/拒绝结果，不保存值或 secret/hash。恢复专属配置与原始
   故障注入，撤销或再次轮换测试凭据，验证两台设备管理访问和 startup 配置。错误 family 或失败 patch
   可能锁死设备，因此无审批、console/OOB、回滚快照和凭据撤销步骤时禁止执行，更不得在生产设备首测。
+
+## TC-REAL-DHCP-BANNER-FILTER-001 — rsyslog 语法、横幅抑制与运行证据保留
+
+- Status: OPEN / NOT RUN。自动化用独立语料证明七类已测 ISC 启动横幅被匹配、未知横幅式变体会触发
+  stale-filter 检测、`Listening on`/`Sending on`/DHCP/ZTP 事件不匹配，且样本窗口残留横幅字节不超过
+  5%；本机没有用目标镜像中的 rsyslog/dhcpd 真进程解析或重载该配置，不得把静态 GREEN 当成现场 PASS。
+- 前置条件：只在隔离 Ubuntu Docker 管理 VM 和测试项目执行，绑定 image/source manifest、容器 image ID、
+  `rsyslog-dhcp.conf`、dhcpd 配置及日志目录的 SHA-256；保留可恢复快照，不读取或保存租约中的客户地址、
+  hostname、MAC 或凭据正文。
+- 步骤与预期：先用目标镜像的 `rsyslogd -N1` 验证语法；启动受管服务并重启 dhcpd，记录专用日志增量，
+  七类横幅均不得落盘，而 listener、发送路径和一轮合成 DORA/ZTP 诊断事件必须逐类出现。再注入一条
+  未知但横幅式的安全测试消息，stale-filter 诊断必须命名它而不能扩大过滤；按同一明确窗口计算横幅
+  字节占比，结果必须不超过 5%。同时核对 10 秒 guardian 使用 serving/liveness 模式、30 秒 Docker
+  healthcheck 仍执行 `dhcpd -t` 与 `apache2ctl configtest`，两者故障隔离语义不变。
+- 证据、清理与风险：只保存脱敏后的 rsyslog 语法退出码、消息类别/计数、窗口总字节与横幅字节、探针
+  argv/退出码和配置摘要，不保存原始租约或设备身份。恢复日志与服务快照并确认无测试消息残留。过滤过宽
+  会删除故障证据，过滤失效会重新造成噪声与轮转压力；任一类别无法证明时保持 OPEN/BLOCKED。

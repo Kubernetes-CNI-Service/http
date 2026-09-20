@@ -943,23 +943,21 @@ def runtime_unknown_devices(
             "template": "default",
             "environment": environment,
             "ip": ip,
-            # True unknown platforms are display/audit observations only.  Do
-            # not retain an SSH transport candidate even though the outer
-            # ssh_collect_enabled gate also rejects them; this keeps every
-            # direct consumer fail-closed if that gate is ever bypassed.
-            "ssh_ips": [ip] if managed_ztp and ip else [],
-            "ssh_interfaces": {ip: "DHCP动态"} if managed_ztp and ip else {},
+            # A MAC outside the project inventory is diagnostic evidence only,
+            # even when its DHCP fingerprint identifies a managed platform.
+            # Keep the observed address/MAC for display and correlation, but
+            # never turn it into an SSH candidate or collection binding.
+            "ssh_ips": [],
+            "ssh_interfaces": {},
             "mac": str(item.get("mac") or "").lower(),
             "mac_plain": mac_plain,
             # Before the device is bound, DHCP chaddr is authoritative but an
             # NVOS request may originate on eth0 or eth1.  The remote probe
             # resolves the actual interface by matching both MACs.
             "identity_macs": {"dhcp": mac_plain},
-            "candidate_identity": (
-                {ip: ("dhcp", mac_plain)} if managed_ztp and ip else {}
-            ),
+            "candidate_identity": {},
             "ssh_user": "admin" if platform == "nvos" else "cumulus",
-            "ssh_collect_enabled": platform in {"cumulus", "nvos"} and bool(ip),
+            "ssh_collect_enabled": False,
             "managed_ztp": managed_ztp,
             "dynamic_dhcp": True,
             "unbound_identity": True,
@@ -1575,34 +1573,149 @@ def devices_for_switch_collection(
     identity_devices: Optional[list[dict[str, Any]]] = None,
     http_identity_claims: Optional[dict[str, dict[str, Any]]] = None,
 ) -> list[dict[str, Any]]:
-    """Collect unique IPs normally and shared IPs only for their MAC owner."""
+    """Annotate admission evidence, then return rows with an admissible IP."""
     selected: list[dict[str, Any]] = []
     identity_by_ip = _devices_by_ip(identity_devices or devices)
-    claimed_devices = {
-        id(device)
-        for device in (
-            _http_claim_device(claim)
-            for claim in (http_identity_claims or {}).values()
-        )
-        if device is not None
-    }
+    http_claims = http_identity_claims or {}
+    claims_by_device: dict[int, list[dict[str, Any]]] = {}
+    for claim in http_claims.values():
+        claim_device = _http_claim_device(claim)
+        if claim_device is not None:
+            claims_by_device.setdefault(id(claim_device), []).append(claim)
+    for claims in claims_by_device.values():
+        claims.sort(key=lambda item: (
+            str(item.get("claimed_at") or ""), str(item.get("ip") or ""),
+        ))
+
+    def row_identity(device: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "hostname": str(device.get("hostname") or ""),
+            "identity_macs": sorted(_device_identity_mac_values(device)),
+        }
+
+    def evidence(
+        *, status: str, source: str, address: str,
+        observed_identity: Any = None, observation_time: Any = None,
+    ) -> dict[str, Any]:
+        return {
+            "status": status,
+            "source": source,
+            "address": address,
+            "observed_identity": observed_identity,
+            "observation_time": observation_time,
+        }
+
     for device in devices:
+        addresses = _device_ips(device)
+        address_verdicts: list[dict[str, Any]] = []
+        selectable = False
+        disabled = device.get("ssh_collect_enabled") is False
+        for address in addresses:
+            claim = http_claims.get(address)
+            claim_device = _http_claim_device(claim)
+            fallback_claim = (
+                claims_by_device.get(id(device), [])[-1]
+                if claims_by_device.get(id(device)) else None
+            )
+            matched_claim = (
+                claim if claim_device is device
+                else fallback_claim if claim is None else None
+            )
+            if matched_claim is not None:
+                http_status = "matched"
+                http_identity = {
+                    "hostname": str(device.get("hostname") or ""),
+                    "claim_address": str(matched_claim.get("ip") or ""),
+                    "holder_mac": str(matched_claim.get("holder_mac") or ""),
+                    "requested_mac": str(
+                        matched_claim.get("requested_mac") or ""
+                    ),
+                }
+                http_time = matched_claim.get("claimed_at")
+            elif claim is None:
+                http_status = "missing"
+                http_identity = None
+                http_time = None
+            else:
+                http_status = "conflict"
+                http_identity = (
+                    row_identity(claim_device) if claim_device is not None else None
+                )
+                http_time = claim.get("claimed_at") if isinstance(claim, dict) else None
+
+            candidates = identity_by_ip.get(address, [])
+            if len(candidates) == 1:
+                uniqueness_status = "matched"
+                unique_identity: Any = row_identity(candidates[0])
+            elif candidates:
+                uniqueness_status = "ambiguous"
+                unique_identity = [row_identity(candidate) for candidate in candidates]
+            else:
+                uniqueness_status = "missing"
+                unique_identity = None
+
+            owner = owners.get(address)
+            if owner is None:
+                owner_status = "missing"
+                owner_identity = None
+            elif _same_device_identity(owner, device):
+                owner_status = "matched"
+                owner_identity = row_identity(owner)
+            else:
+                owner_status = "conflict"
+                owner_identity = row_identity(owner)
+
+            paths = {
+                "http_claim": evidence(
+                    status="not_evaluated" if disabled else http_status,
+                    source="http_claim", address=address,
+                    observed_identity=http_identity,
+                    observation_time=http_time,
+                ),
+                "ip_uniqueness": evidence(
+                    status="not_evaluated" if disabled else uniqueness_status,
+                    source="inventory", address=address,
+                    observed_identity=unique_identity,
+                ),
+                "dhcp_owner": evidence(
+                    status="not_evaluated" if disabled else owner_status,
+                    source="dhcp", address=address,
+                    observed_identity=owner_identity,
+                ),
+            }
+            address_eligible = not disabled and any(
+                value["status"] == "matched" for value in paths.values()
+            )
+            if disabled:
+                missing_evidence = ["inventory_collection_authority"]
+            elif address_eligible:
+                missing_evidence = []
+            else:
+                missing_evidence = [
+                    name for name, path_name in (
+                        ("http_identity_claim", "http_claim"),
+                        ("unique_inventory_address", "ip_uniqueness"),
+                        ("dhcp_mac_owner", "dhcp_owner"),
+                    )
+                    if paths[path_name]["status"] != "matched"
+                ]
+            address_verdicts.append({
+                "address": address,
+                "eligible": address_eligible,
+                "paths": paths,
+                "missing_evidence": missing_evidence,
+            })
+            selectable = selectable or address_eligible
+
+        device["collection_admission"] = {
+            "schema_version": 1,
+            "eligible": selectable,
+            "input_row_identity": row_identity(device),
+            "addresses": address_verdicts,
+            "disabled_reason": "ssh_collect_disabled" if disabled else "",
+        }
         if device.get("ssh_collect_enabled") is False:
             continue
-        # A claim normally authorizes only the canonical eth0 endpoint.  When
-        # eth0_ip is intentionally empty, bind_apache_ztp_identities appends the
-        # current live transit lease as a temporary endpoint.  analyze_switch
-        # still requires both the canonical eth0 MAC and the DHCP holder MAC.
-        selectable = id(device) in claimed_devices and bool(_device_ips(device))
-        for ip in _device_ips(device):
-            candidates = identity_by_ip.get(ip, [])
-            if len(candidates) == 1:
-                selectable = True
-                break
-            owner = owners.get(ip)
-            if owner is not None and _same_device_identity(owner, device):
-                selectable = True
-                break
         if selectable:
             selected.append(device)
     return selected

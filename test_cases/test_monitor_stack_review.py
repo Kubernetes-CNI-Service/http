@@ -1131,7 +1131,7 @@ class UnknownAndTransitTests(unittest.TestCase):
         self.assertEqual("ssh_disabled", result["kind"])
         self.assertEqual([], result["attempts"])
 
-    def test_recognized_pending_nvos_keeps_mac_bound_candidate(self):
+    def test_recognized_pending_nvos_is_diagnostic_only_until_in_inventory(self):
         item = {
             "mac": "02:00:00:00:00:42", "mac_plain": "020000000042",
             "platform": "nvos", "product": "QM9700", "serial": "S42",
@@ -1144,12 +1144,12 @@ class UnknownAndTransitTests(unittest.TestCase):
             device = self.monitor.runtime_unknown_devices(
                 Path("unused.csv"), "", scope="prod", dhcp_leases=None,
             )[0]
-        self.assertEqual(["192.0.2.42"], device["ssh_ips"])
-        self.assertEqual(
-            {"192.0.2.42": ("dhcp", "020000000042")},
-            device["candidate_identity"],
-        )
-        self.assertTrue(device["ssh_collect_enabled"])
+        self.assertEqual("192.0.2.42", device["ip"])
+        self.assertEqual([], device["ssh_ips"])
+        self.assertEqual({}, device["ssh_interfaces"])
+        self.assertEqual({}, device["candidate_identity"])
+        self.assertFalse(device["ssh_collect_enabled"])
+        self.assertEqual([], self.monitor.devices_for_switch_collection([device], {}))
         issue = next(
             value for value in device["issues"]
             if value["code"] == "ZTP_MANAGED_IDENTITY_PENDING"

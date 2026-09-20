@@ -190,10 +190,42 @@ def _check_tcp_endpoints(endpoint_ips: Sequence[str]) -> None:
         connection.close()
 
 
+def _check_dhcp_service(
+    selected, runtime, settings: activate.Settings, *, validate_config: bool,
+) -> None:
+    if validate_config:
+        _run((
+            "/usr/sbin/dhcpd", "-4", "-t", "-cf",
+            os.fspath(settings.dhcp_config),
+        ))
+    expected = runtime.build_dhcpd_argv(
+        selected.listener_names,
+        config=os.fspath(settings.dhcp_config),
+        leases=os.fspath(settings.dhcp_leases),
+    )
+    require_exact_argv(_process_argv(_dhcp_pid()), expected)
+
+
+def _check_apache_service(
+    selected, settings: activate.Settings, expected_apache: str, *,
+    validate_config: bool,
+) -> None:
+    try:
+        actual_apache = settings.apache_listeners.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise HealthError(f"cannot read Apache listener config: {exc}") from exc
+    if actual_apache != expected_apache:
+        raise HealthError("Apache listener config is not the exact current plan")
+    if validate_config:
+        _run(("/usr/sbin/apache2ctl", "configtest"))
+    _check_tcp_endpoints(selected.endpoint_ips)
+
+
 def check_runtime(
     *, require_active: bool = False,
     expected_services: Optional[Sequence[str]] = None,
     allow_rebuild_required: bool = False,
+    serving_only: bool = False,
 ) -> str:
     settings = activate.Settings.from_environment(os.environ)
     activate.validate_python_runtime()
@@ -256,25 +288,14 @@ def check_runtime(
     except HealthError as exc:
         raise HealthError(f"unexpected service state: {exc}") from exc
     if "dhcpd" in services:
-        _run((
-            "/usr/sbin/dhcpd", "-4", "-t", "-cf",
-            os.fspath(settings.dhcp_config),
-        ))
-        expected = _runtime.build_dhcpd_argv(
-            selected.listener_names,
-            config=os.fspath(settings.dhcp_config),
-            leases=os.fspath(settings.dhcp_leases),
+        _check_dhcp_service(
+            selected, _runtime, settings, validate_config=not serving_only,
         )
-        require_exact_argv(_process_argv(_dhcp_pid()), expected)
     if "apache2" in services:
-        try:
-            actual_apache = settings.apache_listeners.read_text(encoding="utf-8")
-        except OSError as exc:
-            raise HealthError(f"cannot read Apache listener config: {exc}") from exc
-        if actual_apache != expected_apache:
-            raise HealthError("Apache listener config is not the exact current plan")
-        _run(("/usr/sbin/apache2ctl", "configtest"))
-        _check_tcp_endpoints(selected.endpoint_ips)
+        _check_apache_service(
+            selected, settings, expected_apache,
+            validate_config=not serving_only,
+        )
     return (
         "healthy activated runtime; listeners="
         + (",".join(selected.listener_names) or "none")
@@ -282,12 +303,14 @@ def check_runtime(
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    require_active = "--require-active" in list(
-        argv if argv is not None else sys.argv[1:]
-    )
+    arguments = list(argv if argv is not None else sys.argv[1:])
+    require_active = "--require-active" in arguments
+    serving_only = "--serving-only" in arguments
     try:
         control_auth = activate.require_control_auth(emit_factory_warning=False)
-        message = check_runtime(require_active=require_active)
+        message = check_runtime(
+            require_active=require_active, serving_only=serving_only,
+        )
         print(json.dumps({
             "healthy": True,
             "message": message,

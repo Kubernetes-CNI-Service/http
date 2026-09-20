@@ -376,9 +376,16 @@ Apache、dhcpd 或 worker 异常退出时 Supervisor 会重新进入 image recei
 authority 验证后再恢复；显式的事务 stop 不会触发重启，且清除 authority 后迟到的 restart
 也无法进入实际服务。rsyslog 的 `dhcpd.log` 与 `syslog` 每 5 分钟检查一次，达到 20 MiB 后保留
 8 代压缩副本；同一策略也覆盖持久 `/var/log/apache2/*.log`，避免持续运行耗尽宿主磁盘。
+写入专用 `dhcpd.log` 前会精确丢弃七类 ISC 启动横幅（版本、版权、权利声明、信息 URL，以及
+config/database/PID 三个固定路径），但保留 `Listening on`、`Sending on` 和真实 DHCP/ZTP 事件。
+回归窗口要求残留横幅字节不超过 5%；未知的横幅式新文案必须被 stale-filter 检测器显式指出，
+不能用更宽的通配规则吞掉运行证据。
 
 常驻 runtime guardian 每 10 秒只读检查运行态。普通检查采用“短锁读取 activation generation →
-锁外限时完整 health → 短锁确认 generation”，不会让卡住的外部命令长期占用 deployment lock。
+锁外限时 serving/liveness health → 短锁确认 generation”，不会让卡住的外部命令长期占用
+deployment lock。该快速探针仍核对 activation、Supervisor 状态、dhcpd argv、Apache listener bytes
+及服务 endpoint，但不重复执行 `dhcpd -t` 或 `apache2ctl configtest`；Docker 的 30 秒 healthcheck
+仍执行这两项完整配置验证。
 连续 3 次失败后，它会在共享锁内执行一次有硬超时的最终复检，仍失败才清除 activation marker、
 写入持久 `quarantine.json`，并按 worker → DHCP → Apache 的顺序停止五个
 业务服务。guardian 不会停止自身，也不会隐式重新启动已隔离的服务；Docker 源码或项目输入

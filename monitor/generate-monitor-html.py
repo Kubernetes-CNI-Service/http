@@ -1118,6 +1118,21 @@ def _render_ztp_device_row(
             for item in attempts if isinstance(item, dict) and item.get("ip")
         }
         connected_ip = str(ip_probe.get("connected_ip") or "")
+        admission = (
+            device.get("collection_admission")
+            if isinstance(device.get("collection_admission"), dict) else {}
+        )
+        admission_by_address = {
+            str(item.get("address") or ""): item
+            for item in admission.get("addresses", [])
+            if isinstance(item, dict) and item.get("address")
+        }
+        admission_labels = {
+            "http_identity_claim": "HTTP 身份声明",
+            "unique_inventory_address": "清单地址唯一性",
+            "dhcp_mac_owner": "DHCP MAC owner",
+            "inventory_collection_authority": "清单采集授权",
+        }
         rendered_ips = []
         for candidate in candidate_values:
             transit_candidate = candidate in ztp_transport_ips
@@ -1139,6 +1154,18 @@ def _render_ztp_device_row(
                     "动态 DHCP 地址探测失败" if dynamic_candidate else
                     "该地址探测失败"
                 )
+            elif (
+                candidate in admission_by_address
+                and admission_by_address[candidate].get("eligible") is False
+            ):
+                css_class = "ztp-ip-neutral ztp-ip-insufficient"
+                missing = [
+                    admission_labels.get(str(value), str(value))
+                    for value in admission_by_address[candidate].get(
+                        "missing_evidence", []
+                    )
+                ]
+                title = "身份取证不足，缺少：" + "、".join(missing)
             elif dynamic_candidate:
                 css_class = "ztp-ip-dynamic"
                 if transit_candidate:
@@ -1163,7 +1190,7 @@ def _render_ztp_device_row(
                 css_class = "ztp-ip-neutral"
                 title = "该地址尚未探测或报告未记录结果"
             rendered_ips.append(
-                f'<span class="ztp-ip {css_class}" title="{title}">'
+                f'<span class="ztp-ip {css_class}" title="{escape(title, quote=True)}">'
                 f'<span class="ztp-ip-interface">{escape(interface_name)}:</span> '
                 f'{escape(candidate)}</span>'
             )

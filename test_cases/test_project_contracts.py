@@ -1524,7 +1524,9 @@ class TemplateContractTests(unittest.TestCase):
             managed = by_platform["cumulus"]
             unknown = by_platform["unknown"]
             self.assertTrue(managed["managed_ztp"])
-            self.assertTrue(managed["ssh_collect_enabled"])
+            self.assertFalse(managed["ssh_collect_enabled"])
+            self.assertEqual([], managed["ssh_ips"])
+            self.assertEqual({}, managed["candidate_identity"])
             self.assertEqual("pending_eth", managed["type"])
             self.assertEqual("192.0.2.21", managed["ip"])
             managed_issue = next(
@@ -3169,6 +3171,58 @@ class TemplateContractTests(unittest.TestCase):
         rows = html.render_ztp_status_rows(status)
         self.assertRegex(rows, r'ztp-ip-neutral[^>]*>.*vlan100:</span> 192\.0\.2\.145</span>')
 
+    def test_insufficient_identity_is_distinct_from_not_yet_probed(self):
+        html = load_module(
+            "monitor_ztp_admission_verdict",
+            ROOT / "monitor/generate-monitor-html.py",
+        )
+        stages = {name: {"status": "pending"} for name in (
+            "dhcp", "bootstrap", "config_http", "ssh", "network", "version",
+            "config_apply", "ssh_keys", "complete",
+        )}
+        status = {
+            "available": True, "generated_at": "2026-09-20T10:00:00+08:00",
+            "devices": [{
+                "hostname": "EXAMPLE-Leaf04", "type": "eth", "ip": "192.0.2.44",
+                "mac": "02:00:00:00:00:44", "stages": stages,
+                "overall": "warning", "progress": {"percent": 0}, "issues": [],
+                "collection_admission": {
+                    "schema_version": 1, "eligible": False,
+                    "input_row_identity": {
+                        "hostname": "EXAMPLE-Leaf04",
+                        "identity_macs": ["020000000044"],
+                    },
+                    "addresses": [{
+                        "address": "192.0.2.44", "eligible": False,
+                        "missing_evidence": [
+                            "http_identity_claim", "unique_inventory_address",
+                            "dhcp_mac_owner",
+                        ],
+                        "paths": {},
+                    }],
+                },
+                "ip_probe": {
+                    "candidates": ["192.0.2.44"],
+                    "interfaces": {"192.0.2.44": "eth0"},
+                    "connected_ip": "", "attempts": [],
+                },
+            }],
+        }
+        insufficient = html.render_ztp_status_rows(status)
+        self.assertIn("ztp-ip-insufficient", insufficient)
+        self.assertIn("HTTP 身份声明", insufficient)
+        self.assertIn("清单地址唯一性", insufficient)
+        self.assertIn("DHCP MAC owner", insufficient)
+        self.assertNotIn("该地址尚未探测或报告未记录结果", insufficient)
+
+        status["devices"][0]["collection_admission"]["eligible"] = True
+        status["devices"][0]["collection_admission"]["addresses"][0].update({
+            "eligible": True, "missing_evidence": [],
+        })
+        pending = html.render_ztp_status_rows(status)
+        self.assertNotIn("ztp-ip-insufficient", pending)
+        self.assertIn("该地址尚未探测或报告未记录结果", pending)
+
     def test_ztp_shared_ip_events_belong_only_to_observed_mac(self):
         monitor = load_module("day0_ztp_monitor_identity", ROOT / "DAY0-Prepare/12-ztp-monitor.py")
         devices = [
@@ -3200,6 +3254,87 @@ class TemplateContractTests(unittest.TestCase):
         self.assertEqual("success", devices[1]["stages"]["dhcp"]["status"])
         self.assertEqual("success", devices[1]["stages"]["bootstrap"]["status"])
         self.assertEqual([devices[1]], monitor.devices_for_switch_collection(devices, owners))
+
+    def test_collection_gate_emits_per_address_admission_verdicts(self):
+        monitor = load_module(
+            "day0_ztp_admission_verdict",
+            ROOT / "DAY0-Prepare/12-ztp-monitor.py",
+        )
+        shared = [
+            {
+                "hostname": "EXAMPLE-Border01", "type": "eth",
+                "ip": "192.0.2.10", "mac_plain": "020000000001",
+            },
+            {
+                "hostname": "AIR-EXAMPLE-Border01", "type": "air",
+                "ip": "192.0.2.10", "mac_plain": "020000000002",
+            },
+        ]
+        self.assertEqual([], monitor.devices_for_switch_collection(shared, {}))
+        for device in shared:
+            verdict = device["collection_admission"]
+            self.assertEqual(1, verdict["schema_version"])
+            self.assertFalse(verdict["eligible"])
+            self.assertEqual(
+                {
+                    "hostname": device["hostname"],
+                    "identity_macs": [device["mac_plain"]],
+                },
+                verdict["input_row_identity"],
+            )
+            address = verdict["addresses"][0]
+            self.assertEqual("192.0.2.10", address["address"])
+            self.assertFalse(address["eligible"])
+            self.assertEqual(
+                [
+                    "http_identity_claim", "unique_inventory_address",
+                    "dhcp_mac_owner",
+                ],
+                address["missing_evidence"],
+            )
+            self.assertEqual("missing", address["paths"]["http_claim"]["status"])
+            self.assertEqual("ambiguous", address["paths"]["ip_uniqueness"]["status"])
+            self.assertEqual("missing", address["paths"]["dhcp_owner"]["status"])
+            for path in address["paths"].values():
+                self.assertEqual("192.0.2.10", path["address"])
+                self.assertIn("source", path)
+                self.assertIn("observed_identity", path)
+                self.assertIn("observation_time", path)
+
+        claim = {
+            "ip": "192.0.2.10", "device": shared[0],
+            "holder_mac": "020000000099", "requested_mac": "020000000001",
+            "claimed_at": "2026-09-20T10:00:00+08:00",
+        }
+        selected = monitor.devices_for_switch_collection(
+            shared, {"192.0.2.10": shared[1]},
+            http_identity_claims={"192.0.2.10": claim},
+        )
+        self.assertEqual(shared, selected)
+        prod_paths = shared[0]["collection_admission"]["addresses"][0]["paths"]
+        air_paths = shared[1]["collection_admission"]["addresses"][0]["paths"]
+        self.assertEqual("matched", prod_paths["http_claim"]["status"])
+        self.assertEqual("conflict", prod_paths["dhcp_owner"]["status"])
+        self.assertEqual("conflict", air_paths["http_claim"]["status"])
+        self.assertEqual("matched", air_paths["dhcp_owner"]["status"])
+        self.assertEqual([], shared[0]["collection_admission"]["addresses"][0]["missing_evidence"])
+        self.assertEqual([], shared[1]["collection_admission"]["addresses"][0]["missing_evidence"])
+
+        transit_claim = dict(
+            claim, ip="198.51.100.201", holder_mac="020000000098",
+        )
+        selected = monitor.devices_for_switch_collection(
+            shared, {},
+            http_identity_claims={"198.51.100.201": transit_claim},
+        )
+        self.assertEqual([shared[0]], selected)
+        canonical_http = shared[0]["collection_admission"]["addresses"][0][
+            "paths"
+        ]["http_claim"]
+        self.assertEqual("matched", canonical_http["status"])
+        self.assertEqual(
+            "198.51.100.201", canonical_http["observed_identity"]["claim_address"],
+        )
 
     def test_air_hostname_keeps_environment_prefix(self):
         monitor = load_module("day0_ztp_monitor_air_hostname", ROOT / "DAY0-Prepare/12-ztp-monitor.py")

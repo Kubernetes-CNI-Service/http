@@ -811,9 +811,6 @@ def main() -> int:
             print("[OK] prepare-only 完成，未连接任何设备")
             return 0
 
-        if not servers:
-            print("[WARN] devices CSV 中没有可部署的 type=server 设备，未执行远程操作")
-            return 0
         if action == "setup" and local_http_enabled and http_ip is not None:
             print(f"[INFO] HTTP Server: {local_http_url(http_ip)}")
         elif action == "setup":

@@ -32,9 +32,9 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 DOCKER_ROOT = ROOT / "infra/docker"
 # Reviewed AM-1..AM-6 plus PK1/M1/M2 contract; prior trust-boundary prose retained.
-PUBLISHED_DOCKER_README_SIZE = 43651
+PUBLISHED_DOCKER_README_SIZE = 44318
 PUBLISHED_DOCKER_README_SHA256 = (
-    "9d09a5d800778cc8d830b7b68ea5c4a0aae7dbf9a470a05450e232b99ef89ddd"
+    "996bb4fa1fa6a492d753f739ae077a9ba01992c8bf361f10a1104f928f0b2930"
 )
 
 
@@ -4249,6 +4249,88 @@ def monitor_authority_recovery_decision(_payload, _diagnostics):
         self.assertIn("compress", policy)
         self.assertIn("copytruncate", policy)
 
+    def test_dhcp_log_filters_only_the_measured_isc_banner_families(self) -> None:
+        source = (DOCKER_ROOT / "rsyslog-dhcp.conf").read_text(
+            encoding="utf-8",
+        )
+        patterns = re.findall(r're_match\(\$msg, "([^"]+)"\)', source)
+        self.assertEqual(7, len(patterns))
+        compiled = [
+            re.compile(pattern.replace(r"\\", "\\")) for pattern in patterns
+        ]
+
+        banner_corpus = (
+            "Internet Systems Consortium DHCP Server 4.4.3-P1",
+            "Copyright 2004-2022 Internet Systems Consortium.",
+            "All rights reserved.",
+            "For info, please visit https://www.isc.org/software/dhcp/",
+            "Config file: /etc/dhcp/dhcpd.conf",
+            "Database file: /var/lib/dhcp/dhcpd.leases",
+            "PID file: /var/run/dhcpd.pid",
+        )
+        retained_evidence = (
+            "Listening on LPF/eth0/02:00:00:00:00:01/192.0.2.0/24",
+            "Sending on   LPF/eth0/02:00:00:00:00:01/192.0.2.0/24",
+            "DHCPDISCOVER from 02:00:00:00:00:02 via eth0",
+            "DHCPOFFER on 192.0.2.10 to 02:00:00:00:00:02 via eth0",
+            "HTTP-ZTP lease owner accepted for 02:00:00:00:00:02",
+        )
+
+        def is_filtered(line: str) -> bool:
+            return any(pattern.fullmatch(line) for pattern in compiled)
+
+        for line in banner_corpus:
+            with self.subTest(banner=line):
+                self.assertTrue(is_filtered(line))
+        for line in retained_evidence:
+            with self.subTest(evidence=line):
+                self.assertFalse(is_filtered(line))
+
+        retained_window = tuple(
+            line for line in banner_corpus + retained_evidence
+            if not is_filtered(line)
+        )
+        retained_banner_bytes = sum(
+            len(line.encode("utf-8")) for line in retained_window
+            if line in banner_corpus
+        )
+        retained_bytes = sum(
+            len(line.encode("utf-8")) for line in retained_window
+        )
+        self.assertLessEqual(retained_banner_bytes / retained_bytes, 0.05)
+        self.assertEqual(retained_evidence, retained_window)
+
+        # This detector is deliberately independent from the configured regexes.
+        # A new banner-shaped line must make the corpus audit fail instead of
+        # silently restoring source noise after an ISC wording change.
+        def unmatched_banner_lines(lines):
+            banner_shape = re.compile(
+                r"^(?:Internet Systems Consortium DHCP Server |Copyright .* "
+                r"Internet Systems Consortium\.|All rights reserved\.|For .*isc\.org/|"
+                r"Config file: |Database file: |PID file: )"
+            )
+            return [
+                line for line in lines
+                if banner_shape.search(line) and not is_filtered(line)
+            ]
+
+        self.assertEqual([], unmatched_banner_lines(banner_corpus))
+        future_variant = "For documentation, visit https://www.isc.org/dhcp/"
+        self.assertEqual(
+            [future_variant], unmatched_banner_lines(banner_corpus + (future_variant,)),
+        )
+        readme = (DOCKER_ROOT / "README.md").read_text(encoding="utf-8")
+        for phrase in (
+            "ISC 启动横幅", "Listening on", "Sending on", "5%",
+            "serving/liveness", "dhcpd -t", "apache2ctl configtest",
+        ):
+            self.assertIn(phrase, readme)
+        real = (ROOT / "test_cases/REAL_ENVIRONMENT.md").read_text(
+            encoding="utf-8",
+        )
+        self.assertIn("TC-REAL-DHCP-BANNER-FILTER-001", real)
+        self.assertIn("Status: OPEN / NOT RUN", real)
+
     def test_docker_readme_states_control_cgi_trust_boundary(self) -> None:
         assert_published_docker_readme(
             self, "## 控制 CGI 的安全边界", "same-origin",
@@ -6833,6 +6915,92 @@ class HealthContractTests(QuietContractTest):
         with self.assertRaisesRegex(health.HealthError, "argv"):
             health.require_exact_argv(expected[:-1], expected)
 
+    def test_serving_probe_keeps_live_service_checks_but_skips_config_validators(self) -> None:
+        health = load_script("healthcheck.py")
+        selected = plan(
+            names=("eno2",), indexes=(7,), endpoints=("192.0.2.10",),
+        )
+        expected_argv = (
+            "/usr/sbin/dhcpd", "-4", "-f", "-cf", "/etc/dhcp/dhcpd.conf",
+            "-lf", "/var/lib/dhcp/dhcpd.leases", "eno2",
+        )
+        runtime = SimpleNamespace(
+            build_dhcpd_argv=mock.Mock(return_value=expected_argv),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            listeners = root / "apache-listeners.conf"
+            listeners.write_text("Listen 192.0.2.10:80\n", encoding="utf-8")
+            settings = SimpleNamespace(
+                dhcp_config=Path("/etc/dhcp/dhcpd.conf"),
+                dhcp_leases=Path("/var/lib/dhcp/dhcpd.leases"),
+                apache_listeners=listeners,
+            )
+            with mock.patch.object(health, "_run") as runner, \
+                    mock.patch.object(health, "_dhcp_pid", return_value=73), \
+                    mock.patch.object(
+                        health, "_process_argv", return_value=expected_argv,
+                    ) as argv_reader, mock.patch.object(
+                        health, "_check_tcp_endpoints",
+                    ) as endpoint_check:
+                health._check_dhcp_service(
+                    selected, runtime, settings, validate_config=False,
+                )
+                health._check_apache_service(
+                    selected, settings, "Listen 192.0.2.10:80\n",
+                    validate_config=False,
+                )
+
+            runner.assert_not_called()
+            argv_reader.assert_called_once_with(73)
+            endpoint_check.assert_called_once_with(("192.0.2.10",))
+            runtime.build_dhcpd_argv.assert_called_once_with(
+                ("eno2",), config="/etc/dhcp/dhcpd.conf",
+                leases="/var/lib/dhcp/dhcpd.leases",
+            )
+
+    def test_full_probe_keeps_both_config_validators(self) -> None:
+        health = load_script("healthcheck.py")
+        selected = plan(names=("eno2",), indexes=(7,), endpoints=())
+        expected_argv = (
+            "/usr/sbin/dhcpd", "-4", "-f", "-cf", "/etc/dhcp/dhcpd.conf",
+            "-lf", "/var/lib/dhcp/dhcpd.leases", "eno2",
+        )
+        runtime = SimpleNamespace(
+            build_dhcpd_argv=mock.Mock(return_value=expected_argv),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            listeners = Path(temporary) / "apache-listeners.conf"
+            listeners.write_text("Listen 127.0.0.1:80\n", encoding="utf-8")
+            settings = SimpleNamespace(
+                dhcp_config=Path("/etc/dhcp/dhcpd.conf"),
+                dhcp_leases=Path("/var/lib/dhcp/dhcpd.leases"),
+                apache_listeners=listeners,
+            )
+            with mock.patch.object(health, "_run") as runner, \
+                    mock.patch.object(health, "_dhcp_pid", return_value=73), \
+                    mock.patch.object(
+                        health, "_process_argv", return_value=expected_argv,
+                    ), mock.patch.object(health, "_check_tcp_endpoints"):
+                health._check_dhcp_service(
+                    selected, runtime, settings, validate_config=True,
+                )
+                health._check_apache_service(
+                    selected, settings, "Listen 127.0.0.1:80\n",
+                    validate_config=True,
+                )
+
+        self.assertEqual(
+            [
+                mock.call((
+                    "/usr/sbin/dhcpd", "-4", "-t", "-cf",
+                    "/etc/dhcp/dhcpd.conf",
+                )),
+                mock.call(("/usr/sbin/apache2ctl", "configtest")),
+            ],
+            runner.call_args_list,
+        )
+
     def test_entrypoint_and_healthcheck_have_no_host_service_manager_fallback(self) -> None:
         combined = "\n".join(
             (DOCKER_ROOT / name).read_text(encoding="utf-8")
@@ -8797,11 +8965,14 @@ class ContainerTransactionContractTests(QuietContractTest):
         ), mock.patch.object(
             hostctl.healthcheck, "check_runtime",
             side_effect=hostctl.activate.ActivationError("image source drift"),
-        ):
+        ) as check_runtime:
             healthy, identity, reason = hostctl.guardian_probe(settings)
         self.assertFalse(healthy)
         self.assertRegex(identity, r"^[0-9a-f]{64}$")
         self.assertIn("source drift", reason)
+        check_runtime.assert_called_once_with(
+            require_active=True, serving_only=True,
+        )
 
     def test_guardian_lock_busy_makes_no_mutation_and_resets_failures(self) -> None:
         hostctl = load_script("hostctl.py")
@@ -8884,6 +9055,13 @@ class ContainerTransactionContractTests(QuietContractTest):
         self.assertFalse(healthy)
         self.assertIn("timed out", reason)
         self.assertEqual(4, runner.call_args.kwargs["timeout"])
+        self.assertEqual(
+            (
+                "/opt/http-ztp/healthcheck.py", "--require-active",
+                "--serving-only",
+            ),
+            runner.call_args.args[0],
+        )
 
     @with_valid_monitor_authority_fixture
     def test_guardian_final_bounded_recheck_holds_lock_and_quarantines(self) -> None:

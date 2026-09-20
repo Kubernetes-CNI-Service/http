@@ -312,10 +312,13 @@ def guardian_snapshot(settings: activate.Settings) -> tuple[Optional[str], bool,
 def guardian_health_probe(
     _settings: activate.Settings, *, timeout: int = GUARDIAN_HEALTH_TIMEOUT,
 ) -> tuple[bool, str]:
-    """Run the complete active health contract with one hard wall-clock limit."""
+    """Run the active serving contract with one hard wall-clock limit."""
     try:
         result = subprocess.run(
-            ("/opt/http-ztp/healthcheck.py", "--require-active"),
+            (
+                "/opt/http-ztp/healthcheck.py", "--require-active",
+                "--serving-only",
+            ),
             capture_output=True, text=True, check=False, timeout=timeout,
         )
     except subprocess.TimeoutExpired:
@@ -334,7 +337,7 @@ def guardian_probe(settings: activate.Settings) -> tuple[bool, Optional[str], st
     if identity is None:
         return inactive_safe, None, reason
     try:
-        healthcheck.check_runtime(require_active=True)
+        healthcheck.check_runtime(require_active=True, serving_only=True)
     except Exception as exc:
         return False, identity, str(exc)
     return True, identity, "healthy active runtime"

@@ -84,6 +84,11 @@ class InfraNeutralDefaultsTests(unittest.TestCase):
         self.assertIn("current/infra-neutral.conf", deploy_source)
 
     def test_zero_target_boundaries_fail_but_prepare_only_writes_config(self):
+        source = (ROOT / "infra/deploy_infra.py").read_text(encoding="utf-8")
+        self.assertNotIn(
+            "devices CSV 中没有可部署的 type=server 设备，未执行远程操作",
+            source,
+        )
         base_args = dict(
             global_file=ROOT / "DAY0-Prepare/template/01-global.yaml",
             devices_file=ROOT / "DAY0-Prepare/template/02-devices_config.csv",
