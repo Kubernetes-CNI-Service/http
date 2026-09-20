@@ -112,6 +112,15 @@ WATCH_STATE_SCHEMA = 1
 WATCH_FAILURE_LIMIT = 5
 WATCH_FAILURE_SUMMARY_SECONDS = 300.0
 WATCH_MESSAGE_MAX_BYTES = 1024
+COLLECTION_ATTRIBUTION_STATE_NAME = ".collection-attribution.json"
+COLLECTION_ATTRIBUTION_STATE_SCHEMA = 1
+COLLECTION_ATTRIBUTION_SOURCE_KINDS = frozenset({
+    "local_observation", "device_reported", "third_party_provider",
+})
+COLLECTION_ATTRIBUTION_RELATIONSHIPS = frozenset({
+    "unknown", "local", "external", "mixed",
+})
+MAX_COLLECTION_ATTRIBUTION_BYTES = 4 * 1024 * 1024
 
 RUNTIME_REPUBLISH_GUIDANCE = (
     "若修复会更新项目清单、配置或 release 输入，则属于 source write："
@@ -1539,6 +1548,284 @@ def _same_device_identity(left: dict[str, Any], right: dict[str, Any]) -> bool:
     return bool(_device_identity_mac_values(left) & _device_identity_mac_values(right))
 
 
+def collection_row_identity(device: dict[str, Any]) -> dict[str, Any]:
+    """Return the current input-row identity used by attribution records."""
+    return {
+        "hostname": str(device.get("hostname") or ""),
+        "identity_macs": sorted(_device_identity_mac_values(device)),
+    }
+
+
+def _valid_collection_attribution_text(value: Any, *, maximum: int = 1024) -> str:
+    if not isinstance(value, str):
+        raise ValueError("collection attribution text field is not a string")
+    rendered = value.strip()
+    if not rendered or len(rendered.encode("utf-8")) > maximum:
+        raise ValueError("collection attribution text field is empty or too large")
+    return rendered
+
+
+def validate_collection_attribution_record(record: Any) -> dict[str, Any]:
+    """Validate one cached/provider attribution without closing ``source``."""
+    required = {
+        "schema_version", "address", "source", "source_kind",
+        "provisioning_relationship", "observed_identity",
+        "input_row_identity", "observation_time",
+    }
+    if not isinstance(record, dict) or set(record) != required:
+        raise ValueError("collection attribution record has invalid keys")
+    if record.get("schema_version") != COLLECTION_ATTRIBUTION_STATE_SCHEMA:
+        raise ValueError("collection attribution record schema is unsupported")
+    address = _valid_collection_attribution_text(record.get("address"), maximum=256)
+    try:
+        address = str(ipaddress.ip_address(address))
+    except ValueError as exc:
+        raise ValueError("collection attribution address is not an IP address") from exc
+    source = _valid_collection_attribution_text(record.get("source"), maximum=512)
+    source_kind = _valid_collection_attribution_text(
+        record.get("source_kind"), maximum=64,
+    )
+    if source_kind not in COLLECTION_ATTRIBUTION_SOURCE_KINDS:
+        raise ValueError("collection attribution source_kind is unsupported")
+    relationship = _valid_collection_attribution_text(
+        record.get("provisioning_relationship"), maximum=32,
+    )
+    if relationship not in COLLECTION_ATTRIBUTION_RELATIONSHIPS:
+        raise ValueError("collection attribution provisioning relationship is unsupported")
+    observation_time = _valid_collection_attribution_text(
+        record.get("observation_time"), maximum=128,
+    )
+    try:
+        parsed_observation_time = dt.datetime.fromisoformat(
+            observation_time.replace("Z", "+00:00")
+        )
+    except ValueError as exc:
+        raise ValueError("collection attribution observation_time is invalid") from exc
+    if parsed_observation_time.tzinfo is None:
+        raise ValueError("collection attribution observation_time lacks timezone")
+    row = record.get("input_row_identity")
+    if (
+        not isinstance(row, dict)
+        or set(row) != {"hostname", "identity_macs"}
+        or not isinstance(row.get("hostname"), str)
+        or not row["hostname"].strip()
+        or not isinstance(row.get("identity_macs"), list)
+        or not row["identity_macs"]
+    ):
+        raise ValueError("collection attribution input row identity is invalid")
+    identity_macs = sorted({
+        normalize_mac(value) for value in row["identity_macs"]
+        if isinstance(value, str)
+        and re.fullmatch(r"[0-9a-f]{12}", normalize_mac(value))
+    })
+    if len(identity_macs) != len(row["identity_macs"]):
+        raise ValueError("collection attribution input row MACs are invalid")
+    observed = record.get("observed_identity")
+    if not isinstance(observed, dict) or set(observed) != {
+        "hostname", "interface_macs"
+    }:
+        raise ValueError("collection attribution observed identity is invalid")
+    observed_hostname = _valid_collection_attribution_text(
+        observed.get("hostname"), maximum=1024,
+    )
+    raw_interfaces = observed.get("interface_macs")
+    if not isinstance(raw_interfaces, dict) or not raw_interfaces:
+        raise ValueError("collection attribution interface identity is invalid")
+    interface_macs: dict[str, str] = {}
+    for interface, raw_mac in raw_interfaces.items():
+        if (
+            not isinstance(interface, str)
+            or not re.fullmatch(r"[A-Za-z0-9_.:-]+", interface)
+        ):
+            raise ValueError("collection attribution interface name is invalid")
+        mac = normalize_mac(str(raw_mac))
+        if not re.fullmatch(r"[0-9a-f]{12}", mac):
+            raise ValueError("collection attribution observed MAC is invalid")
+        interface_macs[interface] = mac
+    return {
+        "schema_version": COLLECTION_ATTRIBUTION_STATE_SCHEMA,
+        "address": address,
+        "source": source,
+        "source_kind": source_kind,
+        "provisioning_relationship": relationship,
+        "observed_identity": {
+            "hostname": observed_hostname,
+            "interface_macs": dict(sorted(interface_macs.items())),
+        },
+        "input_row_identity": {
+            "hostname": row["hostname"].strip(),
+            "identity_macs": identity_macs,
+        },
+        "observation_time": observation_time,
+    }
+
+
+def collection_attribution_input_digests(
+    paths: dict[str, Path],
+) -> dict[str, str]:
+    """Hash every authoritative input by content; mtime is deliberately absent."""
+    digests: dict[str, str] = {}
+    for label, path in sorted(paths.items()):
+        if not isinstance(label, str) or not label or not isinstance(path, Path):
+            raise ValueError("collection attribution input mapping is invalid")
+        try:
+            content = path.read_bytes()
+        except FileNotFoundError:
+            content = b""
+        digests[label] = hashlib.sha256(content).hexdigest()
+    return digests
+
+
+def _validate_collection_input_digests(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        raise ValueError("collection attribution input digests are invalid")
+    validated: dict[str, str] = {}
+    for name, digest in value.items():
+        if (
+            not isinstance(name, str) or not name
+            or not isinstance(digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", digest)
+        ):
+            raise ValueError("collection attribution input digest is invalid")
+        validated[name] = digest
+    return dict(sorted(validated.items()))
+
+
+def load_collection_attribution(
+    path: Path, devices: list[dict[str, Any]], input_digests: dict[str, str],
+) -> list[dict[str, Any]]:
+    """Load and row-reconcile cache state against current authoritative input."""
+    current_digests = _validate_collection_input_digests(input_digests)
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_size > MAX_COLLECTION_ATTRIBUTION_BYTES
+        ):
+            raise ValueError("collection attribution state is not a bounded regular file")
+        with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
+            descriptor = -1
+            payload = json.load(stream)
+    except FileNotFoundError:
+        return []
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"schema_version", "input_digests", "records"}
+        or payload.get("schema_version") != COLLECTION_ATTRIBUTION_STATE_SCHEMA
+        or not isinstance(payload.get("records"), list)
+    ):
+        raise ValueError("collection attribution state has invalid structure")
+    _validate_collection_input_digests(payload.get("input_digests"))
+    # A digest change triggers this complete reconciliation.  It is not a
+    # global flush: independent rows that remain byte-for-byte true survive.
+    current_rows = {
+        (
+            str(address),
+            json.dumps(
+                collection_row_identity(device), sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
+        for device in devices
+        for address in _device_ips(device)
+    }
+    validated: list[dict[str, Any]] = []
+    addresses: set[str] = set()
+    duplicate_addresses: set[str] = set()
+    for raw_record in payload["records"]:
+        record = validate_collection_attribution_record(raw_record)
+        key = (
+            record["address"],
+            json.dumps(
+                record["input_row_identity"], sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
+        if key not in current_rows:
+            continue
+        if record["address"] in addresses:
+            duplicate_addresses.add(record["address"])
+        addresses.add(record["address"])
+        validated.append(record)
+    if duplicate_addresses:
+        validated = [
+            record for record in validated
+            if record["address"] not in duplicate_addresses
+        ]
+    # Referencing current_digests here is intentional: callers must supply a
+    # well-formed current fingerprint even though row truth, not equality with
+    # an old whole-file digest, determines which independent records survive.
+    assert isinstance(current_digests, dict)
+    return sorted(validated, key=lambda item: (
+        item["address"], item["input_row_identity"]["hostname"].casefold(),
+    ))
+
+
+def persist_collection_attribution(
+    path: Path, input_digests: dict[str, str], records: list[dict[str, Any]],
+) -> None:
+    """Atomically replace private attribution state under the monitor lock."""
+    validated_digests = _validate_collection_input_digests(input_digests)
+    validated_records = [
+        validate_collection_attribution_record(record) for record in records
+    ]
+    addresses = [record["address"] for record in validated_records]
+    if len(set(addresses)) != len(addresses):
+        raise ValueError("collection attribution has multiple records for one address")
+    payload = {
+        "schema_version": COLLECTION_ATTRIBUTION_STATE_SCHEMA,
+        "input_digests": validated_digests,
+        "records": sorted(validated_records, key=lambda item: (
+            item["address"], item["input_row_identity"]["hostname"].casefold(),
+        )),
+    }
+    content = (
+        json.dumps(
+            payload, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":"), allow_nan=False,
+        ) + "\n"
+    ).encode("utf-8")
+    if len(content) > MAX_COLLECTION_ATTRIBUTION_BYTES:
+        raise ValueError("collection attribution state is too large")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with monitor_pid_lock(path):
+        descriptor, raw_name = tempfile.mkstemp(
+            prefix=f".{path.name}.", dir=path.parent,
+        )
+        temporary = Path(raw_name)
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "wb") as stream:
+                descriptor = -1
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+            os.chmod(path, 0o600)
+            directory_fd = os.open(
+                path.parent, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
+            )
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            temporary.unlink(missing_ok=True)
+
+
 def active_device_by_ip(
     devices: list[dict[str, Any]], dhcp_events: list[dict[str, str]]
 ) -> dict[str, dict[str, Any]]:
@@ -1565,6 +1852,9 @@ def active_device_by_ip(
         owner_ip = event_ip or str(device.get("ip") or "")
         if owner_ip:
             owners[owner_ip] = device
+            device.setdefault("dhcp_owner_observation_times", {})[owner_ip] = str(
+                event.get("timestamp") or ""
+            )
     return owners
 
 
@@ -1572,11 +1862,18 @@ def devices_for_switch_collection(
     devices: list[dict[str, Any]], owners: dict[str, dict[str, Any]],
     identity_devices: Optional[list[dict[str, Any]]] = None,
     http_identity_claims: Optional[dict[str, dict[str, Any]]] = None,
+    attribution_records: Optional[list[dict[str, Any]]] = None,
 ) -> list[dict[str, Any]]:
     """Annotate admission evidence, then return rows with an admissible IP."""
     selected: list[dict[str, Any]] = []
     identity_by_ip = _devices_by_ip(identity_devices or devices)
     http_claims = http_identity_claims or {}
+    records_by_address: dict[str, dict[str, Any]] = {}
+    for raw_record in attribution_records or []:
+        record = validate_collection_attribution_record(raw_record)
+        if record["address"] in records_by_address:
+            raise ValueError("multiple attribution records for one address")
+        records_by_address[record["address"]] = record
     claims_by_device: dict[int, list[dict[str, Any]]] = {}
     for claim in http_claims.values():
         claim_device = _http_claim_device(claim)
@@ -1586,12 +1883,6 @@ def devices_for_switch_collection(
         claims.sort(key=lambda item: (
             str(item.get("claimed_at") or ""), str(item.get("ip") or ""),
         ))
-
-    def row_identity(device: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "hostname": str(device.get("hostname") or ""),
-            "identity_macs": sorted(_device_identity_mac_values(device)),
-        }
 
     def evidence(
         *, status: str, source: str, source_kind: str,
@@ -1642,17 +1933,20 @@ def devices_for_switch_collection(
             else:
                 http_status = "conflict"
                 http_identity = (
-                    row_identity(claim_device) if claim_device is not None else None
+                    collection_row_identity(claim_device)
+                    if claim_device is not None else None
                 )
                 http_time = claim.get("claimed_at") if isinstance(claim, dict) else None
 
             candidates = identity_by_ip.get(address, [])
             if len(candidates) == 1:
                 uniqueness_status = "matched"
-                unique_identity: Any = row_identity(candidates[0])
+                unique_identity: Any = collection_row_identity(candidates[0])
             elif candidates:
                 uniqueness_status = "ambiguous"
-                unique_identity = [row_identity(candidate) for candidate in candidates]
+                unique_identity = [
+                    collection_row_identity(candidate) for candidate in candidates
+                ]
             else:
                 uniqueness_status = "missing"
                 unique_identity = None
@@ -1663,10 +1957,47 @@ def devices_for_switch_collection(
                 owner_identity = None
             elif _same_device_identity(owner, device):
                 owner_status = "matched"
-                owner_identity = row_identity(owner)
+                owner_identity = collection_row_identity(owner)
             else:
                 owner_status = "conflict"
-                owner_identity = row_identity(owner)
+                owner_identity = collection_row_identity(owner)
+
+            attribution = records_by_address.get(address)
+            if attribution is None:
+                attribution_status = "missing"
+                attribution_identity = None
+                attribution_time = None
+                attribution_source = "posthoc_identity"
+                attribution_source_kind = "device_reported"
+                attribution_relationship = "unknown"
+            else:
+                owner_time = str(
+                    (owner or {}).get("dhcp_owner_observation_times", {}).get(
+                        address, ""
+                    )
+                )
+                claim_time = str(
+                    claim.get("claimed_at") or ""
+                    if isinstance(claim, dict) else ""
+                )
+                attribution_time_value = str(attribution["observation_time"])
+                attribution_superseded = any(
+                    timestamp
+                    and _timestamp_after(timestamp, attribution_time_value)
+                    for timestamp in (owner_time, claim_time)
+                )
+                attribution_status = (
+                    "superseded" if attribution_superseded
+                    else "matched"
+                    if attribution["input_row_identity"]
+                    == collection_row_identity(device)
+                    else "conflict"
+                )
+                attribution_identity = attribution["observed_identity"]
+                attribution_time = attribution["observation_time"]
+                attribution_source = attribution["source"]
+                attribution_source_kind = attribution["source_kind"]
+                attribution_relationship = attribution["provisioning_relationship"]
 
             paths = {
                 "http_claim": evidence(
@@ -1688,9 +2019,24 @@ def devices_for_switch_collection(
                     applicability="unknown", address=address,
                     observed_identity=owner_identity,
                 ),
+                "posthoc_identity": evidence(
+                    status="not_evaluated" if disabled else attribution_status,
+                    source=attribution_source,
+                    source_kind=attribution_source_kind,
+                    applicability="applicable", address=address,
+                    observed_identity=attribution_identity,
+                    observation_time=attribution_time,
+                ),
             }
-            address_eligible = not disabled and any(
-                value["status"] == "matched" for value in paths.values()
+            attribution_is_authoritative = bool(
+                attribution is not None
+                and attribution_status != "superseded"
+                and len(candidates) > 1
+            )
+            address_eligible = not disabled and (
+                paths["posthoc_identity"]["status"] == "matched"
+                if attribution_is_authoritative
+                else any(value["status"] == "matched" for value in paths.values())
             )
             if disabled:
                 missing_evidence = ["inventory_collection_authority"]
@@ -1702,13 +2048,14 @@ def devices_for_switch_collection(
                         ("http_identity_claim", "http_claim"),
                         ("unique_inventory_address", "ip_uniqueness"),
                         ("dhcp_mac_owner", "dhcp_owner"),
+                        ("posthoc_device_identity", "posthoc_identity"),
                     )
                     if paths[path_name]["status"] != "matched"
                 ]
             address_verdicts.append({
                 "address": address,
                 "eligible": address_eligible,
-                "provisioning_relationship": "unknown",
+                "provisioning_relationship": attribution_relationship,
                 "paths": paths,
                 "missing_evidence": missing_evidence,
             })
@@ -1717,7 +2064,7 @@ def devices_for_switch_collection(
         device["collection_admission"] = {
             "schema_version": 1,
             "eligible": selectable,
-            "input_row_identity": row_identity(device),
+            "input_row_identity": collection_row_identity(device),
             "addresses": address_verdicts,
             "disabled_reason": "ssh_collect_disabled" if disabled else "",
         }
@@ -1726,6 +2073,129 @@ def devices_for_switch_collection(
         if selectable:
             selected.append(device)
     return selected
+
+
+def _match_shared_address_observation(
+    address: str, candidates: list[dict[str, Any]], observation: dict[str, Any],
+) -> Optional[dict[str, Any]]:
+    observed = observation.get("observed_identity")
+    if not isinstance(observed, dict):
+        return None
+    remote_hostname = str(observed.get("hostname") or "").strip()
+    remote_short = remote_hostname.split(".", 1)[0].casefold()
+    raw_interfaces = observed.get("interface_macs")
+    if not remote_short or not isinstance(raw_interfaces, dict):
+        return None
+    interface_macs = {
+        str(interface): normalize_mac(str(mac))
+        for interface, mac in raw_interfaces.items()
+        if re.fullmatch(r"[0-9a-f]{12}", normalize_mac(str(mac)))
+    }
+    matched: list[dict[str, Any]] = []
+    for candidate in candidates:
+        expected_short = str(candidate.get("hostname") or "").strip().split(
+            ".", 1,
+        )[0].casefold()
+        expected_interface, expected_mac = (
+            candidate.get("candidate_identity") or {}
+        ).get(address, ("", ""))
+        expected_interface = str(expected_interface or "")
+        expected_mac = normalize_mac(str(expected_mac or ""))
+        if (
+            expected_short
+            and remote_short == expected_short
+            and expected_interface
+            and re.fullmatch(r"[0-9a-f]{12}", expected_mac)
+            and interface_macs.get(expected_interface) == expected_mac
+        ):
+            matched.append(candidate)
+    return matched[0] if len(matched) == 1 else None
+
+
+def resolve_shared_address_attributions(
+    devices: list[dict[str, Any]], selected: list[dict[str, Any]], probe: Any,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Probe each unresolved shared address once and bind only an exact row."""
+    selected_ids = {id(device) for device in selected}
+    grouped = _devices_by_ip(devices)
+    records: list[dict[str, Any]] = []
+    attempts: dict[str, dict[str, Any]] = {}
+    for address, candidates in sorted(grouped.items()):
+        if len(candidates) < 2 or any(id(candidate) in selected_ids for candidate in candidates):
+            continue
+        raw_observation = probe(address, candidates)
+        if not isinstance(raw_observation, dict):
+            raw_observation = {}
+        source = str(raw_observation.get("source") or "posthoc_identity")
+        source_kind = str(
+            raw_observation.get("source_kind") or "device_reported"
+        )
+        observation_time = str(
+            raw_observation.get("observation_time")
+            or now_local().isoformat(timespec="seconds")
+        )
+        observed_identity = raw_observation.get("observed_identity")
+        probe_status = str(raw_observation.get("status") or "probe_failed")
+        matched = (
+            _match_shared_address_observation(address, candidates, raw_observation)
+            if probe_status == "success" else None
+        )
+        terminal_status = "matched" if matched is not None else (
+            "identity_mismatch" if probe_status == "success" else probe_status
+        )
+        attempts[address] = {
+            "status": terminal_status,
+            "source": source,
+            "source_kind": source_kind,
+            "observation_time": observation_time,
+        }
+        record = None
+        if matched is not None:
+            record = validate_collection_attribution_record({
+                "schema_version": COLLECTION_ATTRIBUTION_STATE_SCHEMA,
+                "address": address,
+                "source": source,
+                "source_kind": source_kind,
+                "provisioning_relationship": str(
+                    raw_observation.get("provisioning_relationship") or "unknown"
+                ),
+                "observed_identity": observed_identity,
+                "input_row_identity": collection_row_identity(matched),
+                "observation_time": observation_time,
+            })
+            records.append(record)
+            if id(matched) not in selected_ids:
+                selected.append(matched)
+                selected_ids.add(id(matched))
+        for candidate in candidates:
+            admission = candidate.get("collection_admission")
+            if not isinstance(admission, dict):
+                continue
+            for verdict in admission.get("addresses", []):
+                if not isinstance(verdict, dict) or verdict.get("address") != address:
+                    continue
+                is_match = candidate is matched
+                verdict.setdefault("paths", {})["posthoc_identity"] = {
+                    "status": (
+                        "matched" if is_match
+                        else "conflict" if matched is not None
+                        else terminal_status
+                    ),
+                    "source": source,
+                    "source_kind": source_kind,
+                    "applicability": "applicable",
+                    "address": address,
+                    "observed_identity": observed_identity,
+                    "observation_time": observation_time,
+                }
+                if is_match and record is not None:
+                    verdict["eligible"] = True
+                    verdict["missing_evidence"] = []
+                    verdict["provisioning_relationship"] = record[
+                        "provisioning_relationship"
+                    ]
+                    admission["eligible"] = True
+    return selected, records, attempts
 
 
 def correlate_server_events(devices: list[dict[str, Any]], dhcp_events: list[dict[str, str]],
@@ -1932,6 +2402,63 @@ def parse_remote_interface_macs(text: str) -> dict[str, str]:
         ):
             parsed[interface] = mac_plain
     return parsed
+
+
+def probe_shared_address_identity(
+    address: str, candidates: list[dict[str, Any]], timeout: int,
+    identity: Optional[Path], known_hosts: Path,
+) -> dict[str, Any]:
+    """Perform one unresolved identity-only SSH attempt for a shared address."""
+    observed_at = now_local().isoformat(timespec="seconds")
+    users = {
+        str(candidate.get("ssh_user") or "").strip()
+        for candidate in candidates
+    }
+    if len(users) != 1 or not next(iter(users), ""):
+        return {
+            "status": "probe_unavailable", "source": "ssh-posthoc",
+            "source_kind": "device_reported", "address": address,
+            "observation_time": observed_at, "observed_identity": None,
+        }
+    user = next(iter(users))
+    command = [
+        "ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={timeout}",
+        "-o", "StrictHostKeyChecking=accept-new", "-o",
+        f"UserKnownHostsFile={known_hosts}", "-o", "LogLevel=ERROR",
+    ]
+    if identity:
+        command += ["-i", str(identity)]
+    command += [
+        f"{user}@{address}",
+        "sh -c " + shlex.quote(REMOTE_IDENTITY_PROBE_SCRIPT),
+    ]
+    result = run_command(command, timeout=timeout + 12)
+    if result["returncode"] != 0:
+        return {
+            "status": "probe_failed", "source": "ssh-posthoc",
+            "source_kind": "device_reported", "address": address,
+            "observation_time": observed_at, "observed_identity": None,
+        }
+    hostname = marker(result["stdout"], "HOSTNAME").splitlines()
+    interface_macs = parse_remote_interface_macs(
+        marker(result["stdout"], "INTERFACE_MACS")
+    )
+    if not hostname or not hostname[0].strip() or not interface_macs:
+        return {
+            "status": "identity_incomplete", "source": "ssh-posthoc",
+            "source_kind": "device_reported", "address": address,
+            "observation_time": observed_at, "observed_identity": None,
+        }
+    return {
+        "status": "success", "source": "ssh-posthoc",
+        "source_kind": "device_reported", "address": address,
+        "provisioning_relationship": "unknown",
+        "observation_time": observed_at,
+        "observed_identity": {
+            "hostname": hostname[0].strip(),
+            "interface_macs": interface_macs,
+        },
+    }
 
 
 def static_secondary_probe_error(
@@ -3662,6 +4189,20 @@ def monitor_once(args: argparse.Namespace, project: Path) -> Path:
         air_json=air_json if air_json and air_json.is_file() else None,
         dhcp_leases=dhcp_leases,
     )
+    attribution_inputs = {
+        "devices_csv": project / "02-devices_config.csv",
+    }
+    if air_json is not None:
+        attribution_inputs["air_json"] = air_json
+    if dhcp_leases is not None:
+        attribution_inputs["dhcp_leases"] = dhcp_leases
+    attribution_digests = collection_attribution_input_digests(
+        attribution_inputs,
+    )
+    attribution_state_path = output_root / COLLECTION_ATTRIBUTION_STATE_NAME
+    attribution_records = load_collection_attribution(
+        attribution_state_path, identity_devices, attribution_digests,
+    )
     dhcp_read = collect_dhcp(
         args.since, args.dhcp_log, runtime_backend=runtime_backend,
     )
@@ -3767,6 +4308,40 @@ def monitor_once(args: argparse.Namespace, project: Path) -> Path:
         collection_devices = devices_for_switch_collection(
             devices, active_owners, identity_devices=identity_devices,
             http_identity_claims=http_identity_claims,
+            attribution_records=attribution_records,
+        )
+        collection_devices, new_attributions, _attribution_attempts = (
+            resolve_shared_address_attributions(
+                devices,
+                collection_devices,
+                lambda address, candidates: probe_shared_address_identity(
+                    address, candidates, args.ssh_timeout,
+                    args.identity, args.known_hosts,
+                ),
+            )
+        )
+        active_attribution_addresses = {
+            str(verdict.get("address") or "")
+            for device in devices
+            for verdict in (
+                device.get("collection_admission", {}).get("addresses", [])
+                if isinstance(device.get("collection_admission"), dict) else []
+            )
+            if isinstance(verdict, dict)
+            and isinstance(verdict.get("paths"), dict)
+            and verdict["paths"].get("posthoc_identity", {}).get("status")
+            == "matched"
+        }
+        attribution_by_address = {
+            record["address"]: record for record in attribution_records
+            if record["address"] in active_attribution_addresses
+        }
+        for record in new_attributions:
+            # Exact, newer post-hoc verification outranks older ownership.
+            attribution_by_address[record["address"]] = record
+        persist_collection_attribution(
+            attribution_state_path, attribution_digests,
+            list(attribution_by_address.values()),
         )
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
             futures = {

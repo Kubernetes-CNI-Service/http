@@ -1131,6 +1131,7 @@ def _render_ztp_device_row(
             "http_identity_claim": "HTTP 身份声明",
             "unique_inventory_address": "清单地址唯一性",
             "dhcp_mac_owner": "DHCP MAC owner",
+            "posthoc_device_identity": "设备事后身份",
             "inventory_collection_authority": "清单采集授权",
         }
         rendered_ips = []
@@ -1165,10 +1166,23 @@ def _render_ztp_device_row(
                         "missing_evidence", []
                     )
                 ]
+                paths = admission_by_address[candidate].get("paths", {})
+                posthoc = (
+                    paths.get("posthoc_identity", {})
+                    if isinstance(paths, dict) else {}
+                )
+                posthoc_status = str(posthoc.get("status") or "")
+                posthoc_detail = {
+                    "identity_mismatch": "；设备事后身份与唯一清单行不匹配",
+                    "probe_failed": "；设备事后身份探测失败",
+                    "identity_incomplete": "；设备事后身份探测结果不完整",
+                    "probe_unavailable": "；设备事后身份探测条件不具备",
+                }.get(posthoc_status, "")
                 title = (
                     "当前身份归属证据不足，缺少：" + "、".join(missing)
                     + "；这些证据可能尚未产生，或设备不经本系统配置；"
                     "共享地址需由设备自报或其他可信来源验证"
+                    + posthoc_detail
                 )
             elif dynamic_candidate:
                 css_class = "ztp-ip-dynamic"
