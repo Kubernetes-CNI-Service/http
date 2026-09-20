@@ -15,7 +15,7 @@ class CollectionAttributionWorkflowTests(unittest.TestCase):
     def setUpClass(cls):
         cls.monitor = load_monitor()
 
-    def test_verified_cache_admits_only_bound_row_after_unrelated_input_edit(self):
+    def test_verified_cache_still_requires_current_exact_observation(self):
         address = "192.0.2.60"
         prod = device("prod-leaf-06", "020000000051", address)
         air = device("air-leaf-06", "020000000052", address)
@@ -32,13 +32,63 @@ class CollectionAttributionWorkflowTests(unittest.TestCase):
             selected = self.monitor.devices_for_switch_collection(
                 [prod, air], {}, attribution_records=reconciled,
             )
+            self.assertEqual([], selected)
+
+            def probe(candidate_address, candidates):
+                return {
+                    "status": "success", "source": "ssh-posthoc",
+                    "source_kind": "device_reported",
+                    "address": candidate_address,
+                    "observation_time": "2026-09-20T08:05:00+00:00",
+                    "observed_identity": {
+                        "hostname": air["hostname"],
+                        "interface_macs": {"eth0": air["mac_plain"]},
+                    },
+                }
+
+            selected, current_records, attempts = (
+                self.monitor.resolve_shared_address_attributions(
+                    [prod, air], selected, probe,
+                )
+            )
         self.assertEqual([air], selected)
+        self.assertEqual(1, len(current_records))
+        self.assertEqual("matched", attempts[address]["status"])
         self.assertFalse(prod["collection_admission"]["eligible"])
         self.assertTrue(air["collection_admission"]["eligible"])
         path = air["collection_admission"]["addresses"][0]["paths"]["posthoc_identity"]
         self.assertEqual("matched", path["status"])
         self.assertEqual("device_reported", path["source_kind"])
         self.assertEqual("ssh-posthoc", path["source"])
+
+    def test_project_symlink_switch_never_reuses_previous_project_binding(self):
+        first = device("project-a-leaf", "0200000000a1", "192.0.2.101")
+        second = device("project-b-leaf", "0200000000b1", "192.0.2.101")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project_a = root / "project-a-output"
+            project_b = root / "project-b-output"
+            project_a.mkdir()
+            project_b.mkdir()
+            status = root / "status"
+            status.symlink_to(project_a, target_is_directory=True)
+            state = status / ".collection-attribution.json"
+            self.monitor.persist_collection_attribution(
+                state, {"inventory.csv": "a" * 64},
+                [record(self.monitor, first)],
+            )
+            (project_b / state.name).write_bytes(
+                (project_a / state.name).read_bytes()
+            )
+            status.unlink()
+            status.symlink_to(project_b, target_is_directory=True)
+            self.assertEqual(
+                [],
+                self.monitor.load_collection_attribution(
+                    status / state.name, [second],
+                    {"inventory.csv": "b" * 64},
+                ),
+            )
 
     def test_failed_probe_is_visible_but_cannot_cross_write_another_row(self):
         address = "192.0.2.70"

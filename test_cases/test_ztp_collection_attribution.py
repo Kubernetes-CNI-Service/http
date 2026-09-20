@@ -165,7 +165,7 @@ class CollectionAttributionDirectTests(unittest.TestCase):
         self.assertEqual(1, len(retained))
         self.assertEqual("leaf-04", retained[0]["input_row_identity"]["hostname"])
 
-    def test_only_newer_exact_posthoc_evidence_outranks_local_ownership(self):
+    def test_newer_cached_evidence_requires_current_probe_before_outranking_owner(self):
         address = "192.0.2.45"
         prod = device("prod-leaf-05", "020000000035", address)
         air = device("air-leaf-05", "020000000036", address)
@@ -177,12 +177,36 @@ class CollectionAttributionDirectTests(unittest.TestCase):
         selected = self.monitor.devices_for_switch_collection(
             [prod, air], {address: prod}, attribution_records=[cached],
         )
-        self.assertEqual([air], selected)
+        self.assertEqual([], selected)
         self.assertEqual(
-            "matched",
+            "verification_required",
             air["collection_admission"]["addresses"][0]["paths"]
             ["posthoc_identity"]["status"],
         )
+
+        calls = []
+
+        def current_probe(candidate_address, candidates):
+            calls.append(candidate_address)
+            return {
+                "status": "success",
+                "source": "ssh-posthoc",
+                "source_kind": "device_reported",
+                "address": candidate_address,
+                "observation_time": "2026-09-20T08:15:00+00:00",
+                "observed_identity": {
+                    "hostname": air["hostname"],
+                    "interface_macs": {"eth0": air["mac_plain"]},
+                },
+            }
+
+        selected, records, attempts = self.monitor.resolve_shared_address_attributions(
+            [prod, air], selected, current_probe,
+        )
+        self.assertEqual([address], calls)
+        self.assertEqual([air], selected)
+        self.assertEqual(1, len(records))
+        self.assertEqual("matched", attempts[address]["status"])
 
         prod["dhcp_owner_observation_times"][address] = (
             "2026-09-20T08:20:00+00:00"
@@ -197,6 +221,39 @@ class CollectionAttributionDirectTests(unittest.TestCase):
                 row["collection_admission"]["addresses"][0]["paths"]
                 ["posthoc_identity"]["status"],
             )
+
+    def test_any_ledger_integrity_failure_discards_the_whole_cache(self):
+        first = device("leaf-13", "020000000091", "192.0.2.91")
+        second = device("leaf-14", "020000000092", "192.0.2.92")
+        digests = {"inventory.csv": "a" * 64}
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "collection-attribution.json"
+            malformed_payloads = [
+                b"{not-json\n",
+                json.dumps({
+                    "schema_version": 999,
+                    "input_digests": digests,
+                    "records": [],
+                }).encode("utf-8"),
+                json.dumps({
+                    "schema_version": 1,
+                    "input_digests": digests,
+                    "records": [
+                        record(self.monitor, first),
+                        record(self.monitor, first),
+                        record(self.monitor, second),
+                    ],
+                }).encode("utf-8"),
+            ]
+            for payload in malformed_payloads:
+                with self.subTest(payload=payload[:24]):
+                    state.write_bytes(payload)
+                    self.assertEqual(
+                        [],
+                        self.monitor.load_collection_attribution(
+                            state, [first, second], digests,
+                        ),
+                    )
 
     def test_atomic_private_state_replaces_previous_complete_document(self):
         row = device("leaf-06", "020000000041", "192.0.2.50")
@@ -275,10 +332,12 @@ class CollectionAttributionDirectTests(unittest.TestCase):
             )
             link = directory_path / "linked-state.json"
             link.symlink_to(state)
-            with self.assertRaises((OSError, ValueError)):
+            self.assertEqual(
+                [],
                 self.monitor.load_collection_attribution(
                     link, [row], {"inventory.csv": "a" * 64},
-                )
+                ),
+            )
 
     def test_duplicate_address_and_changed_row_identity_fail_closed(self):
         first = device("leaf-09", "020000000071", "192.0.2.71")
