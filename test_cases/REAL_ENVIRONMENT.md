@@ -1171,3 +1171,20 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 证据、清理与风险：保存脱敏的平台名、命令退出码、门禁阶段、轮换事务摘要、设备身份和登录成功/拒绝
   结果，不保存 secret/hash。结束后立即通过受管流程再次轮换或撤销测试凭据，恢复设备快照并验证原有
   管理访问。错误轮换可能锁死管理面，因此无 console/OOB、撤销步骤或审批时禁止执行，更不得在生产首测。
+
+## TC-REAL-REQ12-NVOS-DEFAULT-001 — NVOS family release default 与降级应用
+
+- 状态：**NOT RUN / REAL_ENV REQUIRED**。本机与 AIR 自动化只证明 IB/NVLink family 选择、发布字节、
+  child/parent manifest 绑定、预取顺序和失败关闭；不得据此宣称真实 NVOS patch、保存或登录成功。
+- 前置条件：批准的可回滚 IB 与 NVLink 实验设备各一台，独立 console/OOB，已按受管流程轮换的测试凭据，
+  可控制的 HTTP 404 与 NVUE apply-failure 注入点。绑定源码、测试、manifest、global、设备身份和 release
+  SHA-256；任何证据不得记录明文密码、密码散列、私钥或可复用认证材料。
+- 步骤与预期：分别对 IB 与 NVLink 强制专属 MAC YAML 404，再强制专属配置 apply 失败；证明 bootstrap
+  预取并只 patch 当前 release 的 <code>default_ib.yaml</code> 或 <code>default_nvl.yaml</code>，timezone、DNS、
+  NTP 与 family 凭据来自正确输入，receipt 分别为 <code>default</code>/<code>fallback_default</code>，且另一
+  family 的值从未出现。删除或损坏所选 family artifact 时，fallback 必须拒绝，不能访问中性 default。
+  成功 patch 后核对 config-save、重启持久性和轮换凭据登录；任一设备未完成即保持 OPEN/BLOCKED。
+- 证据、清理与风险：保存脱敏设备型号/版本、release/manifest SHA、HTTP 请求 basename、NVUE exit、
+  receipt source_kind、配置字段存在性和登录成功/拒绝结果，不保存值或 secret/hash。恢复专属配置与原始
+  故障注入，撤销或再次轮换测试凭据，验证两台设备管理访问和 startup 配置。错误 family 或失败 patch
+  可能锁死设备，因此无审批、console/OOB、回滚快照和凭据撤销步骤时禁止执行，更不得在生产设备首测。

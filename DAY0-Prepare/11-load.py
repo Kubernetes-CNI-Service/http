@@ -103,6 +103,8 @@ from deployment_lock import (
     inherited_lock_subprocess_kwargs,
     release_lock_descriptor,
 )
+
+_strict_yaml_document = safe_load_global_yaml
 from ztp_service_runtime import (
     DhcpRuntimePlan,
     RuntimeContractError,
@@ -4305,6 +4307,96 @@ def _validate_child_artifacts(
         ).strip().casefold()
         if not default_hash or _sha256_path(default_path) != default_hash:
             raise LoadError(f"cumulus effective default hash 漂移：{default_path}")
+    elif label == "nvos":
+        fixed_names = {
+            "ib": "default_ib.yaml",
+            "nvl": "default_nvl.yaml",
+        }
+        families = {
+            str(item.get("type") or "").strip()
+            for item in rows if isinstance(item, dict)
+        }
+        if not families or not families <= set(fixed_names):
+            raise LoadError(f"nvos release 包含无效 family 集合：{sorted(families)}")
+        defaults = manifest.get("effective_defaults")
+        if not isinstance(defaults, dict) or set(defaults) != families:
+            raise LoadError(
+                "nvos effective_defaults family 集合漂移："
+                f"expected={sorted(families)} actual="
+                f"{sorted(defaults) if isinstance(defaults, dict) else '<invalid>'}"
+            )
+        declared_names: set[str] = set()
+        for family in sorted(families):
+            row = defaults.get(family)
+            if not isinstance(row, dict):
+                raise LoadError(f"nvos {family} effective default manifest 无效")
+            name = str(row.get("name") or "").strip()
+            if name != fixed_names[family]:
+                raise LoadError(
+                    f"nvos {family} effective default 名称必须为 "
+                    f"{fixed_names[family]!r}，实际为 {name!r}"
+                )
+            declared_names.add(name)
+            path = release_dir / name
+            try:
+                metadata = path.lstat()
+            except OSError as exc:
+                raise LoadError(f"nvos {family} effective default 缺失：{path}") from exc
+            if (
+                path.is_symlink()
+                or not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_nlink != 1
+                or stat.S_IMODE(metadata.st_mode) != 0o644
+                or metadata.st_size <= 0
+            ):
+                raise LoadError(
+                    f"nvos {family} effective default 必须是 0644、非空、"
+                    f"单链接普通文件：{path}"
+                )
+            try:
+                expected_size = int(row.get("size"))
+            except (TypeError, ValueError) as exc:
+                raise LoadError(f"nvos {family} effective default size 无效") from exc
+            if metadata.st_size != expected_size:
+                raise LoadError(f"nvos {family} effective default size 漂移：{path}")
+            expected_hash = str(row.get("sha256") or "").strip().casefold()
+            if not expected_hash or _sha256_path(path) != expected_hash:
+                raise LoadError(f"nvos {family} effective default hash 漂移：{path}")
+            try:
+                document = _strict_yaml_document(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, yaml.YAMLError, ValueError) as exc:
+                raise LoadError(f"nvos {family} effective default YAML 无效：{exc}") from exc
+            systems = [
+                item.get("set", {}).get("system")
+                for item in document if isinstance(item, dict)
+                and isinstance(item.get("set"), dict)
+                and isinstance(item.get("set", {}).get("system"), dict)
+            ] if isinstance(document, list) else []
+            if len(systems) != 1:
+                raise LoadError(f"nvos {family} effective default 缺少唯一 set.system")
+            def contains_null(value: object) -> bool:
+                if value is None:
+                    return True
+                if isinstance(value, dict):
+                    return any(
+                        key is None or contains_null(child)
+                        for key, child in value.items()
+                    )
+                if isinstance(value, list):
+                    return any(contains_null(child) for child in value)
+                return False
+            if contains_null(document):
+                raise LoadError(f"nvos {family} effective default 不允许 null")
+
+        actual_names = {
+            path.name for path in release_dir.iterdir()
+            if re.fullmatch(r"default(?:_[A-Za-z0-9-]+)?\.yaml", path.name)
+        }
+        if actual_names != declared_names:
+            raise LoadError(
+                "nvos effective default 文件集合漂移："
+                f"expected={sorted(declared_names)} actual={sorted(actual_names)}"
+            )
 
 
 def validate_and_publish_release(

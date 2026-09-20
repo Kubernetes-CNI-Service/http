@@ -271,8 +271,8 @@ def _deep_merge(base, override):
     return result
 
 
-def _eth_global_system(global_data):
-    """从合并格式 01-global.yaml 提取 common.switch + switches.eth 的 system。"""
+def _global_system(global_data, section):
+    """Extract common.switch plus exactly one requested switch family system."""
     if not isinstance(global_data, dict):
         raise ValueError("01-global.yaml 顶层必须是 mapping")
 
@@ -283,17 +283,23 @@ def _eth_global_system(global_data):
         return system
 
     common = global_data.get("common", {}).get("switch", {})
-    eth = next(
-        (item["eth"] for item in global_data.get("switches", [])
-         if isinstance(item, dict) and isinstance(item.get("eth"), dict)),
-        None,
-    )
-    if eth is None:
-        raise ValueError("01-global.yaml 的 switches 中缺少 eth 配置")
-    merged = _deep_merge(common, eth)
+    switches = global_data.get("switches")
+    if not isinstance(switches, list):
+        raise ValueError("01-global.yaml 的 switches 必须是 list")
+    matches = [
+        item[section] for item in switches
+        if isinstance(item, dict) and section in item
+        and isinstance(item.get(section), dict)
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            f"01-global.yaml 的 switches 必须恰好包含一个 {section} 配置，"
+            f"实际为 {len(matches)}"
+        )
+    merged = _deep_merge(common, matches[0])
     system = merged.get("system")
     if not isinstance(system, dict):
-        raise ValueError("01-global.yaml 的 ETH 配置缺少 system")
+        raise ValueError(f"01-global.yaml 的 {section} 配置缺少 system")
     return system
 
 
@@ -335,9 +341,9 @@ def _default_document_with_global(default_data, global_system):
     raise ValueError("default YAML 缺少 set.system")
 
 
-def _refresh_cumulus_defaults(service_dir=None, global_file=None):
+def _render_service_defaults(service_dir, section, global_file=None):
     """Render site defaults in memory; never mutate neutral source files."""
-    service_dir = os.path.abspath(service_dir or _SCRIPT_DIR)
+    service_dir = os.path.abspath(service_dir)
     global_file = os.path.abspath(
         global_file or os.path.join(service_dir, "template", "01-global.yaml")
     )
@@ -349,7 +355,7 @@ def _refresh_cumulus_defaults(service_dir=None, global_file=None):
 
     with open(global_file, encoding="utf-8") as stream:
         global_data = _strict_yaml_load(stream)
-    global_system = _eth_global_system(global_data)
+    global_system = _global_system(global_data, section)
     rendered = {}
     for default_file in defaults:
         with open(default_file, encoding="utf-8") as stream:
@@ -853,7 +859,7 @@ def _effective_cumulus_default(service_dir):
 def _rendered_effective_cumulus_default(service_dir):
     """Return the site-rendered default bytes without mutating neutral input."""
     default_path, version = _effective_cumulus_default(service_dir)
-    rendered_defaults = _refresh_cumulus_defaults(service_dir=service_dir)
+    rendered_defaults = _render_service_defaults(service_dir, "eth")
     default_name = os.path.basename(default_path)
     try:
         default_text = rendered_defaults[default_name]
@@ -867,6 +873,74 @@ def _rendered_effective_cumulus_default(service_dir):
             f"站点 effective default 顶层必须是 list：{default_name}"
         )
     return default_name, default_text.encode("utf-8"), version
+
+
+_NVOS_RELEASE_DEFAULT_NAMES = {
+    "ib": "default_ib.yaml",
+    "nvl": "default_nvl.yaml",
+}
+
+
+def _rendered_nvos_release_defaults(service_dir, kinds):
+    """Return fixed-name, family-specific NVOS defaults and manifest rows."""
+    unknown = set(kinds) - set(_NVOS_RELEASE_DEFAULT_NAMES)
+    if unknown:
+        raise ValueError(f"未知 NVOS default family: {sorted(unknown)}")
+    defaults = {}
+    for family in sorted(kinds):
+        rendered = _render_service_defaults(service_dir, family)
+        try:
+            text = rendered["default.yaml"]
+        except KeyError as exc:
+            raise ValueError("NVOS neutral default.yaml 未生成") from exc
+        document = _strict_yaml_load(text)
+        if not isinstance(document, list):
+            raise ValueError(f"NVOS {family} default 顶层必须是 list")
+        def contains_null(value):
+            if value is None:
+                return True
+            if isinstance(value, dict):
+                return any(
+                    key is None or contains_null(child)
+                    for key, child in value.items()
+                )
+            if isinstance(value, list):
+                return any(contains_null(child) for child in value)
+            return False
+        if contains_null(document):
+            raise ValueError(f"NVOS {family} default 不允许 null")
+        data = text.encode("utf-8")
+        if not data:
+            raise ValueError(f"NVOS {family} default 不能为空")
+        name = _NVOS_RELEASE_DEFAULT_NAMES[family]
+        defaults[family] = {
+            "name": name,
+            "bytes": data,
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "size": len(data),
+        }
+    return defaults
+
+
+def _write_nvos_release_defaults(directory, defaults):
+    """Write rendered defaults without following or overwriting release entries."""
+    for row in defaults.values():
+        destination = os.path.join(directory, row["name"])
+        if os.path.lexists(destination):
+            raise ValueError(
+                f"release 默认文件名与设备配置冲突：{row['name']}"
+            )
+    for row in defaults.values():
+        destination = os.path.join(directory, row["name"])
+        temporary = f"{destination}.tmp.{os.getpid()}"
+        try:
+            with open(temporary, "xb") as stream:
+                stream.write(row["bytes"])
+            os.chmod(temporary, 0o644)
+            os.replace(temporary, destination)
+        finally:
+            if os.path.lexists(temporary):
+                os.unlink(temporary)
 
 
 def _load_air_generation_manifest(air_context):
@@ -1281,7 +1355,7 @@ def _confirm_replace(path):
 
 
 def _write_nvos_release_manifest(
-    directory, timestamp, devices, hosts, kinds, *, deployment_scope="all",
+    directory, timestamp, devices, hosts, kinds, effective_defaults, *, deployment_scope="all",
     switch_scope="all",
 ):
     release_devices = []
@@ -1311,6 +1385,14 @@ def _write_nvos_release_manifest(
         "switch_scope": switch_scope,
         "release_id": f"{timestamp}-nvos",
         "types": sorted(kinds),
+        "effective_defaults": {
+            family: {
+                "name": row["name"],
+                "sha256": row["sha256"],
+                "size": row["size"],
+            }
+            for family, row in sorted(effective_defaults.items())
+        },
         "identity_pending": pending,
         "devices": release_devices,
     }
@@ -1343,10 +1425,19 @@ def _publish_single_nvos(
     if not ok:
         print("[ERROR] 输入目录校验失败，latest_yaml 保持不变")
         return False
-    pending = _write_nvos_release_manifest(
-        ctx["path"], ctx["timestamp"], devices, hosts, {ctx["kind"]},
-        deployment_scope=deployment_scope, switch_scope=switch_scope,
-    )
+    try:
+        defaults = _rendered_nvos_release_defaults(
+            ctx["service_dir"], {ctx["kind"]},
+        )
+        _write_nvos_release_defaults(ctx["path"], defaults)
+        pending = _write_nvos_release_manifest(
+            ctx["path"], ctx["timestamp"], devices, hosts, {ctx["kind"]},
+            defaults, deployment_scope=deployment_scope,
+            switch_scope=switch_scope,
+        )
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        print(f"[ERROR] NVOS 默认配置校验失败：{exc}")
+        return False
     marker = os.path.join(ctx["path"], ".published-complete")
     with open(marker, "w", encoding="utf-8") as f:
         f.write(
@@ -1422,10 +1513,19 @@ def _publish_combined_nvos(
             print("[ERROR] 合并目录校验失败，latest_yaml 保持不变")
             return False
 
-        pending = _write_nvos_release_manifest(
-            staging_dir, timestamp, devices, processed_hosts, kinds,
-            deployment_scope=deployment_scope, switch_scope=switch_scope,
-        )
+        try:
+            defaults = _rendered_nvos_release_defaults(
+                contexts[0]["service_dir"], kinds,
+            )
+            _write_nvos_release_defaults(staging_dir, defaults)
+            pending = _write_nvos_release_manifest(
+                staging_dir, timestamp, devices, processed_hosts, kinds,
+                defaults, deployment_scope=deployment_scope,
+                switch_scope=switch_scope,
+            )
+        except (OSError, ValueError, yaml.YAMLError) as exc:
+            print(f"[ERROR] NVOS 默认配置校验失败：{exc}")
+            return False
         with open(os.path.join(staging_dir, ".published-complete"), "w", encoding="utf-8") as f:
             f.write(
                 f"{timestamp} combine\n"
@@ -2232,12 +2332,6 @@ Cumulus 发布成功后归档并删除生成源目录。""")
         ):
             sys.exit(1)
         return
-
-    try:
-        _refresh_cumulus_defaults()
-    except (OSError, ValueError, yaml.YAMLError) as exc:
-        print(f"[ERROR] Cumulus 默认配置同步失败：{exc}")
-        sys.exit(1)
 
     if cumulus_contexts[0] is not None:
         if deployment_scope == "prod":

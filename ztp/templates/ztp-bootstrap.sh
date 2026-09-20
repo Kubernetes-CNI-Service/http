@@ -1638,8 +1638,12 @@ elif [[ "${PROD_NAME}" == ${IBSW} || "${PROD_NAME}" == ${NVLSW} ]]; then
     MAC_CFG="${CFG_BASE_URL}/latest_yaml/${ETH0_MAC}.yaml"
     MAC_LOCAL="${TMP_DIR}/${MAC_CFG##*/}"
 
-    ## “全局部分默认配置”是只有预设置密码，dns, timezone, ntp等配置，需要用nv config patch
-    GLOBAL_BASE_CFG="${CFG_BASE_URL}/default.yaml"
+    ## Release-bound family default; tracked neutral defaults must never reach a device.
+    if [[ "${PROD_NAME}" == ${IBSW} ]]; then
+        GLOBAL_BASE_CFG="${CFG_BASE_URL}/latest_yaml/default_ib.yaml"
+    else
+        GLOBAL_BASE_CFG="${CFG_BASE_URL}/latest_yaml/default_nvl.yaml"
+    fi
     GLOBAL_DEF_CACHE="${TMP_DIR}/default.nvos-global.yaml"
 
     load_nvos_default_cfg() {

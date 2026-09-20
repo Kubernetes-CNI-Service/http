@@ -559,7 +559,7 @@ def _render_cumulus_default_from_global(default_file, global_file):
     with open(default_file, encoding="utf-8") as stream:
         default_data = helper._strict_yaml_load(stream)
     updated = helper._default_document_with_global(
-        default_data, helper._eth_global_system(global_data),
+        default_data, helper._global_system(global_data, "eth"),
     )
     rendered = yaml.dump(
         updated, allow_unicode=True, sort_keys=False,

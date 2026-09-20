@@ -381,7 +381,7 @@ class ReleaseTransactionTests(unittest.TestCase):
                     LOAD.find_placeholder_password_sections(document),
                 )
 
-        for value in ("**", "'*'*", "''*''", "prefix*suffix", "", None):
+        for value in ("**", "'*'*", "''*''", "' * '", "prefix*suffix", "", None):
             with self.subTest(near_miss=value):
                 document = yaml.safe_load(template.read_text(encoding="utf-8"))
                 switches = {
@@ -397,6 +397,134 @@ class ReleaseTransactionTests(unittest.TestCase):
                 self.assertEqual(
                     (), LOAD.find_placeholder_password_sections(document),
                 )
+
+    def test_service_default_renderer_is_family_specific_and_preserves_neutral_silence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = Path(directory)
+            (service / "template").mkdir()
+            neutral = ROOT / "ztp/config/nvos/default.yaml"
+            shutil.copy2(neutral, service / "default.yaml")
+            source_before = (service / "default.yaml").read_bytes()
+            global_data = {
+                "common": {"switch": {}},
+                "switches": [
+                    {"nvl": {"system": {
+                        "date-time": {"timezone": "Asia/Tokyo"},
+                        "aaa": {"user": {"admin": {"password": "$y$nvl"}}},
+                    }}},
+                    {"ib": {"system": {
+                        "aaa": {"user": {"admin": {"password": "$y$ib"}}},
+                    }}},
+                    {"eth": {"system": {
+                        "date-time": {"timezone": "Europe/London"},
+                        "aaa": {"user": {"cumulus": {"hashed-password": "$y$eth"}}},
+                    }}},
+                ],
+            }
+            global_file = service / "template/01-global.yaml"
+            global_file.write_text(yaml.safe_dump(global_data, sort_keys=False), encoding="utf-8")
+
+            ib = PUBLISHER._render_service_defaults(service, "ib")["default.yaml"]
+            nvl = PUBLISHER._render_service_defaults(service, "nvl")["default.yaml"]
+            ib_system = yaml.safe_load(ib)[0]["set"]["system"]
+            nvl_system = yaml.safe_load(nvl)[0]["set"]["system"]
+            self.assertEqual("$y$ib", ib_system["aaa"]["user"]["admin"]["password"])
+            self.assertEqual("Etc/UTC", ib_system["date-time"]["timezone"])
+            self.assertNotIn("hashed-password", ib)
+            self.assertEqual("$y$nvl", nvl_system["aaa"]["user"]["admin"]["password"])
+            self.assertEqual("Asia/Tokyo", nvl_system["date-time"]["timezone"])
+            self.assertNotIn("$y$ib", nvl)
+            self.assertNotIn("null", ib.casefold())
+            self.assertEqual(source_before, (service / "default.yaml").read_bytes())
+
+            self.assertEqual(
+                "$y$ib",
+                PUBLISHER._global_system(
+                    {
+                        **global_data,
+                        "switches": list(reversed(global_data["switches"])),
+                    },
+                    "ib",
+                )["aaa"]["user"]["admin"]["password"],
+            )
+            self.assertEqual(
+                "$y$eth",
+                PUBLISHER._global_system(global_data, "eth")
+                ["aaa"]["user"]["cumulus"]["hashed-password"],
+            )
+            missing = {
+                **global_data,
+                "switches": (
+                    global_data["switches"][:1] + global_data["switches"][2:]
+                ),
+            }
+            with self.assertRaisesRegex(ValueError, "ib"):
+                PUBLISHER._global_system(missing, "ib")
+            malformed = {**global_data, "switches": [{"ib": "not-a-mapping"}]}
+            with self.assertRaisesRegex(ValueError, "ib"):
+                PUBLISHER._global_system(malformed, "ib")
+
+            duplicate = dict(global_data)
+            duplicate["switches"] = [*global_data["switches"], {"ib": {"system": {}}}]
+            with self.assertRaisesRegex(ValueError, "ib"):
+                PUBLISHER._global_system(duplicate, "ib")
+
+    def test_single_nvos_publish_binds_family_default_and_collision_keeps_latest(self):
+        service = self.root / "single-nvos"
+        output_root = service / "template/99-output-ib_nvl"
+        output_root.mkdir(parents=True)
+        shutil.copy2(ROOT / "ztp/config/nvos/default.yaml", service / "default.yaml")
+        (service / "template/01-global.yaml").write_text(
+            "switches:\n"
+            "- ib:\n    system:\n      aaa:\n        user:\n          admin:\n            password: '$y$ib'\n"
+            "- nvl:\n    system:\n      aaa:\n        user:\n          admin:\n            password: '$y$nvl'\n"
+            "- eth:\n    system: {}\n",
+            encoding="utf-8",
+        )
+        neutral_before = (service / "default.yaml").read_bytes()
+
+        def publish(family, timestamp, hostname, mac):
+            directory = output_root / f"{timestamp}-{family}"
+            directory.mkdir()
+            (directory / f"{hostname}.yaml").write_text(
+                "- set:\n"
+                "    interface:\n"
+                "      eth0:\n"
+                "        ipv4:\n"
+                "          address:\n"
+                "            192.0.2.10/24: {}\n"
+                "          gateway:\n"
+                "            192.0.2.1: {}\n",
+                encoding="utf-8",
+            )
+            devices = {hostname.casefold(): {
+                "hostname": hostname, "dev_type": family,
+                "eth0_ip_cidr": "192.0.2.10/24", "eth0_gw": "192.0.2.1",
+                "eth0_mac": mac, "eth1_mac": "", "eth1_ip_cidr": "",
+                "eth1_gw": "", "identity_pending": False,
+            }}
+            context = PUBLISHER._nvos_dir_context(str(directory))
+            self.assertIsNotNone(context)
+            return PUBLISHER._publish_single_nvos(context, devices), directory
+
+        for family, timestamp, hostname, mac, expected in (
+            ("ib", "20260902_120000", "IB-one", "02:00:00:00:01:01", "default_ib.yaml"),
+            ("nvl", "20260902_120001", "NVL-one", "02:00:00:00:01:02", "default_nvl.yaml"),
+        ):
+            ok, directory = publish(family, timestamp, hostname, mac)
+            self.assertTrue(ok)
+            manifest = json.loads((directory / "release-manifest.json").read_text())
+            self.assertEqual({family}, set(manifest["effective_defaults"]))
+            self.assertEqual(expected, manifest["effective_defaults"][family]["name"])
+            self.assertTrue((directory / expected).is_file())
+
+        previous_latest = (service / "latest_yaml").resolve(strict=True)
+        ok, _directory = publish(
+            "ib", "20260902_120002", "default_ib", "02:00:00:00:01:03",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(previous_latest, (service / "latest_yaml").resolve(strict=True))
+        self.assertEqual(neutral_before, (service / "default.yaml").read_bytes())
 
     def test_placeholder_password_authority_matches_schema_and_password_updater(self):
         password_spec = importlib.util.spec_from_file_location(

@@ -254,6 +254,7 @@ class PlatformReleaseFlowTests(unittest.TestCase):
         cls.dhcp = cls.ztp / "config/isc-dhcp-server"
         for directory in (cls.cumulus / "template", cls.nvos / "template", cls.dhcp):
             directory.mkdir(parents=True)
+        shutil.copy2(ROOT / "ztp/config/nvos/default.yaml", cls.nvos / "default.yaml")
 
         cls.global_file = cls.project / "01-global.yaml"
         cls.devices_file = cls.project / "02-devices_config.csv"
@@ -274,9 +275,29 @@ switches:
       version: 5.16.4
       system: {}
   - ib:
-      system: {}
+      system:
+        date-time:
+          timezone: Asia/Taipei
+        dns:
+          server: [192.0.2.53]
+        ntp:
+          server: [192.0.2.123]
+        aaa:
+          user:
+            admin:
+              password: '$y$ib-family'
   - nvl:
-      system: {}
+      system:
+        date-time:
+          timezone: Asia/Tokyo
+        dns:
+          server: [198.51.100.53]
+        ntp:
+          server: [198.51.100.123]
+        aaa:
+          user:
+            admin:
+              password: '$y$nvl-family'
 """,
             encoding="utf-8",
         )
@@ -635,6 +656,28 @@ switches:
         manifest = json.loads(
             (self.nvos_release / "release-manifest.json").read_text()
         )
+        defaults = manifest["effective_defaults"]
+        self.assertEqual({"ib", "nvl"}, set(defaults))
+        self.assertEqual("default_ib.yaml", defaults["ib"]["name"])
+        self.assertEqual("default_nvl.yaml", defaults["nvl"]["name"])
+        for row in defaults.values():
+            path = self.nvos_release / row["name"]
+            self.assertTrue(path.is_file() and not path.is_symlink())
+            self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), row["sha256"])
+            self.assertEqual(path.stat().st_size, row["size"])
+            self.assertEqual(0o644, path.stat().st_mode & 0o777)
+        ib_text = (self.nvos_release / "default_ib.yaml").read_text(encoding="utf-8")
+        nvl_text = (self.nvos_release / "default_nvl.yaml").read_text(encoding="utf-8")
+        self.assertIn("Asia/Taipei", ib_text)
+        self.assertIn("192.0.2.53", ib_text)
+        self.assertIn("192.0.2.123", ib_text)
+        self.assertIn("$y$ib-family", ib_text)
+        self.assertNotIn("$y$nvl-family", ib_text)
+        self.assertIn("Asia/Tokyo", nvl_text)
+        self.assertIn("198.51.100.53", nvl_text)
+        self.assertIn("198.51.100.123", nvl_text)
+        self.assertIn("$y$nvl-family", nvl_text)
+        self.assertNotIn("$y$ib-family", nvl_text)
         devices = {item["hostname"]: item for item in manifest["devices"]}
         self.assertEqual({IB_HOST, NVL_HOST}, set(devices))
         self.assertEqual("ib", devices[IB_HOST]["type"])
@@ -654,6 +697,43 @@ switches:
             {"dhcp", "cumulus", "nvos"}, set(self.parent["components"]),
         )
 
+    def test_parent_refuses_hostile_nvos_release_defaults(self):
+        cases = (
+            "missing", "wrong-name", "undeclared", "symlink", "hardlink",
+            "hash-drift", "malformed-yaml",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for case in cases:
+                with self.subTest(case=case):
+                    release = root / case
+                    shutil.copytree(self.nvos_release, release, symlinks=True)
+                    manifest_path = release / "release-manifest.json"
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    target = release / "default_ib.yaml"
+                    if case == "missing":
+                        target.unlink()
+                    elif case == "wrong-name":
+                        manifest["effective_defaults"]["ib"]["name"] = "default_nvl.yaml"
+                    elif case == "undeclared":
+                        shutil.copy2(target, release / "default_extra.yaml")
+                    elif case == "symlink":
+                        target.unlink()
+                        target.symlink_to("default_nvl.yaml")
+                    elif case == "hardlink":
+                        target.unlink()
+                        os.link(release / f"{IB_HOST}.yaml", target)
+                    elif case == "hash-drift":
+                        target.write_bytes(target.read_bytes() + b"\n")
+                    else:
+                        target.write_text("- set: [\n", encoding="utf-8")
+                        row = manifest["effective_defaults"]["ib"]
+                        row["size"] = target.stat().st_size
+                        row["sha256"] = hashlib.sha256(target.read_bytes()).hexdigest()
+                    with self.assertRaises(LOAD.LoadError):
+                        LOAD._validate_child_artifacts(
+                            label="nvos", release_dir=release, manifest=manifest,
+                        )
     def test_unknown_platform_gets_a_pool_but_no_url_or_release_identity(self):
         config = (self.dhcp / "dhcpd.conf").read_text(encoding="utf-8")
         self.assertIn("range 192.0.2.100 192.0.2.200;", config)

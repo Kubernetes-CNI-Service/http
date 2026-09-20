@@ -5619,6 +5619,7 @@ PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B test_cases/run_related_tests.p
           <li>Native 服务失败：检查端口、ZTP 地址、Apache/DHCP 配置和 systemd 状态。</li>
           <li>Docker：当前未准入生产；隔离验证失败应停在首个证据点并回到 canonical 工作树修复，外来同名容器不删除。</li>
           <li>ZTP 失败：核对实际 ZTP 接口、DHCP lease、MAC YAML、HTTP 资源和 bootstrap 日志。</li>
+          <li>NVOS 降级配置：IB 只读取当前受管 release 的 <code>latest_yaml/default_ib.yaml</code>，NVLink 只读取 <code>latest_yaml/default_nvl.yaml</code>。两者由项目 global 的对应 family 渲染并受 child/parent manifest 的名称、大小和 SHA-256 约束；缺失、漂移或预取失败时不得退回带占位密码的中性 <code>config/nvos/default.yaml</code>，专属配置失败后的 fallback 必须 fail closed。</li>
         </ul>
         <p>任何错误都应 fail closed。不要删除 lock、receipt、quarantine 或 status 文件来伪造成功。</p>
       </section>

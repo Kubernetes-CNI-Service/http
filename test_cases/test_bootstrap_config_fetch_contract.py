@@ -37,6 +37,9 @@ def run_bootstrap_fetch(
     *,
     response_codes: tuple[str, ...],
     payload: str = "valid",
+    product_name: str = "SN5600",
+    dedicated_apply_fail: bool = False,
+    default_available: bool = True,
     template_source: Optional[str] = None,
 ) -> tuple[subprocess.CompletedProcess[str], list[str], Path, Path]:
     """Run the real Cumulus bootstrap with a deterministic HTTP/NVUE boundary."""
@@ -71,6 +74,9 @@ def run_bootstrap_fetch(
     _write_executable(fake_bin, "nv", """
         #!/bin/sh
         printf 'nv:%s\n' "$*" >> "$EVENTS"
+        if [ "$NV_REPLACE_FAIL" = 1 ] && [ "$1 $2" = "config replace" ]; then
+            exit 1
+        fi
         exit 0
     """)
     _write_executable(fake_bin, "curl", r"""
@@ -136,7 +142,14 @@ def run_bootstrap_fetch(
             *.mode) code=200; body='patch\n' ;;
             *.spx) code=404; body= ;;
             *.pub) code=200; body='ssh-ed25519 AAAATEST bootstrap-contract\n' ;;
-            *) code=200 ;;
+            *)
+                case "$url" in
+                    */config/nvos/latest_yaml/default_*.yaml)
+                        if [ "$DEFAULT_AVAILABLE" = 1 ]; then code=200; else code=404; body=; fi
+                        ;;
+                    *) code=200 ;;
+                esac
+                ;;
         esac
         if [ -n "$output" ] && [ "$output" != /dev/null ]; then
             if [ "$code" = 200 ]; then printf '%b' "$body" > "$output"; else rm -f -- "$output"; fi
@@ -162,7 +175,7 @@ def run_bootstrap_fetch(
         f"APPLIED_STATE_DIR={shlex.quote(str(state_root))}", 1,
     ).replace(
         "PROD_NAME=$(decode-syseeprom 2>/dev/null | grep '^Product Name' | awk '{print $NF}' || echo \"unknown\")",
-        'PROD_NAME="SN5600"', 1,
+        f'PROD_NAME={shlex.quote(product_name)}', 1,
     ).replace(
         "IMG_VER=$(grep '^IMAGE_RELEASE=' /etc/image-release | awk -F'=' '{print $2}')",
         'IMG_VER="5.16.4"', 1,
@@ -171,18 +184,18 @@ def run_bootstrap_fetch(
         'RUN_VER="5.16.4"', 1,
     ).replace(
         'ETH0_RAW_MAC=$(cat /sys/class/net/eth0/address)',
-        f'ETH0_RAW_MAC="{MAC}"', 1,
+        f'ETH0_RAW_MAC="{MAC}"',
     ).replace(
-        'USER_HOME=/home/${USER_NAME}', 'USER_HOME="${TEST_HOME}"', 1,
+        'USER_HOME=/home/${USER_NAME}', 'USER_HOME="${TEST_HOME}"',
     ).replace(
         '        install_manual_ztp_helper\n',
         '        : # helper installation tested independently\n', 1,
     ).replace(
         '        install_applied_config_helper "${USER_NAME}"\n',
-        '        : # helper installation tested independently\n', 1,
+        '        : # helper installation tested independently\n',
     ).replace(
         '        install_time_sync_helper "${USER_NAME}"\n',
-        '        : # helper installation tested independently\n', 1,
+        '        : # helper installation tested independently\n',
     )
     source = re.sub(
         r'if ! select_ztp_network_path; then\n.*?\nfi\n\n'
@@ -206,6 +219,8 @@ def run_bootstrap_fetch(
         "ATTEMPT_FILE": str(attempt_file),
         "RESPONSE_CODES": ",".join(response_codes),
         "DEDICATED_PAYLOAD": payload,
+        "NV_REPLACE_FAIL": "1" if dedicated_apply_fail else "0",
+        "DEFAULT_AVAILABLE": "1" if default_available else "0",
         "TEST_HOME": str(switch_home),
     }
     result = subprocess.run(
@@ -298,6 +313,54 @@ def default_mutations(events: list[str]) -> list[str]:
 
 
 class RequiredDeviceConfigFetchTests(unittest.TestCase):
+    def test_nvos_default_fetch_is_release_bound_and_family_selected(self):
+        source = TEMPLATE_PATH.read_text(encoding="utf-8")
+        nvos = source.split(
+            'elif [[ "${PROD_NAME}" == ${IBSW}', 1,
+        )[1].split('else\n    USER_NAME="root"', 1)[0]
+        self.assertIn("latest_yaml/default_ib.yaml", nvos)
+        self.assertIn("latest_yaml/default_nvl.yaml", nvos)
+        self.assertNotIn('GLOBAL_BASE_CFG="${CFG_BASE_URL}/default.yaml"', nvos)
+
+    def test_nvos_family_release_default_crosses_real_bootstrap_fallback(self):
+        for product, family_name in (("QM9700", "default_ib.yaml"), ("NVL-SW", "default_nvl.yaml")):
+            for response_codes, apply_fail, expected_source in (
+                (("404",), False, "default"),
+                (("200",), True, "fallback_default"),
+            ):
+                with self.subTest(product=product, apply_fail=apply_fail):
+                    result, events, state, _home = self.run_case(
+                        response_codes=response_codes,
+                        product_name=product,
+                        dedicated_apply_fail=apply_fail,
+                    )
+                    self.assertEqual(0, result.returncode, result.stderr + result.stdout)
+                    urls = [event for event in events if event.startswith("curl:http://")]
+                    selected = [event for event in urls if family_name in event]
+                    self.assertEqual(1, len(selected), events)
+                    self.assertFalse(any("/config/nvos/default.yaml" in event for event in urls), urls)
+                    self.assertLess(events.index(selected[0]), next(
+                        index for index, event in enumerate(events)
+                        if event.startswith("curl-argv:") and MAC_FILE in event
+                    ))
+                    self.assertTrue(any(event.startswith("nv:config patch ") for event in events), events)
+                    receipt = (state / "receipt.env").read_text(encoding="utf-8")
+                    self.assertIn(f"source_kind={expected_source}", receipt)
+                    self.assertIn(f"source_name={family_name}", receipt)
+
+    def test_nvos_fallback_fails_closed_without_selected_release_default(self):
+        for product, family_name in (("QM9700", "default_ib.yaml"), ("NVL-SW", "default_nvl.yaml")):
+            with self.subTest(product=product):
+                result, events, state, _home = self.run_case(
+                    response_codes=("404",), product_name=product,
+                    default_available=False,
+                )
+                self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+                self.assertTrue(any(family_name in event for event in events), events)
+                self.assertFalse(any("/config/nvos/default.yaml" in event for event in events), events)
+                self.assertFalse((state / "receipt.env").exists())
+                self.assertFalse(any(event.startswith("nv:config patch ") for event in events), events)
+
     def run_case(self, **kwargs):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
