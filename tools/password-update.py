@@ -25,6 +25,10 @@ import yaml
 from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
 
 from deployment_lock import DeploymentLockError, deployment_lock
+from project_contract import (
+    SWITCH_CREDENTIAL_FAMILY_ORDER,
+    SWITCH_CREDENTIAL_PATHS,
+)
 from ztp_service_runtime import RuntimeContractError, stop_native_ztp_monitors
 
 
@@ -35,7 +39,7 @@ DEVICES_FILENAME = "02-devices_config.csv"
 MAX_GLOBAL_SIZE = 4 * 1024 * 1024
 MIN_PASSWORD_LENGTH = 8
 MAX_PASSWORD_LENGTH = 128
-SECTION_ORDER = ("eth", "ib", "nvl")
+SECTION_ORDER = SWITCH_CREDENTIAL_FAMILY_ORDER
 HASH_METHODS = {
     "eth": ("sha-512", "$6$", "SHA-512 crypt"),
     "ib": ("yescrypt", "$y$", "yescrypt"),
@@ -208,11 +212,25 @@ def _nvos_target(section: str, section_node: Node) -> ScalarTarget:
             "password 或 hashed-password 其中一个"
         )
     field = fields[0]
-    target = _scalar(
-        admin_values[field],
-        f"switches.{section}.system.aaa.user.admin.{field}",
+    expected_field = SWITCH_CREDENTIAL_PATHS[section][-1]
+    if field != expected_field:
+        raise PasswordUpdateError(
+            f"switches.{section} credential field must be {expected_field}"
+        )
+    return _credential_target(section, section_node)
+
+
+def _credential_target(section: str, section_node: Node) -> ScalarTarget:
+    node = section_node
+    label = f"switches.{section}"
+    for key in SWITCH_CREDENTIAL_PATHS[section]:
+        node = _required_mapping_value(node, key, label)
+        label += f".{key}"
+    return ScalarTarget(
+        section=section,
+        field=SWITCH_CREDENTIAL_PATHS[section][-1],
+        node=_scalar(node, label),
     )
-    return ScalarTarget(section=section, field=field, node=target)
 
 
 def locate_password_targets(
@@ -238,24 +256,7 @@ def locate_password_targets(
     for section in selected:
         section_node = available[section]
         if section == "eth":
-            system = _required_mapping_value(
-                section_node, "system", "switches.eth",
-            )
-            aaa = _required_mapping_value(system, "aaa", "switches.eth.system")
-            users = _required_mapping_value(aaa, "user", "switches.eth.system.aaa")
-            cumulus = _required_mapping_value(
-                users, "cumulus", "switches.eth.system.aaa.user",
-            )
-            password = _scalar(
-                _required_mapping_value(
-                    cumulus, "hashed-password",
-                    "switches.eth.system.aaa.user.cumulus",
-                ),
-                "switches.eth.system.aaa.user.cumulus.hashed-password",
-            )
-            targets.append(ScalarTarget(
-                section="eth", field="hashed-password", node=password,
-            ))
+            targets.append(_credential_target(section, section_node))
         else:
             targets.append(_nvos_target(section, section_node))
 

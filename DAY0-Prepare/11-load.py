@@ -84,6 +84,9 @@ if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 from project_contract import (
     GLOBAL_SCHEMA_VERSION,
+    SWITCH_CREDENTIAL_FAMILY_ORDER,
+    SWITCH_CREDENTIAL_PATHS,
+    SWITCH_SCHEMA_FAMILIES,
     detect_global_schema_version,
     normalize_issue_tracker_policy,
     normalize_v2_mlag_policy,
@@ -926,7 +929,7 @@ def load_global(path: Path) -> GlobalSettings:
         if not isinstance(entry, dict) or len(entry) != 1:
             raise LoadError("global.switches 每项必须只包含一种设备类型")
         kind, config = next(iter(entry.items()))
-        if kind not in {"eth", "ib", "nvl"}:
+        if kind not in SWITCH_SCHEMA_FAMILIES:
             raise LoadError(f"global.switches 包含未知设备类型：{kind}")
         if not isinstance(config, dict):
             raise LoadError(f"switches.{kind} 必须是 mapping")
@@ -955,6 +958,74 @@ def load_global(path: Path) -> GlobalSettings:
         ztp_ips=ztp_ips,
         versions=versions,
         schema_version=schema_version,
+    )
+
+
+def find_placeholder_password_sections(global_data: object) -> tuple[str, ...]:
+    """Return ordered switch families whose managed credential is exactly ``*``."""
+    if set(SWITCH_CREDENTIAL_PATHS) != set(SWITCH_SCHEMA_FAMILIES):
+        raise LoadError("switch credential contract does not cover every schema family")
+    if not isinstance(global_data, dict):
+        raise LoadError("global.yaml 顶层必须是 mapping")
+    switches = global_data.get("switches")
+    if not isinstance(switches, list):
+        raise LoadError("global.switches 必须是 list")
+
+    values: dict[str, object] = {}
+    for index, item in enumerate(switches, 1):
+        if not isinstance(item, dict) or len(item) != 1:
+            raise LoadError(f"global.switches[{index}] 必须只包含一种设备类型")
+        family, config = next(iter(item.items()))
+        if family not in SWITCH_SCHEMA_FAMILIES:
+            raise LoadError(
+                f"switch credential contract does not cover schema family: {family}"
+            )
+        if family in values:
+            raise LoadError(f"global.switches 包含重复设备类型：{family}")
+        node: object = config
+        traversed = f"switches.{family}"
+        for key in SWITCH_CREDENTIAL_PATHS[family]:
+            if not isinstance(node, dict) or key not in node:
+                raise LoadError(f"switch credential path missing: {traversed}.{key}")
+            node = node[key]
+            traversed += f".{key}"
+        values[family] = node
+
+    placeholders: list[str] = []
+    for family in SWITCH_CREDENTIAL_FAMILY_ORDER:
+        value = values.get(family)
+        if not isinstance(value, str):
+            continue
+        normalized = value.strip()
+        if (
+            len(normalized) >= 2
+            and normalized[0] == normalized[-1]
+            and normalized[0] in {"'", '"'}
+        ):
+            normalized = normalized[1:-1]
+        if normalized == "*":
+            placeholders.append(family)
+    return tuple(placeholders)
+
+
+def _placeholder_password_error(
+    project: Path, sections: tuple[str, ...],
+) -> LoadError:
+    platforms = {"eth": "cumulus", "ib": "ib", "nvl": "nvl"}
+    commands = [f"DAY0-Prepare/11-load.py {project} --update-passwords"]
+    if sections == SWITCH_CREDENTIAL_FAMILY_ORDER:
+        commands.append(
+            f"python3 tools/password-update.py {project} --platform all"
+        )
+    commands.extend(
+        f"python3 tools/password-update.py {project} --platform {platforms[section]}"
+        for section in sections
+    )
+    return LoadError(
+        "global.yaml 仍含占位密码，受影响平台："
+        + ", ".join(sections)
+        + "。请先执行以下任一对应修复命令：\n  - "
+        + "\n  - ".join(commands)
     )
 
 
@@ -6537,6 +6608,13 @@ def validate_inputs(
     devices_file = project / "02-devices_config.csv"
     subnet_file = project / "02-dhcp-subnet_config.csv"
     settings = load_global(global_file)
+    try:
+        global_data = safe_load_global_yaml(global_file.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError, ValueError) as exc:
+        raise LoadError(f"global YAML 语法错误：{exc}") from exc
+    placeholder_sections = find_placeholder_password_sections(global_data)
+    if placeholder_sections:
+        raise _placeholder_password_error(project, placeholder_sections)
     validation_errors = []
     device_types: frozenset[str] = frozenset()
     p2p_file = project / (args.p2p_file or "p2p.xlsx")

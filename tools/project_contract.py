@@ -27,6 +27,18 @@ _MAC_ADDRESS = re.compile(r"^[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}$")
 _ISSUE_TRACKER_SPREADSHEET_ID = re.compile(r"^[A-Za-z0-9_-]{20,}$")
 _ISSUE_TRACKER_PATH = "common.mgmt.issue-tracker"
 
+# One shared authority for switch families whose schema contains a managed
+# bootstrap credential. The ordered tuple is operator-facing; the schema set
+# is intentionally separate so tests fail closed if a new switch family is
+# added without a credential path.
+SWITCH_SCHEMA_FAMILIES = frozenset({"eth", "ib", "nvl"})
+SWITCH_CREDENTIAL_FAMILY_ORDER = ("eth", "ib", "nvl")
+SWITCH_CREDENTIAL_PATHS = MappingProxyType({
+    "eth": ("system", "aaa", "user", "cumulus", "hashed-password"),
+    "ib": ("system", "aaa", "user", "admin", "password"),
+    "nvl": ("system", "aaa", "user", "admin", "password"),
+})
+
 # A collection cycle has one immutable, ordered set of child authorities for
 # each supported scope.  The mapping proxy is intentional: slot order is part
 # of the evidence contract and must not be process-global mutable state.

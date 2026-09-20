@@ -238,7 +238,28 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.subnet_file = self.project / "02-dhcp-subnet_config.csv"
         self.p2p_file = self.project / "p2p.xlsx"
         for path, content in (
-            (self.global_file, "schema_version: 1\n"),
+            (self.global_file, (
+                "schema_version: 1\n"
+                "switches:\n"
+                "- eth:\n"
+                "    system:\n"
+                "      aaa:\n"
+                "        user:\n"
+                "          cumulus:\n"
+                "            hashed-password: '$6$fixture$safe-value'\n"
+                "- ib:\n"
+                "    system:\n"
+                "      aaa:\n"
+                "        user:\n"
+                "          admin:\n"
+                "            password: '$y$fixture$ib-safe-value'\n"
+                "- nvl:\n"
+                "    system:\n"
+                "      aaa:\n"
+                "        user:\n"
+                "          admin:\n"
+                "            password: '$y$fixture$nvl-safe-value'\n"
+            )),
             (self.subnet_file, "shared_network,subnet\nnet,192.0.2.0\n"),
             (self.p2p_file, "test\n"),
         ):
@@ -305,6 +326,139 @@ class ReleaseTransactionTests(unittest.TestCase):
     def tearDown(self) -> None:
         LOAD.ZTP_DIR = self.old_ztp_dir
         self.temporary.cleanup()
+
+    def test_placeholder_password_detector_uses_real_template_shape_and_order(self):
+        template = ROOT / "DAY0-Prepare/template/01-global.yaml"
+        document = yaml.safe_load(template.read_text(encoding="utf-8"))
+
+        self.assertEqual(
+            ("eth", "ib", "nvl"),
+            LOAD.find_placeholder_password_sections(document),
+        )
+        document["switches"] = list(reversed(document["switches"]))
+        self.assertEqual(
+            ("eth", "ib", "nvl"),
+            LOAD.find_placeholder_password_sections(document),
+        )
+
+    def test_placeholder_password_detector_is_exact_and_fail_closed_for_schema_drift(self):
+        template = ROOT / "DAY0-Prepare/template/01-global.yaml"
+        document = yaml.safe_load(template.read_text(encoding="utf-8"))
+        switches = {
+            next(iter(item)): next(iter(item.values()))
+            for item in document["switches"]
+        }
+        switches["eth"]["system"]["aaa"]["user"]["cumulus"][
+            "hashed-password"
+        ] = " ** "
+        switches["ib"]["system"]["aaa"]["user"]["admin"]["password"] = 7
+        switches["nvl"]["system"]["aaa"]["user"]["admin"]["password"] = (
+            "$y$j9T$valid-looking-value"
+        )
+        self.assertEqual((), LOAD.find_placeholder_password_sections(document))
+
+        document["switches"].append({"future": {"system": {}}})
+        with self.assertRaisesRegex(LOAD.LoadError, "credential.*future|future.*credential"):
+            LOAD.find_placeholder_password_sections(document)
+
+    def test_placeholder_password_detector_accepts_only_one_outer_quote_pair(self):
+        template = ROOT / "DAY0-Prepare/template/01-global.yaml"
+        for value in ("*", " '*' ", ' "*" '):
+            with self.subTest(value=value):
+                document = yaml.safe_load(template.read_text(encoding="utf-8"))
+                switches = {
+                    next(iter(item)): next(iter(item.values()))
+                    for item in document["switches"]
+                }
+                for family, config in switches.items():
+                    path = LOAD.SWITCH_CREDENTIAL_PATHS[family]
+                    target = config
+                    for key in path[:-1]:
+                        target = target[key]
+                    target[path[-1]] = value
+                self.assertEqual(
+                    ("eth", "ib", "nvl"),
+                    LOAD.find_placeholder_password_sections(document),
+                )
+
+        for value in ("**", "'*'*", "''*''", "prefix*suffix", "", None):
+            with self.subTest(near_miss=value):
+                document = yaml.safe_load(template.read_text(encoding="utf-8"))
+                switches = {
+                    next(iter(item)): next(iter(item.values()))
+                    for item in document["switches"]
+                }
+                for family, config in switches.items():
+                    path = LOAD.SWITCH_CREDENTIAL_PATHS[family]
+                    target = config
+                    for key in path[:-1]:
+                        target = target[key]
+                    target[path[-1]] = value
+                self.assertEqual(
+                    (), LOAD.find_placeholder_password_sections(document),
+                )
+
+    def test_placeholder_password_authority_matches_schema_and_password_updater(self):
+        password_spec = importlib.util.spec_from_file_location(
+            "password_contract_parity", ROOT / "tools/password-update.py",
+        )
+        password_module = importlib.util.module_from_spec(password_spec)
+        assert password_spec.loader is not None
+        sys.modules[password_spec.name] = password_module
+        password_spec.loader.exec_module(password_module)
+
+        self.assertEqual(
+            set(LOAD.SWITCH_SCHEMA_FAMILIES),
+            set(LOAD.SWITCH_CREDENTIAL_PATHS),
+        )
+        self.assertEqual(
+            tuple(LOAD.SWITCH_CREDENTIAL_FAMILY_ORDER),
+            tuple(password_module.SECTION_ORDER),
+        )
+        self.assertIs(
+            LOAD.SWITCH_CREDENTIAL_PATHS,
+            password_module.SWITCH_CREDENTIAL_PATHS,
+        )
+
+    def test_validate_inputs_refuses_placeholders_before_downstream_probes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            global_file = project / "01-global.yaml"
+            global_file.write_bytes(
+                (ROOT / "DAY0-Prepare/template/01-global.yaml").read_bytes()
+            )
+            args = SimpleNamespace()
+            downstream = (
+                "apply_subnet_service_ips", "load_device_types", "select_p2p",
+                "validate_subnet_file", "project_air_topology_policy",
+                "project_mini_air_devices", "prepare_images",
+                "validate_shared_artifact_receipts", "prepare_pubkeys",
+            )
+            patches = [mock.patch.object(LOAD, name) for name in downstream]
+            with ExitStack() as stack:
+                mocks = [stack.enter_context(patch) for patch in patches]
+                with self.assertRaises(LOAD.LoadError) as caught:
+                    LOAD.validate_inputs(
+                        project, args, allow_management_key_generation=False,
+                    )
+
+            message = str(caught.exception)
+            self.assertIn("eth, ib, nvl", message)
+            self.assertIn(
+                f"DAY0-Prepare/11-load.py {project} --update-passwords", message,
+            )
+            self.assertIn(
+                f"python3 tools/password-update.py {project} --platform all",
+                message,
+            )
+            for section, platform in (("eth", "cumulus"), ("ib", "ib"), ("nvl", "nvl")):
+                self.assertIn(section, message)
+                self.assertIn(f"--platform {platform}", message)
+            self.assertNotIn("'*'", message)
+            self.assertNotIn("$6$", message)
+            self.assertNotIn("$y$", message)
+            for downstream_mock in mocks:
+                downstream_mock.assert_not_called()
 
     def _prepare_h04_schema_v1_collision_generator(self) -> tuple[Path, Path]:
         template_dir = self.ztp / "config/cumulus/template"

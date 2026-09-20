@@ -1186,6 +1186,7 @@
       "id": "password_rotation_config_generation",
       "members": [
         "DAY0-Prepare/11-load.py",
+        "tools/project_contract.py",
         "tools/password-update.py",
         "ztp/config/cumulus/template/90-c2-generate_configs.py"
       ],

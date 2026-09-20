@@ -1030,6 +1030,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <dt>运行环境：</dt><dd>canonical 项目电脑、Native 管理服务器，或由 Docker hostctl 在容器内调用。</dd>
             <dt>使用场景：</dt><dd>执行“项目创建、输入校验、统一 load、监控与 unload 生命周期”中的明确操作步骤；不要把一次子步骤当作完整发布。</dd>
             <dt>前置条件：</dt><dd>项目、设备范围、运行后端、权限和输入身份已确认；任何 destructive/remote 动作先完成本地 proof 和只读检查。</dd>
+            <dt>密码占位符门禁：</dt><dd><code>validate_inputs()</code> 在任何配置生成、制品复制、密钥准备或服务变更前检查 Ethernet、IB 与 NVLink 的 AAA 字段。若仍为模板占位符，load 会列出受影响平台并停止；通常先运行 <code>python3 DAY0-Prepare/11-load.py DAY0-Prepare/&lt;project&gt; --update-passwords</code>，或运行 <code>python3 tools/password-update.py DAY0-Prepare/&lt;project&gt; --platform all</code>。只轮换部分平台时，其余占位平台仍会阻断 load。</dd>
             <dt>语法/调用方式：</dt><dd>python3 -B DAY0-Prepare/11-load.py [options]</dd>
             <dt>主要参数：</dt><dd>--p2p-file, --p2p-legacy-columns, --mini, --dry-run, --no-upgrade, --skip-infra, --skip-doca, --download-doca, --skip-generate, --update-passwords, --start-services, --start-ztp-monitor, --ztp-monitor-interval, --deployment-scope, --air, --prod, --switch, --ztp-monitor-scope, --type, --ssh-dir</dd>
             <dt>输入：</dt><dd>所属场景的项目输入、设备清单、受信 archive/制品或运行日志；正式写入前必须完成 preflight。</dd>
@@ -4655,6 +4656,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <dt>运行环境：</dt><dd>通常在 canonical 项目电脑；deploy/import/diagnostic 类按说明在目标服务器运行。</dd>
             <dt>使用场景：</dt><dd>执行“跨主机打包、同步、导入、诊断、制品与分析工具”中的明确操作步骤；不要把一次子步骤当作完整发布。</dd>
             <dt>前置条件：</dt><dd>项目、设备范围、运行后端、权限和输入身份已确认；任何 destructive/remote 动作先完成本地 proof 和只读检查。</dd>
+            <dt>与 load 的关系：</dt><dd>模板项目的 Ethernet、IB、NVLink 密码必须在首次真实 load 前轮换。三个系统均需更新时使用 <code>--platform all</code>；单独使用 <code>--platform cumulus</code>、<code>--platform ib</code> 或 <code>--platform nvl</code> 后，未轮换的平台仍会被 load 的占位符门禁明确拒绝。</dd>
             <dt>语法/调用方式：</dt><dd>python3 -B tools/password-update.py [options]</dd>
             <dt>主要参数：</dt><dd>--platform, --same-password, --dry-run</dd>
             <dt>输入：</dt><dd>所属场景的项目输入、设备清单、受信 archive/制品或运行日志；正式写入前必须完成 preflight。</dd>

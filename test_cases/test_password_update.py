@@ -745,6 +745,28 @@ class PasswordUpdateDirectTests(unittest.TestCase):
 
 
 class PasswordUpdateGeneratorWorkflowTests(unittest.TestCase):
+    def test_placeholder_preflight_tracks_complete_and_partial_rotation(self):
+        source = yaml.safe_load(GLOBAL_TEXT)
+        self.assertEqual(
+            ("eth", "ib", "nvl"),
+            LOAD.find_placeholder_password_sections(source),
+        )
+
+        partial = PASSWORD_UPDATE.rewrite_global_passwords(
+            GLOBAL_TEXT, {"eth": CUMULUS_HASH}, sections=("eth",),
+        )
+        self.assertEqual(
+            ("ib", "nvl"),
+            LOAD.find_placeholder_password_sections(yaml.safe_load(partial)),
+        )
+
+        complete = PASSWORD_UPDATE.rewrite_global_passwords(
+            GLOBAL_TEXT, HASHES, sections=("eth", "ib", "nvl"),
+        )
+        self.assertEqual(
+            (), LOAD.find_placeholder_password_sections(yaml.safe_load(complete)),
+        )
+
     def test_load_cli_enables_interactive_selection_and_rejects_dry_run_mutation(self):
         args = LOAD.parse_args(["demo", "--update-passwords"])
         self.assertIs(args.update_passwords, True)
