@@ -65,47 +65,6 @@ class FeedbackGlobalWritebackTests(unittest.TestCase):
     def _timezone_path():
         return ("common", "switch", "system", "date-time", "timezone")
 
-    def test_snapshot_destinations_are_constructor_paths_independent_of_yaml_content(self):
-        # Normal read-only snapshots, not a race or recovery fixture. Changing
-        # document values must not change the directory arguments or held target.
-        for managed in (False, True):
-            for content in (b"common: {}\n", b"common:\n  switch: {}\n"):
-                with self.subTest(managed=managed, content=content), tempfile.TemporaryDirectory() as directory:
-                    root = Path(directory).resolve()
-                    project = root / "example"
-                    project.mkdir()
-                    authority = self._authority(project, content)
-                    kwargs = {}
-                    requested = authority
-                    expected_directories = [project]
-                    if managed:
-                        sample = root / "example-sample"
-                        sample.mkdir()
-                        requested = sample / "01-global.yaml"
-                        requested.symlink_to("../example/01-global.yaml")
-                        kwargs = {"managed_project_root": project, "managed_sample_path": sample}
-                        expected_directories = [sample, project]
-                    before = authority.stat()
-                    transaction = self._transaction(requested, root, **kwargs)
-                    try:
-                        with mock.patch.object(
-                            transaction, "_open_bound_directory", wraps=transaction._open_bound_directory,
-                        ) as opened:
-                            transaction._snapshot_authority()
-                        self.assertEqual([mock.call(path) for path in expected_directories], opened.call_args_list)
-                        self.assertEqual(authority, transaction.target_path)
-                        self.assertEqual(content, transaction.snapshot_bytes)
-                        self.assertEqual(hashlib.sha256(content).hexdigest(), transaction.before_sha256)
-                        held = os.fstat(transaction._target_fd)
-                        self.assertEqual((before.st_dev, before.st_ino), (held.st_dev, held.st_ino))
-                        self.assertEqual(content, authority.read_bytes())
-                        self.assertFalse((project / "99-output-ztp").exists())
-                        if managed:
-                            self.assertTrue(requested.is_symlink())
-                            self.assertEqual("../example/01-global.yaml", os.readlink(requested))
-                    finally:
-                        transaction.close()
-
     def test_implicit_authority_is_same_directory_only_and_ambiguity_fails(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

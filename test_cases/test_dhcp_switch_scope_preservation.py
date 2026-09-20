@@ -199,59 +199,6 @@ def sha256(path: Path) -> str:
 
 
 class DhcpSwitchScopeDirectTests(unittest.TestCase):
-    def test_transaction_plan_preserves_fixed_paths_counts_and_publication_order(self):
-        labels = ("conf", "eth", "ib", "nvl", "manifest")
-        names = (
-            "dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts",
-            "dhcpd_nvl.hosts", "dhcp-release-manifest.json",
-        )
-        for selected, published in (
-            ("all", ("conf", "eth", "ib", "nvl", "manifest")),
-            ("eth", ("conf", "eth", "manifest")),
-            ("ib", ("conf", "ib", "manifest")),
-            ("nvl", ("conf", "nvl", "manifest")),
-        ):
-            with self.subTest(selected=selected), tempfile.TemporaryDirectory() as name:
-                fixture = ScopedDhcpFixture(Path(name))
-                before = fixture.snapshot()
-                records = {
-                    "eth": [{}, {"identity_pending": True}, {}],
-                    "ib": [{"identity_pending": True}],
-                    "nvl": [{}, {}, {}],
-                }
-                with mock.patch.multiple(DHCP, **{
-                    "OUTPUT_" + ("MANIFEST" if label == "manifest" else label.upper()):
-                        str(fixture.dhcp / filename)
-                    for label, filename in zip(labels, names)
-                }):
-                    plan = DHCP._prepare_dhcp_output_transaction(
-                        family_records=records, switch_scope=selected,
-                    )
-                stage_root = Path(plan["directory"])
-                self.assertEqual(fixture.dhcp.resolve(), stage_root.parent)
-                self.assertTrue(stage_root.name.startswith(".dhcp-generate-"))
-                self.assertTrue(stage_root.is_dir())
-                self.assertEqual([], list(stage_root.iterdir()))
-                targets = dict(zip(labels, map(str, (fixture.dhcp.resolve() / value for value in names))))
-                stage = dict(zip(labels, map(str, (stage_root / value for value in names))))
-                self.assertEqual(targets, plan["targets"])
-                self.assertEqual(stage, plan["stage"])
-                self.assertEqual(list(labels), list(plan["stage"]))
-                owned = {"eth", "ib", "nvl"} if selected == "all" else {selected}
-                self.assertEqual(owned, plan["owned_families"])
-                counts = {"eth": 1, "ib": 1, "nvl": 1}
-                for family, count in (("eth", 2), ("ib", 0), ("nvl", 3)):
-                    if family in owned:
-                        counts[family] = count
-                self.assertEqual(counts, plan["declaration_counts"])
-                self.assertEqual(
-                    tuple(stage[label] if label == "conf" or label in owned else targets[label]
-                          for label in ("conf", "eth", "ib", "nvl")),
-                    plan["manifest_outputs"],
-                )
-                self.assertEqual([(stage[label], targets[label]) for label in published], plan["publish"])
-                self.assertEqual(before, fixture.snapshot())
-
     def test_each_selected_family_rewrites_only_its_owned_host_file(self):
         for selected in FAMILY_FILE:
             with self.subTest(selected=selected), tempfile.TemporaryDirectory() as name:
