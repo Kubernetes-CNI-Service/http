@@ -203,6 +203,9 @@
       date-time:
         timezone: {{ g.system['date-time'].timezone }}
       dns:
+{% if g.system.dns.domain is defined %}
+        domain: {{ g.system.dns.domain }}
+{% endif %}
         server:
 {% for srv in g.system.dns.server %}
           {{ srv }}: {}

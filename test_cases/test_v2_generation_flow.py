@@ -2211,6 +2211,74 @@ switches:
                     "350", config["bridge"]["domain"]["br_default"]["vlan"],
                 )
 
+    def test_every_concrete_cumulus_template_conditionally_renders_eth_dns_domain(self):
+        """REQ-10: every role preserves DNS/ Docker VRF while adding domain."""
+        template_names = sorted(
+            path.name.removesuffix(".yaml.j2")
+            for path in TEMPLATES.glob("*.yaml.j2")
+            if not path.name.startswith("_")
+        )
+        self.assertEqual(14, len(template_names))
+        environment = GENERATOR.build_env()
+        configured_global = copy.deepcopy(self.intermediate_document["global"])
+        configured_global["system"]["dns"]["domain"] = "fabric.example"
+        configured_global["system"]["dns"]["vrf"] = "DNS-CONTROL"
+        absent_global = copy.deepcopy(configured_global)
+        del absent_global["system"]["dns"]["domain"]
+        dynamic_server_vrf = {
+            "oobofoob-leaf", "oobofoob-spine", "tan-cp-1gleaf",
+        }
+        dynamic_docker_vrf = {"oobofoob-leaf", "oobofoob-spine"}
+
+        for template_name in template_names:
+            with self.subTest(template=template_name):
+                device = copy.deepcopy(self.generated_devices["EXAMPLE-NoVlan"])
+                device.update({
+                    "hostname": f"EXAMPLE-{template_name}",
+                    "template": template_name,
+                    "mlag_backup": "192.0.2.99",
+                    "mlag_shared_address": "198.51.100.253",
+                    "mlag_mac_address": "02:00:00:00:20:ff",
+                    "mlag_priority": 100,
+                    "system_mac": "02:00:00:00:20:01",
+                })
+                configured = set_block(GENERATOR._load_generated_yaml(
+                    GENERATOR.render(
+                        environment, configured_global,
+                        device["hostname"], device,
+                    ),
+                ))
+                absent = set_block(GENERATOR._load_generated_yaml(
+                    GENERATOR.render(
+                        environment, absent_global,
+                        device["hostname"], device,
+                    ),
+                ))
+
+                self.assertEqual(
+                    "fabric.example", configured["system"]["dns"]["domain"],
+                )
+                self.assertNotIn("search", configured["system"]["dns"])
+                self.assertNotIn("domain", absent["system"]["dns"])
+                self.assertEqual(
+                    absent["system"]["dns"]["server"],
+                    configured["system"]["dns"]["server"],
+                )
+                self.assertEqual(
+                    absent["system"]["docker"],
+                    configured["system"]["docker"],
+                )
+                if template_name in dynamic_server_vrf:
+                    self.assertTrue(all(
+                        server["vrf"] == "DNS-CONTROL"
+                        for server in configured["system"]["dns"]["server"].values()
+                    ))
+                if template_name in dynamic_docker_vrf:
+                    self.assertEqual(
+                        "DNS-CONTROL",
+                        configured["system"]["docker"]["vrf"],
+                    )
+
     def test_intermediate_model_has_no_v1_first_vlan_copy(self):
         leaf = self.generated_devices["EXAMPLE-Leaf01"]
         self.assertEqual(2, leaf["_project_schema_version"])
