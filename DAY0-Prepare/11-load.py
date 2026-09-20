@@ -873,7 +873,7 @@ def _parse_subnet_ztp_fields(
     return service_ip, profile, nvos_ztp
 
 
-def load_global(path: Path) -> GlobalSettings:
+def _load_global_document(path: Path) -> dict[str, object]:
     _nonempty_file(path, "global.yaml")
     try:
         data = safe_load_global_yaml(path.read_text(encoding="utf-8"))
@@ -881,6 +881,13 @@ def load_global(path: Path) -> GlobalSettings:
         raise LoadError(f"global YAML 语法错误：{exc}") from exc
     if not isinstance(data, dict):
         raise LoadError("global.yaml 顶层必须是 mapping")
+    return data
+
+
+def load_global(
+    path: Path, *, global_data: dict[str, object] | None = None,
+) -> GlobalSettings:
+    data = _load_global_document(path) if global_data is None else global_data
     try:
         schema_version = detect_global_schema_version(data)
         normalize_issue_tracker_policy(data)
@@ -6607,11 +6614,8 @@ def validate_inputs(
     global_file = project / "01-global.yaml"
     devices_file = project / "02-devices_config.csv"
     subnet_file = project / "02-dhcp-subnet_config.csv"
-    settings = load_global(global_file)
-    try:
-        global_data = safe_load_global_yaml(global_file.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError, ValueError) as exc:
-        raise LoadError(f"global YAML 语法错误：{exc}") from exc
+    global_data = _load_global_document(global_file)
+    settings = load_global(global_file, global_data=global_data)
     placeholder_sections = find_placeholder_password_sections(global_data)
     if placeholder_sections:
         raise _placeholder_password_error(project, placeholder_sections)
