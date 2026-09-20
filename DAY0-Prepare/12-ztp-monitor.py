@@ -1668,10 +1668,9 @@ def collection_attribution_input_digests(
     for label, path in sorted(paths.items()):
         if not isinstance(label, str) or not label or not isinstance(path, Path):
             raise ValueError("collection attribution input mapping is invalid")
-        try:
-            content = path.read_bytes()
-        except FileNotFoundError:
-            content = b""
+        content = _read_bounded_regular_text(
+            path, label=f"归属输入 {label}", max_bytes=64 * 1024 * 1024,
+        ).encode("utf-8")
         digests[label] = hashlib.sha256(content).hexdigest()
     return digests
 
@@ -1696,37 +1695,25 @@ def load_collection_attribution(
 ) -> list[dict[str, Any]]:
     """Load and row-reconcile cache state against current authoritative input."""
     current_digests = _validate_collection_input_digests(input_digests)
-    descriptor = -1
     try:
-        descriptor = os.open(
-            path,
-            os.O_RDONLY
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NOFOLLOW", 0),
+        raw_payload = _read_bounded_regular_text(
+            path, label="collection attribution state",
+            max_bytes=MAX_COLLECTION_ATTRIBUTION_BYTES,
         )
-        metadata = os.fstat(descriptor)
+        payload = json.loads(raw_payload)
         if (
-            not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_nlink != 1
-            or metadata.st_size > MAX_COLLECTION_ATTRIBUTION_BYTES
+            not isinstance(payload, dict)
+            or set(payload) != {"schema_version", "input_digests", "records"}
+            or payload.get("schema_version") != COLLECTION_ATTRIBUTION_STATE_SCHEMA
+            or not isinstance(payload.get("records"), list)
         ):
-            raise ValueError("collection attribution state is not a bounded regular file")
-        with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
-            descriptor = -1
-            payload = json.load(stream)
-    except FileNotFoundError:
+            raise ValueError("collection attribution state has invalid structure")
+        _validate_collection_input_digests(payload.get("input_digests"))
+        raw_records = payload["records"]
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        # This file is only a cache.  An integrity failure discards it whole;
+        # current-cycle evidence still has to re-establish an exact binding.
         return []
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-    if (
-        not isinstance(payload, dict)
-        or set(payload) != {"schema_version", "input_digests", "records"}
-        or payload.get("schema_version") != COLLECTION_ATTRIBUTION_STATE_SCHEMA
-        or not isinstance(payload.get("records"), list)
-    ):
-        raise ValueError("collection attribution state has invalid structure")
-    _validate_collection_input_digests(payload.get("input_digests"))
     # A digest change triggers this complete reconciliation.  It is not a
     # global flush: independent rows that remain byte-for-byte true survive.
     current_rows = {
@@ -1743,26 +1730,25 @@ def load_collection_attribution(
     validated: list[dict[str, Any]] = []
     addresses: set[str] = set()
     duplicate_addresses: set[str] = set()
-    for raw_record in payload["records"]:
-        record = validate_collection_attribution_record(raw_record)
-        key = (
-            record["address"],
-            json.dumps(
-                record["input_row_identity"], sort_keys=True,
-                separators=(",", ":"),
-            ),
-        )
-        if key not in current_rows:
-            continue
-        if record["address"] in addresses:
-            duplicate_addresses.add(record["address"])
-        addresses.add(record["address"])
-        validated.append(record)
+    try:
+        for raw_record in raw_records:
+            record = validate_collection_attribution_record(raw_record)
+            key = (
+                record["address"],
+                json.dumps(
+                    record["input_row_identity"], sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            )
+            if record["address"] in addresses:
+                duplicate_addresses.add(record["address"])
+            addresses.add(record["address"])
+            if key in current_rows:
+                validated.append(record)
+    except (TypeError, ValueError):
+        return []
     if duplicate_addresses:
-        validated = [
-            record for record in validated
-            if record["address"] not in duplicate_addresses
-        ]
+        return []
     # Referencing current_digests here is intentional: callers must supply a
     # well-formed current fingerprint even though row truth, not equality with
     # an old whole-file digest, determines which independent records survive.
@@ -1800,30 +1786,7 @@ def persist_collection_attribution(
         raise ValueError("collection attribution state is too large")
     path.parent.mkdir(parents=True, exist_ok=True)
     with monitor_pid_lock(path):
-        descriptor, raw_name = tempfile.mkstemp(
-            prefix=f".{path.name}.", dir=path.parent,
-        )
-        temporary = Path(raw_name)
-        try:
-            os.fchmod(descriptor, 0o600)
-            with os.fdopen(descriptor, "wb") as stream:
-                descriptor = -1
-                stream.write(content)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, path)
-            os.chmod(path, 0o600)
-            directory_fd = os.open(
-                path.parent, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
-            )
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-        finally:
-            if descriptor >= 0:
-                os.close(descriptor)
-            temporary.unlink(missing_ok=True)
+        _replace_bytes_durably(path, content, mode=0o600)
 
 
 def active_device_by_ip(
@@ -1988,7 +1951,7 @@ def devices_for_switch_collection(
                 )
                 attribution_status = (
                     "superseded" if attribution_superseded
-                    else "matched"
+                    else "verification_required"
                     if attribution["input_row_identity"]
                     == collection_row_identity(device)
                     else "conflict"
@@ -2028,14 +1991,14 @@ def devices_for_switch_collection(
                     observation_time=attribution_time,
                 ),
             }
-            attribution_is_authoritative = bool(
+            attribution_requires_verification = bool(
                 attribution is not None
                 and attribution_status != "superseded"
                 and len(candidates) > 1
             )
             address_eligible = not disabled and (
-                paths["posthoc_identity"]["status"] == "matched"
-                if attribution_is_authoritative
+                False
+                if attribution_requires_verification
                 else any(value["status"] == "matched" for value in paths.values())
             )
             if disabled:
@@ -4957,7 +4920,9 @@ def _watch_state_bytes(payload: dict[str, Any]) -> bytes:
     ).encode("utf-8")
 
 
-def _replace_bytes_durably(path: Path, content: bytes) -> None:
+def _replace_bytes_durably(
+    path: Path, content: bytes, *, mode: int = 0o644,
+) -> None:
     descriptor = -1
     temporary: Path | None = None
     try:
@@ -4965,7 +4930,7 @@ def _replace_bytes_durably(path: Path, content: bytes) -> None:
             prefix=f".{path.name}.", suffix=".tmp", dir=path.parent,
         )
         temporary = Path(raw_name)
-        os.fchmod(descriptor, 0o644)
+        os.fchmod(descriptor, mode)
         offset = 0
         while offset < len(content):
             offset += os.write(descriptor, content[offset:])
