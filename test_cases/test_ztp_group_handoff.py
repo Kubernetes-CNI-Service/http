@@ -699,7 +699,20 @@ class CollectionGateScopeTests(unittest.TestCase):
                 mock.patch.object(WORKER, "commands_for_scope", return_value=[]), \
                 mock.patch.object(
                     WORKER, "run_collection_cycle_coordinator",
-                    return_value={"identity": {}, "outcomes": [], "summary": None},
+                    return_value={
+                        "identity": {},
+                        "outcomes": [{
+                            "source_slot": "ethernet_prod",
+                            "outcome": "accepted",
+                            "child_result": {
+                                "schema_version": 1,
+                                "planned": 1,
+                                "succeeded": 1,
+                                "failed_devices": [],
+                            },
+                        }],
+                        "summary": None,
+                    },
                 ), \
                 mock.patch.object(WORKER, "write_status"), \
                 mock.patch.object(WORKER.subprocess, "run", return_value=completed):
