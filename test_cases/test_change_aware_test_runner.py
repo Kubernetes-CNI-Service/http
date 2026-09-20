@@ -703,6 +703,7 @@ class ImpactManifestTests(unittest.TestCase):
                 "examples/public-project/02-dhcp-subnet_config.csv.example",
                 "index.html",
                 "infra/docker/README.md",
+                "infra/infra-neutral.conf",
                 "requirements-container-top-level.lock",
                 "requirements-dev.txt",
                 "test_cases/audit_public_tree.py",
