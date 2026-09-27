@@ -97,9 +97,18 @@ def parser() -> argparse.ArgumentParser:
         ),
         allow_abbrev=False,
     )
-    result.add_argument("archive", type=Path, metavar="ARCHIVE")
-    result.add_argument("--root", type=Path, default=Path("/var/www/html"))
-    result.add_argument("--verify-only", action="store_true")
+    result.add_argument(
+        "archive", type=Path, metavar="ARCHIVE",
+        help="Path to the selected shared-artifact archive",
+    )
+    result.add_argument(
+        "--root", type=Path, default=Path("/var/www/html"),
+        help="Live installation root (default: /var/www/html)",
+    )
+    result.add_argument(
+        "--verify-only", action="store_true",
+        help="Verify the archive without installing any files",
+    )
     return result
 
 

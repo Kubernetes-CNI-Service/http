@@ -415,14 +415,14 @@ def _parser() -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(dest="command", required=True)
     inventory = commands.add_parser("inventory")
-    inventory.add_argument("--root", required=True)
-    inventory.add_argument("--state-dir", required=True)
-    inventory.add_argument("--project", required=True)
+    inventory.add_argument("--root", required=True, help="待盘点的备份根目录")
+    inventory.add_argument("--state-dir", required=True, help="保存冻结清单与状态的私有目录")
+    inventory.add_argument("--project", required=True, help="归属该备份根的项目名")
     for name in ("apply", "resume"):
         command = commands.add_parser(name)
-        command.add_argument("--manifest", required=True)
-        command.add_argument("--sha256", required=True)
-        command.add_argument("--journal", required=True)
+        command.add_argument("--manifest", required=True, help="已冻结的权限清单路径")
+        command.add_argument("--sha256", required=True, help="清单的预期 SHA-256 摘要")
+        command.add_argument("--journal", required=True, help="仅追加的清扫执行日志路径")
     return parser
 
 

@@ -6,12 +6,15 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import getpass
+import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 
@@ -29,21 +32,29 @@ from deploy_infra import (
     run_with_log,
     sudo_password_works,
 )
+from project_contract import infra_log_pending_state_names, managed_infra_log_project
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_OUTPUT = SCRIPT_DIR / "collected"
 SUPPORTED_UBUNTU_VERSIONS = {"22.04", "24.04"}
 LOG_NAME = re.compile(r"(?:logs/)?infra-(?:setup|teardown)-\d{8}_\d{6}(?:-\d+)?\.log")
+SAFE_SERVER_LABEL = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--devices-file", type=Path, default=DEFAULT_DEVICES)
+    parser.add_argument(
+        "--devices-file", type=Path, default=DEFAULT_DEVICES,
+        help="Path to the devices CSV used for server selection",
+    )
     parser.add_argument("--user", default=getpass.getuser(), help="SSH 用户")
     parser.add_argument("--identity", type=Path, help="SSH 私钥或公钥路径")
     parser.add_argument("--host", action="append", dest="hosts", help="只检查指定 hostname/IP")
-    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument(
+        "--output-dir", type=Path, default=DEFAULT_OUTPUT,
+        help="Directory for local results and collected remote logs",
+    )
     parser.add_argument(
         "--clients-only", action="store_true",
         help="只检查 CSV client，不检查运行 check_infra.py 的 mgmt 本机",
@@ -60,6 +71,37 @@ def normalize_identity(identity: Path | None) -> Path | None:
             raise DeployError(f"SSH 公钥没有对应私钥：{identity}")
         return private
     return identity.expanduser().resolve()
+
+
+def safe_server_output_dir(output_dir: Path, label: str, address: str) -> Path:
+    """Create one non-symlink result directory directly below output_dir."""
+    try:
+        canonical_address = str(ipaddress.IPv4Address(address))
+    except ipaddress.AddressValueError as exc:
+        raise DeployError(f"无效的 client IPv4 地址：{address!r}") from exc
+
+    if SAFE_SERVER_LABEL.fullmatch(label):
+        safe_label = label
+    else:
+        stem = re.sub(r"[^A-Za-z0-9_-]+", "_", label).strip("_")[:48]
+        digest = hashlib.sha256(label.encode("utf-8")).hexdigest()[:12]
+        safe_label = f"{stem or 'server'}-{digest}"
+    component = f"server-{safe_label}-{canonical_address.replace('.', '-')}"
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", component):
+        raise DeployError(f"无法生成安全的 client 结果目录：{label!r}")
+
+    root = output_dir.resolve()
+    if not root.is_dir() or root.is_symlink():
+        raise DeployError(f"结果根目录不是安全的实体目录：{output_dir}")
+    destination = root / component
+    if destination.is_symlink() or destination.exists():
+        raise DeployError(f"client 结果目录已存在或不是实体目录：{destination}")
+    if destination.parent.resolve() != root:
+        raise DeployError(f"client 结果目录逃逸结果根目录：{destination}")
+    destination.mkdir(mode=0o700, parents=False, exist_ok=False)
+    if destination.is_symlink() or destination.resolve().parent != root:
+        raise DeployError(f"client 结果目录创建后未保持约束：{destination}")
+    return destination
 
 
 def prepare_check_access(
@@ -118,6 +160,48 @@ def parse_key_values(output: str) -> dict[str, str]:
 def remote_probe_script() -> str:
     return r'''set -u
 base="${INFRA_BASE:-$HOME/http-infra}"
+for pending in "$base"/.logs-migration.*; do
+  if [ -e "$pending" ] || [ -L "$pending" ]; then
+    echo 'ERROR: infra log migration state is pending' >&2
+    exit 1
+  fi
+done
+# The lexical shape is part of ownership: merely resolving to a directory
+# would also accept an unrelated symlink outside the selected DAY0 project.
+if [ -L "$base/logs" ]; then
+  target=$(readlink -- "$base/logs") || exit 1
+  case "$target" in
+    ../DAY0-Prepare/*/99-output-infra) ;;
+    *) echo 'ERROR: infra/logs is not a managed project link' >&2; exit 1 ;;
+  esac
+  project=${target#../DAY0-Prepare/}
+  project=${project%/99-output-infra}
+  case "$project" in
+    ''|.|..|*/*|*[!A-Za-z0-9._-]*) echo 'ERROR: invalid infra log project component' >&2; exit 1 ;;
+  esac
+  project_root="$base/../DAY0-Prepare/$project"
+  output_root="$project_root/99-output-infra"
+  if [ -L "$base" ] || [ -L "$base/../DAY0-Prepare" ] ||
+     [ -L "$project_root" ] || [ -L "$output_root" ] ||
+     [ ! -d "$project_root" ] || [ ! -d "$output_root" ]; then
+    echo 'ERROR: infra/logs owner changed or is not a real project output' >&2
+    exit 1
+  fi
+  linked_root=$(cd -P -- "$base/logs" && pwd -P) || exit 1
+  expected_root=$(cd -P -- "$output_root" && pwd -P) || exit 1
+  if [ "$linked_root" != "$expected_root" ]; then
+    echo 'ERROR: infra/logs owner changed during probe' >&2
+    exit 1
+  fi
+  printf 'log.owner.kind=project\nlog.owner.project=%s\n' "$project"
+elif [ -e "$base/logs" ] && [ ! -d "$base/logs" ]; then
+  echo 'ERROR: infra/logs is not a real directory' >&2
+  exit 1
+elif [ -d "$base/logs" ]; then
+  printf 'log.owner.kind=unassigned\n'
+else
+  printf 'log.owner.kind=absent\n'
+fi
 if [ -r "$base/infra-status" ]; then
   while IFS= read -r line; do printf 'public.%s\n' "$line"; done < "$base/infra-status"
   status_http_server=$(awk -F= '$1 == "http_server" { print substr($0, index($0,"=")+1); exit }' "$base/infra-status")
@@ -175,7 +259,7 @@ else
   printf 'privileged.available=false\n'
 fi
 for log_root in "$base" "$base/logs"; do
-  find "$log_root" -maxdepth 1 -type f \( -name 'infra-setup-*.log' -o -name 'infra-teardown-*.log' \) -print 2>/dev/null \
+  find -H "$log_root" -maxdepth 1 -type f \( -name 'infra-setup-*.log' -o -name 'infra-teardown-*.log' \) -print 2>/dev/null \
     | while IFS= read -r path; do
         case "$path" in
           "$base/logs/"*) printf 'log.file=logs/%s\n' "$(basename "$path")" ;;
@@ -356,18 +440,34 @@ def collect_server(
     )
     values = parse_key_values(probe.stdout)
     severity, issues = classify(values)
-    host_dir = output_dir / re.sub(r"[^A-Za-z0-9_.-]+", "_", label)
-    host_dir.mkdir(parents=True, exist_ok=True)
+    host_dir = safe_server_output_dir(output_dir, label, host)
     (host_dir / "status.txt").write_text(probe.stdout, encoding="utf-8")
 
     log_names = [line.split("=", 1)[1] for line in probe.stdout.splitlines() if line.startswith("log.file=")]
+    owner_kind = values.get("log.owner.kind", "unassigned")
+    if owner_kind == "project":
+        project_name = values.get("log.owner.project", "")
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", project_name) or project_name in {".", ".."}:
+            raise DeployError(f"invalid probed infra log owner: {project_name!r}")
+        remote_log_root = f"{home}/DAY0-Prepare/{project_name}/99-output-infra"
+    elif owner_kind == "unassigned":
+        remote_log_root = f"{home}/http-infra/logs"
+    elif owner_kind == "absent":
+        if any(name.startswith("logs/") for name in log_names):
+            raise DeployError("probe reported logs without an infra log owner")
+        remote_log_root = ""
+    else:
+        raise DeployError(f"invalid probed infra log owner kind: {owner_kind!r}")
     copied: list[str] = []
     for name in sorted(set(log_names)):
         if not LOG_NAME.fullmatch(name):
             issues.append(f"跳过不安全的日志文件名：{name}")
             severity = "ERROR"
             continue
-        remote_path = f"{home}/http-infra/{name}"
+        remote_path = (
+            f"{remote_log_root}/{name[5:]}" if name.startswith("logs/")
+            else f"{home}/http-infra/{name}"
+        )
         destination = host_dir / name
         destination.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run([*scp_base, f"{target}:{remote_path}", str(destination)], check=True)
@@ -380,6 +480,35 @@ def collect_server(
 
 def collect_local(output_dir: Path) -> dict[str, object]:
     print("\n── 检查 mgmt 本机 ─────────────────────────────────────")
+    if infra_log_pending_state_names(SCRIPT_DIR.parent):
+        raise DeployError("infra log migration state pending; refusing collection")
+    runtime_log_dir = SCRIPT_DIR / "logs"
+    try:
+        root_mode = runtime_log_dir.lstat().st_mode
+    except FileNotFoundError:
+        owner = {"kind": "absent", "project": None, "target": None}
+        physical_log_dir = None
+    else:
+        if stat.S_ISLNK(root_mode):
+            project = managed_infra_log_project(
+                runtime_log_dir, SCRIPT_DIR.parent / "DAY0-Prepare"
+            )
+            if project is None:
+                raise DeployError(f"foreign infra log link: {runtime_log_dir}")
+            physical_log_dir = project / "99-output-infra"
+            owner = {
+                "kind": "project", "project": str(project.resolve()),
+                "target": str(physical_log_dir.resolve()),
+            }
+        elif stat.S_ISDIR(root_mode):
+            physical_log_dir = runtime_log_dir
+            owner = {
+                "kind": "unassigned", "project": None,
+                "target": str(runtime_log_dir.resolve()),
+            }
+        else:
+            raise DeployError(f"invalid infra log root: {runtime_log_dir}")
+    log_root_stat = physical_log_dir.lstat() if physical_log_dir is not None else None
     environment = os.environ.copy()
     environment["INFRA_BASE"] = str(SCRIPT_DIR)
     probe = subprocess.run(
@@ -401,19 +530,60 @@ def collect_local(output_dir: Path) -> dict[str, object]:
     for source in sorted(SCRIPT_DIR.glob("infra-teardown-*.log")):
         shutil.copy2(source, host_dir / source.name)
         copied.append(source.name)
-    runtime_log_dir = SCRIPT_DIR / "logs"
-    if runtime_log_dir.is_dir():
-        for source in sorted(runtime_log_dir.rglob("*.log")):
-            relative = source.relative_to(runtime_log_dir)
-            destination = host_dir / "logs" / relative
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, destination)
-            copied.append(str(Path("logs") / relative))
+    if physical_log_dir is not None:
+        log_root_fd = os.open(
+            physical_log_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        )
+        try:
+            if not os.path.samestat(log_root_stat, os.fstat(log_root_fd)) or \
+                    not os.path.samestat(log_root_stat, physical_log_dir.lstat()):
+                raise DeployError("infra log owner changed after probe")
+
+            def copy_tree(directory_fd: int, parts: tuple[str, ...] = ()) -> None:
+                with os.scandir(directory_fd) as entries:
+                    names = sorted(entry.name for entry in entries)
+                for name in names:
+                    item = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                    if stat.S_ISLNK(item.st_mode):
+                        raise DeployError(f"infra log tree contains a symlink: {name}")
+                    if stat.S_ISDIR(item.st_mode):
+                        nested_fd = os.open(
+                            name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                            dir_fd=directory_fd,
+                        )
+                        try:
+                            if not os.path.samestat(item, os.fstat(nested_fd)):
+                                raise DeployError(f"infra log directory changed: {name}")
+                            copy_tree(nested_fd, (*parts, name))
+                        finally:
+                            os.close(nested_fd)
+                    elif stat.S_ISREG(item.st_mode) and name.endswith(".log"):
+                        source_fd = os.open(
+                            name, os.O_RDONLY | os.O_NOFOLLOW,
+                            dir_fd=directory_fd,
+                        )
+                        try:
+                            if not os.path.samestat(item, os.fstat(source_fd)):
+                                raise DeployError(f"infra log file changed: {name}")
+                            relative = Path(*parts, name)
+                            destination = host_dir / "logs" / relative
+                            destination.parent.mkdir(parents=True, exist_ok=True)
+                            with os.fdopen(source_fd, "rb", closefd=False) as source, \
+                                    destination.open("xb") as sink:
+                                shutil.copyfileobj(source, sink)
+                            copied.append(str(Path("logs") / relative))
+                        finally:
+                            os.close(source_fd)
+
+            copy_tree(log_root_fd)
+        finally:
+            os.close(log_root_fd)
 
     print_result_details(severity, issues, values, len(copied))
     return {
         "hostname": f"mgmt:{hostname}", "address": "local", "severity": severity,
         "issues": issues, "values": values, "logs": copied,
+        "infra_log_ownership": owner,
     }
 
 

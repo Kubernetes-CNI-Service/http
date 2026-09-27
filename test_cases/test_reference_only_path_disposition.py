@@ -49,8 +49,14 @@ class ReferenceOnlyPathDispositionTests(unittest.TestCase):
             for path in root.rglob("*")
             if path.is_file() or path.is_symlink()
         ))
-        self.assertEqual((), actual)
-        self.assertFalse(root.exists())
+        # The owner may retain this precise reference-only tree in the live
+        # checkout; it is intentionally absent from the published candidate.
+        if root.exists():
+            self.assertTrue(root.is_dir())
+            self.assertFalse(root.is_symlink())
+            self.assertEqual(tuple(sorted(CABLETRACKER_REFERENCE_PATHS)), actual)
+        else:
+            self.assertEqual((), actual)
         self.assertEqual(
             frozenset({"monitor/cabletracker-main"}),
             getattr(CONTRACT, "REFERENCE_ONLY_SUBTREES", frozenset()),

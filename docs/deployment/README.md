@@ -37,6 +37,15 @@ macOS 只做配置准备和全量测试，不安装或启动 Apache/ISC DHCP；�
 adapter，也不能把 macOS 本身当作受支持的管理服务器。需要在本机接真实交换机时，adapter
 必须直通给 Ubuntu VM，Service IP 也配置在该 VM 的 Linux 接口上。
 
+V3 的 Linux `11-load.py` 必须显式声明 `--host-role=workstation` 或
+`--host-role=management-server`，不能从 OS、HOME 或 Service IP 是否已配置推断角色。
+`workstation` 只用于配置准备，不能启动本地 ZTP 服务或 Monitor，也不能从该 HOME
+生成管理服务器公钥；`management-server` 保持服务器公钥与原有项目笔记本公钥的角色边界。
+真实管理服务器的 Service IP 暂缺是服务就绪失败，不能改报 workstation 求通过。
+缺少角色在公钥、模板或服务写入前停止。macOS 默认 workstation，不能声明服务器角色。
+命令行声明不是物理角色证明，隔离 VM 和实际环境仍须按
+`test_cases/REAL_ENVIRONMENT.md` 的 `TC-REAL-REQ16-HOST-ROLE-001` 验证。
+
 | 部署场景 | 源码进入运行主机 | 唯一生命周期 | 同一 Service IP 换接口 |
 |---|---|---|---|
 | Mac 本机开发（不连接交换机） | 不传输；正式本机 load 生成并测试 | 不启动服务 | 不适用 |
@@ -83,7 +92,7 @@ python3 tools/sync-code.py <project> \
 
 # 管理服务器：接收首次包或增量更新后再执行生产 load
 ssh -t <user>@<mgmt-host> \
-  'cd /var/www/html && sudo python3 DAY0-Prepare/11-load.py --start-services DAY0-Prepare/<project>'
+  'cd /var/www/html && sudo python3 DAY0-Prepare/11-load.py --host-role=management-server --start-services DAY0-Prepare/<project>'
 ```
 
 本机 `--dry-run` 不生成文件也不运行全量测试，不能替代正式本机 load。不得在正式本机 load

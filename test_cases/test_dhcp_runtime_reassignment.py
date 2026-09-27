@@ -2,9 +2,13 @@
 
 import datetime as dt
 import importlib.util
+import json
+import os
 from pathlib import Path
+import stat
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,6 +34,65 @@ def lease(address: str, mac: str, state: str, starts: str, ends: str) -> str:
 
 class DhcpRuntimeLeaseReassignmentTests(unittest.TestCase):
     NOW = dt.datetime(2026, 8, 31, 12, 0, tzinfo=dt.timezone.utc)
+
+    def test_inventory_publish_replaces_existing_file_and_cleans_stage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "dhcp-runtime-inventory.json"
+            output.write_text("GENUINE-OLD\n", encoding="utf-8")
+            RUNTIME._atomic_json(output, {"devices": [], "count": 0})
+            self.assertEqual(
+                {"count": 0, "devices": []},
+                json.loads(output.read_text(encoding="utf-8")),
+            )
+            self.assertEqual(0o644, stat.S_IMODE(output.stat().st_mode))
+            self.assertEqual([output.name], [p.name for p in output.parent.iterdir()])
+
+    def test_inventory_publish_replace_failure_preserves_existing_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "dhcp-runtime-inventory.json"
+            output.write_text("GENUINE-OLD\n", encoding="utf-8")
+            with mock.patch.object(
+                RUNTIME.os, "replace", side_effect=OSError("injected rename failure"),
+            ), self.assertRaisesRegex(OSError, "injected rename failure"):
+                RUNTIME._atomic_json(output, {"devices": []})
+            self.assertEqual("GENUINE-OLD\n", output.read_text())
+            self.assertEqual([output.name], [p.name for p in output.parent.iterdir()])
+
+    def test_inventory_publish_refuses_rebound_parent_without_foreign_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parent = root / "legitimate"
+            parent.mkdir()
+            output = parent / "dhcp-runtime-inventory.json"
+            output.write_text("GENUINE-OLD\n", encoding="utf-8")
+            foreign = root / "foreign"
+            foreign.mkdir()
+            foreign_output = foreign / output.name
+            foreign_output.write_text("FOREIGN-SENTINEL\n", encoding="utf-8")
+            detached = root / "detached"
+            original_replace = os.replace
+            rebound = False
+
+            def replace_after_rebind(source, target, *args, **kwargs):
+                nonlocal rebound
+                if not rebound:
+                    rebound = True
+                    parent.rename(detached)
+                    parent.symlink_to(foreign, target_is_directory=True)
+                    (foreign / Path(source).name).write_text(
+                        "ATTACKER-STAGED\n", encoding="utf-8",
+                    )
+                return original_replace(source, target, *args, **kwargs)
+
+            with mock.patch.object(
+                RUNTIME.os, "replace", side_effect=replace_after_rebind,
+            ), self.assertRaises(OSError):
+                RUNTIME._atomic_json(output, {"devices": []})
+            self.assertTrue(rebound)
+            self.assertEqual("FOREIGN-SENTINEL\n", foreign_output.read_text())
+            self.assertEqual(
+                "GENUINE-OLD\n", (detached / output.name).read_text(),
+            )
 
     def test_last_record_by_address_removes_previous_mac_owner(self):
         text = lease(

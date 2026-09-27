@@ -151,10 +151,22 @@ def parser() -> argparse.ArgumentParser:
     build = actions.add_parser(
         "build", help="derive and export one offline project-specific image",
     )
-    build.add_argument("upload_bundle", type=Path, metavar="UPLOAD_BUNDLE")
-    build.add_argument("--base-image", required=True, metavar="IMAGE_ID")
-    build.add_argument("--output", required=True, type=Path, metavar="DIRECTORY")
-    build.add_argument("--shared-bundle", type=Path, metavar="DIRECTORY")
+    build.add_argument(
+        "upload_bundle", type=Path, metavar="UPLOAD_BUNDLE",
+        help="Verified project upload bundle to embed in the image",
+    )
+    build.add_argument(
+        "--base-image", required=True, metavar="IMAGE_ID",
+        help="Exact base image identifier used for this build",
+    )
+    build.add_argument(
+        "--output", required=True, type=Path, metavar="DIRECTORY",
+        help="Local export directory for the finished project image",
+    )
+    build.add_argument(
+        "--shared-bundle", type=Path, metavar="DIRECTORY",
+        help="Optional verified shared-artifact bundle directory",
+    )
     build.add_argument(
         "--no-upgrade", action="store_true",
         help="bind this project image to the no-switch-upgrade deployment path",
@@ -169,8 +181,14 @@ def parser() -> argparse.ArgumentParser:
     install = actions.add_parser(
         "install", help="verify or bootstrap the release embedded in this image",
     )
-    install.add_argument("--root", type=Path, default=Path("/var/www/html"))
-    install.add_argument("--verify-only", action="store_true")
+    install.add_argument(
+        "--root", type=Path, default=Path("/var/www/html"),
+        help="Live installation root (default: /var/www/html)",
+    )
+    install.add_argument(
+        "--verify-only", action="store_true",
+        help="Verify the embedded release without installing any files",
+    )
     install.add_argument(
         "--machine-readable", action="store_true", help=argparse.SUPPRESS,
     )

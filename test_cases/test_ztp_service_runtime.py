@@ -138,6 +138,71 @@ class DynamicDhcpInterfaceContractTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_http_owner_projection_retains_active_down_and_filtered_owners(self) -> None:
+        runtime = load_runtime_module()
+        links = [
+            link(7, "eno2"),
+            link(8, "eno3", up=False),
+            link(9, "dummy0", kind="dummy"),
+            link(10, "eno4"),
+        ]
+        addr = [
+            addresses(7, "eno2", "198.51.100.5/24"),
+            addresses(8, "eno3", "198.51.100.5/24"),
+            addresses(9, "dummy0", "198.51.100.5/24"),
+            addresses(
+                10, "eno4", "198.51.100.5/24",
+                preferred_life_time=0,
+            ),
+        ]
+        owners = runtime.inspect_http_listener_owners(
+            "198.51.100.5", link_snapshot=links, address_snapshot=addr,
+        )
+        by_name = {owner["ifname"]: owner for owner in owners}
+        self.assertEqual({"eno2", "eno3", "dummy0", "eno4"}, set(by_name))
+        self.assertEqual(7, by_name["eno2"]["ifindex"])
+        self.assertIs(by_name["eno2"]["eligible"], True)
+        for name in ("eno3", "dummy0", "eno4"):
+            with self.subTest(owner=name):
+                self.assertIs(by_name[name]["eligible"], False)
+                self.assertTrue(by_name[name]["reason"])
+
+    def test_http_owner_projection_is_order_independent_without_ztp_plan_change(self) -> None:
+        runtime = load_runtime_module()
+        links = [link(7, "eno2"), link(8, "eno3", up=False)]
+        addr = [
+            addresses(7, "eno2", "198.51.100.5/24"),
+            addresses(8, "eno3", "198.51.100.5/24"),
+        ]
+        expected = runtime.inspect_http_listener_owners(
+            "198.51.100.5", link_snapshot=links, address_snapshot=addr,
+        )
+        self.assertEqual(
+            expected,
+            runtime.inspect_http_listener_owners(
+                "198.51.100.5",
+                link_snapshot=list(reversed(links)),
+                address_snapshot=list(reversed(addr)),
+            ),
+        )
+        subnet_csv = self.write_subnets(
+            "direct,192.0.2.0,255.255.255.0,192.0.2.100,192.0.2.120,"
+            "192.0.2.1,192.0.2.10,oob,no",
+        )
+        duplicate_links = [link(7, "eno2"), link(8, "eno3")]
+        duplicate_addr = [
+            addresses(7, "eno2", "192.0.2.10/24"),
+            addresses(8, "eno3", "192.0.2.10/24"),
+        ]
+        with self.assertRaisesRegex(
+            runtime.RuntimeContractError, "expected exactly one eligible interface"
+        ):
+            runtime.plan_dhcp_runtime(
+                subnet_csv,
+                link_snapshot=duplicate_links,
+                address_snapshot=duplicate_addr,
+            )
+
     def write_subnets(self, *rows: str) -> Path:
         path = self.root / "02-dhcp-subnet_config.csv"
         path.write_text(self.HEADER + "".join(f"{row}\n" for row in rows), encoding="utf-8")
@@ -976,7 +1041,7 @@ class ContainerRuntimeWorkflowContractTests(unittest.TestCase):
         with mock.patch.object(
             load, "plan_local_dhcp_runtime", return_value=plan,
         ), mock.patch.object(
-            load, "supports_local_ztp_services", return_value=True,
+            load, "runtime_os", return_value="Linux",
         ), mock.patch.object(
             load.subprocess, "run", side_effect=forbidden,
         ):
@@ -984,6 +1049,7 @@ class ContainerRuntimeWorkflowContractTests(unittest.TestCase):
                 plan,
                 load.quiesce_services(
                     False, inputs=inputs, runtime_backend=Backend(),
+                    host_role="management-server",
                 ),
             )
         state = monitor.service_state("apache2", runtime_backend=Backend())

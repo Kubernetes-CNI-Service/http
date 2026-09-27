@@ -135,6 +135,10 @@ def classify_identity(actual_hostname: str, actual_mac: str, prod: Identity, air
             raise RuntimeError(
                 f"unknown hostname at {prod.ip}: {actual_hostname!r}"
             )
+        else:
+            raise RuntimeError(
+                f"ambiguous hostname at {prod.ip}: {actual_hostname!r} matches Production and AIR"
+            )
     expected_macs = {
         environment: _norm_mac(value) for environment, value in (
             ("prod", prod.mac), ("air", air.mac)
@@ -151,6 +155,10 @@ def classify_identity(actual_hostname: str, actual_mac: str, prod: Identity, air
             signals.extend(mac_matches)
         elif not mac_matches:
             raise RuntimeError(f"unknown eth0 MAC at {prod.ip}: {actual_mac!r}")
+        else:
+            raise RuntimeError(
+                f"ambiguous eth0 MAC at {prod.ip}: {actual_mac!r} matches Production and AIR"
+            )
     if len(set(signals)) > 1:
         raise RuntimeError(
             f"identity conflict at {prod.ip}: hostname={actual_hostname!r}, mac={actual_mac!r}"

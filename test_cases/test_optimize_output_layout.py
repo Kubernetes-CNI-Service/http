@@ -202,7 +202,15 @@ class OptimizeOutputLayoutTests(unittest.TestCase):
                 "hostname,type\nleaf01,eth\n", encoding="utf-8",
             )
 
+            fixture_lock = FEEDBACK.deployment_lock
             with (
+                mock.patch.object(
+                    FEEDBACK, "deployment_lock",
+                    side_effect=lambda _base: fixture_lock(root),
+                ) as lock,
+                mock.patch.object(
+                    FEEDBACK, "stop_native_ztp_monitors", return_value=(),
+                ) as stop,
                 mock.patch.object(
                     FEEDBACK, "prepare_sample_inputs",
                     return_value=([source], sample),
@@ -217,6 +225,8 @@ class OptimizeOutputLayoutTests(unittest.TestCase):
             ):
                 self.assertEqual(FEEDBACK.main([str(source)]), 0)
 
+            lock.assert_called_once_with(ROOT)
+            stop.assert_called_once_with(ROOT)
             destinations = [Path(call.args[1]).resolve() for call in convert.call_args_list]
             self.assertEqual(len(destinations), 2)
             self.assertTrue(all(project_output.resolve() in path.parents for path in destinations))
@@ -295,7 +305,15 @@ class OptimizeOutputLayoutTests(unittest.TestCase):
                 "hostname,type\nleaf01,eth\n", encoding="utf-8"
             )
 
+            fixture_lock = FEEDBACK.deployment_lock
             with (
+                mock.patch.object(
+                    FEEDBACK, "deployment_lock",
+                    side_effect=lambda _base: fixture_lock(root),
+                ) as lock,
+                mock.patch.object(
+                    FEEDBACK, "stop_native_ztp_monitors", return_value=(),
+                ) as stop,
                 mock.patch.object(
                     FEEDBACK, "prepare_sample_inputs",
                     return_value=([source], sample),
@@ -307,6 +325,8 @@ class OptimizeOutputLayoutTests(unittest.TestCase):
                     str(source), "--type", "prod", "--output-dir", str(output),
                 ])
 
+            lock.assert_called_once_with(ROOT)
+            stop.assert_called_once_with(ROOT)
             self.assertEqual(result, 0)
             self.assertEqual(
                 Path(convert.call_args.args[1]), output / "generated-latest.csv"

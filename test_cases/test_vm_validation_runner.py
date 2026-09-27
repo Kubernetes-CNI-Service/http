@@ -8,6 +8,8 @@ import base64
 import importlib.util
 import ipaddress
 import json
+import io
+from contextlib import ExitStack
 from datetime import datetime, timedelta
 from pathlib import Path
 import stat
@@ -78,7 +80,11 @@ class VmReleaseAcceptanceTests(unittest.TestCase):
         self.project = self.root / "DAY0-Prepare/customer"
         self.project.mkdir(parents=True)
         self.payloads = {
-            "global": ("01-global.yaml", b"schema_version: 2\n"),
+            "global": (
+                "01-global.yaml",
+                b"schema_version: 2\ncommon:\n  mgmt:\n"
+                b"    dhcp-server:\n      status: enabled\n",
+            ),
             "devices": ("02-devices_config.csv", b"hostname,type\none,eth\n"),
             "subnet": (
                 "02-dhcp-subnet_config.csv",
@@ -101,16 +107,413 @@ class VmReleaseAcceptanceTests(unittest.TestCase):
             "release_id": "placeholder",
             "project": "customer",
             "validation": "passed",
+            "deployment_scope": "all",
+            "switch_scope": "all",
             "inputs": {
                 key: sha256(payload)
                 for key, (_name, payload) in self.payloads.items()
             },
-            "components": {},
+            "input_sources": {"p2p": {"sha256": sha256(b"synthetic-p2p")}},
+            "components": {"dhcp": {
+                "release_id": "legacy-dhcp", "manifest_sha256": "0" * 64,
+            }},
             "inventory": [],
         }
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def _seal_parent(self) -> None:
+        basis_keys = (
+            "project", "deployment_scope", "switch_scope", "inputs",
+            "input_sources", "components", "inventory",
+        )
+        if self.parent["schema_version"] == 2:
+            basis_keys += ("dhcp_status",)
+        self.parent["release_id"] = sha256(json.dumps(
+            {key: self.parent[key] for key in basis_keys},
+            ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8"))[:20]
+
+    @staticmethod
+    def _real_load_parent(*, enabled: bool):
+        """Use the real producer and its project inputs, not a VM-shaped copy."""
+        from test_cases import test_load_release_transaction as release_fixture
+
+        fixture = release_fixture.ReleaseTransactionTests(
+            "test_writes_parent_release_after_all_components_match"
+        )
+        fixture.setUp()
+        if not enabled:
+            fixture.global_file.write_text(
+                fixture.global_file.read_text(encoding="utf-8").replace(
+                    "status: enabled", "status: disabled"
+                ), encoding="utf-8",
+            )
+        inputs = release_fixture.LOAD.replace(
+            fixture.inputs,
+            settings=release_fixture.LOAD.replace(
+                fixture.inputs.settings, dhcp_enabled=enabled,
+            ),
+        )
+        parent = release_fixture.LOAD.validate_and_publish_release(
+            fixture.project, inputs, publish=True,
+        )
+        return fixture, parent
+
+    def test_real_load_v2_modes_and_legacy_v1_are_strictly_distinguished(self) -> None:
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                fixture, parent = self._real_load_parent(enabled=enabled)
+                try:
+                    self.assertEqual(2, parent["schema_version"])
+                    self.assertEqual([], VM.parent_release_errors(parent, "demo"))
+                    self.assertEqual([], VM.release_input_errors(fixture.project, parent))
+                    self.assertEqual(
+                        "enabled" if enabled else "disabled",
+                        VM.validated_parent_dhcp_status(fixture.project, parent),
+                    )
+                    if enabled:
+                        self.assertIn("dhcp", parent["components"])
+                    else:
+                        self.assertNotIn("dhcp", parent["components"])
+                        # Old files are not current proof when disabled.
+                        (fixture.ztp / "config/isc-dhcp-server/"
+                         "dhcp-release-manifest.json").write_text(
+                            '{"stale":"not-current"}\n', encoding="utf-8",
+                        )
+                        self.assertEqual(
+                            "disabled",
+                            VM.validated_parent_dhcp_status(fixture.project, parent),
+                        )
+                    forged = dict(parent)
+                    forged["dhcp_status"] = "disabled" if enabled else "enabled"
+                    basis_keys = (
+                        "project", "deployment_scope", "switch_scope", "inputs",
+                        "input_sources", "dhcp_status", "components", "inventory",
+                    )
+                    forged["release_id"] = sha256(json.dumps(
+                        {key: forged[key] for key in basis_keys},
+                        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                    ).encode("utf-8"))[:20]
+                    self.assertTrue(VM.parent_release_errors(forged, "demo"))
+                finally:
+                    fixture.tearDown()
+
+        fixture, parent = self._real_load_parent(enabled=True)
+        try:
+            legacy = dict(parent)
+            legacy["schema_version"] = 1
+            legacy.pop("dhcp_status")
+            basis_keys = (
+                "project", "deployment_scope", "switch_scope", "inputs",
+                "input_sources", "components", "inventory",
+            )
+            legacy["release_id"] = sha256(json.dumps(
+                {key: legacy[key] for key in basis_keys},
+                ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8"))[:20]
+            self.assertEqual([], VM.parent_release_errors(legacy, "demo"))
+            self.assertEqual(
+                "enabled", VM.validated_parent_dhcp_status(fixture.project, legacy),
+            )
+            legacy["dhcp_status"] = "disabled"
+            self.assertTrue(VM.parent_release_errors(legacy, "demo"))
+            legacy.pop("dhcp_status")
+            legacy["components"] = dict(legacy["components"])
+            legacy["components"].pop("dhcp")
+            legacy["release_id"] = sha256(json.dumps(
+                {key: legacy[key] for key in basis_keys},
+                ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8"))[:20]
+            self.assertTrue(VM.parent_release_errors(legacy, "demo"))
+        finally:
+            fixture.tearDown()
+
+    def test_disabled_mode_requires_current_global_hash_and_matching_status(self) -> None:
+        fixture, parent = self._real_load_parent(enabled=False)
+        try:
+            self.assertEqual(
+                "disabled", VM.validated_parent_dhcp_status(fixture.project, parent),
+            )
+            fixture.global_file.write_text(
+                fixture.global_file.read_text(encoding="utf-8") + "# drift\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "global|hash|SHA|输入"):
+                VM.validated_parent_dhcp_status(fixture.project, parent)
+            fixture.global_file.write_text(
+                fixture.global_file.read_text(encoding="utf-8").replace(
+                    "status: disabled", "status: enabled"
+                ), encoding="utf-8",
+            )
+            rebased = dict(parent)
+            rebased["inputs"] = dict(parent["inputs"])
+            rebased["inputs"]["global"] = sha256(fixture.global_file.read_bytes())
+            basis_keys = (
+                "project", "deployment_scope", "switch_scope", "inputs",
+                "input_sources", "dhcp_status", "components", "inventory",
+            )
+            rebased["release_id"] = sha256(json.dumps(
+                {key: rebased[key] for key in basis_keys},
+                ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8"))[:20]
+            self.assertEqual([], VM.parent_release_errors(rebased, "demo"))
+            self.assertEqual([], VM.release_input_errors(fixture.project, rebased))
+            with self.assertRaisesRegex(ValueError, "global|status|DHCP|输入"):
+                VM.validated_parent_dhcp_status(fixture.project, rebased)
+
+            # A self-consistent parent + input hash cannot override the
+            # current global mode and suppress runtime DHCP checks.
+            (fixture.project / "99-output-ztp/current-release.json").write_text(
+                json.dumps(rebased), encoding="utf-8",
+            )
+            report = fixture.root / "vm-forged-mode-report.json"
+            with mock.patch.object(
+                VM, "command_result", return_value=(True, "active"),
+            ), mock.patch.object(
+                VM.shutil, "which", return_value="/usr/bin/mock",
+            ), mock.patch.object(
+                VM, "check_password_backend", return_value="test backend",
+            ), mock.patch("sys.stdout", new_callable=io.StringIO):
+                VM.main([
+                    "demo", "--root", str(fixture.root),
+                    "--expect-services", "--output", str(report),
+                ])
+            findings = json.loads(report.read_text(encoding="utf-8"))["findings"]
+            self.assertTrue(any(
+                item["check"] == "dhcp-mode" and item["level"] == "FAIL"
+                for item in findings
+            ))
+            self.assertFalse(any(
+                item["check"] == "release-artifacts" and item["level"] == "PASS"
+                for item in findings
+            ))
+            self.assertTrue(any(
+                item["check"] == "release-artifacts"
+                and item["level"] == "FAIL"
+                and "DHCP" in item["detail"]
+                for item in findings
+            ))
+            self.assertTrue(any(
+                item["check"] == "service:isc-dhcp-server"
+                for item in findings
+            ))
+        finally:
+            fixture.tearDown()
+
+    def test_disabled_vm_service_probe_retains_apache_but_omits_dhcp_only(self) -> None:
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                fixture, parent = self._real_load_parent(enabled=enabled)
+                try:
+                    observed: list[tuple[str, ...]] = []
+
+                    def offline_command(argv, **_kwargs):
+                        observed.append(tuple(argv))
+                        return True, "active" if "is-active" in argv else "valid"
+
+                    def fake_which(name):
+                        if name == "dhcpd":
+                            return None
+                        return "/usr/bin/" + name
+
+                    report = fixture.root / "vm-report.json"
+                    with mock.patch.object(
+                        VM, "command_result", side_effect=offline_command,
+                    ), mock.patch.object(
+                        VM.shutil, "which", side_effect=fake_which,
+                    ), mock.patch.object(
+                        VM, "check_password_backend", return_value="test backend",
+                    ), mock.patch("sys.stdout", new_callable=io.StringIO):
+                        VM.main([
+                            "demo", "--root", str(fixture.root),
+                            "--expect-services", "--output", str(report),
+                        ])
+                    findings = json.loads(report.read_text(encoding="utf-8"))["findings"]
+                    checks = {item["check"] for item in findings}
+                    self.assertIn("service:apache2", checks)
+                    self.assertIn("apache-config", checks)
+                    self.assertEqual(enabled, "service:isc-dhcp-server" in checks)
+                    self.assertEqual(enabled, "dhcpd-syntax" in checks)
+                    self.assertEqual(enabled, "installed-dhcp" in checks)
+                    self.assertEqual(enabled, ("dhcpd", "-t", "-cf", "/etc/dhcp/dhcpd.conf") in observed)
+                    if not enabled:
+                        self.assertFalse(any(
+                            item["check"] == "commands" and "dhcpd" in item["detail"]
+                            for item in findings
+                        ))
+                finally:
+                    fixture.tearDown()
+
+    def test_full_systemd_dhcp_modes_preserve_other_active_evidence(self) -> None:
+        """Only a current, trusted disabled release can omit DHCP runtime probes."""
+        common_checks = {
+            "source-syntax", "service:apache2", "service-enabled:apache2",
+            "service-process:apache2", "apache-config", "apache-public-boundary",
+            "installed-control-cgi", "http-listener", "worker:ztp-monitor",
+            "worker:switch-collection", "worker:manual-ztp", "worker-scope",
+            "worker-status:switch-collection", "worker-status:manual-ztp",
+            "ztp-monitor-report", "http-content-plan", "http-content",
+            "http-control-auth", "http-monitor-authenticated", "http-image",
+            "http-deny-boundary", "http-control-cgi",
+        }
+        dhcp_checks = {
+            "service:isc-dhcp-server", "service-enabled:isc-dhcp-server",
+            "service-process:isc-dhcp-server", "dhcpd-syntax",
+            "installed-dhcp", "dhcp-runtime-interfaces",
+        }
+        for mode in ("disabled", "enabled", "mismatched"):
+            with self.subTest(mode=mode):
+                fixture, parent = self._real_load_parent(enabled=mode == "enabled")
+                try:
+                    if mode == "mismatched":
+                        # The parent is internally consistent, but its disabled
+                        # claim contradicts the current, hash-bound global mode.
+                        fixture.global_file.write_text(
+                            fixture.global_file.read_text(encoding="utf-8").replace(
+                                "status: disabled", "status: enabled"
+                            ), encoding="utf-8",
+                        )
+                        parent = dict(parent)
+                        parent["inputs"] = dict(parent["inputs"])
+                        parent["inputs"]["global"] = sha256(
+                            fixture.global_file.read_bytes()
+                        )
+                        basis_keys = (
+                            "project", "deployment_scope", "switch_scope", "inputs",
+                            "input_sources", "dhcp_status", "components", "inventory",
+                        )
+                        parent["release_id"] = sha256(json.dumps(
+                            {key: parent[key] for key in basis_keys},
+                            ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                        ).encode("utf-8"))[:20]
+                        (fixture.project / "99-output-ztp/current-release.json").write_text(
+                            json.dumps(parent), encoding="utf-8",
+                        )
+                        self.assertEqual([], VM.parent_release_errors(parent, "demo"))
+                        self.assertEqual([], VM.release_input_errors(fixture.project, parent))
+
+                    monitor_html = fixture.root / "monitor/monitor.html"
+                    monitor_html.parent.mkdir(parents=True, exist_ok=True)
+                    monitor_html.write_text("offline monitor\n", encoding="utf-8")
+                    public_key = fixture.ztp / "config/publickey/offline.pub"
+                    public_key.parent.mkdir(parents=True, exist_ok=True)
+                    public_key.write_text("ssh-ed25519 offline\n", encoding="utf-8")
+                    image = fixture.ztp / "image/cumulus/offline.img"
+                    image.parent.mkdir(parents=True, exist_ok=True)
+                    image.write_bytes(b"offline image")
+                    status_dir = fixture.root / "monitor/status"
+                    status_dir.mkdir(parents=True, exist_ok=True)
+                    for label in ("switch-collection", "manual-ztp"):
+                        (status_dir / f"{label}.status.json").write_text(
+                            json.dumps({"scope": "prod", "state": "running"}),
+                            encoding="utf-8",
+                        )
+
+                    observed: list[tuple[str, ...]] = []
+                    original_read = VM.read_regular_bytes
+
+                    def offline_command(argv, **_kwargs):
+                        observed.append(tuple(argv))
+                        if "is-active" in argv:
+                            return True, "active"
+                        if "is-enabled" in argv:
+                            return True, "enabled"
+                        return True, "valid"
+
+                    def offline_read(path, **kwargs):
+                        if str(path).endswith("http-ztp-public-boundary.conf"):
+                            return b"offline boundary"
+                        if str(path) == "/etc/default/isc-dhcp-server":
+                            return b'INTERFACESv4="enp0"\n'
+                        return original_read(path, **kwargs)
+
+                    report = fixture.root / "vm-full-systemd-report.json"
+                    with ExitStack() as stack:
+                        def patch(target, **kwargs):
+                            return stack.enter_context(mock.patch.object(VM, target, **kwargs))
+
+                        patch("command_result", side_effect=offline_command)
+                        stack.enter_context(mock.patch.object(
+                            VM.shutil, "which", side_effect=lambda name: "/offline/" + name,
+                        ))
+                        stack.enter_context(mock.patch.object(VM.os, "geteuid", return_value=0))
+                        patch("source_syntax_errors", return_value=(
+                            {"python": 1, "shell": 1}, [],
+                        ))
+                        patch("check_password_backend", return_value="offline backend")
+                        patch("parse_dhcp_subnets", return_value=(VM.DhcpSubnet(
+                            "direct", ipaddress.ip_network("192.0.2.0/24"),
+                            ipaddress.ip_address("192.0.2.1"),
+                        ),))
+                        patch("local_interface_addresses", return_value={
+                            "enp0": {ipaddress.ip_address("192.0.2.1")},
+                        })
+                        patch("read_ztp_prefix", return_value="/ztp")
+                        patch("systemd_main_process", side_effect=lambda service: (
+                            42, "apache2" if service == "apache2" else "dhcpd",
+                        ))
+                        patch("expected_apache_boundary", return_value=b"offline boundary")
+                        patch("read_regular_bytes", side_effect=offline_read)
+                        patch("installed_cgi_errors", return_value=[])
+                        runtime_probe = patch("dhcp_runtime_interface_errors", return_value=[])
+                        stack.enter_context(mock.patch.object(VM.socket, "create_connection"))
+                        patch("check_worker", return_value=(True, "python --scope prod"))
+                        patch("worker_command_errors", return_value=[])
+                        patch("monitor_runtime_evidence", return_value="offline fresh")
+                        patch("read_control_authorization", return_value="Basic offline")
+                        patch("bootstrap_http_assets", return_value=())
+                        patch("release_http_assets", return_value=())
+                        get_probe = patch("verify_http_asset", return_value="offline GET")
+                        denial_probe = patch("verify_http_status", return_value="offline 403")
+                        patch("verify_control_auth_challenge", return_value="offline 401")
+                        cgi_probe = patch("verify_control_cgi", return_value="offline CGI")
+                        head_probe = patch("verify_http_head", return_value="offline HEAD")
+                        stack.enter_context(mock.patch("sys.stdout", new_callable=io.StringIO))
+                        VM.main([
+                            "demo", "--root", str(fixture.root), "--full-systemd",
+                            "--worker-scope", "prod", "--control-auth-user", "nvis",
+                            "--output", str(report),
+                        ])
+                    payload = json.loads(report.read_text(encoding="utf-8"))
+                    self.assertEqual("full-systemd", payload["validation_profile"])
+                    findings = payload["findings"]
+                    checks = {item["check"] for item in findings}
+                    self.assertFalse(common_checks - checks, common_checks - checks)
+                    passed_checks = {
+                        item["check"] for item in findings if item["level"] == "PASS"
+                    }
+                    self.assertFalse(
+                        common_checks - passed_checks, common_checks - passed_checks,
+                    )
+                    self.assertGreater(get_probe.call_count, 0)
+                    self.assertGreater(denial_probe.call_count, 0)
+                    self.assertGreater(cgi_probe.call_count, 0)
+                    self.assertGreater(head_probe.call_count, 0)
+                    self.assertEqual(
+                        mode != "disabled", dhcp_checks <= checks,
+                    )
+                    self.assertEqual(
+                        mode != "disabled", runtime_probe.call_count == 1,
+                    )
+                    self.assertEqual(
+                        mode != "disabled",
+                        ("dhcpd", "-t", "-cf", "/etc/dhcp/dhcpd.conf") in observed,
+                    )
+                    if mode == "disabled":
+                        self.assertFalse(dhcp_checks & checks)
+                        self.assertTrue(any(
+                            item["check"] == "dhcp-mode" and item["level"] == "PASS"
+                            for item in findings
+                        ))
+                    elif mode == "mismatched":
+                        self.assertTrue(any(
+                            item["check"] == "dhcp-mode" and item["level"] == "FAIL"
+                            for item in findings
+                        ))
+                finally:
+                    fixture.tearDown()
 
     def test_parent_release_binds_every_current_project_input(self) -> None:
         self.assertEqual(
@@ -125,7 +528,10 @@ class VmReleaseAcceptanceTests(unittest.TestCase):
     def test_release_id_is_recomputed_from_canonical_basis(self) -> None:
         basis = {
             key: self.parent[key]
-            for key in ("project", "inputs", "components", "inventory")
+            for key in (
+                "project", "deployment_scope", "switch_scope", "inputs",
+                "input_sources", "components", "inventory",
+            )
         }
         expected = sha256(json.dumps(
             basis, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
@@ -166,6 +572,7 @@ class VmReleaseAcceptanceTests(unittest.TestCase):
             "nvos": {"release_dir": "99-output-ib_nvl/release-nvos"},
             "dhcp": {},
         }
+        self._seal_parent()
 
         self.assertEqual(
             [], VM.runtime_pointer_errors(self.root, self.project, self.parent),
@@ -177,6 +584,40 @@ class VmReleaseAcceptanceTests(unittest.TestCase):
             "\n".join(
                 VM.runtime_pointer_errors(self.root, self.project, self.parent)
             ),
+        )
+
+    def test_explicit_disabled_parent_ignores_stale_dhcp_pointer_only(self) -> None:
+        self.parent["schema_version"] = 2
+        self.parent["dhcp_status"] = "disabled"
+        self.parent["components"] = {}
+        global_path = self.project / "01-global.yaml"
+        global_path.write_bytes(global_path.read_bytes().replace(
+            b"status: enabled", b"status: disabled",
+        ))
+        self.parent["inputs"]["global"] = sha256(global_path.read_bytes())
+        self._seal_parent()
+        errors = VM.runtime_pointer_errors(self.root, self.project, self.parent)
+        # Without Cumulus/NVOS proof this still fails; only the DHCP pointer
+        # requirement can disappear under an explicit disabled record.
+        self.assertTrue(any("cumulus" in error for error in errors))
+        self.assertTrue(any("nvos" in error for error in errors))
+        self.assertFalse(any("dhcp" in error.lower() for error in errors))
+        self.parent["components"]["dhcp"] = {}
+        self._seal_parent()
+        self.assertIn(
+            "disabled",
+            "\n".join(VM.runtime_pointer_errors(self.root, self.project, self.parent)),
+        )
+        self.parent["components"].pop("dhcp")
+        self._seal_parent()
+        global_path.write_bytes(global_path.read_bytes().replace(
+            b"status: disabled", b"status: enabled",
+        ))
+        self.parent["inputs"]["global"] = sha256(global_path.read_bytes())
+        self._seal_parent()
+        self.assertIn(
+            "DHCP",
+            "\n".join(VM.runtime_pointer_errors(self.root, self.project, self.parent)),
         )
 
 

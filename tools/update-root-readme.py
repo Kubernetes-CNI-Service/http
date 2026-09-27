@@ -11,6 +11,8 @@ import stat
 import tempfile
 from typing import NamedTuple
 
+from project_contract import path_disposition
+
 
 ROOT = Path(__file__).resolve().parents[1]
 ROOT_README = ROOT / "README.md"
@@ -33,6 +35,8 @@ class CatalogEntry(NamedTuple):
 
 def _excluded(relative: Path) -> bool:
     parts = relative.parts
+    if path_disposition(relative.as_posix()) == "reference-only":
+        return True
     if relative == Path("README.md"):
         return True
     if any(part.startswith(".") or part == "node_modules" for part in parts):

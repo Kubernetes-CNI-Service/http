@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 import stat
 import tempfile
@@ -64,6 +64,134 @@ class DownloadCliContractTests(unittest.TestCase):
             ):
                 DOWNLOAD.create_day0_archive(args)
             self.assertEqual(0o644, stat.S_IMODE(output.stat().st_mode))
+
+    def test_project_archive_rebound_output_parent_cannot_publish_foreign_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / "DAY0-Prepare/customer"
+            project.mkdir(parents=True)
+            (project / "02-devices_config.csv").write_text(
+                "hostname,type\n", encoding="utf-8",
+            )
+            safe = root / "safe"
+            moved = root / "safe-moved"
+            foreign = root / "foreign"
+            safe.mkdir()
+            foreign.mkdir()
+            output = safe / "customer-download.tar.gz"
+            args = DOWNLOAD.parse_args(["customer", "-o", str(output)])
+            original_open = DOWNLOAD.tarfile.open
+            archive_opens = 0
+
+            @contextmanager
+            def rebind_after_validation(*open_args, **open_kwargs):
+                nonlocal archive_opens
+                with original_open(*open_args, **open_kwargs) as archive:
+                    yield archive
+                archive_opens += 1
+                if archive_opens == 2:
+                    safe.rename(moved)
+                    safe.symlink_to(foreign, target_is_directory=True)
+                    stages = list(moved.glob(".*.tar.gz"))
+                    self.assertEqual(1, len(stages))
+                    (foreign / stages[0].name).write_bytes(b"attacker stage")
+                    (foreign / output.name).write_bytes(b"foreign original")
+
+            with (
+                mock.patch.object(
+                    DOWNLOAD.package_core, "resolve_project", return_value=project,
+                ),
+                mock.patch.object(
+                    DOWNLOAD.package_core, "managed_pubkey_paths", return_value=[],
+                ),
+                mock.patch.object(DOWNLOAD.tarfile, "open", side_effect=rebind_after_validation),
+                redirect_stdout(io.StringIO()),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError, "输出目录在归档校验后发生变化",
+                ):
+                    DOWNLOAD.create_day0_archive(args)
+            self.assertEqual(2, archive_opens)
+            self.assertEqual(b"foreign original", (foreign / output.name).read_bytes())
+
+    def test_project_archive_does_not_replace_output_created_during_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / "DAY0-Prepare/customer"
+            project.mkdir(parents=True)
+            (project / "02-devices_config.csv").write_text(
+                "hostname,type\n", encoding="utf-8",
+            )
+            output = root / "customer-download.tar.gz"
+            args = DOWNLOAD.parse_args(["customer", "-o", str(output)])
+            original_open = DOWNLOAD.tarfile.open
+            archive_opens = 0
+
+            @contextmanager
+            def create_output_after_validation(*open_args, **open_kwargs):
+                nonlocal archive_opens
+                with original_open(*open_args, **open_kwargs) as archive:
+                    yield archive
+                archive_opens += 1
+                if archive_opens == 2:
+                    output.write_bytes(b"concurrent original")
+
+            with (
+                mock.patch.object(
+                    DOWNLOAD.package_core, "resolve_project", return_value=project,
+                ),
+                mock.patch.object(
+                    DOWNLOAD.package_core, "managed_pubkey_paths", return_value=[],
+                ),
+                mock.patch.object(
+                    DOWNLOAD.tarfile, "open", side_effect=create_output_after_validation,
+                ),
+                redirect_stdout(io.StringIO()),
+            ):
+                with self.assertRaises(FileExistsError):
+                    DOWNLOAD.create_day0_archive(args)
+            self.assertEqual(2, archive_opens)
+            self.assertEqual(b"concurrent original", output.read_bytes())
+
+    def test_project_archive_replaced_stage_cannot_be_published(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / "DAY0-Prepare/customer"
+            project.mkdir(parents=True)
+            (project / "02-devices_config.csv").write_text(
+                "hostname,type\n", encoding="utf-8",
+            )
+            output = root / "customer-download.tar.gz"
+            args = DOWNLOAD.parse_args(["customer", "-o", str(output)])
+            original_open = DOWNLOAD.tarfile.open
+            archive_opens = 0
+
+            @contextmanager
+            def replace_stage_after_validation(*open_args, **open_kwargs):
+                nonlocal archive_opens
+                with original_open(*open_args, **open_kwargs) as archive:
+                    yield archive
+                archive_opens += 1
+                if archive_opens == 2:
+                    stages = list(root.glob(".customer-*.tar.gz"))
+                    self.assertEqual(1, len(stages))
+                    stages[0].unlink()
+                    stages[0].write_bytes(b"attacker stage")
+
+            with (
+                mock.patch.object(
+                    DOWNLOAD.package_core, "resolve_project", return_value=project,
+                ),
+                mock.patch.object(
+                    DOWNLOAD.package_core, "managed_pubkey_paths", return_value=[],
+                ),
+                mock.patch.object(DOWNLOAD.tarfile, "open", side_effect=replace_stage_after_validation),
+                redirect_stdout(io.StringIO()),
+            ):
+                with self.assertRaisesRegex(ValueError, "临时归档身份已变化"):
+                    DOWNLOAD.create_day0_archive(args)
+            self.assertEqual(2, archive_opens)
+            self.assertFalse(output.exists())
 
     def test_full_workspace_uses_download_artifact_without_deployment_gate(self):
         with tempfile.TemporaryDirectory() as directory:

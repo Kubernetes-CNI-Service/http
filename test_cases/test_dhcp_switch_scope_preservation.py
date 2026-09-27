@@ -9,6 +9,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import stat
 import sys
 import tempfile
@@ -199,6 +200,144 @@ def sha256(path: Path) -> str:
 
 
 class DhcpSwitchScopeDirectTests(unittest.TestCase):
+    def test_stage_allocation_does_not_create_in_rebound_parent(self):
+        with tempfile.TemporaryDirectory() as name:
+            fixture = ScopedDhcpFixture(Path(name))
+            foreign = fixture.root / "foreign"
+            foreign.mkdir()
+            detached = fixture.root / "detached-dhcp"
+            original_fstat = os.fstat
+            rebound = False
+
+            def fstat_then_rebind(fd):
+                nonlocal rebound
+                result = original_fstat(fd)
+                if not rebound:
+                    rebound = True
+                    fixture.dhcp.rename(detached)
+                    fixture.dhcp.symlink_to(foreign, target_is_directory=True)
+                return result
+
+            outputs = {
+                f"OUTPUT_{label.upper()}": str(path)
+                for label, path in fixture.outputs.items()
+            }
+            with mock.patch.multiple(DHCP, **outputs), mock.patch.object(
+                DHCP.os, "fstat", side_effect=fstat_then_rebind,
+            ), self.assertRaises(OSError):
+                DHCP._prepare_dhcp_output_transaction(
+                    family_records={"eth": [], "ib": [], "nvl": []},
+                    switch_scope="all",
+                )
+            self.assertTrue(rebound)
+            self.assertEqual([], list(foreign.iterdir()))
+            self.assertFalse(list(detached.glob(".dhcp-generate-*")))
+
+    def test_publish_refuses_rebound_parent_without_foreign_write(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            parent = root / "legitimate"
+            parent.mkdir()
+            transaction = parent / ".transaction"
+            transaction.mkdir()
+            candidate = transaction / "dhcpd.conf"
+            candidate.write_text("GENUINE-CANDIDATE\n", encoding="utf-8")
+            target = parent / "dhcpd.conf"
+            target.write_text("GENUINE-OLD\n", encoding="utf-8")
+            foreign = root / "foreign"
+            foreign.mkdir()
+            (foreign / ".transaction").mkdir()
+            (foreign / ".transaction" / "dhcpd.conf").write_text(
+                "ATTACKER-STAGED\n", encoding="utf-8",
+            )
+            foreign_target = foreign / "dhcpd.conf"
+            foreign_target.write_text("FOREIGN-SENTINEL\n", encoding="utf-8")
+
+            detached = root / "detached"
+            parent.rename(detached)
+            parent.symlink_to(foreign, target_is_directory=True)
+            with self.assertRaises(OSError):
+                DHCP._publish_dhcp_candidates(
+                    [(str(candidate), str(target))], str(transaction),
+                )
+            self.assertEqual("FOREIGN-SENTINEL\n", foreign_target.read_text())
+            self.assertEqual(
+                "GENUINE-OLD\n", (detached / "dhcpd.conf").read_text(),
+            )
+
+    def test_real_generation_refuses_rebound_parent_before_publish(self):
+        with tempfile.TemporaryDirectory() as name:
+            fixture = ScopedDhcpFixture(Path(name))
+            original_publish = DHCP._publish_dhcp_candidates
+            foreign = fixture.root / "foreign"
+            foreign.mkdir()
+            sentinels = {}
+            for label, path in fixture.outputs.items():
+                sentinel = f"FOREIGN-{label}\n"
+                (foreign / path.name).write_text(sentinel, encoding="utf-8")
+                sentinels[path.name] = sentinel
+            copied_stage_names = []
+
+            def rebound_publish(candidates, transaction_dir, **kwargs):
+                detached = fixture.root / "detached-dhcp"
+                fixture.dhcp.rename(detached)
+                fixture.dhcp.symlink_to(foreign, target_is_directory=True)
+                shutil.copytree(
+                    detached / Path(transaction_dir).name,
+                    foreign / Path(transaction_dir).name,
+                )
+                copied_stage_names.append(Path(transaction_dir).name)
+                return original_publish(candidates, transaction_dir, **kwargs)
+
+            with mock.patch.object(
+                DHCP, "_publish_dhcp_candidates", side_effect=rebound_publish,
+            ), self.assertRaises(OSError):
+                fixture.execute(["c1-generate_dhcp.py", "-y", "--switch", "ib"])
+            for basename, sentinel in sentinels.items():
+                self.assertEqual(sentinel, (foreign / basename).read_text())
+            self.assertEqual(1, len(copied_stage_names))
+            self.assertTrue((foreign / copied_stage_names[0]).is_dir())
+
+    def test_mid_replace_parent_rebind_rolls_back_pinned_outputs(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            parent = root / "legitimate"
+            parent.mkdir()
+            transaction = parent / ".transaction"
+            transaction.mkdir()
+            (transaction / "dhcpd.conf").write_text("GENUINE-CANDIDATE\n")
+            target = parent / "dhcpd.conf"
+            target.write_text("GENUINE-OLD\n")
+            foreign = root / "foreign"
+            foreign.mkdir()
+            (foreign / ".transaction").mkdir()
+            (foreign / ".transaction" / "dhcpd.conf").write_text(
+                "ATTACKER-STAGED\n",
+            )
+            foreign_target = foreign / "dhcpd.conf"
+            foreign_target.write_text("FOREIGN-SENTINEL\n")
+            detached = root / "detached"
+            original_replace = os.replace
+            rebound = False
+
+            def replace_after_rebind(*args, **kwargs):
+                nonlocal rebound
+                if not rebound:
+                    rebound = True
+                    parent.rename(detached)
+                    parent.symlink_to(foreign, target_is_directory=True)
+                return original_replace(*args, **kwargs)
+
+            with mock.patch.object(DHCP.os, "replace", side_effect=replace_after_rebind):
+                with self.assertRaises(OSError):
+                    DHCP._publish_dhcp_candidates(
+                        [(str(transaction / "dhcpd.conf"), str(target))],
+                        str(transaction),
+                    )
+            self.assertTrue(rebound)
+            self.assertEqual("FOREIGN-SENTINEL\n", foreign_target.read_text())
+            self.assertEqual("GENUINE-OLD\n", (detached / "dhcpd.conf").read_text())
+
     def test_each_selected_family_rewrites_only_its_owned_host_file(self):
         for selected in FAMILY_FILE:
             with self.subTest(selected=selected), tempfile.TemporaryDirectory() as name:

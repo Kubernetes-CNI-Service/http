@@ -68,6 +68,90 @@ def active_project_identity(http_root: Path = HTTP_ROOT) -> str:
     return str(resolved.parent)
 
 
+def _first_two_csv_fields(line: str) -> tuple[str, str]:
+    """Parse the first two RFC-4180 fields without adding a runtime import."""
+    fields: list[str] = []
+    field: list[str] = []
+    quoted = False
+    index = 0
+    while index < len(line):
+        character = line[index]
+        if quoted:
+            if character == '"':
+                if index + 1 < len(line) and line[index + 1] == '"':
+                    field.append('"')
+                    index += 1
+                else:
+                    quoted = False
+            else:
+                field.append(character)
+        elif character == ",":
+            fields.append("".join(field))
+            field = []
+            if len(fields) == 2:
+                return fields[0], fields[1]
+        elif character == '"':
+            if field:
+                raise CollectionGateError("invalid quote in active inventory")
+            quoted = True
+        else:
+            field.append(character)
+        index += 1
+    if quoted:
+        raise CollectionGateError("unterminated quote in active inventory")
+    fields.append("".join(field))
+    if len(fields) < 2:
+        raise CollectionGateError("active inventory row lacks hostname/type fields")
+    return fields[0], fields[1]
+
+
+def project_inventory_targets(project: str, scope: str) -> Optional[tuple[str, ...]]:
+    """Return collector-eligible inventory hostnames, excluding jump transports.
+
+    ``None`` is reserved for synthetic/test identities whose inventory is not
+    present.  A real active project is resolved through
+    :func:`active_project_identity`, so a present but malformed inventory must
+    still fail closed.
+    """
+    allowed = {
+        "air": frozenset(("air",)),
+        "prod": frozenset(("eth", "eth_spx", "spx", "ib", "nvl")),
+        "all": frozenset(("air", "eth", "eth_spx", "spx", "ib", "nvl")),
+    }
+    try:
+        accepted = allowed[scope]
+    except KeyError as exc:
+        raise CollectionGateError(f"invalid collection scope: {scope}") from exc
+    inventory = Path(project) / "02-devices_config.csv"
+    if not inventory.is_file():
+        return None
+    try:
+        lines = inventory.read_text(encoding="utf-8-sig", errors="strict").splitlines()
+        if not lines:
+            raise CollectionGateError(f"active inventory is empty: {inventory}")
+        header = tuple(
+            value.strip().casefold() for value in _first_two_csv_fields(lines[0])
+        )
+        if header != ("hostname", "type"):
+            raise CollectionGateError(
+                f"active inventory must begin with hostname,type: {inventory}"
+            )
+        targets = []
+        for line in lines[1:]:
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            hostname, device_type = _first_two_csv_fields(line)
+            hostname = hostname.strip()
+            device_type = device_type.strip().casefold()
+            if hostname and not hostname.startswith("#") and device_type in accepted:
+                targets.append(hostname)
+    except CollectionGateError:
+        raise
+    except (OSError, UnicodeError) as exc:
+        raise CollectionGateError(f"cannot read active inventory: {inventory}: {exc}") from exc
+    return tuple(dict.fromkeys(targets))
+
+
 def _iso_at(epoch: float) -> str:
     try:
         value = float(epoch)

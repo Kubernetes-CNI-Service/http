@@ -8,6 +8,7 @@ packaging workflows live in tools/tar-for-upload.py and tools/tar-for-download.p
 from __future__ import annotations
 
 import argparse
+from datetime import date
 import fnmatch
 import gzip
 import hashlib
@@ -16,6 +17,8 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import posixpath
+import re
+import secrets
 import stat
 import subprocess
 import sys
@@ -26,9 +29,13 @@ import zipfile
 
 from project_contract import (
     FINISHED_HISTORY_DIR_NAME,
+    REHYDRATE_COMMIT_NAME,
+    REHYDRATE_READY_NAME,
+    REHYDRATE_RECEIPT_NAME,
     is_manual_backup_name,
     is_tools_deployable_file,
     path_disposition,
+    require_project_eligible,
     transfer_exclude_reason,
     ztp_prefix_publication_relative,
 )
@@ -44,6 +51,8 @@ STATIC_SETUP_MANAGED_LINKS = frozenset({
     "nvlink/monitor/nvsw.csv",
     "infiniband/bringup/xdr-upgrade/ib.csv",
     "infiniband/bringup/xdr-initial-setup/ib.csv",
+    "infiniband/bringup/xdr-initial-setup/01-global.yaml",
+    "infiniband/bringup/xdr-initial-setup/publickey",
 })
 DEPLOYMENT_PREWRITE_GUARD = TOOLS_DIR / "deployment_prewrite_guard.py"
 DEPLOYMENT_SOURCE_MANIFEST_RELATIVE = PurePosixPath(
@@ -73,6 +82,86 @@ PROJECT_DEPLOYMENT_INPUTS = {
 AIR_TOPOLOGY_POLICY_NAME = "03-air-topology-policy.json"
 MINI_AIR_DEVICES_NAME = "04-air-mini-devices.txt"
 REPRODUCIBLE_ARCHIVE_MTIME = 0
+
+P2P_VERSION_TOKEN = re.compile(r"(?<![A-Za-z0-9])v?\d+(?:\.\d+)+", re.IGNORECASE)
+P2P_DATE_TOKEN = re.compile(r"(?<!\d)(\d{4})-(\d{2})-?(\d{2})(?!\d)")
+
+
+class P2PSelectionError(ValueError):
+    """The project has no safe, unambiguous P2P selection."""
+
+
+def _p2p_regular_xlsx(path: Path) -> bool:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return False
+    return (
+        stat.S_ISREG(metadata.st_mode)
+        and metadata.st_size > 0
+        and path.suffix.casefold() == ".xlsx"
+    )
+
+
+def project_p2p_candidates(project: Path) -> tuple[Path, ...]:
+    """Use only real, nonempty root workbooks in the frozen R15 candidate set."""
+    project = project.resolve()
+    return tuple(sorted(
+        path for path in project.iterdir()
+        if path.name.casefold() != "p2p.xlsx"
+        and not path.name.startswith(("~$", "._"))
+        and "p2p" in path.name.casefold()
+        and _p2p_regular_xlsx(path)
+    ))
+
+
+def _p2p_rank(path: Path) -> tuple[tuple[int, ...], int, int]:
+    stem = path.stem
+    versions = P2P_VERSION_TOKEN.findall(stem)
+    if len(versions) != 1:
+        raise P2PSelectionError(
+            f"P2P 版本号必须恰好一个：{path.name}"
+        )
+    version = tuple(int(part) for part in versions[0].lstrip("vV").split("."))
+    dates = list(P2P_DATE_TOKEN.finditer(stem))
+    if len(dates) > 1:
+        raise P2PSelectionError(f"P2P 日期不唯一：{path.name}")
+    calendar_day = 0
+    if dates:
+        year, month, day = map(int, dates[0].groups())
+        try:
+            calendar_day = date(year, month, day).toordinal()
+        except ValueError as exc:
+            raise P2PSelectionError(f"P2P 日期无效：{path.name}") from exc
+    return version, calendar_day, path.stat().st_mtime_ns
+
+
+def newest_project_p2p(project: Path) -> Path:
+    candidates = project_p2p_candidates(project)
+    if not candidates:
+        raise P2PSelectionError("项目根目录没有文件名含 P2P 的非空 XLSX")
+    if len(candidates) == 1:
+        return candidates[0]
+    ranked = sorted((_p2p_rank(path), path) for path in candidates)
+    if ranked[-1][0] == ranked[-2][0]:
+        raise P2PSelectionError(
+            "P2P 版本、日期和 mtime 相同，无法裁决："
+            f"{ranked[-2][1].name}、{ranked[-1][1].name}"
+        )
+    return ranked[-1][1]
+
+
+def select_project_p2p_source(project: Path, explicit: str | None = None) -> Path:
+    """Select a root-local regular XLSX; explicit pins may have another basename."""
+    project = project.resolve()
+    if explicit is None:
+        return newest_project_p2p(project)
+    if not explicit or Path(explicit).name != explicit or explicit in {".", ".."}:
+        raise P2PSelectionError("--p2p-file 必须是项目根目录内的 XLSX 文件名")
+    path = project / explicit
+    if not _p2p_regular_xlsx(path):
+        raise P2PSelectionError(f"--p2p-file 必须是项目根目录内的非空普通 XLSX：{explicit}")
+    return path
 
 
 def _reproducible_tarinfo(info: tarfile.TarInfo) -> tarfile.TarInfo:
@@ -711,6 +800,12 @@ def classify_project_entry(relative: PurePosixPath | str) -> str:
         return "project-root"
     if any(part == ".DS_Store" or part.startswith("._") for part in path.parts):
         return "metadata"
+    if len(path.parts) == 1 and path.name in {
+        REHYDRATE_RECEIPT_NAME,
+        REHYDRATE_READY_NAME,
+        REHYDRATE_COMMIT_NAME,
+    }:
+        return "metadata"
     if path.parts[0] == FINISHED_HISTORY_DIR_NAME:
         return "finished project history link"
     if path.parts[0] in PROJECT_LEGACY_DIRS:
@@ -726,14 +821,20 @@ def classify_project_entry(relative: PurePosixPath | str) -> str:
 
 def project_directories() -> list[Path]:
     """Return real DAY0 project directories, excluding templates/tests/dumps."""
-    return sorted(
-        item for item in DAY0.iterdir()
-        if item.is_dir() and not item.is_symlink()
-        and item.name not in {"template", "tests", "test_cases", "dumps"}
-        and not item.name.startswith(".")
-        and (item / "01-global.yaml").is_file()
-        and (item / "02-devices_config.csv").is_file()
-    )
+    selected: list[Path] = []
+    for item in DAY0.iterdir():
+        if (
+            not item.is_dir() or item.is_symlink()
+            or item.name in {"template", "tests", "test_cases", "dumps"}
+            or item.name.startswith(".")
+        ):
+            continue
+        # A visible but unfinished restore blocks an all-project archive;
+        # omitting it would silently change the operator's requested set.
+        require_project_eligible(item)
+        if (item / "01-global.yaml").is_file() and (item / "02-devices_config.csv").is_file():
+            selected.append(item)
+    return sorted(selected)
 
 
 def setup_managed_links() -> set[str]:
@@ -810,49 +911,17 @@ def sha256(path: Path) -> str:
 
 
 def select_upload_p2p(project: Path) -> Path:
-    """Select the same deployable P2P workbook used by setup/load.
-
-    A setup-managed ``p2p.xlsx`` symlink is resolved to its real project file,
-    because runtime links are deliberately excluded from upload archives.  The
-    selected source must remain in the project root or its ``p2p/`` directory.
-    """
+    """Bind a setup-selected real root workbook, never discover a fallback."""
     project = project.resolve()
     canonical = project / "p2p.xlsx"
-    if canonical.is_file() and canonical.stat().st_size > 0:
-        selected = canonical.resolve()
-    else:
-        version_dir = project / "p2p"
-        version_candidates = [
-            item for item in version_dir.iterdir()
-            if item.is_file()
-            and not item.name.startswith(("~$", "._"))
-            and item.name.casefold().endswith(".xlsx")
-            and "p2p" in item.name.casefold()
-            and item.stat().st_size > 0
-        ] if version_dir.is_dir() else []
-        if version_candidates:
-            selected = max(
-                version_candidates,
-                key=lambda item: (item.stat().st_mtime_ns, item.name.casefold()),
-            ).resolve()
-        else:
-            candidates = [
-                item.resolve() for item in sorted(project.iterdir())
-                if item.is_file()
-                and not item.name.startswith(("~$", "._"))
-                and item.name.casefold().endswith(".xlsx")
-                and "p2p" in item.name.casefold()
-                and item.stat().st_size > 0
-            ]
-            if len(candidates) != 1:
-                names = ", ".join(item.name for item in candidates) or "none"
-                raise ValueError(
-                    "upload requires one non-empty P2P XLSX; "
-                    f"candidates: {names}"
-                )
-            selected = candidates[0]
-    if selected.parent not in {project, project / "p2p"}:
-        raise ValueError(f"selected P2P workbook is outside the project input roots: {selected}")
+    if not canonical.is_symlink():
+        raise ValueError(f"upload requires setup-selected p2p.xlsx symlink: {canonical}")
+    link_target = os.readlink(canonical)
+    if Path(link_target).name != link_target or link_target in {".", ".."}:
+        raise ValueError(f"p2p.xlsx must be a relative project-root link: {canonical}")
+    selected = project / link_target
+    if not _p2p_regular_xlsx(selected):
+        raise ValueError(f"p2p.xlsx target is not a nonempty regular root XLSX: {selected}")
     if selected.suffix.casefold() != ".xlsx" or not zipfile.is_zipfile(selected):
         raise ValueError(f"selected P2P input is not a valid XLSX: {selected}")
     with zipfile.ZipFile(selected) as archive:
@@ -1047,7 +1116,10 @@ def active_project() -> Path | None:
         candidate.relative_to(DAY0.resolve())
     except (OSError, ValueError):
         return None
-    return candidate if candidate.is_dir() else None
+    if not candidate.is_dir():
+        return None
+    require_project_eligible(candidate)
+    return candidate
 
 
 def resolve_project(value: str | None) -> Path:
@@ -1075,6 +1147,7 @@ def resolve_project(value: str | None) -> Path:
         raise ValueError(f"project must be under {DAY0}: {project}") from exc
     if not project.is_dir() or project == DAY0:
         raise ValueError(f"deployment project does not exist: {project}")
+    require_project_eligible(project)
     return project
 
 
@@ -1122,6 +1195,7 @@ class PackageFilter:
         max_file_size: int,
         day0_all: bool = True,
         selected_p2p_relative: PurePosixPath | None = None,
+        selected_p2p_by_project: dict[str, Path] | None = None,
         exclude_project_images: bool = False,
         artifact_kind: str = "upload",
     ) -> None:
@@ -1137,11 +1211,10 @@ class PackageFilter:
         self.max_file_size = max_file_size
         self.day0_all = day0_all
         self.selected_p2p_relative = selected_p2p_relative
+        self.selected_p2p_by_project = selected_p2p_by_project or {}
         self.exclude_project_images = exclude_project_images
         self.artifact_kind = artifact_kind
-        projects = [
-            item for item in DAY0.iterdir() if item.is_dir()
-        ] if day0_all else [project]
+        projects = project_directories() if day0_all else [project]
         self.managed_pubkeys = {
             item.relative_to(ROOT).as_posix()
             for item in managed_pubkey_paths(projects)
@@ -1220,6 +1293,18 @@ class PackageFilter:
         shared_reason = transfer_exclude_reason(path)
         if shared_reason:
             self.reject(info, shared_reason)
+            return None
+
+        if (
+            self.artifact_kind != "download"
+            and len(parts) >= 3 and parts[0] == "DAY0-Prepare"
+            and parts[1] not in {"template", "tests", "test_cases"}
+            and (parts[2] == "p2p" or (len(parts) == 3 and path.suffix.casefold() == ".xlsx"))
+        ):
+            # A release carries only the image-free selected real workbook,
+            # injected after traversal. No alternate workbook, canonical link,
+            # retired p2p/ tree or unrelated spreadsheet is a runtime input.
+            self.reject(info, "P2P source replaced by selected image-free workbook")
             return None
 
         # tools/ normally contributes only top-level runtime source files.
@@ -1623,7 +1708,14 @@ def create_package(
     if artifact_kind not in ARTIFACT_KINDS:
         raise ValueError(f"unsupported artifact kind: {artifact_kind!r}")
     project = resolve_project(args.project)
-    selected_p2p = select_upload_p2p(project) if not day0_all else None
+    selected_p2p_by_project = (
+        {
+            item.relative_to(ROOT).as_posix(): select_upload_p2p(item)
+            for item in (project_directories() if day0_all else [project])
+        }
+        if artifact_kind != "download" else {}
+    )
+    selected_p2p = selected_p2p_by_project.get(project.relative_to(ROOT).as_posix())
     air_topology_policy = (
         optional_air_topology_policy(project) if not day0_all else None
     )
@@ -1658,28 +1750,50 @@ def create_package(
         max_file_size=args.max_file_size_mib * 1024 * 1024,
         day0_all=day0_all,
         selected_p2p_relative=selected_p2p_relative,
+        selected_p2p_by_project=selected_p2p_by_project,
         exclude_project_images=getattr(args, "exclude_project_images", False),
         artifact_kind=artifact_kind,
     )
     _reject_selected_special_sources(package_filter)
     output.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=".http-air-package-", suffix=".tar.gz", dir=output.parent
-    )
-    os.close(descriptor)
-    temporary = Path(temporary_name)
-    package_filter.excluded_paths.add(temporary.resolve())
+    directory_flags = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                       | getattr(os, "O_NOFOLLOW", 0)
+                       | getattr(os, "O_CLOEXEC", 0))
+    if not getattr(os, "O_DIRECTORY", 0) or not getattr(os, "O_NOFOLLOW", 0):
+        raise ValueError("output directory cannot be safely bound")
+    parent_fd = os.open(output.parent, directory_flags)
+    temporary_name = f".http-air-package-{secrets.token_hex(12)}.tar.gz"
+    temporary = output.parent / temporary_name
+    descriptor = None
+    archive_size = None
+    archive_sha256 = None
+    package_filter.excluded_paths.add(temporary)
     p2p_stats: dict[str, int] | None = None
     try:
+        parent = os.fstat(parent_fd)
+        visible = output.parent.lstat()
+        if (not stat.S_ISDIR(parent.st_mode)
+                or (parent.st_dev, parent.st_ino) != (visible.st_dev, visible.st_ino)):
+            raise ValueError("output directory identity changed")
+        descriptor = os.open(
+            temporary_name,
+            os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+            | getattr(os, "O_CLOEXEC", 0),
+            0o600, dir_fd=parent_fd,
+        )
         with tempfile.TemporaryDirectory(prefix="http-air-p2p-") as p2p_stage_name:
-            p2p_staged = Path(p2p_stage_name) / "p2p-image-free.xlsx"
+            staged_p2p_by_project: dict[str, Path] = {}
             deployment_manifest = None
             if artifact_kind == "upload":
                 deployment_manifest = write_deployment_source_manifest(
                     Path(p2p_stage_name) / DEPLOYMENT_SOURCE_MANIFEST_RELATIVE.name,
                 )
-            if selected_p2p is not None:
-                p2p_stats = strip_xlsx_images(selected_p2p, p2p_staged)
+            for index, (project_rel, selected) in enumerate(selected_p2p_by_project.items()):
+                p2p_staged = Path(p2p_stage_name) / f"p2p-image-free-{index}.xlsx"
+                stats = strip_xlsx_images(selected, p2p_staged)
+                staged_p2p_by_project[project_rel] = p2p_staged
+                if selected == selected_p2p:
+                    p2p_stats = stats
                 if (
                     package_filter.max_file_size > 0
                     and p2p_staged.stat().st_size > package_filter.max_file_size
@@ -1693,7 +1807,7 @@ def create_package(
                     args, project, day0_all=day0_all,
                 ) else 6
             )
-            with temporary.open("wb") as raw_archive, gzip.GzipFile(
+            with os.fdopen(os.dup(descriptor), "wb") as raw_archive, gzip.GzipFile(
                 filename="", mode="wb", fileobj=raw_archive,
                 compresslevel=compression_level,
                 mtime=REPRODUCIBLE_ARCHIVE_MTIME,
@@ -1722,15 +1836,13 @@ def create_package(
                     _reproducible_tarinfo(manifest_info)
                     with deployment_manifest.open("rb") as stream:
                         archive.addfile(manifest_info, stream)
-                if selected_p2p is not None and selected_p2p_relative is not None:
-                    archive_name = (
-                        f"./{package_filter.project_rel}/"
-                        f"{selected_p2p_relative.as_posix()}"
-                    )
-                    info = archive.gettarinfo(str(p2p_staged), arcname=archive_name)
-                    info.mode = selected_p2p.stat().st_mode & 0o777
+                for project_rel, selected in selected_p2p_by_project.items():
+                    staged = staged_p2p_by_project[project_rel]
+                    archive_name = f"./{project_rel}/{selected.name}"
+                    info = archive.gettarinfo(str(staged), arcname=archive_name)
+                    info.mode = selected.stat().st_mode & 0o777
                     _reproducible_tarinfo(info)
-                    with p2p_staged.open("rb") as stream:
+                    with staged.open("rb") as stream:
                         archive.addfile(info, stream)
                 # Preserve the project contract as an empty placeholder while never
                 # exporting the management server's runtime key material.
@@ -1740,10 +1852,24 @@ def create_package(
                     placeholder.size = 0
                     archive.addfile(_reproducible_tarinfo(placeholder))
         # Reopen the result so a truncated/corrupt archive is never published.
-        with tarfile.open(temporary, "r:gz") as archive:
+        os.fsync(descriptor)
+        stage = os.fstat(descriptor)
+        named_stage = os.stat(temporary_name, dir_fd=parent_fd, follow_symlinks=False)
+        if (not stat.S_ISREG(stage.st_mode) or stage.st_nlink != 1
+                or (stage.st_dev, stage.st_ino) != (named_stage.st_dev, named_stage.st_ino)):
+            raise ValueError("temporary archive identity changed")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        with os.fdopen(os.dup(descriptor), "rb") as raw_archive, tarfile.open(
+            fileobj=raw_archive, mode="r:gz",
+        ) as archive:
             members = archive.getmembers()
             validate_deployment_archive_members(members)
             names = {member.name for member in members}
+            for project_rel, selected in selected_p2p_by_project.items():
+                member_name = f"./{project_rel}/{selected.name}"
+                member = archive.getmember(member_name) if member_name in names else None
+                if member is None or not member.isfile():
+                    raise RuntimeError(f"packaged P2P workbook missing: {member_name}")
             required = {
                 "./.dockerignore",
                 "./infra/docker/Dockerfile",
@@ -1829,13 +1955,62 @@ def create_package(
                         raise RuntimeError("packaged P2P workbook is corrupt")
                     if any(name.startswith("xl/media/") for name in workbook.namelist()):
                         raise RuntimeError("packaged P2P workbook still contains images")
-        os.replace(temporary, output)
-        output.chmod(0o600)
+        visible = output.parent.lstat()
+        if (visible.st_dev, visible.st_ino) != (parent.st_dev, parent.st_ino):
+            raise ValueError("output directory changed after archive validation")
+        os.fchmod(descriptor, 0o600)
+        os.fsync(descriptor)
+        before_hash = os.fstat(descriptor)
+        archive_size = before_hash.st_size
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        digest = hashlib.sha256()
+        while chunk := os.read(descriptor, 1024 * 1024):
+            digest.update(chunk)
+        archive_sha256 = digest.hexdigest()
+        after_hash = os.fstat(descriptor)
+        named_stage = os.stat(temporary_name, dir_fd=parent_fd, follow_symlinks=False)
+        identity = lambda entry: (
+            entry.st_dev, entry.st_ino, entry.st_mode, entry.st_nlink,
+            entry.st_size, entry.st_mtime_ns, entry.st_ctime_ns,
+        )
+        if (after_hash.st_nlink != 1 or identity(before_hash) != identity(after_hash)
+                or identity(after_hash) != identity(named_stage)):
+            raise ValueError("temporary archive identity changed")
+        if args.force:
+            try:
+                existing = os.stat(output.name, dir_fd=parent_fd,
+                                   follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                if not stat.S_ISREG(existing.st_mode):
+                    raise ValueError("--force can replace only a regular archive")
+            os.replace(temporary_name, output.name,
+                       src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        else:
+            os.link(temporary_name, output.name,
+                    src_dir_fd=parent_fd, dst_dir_fd=parent_fd,
+                    follow_symlinks=False)
+            os.unlink(temporary_name, dir_fd=parent_fd)
+        os.fsync(parent_fd)
+        visible = output.parent.lstat()
+        if (visible.st_dev, visible.st_ino) != (parent.st_dev, parent.st_ino):
+            raise ValueError("output directory changed after publication")
     finally:
-        if temporary.exists():
-            temporary.unlink()
+        if descriptor is not None:
+            try:
+                named_stage = os.stat(temporary_name, dir_fd=parent_fd,
+                                      follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                stage = os.fstat(descriptor)
+                if (stage.st_dev, stage.st_ino) == (named_stage.st_dev, named_stage.st_ino):
+                    os.unlink(temporary_name, dir_fd=parent_fd)
+            os.close(descriptor)
+        os.close(parent_fd)
 
-    original_size = directory_size(ROOT) - output.stat().st_size
+    original_size = directory_size(ROOT) - archive_size
     print(f"[OK] Project retained : {project}")
     if selected_p2p is not None and p2p_stats is not None:
         print(f"[OK] P2P source       : {selected_p2p}")
@@ -1847,10 +2022,10 @@ def create_package(
         )
     print(f"[OK] Archive          : {output}")
     print(f"[OK] Workspace size   : {human_size(max(0, original_size))}")
-    print(f"[OK] Archive size     : {human_size(output.stat().st_size)}")
+    print(f"[OK] Archive size     : {human_size(archive_size)}")
     print(f"[OK] Excluded files   : {package_filter.excluded_files}")
     print(f"[OK] Excluded bytes   : {human_size(package_filter.excluded_bytes)}")
     for reason, count in sorted(package_filter.reasons.items()):
         print(f"     {reason:<32} {count}")
-    print(f"[OK] SHA-256          : {sha256(output)}")
+    print(f"[OK] SHA-256          : {archive_sha256}")
     return output

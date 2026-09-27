@@ -39,6 +39,12 @@ Basic HTTP 只允许位于隔离、ACL 保护的可信管理网。
 | 删除控制容器 | 不适用 | `deploy.sh down`（持久数据保留） |
 
 命令中的脚本路径和完整参数以对应模块 README/`--help` 为准。不要跨列执行服务控制命令。
+Linux Native 管理服务器执行表中 `11-load.py` 时必须带
+`--host-role=management-server`；Linux 工作站的配置准备必须带
+`--host-role=workstation`，且不得启动服务。Docker 的受管 `hostctl` 子调用固定传递
+管理服务器角色，不依赖操作员环境变量。Service IP 暂缺不会改变真实服务器角色：保持
+服务安全停止，修复隔离测试网络后按原角色完整重跑。角色或公钥冲突不得靠覆盖旧公钥、
+换 HOME、修改私钥或跳过测试解决。上述行为尚需独立 REAL_ENV 验证。
 
 ## Docker root 管理 SSH identity
 

@@ -208,7 +208,7 @@ def load_csv(csv_file, *, switch_scope="all"):
                     f"第 {lineno} 行列数不足（{len(row)} < {_NCOLS}）"
                 )
             dev_type = _row_type(row, type_col)
-            if dev_type == "server":
+            if dev_type in {"server", "eth_jump"}:
                 continue
             if dev_type not in {"eth", "eth_spx", "spx", "air", "ib", "nvl"}:
                 raise ValueError(f"第 {lineno} 行 type={dev_type!r} 无效")

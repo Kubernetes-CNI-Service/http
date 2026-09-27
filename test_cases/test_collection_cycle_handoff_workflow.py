@@ -9,6 +9,7 @@ witness behaviour have separate tests and are not assumed here.
 from __future__ import annotations
 
 import hashlib
+import fcntl
 import json
 import errno
 import os
@@ -70,6 +71,7 @@ def expected_identity(scope: str) -> dict:
 BOUNDARY_BASH = r'''#!/usr/bin/env python3
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -83,6 +85,72 @@ arguments = sys.argv[1:]
 if not arguments or not arguments[0].endswith("/monitor/cron.sh"):
     os.execv("/bin/bash", ["bash", *arguments])
 
+# The non-collecting plan is a real cron phase but is not a collection child.
+# Run it without adding a second child-result trace; a timing mutant below
+# changes the live source only after that phase has returned.
+if "--emit-target-plan-fd" in arguments:
+    planned = subprocess.run(
+        ["/bin/bash", *arguments], stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, pass_fds=tuple(
+            int(arguments[arguments.index(flag) + 1])
+            for flag in ("--worker-context-fd", "--emit-target-plan-fd",
+                         "--preheld-lock-fd")
+            if flag in arguments
+        ), env=os.environ.copy(), check=False,
+    )
+    root = Path(arguments[0]).parent.parent.parent.resolve()
+    control = json.loads((root / "fixture-control.json").read_text(encoding="utf-8"))
+    if control.get("mode") in {"plan_extra_unbacked", "plan_static_ip_unbacked"} and \
+            control.get("target_slot") == (
+                "ethernet/air" if Path(arguments[0]).parent.parent.name == "ethernet"
+                and "--air" in arguments else
+                f"{Path(arguments[0]).parent.parent.name}/prod"
+            ):
+        descriptor = int(arguments[arguments.index("--emit-target-plan-fd") + 1])
+        original = os.pread(descriptor, os.fstat(descriptor).st_size, 0)
+        plan = json.loads(original)
+        key = {"ethernet": "eth", "infiniband": "ib", "nvlink": "nv"}[
+            Path(arguments[0]).parent.parent.name]
+        if control["mode"] == "plan_extra_unbacked":
+            plan[key].append("rogue-unbound|198.51.100.199")
+        else:
+            plan[key][0] = plan[key][0].replace("192.0.2.", "198.51.100.")
+        replacement = (
+            json.dumps(plan, ensure_ascii=False, sort_keys=True,
+                       separators=(",", ":")) + "\n"
+        ).encode("utf-8")
+        os.ftruncate(descriptor, 0)
+        os.pwrite(descriptor, replacement, 0)
+    if control.get("mode") == "source_changed_after_plan":
+        source = Path(arguments[0]).parent / {
+            "ethernet": "eth.csv", "infiniband": "ib.csv", "nvlink": "nvsw.csv"
+        }[Path(arguments[0]).parent.parent.name]
+        source.write_text(source.read_text(encoding="utf-8").replace(
+            "leaf-", "drift-"), encoding="utf-8")
+    if control.get("mode") == "runtime_snapshot_changed_after_plan":
+        descriptor = int(arguments[arguments.index("--worker-context-fd") + 1])
+        frozen_context = json.loads(os.pread(descriptor,
+            os.fstat(descriptor).st_size, 0))
+        lease = Path(frozen_context["artifacts"]["input_inventory"]).with_suffix(".leases")
+        lease.write_bytes(lease.read_bytes() + b"\nlate lease mutation\n")
+    if control.get("mode") == "probe_lock_between_phases":
+        lock_path = Path(arguments[0]).parent / "cron.lock"
+        fd = os.open(lock_path, os.O_RDWR)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                blocked = False
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except BlockingIOError:
+                blocked = True
+        finally:
+            os.close(fd)
+        (root / "fixture-plan-lock.json").write_text(
+            json.dumps({"blocked": blocked}), encoding="utf-8")
+    sys.stdout.buffer.write(planned.stdout)
+    sys.stderr.buffer.write(planned.stderr)
+    raise SystemExit(planned.returncode)
+
 invoked = Path(arguments[0])
 root = invoked.parent.parent.parent.resolve()
 control = json.loads((root / "fixture-control.json").read_text(encoding="utf-8"))
@@ -93,7 +161,11 @@ mutate = target is None or target == slot
 
 context = None
 child_arguments = list(arguments)
-if "--worker-context-fd" in arguments:
+force_legacy = control.get("mode") in {
+    "legacy_no_context", "mixed_nonempty", "zero_byte_evidence",
+    "all_unreachable",
+}
+if "--worker-context-fd" in arguments and not force_legacy:
     position = arguments.index("--worker-context-fd")
     descriptor = int(arguments[position + 1])
     chunks = []
@@ -104,6 +176,20 @@ if "--worker-context-fd" in arguments:
         chunks.append(chunk)
     raw_context = b"".join(chunks)
     context = json.loads(raw_context)
+    if mutate and control.get("mode") in {"plan_context_tamper", "plan_context_forged_digest"}:
+        plan = context["target_plan"]
+        key = {"ethernet": "eth", "infiniband": "ib", "nvlink": "nv"}[area]
+        row = plan[key][0]
+        plan[key][0] = row.replace("192.0.2.", "198.51.100.")
+        if control["mode"] == "plan_context_forged_digest":
+            context["target_plan_sha256"] = hashlib.sha256(
+                json.dumps(plan, ensure_ascii=False, sort_keys=True,
+                           separators=(",", ":")).encode("utf-8") + b"\n"
+            ).hexdigest()
+        raw_context = (
+            json.dumps(context, ensure_ascii=False, sort_keys=True,
+                       separators=(",", ":")) + "\n"
+        ).encode("utf-8")
     read_fd, write_fd = os.pipe()
     os.write(write_fd, raw_context)
     os.close(write_fd)
@@ -112,20 +198,25 @@ if "--worker-context-fd" in arguments:
     pass_fds = (descriptor,)
 else:
     pass_fds = ()
+    if force_legacy and "--worker-context-fd" in arguments:
+        position = child_arguments.index("--worker-context-fd")
+        del child_arguments[position:position + 2]
+if "--preheld-lock-fd" in arguments:
+    pass_fds = (*pass_fds, int(arguments[arguments.index("--preheld-lock-fd") + 1]))
 
 ordinary = []
 skip = set()
 for position, value in enumerate(arguments):
     if position in skip:
         continue
-    if value == "--worker-context-fd" and position + 1 < len(arguments):
+    if value in {"--worker-context-fd", "--preheld-lock-fd"} and position + 1 < len(arguments):
         skip.add(position + 1)
         continue
     ordinary.append(value)
 trace = {
     "argv": ordinary,
     "context": context,
-    "context_fd_present": "--worker-context-fd" in arguments,
+    "context_fd_present": "--worker-context-fd" in arguments and not force_legacy,
     "environment": dict(os.environ),
     "invoked_path": str(invoked),
     "resolved_path": str(invoked.resolve()),
@@ -139,7 +230,9 @@ completed = subprocess.run(
     stderr=subprocess.PIPE, pass_fds=pass_fds, env=os.environ.copy(), check=False,
 )
 stdout = completed.stdout.decode("utf-8", errors="replace")
+(root / "fixture-child-stdout.txt").write_text(stdout, encoding="utf-8")
 stderr = completed.stderr.decode("utf-8", errors="replace")
+(root / "fixture-child-stderr.txt").write_text(stderr, encoding="utf-8")
 returncode = completed.returncode
 
 def mutate_marker(transform):
@@ -155,6 +248,12 @@ def mutate_marker(transform):
     stdout = "\n".join(lines) + ("\n" if completed.stdout.endswith(b"\n") else "")
 
 mode = control.get("mode", "success")
+if mode == "source_changed_after_freeze" and mutate:
+    csv_name = {"ethernet": "eth.csv", "infiniband": "ib.csv",
+                "nvlink": "nvsw.csv"}[area]
+    source = invoked.parent / csv_name
+    original = source.read_text(encoding="utf-8")
+    source.write_text(original.replace("leaf-", "drift-"), encoding="utf-8")
 if mutate:
     if mode == "missing_marker":
         stdout = "\n".join(
@@ -306,7 +405,14 @@ scp() {
     esac
     return 0
 }
-export -f flock ssh-keygen sleep ssh scp
+tar() {
+    if [[ "${FIXTURE_TAR_MODE:-}" == "fail" ]]; then
+        printf 'fixture archive write failure\n' >&2
+        return 86
+    fi
+    command tar "$@"
+}
+export -f flock ssh-keygen sleep ssh scp tar
 '''
 
 
@@ -355,6 +461,10 @@ scope = sys.argv[2]
 mode = sys.argv[3]
 target = sys.argv[4] or None
 action = sys.argv[5] if len(sys.argv) > 5 else "direct"
+if mode == "helper_failure":
+    (root / "monitor/collection_v2_emitter.py").write_text(
+        "import sys\nraise SystemExit(77)\n", encoding="utf-8"
+    )
 sys.path.insert(0, str(root / "monitor"))
 worker = runpy.run_path(str(root / "monitor/switch-collection-worker.py"))
 required = ("run_collection_slots", "parse_collection_slot_result")
@@ -380,13 +490,14 @@ slots = {
 bindings = {}
 for slot in slots:
     stem = slot.replace("/", "-")
-    area = root / "fixture-artifacts" / stem
-    area.mkdir(parents=True, exist_ok=True)
-    inventory = area / "inventory.csv"
-    inventory.write_bytes(("hostname,type\n" + slot + ",fixture\n").encode("utf-8"))
+    cycle = (root / "monitor/status/collection-cycles"
+             / body["project_key"] / scope / "switch_collection" / "artifacts"
+             / f"{body['sequence']:020d}")
+    area = cycle / stem
+    inventory = cycle / "inputs" / f"{stem}.csv"
     bindings[slot] = {
-        "evidence": str(area / "evidence.bin"),
-        "envelope": str(area / "envelope.json"),
+        "evidence": str(area / "evidence-manifest.json"),
+        "envelope": str(area / "identity-envelope.json"),
         "input_inventory": str(inventory),
     }
 control = {"mode": mode}
@@ -516,6 +627,44 @@ else:
 
 
 class CollectionCycleHandoffWorkflowTests(unittest.TestCase):
+    def test_real_cron_target_plan_phase_has_no_collection_side_effects(self):
+        """Planning binds targets without opening SSH or producing archives."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.make_layout(directory)
+            with tempfile.TemporaryFile(mode="w+b") as plan_file:
+                completed = subprocess.run(
+                    ["/bin/bash", str(root / "infiniband/monitor/cron.sh"),
+                     "--type", "ib", "--emit-target-plan-fd",
+                     str(plan_file.fileno())],
+                    cwd=root / "infiniband/monitor", text=True,
+                    capture_output=True, timeout=20,
+                    pass_fds=(plan_file.fileno(),),
+                    env={
+                        "BASH_ENV": str(root / "fixture-bash-env.sh"),
+                        "PATH": str(root / "fixture-bin") + ":/usr/bin:/bin:/usr/sbin:/sbin",
+                        "PYTHONDONTWRITEBYTECODE": "1",
+                    },
+                )
+                plan_file.seek(0)
+                plan = json.load(plan_file)
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertEqual(["leaf-ib|192.0.2.11"], plan["ib"])
+            self.assertEqual([], plan["eth"])
+            self.assertFalse(list((root / "infiniband/monitor").rglob("*.tar.gz")))
+            self.assertFalse(list((root / "infiniband/monitor").rglob("*.info")))
+
+    def test_managed_cron_lock_remains_held_between_plan_and_full(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.make_layout(directory)
+            completed, payload, _traces = self.run_workflow(
+                root, "prod", "probe_lock_between_phases", "infiniband/prod"
+            )
+            probe = json.loads((root / "fixture-plan-lock.json").read_text(
+                encoding="utf-8"))
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["returned"], payload)
+        self.assertTrue(probe["blocked"], "another cron must not enter between phases")
+
     def make_layout(self, directory: str) -> Path:
         root = Path(directory)
         tools = root / "tools"
@@ -534,8 +683,23 @@ class CollectionCycleHandoffWorkflowTests(unittest.TestCase):
             ROOT / "monitor/switch_collection_gate.py",
             monitor / "switch_collection_gate.py",
         )
+        shutil.copy2(
+            ROOT / "monitor/collection_v2_emitter.py",
+            monitor / "collection_v2_emitter.py",
+        )
         for name in ("cron.sh", "post-collect.py", "sw-info.sh", "sw-link.sh"):
             shutil.copy2(ROOT / "ethernet/monitor" / name, ethernet / name)
+        ztp = root / "ztp"
+        ztp.mkdir()
+        shutil.copy2(ROOT / "ztp/dynamic_air_inventory.py",
+                     ztp / "dynamic_air_inventory.py")
+        shutil.copy2(ROOT / "ztp/dhcp_runtime_inventory.py",
+                     ztp / "dhcp_runtime_inventory.py")
+        (root / "dhcpd.leases").write_text("", encoding="utf-8")
+        (root / "dhcp-runtime.log").write_text("", encoding="utf-8")
+        air_json = ztp / "config/isc-dhcp-server/p2p-air.json"
+        air_json.parent.mkdir(parents=True)
+        air_json.write_text('{"nodes":{}}\n', encoding="utf-8")
         fixture_bin = root / "fixture-bin"
         fixture_bin.mkdir()
         (fixture_bin / "bash").write_text(BOUNDARY_BASH, encoding="utf-8")
@@ -594,6 +758,9 @@ class CollectionCycleHandoffWorkflowTests(unittest.TestCase):
                 "BASH_ENV": str(root / "fixture-bash-env.sh"),
                 "PATH": str(root / "fixture-bin") + ":/usr/bin:/bin:/usr/sbin:/sbin",
                 "PYTHONDONTWRITEBYTECODE": "1",
+                "FIXTURE_TAR_MODE": "fail" if mode == "archive_failure" else "",
+                "DHCP_LEASES_FILE": str(root / "dhcpd.leases"),
+                "DHCP_RUNTIME_LOG_FILE": str(root / "dhcp-runtime.log"),
             },
         )
         payload = None
@@ -710,7 +877,9 @@ class CollectionCycleHandoffWorkflowTests(unittest.TestCase):
     def test_prod_real_v1_handoff_is_ordered_persistable_and_nonqualifying(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.make_layout(directory)
-            completed, payload, traces = self.run_workflow(root, "prod")
+            completed, payload, traces = self.run_workflow(
+                root, "prod", "legacy_no_context"
+            )
 
         self.assertEqual(0, completed.returncode, completed.stderr)
         self.assertIsNotNone(payload, completed.stdout)
@@ -760,6 +929,295 @@ class CollectionCycleHandoffWorkflowTests(unittest.TestCase):
             for item in result["outcomes"]
         ))
 
+    def test_managed_real_collectors_emit_run_bound_v2_evidence(self):
+        """The worker and three real cron entrypoints must agree on one cycle.
+
+        The fixture executes the actual worker and copied canonical cron.sh
+        through Ethernet, InfiniBand and NVLink aliases.  SSH and hardware
+        acquisition alone are shimmed; their output is not treated as a real
+        device validation.  The frozen A4 contract requires the worker to
+        provide an anonymous context FD and independently verify each v2
+        sidecar and inventory before producing a summary.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.make_layout(directory)
+            completed, payload, traces = self.run_workflow(root, "prod")
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertIsNotNone(payload, completed.stdout)
+        assert payload is not None
+        self.assertTrue(payload["returned"], payload)
+        result = payload["result"]
+        self.assertEqual(expected_identity("prod"), result["identity"])
+        self.assertEqual(list(EXPECTED_SLOTS["prod"]), [
+            item["source_slot"] for item in result["outcomes"]
+        ])
+        self.assertEqual(len(EXPECTED_SLOTS["prod"]), len(traces))
+        self.assertTrue(all(trace["context_fd_present"] for trace in traces))
+        self.assertTrue(all(
+            trace["context"]["identity"] == expected_identity("prod")
+            for trace in traces
+        ))
+        self.assertTrue(all(
+            trace["context"].get("target_plan_sha256")
+            == hashlib.sha256(canonical_bytes(
+                trace["context"].get("target_plan")) + b"\n").hexdigest()
+            for trace in traces
+        ), "every full collector must consume one frozen pre-collection plan")
+        self.assertTrue(all(
+            item["outcome"] == "accepted"
+            and item["child_result"]["schema_version"] == 2
+            and item["child_result"]["source_slot"] == item["source_slot"]
+            for item in result["outcomes"]
+        ))
+        self.assertIsNotNone(result["summary"])
+        self.assertTrue(result["summary"]["qualifying"])
+
+    def test_archive_failure_keeps_residual_source_but_publishes_no_v2_authority(self):
+        """A failed tar must not turn a partial directory into artifact proof."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.make_layout(directory)
+            completed, payload, _traces = self.run_workflow(
+                root, "prod", "archive_failure"
+            )
+            residual = list((root / "ethernet/monitor/eth-info").glob("*/"))
+            sidecars = list((root / "monitor/status").rglob(
+                "evidence-manifest.json"
+            )) + list((root / "monitor/status").rglob("identity-envelope.json"))
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertIsNotNone(payload, completed.stdout)
+        assert payload is not None
+        self.assertTrue(payload["returned"], payload)
+        self.assertTrue(residual, "archive failure fixture must leave source data")
+        self.assertEqual([], sidecars)
+        self.assertIsNone(payload["result"]["summary"])
+        self.assertTrue(all(
+            item["outcome"] == "accepted"
+            and item["child_result"]["schema_version"] == 1
+            and item["child_result"]["state"] == "failed"
+            for item in payload["result"]["outcomes"]
+        ), payload["result"]["outcomes"])
+
+    def test_helper_failure_keeps_v1_terminal_and_no_partial_sidecar(self):
+        """A helper crash must not publish either half of v2 authority."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.make_layout(directory)
+            completed, payload, _traces = self.run_workflow(
+                root, "prod", "helper_failure"
+            )
+            sidecars = list((root / "monitor/status").rglob(
+                "evidence-manifest.json"
+            )) + list((root / "monitor/status").rglob("identity-envelope.json"))
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertIsNotNone(payload, completed.stdout)
+        assert payload is not None
+        self.assertTrue(payload["returned"], payload)
+        self.assertEqual([], sidecars)
+        self.assertIsNone(payload["result"]["summary"])
+        self.assertTrue(all(
+            item["outcome"] == "accepted"
+            and item["child_result"]["schema_version"] == 1
+            and item["child_result"]["state"] == "failed"
+            for item in payload["result"]["outcomes"]
+        ), payload["result"]["outcomes"])
+
+    def test_live_source_change_after_worker_freeze_cannot_change_targets(self):
+        """A post-freeze CSV rewrite cannot retarget this managed run."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.make_layout(directory)
+            completed, payload, traces = self.run_workflow(
+                root, "prod", "source_changed_after_freeze", "infiniband/prod"
+            )
+            frozen = list((root / "monitor/status").rglob(
+                "inputs/infiniband-prod.csv"
+            ))
+            self.assertEqual(1, len(frozen))
+            self.assertIn(b"leaf-ib", frozen[0].read_bytes())
+            self.assertIn(b"drift-ib", (
+                root / "infiniband/monitor/ib.csv"
+            ).read_bytes())
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["returned"], payload)
+        self.assertTrue(any(trace["source_slot"] == "infiniband/prod"
+                            and trace["context_fd_present"] for trace in traces))
+        by_slot = {item["source_slot"]: item
+                   for item in payload["result"]["outcomes"]}
+        self.assertEqual("accepted", by_slot["infiniband/prod"]["outcome"])
+        self.assertEqual(2, by_slot["infiniband/prod"]["child_result"]["schema_version"])
+        self.assertTrue(payload["result"]["summary"]["qualifying"])
+
+    def test_live_inventory_rewrite_between_plan_and_full_does_not_retarget(self):
+        """The full collector consumes plan bytes, not the changed live CSV."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.make_layout(directory)
+            completed, payload, traces = self.run_workflow(
+                root, "prod", "source_changed_after_plan", "infiniband/prod"
+            )
+            self.assertIn(b"drift-ib", (
+                root / "infiniband/monitor/ib.csv"
+            ).read_bytes())
+            self.assertIn(b"leaf-ib", traces[1]["context"]["target_plan"]["ib"][0].encode())
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["returned"], payload)
+        by_slot = {item["source_slot"]: item
+                   for item in payload["result"]["outcomes"]}
+        self.assertEqual("accepted", by_slot["infiniband/prod"]["outcome"])
+        self.assertTrue(payload["result"]["summary"]["qualifying"])
+
+    def test_plan_fd_tamper_and_forged_digest_cannot_qualify(self):
+        for mode in ("plan_context_tamper", "plan_context_forged_digest"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = self.make_layout(directory)
+                completed, payload, _traces = self.run_workflow(
+                    root, "prod", mode, "infiniband/prod"
+                )
+                self.assertEqual(0, completed.returncode, completed.stderr)
+                self.assertTrue(payload["returned"], payload)
+                by_slot = {item["source_slot"]: item
+                           for item in payload["result"]["outcomes"]}
+                self.assertNotEqual("accepted", by_slot["infiniband/prod"]["outcome"])
+                self.assertIsNone(payload["result"]["summary"])
+
+    def test_unbacked_planner_target_cannot_gain_v2_authority(self):
+        """A canonical but provenance-free extra target is not qualifying."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.make_layout(directory)
+            completed, payload, _traces = self.run_workflow(
+                root, "prod", "plan_extra_unbacked", "ethernet/prod"
+            )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["returned"], payload)
+        by_slot = {item["source_slot"]: item
+                   for item in payload["result"]["outcomes"]}
+        self.assertNotEqual("accepted", by_slot["ethernet/prod"]["outcome"])
+        self.assertIsNone(payload["result"]["summary"])
+
+    def test_unbacked_static_ip_rewrite_cannot_gain_v2_authority(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.make_layout(directory)
+            completed, payload, _traces = self.run_workflow(
+                root, "prod", "plan_static_ip_unbacked", "infiniband/prod"
+            )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["returned"], payload)
+        by_slot = {item["source_slot"]: item
+                   for item in payload["result"]["outcomes"]}
+        self.assertNotEqual("accepted", by_slot["infiniband/prod"]["outcome"])
+        self.assertIsNone(payload["result"]["summary"])
+
+    def test_runtime_snapshot_mutation_between_plan_and_full_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.make_layout(directory)
+            completed, payload, _traces = self.run_workflow(
+                root, "prod", "runtime_snapshot_changed_after_plan", "ethernet/prod"
+            )
+            frozen_lease = list((root / "monitor/status").rglob(
+                "inputs/ethernet-prod.leases"))
+            self.assertEqual(1, len(frozen_lease))
+            self.assertIn(b"late lease mutation", frozen_lease[0].read_bytes())
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["returned"], payload)
+        by_slot = {item["source_slot"]: item
+                   for item in payload["result"]["outcomes"]}
+        self.assertEqual("accepted", by_slot["ethernet/prod"]["outcome"])
+        self.assertEqual(1, by_slot["ethernet/prod"]["child_result"]["schema_version"])
+        self.assertEqual("failed", by_slot["ethernet/prod"]["child_result"]["state"])
+        self.assertIsNone(payload["result"]["summary"])
+
+    def test_prefrozen_production_unbound_runtime_target_gains_v2_authority(self):
+        """A before-cron derived DHCP row is sealed into the plan and evidence."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.make_layout(directory)
+            helper = root / "ztp/dhcp_runtime_inventory.py"
+            helper.parent.mkdir(parents=True, exist_ok=True)
+            helper.write_text(
+                '#!/usr/bin/env python3\n'
+                'import json\n'
+                'print(json.dumps({"devices":[{"mac":"02:00:00:00:00:01",'
+                '"ip":"192.0.2.99","platform":"cumulus",'
+                '"lease_state":"active"}]}))\n',
+                encoding="utf-8",
+            )
+            completed, payload, traces = self.run_workflow(root, "prod")
+            ethernet_sidecars = list((root / "monitor/status").rglob(
+                "ethernet-prod/evidence-manifest.json"
+            ))
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["returned"], payload)
+        by_slot = {item["source_slot"]: item
+                   for item in payload["result"]["outcomes"]}
+        self.assertEqual(1, len(ethernet_sidecars))
+        self.assertIn("DISCOVERED-CUMULUS-020000000001",
+                      traces[0]["context"]["target_plan"]["eth"][1])
+        self.assertEqual(
+            ["02:00:00:00:00:01|192.0.2.99|cumulus|active"],
+            traces[0]["context"]["prod_runtime_rows"],
+        )
+        self.assertTrue(payload["result"]["summary"]["qualifying"])
+        self.assertEqual("accepted", by_slot["ethernet/prod"]["outcome"])
+        self.assertEqual(2, by_slot["ethernet/prod"]["child_result"]["schema_version"])
+        self.assertEqual("success", by_slot["ethernet/prod"]["child_result"]["state"])
+
+    def test_missing_dynamic_resolver_keeps_real_collection_v1_nonqualifying(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.make_layout(directory)
+            (root / "ztp/dhcp_runtime_inventory.py").unlink()
+            completed, payload, traces = self.run_workflow(root, "prod")
+            evidence = list((root / "monitor/status").rglob(
+                "ethernet-prod/evidence-manifest.json"
+            ))
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["returned"], payload)
+        by_slot = {item["source_slot"]: item
+                   for item in payload["result"]["outcomes"]}
+        self.assertEqual("resolver_unavailable",
+                         traces[0]["context"]["v2_unavailable"])
+        self.assertEqual("accepted", by_slot["ethernet/prod"]["outcome"])
+        self.assertEqual(1, by_slot["ethernet/prod"]["child_result"]["schema_version"])
+        self.assertIsNone(payload["result"]["summary"])
+        self.assertEqual([], evidence)
+
+    def test_prefrozen_air_json_and_lease_dynamic_target_gains_v2_authority(self):
+        """Real AIR resolver consumes private before-cron JSON/lease snapshots."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.make_layout(directory)
+            (root / "ethernet/monitor/eth.csv").write_text(
+                "hostname,type,eth0_ip,eth0_mac\n"
+                "AIR-Leaf01,air,192.0.2.10,02:00:00:00:00:10\n",
+                encoding="utf-8",
+            )
+            air_json = root / "ztp/config/isc-dhcp-server/p2p-air.json"
+            air_json.parent.mkdir(parents=True, exist_ok=True)
+            air_json.write_text(json.dumps({"content": {"nodes": {
+                "AIR-Leaf01": {"os": "cumulus-vx-5.16.4",
+                               "management_interfaces": {"eth0": {
+                                   "mac_address": "02:00:00:00:00:10"}}},
+                "AIR-FW01": {"os": "cumulus-vx-5.16.4",
+                             "management_interfaces": {"eth0": {
+                                 "mac_address": "02:00:00:00:00:21"}}},
+            }}}), encoding="utf-8")
+            (root / "dhcpd.leases").write_text(
+                "lease 192.0.2.21 {\n  binding state active;\n"
+                "  hardware ethernet 02:00:00:00:00:21;\n  }\n",
+                encoding="utf-8",
+            )
+            (root / "tools/lldp-analyze-tool/99-output-p2p/fixture-lldpq-air.dot").write_text(
+                "digraph air_fixture {}\n", encoding="utf-8",
+            )
+            completed, payload, traces = self.run_workflow(root, "air")
+            evidence = list((root / "monitor/status").rglob(
+                "ethernet-air/evidence-manifest.json"))
+            child_stderr = (root / "fixture-child-stderr.txt").read_text(encoding="utf-8")
+            child_stdout = (root / "fixture-child-stdout.txt").read_text(encoding="utf-8")
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["returned"], payload)
+        self.assertEqual(1, len(evidence), (payload, traces, child_stderr, child_stdout))
+        self.assertTrue(payload["result"]["summary"]["qualifying"])
+        self.assertIn("AIR-FW01|192.0.2.21", traces[0]["context"]["target_plan"]["eth"])
+        self.assertEqual(2, payload["result"]["outcomes"][0]["child_result"]["planned"])
+
     def test_real_ib_and_nvlink_entrypoints_reject_an_empty_selected_lane(self):
         for area, inventory_name, slot in (
             ("infiniband", "ib.csv", "infiniband/prod"),
@@ -800,7 +1258,9 @@ class CollectionCycleHandoffWorkflowTests(unittest.TestCase):
                 item["source_slot"]: item
                 for item in payload["result"]["outcomes"]
             }
-            self.assertEqual("missing_marker", by_slot["ethernet/air"]["outcome"])
+            # The plan phase now rejects an empty AIR source before launching
+            # a collection child; the old missing-marker failure moves earlier.
+            self.assertEqual("worker_error", by_slot["ethernet/air"]["outcome"])
             self.assertTrue(all(
                 by_slot[slot]["outcome"] == "accepted"
                 and by_slot[slot]["child_result"]["schema_version"] == 1
@@ -831,9 +1291,13 @@ class CollectionCycleHandoffWorkflowTests(unittest.TestCase):
                 "failed_payload_rc0",
             )
             for mode in mutations:
-                with self.subTest(mode=mode):
+                # A v2 slot publishes immutable private sidecars. Give each
+                # marker mutation a fresh cycle tree so a preceding case's
+                # accepted sidecar cannot turn this case into a replay.
+                with self.subTest(mode=mode), tempfile.TemporaryDirectory() as variant:
+                    variant_root = self.make_layout(variant)
                     completed, payload, _ = self.run_workflow(
-                        root, "prod", mode, "infiniband/prod",
+                        variant_root, "prod", mode, "infiniband/prod",
                     )
                     self.assert_fail_closed(payload, completed)
 
@@ -858,9 +1322,16 @@ class CollectionCycleHandoffWorkflowTests(unittest.TestCase):
             self.assertNotIn("input_inventory_sha256", child)
             self.assertIsNone(payload["result"]["summary"])
 
-            completed, payload, _ = self.run_workflow(
-                root, "prod", "all_unreachable",
-            )
+            # The fixture identity is deliberately fixed at sequence 7. A
+            # second run in the same root would reuse the first run's
+            # immutable worker-owned input names, so give this independent
+            # failure scenario its own project/root while retaining every
+            # all-unreachable outcome assertion below.
+            with tempfile.TemporaryDirectory() as unreachable_directory:
+                unreachable_root = self.make_layout(unreachable_directory)
+                completed, payload, _ = self.run_workflow(
+                    unreachable_root, "prod", "all_unreachable",
+                )
             self.assertEqual(0, completed.returncode, completed.stderr)
             self.assertIsNotNone(payload, completed.stdout)
             self.assertTrue(payload["returned"], payload)

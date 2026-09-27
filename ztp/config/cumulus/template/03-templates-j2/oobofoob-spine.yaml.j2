@@ -11,28 +11,8 @@
             '{{ d.vlan_id }}': {}
 {% endif %}
     interface:
-      eth0:
-        ipv4:
-{% if d.eth0_ip == 'dhcp-client' %}
-          dhcp-client:
-            state: enabled
-{% else %}
-          address:
-            {{ d.eth0_ip }}: {}
-          gateway:
-            {{ d.eth0_gw }}: {}
-{% endif %}
-        type: eth
-        vrf: mgmt
-{% if d.has_eth1 %}
-      eth1:
-        ipv4:
-          address:
-            {{ d.eth1_ip }}: {}
-          gateway:
-            {{ d.eth1_gw }}: {}
-        type: eth
-{% endif %}
+{% include '_management_eth0_dhcp.yaml.j2' %}
+{% include '_management_eth1.yaml.j2' %}
       lo:
         ipv4:
           address:
@@ -198,11 +178,11 @@
         server:
 {% for srv in g.system.dns.server %}
           {{ srv }}:
-            vrf: {{ g.system.dns.vrf }}
+            vrf: {{ g.system.dns.vrf|default('mgmt', true) }}
 {% endfor %}
       docker:
         state: enabled
-        vrf: {{ g.system.dns.vrf }}
+        vrf: {{ g.system.dns.vrf|default('mgmt', true) }}
 {% set schema_v2 = (d._project_schema_version|default(1)) == 2 %}
 {% set emit_mlag_anycast = ((not schema_v2 and d.mlag_mac_address is defined) or (schema_v2 and d.mlag_vxlan_active_active|default(false))) %}
 {% set emit_system_mac = (not schema_v2 and d.system_mac is defined and d.system_mac) %}
@@ -222,7 +202,7 @@
           {{ srv }}:
             iburst: enabled
 {% endfor %}
-        vrf: {{ g.system.ntp.vrf }}
+        vrf: {{ g.system.ntp.vrf|default('mgmt', true) }}
       ssh-server:
         state: enabled
       wjh:

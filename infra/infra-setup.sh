@@ -123,7 +123,7 @@ $force_bluefield && bluefield_mode="yes"
 $force_power_cycle && power_cycle_mode="yes"
 
 script_source="${BASH_SOURCE[0]:-}"
-control_auth_source_sha256="5a133a353cb7ac7af5be0be71b4ef85b41345716103d6e28590140638ee11038"
+control_auth_source_sha256="f5cea5266ab808250b718250a8a73d7d6f6452a199b97fa500643d7ed9e988db"
 MONITOR_AUTHORITY_RECOVERY_WARNING='WARNING: explicit Monitor authority recovery reset invalid cache state; review the accepted www-data denial residual.'
 control_auth_source=""
 control_auth_helper="/usr/local/lib/http-ztp/control-auth.py"
@@ -456,9 +456,62 @@ exec 9>"$lock_file"
 flock -x 9
 
 log_dir="${runtime_dir}/logs"
-mkdir -p "$log_dir"
-log_file="${log_dir}/infra-setup-$(date +%Y%m%d_%H%M%S)-$$.log"
+log_root_lock="${runtime_dir}/.logs.lock"
+if [[ -L "$log_root_lock" || ( -e "$log_root_lock" && ! -f "$log_root_lock" ) ]]; then
+  echo "ERROR: invalid infra log-root lock" >&2
+  exit 1
+fi
+( umask 077; : >>"$log_root_lock" )
+exec 8>>"$log_root_lock"
+flock -x 8
+if [[ -L "$log_root_lock" || ! -f "$log_root_lock" ]]; then
+  echo "ERROR: infra log-root lock changed" >&2
+  exit 1
+fi
+for pending in "${runtime_dir}"/.logs-migration.*; do
+  if [[ -e "$pending" || -L "$pending" ]]; then
+    echo "ERROR: infra log migration state is pending" >&2
+    exit 1
+  fi
+done
+if [[ -L "$log_dir" ]]; then
+  log_target=$(readlink -- "$log_dir") || exit 1
+  case "$log_target" in
+    ../DAY0-Prepare/*/99-output-infra) ;;
+    *) echo "ERROR: infra/logs is not a managed project link" >&2; exit 1 ;;
+  esac
+  log_project=${log_target#../DAY0-Prepare/}
+  log_project=${log_project%/99-output-infra}
+  case "$log_project" in
+    ''|.|..|*/*) echo "ERROR: invalid infra log project" >&2; exit 1 ;;
+  esac
+  projects_root="${runtime_dir}/../DAY0-Prepare"
+  physical_log_dir="${projects_root}/${log_project}/99-output-infra"
+  if [[ -L "$projects_root" || -L "${projects_root}/${log_project}" ||
+        -L "$physical_log_dir" || ! -d "$physical_log_dir" ]]; then
+    echo "ERROR: infra log owner is not a real project output" >&2
+    exit 1
+  fi
+  linked_root=$(cd -P -- "$log_dir" && pwd -P) || exit 1
+  bound_root=$(cd -P -- "$physical_log_dir" && pwd -P) || exit 1
+  if [[ "$linked_root" != "$bound_root" ]]; then
+    echo "ERROR: infra log owner changed during binding" >&2
+    exit 1
+  fi
+elif [[ -e "$log_dir" ]]; then
+  if [[ ! -d "$log_dir" ]]; then
+    echo "ERROR: infra/logs is not a real directory" >&2
+    exit 1
+  fi
+  physical_log_dir="$log_dir"
+else
+  mkdir -m 700 -- "$log_dir"
+  physical_log_dir="$log_dir"
+fi
+log_file="${physical_log_dir}/infra-setup-$(date +%Y%m%d_%H%M%S)-$$.log"
 exec 3>>"$log_file"
+flock -u 8
+exec 8>&-
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] infra-setup.sh started" >&3
 
 if [[ "$recover_monitor_authority" == "true" ]]; then
@@ -1096,9 +1149,10 @@ apt_log() {
 
   set +e
   if command -v stdbuf >/dev/null 2>&1; then
-    stdbuf -oL -eL "$@" 2>&1 | tee -a "$log_file"
+    # FD 3 pins the validated log owner even if infra/logs is repointed.
+    stdbuf -oL -eL "$@" 2>&1 | tee -a /dev/fd/3
   else
-    "$@" 2>&1 | tee -a "$log_file"
+    "$@" 2>&1 | tee -a /dev/fd/3
   fi
   pipeline_status=("${PIPESTATUS[@]}")
   set -e

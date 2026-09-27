@@ -1777,34 +1777,57 @@ def _expected_owned_id_argument(value: str) -> str:
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
-    result.add_argument("--lock", type=Path, default=DEFAULT_LOCK)
-    result.add_argument("--wait", type=int, default=600)
-    result.add_argument("--clear-activation", action="store_true")
-    result.add_argument("--require-owned-or-absent", action="store_true")
-    result.add_argument("--owned-action", choices=("remove-clear",))
-    result.add_argument("--expected-owned-id", type=_expected_owned_id_argument)
-    result.add_argument("--expect-owned-or-absent", action="store_true")
-    result.add_argument("--inspect-owned-id", action="store_true")
-    result.add_argument("--allow-absent", action="store_true")
-    result.add_argument("--require-running", action="store_true")
-    result.add_argument("--expect-env", action="append", default=[])
-    result.add_argument("--validate-local-daemon", action="store_true")
-    result.add_argument("--prepare-control-auth", action="store_true")
-    result.add_argument("--prepare-monitor-authority", action="store_true")
-    result.add_argument("--attest-monitor-authority", action="store_true")
-    result.add_argument("--recover-monitor-authority", action="store_true")
+    result.add_argument("--lock", type=Path, default=DEFAULT_LOCK,
+                        help="host lifecycle lock path")
+    result.add_argument("--wait", type=int, default=600,
+                        help="maximum seconds to wait for the lifecycle lock")
+    result.add_argument("--clear-activation", action="store_true",
+                        help="clear the owned activation marker after the locked command")
+    result.add_argument("--require-owned-or-absent", action="store_true",
+                        help="require the Docker container to be owned or absent")
+    result.add_argument("--owned-action", choices=("remove-clear",),
+                        help="perform a checked action on the owned container")
+    result.add_argument("--expected-owned-id", type=_expected_owned_id_argument,
+                        help="exact owned container ID required by --owned-action")
+    result.add_argument("--expect-owned-or-absent", action="store_true",
+                        help="allow either the current owned container or its absence")
+    result.add_argument("--inspect-owned-id", action="store_true",
+                        help="print the current owned container ID under the lock")
+    result.add_argument("--allow-absent", action="store_true",
+                        help="permit no owned container during --inspect-owned-id")
+    result.add_argument("--require-running", action="store_true",
+                        help="require an inspected owned container to be running")
+    result.add_argument("--expect-env", action="append", default=[],
+                        help="require KEY=VALUE in the inspected container; repeatable")
+    result.add_argument("--validate-local-daemon", action="store_true",
+                        help="validate the local rootful Docker daemon without lifecycle writes")
+    result.add_argument("--prepare-control-auth", action="store_true",
+                        help="prepare control authentication under the lifecycle lock")
+    result.add_argument("--prepare-monitor-authority", action="store_true",
+                        help="prepare monitor authority under the lifecycle lock")
+    result.add_argument("--attest-monitor-authority", action="store_true",
+                        help="attest the current monitor authority transaction")
+    result.add_argument("--recover-monitor-authority", action="store_true",
+                        help="recover a monitor authority transaction after interruption")
     result.add_argument(
         "--recover-monitor-authority-decision", action="store_true",
+        help="print the monitor authority recovery decision",
     )
     result.add_argument(
         "--rotate-control-auth", choices=("nvis", "cumulus"),
+        help="rotate control authentication for one exact device family",
     )
-    result.add_argument("--verify-preloaded-image")
-    result.add_argument("--expected-architecture", choices=("arm64", "amd64"))
-    result.add_argument("--expected-image-flavor", choices=("generic", "project"))
-    result.add_argument("--expected-project")
+    result.add_argument("--verify-preloaded-image",
+                        help="verify a preloaded image by its exact identifier")
+    result.add_argument("--expected-architecture", choices=("arm64", "amd64"),
+                        help="required image architecture for preloaded verification")
+    result.add_argument("--expected-image-flavor", choices=("generic", "project"),
+                        help="required generic or project image flavor")
+    result.add_argument("--expected-project",
+                        help="required project identity for a project image")
     result.add_argument(
         "--expected-upgrade-policy", choices=("enabled", "disabled"),
+        help="required upgrade policy of the preloaded image",
     )
     result.add_argument("command", nargs=argparse.REMAINDER)
     return result

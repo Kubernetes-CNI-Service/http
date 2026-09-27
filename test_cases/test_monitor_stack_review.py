@@ -1363,16 +1363,37 @@ class MonitorEvidenceAndModeContractTests(unittest.TestCase):
             release_dir = project / "99-output-ztp"
             release_dir.mkdir(parents=True)
             release = release_dir / "current-release.json"
-            release.write_text(json.dumps({
+            global_bytes = (
+                b"schema_version: 1\ncommon:\n  mgmt:\n"
+                b"    dhcp-server:\n      status: enabled\n"
+            )
+            (project / "01-global.yaml").write_bytes(global_bytes)
+            payload = {
                 "schema_version": 1,
                 "project": "sample",
-                "release_id": "0123456789abcdefabcd",
+                "deployment_scope": "all",
+                "switch_scope": "all",
+                "inputs": {"global": hashlib.sha256(global_bytes).hexdigest()},
+                "input_sources": {"p2p": {"sha256": "0" * 64}},
+                "components": {"dhcp": {
+                    "release_id": "legacy-dhcp", "manifest_sha256": "0" * 64,
+                }},
+                "inventory": [],
                 "generated_at": "2026-09-06T12:00:00+08:00",
                 "validation": "passed",
-            }) + "\n", encoding="utf-8")
+            }
+            basis_keys = (
+                "project", "deployment_scope", "switch_scope", "inputs",
+                "input_sources", "components", "inventory",
+            )
+            payload["release_id"] = hashlib.sha256(json.dumps(
+                {key: payload[key] for key in basis_keys},
+                ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8")).hexdigest()[:20]
+            release.write_text(json.dumps(payload) + "\n", encoding="utf-8")
             self.assertEqual(
                 {
-                    "release_id": "0123456789abcdefabcd",
+                    "release_id": payload["release_id"],
                     "generated_at": "2026-09-06T12:00:00+08:00",
                 },
                 self.monitor.load_release_identity(project),
@@ -1382,6 +1403,109 @@ class MonitorEvidenceAndModeContractTests(unittest.TestCase):
             release.write_text(json.dumps(payload), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "项目身份"):
                 self.monitor.load_release_identity(project)
+
+    def test_real_load_v2_disabled_release_is_bound_to_current_global(self):
+        # Cross real DAY0 load publication -> monitor reader, not a copied
+        # monitor-only fixture.  A stale DHCP receipt must not choose the mode.
+        from test_cases import test_load_release_transaction as release_fixture
+
+        fixture = release_fixture.ReleaseTransactionTests(
+            "test_writes_parent_release_after_all_components_match"
+        )
+        fixture.setUp()
+        try:
+            fixture.global_file.write_text(
+                fixture.global_file.read_text(encoding="utf-8").replace(
+                    "status: enabled", "status: disabled"
+                ), encoding="utf-8",
+            )
+            stale = fixture.ztp / "config/isc-dhcp-server/dhcp-release-manifest.json"
+            stale.write_text('{"stale":"not-current"}\n', encoding="utf-8")
+            disabled = release_fixture.LOAD.replace(
+                fixture.inputs,
+                settings=release_fixture.LOAD.replace(
+                    fixture.inputs.settings, dhcp_enabled=False,
+                ),
+            )
+            parent = release_fixture.LOAD.validate_and_publish_release(
+                fixture.project, disabled, publish=True,
+            )
+            self.assertEqual(2, parent["schema_version"])
+            self.assertEqual("disabled", parent["dhcp_status"])
+            self.assertNotIn("dhcp", parent["components"])
+            self.assertEqual(
+                parent["release_id"],
+                self.monitor.load_release_identity(fixture.project)["release_id"],
+            )
+
+            path = fixture.project / "99-output-ztp/current-release.json"
+            forged = dict(parent, dhcp_status="enabled")
+            basis_keys = (
+                "project", "deployment_scope", "switch_scope", "inputs",
+                "input_sources", "dhcp_status", "components", "inventory",
+            )
+            forged["release_id"] = hashlib.sha256(json.dumps(
+                {key: forged[key] for key in basis_keys},
+                ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8")).hexdigest()[:20]
+            path.write_text(json.dumps(forged), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "DHCP|dhcp|status|模式"):
+                self.monitor.load_release_identity(fixture.project)
+
+            path.write_text(json.dumps(parent), encoding="utf-8")
+            fixture.global_file.write_text(
+                fixture.global_file.read_text(encoding="utf-8") + "# drift\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "global|hash|SHA|输入"):
+                self.monitor.load_release_identity(fixture.project)
+        finally:
+            fixture.tearDown()
+
+    def test_real_load_v1_legacy_is_enabled_only_and_requires_dhcp_component(self):
+        from test_cases import test_load_release_transaction as release_fixture
+
+        fixture = release_fixture.ReleaseTransactionTests(
+            "test_writes_parent_release_after_all_components_match"
+        )
+        fixture.setUp()
+        try:
+            parent = release_fixture.LOAD.validate_and_publish_release(
+                fixture.project, fixture.inputs, publish=True,
+            )
+            path = fixture.project / "99-output-ztp/current-release.json"
+            legacy = dict(parent)
+            legacy["schema_version"] = 1
+            legacy.pop("dhcp_status")
+            basis_keys = (
+                "project", "deployment_scope", "switch_scope", "inputs",
+                "input_sources", "components", "inventory",
+            )
+
+            def write_bound(record):
+                record["release_id"] = hashlib.sha256(json.dumps(
+                    {key: record[key] for key in basis_keys},
+                    ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                ).encode("utf-8")).hexdigest()[:20]
+                path.write_text(json.dumps(record), encoding="utf-8")
+
+            write_bound(legacy)
+            self.assertEqual(
+                legacy["release_id"],
+                self.monitor.load_release_identity(fixture.project)["release_id"],
+            )
+            legacy["dhcp_status"] = "disabled"
+            write_bound(legacy)
+            with self.assertRaisesRegex(ValueError, "legacy|v1|旧版|dhcp_status"):
+                self.monitor.load_release_identity(fixture.project)
+            legacy.pop("dhcp_status")
+            legacy["components"] = dict(legacy["components"])
+            legacy["components"].pop("dhcp")
+            write_bound(legacy)
+            with self.assertRaisesRegex(ValueError, "DHCP|dhcp"):
+                self.monitor.load_release_identity(fixture.project)
+        finally:
+            fixture.tearDown()
 
     def test_collect_on_complete_is_canonical_and_old_name_is_deprecated_alias(self):
         canonical = self.monitor.parser().parse_args([
@@ -3180,7 +3304,7 @@ print('{{"factory_records_active":true,"valid":true}}')
 
     def test_monitor_status_pins_the_reviewed_helper_digest(self):
         expected = (
-            "5a133a353cb7ac7af5be0be71b4ef85b41345716103d6e28590140638ee11038"
+            "f5cea5266ab808250b718250a8a73d7d6f6452a199b97fa500643d7ed9e988db"
         )
         self.assertEqual(expected, self.ztp_cgi.CONTROL_AUTH_HELPER_SHA256)
         self.assertEqual(
@@ -3428,6 +3552,118 @@ print('{{"factory_records_active":true,"valid":true}}')
                 ), mock.patch.dict(os.environ, environment, clear=True):
                     self.assertFalse(endpoint.post_control_guard()[0])
 
+    def test_issue0004_tls_enabled_diagnostic_names_configured_plain_http_port(self):
+        for endpoint in (self.manual_cgi, self.switch_cgi, self.ztp_cgi):
+            for port in ("80", "8080"):
+                address = "192.0.2.40"
+                authority = address if port == "80" else f"{address}:{port}"
+                environment = {
+                    "SERVER_ADDR": address,
+                    "SERVER_PORT": port,
+                    "CONTROL_SERVICE_PORT": port,
+                    "REQUEST_SCHEME": "http",
+                    "HTTPS": "on",
+                    "HTTP_HOST": authority,
+                    "HTTP_ORIGIN": f"http://{authority}",
+                    "HTTP_SEC_FETCH_SITE": "same-origin",
+                }
+                with self.subTest(endpoint=endpoint.__name__, port=port), \
+                        mock.patch.dict(os.environ, environment, clear=True):
+                    allowed, reason = endpoint.post_control_guard()
+                    self.assertFalse(allowed)
+                    self.assertIn("TLS is enabled", reason)
+                    self.assertIn("plain HTTP", reason)
+                    self.assertIn(f"port {port}", reason)
+                    self.assertNotIn("not enabled", reason)
+
+    def test_issue0004_invalid_https_marker_is_not_mislabeled_tls_enabled(self):
+        for endpoint in (self.manual_cgi, self.switch_cgi, self.ztp_cgi):
+            for port in ("80", "8080"):
+                for marker in ("", "unsupported"):
+                    address = "192.0.2.40"
+                    authority = address if port == "80" else f"{address}:{port}"
+                    environment = {
+                        "SERVER_ADDR": address,
+                        "SERVER_PORT": port,
+                        "CONTROL_SERVICE_PORT": port,
+                        "REQUEST_SCHEME": "http",
+                        "HTTPS": marker,
+                        "HTTP_HOST": authority,
+                        "HTTP_ORIGIN": f"http://{authority}",
+                        "HTTP_SEC_FETCH_SITE": "same-origin",
+                    }
+                    with self.subTest(
+                        endpoint=endpoint.__name__, port=port, marker=marker,
+                    ), mock.patch.dict(os.environ, environment, clear=True):
+                        allowed, reason = endpoint.post_control_guard()
+                        self.assertFalse(allowed)
+                        self.assertIn("HTTPS indicator is invalid", reason)
+                        self.assertIn("plain HTTP", reason)
+                        self.assertIn(f"port {port}", reason)
+                        self.assertNotIn("TLS is enabled", reason)
+
+    def test_issue0004_tls_enabled_post_rejects_before_state_action_or_stdin(self):
+        class UnreadableInput:
+            def read(self, *_args, **_kwargs):
+                raise AssertionError("stdin read before TLS authority rejection")
+
+        endpoints = (
+            (self.manual_cgi, "ManualZTPControl"),
+            (self.switch_cgi, "SwitchCollectionControl"),
+            (self.ztp_cgi, "ZTPMonitorControl"),
+        )
+        protected = (
+            "process_state", "status_with_queue", "enqueue_request",
+            "collection_status", "yaml_backup_status",
+            "continuous_collection_status", "continuous_backup_status",
+            "request_action", "write_request", "send_memory_request",
+            "send_yaml_backup_request", "control_state", "write_control",
+        )
+        for endpoint, request_header in endpoints:
+            for port in ("80", "8080"):
+                address = "192.0.2.40"
+                authority = address if port == "80" else f"{address}:{port}"
+                environment = {
+                    "REQUEST_METHOD": "POST",
+                    "HTTP_X_REQUESTED_WITH": request_header,
+                    "SERVER_ADDR": address,
+                    "SERVER_PORT": port,
+                    "CONTROL_SERVICE_PORT": port,
+                    "REQUEST_SCHEME": "http",
+                    "HTTPS": "on",
+                    "HTTP_HOST": authority,
+                    "HTTP_ORIGIN": f"http://{authority}",
+                    "HTTP_SEC_FETCH_SITE": "same-origin",
+                    "CONTENT_LENGTH": "1",
+                }
+                with self.subTest(endpoint=endpoint.__name__, port=port), \
+                        mock.patch.dict(os.environ, environment, clear=True), \
+                        ExitStack() as stack:
+                    response = stack.enter_context(mock.patch.object(endpoint, "respond"))
+                    stack.enter_context(mock.patch.object(
+                        endpoint, "control_request_guard", return_value=(True, ""),
+                    ))
+                    if endpoint is self.ztp_cgi:
+                        stack.enter_context(mock.patch.object(
+                            endpoint, "control_auth_status", return_value=False,
+                        ))
+                    for name in protected:
+                        if hasattr(endpoint, name):
+                            stack.enter_context(mock.patch.object(
+                                endpoint, name,
+                                side_effect=AssertionError(
+                                    f"{name} called before TLS authority rejection"
+                                ),
+                            ))
+                    stack.enter_context(mock.patch.object(sys, "stdin", UnreadableInput()))
+                    endpoint.main()
+                    response.assert_called_once()
+                    payload, status = response.call_args.args
+                    self.assertEqual("403 Forbidden", status)
+                    self.assertIn("TLS is enabled", payload["error"])
+                    self.assertIn("plain HTTP", payload["error"])
+                    self.assertIn(f"port {port}", payload["error"])
+
     def test_post_origin_and_xrw_gates_run_before_state_stdin_or_actions(self):
         service_ip = "192.0.2.40"
         endpoint_cases = (
@@ -3669,13 +3905,13 @@ print('{{"factory_records_active":true,"valid":true}}')
         }).encode("utf-8"))
         backup = self.switch_worker.decode_yaml_backup_request(json.dumps({
             "action": "continuous_backup_start", "password": "sentinel",
-            "interval_minutes": 23,
+            "interval_minutes": 60,
         }).encode("utf-8"))
         self.assertEqual({
             "action": "continuous_collection_start", "interval_minutes": 17,
         }, collection)
         self.assertEqual("sentinel", backup["password"])
-        self.assertEqual(23, backup["interval_minutes"])
+        self.assertEqual(60, backup["interval_minutes"])
         for action in ("continuous_collection_stop", "continuous_backup_stop"):
             self.assertEqual(
                 {"action": action},
@@ -3812,13 +4048,13 @@ print('{{"factory_records_active":true,"valid":true}}')
             self.switch_cgi, "send_memory_request",
         ) as send_memory_request:
             backup_response = self._post_switch_action(
-                "action=continuous_backup_start&password=sentinel&interval_minutes=23",
+                "action=continuous_backup_start&password=sentinel&interval_minutes=60",
                 continuous_collection=True,
             )
             self.assertEqual("scheduled", backup_response.call_args.args[0]["state"])
             send_memory_request.assert_called_once_with({
                 "action": "continuous_backup_start", "password": "sentinel",
-                "interval_minutes": 23,
+                "interval_minutes": 60,
             })
 
     def test_stopping_one_continuous_mode_does_not_emit_a_cross_channel_stop(self):
@@ -3838,13 +4074,22 @@ print('{{"factory_records_active":true,"valid":true}}')
             encoding="utf-8"
         )
         self.assertIn("enabled: tab !== 'eth'", source)
-        for control_id in (
-            "continuous-collection-interval", "continuous-backup-interval",
+        for control_id, minimum, maximum in (
+            (
+                "continuous-collection-interval",
+                "MIN_CONTINUOUS_INTERVAL_MINUTES",
+                "MAX_CONTINUOUS_INTERVAL_MINUTES",
+            ),
+            (
+                "continuous-backup-interval",
+                "MIN_CONTINUOUS_BACKUP_INTERVAL_MINUTES",
+                "MAX_CONTINUOUS_BACKUP_INTERVAL_MINUTES",
+            ),
         ):
-            self.assertRegex(
+            self.assertIn(
+                f'id="{control_id}" type="number" min="{{{minimum}}}" '
+                f'max="{{{maximum}}}"',
                 source,
-                rf'id="{control_id}"[^>]*\bmin="'
-                rf'{self.project_contract.MIN_CONTINUOUS_INTERVAL_MINUTES}"',
             )
         self.assertIn('id="continuous-collection-button"', source)
         self.assertIn("continuousCollectionEnabled", source)
@@ -3989,7 +4234,7 @@ print('{{"factory_records_active":true,"valid":true}}')
         }).encode("utf-8"))
         backup_message = self.switch_worker.decode_yaml_backup_request(json.dumps({
             "action": "continuous_backup_start", "password": secret,
-            "interval_minutes": 20,
+            "interval_minutes": 60,
         }).encode("utf-8"))
         collection_statuses = []
         backup_statuses = []
@@ -4117,9 +4362,24 @@ print('{{"factory_records_active":true,"valid":true}}')
         self.assertNotIn("remaining_seconds", payload)
 
     def test_continuous_intervals_are_bounded_and_old_combined_action_is_rejected(self):
-        for interval in ("9", "0", "1441", "not-a-number"):
-            with self.subTest(interval=interval), self.assertRaises(ValueError):
-                self.switch_cgi.validate_continuous_interval(interval)
+        for action, valid, invalid in (
+            ("continuous_collection_start", ("10", "240"), ("9", "241")),
+            ("continuous_backup_start", ("60", "1440"), ("59", "1441")),
+        ):
+            for interval in valid:
+                with self.subTest(action=action, interval=interval):
+                    self.assertEqual(
+                        int(interval),
+                        self.switch_cgi.validate_continuous_interval(
+                            interval, action,
+                        ),
+                    )
+            for interval in (*invalid, "0", "not-a-number"):
+                with self.subTest(action=action, interval=interval), \
+                        self.assertRaises(ValueError):
+                    self.switch_cgi.validate_continuous_interval(
+                        interval, action,
+                    )
         with (
             mock.patch.object(
                 self.switch_cgi, "MIN_CONTINUOUS_INTERVAL_MINUTES", 15,
@@ -4129,7 +4389,9 @@ print('{{"factory_records_active":true,"valid":true}}')
             ),
             self.assertRaisesRegex(ValueError, "between 15 and 30"),
         ):
-            self.switch_cgi.validate_continuous_interval("14")
+            self.switch_cgi.validate_continuous_interval(
+                "14", "continuous_collection_start",
+            )
         response = self._post_switch_action(
             "action=continuous_start&password=sentinel&interval_minutes=10"
         )
@@ -4142,24 +4404,31 @@ print('{{"factory_records_active":true,"valid":true}}')
         gate_source = (
             ROOT / "monitor/switch_collection_gate.py"
         ).read_text(encoding="utf-8")
+        authority_names = (
+            "MIN_CONTINUOUS_INTERVAL_MINUTES",
+            "MAX_CONTINUOUS_INTERVAL_MINUTES",
+            "MIN_CONTINUOUS_BACKUP_INTERVAL_MINUTES",
+            "MAX_CONTINUOUS_BACKUP_INTERVAL_MINUTES",
+        )
+
         def authority_errors(source):
             tree = ast.parse(source)
-            local_floor_assignments = []
-            imported_floor = []
+            local_assignments = []
+            imported = []
             guarded_imports = []
             for node in ast.walk(tree):
                 if isinstance(node, (ast.Assign, ast.AnnAssign)):
                     targets = node.targets if isinstance(node, ast.Assign) else [node.target]
                     if any(
                         isinstance(target, ast.Name)
-                        and target.id == "MIN_CONTINUOUS_INTERVAL_MINUTES"
+                        and target.id in authority_names
                         for target in targets
                     ):
-                        local_floor_assignments.append(node)
+                        local_assignments.append(node)
                 if isinstance(node, ast.ImportFrom) and node.module == "project_contract":
-                    imported_floor.extend(
+                    imported.extend(
                         alias.name for alias in node.names
-                        if alias.name == "MIN_CONTINUOUS_INTERVAL_MINUTES"
+                        if alias.name in authority_names
                     )
                 if isinstance(node, ast.Try) and any(
                     isinstance(child, ast.ImportFrom)
@@ -4168,10 +4437,10 @@ print('{{"factory_records_active":true,"valid":true}}')
                 ):
                     guarded_imports.append(node)
             errors = []
-            if local_floor_assignments:
-                errors.append("worker has a local floor or fallback")
-            if imported_floor != ["MIN_CONTINUOUS_INTERVAL_MINUTES"]:
-                errors.append("worker lacks one exact canonical import")
+            if local_assignments:
+                errors.append("worker has a local interval authority or fallback")
+            if tuple(imported) != authority_names:
+                errors.append("worker lacks the exact canonical imports")
             if guarded_imports:
                 errors.append("canonical import is hidden behind a fallback")
             if 'HTTP_ROOT / "tools"' not in source:
@@ -4179,7 +4448,7 @@ print('{{"factory_records_active":true,"valid":true}}')
             gate_position = source.find("from switch_collection_gate import")
             tools_position = source.find('TOOLS_ROOT = HTTP_ROOT / "tools"')
             contract_position = source.find(
-                "from project_contract import MIN_CONTINUOUS_INTERVAL_MINUTES"
+                "from project_contract import ("
             )
             if not 0 <= gate_position < tools_position < contract_position:
                 errors.append("tools path can shadow the local collection gate")
@@ -4187,21 +4456,13 @@ print('{{"factory_records_active":true,"valid":true}}')
 
         self.assertEqual([], authority_errors(worker_source))
         self.assertTrue(authority_errors(worker_source.replace(
-            "from project_contract import MIN_CONTINUOUS_INTERVAL_MINUTES\n",
+            "    MAX_CONTINUOUS_BACKUP_INTERVAL_MINUTES,\n",
             "",
             1,
         )))
         self.assertTrue(authority_errors(
             worker_source + "\nMIN_CONTINUOUS_INTERVAL_MINUTES = 10\n",
         ))
-        self.assertTrue(authority_errors(worker_source.replace(
-            "from project_contract import MIN_CONTINUOUS_INTERVAL_MINUTES\n",
-            "try:\n"
-            "    from project_contract import MIN_CONTINUOUS_INTERVAL_MINUTES\n"
-            "except ImportError:\n"
-            "    MIN_CONTINUOUS_INTERVAL_MINUTES = 10\n",
-            1,
-        )))
         self.assertIn('HTTP_ROOT / "tools"', worker_source)
         self.assertIn("YAML_BACKUP_COOLDOWN_SECONDS = 10 * 60", worker_source)
         self.assertIn("COOLDOWN_SECONDS = 10 * 60", gate_source)
@@ -4211,10 +4472,11 @@ print('{{"factory_records_active":true,"valid":true}}')
 
     def test_worker_continuous_interval_boundaries_use_the_canonical_floor(self):
         test_value = "-".join(("fixed", "secret"))
-        for action in (
-            "continuous_collection_start", "continuous_backup_start",
+        for action, valid, invalid in (
+            ("continuous_collection_start", (10, 240), (9, 241)),
+            ("continuous_backup_start", (60, 1440), (59, 1441)),
         ):
-            for interval in (10, 1440):
+            for interval in valid:
                 with self.subTest(action=action, interval=interval):
                     encoded = {
                         "action": action,
@@ -4233,7 +4495,7 @@ print('{{"factory_records_active":true,"valid":true}}')
                             action,
                         ),
                     )
-            for interval in (9, 1441, True, False, 10.0, "10", None):
+            for interval in (*invalid, True, False, 10.0, "10", None):
                 with self.subTest(action=action, interval=interval):
                     encoded = {
                         "action": action,
@@ -4254,140 +4516,115 @@ print('{{"factory_records_active":true,"valid":true}}')
     def test_worker_continuous_interval_conversion_is_exact_minutes_to_seconds(self):
         worker = self.switch_worker
         test_value = "-".join(("fixed", "secret"))
-        with (
-            mock.patch.object(worker, "write_continuous_status"),
-            mock.patch.object(worker, "write_continuous_backup_status"),
-            mock.patch.object(worker.time, "monotonic", return_value=42.0),
-        ):
-            worker.configure_continuous_collection({
-                "action": "continuous_collection_start",
-                "interval_minutes": 10,
-            })
-            worker.configure_continuous_backup({
-                "action": "continuous_backup_start",
-                "password": test_value,
-                "interval_minutes": 1440,
-            })
-        self.assertEqual(10 * 60, worker._CONTINUOUS_COLLECTION_INTERVAL_SECONDS)
-        self.assertEqual(1440 * 60, worker._CONTINUOUS_BACKUP_INTERVAL_SECONDS)
-        worker.stop_continuous_collection_mode("test cleanup")
-        worker.stop_continuous_backup_mode("test cleanup")
+        with tempfile.TemporaryDirectory() as directory:
+            status_dir = Path(directory)
+            collection_status = status_dir / "continuous-collection.status.json"
+            backup_status = status_dir / "continuous-backup.status.json"
+            # Exercise the real status writer, but bind both its temporary and
+            # final paths to this fixture for the entire start/stop lifecycle.
+            with (
+                mock.patch.object(worker, "STATUS_DIR", status_dir),
+                mock.patch.object(worker, "CONTINUOUS_STATUS_FILE", collection_status),
+                mock.patch.object(worker, "CONTINUOUS_BACKUP_STATUS_FILE", backup_status),
+                mock.patch.object(worker.time, "monotonic", return_value=42.0),
+            ):
+                worker.configure_continuous_collection({
+                    "action": "continuous_collection_start",
+                    "interval_minutes": 10,
+                })
+                worker.configure_continuous_backup({
+                    "action": "continuous_backup_start",
+                    "password": test_value,
+                    "interval_minutes": 1440,
+                })
+                self.assertEqual(10 * 60, worker._CONTINUOUS_COLLECTION_INTERVAL_SECONDS)
+                self.assertEqual(1440 * 60, worker._CONTINUOUS_BACKUP_INTERVAL_SECONDS)
+                worker.stop_continuous_collection_mode("test cleanup")
+                worker.stop_continuous_backup_mode("test cleanup")
+            for path in (collection_status, backup_status):
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                self.assertEqual("stopped", payload["state"])
+                self.assertIs(False, payload["enabled"])
+                self.assertEqual("test cleanup", payload["reason"])
+                self.assertNotIn(test_value, path.read_text(encoding="utf-8"))
 
-    def test_cgi_static_interval_pin_is_bidirectional_and_mutation_proven(self):
-        # generate-monitor-html.py keeps non-authoritative UX hints; the CGI
-        # static pin and worker admission remain the fail-closed authorities.
-        contract_source = (ROOT / "tools/project_contract.py").read_text(
-            encoding="utf-8",
-        )
+    def test_cgi_is_standalone_with_exact_local_interval_authorities(self):
         cgi_source = (
             ROOT / "monitor/switch-collection-control.cgi"
         ).read_text(encoding="utf-8")
-
-        def integer_expression(node):
-            # Keep this intentionally narrow: the guard mirrors the current
-            # literal-or-product constant shape. If production adopts a new
-            # expression form, maintaining this AST pin is an explicit cost.
-            if isinstance(node, ast.Constant) and type(node.value) is int:
-                return node.value
-            if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
-                left = integer_expression(node.left)
-                right = integer_expression(node.right)
-                if left is not None and right is not None:
-                    return left * right
-            return None
-
-        def assigned_integers(source, predicate):
-            result = []
-            for node in ast.walk(ast.parse(source)):
-                if not isinstance(node, (ast.Assign, ast.AnnAssign)):
-                    continue
-                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-                value = integer_expression(node.value)
-                for target in targets:
-                    if (
-                        isinstance(target, ast.Name) and predicate(target.id)
-                        and value is not None
-                    ):
-                        result.append((target.id, value))
-            return result
-
-        def parity_errors(canonical, cgi):
-            errors = []
-            canonical_values = assigned_integers(
-                canonical, lambda name: name == "MIN_CONTINUOUS_INTERVAL_MINUTES",
+        tree = ast.parse(cgi_source)
+        names = {
+            "MIN_CONTINUOUS_INTERVAL_MINUTES",
+            "MAX_CONTINUOUS_INTERVAL_MINUTES",
+            "MIN_CONTINUOUS_BACKUP_INTERVAL_MINUTES",
+            "MAX_CONTINUOUS_BACKUP_INTERVAL_MINUTES",
+        }
+        imported = {
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+            and node.module == "project_contract"
+            for alias in node.names
+            if alias.name in names
+        }
+        assigned = {
+            target.id
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.Assign, ast.AnnAssign))
+            for target in (
+                node.targets if isinstance(node, ast.Assign) else [node.target]
             )
-            cgi_minimums = assigned_integers(
-                cgi, lambda name: name == "MIN_CONTINUOUS_INTERVAL_MINUTES",
-            )
-            cgi_maximums = assigned_integers(
-                cgi, lambda name: name == "MAX_CONTINUOUS_INTERVAL_MINUTES",
-            )
-            cgi_ten_literals = [
-                node for node in ast.walk(ast.parse(cgi))
-                if isinstance(node, ast.Constant)
-                and type(node.value) is int and node.value == 10
-            ]
-            if len(canonical_values) != 1:
-                errors.append("canonical authority must be singular")
-            if len(cgi_minimums) != 1:
-                errors.append("CGI ten-minute source must remain singular")
-            if len(cgi_maximums) != 1:
-                errors.append("CGI maximum source must remain singular")
-            if len(cgi_ten_literals) != 1:
-                errors.append("CGI has an independent ten-minute literal")
-            if (
-                len(cgi_minimums) != 1 or not canonical_values
-                or cgi_minimums[0][1] != canonical_values[0][1]
-            ):
-                errors.append("CGI minimum differs from canonical authority")
-            operator_error_fields = []
-            for node in ast.walk(ast.parse(cgi)):
-                if not isinstance(node, ast.JoinedStr):
-                    continue
-                literal_text = "".join(
-                    part.value for part in node.values
-                    if isinstance(part, ast.Constant)
-                    and isinstance(part.value, str)
-                )
-                if not literal_text.startswith(
-                    "interval_minutes must be between "
-                ):
-                    continue
-                operator_error_fields.append([
-                    part.value.id for part in node.values
-                    if isinstance(part, ast.FormattedValue)
-                    and isinstance(part.value, ast.Name)
-                ])
-            if operator_error_fields != [[
-                "MIN_CONTINUOUS_INTERVAL_MINUTES",
-                "MAX_CONTINUOUS_INTERVAL_MINUTES",
-            ]]:
-                errors.append("CGI operator-facing interval error is stale")
-            if "from project_contract import" in cgi or "import project_contract" in cgi:
-                errors.append("CGI must not gain a runtime authority import")
-            return errors
+            if isinstance(target, ast.Name) and target.id in names
+        }
+        self.assertEqual(set(), imported)
+        self.assertEqual(names, assigned)
+        self.assertNotIn('HTTP_ROOT / "tools"', cgi_source)
+        expected = {
+            "MIN_CONTINUOUS_INTERVAL_MINUTES": 10,
+            "MAX_CONTINUOUS_INTERVAL_MINUTES": 240,
+            "MIN_CONTINUOUS_BACKUP_INTERVAL_MINUTES": 60,
+            "MAX_CONTINUOUS_BACKUP_INTERVAL_MINUTES": 1440,
+        }
+        observed = {
+            node.targets[0].id: node.value.value
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id in names
+            and isinstance(node.value, ast.Constant)
+        }
+        self.assertEqual(expected, observed)
+        self.assertEqual(
+            {name: getattr(self.project_contract, name) for name in names},
+            observed,
+        )
 
-        self.assertEqual([], parity_errors(contract_source, cgi_source))
-        self.assertTrue(parity_errors(
-            contract_source.replace(
-                "MIN_CONTINUOUS_INTERVAL_MINUTES = 10",
-                "MIN_CONTINUOUS_INTERVAL_MINUTES = 11",
-                1,
-            ),
-            cgi_source,
-        ))
-        self.assertTrue(parity_errors(
-            contract_source,
-            cgi_source + "\nFLOOR = 10\n",
-        ))
-        self.assertTrue(parity_errors(
-            contract_source,
-            cgi_source.replace(
-                "{MIN_CONTINUOUS_INTERVAL_MINUTES} and ",
-                "{MAX_CONTINUOUS_INTERVAL_MINUTES} and ",
-                1,
-            ),
-        ))
+        with tempfile.TemporaryDirectory() as directory:
+            installed = Path(directory) / "usr/lib/cgi-bin/switch-collection-control.cgi"
+            installed.parent.mkdir(parents=True)
+            shutil.copy2(ROOT / "monitor/switch-collection-control.cgi", installed)
+            self.assertFalse((installed.resolve().parent.parent / "tools").exists())
+            environment = os.environ.copy()
+            environment.pop("PYTHONPATH", None)
+            self.assertNotIn("PYTHONPATH", environment)
+            result = subprocess.run(
+                [sys.executable, "-B", "-c", (
+                    "import importlib.machinery, importlib.util, json; "
+                    f"p={str(installed)!r}; "
+                    "s=importlib.util.spec_from_loader('installed_switch_cgi', "
+                    "importlib.machinery.SourceFileLoader('installed_switch_cgi', p)); "
+                    "m=importlib.util.module_from_spec(s); s.loader.exec_module(m); "
+                    "print(json.dumps([m.MIN_CONTINUOUS_INTERVAL_MINUTES, "
+                    "m.MAX_CONTINUOUS_INTERVAL_MINUTES, "
+                    "m.MIN_CONTINUOUS_BACKUP_INTERVAL_MINUTES, "
+                    "m.MAX_CONTINUOUS_BACKUP_INTERVAL_MINUTES]))"
+                )],
+                cwd=directory, env=environment, text=True, capture_output=True,
+                timeout=20,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual([10, 240, 60, 1440], json.loads(result.stdout))
 
     def test_continuous_start_rejects_same_type_manual_work_only(self):
         with mock.patch.object(
@@ -4410,14 +4647,14 @@ print('{{"factory_records_active":true,"valid":true}}')
             self.switch_cgi, "send_memory_request",
         ) as send_memory_request:
             blocked_backup = self._post_switch_action(
-                "action=continuous_backup_start&password=sentinel&interval_minutes=10",
+                "action=continuous_backup_start&password=sentinel&interval_minutes=60",
                 backup_state="collecting",
             )
             self.assertEqual("409 Conflict", blocked_backup.call_args.args[1])
             send_memory_request.assert_not_called()
 
             allowed_backup = self._post_switch_action(
-                "action=continuous_backup_start&password=sentinel&interval_minutes=10",
+                "action=continuous_backup_start&password=sentinel&interval_minutes=60",
                 switch_state="collecting",
             )
             self.assertEqual("scheduled", allowed_backup.call_args.args[0]["state"])
@@ -4428,7 +4665,7 @@ print('{{"factory_records_active":true,"valid":true}}')
         }
         backup_request = {
             "action": "continuous_backup_start", "password": "sentinel",
-            "interval_minutes": 10,
+            "interval_minutes": 60,
         }
         with mock.patch.object(
             self.switch_worker, "lane_busy",
@@ -4810,6 +5047,33 @@ print('{{"factory_records_active":true,"valid":true}}')
         self.assertIn("DAY0-Prepare/11-load.py", guidance)
         self.assertIn("--start-ztp-monitor", guidance)
         self.assertIn("Docker/Supervisor", guidance)
+        native = guidance.split("Native/systemd 执行 ", 1)[1].split(
+            "；Docker/Supervisor", 1
+        )[0]
+        native_argv = shlex.split(native)
+        self.assertEqual(
+            [
+                "sudo", "python3", "DAY0-Prepare/11-load.py",
+                "DAY0-Prepare/<project>", "--start-ztp-monitor",
+                "--host-role=management-server",
+            ],
+            native_argv,
+        )
+        real_load = load_module(
+            "review_ztp_recovery_load", ROOT / "DAY0-Prepare/11-load.py"
+        )
+        parsed = real_load.parse_args(native_argv[3:])
+        self.assertEqual(
+            "management-server",
+            real_load.resolve_host_role(parsed.host_role, "Linux"),
+        )
+        without_role = [
+            arg for arg in native_argv[3:] if arg != "--host-role=management-server"
+        ]
+        with self.assertRaisesRegex(real_load.LoadError, "requires explicit --host-role"):
+            real_load.resolve_host_role(
+                real_load.parse_args(without_role).host_role, "Linux"
+            )
         self.assertIn("infra/docker/deploy.sh deploy", guidance)
         self.assertIn("deploy-preloaded <IMAGE_ID>", guidance)
         self.assertIn("没有 source write", guidance)
@@ -4892,16 +5156,23 @@ print('{{"factory_records_active":true,"valid":true}}')
         output = "ordinary log\n[HTTP_ZTP_TASK_RESULT] " + json.dumps(payload) + "\n"
         self.assertEqual(
             payload,
-            self.switch_worker.parse_task_result(output, "switch_collection"),
+            self.switch_worker.parse_task_result(
+                output, "switch_collection",
+                permitted_operations=("collection", "ssh_prepare"),
+            ),
         )
         invalid = dict(payload, failed_count=2)
         with self.assertRaisesRegex(ValueError, "failed_count"):
             self.switch_worker.parse_task_result(
                 "[HTTP_ZTP_TASK_RESULT] " + json.dumps(invalid),
                 "switch_collection",
+                permitted_operations=("collection", "ssh_prepare"),
             )
         with self.assertRaisesRegex(ValueError, "exactly one"):
-            self.switch_worker.parse_task_result(output + output, "switch_collection")
+            self.switch_worker.parse_task_result(
+                output + output, "switch_collection",
+                permitted_operations=("collection", "ssh_prepare"),
+            )
 
     def test_worker_collection_workflow_completes_with_device_warnings(self):
         partial = {
@@ -4913,7 +5184,7 @@ print('{{"factory_records_active":true,"valid":true}}')
             "failed_count": 1,
             "failed_devices": [{
                 "hostname": "leaf02",
-                "operation": "retrieve_info",
+                "operation": "collection",
                 "reason": "unreachable",
             }],
         }
@@ -5608,6 +5879,104 @@ class PublicationAndCollectorTests(unittest.TestCase):
         self.assertEqual(0, air.returncode, air.stderr)
         self.assertIn("no AIR target currently has a resolved address", air.stdout)
 
+    def test_issue0005_csv_diagnostics_preserve_awk_failure_class(self):
+        canonical = (ROOT / "ethernet/monitor/cron.sh").resolve()
+        for area, inventory_name, selected_type in (
+            ("ethernet", "eth.csv", "eth"),
+            ("infiniband", "ib.csv", "ib"),
+            ("nvlink", "nvsw.csv", "nvl"),
+        ):
+            with self.subTest(area=area):
+                entrypoint = ROOT / area / "monitor/cron.sh"
+                self.assertEqual(canonical, entrypoint.resolve())
+                source = entrypoint.read_text(encoding="utf-8")
+                start = source.index("parse_csv_hosts() {")
+                end = source.index("\n# ── Phase 1:", start)
+                parse_csv_hosts = source[start:end]
+
+                def invoke(inventory: str, *, unexpected_awk: bool = False):
+                    with tempfile.TemporaryDirectory() as directory:
+                        root = Path(directory)
+                        (root / inventory_name).write_text(
+                            inventory, encoding="utf-8",
+                        )
+                        paths = {
+                            name: root / name.lower()
+                            for name in ("ETH", "SPX", "IB", "NV")
+                        }
+                        for path in paths.values():
+                            path.write_text("", encoding="utf-8")
+                        awk_probe = (
+                            'awk() { printf "raw_awk_rc=42\\n" >&2; return 42; }'
+                            if unexpected_awk else
+                            'awk() { command awk "$@"; '
+                            'awk_rc=$?; printf "raw_awk_rc=%s\\n" "$awk_rc" >&2; '
+                            'return "$awk_rc"; }'
+                        )
+                        script = "\n".join((
+                            "set -u",
+                            f"BASE={shlex.quote(str(root))}",
+                            f"TYPE_FILTER={shlex.quote(selected_type)}",
+                            'COLLECTION_ENV="prod"',
+                            "DYNAMIC_AIR_DISCOVERED=0",
+                            *(f"{name}={shlex.quote(str(path))}"
+                              for name, path in paths.items()),
+                            'log() { printf "%s\\n" "$*"; }',
+                            "append_dynamic_air_hosts() { :; }",
+                            "append_unbound_prod_cumulus_hosts() { :; }",
+                            awk_probe,
+                            parse_csv_hosts,
+                            "parse_csv_hosts",
+                        ))
+                        return subprocess.run(
+                            ["bash", "-c", script], text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            check=False,
+                        )
+
+                hostname = f"EXAMPLE-{area}-01"
+                missing_header = invoke(
+                    f"hostname,type,management_ip\n{hostname},{selected_type},203.0.113.10\n"
+                )
+                self.assertEqual(1, missing_header.returncode)
+                self.assertIn("raw_awk_rc=2", missing_header.stderr)
+                self.assertIn(
+                    "must contain hostname, type, and eth0_ip columns",
+                    missing_header.stdout,
+                )
+
+                missing_selected_ip = invoke(
+                    f"hostname,type,eth0_ip\n{hostname},{selected_type},\n"
+                )
+                self.assertEqual(1, missing_selected_ip.returncode)
+                self.assertIn("raw_awk_rc=3", missing_selected_ip.stderr)
+                self.assertIn(
+                    f"missing eth0_ip for selected device: {hostname}",
+                    missing_selected_ip.stderr,
+                )
+                self.assertIn(
+                    "selected device(s) missing eth0_ip",
+                    missing_selected_ip.stdout,
+                )
+                self.assertNotIn("must contain", missing_selected_ip.stdout)
+
+                unexpected = invoke(
+                    f"hostname,type,eth0_ip\n{hostname},{selected_type},203.0.113.10\n",
+                    unexpected_awk=True,
+                )
+                self.assertEqual(1, unexpected.returncode)
+                self.assertIn("raw_awk_rc=42", unexpected.stderr)
+                self.assertIn("CSV parsing failed (awk exit 42)", unexpected.stdout)
+                self.assertNotIn("must contain", unexpected.stdout)
+
+                valid = invoke(
+                    f"hostname,type,eth0_ip\n{hostname},{selected_type},203.0.113.10\n"
+                    "EXAMPLE-Unselected,other,\n"
+                )
+                self.assertEqual(0, valid.returncode, valid.stderr)
+                self.assertIn("raw_awk_rc=0", valid.stderr)
+                self.assertNotIn("[CSV] ERROR", valid.stdout)
+
     def test_shared_collector_keeps_reachable_devices_and_emits_one_summary(self):
         source = (ROOT / "ethernet/monitor/cron.sh").read_text(encoding="utf-8")
         self.assertIn("DEVICE_FAILURES=$(mktemp)", source)
@@ -5618,6 +5987,97 @@ class PublicationAndCollectorTests(unittest.TestCase):
         self.assertIn('mv "$successful" "$hosts_file"', source)
         self.assertNotIn("return $((failed > 0 ? 1 : 0))", source)
         self.assertIn('record_device_failure "ssh_prepare"', source)
+        for obsolete in (
+            "eth_info_deploy", "eth_info_trigger", "eth_info_retrieve",
+            "spx_link_deploy", "spx_link_trigger", "spx_link_retrieve",
+            "ib_info_deploy", "ib_info_trigger", "ib_info_retrieve",
+            "ib_link_deploy", "ib_link_trigger", "ib_link_retrieve",
+            "nv_info_deploy", "nv_info_trigger", "nv_info_retrieve",
+            "nv_link_deploy", "nv_link_trigger", "nv_link_retrieve",
+        ):
+            self.assertNotIn(f'"{obsolete}"', source)
+        for function_name in (
+            "collect_eth_info", "collect_spx_link", "collect_ib_info",
+            "collect_ib_link", "collect_nv_info", "collect_nv_link",
+        ):
+            self.assertIn(f"{function_name}()", source)
+
+    def test_shared_collector_truncates_reasons_by_utf8_bytes(self):
+        source = (ROOT / "ethernet/monitor/cron.sh").read_text(encoding="utf-8")
+        result_helpers = "# Record one device-scoped problem" + source.split(
+            "# Record one device-scoped problem", 1,
+        )[1].split("# parse_csv_hosts", 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            planned = root / "planned"
+            failures = root / "failures"
+            cases = {
+                "leaf-exact": "界" * 341 + "A",
+                "leaf-cjk-cut": "界" * 342,
+                "leaf-emoji-cut": "😀" * 257,
+                "leaf-ascii": "x" * 1025,
+            }
+            planned.write_text("\n".join(cases) + "\n", encoding="utf-8")
+            failures.write_text("", encoding="utf-8")
+            reason_paths = {}
+            for hostname, reason in cases.items():
+                reason_path = root / f"{hostname}.reason"
+                reason_path.write_text(reason, encoding="utf-8")
+                reason_paths[hostname] = reason_path
+            harness = root / "harness.sh"
+            harness.write_text(
+                "#!/bin/bash\n"
+                f"DEVICE_FAILURES={shlex.quote(str(failures))}\n"
+                f"PLANNED_DEVICES={shlex.quote(str(planned))}\n"
+                + result_helpers
+                + "\n".join(
+                    "record_device_failure collection "
+                    + shlex.quote(f"{hostname}|192.0.2.1")
+                    + " \"$(cat " + shlex.quote(str(reason_path)) + ")\""
+                    for hostname, reason_path in reason_paths.items()
+                )
+                + "\n"
+                + "emit_collection_result\n",
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                ["bash", str(harness)], cwd=root, text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=10, check=False,
+                env={**os.environ, "LC_ALL": "C", "LANG": "C"},
+            )
+        self.assertEqual(1, completed.returncode, completed.stderr)
+        markers = [
+            line for line in completed.stdout.splitlines()
+            if line.startswith("[HTTP_ZTP_TASK_RESULT] ")
+        ]
+        self.assertEqual(1, len(markers), completed.stderr)
+        self.assertNotIn("UnicodeDecodeError", completed.stderr)
+        marker = markers[0]
+        marker_json = marker.split(" ", 1)[1]
+        self.assertNotIn('": ', marker_json)
+        self.assertNotIn('", ', marker_json)
+        self.assertIn("界", marker_json)
+        self.assertIn("😀", marker_json)
+        payload = json.loads(marker_json)
+        reasons = {
+            item["hostname"]: item["reason"]
+            for item in payload["failed_devices"]
+        }
+        expected = {
+            "leaf-exact": "界" * 341 + "A",
+            "leaf-cjk-cut": "界" * 341,
+            "leaf-emoji-cut": "😀" * 256,
+            "leaf-ascii": "x" * 1024,
+        }
+        self.assertEqual(expected, reasons)
+        self.assertEqual(
+            {"leaf-exact": 1024, "leaf-cjk-cut": 1023,
+             "leaf-emoji-cut": 1024, "leaf-ascii": 1024},
+            {hostname: len(reason.encode("utf-8"))
+             for hostname, reason in reasons.items()},
+        )
+        self.assertNotIn("\ufffd", "".join(reasons.values()))
 
     def test_shared_collector_partial_batch_preserves_successful_host(self):
         source = (ROOT / "ethernet/monitor/cron.sh").read_text(encoding="utf-8")
@@ -5644,7 +6104,7 @@ class PublicationAndCollectorTests(unittest.TestCase):
                 f"PLANNED_DEVICES={shlex.quote(str(planned))}\n"
                 + valid_host + result_helpers
                 + f"run_parallel {shlex.quote(str(hosts))} "
-                + "'[[ \"__NAME__\" == leaf01 ]]' retrieve_info\n"
+                + "'[[ \"__NAME__\" == leaf01 ]]' collection\n"
                 + "printf 'hosts-start\\n'; cat " + shlex.quote(str(hosts))
                 + "; printf 'hosts-end\\n'\n"
                 + "emit_collection_result\n",
@@ -5667,7 +6127,7 @@ class PublicationAndCollectorTests(unittest.TestCase):
             payload["planned"], payload["succeeded"], payload["failed_count"],
         ))
         self.assertEqual("leaf02", payload["failed_devices"][0]["hostname"])
-        self.assertEqual("retrieve_info", payload["failed_devices"][0]["operation"])
+        self.assertEqual("collection", payload["failed_devices"][0]["operation"])
 
     def test_unbound_identity_action_routes_source_write_by_runtime(self):
         rendered = self.html.render_ztp_status_rows({
@@ -5945,7 +6405,7 @@ class PublicationAndCollectorTests(unittest.TestCase):
     def test_cron_csv_fallback_is_order_independent_and_archive_names_are_utc(self):
         source = (ROOT / "ethernet/monitor/cron.sh").read_text(encoding="utf-8")
         match = re.search(
-            r"if ! awk -F',' '\n(.*?)\n    ' mode=", source, re.DOTALL,
+            r"if awk -F',' '\n(.*?)\n    ' mode=", source, re.DOTALL,
         )
         self.assertIsNotNone(match)
         with tempfile.TemporaryDirectory() as directory:

@@ -38,6 +38,38 @@ DEVICE_HEADER = (
 )
 
 
+def _different_host_key_blob(blob: bytes) -> bytes:
+    """Keep the key algorithm framing, but always change its final key byte."""
+    if not blob:
+        raise ValueError("host-key blob is empty")
+    return blob[:-1] + bytes((blob[-1] ^ 0x01,))
+
+
+def _scan_loopback_until_deadline(
+    *, deadline, daemon_alive, scan_once, monotonic, sleeper,
+):
+    """Return a nonempty scan only when it completed before the deadline."""
+    attempts = []
+    while monotonic() < deadline:
+        if not daemon_alive():
+            raise RuntimeError("loopback sshd exited")
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            break
+        scanned = scan_once(remaining)
+        scan_lines = [
+            line for line in scanned.stdout.splitlines()
+            if line and not line.startswith("#")
+        ]
+        attempts.append((scanned.returncode, tuple(scan_lines)))
+        if monotonic() >= deadline:
+            break
+        if scan_lines:
+            return scanned, scan_lines, attempts
+        sleeper(0.05)
+    raise TimeoutError(f"loopback sshd scan deadline expired: attempts={attempts!r}")
+
+
 def load_module(name: str, relative: str):
     path = ROOT / relative
     spec = importlib.util.spec_from_file_location(name, path)
@@ -61,7 +93,7 @@ def load_module(name: str, relative: str):
 class BootstrapPublicationContractTests(unittest.TestCase):
     def test_load_renders_scripts_equal_template_except_runtime_parameters(self):
         runtime_line_keys = (
-            "ZTP_SERVER", "ZTP_URL_PREFIX", "MANUAL_ZTP_OOB_URL",
+            "ZTP_SERVER", "ZTP_SERVER_HOST", "ZTP_URL_PREFIX", "MANUAL_ZTP_OOB_URL",
             "MANUAL_ZTP_OOBOFOOB_URL", "TARGET_CL_VER", "ZTP_UPGRADE_ENABLED",
         )
 
@@ -2292,6 +2324,44 @@ class BackupAuthenticationContractTests(unittest.TestCase):
     SECRET = "SENTINEL spaces 'quotes' $dollar \\slash 密码"
     TARGET = "192.0.2.10"
 
+    def test_loopback_scan_accepts_fourth_result_within_deadline(self):
+        clock = [0.0]
+        results = ["", "", "", "[127.0.0.1]:1234 ssh-ed25519 VALID\n"]
+
+        def scan_once(_remaining):
+            clock[0] += 1.0
+            return subprocess.CompletedProcess(
+                ["ssh-keyscan"], 0, results.pop(0), "",
+            )
+
+        scanned, lines, attempts = _scan_loopback_until_deadline(
+            deadline=8.0, daemon_alive=lambda: True,
+            scan_once=scan_once, monotonic=lambda: clock[0],
+            sleeper=lambda _delay: None,
+        )
+        self.assertEqual(4, len(attempts))
+        self.assertEqual(0, scanned.returncode)
+        self.assertEqual(["[127.0.0.1]:1234 ssh-ed25519 VALID"], lines)
+
+    def test_loopback_scan_rejects_fourth_result_after_deadline(self):
+        clock = [0.0]
+        results = ["", "", "", "[127.0.0.1]:1234 ssh-ed25519 LATE\n"]
+        durations = [2.5, 2.5, 2.5, 0.6]
+
+        def scan_once(_remaining):
+            clock[0] += durations.pop(0)
+            return subprocess.CompletedProcess(
+                ["ssh-keyscan"], 0, results.pop(0), "",
+            )
+
+        with self.assertRaisesRegex(TimeoutError, "deadline"):
+            _scan_loopback_until_deadline(
+                deadline=8.0, daemon_alive=lambda: True,
+                scan_once=scan_once, monotonic=lambda: clock[0],
+                sleeper=lambda _delay: None,
+            )
+        self.assertEqual(8.1, clock[0])
+
     def setUp(self):
         self.backup = load_module(
             f"review_backup_auth_{id(self)}", "ztp/backup/yaml-collect.py",
@@ -2848,6 +2918,12 @@ class BackupAuthenticationContractTests(unittest.TestCase):
                 self.assertEqual(0, scan.call_count)
                 self.assertEqual([], password_spawns)
 
+    def test_negative_host_key_fixture_always_changes_a_terminal_0x7f_byte(self):
+        original = b"ssh-ed25519-test-key\x7f"
+        changed = _different_host_key_blob(original)
+        self.assertEqual(original[:-1], changed[:-1])
+        self.assertNotEqual(original, changed)
+
     @unittest.skipUnless(
         Path("/usr/sbin/sshd").is_file() or shutil.which("sshd"),
         "C1 stock OpenSSH loopback requires sshd; CI NOT-COVERED is tracked in REAL_ENVIRONMENT",
@@ -2994,15 +3070,8 @@ class BackupAuthenticationContractTests(unittest.TestCase):
 
                 host = f"[127.0.0.1]:{port}"
                 deadline = time.monotonic() + 8
-                readiness_attempts = []
-                ready = False
-                for _attempt in range(3):
-                    if not daemon_alive():
-                        self.fail("loopback sshd exited: " + daemon_diagnostics())
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        break
-                    scanned = subprocess.run(
+                def scan_once(remaining):
+                    return subprocess.run(
                         [
                             str(ssh_keyscan), "-T", "2", "-p", str(port),
                             "-t", "ed25519", "127.0.0.1",
@@ -3010,39 +3079,37 @@ class BackupAuthenticationContractTests(unittest.TestCase):
                         text=True, capture_output=True,
                         timeout=min(4, remaining), check=False,
                     )
-                    scan_lines = [
-                        line for line in scanned.stdout.splitlines()
-                        if line and not line.startswith("#")
-                    ]
-                    readiness_attempts.append((scanned.returncode, tuple(scan_lines)))
-                    if scan_lines:
-                        self.assertEqual(0, scanned.returncode, scanned.stderr)
-                        self.assertEqual(1, len(scan_lines), scanned.stdout)
-                        scan_fields = scan_lines[0].split()
-                        self.assertEqual(
-                            [host, ed_fields[0], ed_fields[1]], scan_fields,
-                            scanned.stdout,
+                try:
+                    scanned, scan_lines, readiness_attempts = (
+                        _scan_loopback_until_deadline(
+                            deadline=deadline, daemon_alive=daemon_alive,
+                            scan_once=scan_once, monotonic=time.monotonic,
+                            sleeper=time.sleep,
                         )
-                        scanned_fingerprint = "SHA256:" + base64.b64encode(
-                            hashlib.sha256(base64.b64decode(scan_fields[2])).digest(),
-                        ).rstrip(b"=").decode("ascii")
-                        self.assertEqual(
-                            fingerprints["ed25519"], scanned_fingerprint,
-                        )
-                        ready = True
-                        break
-                    time.sleep(0.05)
-                if not ready:
-                    self.fail(
-                        "loopback sshd did not complete a reviewed host-key KEX: "
-                        f"attempts={readiness_attempts!r}; " + daemon_diagnostics()
                     )
+                except (RuntimeError, TimeoutError) as error:
+                    self.fail(
+                        f"{error}; " + daemon_diagnostics()
+                    )
+                self.assertEqual(0, scanned.returncode, scanned.stderr)
+                self.assertEqual(1, len(scan_lines), scanned.stdout)
+                scan_fields = scan_lines[0].split()
+                self.assertEqual(
+                    [host, ed_fields[0], ed_fields[1]], scan_fields,
+                    scanned.stdout,
+                )
+                scanned_fingerprint = "SHA256:" + base64.b64encode(
+                    hashlib.sha256(base64.b64decode(scan_fields[2])).digest(),
+                ).rstrip(b"=").decode("ascii")
+                self.assertEqual(
+                    fingerprints["ed25519"], scanned_fingerprint,
+                )
 
                 matching = f"{host} {ed_fields[0]} {ed_fields[1]}"
                 same_algorithm_other_key = (
                     f"{host} {ed_fields[0]} "
                     + base64.b64encode(
-                        base64.b64decode(ed_fields[1])[:-1] + b"\x7f",
+                        _different_host_key_blob(base64.b64decode(ed_fields[1])),
                     ).decode("ascii")
                 )
                 different_algorithm = f"{host} {rsa_fields[0]} {rsa_fields[1]}"

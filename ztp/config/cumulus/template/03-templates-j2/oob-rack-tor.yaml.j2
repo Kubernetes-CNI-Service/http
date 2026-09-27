@@ -9,23 +9,8 @@
     evpn:
       state: enabled
     interface:
-      eth0:
-        ipv4:
-          address:
-            {{ d.eth0_ip }}: {}
-          gateway:
-            {{ d.eth0_gw }}: {}
-        type: eth
-        vrf: mgmt
-{% if d.has_eth1 %}
-      eth1:
-        ipv4:
-          address:
-            {{ d.eth1_ip }}: {}
-          gateway:
-            {{ d.eth1_gw }}: {}
-        type: eth
-{% endif %}
+{% include '_management_eth0_static.yaml.j2' %}
+{% include '_management_eth1.yaml.j2' %}
       lo:
         ipv4:
           address:
@@ -161,7 +146,7 @@
         server:
 {% for srv in g.system.dns.server %}
           {{ srv }}:
-            vrf: mgmt
+            vrf: {{ g.system.dns.vrf|default('mgmt', true) }}
 {% endfor %}
       docker:
         state: enabled
@@ -173,7 +158,7 @@
           {{ srv }}:
             iburst: enabled
 {% endfor %}
-        vrf: mgmt
+        vrf: {{ g.system.ntp.vrf|default('mgmt', true) }}
       ssh-server:
         state: enabled
       wjh:

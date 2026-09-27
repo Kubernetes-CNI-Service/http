@@ -9,6 +9,7 @@ import csv
 import contextlib
 from datetime import date, datetime, timedelta, timezone
 import gzip
+import hashlib
 import importlib.util
 from importlib.machinery import SourceFileLoader
 import ipaddress
@@ -23,6 +24,7 @@ import tarfile
 import tempfile
 import unittest
 from unittest import mock
+import zipfile
 
 import yaml
 
@@ -52,6 +54,253 @@ def load_module(name: str, path: Path):
 
 
 class TemplateContractTests(unittest.TestCase):
+    def test_programmatic_setup_checks_restore_commit_before_link_work(self):
+        setup = load_module(
+            "day0_programmatic_setup_restore_admission",
+            ROOT / "DAY0-Prepare/01-a-setup.py",
+        )
+        with tempfile.TemporaryDirectory(prefix="programmatic-setup-restore-") as name:
+            root = Path(name)
+            project = root / "DAY0-Prepare" / "restored"
+            project.mkdir(parents=True)
+            (project / ".finished-source.json").write_text(
+                json.dumps({
+                    "schema_version": 1, "state": "PREPARED",
+                    "source_record": "/offline/Finished-projects/source/record",
+                    "project": "source", "record_id": "20260916T083250Z-aaaaaaaaaaaa",
+                    "content_sha256": "a" * 64, "include_history": False,
+                }, sort_keys=True) + "\n", encoding="ascii",
+            )
+            with mock.patch.object(setup, "HTTP_BASE", str(root)), \
+                 mock.patch.object(setup, "_DRY_RUN", False), \
+                 mock.patch.object(setup, "infra_log_root_lock", return_value=contextlib.nullcontext()), \
+                 mock.patch.object(setup, "infra_log_pending_state_names", return_value=()), \
+                 mock.patch.object(setup, "_rollback_infra_log_migration"), \
+                 mock.patch.object(
+                     setup, "_setup_impl",
+                     side_effect=AssertionError("link transaction entered before restore admission"),
+                 ) as impl:
+                with self.assertRaises(ValueError):
+                    setup.setup(str(project))
+                impl.assert_not_called()
+
+    def test_setup_restore_commit_admission_precedes_monitor_and_link_transaction(self):
+        setup = load_module(
+            "day0_setup_restore_commit_admission", ROOT / "DAY0-Prepare/01-a-setup.py",
+        )
+        with tempfile.TemporaryDirectory(prefix="setup-restore-admission-") as name:
+            root = Path(name)
+            day0 = root / "DAY0-Prepare"
+            day0.mkdir()
+            project = day0 / "restored"
+            project.mkdir()
+            for input_name in (
+                "01-global.yaml", "02-devices_config.csv", "02-dhcp-subnet_config.csv",
+            ):
+                (project / input_name).write_bytes(b"fixture input\n")
+            receipt_path = project / ".finished-source.json"
+            marker_path = project / ".finished-commit.json"
+            receipt = {
+                "schema_version": 1, "state": "PREPARED",
+                "source_record": "/offline/Finished-projects/source/record",
+                "project": "source", "record_id": "20260916T083250Z-aaaaaaaaaaaa",
+                "content_sha256": "a" * 64, "include_history": False,
+            }
+            receipt_bytes = (
+                json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n"
+            ).encode("ascii")
+            identity = project.stat()
+            marker = {
+                "schema_version": 1, "state": "COMMITTED",
+                "receipt_sha256": hashlib.sha256(receipt_bytes).hexdigest(),
+                "target_project": project.name,
+                "target_dev": identity.st_dev, "target_ino": identity.st_ino,
+            }
+            marker_bytes = (
+                json.dumps(marker, sort_keys=True, separators=(",", ":")) + "\n"
+            ).encode("ascii")
+            args = argparse.Namespace(
+                project=str(project), csv_dir=None, p2p_file=None,
+                create=False, _server_delegated=False,
+                host_role="management-server",
+            )
+            outside = root / "outside.txt"
+            outside.write_bytes(b"outside unchanged\n")
+
+            with mock.patch.object(setup, "HERE", str(day0)), \
+                 mock.patch.object(setup, "HTTP_BASE", str(root)), \
+                 mock.patch.object(setup, "_DRY_RUN", False), \
+                 mock.patch.object(setup, "infra_log_root_lock", return_value=contextlib.nullcontext()), \
+                 mock.patch.object(setup, "infra_log_pending_state_names", return_value=()), \
+                 mock.patch.object(setup, "_rollback_infra_log_migration"):
+                # Neither public entry point may reach its first mutable seam
+                # when a visible restore has not committed or its credential
+                # is malformed. The mocks prevent any monitor, lock, or link
+                # work even when the product is still defective.
+                for label, receipt_data, marker_data in (
+                    ("prepared", receipt_bytes, None),
+                    ("malformed", b"{not-json\n", marker_bytes),
+                    ("wrong-directory", receipt_bytes, (
+                        json.dumps(dict(marker, target_ino=identity.st_ino + 1),
+                                   sort_keys=True, separators=(",", ":")) + "\n"
+                    ).encode("ascii")),
+                ):
+                    with self.subTest(case=label):
+                        receipt_path.write_bytes(receipt_data)
+                        if marker_data is None:
+                            marker_path.unlink(missing_ok=True)
+                        else:
+                            marker_path.write_bytes(marker_data)
+                        with mock.patch.object(
+                            setup, "stop_native_ztp_monitors",
+                            side_effect=AssertionError("monitor stopped before restore admission"),
+                        ) as stop, mock.patch.object(
+                            setup, "setup",
+                            side_effect=AssertionError("setup entered before restore admission"),
+                        ) as enter_setup:
+                            with self.assertRaises(ValueError):
+                                setup._main_locked(args)
+                        stop.assert_not_called()
+                        enter_setup.assert_not_called()
+                        with mock.patch.object(
+                            setup, "_setup_impl",
+                            side_effect=AssertionError("link transaction entered before restore admission"),
+                        ) as impl:
+                            with self.assertRaises(ValueError):
+                                setup.setup(str(project))
+                        impl.assert_not_called()
+
+                for label, receipt_data, marker_data in (
+                    ("committed", receipt_bytes, marker_bytes),
+                    ("ordinary", None, None),
+                ):
+                    with self.subTest(case=label):
+                        if receipt_data is None:
+                            receipt_path.unlink()
+                            marker_path.unlink()
+                        else:
+                            receipt_path.write_bytes(receipt_data)
+                            marker_path.write_bytes(marker_data)
+                        with mock.patch.object(setup, "stop_native_ztp_monitors") as stop, \
+                             mock.patch.object(setup, "setup") as enter_setup:
+                            self.assertEqual(0, setup._main_locked(args))
+                        stop.assert_called_once_with(str(root))
+                        enter_setup.assert_called_once_with(str(project.resolve()))
+                        with mock.patch.object(setup, "_setup_impl", return_value="admitted") as impl:
+                            self.assertEqual("admitted", setup.setup(str(project)))
+                        impl.assert_called_once_with(str(project), server_delegated=False)
+            self.assertEqual(b"outside unchanged\n", outside.read_bytes())
+
+    def test_rehydrated_project_commit_gate_is_bound_and_legacy_safe(self):
+        contract = load_module(
+            "project_contract_rehydrate_eligibility", ROOT / "tools/project_contract.py",
+        )
+        with tempfile.TemporaryDirectory(prefix="rehydrate-eligibility-direct-") as name:
+            day0 = Path(name) / "DAY0-Prepare"
+            day0.mkdir()
+            project = day0 / "restored"
+            project.mkdir()
+            outside = Path(name) / "outside.txt"
+            outside.write_bytes(b"outside unchanged\n")
+
+            # Ordinary projects have no restore controls and remain eligible.
+            contract.require_project_eligible(project)
+            sync_marker = day0.parent / ".sync-code-in-progress"
+            sync_marker.write_bytes(b"")
+            with self.assertRaises(ValueError):
+                contract.require_project_eligible(project)
+            sync_marker.unlink()
+            sync_marker.symlink_to(outside)
+            with self.assertRaises(ValueError):
+                contract.require_project_eligible(project)
+            sync_marker.unlink()
+            contract.require_project_eligible(project)
+            receipt_path = project / ".finished-source.json"
+            ready_path = project / ".finished-commit.ready"
+            marker_path = project / ".finished-commit.json"
+            receipt = {
+                "schema_version": 1,
+                "state": "PREPARED",
+                "source_record": "/offline/Finished-projects/source/record",
+                "project": "source",
+                "record_id": "20260916T083250Z-aaaaaaaaaaaa",
+                "content_sha256": "a" * 64,
+                "include_history": False,
+            }
+            receipt_bytes = (
+                json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n"
+            ).encode("ascii")
+            receipt_path.write_bytes(receipt_bytes)
+            with self.assertRaises(ValueError):
+                contract.require_project_eligible(project)
+
+            identity = project.stat()
+            marker = {
+                "schema_version": 1,
+                "state": "COMMITTED",
+                "receipt_sha256": hashlib.sha256(receipt_bytes).hexdigest(),
+                "target_project": "restored",
+                "target_dev": identity.st_dev,
+                "target_ino": identity.st_ino,
+            }
+            marker_bytes = (
+                json.dumps(marker, sort_keys=True, separators=(",", ":")) + "\n"
+            ).encode("ascii")
+            ready_path.write_bytes(marker_bytes)
+            with self.assertRaises(ValueError):
+                contract.require_project_eligible(project)
+            ready_path.unlink()
+            marker_path.write_bytes(marker_bytes)
+            contract.require_project_eligible(project)
+            sync_marker.write_bytes(b"")
+            with self.assertRaises(ValueError):
+                contract.require_project_eligible(project)
+            sync_marker.unlink()
+            contract.require_project_eligible(project)
+
+            wrong_inode = dict(marker, target_ino=identity.st_ino + 1)
+            marker_path.write_bytes(
+                (json.dumps(wrong_inode, sort_keys=True, separators=(",", ":")) + "\n")
+                .encode("ascii")
+            )
+            with self.assertRaises(ValueError):
+                contract.require_project_eligible(project)
+            marker_path.write_bytes(b"{malformed\n")
+            with self.assertRaises(ValueError):
+                contract.require_project_eligible(project)
+            marker_path.write_bytes(b"x" * 4097)
+            with self.assertRaises(ValueError):
+                contract.require_project_eligible(project)
+            marker_path.unlink()
+            marker_path.symlink_to(outside)
+            with self.assertRaises(ValueError):
+                contract.require_project_eligible(project)
+            marker_path.unlink()
+            marker_path.write_bytes(marker_bytes)
+            contract.require_project_eligible(project)
+
+            changed = dict(receipt, state="PENDING")
+            receipt_path.write_bytes(
+                (json.dumps(changed, sort_keys=True, separators=(",", ":")) + "\n")
+                .encode("ascii")
+            )
+            with self.assertRaises(ValueError):
+                contract.require_project_eligible(project)
+            receipt_path.write_bytes(b"{malformed\n")
+            with self.assertRaises(ValueError):
+                contract.require_project_eligible(project)
+            receipt_path.write_bytes(b"x" * 65537)
+            with self.assertRaises(ValueError):
+                contract.require_project_eligible(project)
+            receipt_path.unlink()
+            receipt_path.symlink_to(outside)
+            with self.assertRaises(ValueError):
+                contract.require_project_eligible(project)
+            receipt_path.unlink()
+            with self.assertRaises(ValueError):
+                contract.require_project_eligible(project)
+            self.assertEqual(b"outside unchanged\n", outside.read_bytes())
+
     def test_dynamic_air_firewall_classifier_uses_separator_boundaries(self):
         resolver = load_module(
             "dynamic_air_firewall_boundary_contract",
@@ -946,6 +1195,34 @@ class TemplateContractTests(unittest.TestCase):
         for path in runtime_files:
             self.assertIn(f"/{path}", ignore)
 
+    def test_private_infra_log_receipt_and_atomic_temp_never_transfer(self):
+        contract = load_module(
+            "project_contract_private_infra_log_state",
+            ROOT / "tools/project_contract.py",
+        )
+        private = (
+            "infra/.logs.lock",
+            "infra/.logs-migration.json",
+            "infra/.logs-migration.ABC123",
+        )
+        for relative in private:
+            with self.subTest(private=relative):
+                self.assertEqual(
+                    "private infra log migration state",
+                    contract.transfer_exclude_reason(relative),
+                )
+                self.assertTrue(contract.is_image_host_state_path(relative))
+        excludes = contract.rsync_excludes()
+        self.assertIn(".logs.lock", excludes)
+        self.assertIn(".logs-migration.*", excludes)
+        for relative in (
+            "infra/.logs-migrationx", "infra/.logs-migration",
+            "infra/.logs-migration-backup", "infra/.logs-lock",
+        ):
+            with self.subTest(near_match=relative):
+                self.assertIsNone(contract.transfer_exclude_reason(relative))
+                self.assertFalse(contract.is_image_host_state_path(relative))
+
     def test_sync_root_file_selection_uses_shared_transfer_boundary(self):
         sync = load_module(
             "sync_code_root_workspace_exclude", ROOT / "tools/sync-code.py",
@@ -1061,18 +1338,17 @@ class TemplateContractTests(unittest.TestCase):
             self.assertNotIn("项目模板已创建。", output.getvalue())
             self.assertFalse(project.exists())
 
-    def test_latest_versioned_p2p_becomes_stable_root_link(self):
+    def test_latest_root_versioned_p2p_becomes_stable_root_link(self):
         setup = load_module("day0_setup_versioned_p2p", ROOT / "DAY0-Prepare/01-a-setup.py")
         with tempfile.TemporaryDirectory() as directory:
-            project = Path(directory)
-            versions = project / "p2p"
-            versions.mkdir()
-            older = versions / "Customer-P2P-v1.xlsx"
-            newer = versions / "Customer-P2P-v2.xlsx"
+            project = Path(directory).resolve()
+            older = project / "Customer-P2P-v1.9.xlsx"
+            newer = project / "Customer-P2P-v1.10.xlsx"
             older.write_bytes(b"old")
             newer.write_bytes(b"new")
-            os.utime(older, (100, 100))
-            os.utime(newer, (200, 200))
+            # Version, not mtime or lexical spelling, is the primary order.
+            os.utime(older, (200, 200))
+            os.utime(newer, (100, 100))
             (project / "p2p.xlsx").touch()
             old_explicit, old_dry = setup._P2P_FILE, setup._DRY_RUN
             try:
@@ -1086,6 +1362,7 @@ class TemplateContractTests(unittest.TestCase):
             self.assertEqual(project / "p2p.xlsx", Path(canonical))
             self.assertTrue((project / "p2p.xlsx").is_symlink())
             self.assertEqual(newer.resolve(), (project / "p2p.xlsx").resolve())
+            self.assertEqual(newer.name, os.readlink(project / "p2p.xlsx"))
 
     def test_project_p2p_link_is_inside_setup_transaction(self):
         setup = load_module("day0_setup_p2p_transaction", ROOT / "DAY0-Prepare/01-a-setup.py")
@@ -1096,17 +1373,19 @@ class TemplateContractTests(unittest.TestCase):
                 setup._setup_transaction_paths(str(project)),
             )
 
-    def test_load_passes_nested_p2p_path_to_setup(self):
-        load = load_module("day0_load_nested_p2p", ROOT / "DAY0-Prepare/11-load.py")
+    def test_load_passes_root_p2p_basename_to_setup(self):
+        load = load_module("day0_load_root_p2p", ROOT / "DAY0-Prepare/11-load.py")
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(load, "run") as run:
             project = Path(directory) / "project"
-            p2p = project / "p2p/Customer-P2P-v2.xlsx"
-            p2p.parent.mkdir(parents=True)
-            p2p.touch()
+            project.mkdir()
+            p2p = project / "Customer-P2P-v2.xlsx"
+            with zipfile.ZipFile(p2p, "w") as archive:
+                archive.writestr("xl/workbook.xml", "<workbook/>")
+            (project / "p2p.xlsx").symlink_to(p2p.name)
             with mock.patch.object(load, "active_project", side_effect=[None, project]):
                 load.activate_project(project, p2p)
             command = run.call_args.args[0]
-            self.assertIn("--p2p-file=p2p/Customer-P2P-v2.xlsx", command)
+            self.assertIn("--p2p-file=Customer-P2P-v2.xlsx", command)
             self.assertIn("--confirm-project-switch", command)
 
     def test_setup_parser_separates_creation_and_automation_switch_ack(self):
@@ -1252,7 +1531,7 @@ class TemplateContractTests(unittest.TestCase):
         template = ROOT / "DAY0-Prepare/template"
         expected = {
             "99-output-backup", "99-output-dhcp", "99-output-eth",
-            "99-output-ib_nvl", "99-output-monitor", "99-output-p2p",
+            "99-output-ib_nvl", "99-output-infra", "99-output-monitor", "99-output-p2p",
             "99-output-ztp",
         }
         self.assertEqual(expected, {p.name for p in template.glob("99-output-*") if p.is_dir()})
@@ -1884,6 +2163,54 @@ class TemplateContractTests(unittest.TestCase):
             repeated, {"generated_at": "2026-08-24T10:21:00+00:00", "devices": current}, marker,
         )
         self.assertEqual(3, repeated[0]["ztp_round"])
+
+    def test_same_manual_trigger_repairs_only_malformed_stored_time(self):
+        monitor = load_module(
+            "day0_same_trigger_time_repair", ROOT / "DAY0-Prepare/12-ztp-monitor.py",
+        )
+        old_valid = "2026-09-24T08:30:00+08:00"
+        new_valid = "2026-09-24T08:45:00+08:00"
+
+        def assign(previous_time, incoming_time, trigger_id="same"):
+            previous = {
+                "generated_at": "2026-09-24T08:35:00+08:00",
+                "devices": [{
+                    "hostname": "leaf01", "ztp_round": 2,
+                    "manual_cycle_marker": previous_time,
+                    "cycle_started_at": previous_time,
+                    "trigger_id": "same", "trigger_source": "manual_cli",
+                    "manual_operation": "ztp", "stages": {},
+                }],
+            }
+            current = [{"hostname": "leaf01", "events": [], "stages": {}}]
+            markers = {"leaf01": {
+                "timestamp": incoming_time, "trigger_id": trigger_id,
+                "trigger_source": "manual_cli", "operation": "ztp",
+                "command_started_at": "2026-09-24T08:44:00+08:00",
+                "finished_at": incoming_time,
+            }}
+            monitor.assign_ztp_rounds(current, previous, markers)
+            return current[0]
+
+        repaired = assign("zzz", new_valid)
+        self.assertEqual(2, repaired["ztp_round"])
+        self.assertEqual("same", repaired["trigger_id"])
+        self.assertEqual(new_valid, repaired["manual_cycle_marker"])
+        self.assertEqual(new_valid, repaired["cycle_started_at"])
+        self.assertEqual(new_valid, repaired["manual_command_finished_at"])
+
+        replay = assign(old_valid, new_valid)
+        self.assertEqual(2, replay["ztp_round"])
+        self.assertEqual(old_valid, replay["manual_cycle_marker"])
+        self.assertEqual(old_valid, replay["cycle_started_at"])
+
+        invalid_incoming = assign(old_valid, "zzz")
+        self.assertEqual(2, invalid_incoming["ztp_round"])
+        self.assertEqual(old_valid, invalid_incoming["manual_cycle_marker"])
+
+        distinct_trigger = assign("zzz", new_valid, trigger_id="new-trigger")
+        self.assertEqual(3, distinct_trigger["ztp_round"])
+        self.assertEqual(new_valid, distinct_trigger["manual_cycle_marker"])
 
     def test_accepted_manual_round_marks_dhcp_as_skipped_with_index(self):
         monitor = load_module(
@@ -3911,7 +4238,7 @@ exit 0
     def test_air_monitor_target_inherits_same_subnet_production_svi(self):
         script = (ROOT / "ethernet/monitor/cron.sh").read_text(encoding="utf-8")
         parser = re.search(
-            r"if ! awk -F',' '(.*?)\n    ' mode=\"\$mode\"", script, re.S,
+            r"if awk -F',' '(.*?)\n    ' mode=\"\$mode\"", script, re.S,
         )
         self.assertIsNotNone(parser)
         with tempfile.TemporaryDirectory() as directory:
@@ -5372,19 +5699,19 @@ PSU1-Temp-Sensor           28.0           85         63.0      5         ok
         tab_ids = re.findall(r"switchTab\('([^']+)'\)", tabs)
         labels = re.findall(r">([^<]+)</button>", tabs)
         self.assertEqual(
-            ["ztp", "eth", "etop", "spx", "itop", "ibl", "nvl", "p2p", "air"],
+            ["ztp", "eth", "etop", "spx", "itop", "ibl", "nvl", "p2p", "air", "ufm"],
             tab_ids,
         )
         self.assertEqual(
             [
                 "ZTP Status", "Switch Status", "Eth Link Validation",
                 "SPX Link Monitor", "IB Link Validation", "IB Link Monitor",
-                "NVLink Monitor", "Ethernet Diagram", "AIR Diagram",
+                "NVLink Monitor", "Ethernet Diagram", "AIR Diagram", "UFM",
             ],
             labels,
         )
         self.assertIn(
-            "const TAB_NAMES = ['ztp','eth','etop','spx','itop','ibl','nvl','p2p','air'];",
+            "const TAB_NAMES = ['ztp','eth','etop','spx','itop','ibl','nvl','p2p','air','ufm'];",
             source,
         )
 
@@ -7629,6 +7956,46 @@ class EnvironmentProbeContractTests(unittest.TestCase):
             self.probe.classify_identity(
                 "AIR-EXAMPLE-Border01", "02:00:00:00:00:ff", prod, air
             )
+
+    def test_duplicate_hostname_is_ambiguous_even_when_mac_is_unique(self):
+        prod = self.probe.Identity("EXAMPLE-Leaf01", "192.0.2.10", "02:00:00:00:00:01", "prod")
+        air = self.probe.Identity("EXAMPLE-Leaf01", "192.0.2.10", "02:00:00:00:00:02", "air")
+        with self.assertRaisesRegex(RuntimeError, "ambiguous hostname.*192\\.0\\.2\\.10"):
+            self.probe.classify_identity(
+                "EXAMPLE-Leaf01", "02:00:00:00:00:01", prod, air
+            )
+
+    def test_duplicate_mac_is_ambiguous_even_when_hostname_is_unique(self):
+        prod = self.probe.Identity("EXAMPLE-Leaf01", "192.0.2.10", "02:00:00:00:00:01", "prod")
+        air = self.probe.Identity("AIR-EXAMPLE-Leaf01", "192.0.2.10", "02:00:00:00:00:01", "air")
+        with self.assertRaisesRegex(RuntimeError, "ambiguous eth0 MAC.*192\\.0\\.2\\.10"):
+            self.probe.classify_identity(
+                "EXAMPLE-Leaf01", "02:00:00:00:00:01", prod, air
+            )
+
+    def test_duplicate_inventory_identity_reports_ambiguity_not_absence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            inventory = Path(directory) / "devices.csv"
+            inventory.write_text(
+                "hostname,type,eth0_ip,netmask,eth0_mac\n"
+                "EXAMPLE-Leaf01,,192.0.2.10,24,02:00:00:00:00:01\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(RuntimeError, "ambiguous hostname.*192\\.0\\.2\\.10"):
+                self.probe.detect_environment(
+                    str(inventory),
+                    probe=lambda _ip, _user, _timeout: (
+                        "EXAMPLE-Leaf01", "02:00:00:00:00:01"
+                    ),
+                )
+
+    def test_unique_signal_still_classifies_when_hostname_is_missing(self):
+        prod = self.probe.Identity("EXAMPLE-Leaf01", "192.0.2.10", "02:00:00:00:00:01", "prod")
+        air = self.probe.Identity("AIR-EXAMPLE-Leaf01", "192.0.2.10", "02:00:00:00:00:02", "air")
+        self.assertEqual(
+            "air",
+            self.probe.classify_identity("", "02:00:00:00:00:02", prod, air),
+        )
 
 
 class YamlCollectFallbackContractTests(unittest.TestCase):

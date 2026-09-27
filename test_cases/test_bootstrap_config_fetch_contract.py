@@ -199,7 +199,7 @@ def run_bootstrap_fetch(
     )
     source = re.sub(
         r'if ! select_ztp_network_path; then\n.*?\nfi\n\n'
-        r'if ! check_network "\$\{ZTP_SERVER##\*/\}"; then\n.*?\nfi',
+        r'if ! check_network "\$\{ZTP_SERVER_HOST\}"; then\n.*?\nfi',
         'ZTP_VRF="default"\nZTP_INTERFACE="eth0"',
         source, count=1, flags=re.S,
     )

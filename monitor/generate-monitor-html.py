@@ -46,7 +46,18 @@ from dot_to_html import convert as convert_dot_to_html
 HTTP_ROOT = Path(__file__).resolve().parent.parent
 if str(HTTP_ROOT) not in sys.path:
     sys.path.insert(0, str(HTTP_ROOT))
+TOOLS_ROOT = HTTP_ROOT / "tools"
+if str(TOOLS_ROOT) not in sys.path:
+    sys.path.insert(0, str(TOOLS_ROOT))
+from project_contract import (
+    MIN_CONTINUOUS_INTERVAL_MINUTES,
+    MAX_CONTINUOUS_INTERVAL_MINUTES,
+    MIN_CONTINUOUS_BACKUP_INTERVAL_MINUTES,
+    MAX_CONTINUOUS_BACKUP_INTERVAL_MINUTES,
+)
 from ztp.dynamic_air_inventory import dynamic_air_devices
+from tools.ufm_collection_pipeline import validated_receipts as validated_ufm_receipts
+from tools.ufm_collection_contract import CollectionError, collection_plan as ufm_collection_plan
 
 # ── 路径配置 ──────────────────────────────────────────────────────────────────
 BASE_DIR     = Path(os.path.dirname(os.path.abspath(__file__)))
@@ -1950,6 +1961,76 @@ def load_topology_validation(directory: Path, network: str, scope: str = "all") 
         "sources": source_labels,
         "downloads": downloads,
     }
+
+
+def _render_ufm_evidence_panel(project_root: Path, scope: str,
+                               candidate: dict[str, str] | None = None) -> str:
+    """Render verified public receipts plus at most one private pipeline candidate."""
+    environments = ("air", "prod") if scope == "all" else (scope,)
+    rows: list[str] = []
+    for environment in environments:
+        if environment not in {"air", "prod"}:
+            continue
+        receipts = list(validated_ufm_receipts(project_root, environment))
+        if candidate is not None and f"-{environment}-" in candidate["run_id"]:
+            if any(item["run_id"] == candidate["run_id"]
+                   and item["node"] == candidate["node"] for item in receipts):
+                raise ValueError("UFM candidate is already publicly verified")
+            receipts.append(candidate)
+            receipts.sort(key=lambda item: item["node"])
+            receipts.sort(key=lambda item: item["run_id"], reverse=True)
+        for receipt in receipts[:20]:
+            rows.append(
+                '<tr><td>' + escape("AIR" if environment == "air" else "Production")
+                + '</td><td>' + escape(receipt["node"])
+                + '</td><td>' + escape(receipt["run_id"])
+                + '</td><td>' + escape(receipt["kind"])
+                + '</td><td>' + escape(receipt["report_sha256"][:16])
+                + '</td></tr>'
+            )
+    body = (
+        '<table><thead><tr><th>环境</th><th>节点</th><th>运行 ID</th>'
+        '<th>采集</th><th>报告 SHA-256 前缀</th></tr></thead><tbody>'
+        + "".join(rows) + '</tbody></table>'
+        if rows else '<p>未知（没有已验证的 UFM 采集回执）</p>'
+    )
+    return '<div id="panel-ufm" class="panel"><section id="ufm-collection-panel" ' \
+        'class="ufm-evidence"><h2>UFM 独立证据</h2>' + body + '</section></div>'
+
+
+def render_ufm_evidence_panel(project_root: Path, scope: str = "all") -> str:
+    """Show only public, digest-bound UFM receipts; never preview candidates."""
+    return _render_ufm_evidence_panel(project_root, scope)
+
+
+def render_ufm_candidate_panel(project_root: Path, scope: str,
+                               candidate: dict[str, str]) -> str:
+    """Prepare a private panel preview; this does not publish a receipt.
+
+    Only the held pipeline can attest the candidate's source bytes. A caller
+    must not present this provisional HTML as public completion evidence.
+    """
+    keys = {"schema", "status", "kind", "run_id", "node", "archive",
+            "archive_sha256", "report", "report_sha256", "report_provenance_sha256"}
+    if (type(candidate) is not dict or set(candidate) != keys
+            or any(type(value) is not str for value in candidate.values())
+            or candidate["schema"] != "ufm-collection-v1"
+            or candidate["status"] != "success" or candidate["kind"] != "iblinkinfo"
+            or scope not in {"air", "prod"}
+            or f"-{scope}-" not in candidate["run_id"]
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}", candidate["node"]) is None
+            or any(re.fullmatch(r"[0-9a-f]{64}", candidate[key]) is None
+                   for key in ("archive_sha256", "report_sha256",
+                               "report_provenance_sha256"))):
+        raise ValueError("UFM panel candidate is not a canonical private receipt")
+    try:
+        plan = ufm_collection_plan("iblinkinfo", candidate["run_id"])
+    except CollectionError:
+        raise ValueError("UFM panel candidate has an invalid run ID") from None
+    if (candidate["archive"] != plan.archive_name
+            or candidate["report"] != f"iblinkinfo_{plan.run_id}-topology-validation.xlsx"):
+        raise ValueError("UFM panel candidate has mismatched artifact names")
+    return _render_ufm_evidence_panel(project_root, scope, dict(candidate))
 
 
 def render_topology_tables(
@@ -4255,6 +4336,7 @@ def build_html(
     ethernet_diagram: dict,
     air_diagram: dict,
     ztp_status: dict,
+    ufm_panel: str = "",
 ) -> str:
     gen_time      = datetime.now(DISPLAY_TZ).strftime("%Y-%m-%d %H:%M:%S")
     spx_ts_str    = spx_latest_ts.strftime("%Y-%m-%d %H:%M") if spx_latest_ts else "—"
@@ -5195,6 +5277,7 @@ tr.grp-hidden {{ display: none; }}
   <button class="tab"        onclick="switchTab('nvl')">NVLink Monitor</button>
   <button class="tab"        onclick="switchTab('p2p')">Ethernet Diagram</button>
   <button class="tab"        onclick="switchTab('air')">AIR Diagram</button>
+  <button class="tab"        onclick="switchTab('ufm')">UFM</button>
 </div>
 
 <!-- ═══ Tab 1: 交换机状态 ═══ -->
@@ -5221,7 +5304,7 @@ tr.grp-hidden {{ display: none; }}
       <span class="monitor-control-item">
         <span class="monitor-control-actions">
           <label class="continuous-interval">收集周期
-            <input id="continuous-collection-interval" type="number" min="10" max="1440" step="10" value="10"> 分钟
+            <input id="continuous-collection-interval" type="number" min="{MIN_CONTINUOUS_INTERVAL_MINUTES}" max="{MAX_CONTINUOUS_INTERVAL_MINUTES}" step="10" value="{MIN_CONTINUOUS_INTERVAL_MINUTES}"> 分钟
           </label>
           <button id="continuous-collection-button" type="button" onclick="toggleContinuousCollection()" disabled>持续收集</button>
         </span>
@@ -5238,7 +5321,7 @@ tr.grp-hidden {{ display: none; }}
       <span class="monitor-control-item">
         <span class="monitor-control-actions">
           <label class="continuous-interval">备份周期
-            <input id="continuous-backup-interval" type="number" min="10" max="1440" step="10" value="60"> 分钟
+            <input id="continuous-backup-interval" type="number" min="{MIN_CONTINUOUS_BACKUP_INTERVAL_MINUTES}" max="{MAX_CONTINUOUS_BACKUP_INTERVAL_MINUTES}" step="10" value="{MIN_CONTINUOUS_BACKUP_INTERVAL_MINUTES}"> 分钟
           </label>
           <button id="continuous-backup-button" type="button" onclick="toggleContinuousBackup()" disabled>持续备份</button>
         </span>
@@ -5459,10 +5542,11 @@ tr.grp-hidden {{ display: none; }}
 {infiniband_topology_panel}
 {ethernet_diagram_panel}
 {air_diagram_panel}
+{ufm_panel}
 
 <script>
 // ── Auto-Refresh（两个 Status + 三个 Monitor 页面）──────────────────────────
-const TAB_NAMES = ['ztp','eth','etop','spx','itop','ibl','nvl','p2p','air'];
+const TAB_NAMES = ['ztp','eth','etop','spx','itop','ibl','nvl','p2p','air','ufm'];
 const AUTO_REFRESH_TABS = new Set(['ztp','eth','spx','ibl','nvl']);
 const AUTO_REFRESH_KEY = 'network-monitor:auto-refresh';
 const ACTIVE_TAB_KEY = 'network-monitor:active-tab';
@@ -6106,7 +6190,7 @@ function renderContinuousCollectionControl(payload) {{
           ? `持续收集：等待收集冷却结束（约 ${{Math.ceil(remaining / 60)}} 分钟）`
           : '持续收集：已排队，等待信息收集完成';
       }} else {{
-        label.textContent = `持续收集：已启用（${{payload?.interval_minutes || 10}} 分钟）`;
+      label.textContent = `持续收集：已启用（${{payload?.interval_minutes || {MIN_CONTINUOUS_INTERVAL_MINUTES}}} 分钟）`;
       }}
     }} else {{
       label.textContent = '持续收集：未启用';
@@ -6138,7 +6222,7 @@ function renderContinuousBackupControl(payload) {{
           ? `持续备份：等待备份冷却结束（约 ${{Math.ceil(remaining / 60)}} 分钟）`
           : '持续备份：已排队，等待配置备份完成';
       }} else {{
-        label.textContent = `持续备份：已启用（${{payload?.interval_minutes || 60}} 分钟）`;
+      label.textContent = `持续备份：已启用（${{payload?.interval_minutes || {MIN_CONTINUOUS_BACKUP_INTERVAL_MINUTES}}} 分钟）`;
       }}
     }} else {{
       label.textContent = '持续备份：未启用';
@@ -6184,8 +6268,11 @@ function renderCollectionControls() {{
 function continuousInterval(inputId) {{
   const intervalNode = document.getElementById(inputId);
   const interval = Number.parseInt(intervalNode?.value || '', 10);
-  if (!Number.isInteger(interval) || interval < 10 || interval > 1440) {{
-    window.alert('循环间隔必须是 10 到 1440 分钟的整数');
+  const minimum = Number.parseInt(intervalNode?.min || '', 10);
+  const maximum = Number.parseInt(intervalNode?.max || '', 10);
+  if (!Number.isInteger(interval) || !Number.isInteger(minimum)
+      || !Number.isInteger(maximum) || interval < minimum || interval > maximum) {{
+    window.alert(`循环间隔必须是 ${{minimum}} 到 ${{maximum}} 分钟的整数`);
     return null;
   }}
   return interval;
@@ -7756,7 +7843,20 @@ def _generate_monitor_html(scope: str = "all") -> None:
     log("=== generate-monitor-html start ===")
     log(f"[ENV] 页面数据范围: {scope}")
 
+    excluded_monitor_hostnames = {
+        hostname.casefold()
+        for hostname in read_host_csv(DEVICES_CSV, {"eth_jump"})
+    }
     ztp_status = load_ztp_status(scope=scope)
+    if isinstance(ztp_status, dict):
+        ztp_status = dict(ztp_status)
+        ztp_status["devices"] = [
+            device for device in ztp_status.get("devices", [])
+            if isinstance(device, dict)
+            and str(device.get("type") or "").strip().casefold() != "eth_jump"
+            and str(device.get("hostname") or "").strip().casefold()
+            not in excluded_monitor_hostnames
+        ]
     if ztp_status.get("available"):
         log(f"[ZTP] 读取最新报告: {ztp_status['source']}")
     else:
@@ -7784,6 +7884,11 @@ def _generate_monitor_html(scope: str = "all") -> None:
         load_dynamic_air_inventory(ETH_LOG)
         if "air" in selected_environments(scope) else []
     )
+    dynamic_air_inventory = [
+        device for device in dynamic_air_inventory
+        if str(device.get("hostname") or "").strip().casefold()
+        not in excluded_monitor_hostnames
+    ]
     dynamic_air_metadata = {
         str(device.get("hostname") or "").casefold(): device
         for device in dynamic_air_inventory
@@ -8409,6 +8514,7 @@ def _generate_monitor_html(scope: str = "all") -> None:
         ethernet_diagram,
         air_diagram,
         ztp_status,
+        render_ufm_evidence_panel(BASE_DIR, scope),
     )
     atomic_write_text(OUTPUT, html)
     log(f"完成 → {OUTPUT}  ({len(html):,} 字节)")
@@ -8426,9 +8532,9 @@ def parse_args(argv=None) -> argparse.Namespace:
         description="汇总 ZTP、Ethernet、InfiniBand 和 NVLink 采集数据并生成 monitor.html。"
     )
     environment = parser.add_mutually_exclusive_group()
-    environment.add_argument("--type", choices=("all", "prod", "air"), dest="scope")
-    environment.add_argument("--air", action="store_const", const="air", dest="scope")
-    environment.add_argument("--prod", action="store_const", const="prod", dest="scope")
+    environment.add_argument("--type", choices=("all", "prod", "air"), dest="scope", help="选择全部、Production 或 AIR 数据（默认 all）")
+    environment.add_argument("--air", action="store_const", const="air", dest="scope", help="仅汇总 AIR 数据；等价于 --type air")
+    environment.add_argument("--prod", action="store_const", const="prod", dest="scope", help="仅汇总 Production 数据；等价于 --type prod")
     parser.set_defaults(scope="all")
     return parser.parse_args(argv)
 

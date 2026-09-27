@@ -8,28 +8,8 @@
 {% endif %}
 {% include '_bridge_l2vlans.yaml.j2' %}
     interface:
-      eth0:
-        ipv4:
-{% if d.eth0_ip == 'dhcp-client' %}
-          dhcp-client:
-            state: enabled
-{% else %}
-          address:
-            {{ d.eth0_ip }}: {}
-          gateway:
-            {{ d.eth0_gw }}: {}
-{% endif %}
-        type: eth
-        vrf: mgmt
-{% if d.has_eth1 %}
-      eth1:
-        ipv4:
-          address:
-            {{ d.eth1_ip }}: {}
-          gateway:
-            {{ d.eth1_gw }}: {}
-        type: eth
-{% endif %}
+{% include '_management_eth0_dhcp.yaml.j2' %}
+{% include '_management_eth1.yaml.j2' %}
 {% if d.lo_ip and d.lo_ip not in ['NA', 'None'] %}
       lo:
         ipv4:
@@ -164,15 +144,15 @@
         server:
 {% for srv in g.system.dns.server %}
           {{ srv }}:
-            vrf: {{ g.system.dns.vrf }}
+            vrf: {{ g.system.dns.vrf|default('mgmt', true) }}
 {% endfor %}
       docker:
         state: enabled
-        vrf: {{ g.system.dns.vrf }}
+        vrf: {{ g.system.dns.vrf|default('mgmt', true) }}
       hostname: {{ d.hostname }}
       ntp:
         listen:
-{% for vrf in (d.vrfs | default([])) if vrf.evpn_vrf == g.system.ntp.vrf %}
+{% for vrf in (d.vrfs | default([])) if vrf.evpn_vrf == (g.system.ntp.vrf|default('mgmt', true)) %}
 {% for l2 in vrf.l2vlans if l2.vlan_id is not none %}
           vlan{{ l2.vlan_id }}: {}
 {% endfor %}
@@ -182,7 +162,7 @@
           {{ srv }}:
             iburst: enabled
 {% endfor %}
-        vrf: {{ g.system.ntp.vrf }}
+        vrf: {{ g.system.ntp.vrf|default('mgmt', true) }}
       ssh-server:
         state: enabled
       wjh:

@@ -935,6 +935,82 @@ def _logical_interfaces(
     return tuple(interfaces)
 
 
+def _http_address_problem(record: Mapping[str, Any]) -> Optional[str]:
+    """Explain why a raw address observation cannot serve an HTTP listener."""
+    family = str(record.get("family") or "").casefold()
+    if family != "inet":
+        return f"address family {family or 'absent'} is not IPv4"
+    scope = str(record.get("scope") or "global").casefold()
+    if scope not in {"global", "site"}:
+        return f"address scope {scope} is not listener-capable"
+    raw_flags = record.get("flags") or ()
+    if not isinstance(raw_flags, (list, tuple)):
+        raise RuntimeContractError("IPv4 address flags must be an array")
+    flags = {value.casefold() for value in raw_flags if isinstance(value, str)}
+    blocked_flags = sorted(flags & {"tentative", "dadfailed", "deprecated"})
+    if blocked_flags:
+        return "address has unusable flags: " + ", ".join(blocked_flags)
+    if record.get("preferred_life_time") in {0, "0"}:
+        return "address has zero preferred lifetime"
+    if record.get("valid_life_time") in {0, "0"}:
+        return "address has zero valid lifetime"
+    return None
+
+
+def inspect_http_listener_owners(
+    address: str,
+    *,
+    link_snapshot: Any,
+    address_snapshot: Any,
+) -> Tuple[Mapping[str, Any], ...]:
+    """Project every observed owner, including down and filtered owners.
+
+    `_logical_interfaces` intentionally discards unusable addresses for ZTP
+    planning.  HTTP ownership diagnostics must also see those raw observations
+    so an allowlist ceiling can be checked without concealing another owner.
+    """
+    try:
+        parsed = ipaddress.IPv4Address(address)
+    except (ipaddress.AddressValueError, TypeError) as exc:
+        raise RuntimeContractError(f"invalid HTTP listener IPv4 address {address!r}") from exc
+    if address != str(parsed):
+        raise RuntimeContractError(f"noncanonical HTTP listener IPv4 address {address!r}")
+
+    interfaces = _logical_interfaces(link_snapshot, address_snapshot)
+    by_index = {interface.ifindex: interface for interface in interfaces}
+    owner_problems: dict[int, list[Optional[str]]] = {}
+    for position, record in enumerate(_json_records(address_snapshot, "address snapshot")):
+        ifindex = _positive_ifindex(record.get("ifindex"), f"address snapshot[{position}]")
+        raw_addr_info = record.get("addr_info") or ()
+        for info in raw_addr_info:
+            if info.get("local") != address:
+                continue
+            problem = _http_address_problem(info)
+            raw_prefix = info.get("prefixlen")
+            try:
+                ipaddress.IPv4Interface(f"{address}/{raw_prefix}")
+            except (ipaddress.AddressValueError, ipaddress.NetmaskValueError, ValueError):
+                problem = problem or f"address has invalid prefix {raw_prefix!r}"
+            owner_problems.setdefault(ifindex, []).append(problem)
+
+    owners = []
+    for ifindex in sorted(owner_problems):
+        interface = by_index[ifindex]
+        link_problem = _listener_link_problem(interface, by_index)
+        address_problems = owner_problems[ifindex]
+        address_problem = (
+            None if None in address_problems else sorted(str(value) for value in address_problems)[0]
+        )
+        reason = link_problem or address_problem
+        owners.append({
+            "ifname": interface.ifname,
+            "ifindex": ifindex,
+            "eligible": reason is None,
+            "reason": reason,
+        })
+    return tuple(owners)
+
+
 def _read_dhcp_networks(subnet_csv: Path) -> Tuple[DhcpNetwork, ...]:
     path = Path(subnet_csv)
     try:

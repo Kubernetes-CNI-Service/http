@@ -2186,6 +2186,10 @@ class PublicProjectFixtureWorkflowTests(unittest.TestCase):
 
         package = _load_package_tool()
         with materialized_public_project(ROOT) as project:
+            selected_p2p = project / "p2p.xlsx"
+            selected_p2p.symlink_to("public-p2p.xlsx")
+            self.assertEqual("public-p2p.xlsx", os.readlink(selected_p2p))
+            self.assertEqual(project / "public-p2p.xlsx", selected_p2p.resolve(strict=True))
             with tempfile.TemporaryDirectory(prefix="public-package-output-") as directory:
                 archive = Path(directory) / "public-project-upload.tar.gz"
                 args = argparse.Namespace(

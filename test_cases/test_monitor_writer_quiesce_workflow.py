@@ -797,17 +797,165 @@ def _delegated_governed_script_constants(tree: ast.AST) -> set[str]:
     return governed
 
 
+def _source_bound_setup_mapping_seed(
+    tree: ast.AST, contract_tree: ast.AST | None = None,
+) -> set[str]:
+    """Trace one imported authority through setup's real symlink destination.
+
+    The mapping rows are read as syntax from their production source.  An
+    imported name, an entry table, or a stop call alone is not sink evidence.
+    """
+    def import_bindings(source: ast.AST, name: str):
+        bindings = []
+        for node in ast.walk(source):
+            if isinstance(node, ast.ImportFrom):
+                bindings.extend(
+                    (node.module, alias.name, alias.asname)
+                    for alias in node.names
+                    if (alias.asname or alias.name) == name
+                )
+            elif isinstance(node, ast.Import):
+                bindings.extend(
+                    (None, alias.name, alias.asname)
+                    for alias in node.names
+                    if (alias.asname or alias.name.partition(".")[0]) == name
+                )
+        return bindings
+
+    imports = import_bindings(tree, "SETUP_ZTP_MAPPINGS")
+    if imports != [("project_contract", "SETUP_ZTP_MAPPINGS", None)]:
+        return set()
+    if contract_tree is None:
+        contract_tree = ast.parse(
+            (ROOT / "tools/project_contract.py").read_text(encoding="utf-8")
+        )
+
+    def assignment(source: ast.AST, name: str) -> ast.AST | None:
+        return next((
+            node.value for node in getattr(source, "body", ())
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == name
+                    for target in node.targets)
+        ), None)
+
+    def named(node: ast.AST, name: str) -> bool:
+        return isinstance(node, ast.Name) and node.id == name
+
+    def writes(source: ast.AST, name: str) -> int:
+        # Count *all* stores, including later module reassignment, walrus,
+        # deletion, and a `global` write hidden inside another function.
+        return sum(
+            isinstance(node, ast.Name) and node.id == name
+            and isinstance(node.ctx, (ast.Store, ast.Del))
+            for node in ast.walk(source)
+        )
+
+    if (
+        writes(contract_tree, "SETUP_ZTP_MAPPINGS") != 1
+        or import_bindings(contract_tree, "SETUP_ZTP_MAPPINGS")
+        or writes(tree, "SETUP_ZTP_MAPPINGS") != 0
+        or writes(tree, "MAPPINGS") != 1
+        or import_bindings(tree, "MAPPINGS")
+    ):
+        return set()
+    mapping = assignment(contract_tree, "SETUP_ZTP_MAPPINGS")
+    try:
+        rows = ast.literal_eval(mapping) if mapping is not None else ()
+    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+        return set()
+    if not isinstance(rows, tuple) or (
+        "config/cumulus/template/01-global.yaml", "01-global.yaml", "file"
+    ) not in rows:
+        return set()
+    binding = assignment(tree, "MAPPINGS")
+    if not (
+        isinstance(binding, ast.Call) and named(binding.func, "list")
+        and len(binding.args) == 1 and not binding.keywords
+        and named(binding.args[0], "SETUP_ZTP_MAPPINGS")
+    ):
+        return set()
+    functions = {
+        node.name: node for node in getattr(tree, "body", ())
+        if isinstance(node, ast.FunctionDef)
+    }
+    if not {"_setup_impl", "_process_mapping", "_make_link"} <= functions.keys():
+        return set()
+    setup, process, maker = (
+        functions[name] for name in ("_setup_impl", "_process_mapping", "_make_link")
+    )
+    loops = [
+        node for node in _walk_local_scope(setup)
+        if isinstance(node, ast.For) and named(node.iter, "MAPPINGS")
+        and isinstance(node.target, ast.Tuple)
+        and [item.id for item in node.target.elts if isinstance(item, ast.Name)]
+        == ["ztp_rel", "proj_rel", "kind"]
+    ]
+    if len(loops) != 1 or not any(
+        isinstance(call, ast.Call) and named(call.func, "_process_mapping")
+        and len(call.args) >= 2 and named(call.args[1], "ztp_rel")
+        and not any(keyword.arg == "link_root" for keyword in call.keywords)
+        for statement in loops[0].body for call in ast.walk(statement)
+    ):
+        return set()
+    if not (
+        process.args.args and process.args.args[-1].arg == "link_root"
+        and process.args.defaults and named(process.args.defaults[-1], "ZTP")
+    ):
+        return set()
+    link_bindings = [
+        node.value for node in process.body if isinstance(node, ast.Assign)
+        and any(named(target, "link_path") for target in node.targets)
+    ]
+    if len(link_bindings) != 1:
+        return set()
+    link_path = link_bindings[0]
+    if not (
+        isinstance(link_path, ast.Call)
+        and isinstance(link_path.func, ast.Attribute)
+        and isinstance(link_path.func.value, ast.Attribute)
+        and named(link_path.func.value.value, "os")
+        and link_path.func.value.attr == "path"
+        and link_path.func.attr == "join"
+        and len(link_path.args) == 2
+        and named(link_path.args[0], "link_root")
+        and named(link_path.args[1], "link_rel")
+    ):
+        return set()
+    link_returns = [
+        node.value for node in _walk_local_scope(process)
+        if isinstance(node, ast.Return)
+        and isinstance(node.value, ast.Call)
+        and named(node.value.func, "_make_link")
+    ]
+    if len(link_returns) != 3 or any(
+        len(call.args) != 2 or not named(call.args[0], "link_path")
+        for call in link_returns
+    ):
+        return set()
+    sinks = [
+        node for node in _walk_local_scope(maker)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and named(node.func.value, "os") and node.func.attr == "symlink"
+    ]
+    if len(sinks) != 1 or len(sinks[0].args) != 2 or not named(
+        sinks[0].args[1], "link_path"
+    ):
+        return set()
+    return {"MAPPINGS"}
+
+
 def literal_governed_mutation_sinks(tree: ast.AST) -> set[str]:
     """Find sinks from their destination spelling, independent of quiesce calls."""
     result = set()
     module_aliases = _mutation_aliases(tree)
     delegated_script_constants = _delegated_governed_script_constants(tree)
-    module_governed: set[str] = set()
+    module_governed = _source_bound_setup_mapping_seed(tree)
     string_values = {
         node.value for node in ast.walk(tree)
         if isinstance(node, ast.Constant) and isinstance(node.value, str)
     }
-    has_literal_authority = any(
+    has_literal_authority = bool(module_governed) or any(
         authority in value
         for authority in GOVERNED_AUTHORITY_NAMES
         for value in string_values
@@ -1369,6 +1517,58 @@ def assert_quiesce_structurally_precedes_reachable_sink(
     )
 
 
+def project_live_management_setup(tree: ast.AST) -> ast.AST:
+    """Analyze setup's server branch without blessing conditional stops globally.
+
+    Workstation setup deliberately does not control a server monitor.  This
+    projection is valid only while the production guard is exactly the
+    non-dry-run management-server guard and the sole stop is inside it.
+    """
+    projected = copy.deepcopy(tree)
+    entry = production_functions(projected)["_main_locked"]
+    expected_guard = ast.parse(
+        "not _DRY_RUN and args.host_role == 'management-server'", mode="eval",
+    ).body
+    guarded_stops = [
+        statement for statement in entry.body
+        if isinstance(statement, ast.If)
+        and any(
+            called_name(call) == "stop_native_ztp_monitors"
+            for call in ast.walk(statement)
+            if isinstance(call, ast.Call)
+        )
+    ]
+    if len(guarded_stops) != 1:
+        raise AssertionError("setup must have one guarded management stop")
+    guard = guarded_stops[0]
+    if ast.dump(guard.test, include_attributes=False) != ast.dump(
+        expected_guard, include_attributes=False,
+    ):
+        raise AssertionError("setup management stop guard changed")
+    if guard.orelse or len(guard.body) != 1:
+        raise AssertionError("setup management stop guard has extra paths")
+    stop = guard.body[0]
+    if not (
+        isinstance(stop, ast.Expr)
+        and isinstance(stop.value, ast.Call)
+        and called_name(stop.value) == "stop_native_ztp_monitors"
+        and len(stop.value.args) == 1
+        and isinstance(stop.value.args[0], ast.Name)
+        and stop.value.args[0].id == "HTTP_BASE"
+        and not stop.value.keywords
+    ):
+        raise AssertionError("setup management stop target changed")
+    all_stops = [
+        call for call in _walk_local_scope(entry)
+        if isinstance(call, ast.Call)
+        and called_name(call) == "stop_native_ztp_monitors"
+    ]
+    if len(all_stops) != 1:
+        raise AssertionError("setup has an unscoped or duplicate monitor stop")
+    guard.test = ast.Constant(value=True)
+    return projected
+
+
 class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
     @staticmethod
     def dhcp_main_patches(module, *, events=None):
@@ -1380,7 +1580,7 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
         return (
             mock.patch.object(sys, "argv", ["c1-generate_dhcp.py", "-y"]),
             mock.patch.object(module.os.path, "isfile", return_value=True),
-            mock.patch.object(module, "load_project_global", return_value=("ztp", 2)),
+            mock.patch.object(module, "load_project_global", return_value=("ztp", 2, 80)),
             mock.patch.object(module, "load_subnet_csv", return_value=[{}]),
             mock.patch.object(module, "load_csv", return_value=[record]),
             mock.patch.object(module, "load_p2p_air_json", return_value=[]),
@@ -1406,9 +1606,9 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
         events = []
         args = argparse.Namespace(
             project="customer", create=False, auto_yes=True,
-            confirm_project_switch=False, force=False, strict=False,
+            confirm_project_switch=True, force=False, strict=False,
             dry_run=False, csv_dir=None, p2p_file=None,
-            status=False, list_projects=False,
+            status=False, list_projects=False, host_role="management-server",
         )
 
         @contextmanager
@@ -1426,6 +1626,10 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             with mock.patch.object(setup, "HERE", os.fspath(day0)), \
                  mock.patch.object(setup, "HTTP_BASE", os.fspath(http_root)), \
                  mock.patch.object(setup, "_parse_args", return_value=args), \
+                 mock.patch.object(setup.platform, "system", return_value="Linux"), \
+                 mock.patch.dict(setup.os.environ, {
+                     "HTTP_SETUP_KEY_MODE": "server-delegated", setup.LOCK_FD_ENV: "73",
+                 }), \
                  mock.patch.object(setup, "deployment_lock", fake_lock), \
                  mock.patch.object(
                      setup, "stop_native_ztp_monitors",
@@ -1434,9 +1638,12 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
                  ), \
                  mock.patch.object(
                      setup, "setup",
-                     side_effect=lambda _project: events.append("activation-write"),
-                 ):
+                     side_effect=lambda _project, **_kwargs: events.append("activation-write"),
+                 ) as activation:
                 self.assertEqual(0, setup.main([]))
+                activation.assert_called_once_with(
+                    os.path.realpath(day0 / "customer"), server_delegated=True,
+                )
 
         self.assertEqual(
             ["lock-enter", "monitor-stop", "activation-write", "lock-exit"],
@@ -1458,6 +1665,7 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             http_root = Path(temporary) / "http"
+            (http_root / "infra").mkdir(parents=True)
             managed = http_root / "ztp/config/cumulus/latest_yaml"
             target = http_root / "DAY0-Prepare/customer/99-output-eth"
             managed.parent.mkdir(parents=True)
@@ -1493,9 +1701,9 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
         setup = load_module("mwq_setup_fail", "DAY0-Prepare/01-a-setup.py")
         args = argparse.Namespace(
             project="customer", create=False, auto_yes=True,
-            confirm_project_switch=False, force=False, strict=False,
+            confirm_project_switch=True, force=False, strict=False,
             dry_run=False, csv_dir=None, p2p_file=None,
-            status=False, list_projects=False,
+            status=False, list_projects=False, host_role="management-server",
         )
         writer = mock.Mock()
         with tempfile.TemporaryDirectory() as temporary:
@@ -1505,14 +1713,19 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             with mock.patch.object(setup, "HERE", os.fspath(day0)), \
                  mock.patch.object(setup, "HTTP_BASE", os.fspath(http_root)), \
                  mock.patch.object(setup, "_parse_args", return_value=args), \
+                 mock.patch.object(setup.platform, "system", return_value="Linux"), \
+                 mock.patch.dict(setup.os.environ, {
+                     "HTTP_SETUP_KEY_MODE": "server-delegated", setup.LOCK_FD_ENV: "74",
+                 }), \
                  mock.patch.object(setup, "deployment_lock", mock.MagicMock()), \
                  mock.patch.object(setup, "setup", writer), \
                  mock.patch.object(
                      setup, "stop_native_ztp_monitors",
                      side_effect=setup.RuntimeContractError("fixture stop failure"),
                      create=True,
-                 ):
+                 ) as stop:
                 self.assertEqual(1, setup.main([]))
+        stop.assert_called_once_with(os.fspath(http_root))
         writer.assert_not_called()
 
     def test_unsetup_stop_failure_preserves_real_managed_link(self) -> None:
@@ -1548,7 +1761,7 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
         load = load_module("mwq_load", "DAY0-Prepare/11-load.py")
         events = []
         backend = SimpleNamespace(name="systemd")
-        with mock.patch.object(load, "supports_local_ztp_services", return_value=True), \
+        with mock.patch.object(load, "runtime_os", return_value="Linux"), \
              mock.patch.object(load.shutil, "which", return_value="/bin/systemctl"), \
              mock.patch.object(load, "active_managed_services", return_value=("apache2",)), \
              mock.patch.object(load, "sudo_command", return_value=["systemctl", "stop", "apache2"]), \
@@ -1560,7 +1773,7 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
              mock.patch.object(
                  load, "run", side_effect=lambda *_a, **_k: events.append("service-stop"),
              ):
-            load.quiesce_services(runtime_backend=backend)
+            load.quiesce_services(runtime_backend=backend, host_role="management-server")
 
         self.assertEqual(["monitor-stop", "service-stop"], events)
 
@@ -1569,7 +1782,7 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
         backend = SimpleNamespace(name="systemd")
         native_stop = mock.Mock()
         service_stop = mock.Mock()
-        with mock.patch.object(load, "supports_local_ztp_services", return_value=True), \
+        with mock.patch.object(load, "runtime_os", return_value="Linux"), \
              mock.patch.object(load.shutil, "which", return_value="/bin/systemctl"), \
              mock.patch.object(load, "active_managed_services", return_value=("apache2",)), \
              mock.patch.object(load, "sudo_command", return_value=["systemctl", "stop", "apache2"]), \
@@ -1578,6 +1791,7 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             load.quiesce_services(
                 runtime_backend=backend,
                 native_monitor_already_quiesced=True,
+                host_role="management-server",
             )
         native_stop.assert_not_called()
         service_stop.assert_called_once()
@@ -1586,10 +1800,10 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
         load = load_module("mwq_load_supervisor", "DAY0-Prepare/11-load.py")
         backend = SimpleNamespace(name="supervisor")
         native_stop = mock.Mock()
-        with mock.patch.object(load, "supports_local_ztp_services", return_value=True), \
+        with mock.patch.object(load, "runtime_os", return_value="Linux"), \
              mock.patch.object(load, "active_managed_services", return_value=()), \
              mock.patch.object(load, "stop_native_ztp_monitors", native_stop, create=True):
-            load.quiesce_services(runtime_backend=backend)
+            load.quiesce_services(runtime_backend=backend, host_role="management-server")
         native_stop.assert_not_called()
 
     def test_native_load_stop_failure_precedes_all_service_actions(self) -> None:
@@ -1597,7 +1811,7 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
         backend = SimpleNamespace(name="systemd")
         active = mock.Mock(return_value=("apache2",))
         service_stop = mock.Mock()
-        with mock.patch.object(load, "supports_local_ztp_services", return_value=True), \
+        with mock.patch.object(load, "runtime_os", return_value="Linux"), \
              mock.patch.object(load, "active_managed_services", active), \
              mock.patch.object(load, "run", service_stop), \
              mock.patch.object(
@@ -1606,7 +1820,7 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
                  create=True,
              ):
             with self.assertRaises(load.RuntimeContractError):
-                load.quiesce_services(runtime_backend=backend)
+                load.quiesce_services(runtime_backend=backend, host_role="management-server")
         active.assert_not_called()
         service_stop.assert_not_called()
 
@@ -1683,6 +1897,7 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             status=False, list_projects=False, project="customer", create=False,
             auto_yes=True, confirm_project_switch=False, force=False,
             strict=False, dry_run=True, csv_dir=None, p2p_file=None,
+            host_role="workstation",
         )
         with tempfile.TemporaryDirectory() as temporary:
             day0 = Path(temporary) / "DAY0-Prepare"
@@ -1694,9 +1909,11 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
                 self.assertEqual(0, setup.main([]))
 
         backend = SimpleNamespace(name="systemd")
-        with mock.patch.object(load, "supports_local_ztp_services", return_value=True), \
+        with mock.patch.object(load, "runtime_os", return_value="Linux"), \
              mock.patch.object(load.shutil, "which", return_value=None):
-            load.quiesce_services(dry_run=True, runtime_backend=backend)
+            load.quiesce_services(
+                dry_run=True, runtime_backend=backend, host_role="management-server",
+            )
 
         with mock.patch.object(sys, "argv", ["c1-generate_dhcp.py", "--help"]):
             dhcp.main()
@@ -1827,7 +2044,6 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
                  mock.patch.object(load, "acquire_deployment_lock", return_value=93), \
                  mock.patch.object(load, "release_deployment_lock"), \
                  mock.patch.object(load, "runtime_os", return_value="Linux"), \
-                 mock.patch.object(load, "supports_local_ztp_services", return_value=True), \
                  mock.patch.object(load, "service_runtime_backend", return_value=backend), \
                  mock.patch.object(load, "validate_runtime_options"), \
                  mock.patch.object(load, "resolve_project", return_value=project), \
@@ -1847,7 +2063,9 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
                          (_ for _ in ()).throw(load.LoadError("fixture stop")),
                      )[-1],
                  ):
-                self.assertEqual(1, load.main([str(project), "--update-passwords"]))
+                self.assertEqual(1, load.main([
+                    str(project), "--update-passwords", "--host-role=management-server",
+                ]))
 
         self.assertEqual(
             ["monitor-stop", "template-write", "password-write", "validate"],
@@ -1878,7 +2096,6 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
                  mock.patch.object(load, "acquire_deployment_lock", return_value=94), \
                  mock.patch.object(load, "release_deployment_lock"), \
                  mock.patch.object(load, "runtime_os", return_value="Linux"), \
-                 mock.patch.object(load, "supports_local_ztp_services", return_value=True), \
                  mock.patch.object(load, "service_runtime_backend", return_value=backend), \
                  mock.patch.object(load, "validate_runtime_options"), \
                  mock.patch.object(load, "resolve_project", return_value=project), \
@@ -1886,12 +2103,15 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
                  mock.patch.object(
                      load, "stop_native_ztp_monitors",
                      side_effect=load.RuntimeContractError("fixture stop failure"),
-                 ), mock.patch.object(
+                 ) as stop, mock.patch.object(
                      load, "initialize_from_template", template_write,
                  ), mock.patch.object(
                      load, "update_passwords_before_load", password_write,
                  ), mock.patch.object(load, "validate_inputs", validate):
-                self.assertEqual(1, load.main([str(project), "--update-passwords"]))
+                self.assertEqual(1, load.main([
+                    str(project), "--update-passwords", "--host-role=management-server",
+                ]))
+        stop.assert_called_once_with(load.HTTP_ROOT)
         template_write.assert_not_called()
         password_write.assert_not_called()
         validate.assert_not_called()
@@ -2598,7 +2818,11 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             "write_report",
         }, filesystem_readers)
         self.assertEqual(
-            ["load_release_identity"],
+            [
+                "collection_attribution_input_digests",
+                "load_collection_attribution",
+                "load_release_identity",
+            ],
             sorted(name for name in reachable
                    if "_read_bounded_regular_text" in graph.get(name, set())),
         )
@@ -2634,7 +2858,7 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
         # justified by an independent no-overwrite behavior test below.
         sinks = (
             ("DAY0-Prepare/01-a-setup.py", "_make_exact_link", "replace", "binding", "QUIESCE"),
-            ("DAY0-Prepare/02-unsetup.py", "_main_locked", "remove", "binding", "QUIESCE"),
+            ("DAY0-Prepare/02-unsetup.py", "_main_locked_impl", "remove", "binding", "QUIESCE"),
             ("DAY0-Prepare/11-load.py", "commit_prepared_release", "replace", "release", "QUIESCE"),
             ("DAY0-Prepare/13-unload.py", "remove_project_links", "run", "binding", "QUIESCE"),
             (
@@ -2725,8 +2949,12 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
                 set(), (discovered | {caller for caller, _callee in external_hits}) - forward,
                 f"governed sink is not owned by supported entry {relative}:{entry}",
             )
+            proof_tree = (
+                project_live_management_setup(tree)
+                if relative == "DAY0-Prepare/01-a-setup.py" else tree
+            )
             assert_quiesce_structurally_precedes_reachable_sink(
-                self, tree, entry,
+                self, proof_tree, entry,
                 discovered | {callee for _caller, callee in external_hits},
                 stop_names=stop_names,
             )
@@ -3019,6 +3247,95 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
                     {"publish"},
                     literal_governed_mutation_sinks(ast.parse(source)),
                 )
+
+    def test_imported_setup_mapping_reaches_real_link_sink(self) -> None:
+        """A real imported authority must reach the link mutation, not a table."""
+        setup_source = (ROOT / "DAY0-Prepare/01-a-setup.py").read_text(encoding="utf-8")
+        contract_source = (ROOT / "tools/project_contract.py").read_text(encoding="utf-8")
+        setup_tree = ast.parse(setup_source)
+        contract_tree = ast.parse(contract_source)
+        self.assertEqual({"MAPPINGS"}, _source_bound_setup_mapping_seed(
+            setup_tree, contract_tree,
+        ))
+        self.assertIn("_setup_impl", literal_governed_mutation_sinks(setup_tree))
+
+        mutations = (
+            (
+                "import_removed", "setup",
+                "SETUP_ZTP_MAPPINGS, SETUP_WORKSPACE_INPUT_MAPPINGS",
+                "UNRELATED_MAPPINGS, SETUP_WORKSPACE_INPUT_MAPPINGS",
+            ),
+            (
+                "authority_anchor_removed", "contract",
+                '"config/cumulus/template/01-global.yaml"',
+                '"config/cumulus/template/not-governed"',
+            ),
+            (
+                "source_mapping_rebound", "contract",
+                "SETUP_WORKSPACE_INPUT_MAPPINGS = (",
+                "SETUP_ZTP_MAPPINGS = ()\nSETUP_WORKSPACE_INPUT_MAPPINGS = (",
+            ),
+            (
+                "source_mapping_import_rebound", "contract",
+                "SETUP_WORKSPACE_INPUT_MAPPINGS = (",
+                "import decimal as SETUP_ZTP_MAPPINGS\n"
+                "SETUP_WORKSPACE_INPUT_MAPPINGS = (",
+            ),
+            (
+                "imported_mapping_rebound", "setup",
+                "MAPPINGS = list(SETUP_ZTP_MAPPINGS)",
+                "SETUP_ZTP_MAPPINGS = ()\nMAPPINGS = list(SETUP_ZTP_MAPPINGS)",
+            ),
+            (
+                "mapping_binding_removed", "setup",
+                "MAPPINGS = list(SETUP_ZTP_MAPPINGS)", "MAPPINGS = []",
+            ),
+            (
+                "mapping_rebound", "setup",
+                "WORKSPACE_INPUT_MAPPINGS = list(SETUP_WORKSPACE_INPUT_MAPPINGS)",
+                "MAPPINGS = []\n"
+                "WORKSPACE_INPUT_MAPPINGS = list(SETUP_WORKSPACE_INPUT_MAPPINGS)",
+            ),
+            (
+                "mapping_import_rebound", "setup",
+                "WORKSPACE_INPUT_MAPPINGS = list(SETUP_WORKSPACE_INPUT_MAPPINGS)",
+                "import decimal as MAPPINGS\n"
+                "WORKSPACE_INPUT_MAPPINGS = list(SETUP_WORKSPACE_INPUT_MAPPINGS)",
+            ),
+            (
+                "mapping_loop_removed", "setup",
+                "for ztp_rel, proj_rel, kind in MAPPINGS:",
+                "for ztp_rel, proj_rel, kind in ():",
+            ),
+            (
+                "mapping_argument_diverted", "setup",
+                "_process_mapping(proj_dir, ztp_rel, proj_rel, kind, src_base=_CSV_DIR)",
+                '_process_mapping(proj_dir, "unrelated", proj_rel, kind, src_base=_CSV_DIR)',
+            ),
+            (
+                "link_destination_diverted", "setup",
+                "link_path = os.path.join(link_root, link_rel)",
+                'link_path = os.path.join(link_root, "unrelated")',
+            ),
+            (
+                "link_call_removed", "setup",
+                "return _make_link(link_path, src_path)",
+                "return _other_link(link_path, src_path)",
+            ),
+            (
+                "symlink_destination_diverted", "setup",
+                "os.symlink(rel_target, link_path)",
+                "os.symlink(rel_target, wrong_path)",
+            ),
+        )
+        for name, source_name, old, new in mutations:
+            with self.subTest(mutation=name):
+                source = setup_source if source_name == "setup" else contract_source
+                self.assertIn(old, source)
+                changed = source.replace(old, new, 1)
+                setup = ast.parse(changed if source_name == "setup" else setup_source)
+                contract = ast.parse(changed if source_name == "contract" else contract_source)
+                self.assertEqual(set(), _source_bound_setup_mapping_seed(setup, contract))
 
     def test_all_nine_declared_native_writers_are_mechanically_discovered(self) -> None:
         """Hand-maintained entry tables may classify discovery, never replace it."""
@@ -3385,10 +3702,83 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
                 ):
                     assert_order(mutated)
 
+    def test_setup_management_projection_rejects_guard_and_pre_stop_sink_mutants(self) -> None:
+        """Server projection must not accept a role swap or a hidden sink."""
+        source = ROOT / "DAY0-Prepare/01-a-setup.py"
+        original = ast.parse(source.read_text(encoding="utf-8"))
+        server = project_live_management_setup(original)
+        assert_quiesce_structurally_precedes_reachable_sink(
+            self, server, "_main_locked", {"_make_exact_link"},
+        )
+
+        wrong_role = copy.deepcopy(original)
+        entry = production_functions(wrong_role)["_main_locked"]
+        guard = next(
+            statement for statement in entry.body
+            if isinstance(statement, ast.If)
+            and any(
+                called_name(call) == "stop_native_ztp_monitors"
+                for call in ast.walk(statement)
+                if isinstance(call, ast.Call)
+            )
+        )
+        guard.test = ast.parse(
+            "not _DRY_RUN and args.host_role == 'workstation'", mode="eval",
+        ).body
+        with self.assertRaisesRegex(AssertionError, "guard changed"):
+            project_live_management_setup(wrong_role)
+
+        no_stop = copy.deepcopy(original)
+        entry = production_functions(no_stop)["_main_locked"]
+        entry.body[:] = [
+            statement for statement in entry.body
+            if not (
+                isinstance(statement, ast.If)
+                and any(
+                    called_name(call) == "stop_native_ztp_monitors"
+                    for call in ast.walk(statement)
+                    if isinstance(call, ast.Call)
+                )
+            )
+        ]
+        with self.assertRaisesRegex(AssertionError, "one guarded management stop"):
+            project_live_management_setup(no_stop)
+
+        after_sink = copy.deepcopy(server)
+        entry = production_functions(after_sink)["_main_locked"]
+        guard = next(
+            statement for statement in entry.body
+            if isinstance(statement, ast.If)
+            and any(
+                called_name(call) == "stop_native_ztp_monitors"
+                for call in ast.walk(statement)
+                if isinstance(call, ast.Call)
+            )
+        )
+        entry.body.remove(guard)
+        entry.body.append(guard)
+        with self.assertRaises(AssertionError):
+            assert_quiesce_structurally_precedes_reachable_sink(
+                self, after_sink, "_main_locked", {"_make_exact_link"},
+            )
+
+        covert = copy.deepcopy(server)
+        entry = production_functions(covert)["_main_locked"]
+        entry.body.insert(0, ast.Expr(value=ast.Call(
+            func=ast.Name(id="covert_writer", ctx=ast.Load()),
+            args=[], keywords=[],
+        )))
+        with self.assertRaises(AssertionError):
+            assert_quiesce_structurally_precedes_reachable_sink(
+                self, covert, "_main_locked", {"_make_exact_link", "covert_writer"},
+            )
+
     def test_reverse_sink_closure_rejects_covert_writer_and_real_reordering(self) -> None:
         """Hostile additions and actual AST statement moves must trip one oracle."""
         source = ROOT / "DAY0-Prepare/01-a-setup.py"
-        original = ast.parse(source.read_text(encoding="utf-8"))
+        original = project_live_management_setup(
+            ast.parse(source.read_text(encoding="utf-8")),
+        )
         known_sinks = {"_make_exact_link"} | literal_governed_mutation_sinks(original)
         assert_quiesce_structurally_precedes_reachable_sink(
             self, original, "_main_locked", known_sinks,
@@ -3627,6 +4017,8 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
         for relative, entry, sinks, stop_names in contracts:
             with self.subTest(script=relative, entry=entry):
                 tree = ast.parse((ROOT / relative).read_text(encoding="utf-8"))
+                if relative == "DAY0-Prepare/01-a-setup.py":
+                    tree = project_live_management_setup(tree)
                 assert_quiesce_structurally_precedes_reachable_sink(
                     self, tree, entry,
                     sinks | literal_governed_mutation_sinks(tree),

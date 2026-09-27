@@ -25,7 +25,8 @@
         "test_cases.test_public_s_phase_contract",
         "test_cases.test_public_s_phase_workflow",
         "test_cases.test_public_publication_contract",
-        "test_cases.test_public_publication_workflow"
+        "test_cases.test_public_publication_workflow",
+        "test_cases.test_public_publication_v3_overlap"
       ]
     },
     {
@@ -65,7 +66,15 @@
         "test_cases.test_docker_destructive_confirmation_workflow",
         "test_cases.test_finish_docker_workflow",
         "test_cases.test_finish_native_workflow",
+        "test_cases.test_generation_report_contract",
+        "test_cases.test_generation_report_workflow",
+        "test_cases.test_http_port_contract",
+        "test_cases.test_http_port_workflow",
         "test_cases.test_docker_management_ssh_key",
+        "test_cases.test_dhcp_optional_contract",
+        "test_cases.test_dhcp_optional_workflow",
+        "test_cases.test_eth_jump_transport_contract",
+        "test_cases.test_eth_jump_transport_workflow",
         "test_cases.test_infra_check_and_manual_reset",
         "test_cases.test_infra_neutral_defaults",
         "test_cases.test_load_release_transaction",
@@ -75,6 +84,17 @@
         "test_cases.test_monitor_writer_quiesce",
         "test_cases.test_monitor_writer_quiesce_workflow",
         "test_cases.test_ops_deployment_review",
+        "test_cases.test_req10b_global_link_contract",
+        "test_cases.test_req10b_global_link_workflow",
+        "test_cases.test_req10b_services_keys_contract",
+        "test_cases.test_req10b_services_keys_workflow",
+        "test_cases.test_req10c_auto_contract",
+        "test_cases.test_req10c_auto_workflow",
+        "test_cases.test_req19_infra_log_contract",
+        "test_cases.test_req19_infra_log_workflow",
+        "test_cases.test_service_endpoint_convergence",
+        "test_cases.test_ssh_key_preparation_contract",
+        "test_cases.test_ssh_key_preparation_workflow",
         "test_cases.test_ztp_container_runtime",
         "test_cases.test_ztp_service_runtime"
       ]
@@ -86,17 +106,28 @@
         "test_cases.test_cumulus_snippet_rendering",
         "test_cases.test_dhcp_switch_scope_preservation",
         "test_cases.test_dhcp_switch_scope_preservation_workflow",
+        "test_cases.test_eth_jump_duplicate_identity",
+        "test_cases.test_eth_jump_zero_config_contract",
+        "test_cases.test_eth_jump_zero_config_workflow",
         "test_cases.test_feedback_global_writeback",
         "test_cases.test_feedback_global_writeback_workflow",
         "test_cases.test_flow_release_platform_matrix",
         "test_cases.test_mlag_evpn_generation",
         "test_cases.test_nvue_normalizer",
         "test_cases.test_optimize_output_layout",
+        "test_cases.test_p2p_selection_contract",
+        "test_cases.test_p2p_selection_workflow",
         "test_cases.test_project_contracts",
         "test_cases.test_qos_evpn_uplink_generation",
+        "test_cases.test_req14_active_provenance_workflow",
+        "test_cases.test_req14_splitter_hostname_binding",
+        "test_cases.test_req7_ib_provenance",
+        "test_cases.test_req7_ib_provenance_workflow",
+        "test_cases.test_req8_template_refactor_contract",
         "test_cases.test_splitter_profile_breakout",
         "test_cases.test_splitter_profile_breakout_workflow",
         "test_cases.test_air_link_endpoint_contract",
+        "test_cases.test_air_retained_servers_contract",
         "test_cases.test_terminal_l2_stp_generation",
         "test_cases.test_topology_consistency",
         "test_cases.test_v2_generation_flow",
@@ -110,10 +141,12 @@
       "description": "监控页面、采集 worker、IB 分析、手工比对和分组交接",
       "tests": [
         "test_cases.test_backup_auth_transport_workflow",
+        "test_cases.test_backup_zero_target_contract",
         "test_cases.test_collection_cycle_contract",
         "test_cases.test_collection_cycle_handoff_workflow",
         "test_cases.test_collection_cycle_persistence",
         "test_cases.test_collection_cycle_worker_contract",
+        "test_cases.test_collection_v2_emitter_contract",
         "test_cases.test_collector_inventory_pubkey",
         "test_cases.test_collector_inventory_pubkey_workflow",
         "test_cases.test_continuous_interval_handoff_workflow",
@@ -147,6 +180,83 @@
       "description": "Ubuntu 管理 VM 只读验收器自身的本地合同",
       "tests": [
         "test_cases.test_vm_validation_runner"
+      ]
+    },
+    {
+      "id": "operator-cli-help",
+      "description": "REQ-8/H-29 公开 Python 命令行参数的真实 --help 合同",
+      "tests": [
+        "test_cases.test_req8_public_cli_help_contract"
+      ]
+    },
+    {
+      "id": "issue-tracker-local",
+      "description": "REQ-7 本地 qualified-set 与不可变 manifest 的直接及双脚本流程合同",
+      "tests": [
+        "test_cases.test_issue_tracker_qualification",
+        "test_cases.test_issue_tracker_manifest",
+        "test_cases.test_issue_tracker_manifest_workflow",
+        "test_cases.test_issue_tracker_cycle_source",
+        "test_cases.test_issue_tracker_cycle_source_workflow",
+        "test_cases.test_issue_tracker_k_chain",
+        "test_cases.test_issue_tracker_k_chain_workflow",
+        "test_cases.test_issue_tracker_whitelist",
+        "test_cases.test_issue_tracker_whitelist_workflow",
+        "test_cases.test_issue_tracker_k_store",
+        "test_cases.test_issue_tracker_k_store_workflow",
+        "test_cases.test_issue_tracker_local_commit",
+        "test_cases.test_issue_tracker_local_commit_workflow",
+        "test_cases.test_issue_tracker_local_recovery",
+        "test_cases.test_issue_tracker_local_recovery_workflow",
+        "test_cases.test_issue_tracker_state_owner",
+        "test_cases.test_issue_tracker_state_owner_workflow",
+        "test_cases.test_issue_tracker_activity_source",
+        "test_cases.test_issue_tracker_activity_source_workflow",
+        "test_cases.test_eth_activity_cycle_handoff_workflow",
+        "test_cases.test_issue_tracker_topology_derivation",
+        "test_cases.test_issue_tracker_topology_derivation_workflow",
+        "test_cases.test_issue_tracker_switch_info_source",
+        "test_cases.test_issue_tracker_switch_info_source_workflow",
+        "test_cases.test_issue_tracker_switch_runtime",
+        "test_cases.test_issue_tracker_switch_runtime_workflow",
+        "test_cases.test_issue_tracker_stage_l_consumer",
+        "test_cases.test_issue_tracker_stage_l_consumer_workflow",
+        "test_cases.test_issue_tracker_admission",
+        "test_cases.test_issue_tracker_publish_runtime",
+        "test_cases.test_issue_tracker_publish_runtime_workflow",
+        "test_cases.test_issue_tracker_ib_runtime",
+        "test_cases.test_issue_tracker_ib_runtime_workflow",
+        "test_cases.test_collection_ib_cycle_binding",
+        "test_cases.test_collection_ib_cycle_binding_workflow",
+        "test_cases.test_issue_tracker_whitelist_workbook",
+        "test_cases.test_issue_tracker_whitelist_workbook_workflow",
+        "test_cases.test_issue_tracker_local_workbook",
+        "test_cases.test_issue_tracker_local_workbook_workflow",
+        "test_cases.test_issue_tracker_cabling_projection",
+        "test_cases.test_issue_tracker_switch_projection",
+        "test_cases.test_issue_tracker_local_workbook_commit",
+        "test_cases.test_issue_tracker_local_workbook_commit_workflow"
+      ]
+    },
+    {
+      "id": "ufm-local-source-bridge",
+      "description": "UFM 只读身份发现和本地归档合同；不构成远端或受保护周期验收",
+      "tests": [
+        "test_cases.test_ufm_input_contract",
+        "test_cases.test_ufm_collection_contract",
+        "test_cases.test_ufm_collection_agent",
+        "test_cases.test_ufm_local_archive_workflow",
+        "test_cases.test_ufm_jump_transport",
+        "test_cases.test_ufm_jump_transport_workflow",
+        "test_cases.test_ufm_identity_binding",
+        "test_cases.test_ufm_collection_archive_retrieval",
+        "test_cases.test_ufm_identity_binding_workflow",
+        "test_cases.test_ufm_remote_producer",
+        "test_cases.test_ufm_remote_producer_workflow",
+        "test_cases.test_ufm_collection_pipeline",
+        "test_cases.test_ufm_collection_pipeline_workflow",
+        "test_cases.test_collection_ib_producer",
+        "test_cases.test_collection_ib_producer_workflow"
       ]
     }
   ],
@@ -199,6 +309,7 @@
     "DAY0-Prepare/template/99-output-ib_nvl/bringup/ndr-upgrade-logs/.gitkeep",
     "DAY0-Prepare/template/99-output-ib_nvl/bringup/xdr-initial-setup-logs/.gitkeep",
     "DAY0-Prepare/template/99-output-ib_nvl/bringup/xdr-upgrade-logs/.gitkeep",
+    "DAY0-Prepare/template/99-output-infra/.gitkeep",
     "DAY0-Prepare/template/99-output-monitor/.gitkeep",
     "DAY0-Prepare/template/99-output-p2p/.gitkeep",
     "DAY0-Prepare/template/99-output-ztp/.gitkeep",
@@ -236,6 +347,9 @@
     "ztp/config/cumulus/template/03-templates-j2/_extra_aaa_users.yaml.j2",
     "ztp/config/cumulus/template/03-templates-j2/_global_evpn.yaml.j2",
     "ztp/config/cumulus/template/03-templates-j2/_l2_svis.yaml.j2",
+    "ztp/config/cumulus/template/03-templates-j2/_management_eth0_dhcp.yaml.j2",
+    "ztp/config/cumulus/template/03-templates-j2/_management_eth0_static.yaml.j2",
+    "ztp/config/cumulus/template/03-templates-j2/_management_eth1.yaml.j2",
     "ztp/config/cumulus/template/03-templates-j2/border.yaml.j2",
     "ztp/config/cumulus/template/03-templates-j2/oob-core.yaml.j2",
     "ztp/config/cumulus/template/03-templates-j2/oob-leaf.yaml.j2",
@@ -285,7 +399,31 @@
     "infra/docker/management_ssh_key.py": "infra/docker/management_ssh_key.py",
     "infra/infra-setup.sh": "infra/infra-setup.sh",
     "infra/infra-teardown.sh": "infra/infra-teardown.sh",
+    "infra/ufm_jump_transport.py": "infra/ufm_jump_transport.py",
     "monitor/dot_to_html.py": "monitor/dot_to_html.py",
+    "monitor/collection_v2_emitter.py": "monitor/collection_v2_emitter.py",
+    "monitor/issue_tracker_qualification.py": "monitor/issue_tracker_qualification.py",
+    "monitor/issue_tracker_manifest.py": "monitor/issue_tracker_manifest.py",
+    "monitor/issue_tracker_cycle_source.py": "monitor/issue_tracker_cycle_source.py",
+    "monitor/issue_tracker_k_chain.py": "monitor/issue_tracker_k_chain.py",
+    "monitor/issue_tracker_whitelist.py": "monitor/issue_tracker_whitelist.py",
+    "monitor/issue_tracker_k_store.py": "monitor/issue_tracker_k_store.py",
+    "monitor/issue_tracker_local_commit.py": "monitor/issue_tracker_local_commit.py",
+    "monitor/issue_tracker_local_recovery.py": "monitor/issue_tracker_local_recovery.py",
+    "monitor/issue_tracker_state_owner.py": "monitor/issue_tracker_state_owner.py",
+    "monitor/issue_tracker_activity_source.py": "monitor/issue_tracker_activity_source.py",
+    "monitor/issue_tracker_topology_derivation.py": "monitor/issue_tracker_topology_derivation.py",
+    "monitor/issue_tracker_switch_info_source.py": "monitor/issue_tracker_switch_info_source.py",
+    "monitor/issue_tracker_switch_runtime.py": "monitor/issue_tracker_switch_runtime.py",
+    "monitor/issue_tracker_stage_l_consumer.py": "monitor/issue_tracker_stage_l_consumer.py",
+    "monitor/issue_tracker_admission.py": "monitor/issue_tracker_admission.py",
+    "monitor/issue_tracker_publish_runtime.py": "monitor/issue_tracker_publish_runtime.py",
+    "monitor/issue_tracker_ib_runtime.py": "monitor/issue_tracker_ib_runtime.py",
+    "monitor/collection_ib_cycle_binding.py": "monitor/collection_ib_cycle_binding.py",
+    "monitor/collection_ib_producer.py": "monitor/collection_ib_producer.py",
+    "monitor/issue_tracker_whitelist_workbook.py": "monitor/issue_tracker_whitelist_workbook.py",
+    "monitor/issue_tracker_local_workbook.py": "monitor/issue_tracker_local_workbook.py",
+    "monitor/issue_tracker_local_workbook_commit.py": "monitor/issue_tracker_local_workbook_commit.py",
     "monitor/generate-monitor-html.py": "monitor/generate-monitor-html.py",
     "monitor/manual-ztp-control.cgi": "monitor/manual-ztp-control.cgi",
     "monitor/manual-ztp-worker.py": "monitor/manual-ztp-worker.py",
@@ -306,6 +444,7 @@
     "tools/finished_bundle.py": "tools/finished_bundle.py",
     "tools/finish-project.py": "tools/finish-project.py",
     "tools/finished_project_state.py": "tools/finished_project_state.py",
+    "tools/generation_report.py": "tools/generation_report.py",
     "tools/rehydrate-finished.py": "tools/rehydrate-finished.py",
     "tools/ib-tool-Jie/ib_tool_box/lib/__init__.py": "tools/ib-tool-Jie/ib_tool_box/lib/__init__.py",
     "tools/ib-tool-Jie/ib_tool_box/lib/connection.py": "tools/ib-tool-Jie/ib_tool_box/lib/connection.py",
@@ -358,6 +497,14 @@
     "tools/package-project-image.py": "tools/package-project-image.py",
     "tools/package-shared-artifacts.py": "tools/package-shared-artifacts.py",
     "tools/project_contract.py": "tools/project_contract.py",
+    "tools/ufm_input_contract.py": "tools/ufm_input_contract.py",
+    "tools/ufm-discover.py": "tools/ufm-discover.py",
+    "tools/ufm_collection_contract.py": "tools/ufm_collection_contract.py",
+    "tools/ufm_collection_agent.py": "tools/ufm_collection_agent.py",
+    "tools/ufm_collection_pipeline.py": "tools/ufm_collection_pipeline.py",
+    "tools/ufm_identity_binding.py": "tools/ufm_identity_binding.py",
+    "tools/ufm_remote_producer.py": "tools/ufm_remote_producer.py",
+    "tools/ssh_key_preparation.py": "tools/ssh_key_preparation.py",
     "tools/sync-code.py": "tools/sync-code.py",
     "tools/tar-for-download.py": "tools/tar-for-download.py",
     "tools/tar-for-upload.py": "tools/tar-for-upload.py",
@@ -373,6 +520,7 @@
     "ztp/config/nvos/d-hostname2mac.py": "ztp/config/cumulus/d-hostname2mac.py",
     "ztp/config/nvos/template/90-c2-generate_configs.py": "ztp/config/cumulus/template/90-c2-generate_configs.py",
     "ztp/config/nvos/template/P2P/p2p-to-validation.py": "ztp/config/nvos/template/P2P/p2p-to-validation.py",
+    "ztp/config/ib_topology_provenance.py": "ztp/config/ib_topology_provenance.py",
     "ztp/config/topology_rules.py": "ztp/config/topology_rules.py",
     "ztp/dhcp_runtime_inventory.py": "ztp/dhcp_runtime_inventory.py",
     "ztp/dynamic_air_inventory.py": "ztp/dynamic_air_inventory.py",
@@ -386,6 +534,15 @@
   },
   "test_rules": [
     {
+      "id": "req14_splitter_hostname_binding_direct",
+      "paths": [
+        "DAY0-Prepare/11-load.py"
+      ],
+      "tests": [
+        "test_cases.test_req14_splitter_hostname_binding"
+      ]
+    },
+    {
       "id": "day0_release_operations",
       "paths": [
         "DAY0-Prepare/01-a-setup.py",
@@ -397,12 +554,27 @@
         "test_cases.test_image_context_safety",
         "test_cases.test_ops_deployment_review",
         "test_cases.test_load_release_transaction",
+        "test_cases.test_dhcp_optional_contract",
+        "test_cases.test_dhcp_optional_workflow",
         "test_cases.test_dhcp_switch_scope_preservation",
         "test_cases.test_dhcp_switch_scope_preservation_workflow",
+        "test_cases.test_eth_jump_duplicate_identity",
         "test_cases.test_bootstrap_config_fetch_contract",
         "test_cases.test_bootstrap_config_fetch_workflow",
         "test_cases.test_flow_release_platform_matrix",
+        "test_cases.test_generation_report_contract",
+        "test_cases.test_generation_report_workflow",
+        "test_cases.test_p2p_selection_contract",
+        "test_cases.test_p2p_selection_workflow",
         "test_cases.test_project_contracts",
+        "test_cases.test_req10b_global_link_contract",
+        "test_cases.test_req10b_global_link_workflow",
+        "test_cases.test_req10c_auto_contract",
+        "test_cases.test_req10c_auto_workflow",
+        "test_cases.test_req19_infra_log_contract",
+        "test_cases.test_req19_infra_log_workflow",
+        "test_cases.test_ssh_key_preparation_contract",
+        "test_cases.test_ssh_key_preparation_workflow",
         "test_cases.test_terminal_l2_stp_generation",
         "test_cases.test_v2_project_schema",
         "test_cases.test_v2_generation_flow",
@@ -445,6 +617,7 @@
         "nvlink/monitor/*"
       ],
       "tests": [
+        "test_cases.test_collection_cycle_worker_contract",
         "test_cases.test_monitor_stack_review",
         "test_cases.test_project_contracts",
         "test_cases.test_collector_inventory_pubkey",
@@ -457,7 +630,10 @@
         "infiniband/bringup/*"
       ],
       "tests": [
-        "test_cases.test_monitor_stack_review"
+        "test_cases.test_eth_jump_transport_contract",
+        "test_cases.test_monitor_stack_review",
+        "test_cases.test_req10b_services_keys_contract",
+        "test_cases.test_req10c_auto_contract"
       ]
     },
     {
@@ -470,6 +646,8 @@
         "test_cases.test_apache_publication_boundary",
         "test_cases.test_infra_check_and_manual_reset",
         "test_cases.test_infra_neutral_defaults",
+        "test_cases.test_req19_infra_log_contract",
+        "test_cases.test_req19_infra_log_workflow",
         "test_cases.test_monitor_authority_entrypoints",
         "test_cases.test_monitor_authority_semantic_workflow"
       ]
@@ -504,6 +682,8 @@
       "tests": [
         "test_cases.test_collection_cycle_persistence",
         "test_cases.test_collection_cycle_worker_contract",
+        "test_cases.test_collection_v2_emitter_contract",
+        "test_cases.test_continuous_interval_handoff_workflow",
         "test_cases.test_monitor_stack_review",
         "test_cases.test_project_contracts",
         "test_cases.test_ztp_group_handoff",
@@ -556,6 +736,8 @@
         "test_cases.test_finished_project_import",
         "test_cases.test_finished_project_lifecycle",
         "test_cases.test_import_from_download_target",
+        "test_cases.test_p2p_selection_contract",
+        "test_cases.test_p2p_selection_workflow",
         "test_cases.test_predeploy_test_gate",
         "test_cases.test_reference_only_selector_workflow"
       ]
@@ -582,7 +764,9 @@
         "tools/collect-ztp-diagnostics.py"
       ],
       "tests": [
-        "test_cases.test_diagnostic_bundle"
+        "test_cases.test_diagnostic_bundle",
+        "test_cases.test_p2p_selection_contract",
+        "test_cases.test_p2p_selection_workflow"
       ]
     },
     {
@@ -631,6 +815,37 @@
       ]
     },
     {
+      "id": "dhcp_optional_generation",
+      "paths": [
+        "DAY0-Prepare/11-load.py",
+        "ztp/config/isc-dhcp-server/c1-generate_dhcp.py"
+      ],
+      "tests": [
+        "test_cases.test_dhcp_optional_contract",
+        "test_cases.test_dhcp_optional_workflow"
+      ]
+    },
+    {
+      "id": "generation_report",
+      "paths": [
+        "tools/generation_report.py"
+      ],
+      "tests": [
+        "test_cases.test_generation_report_contract",
+        "test_cases.test_generation_report_workflow"
+      ]
+    },
+    {
+      "id": "ssh_key_preparation",
+      "paths": [
+        "tools/ssh_key_preparation.py"
+      ],
+      "tests": [
+        "test_cases.test_ssh_key_preparation_contract",
+        "test_cases.test_ssh_key_preparation_workflow"
+      ]
+    },
+    {
       "id": "password_update",
       "paths": [
         "tools/password-update.py"
@@ -648,7 +863,34 @@
       ],
       "tests": [
         "test_cases.test_splitter_profile_breakout",
-        "test_cases.test_splitter_profile_breakout_workflow"
+        "test_cases.test_splitter_profile_breakout_workflow",
+        "test_cases.test_air_retained_servers_contract"
+      ]
+    },
+    {
+      "id": "eth_jump_zero_config",
+      "paths": [
+        "DAY0-Prepare/01-a-setup.py",
+        "DAY0-Prepare/11-load.py",
+        "DAY0-Prepare/12-ztp-monitor.py",
+        "ethernet/monitor/cron.sh",
+        "infiniband/monitor/cron.sh",
+        "nvlink/monitor/cron.sh",
+        "monitor/generate-monitor-html.py",
+        "monitor/switch_collection_gate.py",
+        "monitor/switch-collection-worker.py",
+        "tools/collect-ztp-diagnostics.py",
+        "ztp/backup/yaml-collect.py",
+        "ztp/config/cumulus/template/90-c2-generate_configs.py",
+        "ztp/config/nvos/template/90-c2-generate_configs.py",
+        "ztp/config/isc-dhcp-server/c1-generate_dhcp.py",
+        "ztp/config/cumulus/d-hostname2mac.py",
+        "ztp/config/nvos/d-hostname2mac.py",
+        "ztp/manual-ztp.py"
+      ],
+      "tests": [
+        "test_cases.test_eth_jump_zero_config_contract",
+        "test_cases.test_eth_jump_zero_config_workflow"
       ]
     },
     {
@@ -672,6 +914,7 @@
       ],
       "tests": [
         "test_cases.test_project_contracts",
+        "test_cases.test_req10b_global_link_contract",
         "test_cases.test_documentation_catalog",
         "test_cases.test_change_aware_test_runner",
         "test_cases.test_test_case_repository",
@@ -702,6 +945,7 @@
       "tests": [
         "test_cases.test_ztp_release_core_review",
         "test_cases.test_backup_auth_transport_workflow",
+        "test_cases.test_backup_zero_target_contract",
         "test_cases.test_project_contracts",
         "test_cases.test_monitor_stack_review",
         "test_cases.test_ztp_container_runtime"
@@ -720,6 +964,16 @@
       ]
     },
     {
+      "id": "req7_ib_topology_provenance_direct",
+      "paths": ["ztp/config/ib_topology_provenance.py"],
+      "tests": ["test_cases.test_req7_ib_provenance"]
+    },
+    {
+      "id": "req7_ib_cvt_producer_direct",
+      "paths": ["ztp/config/nvos/template/P2P/p2p-to-validation.py"],
+      "tests": ["test_cases.test_req7_ib_provenance_workflow"]
+    },
+    {
       "id": "ztp_config_generation",
       "paths": [
         "ztp/config/*"
@@ -734,12 +988,27 @@
         "test_cases.test_flow_release_platform_matrix",
         "test_cases.test_cumulus_snippet_rendering",
         "test_cases.test_mlag_evpn_generation",
+        "test_cases.test_req8_template_refactor_contract",
         "test_cases.test_terminal_l2_stp_generation",
         "test_cases.test_qos_evpn_uplink_generation",
         "test_cases.test_v2_project_schema",
         "test_cases.test_v2_generation_flow",
         "test_cases.test_xlsx_zero_row_fail_closed",
         "test_cases.test_xlsx_zero_row_workflow"
+      ]
+    },
+    {
+      "id": "req8_public_cli_help",
+      "paths": [
+        "DAY0-Prepare/12-ztp-monitor.py",
+        "monitor/collection_v2_emitter.py",
+        "monitor/generate-monitor-html.py",
+        "ztp/backup/permission-sweep.py",
+        "ztp/config/cumulus/template/90-c2-generate_configs.py",
+        "ztp/config/nvos/template/P2P/p2p-to-validation.py"
+      ],
+      "tests": [
+        "test_cases.test_req8_public_cli_help_contract"
       ]
     },
     {
@@ -754,6 +1023,70 @@
         "test_cases.test_full_flow_integration",
         "test_cases.test_load_release_transaction",
         "test_cases.test_flow_release_platform_matrix"
+      ]
+    },
+    {
+      "id": "ufm_input_discovery_direct",
+      "paths": [
+        "tools/ufm_input_contract.py",
+        "tools/ufm-discover.py"
+      ],
+      "tests": [
+        "test_cases.test_ufm_input_contract"
+      ]
+    },
+    {
+      "id": "ufm_collection_contract_direct",
+      "paths": [
+        "tools/ufm_collection_contract.py"
+      ],
+      "tests": [
+        "test_cases.test_ufm_collection_contract"
+      ]
+    },
+    {
+      "id": "ufm_collection_agent_direct",
+      "paths": [
+        "tools/ufm_collection_agent.py"
+      ],
+      "tests": [
+        "test_cases.test_ufm_collection_agent"
+      ]
+    },
+    {
+      "id": "ufm_jump_transport_direct",
+      "paths": [
+        "infra/ufm_jump_transport.py"
+      ],
+      "tests": [
+        "test_cases.test_ufm_jump_transport"
+      ]
+    },
+    {
+      "id": "ufm_identity_binding_direct",
+      "paths": [
+        "tools/ufm_identity_binding.py"
+      ],
+      "tests": [
+        "test_cases.test_ufm_identity_binding"
+      ]
+    },
+    {
+      "id": "ufm_remote_producer_direct",
+      "paths": [
+        "tools/ufm_remote_producer.py"
+      ],
+      "tests": [
+        "test_cases.test_ufm_remote_producer"
+      ]
+    },
+    {
+      "id": "ufm_collection_pipeline_direct",
+      "paths": [
+        "tools/ufm_collection_pipeline.py"
+      ],
+      "tests": [
+        "test_cases.test_ufm_collection_pipeline"
       ]
     },
     {
@@ -819,9 +1152,650 @@
         "test_cases.test_ztp_release_core_review",
         "test_cases.test_ztp_prefix_runtime_boundary"
       ]
+    },
+    {
+      "id": "http_port_convergence",
+      "paths": [
+        "DAY0-Prepare/01-a-setup.py",
+        "DAY0-Prepare/11-load.py",
+        "DAY0-Prepare/template/01-global.yaml",
+        "infra/deploy_infra.py",
+        "infra/docker/activate.py",
+        "monitor/ztp-monitor-control.cgi",
+        "monitor/manual-ztp-control.cgi",
+        "monitor/switch-collection-control.cgi",
+        "tools/collect-ztp-diagnostics.py",
+        "tools/project_contract.py",
+        "ztp/config/isc-dhcp-server/c1-generate_dhcp.py",
+        "ztp/manual-ztp.py",
+        "ztp/templates/ztp-bootstrap.sh"
+      ],
+      "tests": [
+        "test_cases.test_http_port_contract",
+        "test_cases.test_http_port_workflow"
+      ]
+    },
+    {
+      "id": "service_endpoint_convergence",
+      "paths": [
+        "tools/project_contract.py",
+        "DAY0-Prepare/01-a-setup.py",
+        "DAY0-Prepare/11-load.py",
+        "infra/deploy_infra.py",
+        "infra/docker/activate.py",
+        "ztp/config/isc-dhcp-server/c1-generate_dhcp.py",
+        "ztp/manual-ztp.py"
+      ],
+      "tests": [
+        "test_cases.test_service_endpoint_convergence"
+      ]
+    },
+    {
+      "id": "issue_tracker_local_workbook_commit",
+      "paths": [
+        "monitor/issue_tracker_local_workbook_commit.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_local_workbook_commit"
+      ]
+    },
+    {
+      "id": "issue_tracker_local_workbook",
+      "paths": [
+        "monitor/issue_tracker_local_workbook.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_local_workbook",
+        "test_cases.test_issue_tracker_cabling_projection",
+        "test_cases.test_issue_tracker_switch_projection"
+      ]
+    },
+    {
+      "id": "issue_tracker_whitelist_workbook",
+      "paths": [
+        "monitor/issue_tracker_whitelist_workbook.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_whitelist_workbook"
+      ]
+    },
+    {
+      "id": "issue_tracker_activity_source",
+      "paths": [
+        "monitor/issue_tracker_activity_source.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_activity_source"
+      ]
+    },
+    {
+      "id": "issue_tracker_topology_derivation",
+      "paths": [
+        "monitor/issue_tracker_topology_derivation.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_topology_derivation"
+      ]
+    },
+    {
+      "id": "issue_tracker_ib_runtime_direct",
+      "paths": [
+        "monitor/issue_tracker_ib_runtime.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_ib_runtime"
+      ]
+    },
+    {
+      "id": "collection_ib_cycle_binding_direct",
+      "paths": [
+        "monitor/collection_ib_cycle_binding.py"
+      ],
+      "tests": [
+        "test_cases.test_collection_ib_cycle_binding"
+      ]
+    },
+    {
+      "id": "collection_ib_producer_direct",
+      "paths": [
+        "monitor/collection_ib_producer.py"
+      ],
+      "tests": [
+        "test_cases.test_collection_ib_producer"
+      ]
+    },
+    {
+      "id": "issue_tracker_stage_l_consumer",
+      "paths": [
+        "monitor/issue_tracker_stage_l_consumer.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_stage_l_consumer"
+      ]
+    },
+    {
+      "id": "issue_tracker_admission",
+      "paths": [
+        "monitor/issue_tracker_admission.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_admission"
+      ]
+    },
+    {
+      "id": "issue_tracker_publish_runtime",
+      "paths": [
+        "monitor/issue_tracker_publish_runtime.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_publish_runtime"
+      ]
+    },
+    {
+      "id": "issue_tracker_switch_runtime",
+      "paths": [
+        "monitor/issue_tracker_switch_runtime.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_switch_runtime"
+      ]
+    },
+    {
+      "id": "issue_tracker_switch_info_source",
+      "paths": [
+        "monitor/issue_tracker_switch_info_source.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_switch_info_source"
+      ]
+    },
+    {
+      "id": "issue_tracker_state_owner",
+      "paths": [
+        "monitor/issue_tracker_state_owner.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_state_owner"
+      ]
+    },
+    {
+      "id": "issue_tracker_local_commit",
+      "paths": [
+        "monitor/issue_tracker_local_commit.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_local_commit"
+      ]
+    },
+    {
+      "id": "issue_tracker_local_recovery",
+      "paths": [
+        "monitor/issue_tracker_local_recovery.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_local_recovery"
+      ]
+    },
+    {
+      "id": "issue_tracker_k_store",
+      "paths": [
+        "monitor/issue_tracker_k_store.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_k_store"
+      ]
+    },
+    {
+      "id": "issue_tracker_whitelist",
+      "paths": [
+        "monitor/issue_tracker_whitelist.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_whitelist"
+      ]
+    },
+    {
+      "id": "issue_tracker_k_chain",
+      "paths": [
+        "monitor/issue_tracker_k_chain.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_k_chain"
+      ]
+    },
+    {
+      "id": "issue_tracker_cycle_source",
+      "paths": [
+        "monitor/issue_tracker_cycle_source.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_cycle_source"
+      ]
+    },
+    {
+      "id": "issue_tracker_local_qualified_set",
+      "paths": [
+        "monitor/issue_tracker_qualification.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_qualification"
+      ]
+    },
+    {
+      "id": "issue_tracker_local_manifest",
+      "paths": [
+        "monitor/issue_tracker_manifest.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_manifest"
+      ]
+    },
+    {
+      "id": "req19_infra_log_ownership",
+      "paths": [
+        "DAY0-Prepare/01-a-setup.py",
+        "infra/deploy_infra.py",
+        "infra/check_infra.py",
+        "infra/infra-setup.sh",
+        "tools/project_contract.py",
+        ".gitignore"
+      ],
+      "tests": [
+        "test_cases.test_req19_infra_log_contract",
+        "test_cases.test_req19_infra_log_workflow"
+      ]
     }
   ],
   "workflows": [
+    {
+      "id": "issue_tracker_cold_generation_recovery",
+      "members": [
+        "monitor/issue_tracker_local_commit.py",
+        "monitor/issue_tracker_state_owner.py",
+        "monitor/issue_tracker_local_recovery.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_local_recovery_workflow"
+      ]
+    },
+    {
+      "id": "issue_tracker_stage_l_consumer_from_worker_emitter_sources",
+      "members": [
+        "monitor/switch-collection-worker.py",
+        "monitor/collection_v2_emitter.py",
+        "monitor/issue_tracker_switch_runtime.py",
+        "monitor/issue_tracker_stage_l_consumer.py",
+        "monitor/issue_tracker_admission.py",
+        "monitor/issue_tracker_ib_runtime.py",
+        "monitor/issue_tracker_state_owner.py",
+        "monitor/issue_tracker_whitelist_workbook.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_stage_l_consumer_workflow"
+      ]
+    },
+    {
+      "id": "issue_tracker_publish_runtime_from_worker_sources",
+      "members": [
+        "monitor/switch-collection-worker.py",
+        "monitor/issue_tracker_publish_runtime.py",
+        "monitor/issue_tracker_admission.py",
+        "monitor/issue_tracker_stage_l_consumer.py",
+        "monitor/issue_tracker_local_workbook_commit.py",
+        "monitor/issue_tracker_state_owner.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_publish_runtime_workflow"
+      ]
+    },
+    {
+      "id": "issue_tracker_switch_runtime_from_worker_emitter_info",
+      "members": [
+        "monitor/switch-collection-worker.py",
+        "monitor/collection_v2_emitter.py",
+        "monitor/issue_tracker_switch_info_source.py",
+        "monitor/issue_tracker_switch_runtime.py",
+        "monitor/issue_tracker_whitelist_workbook.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_switch_runtime_workflow"
+      ]
+    },
+    {
+      "id": "issue_tracker_p2p_to_lldpq_derivation",
+      "members": [
+        "ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py",
+        "monitor/switch-collection-worker.py",
+        "monitor/issue_tracker_activity_source.py",
+        "monitor/issue_tracker_topology_derivation.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_topology_derivation_workflow"
+      ]
+    },
+    {
+      "id": "issue_tracker_switch_info_from_v2_emitter",
+      "members": [
+        "monitor/collection_v2_emitter.py",
+        "monitor/issue_tracker_switch_info_source.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_switch_info_source_workflow"
+      ]
+    },
+    {
+      "id": "issue_tracker_eth_activity_cycle_handoff",
+      "members": [
+        "tools/lldp-analyze-tool/analyze_lldp.py",
+        "tools/lldp-analyze-tool/build_report.py",
+        "ztp/config/topology_rules.py",
+        "monitor/issue_tracker_activity_source.py",
+        "ethernet/monitor/post-collect.py",
+        "ethernet/monitor/cron.sh",
+        "monitor/collection_v2_emitter.py",
+        "monitor/switch-collection-worker.py"
+      ],
+      "tests": [
+        "test_cases.test_eth_activity_cycle_handoff_workflow"
+      ]
+    },
+    {
+      "id": "issue_tracker_eth_activity_from_lldp",
+      "members": [
+        "monitor/issue_tracker_activity_source.py",
+        "tools/lldp-analyze-tool/analyze_lldp.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_activity_source_workflow"
+      ]
+    },
+    {
+      "id": "issue_tracker_shared_state_owner",
+      "members": [
+        "monitor/issue_tracker_state_owner.py",
+        "monitor/issue_tracker_k_store.py",
+        "monitor/issue_tracker_local_commit.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_state_owner_workflow"
+      ]
+    },
+    {
+      "id": "issue_tracker_workbook_local_commit_chain",
+      "members": [
+        "monitor/issue_tracker_whitelist_workbook.py",
+        "monitor/issue_tracker_qualification.py",
+        "monitor/issue_tracker_manifest.py",
+        "monitor/issue_tracker_local_workbook.py",
+        "monitor/issue_tracker_local_workbook_commit.py",
+        "monitor/issue_tracker_local_commit.py",
+        "monitor/issue_tracker_state_owner.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_local_workbook_commit_workflow"
+      ]
+    },
+    {
+      "id": "issue_tracker_cabling_source_to_workbook",
+      "members": [
+        "monitor/issue_tracker_whitelist_workbook.py",
+        "monitor/issue_tracker_local_workbook.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_cabling_projection"
+      ]
+    },
+    {
+      "id": "issue_tracker_local_workbook_to_frozen_manifest",
+      "members": [
+        "monitor/issue_tracker_local_workbook.py",
+        "monitor/issue_tracker_whitelist_workbook.py",
+        "monitor/issue_tracker_qualification.py",
+        "monitor/issue_tracker_manifest.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_local_workbook_workflow"
+      ]
+    },
+    {
+      "id": "issue_tracker_whitelist_workbook_to_rules",
+      "members": [
+        "monitor/issue_tracker_whitelist_workbook.py",
+        "monitor/issue_tracker_whitelist.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_whitelist_workbook_workflow"
+      ]
+    },
+    {
+      "id": "issue_tracker_manifest_to_local_commit",
+      "members": [
+        "monitor/issue_tracker_local_commit.py",
+        "monitor/issue_tracker_manifest.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_local_commit_workflow"
+      ]
+    },
+    {
+      "id": "issue_tracker_k_store_to_chain_source",
+      "members": [
+        "monitor/issue_tracker_k_store.py",
+        "monitor/issue_tracker_k_chain.py",
+        "monitor/issue_tracker_cycle_source.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_k_store_workflow"
+      ]
+    },
+    {
+      "id": "issue_tracker_whitelist_to_qualification_manifest",
+      "members": [
+        "monitor/issue_tracker_whitelist.py",
+        "monitor/issue_tracker_qualification.py",
+        "monitor/issue_tracker_manifest.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_whitelist_workflow"
+      ]
+    },
+    {
+      "id": "issue_tracker_k_chain_from_collection",
+      "members": [
+        "monitor/issue_tracker_k_chain.py",
+        "monitor/issue_tracker_cycle_source.py",
+        "monitor/switch-collection-worker.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_k_chain_workflow"
+      ]
+    },
+    {
+      "id": "issue_tracker_cycle_source_from_collection",
+      "members": [
+        "monitor/collection_v2_emitter.py",
+        "monitor/switch-collection-worker.py",
+        "monitor/issue_tracker_cycle_source.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_cycle_source_workflow"
+      ]
+    },
+    {
+      "id": "issue_tracker_local_qualification_to_manifest",
+      "members": [
+        "tools/project_contract.py",
+        "monitor/issue_tracker_qualification.py",
+        "monitor/issue_tracker_manifest.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_manifest_workflow"
+      ]
+    },
+    {
+      "id": "req8_template_refactor_to_config_generation",
+      "members": [
+        "DAY0-Prepare/11-load.py",
+        "ztp/config/cumulus/template/90-c2-generate_configs.py",
+        "ztp/config/cumulus/d-hostname2mac.py"
+      ],
+      "tests": [
+        "test_cases.test_req8_template_refactor_contract"
+      ]
+    },
+    {
+      "id": "req19_infra_log_lifecycle",
+      "members": [
+        "DAY0-Prepare/01-a-setup.py",
+        "infra/deploy_infra.py",
+        "infra/check_infra.py",
+        "infra/infra-setup.sh",
+        "tools/project_contract.py"
+      ],
+      "tests": [
+        "test_cases.test_req19_infra_log_workflow"
+      ]
+    },
+    {
+      "id": "req10b_global_link_lifecycle",
+      "members": [
+        "tools/project_contract.py",
+        "DAY0-Prepare/01-a-setup.py",
+        "DAY0-Prepare/02-unsetup.py"
+      ],
+      "tests": [
+        "test_cases.test_req10b_global_link_workflow"
+      ]
+    },
+    {
+      "id": "req10c_auto_watch_lifecycle",
+      "members": [
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py",
+        "DAY0-Prepare/02-unsetup.py"
+      ],
+      "tests": [
+        "test_cases.test_req10c_auto_workflow"
+      ]
+    },
+    {
+      "id": "req10b_service_key_lifecycle",
+      "members": [
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py",
+        "ztp/config/nvos/template/90-c2-generate_configs.py",
+        "DAY0-Prepare/11-load.py"
+      ],
+      "tests": [
+        "test_cases.test_req10b_services_keys_workflow"
+      ]
+    },
+    {
+      "id": "p2p_selection_and_transport",
+      "members": [
+        "DAY0-Prepare/01-a-setup.py",
+        "DAY0-Prepare/11-load.py",
+        "tools/_package_common.py",
+        "tools/collect-ztp-diagnostics.py"
+      ],
+      "tests": [
+        "test_cases.test_p2p_selection_workflow"
+      ]
+    },
+    {
+      "id": "generation_report_lifecycle",
+      "members": [
+        "DAY0-Prepare/01-a-setup.py",
+        "DAY0-Prepare/11-load.py",
+        "tools/generation_report.py",
+        "tools/ssh_key_preparation.py"
+      ],
+      "tests": [
+        "test_cases.test_generation_report_workflow"
+      ]
+    },
+    {
+      "id": "ssh_key_preparation_lifecycle",
+      "members": [
+        "DAY0-Prepare/01-a-setup.py",
+        "DAY0-Prepare/11-load.py",
+        "tools/ssh_key_preparation.py"
+      ],
+      "tests": [
+        "test_cases.test_ssh_key_preparation_workflow"
+      ]
+    },
+    {
+      "id": "http_port_convergence",
+      "members": [
+        "DAY0-Prepare/01-a-setup.py",
+        "DAY0-Prepare/11-load.py",
+        "DAY0-Prepare/template/01-global.yaml",
+        "infra/deploy_infra.py",
+        "infra/docker/activate.py",
+        "monitor/ztp-monitor-control.cgi",
+        "monitor/manual-ztp-control.cgi",
+        "monitor/switch-collection-control.cgi",
+        "tools/collect-ztp-diagnostics.py",
+        "tools/project_contract.py",
+        "ztp/config/isc-dhcp-server/c1-generate_dhcp.py",
+        "ztp/manual-ztp.py",
+        "ztp/templates/ztp-bootstrap.sh"
+      ],
+      "tests": [
+        "test_cases.test_http_port_workflow"
+      ]
+    },
+    {
+      "id": "eth_jump_phase_c_zero_config",
+      "members": [
+        "DAY0-Prepare/01-a-setup.py",
+        "DAY0-Prepare/11-load.py",
+        "DAY0-Prepare/12-ztp-monitor.py",
+        "ethernet/monitor/cron.sh",
+        "infiniband/monitor/cron.sh",
+        "nvlink/monitor/cron.sh",
+        "monitor/generate-monitor-html.py",
+        "monitor/switch_collection_gate.py",
+        "monitor/switch-collection-worker.py",
+        "tools/collect-ztp-diagnostics.py",
+        "ztp/backup/yaml-collect.py",
+        "ztp/config/cumulus/template/90-c2-generate_configs.py",
+        "ztp/config/nvos/template/90-c2-generate_configs.py",
+        "ztp/config/isc-dhcp-server/c1-generate_dhcp.py",
+        "ztp/config/cumulus/d-hostname2mac.py",
+        "ztp/config/nvos/d-hostname2mac.py",
+        "ztp/manual-ztp.py"
+      ],
+      "tests": [
+        "test_cases.test_eth_jump_duplicate_identity",
+        "test_cases.test_eth_jump_zero_config_workflow"
+      ]
+    },
+    {
+      "id": "eth_jump_phase_b_gating",
+      "members": [
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py",
+        "DAY0-Prepare/01-a-setup.py",
+        "DAY0-Prepare/11-load.py"
+      ],
+      "tests": [
+        "test_cases.test_eth_jump_transport_workflow"
+      ]
+    },
+    {
+      "id": "service_endpoint_convergence",
+      "members": [
+        "tools/project_contract.py",
+        "DAY0-Prepare/01-a-setup.py",
+        "DAY0-Prepare/11-load.py",
+        "infra/deploy_infra.py",
+        "infra/docker/activate.py",
+        "ztp/config/isc-dhcp-server/c1-generate_dhcp.py",
+        "ztp/manual-ztp.py"
+      ],
+      "tests": [
+        "test_cases.test_service_endpoint_convergence"
+      ]
+    },
     {
       "id": "issue_tracker_policy_handoff",
       "members": [
@@ -908,6 +1882,7 @@
       "tests": [
         "test_cases.test_ops_deployment_review",
         "test_cases.test_load_release_transaction",
+        "test_cases.test_dhcp_optional_workflow",
         "test_cases.test_apache_publication_boundary",
         "test_cases.test_flow_release_platform_matrix",
         "test_cases.test_terminal_l2_stp_generation",
@@ -998,6 +1973,16 @@
       ]
     },
     {
+      "id": "dhcp_optional_generation",
+      "members": [
+        "DAY0-Prepare/11-load.py",
+        "ztp/config/isc-dhcp-server/c1-generate_dhcp.py"
+      ],
+      "tests": [
+        "test_cases.test_dhcp_optional_workflow"
+      ]
+    },
+    {
       "id": "dhcp_to_ztp_identity",
       "members": [
         "DAY0-Prepare/12-ztp-monitor.py",
@@ -1075,6 +2060,7 @@
       "members": [
         "tools/project_contract.py",
         "monitor/switch-collection-worker.py",
+        "monitor/collection_v2_emitter.py",
         "monitor/switch_collection_gate.py",
         "monitor/generate-monitor-html.py",
         "ethernet/monitor/cron.sh",
@@ -1088,6 +2074,7 @@
         "test_cases.test_collection_cycle_handoff_workflow",
         "test_cases.test_collection_cycle_persistence",
         "test_cases.test_collection_cycle_worker_contract",
+        "test_cases.test_collection_v2_emitter_contract",
         "test_cases.test_project_contracts",
         "test_cases.test_monitor_stack_review"
       ]
@@ -1112,7 +2099,8 @@
         "tools/project_contract.py",
         "monitor/switch-collection-worker.py",
         "monitor/switch_collection_gate.py",
-        "monitor/switch-collection-control.cgi"
+        "monitor/switch-collection-control.cgi",
+        "monitor/generate-monitor-html.py"
       ],
       "tests": [
         "test_cases.test_project_contracts",
@@ -1204,6 +2192,18 @@
       ]
     },
     {
+      "id": "req14_active_provenance_to_nvue",
+      "members": [
+        "DAY0-Prepare/11-load.py",
+        "ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py",
+        "ztp/config/cumulus/template/90-c2-generate_configs.py",
+        "ztp/config/cumulus/d-hostname2mac.py"
+      ],
+      "tests": [
+        "test_cases.test_req14_active_provenance_workflow"
+      ]
+    },
+    {
       "id": "splitter_profile_to_nvue",
       "members": [
         "ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py",
@@ -1266,15 +2266,139 @@
       ]
     },
     {
+      "id": "ufm_readonly_discovery_from_inventory_and_leases",
+      "members": [
+        "tools/ufm-discover.py",
+        "tools/ufm_input_contract.py",
+        "ztp/dhcp_runtime_inventory.py",
+        "tools/project_contract.py"
+      ],
+      "tests": [
+        "test_cases.test_ufm_input_contract"
+      ]
+    },
+    {
+      "id": "ufm_local_archive_contract_agent",
+      "members": [
+        "tools/ufm_collection_contract.py",
+        "tools/ufm_collection_agent.py"
+      ],
+      "tests": [
+        "test_cases.test_ufm_local_archive_workflow"
+      ]
+    },
+    {
+      "id": "ufm_jump_transport_day0_typed_argv_boundary",
+      "members": [
+        "infra/ufm_jump_transport.py",
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py"
+      ],
+      "tests": [
+        "test_cases.test_ufm_jump_transport_workflow"
+      ]
+    },
+    {
+      "id": "ufm_identity_binding_from_inventory_and_transport",
+      "members": [
+        "tools/ufm_identity_binding.py",
+        "tools/ufm_input_contract.py",
+        "ztp/dhcp_runtime_inventory.py",
+        "infra/ufm_jump_transport.py",
+        "tools/ufm_collection_contract.py"
+      ],
+      "tests": [
+        "test_cases.test_ufm_identity_binding_workflow",
+        "test_cases.test_ufm_collection_archive_retrieval"
+      ]
+    },
+    {
+      "id": "ufm_remote_producer_pinned_retrieval",
+      "members": [
+        "tools/ufm_remote_producer.py",
+        "tools/ufm_identity_binding.py",
+        "tools/ufm_collection_agent.py",
+        "tools/ufm_collection_contract.py",
+        "infra/ufm_jump_transport.py"
+      ],
+      "tests": [
+        "test_cases.test_ufm_remote_producer_workflow"
+      ]
+    },
+    {
+      "id": "ufm_collection_pipeline_analyzer_receipt",
+      "members": [
+        "tools/ufm_collection_pipeline.py",
+        "tools/ufm_collection_contract.py",
+        "tools/ufm_collection_agent.py",
+        "tools/ibdiagnet-analyze-tool/scripts/validate_ib_topology.py"
+      ],
+      "tests": [
+        "test_cases.test_ufm_collection_pipeline_workflow"
+      ]
+    },
+    {
+      "id": "collection_ib_cycle_binding_real_worker_emitter",
+      "members": [
+        "monitor/collection_ib_cycle_binding.py",
+        "monitor/issue_tracker_cycle_source.py",
+        "monitor/issue_tracker_switch_runtime.py",
+        "monitor/collection_v2_emitter.py",
+        "monitor/switch-collection-worker.py"
+      ],
+      "tests": [
+        "test_cases.test_collection_ib_cycle_binding_workflow"
+      ]
+    },
+    {
+      "id": "collection_ib_producer_real_worker_emitter",
+      "members": [
+        "monitor/collection_ib_producer.py",
+        "monitor/switch-collection-worker.py",
+        "monitor/collection_v2_emitter.py",
+        "tools/ufm_remote_producer.py",
+        "tools/ufm_collection_pipeline.py"
+      ],
+      "tests": [
+        "test_cases.test_collection_ib_producer_workflow"
+      ]
+    },
+    {
+      "id": "issue_tracker_ib_local_report_from_real_converter_validator",
+      "members": [
+        "monitor/issue_tracker_ib_runtime.py",
+        "ztp/config/ib_topology_provenance.py",
+        "ztp/config/nvos/template/P2P/p2p-to-validation.py",
+        "tools/ibdiagnet-analyze-tool/scripts/validate_ib_topology.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_ib_runtime_workflow"
+      ]
+    },
+    {
+      "id": "req7_ib_expected_topology_byte_authority",
+      "members": [
+        "ztp/config/ib_topology_provenance.py",
+        "ztp/config/nvos/template/P2P/p2p-to-validation.py",
+        "tools/ibdiagnet-analyze-tool/scripts/validate_ib_topology.py",
+        "tools/ibdiagnet-analyze-tool/analyze.py"
+      ],
+      "tests": [
+        "test_cases.test_req7_ib_provenance",
+        "test_cases.test_req7_ib_provenance_workflow"
+      ]
+    },
+    {
       "id": "topology_inventory_and_lldp_identity",
       "members": [
         "ztp/config/topology_rules.py",
         "ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py",
         "ztp/config/nvos/template/P2P/p2p-to-validation.py",
+        "ztp/config/ib_topology_provenance.py",
         "tools/lldp-analyze-tool/analyze_lldp.py"
       ],
       "tests": [
         "test_cases.test_topology_consistency",
+        "test_cases.test_req7_ib_provenance_workflow",
         "test_cases.test_upload_package_contract"
       ]
     },
@@ -1334,6 +2458,15 @@
     }
   ],
   "path_rules": [
+    {
+      "paths": ["DAY0-Prepare/template/99-output-infra/.gitkeep"],
+      "tests": [
+        "test_cases.test_change_aware_test_runner",
+        "test_cases.test_public_repository_contract",
+        "test_cases.test_req19_infra_log_contract",
+        "test_cases.test_req19_infra_log_workflow"
+      ]
+    },
     {
       "paths": ["test_cases/module_loader.py"],
       "tests": [
@@ -1397,6 +2530,15 @@
     },
     {
       "paths": [
+        "test_cases/REAL_ENVIRONMENT.md"
+      ],
+      "tests": [
+        "test_cases.test_req10c_auto_contract",
+        "test_cases.test_req14_active_provenance_workflow"
+      ]
+    },
+    {
+      "paths": [
         ".gitattributes",
         ".gitignore",
         ".github/README.md",
@@ -1417,7 +2559,8 @@
         "test_cases.test_public_s_phase_contract",
         "test_cases.test_public_s_phase_workflow",
         "test_cases.test_public_publication_contract",
-        "test_cases.test_public_publication_workflow"
+        "test_cases.test_public_publication_workflow",
+        "test_cases.test_public_publication_v3_overlap"
       ]
     },
     {
@@ -1444,7 +2587,8 @@
         "test_cases.test_upload_package_contract",
         "test_cases.test_deployment_writer_lock",
         "test_cases.test_public_publication_contract",
-        "test_cases.test_public_publication_workflow"
+        "test_cases.test_public_publication_workflow",
+        "test_cases.test_public_publication_v3_overlap"
       ]
     },
     {
@@ -1547,6 +2691,7 @@
       "tests": [
         "test_cases.test_ztp_container_runtime",
         "test_cases.test_project_contracts",
+        "test_cases.test_service_endpoint_convergence",
         "test_cases.test_v2_project_schema",
         "test_cases.test_v2_generation_flow"
       ]
@@ -1560,6 +2705,7 @@
         "test_cases.test_project_contracts",
         "test_cases.test_v2_project_schema",
         "test_cases.test_v2_generation_flow",
+        "test_cases.test_req8_template_refactor_contract",
         "test_cases.test_change_aware_test_runner",
         "test_cases.test_flow_release_platform_matrix"
       ],

@@ -256,8 +256,8 @@ def check_runtime(
     states = _supervisor_states()
     require_running(states, ("rsyslog", "logrotate", "runtime-guardian"))
     activate.validate_control_cgi(settings)
-    marker = activate.read_activation_marker(settings)
     if expected_services is None:
+        marker = activate.read_activation_marker(settings)
         if marker is None:
             precommit_path = getattr(settings, "precommit_marker", None)
             if precommit_path is not None and _state_file_present(
@@ -277,8 +277,15 @@ def check_runtime(
         services = tuple(marker["services"])
     else:
         services = tuple(expected_services)
-        if services != activate.expected_services(selected):
+        if services != activate.expected_services(
+            selected,
+            http_listener_ips=activate.project_http_listener_ips(settings, selected),
+        ):
             raise HealthError("pre-commit service set does not match current plan")
+        # Preserve the marker's structural read after the exact precommit
+        # service-set gate; a mismatched plan must reject before any marker
+        # lookup or service inspection can obscure that failure.
+        activate.read_activation_marker(settings)
     require_running(states, services)
     inactive = tuple(
         service for service in activate.MANAGED_SERVICES if service not in services

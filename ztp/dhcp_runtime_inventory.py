@@ -10,15 +10,17 @@ planned hostname; that binding requires an operator's physical/topology check.
 from __future__ import annotations
 
 import argparse
+from collections import namedtuple
 import csv
 import datetime as dt
 import ipaddress
 import json
 import os
 import re
+import secrets
+import stat
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -29,6 +31,14 @@ DEFAULT_LEASES = Path("/var/lib/dhcp/dhcpd.leases")
 _EVENT_MARKER = "ZTP_DHCP_EVENT_V1 "
 _MAC_RE = re.compile(r"^[0-9a-f]{12}$")
 _LEASE_RE = re.compile(r"(?ms)^lease\s+(\S+)\s*\{(.*?)^[ \t]*\}")
+_LEASE_START_RE = re.compile(r"(?m)^lease\s+\S+\s*\{")
+
+
+# Named tuple remains importable by legacy file-loader tests without requiring
+# those loaders to register this module before class definition.
+UfmCurrentLease = namedtuple(
+    "UfmCurrentLease", "hostname address management_mac lease_ends"
+)
 
 
 def normalize_mac(value: str) -> Optional[str]:
@@ -254,6 +264,57 @@ def parse_leases(text: str, now: Optional[dt.datetime] = None):
     return leases
 
 
+def bind_ufm_current_leases(
+    nodes, lease_text: str, *, now: Optional[dt.datetime] = None,
+) -> tuple[UfmCurrentLease, ...]:
+    """Bind declared UFM nodes to final active ISC lease-file records.
+
+    DHCP logs are corroboration, not this discovery authority. This read-only
+    observation cannot attest SSH host identity, physical NICs or licence MAC.
+    """
+    current = now or dt.datetime.now().astimezone()
+    if current.tzinfo is None or current.utcoffset() is None:
+        raise ValueError("UFM lease observation requires an aware clock")
+    if len(nodes) not in {1, 2} or not isinstance(lease_text, str):
+        raise ValueError("UFM lease binding requires one or two nodes and lease text")
+    # The generic inventory parser tolerates a trailing partial ISC block for
+    # diagnostics; deployment discovery must not revive its older active block.
+    if len(_LEASE_START_RE.findall(lease_text)) != len(_LEASE_RE.findall(lease_text)):
+        raise ValueError("UFM lease file contains an incomplete block")
+    records = _lease_records_by_address(lease_text, now=current)
+    bound: list[UfmCurrentLease] = []
+    seen_addresses: set[str] = set()
+    seen_macs: set[str] = set()
+    for node in nodes:
+        try:
+            address = str(ipaddress.IPv4Address(node.address))
+            mac = normalize_mac(node.management_mac)
+            hostname = str(node.hostname)
+        except (AttributeError, ValueError, TypeError) as exc:
+            raise ValueError("UFM node has an invalid declared identity") from exc
+        if not mac or not hostname or address in seen_addresses or mac in seen_macs:
+            raise ValueError("UFM nodes have missing or duplicate identities")
+        seen_addresses.add(address)
+        seen_macs.add(mac)
+        entry = records.get(address)
+        record = entry[1] if entry else None
+        if record is None or record.get("mac") != mac:
+            raise ValueError(f"UFM current lease owner mismatch: {hostname}")
+        ends = record.get("lease_ends_dt")
+        if (record.get("lease_state") != "active"
+                or not isinstance(ends, dt.datetime) or ends <= current):
+            raise ValueError(f"UFM current lease is inactive or unbounded: {hostname}")
+        for other_address, (_sequence, other) in records.items():
+            if other_address != address and other.get("mac") == mac:
+                other_ends = other.get("lease_ends_dt")
+                if other.get("lease_state") == "active" and (
+                    not isinstance(other_ends, dt.datetime) or other_ends > current
+                ):
+                    raise ValueError(f"UFM management MAC has multiple active leases: {hostname}")
+        bound.append(UfmCurrentLease(hostname, address, mac, ends))
+    return tuple(bound)
+
+
 def inventory_macs(path: Optional[os.PathLike]):
     known = set()
     if not path:
@@ -411,17 +472,103 @@ def _default_output():
 
 def _atomic_json(path: Path, payload):
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    parent_fd = os.open(
+        path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    stage_name = None
+    backup_name = None
+    prior = None
+    stage_identity = None
+
+    def check_visible_parent():
+        named = os.lstat(path.parent)
+        pinned = os.fstat(parent_fd)
+        if (not stat.S_ISDIR(named.st_mode)
+                or (named.st_dev, named.st_ino) != (pinned.st_dev, pinned.st_ino)):
+            raise OSError("DHCP inventory output parent changed")
+
     try:
+        check_visible_parent()
+        for _ in range(10):
+            candidate_name = f".{path.name}.{secrets.token_hex(16)}.tmp"
+            try:
+                fd = os.open(
+                    candidate_name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                    | os.O_CLOEXEC, 0o600, dir_fd=parent_fd,
+                )
+            except FileExistsError:
+                continue
+            stage_name = candidate_name
+            break
+        if stage_name is None:
+            raise OSError("could not allocate DHCP inventory stage")
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             json.dump(payload, stream, ensure_ascii=False, indent=2, sort_keys=True)
             stream.write("\n")
-        os.chmod(temporary, 0o644)
-        os.replace(temporary, path)
+            stream.flush()
+            os.fchmod(stream.fileno(), 0o644)
+            os.fsync(stream.fileno())
+        stage_identity = os.stat(stage_name, dir_fd=parent_fd,
+                                 follow_symlinks=False)
+        if not stat.S_ISREG(stage_identity.st_mode) or stage_identity.st_nlink != 1:
+            raise OSError("DHCP inventory stage is unsafe")
+        try:
+            prior = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            if not stat.S_ISREG(prior.st_mode) or prior.st_nlink != 1:
+                raise OSError("DHCP inventory target is unsafe")
+            candidate_backup = f".{path.name}.{secrets.token_hex(16)}.backup"
+            os.link(path.name, candidate_backup, src_dir_fd=parent_fd,
+                    dst_dir_fd=parent_fd, follow_symlinks=False)
+            backup_name = candidate_backup
+            backed = os.stat(backup_name, dir_fd=parent_fd,
+                             follow_symlinks=False)
+            if (backed.st_dev, backed.st_ino) != (prior.st_dev, prior.st_ino):
+                raise OSError("DHCP inventory backup identity changed")
+        check_visible_parent()
+        # The held dir_fd on *both* sides is the write-boundary protection.
+        os.replace(stage_name, path.name,
+                   src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        stage_name = None
+        os.fsync(parent_fd)
+        check_visible_parent()
+        if backup_name is not None:
+            os.unlink(backup_name, dir_fd=parent_fd)
+            backup_name = None
+            os.fsync(parent_fd)
     except BaseException:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+        if stage_identity is not None:
+            try:
+                current = os.stat(path.name, dir_fd=parent_fd,
+                                  follow_symlinks=False)
+            except FileNotFoundError:
+                current = None
+            if (current is not None
+                    and (current.st_dev, current.st_ino)
+                    == (stage_identity.st_dev, stage_identity.st_ino)):
+                if backup_name is None:
+                    os.unlink(path.name, dir_fd=parent_fd)
+                else:
+                    os.replace(backup_name, path.name,
+                               src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+                    backup_name = None
+                os.fsync(parent_fd)
+            elif (backup_name is not None and prior is not None
+                  and current is not None
+                  and (current.st_dev, current.st_ino)
+                  == (prior.st_dev, prior.st_ino)):
+                os.unlink(backup_name, dir_fd=parent_fd)
+                backup_name = None
         raise
+    finally:
+        try:
+            if stage_name is not None:
+                os.unlink(stage_name, dir_fd=parent_fd)
+        finally:
+            os.close(parent_fd)
 
 
 def main(argv=None):

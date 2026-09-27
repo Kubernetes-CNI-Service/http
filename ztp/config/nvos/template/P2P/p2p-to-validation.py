@@ -12,6 +12,8 @@ import argparse
 import csv
 import os
 import re
+import secrets
+import stat
 import sys
 import tempfile
 import zipfile
@@ -29,6 +31,11 @@ if str(CONFIG_ROOT) not in sys.path:
 from topology_rules import (  # noqa: E402
     load_inventory_sections,
     resolve_inventory_device_type,
+)
+from ib_topology_provenance import (  # noqa: E402
+    ProvenanceError,
+    capture_sources,
+    write_cvt_provenance,
 )
 
 
@@ -727,6 +734,35 @@ def write_cvt_workbook(
             )
 
 
+def _reject_governed_cvt_output(path: Path) -> None:
+    """A diagnostic CVT cannot replace a DAY0 project input or output."""
+    repository = CONFIG_ROOT.resolve(strict=False).parents[1]
+    day0 = repository / "DAY0-Prepare"
+    destination = path.expanduser().resolve(strict=False)
+    try:
+        relative = destination.relative_to(day0)
+    except ValueError:
+        pass
+    else:
+        if len(relative.parts) >= 2:
+            raise ConversionError(
+                f"CVT output cannot enter a DAY0 project authority: {path}"
+            )
+    # A project child may itself link out of DAY0; retain and check its
+    # lexical location so the resolved-path check cannot hide that origin.
+    lexical = Path(os.path.abspath(os.fspath(path.expanduser())))
+    lexical_day0 = Path(os.path.abspath(os.fspath(CONFIG_ROOT))).parents[1] / "DAY0-Prepare"
+    for ancestor in lexical.parents:
+        if ancestor.name != "DAY0-Prepare":
+            continue
+        if len(lexical.relative_to(ancestor).parts) < 2:
+            continue
+        if ancestor == lexical_day0 or ancestor.resolve(strict=False) == day0:
+            raise ConversionError(
+                f"CVT output cannot enter a DAY0 project authority: {path}"
+            )
+
+
 def publish_cvt_workbook(
     path: Path,
     node_rows: list[list[str]],
@@ -734,35 +770,97 @@ def publish_cvt_workbook(
     link_rows: list[list[str]],
     profile_rows: list[list[str]],
 ) -> Optional[Path]:
-    """Generate safely, backing up an existing result before replacement."""
+    """Generate privately and publish through a held output-directory handle."""
+    path = Path(path)
+    _reject_governed_cvt_output(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+    parent_fd = os.open(
+        path.parent,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
     )
-    os.close(fd)
-    temporary_path = Path(temporary_name)
+    stage_name = f".{path.name}.{secrets.token_hex(12)}.tmp"
+    staged = False
+    published = False
+    moved_old = False
     backup_path: Optional[Path] = None
+
+    def assert_parent_bound() -> None:
+        held = os.fstat(parent_fd)
+        visible = os.stat(path.parent, follow_symlinks=False)
+        if (not stat.S_ISDIR(visible.st_mode)
+                or (held.st_dev, held.st_ino) != (visible.st_dev, visible.st_ino)):
+            raise ConversionError("CVT output directory changed during publication")
+
+    def regular_target(name: str) -> bool:
+        try:
+            current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        if not stat.S_ISREG(current.st_mode) or current.st_nlink != 1:
+            raise ConversionError(f"unsafe CVT output or backup: {name}")
+        return True
+
     try:
-        write_cvt_workbook(
-            temporary_path, node_rows, layout_rows, link_rows, profile_rows
-        )
-        if path.exists():
-            if not path.is_file():
-                raise ConversionError(f"output path exists but is not a file: {path}")
+        assert_parent_bound()
+        # Workbook generation is path-based, so keep it outside the output
+        # parent until the complete image exists in a private 0700 directory.
+        with tempfile.TemporaryDirectory(prefix="cvt-workbook-") as workspace:
+            rendered = Path(workspace) / "candidate.xlsx"
+            write_cvt_workbook(
+                rendered, node_rows, layout_rows, link_rows, profile_rows
+            )
+            assert_parent_bound()
+            descriptor = os.open(
+                stage_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                0o600,
+                dir_fd=parent_fd,
+            )
+            staged = True
+            with open(rendered, "rb") as source, os.fdopen(descriptor, "wb") as stage:
+                while True:
+                    block = source.read(1024 * 1024)
+                    if not block:
+                        break
+                    stage.write(block)
+                stage.flush()
+                os.fsync(stage.fileno())
+        os.fsync(parent_fd)
+        assert_parent_bound()
+        old_exists = regular_target(path.name)
+        if old_exists:
             backup_path = Path(f"{path}.bak")
+            regular_target(backup_path.name)
             print(f"WARNING: Output file already exists: {path}", file=sys.stderr)
             print(f"WARNING: Backing up existing file to: {backup_path}", file=sys.stderr)
-            os.replace(path, backup_path)
+            # Both rename endpoints stay relative to the held parent. The
+            # visible-name check detects drift; it is not the write guard.
+            os.replace(path.name, backup_path.name,
+                       src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            moved_old = True
         try:
-            os.replace(temporary_path, path)
-        except OSError:
-            if backup_path is not None and backup_path.is_file() and not path.exists():
-                os.replace(backup_path, path)
+            os.replace(stage_name, path.name,
+                       src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            staged = False
+            published = True
+            os.fsync(parent_fd)
+            assert_parent_bound()
+        except (OSError, ConversionError):
+            if moved_old:
+                os.replace(backup_path.name, path.name,
+                           src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+                moved_old = False
+            elif published:
+                os.unlink(path.name, dir_fd=parent_fd)
+            os.fsync(parent_fd)
             raise
+        return backup_path
     finally:
-        if temporary_path.exists():
-            temporary_path.unlink()
-    return backup_path
+        try:
+            if staged:
+                os.unlink(stage_name, dir_fd=parent_fd)
+        finally:
+            os.close(parent_fd)
 
 
 def choose_input(script_dir: Path) -> Path:
@@ -788,10 +886,19 @@ def convert(args: argparse.Namespace) -> tuple[Path, int, int, list[tuple[str, i
     script_dir = runtime_dir()
     input_path = choose_input(script_dir)
     workbook_path = (
-        Path(args.output).expanduser().resolve()
+        Path(args.output).expanduser().absolute()
         if args.output
         else script_dir / "output-p2p" / f"{source_workbook_stem(input_path)}-cvt.xlsx"
     )
+    source_paths = {
+        "p2p": input_path,
+        "inventory": Path(args.inventory),
+        "port_map": Path(args.port_map),
+        "splitter": Path(args.splitter),
+        "converter": Path(__file__),
+        "topology_rules": CONFIG_ROOT / "topology_rules.py",
+    }
+    expected_sources = capture_sources(source_paths)
     rules = RuleSet(Path(args.inventory), Path(args.port_map), Path(args.splitter))
 
     extracted_links: list[ExtractedLink] = []
@@ -874,6 +981,11 @@ def convert(args: argparse.Namespace) -> tuple[Path, int, int, list[tuple[str, i
     backup_path = publish_cvt_workbook(
         workbook_path, node_rows, layout_rows, output_rows, profile_rows
     )
+    # The sidecar is only published for final CVT bytes. A missing or stale
+    # sidecar keeps this output unusable as REQ7 expected-topology authority.
+    write_cvt_provenance(
+        workbook_path, source_paths, expected_sources=expected_sources,
+    )
     if backup_path is not None:
         print(f"Backup created: {backup_path}")
     return workbook_path, unknown, malformed, matched_sheets
@@ -893,16 +1005,16 @@ def parse_args() -> argparse.Namespace:
         "--fabric-id", default="",
         help="FabricId written to Nodes/DC Floor Layout; default: blank",
     )
-    parser.add_argument("--inventory", default=str(script_dir / "01-inventory.log"))
-    parser.add_argument("--port-map", default=str(script_dir / "02-port-mapping.log"))
-    parser.add_argument("--splitter", default=str(script_dir / "03-splitter.log"))
+    parser.add_argument("--inventory", default=str(script_dir / "01-inventory.log"), help="设备清单日志路径")
+    parser.add_argument("--port-map", default=str(script_dir / "02-port-mapping.log"), help="端口映射日志路径")
+    parser.add_argument("--splitter", default=str(script_dir / "03-splitter.log"), help="分线器日志路径")
     return parser.parse_args()
 
 
 def main() -> int:
     try:
         workbook, unknown, malformed, sheets = convert(parse_args())
-    except (ConversionError, OSError) as exc:
+    except (ConversionError, ProvenanceError, OSError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 

@@ -1,0 +1,13 @@
+      eth0:
+        ipv4:
+{% if d.eth0_ip == 'dhcp-client' %}
+          dhcp-client:
+            state: enabled
+{% else %}
+          address:
+            {{ d.eth0_ip }}: {}
+          gateway:
+            {{ d.eth0_gw }}: {}
+{% endif %}
+        type: eth
+        vrf: mgmt

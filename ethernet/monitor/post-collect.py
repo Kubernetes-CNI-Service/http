@@ -14,6 +14,8 @@ from typing import Iterable
 
 BASE = Path(__file__).resolve().parent
 HTTP_ROOT = BASE.parent.parent
+if str(HTTP_ROOT) not in sys.path:
+    sys.path.insert(0, str(HTTP_ROOT))
 ANALYZER = HTTP_ROOT / "tools/lldp-analyze-tool/analyze_lldp.py"
 OUTPUT_DIR = HTTP_ROOT / "tools/lldp-analyze-tool/99-output-p2p"
 HTML_GENERATOR = HTTP_ROOT / "monitor/generate-monitor-html.py"
@@ -46,8 +48,10 @@ def select_expected_dot(output_dir: Path, environment: str) -> Path:
     return candidates[0]
 
 
-def run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, text=True, capture_output=True, check=False)
+def run_command(command: list[str], *, pass_fds: tuple[int, ...] = ()) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, text=True, capture_output=True, check=False,
+                          pass_fds=pass_fds,
+                          stdin=None if 0 in pass_fds else subprocess.DEVNULL)
 
 
 def emit_process_output(completed: subprocess.CompletedProcess[str]) -> None:
@@ -67,6 +71,8 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
                         help="exact Ethernet collection .tar.gz/.tgz from this run")
     parser.add_argument("--environment", choices=("air", "prod"), required=True,
                         help="collection environment and HTML generation scope")
+    parser.add_argument("--worker-context-fd", type=int,
+                        help="inherited worker context for cycle-bound ETH analysis")
     return parser.parse_args(argv)
 
 
@@ -90,7 +96,18 @@ def main(argv: Iterable[str] | None = None) -> int:
         )
         return 2
     try:
-        expected_dot = select_expected_dot(OUTPUT_DIR, args.environment)
+        if args.worker_context_fd is None:
+            expected_dot = select_expected_dot(OUTPUT_DIR, args.environment)
+        else:
+            from monitor.issue_tracker_activity_source import (
+                read_worker_eth_activity_context_fd,
+            )
+            context, _binding = read_worker_eth_activity_context_fd(
+                args.worker_context_fd,
+            )
+            if context["source_slot"] != f"ethernet/{args.environment}":
+                raise ValueError("worker Ethernet slot disagrees with environment")
+            expected_dot = Path(context["activity"]["sources"]["dot"]["path"])
     except ValueError as exc:
         log(f"ERROR: {exc}")
         return 2
@@ -111,9 +128,13 @@ def main(argv: Iterable[str] | None = None) -> int:
         "--output-dir",
         str(OUTPUT_DIR),
     ]
+    if args.worker_context_fd is not None:
+        analyze_command.extend(("--worker-context-fd", str(args.worker_context_fd)))
     log(f"analyzing exact archive: {archive}")
     log(f"expected topology ({args.environment}): {expected_dot}")
-    analyzed = run_command(analyze_command)
+    analyzed = (run_command(analyze_command)
+                if args.worker_context_fd is None else
+                run_command(analyze_command, pass_fds=(args.worker_context_fd,)))
     emit_process_output(analyzed)
     # analyze_lldp.py returns 1 when it successfully creates a report that has
     # mismatches.  Return code 2 means the analysis/report generation failed.

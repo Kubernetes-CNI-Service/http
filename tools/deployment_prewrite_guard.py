@@ -4074,17 +4074,26 @@ def run_lock_holder(
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
-    result.add_argument("--lock", type=Path, required=True)
-    result.add_argument("--root", type=Path, required=True)
-    result.add_argument("--wait", type=float, default=0)
-    result.add_argument("--protect-docker", action="store_true")
-    result.add_argument("--holder", action="store_true")
-    result.add_argument("--runtime", choices=("native", "docker"), default="native")
+    result.add_argument("--lock", type=Path, required=True,
+                        help="deployment prewrite lock path")
+    result.add_argument("--root", type=Path, required=True,
+                        help="managed HTTP root protected by this operation")
+    result.add_argument("--wait", type=float, default=0,
+                        help="maximum seconds to wait for the prewrite lock")
+    result.add_argument("--protect-docker", action="store_true",
+                        help="quiesce the selected managed runtime before a shell payload")
+    result.add_argument("--holder", action="store_true",
+                        help="hold the lock while validating a source manifest")
+    result.add_argument("--runtime", choices=("native", "docker"), default="native",
+                        help="managed runtime to protect: native or docker")
     archive_authority = result.add_mutually_exclusive_group()
-    archive_authority.add_argument("--archive", type=Path)
+    archive_authority.add_argument("--archive", type=Path,
+                                   help="local verified archive to stage under the lock")
     archive_authority.add_argument("--archive-fd", type=int, help=argparse.SUPPRESS)
-    result.add_argument("--archive-sha256", default="")
-    result.add_argument("--source-manifest-sha256", default="")
+    result.add_argument("--archive-sha256", default="",
+                        help="required SHA-256 digest of the staged archive")
+    result.add_argument("--source-manifest-sha256", default="",
+                        help="required SHA-256 digest of the source manifest")
     result.add_argument("payload", nargs="?", default="")
     return result
 

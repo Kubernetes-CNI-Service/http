@@ -53,6 +53,9 @@ EOF
 TYPE_FILTER=""
 COLLECTION_ENV=""
 LOCK_WAIT=0
+WORKER_CONTEXT_FD=""
+EMIT_TARGET_PLAN_FD=""
+PREHELD_LOCK_FD=""
 set_type_filter() {
     local value="$1" option="$2"
     if [[ -n "$TYPE_FILTER" && "$TYPE_FILTER" != "$value" ]]; then
@@ -106,6 +109,30 @@ while (( $# )); do
             LOCK_WAIT="$value"
             shift
             ;;
+        --worker-context-fd)
+            [[ $# -ge 2 && "$2" =~ ^[0-9]+$ && "$2" -ge 3 ]] || {
+                echo "ERROR: --worker-context-fd requires an inherited descriptor" >&2
+                exit 2
+            }
+            WORKER_CONTEXT_FD="$2"
+            shift 2
+            ;;
+        --emit-target-plan-fd)
+            [[ $# -ge 2 && "$2" =~ ^[0-9]+$ && "$2" -ge 3 ]] || {
+                echo "ERROR: --emit-target-plan-fd requires an inherited descriptor" >&2
+                exit 2
+            }
+            EMIT_TARGET_PLAN_FD="$2"
+            shift 2
+            ;;
+        --preheld-lock-fd)
+            [[ $# -ge 2 && "$2" =~ ^[0-9]+$ && "$2" -ge 3 ]] || {
+                echo "ERROR: --preheld-lock-fd requires an inherited descriptor" >&2
+                exit 2
+            }
+            PREHELD_LOCK_FD="$2"
+            shift 2
+            ;;
         -h|--help)
             usage
             exit 0
@@ -127,6 +154,13 @@ NV=$(mktemp)    # populated from nvsw.csv: type=nvl
 DYNAMIC_AIR_IDENTITIES=$(mktemp)  # runtime hostname|authoritative eth0 MAC|runtime source (AIR + unbound Production)
 PLANNED_DEVICES=$(mktemp)  # immutable hostname set before per-device filtering
 DEVICE_FAILURES=$(mktemp)  # hostname<TAB>operation<TAB>bounded reason
+CONTEXT_FILE=""
+UNQUALIFIED_CONTEXT_FILE=""
+RESULT_FILE=""
+INFO_ARCHIVE=""
+LINK_ARCHIVE=""
+LINK_CSV=""
+V2_EMITTER=${BASE}/../../monitor/collection_v2_emitter.py
 DYNAMIC_AIR_HELPER=${BASE}/../../ztp/dynamic_air_inventory.py
 DHCP_RUNTIME_HELPER=${BASE}/../../ztp/dhcp_runtime_inventory.py
 AIR_JSON_FILE=${BASE}/../../ztp/config/isc-dhcp-server/p2p-air.json
@@ -142,18 +176,48 @@ UNBOUND_PROD_ADDED=0
 UNBOUND_PROD_SKIPPED=0
 LOCK_FILE="${BASE}/$(basename "${BASH_SOURCE[0]%.*}").lock"
 ASKPASS_FILE=""
-exec 200>"$LOCK_FILE"
-if (( LOCK_WAIT > 0 )); then
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 等待采集锁（最多 ${LOCK_WAIT}s）：$LOCK_FILE"
-    lock_args=(-w "$LOCK_WAIT")
+if [[ -n "$PREHELD_LOCK_FD" ]]; then
+    if ! python3 - "$PREHELD_LOCK_FD" "$LOCK_FILE" <<'PY'
+import fcntl, os, sys
+descriptor = int(sys.argv[1])
+opened = os.fstat(descriptor)
+target = os.stat(sys.argv[2], follow_symlinks=False)
+if (opened.st_dev, opened.st_ino) != (target.st_dev, target.st_ino):
+    raise SystemExit("inherited collection lock is not the active lock file")
+fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+PY
+    then
+        echo "[A4] ERROR: inherited collection lock is invalid" >&2
+        exit 1
+    fi
 else
-    lock_args=(-n)
+    exec 200>"$LOCK_FILE"
+    if (( LOCK_WAIT > 0 )); then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 等待采集锁（最多 ${LOCK_WAIT}s）：$LOCK_FILE"
+        lock_args=(-w "$LOCK_WAIT")
+    else
+        lock_args=(-n)
+    fi
+    if ! flock "${lock_args[@]}" 200; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 采集锁等待超时或另一实例正在运行（$LOCK_FILE）" >&2
+        exit 1
+    fi
 fi
-if ! flock "${lock_args[@]}" 200; then
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 采集锁等待超时或另一实例正在运行（$LOCK_FILE）" >&2
-    exit 1
+trap 'rm -f "$ETH" "$SPX" "$IB" "$NV" "$DYNAMIC_AIR_IDENTITIES" "$PLANNED_DEVICES" "$DEVICE_FAILURES" ${CONTEXT_FILE:+"$CONTEXT_FILE"} ${UNQUALIFIED_CONTEXT_FILE:+"$UNQUALIFIED_CONTEXT_FILE"} ${RESULT_FILE:+"$RESULT_FILE"} ${ASKPASS_FILE:+"$ASKPASS_FILE"}' EXIT
+if [[ -n "$WORKER_CONTEXT_FD" ]]; then
+    CONTEXT_FILE=$(mktemp) || exit 1
+    if ! cat <&"$WORKER_CONTEXT_FD" > "$CONTEXT_FILE"; then
+        log "[A4] ERROR: failed to read anonymous worker context"
+        exit 1
+    fi
+    # A missing dynamic resolver is not evidence of zero targets. Keep the
+    # preheld lock, but run the normal legacy collector with live discovery;
+    # never let this run publish an artifact-qualifying v2 sidecar.
+    if python3 -c 'import json,sys; value=json.load(open(sys.argv[1], encoding="utf-8")); sys.exit(0 if value.get("v2_unavailable") == "resolver_unavailable" else 1)' "$CONTEXT_FILE"; then
+        UNQUALIFIED_CONTEXT_FILE="$CONTEXT_FILE"
+        CONTEXT_FILE=""
+    fi
 fi
-trap 'rm -f "$ETH" "$SPX" "$IB" "$NV" "$DYNAMIC_AIR_IDENTITIES" "$PLANNED_DEVICES" "$DEVICE_FAILURES" ${ASKPASS_FILE:+"$ASKPASS_FILE"}' EXIT
 SWSH=${BASE}/sw-info.sh          # unified info script for ETH and IB switches
 SWLSH=${BASE}/sw-link.sh         # unified link script for SPX and IB switches
 POST_COLLECT=${BASE}/post-collect.py  # exact-archive validation + HTML refresh
@@ -402,6 +466,24 @@ append_dynamic_air_hosts() {
     local hostname ip mac _template address_source issue
 
     [[ "$TYPE_FILTER" == "air" ]] || return 0
+    if [[ -n "${CONTEXT_FILE:-}" ]]; then
+        output_file=$(mktemp) || return 1
+        if ! python3 - "$CONTEXT_FILE" >"$output_file" <<'PY'
+import json, sys
+from pathlib import Path
+context = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+rows = context["air_dynamic_rows"]
+if not isinstance(rows, list) or any(not isinstance(row, str) or "\n" in row
+                                     or "\r" in row or "\x00" in row for row in rows):
+    raise SystemExit("invalid frozen AIR runtime rows")
+for row in rows:
+    print(row)
+PY
+        then
+            rm -f "$output_file"
+            return 1
+        fi
+    else
     if [[ ! -f "$DYNAMIC_AIR_HELPER" ]]; then
         log "[AIR-DYNAMIC] WARN: helper not found: ${DYNAMIC_AIR_HELPER}; static AIR targets only"
         return 0
@@ -436,6 +518,7 @@ append_dynamic_air_hosts() {
         return 0
     fi
     rm -f "$error_file"
+    fi
 
     while IFS='|' read -r hostname ip mac _template address_source issue; do
         [[ -n "$hostname" ]] || continue
@@ -498,6 +581,24 @@ append_unbound_prod_cumulus_hosts() {
     local -a helper_args
 
     [[ "$COLLECTION_ENV" == "prod" ]] || return 0
+    if [[ -n "${CONTEXT_FILE:-}" ]]; then
+        rows_file=$(mktemp) || return 1
+        if ! python3 - "$CONTEXT_FILE" >"$rows_file" <<'PY'
+import json, sys
+from pathlib import Path
+context = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+rows = context["prod_runtime_rows"]
+if not isinstance(rows, list) or any(not isinstance(row, str) or "\n" in row
+                                     or "\r" in row or "\x00" in row for row in rows):
+    raise SystemExit("invalid frozen Production runtime rows")
+for row in rows:
+    print(row)
+PY
+        then
+            rm -f "$rows_file"
+            return 1
+        fi
+    else
     if [[ ! -f "$DHCP_RUNTIME_HELPER" ]]; then
         log "[PROD-UNBOUND] WARN: helper not found: ${DHCP_RUNTIME_HELPER}; planned Production targets only"
         return 0
@@ -546,6 +647,7 @@ for item in payload.get("devices", []):
         return 0
     fi
     rm -f "$output_file" "$error_file"
+    fi
 
     while IFS='|' read -r mac ip platform lease_state; do
         [[ -n "$mac" ]] || continue
@@ -617,7 +719,7 @@ record_device_failure() {
     local operation="$1" entry="$2" reason="$3" name host
     IFS='|' read -r name host <<< "$entry"
     [[ -n "$name" ]] || name="$host"
-    reason=$(printf '%s' "$reason" | tr '\t\r\n' '   ' | cut -c1-500)
+    reason=$(printf '%s' "$reason" | tr '\t\r\n' '   ')
     printf '%s\t%s\t%s\n' "$name" "$operation" "${reason:-operation failed}" \
         >> "$DEVICE_FAILURES"
 }
@@ -638,6 +740,9 @@ emit_collection_result() {
     python3 - "$PLANNED_DEVICES" "$DEVICE_FAILURES" <<'PY'
 import json
 import sys
+
+def truncate_utf8(value, limit):
+    return value.encode("utf-8")[:limit].decode("utf-8", errors="ignore")
 
 planned_path, failures_path = sys.argv[1:]
 with open(planned_path, encoding="utf-8") as stream:
@@ -662,7 +767,7 @@ failed_devices = [
     {
         "hostname": planned_by_key[key],
         "operation": ",".join(sorted(value["operations"])),
-        "reason": "; ".join(value["reasons"])[:1024],
+        "reason": truncate_utf8("; ".join(value["reasons"]), 1024),
     }
     for key, value in sorted(failures.items())
 ]
@@ -685,6 +790,31 @@ raise SystemExit(1 if state == "failed" else 0)
 PY
 }
 
+# A collector/archive or evidence-publication failure is a terminal v1
+# failure, never a fabricated v2 artifact assertion. The reason is fixed and
+# contains no credentials or device transcript.
+emit_failed_collection_result() {
+    python3 - "$PLANNED_DEVICES" <<'A4_FAILED_PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    planned = [line.strip() for line in stream if line.strip()]
+if len(planned) > 10000:
+    raise SystemExit("too many planned devices")
+payload = {
+    "schema_version": 1, "task": "switch_collection", "state": "failed",
+    "planned": len(planned), "succeeded": 0, "failed_count": len(planned),
+    "failed_devices": [
+        {"hostname": name, "operation": "collection",
+         "reason": "collection or evidence publication failed"}
+        for name in planned
+    ],
+}
+print("[HTTP_ZTP_TASK_RESULT] " + json.dumps(
+    payload, ensure_ascii=False, separators=(",", ":")))
+A4_FAILED_PY
+}
+
 # run_parallel <hosts_file> <cmd_template> <operation>
 # Runs cmd_template for every host in hosts_file, at most MAX_PARALLEL at a time.
 # Host-list rows use "expected_hostname|ssh_target". __NAME__ is replaced with
@@ -695,6 +825,10 @@ run_parallel() {
     local hosts_file="$1" cmd_tmpl="$2" operation="${3:-collection}"
     local pids=() unsafe=0 successful
     local entry name host command
+    if [[ "$operation" != "collection" ]]; then
+        echo "[PARALLEL][REJECT] unsupported failure operation: ${operation}" >&2
+        return 1
+    fi
     successful=$(mktemp) || return 1
     while IFS= read -r entry; do
         [[ -z "$entry" || "$entry" =~ ^[[:space:]]*# ]] && continue
@@ -767,6 +901,29 @@ parse_csv_hosts() {
             ;;
     esac
 
+    # A managed cycle reads the worker's immutable input copy, never a second
+    # live CSV revision. Dynamic runtime additions remain visible to the
+    # collector, but the v2 emitter rejects any unbound target-count delta.
+    if [[ -n "${CONTEXT_FILE:-}" ]]; then
+        local frozen_csv
+        frozen_csv=$(python3 - "$CONTEXT_FILE" <<'A4_CSV_PY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+context = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+path = Path(context["artifacts"]["input_inventory"])
+content = path.read_bytes()
+if hashlib.sha256(content).hexdigest() != context["input_inventory_sha256"]:
+    raise SystemExit("frozen input inventory digest mismatch")
+if not path.is_file() or path.is_symlink():
+    raise SystemExit("frozen input inventory is not a regular file")
+print(path)
+A4_CSV_PY
+) || return 1
+        csv="$frozen_csv"
+    fi
+
     if [[ -n "$TYPE_FILTER" ]]; then
         case "${mode}:${TYPE_FILTER}" in
             eth:ethernet|eth:eth|eth:eth_spx|eth:spx|eth:air|ib:ib|nvl:nvl) ;;
@@ -777,7 +934,7 @@ parse_csv_hosts() {
         esac
     fi
 
-    if ! awk -F',' '
+    if awk -F',' '
         function ipnum(value, parts) {
             if (split(value, parts, ".") != 4) return -1
             return (((parts[1] * 256 + parts[2]) * 256 + parts[3]) * 256 + parts[4])
@@ -867,7 +1024,14 @@ parse_csv_hosts() {
         }
     ' mode="$mode" filter="$TYPE_FILTER" eth_file="$ETH" spx_file="$SPX" ib_file="$IB" nv_file="$NV" "$csv"
     then
-        log "[CSV] ERROR: ${csv_name} must contain hostname, type, and eth0_ip columns"
+        :
+    else
+        local awk_rc=$?
+        case "$awk_rc" in
+            2) log "[CSV] ERROR: ${csv_name} must contain hostname, type, and eth0_ip columns" ;;
+            3) log "[CSV] ERROR: ${csv_name} has selected device(s) missing eth0_ip (see stderr for hostname)" ;;
+            *) log "[CSV] ERROR: ${csv_name} CSV parsing failed (awk exit ${awk_rc})" ;;
+        esac
         return 1
     fi
 
@@ -1226,7 +1390,7 @@ collect_eth_info() {
     log "[ETH] deploying sw-info.sh"
     if ! run_parallel "$ETH" \
         "scp $SSH_OPTS $SWSH ${ETH_SSH_USER}@__HOST__:${ETH_REMOTE_DIR}/ 2>&1" \
-        "eth_info_deploy" \
+        "collection" \
     ; then log "[ETH] ERROR: one or more deploys failed; skipping this phase"; return 1; fi
     if ! hosts_file_has_entries "$ETH"; then
         log "[ETH] WARN: no device survived script deployment"; rm -r -- "$dir"; return 0
@@ -1239,7 +1403,7 @@ collect_eth_info() {
               rm -f monitor/*.info
               test -s monitor/sw-info.sh || exit 1
               nohup bash monitor/sw-info.sh </dev/null >/dev/null 2>&1 &'" \
-        "eth_info_trigger" \
+        "collection" \
     ; then log "[ETH] ERROR: one or more triggers failed; skipping wait/retrieval"; return 1; fi
     if ! hosts_file_has_entries "$ETH"; then
         log "[ETH] WARN: no device survived collection trigger"; rm -r -- "$dir"; return 0
@@ -1251,7 +1415,7 @@ collect_eth_info() {
     log "[ETH] retrieving *.info files"
     if ! run_parallel "$ETH" \
         "scp $SSH_OPTS ${ETH_SSH_USER}@__HOST__:${ETH_REMOTE_DIR}/*.info ${dir}/__NAME__.info 2>&1" \
-        "eth_info_retrieve" \
+        "collection" \
     ; then log "[ETH] ERROR: some hosts returned no *.info files"; return 1; fi
     if ! hosts_file_has_entries "$ETH"; then
         log "[ETH] WARN: no device returned an info file"; rm -r -- "$dir"; return 0
@@ -1268,6 +1432,7 @@ collect_eth_info() {
 
     archive_collection_dir "$dir" "[ETH]" || return 1
     ETH_ARCHIVE="${dir}.tar.gz"
+    INFO_ARCHIVE="$ETH_ARCHIVE"
     log "[ETH] done → ${dir}.tar.gz"
 }
 
@@ -1282,7 +1447,7 @@ collect_spx_link() {
     log "[SPX] deploying sw-link.sh"
     if ! run_parallel "$SPX" \
         "scp $SSH_OPTS $SWLSH ${ETH_SSH_USER}@__HOST__:${ETH_REMOTE_DIR}/ 2>&1" \
-        "spx_link_deploy" \
+        "collection" \
     ; then log "[SPX] ERROR: one or more deploys failed; skipping this phase"; return 1; fi
     if ! hosts_file_has_entries "$SPX"; then
         log "[SPX] WARN: no device survived script deployment"; rm -r -- "$dir"; return 0
@@ -1295,7 +1460,7 @@ collect_spx_link() {
               rm -f monitor/*.link
               test -s monitor/sw-link.sh || exit 1
               nohup bash monitor/sw-link.sh </dev/null >/dev/null 2>&1 &'" \
-        "spx_link_trigger" \
+        "collection" \
     ; then log "[SPX] ERROR: one or more triggers failed; skipping wait/retrieval"; return 1; fi
     if ! hosts_file_has_entries "$SPX"; then
         log "[SPX] WARN: no device survived collection trigger"; rm -r -- "$dir"; return 0
@@ -1307,7 +1472,7 @@ collect_spx_link() {
     log "[SPX] retrieving *.link files"
     if ! run_parallel "$SPX" \
         "scp $SSH_OPTS ${ETH_SSH_USER}@__HOST__:${ETH_REMOTE_DIR}/*.link ${dir}/__NAME__.link 2>&1" \
-        "spx_link_retrieve" \
+        "collection" \
     ; then log "[SPX] ERROR: some hosts returned no *.link files"; return 1; fi
     if ! hosts_file_has_entries "$SPX"; then
         log "[SPX] WARN: no device returned a link file"; rm -r -- "$dir"; return 0
@@ -1326,6 +1491,8 @@ collect_spx_link() {
         > "${csv}.tmp" && mv "${csv}.tmp" "$csv"
 
     archive_collection_dir "$dir" "[SPX]" || return 1
+    LINK_ARCHIVE="${dir}.tar.gz"
+    LINK_CSV="$csv"
     log "[SPX] done → ${dir}.tar.gz  |  CSV → ${csv}"
 }
 
@@ -1340,7 +1507,7 @@ collect_ib_info() {
     log "[IB]  deploying sw-info.sh"
     if ! run_parallel "$IB" \
         "scp $SSH_OPTS $SWSH ${IB_SSH_USER}@__HOST__:${IB_REMOTE_DIR}/ 2>&1" \
-        "ib_info_deploy" \
+        "collection" \
     ; then log "[IB]  ERROR: one or more deploys failed; skipping this phase"; return 1; fi
     if ! hosts_file_has_entries "$IB"; then
         log "[IB] WARN: no device survived script deployment"; rm -r -- "$dir"; return 0
@@ -1353,7 +1520,7 @@ collect_ib_info() {
               rm -f monitor/*.info
               test -s monitor/sw-info.sh || exit 1
               nohup bash monitor/sw-info.sh </dev/null >/dev/null 2>&1 &'" \
-        "ib_info_trigger" \
+        "collection" \
     ; then log "[IB]  ERROR: one or more triggers failed; skipping wait/retrieval"; return 1; fi
     if ! hosts_file_has_entries "$IB"; then
         log "[IB] WARN: no device survived collection trigger"; rm -r -- "$dir"; return 0
@@ -1365,7 +1532,7 @@ collect_ib_info() {
     log "[IB]  retrieving *.info files"
     if ! run_parallel "$IB" \
         "scp $SSH_OPTS ${IB_SSH_USER}@__HOST__:${IB_REMOTE_DIR}/*.info ${dir}/__NAME__.info 2>&1" \
-        "ib_info_retrieve" \
+        "collection" \
     ; then log "[IB]  ERROR: some hosts returned no *.info files"; return 1; fi
     if ! hosts_file_has_entries "$IB"; then
         log "[IB] WARN: no device returned an info file"; rm -r -- "$dir"; return 0
@@ -1378,6 +1545,7 @@ collect_ib_info() {
     if (( count != expected )); then log "[IB]  ERROR: expected ${expected} unique info files, got ${count}"; return 1; fi
 
     archive_collection_dir "$dir" "[IB]" || return 1
+    INFO_ARCHIVE="${dir}.tar.gz"
     log "[IB]  done → ${dir}.tar.gz"
 }
 
@@ -1392,7 +1560,7 @@ collect_ib_link() {
     log "[IBL] deploying sw-link.sh"
     if ! run_parallel "$IB" \
         "scp $SSH_OPTS $SWLSH ${IB_SSH_USER}@__HOST__:${IB_REMOTE_DIR}/ 2>&1" \
-        "ib_link_deploy" \
+        "collection" \
     ; then log "[IBL] ERROR: one or more deploys failed; skipping this phase"; return 1; fi
     if ! hosts_file_has_entries "$IB"; then
         log "[IBL] WARN: no device survived script deployment"; rm -r -- "$dir"; return 0
@@ -1405,7 +1573,7 @@ collect_ib_link() {
               rm -f monitor/*.link
               test -s monitor/sw-link.sh || exit 1
               nohup bash monitor/sw-link.sh </dev/null >/dev/null 2>&1 &'" \
-        "ib_link_trigger" \
+        "collection" \
     ; then log "[IBL] ERROR: one or more triggers failed; skipping wait/retrieval"; return 1; fi
     if ! hosts_file_has_entries "$IB"; then
         log "[IBL] WARN: no device survived collection trigger"; rm -r -- "$dir"; return 0
@@ -1417,7 +1585,7 @@ collect_ib_link() {
     log "[IBL] retrieving *.link files"
     if ! run_parallel "$IB" \
         "scp $SSH_OPTS ${IB_SSH_USER}@__HOST__:${IB_REMOTE_DIR}/*.link ${dir}/__NAME__.link 2>&1" \
-        "ib_link_retrieve" \
+        "collection" \
     ; then log "[IBL] ERROR: some hosts returned no *.link files"; return 1; fi
     if ! hosts_file_has_entries "$IB"; then
         log "[IBL] WARN: no device returned a link file"; rm -r -- "$dir"; return 0
@@ -1436,6 +1604,8 @@ collect_ib_link() {
         > "${csv}.tmp" && mv "${csv}.tmp" "$csv"
 
     archive_collection_dir "$dir" "[IBL]" || return 1
+    LINK_ARCHIVE="${dir}.tar.gz"
+    LINK_CSV="$csv"
     log "[IBL] done → ${dir}.tar.gz  |  CSV → ${csv}"
 }
 
@@ -1450,7 +1620,7 @@ collect_nv_info() {
     log "[NV]  deploying sw-info.sh"
     if ! run_parallel "$NV" \
         "scp $SSH_OPTS $SWSH ${NV_SSH_USER}@__HOST__:${NV_REMOTE_DIR}/ 2>&1" \
-        "nv_info_deploy" \
+        "collection" \
     ; then log "[NV]  ERROR: one or more deploys failed; skipping this phase"; return 1; fi
     if ! hosts_file_has_entries "$NV"; then
         log "[NV] WARN: no device survived script deployment"; rm -r -- "$dir"; return 0
@@ -1463,7 +1633,7 @@ collect_nv_info() {
               rm -f monitor/*.info
               test -s monitor/sw-info.sh || exit 1
               nohup bash monitor/sw-info.sh </dev/null >/dev/null 2>&1 &'" \
-        "nv_info_trigger" \
+        "collection" \
     ; then log "[NV]  ERROR: one or more triggers failed; skipping wait/retrieval"; return 1; fi
     if ! hosts_file_has_entries "$NV"; then
         log "[NV] WARN: no device survived collection trigger"; rm -r -- "$dir"; return 0
@@ -1475,7 +1645,7 @@ collect_nv_info() {
     log "[NV]  retrieving *.info files"
     if ! run_parallel "$NV" \
         "scp $SSH_OPTS ${NV_SSH_USER}@__HOST__:${NV_REMOTE_DIR}/*.info ${dir}/__NAME__.info 2>&1" \
-        "nv_info_retrieve" \
+        "collection" \
     ; then log "[NV]  ERROR: some hosts returned no *.info files"; return 1; fi
     if ! hosts_file_has_entries "$NV"; then
         log "[NV] WARN: no device returned an info file"; rm -r -- "$dir"; return 0
@@ -1488,6 +1658,7 @@ collect_nv_info() {
     if (( count != expected )); then log "[NV]  ERROR: expected ${expected} unique info files, got ${count}"; return 1; fi
 
     archive_collection_dir "$dir" "[NV]" || return 1
+    INFO_ARCHIVE="${dir}.tar.gz"
     log "[NV]  done → ${dir}.tar.gz"
 }
 
@@ -1502,7 +1673,7 @@ collect_nv_link() {
     log "[NVL] deploying sw-link.sh"
     if ! run_parallel "$NV" \
         "scp $SSH_OPTS $SWLSH ${NV_SSH_USER}@__HOST__:${NV_REMOTE_DIR}/ 2>&1" \
-        "nv_link_deploy" \
+        "collection" \
     ; then log "[NVL] ERROR: one or more deploys failed; skipping this phase"; return 1; fi
     if ! hosts_file_has_entries "$NV"; then
         log "[NVL] WARN: no device survived script deployment"; rm -r -- "$dir"; return 0
@@ -1515,7 +1686,7 @@ collect_nv_link() {
               rm -f monitor/*.link
               test -s monitor/sw-link.sh || exit 1
               nohup bash monitor/sw-link.sh </dev/null >/dev/null 2>&1 &'" \
-        "nv_link_trigger" \
+        "collection" \
     ; then log "[NVL] ERROR: one or more triggers failed; skipping wait/retrieval"; return 1; fi
     if ! hosts_file_has_entries "$NV"; then
         log "[NVL] WARN: no device survived collection trigger"; rm -r -- "$dir"; return 0
@@ -1527,7 +1698,7 @@ collect_nv_link() {
     log "[NVL] retrieving *.link files"
     if ! run_parallel "$NV" \
         "scp $SSH_OPTS ${NV_SSH_USER}@__HOST__:${NV_REMOTE_DIR}/*.link ${dir}/__NAME__.link 2>&1" \
-        "nv_link_retrieve" \
+        "collection" \
     ; then log "[NVL] ERROR: some hosts returned no *.link files"; return 1; fi
     if ! hosts_file_has_entries "$NV"; then
         log "[NVL] WARN: no device returned a link file"; rm -r -- "$dir"; return 0
@@ -1546,6 +1717,8 @@ collect_nv_link() {
         > "${csv}.tmp" && mv "${csv}.tmp" "$csv"
 
     archive_collection_dir "$dir" "[NVL]" || return 1
+    LINK_ARCHIVE="${dir}.tar.gz"
+    LINK_CSV="$csv"
     log "[NVL] done → ${dir}.tar.gz  |  CSV → ${csv}"
 }
 
@@ -1664,9 +1837,71 @@ if ! detect_eth_environment; then
     exit 1
 fi
 
-if ! parse_csv_hosts; then
-    log "[CSV] ERROR: host parsing failed, aborting"
-    exit 1
+if [[ -n "$CONTEXT_FILE" && -z "$EMIT_TARGET_PLAN_FD" ]] && \
+    python3 - "$CONTEXT_FILE" "$ETH" "$SPX" "$IB" "$NV" "$DYNAMIC_AIR_IDENTITIES" <<'A4_SNAPSHOT_PY'
+import hashlib, ipaddress, json, re, sys
+from pathlib import Path
+context = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+plan = context.get("target_plan")
+if plan is None:
+    raise SystemExit(1)
+content = (json.dumps(plan, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=False, allow_nan=False) + "\n").encode()
+if hashlib.sha256(content).hexdigest() != context.get("target_plan_sha256"):
+    raise SystemExit("target plan digest mismatch")
+if not isinstance(plan, dict) or set(plan) != {"eth", "spx", "ib", "nv", "dynamic_identities"}:
+    raise SystemExit("target plan shape mismatch")
+for key, filename in zip(("eth", "spx", "ib", "nv", "dynamic_identities"), sys.argv[2:]):
+    rows = plan[key]
+    if not isinstance(rows, list) or len(rows) > 10000:
+        raise SystemExit("invalid target plan rows")
+    for row in rows:
+        if not isinstance(row, str) or any(c in row for c in "\r\n\x00"):
+            raise SystemExit("invalid target plan row")
+        pieces = row.split("|")
+        if not pieces or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", pieces[0]):
+            raise SystemExit("invalid target plan hostname")
+        if key != "dynamic_identities":
+            if len(pieces) not in (2, 3):
+                raise SystemExit("invalid target plan endpoint")
+            for endpoint in pieces[1:]:
+                ipaddress.IPv4Address(endpoint)
+    Path(filename).write_text("".join(row + "\n" for row in rows), encoding="utf-8")
+A4_SNAPSHOT_PY
+then
+    log "[A4] loaded frozen target plan without re-reading target sources"
+else
+    if [[ -n "$CONTEXT_FILE" && -z "$EMIT_TARGET_PLAN_FD" ]] && \
+       python3 - "$CONTEXT_FILE" <<'A4_PLAN_PY'
+import json, sys
+from pathlib import Path
+context = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+raise SystemExit(0 if "target_plan" in context else 1)
+A4_PLAN_PY
+    then
+        log "[A4] ERROR: invalid frozen target plan"
+        exit 1
+    fi
+    if ! parse_csv_hosts; then
+        log "[CSV] ERROR: host parsing failed, aborting"
+        exit 1
+    fi
+fi
+if [[ -n "$EMIT_TARGET_PLAN_FD" ]]; then
+    if ! python3 - "$ETH" "$SPX" "$IB" "$NV" "$DYNAMIC_AIR_IDENTITIES" \
+            >&"$EMIT_TARGET_PLAN_FD" <<'A4_TARGET_PY'
+import json, sys
+from pathlib import Path
+names = ("eth", "spx", "ib", "nv", "dynamic_identities")
+plan = {name: Path(path).read_text(encoding="utf-8").splitlines()
+        for name, path in zip(names, sys.argv[1:])}
+print(json.dumps(plan, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+A4_TARGET_PY
+    then
+        log "[A4] ERROR: target plan write failed"
+        exit 1
+    fi
+    exit 0
 fi
 record_planned_devices
 
@@ -1720,12 +1955,32 @@ if [[ -n "$ETH_ARCHIVE" ]]; then
     if [[ ! -f "$POST_COLLECT" ]]; then
         log "[ETH-CLOSED-LOOP] ERROR: missing post-collection script: $POST_COLLECT"
         collection_failed=1
-    elif ! python3 "$POST_COLLECT" \
-        --archive "$ETH_ARCHIVE" \
-        --environment "${COLLECTION_ENV:-prod}"
-    then
-        log "[ETH-CLOSED-LOOP] ERROR: validation report or monitor.html refresh failed"
-        collection_failed=1
+    else
+        post_args=(--archive "$ETH_ARCHIVE" --environment "${COLLECTION_ENV:-prod}")
+        activity_context=0
+        if [[ -n "$CONTEXT_FILE" ]] && python3 - "$CONTEXT_FILE" <<'ACTIVITY_CONTEXT_PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    context = json.load(stream)
+raise SystemExit(0 if "activity" in context else 1)
+ACTIVITY_CONTEXT_PY
+        then
+            # Bash does not guarantee inherited high-numbered descriptors
+            # survive the next exec. Duplicate the worker-owned regular FD
+            # onto stdin for this one child; the analyzer inherits it again.
+            post_args+=(--worker-context-fd 0)
+            activity_context=1
+        fi
+        post_rc=0
+        if (( activity_context )); then
+            python3 "$POST_COLLECT" "${post_args[@]}" <&"$WORKER_CONTEXT_FD" || post_rc=$?
+        else
+            python3 "$POST_COLLECT" "${post_args[@]}" || post_rc=$?
+        fi
+        if (( post_rc )); then
+            log "[ETH-CLOSED-LOOP] ERROR: validation report or monitor.html refresh failed"
+            collection_failed=1
+        fi
     fi
 elif (( collection_failed == 0 )) && \
     { hosts_file_has_entries "$IB" || hosts_file_has_entries "$NV"; }
@@ -1753,12 +2008,55 @@ cleanup_data_dirs \
     "${BASE}/nvsw-link"
 
 if (( collection_failed )); then
+    emit_failed_collection_result
     log "========== cron finish with errors =========="
     exit 1
 fi
-if ! emit_collection_result; then
+RESULT_FILE=$(mktemp) || exit 1
+if emit_collection_result > "$RESULT_FILE"; then
+    result_rc=0
+else
+    result_rc=$?
+fi
+if (( result_rc != 0 )); then
+    cat "$RESULT_FILE"
     log "========== cron finish: every selected device failed =========="
     exit 1
+fi
+if [[ -n "$CONTEXT_FILE" ]]; then
+    emitter_args=(
+        --context-file "$CONTEXT_FILE"
+        --legacy-result-file "$RESULT_FILE"
+        --planned-file "$PLANNED_DEVICES"
+    )
+    [[ -z "$INFO_ARCHIVE" ]] || emitter_args+=(--info "$INFO_ARCHIVE")
+    [[ -z "$LINK_ARCHIVE" ]] || emitter_args+=(--link "$LINK_ARCHIVE")
+    [[ -z "$LINK_CSV" ]] || emitter_args+=(--csv "$LINK_CSV")
+    if [[ -n "$ETH_ARCHIVE" ]] && python3 - "$CONTEXT_FILE" <<'ACTIVITY_EMIT_PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    context = json.load(stream)
+raise SystemExit(0 if "activity" in context else 1)
+ACTIVITY_EMIT_PY
+    then
+        activity_file=$(python3 - "$CONTEXT_FILE" <<'ACTIVITY_PATH_PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    print(json.load(stream)["activity"]["sidecar_path"])
+ACTIVITY_PATH_PY
+        ) || exit 1
+        emitter_args+=(--activity "$activity_file")
+    fi
+    # The v2 publisher has no SSH role. Give it a closed, credential-free
+    # environment even when the collector is in an askpass fallback session.
+    if ! env -i PATH="$PATH" LANG=C.UTF-8 PYTHONDONTWRITEBYTECODE=1 \
+        python3 "$V2_EMITTER" "${emitter_args[@]}"; then
+        emit_failed_collection_result
+        log "========== cron finish: v2 evidence publication failed =========="
+        exit 1
+    fi
+else
+    cat "$RESULT_FILE"
 fi
 if [[ -s "$DEVICE_FAILURES" ]]; then
     log "========== cron finish with device warnings =========="

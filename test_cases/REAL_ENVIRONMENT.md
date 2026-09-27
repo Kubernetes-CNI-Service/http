@@ -118,6 +118,32 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 未绑定 NVOS 不得进入正式 IB/NVLink 完成状态或触发错误 SSH。
 - factory reset、强制 ZTP 和 image/version 分支均形成新的轮次证据。
 
+## TC-REAL-REQ10B-DAY0-KEYS-001 — Day-0 服务与公钥的真实管理边界
+
+- 类型：scenario / real-environment；对应需求 10B.5–10B.8、10B.11 及 B10-8。状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。这张卡只登记 owner AIR/prod 验证阶段需要取得的证据；本卡、离线 direct/workflow 通过或草稿本身均不授权现在连接、配置、重置任何设备、服务、Docker 或生产环境。
+- 自动化先决：当前 exact candidate 的 `test_req10b_services_keys_contract.py`、`test_req10b_services_keys_workflow.py`、`test_req10b_global_link_contract.py`、`test_req10b_global_link_workflow.py` 和完整 manifest 映射已通过 Codex 落地整树 full/check；Claude 后续在逐字节未变整树上的 `--no-approve` full 已通过。真实测试不代替这些门禁。记录 HEAD/tree、全受管路径清单与摘要、平台/Python/NVOS 版本、命令选择、两轮 full 证明身份，不以旧候选或项目目录名代替逐字节绑定。
+- 风险与目标：证明项目切换时 setup/unsetup 的两层 IB 公钥链接不会遗留旧项目 key，管理端 P1 生成的 v4 target cache 对每把 key 的内容、指纹和来源有约束；OOB Leaf 上的 Ethernet P2 不需要 PyYAML、`01-global.yaml` 或 `ssh-keygen`；真实 `NestedResponder` 只安装到目标 IB 的 `authorized_keys`，不改写项目 `mgmt-server.pub` 或笔记本 key，也不把单把私钥的回连结果冒称所有 key 可回连。
+- 前置条件：owner 对**精确**隔离 AIR simulation 或可恢复的测试交换机、管理服务器、OOB Leaf、目标 IB、项目输入快照及操作窗口另行书面 go；不得默认指向生产设备。先冻结设备身份、当前管理连通性、`nv config show -o commands`、IB `~/.ssh` 和 `authorized_keys` 的安全元数据/指纹、setup manifest、两层链接 `lstat/readlink`、target cache 元数据、审计日志与恢复点。使用本案临时生成的管理和笔记本测试 key；私钥只留在各自受控主机，原始私钥、公钥全文、完整 cache 和 `authorized_keys` 不回传，只回传允许的 SHA-256/SSH 指纹、mode、owner、计数及脱敏差异。事前确认独立恢复路径、保留现有登录方式与断连回退责任人；不满足即 BLOCKED，不尝试破坏性负例。
+- 正向步骤 1（setup/切换）：在已授权的测试项目 A 中经正式 load/`01-a-setup.py` 注入、发布非空 `laptop.pub`、`mgmt-server.pub` 与一把额外 `.pub`，保留一个 0 字节占位。记录 `ztp/config/publickey` 与 `infiniband/publickey` 中同名链接的来源、目标和 manifest；`infiniband/bringup/xdr-initial-setup/publickey` 必须是 Git 跟踪的相对桥 `../../publickey`。切到独立项目 B（不同 key 集）后，两处 setup 托管目录都只保留 B 的非空 key 链接，A 的过期链接消失；运维自建普通文件/非本轮托管对象保持原样。缺少一级项目链接或公钥时，公钥阶段明确记 skipped，不妨碍合法 Day-0/服务阶段。只读确认 `mgmt-server.pub` 仍由 load 准备、initial-setup 未写该项目文件。
+- 正向步骤 2（P1/cache）：在管理端通过受支持入口生成 v4 target cache；逐个源 `.pub` 以独立 `ssh-keygen -l` 校验其**每一行**，再比较 cache 中的 key 内容摘要/指纹与冻结源，不回传 key 全文。替换或新增任一 `.pub`（在隔离测试项目）后，证明旧 cache 被判 stale 并重建，目标只得到新 key 集；0 字节、格式坏、混合一条有效加一条 `ssh-keygen` 无效的 key，以及旧版本/篡改 cache，均须在任何 IB 授权文件写入前拒绝或明确跳过，不能借另一行有效而通过。删除 `01-global.yaml` 只使服务阶段按合同跳过，不使 Day-0 或可用公钥安装崩溃。
+- 正向步骤 3（真实 P2/安装）：在已授权隔离 OOB Leaf 使用由管理端生成并验证的 v4 cache 走真实 Ethernet P2；该叶无项目 `01-global.yaml`、PyYAML 和 `ssh-keygen` 可用时仍须按 cache 完成受支持服务命令与 key 安装，且以受控命令审计证明确实未调用 `ssh-keygen`（不能仅凭 PATH 声称未调用）。对一台已完成 Day-0 的 IB 重跑：Day-0 不重写，服务阶段仍补齐缺失的 DNS/NTP/timezone；服务阶段作为独立 apply/save 事务，失败仅记该设备并继续其他设备，且不回滚已生效的 Day-0 地址/hostname。对全清/仅服务项清除两种恢复状态分别留证；设备差异值按 B10-9 只报告，不以 `--force` 覆盖。真实 `NestedResponder` 进入正确 IB 用户会话，把两把固定 key 和额外 key 按 key identity 装入 `authorized_keys`，`.ssh` 为 0700、文件为 0600、既有未知行/注释/选项保留。重复运行和只改注释不得产生重复 identity；原子发布中断不得留下部分文件或临时文件。
+- 验证边界：只有本机确有对应私钥的管理 key 可从管理服务器执行真实纯公钥回连并比较目标身份；笔记本 key 与其他无本地私钥的 key 只能判“已安装、未验证”，除非 owner 另在持有其私钥的主机明确授权独立回连。不得为做验证复制笔记本私钥到管理服务器、OOB Leaf、cache、日志或证据包。连接失败、错误目标身份、未按 identity 去重、权限错误或原有授权行丢失均 FAIL/BLOCKED，不得用报告文本降格为 PASS。
+- 负例及恢复：在隔离项目分别测试错项目链接、悬空/恶意链接、普通文件占位、旧 key 残留、cache 摘要/版本/源 mtime 不匹配、单行坏 key、IB 登录中断、`authorized_keys` stage/rename 故障及重复运行；每一例保存操作前后允许的文件身份/摘要、命令退出码、设备身份和事务日志，证明错误时不改写其他项目、其他设备或既有授权文件。不得对生产 key 或真实保留登录路径注入故障。最后以正式 `02-unsetup.py`/受支持恢复流程清理本案 setup 托管两侧链接和测试 key，保留运维自建对象；逐项复核 manifest、cache、IB 授权文件、设备配置、连通性和恢复点。无法确认恢复则保留隔离并报告 BLOCKED，不做盲目删除。
+- 判定与证据：分别列出 setup双目录、cache P1、Ethernet P2、真实 NestedResponder、管理私钥回连、笔记本安装但未验证、负例、unsetup/恢复的 PASS/FAIL/NOT RUN；任一子项未运行不得汇总整卡 PASS。保存完整 argv/exit、脱敏 stdout/stderr、时间线、前后 SHA-256/SSH 指纹和权限、设备/NVOS/平台身份、cache 版本、源和目标项目绑定、独立见证签名；不保存密钥材料。此卡不关闭 AIR/prod 其他服务、ZTP、Docker、H、F01 或 release 门禁。
+
+## TC-REAL-REQ10C-AUTO-001 — 自动部署与同 UID crontab 静默验证
+
+- Type: real-environment / owner-authorized isolated AIR-management validation; requirement REQ10C §10C.1–10C.9, dependent on REQ10B key/service stage.
+- Status: OPEN / NOT RUN. Hermetic tests do not satisfy real cron UID, OOB Leaf, or IB device claims.
+- Risk: `--auto` can install a 10-minute user crontab and retain `auto.env` containing credentials; it can modify a test IB switch and OOB Leaf. Never run against production or uncontrolled user crontab.
+- Preconditions: owner explicitly selects an isolated management host, test project, OOB Leaf and IB devices; records authorized user/uid, rollback access, exact CSV/P2P hashes, current device states, and a protected evidence directory. First confirm the landed whole-tree Codex and same-byte Claude full proofs plus the local REQ10B stage tests; the **real** REQ10B service/key stage remains part of this owner-run validation, not a pre-validated fact. Preserve initial user crontab, project state, device config, and credential-file metadata without copying secret values into evidence. One intentionally foreign crontab line is preserved as a negative control.
+- Same-user crontab writer exclusion: before **each** REQ10C install, unattended auto-removal, and `02-unsetup.py` cleanup, inventory every other process, automation, service, and operator session that can invoke `crontab` for the same UID. For an unattended run, keep the external exclusion continuously in force from enrollment until its auto-removal completes; a one-time check at setup cannot witness an unknown future cleanup instant. Record writer owners, identities, quiescence start, and a witness that their crontab **writes remain fully silent for every entire read–modify–write interval**; keep the exclusion in force through the final `crontab -` completion and before/after byte comparison. The project-owned `auto-crontab.lock` only serializes this project's three operations and cannot exclude noncooperating writers. If any other writer cannot be held silent, becomes active, or its state is unknown, STOP before the operation (or mark an in-flight result unproven and preserve evidence); do not infer exclusivity from a second `crontab -l` read or a post-write check. For the unattended mode, release the external exclusion only after the final auto-removal and foreign-entry comparison are recorded; for separately authorized unsetup, release it only after that cleanup transaction and comparison.
+- Positive sequence: first interactive `--auto` handles currently ready IB; if all CSV IB are already configured it exits without cron or secret file. Otherwise it prints forced-password-change and credential-retention warnings, installs exactly one own `*/10` line under the invoking UID and creates one owner-only `0600` `auto.env`. During subsequent no-TTY invocation, a newly available OOB Leaf is key-installed using its first-login password; later logins prefer key and use the authorized password fallback only on key failure. An IB device becoming reachable is configured Day-0, then services, then key; every round takes fresh OOB interface/network and candidate/cache provenance. When all CSV IB are configured, only the own cron line and own `auto.env` are removed, foreign crontab entries and unrelated files remain unchanged.
+- Fail-closed sequence: inject symlink/hardlink/wrong-owner/world-readable/oversized/duplicate/unknown-key `auto.env`; each stops before network or device mutation. Inject one transient port/key failure (later round retries) and one partial/terminal Day-0 state (same input does not repeat unsafe mutation; changed CSV/P2P bytes trigger re-evaluation). Launch two overlapping rounds and prove one cannot perform any device operation while the other holds the lock. Induce crontab write/cleanup failure and prove visible non-success with recoverable owned state. Inject no valid `O_NOFOLLOW`/`O_CLOEXEC` support only in the hermetic environment, because changing a real host's OS flags is not a safe physical action.
+- Evidence: exact command/exit-time/PID/uid, redacted stdout/stderr and cron log with no secret values, before/after `crontab -l` byte hashes and own-line count, the three separate same-user writer-inventory/quiescence/restore receipts, `auto.env` `lstat` type/mode/uid/nlink/size/hash only, CSV/P2P and cache origin hashes, OOB/IB nonsecret fingerprints and config diffs, stage-order receipt, lock contention trace, negative-control foreign-entry byte equality, clean-up receipt. Bind each to the same landed candidate and selected device identities.
+- Cleanup: stop own watcher and remove only the own crontab entry; invoke real `02-unsetup.py` scoped to the test project, verify owned state deletion and foreign retention; restore isolated device config and original crontab from the protected baseline; destroy test credential file without publishing its contents. Any cleanup failure remains OPEN and blocks validation.
+- Automated coverage intended: REQ10C direct `test_req10c_auto_contract.py` plus multi-real-script `test_req10c_auto_workflow.py`; candidate direct/workflow tests are locally ported; exact landed full proofs and owner real-environment execution remain OPEN.
+
 ## TC-REAL-MONITOR-001 — 轮次、重启与跨时区
 
 - 手工 ZTP/reset 前后改变 timezone，验证 network/version 不会永久等待。
@@ -161,6 +187,13 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - preview 必须以 selector-normalized `nv config show` 对比 current latest 并显示变化路径。
 - receipt 只作为审计/TOCTOU 证据，不能掩盖运行态漂移。
 - preview 后修改运行配置或发布 release，confirm 必须拒绝旧指纹。
+- 手工操作回执的目录重绑定验证仍为 **OPEN / NOT RUN**：仅在隔离 0700 项目副本和
+  同账号测试写者可完全静默的前提下，记录 `manual-ztp.py`、`12-ztp-monitor.py`、
+  `result.json` 及父目录的 inode/SHA256；在回执临时文件刷盘后、发布前把该 run 目录
+  改名并将原路径重绑定到隔离攻击目录。预期发布 fail closed，攻击目录没有正式
+  `result.json`，monitor 不将其计为新一轮；正常回执仍可被 monitor 读取。
+  保存命令、退出码、目录链与 monitor 输出；只清理本案私有副本，不触碰当前项目、
+  真实设备或生产回执。风险是服务侧可能把错误回执当成真实手工操作结果。
 
 ## TC-REAL-TIME-001 — 时间检测与同步按钮
 
@@ -441,24 +474,27 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   不得使用生产密码录屏或把密码写入证据。
 - 正向步骤：首次打开 Switch Status，证明 Auto-Refresh 默认关闭。分别执行“信息收集”和
   “配置备份”，并在其中一项仍运行时启动另一项，证明收集与备份可以同时运行。核对两类成功后
-  各自进入 10 分钟冷却，且一个冷却不会阻断另一类型。分别给“持续收集”和“持续备份”设置不同
-  的 10–1440 分钟周期并启用；两者必须独立等待自己的同类型冷却，然后可以并行产生新的 Switch
-  归档和 YAML backup，随后各自进入下一轮 scheduled。确认四个按钮的解释与按钮相邻：手工项
+  各自进入 10 分钟冷却，且一个冷却不会阻断另一类型。分别给“持续收集”和“持续备份”设置各自
+  范围内的不同周期并启用；两者必须独立等待自己的同类型冷却，然后可以并行产生新的 Switch
+  归档和 YAML backup，随后各自进入下一轮 scheduled。持续收集只接受 10–240 分钟，持续备份只接受
+  60–1440 分钟，且两条车道的默认值分别等于 10 与 60。确认四个按钮的解释与按钮相邻：手工项
   为“单次执行；开始后不可中断”，持续项为“周期执行；停止只取消后续轮次”。两个手工按钮在
   点击后均显示运行中且不可用，直到各自任务收口；不得出现手工停止动作。
 - 周期 authority 与边界证据：分别在 Native 服务和 container worker 中记录实际加载的
   `<HTTP_ROOT>/tools/project_contract.py` 路径、owner、mode、size/SHA-256，并证明 worker 消费其
-  `MIN_CONTINUOUS_INTERVAL_MINUTES`，不存在本地 fallback。对收集与备份两种 start 请求各自实测
-  9、10、1440、1441：9 与 1441 fail closed，10 与 1440 接受并精确转换为分钟乘 60；同时证明
+  `MIN_CONTINUOUS_INTERVAL_MINUTES`、`MAX_CONTINUOUS_INTERVAL_MINUTES` 及由它们乘 6 导出的备份边界，
+  不存在本地 fallback。分别实测收集 9、10、240、241 与备份 59、60、1440、1441：边界外 fail
+  closed，边界值接受并精确转换为分钟乘 60；同时证明 CGI、worker 与生成页面消费/渲染同一 authority，
+  页面 JavaScript 依据各自输入框的已渲染 min/max 校验，而非共享 10–1440 字面量；同时证明
   `switch_collection_gate.py` 的 collection cooldown、worker 的 YAML backup cooldown 和这个
-  admission floor 是三个独立量，不能互相派生或共享状态。`generate-monitor-html.py` 中的输入提示
-  值只是非权威 UX 副本；CGI 静态 pin 与 worker admission 才是 fail-closed 边界。
+  admission floor 是三个独立量，不能互相派生或共享状态。
 - 互斥与安全证据：持续模式只禁用同类型手工按钮。直接构造同类型的同源 POST 必须返回 409，
   跨类型 POST 必须仍可下发。记录 collector argv、`/proc/<pid>/environ`、worker 状态/日志和 Unix socket
   元数据，确认密码不在 worker/collector argv、任何子进程 environment、状态文件、日志
   或 HTTP 响应中；单轮 SSH 密码只进入 inode 绑定的 `0600` FIFO，askpass 环境只含 FIFO
   路径和 inode 身份。证据不保存 POST body、FIFO payload 或任何子进程 environment 原文。
-  时间间隔 9、0、1441、非数字、重复字段、超长/换行密码都必须 fail closed。
+  收集时间间隔 9、241、备份时间间隔 59、1441，以及 0、非数字、重复字段、超长/换行密码都必须
+  fail closed。
 - 部分失败证据：在收集和备份各自的测试轮中保留至少一台可访问设备，并让另一台测试设备不可达
   或拒绝认证。确认可访问设备仍完成采集/备份并发布，页面显示“完成但有警告”，列出失败设备、
   阶段和原因，且部分成功进入冷却并允许持续模式下一轮继续。再在隔离清单中让全部目标不可达，
@@ -779,6 +815,29 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   经批准的显式轮换，不复制旧文件覆盖；删除临时 HAR/curl 文件并确认服务仍健康。该案例不测试
   Internet 暴露，TLS/mTLS 仍为独立 blocker。
 
+## TC-REAL-MONITOR-AUTH-HELPER-PIN-TRANSITION-001 — 控制凭据 helper 的 pin 升级与回滚
+
+- 状态：**NOT RUN / REAL_ENV REQUIRED**。只在 owner 批准的隔离、可回滚 Ubuntu Native 与
+  Docker contract-3 管理 VM 执行；本机单元与 workflow 不能证明安装过渡期的服务状态。
+- 前置条件：绑定候选 HEAD/tree、完整交付包和已安装包身份，并独立计算
+  `tools/control-auth.py` 的 SHA-256。旧包 helper/pin 为
+  `5a133a353cb7ac7af5be0be71b4ef85b41345716103d6e28590140638ee11038`；新包 helper/pin 为
+  `f5cea5266ab808250b718250a8a73d7d6f6452a199b97fa500643d7ed9e988db`。
+  同时留存五处生产 pin 的脱敏位置/值、现有服务健康状态和 auth 文件的
+  inode/hash/mode/owner；不得记录密码、Authorization 或 auth 文件内容。
+- 步骤：先停止外部控制流量并冻结并发安装/部署，在 VM 快照的隔离副本分别制造“旧 helper +
+  新 pin”和“新 helper + 旧 pin”两种 mixed-version 组合。确认 Native load/setup/teardown、
+  Docker activate 与 Monitor control CGI 各自的真实 hash 门禁拒绝不匹配组合，不能靠动态计算
+  helper hash、改写 pin、禁用验证或复制 auth 文件跨越拒绝。恢复快照后，仅以已批准的完整
+  交付/部署事务一起安装新 helper 与五处新 pin；重新计算已安装 helper SHA，验证
+  validate/status、Native 与 Docker 启动/控制入口和已轮换凭据仍保持原有语义。
+- 回滚与判据：对新包启动/健康失败只恢复**整份旧包及其旧 pin**或 VM 快照，绝不单独回滚
+  helper 或某一个消费点；若恢复后的 helper/pin 仍不一致，服务保持安全停止并标记 BLOCKED。
+  auth 文件不是代码回滚对象，不复制、不覆盖、不 chmod；通过只读 validate/status 和原有
+  凭据的脱敏状态证明其身份与权限连续。保存 exact 版本/hash、五处拒绝/通过结果、服务状态、
+  回滚时间线及清理后快照身份；清理仅限隔离 VM 和脱敏证据。未实测升级、两种拒绝与回滚
+  不得宣称本案例通过，更不能将其用于生产首测。
+
 ## TC-REAL-MONITOR-AUTHORITY-001 — 固定 Monitor cache authority 与生命周期保留
 
 - 前置条件：隔离 Ubuntu 22.04/24.04 Native 与 local-rootful Docker contract-3 管理服务器各一套；
@@ -1026,6 +1085,36 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   中转和本机临时副本但保留受管 finished record。传输对象含私有配置/密码散列，必须使用 ACL 受限路径，
   不得上传公共制品库或记录 payload 内容。
 
+## TC-REAL-FINISH-OFFLINE-RESTORE-001 — 离线 finished record 到新 DAY0 项目恢复
+
+- Case ID：`TC-REAL-FINISH-OFFLINE-RESTORE-001`；类型：real-environment / disaster-restore /
+  failure-injection；状态：**NOT RUN / REAL_ENV REQUIRED**。本机合成测试与 relay-import 案例只证明
+  局部合同；前一案例停在 immutable record 发布，并未证明新项目的离线恢复。
+- 前置条件：仅在 owner 批准的一次性、断网 VM 和独立私有可擦写磁盘上操作，使用虚构项目、
+  无客户配置/凭据的固定夹具及快照；确认没有网络路由或真实管理服务，禁止将测试盘挂到生产主机。
+  冻结同一候选 HEAD/tree、源码、测试、manifest、runner 完整证明、源项目树、目标空 DAY0、
+  finished 状态目录、文件系统类型/容量/权限和各目录前像。测试操作者保留独立恢复通道，
+  并把负例所需的文件、符号链接和故障注入限制在可回滚 VM/私有盘内。
+- 正向步骤与预期：在隔离源 VM 用受管合成项目完成真实 finish，独立重验 bundle 与 pre-stop/final
+  delta；断网后逐字节复制 bundle 到私有盘和恢复 VM，每跳稳定重开并记录 size/SHA-256，不重打包。
+  在恢复 VM review-only 后将 bundle 导入唯一不可变 `Finished-projects/<project>/<record-id>`，
+  再由正式显式 rehydrate 入口生成新的 DAY0 项目名。独立枚举 record inventory 的每项
+  path/type/mode/size/SHA-256、目录/链接语义，与新项目逐项对应；记录源 bundle、import receipt、
+  immutable record、rehydrate receipt、目标项目及 parent 目录的 inode/大小/摘要和时间线。
+  核对默认配置与历史记录的选择：新项目只恢复受支持的 default/history，既有记录及目标项目不被
+  覆盖，源项目、finished record、默认项与历史条目的摘要保持前像；新 DAY0 存在不等于可 load。
+- 负例与故障注入：分别在隔离副本篡改/截断 bundle、修改 record 单条内容或 mode、制造同名目标
+  冲突及 staged 目录 symlink-swap；在 stage 创建 `O_CREAT`、文件复制、fsync、目录 fsync 和
+  原子发布边界中断。每例须在任何错误目标写入或 receipt 完成前 fail closed：目标若原本存在则
+  inode/字节不变，外部哨兵不变；新目标失败后不得留下貌似完成的项目。并发重试只可按受管幂等
+  合同处理，不允许手工改 receipt、批准账本或借早期局部 GREEN 消除同 UID 竞态缺口。
+- 证据、清理与风险：保存脱敏命令、退出码、断网证明、每跳和逐项摘要、inode/mode、receipt、
+  注入点、前后快照与删除清单；不保存原始配置、私钥、密码、token 或客户拓扑。每个负例恢复 VM/
+  私有盘快照；正向结束后按受管步骤删除新建测试项目和传输副本，核对源/record/default/history
+  前像及无临时 stage、外部写入和后台进程残留。本案例绝不运行 load、sync、服务启动或生产动作。
+  任一文件身份、竞争窗口、故障拒绝、默认/历史项或清理证据缺失均保持 OPEN/BLOCKED；D57/D58
+  stage-rebind 修复与同树全量证明另行验证，本卡不宣告它们已通过。
+
 ## TC-REAL-FINISH-RESUME-001 — 阶段故障恢复不重复停止或发布
 
 - 状态：**NOT RUN / REAL_ENV REQUIRED**。在上述 Native 与 Docker disposable VM 各执行一次；为每个阶段
@@ -1114,6 +1203,68 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 故障与清理：在实验环境保留不支持模式的拒绝案例；通过独立 console 恢复原配置并核对全部原链路。
   仅清理本项生成的临时制品，保留脱敏报告。不在生产设备首测，也不由测试 runner 自动下发。
 
+## TC-REAL-REQ14-ACTIVE-PROVENANCE-001 — 09:15 工作簿到当前发布的逐源绑定
+
+- Case ID：`TC-REAL-REQ14-ACTIVE-PROVENANCE-001`；类型：real-input / local transaction /
+  scenario；状态：**PARTIAL / PRIVATE REAL-INPUT POSITIVE + NINE NEGATIVE PASS;
+  SOURCE-YAML FULL-PARENT PRIVATE PASS; LIVE RUNTIME OPEN**。
+  历史 4,536 条 sidecar 与 436 个
+  parent 的对账已经完成，不由本案重开；本案也不以 8x 硬件接受性作为新门禁。合成 direct/workflow
+  测试、旧日期的 AIR/DOT、或从当前 YAML 反推预期值，都不能替代真实 09:15 source-to-release 证明。
+- 2026-09-25 私有正向证据：一次性隔离 09:15 Stage H 的 P2P、DHCP、Cumulus child、publisher、
+  parent 五步均 exit 0；真实 sidecar 4,536 条、child 两组各 539 份 YAML、432/436 原 parent
+  不变与 4/436 预期变动、当前 parent receipt/provenance 均经冻结 oracle 核对。完整私有收据
+  SHA-256 `bfc4144da8a6b049fc5c2e501acfeb6bcb2400ac21658ad1f3394f2717fb06a1`；
+  原件/候选 43+7 文件、15 条 stage 链接及隔离外 sentinel 后像一致。未写 live、设备或生产。
+  本项仅关闭本地真实输入正向子门禁，不证明 AIR/prod、整树验收或部署许可。
+- 2026-09-25 私有负向证据：从上述冻结 Stage H 独立复制的 11 个一次性副本中，C0
+  无变异 `publish=False` 验证和 C1 精确 `source_yaml_b64` 直接正控通过；N1–N9 九个
+  负例均在直接溯源和完整父流程中以对应 `LoadError` 拒绝，父回执与隔离外 sentinel
+  逐字节不变。覆盖错误 profile、缺失/等长改写 LLDPQ、同字节改 workbook basename、
+  等长改 inventory/port mapping、child YAML 冲突、伪造 metadata 摘要、内部摘要一致但
+  source YAML 与 child 发布字节不一致。脱敏汇总报告 SHA-256
+  `9336a3bc779708ad11504784986f0b50b07b60747c8f9247995d0a22ac65386a`；
+  原始正例树和回执后像仍与冻结身份一致。N4 证明新 basename 的派生 sidecar 缺失时
+  fail closed，不单独证明密码学 basename 绑定；C1 仅是直接正控，须与下述 C2 完整父流程
+  正向提交分别计数，不能把本地负例通过写作 REQ-14 验收。
+- 2026-09-25 私有 source-YAML 完整父流程正控：另一个一次性隔离 C2 副本仅改设备 CSV
+  的合法 source/fields 摘要与同一设备在 P2P sidecar 中的 13 条 profile；原 sidecar 其余
+  4,523 条顺序和内容不变。直接溯源与复制的 parent validate→prepare→commit 均 exit 0，
+  新 parent receipt 的 source-YAML 摘要仅绑定该设备的已发布 child 字节；原 104 台发布
+  设备全部不变，generator profile 仅移除该设备，其余 103 台逐项不变。最终持久变更
+  限定为隔离副本的 CSV、sidecar 与 parent receipt 三个文件，原正例树及隔离外 sentinel
+  仍逐字节不变。脱敏 C2 收据 SHA-256
+  `72985e000ab0a6f2862f5d84ed9486d1752e15e1efa7eef7408711f04377ccd9`；
+  新私有 parent receipt SHA-256
+  `a1d8a6726f8e158a6bd77d132934748e145e6aea12c942375fde22683368680d`。
+  这只关闭本地 source-YAML 完整父流程正控，不证明当前 live 09:15 runtime 发布、AIR/prod、
+  整树验收或部署许可；上述真实环境门禁继续 OPEN。
+- 前置条件与隔离：只在 owner 已授权的本机私有隔离项目副本操作，不改 live dirty root、原始工作簿、
+  当前发布链接或设备。先以 inode、大小、SHA-256 绑定所选真实工作簿及其项目根 basename、
+  `p2p.xlsx` 相对链接文字、inventory、port mapping、LLDPQ template、generator/load 源码、
+  manifest、候选 HEAD/tree 与隔离副本前像；固定显式 legacy-columns 选择。缺任一输入、
+  链接逃逸或候选未冻结即 STOP。客户工作簿和拓扑原文仅留在私有证据域。
+- 正向链：对隔离副本运行真实 P2P producer，再运行真实 Cumulus child generator 与 parent
+  load publisher，不用手写 sidecar、DOT、child manifest 或 parent current-release 冒充生产者。
+  逐字节冻结 `*-lldpq.dot`、`*-splitter-profiles.json`、所选 workbook/inventory/port mapping、
+  发布 child YAML/manifest、parent current-release；独立解析 sidecar 的 source_workbook 与四个
+  source SHA、每个相关 `(device,parent,profile)`，并与发布 YAML 的 breakout 和来源行对应。
+  四个已知目标 parent 变化须由事先保存的真实输入 oracle 判定，其他 parent 不变；记录
+  prod 与 with_desc 两组各 539 份实际 YAML consumer 覆盖，以及 432/436 不变、
+  4/436 有意变动的独立比较结果，不能把
+  历史 4,536/436 对账当作本次发布结果。parent release_id 必须绑定本次 source identity，
+  消费者只能选择该次发布的 child/parent，不能选 09/06 DOT 或 09/10 AIR 旧制品。
+- 负例与事务：在可丢弃副本中分别于 child 生成后、parent commit 前替换合法形状但错误
+  profile 的 sidecar、移除或同大小改写 LLDPQ、更换同字节不同 basename 工作簿、改写
+  inventory/port mapping、使 child YAML 与 sidecar profile 冲突，均须在 parent 提交前
+  fail closed 且旧 current-release 字节不变。单独用合法 `source_yaml_b64` breakout
+  作正例：只有 CSV source/fields 摘要及发布 child 字节一致时才允许无 generator sidecar；
+  伪造或陈旧 metadata 不得成为绕过途径。故障注入不得写真实项目或生产设备。
+- 证据与清理：记录脱敏 argv、退出码、各检查时间、文件 stat/SHA、源行定位、前后
+  release identity、拒绝原因和隔离副本清理核对；保留原始客户输入仅在私有受控域，不把
+  拓扑正文或凭据写入公共日志。此案证明本地真实输入的生成/发布来源，不证明 AIR/prod
+  设备接受性；任一链条或拒绝断言缺证据时保持 OPEN。
+
 ## TC-REAL-CONFIG-SYNC-001 — 受保护完整配置同步与会话连续性
 
 - 状态：**NOT RUN / REAL_ENV REQUIRED**。自动化仅在隔离 fixture 中验证规范化门禁、完整回执、
@@ -1143,15 +1294,34 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   collector 及合成 inventory/sidecar 不构成真实交换机、真实 archive 数量或真实 IB/NVLink 内容证据。
 - 前置条件：仅在隔离管理 VM 与批准的可回滚实验交换机执行，冻结源码/测试/manifest SHA-256、项目
   identity、scope、所选 inventory 和 `monitor/status/collection-cycles` 前置树摘要；为 coordinator 及
-  全部 family child 提供独立进程观测和有界 TERM/KILL 清理能力，不使用生产设备或生产凭据。
+  全部 family child 提供独立进程观测和有界 TERM/KILL 清理能力，不使用生产设备或生产凭据。先独立
+  冻结每个 slot 的 CSV、AIR inventory/lease/JSON、Production lease/log 或 journal-derived rows 的
+  SHA-256，并确认 cron.lock 从无采集 plan 阶段连续持有至 full 阶段；动态来源不具备可信预运行快照时
+  必须退回 nonqualifying v1，不能补写 v2。Production 未提供显式 DHCP log 时必须由管理 VM 在 cron
+  前成功读取并冻结 journal 原文字节，之后只以该私有 log 快照驱动 runtime resolver；resolver 脚本、
+  lease 或 AIR JSON 缺失均不得等同于“零动态设备”。
 - 步骤与预期：分别运行 AIR、Production 和 all scope，证明实际 slot 顺序、每个真实 collector 的一次
   执行、archive/CSV/info/link 的真实数量和内容类别、inventory binding、专用 coordinator PID/boot/start
-  identity，以及 completion 早于 cooldown/UI success。另在 launch 后分别保持 coordinator 存活、令
+  identity，以及 completion 早于 cooldown/UI success。核对私有 plan/context FD 在全程不被替换、
+  seek 或重新读取动态源，验证 v2 sidecar 的有序 slot/role、输入快照散列、archive/manifest 身份及
+  worker 独立资格判定；伪造 digest、路径逃逸、跨阶段源变更和 archive 失败均不得发布 v2 权威证据。
+  另在 launch 后分别保持 coordinator 存活、令
   process inspection 不可用、再 SIGKILL；前两者必须 HOLD 且所有 durable bytes 不变，只有精确 dead
   binding 才能发布 `cycle_crashed`，其后新 cycle 使用下一 sequence。busy/cooldown/取消须证明 witness、
   records 与 sidecar 逐字节不变。
+- 发布父目录隔离负例：只在上述可回滚 VM 的私有 status 副本中，分别把 `monitor/status`
+  换成指向隔离哨兵目录的符号链接、把 `.publish.lock` 换成指向哨兵文件的符号链接
+  或硬链接，
+  以及在发布前重绑可见的 `monitor/status` 路径。前两例必须在发布前拒绝且哨兵字节
+  不变；重绑例不得把权威 sidecar 发布到**新绑定**的可见目录。若重绑发生于最终
+  路径检查之后，只允许 FD 绑定的原目录承接 rename；发布后路径复核必须拒绝并清理
+  该次写入，不能把它当作当前可见目录的成功证据。记录发布前后父目录 dev/ino、
+  sidecar 摘要、拒绝类别和哨兵摘要；先停
+  止本案 collector，再从快照恢复私有 status 树。此故障注入绝不在 live/生产
+  `monitor/status`、共享服务或真实客户项目执行。
 - 证据：只保存脱敏 identity、sequence、cycle_id、PID/boot/start 摘要、record/tree SHA-256、slot/outcome
-  计数、archive 成员类别与退出码；不得保存设备输出、拓扑正文、密码、私钥或客户地址。AIR 无 IB/NVLink
+  计数、冻结输入/plan/sidecar SHA-256、archive 成员类别与退出码；不得保存设备输出、拓扑正文、密码、
+  私钥或客户地址。AIR 无 IB/NVLink
   的事实不得推广为 Production 内容为空，fixture v1 nonqualifying 结果不得宣称 artifact authority。
 - 清理与风险：停止 coordinator 进程组并核对无遗留 collector，保留只读脱敏 records 报告后销毁隔离
   status/artifact 副本，从 VM/交换机快照恢复。错误 kill 目标、PID 复用或不完整 archive 可能造成错误
@@ -1224,3 +1394,361 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   行代号、探测次数与失败类别，不保存客户地址、hostname、MAC、设备输出或凭据正文。结束后停止隔离
   monitor，核对无遗留 SSH/collector 进程，删除本项隔离 sidecar 并恢复 VM/交换机快照。错误归属会造成
   AIR/Production 串写，是 fail-closed 门禁；任一真实身份信号或清理不确定即保持 BLOCKED。
+
+## TC-REAL-SERVICE-ENDPOINT-001 — 本机 HTTP service endpoint 与真实接口绑定
+
+- 状态：**NOT RUN / REAL_ENV REQUIRED**。本机自动化已验证共享 endpoint 值对象、默认端口、九个调用
+  锚点、恶意地址拒绝和 Apache 渲染逐字节兼容；mock 的 `ip`/`ifconfig` 输出不能证明目标管理 VM 的
+  实际接口枚举、路由源地址或 Apache bind 成功。
+- 前置条件：仅在批准的隔离 Linux 与 macOS 管理 VM 各执行一次；VM 具有一个可回滚的非 loopback、
+  非 link-local IPv4，且允许临时运行 Apache configtest。冻结源码、测试、manifest、接口清单及路由
+  摘要；不得使用生产设备、生产地址或生产服务端口。
+- 步骤与预期：分别从仓库外任意 cwd 导入并运行 `infra/deploy_infra.py`，确认显式本机地址通过、未分配
+  单播地址与 loopback/link-local/multicast/all-ones 均在任何网络或文件写入前拒绝；再由真实路由推导
+  同一地址。Native 与 container renderer 对同一地址必须生成既有逐字节 listener 配置，Apache
+  configtest 通过且只绑定该地址的 port 80；停止/恢复接口后必须 fail closed，重复地址只要求至少一个
+  本机接口持有。
+- 证据、清理与风险：保存脱敏的平台版本、cwd、接口/路由命令退出码、候选地址类别、listener SHA-256、
+  configtest 与 bind 结果，不保存客户地址或完整接口清单。恢复 Apache 与接口快照并确认无 listener、
+  route 或进程残留。错误接口归属会把 `/apps` 指向不可达或错误主机；任一真实枚举、路由或 bind 证据
+  缺失均保持 OPEN/BLOCKED，不得把模拟测试宣称为现场 PASS。
+
+## TC-REAL-ETH-JUMP-ZERO-CONFIG-001 — jump host schema admission 与零配置产物
+
+- 状态：**NOT RUN / REAL_ENV REQUIRED**。本机 direct/workflow 已验证安全的 `type=eth_jump` 行可通过
+  两个 schema gate，配置意图字段会 fail closed，两个 generator pass 会逐实际类型计数，且 YAML、DHCP、
+  ZTP publication、Day-0 monitor、Switch Status HTML、collection gate/worker、diagnostics、backup/yaml-collect
+  与 manual ZTP/reset inventory 均不为该行产出设备制品或目标；三个真实 collector 入口也不会向该行部署
+  `sw-info.sh`。这些 fixture 不能证明真实跳板机在受管 load 前后逐字节未变。
+- 前置条件：仅在 owner 批准的隔离项目和可回滚实验跳板交换机执行；CSV 中该行须具有唯一 hostname、
+  可用管理 IPv4，template 与 VLAN/SVI/BGP/bond/peerlink/VRL/EVPN/DHCP-relay 配置意图字段为空或 NA。
+  冻结源码、测试、manifest、CSV、global、P2P 与跳板机 running/startup 配置摘要 SHA-256；具备独立
+  console/OOB 和恢复快照，不使用生产项目或生产凭据。
+- 步骤与预期：先记录跳板机 running/startup 配置、DHCP reservation、已发布 YAML/MAC 链接及 manual
+  ZTP/reset inventory；运行正式隔离 load，并分别核对 Cumulus 与 NVOS generator report 均把该行命名为
+  `type=eth_jump` 的显式排除项。运行后该 hostname 不得出现在任何设备 YAML、DHCP reservation、ZTP
+  publication、Day-0 monitor、Switch Status HTML（hostname 出现次数必须为零）、collection gate/worker、
+  diagnostics、backup/yaml-collect、reset/manual inventory 或向设备发起的监控、备份、配置、复位命令中；
+  Ethernet、InfiniBand、NVLink 三个 collector 均不得向该主机 `scp sw-info.sh`，且跳板机 running/startup
+  配置摘要必须与前像一致。另在隔离副本逐项填入配置意图
+  字段，两个 schema gate 都必须在任何生成、网络或设备写入前拒绝。
+- 证据、清理与风险：保存脱敏的 gate 结果、逐类型排除计数、各制品目录/manifest 摘要、设备前后配置摘要、
+  网络命令计数和回滚结果，不保存配置正文、地址、MAC、凭据或客户拓扑。销毁隔离输出并恢复设备/VM
+  快照。`_EXCLUDED_CONFIG_TYPES` 是防止未来 whitelist 扩展的显式计数信号；当前阻断仍由 downstream
+  type whitelist 承担，不得把 frozen-set 成员误报为唯一安全机制。任何制品、设备摘要或命令不确定均
+  记 BLOCKED，不得弱化为警告。
+
+## TC-REAL-HTTP-PORT-001 — 非默认 HTTP 端口的 AIR 管理服务闭环
+
+- Case ID：`TC-REAL-HTTP-PORT-001`；名称：非默认 HTTP 端口的 AIR 管理服务闭环；类型：
+  real-environment / scenario；对应需求：REQ-14 port P2；适用平台：隔离管理 VM、AIR 实验交换机。
+- 状态：**NOT RUN / REAL_ENV REQUIRED**。自动化 direct/workflow 仅证明配置渲染和 CGI 请求语义，
+  不能冒充真实 Apache bind、DHCP DORA、设备 bootstrap 或现场端口可达性。
+- 前置条件：仅由 owner 在批准的隔离管理 VM 与可回滚 AIR 实验交换机执行；准备一份
+  `common.mgmt.http.port=8080` 的非生产项目和一份缺省端口对照项目，独立 console/OOB、
+  可回滚 Apache/DHCP 配置及设备快照。冻结 candidate HEAD/tree、源码、测试、manifest、
+  global YAML、生成配置与服务监听地址摘要；先确认 8080 未被占用，不使用生产地址、凭据或设备。
+- 步骤与预期：在隔离项目完成正式 load，分别检查 native/container Apache renderer 生成的
+  `Listen`、`VirtualHost` 与 `CONTROL_SERVICE_PORT` 一致，`apache2ctl configtest` 成功且只在
+  指定服务 IPv4 的 8080 监听；DHCP option 239/67、manual ZTP URL、NVOS JSON 与 bootstrap
+  三个目标 URL 均指向相同 `http://<SERVICE_IP>:8080` origin。用真实实验交换机完成一次 DHCP
+  与 bootstrap 读取，核对实际 HTTP 请求抵达该 listener；三条 CGI 分别验证正确 Host/Origin/
+  SERVER_PORT 被接受，错端口、错 host、错 origin 在动作执行前拒绝。缺省对照项目仍用 80，
+  且不输出额外 `SetEnv`。另注入 8080 已占用、Apache configtest 失败、DHCP 发布失败和设备无法
+  回连，均须显式阻断，不能回退到错误端口或悄然继续。
+- 证据：只保留脱敏的完整命令、退出码、端口/listener 与网络请求计数、配置/制品 SHA-256、
+  Apache/DHCP 状态、失败注入和回滚时间线，不保存客户地址、设备输出、凭据或原始租约。
+  每条请求须绑定请求端与监听端的端口证据，不能仅凭配置文本宣告通过。
+- 清理与风险：恢复 Apache/DHCP、接口和实验交换机快照，确认没有 8080 listener、租约、
+  测试进程或发布制品残留；复跑缺省 80 的最小可达性。端口错配会使设备无法启动配置，
+  错 listener 可能暴露管理服务；真实闭环、故障拒绝或清理任一缺失均保持 OPEN/BLOCKED。
+
+## TC-REAL-HTTP-ADDRESS-001 — 独立 HTTP 地址与多接口归属的真实服务门禁
+
+- Case ID：`TC-REAL-HTTP-ADDRESS-001`；类型：real-environment / scenario / failure-injection；
+  对应 endpoint/address convergence 与 REQ-14 port；状态：**NOT RUN / REAL_ENV REQUIRED**。
+  本机 direct/workflow 只证明解析、计划、写前拒绝和配置字节，不能证明真实接口归属、Apache bind、
+  Docker/Supervisor 启停及健康检查。
+- 前置条件：仅在 owner 后续批准的隔离 Native 与 Docker 管理 VM 中运行；每台具备可回滚的接口、
+  Apache/容器/项目快照、独立控制台及不与生产互通的两枚单播测试 IPv4。冻结同一干净候选的
+  HEAD/tree、源码/测试/manifest/ledger、global YAML、接口名称与 ifindex、地址/路由、服务配置
+  摘要；记录 80 与非默认 8080 的端口占用前像。不得使用生产地址、凭据、设备或服务。
+- 正向矩阵：分别运行没有 ZTP endpoint 的 `common.mgmt.http.address` HTTP-only 项目，以及 HTTP
+  地址与 ZTP endpoint 相等和不等的项目。Native 与 Docker 均须只生成精确的 `Listen <IP>:<port>`
+  集合：相等只一条，不等各一条；HTTP-only 只启动 Apache，不产生 DHCP/ZTP worker、DORA 或
+  bootstrap 发布身份。两种后端的实际 listener、服务集、precommit/committed marker、健康检查
+  与 HTTP 回读必须一致；默认端口仍为 80，8080 不得回退 80 或 wildcard。
+- 归属与拒绝矩阵：记录指定 HTTP 地址的**全部**观测接口及其 ifindex、up/down/可监听资格、
+  不合格原因和配置的接口 allowlist。无 allowlist 时至少一个可监听 owner 方可通过；配置
+  allowlist 时至少一个可监听 owner 须在其中，且所有其他当前可监听 owner 也须在其中。
+  两个允许且可监听 owner 通过；允许+仍可监听但不允许的 owner 在任何服务/文件/网络写入前拒绝；
+  允许+down 或其他不可监听 owner 可以通过但须记录两者；零可监听 owner、未分配地址、
+  loopback/link-local/multicast/unspecified/all-ones、错误端口及接口顺序变化均验证确定性的
+  fail-closed 或等价结果。ZTP endpoint 的原有全局唯一规则不因 HTTP 重复归属而放宽。
+- 故障注入与证据：分别在解析后、服务启动前、Apache bind、健康检查及接口漂移时注入失败，
+  核对没有错误 listener、过期 marker、部分启动的 DHCP/ZTP worker 或未回滚服务。保留脱敏
+  命令/退出码、完整 owner 类别/ifindex、配置和制品 SHA-256、实际监听及 HTTP 请求计数、
+  前后服务状态与回滚时间线；不保存客户地址、原始设备输出或凭据。任何真实绑定、owner 上限、
+  健康或清理证据缺失即保持 OPEN/BLOCKED，不能以本机 mock PASS 代替。
+- 清理与风险：停止仅本案创建的隔离服务并恢复接口、项目、Apache/容器快照；独立确认没有
+  测试端口 listener、进程、路由、租约、临时发布物或 marker 残留。错误 HTTP owner 可能将
+  管理服务暴露在未经允许的接口；无完整清理证据不得复用环境。
+
+## TC-REAL-DHCP-OPTIONAL-001 — 显式 DHCP 开关的发布与服务隔离
+
+- Case ID：`TC-REAL-DHCP-OPTIONAL-001`；类型：real-environment / scenario；对应需求：
+  DHCP-optional；适用平台：owner 批准的隔离 Ubuntu 管理 VM、可回滚 HTTP/DHCP 服务。
+  状态：**NOT RUN / REAL_ENV REQUIRED**。本机 direct/workflow 证明发布身份和调用分支，
+  不能代替真实服务、文件系统及网络隔离的观察。
+- 前置条件：在隔离项目准备启用与禁用两份明确写有
+  `common.mgmt.dhcp-server.status` 的 global；冻结同一候选 HEAD/tree、测试与 manifest、
+  输入文件、当前发布记录、HTTP 根目录五个 DHCP 制品及 Apache/DHCP 服务状态的前像和摘要。
+  保留独立 console/OOB 与回滚快照，不使用生产设备、客户地址、凭据或租约。
+- 禁用路径：执行经全量证明的正式 load，核对新 parent `schema_version=2`、
+  `release_basis.dhcp_status=disabled` 与 canonical `release_id`，且无 `components.dhcp`。
+  即使旧的四个 DHCP 输出及 manifest 存在，也不得读作本次发布证据、生成、覆盖、安装或启动 DHCP；
+  五项字节与 mtime 应保持前像，`isc-dhcp-server`/容器 `dhcpd` 不得 active。
+  Apache、HTTP endpoint、ZTP 静态发布及非 DHCP monitor/VM 检查必须继续成立，
+  不得把“没有 DHCP 文件”误当成禁用意图。
+- 启用对照：切回显式 `enabled` 并重新正式 load，核对 parent status、DHCP component、
+  当前 manifest 和四个输出摘要、服务 listener/接口、HTTP endpoint 与发布身份同代；
+  旧 v1 parent 只可按严格 enabled 合同读取，不得解释为 disabled。
+  两个模式之间不得沿用前一模式的 release_id 或混合不同代制品。
+- 故障与拒绝：在隔离副本分别注入 parent status/release_id 与当前 global 不一致、
+  global 输入摘要漂移、禁用记录夹带 DHCP component、启用记录缺 component/输出摘要、
+  stale manifest、DHCP 端口占用以及 Apache 检查失败。前五项必须在消费或服务动作前拒绝；
+  后两项必须保持服务安全停止或回滚，不得退回另一模式、放松 HTTP/worker/source 证明，
+  也不得改写已有 DHCP 文件来制造通过证据。
+- 证据与清理：保存脱敏命令、退出码、时间线、模式字段、release/输入/五制品摘要及 mtime、
+  Apache/DHCP 服务 PID/argv、监听端口、HTTP 可达性与拒绝点；不保存客户数据或原始租约。
+  恢复项目、服务、接口、文件及隔离 VM 快照，逐项核对前像。任一服务实测、故障拒绝、
+  证据或清理缺失均保持 OPEN/BLOCKED，不得以本机测试 GREEN 代替现场验收。
+
+## TC-REAL-REQ15-P2P-001 — 工作簿选择与旧列布局的真实语料核对
+
+- Case ID：`TC-REAL-REQ15-P2P-001`；对应 REQ-15 / R15-1..16。状态：**NOT RUN / REAL_ENV REQUIRED**。
+  合成 direct/workflow 证明排序、链接、无覆盖归档与单份传输，不证明客户工作簿列含义，也不代替 AIR/prod 验证。
+- 前置条件：在隔离、可回滚的项目副本中绑定 HEAD/tree、四份治理文件、manifest、loader、producer、
+  0915 P2P 与两个现代对照工作簿的真实路径/大小/SHA-256；先核对 `p2p.xlsx` 是否为项目根目录内相对链接。
+  不在 live dirty root、生产服务或客户设备上运行生成/部署。保留隔离副本前像及清理清单。
+- A/B：旗舰 0915 工作簿只在显式 `--p2p-legacy-columns` 时向 producer 传入一次精确
+  `--legacy-columns`；移除开关须在 `OOB Fabric` 表头检测处失败，改成 `--legacy-columnsX` 也须失败。
+  不得自动重试、跳过 sheet、推断零行或默认启用旧列。
+- C/D：不带开关的 `2026-06-vb-b300`、`2026-07-vb-gb300-staging` 对照分别保持 **1994**、
+  **338** 条；stderr 不出现 `WARNING: --legacy-columns 使用固定列`。将任一预期数改动 ±1 应使该断言 RED。
+- E/F：对自动表头可成功识别的工作簿，带/不带旧列开关的生成输出须逐字节一致；对自动识别失败且
+  fallback 落到错误字段的隔离负例，必须有独立断言 RED 并阻止错误拓扑进入 DOT/AIR。旧项目 A 的
+  87 条错位链接与旧项目 B 的 3008 条 `#ERROR!` 不是“legacy 成功”证据。
+- 选择/传输：重复验证根目录版本/日期/mtime 裁决、旧版显式钉选、`p2p.xlsx: 旧 -> 新` 变更行、
+  非空 canonical 无覆盖归档及摘要、tar/sync 仅含解引用的选中真实工作簿；部署记录同时绑定路径与摘要。
+  同版本日期/mtime 全等、坏日期、逃逸链接、缺失 canonical 或无原子无覆盖原语必须在输出发布前拒绝。
+- 证据、清理与风险：保存脱敏命令、退出码、行数、stderr、生成制品摘要、所选路径/摘要与负例的阻断点；
+  不保存客户工作簿或拓扑正文。销毁隔离生成物、恢复链接/占位文件和权限并核对前像。旧列开关在某些
+  客户表上可把显式错误变成看似成功的错误链路，任何负例未阻断或证据不全均保持 OPEN，不得因日期临近放行。
+- 旧记录迁移：先在隔离副本保存旧 `schema_version=1` current-release 前像，确认缺少
+  `input_sources.p2p` 时手工部署门禁 fail closed；重新运行正式 load 后，确认新记录为 schema 2、
+  含显式且与当前 global 绑定的 `dhcp_status`；`input_sources.p2p.path` 是项目根目录真实选中工作簿名
+  而非 `p2p.xlsx`、其摘要与真实字节一致，
+  且该字段参与 release_id。对两份字节相同但文件名不同的候选重指 canonical，旧记录也必须拒绝；
+  不得把旧/新 current-release 混用，也不得以手工改写 release_id 代替重新 load。
+
+## TC-REAL-REQ16-GENERATION-REPORT-001 — 实际发布公钥报告与两文件故障窗口
+
+- Case ID：`TC-REAL-REQ16-GENERATION-REPORT-001`；类型：real-environment / transaction / scenario；
+  对应 REQ-16 R16-9。状态：**NOT RUN / REAL_ENV REQUIRED**。本机
+  `test_generation_report_contract.py`、`test_generation_report_workflow.py` 与相关 load 事务测试
+  只验证隔离合成输入和调用次序，不证明真实 Native/Supervisor 路径、权限、服务状态或断电恢复。
+- 风险与目标：报告可能把计划中的空占位、另一项目的链接或过期父 release 说成「本次实际使用」；
+  `current-release.json` 与 `generation-report.json` 是**两个独立原子替换，不是一个原子事务**。
+  父记录已提交而报告仍缺失/陈旧时，检查器必须拒绝，受管服务不得因普通报告提交失败而启动；
+  后续由持有 deployment lock 的**完整** load 重跑重建。报告仅证明本地实际发布的公钥身份，
+  **不证明持有私钥、设备已安装该密钥或旧设备密钥已撤销**。
+- 前置条件与输入：只有 owner 明确授权后，分别在可回滚的一次性 Ubuntu Native 管理 VM 和
+  rootful Docker/Supervisor VM 内执行，使用不含客户秘密的隔离项目、两把不同的有效公钥、
+  可观测且可恢复的服务和 VM 快照；真实生产服务/设备不用于故障注入。先绑定同一干净落地树的
+  HEAD/tree、manifest、helper、`11-load.py`、setup、测试及 full-proof 身份；逐项保存项目目录、
+  `ztp/config/publickey/{laptop,mgmt-server}.pub` 两条**实际发布链接**、各自同名项目根常规公钥叶子、
+  `99-output-ztp/{current-release,generation-report}.json` 的路径、链接文字、owner/EUID、mode、
+  inode、大小、SHA-256 和服务/PID/监听前像。确认同一运行时内 reporter 使用的 published-dir
+  与 setup 发布目录逐字相同；目录属主或 `/var` 路径别名不合合同时 STOP，不能为通过而改权限。
+  owner 已裁定：既有有效公钥与 HOME 不一致时拒绝，原有公钥逐字节不动；
+  RSA-only 管理服务器 HOME 在 PRE 范围内 fail closed，不读取 RSA 私钥。本案仍须实测
+  实际发布链接、两文件故障窗口与 Linux 笔记本/管理服务器角色事实，不得据此宣告验收。
+- 正向步骤与预期：在每种后端的隔离项目完成获准的正式 load，再在**同一运行时**用显式
+  published-dir 执行 `tools/generation_report.py inspect PROJECT --json`；分别对两条发布链接落到的
+  项目公钥叶子用固定 `/usr/bin/ssh-keygen -lf` 独立取得 OpenSSH SHA256 指纹，不读取私钥。
+  父记录必须是已验证 schema 2，其 release_id 可由既定 release basis 重算；报告只在
+  `project/99-output-ztp/generation-report.json`，具有 schema 3、固定 record_type、相同的
+  project/release_id/generated_at 与按 laptop、management 排序的两条 type + SSH wire-blob 指纹。
+  检查器成功输出必须与报告记录一致；项目根旧 ad-hoc schema-2 同名文件保持逐字节不变。
+  独立 macOS/config-only 与 `--dry-run` 隔离对照不得声称或生成两把实际管理/笔记本公钥报告。
+- 拒绝、故障注入与重复执行：只在可回滚 VM/项目副本中分别制造空管理公钥占位、跨项目/错角色/
+  回弹的发布链接、单把公钥轮换、父 release 身份改变、缺失或畸形/未知版本报告、symlink/FIFO/
+  hardlink 目的地；检查器须非零，不能回退读项目根 ad-hoc 文件，外部哨兵不变。分别在报告
+  stage 前、**父 commit 后报告 commit 前**、报告 replace 与目录 fsync 失败处注入中断/故障；
+  保存每个 checkpoint 的父/报告前后身份和服务状态。父已提交而报告缺失/旧代的窗口必须
+  fail closed，不能宣称两文件同时回滚；普通提交失败须保持服务安全停止。修复输入后完整持锁
+  重跑，报告与父记录、当前发布公钥重新收敛；重复运行不得复制私钥或替换无关文件。
+- 证据、清理与风险：在 0700 私有证据目录保存脱敏 argv、退出码、时间线、OS/backend/EUID、
+  HEAD/tree、manifest/full-proof、链接文字与 stat、文件 SHA、两个独立公钥指纹、checkpoint、
+  deployment-lock 身份、服务 PID/监听状态和恢复前后比对；原始报告/负例制品若必须留存则 0600
+  且只在受控证据域，不回传原始 JSON、公钥行、客户配置或任何私钥字节。恢复一次性 VM 快照和
+  测试服务，逐项核对前像；不删除/覆盖真实健康密钥，也不以人工写报告代替正式 load。
+  公钥指纹、项目名、release_id、时间是可经 HTTP 暴露的运维元数据，需实测访问边界并按 owner
+  的披露策略处置；任一后端未测、故障拒绝或清理证据缺失均保持 OPEN/BLOCKED。
+
+## TC-REAL-REQ16-HOST-ROLE-001 — Linux 工作站、管理服务器与 Service IP 暂缺
+
+- Case ID：`TC-REAL-REQ16-HOST-ROLE-001`；类型：real-environment / role / workflow；
+  对应 REQ-16 R16-1。状态：**NOT RUN / REAL_ENV REQUIRED**。现有 Ubuntu 24.04
+  Docker 合成 HOME 探针和 direct/workflow 测试不是物理角色或真实部署证明；本案与
+  `TC-REAL-REQ16-GENERATION-REPORT-001` 互相不能替代。
+- 前置条件：仅在 owner 授权的可回滚一次性 Ubuntu 24.04 工作站 VM、Native 管理 VM、
+  rootful Docker/Supervisor VM 中执行，分别绑定干净最终 HEAD/tree、manifest、CLI help、
+  exact full-proof 状态、OS/backend/EUID、声明角色、Service IP/接口计划、deployment lock
+  和 VM 快照。使用两个独立合成 Ed25519 key pair 与 0700 一次性 HOME/项目；观察者不打开
+  私钥，旧真实公钥只可 stat，绝不当 fixture 读取、写入或复制。不得碰生产主机或真实 cron。
+- 拒绝 N1：Linux 上 `11-load.py` 与 standalone `01-a-setup.py --create` 的缺失、无效及
+  与 delegated context 冲突的角色必须在合成公钥、模板、发布链接、Monitor、服务写入前
+  非零停止；记录明确角色错误而非无关配置错误。逐项比对合成叶子字节与 inode/mode/mtime、
+  服务 PID/监听和锁前后像；把 Linux OS 单独当 server 的旧行为作为应被拒绝的反例。
+- 工作站 W1：在明确支持的隔离 Linux 工作站范围内声明 workstation，完成配置准备且只从
+  该合成 HOME 准备 `laptop.pub`，不读取或创建管理服务器 HOME 公钥、不委托 server setup、
+  不启动 Apache/DHCP/Monitor。若实际平台范围不支持完整 Linux workstation load，必须
+  记录早期明确拒绝，W1 保持 NOT RUN/OPEN，不得把拒绝算作正向通过。
+- 服务器 S1：Native 管理 VM 显式声明 management-server，即使配置的 Service IP 暂不可用，
+  仍以 server 角色准备合成管理公钥并委托持锁 setup，保留项目原有独立笔记本公钥；服务
+  就绪门禁安全停止。恢复隔离网络后按同一角色完整重跑。分别测新公钥和已有有效公钥；
+  冲突公钥必须原样保留且拒绝，不能降格成 workstation。
+- Docker D1：受管 `deploy.sh` → `hostctl.py` → 容器 `11-load.py` 的真实子命令必须固定携带
+  management-server 角色，不从环境变量或宿主 HOME 猜测；Supervisor 的 root identity
+  配对与公钥证明保持原有合同，容器 load 不生成 SSH 私钥。删除子命令角色参数须使测试失败。
+- 故障、证据和清理：分别注入角色缺失/冲突、公钥冲突与服务 IP 暂缺；保存脱敏 argv、退出码、
+  时间线、独立合成公钥指纹、安全 stat/SHA、服务 PID/监听、网络状态、锁和快照恢复回执。
+  只修角色声明或隔离网络后持锁重试，验证无重复 append 或无关覆盖。恢复 VM 快照并逐项核对
+  前像；任一 N1/W1/S1/D1 帧未测、失败或恢复证据不足时本案保持 OPEN。
+
+## TC-REAL-ISSUE-0001 — Cumulus 14 角色 DNS/NTP VRF 真机验证
+
+- Case ID：`TC-REAL-ISSUE-0001`；类型：real-environment / scenario；对应缺陷：ISSUE-0001；
+  自动化：`test_cases.test_v2_generation_flow.V2GenerationWorkflowTests.test_issue0001_all_fourteen_roles_honor_independent_dns_and_ntp_vrfs`
+  与 `test_issue0001_global_to_render_missing_vrf_falls_back_to_mgmt`；适用平台：隔离 Cumulus
+  实验交换机及管理 VM。状态：**NOT RUN / REAL_ENV REQUIRED**。
+- 风险与目标：模板可能在 YAML 层显示正确 `vrf`，但实际 DNS 查询或 NTP 同步走错 VRF。
+  本机 direct/workflow 的 14 角色渲染不能代替设备数据面验证。
+- 前置条件：owner 批准的可回滚隔离项目；至少一台可分别承载典型普通角色、原硬编码角色和
+  `oobofoob` 动态角色的实验设备，独立 console/OOB；可区分的 DNS 与 NTP 服务端点及 `mgmt`、
+  `DNS-CONTROL`、`NTP-CONTROL` 测试 VRF。冻结 candidate HEAD/tree、global、CSV、manifest、
+  生成 YAML 与设备前像 SHA-256；不使用生产地址、凭据或服务。
+- 步骤与预期：用显式非 `mgmt` 的 DNS/NTP VRF 做正式隔离 load，核对 14 角色生成 YAML
+  的每个 DNS server VRF 和 NTP 顶层 VRF；在代表设备上观测真实 DNS 查询和 NTP 同步均从
+  指定 VRF 出口到达对应测试端点。随后在隔离副本移除两项 global VRF，重新生成并验证
+  14 角色均退回 `mgmt`，代表设备的真实流量亦转回 `mgmt`。两次运行都核对 Docker、
+  管理接口及租户 VRF 未被 ISSUE-0001 意外改写；错误或不可观测必须保持 BLOCKED。
+- 故障注入、证据与清理：在隔离设备断开目标 VRF 路由，确认 DNS/NTP 不会静默从其他 VRF
+  成功；保存脱敏命令、退出码、路由/接口/抓包计数、服务端接收记录、生成配置摘要和回滚
+  时间线，不保存客户拓扑或凭据。恢复配置、测试服务与设备快照并核对前像。真实设备
+  运行、故障拒绝或清理任一缺失时不得把本机 GREEN 误称为真机验收。
+
+## TC-REAL-REQ7-LOCAL-RECOVERY-001 — Stage-L 本地证据冷启动与离线恢复边界
+
+- Case ID：`TC-REAL-REQ7-LOCAL-RECOVERY-001`；类型：transaction / real-environment / offline-restore；对应需求 7 的 C-6 持久化、故障/竞态注入及恢复。状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。自动化先决为 `test_cases.test_issue_tracker_local_recovery` 与 `test_cases.test_issue_tracker_local_recovery_workflow` 的独立进程 direct/workflow，不能以其 GREEN 代替本卡。适用平台为 owner 明确批准的隔离管理 VM/卷，不是当前 live 项目或生产 tracker。
+- 风险与目标：进程死亡后的磁盘 generation 可能有 INTENT 而无 RECEIPT，或有可见但未完成恢复屏障的 RECEIPT；复制到另一介质时 dev/ino 凭据通常改变。恢复者不得把这些情况推断成在线可发布资格、补造 RECEIPT、删除未决证据、重用旧锁令牌或重放 Google/在线写入。
+- 前置条件与输入：先有同一逐字节落地整树的 Codex 全量证明及 Claude `--no-approve` 全量结果；owner 再指定可丢弃的隔离 VM、独立私有 0700 证据目录、恢复负责人和独立回滚快照。记录平台/Python/文件系统/挂载与卷身份、HEAD/tree、manifest/ledger、C-6/K-store 源码及 direct/workflow SHA、项目与发布根的原始 `lstat`/SHA、LK-P 锁所有者；不得包含真实客户 workbook、在线凭据或生产卷。缺少排他维护窗口或快照即 STOP。
+- 正向步骤：在同一隔离卷用真实 `tracker_writer` 创建 (a) 无 INTENT、(b) 已 fsync INTENT/准备文件但故意终止写进程、(c) 已正式 commit 的三个 generation；关闭所有进程后由全新 Python 进程持单一 LK-P 执行只读冷发现。独立比较磁盘 STATE/MANIFEST/INTENT/RECEIPT、准备/发布对象的 dev/ino/size/SHA 与返回三态；(a)(b) 只能为 UNRESOLVED，(c) 只能为 RECEIPT-PRESENT-NOT-ELIGIBILITY。重复发现前后所有对象的字节、inode、权限、名称及数量不变，也无在线请求。
+- 故障与竞态：仅在隔离卷分别注入 INTENT 后 `SIGKILL`、RECEIPT 发布/目录 fsync 故障、第二进程争用 LK-P、STATE/MANIFEST 缺损、伪造 RECEIPT、generation 或 quarantine 符号链接、孤儿 quarantine 项及名称交换；每例必须 HOLD、保留原始字节和拒绝证据，不能由另一进程补造成功状态。把同一隔离树逐字节复制到**另一**卷并记录 dev/ino 变化；旧 RECEIPT 凭据不匹配时必须 HOLD。跨介质正向迁移若需要，必须另有 owner 批准的凭据重绑定协议及独立测试，不能把普通 byte-copy 的失败改写成 PASS。
+- 证据与判定：保存每次完整 argv、退出码、进程/锁/挂载身份、注入点、前后对象清单和 SHA、可见 RECEIPT 与实际 fsync 结果、只读返回状态、未发在线请求的独立观察、卷快照/恢复日志。分别报告冷启动正例、故障/竞态负例、跨卷 HOLD、回滚核对为 PASS/FAIL/NOT RUN；任一缺失时本卡仍 OPEN。全程不动真实 crontab、服务、设备、Google 或生产数据。
+- 清理：按已批准隔离 VM 快照恢复或只删除本案逐一列出的临时项目/证据副本；先验证前像，保留故障证据与完整回滚收据。不能用全局清理、删除真实 tracker 或手改 ledger/RECEIPT 作为收尾。
+
+## TC-REAL-DHCP-PUBLISH-REBOUND-001 — DHCP 候选发布目录改绑
+
+- Case ID：`TC-REAL-DHCP-PUBLISH-REBOUND-001`；类型：real-environment / transaction / race；状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。本机先决测试为 `test_cases.test_dhcp_switch_scope_preservation` 的父目录改绑 direct 与真实生成流程用例，以及 `test_cases.test_dhcp_switch_scope_preservation_workflow`；其 GREEN 不等于本卡通过。
+- 前置条件：仅在 owner 批准的可丢弃 Ubuntu 24.04 管理 VM 和隔离 DHCP 项目副本中运行，先冻结 HEAD/tree、manifest、全量证明、项目/输出目录及服务的前像、真实写者静默窗口和快照。两个目录必须是单独的私有 0700 测试目录，攻击者同 UID 只操作本案副本，不碰 `/etc/dhcp`、服务或真实项目。
+- 步骤与预期：分别在持有输出父目录描述符后、分配 stage 前，候选 stage 已写入而发布前，以及第一次 replace 期间，把项目 DHCP 输出父目录移到隔离名字并将原路径改绑至另一个私有目录；后者预置同名 stage 和带独立哈希的外部哨兵。正式生成应非零拒绝；分配前改绑不得在外部目录留下空 stage；外部哨兵字节/inode 不变，已移走目录的旧输出保持可恢复，回滚和 stage 清理只触碰持有的目录描述符，不通过改绑路径清除外部对象。正常无竞态运行的 conf/hosts/manifest 则须保持事务一致和原有 mode。stage 内容写入仍使用路径，故没有可核验的真实写者静默时不得把此卡视为同 UID 任意竞态免疫。
+- 证据与清理：保存脱敏 argv、注入时序、退出码、父目录及 stage/目标的 dev/ino/模式/SHA、服务 PID/监听前后像、回滚和目录清理记录。恢复 VM 快照并逐项核对哨兵与原始 DHCP 前像；任何中途写入外部目录、混代 manifest、无法证明写者静默/恢复或未实测状态均保持 OPEN，绝不用于真实 DHCP 切换。
+
+## TC-REAL-DHCP-INVENTORY-REBOUND-001 — DHCP 运行时盘点发布目录改绑
+
+- Case ID：`TC-REAL-DHCP-INVENTORY-REBOUND-001`；类型：real-environment / transaction / same-UID race；状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。自动先决为 `test_cases.test_dhcp_runtime_reassignment` direct、`test_cases.test_full_flow_integration` workflow 与 manifest 绑定；本机 GREEN 不构成真机通过。
+- 前置条件：只在 owner 批准的可丢弃 Ubuntu 24.04 管理 VM、私有 0700 项目副本及隔离输出目录执行；冻结 HEAD/tree、父目录与盘点 JSON 的 dev/ino/mode/SHA、服务/进程前像和快照，确认其他同 UID 写者全程静默。不得写 `/var/lib/dhcp`、真实项目或服务目录，不得把测试输出放到 Web 发布路径。
+- 步骤与预期：在写盘点暂存文件后、原子替换前改绑可见输出父目录；外部目录预置同名暂存和目标哨兵。真实 `ztp/dhcp_runtime_inventory.py --output` 应非零拒绝，外部哨兵字节/inode 不变，已移走目录的旧盘点可恢复，失败暂存与备份不得遗留或逃逸至改绑目录；无竞态正例须发布合法 JSON、0644 mode 并清除暂存。记录 argv/exit、注入时序、目录和文件身份、前后 SHA 与独立写者静默见证。结束后用快照恢复并逐项核对；无静默见证、外部写入、旧目标不可恢复或未实测均保持 OPEN。
+
+## TC-REAL-NVOS-CVT-REBOUND-001 — P2P CVT 验证工作簿发布目录改绑
+
+- Case ID：`TC-REAL-NVOS-CVT-REBOUND-001`；类型：real-environment / generated-evidence / same-UID race；状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。自动先决为 `test_cases.test_topology_consistency` direct 与 `topology_inventory_and_lldp_identity` 多脚本 workflow；本机定向 GREEN 不构成真机验收。
+- 前置条件：只在 owner 批准的可丢弃 Ubuntu 24.04 VM、私有 0700 项目副本与隔离输出目录执行。记录 HEAD/tree、输入 P2P 与输出目录 dev/ino/mode/SHA、原工作簿及 `.bak` 前像、其他同 UID 写者静默见证与可恢复快照；不得触碰 live 项目、服务发布目录、真实设备或生产数据。
+- 步骤与预期：用真实 `p2p-to-validation.py` 生成可解析 CVT；在暂存后、发布原子替换前，将原输出父目录移走并把可见名称改绑到预置同名暂存/目标哨兵的外部私有目录。脚本必须非零拒绝，外部哨兵字节和 inode 不变，原目录中的旧 CVT 与备份可恢复；无竞态正例须保持旧字节于 `.bak` 并发布与输入对应的新 CVT。保存脱敏 argv/exit、注入时序、前后 SHA/身份、回滚与清理记录；恢复快照并核对。若外部写入、旧目标丢失、缺静默见证或未实测，保持 OPEN；不宣称对任意不合作同 UID 写者免疫。
+
+## TC-REAL-DOWNLOAD-ARCHIVE-REBOUND-001 — 项目下载归档发布目录改绑
+
+- Case ID：`TC-REAL-DOWNLOAD-ARCHIVE-REBOUND-001`；类型：real-environment / packaging / same-UID race；状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。本机先决为 `test_cases.test_download_cli_contract` 与 `test_cases.test_upload_package_contract` 的父目录改绑、stage 替换及并发无覆盖 direct，和 `package_sync_load` 多脚本 workflow；本机 GREEN 不构成管理服务器验收。
+- 前置条件：只在 owner 批准的可丢弃 Ubuntu 24.04 VM 与私有 0700 项目副本运行，指定待打包 DAY0 副本及位于其外的两个私有输出目录；先记录最终整树 HEAD/tree、测试证明、输入、输出父目录、同名目标与外部哨兵的 dev/ino/mode/SHA、卷快照及同 UID 写者静默见证。不得写 `/var/www/html`、真实客户项目或生产下载目录。
+- 步骤与预期：分别在归档校验之后、发布之前改绑可见父目录，并在外部目录预置同名 stage/目标哨兵；另在保持父目录不变时替换暂存 inode、并发创建无 `--force` 的最终目标。`tar-for-download.py` 的项目及 `--all-day0` 模式、`--full-workspace` 和共享上传包入口分别执行，均须非零拒绝，外部和并发目标字节/inode 不变，不能打印假 `[OK]`；无竞态正例须产出可重新打开的 tar.gz、准确 mode（项目下载 0644、共享包 0600）与摘要，`--force` 仅替换受控同目录普通文件。共享上传包仍须独立通过正式全量证明门禁；本卡不授权实际上传或部署。
+- 证据、清理与风险：保存脱敏 argv/exit、注入时序、父目录及 stage/目标身份、归档摘要、源数据前像、恢复与快照核对；仅清理本卡隔离目录。若缺 writer 静默、外部哨兵变化、归档身份或恢复证据不全，则保持 OPEN。此实现持有目录/暂存描述符并在发布前重验，不宣称抵抗任意不合作的同 UID 写者在最后一次重验和发布之间的竞态。
+
+## TC-REAL-IB-INFO-LINK-REBOUND-001 — IB 分析输入链接的发布目录改绑
+
+- Case ID：`TC-REAL-IB-INFO-LINK-REBOUND-001`；类型：real-environment / input-provenance / same-UID race；状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。自动先决为 `test_cases.test_ib_analysis_domain.IbInfoLinkPublicationTests` 和 `offline_network_analysis` 多脚本 workflow；隔离本机测试通过不能证明真实分析目录与服务写者边界。
+- 前置条件：只在 owner 授权的可丢弃 Ubuntu 24.04 VM、私有 0700 项目副本和独立输出目录执行；先保存 HEAD/tree、manifest/full-proof、ib-info 来源与旧绝对链接、输出目录/哨兵 dev/ino/mode/SHA、服务/分析进程状态、同 UID 写者静默见证及快照。不得碰真实项目的 `99-output-p2p`、客户 IB 快照或生产设备。
+- 步骤与预期：用真实 `tools/ibdiagnet-analyze-tool/analyze.py` 对隔离 ib-info 源做正常发现，旧绝对链接须转成同源相对链接，新输入须创建正确相对链接；然后在暂存链接建立后、替换旧链接前，把可见输出目录移走并改绑到含同名暂存/目标哨兵的外部私有目录。应非零拒绝，外部哨兵字节/inode 保持不变，已移走目录的旧输入仍可辨认/恢复；不得把被改绑的路径展示为成功来源。记录精确 argv/exit、链接文字、源与目标的身份和摘要、目录重绑时序、前后服务状态及回滚。
+- 清理与风险：恢复 VM 快照并逐项核对前像，只清理本案隔离目录。此实现将链接创建/替换约束在持有的输出目录描述符并重验可见目录；它不保证最后一次核验与发布之间面对任意不合作同 UID 写者的原子隔离，也不替代 REQ7 的受保护 IB 完成见证。缺 writer 静默、外部哨兵变化、旧链接无法恢复或未真机执行时保持 OPEN。
+
+## TC-REAL-REQ7-IB-LOCAL-SOURCE-001 — 本地 IB 拓扑报告逐字节见证（不授予 cycle 资格）
+
+- Case ID：`TC-REAL-REQ7-IB-LOCAL-SOURCE-001`；类型：real-environment / integration / input-provenance；状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。本机自动化先决为 `test_cases.test_req7_ib_provenance`、`test_cases.test_req7_ib_provenance_workflow`、`test_cases.test_issue_tracker_ib_runtime` 与 `test_cases.test_issue_tracker_ib_runtime_workflow` 的 direct/workflow GREEN；这些本地结果不代替真实 IB 输入见证。
+- 前置条件：只用 owner 许可的隔离 0700 stage 和经脱敏的真实 09:15 P2P、inventory、port map、splitter、profile 与 iblinkinfo 输入，或可丢弃 Ubuntu 24.04 Docker/VM 中的授权副本。先记录输入来源、权限、dev/ino/size/SHA、操作者、工具版本、候选 HEAD/tree、manifest/full-proof 状态及同 UID 写者静默窗口；不得写 live 项目、生产 UFM、真实 crontab 或管理服务器。
+- 步骤与预期：真实转换器产生 CVT 和六源 provenance，真实 IB validator 产生报告和侧车，报告解码应保留 Missing 的空 actual、Miswired 的字面 actual。每次仅改变 P2P、CVT、iblinkinfo 或 profile 中一项的字节并恢复原 mtime，本地见证必须 fail closed；恢复前像后通过。向 `require_completed_ib_cycle` 传入看似合格的 prod cycle dict、UFM receipt 或 ACK 仍必须拒绝，不得写 `99-output-monitor`、修改模板或作网络发送。
+- 证据、清理与风险：保存脱敏精确 argv/exit、输入/输出及侧车 SHA、负例拒绝、权限、前后目录清单和独立回滚核验；只清理该私有 stage 或恢复 VM 快照。若缺真实授权输入、writer 静默、前像/回滚证据、或有任何 live/生产副作用，保持 OPEN。此卡只证明本地报告边界，绝不证明受保护 collection cycle、K-window、三面板 QualifiedSet 或 C6 发布。
+
+## TC-REAL-REQ7-IB-CYCLE-BINDING-001 — IB 报告接入受保护完成周期
+
+- Case ID：`TC-REAL-REQ7-IB-CYCLE-BINDING-001`；类型：real-environment / protected-cycle / Stage-L；状态：**BLOCKED / NOT RUN / REAL_ENV REQUIRED**。候选已有受保护生产者、worker/emitter 九角色边界、完成周期的只读重放、绑定真实本地 K 设置的 IB-only 只读窗口，以及从实读本地工作簿按计划 A/Z 节点作 W1 跳过的只读预览；早期 `test_cases.test_collection_ib_cycle_binding_workflow` 的九角色组合采用受保护重放函数替身，K/W1 正向归约也替换了受保护报告读取，不能证明根保护。后续独立 hermetic 工作流接入本地受保护九角色、三面板 C5/C6，但远端 UFM 检索仍为确定性替身，且未用 owner 管理的正式模板。三角色周期仍只诊断六角色缺口；任一本地绿色结果不得计作本卡现场验收。
+- 前置条件：在 owner 另行批准的隔离 Ubuntu 24.04 VM 与可丢弃项目副本完成真实三面板采集，并记录 worker、completion、evidence/envelope、六个角色、F01 归档及安装态 attestation 的字节身份、根目录权限、writer 静默和快照。真实 UFM、生产 tracker、live 项目及 crontab 不在授权范围内。
+- 步骤与预期：只有同一完成周期、同一项目、同一目标、同一 CVT 与真实安装态 attest 的报告可形成非自证的 IB source；替换任一 role、sidecar、完成摘要、输入或路径，或仅提供本地 receipt/ACK、复制九角色、改变 CVT 但保留 mtime，都必须拒绝。K 个连续合格周期要按同一 expected topology 逐周期重放，活动键只取交集且使用最近周期字面 actual；不同 issue type、拓扑漂移、Whitelist A/Z 命中和无历史均须按合同拒绝或保持冷态，不得凭伪造 dict 进入本地工作簿。
+- 证据、清理与风险：保存脱敏启动/完成记录、角色与 sidecar 摘要、逐步故障注入、拒绝日志、目录前后快照及恢复核验；只在隔离 VM 回滚。本卡未实测或当前候选未接入 worker/F01/三面板正式消费点时一直 BLOCKED，绝不宣称 REQ7 Stage L 或 owner AIR/prod 已验收。
+
+## TC-REAL-UFM-PRE-SOURCE-BRIDGE-001 — UFM 输入身份和本地归档的真实来源边界
+
+- Case ID：`TC-REAL-UFM-PRE-SOURCE-BRIDGE-001`；类型：real-environment / input-provenance / local-archive；状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。本机自动化先决为 `test_cases.test_ufm_input_contract`、`test_cases.test_ufm_collection_contract`、`test_cases.test_ufm_collection_agent` 与真实双脚本 `test_cases.test_ufm_local_archive_workflow` 全部 GREEN；这些测试不证明远端 UFM、安装态身份、受保护周期或 REQ7 Stage L。
+- 前置条件：只在 owner 许可的隔离私有 0700 stage 或可丢弃 Ubuntu 24.04 VM 内，使用经授权的 UFM 输入副本；真实 UFM、live 项目、客户设备、管理服务器和生产 crontab 不在本卡授权范围内。登记候选 HEAD/tree、测试/manifest 身份、全量证明状态、操作者、隔离根及 CSV/global/lease/归档输入的 dev/ino/mode/size/SHA、工具版本、同 UID 写者静默与快照。任何真实远端连接需另行书面授权及主机密钥钉扎，不能由本卡推定。
+- 步骤与预期：先让只读发现入口以一台及两台合成当前 DHCP lease 绑定 UFM CSV 与 `servers.ufm`，仅输出 `discovery_only`，明确 `ssh_identity_verified=false`、`license_mac_verified=false`、`vip_configured=false`；重分配、过期、重复、截断租约与无效 YAML/CSV 均非零拒绝且无 JSON 产品。随后在隔离节点副本运行本地 contract/agent，核对唯一单文件归档、成员/路径/mode/摘要与不变输入；篡改暂存、符号链接/祖先改绑、重复 run-id、超大成员和中断必须无外部写入、无成功 receipt。仅本地归档或人工复制 receipt 不得进入 worker 的六角色，也不得提升 IssueTracker 合格集。
+- 证据、清理与风险：保留脱敏精确命令/退出码、拒绝类别、归档前后 SHA 与 inode、外部哨兵身份、权限、目录前后清单、writer 静默和快照回滚比对；只删除本卡隔离产物或恢复 VM 快照。若权限/静默/来源/恢复证据缺失，保持 OPEN。此卡不替代 D-70 真实远端 before/after SHA、独立 SSH host pin/current lease/安装态 attestation，也不解除 `TC-REAL-REQ7-IB-CYCLE-BINDING-001` 的 BLOCKED。
+
+## TC-REAL-UFM-REMOTE-SOURCE-001 — UFM 管理身份、钉扎传输与归档来源
+
+- Case ID：`TC-REAL-UFM-REMOTE-SOURCE-001`；类型：real-environment / remote-identity / pinned-transport；状态：**BLOCKED / NOT RUN / REAL_ENV REQUIRED**。本地先决为 `test_cases.test_ufm_jump_transport`、`test_cases.test_ufm_jump_transport_workflow`、`test_cases.test_ufm_identity_binding`、`test_cases.test_ufm_collection_archive_retrieval`、`test_cases.test_ufm_identity_binding_workflow`、`test_cases.test_ufm_remote_producer` 与 `test_cases.test_ufm_remote_producer_workflow` 全部 GREEN；合成 runner 的 GREEN 绝非远端实证。
+- 前置条件：另获 owner 对可丢弃 UFM VM、跳板与管理网的逐节点、逐命令授权；目前无此授权，不得执行真实 SSH/SCP。先由独立渠道批准准确 known_hosts SHA 和真实主机密钥、当期 DHCP lease/CSV/global、已批准的远端 Python/agent/contract SHA、root 持有且 0600 的安装态、远端写者静默、备份/快照及回滚负责人；记录候选 HEAD/tree、全量证明、所有输入和输出 dev/ino/mode/size/SHA，不向公开日志写凭据或客户地址。
+- 步骤与预期：只在授权范围以 key-only、`StrictHostKeyChecking=yes` 经固定跳板观测准确 hostname/management MAC/IP；重分配、过期/截断 lease、变更钉扎密钥或项目输入必须在任何 vendor agent 命令前拒绝。对已批准安装态逐路径观测 root 所有权、非组/世界可写及三个精确 SHA；调用固定绝对 Python+agent，仅用一次受控 run-id，验证远端最终文件在拉取前、后 SHA 一致、本地归档及身份重新验证一致。远端源变化、中断、半成品、路径改绑、目标并发占用必须无成功 receipt、无外部写入；不重试未知结果。
+- 证据、清理与风险：保存脱敏 argv/exit、独立 host-pin 来源、lease/SSH/安装态前后摘要、远端前后及本地归档 SHA、负例拒绝、写者静默、节点和目录身份、快照恢复核验。只在批准的可丢弃节点卸载本卡产物并核对前像；不写生产 UFM/live 项目/真实 crontab。授权或任一物理证据缺失仍为 BLOCKED/NOT RUN；本卡即使完成也只证明归档来源，不证明六个 worker-owned IB 角色、受保护三面板同周期、REQ7 Stage L 或线上发布。
+
+## TC-REAL-UFM-LOCAL-PIPELINE-001 — 本地 UFM 归档、IB 分析与展示来源
+
+- Case ID：`TC-REAL-UFM-LOCAL-PIPELINE-001`；类型：real-environment / analyzer / display-sync；状态：**BLOCKED / NOT RUN / REAL_ENV REQUIRED**。本机先决为 `test_cases.test_ufm_collection_pipeline` direct 与 `test_cases.test_ufm_collection_pipeline_workflow` 多脚本全绿；当前候选的 24/24 本机通过只满足自动化先决，不替代真实来源、写者静默或恢复见证。本卡属于 F01 完整产品的后续验证；REQ7 PRE 仅可采用已独立证明的最小来源桥接，不得据此提前宣布 F01 完成。
+- 前置条件：仅在 owner 明确批准的隔离 0700 stage 或可丢弃 Ubuntu 24.04 VM、经过授权的脱敏 UFM 归档和 P2P/CVT 副本上执行；保存候选 HEAD/tree、全量证明、归档/分析工具/项目目录/监控输出及外部哨兵的 dev/ino/mode/size/SHA、服务状态、同 UID 写者静默及快照。不得连接真实 UFM、写 live 项目或生产监控发布路径。
+- 步骤与预期：用真实归档→分析器→receipt 的固定路径走正常一次，再分别在 receipt 前修改 P2P/CVT/日志、在同步时替换归档/父目录、重复 run-id 和跨项目复用；均须非零拒绝且原产品和外部哨兵不变。setup 管理的 `99-output-ufm` 仅允许精确项目目标的链接，遇已有普通文件应拒绝不覆盖；HTML 三面板只能展示本地逐字节验真的 receipt，任何缺失/篡改/旧周期一律显示未知而非成功。
+- 证据、清理与风险：保留精确命令/退出码、归档、报告、receipt、页面与链接前后 SHA/身份、故障注入和恢复核对；仅回滚隔离副本。本卡未实测或完整 direct/workflow 有 RED 时保持 BLOCKED。页面展示不授予生产周期资格。
+
+## TC-REAL-REQ7-IB-PRODUCER-001 — 受保护的 IB 生产者完成见证
+
+- Case ID：`TC-REAL-REQ7-IB-PRODUCER-001`；类型：real-environment / protected worker-cycle / Stage L；状态：**BLOCKED / NOT RUN / REAL_ENV REQUIRED**。本机先决为 `test_cases.test_collection_ib_producer` direct、`test_cases.test_collection_ib_producer_workflow` 真实 worker/emitter 多脚本流程及 UFM 来源桥接全绿；单独 14/14 direct 或合成 runner 不能证明远端执行、受保护三面板或 Stage L。
+- 前置条件：只在 owner 授权的可丢弃 Ubuntu 24.04 VM、私有 0700 项目与已获独立远端授权的 UFM 测试节点上运行；先核对 root 0600 安装态、known_hosts 钉扎、当期 DHCP lease、真实 P2P/CVT sidecar、远端 agent/contract/Python SHA、受保护 0700 attestation 目录与 worker 唯一写者静默。保存 HEAD/tree、proof、设备/服务/输入及目标 dev/ino/mode/size/SHA、快照及回滚责任人。不得改生产 UFM、真实 crontab 或 live 项目。
+- 步骤与预期：让唯一 worker 为同一个 prod cycle 执行固定跳板、远端 before/after SHA、拉取、真实 IB 分析、六个独立角色和 no-overwrite root attestation；emitter、完成记录和 Stage L 消费点必须逐字节重放同一 cycle。分别替换根记录、租约、host pin、P2P/CVT、归档、报告、receipt、attestation 和任一角色后应 fail closed，旧周期/调用方字典/三角色周期均不得晋升。
+- 证据、清理与风险：保存脱敏精确 argv/exit、前后身份/摘要、worker/emitter/protected-cycle 三方原始证据、负例及快照恢复核验；只回滚获准的隔离对象。远端授权/静默/任何保护证明缺失或未实测，保持 BLOCKED，不把本卡或本地测试视为 AIR/prod 验收。
+
+## TC-REAL-REQ7-SWITCH-PROD-SOURCE-001 — ETH/NVLink 生产来源只读 K 窗口
+
+- Case ID：`TC-REAL-REQ7-SWITCH-PROD-SOURCE-001`；类型：real-environment / protected-cycle / read-only source；状态：**BLOCKED / NOT RUN / REAL_ENV REQUIRED**。本机自动化先决为 `test_cases.test_issue_tracker_switch_info_source`、`test_cases.test_issue_tracker_switch_info_source_workflow`、`test_cases.test_issue_tracker_switch_runtime`、`test_cases.test_issue_tracker_switch_runtime_workflow`、`test_cases.test_issue_tracker_stage_l_consumer` 与 `test_cases.test_issue_tracker_stage_l_consumer_workflow` 的 direct/workflow 全绿；合成归档和 worker/emitter 测试不能证明真实交换机、受保护根或整套 Stage L。
+- 前置条件：仅在 owner 单独授权的隔离 Ubuntu 24.04 VM、私有 0700 项目和经脱敏的真实 ETH/NVLink `info`、link 归档、CSV、inventory 与动态发现输入副本运行。记录同 UID 写者静默、worker/emitter 唯一写者、K 与 Whitelist 工作簿、HEAD/tree/full-proof、各输入及输出的 dev/ino/mode/size/SHA、快照和回滚负责人；不得连接生产设备、写 live 项目、真实 crontab 或线上 tracker。
+- 步骤与预期：真实 worker/emitter 为两个连续 prod 周期冻结目标计划、子结果及完成记录；只读消费必须分别重建 ETH/NVLink 两类 Switch 来源、字面异常值和明确不适用项，以同一项目/K/Whitelist 归约，且 `qualified=false`、无 workbook/manifest/RECEIPT/在线写入。只有在同一受保护周期真实存在并可重放 IB report 九角色时，Switch 两来源加 IB 的只读绑定才可返回 `qualification_not_implemented` 的 HOLD 见证；**这仍缺独立 ETH Cabling 面板，绝非完整三面板 Stage L**。本地工作流中替换受保护 IB report 解码器的组合测试不能当作该实测。逐项替换 inventory、动态行、冻结计划、任一 info/link/IB report 角色、完成记录、K 或 Whitelist 后必须 HOLD，旧见证重验不得通过；同内容但不同受保护周期不得误判为 replay。IB 报告缺失时仍须全局 HOLD，不得以两个 Switch 来源代替其他面板。
+- ETH Cabling 独立来源补充：在隔离授权环境以真实 prod worker/emitter 生成含第四个 activity role 的完成周期，按周期身份重建冻结 topology、DOT、inventory、alias、目标计划、运行时行和报告；只读 reader 返回逐条 ETH 链接观测状态且 `qualified=false`。本地三面板资格层另经重放才按 analyzer sheet 分组生成 Missing_Links/`Link Down` 或 Miswired_Links/`Mis-wiring` 的 C5 意图；只读 reader 自身不授予该权力。缺少第四 role、冻结 DOT/报告漂移、周期/sidecar 漂移必须 HOLD。若没有经独立重算的 P2P→LLDPQ 派生角色，`derivation=None`，即使 activity 行存在也不得称完整 ETH Cabling 面板，更不能执行本地工作簿或线上写入；本地合成 worker/emitter 绿色不能替代该真实见证。
+- ETH Cabling K/W1 补充：在两个连续且来源完整的真实 prod 周期设置 K=2，按预期 A/Z 和完整状态、观察值逐值求交，仅向只读见证返回连续未变的问题值；观察值改变即不得沿用旧值。实读本地模板 `Whitelist` 任一端命中时只给含真实端点及匹配规则原文的可审计 skip，不进入后续候选；规则原文缺失或重放变化必须 HOLD，不能从排除结果反推或合成。改变 K、模板字节、任一冻结输入、旧见证或归档身份必须 HOLD。只读归约及 hermetic 正向仍非真实环境验收，本卡继续 BLOCKED/NOT RUN。
+- 三来源组合补充：同一隔离真实完成周期必须同时具有 ETH/NVLink Switch、ETH 链接第四 role/P2P 派生和 IB 受保护报告九角色，三者 K/完成摘要/K 设置/W1 模板必须一致；任一角色缺失或不同周期均 HOLD。新增 hermetic 正向工作流使用本地受保护九角色 producer、真实 worker/emitter 完成记录和真实 K/Whitelist 重放，并可测试三面板 C5→C6；它仍以确定性检索替身代替远端 UFM，使用测试工作簿而非 owner 管理的正式模板，不能当成本卡真机或正式工作簿验收。本卡没有真实角色、正式输入与写者静默证据时保持 BLOCKED/NOT RUN。
+- 证据、清理与风险：保留脱敏精确命令/退出码、周期和来源摘要、拒绝原因、前后目录/服务状态、写者静默与独立快照恢复核验；仅回滚隔离副本。真实格式或保护链未证明、发生任何外部写入或没有授权时保持 BLOCKED/NOT RUN。本卡只证明只读来源，不能解除 `TC-REAL-REQ7-IB-CYCLE-BINDING-001` 或本地 C5/C6/线上发布门禁。
+
+## TC-REAL-REQ7-STAGE-L-C5-C6-001 — 受保护三面板到正式工作簿本地凭证
+
+- Case ID：`TC-REAL-REQ7-STAGE-L-C5-C6-001`；类型：real-environment / protected-cycle / local-transaction；状态：**BLOCKED / NOT RUN / REAL_ENV REQUIRED**。本机自动化先决为 `test_cases.test_issue_tracker_ib_runtime`/`_workflow`、`test_cases.test_issue_tracker_switch_runtime`/`_workflow`、`test_cases.test_issue_tracker_stage_l_consumer`/`_workflow`、`test_cases.test_issue_tracker_manifest`/`_workflow`、`test_cases.test_issue_tracker_local_workbook`/`_workflow` 与 `test_cases.test_issue_tracker_local_workbook_commit`/`_workflow` 的 direct/workflow 全绿；只有同一逐字节候选的正式 Codex/Claude 两轮全量结果才可进入本卡。自动化正向夹具不等于远端真实来源、正式模板或线上写入。
+- 前置条件：owner 另行授权隔离 Ubuntu 24.04 VM、私有 0700 stage、可丢弃项目与卷快照、唯一 LK-P 写者和可核验的同 UID 外部写者静默；选定 owner 管理的正式 `Issue_Tracker_Template_v1.xlsx`，逐字节记录其 dev/ino/mode/size/SHA 与 `Whitelist`/14 张工作表结构，不把模板搬入 Git，也不改 live/生产或线上 tracker。记录 K 设置、同周期受保护九角色 IB、ETH 第四 role/P2P 派生、两类 Switch inventory 中的 type/template 身份、完整 producer/worker/emitter root attestation 与完成记录的前像。缺任一来源、权限、回滚或全量证明即 STOP。
+- 步骤与预期：在隔离副本连续完成所需 K 个 prod 周期；独立重放所有 role、完成摘要、K、W1、模板及来源时间，三面板必须只在来源完整时生成稳定 activity_key/operation_id；C5 manifest 仅含经重放的 upsert 意图和可审计 W1 skip，IB 活动键、ETH 真实端点、Switch 原始记录 ID 与各自匹配规则不得混同。持同一 ACTIVE token 将正式模板或前一个有效 RECEIPT 所绑定的工作簿投影至 ETH Cabling、IB Cabling、ETH&IB Switch 和 Update_History；被 W1 跳过项须在 preview、provenance 与 Update_History 可见，历史行绑定 C5 manifest_id 及受保护来源 UTC，且不得写回被排除的业务行。先 INTENT 再本地 XLSX RECEIPT，逐字核对 manifest_id、published SHA 与原始工作簿。无候选且无新 skip 或幂等重放不得意外创生代次；Priority 人工值、公式、其他表、旧凭证不得被静默覆盖。本地 RECEIPT 不授予线上发布资格。
+- 负例与证据：分别漂移任一 IB 角色/attestation、ETH 派生、Switch type/template、K、W1、正式模板、操作员编辑 witness、既有 RECEIPT/发布文件，并在准备/INTENT/RECEIPT 与 fsync 边界注入失败；必须 fail closed、保留未解决 INTENT 且不得伪造 RECEIPT 或线上写入。真实 root worker 完成周期后还须核对 N=1 默认、显式 N 到期/未到期、禁用线上但本地独立、全局策略中途变化、来源 HOLD 与状态文件不可写时既不产生未授权本地代次也不改写采集结果。C-23 须另外核对同一 boot 上第二个及后续新周期只在相对 N 个唯一完成事件与共享最小间隔同时满足后准入，积压只投影当前合格集合、不补发历史 generation；跨 boot、时钟倒退、同周期重放、第二条 admission 缺失/篡改、C6 后但 admission fsync 前故障均 HOLD。还要直接调用底层 C6 路径尝试绕过共享准入，证明不会产生第二个无见证 RECEIPT。手动与重试路径也须证明共用同一 limiter；当前保守 HOLD 不能代替正向准入，这些现场证据未齐不得称 C-23 完成。`local_applied` 只表示本地 RECEIPT，不是在线 GO。保存脱敏 argv/exit、前后 inode/size/SHA、manifest、故障点、代次、负例拒绝、目录清单、写者静默和独立快照回滚比对；只恢复隔离副本。任何真机来源/正式模板/恢复证据缺失或尚未执行时保持 BLOCKED/NOT RUN；本卡完成也不替代 owner 单独裁定的 Stage O 在线编辑与发布。
+- C-23 持久 C6／共享准入不一致的人工恢复（**NOT RUN / 不能自动修补**）：在隔离可丢弃项目与卷快照内，先验证唯一 LK-P 写者及同 UID 外部写者静默；分别见证 C6 RECEIPT 后无事件目录、事件目录不完整／不连续、事件无 C6 RECEIPT、代次集合不匹配、存储事件不能绑定 C6／周期、末事件不能绑定已发布 C6 六种终态；尤其在 C6 RECEIPT 持久化后、共享准入事件 fsync 前注入故障。预期 worker 状态 `reason=local_c6_terminal_admission_state` 且 `terminal_detail` 精确描述命中的条件，该 state root 的所有后续自动、手动及重试准入均 HOLD；重复完成周期 ID 与暂时 I/O 错误不得被错误标为终态。保留 RECEIPT、INTENT、已发布 XLSX、未匹配或缺失的事件目录及其原始 inode/size/SHA 和错误状态，不删除、不回填、不重命名、不复用旧代次，也不把已有 RECEIPT 猜成许可。操作员只读封存整个 state root、来源完成证明、模板与策略身份及隔离卷快照；若业务必须继续，须由 owner 另行明确批准从已核验来源建立**新的**项目/state 身份，再在独立私有 stage 重走正式验证与两轮全量门禁。原 state root 保持终止 HOLD 并留存审计，不在原目录内“修复”历史；未经另行授权不得用于 live、AIR 或生产。记录故障注入点、封存前后哈希、写者静默、拒绝路径、新旧身份隔离及快照清理证明。此卡未实测或 owner 未授权重建时，不得宣称恢复能力或 C-23 真实环境验收。

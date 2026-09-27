@@ -38,6 +38,116 @@ CHECK = load_check_infra()
 
 
 class InfraCheckFunctionalTests(unittest.TestCase):
+    def test_public_collection_options_explain_inputs_and_output(self):
+        with mock.patch.object(sys, "argv", ["check_infra.py"]):
+            with mock.patch.object(CHECK.argparse.ArgumentParser, "parse_args", autospec=True) as parse:
+                CHECK.parse_args()
+                parser = parse.call_args.args[0]
+        actions = {
+            option: action
+            for action in parser._actions
+            for option in action.option_strings
+        }
+        self.assertIn("devices CSV", actions["--devices-file"].help or "")
+        self.assertIn("local results", actions["--output-dir"].help or "")
+
+    def assert_remote_result_directory_contract(self, factory):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "collected"
+            output.mkdir()
+            observed = {
+                label: factory(output, label, "192.0.2.10")
+                for label in (
+                    ".", "..", "", "leaf01", "leaf/../escape", "leaf\N{SNOWMAN}",
+                    "rack/a", "rack?a",
+                )
+            }
+            self.assertEqual(len(observed), len(set(observed.values())))
+            for destination in observed.values():
+                self.assertEqual(output.resolve(), destination.resolve().parent)
+                self.assertRegex(destination.name, r"\Aserver-[A-Za-z0-9_-]+-192-0-2-10\Z")
+
+            first = factory(output, "same-label", "192.0.2.11")
+            second = factory(output, "same-label", "192.0.2.12")
+            self.assertNotEqual(first, second)
+
+    def test_remote_result_directory_is_one_canonical_contained_component(self):
+        self.assert_remote_result_directory_contract(CHECK.safe_server_output_dir)
+
+    def test_remote_result_directory_oracle_rejects_wrong_but_present_helper(self):
+        def unsafe_factory(output_dir, label, _address):
+            destination = output_dir.parent / (label or "server-fallback")
+            destination.mkdir(parents=True, exist_ok=True)
+            return destination
+
+        with self.assertRaises(AssertionError):
+            self.assert_remote_result_directory_contract(unsafe_factory)
+
+    def test_remote_result_directory_rejects_non_ipv4_and_preexisting_symlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "collected"
+            output.mkdir()
+            for address in ("", "../escape", "2001:db8::1", "999.1.1.1"):
+                with self.subTest(address=address), self.assertRaises(CHECK.DeployError):
+                    CHECK.safe_server_output_dir(output, "leaf", address)
+
+            destination = output / "server-leaf-192-0-2-10"
+            destination.symlink_to(Path(directory))
+            with self.assertRaises(CHECK.DeployError):
+                CHECK.safe_server_output_dir(output, "leaf", "192.0.2.10")
+
+    def test_collect_server_keeps_status_and_log_destinations_beneath_output(self):
+        probe_text = "\n".join((
+            "public.status=completed",
+            "public.last_action=setup",
+            "public.exit_code=0",
+            "system.os_id=ubuntu",
+            "system.os_version=24.04",
+            "run_info.status=completed",
+            "packages.missing=",
+            "privileged.available=true",
+            "effective.dns=8.8.8.8",
+            "effective.ntp=ntp.ubuntu.com",
+            "effective.timezone=Etc/UTC",
+            "log.file=infra-setup-20260923_010203.log",
+            "log.file=logs/infra-teardown-20260923_010204.log",
+            "",
+        ))
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "collected" / "20260923T010200Z"
+            output.mkdir(parents=True)
+            copied = []
+
+            def fake_run(command, **_kwargs):
+                if command[0] == "scp":
+                    destination = Path(command[-1])
+                    destination.write_text("copied", encoding="utf-8")
+                    copied.append(destination)
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                if command[-1] == "printf '%s' \"$HOME\"":
+                    return subprocess.CompletedProcess(command, 0, "/home/operator", "")
+                return subprocess.CompletedProcess(command, 0, probe_text, "")
+
+            with mock.patch.object(CHECK, "key_login_works", return_value=True), \
+                 mock.patch.object(CHECK.subprocess, "run", side_effect=fake_run):
+                result = CHECK.collect_server(
+                    {"hostname": "..", "address": "192.0.2.10"},
+                    "operator", None, output,
+                )
+
+            self.assertEqual(
+                [
+                    "infra-setup-20260923_010203.log",
+                    "logs/infra-teardown-20260923_010204.log",
+                ],
+                result["logs"],
+            )
+            status_files = list(output.glob("server-*/status.txt"))
+            self.assertEqual(1, len(status_files))
+            self.assertEqual(2, len(copied))
+            for destination in [*status_files, *copied]:
+                self.assertTrue(destination.resolve().is_relative_to(output.resolve()))
+
     def test_probe_values_drive_success_and_failure_classification(self):
         healthy = CHECK.parse_key_values(
             "\n".join((

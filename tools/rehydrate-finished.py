@@ -11,10 +11,9 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
-import shutil
+import secrets
 import stat
 import sys
-import tempfile
 from typing import Any
 
 
@@ -26,10 +25,24 @@ CONTROL_NAMES = frozenset({
     "latest", "activation.json", "precommit.json", ".deployment.lock",
     ".sync-code-in-progress",
 })
+REHYDRATE_CONTROL_NAMES = frozenset({
+    ".finished-source.json", ".finished-commit.ready", ".finished-commit.json",
+})
 
 
 class RehydrateError(RuntimeError):
     """The finished record or destination is unsafe."""
+
+
+class _VerifiedReport(dict[str, Any]):
+    """Import report paired with the object identities verified with it."""
+
+    def __init__(self, report: dict[str, Any], entries: list[dict[str, str]]) -> None:
+        super().__init__(report)
+        self.entries = tuple(
+            (entry["path"], entry["type"], entry["identity"])
+            for entry in entries
+        )
 
 
 def _sha256_bytes(payload: bytes) -> str:
@@ -91,7 +104,7 @@ def _record_entries(record: Path) -> list[dict[str, str]]:
     return entries
 
 
-def verify_record(record: Path) -> dict[str, Any]:
+def verify_record(record: Path) -> _VerifiedReport:
     record = Path(record)
     try:
         metadata = record.lstat()
@@ -139,7 +152,7 @@ def verify_record(record: Path) -> dict[str, Any]:
     source = record / "reconstructed-final"
     if source.is_symlink() or not source.is_dir():
         raise RehydrateError("record reconstructed-final is missing or unsafe")
-    return report
+    return _VerifiedReport(report, entries)
 
 
 def _is_runtime_control(relative: PurePosixPath) -> bool:
@@ -166,53 +179,234 @@ def _include(relative: PurePosixPath, include_history: bool) -> bool:
     return True
 
 
-def _write_file(path: Path, payload: bytes, executable: bool) -> None:
-    descriptor = os.open(
-        path,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
-        0o700 if executable else 0o600,
-    )
+_DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+_FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+
+
+class _HeldStage:
+    """Confine destination mutations to one held DAY0/stage directory pair."""
+
+    def __init__(self, root: Path, root_fd: int, name: str, stage_fd: int) -> None:
+        self.root, self.root_fd = root, root_fd
+        self.name, self.stage_fd = name, stage_fd
+        parent = os.fstat(root_fd)
+        self.parent_identity = (parent.st_dev, parent.st_ino)
+        # Own child writes never alter the DAY0 directory. A rename/rebind of
+        # the public stage name does, even if the name is immediately restored.
+        self.parent_ctime_ns = parent.st_ctime_ns
+        held_stage = os.fstat(stage_fd)
+        self.stage_identity = (held_stage.st_dev, held_stage.st_ino)
+
+    def check(self, *, require_unchanged_parent: bool = True) -> None:
+        try:
+            visible_root = os.lstat(self.root)
+            held_root = os.fstat(self.root_fd)
+            visible_stage = os.stat(self.name, dir_fd=self.root_fd, follow_symlinks=False)
+            held_stage = os.fstat(self.stage_fd)
+        except OSError as exc:
+            raise RehydrateError("rehydrate staging directory is unavailable") from exc
+        if (
+            not stat.S_ISDIR(visible_root.st_mode)
+            or not stat.S_ISDIR(visible_stage.st_mode)
+            or (visible_root.st_dev, visible_root.st_ino) != self.parent_identity
+            or (held_root.st_dev, held_root.st_ino) != self.parent_identity
+            or (require_unchanged_parent and held_root.st_ctime_ns != self.parent_ctime_ns)
+            or (visible_stage.st_dev, visible_stage.st_ino) != self.stage_identity
+            or (held_stage.st_dev, held_stage.st_ino) != self.stage_identity
+        ):
+            raise RehydrateError("rehydrate staging directory rebound")
+
+
+def _open_staged_directory(stage: _HeldStage, parts: tuple[str, ...]) -> int:
+    descriptor = os.dup(stage.stage_fd)
     try:
+        for name in parts:
+            stage.check()
+            try:
+                os.mkdir(name, 0o700, dir_fd=descriptor)
+            except FileExistsError:
+                pass
+            child = os.open(name, _DIR_FLAGS, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+            stage.check()
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _write_staged_file(
+    stage: _HeldStage, relative: PurePosixPath, payload: bytes, executable: bool,
+) -> None:
+    parent_fd = _open_staged_directory(stage, relative.parts[:-1])
+    descriptor = -1
+    try:
+        stage.check()
+        descriptor = os.open(
+            relative.name, _FILE_FLAGS | getattr(os, "O_CLOEXEC", 0),
+            0o700 if executable else 0o600, dir_fd=parent_fd,
+        )
+        # Check *before* the first byte write. The held parent fd keeps even
+        # the O_CREAT leaf inside the original stage if its public name moves.
+        stage.check()
         with os.fdopen(descriptor, "wb", closefd=False) as stream:
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
+        os.fsync(parent_fd)
+        stage.check()
     finally:
-        os.close(descriptor)
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent_fd)
 
 
-def _copy_materialized(source: Path, stage: Path, include_history: bool) -> None:
+def _remove_staged_entries(stage: _HeldStage, directory_fd: int) -> None:
+    """Remove only children of a held directory; never follow a rebound name."""
+    with os.scandir(directory_fd) as entries:
+        names = [entry.name for entry in entries]
+    for name in names:
+        stage.check(require_unchanged_parent=False)
+        metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if stat.S_ISDIR(metadata.st_mode):
+            child = os.open(name, _DIR_FLAGS, dir_fd=directory_fd)
+            try:
+                _remove_staged_entries(stage, child)
+            finally:
+                os.close(child)
+            stage.check(require_unchanged_parent=False)
+            os.rmdir(name, dir_fd=directory_fd)
+        else:
+            stage.check(require_unchanged_parent=False)
+            os.unlink(name, dir_fd=directory_fd)
+
+
+def _selected_entries(
+    entries: tuple[tuple[str, str, str], ...], include_history: bool,
+) -> dict[str, tuple[str, str]]:
+    expected: dict[str, tuple[str, str]] = {}
+    if ("reconstructed-final", "directory", "directory") not in entries:
+        raise RehydrateError("verified reconstructed-final root is missing")
+    for name, kind, identity in entries:
+        parts = PurePosixPath(name).parts
+        if not parts or parts[0] != "reconstructed-final" or len(parts) == 1:
+            continue
+        relative = PurePosixPath(*parts[1:])
+        if not _include(relative, include_history):
+            continue
+        key = relative.as_posix()
+        if key in REHYDRATE_CONTROL_NAMES:
+            raise RehydrateError(f"source contains reserved rehydrate control: {key}")
+        if key in expected:
+            raise RehydrateError(f"duplicate verified source entry: {key}")
+        expected[key] = (kind, identity)
+    return expected
+
+
+def _verify_materialized_stage(
+    stage: _HeldStage, expected: dict[str, tuple[str, str]],
+) -> None:
+    seen: set[str] = set()
+
+    def walk(directory_fd: int, prefix: tuple[str, ...]) -> None:
+        with os.scandir(directory_fd) as entries:
+            names = sorted(entry.name for entry in entries)
+        for name in names:
+            relative = PurePosixPath(*prefix, name).as_posix()
+            identity = expected.get(relative)
+            if identity is None or relative in seen:
+                raise RehydrateError(f"materialized stage has an unexpected object: {relative}")
+            seen.add(relative)
+            kind, digest = identity
+            metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if kind == "directory" and stat.S_ISDIR(metadata.st_mode):
+                child = os.open(name, _DIR_FLAGS, dir_fd=directory_fd)
+                try:
+                    walk(child, (*prefix, name))
+                finally:
+                    os.close(child)
+                continue
+            if kind == "file" and stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1:
+                descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+                try:
+                    held = os.fstat(descriptor)
+                    if (held.st_dev, held.st_ino) != (metadata.st_dev, metadata.st_ino):
+                        raise RehydrateError(f"materialized stage file rebound: {relative}")
+                    hasher = hashlib.sha256()
+                    while chunk := os.read(descriptor, 1024 * 1024):
+                        hasher.update(chunk)
+                    after = os.fstat(descriptor)
+                    if (
+                        hasher.hexdigest() == digest
+                        and (held.st_dev, held.st_ino, held.st_size, held.st_mtime_ns)
+                        == (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+                    ):
+                        continue
+                finally:
+                    os.close(descriptor)
+            raise RehydrateError(f"materialized stage differs from verified record: {relative}")
+
+    stage.check()
+    walk(stage.stage_fd, ())
+    stage.check()
+    if seen != expected.keys():
+        raise RehydrateError("materialized stage is missing verified objects")
+
+
+def _copy_materialized(
+    source: Path, stage: _HeldStage, include_history: bool,
+    verified_entries: tuple[tuple[str, str, str], ...],
+) -> None:
+    expected = _selected_entries(verified_entries, include_history)
+    seen: set[str] = set()
     for path in sorted(source.rglob("*"), key=lambda item: item.relative_to(source).as_posix()):
         relative = PurePosixPath(path.relative_to(source).as_posix())
         if not _include(relative, include_history):
             continue
-        target = stage.joinpath(*relative.parts)
+        key = relative.as_posix()
+        identity = expected.get(key)
+        if identity is None or key in seen:
+            raise RehydrateError(f"rehydrate source differs from verified record: {relative}")
+        seen.add(key)
+        kind, digest = identity
         metadata = path.lstat()
         if stat.S_ISLNK(metadata.st_mode):
             raise RehydrateError(f"rehydrate source contains a non-control symlink: {relative}")
         if stat.S_ISDIR(metadata.st_mode):
-            target.mkdir(mode=0o700, parents=True, exist_ok=True)
+            if kind != "directory" or stat.S_IMODE(metadata.st_mode) != 0o555:
+                raise RehydrateError(f"rehydrate directory differs from verified record: {relative}")
+            directory_fd = _open_staged_directory(stage, relative.parts)
+            os.close(directory_fd)
             continue
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        if (
+            kind != "file" or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1 or stat.S_IMODE(metadata.st_mode) != 0o444
+        ):
             raise RehydrateError(f"rehydrate source contains an unsafe object: {relative}")
-        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         payload = _stable_bytes(path)
-        _write_file(target, payload, bool(metadata.st_mode & 0o111))
+        if _sha256_bytes(payload) != digest:
+            raise RehydrateError(f"rehydrate source bytes differ from verified record: {relative}")
+        _write_staged_file(stage, relative, payload, bool(metadata.st_mode & 0o111))
+    if seen != expected.keys():
+        raise RehydrateError("rehydrate source is missing verified objects")
+    _verify_materialized_stage(stage, expected)
 
 
-def _rename_noreplace(source: Path, destination: Path) -> None:
+def _rename_noreplace(source: Path, destination: Path, *, directory_fd: int) -> None:
     libc = ctypes.CDLL(None, use_errno=True)
-    source_bytes = os.fsencode(source)
-    destination_bytes = os.fsencode(destination)
-    if sys.platform == "darwin" and hasattr(libc, "renamex_np"):
-        result = libc.renamex_np(
-            ctypes.c_char_p(source_bytes), ctypes.c_char_p(destination_bytes),
+    source_bytes = os.fsencode(source.name)
+    destination_bytes = os.fsencode(destination.name)
+    if sys.platform == "darwin" and hasattr(libc, "renameatx_np"):
+        result = libc.renameatx_np(
+            ctypes.c_int(directory_fd), ctypes.c_char_p(source_bytes),
+            ctypes.c_int(directory_fd), ctypes.c_char_p(destination_bytes),
             ctypes.c_uint(0x00000004),
         )
     elif sys.platform.startswith("linux") and hasattr(libc, "renameat2"):
         result = libc.renameat2(
-            ctypes.c_int(-100), ctypes.c_char_p(source_bytes),
-            ctypes.c_int(-100), ctypes.c_char_p(destination_bytes),
+            ctypes.c_int(directory_fd), ctypes.c_char_p(source_bytes),
+            ctypes.c_int(directory_fd), ctypes.c_char_p(destination_bytes),
             ctypes.c_uint(1),
         )
     else:
@@ -223,6 +417,64 @@ def _rename_noreplace(source: Path, destination: Path) -> None:
     if error == errno.EEXIST:
         raise RehydrateError(f"target already exists: {destination}")
     raise RehydrateError(f"cannot publish rehydrated project: {os.strerror(error)}")
+
+
+def _canonical_json_bytes(value: dict[str, Any]) -> bytes:
+    return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+
+
+def _bound_commit_is_visible(
+    *, day0_root: Path, root_fd: int, target: Path, stage: _HeldStage,
+    expected: bytes,
+) -> bool:
+    """Resolve an indeterminate final rename without trusting its exception."""
+    try:
+        named_root = os.lstat(day0_root)
+        named_target = os.lstat(target)
+        held_target = os.stat(target.name, dir_fd=root_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(named_root.st_mode)
+            or (named_root.st_dev, named_root.st_ino) != stage.parent_identity
+            or not stat.S_ISDIR(named_target.st_mode)
+            or (named_target.st_dev, named_target.st_ino) != stage.stage_identity
+            or (held_target.st_dev, held_target.st_ino) != stage.stage_identity
+        ):
+            return False
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(".finished-commit.json", flags, dir_fd=stage.stage_fd)
+        matches = False
+        try:
+            before = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or before.st_nlink != 1
+                or before.st_size != len(expected)
+            ):
+                return False
+            payload = os.read(descriptor, len(expected) + 1)
+            after = os.fstat(descriptor)
+            matches = (
+                payload == expected
+                and (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+                == (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+            )
+            return matches
+        finally:
+            try:
+                os.close(descriptor)
+            except OSError as exc:
+                if not matches:
+                    raise
+                _warn_nonfatal(f"[WARN] bound commit marker close failed: {exc}")
+    except OSError:
+        return False
+
+
+def _warn_nonfatal(message: str) -> None:
+    try:
+        print(message, file=sys.stderr)
+    except (OSError, ValueError):
+        pass
 
 
 def rehydrate_record(
@@ -239,42 +491,160 @@ def rehydrate_record(
     if os.path.lexists(target):
         raise RehydrateError(f"target already exists: {target}")
     report = verify_record(Path(record))
+    if not isinstance(report, _VerifiedReport):
+        raise RehydrateError("record verification did not bind object identities")
     source = Path(record) / "reconstructed-final"
-    stage = Path(tempfile.mkdtemp(prefix=f".{new_project}.rehydrate-", dir=day0_root))
-    stage.chmod(0o700)
+    root_fd = os.open(day0_root, _DIR_FLAGS)
+    stage_fd = -1
+    stage: _HeldStage | None = None
+    stage_name: str | None = None
+    created_stage_identity: tuple[int, int] | None = None
+    published = False
+    committed = False
     try:
-        _copy_materialized(source, stage, include_history)
+        held_root = os.fstat(root_fd)
+        visible_root = os.lstat(day0_root)
+        if (
+            not stat.S_ISDIR(held_root.st_mode)
+            or (held_root.st_dev, held_root.st_ino)
+            != (visible_root.st_dev, visible_root.st_ino)
+        ):
+            raise RehydrateError("DAY0 root rebound before staging")
+        stage_name = f".{new_project}.rehydrate-{secrets.token_hex(16)}"
+        os.mkdir(stage_name, 0o700, dir_fd=root_fd)
+        created = os.stat(stage_name, dir_fd=root_fd, follow_symlinks=False)
+        created_stage_identity = (created.st_dev, created.st_ino)
+        stage_fd = os.open(stage_name, _DIR_FLAGS, dir_fd=root_fd)
+        stage = _HeldStage(day0_root, root_fd, stage_name, stage_fd)
+        if stage.stage_identity != created_stage_identity:
+            raise RehydrateError("rehydrate stage rebound during open")
+        stage.check()
+        _copy_materialized(source, stage, include_history, report.entries)
         receipt = {
             "schema_version": 1,
+            "state": "PREPARED",
             "source_record": str(Path(record).resolve(strict=True)),
             "project": report["project"],
             "record_id": report["record_id"],
             "content_sha256": report["content_sha256"],
             "include_history": bool(include_history),
         }
-        _write_file(
-            stage / ".finished-source.json",
-            (json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii"),
+        receipt_bytes = _canonical_json_bytes(receipt)
+        _write_staged_file(
+            stage, PurePosixPath(".finished-source.json"),
+            receipt_bytes,
             False,
         )
-        _rename_noreplace(stage, target)
-        descriptor = os.open(day0_root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        commit_bytes = _canonical_json_bytes({
+            "schema_version": 1,
+            "state": "COMMITTED",
+            "receipt_sha256": _sha256_bytes(receipt_bytes),
+            "target_project": new_project,
+            "target_dev": stage.stage_identity[0],
+            "target_ino": stage.stage_identity[1],
+        })
+        _write_staged_file(
+            stage, PurePosixPath(".finished-commit.ready"), commit_bytes, False,
+        )
+        stage.check()
+        os.fsync(stage_fd)
         try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+            _rename_noreplace(Path(stage.name), target, directory_fd=root_fd)
+            published = True
+        except (OSError, RehydrateError) as exc:
+            # A no-replace rename can have taken effect even if its caller saw
+            # an error.  Keep the possibly published inode and its evidence.
+            try:
+                named = os.stat(target.name, dir_fd=root_fd, follow_symlinks=False)
+                if (named.st_dev, named.st_ino) == stage.stage_identity:
+                    published = True
+            except OSError:
+                pass
+            if published:
+                raise RehydrateError(
+                    "rehydrate publication outcome indeterminate; pending target retained"
+                ) from exc
+            raise
+        os.fsync(root_fd)
+        named_root = os.lstat(day0_root)
+        named_target = os.lstat(target)
+        held_target = os.stat(target.name, dir_fd=root_fd, follow_symlinks=False)
+        if (
+            (named_root.st_dev, named_root.st_ino) != stage.parent_identity
+            or not stat.S_ISDIR(named_target.st_mode)
+            or (named_target.st_dev, named_target.st_ino) != stage.stage_identity
+            or (held_target.st_dev, held_target.st_ino) != stage.stage_identity
+        ):
+            raise RehydrateError("rehydrated project rebound after publication")
+        try:
+            _rename_noreplace(
+                Path(".finished-commit.ready"), Path(".finished-commit.json"),
+                directory_fd=stage_fd,
+            )
+            committed = True
+        except (OSError, RehydrateError) as exc:
+            if _bound_commit_is_visible(
+                day0_root=day0_root, root_fd=root_fd, target=target,
+                stage=stage, expected=commit_bytes,
+            ):
+                committed = True
+                _warn_nonfatal(
+                    f"[WARN] rehydrate commit rename reported an error after "
+                    f"the bound marker became visible: {exc}"
+                )
+            else:
+                raise RehydrateError(
+                    "rehydrate commit outcome indeterminate; pending target retained"
+                ) from exc
+        # The marker rename is the logical commit point.  No later durability
+        # syscall may turn this committed outcome into a reported failure.
         return target
     finally:
-        if os.path.lexists(stage):
-            shutil.rmtree(stage)
+        try:
+            if stage is not None and not published:
+                stage.check(require_unchanged_parent=False)
+                _remove_staged_entries(stage, stage.stage_fd)
+                stage.check(require_unchanged_parent=False)
+                os.rmdir(stage.name, dir_fd=root_fd)
+            elif stage is None and stage_name is not None and created_stage_identity is not None:
+                try:
+                    named = os.stat(stage_name, dir_fd=root_fd, follow_symlinks=False)
+                    if (named.st_dev, named.st_ino) == created_stage_identity:
+                        os.rmdir(stage_name, dir_fd=root_fd)
+                except FileNotFoundError:
+                    pass
+        finally:
+            close_error: OSError | None = None
+            for descriptor, label in ((stage_fd, "stage"), (root_fd, "parent")):
+                if descriptor < 0:
+                    continue
+                try:
+                    os.close(descriptor)
+                except OSError as exc:
+                    if committed:
+                        _warn_nonfatal(f"[WARN] committed rehydrate {label} close failed: {exc}")
+                    elif close_error is None:
+                        close_error = exc
+            if close_error is not None:
+                raise close_error
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("record", type=Path)
-    parser.add_argument("new_project")
-    parser.add_argument("--day0-root", type=Path, default=Path("DAY0-Prepare"))
-    parser.add_argument("--include-history", action="store_true")
+    parser.add_argument(
+        "record", type=Path, help="Path to a verified finished record",
+    )
+    parser.add_argument(
+        "new_project", help="Name for the new DAY0 project materialized from the record",
+    )
+    parser.add_argument(
+        "--day0-root", type=Path, default=Path("DAY0-Prepare"),
+        help="Existing DAY0 project root (default: DAY0-Prepare)",
+    )
+    parser.add_argument(
+        "--include-history", action="store_true",
+        help="Also restore history files that are omitted by default",
+    )
     return parser.parse_args(argv)
 
 
@@ -290,8 +660,11 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, RehydrateError) as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 1
-    print(f"[OK] rehydrated finished record to {target}")
-    print("[NEXT] validate and load it as a normal DAY0 project")
+    try:
+        print(f"[OK] rehydrated finished record to {target}", flush=True)
+        print("[NEXT] validate and load it as a normal DAY0 project", flush=True)
+    except (OSError, ValueError) as exc:
+        _warn_nonfatal(f"[WARN] rehydrate committed but success output failed: {exc}")
     return 0
 
 

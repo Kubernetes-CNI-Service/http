@@ -2279,6 +2279,135 @@ switches:
                         configured["system"]["docker"]["vrf"],
                     )
 
+    def test_issue0001_all_fourteen_roles_honor_independent_dns_and_ntp_vrfs(self):
+        """Direct render contract: neither service may inherit a literal mgmt VRF."""
+        roles = sorted(
+            path.stem.removesuffix(".yaml")
+            for path in TEMPLATES.glob("*.yaml.j2")
+            if not path.name.startswith("_")
+        )
+        self.assertEqual(14, len(roles))
+        global_vars = copy.deepcopy(self.intermediate_document["global"])
+        global_vars["system"]["dns"]["vrf"] = "DNS-CONTROL"
+        global_vars["system"]["ntp"]["vrf"] = "NTP-CONTROL"
+        environment = GENERATOR.build_env()
+        for role in roles:
+            with self.subTest(role=role):
+                device = copy.deepcopy(self.generated_devices["EXAMPLE-NoVlan"])
+                device.update({
+                    "hostname": f"EXAMPLE-{role}", "template": role,
+                    "mlag_backup": "192.0.2.99",
+                    "mlag_shared_address": "198.51.100.253",
+                    "mlag_mac_address": "02:00:00:00:20:ff",
+                    "mlag_priority": 100,
+                    "system_mac": "02:00:00:00:20:01",
+                })
+                document = GENERATOR._load_generated_yaml(GENERATOR.render(
+                    environment, global_vars, device["hostname"], device,
+                ))
+                system = set_block(document)["system"]
+                self.assertEqual(
+                    {"DNS-CONTROL"},
+                    {server.get("vrf") for server in system["dns"]["server"].values()},
+                )
+                self.assertEqual("NTP-CONTROL", system["ntp"].get("vrf"))
+                self.assertEqual(
+                    "DNS-CONTROL" if role in {"oobofoob-leaf", "oobofoob-spine"} else "mgmt",
+                    system["docker"]["vrf"],
+                    "ISSUE-0001 must not change Docker's independent VRF policy",
+                )
+
+    def test_issue0001_all_roles_null_and_empty_vrf_fall_back_without_overriding_explicit(self):
+        """A present but empty service VRF has the same default as an absent one."""
+        roles = sorted(
+            path.stem.removesuffix(".yaml")
+            for path in TEMPLATES.glob("*.yaml.j2")
+            if not path.name.startswith("_")
+        )
+        self.assertEqual(14, len(roles))
+        environment = GENERATOR.build_env()
+        for role in roles:
+            device = copy.deepcopy(self.generated_devices["EXAMPLE-NoVlan"])
+            device.update({
+                "hostname": f"EXAMPLE-{role}", "template": role,
+                "mlag_backup": "192.0.2.99",
+                "mlag_shared_address": "198.51.100.253",
+                "mlag_mac_address": "02:00:00:00:20:ff",
+                "mlag_priority": 100,
+                "system_mac": "02:00:00:00:20:01",
+            })
+            for value, expected_dns, expected_ntp in (
+                (None, "mgmt", "mgmt"),
+                ("", "mgmt", "mgmt"),
+                ("DNS-CONTROL", "DNS-CONTROL", "NTP-CONTROL"),
+            ):
+                with self.subTest(role=role, vrf=value):
+                    global_vars = copy.deepcopy(self.intermediate_document["global"])
+                    global_vars["system"]["dns"]["vrf"] = value
+                    global_vars["system"]["ntp"]["vrf"] = (
+                        "NTP-CONTROL" if value == "DNS-CONTROL" else value
+                    )
+                    document = GENERATOR._load_generated_yaml(GENERATOR.render(
+                        environment, global_vars, device["hostname"], device,
+                    ))
+                    system = set_block(document)["system"]
+                    self.assertEqual(
+                        {expected_dns},
+                        {server.get("vrf") for server in system["dns"]["server"].values()},
+                    )
+                    self.assertEqual(expected_ntp, system["ntp"].get("vrf"))
+                    self.assertEqual(
+                        expected_dns if role in {"oobofoob-leaf", "oobofoob-spine"} else "mgmt",
+                        system["docker"]["vrf"],
+                    )
+
+    def test_issue0001_global_to_render_missing_vrf_falls_back_to_mgmt(self):
+        """Real load and render preserve absent, null, and empty service defaults."""
+        environment = GENERATOR.build_env()
+        roles = sorted(
+            path.stem.removesuffix(".yaml")
+            for path in TEMPLATES.glob("*.yaml.j2")
+            if not path.name.startswith("_")
+        )
+        self.assertEqual(14, len(roles))
+        for scenario, value in (("absent", None), ("null", None), ("empty", "")):
+            original = yaml.safe_load(self.global_file.read_text(encoding="utf-8"))
+            eth = next(item["eth"] for item in original["switches"] if "eth" in item)
+            for service in ("dns", "ntp"):
+                if scenario == "absent":
+                    eth["system"][service].pop("vrf", None)
+                else:
+                    eth["system"][service]["vrf"] = value
+            with tempfile.TemporaryDirectory() as directory:
+                global_file = Path(directory) / "01-global.yaml"
+                global_file.write_text(
+                    yaml.safe_dump(original, sort_keys=False), encoding="utf-8",
+                )
+                LOAD.load_global(global_file)
+                with mock.patch.object(GENERATOR, "_GLOBAL_FILE", str(global_file)):
+                    global_vars = GENERATOR.load_global("eth")
+            for role in roles:
+                with self.subTest(scenario=scenario, role=role):
+                    device = copy.deepcopy(self.generated_devices["EXAMPLE-NoVlan"])
+                    device.update({
+                        "hostname": f"EXAMPLE-{role}", "template": role,
+                        "mlag_backup": "192.0.2.99",
+                        "mlag_shared_address": "198.51.100.253",
+                        "mlag_mac_address": "02:00:00:00:20:ff",
+                        "mlag_priority": 100,
+                        "system_mac": "02:00:00:00:20:01",
+                    })
+                    document = GENERATOR._load_generated_yaml(GENERATOR.render(
+                        environment, global_vars, device["hostname"], device,
+                    ))
+                    system = set_block(document)["system"]
+                    self.assertEqual(
+                        {"mgmt"},
+                        {server.get("vrf") for server in system["dns"]["server"].values()},
+                    )
+                    self.assertEqual("mgmt", system["ntp"].get("vrf"))
+                    self.assertEqual("mgmt", system["docker"]["vrf"])
+
     def test_eth_dns_domain_is_strictly_validated_before_render(self):
         """REQ-10: explicit domain must be a non-empty string on every entry path."""
         original = yaml.safe_load(self.global_file.read_text(encoding="utf-8"))

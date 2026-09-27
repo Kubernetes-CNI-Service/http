@@ -11,6 +11,7 @@ set -euo pipefail
 
 #==================== 全局公共配置 ====================
 ZTP_SERVER="http://127.0.0.1"
+ZTP_SERVER_HOST="127.0.0.1"
 ZTP_URL_PREFIX="/ztp"
 MANUAL_ZTP_OOB_URL="http://127.0.0.1/ztp/ztp-bootstrap_oob.sh"
 MANUAL_ZTP_OOBOFOOB_URL="http://127.0.0.1/ztp/ztp-bootstrap_oobofoob.sh"
@@ -870,9 +871,9 @@ select_ztp_network_path() {
     fi
 
     if [[ "${ZTP_VRF}" == "default" ]]; then
-        route=$(ip -4 route get "${ZTP_SERVER##*/}" 2>/dev/null | head -n 1 || true)
+        route=$(ip -4 route get "${ZTP_SERVER_HOST}" 2>/dev/null | head -n 1 || true)
     else
-        route=$(ip -4 route get "${ZTP_SERVER##*/}" vrf "${ZTP_VRF}" 2>/dev/null | head -n 1 || true)
+        route=$(ip -4 route get "${ZTP_SERVER_HOST}" vrf "${ZTP_VRF}" 2>/dev/null | head -n 1 || true)
     fi
     ZTP_ROUTE_DEV=$(awk '{for (i=1; i<=NF; i++) if ($i == "dev" && i < NF) {print $(i+1); exit}}' <<<"${route}")
     log "[ZTP] Selected route: vrf=${ZTP_VRF}, interface=${ZTP_INTERFACE:-auto}, route_dev=${ZTP_ROUTE_DEV:-unknown}, route=${route:-unavailable}"
@@ -1373,7 +1374,7 @@ if ! select_ztp_network_path; then
     exit 1
 fi
 
-if ! check_network "${ZTP_SERVER##*/}"; then
+if ! check_network "${ZTP_SERVER_HOST}"; then
     log "[ZTP] ERROR: Cannot reach ${ZTP_SERVER}"
     log "======================== ZTP FINISH ========================"
     exit 1

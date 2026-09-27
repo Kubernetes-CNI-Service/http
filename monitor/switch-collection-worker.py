@@ -4,15 +4,18 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import ctypes
 from datetime import datetime
 import fcntl
 import grp
 import hashlib
+import io
+import ipaddress
 import json
 import math
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import signal
 import socket
 import stat
@@ -32,18 +35,26 @@ from switch_collection_gate import (
     CollectionGateError,
     active_project_identity,
     collection_keys_for_scope,
+    project_inventory_targets,
 )
 
 HTTP_ROOT = Path(__file__).resolve().parent.parent
+if str(HTTP_ROOT) not in sys.path:
+    sys.path.insert(0, str(HTTP_ROOT))
 TOOLS_ROOT = HTTP_ROOT / "tools"
 if str(TOOLS_ROOT) not in sys.path:
     sys.path.insert(0, str(TOOLS_ROOT))
 
-from project_contract import MIN_CONTINUOUS_INTERVAL_MINUTES
 from project_contract import (
+    MIN_CONTINUOUS_INTERVAL_MINUTES,
+    MAX_CONTINUOUS_INTERVAL_MINUTES,
+    MIN_CONTINUOUS_BACKUP_INTERVAL_MINUTES,
+    MAX_CONTINUOUS_BACKUP_INTERVAL_MINUTES,
+    COLLECTION_CYCLE_FAILED_DEVICE_OPERATIONS,
     COLLECTION_CYCLE_MAX_SEQUENCE,
     COLLECTION_CYCLE_MAX_FAILED_DEVICES,
     COLLECTION_CYCLE_MAX_FAILED_DEVICE_TEXT_BYTES,
+    YAML_BACKUP_FAILED_DEVICE_OPERATIONS,
     _validate_collection_cycle_legacy_result,
     build_collection_cycle_identity,
     canonical_collection_cycle_json,
@@ -63,10 +74,10 @@ PID_FILE = STATUS_DIR / "switch-collection.pid"
 YAML_BACKUP_STATUS_FILE = STATUS_DIR / "yaml-backup.status.json"
 CONTINUOUS_STATUS_FILE = STATUS_DIR / "continuous-collection.status.json"
 CONTINUOUS_BACKUP_STATUS_FILE = STATUS_DIR / "continuous-backup.status.json"
+ISSUE_TRACKER_STAGE_L_STATUS_FILE = STATUS_DIR / "issue-tracker-stage-l.status.json"
 YAML_BACKUP_SOCKET = STATUS_DIR / ".yaml-backup.sock"
 YAML_BACKUP_SCRIPT = HTTP_ROOT / "ztp/backup/yaml-collect.py"
 YAML_BACKUP_COOLDOWN_SECONDS = 10 * 60
-MAX_CONTINUOUS_INTERVAL_MINUTES = 24 * 60
 MAX_PASSWORD_BYTES = 1024
 MAX_MEMORY_REQUEST_BYTES = 2048
 TASK_RESULT_PREFIX = "[HTTP_ZTP_TASK_RESULT] "
@@ -893,6 +904,142 @@ def write_continuous_backup_status(state: str, **extra) -> None:
     )
 
 
+def _publish_stage_l_status_after_completion(store) -> None:
+    """Report independent REQ7 admission without changing cycle completion."""
+    from monitor.issue_tracker_publish_runtime import StageLHold, inspect_stage_l
+
+    project = Path(store.project_identity)
+    try:
+        status = inspect_stage_l(
+            store, http_root=HTTP_ROOT, project=project,
+            publication=project / "99-output-monitor",
+            template_path=HTTP_ROOT / "monitor/Issue_Tracker_Template_v1.xlsx",
+        )
+    except StageLHold:
+        status = {
+            "schema_version": 1, "state": "hold",
+            "reason": "stage_l_authority_unavailable",
+            "panels": {
+                name: {"state": "hold", "reason": "stage_l_authority_unavailable"}
+                for name in ("Switch Status", "Eth Link Validation", "IB Link Validation")
+            },
+            "online": "disabled_no_send_authority",
+        }
+    _write_status_file(
+        ISSUE_TRACKER_STAGE_L_STATUS_FILE, ".issue-tracker-stage-l.",
+        status.pop("state"), **status,
+    )
+
+
+def _publish_stage_l_local_after_completion(store):
+    """Admit at most one automatic local C6 after a protected prod cycle.
+
+    A collector completion is already durable. This independent lane cannot
+    turn a local result into Google authority or relabel collection success.
+    """
+    if store.scope != "prod":
+        return None
+    from monitor.issue_tracker_local_workbook_commit import (
+        CommittedProdWorkbook, ProdWorkbookNoop,
+    )
+    from monitor.issue_tracker_publish_runtime import (
+        AutoLocalCollectorAnomaly, AutoLocalNotDue, StageLHold,
+        TerminalC6AdmissionHold,
+        commit_qualified_prod_local, inspect_stage_l, local_publish_interval,
+    )
+
+    project = Path(store.project_identity)
+    template = HTTP_ROOT / "monitor/Issue_Tracker_Template_v1.xlsx"
+    publication = project / "99-output-monitor"
+    try:
+        interval, policy_sha = local_publish_interval(project)
+        source = inspect_stage_l(
+            store, http_root=HTTP_ROOT, project=project,
+            publication=publication, template_path=template,
+        )
+        if source["state"] != "qualified":
+            return None
+        # A first admission is due after N unique completions, not only when
+        # the lifetime total happens to be divisible by N. The held C6 writer
+        # performs the protected admission/cycle recheck before any write.
+        if source["completed_cycles"] < interval:
+            source.update({
+                "reason": "awaiting_publish_interval",
+                "local": "not_due", "publish_every_cycles": interval,
+                "policy_sha256": policy_sha,
+            })
+            _write_status_file(
+                ISSUE_TRACKER_STAGE_L_STATUS_FILE, ".issue-tracker-stage-l.",
+                source.pop("state"), **source,
+            )
+            return None
+        if local_publish_interval(project) != (interval, policy_sha):
+            raise StageLHold("automatic local policy changed before C6")
+        result = commit_qualified_prod_local(
+            store, http_root=HTTP_ROOT, project=project,
+            publication=publication, template_path=template,
+            refuse_prior_without_admission=True,
+            auto_admission=(policy_sha, interval, _current_boot_identity(),
+                            time.monotonic_ns()),
+        )
+        source["publish_every_cycles"] = interval
+        source["policy_sha256"] = policy_sha
+        if isinstance(result, AutoLocalNotDue):
+            source["reason"] = result.reason
+            source["local"] = "not_due"
+            _write_status_file(
+                ISSUE_TRACKER_STAGE_L_STATUS_FILE, ".issue-tracker-stage-l.",
+                source.pop("state"), **source,
+            )
+            return None
+        if isinstance(result, CommittedProdWorkbook):
+            state = "local_applied"
+            source["local"] = "receipt"
+            source["local_receipt_sha256"] = result.receipt.published_sha256
+        elif isinstance(result, ProdWorkbookNoop):
+            if result.status == "no_candidates" and result.existing_published_sha256 is None:
+                state = "local_no_candidates"
+                source["local"] = "no_candidates"
+            elif result.status == "no_change" and result.existing_published_sha256 is not None:
+                state = "local_no_change"
+                source["local"] = "no_change"
+                source["local_receipt_sha256"] = result.existing_published_sha256
+            else:
+                raise StageLHold("unexpected local C6 no-op result")
+        else:
+            raise StageLHold("unexpected local C6 result")
+        source["reason"] = ("qualified_empty_set_no_local_write"
+                            if state == "local_no_candidates"
+                            else "local_receipt_not_online_eligibility")
+        _write_status_file(
+            ISSUE_TRACKER_STAGE_L_STATUS_FILE, ".issue-tracker-stage-l.",
+            state, **{key: value for key, value in source.items() if key != "state"},
+        )
+        return result
+    except TerminalC6AdmissionHold as exc:
+        _write_status_file(
+            ISSUE_TRACKER_STAGE_L_STATUS_FILE, ".issue-tracker-stage-l.",
+            "hold", schema_version=1, reason="local_c6_terminal_admission_state",
+            terminal_detail=str(exc),
+            online="disabled_no_send_authority",
+        )
+        return None
+    except AutoLocalCollectorAnomaly:
+        _write_status_file(
+            ISSUE_TRACKER_STAGE_L_STATUS_FILE, ".issue-tracker-stage-l.",
+            "hold", schema_version=1, reason="collector_interval_below_minimum",
+            online="disabled_no_send_authority",
+        )
+        return None
+    except StageLHold:
+        _write_status_file(
+            ISSUE_TRACKER_STAGE_L_STATUS_FILE, ".issue-tracker-stage-l.",
+            "hold", schema_version=1, reason="local_c6_admission_refused",
+            online="disabled_no_send_authority",
+        )
+        return None
+
+
 def _validated_password(value) -> str:
     if not isinstance(value, str):
         raise ValueError("password must be text")
@@ -922,13 +1069,7 @@ def decode_yaml_backup_request(payload: bytes) -> dict:
     if action == "continuous_collection_start":
         if set(message) != {"action", "interval_minutes"}:
             raise ValueError("invalid continuous collection request schema")
-        interval = message["interval_minutes"]
-        if (
-            isinstance(interval, bool) or not isinstance(interval, int)
-            or not MIN_CONTINUOUS_INTERVAL_MINUTES
-            <= interval <= MAX_CONTINUOUS_INTERVAL_MINUTES
-        ):
-            raise ValueError("invalid continuous collection interval")
+        interval = _validated_interval(message, action)
         return {
             "action": action,
             "interval_minutes": interval,
@@ -936,13 +1077,7 @@ def decode_yaml_backup_request(payload: bytes) -> dict:
     if action == "continuous_backup_start":
         if set(message) != {"action", "password", "interval_minutes"}:
             raise ValueError("invalid continuous backup request schema")
-        interval = message["interval_minutes"]
-        if (
-            isinstance(interval, bool) or not isinstance(interval, int)
-            or not MIN_CONTINUOUS_INTERVAL_MINUTES
-            <= interval <= MAX_CONTINUOUS_INTERVAL_MINUTES
-        ):
-            raise ValueError("invalid continuous backup interval")
+        interval = _validated_interval(message, action)
         return {
             "action": action,
             "password": _validated_password(message["password"]),
@@ -1395,8 +1530,33 @@ def _yaml_backup_scope(scope: str) -> str:
     return scope if scope in {"air", "prod"} else "auto"
 
 
-def parse_task_result(output: str, expected_task: str) -> dict:
+_FAILED_DEVICE_OPERATION_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+def _validated_operation_authority(permitted_operations: object) -> tuple[str, ...]:
+    if (
+        not isinstance(permitted_operations, tuple)
+        or not permitted_operations
+        or len(permitted_operations) != len(set(permitted_operations))
+        or tuple(sorted(permitted_operations)) != permitted_operations
+        or any(
+            not isinstance(operation, str)
+            or not _FAILED_DEVICE_OPERATION_RE.fullmatch(operation)
+            for operation in permitted_operations
+        )
+    ):
+        raise ValueError("permitted_operations must be a non-empty canonical tuple")
+    return permitted_operations
+
+
+def parse_task_result(
+    output: str,
+    expected_task: str,
+    *,
+    permitted_operations: tuple[str, ...],
+) -> dict:
     """Validate one collector-owned machine result without trusting log text."""
+    permitted_operations = _validated_operation_authority(permitted_operations)
     if expected_task not in {"switch_collection", "yaml_backup"}:
         raise ValueError("unsupported task result type")
     if not isinstance(output, str):
@@ -1446,6 +1606,15 @@ def parse_task_result(output: str, expected_task: str) -> dict:
                 or any(marker in value for marker in ("\x00", "\r", "\n"))
             ):
                 raise ValueError(f"invalid failed_devices {name}")
+        operations = item["operation"].split(",")
+        if (
+            any(not operation for operation in operations)
+            or len(operations) != len(set(operations))
+            or tuple(sorted(operations)) != tuple(operations)
+            or any(operation not in permitted_operations for operation in operations)
+            or ",".join(operations) != item["operation"]
+        ):
+            raise ValueError("invalid failed_devices operation")
         folded = item["hostname"].casefold()
         if folded in seen:
             raise ValueError("duplicate failed device")
@@ -1685,23 +1854,448 @@ def _collection_slot_file_evidence(path: object) -> dict[str, object]:
     }
 
 
+_COLLECTION_ARTIFACT_ROLES = ("info_archive", "link_archive", "link_csv")
+
+
+def _collection_private_json(path: Path) -> dict:
+    content = path.read_bytes()
+    if len(content) > 1024 * 1024:
+        raise ValueError("collection sidecar is oversized")
+    value = json.loads(content.decode("utf-8"))
+    if not isinstance(value, dict) or _canonical_json_line(value) != content:
+        raise ValueError("collection sidecar is not canonical JSON")
+    return value
+
+
+def _collection_artifact_path(root: Path, relative: object) -> Path:
+    if (not isinstance(relative, str) or not relative
+            or any(character in relative for character in ("\x00", "\r", "\n"))
+            or "\\" in relative):
+        raise ValueError("collection artifact path is invalid")
+    pure = PurePosixPath(relative)
+    if (pure.is_absolute() or str(pure) != relative
+            or any(part in {"", ".", ".."} for part in relative.split("/"))):
+        raise ValueError("collection artifact path is not canonical relative")
+    candidate = root
+    for part in pure.parts:
+        candidate = candidate / part
+        if candidate.is_symlink():
+            raise ValueError("collection artifact path traverses a symlink")
+    if not candidate.is_file():
+        raise ValueError("collection artifact is missing")
+    return candidate
+
+
+def _collection_inventory_count(content: bytes, slot: str) -> tuple[int, bool]:
+    text = content.decode("utf-8")
+    rows = list(csv.DictReader(io.StringIO(text)))
+    expected_type = {"ethernet": {"eth", "eth_spx", "spx"},
+                     "infiniband": {"ib"}, "nvlink": {"nvl"}}[slot.split("/")[0]]
+    selected = [row for row in rows if row.get("type", "").lower() in expected_type]
+    return len(selected), any(row.get("type", "").lower() in {"eth_spx", "spx"}
+                              for row in selected)
+
+
+def _collection_target_plan_matches_sources(
+    context: dict, inventory: bytes, slot: str,
+) -> bool:
+    """Independently reject planner rows without frozen input provenance."""
+    try:
+        area, scope = slot.split("/", 1)
+        plan = context["target_plan"]
+        rows = list(csv.DictReader(io.StringIO(inventory.decode("utf-8"))))
+        types = {"ethernet": {"air"} if scope == "air" else
+                 {"eth", "eth_spx", "spx"},
+                 "infiniband": {"ib"}, "nvlink": {"nvl"}}[area]
+        static = [row for row in rows if row.get("type", "").strip().lower() in types]
+        key = {"ethernet": "eth", "infiniband": "ib", "nvlink": "nv"}[area]
+        entries = plan[key]
+        if not isinstance(entries, list) or not entries:
+            return False
+        parsed = []
+        for item in entries:
+            pieces = item.split("|")
+            if len(pieces) not in (2, 3):
+                return False
+            ipaddress.IPv4Address(pieces[1])
+            parsed.append((pieces[0], pieces[1]))
+        if ([item[0] for item in parsed[:len(static)]] !=
+                [row["hostname"].strip() for row in static]):
+            return False
+        for row, (name, actual_ip) in zip(static, parsed):
+            source_ip = row["eth0_ip"].strip()
+            if actual_ip == source_ip:
+                continue
+            if scope != "air" or not any(
+                (parts := raw.split("|"))[0] == name
+                and len(parts) == 6 and parts[1] == actual_ip
+                and parts[4] == "dhcp-lease-transition"
+                for raw in context["air_dynamic_rows"]
+            ):
+                return False
+        if len({name.casefold() for name, _ip in parsed}) != len(parsed):
+            return False
+        if area == "ethernet":
+            expected_links = [row["hostname"].strip() for row in static
+                              if row.get("type", "").strip().lower() in
+                              {"eth_spx", "spx"}]
+            if [item.split("|", 1)[0] for item in plan["spx"]] != expected_links:
+                return False
+        elif plan["spx"] or plan["dynamic_identities"]:
+            return False
+        if any(plan[name] for name in {"eth", "ib", "nv"} - {key}):
+            return False
+        expected_extra = []
+        expected_identities = []
+        static_names = {row["hostname"].strip().casefold() for row in static}
+        if area == "ethernet" and scope == "air":
+            for raw in context["air_dynamic_rows"]:
+                pieces = raw.split("|")
+                if len(pieces) != 6:
+                    return False
+                name, ip, mac, _template, source, _issue = pieces
+                if not ip:
+                    continue
+                ipaddress.IPv4Address(ip)
+                if name.casefold() in static_names:
+                    if source == "dhcp-lease-transition":
+                        expected_identities.append(f"{name}|{mac}|{source}")
+                    continue
+                if name.casefold() in {n.casefold() for n, _ in expected_extra}:
+                    continue
+                expected_extra.append((name, ip))
+                expected_identities.append(f"{name}|{mac}|{source or 'dhcp-lease'}")
+        elif area == "ethernet":
+            used_ips = {ip for _name, ip in parsed[:len(static)]}
+            for raw in context["prod_runtime_rows"]:
+                pieces = raw.split("|")
+                if len(pieces) != 4:
+                    return False
+                mac, ip, platform, lease_state = pieces
+                if platform != "cumulus" or lease_state not in {"active", "observed"}:
+                    continue
+                normalized = re.sub(r"[^0-9a-f]", "", mac.casefold())
+                if len(normalized) != 12 or any(c not in "0123456789abcdef" for c in normalized):
+                    continue
+                if not ip:
+                    continue
+                ipaddress.IPv4Address(ip)
+                name = "DISCOVERED-CUMULUS-" + normalized.upper()
+                if (ip in used_ips or name.casefold() in static_names
+                        or name.casefold() in {n.casefold() for n, _ in expected_extra}):
+                    continue
+                expected_extra.append((name, ip))
+                expected_identities.append(f"{name}|{mac}|dhcp-unbound-cumulus")
+                used_ips.add(ip)
+        return (parsed[len(static):] == expected_extra
+                and plan["dynamic_identities"] == expected_identities)
+    except (ValueError, KeyError, TypeError, UnicodeError, AttributeError):
+        return False
+
+
+def _collection_runtime_snapshots_match(context: dict, inventory_path: Path) -> bool:
+    try:
+        hashes = context["runtime_input_hashes"]
+        allowed = {"leases": ".leases", "air_json": ".air.json",
+                   "dhcp_log": ".dhcp.log"}
+        if (not isinstance(hashes, dict) or
+                not set(hashes).issubset(set(allowed) | {"journal_derived_rows"})):
+            return False
+        for key, suffix in allowed.items():
+            if key not in hashes:
+                continue
+            path = inventory_path.with_suffix(suffix)
+            if path.is_symlink() or not path.is_file():
+                return False
+            if hashlib.sha256(path.read_bytes()).hexdigest() != hashes[key]:
+                return False
+        if "journal_derived_rows" in hashes and hashlib.sha256(
+            _canonical_json_line(context["prod_runtime_rows"])
+        ).hexdigest() != hashes["journal_derived_rows"]:
+            return False
+        return True
+    except (OSError, TypeError, ValueError, KeyError):
+        return False
+
+
+def _collection_freeze_plan_sources(
+    slot: str, bindings: dict, context: dict, plan_raw: bytes,
+) -> dict[str, str]:
+    """Persist the exact planner output and derived rows within this cycle.
+
+    The anonymous planning FD is deliberately not a later source authority:
+    a read-only consumer must be able to recheck these fixed, private bytes
+    against the child envelope rather than accepting a caller-supplied plan.
+    """
+    if not getattr(os, "O_NOFOLLOW", 0):
+        raise ValueError("cycle-owned input freeze requires no-follow support")
+    directory = Path(bindings["input_inventory"]).parent
+    stem = slot.replace("/", "-")
+    payloads = {"target_plan": (directory / f"{stem}.target-plan.json", plan_raw)}
+    if slot == "ethernet/prod":
+        payloads["runtime_derived_rows"] = (
+            directory / f"{stem}.runtime-derived-rows.json",
+            _canonical_json_line(context["prod_runtime_rows"]),
+        )
+    frozen = {}
+    for role, (path, payload) in payloads.items():
+        descriptor = os.open(
+            path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+            | getattr(os, "O_CLOEXEC", 0), 0o600,
+        )
+        try:
+            with os.fdopen(descriptor, "wb", closefd=False) as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        frozen[role] = str(path)
+    _fsync_directory(directory)
+    return frozen
+
+
+def _collection_frozen_plan_sources_match(
+    slot: str, bindings: dict, context: dict, plan_raw: bytes,
+) -> bool:
+    try:
+        directory = Path(bindings["input_inventory"]).parent
+        stem = slot.replace("/", "-")
+        expected = {directory / f"{stem}.target-plan.json": plan_raw}
+        if slot == "ethernet/prod":
+            expected[directory / f"{stem}.runtime-derived-rows.json"] = (
+                _canonical_json_line(context["prod_runtime_rows"])
+            )
+        for path, payload in expected.items():
+            if path.is_symlink() or not path.is_file() or path.read_bytes() != payload:
+                return False
+        return True
+    except (OSError, TypeError, ValueError, KeyError):
+        return False
+
+
+def _collection_validate_artifact_roles(
+    evidence: dict, *, root: Path, child: dict, inventory: bytes,
+    context: dict | None = None,
+) -> bool:
+    if set(evidence) != {"roles"} or not isinstance(evidence["roles"], list):
+        return False
+    roles = evidence["roles"]
+    activity = context is not None and "activity" in context
+    ib_analysis = context is not None and "ib_analysis" in context
+    if activity and ib_analysis:
+        return False
+    expected_roles = [*_COLLECTION_ARTIFACT_ROLES]
+    if activity:
+        expected_roles.append("activity_observation")
+    if ib_analysis:
+        from monitor.collection_ib_producer import IB_ROLE_NAMES
+        expected_roles.extend(IB_ROLE_NAMES)
+    if len(roles) != len(expected_roles) or [
+        item.get("role") if isinstance(item, dict) else None for item in roles
+    ] != expected_roles:
+        return False
+    slot = child["source_slot"]
+    area, _scope = slot.split("/", 1)
+    prefix = {"ethernet": ("eth-info", "spx-link", "spx-link"),
+              "infiniband": ("ib-info", "ib-link", "ib-link"),
+              "nvlink": ("nvsw-info", "nvsw-link", "nvsw-link")}[area]
+    count, link_selected = _collection_inventory_count(inventory, slot)
+    if context is not None:
+        plan = context["target_plan"]
+        key = {"ethernet": "eth", "infiniband": "ib", "nvlink": "nv"}[area]
+        entries = plan[key]
+        if not isinstance(entries, list) or not entries:
+            return False
+        names = [entry.split("|", 1)[0] for entry in entries]
+        if len({name.casefold() for name in names}) != len(names):
+            return False
+        count = len(names)
+        link_selected = area != "ethernet" or bool(plan["spx"])
+    if count != child["planned"] or count == 0:
+        return False
+    for index, role in enumerate(roles[:3]):
+        if not isinstance(role, dict) or set(role) != {
+            "role", "state", "relative_path", "sha256", "size_bytes"
+        }:
+            return False
+        applicable = index == 0 or area != "ethernet" or link_selected
+        if not applicable:
+            if any(role[key] is not None for key in
+                   ("relative_path", "sha256", "size_bytes")) or role["state"] != "not_applicable":
+                return False
+            continue
+        if role["state"] != "present":
+            return False
+        relative = role["relative_path"]
+        expected_prefix = f"{area}/monitor/{prefix[index]}/"
+        if not isinstance(relative, str) or not relative.startswith(expected_prefix):
+            return False
+        path = _collection_artifact_path(root, relative)
+        suffix = ".csv" if index == 2 else ".tar.gz"
+        if not re.fullmatch(r"[0-9]{8}-[0-9]{4}(?:-(?:air|prod))?" + re.escape(suffix), path.name):
+            return False
+        if _collection_slot_file_evidence(path) != {
+            "sha256": role["sha256"], "size_bytes": role["size_bytes"]
+        }:
+            return False
+    if roles[1]["state"] == "present" and roles[2]["state"] == "present":
+        link_name = Path(roles[1]["relative_path"]).name.removesuffix(".tar.gz")
+        csv_name = Path(roles[2]["relative_path"]).name.removesuffix(".csv")
+        if link_name != csv_name:
+            return False
+    if activity:
+        from monitor.issue_tracker_activity_source import (
+            load_eth_activity_evidence, validate_worker_eth_activity_context,
+        )
+        binding = validate_worker_eth_activity_context(context)
+        fourth = roles[3]
+        if area != "ethernet" or not isinstance(fourth, dict) or set(fourth) != {
+            "role", "state", "relative_path", "sha256", "size_bytes"
+        } or fourth["state"] != "present":
+            return False
+        slot_dir = Path(context["artifacts"]["evidence"]).parent
+        expected_path = slot_dir / "activity-observation.json"
+        if fourth["relative_path"] != expected_path.relative_to(root).as_posix():
+            return False
+        published = _collection_artifact_path(root, fourth["relative_path"])
+        if _collection_slot_file_evidence(published) != {
+            "sha256": fourth["sha256"], "size_bytes": fourth["size_bytes"]
+        }:
+            return False
+        original = Path(context["activity"]["sidecar_path"])
+        if original.is_symlink() or _collection_slot_file_evidence(original) != {
+            "sha256": fourth["sha256"], "size_bytes": fourth["size_bytes"]
+        }:
+            return False
+        payload = json.loads(published.read_bytes())
+        archive = roles[0]
+        expected_archive = root / archive["relative_path"]
+        if payload["sources"]["archive"] != {
+            "path": str(expected_archive), "sha256": archive["sha256"]
+        } or _collection_slot_file_evidence(expected_archive) != {
+            "sha256": archive["sha256"], "size_bytes": archive["size_bytes"]
+        }:
+            return False
+        source_paths = {
+            role: Path(context["activity"]["sources"][role]["path"])
+            for role in ("dot", "inventory", "device_aliases")
+        }
+        source_paths["archive"] = expected_archive
+        report = Path(payload["report"]["path"])
+        expected_report = (
+            root / "tools/lldp-analyze-tool/99-output-p2p"
+            / (expected_archive.name.removesuffix(".tar.gz")
+               + "-ethernet-topology-validation.xlsx")
+        ).resolve()
+        if report != expected_report:
+            return False
+        load_eth_activity_evidence(
+            published, sources=source_paths, report_path=report,
+            expected_evidence_sha256=fourth["sha256"],
+            expected_cycle_binding=binding,
+        )
+    if ib_analysis:
+        from monitor.collection_ib_producer import (
+            IbProducerHold, validate_ib_completion_attestation,
+        )
+        if slot != "infiniband/prod" or area != "infiniband":
+            return False
+        try:
+            verified_ib_roles = validate_ib_completion_attestation(
+                context["identity"], context["ib_analysis"], http_root=root,
+            )
+        except IbProducerHold:
+            return False
+        if verified_ib_roles != roles[3:]:
+            return False
+    return True
+
+
 def _collection_slot_artifacts_match(
-    child: dict[str, object], bindings: object,
+    child: dict[str, object], bindings: object, context: dict | None = None,
 ) -> bool:
     if not isinstance(bindings, dict) or set(bindings) != {
         "evidence", "envelope", "input_inventory"
     }:
         return False
+    if not _collection_private_binding_paths(child, bindings):
+        return False
     try:
-        evidence = _collection_slot_file_evidence(bindings["evidence"])
-        envelope = _collection_slot_file_evidence(bindings["envelope"])
-        inventory = _collection_slot_file_evidence(bindings["input_inventory"])
-    except (OSError, TypeError, ValueError):
+        evidence_path = Path(bindings["evidence"])
+        envelope_path = Path(bindings["envelope"])
+        inventory_path = Path(bindings["input_inventory"])
+        evidence = _collection_slot_file_evidence(evidence_path)
+        envelope = _collection_slot_file_evidence(envelope_path)
+        inventory_content = inventory_path.read_bytes()
+        inventory_sha256 = hashlib.sha256(inventory_content).hexdigest()
+        manifest = _collection_private_json(evidence_path)
+        identity_envelope = _collection_private_json(envelope_path)
+        expected_envelope_keys = {
+            "identity", "source_slot", "state", "planned", "succeeded",
+            "failed_count", "input_inventory_sha256", "evidence"
+        }
+        if context is not None:
+            plan = context["target_plan"]
+            plan_raw = _canonical_json_line(plan)
+            if (not isinstance(plan, dict) or set(plan) != {
+                "eth", "spx", "ib", "nv", "dynamic_identities"
+            } or hashlib.sha256(plan_raw).hexdigest()
+                    != context["target_plan_sha256"]):
+                return False
+            expected_envelope_keys.add("target_plan_sha256")
+            expected_envelope_keys.add("runtime_input_hashes")
+            if "activity" in context:
+                expected_envelope_keys.add("activity_context_sha256")
+            if "ib_analysis" in context:
+                expected_envelope_keys.add("ib_analysis_context_sha256")
+                expected_envelope_keys.add("ib_analysis_binding")
+            if not _collection_target_plan_matches_sources(
+                context, inventory_content, child["source_slot"]
+            ) or not _collection_runtime_snapshots_match(context, inventory_path):
+                return False
+        if set(identity_envelope) != expected_envelope_keys:
+            return False
+        expected_envelope = {
+            "identity": {key: child[key] for key in (
+                "project_key", "run_token", "scope", "sequence", "source", "cycle_id"
+            )},
+            "source_slot": child["source_slot"], "state": child["state"],
+            "planned": child["planned"], "succeeded": child["succeeded"],
+            "failed_count": child["failed_count"],
+            "input_inventory_sha256": inventory_sha256,
+            "evidence": evidence,
+        }
+        if context is not None:
+            expected_envelope["target_plan_sha256"] = context["target_plan_sha256"]
+            expected_envelope["runtime_input_hashes"] = context["runtime_input_hashes"]
+            if "activity" in context:
+                expected_envelope["activity_context_sha256"] = hashlib.sha256(
+                    _canonical_json_line(context)
+                ).hexdigest()
+            if "ib_analysis" in context:
+                expected_envelope["ib_analysis_context_sha256"] = hashlib.sha256(
+                    _canonical_json_line(context)
+                ).hexdigest()
+                expected_envelope["ib_analysis_binding"] = {
+                    key: context["ib_analysis"][key] for key in (
+                        "run_id", "node", "authority_sha256",
+                        "expected_topology_sha256", "attestation_sha256",
+                    )
+                }
+        if identity_envelope != expected_envelope:
+            return False
+        if not _collection_validate_artifact_roles(
+            manifest, root=HTTP_ROOT, child=child, inventory=inventory_content,
+            context=context,
+        ):
+            return False
+    except (OSError, TypeError, ValueError, KeyError, UnicodeError, json.JSONDecodeError):
         return False
     return (
         child["evidence"] == evidence
         and child["envelope"] == envelope
-        and child["input_inventory_sha256"] == inventory["sha256"]
+        and child["input_inventory_sha256"] == inventory_sha256
     )
 
 
@@ -1724,6 +2318,450 @@ def _collection_slot_wrapper(
     )
 
 
+def _collection_managed_bindings(identity: dict, slot: str) -> dict[str, str]:
+    area = slot.split("/", 1)[0]
+    scope = identity["scope"]
+    directory = (
+        HTTP_ROOT / "monitor/status/collection-cycles" / identity["project_key"] / scope
+        / "switch_collection" / "artifacts" / f"{identity['sequence']:020d}"
+        / slot.replace("/", "-")
+    )
+    return {
+        "evidence": str(directory / "evidence-manifest.json"),
+        "envelope": str(directory / "identity-envelope.json"),
+        "input_inventory": str(directory.parent / "inputs" /
+                               f"{slot.replace('/', '-')}.csv"),
+    }
+
+
+def _collection_private_binding_paths(child: dict, bindings: dict) -> bool:
+    identity = {key: child[key] for key in (
+        "project_key", "run_token", "scope", "sequence", "source", "cycle_id"
+    )}
+    if bindings != _collection_managed_bindings(identity, child["source_slot"]):
+        return False
+    for raw in bindings.values():
+        path = Path(raw)
+        try:
+            parts = path.relative_to(HTTP_ROOT).parts
+        except ValueError:
+            return False
+        current = HTTP_ROOT
+        for part in parts:
+            current = current / part
+            if current.is_symlink():
+                return False
+    return True
+
+
+def _collection_snapshot_inventory(slot: str, bindings: dict) -> bytes:
+    area = slot.split("/", 1)[0]
+    source_name = {"ethernet": "eth.csv", "infiniband": "ib.csv",
+                   "nvlink": "nvsw.csv"}[area]
+    source = SCRIPTS[area].parent / source_name
+    content = source.read_bytes()
+    destination = Path(bindings["input_inventory"])
+    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="wb", dir=destination.parent,
+                                     prefix=".frozen-inventory-", delete=False) as stream:
+        temporary = Path(stream.name)
+        try:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+            os.replace(temporary, destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+    return content
+
+
+def _collection_freeze_activity_member(source: Path, destination: Path,
+                                       *, maximum: int) -> str:
+    """Freeze one selected topology authority without following a moving name."""
+    named = source.lstat()
+    if not stat.S_ISREG(named.st_mode) or named.st_nlink != 1:
+        raise ValueError("activity source is not one regular file")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(source, flags)
+    temporary = None
+    try:
+        before = os.fstat(descriptor)
+        if (before.st_dev, before.st_ino) != (named.st_dev, named.st_ino) \
+                or before.st_size < 0 or before.st_size > maximum:
+            raise ValueError("activity source identity or size is invalid")
+        digest = hashlib.sha256()
+        destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=destination.parent,
+                                         prefix=".activity-freeze-", delete=False) as out:
+            temporary = Path(out.name)
+            os.fchmod(out.fileno(), 0o600)
+            copied = 0
+            while True:
+                part = os.read(descriptor, 1024 * 1024)
+                if not part:
+                    break
+                copied += len(part)
+                if copied > maximum:
+                    raise ValueError("activity source exceeds snapshot bound")
+                out.write(part)
+                digest.update(part)
+            out.flush()
+            os.fsync(out.fileno())
+        after = os.fstat(descriptor)
+        named_after = source.lstat()
+        identity = lambda value: (
+            value.st_dev, value.st_ino, value.st_size,
+            value.st_mtime_ns, value.st_ctime_ns,
+        )
+        if copied != before.st_size or identity(before) != identity(after) \
+                or identity(after) != identity(named_after):
+            raise ValueError("activity source changed during snapshot")
+        os.link(temporary, destination)
+        temporary.unlink()
+        temporary = None
+        _fsync_directory(destination.parent)
+        return digest.hexdigest()
+    finally:
+        os.close(descriptor)
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def _collection_activity_file_identity(metadata: os.stat_result) -> tuple:
+    return (
+        metadata.st_dev, metadata.st_ino, metadata.st_mode,
+        metadata.st_nlink, metadata.st_size, metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _collection_activity_link_identity(path: Path) -> tuple:
+    """Bind one setup-managed link's inode and exact text, not its resolved name."""
+    try:
+        before = path.lstat()
+        if not stat.S_ISLNK(before.st_mode) or before.st_nlink != 1:
+            raise ValueError("activity P2P selection is not one symlink")
+        text = os.readlink(path)
+        after = path.lstat()
+    except OSError as exc:
+        raise ValueError("activity P2P selection link is unavailable") from exc
+    if _collection_activity_file_identity(before) != _collection_activity_file_identity(after):
+        raise ValueError("activity P2P selection changed while read")
+    return _collection_activity_file_identity(after), text
+
+
+def _collection_activity_selected_workbook(fixed: Path) -> tuple[Path, str, tuple]:
+    """Resolve the exact two links installed by setup, inside one project."""
+    outer = _collection_activity_link_identity(fixed)
+    if not outer[1] or os.path.isabs(outer[1]):
+        raise ValueError("activity P2P selection must be relative")
+    # Resolve the containing directory first: macOS exposes /var through
+    # /private/var, so lexical /var and canonical /private/var must not diverge.
+    canonical = Path(os.path.abspath(os.path.join(
+        fixed.parent.resolve(strict=True), outer[1],
+    )))
+    project_root = HTTP_ROOT.resolve(strict=True) / "DAY0-Prepare"
+    try:
+        relative = canonical.relative_to(project_root)
+    except ValueError as exc:
+        raise ValueError("activity P2P selection escapes project root") from exc
+    if len(relative.parts) != 2 or relative.parts[1] != "p2p.xlsx":
+        raise ValueError("activity P2P selection is not project/p2p.xlsx")
+    for directory in (project_root, canonical.parent):
+        metadata = directory.lstat()
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError("activity P2P project directory is not real")
+    inner = _collection_activity_link_identity(canonical)
+    target_name = inner[1]
+    if not target_name or target_name in {".", "..", "p2p.xlsx"} \
+            or os.path.isabs(target_name) or os.path.basename(target_name) != target_name \
+            or not target_name.lower().endswith(".xlsx"):
+        raise ValueError("activity P2P selected workbook name is invalid")
+    selected = canonical.parent / target_name
+    metadata = selected.lstat()
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise ValueError("activity P2P selected workbook is not one regular file")
+    return selected, selected.stem, (fixed, outer, canonical, inner,
+                                     _collection_activity_file_identity(metadata))
+
+
+def _collection_activity_verify_selection(selection: tuple, digest: str) -> None:
+    fixed, outer, canonical, inner, initial_target = selection
+    if (_collection_activity_link_identity(fixed) != outer
+            or _collection_activity_link_identity(canonical) != inner):
+        raise ValueError("activity P2P selection changed during snapshot")
+    target = canonical.parent / inner[1]
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(target, flags)
+    try:
+        before = os.fstat(descriptor)
+        if _collection_activity_file_identity(before) != initial_target:
+            raise ValueError("activity P2P selected workbook identity changed")
+        hasher = hashlib.sha256()
+        copied = 0
+        while True:
+            part = os.read(descriptor, 1024 * 1024)
+            if not part:
+                break
+            copied += len(part)
+            if copied > 64 * 1024 * 1024:
+                raise ValueError("activity P2P selected workbook exceeded snapshot bound")
+            hasher.update(part)
+        after = os.fstat(descriptor)
+        named_after = target.lstat()
+        if (_collection_activity_file_identity(after) != initial_target
+                or _collection_activity_file_identity(named_after) != initial_target
+                or hasher.hexdigest() != digest):
+            raise ValueError("activity P2P selected workbook changed during snapshot")
+    finally:
+        os.close(descriptor)
+    if (_collection_activity_link_identity(fixed) != outer
+            or _collection_activity_link_identity(canonical) != inner):
+        raise ValueError("activity P2P selection changed during snapshot")
+
+
+def _collection_snapshot_activity_sources(slot: str, bindings: dict) -> dict | None:
+    """Freeze ETH topology inputs for this worker slot before collection.
+
+    Absent source files keep the existing operational three-role collector;
+    they can never silently become activity evidence.  Present but unsafe
+    sources are an explicit worker error, not a substituted latest report.
+    """
+    if slot not in {"ethernet/air", "ethernet/prod"}:
+        return None
+    p2p = HTTP_ROOT / "ztp/config/cumulus/template/P2P"
+    workbook = p2p / "p2p.xlsx"
+    if not workbook.exists() and not workbook.is_symlink():
+        return None
+    selection = None
+    selected = workbook
+    selected_stem = workbook.stem
+    if workbook.is_symlink():
+        selected, selected_stem, selection = _collection_activity_selected_workbook(workbook)
+    suffix = "-air.dot" if slot.endswith("/air") else "-lldpq.dot"
+    dot = p2p / "output-p2p" / f"{selected_stem}{suffix}"
+    inputs = {
+        "topology": (selected, "p2p.xlsx", 64 * 1024 * 1024),
+        "dot": (dot, "dot", 16 * 1024 * 1024),
+        "inventory": (p2p / "01-inventory.log", "lldp-inventory.log", 4 * 1024 * 1024),
+        "device_aliases": (
+            HTTP_ROOT / "tools/lldp-analyze-tool/04-lldp-device-aliases.json",
+            "aliases.json", 4 * 1024 * 1024,
+        ),
+    }
+    if any(not source.exists() and not source.is_symlink()
+           for source, _suffix, _maximum in inputs.values()):
+        raise ValueError("activity P2P selected source or matching DOT is missing")
+    derivation_inputs = {}
+    if slot == "ethernet/prod":
+        port_mapping = p2p / "02-port-mapping.log"
+        splitter_profiles = p2p / "output-p2p" / f"{selected_stem}-splitter-profiles.json"
+        if any(path.is_symlink() or (path.exists() and not path.is_file())
+               for path in (port_mapping, splitter_profiles)):
+            raise ValueError("activity P2P derivation source is not a regular file")
+        found = tuple(path.exists() or path.is_symlink()
+                      for path in (port_mapping, splitter_profiles))
+        # A partially generated old project may still collect LLDP links; it
+        # must not gain a P2P->DOT derivation witness until both roles exist.
+        if all(found):
+            derivation_inputs = {
+                "port_mapping": (port_mapping, "port-mapping.log", 4 * 1024 * 1024),
+                "splitter_profiles": (
+                    splitter_profiles, "splitter-profiles.json", 4 * 1024 * 1024,
+                ),
+            }
+    private = Path(bindings["input_inventory"]).parent
+    stem = slot.replace("/", "-")
+    frozen = {}
+    for role, (source, suffix_name, maximum) in {**inputs, **derivation_inputs}.items():
+        destination = private / f"{stem}.{suffix_name}"
+        frozen[role] = {
+            "path": str(destination),
+            "sha256": _collection_freeze_activity_member(
+                source, destination, maximum=maximum,
+            ),
+        }
+    if selection is not None:
+        _collection_activity_verify_selection(selection, frozen["topology"]["sha256"])
+    activity = {
+        "schema_version": 1,
+        "source_slot": slot,
+        "topology": frozen["topology"],
+        "sources": {role: frozen[role] for role in (
+            "dot", "inventory", "device_aliases"
+        )},
+        "sidecar_path": str(private / f"{stem}.activity.json"),
+    }
+    if derivation_inputs:
+        activity["derivation_sources"] = {
+            role: frozen[role] for role in ("port_mapping", "splitter_profiles")
+        }
+        activity["selected_workbook_name"] = selected.name
+    return activity
+
+
+def _collection_snapshot_runtime(slot: str, bindings: dict) -> dict:
+    """Freeze dynamic resolver inputs and derived rows before cron planning."""
+    source_inventory = Path(bindings["input_inventory"])
+    directory = source_inventory.parent
+    if not slot.startswith("ethernet/"):
+        return {"air_dynamic_rows": [], "prod_runtime_rows": [],
+                "runtime_input_hashes": {}}
+
+    def unavailable() -> dict:
+        # The collection may still run under its preheld lock, but this slot
+        # must emit only legacy v1. Absence is never proof of zero dynamic rows.
+        return {"air_dynamic_rows": [], "prod_runtime_rows": [],
+                "runtime_input_hashes": {},
+                "v2_unavailable": "resolver_unavailable"}
+
+    def freeze(source: Path, suffix: str) -> Path:
+        if source.is_symlink():
+            raise ValueError("runtime input symlink is not trusted")
+        data = source.read_bytes() if source.is_file() else b""
+        if len(data) > 32 * 1024 * 1024:
+            raise ValueError("runtime input exceeds snapshot bound")
+        target = directory / (source_inventory.stem + suffix)
+        with tempfile.NamedTemporaryFile(mode="wb", dir=directory,
+                                         prefix=".runtime-freeze-", delete=False) as stream:
+            temporary = Path(stream.name)
+            try:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+                os.replace(temporary, target)
+            finally:
+                temporary.unlink(missing_ok=True)
+        return target
+
+    lease_source = Path(os.environ.get("DHCP_LEASES_FILE", "/var/lib/dhcp/dhcpd.leases"))
+    if lease_source.is_symlink():
+        raise ValueError("runtime resolver lease input is unsafe")
+    if not lease_source.is_file():
+        return unavailable()
+    frozen_lease = freeze(lease_source, ".leases")
+    hashes = {"leases": hashlib.sha256(frozen_lease.read_bytes()).hexdigest()}
+    if slot == "ethernet/air":
+        air_source = HTTP_ROOT / "ztp/config/isc-dhcp-server/p2p-air.json"
+        helper = HTTP_ROOT / "ztp/dynamic_air_inventory.py"
+        if air_source.is_symlink() or helper.is_symlink():
+            raise ValueError("AIR resolver input or helper is unsafe")
+        if not air_source.is_file() or not helper.is_file():
+            return unavailable()
+        frozen_air = freeze(air_source, ".air.json")
+        hashes["air_json"] = hashlib.sha256(frozen_air.read_bytes()).hexdigest()
+        result = subprocess.run(
+            [sys.executable, str(helper), "--inventory", str(source_inventory),
+             "--air-json", str(frozen_air), "--leases", str(frozen_lease),
+             "--include-static-transitions", "--format", "pipe"],
+            cwd=HTTP_ROOT, capture_output=True, text=True, timeout=20,
+            check=False,
+        )
+        if result.returncode or len(result.stdout) > 1024 * 1024:
+            return unavailable()
+        rows = result.stdout.splitlines()
+        return {"air_dynamic_rows": rows, "prod_runtime_rows": [],
+                "runtime_input_hashes": hashes}
+
+    log_source = os.environ.get("DHCP_RUNTIME_LOG_FILE", "")
+    helper = HTTP_ROOT / "ztp/dhcp_runtime_inventory.py"
+    if helper.is_symlink():
+        raise ValueError("Production runtime resolver helper is unsafe")
+    if not helper.is_file():
+        return unavailable()
+    if log_source:
+        source = Path(log_source)
+        if source.is_symlink():
+            raise ValueError("Production runtime resolver log is unsafe")
+        if not source.is_file():
+            return unavailable()
+        frozen_log = freeze(source, ".dhcp.log")
+    else:
+        journal = subprocess.run(
+            ["journalctl", "--no-pager", "-o", "short-iso-precise", "-u",
+             "isc-dhcp-server", "--since", "-7 days"],
+            capture_output=True, timeout=20, check=False,
+        )
+        if journal.returncode or len(journal.stdout) > 32 * 1024 * 1024:
+            return unavailable()
+        with tempfile.NamedTemporaryFile(mode="wb", dir=directory,
+                                         prefix=".runtime-journal-", delete=False) as stream:
+            temporary = Path(stream.name)
+            try:
+                stream.write(journal.stdout)
+                stream.flush()
+                os.fsync(stream.fileno())
+                frozen_log = directory / (source_inventory.stem + ".dhcp.log")
+                os.replace(temporary, frozen_log)
+            finally:
+                temporary.unlink(missing_ok=True)
+    hashes["dhcp_log"] = hashlib.sha256(frozen_log.read_bytes()).hexdigest()
+    command = [sys.executable, str(helper), "--stdout", "--inventory",
+               str(source_inventory), "--leases", str(frozen_lease),
+               "--dhcp-log", str(frozen_log)]
+    result = subprocess.run(command, cwd=HTTP_ROOT, capture_output=True,
+                            text=True, timeout=20, check=False)
+    if result.returncode or len(result.stdout) > 1024 * 1024:
+        return unavailable()
+    payload = json.loads(result.stdout)
+    if not isinstance(payload, dict) or not isinstance(payload.get("devices"), list):
+        return unavailable()
+    rows = ["|".join("" if item.get(key) is None else str(item[key])
+                     for key in ("mac", "ip", "platform", "lease_state"))
+            for item in payload["devices"]]
+    hashes["journal_derived_rows"] = hashlib.sha256(
+        _canonical_json_line(rows)).hexdigest()
+    return {"air_dynamic_rows": [], "prod_runtime_rows": rows,
+            "runtime_input_hashes": hashes}
+
+
+def _collection_ib_authority_installed(identity: dict[str, object]) -> bool:
+    """Only a root-installed record opts an ordinary IB collection into analysis."""
+    authority_path = (
+        Path("/var/lib/http-ztp-container/ib-producer-authority")
+        / f"{identity['project_key']}.json"
+    )
+    try:
+        authority_path.lstat()
+    except OSError:
+        return False
+    return True
+
+
+def _collection_prepare_ib_analysis(
+    identity: dict[str, object], slot: str,
+) -> tuple[dict[str, object] | None, object | None]:
+    """Mint extra IB evidence from protected worker inputs, never child data."""
+    if slot != "infiniband/prod":
+        return None, None
+    try:
+        project_root = Path(active_project_identity(HTTP_ROOT))
+    except CollectionGateError:
+        return None, None
+    # An ordinary three-role collection must not import optional analyzer or
+    # transport dependencies. A present, even unsafe, record is checked below.
+    if not _collection_ib_authority_installed(identity):
+        return None, None
+    from monitor.collection_ib_producer import (
+        IbProducerHold, load_ib_producer_authority,
+        produce_worker_ib_analysis, recheck_ib_producer_authority,
+    )
+    try:
+        snapshot = load_ib_producer_authority(
+            project_key=identity["project_key"], project_root=project_root,
+        )
+        binding = produce_worker_ib_analysis(
+            identity, project_root=project_root, http_root=HTTP_ROOT,
+        )
+        if binding["authority_sha256"] != snapshot.sha256:
+            raise IbProducerHold("IB producer used another protected authority")
+        recheck_ib_producer_authority(snapshot)
+        return binding, snapshot
+    except (IbProducerHold, CollectionGateError):
+        # Base switch collection can still run, while Stage L remains HOLD.
+        return None, None
+
+
 def run_collection_slots(
     identity: object,
     *,
@@ -1734,12 +2772,12 @@ def run_collection_slots(
     """Run each declared slot once and return total terminal coverage.
 
     ``timeout`` and ``lock_wait`` are required so this API does not create a
-    second default authority.  Current real collectors emit only schema v1;
-    those markers remain visible in accepted wrappers but never become a v2
-    summary and therefore cannot qualify a production cycle.  This guard is
-    deliberately layered: if a caller independently gives legacy results to
-    the pure summarizer, that layer also returns ``qualifying=False`` with the
-    closed ``legacy`` reason.
+    second default authority. Real collectors can emit v2 only with frozen
+    inputs, a matching target plan, and independently checked private
+    artifacts. Missing resolver authority or a legacy collector remains
+    operational as v1 and cannot qualify a production cycle. The pure
+    summarizer independently returns ``qualifying=False`` with the closed
+    ``legacy`` reason for such results.
     """
     validated_identity = validate_collection_cycle_identity(identity)
     slots = collection_cycle_source_slots(validated_identity["scope"])
@@ -1758,6 +2796,9 @@ def run_collection_slots(
     for slot, command in zip(slots, commands):
         empty_result = {"returncode": 1, "stdout": "", "stderr": ""}
         evidence_result = empty_result
+        context = None
+        ib_authority_snapshot = None
+        cron_lock_fd = None
         try:
             script = next(
                 (Path(argument) for argument in command
@@ -1765,9 +2806,99 @@ def run_collection_slots(
                 HTTP_ROOT,
             )
             cwd = script.parent if script != HTTP_ROOT else HTTP_ROOT
-            process_result, cancelled = run_interruptible(
-                command, cwd, timeout, lane=COLLECTION_LANE
-            )
+            bindings = artifact_bindings.get(slot)
+            area = slot.split("/", 1)[0]
+            source_name = {"ethernet": "eth.csv", "infiniband": "ib.csv",
+                           "nvlink": "nvsw.csv"}[area]
+            inventory_available = (
+                SCRIPTS[area].parent / source_name
+            ).is_file()
+            if script != HTTP_ROOT and script.is_file() and inventory_available:
+                cron_lock_fd = os.open(
+                    cwd / "cron.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600
+                )
+                lock_deadline = time.monotonic() + lock_wait
+                while True:
+                    try:
+                        fcntl.flock(cron_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() >= lock_deadline or lane_cancelled(COLLECTION_LANE):
+                            raise ValueError("collection cron lock is unavailable")
+                        time.sleep(0.05)
+                if bindings is None:
+                    bindings = _collection_managed_bindings(validated_identity, slot)
+                if not isinstance(bindings, dict) or set(bindings) != {
+                    "evidence", "envelope", "input_inventory"
+                }:
+                    raise ValueError("collection slot bindings are invalid")
+                frozen = _collection_snapshot_inventory(slot, bindings)
+                context = {
+                    "identity": validated_identity,
+                    "source_slot": slot,
+                    "artifacts": bindings,
+                    "input_inventory_sha256": hashlib.sha256(frozen).hexdigest(),
+                    **_collection_snapshot_runtime(slot, bindings),
+                }
+                with tempfile.TemporaryFile(mode="w+b") as plan_context, \
+                        tempfile.TemporaryFile(mode="w+b") as plan_file:
+                    plan_context.write(_canonical_json_line(context))
+                    plan_context.flush()
+                    plan_context.seek(0)
+                    planner_command = [
+                        *command, "--worker-context-fd", str(plan_context.fileno()),
+                        "--emit-target-plan-fd", str(plan_file.fileno()),
+                        "--preheld-lock-fd", str(cron_lock_fd),
+                    ]
+                    plan_result, plan_cancelled = run_interruptible(
+                        planner_command, cwd, timeout,
+                        pass_fds=(plan_context.fileno(), plan_file.fileno(), cron_lock_fd),
+                        lane=COLLECTION_LANE,
+                    )
+                    if plan_cancelled or plan_result["returncode"] != 0:
+                        evidence_result = plan_result
+                        raise ValueError("collector target planning failed")
+                    plan_size = os.fstat(plan_file.fileno()).st_size
+                    if plan_size <= 0 or plan_size > 1024 * 1024:
+                        raise ValueError("collector target plan size is invalid")
+                    plan_raw = os.pread(plan_file.fileno(), plan_size, 0)
+                    plan = json.loads(plan_raw)
+                    if _canonical_json_line(plan) != plan_raw:
+                        raise ValueError("collector target plan is noncanonical")
+                    if not isinstance(plan, dict) or set(plan) != {
+                        "eth", "spx", "ib", "nv", "dynamic_identities"
+                    }:
+                        raise ValueError("collector target plan shape is invalid")
+                    context["target_plan"] = plan
+                    context["target_plan_sha256"] = hashlib.sha256(plan_raw).hexdigest()
+                    _collection_freeze_plan_sources(slot, bindings, context, plan_raw)
+                activity = _collection_snapshot_activity_sources(slot, bindings)
+                if activity is not None:
+                    context["activity"] = activity
+                ib_analysis, ib_authority_snapshot = _collection_prepare_ib_analysis(
+                    validated_identity, slot,
+                )
+                if ib_analysis is not None:
+                    context["ib_analysis"] = ib_analysis
+                with tempfile.TemporaryFile(mode="w+b") as context_file:
+                    context_file.write(_canonical_json_line(context))
+                    context_file.flush()
+                    context_file.seek(0)
+                    managed_command = [
+                        *command, "--worker-context-fd", str(context_file.fileno()),
+                        "--preheld-lock-fd", str(cron_lock_fd),
+                    ]
+                    process_result, cancelled = run_interruptible(
+                        managed_command, cwd, timeout,
+                        pass_fds=(context_file.fileno(), cron_lock_fd), lane=COLLECTION_LANE,
+                    )
+            else:
+                # No input inventory means this cannot be an A4 evidence run.
+                # Preserve the existing operational/legacy collector path so
+                # process supervision remains testable, never v2 qualifying.
+                process_result, cancelled = run_interruptible(
+                    command, cwd, timeout, lane=COLLECTION_LANE
+                )
             evidence_result = process_result
             if cancelled:
                 outcomes.append(_collection_slot_wrapper(
@@ -1801,13 +2932,25 @@ def run_collection_slots(
                 ))
                 continue
             if child["schema_version"] == 2 and not _collection_slot_artifacts_match(
-                child, artifact_bindings.get(slot)
+                child, bindings, context
             ):
                 outcomes.append(_collection_slot_wrapper(
                     slot, "artifact_mismatch", None, process_result,
                     validated_identity,
                 ))
                 continue
+            if ib_authority_snapshot is not None:
+                from monitor.collection_ib_producer import (
+                    IbProducerHold, recheck_ib_producer_authority,
+                )
+                try:
+                    recheck_ib_producer_authority(ib_authority_snapshot)
+                except IbProducerHold:
+                    outcomes.append(_collection_slot_wrapper(
+                        slot, "artifact_mismatch", None, process_result,
+                        validated_identity,
+                    ))
+                    continue
             outcomes.append(_collection_slot_wrapper(
                 slot, "accepted", child, process_result, validated_identity
             ))
@@ -1819,6 +2962,10 @@ def run_collection_slots(
             outcomes.append(_collection_slot_wrapper(
                 slot, "worker_error", None, process_result, validated_identity
             ))
+        finally:
+            if cron_lock_fd is not None:
+                fcntl.flock(cron_lock_fd, fcntl.LOCK_UN)
+                os.close(cron_lock_fd)
 
     summary = None
     if all(item["outcome"] == "accepted" for item in outcomes) and all(
@@ -2044,6 +3191,13 @@ def run_collection_cycle_coordinator(
                     "collection cycle coordinator result is invalid"
                 ) from exc
             completion = store.publish_completion(start, run_result)
+            try:
+                _publish_stage_l_status_after_completion(store)
+                _publish_stage_l_local_after_completion(store)
+            except OSError:
+                # Status is non-authoritative. Its failure cannot relabel the
+                # already durable collection-cycle completion.
+                print("Issue Tracker Stage L status unavailable", file=sys.stderr)
             return completion["run_result"]
         finally:
             _clear_active_collector(process, COLLECTION_LANE)
@@ -2071,6 +3225,15 @@ def run_yaml_backup(password: str, scope: str, timeout: int, lock_wait: int) -> 
     write_yaml_backup_status("collecting", scope=scope, started_at=started_at)
     try:
         project = active_project_identity(HTTP_ROOT)
+        targets = project_inventory_targets(project, scope)
+        if targets == ():
+            write_yaml_backup_status(
+                "success", scope=scope, started_at=started_at,
+                finished_at=timestamp(), planned=0, succeeded=0,
+                failed_count=0, failed_devices=[],
+                summary="no monitorable devices selected",
+            )
+            return True
         with CollectionGate(
             project, scope, collection_keys=("yaml-backup",),
             status_dir=STATUS_DIR,
@@ -2142,7 +3305,10 @@ def run_yaml_backup(password: str, scope: str, timeout: int, lock_wait: int) -> 
                     end="" if result["stderr"].endswith("\n") else "\n",
                     file=sys.stderr, flush=True,
                 )
-            task_result = parse_task_result(result["stdout"], "yaml_backup")
+            task_result = parse_task_result(
+                result["stdout"], "yaml_backup",
+                permitted_operations=YAML_BACKUP_FAILED_DEVICE_OPERATIONS,
+            )
             if task_result["state"] == "failed":
                 write_yaml_backup_status(
                     "failed", scope=scope, started_at=started_at,
@@ -2210,10 +3376,17 @@ def _validated_interval(message: dict, action: str) -> int:
     if message.get("action") != action:
         raise ValueError(f"{action} request required")
     interval = message.get("interval_minutes")
+    if action == "continuous_collection_start":
+        minimum = MIN_CONTINUOUS_INTERVAL_MINUTES
+        maximum = MAX_CONTINUOUS_INTERVAL_MINUTES
+    elif action == "continuous_backup_start":
+        minimum = MIN_CONTINUOUS_BACKUP_INTERVAL_MINUTES
+        maximum = MAX_CONTINUOUS_BACKUP_INTERVAL_MINUTES
+    else:
+        raise ValueError("unsupported continuous interval action")
     if (
         isinstance(interval, bool) or not isinstance(interval, int)
-        or not MIN_CONTINUOUS_INTERVAL_MINUTES
-        <= interval <= MAX_CONTINUOUS_INTERVAL_MINUTES
+        or not minimum <= interval <= maximum
     ):
         raise ValueError("invalid continuous interval")
     return interval

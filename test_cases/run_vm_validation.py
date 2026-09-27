@@ -317,15 +317,36 @@ def parent_release_errors(
     parent: dict[str, Any], expected_project: str,
 ) -> list[str]:
     errors: list[str] = []
-    if parent.get("schema_version") != 1:
-        errors.append("parent release schema_version 必须为 1")
+    schema = parent.get("schema_version")
+    if type(schema) is not int or schema not in {1, 2}:
+        errors.append("parent release schema_version 必须为 1 或 2")
     if parent.get("project") != expected_project:
         errors.append(
             f"parent project={parent.get('project')!r}，预期 {expected_project!r}"
         )
     if parent.get("validation") != "passed":
         errors.append(f"parent validation={parent.get('validation')!r}")
-    basis_keys = ("project", "inputs", "components", "inventory")
+    if schema == 1:
+        if "dhcp_status" in parent:
+            errors.append("legacy v1 parent release 不允许 dhcp_status")
+        dhcp_status = "enabled"
+    else:
+        dhcp_status = parent.get("dhcp_status")
+        if dhcp_status not in {"enabled", "disabled"}:
+            errors.append("parent release dhcp_status 必须为 enabled 或 disabled")
+    components = parent.get("components")
+    if not isinstance(components, dict):
+        errors.append("parent components 不是 object")
+    elif dhcp_status == "enabled" and not isinstance(components.get("dhcp"), dict):
+        errors.append("enabled parent release 缺少 DHCP component")
+    elif dhcp_status == "disabled" and "dhcp" in components:
+        errors.append("disabled parent release 不允许 DHCP component")
+    basis_keys = (
+        "project", "deployment_scope", "switch_scope", "inputs",
+        "input_sources", "components", "inventory",
+    )
+    if schema == 2:
+        basis_keys += ("dhcp_status",)
     if all(key in parent for key in basis_keys):
         basis = {key: parent[key] for key in basis_keys}
         expected_id = hashlib.sha256(json.dumps(
@@ -339,6 +360,42 @@ def parent_release_errors(
     else:
         errors.append("parent release 缺少 canonical basis 字段")
     return errors
+
+
+def validated_parent_dhcp_status(project: Path, parent: dict[str, Any]) -> str:
+    """Trust a disabled mode only after canonical parent and current global bind."""
+    errors = parent_release_errors(parent, project.name)
+    errors.extend(release_input_errors(project, parent))
+    if errors:
+        raise ValueError("parent/global 输入或身份无效: " + "; ".join(errors))
+    global_path = project / "01-global.yaml"
+    payload = read_regular_bytes(global_path, max_bytes=4 * 1024 * 1024)
+    try:
+        import yaml
+    except ImportError as exc:
+        raise ValueError("缺少 PyYAML，无法验证 current global DHCP status") from exc
+    try:
+        root = Path(__file__).resolve().parents[1]
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+        from tools.project_contract import safe_load_global_yaml
+        document = safe_load_global_yaml(payload.decode("utf-8"))
+        actual = document["common"]["mgmt"]["dhcp-server"]["status"]
+    except (
+        ImportError, UnicodeError, KeyError, TypeError, ValueError,
+        yaml.YAMLError,
+    ) as exc:
+        raise ValueError(f"current global DHCP status 无法验证: {exc}") from exc
+    actual_status = str(actual or "").strip().casefold()
+    if actual_status not in {"enabled", "disabled"}:
+        raise ValueError("current global DHCP status 非法")
+    expected = (
+        "enabled" if parent["schema_version"] == 1
+        else parent["dhcp_status"]
+    )
+    if actual_status != expected:
+        raise ValueError("current global DHCP status 与 parent release 不一致")
+    return expected
 
 
 def parse_dhcp_subnets(path: Path) -> tuple[DhcpSubnet, ...]:
@@ -622,13 +679,24 @@ def devices_csv_errors(path: Path) -> tuple[list[str], dict[str, int], int]:
 
 
 def component_artifact_errors(
-    project: Path, parent: dict[str, Any],
+    project: Path, parent: dict[str, Any], *, dhcp_status: str | None = None,
 ) -> tuple[list[str], int]:
     errors: list[str] = []
     checked_configs = 0
     components = parent.get("components")
     if not isinstance(components, dict):
         return ["parent components 不是 object"], checked_configs
+    if dhcp_status is None:
+        try:
+            dhcp_status = validated_parent_dhcp_status(project, parent)
+        except ValueError as exc:
+            return [f"parent/global DHCP 模式未可信: {exc}"], checked_configs
+    if dhcp_status == "enabled" and "dhcp" not in components:
+        errors.append("enabled parent 缺少 DHCP component")
+    elif dhcp_status == "disabled" and "dhcp" in components:
+        errors.append("disabled parent 不允许 DHCP component")
+    elif dhcp_status not in {"enabled", "disabled"}:
+        errors.append("parent DHCP status 无效")
     for label, record in components.items():
         if not isinstance(record, dict):
             errors.append(f"component {label} 不是 object")
@@ -670,6 +738,9 @@ def component_artifact_errors(
 
         if label == "dhcp":
             outputs = manifest.get("outputs", {})
+            if not isinstance(outputs, dict):
+                errors.append("DHCP manifest outputs 不是 object")
+                continue
             for name in DHCP_OUTPUTS:
                 expected = outputs.get(name, {}).get("sha256") if isinstance(
                     outputs.get(name), dict
@@ -709,12 +780,21 @@ def component_artifact_errors(
 
 def runtime_pointer_errors(
     root: Path, project: Path, parent: dict[str, Any],
+    *, dhcp_status: str | None = None,
 ) -> list[str]:
     """Require runtime/latest links to resolve to the parent-bound release."""
     errors: list[str] = []
     components = parent.get("components")
     if not isinstance(components, dict):
         return ["parent components 不是 object"]
+    if dhcp_status is None:
+        # Standalone callers must prove the same global-bound mode as main.
+        try:
+            dhcp_status = validated_parent_dhcp_status(project, parent)
+        except ValueError as exc:
+            return [f"parent/global DHCP 模式未可信: {exc}"]
+    if dhcp_status not in {"enabled", "disabled"}:
+        return ["parent DHCP status 无效"]
 
     def check(pointer: Path, target: Path, label: str) -> None:
         if not pointer.is_symlink():
@@ -759,7 +839,10 @@ def runtime_pointer_errors(
         check(pointers[0], target, f"{label} project latest")
         check(pointers[1], target, f"{label} runtime latest_yaml")
 
-    if "dhcp" not in components:
+    if dhcp_status == "disabled":
+        if "dhcp" in components:
+            errors.append("disabled parent 不允许 dhcp component")
+    elif "dhcp" not in components:
         errors.append("parent 缺少 dhcp component")
     else:
         check(
@@ -1454,6 +1537,8 @@ def main(argv: list[str] | None = None) -> int:
     assignments: dict[str, tuple[str, ...]] = {}
     service_processes: dict[str, tuple[int, str]] = {}
     ztp_prefix: str | None = None
+    # Invalid/missing parent cannot authorize omission of DHCP evidence.
+    dhcp_status = "enabled"
 
     system = platform.system()
     os_release: dict[str, str] = {}
@@ -1476,11 +1561,6 @@ def main(argv: list[str] | None = None) -> int:
                 f"VERSION_ID={os_release.get('VERSION_ID')}",
             )
 
-    missing_commands = [name for name in REQUIRED_COMMANDS if not shutil.which(name)]
-    if missing_commands:
-        recorder.fail("commands", "缺少: " + ", ".join(missing_commands))
-    else:
-        recorder.passed("commands", ", ".join(REQUIRED_COMMANDS))
     missing_modules = [
         name for name in REQUIRED_PYTHON_MODULES
         if importlib.util.find_spec(name) is None
@@ -1556,23 +1636,37 @@ def main(argv: list[str] | None = None) -> int:
                     "release-inputs",
                     f"{len(parent.get('inputs', {}))} 个输入 SHA-256 全匹配",
                 )
-            artifact_errors, checked = component_artifact_errors(project, parent)
+            if not errors and not input_errors:
+                trusted = recorder.guarded(
+                    "dhcp-mode",
+                    lambda: validated_parent_dhcp_status(project, parent),
+                )
+                if trusted in {"enabled", "disabled"}:
+                    dhcp_status = trusted
+                    recorder.passed("dhcp-mode", f"global-bound {trusted}")
+            artifact_errors, checked = component_artifact_errors(
+                project, parent, dhcp_status=dhcp_status,
+            )
             if artifact_errors:
                 for error in artifact_errors:
                     recorder.fail("release-artifacts", error)
             else:
                 recorder.passed(
                     "release-artifacts",
-                    f"3 个组件与 {checked} 份设备配置 hash 匹配",
+                    f"{len(parent['components'])} 个组件与 {checked} 份设备配置 hash 匹配",
                 )
-            pointer_errors = runtime_pointer_errors(root, project, parent)
+            pointer_errors = runtime_pointer_errors(
+                root, project, parent, dhcp_status=dhcp_status,
+            )
             if pointer_errors:
                 for error in pointer_errors:
                     recorder.fail("runtime-pointers", error)
             else:
                 recorder.passed(
                     "runtime-pointers",
-                    "Cumulus/NVOS latest 与 DHCP runtime manifest 均绑定 parent",
+                    "Cumulus/NVOS latest"
+                    + (" 与 DHCP runtime manifest" if dhcp_status == "enabled" else "")
+                    + " 绑定 parent",
                 )
             inventory = parent.get("inventory")
             if isinstance(inventory, list):
@@ -1692,10 +1786,24 @@ def main(argv: list[str] | None = None) -> int:
                         f"清单条目={listed}（允许重复），AIR nodes={nodes}",
                     )
 
+    required_commands = tuple(
+        name for name in REQUIRED_COMMANDS
+        if dhcp_status == "enabled" or name != "dhcpd"
+    )
+    missing_commands = [name for name in required_commands if not shutil.which(name)]
+    if missing_commands:
+        recorder.fail("commands", "缺少: " + ", ".join(missing_commands))
+    else:
+        recorder.passed("commands", ", ".join(required_commands))
+
     if args.expect_services:
         if os.geteuid() != 0 and not args.full_systemd:
-            recorder.warn("privilege", "建议 root 执行，以完整读取 DHCP 服务证据")
-        for service in ("apache2", "isc-dhcp-server"):
+            recorder.warn("privilege", "建议 root 执行，以完整读取服务证据")
+        expected_services = (
+            ("apache2", "isc-dhcp-server") if dhcp_status == "enabled"
+            else ("apache2",)
+        )
+        for service in expected_services:
             ok, output_text = command_result(["systemctl", "is-active", service])
             if ok and output_text == "active":
                 recorder.passed(f"service:{service}", "active")
@@ -1727,12 +1835,13 @@ def main(argv: list[str] | None = None) -> int:
                             f"service-process:{service}",
                             f"MainPID={pid} {command}",
                         )
-        ok, output_text = command_result([
-            "dhcpd", "-t", "-cf", "/etc/dhcp/dhcpd.conf",
-        ])
-        (recorder.passed if ok else recorder.fail)(
-            "dhcpd-syntax", output_text or ("valid" if ok else "failed"),
-        )
+        if dhcp_status == "enabled":
+            ok, output_text = command_result([
+                "dhcpd", "-t", "-cf", "/etc/dhcp/dhcpd.conf",
+            ])
+            (recorder.passed if ok else recorder.fail)(
+                "dhcpd-syntax", output_text or ("valid" if ok else "failed"),
+            )
         apache = shutil.which("apache2ctl") or shutil.which("apachectl")
         if apache:
             ok, output_text = command_result([apache, "configtest"])
@@ -1776,7 +1885,7 @@ def main(argv: list[str] | None = None) -> int:
                         "installed-control-cgi",
                         "三个控制 CGI hash 与 executable mode 匹配",
                     )
-        if project is not None:
+        if project is not None and dhcp_status == "enabled":
             for name in DHCP_OUTPUTS:
                 generated = project / "99-output-dhcp" / name
                 installed = Path("/etc/dhcp") / name
@@ -1799,7 +1908,10 @@ def main(argv: list[str] | None = None) -> int:
                     recorder.fail("http-listener", f"{address}:80: {exc}")
                 else:
                     recorder.passed("http-listener", f"{address}:80 可连接")
-        if args.full_systemd and interfaces is not None and assignments:
+        if (
+            args.full_systemd and dhcp_status == "enabled"
+            and interfaces is not None and assignments
+        ):
             runtime_result = recorder.guarded(
                 "dhcp-runtime-interfaces",
                 lambda: parse_interfacesv4(

@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import copy
+from contextlib import contextmanager
+from collections.abc import Mapping
+import fcntl
 import fnmatch
 import hashlib
 import ipaddress
@@ -13,7 +16,9 @@ import posixpath
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 import re
+import stat
 from types import MappingProxyType
+from typing import Callable, Iterable
 
 import yaml
 
@@ -21,6 +26,13 @@ GLOBAL_SCHEMA_VERSION = 1
 CURRENT_GLOBAL_SCHEMA_VERSION = 2
 SUPPORTED_GLOBAL_SCHEMA_VERSIONS = frozenset({1, 2})
 MIN_CONTINUOUS_INTERVAL_MINUTES = 10
+MAX_CONTINUOUS_INTERVAL_MINUTES = 240
+MIN_CONTINUOUS_BACKUP_INTERVAL_MINUTES = (
+    MIN_CONTINUOUS_INTERVAL_MINUTES * 6
+)
+MAX_CONTINUOUS_BACKUP_INTERVAL_MINUTES = (
+    MAX_CONTINUOUS_INTERVAL_MINUTES * 6
+)
 AIR_UNCONNECTED_ENDPOINT = "unconnected"
 AIR_OUTBOUND_ENDPOINT = "outbound"
 _MAC_ADDRESS = re.compile(r"^[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}$")
@@ -72,6 +84,10 @@ COLLECTION_CYCLE_FAILED_DEVICE_OPERATIONS = (
     "collection",
     "ssh_prepare",
 )
+YAML_BACKUP_FAILED_DEVICE_OPERATIONS = (
+    "connect",
+    "yaml_backup",
+)
 COLLECTION_CYCLE_MAX_FAILED_DEVICES = 10000
 COLLECTION_CYCLE_MAX_FAILED_DEVICE_TEXT_BYTES = 1024
 # Persistence renders sequences as fixed-width decimal filenames.  Keep the
@@ -105,6 +121,513 @@ _COLLECTION_CYCLE_UUID4_HEX = re.compile(
     r"^[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$"
 )
 _EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
+
+
+DEFAULT_HTTP_PORT = 80
+
+REHYDRATE_RECEIPT_NAME = ".finished-source.json"
+REHYDRATE_READY_NAME = ".finished-commit.ready"
+REHYDRATE_COMMIT_NAME = ".finished-commit.json"
+_REHYDRATE_RECEIPT_MAX_BYTES = 64 * 1024
+_REHYDRATE_MARKER_MAX_BYTES = 4096
+_REHYDRATE_RECEIPT_KEYS = frozenset({
+    "schema_version", "state", "source_record", "project", "record_id",
+    "content_sha256", "include_history",
+})
+_REHYDRATE_MARKER_KEYS = frozenset({
+    "schema_version", "state", "receipt_sha256", "target_project",
+    "target_dev", "target_ino",
+})
+
+
+def _read_rehydrate_control(directory_fd: int, name: str, limit: int) -> bytes | None:
+    """Read one local restore control without following links or accepting a race."""
+    try:
+        named = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ValueError(f"restore control cannot be inspected: {name}") from exc
+    if (
+        not stat.S_ISREG(named.st_mode) or named.st_nlink != 1
+        or not 0 < named.st_size <= limit
+    ):
+        raise ValueError(f"restore control has an unsafe shape: {name}")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(name, flags, dir_fd=directory_fd)
+    except OSError as exc:
+        raise ValueError(f"restore control cannot be opened: {name}") from exc
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1
+            or (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+            != (named.st_dev, named.st_ino, named.st_size, named.st_mtime_ns)
+        ):
+            raise ValueError(f"restore control was replaced: {name}")
+        chunks: list[bytes] = []
+        remaining = opened.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 65536))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        after = os.fstat(descriptor)
+        try:
+            named_after = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        except OSError as exc:
+            raise ValueError(f"restore control disappeared: {name}") from exc
+        identity = lambda item: (
+            item.st_dev, item.st_ino, item.st_size, item.st_mtime_ns, item.st_ctime_ns
+        )
+        if remaining or identity(opened) != identity(after) or identity(opened) != identity(named_after):
+            raise ValueError(f"restore control changed while reading: {name}")
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def require_project_eligible(project: Path) -> None:
+    """Reject a restore until its local, inode-bound commit marker is present.
+
+    Ordinary projects predating this protocol have none of its three controls.
+    A copied receipt or marker is not a portable authorization: the finished
+    record is the provenance authority on another host.  Callers must also
+    bind their selected path and recheck before irreversible work.
+    """
+    project = Path(project)
+    # sync-code publishes this workspace-root marker before its first remote
+    # write and clears it only after the final source authority receipt.  A
+    # copied project without local restore controls is still ineligible while
+    # its receiving tree is incomplete.
+    sync_marker = project.parent.parent / ".sync-code-in-progress"
+    try:
+        sync_marker.lstat()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise ValueError(f"project sync state cannot be inspected: {sync_marker}") from exc
+    else:
+        raise ValueError(f"project sync is incomplete: {sync_marker}")
+    try:
+        named_project = project.lstat()
+        if not stat.S_ISDIR(named_project.st_mode):
+            raise ValueError(f"project must be a real directory: {project}")
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        directory_fd = os.open(project, flags)
+    except OSError as exc:
+        raise ValueError(f"project cannot be inspected: {project}") from exc
+    try:
+        opened_project = os.fstat(directory_fd)
+        if (opened_project.st_dev, opened_project.st_ino) != (
+            named_project.st_dev, named_project.st_ino
+        ):
+            raise ValueError(f"project was replaced: {project}")
+        receipt_bytes = _read_rehydrate_control(
+            directory_fd, REHYDRATE_RECEIPT_NAME, _REHYDRATE_RECEIPT_MAX_BYTES,
+        )
+        ready_bytes = _read_rehydrate_control(
+            directory_fd, REHYDRATE_READY_NAME, _REHYDRATE_MARKER_MAX_BYTES,
+        )
+        marker_bytes = _read_rehydrate_control(
+            directory_fd, REHYDRATE_COMMIT_NAME, _REHYDRATE_MARKER_MAX_BYTES,
+        )
+        if receipt_bytes is None and ready_bytes is None and marker_bytes is None:
+            return
+        if receipt_bytes is None or ready_bytes is not None or marker_bytes is None:
+            raise ValueError(f"restored project has no completed commit: {project}")
+        try:
+            receipt = json.loads(receipt_bytes.decode("ascii"))
+            marker = json.loads(marker_bytes.decode("ascii"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"restored project has malformed commit controls: {project}") from exc
+        if (
+            not isinstance(receipt, dict) or set(receipt) != _REHYDRATE_RECEIPT_KEYS
+            or type(receipt["schema_version"]) is not int or receipt["schema_version"] != 1
+            or receipt["state"] != "PREPARED"
+            or not isinstance(receipt["source_record"], str)
+            or not receipt["source_record"].startswith("/")
+            or not isinstance(receipt["project"], str) or not receipt["project"]
+            or not isinstance(receipt["record_id"], str) or not receipt["record_id"]
+            or not isinstance(receipt["content_sha256"], str)
+            or not _COLLECTION_CYCLE_SHA256.fullmatch(receipt["content_sha256"])
+            or type(receipt["include_history"]) is not bool
+        ):
+            raise ValueError(f"restored project has an invalid receipt: {project}")
+        if (
+            not isinstance(marker, dict) or set(marker) != _REHYDRATE_MARKER_KEYS
+            or type(marker["schema_version"]) is not int or marker["schema_version"] != 1
+            or marker["state"] != "COMMITTED"
+            or marker["receipt_sha256"] != hashlib.sha256(receipt_bytes).hexdigest()
+            or marker["target_project"] != project.name
+            or type(marker["target_dev"]) is not int
+            or type(marker["target_ino"]) is not int
+            or (marker["target_dev"], marker["target_ino"])
+            != (opened_project.st_dev, opened_project.st_ino)
+        ):
+            raise ValueError(f"restored project has a mismatched commit marker: {project}")
+        named_after = project.lstat()
+        opened_after = os.fstat(directory_fd)
+        if (
+            (named_after.st_dev, named_after.st_ino)
+            != (opened_project.st_dev, opened_project.st_ino)
+            or (opened_after.st_dev, opened_after.st_ino)
+            != (opened_project.st_dev, opened_project.st_ino)
+        ):
+            raise ValueError(f"project was replaced during commit check: {project}")
+    finally:
+        os.close(directory_fd)
+
+
+@dataclass(frozen=True, order=True)
+class ServiceEndpoint:
+    """One validated IPv4 HTTP service endpoint."""
+
+    address: ipaddress.IPv4Address
+    port: int = DEFAULT_HTTP_PORT
+
+    @property
+    def host(self) -> str:
+        return str(self.address)
+
+    @property
+    def origin(self) -> str:
+        if self.port == DEFAULT_HTTP_PORT:
+            return f"http://{self.host}"
+        return f"http://{self.host}:{self.port}"
+
+    @property
+    def listen_directive(self) -> str:
+        return f"Listen {self.host}:{self.port}"
+
+
+def validate_service_endpoint(
+    address: object, port: object = None, *, field: str,
+) -> ServiceEndpoint:
+    """Return a canonical, usable unicast IPv4 service endpoint."""
+    raw_text = str(address)
+    try:
+        parsed = ipaddress.IPv4Address(raw_text)
+    except ipaddress.AddressValueError as exc:
+        raise ValueError(f"{field} must be a valid IPv4 address") from exc
+    if raw_text != str(parsed):
+        raise ValueError(f"{field} must use canonical IPv4 text")
+    if (
+        parsed.is_unspecified
+        or parsed.is_multicast
+        or parsed.is_loopback
+        or parsed.is_link_local
+        or int(parsed) == 0xFFFFFFFF
+    ):
+        raise ValueError(f"{field} must be a usable unicast service address")
+
+    resolved_port = DEFAULT_HTTP_PORT if port is None else port
+    if (
+        isinstance(resolved_port, bool)
+        or not isinstance(resolved_port, int)
+        or not 1 <= resolved_port <= 65535
+    ):
+        raise ValueError(f"{field} port must be an integer from 1 through 65535")
+    return ServiceEndpoint(parsed, resolved_port)
+
+
+def merge_http_listener_addresses(
+    ztp_service_ips: Iterable[object], http_address: object | None,
+) -> tuple[str, ...]:
+    """Return canonical exact HTTP listeners without changing ZTP identity.
+
+    ``None`` means no independently declared HTTP address. Every present
+    address is validated before numeric sorting and de-duplication.
+    """
+    addresses = {
+        validate_service_endpoint(value, field="ZTP service IPv4").host
+        for value in ztp_service_ips
+    }
+    if http_address is not None:
+        addresses.add(validate_service_endpoint(
+            http_address, field="common.mgmt.http.address"
+        ).host)
+    return tuple(sorted(addresses, key=ipaddress.IPv4Address))
+
+
+def validate_http_listener_ownership(
+    address: object,
+    owners: Iterable[Mapping[str, object]],
+    *,
+    allowlist: Iterable[str] = (),
+) -> tuple[dict[str, object], ...]:
+    """Validate every observed owner of an HTTP address before any write.
+
+    An absent allowlist does not impose a single-owner limit.  A configured
+    allowlist is a ceiling on *currently listener-capable* owners; down or
+    otherwise ineligible owners remain in the returned diagnostics.
+    """
+    endpoint = validate_service_endpoint(
+        address, field="common.mgmt.http.address",
+    )
+    if isinstance(owners, (str, bytes, Mapping)):
+        raise ValueError("HTTP listener owners must be an iterable of records")
+    try:
+        raw_owners = tuple(owners)
+    except TypeError as exc:
+        raise ValueError("HTTP listener owners must be iterable") from exc
+
+    normalized: list[dict[str, object]] = []
+    seen_names: set[str] = set()
+    seen_indexes: set[int] = set()
+    for position, record in enumerate(raw_owners):
+        if not isinstance(record, Mapping):
+            raise ValueError(f"HTTP listener owner[{position}] must be a record")
+        name = record.get("ifname")
+        index = record.get("ifindex")
+        eligible = record.get("eligible")
+        reason = record.get("reason")
+        if (
+            not isinstance(name, str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}", name)
+        ):
+            raise ValueError(f"HTTP listener owner[{position}] has unsafe ifname")
+        if isinstance(index, bool) or not isinstance(index, int) or index <= 0:
+            raise ValueError(f"HTTP listener owner {name} has invalid ifindex")
+        if not isinstance(eligible, bool):
+            raise ValueError(f"HTTP listener owner {name} lacks eligibility")
+        if eligible and reason is not None:
+            raise ValueError(f"eligible HTTP listener owner {name} has a reason")
+        if not eligible and (not isinstance(reason, str) or not reason.strip()):
+            raise ValueError(f"ineligible HTTP listener owner {name} lacks a reason")
+        if name in seen_names or index in seen_indexes:
+            raise ValueError(f"duplicate HTTP listener owner {name}/{index}")
+        seen_names.add(name)
+        seen_indexes.add(index)
+        normalized.append({
+            "ifname": name,
+            "ifindex": index,
+            "eligible": eligible,
+            "reason": reason,
+        })
+    normalized.sort(key=lambda owner: (owner["ifindex"], owner["ifname"]))
+    detail = ", ".join(
+        f"{owner['ifname']}[{owner['ifindex']}]:"
+        + ("eligible" if owner["eligible"] else str(owner["reason"]))
+        for owner in normalized
+    ) or "none observed"
+    eligible_names = {str(owner["ifname"]) for owner in normalized if owner["eligible"]}
+    if not eligible_names:
+        raise ValueError(
+            f"HTTP listener {endpoint.host} has no listener-capable owner; "
+            f"observed owners: {detail}"
+        )
+
+    if isinstance(allowlist, (str, bytes, Mapping)):
+        raise ValueError("HTTP listener allowlist must be interface names")
+    try:
+        allowed = tuple(allowlist)
+    except TypeError as exc:
+        raise ValueError("HTTP listener allowlist must be iterable") from exc
+    for name in allowed:
+        if (
+            not isinstance(name, str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}", name)
+        ):
+            raise ValueError(f"HTTP listener allowlist has unsafe name: {name!r}")
+    if len(set(allowed)) != len(allowed):
+        raise ValueError("HTTP listener allowlist contains duplicate names")
+    if allowed and not eligible_names <= set(allowed):
+        raise ValueError(
+            f"HTTP listener {endpoint.host} has listener-capable owners outside "
+            f"allowlist {sorted(allowed)}; observed owners: {detail}"
+        )
+    return tuple(normalized)
+
+
+AUDIENCE_DEVICE = "device"
+AUDIENCE_MACHINE = "machine"
+AUDIENCE_HUMAN = "human"
+CHANNELS = (
+    "dhcp-provision-url",
+    "dhcp-bootfile",
+    "bootstrap-origin",
+    "bootstrap-manual-oob",
+    "bootstrap-manual-oobofoob",
+    "nvos-commands-list",
+    "nvos-provisioning",
+    "pubkey",
+    "image",
+    "manual-ztp",
+    "apt-repository",
+    "console-monitor",
+)
+
+
+def service_url(
+    endpoint: ServiceEndpoint, path: str, *, channel: str, prefix: str = "",
+) -> str:
+    """Construct a channel-attributed service URL from one validated endpoint."""
+    if not isinstance(endpoint, ServiceEndpoint):
+        raise ValueError("HTTP service URL requires a ServiceEndpoint")
+    if channel not in CHANNELS:
+        raise ValueError(f"unknown HTTP service URL channel: {channel}")
+    if not isinstance(path, str) or (path and not path.startswith("/")):
+        raise ValueError("HTTP service URL path must be empty or absolute")
+    if prefix:
+        prefix = validate_ztp_url_prefix(prefix)
+    return f"{endpoint.origin}{prefix}{path}"
+
+
+@dataclass(frozen=True, order=True)
+class PublishedUrl:
+    """One enumerable URL, with its consumer audience and source channel."""
+
+    url: str
+    endpoint: ServiceEndpoint
+    audience: str
+    channel: str
+    path: str
+    consumer: str
+
+
+@dataclass(frozen=True)
+class PublicationPlan:
+    """Primitive project inputs for a pure URL-publication enumeration."""
+
+    endpoints_by_role: tuple[tuple[str, tuple[ServiceEndpoint, ...]], ...]
+    boot_endpoints: tuple[ServiceEndpoint, ...]
+    ztp_prefix: str
+    pubkey_names: tuple[str, ...]
+    image_names: tuple[tuple[str, str], ...]
+    apt_endpoint: ServiceEndpoint | None
+
+
+def device_visible_urls(plan: PublicationPlan) -> tuple[PublishedUrl, ...]:
+    """Enumerate all project HTTP URLs in deterministic order, including device URLs."""
+    prefix = validate_ztp_url_prefix(plan.ztp_prefix)
+    rows: list[PublishedUrl] = []
+    bootstrap_by_role = {
+        "air_oob": "ztp-bootstrap_oob.sh",
+        "prod_oob": "ztp-bootstrap_oob.sh",
+        "air_oobofoob": "ztp-bootstrap_oobofoob.sh",
+        "prod_oobofoob": "ztp-bootstrap_oobofoob.sh",
+    }
+    all_endpoints: set[ServiceEndpoint] = set(plan.boot_endpoints)
+    for role, endpoints in plan.endpoints_by_role:
+        if role not in bootstrap_by_role:
+            raise ValueError(f"unknown ZTP publication role: {role}")
+        script = bootstrap_by_role[role]
+        for endpoint in endpoints:
+            all_endpoints.add(endpoint)
+            path = f"/{script}"
+            rows.append(PublishedUrl(
+                service_url(endpoint, path, prefix=prefix,
+                            channel="dhcp-provision-url"),
+                endpoint, AUDIENCE_DEVICE, "dhcp-provision-url",
+                f"{prefix}{path}", "DHCP option 239",
+            ))
+            rows.append(PublishedUrl(
+                service_url(endpoint, "", channel="bootstrap-origin"),
+                endpoint, AUDIENCE_DEVICE, "bootstrap-origin", "",
+                "bootstrap ZTP_SERVER",
+            ))
+            if role.endswith("oobofoob"):
+                rows.append(PublishedUrl(
+                    service_url(endpoint, path, prefix=prefix,
+                                channel="bootstrap-manual-oobofoob"),
+                    endpoint, AUDIENCE_DEVICE, "bootstrap-manual-oobofoob",
+                    f"{prefix}{path}", "bootstrap manual URL",
+                ))
+            else:
+                rows.append(PublishedUrl(
+                    service_url(endpoint, path, prefix=prefix,
+                                channel="bootstrap-manual-oob"),
+                    endpoint, AUDIENCE_DEVICE, "bootstrap-manual-oob",
+                    f"{prefix}{path}", "bootstrap manual URL",
+                ))
+            rows.append(PublishedUrl(
+                service_url(endpoint, path, prefix=prefix,
+                            channel="manual-ztp"),
+                endpoint, AUDIENCE_DEVICE, "manual-ztp",
+                f"{prefix}{path}", "manual ZTP handout",
+            ))
+    for endpoint in plan.boot_endpoints:
+        rows.append(PublishedUrl(
+            service_url(endpoint, "/ztp.json", prefix=prefix,
+                        channel="dhcp-bootfile"),
+            endpoint, AUDIENCE_DEVICE, "dhcp-bootfile", f"{prefix}/ztp.json",
+            "DHCP option 67",
+        ))
+        rows.append(PublishedUrl(
+            service_url(endpoint, "/config/nvos/disable-password-hardening.nv",
+                        prefix=prefix, channel="nvos-commands-list"),
+            endpoint, AUDIENCE_DEVICE, "nvos-commands-list",
+            f"{prefix}/config/nvos/disable-password-hardening.nv",
+            "ztp.json commands list",
+        ))
+        rows.append(PublishedUrl(
+            service_url(endpoint, "/ztp-bootstrap_oob.sh", prefix=prefix,
+                        channel="nvos-provisioning"),
+            endpoint, AUDIENCE_DEVICE, "nvos-provisioning",
+            f"{prefix}/ztp-bootstrap_oob.sh", "ztp.json provisioning",
+        ))
+    for endpoint in sorted(all_endpoints):
+        for name in plan.pubkey_names:
+            path = f"/config/publickey/{name}"
+            rows.append(PublishedUrl(
+                service_url(endpoint, path, prefix=prefix, channel="pubkey"),
+                endpoint, AUDIENCE_DEVICE, "pubkey", f"{prefix}{path}",
+                "bootstrap public key",
+            ))
+        for platform, name in plan.image_names:
+            if platform not in {"cumulus", "nvos"}:
+                raise ValueError(f"unknown image platform: {platform}")
+            path = f"/image/{platform}/{name}"
+            rows.append(PublishedUrl(
+                service_url(endpoint, path, prefix=prefix, channel="image"),
+                endpoint, AUDIENCE_DEVICE, "image", f"{prefix}{path}",
+                "switch image",
+            ))
+        rows.append(PublishedUrl(
+            service_url(endpoint, "/monitor", channel="console-monitor"),
+            endpoint, AUDIENCE_HUMAN, "console-monitor", "/monitor",
+            "operator monitor link",
+        ))
+    if plan.apt_endpoint is not None:
+        endpoint = plan.apt_endpoint
+        rows.append(PublishedUrl(
+            service_url(endpoint, "/apps", channel="apt-repository"),
+            endpoint, AUDIENCE_MACHINE, "apt-repository", "/apps",
+            "managed-server APT source",
+        ))
+    return tuple(sorted(set(rows)))
+
+
+def validate_local_service_endpoint(
+    address: object,
+    port: object = None,
+    *,
+    field: str,
+    local_addresses: Callable[[], Iterable[object]],
+) -> ServiceEndpoint:
+    """Require presence on at least one local interface.
+
+    Duplicate assignments are tolerated.  This locality rule relies on the
+    owner assumption that deployment-server interface and route configuration
+    are otherwise correct.
+    """
+    endpoint = validate_service_endpoint(address, port, field=field)
+    try:
+        available = {
+            validate_service_endpoint(value, field=field).address
+            for value in local_addresses()
+        }
+    except (OSError, TypeError, ValueError) as exc:
+        raise ValueError(f"{field} could not enumerate local IPv4 addresses") from exc
+    if endpoint.address not in available:
+        raise ValueError(
+            f"{field} must be assigned to this host; deployment-server "
+            "interface and route configuration are assumed correct"
+        )
+    return endpoint
 
 
 def collection_cycle_source_slots(scope: object) -> tuple[str, ...]:
@@ -562,8 +1085,88 @@ SETUP_ZTP_MAPPINGS = (
 SETUP_WORKSPACE_INPUT_MAPPINGS = (
     ("infra/01-global.yaml", "01-global.yaml", "file"),
     ("infra/02-devices_config.csv", "02-devices_config.csv", "file_csv"),
+    ("infra/logs", "99-output-infra", "dir"),
     ("monitor/01-global.yaml", "01-global.yaml", "file"),
+    ("infiniband/01-global.yaml", "01-global.yaml", "file"),
 )
+
+
+def managed_infra_log_project(log_path: str | os.PathLike[str],
+                              projects_root: str | os.PathLike[str]) -> Path | None:
+    """Return the direct DAY0 project owning an exact, real infra/logs link.
+
+    A resolved directory alone is not evidence of ownership: the lexical
+    target, every ancestor, project, and output directory must also have the
+    expected shape without an intervening symlink.
+    """
+    link = Path(os.path.abspath(log_path))
+    projects = Path(os.path.abspath(projects_root))
+    try:
+        if not stat.S_ISLNK(link.lstat().st_mode):
+            return None
+        lexical = os.readlink(link)
+        if os.path.isabs(lexical):
+            return None
+        target = Path(os.path.normpath(os.path.join(link.parent, lexical)))
+        if (target.name != "99-output-infra" or target.parent.parent != projects
+                or target.parent.name in ("", ".", "..")
+                or lexical != os.path.relpath(target, link.parent)):
+            return None
+        for component in (link.parent, projects, target.parent, target):
+            if not stat.S_ISDIR(component.lstat().st_mode):
+                return None
+        if link.resolve(strict=True) != target.resolve(strict=True):
+            return None
+        return target.parent
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def infra_log_pending_state_names(http_root: str | os.PathLike[str]) -> tuple[str, ...]:
+    """Inventory exact private receipt/temp names without opening their leaves.
+
+    The durable receipt and any fsynced atomic temp both fence log writers.
+    Near-match user names are not part of this private namespace.
+    """
+    parent = Path(http_root) / "infra"
+    if not stat.S_ISDIR(parent.lstat().st_mode):
+        raise ValueError(f"infra parent must be a real directory: {parent}")
+    with os.scandir(parent) as children:
+        return tuple(sorted(item.name for item in children
+                            if item.name == ".logs-migration.json"
+                            or item.name.startswith(".logs-migration.")))
+
+
+@contextmanager
+def infra_log_root_lock(http_root: str | os.PathLike[str]):
+    """Serialize log-root publication independently of the deployment lock.
+
+    Writers invoked by load do not inherit its workspace lock descriptor, so
+    they must never attempt to reacquire that lock.  The lock inode itself is
+    private runtime state and cannot be a symlink or a hardlink alias.
+    """
+    parent = Path(http_root) / "infra"
+    if not stat.S_ISDIR(parent.lstat().st_mode):
+        raise ValueError(f"infra parent must be a real directory: {parent}")
+    path = parent / ".logs.lock"
+    flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        named = path.lstat()
+        if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1
+                or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)):
+            raise ValueError(f"unsafe infra log lock identity: {path}")
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            yield
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
 P2P_INPUT_PATHS = (
     "ztp/config/cumulus/template/P2P/p2p.xlsx",
     "ztp/config/nvos/template/P2P/p2p.xlsx",
@@ -602,6 +1205,7 @@ NETWORK_INVENTORY_LINKS = tuple((network + "/monitor/" + csv, network + "/" + cs
 # (repository name, project target, optional repository-internal alias target).
 MONITOR_RUNTIME_MAPPINGS = (
     ("monitor/02-devices_config.csv", "02-devices_config.csv", None),
+    ("monitor/99-output-ufm", "99-output-ufm", None),
     ("ztp/status", "99-output-ztp", None),
     ("monitor/ztp-status", "99-output-ztp", "ztp/status"),
 ) + tuple(
@@ -1224,6 +1828,7 @@ IMAGE_MANIFEST_CARRIER = "infra/docker/deployment-source-manifest.json"
 IMAGE_HOST_STATE_PATHS = frozenset(name for name, _target in runtime_link_specs()) | frozenset(
     PUBLISHED_RUNTIME_FILE_PATHS
 ) | frozenset({
+    "infra/.logs.lock", "infra/.logs-migration.json",
     "infra/docker/infra-runtime.conf", "infra/docker/container.env",
     "infra/docker/desired-state.json", "infra/docker/runtime-state.json",
     "monitor/generate-monitor.log", "monitor/monitor.html", "ztp/.setup_manifest",
@@ -1237,6 +1842,7 @@ IMAGE_HOST_STATE_SUBTREES = frozenset({
     "ztp/image", "tools/ib-tool-Jie", "tools/ibdiagnet-analyze-tool",
 }) | REFERENCE_ONLY_SUBTREES
 IMAGE_HOST_STATE_DYNAMIC_PATTERNS = (
+    "infra/.logs-migration.*",
     "ztp/config/isc-dhcp-server/dhcpd_*.hosts", "ztp/optimize/*-sample",
 )
 
@@ -1454,6 +2060,20 @@ def transfer_exclude_reason(path: PurePosixPath | str) -> str | None:
     """Return why a workspace-relative path is not deployable, if applicable."""
     value = PurePosixPath(path)
     parts = value.parts
+    if (
+        len(parts) == 3
+        and parts[0] == "DAY0-Prepare"
+        and parts[2] in {
+            REHYDRATE_RECEIPT_NAME,
+            REHYDRATE_READY_NAME,
+            REHYDRATE_COMMIT_NAME,
+        }
+    ):
+        return "local finished-project restore control"
+    if (len(parts) >= 2 and parts[0] == "infra"
+            and (parts[1] == ".logs.lock"
+                 or parts[1].startswith(".logs-migration."))):
+        return "private infra log migration state"
     disposition = path_disposition(path)
     if parts and parts[0] == FINISHED_PROJECT_ROOT_NAME:
         return "finished project archive"
@@ -1538,5 +2158,7 @@ def rsync_excludes() -> tuple[str, ...]:
         "[Rr][Ee][Aa][Dd][Mm][Ee]*",
         "infra-runtime.conf", "container.env", ".env",
         "desired-state.json", "runtime-state.json",
+        ".logs.lock", ".logs-migration.*",
+        REHYDRATE_RECEIPT_NAME, REHYDRATE_READY_NAME, REHYDRATE_COMMIT_NAME,
         ZTP_PREFIX_PUBLICATION_MARKER,
     )

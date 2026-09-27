@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import ExitStack, contextmanager
+import hashlib
 import importlib.util
 import io
 import json
@@ -385,18 +386,38 @@ class MonitorWatchResilienceDirectTests(unittest.TestCase):
                 inventory = project / "02-devices_config.csv"
                 inventory.write_text("hostname\n", encoding="utf-8")
                 global_yaml = project / "01-global.yaml"
-                global_yaml.write_text(
-                    "project: site-a\ntimezone: Asia/Shanghai\n", encoding="utf-8",
+                global_text = (
+                    "schema_version: 1\ncommon:\n  mgmt:\n"
+                    "    dhcp-server:\n      status: enabled\n"
+                    "timezone: Asia/Shanghai\n"
                 )
+                global_yaml.write_text(global_text, encoding="utf-8")
                 alternate_inventory = project / "02-alternate.csv"
                 alternate_inventory.write_text("hostname\n", encoding="utf-8")
                 release = output_root / "current-release.json"
-                release.write_text(json.dumps({
+                release_payload = {
                     "schema_version": 1, "project": "site-a",
-                    "release_id": "a" * 20,
+                    "deployment_scope": "all", "switch_scope": "all",
+                    "inputs": {"global": hashlib.sha256(
+                        global_text.encode("utf-8")
+                    ).hexdigest()},
+                    "input_sources": {"p2p": {"sha256": "0" * 64}},
+                    "components": {"dhcp": {
+                        "release_id": "legacy-dhcp", "manifest_sha256": "0" * 64,
+                    }},
+                    "inventory": [],
                     "generated_at": "2026-09-12T12:00:00+08:00",
                     "validation": "passed",
-                }) + "\n", encoding="utf-8")
+                }
+                basis_keys = (
+                    "project", "deployment_scope", "switch_scope", "inputs",
+                    "input_sources", "components", "inventory",
+                )
+                release_payload["release_id"] = hashlib.sha256(json.dumps(
+                    {key: release_payload[key] for key in basis_keys},
+                    ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                ).encode("utf-8")).hexdigest()[:20]
+                release.write_text(json.dumps(release_payload) + "\n", encoding="utf-8")
                 active_inventory = base / "ztp/config/isc-dhcp-server/02-devices_config.csv"
                 active_inventory.parent.mkdir(parents=True)
                 active_inventory.symlink_to(os.path.relpath(inventory, active_inventory.parent))
@@ -430,15 +451,15 @@ class MonitorWatchResilienceDirectTests(unittest.TestCase):
                 def mutate_identity(_seconds):
                     if drift == "current-release":
                         atomic_replace(release, (json.dumps({
-                            "schema_version": 1, "project": "site-a",
-                            "release_id": "b" * 20,
+                            **release_payload,
                             "generated_at": "2026-09-12T12:00:01+08:00",
-                            "validation": "passed",
                         }) + "\n").encode("utf-8"))
                     elif drift == "global-yaml":
                         atomic_replace(
                             global_yaml,
-                            b"project: site-a\ntimezone: UTC\n",
+                            global_text.replace(
+                                "Asia/Shanghai", "UTC",
+                            ).encode("utf-8"),
                         )
                     elif drift == "inventory-bytes":
                         atomic_replace(

@@ -30,6 +30,7 @@ import subprocess
 import sys
 import tempfile
 from typing import Iterable, Mapping, NamedTuple, Optional, Sequence, Tuple
+import yaml
 
 
 HERE = Path(__file__).resolve().parent
@@ -38,10 +39,13 @@ TOOLS_DIRECTORY = HERE.parents[1] / "tools"
 sys.path.insert(0, os.fspath(TOOLS_DIRECTORY))
 import hostlock  # noqa: E402
 from project_contract import (  # noqa: E402
+    ServiceEndpoint,
     is_image_credential_name, is_image_host_state_path,
     IMAGE_HOST_STATE_PATHS, IMAGE_HOST_STATE_SUBTREES, IMAGE_MANIFEST_CARRIER,
     PUBLISHED_RUNTIME_FILE_PATHS, published_runtime_link_specs, P2P_INPUT_PATHS, P2P_AIR_PATH,
-    path_disposition, transfer_exclude_reason,
+    path_disposition, transfer_exclude_reason, validate_service_endpoint,
+    merge_http_listener_addresses, safe_load_global_yaml,
+    validate_http_listener_ownership,
 )
 
 
@@ -62,7 +66,7 @@ CONTROL_AUTH_IMAGE_SOURCE_HELPER = Path(
 )
 MONITOR_AUTHORITY_ROOT = Path("/var/lib/http-ztp-monitor-auth")
 CONTROL_AUTH_HELPER_SHA256 = (
-    "5a133a353cb7ac7af5be0be71b4ef85b41345716103d6e28590140638ee11038"
+    "f5cea5266ab808250b718250a8a73d7d6f6452a199b97fa500643d7ed9e988db"
 )
 CONTROL_AUTH_HELPER_SIZE_LIMIT = 256 * 1024
 CONTROL_AUTH_IMAGE_DIRECTORY_CONTRACTS = (
@@ -1301,41 +1305,105 @@ def restore_mutable_image_sources(
         _atomic_write_bytes(destination, (source_root / relative_name).read_bytes(), 0o644)
 
 
-def render_apache_listener_config(endpoint_ips: Iterable[str]) -> str:
-    addresses = []
+def project_http_policy(settings: Settings) -> tuple[int, str | None]:
+    """Read independent HTTP listener authority from the bound project."""
+    project = settings.project_dir
+    global_yaml = project / "01-global.yaml"
+    _canonical_regular_within(global_yaml, project, "project global YAML")
+    try:
+        document = safe_load_global_yaml(global_yaml.read_text(encoding="utf-8"))
+        common = document.get("common", {})
+        if not isinstance(common, dict):
+            raise ValueError("common must be a mapping")
+        mgmt = common.get("mgmt", {})
+        if not isinstance(mgmt, dict):
+            raise ValueError("common.mgmt must be a mapping")
+        http_policy = mgmt.get("http", {})
+        if not isinstance(http_policy, dict):
+            raise ValueError("common.mgmt.http must be a mapping")
+        raw_port = http_policy.get("port", 80)
+        port = validate_service_endpoint(
+            "192.0.2.1", raw_port, field="common.mgmt.http.port"
+        ).port
+        address = None
+        if "address" in http_policy:
+            address = validate_service_endpoint(
+                http_policy["address"], field="common.mgmt.http.address"
+            ).host
+        return port, address
+    except (OSError, UnicodeError, yaml.YAMLError, ValueError, KeyError, TypeError) as exc:
+        raise ActivationError(f"invalid project HTTP policy: {exc}") from exc
+
+
+def project_http_port(settings: Settings) -> int:
+    """Read the bound project's optional HTTP port for container activation."""
+    return project_http_policy(settings)[0]
+
+
+def project_http_listener_ips(settings: Settings, selected) -> tuple[str, ...]:
+    """Project HTTP listeners; selected.endpoint_ips remains ZTP-only."""
+    _port, address = project_http_policy(settings)
+    try:
+        return merge_http_listener_addresses(selected.endpoint_ips, address)
+    except ValueError as exc:
+        raise ActivationError(f"invalid project HTTP listener: {exc}") from exc
+
+
+def current_project_dhcp_status(settings: Settings) -> str:
+    """Bind activation to the validated current global mode, not stale files."""
+    project = settings.project_dir
+    global_yaml = project / "01-global.yaml"
+    _canonical_regular_within(global_yaml, project, "project global YAML")
+    try:
+        document = safe_load_global_yaml(global_yaml.read_text(encoding="utf-8"))
+        raw = document["common"]["mgmt"]["dhcp-server"]["status"]
+    except (OSError, UnicodeError, yaml.YAMLError, ValueError, KeyError, TypeError) as exc:
+        raise ActivationError(
+            f"invalid common.mgmt.dhcp-server.status: {exc}"
+        ) from exc
+    status = str(raw or "").strip().casefold()
+    if status not in {"enabled", "disabled"}:
+        raise ActivationError(
+            "common.mgmt.dhcp-server.status must be enabled or disabled"
+        )
+    return status
+
+
+def render_apache_listener_config(
+    endpoint_ips: Iterable[str], *, port: int = 80,
+) -> str:
+    endpoints: list[ServiceEndpoint] = []
     for raw in endpoint_ips:
-        raw_text = str(raw)
         try:
-            parsed = ipaddress.IPv4Address(raw_text)
-        except ipaddress.AddressValueError as exc:
+            endpoint = validate_service_endpoint(
+                raw, port, field="Apache service IPv4"
+            )
+        except ValueError as exc:
             raise ActivationError(f"invalid Apache service IPv4: {raw!r}") from exc
-        address = str(parsed)
-        if (
-            raw_text != address
-            or parsed.is_unspecified
-            or parsed.is_multicast
-            or int(parsed) == 0xFFFFFFFF
-        ):
-            raise ActivationError(f"invalid Apache service IPv4: {raw!r}")
-        if address in addresses:
-            raise ActivationError(f"duplicate Apache service IPv4: {address}")
-        addresses.append(address)
+        if endpoint in endpoints:
+            raise ActivationError(
+                f"duplicate Apache service IPv4: {endpoint.host}"
+            )
+        endpoints.append(endpoint)
     lines = [
         "# Generated by /opt/http-ztp/activate.py; do not edit.",
         "# Exact host-network listeners only; wildcard binds are forbidden.",
     ]
-    for address in addresses:
-        lines.append(f"Listen {address}:80")
-    for address in addresses:
-        lines.extend((
+    for endpoint in endpoints:
+        lines.append(endpoint.listen_directive)
+    for endpoint in endpoints:
+        virtual_host = [
             "",
-            f"<VirtualHost {address}:80>",
-            f"    ServerName {address}",
+            f"<VirtualHost {endpoint.host}:{endpoint.port}>",
+            f"    ServerName {endpoint.host}",
             "    DocumentRoot /var/www/html",
             "    ErrorLog /var/log/apache2/error.log",
             "    CustomLog /var/log/apache2/access.log combined",
-            "</VirtualHost>",
-        ))
+        ]
+        if endpoint.port != 80:
+            virtual_host.append(f"    SetEnv CONTROL_SERVICE_PORT {endpoint.port}")
+        virtual_host.append("</VirtualHost>")
+        lines.extend(virtual_host)
     lines.append("")
     return "\n".join(lines)
 
@@ -2144,8 +2212,27 @@ def ensure_docker_deployment_owner(
 
 def observe_runtime(settings: Settings, runner=subprocess.run):
     """Build the current plan and rendered config without changing any file."""
+    port, address = project_http_policy(settings)
     selected, links, addresses, runtime = build_runtime_plan(settings, runner)
-    apache = render_apache_listener_config(selected.endpoint_ips)
+    if address is not None:
+        try:
+            owners = runtime.inspect_http_listener_owners(
+                address, link_snapshot=links, address_snapshot=addresses,
+            )
+            validate_http_listener_ownership(
+                address, owners, allowlist=settings.allowlist,
+            )
+        except Exception as exc:
+            raise ActivationError(
+                f"invalid HTTP listener ownership: {exc}"
+            ) from exc
+    try:
+        listener_ips = merge_http_listener_addresses(
+            selected.endpoint_ips, address
+        )
+    except ValueError as exc:
+        raise ActivationError(f"invalid project HTTP listener: {exc}") from exc
+    apache = render_apache_listener_config(listener_ips, port=port)
     payload = runtime_plan_payload(settings, selected, links, addresses)
     payload["apache_listener_sha256"] = hashlib.sha256(
         apache.encode("utf-8")
@@ -2155,8 +2242,16 @@ def observe_runtime(settings: Settings, runner=subprocess.run):
 
 def prepare_runtime(settings: Settings, runner=subprocess.run):
     """Explicitly publish a freshly observed plan and exact Apache listeners."""
-    ensure_runtime_directories(settings)
-    selected, runtime, payload, apache = observe_runtime(settings, runner)
+    _port, address = project_http_policy(settings)
+    if address is None:
+        # Keep the existing ZTP-only preparation order. An independently
+        # declared HTTP address additionally requires prewrite ownership
+        # admission, including before directory creation.
+        ensure_runtime_directories(settings)
+        selected, runtime, payload, apache = observe_runtime(settings, runner)
+    else:
+        selected, runtime, payload, apache = observe_runtime(settings, runner)
+        ensure_runtime_directories(settings)
     _atomic_write(settings.apache_listeners, apache, 0o644)
     _atomic_write(
         settings.runtime_plan,
@@ -2166,11 +2261,17 @@ def prepare_runtime(settings: Settings, runner=subprocess.run):
     return selected, runtime, payload
 
 
-def expected_services(selected) -> Tuple[str, ...]:
+def expected_services(
+    selected, *, dhcp_status: str = "enabled",
+    http_listener_ips: Iterable[str] | None = None,
+) -> Tuple[str, ...]:
+    if dhcp_status not in {"enabled", "disabled"}:
+        raise ActivationError("invalid DHCP status for service plan")
     services = []
-    if selected.endpoint_ips:
+    listeners = selected.endpoint_ips if http_listener_ips is None else http_listener_ips
+    if tuple(listeners):
         services.append("apache2")
-    if selected.listener_names:
+    if selected.listener_names and dhcp_status == "enabled":
         services.append("dhcpd")
     if selected.endpoint_ips and selected.listener_names:
         services.extend(("ztp-monitor", "switch-collection", "manual-ztp"))
@@ -2446,6 +2547,37 @@ def validate_parent_release(settings: Settings, release_manifest: Path) -> dict:
     """Bind an activation marker to current inputs and child release manifests."""
     validate_project_mount(settings)
     parent = _load_json_object(release_manifest, "parent current release")
+    schema = parent.get("schema_version")
+    if (
+        schema not in {1, 2}
+        or parent.get("validation") != "passed"
+        or parent.get("project") != settings.project_name
+    ):
+        raise ActivationError("parent current release schema/project/validation is invalid")
+    if schema == 1:
+        if "dhcp_status" in parent:
+            raise ActivationError("legacy parent release cannot claim DHCP status")
+        parent_dhcp_status = "enabled"
+    else:
+        parent_dhcp_status = parent.get("dhcp_status")
+        if parent_dhcp_status not in {"enabled", "disabled"}:
+            raise ActivationError("parent current release DHCP status is invalid")
+    basis_keys = (
+        "project", "deployment_scope", "switch_scope", "inputs",
+        "input_sources", "components", "inventory",
+    )
+    if any(key not in parent for key in basis_keys):
+        raise ActivationError("parent current release basis is incomplete")
+    release_basis = {key: parent[key] for key in basis_keys}
+    if schema == 2:
+        release_basis["dhcp_status"] = parent_dhcp_status
+    calculated_release_id = hashlib.sha256(json.dumps(
+        release_basis, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()[:20]
+    if parent.get("release_id") != calculated_release_id:
+        raise ActivationError("parent current release release_id does not match basis")
+    if current_project_dhcp_status(settings) != parent_dhcp_status:
+        raise ActivationError("parent current release DHCP status differs from global")
     parent_scope = str(parent.get("deployment_scope") or "")
     if parent_scope != settings.scope:
         raise ActivationError(
@@ -2498,6 +2630,11 @@ def validate_parent_release(settings: Settings, release_manifest: Path) -> dict:
     components = parent.get("components")
     if not isinstance(components, dict):
         raise ActivationError("parent current release has no components object")
+    if parent_dhcp_status == "enabled":
+        if not isinstance(components.get("dhcp"), dict):
+            raise ActivationError("enabled parent release is missing DHCP component")
+    elif "dhcp" in components:
+        raise ActivationError("disabled parent release contains DHCP component")
     component_identity = {}
     for name, raw_component in components.items():
         if name not in {"cumulus", "nvos", "dhcp"} or not isinstance(raw_component, dict):
@@ -2611,11 +2748,36 @@ def validate_parent_release(settings: Settings, release_manifest: Path) -> dict:
             raw_component.get("manifest_sha256"),
             f"parent release {name} manifest",
         )
+        if name == "dhcp":
+            # The public publication is a validated symlink; parse its
+            # already-canonical current-project regular-file target.
+            dhcp_manifest = _load_json_object(
+                expected_manifest, "parent release dhcp manifest",
+            )
+            if dhcp_manifest.get("release_id") != raw_component.get("release_id"):
+                raise ActivationError("parent release DHCP manifest release_id mismatch")
+            outputs = dhcp_manifest.get("outputs")
+            if not isinstance(outputs, dict):
+                raise ActivationError("parent release DHCP manifest has no outputs")
+            for output_name in (
+                "dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts",
+            ):
+                item = outputs.get(output_name)
+                if not isinstance(item, dict):
+                    raise ActivationError(
+                        f"parent release DHCP manifest lacks {output_name} hash"
+                    )
+                _hash_matches(
+                    dhcp_directory / output_name,
+                    item.get("sha256"),
+                    f"parent release DHCP output {output_name}",
+                )
         component_identity[name] = {
             "release_id": str(raw_component.get("release_id") or ""),
             "manifest_sha256": str(raw_component.get("manifest_sha256") or ""),
         }
     return {
+        "parent_dhcp_status": parent_dhcp_status,
         "parent_release_sha256": sha256_path(release_manifest),
         "parent_inputs": dict(sorted((str(k), str(v)) for k, v in inputs.items())),
         "parent_components": component_identity,
@@ -2917,22 +3079,29 @@ def build_activation_marker(
         raise ActivationError(
             "published P2P workbook does not match parent release input"
         )
-    return {
+    dhcp_status = release_identity["parent_dhcp_status"]
+    marker = {
         "schema_version": MARKER_SCHEMA,
         "activated_at": datetime.now(timezone.utc).isoformat(),
         "project": settings.project_name,
         "scope": settings.scope,
         "switch_scope": settings.switch_scope,
         "mini": settings.mini,
+        "dhcp_status": dhcp_status,
         "subnet_sha256": sha256_path(subnet),
-        "dhcp_config_sha256": sha256_path(dhcp),
         "release_manifest_sha256": sha256_path(release),
-        "services": list(expected_services(selected)),
+        "services": list(expected_services(
+            selected, dhcp_status=dhcp_status,
+            http_listener_ips=project_http_listener_ips(settings, selected),
+        )),
         "published_runtime": published_runtime_identity(settings),
         "published_links": published_links,
         "runtime_source": validate_image_source_contract(settings),
         **release_identity,
     }
+    if dhcp_status == "enabled":
+        marker["dhcp_config_sha256"] = sha256_path(dhcp)
+    return marker
 
 
 def validate_activation_marker(
@@ -2957,14 +3126,19 @@ def validate_activation_marker(
     except ActivationError as exc:
         return False, str(exc)
     for key in (
-        "schema_version", "project", "scope", "switch_scope", "mini",
+        "schema_version", "project", "scope", "switch_scope", "mini", "dhcp_status",
         "subnet_sha256",
-        "dhcp_config_sha256", "release_manifest_sha256", "services",
-        "parent_release_sha256", "parent_inputs", "parent_components",
+        "release_manifest_sha256", "services",
+        "parent_release_sha256", "parent_dhcp_status", "parent_inputs", "parent_components",
         "published_runtime", "published_links", "runtime_source",
     ):
         if marker.get(key) != expected[key]:
             return False, f"activation marker {key} does not match current runtime"
+    if expected["dhcp_status"] == "enabled":
+        if marker.get("dhcp_config_sha256") != expected["dhcp_config_sha256"]:
+            return False, "activation marker dhcp_config_sha256 does not match current runtime"
+    elif "dhcp_config_sha256" in marker:
+        return False, "disabled activation marker contains stale DHCP hash"
     return True, "active runtime matches current inputs"
 
 
@@ -3238,8 +3412,8 @@ def exec_managed_service(name: str, settings: Settings) -> None:
     selected, runtime, payload, expected_apache = observe_runtime(settings)
     require_service_start_authority(name, settings, selected)
     if name == "apache2":
-        if not selected.endpoint_ips:
-            raise ActivationError("refuse Apache start without a ZTP service endpoint")
+        if not project_http_listener_ips(settings, selected):
+            raise ActivationError("refuse Apache start without an HTTP listener")
         try:
             actual = settings.apache_listeners.read_text(encoding="utf-8")
         except OSError as exc:

@@ -4,6 +4,10 @@
 from __future__ import annotations
 
 import importlib.util
+import io
+import json
+from contextlib import redirect_stderr
+from datetime import datetime
 from pathlib import Path
 import sys
 import tempfile
@@ -184,6 +188,71 @@ class FullFlowIntegrationTests(unittest.TestCase):
                 scope="air",
             )
             self.assertEqual({}, claims)
+
+    def test_issue0014_invalid_timestamp_premises(self):
+        for invalid in ("zzz", "2026-13-99"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    datetime.fromisoformat(invalid)
+
+    def test_issue0014_triggered_result_without_time_reports_diagnostic(self):
+        cases = (
+            ("missing", {"hostname": "leaf01", "state": "triggered"}, True),
+            ("blank", {"hostname": "leaf01", "state": "triggered", "finished_at": "   "}, True),
+            ("not_triggered", {"hostname": "leaf01", "state": "failed"}, False),
+            ("no_hostname", {"state": "triggered", "finished_at": "   "}, False),
+        )
+        for label, payload, should_warn in cases:
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                result_path = root / "manual-trigger" / "run" / "leaf01" / "result.json"
+                result_path.parent.mkdir(parents=True)
+                result_path.write_text(json.dumps(payload), encoding="utf-8")
+                warnings = io.StringIO()
+                with redirect_stderr(warnings):
+                    markers = MONITOR.latest_manual_trigger_markers(root)
+                self.assertEqual({}, markers)
+                if should_warn:
+                    self.assertIn("[WARN]", warnings.getvalue())
+                    self.assertIn("leaf01", warnings.getvalue())
+                    self.assertIn("result.json", warnings.getvalue())
+                    self.assertRegex(warnings.getvalue(), r"(?i)(timestamp|时间戳)")
+                else:
+                    self.assertEqual("", warnings.getvalue())
+
+    def test_issue0014_both_timestamp_comparators_fail_closed_and_recover(self):
+        observed = "2026-09-24T08:45:00+08:00"
+        older = "2026-09-24T08:00:00+08:00"
+        newer = "2026-09-24T09:00:00+08:00"
+        same_instant_utc = "2026-09-24T00:45:00Z"
+        naive = "2026-09-24T08:45:00"
+        for name, compare, equal_is_new in (
+            ("after", MONITOR._timestamp_after, False),
+            ("at_or_after", MONITOR._timestamp_at_or_after, True),
+        ):
+            with self.subTest(comparator=name, case="normal_newer"):
+                self.assertTrue(compare(newer, observed))
+            with self.subTest(comparator=name, case="normal_older"):
+                self.assertFalse(compare(older, observed))
+            with self.subTest(comparator=name, case="equal"):
+                self.assertIs(equal_is_new, compare(observed, observed))
+            with self.subTest(comparator=name, case="Z_equal_instant"):
+                self.assertIs(equal_is_new, compare(same_instant_utc, observed))
+            with self.subTest(comparator=name, case="empty_stored"):
+                self.assertTrue(compare(observed, ""))
+            with self.subTest(comparator=name, case="empty_incoming"):
+                self.assertFalse(compare("", observed))
+            with self.subTest(comparator=name, case="naive_incoming"):
+                self.assertFalse(compare(naive, observed))
+            with self.subTest(comparator=name, case="naive_stored"):
+                self.assertTrue(compare(observed, naive))
+            for invalid in ("zzz", "2026-13-99"):
+                with self.subTest(comparator=name, case="invalid_stored", invalid=invalid):
+                    self.assertTrue(compare(observed, invalid))
+                with self.subTest(comparator=name, case="invalid_incoming", invalid=invalid):
+                    self.assertFalse(compare(invalid, observed))
+                with self.subTest(comparator=name, case="invalid_incoming_empty_stored", invalid=invalid):
+                    self.assertFalse(compare(invalid, ""))
 
 
 if __name__ == "__main__":

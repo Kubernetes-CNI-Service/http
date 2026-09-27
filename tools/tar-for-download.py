@@ -12,11 +12,13 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime
+import hashlib
 import os
 from pathlib import Path, PurePosixPath
+import secrets
+import stat
 import sys
 import tarfile
-import tempfile
 
 # Resolve the shared implementation relative to this command, not the caller's
 # current directory or import path.  This also keeps file-based imports used by
@@ -170,11 +172,15 @@ def create_day0_archive(args: argparse.Namespace) -> Path:
     output_label = "DAY0-Prepare-all" if args.all_day0 else project.name
     output = resolve_output(args.output, output_label, source, force=args.force)
 
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{label}-", suffix=".tar.gz", dir=output.parent
-    )
-    os.close(descriptor)
-    temporary = Path(temporary_name)
+    directory_flags = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                       | getattr(os, "O_NOFOLLOW", 0)
+                       | getattr(os, "O_CLOEXEC", 0))
+    if not getattr(os, "O_DIRECTORY", 0) or not getattr(os, "O_NOFOLLOW", 0):
+        raise ValueError("输出目录不能被安全绑定")
+    temporary_name = f".{label}-{secrets.token_hex(12)}.tar.gz"
+    descriptor = None
+    published_size = None
+    published_sha256 = None
     projects_for_keys = sources
     managed_names = {
         (Path("DAY0-Prepare") / path.relative_to(package_core.DAY0)).as_posix()
@@ -212,8 +218,22 @@ def create_day0_archive(args: argparse.Namespace) -> Path:
             return None
         return info
 
+    parent_fd = os.open(output.parent, directory_flags)
     try:
-        with tarfile.open(temporary, "w:gz", dereference=False) as archive:
+        parent = os.fstat(parent_fd)
+        visible = output.parent.lstat()
+        if (not stat.S_ISDIR(parent.st_mode)
+                or (parent.st_dev, parent.st_ino) != (visible.st_dev, visible.st_ino)):
+            raise ValueError("输出目录身份已变化")
+        descriptor = os.open(
+            temporary_name,
+            os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+            | getattr(os, "O_CLOEXEC", 0),
+            0o600, dir_fd=parent_fd,
+        )
+        with os.fdopen(os.dup(descriptor), "wb") as stream, tarfile.open(
+            fileobj=stream, mode="w:gz", dereference=False,
+        ) as archive:
             if args.all_day0:
                 archive.add(package_core.DAY0, arcname="DAY0-Prepare", recursive=False)
                 for item in sources:
@@ -233,7 +253,16 @@ def create_day0_archive(args: argparse.Namespace) -> Path:
                 placeholder.mtime = int(datetime.now().timestamp())
                 placeholder.size = 0
                 archive.addfile(placeholder)
-        with tarfile.open(temporary, "r:gz") as archive:
+        os.fsync(descriptor)
+        stage = os.fstat(descriptor)
+        named_stage = os.stat(temporary_name, dir_fd=parent_fd, follow_symlinks=False)
+        if (not stat.S_ISREG(stage.st_mode) or stage.st_nlink != 1
+                or (stage.st_dev, stage.st_ino) != (named_stage.st_dev, named_stage.st_ino)):
+            raise ValueError("临时归档身份已变化")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        with os.fdopen(os.dup(descriptor), "rb") as stream, tarfile.open(
+            fileobj=stream, mode="r:gz",
+        ) as archive:
             names = set(archive.getnames())
             required = (
                 {f"DAY0-Prepare/{item.name}/02-devices_config.csv" for item in sources}
@@ -243,22 +272,70 @@ def create_day0_archive(args: argparse.Namespace) -> Path:
             missing = sorted(required - names)
             if missing:
                 raise RuntimeError(f"归档验证缺少：{', '.join(missing)}")
-        os.replace(temporary, output)
-        # mkstemp keeps the in-progress archive private.  Only after the
-        # archive has been reopened, validated and atomically published do we
-        # apply the operator-facing download mode requested by the workflow.
-        output.chmod(0o644)
+        visible = output.parent.lstat()
+        if (visible.st_dev, visible.st_ino) != (parent.st_dev, parent.st_ino):
+            raise ValueError("输出目录在归档校验后发生变化")
+        os.fchmod(descriptor, 0o644)
+        os.fsync(descriptor)
+        before_hash = os.fstat(descriptor)
+        published_size = before_hash.st_size
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        digest = hashlib.sha256()
+        while chunk := os.read(descriptor, 1024 * 1024):
+            digest.update(chunk)
+        published_sha256 = digest.hexdigest()
+        after_hash = os.fstat(descriptor)
+        named_stage = os.stat(temporary_name, dir_fd=parent_fd, follow_symlinks=False)
+        identity = lambda entry: (
+            entry.st_dev, entry.st_ino, entry.st_mode, entry.st_nlink,
+            entry.st_size, entry.st_mtime_ns, entry.st_ctime_ns,
+        )
+        if (after_hash.st_nlink != 1 or identity(before_hash) != identity(after_hash)
+                or identity(after_hash) != identity(named_stage)):
+            raise ValueError("临时归档身份已变化")
+        if args.force:
+            try:
+                existing = os.stat(output.name, dir_fd=parent_fd,
+                                   follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                if not stat.S_ISREG(existing.st_mode):
+                    raise ValueError("--force 只能替换普通归档文件")
+            os.replace(temporary_name, output.name,
+                       src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        else:
+            # linkat is atomic no-replace: a new file cannot silently replace
+            # an output created after resolve_output checked the path.
+            os.link(temporary_name, output.name,
+                    src_dir_fd=parent_fd, dst_dir_fd=parent_fd,
+                    follow_symlinks=False)
+            os.unlink(temporary_name, dir_fd=parent_fd)
+        os.fsync(parent_fd)
+        visible = output.parent.lstat()
+        if (visible.st_dev, visible.st_ino) != (parent.st_dev, parent.st_ino):
+            raise ValueError("输出目录在发布后发生变化")
     finally:
-        if temporary.exists():
-            temporary.unlink()
+        if descriptor is not None:
+            try:
+                named_stage = os.stat(temporary_name, dir_fd=parent_fd,
+                                      follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                stage = os.fstat(descriptor)
+                if (stage.st_dev, stage.st_ino) == (named_stage.st_dev, named_stage.st_ino):
+                    os.unlink(temporary_name, dir_fd=parent_fd)
+            os.close(descriptor)
+        os.close(parent_fd)
 
     scope_text = "all DAY0 projects" if args.all_day0 else ", ".join(map(str, sources))
     print(f"[OK] Archive scope    : {scope_text}")
     print(f"[OK] Archive          : {output}")
     source_size = sum(package_core.directory_size(item) for item in sources)
     print(f"[OK] Source size      : {package_core.human_size(source_size)}")
-    print(f"[OK] Archive size     : {package_core.human_size(output.stat().st_size)}")
-    print(f"[OK] SHA-256          : {package_core.sha256(output)}")
+    print(f"[OK] Archive size     : {package_core.human_size(published_size)}")
+    print(f"[OK] SHA-256          : {published_sha256}")
     print(f"[OK] Omitted entries  : {sum(omitted.values())}")
     for reason, count in sorted(omitted.items()):
         print(f"     {reason:<32} {count}")

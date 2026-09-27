@@ -223,6 +223,30 @@ python3 initial-setup.py --execution-mode ethernet \
   --local-ethernet-hostname NM1FL08SH04OOBLE03
 ```
 
+`--execution-mode auto` 只判断执行位置，与 REQ10C 的 `--auto` 持续配置模式不是同一开关。
+仅在 owner 授权的隔离管理服务器与测试设备上使用持续模式；它会自动启用
+`--apply --yes`，可能执行初次改密及配置变更，不能用作只读检查：
+
+```bash
+python3 initial-setup.py --auto --execution-mode management --ib-csv ib.csv --p2p p2p.xlsx
+```
+
+首次运行必须有交互终端，逐台取得 OOB Leaf 与 IB 密码并显示凭据保留风险。只要 CSV 中仍有
+未完成的 IB，脚本在自己的日志目录中创建归属当前 UID 的 `0600 auto.env`，并仅给当前
+UID 的 crontab 加一条带归属标记的十分钟任务；cron 以非阻塞 `flock` 防止重叠轮次。
+后续无 TTY 轮次只能用 `--auto --credentials-file <受控 auto.env 路径>`，文件必须是当前
+UID 拥有、单链接、非符号链接的普通 `0600` 文件。不要把密码写进命令行、crontab 或日志。
+每轮重新采集 OOB 状态；同一输入中出现终止性 Day-0 冲突时停止对该 IB 的危险重试，
+输入字节改变后重新评估。所有 CSV IB 完成时仅移除本工具拥有的 cron 行及凭据，保留
+其他 crontab 内容；项目 `02-unsetup.py` 也负责清理本工具持有的 watch 状态。
+安装、自动完成时删除以及 `02-unsetup.py` 清理都会读写**整个当前用户的 crontab**。
+操作前须由该 UID 的调度负责人盘点并保证其他所有 crontab 写者在每次读到写完成的
+整个区间完全静默，包含未来无 TTY 自动完成的时刻；无法持续保证时不得启用或清理
+watch，应停止并保留证据。`auto-crontab.lock` 仅串行化本项目的写者，不能阻止其他
+不使用该锁的进程；事后重读也不能恢复曾被并发覆盖的未知任务。
+任何真实 cron、OOB 或 IB 行为仍须按 `test_cases/REAL_ENVIRONMENT.md` 的
+`TC-REAL-REQ10C-AUTO-001` 由 owner 授权并留证；本地测试不等于真实验收。
+
 无论本机还是远端，每台 Ethernet 的 interface/link/FDB/neighbor/VRF 只采集一次，
 并独立验证 hostname。
 每台 Ethernet 分别提示一次密码；本机执行时该密码不用于登录本机，而是供首次 NVOS
@@ -235,10 +259,12 @@ Ethernet 继续处理。
 - `xdr-initial-setup-logs/initial-setup-targets.json`：CSV/P2P 解析后的设备和链路映射。如果它比 `ib.csv` 和
   P2P 文件都新、记录的源文件绝对路径一致、缓存版本有效，并且通过配套的
   `initial-setup-targets.json.sha256` 完整性校验，后续运行直接引用；否则自动重新生成。
-  校验针对原始文件字节，人工修改任意字段、空格或换行都会使缓存失效。旧缓存没有校验
-  文件时也会重新生成。可用 `--target-cache <路径>` 指定其他文件，校验文件相应追加
-  `.sha256` 后缀。即使内容没有变化，只要信息文件在校验文件之后又被手工保存或 `touch`，
-  也会重新生成。
+  缓存还绑定 CSV/P2P/管理端 `01-global.yaml` 内容摘要、生成器源码和 Python 运行时
+  身份；不能用回拨 mtime 掩盖字节变化。管理端 P1 缺失当前 global 源时失效，OOB Leaf
+  P2 可使用管理端预先烘入且仍通过来源校验的配置，不要求本地有该 YAML 或 PyYAML。
+  旧缓存没有校验文件时也会重新生成。可用 `--target-cache <路径>` 指定其他文件，校验
+  文件相应追加 `.sha256` 后缀。即使内容没有变化，只要信息文件在校验文件之后又被手工
+  保存或 `touch`，也会重新生成。
 - `xdr-initial-setup-logs/initial-setup-report.log`：每次运行覆盖，包含设备映射、MAC/IPv6、VLAN/SVI、VRF、
   当前配置、计划或执行的命令、验证结果和错误。可用 `--report <路径>` 指定其他文件。
 

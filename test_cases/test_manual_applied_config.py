@@ -2,12 +2,18 @@
 
 import hashlib
 import importlib.util
+import io
+import json
 import os
+import sys
+from contextlib import redirect_stderr
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
 import unittest
 from unittest import mock
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +30,17 @@ FEEDBACK_SPEC = importlib.util.spec_from_file_location(
 FEEDBACK = importlib.util.module_from_spec(FEEDBACK_SPEC)
 assert FEEDBACK_SPEC.loader is not None
 FEEDBACK_SPEC.loader.exec_module(FEEDBACK)
+
+MONITOR_SPEC = importlib.util.spec_from_file_location(
+    "manual_result_monitor_under_test", ROOT / "DAY0-Prepare/12-ztp-monitor.py",
+)
+MONITOR = importlib.util.module_from_spec(MONITOR_SPEC)
+assert MONITOR_SPEC.loader is not None
+sys.modules[MONITOR_SPEC.name] = MONITOR
+try:
+    MONITOR_SPEC.loader.exec_module(MONITOR)
+finally:
+    sys.modules.pop(MONITOR_SPEC.name, None)
 
 
 MAC = "02:00:00:00:00:01"
@@ -58,6 +75,115 @@ def protocol(
     return "\n".join(lines) + "\n---\n" + raw_yaml
 
 
+def dhcp_mode_release_fixture(http_root: Path, mode: str, *, legacy: bool = False):
+    """Build one independent, real parent/child/DHCP publication fixture."""
+    project = http_root / "DAY0-Prepare/site-a"
+    project.mkdir(parents=True)
+    global_data = yaml.safe_load(
+        (ROOT / "DAY0-Prepare/template/01-global.yaml").read_text(encoding="utf-8")
+    )
+    global_data["common"]["mgmt"]["dhcp-server"]["status"] = mode
+    (project / "01-global.yaml").write_text(
+        yaml.safe_dump(global_data, sort_keys=True), encoding="utf-8",
+    )
+    (project / "02-devices_config.csv").write_text("hostname,type\nleaf01,eth\n", encoding="utf-8")
+    (project / "02-dhcp-subnet_config.csv").write_text("subnet\n192.0.2.0/24\n", encoding="utf-8")
+    source = project / "fixture-p2p.xlsx"
+    source.write_bytes(b"independent-p2p-workbook-fixture\n")
+    (project / "p2p.xlsx").symlink_to(source.name)
+    input_paths = {
+        "global": project / "01-global.yaml",
+        "devices": project / "02-devices_config.csv",
+        "subnet": project / "02-dhcp-subnet_config.csv",
+        "p2p": project / "p2p.xlsx",
+    }
+    inputs = {name: hashlib.sha256(path.read_bytes()).hexdigest()
+              for name, path in input_paths.items()}
+
+    release_dir = project / "99-output-eth/release-a"
+    release_dir.mkdir(parents=True)
+    config = release_dir / "leaf01.yaml"
+    config.write_text("hostname: leaf01\n", encoding="utf-8")
+    child = release_dir / "release-manifest.json"
+    child.write_text(json.dumps({
+        "release_id": "child-a",
+        "devices": [{
+            "hostname": "leaf01", "config": config.name,
+            "config_sha256": hashlib.sha256(config.read_bytes()).hexdigest(),
+        }],
+    }) + "\n", encoding="utf-8")
+    marker = release_dir / ".published-complete"
+    marker.write_text("complete\n", encoding="utf-8")
+    (release_dir.parent / "latest").symlink_to(release_dir.name)
+    public_latest = http_root / "ztp/config/cumulus/latest_yaml"
+    public_latest.parent.mkdir(parents=True)
+    public_latest.symlink_to(release_dir)
+    digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+    components = {"cumulus": {
+        "release_id": "child-a", "release_dir": "99-output-eth/release-a",
+        "manifest_sha256": digest(child),
+        "published_marker_sha256": digest(marker),
+    }}
+
+    dhcp_dir = http_root / "ztp/config/isc-dhcp-server"
+    dhcp_dir.mkdir(parents=True)
+    outputs = {}
+    for name in ("dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts"):
+        path = dhcp_dir / name
+        path.write_text(f"stale-or-current-{name}\n", encoding="utf-8")
+        outputs[name] = {"sha256": digest(path)}
+    dhcp_manifest = project / "99-output-dhcp/dhcp-release-manifest.json"
+    dhcp_manifest.parent.mkdir(parents=True)
+    dhcp_manifest.write_text(json.dumps({
+        "release_id": "dhcp-a", "outputs": outputs,
+    }) + "\n", encoding="utf-8")
+    public_dhcp = dhcp_dir / "dhcp-release-manifest.json"
+    public_dhcp.symlink_to(os.path.relpath(dhcp_manifest, dhcp_dir))
+    if mode == "enabled":
+        components["dhcp"] = {
+            "release_id": "dhcp-a", "manifest_sha256": digest(dhcp_manifest),
+        }
+    basis = {
+        "project": "site-a", "deployment_scope": "air", "switch_scope": "eth",
+        "inputs": inputs,
+        "input_sources": {"p2p": {"path": source.name, "sha256": digest(source)}},
+        "components": components,
+        "inventory": [{
+            "hostname": "leaf01", "type": "eth",
+            "eth0_mac": DEVICE["mac_plain"], "eth1_mac": None,
+            "identity_state": "identified", "identity_source": "devices_config",
+        }],
+    }
+    if not legacy:
+        basis["dhcp_status"] = mode
+    release_id = hashlib.sha256(json.dumps(
+        basis, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()[:20]
+    parent = {
+        "schema_version": 1 if legacy else 2,
+        "validation": "passed", "release_id": release_id, **basis,
+    }
+    parent_path = project / "99-output-ztp/current-release.json"
+    parent_path.parent.mkdir(parents=True)
+    parent_path.write_text(json.dumps(parent, sort_keys=True) + "\n", encoding="utf-8")
+    return project, parent_path, parent, public_dhcp, dhcp_dir
+
+
+def load_activation_consumer():
+    """Load the actual container reader for the cross-script release witness."""
+    spec = importlib.util.spec_from_file_location(
+        "manual_dhcp_mode_activation_under_test", ROOT / "infra/docker/activate.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop(spec.name, None)
+    return module
+
+
 class ParentReleaseInputContractTests(unittest.TestCase):
     def test_optional_air_policy_is_hash_bound_and_backward_compatible(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -90,6 +216,128 @@ class ParentReleaseInputContractTests(unittest.TestCase):
             policy.unlink()
             with self.assertRaisesRegex(MANUAL.ManualZtpError, "AIR.*无法读取"):
                 MANUAL.validate_parent_release_input_hashes(project, expected)
+
+
+class DhcpModeManualActivationWorkflowTests(unittest.TestCase):
+    """One real parent is read by both manual preflight and container activation."""
+
+    def test_legacy_v1_enabled_fixture_is_valid_before_mode_extension(self):
+        activate = load_activation_consumer()
+        with tempfile.TemporaryDirectory() as directory:
+            http_root = Path(directory) / "html"
+            project, parent_path, _parent, public_dhcp, _dhcp_dir = (
+                dhcp_mode_release_fixture(http_root, "enabled", legacy=True)
+            )
+            settings = activate.Settings(
+                project_name="site-a", scope="air", switch_scope="eth",
+                http_root=http_root,
+            )
+            with mock.patch.object(MANUAL, "DHCP_RELEASE_MANIFEST", public_dhcp):
+                binding = MANUAL.validate_parent_release_binding(project, DEVICE)
+                self.assertEqual("dhcp-a", binding["dhcp_release_id"])
+            identity = activate.validate_parent_release(settings, parent_path)
+            self.assertIn("dhcp", identity["parent_components"])
+
+    def test_disabled_v2_ignores_stale_dhcp_artifacts_and_rejects_injected_binding(self):
+        activate = load_activation_consumer()
+        with tempfile.TemporaryDirectory() as directory:
+            http_root = Path(directory) / "html"
+            project, parent_path, _parent, public_dhcp, dhcp_dir = (
+                dhcp_mode_release_fixture(http_root, "disabled")
+            )
+            # These are intentionally present but stale: absence of a current
+            # DHCP component, not artifact deletion, is the published mode.
+            (dhcp_dir / "dhcpd.conf").write_text("stale-after-parent\n", encoding="utf-8")
+            public_dhcp.unlink()
+            public_dhcp.write_text("not-a-current-manifest\n", encoding="utf-8")
+            settings = activate.Settings(
+                project_name="site-a", scope="air", switch_scope="eth",
+                http_root=http_root,
+            )
+            with mock.patch.object(MANUAL, "DHCP_RELEASE_MANIFEST", public_dhcp):
+                binding = MANUAL.validate_parent_release_binding(project, DEVICE)
+                self.assertEqual("disabled", binding["dhcp_status"])
+                self.assertFalse(any(
+                    key.startswith("dhcp_") and key != "dhcp_status"
+                    for key in binding
+                ))
+                MANUAL.verify_prepared_release_binding(binding)
+                injected = dict(binding, dhcp_manifest_path=str(public_dhcp),
+                                dhcp_manifest_sha256="0" * 64)
+                with self.assertRaises(MANUAL.ManualZtpError):
+                    MANUAL.verify_prepared_release_binding(injected)
+            identity = activate.validate_parent_release(settings, parent_path)
+            self.assertNotIn("dhcp", identity["parent_components"])
+
+    def test_enabled_v2_and_legacy_v1_require_current_dhcp_outputs(self):
+        activate = load_activation_consumer()
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy), tempfile.TemporaryDirectory() as directory:
+                http_root = Path(directory) / "html"
+                project, parent_path, _parent, public_dhcp, dhcp_dir = (
+                    dhcp_mode_release_fixture(http_root, "enabled", legacy=legacy)
+                )
+                settings = activate.Settings(
+                    project_name="site-a", scope="air", switch_scope="eth",
+                    http_root=http_root,
+                )
+                with mock.patch.object(MANUAL, "DHCP_RELEASE_MANIFEST", public_dhcp):
+                    binding = MANUAL.validate_parent_release_binding(project, DEVICE)
+                    self.assertEqual("enabled", binding["dhcp_status"])
+                    self.assertEqual("dhcp-a", binding["dhcp_release_id"])
+                    MANUAL.verify_prepared_release_binding(binding)
+                identity = activate.validate_parent_release(settings, parent_path)
+                self.assertIn("dhcp", identity["parent_components"])
+                (dhcp_dir / "dhcpd.conf").write_text("drift-after-parent\n", encoding="utf-8")
+                with mock.patch.object(MANUAL, "DHCP_RELEASE_MANIFEST", public_dhcp):
+                    with self.assertRaises(MANUAL.ManualZtpError):
+                        MANUAL.validate_parent_release_binding(project, DEVICE)
+                with self.assertRaises(activate.ActivationError):
+                    activate.validate_parent_release(settings, parent_path)
+
+    def test_parent_mode_and_release_id_are_not_inferred_from_missing_artifacts(self):
+        activate = load_activation_consumer()
+        cases = (
+            ("disabled", True, None),  # v1 cannot express disabled.
+            ("enabled", False, None),  # relabel without rebuilding release_id.
+            ("disabled", False, "enabled"),  # current mode disagrees with parent.
+        )
+        for mode, legacy, status_override in cases:
+            with self.subTest(mode=mode, legacy=legacy, override=status_override), \
+                    tempfile.TemporaryDirectory() as directory:
+                http_root = Path(directory) / "html"
+                project, parent_path, parent, public_dhcp, _dhcp_dir = (
+                    dhcp_mode_release_fixture(http_root, mode, legacy=legacy)
+                )
+                if mode == "enabled" and not legacy:
+                    parent["dhcp_status"] = "disabled"
+                    parent_path.write_text(json.dumps(parent) + "\n", encoding="utf-8")
+                if status_override is not None:
+                    global_path = project / "01-global.yaml"
+                    data = yaml.safe_load(global_path.read_text(encoding="utf-8"))
+                    data["common"]["mgmt"]["dhcp-server"]["status"] = status_override
+                    global_path.write_text(yaml.safe_dump(data), encoding="utf-8")
+                    parent["inputs"]["global"] = hashlib.sha256(
+                        global_path.read_bytes()
+                    ).hexdigest()
+                    basis_keys = (
+                        "project", "deployment_scope", "switch_scope", "inputs",
+                        "input_sources", "dhcp_status", "components", "inventory",
+                    )
+                    parent["release_id"] = hashlib.sha256(json.dumps(
+                        {key: parent[key] for key in basis_keys if key in parent},
+                        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                    ).encode("utf-8")).hexdigest()[:20]
+                    parent_path.write_text(json.dumps(parent) + "\n", encoding="utf-8")
+                settings = activate.Settings(
+                    project_name="site-a", scope="air", switch_scope="eth",
+                    http_root=http_root,
+                )
+                with mock.patch.object(MANUAL, "DHCP_RELEASE_MANIFEST", public_dhcp):
+                    with self.assertRaises(MANUAL.ManualZtpError):
+                        MANUAL.validate_parent_release_binding(project, DEVICE)
+                with self.assertRaises(activate.ActivationError):
+                    activate.validate_parent_release(settings, parent_path)
 
 
 class RuntimeMacYamlWorkflowTests(unittest.TestCase):
@@ -710,6 +958,28 @@ class ReplaceConfigGuardTests(unittest.TestCase):
             ])
 
 
+class ManualCommandHelpTests(unittest.TestCase):
+    def test_public_flags_explain_environment_and_timeout_units(self):
+        public_help = " ".join(MANUAL.parser().format_help().split())
+        expected = {
+            "--air": "只选 AIR 环境设备",
+            "--prod": "只选 Production 环境设备",
+            "--connect-timeout": "SSH 建连超时（秒，默认 10）",
+            "--command-timeout": "设备命令超时（秒，默认 900）",
+            "--http-timeout": "HTTP 请求超时（秒，默认 10）",
+        }
+        for flag, explanation in expected.items():
+            with self.subTest(flag=flag):
+                self.assertIn(flag, public_help)
+                self.assertIn(explanation, public_help)
+
+    def test_reset_help_has_only_supported_public_timeout_flags(self):
+        reset_help = " ".join(MANUAL.parser("reset").format_help().split())
+        self.assertIn("SSH 建连超时（秒，默认 10）", reset_help)
+        self.assertIn("设备命令超时（秒，默认 900）", reset_help)
+        self.assertNotIn("--http-timeout", reset_help)
+
+
 class ConfirmAppliedFingerprintTests(unittest.TestCase):
     def test_replace_config_rechecks_guard_and_uses_full_replace(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -815,6 +1085,220 @@ class ConfirmAppliedFingerprintTests(unittest.TestCase):
             self.assertEqual("failed", result["state"])
             self.assertIn("ZTP 输入凭据发生变化", result["reason"])
             self.assertEqual(2, client.run.call_count)
+
+
+class ManualReceiptPublicationBoundaryTests(unittest.TestCase):
+    def test_rebind_after_visible_check_cannot_redirect_fd_relative_rename(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            visible = root / "run"
+            detached = root / "detached"
+            attacker = root / "attacker"
+            visible.mkdir()
+            attacker.mkdir()
+            target = visible / "result.json"
+            original_check = MANUAL._assert_receipt_parent_bound
+            checked = False
+
+            def rebind_after_first_check(path, parent_fd):
+                nonlocal checked
+                original_check(path, parent_fd)
+                if checked:
+                    return
+                checked = True
+                visible.rename(detached)
+                visible.symlink_to(attacker, target_is_directory=True)
+                staged = next(detached.glob(".result.json.*"))
+                (attacker / staged.name).write_bytes(staged.read_bytes())
+
+            with mock.patch.object(
+                MANUAL, "_assert_receipt_parent_bound",
+                side_effect=rebind_after_first_check,
+            ):
+                with self.assertRaisesRegex(ValueError, "publication parent changed"):
+                    MANUAL.atomic_json(target, {"state": "triggered"})
+
+            self.assertTrue(checked)
+            self.assertFalse((attacker / "result.json").exists())
+            self.assertFalse((detached / "result.json").exists())
+
+    def test_rebound_result_parent_cannot_publish_to_attacker_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            visible = root / "manual-trigger" / "rebound" / DEVICE["hostname"]
+            detached = root / "detached"
+            attacker = root / "attacker"
+            visible.mkdir(parents=True)
+            attacker.mkdir()
+            target = visible / "result.json"
+            good = root / "manual-trigger" / "good" / DEVICE["hostname"] / "result.json"
+            MANUAL.atomic_json(good, {
+                "hostname": DEVICE["hostname"], "state": "triggered",
+                "trigger_id": "good", "trigger_source": "manual_cli",
+                "finished_at": "2026-09-26T01:00:00+08:00",
+            })
+            original_fsync = os.fsync
+            moved = False
+
+            def rebind_after_receipt_flush(descriptor):
+                nonlocal moved
+                original_fsync(descriptor)
+                if moved:
+                    return
+                moved = True
+                visible.rename(detached)
+                visible.symlink_to(attacker, target_is_directory=True)
+                staged = next(detached.glob(".result.json.*"))
+                (attacker / staged.name).write_bytes(staged.read_bytes())
+
+            with mock.patch.object(
+                MANUAL.os, "fsync", side_effect=rebind_after_receipt_flush,
+            ):
+                with self.assertRaisesRegex(ValueError, "publication parent changed"):
+                    MANUAL.atomic_json(target, {
+                        "hostname": DEVICE["hostname"], "state": "triggered",
+                        "trigger_id": "rebound", "trigger_source": "manual_cli",
+                        "finished_at": "2026-09-26T01:01:00+08:00",
+                    })
+
+            self.assertTrue(moved)
+            self.assertFalse((attacker / "result.json").exists())
+            self.assertFalse((detached / "result.json").exists())
+            markers = MONITOR.latest_manual_trigger_markers(root)
+            self.assertEqual("good", markers[DEVICE["hostname"]]["trigger_id"])
+
+
+class ManualMarkerMonitorWorkflowTests(unittest.TestCase):
+    def test_issue0014_invalid_only_result_is_rejected_with_visible_diagnostic(self):
+        for label, value in (("junk", "zzz"), ("blank", "   "), ("missing", None)):
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                bad_path = (
+                    root / "manual-trigger" / "bad" / DEVICE["hostname"] / "result.json"
+                )
+                bad_path.parent.mkdir(parents=True)
+                result = {
+                    "hostname": DEVICE["hostname"], "state": "triggered",
+                    "trigger_id": "bad",
+                }
+                if value is not None:
+                    result["finished_at"] = value
+                bad_path.write_text(json.dumps(result), encoding="utf-8")
+
+                warnings = io.StringIO()
+                with redirect_stderr(warnings):
+                    markers = MONITOR.latest_manual_trigger_markers(root)
+
+                self.assertEqual({}, markers)
+                self.assertIn("[WARN]", warnings.getvalue())
+                self.assertIn(DEVICE["hostname"], warnings.getvalue())
+                self.assertIn("result.json", warnings.getvalue())
+                self.assertRegex(warnings.getvalue(), r"(?i)(timestamp|时间戳)")
+                if value:
+                    self.assertIn(value.strip(), warnings.getvalue())
+
+    def test_same_id_real_manual_result_repairs_persisted_junk_without_new_round(self):
+        """A real manual result repairs stored junk without replaying its round."""
+        valid_marker = "2026-09-24T08:45:00+08:00"
+        previous_report = {
+            "generated_at": "2026-09-24T08:00:00+08:00",
+            "devices": [{
+                "hostname": DEVICE["hostname"], "ztp_round": 2,
+                "manual_cycle_marker": "zzz", "trigger_id": "same",
+                "trigger_source": "manual_cli", "manual_operation": "ztp",
+                "cycle_started_at": "zzz",
+                "manual_command_finished_at": "zzz", "stages": {},
+            }],
+        }
+        client = mock.Mock()
+        client.args.command_timeout = 10
+        client.args.non_interactive = True
+        client.sudo_command.return_value = ("sudo -n helper", "")
+        client.run.side_effect = [
+            completed("config\n"),
+            completed("[2026-09-24T00:45:00Z] [ZTP] Cumulus provision complete\n"),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with mock.patch.object(
+                MANUAL, "connect_and_verify", return_value=("192.0.2.10", "eth0"),
+            ), mock.patch.object(MANUAL, "datetime") as clock:
+                clock.now.return_value = datetime.fromisoformat(valid_marker)
+                result = MANUAL.trigger_one(
+                    client, DEVICE, "http://192.0.2.2/ztp/ztp-bootstrap_oob.sh",
+                    root / "manual-trigger" / "same", "manual_cli", "same",
+                )
+            self.assertEqual("triggered", result["state"], result)
+            manual_markers = MONITOR.latest_manual_trigger_markers(root)
+
+        self.assertEqual({DEVICE["hostname"]}, set(manual_markers))
+        devices = [{"hostname": DEVICE["hostname"], "events": [], "stages": {}}]
+        MONITOR.assign_ztp_rounds(devices, previous_report, manual_markers)
+        self.assertEqual(2, devices[0]["ztp_round"])
+        self.assertEqual("same", devices[0]["trigger_id"])
+        self.assertEqual(valid_marker, devices[0]["manual_cycle_marker"])
+        self.assertEqual(valid_marker, devices[0]["cycle_started_at"])
+        self.assertEqual(valid_marker, devices[0]["manual_command_finished_at"])
+
+        repeated = [{"hostname": DEVICE["hostname"], "events": [], "stages": {}}]
+        MONITOR.assign_ztp_rounds(
+            repeated,
+            {"generated_at": valid_marker, "devices": devices},
+            manual_markers,
+        )
+        self.assertEqual(2, repeated[0]["ztp_round"])
+        self.assertEqual(valid_marker, repeated[0]["manual_cycle_marker"])
+
+    def test_issue0014_real_manual_result_beats_invalid_result_in_both_scan_orders(self):
+        fixed_time = datetime(2026, 9, 24, 8, 45, tzinfo=timezone(timedelta(hours=8)))
+        client = mock.Mock()
+        client.args.command_timeout = 10
+        client.args.non_interactive = True
+        client.sudo_command.return_value = ("sudo -n helper", "")
+        client.run.side_effect = [
+            completed("config\n"),
+            completed("[2026-09-24T00:45:00Z] [ZTP] Cumulus provision complete\n"),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            good_path = root / "manual-trigger" / "good" / DEVICE["hostname"] / "result.json"
+            with mock.patch.object(
+                MANUAL, "connect_and_verify", return_value=("192.0.2.10", "eth0"),
+            ), mock.patch.object(MANUAL, "datetime") as clock:
+                clock.now.return_value = fixed_time
+                result = MANUAL.trigger_one(
+                    client, DEVICE, "http://192.0.2.2/ztp/ztp-bootstrap_oob.sh",
+                    root / "manual-trigger" / "good", "manual_cli", "good",
+                )
+            self.assertEqual("triggered", result["state"], result)
+            self.assertTrue(good_path.is_file())
+            self.assertEqual(fixed_time, datetime.fromisoformat(result["finished_at"]))
+
+            bad_path = root / "manual-trigger" / "bad" / DEVICE["hostname"] / "result.json"
+            bad_path.parent.mkdir(parents=True)
+            bad_path.write_text(json.dumps({
+                "hostname": DEVICE["hostname"], "state": "triggered",
+                "finished_at": "zzz", "trigger_id": "bad",
+                "command_ztp_log_sha256": "", "command_ztp_complete": False,
+            }), encoding="utf-8")
+            original_glob = Path.glob
+            for order in ((bad_path, good_path), (good_path, bad_path)):
+                def ordered_glob(path, pattern):
+                    if path == root / "manual-trigger" and pattern == "*/*/result.json":
+                        return iter(order)
+                    return original_glob(path, pattern)
+
+                with self.subTest(first=order[0].parent.parent.name), mock.patch.object(
+                    Path, "glob", new=ordered_glob,
+                ):
+                    markers = MONITOR.latest_manual_trigger_markers(root)
+                    self.assertEqual({DEVICE["hostname"]}, set(markers))
+                    self.assertEqual("good", markers[DEVICE["hostname"]]["trigger_id"])
+                    self.assertEqual("manual_cli", markers[DEVICE["hostname"]]["trigger_source"])
+                    self.assertEqual(
+                        fixed_time,
+                        datetime.fromisoformat(markers[DEVICE["hostname"]]["timestamp"]),
+                    )
 
 
 if __name__ == "__main__":

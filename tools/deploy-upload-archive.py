@@ -82,12 +82,22 @@ def parser() -> argparse.ArgumentParser:
             "never manually extract an upload tar into the live HTTP root."
         ),
     )
-    result.add_argument("archive", type=Path, metavar="ARCHIVE")
-    result.add_argument("--root", type=Path, default=Path("/var/www/html"))
+    result.add_argument(
+        "archive", type=Path, metavar="ARCHIVE",
+        help="Path to the selected upload archive",
+    )
+    result.add_argument(
+        "--root", type=Path, default=Path("/var/www/html"),
+        help="Live installation root (default: /var/www/html)",
+    )
     result.add_argument(
         "--runtime", choices=("native", "docker"), default="native",
+        help="Target runtime used for archive verification (default: native)",
     )
-    result.add_argument("--verify-only", action="store_true")
+    result.add_argument(
+        "--verify-only", action="store_true",
+        help="Verify the archive without installing any files",
+    )
     return result
 
 
@@ -1082,7 +1092,7 @@ def next_commands(result: DeployResult, root: Path) -> tuple[str, str]:
     return (
         f"cd {root_text}",
         "sudo python3 DAY0-Prepare/11-load.py "
-        f"DAY0-Prepare/{result.project}",
+        f"DAY0-Prepare/{result.project} --host-role=management-server",
     )
 
 

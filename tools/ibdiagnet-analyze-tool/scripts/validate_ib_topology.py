@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import io
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,6 +14,14 @@ import pandas as pd
 import xlsxwriter
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "ztp/config"))
+
+from ib_topology_provenance import (
+    ProvenanceError,
+    capture_report_inputs,
+    read_cvt_provenance,
+    write_report_provenance,
+)
 
 from lib.excel import write_dataframe
 from lib.reporting import count_line, section, write_sheets
@@ -49,7 +59,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--iblinkinfo", metavar="LOG",
         help="text output captured from the iblinkinfo command",
     )
-    parser.add_argument("-p", "--p2p", required=True, metavar="FILE")
+    parser.add_argument(
+        "-p", "--p2p", required=True, metavar="FILE",
+        help="planned P2P workbook to compare with actual links",
+    )
     parser.add_argument(
         "-o", "--output", metavar="FILE",
         help="output workbook; archive input defaults beside the archive",
@@ -105,6 +118,7 @@ def _plan_counts(plan: PlanResult) -> tuple[int, int, int]:
 def _summary_frame(
     actual_input: Path, actual_format: str, p2p_path: Path, output: Path,
     plan: PlanResult, actual: ActualResult, compared: CompareResult,
+    expected_topology_sha256: str | None = None,
 ) -> pd.DataFrame:
     actual_total, actual_sw_hca, actual_sw_sw = _logical_actual_counts(actual)
     plan_total, plan_sw_hca, plan_sw_sw = _plan_counts(plan)
@@ -113,6 +127,7 @@ def _summary_frame(
         ("Actual Format", actual_format, "auto-detected by analyze.py"),
         ("P2P Format", plan.format_name, "auto-detected"),
         ("P2P Input", str(p2p_path.resolve()), ""),
+        ("Expected Topology SHA256", expected_topology_sha256 or "UNVERIFIED", "CVT input bytes"),
         ("Actual Input", str(actual_input.resolve()), ""),
         ("Output", str(output.resolve()), ""),
         ("Actual Logical Links", actual_total, "SW-HCA + unique SW-SW"),
@@ -141,11 +156,13 @@ def write_report(
     output: Path, actual_input: Path, actual_format: str, p2p_path: Path,
     plan: PlanResult, actual: ActualResult, compared: CompareResult,
     actual_details: pd.DataFrame | None = None,
+    expected_topology_sha256: str | None = None,
 ) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     workbook = xlsxwriter.Workbook(str(output))
     summary = _summary_frame(
-        actual_input, actual_format, p2p_path, output, plan, actual, compared
+        actual_input, actual_format, p2p_path, output, plan, actual, compared,
+        expected_topology_sha256,
     )
     write_dataframe(workbook, "Summary", summary)
     summary_sheet = workbook.get_worksheet_by_name("Summary")
@@ -188,6 +205,12 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(f"ERROR: port profile catalog not found: {profile_catalog}")
 
     try:
+        cvt_record = read_cvt_provenance(p2p_path)
+        cvt_bytes = p2p_path.read_bytes()
+        expected_digest = cvt_record["cvt_sha256"]
+        if hashlib.sha256(cvt_bytes).hexdigest() != expected_digest:
+            raise ProvenanceError("CVT bytes changed before parsing")
+        expected_inputs = capture_report_inputs(actual_input, profile_catalog)
         actual_details = None
         if args.iblinkinfo:
             print(f"Loading iblinkinfo input: {actual_input} ...")
@@ -198,13 +221,17 @@ def main(argv: list[str] | None = None) -> None:
                 print(f"Using ibdiagnet snapshot: {ibdir}")
                 actual = build_actual_links(ibdir)
         print(f"Loading P2P/CVT: {p2p_path} ...")
-        plan = parse_plan(p2p_path, profile_catalog)
+        plan = parse_plan(io.BytesIO(cvt_bytes), profile_catalog)
         compared = compare_links(actual.links, plan.links)
         write_report(
             output, actual_input, actual_format, p2p_path, plan, actual,
-            compared, actual_details,
+            compared, actual_details, expected_digest,
         )
-    except (OSError, ValueError, KeyError) as exc:
+        write_report_provenance(
+            output, p2p_path, actual_input, profile_catalog,
+            expected_inputs=expected_inputs,
+        )
+    except (OSError, ValueError, KeyError, ProvenanceError) as exc:
         sys.exit(f"ERROR: {exc}")
 
     actual_total, actual_sw_hca, actual_sw_sw = _logical_actual_counts(actual)

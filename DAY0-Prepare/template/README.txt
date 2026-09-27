@@ -17,11 +17,13 @@ DAY0 项目完整目录模板说明
 
 公开仓库中的本目录只包含不可直接上线的脱敏骨架：192.0.2.0/24、
 198.51.100.0/24 和 203.0.113.0/24 是文档地址，02:00 开头的 MAC 是本地管理
-示例；laptop.pub、mgmt-server.pub、镜像和 p2p.xlsx 都是空占位。所有密码值
+示例；仓库模板中的 laptop.pub、mgmt-server.pub、镜像和 p2p.xlsx 都是空骨架，
+setup 不从模板复制 laptop.pub。所有密码值
 均为锁定值 `*`。其中 Cumulus global 输入写成 `"'*'"` 是有意的：Jinja 渲染
 后生成 YAML 才会得到安全的 `hashed-password: '*'`，不能简化成裸星号。
-创建项目后必须先替换地址、MAC、凭据、公钥和所需制品；strict setup/load 会
-拒绝尚未准备完成的占位输入。
+创建项目后必须准备真实地址、MAC、凭据和所需制品；本机 setup 从本机 ~/.ssh
+选择或必要时生成项目电脑公钥，Linux 管理服务器正式 load 使用独立的管理公钥。
+未准备完成的部署输入不得进入正式发布。
 
 执行：
 
@@ -30,7 +32,7 @@ DAY0 项目完整目录模板说明
 时，setup 会递归遍历本目录：
 
   1. 在真实项目中创建这里出现的全部目录，包括空目录。
-  2. 把这里的全部缺失文件复制到真实项目。
+  2. 除 laptop.pub 外，把这里的缺失文件复制到真实项目。
   3. 真实项目中已经存在的同名文件或目录不会被覆盖。
   4. template 后续增加的文件或目录，会在项目下次 setup 时自动补齐。
 
@@ -173,12 +175,18 @@ NVOS 镜像精确支持 `nvos-amd64-<A.B.C>.bin` 和
 
 p2p.xlsx
   作用：P2P 拓扑 Excel 的固定入口，供 AIR、LLDPq 和 CVT 相关流程使用。
-        可把多个客户版本保存在 p2p/ 下，文件名须包含 p2p（忽略大小写）；setup/load
-        默认选择修改时间最新的非空版本，并把根目录空占位替换为相对软链接：
-        p2p.xlsx -----> p2p/<最新客户文件名>.xlsx
-        IP Assignment 等其他 XLSX 不参与选择。也可用
-        --p2p-file=p2p/<文件名>.xlsx 明确选择；脚本不会删除旧版本。
-        若不使用 p2p/，根目录仍须只有一个文件名含 p2p 的非空 XLSX。
+        客户版本只放项目根目录。自动选择候选须为非空普通 XLSX，文件名含 p2p
+        （忽略大小写）；显式 --p2p-file 可钉选项目根目录内任意非空普通 XLSX，
+        文件名无需包含 p2p。
+        p2p.xlsx 是上次选定版本的相对软链接，不是参与比较的候选。
+        唯一候选无需版本号；多候选各须有恰好一个 vX.Y 类版本号，再按数字版本、
+        可选有效日期、最后 mtime 排序；平局拒绝猜测。
+        无 --p2p-file 时调和到最新；--p2p-file=<根目录文件名> 可刻意钉选旧版，
+        命令会提示最新文件和改名建议。IP Assignment 不参与自动选择。
+        原有非空普通 p2p.xlsx 会先无覆盖归档为 p2p-original-时间戳[-N].xlsx；
+        无原子无覆盖移动能力时停止，绝不覆盖客户字节。项目 p2p/ 不再使用。
+        升级后旧版 current-release 即使 schema_version=1 也缺少真实来源绑定；
+        须对当前项目重新正式 load，生成同时绑定真实文件名与摘要的新记录后才能手工部署。
   可能创建的连接：
     ztp/config/cumulus/template/P2P/p2p.xlsx -----> DAY0-Prepare/<项目>/p2p.xlsx
     ztp/config/nvos/template/P2P/p2p.xlsx    -----> DAY0-Prepare/<项目>/p2p.xlsx
@@ -199,16 +207,19 @@ p2p.xlsx
   preflight 会检查新增、删除或内容漂移，防止发布后静默改变 AIR 拓扑。
 
 laptop.pub
-  作用：项目电脑 SSH Ed25519 公钥。setup 会复制到真实项目，并作为 ZTP/bootstrap 安装到交换机 authorized_keys 的公钥。
+  作用：项目电脑 SSH 公钥。本机 setup 从本机 ~/.ssh 选取或必要时生成公钥，
+        安全准备真实项目的 laptop.pub；server-delegated setup 不读取服务器 HOME，
+        而是校验项目中已有的两把不同、非空的电脑和管理服务器公钥。
   可能创建的连接：
     ztp/config/publickey/laptop.pub   -----> DAY0-Prepare/<项目>/laptop.pub
-  使用要求：创建项目后应替换为项目电脑的真实公钥。0 字节公钥只作为准备占位，setup 不会发布；Linux 正式 load 的 strict 门禁会拒绝必需的空公钥。
+  使用要求：不可将仓库模板中的 0 字节 laptop.pub 当作项目电脑身份或发布文件；
+        管理服务器 load 不得以服务器自己的 HOME 公钥覆盖电脑身份。
 
 mgmt-server.pub 和 .management-pubkeys
   作用：`mgmt-server.pub` 为空时是管理服务器公钥占位文件；非空时保存管理服务器的真实公钥。
   `.management-pubkeys` 明确记录该路径由 load 流程管理。
   macOS 配置准备会保留这个计划路径但不发布空文件；Linux 管理服务器正式 load 时使用
-  当前执行用户的 `~/.ssh/id_ed25519.pub` 注入它，再发布到 ZTP。
+  管理服务器端准备并校验公私一致的独立 Ed25519 公钥注入它，再发布到 ZTP。
   不要手工复制项目电脑公钥到这个文件，两把 key 必须不同。
 
 其他 *.pub（可选约定）
@@ -325,6 +336,7 @@ README.txt
 
 1. template 中不要放项目生成结果、真实监控数据或设备备份。
 2. 修改 template 不会覆盖既有项目的同名文件，只会补齐缺失项。
-3. 空的 .xlsx、*.pub 或 http/image/*.bin 在 --strict 校验下会阻止 setup。
+3. 严格校验会拒绝未准备的 P2P 工作簿和所需镜像；公钥按本机 setup 与 Linux load
+   的双身份流程准备、校验，不能把模板空公钥发布为运行时身份。
 4. template 和项目根目录只保留空 `.bin` 名称占位符；真实镜像只放在 http/image/ 中。
 5. 新增模板文件时，应在本 README 中补充用途、维护责任和可能的软链接。

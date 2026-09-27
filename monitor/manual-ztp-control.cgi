@@ -72,18 +72,37 @@ def post_control_guard():
         or int(address) == 0xFFFFFFFF
     ):
         return False, "invalid service address"
-    if os.environ.get("SERVER_PORT") != "80":
+    expected_port = os.environ.get("CONTROL_SERVICE_PORT", "80")
+    if (
+        re.fullmatch(r"[1-9][0-9]{0,4}", expected_port) is None
+        or int(expected_port) > 65535
+        or os.environ.get("SERVER_PORT") != expected_port
+    ):
         return False, "invalid service port"
     if os.environ.get("REQUEST_SCHEME") != "http":
         return False, "invalid request scheme"
-    if os.environ.get("HTTPS") not in {None, "off"}:
-        return False, "TLS is not enabled on the control listener"
+    https_marker = os.environ.get("HTTPS")
+    if https_marker not in {None, "off"}:
+        condition = (
+            "TLS is enabled" if https_marker.casefold() == "on"
+            else "HTTPS indicator is invalid"
+        )
+        return False, f"{condition}; control POST requires plain HTTP on port {expected_port}"
     host = os.environ.get("HTTP_HOST", "")
-    if host not in {canonical, f"{canonical}:80"}:
+    allowed_hosts = (
+        {canonical, f"{canonical}:80"}
+        if expected_port == "80" else {f"{canonical}:{expected_port}"}
+    )
+    if host not in allowed_hosts:
         return False, "invalid Host header"
     origin = os.environ.get("HTTP_ORIGIN", "")
     fetch_site = os.environ.get("HTTP_SEC_FETCH_SITE", "").strip().casefold()
-    if origin not in {f"http://{canonical}", f"http://{canonical}:80"}:
+    allowed_origins = (
+        {f"http://{canonical}", f"http://{canonical}:80"}
+        if expected_port == "80"
+        else {f"http://{canonical}:{expected_port}"}
+    )
+    if origin not in allowed_origins:
         return False, "same-origin POST is required"
     if fetch_site and fetch_site != "same-origin":
         return False, "cross-site control request rejected"

@@ -909,9 +909,12 @@ class V2VrrTests(unittest.TestCase):
             "02:00:5e:02:40:94", GENERATOR._v2_vrr_mac(fabric_two, 4094),
         )
 
-    def test_every_local_schema_v2_global_uses_the_canonical_vrr_base(self):
+    def test_repository_schema_v2_template_uses_the_canonical_vrr_base(self):
         checked = []
-        for path in sorted((ROOT / "DAY0-Prepare").glob("*/01-global.yaml")):
+        # Source regression tests bind repository fixtures, not owner-created
+        # project inputs. The selected project's load path separately rejects
+        # schema-v2 configs with a missing or invalid VRR policy.
+        for path in (ROOT / "DAY0-Prepare/template/01-global.yaml",):
             document = yaml.safe_load(path.read_text(encoding="utf-8"))
             if document.get("schema_version") != 2:
                 continue

@@ -1503,6 +1503,14 @@ class SyncDeploymentLockTests(unittest.TestCase):
 
 
 class ArchiveDeploymentLockTests(unittest.TestCase):
+    def test_guard_public_options_have_individual_help(self):
+        missing = [
+            ", ".join(action.option_strings)
+            for action in guard_module().parser()._actions
+            if action.option_strings and action.help is None
+        ]
+        self.assertEqual([], missing)
+
     def test_formal_upload_uses_one_private_archive_snapshot_after_approval(self):
         approved_guard = b"print('approved guard')\n"
         changed_guard = b"print('changed after snapshot')\n"

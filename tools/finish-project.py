@@ -9,11 +9,14 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import secrets
 import shutil
 import stat
 import subprocess
 import sys
+import tarfile
+import tempfile
 import uuid
 from typing import Any
 
@@ -23,12 +26,14 @@ if str(REPOSITORY) not in sys.path:
 
 from tools.deployment_lock import deployment_lock
 from tools.finished_bundle import (
+    BUNDLE_ROOT,
     BundleResult,
     create_finished_bundle,
     inventory_tree,
     verify_finished_bundle,
 )
 from tools import finished_project_state as state
+from tools.project_contract import require_project_eligible
 
 
 FOOTPRINT_NAME = "deployment-footprint.json"
@@ -82,6 +87,10 @@ def resolve_project(repository: Path, project_name: str) -> Path:
         or not metadata.st_nlink
     ):
         raise FinishProjectError("project must be a real direct child of DAY0-Prepare")
+    try:
+        require_project_eligible(resolved)
+    except ValueError as exc:
+        raise FinishProjectError(f"project is not eligible for finish: {exc}") from exc
     return resolved
 
 
@@ -132,37 +141,533 @@ def build_plan(
     }
 
 
-def _copy_snapshot(source: Path, destination: Path) -> None:
-    inventory_tree(source)
-    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    staging = destination.with_name(f".{destination.name}.staging")
-    if os.path.lexists(staging):
-        metadata = staging.lstat()
-        if staging.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
-            raise FinishProjectError("pre-stop staging identity is unsafe")
-        shutil.rmtree(staging)
-    if os.path.lexists(destination):
-        raise FinishProjectError("pre-stop snapshot already exists")
+def _snapshot_directory_flags() -> int:
+    if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+        raise FinishProjectError("no-follow directory operations are unavailable")
+    return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+
+
+def _same_directory_name(parent: int, name: str, descriptor: int) -> bool:
+    named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    opened = os.fstat(descriptor)
+    return (
+        stat.S_ISDIR(named.st_mode)
+        and stat.S_ISDIR(opened.st_mode)
+        and (named.st_dev, named.st_ino) == (opened.st_dev, opened.st_ino)
+    )
+
+
+def _snapshot_parent_descriptors(destination: Path) -> tuple[Path, list[int]]:
+    """Hold the state-root/transaction/components chain without following children."""
+    destination = Path(destination)
+    if (
+        destination.name != "pre-stop-project"
+        or destination.parent.name != "components"
+        or destination.parents[2].name != state.TRANSACTIONS_NAME
+        or not state.TRANSACTION_PATTERN.fullmatch(destination.parents[1].name)
+    ):
+        raise FinishProjectError("pre-stop snapshot destination is not a transaction component")
+    root = destination.parents[3]
+    descriptors: list[int] = []
     try:
-        shutil.copytree(source, staging, symlinks=True)
-        inventory_tree(staging)
-        if os.path.lexists(destination):
+        root_fd = os.open(root, _snapshot_directory_flags())
+        descriptors.append(root_fd)
+        named_root = root.lstat()
+        opened_root = os.fstat(root_fd)
+        if (
+            not stat.S_ISDIR(named_root.st_mode)
+            or (named_root.st_dev, named_root.st_ino)
+            != (opened_root.st_dev, opened_root.st_ino)
+        ):
+            raise FinishProjectError("pre-stop state root identity is unsafe")
+        for name in (
+            state.TRANSACTIONS_NAME, destination.parents[1].name, "components",
+        ):
+            parent = descriptors[-1]
+            child = os.open(name, _snapshot_directory_flags(), dir_fd=parent)
+            descriptors.append(child)
+            if not _same_directory_name(parent, name, child):
+                raise FinishProjectError("pre-stop destination directory identity is unsafe")
+        return root, descriptors
+    except OSError as exc:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+        raise FinishProjectError("pre-stop destination directory identity is unsafe") from exc
+    except BaseException:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+        raise
+
+
+def _assert_snapshot_parent_binding(root: Path, descriptors: list[int], transaction: str) -> None:
+    named = root.lstat()
+    opened = os.fstat(descriptors[0])
+    if (
+        not stat.S_ISDIR(named.st_mode)
+        or (named.st_dev, named.st_ino) != (opened.st_dev, opened.st_ino)
+        or not all(
+            _same_directory_name(parent, name, child)
+            for parent, name, child in zip(
+                descriptors, (state.TRANSACTIONS_NAME, transaction, "components"),
+                descriptors[1:],
+            )
+        )
+    ):
+        raise FinishProjectError("pre-stop destination directory identity changed")
+
+
+def _copy_snapshot_entries(source_fd: int, output_fd: int) -> None:
+    """Copy source entries by descriptor; never interpret a public output path."""
+    flags = _snapshot_directory_flags()
+    for name in sorted(os.listdir(source_fd)):
+        metadata = os.stat(name, dir_fd=source_fd, follow_symlinks=False)
+        mode = stat.S_IMODE(metadata.st_mode)
+        if stat.S_ISDIR(metadata.st_mode):
+            source_child = os.open(name, flags, dir_fd=source_fd)
+            try:
+                if not _same_directory_name(source_fd, name, source_child):
+                    raise FinishProjectError("snapshot source directory changed")
+                os.mkdir(name, 0o700, dir_fd=output_fd)
+                output_child = os.open(name, flags, dir_fd=output_fd)
+                try:
+                    _copy_snapshot_entries(source_child, output_child)
+                    os.fchmod(output_child, mode)
+                    os.fsync(output_child)
+                finally:
+                    os.close(output_child)
+            finally:
+                os.close(source_child)
+        elif stat.S_ISREG(metadata.st_mode):
+            if metadata.st_nlink != 1:
+                raise FinishProjectError("snapshot source hard link is unsafe")
+            source_file = os.open(
+                name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=source_fd,
+            )
+            try:
+                opened = os.fstat(source_file)
+                if (
+                    not stat.S_ISREG(opened.st_mode)
+                    or (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino)
+                ):
+                    raise FinishProjectError("snapshot source file changed")
+                output_file = os.open(
+                    name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                    | getattr(os, "O_CLOEXEC", 0),
+                    0o600, dir_fd=output_fd,
+                )
+                try:
+                    while chunk := os.read(source_file, 1024 * 1024):
+                        view = memoryview(chunk)
+                        while view:
+                            written = os.write(output_file, view)
+                            if written <= 0:
+                                raise FinishProjectError("snapshot file copy made no progress")
+                            view = view[written:]
+                    os.fchmod(output_file, mode)
+                    os.fsync(output_file)
+                finally:
+                    os.close(output_file)
+                after = os.fstat(source_file)
+                if (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns) != (
+                    after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns,
+                ):
+                    raise FinishProjectError("snapshot source file changed during copy")
+            finally:
+                os.close(source_file)
+        elif stat.S_ISLNK(metadata.st_mode):
+            target = os.readlink(name, dir_fd=source_fd)
+            if os.path.isabs(target):
+                raise FinishProjectError("absolute snapshot symlink cannot be relocated")
+            os.symlink(target, name, dir_fd=output_fd)
+        else:
+            raise FinishProjectError("special snapshot source entry is unsafe")
+
+
+def _snapshot_inventory_fd(root_fd: int) -> dict[str, dict[str, Any]]:
+    rows: dict[str, dict[str, Any]] = {}
+
+    def visit(parent_fd: int, prefix: str) -> None:
+        for name in sorted(os.listdir(parent_fd)):
+            relative = f"{prefix}/{name}" if prefix else name
+            metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            mode = stat.S_IMODE(metadata.st_mode)
+            if stat.S_ISDIR(metadata.st_mode):
+                child = os.open(name, _snapshot_directory_flags(), dir_fd=parent_fd)
+                try:
+                    if not _same_directory_name(parent_fd, name, child):
+                        raise FinishProjectError("snapshot directory changed during inventory")
+                    rows[relative] = {"type": "directory", "mode": mode}
+                    visit(child, relative)
+                finally:
+                    os.close(child)
+            elif stat.S_ISREG(metadata.st_mode):
+                if metadata.st_nlink != 1:
+                    raise FinishProjectError("snapshot hard link is unsafe")
+                descriptor = os.open(
+                    name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                    dir_fd=parent_fd,
+                )
+                try:
+                    opened = os.fstat(descriptor)
+                    if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+                        raise FinishProjectError("snapshot file changed during inventory")
+                    digest = hashlib.sha256()
+                    size = 0
+                    while chunk := os.read(descriptor, 1024 * 1024):
+                        digest.update(chunk)
+                        size += len(chunk)
+                    after = os.fstat(descriptor)
+                    if (opened.st_size, opened.st_mtime_ns) != (
+                        after.st_size, after.st_mtime_ns,
+                    ):
+                        raise FinishProjectError("snapshot file changed during inventory")
+                    rows[relative] = {
+                        "type": "file", "mode": mode, "size": size,
+                        "sha256": digest.hexdigest(),
+                    }
+                finally:
+                    os.close(descriptor)
+            elif stat.S_ISLNK(metadata.st_mode):
+                rows[relative] = {
+                    "type": "symlink", "mode": mode,
+                    "target": os.readlink(name, dir_fd=parent_fd),
+                }
+            else:
+                raise FinishProjectError("special snapshot entry is unsafe")
+
+    visit(root_fd, "")
+    return rows
+
+
+def _remove_snapshot_tree(parent_fd: int, name: str, expected: os.stat_result) -> None:
+    """Best-effort cleanup inside the held parent, never through its public name."""
+    directory = os.open(name, _snapshot_directory_flags(), dir_fd=parent_fd)
+    try:
+        opened = os.fstat(directory)
+        if (opened.st_dev, opened.st_ino) != (expected.st_dev, expected.st_ino):
+            raise FinishProjectError("pre-stop staging identity changed before cleanup")
+        for child_name in os.listdir(directory):
+            child = os.stat(child_name, dir_fd=directory, follow_symlinks=False)
+            if stat.S_ISDIR(child.st_mode):
+                _remove_snapshot_tree(directory, child_name, child)
+            else:
+                os.unlink(child_name, dir_fd=directory)
+        if not _same_directory_name(parent_fd, name, directory):
+            raise FinishProjectError("pre-stop staging identity changed during cleanup")
+        os.rmdir(name, dir_fd=parent_fd)
+    finally:
+        os.close(directory)
+
+
+def _copy_snapshot(source: Path, destination: Path) -> None:
+    expected = inventory_tree(source)
+    root, parents = _snapshot_parent_descriptors(destination)
+    stage_name: str | None = None
+    stage_identity: os.stat_result | None = None
+    stage_fd = -1
+    source_fd = -1
+    transaction = destination.parents[1].name
+    try:
+        _assert_snapshot_parent_binding(root, parents, transaction)
+        try:
+            os.stat(destination.name, dir_fd=parents[-1], follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise FinishProjectError("pre-stop snapshot already exists")
+        source_fd = os.open(source, _snapshot_directory_flags())
+        source_named = source.lstat()
+        source_opened = os.fstat(source_fd)
+        if (
+            not stat.S_ISDIR(source_named.st_mode)
+            or (source_named.st_dev, source_named.st_ino)
+            != (source_opened.st_dev, source_opened.st_ino)
+        ):
+            raise FinishProjectError("snapshot source root identity changed")
+        stage_name = f".{destination.name}.staging-{secrets.token_hex(12)}"
+        os.mkdir(stage_name, 0o700, dir_fd=parents[-1])
+        stage_fd = os.open(stage_name, _snapshot_directory_flags(), dir_fd=parents[-1])
+        stage_identity = os.fstat(stage_fd)
+        _copy_snapshot_entries(source_fd, stage_fd)
+        os.fsync(stage_fd)
+        if _snapshot_inventory_fd(stage_fd) != expected:
+            raise FinishProjectError("pre-stop snapshot differs from source inventory")
+        _assert_snapshot_parent_binding(root, parents, transaction)
+        if not _same_directory_name(parents[-1], stage_name, stage_fd):
+            raise FinishProjectError("pre-stop staging identity changed")
+        try:
+            os.stat(destination.name, dir_fd=parents[-1], follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
             raise FinishProjectError("pre-stop snapshot appeared during publication")
-        os.rename(staging, destination)
-        descriptor = os.open(
-            destination.parent,
-            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        os.rename(
+            stage_name, destination.name,
+            src_dir_fd=parents[-1], dst_dir_fd=parents[-1],
+        )
+        stage_name = None
+        if not _same_directory_name(parents[-1], destination.name, stage_fd):
+            raise FinishProjectError("pre-stop published snapshot identity changed")
+        os.fsync(parents[-1])
+        _assert_snapshot_parent_binding(root, parents, transaction)
+        if _snapshot_inventory_fd(stage_fd) != expected:
+            raise FinishProjectError("pre-stop published snapshot inventory changed")
+    finally:
+        pending_exception = sys.exc_info()[0] is not None
+        if stage_fd >= 0:
+            os.close(stage_fd)
+        if source_fd >= 0:
+            os.close(source_fd)
+        try:
+            if stage_name is not None and stage_identity is not None:
+                _remove_snapshot_tree(parents[-1], stage_name, stage_identity)
+        except BaseException:
+            if not pending_exception:
+                raise
+        finally:
+            for descriptor in reversed(parents):
+                os.close(descriptor)
+
+
+def _anchored_pre_stop_inventory(pre_stop: Path) -> dict[str, dict[str, Any]]:
+    """Inventory only the snapshot named by the held transaction components."""
+    root, parents = _snapshot_parent_descriptors(pre_stop)
+    try:
+        snapshot_fd = os.open(pre_stop.name, _snapshot_directory_flags(), dir_fd=parents[-1])
+        try:
+            _assert_snapshot_parent_binding(root, parents, pre_stop.parents[1].name)
+            if not _same_directory_name(parents[-1], pre_stop.name, snapshot_fd):
+                raise FinishProjectError("pre-stop snapshot identity changed")
+            result = _snapshot_inventory_fd(snapshot_fd)
+            _assert_snapshot_parent_binding(root, parents, pre_stop.parents[1].name)
+            if not _same_directory_name(parents[-1], pre_stop.name, snapshot_fd):
+                raise FinishProjectError("pre-stop snapshot identity changed")
+            return result
+        finally:
+            os.close(snapshot_fd)
+    finally:
+        for descriptor in reversed(parents):
+            os.close(descriptor)
+
+
+def _copy_file_descriptors(source_fd: int, destination_fd: int) -> None:
+    while chunk := os.read(source_fd, 1024 * 1024):
+        view = memoryview(chunk)
+        while view:
+            written = os.write(destination_fd, view)
+            if written <= 0:
+                raise FinishProjectError("finished bundle copy made no progress")
+            view = view[written:]
+    os.fsync(destination_fd)
+
+
+def _private_bundle_copy(components_fd: int, name: str, destination: Path) -> None:
+    source_fd = os.open(
+        name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+        dir_fd=components_fd,
+    )
+    try:
+        source_metadata = os.fstat(source_fd)
+        if not stat.S_ISREG(source_metadata.st_mode) or source_metadata.st_nlink != 1:
+            raise FinishProjectError("finished bundle identity is unsafe")
+        destination_fd = os.open(
+            destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
         )
         try:
-            os.fsync(descriptor)
+            _copy_file_descriptors(source_fd, destination_fd)
         finally:
-            os.close(descriptor)
-        inventory_tree(destination)
+            os.close(destination_fd)
+        after = os.fstat(source_fd)
+        if (source_metadata.st_dev, source_metadata.st_ino, source_metadata.st_size,
+                source_metadata.st_mtime_ns) != (
+            after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns,
+        ):
+            raise FinishProjectError("finished bundle changed during verification copy")
     finally:
-        if os.path.lexists(staging):
-            if staging.is_symlink() or not staging.is_dir():
-                raise FinishProjectError("pre-stop staging identity changed")
-            shutil.rmtree(staging)
+        os.close(source_fd)
+
+
+def _publish_private_bundle(source: Path, components_fd: int, name: str) -> None:
+    source_fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        output_fd = os.open(
+            name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+            | getattr(os, "O_CLOEXEC", 0),
+            0o600, dir_fd=components_fd,
+        )
+        try:
+            _copy_file_descriptors(source_fd, output_fd)
+        finally:
+            os.close(output_fd)
+        os.fsync(components_fd)
+    finally:
+        os.close(source_fd)
+
+
+def _bundled_pre_stop_inventory(bundle_path: Path) -> dict[str, dict[str, Any]]:
+    """Derive source identity from the actual nested bytes, not bundle metadata."""
+    result: dict[str, dict[str, Any]] = {}
+    names: set[str] = set()
+    with tarfile.open(bundle_path, "r:gz") as outer:
+        component = outer.extractfile(f"{BUNDLE_ROOT}/pre-stop/project.tar.gz")
+        if component is None:
+            raise FinishProjectError("finished bundle has no pre-stop project archive")
+        with component, tarfile.open(fileobj=component, mode="r:gz") as inner:
+            for member in inner:
+                path = PurePosixPath(member.name)
+                if (
+                    path.as_posix() != member.name or not path.parts
+                    or path.parts[0] != "project" or ".." in path.parts
+                    or member.name in names
+                ):
+                    raise FinishProjectError("finished bundle pre-stop path is unsafe")
+                names.add(member.name)
+                if member.name == "project":
+                    if not member.isdir():
+                        raise FinishProjectError("finished bundle pre-stop root is unsafe")
+                    continue
+                relative = PurePosixPath(*path.parts[1:]).as_posix()
+                mode = stat.S_IMODE(member.mode)
+                if member.isdir():
+                    result[relative] = {"type": "directory", "mode": mode}
+                elif member.issym():
+                    result[relative] = {
+                        "type": "symlink", "mode": mode, "target": member.linkname,
+                    }
+                elif member.isfile():
+                    stream = inner.extractfile(member)
+                    if stream is None:
+                        raise FinishProjectError("finished bundle pre-stop file is unreadable")
+                    digest = hashlib.sha256()
+                    size = 0
+                    with stream:
+                        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                            size += len(chunk)
+                            digest.update(chunk)
+                    if size != member.size:
+                        raise FinishProjectError("finished bundle pre-stop file size changed")
+                    result[relative] = {
+                        "type": "file", "mode": mode, "size": size,
+                        "sha256": digest.hexdigest(),
+                    }
+                else:
+                    raise FinishProjectError("finished bundle pre-stop entry is unsafe")
+    if "project" not in names:
+        raise FinishProjectError("finished bundle pre-stop root is missing")
+    return result
+
+
+def _build_or_verify_anchored_bundle(
+    *, pre_stop: Path, bundle_path: Path, project: Path, project_name: str,
+    transaction_id: str, runtime: str, created_at: str, repository: Path,
+    stopped: dict[str, Any], footprint: dict[str, Any],
+    deletion_plan: dict[str, Any], resumable_stage: str,
+) -> tuple[BundleResult, str, int]:
+    """Keep the public components name out of bundle reads and writes."""
+    root, parents = _snapshot_parent_descriptors(pre_stop)
+    transaction = pre_stop.parents[1].name
+    snapshot_fd = -1
+    try:
+        _assert_snapshot_parent_binding(root, parents, transaction)
+        snapshot_fd = os.open(
+            pre_stop.name, _snapshot_directory_flags(), dir_fd=parents[-1],
+        )
+        if not _same_directory_name(parents[-1], pre_stop.name, snapshot_fd):
+            raise FinishProjectError("pre-stop snapshot identity changed")
+        with tempfile.TemporaryDirectory(prefix="http-finish-held-") as temporary_name:
+            temporary = Path(temporary_name)
+            mirror = temporary / "pre-stop-project"
+            mirror.mkdir(mode=0o700)
+            mirror_fd = os.open(mirror, _snapshot_directory_flags())
+            try:
+                before = _snapshot_inventory_fd(snapshot_fd)
+                _copy_snapshot_entries(snapshot_fd, mirror_fd)
+                os.fsync(mirror_fd)
+                if _snapshot_inventory_fd(mirror_fd) != before:
+                    raise FinishProjectError("private pre-stop mirror differs from held snapshot")
+                temporary_fd = os.open(temporary, _snapshot_directory_flags())
+                try:
+                    if not _same_directory_name(
+                        temporary_fd, mirror.name, mirror_fd,
+                    ):
+                        raise FinishProjectError("private pre-stop mirror identity changed")
+                finally:
+                    os.close(temporary_fd)
+            finally:
+                os.close(mirror_fd)
+            temporary_bundle = temporary / bundle_path.name
+            try:
+                named = os.stat(
+                    bundle_path.name, dir_fd=parents[-1], follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                named = None
+            if named is None:
+                if resumable_stage != "final_delta_building":
+                    raise FinishProjectError("durable finished bundle is missing")
+                create_finished_bundle(
+                    project=project_name,
+                    transaction_id=transaction_id,
+                    runtime=runtime,
+                    created_at=created_at,
+                    pre_stop_project=mirror,
+                    post_stop_project=project,
+                    deployment_source=repository,
+                    host_state={
+                        "schema_version": 1,
+                        "project": project_name,
+                        "runtime": runtime,
+                        "runtime_stopped": True,
+                        "stop_evidence": stopped,
+                        "installed_packages_retained": True,
+                        "infra_state_retained": True,
+                    },
+                    deployment_footprint=footprint,
+                    deletion_plan=deletion_plan,
+                    output=temporary_bundle,
+                )
+            else:
+                if not stat.S_ISREG(named.st_mode) or named.st_nlink != 1:
+                    raise FinishProjectError("durable finished bundle identity is unsafe")
+                _private_bundle_copy(parents[-1], bundle_path.name, temporary_bundle)
+            verified = verify_finished_bundle(
+                temporary_bundle,
+                expected_project=project_name,
+                expected_transaction_id=transaction_id,
+                expected_runtime=runtime,
+                expected_created_at=created_at,
+            )
+            if _bundled_pre_stop_inventory(temporary_bundle) != before:
+                raise FinishProjectError(
+                    "finished bundle pre-stop differs from held snapshot"
+                )
+            bundle_sha256 = _sha256_file(temporary_bundle)
+            bundle_size = temporary_bundle.stat().st_size
+            _assert_snapshot_parent_binding(root, parents, transaction)
+            if not _same_directory_name(parents[-1], pre_stop.name, snapshot_fd):
+                raise FinishProjectError("pre-stop snapshot identity changed")
+            if named is None:
+                _publish_private_bundle(temporary_bundle, parents[-1], bundle_path.name)
+            else:
+                current = os.stat(
+                    bundle_path.name, dir_fd=parents[-1], follow_symlinks=False,
+                )
+                if (current.st_dev, current.st_ino) != (named.st_dev, named.st_ino):
+                    raise FinishProjectError("durable finished bundle identity changed")
+            _assert_snapshot_parent_binding(root, parents, transaction)
+            return (
+                BundleResult(bundle_path, verified.record_id, verified.content_sha256),
+                bundle_sha256, bundle_size,
+            )
+    finally:
+        if snapshot_fd >= 0:
+            os.close(snapshot_fd)
+        for descriptor in reversed(parents):
+            os.close(descriptor)
 
 
 def stop_runtime(
@@ -263,44 +768,20 @@ def _finish_after_runtime_stopping(
         raise FinishProjectError(
             f"cannot finalize bundle from stage {resumable_stage}"
         )
-    if not os.path.lexists(bundle_path):
-        if resumable_stage != "final_delta_building":
-            raise FinishProjectError("durable finished bundle is missing")
-        create_finished_bundle(
-            project=project_name,
-            transaction_id=transaction_id,
-            runtime=runtime,
-            created_at=created_at,
-            pre_stop_project=pre_stop,
-            post_stop_project=project,
-            deployment_source=repository,
-            host_state={
-                "schema_version": 1,
-                "project": project_name,
-                "runtime": runtime,
-                "runtime_stopped": True,
-                "stop_evidence": stopped,
-                "installed_packages_retained": True,
-                "infra_state_retained": True,
-            },
-            deployment_footprint=footprint,
-            deletion_plan=deletion_plan,
-            output=bundle_path,
-        )
-    bundle: BundleResult = verify_finished_bundle(
-        bundle_path,
-        expected_project=project_name,
-        expected_transaction_id=transaction_id,
-        expected_runtime=runtime,
-        expected_created_at=created_at,
+    bundle, bundle_sha256, bundle_size = _build_or_verify_anchored_bundle(
+        pre_stop=pre_stop, bundle_path=bundle_path, project=project,
+        project_name=project_name, transaction_id=transaction_id,
+        runtime=runtime, created_at=created_at, repository=repository,
+        stopped=stopped, footprint=footprint, deletion_plan=deletion_plan,
+        resumable_stage=resumable_stage,
     )
-    bundle_sha256 = _sha256_file(bundle.path)
+    _anchored_pre_stop_inventory(pre_stop)
     bundle_evidence = {
         "bundle_path": str(bundle.path),
         "bundle_sha256": bundle_sha256,
         "record_id": bundle.record_id,
         "content_sha256": bundle.content_sha256,
-        "bundle_size": bundle.path.stat().st_size,
+        "bundle_size": bundle_size,
     }
     if resumable_stage == "final_delta_building":
         state.advance_transaction(
@@ -320,6 +801,7 @@ def _finish_after_runtime_stopping(
             transaction_id, "bundle_finalizing", root=state_root,
         )
         resumable_stage = "bundle_finalizing"
+    _anchored_pre_stop_inventory(pre_stop)
     state.advance_transaction(
         transaction_id, "completed", root=state_root,
         evidence=bundle_evidence,
@@ -365,7 +847,7 @@ def execute_finish(
             transaction_id, "pre_stop_archiving", root=state_root,
         )
         _copy_snapshot(project, pre_stop)
-        pre_inventory = inventory_tree(pre_stop)
+        pre_inventory = _anchored_pre_stop_inventory(pre_stop)
         state.advance_transaction(
             transaction_id, "pre_stop_complete", root=state_root,
             evidence={
@@ -482,7 +964,7 @@ def execute_resume(
         if resumable_stage == "pre_stop_archiving":
             if not os.path.lexists(pre_stop):
                 _copy_snapshot(project, pre_stop)
-            pre_inventory = inventory_tree(pre_stop)
+            pre_inventory = _anchored_pre_stop_inventory(pre_stop)
             state.advance_transaction(
                 transaction_id, "pre_stop_complete", root=state_root,
                 evidence={
@@ -513,7 +995,7 @@ def execute_resume(
             raise FinishProjectError(
                 "matching finish-pending authority is required for resume"
             )
-        inventory_tree(pre_stop)
+        _anchored_pre_stop_inventory(pre_stop)
         if resumable_stage == "pending_committed":
             state.advance_transaction(
                 transaction_id, "runtime_stopping", root=state_root,
@@ -555,11 +1037,25 @@ def _new_identity() -> tuple[str, str]:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("plan", "finish", "resume"))
-    parser.add_argument("project")
-    parser.add_argument("--runtime", choices=("native", "docker"), required=True)
-    parser.add_argument("--transaction-id")
-    parser.add_argument("--runtime-only-stop", action="store_true")
+    parser.add_argument(
+        "action", choices=("plan", "finish", "resume"),
+        help="Choose plan, finish, or resume for a finished-project transaction",
+    )
+    parser.add_argument(
+        "project", help="Existing DAY0 project to finish or inspect",
+    )
+    parser.add_argument(
+        "--runtime", choices=("native", "docker"), required=True,
+        help="Choose the deployment runtime of the project (native or docker)",
+    )
+    parser.add_argument(
+        "--transaction-id",
+        help="ID of an existing transaction; required for resume, not finish",
+    )
+    parser.add_argument(
+        "--runtime-only-stop", action="store_true",
+        help="Allow runtime-only stop for a legacy project without a recorded footprint",
+    )
     return parser.parse_args(argv)
 
 

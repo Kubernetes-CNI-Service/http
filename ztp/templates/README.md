@@ -125,11 +125,12 @@ applied_at=...
 重新运行 `11-load.py`；Docker source write 后重新运行 `deploy.sh deploy`（或重新验证身份链后
 运行 `deploy-preloaded`），不得直接运行 `deploy.sh load`。
 
-维护模板后至少执行：
+维护模板后至少在项目电脑执行（Linux 项目电脑也必须显式声明 workstation；
+管理服务器不能把下列示例当成服务收敛命令）：
 
 ```bash
 bash -n ztp/templates/ztp-bootstrap.sh
-python3 DAY0-Prepare/11-load.py <project> --dry-run --skip-infra
+python3 DAY0-Prepare/11-load.py <project> --host-role=workstation --dry-run --skip-infra
 ```
 
 不要直接把模板文件名写进 DHCP；设备只应下载 load 根据 `ztp_service_ip`、global URL 前缀和

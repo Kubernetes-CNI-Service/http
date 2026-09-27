@@ -16,6 +16,7 @@ import shlex
 import shutil
 import stat
 import struct
+import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -466,6 +467,32 @@ print(TARGET + " ssh-ed25519 " + blob)
         self.assertFalse(result, (stdout, stderr))
         self.assertEqual("failed", statuses[-1][0])
         self.assertIn("ValueError", statuses[-1][1]["reason"])
+
+    def test_real_standalone_empty_backup_never_publishes_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            collector, output = self._stage_real_collector(root)
+            inventory = (collector.parent / "02-devices_config.csv").resolve()
+            inventory.write_text(
+                "hostname,type,template,eth0_ip,netmask,eth0_gw,eth0_mac,"
+                "eth1_ip,netmask,eth1_gw,eth1_mac\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [sys.executable, "-B", str(collector), "-y", "--prod"],
+                capture_output=True, text=True, timeout=30,
+                env={**os.environ, "PYTHONPYCACHEPREFIX": str(root / "pyc")},
+            )
+            published = list(output.iterdir())
+
+        markers = [
+            json.loads(line.split(" ", 1)[1])
+            for line in result.stdout.splitlines()
+            if line.startswith("[HTTP_ZTP_TASK_RESULT] ")
+        ]
+        self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertFalse(any(item.get("state") == "success" for item in markers))
+        self.assertEqual([], published, "empty backup reached publication")
 
     def test_real_worker_collector_fake_ssh_fifo_tofu_and_changed_key(self):
         secret_hash = hashlib.sha256(SECRET.encode("utf-8")).hexdigest()

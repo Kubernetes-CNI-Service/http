@@ -434,10 +434,10 @@ def _resolved_physical_links(
             dst_dev, dst_port, inv_patterns, type_order,
             port_direct, port_switch, splitter_profiles,
         )
-        if (_air_is_ztp_server(src_dev)
+        if (_air_is_retained_server(src_dev)
                 and str(src_port).strip().casefold().startswith("bmc")):
             ztp_bmc_endpoints.add((str(src_dev).casefold(), src_os.casefold()))
-        if (_air_is_ztp_server(dst_dev)
+        if (_air_is_retained_server(dst_dev)
                 and str(dst_port).strip().casefold().startswith("bmc")):
             ztp_bmc_endpoints.add((str(dst_dev).casefold(), dst_os.casefold()))
         resolved.append((src_dev, src_os, dst_dev, dst_os))
@@ -2077,10 +2077,16 @@ def _air_is_ztp_server(name):
     return "ztp-server" in str(name).casefold()
 
 
+def _air_is_retained_server(name):
+    """Retain the three owner-designated server identities in AIR."""
+    lowered = str(name).casefold()
+    return any(fragment in lowered for fragment in ("ztp-server", "bcm", "ufm"))
+
+
 def _air_drop_server_port(name, interface):
-    """Apply management-link filtering, with the ZTP server BMC exception."""
+    """Apply management-link filtering, preserving retained-server links."""
     value = str(interface).strip().casefold()
-    if _air_is_ztp_server(name):
+    if _air_is_retained_server(name):
         return value.startswith("bmc")
     return _air_management_port(interface)
 
@@ -2430,6 +2436,7 @@ def _resolve_mini_air_device_selection(
     eligible,
     *,
     ztp_server_names=(),
+    retained_server_names=(),
     mini_sampling=None,
 ):
     """Write the canonical two-section contract and return its selected nodes."""
@@ -2441,6 +2448,7 @@ def _resolve_mini_air_device_selection(
     if canonical.name != _MINI_AIR_DEVICES_NAME:
         raise ValueError(f"mini AIR canonical file must be {_MINI_AIR_DEVICES_NAME}")
     ztp_server_names = tuple(ztp_server_names)
+    retained_server_names = tuple(retained_server_names)
 
     customer, source_metadata = _mini_air_read_customer_entries(source)
     if customer is None:
@@ -2477,6 +2485,10 @@ def _resolve_mini_air_device_selection(
         add_alias(device, "ztp", str(device))
         add_alias(_mini_air_logical_name(device, mini_sampling), "ztp", str(device))
         add_alias("ztp-server", "ztp", str(device))
+    for device in retained_server_names:
+        add_alias(device, "retained", str(device))
+        add_alias(_mini_air_logical_name(device, mini_sampling),
+                  "retained", str(device))
 
     customer_network = set()
     customer_resolved = set()
@@ -2493,13 +2505,17 @@ def _resolve_mini_air_device_selection(
 
     minimum_names = sorted(
         {_mini_air_display_name(name, mini_sampling) for name in required}
-        | ({"ztp-server"} if ztp_server_names else set()),
+        | ({"ztp-server"} if ztp_server_names else set())
+        | {_mini_air_display_name(name, mini_sampling)
+           for name in retained_server_names},
         key=_natural_key,
     )
     selected_network = required | customer_network
     selected_names = sorted(
         {_mini_air_display_name(name, mini_sampling) for name in selected_network}
-        | ({"ztp-server"} if ztp_server_names else set()),
+        | ({"ztp-server"} if ztp_server_names else set())
+        | {_mini_air_display_name(name, mini_sampling)
+           for name in retained_server_names},
         key=_natural_key,
     )
     customer_additions = sorted(
@@ -2629,6 +2645,19 @@ def _air_template_node(template_nodes, node_name, explicit_name=None):
     return candidate, deepcopy(template_nodes[candidate])
 
 
+def _air_retained_server_prototype(template_nodes, name):
+    """Use an explicit server prototype, falling back to the ZTP image."""
+    lowered = str(name).casefold()
+    kinds = [kind for kind in ("bcm", "ufm") if kind in lowered]
+    if len(kinds) != 1:
+        raise ValueError(f"ambiguous AIR retained server class: {name}")
+    available = {str(key).casefold() for key in template_nodes}
+    requested = kinds[0] if kinds[0] in available else "ztp-server"
+    return _air_template_node(
+        template_nodes, name, explicit_name=requested,
+    )
+
+
 def generate_air_dot(
     lldpq_file,
     air_file,
@@ -2711,6 +2740,20 @@ def generate_air_dot(
             ztp_bmc_endpoints=ztp_bmc_endpoints,
             )
         )
+        # Servers are not inputs to network-role sampling.  Their adjacent
+        # switches are nevertheless required for the retained links to exist.
+        retained_neighbours = set()
+        for src, sp, dst, dp in edges:
+            for switch, switch_port, server, server_port in (
+                (src, sp, dst, dp), (dst, dp, src, sp),
+            ):
+                if (is_eligible_net(switch)
+                        and _air_is_retained_server(server)
+                        and (server.casefold(), server_port.casefold())
+                        not in ztp_bmc_endpoints
+                        and not _air_drop_server_port(server, server_port)):
+                    retained_neighbours.add(switch)
+        required_net_devs.update(retained_neighbours)
         source = Path(
             mini_devices_file
             or Path(os.path.realpath(DEVICES_CONFIG)).parent
@@ -2721,12 +2764,25 @@ def generate_air_dot(
             name for edge in edges for name in (edge[0], edge[2])
             if _air_is_ztp_server(name)
         }
+        retained_server_names = {
+            server for src, sp, dst, dp in edges
+            for switch, switch_port, server, server_port in (
+                (src, sp, dst, dp), (dst, dp, src, sp),
+            )
+            if (is_eligible_net(switch)
+                and _air_is_retained_server(server)
+                and not _air_is_ztp_server(server)
+                and (server.casefold(), server_port.casefold())
+                not in ztp_bmc_endpoints
+                and not _air_drop_server_port(server, server_port))
+        }
         selected_net_devs, mini_report = _resolve_mini_air_device_selection(
             source,
             canonical,
             required_net_devs,
             net_devs_seen,
             ztp_server_names=ztp_server_names,
+            retained_server_names=retained_server_names,
             mini_sampling=mini_sampling,
         )
         # The customer 04 list is an explicit, higher-priority selection
@@ -2736,7 +2792,11 @@ def generate_air_dot(
         for item in selection_reasons:
             if item["hostname"] in selected_net_devs and not item["selected"]:
                 item["selected"] = True
-                item["reason"] = "explicit 04-air-mini-devices.txt selection"
+                item["reason"] = (
+                    "minimum retained-server adjacency"
+                    if item["hostname"] in retained_neighbours
+                    else "explicit 04-air-mini-devices.txt selection"
+                )
         omitted_by_role = {}
         for device in net_devs_seen:
             if device in selected_net_devs:
@@ -2794,10 +2854,13 @@ def generate_air_dot(
                               key=lambda d: (_dev_rank(d), d.lower()))
     net_devs_ordered = [device for device in net_devs_ordered if is_net(device)]
 
-    # Classify links and retain only the real ZTP server among non-network nodes.
+    # ZTP keeps its singleton interface rewrite; other retained servers keep
+    # their own node identities and original physical endpoint names.
     sw_sw_links = []
     ztp_links = []
+    retained_links = []
     ztp_source_names = set()
+    retained_source_names = {}
     preserved_switch_ports = {
         str(device).casefold(): set(interfaces)
         for device, interfaces in (required_unconnected_ports or {}).items()
@@ -2842,6 +2905,24 @@ def generate_air_dot(
             consume_switch_port(net_device, net_port)
             continue
 
+        if _air_is_retained_server(peer_device):
+            if (peer_endpoint in ztp_bmc_endpoints or
+                    _air_drop_server_port(peer_device, peer_port)):
+                preserve_switch_port(net_device, net_port)
+                continue
+            identity = peer_device.casefold()
+            previous = retained_source_names.setdefault(identity, peer_device)
+            if previous != peer_device:
+                raise ValueError(
+                    f"AIR retained server identity is ambiguous: "
+                    f"{previous}, {peer_device}"
+                )
+            retained_links.append(
+                (net_device, net_port, peer_device, peer_port)
+            )
+            consume_switch_port(net_device, net_port)
+            continue
+
         # Ordinary servers are deliberately absent from AIR, but their switch
         # ports still define the simulated switch's exact interface inventory.
         preserve_switch_port(net_device, net_port)
@@ -2850,6 +2931,10 @@ def generate_air_dot(
     ztp_links.sort(key=lambda edge: (
         _dev_rank(edge[0]), _natural_key(edge[0]), _natural_key(edge[1]),
         _natural_key(edge[3]),
+    ))
+    retained_links.sort(key=lambda edge: (
+        _natural_key(edge[2]), _natural_key(edge[3]),
+        _natural_key(edge[0]), _natural_key(edge[1]),
     ))
     if len({name.casefold() for name in ztp_source_names}) > 1:
         raise ValueError(
@@ -2914,6 +2999,25 @@ def generate_air_dot(
             f'storage="{_AIR_ZTP_SERVER_STORAGE_GB}" oob="{ztp_oob}" '
             f'template_node="{ztp_template_name}"{ztp_mgmt_attr} ]'
         )
+        if assign_management_ips:
+            mgmt_base += 1
+    for server in sorted(retained_source_names.values(), key=_natural_key):
+        template_name, prototype = _air_retained_server_prototype(
+            template_nodes, server,
+        )
+        model = (prototype.get("labels") or {}).get("model") or "SERVERTEST"
+        node_os = str(prototype.get("os", "generic/ubuntu2204"))
+        oob = str(bool(prototype.get("oob", False))).lower()
+        mgmt_attr = ""
+        if assign_management_ips:
+            mgmt_attr = f' mgmt_ip="192.168.200.{mgmt_base}"'
+            mgmt_base += 1
+        out.append(
+            f'"{_air_hostname(server)}" [ memory="{prototype.get("memory", 4096)}" '
+            f'model="{model}" os="{node_os}" '
+            f'cpus="{prototype.get("cpu", 1)}" oob="{oob}" '
+            f'template_node="{template_name}"{mgmt_attr} ]'
+        )
     out.append("")
 
     # Switch-switch links
@@ -2933,6 +3037,12 @@ def generate_air_dot(
         out.append(
             f'"{_air_hostname(dev)}":"{sw_port}" -- '
             f'"ztp-server":"{server_interface}"'
+        )
+
+    for dev, sw_port, server, server_port in retained_links:
+        out.append(
+            f'"{_air_hostname(dev)}":"{sw_port}" -- '
+            f'"{_air_hostname(server)}":"{server_port}"'
         )
 
     out.append("")
@@ -3044,6 +3154,16 @@ def _air_json_links_from_lldpq(
                     f"{source_name}:{interface}"
                 )
             seen_source_endpoints.add(endpoint)
+
+        if any(
+            _air_is_retained_server(source_name)
+            and not _air_is_ztp_server(source_name)
+            and _air_drop_server_port(source_name, interface)
+            for source_name, interface in (
+                (left_source, left_port), (right_source, right_port)
+            )
+        ):
+            continue
 
         left_node = selected_name(left_source)
         right_node = selected_name(right_source)
@@ -3588,7 +3708,7 @@ def generate_air_json(
             explicit_name=attrs.get("template_node"),
         )
         inherit_oob_leaf = "oobofoob" in name.casefold()
-        if _air_is_ztp_server(name):
+        if _air_is_retained_server(name):
             node["cpu"] = _AIR_ZTP_SERVER_CPUS
             node["memory"] = _AIR_ZTP_SERVER_MEMORY_MB
             node["storage"] = _AIR_ZTP_SERVER_STORAGE_GB

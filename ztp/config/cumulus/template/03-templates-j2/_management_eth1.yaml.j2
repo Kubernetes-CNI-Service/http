@@ -1,0 +1,9 @@
+{% if d.has_eth1 %}
+      eth1:
+        ipv4:
+          address:
+            {{ d.eth1_ip }}: {}
+          gateway:
+            {{ d.eth1_gw }}: {}
+        type: eth
+{% endif %}

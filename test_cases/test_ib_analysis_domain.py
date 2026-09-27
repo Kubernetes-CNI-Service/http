@@ -5,12 +5,14 @@ from __future__ import annotations
 from contextlib import contextmanager, redirect_stdout
 import importlib
 import io
+import os
 from pathlib import Path
 import subprocess
 import sys
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
 import pandas as pd
 import xlsxwriter
@@ -154,6 +156,67 @@ def write_opensm_fixture(root: Path) -> tuple[Path, Path]:
         encoding="utf-8",
     )
     return config, logs
+
+
+class IbInfoLinkPublicationTests(unittest.TestCase):
+    def test_real_ib_info_links_are_relative_and_resolve_to_selected_inputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output"
+            source_dir = output / "ib-info"
+            source_dir.mkdir(parents=True)
+            first = source_dir / "ibdiagnet-first.tgz"
+            second = source_dir / "iblinkinfo-second.log"
+            first.write_bytes(b"first snapshot")
+            second.write_bytes(b"second snapshot")
+            (output / first.name).symlink_to(first)
+            with isolated_tool_imports(IBDIAGNET_ROOT) as load:
+                analyze = load("analyze")
+                with redirect_stdout(io.StringIO()):
+                    linked = analyze.link_ib_info_inputs(output)
+            self.assertEqual({first.name, second.name}, {path.name for path in linked})
+            for source in (first, second):
+                destination = output / source.name
+                self.assertFalse(destination.readlink().is_absolute())
+                self.assertEqual(source.resolve(strict=True), destination.resolve(strict=True))
+
+    def test_rebound_output_parent_cannot_replace_foreign_ib_info_link(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            safe = root / "safe"
+            moved = root / "safe-moved"
+            foreign = root / "foreign"
+            source_dir = safe / "ib-info"
+            source_dir.mkdir(parents=True)
+            foreign.mkdir()
+            source = source_dir / "ibdiagnet-fixture.tgz"
+            source.write_bytes(b"isolated snapshot")
+            destination = safe / source.name
+            destination.symlink_to(source)
+            sentinel = foreign / "original"
+            sentinel.write_bytes(b"foreign original")
+            foreign_link = foreign / source.name
+            foreign_link.symlink_to(sentinel)
+            original_symlink = os.symlink
+            injected = False
+
+            def rebind_after_stage(target, link_name, *args, **kwargs):
+                nonlocal injected
+                result = original_symlink(target, link_name, *args, **kwargs)
+                if not injected:
+                    injected = True
+                    safe.rename(moved)
+                    original_symlink(foreign, safe, target_is_directory=True)
+                    original_symlink(sentinel, foreign / Path(link_name).name)
+                return result
+
+            with isolated_tool_imports(IBDIAGNET_ROOT) as load:
+                analyze = load("analyze")
+                with mock.patch.object(analyze.os, "symlink", side_effect=rebind_after_stage):
+                    with self.assertRaisesRegex(ValueError, "output directory.*changed"):
+                        analyze.link_ib_info_inputs(safe)
+            self.assertTrue(injected)
+            self.assertEqual(sentinel.resolve(strict=True), foreign_link.resolve(strict=True))
+            self.assertEqual(b"foreign original", sentinel.read_bytes())
 
 
 class SharedIbLibraryDomainTests(unittest.TestCase):
@@ -350,6 +413,31 @@ class IbdiagnetExtensionDomainTests(unittest.TestCase):
 
 
 class IbCliModuleDomainTests(unittest.TestCase):
+    def test_ibdiagnet_operator_options_explain_their_inputs_and_outputs(self):
+        descriptions = {
+            "analyze": (
+                "ibdiagnet snapshot archive",
+                "iblinkinfo text log",
+                "planned CVT workbook",
+                "write the analysis workbook",
+                "fallback port profile catalog",
+            ),
+            "scripts.validate_ib_topology": (
+                "planned P2P workbook",
+            ),
+        }
+        with isolated_tool_imports(IBDIAGNET_ROOT) as load:
+            for module_name, expected in descriptions.items():
+                with self.subTest(module=module_name):
+                    module = load(module_name)
+                    output = io.StringIO()
+                    with redirect_stdout(output), self.assertRaises(SystemExit) as raised:
+                        module.parse_args(["--help"])
+                    self.assertEqual(0, raised.exception.code)
+                    help_text = output.getvalue()
+                    for phrase in expected:
+                        self.assertIn(phrase, help_text)
+
     def test_each_cli_module_is_imported_and_calls_domain_code(self):
         for tool_root in TOOL_ROOTS:
             with self.subTest(tool=tool_root.name), tempfile.TemporaryDirectory() as name:

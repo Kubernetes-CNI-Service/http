@@ -5,14 +5,20 @@ from __future__ import annotations
 
 import argparse
 import os
+import secrets
+import stat
 import sys
 from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT))
+sys.path.insert(0, str(PROJECT.parents[1] / "ztp/config"))
 
 from lib.snapshot import default_report_path, is_supported_archive
-from scripts.validate_ib_topology import main as validate_main
+from scripts.validate_ib_topology import (
+    DEFAULT_PROFILE_CATALOG, main as validate_main,
+)
+from ib_topology_provenance import ProvenanceError, read_report_provenance
 
 
 REPORT_SUFFIX = "-topology-validation.xlsx"
@@ -52,59 +58,97 @@ def ib_info_directories(output_directory: Path) -> list[Path]:
 
 def link_ib_info_inputs(output_directory: Path) -> list[Path]:
     """Link discovered ibdiagnet/iblinkinfo inputs into the output directory."""
+    output_directory = Path(output_directory).resolve(strict=True)
+    directory_flags = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                       | getattr(os, "O_NOFOLLOW", 0)
+                       | getattr(os, "O_CLOEXEC", 0))
+    if not getattr(os, "O_DIRECTORY", 0) or not getattr(os, "O_NOFOLLOW", 0):
+        raise ValueError("output directory cannot be safely bound")
+    parent_fd = os.open(output_directory, directory_flags)
+
+    def require_visible_parent() -> None:
+        visible = output_directory.lstat()
+        if (not stat.S_ISDIR(visible.st_mode)
+                or (visible.st_dev, visible.st_ino) != (parent.st_dev, parent.st_ino)):
+            raise ValueError("output directory identity changed")
+
     linked: list[Path] = []
-    sources: list[Path] = []
-    for ib_info in ib_info_directories(output_directory):
-        sources.extend(
-            path for path in ib_info.rglob("*")
-            if path.is_file()
-            and not path.name.startswith("._")
-            and (
-                ("ibdiagnet" in path.name.casefold() and is_supported_archive(path))
-                or is_iblinkinfo_file(path)
-            )
-        )
-
-    by_name: dict[str, Path] = {}
-    for source in sorted(set(path.resolve() for path in sources)):
-        previous = by_name.get(source.name)
-        if previous is not None and previous != source:
-            raise ValueError(
-                f"multiple ib-info inputs have the same filename {source.name!r}: "
-                f"{previous} and {source}"
-            )
-        by_name[source.name] = source
-
-    for name, source in by_name.items():
-        destination = output_directory / name
-        relative_target = Path(os.path.relpath(source, start=output_directory))
-        if destination.is_symlink():
-            try:
-                current = destination.resolve(strict=True)
-            except OSError as exc:
-                raise ValueError(f"broken ib-info link in output directory: {destination}") from exc
-            if current != source:
-                raise ValueError(
-                    f"ib-info link points to a different file: {destination} -> {current}; "
-                    f"expected {source}"
+    try:
+        parent = os.fstat(parent_fd)
+        require_visible_parent()
+        sources: list[Path] = []
+        for ib_info in ib_info_directories(output_directory):
+            sources.extend(
+                path for path in ib_info.rglob("*")
+                if path.is_file()
+                and not path.name.startswith("._")
+                and (
+                    ("ibdiagnet" in path.name.casefold() and is_supported_archive(path))
+                    or is_iblinkinfo_file(path)
                 )
-            if destination.readlink().is_absolute():
-                temporary = destination.with_name(f".{destination.name}.relative-link.tmp")
-                if temporary.exists() or temporary.is_symlink():
-                    raise ValueError(f"temporary link path already exists: {temporary}")
-                temporary.symlink_to(relative_target)
-                os.replace(temporary, destination)
-                print(f"[RELINKED] {destination} -> {relative_target}")
-        elif destination.exists():
-            if destination.resolve() != source:
+            )
+
+        by_name: dict[str, Path] = {}
+        for source in sorted(set(path.resolve() for path in sources)):
+            previous = by_name.get(source.name)
+            if previous is not None and previous != source:
                 raise ValueError(
-                    f"cannot create ib-info link because path already exists: {destination}"
+                    f"multiple ib-info inputs have the same filename {source.name!r}: "
+                    f"{previous} and {source}"
                 )
-        else:
-            destination.symlink_to(relative_target)
-            print(f"[LINKED] {destination} -> {relative_target}")
-        linked.append(destination)
-    return linked
+            by_name[source.name] = source
+
+        for name, source in by_name.items():
+            require_visible_parent()
+            destination = output_directory / name
+            relative_target = Path(os.path.relpath(source, start=output_directory))
+            if destination.is_symlink():
+                try:
+                    current = destination.resolve(strict=True)
+                except OSError as exc:
+                    raise ValueError(f"broken ib-info link in output directory: {destination}") from exc
+                if current != source:
+                    raise ValueError(
+                        f"ib-info link points to a different file: {destination} -> {current}; "
+                        f"expected {source}"
+                    )
+                if destination.readlink().is_absolute():
+                    temporary_name = f".{name}.{secrets.token_hex(8)}.relative-link.tmp"
+                    os.symlink(relative_target, temporary_name, dir_fd=parent_fd)
+                    try:
+                        require_visible_parent()
+                        os.replace(temporary_name, name,
+                                   src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+                        require_visible_parent()
+                    finally:
+                        try:
+                            if os.readlink(temporary_name, dir_fd=parent_fd) == str(relative_target):
+                                os.unlink(temporary_name, dir_fd=parent_fd)
+                        except FileNotFoundError:
+                            pass
+                    print(f"[RELINKED] {destination} -> {relative_target}")
+            elif destination.exists():
+                if destination.resolve() != source:
+                    raise ValueError(
+                        f"cannot create ib-info link because path already exists: {destination}"
+                    )
+            else:
+                os.symlink(relative_target, name, dir_fd=parent_fd)
+                try:
+                    require_visible_parent()
+                except (OSError, ValueError):
+                    try:
+                        if os.readlink(name, dir_fd=parent_fd) == str(relative_target):
+                            os.unlink(name, dir_fd=parent_fd)
+                    except FileNotFoundError:
+                        pass
+                    raise
+                print(f"[LINKED] {destination} -> {relative_target}")
+            require_visible_parent()
+            linked.append(destination)
+        return linked
+    finally:
+        os.close(parent_fd)
 
 
 def classify_inputs(paths: list[str]) -> tuple[Path, Path]:
@@ -224,11 +268,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "CVT .xlsx in either order"
         ),
     )
-    parser.add_argument("-i", "--ibdiagnet", metavar="ARCHIVE")
-    parser.add_argument("--iblinkinfo", metavar="LOG")
-    parser.add_argument("-p", "--p2p", metavar="CVT_XLSX")
-    parser.add_argument("-o", "--output", metavar="FILE")
-    parser.add_argument("--port-profiles", metavar="CSV")
+    parser.add_argument(
+        "-i", "--ibdiagnet", metavar="ARCHIVE",
+        help="ibdiagnet snapshot archive or extracted directory",
+    )
+    parser.add_argument(
+        "--iblinkinfo", metavar="LOG",
+        help="iblinkinfo text log as the actual-topology input",
+    )
+    parser.add_argument(
+        "-p", "--p2p", metavar="CVT_XLSX",
+        help="planned CVT workbook to compare with actual links",
+    )
+    parser.add_argument(
+        "-o", "--output", metavar="FILE",
+        help="write the analysis workbook to this file",
+    )
+    parser.add_argument(
+        "--port-profiles", metavar="CSV",
+        help="fallback port profile catalog for link normalization",
+    )
     args = parser.parse_args(argv)
     args.batch_dir = None
     positional_mode = bool(args.inputs)
@@ -322,22 +381,23 @@ def run_batch(args: argparse.Namespace) -> None:
             continue
         reserved_outputs.add(output)
         if output.is_file():
-            newest_input = max(workbook.stat().st_mtime_ns, snapshot.stat().st_mtime_ns)
-            if newest_input <= output.stat().st_mtime_ns:
+            try:
+                existing = read_report_provenance(output)
+                wanted_profile = Path(args.port_profiles or DEFAULT_PROFILE_CATALOG).resolve()
+                if (
+                    existing["cvt"]["path"] != str(workbook.resolve())
+                    or existing["actual"]["path"] != str(snapshot.resolve())
+                    or existing["profile"]["path"] != str(wanted_profile)
+                ):
+                    raise ProvenanceError("report was generated from different inputs")
+            except ProvenanceError as exc:
+                print(f"\n[{index}/{len(snapshots)}] Reanalyzing: {snapshot.name}")
+                print(f"[STALE] Byte provenance failed: {exc}")
+            else:
                 skipped.append(output)
                 print(f"\n[{index}/{len(snapshots)}] Skipping: {snapshot.name}")
-                print(f"[SKIPPED] Result exists and is current: {output}")
+                print(f"[SKIPPED] Result byte provenance is current: {output}")
                 continue
-            print(f"\n[{index}/{len(snapshots)}] Reanalyzing: {snapshot.name}")
-            stale_inputs = []
-            if workbook.stat().st_mtime_ns > output.stat().st_mtime_ns:
-                stale_inputs.append("CVT workbook")
-            if snapshot.stat().st_mtime_ns > output.stat().st_mtime_ns:
-                stale_inputs.append("actual-topology input")
-            print(
-                f"[STALE] Newer input(s): {', '.join(stale_inputs)}; "
-                f"result will be replaced: {output}"
-            )
         else:
             print(f"\n[{index}/{len(snapshots)}] Analyzing: {snapshot.name}")
         try:

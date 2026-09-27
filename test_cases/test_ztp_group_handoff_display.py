@@ -287,6 +287,8 @@ class EnvironmentDisplayTests(unittest.TestCase):
                 HTML, "load_ztp_status", return_value=status,
             ), mock.patch.object(
                 HTML, "load_dynamic_air_inventory", return_value=[],
+            ), mock.patch.object(
+                HTML, "DISPLAY_TZ", dt.timezone(dt.timedelta(hours=8)),
             ), mock.patch.multiple(
                 HTML,
                 ETH_INFO_DIR=empty, SPX_LINK_DIR=empty,

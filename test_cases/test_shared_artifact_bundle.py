@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -258,6 +259,20 @@ class PackagerDirectTests(unittest.TestCase):
         self.assertNotIn("--include-images", help_text)
         self.assertNotIn("--include-apps", help_text)
         self.assertNotIn("--include-firmware", help_text)
+
+    def test_public_packager_options_explain_project_scope_and_output(self):
+        parser = self.packager.parser()
+        actions = {action.dest: action for action in parser._actions}
+        expected = {
+            "project": "DAY0 project",
+            "deployment_scope": "deployment environment",
+            "switch_scope": "switch family",
+            "output": "archive output directory",
+        }
+        for destination, phrase in expected.items():
+            with self.subTest(destination=destination):
+                self.assertIn(destination, actions)
+                self.assertIn(phrase, actions[destination].help or "")
 
     def test_air_mini_uses_real_load_parser_and_selects_only_eth(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -733,6 +748,18 @@ class InstallerDirectTests(unittest.TestCase):
         help_text = parser.format_help()
         self.assertNotIn("--force", help_text)
         self.assertNotIn("--skip-verify", help_text)
+
+    def test_public_installer_options_explain_safe_destination_and_verify_only(self):
+        actions = {action.dest: action for action in self.installer.parser()._actions}
+        expected = {
+            "archive": "shared-artifact archive",
+            "root": "installation root",
+            "verify_only": "without installing",
+        }
+        for destination, phrase in expected.items():
+            with self.subTest(destination=destination):
+                self.assertIn(destination, actions)
+                self.assertIn(phrase, actions[destination].help or "")
 
     def test_verify_only_does_not_touch_live_root_or_lock(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1244,6 +1271,23 @@ class InstallerDirectTests(unittest.TestCase):
 
 class SharedArtifactWorkflowTests(unittest.TestCase):
     """Crosses the real packager and installer rather than mocking either one."""
+
+    def test_both_public_help_paths_are_read_only_and_explain_the_boundary(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            for script, required in (
+                (PACKAGER_PATH, ("deployment environment", "switch family", "archive output directory")),
+                (INSTALLER_PATH, ("shared-artifact archive", "installation root", "without installing")),
+            ):
+                with self.subTest(script=script.name):
+                    result = subprocess.run(
+                        [sys.executable, "-B", str(script), "--help"],
+                        cwd=work, capture_output=True, text=True, check=False,
+                    )
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    for phrase in required:
+                        self.assertIn(phrase, result.stdout)
+                    self.assertFalse(list(work.iterdir()), "--help created artifacts")
 
     def setUp(self):
         self.packager = load_script(PACKAGER_PATH, "shared_artifact_packager_workflow")

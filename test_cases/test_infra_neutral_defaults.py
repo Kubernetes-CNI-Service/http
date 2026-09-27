@@ -27,6 +27,17 @@ SPEC.loader.exec_module(DEPLOY)
 
 
 class InfraNeutralDefaultsTests(unittest.TestCase):
+    def test_deploy_cli_explains_both_inventory_inputs(self):
+        output = io.StringIO()
+        with mock.patch.object(sys, "argv", ["deploy_infra.py", "--help"]):
+            with redirect_stdout(output), self.assertRaises(SystemExit) as exited:
+                DEPLOY.parse_args()
+        self.assertEqual(0, exited.exception.code)
+        self.assertIn("--global-file", output.getvalue())
+        self.assertIn("global YAML", output.getvalue())
+        self.assertIn("--devices-file", output.getvalue())
+        self.assertIn("devices CSV", output.getvalue())
+
     def test_authority_is_strict_and_global_keys_replace_it(self):
         neutral_file = ROOT / "infra/infra-neutral.conf"
         self.assertEqual(
@@ -141,6 +152,7 @@ class InfraNeutralDefaultsTests(unittest.TestCase):
             with mock.patch.object(
                 DEPLOY, "parse_args", return_value=SimpleNamespace(**prepared_args)
             ), mock.patch.object(DEPLOY, "load_servers", return_value=[]), \
+                 mock.patch.object(DEPLOY, "_local_ipv4_addresses", return_value={"192.0.2.10"}), \
                  mock.patch.object(DEPLOY, "http_service_works", return_value=False), \
                  redirect_stdout(io.StringIO()):
                 self.assertEqual(0, DEPLOY.main())

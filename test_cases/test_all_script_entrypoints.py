@@ -9,12 +9,17 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 import unittest
 import warnings
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT_SUFFIXES = {".py", ".cgi", ".sh"}
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from test_cases import run_related_tests as RUNNER  # noqa: E402
+
 SOURCE_DOMAINS = (
     "DAY0-Prepare/",
     "ethernet/monitor/",
@@ -26,16 +31,6 @@ SOURCE_DOMAINS = (
     "tools/",
     "ztp/",
 )
-GENERATED_RUNTIME_SCRIPTS = {
-    "ztp/ztp-bootstrap_oob.sh",
-    "ztp/ztp-bootstrap_oobofoob.sh",
-}
-NON_SOURCE_ROOTS = {".git", ".codex", ".agents", "outputs"}
-NON_DEPLOYMENT_DIR_NAMES = {
-    "test", "tests", "test_cases", "test-results", "__pycache__",
-    ".pytest_cache", "node_modules",
-}
-
 # These operator-facing shell entrypoints implement an explicit, non-mutating
 # help path.  Keep the list deliberate: invoking an arbitrary collection or
 # bootstrap shell script merely to probe its CLI could contact a switch.
@@ -65,26 +60,35 @@ MANUAL_HELP_ENTRYPOINTS = (
 
 
 def source_scripts() -> list[Path]:
-    scripts = []
-    for path in ROOT.rglob("*"):
-        if not path.is_file() or path.suffix not in SCRIPT_SUFFIXES:
-            continue
-        relative = path.relative_to(ROOT)
-        if (
-            relative.parts[0] in NON_SOURCE_ROOTS
-            or relative.parts[0].startswith(".codex_tmp")
-            or any(part in NON_DEPLOYMENT_DIR_NAMES for part in relative.parts)
-        ):
-            continue
-        if any(part.startswith("99-output") for part in relative.parts):
-            continue
-        if relative.as_posix() in GENERATED_RUNTIME_SCRIPTS:
-            continue
-        scripts.append(path)
-    return sorted(scripts)
+    """Use the same pruned, canonical source frame as the test runner."""
+    return [ROOT / relative for relative in RUNNER.discover_source_scripts(ROOT)]
 
 
 class AllScriptEntrypointTests(unittest.TestCase):
+    def test_public_source_inventory_prunes_known_non_source_trees(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for relative in (
+                "infra/entry.py",
+                ".private/entry.py",
+                "outputs/bundle/deep/ignored.py",
+                "test_cases/deep/ignored.py",
+                "ztp/99-output-old/deep/ignored.py",
+            ):
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("pass\n", encoding="utf-8")
+            (root / "alias.py").symlink_to("infra/entry.py")
+            with mock.patch.object(sys.modules[__name__], "ROOT", root), \
+                    mock.patch.object(Path, "rglob", side_effect=AssertionError(
+                        "public source inventory traversed the whole tree"
+                    )):
+                discovered = source_scripts()
+        self.assertEqual(
+            [".private/entry.py", "alias.py", "infra/entry.py"],
+            [path.relative_to(root).as_posix() for path in discovered],
+        )
+
     def test_xdr_upgrade_readme_uses_documentation_networks(self):
         readme = (
             ROOT / "infiniband/bringup/xdr-upgrade/README.md"
@@ -236,7 +240,7 @@ class AllScriptEntrypointTests(unittest.TestCase):
         discovered = {
             path.relative_to(ROOT).as_posix() for path in source_scripts()
         }
-        self.assertTrue(GENERATED_RUNTIME_SCRIPTS.isdisjoint(discovered))
+        self.assertTrue(RUNNER.GENERATED_RUNTIME_SCRIPTS.isdisjoint(discovered))
         self.assertFalse(any(path.startswith("outputs/") for path in discovered))
         source = template.read_text(encoding="utf-8")
         self.assertIn('ZTP_SERVER="http://127.0.0.1"', source)

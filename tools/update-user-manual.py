@@ -110,7 +110,7 @@ FILE_PURPOSE_OVERRIDES = {
 OPERATOR_EXAMPLES = {
     "DAY0-Prepare/01-a-setup.py": "python3 -B DAY0-Prepare/01-a-setup.py --list-projects",
     "DAY0-Prepare/02-unsetup.py": "sudo python3 -B DAY0-Prepare/02-unsetup.py <project> --dry-run",
-    "DAY0-Prepare/11-load.py": "python3 -B DAY0-Prepare/11-load.py DAY0-Prepare/<project> --prod --switch eth",
+    "DAY0-Prepare/11-load.py": "python3 -B DAY0-Prepare/11-load.py DAY0-Prepare/<project> --host-role=workstation --prod --switch eth",
     "DAY0-Prepare/12-ztp-monitor.py": "python3 -B DAY0-Prepare/12-ztp-monitor.py <project> --watch 30 --type prod",
     "DAY0-Prepare/13-unload.py": "sudo python3 -B DAY0-Prepare/13-unload.py <project> --dry-run",
     "tools/tar-for-upload.py": "python3 -B tools/tar-for-upload.py DAY0-Prepare/<project> user@server --runtime native --deploy --exclude-apps",
@@ -464,7 +464,10 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
         example = "bash infra/docker/deploy.sh --help  # 只读查看；当前禁止作为已支持生产流程执行 deploy"
     elif is_worker or is_docker_internal or is_bootstrap:
         direct = "否；由 systemd、Supervisor、Docker entrypoint、浏览器控制面或设备 bootstrap 流程编排。"
-        environment = "所属 runtime 的受管用户、目录、网络和 capability 环境。"
+        environment = (
+            "所属 runtime 的受管用户、目录、网络和 capability 环境；以下 load 示例仅适用"
+            "于 Native 管理服务器，Docker 仍由 deploy.sh 编排。"
+        )
         scenario = "上层生命周期启动后执行后台采集、恢复、健康检查、配置应用或容器激活。"
         prerequisite = "上层入口已验证 release/receipt、路径类型、权限、锁和依赖服务；当前身份必须匹配。"
         syntax = f"由所属上层配置调用 {relative}；人工只使用对应 deploy/load/status/CGI 入口"
@@ -474,7 +477,11 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
         outputs = "受管状态、日志、配置、health 或设备应用回执；所有写入应留在规定根目录。"
         success = "上层 health/status、PID/退出码、receipt 与输出身份同时满足合同。"
         recovery = "使用上层 status/health/logs 或事务恢复；不要脱离 supervisor/systemd 手工重启子进程。"
-        example = "sudo ./infra/docker/deploy.sh status" if relative.startswith("infra/docker/") else "python3 -B DAY0-Prepare/11-load.py DAY0-Prepare/<project> --prod"
+        example = (
+            "sudo ./infra/docker/deploy.sh status"
+            if relative.startswith("infra/docker/")
+            else "python3 -B DAY0-Prepare/11-load.py DAY0-Prepare/<project> --host-role=management-server --prod"
+        )
     else:
         direct = "是，但仅在本节场景和权限边界内；先运行 --help、dry-run、verify-only、doctor 或 status（若提供）。"
         environment = {
@@ -500,6 +507,12 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
         success = "退出码 0，并且脚本打印的后置检查、receipt、状态或生成清单全部通过；仅生成文件不等于部署完成。"
         recovery = "在第一个失败处停止，保留原日志和 marker；按脚本给出的 NEXT/README 修复后从完整受支持入口重试。"
         example = OPERATOR_EXAMPLES.get(relative)
+        if relative == "DAY0-Prepare/11-load.py":
+            environment = (
+                "以下示例仅在 canonical 项目电脑运行；Linux 项目电脑须声明 "
+                "--host-role=workstation。Native 管理服务器须另用 "
+                "--host-role=management-server；Docker 由 hostctl 编排。"
+            )
         if not example:
             if is_python_main(source):
                 example = f"python3 -B {relative} --help"

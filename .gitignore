@@ -69,6 +69,8 @@ id_ecdsa*
 # explicitly rather than relying on a broad *.md rule that would capture
 # tracked documentation.
 /v3-requirements.md
+# Owner-held future-requirement input; keep it local until explicitly adopted.
+/01-global-dev.yaml
 *.pid
 *.tmp
 *.temp
@@ -155,8 +157,6 @@ core.*
 !/DAY0-Prepare/template/
 /DAY0-Prepare/template/**
 !/DAY0-Prepare/template/README.txt
-!/DAY0-Prepare/template/p2p/
-!/DAY0-Prepare/template/p2p/README.txt
 
 # setup/load-owned publication links and rendered entrypoints
 /ztp/.setup_manifest
@@ -192,7 +192,9 @@ core.*
 
 /infra/01-global.yaml
 /infra/02-devices_config.csv
-/infra/logs/
+/infra/logs
+/infra/.logs.lock
+/infra/.logs-migration.*
 
 /monitor/01-global.yaml
 /monitor/02-devices_config.csv
@@ -203,6 +205,8 @@ core.*
 /monitor/status/
 /monitor/ztp-status
 /monitor/monitor.html
+# Owner-held Cabletracker tool is not part of the V3 source checkout.
+/monitor/cabletracker-main/
 
 # ZTP data and links populated from the active DAY0 project
 /ztp/image/
@@ -288,6 +292,8 @@ core.*
 !/DAY0-Prepare/template/nvosv25-02-7002amd64.bin
 !/DAY0-Prepare/template/nvosv25-02-8008amd64.bin
 !/DAY0-Prepare/template/p2p.xlsx
+!/DAY0-Prepare/template/p2p/
+!/DAY0-Prepare/template/p2p/README.txt
 
 # Git cannot retain empty directories.  Only these zero-content sentinels are
 # public; files later written into the output trees still match **/99-output*.
@@ -306,6 +312,8 @@ core.*
 !/DAY0-Prepare/template/99-output-ib_nvl/bringup/xdr-initial-setup-logs/.gitkeep
 !/DAY0-Prepare/template/99-output-ib_nvl/bringup/xdr-upgrade-logs/
 !/DAY0-Prepare/template/99-output-ib_nvl/bringup/xdr-upgrade-logs/.gitkeep
+!/DAY0-Prepare/template/99-output-infra/
+!/DAY0-Prepare/template/99-output-infra/.gitkeep
 !/DAY0-Prepare/template/99-output-monitor/
 !/DAY0-Prepare/template/99-output-monitor/.gitkeep
 !/DAY0-Prepare/template/99-output-p2p/

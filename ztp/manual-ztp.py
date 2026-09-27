@@ -39,8 +39,11 @@ TOOLS_DIR = HTTP_ROOT / "tools"
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 from project_contract import (
+    safe_load_global_yaml,
     safe_load_all_yaml_preserving_mac,
     safe_load_yaml_preserving_mac,
+    service_url,
+    validate_service_endpoint,
     validate_ztp_url_prefix,
 )
 from deployment_lock import (
@@ -152,9 +155,40 @@ def sha256_path(path: Path) -> str:
 
 
 def validate_parent_release_input_hashes(
-    project: Path, expected_inputs: dict,
+    project: Path, expected_inputs: dict, *,
+    expected_p2p_source: dict | None = None,
 ) -> None:
     """Require current project inputs to match the committed parent release."""
+    if expected_p2p_source is not None:
+        source_name = expected_p2p_source.get("path") if isinstance(expected_p2p_source, dict) else None
+        source_digest = expected_p2p_source.get("sha256") if isinstance(expected_p2p_source, dict) else None
+        if (
+            not isinstance(expected_p2p_source, dict)
+            or set(expected_p2p_source) != {"path", "sha256"}
+            or not isinstance(source_name, str)
+            or Path(source_name).name != source_name
+            or source_name in {".", ".."}
+            or source_name.casefold() == "p2p.xlsx"
+            or source_name.startswith(("~$", "._"))
+            or "p2p" not in source_name.casefold()
+            or not source_name.casefold().endswith(".xlsx")
+            or not isinstance(source_digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", source_digest)
+            or source_digest != expected_inputs.get("p2p")
+        ):
+            raise ManualZtpError("统一 release P2P 真实来源记录无效")
+        canonical = project / "p2p.xlsx"
+        source = project / source_name
+        try:
+            if not canonical.is_symlink() or os.readlink(canonical) != source_name:
+                raise ManualZtpError("统一 release P2P 选择链接已变化")
+            source_stat = source.lstat()
+            if not stat.S_ISREG(source_stat.st_mode) or source_stat.st_size <= 0:
+                raise ManualZtpError("统一 release P2P 真实来源不是非空普通文件")
+            if sha256_path(source) != source_digest:
+                raise ManualZtpError("统一 release 输入 p2p.xlsx 已变化（真实来源）")
+        except OSError as exc:
+            raise ManualZtpError(f"统一 release P2P 真实来源无法读取: {exc}") from exc
     input_paths = {
         "global": (project / "01-global.yaml", "01-global.yaml"),
         "devices": (project / "02-devices_config.csv", "02-devices_config.csv"),
@@ -189,6 +223,25 @@ def validate_parent_release_input_hashes(
             raise ManualZtpError(
                 f"统一 release 输入 {label} 已变化；{UNIFIED_LOAD_RECOVERY}"
             )
+
+
+def current_project_dhcp_status(project: Path) -> str:
+    """Read the source-of-truth DHCP mode, never infer it from old outputs."""
+    global_yaml = project / "01-global.yaml"
+    require_bound_regular_file(global_yaml, "统一 release global YAML")
+    try:
+        document = safe_load_global_yaml(global_yaml.read_text(encoding="utf-8"))
+        raw = document["common"]["mgmt"]["dhcp-server"]["status"]
+    except (OSError, KeyError, TypeError, yaml.YAMLError, ValueError) as exc:
+        raise ManualZtpError(
+            f"无法验证 common.mgmt.dhcp-server.status: {exc}"
+        ) from exc
+    status = str(raw or "").strip().casefold()
+    if status not in {"enabled", "disabled"}:
+        raise ManualZtpError(
+            "common.mgmt.dhcp-server.status 必须是 enabled 或 disabled"
+        )
+    return status
 
 
 def require_bound_regular_file(path: Path, label: str) -> None:
@@ -256,7 +309,7 @@ def read_devices(
             device_type = str(row.get("type") or "").strip().casefold()
             if not any(str(value or "").strip() for value in values):
                 continue
-            if device_type == "server":
+            if device_type in {"server", "eth_jump"}:
                 continue
             if not hostname:
                 raise ManualZtpError(f"02-devices_config.csv 第 {lineno} 行 hostname 为空")
@@ -554,20 +607,32 @@ def validate_parent_release_binding(project: Path, device: dict) -> dict[str, st
     """
     parent_path = project / "99-output-ztp/current-release.json"
     parent = _json_object(parent_path, "统一 current-release")
+    schema = parent.get("schema_version")
     if (
-        parent.get("schema_version") != 1
+        schema not in {1, 2}
         or parent.get("validation") != "passed"
         or str(parent.get("project") or "") != project.name
     ):
         raise ManualZtpError("统一 current-release schema/project/validation 门禁未通过")
+    if schema == 1:
+        if "dhcp_status" in parent:
+            raise ManualZtpError("旧版统一 current-release 不允许 DHCP status")
+        parent_dhcp_status = "enabled"
+    else:
+        parent_dhcp_status = parent.get("dhcp_status")
+        if parent_dhcp_status not in {"enabled", "disabled"}:
+            raise ManualZtpError("统一 current-release DHCP status 无效")
     release_basis = {
         "project": parent.get("project"),
         "deployment_scope": parent.get("deployment_scope", "all"),
         "switch_scope": parent.get("switch_scope", "all"),
         "inputs": parent.get("inputs"),
+        "input_sources": parent.get("input_sources"),
         "components": parent.get("components"),
         "inventory": parent.get("inventory"),
     }
+    if schema == 2:
+        release_basis["dhcp_status"] = parent_dhcp_status
     calculated_release_id = hashlib.sha256(
         json.dumps(
             release_basis, ensure_ascii=False, sort_keys=True,
@@ -580,46 +645,59 @@ def validate_parent_release_binding(project: Path, device: dict) -> dict[str, st
     expected_inputs = parent.get("inputs")
     if not isinstance(expected_inputs, dict):
         raise ManualZtpError("统一 current-release 缺少 inputs hash")
-    validate_parent_release_input_hashes(project, expected_inputs)
+    input_sources = parent.get("input_sources")
+    if not isinstance(input_sources, dict) or set(input_sources) != {"p2p"}:
+        raise ManualZtpError("统一 current-release 缺少 P2P 真实来源")
+    validate_parent_release_input_hashes(
+        project, expected_inputs, expected_p2p_source=input_sources["p2p"],
+    )
 
     components = parent.get("components")
     if not isinstance(components, dict):
         raise ManualZtpError("统一 current-release 缺少 components")
+    if current_project_dhcp_status(project) != parent_dhcp_status:
+        raise ManualZtpError("统一 current-release DHCP status 与当前 global 不一致")
 
     dhcp_component = components.get("dhcp")
-    if not isinstance(dhcp_component, dict):
-        raise ManualZtpError("统一 current-release 缺少 DHCP 子 release")
-    dhcp = _json_object(DHCP_RELEASE_MANIFEST, "DHCP release manifest")
-    dhcp_hash = sha256_path(DHCP_RELEASE_MANIFEST)
-    if (
-        str(dhcp.get("release_id") or "")
-        != str(dhcp_component.get("release_id") or "")
-        or dhcp_hash != str(dhcp_component.get("manifest_sha256") or "")
-    ):
-        raise ManualZtpError(
-            "当前 DHCP manifest 未绑定到统一 current-release；"
-            + UNIFIED_LOAD_RECOVERY
-        )
-    dhcp_outputs = dhcp.get("outputs")
-    if not isinstance(dhcp_outputs, dict):
-        raise ManualZtpError("DHCP release manifest 缺少 outputs hash")
     verified_dhcp_outputs: dict[str, tuple[Path, str]] = {}
-    for name in (
-        "dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts",
-    ):
-        output = dhcp_outputs.get(name)
-        expected_hash = str(output.get("sha256") or "") if isinstance(output, dict) else ""
-        output_path = DHCP_RELEASE_MANIFEST.parent / name
-        try:
-            actual_hash = sha256_path(output_path)
-        except OSError as exc:
-            raise ManualZtpError(f"DHCP release 输出 {name} 无法读取: {exc}") from exc
-        if not expected_hash or actual_hash != expected_hash:
+    dhcp: dict = {}
+    dhcp_hash = ""
+    if parent_dhcp_status == "disabled":
+        if "dhcp" in components:
+            raise ManualZtpError("DHCP disabled 统一 release 不允许 DHCP 子 release")
+    else:
+        if not isinstance(dhcp_component, dict):
+            raise ManualZtpError("统一 current-release 缺少 DHCP 子 release")
+        dhcp = _json_object(DHCP_RELEASE_MANIFEST, "DHCP release manifest")
+        dhcp_hash = sha256_path(DHCP_RELEASE_MANIFEST)
+        if (
+            str(dhcp.get("release_id") or "")
+            != str(dhcp_component.get("release_id") or "")
+            or dhcp_hash != str(dhcp_component.get("manifest_sha256") or "")
+        ):
             raise ManualZtpError(
-                f"DHCP release 输出 {name} 与 manifest hash 不一致；"
+                "当前 DHCP manifest 未绑定到统一 current-release；"
                 + UNIFIED_LOAD_RECOVERY
             )
-        verified_dhcp_outputs[name] = (output_path, actual_hash)
+        dhcp_outputs = dhcp.get("outputs")
+        if not isinstance(dhcp_outputs, dict):
+            raise ManualZtpError("DHCP release manifest 缺少 outputs hash")
+        for name in (
+            "dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts",
+        ):
+            output = dhcp_outputs.get(name)
+            expected_hash = str(output.get("sha256") or "") if isinstance(output, dict) else ""
+            output_path = DHCP_RELEASE_MANIFEST.parent / name
+            try:
+                actual_hash = sha256_path(output_path)
+            except OSError as exc:
+                raise ManualZtpError(f"DHCP release 输出 {name} 无法读取: {exc}") from exc
+            if not expected_hash or actual_hash != expected_hash:
+                raise ManualZtpError(
+                    f"DHCP release 输出 {name} 与 manifest hash 不一致；"
+                    + UNIFIED_LOAD_RECOVERY
+                )
+            verified_dhcp_outputs[name] = (output_path, actual_hash)
 
     component_name = "nvos" if device.get("type") in {"ib", "nvl"} else "cumulus"
     component = components.get(component_name)
@@ -720,9 +798,7 @@ def validate_parent_release_binding(project: Path, device: dict) -> dict[str, st
         "parent_release_id": str(parent.get("release_id") or ""),
         "parent_manifest_path": str(parent_path),
         "parent_manifest_sha256": sha256_path(parent_path),
-        "dhcp_release_id": str(dhcp.get("release_id") or ""),
-        "dhcp_manifest_path": str(DHCP_RELEASE_MANIFEST),
-        "dhcp_manifest_sha256": dhcp_hash,
+        "dhcp_status": parent_dhcp_status,
         "child_component": component_name,
         "child_release_id": str(manifest.get("release_id") or ""),
         "child_manifest_path": str(manifest_path),
@@ -733,6 +809,12 @@ def validate_parent_release_binding(project: Path, device: dict) -> dict[str, st
         "child_config_path": str(hostname_yaml_resolved),
         "child_config_sha256": config_hash,
     }
+    if parent_dhcp_status == "enabled":
+        binding.update({
+            "dhcp_release_id": str(dhcp.get("release_id") or ""),
+            "dhcp_manifest_path": str(DHCP_RELEASE_MANIFEST),
+            "dhcp_manifest_sha256": dhcp_hash,
+        })
     for name, (output_path, output_hash) in verified_dhcp_outputs.items():
         key = name.replace(".", "_")
         binding[f"dhcp_output_{key}_path"] = str(output_path)
@@ -745,21 +827,30 @@ def validate_parent_release_binding(project: Path, device: dict) -> dict[str, st
 
 def verify_prepared_release_binding(prepared: dict) -> None:
     """Recheck every committed release artifact immediately before mutation."""
-    checks = (
+    dhcp_status = prepared.get("dhcp_status")
+    if dhcp_status not in {"enabled", "disabled"}:
+        raise ManualZtpError("确认后 release DHCP status 无效")
+    checks = [
         ("parent_manifest_path", "parent_manifest_sha256"),
-        ("dhcp_manifest_path", "dhcp_manifest_sha256"),
         ("child_manifest_path", "child_manifest_sha256"),
         ("child_marker_path", "child_marker_sha256"),
         ("child_config_path", "child_config_sha256"),
-    )
-    dynamic_checks = list(checks)
-    for name in (
-        "dhcpd_conf", "dhcpd_eth_hosts", "dhcpd_ib_hosts", "dhcpd_nvl_hosts",
-    ):
-        dynamic_checks.append(
-            (f"dhcp_output_{name}_path", f"dhcp_output_{name}_sha256")
-        )
-    for path_key, hash_key in dynamic_checks:
+    ]
+    if dhcp_status == "disabled":
+        if any(
+            key.startswith("dhcp_") and key != "dhcp_status"
+            for key in prepared
+        ):
+            raise ManualZtpError("确认后 DHCP disabled 绑定包含陈旧 DHCP 字段")
+    else:
+        checks.append(("dhcp_manifest_path", "dhcp_manifest_sha256"))
+        for name in (
+            "dhcpd_conf", "dhcpd_eth_hosts", "dhcpd_ib_hosts", "dhcpd_nvl_hosts",
+        ):
+            checks.append(
+                (f"dhcp_output_{name}_path", f"dhcp_output_{name}_sha256")
+            )
+    for path_key, hash_key in checks:
         path = Path(str(prepared.get(path_key) or ""))
         expected = str(prepared.get(hash_key) or "")
         try:
@@ -1436,28 +1527,40 @@ def display_preflight_diff(target_dir: Path, *, limit: int = 240) -> None:
         print(f"完整 diff: {diff_path}")
 
 
-def global_ztp_url_prefix(global_yaml: Path) -> str:
-    """Return the validated project-owned URL prefix used by all ZTP URLs."""
+def global_ztp_http_policy(global_yaml: Path) -> tuple[str, int]:
+    """Return the project URL prefix and HTTP listener port together."""
     try:
         document = safe_load_yaml_preserving_mac(
             global_yaml.read_text(encoding="utf-8")
         )
         prefix = str(document["common"]["mgmt"]["ztp"]["ztp_url_prefix"]).strip()
+        http_policy = document["common"]["mgmt"].get("http", {})
+        if not isinstance(http_policy, dict):
+            raise ManualZtpError("common.mgmt.http 必须是 mapping")
+        port_value = http_policy.get("port", 80)
     except (OSError, KeyError, TypeError, yaml.YAMLError) as exc:
         raise ManualZtpError(
             f"无法读取 01-global.yaml 的 common.mgmt.ztp.ztp_url_prefix: {exc}"
         ) from exc
     try:
-        return validate_ztp_url_prefix(prefix)
+        port = validate_service_endpoint(
+            "192.0.2.1", port_value, field="common.mgmt.http.port"
+        ).port
+        return validate_ztp_url_prefix(prefix), port
     except ValueError as exc:
         raise ManualZtpError(str(exc)) from exc
+
+
+def global_ztp_url_prefix(global_yaml: Path) -> str:
+    """Return the validated project-owned URL prefix (legacy public helper)."""
+    return global_ztp_http_policy(global_yaml)[0]
 
 
 def provision_urls(
     subnet_csv: Path, global_yaml: Path,
 ) -> list[tuple[ipaddress.IPv4Network, str]]:
     """Derive Cumulus bootstrap URLs from the declarative subnet contract."""
-    prefix = global_ztp_url_prefix(global_yaml)
+    prefix, http_port = global_ztp_http_policy(global_yaml)
     result = []
     profile_services: dict[str, tuple[ipaddress.IPv4Address, int]] = {}
     nvos_service: tuple[ipaddress.IPv4Address, int] | None = None
@@ -1512,17 +1615,18 @@ def provision_urls(
             service_ip = None
             if service_ip_text:
                 try:
-                    service_ip = ipaddress.IPv4Address(service_ip_text)
+                    service_ip = validate_service_endpoint(
+                        service_ip_text,
+                        field=(
+                            "02-dhcp-subnet_config.csv:"
+                            f"{line_number} ztp_service_ip"
+                        ),
+                    ).address
                 except ValueError as exc:
                     raise ManualZtpError(
                         f"02-dhcp-subnet_config.csv:{line_number} "
-                        f"ztp_service_ip 无效: {service_ip_text!r}"
+                        f"ztp_service_ip={service_ip_text} 不是可用单播地址"
                     ) from exc
-                if service_ip.is_unspecified or service_ip.is_multicast:
-                    raise ManualZtpError(
-                        f"02-dhcp-subnet_config.csv:{line_number} "
-                        f"ztp_service_ip={service_ip} 不是可用单播地址"
-                    )
             if (profile != "none" or nvos_ztp == "yes") and service_ip is None:
                 raise ManualZtpError(
                     f"02-dhcp-subnet_config.csv:{line_number} 启用 ZTP 时 "
@@ -1568,7 +1672,12 @@ def provision_urls(
                 continue
             assert service_ip is not None
             filename = f"ztp-bootstrap_{profile}.sh"
-            url = f"http://{service_ip}{prefix}/{filename}"
+            endpoint = validate_service_endpoint(
+                str(service_ip), http_port, field="manual ZTP service IPv4"
+            )
+            url = service_url(
+                endpoint, f"/{filename}", prefix=prefix, channel="manual-ztp"
+            )
             result.append((network, url))
     if not result:
         raise ManualZtpError(
@@ -1864,19 +1973,105 @@ def sync_management_time(
     }
 
 
-def atomic_json(path: Path, value: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+def _open_receipt_parent(path: Path, *, create: bool) -> int:
+    """Walk receipt directories without following a symlink at any component."""
+    parent = path.parent.absolute()
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    descriptor = os.open(parent.anchor, flags)
     try:
+        for component in parent.parts[1:]:
+            if component in ("", "."):
+                continue
+            if component == "..":
+                raise ValueError("unsafe manual receipt parent")
+            if create:
+                try:
+                    os.mkdir(component, 0o700, dir_fd=descriptor)
+                except FileExistsError:
+                    pass
+            try:
+                child = os.open(component, flags, dir_fd=descriptor)
+            except OSError:
+                entry = os.stat(component, dir_fd=descriptor, follow_symlinks=False)
+                owner = os.fstat(descriptor)
+                # macOS exposes private temporary directories via /var ->
+                # /private/var.  Only an immutable root-owned ancestor may
+                # provide such an alias; project-writable links stay closed.
+                if (
+                    not stat.S_ISLNK(entry.st_mode)
+                    or owner.st_uid != 0
+                    or owner.st_mode & 0o022
+                ):
+                    raise
+                child = os.open(component, flags & ~os.O_NOFOLLOW, dir_fd=descriptor)
+                after = os.stat(component, dir_fd=descriptor, follow_symlinks=False)
+                if (entry.st_dev, entry.st_ino) != (after.st_dev, after.st_ino):
+                    os.close(child)
+                    raise ValueError("manual receipt publication parent changed")
+            os.close(descriptor)
+            descriptor = child
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _assert_receipt_parent_bound(path: Path, parent_fd: int) -> None:
+    try:
+        visible_fd = _open_receipt_parent(path, create=False)
+    except OSError as exc:
+        raise ValueError("manual receipt publication parent changed") from exc
+    try:
+        held = os.fstat(parent_fd)
+        visible = os.fstat(visible_fd)
+        if (held.st_dev, held.st_ino) != (visible.st_dev, visible.st_ino):
+            raise ValueError("manual receipt publication parent changed")
+    finally:
+        os.close(visible_fd)
+
+
+def atomic_json(path: Path, value: dict) -> None:
+    parent_fd = _open_receipt_parent(path, create=True)
+    stage = f".{path.name}.{uuid.uuid4().hex}.tmp"
+    staged = False
+    renamed = False
+    existed = False
+    published = False
+    try:
+        try:
+            current = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            if not stat.S_ISREG(current.st_mode) or current.st_nlink != 1:
+                raise ValueError("unsafe manual receipt target")
+            existed = True
+        descriptor = os.open(
+            stage,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+            0o600,
+            dir_fd=parent_fd,
+        )
+        staged = True
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
             json.dump(value, stream, ensure_ascii=False, indent=2)
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        _assert_receipt_parent_bound(path, parent_fd)
+        # Both paths are anchored to the held directory, even if the visible
+        # project path is rebound after the check.
+        os.rename(stage, path.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        renamed = True
+        os.fsync(parent_fd)
+        _assert_receipt_parent_bound(path, parent_fd)
+        published = True
     finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+        if staged and not renamed:
+            os.unlink(stage, dir_fd=parent_fd)
+        if renamed and not published and not existed:
+            os.unlink(path.name, dir_fd=parent_fd)
+        os.close(parent_fd)
 
 
 def acquire_operation_lock(output_root: Path, hostname: str) -> int:
@@ -2122,8 +2317,14 @@ def parser(operation: str = "ztp") -> argparse.ArgumentParser:
         choices=("all", "prod", "air", "ethernet", "eth", "eth_spx", "spx", "ib", "nvl"),
         help="只从指定环境/设备类型中展开位置参数（默认 all）",
     )
-    environment.add_argument("--air", action="store_const", const="air", dest="type")
-    environment.add_argument("--prod", action="store_const", const="prod", dest="type")
+    environment.add_argument(
+        "--air", action="store_const", const="air", dest="type",
+        help="只选 AIR 环境设备",
+    )
+    environment.add_argument(
+        "--prod", action="store_const", const="prod", dest="type",
+        help="只选 Production 环境设备",
+    )
     result.add_argument("-y", "--yes", action="store_true", help="跳过执行前确认")
     result.add_argument("--dry-run", action="store_true", help="只展开并打印目标，不连接设备")
     result.add_argument("--non-interactive", action="store_true", help=argparse.SUPPRESS)
@@ -2165,10 +2366,19 @@ def parser(operation: str = "ztp") -> argparse.ArgumentParser:
         result.set_defaults(sudo_password=None)
     else:
         result.set_defaults(sudo_password=False)
-    result.add_argument("--connect-timeout", type=int, default=10)
-    result.add_argument("--command-timeout", type=int, default=900)
+    result.add_argument(
+        "--connect-timeout", type=int, default=10,
+        help="SSH 建连超时（秒，默认 10）",
+    )
+    result.add_argument(
+        "--command-timeout", type=int, default=900,
+        help="设备命令超时（秒，默认 900）",
+    )
     if operation != "reset":
-        result.add_argument("--http-timeout", type=int, default=10)
+        result.add_argument(
+            "--http-timeout", type=int, default=10,
+            help="HTTP 请求超时（秒，默认 10）",
+        )
     else:
         result.set_defaults(http_timeout=10)
     return result

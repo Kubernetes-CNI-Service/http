@@ -49,6 +49,7 @@ EMPTY_DIRECTORY_SENTINELS = frozenset(
         "DAY0-Prepare/template/99-output-ib_nvl/bringup/ndr-upgrade-logs/.gitkeep",
         "DAY0-Prepare/template/99-output-ib_nvl/bringup/xdr-initial-setup-logs/.gitkeep",
         "DAY0-Prepare/template/99-output-ib_nvl/bringup/xdr-upgrade-logs/.gitkeep",
+        "DAY0-Prepare/template/99-output-infra/.gitkeep",
         "DAY0-Prepare/template/99-output-monitor/.gitkeep",
         "DAY0-Prepare/template/99-output-p2p/.gitkeep",
         "DAY0-Prepare/template/99-output-ztp/.gitkeep",
@@ -58,6 +59,13 @@ EMPTY_DIRECTORY_SENTINELS = frozenset(
 EMPTY_DIRECTORY_SENTINEL_CONTENT = (
     b"# Retain this empty runtime-output skeleton in source checkouts.\n"
 )
+
+# REQ10B's tracked bridge points to the project-specific workspace link that
+# setup creates.  That target contains operator input and must not be public.
+SETUP_RUNTIME_BRIDGE = "infiniband/bringup/xdr-initial-setup/01-global.yaml"
+SETUP_RUNTIME_BRIDGE_TARGET = "../../01-global.yaml"
+SETUP_PUBLICKEY_BRIDGE = "infiniband/bringup/xdr-initial-setup/publickey"
+SETUP_PUBLICKEY_BRIDGE_TARGET = "../../publickey"
 
 PUBLIC_DAY0_TEMPLATE_FILES = frozenset(
     {
@@ -848,6 +856,29 @@ def index_symlink_target_is_candidate(
     return False, "unpublished-symlink"
 
 
+def exact_setup_runtime_bridge(
+    root: Path, relative: str, target: str, entry: IndexEntry | None,
+) -> bool:
+    runtime_targets = {
+        SETUP_RUNTIME_BRIDGE: (SETUP_RUNTIME_BRIDGE_TARGET, "infiniband/01-global.yaml"),
+        SETUP_PUBLICKEY_BRIDGE: (SETUP_PUBLICKEY_BRIDGE_TARGET, "infiniband/publickey"),
+    }
+    bridge = runtime_targets.get(relative)
+    if bridge is None or target != bridge[0] or entry is None or entry.mode != "120000":
+        return False
+    # The setup-managed target may be absent in a source checkout.  A present
+    # target (including a dangling symlink) must take the ordinary publication
+    # and containment checks; Path.exists() would hide dangling symlinks.
+    runtime_target = root / bridge[1]
+    try:
+        runtime_target.lstat()
+    except FileNotFoundError:
+        return True
+    except OSError as exc:
+        raise AuditError("setup runtime bridge target cannot be inspected") from exc
+    return False
+
+
 def inspect_index_candidate(
     root: Path,
     relative: str,
@@ -862,8 +893,14 @@ def inspect_index_candidate(
     if size > MAX_BLOB_BYTES:
         return [Finding("large-blob", relative, "indexed blob exceeds the 5 MiB public limit")]
     assert data is not None
+    if relative in {SETUP_RUNTIME_BRIDGE, SETUP_PUBLICKEY_BRIDGE} and entry.mode != "120000":
+        return [Finding("invalid-runtime-bridge", relative, "setup bridge must be an indexed symlink")]
     if entry.mode == "120000":
         target = os.fsdecode(data)
+        if relative == SETUP_PUBLICKEY_BRIDGE and target != SETUP_PUBLICKEY_BRIDGE_TARGET:
+            return [Finding("invalid-runtime-bridge", relative, "public-key bridge target changed")]
+        if exact_setup_runtime_bridge(root, relative, target, entry):
+            return []
         valid, kind = index_symlink_target_is_candidate(relative, target, candidates)
         if valid:
             return []
@@ -879,7 +916,9 @@ def inspect_index_candidate(
     return inspect_regular_data(relative, data)
 
 
-def inspect_candidate(root: Path, relative: str, candidates: set[str]) -> list[Finding]:
+def inspect_candidate(
+    root: Path, relative: str, candidates: set[str], entry: IndexEntry | None,
+) -> list[Finding]:
     findings: list[Finding] = []
     try:
         pure = validate_relative_path(relative)
@@ -900,11 +939,20 @@ def inspect_candidate(root: Path, relative: str, candidates: set[str]) -> list[F
         findings.append(Finding("missing-candidate", relative, "Git candidate is absent"))
         return findings
 
+    if relative in {SETUP_RUNTIME_BRIDGE, SETUP_PUBLICKEY_BRIDGE} and not stat.S_ISLNK(info.st_mode):
+        findings.append(Finding("invalid-runtime-bridge", relative, "setup bridge must be a symlink"))
+        return findings
+
     if stat.S_ISLNK(info.st_mode):
         try:
             target = os.readlink(path)
         except OSError:
             findings.append(Finding("broken-symlink", relative, "symlink target cannot be read"))
+            return findings
+        if relative == SETUP_PUBLICKEY_BRIDGE and target != SETUP_PUBLICKEY_BRIDGE_TARGET:
+            findings.append(Finding("invalid-runtime-bridge", relative, "public-key bridge target changed"))
+            return findings
+        if exact_setup_runtime_bridge(root, relative, target, entry):
             return findings
         if os.path.isabs(target):
             findings.append(Finding("absolute-symlink", relative, "absolute symlink is not portable"))
@@ -974,8 +1022,8 @@ def audit(root: Path) -> tuple[list[str], list[Finding]]:
     candidate_set = set(candidates)
     findings: list[Finding] = []
     for relative in candidates:
-        findings.extend(inspect_candidate(root, relative, candidate_set))
         entry = index_entries.get(relative)
+        findings.extend(inspect_candidate(root, relative, candidate_set, entry))
         if entry is not None:
             findings.extend(inspect_index_candidate(root, relative, entry, candidate_set))
     return candidates, list(dict.fromkeys(findings))

@@ -20,6 +20,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+import zipfile
 from unittest import mock
 
 import yaml
@@ -260,6 +261,7 @@ class PlatformReleaseFlowTests(unittest.TestCase):
         cls.devices_file = cls.project / "02-devices_config.csv"
         cls.subnet_file = cls.project / "02-dhcp-subnet_config.csv"
         cls.p2p_file = cls.project / "p2p.xlsx"
+        cls.p2p_source = cls.project / "demo-P2P.xlsx"
         cls.global_file.write_text(
             """schema_version: 1
 common:
@@ -321,7 +323,11 @@ switches:
             "192.0.3.1,192.0.2.2,none,yes\n",
             encoding="utf-8",
         )
-        cls.p2p_file.write_bytes(b"isolated-flow-fixture\n")
+        # Setup selects a real project-root workbook.  The parent consumer
+        # binds the selected source bytes, not opaque content at the alias.
+        with zipfile.ZipFile(cls.p2p_source, "w") as workbook:
+            workbook.writestr("xl/workbook.xml", "<workbook/>")
+        cls.p2p_file.symlink_to(cls.p2p_source.name)
 
         # setup normally creates these project-input and output links.  Keep
         # that ownership boundary in the fixture instead of redirecting a

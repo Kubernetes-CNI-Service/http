@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
+import hashlib
 import json
 import os
 import re
@@ -397,6 +399,48 @@ def archive_snapshots(
     return snapshots, display_names, warnings
 
 
+def freeze_evidence_input(source: Path, directory: Path) -> tuple[Path, str]:
+    """Copy one held regular input for opt-in evidence-mode analysis.
+
+    The parser subsequently consumes the private copy, not the mutable public
+    pathname; the returned hash is calculated while writing that exact copy.
+    """
+    named = source.lstat()
+    if not stat.S_ISREG(named.st_mode) or named.st_nlink != 1:
+        raise ValueError(f"evidence input is not one regular file: {source}")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(source, flags)
+    try:
+        before = os.fstat(descriptor)
+        if (named.st_dev, named.st_ino) != (before.st_dev, before.st_ino):
+            raise ValueError(f"evidence input identity changed: {source}")
+        if before.st_size < 0 or before.st_size > 4 * 1024 * 1024 * 1024:
+            raise ValueError(f"evidence input exceeds bounded snapshot: {source}")
+        destination = directory / source.name
+        digest = hashlib.sha256()
+        copied = 0
+        with destination.open("xb") as output:
+            while True:
+                part = os.read(descriptor, 1024 * 1024)
+                if not part:
+                    break
+                output.write(part)
+                digest.update(part)
+                copied += len(part)
+        after = os.fstat(descriptor)
+        named_after = source.lstat()
+        identity = lambda item: (
+            item.st_dev, item.st_ino, item.st_size, item.st_mtime_ns,
+            item.st_ctime_ns,
+        )
+        if copied != before.st_size or identity(before) != identity(after) \
+                or identity(after) != identity(named_after):
+            raise ValueError(f"evidence input changed during snapshot: {source}")
+        return destination, digest.hexdigest()
+    finally:
+        os.close(descriptor)
+
+
 def discover_latest_archive(directory: Path) -> Path:
     candidates = [
         path for pattern in ("*.tar.gz", "*.tgz")
@@ -631,6 +675,13 @@ def write_report(
     display_names: dict[str, str],
     eth_names: set[str],
     aliases: dict[str, frozenset[str]] | None = None,
+    *,
+    display_archive: Path | None = None,
+    display_dot: Path | None = None,
+    activity_evidence_output: Path | None = None,
+    activity_sources: dict[str, Path] | None = None,
+    activity_source_sha256: dict[str, str] | None = None,
+    activity_cycle_binding: dict | None = None,
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     archive_base = re.sub(r"\.tar\.gz$|\.tgz$", "", archive.name, flags=re.I)
@@ -712,8 +763,8 @@ def write_report(
     payload = {
         "metadata": {
             "generated_local": datetime.now().astimezone().isoformat(timespec="seconds"),
-            "expected_dot": str(dot),
-            "collection_archive": str(archive),
+            "expected_dot": str(display_dot or dot),
+            "collection_archive": str(display_archive or archive),
             "output": str(output_path),
             "collected_ethernet_switches": len(snapshots),
         },
@@ -757,6 +808,22 @@ def write_report(
         raise ValueError(f"XLSX generation failed: {detail}")
     if not output_path.is_file():
         raise ValueError(f"XLSX builder did not create: {output_path}")
+    if activity_evidence_output is not None:
+        if activity_sources is None or activity_source_sha256 is None:
+            raise ValueError("activity evidence source snapshots are missing")
+        if str(WORKSPACE) not in sys.path:
+            sys.path.insert(0, str(WORKSPACE))
+        from monitor.issue_tracker_activity_source import (  # noqa: E402
+            write_eth_activity_evidence,
+        )
+        write_eth_activity_evidence(
+            activity_evidence_output,
+            sources=activity_sources,
+            source_sha256=activity_source_sha256,
+            report_path=output_path,
+            result_records=result_records,
+            cycle_binding=activity_cycle_binding,
+        )
     return output_path
 
 
@@ -808,14 +875,41 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--strict-lldp", action="store_true",
                         help=("deprecated compatibility option; SW-SW and SW-Other "
                               "validation now always require LLDP"))
+    parser.add_argument(
+        "--activity-evidence-output", type=Path,
+        help=("write a local four-input Ethernet observation sidecar; "
+              "not a qualified collection cycle"),
+    )
+    parser.add_argument(
+        "--worker-context-fd", type=int,
+        help="inherited worker context FD for an ETH cycle-bound observation",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: Iterable[str] | None = None) -> int:
     args = parse_args(argv)
     try:
+        cycle_binding = None
+        activity_context = None
+        if args.worker_context_fd is not None:
+            if args.activity_evidence_output is not None or args.archive is None:
+                raise ValueError("worker activity requires exact archive and FD-owned output")
+            if str(WORKSPACE) not in sys.path:
+                sys.path.insert(0, str(WORKSPACE))
+            from monitor.issue_tracker_activity_source import (  # noqa: E402
+                read_worker_eth_activity_context_fd,
+            )
+            activity_context, cycle_binding = read_worker_eth_activity_context_fd(
+                args.worker_context_fd,
+            )
+            args.activity_evidence_output = Path(
+                activity_context["activity"]["sidecar_path"]
+            )
         output_dir = args.output_dir.resolve()
-        dot = args.dot.resolve() if args.dot else discover_dot(output_dir).resolve()
+        dot = (Path(activity_context["activity"]["sources"]["dot"]["path"])
+               if activity_context is not None else
+               args.dot.resolve() if args.dot else discover_dot(output_dir).resolve())
         if args.archive:
             archive = args.archive.resolve()
         else:
@@ -825,38 +919,64 @@ def main(argv: Iterable[str] | None = None) -> int:
             )
             latest_archive = discover_latest_archive(archive_dir)
             archive = link_archive_input(latest_archive, output_dir)
-        inventory = args.inventory.resolve()
-        alias_authority = args.device_aliases.absolute()
+        inventory = (Path(activity_context["activity"]["sources"]["inventory"]["path"])
+                     if activity_context is not None else args.inventory.resolve())
+        alias_authority = (Path(activity_context["activity"]["sources"]["device_aliases"]["path"])
+                           if activity_context is not None else args.device_aliases.absolute())
         for label, path in (
             ("DOT", dot), ("archive", archive), ("inventory", inventory),
             ("LLDP alias authority", alias_authority),
         ):
             if not path.is_file():
                 raise ValueError(f"{label} file not found: {path}")
-        aliases = load_device_aliases(alias_authority)
-        links = parse_dot(dot)
-        snapshots, display_names, warnings = archive_snapshots(archive)
-        patterns, order = load_inventory(inventory)
-        eth_names = {
-            normalize_device(endpoint.device)
-            for link in links for endpoint in (link.left, link.right)
-            if device_type(endpoint.device, patterns, order).casefold() == "eth-sw"
+        source_paths = {
+            "dot": dot, "archive": archive,
+            "inventory": inventory, "device_aliases": alias_authority,
         }
-        # A collected .info file is authoritative evidence that the endpoint is
-        # an Ethernet switch, even when its name does not match inventory globs.
-        eth_names.update(snapshots)
-        results = [
-            result for link in links
-            if (result := analyze_link(link, snapshots, eth_names, aliases)) is not None
-        ]
-        expected = {canonical_link(link.left, link.right) for link in links}
-        unexpected = unexpected_lldp(
-            snapshots, expected, display_names, aliases,
-        )
-        report_path = write_report(
-            output_dir, archive, dot, results, unexpected, warnings,
-            links, snapshots, display_names, eth_names, aliases,
-        )
+        with ExitStack() as stack:
+            consumed = dict(source_paths)
+            source_sha256: dict[str, str] | None = None
+            if args.activity_evidence_output is not None:
+                directory = Path(stack.enter_context(
+                    tempfile.TemporaryDirectory(prefix="lldp-evidence-inputs-"),
+                ))
+                source_sha256 = {}
+                for role, source in source_paths.items():
+                    private_role = directory / role
+                    private_role.mkdir(mode=0o700)
+                    consumed[role], source_sha256[role] = freeze_evidence_input(
+                        source, private_role,
+                    )
+            aliases = load_device_aliases(consumed["device_aliases"])
+            links = parse_dot(consumed["dot"])
+            snapshots, display_names, warnings = archive_snapshots(consumed["archive"])
+            patterns, order = load_inventory(consumed["inventory"])
+            eth_names = {
+                normalize_device(endpoint.device)
+                for link in links for endpoint in (link.left, link.right)
+                if device_type(endpoint.device, patterns, order).casefold() == "eth-sw"
+            }
+            # A collected .info file is authoritative evidence that the endpoint is
+            # an Ethernet switch, even when its name does not match inventory globs.
+            eth_names.update(snapshots)
+            results = [
+                result for link in links
+                if (result := analyze_link(link, snapshots, eth_names, aliases)) is not None
+            ]
+            expected = {canonical_link(link.left, link.right) for link in links}
+            unexpected = unexpected_lldp(
+                snapshots, expected, display_names, aliases,
+            )
+            report_path = write_report(
+                output_dir, consumed["archive"], consumed["dot"],
+                results, unexpected, warnings, links, snapshots,
+                display_names, eth_names, aliases,
+                display_archive=archive, display_dot=dot,
+                activity_evidence_output=args.activity_evidence_output,
+                activity_sources=source_paths if source_sha256 is not None else None,
+                activity_source_sha256=source_sha256,
+                activity_cycle_binding=cycle_binding,
+            )
     except (OSError, ValueError, tarfile.TarError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2

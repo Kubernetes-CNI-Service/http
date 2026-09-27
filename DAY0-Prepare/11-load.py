@@ -15,10 +15,12 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import csv
 from dataclasses import dataclass, replace
 from datetime import datetime
 import getpass
+import gzip
 import hashlib
 import hmac
 import importlib.util
@@ -82,20 +84,34 @@ HTTP_ROOT = HERE.parent
 TOOLS_DIR = HTTP_ROOT / "tools"
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
+import generation_report
+import ssh_key_preparation as ssh_keys
 from project_contract import (
     GLOBAL_SCHEMA_VERSION,
+    PublicationPlan,
+    ServiceEndpoint,
     SWITCH_CREDENTIAL_FAMILY_ORDER,
     SWITCH_CREDENTIAL_PATHS,
     SWITCH_SCHEMA_FAMILIES,
     detect_global_schema_version,
+    device_visible_urls,
+    merge_http_listener_addresses,
     normalize_issue_tracker_policy,
     normalize_v2_mlag_policy,
     normalize_v2_vrr_policy,
     parse_device_csv_layout,
     require_device_csv_row_width,
+    require_project_eligible,
     safe_load_global_yaml,
+    service_url,
     validate_cumulus_dns_domain,
+    validate_service_endpoint,
     validate_ztp_url_prefix,
+)
+from _package_common import (
+    P2PSelectionError,
+    select_project_p2p_source,
+    select_upload_p2p,
 )
 from deployment_lock import (
     DeploymentLockError,
@@ -136,7 +152,7 @@ CONTROL_AUTH_SOURCE = TOOLS_DIR / "control-auth.py"
 CONTROL_AUTH_NATIVE_HELPER = Path("/usr/local/lib/http-ztp/control-auth.py")
 CONTROL_AUTH_CONTAINER_HELPER = Path("/opt/http-ztp/control-auth.py")
 CONTROL_AUTH_SOURCE_SHA256 = (
-    "5a133a353cb7ac7af5be0be71b4ef85b41345716103d6e28590140638ee11038"
+    "f5cea5266ab808250b718250a8a73d7d6f6452a199b97fa500643d7ed9e988db"
 )
 CONTROL_AUTH_HELPER_MAX_BYTES = 256 * 1024
 CONTROL_AUTH_STATUS_MAX_BYTES = 4096
@@ -161,7 +177,9 @@ SHARED_ARTIFACT_RECEIPT_DIR = ".shared-artifact-receipts"
 SHARED_ARTIFACT_RECEIPT_MAX_BYTES = 64 * 1024 * 1024
 SHARED_ARTIFACT_RECEIPT_MAX_ENTRIES = 10_000
 SHARED_ARTIFACT_MAX_BYTES = 16 * 1024 * 1024 * 1024
-VALID_TYPES = {"eth", "eth_spx", "spx", "ib", "nvl", "server", "air"}
+VALID_TYPES = {
+    "eth", "eth_spx", "spx", "ib", "nvl", "server", "air", "eth_jump",
+}
 BOOTSTRAP_BY_ROLE = {
     "air_oobofoob": "ztp-bootstrap_oobofoob.sh",
     "air_oob": "ztp-bootstrap_oob.sh",
@@ -211,6 +229,12 @@ DEVICE_HEADER_PREFIX = (
     "hostname", "type", "template", "eth0_ip", "netmask", "eth0_gw",
     "eth0_mac", "eth1_ip", "netmask", "eth1_gw", "eth1_mac",
 )
+ETH_JUMP_CONFIG_ONLY_FIELDS = frozenset({
+    "lo_ip", "vrf_default", "vlan_id", "svi_ip", "vrr_ip", "vrr_mac",
+    "vlan_ports", "bgp_asn", "bgp_ports", "bond_ports", "bond_type",
+    "bond_mac", "peerlink_ports", "vrl", "evpn_vrf", "evpn_l3vni",
+    "evpn_l3vlan", "dhcp_relay", "evpn_l2vni", "evpn_l2vlan",
+})
 DHCP_INTERFACE_ALLOWLIST_ENV = "HTTP_ZTP_DHCP_INTERFACE_ALLOWLIST"
 DHCP_RELAY_INGRESS_ENV = "HTTP_ZTP_DHCP_RELAY_INGRESS"
 SUPERVISOR_QUIESCE_SERVICES = (
@@ -225,6 +249,23 @@ _MINI_GENERATION_AUTHORITIES: dict[
 
 class LoadError(RuntimeError):
     pass
+
+
+def _device_csv_na(value: object) -> bool:
+    return str(value or "").strip().casefold() in {"", "na", "n/a", "none", "null", "-"}
+
+
+def _eth_jump_configuration_intent(
+    fields: list[str], row: list[str],
+) -> tuple[str, ...]:
+    conflicts = set()
+    for index, field in enumerate(fields):
+        if field in ETH_JUMP_CONFIG_ONLY_FIELDS and not _device_csv_na(row[index]):
+            conflicts.add(field)
+    template_index = fields.index("template")
+    if not _device_csv_na(row[template_index]):
+        conflicts.add("template")
+    return tuple(sorted(conflicts))
 
 
 @dataclass(frozen=True)
@@ -248,6 +289,7 @@ class PreparedParentRelease:
     temporary: Path
     release_id: str
     committed: bool = False
+    splitter_provenance: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -279,10 +321,12 @@ class GlobalSettings:
     versions: dict[str, str]
     boot_ips: tuple[str, ...] = ()
     schema_version: int = GLOBAL_SCHEMA_VERSION
+    http_port: int = 80
+    http_address: str | None = None
 
     @property
     def service_ips(self) -> tuple[str, ...]:
-        """All distinct HTTP/ZTP addresses derived from declarative subnet rows."""
+        """ZTP addresses derived from declarative subnet rows only."""
         values = [
             address
             for role in SERVICE_IP_PRIORITY
@@ -290,6 +334,42 @@ class GlobalSettings:
         ]
         values.extend(self.boot_ips)
         return tuple(dict.fromkeys(values))
+
+    @property
+    def http_listener_ips(self) -> tuple[str, ...]:
+        """Apache listens on the union of ZTP and independent HTTP authority."""
+        return merge_http_listener_addresses(self.service_ips, self.http_address)
+
+
+def publication_plan_for(
+    settings: GlobalSettings, *, pubkey_names: tuple[str, ...],
+    image_names: tuple[tuple[str, str], ...],
+) -> PublicationPlan:
+    """Bind declarative project URLs to the same endpoints Apache will listen on."""
+    return PublicationPlan(
+        endpoints_by_role=tuple(
+            (role, tuple(
+                validate_service_endpoint(
+                    address, settings.http_port,
+                    field=f"{role} ZTP service IPv4",
+                )
+                for address in settings.ztp_ips.get(role, ())
+            ))
+            for role in SERVICE_IP_PRIORITY
+            if settings.ztp_ips.get(role)
+        ),
+        boot_endpoints=tuple(dict.fromkeys(
+            validate_service_endpoint(
+                address, settings.http_port,
+                field="NVOS boot service IPv4",
+            )
+            for address in settings.boot_ips
+        )),
+        ztp_prefix=settings.ztp_prefix,
+        pubkey_names=pubkey_names,
+        image_names=image_names,
+        apt_endpoint=None,
+    )
 
 
 @dataclass(frozen=True)
@@ -577,6 +657,22 @@ def supports_local_ztp_services(os_name: str | None = None) -> bool:
     return (os_name or runtime_os()).casefold() == "linux"
 
 
+def resolve_host_role(declared: str | None, os_name: str | None = None) -> str:
+    """Resolve an operator declaration, never a service/IP/HOME heuristic."""
+    host_os = (os_name or runtime_os()).casefold()
+    if declared not in (None, "workstation", "management-server"):
+        raise LoadError("invalid --host-role; expected workstation or management-server")
+    if host_os == "darwin":
+        if declared not in (None, "workstation"):
+            raise LoadError("Darwin host role must be workstation")
+        return "workstation"
+    if host_os == "linux":
+        if declared is None:
+            raise LoadError("Linux requires explicit --host-role=workstation|management-server before any write")
+        return declared
+    raise LoadError(f"unsupported host OS for --host-role: {host_os}")
+
+
 def _flush_operator_output() -> None:
     """Commit buffered narration before a direct child can emit output."""
     sys.stdout.flush()
@@ -598,16 +694,25 @@ def _popen_subprocess(*args, **kwargs):
 def run(
     command: list[str], *, cwd: Path | None = None, dry_run: bool = False,
     inherited_lock_descriptor: int | None = None,
+    setup_key_context: bool | None = None,
 ) -> None:
     display = " ".join(shlex_quote(item) for item in command)
     if dry_run:
         print(f"[DRY] ({cwd or Path.cwd()}) {display}")
         return
     print(f"[RUN] ({cwd or Path.cwd()}) {display}")
-    result = _run_subprocess(
-        command, cwd=cwd,
-        **inherited_lock_subprocess_kwargs(inherited_lock_descriptor),
-    )
+    child_kwargs = inherited_lock_subprocess_kwargs(inherited_lock_descriptor)
+    if setup_key_context is not None:
+        # This private mode is scoped to the setup child.  Never let an
+        # unrelated parent environment silently decide the child's key role.
+        child_env = dict(child_kwargs.get("env") or os.environ)
+        child_env.pop("HTTP_SETUP_KEY_MODE", None)
+        if setup_key_context:
+            if inherited_lock_descriptor is None:
+                raise LoadError("server-delegated setup requires the deployment lock FD")
+            child_env["HTTP_SETUP_KEY_MODE"] = "server-delegated"
+        child_kwargs["env"] = child_env
+    result = _run_subprocess(command, cwd=cwd, **child_kwargs)
     if result.returncode != 0:
         raise LoadError(f"命令执行失败（exit={result.returncode}）：{display}")
 
@@ -638,6 +743,14 @@ def resolve_project(argument: str) -> Path:
     project = project.resolve()
     if not _inside(project, HERE) or project == HERE:
         raise LoadError(f"部署目录必须是 {HERE} 下的独立项目目录：{project}")
+    # A local dry-run may intentionally name a not-yet-created project; the
+    # template planner reports that future creation.  An existing directory
+    # must pass the restore gate before any subsequent project operation.
+    if os.path.lexists(project):
+        try:
+            require_project_eligible(project)
+        except ValueError as exc:
+            raise LoadError(f"部署目录恢复提交未完成：{project}: {exc}") from exc
     return project
 
 
@@ -851,18 +964,15 @@ def _parse_subnet_ztp_fields(
     service_ip = ""
     if raw_ip:
         try:
-            address = ipaddress.IPv4Address(raw_ip)
-        except ipaddress.AddressValueError as exc:
+            endpoint = validate_service_endpoint(
+                raw_ip, field=f"DHCP subnet CSV 第 {lineno} 行 ztp_service_ip"
+            )
+        except ValueError as exc:
             raise LoadError(
                 f"DHCP subnet CSV 第 {lineno} 行 ztp_service_ip={raw_ip!r} "
-                "不是有效 IPv4"
-            ) from exc
-        if address.is_unspecified or address.is_multicast:
-            raise LoadError(
-                f"DHCP subnet CSV 第 {lineno} 行 ztp_service_ip={address} "
                 "不是可用单播地址"
-            )
-        service_ip = str(address)
+            ) from exc
+        service_ip = endpoint.host
     if (profile in BOOTSTRAP_BY_PROFILE or nvos_ztp == "yes") and not service_ip:
         raise LoadError(
             f"DHCP subnet CSV 第 {lineno} 行启用了平台 ZTP，"
@@ -910,6 +1020,8 @@ def load_global(
             f"global 缺少 common.mgmt.dhcp-server/http/ztp "
             f"或 common.switch.system：{exc}"
         ) from exc
+    if not isinstance(http, dict):
+        raise LoadError("common.mgmt.http 必须是 mapping")
 
     dhcp_enabled = _enabled(dhcp.get("status"), "common.mgmt.dhcp-server.status")
     dhcp_package = str(dhcp.get("package") or "").strip()
@@ -922,6 +1034,20 @@ def load_global(
     http_root_text = str(http.get("http_root") or "").strip()
     if not http_root_text or not Path(http_root_text).is_absolute():
         raise LoadError("common.mgmt.http.http_root 必须是绝对路径")
+    try:
+        http_port = validate_service_endpoint(
+            "192.0.2.1", http.get("port", 80), field="common.mgmt.http.port"
+        ).port
+    except ValueError as exc:
+        raise LoadError(str(exc)) from exc
+    http_address = None
+    if "address" in http:
+        try:
+            http_address = validate_service_endpoint(
+                http["address"], field="common.mgmt.http.address"
+            ).host
+        except ValueError as exc:
+            raise LoadError(str(exc)) from exc
     ztp_enabled = _enabled(ztp.get("status"), "common.mgmt.ztp.status")
     prefix = _validate_ztp_prefix(ztp.get("ztp_url_prefix"))
     # service_ip is intentionally not part of global.yaml. It is derived from
@@ -977,6 +1103,8 @@ def load_global(
         ztp_ips=ztp_ips,
         versions=versions,
         schema_version=schema_version,
+        http_port=http_port,
+        http_address=http_address,
     )
 
 
@@ -1028,10 +1156,13 @@ def find_placeholder_password_sections(global_data: object) -> tuple[str, ...]:
 
 
 def _placeholder_password_error(
-    project: Path, sections: tuple[str, ...],
+    project: Path, sections: tuple[str, ...], *, host_role: str,
 ) -> LoadError:
     platforms = {"eth": "cumulus", "ib": "ib", "nvl": "nvl"}
-    commands = [f"DAY0-Prepare/11-load.py {project} --update-passwords"]
+    commands = [
+        f"DAY0-Prepare/11-load.py {project} --update-passwords "
+        f"--host-role={host_role}"
+    ]
     if sections == SWITCH_CREDENTIAL_FAMILY_ORDER:
         commands.append(
             f"python3 tools/password-update.py {project} --platform all"
@@ -1146,6 +1277,8 @@ def load_device_types(
                     raise LoadError(f"devices_config.csv 缺少列：{required}")
             types: set[str] = set()
             seen_hostnames: set[str] = set()
+            seen_eth0_addr: dict[str, tuple[int, str]] = {}
+            seen_eth0_mac: dict[str, tuple[int, str]] = {}
             rows = 0
             for lineno, raw_row in enumerate(reader, start=2):
                 if not any(str(value or "").strip() for value in raw_row):
@@ -1161,7 +1294,9 @@ def load_device_types(
                 hostname = str(row[fields.index("hostname")] or "").strip()
                 kind = str(row[fields.index("type")] or "").strip().casefold()
                 template = str(row[fields.index("template")] or "").strip()
-                address = str(row[fields.index("eth0_ip")] or "").strip().split("/", 1)[0]
+                raw_address = str(row[fields.index("eth0_ip")] or "").strip()
+                address = raw_address.split("/", 1)[0]
+                raw_mac = str(row[fields.index("eth0_mac")] or "").strip()
                 if not hostname:
                     raise LoadError(f"devices_config.csv 第 {lineno} 行 hostname 为空")
                 if not SAFE_HOSTNAME.fullmatch(hostname):
@@ -1179,6 +1314,59 @@ def load_device_types(
                     selected_scope == "all"
                     or kind in SWITCH_SCOPE_TYPES[selected_scope]
                 )
+                try:
+                    parsed_address = ipaddress.IPv4Interface(raw_address).ip
+                except ValueError:
+                    parsed_address = None
+                if parsed_address is not None:
+                    address_key = str(parsed_address)
+                    previous = seen_eth0_addr.get(address_key)
+                    if previous is not None and (
+                        kind == "eth_jump" or previous[1] == "eth_jump"
+                    ):
+                        raise LoadError(
+                            f"devices_config.csv 第 {lineno} 行 eth0_ip 重复"
+                            f"（{address_key}，首次行{previous[0]}）"
+                        )
+                    seen_eth0_addr.setdefault(address_key, (lineno, kind))
+                valid_mac = bool(re.fullmatch(
+                    r"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}|"
+                    r"(?:[0-9a-f]{2}-){5}[0-9a-f]{2}",
+                    raw_mac.casefold(),
+                ))
+                if kind == "eth_jump" and not _device_csv_na(raw_mac) and not valid_mac:
+                    raise LoadError(
+                        f"devices_config.csv 第 {lineno} 行 eth_jump "
+                        f"eth0_mac={raw_mac!r} 无效"
+                    )
+                if valid_mac:
+                    mac_key = raw_mac.casefold().replace("-", ":")
+                    previous = seen_eth0_mac.get(mac_key)
+                    if previous is not None and (
+                        kind == "eth_jump" or previous[1] == "eth_jump"
+                    ):
+                        raise LoadError(
+                            f"devices_config.csv 第 {lineno} 行 eth0_mac 重复"
+                            f"（首次行{previous[0]}）"
+                        )
+                    seen_eth0_mac.setdefault(mac_key, (lineno, kind))
+                if kind == "eth_jump":
+                    conflicts = _eth_jump_configuration_intent(fields, row)
+                    if conflicts:
+                        raise LoadError(
+                            f"devices_config.csv 第 {lineno} 行 {hostname} type=eth_jump "
+                            f"字段 {', '.join(conflicts)} 与零配置意图冲突"
+                        )
+                    try:
+                        ipaddress.IPv4Address(raw_address)
+                    except ValueError as exc:
+                        raise LoadError(
+                            f"devices_config.csv 第 {lineno} 行 eth_jump "
+                            f"eth0_ip={raw_address!r} 无效"
+                        ) from exc
+                    if selected_kind:
+                        types.add(kind)
+                    continue
                 if not selected_kind:
                     continue
                 if kind in {"eth", "eth_spx", "spx"} and (
@@ -1202,46 +1390,25 @@ def load_device_types(
     return frozenset(types)
 
 
-def select_p2p(project: Path, explicit: str | None = None) -> Path:
-    if explicit:
-        path = (project / explicit).resolve()
-        if not _inside(path, project) or path.parent not in {project, project / "p2p"}:
-            raise LoadError("--p2p-file 必须位于项目根目录或 p2p/ 目录")
-    else:
-        canonical = project / "p2p.xlsx"
-        if canonical.is_file() and canonical.stat().st_size > 0:
+def select_p2p(
+    project: Path, explicit: str | None = None, *,
+    migrate_legacy_canonical: bool = False,
+) -> Path:
+    project = project.resolve()
+    canonical = project / "p2p.xlsx"
+    try:
+        # A pre-link real canonical workbook is the sole migration exception:
+        # setup rescues it using an atomic no-replace move before reconciliation.
+        if (
+            migrate_legacy_canonical and explicit is None and os.path.lexists(canonical)
+            and stat.S_ISREG(canonical.lstat().st_mode)
+            and canonical.stat().st_size > 0
+        ):
             path = canonical
         else:
-            version_dir = project / "p2p"
-            version_candidates = [
-                item for item in version_dir.iterdir()
-                if item.is_file()
-                and not item.name.startswith(("~$", "._"))
-                and item.name.casefold().endswith(".xlsx")
-                and "p2p" in item.name.casefold()
-                and item.stat().st_size > 0
-            ] if version_dir.is_dir() else []
-            if version_candidates:
-                path = max(
-                    version_candidates,
-                    key=lambda item: (item.stat().st_mtime_ns, item.name.casefold()),
-                )
-            else:
-                candidates = [
-                    item for item in sorted(project.iterdir())
-                    if item.is_file()
-                    and not item.name.startswith(("~$", "._"))
-                    and item.name.casefold().endswith(".xlsx")
-                    and "p2p" in item.name.casefold()
-                    and item.stat().st_size > 0
-                ]
-                if len(candidates) != 1:
-                    names = ", ".join(item.name for item in candidates) or "none"
-                    raise LoadError(
-                        f"需要唯一文件名含 P2P 的非空 XLSX；当前候选：{names}。"
-                        "可用 --p2p-file 明确指定"
-                    )
-                path = candidates[0]
+            path = select_project_p2p_source(project, explicit)
+    except (OSError, P2PSelectionError) as exc:
+        raise LoadError(f"P2P 选择失败：{exc}") from exc
     _nonempty_file(path, "p2p.xlsx")
     if path.suffix.casefold() != ".xlsx" or not zipfile.is_zipfile(path):
         raise LoadError(f"P2P 文件不是合法 XLSX：{path.name}")
@@ -1725,89 +1892,23 @@ def _revalidate_management_leaf(leaf: _HeldManagementLeaf) -> None:
 
 
 def _parse_management_ed25519(payload: bytes, label: str) -> tuple[bytes, bytes]:
-    if not payload or len(payload) > MANAGEMENT_KEY_MAX_BYTES:
-        raise LoadError(f"{label} 为空或过大")
-    if not payload.endswith(b"\n") or payload.endswith(b"\n\n") or b"\r" in payload:
-        raise LoadError(f"{label} 必须是单行 canonical Ed25519 public key")
-    line = payload[:-1]
-    if b"\n" in line or any(byte < 0x20 or byte > 0x7e for byte in line):
-        raise LoadError(f"{label} 必须是单行 canonical Ed25519 public key")
-    fields = line.split(b" ", 2)
-    if len(fields) < 2 or fields[0] != b"ssh-ed25519" or not fields[1]:
-        raise LoadError(f"{label} 必须是 ssh-ed25519 public key")
     try:
-        blob = base64.b64decode(fields[1], validate=True)
-    except (ValueError, TypeError) as exc:
-        raise LoadError(f"{label} base64 格式无效") from exc
-    expected_prefix = len(b"ssh-ed25519").to_bytes(4, "big") + b"ssh-ed25519"
-    if (
-        not blob.startswith(expected_prefix)
-        or len(blob) != len(expected_prefix) + 4 + 32
-        or int.from_bytes(blob[len(expected_prefix):len(expected_prefix) + 4], "big") != 32
-    ):
-        raise LoadError(f"{label} Ed25519 blob 结构无效")
-    return b"ssh-ed25519", fields[1]
+        identity = ssh_keys.public_key_identity_bytes(payload)
+    except ssh_keys.SshKeyPreparationError as exc:
+        raise LoadError(f"{label} Ed25519 public key 无效：{exc}") from exc
+    if identity[0] != b"ssh-ed25519":
+        raise LoadError(f"{label} 必须是 ssh-ed25519 public key")
+    return identity[0], base64.b64encode(identity[1])
 
 
 def _parse_held_project_public_identity(
     payload: bytes, label: str,
 ) -> tuple[bytes, bytes]:
-    if not payload or len(payload) > MANAGEMENT_KEY_MAX_BYTES:
-        raise LoadError(f"{label} 为空或过大")
-    if not payload.endswith(b"\n") or payload.endswith(b"\n\n") or b"\r" in payload:
-        raise LoadError(f"{label} 必须是单行 canonical SSH public key")
-    line = payload[:-1]
-    if b"\n" in line or any(byte < 0x20 or byte > 0x7e for byte in line):
-        raise LoadError(f"{label} 含有不安全控制字符")
-    fields = line.split(b" ", 2)
-    if len(fields) < 2 or not re.fullmatch(
-        rb"(?:ssh-(?:ed25519|rsa)|ecdsa-sha2-nistp(?:256|384|521)|"
-        rb"sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com)",
-        fields[0],
-    ):
-        raise LoadError(f"{label} SSH public key type 无效")
     try:
-        blob = base64.b64decode(fields[1], validate=True)
-    except (ValueError, TypeError) as exc:
-        raise LoadError(f"{label} base64 格式无效") from exc
-    offset = 0
-
-    def ssh_string() -> bytes:
-        nonlocal offset
-        if offset + 4 > len(blob):
-            raise LoadError(f"{label} SSH public key blob truncated")
-        size = int.from_bytes(blob[offset:offset + 4], "big")
-        offset += 4
-        if size <= 0 or offset + size > len(blob):
-            raise LoadError(f"{label} SSH public key blob field 无效")
-        value = blob[offset:offset + size]
-        offset += size
-        return value
-
-    if ssh_string() != fields[0]:
-        raise LoadError(f"{label} textual type 与 SSH blob type 不匹配")
-    if fields[0] == b"ssh-ed25519":
-        if len(ssh_string()) != 32:
-            raise LoadError(f"{label} Ed25519 key length 无效")
-    elif fields[0] == b"ssh-rsa":
-        exponent = ssh_string()
-        modulus = ssh_string()
-        if not exponent or not modulus:
-            raise LoadError(f"{label} RSA key fields 无效")
-    elif fields[0].startswith(b"ecdsa-sha2-"):
-        curve = ssh_string()
-        point = ssh_string()
-        if fields[0] != b"ecdsa-sha2-" + curve or not point:
-            raise LoadError(f"{label} ECDSA key fields 无效")
-    elif fields[0] == b"sk-ssh-ed25519@openssh.com":
-        if len(ssh_string()) != 32 or not ssh_string():
-            raise LoadError(f"{label} security-key fields 无效")
-    elif fields[0] == b"sk-ecdsa-sha2-nistp256@openssh.com":
-        if ssh_string() != b"nistp256" or not ssh_string() or not ssh_string():
-            raise LoadError(f"{label} security-key fields 无效")
-    if offset != len(blob):
-        raise LoadError(f"{label} SSH public key blob 含 trailing data")
-    return fields[0], fields[1]
+        identity = ssh_keys.public_key_identity_bytes(payload)
+    except ssh_keys.SshKeyPreparationError as exc:
+        raise LoadError(f"{label} SSH public key 无效：{exc}") from exc
+    return identity[0], base64.b64encode(identity[1])
 
 
 def _management_fd_path(descriptor: int) -> str:
@@ -1940,10 +2041,12 @@ def deployable_pubkeys(pubkeys: tuple[Path, ...]) -> tuple[Path, ...]:
     )
 
 
-def _public_key_identity(path: Path) -> str:
+def _public_key_identity(path: Path) -> tuple[bytes, bytes]:
     """Return the key type/blob pair, excluding the non-identity comment."""
-    fields = path.read_text(encoding="utf-8").splitlines()[0].split()
-    return " ".join(fields[:2])
+    try:
+        return ssh_keys.public_key_identity(path)
+    except ssh_keys.SshKeyPreparationError as exc:
+        raise LoadError(f"项目公钥身份无效：{exc}") from exc
 
 
 def _management_pair_presence(ssh_dir: Path) -> tuple[bool, bool]:
@@ -1972,52 +2075,53 @@ def _management_pair_presence(ssh_dir: Path) -> tuple[bool, bool]:
         directory.close()
 
 
-def _generate_native_management_key(ssh_dir: Path) -> None:
-    private_key = ssh_dir / MANAGEMENT_PRIVATE_KEY_NAME
-    public_key = ssh_dir / MANAGEMENT_PUBLIC_KEY_NAME
-    created_directory = False
+def _server_rsa_public_fallback_present(ssh_dir: Path) -> bool:
+    """Check a server RSA public leaf without consulting its private half.
+
+    Native management-key generation must not silently supersede a present
+    RSA public identity. RSA-only server operation remains unsupported until
+    its separate no-private-read contract is resolved.
+    """
     try:
-        os.lstat(ssh_dir)
-    except FileNotFoundError:
-        try:
-            ssh_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
-            created_directory = True
-        except OSError as exc:
-            raise LoadError(f"无法创建管理服务器 SSH 目录：{exc}") from exc
-    directory = _open_management_directory(
-        ssh_dir, label="管理服务器 SSH 目录", allowed_modes=(0o700,),
-    )
-    directory.close()
-    if not MANAGEMENT_KEYGEN.is_file():
-        raise LoadError("固定 /usr/bin/ssh-keygen 不存在，无法生成管理服务器 key")
-    try:
-        result = _run_bounded_management_command(
-            [
-                os.fspath(MANAGEMENT_KEYGEN), "-q", "-t", "ed25519", "-N", "",
-                "-f", os.fspath(private_key), "-C", "root@management-server",
-            ],
+        directory = _open_management_directory(
+            ssh_dir, label="管理服务器 SSH 目录", allowed_modes=(0o700,),
         )
-        if result.returncode != 0:
-            raise LoadError("自动生成管理服务器 SSH key 失败")
-        os.chmod(private_key, 0o600, follow_symlinks=False)
-        os.chmod(public_key, 0o644, follow_symlinks=False)
-    except BaseException:
-        for path in (private_key, public_key):
-            try:
-                metadata = os.lstat(path)
-            except OSError:
-                continue
-            if stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1:
-                try:
-                    path.unlink()
-                except OSError:
-                    pass
-        if created_directory:
-            try:
-                ssh_dir.rmdir()
-            except OSError:
-                pass
+    except LoadError as exc:
+        if "无法安全打开" in str(exc) and not ssh_dir.exists():
+            return False
         raise
+    rsa_public: _HeldManagementLeaf | None = None
+    try:
+        try:
+            os.stat("id_rsa.pub", dir_fd=directory.descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            _revalidate_management_directory(directory)
+            return False
+        except OSError as exc:
+            raise LoadError(f"无法检查管理服务器 RSA public key：{exc}") from exc
+        rsa_public = _open_management_leaf(
+            directory, "id_rsa.pub", label="管理服务器 RSA public key", mode=0o644,
+        )
+        try:
+            identity = ssh_keys.public_key_identity_bytes(rsa_public.payload)
+        except ssh_keys.SshKeyPreparationError as exc:
+            raise LoadError(f"管理服务器 RSA public key 无效：{exc}") from exc
+        if identity[0] != b"ssh-rsa":
+            raise LoadError("id_rsa.pub 不是 RSA public key")
+        _revalidate_management_leaf(rsa_public)
+        _revalidate_management_directory(directory)
+        return True
+    finally:
+        if rsa_public is not None:
+            rsa_public.close()
+        directory.close()
+
+
+def _generate_native_management_key(ssh_dir: Path) -> None:
+    try:
+        ssh_keys.generate_ed25519_pair(ssh_dir, comment="root@management-server")
+    except ssh_keys.SshKeyPreparationError as exc:
+        raise LoadError(f"自动生成管理服务器 SSH key 失败：{exc}") from exc
 
 
 def ensure_management_key(
@@ -2036,6 +2140,11 @@ def ensure_management_key(
     if private_exists != public_exists:
         raise LoadError("管理服务器 SSH key pair 不完整，未自动修复")
     if not private_exists:
+        if _server_rsa_public_fallback_present(ssh_dir):
+            raise LoadError(
+                "管理服务器存在 RSA public key；RSA-only server fallback 尚未获准，"
+                "拒绝静默生成或发布另一把 Ed25519 key"
+            )
         if not allow_generation:
             raise LoadError("管理服务器 SSH key 尚未由 host helper prepared；Supervisor 不会生成")
         if dry_run:
@@ -2061,7 +2170,17 @@ def _prepare_pubkeys_without_management_injection(
     } if marker.is_file() else set()
     empty = [item for item in pubs if not item.is_file() or item.stat().st_size == 0]
     static = [item for item in pubs if item not in empty and item.name not in managed_names]
-    if not static:
+    # setup, not this config-only preflight, prepares the laptop's HOME key.
+    # Only its explicitly named empty regular placeholder may be planned as a
+    # static key; no other empty *.pub can satisfy that role.
+    laptop_placeholder = project / LAPTOP_PUBKEY_NAME
+    planned_laptop = None
+    if laptop_placeholder in empty and LAPTOP_PUBKEY_NAME not in managed_names:
+        metadata = laptop_placeholder.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or metadata.st_size != 0:
+            raise LoadError("laptop.pub 空占位在配置预检中发生变化或不是独立普通文件")
+        planned_laptop = laptop_placeholder
+    if not static and planned_laptop is None:
         raise LoadError("项目必须至少包含一个非空 *.pub（例如模板中的电脑公钥）")
     for item in static:
         validate_pubkey(item)
@@ -2069,7 +2188,7 @@ def _prepare_pubkeys_without_management_injection(
         project / name for name in managed_names if (project / name).is_file()
     )
     if not planned_management:
-        planned_management = sorted(empty)
+        planned_management = sorted(item for item in empty if item != planned_laptop)
     preserved = sorted(item for item in planned_management if item.stat().st_size > 0)
     for item in preserved:
         validate_pubkey(item)
@@ -2086,8 +2205,8 @@ def _prepare_pubkeys_without_management_injection(
             "当前平台仅准备配置，项目中的管理服务器公钥尚未注入；"
             "保留计划公钥路径但不发布空文件。请在 Linux 管理服务器正式 load 时注入管理 key"
         )
-    valid = static + planned_management
-    if len(valid) < 2:
+    valid = static + ([planned_laptop] if planned_laptop is not None else []) + planned_management
+    if (planned_laptop is not None and not planned_management) or len(set(valid)) < 2:
         raise LoadError(
             "ZTP 需要一个电脑公钥和一个管理服务器公钥占位路径；"
             f"请在项目中增加空的 {MANAGEMENT_PUBKEY_NAME}"
@@ -2160,9 +2279,7 @@ def prepare_pubkeys(
         pair = _open_management_pair(ssh_dir)
         if pair.identity in static_identities:
             raise LoadError("管理服务器公钥与项目电脑公钥相同，无法保证两个独立 key")
-        if placeholder_identity is not None:
-            if placeholder_identity != pair.identity:
-                raise LoadError("项目管理服务器公钥与 prepared service key 不匹配 mismatch")
+        if placeholder_identity == pair.identity:
             _revalidate_management_leaf(marker)
             _revalidate_management_leaf(placeholder)
             for leaf in static_leaves:
@@ -2187,6 +2304,20 @@ def prepare_pubkeys(
         _revalidate_management_leaf(pair.private)
         _revalidate_management_leaf(pair.public)
         _revalidate_management_directory(pair.directory)
+        if placeholder_identity is not None:
+            # Held management identities use canonical base64 as their second
+            # field; OpenSSH fingerprints hash the decoded wire blob.
+            old_wire = base64.b64decode(placeholder_identity[1], validate=True)
+            new_wire = base64.b64decode(pair.identity[1], validate=True)
+            mismatch = (
+                f"management public key mismatch: {placeholder.name} "
+                f"source={ssh_dir / MANAGEMENT_PUBLIC_KEY_NAME} "
+                f"old={ssh_keys._fingerprint((placeholder_identity[0], old_wire))} "
+                f"new={ssh_keys._fingerprint((pair.identity[0], new_wire))}; "
+                "existing real key was not changed"
+            )
+            print(f"[BLOCK] {mismatch}")
+            raise LoadError(mismatch)
         if dry_run:
             print(f"[DRY] 将注入 prepared service management public key → {placeholder.name}")
             return tuple(sorted(static + [project / MANAGEMENT_PUBKEY_NAME], key=_pubkey_sort_key))
@@ -2946,7 +3077,9 @@ def sync_marker_present(path: Path) -> bool:
 def activate_project(
     project: Path, p2p_file: Path, *, strict: bool = True, dry_run: bool = False,
     deployment_lock_descriptor: int | None = None,
+    host_role: str | None = None,
 ) -> None:
+    host_role = resolve_host_role(host_role)
     current = active_project()
     if current == project:
         mode = "严格" if strict else "配置准备/no-upgrade（跳过部署门禁）"
@@ -2964,13 +3097,32 @@ def activate_project(
         p2p_argument = p2p_file.relative_to(project).as_posix()
     except ValueError as exc:
         raise LoadError(f"P2P 文件不在项目目录内：{p2p_file}") from exc
-    command.extend([f"--p2p-file={p2p_argument}", str(project)])
+    # A nonempty legacy canonical is migrated by setup's no-override path.
+    # Passing it as an explicit pin would point at a name moved by the rescue.
+    if p2p_argument != "p2p.xlsx" or p2p_file.is_symlink():
+        command.append(f"--p2p-file={p2p_argument}")
+    command.append(str(project))
+    server_delegated_setup = host_role == "management-server"
+    command.insert(-1, f"--host-role={host_role}")
+    if server_delegated_setup and not dry_run and deployment_lock_descriptor is None:
+        raise LoadError("server load invoking setup requires the inherited deployment lock FD")
     run(
         command, cwd=HERE, dry_run=dry_run,
         inherited_lock_descriptor=deployment_lock_descriptor,
+        setup_key_context=server_delegated_setup,
     )
     if not dry_run and active_project() != project:
         raise LoadError("01-a-setup.py 返回成功，但活动项目清单未指向目标项目")
+    if not dry_run:
+        canonical = project / "p2p.xlsx"
+        if not canonical.is_symlink():
+            raise LoadError("setup 后 p2p.xlsx 不是项目根目录相对链接")
+        try:
+            selected = select_upload_p2p(project)
+        except ValueError as exc:
+            raise LoadError(f"setup 后 P2P 链接无效：{exc}") from exc
+        if _sha256_path(selected) != _sha256_path(p2p_file):
+            raise LoadError("setup 后 P2P 选定内容与预检内容不一致")
 
 
 def _runtime_interface_names(raw_value: str) -> tuple[str, ...]:
@@ -3062,6 +3214,14 @@ def plan_local_dhcp_runtime(
         )
     except RuntimeContractError as exc:
         raise LoadError(f"DHCP listener 动态规划失败：{exc}") from exc
+    if not inputs.settings.dhcp_enabled:
+        # The CSV still supplies HTTP/ZTP endpoint identity, but a disabled
+        # DHCP service must not inherit a listener from otherwise valid rows.
+        plan = replace(
+            plan, listener_names=(), listener_ifindexes=(),
+            direct_shared_networks=(), relay_shared_networks=(),
+            dhcp_only_shared_networks=(),
+        )
     if plan.listener_names:
         ok(
             "DHCP listener 动态规划通过："
@@ -3102,9 +3262,11 @@ def _runtime_service_action(
 
 def active_managed_services(
     runtime_backend: ServiceRuntimeBackend | None = None,
+    *, host_role: str | None = None,
 ) -> tuple[str, ...]:
     """Return the managed units that are currently active, without mutation."""
-    if not supports_local_ztp_services():
+    host_role = resolve_host_role(host_role)
+    if host_role != "management-server":
         return ()
     backend = runtime_backend or service_runtime_backend()
     if backend.name == "supervisor":
@@ -3129,11 +3291,12 @@ def active_managed_services(
 def require_artifact_builder_services_inactive(
     dry_run: bool = False, *,
     runtime_backend: ServiceRuntimeBackend | None = None,
+    host_role: str | None = None,
 ) -> None:
     """Never stop unrelated live services for a configuration-only Linux run."""
     if dry_run:
         return
-    active = active_managed_services(runtime_backend)
+    active = active_managed_services(runtime_backend, host_role=host_role)
     if active:
         raise LoadError(
             "本机不具备当前项目 service_ip，且以下服务正在运行："
@@ -3150,10 +3313,12 @@ def quiesce_services(
     runtime_backend: ServiceRuntimeBackend | None = None,
     native_monitor_already_quiesced: bool = False,
     link_snapshot=None, address_snapshot=None,
+    host_role: str | None = None,
 ) -> DhcpRuntimePlan | None:
     """Stop services before changing project links; failed loads remain safely stopped."""
-    if not supports_local_ztp_services():
-        info(f"{runtime_os()} 不管理 Apache/ISC DHCP，跳过旧服务状态检查")
+    host_role = resolve_host_role(host_role)
+    if host_role != "management-server":
+        info("workstation 不管理 Apache/ISC DHCP，跳过旧服务状态检查")
         return None
     # This is deliberately the first executable gate in this function.  A
     # listener ambiguity must not stop even one currently healthy service.
@@ -3176,7 +3341,7 @@ def quiesce_services(
     if backend.name == "systemd" and not shutil.which("systemctl"):
         info("未找到 systemctl，跳过旧服务状态检查")
         return dhcp_plan
-    active = list(active_managed_services(backend))
+    active = list(active_managed_services(backend, host_role=host_role))
     if not active:
         ok("Apache/DHCP 当前均未运行，可以安全切换项目")
         return dhcp_plan
@@ -3475,6 +3640,76 @@ def configure_ztp_prefix_publication(
         raise
 
 
+def render_bootstrap_script_text(
+    text: str, *, address: str, port: int, prefix: str,
+    manual_urls: dict[str, str], upgrade_enabled: bool,
+    key_names: tuple[str, ...] | list[str], eth_version: str | None,
+    script_name: str,
+) -> str:
+    """Render one bootstrap without a filesystem side effect.
+
+    The origin may contain a port; the route and reachability target must be
+    the canonical host alone. Every required template slot is fail-closed.
+    """
+    endpoint = validate_service_endpoint(
+        address, port, field=f"{script_name} ZTP service"
+    )
+    text, server_count = re.subn(
+        r'^ZTP_SERVER="[^"]*"$',
+        f'ZTP_SERVER="{service_url(endpoint, "", channel="bootstrap-origin")}"',
+        text, count=1, flags=re.MULTILINE,
+    )
+    text, host_count = re.subn(
+        r'^ZTP_SERVER_HOST="[^"]*"$', f'ZTP_SERVER_HOST="{endpoint.host}"',
+        text, count=1, flags=re.MULTILINE,
+    )
+    text, prefix_count = re.subn(
+        r'^ZTP_URL_PREFIX="[^"]*"$',
+        f'ZTP_URL_PREFIX="{prefix}"', text, count=1,
+        flags=re.MULTILINE,
+    )
+    text, manual_oob_count = re.subn(
+        r'^MANUAL_ZTP_OOB_URL="[^"]*"$',
+        f'MANUAL_ZTP_OOB_URL="{manual_urls.get("ztp-bootstrap_oob.sh", "")}"',
+        text, count=1, flags=re.MULTILINE,
+    )
+    text, manual_oobofoob_count = re.subn(
+        r'^MANUAL_ZTP_OOBOFOOB_URL="[^"]*"$',
+        f'MANUAL_ZTP_OOBOFOOB_URL="{manual_urls.get("ztp-bootstrap_oobofoob.sh", "")}"',
+        text, count=1, flags=re.MULTILINE,
+    )
+    text, upgrade_count = re.subn(
+        r'^ZTP_UPGRADE_ENABLED="(?:true|false)"$',
+        f'ZTP_UPGRADE_ENABLED="{str(upgrade_enabled).lower()}"',
+        text, count=1, flags=re.MULTILINE,
+    )
+    key_block = "PUBKEY_PATHS=(\n" + "".join(
+        f'    "${{ZTP_URL_PREFIX}}/config/publickey/{name}"\n'
+        for name in key_names
+    ) + ")"
+    text, key_count = re.subn(
+        r'^PUBKEY_PATHS=\(\n.*?^\)$', key_block, text, count=1,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    if (
+        server_count != 1 or host_count != 1 or prefix_count != 1
+        or manual_oob_count != 1 or manual_oobofoob_count != 1
+        or upgrade_count != 1 or key_count != 1
+    ):
+        raise LoadError(
+            f"无法安全更新 {script_name} 的服务器、手工 ZTP URL、升级开关或公钥参数"
+        )
+    if eth_version:
+        text, version_count = re.subn(
+            r'^TARGET_CL_VER="[^"]*"$',
+            f'TARGET_CL_VER="{eth_version}"', text, count=1,
+            flags=re.MULTILINE,
+        )
+        if version_count != 1:
+            raise LoadError(f"无法安全更新 {script_name} 的 TARGET_CL_VER")
+    return text
+
+
 def render_ztp_runtime(
     settings: GlobalSettings, pubkeys: tuple[Path, ...], device_types: frozenset[str],
     *, upgrade_enabled: bool = True, dry_run: bool = False,
@@ -3515,69 +3750,30 @@ def render_ztp_runtime(
     if not template.is_file():
         raise LoadError(f"缺少不可变 bootstrap 模板：{template}")
     template_text = template.read_text(encoding="utf-8")
-    manual_urls = {
-        filename: f"http://{address}{settings.ztp_prefix}/{filename}"
-        for filename, address in scripts
-    }
+    manual_urls = {}
+    for filename, address in scripts:
+        endpoint = validate_service_endpoint(
+            address, settings.http_port, field="bootstrap service IPv4"
+        )
+        if filename == "ztp-bootstrap_oobofoob.sh":
+            manual_urls[filename] = service_url(
+                endpoint, f"/{filename}", prefix=settings.ztp_prefix,
+                channel="bootstrap-manual-oobofoob",
+            )
+        else:
+            manual_urls[filename] = service_url(
+                endpoint, f"/{filename}", prefix=settings.ztp_prefix,
+                channel="bootstrap-manual-oob",
+            )
     for filename, address in scripts:
         script = ZTP_DIR / filename
 
-        def transform(
-            text: str, address: str = address, filename: str = filename,
-        ) -> str:
-            text, server_count = re.subn(
-                r'^ZTP_SERVER="[^"]*"$', f'ZTP_SERVER="http://{address}"',
-                text, count=1, flags=re.MULTILINE,
-            )
-            text, prefix_count = re.subn(
-                r'^ZTP_URL_PREFIX="[^"]*"$',
-                f'ZTP_URL_PREFIX="{settings.ztp_prefix}"', text, count=1,
-                flags=re.MULTILINE,
-            )
-            text, manual_oob_count = re.subn(
-                r'^MANUAL_ZTP_OOB_URL="[^"]*"$',
-                f'MANUAL_ZTP_OOB_URL="{manual_urls.get("ztp-bootstrap_oob.sh", "")}"',
-                text, count=1,
-                flags=re.MULTILINE,
-            )
-            text, manual_oobofoob_count = re.subn(
-                r'^MANUAL_ZTP_OOBOFOOB_URL="[^"]*"$',
-                f'MANUAL_ZTP_OOBOFOOB_URL="{manual_urls.get("ztp-bootstrap_oobofoob.sh", "")}"',
-                text, count=1,
-                flags=re.MULTILINE,
-            )
-            text, upgrade_count = re.subn(
-                r'^ZTP_UPGRADE_ENABLED="(?:true|false)"$',
-                f'ZTP_UPGRADE_ENABLED="{str(upgrade_enabled).lower()}"',
-                text, count=1, flags=re.MULTILINE,
-            )
-            key_block = "PUBKEY_PATHS=(\n" + "".join(
-                f'    "${{ZTP_URL_PREFIX}}/config/publickey/{name}"\n'
-                for name in key_names
-            ) + ")"
-            text, key_count = re.subn(
-                r'^PUBKEY_PATHS=\(\n.*?^\)$', key_block, text, count=1,
-                flags=re.MULTILINE | re.DOTALL,
-            )
-            if (
-                server_count != 1 or prefix_count != 1
-                or manual_oob_count != 1 or manual_oobofoob_count != 1
-                or upgrade_count != 1 or key_count != 1
-            ):
-                raise LoadError(
-                    f"无法安全更新 {script.name} 的服务器、手工 ZTP URL、升级开关或公钥参数"
-                )
-            if eth_version:
-                text, version_count = re.subn(
-                    r'^TARGET_CL_VER="[^"]*"$',
-                    f'TARGET_CL_VER="{eth_version}"', text, count=1,
-                    flags=re.MULTILINE,
-                )
-                if version_count != 1:
-                    raise LoadError(f"无法安全更新 {script.name} 的 TARGET_CL_VER")
-            return text
-
-        rendered = transform(template_text)
+        rendered = render_bootstrap_script_text(
+            template_text, address=address, port=settings.http_port,
+            prefix=settings.ztp_prefix, manual_urls=manual_urls,
+            upgrade_enabled=upgrade_enabled, key_names=key_names,
+            eth_version=eth_version, script_name=script.name,
+        )
         try:
             display_script = script.relative_to(HTTP_ROOT)
         except ValueError:
@@ -3610,11 +3806,20 @@ def render_ztp_runtime(
             if not isinstance(ping_hosts, list) or not ping_hosts:
                 raise TypeError("01-connectivity-check.ping-hosts 必须是非空列表")
             ping_hosts[0] = prod_oob_ips[0]
+            endpoint = validate_service_endpoint(
+                prod_oob_ips[0], settings.http_port, field="NVOS ZTP service IPv4"
+            )
             ztp["02-commands-list"]["url"] = (
-                f"http://{prod_oob_ips[0]}{settings.ztp_prefix}/config/nvos/disable-password-hardening.nv"
+                service_url(
+                    endpoint, "/config/nvos/disable-password-hardening.nv",
+                    prefix=settings.ztp_prefix, channel="nvos-commands-list",
+                )
             )
             ztp["03-provisioning-script"]["url"] = (
-                f"http://{prod_oob_ips[0]}{settings.ztp_prefix}/ztp-bootstrap_oob.sh"
+                service_url(
+                    endpoint, "/ztp-bootstrap_oob.sh",
+                    prefix=settings.ztp_prefix, channel="nvos-provisioning",
+                )
             )
         except (OSError, UnicodeError, KeyError, TypeError, json.JSONDecodeError) as exc:
             raise LoadError(f"NVOS ZTP 模板结构无效：{exc}") from exc
@@ -3966,6 +4171,20 @@ def _sha256_path(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def p2p_release_source_binding(project: Path, selected_input: Path) -> dict[str, str]:
+    """Bind the selected real project-root workbook, not its canonical link."""
+    try:
+        source = select_upload_p2p(project)
+        if selected_input.resolve(strict=True) != source:
+            raise LoadError(
+                "P2P release 输入与 p2p.xlsx 选择记录不一致："
+                f"input={selected_input.name} selected={source.name}"
+            )
+        return {"path": source.name, "sha256": _sha256_path(source)}
+    except (OSError, ValueError) as exc:
+        raise LoadError(f"P2P release 真实来源无效：{exc}") from exc
 
 
 def _project_source_identities(inputs: ProjectInputs) -> dict[str, str]:
@@ -4409,6 +4628,241 @@ def _validate_child_artifacts(
             )
 
 
+def _published_breakouts(path: Path) -> dict[str, str]:
+    """Read exact physical breakout intent from one already-published YAML."""
+    try:
+        document = _strict_yaml_document(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise LoadError(f"cumulus breakout YAML 无法解析：{path}: {exc}") from exc
+    fragments = document if isinstance(document, list) else [document]
+    found: dict[str, str] = {}
+    for fragment in fragments:
+        if not isinstance(fragment, dict):
+            continue
+        settings = fragment.get("set")
+        interfaces = settings.get("interface") if isinstance(settings, dict) else None
+        if interfaces is None:
+            continue
+        if not isinstance(interfaces, dict):
+            raise LoadError(f"cumulus interface YAML 不是 mapping：{path}")
+        for parent, interface in interfaces.items():
+            link = interface.get("link") if isinstance(interface, dict) else None
+            if not isinstance(link, dict) or "breakout" not in link:
+                continue
+            breakout = link["breakout"]
+            if (not isinstance(parent, str)
+                    or not re.fullmatch(r"swp[0-9]+", parent)
+                    or not isinstance(breakout, dict)
+                    or len(breakout) != 1):
+                raise LoadError(f"cumulus breakout 结构无效：{path}:{parent}")
+            mode, value = next(iter(breakout.items()))
+            count = {"2x": 2, "4x": 4, "8x": 8}.get(mode)
+            if (count is None or not isinstance(value, dict)
+                    or set(value) != {"lanes-per-port"}
+                    or isinstance(value["lanes-per-port"], bool)
+                    or str(value["lanes-per-port"]) != str(8 // count)
+                    or parent in found):
+                raise LoadError(f"cumulus breakout mode/lanes 无效或重复：{path}:{parent}")
+            found[parent] = f"1to{count}"
+    return found
+
+
+def _source_yaml_receipts(path: Path, schema_version: int) -> dict[str, bytes]:
+    """Independently validate the generator's CSV source-receipt contract."""
+    receipts: dict[str, bytes] = {}
+    try:
+        with path.open(newline="", encoding="utf-8-sig") as stream:
+            reader = csv.reader(stream)
+            header = [str(cell or "").strip().casefold() for cell in next(reader, [])]
+            metadata = ("source_yaml_b64", "source_yaml_sha256", "source_fields_sha256")
+            if not any(name in header for name in metadata):
+                return receipts
+            layout = parse_device_csv_layout(header, schema_version)
+            if tuple(header[layout.metadata_start:]) != metadata:
+                raise ValueError("source YAML metadata columns are incomplete")
+            for lineno, raw in enumerate(reader, 2):
+                if not any(raw):
+                    continue
+                require_device_csv_row_width(raw, len(header), schema_version,
+                                             lineno=lineno)
+                row = [str(cell or "").strip() for cell in raw]
+                row.extend([""] * max(0, len(header) - len(row)))
+                hostname = row[0].casefold()
+                if not hostname or hostname in receipts:
+                    raise ValueError(f"duplicate/empty source receipt hostname: {hostname!r}")
+                encoded, source_sha, fields_sha = row[layout.metadata_start:len(header)]
+                if not encoded or encoded.casefold() == "na":
+                    continue
+                actual_fields = hashlib.sha256(json.dumps(
+                    row[:layout.metadata_start], ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")).hexdigest()
+                if (not re.fullmatch(r"[0-9a-fA-F]{64}", fields_sha)
+                        or not hmac.compare_digest(fields_sha.casefold(), actual_fields)
+                        or not re.fullmatch(r"[0-9a-fA-F]{64}", source_sha)):
+                    raise ValueError(f"source YAML metadata digest invalid: {hostname}")
+                prefix = "gzip+base64:"
+                compressed = encoded.startswith(prefix)
+                payload = encoded[len(prefix):] if compressed else encoded
+                source = base64.b64decode(payload, validate=True)
+                if compressed:
+                    source = gzip.decompress(source)
+                if not hmac.compare_digest(
+                    hashlib.sha256(source).hexdigest(), source_sha.casefold(),
+                ):
+                    raise ValueError(f"source YAML digest changed: {hostname}")
+                source_document = _strict_yaml_document(source.decode("utf-8"))
+                if not (isinstance(source_document, list) and any(
+                    isinstance(item, dict) and isinstance(item.get("set"), dict)
+                    for item in source_document
+                )):
+                    raise ValueError(f"source YAML must contain set mapping: {hostname}")
+                receipts[hostname] = source
+    except (OSError, UnicodeError, ValueError, binascii.Error, EOFError) as exc:
+        raise LoadError(f"cumulus source YAML receipt 无效：{path}: {exc}") from exc
+    return receipts
+
+
+def _sidecar_profiles_for_child(
+    expected: dict[str, dict[str, str]], hostname: str,
+) -> dict[str, str] | None:
+    """Resolve one child hostname against P2P's site-qualified device keys.
+
+    The Cumulus child accepts either an exact key or one ``-hostname``
+    boundary suffix.  More than one matching site is ambiguous even when its
+    profile happens to be identical, so parent provenance must fail closed.
+    """
+    matches = [host for host in expected
+               if host == hostname or host.endswith("-" + hostname)]
+    if len(matches) > 1:
+        raise ValueError(
+            f"ambiguous splitter sidecar device ownership for {hostname}: "
+            f"{sorted(matches)}"
+        )
+    return expected[matches[0]] if matches else None
+
+
+def _current_splitter_provenance(
+    project: Path, devices_file: Path, p2p_file: Path, release_dir: Path,
+    manifest: dict[str, object], schema_version: int,
+) -> dict[str, object] | None:
+    """Bind published breakout YAML to current source authority, not a stale cache."""
+    rows = manifest.get("devices")
+    if not isinstance(rows, list):
+        raise LoadError("cumulus manifest.devices 必须是 list")
+    breakouts: dict[str, dict[str, str]] = {}
+    configs: dict[str, Path] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise LoadError("cumulus manifest.devices 包含非 object 元素")
+        hostname = str(row.get("hostname") or "").strip()
+        config = release_dir / str(row.get("config") or "")
+        profiles = _published_breakouts(config)
+        if profiles:
+            key = hostname.casefold()
+            breakouts[key] = profiles
+            configs[key] = config
+    if not breakouts:
+        return None
+
+    receipts = _source_yaml_receipts(devices_file, schema_version)
+    source_yaml: dict[str, str] = {}
+    generated: dict[str, dict[str, str]] = {}
+    for hostname, profiles in breakouts.items():
+        if hostname in receipts:
+            source = receipts[hostname]
+            if configs[hostname].read_bytes() != source:
+                raise LoadError(f"cumulus source YAML 与 child 发布字节不一致：{hostname}")
+            source_yaml[hostname] = hashlib.sha256(source).hexdigest()
+        else:
+            generated[hostname] = profiles
+
+    provenance: dict[str, object] = {
+        "schema_version": 1,
+        "devices_schema_version": schema_version,
+        "devices_name": devices_file.name,
+        "devices_sha256": _sha256_path(devices_file),
+        "published_profiles": breakouts,
+        "source_yaml_sha256": source_yaml,
+    }
+    if not generated:
+        return provenance
+
+    try:
+        selected = select_upload_p2p(project)
+        if p2p_file.resolve(strict=True) != selected:
+            raise LoadError("P2P splitter workbook 与本次选择不一致")
+        p2p = ZTP_DIR / "config/cumulus/template/P2P"
+        workbook = p2p / "p2p.xlsx"
+        if workbook.resolve(strict=True) != selected:
+            raise LoadError("P2P splitter 固定 workbook 不是本次项目来源")
+        output = p2p / "output-p2p"
+        sidecar = output / f"{selected.stem}-splitter-profiles.json"
+        lldpq = output / f"{selected.stem}-lldpq.dot"
+        metadata = sidecar.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise LoadError("P2P splitter sidecar 不是单链接普通文件")
+
+        def unique_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+            result: dict[str, object] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError(f"duplicate splitter sidecar key: {key}")
+                result[key] = value
+            return result
+
+        document = json.loads(sidecar.read_text(encoding="utf-8"),
+                              object_pairs_hook=unique_keys)
+        keys = {"schema_version", "source_workbook", "workbook_sha256",
+                "inventory_sha256", "port_mapping_sha256", "lldpq_sha256",
+                "profiles"}
+        if (not isinstance(document, dict) or set(document) != keys
+                or type(document["schema_version"]) is not int
+                or document["schema_version"] != 1
+                or document["source_workbook"] != selected.name
+                or not isinstance(document["profiles"], list)):
+            raise ValueError("invalid splitter sidecar schema/source")
+        bindings = {
+            "workbook_sha256": selected,
+            "inventory_sha256": p2p / "01-inventory.log",
+            "port_mapping_sha256": p2p / "02-port-mapping.log",
+            "lldpq_sha256": lldpq,
+        }
+        for field, path in bindings.items():
+            actual = _sha256_path(path)
+            if not isinstance(document[field], str) or not hmac.compare_digest(
+                document[field].casefold(), actual,
+            ):
+                raise ValueError(f"splitter sidecar source binding changed: {field}")
+        expected: dict[str, dict[str, str]] = {}
+        for item in document["profiles"]:
+            if (not isinstance(item, dict)
+                    or set(item) != {"device", "parent", "profile"}
+                    or not isinstance(item["device"], str)
+                    or not SAFE_HOSTNAME.fullmatch(item["device"])
+                    or not isinstance(item["parent"], str)
+                    or not re.fullmatch(r"swp[0-9]+", item["parent"])
+                    or not isinstance(item["profile"], str)
+                    or item["profile"] not in {"1to2", "1to4", "1to8"}):
+                raise ValueError("invalid splitter sidecar profile entry")
+            host = item["device"].casefold()
+            profiles = expected.setdefault(host, {})
+            if item["parent"] in profiles:
+                raise ValueError(f"duplicate splitter sidecar profile: {host}:{item['parent']}")
+            profiles[item["parent"]] = item["profile"]
+        for hostname, profiles in generated.items():
+            if _sidecar_profiles_for_child(expected, hostname) != profiles:
+                raise ValueError(f"splitter profiles disagree with child YAML: {hostname}")
+        provenance["splitter_sidecar_sha256"] = _sha256_path(sidecar)
+        provenance["splitter_sources"] = {
+            field: _sha256_path(path) for field, path in bindings.items()
+        }
+        provenance["generator_profiles"] = generated
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise LoadError(f"P2P splitter current authority 无效：{exc}") from exc
+    return provenance
+
+
 def validate_and_publish_release(
     project: Path, inputs: ProjectInputs, *, dry_run: bool = False,
     publish: bool = True,
@@ -4513,78 +4967,78 @@ def validate_and_publish_release(
             f"deployment scope={inputs.deployment_scope}, "
             f"switch scope={inputs.switch_scope} 没有可发布设备"
         )
-    dhcp_path = ZTP_DIR / "config/isc-dhcp-server/dhcp-release-manifest.json"
-    dhcp = _load_release_json(dhcp_path, "DHCP release manifest")
-    if str(dhcp.get("deployment_scope") or "all") != inputs.deployment_scope:
-        raise LoadError(
-            "DHCP release deployment scope 与本次 load 不一致："
-            f"manifest={dhcp.get('deployment_scope') or 'all'} "
-            f"requested={inputs.deployment_scope}"
-        )
-    if str(dhcp.get("switch_scope") or "all") != inputs.switch_scope:
-        raise LoadError(
-            "DHCP release switch scope 与本次 load 不一致："
-            f"manifest={dhcp.get('switch_scope') or 'all'} "
-            f"requested={inputs.switch_scope}"
-        )
-    dhcp_rows = dhcp.get("devices")
-    if not isinstance(dhcp_rows, list):
-        raise LoadError("DHCP release manifest.devices 必须是 list")
-    expected_dhcp: dict[tuple[str, str], dict[str, object]] = {}
-    for item in inventory:
-        expected_dhcp[(str(item["hostname_key"]), "eth0")] = {
-            **item, "mac": item["eth0_mac"],
-        }
-        if item.get("eth1_mac"):
-            expected_dhcp[(str(item["hostname_key"]), "eth1")] = {
-                **item, "mac": item["eth1_mac"],
-            }
-    actual_dhcp: dict[tuple[str, str], dict[str, object]] = {}
-    for row in dhcp_rows:
-        if not isinstance(row, dict):
-            raise LoadError("DHCP release manifest.devices 包含非 object 元素")
-        key = (
-            str(row.get("hostname") or "").strip().casefold(),
-            str(row.get("interface") or "").strip().casefold(),
-        )
-        if not all(key) or key in actual_dhcp:
-            raise LoadError(f"DHCP release manifest 设备接口为空或重复：{key}")
-        actual_dhcp[key] = row
-    if set(actual_dhcp) != set(expected_dhcp):
-        missing = sorted(set(expected_dhcp) - set(actual_dhcp))
-        extra = sorted(set(actual_dhcp) - set(expected_dhcp))
-        raise LoadError(
-            f"DHCP release 与当前设备接口清单漂移：missing={missing or 'none'}，"
-            f"extra={extra or 'none'}"
-        )
-    for key, expected in expected_dhcp.items():
-        row = actual_dhcp[key]
-        if str(row.get("type") or "").casefold() != expected["type"]:
-            raise LoadError(f"DHCP release {key} type 与当前 CSV 不一致")
-        actual_mac = _normalized_mac(row.get("mac"))
-        if actual_mac != expected["mac"]:
-            raise LoadError(f"DHCP release {key} MAC 与当前 CSV 不一致")
-        expected_state = "identified" if expected["mac"] else "identity_pending"
-        if row.get("identity_state") != expected_state:
+    dhcp_status = "enabled" if inputs.settings.dhcp_enabled else "disabled"
+    components: dict[str, dict[str, object]] = {}
+    if inputs.settings.dhcp_enabled:
+        dhcp_path = ZTP_DIR / "config/isc-dhcp-server/dhcp-release-manifest.json"
+        dhcp = _load_release_json(dhcp_path, "DHCP release manifest")
+        if str(dhcp.get("deployment_scope") or "all") != inputs.deployment_scope:
             raise LoadError(
-                f"DHCP release {key} identity_state={row.get('identity_state')!r}，"
-                f"当前应为 {expected_state!r}"
+                "DHCP release deployment scope 与本次 load 不一致："
+                f"manifest={dhcp.get('deployment_scope') or 'all'} "
+                f"requested={inputs.deployment_scope}"
             )
-    output_hashes = dhcp.get("outputs")
-    if not isinstance(output_hashes, dict):
-        raise LoadError("DHCP release manifest 缺少 outputs hash")
-    for source in dhcp_file_mappings():
-        item = output_hashes.get(source.name)
-        expected_hash = item.get("sha256") if isinstance(item, dict) else None
-        if expected_hash != _sha256_path(source):
-            raise LoadError(f"DHCP release 输出 hash 漂移：{source.name}")
-
-    components: dict[str, dict[str, str]] = {
-        "dhcp": {
+        if str(dhcp.get("switch_scope") or "all") != inputs.switch_scope:
+            raise LoadError(
+                "DHCP release switch scope 与本次 load 不一致："
+                f"manifest={dhcp.get('switch_scope') or 'all'} "
+                f"requested={inputs.switch_scope}"
+            )
+        dhcp_rows = dhcp.get("devices")
+        if not isinstance(dhcp_rows, list):
+            raise LoadError("DHCP release manifest.devices 必须是 list")
+        expected_dhcp: dict[tuple[str, str], dict[str, object]] = {}
+        for item in inventory:
+            expected_dhcp[(str(item["hostname_key"]), "eth0")] = {
+                **item, "mac": item["eth0_mac"],
+            }
+            if item.get("eth1_mac"):
+                expected_dhcp[(str(item["hostname_key"]), "eth1")] = {
+                    **item, "mac": item["eth1_mac"],
+                }
+        actual_dhcp: dict[tuple[str, str], dict[str, object]] = {}
+        for row in dhcp_rows:
+            if not isinstance(row, dict):
+                raise LoadError("DHCP release manifest.devices 包含非 object 元素")
+            key = (
+                str(row.get("hostname") or "").strip().casefold(),
+                str(row.get("interface") or "").strip().casefold(),
+            )
+            if not all(key) or key in actual_dhcp:
+                raise LoadError(f"DHCP release manifest 设备接口为空或重复：{key}")
+            actual_dhcp[key] = row
+        if set(actual_dhcp) != set(expected_dhcp):
+            missing = sorted(set(expected_dhcp) - set(actual_dhcp))
+            extra = sorted(set(actual_dhcp) - set(expected_dhcp))
+            raise LoadError(
+                f"DHCP release 与当前设备接口清单漂移：missing={missing or 'none'}，"
+                f"extra={extra or 'none'}"
+            )
+        for key, expected in expected_dhcp.items():
+            row = actual_dhcp[key]
+            if str(row.get("type") or "").casefold() != expected["type"]:
+                raise LoadError(f"DHCP release {key} type 与当前 CSV 不一致")
+            actual_mac = _normalized_mac(row.get("mac"))
+            if actual_mac != expected["mac"]:
+                raise LoadError(f"DHCP release {key} MAC 与当前 CSV 不一致")
+            expected_state = "identified" if expected["mac"] else "identity_pending"
+            if row.get("identity_state") != expected_state:
+                raise LoadError(
+                    f"DHCP release {key} identity_state={row.get('identity_state')!r}，"
+                    f"当前应为 {expected_state!r}"
+                )
+        output_hashes = dhcp.get("outputs")
+        if not isinstance(output_hashes, dict):
+            raise LoadError("DHCP release manifest 缺少 outputs hash")
+        for source in dhcp_file_mappings():
+            item = output_hashes.get(source.name)
+            expected_hash = item.get("sha256") if isinstance(item, dict) else None
+            if expected_hash != _sha256_path(source):
+                raise LoadError(f"DHCP release 输出 hash 漂移：{source.name}")
+        components["dhcp"] = {
             "release_id": str(dhcp["release_id"]),
             "manifest_sha256": _sha256_path(dhcp_path),
-        },
-    }
+        }
     platform_specs = (
         ("cumulus", {"eth", "eth_spx", "spx", "air"},
          ZTP_DIR / "config/cumulus/latest_yaml"),
@@ -4625,6 +5079,13 @@ def validate_and_publish_release(
             "published_marker_sha256": _sha256_path(marker),
             "release_dir": str(release_dir.relative_to(project.resolve())),
         }
+        if label == "cumulus":
+            splitter_provenance = _current_splitter_provenance(
+                project, inputs.devices_file, inputs.p2p_file, release_dir,
+                manifest, inputs.settings.schema_version,
+            )
+            if splitter_provenance is not None:
+                components[label]["splitter_provenance"] = splitter_provenance
 
     input_files = {
         "global": inputs.global_file,
@@ -4637,11 +5098,16 @@ def validate_and_publish_release(
     if inputs.mini_devices_file is not None:
         input_files["mini_air_devices"] = inputs.mini_devices_file
     input_hashes = {name: _sha256_path(path) for name, path in input_files.items()}
+    p2p_source = p2p_release_source_binding(project, inputs.p2p_file)
+    if input_hashes["p2p"] != p2p_source["sha256"]:
+        raise LoadError("P2P release 输入在摘要绑定时发生变化")
     release_basis = {
         "project": project.name,
         "deployment_scope": inputs.deployment_scope,
         "switch_scope": inputs.switch_scope,
+        "dhcp_status": dhcp_status,
         "inputs": input_hashes,
+        "input_sources": {"p2p": p2p_source},
         "components": components,
         "inventory": [{
             "hostname": item["hostname"],
@@ -4659,7 +5125,7 @@ def validate_and_publish_release(
         ).encode("utf-8")
     ).hexdigest()[:20]
     parent = {
-        "schema_version": 1,
+        "schema_version": 2,
         "release_id": release_id,
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "validation": "passed",
@@ -4671,7 +5137,9 @@ def validate_and_publish_release(
         pending = sum(item["identity_state"] == "identity_pending" for item in inventory)
         ok(
             f"统一 release {release_id} 已验证：{len(inventory)} 台设备，"
-            f"identity_pending={pending}；等待 DHCP 事务安装后提交"
+            f"identity_pending={pending}；"
+            + ("等待 DHCP 事务安装后提交" if inputs.settings.dhcp_enabled
+               else "DHCP 已禁用，等待原子提交")
         )
     return parent
 
@@ -4696,17 +5164,67 @@ def prepare_current_release(
         if os.path.exists(temporary):
             os.unlink(temporary)
         raise
+    components = parent.get("components")
+    cumulus = components.get("cumulus") if isinstance(components, dict) else None
+    provenance = (
+        cumulus.get("splitter_provenance")
+        if isinstance(cumulus, dict) else None
+    )
+    guard = None
+    if provenance is not None:
+        guard = {
+            "expected": provenance,
+            "release_dir": cumulus.get("release_dir"),
+            "manifest_sha256": cumulus.get("manifest_sha256"),
+            "published_marker_sha256": cumulus.get("published_marker_sha256"),
+        }
     return PreparedParentRelease(
         destination=destination,
         temporary=Path(temporary),
         release_id=str(parent.get("release_id") or ""),
+        splitter_provenance=guard,
     )
+
+
+def _recheck_prepared_splitter_provenance(candidate: PreparedParentRelease) -> None:
+    """Close cooperative precommit drift, without claiming a same-UID lock."""
+    guard = candidate.splitter_provenance
+    if guard is None:
+        return
+    expected = guard.get("expected")
+    release_name = guard.get("release_dir")
+    if (not isinstance(expected, dict)
+            or not isinstance(release_name, str)
+            or not isinstance(expected.get("devices_name"), str)
+            or Path(expected["devices_name"]).name != expected["devices_name"]):
+        raise LoadError("P2P splitter prepared provenance 结构无效")
+    project = candidate.destination.parent.parent
+    release_dir = project / release_name
+    try:
+        if (release_dir.resolve(strict=True)
+                != (ZTP_DIR / "config/cumulus/latest_yaml").resolve(strict=True)):
+            raise LoadError("cumulus latest_yaml 在 parent commit 前已切换")
+        manifest_path = release_dir / "release-manifest.json"
+        marker = release_dir / ".published-complete"
+        if (_sha256_path(manifest_path) != guard.get("manifest_sha256")
+                or _sha256_path(marker) != guard.get("published_marker_sha256")):
+            raise LoadError("cumulus child release 在 parent commit 前已变化")
+        manifest = _load_release_json(manifest_path, "cumulus release manifest")
+        current = _current_splitter_provenance(
+            project, project / expected["devices_name"], project / "p2p.xlsx",
+            release_dir, manifest, expected["devices_schema_version"],
+        )
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise LoadError(f"P2P splitter precommit 复验失败：{exc}") from exc
+    if current != expected:
+        raise LoadError("P2P splitter provenance 在 parent commit 前已变化")
 
 
 def commit_prepared_release(candidate: PreparedParentRelease) -> Path:
     """Commit an already-fsynced parent candidate with one atomic replace."""
     if candidate.committed:
         return candidate.destination
+    _recheck_prepared_splitter_provenance(candidate)
     os.replace(candidate.temporary, candidate.destination)
     candidate.committed = True
     # fsync the containing directory so the rename itself survives a crash.
@@ -4809,6 +5327,7 @@ def restore_release_links(snapshot: dict[Path, Optional[str]]) -> None:
 
 def generate_configs(
     device_types: frozenset[str], *, install_dhcp: bool, dry_run: bool = False,
+    dhcp_enabled: bool = True,
     schema_version: int = GLOBAL_SCHEMA_VERSION,
     eth_version: str | None = None,
     air_topology_policy: Path | None = None,
@@ -4890,15 +5409,16 @@ def generate_configs(
     # template/IP/netmask/gateway from the matching production CSV row. It must
     # run before hostname2mac validates each pair and points both MACs at the
     # same production full-config YAML.
-    run(
-        [
-            sys.executable, "c1-generate_dhcp.py", "-y",
-            *scope_args, *switch_args,
-        ],
-        cwd=ZTP_DIR / "config/isc-dhcp-server",
-        dry_run=dry_run,
-        **inherited_lock,
-    )
+    if dhcp_enabled:
+        run(
+            [
+                sys.executable, "c1-generate_dhcp.py", "-y",
+                *scope_args, *switch_args,
+            ],
+            cwd=ZTP_DIR / "config/isc-dhcp-server",
+            dry_run=dry_run,
+            **inherited_lock,
+        )
     device_types = _device_types_after_dhcp(
         device_types, dry_run=dry_run, schema_version=schema_version,
         deployment_scope=deployment_scope,
@@ -4952,7 +5472,9 @@ def generate_configs(
                 cwd=ZTP_DIR / "config/nvos",
             )
 
-    if install_dhcp:
+    if not dhcp_enabled:
+        info("global 中 DHCP 已禁用；未生成、读取或安装五个 DHCP 制品")
+    elif install_dhcp:
         info("DHCP 安装已延后到统一 release 验证通过之后")
     else:
         warn("本机没有可用 service_ip：已生成 DHCP 文件，但不复制到 /etc/dhcp，也不执行 dhcpd -t")
@@ -5099,61 +5621,66 @@ def resolve_ztp_monitor_scope(
         warn("无效环境；请输入 air 或 prod（此选择没有默认值）")
 
 
-def print_ztp_monitor_access(service_ips: tuple[str, ...]) -> None:
+def print_ztp_monitor_access(
+    service_ips: tuple[str, ...], *, port: int = 80,
+) -> None:
     """Show operators where the live ZTP status can be inspected."""
     status_csv = ZTP_DIR / "status" / "latest" / "devices.csv"
     info(f"ZTP 状态 CSV：{status_csv}")
     for address in dict.fromkeys(service_ips):
-        info(f"ZTP 状态页面：http://{address}/monitor/monitor.html")
+        endpoint = validate_service_endpoint(
+            address, port, field="ZTP monitor service IPv4"
+        )
+        info("ZTP 状态页面：" + service_url(
+            endpoint, "/monitor/monitor.html", channel="console-monitor"
+        ))
 
 
 def _canonical_apache_listener_addresses(
     service_ips: tuple[str, ...],
-) -> tuple[str, ...]:
-    addresses = []
+    *, port: int = 80,
+) -> tuple[ServiceEndpoint, ...]:
+    endpoints = []
     for raw in service_ips:
-        raw_text = str(raw)
         try:
-            parsed = ipaddress.IPv4Address(raw_text)
-        except ipaddress.AddressValueError as exc:
+            endpoint = validate_service_endpoint(
+                raw, port, field="Apache service IPv4"
+            )
+        except ValueError as exc:
             raise LoadError(f"Apache service IPv4 无效：{raw!r}") from exc
-        canonical = str(parsed)
-        if (
-            raw_text != canonical
-            or parsed.is_unspecified
-            or parsed.is_multicast
-            or int(parsed) == 0xFFFFFFFF
-        ):
-            raise LoadError(f"Apache service IPv4 无效：{raw!r}")
-        if canonical in addresses:
-            raise LoadError(f"Apache service IPv4 重复：{canonical}")
-        addresses.append(canonical)
-    if not addresses:
+        if endpoint in endpoints:
+            raise LoadError(f"Apache service IPv4 重复：{endpoint.host}")
+        endpoints.append(endpoint)
+    if not endpoints:
         raise LoadError("Apache exact listener 缺少 service IPv4")
-    return tuple(addresses)
+    return tuple(endpoints)
 
 
 def render_native_apache_listener_config(
     service_ips: tuple[str, ...],
+    *, port: int = 80,
 ) -> str:
     """Render Native Apache listeners bound only to canonical service IPv4s."""
-    addresses = _canonical_apache_listener_addresses(service_ips)
+    addresses = _canonical_apache_listener_addresses(service_ips, port=port)
     lines = [
         "# Generated by DAY0-Prepare/11-load.py; do not edit.",
         "# Exact service-IP listeners only; wildcard binds are forbidden.",
     ]
-    for address in addresses:
-        lines.append(f"Listen {address}:80")
-    for address in addresses:
-        lines.extend((
+    for endpoint in addresses:
+        lines.append(endpoint.listen_directive)
+    for endpoint in addresses:
+        virtual_host = [
             "",
-            f"<VirtualHost {address}:80>",
-            f"    ServerName {address}",
+            f"<VirtualHost {endpoint.host}:{endpoint.port}>",
+            f"    ServerName {endpoint.host}",
             "    DocumentRoot /var/www/html",
             "    ErrorLog /var/log/apache2/error.log",
             "    CustomLog /var/log/apache2/access.log combined",
-            "</VirtualHost>",
-        ))
+        ]
+        if endpoint.port != 80:
+            virtual_host.append(f"    SetEnv CONTROL_SERVICE_PORT {endpoint.port}")
+        virtual_host.append("</VirtualHost>")
+        lines.extend(virtual_host)
     lines.append("")
     return "\n".join(lines)
 
@@ -5169,17 +5696,25 @@ def _fsync_parent_directory(path: Path) -> None:
 
 def publish_native_apache_listener_config(
     service_ips: tuple[str, ...], *,
+    port: int = 80,
     destination: Path = NATIVE_APACHE_LISTENER_CONF,
     command_runner=run,
     dry_run: bool = False,
 ) -> None:
     """Atomically publish exact Native listeners and roll back failed syntax."""
-    rendered = render_native_apache_listener_config(service_ips).encode("utf-8")
+    rendered = render_native_apache_listener_config(
+        service_ips, port=port
+    ).encode("utf-8")
     destination = Path(destination)
     if dry_run:
         info(
             "dry-run：将原子发布 Apache exact listener："
-            + ", ".join(_canonical_apache_listener_addresses(service_ips))
+            + ", ".join(
+                endpoint.host
+                for endpoint in _canonical_apache_listener_addresses(
+                    service_ips, port=port
+                )
+            )
         )
         return
     try:
@@ -5559,6 +6094,7 @@ def start_ztp_monitor(
     project: Path, *, interval: int = DEFAULT_ZTP_MONITOR_INTERVAL,
     scope: str = "all",
     service_ips: tuple[str, ...] = (),
+    http_port: int = 80,
     dry_run: bool = False,
     runtime_backend: ServiceRuntimeBackend | None = None,
 ) -> None:
@@ -5589,7 +6125,7 @@ def start_ztp_monitor(
         )
         print(f"[DRY] 后台启动：{display}")
         print(f"[DRY] PID: {pid_file}；日志: {log_file}")
-        print_ztp_monitor_access(service_ips)
+        print_ztp_monitor_access(service_ips, port=http_port)
         return
 
     status_dir.mkdir(parents=True, exist_ok=True)
@@ -5617,7 +6153,7 @@ def start_ztp_monitor(
             "Supervisor ZTP 后台监控已启动："
             f"间隔由容器运行态管理，scope={scope}"
         )
-        print_ztp_monitor_access(service_ips)
+        print_ztp_monitor_access(service_ips, port=http_port)
         return
     stopped = stop_other_ztp_monitors(project)
     if stopped:
@@ -5673,7 +6209,7 @@ def start_ztp_monitor(
         f"ZTP 后台监控已启动：PID={process.pid}，间隔={interval}s，"
         f"scope={scope}，日志={log_file}；停止命令：kill $(cat {pid_file})"
     )
-    print_ztp_monitor_access(service_ips)
+    print_ztp_monitor_access(service_ips, port=http_port)
 
 
 def local_ipv4_addresses() -> set[str]:
@@ -5688,7 +6224,17 @@ def local_ipv4_addresses() -> set[str]:
         result = _run_subprocess(["ifconfig"], capture_output=True, text=True)
         if result.returncode == 0:
             addresses.update(re.findall(r"\binet\s+(\d+\.\d+\.\d+\.\d+)\b", result.stdout))
-    return {address for address in addresses if not address.startswith("127.")}
+    validated = set()
+    for address in addresses:
+        try:
+            validated.add(
+                validate_service_endpoint(
+                    address, field="local HTTP service IPv4"
+                ).host
+            )
+        except ValueError:
+            continue
+    return validated
 
 
 def service_ip_bindings(inputs: ProjectInputs) -> tuple[str, ...]:
@@ -5975,32 +6521,35 @@ def validate_management_host(settings: GlobalSettings, dry_run: bool = False) ->
         problems.append(
             f"global http_root={settings.http_root}，当前代码根目录={HTTP_ROOT}"
         )
-    configured_ips = set(settings.service_ips)
+    configured_ips = set(settings.http_listener_ips)
     local_ips = local_ipv4_addresses()
     matching_local = sorted(configured_ips & local_ips)
     missing_local = sorted(configured_ips - local_ips, key=ipaddress.IPv4Address)
     if not matching_local:
         problems.append(
-            "DHCP subnet CSV 的 service_ip 中没有任何地址配置在本机接口"
-            f"（service_ip={','.join(sorted(configured_ips)) or 'none'}；"
+            "HTTP listener 地址中没有任何地址配置在本机接口"
+            f"（listener={','.join(sorted(configured_ips)) or 'none'}；"
             f"local={','.join(sorted(local_ips)) or 'none'}）"
         )
     elif missing_local:
         warn(
-            "以下启用 service_ip 尚未配置在本机接口，将在 DHCP 重启前逐一门禁并"
+            "以下 HTTP listener 地址尚未配置在本机接口，将在 DHCP 重启前逐一门禁并"
             "提供重试提示：" + ", ".join(missing_local)
+        )
+    if settings.http_address and settings.http_address not in local_ips:
+        problems.append(
+            "common.mgmt.http.address 未配置在本机接口："
+            + settings.http_address
         )
     disabled = []
     if not settings.http_enabled:
         disabled.append("http")
     if not settings.dhcp_enabled:
-        disabled.append("dhcp-server")
-    if not settings.ztp_enabled:
-        disabled.append("ztp")
+        info("global 中 dhcp-server 已禁用；独立校验 HTTP 发布条件")
     if disabled:
         problems.append("以下服务在 global 中未启用：" + ", ".join(disabled))
     if not problems:
-        ok("管理服务器 HTTP 根目录和本机 service_ip 基础检查通过：" + ", ".join(matching_local))
+        ok("管理服务器 HTTP 根目录和本机 listener 基础检查通过：" + ", ".join(matching_local))
         return True
     message = "；".join(problems)
     warn("服务不可用，不能在本机部署/启动 Apache 与 DHCP：" + message)
@@ -6041,30 +6590,24 @@ def supervisor_service_availability(
 
 
 def verify_http_publication(inputs: ProjectInputs, images: dict[str, Path], dry_run: bool) -> None:
-    urls = []
-    for role, addresses in inputs.settings.ztp_ips.items():
-        for address in addresses:
-            for pubkey in deployable_pubkeys(inputs.pubkeys):
-                urls.append(
-                    f"http://{address}{inputs.settings.ztp_prefix}/config/publickey/"
-                    f"{pubkey.name}"
-                )
-            script = BOOTSTRAP_BY_ROLE[role]
-            urls.append(f"http://{address}{inputs.settings.ztp_prefix}/{script}")
-    for address in inputs.settings.boot_ips:
-        urls.append(
-            f"http://{address}{inputs.settings.ztp_prefix}/ztp.json"
-        )
-    for kind, image in images.items():
-        platform = "cumulus" if kind == "eth" else "nvos"
-        all_addresses = {
-            address for address in inputs.settings.service_ips
-        }
-        for address in sorted(all_addresses):
-            urls.append(
-                f"http://{address}{inputs.settings.ztp_prefix}/image/{platform}/{image.name}"
-            )
-    for url in dict.fromkeys(urls):
+    plan = publication_plan_for(
+        inputs.settings,
+        pubkey_names=tuple(
+            pubkey.name for pubkey in deployable_pubkeys(inputs.pubkeys)
+        ),
+        image_names=tuple(
+            ("cumulus" if kind == "eth" else "nvos", image.name)
+            for kind, image in images.items()
+        ),
+    )
+    probed_channels = frozenset({
+        "pubkey", "dhcp-provision-url", "dhcp-bootfile", "image",
+    })
+    urls = dict.fromkeys(
+        item.url for item in device_visible_urls(plan)
+        if item.channel in probed_channels
+    )
+    for url in urls:
         run(["curl", "-fsSI", "--max-time", "5", url], dry_run=dry_run)
 
 
@@ -6338,11 +6881,18 @@ def preflight_services(
     verify_control_auth(runtime_backend=backend, dry_run=dry_run)
     verify_published_files(inputs, images, dry_run=dry_run)
     verify_apache_publication_boundary(dry_run=dry_run)
-    for source in dhcp_file_mappings():
-        _nonempty_file(source, f"DHCP 输出 {source.name}")
-    run(sudo_command("dhcpd", "-t", "-cf", "/etc/dhcp/dhcpd.conf"), dry_run=dry_run)
+    if inputs.settings.dhcp_enabled:
+        for source in dhcp_file_mappings():
+            _nonempty_file(source, f"DHCP 输出 {source.name}")
+        run(
+            sudo_command("dhcpd", "-t", "-cf", "/etc/dhcp/dhcpd.conf"),
+            dry_run=dry_run,
+        )
     run(sudo_command("apache2ctl", "configtest"), dry_run=dry_run)
-    ok("启动前检查通过：公钥、DHCP、Apache 配置和 HTTP 发布文件均有效")
+    ok(
+        "启动前检查通过：公钥、Apache 配置和 HTTP 发布文件均有效"
+        + ("；DHCP 配置有效" if inputs.settings.dhcp_enabled else "；DHCP 已禁用")
+    )
 
 
 def ztp_url_network_requirements(
@@ -6663,6 +7213,38 @@ def start_services(
         return
     # Preserve the established systemd gate and activation semantics.
     ensure_ztp_url_network_ready(inputs, dry_run=dry_run)
+    if not inputs.settings.dhcp_enabled:
+        if not inputs.settings.http_enabled:
+            raise LoadError("DHCP 与 HTTP 均已禁用，没有可启动的原生服务")
+        if dry_run:
+            run(sudo_command("systemctl", "enable", "--now", "apache2"), dry_run=True)
+            info("dry-run：DHCP 已禁用，保持 isc-dhcp-server 停止")
+            verify_http_publication(inputs, images, True)
+            return
+        states = snapshot_service_states(services, runtime_backend=backend)
+        try:
+            if states["isc-dhcp-server"].active:
+                run(sudo_command("systemctl", "stop", "isc-dhcp-server"))
+            if states["isc-dhcp-server"].enabled:
+                run(sudo_command("systemctl", "disable", "isc-dhcp-server"))
+            if not states["apache2"].active or not states["apache2"].enabled:
+                run(sudo_command("systemctl", "enable", "--now", "apache2"))
+            verify_http_publication(inputs, images, False)
+        except BaseException as exc:
+            rollback_error = ""
+            try:
+                restore_service_states(states, runtime_backend=backend)
+            except (LoadError, OSError, subprocess.SubprocessError) as rollback_exc:
+                rollback_error = str(rollback_exc)
+            if rollback_error:
+                print(f"[ERROR] {rollback_error}", file=sys.stderr)
+                if isinstance(exc, Exception):
+                    raise LoadError(
+                        f"HTTP-only 服务启动失败且状态回滚不完整：{exc}；{rollback_error}"
+                    ) from exc
+            raise
+        ok("DHCP 已禁用；Apache HTTP 发布检查通过，DHCP 保持停止")
+        return
     if not plan.listener_names:
         if dry_run:
             info("dry-run：DHCP listener 为 0，Apache/DHCP 保持停止")
@@ -6712,7 +7294,9 @@ def start_services(
 def validate_inputs(
     project: Path, args: argparse.Namespace, *,
     allow_management_key_generation: bool,
+    host_role: str | None = None,
 ) -> tuple[ProjectInputs, dict[str, Path]]:
+    host_role = resolve_host_role(host_role or getattr(args, "host_role", None))
     global_file = project / "01-global.yaml"
     devices_file = project / "02-devices_config.csv"
     subnet_file = project / "02-dhcp-subnet_config.csv"
@@ -6720,7 +7304,9 @@ def validate_inputs(
     settings = load_global(global_file, global_data=global_data)
     placeholder_sections = find_placeholder_password_sections(global_data)
     if placeholder_sections:
-        raise _placeholder_password_error(project, placeholder_sections)
+        raise _placeholder_password_error(
+            project, placeholder_sections, host_role=host_role,
+        )
     validation_errors = []
     device_types: frozenset[str] = frozenset()
     p2p_file = project / (args.p2p_file or "p2p.xlsx")
@@ -6741,7 +7327,9 @@ def validate_inputs(
     except LoadError as exc:
         validation_errors.append(str(exc))
     try:
-        p2p_file = select_p2p(project, args.p2p_file)
+        p2p_file = select_p2p(
+            project, args.p2p_file, migrate_legacy_canonical=True,
+        )
     except LoadError as exc:
         validation_errors.append(str(exc))
     try:
@@ -6839,7 +7427,7 @@ def validate_inputs(
         project,
         ssh_dir=args.ssh_dir,
         dry_run=args.dry_run,
-        inject_management_key=supports_local_ztp_services(),
+        inject_management_key=host_role == "management-server",
         allow_management_key_generation=allow_management_key_generation,
     )
     if args.no_upgrade:
@@ -7021,7 +7609,11 @@ def update_passwords_before_load(
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("project", help="DAY0-Prepare 下的部署项目目录或其绝对路径")
-    parser.add_argument("--p2p-file", help="明确选择项目根目录或 p2p/ 下的 P2P XLSX")
+    parser.add_argument(
+        "--host-role", choices=("workstation", "management-server"),
+        help="Linux 必须显式声明本机角色；Darwin 默认为 workstation",
+    )
+    parser.add_argument("--p2p-file", help="明确选择项目根目录内任意非空普通 XLSX 文件名")
     parser.add_argument(
         "--p2p-legacy-columns", action="store_true",
         help="显式允许 P2P 未识别表头使用历史固定列；默认严格检查，不自动回退",
@@ -7141,6 +7733,7 @@ def main(argv: list[str] | None = None) -> int:
     release_committed = False
     deployment_lock_descriptor: int | None = None
     parent_candidate: PreparedParentRelease | None = None
+    report_candidate = None
     prefix_publication_snapshot: ZtpPrefixPublicationSnapshot | None = None
     dhcp_runtime_plan: DhcpRuntimePlan | None = None
     runtime_backend_instance: ServiceRuntimeBackend | None = None
@@ -7152,8 +7745,16 @@ def main(argv: list[str] | None = None) -> int:
     should_monitor = False
     monitor_scope: str | None = None
     failure_phase = "启动前参数检查"
+    primary_failure = False
+    completed_successfully = False
+    host_role: str | None = None
     try:
         host_os = runtime_os()
+        host_role = resolve_host_role(getattr(args, "host_role", None), host_os)
+        if host_os.casefold() == "linux" and host_role == "workstation" and (
+            args.start_services or args.start_ztp_monitor
+        ):
+            raise LoadError("workstation host role cannot start local ZTP services or monitor")
         deployment_scope = validate_deployment_scope_options(args)
         switch_scope = validate_switch_scope_options(args, deployment_scope)
         args.deployment_scope = deployment_scope
@@ -7174,7 +7775,7 @@ def main(argv: list[str] | None = None) -> int:
                 "global/devices/subnet/p2p 来源证明，不能把旧制品重新签名为当前输入；"
                 "请执行完整配置生成"
             )
-        local_services_supported = supports_local_ztp_services(host_os)
+        local_services_supported = host_role == "management-server"
         if local_services_supported:
             runtime_backend_instance = service_runtime_backend()
             validate_runtime_options(args, runtime_backend_instance)
@@ -7278,6 +7879,7 @@ def main(argv: list[str] | None = None) -> int:
             project,
             args,
             allow_management_key_generation=allow_management_key_generation,
+            host_role=host_role,
         )
 
         section("活动项目 setup 检查/切换")
@@ -7295,8 +7897,12 @@ def main(argv: list[str] | None = None) -> int:
             legacy_service_available = validate_management_host(
                 inputs.settings, args.dry_run,
             )
-            http_service_available = legacy_service_available
-            dhcp_service_available = legacy_service_available
+            http_service_available = (
+                legacy_service_available and inputs.settings.http_enabled
+            )
+            dhcp_service_available = (
+                legacy_service_available and inputs.settings.dhcp_enabled
+            )
             if legacy_service_available:
                 dhcp_runtime_plan = plan_local_dhcp_runtime(inputs)
         runtime_services_available = (
@@ -7329,10 +7935,12 @@ def main(argv: list[str] | None = None) -> int:
                 dhcp_runtime_plan=dhcp_runtime_plan,
                 runtime_backend=runtime_backend_instance,
                 native_monitor_already_quiesced=native_monitor_quiesced,
+                host_role=host_role,
             )
         elif local_services_supported:
             require_artifact_builder_services_inactive(
                 args.dry_run, runtime_backend=runtime_backend_instance,
+                host_role=host_role,
             )
         failure_phase = "活动项目 setup 检查/切换"
         activate_project(
@@ -7342,7 +7950,11 @@ def main(argv: list[str] | None = None) -> int:
             strict=local_services_supported and not args.no_upgrade,
             dry_run=args.dry_run,
             deployment_lock_descriptor=deployment_lock_descriptor,
+            host_role=host_role,
         )
+        if not args.dry_run and (project / "p2p.xlsx").is_symlink():
+            selected_runtime_p2p = (project / "p2p.xlsx").resolve()
+            inputs = replace(inputs, p2p_file=selected_runtime_p2p)
 
         failure_phase = "同步 ZTP 运行时参数"
         section("同步 ZTP 运行时参数")
@@ -7426,6 +8038,8 @@ def main(argv: list[str] | None = None) -> int:
                 "deployment_scope": deployment_scope,
                 "switch_scope": switch_scope,
             }
+            if not inputs.settings.dhcp_enabled:
+                generation_options["dhcp_enabled"] = False
             # Keep the established full-topology call contract byte-for-byte
             # compatible for embedders which wrap generate_configs().
             if getattr(args, "p2p_legacy_columns", False):
@@ -7461,6 +8075,16 @@ def main(argv: list[str] | None = None) -> int:
             # remaining commit is one os.replace performed while DHCP backups
             # and the global deployment lock are still held.
             parent_candidate = prepare_current_release(project, parent_release)
+        if local_services_supported and not args.dry_run and parent_release is not None:
+            failure_phase = "准备本次实际使用公钥报告"
+            actual_key_report = generation_report.build_report(
+                project, parent_release,
+                published_dir=ZTP_DIR / "config/publickey",
+            )
+            report_candidate = generation_report.prepare_generation_report(
+                project, actual_key_report,
+            )
+        failure_phase = "统一 release 一致性与 DHCP 事务安装"
         if local_services_supported and dhcp_service_available:
             mount_and_test_dhcp(
                 args.dry_run, parent_candidate=parent_candidate,
@@ -7477,6 +8101,12 @@ def main(argv: list[str] | None = None) -> int:
             # single-replace parent commit.
             commit_prepared_release(parent_candidate)
             release_committed = True
+        if report_candidate is not None:
+            # Parent and report are two separate atomic replacements, not one
+            # transaction.  A crash between them leaves an absent/stale report;
+            # the inspector fails closed until a full rerun under this lock.
+            failure_phase = "提交本次实际使用公钥报告"
+            generation_report.commit_prepared_generation_report(report_candidate)
 
         failure_phase = "服务启动门禁"
         section("服务启动门禁")
@@ -7489,7 +8119,9 @@ def main(argv: list[str] | None = None) -> int:
         else:
             if runtime_backend_instance.name == "systemd":
                 publish_native_apache_listener_config(
-                    inputs.settings.service_ips, dry_run=args.dry_run,
+                    inputs.settings.http_listener_ips,
+                    port=inputs.settings.http_port,
+                    dry_run=args.dry_run,
                 )
             preflight_services(
                 inputs, images, args.dry_run,
@@ -7521,6 +8153,7 @@ def main(argv: list[str] | None = None) -> int:
                         project, interval=args.ztp_monitor_interval,
                         scope=monitor_scope,
                         service_ips=inputs.settings.service_ips,
+                        http_port=inputs.settings.http_port,
                         dry_run=args.dry_run,
                         runtime_backend=runtime_backend_instance,
                     )
@@ -7541,9 +8174,10 @@ def main(argv: list[str] | None = None) -> int:
             warn(f"{host_os} 不运行 ZTP 后台监控，已忽略 --start-ztp-monitor")
         if args.dry_run:
             print(dry_run_next_step(requested_argv))
-        ok(f"load 流程完成：{project}")
+        completed_successfully = True
         return 0
     except BaseException as exc:
+        primary_failure = True
         cleanup_errors = []
         release_committed = release_committed or bool(
             parent_candidate is not None and parent_candidate.committed
@@ -7555,6 +8189,7 @@ def main(argv: list[str] | None = None) -> int:
                     dhcp_runtime_plan=dhcp_runtime_plan,
                     runtime_backend=runtime_backend_instance,
                     native_monitor_already_quiesced=native_monitor_quiesced,
+                    host_role=host_role,
                 )
             except (LoadError, OSError, subprocess.SubprocessError) as cleanup_exc:
                 cleanup_errors.append(f"服务停止清理失败：{cleanup_exc}")
@@ -7607,8 +8242,27 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         raise
     finally:
-        discard_prepared_release(parent_candidate)
-        release_deployment_lock(deployment_lock_descriptor)
+        final_cleanup_errors: list[tuple[str, BaseException]] = []
+        try:
+            generation_report.discard_prepared_generation_report(report_candidate)
+        except BaseException as cleanup_exc:
+            final_cleanup_errors.append(("公钥报告暂存清理", cleanup_exc))
+        try:
+            discard_prepared_release(parent_candidate)
+        except BaseException as cleanup_exc:
+            final_cleanup_errors.append(("release 暂存清理", cleanup_exc))
+        try:
+            release_deployment_lock(deployment_lock_descriptor)
+        except BaseException as cleanup_exc:
+            final_cleanup_errors.append(("部署锁释放", cleanup_exc))
+        for label, cleanup_exc in final_cleanup_errors:
+            print(f"[ERROR] {label}失败：{cleanup_exc}", file=sys.stderr)
+        if final_cleanup_errors and not primary_failure:
+            # A successful load must not silently accept incomplete cleanup.
+            # During a failed load, preserve its original failure/exit status.
+            raise final_cleanup_errors[0][1]
+        if completed_successfully and not final_cleanup_errors:
+            ok(f"load 流程完成：{project}")
 
 
 def cli(argv: list[str] | None = None) -> int:

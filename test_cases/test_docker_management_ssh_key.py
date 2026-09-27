@@ -70,6 +70,18 @@ def load_module(path: Path, name: str):
     return module
 
 
+def _await_late_member_fixture_phase(read_fd: int, expected: bytes, deadline: float) -> None:
+    """Synchronize the test child without borrowing the product cleanup clock."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0 or not select.select([read_fd], [], [], remaining)[0]:
+        raise AssertionError(f"late-member fixture phase {expected!r} timed out")
+    if time.monotonic() >= deadline:
+        raise AssertionError(f"late-member fixture phase {expected!r} exceeded its deadline")
+    actual = os.read(read_fd, 1)
+    if actual != expected:
+        raise AssertionError(f"late-member fixture phase {expected!r} got {actual!r}")
+
+
 def install_nonlinux_held_link_test_oracle(module) -> None:
     """Exercise state semantics on Darwin without inventing a production fallback."""
     if sys.platform.startswith("linux"):
@@ -1442,6 +1454,36 @@ class DockerManagementSshKeyDirectTests(unittest.TestCase):
         kill_child.assert_not_called()
         process.wait.assert_called_once_with(timeout=0.0)
 
+    def test_late_member_fixture_slow_start_does_not_enter_cleanup(self) -> None:
+        """A late fixture child must become ready before cleanup is exercised."""
+        helper = self.helper()
+        gate_read_fd, gate_write_fd = os.pipe()
+        read_fd, write_fd = os.pipe()
+        child = subprocess.Popen(
+            [sys.executable, "-c",
+             "import os,sys; os.read(int(sys.argv[1]),1); os.write(int(sys.argv[2]),b'R')",
+             str(gate_read_fd), str(write_fd)],
+            pass_fds=(gate_read_fd, write_fd),
+        )
+        os.close(gate_read_fd)
+        os.close(write_fd)
+        started = time.monotonic()
+        try:
+            with mock.patch.object(helper, "_terminate_process") as cleanup:
+                self.assertFalse(select.select([read_fd], [], [], 0.7)[0],
+                                 "old 0.7-second fixture precondition unexpectedly succeeded")
+                cleanup.assert_not_called()
+                os.write(gate_write_fd, b"G")
+                _await_late_member_fixture_phase(read_fd, b"R", started + 5.0)
+                self.assertGreaterEqual(time.monotonic() - started, 0.7)
+                cleanup.assert_not_called()
+        finally:
+            os.close(gate_write_fd)
+            os.close(read_fd)
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=2)
+
     def test_cleanup_second_real_kill_removes_late_member_before_reaping_anchor(self) -> None:
         helper = self.helper()
         real_killpg = os.killpg
@@ -1449,6 +1491,7 @@ class DockerManagementSshKeyDirectTests(unittest.TestCase):
         ready = self.root / "late-member-ready"
         joined = self.root / "late-member-joined"
         read_fd, write_fd = os.pipe()
+        event_read_fd, event_write_fd = os.pipe()
         script = (
             "import os,sys,time\n"
             "leader=os.getpid()\n"
@@ -1457,33 +1500,32 @@ class DockerManagementSshKeyDirectTests(unittest.TestCase):
             "    os.setpgid(0,0)\n"
             "    with open(sys.argv[1]+'.tmp','w') as marker: marker.write(str(os.getpid()))\n"
             "    os.replace(sys.argv[1]+'.tmp',sys.argv[1])\n"
+            "    os.write(int(sys.argv[4]), b'R')\n"
             "    if os.read(int(sys.argv[3]),1) != b'J': os._exit(4)\n"
             "    os.setpgid(0,leader)\n"
             "    with open(sys.argv[2]+'.tmp','w') as marker: marker.write(str(os.getpgrp()))\n"
             "    os.replace(sys.argv[2]+'.tmp',sys.argv[2])\n"
+            "    os.write(int(sys.argv[4]), b'J')\n"
             "time.sleep(30)\n"
         )
+        startup_deadline = time.monotonic() + 5.0
         child = subprocess.Popen(
-            [sys.executable, "-c", script, str(ready), str(joined), str(read_fd)],
-            start_new_session=True, pass_fds=(read_fd,),
+            [sys.executable, "-c", script, str(ready), str(joined), str(read_fd), str(event_write_fd)],
+            start_new_session=True, pass_fds=(read_fd, event_write_fd),
         )
         os.close(read_fd)
+        os.close(event_write_fd)
         original_wait = child.wait
         signals = []
         late_pid = None
         completed = False
 
-        def await_file(path):
-            deadline = time.monotonic() + 0.7
-            while not path.is_file() and time.monotonic() < deadline:
-                time.sleep(0.005)
-            self.assertTrue(path.is_file(), str(path))
-
         def observe(process, deadline):
             observer(process, deadline)
             self.assertIsNone(process.returncode)
             os.write(write_fd, b"J")
-            await_file(joined)
+            _await_late_member_fixture_phase(event_read_fd, b"J", deadline)
+            self.assertTrue(joined.is_file(), str(joined))
             self.assertEqual(child.pid, int(joined.read_text()))
             os.kill(late_pid, 0)
 
@@ -1501,7 +1543,8 @@ class DockerManagementSshKeyDirectTests(unittest.TestCase):
             return original_wait(timeout=timeout)
 
         try:
-            await_file(ready)
+            _await_late_member_fixture_phase(event_read_fd, b"R", startup_deadline)
+            self.assertTrue(ready.is_file(), str(ready))
             late_pid = int(ready.read_text())
             with mock.patch.object(helper.os, "killpg", side_effect=kill_group), \
                  mock.patch.object(helper, "_wait_child_exit_without_reaping", side_effect=observe, create=True), \
@@ -1514,6 +1557,7 @@ class DockerManagementSshKeyDirectTests(unittest.TestCase):
             completed = True
         finally:
             os.close(write_fd)
+            os.close(event_read_fd)
             if not completed and child.returncode is None:
                 # The guarded wait preserves the leader anchor on a RED run.
                 if late_pid is not None:
@@ -3178,6 +3222,7 @@ class DockerManagementSshKeyWorkflowTests(unittest.TestCase):
                 return SimpleNamespace(
                     project=project,
                     ssh_dir=selected_ssh_dir,
+                    host_role="management-server",
                     dry_run=False,
                     update_passwords=False,
                     skip_doca=False,
@@ -3265,7 +3310,7 @@ class DockerManagementSshKeyWorkflowTests(unittest.TestCase):
                 self.assertEqual(1, loader.main([]))
                 attest.assert_not_called()
 
-    def test_nonempty_matching_project_key_is_noop_and_mismatch_is_zero_write(self) -> None:
+    def test_matching_project_key_is_noop_and_mismatch_needs_explicit_atomic_rotation(self) -> None:
         loader = load_module(LOAD_PATH, "docker_key_project_binding")
         with tempfile.TemporaryDirectory(prefix="http-key-project-binding-") as temporary:
             root = Path(temporary).resolve()
@@ -3296,6 +3341,7 @@ class DockerManagementSshKeyWorkflowTests(unittest.TestCase):
                         management.write_bytes(other_public)
                     management.chmod(0o644)
                     before = DockerManagementSshKeyDirectTests.snapshot(project)
+                    before_service = DockerManagementSshKeyDirectTests.snapshot(service)
                     if matching:
                         observed = loader.prepare_pubkeys(
                             project,
@@ -3305,17 +3351,51 @@ class DockerManagementSshKeyWorkflowTests(unittest.TestCase):
                             allow_management_key_generation=False,
                         )
                         self.assertIn(management, observed)
+                        self.assertEqual(
+                            before, DockerManagementSshKeyDirectTests.snapshot(project),
+                        )
                     else:
-                        with self.assertRaisesRegex(loader.LoadError, "匹配|mismatch|管理服务器"):
+                        with self.assertRaisesRegex(loader.LoadError, "management public key mismatch"):
                             loader.prepare_pubkeys(
-                                project,
-                                ssh_dir=service,
-                                dry_run=False,
+                                project, ssh_dir=service, dry_run=False,
                                 inject_management_key=True,
                                 allow_management_key_generation=False,
                             )
+                        self.assertEqual(before, DockerManagementSshKeyDirectTests.snapshot(project))
+                        # The retained explicit rotation primitive remains
+                        # atomic under an injected publication failure.
+                        with mock.patch.object(
+                            loader.ssh_keys.os, "replace",
+                            side_effect=OSError("injected pre-publication failure"),
+                        ):
+                            with self.assertRaises(loader.ssh_keys.SshKeyPreparationError):
+                                loader.ssh_keys.prepare_project_public_key(
+                                    project, "mgmt-server.pub", service / "id_ed25519.pub",
+                                    on_mismatch="replace",
+                                )
+                        after_failed_stage = DockerManagementSshKeyDirectTests.snapshot(project)
+                        self.assertEqual(
+                            {name: state for name, state in before.items() if name != "."},
+                            {name: state for name, state in after_failed_stage.items() if name != "."},
+                        )
+                        self.assertFalse(list(project.glob(".mgmt-server.pub.*.tmp")))
+                        old_inode = management.stat().st_ino
+                        rotated = loader.ssh_keys.prepare_project_public_key(
+                            project, "mgmt-server.pub", service / "id_ed25519.pub",
+                            on_mismatch="replace",
+                        )
+                        self.assertEqual(management, rotated)
+                        self.assertEqual(service_public, management.read_bytes())
+                        self.assertNotEqual(old_inode, management.stat().st_ino)
+                        after = DockerManagementSshKeyDirectTests.snapshot(project)
+                        self.assertEqual(
+                            {name: state for name, state in before.items()
+                             if name not in (".", "mgmt-server.pub")},
+                            {name: state for name, state in after.items()
+                             if name not in (".", "mgmt-server.pub")},
+                        )
                     self.assertEqual(
-                        before, DockerManagementSshKeyDirectTests.snapshot(project),
+                        before_service, DockerManagementSshKeyDirectTests.snapshot(service),
                     )
 
     def test_marker_and_placeholder_are_exact_safe_managed_objects(self) -> None:

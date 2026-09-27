@@ -162,6 +162,15 @@ action=${{1:-}}'''
 
 
 class DockerDestructiveConfirmationTests(unittest.TestCase):
+    def test_hostlock_operator_options_have_individual_help(self):
+        actions = load_hostlock().parser()._actions
+        undocumented = [
+            ", ".join(action.option_strings)
+            for action in actions
+            if action.option_strings and not (action.help or "").strip()
+        ]
+        self.assertEqual([], undocumented)
+
     @staticmethod
     def _owned_record(identifier: str, *, running: bool = False) -> list[dict]:
         return [{

@@ -34,6 +34,7 @@ import ipaddress
 import json
 import os
 import re
+import secrets
 import select
 import shutil
 import stat
@@ -54,6 +55,8 @@ from project_contract import (
     detect_global_schema_version,
     parse_device_csv_layout,
     require_device_csv_row_width,
+    service_url,
+    validate_service_endpoint,
     validate_ztp_url_prefix,
 )
 from deployment_lock import DeploymentLockError, deployment_lock
@@ -136,6 +139,10 @@ def load_project_global(path):
         with open(path, encoding="utf-8") as stream:
             data = yaml.safe_load(stream)
         value = data["common"]["mgmt"]["ztp"]["ztp_url_prefix"]
+        http_policy = data["common"]["mgmt"].get("http", {})
+        if not isinstance(http_policy, dict):
+            raise ValueError("common.mgmt.http 必须是 mapping")
+        port_value = http_policy.get("port", 80)
         schema_version = detect_global_schema_version(data)
     except (OSError, yaml.YAMLError) as exc:
         raise ValueError(f"01-global.yaml 无法读取：{exc}") from exc
@@ -143,17 +150,16 @@ def load_project_global(path):
         raise ValueError(
             "01-global.yaml 缺少 common.mgmt.ztp.ztp_url_prefix"
         ) from exc
-    return _validate_ztp_url_prefix(value), schema_version
+    port = validate_service_endpoint(
+        "192.0.2.1", port_value, field="common.mgmt.http.port"
+    ).port
+    return _validate_ztp_url_prefix(value), schema_version, port
 
 
 def load_ztp_url_prefix(path):
     """Read the URL path policy (legacy public helper)."""
     return load_project_global(path)[0]
 
-
-def _ztp_url(service_ip, prefix, filename):
-    """Build a fixed HTTP URL; callers supply only validated declarative data."""
-    return f"http://{service_ip}{prefix}/{filename}"
 
 # ── 读取 CSV ──────────────────────────────────────────────────────────────────
 
@@ -195,7 +201,7 @@ def load_csv(path, schema_version=1):
 
             if type_col is not None and len(row) > type_col:
                 fmt = row[type_col].strip().lower()
-                if fmt == "server":
+                if fmt in {"server", "eth_jump"}:
                     continue
                 if fmt not in ("eth", "eth_spx", "spx", "ib", "nvl", "air"):
                     raise ValueError(
@@ -966,49 +972,109 @@ def _candidate_mode(candidate, target, default=0o644):
     os.chmod(candidate, mode)
 
 
-def _publish_dhcp_candidates(candidates, transaction_dir):
-    """Publish a prepared output set, restoring original inodes on any failure."""
-    backup_dir = os.path.join(transaction_dir, "backup")
-    os.mkdir(backup_dir, 0o700)
+def _publish_dhcp_candidates(candidates, transaction_dir, *, parent_fd=None):
+    """Publish one set through pinned directories, restoring it on failure."""
+    if not candidates:
+        raise OSError("DHCP publication has no candidates")
+    parent = os.path.dirname(candidates[0][1])
+    if (os.path.dirname(transaction_dir) != parent
+            or any(os.path.dirname(candidate) != transaction_dir
+                   or os.path.dirname(target) != parent
+                   for candidate, target in candidates)):
+        raise OSError("DHCP publication paths do not share the pinned parent")
+    own_parent_fd = parent_fd is None
+    if own_parent_fd:
+        parent_fd = os.open(
+            parent,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+    transaction_fd = backup_fd = None
+    parent_identity = os.fstat(parent_fd)
+
+    def check_visible_parent():
+        named = os.lstat(parent)
+        if (not stat.S_ISDIR(named.st_mode)
+                or (named.st_dev, named.st_ino)
+                != (parent_identity.st_dev, parent_identity.st_ino)):
+            raise OSError("DHCP publication parent changed during transaction")
+
     states = []
     try:
+        check_visible_parent()
+        transaction_fd = os.open(
+            os.path.basename(transaction_dir),
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=parent_fd,
+        )
+        os.mkdir("backup", 0o700, dir_fd=transaction_fd)
+        backup_fd = os.open(
+            "backup", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=transaction_fd,
+        )
         for index, (candidate, target) in enumerate(candidates):
-            backup = os.path.join(backup_dir, f"{index}-{os.path.basename(target)}")
-            existed = os.path.lexists(target)
+            check_visible_parent()
+            candidate_name = os.path.basename(candidate)
+            target_name = os.path.basename(target)
+            backup_name = f"{index}-{target_name}"
+            staged = os.stat(candidate_name, dir_fd=transaction_fd,
+                             follow_symlinks=False)
+            if not stat.S_ISREG(staged.st_mode) or staged.st_nlink != 1:
+                raise OSError(f"unsafe DHCP candidate: {candidate}")
+            try:
+                previous = os.stat(target_name, dir_fd=parent_fd,
+                                   follow_symlinks=False)
+            except FileNotFoundError:
+                existed = False
+            else:
+                if not stat.S_ISREG(previous.st_mode) or previous.st_nlink != 1:
+                    raise OSError(f"unsafe DHCP output: {target}")
+                existed = True
             state = {
-                "target": target,
-                "backup": backup,
+                "target": target_name,
+                "backup": backup_name,
                 "existed": existed,
                 "installed": False,
             }
             states.append(state)
+            # The held dir_fds, not the visible-path check, prevent a rebound
+            # parent pathname from redirecting either half of this rename.
             if existed:
-                os.replace(target, backup)
+                os.replace(target_name, backup_name,
+                           src_dir_fd=parent_fd, dst_dir_fd=backup_fd)
             try:
-                os.replace(candidate, target)
+                os.replace(candidate_name, target_name,
+                           src_dir_fd=transaction_fd, dst_dir_fd=parent_fd)
                 state["installed"] = True
             except BaseException:
-                if existed and not os.path.lexists(target):
-                    os.replace(backup, target)
+                try:
+                    os.stat(target_name, dir_fd=parent_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    if existed:
+                        os.replace(backup_name, target_name,
+                                   src_dir_fd=backup_fd, dst_dir_fd=parent_fd)
                 raise
-        directory_fd = os.open(
-            os.path.dirname(os.path.realpath(candidates[0][1])),
-            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
-        )
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+            check_visible_parent()
+        os.fsync(parent_fd)
+        check_visible_parent()
     except BaseException:
         rollback_errors = []
         for state in reversed(states):
             target = state["target"]
             backup = state["backup"]
             try:
-                if state["installed"] and os.path.lexists(target):
-                    os.unlink(target)
-                if state["existed"] and os.path.lexists(backup):
-                    os.replace(backup, target)
+                if state["installed"]:
+                    try:
+                        os.unlink(target, dir_fd=parent_fd)
+                    except FileNotFoundError:
+                        pass
+                if state["existed"]:
+                    try:
+                        os.stat(backup, dir_fd=backup_fd, follow_symlinks=False)
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        os.replace(backup, target,
+                                   src_dir_fd=backup_fd, dst_dir_fd=parent_fd)
             except OSError as rollback_exc:
                 rollback_errors.append(f"{target}: {rollback_exc}")
         if rollback_errors:
@@ -1017,6 +1083,39 @@ def _publish_dhcp_candidates(candidates, transaction_dir):
                 + "; ".join(rollback_errors)
             )
         raise
+    finally:
+        if backup_fd is not None:
+            os.close(backup_fd)
+        if transaction_fd is not None:
+            os.close(transaction_fd)
+        if own_parent_fd:
+            os.close(parent_fd)
+
+
+def _remove_dhcp_stage(parent_fd, transaction_dir):
+    """Remove only the stage beneath the held output parent, never a rebound path."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+    def remove_children(directory_fd):
+        for name in os.listdir(directory_fd):
+            child = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if stat.S_ISDIR(child.st_mode):
+                child_fd = os.open(name, flags, dir_fd=directory_fd)
+                try:
+                    remove_children(child_fd)
+                finally:
+                    os.close(child_fd)
+                os.rmdir(name, dir_fd=directory_fd)
+            else:
+                os.unlink(name, dir_fd=directory_fd)
+
+    name = os.path.basename(transaction_dir)
+    stage_fd = os.open(name, flags, dir_fd=parent_fd)
+    try:
+        remove_children(stage_fd)
+    finally:
+        os.close(stage_fd)
+    os.rmdir(name, dir_fd=parent_fd)
 
 
 def _prepare_dhcp_output_transaction(*, family_records, switch_scope):
@@ -1046,7 +1145,47 @@ def _prepare_dhcp_output_transaction(*, family_records, switch_scope):
                 targets[family]
             )
 
-    transaction_dir = tempfile.mkdtemp(prefix=".dhcp-generate-", dir=parent)
+    parent_fd = os.open(
+        parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    try:
+        named = os.lstat(parent)
+        pinned = os.fstat(parent_fd)
+        if (not stat.S_ISDIR(named.st_mode)
+                or (named.st_dev, named.st_ino) != (pinned.st_dev, pinned.st_ino)):
+            raise OSError("DHCP output parent changed before transaction")
+    except BaseException:
+        os.close(parent_fd)
+        raise
+    stage_name = None
+    try:
+        # Allocate under the held parent: a pathname rebound after the check
+        # above must not create even an empty stage in the replacement tree.
+        for _ in range(10):
+            candidate_name = f".dhcp-generate-{secrets.token_hex(16)}"
+            try:
+                os.mkdir(candidate_name, 0o700, dir_fd=parent_fd)
+            except FileExistsError:
+                continue
+            stage_name = candidate_name
+            break
+        if stage_name is None:
+            raise OSError("could not allocate DHCP stage directory")
+        transaction_dir = os.path.join(parent, stage_name)
+        staged = os.stat(stage_name, dir_fd=parent_fd, follow_symlinks=False)
+        named = os.lstat(parent)
+        pinned = os.fstat(parent_fd)
+        if (not stat.S_ISDIR(staged.st_mode)
+                or not stat.S_ISDIR(named.st_mode)
+                or (named.st_dev, named.st_ino) != (pinned.st_dev, pinned.st_ino)):
+            raise OSError("DHCP output parent changed during stage allocation")
+    except BaseException:
+        try:
+            if stage_name is not None:
+                _remove_dhcp_stage(parent_fd, os.path.join(parent, stage_name))
+        finally:
+            os.close(parent_fd)
+        raise
     stage = {
         label: os.path.join(transaction_dir, os.path.basename(target))
         for label, target in targets.items()
@@ -1065,6 +1204,7 @@ def _prepare_dhcp_output_transaction(*, family_records, switch_scope):
     publish.append((stage["manifest"], targets["manifest"]))
     return {
         "directory": transaction_dir,
+        "parent_fd": parent_fd,
         "targets": targets,
         "stage": stage,
         "owned_families": owned_families,
@@ -1075,7 +1215,7 @@ def _prepare_dhcp_output_transaction(*, family_records, switch_scope):
 
 # ── Subnet 配置 ───────────────────────────────────────────────────────────────
 
-def load_subnet_csv(path, ztp_prefix):
+def load_subnet_csv(path, ztp_prefix, port=80):
     """Read declarative subnet rows and derive the two platform ZTP URLs."""
     ztp_prefix = _validate_ztp_url_prefix(ztp_prefix)
     required = (
@@ -1129,11 +1269,15 @@ def load_subnet_csv(path, ztp_prefix):
             service_address = None
             if service_ip:
                 try:
-                    service_address = ipaddress.IPv4Address(service_ip)
-                    service_ip = str(service_address)
-                except ipaddress.AddressValueError:
+                    endpoint = validate_service_endpoint(
+                        service_ip,
+                        field=f"第 {lineno} 行 ztp_service_ip",
+                    )
+                    service_address = endpoint.address
+                    service_ip = endpoint.host
+                except ValueError:
                     errors.append(
-                        f"  第 {lineno} 行 ztp_service_ip={service_ip!r} 不是有效 IPv4"
+                        f"  第 {lineno} 行 ztp_service_ip={service_ip!r} 不是可用单播地址"
                     )
             if (profile in _CUMULUS_BOOTSTRAP_BY_PROFILE or nvos_ztp == "yes") and not service_ip:
                 errors.append(
@@ -1143,25 +1287,27 @@ def load_subnet_csv(path, ztp_prefix):
                 errors.append(
                     f"  第 {lineno} 行未启用任何平台 ZTP，ztp_service_ip 必须为空"
                 )
-            if service_address is not None and (
-                service_address.is_unspecified or service_address.is_multicast
-            ):
-                errors.append(
-                    f"  第 {lineno} 行 ztp_service_ip={service_address} 不是可用单播地址"
-                )
             row["ztp_service_ip"] = service_ip
             row["cumulus_profile"] = profile
             row["nvos_ztp"] = nvos_ztp
             row["cumulus_provision_url"] = (
-                _ztp_url(
-                    service_ip, ztp_prefix,
-                    _CUMULUS_BOOTSTRAP_BY_PROFILE[profile],
+                service_url(
+                    validate_service_endpoint(
+                        service_ip, port, field="DHCP ZTP service IPv4"
+                    ),
+                    f"/{_CUMULUS_BOOTSTRAP_BY_PROFILE[profile]}",
+                    prefix=ztp_prefix, channel="dhcp-provision-url",
                 )
-                if service_ip and profile in _CUMULUS_BOOTSTRAP_BY_PROFILE else ""
+                if service_address is not None and profile in _CUMULUS_BOOTSTRAP_BY_PROFILE else ""
             )
             row["bootfile_name"] = (
-                _ztp_url(service_ip, ztp_prefix, "ztp.json")
-                if service_ip and nvos_ztp == "yes" else ""
+                service_url(
+                    validate_service_endpoint(
+                        service_ip, port, field="DHCP ZTP service IPv4"
+                    ),
+                    "/ztp.json", prefix=ztp_prefix, channel="dhcp-bootfile",
+                )
+                if service_address is not None and nvos_ztp == "yes" else ""
             )
             if service_ip and profile in _CUMULUS_BOOTSTRAP_BY_PROFILE:
                 previous = profile_services.setdefault(profile, (service_ip, lineno))
@@ -1405,7 +1551,7 @@ def _production_handoff_text():
     return (
         "[NEXT] 已生成项目内 DHCP 候选；独立生成仅用于开发预览，不构成生产发布\n"
         "[NEXT] Native/systemd：sudo python3 DAY0-Prepare/11-load.py "
-        "DAY0-Prepare/<project>\n"
+        "DAY0-Prepare/<project> --host-role=management-server\n"
         "[NEXT] Docker/Supervisor 首次部署或 source write 后："
         "sudo ./infra/docker/deploy.sh deploy\n"
         "[NEXT] 已有与 live 来源身份链匹配且经验证的镜像："
@@ -1476,13 +1622,13 @@ def main():
         print(f"[ERROR] 找不到 {os.path.basename(SUBNET_CSV)}")
         sys.exit(1)
     try:
-        ztp_prefix, schema_version = load_project_global(GLOBAL_YAML)
+        ztp_prefix, schema_version, http_port = load_project_global(GLOBAL_YAML)
     except ValueError as exc:
         print(f"[ERROR] {exc}")
         sys.exit(1)
     print(f"读取：{os.path.basename(GLOBAL_YAML)}（ztp_url_prefix={ztp_prefix}）")
     print(f"读取：{os.path.basename(SUBNET_CSV)}")
-    subnets = load_subnet_csv(SUBNET_CSV, ztp_prefix)
+    subnets = load_subnet_csv(SUBNET_CSV, ztp_prefix, port=http_port)
     print(f"  已加载 {len(subnets)} 条 subnet 配置\n")
 
     csv_files = [DEVICES_CSV]
@@ -1644,10 +1790,24 @@ def main():
                 )
                 _candidate_mode(stage["manifest"], targets["manifest"])
                 _publish_dhcp_candidates(
-                    transaction["publish"], transaction["directory"]
+                    transaction["publish"], transaction["directory"],
+                    parent_fd=transaction["parent_fd"],
                 )
             finally:
-                shutil.rmtree(transaction["directory"], ignore_errors=True)
+                primary_error = sys.exc_info()[1]
+                try:
+                    _remove_dhcp_stage(
+                        transaction["parent_fd"], transaction["directory"],
+                    )
+                except OSError as cleanup_error:
+                    if primary_error is None:
+                        raise
+                    print(
+                        f"[ERROR] DHCP stage cleanup failed after primary error: "
+                        f"{cleanup_error}", file=sys.stderr,
+                    )
+                finally:
+                    os.close(transaction["parent_fd"])
 
             print("\n" + _production_handoff_text())
 

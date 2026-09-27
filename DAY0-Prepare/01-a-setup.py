@@ -17,10 +17,19 @@
 
 import argparse
 import base64
+from contextlib import nullcontext
+import ctypes
 import csv
+from datetime import datetime
+import errno
 import glob
+import ctypes
+import errno
+import hashlib
 import ipaddress
+import json
 import os
+import platform
 from pathlib import Path
 import re
 import shutil
@@ -28,6 +37,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 
 OPTIMIZE_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "ztp", "optimize"))
 if OPTIMIZE_DIR not in sys.path:
@@ -48,6 +58,8 @@ if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
 from project_contract import (
     SETUP_ZTP_MAPPINGS, SETUP_WORKSPACE_INPUT_MAPPINGS,
+    managed_infra_log_project,
+    infra_log_root_lock, infra_log_pending_state_names,
     P2P_INPUT_PATHS, P2P_OUTPUT_PATHS, P2P_AIR_PATH,
     BRINGUP_OUTPUT_SPECS, ANALYZER_INPUT_SPECS, ANALYZER_OUTPUT_SPECS,
     NETWORK_MONITOR_SPECS, NETWORK_CSV_MAPPINGS, NETWORK_INVENTORY_LINKS,
@@ -58,14 +70,22 @@ from project_contract import (
     normalize_v2_mlag_policy,
     normalize_v2_vrr_policy,
     parse_device_csv_layout,
+    require_project_eligible,
     require_device_csv_row_width,
     safe_load_global_yaml,
     validate_cumulus_dns_domain,
+    validate_service_endpoint,
     validate_ztp_url_prefix,
     v2_vrr_ipv4_plan,
 )
-from deployment_lock import DeploymentLockError, deployment_lock
+from deployment_lock import LOCK_FD_ENV, DeploymentLockError, deployment_lock
+from _package_common import (
+    P2PSelectionError,
+    newest_project_p2p,
+    select_project_p2p_source,
+)
 from ztp_service_runtime import RuntimeContractError, stop_native_ztp_monitors
+import ssh_key_preparation as ssh_keys
 ZTP          = os.path.normpath(os.path.join(HERE, "..", "ztp"))
 TEMPLATE_DIR = os.path.join(HERE, "template")                # DAY0-Prepare/template/
 IMAGE_DIR    = os.path.join(HTTP_BASE, "image")               # 项目无关的共享系统镜像
@@ -81,6 +101,7 @@ MAPPINGS = list(SETUP_ZTP_MAPPINGS)
 
 # ZTP 目录之外、同样随当前部署项目切换的输入链接。
 WORKSPACE_INPUT_MAPPINGS = list(SETUP_WORKSPACE_INPUT_MAPPINGS)
+INFRA_LOG_REL = "infra/logs"
 
 # 所有 P2P 消费工具只使用固定文件名 p2p.xlsx；setup 将同一个项目源文件
 # 挂载到以下五个输入入口，并让两个转换流程共享同一个输出目录。
@@ -110,6 +131,7 @@ _P2P_FILE = None   # --p2p-file 指定的项目根目录 XLSX
 _P2P_SOURCE = None # 本次 setup 选定的唯一 P2P 源
 _LINK_ERRORS = 0   # 本次 setup 中所有固定/动态链接错误数
 _LINK_TRANSACTION = None  # 当前 setup 的整批链接回滚快照
+_INFRA_LOG_MIGRATION = None  # 待 manifest 成功后清理的原目录备份
 _CONFIRM_PROJECT_SWITCH = False  # 自动化对跨项目切换的独立显式确认
 
 MANIFEST_FILE = os.path.join(ZTP, ".setup_manifest")  # setup 创建的链接清单
@@ -364,6 +386,9 @@ def _initialize_project_from_template(proj_dir):
             src = os.path.join(src_root, filename)
             dest = os.path.join(dest_root, filename)
             rel_path = os.path.join(rel_root, filename) if rel_root else filename
+            if rel_path == "laptop.pub":
+                # This identity belongs to the local operator, never to a template.
+                continue
             if os.path.lexists(dest):
                 if os.path.isdir(dest) and not os.path.islink(dest):
                     print(_c(RED, f"  [ERROR] 模板文件 {rel_path} 与项目目录冲突"))
@@ -435,63 +460,71 @@ def _process_bin_files():
 
 
 def _select_p2p_source(proj_dir):
-    """从文件名含 p2p 的 XLSX 中选出唯一 P2P 源。
-
-    自动发现忽略大小写和 Excel 临时文件；空模板 p2p.xlsx 不会遮蔽
-    唯一的非空真实 P2P 文件。--p2p-file 是显式人工选择，不受命名约束。
-    """
-    if _P2P_FILE:
-        source = _P2P_FILE if os.path.isabs(_P2P_FILE) else os.path.join(proj_dir, _P2P_FILE)
-        source = os.path.abspath(source)
-        allowed_root = os.path.abspath(proj_dir)
-        allowed_versions = os.path.join(allowed_root, "p2p")
-        if os.path.dirname(source) not in {allowed_root, allowed_versions}:
-            print(_c(RED, "[ERROR] --p2p-file 必须位于项目根目录或 p2p/ 目录"))
-            return None
-        if not source.lower().endswith(".xlsx") or not os.path.isfile(source):
-            print(_c(RED, f"[ERROR] --p2p-file 不存在或不是 XLSX：{source}"))
-            return None
-        return source
-
-    version_dir = os.path.join(proj_dir, "p2p")
-    version_candidates = sorted(
-        entry.path for entry in os.scandir(version_dir)
-        if entry.is_file()
-        and not entry.name.startswith(("~$", "._"))
-        and entry.name.lower().endswith(".xlsx")
-        and "p2p" in entry.name.lower()
-        and os.path.getsize(entry.path) > 0
-    ) if os.path.isdir(version_dir) else []
-    if version_candidates:
-        return max(
-            version_candidates,
-            key=lambda path: (os.stat(path).st_mtime_ns, os.path.basename(path).casefold()),
-        )
-
-    candidates = sorted(
-        entry.path for entry in os.scandir(proj_dir)
-        if entry.is_file()
-        # Ignore Excel lock files and macOS AppleDouble metadata files.
-        and not entry.name.startswith(("~$", "._"))
-        and entry.name.lower().endswith(".xlsx")
-        and "p2p" in entry.name.lower()
-    )
-    canonical = os.path.join(proj_dir, "p2p.xlsx")
-    if os.path.isfile(canonical) and os.path.getsize(canonical) > 0:
-        return canonical
-
-    nonempty = [path for path in candidates if os.path.getsize(path) > 0]
-    if len(nonempty) == 1:
-        return nonempty[0]
-    if len(nonempty) > 1:
-        names = ", ".join(os.path.basename(path) for path in nonempty)
-        print(_c(RED, f"[ERROR] 项目根目录有多个文件名含 P2P 的非空 XLSX：{names}"))
-        print("        请用 --p2p-file=<文件名> 明确选择一个 P2P 源")
+    """Resolve the frozen project-root candidate set before changing runtime links."""
+    canonical = Path(proj_dir) / "p2p.xlsx"
+    try:
+        if canonical.exists() and not canonical.is_symlink() and canonical.stat().st_size:
+            if not canonical.is_file():
+                raise P2PSelectionError("p2p.xlsx 必须是普通 XLSX 文件")
+            if _DRY_RUN:
+                print(_c(CYAN, "  [DRY] 将非空 p2p.xlsx 无覆盖归档后重新选择"))
+                return os.fspath(canonical)
+            rescued = _rescue_canonical_p2p(canonical)
+            print(_c(GREEN, f"  [RESCUE] p2p.xlsx -> {rescued.name}"))
+        selected = select_project_p2p_source(Path(proj_dir), _P2P_FILE)
+        if _P2P_FILE:
+            try:
+                newest = newest_project_p2p(Path(proj_dir))
+            except P2PSelectionError:
+                newest = None
+            if newest is not None and newest != selected:
+                print(_c(YELLOW, f"  [ADVISORY] 最新 P2P 是 {newest.name}；"
+                      f"本次固定使用 {selected.name}。如需自动选择，可将所需文件重命名后不带 --p2p-file 重试"))
+        return os.fspath(selected)
+    except (OSError, P2PSelectionError) as exc:
+        print(_c(RED, f"[ERROR] P2P 选择失败：{exc}"))
         return None
-    if os.path.isfile(canonical):
-        return canonical
-    print(_c(RED, "[ERROR] 项目根目录未找到文件名含 P2P 的 XLSX 文件"))
-    return None
+
+
+def _atomic_rename_noreplace(source, destination):
+    """Move one local file only if the OS offers an atomic no-replace primitive."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    source_bytes = os.fsencode(source)
+    destination_bytes = os.fsencode(destination)
+    if sys.platform == "darwin" and hasattr(libc, "renamex_np"):
+        operation = libc.renamex_np
+        operation.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint)
+        operation.restype = ctypes.c_int
+        result = operation(source_bytes, destination_bytes, 0x00000004)  # RENAME_EXCL
+    elif sys.platform.startswith("linux") and hasattr(libc, "renameat2"):
+        operation = libc.renameat2
+        operation.argtypes = (
+            ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint,
+        )
+        operation.restype = ctypes.c_int
+        result = operation(-100, source_bytes, -100, destination_bytes, 1)  # RENAME_NOREPLACE
+    else:
+        raise OSError(errno.ENOTSUP, "atomic no-replace rename is unavailable")
+    if result != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), destination)
+
+
+def _rescue_canonical_p2p(canonical):
+    metadata = canonical.lstat()
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size == 0:
+        raise P2PSelectionError("非空 p2p.xlsx 必须是普通文件才能归档")
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    for index in range(1000):
+        suffix = "" if index == 0 else f"-{index}"
+        destination = canonical.with_name(f"p2p-original-{timestamp}{suffix}.xlsx")
+        try:
+            _atomic_rename_noreplace(canonical, destination)
+            return destination
+        except OSError as exc:
+            if exc.errno != errno.EEXIST:
+                raise
+    raise P2PSelectionError("p2p.xlsx 归档候选名称已全部被占用")
 
 
 def _ensure_project_p2p_link(proj_dir, source):
@@ -500,34 +533,38 @@ def _ensure_project_p2p_link(proj_dir, source):
     if os.path.abspath(source) == os.path.abspath(canonical):
         return source
     relative = os.path.relpath(source, proj_dir)
+    if os.path.dirname(relative) or relative in {".", ".."}:
+        print(_c(RED, "[ERROR] P2P 链接目标必须是项目根目录普通文件"))
+        return None
+    old_target = None
     if os.path.islink(canonical):
-        if os.path.realpath(canonical) == os.path.realpath(source):
+        old_target = os.readlink(canonical)
+        if old_target == relative:
             print(f"  [SKIP] p2p.xlsx 已指向 {relative}")
             return canonical
         if _DRY_RUN:
-            print(_c(CYAN, f"  [DRY] 更新 p2p.xlsx → {relative}"))
+            print(_c(CYAN, f"  [DRY] p2p.xlsx: {old_target} -> {relative}"))
             return canonical
-        os.remove(canonical)
     elif os.path.exists(canonical):
         if os.path.isfile(canonical) and os.path.getsize(canonical) == 0:
             if _DRY_RUN:
                 print(_c(CYAN, f"  [DRY] 用链接替换空 p2p.xlsx → {relative}"))
                 return canonical
-            os.remove(canonical)
         else:
-            print(_c(RED, "[ERROR] 非空实际文件 p2p.xlsx 与选定 P2P 源冲突；请先归档或明确处理"))
+            print(_c(RED, "[ERROR] 非空实际文件 p2p.xlsx 必须先无覆盖归档"))
             return None
     if not _DRY_RUN:
-        temporary = canonical + f".tmp.{os.getpid()}"
+        temporary = canonical + f".tmp.{os.getpid()}.{os.urandom(4).hex()}"
         try:
-            if os.path.lexists(temporary):
-                os.remove(temporary)
             os.symlink(relative, temporary)
             os.replace(temporary, canonical)
         finally:
             if os.path.lexists(temporary):
                 os.remove(temporary)
-    print(_c(CYAN if _DRY_RUN else GREEN, f"  [{'DRY' if _DRY_RUN else 'LINK'}] p2p.xlsx → {relative}"))
+    if old_target is not None:
+        print(_c(GREEN, f"  [LINK] p2p.xlsx: {old_target} -> {relative}"))
+    else:
+        print(_c(CYAN if _DRY_RUN else GREEN, f"  [{'DRY' if _DRY_RUN else 'LINK'}] p2p.xlsx → {relative}"))
     return canonical
 
 
@@ -615,6 +652,64 @@ def _process_analyzer_links(proj_dir):
 MANAGEMENT_PUBKEY_MARKER = ".management-pubkeys"
 
 
+def _prepare_laptop_public_key(proj_dir):
+    """Select the local public key and atomically bind this project's laptop.pub."""
+    ssh_dir = Path.home() / ".ssh"
+    try:
+        if _DRY_RUN:
+            selected = ssh_keys.select_public_key(ssh_dir)
+            if selected is None:
+                print(_c(CYAN, "  [DRY] 将生成本机 Ed25519 key 并准备 laptop.pub"))
+                return
+            print(_c(CYAN, f"  [DRY] 将准备 laptop.pub ← {selected}"))
+            return
+        selected = ssh_keys.ensure_public_key(ssh_dir, comment="operator@laptop")
+        ssh_keys.prepare_project_public_key(Path(proj_dir), "laptop.pub", selected)
+    except ssh_keys.SshKeyPreparationError as exc:
+        print(_c(RED, f"  [ERROR] 本机 laptop.pub 准备失败：{exc}"))
+        raise SystemExit(1) from exc
+
+
+def _require_delegated_laptop_public_key(proj_dir):
+    """Validate the two existing project keys without consulting this host's HOME.
+
+    A server load may invoke setup as a child, but that child must never turn
+    the server's own public key into the project's laptop identity.
+    """
+    project = Path(proj_dir)
+    directory_fd = -1
+    try:
+        named = project.lstat()
+        if not stat.S_ISDIR(named.st_mode):
+            raise ssh_keys.SshKeyPreparationError("project root must be a no-follow directory")
+        directory_fd = os.open(project, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        held = os.fstat(directory_fd)
+        if (named.st_dev, named.st_ino) != (held.st_dev, held.st_ino):
+            raise ssh_keys.SshKeyPreparationError("project root changed while opening")
+        laptop = ssh_keys._read_project_leaf(directory_fd, "laptop.pub")
+        management = ssh_keys._read_project_leaf(directory_fd, "mgmt-server.pub")
+        if laptop is None or management is None:
+            raise ssh_keys.SshKeyPreparationError("server-delegated setup requires both project public keys")
+        laptop_identity = ssh_keys.public_key_identity_bytes(laptop[0])
+        management_identity = ssh_keys.public_key_identity_bytes(management[0])
+        if laptop_identity == management_identity:
+            raise ssh_keys.SshKeyPreparationError("management and laptop public keys must be distinct")
+        rebound = project.lstat()
+        if (rebound.st_dev, rebound.st_ino) != (held.st_dev, held.st_ino):
+            raise ssh_keys.SshKeyPreparationError("project root rebound before setup")
+        if (
+            ssh_keys._read_project_leaf(directory_fd, "laptop.pub") != laptop
+            or ssh_keys._read_project_leaf(directory_fd, "mgmt-server.pub") != management
+        ):
+            raise ssh_keys.SshKeyPreparationError("project public key changed before setup")
+    except (OSError, ssh_keys.SshKeyPreparationError) as exc:
+        print(_c(RED, f"  [ERROR] server-delegated public key check failed: {exc}"))
+        raise SystemExit(1) from exc
+    finally:
+        if directory_fd >= 0:
+            os.close(directory_fd)
+
+
 def _unused_empty_pubkeys(proj_dir):
     """Return legacy empty placeholders that are not part of the active key pair.
 
@@ -646,8 +741,16 @@ def _unused_empty_pubkeys(proj_dir):
     }
 
 
+def _publickey_roots():
+    """The two first-layer public-key readers share the active project keys."""
+    return (
+        os.path.join(ZTP, "config", "publickey"),
+        os.path.join(HTTP_BASE, "infiniband", "publickey"),
+    )
+
+
 def _process_pubkeys(proj_dir):
-    """将项目中的 .pub 公钥链接到 config/publickey/。"""
+    """Publish non-empty project keys to both managed public-key roots."""
     pubs = glob.glob(os.path.join(proj_dir, "*.pub"))
     if not pubs:
         inited = _copy_glob_from_template(proj_dir, "*.pub")
@@ -661,23 +764,22 @@ def _process_pubkeys(proj_dir):
     # load injects the management key before setup, so required keys are
     # non-empty by the time they are published.
     pubs = [path for path in pubs if os.path.getsize(path) > 0]
-    key_dir = os.path.join(ZTP, "config", "publickey")
-    if not _DRY_RUN:
-        os.makedirs(key_dir, exist_ok=True)
     expected_names = {os.path.basename(src) for src in pubs}
-    # Public-key links project only active keys. Remove setup-managed links for
-    # obsolete placeholders, but never touch a real operator-managed file.
-    for old in sorted(glob.glob(os.path.join(key_dir, "*.pub"))):
-        if not os.path.islink(old) or os.path.basename(old) in expected_names:
-            continue
-        if _DRY_RUN:
-            print(_c(CYAN, f"  [DRY] 删除旧公钥链接 {os.path.relpath(old, HTTP_BASE)}"))
-        else:
-            os.remove(old)
-            print(_c(GREEN, f"  [DEL] 旧公钥链接 {os.path.relpath(old, HTTP_BASE)}"))
-    for src in sorted(pubs):
-        fname = os.path.basename(src)
-        _make_link(os.path.join(key_dir, fname), src)
+    for key_dir in _publickey_roots():
+        if not _DRY_RUN:
+            os.makedirs(key_dir, exist_ok=True)
+        # Public-key links project only active keys. Remove obsolete links,
+        # but never touch an operator-managed regular file.
+        for old in sorted(glob.glob(os.path.join(key_dir, "*.pub"))):
+            if not os.path.islink(old) or os.path.basename(old) in expected_names:
+                continue
+            if _DRY_RUN:
+                print(_c(CYAN, f"  [DRY] 删除旧公钥链接 {os.path.relpath(old, HTTP_BASE)}"))
+            else:
+                os.remove(old)
+                print(_c(GREEN, f"  [DEL] 旧公钥链接 {os.path.relpath(old, HTTP_BASE)}"))
+        for src in sorted(pubs):
+            _make_link(os.path.join(key_dir, os.path.basename(src)), src)
 
 
 def _latest_cumulus_publish_dir(parent):
@@ -881,6 +983,25 @@ def _remove_legacy_nvos_output_links():
 def _vna(val):
     """判断 CSV 字段是否为空 / NA。"""
     return not val or val.strip().lower() in ("na", "n/a", "none", "-", "")
+
+
+_ETH_JUMP_CONFIG_ONLY_FIELDS = frozenset({
+    "lo_ip", "vrf_default", "vlan_id", "svi_ip", "vrr_ip", "vrr_mac",
+    "vlan_ports", "bgp_asn", "bgp_ports", "bond_ports", "bond_type",
+    "bond_mac", "peerlink_ports", "vrl", "evpn_vrf", "evpn_l3vni",
+    "evpn_l3vlan", "dhcp_relay", "evpn_l2vni", "evpn_l2vlan",
+})
+
+
+def _eth_jump_configuration_intent(header, row):
+    conflicts = set()
+    for index, field in enumerate(header):
+        if field in _ETH_JUMP_CONFIG_ONLY_FIELDS and not _vna(row[index]):
+            conflicts.add(field)
+    template_index = header.index("template")
+    if not _vna(row[template_index]):
+        conflicts.add("template")
+    return tuple(sorted(conflicts))
 
 
 _V2_PEERLINK_PORT_TOKEN_RE = re.compile(
@@ -1849,7 +1970,10 @@ def _validate_eth_csv(path):
     _NVOS_TYPES = {"ib", "nvl"}
     _SERVER_TYPES = {"server"}
     _AIR_TYPES = {"air"}
-    _SUPPORTED_TYPES = _ETH_TYPES | _NVOS_TYPES | _SERVER_TYPES | _AIR_TYPES
+    _JUMP_TYPES = {"eth_jump"}
+    _SUPPORTED_TYPES = (
+        _ETH_TYPES | _NVOS_TYPES | _SERVER_TYPES | _AIR_TYPES | _JUMP_TYPES
+    )
 
     def e(row_n, hn, msg):
         errors.append(f"  行{row_n} [{hn}] {msg}")
@@ -1926,11 +2050,12 @@ def _validate_eth_csv(path):
                 # 确定设备类型
                 row_type = row[type_col].strip().lower() if (type_col is not None and len(row) > type_col) else "eth"
                 if row_type not in _SUPPORTED_TYPES:
-                    e(row_n, hn, f"type 无效：'{row_type}'（仅支持 eth/eth_spx/spx/ib/nvl/server/air）")
+                    e(row_n, hn, f"type 无效：'{row_type}'（仅支持 eth/eth_spx/spx/ib/nvl/server/air/eth_jump）")
                     continue
                 is_nvos  = row_type in _NVOS_TYPES
                 is_server = row_type in _SERVER_TYPES
                 is_air = row_type in _AIR_TYPES
+                is_jump = row_type in _JUMP_TYPES
 
                 # ── 共有字段校验（eth0、eth1 管理接口、MAC）────────────────────
                 if len(row) < _COL_ETH0_IP + 1:
@@ -1942,7 +2067,8 @@ def _validate_eth_csv(path):
                 eth0_gw     = row[_COL_ETH0_GW].strip()  if len(row) > _COL_ETH0_GW  else ""
                 eth0_mac    = row[_COL_ETH0_MAC].strip() if len(row) > _COL_ETH0_MAC else ""
 
-                # 所有静态管理地址按实际 IP 去重，不因前缀写法不同而漏检。
+                # 所有静态管理地址（含 eth_jump）按实际 IP 去重；只有匹配的生产/AIR
+                # 二元组可共享地址，前缀写法不同也不能绕过重复检测。
                 if not _vna(eth0_ip_raw) and eth0_ip_raw.lower() != "dhcp-client":
                     try:
                         parsed_eth0 = ipaddress.ip_interface(eth0_ip_raw).ip
@@ -1950,6 +2076,8 @@ def _validate_eth_csv(path):
                         previous = seen_eth0_addr.setdefault(eth0_addr, [])
                         allowed_pair = (
                             len(previous) == 1
+                            and not is_jump
+                            and previous[0][2] != "eth_jump"
                             and _is_matching_production_air_pair(
                                 previous[0][1], previous[0][2], hn, row_type,
                                 production_hostnames,
@@ -1963,6 +2091,33 @@ def _validate_eth_csv(path):
                         previous.append((row_n, hn, row_type))
                     except ValueError:
                         pass  # 各设备类型分支负责输出更具体的格式错误。
+
+                if is_jump:
+                    conflicts = _eth_jump_configuration_intent(h_lower, row)
+                    if conflicts:
+                        e(
+                            row_n, hn,
+                            "type=eth_jump 字段 " + ", ".join(conflicts)
+                            + " 与零配置意图冲突",
+                        )
+                    try:
+                        ipaddress.IPv4Address(eth0_ip_raw)
+                    except ValueError:
+                        e(row_n, hn, f"eth0_ip 无效（eth_jump 必填 IPv4）：'{eth0_ip_raw}'")
+                    if not _vna(eth0_nm) and not _valid_mask(eth0_nm):
+                        e(row_n, hn, f"netmask(eth0) 无效：'{eth0_nm}'")
+                    if not _vna(eth0_gw) and not _valid_ip(eth0_gw):
+                        e(row_n, hn, f"eth0_gw 无效：'{eth0_gw}'")
+                    if not _vna(eth0_mac):
+                        if not _valid_mac(eth0_mac):
+                            e(row_n, hn, f"eth0_mac 无效：'{eth0_mac}'")
+                        else:
+                            key = eth0_mac.lower().replace("-", ":")
+                            if key in seen_eth0_mac:
+                                e(row_n, hn, f"eth0_mac 重复（首次行{seen_eth0_mac[key]}）")
+                            else:
+                                seen_eth0_mac[key] = row_n
+                    continue
 
                 if is_server:
                     # infra/deploy_infra.py 以 eth0_ip 登录 server；允许裸 IPv4 或 CIDR。
@@ -2350,11 +2505,15 @@ def _validate_subnet_csv(path):
                 service_address = None
                 if service_ip:
                     try:
-                        service_address = ipaddress.IPv4Address(service_ip)
-                        service_ip = str(service_address)
-                    except ipaddress.AddressValueError:
+                        endpoint = validate_service_endpoint(
+                            service_ip,
+                            field=f"行{row_n} ztp_service_ip",
+                        )
+                        service_address = endpoint.address
+                        service_ip = endpoint.host
+                    except ValueError:
                         errors.append(
-                            f"  行{row_n} ztp_service_ip='{service_ip}' 不是有效 IPv4"
+                            f"  行{row_n} ztp_service_ip='{service_ip}' 不是可用单播地址"
                         )
                 if (profile in {"oob", "oobofoob"} or nvos_ztp == "yes") and not service_ip:
                     errors.append(
@@ -2363,12 +2522,6 @@ def _validate_subnet_csv(path):
                 if profile == "none" and nvos_ztp == "no" and service_ip:
                     errors.append(
                         f"  行{row_n} 未启用任何平台 ZTP，ztp_service_ip 必须为空"
-                    )
-                if service_address is not None and (
-                    service_address.is_unspecified or service_address.is_multicast
-                ):
-                    errors.append(
-                        f"  行{row_n} ztp_service_ip={service_address} 不是可用单播地址"
                     )
                 if service_ip and profile in {"oob", "oobofoob"}:
                     previous = profile_services.setdefault(profile, (service_ip, row_n))
@@ -2451,6 +2604,25 @@ def _validate_global_yaml(path, section_key="eth"):
                 validate_ztp_url_prefix(prefix)
             except ValueError as exc:
                 errors.append(f"  {exc}")
+        try:
+            mgmt = data["common"]["mgmt"]
+            http_policy = mgmt.get("http", {})
+            if not isinstance(http_policy, dict):
+                raise ValueError("common.mgmt.http 必须是 mapping")
+            http_port = http_policy.get("port", 80)
+            validate_service_endpoint(
+                "192.0.2.1", http_port, field="common.mgmt.http.port"
+            )
+        except (KeyError, TypeError, ValueError, AttributeError) as exc:
+            errors.append(f"  common.mgmt.http.port 无效：{exc}")
+        else:
+            if "address" in http_policy:
+                try:
+                    validate_service_endpoint(
+                        http_policy["address"], field="common.mgmt.http.address"
+                    )
+                except ValueError as exc:
+                    errors.append(f"  common.mgmt.http.address 无效：{exc}")
         # Support merged format: switches list with eth/ib/nvl sections
         if "switches" in data:
             section = next((s[section_key] for s in data["switches"]
@@ -2747,6 +2919,7 @@ def _managed_ztp_link_candidates():
         os.path.join(ZTP, "image", "cumulus", "*.bin"),
         os.path.join(ZTP, "image", "nvos", "*.bin"),
         os.path.join(ZTP, "config", "publickey", "*.pub"),
+        os.path.join(HTTP_BASE, "infiniband", "publickey", "*.pub"),
         os.path.join(ZTP, "config", "cumulus", "template", "P2P", "*.xlsx"),
         os.path.join(ZTP, "config", "nvos", "template", "P2P", "*.xlsx"),
         os.path.join(ZTP, "config", "cumulus", "template", "AIR", "*.xlsx"),
@@ -2777,6 +2950,10 @@ def _unsetup_previous(proj_dir):
     candidates.extend(legacy_monitor_csv)
     candidates.extend(lp for lp, _ in _NET_CSV_LINKS)
     for lp in sorted(set(candidates)):
+        # REQ-19 has a separate ownership and atomic re-point contract.  The
+        # generic cleanup must never unlink this path, even for a foreign link.
+        if os.path.abspath(lp) == os.path.join(HTTP_BASE, INFRA_LOG_REL):
+            continue
         if not os.path.islink(lp):
             continue
         target_real = os.path.realpath(lp)
@@ -2890,10 +3067,10 @@ def _collect_expected_links(proj_dir):
     links.extend(link_path for link_path, _target in _analyzer_output_pairs(proj_dir))
 
     # .pub 公钥
-    key_dir = os.path.join(ZTP, "config", "publickey")
     for src in glob.glob(os.path.join(proj_dir, "*.pub")):
         if os.path.getsize(src) > 0:
-            links.append(os.path.join(key_dir, os.path.basename(src)))
+            for key_dir in _publickey_roots():
+                links.append(os.path.join(key_dir, os.path.basename(src)))
 
     # latest_yaml
     for sub in ("cumulus", "nvos"):
@@ -2923,6 +3100,8 @@ def _check_conflicts(proj_dir):
     conflicts = []
 
     for link_path in _collect_expected_links(proj_dir):
+        if os.path.abspath(link_path) == os.path.join(HTTP_BASE, INFRA_LOG_REL):
+            continue
         if not os.path.islink(link_path):
             continue
         target_real = os.path.realpath(link_path)
@@ -2964,7 +3143,437 @@ OUTPUT_DIRS = [
     "99-output-p2p",
     "99-output-monitor",
     "99-output-ztp",
+    "99-output-infra",
+    "99-output-ufm",
 ]
+
+
+def _preflight_infra_log_tree(source, destination, receipt=None):
+    """Prove the entire real source tree is safe before any transfer occurs."""
+    pending = [source]
+    entries = []
+    while pending:
+        directory = pending.pop()
+        with os.scandir(directory) as children:
+            for item in children:
+                item_path = item.path
+                relative = os.path.relpath(item_path, source)
+                target_path = os.path.join(destination, relative)
+                source_mode = item.stat(follow_symlinks=False).st_mode
+                if stat.S_ISDIR(source_mode):
+                    if os.path.lexists(target_path) and not stat.S_ISDIR(os.lstat(target_path).st_mode):
+                        raise ValueError(f"日志迁移目录冲突：{relative}")
+                    pending.append(item_path)
+                    entries.append((relative, "dir"))
+                elif stat.S_ISREG(source_mode):
+                    if os.path.lexists(target_path):
+                        expected = (receipt or {}).get("entries", {}).get(relative)
+                        source_info = os.lstat(item_path)
+                        target_info = os.lstat(target_path)
+                        if (expected is None or not stat.S_ISREG(target_info.st_mode)
+                                or (source_info.st_dev, source_info.st_ino)
+                                != (target_info.st_dev, target_info.st_ino)
+                                or _infra_log_file_signature(item_path) != expected
+                                or _infra_log_file_signature(target_path) != expected):
+                            raise ValueError(f"日志迁移文件重名，拒绝覆盖：{relative}")
+                    entries.append((relative, "file"))
+                else:
+                    raise ValueError(f"日志迁移源含链接或特殊对象：{relative}")
+    return tuple(sorted(entries))
+
+
+def _infra_log_receipt_path():
+    return os.path.join(HTTP_BASE, "infra", ".logs-migration.json")
+
+
+def _infra_log_file_signature(path):
+    """Hash one regular file through a no-follow descriptor and detect growth."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError(f"日志迁移源不是普通文件：{path}")
+        digest = hashlib.sha256()
+        with os.fdopen(os.dup(descriptor), "rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                digest.update(chunk)
+        after = os.fstat(descriptor)
+        if ((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+                != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)):
+            raise ValueError(f"日志迁移源在校验中变化：{path}")
+        return {"size": before.st_size, "sha256": digest.hexdigest()}
+    finally:
+        os.close(descriptor)
+
+
+def _infra_log_receipt_document(source, destination, inventory):
+    source_info = os.lstat(source)
+    if not stat.S_ISDIR(source_info.st_mode):
+        raise ValueError(f"日志迁移源必须是真实目录：{source}")
+    files = {
+        relative: _infra_log_file_signature(os.path.join(source, relative))
+        for relative, kind in inventory if kind == "file"
+    }
+    return {
+        "schema_version": 1,
+        "source": {"path": source, "dev": source_info.st_dev, "ino": source_info.st_ino},
+        "destination": {"path": destination},
+        "directories": [relative for relative, kind in inventory if kind == "dir"],
+        "entries": files,
+    }
+
+
+def _publish_infra_log_receipt(document):
+    """Publish a durable, private no-clobber receipt before any transfer."""
+    path = _infra_log_receipt_path()
+    payload = (json.dumps(document, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        with os.fdopen(os.dup(descriptor), "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    parent_fd = os.open(os.path.dirname(path), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
+
+
+def _read_infra_log_receipt():
+    path = _infra_log_receipt_path()
+    if not os.path.lexists(path):
+        return None
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 32 * 1024 * 1024:
+            raise ValueError(f"日志迁移凭据类型/大小不安全：{path}")
+        with os.fdopen(os.dup(descriptor), "r", encoding="utf-8") as stream:
+            document = json.load(stream)
+    finally:
+        os.close(descriptor)
+    if not isinstance(document, dict) or document.get("schema_version") != 1:
+        raise ValueError(f"日志迁移凭据格式不正确：{path}")
+    if document.get("phase", "pending") not in ("pending", "finalizing"):
+        raise ValueError(f"日志迁移凭据阶段不正确：{path}")
+    if (not isinstance(document.get("entries"), dict)
+            or not isinstance(document.get("directories"), list)):
+        raise ValueError("日志迁移凭据含不安全的清单")
+    def safe_relative(value):
+        return (isinstance(value, str) and bool(value) and not os.path.isabs(value)
+                and value not in (".", "..") and os.path.normpath(value) == value
+                and not value.startswith(".." + os.sep))
+    for relative, signature in document["entries"].items():
+        if (not safe_relative(relative) or not isinstance(signature, dict)
+                or not isinstance(signature.get("size"), int)
+                or signature["size"] < 0
+                or not isinstance(signature.get("sha256"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", signature["sha256"])):
+            raise ValueError("日志迁移凭据含不安全的文件路径或签名")
+    if any(not safe_relative(relative) for relative in document["directories"]):
+        raise ValueError("日志迁移凭据含不安全的目录路径")
+    return document
+
+
+def _mark_infra_log_receipt_finalizing(receipt):
+    """Durably mark commit before deleting even one original backup entry."""
+    path = _infra_log_receipt_path()
+    updated = dict(receipt, phase="finalizing")
+    parent = os.path.dirname(path)
+    descriptor, temporary = tempfile.mkstemp(prefix=".logs-migration.", dir=parent)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write((json.dumps(updated, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8"))
+            stream.flush()
+            os.fsync(stream.fileno())
+        current = _read_infra_log_receipt()
+        if current != receipt:
+            raise ValueError("日志迁移凭据在提交前发生变化")
+        os.replace(temporary, path)
+        parent_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+    finally:
+        if os.path.lexists(temporary):
+            os.unlink(temporary)
+
+
+def _verify_infra_log_receipt(document, source, destination):
+    source_info = os.lstat(source)
+    expected_source = {"path": source, "dev": source_info.st_dev, "ino": source_info.st_ino}
+    if (not stat.S_ISDIR(source_info.st_mode)
+            or document.get("source") != expected_source
+            or document.get("destination") != {"path": destination}
+            or not isinstance(document.get("entries"), dict)
+            or not isinstance(document.get("directories"), list)
+            or document.get("phase", "pending") != "pending"):
+        raise ValueError("日志迁移凭据与当前源/项目身份不符")
+    for relative, signature in document["entries"].items():
+        if (not isinstance(relative, str) or not relative or relative.startswith("/")
+                or os.path.normpath(relative) != relative
+                or relative == ".." or relative.startswith(".." + os.sep)
+                or not isinstance(signature, dict)
+                or not isinstance(signature.get("size"), int)
+                or not isinstance(signature.get("sha256"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", signature["sha256"])):
+            raise ValueError("日志迁移凭据含不安全的条目")
+
+
+def _preflight_empty_log_destination(destination):
+    """No receipt means existing project log bytes have ambiguous provenance."""
+    for directory, subdirs, files in os.walk(destination, followlinks=False):
+        for name in subdirs:
+            path = os.path.join(directory, name)
+            if not stat.S_ISDIR(os.lstat(path).st_mode):
+                raise ValueError(f"项目日志目录含不安全的路径：{path}")
+        for name in files:
+            path = os.path.join(directory, name)
+            if directory == destination and name == ".gitkeep" and stat.S_ISREG(os.lstat(path).st_mode):
+                continue
+            raise ValueError(f"项目日志目标已有未登记内容，拒绝归属推断：{path}")
+
+
+def _infra_log_backup_path(destination):
+    return os.path.join(destination, ".logs-migration-source")
+
+
+def _rename_infra_log_dir_noreplace(source, destination):
+    """Atomically rename a directory only when the destination is absent."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        if not hasattr(libc, "renamex_np"):
+            raise OSError(errno.ENOTSUP, "atomic no-replace rename is unavailable", destination)
+        libc.renamex_np.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint)
+        libc.renamex_np.restype = ctypes.c_int
+        result = libc.renamex_np(os.fsencode(source), os.fsencode(destination), 0x00000004)
+    elif sys.platform.startswith("linux"):
+        if not hasattr(libc, "renameat2"):
+            raise OSError(errno.ENOTSUP, "atomic no-replace rename is unavailable", destination)
+        libc.renameat2.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
+        libc.renameat2.restype = ctypes.c_int
+        result = libc.renameat2(-100, os.fsencode(source), -100, os.fsencode(destination), 1)
+    else:
+        raise OSError(errno.ENOTSUP, "atomic no-replace rename is unavailable", destination)
+    if result != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), destination)
+
+
+def _restore_pending_infra_log_backup(source, destination):
+    """Undo an interrupted link publication before setup snapshots links."""
+    receipt = _read_infra_log_receipt()
+    if receipt is None:
+        return
+    if (receipt.get("source", {}).get("path") != source
+            or receipt.get("destination") != {"path": destination}):
+        raise ValueError("待恢复日志凭据不属于所选项目")
+    if receipt.get("phase") == "finalizing":
+        _complete_infra_log_finalization(source, destination, receipt)
+        return
+    backup = _infra_log_backup_path(destination)
+    if not os.path.lexists(backup):
+        if not os.path.lexists(source) or not stat.S_ISDIR(os.lstat(source).st_mode):
+            raise ValueError("日志迁移凭据存在，但原目录和可恢复备份均不存在")
+        return
+    info = os.lstat(backup)
+    if (not stat.S_ISDIR(info.st_mode)
+            or (info.st_dev, info.st_ino)
+            != (receipt.get("source", {}).get("dev"), receipt.get("source", {}).get("ino"))):
+        raise ValueError("日志迁移备份与原目录凭据身份不符")
+    if os.path.islink(source):
+        if managed_infra_log_project(source, HERE) != Path(os.path.dirname(destination)):
+            raise ValueError("待恢复日志链接不是所选项目的规范链接")
+        os.remove(source)
+    elif os.path.lexists(source):
+        raise ValueError("日志迁移备份与现存日志根冲突")
+    _rename_infra_log_dir_noreplace(backup, source)
+
+
+def _migrate_infra_log_tree(source, destination, relative_target):
+    """Copy by no-clobber hardlink, verify, retain the original dir to commit."""
+    global _INFRA_LOG_MIGRATION
+    backup = _infra_log_backup_path(destination)
+    if os.path.lexists(backup):
+        raise ValueError("日志迁移备份位置冲突")
+    receipt = _read_infra_log_receipt()
+    if receipt is None:
+        _preflight_empty_log_destination(destination)
+        inventory = _preflight_infra_log_tree(source, destination)
+        receipt = _infra_log_receipt_document(source, destination, inventory)
+        _publish_infra_log_receipt(receipt)
+    else:
+        _verify_infra_log_receipt(receipt, source, destination)
+        inventory = _preflight_infra_log_tree(source, destination, receipt)
+        if (set(receipt["entries"]) != {rel for rel, kind in inventory if kind == "file"}
+                or set(receipt["directories"]) != {rel for rel, kind in inventory if kind == "dir"}):
+            raise ValueError("日志迁移凭据与当前源目录清单不符")
+
+    for relative, kind in sorted(inventory, key=lambda row: (row[0].count(os.sep), row[0])):
+        if kind == "dir":
+            target = os.path.join(destination, relative)
+            if not os.path.lexists(target):
+                os.mkdir(target)
+            elif not stat.S_ISDIR(os.lstat(target).st_mode):
+                raise ValueError(f"日志迁移目录冲突：{relative}")
+    for relative in sorted(receipt["entries"]):
+        source_file = os.path.join(source, relative)
+        target_file = os.path.join(destination, relative)
+        expected = receipt["entries"][relative]
+        if _infra_log_file_signature(source_file) != expected:
+            raise ValueError(f"日志迁移源内容已变化：{relative}")
+        if not os.path.lexists(target_file):
+            os.link(source_file, target_file, follow_symlinks=False)
+        source_info, target_info = os.lstat(source_file), os.lstat(target_file)
+        if ((source_info.st_dev, source_info.st_ino)
+                != (target_info.st_dev, target_info.st_ino)
+                or _infra_log_file_signature(target_file) != expected):
+            raise ValueError(f"日志迁移目标校验失败：{relative}")
+
+    identity = os.lstat(source)
+    if ((identity.st_dev, identity.st_ino)
+            != (receipt["source"]["dev"], receipt["source"]["ino"])):
+        raise ValueError("日志迁移原目录身份发生变化")
+    if os.path.lexists(backup):
+        raise ValueError("日志迁移备份位置冲突")
+    _rename_infra_log_dir_noreplace(source, backup)
+    try:
+        moved = os.lstat(backup)
+        if (moved.st_dev, moved.st_ino) != (identity.st_dev, identity.st_ino):
+            raise ValueError("日志迁移备份未保留原目录身份")
+        os.symlink(relative_target, source)
+    except BaseException:
+        if not os.path.lexists(source) and os.path.lexists(backup):
+            _rename_infra_log_dir_noreplace(backup, source)
+        raise
+    _INFRA_LOG_MIGRATION = (source, backup, destination, receipt)
+    return "linked"
+
+
+def _rollback_infra_log_migration():
+    global _INFRA_LOG_MIGRATION
+    state = _INFRA_LOG_MIGRATION
+    if state is None:
+        return
+    source, backup, destination, receipt = state
+    if (_read_infra_log_receipt() or {}).get("phase") == "finalizing":
+        # The manifest has committed and backup cleanup may already be partial.
+        # The complete project copy is the source of truth; retry finishes it.
+        _INFRA_LOG_MIGRATION = None
+        return
+    if not os.path.lexists(backup):
+        raise ValueError("日志迁移回滚时原目录备份已消失")
+    if os.path.islink(source):
+        if managed_infra_log_project(source, HERE) != Path(os.path.dirname(destination)):
+            raise ValueError("日志迁移回滚拒绝删除非所选项目链接")
+        os.remove(source)
+    elif os.path.lexists(source):
+        raise ValueError("日志迁移回滚时日志根已被占用")
+    _rename_infra_log_dir_noreplace(backup, source)
+    restored = os.lstat(source)
+    if (restored.st_dev, restored.st_ino) != (receipt["source"]["dev"], receipt["source"]["ino"]):
+        raise ValueError("日志迁移回滚未恢复原目录身份")
+    _INFRA_LOG_MIGRATION = None
+
+
+def _complete_infra_log_finalization(source, destination, receipt):
+    """Idempotently discard only receipt-bound backup entries after commit."""
+    backup = _infra_log_backup_path(destination)
+    if managed_infra_log_project(source, HERE) != Path(os.path.dirname(destination)):
+        raise ValueError("日志迁移提交恢复时规范链接缺失")
+    has_backup = os.path.lexists(backup)
+    if has_backup:
+        info = os.lstat(backup)
+        if (not stat.S_ISDIR(info.st_mode)
+                or (info.st_dev, info.st_ino)
+                != (receipt.get("source", {}).get("dev"), receipt.get("source", {}).get("ino"))):
+            raise ValueError("日志迁移提交恢复时备份身份改变")
+    # Verify the entire committed tree before deleting any remaining original.
+    for relative, expected in sorted(receipt["entries"].items()):
+        committed = os.path.join(destination, relative)
+        if _infra_log_file_signature(committed) != expected:
+            raise ValueError(f"日志迁移提交内容变化：{relative}")
+        from_backup = os.path.join(backup, relative)
+        if has_backup and os.path.lexists(from_backup):
+            old, new = os.lstat(from_backup), os.lstat(committed)
+            if ((old.st_dev, old.st_ino) != (new.st_dev, new.st_ino)
+                    or _infra_log_file_signature(from_backup) != expected):
+                raise ValueError(f"日志迁移提交备份内容变化：{relative}")
+    if has_backup:
+        for relative in sorted(receipt["entries"]):
+            from_backup = os.path.join(backup, relative)
+            if os.path.lexists(from_backup):
+                os.unlink(from_backup)
+        for relative in sorted(receipt["directories"], key=lambda name: (-name.count(os.sep), name)):
+            directory = os.path.join(backup, relative)
+            if os.path.lexists(directory):
+                os.rmdir(directory)
+        os.rmdir(backup)
+    os.unlink(_infra_log_receipt_path())
+
+
+def _finalize_infra_log_migration():
+    global _INFRA_LOG_MIGRATION
+    state = _INFRA_LOG_MIGRATION
+    if state is None:
+        return
+    source, _, destination, receipt = state
+    _mark_infra_log_receipt_finalizing(receipt)
+    _complete_infra_log_finalization(source, destination, dict(receipt, phase="finalizing"))
+    _INFRA_LOG_MIGRATION = None
+
+
+def _bind_infra_logs(proj_dir):
+    """Bind an absent root, migrate a real root, or re-point an owned link."""
+    path = os.path.join(HTTP_BASE, INFRA_LOG_REL)
+    target = os.path.join(proj_dir, "99-output-infra")
+    relative = os.path.relpath(target, os.path.dirname(path))
+    if (not stat.S_ISDIR(os.lstat(proj_dir).st_mode)
+            or not stat.S_ISDIR(os.lstat(target).st_mode)):
+        raise ValueError("项目及其 99-output-infra 必须是真实目录")
+    if _DRY_RUN:
+        print(_c(CYAN, f"  [DRY] {INFRA_LOG_REL} → {relative}"))
+        return "dry"
+    if not os.path.lexists(path):
+        if _read_infra_log_receipt() is not None:
+            raise ValueError("日志迁移凭据存在，但原目录与备份均不可用")
+        os.symlink(relative, path)
+        return "linked"
+    if not os.path.islink(path):
+        if stat.S_ISDIR(os.lstat(path).st_mode):
+            return _migrate_infra_log_tree(path, target, relative)
+        raise ValueError(f"{INFRA_LOG_REL} 不是实际目录或规范链接")
+    if _read_infra_log_receipt() is not None:
+        raise ValueError("日志迁移凭据尚未结清，拒绝重新绑定")
+    previous_project = managed_infra_log_project(path, HERE)
+    if previous_project is None:
+        raise ValueError(f"{INFRA_LOG_REL} 不是规范 DAY0 项目日志链接")
+    if os.readlink(path) == relative:
+        return "skipped"
+    if previous_project != Path(proj_dir):
+        if not _authorize_project_switch(proj_dir, 1):
+            raise ValueError(f"未授权切换 {INFRA_LOG_REL} 的归属")
+    identity = os.lstat(path)
+    temporary = os.path.join(os.path.dirname(path),
+                             f".logs.setup.{os.getpid()}.{time.monotonic_ns()}")
+    try:
+        os.symlink(relative, temporary)
+        current = os.lstat(path)
+        if ((current.st_dev, current.st_ino) != (identity.st_dev, identity.st_ino)
+                or not stat.S_ISLNK(current.st_mode)
+                or managed_infra_log_project(path, HERE) != previous_project):
+            raise ValueError(f"{INFRA_LOG_REL} 在切换前发生变化")
+        os.replace(temporary, path)
+    finally:
+        if os.path.lexists(temporary):
+            os.remove(temporary)
+    return "linked"
 
 
 class _SetupLinkTransaction:
@@ -3012,7 +3621,8 @@ class _SetupLinkTransaction:
                     if os.path.lexists(path) and not os.path.islink(path):
                         failures.append(f"{path} 已变成实际文件/目录")
                         continue
-                    self._restore_link(path, target)
+                    if not (os.path.islink(path) and os.readlink(path) == target):
+                        self._restore_link(path, target)
                 elif kind == "missing" and os.path.islink(path):
                     os.remove(path)
                 # Existing real files/directories are never setup mutations.
@@ -3049,13 +3659,17 @@ def _setup_transaction_paths(proj_dir):
 
 # ── 主流程 ────────────────────────────────────────────────────────────────────
 
-def _setup_impl(proj_dir):
+def _setup_impl(proj_dir, *, server_delegated=False):
     global _LINK_ERRORS, _P2P_SOURCE, _LINK_TRANSACTION
     _LINK_ERRORS = 0
     print(f"\n项目目录：{proj_dir}")
     print(f"ZTP 目录：{ZTP}\n")
 
+    if server_delegated:
+        _require_delegated_laptop_public_key(proj_dir)
     _initialize_project_from_template(proj_dir)
+    if not server_delegated:
+        _prepare_laptop_public_key(proj_dir)
     _P2P_SOURCE = _select_p2p_source(proj_dir)
     if not _P2P_SOURCE:
         sys.exit(1)
@@ -3063,6 +3677,11 @@ def _setup_impl(proj_dir):
         sys.exit(1)
     print()
 
+    if not _DRY_RUN:
+        _restore_pending_infra_log_backup(
+            os.path.join(HTTP_BASE, INFRA_LOG_REL),
+            os.path.join(proj_dir, "99-output-infra"),
+        )
     _LINK_TRANSACTION = _SetupLinkTransaction(_setup_transaction_paths(proj_dir))
     canonical_p2p = _ensure_project_p2p_link(proj_dir, _P2P_SOURCE)
     if not canonical_p2p:
@@ -3099,10 +3718,13 @@ def _setup_impl(proj_dir):
 
     print("\n── Infra 部署输入 ─────────────────────────────────────────────────")
     for workspace_rel, proj_rel, kind in WORKSPACE_INPUT_MAPPINGS:
-        result = _process_mapping(
-            proj_dir, workspace_rel, proj_rel, kind,
-            src_base=_CSV_DIR, link_root=HTTP_BASE,
-        )
+        if workspace_rel == INFRA_LOG_REL:
+            result = _bind_infra_logs(proj_dir)
+        else:
+            result = _process_mapping(
+                proj_dir, workspace_rel, proj_rel, kind,
+                src_base=_CSV_DIR, link_root=HTTP_BASE,
+            )
         if result == "linked":   linked += 1
         elif result == "skipped": skipped += 1
         elif result == "missing": missing += 1
@@ -3155,6 +3777,7 @@ def _setup_impl(proj_dir):
         _print_next_steps(proj_dir)
         _LINK_TRANSACTION.commit()
         _LINK_TRANSACTION = None
+        _finalize_infra_log_migration()
     elif errors:
         print(_c(RED, "setup 未完成：未写入成功清单，请处理错误后重试"))
         sys.exit(1)
@@ -3163,16 +3786,35 @@ def _setup_impl(proj_dir):
         _LINK_TRANSACTION = None
 
 
-def setup(proj_dir):
+def setup(proj_dir, *, server_delegated=False):
     """Run setup as one link transaction; any failure restores prior state."""
-    global _LINK_TRANSACTION
-    try:
-        return _setup_impl(proj_dir)
-    except BaseException:
-        if _LINK_TRANSACTION is not None:
-            _LINK_TRANSACTION.rollback()
-            _LINK_TRANSACTION = None
-        raise
+    global _LINK_TRANSACTION, _INFRA_LOG_MIGRATION
+    require_project_eligible(Path(proj_dir))
+    if _INFRA_LOG_MIGRATION is not None:
+        raise ValueError("前次日志迁移仍在当前进程中待结清")
+    lock = nullcontext() if _DRY_RUN else infra_log_root_lock(HTTP_BASE)
+    with lock:
+        try:
+            if not _DRY_RUN:
+                # A crash before receipt replace can leave a newer fsynced
+                # temp alongside the old receipt.  Never infer a phase or
+                # delete ambiguous bytes; report exact names for offline
+                # preservation before entering any mutable setup stage.
+                orphans = tuple(name for name in infra_log_pending_state_names(HTTP_BASE)
+                                if name != ".logs-migration.json")
+                if orphans:
+                    preview = ", ".join(orphans[:3])
+                    extra = f"（另有 {len(orphans) - 3} 个）" if len(orphans) > 3 else ""
+                    raise ValueError(
+                        f"日志迁移临时凭据未结清：{preview}{extra}；请离线保全并核对后重试"
+                    )
+            return _setup_impl(proj_dir, server_delegated=server_delegated)
+        except BaseException:
+            _rollback_infra_log_migration()
+            if _LINK_TRANSACTION is not None:
+                _LINK_TRANSACTION.rollback()
+                _LINK_TRANSACTION = None
+            raise
 
 
 def _write_manifest(proj_dir):
@@ -3621,6 +4263,10 @@ def _parse_args(argv=None):
         "--create", action="store_true",
         help="只从模板初始化一个不存在的项目并退出，不创建或切换运行时链接",
     )
+    parser.add_argument(
+        "--host-role", choices=("workstation", "management-server"),
+        help="Linux 必须显式声明本机角色；Darwin 默认为 workstation",
+    )
     parser.add_argument("-y", action="store_true", dest="auto_yes",
                         help="自动确认目标项目内的普通修复；不授权跨项目切换")
     parser.add_argument(
@@ -3642,6 +4288,7 @@ def _parse_args(argv=None):
         if args.project is not None or any((
             args.create, args.auto_yes, args.confirm_project_switch,
             args.force, args.strict, args.dry_run, args.csv_dir, args.p2p_file,
+            args.host_role,
         )):
             parser.error("--status/--list-projects 是独立只读动作，不能组合变更参数")
     elif args.project is None:
@@ -3683,6 +4330,7 @@ def _main_locked(args):
             os.makedirs(proj_dir, exist_ok=False)
             print(_c(GREEN, f"[MKDIR] 项目目录已创建：{proj_dir}"))
         _initialize_project_from_template(proj_dir)
+        _prepare_laptop_public_key(proj_dir)
         if _DRY_RUN:
             print(_c(
                 CYAN,
@@ -3705,9 +4353,16 @@ def _main_locked(args):
         ))
         return 1
 
-    if not _DRY_RUN:
+    # A restored project's local commit must be durable before stopping a
+    # monitor or entering setup's link transaction. Recheck in setup() for
+    # callers that bypass this CLI entry point.
+    require_project_eligible(Path(proj_dir))
+    if not _DRY_RUN and args.host_role == "management-server":
         stop_native_ztp_monitors(HTTP_BASE)
-    setup(proj_dir)
+    if getattr(args, "_server_delegated", False):
+        setup(proj_dir, server_delegated=True)
+    else:
+        setup(proj_dir)
     return 0
 
 
@@ -3725,15 +4380,44 @@ def main(argv=None):
         except (OSError, RuntimeError, ValueError) as exc:
             print(_c(RED, f"[ERROR] 只读项目发现失败：{exc}"))
             return 1
+    # Resolve role before acquiring a writer lock, creating a project, or
+    # entering either the ordinary or the private delegated key path.
+    host_os = platform.system().casefold()
+    if host_os == "darwin":
+        if getattr(args, "host_role", None) not in (None, "workstation"):
+            print(_c(RED, "[ERROR] Darwin host role must be workstation"))
+            return 1
+        args.host_role = "workstation"
+    elif host_os == "linux":
+        if getattr(args, "host_role", None) is None:
+            print(_c(RED, "[ERROR] Linux requires explicit --host-role before any write"))
+            return 1
+    else:
+        print(_c(RED, f"[ERROR] unsupported host role platform: {host_os}"))
+        return 1
     _DRY_RUN = args.dry_run
     _AUTO_YES = args.auto_yes
     _FORCE = args.force
     _STRICT = args.strict
     _CONFIRM_PROJECT_SWITCH = args.confirm_project_switch
+    key_mode = os.environ.get("HTTP_SETUP_KEY_MODE", "")
+    if key_mode not in ("", "server-delegated"):
+        print(_c(RED, "[ERROR] invalid private setup key-preparation mode"))
+        return 1
+    if key_mode == "server-delegated" and (
+        args.create or args.dry_run or not args.confirm_project_switch
+        or not os.environ.get(LOCK_FD_ENV)
+    ):
+        print(_c(RED, "[ERROR] server-delegated setup requires the inherited deployment lock and load confirmation"))
+        return 1
+    if (key_mode == "server-delegated") != (args.host_role == "management-server"):
+        print(_c(RED, "[ERROR] host role contradicts delegated setup key mode"))
+        return 1
+    args._server_delegated = key_mode == "server-delegated"
     try:
         with deployment_lock(HTTP_BASE, dry_run=_DRY_RUN):
             return _main_locked(args)
-    except (DeploymentLockError, RuntimeContractError) as exc:
+    except (DeploymentLockError, RuntimeContractError, ValueError) as exc:
         print(_c(RED, f"[ERROR] 部署/Monitor 写前保护失败：{exc}"))
         return 1
 

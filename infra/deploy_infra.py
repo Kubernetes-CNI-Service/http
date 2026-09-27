@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import as_completed, ThreadPoolExecutor
+from contextlib import contextmanager
 import csv
 from datetime import datetime, timezone
+import fcntl
 import getpass
 import hashlib
 import ipaddress
@@ -16,6 +18,7 @@ import re
 import select
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -28,6 +31,17 @@ import yaml
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+TOOLS_DIR = SCRIPT_DIR.parent / "tools"
+if str(TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(TOOLS_DIR))
+from project_contract import (  # noqa: E402
+    infra_log_pending_state_names,
+    managed_infra_log_project,
+    service_url,
+    validate_local_service_endpoint,
+    validate_service_endpoint,
+)
+
 DEFAULT_GLOBAL = SCRIPT_DIR / "01-global.yaml"
 DEFAULT_DEVICES = SCRIPT_DIR / "02-devices_config.csv"
 DEFAULT_SETUP = SCRIPT_DIR / "infra-setup.sh"
@@ -67,13 +81,66 @@ class TeeStream:
         return getattr(self.terminal, "encoding", "utf-8")
 
 
+@contextmanager
+def _bound_log_root():
+    """Pin a validated log owner while briefly holding the separate log lock.
+
+    The workspace transaction lock is deliberately not acquired here.  No
+    callback, network call, or installer runs while this lock is held.
+    """
+    lock_path = SCRIPT_DIR / ".logs.lock"
+    flags = os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW
+    lock_fd = os.open(lock_path, flags, 0o600)
+    try:
+        lock_stat = os.fstat(lock_fd)
+        if not stat.S_ISREG(lock_stat.st_mode) or lock_stat.st_nlink != 1:
+            raise DeployError(f"invalid infra log lock: {lock_path}")
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        if infra_log_pending_state_names(SCRIPT_DIR.parent):
+            raise DeployError("infra log migration state pending; refusing writer")
+        log_link = SCRIPT_DIR / "logs"
+        try:
+            link_stat = log_link.lstat()
+        except FileNotFoundError:
+            log_link.mkdir(mode=0o700)
+            link_stat = log_link.lstat()
+        if stat.S_ISLNK(link_stat.st_mode):
+            project = managed_infra_log_project(
+                log_link, SCRIPT_DIR.parent / "DAY0-Prepare"
+            )
+            if project is None:
+                raise DeployError(f"foreign or invalid infra log link: {log_link}")
+            physical = project / "99-output-infra"
+        elif stat.S_ISDIR(link_stat.st_mode):
+            physical = log_link
+        else:
+            raise DeployError(f"invalid infra log root: {log_link}")
+        dir_fd = os.open(physical, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            root_stat = os.fstat(dir_fd)
+            if not stat.S_ISDIR(root_stat.st_mode) or not os.path.samestat(
+                root_stat, physical.lstat()
+            ):
+                raise DeployError(f"infra log owner changed during binding: {physical}")
+            yield physical, dir_fd
+        finally:
+            os.close(dir_fd)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
 def run_with_log(prefix: str, callback: object) -> int:
-    log_dir = SCRIPT_DIR / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    log_path = log_dir / f"{prefix}-{timestamp}-{os.getpid()}.log"
+    log_name = f"{prefix}-{timestamp}-{os.getpid()}.log"
     original_stdout, original_stderr = sys.stdout, sys.stderr
-    with log_path.open("a", encoding="utf-8") as log_stream:
+    with _bound_log_root() as (log_dir, dir_fd):
+        log_fd = os.open(
+            log_name, os.O_CREAT | os.O_APPEND | os.O_WRONLY | os.O_NOFOLLOW,
+            0o600, dir_fd=dir_fd,
+        )
+        log_path = log_dir / log_name
+    with os.fdopen(log_fd, "a", encoding="utf-8") as log_stream:
         sys.stdout = TeeStream(original_stdout, log_stream)
         sys.stderr = TeeStream(original_stderr, log_stream)
         try:
@@ -133,9 +200,9 @@ def load_neutral_defaults(
     return [values["DNS"]], [values["NTP"]], values["TIMEZONE"]
 
 
-def load_common(
+def _load_common_with_http_port(
     global_file: Path, neutral_file: Path = DEFAULT_NEUTRAL,
-) -> tuple[list[str], list[str], str]:
+) -> tuple[list[str], list[str], str, int]:
     neutral_dns, neutral_ntp, neutral_timezone = load_neutral_defaults(neutral_file)
     try:
         data = yaml.safe_load(global_file.read_text(encoding="utf-8"))
@@ -176,6 +243,30 @@ def load_common(
         timezone = neutral_timezone
     if not timezone or any(ch.isspace() for ch in timezone):
         raise DeployError("common.switch.system.date-time.timezone 无效")
+    # Read the APT endpoint authority from the same YAML snapshot as DNS/NTP.
+    # Legacy infra-only globals without common.mgmt.http retain port 80.
+    try:
+        common = data["common"]
+        mgmt = common.get("mgmt", {})
+        if not isinstance(mgmt, dict):
+            raise TypeError("common.mgmt")
+        http = mgmt.get("http", {})
+        if not isinstance(http, dict):
+            raise TypeError("common.mgmt.http")
+        http_port = validate_service_endpoint(
+            "192.0.2.1", http.get("port", 80), field="common.mgmt.http.port"
+        ).port
+    except (KeyError, TypeError, ValueError) as exc:
+        raise DeployError(f"common.mgmt.http.port 无效：{exc}") from exc
+    return dns, ntp, timezone, http_port
+
+
+def load_common(
+    global_file: Path, neutral_file: Path = DEFAULT_NEUTRAL,
+) -> tuple[list[str], list[str], str]:
+    dns, ntp, timezone, _http_port = _load_common_with_http_port(
+        global_file, neutral_file
+    )
     return dns, ntp, timezone
 
 
@@ -196,12 +287,41 @@ def _interface_ipv4(interface: str) -> str | None:
         if result.returncode != 0:
             continue
         for pattern in patterns:
-            match = pattern.search(result.stdout)
-            if match:
-                address = str(ipaddress.IPv4Address(match.group(1)))
-                if not address.startswith("127."):
-                    return address
+            for match in pattern.finditer(result.stdout):
+                try:
+                    return validate_service_endpoint(
+                        match.group(1), field=f"interface {interface} IPv4"
+                    ).host
+                except ValueError:
+                    continue
     return None
+
+
+def _local_ipv4_addresses() -> set[str]:
+    """Enumerate usable IPv4 addresses assigned to this host."""
+    addresses: set[str] = set()
+    commands = (
+        ["ip", "-4", "-o", "addr", "show"],
+        ["ifconfig"],
+    )
+    for command in commands:
+        if not shutil.which(command[0]):
+            continue
+        result = subprocess.run(command, text=True, capture_output=True)
+        if result.returncode != 0:
+            continue
+        for raw in re.findall(r"\binet\s+(\d+\.\d+\.\d+\.\d+)(?:/\d+)?", result.stdout):
+            try:
+                addresses.add(
+                    validate_service_endpoint(
+                        raw, field="local HTTP service IPv4"
+                    ).host
+                )
+            except ValueError:
+                continue
+        if addresses:
+            break
+    return addresses
 
 
 def detect_route_source_ipv4(target: str) -> str:
@@ -236,9 +356,15 @@ def determine_http_source_ip(
 ) -> str:
     if explicit_ip:
         try:
-            return str(ipaddress.IPv4Address(explicit_ip))
-        except ipaddress.AddressValueError as exc:
-            raise DeployError(f"--http-server-ip 不是有效 IPv4：{explicit_ip}") from exc
+            return validate_local_service_endpoint(
+                explicit_ip,
+                field="--http-server-ip",
+                local_addresses=_local_ipv4_addresses,
+            ).host
+        except ValueError as exc:
+            raise DeployError(
+                f"--http-server-ip 不是本机可用服务 IPv4：{explicit_ip}"
+            ) from exc
     if not servers:
         raise DeployError("没有有效的 type=server 目标，无法通过设备路由确定 HTTP Server 地址")
 
@@ -256,15 +382,30 @@ def determine_http_source_ip(
         raise DeployError(
             "目标设备使用了不同的本机出接口源地址，单一 setup 脚本无法安全复用：" + details
         )
-    return unique_sources.pop()
+    source = unique_sources.pop()
+    try:
+        return validate_local_service_endpoint(
+            source,
+            field="route-selected HTTP source IPv4",
+            local_addresses=_local_ipv4_addresses,
+        ).host
+    except ValueError as exc:
+        raise DeployError(
+            f"路由选择的 HTTP 源地址不是本机可用服务 IPv4：{source}"
+        ) from exc
 
 
-def local_http_url(http_ip: str) -> str:
-    return f"http://{ipaddress.IPv4Address(http_ip)}/apps"
+def local_http_url(http_ip: str, *, port: int = 80) -> str:
+    endpoint = validate_service_endpoint(
+        http_ip, port, field="infrastructure APT service IPv4"
+    )
+    return service_url(endpoint, "/apps", channel="apt-repository")
 
 
-def http_service_works(http_ip: str, timeout: float = 3.0) -> bool:
-    base = local_http_url(http_ip)
+def http_service_works(
+    http_ip: str, timeout: float = 3.0, *, port: int = 80,
+) -> bool:
+    base = local_http_url(http_ip, port=port)
     repository_paths = (
         "ubuntu-22.04/amd64", "ubuntu-22.04/arm64",
         "ubuntu-24.04/amd64", "ubuntu-24.04/arm64",
@@ -284,12 +425,12 @@ def http_service_works(http_ip: str, timeout: float = 3.0) -> bool:
 
 def render_managed_block(
     http_ip: str, dns: Iterable[str], ntp: Iterable[str], timezone: str,
-    local_http_enabled: bool = True,
+    local_http_enabled: bool = True, *, port: int = 80,
 ) -> str:
     # Preserve the future publication URL even before Packages.gz exists.  A
     # first --mgmt run needs this address to verify the repository it creates;
     # clients still obey local_http_enabled and will not use an unavailable URL.
-    http_server = local_http_url(http_ip)
+    http_server = local_http_url(http_ip, port=port)
     dns_values = " ".join(shlex.quote(item) for item in dns)
     ntp_values = " ".join(shlex.quote(item) for item in ntp)
     return "\n".join(
@@ -708,8 +849,14 @@ def deploy_server(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--global-file", type=Path, default=DEFAULT_GLOBAL)
-    parser.add_argument("--devices-file", type=Path, default=DEFAULT_DEVICES)
+    parser.add_argument(
+        "--global-file", type=Path, default=DEFAULT_GLOBAL,
+        help="Path to the project global YAML configuration",
+    )
+    parser.add_argument(
+        "--devices-file", type=Path, default=DEFAULT_DEVICES,
+        help="Path to the devices CSV inventory of server targets",
+    )
     parser.add_argument(
         "--setup-script", type=Path, default=DEFAULT_SETUP,
         help="要上传的 setup 脚本路径；不决定执行动作",
@@ -775,23 +922,24 @@ def main() -> int:
             if not servers and not args.http_server_ip:
                 raise DeployError("零目标 --prepare-only 必须显式指定 --http-server-ip")
             neutral_config = args.setup_script.resolve().with_name("infra-neutral.conf")
-            dns, ntp, timezone_name = load_common(
+            dns, ntp, timezone_name, http_port = _load_common_with_http_port(
                 args.global_file.resolve(), neutral_config,
             )
             http_ip = determine_http_source_ip(servers, args.http_server_ip)
-            local_http_enabled = http_service_works(http_ip)
+            local_http_enabled = http_service_works(http_ip, port=http_port)
             if local_http_enabled:
                 print(
                     f"[OK] 本机存在兼容的版本化 APT 仓库："
-                    f"{local_http_url(http_ip)}/ubuntu-<version>/<arch>/Packages.gz"
+                    f"{local_http_url(http_ip, port=http_port)}/ubuntu-<version>/<arch>/Packages.gz"
                 )
             else:
                 print(
-                    f"[WARN] 本机 {local_http_url(http_ip)} 不可用，"
+                    f"[WARN] 本机 {local_http_url(http_ip, port=http_port)} 不可用，"
                     "生成的 setup 将跳过本地下载并直接使用 Internet"
                 )
             managed_block = render_managed_block(
-                http_ip, dns, ntp, timezone_name, local_http_enabled=local_http_enabled
+                http_ip, dns, ntp, timezone_name,
+                local_http_enabled=local_http_enabled, port=http_port,
             )
             update_runtime_config(
                 args.setup_script.resolve().with_name("infra-runtime.conf"),
@@ -812,7 +960,7 @@ def main() -> int:
             return 0
 
         if action == "setup" and local_http_enabled and http_ip is not None:
-            print(f"[INFO] HTTP Server: {local_http_url(http_ip)}")
+            print(f"[INFO] HTTP Server: {local_http_url(http_ip, port=http_port)}")
         elif action == "setup":
             print("[INFO] HTTP Server: disabled; package downloads use Internet directly")
         print(f"[INFO] 待部署 server：{len(servers)} 台")
@@ -839,8 +987,20 @@ def main() -> int:
 
         failures: list[str] = []
         run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + f"-{os.getpid()}"
-        client_log_dir = SCRIPT_DIR / "logs" / "clients" / run_id
-        client_log_dir.mkdir(parents=True, exist_ok=True)
+        with _bound_log_root() as (log_root, dir_fd):
+            try:
+                os.mkdir("clients", mode=0o700, dir_fd=dir_fd)
+            except FileExistsError:
+                pass
+            clients_fd = os.open(
+                "clients", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=dir_fd,
+            )
+            try:
+                os.mkdir(run_id, mode=0o700, dir_fd=clients_fd)
+            finally:
+                os.close(clients_fd)
+            client_log_dir = log_root / "clients" / run_id
         print(f"[INFO] client 独立日志目录：{client_log_dir}")
 
         accesses: list[tuple[dict[str, str], str, Path | None, Path, bool]] = []

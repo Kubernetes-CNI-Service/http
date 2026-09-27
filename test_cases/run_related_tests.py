@@ -198,25 +198,38 @@ def normalize_relative(root: Path, raw: str) -> str:
 def discover_source_scripts(root: Path) -> dict[str, str]:
     """Return every governed source path and its in-workspace canonical path."""
     found: dict[str, str] = {}
-    for path in root.rglob("*"):
-        if not path.is_file() or path.suffix not in SOURCE_SUFFIXES:
-            continue
-        relative = path.relative_to(root)
-        if (
-            relative.parts[0] in NON_SOURCE_ROOTS
-            or relative.parts[0].startswith(".codex_tmp")
-            or path_disposition(relative.as_posix()) != "production"
-        ):
-            continue
-        if any(part.startswith("99-output") for part in relative.parts):
-            continue
-        if relative.as_posix() in GENERATED_RUNTIME_SCRIPTS:
-            continue
-        try:
-            canonical = path.resolve(strict=True).relative_to(root.resolve())
-        except (FileNotFoundError, ValueError) as exc:
-            raise ImpactError(f"unsafe or broken source path: {relative}") from exc
-        found[relative.as_posix()] = canonical.as_posix()
+    for directory, subdirs, files in os.walk(root, topdown=True, followlinks=False):
+        parent = Path(directory)
+        kept = []
+        for name in subdirs:
+            relative = (parent / name).relative_to(root)
+            if (
+                relative.parts[0] in NON_SOURCE_ROOTS
+                or relative.parts[0].startswith(".codex_tmp")
+                or path_disposition(relative.as_posix()) != "production"
+                or any(part.startswith("99-output") for part in relative.parts)
+            ):
+                continue
+            kept.append(name)
+        subdirs[:] = kept
+        for name in files:
+            path = parent / name
+            if not path.is_file() or path.suffix not in SOURCE_SUFFIXES:
+                continue
+            relative = path.relative_to(root)
+            if (
+                relative.parts[0] in NON_SOURCE_ROOTS
+                or relative.parts[0].startswith(".codex_tmp")
+                or path_disposition(relative.as_posix()) != "production"
+                or any(part.startswith("99-output") for part in relative.parts)
+                or relative.as_posix() in GENERATED_RUNTIME_SCRIPTS
+            ):
+                continue
+            try:
+                canonical = path.resolve(strict=True).relative_to(root.resolve())
+            except (FileNotFoundError, ValueError) as exc:
+                raise ImpactError(f"unsafe or broken source path: {relative}") from exc
+            found[relative.as_posix()] = canonical.as_posix()
     return dict(sorted(found.items()))
 
 

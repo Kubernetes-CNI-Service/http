@@ -10,6 +10,8 @@ from pathlib import Path
 import sys
 import unittest
 
+from tools.project_contract import path_disposition
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CASES = ROOT / "test_cases"
@@ -39,7 +41,15 @@ class TestCaseRepositoryTests(unittest.TestCase):
             for path in discovered
             if CASES not in path.parents
         ]
-        self.assertEqual([], outside)
+        reference_root = ROOT / "monitor/cabletracker-main"
+        reference_tests = sorted((
+            "monitor/cabletracker-main/tests/test_cvt_sum.py",
+            "monitor/cabletracker-main/tests/test_offline_workflow.py",
+        ))
+        expected_outside = reference_tests if reference_root.is_dir() else []
+        self.assertEqual(expected_outside, sorted(outside))
+        for relative in outside:
+            self.assertEqual("reference-only", path_disposition(relative))
         self.assertGreaterEqual(len(discovered), 20)
 
     def test_no_alias_or_persistent_symlink_can_duplicate_discovery(self):
@@ -103,6 +113,20 @@ class TestCaseRepositoryTests(unittest.TestCase):
         self.assertIn("REAL_ENVIRONMENT.md", agents)
         self.assertIn("run_related_tests.py --all", agents)
         self.assertIn("run_related_tests.py --check", agents)
+
+    def test_req16_real_environment_card_records_owner_key_dispositions(self):
+        real_environment = (CASES / "REAL_ENVIRONMENT.md").read_text(
+            encoding="utf-8"
+        )
+        marker = "## TC-REAL-REQ16-GENERATION-REPORT-001"
+        self.assertEqual(1, real_environment.count(marker))
+        card = real_environment.split(marker, 1)[1].split("\n## ", 1)[0]
+        self.assertIn("既有有效公钥与 HOME 不一致时拒绝", card)
+        self.assertIn("原有公钥逐字节不动", card)
+        self.assertIn("RSA-only 管理服务器 HOME 在 PRE 范围内 fail closed", card)
+        self.assertIn("不读取 RSA 私钥", card)
+        self.assertNotIn("A/B owner 事实选择", card)
+        self.assertNotIn("RSA-only 私钥读取例外", card)
 
     def test_case_repository_is_never_deployed(self):
         contract_path = ROOT / "tools/project_contract.py"

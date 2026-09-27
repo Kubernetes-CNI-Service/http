@@ -42,7 +42,7 @@ RUNTIME_MEMBERS = tuple(RUNTIME_TARGETS)
 RUNTIME_FORMS = ("regular", "resolving", "dangling")
 EMPTY_DENIED_DIRS = (
     "DAY0-Prepare/template/empty/.sSh", "ztp/optimize/site-a-sample",
-    "infra/logs", "monitor/status",
+    "monitor/status",
 )
 DENIED = (
     "DAY0-Prepare/site-a/01-global.yaml", "DAY0-Prepare/site-a/notes.txt",
@@ -79,6 +79,8 @@ DENIED = (
     "DAY0-Prepare/template/ID_ECDSA.old", "DAY0-Prepare/template/.ENV.dev",
     "DAY0-Prepare/template/.CONTROL-USERS.backup", "monitor/a.HTPASSWD.copy",
 ) + RUNTIME_MEMBERS
+CONTEXT_ONLY_DENIED = ("01-global-dev.yaml",)
+SYNTHETIC_DENIED = DENIED + CONTEXT_ONLY_DENIED
 FINAL_RUNTIME_DENIES = (
     "**/99-output*", "**/99-output*/**", "**/*.lock",
     "**/finished-history", "**/finished-history/**",
@@ -108,8 +110,8 @@ def live_shaped_tree(root, runtime_form="regular"):
     if runtime_form not in RUNTIME_FORMS:
         raise AssertionError("unknown runtime fixture form")
     synthetic_tree(root)
-    expected = set(ALLOWED) | set(DENIED)
-    for name in sorted(set(DENIED)):
+    expected = set(ALLOWED) | set(SYNTHETIC_DENIED)
+    for name in sorted(set(SYNTHETIC_DENIED)):
         path = root / name
         path.parent.mkdir(parents=True, exist_ok=True)
         if runtime_form != "regular" and name in RUNTIME_TARGETS:
@@ -200,6 +202,8 @@ class ImageContextSafetyDirectTests(unittest.TestCase):
             "ztp/config/isc-dhcp-server/dhcpd_synthetic.hosts", "ztp/optimize/site-a-sample",
             "monitor/monitor.html", "monitor/cabletracker-main", "monitor/cabletracker-main.zip",
             "infra/logs", "infiniband/bringup", "monitor/status", "ztp/backup",
+            "infra/.logs.lock", "infra/.logs-migration.json",
+            "infra/.logs-migration.ABC123",
             "ztp/config/cumulus/template/.claude", "ztp/config/publickey", "ztp/image",
             "tools/ib-tool-Jie", "tools/ibdiagnet-analyze-tool",
         )
@@ -223,6 +227,7 @@ class ImageContextSafetyDirectTests(unittest.TestCase):
 
     def test_host_state_family_matching_preserves_neutral_prefix_neighbors(self):
         for name in ("infra/logs-extra/source.py", "monitor/status-code.py",
+                     "infra/.logs-migrationx", "infra/.logs-migration-not-a-receipt",
                      "monitor/cabletracker-mainland/source.py", "ztp/optimize/site-sample-extra/source.py",
                      "ztp/optimize/neutral/site-sample/source.py", "infra/docker/container.env.example"):
             with self.subTest(name=name):
@@ -257,7 +262,7 @@ class ImageContextSafetyDirectTests(unittest.TestCase):
             self.assertGreater(start, max(i for i, line in enumerate(lines) if line.startswith("!")))
 
     def test_live_fixture_preserves_every_literal_name_on_the_host_filesystem(self):
-        expected = set(ALLOWED) | set(DENIED)
+        expected = set(ALLOWED) | set(SYNTHETIC_DENIED)
         # Case variants need different parent directories on default macOS;
         # overwriting an earlier marker is not mixed-case COPY coverage.
         self.assertEqual(len(expected), len({name.casefold() for name in expected}))

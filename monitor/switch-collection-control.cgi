@@ -8,12 +8,21 @@ import json
 import os
 from pathlib import Path
 import math
+import re
 import socket
 import stat
 import sys
 import time
 from urllib.parse import parse_qs
 
+
+# This CGI is installed as one byte-identical standalone file under
+# /usr/lib/cgi-bin.  These four deployment-contract limits therefore remain
+# explicit local literals; tests bind them to the shared worker/UI contract.
+MIN_CONTINUOUS_INTERVAL_MINUTES = 10
+MAX_CONTINUOUS_INTERVAL_MINUTES = 240
+MIN_CONTINUOUS_BACKUP_INTERVAL_MINUTES = 60
+MAX_CONTINUOUS_BACKUP_INTERVAL_MINUTES = 1440
 
 STATUS_DIR = Path("/var/www/html/monitor/status")
 REQUEST_FILE = STATUS_DIR / "switch-collection.request"
@@ -24,8 +33,6 @@ CONTINUOUS_STATUS_FILE = STATUS_DIR / "continuous-collection.status.json"
 CONTINUOUS_BACKUP_STATUS_FILE = STATUS_DIR / "continuous-backup.status.json"
 YAML_BACKUP_SOCKET = STATUS_DIR / ".yaml-backup.sock"
 MAX_PASSWORD_BYTES = 1024
-MIN_CONTINUOUS_INTERVAL_MINUTES = 10
-MAX_CONTINUOUS_INTERVAL_MINUTES = 24 * 60
 CONTROL_USERS = frozenset(("nvis", "cumulus"))
 CONTROL_SCRIPT_NAMES = frozenset((
     "/monitor/control/switch-collection",
@@ -63,18 +70,37 @@ def post_control_guard():
         or int(address) == 0xFFFFFFFF
     ):
         return False, "invalid service address"
-    if os.environ.get("SERVER_PORT") != "80":
+    expected_port = os.environ.get("CONTROL_SERVICE_PORT", "80")
+    if (
+        re.fullmatch(r"[1-9][0-9]{0,4}", expected_port) is None
+        or int(expected_port) > 65535
+        or os.environ.get("SERVER_PORT") != expected_port
+    ):
         return False, "invalid service port"
     if os.environ.get("REQUEST_SCHEME") != "http":
         return False, "invalid request scheme"
-    if os.environ.get("HTTPS") not in {None, "off"}:
-        return False, "TLS is not enabled on the control listener"
+    https_marker = os.environ.get("HTTPS")
+    if https_marker not in {None, "off"}:
+        condition = (
+            "TLS is enabled" if https_marker.casefold() == "on"
+            else "HTTPS indicator is invalid"
+        )
+        return False, f"{condition}; control POST requires plain HTTP on port {expected_port}"
     host = os.environ.get("HTTP_HOST", "")
-    if host not in {canonical, f"{canonical}:80"}:
+    allowed_hosts = (
+        {canonical, f"{canonical}:80"}
+        if expected_port == "80" else {f"{canonical}:{expected_port}"}
+    )
+    if host not in allowed_hosts:
         return False, "invalid Host header"
     origin = os.environ.get("HTTP_ORIGIN", "")
     fetch_site = os.environ.get("HTTP_SEC_FETCH_SITE", "").strip().casefold()
-    if origin not in {f"http://{canonical}", f"http://{canonical}:80"}:
+    allowed_origins = (
+        {f"http://{canonical}", f"http://{canonical}:80"}
+        if expected_port == "80"
+        else {f"http://{canonical}:{expected_port}"}
+    )
+    if origin not in allowed_origins:
         return False, "same-origin POST is required"
     if fetch_site and fetch_site != "same-origin":
         return False, "cross-site control request rejected"
@@ -160,15 +186,22 @@ def validate_yaml_backup_password(value):
     return value
 
 
-def validate_continuous_interval(value):
+def validate_continuous_interval(value, action):
     if not isinstance(value, str) or not value.isascii() or not value.isdigit():
         raise ValueError("interval_minutes must be a decimal integer")
     interval = int(value)
-    if not MIN_CONTINUOUS_INTERVAL_MINUTES <= interval <= MAX_CONTINUOUS_INTERVAL_MINUTES:
+    if action == "continuous_collection_start":
+        minimum = MIN_CONTINUOUS_INTERVAL_MINUTES
+        maximum = MAX_CONTINUOUS_INTERVAL_MINUTES
+    elif action == "continuous_backup_start":
+        minimum = MIN_CONTINUOUS_BACKUP_INTERVAL_MINUTES
+        maximum = MAX_CONTINUOUS_BACKUP_INTERVAL_MINUTES
+    else:
+        raise ValueError("unsupported continuous interval action")
+    if not minimum <= interval <= maximum:
         raise ValueError(
             "interval_minutes must be between "
-            f"{MIN_CONTINUOUS_INTERVAL_MINUTES} and "
-            f"{MAX_CONTINUOUS_INTERVAL_MINUTES}"
+            f"{minimum} and {maximum}"
         )
     return interval
 
@@ -343,7 +376,9 @@ def main():
         try:
             message = {
                 "action": "continuous_collection_start",
-                "interval_minutes": validate_continuous_interval(intervals[0]),
+                "interval_minutes": validate_continuous_interval(
+                    intervals[0], action,
+                ),
             }
             send_memory_request(message)
         except ValueError as exc:
@@ -380,7 +415,9 @@ def main():
             message = {
                 "action": "continuous_backup_start",
                 "password": validate_yaml_backup_password(passwords[0]),
-                "interval_minutes": validate_continuous_interval(intervals[0]),
+                "interval_minutes": validate_continuous_interval(
+                    intervals[0], action,
+                ),
             }
             send_memory_request(message)
         except ValueError as exc:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import csv
 from contextlib import ExitStack
 from contextlib import redirect_stderr, redirect_stdout
@@ -13,6 +14,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import stat
 import subprocess
@@ -20,6 +22,7 @@ from types import SimpleNamespace
 import tempfile
 import unittest
 from unittest import mock
+import zipfile
 
 import yaml
 
@@ -237,9 +240,14 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.global_file = self.project / "01-global.yaml"
         self.subnet_file = self.project / "02-dhcp-subnet_config.csv"
         self.p2p_file = self.project / "p2p.xlsx"
+        self.p2p_source = self.project / "demo P2P_v1.0.xlsx"
         for path, content in (
             (self.global_file, (
                 "schema_version: 1\n"
+                "common:\n"
+                "  mgmt:\n"
+                "    dhcp-server:\n"
+                "      status: enabled\n"
                 "switches:\n"
                 "- eth:\n"
                 "    system:\n"
@@ -261,9 +269,11 @@ class ReleaseTransactionTests(unittest.TestCase):
                 "            password: '$y$fixture$nvl-safe-value'\n"
             )),
             (self.subnet_file, "shared_network,subnet\nnet,192.0.2.0\n"),
-            (self.p2p_file, "test\n"),
         ):
             path.write_text(content, encoding="utf-8")
+        with zipfile.ZipFile(self.p2p_source, "w") as archive:
+            archive.writestr("xl/workbook.xml", "<workbook/>")
+        self.p2p_file.symlink_to(self.p2p_source.name)
         self.devices_file = self.project / "02-devices_config.csv"
         with self.devices_file.open("w", newline="", encoding="utf-8") as stream:
             writer = csv.writer(stream)
@@ -319,7 +329,7 @@ class ReleaseTransactionTests(unittest.TestCase):
         )
         self.inputs = LOAD.ProjectInputs(
             global_file=self.global_file, devices_file=self.devices_file,
-            subnet_file=self.subnet_file, p2p_file=self.p2p_file,
+            subnet_file=self.subnet_file, p2p_file=self.p2p_source,
             device_types=frozenset({"eth"}), pubkeys=(), settings=settings,
         )
 
@@ -574,6 +584,61 @@ class ReleaseTransactionTests(unittest.TestCase):
             password_module.SWITCH_CREDENTIAL_PATHS,
         )
 
+    def test_placeholder_password_repair_command_binds_declared_linux_role(self):
+        project = Path("/tmp/req16-placeholder-demo")
+        for role in ("workstation", "management-server"):
+            with self.subTest(role=role):
+                message = str(LOAD._placeholder_password_error(
+                    project, ("eth",), host_role=role,
+                ))
+                command = next(
+                    line.strip().removeprefix("- ")
+                    for line in message.splitlines()
+                    if line.strip().startswith("- DAY0-Prepare/11-load.py ")
+                )
+                self.assertEqual(
+                    f"DAY0-Prepare/11-load.py {project} --update-passwords "
+                    f"--host-role={role}", command,
+                )
+                parsed = LOAD.parse_args(shlex.split(command)[1:])
+                self.assertEqual(role, LOAD.resolve_host_role(parsed.host_role, "Linux"))
+                without_role = [
+                    token for token in shlex.split(command)[1:]
+                    if not token.startswith("--host-role=")
+                ]
+                with self.assertRaisesRegex(LOAD.LoadError, "explicit --host-role"):
+                    LOAD.resolve_host_role(
+                        LOAD.parse_args(without_role).host_role, "Linux",
+                    )
+                self.assertIn(
+                    f"python3 tools/password-update.py {project} --platform cumulus",
+                    message,
+                )
+
+    def test_validate_inputs_placeholder_guidance_preserves_explicit_server_role(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "01-global.yaml").write_bytes(
+                (ROOT / "DAY0-Prepare/template/01-global.yaml").read_bytes()
+            )
+            args = SimpleNamespace(host_role="management-server")
+            with mock.patch.object(LOAD, "runtime_os", return_value="Linux"):
+                with self.assertRaises(LOAD.LoadError) as caught:
+                    LOAD.validate_inputs(
+                        project, args, allow_management_key_generation=False,
+                    )
+            message = str(caught.exception)
+            expected = (
+                f"DAY0-Prepare/11-load.py {project} --update-passwords "
+                "--host-role=management-server"
+            )
+            self.assertIn(expected, message)
+            parsed = LOAD.parse_args(shlex.split(expected)[1:])
+            self.assertEqual(
+                "management-server",
+                LOAD.resolve_host_role(parsed.host_role, "Linux"),
+            )
+
     def test_validate_inputs_refuses_placeholders_before_downstream_probes(self):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
@@ -703,11 +768,15 @@ class ReleaseTransactionTests(unittest.TestCase):
             skip_infra=True, skip_generate=False, start_services=False,
             start_ztp_monitor=False, ztp_monitor_scope="auto",
             ztp_monitor_interval=30, ssh_dir=Path("/root/.ssh"),
+            host_role="management-server",
         )
-        candidate = LOAD.prepare_current_release(
-            self.project,
-            {"schema_version": 1, "release_id": "failure-candidate"},
-        )
+        # Keep the deliberately minimal parent: this fixture tests load's
+        # transaction cleanup, not generation-report schema validation.
+        fake_parent = {"schema_version": 1, "release_id": "failure-candidate"}
+        candidate = LOAD.prepare_current_release(self.project, fake_parent)
+        report_payload = mock.sentinel.generation_report_payload
+        staged_report = mock.sentinel.staged_generation_report
+        transaction_events: list[str] = []
         quiesce = mock.Mock()
         restore_links = mock.Mock()
         restore_prefix = mock.Mock()
@@ -769,14 +838,47 @@ class ReleaseTransactionTests(unittest.TestCase):
                     if lifecycle_events is not None else None
                 ),
             ))
-            stack.enter_context(mock.patch.object(
-                LOAD, "validate_and_publish_release",
-                return_value={"schema_version": 1, "release_id": "failure-candidate"},
+            def validate_parent(*_args, **_kwargs):
+                transaction_events.append("parent-validate")
+                return fake_parent
+
+            def stage_parent(*_args, **_kwargs):
+                transaction_events.append("parent-stage")
+                return candidate
+
+            def build_report(*_args, **_kwargs):
+                transaction_events.append("report-build")
+                return report_payload
+
+            def stage_report(*_args, **_kwargs):
+                transaction_events.append("report-stage")
+                return staged_report
+
+            def discard_report(*_args, **_kwargs):
+                transaction_events.append("report-discard")
+
+            parent_validate = stack.enter_context(mock.patch.object(
+                LOAD, "validate_and_publish_release", side_effect=validate_parent,
             ))
-            stack.enter_context(mock.patch.object(
-                LOAD, "prepare_current_release", return_value=candidate,
+            parent_stage = stack.enter_context(mock.patch.object(
+                LOAD, "prepare_current_release", side_effect=stage_parent,
+            ))
+            report_build = stack.enter_context(mock.patch.object(
+                LOAD.generation_report, "build_report", side_effect=build_report,
+            ))
+            report_stage = stack.enter_context(mock.patch.object(
+                LOAD.generation_report, "prepare_generation_report",
+                side_effect=stage_report,
+            ))
+            report_commit = stack.enter_context(mock.patch.object(
+                LOAD.generation_report, "commit_prepared_generation_report",
+            ))
+            report_discard = stack.enter_context(mock.patch.object(
+                LOAD.generation_report, "discard_prepared_generation_report",
+                side_effect=discard_report,
             ))
             def fail_dhcp_transaction(*_args, **_kwargs):
+                transaction_events.append("dhcp-transaction")
                 if lifecycle_events is not None:
                     lifecycle_events.append("dhcp-transaction")
                 raise failure
@@ -794,6 +896,30 @@ class ReleaseTransactionTests(unittest.TestCase):
                 result = LOAD.main([] if argv is None else argv)
             except BaseException as exc:  # Assert propagation after cleanup below.
                 caught = exc
+            report_commit.assert_not_called()
+            if authority_failure is None:
+                parent_validate.assert_called_once()
+                parent_stage.assert_called_once_with(self.project, fake_parent)
+                report_build.assert_called_once_with(
+                    self.project, fake_parent,
+                    published_dir=LOAD.ZTP_DIR / "config/publickey",
+                )
+                report_stage.assert_called_once_with(self.project, report_payload)
+                report_discard.assert_called_once_with(staged_report)
+                self.assertEqual(
+                    [
+                        "parent-validate", "parent-stage", "report-build",
+                        "report-stage", "dhcp-transaction", "report-discard",
+                    ],
+                    transaction_events,
+                )
+            else:
+                parent_validate.assert_not_called()
+                parent_stage.assert_not_called()
+                report_build.assert_not_called()
+                report_stage.assert_not_called()
+                report_discard.assert_called_once_with(None)
+                self.assertEqual(["report-discard"], transaction_events)
         return (
             result, caught, candidate, quiesce, restore_links,
             restore_prefix, release_lock, runtime_backend, runtime_plan,
@@ -805,6 +931,131 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertEqual(set(result["components"]), {"dhcp", "cumulus"})
         current = self.project / "99-output-ztp/current-release.json"
         self.assertEqual(json.loads(current.read_text())["release_id"], result["release_id"])
+
+    def test_source_yaml_backed_breakout_needs_no_generator_sidecar(self) -> None:
+        """A lossless CSV source receipt bypasses the template splitter input."""
+        source = (
+            b"- set:\n"
+            b"    interface:\n"
+            b"      swp9:\n"
+            b"        link:\n"
+            b"          breakout:\n"
+            b"            8x:\n"
+            b"              lanes-per-port: 1\n"
+        )
+        header = list(H04_SCHEMA_V1_HEADER) + [
+            "source_yaml_b64", "source_yaml_sha256", "source_fields_sha256",
+        ]
+        row = [
+            "leaf01", "eth", "leaf", "192.0.2.10", "24", "192.0.2.1",
+            "02:00:00:00:00:01", "", "", "", "", "198.51.100.10",
+        ]
+        row += [""] * (len(H04_SCHEMA_V1_HEADER) - len(row))
+        fields_digest = hashlib.sha256(json.dumps(
+            row, ensure_ascii=False, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
+        row += [
+            base64.b64encode(source).decode("ascii"),
+            hashlib.sha256(source).hexdigest(), fields_digest,
+        ]
+        context = GENERATOR._device_csv_header_context(header, 1)
+        errors = []
+        device = {}
+        self.assertTrue(GENERATOR._apply_source_yaml_metadata(
+            row, "leaf01", device, context, errors,
+        ))
+        self.assertEqual([], errors)
+        self.assertEqual(source.decode("utf-8"), GENERATOR.render(
+            None, {}, "leaf01", device,
+        ))
+        with self.devices_file.open("w", newline="", encoding="utf-8") as stream:
+            csv.writer(stream).writerows([header, row])
+
+        release = (self.project / "99-output-eth/latest").resolve()
+        config = release / "leaf01.yaml"
+        config.write_bytes(source)
+        manifest_path = release / "release-manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["devices"][0]["config_sha256"] = sha256(config)
+        manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n",
+                                 encoding="utf-8")
+        self.assertFalse((self.ztp / "config/cumulus/template/P2P/output-p2p").exists())
+
+        result = LOAD.validate_and_publish_release(self.project, self.inputs)
+        self.assertEqual("passed", result["validation"])
+        self.assertEqual(source, config.read_bytes())
+        current = self.project / "99-output-ztp/current-release.json"
+        last_good = current.read_bytes()
+        config.write_bytes(source.replace(b"8x:", b"4x:"))
+        manifest["devices"][0]["config_sha256"] = sha256(config)
+        manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n",
+                                 encoding="utf-8")
+        with self.assertRaises(LOAD.LoadError):
+            LOAD.validate_and_publish_release(self.project, self.inputs)
+        self.assertEqual(last_good, current.read_bytes())
+
+    def test_parent_rejects_splitter_source_changed_after_child_yaml(self) -> None:
+        """A valid-looking current sidecar must still agree with published 8x YAML."""
+        p2p = self.ztp / "config/cumulus/template/P2P"
+        output = p2p / "output-p2p"
+        output.mkdir(parents=True)
+        (p2p / "p2p.xlsx").symlink_to(self.p2p_source)
+        inventory = p2p / "01-inventory.log"
+        port_map = p2p / "02-port-mapping.log"
+        inventory.write_bytes(b"[Eth-SW]\nleaf01\n")
+        port_map.write_bytes(b"1to8#/2/4,swp#s7\n")
+        lldpq = output / f"{self.p2p_source.stem}-lldpq.dot"
+        lldpq.write_bytes(b'graph "fixture" {}\n')
+        sidecar = output / f"{self.p2p_source.stem}-splitter-profiles.json"
+        authority = {
+            "schema_version": 1,
+            "source_workbook": self.p2p_source.name,
+            "workbook_sha256": sha256(self.p2p_source),
+            "inventory_sha256": sha256(inventory),
+            "port_mapping_sha256": sha256(port_map),
+            "lldpq_sha256": sha256(lldpq),
+            "profiles": [{"device": "leaf01", "parent": "swp9",
+                          "profile": "1to8"}],
+        }
+        sidecar.write_text(json.dumps(authority, sort_keys=True) + "\n",
+                           encoding="utf-8")
+
+        release = (self.project / "99-output-eth/latest").resolve()
+        config = release / "leaf01.yaml"
+        config.write_text(yaml.safe_dump([{"set": {"interface": {"swp9": {
+            "link": {"breakout": {"8x": {"lanes-per-port": "1"}}},
+        }}}}], sort_keys=True), encoding="utf-8")
+        manifest_path = release / "release-manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["devices"][0]["config_sha256"] = sha256(config)
+        manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n",
+                                 encoding="utf-8")
+
+        positive = LOAD.validate_and_publish_release(self.project, self.inputs)
+        self.assertEqual("passed", positive["validation"])
+        current = self.project / "99-output-ztp/current-release.json"
+        last_good = current.read_bytes()
+        sidecar_before = sidecar.read_bytes()
+        dot_before = lldpq.read_bytes()
+        child_before = config.read_bytes()
+        for mutation in ("profile-1to4", "missing-lldpq", "changed-lldpq"):
+            with self.subTest(mutation=mutation):
+                sidecar.write_bytes(sidecar_before)
+                lldpq.write_bytes(dot_before)
+                if mutation == "profile-1to4":
+                    changed = dict(authority, profiles=[{
+                        "device": "leaf01", "parent": "swp9", "profile": "1to4",
+                    }])
+                    sidecar.write_text(json.dumps(changed, sort_keys=True) + "\n",
+                                       encoding="utf-8")
+                elif mutation == "missing-lldpq":
+                    lldpq.unlink()
+                else:
+                    lldpq.write_bytes(dot_before + b"changed-after-generator\n")
+                with self.assertRaises(LOAD.LoadError):
+                    LOAD.validate_and_publish_release(self.project, self.inputs)
+                self.assertEqual(last_good, current.read_bytes())
+                self.assertEqual(child_before, config.read_bytes())
 
     def test_setup_publishes_every_nvos_name_that_load_can_select(self) -> None:
         filenames = (
@@ -1769,11 +2020,14 @@ class ReleaseTransactionTests(unittest.TestCase):
         ), mock.patch.object(
             LOAD, "supports_local_ztp_services", return_value=True,
         ), mock.patch.object(
+            LOAD, "runtime_os", return_value="Linux",
+        ), mock.patch.object(
             LOAD.subprocess, "run",
             side_effect=AssertionError("supervisor path must not invoke systemctl"),
         ):
             actual = LOAD.quiesce_services(
                 False, inputs=self.inputs, runtime_backend=Backend(),
+                host_role="management-server",
             )
 
         self.assertIs(expected_plan, actual)
@@ -1905,6 +2159,7 @@ class ReleaseTransactionTests(unittest.TestCase):
             skip_infra=True, skip_generate=False, start_services=True,
             start_ztp_monitor=True, ztp_monitor_scope="air",
             ztp_monitor_interval=30, ssh_dir=Path("/root/.ssh"),
+            host_role="management-server",
         )
         settings = LOAD.replace(
             self.inputs.settings,
@@ -1993,6 +2248,7 @@ class ReleaseTransactionTests(unittest.TestCase):
         quiesce.assert_called_once_with(
             False, dhcp_runtime_plan=plan, runtime_backend=backend,
             native_monitor_already_quiesced=False,
+            host_role="management-server",
         )
         generate.assert_called_once_with(
             inputs.device_types,
@@ -2006,12 +2262,15 @@ class ReleaseTransactionTests(unittest.TestCase):
             switch_scope="all",
         )
         mount.assert_called_once_with(False, parent_candidate=None)
+        expected_runtime_inputs = LOAD.replace(
+            inputs, p2p_file=inputs.p2p_file.resolve(),
+        )
         preflight.assert_called_once_with(
-            inputs, {}, False, dhcp_runtime_plan=plan,
+            expected_runtime_inputs, {}, False, dhcp_runtime_plan=plan,
             runtime_backend=backend,
         )
         start.assert_called_once_with(
-            inputs, {}, False, dhcp_runtime_plan=plan,
+            expected_runtime_inputs, {}, False, dhcp_runtime_plan=plan,
             runtime_backend=backend,
         )
         prefix_snapshot.assert_not_called()
@@ -2118,6 +2377,7 @@ class ReleaseTransactionTests(unittest.TestCase):
             skip_infra=True, skip_generate=False, start_services=False,
             start_ztp_monitor=False, ztp_monitor_scope="auto",
             ztp_monitor_interval=30, ssh_dir=Path("/root/.ssh"),
+            host_role="management-server",
         )
         backend = SimpleNamespace(name="supervisor")
         quiesce = mock.Mock()
@@ -2171,6 +2431,7 @@ class ReleaseTransactionTests(unittest.TestCase):
             skip_infra=True, skip_generate=False, start_services=True,
             start_ztp_monitor=True, ztp_monitor_scope="auto",
             ztp_monitor_interval=30, ssh_dir=Path("/root/.ssh"),
+            host_role="management-server",
         )
         backend = SimpleNamespace(name="supervisor")
         plan = SimpleNamespace(
@@ -2279,7 +2540,7 @@ class ReleaseTransactionTests(unittest.TestCase):
         stderr = io.StringIO()
         argv = [
             "demo", "--skip-doca", "--download-doca", "--no-upgrade",
-            "--ztp-monitor-scope", "prod",
+            "--ztp-monitor-scope", "prod", "--host-role=management-server",
         ]
         with mock.patch.object(LOAD, "runtime_os", return_value="Linux"), \
                 redirect_stderr(stderr):
@@ -2673,12 +2934,15 @@ class ReleaseTransactionTests(unittest.TestCase):
 
     def test_main_propagates_implicit_mini_scope_before_input_validation(self) -> None:
         observed: dict[str, str] = {}
+        stderr = io.StringIO()
 
         def capture_selection(
             _project: Path, args, *, allow_management_key_generation: bool,
+            host_role: str,
         ) -> tuple[object, object]:
             observed["deployment_scope"] = args.deployment_scope
             observed["switch_scope"] = args.switch_scope
+            observed["host_role"] = host_role
             observed["allow_management_key_generation"] = (
                 allow_management_key_generation
             )
@@ -2694,17 +2958,22 @@ class ReleaseTransactionTests(unittest.TestCase):
             LOAD, "initialize_from_template",
         ), mock.patch.object(
             LOAD, "validate_inputs", side_effect=capture_selection,
-        ), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-            result = LOAD.main([str(self.project), "--mini", "--dry-run"])
+        ), redirect_stdout(io.StringIO()), redirect_stderr(stderr):
+            result = LOAD.main([
+                str(self.project), "--mini", "--dry-run",
+                "--host-role=workstation",
+            ])
 
         self.assertEqual(1, result)
         self.assertEqual(
             {
                 "deployment_scope": "air",
                 "switch_scope": "eth",
+                "host_role": "workstation",
                 "allow_management_key_generation": False,
             },
             observed,
+            stderr.getvalue(),
         )
 
     def test_invalid_deployment_scope_stops_main_before_lock_or_project_write(self) -> None:
@@ -4316,6 +4585,7 @@ class ReleaseTransactionTests(unittest.TestCase):
             skip_infra=True, skip_generate=False, start_services=False,
             start_ztp_monitor=False, ztp_monitor_scope="auto",
             ztp_monitor_interval=30,
+            host_role="workstation",
             p2p_legacy_columns=p2p_legacy_columns,
         )
         remote_settings = LOAD.replace(
@@ -4404,13 +4674,14 @@ class ReleaseTransactionTests(unittest.TestCase):
         release_lock.assert_called_once_with(73)
 
     def test_linux_without_local_service_does_not_publish_runtime_ztp_prefix(self) -> None:
-        """A Linux artifact builder without service endpoints must not publish aliases."""
+        """A Linux workstation never touches host services or publishes aliases."""
         args = SimpleNamespace(
             skip_doca=False, download_doca=False, dry_run=False,
             project=str(self.project), no_upgrade=True, p2p_file=None,
             skip_infra=True, skip_generate=False, start_services=False,
             start_ztp_monitor=False, ztp_monitor_scope="auto",
             ztp_monitor_interval=30,
+            host_role="workstation",
         )
         remote_settings = LOAD.replace(
             self.inputs.settings,
@@ -4483,12 +4754,10 @@ class ReleaseTransactionTests(unittest.TestCase):
             result = LOAD.main([])
 
         self.assertEqual(0, result)
-        validate_host.assert_called_once_with(remote_settings, False)
-        require_inactive.assert_called_once_with(
-            False, runtime_backend=mock.ANY,
-        )
+        validate_host.assert_not_called()
+        require_inactive.assert_not_called()
         quiesce.assert_not_called()
-        stop_monitor.assert_called_once_with(LOAD.HTTP_ROOT)
+        stop_monitor.assert_not_called()
         snapshot_prefix.assert_not_called()
         configure_prefix.assert_not_called()
         render_runtime.assert_called_once()
@@ -4605,6 +4874,7 @@ class ReleaseTransactionTests(unittest.TestCase):
             skip_infra=True, skip_generate=False, start_services=False,
             start_ztp_monitor=False, ztp_monitor_scope="auto",
             ztp_monitor_interval=30,
+            host_role="workstation",
         )
         remote_inputs = LOAD.replace(
             self.inputs,

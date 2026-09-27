@@ -7,7 +7,9 @@ import argparse
 from contextlib import ExitStack, nullcontext, redirect_stderr, redirect_stdout
 import importlib.util
 import io
+import json
 import os
+import shlex
 import stat
 import tarfile
 from pathlib import Path
@@ -73,6 +75,19 @@ def upload_args(*, deploy: bool, dry_run: bool) -> argparse.Namespace:
 
 
 class GateCommandTests(unittest.TestCase):
+    def test_native_upload_next_command_declares_server_role_to_real_load_parser(self):
+        args = upload_args(deploy=True, dry_run=False)
+        command = UPLOAD.recommended_remote_load_command(
+            args, Path("/tmp/customer"),
+        )
+        remote = shlex.split(command[-1])
+        self.assertEqual(["ssh", "-t", args.host], [command[0], command[-3], command[-2]])
+        requested = remote[remote.index("11-load.py") + 1:]
+        self.assertEqual(
+            "management-server",
+            LOAD.resolve_host_role(LOAD.parse_args(requested).host_role, "Linux"),
+        )
+
     def test_invalid_load_scope_stops_before_macos_full_test_gate(self):
         events = []
         stderr = io.StringIO()
@@ -155,6 +170,8 @@ class GateCommandTests(unittest.TestCase):
                 approvals, snapshot, full_suite=True,
             )
             before = approvals.read_bytes()
+            declared_scripts = set(manifest["scripts"])
+            self.assertEqual(declared_scripts, set(json.loads(before)["scripts"]))
             wrapper = root / "run_related_tests.py"
             wrapper.write_text(
                 "import runpy, sys\n"
@@ -194,7 +211,7 @@ class GateCommandTests(unittest.TestCase):
             for completed in results:
                 self.assertEqual(0, completed.returncode)
                 self.assertEqual(
-                    "impact manifest and 125 scripts are approved\n",
+                    f"impact manifest and {len(declared_scripts)} scripts are approved\n",
                     completed.stdout,
                 )
                 self.assertEqual("", completed.stderr)
@@ -406,6 +423,41 @@ class SyncGateTests(unittest.TestCase):
         }
         defaults.update(extra)
         return defaults
+
+    def test_native_success_next_command_declares_server_role_to_real_load_parser(self):
+        args = sync_args()
+        patches = self._main_patches(args)
+        patches.update({
+            "gate": mock.patch.object(SYNC, "run_predeploy_test_gate"),
+            "lock": mock.patch.object(
+                SYNC, "acquire_remote_deployment_lock", return_value=object(),
+            ),
+            "preview": mock.patch.object(
+                SYNC, "sync_jobs_have_changes", return_value=(object(),),
+            ),
+            "prewrite": mock.patch.object(
+                SYNC, "prepare_remote_source_write", return_value=False,
+            ),
+            "commit_source": mock.patch.object(SYNC, "commit_remote_source_write"),
+        })
+        output = io.StringIO()
+        with ExitStack() as stack:
+            entered = {name: stack.enter_context(patch) for name, patch in patches.items()}
+            stack.enter_context(redirect_stdout(output))
+            self.assertEqual(0, SYNC.main([]))
+        entered["run_job"].assert_called_once()
+        entered["commit_source"].assert_called_once()
+        next_lines = [
+            line.strip() for line in output.getvalue().splitlines()
+            if "11-load.py" in line and line.lstrip().startswith("cd ")
+        ]
+        self.assertEqual(1, len(next_lines))
+        remote = shlex.split(next_lines[0])
+        requested = remote[remote.index("11-load.py") + 1:]
+        self.assertEqual(
+            "management-server",
+            LOAD.resolve_host_role(LOAD.parse_args(requested).host_role, "Linux"),
+        )
 
     def test_formal_sync_tests_freezes_authority_and_rechecks_before_remote_lock(self):
         events: list[str] = []
@@ -949,7 +1001,7 @@ class UploadGateTests(unittest.TestCase):
         self.assertEqual("ubuntu@worker.example", load_command[-2])
         self.assertEqual(
             "cd /var/www/html/DAY0-Prepare && "
-            "sudo -n python3 11-load.py customer",
+            "sudo -n python3 11-load.py customer --host-role=management-server",
             load_command[-1],
         )
 

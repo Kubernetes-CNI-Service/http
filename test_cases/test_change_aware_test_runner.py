@@ -54,6 +54,9 @@ EXPECTED_TEST_SUITES = [
     "monitoring-collection",
     "ztp-runtime",
     "vm-validation",
+    "operator-cli-help",
+    "issue-tracker-local",
+    "ufm-local-source-bridge",
 ]
 
 
@@ -109,6 +112,9 @@ EXPECTED_TEMPLATE_AUTHORITY_NAMES = {
     "_extra_aaa_users.yaml.j2",
     "_global_evpn.yaml.j2",
     "_l2_svis.yaml.j2",
+    "_management_eth0_dhcp.yaml.j2",
+    "_management_eth0_static.yaml.j2",
+    "_management_eth1.yaml.j2",
     "border.yaml.j2",
     "oob-core.yaml.j2",
     "oob-leaf.yaml.j2",
@@ -246,6 +252,16 @@ class ImpactManifestTests(unittest.TestCase):
                 "02-dhcp-subnet_config.csv",
             ):
                 (project / name).write_text(f"fixture: {name}\n", encoding="utf-8")
+            # The upload selector now requires the setup-selected real workbook.
+            # Keep this archive-growth fixture on that supported path so a
+            # missing selector entry, rather than an invalid P2P input, fails it.
+            from openpyxl import Workbook
+
+            workbook = Workbook()
+            workbook.active.title = "P2P"
+            workbook.active.append(("src", "dst"))
+            workbook.save(project / "p2p-20260923.xlsx")
+            (project / "p2p.xlsx").symlink_to("p2p-20260923.xlsx")
             required = (
                 ".dockerignore",
                 "infra/docker/Dockerfile",
@@ -673,6 +689,78 @@ class ImpactManifestTests(unittest.TestCase):
             "an arbitrary hidden/ignored script must still fail closed into inventory",
         )
 
+    def test_source_discovery_prunes_only_known_non_source_subtrees(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for relative in (
+                "infra/entry.py",
+                ".private/ignored_but_governed.py",
+                ".codex_tmp-decoy.py",
+                "99-output-decoy.py",
+                "test_cases/node_modules/deep/irrelevant.py",
+                "outputs/docker-bundles/deep/irrelevant.py",
+                "monitor/cabletracker-main/deep/irrelevant.py",
+            ):
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("pass\n", encoding="utf-8")
+
+            scanned = []
+            real_scandir = os.scandir
+
+            def observing_scandir(path):
+                scanned.append(Path(path).relative_to(root).as_posix())
+                return real_scandir(path)
+
+            with mock.patch.object(os, "scandir", side_effect=observing_scandir), \
+                    mock.patch.object(Path, "rglob", side_effect=AssertionError(
+                        "source discovery traversed the entire tree"
+                    )):
+                discovered = RUNNER.discover_source_scripts(root)
+
+        self.assertEqual(
+            {".private/ignored_but_governed.py": ".private/ignored_but_governed.py",
+             "infra/entry.py": "infra/entry.py"},
+            discovered,
+        )
+        self.assertFalse(
+            any(path.startswith(("test_cases", "outputs", "monitor/cabletracker-main"))
+                for path in scanned),
+            scanned,
+        )
+
+    def test_public_entrypoint_gate_uses_same_pruned_source_frame(self):
+        public = load_repository_module(
+            "h22_public_entrypoints", ROOT / "test_cases/test_all_script_entrypoints.py",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for relative in (
+                "infra/entry.py", ".private/entry.py",
+                "outputs/deep/ignored.py", "test_cases/deep/ignored.py",
+                "ztp/99-output-old/deep/ignored.py",
+            ):
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("pass\n", encoding="utf-8")
+            (root / "alias.py").symlink_to("infra/entry.py")
+            with mock.patch.object(public, "ROOT", root), mock.patch.object(
+                Path, "rglob", side_effect=AssertionError(
+                    "public entrypoint gate must share pruned discovery"
+                ),
+            ):
+                public_paths = {
+                    path.relative_to(root).as_posix()
+                    for path in public.source_scripts()
+                }
+            governed = RUNNER.discover_source_scripts(root)
+        self.assertEqual(set(governed), public_paths)
+        self.assertEqual("infra/entry.py", governed["alias.py"])
+        self.assertEqual(
+            {".private/entry.py", "alias.py", "infra/entry.py"},
+            public_paths,
+        )
+
     def test_every_source_and_symlink_alias_has_direct_and_workflow_mapping(self):
         manifest = RUNNER.load_and_validate_manifest(ROOT, MANIFEST_PATH)
         actual = RUNNER.discover_source_scripts(ROOT)
@@ -729,6 +817,7 @@ class ImpactManifestTests(unittest.TestCase):
                 "DAY0-Prepare/template/99-output-ib_nvl/bringup/ndr-upgrade-logs/.gitkeep",
                 "DAY0-Prepare/template/99-output-ib_nvl/bringup/xdr-initial-setup-logs/.gitkeep",
                 "DAY0-Prepare/template/99-output-ib_nvl/bringup/xdr-upgrade-logs/.gitkeep",
+                "DAY0-Prepare/template/99-output-infra/.gitkeep",
                 "DAY0-Prepare/template/99-output-monitor/.gitkeep",
                 "DAY0-Prepare/template/99-output-p2p/.gitkeep",
                 "DAY0-Prepare/template/99-output-ztp/.gitkeep",
@@ -766,6 +855,9 @@ class ImpactManifestTests(unittest.TestCase):
                 "ztp/config/cumulus/template/03-templates-j2/_extra_aaa_users.yaml.j2",
                 "ztp/config/cumulus/template/03-templates-j2/_global_evpn.yaml.j2",
                 "ztp/config/cumulus/template/03-templates-j2/_l2_svis.yaml.j2",
+                "ztp/config/cumulus/template/03-templates-j2/_management_eth0_dhcp.yaml.j2",
+                "ztp/config/cumulus/template/03-templates-j2/_management_eth0_static.yaml.j2",
+                "ztp/config/cumulus/template/03-templates-j2/_management_eth1.yaml.j2",
                 "ztp/config/cumulus/template/03-templates-j2/border.yaml.j2",
                 "ztp/config/cumulus/template/03-templates-j2/oob-core.yaml.j2",
                 "ztp/config/cumulus/template/03-templates-j2/oob-leaf.yaml.j2",
@@ -826,6 +918,50 @@ class ImpactManifestTests(unittest.TestCase):
         self.assertIn(relative, selection.changed_paths)
         self.assertIn("test_cases.test_ztp_container_runtime", selection.tests)
 
+    def test_output_infra_sentinel_bytes_invalidate_approval_and_select_req19(self):
+        relative = "DAY0-Prepare/template/99-output-infra/.gitkeep"
+        manifest = RUNNER.load_and_validate_manifest(ROOT, MANIFEST_PATH)
+        self.assertIn(relative, manifest["tracked_support"])
+        snapshot = RUNNER.make_snapshot(ROOT, MANIFEST_PATH, manifest)
+        self.assertEqual(
+            hashlib.sha256((ROOT / relative).read_bytes()).hexdigest(),
+            snapshot.support[relative],
+        )
+        changed = RUNNER.Snapshot(
+            manifest_sha256=snapshot.manifest_sha256,
+            scripts=snapshot.scripts,
+            tests=snapshot.tests,
+            support={**snapshot.support, relative: "f" * 64},
+        )
+        pending = RUNNER.detect_pending(
+            changed, RUNNER.snapshot_as_json(snapshot),
+        )
+        self.assertEqual({relative}, pending.support)
+        selected = RUNNER.select_tests(ROOT, manifest, [], pending)
+        self.assertIn(relative, selected.changed_paths)
+        self.assertIn("test_cases.test_req19_infra_log_contract", selected.tests)
+        self.assertIn("test_cases.test_req19_infra_log_workflow", selected.tests)
+
+    def test_real_environment_card_change_selects_req10c_and_req14_contracts(self):
+        relative = "test_cases/REAL_ENVIRONMENT.md"
+        manifest = RUNNER.load_and_validate_manifest(ROOT, MANIFEST_PATH)
+        self.assertIn(relative, manifest["tracked_support"])
+        snapshot = RUNNER.make_snapshot(ROOT, MANIFEST_PATH, manifest)
+        changed = RUNNER.Snapshot(
+            manifest_sha256=snapshot.manifest_sha256,
+            scripts=snapshot.scripts,
+            tests=snapshot.tests,
+            support={**snapshot.support, relative: "f" * 64},
+        )
+        pending = RUNNER.detect_pending(
+            changed, RUNNER.snapshot_as_json(snapshot),
+        )
+        self.assertEqual({relative}, pending.support)
+        selected = RUNNER.select_tests(ROOT, manifest, [], pending)
+        self.assertIn(relative, selected.changed_paths)
+        self.assertIn("test_cases.test_req10c_auto_contract", selected.tests)
+        self.assertIn("test_cases.test_req14_active_provenance_workflow", selected.tests)
+
     def test_script_selects_direct_contract_and_multi_script_workflow(self):
         manifest = RUNNER.load_and_validate_manifest(ROOT, MANIFEST_PATH)
         snapshot = RUNNER.make_snapshot(ROOT, MANIFEST_PATH, manifest)
@@ -838,6 +974,31 @@ class ImpactManifestTests(unittest.TestCase):
         self.assertIn("test_cases.test_load_release_transaction", selection.tests)
         self.assertIn("test_cases.test_full_flow_integration", selection.tests)
         self.assertTrue(any("workflow" in reason for reason in selection.reasons))
+
+    def test_req8_emitter_change_selects_public_cli_help_contract(self):
+        manifest = RUNNER.load_and_validate_manifest(ROOT, MANIFEST_PATH)
+        selection = RUNNER.select_tests(
+            ROOT,
+            manifest,
+            ["monitor/collection_v2_emitter.py"],
+            RUNNER.PendingChanges(),
+        )
+        self.assertFalse(selection.full_suite)
+        self.assertIn("test_cases.test_req8_public_cli_help_contract", selection.tests)
+        self.assertTrue(
+            any("-> rule req8_public_cli_help" in reason for reason in selection.reasons)
+        )
+
+    def test_global_template_change_selects_service_endpoint_contract(self):
+        manifest = RUNNER.load_and_validate_manifest(ROOT, MANIFEST_PATH)
+        selection = RUNNER.select_tests(
+            ROOT,
+            manifest,
+            ["DAY0-Prepare/template/01-global.yaml"],
+            RUNNER.PendingChanges(),
+        )
+        self.assertFalse(selection.full_suite)
+        self.assertIn("test_cases.test_service_endpoint_convergence", selection.tests)
 
     def test_nvos_ztp_template_selects_its_render_contract(self):
         manifest = RUNNER.load_and_validate_manifest(ROOT, MANIFEST_PATH)
@@ -899,6 +1060,7 @@ class ImpactManifestTests(unittest.TestCase):
                 "test_cases.test_project_contracts",
                 "test_cases.test_v2_project_schema",
                 "test_cases.test_v2_generation_flow",
+                "test_cases.test_req8_template_refactor_contract",
                 "test_cases.test_change_aware_test_runner",
                 "test_cases.test_flow_release_platform_matrix",
             ],

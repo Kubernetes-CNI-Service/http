@@ -746,16 +746,23 @@ class SharedDeploymentLockTests(unittest.TestCase):
 
     def test_setup_and_unsetup_fail_before_body_when_lock_is_busy(self):
         with tempfile.TemporaryDirectory() as directory:
-            for module, argv in ((SETUP, ["project"]), (UNSETUP, ["-y"])):
-                body = mock.Mock(return_value=0)
-                with self.subTest(entry=module.__name__), LOCKS.deployment_lock(directory):
-                    with (
-                        mock.patch.object(module, "HTTP_BASE", directory),
-                        mock.patch.object(module, "_main_locked", body),
-                        redirect_stdout(io.StringIO()),
-                    ):
-                        self.assertEqual(1, module.main(argv))
-                body.assert_not_called()
+            with mock.patch.object(SETUP.platform, "system", return_value="Linux"):
+                for module, argv in ((
+                    SETUP, ["project", "--host-role=workstation"],
+                ), (UNSETUP, ["-y"])):
+                    body = mock.Mock(return_value=0)
+                    with self.subTest(entry=module.__name__), LOCKS.deployment_lock(directory):
+                        with (
+                            mock.patch.object(module, "HTTP_BASE", directory),
+                            mock.patch.object(module, "_main_locked", body),
+                            mock.patch.object(
+                                module, "deployment_lock", wraps=module.deployment_lock,
+                            ) as lock_gate,
+                            redirect_stdout(io.StringIO()),
+                        ):
+                            self.assertEqual(1, module.main(argv))
+                        lock_gate.assert_called_once()
+                    body.assert_not_called()
 
     def test_unload_fails_before_mutation_when_lock_is_busy(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1468,6 +1475,8 @@ class SetupUnloadAndTransportTests(unittest.TestCase):
     def test_unsetup_rolls_back_links_after_mid_delete_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            infra = root / "infra"
+            infra.mkdir(mode=0o700)
             first = root / "first"
             second = root / "second"
             first.symlink_to("target-one")
@@ -1497,6 +1506,10 @@ class SetupUnloadAndTransportTests(unittest.TestCase):
             self.assertEqual("target-one", os.readlink(first))
             self.assertTrue(second.is_symlink())
             self.assertEqual("target-two", os.readlink(second))
+            lock = infra / ".logs.lock"
+            self.assertTrue(stat.S_ISREG(lock.lstat().st_mode))
+            self.assertEqual(1, lock.stat().st_nlink)
+            self.assertEqual(0o600, stat.S_IMODE(lock.stat().st_mode))
 
     def test_unload_dhcp_mismatch_preflight_makes_no_changes(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1583,8 +1596,41 @@ class SetupUnloadAndTransportTests(unittest.TestCase):
         setup = (ROOT / "infra/infra-setup.sh").read_text(encoding="utf-8")
         self.assertIn("/etc/hosts|/etc/systemd/resolved.conf", teardown)
         self.assertIn("restore_file /etc/hosts", teardown)
-        self.assertLess(teardown.index("flock -x 9"), teardown.index('mkdir -p "$log_dir"'))
-        self.assertLess(setup.index("flock -x 9"), setup.index('mkdir -p "$log_dir"'))
+
+        def assert_locked_log_root(script):
+            for required in (
+                "flock -x 9", "flock -x 8",
+                'if [[ -L "$log_root_lock" || ( -e "$log_root_lock" && ! -f "$log_root_lock" ) ]]; then',
+                'if [[ -L "$log_dir" ]]', 'elif [[ -e "$log_dir" ]]',
+                'mkdir -m 700 -- "$log_dir"', 'exec 3>>"$log_file"',
+                'if [[ "$linked_root" != "$bound_root" ]]',
+            ):
+                self.assertIn(required, script)
+            lock9 = script.index("flock -x 9")
+            lock8 = script.index("flock -x 8")
+            log_link = script.index('if [[ -L "$log_dir" ]]')
+            log_existing = script.index('elif [[ -e "$log_dir" ]]')
+            log_create = script.index('mkdir -m 700 -- "$log_dir"')
+            log_open = script.index('exec 3>>"$log_file"')
+            self.assertLess(lock9, lock8)
+            self.assertLess(lock8, log_link)
+            self.assertLess(log_link, log_existing)
+            self.assertLess(log_existing, log_create)
+            self.assertLess(log_create, log_open)
+
+        for script in (teardown, setup):
+            assert_locked_log_root(script)
+            for mutant in (
+                script.replace("flock -x 8", "# missing log-root lock", 1),
+                script.replace('if [[ -L "$log_dir" ]]', 'if [[ -e "$log_dir" ]]', 1),
+                script.replace('mkdir -m 700 -- "$log_dir"', 'mkdir -p "$log_dir"', 1),
+                script.replace("flock -x 8\n", "", 1).replace(
+                    'mkdir -m 700 -- "$log_dir"',
+                    'mkdir -m 700 -- "$log_dir"\nflock -x 8', 1,
+                ),
+            ):
+                with self.assertRaises(AssertionError):
+                    assert_locked_log_root(mutant)
 
 
 class InfraAndAnalysisParserTests(unittest.TestCase):

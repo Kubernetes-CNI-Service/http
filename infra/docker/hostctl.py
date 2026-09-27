@@ -744,6 +744,7 @@ def load_command(
         os.fspath(settings.http_root / "DAY0-Prepare/11-load.py"),
         settings.project_name,
         "--skip-infra",
+        "--host-role=management-server",
         "--deployment-scope", settings.scope,
     ]
     if settings.switch_scope != "all":
@@ -807,7 +808,10 @@ def transactional_load(
                 mutable_sources_touched = False
                 activate.validate_image_source_contract(settings)
                 selected, _runtime, _payload = activate.prepare_runtime(settings)
-                services = activate.expected_services(selected)
+                services = activate.expected_services(
+                    selected,
+                    http_listener_ips=activate.project_http_listener_ips(settings, selected),
+                )
                 # 11-load deliberately runs in no-start mode inside the
                 # container, so its legacy start_* helpers do not create or
                 # reset the three CGI/worker control files.  Initialize them
@@ -901,7 +905,10 @@ def transactional_reload_network(settings: activate.Settings) -> None:
                 )
             changed = activate.validate_network_reload_plan(saved, current)
             services = tuple(marker.get("services") or ())
-            if services != activate.expected_services(selected):
+            if services != activate.expected_services(
+                selected,
+                http_listener_ips=activate.project_http_listener_ips(settings, selected),
+            ):
                 raise ControllerError(
                     "network reload service set does not match the current plan"
                 )
@@ -923,7 +930,10 @@ def transactional_reload_network(settings: activate.Settings) -> None:
                     raise ControllerError(
                         "network listener identity changed while reload was running"
                     )
-                services = activate.expected_services(selected)
+                services = activate.expected_services(
+                    selected,
+                    http_listener_ips=activate.project_http_listener_ips(settings, selected),
+                )
                 if tuple(marker.get("services") or ()) != services:
                     raise ControllerError(
                         "network reload would change the managed service set"

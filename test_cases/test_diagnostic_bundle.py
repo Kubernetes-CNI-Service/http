@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+from contextlib import ExitStack
 import io
 import json
 import os
@@ -1218,6 +1219,304 @@ __NV_CONFIG_END__
         help_text = stdout.getvalue()
         self.assertIn("2099-example-site", help_text)
         self.assertNotIn("2026-" + "06-vb", help_text)
+        self.assertIn("选择 AIR 或 Production 环境", help_text)
+
+
+class DiagnosticOutputRaceTests(unittest.TestCase):
+    """Output bytes stay outside DocumentRoot across adversarial name rebinds."""
+
+    @staticmethod
+    def _tree_identity(root: Path):
+        result = []
+        for path in [root, *sorted(root.rglob("*"))]:
+            info = path.lstat()
+            payload = (
+                os.readlink(path) if stat.S_ISLNK(info.st_mode)
+                else path.read_bytes() if stat.S_ISREG(info.st_mode) else None
+            )
+            result.append((
+                path.relative_to(root).as_posix(), info.st_dev, info.st_ino,
+                info.st_mode, info.st_size, info.st_mtime_ns, payload,
+            ))
+        return tuple(result)
+
+    @staticmethod
+    def _run_isolated_collector(project: Path, output: Path, capture):
+        with ExitStack() as patches, mock.patch("sys.stdout", new_callable=io.StringIO), \
+                mock.patch("sys.stderr", new_callable=io.StringIO):
+            for name, value in (
+                ("resolve_project", project),
+                ("runtime_active_project", None),
+                ("load_latest_report", (None, {})),
+            ):
+                patches.enter_context(mock.patch.object(COLLECTOR, name, return_value=value))
+            patches.enter_context(mock.patch.object(
+                COLLECTOR, "collect_project_inputs", side_effect=capture,
+            ))
+            for name in (
+                "collect_runtime_files", "collect_selected_published_configs",
+                "collect_selected_operation_metadata", "collect_server_commands",
+                "collect_public_key_fingerprints", "collect_monitor_state",
+                "collect_switch_archives",
+            ):
+                patches.enter_context(mock.patch.object(COLLECTOR, name, return_value=None))
+            return COLLECTOR.main([
+                "-p", "fixture", "--output-dir", str(output),
+            ])
+
+    @staticmethod
+    def _fixture(base: Path):
+        document_root = base / "document-root"
+        private = document_root / "private"
+        private.mkdir(parents=True, mode=0o700)
+        (private / "sentinel.txt").write_bytes(b"DO-NOT-CHANGE\n")
+        project = base / "fixture-project"
+        project.mkdir(mode=0o700)
+        return document_root, private, project
+
+    def test_output_archive_unchanged_path_is_complete_and_private(self):
+        with tempfile.TemporaryDirectory(prefix="diagnostic-output-positive-") as temp:
+            base = Path(temp)
+            document_root, _private, project = self._fixture(base)
+            before = self._tree_identity(document_root)
+            output = base / "output"
+
+            def capture(builder, _project):
+                builder.write("server/probe.txt", b"synthetic-probe\n", source="fixture")
+
+            with mock.patch.object(COLLECTOR, "HTTP_ROOT", document_root):
+                rc = self._run_isolated_collector(project, output, capture)
+            self.assertEqual(0, rc)
+            self.assertEqual(before, self._tree_identity(document_root))
+            archives = list(output.glob("ztp-diagnostics-*.tar.gz"))
+            self.assertEqual(1, len(archives))
+            self.assertEqual(0o600, stat.S_IMODE(archives[0].stat().st_mode))
+            with tarfile.open(archives[0], "r:gz") as archive:
+                names = archive.getnames()
+                self.assertEqual(1, sum(name.endswith("/manifest.json") for name in names))
+                self.assertEqual(1, sum(name.endswith("/server/probe.txt") for name in names))
+                member = next(name for name in names if name.endswith("/server/probe.txt"))
+                self.assertEqual(b"synthetic-probe\n", archive.extractfile(member).read())
+
+    def test_output_root_rebind_after_prepare_never_writes_document_root(self):
+        with tempfile.TemporaryDirectory(prefix="diagnostic-root-rebind-") as temp:
+            base = Path(temp)
+            document_root, private, project = self._fixture(base)
+            before = self._tree_identity(document_root)
+            output = base / "output"
+            parked = base / "original-output"
+            original_prepare = COLLECTOR.prepare_output_root
+            injected = []
+            observed = []
+
+            def prepare_then_rebind(value):
+                prepared = original_prepare(value)
+                output.rename(parked)
+                output.symlink_to(private, target_is_directory=True)
+                injected.append(True)
+                return prepared
+
+            def capture(builder, _project):
+                try:
+                    builder.write("server/probe.txt", b"synthetic-probe\n", source="fixture")
+                finally:
+                    observed.append(self._tree_identity(document_root))
+
+            try:
+                with mock.patch.object(COLLECTOR, "HTTP_ROOT", document_root), \
+                        mock.patch.object(COLLECTOR, "prepare_output_root", side_effect=prepare_then_rebind):
+                    self._run_isolated_collector(project, output, capture)
+                self.assertEqual([True], injected)
+                self.assertTrue(all(item == before for item in observed))
+                self.assertEqual(before, self._tree_identity(document_root))
+                self.assertEqual([], list(private.glob("ztp-diagnostics-*.tar.gz")))
+            finally:
+                if output.is_symlink():
+                    output.unlink()
+                if parked.exists():
+                    parked.rename(output)
+
+    def test_staging_parent_rebind_never_writes_document_root(self):
+        with tempfile.TemporaryDirectory(prefix="diagnostic-stage-rebind-") as temp:
+            base = Path(temp)
+            document_root, private, project = self._fixture(base)
+            before = self._tree_identity(document_root)
+            output = base / "output"
+            parked = base / "original-staging-parent"
+            switched_parent = []
+            observed = []
+
+            def capture(builder, _project):
+                stage = Path(builder.staging)
+                parent = stage.parent
+                parent.rename(parked)
+                parent.symlink_to(private, target_is_directory=True)
+                switched_parent.append(parent)
+                try:
+                    builder.write("server/probe.txt", b"synthetic-probe\n", source="fixture")
+                finally:
+                    observed.append(self._tree_identity(document_root))
+
+            try:
+                with mock.patch.object(COLLECTOR, "HTTP_ROOT", document_root):
+                    self._run_isolated_collector(project, output, capture)
+                self.assertEqual(1, len(switched_parent))
+                self.assertTrue(all(item == before for item in observed))
+                self.assertEqual(before, self._tree_identity(document_root))
+                self.assertEqual([], list(private.glob("ztp-diagnostics-*.tar.gz")))
+            finally:
+                if switched_parent and switched_parent[0].is_symlink():
+                    switched_parent[0].unlink()
+                if switched_parent and parked.exists() and not switched_parent[0].exists():
+                    parked.rename(switched_parent[0])
+
+    def test_final_archive_publication_never_overwrites_raced_name(self):
+        with tempfile.TemporaryDirectory(prefix="diagnostic-final-rebind-") as temp:
+            base = Path(temp)
+            document_root, private, project = self._fixture(base)
+            before = self._tree_identity(document_root)
+            output = base / "output"
+            sentinel = private / "sentinel.txt"
+            original_replace, original_link = os.replace, os.link
+            injected = []
+
+            def raced_destination(destination, *, dir_fd=None):
+                name = os.fspath(destination)
+                if not name.startswith("ztp-diagnostics-") and "/ztp-diagnostics-" not in name:
+                    return
+                if not name.endswith(".tar.gz") or injected:
+                    return
+                target = output / Path(name).name
+                target.symlink_to(sentinel)
+                injected.append(target)
+
+            def replace_with_race(source, destination, *args, **kwargs):
+                raced_destination(destination, dir_fd=kwargs.get("dst_dir_fd"))
+                return original_replace(source, destination, *args, **kwargs)
+
+            def link_with_race(source, destination, *args, **kwargs):
+                raced_destination(destination, dir_fd=kwargs.get("dst_dir_fd"))
+                return original_link(source, destination, *args, **kwargs)
+
+            def capture(builder, _project):
+                builder.write("server/probe.txt", b"synthetic-probe\n", source="fixture")
+
+            with mock.patch.object(COLLECTOR, "HTTP_ROOT", document_root), \
+                    mock.patch.object(COLLECTOR.os, "replace", side_effect=replace_with_race), \
+                    mock.patch.object(COLLECTOR.os, "link", side_effect=link_with_race):
+                rc = self._run_isolated_collector(project, output, capture)
+            self.assertEqual(1, len(injected), "final publish boundary was not exercised")
+            self.assertEqual(1, rc, "a raced final name must fail closed")
+            self.assertTrue(injected[0].is_symlink(), "existing final name was overwritten")
+            self.assertEqual(sentinel.resolve(), injected[0].resolve())
+            self.assertEqual(b"DO-NOT-CHANGE\n", sentinel.read_bytes())
+            self.assertEqual(before, self._tree_identity(document_root))
+            self.assertEqual([], list(output.glob(".ztp-diagnostics.*.tar.gz")))
+
+    def test_temporary_archive_replacement_at_verify_open_cannot_publish_foreign_tar(self):
+        with tempfile.TemporaryDirectory(prefix="diagnostic-temp-verify-swap-") as temp:
+            base = Path(temp)
+            document_root, private, project = self._fixture(base)
+            before = self._tree_identity(document_root)
+            output = base / "output"
+            sentinel = private / "sentinel.txt"
+            expected_member = b"synthetic-probe\n"
+            foreign_member = b"FOREIGN-UNREDACTED-ARCHIVE\n"
+            foreign_archive = []
+            original_open = os.open
+            injected = []
+            staged = []
+
+            def replace_at_verify_open(name, flags, *args, **kwargs):
+                directory_fd = kwargs.get("dir_fd")
+                if (
+                    not injected and isinstance(name, str)
+                    and name.startswith(".ztp-diagnostics.")
+                    and name.endswith(".tar.gz")
+                    and flags & os.O_ACCMODE == os.O_RDONLY
+                    and directory_fd is not None
+                ):
+                    self.assertEqual(output.stat().st_ino, os.fstat(directory_fd).st_ino)
+                    os.unlink(name, dir_fd=directory_fd)
+                    replacement_fd = original_open(
+                        name, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                        0o600, dir_fd=directory_fd,
+                    )
+                    with os.fdopen(replacement_fd, "wb") as replacement:
+                        replacement.write(foreign_archive[0])
+                        replacement.flush()
+                        os.fsync(replacement.fileno())
+                    injected.append(name)
+                return original_open(name, flags, *args, **kwargs)
+
+            def capture(builder, _project):
+                builder.write("server/probe.txt", expected_member, source="fixture")
+                staged.append(builder.entries[-1]["sha256"])
+                foreign_stream = io.BytesIO()
+                with tarfile.open(fileobj=foreign_stream, mode="w:gz") as archive:
+                    member = tarfile.TarInfo(
+                        f"{builder.artifact_id}/server/probe.txt"
+                    )
+                    member.size = len(foreign_member)
+                    archive.addfile(member, io.BytesIO(foreign_member))
+                foreign_archive.append(foreign_stream.getvalue())
+
+            with mock.patch.object(COLLECTOR, "HTTP_ROOT", document_root), \
+                    mock.patch.object(COLLECTOR.os, "open", side_effect=replace_at_verify_open):
+                rc = self._run_isolated_collector(project, output, capture)
+            self.assertEqual(1, len(injected), "temporary verify-open boundary was not exercised")
+            self.assertEqual(
+                [COLLECTOR.sha256_bytes(expected_member)], staged,
+                "the original staged member was not written with its expected identity",
+            )
+            self.assertEqual(before, self._tree_identity(document_root))
+            self.assertEqual(b"DO-NOT-CHANGE\n", sentinel.read_bytes())
+            self.assertEqual([], list(output.glob(".ztp-diagnostics.*.tar.gz")))
+            self.assertEqual(
+                (1, []),
+                (rc, list(output.glob("ztp-diagnostics-*.tar.gz"))),
+                "replacing the generated temporary archive must fail without publication",
+            )
+
+    def test_temporary_archive_replacement_at_link_leaves_no_final_symlink(self):
+        with tempfile.TemporaryDirectory(prefix="diagnostic-temp-link-swap-") as temp:
+            base = Path(temp)
+            document_root, private, project = self._fixture(base)
+            before = self._tree_identity(document_root)
+            output = base / "output"
+            sentinel = private / "sentinel.txt"
+            original_link = os.link
+            injected = []
+
+            def replace_at_link(source, destination, *args, **kwargs):
+                directory_fd = kwargs.get("src_dir_fd")
+                if (
+                    not injected and isinstance(source, str)
+                    and source.startswith(".ztp-diagnostics.")
+                    and source.endswith(".tar.gz")
+                    and directory_fd is not None
+                ):
+                    self.assertEqual(output.stat().st_ino, os.fstat(directory_fd).st_ino)
+                    os.unlink(source, dir_fd=directory_fd)
+                    os.symlink(str(sentinel), source, dir_fd=directory_fd)
+                    injected.append((source, destination))
+                return original_link(source, destination, *args, **kwargs)
+
+            def capture(builder, _project):
+                builder.write("server/probe.txt", b"synthetic-probe\n", source="fixture")
+
+            with mock.patch.object(COLLECTOR, "HTTP_ROOT", document_root), \
+                    mock.patch.object(COLLECTOR.os, "link", side_effect=replace_at_link):
+                rc = self._run_isolated_collector(project, output, capture)
+            self.assertEqual(1, len(injected), "temporary link boundary was not exercised")
+            self.assertEqual(1, rc, "a substituted temporary name must fail closed")
+            self.assertEqual(before, self._tree_identity(document_root))
+            self.assertEqual(b"DO-NOT-CHANGE\n", sentinel.read_bytes())
+            self.assertEqual([], list(output.glob(".ztp-diagnostics.*.tar.gz")))
+            self.assertEqual(
+                [], list(output.glob("ztp-diagnostics-*.tar.gz")),
+                "failed publication must not leave a newly linked final symlink",
+            )
 
 
 if __name__ == "__main__":

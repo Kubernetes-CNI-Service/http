@@ -16,6 +16,7 @@ common:
       status: enabled
       http_root: /var/www/html
       package: apache2
+      port: 80
     ztp:
       status: enabled
       ztp_url_prefix: /ztp

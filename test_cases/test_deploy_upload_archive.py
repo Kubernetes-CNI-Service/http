@@ -10,6 +10,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import stat
 import subprocess
@@ -114,6 +115,22 @@ class RelayArchiveInstallerTests(unittest.TestCase):
     def setUp(self):
         self.installer = load_installer()
 
+    def test_native_installer_next_command_declares_server_role(self):
+        result = self.installer.DeployResult(
+            "customer", "native", "native", 0, "a" * 64, "b" * 64,
+            b"", b"",
+        )
+        commands = self.installer.next_commands(result, Path("/var/www/html"))
+        self.assertEqual("cd /var/www/html", commands[0])
+        requested = shlex.split(commands[1])
+        self.assertEqual(
+            ["sudo", "python3", "DAY0-Prepare/11-load.py", "DAY0-Prepare/customer"],
+            requested[:4],
+        )
+        self.assertEqual(
+            ["--host-role=management-server"], requested[4:],
+        )
+
     def _load_verified_guard(self, archive: Path, base: Path, module_name: str):
         verified = self.installer.verify_inputs(
             archive, INSTALLER_PATH, required_uid=os.getuid(),
@@ -144,6 +161,25 @@ class RelayArchiveInstallerTests(unittest.TestCase):
         self.assertNotIn("--archive-sha256", help_text)
         self.assertNotIn("--force", help_text)
         self.assertNotIn("--skip-verify", help_text)
+
+    def test_public_cli_options_explain_their_effects(self):
+        parser = self.installer.parser()
+        actions = {
+            option: action
+            for action in parser._actions
+            for option in action.option_strings
+        }
+        archive = next(action for action in parser._actions if action.dest == "archive")
+        self.assertIn("upload archive", archive.help or "")
+        expected = {
+            "--root": "installation root",
+            "--runtime": "runtime",
+            "--verify-only": "without installing",
+        }
+        for option, phrase in expected.items():
+            with self.subTest(option=option):
+                self.assertIn(option, actions)
+                self.assertIn(phrase, actions[option].help or "")
 
     def test_archive_and_installer_are_hash_bound_before_guard(self):
         installer_bytes = INSTALLER_PATH.read_bytes()
@@ -1369,6 +1405,10 @@ class RelayArchiveInstallerTests(unittest.TestCase):
         fixture = materialized_public_project(ROOT)
         project = fixture.__enter__()
         self.addCleanup(fixture.__exit__, None, None, None)
+        selected_p2p = project / "p2p.xlsx"
+        selected_p2p.symlink_to("public-p2p.xlsx")
+        self.assertEqual("public-p2p.xlsx", os.readlink(selected_p2p))
+        self.assertEqual(project / "public-p2p.xlsx", selected_p2p.resolve(strict=True))
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory).resolve()
             built = base / "built-upload.tar.gz"
@@ -1381,6 +1421,14 @@ class RelayArchiveInstallerTests(unittest.TestCase):
             package.create_package(
                 args, day0_all=False, artifact_kind="upload",
             )
+            with tarfile.open(built, "r:gz") as upload:
+                names = {item.name.removeprefix("./") for item in upload.getmembers()}
+            for setup_bridge in (
+                "infiniband/bringup/xdr-initial-setup/01-global.yaml",
+                "infiniband/bringup/xdr-initial-setup/publickey",
+            ):
+                with self.subTest(setup_bridge=setup_bridge):
+                    self.assertNotIn(setup_bridge, names)
 
             relayed = base / "relayed-upload.tar.gz"
             installer_copy = base / "deploy-upload-archive.py"

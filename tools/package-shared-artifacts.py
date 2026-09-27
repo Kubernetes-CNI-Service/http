@@ -125,12 +125,16 @@ def parser() -> argparse.ArgumentParser:
         ),
         allow_abbrev=False,
     )
-    result.add_argument("project", metavar="PROJECT")
+    result.add_argument(
+        "project", metavar="PROJECT", help="DAY0 project whose artifacts are packaged",
+    )
     result.add_argument(
         "--deployment-scope", choices=("all", "prod", "air"), default="all",
+        help="Target deployment environment: all, prod, or air (default: all)",
     )
     result.add_argument(
         "--switch", dest="switch_scope", choices=("all", "eth", "ib", "nvl"),
+        help="Limit the switch family included in the artifact bundle",
     )
     result.add_argument(
         "--mini", nargs="?", const=DEFAULT_MINI, metavar="DEVICES.txt",
@@ -149,7 +153,10 @@ def parser() -> argparse.ArgumentParser:
         "--firmware", action="append", default=[], type=Path, metavar="FILE",
         help="explicit file below firmware/ to include; repeat as needed",
     )
-    result.add_argument("--output", type=Path, metavar="DIRECTORY")
+    result.add_argument(
+        "--output", type=Path, metavar="DIRECTORY",
+        help="Explicit archive output directory",
+    )
     return result
 
 

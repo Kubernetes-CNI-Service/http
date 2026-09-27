@@ -27,6 +27,8 @@ import time
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
+import yaml
+
 
 HERE = Path(__file__).resolve().parent
 HTTP_ROOT = HERE.parent
@@ -53,6 +55,7 @@ from ztp_service_runtime import (  # noqa: E402
     runtime_backend_from_environment,
     write_monitor_pid_record_locked,
 )
+from project_contract import safe_load_global_yaml
 
 
 ZTP_STATUS_DIR = HTTP_ROOT / "ztp" / "status"
@@ -407,7 +410,7 @@ def read_devices(
         identity_macs = ({"eth0": eth0_mac_plain} if eth0_mac_plain else {})
         if device_type in {"ib", "nvl"} and eth1_mac_plain:
             identity_macs["eth1"] = eth1_mac_plain
-        if not hostname or device_type == "server":
+        if not hostname or device_type in {"server", "eth_jump"}:
             continue
         alternate_ssh_ips: list[str] = []
         alternate_ssh_interfaces: dict[str, str] = {}
@@ -3470,20 +3473,30 @@ def _latest_dhcp_cycle_marker(device: dict[str, Any]) -> str:
     return max(candidates, default="")
 
 
+def _timestamp_replaces(left: str, right: str, equal_is_newer: bool) -> bool:
+    """Order two event times, failing closed on anything unparseable.
+
+    A value that does not resolve to an absolute instant carries no ordering
+    information, so it never wins: an unusable ``left`` loses to everything and
+    a usable ``left`` outranks an unusable ``right``.  Comparing the raw strings
+    instead would rank them lexicographically, letting junk such as "zzz" beat a
+    real timestamp because "z" sorts above "2".
+    """
+    left_time = _aware_event_time(left)
+    if left_time is None:
+        return False
+    right_time = _aware_event_time(right)
+    if right_time is None:
+        return True
+    return left_time >= right_time if equal_is_newer else left_time > right_time
+
+
 def _timestamp_after(left: str, right: str) -> bool:
-    try:
-        return dt.datetime.fromisoformat(left) > dt.datetime.fromisoformat(right)
-    except (TypeError, ValueError):
-        return bool(left and right and left > right)
+    return _timestamp_replaces(left, right, equal_is_newer=False)
 
 
 def _timestamp_at_or_after(left: str, right: str) -> bool:
-    if not right:
-        return bool(left)
-    try:
-        return dt.datetime.fromisoformat(left) >= dt.datetime.fromisoformat(right)
-    except (TypeError, ValueError):
-        return bool(left and left >= right)
+    return _timestamp_replaces(left, right, equal_is_newer=True)
 
 
 def _timestamp_near_boundary(left: str, boundary: str, seconds: int = 30) -> bool:
@@ -3594,7 +3607,19 @@ def latest_manual_trigger_markers(output_root: Path) -> dict[str, dict[str, Any]
                     )
             except OSError:
                 command_log_sha256, command_log_complete = "", False
-        if not hostname or not marker:
+        if not hostname:
+            continue
+        if _aware_event_time(marker) is None:
+            # An unparseable marker carries no ordering information, so it must
+            # not enter ``markers`` at all -- once stored it becomes the
+            # baseline every later observation is compared against.  Report it
+            # rather than dropping it silently: an operator cannot tell a
+            # discarded result.json from a switch that never triggered.
+            log(
+                f"[WARN] 手工触发 result.json 的时间戳无法解析，已跳过该结果："
+                f"{hostname} finished_at={marker!r} ({path})",
+                file=sys.stderr,
+            )
             continue
         previous = markers.get(hostname, {})
         if not previous or _timestamp_after(marker, previous.get("timestamp", "")):
@@ -3751,15 +3776,21 @@ def assign_ztp_rounds(
             new_cycle = False
             boot_cycle = False
             dhcp_cycle = False
+        repair_same_manual_marker = bool(
+            same_manual_trigger and not new_cycle and not promotion_started
+            and previous_manual_marker
+            and _aware_event_time(previous_manual_marker) is None
+            and _aware_event_time(manual_marker) is not None
+        )
         device["ztp_round"] = 1 if reset_cycle else (
             previous_round + 1 if new_cycle else previous_round
         )
         device["cycle_marker"] = marker or previous_marker
-        # Do not consume a marker that was not accepted as a new cycle.  This
-        # matters when a monitor snapshot lands between operation start and
-        # successful remote-command return.
+        # Do not consume an unaccepted marker as a new cycle.  A valid result
+        # for the same trigger may only repair a malformed persisted marker.
         device["manual_cycle_marker"] = (
-            manual_marker if manual_cycle else previous_manual_marker
+            manual_marker if manual_cycle or repair_same_manual_marker
+            else previous_manual_marker
         )
         if manual_cycle:
             device["cycle_started_at"] = manual_marker
@@ -3794,17 +3825,23 @@ def assign_ztp_rounds(
             device["manual_command_ztp_log_sha256"] = ""
             device["manual_command_ztp_complete"] = False
         else:
-            device["cycle_started_at"] = str(previous.get("cycle_started_at") or "")
+            device["cycle_started_at"] = (
+                manual_marker if repair_same_manual_marker
+                else str(previous.get("cycle_started_at") or "")
+            )
             device["trigger_source"] = previous_source
             device["trigger_id"] = previous_trigger_id
             device["manual_operation"] = previous_operation
             accepted_marker_reloaded = bool(
-                manual_marker
-                and manual_marker == previous_manual_marker
-                and (
-                    not manual_trigger_id
-                    or not previous_trigger_id
-                    or manual_trigger_id == previous_trigger_id
+                repair_same_manual_marker
+                or (
+                    manual_marker
+                    and manual_marker == previous_manual_marker
+                    and (
+                        not manual_trigger_id
+                        or not previous_trigger_id
+                        or manual_trigger_id == previous_trigger_id
+                    )
                 )
             )
             device["manual_command_started_at"] = (
@@ -5208,15 +5245,62 @@ def load_release_identity(project: Path) -> dict[str, str]:
         payload = json.loads(text)
     except json.JSONDecodeError as exc:
         raise ValueError(f"current release JSON 无效: {path}: {exc}") from exc
-    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+    if (
+        not isinstance(payload, dict)
+        or type(payload.get("schema_version")) is not int
+        or payload.get("schema_version") not in {1, 2}
+    ):
         raise ValueError(f"current release schema 无效: {path}")
-    release_id = str(payload.get("release_id") or "")
-    generated_at = str(payload.get("generated_at") or "")
     if payload.get("project") != project.name:
         raise ValueError(
             f"current release 项目身份不匹配: expected={project.name}, "
             f"actual={payload.get('project')!r}"
         )
+    schema = payload["schema_version"]
+    components = payload.get("components")
+    inputs = payload.get("inputs")
+    if not isinstance(components, dict) or not isinstance(inputs, dict):
+        raise ValueError(f"current release components/inputs 无效: {path}")
+    if schema == 1:
+        if "dhcp_status" in payload:
+            raise ValueError(f"current release legacy v1 不允许 dhcp_status: {path}")
+        dhcp_status = "enabled"
+    else:
+        dhcp_status = payload.get("dhcp_status")
+        if dhcp_status not in {"enabled", "disabled"}:
+            raise ValueError(f"current release DHCP status 无效: {path}")
+    if dhcp_status == "enabled" and not isinstance(components.get("dhcp"), dict):
+        raise ValueError(f"current release enabled 缺少 DHCP component: {path}")
+    if dhcp_status == "disabled" and "dhcp" in components:
+        raise ValueError(f"current release disabled 不允许 DHCP component: {path}")
+    basis_keys = (
+        "project", "deployment_scope", "switch_scope", "inputs",
+        "input_sources", "components", "inventory",
+    )
+    if schema == 2:
+        basis_keys += ("dhcp_status",)
+    if any(key not in payload for key in basis_keys):
+        raise ValueError(f"current release canonical basis 不完整: {path}")
+    expected_id = hashlib.sha256(json.dumps(
+        {key: payload[key] for key in basis_keys},
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()[:20]
+    if payload.get("release_id") != expected_id:
+        raise ValueError(f"current release canonical release_id 无效: {path}")
+    global_text = _read_bounded_regular_text(
+        project / "01-global.yaml", label="current global YAML",
+    )
+    if inputs.get("global") != hashlib.sha256(global_text.encode("utf-8")).hexdigest():
+        raise ValueError(f"current release global 输入 SHA-256 漂移: {path}")
+    try:
+        global_document = safe_load_global_yaml(global_text)
+        actual_status = global_document["common"]["mgmt"]["dhcp-server"]["status"]
+    except (KeyError, TypeError, ValueError, yaml.YAMLError) as exc:
+        raise ValueError(f"current global DHCP status 无效: {exc}") from exc
+    if str(actual_status or "").strip().casefold() != dhcp_status:
+        raise ValueError(f"current global DHCP status 与 release 模式不一致: {path}")
+    release_id = str(payload.get("release_id") or "")
+    generated_at = str(payload.get("generated_at") or "")
     if payload.get("validation") != "passed" or not re.fullmatch(
         r"[0-9a-f]{20}", release_id,
     ):
@@ -5355,7 +5439,7 @@ def parser() -> argparse.ArgumentParser:
         "--offline", action="store_true",
         help="仅用显式本地证据做一次性分析；不读取 active runtime 或连接设备",
     )
-    result.add_argument("--apache-log", type=Path)
+    result.add_argument("--apache-log", type=Path, help="从指定文件读取 Apache 访问日志（测试/离线分析）")
     result.add_argument("--dhcp-log", type=Path, help="从指定文件读取 DHCP 日志（测试/离线分析）")
     result.add_argument(
         "--dhcp-leases", type=Path,
@@ -5366,7 +5450,7 @@ def parser() -> argparse.ArgumentParser:
         help="离线分析使用的显式 AIR inventory JSON",
     )
     result.add_argument("--no-ssh", action="store_true", help="只分析管理服务器日志，不连接交换机")
-    result.add_argument("--ssh-timeout", type=int, default=8)
+    result.add_argument("--ssh-timeout", type=int, default=8, help="单次 SSH 连接超时秒数（默认 8）")
     result.add_argument("--jobs", type=int, default=12, help="并发 SSH 数（默认 12）")
     environment = result.add_mutually_exclusive_group()
     environment.add_argument(
@@ -5387,7 +5471,7 @@ def parser() -> argparse.ArgumentParser:
     )
     result.set_defaults(scope="all")
     result.add_argument("--identity", type=Path, help="SSH 私钥路径")
-    result.add_argument("--known-hosts", type=Path, default=Path.home() / ".ssh" / "known_hosts")
+    result.add_argument("--known-hosts", type=Path, default=Path.home() / ".ssh" / "known_hosts", help="SSH 已知主机文件（默认 ~/.ssh/known_hosts）")
     result.add_argument(
         "--generate-html", action="store_true",
         help="每轮 ZTP 报告完成后运行 generate-monitor-html.py 刷新 monitor.html",

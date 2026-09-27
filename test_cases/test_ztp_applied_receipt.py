@@ -171,18 +171,22 @@ def run_cumulus_mode_bootstrap(
         '        install_time_sync_helper "${USER_NAME}"\n',
         '        : # helper installation covered separately\n', 1,
     )
-    source = re.sub(
+    source, network_replacements = re.subn(
         r'if ! select_ztp_network_path; then\n.*?\nfi\n\n'
-        r'if ! check_network "\$\{ZTP_SERVER##\*/\}"; then\n.*?\nfi',
+        r'if ! check_network "\$\{ZTP_SERVER_HOST\}"; then\n.*?\nfi',
         'ZTP_VRF="default"\nZTP_INTERFACE="eth0"',
         source, count=1, flags=re.S,
     )
-    source = re.sub(
+    if network_replacements != 1:
+        raise AssertionError("bootstrap network harness no longer matches the real entrypoint")
+    source, clock_replacements = re.subn(
         r'if ! sync_management_clock_for_ztp; then\n.*?\nfi\n'
         r'log "\[ZTP\] Network check passed after management-server time sync:.*?"',
         'log "[ZTP] Network/time prerequisites mocked for mode-sidecar test"',
         source, count=1, flags=re.S,
     )
+    if clock_replacements != 1:
+        raise AssertionError("bootstrap clock harness no longer matches the real entrypoint")
     script = root / "bootstrap.sh"
     script.write_text(source, encoding="utf-8")
     script.chmod(0o755)
@@ -1024,21 +1028,23 @@ class PrefetchBeforeApplyTests(unittest.TestCase):
                 '        : # helper installation is covered by static contract tests\n',
                 1,
             )
-            source = re.sub(
+            source, network_replacements = re.subn(
                 r'if ! select_ztp_network_path; then\n.*?\nfi\n\n'
-                r'if ! check_network "\$\{ZTP_SERVER##\*/\}"; then\n.*?\nfi',
+                r'if ! check_network "\$\{ZTP_SERVER_HOST\}"; then\n.*?\nfi',
                 'ZTP_VRF="default"\nZTP_INTERFACE="eth0"',
                 source, count=1, flags=re.S,
             )
+            self.assertEqual(1, network_replacements)
             # This test exercises prefetch/fallback ordering, not the independent
             # management-server clock gate.  Keep it hermetic: setting the host
             # clock is neither permitted nor meaningful in the test process.
-            source = re.sub(
+            source, clock_replacements = re.subn(
                 r'if ! sync_management_clock_for_ztp; then\n.*?\nfi\n'
                 r'log "\[ZTP\] Network check passed after management-server time sync:.*?"',
                 'log "[ZTP] Network/time prerequisites mocked for prefetch test"',
                 source, count=1, flags=re.S,
             )
+            self.assertEqual(1, clock_replacements)
             script = root / "bootstrap.sh"
             script.write_text(source, encoding="utf-8")
             script.chmod(0o755)

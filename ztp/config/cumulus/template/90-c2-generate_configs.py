@@ -55,7 +55,10 @@ csv.field_size_limit(min(sys.maxsize, 2**31 - 1))
 # ── Common constants ──────────────────────────────────────────────────────────
 
 _AUTO_YES = False  # 由 -y 参数设置
-_EXCLUDED_CONFIG_TYPES = frozenset({"air"})
+# The downstream branch whitelists already keep these rows from rendering.
+# This explicit set is a future-proofing/counting signal: if a later whitelist
+# widens, these types must remain deliberately configuration-inert.
+_EXCLUDED_CONFIG_TYPES = frozenset({"air", "eth_jump"})
 _SAFE_HOSTNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")
 _SAFE_AAA_USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 _MAC_SCALAR_RE = re.compile(r"^(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
@@ -141,7 +144,7 @@ def generation_parser(branch):
         epilog="完整、受支持的操作流程见仓库根目录 USER_MANUAL.md。",
         allow_abbrev=False,
     )
-    parser.add_argument("-y", action="store_true", dest="auto_yes")
+    parser.add_argument("-y", action="store_true", dest="auto_yes", help="自动确认受支持的交互提示")
     parser.add_argument(
         "--deployment-scope", choices=("all", "prod", "air"), default="all",
         help="生成范围；all=Production+AIR，prod=Production，air=AIR",
@@ -152,12 +155,13 @@ def generation_parser(branch):
         help="只生成指定设备族；ETH 分支仅接受 eth，NVOS 分支接受 ib 或 nvl",
     )
     if branch == "eth":
-        parser.add_argument("--csv", dest="csv_file")
-        parser.add_argument("--verify", action="store_true")
-        parser.add_argument("--fail-on-diff", action="store_true")
+        parser.add_argument("--csv", dest="csv_file", help="读取指定设备 CSV，而非项目默认文件")
+        parser.add_argument("--verify", action="store_true", help="校验生成结果与参考配置的差异")
+        parser.add_argument("--fail-on-diff", action="store_true", help="校验发现配置差异时返回失败")
         parser.add_argument(
             "--ref-dir", action="append", dest="ref_dirs",
             type=_reference_directory,
+            help="参考配置目录；可重复指定多个目录",
         )
         parser.add_argument(
             "--skip-descriptions", action="store_true",
@@ -2603,467 +2607,8 @@ def _apply_v2_mlag_attributes(devices_data, mlag_global, policy):
 
 # ── ETH: csv_to_yaml main function ───────────────────────────────────────────
 
-def _generate_devices_yaml():
-    """Read 02-devices_config.csv + 01-global.yaml and write 91-devices.yaml."""
-    _tmpl_map = _load_devices_template(_CSV_FILE)
-    global_data = load_global()  # handles merged format extraction
-    schema_version = global_data.get("_project_schema_version", 1)
-    native_svi_link_mac = _cumulus_uses_native_svi_link_mac(
-        global_data.get("version"),
-    )
-    v2_vrr_policy = None
-    v2_mlag_policy = None
-    if schema_version == 2:
-        try:
-            v2_vrr_policy = _normalize_v2_vrr_policy(global_data)
-            v2_mlag_policy = normalize_v2_mlag_policy(global_data)
-        except ValueError as exc:
-            print(f"[ERROR] 01-global.yaml schema v2 配置无效：{exc}")
-            sys.exit(1)
-    try:
-        _refresh_cumulus_defaults_from_global()
-    except (OSError, ValueError, yaml.YAMLError) as exc:
-        print(f"[ERROR] Cumulus 默认配置同步失败：{exc}")
-        sys.exit(1)
-    try:
-        dhcp_server_catalog = _normalize_dhcp_server_groups(global_data)
-    except ValueError as exc:
-        print(f"[ERROR] 01-global.yaml DHCP relay 配置无效：{exc}")
-        sys.exit(1)
-    try:
-        global_data["vrl_render"] = _normalize_vrl_config(global_data)
-    except ValueError as exc:
-        print(f"[ERROR] 01-global.yaml VRF route-leaking 配置无效：{exc}")
-        sys.exit(1)
-
-    devices_data = {}
-    _dup_errs = []
-    _port_errors = []
-    _mac_map = {}   # eth0_mac → [hostname, ...]（CSV col 5，解析时收集）
-    _hostname_owners = {}
-    _source_lines = {}
-
-    try:
-        _csv_f = open(_CSV_FILE, newline="", encoding="utf-8")
-    except FileNotFoundError:
-        print(f"[ERROR] 找不到配置文件: {_CSV_FILE}"); sys.exit(1)
-
-    skipped_excluded = 0
-    with _csv_f as f:
-        reader   = csv.reader(f)
-        header   = next(reader, [])
-        h_lower  = [c.strip().lower() for c in header]
-        try:
-            _layout = parse_device_csv_layout(h_lower, schema_version)
-        except ValueError as exc:
-            print(f"[ERROR] {_CSV_FILE} 列结构无效：{exc}")
-            sys.exit(1)
-        _type_col = h_lower.index("type") if "type" in h_lower else None
-
-        _source_yaml_col = h_lower.index(_SOURCE_YAML_COL) if _SOURCE_YAML_COL in h_lower else None
-        _source_sha256_col = h_lower.index(_SOURCE_SHA256_COL) if _SOURCE_SHA256_COL in h_lower else None
-        _source_fields_sha256_col = (h_lower.index(_SOURCE_FIELDS_SHA256_COL)
-                                     if _SOURCE_FIELDS_SHA256_COL in h_lower else None)
-        _metadata_positions = [i for i in (
-            _source_yaml_col, _source_sha256_col, _source_fields_sha256_col
-        ) if i is not None]
-        _fixed = _layout.fixed_indices
-        _vrl_col = _fixed.get("vrl")
-        _evpn_width = len(
-            _EVPN_V2_COLUMNS if schema_version == 2 else _EVPN_COLUMNS
-        )
-        _evpn_group_count = len(_layout.evpn_group_starts)
-        _evpn_base = (
-            _layout.evpn_group_starts[0]
-            if _layout.evpn_group_starts
-            else _layout.fixed_start + len(_layout.fixed_columns)
-        )
-        _evpn_end = _layout.metadata_start
-
-        def _row_type(row):
-            if _type_col is not None and len(row) > _type_col:
-                return row[_type_col].strip().lower()
-            return "ib" if row[0].strip().lower().startswith("ib") else "eth"
-
-        for lineno, raw in enumerate(reader, start=2):
-            row = [c.strip() for c in raw]
-            if not any(row):
-                continue
-            try:
-                require_device_csv_row_width(
-                    raw, len(header), schema_version, lineno=lineno,
-                )
-            except ValueError as exc:
-                _dup_errs.append(f"  {exc}")
-                continue
-            if len(row) < len(header):
-                row.extend([""] * (len(header) - len(row)))
-            row.extend([""] * 47)
-            row_type = _row_type(row)
-            if _exclude_config_type(row_type):
-                skipped_excluded += 1
-                continue
-            if row_type not in ("eth", "eth_spx", "spx"):
-                continue
-            hostname = row[0]; csv_template = row[2]
-            if not hostname:
-                if not csv_template:
-                    continue
-                _dup_errs.append(f"  行缺少必填字段: hostname={hostname!r}")
-                continue
-            if not _SAFE_HOSTNAME_RE.fullmatch(hostname):
-                _dup_errs.append(
-                    f"  hostname 含不安全字符，不能作为 YAML 文件名: {hostname!r}"
-                )
-                continue
-            hostname_key = hostname.casefold()
-            if hostname_key in _hostname_owners:
-                _dup_errs.append(f"  重复 hostname: {hostname!r}"); continue
-            _hostname_owners[hostname_key] = hostname
-
-            csv_has   = csv_template and not _csv_na(csv_template)
-            mapped    = _tmpl_map.get(hostname.lower())
-            tmpl_has  = bool(mapped)
-
-            template = _select_device_template(csv_template, mapped)
-            if (csv_has and tmpl_has and
-                    csv_template.strip().lower() != mapped.strip().lower()):
-                print(
-                    f"  [INFO] {hostname}: devices_config.csv 模板 {csv_template!r} "
-                    f"覆盖 devices_template 默认值 {mapped!r}"
-                )
-
-            if not template:
-                _dup_errs.append(
-                    f"  {hostname}: type={row_type} 必须在 devices_config.csv "
-                    "或 devices_template 中显式指定模板，已禁止按 hostname 自动猜测"
-                )
-                continue
-
-            if template:
-                resolved_tmpl_file, is_exact = _best_template(template, hostname)
-                if not is_exact:
-                    _dup_errs.append(
-                        f"  {hostname}: 指定模板 '{template}.yaml.j2' 不存在"
-                        + (f"（最接近: {resolved_tmpl_file[:-len('.yaml.j2')]}）" if resolved_tmpl_file else "")
-                    )
-                    continue
-            else:
-                resolved_tmpl_file, is_exact = _best_template(hostname, hostname)
-                if not resolved_tmpl_file:
-                    _dup_errs.append(
-                        f"  {hostname}: 无法确定模板（devices_config.csv 和 devices_template 均未指定，"
-                        f"且 hostname 无法匹配任何模板）"
-                    )
-                    continue
-                if not is_exact:
-                    print(f"  [INFO] {hostname}: 自动匹配模板 "
-                          f"'{resolved_tmpl_file[:-len('.yaml.j2')]}'（未在 CSV/devices_template 中指定）")
-            template = resolved_tmpl_file[: -len(".yaml.j2")]
-            # vrfs 表示非 default/mgmt 的业务 VRF。没有业务 VRF 的设备也保持
-            # 稳定的空列表数据结构，供模板安全遍历。
-            dev = {
-                "template": template,
-                "hostname": hostname,
-                "vrfs": [],
-                "_project_schema_version": schema_version,
-            }
-            _source_lines[hostname] = lineno
-            try:
-                dev["vrl"] = _csv_vrl_enabled(
-                    row[_vrl_col] if _vrl_col is not None else ""
-                )
-            except ValueError as exc:
-                _dup_errs.append(f"  {hostname}: {exc}")
-                continue
-            if _source_yaml_col is not None and not _csv_na(row[_source_yaml_col]):
-                source_sha256 = (row[_source_sha256_col]
-                                  if _source_sha256_col is not None else "")
-                source_fields_sha256 = (row[_source_fields_sha256_col]
-                                         if _source_fields_sha256_col is not None else "")
-                actual_fields_sha256 = hashlib.sha256(json.dumps(
-                    row[:_evpn_end], ensure_ascii=False, separators=(",", ":")
-                ).encode("utf-8")).hexdigest()
-                if (not re.fullmatch(r"[0-9a-fA-F]{64}", source_fields_sha256)
-                        or source_fields_sha256.lower() != actual_fields_sha256):
-                    _dup_errs.append(
-                        f"  {hostname}: CSV 可编辑字段已变化或 source_fields_sha256 无效；"
-                        f"若要改用模板生成，请删除该行的 source_yaml_* 元数据"
-                    )
-                    continue
-                try:
-                    _decode_source_yaml(row[_source_yaml_col], source_sha256)
-                except ValueError as exc:
-                    _dup_errs.append(f"  {hostname}: {exc}")
-                    continue
-                dev["source_yaml_b64"] = row[_source_yaml_col]
-                dev["source_yaml_sha256"] = source_sha256.lower()
-                dev["source_fields_sha256"] = source_fields_sha256.lower()
-                devices_data[hostname] = dev
-                continue
-            dev["eth0_ip"]  = _csv_combine_ip(row[3], row[4])
-            dev["eth0_gw"]  = row[5]
-            eth0_mac_raw = row[6]
-            if eth0_mac_raw and eth0_mac_raw.upper() != "NA":
-                _mac_map.setdefault(eth0_mac_raw.lower(), []).append(hostname)
-            eth1_valid = (not _csv_na(row[7]) and not _csv_na(row[8])
-                          and not _csv_na(row[9]))
-            dev["has_eth1"] = eth1_valid
-            if eth1_valid:
-                dev["eth1_ip"] = _csv_combine_ip(row[7], row[8])
-                dev["eth1_gw"] = row[9]
-            eth1_mac_raw = row[10] if not _csv_na(row[10]) else ""
-            if eth1_mac_raw:
-                _mac_map.setdefault(eth1_mac_raw.lower(), []).append(hostname)
-            lo_ip = row[11]
-            if _csv_na(lo_ip):
-                dev["lo_ip"] = lo_ip
-            elif "/" not in lo_ip:
-                dev["lo_ip"] = f"{lo_ip}/32"
-            else:
-                ip_part = lo_ip.split("/")[0]
-                dev["lo_ip"] = lo_ip if not _csv_na(ip_part) else ip_part
-            ordinary_groups = []
-            if schema_version == 2:
-                invalid_ordinary = False
-                for group_index, start in enumerate(
-                        _layout.vlan_group_starts, start=1):
-                    try:
-                        ordinary = _csv_parse_v2_vlan_group(
-                            row[start:start + 4]
-                        )
-                    except ValueError as exc:
-                        _dup_errs.append(
-                            f"  {hostname}: 普通 VLAN 组 {group_index}: {exc}"
-                        )
-                        invalid_ordinary = True
-                        continue
-                    if ordinary is not None:
-                        ordinary["_csv_source"] = {
-                            "line": lineno,
-                            "group": f"普通 VLAN 组 {group_index}",
-                        }
-                        ordinary_groups.append(ordinary)
-                if invalid_ordinary:
-                    continue
-            elif template in _SIMPLE_TEMPLATES:
-                if not _csv_na(row[13]):
-                    try:
-                        vlan_id, vlan_spec, vlan_ids = _csv_parse_vlan_selector(row[13])
-                    except ValueError as exc:
-                        _dup_errs.append(f"  {hostname}: vlan_id: {exc}")
-                        continue
-                    dev["vlan_id"] = vlan_id
-                    dev["vlan_spec"] = vlan_spec
-                    dev["vlan_ids"] = vlan_ids
-                dev["svi_ip"]  = _csv_combine_ip(row[14], row[15]) if not _csv_na(row[14]) else ""
-                dev["vrr_ip"]  = _csv_combine_ip(row[16], row[15]) if not _csv_na(row[16]) else ""
-                dev["vrr_mac"] = row[17].strip() if not _csv_na(row[17]) else ""
-                if len(dev.get("vlan_ids", [])) > 1 and any((
-                        dev["svi_ip"], dev["vrr_ip"], dev["vrr_mac"])):
-                    _dup_errs.append(
-                        f"{hostname}: vlan_id={dev['vlan_spec']} 是 VLAN 范围，不能同时指定单值 "
-                        "svi_ip/vrr_ip/vrr_mac"
-                    )
-                    continue
-                if dev["vrr_ip"] and not dev["vrr_mac"]:
-                    _dup_errs.append(
-                        f"  {hostname}: vlan_id={dev.get('vlan_spec') or dev.get('vlan_id')} "
-                        "的 vrr_ip 出现时必须同时指定 vrr_mac"
-                    )
-                    continue
-                if dev["vrr_mac"] and not (dev["vrr_ip"] or dev["svi_ip"]):
-                    _dup_errs.append(
-                        f"  {hostname}: vlan_id={dev.get('vlan_spec') or dev.get('vlan_id')} "
-                        "的 vrr_mac 必须与 svi_ip 或 vrr_ip 一起使用"
-                    )
-                    continue
-                if (dev["svi_ip"] and dev["vrr_ip"] and
-                        dev["svi_ip"].split("/", 1)[0] == dev["vrr_ip"].split("/", 1)[0]):
-                    _dup_errs.append(
-                        f"  {hostname}: vlan_id={dev.get('vlan_spec') or dev.get('vlan_id')} "
-                        "的 svi_ip 与 vrr_ip 不能相同"
-                    )
-                    continue
-                vp = row[18]
-                dev.setdefault("vlan_ports", [])
-                if not _csv_na(vp) and "bond" not in vp.lower():
-                    dev["vlan_ports"] = _csv_expand_ports(vp)
-                elif not _csv_na(vp):
-                    dev["legacy_vlan_bonds"] = _csv_expand_prefixed(
-                        vp, "bond", f"{hostname}.vlan_ports", _port_errors
-                    )
-            dev["bgp_asn"] = (
-                _csv_to_int(row[_fixed["bgp_asn"]])
-                if not _csv_na(row[_fixed["bgp_asn"]]) else None
-            )
-            if not _csv_na(row[_fixed["bgp_ports"]]):
-                dev["bgp_neighbors"] = _csv_expand_ports(
-                    row[_fixed["bgp_ports"]],
-                    f"{hostname}.bgp_ports", _port_errors,
-                )
-            bond_groups = []
-            if (not _csv_na(row[_fixed["bond_ports"]])
-                    and not _csv_na(row[_fixed["bond_type"]])):
-                try:
-                    bond_groups = _csv_parse_bond_groups(
-                        row[_fixed["bond_ports"]], row[_fixed["bond_type"]],
-                        row[_fixed["bond_mac"]],
-                        f"{hostname}.bond_ports", _port_errors,
-                        schema_version=schema_version,
-                    )
-                except ValueError as exc:
-                    _dup_errs.append(f"  {hostname}: {exc}")
-                    continue
-            elif schema_version == 2 and _csv_na(row[_fixed["bond_ports"]]):
-                if not _csv_na(row[_fixed["bond_type"]]):
-                    print(
-                        f"[WARN] 行{lineno} [{hostname}] bond_type 已填写，"
-                        "但 bond_ports 为空"
-                    )
-                if not _csv_na(row[_fixed["bond_mac"]]):
-                    print(
-                        f"[WARN] 行{lineno} [{hostname}] bond_mac 已填写，"
-                        "但 bond_ports 为空"
-                    )
-            elif schema_version == 2 and any(not _csv_na(row[_fixed[name]]) for name in (
-                    "bond_ports", "bond_type", "bond_mac")):
-                _dup_errs.append(
-                    f"  {hostname}: bond_ports 与 bond_type 必须同时填写"
-                )
-                continue
-            if schema_version == 2:
-                try:
-                    _validate_template_bond_modes(
-                        template,
-                        {group["type"] for group in bond_groups},
-                        hostname=hostname,
-                        source_line=lineno,
-                    )
-                except ValueError as exc:
-                    _dup_errs.append(f"  {exc}")
-                    continue
-            if (schema_version == 2 or template in _SIMPLE_TEMPLATES) and bond_groups:
-                dev["bond_groups"] = bond_groups
-            if not _csv_na(row[_fixed["peerlink_ports"]]):
-                dev["peerlink_ports"] = row[_fixed["peerlink_ports"]].strip()
-            groups = _csv_collect_evpn_groups(
-                row, _evpn_group_count, hostname, _dup_errs,
-                base=_evpn_base, width=_evpn_width,
-                schema_version=schema_version, source_line=lineno,
-            )
-            if groups is None:
-                continue
-            if schema_version == 2:
-                groups = ordinary_groups + groups
-            if groups:
-                vrfs = _csv_build_vrfs_checked(
-                    groups, bond_groups, hostname, _dup_errs,
-                    schema_version=schema_version,
-                )
-                if vrfs is None:
-                    continue
-                dev["vrfs"] = vrfs
-            if (schema_version == 1 and template in _SIMPLE_TEMPLATES
-                    and dev.get("vrfs")):
-                first_l2 = dev["vrfs"][0].get("l2vlans", [])
-                if first_l2:
-                    l2 = first_l2[0]
-                    if "vlan_id" not in dev and l2.get("vlan_id") is not None:
-                        dev["vlan_id"] = l2["vlan_id"]
-                    if "vlan_spec" not in dev and l2.get("vlan_spec"):
-                        dev["vlan_spec"] = l2["vlan_spec"]
-                    if not dev.get("svi_ip") and l2.get("svi_ip"):
-                        dev["svi_ip"] = l2["svi_ip"]
-            devices_data[hostname] = dev
-
-    if skipped_excluded:
-        print(f"[INFO] 已忽略 {skipped_excluded} 行 type=air 设备，不生成配置")
-
-    # Same-named VRFs are a project-wide object: validate their explicit L3
-    # identifiers and fill omissions before resolving DHCP upstream interfaces.
-    _dup_errs.extend(_validate_and_inherit_project_vrfs(devices_data))
-    if not _dup_errs and schema_version == 2:
-        try:
-            _apply_v2_vrr_policy(devices_data, v2_vrr_policy)
-        except ValueError as exc:
-            print("[ERROR] 02-devices_config.csv 的 SVI/VRR 地址策略冲突：")
-            for line in str(exc).splitlines():
-                print(f"  {line}")
-            sys.exit(1)
-        try:
-            _assign_v2_border_default_routes(devices_data)
-        except ValueError as exc:
-            _dup_errs.append(f"  Border 默认路由推导失败：{exc}")
-    if not _dup_errs:
-        for hostname, dev in devices_data.items():
-            if dev.get("source_yaml_b64"):
-                continue
-            if dev.get("vrl"):
-                vrl_render = global_data["vrl_render"]
-                if not vrl_render["imports"]:
-                    _dup_errs.append(
-                        f"  {hostname}: vrl=true，但 01-global.yaml 未配置 vrl"
-                    )
-                    continue
-                device_vrfs = {
-                    vrf.get("evpn_vrf") for vrf in dev.get("vrfs", [])
-                    if vrf.get("evpn_vrf")
-                }
-                missing_vrfs = sorted(set(vrl_render["vrfs"]) - device_vrfs)
-                if missing_vrfs:
-                    _dup_errs.append(
-                        f"  {hostname}: vrl=true，但设备缺少参与 leaking 的 VRF："
-                        + ", ".join(missing_vrfs)
-                    )
-                    continue
-            try:
-                dev["svi_vrr_support"] = _resolve_device_svi_vrr_support(
-                    dev, native_svi_link_mac=native_svi_link_mac,
-                )
-                dev["dhcp_relays"] = _resolve_device_dhcp_relays(
-                    dev, dhcp_server_catalog,
-                    native_svi_link_mac=native_svi_link_mac,
-                )
-            except ValueError as exc:
-                _dup_errs.append(f"  {hostname}: SVI/VRR/DHCP relay 配置: {exc}")
-                continue
-    # MLAG attributes
-    mlag_global   = global_data.get("mlag") or {}
-    mlag_hosts = [
-        hostname for hostname, device in devices_data.items()
-        if not device.get("source_yaml_b64") and "mlag" in _device_bond_types(device)
-    ]
-    if schema_version == 2:
-        try:
-            _apply_v2_mlag_attributes(
-                devices_data, mlag_global, v2_mlag_policy,
-            )
-        except ValueError as exc:
-            _dup_errs.append(f"  {exc}")
-    else:
-        mlag_pairs = mlag_global.get("pairs", [])
-        mlag_priority = mlag_global.get("priority", [])
-        for i, hostname in enumerate(mlag_hosts):
-            pair_idx = i // 2; role_idx = i % 2
-            peer = mlag_hosts[i ^ 1] if (i ^ 1) < len(mlag_hosts) else None
-            if peer:
-                devices_data[hostname]["mlag_backup"] = devices_data[peer]["eth0_ip"].split("/")[0]
-            if mlag_priority and role_idx < len(mlag_priority):
-                devices_data[hostname]["mlag_priority"] = mlag_priority[role_idx]
-            if pair_idx < len(mlag_pairs):
-                pair = mlag_pairs[pair_idx]
-                sys_macs = pair.get("system-mac", [])
-                if role_idx < len(sys_macs):
-                    devices_data[hostname]["system_mac"] = sys_macs[role_idx]
-                shared = pair.get("shared-addresses", [])
-                if shared:
-                    devices_data[hostname]["mlag_shared_address"] = shared[0]
-                mlag_mac = pair.get("mac-address", [])
-                if mlag_mac:
-                    devices_data[hostname]["mlag_mac_address"] = mlag_mac[0]
-
-    # ── 重复值检查 ────────────────────────────────────────────────────────────
+def _collect_duplicate_value_errors(devices_data, mac_map, prior_errors):
+    """Collect duplicate address and VRR-MAC conflicts before publication."""
     _dup_val_errs = []
 
     def _collect_dup(field_name, value_map):
@@ -3105,7 +2650,7 @@ def _generate_devices_yaml():
                 _record_vrrmac(_vrr_vrrmac, scope, vrr_ip, vrr_mac, label)
 
     _collect_dup("eth0_ip",  _eth0_ip_map)
-    _collect_dup("eth0_mac", _mac_map)
+    _collect_dup("eth0_mac", mac_map)
     _collect_dup("lo_ip",    _lo_ip_map)
 
     for (vrf_name, vlan_id, svi_ip), mac_hosts in _svi_vrrmac.items():
@@ -3126,23 +2671,13 @@ def _generate_devices_yaml():
     # When an earlier parse/cross-field error prevented VRR derivation, empty
     # derived vrr_mac values are not independent duplicate errors.  Reporting
     # them would hide the actionable source error from the operator.
-    if not _dup_errs:
+    if not prior_errors:
         _dup_val_errs.extend(_validate_project_svi_vrr(devices_data))
+    return _dup_val_errs
 
-    if _dup_val_errs:
-        print("[ERROR] 02-devices_config.csv 中存在重复值，请修正后重新运行：")
-        for e in _dup_val_errs:
-            print(e)
-        sys.exit(1)
 
-    # Profile authority must be current before the intermediate model is staged.
-    try:
-        _attach_splitter_profiles(devices_data)
-    except ValueError as exc:
-        print(f"[ERROR] {exc}")
-        sys.exit(1)
-
-    # Validation
+def _collect_device_field_errors(devices_data, schema_version, source_lines):
+    """Validate each parsed device without publishing the intermediate model."""
     _errs = []
     def _chk(ok, hostname, field, val):
         if not ok:
@@ -3156,7 +2691,7 @@ def _generate_devices_yaml():
                 _expected_active_bond_descriptors(dev)
             except ValueError as exc:
                 _errs.append(
-                    f"  行{_source_lines.get(hostname, '?')} [{hostname}] "
+                    f"  行{source_lines.get(hostname, '?')} [{hostname}] "
                     f"template={dev.get('template') or '<empty>'}: {exc}"
                 )
         else:
@@ -3167,7 +2702,7 @@ def _generate_devices_yaml():
                 preprocess_device(copy.deepcopy(dev))
             except ValueError as exc:
                 _errs.append(
-                    f"  行{_source_lines.get(hostname, '?')} [{hostname}] "
+                    f"  行{source_lines.get(hostname, '?')} [{hostname}] "
                     f"template={dev.get('template') or '<empty>'}: {exc}"
                 )
         _chk(_csv_valid_ip(dev.get("eth0_ip", ""), allow_dhcp=True), hostname, "eth0_ip", dev.get("eth0_ip"))
@@ -3212,21 +2747,49 @@ def _generate_devices_yaml():
                 if l2.get("vni") is not None:
                     _chk(1 <= l2["vni"] <= 16777215,         hostname, "l2vni",   l2["vni"])
 
-    if schema_version == 1 and len(mlag_hosts) % 2 != 0:
-        _errs.append(f"  MLAG 设备数量为奇数 ({len(mlag_hosts)})，无法配对: {mlag_hosts}")
-    _errs.extend(_dup_errs)
-    _errs.extend(_port_errors)
+    return _errs
 
-    if _errs:
-        print("[ERROR] 02-devices_config.csv 中存在格式错误，请修正后重新运行：")
-        for e in _errs:
-            print(e)
+
+def _prepare_devices_generation_globals():
+    """Normalize project-wide inputs before reading any device row."""
+    _tmpl_map = _load_devices_template(_CSV_FILE)
+    global_data = load_global()  # handles merged format extraction
+    schema_version = global_data.get("_project_schema_version", 1)
+    native_svi_link_mac = _cumulus_uses_native_svi_link_mac(
+        global_data.get("version"),
+    )
+    v2_vrr_policy = None
+    v2_mlag_policy = None
+    if schema_version == 2:
+        try:
+            v2_vrr_policy = _normalize_v2_vrr_policy(global_data)
+            v2_mlag_policy = normalize_v2_mlag_policy(global_data)
+        except ValueError as exc:
+            print(f"[ERROR] 01-global.yaml schema v2 配置无效：{exc}")
+            sys.exit(1)
+    try:
+        _refresh_cumulus_defaults_from_global()
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        print(f"[ERROR] Cumulus 默认配置同步失败：{exc}")
         sys.exit(1)
+    try:
+        dhcp_server_catalog = _normalize_dhcp_server_groups(global_data)
+    except ValueError as exc:
+        print(f"[ERROR] 01-global.yaml DHCP relay 配置无效：{exc}")
+        sys.exit(1)
+    try:
+        global_data["vrl_render"] = _normalize_vrl_config(global_data)
+    except ValueError as exc:
+        print(f"[ERROR] 01-global.yaml VRF route-leaking 配置无效：{exc}")
+        sys.exit(1)
+    return (
+        _tmpl_map, global_data, schema_version, native_svi_link_mac,
+        v2_vrr_policy, v2_mlag_policy, dhcp_server_catalog,
+    )
 
-    for dev in devices_data.values():
-        for vrf in dev.get("vrfs", []):
-            for l2 in vrf.get("l2vlans", []):
-                l2.pop("_csv_source", None)
+
+def _publish_devices_yaml(global_data, devices_data):
+    """Atomically replace the project target, not its setup-managed symlink."""
     output = {"global": global_data, "devices": devices_data}
     # DEVICES_FILE is normally a setup-managed symlink into the active project.
     # Atomic replacement must happen beside the target, otherwise os.replace()
@@ -3240,7 +2803,645 @@ def _generate_devices_yaml():
             sort_keys=False, width=120, Dumper=_YamlSafeDumperBase,
         )
     os.replace(tmp_path, output_path)
+
+
+def _device_csv_header_context(header, schema_version):
+    """Validate the CSV layout once and retain its positional row offsets."""
+    h_lower = [column.strip().lower() for column in header]
+    layout = parse_device_csv_layout(h_lower, schema_version)
+    metadata_columns = (
+        _SOURCE_YAML_COL, _SOURCE_SHA256_COL, _SOURCE_FIELDS_SHA256_COL,
+    )
+    metadata_indices = {
+        name: h_lower.index(name) if name in h_lower else None
+        for name in metadata_columns
+    }
+    return {
+        "layout": layout,
+        "type_col": h_lower.index("type") if "type" in h_lower else None,
+        "source_yaml_col": metadata_indices[_SOURCE_YAML_COL],
+        "source_sha256_col": metadata_indices[_SOURCE_SHA256_COL],
+        "source_fields_sha256_col": metadata_indices[_SOURCE_FIELDS_SHA256_COL],
+        "fixed": layout.fixed_indices,
+        "vrl_col": layout.fixed_indices.get("vrl"),
+        "evpn_width": len(
+            _EVPN_V2_COLUMNS if schema_version == 2 else _EVPN_COLUMNS
+        ),
+        "evpn_group_count": len(layout.evpn_group_starts),
+        "evpn_base": (
+            layout.evpn_group_starts[0]
+            if layout.evpn_group_starts
+            else layout.fixed_start + len(layout.fixed_columns)
+        ),
+        "evpn_end": layout.metadata_start,
+    }
+
+
+def _triage_device_csv_row(
+        raw, lineno, header_width, schema_version, type_col,
+        errors, skipped_excluded, hostname_owners):
+    """Reject rows that cannot become ETH devices before parsing fields."""
+    row = [cell.strip() for cell in raw]
+    if not any(row):
+        return None
+    try:
+        require_device_csv_row_width(
+            raw, header_width, schema_version, lineno=lineno,
+        )
+    except ValueError as exc:
+        errors.append(f"  {exc}")
+        return None
+    if len(row) < header_width:
+        row.extend([""] * (header_width - len(row)))
+    row.extend([""] * 47)
+    row_type = (
+        row[type_col].strip().lower()
+        if type_col is not None and len(row) > type_col
+        else "ib" if row[0].strip().lower().startswith("ib") else "eth"
+    )
+    if _exclude_config_type(row_type):
+        skipped_excluded[row_type] = skipped_excluded.get(row_type, 0) + 1
+        return None
+    if row_type not in ("eth", "eth_spx", "spx"):
+        return None
+    hostname, csv_template = row[0], row[2]
+    if not hostname:
+        if csv_template:
+            errors.append(f"  行缺少必填字段: hostname={hostname!r}")
+        return None
+    if not _SAFE_HOSTNAME_RE.fullmatch(hostname):
+        errors.append(
+            f"  hostname 含不安全字符，不能作为 YAML 文件名: {hostname!r}"
+        )
+        return None
+    hostname_key = hostname.casefold()
+    if hostname_key in hostname_owners:
+        errors.append(f"  重复 hostname: {hostname!r}")
+        return None
+    hostname_owners[hostname_key] = hostname
+    return row, row_type, hostname, csv_template
+
+
+def _populate_device_csv_interfaces(row, hostname, dev, mac_map):
+    """Project one ETH CSV row's base interfaces and MAC collision owners."""
+    dev["eth0_ip"] = _csv_combine_ip(row[3], row[4])
+    dev["eth0_gw"] = row[5]
+    eth0_mac_raw = row[6]
+    if eth0_mac_raw and eth0_mac_raw.upper() != "NA":
+        mac_map.setdefault(eth0_mac_raw.lower(), []).append(hostname)
+    eth1_valid = (
+        not _csv_na(row[7]) and not _csv_na(row[8])
+        and not _csv_na(row[9])
+    )
+    dev["has_eth1"] = eth1_valid
+    if eth1_valid:
+        dev["eth1_ip"] = _csv_combine_ip(row[7], row[8])
+        dev["eth1_gw"] = row[9]
+    eth1_mac_raw = row[10] if not _csv_na(row[10]) else ""
+    if eth1_mac_raw:
+        mac_map.setdefault(eth1_mac_raw.lower(), []).append(hostname)
+    lo_ip = row[11]
+    if _csv_na(lo_ip):
+        dev["lo_ip"] = lo_ip
+    elif "/" not in lo_ip:
+        dev["lo_ip"] = f"{lo_ip}/32"
+    else:
+        ip_part = lo_ip.split("/")[0]
+        dev["lo_ip"] = lo_ip if not _csv_na(ip_part) else ip_part
+
+
+def _apply_source_yaml_metadata(row, hostname, dev, context, errors):
+    """Validate a lossless source receipt before any generated fields are used.
+
+    None means no receipt; False means a rejected receipt; True means the
+    validated receipt is attached and this row bypasses template generation.
+    """
+    source_yaml_col = context["source_yaml_col"]
+    if source_yaml_col is None or _csv_na(row[source_yaml_col]):
+        return None
+    source_sha256_col = context["source_sha256_col"]
+    source_fields_sha256_col = context["source_fields_sha256_col"]
+    source_sha256 = row[source_sha256_col] if source_sha256_col is not None else ""
+    source_fields_sha256 = (
+        row[source_fields_sha256_col]
+        if source_fields_sha256_col is not None else ""
+    )
+    actual_fields_sha256 = hashlib.sha256(json.dumps(
+        row[:context["evpn_end"]], ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")).hexdigest()
+    if (not re.fullmatch(r"[0-9a-fA-F]{64}", source_fields_sha256)
+            or source_fields_sha256.lower() != actual_fields_sha256):
+        errors.append(
+            f"  {hostname}: CSV 可编辑字段已变化或 source_fields_sha256 无效；"
+            f"若要改用模板生成，请删除该行的 source_yaml_* 元数据"
+        )
+        return False
+    try:
+        _decode_source_yaml(row[source_yaml_col], source_sha256)
+    except ValueError as exc:
+        errors.append(f"  {hostname}: {exc}")
+        return False
+    dev["source_yaml_b64"] = row[source_yaml_col]
+    dev["source_yaml_sha256"] = source_sha256.lower()
+    dev["source_fields_sha256"] = source_fields_sha256.lower()
+    return True
+
+
+def _parse_v2_ordinary_vlan_groups(row, layout, hostname, lineno, errors):
+    """Parse each v2 ordinary VLAN quartet, rejecting the whole bad row."""
+    ordinary_groups = []
+    invalid_ordinary = False
+    for group_index, start in enumerate(layout.vlan_group_starts, start=1):
+        try:
+            ordinary = _csv_parse_v2_vlan_group(row[start:start + 4])
+        except ValueError as exc:
+            errors.append(f"  {hostname}: 普通 VLAN 组 {group_index}: {exc}")
+            invalid_ordinary = True
+            continue
+        if ordinary is not None:
+            ordinary["_csv_source"] = {
+                "line": lineno,
+                "group": f"普通 VLAN 组 {group_index}",
+            }
+            ordinary_groups.append(ordinary)
+    return None if invalid_ordinary else ordinary_groups
+
+
+def _apply_v1_simple_vlan_fields(row, hostname, dev, errors, port_errors):
+    """Apply legacy simple-template VLAN/SVI/VRR fields or reject the row."""
+    if not _csv_na(row[13]):
+        try:
+            vlan_id, vlan_spec, vlan_ids = _csv_parse_vlan_selector(row[13])
+        except ValueError as exc:
+            errors.append(f"  {hostname}: vlan_id: {exc}")
+            return False
+        dev["vlan_id"] = vlan_id
+        dev["vlan_spec"] = vlan_spec
+        dev["vlan_ids"] = vlan_ids
+    dev["svi_ip"] = _csv_combine_ip(row[14], row[15]) if not _csv_na(row[14]) else ""
+    dev["vrr_ip"] = _csv_combine_ip(row[16], row[15]) if not _csv_na(row[16]) else ""
+    dev["vrr_mac"] = row[17].strip() if not _csv_na(row[17]) else ""
+    if len(dev.get("vlan_ids", [])) > 1 and any((
+            dev["svi_ip"], dev["vrr_ip"], dev["vrr_mac"])):
+        errors.append(
+            f"{hostname}: vlan_id={dev['vlan_spec']} 是 VLAN 范围，不能同时指定单值 "
+            "svi_ip/vrr_ip/vrr_mac"
+        )
+        return False
+    if dev["vrr_ip"] and not dev["vrr_mac"]:
+        errors.append(
+            f"  {hostname}: vlan_id={dev.get('vlan_spec') or dev.get('vlan_id')} "
+            "的 vrr_ip 出现时必须同时指定 vrr_mac"
+        )
+        return False
+    if dev["vrr_mac"] and not (dev["vrr_ip"] or dev["svi_ip"]):
+        errors.append(
+            f"  {hostname}: vlan_id={dev.get('vlan_spec') or dev.get('vlan_id')} "
+            "的 vrr_mac 必须与 svi_ip 或 vrr_ip 一起使用"
+        )
+        return False
+    if (dev["svi_ip"] and dev["vrr_ip"] and
+            dev["svi_ip"].split("/", 1)[0] == dev["vrr_ip"].split("/", 1)[0]):
+        errors.append(
+            f"  {hostname}: vlan_id={dev.get('vlan_spec') or dev.get('vlan_id')} "
+            "的 svi_ip 与 vrr_ip 不能相同"
+        )
+        return False
+    vp = row[18]
+    dev.setdefault("vlan_ports", [])
+    if not _csv_na(vp) and "bond" not in vp.lower():
+        dev["vlan_ports"] = _csv_expand_ports(vp)
+    elif not _csv_na(vp):
+        dev["legacy_vlan_bonds"] = _csv_expand_prefixed(
+            vp, "bond", f"{hostname}.vlan_ports", port_errors
+        )
+    return True
+
+
+def _parse_device_csv_bond_groups(
+        row, fixed, schema_version, template, hostname, lineno,
+        dev, errors, port_errors):
+    """Parse bond declarations and keep v2 stale-metadata warning semantics."""
+    bond_groups = []
+    if (not _csv_na(row[fixed["bond_ports"]])
+            and not _csv_na(row[fixed["bond_type"]])):
+        try:
+            bond_groups = _csv_parse_bond_groups(
+                row[fixed["bond_ports"]], row[fixed["bond_type"]],
+                row[fixed["bond_mac"]],
+                f"{hostname}.bond_ports", port_errors,
+                schema_version=schema_version,
+            )
+        except ValueError as exc:
+            errors.append(f"  {hostname}: {exc}")
+            return None
+    elif schema_version == 2 and _csv_na(row[fixed["bond_ports"]]):
+        if not _csv_na(row[fixed["bond_type"]]):
+            print(
+                f"[WARN] 行{lineno} [{hostname}] bond_type 已填写，"
+                "但 bond_ports 为空"
+            )
+        if not _csv_na(row[fixed["bond_mac"]]):
+            print(
+                f"[WARN] 行{lineno} [{hostname}] bond_mac 已填写，"
+                "但 bond_ports 为空"
+            )
+    elif schema_version == 2 and any(
+            not _csv_na(row[fixed[name]])
+            for name in ("bond_ports", "bond_type", "bond_mac")):
+        errors.append(f"  {hostname}: bond_ports 与 bond_type 必须同时填写")
+        return None
+    if schema_version == 2:
+        try:
+            _validate_template_bond_modes(
+                template, {group["type"] for group in bond_groups},
+                hostname=hostname, source_line=lineno,
+            )
+        except ValueError as exc:
+            errors.append(f"  {exc}")
+            return None
+    if (schema_version == 2 or template in _SIMPLE_TEMPLATES) and bond_groups:
+        dev["bond_groups"] = bond_groups
+    if not _csv_na(row[fixed["peerlink_ports"]]):
+        dev["peerlink_ports"] = row[fixed["peerlink_ports"]].strip()
+    return bond_groups
+
+
+def _apply_device_csv_vrfs(
+        row, schema_version, template, hostname, lineno,
+        evpn_group_count, evpn_base, evpn_width, ordinary_groups,
+        bond_groups, dev, errors):
+    """Merge EVPN and ordinary VLAN groups, then keep v1 legacy backfill."""
+    groups = _csv_collect_evpn_groups(
+        row, evpn_group_count, hostname, errors,
+        base=evpn_base, width=evpn_width,
+        schema_version=schema_version, source_line=lineno,
+    )
+    if groups is None:
+        return False
+    if schema_version == 2:
+        groups = ordinary_groups + groups
+    if groups:
+        vrfs = _csv_build_vrfs_checked(
+            groups, bond_groups, hostname, errors,
+            schema_version=schema_version,
+        )
+        if vrfs is None:
+            return False
+        dev["vrfs"] = vrfs
+    if (schema_version == 1 and template in _SIMPLE_TEMPLATES
+            and dev.get("vrfs")):
+        first_l2 = dev["vrfs"][0].get("l2vlans", [])
+        if first_l2:
+            l2 = first_l2[0]
+            if "vlan_id" not in dev and l2.get("vlan_id") is not None:
+                dev["vlan_id"] = l2["vlan_id"]
+            if "vlan_spec" not in dev and l2.get("vlan_spec"):
+                dev["vlan_spec"] = l2["vlan_spec"]
+            if not dev.get("svi_ip") and l2.get("svi_ip"):
+                dev["svi_ip"] = l2["svi_ip"]
+    return True
+
+
+def _apply_project_v2_vrr_routes(devices_data, v2_vrr_policy, errors):
+    """Apply v2 address policy before deriving border default routes."""
+    if errors:
+        return
+    try:
+        _apply_v2_vrr_policy(devices_data, v2_vrr_policy)
+    except ValueError as exc:
+        print("[ERROR] 02-devices_config.csv 的 SVI/VRR 地址策略冲突：")
+        for line in str(exc).splitlines():
+            print(f"  {line}")
+        sys.exit(1)
+    try:
+        _assign_v2_border_default_routes(devices_data)
+    except ValueError as exc:
+        errors.append(f"  Border 默认路由推导失败：{exc}")
+
+
+def _apply_project_mlag_attributes(
+        devices_data, mlag_global, v2_mlag_policy, schema_version, errors):
+    """Apply project MLAG policy and return eligible hosts for v1 pairing checks."""
+    mlag_hosts = [
+        hostname for hostname, device in devices_data.items()
+        if not device.get("source_yaml_b64") and "mlag" in _device_bond_types(device)
+    ]
+    if schema_version == 2:
+        try:
+            _apply_v2_mlag_attributes(devices_data, mlag_global, v2_mlag_policy)
+        except ValueError as exc:
+            errors.append(f"  {exc}")
+    else:
+        mlag_pairs = mlag_global.get("pairs", [])
+        mlag_priority = mlag_global.get("priority", [])
+        for i, hostname in enumerate(mlag_hosts):
+            pair_idx = i // 2; role_idx = i % 2
+            peer = mlag_hosts[i ^ 1] if (i ^ 1) < len(mlag_hosts) else None
+            if peer:
+                devices_data[hostname]["mlag_backup"] = devices_data[peer]["eth0_ip"].split("/")[0]
+            if mlag_priority and role_idx < len(mlag_priority):
+                devices_data[hostname]["mlag_priority"] = mlag_priority[role_idx]
+            if pair_idx < len(mlag_pairs):
+                pair = mlag_pairs[pair_idx]
+                sys_macs = pair.get("system-mac", [])
+                if role_idx < len(sys_macs):
+                    devices_data[hostname]["system_mac"] = sys_macs[role_idx]
+                shared = pair.get("shared-addresses", [])
+                if shared:
+                    devices_data[hostname]["mlag_shared_address"] = shared[0]
+                mlag_mac = pair.get("mac-address", [])
+                if mlag_mac:
+                    devices_data[hostname]["mlag_mac_address"] = mlag_mac[0]
+    return mlag_hosts
+
+
+def _collect_project_device_errors(
+        devices_data, schema_version, source_lines, mlag_hosts,
+        duplicate_errors, port_errors):
+    """Collect final field, v1 pairing, duplicate and port errors in order."""
+    errors = _collect_device_field_errors(
+        devices_data, schema_version, source_lines,
+    )
+    if schema_version == 1 and len(mlag_hosts) % 2 != 0:
+        errors.append(
+            f"  MLAG 设备数量为奇数 ({len(mlag_hosts)})，无法配对: {mlag_hosts}"
+        )
+    errors.extend(duplicate_errors)
+    errors.extend(port_errors)
+    return errors
+
+
+def _resolve_device_csv_template(
+        hostname, row_type, csv_template, mapped, errors):
+    """Select an explicit CSV/template-map role without hostname guessing."""
+    csv_has = csv_template and not _csv_na(csv_template)
+    tmpl_has = bool(mapped)
+    template = _select_device_template(csv_template, mapped)
+    if (csv_has and tmpl_has and
+            csv_template.strip().lower() != mapped.strip().lower()):
+        print(
+            f"  [INFO] {hostname}: devices_config.csv 模板 {csv_template!r} "
+            f"覆盖 devices_template 默认值 {mapped!r}"
+        )
+    if not template:
+        errors.append(
+            f"  {hostname}: type={row_type} 必须在 devices_config.csv "
+            "或 devices_template 中显式指定模板，已禁止按 hostname 自动猜测"
+        )
+        return None
+    resolved_tmpl_file, is_exact = _best_template(template, hostname)
+    if not is_exact:
+        errors.append(
+            f"  {hostname}: 指定模板 '{template}.yaml.j2' 不存在"
+            + (f"（最接近: {resolved_tmpl_file[:-len('.yaml.j2')]}）" if resolved_tmpl_file else "")
+        )
+        return None
+    return resolved_tmpl_file[: -len(".yaml.j2")]
+
+
+def _new_device_csv_record(
+        row, hostname, template, lineno, schema_version, vrl_col,
+        errors, source_lines):
+    """Initialize one device with stable VRF shape and parsed VRL setting."""
+    # vrfs denotes business VRFs beyond default/mgmt; always retain [] shape.
+    dev = {
+        "template": template,
+        "hostname": hostname,
+        "vrfs": [],
+        "_project_schema_version": schema_version,
+    }
+    source_lines[hostname] = lineno
+    try:
+        dev["vrl"] = _csv_vrl_enabled(
+            row[vrl_col] if vrl_col is not None else ""
+        )
+    except ValueError as exc:
+        errors.append(f"  {hostname}: {exc}")
+        return None
+    return dev
+
+
+def _apply_device_csv_bgp_fields(row, fixed, hostname, dev, port_errors):
+    """Parse the row's BGP ASN and neighbors before bond/VRF groups."""
+    dev["bgp_asn"] = (
+        _csv_to_int(row[fixed["bgp_asn"]])
+        if not _csv_na(row[fixed["bgp_asn"]]) else None
+    )
+    if not _csv_na(row[fixed["bgp_ports"]]):
+        dev["bgp_neighbors"] = _csv_expand_ports(
+            row[fixed["bgp_ports"]],
+            f"{hostname}.bgp_ports", port_errors,
+        )
+
+
+def _apply_project_device_runtime_fields(
+        devices_data, global_data, native_svi_link_mac,
+        dhcp_server_catalog, errors):
+    """Derive each generated device's VRL, SVI/VRR and DHCP relay fields."""
+    if errors:
+        return
+    for hostname, dev in devices_data.items():
+        if dev.get("source_yaml_b64"):
+            continue
+        if dev.get("vrl"):
+            vrl_render = global_data["vrl_render"]
+            if not vrl_render["imports"]:
+                errors.append(
+                    f"  {hostname}: vrl=true，但 01-global.yaml 未配置 vrl"
+                )
+                continue
+            device_vrfs = {
+                vrf.get("evpn_vrf") for vrf in dev.get("vrfs", [])
+                if vrf.get("evpn_vrf")
+            }
+            missing_vrfs = sorted(set(vrl_render["vrfs"]) - device_vrfs)
+            if missing_vrfs:
+                errors.append(
+                    f"  {hostname}: vrl=true，但设备缺少参与 leaking 的 VRF："
+                    + ", ".join(missing_vrfs)
+                )
+                continue
+        try:
+            dev["svi_vrr_support"] = _resolve_device_svi_vrr_support(
+                dev, native_svi_link_mac=native_svi_link_mac,
+            )
+            dev["dhcp_relays"] = _resolve_device_dhcp_relays(
+                dev, dhcp_server_catalog,
+                native_svi_link_mac=native_svi_link_mac,
+            )
+        except ValueError as exc:
+            errors.append(f"  {hostname}: SVI/VRR/DHCP relay 配置: {exc}")
+            continue
+
+
+def _validate_project_duplicates_and_profiles(devices_data, mac_map, errors):
+    """Stop on duplicate identities before attaching authoritative profiles."""
+    duplicate_errors = _collect_duplicate_value_errors(
+        devices_data, mac_map, errors,
+    )
+    if duplicate_errors:
+        print("[ERROR] 02-devices_config.csv 中存在重复值，请修正后重新运行：")
+        for error in duplicate_errors:
+            print(error)
+        sys.exit(1)
+    # Profile authority must be current before the intermediate model is staged.
+    try:
+        _attach_splitter_profiles(devices_data)
+    except ValueError as exc:
+        print(f"[ERROR] {exc}")
+        sys.exit(1)
+
+
+def _finalize_device_csv_publication(global_data, devices_data):
+    """Discard CSV-only provenance before atomically publishing devices."""
+    for dev in devices_data.values():
+        for vrf in dev.get("vrfs", []):
+            for l2 in vrf.get("l2vlans", []):
+                l2.pop("_csv_source", None)
+    _publish_devices_yaml(global_data, devices_data)
     print(f"Generated {DEVICES_FILE}: {len(global_data)} global keys, {len(devices_data)} devices")
+
+
+def _ingest_device_csv_row(
+        raw, lineno, header_width, schema_version, context, tmpl_map,
+        devices_data, dup_errs, port_errors, mac_map, source_lines,
+        skipped_excluded, hostname_owners):
+    """Apply one validated CSV row without owning the project-wide flow."""
+    triaged = _triage_device_csv_row(
+        raw, lineno, header_width, schema_version,
+        context["type_col"], dup_errs, skipped_excluded, hostname_owners,
+    )
+    if triaged is None:
+        return
+    row, row_type, hostname, csv_template = triaged
+    template = _resolve_device_csv_template(
+        hostname, row_type, csv_template,
+        tmpl_map.get(hostname.lower()), dup_errs,
+    )
+    if template is None:
+        return
+    dev = _new_device_csv_record(
+        row, hostname, template, lineno, schema_version,
+        context["vrl_col"], dup_errs, source_lines,
+    )
+    if dev is None:
+        return
+    receipt = _apply_source_yaml_metadata(
+        row, hostname, dev, context, dup_errs,
+    )
+    if receipt is not None:
+        if receipt:
+            devices_data[hostname] = dev
+        return
+    _populate_device_csv_interfaces(row, hostname, dev, mac_map)
+    ordinary_groups = []
+    if schema_version == 2:
+        ordinary_groups = _parse_v2_ordinary_vlan_groups(
+            row, context["layout"], hostname, lineno, dup_errs,
+        )
+        if ordinary_groups is None:
+            return
+    elif template in _SIMPLE_TEMPLATES:
+        if not _apply_v1_simple_vlan_fields(
+                row, hostname, dev, dup_errs, port_errors):
+            return
+    _apply_device_csv_bgp_fields(
+        row, context["fixed"], hostname, dev, port_errors,
+    )
+    bond_groups = _parse_device_csv_bond_groups(
+        row, context["fixed"], schema_version, template, hostname, lineno,
+        dev, dup_errs, port_errors,
+    )
+    if bond_groups is None:
+        return
+    if not _apply_device_csv_vrfs(
+            row, schema_version, template, hostname, lineno,
+            context["evpn_group_count"], context["evpn_base"],
+            context["evpn_width"], ordinary_groups, bond_groups,
+            dev, dup_errs):
+        return
+    devices_data[hostname] = dev
+
+
+def _generate_devices_yaml():
+    """Read 02-devices_config.csv + 01-global.yaml and write 91-devices.yaml."""
+    (
+        _tmpl_map, global_data, schema_version, native_svi_link_mac,
+        v2_vrr_policy, v2_mlag_policy, dhcp_server_catalog,
+    ) = _prepare_devices_generation_globals()
+
+    devices_data = {}
+    _dup_errs = []
+    _port_errors = []
+    _mac_map = {}   # eth0_mac → [hostname, ...]（CSV col 5，解析时收集）
+    _hostname_owners = {}
+    _source_lines = {}
+
+    try:
+        _csv_f = open(_CSV_FILE, newline="", encoding="utf-8")
+    except FileNotFoundError:
+        print(f"[ERROR] 找不到配置文件: {_CSV_FILE}"); sys.exit(1)
+
+    skipped_excluded = {}
+    with _csv_f as f:
+        reader   = csv.reader(f)
+        header   = next(reader, [])
+        try:
+            context = _device_csv_header_context(header, schema_version)
+        except ValueError as exc:
+            print(f"[ERROR] {_CSV_FILE} 列结构无效：{exc}")
+            sys.exit(1)
+        for lineno, raw in enumerate(reader, start=2):
+            _ingest_device_csv_row(
+                raw, lineno, len(header), schema_version, context,
+                _tmpl_map, devices_data, _dup_errs, _port_errors,
+                _mac_map, _source_lines, skipped_excluded, _hostname_owners,
+            )
+
+    if skipped_excluded:
+        excluded_summary = ", ".join(
+            f"type={device_type}: {count}"
+            for device_type, count in sorted(skipped_excluded.items())
+        )
+        print(
+            f"[INFO] 已忽略 {sum(skipped_excluded.values())} 行显式排除设备"
+            f"（{excluded_summary}），不生成配置"
+        )
+
+    # Same-named VRFs are a project-wide object: validate their explicit L3
+    # identifiers and fill omissions before resolving DHCP upstream interfaces.
+    _dup_errs.extend(_validate_and_inherit_project_vrfs(devices_data))
+    if schema_version == 2:
+        _apply_project_v2_vrr_routes(
+            devices_data, v2_vrr_policy, _dup_errs,
+        )
+    _apply_project_device_runtime_fields(
+        devices_data, global_data, native_svi_link_mac,
+        dhcp_server_catalog, _dup_errs,
+    )
+    # MLAG attributes
+    mlag_global   = global_data.get("mlag") or {}
+    mlag_hosts = _apply_project_mlag_attributes(
+        devices_data, mlag_global, v2_mlag_policy, schema_version, _dup_errs,
+    )
+
+    _validate_project_duplicates_and_profiles(
+        devices_data, _mac_map, _dup_errs,
+    )
+
+    _errs = _collect_project_device_errors(
+        devices_data, schema_version, _source_lines, mlag_hosts,
+        _dup_errs, _port_errors,
+    )
+
+    if _errs:
+        print("[ERROR] 02-devices_config.csv 中存在格式错误，请修正后重新运行：")
+        for e in _errs:
+            print(e)
+        sys.exit(1)
+
+    _finalize_device_csv_publication(global_data, devices_data)
 
 
 # ── ETH: config generation (Jinja2) ──────────────────────────────────────────
@@ -3993,14 +4194,18 @@ def render(env, global_vars, device_name, device_vars):
         return _decode_source_yaml(source_b64, device_vars.get("source_yaml_sha256"))
 
     device_vars   = preprocess_device(device_vars)
-    template_hint = device_vars.get('template', '')
+    template_hint = device_vars.get('template')
+    if not isinstance(template_hint, str) or not template_hint.strip():
+        raise ValueError(
+            f"{device_name}: 必须显式指定 template，已禁止按 hostname 自动猜测"
+        )
+    template_hint = template_hint.strip()
 
     template_name, is_exact = _best_template(template_hint, device_name)
-    resolved_base = template_name[: -len(".yaml.j2")]
-
     if not is_exact:
-        print(f"  [TMPL] {device_name}: '{template_hint}' 无精确匹配，"
-              f"使用最佳匹配模板 '{resolved_base}'")
+        raise ValueError(
+            f"{device_name}: 指定模板 '{template_hint}.yaml.j2' 不存在"
+        )
 
     try:
         tmpl = env.get_template(template_name)
@@ -7398,7 +7603,7 @@ def _load_csv_ib():
     """读取 CSV，返回 ib/nvl 设备列表和错误列表。"""
     devices = []
     errors  = []
-    skipped_excluded = 0
+    skipped_excluded = {}
     _global_document, schema_version = _load_global_document()
 
     try:
@@ -7438,7 +7643,7 @@ def _load_csv_ib():
                 continue
             dev_type = _row_type_ib(row, type_col)
             if _exclude_config_type(dev_type):
-                skipped_excluded += 1
+                skipped_excluded[dev_type] = skipped_excluded.get(dev_type, 0) + 1
                 continue
             if dev_type not in ("ib", "nvl"):
                 continue
@@ -7463,7 +7668,14 @@ def _load_csv_ib():
             })
 
     if skipped_excluded:
-        print(f"[INFO] 已忽略 {skipped_excluded} 行 type=air 设备，不生成配置")
+        excluded_summary = ", ".join(
+            f"type={device_type}: {count}"
+            for device_type, count in sorted(skipped_excluded.items())
+        )
+        print(
+            f"[INFO] 已忽略 {sum(skipped_excluded.values())} 行显式排除设备"
+            f"（{excluded_summary}），不生成配置"
+        )
     return devices, errors
 
 
@@ -7716,7 +7928,7 @@ def _production_handoff_rows(row):
         row(),
         row("3. 生产请回到仓库根目录，按既定后端执行统一事务："),
         row("   Native/systemd："),
-        row("     sudo python3 DAY0-Prepare/11-load.py DAY0-Prepare/<project>"),
+        row("     sudo python3 DAY0-Prepare/11-load.py DAY0-Prepare/<project> --host-role=management-server"),
         row("   Docker/Supervisor，首次部署或 source write 后："),
         row("     sudo ./infra/docker/deploy.sh deploy"),
         row("   已有与 live 来源身份链匹配且经验证的镜像："),

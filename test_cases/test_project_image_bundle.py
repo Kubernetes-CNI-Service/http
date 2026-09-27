@@ -322,6 +322,26 @@ class ProjectImageBundleTests(unittest.TestCase):
         self.assertNotIn("--skip-verify", help_text)
         self.assertNotIn("--force", help_text)
 
+    def test_public_build_and_install_options_explain_artifacts_and_effects(self):
+        parser = self.tool.parser()
+        subparsers = next(action for action in parser._actions if action.dest == "action")
+        build = {action.dest: action for action in subparsers.choices["build"]._actions}
+        install = {action.dest: action for action in subparsers.choices["install"]._actions}
+        for destination, phrase in {
+            "upload_bundle": "upload bundle",
+            "base_image": "base image",
+            "output": "export directory",
+            "shared_bundle": "shared-artifact bundle",
+        }.items():
+            with self.subTest(action="build", destination=destination):
+                self.assertIn(phrase, build[destination].help or "")
+        for destination, phrase in {
+            "root": "installation root",
+            "verify_only": "without installing",
+        }.items():
+            with self.subTest(action="install", destination=destination):
+                self.assertIn(phrase, install[destination].help or "")
+
     def test_shared_upgrade_policy_drives_the_only_supported_deploy_command(self):
         image_id = "sha256:" + "c" * 64
         for policy, expected_suffix in (
@@ -991,12 +1011,13 @@ class ProjectImageBundleTests(unittest.TestCase):
                 "subnet,netmask\n192.0.2.0,255.255.255.0\n", encoding="ascii",
             )
             with zipfile.ZipFile(
-                project / "p2p.xlsx", "w", compression=zipfile.ZIP_DEFLATED,
+                project / "Customer P2P.xlsx", "w", compression=zipfile.ZIP_DEFLATED,
             ) as workbook:
                 workbook.writestr("[Content_Types].xml", "<Types/>")
                 workbook.writestr(
                     "xl/workbook.xml", "<workbook><keep>cells</keep></workbook>",
                 )
+            (project / "p2p.xlsx").symlink_to("Customer P2P.xlsx")
             private = workspace / "infra/.Ssh/id_ed25519"
             private.parent.mkdir()
             private.write_bytes(sentinel)

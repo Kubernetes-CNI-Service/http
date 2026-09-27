@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import stat
 import sys
@@ -166,6 +167,7 @@ class DocumentationCatalogTests(unittest.TestCase):
                 root / "DAY0-Prepare/project/README.md",
                 root / "module/99-output-run/README.md",
                 root / "outputs/review-evidence/README.md",
+                root / "monitor/cabletracker-main/README.md",
                 root / "ztp/optimize/issue-tracker/OPT-001-example/README.md",
             )
             for path in included + excluded:
@@ -664,6 +666,70 @@ class DocumentationCatalogTests(unittest.TestCase):
         self.assertIn("只读验收", validator)
         self.assertNotIn("-m unittest -v test_cases.run_vm_validation", validator)
 
+    def test_v3_generated_load_guidance_declares_the_real_host_role(self):
+        updater = load_path("manual_v3_host_role", USER_MANUAL_SCRIPT)
+        load = load_path("manual_v3_load_parser", ROOT / "DAY0-Prepare/11-load.py")
+
+        def assert_role(command: str, expected: str) -> None:
+            tokens = shlex.split(command)
+            script_index = tokens.index("DAY0-Prepare/11-load.py")
+            args = load.parse_args(tokens[script_index + 1:])
+            self.assertEqual(expected, load.resolve_host_role(args.host_role, "Linux"))
+
+        project_computer = updater.script_profile(ROOT, "DAY0-Prepare/11-load.py")
+        self.assertIn("项目电脑", project_computer["environment"])
+        assert_role(project_computer["example"], "workstation")
+
+        native_worker = updater.script_profile(ROOT, "monitor/manual-ztp-worker.py")
+        self.assertIn("上层生命周期", native_worker["scenario"])
+        assert_role(native_worker["example"], "management-server")
+
+        # Removing the role must be caught even when argparse accepts the command.
+        missing_role = project_computer["example"].replace(
+            "--host-role=workstation", "",
+        )
+        with self.assertRaisesRegex(load.LoadError, "explicit --host-role"):
+            assert_role(missing_role, "workstation")
+
+    def test_v3_current_guides_bind_copyable_load_commands_to_host_role(self):
+        load = load_path("manual_v3_guide_parser", ROOT / "DAY0-Prepare/11-load.py")
+        guides = (
+            ("docs/deployment/BUNDLE_WORKFLOWS.md", "management-server"),
+            ("ztp/templates/README.md", "workstation"),
+        )
+        for relative, expected in guides:
+            text = (ROOT / relative).read_text(encoding="utf-8")
+            commands = [
+                command for command in bash_commands(text)
+                if "DAY0-Prepare/11-load.py" in command
+            ]
+            self.assertTrue(commands, relative)
+            for command in commands:
+                with self.subTest(guide=relative, command=command):
+                    tokens = shlex.split(command)
+                    index = tokens.index("DAY0-Prepare/11-load.py")
+                    args = load.parse_args(tokens[index + 1:])
+                    self.assertEqual(
+                        expected, load.resolve_host_role(args.host_role, "Linux"),
+                    )
+
+    def test_v3_generated_manual_workflow_keeps_role_bound_examples(self):
+        updater = load_path("manual_v3_render_role", USER_MANUAL_SCRIPT)
+        rendered = updater.render_manual(ROOT)
+        current = (ROOT / "user-manual.html").read_text(encoding="utf-8")
+        self.assertEqual(current, rendered, "generated manual must be current")
+        generated = rendered.split(updater.SCRIPT_BEGIN, 1)[1].split(
+            updater.SCRIPT_END, 1,
+        )[0]
+        examples = re.findall(
+            r"<pre><code>([^<]*DAY0-Prepare/11-load\.py[^<]*)</code></pre>",
+            generated,
+        )
+        self.assertTrue(examples)
+        for example in examples:
+            with self.subTest(example=example):
+                self.assertRegex(html.unescape(example), r"--host-role=(?:workstation|management-server)")
+
     def test_offline_repository_and_test_gate_documentation_are_fail_closed(self):
         apps = (ROOT / "apps/README.md").read_text(encoding="utf-8")
         self.assertIn("repository.meta", apps)
@@ -674,6 +740,19 @@ class DocumentationCatalogTests(unittest.TestCase):
         check_position = test_readme.index("run_related_tests.py --check")
         self.assertLess(all_position, check_position)
         self.assertNotRegex(test_readme, r"\*\*\d+ 个受管脚本路径\*\*")
+
+    def test_template_guide_names_distinct_laptop_and_management_key_origins(self):
+        guide = (ROOT / "DAY0-Prepare/template/README.txt").read_text(
+            encoding="utf-8",
+        )
+        self.assertIn("setup 不从模板复制 laptop.pub", guide)
+        self.assertIn("本机 ~/.ssh", guide)
+        self.assertIn("server-delegated", guide)
+        self.assertIn("管理服务器端准备并校验", guide)
+        self.assertNotIn("把这里的全部缺失文件复制到真实项目", guide)
+        self.assertNotIn("setup 会复制到真实项目", guide)
+        self.assertNotIn("创建项目后必须先替换地址、MAC、凭据、公钥", guide)
+        self.assertNotIn("当前执行用户的 `~/.ssh/id_ed25519.pub`", guide)
 
     def test_documentation_tree_and_manifest_path_governance(self):
         from test_cases import test_public_publication_contract as publication

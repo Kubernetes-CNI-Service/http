@@ -15,7 +15,9 @@ import inspect
 import json
 from pathlib import Path
 import re
+import subprocess
 import sys
+import tempfile
 import unittest
 from collections.abc import Mapping
 
@@ -1101,6 +1103,69 @@ class CollectionCycleContractTests(unittest.TestCase):
                         results,
                         html_annotation=annotation,
                     )
+
+
+class EthernetCollectionResultContractTests(unittest.TestCase):
+    def test_multibyte_failure_reason_is_bounded_by_utf8_bytes(self):
+        source = (ROOT / "ethernet/monitor/cron.sh").read_text(encoding="utf-8")
+        self.assertEqual(1, source.count("emit_collection_result() {"))
+        body = source.split("emit_collection_result() {", 1)[1]
+        self.assertEqual(1, body.count("<<'PY'\n"))
+        program = body.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+
+        reason = "界" * 1200
+        self.assertEqual(3600, len(reason.encode("utf-8")))
+        self.assertGreater(len(reason[:1024].encode("utf-8")), 1024)
+        with tempfile.TemporaryDirectory() as directory:
+            planned = Path(directory) / "planned"
+            failures = Path(directory) / "failures"
+            planned.write_text("leaf-a\nleaf-b\n", encoding="utf-8")
+            failures.write_text(
+                f"leaf-a\tcollection\t{reason}\n", encoding="utf-8",
+            )
+            completed = subprocess.run(
+                [sys.executable, "-c", program, str(planned), str(failures)],
+                text=True, capture_output=True, check=False,
+            )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        prefix = "[HTTP_ZTP_TASK_RESULT] "
+        self.assertTrue(completed.stdout.startswith(prefix), completed.stdout)
+        payload = json.loads(completed.stdout.removeprefix(prefix))
+        self.assertEqual("partial", payload["state"])
+        self.assertEqual(1, payload["failed_count"])
+        stored = payload["failed_devices"][0]["reason"]
+        self.assertLessEqual(len(stored.encode("utf-8")), 1024)
+        self.assertEqual("界" * 341, stored)
+        self.assertEqual(1023, len(stored.encode("utf-8")))
+
+    def test_failure_reason_preserves_whole_three_and_four_byte_characters_at_limit(self):
+        source = (ROOT / "ethernet/monitor/cron.sh").read_text(encoding="utf-8")
+        body = source.split("emit_collection_result() {", 1)[1]
+        program = body.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+        cases = (
+            ("three-byte-straddle", "a" * 1022 + "界" + "tail", "a" * 1022, 1022),
+            ("four-byte-straddle", "a" * 1021 + "😀" + "tail", "a" * 1021, 1021),
+            ("four-byte-exact-fit", "a" * 1020 + "😀" + "tail", "a" * 1020 + "😀", 1024),
+        )
+        for label, reason, expected, expected_bytes in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                planned = Path(directory) / "planned"
+                failures = Path(directory) / "failures"
+                planned.write_text("leaf-a\nleaf-b\n", encoding="utf-8")
+                failures.write_text(f"leaf-a\tcollection\t{reason}\n", encoding="utf-8")
+                completed = subprocess.run(
+                    [sys.executable, "-c", program, str(planned), str(failures)],
+                    text=True, capture_output=True, check=False,
+                )
+                self.assertEqual(0, completed.returncode, completed.stderr)
+                prefix = "[HTTP_ZTP_TASK_RESULT] "
+                self.assertTrue(completed.stdout.startswith(prefix), completed.stdout)
+                payload = json.loads(completed.stdout.removeprefix(prefix))
+                stored = payload["failed_devices"][0]["reason"]
+                self.assertEqual(expected, stored)
+                self.assertEqual(expected_bytes, len(stored.encode("utf-8")))
+                self.assertNotIn("\ufffd", stored)
 
 
 if __name__ == "__main__":

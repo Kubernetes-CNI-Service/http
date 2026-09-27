@@ -229,7 +229,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "metadata, and SHA256SUMS; no HOST or SSH is used"
         ),
     )
-    parser.add_argument("--include-images", action="store_true")
+    parser.add_argument(
+        "--include-images", action="store_true",
+        help="include prepared container images in the upload archive",
+    )
     apps = parser.add_mutually_exclusive_group()
     apps.add_argument(
         "--include-apps", dest="include_apps", action="store_true",
@@ -258,10 +261,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=("additional offline client OS/architecture repository to include; "
               "repeat for multiple client platforms"),
     )
-    parser.add_argument("--include-firmware", action="store_true")
+    parser.add_argument(
+        "--include-firmware", action="store_true",
+        help="include firmware files from the selected project",
+    )
     parser.add_argument("--max-file-size-mib", type=int,
-                        default=package_core.DEFAULT_MAX_FILE_MIB)
-    parser.add_argument("--force", action="store_true")
+                        default=package_core.DEFAULT_MAX_FILE_MIB,
+                        help="maximum size of each packaged file in MiB")
+    parser.add_argument(
+        "--force", action="store_true",
+        help="overwrite an existing local archive after confirmation; does not bypass test proof",
+    )
     parser.add_argument(
         "-n", "--dry-run", "--list-only", dest="dry_run", action="store_true",
         help="build, verify and list the local archive without SSH/upload",
@@ -1384,7 +1394,8 @@ def recommended_remote_load_command(
     privilege = "" if args.no_sudo else "sudo -n "
     remote = (
         f"cd {shlex.quote(day0)} && "
-        f"{privilege}python3 11-load.py {shlex.quote(project.name)}"
+        f"{privilege}python3 11-load.py {shlex.quote(project.name)} "
+        "--host-role=management-server"
     )
     return command_base("ssh", args) + ["-t", args.host, remote]
 

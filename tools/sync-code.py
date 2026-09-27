@@ -36,6 +36,7 @@ from project_contract import (
     is_readme_name,
     is_tools_deployable_file,
     path_disposition,
+    require_project_eligible,
     rsync_excludes,
     transfer_exclude_reason,
 )
@@ -319,6 +320,7 @@ def resolve_project(value: str) -> Path:
         raise ValueError(f"项目必须位于 {DAY0} 下：{candidate}") from exc
     if not candidate.is_dir() or not (candidate / "02-devices_config.csv").is_file():
         raise ValueError(f"项目不存在或缺少 02-devices_config.csv：{candidate}")
+    require_project_eligible(candidate)
     return candidate
 
 
@@ -1568,7 +1570,8 @@ def main(argv: list[str] | None = None) -> int:
                 print("[NEXT] 远端同步门禁已清除；登录管理服务器并必须重新执行：")
                 print(
                     f"       cd {args.remote_root}/DAY0-Prepare && "
-                    f"sudo python3 11-load.py {project.name}"
+                    f"sudo python3 11-load.py {project.name} "
+                    "--host-role=management-server"
                 )
         return 0
     except (OSError, ValueError, RuntimeError) as exc:

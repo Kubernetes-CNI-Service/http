@@ -41,9 +41,62 @@ exec 9>"$lock_file"
 flock -x 9
 
 log_dir="${runtime_dir}/logs"
-mkdir -p "$log_dir"
-log_file="${log_dir}/infra-teardown-$(date +%Y%m%d_%H%M%S)-$$.log"
+log_root_lock="${runtime_dir}/.logs.lock"
+if [[ -L "$log_root_lock" || ( -e "$log_root_lock" && ! -f "$log_root_lock" ) ]]; then
+  echo "ERROR: invalid infra log-root lock" >&2
+  exit 1
+fi
+( umask 077; : >>"$log_root_lock" )
+exec 8>>"$log_root_lock"
+flock -x 8
+if [[ -L "$log_root_lock" || ! -f "$log_root_lock" ]]; then
+  echo "ERROR: infra log-root lock changed" >&2
+  exit 1
+fi
+for pending in "${runtime_dir}"/.logs-migration.*; do
+  if [[ -e "$pending" || -L "$pending" ]]; then
+    echo "ERROR: infra log migration state is pending" >&2
+    exit 1
+  fi
+done
+if [[ -L "$log_dir" ]]; then
+  log_target=$(readlink -- "$log_dir") || exit 1
+  case "$log_target" in
+    ../DAY0-Prepare/*/99-output-infra) ;;
+    *) echo "ERROR: infra/logs is not a managed project link" >&2; exit 1 ;;
+  esac
+  log_project=${log_target#../DAY0-Prepare/}
+  log_project=${log_project%/99-output-infra}
+  case "$log_project" in
+    ''|.|..|*/*) echo "ERROR: invalid infra log project" >&2; exit 1 ;;
+  esac
+  projects_root="${runtime_dir}/../DAY0-Prepare"
+  physical_log_dir="${projects_root}/${log_project}/99-output-infra"
+  if [[ -L "$projects_root" || -L "${projects_root}/${log_project}" ||
+        -L "$physical_log_dir" || ! -d "$physical_log_dir" ]]; then
+    echo "ERROR: infra log owner is not a real project output" >&2
+    exit 1
+  fi
+  linked_root=$(cd -P -- "$log_dir" && pwd -P) || exit 1
+  bound_root=$(cd -P -- "$physical_log_dir" && pwd -P) || exit 1
+  if [[ "$linked_root" != "$bound_root" ]]; then
+    echo "ERROR: infra log owner changed during binding" >&2
+    exit 1
+  fi
+elif [[ -e "$log_dir" ]]; then
+  if [[ ! -d "$log_dir" ]]; then
+    echo "ERROR: infra/logs is not a real directory" >&2
+    exit 1
+  fi
+  physical_log_dir="$log_dir"
+else
+  mkdir -m 700 -- "$log_dir"
+  physical_log_dir="$log_dir"
+fi
+log_file="${physical_log_dir}/infra-teardown-$(date +%Y%m%d_%H%M%S)-$$.log"
 exec 3>>"$log_file"
+flock -u 8
+exec 8>&-
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] infra-teardown.sh started" >&3
 
 state_dir="/var/lib/http-infra"
@@ -60,7 +113,7 @@ apache_ports_conf="/etc/apache2/ports.conf"
 apache_default_site_state="${state_dir}/apache-default-site-enabled"
 apache_public_boundary_sha256="616629333ac16e4bc0c076a499d98864959372b5a24bee3c0d4257c1aa9d15fb"
 control_auth_helper="/usr/local/lib/http-ztp/control-auth.py"
-control_auth_helper_sha256="5a133a353cb7ac7af5be0be71b4ef85b41345716103d6e28590140638ee11038"
+control_auth_helper_sha256="f5cea5266ab808250b718250a8a73d7d6f6452a199b97fa500643d7ed9e988db"
 control_auth_file="/etc/http-ztp/control-users.htpasswd"
 apache_boundary_snapshot=""
 

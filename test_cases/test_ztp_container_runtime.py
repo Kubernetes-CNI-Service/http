@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 import configparser
 import copy
+import fnmatch
 import importlib.util
 import hashlib
 import io
@@ -59,7 +60,7 @@ def assert_published_docker_readme(testcase, *phrases: str) -> str:
 
 
 EXPECTED_CONTROL_AUTH_HELPER_SHA256 = (
-    "5a133a353cb7ac7af5be0be71b4ef85b41345716103d6e28590140638ee11038"
+    "f5cea5266ab808250b718250a8a73d7d6f6452a199b97fa500643d7ed9e988db"
 )
 EXPECTED_IMAGE_ENVIRONMENT = [
     "PATH=/opt/http-ztp/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
@@ -115,6 +116,7 @@ REQUIRED_ACTIVE_SOURCE_PATHS = (
     "tools/project_contract.py",
     "DAY0-Prepare/12-ztp-monitor.py",
     "monitor/switch-collection-worker.py",
+    "monitor/collection_v2_emitter.py",
     "monitor/manual-ztp-worker.py",
     "monitor/switch_collection_gate.py",
     "monitor/generate-monitor-html.py",
@@ -185,6 +187,9 @@ REQUIRED_PUBLISHED_LINKS = {
     ),
     "monitor/99-output-p2p": (
         "../DAY0-Prepare/{project}/99-output-p2p", "99-output-p2p", "dir",
+    ),
+    "monitor/99-output-ufm": (
+        "../DAY0-Prepare/{project}/99-output-ufm", "99-output-ufm", "dir",
     ),
     "monitor/ethernet": (
         "../DAY0-Prepare/{project}/99-output-monitor/ethernet",
@@ -338,6 +343,21 @@ def plan(*, names=("eno2",), indexes=(7,), endpoints=("192.0.2.10",)):
 class QuietContractTest(unittest.TestCase):
     """Keep deliberately injected production failures out of user test output."""
 
+    def http_project_fixture(self, http_root: Path | None = None) -> Path:
+        """Provide the real, regular project policy now read by service consumers."""
+        if http_root is None:
+            temporary = tempfile.TemporaryDirectory(prefix="http-v3-http-policy-")
+            self.addCleanup(temporary.cleanup)
+            http_root = Path(temporary.name)
+        project = http_root / "DAY0-Prepare/site-a"
+        project.mkdir(parents=True, exist_ok=True)
+        (project / "01-global.yaml").write_text(
+            "common:\n  mgmt:\n    http:\n      port: 80\n"
+            "    dhcp-server:\n      status: enabled\n",
+            encoding="utf-8",
+        )
+        return project
+
     def setUp(self) -> None:
         super().setUp()
         self.contract_output = io.StringIO()
@@ -430,6 +450,77 @@ class ContainerArtifactContractTests(QuietContractTest):
         self.assertEqual({"_CANDIDATE_PREFIX", "_RECOVERY_PREFIX"}, set(constants))
         for prefix in constants.values():
             self.assertTrue(prefix.startswith(".control-users."))
+
+    def test_auth_state_names_are_excluded_by_hermetic_ignore_approximation(self) -> None:
+        """Retain the auth-state negative oracle; fnmatch is not Docker COPY."""
+        helper_source = (ROOT / "tools/control-auth.py").read_text(
+            encoding="utf-8",
+        )
+        constants = {}
+        for node in ast.parse(helper_source).body:
+            if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+                continue
+            target = node.targets[0]
+            if isinstance(target, ast.Name) and target.id in {
+                "_CANDIDATE_PREFIX", "_RECOVERY_PREFIX",
+            }:
+                constants[target.id] = ast.literal_eval(node.value)
+        self.assertEqual({"_CANDIDATE_PREFIX", "_RECOVERY_PREFIX"}, set(constants))
+
+        ignore_paths = (
+            ROOT / ".dockerignore",
+            DOCKER_ROOT / ".dockerignore",
+            DOCKER_ROOT / "Dockerfile.dockerignore",
+        )
+        for ignore_path in ignore_paths[1:]:
+            self.assertEqual(ignore_paths[0].read_bytes(), ignore_path.read_bytes())
+
+        def included(relative: str, rules: list[str]) -> bool:
+            # Last-rule-wins is a hermetic approximation of the ignore order;
+            # actual BuildKit COPY membership remains an opt-in REAL_ENV gate.
+            selected = True
+            for raw_rule in rules:
+                rule = raw_rule.strip()
+                if not rule or rule.startswith("#"):
+                    continue
+                negate = rule.startswith("!")
+                pattern = rule[1:] if negate else rule
+                if fnmatch.fnmatchcase(relative, pattern):
+                    selected = negate
+            return selected
+
+        with tempfile.TemporaryDirectory() as temporary:
+            context = Path(temporary)
+            inventory = {
+                "tools/control-auth.py": helper_source,
+                "tools/" + constants["_CANDIDATE_PREFIX"] + "012345": "candidate",
+                (
+                    "DAY0-Prepare/template/private/"
+                    + constants["_RECOVERY_PREFIX"] + "abcdef"
+                ): "recovery",
+                "infra/docker/control-users.htpasswd": "canonical",
+                "monitor/control-users.htpasswd.operator-copy": "copy",
+                "infra/.SSH/id_ed25519": "docker-management-private-sentinel",
+                "infra/cre.json": "service-credential",
+                "tools/fake.service-account.json": "service-account-credential",
+            }
+            for relative, content in inventory.items():
+                target = context / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8")
+            observed = sorted(
+                path.relative_to(context).as_posix()
+                for path in context.rglob("*") if path.is_file()
+            )
+            self.assertEqual(sorted(inventory), observed)
+
+            for ignore_path in ignore_paths:
+                rules = ignore_path.read_text(encoding="utf-8").splitlines()
+                with self.subTest(ignore=ignore_path.relative_to(ROOT)):
+                    self.assertTrue(included("tools/control-auth.py", rules))
+                    for relative in observed:
+                        if relative != "tools/control-auth.py":
+                            self.assertFalse(included(relative, rules), relative)
 
 
     def test_dockerfile_is_ubuntu_2404_and_installs_foreground_runtime(self) -> None:
@@ -4355,6 +4446,98 @@ def monitor_authority_recovery_decision(_payload, _diagnostics):
 
 class ActivationContractTests(QuietContractTest):
     @staticmethod
+    def _dhcp_mode_fixture(http_root, mode, *, legacy=False):
+        # The fixture is hand-authored in the manual consumer tests and is
+        # consumed here by the actual container reader, not a mocked parent.
+        from test_cases.test_manual_applied_config import dhcp_mode_release_fixture
+        return dhcp_mode_release_fixture(http_root, mode, legacy=legacy)
+
+    @staticmethod
+    def _rebind_parent_id(parent):
+        basis_keys = (
+            "project", "deployment_scope", "switch_scope", "inputs",
+            "input_sources", "dhcp_status", "components", "inventory",
+        )
+        basis = {key: parent[key] for key in basis_keys if key in parent}
+        parent["release_id"] = hashlib.sha256(json.dumps(
+            basis, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()[:20]
+
+    def test_parent_dhcp_mode_matrix_rejects_internally_consistent_bad_records(self):
+        activate = load_script("activate.py")
+        cases = (
+            ("disabled", False, "missing-status"),
+            ("disabled", False, "unknown-status"),
+            ("disabled", False, "unexpected-dhcp-component"),
+            ("enabled", False, "missing-dhcp-component"),
+            ("disabled", True, "legacy-disabled"),
+            ("enabled", True, "legacy-missing-dhcp"),
+        )
+        for mode, legacy, mutation in cases:
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                http_root = Path(temporary) / "html"
+                _project, parent_path, parent, public_dhcp, _dhcp_dir = (
+                    self._dhcp_mode_fixture(http_root, mode, legacy=legacy)
+                )
+                if mutation == "missing-status":
+                    parent.pop("dhcp_status")
+                elif mutation == "unknown-status":
+                    parent["dhcp_status"] = "off"
+                elif mutation == "unexpected-dhcp-component":
+                    parent["components"]["dhcp"] = {
+                        "release_id": "dhcp-a",
+                        "manifest_sha256": hashlib.sha256(public_dhcp.read_bytes()).hexdigest(),
+                    }
+                elif mutation in {"missing-dhcp-component", "legacy-missing-dhcp"}:
+                    parent["components"].pop("dhcp")
+                self._rebind_parent_id(parent)
+                parent_path.write_text(json.dumps(parent) + "\n", encoding="utf-8")
+                settings = activate.Settings(
+                    project_name="site-a", scope="air", switch_scope="eth",
+                    http_root=http_root,
+                )
+                with self.assertRaises(activate.ActivationError):
+                    activate.validate_parent_release(settings, parent_path)
+
+    def test_disabled_v2_marker_is_http_only_without_dhcp_hash_or_service(self):
+        activate = load_script("activate.py")
+        with tempfile.TemporaryDirectory() as temporary:
+            http_root = Path(temporary) / "html"
+            project, _parent_path, parent, _public_dhcp, _dhcp_dir = (
+                self._dhcp_mode_fixture(http_root, "disabled")
+            )
+            settings = activate.Settings(
+                project_name="site-a", scope="air", switch_scope="eth",
+                http_root=http_root, dhcp_config=http_root / "missing-dhcp.conf",
+            )
+            selected = SimpleNamespace(
+                endpoint_ips=("192.0.2.10",), listener_names=("eth0",),
+            )
+            public_p2p = activate.PUBLISHED_P2P_INPUT_LINK.as_posix()
+            with mock.patch.object(
+                activate, "published_runtime_identity", return_value={},
+            ), mock.patch.object(
+                activate, "published_link_identity", return_value={
+                    public_p2p: {"sha256": parent["inputs"]["p2p"]},
+            }), mock.patch.object(
+                activate, "validate_image_source_contract", return_value={},
+            ):
+                marker = activate.build_activation_marker(settings, selected)
+                self.assertEqual("disabled", marker["dhcp_status"])
+                self.assertNotIn("dhcp_config_sha256", marker)
+                self.assertIn("apache2", marker["services"])
+                self.assertNotIn("dhcpd", marker["services"])
+                valid, reason = activate.validate_activation_marker(
+                    marker, settings, selected,
+                )
+                self.assertTrue(valid, reason)
+                injected = dict(marker, dhcp_config_sha256="0" * 64)
+                valid, _reason = activate.validate_activation_marker(
+                    injected, settings, selected,
+                )
+                self.assertFalse(valid)
+
+    @staticmethod
     def _stable_snapshot_fixtures():
         links = [
             {
@@ -5258,6 +5441,13 @@ class ActivationContractTests(QuietContractTest):
             }
             for name, path in inputs.items():
                 path.write_text(f"independent-{name}-fixture\n", encoding="utf-8")
+            inputs["global"].write_text(
+                "common:\n  mgmt:\n    dhcp-server:\n      status: disabled\n",
+                encoding="utf-8",
+            )
+            p2p_source = project / "fixture-p2p.xlsx"
+            inputs["p2p"].rename(p2p_source)
+            inputs["p2p"].symlink_to(p2p_source.name)
             subnet = inputs["subnet"]
             dhcp = root / "dhcpd.conf"
             release = root / "current-release.json"
@@ -5266,13 +5456,20 @@ class ActivationContractTests(QuietContractTest):
                 name: hashlib.sha256(path.read_bytes()).hexdigest()
                 for name, path in inputs.items()
             }
-            release.write_text(json.dumps({
-                "release_id": "fixture",
+            parent_payload = {
+                "schema_version": 2, "project": "site-a",
+                "validation": "passed", "dhcp_status": "disabled",
                 "deployment_scope": "prod",
                 "switch_scope": "all",
                 "inputs": hashes,
+                "input_sources": {"p2p": {
+                    "path": p2p_source.name, "sha256": hashes["p2p"],
+                }},
                 "components": {},
-            }) + "\n", encoding="utf-8")
+                "inventory": [],
+            }
+            self._rebind_parent_id(parent_payload)
+            release.write_text(json.dumps(parent_payload) + "\n", encoding="utf-8")
             bootstrap = http_root / "ztp/ztp-bootstrap_oob.sh"
             bootstrap.parent.mkdir(parents=True)
             for relative in activate.PUBLISHED_RUNTIME_FILES:
@@ -5324,7 +5521,11 @@ class ActivationContractTests(QuietContractTest):
                 bootstrap.write_text(
                     "#!/bin/sh\n# release fixture\n", encoding="utf-8",
                 )
-                inputs["global"].write_text("changed-after-load\n", encoding="utf-8")
+                inputs["global"].write_text(
+                    "common:\n  mgmt:\n    dhcp-server:\n      status: disabled\n"
+                    "  changed_after_load: true\n",
+                    encoding="utf-8",
+                )
                 drift_valid, drift_reason = activate.validate_activation_marker(
                     marker, settings, plan(indexes=(91,)), subnet_csv=subnet,
                     dhcp_config=dhcp, release_manifest=release,
@@ -5359,6 +5560,13 @@ class ActivationContractTests(QuietContractTest):
             }
             for name, path in inputs.items():
                 path.write_text(f"fixture-{name}\n", encoding="utf-8")
+            inputs["global"].write_text(
+                "common:\n  mgmt:\n    dhcp-server:\n      status: disabled\n",
+                encoding="utf-8",
+            )
+            p2p_source = project / "fixture-p2p.xlsx"
+            inputs["p2p"].rename(p2p_source)
+            inputs["p2p"].symlink_to(p2p_source.name)
             release_dir = project / "99-output-eth/release-a"
             release_dir.mkdir(parents=True)
             child_manifest = release_dir / "release-manifest.json"
@@ -5368,7 +5576,8 @@ class ActivationContractTests(QuietContractTest):
             current = project / "99-output-ztp/current-release.json"
             current.parent.mkdir(parents=True)
             parent_payload = {
-                "release_id": "parent-a",
+                "schema_version": 2, "project": "site-a",
+                "validation": "passed", "dhcp_status": "disabled",
                 "deployment_scope": "air",
                 "switch_scope": "eth",
                 "inputs": {
@@ -5387,7 +5596,13 @@ class ActivationContractTests(QuietContractTest):
                         ).hexdigest(),
                     },
                 },
+                "input_sources": {"p2p": {
+                    "path": p2p_source.name,
+                    "sha256": hashlib.sha256(p2p_source.read_bytes()).hexdigest(),
+                }},
+                "inventory": [{"hostname": "leaf01", "type": "eth"}],
             }
+            self._rebind_parent_id(parent_payload)
             current.write_text(
                 json.dumps(parent_payload) + "\n", encoding="utf-8",
             )
@@ -5401,6 +5616,7 @@ class ActivationContractTests(QuietContractTest):
 
             activate.validate_parent_release(settings, current)
             parent_payload["switch_scope"] = "nvl"
+            self._rebind_parent_id(parent_payload)
             current.write_text(
                 json.dumps(parent_payload) + "\n", encoding="utf-8",
             )
@@ -5411,6 +5627,7 @@ class ActivationContractTests(QuietContractTest):
 
             parent_payload["switch_scope"] = "eth"
             mini_hash = parent_payload["inputs"].pop("mini_air_devices")
+            self._rebind_parent_id(parent_payload)
             current.write_text(
                 json.dumps(parent_payload) + "\n", encoding="utf-8",
             )
@@ -5418,6 +5635,7 @@ class ActivationContractTests(QuietContractTest):
                 activate.validate_parent_release(settings, current)
 
             parent_payload["inputs"]["mini_air_devices"] = mini_hash
+            self._rebind_parent_id(parent_payload)
             current.write_text(
                 json.dumps(parent_payload) + "\n", encoding="utf-8",
             )
@@ -5443,6 +5661,10 @@ class ActivationContractTests(QuietContractTest):
                 "02-dhcp-subnet_config.csv",
             ):
                 (project / name).write_text(f"site-a-{name}\n", encoding="utf-8")
+            (project / "01-global.yaml").write_text(
+                "common:\n  mgmt:\n    dhcp-server:\n      status: enabled\n",
+                encoding="utf-8",
+            )
             sibling_p2p = sibling / "fixture.xlsx"
             sibling_p2p.write_text("same-hash-is-not-authority\n", encoding="utf-8")
             (project / "p2p.xlsx").symlink_to("../site-b/fixture.xlsx")
@@ -5452,23 +5674,36 @@ class ActivationContractTests(QuietContractTest):
 
             (project / "p2p.xlsx").unlink()
             (project / "p2p.xlsx").write_text("site-a-p2p\n", encoding="utf-8")
+            source = project / "site-a-p2p.xlsx"
+            (project / "p2p.xlsx").rename(source)
+            (project / "p2p.xlsx").symlink_to(source.name)
             inputs = {
                 "global": project / "01-global.yaml",
                 "devices": project / "02-devices_config.csv",
                 "subnet": project / "02-dhcp-subnet_config.csv",
                 "p2p": project / "p2p.xlsx",
             }
+            dhcp = http_root / "ztp/config/isc-dhcp-server"
+            dhcp.mkdir(parents=True)
+            outputs = {}
+            for output_name in (
+                "dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts",
+            ):
+                output = dhcp / output_name
+                output.write_text(f"fixture-{output_name}\n", encoding="utf-8")
+                outputs[output_name] = {
+                    "sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
+                }
             target_manifest = (
                 project / "99-output-dhcp/dhcp-release-manifest.json"
             )
             target_manifest.parent.mkdir(parents=True)
             target_manifest.write_text(
-                '{"release_id":"dhcp"}\n', encoding="utf-8",
+                json.dumps({"release_id": "dhcp", "outputs": outputs}) + "\n",
+                encoding="utf-8",
             )
             outside = http_root.parent / "outside-dhcp-release.json"
             outside.write_bytes(target_manifest.read_bytes())
-            dhcp = http_root / "ztp/config/isc-dhcp-server"
-            dhcp.mkdir(parents=True)
             public_manifest = dhcp / "dhcp-release-manifest.json"
             public_manifest.symlink_to(
                 "../../../DAY0-Prepare/site-a/99-output-dhcp/"
@@ -5476,14 +5711,19 @@ class ActivationContractTests(QuietContractTest):
             )
             current = project / "99-output-ztp/current-release.json"
             current.parent.mkdir(parents=True)
-            current.write_text(json.dumps({
-                "release_id": "parent",
+            parent_payload = {
+                "schema_version": 2, "project": "site-a",
+                "validation": "passed", "dhcp_status": "enabled",
                 "deployment_scope": "air",
                 "switch_scope": "eth",
                 "inputs": {
                     name: hashlib.sha256(path.read_bytes()).hexdigest()
                     for name, path in inputs.items()
                 },
+                "input_sources": {"p2p": {
+                    "path": source.name,
+                    "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                }},
                 "components": {
                     "dhcp": {
                         "release_id": "dhcp",
@@ -5492,7 +5732,10 @@ class ActivationContractTests(QuietContractTest):
                         ).hexdigest(),
                     },
                 },
-            }) + "\n", encoding="utf-8")
+                "inventory": [{"hostname": "leaf01", "type": "eth"}],
+            }
+            self._rebind_parent_id(parent_payload)
+            current.write_text(json.dumps(parent_payload) + "\n", encoding="utf-8")
             settings = activate.Settings(
                 project_name="site-a", scope="air", http_root=http_root,
             )
@@ -5562,6 +5805,29 @@ class ActivationContractTests(QuietContractTest):
             ("apache2", "dhcpd", "ztp-monitor", "switch-collection", "manual-ztp"),
             activate.expected_services(plan()),
         )
+
+    def test_http_only_project_has_apache_without_dhcp_or_ztp_workers(self) -> None:
+        activate = load_script("activate.py")
+        selected = plan(names=(), indexes=(), endpoints=())
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary) / "DAY0-Prepare/site-a"
+            project.mkdir(parents=True)
+            (project / "01-global.yaml").write_text(
+                "common:\n  mgmt:\n    http:\n      address: 192.0.2.88\n"
+                "    dhcp-server:\n      status: disabled\n",
+                encoding="utf-8",
+            )
+            settings = SimpleNamespace(project_dir=project)
+            listeners = activate.project_http_listener_ips(settings, selected)
+            self.assertEqual(("192.0.2.88",), listeners)
+            self.assertEqual((), selected.endpoint_ips)
+            self.assertEqual((), selected.listener_names)
+            self.assertEqual(
+                ("apache2",),
+                activate.expected_services(
+                    selected, dhcp_status="disabled", http_listener_ips=listeners,
+                ),
+            )
 
     def test_dhcp_only_or_relay_ingress_plan_still_runs_exact_dhcp_service(self) -> None:
         activate = load_script("activate.py")
@@ -6849,9 +7115,94 @@ class HealthContractTests(QuietContractTest):
                 ):
                     health.check_runtime()
 
+    def test_http_only_precommit_health_accepts_exact_apache_set(self) -> None:
+        health = load_script("healthcheck.py")
+        selected = plan(names=(), indexes=(), endpoints=())
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project = root / "DAY0-Prepare/site-a"
+            project.mkdir(parents=True)
+            (project / "01-global.yaml").write_text(
+                "common:\n  mgmt:\n    http:\n      address: 192.0.2.88\n"
+                "    dhcp-server:\n      status: disabled\n",
+                encoding="utf-8",
+            )
+            settings = SimpleNamespace(
+                project_dir=project,
+                rebuild_required=root / "rebuild-required.json",
+                guardian_fault=root / "guardian-fault.json",
+                quarantine_marker=root / "quarantine.json",
+            )
+            states = {
+                "rsyslog": "RUNNING", "logrotate": "RUNNING",
+                "runtime-guardian": "RUNNING",
+                **{
+                    service: ("RUNNING" if service == "apache2" else "STOPPED")
+                    for service in health.activate.MANAGED_SERVICES
+                },
+            }
+            with mock.patch.object(
+                health.activate.Settings, "from_environment", return_value=settings,
+            ), mock.patch.object(
+                health.activate, "validate_python_runtime",
+            ), mock.patch.object(
+                health.activate, "require_monitor_authority",
+            ), mock.patch.object(
+                health.activate, "validate_image_source_contract",
+            ), mock.patch.object(
+                health.activate, "observe_runtime",
+                return_value=(selected, None, {}, "apache fixture"),
+            ), mock.patch.object(
+                health, "_load_runtime_state", return_value={},
+            ), mock.patch.object(
+                health, "_supervisor_states", return_value=states,
+            ), mock.patch.object(
+                health, "_supervisor_pid", return_value=0,
+            ), mock.patch.object(
+                health.activate, "validate_control_cgi",
+            ), mock.patch.object(
+                health.activate, "read_activation_marker", return_value=None,
+            ), mock.patch.object(
+                health, "_check_apache_service",
+            ) as apache_check, mock.patch.object(
+                health, "_check_dhcp_service",
+            ) as dhcp_check:
+                self.assertIn(
+                    "healthy activated runtime",
+                    health.check_runtime(expected_services=("apache2",)),
+                )
+            apache_check.assert_called_once()
+            dhcp_check.assert_not_called()
+
+            for wrong_services in ((), ("apache2", "dhcpd")):
+                with self.subTest(wrong_services=wrong_services), mock.patch.object(
+                    health.activate.Settings, "from_environment", return_value=settings,
+                ), mock.patch.object(
+                    health.activate, "validate_python_runtime",
+                ), mock.patch.object(
+                    health.activate, "require_monitor_authority",
+                ), mock.patch.object(
+                    health.activate, "validate_image_source_contract",
+                ), mock.patch.object(
+                    health.activate, "observe_runtime",
+                    return_value=(selected, None, {}, "apache fixture"),
+                ), mock.patch.object(
+                    health, "_load_runtime_state", return_value={},
+                ), mock.patch.object(
+                    health, "_supervisor_states", return_value=states,
+                ), mock.patch.object(
+                    health.activate, "validate_control_cgi",
+                ):
+                    with self.assertRaisesRegex(
+                        health.HealthError,
+                        "pre-commit service set does not match current plan",
+                    ):
+                        health.check_runtime(expected_services=wrong_services)
+
     def test_active_contract_requires_every_unselected_service_exactly_stopped(self) -> None:
         health = load_script("healthcheck.py")
         selected = plan(names=(), indexes=(), endpoints=())
+        project = self.http_project_fixture()
         control = {
             "rsyslog": "RUNNING", "logrotate": "RUNNING",
             "runtime-guardian": "RUNNING",
@@ -6859,6 +7210,7 @@ class HealthContractTests(QuietContractTest):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             settings = SimpleNamespace(
+                project_dir=project,
                 rebuild_required=root / "rebuild-required.json",
                 guardian_fault=root / "guardian-fault.json",
                 quarantine_marker=root / "quarantine.json",
@@ -7017,9 +7369,11 @@ class HealthContractTests(QuietContractTest):
         )
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
+            project = self.http_project_fixture(root)
             listeners = root / "apache-listeners.conf"
             listeners.write_text("Listen 192.0.2.10:80\n", encoding="utf-8")
             settings = SimpleNamespace(
+                project_dir=project,
                 rebuild_required=root / "rebuild-required.json",
                 guardian_fault=root / "guardian-fault.json",
                 quarantine_marker=root / "quarantine.json",
@@ -7355,6 +7709,35 @@ class ContainerTransactionContractTests(QuietContractTest):
         self.assertNotIn('"--start-ztp-monitor"', source)
         self.assertIn("publish_precommit_activation", source)
 
+    def test_container_load_declares_management_server_role_to_real_load_parser(self) -> None:
+        hostctl = load_script("hostctl.py")
+        load_path = ROOT / "DAY0-Prepare/11-load.py"
+        spec = importlib.util.spec_from_file_location(
+            "container_load_host_role_contract", load_path,
+        )
+        assert spec is not None and spec.loader is not None
+        load = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = load
+        spec.loader.exec_module(load)
+
+        settings = SimpleNamespace(
+            http_root=Path("/var/www/html"), project_name="site-a",
+            scope="air", switch_scope="eth", mini=True, monitor_interval=30,
+        )
+        command = hostctl.load_command(settings)
+        role_option = "--host-role=management-server"
+        self.assertEqual(1, command.count(role_option))
+        self.assertEqual(
+            "management-server",
+            load.resolve_host_role(load.parse_args(list(command[3:])).host_role, "Linux"),
+        )
+
+        missing_role_mutant = [part for part in command[3:] if part != role_option]
+        with self.assertRaisesRegex(load.LoadError, "Linux requires explicit --host-role"):
+            load.resolve_host_role(
+                load.parse_args(missing_role_mutant).host_role, "Linux",
+            )
+
     def test_container_child_generates_only_and_hostctl_owns_service_convergence(self) -> None:
         hostctl = load_script("hostctl.py")
         air_mini = SimpleNamespace(
@@ -7365,6 +7748,7 @@ class ContainerTransactionContractTests(QuietContractTest):
             "/usr/bin/python3", "-u",
             "/var/www/html/DAY0-Prepare/11-load.py", "site-a",
             "--skip-infra",
+            "--host-role=management-server",
             "--deployment-scope", "air",
             "--switch", "eth",
             "--mini",
@@ -7508,11 +7892,13 @@ class ContainerTransactionContractTests(QuietContractTest):
             http_root = Path(temporary) / "html"
             (http_root / "ztp").mkdir(parents=True)
             (http_root / "monitor/status").mkdir(parents=True)
+            project = self.http_project_fixture(http_root)
             settings = SimpleNamespace(
-                http_root=http_root, project_name="site-a", scope="air",
+                http_root=http_root, project_dir=project,
+                project_name="site-a", scope="air",
                 switch_scope="eth", mini=False, monitor_interval=30,
             )
-            selected = object()
+            selected = plan()
             events = []
 
             @contextmanager
@@ -7661,8 +8047,10 @@ class ContainerTransactionContractTests(QuietContractTest):
         with tempfile.TemporaryDirectory() as temporary:
             marker = Path(temporary) / "rebuild-required.json"
             marker.write_text('{"schema_version":1}\n', encoding="utf-8")
+            project = self.http_project_fixture(Path(temporary))
             settings = SimpleNamespace(
                 http_root=Path("/var/www/html"), rebuild_required=marker,
+                project_dir=project,
                 project_name="site-a", scope="air", switch_scope="eth",
                 mini=False, monitor_interval=30,
             )
@@ -7684,14 +8072,15 @@ class ContainerTransactionContractTests(QuietContractTest):
             ), mock.patch.object(
                 hostctl.activate, "restore_mutable_image_sources",
             ), mock.patch.object(
-                hostctl.activate, "observe_runtime", return_value=(object(), None, {}),
+                hostctl.activate, "observe_runtime",
+                return_value=(plan(names=(), indexes=(), endpoints=()), None, {}),
             ), mock.patch.object(hostctl, "stop_managed_services"), \
                     mock.patch.object(hostctl.activate, "clear_activation"), \
                     mock.patch.object(hostctl, "clear_guardian_fault"), \
                     mock.patch.object(hostctl.activate, "install_control_cgi"), \
                     mock.patch.object(
                         hostctl.activate, "prepare_runtime",
-                        return_value=(object(), None, {}),
+                        return_value=(plan(names=(), indexes=(), endpoints=()), None, {}),
                     ), mock.patch.object(hostctl, "run_child"), \
                     mock.patch.object(
                         hostctl.activate, "expected_services", return_value=(),
@@ -7716,13 +8105,88 @@ class ContainerTransactionContractTests(QuietContractTest):
             self.assertEqual(2, sum(event[0] == "health" for event in events))
 
     @with_valid_monitor_authority_fixture
+    def test_http_only_load_precommit_and_commit_converge_exact_apache_set(self) -> None:
+        hostctl = load_script("hostctl.py")
+        selected = plan(names=(), indexes=(), endpoints=())
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project = root / "DAY0-Prepare/site-a"
+            project.mkdir(parents=True)
+            (project / "01-global.yaml").write_text(
+                "common:\n  mgmt:\n    http:\n      address: 192.0.2.88\n"
+                "    dhcp-server:\n      status: disabled\n",
+                encoding="utf-8",
+            )
+            settings = SimpleNamespace(
+                http_root=root, project_dir=project, project_name="site-a",
+                scope="air", switch_scope="all", mini=False,
+                monitor_interval=30,
+            )
+            events = []
+
+            @contextmanager
+            def held(_root):
+                yield 19
+
+            with mock.patch.object(
+                hostctl, "_lock_contract",
+                return_value=(hostctl.hostlock.HostLockError, held, lambda _fd: {}),
+            ), mock.patch.object(
+                hostctl.activate, "validate_image_source_contract",
+            ), mock.patch.object(
+                hostctl.activate, "restore_mutable_image_sources",
+            ), mock.patch.object(
+                hostctl.activate, "observe_runtime",
+                return_value=(selected, None, {}),
+            ), mock.patch.object(hostctl.activate, "clear_activation"), \
+                    mock.patch.object(hostctl, "stop_managed_services"), \
+                    mock.patch.object(hostctl, "clear_guardian_fault"), \
+                    mock.patch.object(hostctl.activate, "install_control_cgi"), \
+                    mock.patch.object(
+                        hostctl.activate, "prepare_runtime",
+                        return_value=(selected, None, {}),
+                    ), mock.patch.object(hostctl, "run_child"), \
+                    mock.patch.object(
+                        hostctl.activate, "initialize_worker_control_files",
+                    ), mock.patch.object(
+                        hostctl.activate, "publish_precommit_activation",
+                        side_effect=lambda *_args: events.append(("precommit", None)),
+                    ), mock.patch.object(
+                        hostctl, "converge_services",
+                        side_effect=lambda services: events.append(
+                            ("converge", tuple(services))
+                        ),
+                    ), mock.patch.object(
+                        hostctl.healthcheck, "check_runtime",
+                        side_effect=lambda **kwargs: events.append(
+                            ("health", kwargs)
+                        ),
+                    ), mock.patch.object(
+                        hostctl.activate, "commit_activation",
+                        side_effect=lambda *_args: events.append(("commit", None)),
+                    ), mock.patch.object(hostctl, "clear_quarantine"), \
+                    mock.patch.object(hostctl.activate, "clear_rebuild_required"):
+                hostctl.transactional_load(settings)
+
+            self.assertEqual((), selected.endpoint_ips)
+            self.assertEqual((), selected.listener_names)
+            self.assertEqual(
+                ["precommit", "converge", "health", "commit", "health"],
+                [event[0] for event in events],
+            )
+            self.assertEqual(("apache2",), events[1][1])
+            self.assertEqual(("apache2",), events[2][1]["expected_services"])
+            self.assertTrue(events[4][1]["require_active"])
+
+    @with_valid_monitor_authority_fixture
     def test_load_withdraws_start_authority_before_stop_and_publishes_candidate_late(self) -> None:
         hostctl = load_script("hostctl.py")
         settings = SimpleNamespace(
             http_root=Path("/var/www/html"), project_name="site-a",
+            project_dir=self.http_project_fixture(),
             scope="air", switch_scope="eth", mini=False, monitor_interval=30,
         )
-        selected = object()
+        selected = plan(names=("eth",), indexes=(7,), endpoints=())
         events = []
 
         @contextmanager
@@ -8071,6 +8535,7 @@ class ContainerTransactionContractTests(QuietContractTest):
         hostctl = load_script("hostctl.py")
         settings = SimpleNamespace(
             http_root=Path("/var/www/html"),
+            project_dir=self.http_project_fixture(),
             rebuild_required=Path("/state/rebuild-required.json"),
             quarantine_marker=Path("/state/quarantine.json"),
             guardian_fault=Path("/state/guardian-fault.json"),
@@ -8172,6 +8637,7 @@ class ContainerTransactionContractTests(QuietContractTest):
         hostctl = load_script("hostctl.py")
         settings = SimpleNamespace(
             http_root=Path("/var/www/html"),
+            project_dir=self.http_project_fixture(),
             rebuild_required=Path("/state/rebuild-required.json"),
             quarantine_marker=Path("/state/quarantine.json"),
             guardian_fault=Path("/state/guardian-fault.json"),
@@ -8286,6 +8752,7 @@ class ContainerTransactionContractTests(QuietContractTest):
         hostctl = load_script("hostctl.py")
         settings = SimpleNamespace(
             http_root=Path("/var/www/html"),
+            project_dir=self.http_project_fixture(),
             rebuild_required=Path("/state/rebuild-required.json"),
             quarantine_marker=Path("/state/quarantine.json"),
             guardian_fault=Path("/state/guardian-fault.json"),

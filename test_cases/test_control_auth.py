@@ -25,7 +25,7 @@ import fcntl
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "tools/control-auth.py"
 EXPECTED_HELPER_SHA256 = (
-    "5a133a353cb7ac7af5be0be71b4ef85b41345716103d6e28590140638ee11038"
+    "f5cea5266ab808250b718250a8a73d7d6f6452a199b97fa500643d7ed9e988db"
 )
 
 
@@ -277,6 +277,41 @@ class ControlAuthDirectTests(unittest.TestCase):
             "by design; it cannot be automated or run unattended.",
             " ".join(completed.stdout.split()),
         )
+
+    def test_rotate_help_names_required_target_without_touching_credentials(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workdir = Path(directory)
+            completed = subprocess.run(
+                [sys.executable, "-B", os.fspath(SCRIPT), "rotate", "--help"],
+                cwd=workdir,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+                timeout=15,
+            )
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertEqual("", completed.stderr)
+            self.assertIn("--user {nvis,cumulus}", completed.stdout)
+            self.assertIn("选择要轮换的 Monitor 控制用户", completed.stdout)
+            self.assertEqual([], list(workdir.iterdir()))
+
+    def test_real_environment_registers_pinned_helper_upgrade_and_rollback(self):
+        cases = (ROOT / "test_cases/REAL_ENVIRONMENT.md").read_text(
+            encoding="utf-8"
+        )
+        case_id = "TC-REAL-MONITOR-AUTH-HELPER-PIN-TRANSITION-001"
+        self.assertTrue(case_id in cases, f"missing {case_id}")
+        case = cases.split(case_id, 1)[1].split("\n## ", 1)[0]
+        for required in (
+            EXPECTED_HELPER_SHA256,
+            "5a133a353cb7ac7af5be0be71b4ef85b41345716103d6e28590140638ee11038",
+            "mixed-version",
+            "NOT RUN / REAL_ENV REQUIRED",
+        ):
+            with self.subTest(required=required):
+                self.assertTrue(required in case, f"missing {required} in {case_id}")
 
     def test_explicit_ensure_emits_one_bounded_actionable_factory_warning(self):
         self._write()

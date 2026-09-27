@@ -45,6 +45,8 @@ ethernet/monitor/spx-link
 ethernet/monitor/spx-link/**
 ethernet/p2p.xlsx
 ethernet/p2p.xlsx/**
+infiniband/01-global.yaml
+infiniband/01-global.yaml/**
 infiniband/bringup
 infiniband/bringup/**
 infiniband/bringup/ndr/ndr-upgrade-logs
@@ -71,6 +73,12 @@ infiniband/monitor/ib.csv
 infiniband/monitor/ib.csv/**
 infiniband/p2p.xlsx
 infiniband/p2p.xlsx/**
+infra/.logs-migration.*
+infra/.logs-migration.*/**
+infra/.logs-migration.json
+infra/.logs-migration.json/**
+infra/.logs.lock
+infra/.logs.lock/**
 infra/01-global.yaml
 infra/01-global.yaml/**
 infra/02-devices_config.csv
@@ -91,6 +99,8 @@ monitor/02-devices_config.csv
 monitor/02-devices_config.csv/**
 monitor/99-output-p2p
 monitor/99-output-p2p/**
+monitor/99-output-ufm
+monitor/99-output-ufm/**
 monitor/cabletracker-main
 monitor/cabletracker-main/**
 monitor/cabletracker-main.zip

@@ -13,6 +13,7 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -542,6 +543,130 @@ class TopologyWorkflowTests(unittest.TestCase):
                             LLDP.device_type(hostname, l_patterns, l_order),
                         ],
                     )
+
+
+class NvosCvtPublicationDirectTests(unittest.TestCase):
+    def test_real_cvt_writer_publishes_readable_workbook_without_backup(self):
+        with tempfile.TemporaryDirectory(prefix="cvt-real-writer-") as directory:
+            target = Path(directory) / "report.xlsx"
+            backup = NVOS.publish_cvt_workbook(target, [], [], [], [])
+            self.assertIsNone(backup)
+            with zipfile.ZipFile(target) as workbook:
+                self.assertIn("xl/workbook.xml", workbook.namelist())
+                self.assertIn("xl/worksheets/sheet1.xml", workbook.namelist())
+            self.assertEqual([], sorted(Path(directory).glob(".report.xlsx.*")))
+
+    def test_cvt_existing_target_keeps_backup_of_exact_old_bytes(self):
+        with tempfile.TemporaryDirectory(prefix="cvt-backup-") as directory:
+            target = Path(directory) / "report.xlsx"
+            target.write_bytes(b"OLD-CVT")
+            with mock.patch.object(
+                NVOS, "write_cvt_workbook",
+                side_effect=lambda path, *_rows: Path(path).write_bytes(b"NEW-CVT"),
+            ):
+                backup = NVOS.publish_cvt_workbook(target, [], [], [], [])
+            self.assertEqual(target.with_name("report.xlsx.bak"), backup)
+            self.assertEqual(b"OLD-CVT", backup.read_bytes())
+            self.assertEqual(b"NEW-CVT", target.read_bytes())
+
+    def test_cvt_failed_publish_restores_old_target_without_receipt(self):
+        with tempfile.TemporaryDirectory(prefix="cvt-rollback-") as directory:
+            target = Path(directory) / "report.xlsx"
+            target.write_bytes(b"OLD-CVT")
+            original_replace = os.replace
+            injected = []
+
+            def fail_candidate_rename(source, destination, *args, **kwargs):
+                if (not injected and destination == target.name
+                        and isinstance(source, str) and source.startswith(".")):
+                    injected.append(True)
+                    raise OSError("injected rename failure")
+                return original_replace(source, destination, *args, **kwargs)
+
+            with mock.patch.object(
+                NVOS, "write_cvt_workbook",
+                side_effect=lambda path, *_rows: Path(path).write_bytes(b"NEW-CVT"),
+            ), mock.patch.object(NVOS.os, "replace", side_effect=fail_candidate_rename):
+                with self.assertRaises(OSError):
+                    NVOS.publish_cvt_workbook(target, [], [], [], [])
+            self.assertTrue(injected)
+            self.assertEqual(b"OLD-CVT", target.read_bytes())
+            self.assertFalse(target.with_name("report.xlsx.bak").exists())
+            self.assertEqual([], sorted(Path(directory).glob(".report.xlsx.*")))
+
+    def test_cvt_parent_rebind_cannot_publish_into_foreign_directory(self):
+        """A validated private stage must not follow a rebound project parent."""
+        with tempfile.TemporaryDirectory(prefix="cvt-parent-rebind-") as directory:
+            base = Path(directory)
+            parent = base / "legitimate"
+            foreign = base / "foreign"
+            detached = base / "detached"
+            parent.mkdir(mode=0o700)
+            foreign.mkdir(mode=0o700)
+            target = parent / "report.xlsx"
+            foreign_target = foreign / target.name
+            foreign_target.write_bytes(b"FOREIGN-ORIGINAL")
+            original_replace = os.replace
+            rebound = []
+
+            def rebind_before_replace(source, destination, *args, **kwargs):
+                if not rebound:
+                    parent.rename(detached)
+                    parent.symlink_to(foreign, target_is_directory=True)
+                    source_path = Path(source)
+                    if source_path.is_absolute() and source_path.parent == parent:
+                        (foreign / source_path.name).write_bytes(b"FOREIGN-STAGE")
+                    rebound.append(True)
+                return original_replace(source, destination, *args, **kwargs)
+
+            def render_private_workbook(path, *_rows):
+                Path(path).write_bytes(b"VALIDATED-PRIVATE-CVT")
+
+            with mock.patch.object(NVOS, "write_cvt_workbook", side_effect=render_private_workbook), \
+                    mock.patch.object(NVOS.os, "replace", side_effect=rebind_before_replace):
+                with self.assertRaises((OSError, NVOS.ConversionError)):
+                    NVOS.publish_cvt_workbook(target, [], [], [], [])
+            self.assertTrue(rebound)
+            self.assertEqual(b"FOREIGN-ORIGINAL", foreign_target.read_bytes())
+            self.assertEqual([], sorted(foreign.glob(".report.xlsx.*")))
+
+    def test_cvt_rebound_backup_never_moves_foreign_old_target(self):
+        with tempfile.TemporaryDirectory(prefix="cvt-backup-rebind-") as directory:
+            base = Path(directory)
+            parent = base / "legitimate"
+            foreign = base / "foreign"
+            detached = base / "detached"
+            parent.mkdir(mode=0o700)
+            foreign.mkdir(mode=0o700)
+            target = parent / "report.xlsx"
+            target.write_bytes(b"LEGITIMATE-OLD")
+            foreign_target = foreign / target.name
+            foreign_target.write_bytes(b"FOREIGN-OLD")
+            foreign_inode = foreign_target.stat().st_ino
+            original_replace = os.replace
+            rebound = []
+
+            def rebind_before_backup(source, destination, *args, **kwargs):
+                if not rebound:
+                    parent.rename(detached)
+                    parent.symlink_to(foreign, target_is_directory=True)
+                    source_path = Path(source)
+                    if source_path.is_absolute() and source_path.parent == parent:
+                        (foreign / source_path.name).write_bytes(b"FOREIGN-STAGE")
+                    rebound.append(True)
+                return original_replace(source, destination, *args, **kwargs)
+
+            with mock.patch.object(
+                NVOS, "write_cvt_workbook",
+                side_effect=lambda path, *_rows: Path(path).write_bytes(b"NEW-CVT"),
+            ), mock.patch.object(NVOS.os, "replace", side_effect=rebind_before_backup):
+                with self.assertRaises((OSError, NVOS.ConversionError)):
+                    NVOS.publish_cvt_workbook(target, [], [], [], [])
+            self.assertTrue(rebound)
+            self.assertEqual((b"FOREIGN-OLD", foreign_inode),
+                             (foreign_target.read_bytes(), foreign_target.stat().st_ino))
+            self.assertFalse((foreign / "report.xlsx.bak").exists())
+            self.assertEqual(b"LEGITIMATE-OLD", (detached / "report.xlsx").read_bytes())
 
 
 if __name__ == "__main__":

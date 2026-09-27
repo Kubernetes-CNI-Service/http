@@ -3318,7 +3318,12 @@ def _parser() -> argparse.ArgumentParser:
     subparsers.add_parser("validate", help="validate the complete state")
     subparsers.add_parser("status", help="print exact machine JSON")
     rotate = subparsers.add_parser("rotate", help="rotate one control user")
-    rotate.add_argument("--user", required=True, choices=USERS)
+    rotate.add_argument(
+        "--user",
+        required=True,
+        choices=USERS,
+        help="选择要轮换的 Monitor 控制用户",
+    )
     return parser
 
 

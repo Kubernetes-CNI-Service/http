@@ -11,8 +11,12 @@
 """
 
 import argparse
+from contextlib import contextmanager, nullcontext
+import fcntl
 import os
 import glob
+import stat
+import subprocess
 import sys
 
 HERE          = os.path.dirname(os.path.realpath(__file__))
@@ -23,6 +27,7 @@ TOOLS_DIR     = os.path.join(HTTP_BASE, "tools")
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
 from deployment_lock import DeploymentLockError, deployment_lock
+from project_contract import infra_log_root_lock, managed_infra_log_project
 from ztp_service_runtime import RuntimeContractError, stop_native_ztp_monitors
 
 _AUTO_YES = False
@@ -118,7 +123,9 @@ def _known_workspace_links():
     paths = [
         os.path.join(HTTP_BASE, "infra", "01-global.yaml"),
         os.path.join(HTTP_BASE, "infra", "02-devices_config.csv"),
+        os.path.join(HTTP_BASE, "infra", "logs"),
         os.path.join(HTTP_BASE, "monitor", "01-global.yaml"),
+        os.path.join(HTTP_BASE, "infiniband", "01-global.yaml"),
         os.path.join(HTTP_BASE, "ethernet", "eth.csv"),
         os.path.join(HTTP_BASE, "ethernet", "p2p.xlsx"),
         os.path.join(HTTP_BASE, "infiniband", "ib.csv"),
@@ -151,6 +158,7 @@ def _known_workspace_links():
             os.path.join(monitor_dir, "cronjob.log"),
             os.path.join(HTTP_BASE, "monitor", net_type),
         ])
+    paths.extend(glob.glob(os.path.join(HTTP_BASE, "infiniband", "publickey", "*.pub")))
     paths.extend(glob.glob(os.path.join(ZTP, "optimize", "*-sample", "*")))
     return [path for path in paths if os.path.islink(path)]
 
@@ -194,6 +202,158 @@ def _parse_args(argv=None):
     return parser.parse_args(argv)
 
 
+@contextmanager
+def _req10c_crontab_lock(state):
+    """Use the same persistent project lock inode as initial-setup.py."""
+    if not all(hasattr(os, name) for name in ("O_DIRECTORY", "O_CLOEXEC", "O_NOFOLLOW")):
+        raise OSError("REQ10C secure project crontab lock flags unavailable")
+    try:
+        directory_fd = os.open(state, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError as exc:
+        raise OSError(f"REQ10C project crontab lock directory open failed: {exc}") from exc
+    try:
+        directory_info = os.fstat(directory_fd)
+        if (
+            not stat.S_ISDIR(directory_info.st_mode)
+            or directory_info.st_uid != os.geteuid()
+            or directory_info.st_mode & 0o022
+        ):
+            raise OSError("REQ10C project crontab lock directory is not safely owned")
+        try:
+            fd = os.open(
+                "auto-crontab.lock",
+                os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
+                0o600, dir_fd=directory_fd,
+            )
+        except OSError as exc:
+            raise OSError(f"REQ10C project crontab lock open failed: {exc}") from exc
+        try:
+            info = os.fstat(fd)
+            if (
+                not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or info.st_uid != os.geteuid()
+                or info.st_mode & 0o777 != 0o600
+            ):
+                raise OSError("REQ10C project crontab lock is not an owned 0600 single-link file")
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                linked = os.stat(
+                    "auto-crontab.lock", dir_fd=directory_fd,
+                    follow_symlinks=False,
+                )
+                if (linked.st_dev, linked.st_ino) != (info.st_dev, info.st_ino):
+                    raise OSError("REQ10C project crontab lock pathname changed")
+                current = os.stat(state)
+                if (current.st_dev, current.st_ino) != (
+                    directory_info.st_dev, directory_info.st_ino
+                ):
+                    raise OSError("REQ10C project crontab lock directory changed")
+                yield
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _cleanup_req10c_auto_watch(project_filter=None):
+    """Remove only our current-user watch, even when no setup links remain."""
+    if _DRY_RUN:
+        return
+    tool = os.path.join(HTTP_BASE, "infiniband", "bringup", "xdr-initial-setup")
+    credentials = os.path.join(tool, "xdr-initial-setup-logs", "auto.env")
+    marker = os.path.join(tool, "xdr-initial-setup-logs", "auto-watch.state")
+    terminal = os.path.join(tool, "xdr-initial-setup-logs", "auto-terminal.json")
+    if project_filter and not _inside(os.path.realpath(credentials), project_filter):
+        return
+    state = os.path.dirname(credentials)
+    if not os.path.lexists(state):
+        return
+    with _req10c_crontab_lock(state):
+        _cleanup_req10c_auto_watch_locked(tool, credentials, marker, terminal)
+
+
+def _cleanup_req10c_auto_watch_locked(tool, credentials, marker, terminal):
+    if not any(os.path.lexists(path) for path in (credentials, marker, terminal)):
+        return
+    try:
+        listing = subprocess.run(
+            ["crontab", "-l"], capture_output=True, text=True,
+            timeout=10, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise OSError(f"REQ10C crontab read failed: {exc}") from exc
+    if listing.returncode == 0:
+        existing = listing.stdout
+    elif listing.returncode == 1 and "no crontab" in listing.stderr.casefold():
+        existing = ""
+    else:
+        raise OSError(f"REQ10C crontab read failed (exit {listing.returncode})")
+
+    def ours(line):
+        if "# http-v3-req10c-auto" in line and os.path.join(tool, "initial-setup.py") in line:
+            return True
+        return (
+            line.startswith("*/10 * * * * ")
+            and "initial-setup.py --auto --apply --yes --credentials-file " in line
+            and tool in line and credentials in line
+        )
+
+    retained = "".join(
+        line for line in existing.splitlines(keepends=True) if not ours(line)
+    )
+    if retained != existing:
+        try:
+            result = subprocess.run(
+                ["crontab", "-"], input=retained, capture_output=True,
+                text=True, timeout=10, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise OSError(f"REQ10C crontab update failed: {exc}") from exc
+        if result.returncode != 0:
+            raise OSError(f"REQ10C crontab update failed (exit {result.returncode})")
+    try:
+        info = os.lstat(credentials)
+    except FileNotFoundError:
+        pass
+    else:
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or info.st_uid != os.geteuid()
+            or info.st_mode & 0o077
+        ):
+            raise OSError("REQ10C auto.env is not a safe owned regular secret; preserved")
+        os.unlink(credentials)
+    try:
+        marker_info = os.lstat(marker)
+    except FileNotFoundError:
+        pass
+    else:
+        if (
+            not stat.S_ISREG(marker_info.st_mode)
+            or marker_info.st_nlink != 1
+            or marker_info.st_uid != os.geteuid()
+            or marker_info.st_mode & 0o077
+        ):
+            raise OSError("REQ10C auto watch marker is not a safe owned file; preserved")
+        os.unlink(marker)
+    try:
+        terminal_info = os.lstat(terminal)
+    except FileNotFoundError:
+        pass
+    else:
+        if (
+            not stat.S_ISREG(terminal_info.st_mode)
+            or terminal_info.st_nlink != 1
+            or terminal_info.st_uid != os.geteuid()
+            or terminal_info.st_mode & 0o077
+        ):
+            raise OSError("REQ10C auto terminal state is not a safe owned file; preserved")
+        os.unlink(terminal)
+
+
 def _restore_deleted_links(deleted):
     failures = []
     for index, (path, target) in enumerate(reversed(deleted)):
@@ -216,9 +376,28 @@ def _restore_deleted_links(deleted):
     return failures
 
 
-def _main_locked(args):
+def _main_locked_impl(args):
     project_filter = _resolve_project(args.project) if args.project else None
     manifest, manifest_project = _read_manifest()
+    try:
+        _cleanup_req10c_auto_watch(project_filter)
+    except OSError as exc:
+        print(_c(RED, f"[ERROR] REQ10C auto watch cleanup failed: {exc}"))
+        return 1
+    log_root = os.path.join(HTTP_BASE, "infra", "logs")
+    # An interrupted setup still owns this link and its original directory
+    # backup.  Removing the link would strand receipt-bound recovery even if
+    # the lexical target currently looks like a valid project owner.
+    receipt = os.path.join(HTTP_BASE, "infra", ".logs-migration.json")
+    if os.path.lexists(receipt):
+        print(_c(RED, f"[ERROR] 日志迁移凭据未结清，拒绝 unsetup：{receipt}"))
+        return 1
+    # A manifest entry or a symlink leaf alone cannot authorize deletion.
+    # Reject the entire unsetup before touching any link when the log root is
+    # foreign, chained, broken, or cyclic; preserve the manifest for recovery.
+    if os.path.islink(log_root) and managed_infra_log_project(log_root, HERE) is None:
+        print(_c(RED, f"[ERROR] infra/logs 不是规范 DAY0 项目日志链接：{log_root}"))
+        return 1
     manifest_matches_filter = bool(
         project_filter and manifest_project and os.path.isdir(manifest_project)
         and os.path.realpath(manifest_project) == project_filter
@@ -294,6 +473,13 @@ def _main_locked(args):
         detail = f"；回滚不完整：{' | '.join(failures)}" if failures else "；已回滚"
         print(_c(RED, f"[ERROR] unsetup 删除失败：{exc}{detail}"))
         return 1
+
+
+def _main_locked(args):
+    """Keep log-link removal serialized with setup and log writers."""
+    lock = nullcontext() if _DRY_RUN else infra_log_root_lock(HTTP_BASE)
+    with lock:
+        return _main_locked_impl(args)
 
 
 def main(argv=None):

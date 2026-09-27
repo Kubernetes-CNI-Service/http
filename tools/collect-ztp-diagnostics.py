@@ -10,6 +10,7 @@ SSH and inventory/report identity checks before any device evidence is saved.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import csv
 import datetime as dt
 import hashlib
@@ -116,6 +117,9 @@ APACHE_SETENV_BODY = re.compile(
     r"^(?P<name>[^ \t=]+)(?P<separator>[ \t]+|=)(?P<value>.*)$"
 )
 BENIGN_APACHE_SETENV_LINE = "SetEnv CONTROL_REQUIRE_AUTH 1"
+BENIGN_APACHE_PORT_LINE = re.compile(
+    r"^SetEnv CONTROL_SERVICE_PORT (?:[1-9][0-9]{0,4})$"
+)
 SENSITIVE_AUTHORIZATION_KEYS = frozenset({
     "authorization", "proxy-authorization", "proxyauthorization",
 })
@@ -137,6 +141,100 @@ CONTROL_CHARS = re.compile(
 
 class DiagnosticError(RuntimeError):
     pass
+
+
+_DIRECTORY_FLAGS = (
+    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+)
+
+
+def _open_directory_at(parent_fd: int, name: str) -> int:
+    descriptor = os.open(name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
+    info = os.fstat(descriptor)
+    if not stat.S_ISDIR(info.st_mode):
+        os.close(descriptor)
+        raise DiagnosticError(f"output component is not a directory: {name}")
+    return descriptor
+
+
+def _remove_directory_contents(descriptor: int) -> None:
+    """Clean private staging by inode, never by a possibly rebound path."""
+    for name in os.listdir(descriptor):
+        info = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+        if stat.S_ISDIR(info.st_mode):
+            child = _open_directory_at(descriptor, name)
+            try:
+                _remove_directory_contents(child)
+            finally:
+                os.close(child)
+            os.rmdir(name, dir_fd=descriptor)
+        else:
+            os.unlink(name, dir_fd=descriptor)
+
+
+class BoundOutputDirectory:
+    """A directory capability: display paths are never used for output I/O."""
+
+    def __init__(self, path: Path, descriptor: int):
+        self.path = path
+        self.fd = descriptor
+
+    def __enter__(self) -> "BoundOutputDirectory":
+        return self
+
+    def __exit__(self, _type: Any, _value: Any, _traceback: Any) -> None:
+        os.close(self.fd)
+
+    def __truediv__(self, name: str) -> Path:
+        # Human-readable compatibility only. The CLI never writes via this path.
+        return self.path / name
+
+    def assert_name_bound(self) -> None:
+        try:
+            current = os.stat(self.path, follow_symlinks=False)
+        except OSError as exc:
+            raise DiagnosticError("diagnostic output directory name was rebound") from exc
+        bound = os.fstat(self.fd)
+        if (
+            not stat.S_ISDIR(current.st_mode)
+            or (current.st_dev, current.st_ino) != (bound.st_dev, bound.st_ino)
+        ):
+            raise DiagnosticError("diagnostic output directory name was rebound")
+
+
+@contextmanager
+def _private_bound_child(parent: BoundOutputDirectory, name: Optional[str] = None):
+    if name is None:
+        for _attempt in range(16):
+            candidate = ".collect." + os.urandom(16).hex()
+            try:
+                os.mkdir(candidate, 0o700, dir_fd=parent.fd)
+                name = candidate
+                break
+            except FileExistsError:
+                continue
+        else:
+            raise DiagnosticError("cannot reserve a private diagnostic directory")
+    else:
+        if not SAFE_HOSTNAME.fullmatch(name):
+            raise DiagnosticError("unsafe diagnostic staging name")
+        os.mkdir(name, 0o700, dir_fd=parent.fd)
+    try:
+        descriptor = _open_directory_at(parent.fd, name)
+        info = os.fstat(descriptor)
+        if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077:
+            os.close(descriptor)
+            raise DiagnosticError("private diagnostic directory has unsafe owner/mode")
+        child = BoundOutputDirectory(parent.path / name, descriptor)
+        try:
+            yield child
+        finally:
+            try:
+                _remove_directory_contents(descriptor)
+            finally:
+                os.close(descriptor)
+    finally:
+        os.rmdir(name, dir_fd=parent.fd)
 
 
 def is_within(path: Path, root: Path) -> bool:
@@ -271,7 +369,10 @@ def redact_apache_setenv_line(line: str) -> str:
         if keyword is None:
             return line
         return keyword.group("indent") + "SetEnv <redacted:secret>"
-    if line == BENIGN_APACHE_SETENV_LINE:
+    if line == BENIGN_APACHE_SETENV_LINE or (
+        BENIGN_APACHE_PORT_LINE.fullmatch(line) is not None
+        and 1 <= int(line.rsplit(" ", 1)[1]) <= 65535
+    ):
         return line
     body = APACHE_SETENV_BODY.fullmatch(match.group("body"))
     if body is None:
@@ -477,15 +578,19 @@ def run_bounded_command(
 
 
 class BundleBuilder:
-    def __init__(self, staging: Path, artifact_id: str):
-        self.staging = staging
+    def __init__(self, staging: Path | BoundOutputDirectory, artifact_id: str):
+        self._staging_fd = (
+            staging.fd if isinstance(staging, BoundOutputDirectory) else None
+        )
+        self.staging = staging.path if isinstance(staging, BoundOutputDirectory) else staging
         self.artifact_id = artifact_id
         self.entries: list[dict[str, Any]] = []
         self.commands: list[dict[str, Any]] = []
         self.warnings: list[str] = []
         self.total_bytes = 0
-        self.staging.mkdir(parents=True, exist_ok=True)
-        os.chmod(self.staging, 0o700)
+        if self._staging_fd is None:
+            self.staging.mkdir(parents=True, exist_ok=True)
+            os.chmod(self.staging, 0o700)
 
     def warn(self, message: str) -> None:
         self.warnings.append(str(message))
@@ -500,12 +605,39 @@ class BundleBuilder:
             raise DiagnosticError("bundle member limit exceeded")
         if self.total_bytes + len(data) > MAX_TOTAL_BYTES:
             raise DiagnosticError("bundle uncompressed size limit exceeded")
-        destination = self.staging.joinpath(*member.parts)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        os.chmod(destination.parent, 0o700)
-        descriptor = os.open(
-            destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
-        )
+        if self._staging_fd is None:
+            destination = self.staging.joinpath(*member.parts)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            os.chmod(destination.parent, 0o700)
+            descriptor = os.open(
+                destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+            )
+        else:
+            parent_fd = os.dup(self._staging_fd)
+            try:
+                for part in member.parts[:-1]:
+                    try:
+                        os.mkdir(part, 0o700, dir_fd=parent_fd)
+                    except FileExistsError:
+                        pass
+                    child_fd = _open_directory_at(parent_fd, part)
+                    info = os.fstat(child_fd)
+                    if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077:
+                        os.close(child_fd)
+                        raise DiagnosticError("bundle member parent has unsafe owner/mode")
+                    os.close(parent_fd)
+                    parent_fd = child_fd
+                descriptor = os.open(
+                    member.parts[-1],
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    0o600, dir_fd=parent_fd,
+                )
+            finally:
+                os.close(parent_fd)
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                os.close(descriptor)
+                raise DiagnosticError("bundle member is not a private regular file")
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(data)
             stream.flush()
@@ -726,25 +858,58 @@ def resolve_project(value: str) -> Path:
     return project
 
 
-def prepare_output_root(value: Optional[str]) -> Path:
+def prepare_output_root(value: Optional[str]) -> BoundOutputDirectory:
     requested = Path(value) if value else DEFAULT_OUTPUT_ROOT
     if not requested.is_absolute():
         requested = Path.cwd() / requested
-    # Resolve existing ancestors and reject DocumentRoot even before mkdir.
-    resolved = requested.resolve(strict=False)
-    http_root = HTTP_ROOT.resolve(strict=True)
-    if is_within(resolved, http_root):
-        raise DiagnosticError("diagnostic output must not be inside Apache DocumentRoot")
-    if requested.exists() and requested.is_symlink():
+    # Resolve platform aliases (notably macOS /var -> /private/var) once,
+    # then create and open every canonical component relative to retained FDs.
+    # A final symlink is never an accepted output directory.
+    try:
+        existing = os.stat(requested, follow_symlinks=False)
+    except FileNotFoundError:
+        existing = None
+    if existing is not None and stat.S_ISLNK(existing.st_mode):
         raise DiagnosticError("diagnostic output directory must not be a symlink")
-    requested.mkdir(parents=True, exist_ok=True, mode=0o700)
-    resolved = requested.resolve(strict=True)
-    info = resolved.stat()
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
-        raise DiagnosticError("diagnostic output directory has unsafe owner/type")
-    if stat.S_IMODE(info.st_mode) & 0o077:
-        raise DiagnosticError("diagnostic output directory must be mode 0700")
-    return resolved
+    try:
+        canonical = requested.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise DiagnosticError("cannot resolve diagnostic output directory") from exc
+    http_root = HTTP_ROOT.resolve(strict=True)
+    if is_within(canonical, http_root):
+        raise DiagnosticError("diagnostic output must not be inside Apache DocumentRoot")
+    http_info = http_root.stat()
+    descriptor = os.open("/", _DIRECTORY_FLAGS)
+    try:
+        for part in canonical.parts[1:]:
+            try:
+                child_fd = _open_directory_at(descriptor, part)
+            except FileNotFoundError:
+                try:
+                    os.mkdir(part, 0o700, dir_fd=descriptor)
+                except FileExistsError:
+                    pass
+                child_fd = _open_directory_at(descriptor, part)
+            os.close(descriptor)
+            descriptor = child_fd
+            child_info = os.fstat(descriptor)
+            if (child_info.st_dev, child_info.st_ino) == (
+                http_info.st_dev, http_info.st_ino
+            ):
+                raise DiagnosticError("diagnostic output enters Apache DocumentRoot")
+        info = os.fstat(descriptor)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+            raise DiagnosticError("diagnostic output directory has unsafe owner/type")
+        if stat.S_IMODE(info.st_mode) & 0o077:
+            raise DiagnosticError("diagnostic output directory must be mode 0700")
+        result = BoundOutputDirectory(requested, descriptor)
+        result.assert_name_bound()
+        if is_within(requested.resolve(strict=True), http_root):
+            raise DiagnosticError("diagnostic output must not be inside Apache DocumentRoot")
+        return result
+    except BaseException:
+        os.close(descriptor)
+        raise
 
 
 def latest_snapshot(project: Path) -> Optional[Path]:
@@ -800,7 +965,11 @@ def device_in_scope(device: dict[str, Any], scope: str) -> bool:
 def select_devices(
     report: dict[str, Any], hostnames: list[str], scope: str,
 ) -> list[dict[str, Any]]:
-    devices = [item for item in report.get("devices", []) if isinstance(item, dict)]
+    devices = [
+        item for item in report.get("devices", [])
+        if isinstance(item, dict)
+        and str(item.get("type") or "").strip().casefold() != "eth_jump"
+    ]
     selected = []
     for hostname in hostnames:
         if not SAFE_HOSTNAME.fullmatch(hostname):
@@ -1641,7 +1810,228 @@ def collect_server_commands(
         collect_supervisor_runtime_evidence(builder, runtime_backend)
 
 
-def create_archive(staging: Path, destination: Path, top_level: str) -> None:
+def _bound_staged_members(descriptor: int, prefix: tuple[str, ...] = ()):
+    """Read staged regular files through directory descriptors only."""
+    for name in sorted(os.listdir(descriptor)):
+        if name in {"", ".", ".."} or "/" in name:
+            raise DiagnosticError("unsafe staged member name")
+        info = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+        relative = prefix + (name,)
+        safe_relative("/".join(relative))
+        if stat.S_ISDIR(info.st_mode):
+            child_fd = _open_directory_at(descriptor, name)
+            try:
+                opened = os.fstat(child_fd)
+                if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                    raise DiagnosticError("staged directory changed during archive")
+                yield from _bound_staged_members(child_fd, relative)
+            finally:
+                os.close(child_fd)
+            continue
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise DiagnosticError("unsafe staged member type")
+        leaf_fd = os.open(
+            name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=descriptor,
+        )
+        with os.fdopen(leaf_fd, "rb") as stream:
+            opened = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_nlink != 1
+                or (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)
+            ):
+                raise DiagnosticError("staged member changed during archive")
+            data = stream.read(MAX_MEMBER_BYTES + 1)
+            after = os.fstat(stream.fileno())
+            if len(data) > MAX_MEMBER_BYTES or (
+                after.st_dev, after.st_ino, after.st_size
+            ) != (opened.st_dev, opened.st_ino, opened.st_size):
+                raise DiagnosticError("staged member changed or exceeded limit")
+        yield "/".join(relative), data, int(info.st_mtime)
+
+
+def _create_archive_bound(
+    staging: BoundOutputDirectory, output_root: BoundOutputDirectory,
+    destination: Path, top_level: str,
+) -> str:
+    temporary_name = ".ztp-diagnostics." + os.urandom(16).hex() + ".tar.gz"
+    if destination.parent != output_root.path or not SAFE_HOSTNAME.fullmatch(top_level):
+        raise DiagnosticError("unsafe diagnostic archive destination")
+    descriptor = os.open(
+        temporary_name,
+        os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+        0o600, dir_fd=output_root.fd,
+    )
+    linked_final = False
+    published_info = None
+    publication_complete = False
+    try:
+        # Keep the original inode open until publication is verified. Reopening
+        # only the temporary *name* would trust an attacker-controlled rebind.
+        with os.fdopen(os.dup(descriptor), "wb") as stream:
+            with tarfile.open(fileobj=stream, mode="w:gz") as archive:
+                root_info = tarfile.TarInfo(top_level)
+                root_info.type = tarfile.DIRTYPE
+                root_info.mode = 0o700
+                root_info.uid = root_info.gid = 0
+                root_info.uname = root_info.gname = "root"
+                root_info.mtime = int(time.time())
+                archive.addfile(root_info)
+                for relative, data, mtime in _bound_staged_members(staging.fd):
+                    info = tarfile.TarInfo(f"{top_level}/{relative}")
+                    info.size = len(data)
+                    info.mode = 0o600
+                    info.uid = info.gid = 0
+                    info.uname = info.gname = "root"
+                    info.mtime = mtime
+                    import io
+                    archive.addfile(info, io.BytesIO(data))
+            stream.flush()
+            os.fsync(stream.fileno())
+        written_info = os.fstat(descriptor)
+        if not stat.S_ISREG(written_info.st_mode) or written_info.st_nlink != 1:
+            raise DiagnosticError("unsafe original diagnostic archive")
+        verify_fd = os.open(
+            temporary_name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=output_root.fd,
+        )
+        with os.fdopen(verify_fd, "rb") as stream:
+            temporary_info = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(temporary_info.st_mode)
+                or temporary_info.st_nlink != 1
+                or (temporary_info.st_dev, temporary_info.st_ino) != (
+                    written_info.st_dev, written_info.st_ino
+                )
+            ):
+                raise DiagnosticError("temporary diagnostic archive was replaced")
+            with tarfile.open(fileobj=stream, mode="r:gz") as archive:
+                for member in archive.getmembers():
+                    path = PurePosixPath(member.name)
+                    if (
+                        path.is_absolute()
+                        or any(part in {"", ".", ".."} for part in path.parts)
+                        or not (member.isdir() or member.isfile())
+                    ):
+                        raise DiagnosticError(f"unsafe final archive member: {member.name}")
+            stream.seek(0)
+            expected_digest = hashlib.sha256()
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                expected_digest.update(chunk)
+            verified_info = os.fstat(stream.fileno())
+            if (
+                verified_info.st_size != written_info.st_size
+                or verified_info.st_mtime_ns != written_info.st_mtime_ns
+                or verified_info.st_ctime_ns != written_info.st_ctime_ns
+            ):
+                raise DiagnosticError("diagnostic archive changed during verification")
+        named_info = os.stat(
+            temporary_name, dir_fd=output_root.fd, follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISREG(named_info.st_mode)
+            or (named_info.st_dev, named_info.st_ino) != (
+                written_info.st_dev, written_info.st_ino
+            )
+        ):
+            raise DiagnosticError("temporary diagnostic archive name was replaced")
+        output_root.assert_name_bound()
+        # linkat is atomic no-replace on macOS and Linux; a concurrent final
+        # symlink or regular file causes EEXIST rather than an overwrite.
+        os.link(
+            temporary_name, destination.name,
+            src_dir_fd=output_root.fd, dst_dir_fd=output_root.fd,
+            follow_symlinks=False,
+        )
+        linked_final = True
+        published_info = os.stat(
+            destination.name, dir_fd=output_root.fd, follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISREG(published_info.st_mode)
+            or (published_info.st_dev, published_info.st_ino) != (
+                written_info.st_dev, written_info.st_ino
+            )
+        ):
+            raise DiagnosticError("diagnostic archive source changed during publication")
+        os.unlink(temporary_name, dir_fd=output_root.fd)
+        final_fd = os.open(
+            destination.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=output_root.fd,
+        )
+        with os.fdopen(final_fd, "rb") as stream:
+            final_info = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(final_info.st_mode)
+                or (final_info.st_dev, final_info.st_ino) != (
+                    written_info.st_dev, written_info.st_ino
+                )
+            ):
+                raise DiagnosticError("diagnostic archive changed after publication")
+            digest = hashlib.sha256()
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+            final_after = os.fstat(stream.fileno())
+            if (
+                final_after.st_size != final_info.st_size
+                or final_after.st_mtime_ns != final_info.st_mtime_ns
+            ):
+                raise DiagnosticError("diagnostic archive changed during final read")
+        if digest.digest() != expected_digest.digest():
+            raise DiagnosticError("diagnostic archive bytes changed after publication")
+        final_name_info = os.stat(
+            destination.name, dir_fd=output_root.fd, follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISREG(final_name_info.st_mode)
+            or (final_name_info.st_dev, final_name_info.st_ino) != (
+                written_info.st_dev, written_info.st_ino
+            )
+        ):
+            raise DiagnosticError("diagnostic archive name changed after publication")
+        output_root.assert_name_bound()
+        publication_complete = True
+        return digest.hexdigest()
+    finally:
+        try:
+            if linked_final and not publication_complete and published_info is not None:
+                # Only clean the identity this call observed immediately after
+                # linking. A later replacement with a different inode is left
+                # untouched. Standard unlink cannot atomically compare identity
+                # against a concurrent same-UID name swap.
+                try:
+                    current_info = os.stat(
+                        destination.name, dir_fd=output_root.fd,
+                        follow_symlinks=False,
+                    )
+                    if (
+                        current_info.st_dev, current_info.st_ino,
+                        stat.S_IFMT(current_info.st_mode),
+                    ) == (
+                        published_info.st_dev, published_info.st_ino,
+                        stat.S_IFMT(published_info.st_mode),
+                    ):
+                        os.unlink(destination.name, dir_fd=output_root.fd)
+                except FileNotFoundError:
+                    pass
+        finally:
+            try:
+                os.unlink(temporary_name, dir_fd=output_root.fd)
+            except FileNotFoundError:
+                pass
+            finally:
+                os.close(descriptor)
+
+
+def create_archive(
+    staging: Path | BoundOutputDirectory, destination: Path, top_level: str,
+    *, output_root: Optional[BoundOutputDirectory] = None,
+) -> Optional[str]:
+    if isinstance(staging, BoundOutputDirectory):
+        if output_root is None:
+            raise DiagnosticError("bound archive requires a bound output root")
+        return _create_archive_bound(staging, output_root, destination, top_level)
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=".ztp-diagnostics.", suffix=".tar.gz", dir=str(destination.parent)
     )
@@ -1708,7 +2098,10 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     scope_group = parser.add_mutually_exclusive_group()
     scope_group.add_argument("--air", action="store_true", help="AIR 环境")
     scope_group.add_argument("--prod", action="store_true", help="Production 环境")
-    scope_group.add_argument("--type", choices=("air", "prod"), dest="scope_type")
+    scope_group.add_argument(
+        "--type", choices=("air", "prod"), dest="scope_type",
+        help="选择 AIR 或 Production 环境；等价于 --air 或 --prod",
+    )
     parser.add_argument("--host", action="append", default=[], help="精确 hostname，可重复")
     parser.add_argument(
         "--server-only", action="store_true",
@@ -1743,71 +2136,78 @@ def _main(argv: Optional[list[str]] = None) -> int:
     try:
         args = parse_args(argv)
         project = resolve_project(args.project)
-        output_root = prepare_output_root(args.output_dir)
-        stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        artifact_id = f"{stamp}-{project.name}-{args.scope}"
-        destination = output_root / f"ztp-diagnostics-{artifact_id}.tar.gz"
-        if destination.exists() or destination.is_symlink():
-            raise DiagnosticError(f"output already exists: {destination}")
-        with tempfile.TemporaryDirectory(prefix=".collect.", dir=output_root) as temporary:
-            staging = Path(temporary) / artifact_id
-            builder = BundleBuilder(staging, artifact_id)
-            active_project = runtime_active_project()
-            snapshot, report = load_latest_report(project)
-            selected = select_devices(report, args.host, args.scope) if args.host else []
-            collect_project_inputs(builder, project)
-            collect_runtime_files(builder, project)
-            collect_selected_published_configs(builder, selected, project)
-            collect_selected_operation_metadata(builder, project, args.host)
-            collect_server_commands(builder, args.since_minutes, project)
-            collect_public_key_fingerprints(builder)
-            collect_monitor_state(builder, project, snapshot, selected)
-            collect_switch_archives(
-                builder, project, [str(item.get("hostname") or "") for item in selected],
-            )
-            if selected and not args.server_only:
-                if active_project != project:
-                    active_text = str(active_project) if active_project else "unresolved"
-                    builder.warn(
-                        "live SSH collection is allowed only for the active runtime "
-                        f"project; requested={project}, active={active_text}. "
-                        "Device SSH was skipped; server/project evidence is retained."
+        with prepare_output_root(args.output_dir) as output_root:
+            stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            artifact_id = f"{stamp}-{project.name}-{args.scope}"
+            destination = output_root.path / f"ztp-diagnostics-{artifact_id}.tar.gz"
+            try:
+                os.stat(destination.name, dir_fd=output_root.fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise DiagnosticError(f"output already exists: {destination}")
+            output_root.assert_name_bound()
+            with _private_bound_child(output_root) as temporary:
+                with _private_bound_child(temporary, artifact_id) as staging:
+                    builder = BundleBuilder(staging, artifact_id)
+                    active_project = runtime_active_project()
+                    snapshot, report = load_latest_report(project)
+                    selected = select_devices(report, args.host, args.scope) if args.host else []
+                    collect_project_inputs(builder, project)
+                    collect_runtime_files(builder, project)
+                    collect_selected_published_configs(builder, selected, project)
+                    collect_selected_operation_metadata(builder, project, args.host)
+                    collect_server_commands(builder, args.since_minutes, project)
+                    collect_public_key_fingerprints(builder)
+                    collect_monitor_state(builder, project, snapshot, selected)
+                    collect_switch_archives(
+                        builder, project, [str(item.get("hostname") or "") for item in selected],
                     )
-                else:
-                    try:
-                        identity, known_hosts = validate_ssh_inputs(
-                            args.identity, args.known_hosts
-                        )
-                    except (DiagnosticError, OSError) as exc:
-                        builder.warn(
-                            f"live SSH inputs are unavailable; device collection skipped: {exc}"
-                        )
-                    else:
-                        for device in selected:
-                            collect_live_device(
-                                builder, device,
-                                identity=identity, known_hosts=known_hosts,
+                    if selected and not args.server_only:
+                        if active_project != project:
+                            active_text = str(active_project) if active_project else "unresolved"
+                            builder.warn(
+                                "live SSH collection is allowed only for the active runtime "
+                                f"project; requested={project}, active={active_text}. "
+                                "Device SSH was skipped; server/project evidence is retained."
                             )
-            builder.finalize({
-                "generated_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
-                "collector_host": socket.gethostname(),
-                "project": project.name, "project_path": str(project),
-                "runtime_active_project": (
-                    active_project.name if active_project is not None else None
-                ),
-                "runtime_active_project_path": (
-                    str(active_project) if active_project is not None else None
-                ),
-                "scope": args.scope, "selected_hosts": args.host,
-                "server_only": bool(args.server_only or not args.host),
-                "since_minutes": args.since_minutes,
-            })
-            create_archive(staging, destination, artifact_id)
-        digest = sha256_file(destination)
-        print(f"[OK] 诊断包：{destination}")
-        print(f"[OK] SHA256：{digest}")
-        print(f"[INFO] 安全复制示例：scp root@<ztp-server>:{destination} .")
-        return 2 if builder.warnings else 0
+                        else:
+                            try:
+                                identity, known_hosts = validate_ssh_inputs(
+                                    args.identity, args.known_hosts
+                                )
+                            except (DiagnosticError, OSError) as exc:
+                                builder.warn(
+                                    f"live SSH inputs are unavailable; device collection skipped: {exc}"
+                                )
+                            else:
+                                for device in selected:
+                                    collect_live_device(
+                                        builder, device,
+                                        identity=identity, known_hosts=known_hosts,
+                                    )
+                    builder.finalize({
+                        "generated_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+                        "collector_host": socket.gethostname(),
+                        "project": project.name, "project_path": str(project),
+                        "runtime_active_project": (
+                            active_project.name if active_project is not None else None
+                        ),
+                        "runtime_active_project_path": (
+                            str(active_project) if active_project is not None else None
+                        ),
+                        "scope": args.scope, "selected_hosts": args.host,
+                        "server_only": bool(args.server_only or not args.host),
+                        "since_minutes": args.since_minutes,
+                    })
+                    digest = create_archive(
+                        staging, destination, artifact_id, output_root=output_root,
+                    )
+            output_root.assert_name_bound()
+            print(f"[OK] 诊断包：{destination}")
+            print(f"[OK] SHA256：{digest}")
+            print(f"[INFO] 安全复制示例：scp root@<ztp-server>:{destination} .")
+            return 2 if builder.warnings else 0
     except (DiagnosticError, OSError, ValueError, tarfile.TarError) as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 1

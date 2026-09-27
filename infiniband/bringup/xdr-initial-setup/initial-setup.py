@@ -13,7 +13,11 @@ is required.
 from __future__ import annotations
 
 import argparse
+import ast
+import base64
+import copy
 import csv
+import fcntl
 import getpass
 import hashlib
 import ipaddress
@@ -23,13 +27,17 @@ import pty
 import re
 import select
 import shlex
+import shutil
 import signal
 import socket
+import stat
+import subprocess
 import sys
 import time
 import zipfile
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -37,13 +45,36 @@ from typing import Callable, Optional
 NA_VALUES = {"", "na", "n/a", "none", "null", "tbd", "-"}
 IB_PORT_ALIASES = {"eth0", "mgmt", "management", "bmc"}
 DEFAULT_HOSTNAMES = {"", "nvos"}
-TARGET_CACHE_VERSION = 3
+TRANSIT_DEVICE_TYPES = frozenset({"eth", "eth_spx", "spx", "ethernet", "eth_jump"})
+TARGET_CACHE_VERSION = 4
+_SELF_SOURCE_PATH = Path(__file__).resolve()
 MAC_RE = re.compile(r"\b(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}\b")
 DOT_LINK_RE = re.compile(
     r'^\s*"([^"]+)"\s*:\s*"([^"]+)"\s*--\s*'
     r'"([^"]+)"\s*:\s*"([^"]+)"'
 )
 REPORT_HANDLE = None
+_KEY_INSTALL_AWK = (
+    "function iskey(v) { return v ~ /^(ssh-|ecdsa-|sk-)[A-Za-z0-9@._+-]+$/ } "
+    "{ identity=\"\"; for (i=1; i<NF; i++) if (iskey($i)) "
+    "{ identity=$i SUBSEP $(i+1); break } "
+    "if (identity==\"\" || !seen[identity]++) print }"
+)
+_KEY_INSTALL_SCRIPT = (
+    'set -eu; test -n "${HOME:-}" && test -d "$HOME" && test ! -L "$HOME" || exit 31; '
+    'ssh_dir="$HOME/.ssh"; '
+    'if test -L "$ssh_dir" || { test -e "$ssh_dir" && test ! -d "$ssh_dir"; }; then exit 32; fi; '
+    'umask 077; mkdir -p "$ssh_dir"; chmod 700 "$ssh_dir"; '
+    'auth="$ssh_dir/authorized_keys"; '
+    'if test -L "$auth" || { test -e "$auth" && test ! -f "$auth"; }; then exit 33; fi; '
+    'tmp="$(mktemp "$ssh_dir/.authorized_keys.XXXXXX")"; '
+    'trap \'rm -f "$tmp"\' EXIT HUP INT TERM; '
+    '{ if test -f "$auth"; then cat "$auth"; fi; '
+    'printf %s "$1" | base64 -d; } | awk \'' + _KEY_INSTALL_AWK + '\' >"$tmp"; '
+    'chmod 600 "$tmp"; '
+    'if test -f "$auth" && cmp -s "$tmp" "$auth"; then rm -f "$tmp"; trap - EXIT; exit 0; fi; '
+    'mv -f "$tmp" "$auth"; trap - EXIT'
+)
 
 
 class SetupError(RuntimeError):
@@ -300,7 +331,7 @@ def load_devices(path: Path) -> tuple[dict[str, Device], dict[str, Device]]:
         for line_number, row in enumerate(reader, 2):
             hostname = row_value(row, indexes, "hostname")
             dev_type = row_value(row, indexes, "type").casefold()
-            if not hostname or dev_type not in {"ib", "eth", "eth_spx", "spx", "ethernet"}:
+            if not hostname or dev_type not in ({"ib"} | TRANSIT_DEVICE_TYPES):
                 continue
             if not valid_hostname(hostname):
                 raise SetupError(f"{path}:{line_number}: invalid hostname {hostname!r}")
@@ -595,7 +626,7 @@ def build_targets(links: list[Link], ib_devices: dict[str, Device],
             if not ethernet:
                 raise SetupError(
                     f"P2P peer {eth_name!r} for IB device {ib.hostname} is not a "
-                    "type=eth device with a login IP in the CSV"
+                    "supported Ethernet transit device with a login IP in the CSV"
                 )
             key = normalize_name(ib.hostname)
             if key in seen:
@@ -608,8 +639,21 @@ def build_targets(links: list[Link], ib_devices: dict[str, Device],
     if missing:
         log("WARNING: no Ethernet management link found for: " + ", ".join(sorted(missing)))
     if not targets:
-        raise SetupError("no IB management links to type=eth devices were found in P2P")
+        raise SetupError(
+            "no IB management links to supported Ethernet transit devices "
+            "were found in P2P"
+        )
     return sorted(targets, key=lambda target: normalize_name(target.ib.hostname))
+
+
+def require_auto_full_target_coverage(ib_candidate_count: int,
+                                      targets: list[Target]) -> None:
+    names = [normalize_name(target.ib.hostname) for target in targets]
+    if ib_candidate_count < 1 or len(names) != ib_candidate_count or len(set(names)) != len(names):
+        raise SetupError(
+            "--auto requires one P2P management link for every CSV IB switch; "
+            "fix CSV/P2P before starting a watch"
+        )
 
 
 def device_to_dict(device: Device) -> dict[str, str]:
@@ -625,8 +669,415 @@ def device_to_dict(device: Device) -> dict[str, str]:
     }
 
 
+def _global_yaml_subset(source: str) -> dict:
+    """Read the bounded project-global block dialect without a leaf dependency.
+
+    This is deliberately not general YAML: unsupported constructs fail closed.
+    Real IB and NVL project globals are parity-checked against the generator.
+    """
+    if len(source.encode("utf-8")) > 1024 * 1024:
+        raise SetupError("01-global.yaml exceeds the supported size")
+    lines: list[tuple[int, str]] = []
+    anchors: dict[str, object] = {}
+    depth = 0
+    for raw in source.splitlines():
+        if re.match(r"^ *\t", raw):
+            raise SetupError("01-global.yaml has tab indentation")
+        quote = ""
+        index = 0
+        while index < len(raw):
+            char = raw[index]
+            if quote == "'":
+                if char == "'" and index + 1 < len(raw) and raw[index + 1] == "'":
+                    index += 2
+                    continue
+                if char == "'":
+                    quote = ""
+            elif quote == '"':
+                if char == "\\":
+                    index += 2
+                    continue
+                if char == '"':
+                    quote = ""
+            elif char in "'\"":
+                quote = char
+            elif char == "#" and (index == 0 or raw[index - 1].isspace()):
+                raw = raw[:index]
+                break
+            index += 1
+        text = raw.rstrip()
+        if not text.strip():
+            continue
+        if text.strip() in {"---", "..."}:
+            raise SetupError("01-global.yaml must contain one document")
+        lines.append((len(text) - len(text.lstrip(" ")), text.lstrip(" ")))
+    if not lines or len(lines) > 20000:
+        raise SetupError("01-global.yaml is empty or too large")
+
+    def scalar(value: str) -> object:
+        if value.startswith("{"):
+            raise SetupError("01-global.yaml flow mapping is unsupported")
+        if value.startswith("["):
+            if not value.endswith("]") or any(c in value[1:-1] for c in "[]{}"):
+                raise SetupError("01-global.yaml nested flow syntax is unsupported")
+            inner = value[1:-1]
+            return [scalar(part.strip()) for part in inner.split(",")] if inner.strip() else []
+        if value.startswith('"'):
+            try:
+                return ast.literal_eval(value)
+            except (SyntaxError, ValueError) as exc:
+                raise SetupError("01-global.yaml has an invalid quoted value") from exc
+        if value.startswith("'"):
+            if not value.endswith("'"):
+                raise SetupError("01-global.yaml has an invalid quoted value")
+            return value[1:-1].replace("''", "'")
+        low = value.lower()
+        if low in {"null", "~"}:
+            return None
+        if low in {"true", "yes", "on"}:
+            return True
+        if low in {"false", "no", "off"}:
+            return False
+        if re.fullmatch(r"[+-]?\d+", value):
+            return int(value)
+        if re.fullmatch(r"[+-]?(?:\d+\.\d*|\.\d+)(?:[Ee][+-]?\d+)?", value):
+            return float(value)
+        return value
+
+    def key_value(text: str) -> tuple[str, str]:
+        match = re.fullmatch(r"([^:]+):(?:\s+(.*))?", text)
+        if not match or not re.fullmatch(r"[A-Za-z0-9_.-]+", match.group(1).strip()):
+            raise SetupError("01-global.yaml has unsupported mapping syntax")
+        return match.group(1).strip(), match.group(2) or ""
+
+    def child(index: int, indent: int) -> tuple[object, int]:
+        if index < len(lines) and (lines[index][0] > indent or
+                                   lines[index][0] == indent and lines[index][1].startswith("- ")):
+            return parse(index, lines[index][0])
+        return None, index
+
+    def value_at(value: str, index: int, indent: int) -> tuple[object, int]:
+        if value.startswith("*"):
+            if not re.fullmatch(r"\*[A-Za-z0-9_-]+", value) or value[1:] not in anchors:
+                raise SetupError("01-global.yaml has an unknown alias")
+            return copy.deepcopy(anchors[value[1:]]), index
+        if value.startswith("&"):
+            match = re.fullmatch(r"&([A-Za-z0-9_-]+)(?:\s+(.+))?", value)
+            if not match:
+                raise SetupError("01-global.yaml has invalid anchor syntax")
+            parsed, index = (scalar(match.group(2)), index) if match.group(2) else child(index, indent)
+            anchors[match.group(1)] = copy.deepcopy(parsed)
+            return parsed, index
+        return scalar(value), index
+
+    def mapping(index: int, indent: int) -> tuple[dict, int]:
+        result: dict = {}
+        while index < len(lines) and lines[index][0] == indent and not lines[index][1].startswith("- "):
+            key, value = key_value(lines[index][1])
+            if key in result:
+                raise SetupError("01-global.yaml has a duplicate key")
+            index += 1
+            result[key], index = value_at(value, index, indent) if value else child(index, indent)
+        return result, index
+
+    def sequence(index: int, indent: int) -> tuple[list, int]:
+        result: list = []
+        while index < len(lines) and lines[index][0] == indent and lines[index][1].startswith("- "):
+            body = lines[index][1][2:].strip()
+            index += 1
+            if not body:
+                value, index = child(index, indent)
+            elif re.match(r"[^:]+:(?:\s|$)", body):
+                key, remainder = key_value(body)
+                member, index = value_at(remainder, index, indent) if remainder else child(index, indent)
+                value = {key: member}
+                if index < len(lines) and lines[index][0] > indent:
+                    extra, index = mapping(index, lines[index][0])
+                    if key in extra:
+                        raise SetupError("01-global.yaml has a duplicate key")
+                    value.update(extra)
+            else:
+                value, index = value_at(body, index, indent)
+            result.append(value)
+        return result, index
+
+    def parse(index: int, indent: int) -> tuple[object, int]:
+        nonlocal depth
+        depth += 1
+        try:
+            if depth > 64:
+                raise SetupError("01-global.yaml nesting exceeds the supported limit")
+            if lines[index][1].startswith("- "):
+                return sequence(index, indent)
+            return mapping(index, indent)
+        finally:
+            depth -= 1
+
+    document, end = parse(0, lines[0][0])
+    if end != len(lines) or not isinstance(document, dict):
+        raise SetupError("01-global.yaml has unsupported trailing syntax")
+    return document
+
+
+def _deep_merge_global(base: dict, override: dict) -> dict:
+    result = copy.deepcopy(base)
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = _deep_merge_global(result[key], value)
+        else:
+            result[key] = copy.deepcopy(value)
+    return result
+
+
+def _merged_global(document: dict, family: str) -> dict:
+    switches = document.get("switches")
+    if not isinstance(switches, list):
+        raise SetupError("01-global.yaml switches must be a list")
+    section = next((item[family] for item in switches
+                    if isinstance(item, dict) and family in item), None)
+    common = document.get("common", {})
+    if not isinstance(common, dict) or not isinstance(common.get("switch", {}), dict) or not isinstance(section, dict):
+        raise SetupError(f"01-global.yaml has invalid {family} or common.switch section")
+    return _deep_merge_global(common.get("switch", {}), section)
+
+
+def _neutral_services(tool: Path) -> dict[str, str]:
+    neutral_path = tool.parents[2] / "infra/infra-neutral.conf"
+    try:
+        lines = neutral_path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise SetupError(f"neutral service authority unavailable: {neutral_path}") from exc
+    values: dict[str, str] = {}
+    for line in lines:
+        if not line or line.startswith("#"):
+            continue
+        key, separator, value = line.partition("=")
+        if not separator or key in values or key not in {"DNS", "NTP", "TIMEZONE"}:
+            raise SetupError("infra-neutral.conf has invalid or duplicate service entry")
+        values[key] = value.strip()
+    if set(values) != {"DNS", "NTP", "TIMEZONE"} or not all(values.values()):
+        raise SetupError("infra-neutral.conf lacks a service fallback")
+    return values
+
+
+def _service_profile(tool: Path) -> Optional[dict[str, object]]:
+    global_path = tool / "01-global.yaml"
+    if not global_path.is_file():
+        return None
+    try:
+        document = _global_yaml_subset(global_path.read_text(encoding="utf-8"))
+        merged = _merged_global(document, "ib")
+    except (OSError, UnicodeError) as exc:
+        raise SetupError(f"cannot read 01-global.yaml: {exc}") from exc
+    system = merged.get("system")
+    if not isinstance(system, dict):
+        raise SetupError("01-global.yaml IB system must be a mapping")
+    neutral = _neutral_services(tool)
+    output: dict[str, object] = {}
+    for key, field, fallback in (
+        ("dns", "server", "DNS"), ("ntp", "server", "NTP"),
+        ("date-time", "timezone", "TIMEZONE"),
+    ):
+        group = system.get(key, {})
+        if group is None:
+            group = {}
+        if not isinstance(group, dict):
+            raise SetupError(f"01-global.yaml system.{key} must be a mapping")
+        value = group.get(field)
+        if value is None or value == "" or value == []:
+            value = neutral[fallback] if field == "timezone" else [neutral[fallback]]
+        if field == "server":
+            if not isinstance(value, list) or not value or any(
+                not isinstance(item, str) or not item.strip() for item in value
+            ):
+                raise SetupError(f"01-global.yaml system.{key}.{field} is invalid")
+            for item in value:
+                ib_command_argv(["nv", "set", "system", key, field, item])
+            output[key] = list(value)
+        else:
+            if not isinstance(value, str) or not value.strip():
+                raise SetupError("01-global.yaml timezone is invalid")
+            ib_command_argv(["nv", "set", "system", key, field, value])
+            output["timezone"] = value
+    return output
+
+
+def _public_key_fingerprint(line: str) -> str:
+    if not isinstance(line, str) or re.search(r"[\x00-\x1f\x7f-\x9f]", line):
+        raise SetupError("SSH public key contains a control character")
+    parts = line.split()
+    if len(parts) < 2 or not re.fullmatch(
+        r"ssh-(?:ed25519|rsa)|ecdsa-sha2-nistp(?:256|384|521)|"
+        r"sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com",
+        parts[0],
+    ):
+        raise SetupError("invalid SSH public key type")
+    try:
+        blob = base64.b64decode(parts[1], validate=True)
+        fields: list[bytes] = []
+        offset = 0
+        while offset < len(blob):
+            if len(blob) - offset < 4:
+                raise ValueError("truncated SSH key field")
+            size = int.from_bytes(blob[offset:offset + 4], "big")
+            offset += 4
+            if size > 65536 or size > len(blob) - offset:
+                raise ValueError("invalid SSH key field length")
+            fields.append(blob[offset:offset + size])
+            offset += size
+        if not fields or fields[0].decode("ascii") != parts[0]:
+            raise ValueError("SSH key type/blob mismatch")
+        if parts[0] == "ssh-ed25519" and (len(fields) != 2 or len(fields[1]) != 32):
+            raise ValueError("invalid ed25519 key payload")
+        if len(fields) < 2:
+            raise ValueError("SSH key has no public payload")
+    except (ValueError, UnicodeError) as exc:
+        raise SetupError("invalid SSH public key blob") from exc
+    return "SHA256:" + base64.b64encode(
+        hashlib.sha256(blob).digest()
+    ).rstrip(b"=").decode("ascii")
+
+
+def _public_key_profile(tool: Path, *, validate_with_ssh_keygen: bool = True
+                        ) -> list[dict[str, str]]:
+    directory = tool / "publickey"
+    if not directory.is_dir():
+        return []
+    result: list[dict[str, str]] = []
+    validator: Optional[str] = None
+    for path in sorted(directory.glob("*.pub")):
+        try:
+            source = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise SetupError(f"cannot read public key {path.name}: {exc}") from exc
+        if not source.strip():
+            continue  # project preparation placeholder; never deploy it
+        for line in source.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                fingerprint = _public_key_fingerprint(line)
+            except SetupError as exc:
+                raise SetupError(f"invalid SSH public key in {path.name}") from exc
+            if validate_with_ssh_keygen:
+                if validator is None:
+                    validator = shutil.which("ssh-keygen")
+                    if validator is None:
+                        raise SetupError("ssh-keygen is required to validate project public keys")
+                try:
+                    probe = subprocess.run(
+                        [validator, "-l", "-E", "sha256", "-f", "/dev/stdin"],
+                        input=line + "\n", capture_output=True, text=True,
+                        timeout=10, check=False,
+                    )
+                except (OSError, subprocess.TimeoutExpired) as exc:
+                    raise SetupError(
+                        f"ssh-keygen could not validate public key in {path.name}"
+                    ) from exc
+                if (
+                    probe.returncode != 0
+                    or len(probe.stdout.splitlines()) != 1
+                    or fingerprint not in probe.stdout.split()
+                ):
+                    raise SetupError(f"ssh-keygen rejected public key in {path.name}")
+            result.append({"name": path.name, "line": line, "fingerprint": fingerprint})
+    return result
+
+
+def _validate_cache_profile(payload: dict) -> None:
+    services = payload.get("services")
+    if services is not None:
+        if not isinstance(services, dict) or set(services) != {"dns", "ntp", "timezone"}:
+            raise SetupError("target cache has invalid service categories")
+        for category in ("dns", "ntp"):
+            values = services[category]
+            if not isinstance(values, list) or not values or any(
+                not isinstance(value, str) for value in values
+            ):
+                raise SetupError(f"target cache has invalid {category} values")
+            for value in values:
+                ib_command_argv(["nv", "set", "system", category, "server", value])
+        ib_command_argv([
+            "nv", "set", "system", "date-time", "timezone", services["timezone"],
+        ])
+    keys = payload.get("public_keys")
+    if not isinstance(keys, list):
+        raise SetupError("target cache has invalid public-key list")
+    if keys:
+        key_install_command(keys)
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _cache_authority(ib_csv: Path, p2p: Path,
+                     global_file: Optional[Path]) -> dict[str, object]:
+    """Record the P1 parser and source authority without requiring YAML on P2.
+
+    This generator uses the bounded stdlib global dialect rather than PyYAML.
+    PyYAML is explicitly not required by this stdlib-only generator.  P2
+    never imports or reparses that dependency, even if it is installed.
+    """
+    return {
+        "ib_csv_sha256": _file_sha256(ib_csv),
+        "p2p_sha256": _file_sha256(p2p),
+        "global_sha256": _file_sha256(global_file) if global_file else None,
+        "generator": "initial-setup.py",
+        "generator_sha256": _file_sha256(_SELF_SOURCE_PATH),
+        "python": f"{sys.implementation.name}:{sys.version_info.major}.{sys.version_info.minor}",
+        "pyyaml_required": False,
+        "pyyaml_version": "not-required",
+    }
+
+
+def _valid_cache_authority(payload: dict, ib_csv: Path, p2p: Path,
+                           global_file: Optional[Path]) -> bool:
+    authority = payload.get("cache_authority")
+    if not isinstance(authority, dict) or set(authority) != {
+        "ib_csv_sha256", "p2p_sha256", "global_sha256", "generator",
+        "generator_sha256", "python", "pyyaml_required", "pyyaml_version",
+    }:
+        return False
+    hexdigest = r"[0-9a-f]{64}"
+    if (
+        authority["generator"] != "initial-setup.py"
+        or authority["python"] !=
+        f"{sys.implementation.name}:{sys.version_info.major}.{sys.version_info.minor}"
+        or authority["pyyaml_required"] is not False
+        or authority["pyyaml_version"] != "not-required"
+        or any(not isinstance(authority[field], str)
+               or not re.fullmatch(hexdigest, authority[field])
+               for field in ("ib_csv_sha256", "p2p_sha256", "generator_sha256"))
+        or (authority["global_sha256"] is not None and
+            (not isinstance(authority["global_sha256"], str)
+             or not re.fullmatch(hexdigest, authority["global_sha256"])))
+    ):
+        return False
+    if (payload.get("global") is None) != (authority["global_sha256"] is None):
+        return False
+    if (
+        authority["ib_csv_sha256"] != _file_sha256(ib_csv)
+        or authority["p2p_sha256"] != _file_sha256(p2p)
+        or authority["generator_sha256"] != _file_sha256(_SELF_SOURCE_PATH)
+    ):
+        return False
+    if global_file is not None and global_file.is_file():
+        if authority["global_sha256"] != _file_sha256(global_file):
+            return False
+    return True
+
+
 def load_target_cache(cache_path: Path, ib_csv: Path,
-                      p2p: Path) -> Optional[tuple[int, list[Target]]]:
+                      p2p: Path, *, public_key_tool: Optional[Path] = None,
+                      validate_public_keys_with_ssh_keygen: bool = False,
+                      allow_baked_missing_global: bool = False
+                      ) -> Optional[tuple[int, list[Target]]]:
     try:
         if cache_path.stat().st_mtime < max(ib_csv.stat().st_mtime, p2p.stat().st_mtime):
             return None
@@ -646,6 +1097,33 @@ def load_target_cache(cache_path: Path, ib_csv: Path,
             return None
         if payload.get("ib_csv") != str(ib_csv) or payload.get("p2p") != str(p2p):
             return None
+        current_global = public_key_tool / "01-global.yaml" if public_key_tool else None
+        if not _valid_cache_authority(payload, ib_csv, p2p, current_global):
+            return None
+        if "global" not in payload or "services" not in payload or "public_keys" not in payload:
+            return None
+        _validate_cache_profile(payload)
+        if public_key_tool is not None:
+            global_file = public_key_tool / "01-global.yaml"
+            if global_file.is_file():
+                if payload["global"] != str(global_file.resolve()):
+                    return None
+                if global_file.stat().st_mtime_ns > cache_path.stat().st_mtime_ns:
+                    return None
+            elif payload["global"] is not None and not allow_baked_missing_global:
+                return None
+            source_dir = public_key_tool / "publickey"
+            if source_dir.is_dir() and any(
+                path.stat().st_mtime_ns > cache_path.stat().st_mtime_ns
+                for path in source_dir.glob("*.pub")
+            ):
+                return None
+            if source_dir.is_dir() or not allow_baked_missing_global:
+                if _public_key_profile(
+                    public_key_tool,
+                    validate_with_ssh_keygen=validate_public_keys_with_ssh_keygen,
+                ) != payload["public_keys"]:
+                    return None
         targets = [
             Target(
                 Device(**item["ib"]), Device(**item["ethernet"]),
@@ -662,13 +1140,20 @@ def load_target_cache(cache_path: Path, ib_csv: Path,
 
 
 def save_target_cache(cache_path: Path, ib_csv: Path, p2p: Path,
-                      ib_candidate_count: int, targets: list[Target]) -> None:
+                      ib_candidate_count: int, targets: list[Target], *,
+                      global_file: Optional[Path] = None,
+                      services: Optional[dict[str, object]] = None,
+                      public_keys: Optional[list[dict[str, str]]] = None) -> None:
     payload = {
         "version": TARGET_CACHE_VERSION,
         "generated_at": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
         "ib_csv": str(ib_csv),
         "p2p": str(p2p),
+        "global": str(global_file.resolve()) if global_file is not None else None,
+        "cache_authority": _cache_authority(ib_csv, p2p, global_file),
         "ib_candidate_count": ib_candidate_count,
+        "services": services,
+        "public_keys": public_keys or [],
         "targets": [
             {
                 "ib": device_to_dict(target.ib),
@@ -679,6 +1164,7 @@ def save_target_cache(cache_path: Path, ib_csv: Path, p2p: Path,
             for target in targets
         ],
     }
+    _validate_cache_profile(payload)
     checksum_path = cache_path.with_name(cache_path.name + ".sha256")
     temporary = cache_path.with_name(cache_path.name + ".tmp")
     checksum_temporary = checksum_path.with_name(checksum_path.name + ".tmp")
@@ -782,13 +1268,118 @@ def ssh_options(timeout: int) -> list[str]:
     ]
 
 
-def outer_ssh_command(ethernet: Device, user: str, remote_command: str,
+def typed_argv(argv: object, *, label: str) -> list[str]:
+    """Copy one command vector after rejecting scalar and control-byte carriers."""
+    if type(argv) is not list or not argv:
+        raise SetupError(f"{label} must be a non-empty argv array")
+    if any(type(item) is not str or not item for item in argv):
+        raise SetupError(f"{label} must contain only non-empty string tokens")
+    if any(re.search(r"[\x00-\x1f\x7f-\x9f]", item) for item in argv):
+        raise SetupError(f"{label} contains a forbidden control character")
+    return list(argv)
+
+
+def ethernet_command_argv(argv: object) -> list[str]:
+    """Enforce the complete read-only command surface of a transit switch."""
+    command = typed_argv(argv, label="Ethernet jump command")
+    exact_commands = {
+        ("hostname",),
+        ("nv", "show", "interface"),
+        ("nv", "config", "show"),
+        ("ip", "-d", "link", "show"),
+        ("bridge", "fdb", "show"),
+        ("ip", "neighbor"),
+    }
+    tokens = tuple(command)
+    if tokens in exact_commands:
+        return command
+    if (
+        len(command) == 2
+        and command[0] == "ifquery"
+        and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", command[1])
+    ):
+        return command
+    raise SetupError(
+        "Ethernet jump command is not allowed by the read-only argv allowlist: "
+        + shlex.join(command)
+    )
+
+
+def ib_command_argv(argv: object) -> list[str]:
+    """Enforce the NVOS command vectors used by this Day-0 workflow."""
+    command = typed_argv(argv, label="NVOS command")
+    tokens = tuple(command)
+    if (
+        len(command) == 5 and command[:2] == ["sh", "-c"]
+        and command[2] == _KEY_INSTALL_SCRIPT and command[3] == "--"
+        and len(command[4]) <= 131072
+        and re.fullmatch(r"[A-Za-z0-9+/=]+", command[4])
+    ):
+        return command
+    if tokens in {
+        ("true",),
+        ("nv", "config", "show"),
+        ("nv", "config", "show", "-o", "commands"),
+        ("nv", "config", "apply"),
+        ("nv", "config", "save"),
+    }:
+        return command
+    if len(command) == 7 and command[:3] == ["nv", "set", "interface"]:
+        interface, family, operation, value = command[3:]
+        if interface not in {"eth0", "eth1", "eth0-1"} or family != "ipv4":
+            raise SetupError(
+                "NVOS command is not allowed by the Day-0 argv allowlist: "
+                + shlex.join(command)
+            )
+        try:
+            if operation == "address":
+                ipaddress.IPv4Interface(value)
+            elif operation == "gateway":
+                ipaddress.IPv4Address(value)
+            else:
+                raise ValueError(operation)
+        except ValueError as exc:
+            raise SetupError(
+                "NVOS command has an invalid interface value: "
+                + shlex.join(command)
+            ) from exc
+        return command
+    if (
+        len(command) == 5
+        and command[:4] == ["nv", "set", "system", "hostname"]
+        and valid_hostname(command[4])
+    ):
+        return command
+    if len(command) == 6 and command[:3] == ["nv", "set", "system"]:
+        category, field, value = command[3:]
+        if (category, field) == ("dns", "server"):
+            try:
+                ipaddress.ip_address(value)
+            except ValueError as exc:
+                raise SetupError("invalid DNS server address") from exc
+            return command
+        if (category, field) == ("ntp", "server") and re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,252}", value
+        ):
+            return command
+        if (category, field) == ("date-time", "timezone") and re.fullmatch(
+            r"[A-Za-z0-9_+-]+(?:/[A-Za-z0-9_+-]+)*", value
+        ):
+            return command
+    raise SetupError(
+        "NVOS command is not allowed by the Day-0 argv allowlist: "
+        + shlex.join(command)
+    )
+
+
+def outer_ssh_command(ethernet: Device, user: str, remote_argv: list[str],
                       timeout: int, *, tty: bool = False,
                       local: bool = False) -> list[str]:
+    command = typed_argv(remote_argv, label="outer SSH command")
     if local:
-        return ["sh", "-c", remote_command]
+        return command
     return ["ssh", *( ["-tt"] if tty else [] ), *ssh_options(timeout),
-            f"{user}@{ethernet.login_ip}", remote_command]
+            f"{user}@{ethernet.login_ip}", shlex.join(command)]
 
 
 def ethernet_responder(ethernet_password: str) -> Callable[[str], Optional[str]]:
@@ -808,12 +1399,26 @@ def ethernet_responder(ethernet_password: str) -> Callable[[str], Optional[str]]
 
 
 def run_on_ethernet(ethernet: Device, user: str, password: str,
-                    remote_command: str, timeout: int, *, local: bool = False) -> str:
+                    remote_argv: list[str], timeout: int, *, local: bool = False) -> str:
+    if ethernet.dev_type not in TRANSIT_DEVICE_TYPES:
+        raise SetupError(
+            f"{ethernet.hostname} is not a supported Ethernet transit device"
+        )
+    command = ethernet_command_argv(remote_argv)
     result = interactive_run(
-        outer_ssh_command(ethernet, user, remote_command, timeout, local=local),
+        outer_ssh_command(ethernet, user, command, timeout, local=local),
         (lambda _output: None) if local else ethernet_responder(password), timeout,
     )
     if result.exit_code != 0:
+        if (
+            command[0] == "ifquery"
+            and result.exit_code == 1
+            and not result.output.strip()
+        ):
+            # ifupdown2 uses exit 1 with no output when the interface has no
+            # stanza.  That semantic absence means the Linux default VRF; no
+            # other exit/output combination is downgraded.
+            return ""
         raise SetupError(
             f"Ethernet SSH failed for {ethernet.hostname} ({ethernet.login_ip}), "
             f"exit={result.exit_code}: {result.output.strip()[-600:]}"
@@ -824,21 +1429,13 @@ def run_on_ethernet(ethernet: Device, user: str, password: str,
 def collect_ethernet_interfaces(ethernet: Device, user: str, password: str,
                                 timeout: int, *,
                                 local: bool = False) -> tuple[str, str]:
-    marker_host = "__XDR_HOSTNAME__"
-    marker_interfaces = "__XDR_NV_INTERFACES__"
-    command = (
-        f"printf '{marker_host}\\n'; hostname; "
-        f"printf '{marker_interfaces}\\n'; nv show interface"
+    hostname_output = run_on_ethernet(
+        ethernet, user, password, ["hostname"], timeout, local=local
     )
-    output = run_on_ethernet(
-        ethernet, user, password, command, timeout, local=local
+    interface_output = run_on_ethernet(
+        ethernet, user, password, ["nv", "show", "interface"], timeout,
+        local=local,
     )
-    if marker_host not in output or marker_interfaces not in output:
-        raise SetupError(
-            f"incomplete hostname/interface output from {ethernet.hostname}"
-        )
-    body = output.split(marker_host, 1)[1]
-    hostname_output, body = body.split(marker_interfaces, 1)
     hostname_lines = [clean(line) for line in hostname_output.splitlines() if clean(line)]
     if len(hostname_lines) != 1 or not valid_hostname(hostname_lines[0]):
         raise SetupError(
@@ -854,30 +1451,25 @@ def collect_ethernet_interfaces(ethernet: Device, user: str, password: str,
             f"{ethernet.hostname}, device reports {actual_hostname}"
         )
     log(f"  Ethernet identity verified: {actual_hostname} ({ethernet.login_ip})")
-    return actual_hostname, body.strip()
+    if not interface_output.strip():
+        raise SetupError(f"empty 'nv show interface' output from {ethernet.hostname}")
+    return actual_hostname, interface_output.strip()
 
 
 def collect_ethernet_network_tables(ethernet: Device, user: str,
                                     password: str, timeout: int, *,
                                     local: bool = False) -> tuple[str, str, str]:
-    marker_links = "__XDR_IP_LINKS__"
-    marker_fdb = "__XDR_FDB__"
-    marker_neigh = "__XDR_NEIGH__"
-    command = (
-        f"printf '{marker_links}\\n'; ip -d link show; "
-        f"printf '{marker_fdb}\\n'; bridge fdb show; "
-        f"printf '{marker_neigh}\\n'; ip neighbor"
+    links = run_on_ethernet(
+        ethernet, user, password, ["ip", "-d", "link", "show"], timeout,
+        local=local,
     )
-    output = run_on_ethernet(
-        ethernet, user, password, command, timeout, local=local
+    fdb = run_on_ethernet(
+        ethernet, user, password, ["bridge", "fdb", "show"], timeout,
+        local=local,
     )
-    if any(marker not in output for marker in (marker_links, marker_fdb, marker_neigh)):
-        raise SetupError(
-            f"incomplete link/FDB/neighbor output from {ethernet.hostname}"
-        )
-    body = output.split(marker_links, 1)[1]
-    links, body = body.split(marker_fdb, 1)
-    fdb, neighbors = body.split(marker_neigh, 1)
+    neighbors = run_on_ethernet(
+        ethernet, user, password, ["ip", "neighbor"], timeout, local=local,
+    )
     if not links.strip():
         raise SetupError(f"empty 'ip -d link show' output from {ethernet.hostname}")
     return links.strip(), fdb.strip(), neighbors.strip()
@@ -1093,8 +1685,7 @@ def interface_vrf(ethernet: Device, user: str, password: str,
                   interface: str, timeout: int, *, local: bool = False) -> str:
     """Return the SVI's explicitly configured VRF, or default."""
     output = run_on_ethernet(
-        ethernet, user, password,
-        f"ifquery {shlex.quote(interface)} 2>/dev/null || true", timeout,
+        ethernet, user, password, ["ifquery", interface], timeout,
         local=local,
     )
     matches = re.findall(r"(?im)^\s*vrf\s+(\S+)\s*$", output)
@@ -1170,35 +1761,77 @@ class NestedResponder:
         return None
 
 
+def validate_jump_target(target: Target) -> None:
+    """Bind a jump operation to one IB target and one supported transit."""
+    if target.ib.dev_type != "ib":
+        raise SetupError(
+            f"{target.ib.hostname} is not a type=ib Day-0 target"
+        )
+    if target.ethernet.dev_type not in TRANSIT_DEVICE_TYPES:
+        raise SetupError(
+            f"{target.ethernet.hostname} is not a supported Ethernet transit device"
+        )
+
+
+def validate_network_selector(value: object, *, label: str) -> str:
+    """Reject empty/control-bearing interface and VRF selectors."""
+    if (
+        type(value) is not str
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", value)
+    ):
+        raise SetupError(f"invalid {label}: {value!r}")
+    return value
+
+
+def validate_neighbor_boundary(neighbor: Neighbor) -> None:
+    """Validate semantic nested-SSH selectors before credentials are created."""
+    if type(neighbor.ipv6) is not str or "%" in neighbor.ipv6:
+        raise SetupError(f"invalid IPv6 link-local neighbor: {neighbor.ipv6!r}")
+    try:
+        address = ipaddress.IPv6Address(neighbor.ipv6)
+    except ipaddress.AddressValueError as exc:
+        raise SetupError(
+            f"invalid IPv6 link-local neighbor: {neighbor.ipv6!r}"
+        ) from exc
+    if not address.is_link_local:
+        raise SetupError(f"neighbor is not IPv6 link-local: {neighbor.ipv6!r}")
+    validate_network_selector(neighbor.interface, label="neighbor interface")
+    validate_network_selector(neighbor.vrf, label="neighbor VRF")
+
+
 def nested_ssh_command(target: Target, neighbor: Neighbor, eth_user: str,
-                       ib_user: str, timeout: int, ib_command: str, *,
+                       ib_user: str, timeout: int, ib_command: list[str], *,
                        local: bool = False) -> list[str]:
+    validate_jump_target(target)
+    validate_neighbor_boundary(neighbor)
+    command = ib_command_argv(ib_command)
     destination = f"{ib_user}@{neighbor.ipv6}"
     nested = [
         "ip", "vrf", "exec", neighbor.vrf, "ssh", "-6",
         "-o", f"ConnectTimeout={timeout}",
         "-o", "StrictHostKeyChecking=accept-new",
         "-o", "LogLevel=ERROR",
-        destination, "-B", neighbor.interface, ib_command,
+        destination, "-B", neighbor.interface, shlex.join(command),
     ]
     return outer_ssh_command(
-        target.ethernet, eth_user, shlex.join(nested), timeout,
+        target.ethernet, eth_user, nested, timeout,
         tty=True, local=local,
     )
 
 
 def run_on_ib(target: Target, neighbor: Neighbor, eth_user: str,
               ethernet_password: str, ib_user: str, ib_default_password: str,
-              timeout: int, ib_command: str, *, local: bool = False,
+              timeout: int, ib_command: list[str], *, local: bool = False,
               allow_password_change: bool = False) -> SessionResult:
+    command = nested_ssh_command(
+        target, neighbor, eth_user, ib_user, timeout, ib_command,
+        local=local,
+    )
     responder = NestedResponder(
         ethernet_password, ib_default_password, allow_password_change
     )
     result = interactive_run(
-        nested_ssh_command(
-            target, neighbor, eth_user, ib_user, timeout, ib_command,
-            local=local,
-        ),
+        command,
         responder,
         max(timeout * 4, 60),
     )
@@ -1289,29 +1922,125 @@ def state_is_unconfigured(state: DeviceState) -> bool:
     )
 
 
-def desired_commands(device: Device) -> list[str]:
+def classify_auto_day0(device: Device, state: DeviceState) -> str:
+    """Classify protected Day-0 fields without repairing partial configurations.
+
+    A watch round may configure only the untouched factory state.  Existing
+    fields must match the CSV exactly before services or keys are attempted;
+    neither a missing field nor a contradictory field is silently complete.
+    """
+    if state_is_unconfigured(state):
+        return "unconfigured"
+    if normalize_name(state.hostname) != normalize_name(device.hostname):
+        return "terminal"
+    fields = (
+        (state.eth0_addresses, device.eth0_prefix),
+        (state.eth0_gateways, device.eth0_gateway),
+        (state.eth1_addresses, device.eth1_prefix),
+    )
+    if any(actual != ((expected,) if expected else ()) for actual, expected in fields):
+        return "terminal"
+    allowed_eth1_gateways = (
+        (device.eth1_gateway,) if device.eth1_prefix else (),
+        (device.eth0_gateway,) if not device.eth1_prefix else (),
+    )
+    if state.eth1_gateways not in allowed_eth1_gateways:
+        return "terminal"
+    return "complete"
+
+
+def desired_commands(device: Device) -> list[list[str]]:
     commands = [
-        f"nv set interface eth0 ipv4 address {shlex.quote(device.eth0_prefix)}",
+        ["nv", "set", "interface", "eth0", "ipv4", "address", device.eth0_prefix],
     ]
     if device.eth1_prefix:
         commands.append(
-            f"nv set interface eth1 ipv4 address {shlex.quote(device.eth1_prefix)}"
+            ["nv", "set", "interface", "eth1", "ipv4", "address", device.eth1_prefix]
         )
     if device.eth1_prefix and device.eth1_gateway != device.eth0_gateway:
         commands.extend([
-            f"nv set interface eth0 ipv4 gateway {shlex.quote(device.eth0_gateway)}",
-            f"nv set interface eth1 ipv4 gateway {shlex.quote(device.eth1_gateway)}",
+            ["nv", "set", "interface", "eth0", "ipv4", "gateway", device.eth0_gateway],
+            ["nv", "set", "interface", "eth1", "ipv4", "gateway", device.eth1_gateway],
         ])
     else:
         commands.append(
-            f"nv set interface eth0-1 ipv4 gateway {shlex.quote(device.eth0_gateway)}"
+            [
+                "nv", "set", "interface", "eth0-1", "ipv4", "gateway",
+                device.eth0_gateway,
+            ]
         )
     commands.extend([
-        f"nv set system hostname {shlex.quote(device.hostname)}",
-        "nv config apply",
-        "nv config save",
+        ["nv", "set", "system", "hostname", device.hostname],
+        ["nv", "config", "apply"],
+        ["nv", "config", "save"],
     ])
     return commands
+
+
+def desired_service_commands(services: dict[str, object], current: str) -> list[list[str]]:
+    """Add missing service values only; never synthesize an nv unset."""
+    commands: list[list[str]] = []
+    for category in ("dns", "ntp"):
+        values = services.get(category)
+        if not isinstance(values, list) or not values:
+            raise SetupError(f"target cache has invalid {category} profile")
+        for value in values:
+            command = ib_command_argv(["nv", "set", "system", category, "server", value])
+            if shlex.join(command) not in current.splitlines():
+                commands.append(command)
+    timezone = services.get("timezone")
+    command = ib_command_argv(["nv", "set", "system", "date-time", "timezone", timezone])
+    if shlex.join(command) not in current.splitlines():
+        commands.append(command)
+    return commands
+
+
+def force_day0_needed(device: Device, state: DeviceState) -> bool:
+    """Permit fill-only Day-0; a single contradictory value forbids all writes."""
+    expected_eth1 = device.eth1_prefix
+    expected_eth1_gateway = device.eth1_gateway if expected_eth1 else device.eth0_gateway
+    fields = (
+        ("eth0 address", state.eth0_addresses, device.eth0_prefix),
+        ("eth1 address", state.eth1_addresses, expected_eth1),
+        ("eth0 gateway", state.eth0_gateways, device.eth0_gateway),
+        ("eth1 gateway", state.eth1_gateways, expected_eth1_gateway),
+    )
+    missing = False
+    conflicts: list[str] = []
+    for label, actual, expected in fields:
+        if any(value != expected for value in actual):
+            conflicts.append(f"{label}: expected {expected or 'unset'}, found {actual}")
+        elif expected and not actual:
+            missing = True
+    hostname = normalize_name(state.hostname)
+    if hostname in DEFAULT_HOSTNAMES:
+        missing = True
+    elif hostname != normalize_name(device.hostname):
+        conflicts.append(f"hostname: expected {device.hostname}, found {state.hostname}")
+    if conflicts:
+        raise SetupError("Day-0 conflict; manual resolution required: " + "; ".join(conflicts))
+    return missing
+
+
+def key_install_command(keys: list[dict[str, str]]) -> list[str]:
+    """Carry only validated public lines through a fixed, closed shell program."""
+    if not isinstance(keys, list) or not keys:
+        raise SetupError("public-key installation needs nonempty cache entries")
+    lines: list[str] = []
+    for entry in keys:
+        if not isinstance(entry, dict) or set(entry) != {"name", "line", "fingerprint"}:
+            raise SetupError("target cache has an invalid public-key entry")
+        if not isinstance(entry["name"], str) or not re.fullmatch(
+            r"[A-Za-z0-9_.-]+\.pub", entry["name"]
+        ):
+            raise SetupError("target cache has invalid public-key name")
+        line = entry["line"]
+        fingerprint = _public_key_fingerprint(line)
+        if entry.get("fingerprint") != fingerprint:
+            raise SetupError("target cache has mismatched public-key fingerprint")
+        lines.append(line)
+    encoded = base64.b64encode(("\n".join(lines) + "\n").encode("utf-8")).decode("ascii")
+    return ib_command_argv(["sh", "-c", _KEY_INSTALL_SCRIPT, "--", encoded])
 
 
 def verify_state(device: Device, state: DeviceState) -> None:
@@ -1340,15 +2069,18 @@ def verify_state(device: Device, state: DeviceState) -> None:
 def verify_ipv4_login(target: Target, vrf: str, eth_user: str,
                       ethernet_password: str, ib_user: str, timeout: int, *,
                       local: bool = False) -> None:
+    validate_jump_target(target)
+    validated_vrf = validate_network_selector(vrf, label="IPv4 verification VRF")
+    command = ib_command_argv(["true"])
     nested = [
-        "ip", "vrf", "exec", vrf, "ssh",
+        "ip", "vrf", "exec", validated_vrf, "ssh",
         "-o", f"ConnectTimeout={timeout}",
         "-o", "StrictHostKeyChecking=accept-new",
         "-o", "LogLevel=ERROR",
-        f"{ib_user}@{target.ib.login_ip}", "true",
+        f"{ib_user}@{target.ib.login_ip}", shlex.join(command),
     ]
     command = outer_ssh_command(
-        target.ethernet, eth_user, shlex.join(nested), timeout,
+        target.ethernet, eth_user, nested, timeout,
         tty=True, local=local,
     )
     result = interactive_run(
@@ -1428,6 +2160,429 @@ def prompt_ethernet_passwords(targets: list[Target], supplied: Optional[str],
     return passwords
 
 
+_AUTO_ENV_MAX_BYTES = 65536
+_AUTO_CRON_MARKER = "# http-v3-req10c-auto"
+
+
+def _required_auto_fd_flags() -> int:
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    if not nofollow or not cloexec:
+        raise SetupError("auto.env safety requires O_NOFOLLOW and O_CLOEXEC")
+    return nofollow | cloexec
+
+
+def _auto_state_dir(tool: Path) -> Path:
+    return tool / "xdr-initial-setup-logs"
+
+
+def _auto_input_identity(*paths: Path) -> str:
+    """Bind terminal outcomes to input bytes, not only mutable mtimes."""
+    digest = hashlib.sha256()
+    for path in paths:
+        digest.update(str(path).encode("utf-8"))
+        digest.update(b"\0")
+        try:
+            with path.open("rb") as source:
+                for chunk in iter(lambda: source.read(65536), b""):
+                    digest.update(chunk)
+        except OSError as exc:
+            raise SetupError(f"cannot bind auto input {path}: {exc}") from exc
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _load_auto_terminal(path: Path, identity: str) -> set[str]:
+    flags = os.O_RDONLY | _required_auto_fd_flags()
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        return set()
+    except OSError as exc:
+        raise SetupError(f"cannot safely read auto terminal state: {exc}") from exc
+    try:
+        info = os.fstat(fd)
+        if (
+            not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+            or info.st_uid != os.geteuid() or info.st_mode & 0o077
+            or info.st_size > 65536
+        ):
+            raise SetupError("auto terminal state is not an owned 0600 regular file")
+        with os.fdopen(fd, "rb", closefd=False) as stream:
+            raw = stream.read(65537)
+    finally:
+        os.close(fd)
+    if len(raw) > 65536:
+        raise SetupError("auto terminal state exceeds bounded size")
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SetupError("auto terminal state is malformed") from exc
+    if (
+        not isinstance(payload, dict) or set(payload) != {"version", "inputs", "terminal"}
+        or payload["version"] != 1
+        or not isinstance(payload["inputs"], str)
+        or not re.fullmatch(r"[0-9a-f]{64}", payload["inputs"])
+        or not isinstance(payload["terminal"], list)
+        or any(not isinstance(name, str) or not re.fullmatch(r"[a-z0-9_.-]+", name)
+               for name in payload["terminal"])
+        or len(payload["terminal"]) != len(set(payload["terminal"]))
+    ):
+        raise SetupError("auto terminal state schema is invalid")
+    return set(payload["terminal"]) if payload["inputs"] == identity else set()
+
+
+def _save_auto_terminal(path: Path, identity: str, names: set[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(
+        {"version": 1, "inputs": identity, "terminal": sorted(names)},
+        separators=(",", ":"), sort_keys=True,
+    ).encode("utf-8") + b"\n"
+    if len(payload) > 65536:
+        raise SetupError("auto terminal state exceeds bounded size")
+    temporary = path.with_name(path.name + f".{os.getpid()}.tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _required_auto_fd_flags()
+    try:
+        fd = os.open(temporary, flags, 0o600)
+        try:
+            os.write(fd, payload)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(temporary, path)
+    except OSError as exc:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        raise SetupError(f"cannot safely publish auto terminal state: {exc}") from exc
+
+
+def _auto_password_key(hostname: str) -> str:
+    suffix = re.sub(r"[^A-Z0-9]", "_", hostname.upper())
+    if not suffix or not re.fullmatch(r"[A-Z0-9_]+", suffix):
+        raise SetupError(f"invalid OOB Leaf hostname for auto credential: {hostname!r}")
+    return "ZTP_ETH_PASSWORD_" + suffix
+
+
+def read_auto_credentials(path: Path) -> dict[str, str]:
+    """Read one bounded, owned data file through a NOFOLLOW fd, never a shell."""
+    flags = os.O_RDONLY | _required_auto_fd_flags()
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise SetupError(f"auto.env credential cannot be opened safely: {exc}") from exc
+    try:
+        info = os.fstat(fd)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or info.st_uid != os.geteuid()
+            or info.st_mode & 0o077
+            or info.st_size > _AUTO_ENV_MAX_BYTES
+        ):
+            raise SetupError("auto.env credential has unsafe owner, mode, link or size")
+        with os.fdopen(fd, "rb", closefd=False) as stream:
+            raw = stream.read(_AUTO_ENV_MAX_BYTES + 1)
+        if len(raw) > _AUTO_ENV_MAX_BYTES:
+            raise SetupError("auto.env credential exceeds bounded size")
+    finally:
+        os.close(fd)
+    try:
+        data = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise SetupError("auto.env credential is not UTF-8") from exc
+    values: dict[str, str] = {}
+    for line in data.splitlines():
+        match = re.fullmatch(r"([A-Z][A-Z0-9_]*)=([^\x00-\x1f\x7f]*)", line)
+        if not match:
+            raise SetupError("auto.env credential contains a malformed KEY=VALUE line")
+        key, value = match.groups()
+        if (
+            key in values
+            or not value
+            or key not in {"NVOS_INITIAL_PASSWORD", "ZTP_ETH_PASSWORD"}
+            and not re.fullmatch(r"ZTP_ETH_PASSWORD_[A-Z0-9_]+", key)
+        ):
+            raise SetupError("auto.env credential contains an unknown, repeated or empty key")
+        values[key] = value
+    if not values.get("NVOS_INITIAL_PASSWORD"):
+        raise SetupError("auto.env credential lacks NVOS_INITIAL_PASSWORD")
+    if not any(key.startswith("ZTP_ETH_PASSWORD") for key in values):
+        raise SetupError("auto.env credential lacks OOB Leaf password")
+    return values
+
+
+def _auto_passwords_for_targets(credentials: dict[str, str],
+                                targets: list[Target]) -> dict[str, str]:
+    passwords: dict[str, str] = {}
+    normalized_keys: dict[str, str] = {}
+    for target in targets:
+        host = target.ethernet.hostname
+        key = normalize_name(host)
+        variable = _auto_password_key(host)
+        previous = normalized_keys.setdefault(variable, key)
+        if previous != key:
+            raise SetupError("auto.env OOB Leaf hostname normalization collision")
+        value = credentials.get(variable, credentials.get("ZTP_ETH_PASSWORD"))
+        if not value:
+            raise SetupError(f"auto.env credential lacks OOB Leaf password for {host}")
+        passwords[key] = value
+    return passwords
+
+
+def install_oob_management_key(ethernet: Device, user: str, password: str,
+                               entry: dict[str, str], timeout: int) -> None:
+    """Install only the baked management key on a genuine OOB Leaf.
+
+    The eth_jump transit type is intentionally not eligible: its owner-facing
+    contract forbids any remote write.  This is a closed hard-coded installer,
+    not a relaxation of the read-only Ethernet argv allowlist.
+    """
+    if ethernet.dev_type not in {"eth", "ethernet"}:
+        raise SetupError(
+            f"OOB key installation is not authorized for transit type {ethernet.dev_type}"
+        )
+    if entry.get("name") != "mgmt-server.pub":
+        raise SetupError("OOB key installation accepts only mgmt-server.pub")
+    command = key_install_command([entry])
+    remote = outer_ssh_command(ethernet, user, command, timeout, tty=True)
+    result = interactive_run(remote, ethernet_responder(password), max(timeout * 3, 45))
+    if result.exit_code != 0:
+        raise SetupError(
+            f"OOB Leaf management-key installation failed for {ethernet.hostname} "
+            f"(exit={result.exit_code})"
+        )
+
+
+def _write_auto_credentials(path: Path, initial: str,
+                            passwords: dict[str, str], targets: list[Target]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = ["NVOS_INITIAL_PASSWORD=" + initial]
+    hostname_for_key = {
+        normalize_name(target.ethernet.hostname): target.ethernet.hostname
+        for target in targets
+    }
+    for key, password in sorted(passwords.items()):
+        if any(c in password for c in "\r\n\x00"):
+            raise SetupError("auto.env credential contains an invalid password control")
+        lines.append(_auto_password_key(hostname_for_key[key]) + "=" + password)
+    payload = ("\n".join(lines) + "\n").encode("utf-8")
+    if len(payload) > _AUTO_ENV_MAX_BYTES:
+        raise SetupError("auto.env credential exceeds bounded size")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _required_auto_fd_flags()
+    try:
+        fd = os.open(path, flags, 0o600)
+        try:
+            os.write(fd, payload)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        raise SetupError(f"auto.env credential cannot be published safely: {exc}") from exc
+
+
+def _auto_marker(path: Path) -> None:
+    """Persist nonsecret watch ownership even if auto.env is later missing."""
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _required_auto_fd_flags()
+        try:
+            fd = os.open(path, flags, 0o600)
+            try:
+                os.write(fd, b"http-v3-req10c-auto-v1\n")
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        except OSError as exc:
+            raise SetupError(f"cannot create owned auto watch marker: {exc}") from exc
+        return
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_nlink != 1
+        or info.st_uid != os.geteuid()
+        or info.st_mode & 0o077
+        or info.st_size != len(b"http-v3-req10c-auto-v1\n")
+        or path.read_bytes() != b"http-v3-req10c-auto-v1\n"
+    ):
+        raise SetupError("auto watch marker is not owned or valid")
+
+
+@contextmanager
+def _auto_crontab_lock(tool: Path):
+    """Serialize this project's crontab RMW operations, not foreign clients.
+
+    The lock inode is retained after cleanup: unlinking it while a process
+    waits would allow two independent lock generations to enter together.
+    The project's log directory may be a managed link, so pin and validate
+    the opened destination directory before opening the lock relative to it.
+    """
+    state = _auto_state_dir(tool)
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    directory_flags |= getattr(os, "O_CLOEXEC", 0)
+    if not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_CLOEXEC"):
+        raise SetupError("secure project crontab lock requires directory/CLOEXEC flags")
+    try:
+        directory_fd = os.open(state, directory_flags)
+    except OSError as exc:
+        raise SetupError(f"cannot open project crontab lock directory: {exc}") from exc
+    try:
+        directory_info = os.fstat(directory_fd)
+        if (
+            not stat.S_ISDIR(directory_info.st_mode)
+            or directory_info.st_uid != os.geteuid()
+            or directory_info.st_mode & 0o022
+        ):
+            raise SetupError("project crontab lock directory is not safely owned")
+        try:
+            fd = os.open(
+                "auto-crontab.lock",
+                os.O_RDWR | os.O_CREAT | _required_auto_fd_flags(),
+                0o600, dir_fd=directory_fd,
+            )
+        except OSError as exc:
+            raise SetupError(f"cannot open project crontab lock safely: {exc}") from exc
+        try:
+            info = os.fstat(fd)
+            if (
+                not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or info.st_uid != os.geteuid()
+                or info.st_mode & 0o777 != 0o600
+            ):
+                raise SetupError("project crontab lock is not an owned 0600 single-link file")
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                linked = os.stat(
+                    "auto-crontab.lock", dir_fd=directory_fd,
+                    follow_symlinks=False,
+                )
+                if (linked.st_dev, linked.st_ino) != (info.st_dev, info.st_ino):
+                    raise SetupError("project crontab lock pathname changed")
+                current = os.stat(state)
+                if (current.st_dev, current.st_ino) != (
+                    directory_info.st_dev, directory_info.st_ino
+                ):
+                    raise SetupError("project crontab lock directory changed")
+                yield
+            except OSError as exc:
+                raise SetupError(f"project crontab lock failed: {exc}") from exc
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _read_auto_crontab() -> str:
+    try:
+        result = subprocess.run(
+            ["crontab", "-l"], capture_output=True, text=True, timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SetupError(f"cannot read current-user crontab: {exc}") from exc
+    if result.returncode == 0:
+        return result.stdout
+    if result.returncode == 1 and "no crontab" in result.stderr.casefold():
+        return ""
+    raise SetupError(f"cannot read current-user crontab (exit {result.returncode})")
+
+
+def _write_auto_crontab(contents: str) -> None:
+    try:
+        result = subprocess.run(
+            ["crontab", "-"], input=contents, capture_output=True,
+            text=True, timeout=10, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SetupError(f"cannot update current-user crontab: {exc}") from exc
+    if result.returncode != 0:
+        raise SetupError(f"cannot update current-user crontab (exit {result.returncode})")
+
+
+def _own_auto_cron_line(line: str, tool: Path, credentials: Path) -> bool:
+    if _AUTO_CRON_MARKER in line and str(tool / "initial-setup.py") in line:
+        return True
+    # Cleanup of the documented pre-marker shape remains exact to the known
+    # script and credential path, never a generic 'initial-setup.py' match.
+    return (
+        line.startswith("*/10 * * * * ")
+        and "initial-setup.py --auto --apply --yes --credentials-file " in line
+        and str(credentials) in line
+        and str(tool) in line
+    )
+
+
+def _install_auto_watch(tool: Path, credentials: Path, ib_csv: Path,
+                        p2p: Path, cache: Path, report: Path,
+                        snapshots: Path, *, force: bool) -> None:
+    state = _auto_state_dir(tool)
+    state.mkdir(parents=True, exist_ok=True)
+    with _auto_crontab_lock(tool):
+        _install_auto_watch_locked(
+            tool, credentials, ib_csv, p2p, cache, report, snapshots, force=force,
+        )
+
+
+def _install_auto_watch_locked(tool: Path, credentials: Path, ib_csv: Path,
+                               p2p: Path, cache: Path, report: Path,
+                               snapshots: Path, *, force: bool) -> None:
+    state = _auto_state_dir(tool)
+    _auto_marker(state / "auto-watch.state")
+    python = Path(sys.executable).resolve()
+    if not python.is_absolute():
+        raise SetupError("auto cron Python executable is not absolute")
+    args = [
+        str(python), str(tool / "initial-setup.py"), "--auto", "--apply", "--yes",
+        "--credentials-file", str(credentials), "--execution-mode", "management",
+        "--ib-csv", str(ib_csv), "--p2p", str(p2p), "--target-cache", str(cache),
+        "--report", str(report), "--snapshot-dir", str(snapshots),
+    ]
+    if force:
+        args.append("--force")
+    shell = (
+        "cd " + shlex.quote(str(tool)) + " && "
+        + "flock -w 0 " + shlex.quote(str(state / "auto.lock")) + " "
+        + shlex.join(args) + " >> " + shlex.quote(str(state / "auto-cron.log"))
+        + " 2>&1 " + _AUTO_CRON_MARKER
+    )
+    job = "*/10 * * * * " + shell + "\n"
+    existing = _read_auto_crontab()
+    retained = "".join(
+        line for line in existing.splitlines(keepends=True)
+        if not _own_auto_cron_line(line, tool, credentials)
+    )
+    if retained and not retained.endswith("\n"):
+        retained += "\n"
+    _write_auto_crontab(retained + job)
+
+
+def _remove_auto_watch(tool: Path, credentials: Path) -> None:
+    with _auto_crontab_lock(tool):
+        _remove_auto_watch_locked(tool, credentials)
+
+
+def _remove_auto_watch_locked(tool: Path, credentials: Path) -> None:
+    existing = _read_auto_crontab()
+    retained = "".join(
+        line for line in existing.splitlines(keepends=True)
+        if not _own_auto_cron_line(line, tool, credentials)
+    )
+    if retained != existing:
+        _write_auto_crontab(retained)
+    if credentials.exists() or credentials.is_symlink():
+        # A bad replacement is not deleted, because it could be a foreign
+        # object.  Report a repairable failure instead of hiding it.
+        read_auto_credentials(credentials)
+        credentials.unlink()
+    marker = _auto_state_dir(tool) / "auto-watch.state"
+    if marker.exists() or marker.is_symlink():
+        _auto_marker(marker)
+        marker.unlink()
+
+
 def confirm_first_device_change(target: Target, reason: str) -> bool:
     log(
         f"\nFIRST DEVICE CHANGE: {target.ib.hostname} via "
@@ -1438,6 +2593,118 @@ def confirm_first_device_change(target: Target, reason: str) -> bool:
         "Authorize this change and subsequent eligible IB devices? [y/N]: "
     ).strip().casefold()
     return answer in {"y", "yes"}
+
+
+def run_service_stage(target: Target, neighbor: Neighbor, eth_user: str,
+                      eth_password: str, ib_user: str, timeout: int,
+                      services: Optional[dict[str, object]], current: str,
+                      *, local: bool, apply: bool, authorized: bool) -> tuple[bool, bool]:
+    if services is None:
+        log("  Services SKIP: 01-global.yaml was unavailable at cache generation.")
+        return authorized, True
+    commands = desired_service_commands(services, current)
+    if not commands:
+        log("  Services SKIP: all desired values are already present; no flash save.")
+        return authorized, True
+    for command in commands:
+        log(f"  Services {'APPLY' if apply else 'WOULD APPLY'}: {shlex.join(command)}")
+    if not apply:
+        return authorized, False
+    if not authorized:
+        authorized = confirm_first_device_change(
+            target, "apply the missing NVOS services and verify them independently"
+        )
+        if not authorized:
+            log("  Services SKIP: device changes were not authorized.")
+            return False, True
+    for command in (*commands, ["nv", "config", "apply"], ["nv", "config", "save"]):
+        run_on_ib(target, neighbor, eth_user, eth_password, ib_user,
+                  eth_password, timeout, command, local=local)
+    result = run_on_ib(
+        target, neighbor, eth_user, eth_password, ib_user, eth_password, timeout,
+        ["nv", "config", "show", "-o", "commands"], local=local,
+    )
+    remaining = desired_service_commands(services, result.output)
+    if remaining:
+        raise SetupError("service verification failed: " +
+                         ", ".join(shlex.join(command) for command in remaining))
+    log("  Services SUCCESS: desired values verified.")
+    return authorized, False
+
+
+def verify_management_key_possession(target: Target, ib_user: str,
+                                     entry: dict[str, str], private_key: Path,
+                                     timeout: int) -> None:
+    """Prove the installed management key by a public-key-only IPv4 reconnect."""
+    if private_key.is_symlink() or not private_key.is_file():
+        raise SetupError("management private key is not a regular local file")
+    if not valid_ssh_user(ib_user):
+        raise SetupError("invalid IB user for public-key verification")
+    try:
+        login_ip = str(ipaddress.IPv4Address(target.ib.login_ip))
+        derived = subprocess.run(
+            ["ssh-keygen", "-y", "-f", str(private_key)],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            timeout=max(timeout, 10), check=False,
+        )
+        if derived.returncode != 0:
+            raise SetupError("local management private key could not be read")
+        if _public_key_fingerprint(derived.stdout.strip()) != entry["fingerprint"]:
+            raise SetupError("local management private key does not match installed public key")
+        probe = [
+            "ssh", "-i", str(private_key),
+            "-o", "BatchMode=yes",
+            "-o", "PreferredAuthentications=publickey",
+            "-o", "PasswordAuthentication=no",
+            "-o", "KbdInteractiveAuthentication=no",
+            "-o", "IdentitiesOnly=yes",
+            "-o", f"ConnectTimeout={timeout}",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "LogLevel=ERROR",
+            f"{ib_user}@{login_ip}", "true",
+        ]
+        result = subprocess.run(
+            probe, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            timeout=max(timeout * 2, 30), check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+        raise SetupError("management public-key verification could not complete") from exc
+    if result.returncode != 0:
+        raise SetupError("management public-key-only IPv4 SSH verification failed")
+
+
+def run_key_stage(target: Target, neighbor: Neighbor, eth_user: str,
+                  eth_password: str, ib_user: str, timeout: int,
+                  keys: list[dict[str, str]], *, local: bool,
+                  apply: bool, authorized: bool,
+                  management_private_key: Optional[Path] = None) -> bool:
+    if not keys:
+        log("  Public keys SKIP: no usable project public keys were baked into cache.")
+        return authorized
+    command = key_install_command(keys)
+    for entry in keys:
+        log(f"  Public key {'INSTALL' if apply else 'WOULD INSTALL'}: "
+            f"{entry['name']} {entry['fingerprint']}")
+    if not apply:
+        return authorized
+    if not authorized:
+        authorized = confirm_first_device_change(
+            target, "install validated project public keys into authorized_keys"
+        )
+        if not authorized:
+            log("  Public keys SKIP: device changes were not authorized.")
+            return False
+    run_on_ib(target, neighbor, eth_user, eth_password, ib_user,
+              eth_password, timeout, command, local=local)
+    for entry in keys:
+        if entry["name"] == "mgmt-server.pub" and management_private_key is not None:
+            verify_management_key_possession(
+                target, ib_user, entry, management_private_key, timeout,
+            )
+            log(f"  Public key {entry['name']} {entry['fingerprint']}: 已验证")
+        else:
+            log(f"  Public key {entry['name']} {entry['fingerprint']}: 已写入，未验证")
+    return authorized
 
 
 def parse_args() -> argparse.Namespace:
@@ -1471,9 +2738,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--connect-timeout", type=int, default=10,
                         help="SSH connect timeout seconds (default: 10)")
     parser.add_argument("--plan", action="store_true",
-                        help="only parse CSV/P2P and show targets")
+                        help="show targets and all potential Day-0, service and key commands without connecting")
     parser.add_argument("--apply", action="store_true",
                         help="configure devices that pass the all-unconfigured check")
+    parser.add_argument("--force", action="store_true",
+                        help="only complete missing Day-0 fields; refuse conflicts")
+    parser.add_argument(
+        "--auto", action="store_true",
+        help="watch all CSV IB switches; retry every 10 minutes until configured",
+    )
+    parser.add_argument(
+        "--credentials-file", type=Path,
+        help="owned 0600 auto.env data file for non-interactive --auto rounds",
+    )
     parser.add_argument("--yes", action="store_true",
                         help="with --apply, do not ask for final confirmation")
     parser.add_argument(
@@ -1521,6 +2798,21 @@ def main() -> int:
         raise SetupError(
             "--generate-json cannot be combined with --plan or --apply"
         )
+    if args.auto:
+        if args.plan or args.generate_json or args.execution_mode == "ethernet":
+            raise SetupError("--auto requires management execution, not plan or P1 generation")
+        if args.ethernet_password is not None:
+            raise SetupError("--auto forbids --ethernet-password in argv")
+        if args.credentials_file is None and not sys.stdin.isatty():
+            raise SetupError("interactive first --auto round requires a tty")
+        args.apply = True
+        args.yes = True
+    elif args.credentials_file is not None:
+        raise SetupError("--credentials-file is only valid with --auto")
+    auto_credentials = (
+        read_auto_credentials(args.credentials_file)
+        if args.credentials_file is not None else None
+    )
     if not valid_ssh_user(args.eth_user):
         raise SetupError(f"invalid --eth-user: {args.eth_user!r}")
     if not valid_ssh_user(args.ib_user):
@@ -1554,8 +2846,14 @@ def main() -> int:
         links = parse_p2p(p2p_path)
         validate_p2p_links(links)
         targets = build_targets(links, ib_devices, eth_devices)
+        tool = Path(__file__).resolve().parent
+        services = _service_profile(tool)
+        public_keys = _public_key_profile(tool)
+        global_file = tool / "01-global.yaml"
         save_target_cache(
-            cache_path, ib_csv_path, p2p_path, len(ib_devices), targets
+            cache_path, ib_csv_path, p2p_path, len(ib_devices), targets,
+            global_file=global_file if global_file.is_file() else None,
+            services=services, public_keys=public_keys,
         )
         print(f"Input CSV: {ib_csv_path}")
         print(f"Input P2P: {p2p_path}")
@@ -1574,20 +2872,76 @@ def main() -> int:
     log(f"Started: {time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
     log(f"Input CSV: {ib_csv_path}")
     log(f"Input P2P: {p2p_path}")
-    cached = load_target_cache(cache_path, ib_csv_path, p2p_path)
+    if args.auto:
+        log(
+            "AUTO WATCH: --auto authorizes --apply --yes including future IB password "
+            "changes, installs an OOB Leaf key when supported, and may write a "
+            "0600 auto.env with all OOB Leaf and IB passwords.  Disclosure of "
+            "that file exposes all of those devices.  Edit CSV to correct "
+            "bad MACs; the next round revalidates inputs."
+        )
+    tool = Path(__file__).resolve().parent
+    source_inputs_available = (
+        args.execution_mode in {"management", "ethernet"}
+        or (args.execution_mode == "auto" and (
+            (tool / "publickey").is_dir() or (tool / "01-global.yaml").is_file()
+        ))
+    )
+    cached = load_target_cache(
+        cache_path, ib_csv_path, p2p_path,
+        public_key_tool=tool if source_inputs_available else None,
+        validate_public_keys_with_ssh_keygen=args.execution_mode == "management",
+        allow_baked_missing_global=args.execution_mode != "management",
+    )
+    if cached is not None and args.execution_mode == "auto":
+        # A disconnected Ethernet leaf legitimately has neither project link.
+        # Distinguish it from a management host using validated target identities;
+        # a management cache reuse still needs the same P1 key validation as minting.
+        local_for_cache = local_ethernet_keys(
+            cached[1], args.execution_mode, args.local_ethernet_hostname,
+        )
+        if not local_for_cache:
+            cached = load_target_cache(
+                cache_path, ib_csv_path, p2p_path, public_key_tool=tool,
+                validate_public_keys_with_ssh_keygen=True,
+                allow_baked_missing_global=False,
+            )
     if cached is not None:
         ib_candidate_count, targets = cached
         log(f"Target cache: reused {cache_path}")
     else:
+        if args.execution_mode == "ethernet":
+            if cache_path.is_file():
+                raise SetupError(
+                    "target cache version, checksum, or input identity is invalid; "
+                    "regenerate version 4 on the management server"
+                )
+            raise SetupError("target cache is missing; generate version 4 on the management server")
         ib_devices, eth_devices = load_devices(ib_csv_path)
         links = parse_p2p(p2p_path)
         validate_p2p_links(links)
         targets = build_targets(links, ib_devices, eth_devices)
         ib_candidate_count = len(ib_devices)
+        services = _service_profile(tool)
+        public_keys = _public_key_profile(tool)
+        global_file = tool / "01-global.yaml"
         save_target_cache(
-            cache_path, ib_csv_path, p2p_path, ib_candidate_count, targets
+            cache_path, ib_csv_path, p2p_path, ib_candidate_count, targets,
+            global_file=global_file if global_file.is_file() else None,
+            services=services, public_keys=public_keys,
         )
         log(f"Target cache: generated {cache_path}")
+    if args.auto:
+        require_auto_full_target_coverage(ib_candidate_count, targets)
+    cache_payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    services = cache_payload["services"]
+    public_keys = cache_payload["public_keys"]
+    auto_management_keys = (
+        [entry for entry in public_keys if entry["name"] == "mgmt-server.pub"]
+        if args.auto else []
+    )
+    if args.auto and not auto_management_keys:
+        raise SetupError("--auto requires a validated mgmt-server.pub for OOB Leaf key install")
 
     log(f"IB candidates in CSV: {ib_candidate_count}")
     log(f"P2P management links: {len(targets)}")
@@ -1605,22 +2959,57 @@ def main() -> int:
     else:
         log("Device changes: DISABLED (no --apply); read-only device mode.")
     if args.plan:
+        log("Plan lists potential commands; already-present values may be omitted at runtime.")
+        for target in targets:
+            log(f"  [{target.ib.hostname}] Day-0 commands:")
+            for command in desired_commands(target.ib):
+                log("    " + shlex.join(command))
+            if services is None:
+                log("    Services SKIP: 01-global.yaml was unavailable at cache generation.")
+            else:
+                log("    Services commands:")
+                for command in desired_service_commands(services, ""):
+                    log("    " + shlex.join(command))
+                log("    nv config apply")
+                log("    nv config save")
+            if public_keys:
+                log("    Public-key install command:")
+                log("    " + shlex.join(key_install_command(public_keys)))
+                for entry in public_keys:
+                    log(f"    {entry['name']} {entry['fingerprint']}")
+            else:
+                log("    Public keys SKIP: no usable project public keys were baked into cache.")
         return 0
 
-    initial_ib_password = resolve_initial_ib_password(
-        args.ib_initial_password_env,
-        factory_default_admin=args.factory_default_admin,
+    initial_ib_password = (
+        auto_credentials["NVOS_INITIAL_PASSWORD"]
+        if auto_credentials is not None else resolve_initial_ib_password(
+            args.ib_initial_password_env,
+            factory_default_admin=args.factory_default_admin,
+        )
     )
 
     local_keys = local_ethernet_keys(
         targets, args.execution_mode, args.local_ethernet_hostname
     )
+    if args.auto and local_keys:
+        raise SetupError(
+            "--auto watch must run on the management server, not a local OOB Leaf"
+        )
+    management_private_key = None
+    if args.execution_mode != "ethernet" and not local_keys:
+        candidate_private_key = Path.home() / ".ssh" / "id_ed25519"
+        if candidate_private_key.is_file() and not candidate_private_key.is_symlink():
+            management_private_key = candidate_private_key
     if local_keys:
         log("Local Ethernet execution: " + ", ".join(sorted(local_keys)))
     else:
         log("Execution location: management server (all Ethernet access uses SSH)")
-    passwords = prompt_ethernet_passwords(
-        targets, args.ethernet_password, local_keys
+    passwords = (
+        _auto_passwords_for_targets(auto_credentials, targets)
+        if auto_credentials is not None else prompt_ethernet_passwords(
+            targets, args.ethernet_password, local_keys
+        )
     )
     apply_authorized = bool(args.apply and args.yes)
     if apply_authorized:
@@ -1629,7 +3018,13 @@ def main() -> int:
     interface_tables: dict[str, str] = {}
     network_tables: dict[str, tuple[str, str, str]] = {}
     table_failures: dict[str, str] = {}
-    failures = configured = skipped = 0
+    failures = configured = skipped = day0_skipped = services_skipped = 0
+    completed_targets: set[str] = set()
+    terminal_path = _auto_state_dir(tool) / "auto-terminal.json"
+    terminal_identity = _auto_input_identity(ib_csv_path, p2p_path) if args.auto else ""
+    terminal_targets = (
+        _load_auto_terminal(terminal_path, terminal_identity) if args.auto else set()
+    )
     ethernet_switches = {
         normalize_name(target.ethernet.hostname): target.ethernet
         for target in targets
@@ -1665,6 +3060,15 @@ def main() -> int:
         eth_password = passwords[eth_key]
         ethernet_is_local = eth_key in local_keys
         log(f"\n[{target.ib.hostname}] via {target.ethernet.hostname}:{target.ethernet_port}")
+        ib_key = normalize_name(target.ib.hostname)
+        if args.auto and ib_key in terminal_targets:
+            failures += 1
+            log(
+                "  Day-0 TERMINAL: recorded partial/conflicting configuration; "
+                "IB login and writes skipped until CSV/P2P change or operator "
+                "clears owned auto-terminal.json after manual repair."
+            )
+            continue
         try:
             if eth_key in table_failures:
                 raise SetupError(
@@ -1715,7 +3119,8 @@ def main() -> int:
             result = run_on_ib(
                 target, neighbor, args.eth_user, eth_password,
                 args.ib_user, initial_ib_password, args.connect_timeout,
-                "nv config show -o commands", local=ethernet_is_local,
+                ["nv", "config", "show", "-o", "commands"],
+                local=ethernet_is_local,
                 allow_password_change=apply_authorized,
             )
             if result.password_change_required:
@@ -1740,7 +3145,8 @@ def main() -> int:
                 result = run_on_ib(
                     target, neighbor, args.eth_user, eth_password,
                     args.ib_user, initial_ib_password, args.connect_timeout,
-                    "nv config show -o commands", local=ethernet_is_local,
+                    ["nv", "config", "show", "-o", "commands"],
+                    local=ethernet_is_local,
                     allow_password_change=True,
                 )
             if result.password_changed:
@@ -1749,7 +3155,8 @@ def main() -> int:
                 result = run_on_ib(
                     target, neighbor, args.eth_user, eth_password,
                     args.ib_user, eth_password, args.connect_timeout,
-                    "nv config show -o commands", local=ethernet_is_local,
+                    ["nv", "config", "show", "-o", "commands"],
+                    local=ethernet_is_local,
                 )
             state = parse_nvue_state(result.output)
             log(
@@ -1762,14 +3169,51 @@ def main() -> int:
                     state.hostname or "unset",
                 )
             )
-            if not state_is_unconfigured(state):
+            if args.auto:
+                auto_day0 = classify_auto_day0(target.ib, state)
+                if auto_day0 == "terminal":
+                    failures += 1
+                    terminal_targets.add(ib_key)
+                    log(
+                        "  Day-0 TERMINAL: protected fields are partially configured "
+                        "or conflict with CSV; manual resolution required; no write attempted."
+                    )
+                    continue
+                day0_required = auto_day0 == "unconfigured"
+            else:
+                day0_required = state_is_unconfigured(state)
+            if args.force and not day0_required:
+                try:
+                    day0_required = force_day0_needed(target.ib, state)
+                except SetupError as exc:
+                    log(f"  Day-0 SKIP: {exc}")
+                    day0_required = False
+            if not day0_required:
                 skipped += 1
-                log("  SKIP: at least one protected field is already configured; nothing changed.")
+                day0_skipped += 1
+                log("  Day-0 SKIP: protected fields already configured; services remain eligible.")
+                apply_authorized, service_was_skipped = run_service_stage(
+                    target, neighbor, args.eth_user, eth_password, args.ib_user,
+                    args.connect_timeout, services, state.raw_commands,
+                    local=ethernet_is_local, apply=args.apply,
+                    authorized=apply_authorized,
+                )
+                services_skipped += int(service_was_skipped)
+                apply_authorized = run_key_stage(
+                    target, neighbor, args.eth_user, eth_password, args.ib_user,
+                    args.connect_timeout, public_keys, local=ethernet_is_local,
+                    apply=args.apply, authorized=apply_authorized,
+                    management_private_key=management_private_key,
+                )
+                completed_targets.add(normalize_name(target.ib.hostname))
                 continue
 
             commands = desired_commands(target.ib)
             for command in commands:
-                log(f"  {'APPLY' if args.apply else 'WOULD APPLY'}: {command}")
+                log(
+                    f"  {'APPLY' if args.apply else 'WOULD APPLY'}: "
+                    f"{shlex.join(command)}"
+                )
             if not args.apply:
                 log("  Check-only mode; use --apply to configure.")
                 continue
@@ -1785,15 +3229,17 @@ def main() -> int:
                     return 0
 
             try:
-                run_on_ib(
-                    target, neighbor, args.eth_user, eth_password,
-                    args.ib_user, eth_password, args.connect_timeout,
-                    " && ".join(commands), local=ethernet_is_local,
-                )
+                for command in commands:
+                    run_on_ib(
+                        target, neighbor, args.eth_user, eth_password,
+                        args.ib_user, eth_password, args.connect_timeout,
+                        command, local=ethernet_is_local,
+                    )
                 verify_result = run_on_ib(
                     target, neighbor, args.eth_user, eth_password,
                     args.ib_user, eth_password, args.connect_timeout,
-                    "nv config show -o commands", local=ethernet_is_local,
+                    ["nv", "config", "show", "-o", "commands"],
+                    local=ethernet_is_local,
                 )
                 verify_state(target.ib, parse_nvue_state(verify_result.output))
                 verify_ipv4_login(
@@ -1810,14 +3256,97 @@ def main() -> int:
                 break
             configured += 1
             log(f"  SUCCESS: configuration verified; IPv4 SSH to {target.ib.login_ip} succeeded.")
+            apply_authorized, service_was_skipped = run_service_stage(
+                target, neighbor, args.eth_user, eth_password, args.ib_user,
+                args.connect_timeout, services, verify_result.output,
+                local=ethernet_is_local, apply=args.apply,
+                authorized=apply_authorized,
+            )
+            services_skipped += int(service_was_skipped)
+            apply_authorized = run_key_stage(
+                target, neighbor, args.eth_user, eth_password, args.ib_user,
+                args.connect_timeout, public_keys, local=ethernet_is_local,
+                apply=args.apply, authorized=apply_authorized,
+                management_private_key=management_private_key,
+            )
+            completed_targets.add(normalize_name(target.ib.hostname))
         except SetupError as exc:
             failures += 1
             log(f"  ERROR: {exc}")
 
-    log(
-        f"\nSummary: targets={len(targets)} configured={configured} "
-        f"skipped={skipped} failed={failures}"
+    oob_key_pending = False
+    if args.auto:
+        for eth_key, ethernet in sorted(ethernet_switches.items()):
+            if ethernet.dev_type not in {"eth", "ethernet"}:
+                log(
+                    f"  OOB key SKIP: {ethernet.hostname} is {ethernet.dev_type}; "
+                    "transit write is not authorized."
+                )
+                continue
+            if eth_key in table_failures:
+                oob_key_pending = True
+                log(f"  OOB key RETRY: {ethernet.hostname} snapshot was unavailable.")
+                continue
+            for entry in auto_management_keys:
+                try:
+                    install_oob_management_key(
+                        ethernet, args.eth_user, passwords[eth_key], entry,
+                        args.connect_timeout,
+                    )
+                except SetupError as exc:
+                    oob_key_pending = True
+                    log(f"  OOB key RETRY: {ethernet.hostname}: {exc}")
+                else:
+                    log(f"  OOB key installed: {ethernet.hostname} {entry['fingerprint']}")
+
+    summary = (
+        f"Summary: targets={len(targets)} configured={configured} "
+        f"skipped={skipped} failed={failures} "
+        f"day0-skipped={day0_skipped} services-skipped={services_skipped}"
     )
+    if args.auto:
+        ib_names = {
+            normalize_name(target.ib.hostname): target.ib.hostname
+            for target in targets
+        }
+        terminal_names = [
+            ib_names.get(name, name) for name in sorted(terminal_targets)
+        ]
+        summary += (
+            f" terminal={len(terminal_names)} "
+            f"terminal-devices={','.join(terminal_names) or '-'}"
+        )
+    log("\n" + summary)
+    if args.auto:
+        if terminal_targets:
+            _save_auto_terminal(terminal_path, terminal_identity, terminal_targets)
+        credentials_path = (
+            Path(os.path.abspath(args.credentials_file)) if args.credentials_file is not None
+            else _auto_state_dir(tool) / "auto.env"
+        )
+        if len(completed_targets) == ib_candidate_count and failures == 0 and not oob_key_pending:
+            if args.credentials_file is not None:
+                _remove_auto_watch(tool, credentials_path)
+                log("AUTO WATCH: all CSV IB switches configured; own cron and auto.env removed.")
+            else:
+                log("AUTO WATCH: all CSV IB switches configured; no cron installed.")
+        else:
+            created = False
+            if args.credentials_file is None:
+                _write_auto_credentials(
+                    credentials_path, initial_ib_password, passwords, targets,
+                )
+                created = True
+            try:
+                _install_auto_watch(
+                    tool, credentials_path, ib_csv_path, p2p_path, cache_path,
+                    report_path, snapshot_directory, force=args.force,
+                )
+            except SetupError:
+                if created:
+                    credentials_path.unlink()
+                raise
+            log("AUTO WATCH: unresolved CSV IB switches; 10-minute own cron installed.")
     return 1 if failures else 0
 
 

@@ -520,6 +520,140 @@ class PublicRepositoryAuditContractTest(unittest.TestCase):
         self.write(path, marker + "field output\n")
         self.assert_rejected(self.audit(), "placeholder-content")
 
+    def test_infra_output_sentinel_is_exact_without_opening_output_tree(self):
+        path = "DAY0-Prepare/template/99-output-infra/.gitkeep"
+        marker = "# Retain this empty runtime-output skeleton in source checkouts.\n"
+        self.write(path, marker)
+        self.assertEqual(0, self.audit().returncode)
+
+        self.write(path, marker + "field output\n")
+        self.assert_rejected(self.audit(), "placeholder-content")
+        (self.root / path).unlink()
+        self.write("DAY0-Prepare/template/99-output-infra/extra", marker)
+        self.assert_rejected(self.audit(), "field-path")
+
+    def test_only_tracked_exact_setup_bridge_may_lack_runtime_target(self):
+        contract = load_module(
+            "public_bridge_project_contract", ROOT / "tools/project_contract.py",
+        )
+        self.assertIn(
+            ("infiniband/01-global.yaml", "01-global.yaml", "file"),
+            contract.SETUP_WORKSPACE_INPUT_MAPPINGS,
+        )
+        bridge_relative = "infiniband/bringup/xdr-initial-setup/01-global.yaml"
+        bridge = self.root / bridge_relative
+        bridge.parent.mkdir(parents=True)
+        bridge.symlink_to("../../01-global.yaml")
+        self.git("add", bridge_relative)
+        self.assertEqual(0, self.audit().returncode)
+
+        self.git("rm", "--cached", bridge_relative)
+        self.assert_rejected(self.audit(), "broken-symlink")
+        self.git("add", bridge_relative)
+
+        bridge.unlink()
+        self.write(bridge_relative, "../../01-global.yaml\n")
+        self.git("add", bridge_relative)
+        self.assert_rejected(self.audit(), "invalid-runtime-bridge")
+
+        bridge.unlink()
+        for target, kind in (
+            ("../01-global.yaml", "broken-symlink"),
+            ("../../../../outside", "escaping-symlink"),
+            ("/etc/passwd", "absolute-symlink"),
+        ):
+            with self.subTest(target=target):
+                bridge.symlink_to(target)
+                self.git("add", bridge_relative)
+                self.assert_rejected(self.audit(), kind)
+                bridge.unlink()
+
+        bridge.symlink_to("../../01-global.yaml")
+        self.git("add", bridge_relative)
+        other_relative = "infiniband/bringup/xdr-upgrade/01-global.yaml"
+        other = self.root / other_relative
+        other.parent.mkdir(parents=True)
+        other.symlink_to("../../01-global.yaml")
+        self.git("add", other_relative)
+        self.assert_rejected(self.audit(), "broken-symlink")
+
+    def test_exact_tracked_publickey_bridge_may_lack_runtime_target(self):
+        bridge_relative = "infiniband/bringup/xdr-initial-setup/publickey"
+        bridge = self.root / bridge_relative
+        bridge.parent.mkdir(parents=True)
+        bridge.symlink_to("../../publickey")
+        self.git("add", bridge_relative)
+        result = self.audit()
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
+        self.git("rm", "--cached", bridge_relative)
+        self.assert_rejected(self.audit(), "broken-symlink")
+
+    def test_publickey_bridge_rejects_wrong_target_and_index_mode(self):
+        bridge_relative = "infiniband/bringup/xdr-initial-setup/publickey"
+        bridge = self.root / bridge_relative
+        bridge.parent.mkdir(parents=True)
+        self.write("infiniband/other-publickey", "safe public fixture\n")
+        bridge.symlink_to("../../other-publickey")
+        self.git("add", "infiniband/other-publickey", bridge_relative)
+        self.assert_rejected(self.audit(), "invalid-runtime-bridge")
+
+        bridge.unlink()
+        bridge.symlink_to("../../publickey")
+        self.assert_rejected(self.audit(), "invalid-runtime-bridge")
+
+        bridge.unlink()
+        self.write(bridge_relative, "../../publickey\n")
+        self.git("add", bridge_relative)
+        self.assert_rejected(self.audit(), "invalid-runtime-bridge")
+
+    def test_publickey_bridge_present_unsafe_target_is_not_exempt(self):
+        bridge_relative = "infiniband/bringup/xdr-initial-setup/publickey"
+        runtime_relative = "infiniband/publickey"
+        bridge = self.root / bridge_relative
+        bridge.parent.mkdir(parents=True)
+        bridge.symlink_to("../../publickey")
+        self.write(".gitignore", f"/{runtime_relative}\n")
+        self.git("add", ".gitignore", bridge_relative)
+        runtime = self.write(runtime_relative, "operator-owned key material\n")
+        self.assert_rejected(self.audit(), "unpublished-symlink")
+
+        runtime.unlink()
+        with tempfile.TemporaryDirectory() as outside_directory:
+            outside = Path(outside_directory) / "synthetic-key-directory"
+            outside.mkdir()
+            runtime.symlink_to(outside)
+            self.assert_rejected(self.audit(), "escaping-symlink")
+
+    def install_exact_ignored_setup_bridge(self) -> Path:
+        runtime_relative = "infiniband/01-global.yaml"
+        bridge_relative = "infiniband/bringup/xdr-initial-setup/01-global.yaml"
+        self.write(".gitignore", f"/{runtime_relative}\n")
+        bridge = self.root / bridge_relative
+        bridge.parent.mkdir(parents=True)
+        bridge.symlink_to("../../01-global.yaml")
+        self.git("add", ".gitignore", bridge_relative)
+        self.assertEqual(0, self.audit().returncode, "missing runtime target must remain allowed")
+        return self.root / runtime_relative
+
+    def test_exact_setup_bridge_rejects_ignored_runtime_symlink_outside_repo(self):
+        runtime = self.install_exact_ignored_setup_bridge()
+        with tempfile.TemporaryDirectory() as outside_directory:
+            outside = Path(outside_directory) / "synthetic-private.yaml"
+            outside.write_text("synthetic: harmless\n", encoding="utf-8")
+            runtime.symlink_to(outside)
+            self.assert_rejected(self.audit(), "escaping-symlink")
+
+    def test_exact_setup_bridge_rejects_ignored_unpublished_runtime_file(self):
+        runtime = self.install_exact_ignored_setup_bridge()
+        runtime.write_text("synthetic: harmless\n", encoding="utf-8")
+        self.assert_rejected(self.audit(), "unpublished-symlink")
+
+    def test_exact_setup_bridge_rejects_ignored_dangling_runtime_symlink(self):
+        runtime = self.install_exact_ignored_setup_bridge()
+        runtime.symlink_to("../synthetic-missing-private.yaml")
+        self.assert_rejected(self.audit(), "broken-symlink")
+
     @staticmethod
     def valid_public_key() -> str:
         algorithm = b"ssh-ed25519"
@@ -533,6 +667,45 @@ class PublicRepositoryAuditContractTest(unittest.TestCase):
 
 
 class PublicRepositoryWorkflowContractTest(unittest.TestCase):
+    def test_owner_held_live_only_paths_are_ignored_by_git_preflight(self):
+        """Leave owner files in place while keeping Git's untracked scan clean."""
+        ignore_payload = (ROOT / ".gitignore").read_text(encoding="utf-8")
+        ignore_lines = ignore_payload.splitlines()
+        held_paths = (
+            "01-global-dev.yaml",
+            "monitor/cabletracker-main/README.md",
+            "monitor/cabletracker-main/tmp.json",
+        )
+        near_misses = (
+            "01-global-dev.yaml.example",
+            "monitor/cabletracker-mainland/README.md",
+        )
+        self.assertIn("/01-global-dev.yaml", ignore_lines)
+        self.assertIn("/monitor/cabletracker-main/", ignore_lines)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            subprocess.run(
+                ["git", "init", "-q", str(root)],
+                check=True, capture_output=True, text=True,
+            )
+            (root / ".gitignore").write_text(ignore_payload, encoding="utf-8")
+            for relative in held_paths + near_misses:
+                target = root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("synthetic marker\n", encoding="utf-8")
+
+            result = subprocess.run(
+                ["git", "-C", str(root), "ls-files", "--others",
+                 "--exclude-standard", "-z"],
+                check=True, capture_output=True,
+            )
+            untracked = set(filter(None, result.stdout.split(b"\0")))
+            for relative in held_paths:
+                self.assertNotIn(relative.encode(), untracked)
+            for relative in near_misses:
+                self.assertIn(relative.encode(), untracked)
+
     def test_collection_cycle_records_inherit_monitor_status_git_ignore(self):
         relative = (
             "monitor/status/collection-cycles/air/ethernet/0001.json"
@@ -791,6 +964,15 @@ class PublicRepositoryWorkflowContractTest(unittest.TestCase):
                 content = authority.read_text(encoding="utf-8")
                 for fragment in fragments:
                     self.assertIn(fragment, content)
+
+    def test_legacy_columns_negative_evidence_uses_neutral_labels(self):
+        evidence = (ROOT / "test_cases/REAL_ENVIRONMENT.md").read_text(
+            encoding="utf-8"
+        )
+        normalized = re.sub(r"\s+", " ", evidence)
+        self.assertIn("旧项目 A 的 87 条错位链接", normalized)
+        self.assertIn("旧项目 B 的 3008 条 `#ERROR!`", normalized)
+        self.assertIn("不是“legacy 成功”证据", normalized)
 
 
 if __name__ == "__main__":

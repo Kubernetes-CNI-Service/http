@@ -1575,7 +1575,7 @@ class MonitorAuthoritySemanticWorkflowTests(unittest.TestCase):
         self.assertLess(publish_calls[0].lineno, min(call.lineno for call in preflight_calls))
         self.assertEqual(1, len(publish_calls[0].args))
         self.assertEqual(
-            "inputs.settings.service_ips",
+            "inputs.settings.http_listener_ips",
             ast.unparse(publish_calls[0].args[0]),
         )
 
@@ -2966,6 +2966,7 @@ printf 'capture=%s rc=%s token=<%s>\\n' \
             "test_guardian_second_fault_unlink_failure_does_not_block_markerless_stop",
             "test_guardian_threshold_rechecks_under_same_lock_and_recovery_does_not_mutate",
             "test_guardian_treats_inactive_stopped_runtime_as_safe_under_lock",
+            "test_http_only_load_precommit_and_commit_converge_exact_apache_set",
             "test_load_observes_then_quiesces_before_mutation_and_rolls_back_failure",
             "test_load_validates_receipt_only_after_trusted_lock_and_before_observe",
             "test_load_withdraws_start_authority_before_stop_and_publishes_candidate_late",

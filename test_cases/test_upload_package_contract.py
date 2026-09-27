@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import errno
 import hashlib
 import importlib.util
@@ -145,6 +146,62 @@ def write_sparse_self_extracting_image(path: Path) -> None:
 
 
 class UploadPackageContractTests(unittest.TestCase):
+    def test_upload_content_and_overwrite_options_explain_their_risks(self):
+        result = subprocess.run(
+            [sys.executable, "-B", str(TOOLS / "tar-for-upload.py"), "--help"],
+            cwd=ROOT, stdin=subprocess.DEVNULL, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            timeout=15, check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stdout)
+        for phrase in (
+            "include prepared container images",
+            "include firmware files",
+            "maximum size of each packaged file",
+            "overwrite an existing local archive",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, result.stdout)
+
+    def test_only_setup_managed_initial_setup_bridges_are_filtered(self):
+        """The public-key and global-config bridges are recreated by setup."""
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            workspace, day0, project = self._minimal_package_workspace(base)
+            with mock.patch.multiple(
+                package,
+                ROOT=workspace,
+                DAY0=day0,
+                MANIFEST=workspace / "ztp/.setup_manifest",
+            ):
+                selected = package.PackageFilter(
+                    project,
+                    base / "upload.tar.gz",
+                    include_images=False,
+                    include_apps=False,
+                    include_firmware=False,
+                    max_file_size=50 * 1024 * 1024,
+                    day0_all=False,
+                    artifact_kind="upload",
+                )
+                for name, target in (
+                    ("infiniband/bringup/xdr-initial-setup/01-global.yaml",
+                     "../../../DAY0-Prepare/customer/01-global.yaml"),
+                    ("infiniband/bringup/xdr-initial-setup/publickey",
+                     "../../publickey"),
+                ):
+                    with self.subTest(name=name):
+                        bridge = tarfile.TarInfo("./" + name)
+                        bridge.type = tarfile.SYMTYPE
+                        bridge.linkname = target
+                        self.assertIsNone(selected(bridge))
+                arbitrary = tarfile.TarInfo(
+                    "./infiniband/bringup/xdr-initial-setup/foreign-link"
+                )
+                arbitrary.type = tarfile.SYMTYPE
+                arbitrary.linkname = "../../missing"
+                self.assertIs(arbitrary, selected(arbitrary))
+
     @staticmethod
     def _minimal_package_workspace(base: Path) -> tuple[Path, Path, Path]:
         workspace = (base / "http").resolve()
@@ -167,6 +224,13 @@ class UploadPackageContractTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             if not path.exists():
                 path.write_text(f"fixture for {relative}\n", encoding="utf-8")
+        source = project / "Customer P2P.xlsx"
+        with zipfile.ZipFile(source, "w") as archive:
+            archive.writestr(
+                zipfile.ZipInfo("xl/workbook.xml", date_time=(2020, 1, 1, 0, 0, 0)),
+                "<workbook/>",
+            )
+        (project / "p2p.xlsx").symlink_to(source.name)
         return workspace, day0, project
 
     @staticmethod
@@ -203,6 +267,124 @@ class UploadPackageContractTests(unittest.TestCase):
         self.assertIsNotNone(parameter)
         self.assertEqual(inspect.Parameter.KEYWORD_ONLY, parameter.kind)
         self.assertIs(inspect.Parameter.empty, parameter.default)
+
+    def test_shared_builder_rebound_output_parent_cannot_publish_foreign_archive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            workspace, day0, project = self._minimal_package_workspace(base)
+            safe = base / "safe"
+            moved = base / "safe-moved"
+            foreign = base / "foreign"
+            safe.mkdir()
+            foreign.mkdir()
+            output = safe / "upload.tar.gz"
+            args = argparse.Namespace(
+                project=str(project), output=output, force=False,
+                max_file_size_mib=50, include_images=False,
+                include_apps=False, apps_platform=None, apps_platforms=set(),
+                include_firmware=False, exclude_project_images=False,
+            )
+            original_open = package.tarfile.open
+            archive_opens = 0
+
+            @contextmanager
+            def rebind_after_validation(*open_args, **open_kwargs):
+                nonlocal archive_opens
+                with original_open(*open_args, **open_kwargs) as archive:
+                    yield archive
+                archive_opens += 1
+                if archive_opens == 2:
+                    safe.rename(moved)
+                    safe.symlink_to(foreign, target_is_directory=True)
+                    stages = list(moved.glob(".http-air-package-*.tar.gz"))
+                    self.assertEqual(1, len(stages))
+                    (foreign / stages[0].name).write_bytes(b"attacker archive")
+                    (foreign / output.name).write_bytes(b"foreign original")
+
+            with mock.patch.multiple(
+                package, ROOT=workspace, DAY0=day0,
+                MANIFEST=workspace / "ztp/.setup_manifest",
+                TOOLS_DIR=workspace / "tools",
+            ), mock.patch.object(
+                package.tarfile, "open", side_effect=rebind_after_validation,
+            ):
+                with self.assertRaisesRegex(ValueError, "output directory.*changed"):
+                    package.create_package(args, day0_all=False, artifact_kind="upload")
+            self.assertEqual(2, archive_opens)
+            self.assertEqual(b"foreign original", (foreign / output.name).read_bytes())
+
+    def test_shared_builder_replaced_stage_cannot_publish_foreign_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            workspace, day0, project = self._minimal_package_workspace(base)
+            output = base / "upload.tar.gz"
+            args = argparse.Namespace(
+                project=str(project), output=output, force=False,
+                max_file_size_mib=50, include_images=False,
+                include_apps=False, apps_platform=None, apps_platforms=set(),
+                include_firmware=False, exclude_project_images=False,
+            )
+            original_open = package.tarfile.open
+            archive_opens = 0
+
+            @contextmanager
+            def replace_stage_after_validation(*open_args, **open_kwargs):
+                nonlocal archive_opens
+                with original_open(*open_args, **open_kwargs) as archive:
+                    yield archive
+                archive_opens += 1
+                if archive_opens == 2:
+                    stages = list(base.glob(".http-air-package-*.tar.gz"))
+                    self.assertEqual(1, len(stages))
+                    stages[0].unlink()
+                    stages[0].write_bytes(b"attacker archive")
+
+            with mock.patch.multiple(
+                package, ROOT=workspace, DAY0=day0,
+                MANIFEST=workspace / "ztp/.setup_manifest",
+                TOOLS_DIR=workspace / "tools",
+            ), mock.patch.object(
+                package.tarfile, "open", side_effect=replace_stage_after_validation,
+            ):
+                with self.assertRaisesRegex(ValueError, "temporary archive identity changed"):
+                    package.create_package(args, day0_all=False, artifact_kind="upload")
+            self.assertEqual(2, archive_opens)
+            self.assertFalse(output.exists())
+
+    def test_shared_builder_does_not_replace_concurrent_no_force_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            workspace, day0, project = self._minimal_package_workspace(base)
+            output = base / "upload.tar.gz"
+            args = argparse.Namespace(
+                project=str(project), output=output, force=False,
+                max_file_size_mib=50, include_images=False,
+                include_apps=False, apps_platform=None, apps_platforms=set(),
+                include_firmware=False, exclude_project_images=False,
+            )
+            original_open = package.tarfile.open
+            archive_opens = 0
+
+            @contextmanager
+            def create_target_after_validation(*open_args, **open_kwargs):
+                nonlocal archive_opens
+                with original_open(*open_args, **open_kwargs) as archive:
+                    yield archive
+                archive_opens += 1
+                if archive_opens == 2:
+                    output.write_bytes(b"concurrent original")
+
+            with mock.patch.multiple(
+                package, ROOT=workspace, DAY0=day0,
+                MANIFEST=workspace / "ztp/.setup_manifest",
+                TOOLS_DIR=workspace / "tools",
+            ), mock.patch.object(
+                package.tarfile, "open", side_effect=create_target_after_validation,
+            ):
+                with self.assertRaises(FileExistsError):
+                    package.create_package(args, day0_all=False, artifact_kind="upload")
+            self.assertEqual(2, archive_opens)
+            self.assertEqual(b"concurrent original", output.read_bytes())
 
     def test_common_builder_separates_deployment_authorities_by_artifact_kind(self):
         deployment_authorities = {
@@ -243,6 +425,39 @@ class UploadPackageContractTests(unittest.TestCase):
                         self.assertLessEqual(deployment_authorities, names)
                     else:
                         self.assertTrue(deployment_authorities.isdisjoint(names))
+
+    def test_real_upload_archive_excludes_private_infra_log_receipt_and_temp(self):
+        with tempfile.TemporaryDirectory(prefix="req19-private-package-") as temporary:
+            base = Path(temporary)
+            workspace, day0, project = self._minimal_package_workspace(base)
+            infra = workspace / "infra"
+            infra.mkdir(exist_ok=True)
+            private = (
+                "infra/.logs.lock",
+                "infra/.logs-migration.json",
+                "infra/.logs-migration.ABC123",
+            )
+            for relative in private:
+                (workspace / relative).write_bytes(b"private runtime sentinel\n")
+            output = base / "private-hoststate-upload.tar.gz"
+            args = argparse.Namespace(
+                project=str(project), output=output, force=False,
+                max_file_size_mib=50, include_images=False, include_apps=False,
+                apps_platform=None, apps_platforms=set(), include_firmware=False,
+                exclude_project_images=False,
+            )
+            with mock.patch.multiple(
+                package, ROOT=workspace, DAY0=day0,
+                MANIFEST=workspace / "ztp/.setup_manifest",
+                TOOLS_DIR=workspace / "tools",
+            ):
+                package.create_package(args, day0_all=False, artifact_kind="upload")
+            with tarfile.open(output, "r:gz") as archive:
+                names = {member.name.removeprefix("./") for member in archive.getmembers()}
+            self.assertIn("infra/docker/Dockerfile", names)
+            for relative in private:
+                with self.subTest(private=relative):
+                    self.assertNotIn(relative, names)
 
     def test_common_builder_rejects_unknown_artifact_kind_before_output(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -362,6 +577,7 @@ class UploadPackageContractTests(unittest.TestCase):
         fixture = materialized_public_project(ROOT)
         project = fixture.__enter__()
         self.addCleanup(fixture.__exit__, None, None, None)
+        (project / "p2p.xlsx").symlink_to("public-p2p.xlsx")
         manual_updater = ROOT / "tools/update-user-manual.py"
         self.assertTrue(manual_updater.is_file())
         manual_spec = importlib.util.spec_from_file_location(
@@ -402,6 +618,10 @@ class UploadPackageContractTests(unittest.TestCase):
                     "requirements-container-top-level.lock", packaged_names,
                 )
                 self.assertIn("user-manual.html", packaged_names)
+                self.assertIn(
+                    "DAY0-Prepare/template/p2p.xlsx", packaged_names,
+                    "the tracked template placeholder is an image source, not an alternate project workbook",
+                )
                 self.assertIn("tools/control-auth.py", packaged_names)
                 self.assertNotIn(
                     "etc/http-ztp/control-users.htpasswd", packaged_names,
@@ -442,6 +662,7 @@ class UploadPackageContractTests(unittest.TestCase):
                     "nvlink/monitor/nvsw.csv",
                     "infiniband/bringup/xdr-upgrade/ib.csv",
                     "infiniband/bringup/xdr-initial-setup/ib.csv",
+                    "infiniband/bringup/xdr-initial-setup/01-global.yaml",
                 ):
                     with self.subTest(runtime_path=runtime_path):
                         self.assertNotIn(runtime_path, packaged_names)
@@ -909,6 +1130,7 @@ class UploadPackageContractTests(unittest.TestCase):
                 for name in package.PROJECT_DEPLOYMENT_INPUTS:
                     (project / name).write_text("input\n", encoding="utf-8")
                 write_picture_workbook(project / "Customer P2P.xlsx")
+                (project / "p2p.xlsx").symlink_to("Customer P2P.xlsx")
                 write_sparse_self_extracting_image(workspace / "image" / image_name)
 
                 archives = {}
@@ -984,6 +1206,7 @@ class UploadPackageContractTests(unittest.TestCase):
             for name in package.PROJECT_DEPLOYMENT_INPUTS:
                 (project / name).write_text("input\n", encoding="utf-8")
             write_picture_workbook(project / "Customer P2P.xlsx")
+            (project / "p2p.xlsx").symlink_to("Customer P2P.xlsx")
             output = workspace / "upload.tar.gz"
             args = argparse.Namespace(
                 project=str(project), output=output, force=False,
@@ -1020,6 +1243,7 @@ class UploadPackageContractTests(unittest.TestCase):
             for name in package.PROJECT_DEPLOYMENT_INPUTS:
                 (project / name).write_text("input\n", encoding="utf-8")
             write_picture_workbook(project / "Customer P2P.xlsx")
+            (project / "p2p.xlsx").symlink_to("Customer P2P.xlsx")
             (project / "03-air-topology-policy.json").write_text(
                 "{}\n", encoding="utf-8",
             )
@@ -1069,6 +1293,7 @@ class UploadPackageContractTests(unittest.TestCase):
                 for name in package.PROJECT_DEPLOYMENT_INPUTS:
                     (project / name).write_text("input\n", encoding="utf-8")
                 write_picture_workbook(project / "Customer P2P.xlsx")
+                (project / "p2p.xlsx").symlink_to("Customer P2P.xlsx")
                 policy = project / "03-air-topology-policy.json"
                 if path_kind == "symlink":
                     (project / "policy-target.json").write_text("{}\n", encoding="utf-8")
@@ -1109,6 +1334,7 @@ class UploadPackageContractTests(unittest.TestCase):
             for name in package.PROJECT_DEPLOYMENT_INPUTS:
                 (project / name).write_text("input\n", encoding="utf-8")
             write_picture_workbook(project / "Customer P2P.xlsx")
+            (project / "p2p.xlsx").symlink_to("Customer P2P.xlsx")
             args = argparse.Namespace(
                 project=str(project), output=workspace / "upload.tar.gz",
                 force=False, max_file_size_mib=50, include_images=False,
@@ -1230,17 +1456,16 @@ class UploadPackageContractTests(unittest.TestCase):
                     self.assertEqual("", member.gname)
 
     def test_upload_package_honors_canonical_p2p_pointer_across_mtime_changes(self):
-        """A setup-managed canonical pointer, not fallback discovery, binds upload."""
+        """A root-confined canonical pointer binds upload; absence fails closed."""
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             workspace, day0, project = self._minimal_package_workspace(base)
-            versions = project / "p2p"
-            versions.mkdir()
-            first = versions / "A-p2p.xlsx"
-            second = versions / "B-p2p.xlsx"
+            first = project / "A-p2p-v1.0.xlsx"
+            second = project / "B-p2p-v2.0.xlsx"
             write_picture_workbook(first, "literal-first")
             write_picture_workbook(second, "literal-second")
-            (project / "p2p.xlsx").symlink_to(Path("p2p") / first.name)
+            (project / "p2p.xlsx").unlink()
+            (project / "p2p.xlsx").symlink_to(first.name)
             outputs = (base / "mtime-first.tar.gz", base / "mtime-second.tar.gz")
             payloads = []
             for index, output in enumerate(outputs):
@@ -1274,11 +1499,8 @@ class UploadPackageContractTests(unittest.TestCase):
             (project / "p2p.xlsx").unlink()
             os.utime(first, (1_600_000_000, 1_600_000_000))
             os.utime(second, (1_700_000_000, 1_700_000_000))
-            self.assertEqual(
-                second.resolve(),
-                package.select_upload_p2p(project),
-                "without the canonical pointer, fallback retains setup/load mtime order",
-            )
+            with self.assertRaisesRegex(ValueError, "p2p.xlsx"):
+                package.select_upload_p2p(project)
 
     def test_archive_member_modes_are_canonical_across_source_umask(self):
         """Host umask metadata cannot alter an otherwise identical archive."""

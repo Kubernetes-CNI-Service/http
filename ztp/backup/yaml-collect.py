@@ -1425,7 +1425,7 @@ def load_devices_csv(path):
             # 判断设备类型
             if type_col is not None and len(row) > type_col:
                 fmt = row[type_col].strip().lower()
-                if fmt == "server":
+                if fmt in {"server", "eth_jump"}:
                     continue
                 if fmt not in ("eth", "eth_spx", "spx", "air", "ib", "nvl"):
                     raise ValueError(
@@ -3040,6 +3040,15 @@ prod/air 可显式限定，--air/--prod 分别是 --type air/prod 的短写。�
             seen.add(key)
             unique.append(d)
     all_devices = unique
+
+    # A header-only or scope-filtered inventory is not a recoverable backup.
+    # Reject it before a password prompt or private/publication tree is made.
+    if not all_devices:
+        print(
+            f"[ERROR] {_ENVIRONMENT.upper()} 备份选中 0 台设备；"
+            "未创建或发布空备份，请检查当前设备清单"
+        )
+        raise SystemExit(1)
 
     eth_n = sum(1 for d in all_devices if d["fmt"] == "eth")
     eth_spx_n = sum(1 for d in all_devices if d["fmt"] == "eth_spx")

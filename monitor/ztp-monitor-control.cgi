@@ -30,7 +30,7 @@ CONTROL_SCRIPT_NAMES = frozenset((
 CONTROL_AUTH_HELPER = Path("/usr/local/lib/http-ztp/control-auth.py")
 CONTROL_AUTH_PYTHON = Path("/usr/bin/python3")
 CONTROL_AUTH_HELPER_SHA256 = (
-    "5a133a353cb7ac7af5be0be71b4ef85b41345716103d6e28590140638ee11038"
+    "f5cea5266ab808250b718250a8a73d7d6f6452a199b97fa500643d7ed9e988db"
 )
 CONTROL_AUTH_HELPER_MAX_BYTES = 256 * 1024
 CONTROL_AUTH_OUTPUT_LIMIT = 256
@@ -1551,18 +1551,37 @@ def post_control_guard():
         or int(address) == 0xFFFFFFFF
     ):
         return False, "invalid service address"
-    if os.environ.get("SERVER_PORT") != "80":
+    expected_port = os.environ.get("CONTROL_SERVICE_PORT", "80")
+    if (
+        re.fullmatch(r"[1-9][0-9]{0,4}", expected_port) is None
+        or int(expected_port) > 65535
+        or os.environ.get("SERVER_PORT") != expected_port
+    ):
         return False, "invalid service port"
     if os.environ.get("REQUEST_SCHEME") != "http":
         return False, "invalid request scheme"
-    if os.environ.get("HTTPS") not in {None, "off"}:
-        return False, "TLS is not enabled on the control listener"
+    https_marker = os.environ.get("HTTPS")
+    if https_marker not in {None, "off"}:
+        condition = (
+            "TLS is enabled" if https_marker.casefold() == "on"
+            else "HTTPS indicator is invalid"
+        )
+        return False, f"{condition}; control POST requires plain HTTP on port {expected_port}"
     host = os.environ.get("HTTP_HOST", "")
-    if host not in {canonical, f"{canonical}:80"}:
+    allowed_hosts = (
+        {canonical, f"{canonical}:80"}
+        if expected_port == "80" else {f"{canonical}:{expected_port}"}
+    )
+    if host not in allowed_hosts:
         return False, "invalid Host header"
     origin = os.environ.get("HTTP_ORIGIN", "")
     fetch_site = os.environ.get("HTTP_SEC_FETCH_SITE", "").strip().casefold()
-    if origin not in {f"http://{canonical}", f"http://{canonical}:80"}:
+    allowed_origins = (
+        {f"http://{canonical}", f"http://{canonical}:80"}
+        if expected_port == "80"
+        else {f"http://{canonical}:{expected_port}"}
+    )
+    if origin not in allowed_origins:
         return False, "same-origin POST is required"
     if fetch_site and fetch_site != "same-origin":
         return False, "cross-site control request rejected"
@@ -1691,7 +1710,8 @@ def main():
             "error": (
                 "monitor process is not running；请按当前后端恢复：Native/systemd 执行 "
                 "sudo python3 DAY0-Prepare/11-load.py DAY0-Prepare/<project> "
-                "--start-ztp-monitor；Docker/Supervisor 如有 source write，执行 "
+                "--start-ztp-monitor --host-role=management-server；"
+                "Docker/Supervisor 如有 source write，执行 "
                 "infra/docker/deploy.sh deploy，或对与 live 来源身份链匹配且经验证的"
                 "镜像执行 infra/docker/deploy.sh deploy-preloaded <IMAGE_ID>；仅在没有 "
                 "source write 且已有运行中的 inactive 控制容器时执行 "

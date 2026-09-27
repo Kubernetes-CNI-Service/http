@@ -207,7 +207,7 @@ Mac 和 VM 场景的正式命令、管理服务器 load 参数与物理设备证
 
 ```bash
 sudo python3 DAY0-Prepare/11-load.py \
-  --start-services DAY0-Prepare/2026-12-vb-gb300
+  --host-role=management-server --start-services DAY0-Prepare/2026-12-vb-gb300
 ```
 
 Service IP 地址值改变属于项目输入变更。必须回到项目电脑修改 subnet 输入、正式 load/全量门禁，
