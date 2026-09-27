@@ -3889,11 +3889,9 @@ class BackupAuthenticationContractTests(unittest.TestCase):
             child_file = root / "child.pid"
             fake_ssh = fake_bin / "ssh"
             fake_ssh.write_text(
-                "#!/usr/bin/env python3\n"
-                "import os, subprocess, sys\n"
-                "child = subprocess.Popen([sys.executable, '-c', "
-                "'import time; time.sleep(20)'])\n"
-                "open(os.environ['CHILD_PID'], 'w').write(str(child.pid))\n",
+                "#!/bin/sh\n"
+                "sleep 20 &\n"
+                "echo \"$!\" > \"$CHILD_PID\"\n",
                 encoding="utf-8",
             )
             fake_ssh.chmod(0o755)
@@ -3931,13 +3929,9 @@ class BackupAuthenticationContractTests(unittest.TestCase):
             child_file = root / "child.pid"
             fake_ssh = fake_bin / "ssh"
             fake_ssh.write_text(
-                "#!/usr/bin/env python3\n"
-                "import os, subprocess, sys\n"
-                "child = subprocess.Popen([sys.executable, '-c', "
-                "'import time; time.sleep(20)'], stdin=subprocess.DEVNULL, "
-                "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, "
-                "close_fds=True)\n"
-                "open(os.environ['CHILD_PID'], 'w').write(str(child.pid))\n",
+                "#!/bin/sh\n"
+                "sleep 20 </dev/null >/dev/null 2>&1 &\n"
+                "echo \"$!\" > \"$CHILD_PID\"\n",
                 encoding="utf-8",
             )
             fake_ssh.chmod(0o755)
