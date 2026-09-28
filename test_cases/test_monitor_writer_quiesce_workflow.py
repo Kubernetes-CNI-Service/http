@@ -1059,6 +1059,83 @@ def governed_external_sink_calls(
     return result
 
 
+def _reject_relevant_unresolved_imports(
+    tree: ast.AST, module_sources: dict[str, ast.AST],
+) -> None:
+    """Never silently classify a governed path passed to an unknown import.
+
+    This is intentionally narrower than whole-program import resolution: the
+    admission point is an actual imported call with a governed path argument.
+    An unknown unrelated display/diagnostic import is not a writer claim.
+    """
+    bindings: dict[str, tuple[str, str | None]] = {}
+    for node in getattr(tree, "body", ()):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            for alias in node.names:
+                bindings[alias.asname or alias.name] = (node.module, alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                bindings[alias.asname or alias.name.split(".")[0]] = (
+                    alias.name, None,
+                )
+    # These standard-library modules are modeled by the local mutation sink
+    # visitor or are read-only parser/serialization adapters. This gate is for
+    # otherwise unresolved imported *repository/third-party* call targets.
+    modeled_standard_modules = {
+        "argparse", "csv", "json", "os", "pathlib", "re", "shutil", "sys",
+    }
+    harmless_path_constructors = {
+        ("pathlib", "Path"), ("pathlib", "PurePath"),
+        ("pathlib", "PurePosixPath"),
+    }
+    rebound_imports = {
+        node.id for node in ast.walk(tree)
+        if isinstance(node, ast.Name)
+        and isinstance(node.ctx, (ast.Store, ast.Del))
+        and node.id in bindings
+    }
+    for function in production_functions(tree).values():
+        governed = _governed_locals(function, set(), set())
+        for call in (
+            node for node in _walk_local_scope(function)
+            if isinstance(node, ast.Call)
+        ):
+            imported = None
+            import_name = None
+            if isinstance(call.func, ast.Name):
+                import_name = call.func.id
+                imported = bindings.get(import_name)
+            elif (
+                isinstance(call.func, ast.Attribute)
+                and isinstance(call.func.value, ast.Name)
+            ):
+                import_name = call.func.value.id
+                binding = bindings.get(import_name)
+                if binding is not None and binding[1] is None:
+                    imported = (binding[0], call.func.attr)
+            if (
+                imported is None or imported in harmless_path_constructors
+                or imported[0] in modeled_standard_modules
+            ):
+                continue
+            if not any(
+                _is_governed_destination(argument, governed)
+                for argument in (*call.args, *(item.value for item in call.keywords))
+            ):
+                continue
+            if import_name in rebound_imports:
+                raise AssertionError(
+                    "WDISC_UNRESOLVED:rebound imported governed destination "
+                    f"{import_name}"
+                )
+            source = module_sources.get(imported[0])
+            if source is None or imported[1] not in production_functions(source):
+                raise AssertionError(
+                    "WDISC_UNRESOLVED:imported governed destination "
+                    f"{imported[0]}.{imported[1]}"
+                )
+
+
 def _transparent_governed_expression(
     expression: ast.AST, governed: set[str], governed_returns: set[str],
 ) -> bool:
@@ -1696,6 +1773,62 @@ def _argparse_terminal_functions(tree: ast.AST) -> dict[str, set[int]]:
                 terminal[name] = indices
                 changed = True
     return terminal
+
+
+def _literal_argparse_receivers(tree: ast.AST, function_name: str) -> set[str]:
+    """Prove a parser receiver from one literal argparse constructor binding.
+
+    Local/global rebinding invalidates the certificate. A name merely spelled
+    ``parser`` or an arbitrary object's ``error`` method is not enough.
+    """
+    module_aliases: set[str] = set()
+    constructor_aliases: set[str] = set()
+    for node in getattr(tree, "body", ()):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "argparse":
+                    module_aliases.add(alias.asname or "argparse")
+        elif isinstance(node, ast.ImportFrom) and node.module == "argparse":
+            for alias in node.names:
+                if alias.name == "ArgumentParser":
+                    constructor_aliases.add(alias.asname or alias.name)
+    function = production_functions(tree)[function_name]
+    local_nodes = list(_walk_local_scope(function))
+    candidates = set()
+    for node in function.body:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        value = node.value
+        if not isinstance(target, ast.Name) or not isinstance(value, ast.Call):
+            continue
+        valid = (
+            isinstance(value.func, ast.Attribute)
+            and isinstance(value.func.value, ast.Name)
+            and value.func.value.id in module_aliases
+            and value.func.attr == "ArgumentParser"
+        ) or (
+            isinstance(value.func, ast.Name)
+            and value.func.id in constructor_aliases
+        )
+        if valid:
+            candidates.add(target.id)
+    module_stores = {
+        node.id for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del))
+        and node.id in module_aliases | constructor_aliases
+    }
+    if module_stores:
+        return set()
+    parameters = set(_function_parameters(function))
+    for candidate in tuple(candidates):
+        if candidate in parameters or sum(
+            isinstance(node, ast.Name) and node.id == candidate
+            and isinstance(node.ctx, (ast.Store, ast.Del))
+            for node in local_nodes
+        ) != 1:
+            candidates.remove(candidate)
+    return candidates
 
 
 def _terminal_call_is_bound(
@@ -4242,6 +4375,146 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
                 setup = ast.parse(changed if source_name == "setup" else setup_source)
                 contract = ast.parse(changed if source_name == "contract" else contract_source)
                 self.assertEqual(set(), _source_bound_setup_mapping_seed(setup, contract))
+
+    def test_imported_mapping_argparse_real_writers_still_require_governed_literals(self) -> None:
+        """Imported authority and parser termination need real source bindings.
+
+        This is an independently specified replacement check, not a claim that
+        the unavailable historical H oracle's method body was recovered.
+        """
+        setup_source = (ROOT / "DAY0-Prepare/01-a-setup.py").read_text(encoding="utf-8")
+        contract_source = (ROOT / "tools/project_contract.py").read_text(encoding="utf-8")
+        feedback_source = (ROOT / "ztp/optimize/feedback.py").read_text(encoding="utf-8")
+        setup = ast.parse(setup_source)
+        contract = ast.parse(contract_source)
+        feedback = ast.parse(feedback_source)
+        self.assertEqual({"MAPPINGS"}, _source_bound_setup_mapping_seed(setup, contract))
+        self.assertIn("_setup_impl", literal_governed_mutation_sinks(setup))
+        self.assertIn("main", literal_governed_mutation_sinks(feedback))
+        self.assertIn("write_global_yaml", local_call_graph(feedback)["main"])
+        self.assertEqual({"parser"}, _literal_argparse_receivers(feedback, "main"))
+
+        setup_mutants = (
+            setup_source.replace(
+                "MAPPINGS = list(SETUP_ZTP_MAPPINGS)",
+                "MAPPINGS = list(runtime_mappings())", 1,
+            ),
+            setup_source.replace(
+                "MAPPINGS = list(SETUP_ZTP_MAPPINGS)",
+                "MAPPINGS = []", 1,
+            ),
+        )
+        for source in setup_mutants:
+            with self.subTest(boundary="imported-mapping"):
+                self.assertNotEqual(source, setup_source)
+                self.assertEqual(set(), _source_bound_setup_mapping_seed(ast.parse(source), contract))
+        bad_contract = contract_source.replace(
+            '"config/cumulus/template/01-global.yaml"',
+            '"config/cumulus/template/not-governed"', 1,
+        )
+        self.assertNotEqual(bad_contract, contract_source)
+        self.assertEqual(set(), _source_bound_setup_mapping_seed(setup, ast.parse(bad_contract)))
+
+        parser_mutants = (
+            feedback_source.replace(
+                "parser = argparse.ArgumentParser(",
+                "parser = logger.ArgumentParser(", 1,
+            ),
+            feedback_source.replace(
+                "parser = argparse.ArgumentParser(",
+                "parser = argparse.ArgumentParser(\n        )\n    parser = runtime_parser(\n", 1,
+            ),
+        )
+        for source in parser_mutants:
+            with self.subTest(boundary="argparse-binding"):
+                self.assertNotEqual(source, feedback_source)
+                self.assertEqual(set(), _literal_argparse_receivers(ast.parse(source), "main"))
+        self.assertEqual(
+            {"gate"}, _literal_argparse_receivers(ast.parse(
+                "import argparse as cli\n"
+                "def main():\n"
+                "    gate = cli.ArgumentParser()\n"
+            ), "main"),
+        )
+        self.assertEqual(
+            {"gate"}, _literal_argparse_receivers(ast.parse(
+                "from argparse import ArgumentParser as Parser\n"
+                "def main():\n"
+                "    gate = Parser()\n"
+            ), "main"),
+        )
+        self.assertEqual(
+            set(), _literal_argparse_receivers(ast.parse(
+                "import argparse as cli\n"
+                "def main():\n"
+                "    cli = runtime_module()\n"
+                "    gate = cli.ArgumentParser()\n"
+            ), "main"),
+        )
+        self.assertEqual(
+            set(), _literal_argparse_receivers(ast.parse(
+                "import argparse\n"
+                "def main():\n"
+                "    if runtime_choice:\n"
+                "        gate = argparse.ArgumentParser()\n"
+            ), "main"),
+        )
+
+        writer = ast.parse(
+            "import os\n"
+            "def publish(temporary, destination):\n"
+            "    os.replace(temporary, destination)\n"
+        )
+        import_positives = (
+            "from review_writer import publish as commit\n"
+            "def main():\n"
+            "    commit('tmp', '01-global.yaml')\n",
+            "import review_writer as writer\n"
+            "def main():\n"
+            "    writer.publish('tmp', '01-global.yaml')\n",
+            "from review_writer import publish as commit\n"
+            "def main():\n"
+            "    destination = Path('/srv/http/01-global.yaml')\n"
+            "    commit('tmp', destination)\n",
+        )
+        for source in import_positives:
+            with self.subTest(boundary="resolved-import"):
+                _reject_relevant_unresolved_imports(
+                    ast.parse(source), {"review_writer": writer},
+                )
+                with self.assertRaisesRegex(AssertionError, "WDISC_UNRESOLVED"):
+                    _reject_relevant_unresolved_imports(ast.parse(source), {})
+                with self.assertRaisesRegex(AssertionError, "WDISC_UNRESOLVED"):
+                    _reject_relevant_unresolved_imports(ast.parse(source), {
+                        "review_writer": ast.parse("def unrelated():\n    pass\n"),
+                    })
+        rebound_imports = (
+            "from review_writer import publish as commit\n"
+            "def main():\n"
+            "    commit = runtime_writer\n"
+            "    commit('tmp', '01-global.yaml')\n",
+            "import review_writer as writer\n"
+            "def main():\n"
+            "    writer = runtime_module\n"
+            "    writer.publish('tmp', '01-global.yaml')\n",
+        )
+        for source in rebound_imports:
+            with self.subTest(boundary="rebound-import"):
+                with self.assertRaisesRegex(AssertionError, "WDISC_UNRESOLVED"):
+                    _reject_relevant_unresolved_imports(ast.parse(source), {
+                        "review_writer": writer,
+                    })
+        unrelated = ast.parse(
+            "from unavailable import display\n"
+            "def main():\n"
+            "    display('ordinary-status')\n"
+        )
+        _reject_relevant_unresolved_imports(unrelated, {})
+
+        _reject_relevant_unresolved_imports(setup, {
+            "project_contract": contract,
+        })
+        _reject_relevant_unresolved_imports(feedback, {})
 
     def test_all_nine_declared_native_writers_are_mechanically_discovered(self) -> None:
         """Hand-maintained entry tables may classify discovery, never replace it."""

@@ -459,6 +459,11 @@ load、unload、DHCP/P2P generator、密码更新、feedback writeback 和 deplo
 单一路径：外层精确 AST 摘要遇源码变化即撤销证明，独立结构层的改写负控另行验证导入、停机次序
 与目标。它们不构成 H 的完整固定点盘点或真实服务停机证明；H 验收仍按 D-59 的现行合同及
 `TC-REAL-MONITOR-WRITER-QUIESCE-001` 的 NOT RUN 状态分别判断。
+补入的 `test_imported_mapping_argparse_real_writers_still_require_governed_literals`
+独立检查生产 setup 的导入映射到软链接、feedback 的真实 argparse 构造绑定，以及受管目标传入
+未知/改绑导入函数时的拒绝；正反例均由测试固定。这是缺失验收方法的有界替代检查，**不是**
+历史私有 304-test H oracle 的逐字节恢复，也不将该方法或当前模块的绿色结果升格为 H 完成。
+未解析导入门禁只覆盖实际传入受管目标的调用；对完整导入/返回形状/运行时输入不作全面证明。
 
 `test_ztp_monitor_watch_resilience.py` 与 `test_ztp_monitor_watch_runtime_workflow.py` 约束持续
 Monitor 的故障恢复合同。只有明确命名的 runtime transport 与报告发布边界属于可重试故障；每次
