@@ -85,6 +85,42 @@ class ProdStageLConsumerDirectTests(ProdStageLFixture):
             _bound_source_file(self.root, alias.relative_to(self.root).as_posix(),
                                digest)
 
+    def test_source_validation_rejects_same_bytes_same_mtime_inode_replacement(self):
+        from monitor.issue_tracker_stage_l_consumer import (
+            StageLConsumerHold, _bound_source_file,
+            validate_prod_stage_l_panel_source_files,
+        )
+
+        content = b"independent fixture source\n"
+        digest = hashlib.sha256(content).hexdigest()
+        source = self.root / "monitor/status/synthetic-panel-source.bin"
+        source.write_bytes(content)
+        relative = source.relative_to(self.root).as_posix()
+        original = _bound_source_file(self.root, relative, digest)
+
+        replacement = source.with_name("synthetic-panel-replacement.bin")
+        replacement.write_bytes(content)
+        os.utime(replacement, ns=(original.mtime_ns, original.mtime_ns))
+        os.replace(replacement, source)
+        current = _bound_source_file(self.root, relative, digest)
+        self.assertEqual(original.sha256, current.sha256)
+        self.assertEqual(original.size_bytes, current.size_bytes)
+        self.assertEqual(original.mtime_ns, current.mtime_ns)
+        self.assertNotEqual(original.inode, current.inode)
+
+        with mock.patch(
+            "monitor.issue_tracker_stage_l_consumer.read_prod_stage_l_panel_source_files",
+            return_value=(current,),
+        ) as reread:
+            with self.assertRaisesRegex(StageLConsumerHold, "changed; preview again"):
+                validate_prod_stage_l_panel_source_files(
+                    (original,), object(), object(), panel="Switch Status",
+                    http_root=self.root, settings=self.settings,
+                    whitelist_snapshot=self.snapshot,
+                    whitelist_path=self.template,
+                )
+        reread.assert_called_once()
+
     def test_panel_source_identity_rejects_unbound_caller_rows(self):
         from monitor.issue_tracker_stage_l_consumer import (
             StageLConsumerHold, read_prod_stage_l_panel_source_files,
