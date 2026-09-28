@@ -1565,14 +1565,14 @@ def _has_governed_literal(expression: ast.AST) -> bool:
                 break  # Let the complete literal expression decide instead.
             if isinstance(ancestor, ast.BinOp):
                 if isinstance(ancestor.op, ast.Add) and current is ancestor.left:
-                    if _literal_string(ancestor.right) != "":
+                    if _literal_string(ancestor.right) not in {None, ""}:
                         break
                 elif isinstance(ancestor.op, ast.Div) and current is ancestor.left:
                     break
             elif isinstance(ancestor, ast.JoinedStr):
                 position = ancestor.values.index(current)
                 if any(
-                    _literal_string(part) != ""
+                    _literal_string(part) not in {None, ""}
                     for part in ancestor.values[position + 1:]
                 ):
                     break
@@ -1589,11 +1589,14 @@ def _has_governed_literal(expression: ast.AST) -> bool:
                     suffix = _literal_string(_argument(ancestor, 0, "suffix"))
                     if suffix is not None and suffix != Path(value).suffix:
                         break
-                elif method == "joinpath" and len(ancestor.args) == 1 \
+                elif method == "joinpath" and ancestor.args \
                         and not ancestor.keywords:
-                    child = _literal_string(ancestor.args[0])
-                    if child not in {None, "", ".", ".."} \
-                            and "/" not in child and "\\" not in child:
+                    children = [_literal_string(arg) for arg in ancestor.args]
+                    if all(child is not None for child in children) and any(
+                        child not in {"", "."} for child in children
+                    ) and all(
+                        ".." not in Path(child).parts for child in children
+                    ):
                         break
             current = ancestor
             ancestor = parents.get(current)
@@ -4295,12 +4298,27 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             "import os\n"
             "def publish(root):\n"
             "    os.replace('staged', f'{root}01-global.yaml')\n",
+            "import os\n"
+            "def publish(suffix):\n"
+            "    os.replace('staged', '01-global.yaml' + suffix)\n",
+            "import os\n"
+            "def publish(suffix):\n"
+            "    os.replace('staged', f'01-global.yaml{suffix}')\n",
+            "import os\n"
+            "def publish():\n"
+            "    os.replace('staged', '01-global.yaml' + '')\n",
             "import os\nfrom pathlib import Path\n"
             "def publish():\n"
             "    os.replace('staged', Path('/srv/http/01-global.yaml').with_suffix('.yaml'))\n",
             "import os\nfrom pathlib import Path\n"
             "def publish():\n"
             "    os.replace('staged', Path('/srv/http').joinpath('01-global.yaml'))\n",
+            "import os\nfrom pathlib import Path\n"
+            "def publish(child):\n"
+            "    os.replace('staged', Path('/srv/http/01-global.yaml').joinpath(child))\n",
+            "import os\nfrom pathlib import Path\n"
+            "def publish():\n"
+            "    os.replace('staged', Path('/srv/http/01-global.yaml').joinpath(''))\n",
         )
         for source in positive:
             with self.subTest(source=source):
@@ -4327,6 +4345,8 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             "root + '01-global.yaml' + '.tmp'",
             "Path('/srv/http/01-global.yaml').with_suffix('.tmp')",
             "Path('/srv/http/01-global.yaml').joinpath('child')",
+            "Path('/srv/http/01-global.yaml').joinpath('/tmp/staged')",
+            "Path('/srv/http/01-global.yaml').joinpath('child', 'subchild')",
         )
         for target in complete_target_negatives:
             with self.subTest(complete_target=target):
