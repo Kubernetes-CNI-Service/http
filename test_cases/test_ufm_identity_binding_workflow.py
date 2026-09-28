@@ -7,6 +7,8 @@ import hashlib
 import datetime as dt
 import json
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -39,6 +41,59 @@ def write_project(root: Path, *, first_mac: str = "02:00:00:00:00:21") -> Path:
 
 
 class UfmIdentityBindingWorkflowTests(unittest.TestCase):
+    def test_discovery_cli_enforces_top_level_server_shape_without_rewriting_nested_groups(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            lease, _known, _jump, _far, _pin = make_site(root)
+            project = write_project(root)
+            global_path = project / "01-global.yaml"
+            valid = (
+                "servers:\n"
+                "  - ufm:\n"
+                "      version: '2.5.1-8'\n"
+                "      interfaces:\n"
+                "        alias: {eth0: eno8303, eth1: eno8403}\n"
+                "switches:\n"
+                "  - eth:\n"
+                "      services:\n"
+                "        dhcp_relay:\n"
+                "          inband:\n"
+                "            server_group:\n"
+                "              servers: [192.0.2.53]\n"
+            )
+            command = [
+                sys.executable, "-B", str(Path(__file__).resolve().parents[1]
+                                            / "tools/ufm-discover.py"),
+                "--project", str(project), "--leases", str(lease),
+            ]
+
+            global_path.write_text(valid, encoding="utf-8")
+            accepted = subprocess.run(command, text=True, capture_output=True,
+                                      check=False)
+            self.assertEqual(0, accepted.returncode, accepted.stderr)
+            product = json.loads(accepted.stdout)
+            self.assertEqual("discovery_only", product["phase"])
+            self.assertEqual(2, len(product["nodes"]))
+            self.assertFalse(product["vip_configured"])
+            self.assertEqual(valid, global_path.read_text(encoding="utf-8"))
+            self.assertFalse((project / "99-output-ufm").exists())
+
+            malformed_documents = (
+                valid.replace("  - ufm:\n", "  ufm:\n", 1),
+                valid.replace("'2.5.1-8'", "2.5", 1),
+                valid.replace("alias: {eth0: eno8303, eth1: eno8403}",
+                              "alias: {eth0: eno8303, eth0: eno8403, eth1: eno8403}", 1),
+            )
+            for malformed in malformed_documents:
+                with self.subTest(malformed=malformed.splitlines()[:5]):
+                    global_path.write_text(malformed, encoding="utf-8")
+                    rejected = subprocess.run(command, text=True, capture_output=True,
+                                              check=False)
+                    self.assertNotEqual(0, rejected.returncode)
+                    self.assertEqual("", rejected.stdout,
+                                     "invalid schema must publish no JSON product")
+                    self.assertFalse((project / "99-output-ufm").exists())
+
     def test_project_csv_and_global_sources_bind_before_any_ssh_or_archive_probe(self):
         plan = collection.collection_plan("iblinkinfo", RUN_ID)
         with tempfile.TemporaryDirectory() as directory:
