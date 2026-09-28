@@ -2155,11 +2155,200 @@ def render_topology_tables(
     return "".join(blocks), sorted(statuses, key=str.casefold)
 
 
+def _issue_tracker_manual_controls(panel_id: str, panel: str) -> str:
+    """Test-only local controls; the installed generator never enables them."""
+    if (panel_id, panel) not in (
+        ("eth", "Switch Status"),
+        ("etop", "Eth Link Validation"),
+        ("itop", "IB Link Validation"),
+    ):
+        raise ValueError("unsupported manual Issue Tracker panel")
+    return (
+        f'<span class="issue-tracker-manual" data-issue-tracker-panel="{panel}">'
+        f'<button id="issue-tracker-{panel_id}-preview" type="button" '
+        f'onclick="issueTrackerManualPreview(\'{panel}\')">发布到 Issue Tracker</button>'
+        f'<label>合格窗口 K <input id="issue-tracker-{panel_id}-k" '
+        'type="number" min="1" value="3" disabled '
+        'title="服务端 K 设置尚未接入"></label>'
+        '<small>仅本地预览；Stage O 在线发布未启用；K 设置待接入</small>'
+        '</span>'
+    )
+
+
+_ISSUE_TRACKER_MANUAL_DIALOG = '''<dialog id="issue-tracker-manual-dialog" class="issue-tracker-manual-dialog">
+  <section>
+    <h2>Issue Tracker 本地发布预览</h2>
+    <pre id="issue-tracker-preview-detail"></pre>
+    <p id="issue-tracker-preview-state" role="status" aria-live="polite">未知</p>
+    <menu>
+      <button id="issue-tracker-cancel" type="button" onclick="issueTrackerManualCancel()">取消</button>
+      <button id="issue-tracker-confirm" type="button" onclick="issueTrackerManualConfirm()" disabled>确认本地发布</button>
+    </menu>
+  </section>
+</dialog>'''
+
+
+_ISSUE_TRACKER_MANUAL_CSS = '''.issue-tracker-manual { display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap; }
+.issue-tracker-manual input { width:52px; }
+.issue-tracker-manual small { color:#805800; }
+.issue-tracker-manual-dialog { border:0; border-radius:8px; max-width:min(92vw,800px); }
+.issue-tracker-manual-dialog pre { overflow:auto; white-space:pre-wrap; word-break:break-all; }
+.issue-tracker-manual-dialog menu { display:flex; justify-content:flex-end; gap:8px; }
+'''
+
+
+_ISSUE_TRACKER_MANUAL_SCRIPT = '''
+// Explicit test-only seam: production build_html() omits this whole block.
+const ISSUE_TRACKER_MANUAL_URL = '/monitor/control/issue-tracker';
+const ISSUE_TRACKER_SHEETS = {
+  'Switch Status': 'ETH&IB Switch',
+  'Eth Link Validation': 'ETH Cabling',
+  'IB Link Validation': 'IB Cabling',
+};
+let pendingIssueTrackerPreview = null;
+let issueTrackerRequestSequence = 0;
+let issueTrackerManualBusy = false;
+
+function validIssueTrackerPreview(payload, panel) {
+  const hex = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
+  if (!payload || payload.panel !== panel
+      || payload.online !== "disabled_no_send_authority") return false;
+  return payload && typeof payload === 'object'
+    && payload.target_sheet === ISSUE_TRACKER_SHEETS[panel]
+    && typeof payload.token === 'string' && /^[A-Za-z0-9_-]{43}$/.test(payload.token)
+    && Number.isInteger(payload.expires_in_seconds)
+    && payload.expires_in_seconds > 0 && payload.expires_in_seconds <= 120
+    && typeof payload.latest_cycle_id === 'string' && payload.latest_cycle_id.length > 0
+    && hex(payload.source_authority_sha256)
+    && hex(payload.selected_decision_sha256)
+    && hex(payload.observations_sha256)
+    && Number.isInteger(payload.qualified_operation_count)
+    && payload.qualified_operation_count >= 0
+    && Number.isInteger(payload.whitelist_skip_count)
+    && payload.whitelist_skip_count >= 0
+    // Current broker lacks these required details. Until the protected
+    // worker supplies them, preview is incomplete and confirm stays closed.
+    && Array.isArray(payload.source_files) && payload.source_files.length > 0
+    && payload.source_files.every(source => source && typeof source.path === 'string'
+      && source.path.length > 0 && typeof source.recorded_at_utc === 'string'
+      && source.recorded_at_utc.length > 0 && hex(source.sha256))
+    && Number.isInteger(payload.new_count) && payload.new_count >= 0
+    && Number.isInteger(payload.update_count) && payload.update_count >= 0
+    && Number.isInteger(payload.skip_count) && payload.skip_count >= 0
+    && Array.isArray(payload.row_digests)
+    && payload.row_digests.every(hex)
+    && payload.row_digests.length === payload.qualified_operation_count;
+}
+
+function issueTrackerManualCancel() {
+  issueTrackerRequestSequence += 1;
+  pendingIssueTrackerPreview = null;
+  const confirm = document.getElementById('issue-tracker-confirm');
+  if (confirm) confirm.disabled = true;
+  const detail = document.getElementById('issue-tracker-preview-detail');
+  if (detail) detail.textContent = '';
+  const dialog = document.getElementById('issue-tracker-manual-dialog');
+  if (dialog?.open) dialog.close();
+}
+
+async function issueTrackerManualPost(body) {
+  const response = await fetch(ISSUE_TRACKER_MANUAL_URL, {
+    credentials: 'same-origin', cache: 'no-store', method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'X-Requested-With': 'IssueTrackerManualControl',
+    }, body,
+  });
+  const payload = await response.json();
+  if (!response.ok || !payload || typeof payload !== 'object')
+    throw new Error('服务端未提供可核验的本地预览/结果');
+  return payload;
+}
+
+async function issueTrackerManualPreview(panel) {
+  if (!Object.prototype.hasOwnProperty.call(ISSUE_TRACKER_SHEETS, panel)
+      || issueTrackerManualBusy)
+    return;
+  issueTrackerManualCancel();
+  const sequence = issueTrackerRequestSequence;
+  issueTrackerManualBusy = true;
+  try {
+    const payload = await issueTrackerManualPost(
+      new URLSearchParams({action: "preview", panel})
+    );
+    if (sequence !== issueTrackerRequestSequence) return;
+    if (!validIssueTrackerPreview(payload, panel))
+      throw new Error('预览缺少来源、计数或行摘要；禁止确认');
+    const detail = document.getElementById('issue-tracker-preview-detail');
+    const sourceLines = payload.source_files.map(source =>
+      `${source.path}  ${source.recorded_at_utc}  SHA256 ${source.sha256}`);
+    if (detail) detail.textContent = [
+      `面板：${panel}`, `目标表：${payload.target_sheet}`,
+      `最新周期：${payload.latest_cycle_id}`,
+      `可操作：${payload.qualified_operation_count}；新增：${payload.new_count}；更新：${payload.update_count}；跳过：${payload.skip_count}`,
+      `Whitelist 跳过：${payload.whitelist_skip_count}`,
+      `来源摘要：${payload.source_authority_sha256}`,
+      `选择判定：${payload.selected_decision_sha256}`,
+      ...sourceLines, ...payload.row_digests.map(digest => `行 SHA256 ${digest}`),
+    ].join('\\n');
+    pendingIssueTrackerPreview = {
+      panel, token: payload.token,
+      deadline: Date.now() + payload.expires_in_seconds * 1000,
+    };
+    const confirm = document.getElementById('issue-tracker-confirm');
+    if (confirm) confirm.disabled = false;
+    const state = document.getElementById('issue-tracker-preview-state');
+    if (state) state.textContent = '预览已核验；仅本地发布，需再次确认';
+    document.getElementById('issue-tracker-manual-dialog')?.showModal();
+  } catch (_error) {
+    issueTrackerManualCancel();
+    const state = document.querySelector(
+      `.issue-tracker-manual[data-issue-tracker-panel="${panel}"] small`);
+    if (state) state.textContent = '本地预览不可用或不完整；未发布';
+  } finally {
+    issueTrackerManualBusy = false;
+  }
+}
+
+async function issueTrackerManualConfirm() {
+  const preview = pendingIssueTrackerPreview;
+  pendingIssueTrackerPreview = null;
+  const confirm = document.getElementById('issue-tracker-confirm');
+  if (confirm) confirm.disabled = true;
+  if (!preview || Date.now() >= preview.deadline || issueTrackerManualBusy)
+    return;
+  issueTrackerManualBusy = true;
+  try {
+    const result = await issueTrackerManualPost(new URLSearchParams({
+      action: "confirm", panel: preview.panel, token: preview.token,
+      confirmation: "publish_local",
+    }));
+    const state = document.getElementById('issue-tracker-preview-state');
+    if (state) state.textContent = result.local_applied === true
+      ? '本地发布已由 worker 确认；在线发布仍禁用'
+      : '本地结果未获确认；请检查受保护状态，勿重试';
+  } catch (_error) {
+    const state = document.getElementById('issue-tracker-preview-state');
+    if (state) state.textContent = '本地结果未知；请检查受保护状态，勿重试';
+  } finally {
+    issueTrackerManualBusy = false;
+  }
+}
+
+document.getElementById('tabs')?.addEventListener('click', event => {
+  if (event.target.closest?.('.tab')) issueTrackerManualCancel();
+});
+document.getElementById('issue-tracker-manual-dialog')?.addEventListener(
+  'cancel', () => issueTrackerManualCancel());
+'''
+
+
 def render_topology_panel(
     topology: dict,
     panel_name: str,
     title: str,
     hidden_headers: tuple[str, ...] = (),
+    manual_controls: str = "",
 ) -> str:
     """渲染一个网络的拓扑验证页签，四类结果在同一页内连续展示。"""
     prefix = f"{panel_name}-topo"
@@ -2184,6 +2373,7 @@ def render_topology_panel(
         f'download>⬇ 下载{escape(item.get("label", ""))} XLSX</a>'
         for item in downloads
     )
+    manual_controls_fragment = f"\n    {manual_controls}" if manual_controls else ""
     if not tables:
         tables = (
             f'<div class="topo-no-data">99-output-p2p/ 下没有 {escape(title)} '
@@ -2202,7 +2392,7 @@ def render_topology_panel(
     <span class="topo-count topo-miswired">Miswired {counts.get('Miswired', 0)}</span>
     <span class="topo-count topo-missing">Missing {counts.get('Missing', 0)}</span>
     <span class="topo-count topo-undefined">Undefined {counts.get('Undefined', 0)}</span>
-    {download}
+    {download}{manual_controls_fragment}
   </div>
   <div class="topo-toolbar">
     <label>搜索：
@@ -4339,7 +4529,28 @@ def build_html(
     air_diagram: dict,
     ztp_status: dict,
     ufm_panel: str = "",
+    issue_tracker_local_ui: bool = False,
 ) -> str:
+    if type(issue_tracker_local_ui) is not bool:
+        raise ValueError("local Issue Tracker UI flag must be explicit")
+    manual_controls = (
+        {panel: _issue_tracker_manual_controls(panel_id, panel)
+         for panel_id, panel in (
+             ("eth", "Switch Status"),
+             ("etop", "Eth Link Validation"),
+             ("itop", "IB Link Validation"),
+         )} if issue_tracker_local_ui else {}
+    )
+    issue_tracker_dialog = (_ISSUE_TRACKER_MANUAL_DIALOG + "\n"
+                            if issue_tracker_local_ui else "")
+    issue_tracker_css = (_ISSUE_TRACKER_MANUAL_CSS
+                         if issue_tracker_local_ui else "")
+    issue_tracker_script = (_ISSUE_TRACKER_MANUAL_SCRIPT
+                            if issue_tracker_local_ui else "")
+    issue_tracker_eth_controls = (
+        manual_controls["Switch Status"] + "\n    "
+        if issue_tracker_local_ui else ""
+    )
     gen_time      = datetime.now(DISPLAY_TZ).strftime("%Y-%m-%d %H:%M:%S")
     spx_ts_str    = spx_latest_ts.strftime("%Y-%m-%d %H:%M") if spx_latest_ts else "—"
     ibl_ts_str    = ibl_latest_ts.strftime("%Y-%m-%d %H:%M") if ibl_latest_ts else "—"
@@ -4352,9 +4563,11 @@ def build_html(
         "etop",
         "Ethernet",
         hidden_headers=("B Oper", "B Remote Host", "B Remote Port"),
+        manual_controls=manual_controls.get("Eth Link Validation", ""),
     )
     infiniband_topology_panel = render_topology_panel(
-        infiniband_topology, "itop", "InfiniBand"
+        infiniband_topology, "itop", "InfiniBand",
+        manual_controls=manual_controls.get("IB Link Validation", ""),
     )
     ethernet_diagram_panel = render_diagram_panel(
         ethernet_diagram, "p2p", "最新 Ethernet 拓扑图", "*-lldpq.html"
@@ -5170,7 +5383,7 @@ tr.grp-hidden {{ display: none; }}
 .monitor-control-actions {{ display:flex; align-items:center; gap:6px; min-height:30px; }}
 .monitor-control-help {{ color:#667085; font-size:10px; line-height:1.25; white-space:nowrap; }}
 .monitor-control-item .ztp-monitor-state {{ max-width:260px; white-space:normal; }}
-.ztp-monitor-control button {{ border:1px solid #8290a3; border-radius:4px; padding:6px 10px;
+{issue_tracker_css}.ztp-monitor-control button {{ border:1px solid #8290a3; border-radius:4px; padding:6px 10px;
   background:#fff; color:#26364a; cursor:pointer; font-weight:600; }}
 .ztp-monitor-control button.running {{ border-color:#c33; color:#a31515; }}
 .ztp-monitor-control button.paused {{ border-color:#27834c; color:#176b39; }}
@@ -5331,7 +5544,7 @@ tr.grp-hidden {{ display: none; }}
         <span id="continuous-backup-state" class="ztp-monitor-state" aria-live="polite">持续备份：未知</span>
       </span>
     </span>
-    {auto_refresh_control('eth')}
+    {issue_tracker_eth_controls}{auto_refresh_control('eth')}
     <input id="eth-search" type="text" placeholder="按主机名筛选…" oninput="filterCards()">
     <div class="view-toggle">
       <button id="btn-card" class="vtbtn active" onclick="setView('card')">卡片</button>
@@ -5545,9 +5758,9 @@ tr.grp-hidden {{ display: none; }}
 {ethernet_diagram_panel}
 {air_diagram_panel}
 {ufm_panel}
-
+{issue_tracker_dialog}
 <script>
-// ── Auto-Refresh（两个 Status + 三个 Monitor 页面）──────────────────────────
+{issue_tracker_script}// ── Auto-Refresh（两个 Status + 三个 Monitor 页面）──────────────────────────
 const TAB_NAMES = ['ztp','eth','etop','spx','itop','ibl','nvl','p2p','air','ufm'];
 const AUTO_REFRESH_TABS = new Set(['ztp','eth','spx','ibl','nvl']);
 const AUTO_REFRESH_KEY = 'network-monitor:auto-refresh';

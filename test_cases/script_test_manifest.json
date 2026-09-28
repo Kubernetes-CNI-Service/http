@@ -233,6 +233,8 @@
         "test_cases.test_issue_tracker_manual_channel_workflow",
         "test_cases.test_issue_tracker_manual_listener",
         "test_cases.test_issue_tracker_manual_listener_workflow",
+        "test_cases.test_issue_tracker_manual_ui",
+        "test_cases.test_issue_tracker_manual_ui_workflow",
         "test_cases.test_issue_tracker_publish_runtime",
         "test_cases.test_issue_tracker_publish_runtime_workflow",
         "test_cases.test_issue_tracker_ib_runtime",
@@ -1331,6 +1333,15 @@
       ]
     },
     {
+      "id": "issue_tracker_manual_ui",
+      "paths": [
+        "monitor/generate-monitor-html.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_manual_ui"
+      ]
+    },
+    {
       "id": "issue_tracker_manual_listener",
       "paths": [
         "monitor/issue_tracker_manual_listener.py"
@@ -1472,6 +1483,18 @@
       ],
       "tests": [
         "test_cases.test_backup_permission_convergence_workflow"
+      ]
+    },
+    {
+      "id": "issue_tracker_manual_ui_to_cgi",
+      "members": [
+        "monitor/generate-monitor-html.py",
+        "monitor/issue-tracker-control.cgi",
+        "monitor/issue_tracker_manual_channel.py",
+        "monitor/issue_tracker_manual_preview.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_manual_ui_workflow"
       ]
     },
     {

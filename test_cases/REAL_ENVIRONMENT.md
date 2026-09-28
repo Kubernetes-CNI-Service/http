@@ -1763,6 +1763,13 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 三来源组合补充：同一隔离真实完成周期必须同时具有 ETH/NVLink Switch、ETH 链接第四 role/P2P 派生和 IB 受保护报告九角色，三者 K/完成摘要/K 设置/W1 模板必须一致；任一角色缺失或不同周期均 HOLD。新增 hermetic 正向工作流使用本地受保护九角色 producer、真实 worker/emitter 完成记录和真实 K/Whitelist 重放，并可测试三面板 C5→C6；它仍以确定性检索替身代替远端 UFM，使用测试工作簿而非 owner 管理的正式模板，不能当成本卡真机或正式工作簿验收。本卡没有真实角色、正式输入与写者静默证据时保持 BLOCKED/NOT RUN。
 - 证据、清理与风险：保留脱敏精确命令/退出码、周期和来源摘要、拒绝原因、前后目录/服务状态、写者静默与独立快照恢复核验；仅回滚隔离副本。真实格式或保护链未证明、发生任何外部写入或没有授权时保持 BLOCKED/NOT RUN。本卡只证明只读来源，不能解除 `TC-REAL-REQ7-IB-CYCLE-BINDING-001` 或本地 C5/C6/线上发布门禁。
 
+## TC-REAL-REQ7-MANUAL-UI-001 — 三面板手动预览与二次确认
+
+- Case ID：`TC-REAL-REQ7-MANUAL-UI-001`；类型：real-environment / browser / Apache CGI / local-only；状态：**BLOCKED / NOT RUN / REAL_ENV REQUIRED**。自动化先决为 `test_cases.test_issue_tracker_manual_ui` direct、`test_cases.test_issue_tracker_manual_ui_workflow` 多真实脚本 workflow，以及同一逐字节树的正式全量证明。当前 `build_html()` 的生产默认不输出按钮、对话框或 CGI URL；显式测试态只验证前端形态，**不**部署、不开放路由、不构成可用的发布按钮。K 设置控件仍禁用，不能把显示的默认 3 冒充已持久化服务端 K。
+- 前置条件：只有在另行获 owner 书面许可的可丢弃 Ubuntu 24.04 VM 与私有 0700 项目快照中，完成 `TC-REAL-REQ7-MANUAL-CGI-QUEUE-001` 的 Apache 独占 CGI 身份/root worker/受保护 C5/C6 接入，并由 worker 返回完整逐源文件名、UTC 时间戳与摘要、新增/更新/跳过计数、行摘要，才可启用 UI 候选。先记录 HEAD/tree/full-proof、生成器及发布页面 SHA、源与目标 dev/ino/mode/size/SHA、模板与 K revision、路由及 worker 权限和回滚责任人；不得碰生产 Apache、真实项目、真实 crontab、线上表或 owner 的 v3.1 验证树。
+- 步骤与预期：在真实浏览器分别打开 Switch Status、Eth Link Validation、IB Link Validation，确认每个面板仅有本面板的按钮；浏览器只发同源 `{action,panel}` preview，收到服务端完整预览后才显示目标 sheet、源文件/时间戳/摘要、可操作/新增/更新/跳过计数与行摘要并启用独立的“确认本地发布”按钮；确认请求只传 `{action,panel,token,confirmation}`，不传行、项目路径、来源摘要、凭据。取消、切面板、页面刷新、token 过期、错面板、缺字段、源漂移、服务端 HOLD、CGI/worker 不可用及 C6 后响应丢失均不得由浏览器重放或显示成功；未知须提示检查受保护状态而非再点一次。确认只在本地 RECEIPT 经 worker 明确核实时显示本地成功，在线 Stage O 状态始终单列为禁用。K 从 UI 改变的服务端持久化/历史审计须有独立实现和证据；此卡的禁用控件不证明 K 已完成。
+- 证据、清理与风险：保存脱敏浏览器网络记录、页面/CGI/root 状态、逐字段显示、前后源/工作簿/RECEIPT SHA 与权限、所有负例、同 UID 写者静默与快照恢复核验；仅撤除获准隔离 VM 的测试资源。完整后端预览、独占身份、真实浏览器或回滚证据任一缺失时保持 BLOCKED/NOT RUN；本卡不授权生产按钮、Stage O 或最终发布。
+
 ## TC-REAL-REQ7-MANUAL-CGI-QUEUE-001 — 手动面板 CGI 到 root 私有队列
 
 - Case ID：`TC-REAL-REQ7-MANUAL-CGI-QUEUE-001`；类型：real-environment / Apache / root-worker / local-only；状态：**BLOCKED / NOT RUN / REAL_ENV REQUIRED**。本机先决为 `test_cases.test_issue_tracker_manual_channel`、`test_cases.test_issue_tracker_manual_listener` direct，两个对应多真实脚本 workflow，以及现有 Stage L/C5/C6 全量同树证明。当前 Linux listener 只是**未安装的库级接点**，无 root 服务启动、Apache 路由或受保护 C5/C6 回调；macOS 夹具模拟的 `SO_PEERCRED` 不是真实内核 peer 证明，自动化 GREEN 不代表可部署。
