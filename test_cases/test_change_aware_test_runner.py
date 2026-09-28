@@ -729,6 +729,86 @@ class ImpactManifestTests(unittest.TestCase):
             scanned,
         )
 
+    def test_registered_nested_worktree_is_not_governed_but_decoys_are(self):
+        public = load_repository_module(
+            "nested_worktree_public_entrypoints",
+            ROOT / "test_cases/test_all_script_entrypoints.py",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(["git", "-C", str(root), "init", "-q"], check=True)
+            subprocess.run(
+                ["git", "-C", str(root), "-c", "user.name=Fixture",
+                 "-c", "user.email=fixture@example.invalid", "commit",
+                 "--allow-empty", "-qm", "baseline"],
+                check=True,
+            )
+            parent = root / "ztp/config/cumulus/template/.claude/worktrees"
+            parent.mkdir(parents=True)
+            nested = parent / "real-linked"
+            subprocess.run(
+                ["git", "-C", str(root), "worktree", "add", "-q", "--detach",
+                 str(nested), "HEAD"],
+                check=True,
+            )
+            (nested / "unrelated.py").write_text("pass\n", encoding="utf-8")
+            decoy = parent / "fake-linked"
+            decoy.mkdir()
+            (decoy / ".git").write_text(
+                "gitdir: /nonexistent/worktree\n", encoding="utf-8"
+            )
+            (decoy / "new-production.py").write_text(
+                "pass\n", encoding="utf-8"
+            )
+            source = root / "infra/new-production.py"
+            source.parent.mkdir()
+            source.write_text("pass\n", encoding="utf-8")
+
+            actual = RUNNER.discover_source_scripts(root)
+            with mock.patch.object(public, "ROOT", root):
+                public_paths = {
+                    path.relative_to(root).as_posix()
+                    for path in public.source_scripts()
+                }
+            dotgit = nested / ".git"
+            original_marker = dotgit.read_text(encoding="utf-8")
+            dotgit.write_text(
+                "gitdir: /nonexistent/worktree\n", encoding="utf-8"
+            )
+            try:
+                tampered = RUNNER.discover_source_scripts(root)
+            finally:
+                dotgit.write_text(original_marker, encoding="utf-8")
+
+        self.assertNotIn(
+            "ztp/config/cumulus/template/.claude/worktrees/real-linked/unrelated.py",
+            actual,
+        )
+        self.assertIn(
+            "ztp/config/cumulus/template/.claude/worktrees/fake-linked/new-production.py",
+            actual,
+        )
+        self.assertIn("infra/new-production.py", actual)
+        self.assertEqual(set(actual), public_paths)
+        self.assertIn(
+            "ztp/config/cumulus/template/.claude/worktrees/real-linked/unrelated.py",
+            tampered,
+            "a stale or forged Git marker must not exempt a production script",
+        )
+
+    def test_unmapped_governed_script_still_rejects_manifest(self):
+        manifest = RUNNER.load_and_validate_manifest(ROOT, MANIFEST_PATH)
+        actual = dict(manifest["scripts"])
+        actual["infra/new-production.py"] = "infra/new-production.py"
+        with mock.patch.object(
+            RUNNER, "discover_source_scripts", return_value=actual,
+        ):
+            with self.assertRaisesRegex(
+                RUNNER.ImpactError,
+                r"source inventory differs from manifest: unmapped=infra/new-production.py",
+            ):
+                RUNNER.load_and_validate_manifest(ROOT, MANIFEST_PATH)
+
     def test_public_entrypoint_gate_uses_same_pruned_source_frame(self):
         public = load_repository_module(
             "h22_public_entrypoints", ROOT / "test_cases/test_all_script_entrypoints.py",

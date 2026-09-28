@@ -214,16 +214,92 @@ def normalize_relative(root: Path, raw: str) -> str:
     return result
 
 
+def _registered_nested_worktrees(root: Path) -> set[str]:
+    """Find only live linked checkouts registered to this exact Git worktree.
+
+    A directory name, .gitignore match, or a forged .git file alone is not a
+    source-inventory exemption.  An unverified path remains governed.
+    """
+    environment = os.environ.copy()
+    for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE"):
+        environment.pop(key, None)
+    try:
+        result = subprocess.run(
+            ["git", "-C", os.fspath(root), "worktree", "list", "--porcelain", "-z"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, env=environment, timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return set()
+    if result.returncode:
+        return set()
+
+    workspace = root.resolve()
+    registered: set[Path] = set()
+    for field in result.stdout.split(b"\0"):
+        if not field.startswith(b"worktree "):
+            continue
+        path = Path(os.fsdecode(field[len(b"worktree "):]))
+        if path.is_absolute():
+            registered.add(path.resolve())
+    if workspace not in registered:
+        return set()
+
+    nested: set[str] = set()
+    for path in registered - {workspace}:
+        try:
+            relative = path.relative_to(workspace)
+        except ValueError:
+            continue
+        dotgit = path / ".git"
+        try:
+            info = dotgit.lstat()
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_nlink != 1
+                or info.st_size > 4096
+            ):
+                continue
+            marker = dotgit.read_text(encoding="utf-8").strip()
+            if not marker.startswith("gitdir: "):
+                continue
+            admin = Path(marker[len("gitdir: "):])
+            if not admin.is_absolute():
+                admin = path / admin
+            admin = admin.resolve(strict=True)
+            gitdir_link = admin / "gitdir"
+            link_info = gitdir_link.lstat()
+            if (
+                not stat.S_ISREG(link_info.st_mode)
+                or link_info.st_nlink != 1
+                or link_info.st_size > 4096
+            ):
+                continue
+            backlink = gitdir_link.read_text(encoding="utf-8").strip()
+            backlink_path = Path(backlink)
+            if not backlink_path.is_absolute():
+                backlink_path = admin / backlink_path
+            if backlink_path.resolve(strict=True) != dotgit.resolve(strict=True):
+                continue
+        except (OSError, UnicodeError, ValueError):
+            continue
+        nested.add(relative.as_posix())
+    return nested
+
+
 def discover_source_scripts(root: Path) -> dict[str, str]:
     """Return every governed source path and its in-workspace canonical path."""
     found: dict[str, str] = {}
+    nested_worktrees = _registered_nested_worktrees(root)
     for directory, subdirs, files in os.walk(root, topdown=True, followlinks=False):
         parent = Path(directory)
         kept = []
         for name in subdirs:
             relative = (parent / name).relative_to(root)
             if (
-                relative.parts[0] in NON_SOURCE_ROOTS
+                relative.as_posix() in nested_worktrees
+                or relative.parts[0] in NON_SOURCE_ROOTS
                 or relative.parts[0].startswith(".codex_tmp")
                 or path_disposition(relative.as_posix()) != "production"
                 or any(part.startswith("99-output") for part in relative.parts)
