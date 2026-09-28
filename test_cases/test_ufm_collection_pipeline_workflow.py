@@ -61,6 +61,47 @@ def _write_cvt(path: Path) -> None:
 
 
 class UfmCollectionPipelineWorkflowTests(unittest.TestCase):
+    def test_real_analyzer_receipt_rejects_sidecar_replaced_before_provenance_parse(self):
+        plan = COLLECTION.collection_plan("iblinkinfo", RUN_ID)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            vendor_output = root / "iblinkinfo.txt"
+            vendor_output.write_text(
+                "Switch: 0x1 MF0;leaf01:MQM9700/U1:\n"
+                ' 10 1[  ] ==( 4X 200 Gbps Active / LinkUp )==> '
+                '20 1[  ] "server01 mlx5_0"\n', encoding="utf-8",
+            )
+            ufm_dir = root / "ufm-private"
+            ufm_dir.mkdir()
+            archive = COLLECTION.publish_local_archive(plan, vendor_output, ufm_dir)
+            cvt = root / "cvt.xlsx"
+            _write_cvt(cvt)
+            project = root / "project"
+            project.mkdir()
+            final = PIPELINE.run_local_iblinkinfo(
+                plan, "EXAMPLE-UFM01", archive, cvt, project,
+            )
+            self.assertEqual(1, len(PIPELINE.validated_receipts(project, "air")))
+            report = final / f"iblinkinfo_{RUN_ID}-topology-validation.xlsx"
+            sidecar = PROVENANCE.sidecar_path(report)
+            original = sidecar.read_bytes()
+            real_reader = PIPELINE.read_report_provenance
+            replaced: list[bool] = []
+
+            def replace_before_parse(path: Path) -> dict:
+                replacement = final / "replacement-sidecar"
+                replacement.write_bytes(b" " + original)
+                replacement.replace(sidecar)
+                replaced.append(True)
+                return real_reader(path)
+
+            with mock.patch.object(PIPELINE, "read_report_provenance",
+                                   side_effect=replace_before_parse):
+                self.assertEqual([], PIPELINE.validated_receipts(project, "air"))
+            self.assertEqual([True], replaced)
+            self.assertEqual(b" " + original, sidecar.read_bytes())
+            self.assertNotIn(RUN_ID, HTML.render_ufm_evidence_panel(project, "air"))
+
     def test_real_receipt_reader_cannot_claim_a_replaced_success_receipt(self):
         plan = COLLECTION.collection_plan("iblinkinfo", RUN_ID)
         with tempfile.TemporaryDirectory() as directory:

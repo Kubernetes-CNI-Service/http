@@ -777,6 +777,10 @@ def validated_receipts(project_root: Path, environment: str) -> list[dict[str, s
                                     report_path = (project_root / "99-output-ufm" / "runs"
                                                    / run_name / node / report_name)
                                     report_source = read_report_provenance(report_path)
+                                    provenance_sha = hashlib.sha256(provenance).hexdigest()
+                                    if _digest_regular_at(node_fd, provenance_name,
+                                                          max_bytes=16 * 1024) != provenance_sha:
+                                        continue
                                     if data == {
                                         "schema": "ufm-collection-v1", "status": "success",
                                         "kind": plan.kind, "run_id": run_name, "node": node,
@@ -784,8 +788,7 @@ def validated_receipts(project_root: Path, environment: str) -> list[dict[str, s
                                         "archive_sha256": archive_sha,
                                         "report": report_name,
                                         "report_sha256": hashlib.sha256(report).hexdigest(),
-                                        "report_provenance_sha256": hashlib.sha256(
-                                            provenance).hexdigest(),
+                                        "report_provenance_sha256": provenance_sha,
                                     } and report_source["report"]["sha256"] == data["report_sha256"]:
                                         results.append(data)
                                 except (OSError, ValueError, UnicodeError, KeyError):
