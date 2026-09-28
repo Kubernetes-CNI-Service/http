@@ -112,6 +112,8 @@
         "test_cases.test_feedback_global_writeback",
         "test_cases.test_feedback_global_writeback_workflow",
         "test_cases.test_flow_release_platform_matrix",
+        "test_cases.test_issue0007_role_link_contract",
+        "test_cases.test_issue0007_role_link_workflow",
         "test_cases.test_mlag_evpn_generation",
         "test_cases.test_nvue_normalizer",
         "test_cases.test_optimize_output_layout",
@@ -852,6 +854,17 @@
       ],
       "tests": [
         "test_cases.test_password_update"
+      ]
+    },
+    {
+      "id": "issue0007_role_link_defaults",
+      "paths": [
+        "ztp/config/cumulus/template/90-c2-generate_configs.py",
+        "ztp/config/nvos/template/90-c2-generate_configs.py"
+      ],
+      "tests": [
+        "test_cases.test_issue0007_role_link_contract",
+        "test_cases.test_issue0007_role_link_workflow"
       ]
     },
     {
@@ -1630,6 +1643,16 @@
       ],
       "tests": [
         "test_cases.test_issue_tracker_manifest_workflow"
+      ]
+    },
+    {
+      "id": "issue0007_role_template_publish",
+      "members": [
+        "ztp/config/cumulus/template/90-c2-generate_configs.py",
+        "ztp/config/cumulus/d-hostname2mac.py"
+      ],
+      "tests": [
+        "test_cases.test_issue0007_role_link_workflow"
       ]
     },
     {
@@ -2705,6 +2728,8 @@
         "test_cases.test_project_contracts",
         "test_cases.test_v2_project_schema",
         "test_cases.test_v2_generation_flow",
+        "test_cases.test_issue0007_role_link_contract",
+        "test_cases.test_issue0007_role_link_workflow",
         "test_cases.test_req8_template_refactor_contract",
         "test_cases.test_change_aware_test_runner",
         "test_cases.test_flow_release_platform_matrix"

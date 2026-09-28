@@ -78,24 +78,15 @@
 {% endif %}
 {% for swp in d.bgp_plain_uplinks %}
       {{ swp }}:
-        link:
-          fec: auto
-          mtu: 9216
         type: swp
 {% endfor %}
 {% for swp in d.member_swps %}
       {{ swp }}:
-        link:
-          fec: auto
-          mtu: 9216
         type: swp
 {% endfor %}
 {% if d.peerlink_member_list %}
 {% for swp in d.peerlink_member_list %}
       {{ swp }}:
-        link:
-          fec: auto
-          mtu: 9216
         type: swp
 {% endfor %}
 {% endif %}

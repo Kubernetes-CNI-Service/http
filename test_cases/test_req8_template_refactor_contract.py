@@ -40,6 +40,16 @@ DHCP_CLIENT_ROLES = frozenset({"oobofoob-leaf", "oobofoob-spine"})
 PRE_REFACTOR_ROLE_RENDER_SHA256 = (
     "eee15c2377d1a26a3edd826f44448320cf8e9fea1305d9f817e913769ba73406"
 )
+# ISSUE-0007 intentionally changes rendered role bytes.  This successor was
+# derived independently from a pristine archive of frozen 3ac4a82: first the
+# test above passed against PRE_REFACTOR_ROLE_RENDER_SHA256, then exactly the
+# owner-approved 16 three-line (link/fec/mtu) and seven two-line (link/mtu)
+# blocks were removed from the eight named J2 templates in that archive.
+# The same 14-role/eth1 framing below then produced this reference digest.
+# It was not captured from the edited worktree's rendered output.
+POST_ISSUE0007_ROLE_RENDER_SHA256 = (
+    "0c49fc2c248dc479ba0575230d1a5927731c1b47b9c2cea7ac04c0a65f835003"
+)
 PRE_PHASE_EXTRACTION_DEVICES_YAML_SHA256 = (
     "8cf33e6a978f37089f9022772fc0c6d7a856a08f19a443ab2a8e1feea336be6a"
 )
@@ -855,7 +865,7 @@ class H05H06RealWorkflowTests(unittest.TestCase):
     def tearDownClass(cls):
         fixture.V2GenerationWorkflowTests.tearDownClass()
 
-    def test_all_role_outputs_keep_exact_pre_refactor_bytes_with_and_without_eth1(self):
+    def test_all_role_outputs_keep_exact_post_issue0007_bytes_with_and_without_eth1(self):
         self.assertEqual(14, len(ROLE_NAMES))
         environment = GENERATOR.build_env()
         digest = hashlib.sha256()
@@ -890,7 +900,10 @@ class H05H06RealWorkflowTests(unittest.TestCase):
                     digest.update(label)
                     digest.update(len(rendered).to_bytes(8, "big"))
                     digest.update(rendered)
-        self.assertEqual(PRE_REFACTOR_ROLE_RENDER_SHA256, digest.hexdigest())
+        self.assertNotEqual(
+            PRE_REFACTOR_ROLE_RENDER_SHA256, POST_ISSUE0007_ROLE_RENDER_SHA256,
+        )
+        self.assertEqual(POST_ISSUE0007_ROLE_RENDER_SHA256, digest.hexdigest())
 
     def test_real_csv_to_intermediate_yaml_bytes_survive_phase_extraction(self):
         intermediate = fixture.V2GenerationWorkflowTests.intermediate

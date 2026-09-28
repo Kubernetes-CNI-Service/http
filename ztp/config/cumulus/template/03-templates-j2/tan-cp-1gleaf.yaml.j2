@@ -33,18 +33,12 @@
               vlan:
                 '{{ port.vlan_trunk_range }}': {}
 {% endif %}
-        link:
-          fec: auto
-          mtu: 9216
         type: swp
 {% endfor %}
 {% for bond in d.computed_bonds %}
 {% if bond.type == 'localbond' %}
 {% for m in bond.members %}
       {{ m }}:
-        link:
-          fec: auto
-          mtu: 9216
         type: swp
 {% endfor %}
 {% endif %}
@@ -76,16 +70,11 @@
                 '{{ bond.vlan_trunk_range }}': {}
 {% endif %}
         description: {{ bond.members[0] }}
-        link:
-          mtu: 9216
         type: bond
 {% endif %}
 {% endfor %}
 {% for swp in d.bgp_neighbors %}
       {{ swp }}:
-        link:
-          fec: auto
-          mtu: 9216
         type: swp
 {% endfor %}
 {% include '_l2_svis.yaml.j2' %}

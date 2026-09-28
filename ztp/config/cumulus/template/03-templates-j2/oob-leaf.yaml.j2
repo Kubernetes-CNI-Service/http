@@ -56,31 +56,20 @@
 {% endif %}
               state: enabled
 {% endif %}
-        link:
-          mtu: 9216
         type: bond
 {% if bond.type == 'localbond' %}
 {% for m in bond.members %}
       {{ m }}:
-        link:
-          fec: auto
-          mtu: 9216
         type: swp
 {% endfor %}
 {% else %}
       {{ bond.member }}:
-        link:
-          fec: auto
-          mtu: 9216
         type: swp
 {% endif %}
 {% endfor %}
 {% include '_direct_vlan_ports.yaml.j2' %}
 {% for swp in d.bgp_neighbors %}
       {{ swp }}:
-        link:
-          fec: auto
-          mtu: 9216
         type: swp
 {% endfor %}
 {% include '_l2_svis.yaml.j2' %}

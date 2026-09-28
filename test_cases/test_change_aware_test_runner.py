@@ -1060,6 +1060,8 @@ class ImpactManifestTests(unittest.TestCase):
                 "test_cases.test_project_contracts",
                 "test_cases.test_v2_project_schema",
                 "test_cases.test_v2_generation_flow",
+                "test_cases.test_issue0007_role_link_contract",
+                "test_cases.test_issue0007_role_link_workflow",
                 "test_cases.test_req8_template_refactor_contract",
                 "test_cases.test_change_aware_test_runner",
                 "test_cases.test_flow_release_platform_matrix",

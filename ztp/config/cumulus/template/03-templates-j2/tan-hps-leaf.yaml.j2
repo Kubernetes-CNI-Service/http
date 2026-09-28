@@ -62,15 +62,10 @@
 {% else %}
         description: {{ bond.member }}
 {% endif %}
-        link:
-          mtu: 9216
         type: bond
 {% if bond.type == 'localbond' %}
 {% for m in bond.members %}
       {{ m }}:
-        link:
-          fec: auto
-          mtu: 9216
         type: swp
 {% endfor %}
 {% endif %}

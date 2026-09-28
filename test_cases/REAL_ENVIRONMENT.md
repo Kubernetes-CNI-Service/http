@@ -1,5 +1,12 @@
 # Real-environment acceptance cases
 
+## TC-REAL-ISSUE-0007-ROLE-LINK-001 — J2 模板不强制物理链路 FEC/MTU
+
+- Case ID：`TC-REAL-ISSUE-0007-ROLE-LINK-001`；类型：real-environment / Cumulus NVUE / link behavior；状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。本机先决为 `test_cases.test_issue0007_role_link_contract` 的独立 direct 和 `test_cases.test_issue0007_role_link_workflow` 的真实生成器→发布脚本工作流 GREEN；本机合成通过不证明设备对省略字段的行为。
+- 前置条件：仅在 owner 另行授权的可恢复隔离 Cumulus VM/交换机和脱敏项目副本执行。冻结精确 HEAD/tree、输入、生成 YAML、设备 NVUE/链路前像、平台及端口能力、服务状态、快照和回滚责任人；不得连接生产网络、真实客户设备、live 项目或真实 crontab。先确认验证端口允许短时中断。
+- 步骤与预期：对八种角色各生成至少一份配置，分别覆盖普通 SWP、bond 成员、BGP 口、适用的非 localbond 分支和 breakout 父口；核对 23 个原纯 `fec: auto`/`mtu: 9216` 的模板块均不再产生 `link`，其 `type` 保留，12 个 breakout 模板块及渲染后的 `lanes-per-port` 保留。用真实发布入口验证 MAC 链接，再在隔离设备检查 `nv config show`、NVUE apply 退出码及链路状态；记录省略后的实际设备行为，不预设设备默认 FEC/MTU，也不把某个设备平台结论推广到其他型号。
+- 证据、清理与风险：保存脱敏命令/退出码、配置与发布文件 SHA、端口和设备型号、应用前后 NVUE/链路状态、快照和恢复核验；仅回滚隔离对象并核对前像。任一角色/分支缺失、设备行为不明、无法恢复或未真机执行时保持 OPEN，不授权 AIR/prod 发布。
+
 这里保存不能在本机隔离测试中安全、真实地完成的验收案例。它们不是自动化回归的替代品；
 对应解析、事务和失败分支仍应在 `test_*.py` 中使用 fixture 自动覆盖。
 
