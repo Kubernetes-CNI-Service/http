@@ -515,6 +515,17 @@ def _source_bound_load_report_path(
     if any(hashlib.sha256(ast.dump(tree, include_attributes=False).encode()).hexdigest()
            != expected for tree, expected in reviewed):
         return {}
+    return _load_report_structural_path(load_tree, report_tree)
+
+
+def _load_report_structural_path(
+    load_tree: ast.AST, report_tree: ast.AST,
+) -> dict[str, ast.AST]:
+    """Independently check the reviewed path's import, order and held writer.
+
+    Mutation tests call this layer directly; the production-facing certificate
+    continues to require both complete reviewed AST identities first.
+    """
     load_bindings = _source_scope_bindings(load_tree)
     report_bindings = _source_scope_bindings(report_tree)
     imports = ((load_bindings, "generation_report"), (report_bindings, "os"))
@@ -3981,6 +3992,53 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             with self.subTest(module="generation_report", mutation=label):
                 self.assertIn(before, report)
                 self.assertEqual({}, inspect(load, report.replace(before, after, 1)))
+
+    def test_native_load_report_structure_rejects_order_and_destination_mutants(self) -> None:
+        """Independent structure must reject a late stop and wrong report target."""
+        load = (ROOT / "DAY0-Prepare/11-load.py").read_text(encoding="utf-8")
+        report = (ROOT / "tools/generation_report.py").read_text(encoding="utf-8")
+
+        def structural(load_text: str, report_text: str) -> dict[str, str]:
+            return {
+                role: ast.unparse(node)
+                for role, node in _load_report_structural_path(
+                    ast.parse(load_text), ast.parse(report_text),
+                ).items()
+            }
+
+        expected = {
+            "native_guard": "local_services_supported and runtime_backend_instance.name == 'systemd' and (not args.dry_run)",
+            "quiesce": "stop_native_ztp_monitors(HTTP_ROOT)",
+            "handoff": "generation_report.commit_prepared_generation_report(report_candidate)",
+            "mutation": "os.replace(candidate.temporary.name, REPORT_NAME, src_dir_fd=descriptor, dst_dir_fd=descriptor)",
+        }
+        self.assertEqual(expected, structural(load, report))
+
+        stop_statement = "            stop_native_ztp_monitors(HTTP_ROOT)\n"
+        handoff_statement = (
+            "            generation_report.commit_prepared_generation_report(report_candidate)\n"
+        )
+        self.assertEqual(1, load.count(stop_statement))
+        self.assertEqual(1, load.count(handoff_statement))
+        late_stop = load.replace(stop_statement, "            pass\n", 1).replace(
+            handoff_statement, handoff_statement + stop_statement, 1,
+        )
+        self.assertNotEqual(load, late_stop)
+        self.assertEqual({}, structural(late_stop, report))
+        self.assertEqual({}, _source_bound_load_report_path(
+            ast.parse(late_stop), ast.parse(report),
+        ))
+
+        target = "candidate.temporary.name, REPORT_NAME,\n"
+        self.assertEqual(1, report.count(target))
+        wrong_target = report.replace(
+            target, "candidate.temporary.name, 'unexpected-report.json',\n", 1,
+        )
+        self.assertNotEqual(report, wrong_target)
+        self.assertEqual({}, structural(load, wrong_target))
+        self.assertEqual({}, _source_bound_load_report_path(
+            ast.parse(load), ast.parse(wrong_target),
+        ))
 
     def test_feedback_recovery_structural_path_rejects_two_script_mutants(self) -> None:
         """Feedback-to-runtime recovery proof is not merely an AST hash match."""

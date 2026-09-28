@@ -455,6 +455,10 @@ load、unload、DHCP/P2P generator、密码更新、feedback writeback 和 deplo
 子流程复用继承 lock/quiesce，不得重复停止。`import-from-download.py` 只允许 merge-new 且不得覆盖
 任一既有 authority，因此是精确豁免而非通用写入豁免。测试以真实多脚本 workflow、失败零写入、
 反向 sink/caller 闭包和写入顺序 hostile mutation 共同约束该集合。
+其中 Native load→generation report 与 feedback→runtime stop 的源码绑定检查仅证明各自列出的
+单一路径：外层精确 AST 摘要遇源码变化即撤销证明，独立结构层的改写负控另行验证导入、停机次序
+与目标。它们不构成 H 的完整固定点盘点或真实服务停机证明；H 验收仍按 D-59 的现行合同及
+`TC-REAL-MONITOR-WRITER-QUIESCE-001` 的 NOT RUN 状态分别判断。
 
 `test_ztp_monitor_watch_resilience.py` 与 `test_ztp_monitor_watch_runtime_workflow.py` 约束持续
 Monitor 的故障恢复合同。只有明确命名的 runtime transport 与报告发布边界属于可重试故障；每次
