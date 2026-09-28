@@ -102,6 +102,11 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             manual_channel_bridge=True,
         )
 
+    def test_real_three_panel_source_paths_times_hashes_reopen_or_hold(self):
+        self._exercise_real_protected_three_panel_fixture(
+            skip_history=False, source_identity_probe=True,
+        )
+
     def _verify_manual_queue_protected_commit(
         self, project, original_template, before_generations, qualified,
     ):
@@ -252,6 +257,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         require_first_manual_admission=False, manual_after_manual=False,
         terminal_orphan_probe=False, selected_manual_panel=None,
         selected_panel_empty=False, manual_channel_bridge=False,
+        source_identity_probe=False,
     ):
         from monitor.collection_ib_producer import (
             IbProducerAuthoritySnapshot, parse_ib_producer_authority,
@@ -446,6 +452,60 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             self.assertEqual(expected_panels,
                              {item.panel for item in qualified.candidates})
             self.assertEqual(expected_count, len(qualified.candidates))
+            if source_identity_probe:
+                from monitor.issue_tracker_stage_l_consumer import (
+                    read_prod_stage_l_panel_source_files,
+                    validate_prod_stage_l_panel_source_files,
+                )
+                expected = {
+                    "Switch Status": {
+                        artifacts["ethernet/prod"]["info"],
+                        artifacts["nvlink/prod"]["info"],
+                    },
+                    "Eth Link Validation": {
+                        artifacts["ethernet/prod"]["activity"],
+                    },
+                    "IB Link Validation": {
+                        project / "99-output-ufm/runs" / binding["run_id"] /
+                        "EXAMPLE-UFM01" /
+                        f"iblinkinfo_{binding['run_id']}-topology-validation.xlsx",
+                    },
+                }
+                witnessed_by_panel = {}
+                for panel, source_paths in expected.items():
+                    witnessed = read_prod_stage_l_panel_source_files(
+                        qualified, self.store, panel=panel, **args,
+                    )
+                    witnessed_by_panel[panel] = witnessed
+                    self.assertEqual(
+                        {str(path.relative_to(self.root)) for path in source_paths},
+                        {item.path for item in witnessed},
+                    )
+                    self.assertTrue(all(item.recorded_at_utc and
+                                        item.sha256 == hashlib.sha256(
+                                            (self.root / item.path).read_bytes()
+                                        ).hexdigest() for item in witnessed))
+                    self.assertEqual(witnessed,
+                        validate_prod_stage_l_panel_source_files(
+                            witnessed, qualified, self.store, panel=panel,
+                            **args,
+                        ))
+                altered = artifacts["ethernet/prod"]["info"]
+                prior_ns = altered.stat().st_mtime_ns
+                os.utime(altered, ns=(prior_ns + 2_000_000_000,
+                                      prior_ns + 2_000_000_000))
+                with self.assertRaises(StageLConsumerHold):
+                    validate_prod_stage_l_panel_source_files(
+                        witnessed_by_panel["Switch Status"], qualified, self.store,
+                        panel="Switch Status", **args,
+                    )
+                altered.write_bytes(b"changed after protected preview")
+                with self.assertRaises(StageLConsumerHold):
+                    validate_prod_stage_l_panel_source_files(
+                        witnessed_by_panel["Switch Status"], qualified, self.store,
+                        panel="Switch Status", **args,
+                    )
+                return
             stage_status = inspect_stage_l(
                 self.store, http_root=self.root, project=project,
                 publication=self.publication, template_path=self.template,

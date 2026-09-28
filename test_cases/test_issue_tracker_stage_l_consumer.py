@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
 import unittest
 from unittest import mock
 
@@ -57,6 +59,45 @@ class ProdStageLFixture(unittest.TestCase):
 
 
 class ProdStageLConsumerDirectTests(ProdStageLFixture):
+    def test_source_file_identity_requires_regular_named_bytes_and_records_mtime(self):
+        from monitor.issue_tracker_stage_l_consumer import (
+            StageLConsumerHold, _bound_source_file,
+        )
+
+        source = self.root / "monitor/status/synthetic-panel-source.bin"
+        source.write_bytes(b"independent fixture source\n")
+        digest = hashlib.sha256(b"independent fixture source\n").hexdigest()
+        relative = source.relative_to(self.root).as_posix()
+        first = _bound_source_file(self.root, relative, digest)
+        self.assertEqual(relative, first.path)
+        self.assertEqual(digest, first.sha256)
+        self.assertEqual(source.stat().st_mtime_ns, first.mtime_ns)
+        self.assertTrue(first.recorded_at_utc.endswith("Z"))
+        with self.assertRaises(StageLConsumerHold):
+            _bound_source_file(self.root, relative, "0" * 64)
+        old = source.stat().st_mtime_ns
+        os.utime(source, ns=(old + 2_000_000_000, old + 2_000_000_000))
+        second = _bound_source_file(self.root, relative, digest)
+        self.assertNotEqual(first, second)  # same bytes but stale timestamp
+        alias = source.with_name("synthetic-panel-alias.bin")
+        alias.symlink_to(source.name)
+        with self.assertRaises(StageLConsumerHold):
+            _bound_source_file(self.root, alias.relative_to(self.root).as_posix(),
+                               digest)
+
+    def test_panel_source_identity_rejects_unbound_caller_rows(self):
+        from monitor.issue_tracker_stage_l_consumer import (
+            StageLConsumerHold, read_prod_stage_l_panel_source_files,
+        )
+
+        with self.assertRaises(StageLConsumerHold):
+            read_prod_stage_l_panel_source_files(
+                {"project_key": self.store.project_key}, self.store,
+                panel="Switch Status", http_root=self.root,
+                settings=self.settings, whitelist_snapshot=self.snapshot,
+                whitelist_path=self.template,
+            )
+
     def test_dynamic_switch_host_without_frozen_fabric_identity_holds(self):
         from monitor.issue_tracker_stage_l_consumer import (
             StageLConsumerHold, inspect_prod_stage_l_sources,

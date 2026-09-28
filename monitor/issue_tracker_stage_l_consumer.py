@@ -10,8 +10,11 @@ online send permit.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 import hashlib
+import os
 from pathlib import Path
+import stat
 
 from monitor.issue_tracker_cycle_source import read_completed_cycle_evidence
 from monitor.issue_tracker_ib_runtime import (
@@ -150,6 +153,187 @@ class ProdStageLQualifiedSet:
     recorded_at_utc: str
     mode: str = "prod-runtime-protected-v1"
     qualified: bool = True
+
+
+@dataclass(frozen=True)
+class StageLSourceFileIdentity:
+    """One reopened protected source file, not browser or publish authority."""
+
+    path: str
+    recorded_at_utc: str
+    sha256: str
+    size_bytes: int
+    device: int
+    inode: int
+    mtime_ns: int
+    ctime_ns: int
+
+
+_PANEL_SOURCE_SLOTS = {
+    "Switch Status": ("ethernet/prod", "nvlink/prod"),
+    "Eth Link Validation": ("ethernet/prod",),
+    "IB Link Validation": ("infiniband/prod",),
+}
+
+
+def _bound_source_file(root, relative, expected_sha256):
+    """Read exact role bytes and a stable name/FD identity without symlinks."""
+    from monitor.issue_tracker_switch_runtime import (
+        SwitchRuntimeHoldError, _read_bound, _safe_child,
+    )
+
+    if (type(relative) is not str or type(expected_sha256) is not str
+            or len(expected_sha256) != 64
+            or any(char not in "0123456789abcdef" for char in expected_sha256)):
+        raise StageLConsumerHold("protected source role identity is incomplete")
+    try:
+        path = _safe_child(root, relative)
+    except SwitchRuntimeHoldError as exc:
+        raise StageLConsumerHold("protected source path is unsafe") from exc
+    before = os.stat(path, follow_symlinks=False)
+    if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+            or before.st_size <= 0 or before.st_size > 64 * 1024 * 1024):
+        raise StageLConsumerHold("protected source is not a bounded regular file")
+    try:
+        raw = _read_bound(root, path, maximum=64 * 1024 * 1024)
+    except SwitchRuntimeHoldError as exc:
+        raise StageLConsumerHold("protected source bytes are unsafe") from exc
+    after = os.stat(path, follow_symlinks=False)
+    identity = lambda item: (item.st_dev, item.st_ino, item.st_size,
+                             item.st_mtime_ns, item.st_ctime_ns)
+    if (identity(before) != identity(after)
+            or hashlib.sha256(raw).hexdigest() != expected_sha256):
+        raise StageLConsumerHold("protected source changed during identity read")
+    return StageLSourceFileIdentity(
+        relative,
+        datetime.fromtimestamp(before.st_mtime, timezone.utc).isoformat(
+            timespec="microseconds").replace("+00:00", "Z"),
+        expected_sha256, before.st_size, before.st_dev, before.st_ino,
+        before.st_mtime_ns, before.st_ctime_ns,
+    )
+
+
+def read_prod_stage_l_panel_source_files(
+    qualified, store, *, panel, http_root, settings,
+    whitelist_snapshot, whitelist_path, writer_token=None,
+):
+    """Reopen the selected panel's completed K source roles or HOLD.
+
+    The result is an internal prerequisite only.  It omits workbook
+    new/update/skip classification and must not be surfaced as a complete
+    manual preview or used to enable confirmation.
+    """
+    from monitor.collection_ib_cycle_binding import (
+        inspect_completed_ib_cycle_roles,
+    )
+    from monitor.issue_tracker_ib_runtime import read_completed_ib_cycle_report
+    from monitor.issue_tracker_switch_runtime import (
+        _private_json, read_prod_eth_activity_cycle_source,
+        read_prod_switch_cycle_source,
+    )
+
+    try:
+        if (type(qualified) is not ProdStageLQualifiedSet
+                or qualified.qualified is not True
+                or type(panel) is not str or panel not in _PANEL_SOURCE_SLOTS):
+            raise StageLConsumerHold("selected panel has no protected source authority")
+        root = Path(http_root).resolve(strict=True)
+        arguments = dict(http_root=root, settings=settings,
+                         whitelist_snapshot=whitelist_snapshot,
+                         whitelist_path=whitelist_path,
+                         writer_token=writer_token)
+        if qualify_prod_stage_l(store, **arguments) != qualified:
+            raise StageLConsumerHold("selected panel qualification changed before source read")
+        cycles = read_completed_cycle_evidence(store)
+        tail = cycles[-settings.k:]
+        if (len(tail) != settings.k
+                or tuple(item.cycle_id for item in tail) != qualified.cycle_ids):
+            raise StageLConsumerHold("selected panel K source identity changed")
+        result = []
+        for cycle in tail:
+            area = (root / "monitor/status/collection-cycles" / cycle.project_key
+                    / "prod/switch_collection/artifacts" / f"{cycle.sequence:020d}")
+            if panel == "Switch Status":
+                for slot in _PANEL_SOURCE_SLOTS[panel]:
+                    source = read_prod_switch_cycle_source(
+                        store, http_root=root, sequence=cycle.sequence,
+                        source_slot=slot,
+                    )
+                    evidence, _ = _private_json(
+                        root, area / slot.replace("/", "-") /
+                        "evidence-manifest.json",
+                    )
+                    roles = evidence.get("roles")
+                    role = roles[0] if type(roles) is list and roles else None
+                    if (type(role) is not dict or role.get("role") != "info_archive"
+                            or role.get("state") != "present"
+                            or role.get("sha256") != source.preview.archive_sha256):
+                        raise StageLConsumerHold("Switch info role differs from protected reader")
+                    result.append(_bound_source_file(
+                        root, role.get("relative_path"), role["sha256"],
+                    ))
+                    if read_prod_switch_cycle_source(
+                            store, http_root=root, sequence=cycle.sequence,
+                            source_slot=slot) != source:
+                        raise StageLConsumerHold("Switch source changed after file read")
+            elif panel == "Eth Link Validation":
+                source = read_prod_eth_activity_cycle_source(
+                    store, http_root=root, sequence=cycle.sequence,
+                )
+                relative = (area / "ethernet-prod/activity-observation.json"
+                            ).relative_to(root).as_posix()
+                result.append(_bound_source_file(
+                    root, relative, source.activity_sha256,
+                ))
+                if read_prod_eth_activity_cycle_source(
+                        store, http_root=root, sequence=cycle.sequence) != source:
+                    raise StageLConsumerHold("ETH activity changed after file read")
+            else:
+                role = inspect_completed_ib_cycle_roles(
+                    store, http_root=root, sequence=cycle.sequence,
+                )
+                source = read_completed_ib_cycle_report(
+                    store, http_root=root, sequence=cycle.sequence,
+                )
+                if (role.report_sha256 != source.report_sha256
+                        or role.cycle_id != cycle.cycle_id):
+                    raise StageLConsumerHold("IB report role differs from protected reader")
+                result.append(_bound_source_file(
+                    root, role.report_relative_path, role.report_sha256,
+                ))
+                if (inspect_completed_ib_cycle_roles(
+                        store, http_root=root, sequence=cycle.sequence) != role
+                        or read_completed_ib_cycle_report(
+                            store, http_root=root, sequence=cycle.sequence) != source):
+                    raise StageLConsumerHold("IB source changed after file read")
+        if (not result or len({item.path for item in result}) != len(result)
+                or qualify_prod_stage_l(store, **arguments) != qualified
+                or read_completed_cycle_evidence(store) != cycles):
+            raise StageLConsumerHold("selected panel source changed before readback")
+        return tuple(result)
+    except (OSError, TypeError, KeyError, AttributeError, RuntimeError,
+            ValueError) as exc:
+        if isinstance(exc, StageLConsumerHold):
+            raise
+        raise StageLConsumerHold("selected panel source identity is unsafe") from exc
+
+
+def validate_prod_stage_l_panel_source_files(
+    witness, qualified, store, *, panel, http_root, settings,
+    whitelist_snapshot, whitelist_path, writer_token=None,
+):
+    """Require byte, path and timestamp identity on a fresh protected read."""
+    if (type(witness) is not tuple or not witness
+            or any(type(item) is not StageLSourceFileIdentity for item in witness)):
+        raise StageLConsumerHold("selected panel source witness is invalid")
+    actual = read_prod_stage_l_panel_source_files(
+        qualified, store, panel=panel, http_root=http_root, settings=settings,
+        whitelist_snapshot=whitelist_snapshot, whitelist_path=whitelist_path,
+        writer_token=writer_token,
+    )
+    if actual != witness:
+        raise StageLConsumerHold("selected panel source file changed; preview again")
+    return actual
 
 
 _FABRIC_WORDS = (("OOB", ("border", "oob")),
