@@ -236,8 +236,18 @@ class DurableManualQueue:
                         or type(record["boot_id"]) is not str):
                     raise ManualChannelHold("manual queue record shape is invalid")
                 request = _request(record["request"])
-                os.rename(source, f"claimed-{current}.json",
-                          src_dir_fd=fd, dst_dir_fd=fd)
+                # No-overwrite claim: rename() could replace retained UNKNOWN
+                # evidence. If a crash leaves both hardlinks, _read rejects
+                # nlink=2 and nothing is replayed.
+                try:
+                    os.link(source, f"claimed-{current}.json",
+                            src_dir_fd=fd, dst_dir_fd=fd,
+                            follow_symlinks=False)
+                except FileExistsError as exc:
+                    raise ManualChannelHold(
+                        "manual job already has an unknown claim") from exc
+                os.fsync(fd)
+                os.unlink(source, dir_fd=fd)
                 os.fsync(fd)
                 if record["boot_id"] != self.boot_id:
                     continue  # stale worker lifetime is permanently UNKNOWN

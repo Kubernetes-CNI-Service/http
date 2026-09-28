@@ -153,6 +153,21 @@ class ManualChannelDirectTests(unittest.TestCase):
             self.assertEqual("queued", queue.status(first)["state"])
             self.assertEqual("done", queue.status(second)["state"])
 
+    def test_claim_never_overwrites_an_existing_unknown_claim(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "manual"
+            root.mkdir(mode=0o700)
+            queue = DurableManualQueue(root, boot_id="boot-a")
+            job = queue.enqueue({"action": "preview", "panel": "Switch Status",
+                                 "principal": "nvis"})
+            prior = root / f"claimed-{job}.json"
+            prior.write_bytes(b"previous unknown claim\n")
+            os.chmod(prior, 0o600)
+            with self.assertRaises(ManualChannelHold):
+                queue.claim(job)
+            self.assertEqual(b"previous unknown claim\n", prior.read_bytes())
+            self.assertEqual([job], queue.pending_ids())
+
     def test_cgi_rejects_broken_or_non_object_worker_result(self):
         body = b"action=preview&panel=Switch+Status"
         for result in ([], "ok", None, {"error": "unexpected"}):
