@@ -22,6 +22,16 @@ RUN_ID = "20260926-0315-air-0123456789abcdef"
 
 
 class UfmCollectionPipelineTests(unittest.TestCase):
+    def test_staged_archive_digest_must_match_independent_source_digest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            staged = Path(directory) / "staged.tar.gz"
+            staged.write_bytes(b"original source archive bytes")
+            expected = hashlib.sha256(b"original source archive bytes").hexdigest()
+            self.assertEqual(expected, PIPELINE._require_staged_archive_digest(staged, expected))
+            staged.write_bytes(b"replacement archive bytes")
+            with self.assertRaises(PIPELINE.PipelineError):
+                PIPELINE._require_staged_archive_digest(staged, expected)
+
     def test_source_archive_witness_rejects_byte_drift_and_same_byte_replace(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()

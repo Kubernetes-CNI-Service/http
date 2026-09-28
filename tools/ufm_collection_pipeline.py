@@ -136,6 +136,14 @@ def _require_source_archive_witness(path: Path,
         raise PipelineError("retrieved source archive changed before receipt")
 
 
+def _require_staged_archive_digest(path: Path, source_sha256: str) -> str:
+    """Fail closed if the staged name no longer contains the witnessed bytes."""
+    staged_sha256 = _source_archive_witness(path).sha256
+    if staged_sha256 != source_sha256:
+        raise PipelineError("staged archive diverged from the witnessed source")
+    return staged_sha256
+
+
 def _fsync_regular(path: Path) -> None:
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags)
@@ -520,6 +528,7 @@ def _run_local_analysis(plan: CollectionPlan, node: str, archive: Path,
         if _sha256(staged_archive) != archive_witness.sha256:
             raise PipelineError("staged archive differs from source")
         _require_source_archive_witness(archive, archive_witness)
+        _require_staged_archive_digest(staged_archive, archive_witness.sha256)
         log = stage / f"iblinkinfo_{plan.run_id}.log" if content is not None else staged_archive
         if content is not None:
             log.write_bytes(content)
@@ -535,6 +544,7 @@ def _run_local_analysis(plan: CollectionPlan, node: str, archive: Path,
             raise PipelineError("UFM analysis did not complete") from exc
         if result.returncode != 0 or not _regular(report) or report.stat().st_size == 0:
             raise PipelineError("UFM analysis failed; no receipt published")
+        _require_staged_archive_digest(staged_archive, archive_witness.sha256)
         try:
             with zipfile.ZipFile(report) as workbook:
                 if workbook.testzip() is not None or "xl/workbook.xml" not in workbook.namelist():
@@ -569,7 +579,8 @@ def _run_local_analysis(plan: CollectionPlan, node: str, archive: Path,
                     if read_report_provenance(report) != stage_attestation:
                         raise PipelineError("staged IB analysis provenance changed")
                     expected = {
-                        plan.archive_name: _sha256(staged_archive),
+                        plan.archive_name: _require_staged_archive_digest(
+                            staged_archive, archive_witness.sha256),
                         log.name: stage_attestation["actual"]["sha256"],
                         report.name: stage_attestation["report"]["sha256"],
                     }
@@ -603,7 +614,8 @@ def _run_local_analysis(plan: CollectionPlan, node: str, archive: Path,
                 receipt = {
                     "schema": "ufm-collection-v1", "status": "success", "kind": plan.kind,
                     "run_id": plan.run_id, "node": node,
-                    "archive": plan.archive_name, "archive_sha256": _sha256(staged_archive),
+                    "archive": plan.archive_name,
+                    "archive_sha256": archive_witness.sha256,
                     "report": report.name, "report_sha256": stage_attestation["report"]["sha256"],
                     "report_provenance_sha256": _digest_regular_at(
                         target_fd, sidecar_path(final_report).name, max_bytes=16 * 1024),
@@ -650,6 +662,9 @@ def _run_local_analysis(plan: CollectionPlan, node: str, archive: Path,
                                               max_bytes=(512 if name == plan.archive_name
                                                          else 128) * 1024 * 1024) != digest:
                             raise PipelineError("IB result changed during evidence gate")
+                if _digest_regular_at(target_fd, plan.archive_name,
+                                      max_bytes=512 * 1024 * 1024) != archive_witness.sha256:
+                    raise PipelineError("published UFM archive differs from witnessed source")
                 _require_source_archive_witness(archive, archive_witness)
                 os.link(".receipt.prepared", "receipt.json",
                         src_dir_fd=target_fd, dst_dir_fd=target_fd,

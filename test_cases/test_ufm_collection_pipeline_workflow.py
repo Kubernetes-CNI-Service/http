@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from datetime import datetime, timezone
+import hashlib
 import os
 import subprocess
 import sys
@@ -60,6 +61,55 @@ def _write_cvt(path: Path) -> None:
 
 
 class UfmCollectionPipelineWorkflowTests(unittest.TestCase):
+    def test_iblinkinfo_staged_archive_replacement_cannot_publish_divergent_receipt(self):
+        plan = COLLECTION.collection_plan("iblinkinfo", RUN_ID)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            private = root / "private"
+            private.mkdir()
+            vendor = root / "iblinkinfo.txt"
+            vendor.write_text(
+                "Switch: 0x1 MF0;leaf01:MQM9700/U1:\n"
+                ' 10 1[  ] ==( 4X 200 Gbps Active / LinkUp )==> '
+                '20 1[  ] "server01 mlx5_0"\n', encoding="utf-8",
+            )
+            archive = COLLECTION.publish_local_archive(plan, vendor, private)
+            original_bytes = archive.read_bytes()
+            other_vendor = root / "other-iblinkinfo.txt"
+            other_vendor.write_text(vendor.read_text(encoding="utf-8") + "# alternate\n",
+                                    encoding="utf-8")
+            other_private = root / "other-private"
+            other_private.mkdir()
+            alternate = COLLECTION.publish_local_archive(plan, other_vendor, other_private)
+            alternate_bytes = alternate.read_bytes()
+            self.assertNotEqual(original_bytes, alternate_bytes)
+            cvt = root / "cvt.xlsx"
+            _write_cvt(cvt)
+            project = root / "project"
+            project.mkdir()
+            original_sha256 = PIPELINE._sha256
+            swapped = []
+
+            def swap_after_first_stage_hash(path):
+                digest = original_sha256(path)
+                if (path.name == plan.archive_name
+                        and path.parent.name.startswith(".ufm-handoff-")
+                        and not swapped):
+                    replacement = path.parent / "replacement-archive"
+                    replacement.write_bytes(alternate_bytes)
+                    replacement.replace(path)
+                    swapped.append(True)
+                return digest
+
+            with mock.patch.object(PIPELINE, "_sha256", side_effect=swap_after_first_stage_hash):
+                with self.assertRaises(PIPELINE.PipelineError):
+                    PIPELINE.run_local_iblinkinfo(plan, "EXAMPLE-UFM01", archive, cvt, project)
+            self.assertEqual([True], swapped)
+            self.assertEqual(original_bytes, archive.read_bytes())
+            target = project / "99-output-ufm" / "runs" / RUN_ID / "EXAMPLE-UFM01"
+            self.assertFalse((target / "receipt.json").exists())
+            self.assertEqual([], PIPELINE.validated_receipts(project, "air"))
+
     def test_failed_pre_receipt_gate_keeps_real_analyzer_result_unpublished(self):
         plan = COLLECTION.collection_plan("iblinkinfo", RUN_ID)
         with tempfile.TemporaryDirectory() as directory:
@@ -215,6 +265,8 @@ class UfmCollectionPipelineWorkflowTests(unittest.TestCase):
             before = HTML.render_ufm_evidence_panel(project, "air")
             final = PIPELINE.run_local_iblinkinfo(plan, "EXAMPLE-UFM01", archive, cvt, project)
             self.assertTrue((final / "receipt.json").is_file())
+            self.assertEqual(hashlib.sha256(archive.read_bytes()).hexdigest(),
+                             PIPELINE.validated_receipts(project, "air")[0]["archive_sha256"])
             report = final / f"iblinkinfo_{RUN_ID}-topology-validation.xlsx"
             self.assertTrue(report.is_file())
             source = PROVENANCE.read_report_provenance(report)
