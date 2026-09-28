@@ -18,6 +18,13 @@ class Req14SplitterHostnameBinding(unittest.TestCase):
             {"g04-oob-core01": profiles}, "oob-core01",
         ))
 
+    def test_air_child_binds_to_production_topology_owner(self):
+        profiles = {"swp1": "1to2", "swp44": "1to2"}
+        self.assertEqual(profiles, LOAD._sidecar_profiles_for_child(
+            {"a05-tan-pod3-leaf05": profiles},
+            "air-a05-tan-pod3-leaf05",
+        ))
+
     def test_ambiguous_site_owners_fail_closed_even_if_profiles_agree(self):
         with self.assertRaisesRegex(ValueError, "ambiguous"):
             LOAD._sidecar_profiles_for_child({

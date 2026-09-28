@@ -4798,11 +4798,20 @@ def _sidecar_profiles_for_child(
     """Resolve one child hostname against P2P's site-qualified device keys.
 
     The Cumulus child accepts either an exact key or one ``-hostname``
-    boundary suffix.  More than one matching site is ambiguous even when its
-    profile happens to be identical, so parent provenance must fail closed.
+    boundary suffix.  AIR child releases use the managed ``AIR-`` prefix but
+    retain the production topology's breakout authority, so that prefix is
+    also removed for matching.  More than one matching owner is ambiguous
+    even when its profile happens to be identical, so parent provenance must
+    fail closed.
     """
-    matches = [host for host in expected
-               if host == hostname or host.endswith("-" + hostname)]
+    identities = {hostname}
+    if hostname.startswith("air-"):
+        identities.add(hostname[len("air-"):])
+    matches = [
+        host for host in expected
+        if any(host == identity or host.endswith("-" + identity)
+               for identity in identities)
+    ]
     if len(matches) > 1:
         raise ValueError(
             f"ambiguous splitter sidecar device ownership for {hostname}: "
