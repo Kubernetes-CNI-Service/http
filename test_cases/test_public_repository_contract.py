@@ -589,6 +589,42 @@ class PublicRepositoryAuditContractTest(unittest.TestCase):
         self.git("rm", "--cached", bridge_relative)
         self.assert_rejected(self.audit(), "broken-symlink")
 
+    def test_exact_tracked_bridges_accept_setup_managed_project_links(self):
+        project = "DAY0-Prepare/synthetic-project"
+        self.write(
+            ".gitignore",
+            "/infiniband/01-global.yaml\n"
+            "/infiniband/publickey/\n"
+            f"/{project}/\n",
+        )
+        self.write(f"{project}/01-global.yaml", "schema_version: 2\n")
+        self.write(f"{project}/laptop.pub", "synthetic operator key\n")
+
+        global_runtime = self.root / "infiniband/01-global.yaml"
+        global_runtime.parent.mkdir(parents=True, exist_ok=True)
+        global_runtime.symlink_to("../DAY0-Prepare/synthetic-project/01-global.yaml")
+        global_bridge_relative = (
+            "infiniband/bringup/xdr-initial-setup/01-global.yaml"
+        )
+        global_bridge = self.root / global_bridge_relative
+        global_bridge.parent.mkdir(parents=True, exist_ok=True)
+        global_bridge.symlink_to("../../01-global.yaml")
+
+        key_runtime = self.root / "infiniband/publickey"
+        key_runtime.mkdir(mode=0o700)
+        key_runtime.joinpath("laptop.pub").symlink_to(
+            "../../DAY0-Prepare/synthetic-project/laptop.pub"
+        )
+        key_bridge_relative = "infiniband/bringup/xdr-initial-setup/publickey"
+        key_bridge = self.root / key_bridge_relative
+        key_bridge.symlink_to("../../publickey")
+
+        self.git(
+            "add", ".gitignore", global_bridge_relative, key_bridge_relative,
+        )
+        result = self.audit()
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
     def test_publickey_bridge_rejects_wrong_target_and_index_mode(self):
         bridge_relative = "infiniband/bringup/xdr-initial-setup/publickey"
         bridge = self.root / bridge_relative

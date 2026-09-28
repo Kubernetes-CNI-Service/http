@@ -871,12 +871,59 @@ def exact_setup_runtime_bridge(
     # and containment checks; Path.exists() would hide dangling symlinks.
     runtime_target = root / bridge[1]
     try:
-        runtime_target.lstat()
+        runtime_info = runtime_target.lstat()
     except FileNotFoundError:
         return True
     except OSError as exc:
         raise AuditError("setup runtime bridge target cannot be inspected") from exc
-    return False
+
+    def exact_project_input(candidate: Path, expected_name: str) -> bool:
+        try:
+            candidate_info = candidate.lstat()
+            candidate_target = os.readlink(candidate)
+        except (OSError, ValueError):
+            return False
+        if not stat.S_ISLNK(candidate_info.st_mode) or os.path.isabs(candidate_target):
+            return False
+        lexical = Path(os.path.abspath(os.path.join(candidate.parent, candidate_target)))
+        try:
+            lexical_relative = lexical.relative_to(root)
+        except ValueError:
+            return False
+        parts = lexical_relative.parts
+        if (
+            len(parts) != 3
+            or parts[0] != "DAY0-Prepare"
+            or parts[1] in {"template", "dumps"}
+            or parts[2] != expected_name
+        ):
+            return False
+        try:
+            resolved = candidate.resolve(strict=True)
+            resolved_info = resolved.stat()
+        except (OSError, RuntimeError):
+            return False
+        return (
+            resolved == lexical
+            and stat.S_ISREG(resolved_info.st_mode)
+            and resolved_info.st_nlink == 1
+        )
+
+    if relative == SETUP_RUNTIME_BRIDGE:
+        return exact_project_input(runtime_target, "01-global.yaml")
+
+    if not stat.S_ISDIR(runtime_info.st_mode) or stat.S_ISLNK(runtime_info.st_mode):
+        return False
+    try:
+        children = tuple(runtime_target.iterdir())
+    except OSError:
+        return False
+    return all(
+        child.name.endswith(".pub")
+        and child.name != ".pub"
+        and exact_project_input(child, child.name)
+        for child in children
+    )
 
 
 def inspect_index_candidate(
