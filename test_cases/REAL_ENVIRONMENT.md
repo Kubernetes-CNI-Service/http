@@ -1635,6 +1635,16 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   只修角色声明或隔离网络后持锁重试，验证无重复 append 或无关覆盖。恢复 VM 快照并逐项核对
   前像；任一 N1/W1/S1/D1 帧未测、失败或恢复证据不足时本案保持 OPEN。
 
+## TC-REAL-REQ19-INFRA-LOG-RECOVERY-001 — 项目日志恢复与跨设备迁移边界
+
+- Case ID：`TC-REAL-REQ19-INFRA-LOG-RECOVERY-001`；类型：real-environment / transaction / disaster-recovery / scenario；对应 REQ-19 R19-2、R19-2a、R19-3、R19-3a、R19-4、R19-5、R19-7a。状态：**BLOCKED / NOT RUN / REAL_ENV REQUIRED**。本机 `test_cases.test_req19_infra_log_contract` direct 与 `test_cases.test_req19_infra_log_workflow` 多真实脚本 workflow 是自动化先决，不能代替真实文件系统、断电和现场日志归属见证；本卡迄今未运行。旧聚合只读盘点记录的是实现前 `infra/logs` 存量，不是本卡的恢复或跨设备验收。
+- 风险与目标：`infra/logs` 的真实目录迁移跨越 `01-a-setup.py`、`infra-setup.sh`、`check_infra.py`、`deploy_infra.py` 的写者/读者边界。掉电、目标重名、恢复凭据损坏或跨设备硬链接失败可能造成日志丢失、重复归属，或将旧项目日志标成新项目。目标是证明失败时原目录与可核验恢复证据仍在，不覆盖已有目标；只有完整迁移后才可宣称项目归属。
+- 前置条件与输入：仅在 owner 另行书面授权的一次性、隔离、可回滚 Ubuntu Native 管理 VM 与无客户数据的两个合成项目上执行；若拟支持 Docker/独立挂载卷，须对该实际后端另取证。先绑定干净候选 HEAD/tree、manifest、测试与正式验证证明、OS/文件系统/挂载身份、EUID、deployment lock、服务/写者 PID、VM 快照和恢复责任人。`infra/logs` 初始为含顶层及嵌套普通文件的真实目录，目标 `<项目>/99-output-infra` 仅含模板 `.gitkeep`；另准备含已知不同 SHA-256 的目标重名负例。两个项目、源目录与项目输出目录的路径、`st_dev`/inode/mode/owner 及脱敏文件清单先独立记录。整个读—迁—校验—重指窗口须停止其它日志写者；不能在生产、live 项目、客户设备或真实 cron 上故障注入。
+- 同设备正向：在源与目标 `st_dev` 相同的隔离卷上，先允许无项目的 `infra-setup.sh` 写入真实 `infra/logs`；随后执行获准的 setup/load。核对 `.logs-migration.json` 在首次文件转移前已持久发布，清单和源身份与前像一致；完成后 `infra/logs` 为词法与解析目标都指向当前项目真实 `99-output-infra` 的规范链接，目标各文件大小/SHA-256 等于独立前像，原目录备份 `.logs-migration-source` 与凭据按提交阶段安全结清。`check_infra.py` 的 `log.file=logs/<basename>` 保留词法路径，同时 `log.owner.project` 绑定项目；`deploy_infra.py` 写入本项目。切到第二项目后旧日志仍只在第一项目、绝不移动或重归属。
+- 故障与恢复：只在 VM 快照副本上，于凭据发布前后、首个/第二个文件转移、目录改名后建链前、建链后 manifest 提交前，以及 `finalizing` 清理期间分别注入进程中断/断电并冷启动。每个 checkpoint 保存退出码、时间线、`infra/logs` 类型、`.logs-migration.json` 与 `.logs-migration-source` 的身份/内容摘要、两侧逐文件 SHA-256、manifest 和服务前后像。待决凭据或孤儿 `.logs-migration.*` 存在时写者与采集者须 fail closed；恢复或重试须按绑定项目身份进行，不覆盖目标、不把未核验副本删除；无法自动恢复时保留原目录和证据、停止操作并交 owner 判定。重名、链接/特殊源对象、悬空/外部日志链接、凭据不符及恢复路径竞争均须在越界写入前拒绝；unsetup 不得掩盖待决迁移。
+- 跨设备边界：在同一隔离 VM 的两个真实挂载文件系统上证明源与 `99-output-infra` 的 `st_dev` 不同，重复真实目录迁移及中断恢复，不得用 mock 出的 `EXDEV` 代替。当前实现通过 `os.link` 转移普通文件，跨设备会返回 `EXDEV`；这只能作为 fail closed/无数据丢失的负面证据，**不是 R19-2 无条件“内容移入”的正向验收**。记录真实 errno、源与目标清单/摘要、凭据和链接状态：原日志须保留为真实目录、不得出现已提交的项目链接，重试不得覆盖或误归属。跨设备正向迁移与断电恢复仍为 BLOCKED；须先由 owner 裁定受支持挂载拓扑并审阅相应实现及 direct/workflow 合同，再重新执行本卡，不能手工复制、删凭据或以禁用错误掩盖缺口。
+- 证据、清理与风险：在私有 0700 证据目录保存脱敏 argv、退出码、时间线、HEAD/tree/manifest/proof、`st_dev`/inode/mode/owner、链接词法及解析目标、receipt 阶段、文件名与大小/SHA-256、服务/写者静默证明、快照恢复回执；不回传日志正文、客户配置或凭据。仅恢复隔离 VM 快照与合成项目，逐项核对目录、服务、挂载和链接前像；证据未充分封存前不得删除残留源或目标。任一同设备故障窗口、跨设备结果、项目归属、清理或 owner 授权缺失，均保持 **BLOCKED / NOT RUN / REAL_ENV REQUIRED**，不授权 AIR/prod 发布。
+
 ## TC-REAL-ISSUE-0001 — Cumulus 14 角色 DNS/NTP VRF 真机验证
 
 - Case ID：`TC-REAL-ISSUE-0001`；类型：real-environment / scenario；对应缺陷：ISSUE-0001；

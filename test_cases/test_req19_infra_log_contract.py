@@ -9,6 +9,7 @@ from itertools import product
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import tempfile
@@ -1042,6 +1043,52 @@ class Req19InfraLogContractTests(unittest.TestCase):
                     self.assertFalse(os.path.lexists(logs))
                     self.assertFalse(manifest.exists())
                 self.assertEqual(b"committed project bytes\n", owned.read_bytes())
+
+
+class Req19RealEnvironmentDocumentationTests(unittest.TestCase):
+    """Independent acceptance-card contract; fixture success is not field proof."""
+
+    CASE_ID = "TC-REAL-REQ19-INFRA-LOG-RECOVERY-001"
+
+    def case(self):
+        document = (ROOT / "test_cases/REAL_ENVIRONMENT.md").read_text(encoding="utf-8")
+        heading = re.compile(rf"^## {self.CASE_ID}[^\n]*$", re.MULTILINE)
+        matches = list(heading.finditer(document))
+        self.assertEqual(1, len(matches), f"expected exactly one {self.CASE_ID} card")
+        following = re.search(r"^## ", document[matches[0].end():], re.MULTILINE)
+        end = matches[0].end() + following.start() if following else len(document)
+        return document[matches[0].start():end]
+
+    def test_card_is_blocked_and_names_hermetic_prerequisites(self):
+        case = self.case()
+        for expected in (
+            "REQ-19", "BLOCKED / NOT RUN / REAL_ENV REQUIRED",
+            "test_cases.test_req19_infra_log_contract",
+            "test_cases.test_req19_infra_log_workflow",
+            "01-a-setup.py", "infra-setup.sh", "check_infra.py", "deploy_infra.py",
+            "99-output-infra", "infra/logs", ".logs-migration.json",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, case)
+
+    def test_recovery_and_cross_device_boundaries_have_distinct_evidence(self):
+        case = self.case()
+        for expected in (
+            "同设备", "跨设备", "EXDEV", "st_dev", "SHA-256",
+            "断电", "恢复", "重试", "不覆盖", "fail closed",
+            ".logs-migration-source", "log.owner.project", "log.file",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, case)
+
+    def test_card_records_authorization_cleanup_and_data_loss_risk(self):
+        case = self.case()
+        for expected in (
+            "owner", "前置条件", "证据", "清理", "风险",
+            "隔离", "可回滚", "生产", "归属", "不得", "未运行",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, case)
 
 
 if __name__ == "__main__":
