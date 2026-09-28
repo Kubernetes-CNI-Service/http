@@ -152,6 +152,30 @@ class DocumentationCatalogTests(unittest.TestCase):
     def setUpClass(cls):
         cls.catalog = load_script()
 
+    def test_req10b_real_environment_requires_fresh_exact_tree_proofs(self):
+        """Historical full runs cannot authorize a newly edited AIR candidate."""
+        document = (ROOT / "test_cases/REAL_ENVIRONMENT.md").read_text(
+            encoding="utf-8"
+        )
+        marker = "## TC-REAL-REQ10B-DAY0-KEYS-001"
+        self.assertEqual(1, document.count(marker))
+        card = document.split(marker, 1)[1].split("\n## ", 1)[0]
+        self.assertIn("OPEN / NOT RUN / REAL_ENV REQUIRED", card)
+
+        prerequisites = [
+            line for line in card.splitlines() if line.startswith("- 自动化先决：")
+        ]
+        self.assertEqual(1, len(prerequisites))
+        prerequisite = prerequisites[0]
+        for required in (
+            "当前", "逐字节", "Codex", "Claude", "full/check",
+            "--no-approve", "必须先取得",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, prerequisite)
+        self.assertNotRegex(prerequisite, r"已通过|已经通过|已完成")
+        self.assertIn("旧候选", prerequisite)
+
     def test_discovery_excludes_outputs_history_details_and_deduplicates_aliases(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
