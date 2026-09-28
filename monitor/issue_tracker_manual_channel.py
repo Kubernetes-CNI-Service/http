@@ -219,23 +219,29 @@ class DurableManualQueue:
             self._write_new(fd, f"pending-{job}.json", record)
         return job
 
-    def claim(self):
+    def claim(self, job=None):
+        if job is not None and (type(job) is not str or not _JOB.fullmatch(job)):
+            raise ManualChannelHold("manual job identity is invalid")
+        jobs = (job,) if job is not None else self.pending_ids()
         with self._directory() as fd:
-            for job in self.pending_ids():
-                if not _JOB.fullmatch(job):
+            for current in jobs:
+                if not _JOB.fullmatch(current):
                     raise ManualChannelHold("manual queue filename is invalid")
-                source = f"pending-{job}.json"
-                record = self._read(fd, source)
+                source = f"pending-{current}.json"
+                try:
+                    record = self._read(fd, source)
+                except FileNotFoundError as exc:
+                    raise ManualChannelHold("manual pending job is absent") from exc
                 if (type(record) is not dict or set(record) != {"boot_id", "request"}
                         or type(record["boot_id"]) is not str):
                     raise ManualChannelHold("manual queue record shape is invalid")
                 request = _request(record["request"])
-                os.rename(source, f"claimed-{job}.json",
+                os.rename(source, f"claimed-{current}.json",
                           src_dir_fd=fd, dst_dir_fd=fd)
                 os.fsync(fd)
                 if record["boot_id"] != self.boot_id:
                     continue  # stale worker lifetime is permanently UNKNOWN
-                return job, request
+                return current, request
         return None
 
     def complete(self, job, result):
@@ -281,6 +287,16 @@ class ManualQueueWorker:
         claim = self.queue.claim()
         if claim is None:
             return None
+        return self._process_claim(claim)
+
+    def process_job(self, job):
+        """Process only this enqueued ID; never answer with another request."""
+        claim = self.queue.claim(job)
+        if claim is None:
+            raise ManualChannelHold("manual job belongs to another worker boot")
+        return self._process_claim(claim)
+
+    def _process_claim(self, claim):
         job, request = claim
         try:
             if request["action"] == "preview":

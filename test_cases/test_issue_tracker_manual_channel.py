@@ -70,6 +70,16 @@ class ManualChannelDirectTests(unittest.TestCase):
         submit.assert_called_once_with({"action": "preview", "panel": "Switch Status",
                                         "principal": "nvis"})
 
+    def test_cgi_unsafe_socket_metadata_returns_stable_unavailable(self):
+        body = b"action=preview&panel=Switch+Status"
+        with tempfile.TemporaryDirectory() as tmp:
+            unsafe_endpoint = Path(tmp) / "not-a-socket"
+            unsafe_endpoint.write_text("unsafe", encoding="utf-8")
+            with mock.patch.object(cgi, "SOCKET_PATH", unsafe_endpoint):
+                status, payload = cgi.handle(valid_env(body), body)
+        self.assertEqual("503 Service Unavailable", status)
+        self.assertEqual({"error": "manual_worker_unavailable"}, payload)
+
     def test_queue_is_private_atomic_and_crash_never_replays_claim(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "manual"
@@ -122,6 +132,26 @@ class ManualChannelDirectTests(unittest.TestCase):
             self.assertEqual(job, queue.claim()[0])
             self.assertEqual("unknown_after_claim", queue.status(job)["state"])
             self.assertEqual("unknown_job", queue.status("f" * 32)["state"])
+
+    def test_worker_exact_job_cannot_return_another_principals_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "manual"
+            root.mkdir(mode=0o700)
+            queue = DurableManualQueue(root, boot_id="boot-a")
+            first = queue.enqueue({"action": "preview", "panel": "Switch Status",
+                                   "principal": "nvis"})
+            second = queue.enqueue({"action": "preview", "panel": "IB Link Validation",
+                                    "principal": "cumulus"})
+
+            class EchoBroker:
+                def preview(self, principal, panel):
+                    return {"principal": principal, "panel": panel}
+
+            result = ManualQueueWorker(queue, EchoBroker()).process_job(second)
+            self.assertEqual((second, {"principal": "cumulus",
+                                       "panel": "IB Link Validation"}), result)
+            self.assertEqual("queued", queue.status(first)["state"])
+            self.assertEqual("done", queue.status(second)["state"])
 
     def test_cgi_rejects_broken_or_non_object_worker_result(self):
         body = b"action=preview&panel=Switch+Status"

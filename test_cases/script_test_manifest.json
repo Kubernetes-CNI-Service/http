@@ -231,6 +231,8 @@
         "test_cases.test_issue_tracker_manual_panel_workflow",
         "test_cases.test_issue_tracker_manual_channel",
         "test_cases.test_issue_tracker_manual_channel_workflow",
+        "test_cases.test_issue_tracker_manual_listener",
+        "test_cases.test_issue_tracker_manual_listener_workflow",
         "test_cases.test_issue_tracker_publish_runtime",
         "test_cases.test_issue_tracker_publish_runtime_workflow",
         "test_cases.test_issue_tracker_ib_runtime",
@@ -430,6 +432,7 @@
     "monitor/issue_tracker_admission.py": "monitor/issue_tracker_admission.py",
     "monitor/issue_tracker_manual_preview.py": "monitor/issue_tracker_manual_preview.py",
     "monitor/issue_tracker_manual_channel.py": "monitor/issue_tracker_manual_channel.py",
+    "monitor/issue_tracker_manual_listener.py": "monitor/issue_tracker_manual_listener.py",
     "monitor/issue-tracker-control.cgi": "monitor/issue-tracker-control.cgi",
     "monitor/issue_tracker_publish_runtime.py": "monitor/issue_tracker_publish_runtime.py",
     "monitor/issue_tracker_ib_runtime.py": "monitor/issue_tracker_ib_runtime.py",
@@ -1328,6 +1331,15 @@
       ]
     },
     {
+      "id": "issue_tracker_manual_listener",
+      "paths": [
+        "monitor/issue_tracker_manual_listener.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_manual_listener"
+      ]
+    },
+    {
       "id": "issue_tracker_publish_runtime",
       "paths": [
         "monitor/issue_tracker_publish_runtime.py"
@@ -1460,6 +1472,18 @@
       ],
       "tests": [
         "test_cases.test_backup_permission_convergence_workflow"
+      ]
+    },
+    {
+      "id": "issue_tracker_manual_cgi_to_private_listener",
+      "members": [
+        "monitor/issue-tracker-control.cgi",
+        "monitor/issue_tracker_manual_channel.py",
+        "monitor/issue_tracker_manual_listener.py",
+        "monitor/issue_tracker_manual_preview.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_manual_listener_workflow"
       ]
     },
     {
