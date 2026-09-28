@@ -337,7 +337,7 @@ def commit_prod_stage_l_workbook(
         )
     prepared = PreparedProdWorkbook(
         image, hashlib.sha256(image).hexdigest(), source_sha, manifest_id,
-        3 if selected_panel is None else 1,
+        3,  # C5 requalified all source families even for one-panel intent.
         len({candidate.panel for candidate in qualified.candidates
              if selected_panel is None or candidate.panel == selected_panel}),
         sum(item.fabric_source == "hostname-fallback" for item in switch),

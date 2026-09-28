@@ -341,6 +341,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                         selected_panel=selected_manual_panel, **args,
                     )
                 self.assertIsInstance(committed, CommittedProdWorkbook)
+                self.assertEqual(3, committed.prepared.source_family_count)
                 self.assertEqual(selected_id, committed.receipt.manifest_id)
                 generation = (project / ".tracker/generations" /
                               committed.generation.generation_id)
