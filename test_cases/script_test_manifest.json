@@ -143,6 +143,7 @@
       "description": "监控页面、采集 worker、IB 分析、手工比对和分组交接",
       "tests": [
         "test_cases.test_backup_auth_transport_workflow",
+        "test_cases.test_backup_permission_convergence_workflow",
         "test_cases.test_backup_zero_target_contract",
         "test_cases.test_collection_cycle_contract",
         "test_cases.test_collection_cycle_handoff_workflow",
@@ -1423,6 +1424,16 @@
     }
   ],
   "workflows": [
+    {
+      "id": "backup_permission_historical_to_new_collection",
+      "members": [
+        "ztp/backup/permission-sweep.py",
+        "ztp/backup/yaml-collect.py"
+      ],
+      "tests": [
+        "test_cases.test_backup_permission_convergence_workflow"
+      ]
+    },
     {
       "id": "issue_tracker_cold_generation_recovery",
       "members": [
