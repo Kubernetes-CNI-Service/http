@@ -19,6 +19,13 @@ from test_cases.test_issue_tracker_manual_channel import valid_env
 from test_cases.test_issue_tracker_manual_listener import FakeConnection
 from test_cases.test_issue_tracker_manual_preview import qualified_status
 
+LOCAL_RECEIPT = {
+    "local": "committed", "local_applied": True,
+    "generation_id": "gen-" + "0" * 19 + "1-" + "a" * 32,
+    "manifest_id": "b" * 64, "published_sha256": "c" * 64,
+    "online": "disabled_no_send_authority",
+}
+
 
 CGI_PATH = Path(__file__).resolve().parents[1] / "monitor/issue-tracker-control.cgi"
 loader = importlib.machinery.SourceFileLoader("issue_tracker_listener_flow", str(CGI_PATH))
@@ -34,7 +41,7 @@ class ManualListenerWorkflowTests(unittest.TestCase):
         broker = ManualPreviewBroker(
             lambda: source,
             lambda panel, fingerprint: commits.append((panel, fingerprint)) or
-            {"local": "receipt"}, clock=lambda: 1000.0,
+            LOCAL_RECEIPT, clock=lambda: 1000.0,
         )
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "manual"
@@ -68,7 +75,7 @@ class ManualListenerWorkflowTests(unittest.TestCase):
                 status, result = cgi.handle(valid_env(confirm), confirm,
                                             submit=relay)
                 self.assertEqual("200 OK", status)
-                self.assertEqual({"local": "receipt"}, result)
+                self.assertEqual(LOCAL_RECEIPT, result)
                 self.assertEqual(1, len(commits))
                 status, _ = cgi.handle(valid_env(confirm), confirm, submit=relay)
                 self.assertEqual("409 Conflict", status)

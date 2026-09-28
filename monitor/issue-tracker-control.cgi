@@ -18,7 +18,7 @@ from pathlib import Path
 sys.path.insert(0, "/var/www/html")
 
 from monitor.issue_tracker_manual_channel import (
-    ManualChannelHold, validate_ingress,
+    ManualChannelHold, require_local_result, validate_ingress,
 )
 
 
@@ -68,6 +68,11 @@ def handle(environ, body, *, submit=send_to_worker):
         return "409 Conflict", {"error": "manual_hold"}
     if "error" in result:
         return "503 Service Unavailable", {"error": "manual_worker_unavailable"}
+    if request["action"] == "confirm":
+        try:
+            require_local_result(result)
+        except ManualChannelHold:
+            return "503 Service Unavailable", {"error": "manual_worker_unavailable"}
     return "200 OK", result
 
 

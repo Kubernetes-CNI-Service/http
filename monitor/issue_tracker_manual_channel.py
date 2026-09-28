@@ -30,6 +30,8 @@ _ROUTES = frozenset(("/monitor/control/issue-tracker",
                      "/cgi-bin/issue-tracker-control"))
 _TOKEN = re.compile(r"[A-Za-z0-9_-]{43}\Z")
 _JOB = re.compile(r"[0-9a-f]{32}\Z")
+_HEX = re.compile(r"[0-9a-f]{64}\Z")
+_GENERATION = re.compile(r"gen-[0-9]{20}-[0-9a-f]{32}\Z")
 _MAX_REQUEST = 512
 _MAX_RESULT = 8192
 
@@ -56,6 +58,30 @@ def _request(value):
                 and value["confirmation"] == "publish_local"):
             return value
     raise ManualChannelHold("manual action is not one exact panel request")
+
+
+def require_local_result(result):
+    """Require one exact C6 receipt/no-op shape before a confirm is completed."""
+    if (type(result) is not dict
+            or result.get("online") != "disabled_no_send_authority"
+            or type(result.get("manifest_id")) is not str
+            or _HEX.fullmatch(result["manifest_id"]) is None):
+        raise ManualChannelHold("manual local result identity is incomplete")
+    if result.get("local") == "committed":
+        valid = (set(result) == {"local", "local_applied", "generation_id",
+                                 "manifest_id", "published_sha256", "online"}
+                 and result["local_applied"] is True
+                 and type(result["generation_id"]) is str
+                 and _GENERATION.fullmatch(result["generation_id"]) is not None
+                 and type(result["published_sha256"]) is str
+                 and _HEX.fullmatch(result["published_sha256"]) is not None)
+    else:
+        valid = (result.get("local") in ("no_candidates", "no_change")
+                 and set(result) == {"local", "local_applied", "manifest_id", "online"}
+                 and result["local_applied"] is False)
+    if not valid:
+        raise ManualChannelHold("manual local result is not a C6 receipt/no-op")
+    return result
 
 
 def validate_ingress(environ, body):
@@ -316,6 +342,7 @@ class ManualQueueWorker:
                     request["principal"], request["panel"], request["token"],
                     confirmation=request["confirmation"],
                 )
+                require_local_result(result)
         except ManualPreviewHold:
             result = {"error": "manual_hold"}
         # Unexpected C6 errors deliberately leave a claimed UNKNOWN and are

@@ -18,8 +18,55 @@ spec = importlib.util.spec_from_loader(loader.name, loader)
 cgi = importlib.util.module_from_spec(spec)
 loader.exec_module(cgi)
 
+LOCAL_RECEIPT = {
+    "local": "committed", "local_applied": True,
+    "generation_id": "gen-" + "0" * 19 + "1-" + "a" * 32,
+    "manifest_id": "b" * 64, "published_sha256": "c" * 64,
+    "online": "disabled_no_send_authority",
+}
+
 
 class ManualChannelWorkflowTests(unittest.TestCase):
+    def test_incomplete_post_c6_reply_is_unknown_not_browser_success_or_replay(self):
+        commits = []
+        broker = ManualPreviewBroker(
+            qualified_status,
+            lambda panel, fingerprint: commits.append(panel) or
+            {"local_applied": True},
+            clock=lambda: 1000.0,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "manual"
+            root.mkdir(mode=0o700)
+            queue = DurableManualQueue(root, boot_id="boot-a")
+            worker = ManualQueueWorker(queue, broker)
+            jobs = []
+
+            def submit(request):
+                job = queue.enqueue(request)
+                jobs.append(job)
+                self.assertEqual(job, worker.process_job(job)[0])
+                return queue.status(job)["result"]
+
+            preview_body = b"action=preview&panel=Switch+Status"
+            status, preview = cgi.handle(valid_env(preview_body), preview_body,
+                                         submit=submit)
+            self.assertEqual("200 OK", status)
+            confirm_body = (b"action=confirm&panel=Switch+Status&token="
+                            + preview["token"].encode()
+                            + b"&confirmation=publish_local")
+            status, reply = cgi.handle(valid_env(confirm_body), confirm_body,
+                                       submit=submit)
+            self.assertEqual("503 Service Unavailable", status)
+            self.assertEqual({"error": "manual_worker_unavailable"}, reply)
+            self.assertEqual("unknown_after_claim", queue.status(jobs[-1])["state"])
+            self.assertEqual(["Switch Status"], commits)
+            status, reply = cgi.handle(valid_env(confirm_body), confirm_body,
+                                       submit=submit)
+            self.assertEqual("409 Conflict", status)
+            self.assertEqual({"error": "manual_hold"}, reply)
+            self.assertEqual(["Switch Status"], commits)
+
     def test_real_cgi_queue_worker_broker_is_one_use_and_source_bound(self):
         status = qualified_status()
         commits = []
@@ -27,7 +74,7 @@ class ManualChannelWorkflowTests(unittest.TestCase):
         broker = ManualPreviewBroker(
             lambda: status,
             lambda panel, fingerprint: commits.append((panel, fingerprint)) or
-            {"local": "receipt"},
+            LOCAL_RECEIPT,
             clock=lambda: now[0],
         )
         with tempfile.TemporaryDirectory() as tmp:
@@ -72,7 +119,7 @@ class ManualChannelWorkflowTests(unittest.TestCase):
             http_status, result = cgi.handle(valid_env(confirm), confirm,
                                              submit=submit)
             self.assertEqual("200 OK", http_status)
-            self.assertEqual({"local": "receipt"}, result)
+            self.assertEqual(LOCAL_RECEIPT, result)
             self.assertEqual(1, len(commits))
             self.assertEqual("Switch Status", commits[0][0])
             http_status, _ = cgi.handle(valid_env(confirm), confirm, submit=submit)

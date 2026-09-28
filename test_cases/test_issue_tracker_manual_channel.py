@@ -153,6 +153,25 @@ class ManualChannelDirectTests(unittest.TestCase):
             self.assertEqual("queued", queue.status(first)["state"])
             self.assertEqual("done", queue.status(second)["state"])
 
+    def test_worker_does_not_complete_a_claim_without_local_receipt_identity(self):
+        class BrokenBroker:
+            def confirm(self, principal, panel, token, *, confirmation):
+                return {"local_applied": True}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "manual"
+            root.mkdir(mode=0o700)
+            queue = DurableManualQueue(root, boot_id="boot-a")
+            job = queue.enqueue({
+                "action": "confirm", "panel": "Switch Status",
+                "principal": "nvis", "token": "a" * 43,
+                "confirmation": "publish_local",
+            })
+            with self.assertRaises(ManualChannelHold):
+                ManualQueueWorker(queue, BrokenBroker()).process_job(job)
+            self.assertEqual("unknown_after_claim", queue.status(job)["state"])
+            self.assertEqual([], queue.pending_ids())
+
     def test_claim_never_overwrites_an_existing_unknown_claim(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "manual"
@@ -176,6 +195,43 @@ class ManualChannelDirectTests(unittest.TestCase):
                                              submit=lambda request: result)
                 self.assertEqual("503 Service Unavailable", status)
                 self.assertEqual("manual_worker_unavailable", payload["error"])
+
+    def test_confirm_requires_a_complete_local_receipt_not_a_success_flag(self):
+        body = (b"action=confirm&panel=Switch+Status&token=" + b"a" * 43
+                + b"&confirmation=publish_local")
+        committed = {
+            "local": "committed", "local_applied": True,
+            "generation_id": "gen-" + "0" * 19 + "1-" + "a" * 32,
+            "manifest_id": "b" * 64,
+            "published_sha256": "c" * 64,
+            "online": "disabled_no_send_authority",
+        }
+        for false_receipt in (
+            {"local_applied": True},
+            {**committed, "manifest_id": "bad"},
+            {**committed, "published_sha256": "bad"},
+            {**committed, "online": "enabled"},
+            {**committed, "credentials": "must-not-echo"},
+            {**committed, "local_applied": 1},
+        ):
+            with self.subTest(false_receipt=false_receipt):
+                status, payload = cgi.handle(valid_env(body), body,
+                                             submit=lambda request: false_receipt)
+                self.assertEqual("503 Service Unavailable", status)
+                self.assertEqual({"error": "manual_worker_unavailable"}, payload)
+        status, payload = cgi.handle(valid_env(body), body,
+                                     submit=lambda request: committed)
+        self.assertEqual("200 OK", status)
+        self.assertEqual(committed, payload)
+        noop = {
+            "local": "no_change", "local_applied": False,
+            "manifest_id": "d" * 64,
+            "online": "disabled_no_send_authority",
+        }
+        status, payload = cgi.handle(valid_env(body), body,
+                                     submit=lambda request: noop)
+        self.assertEqual("200 OK", status)
+        self.assertEqual(noop, payload)
 
 
 if __name__ == "__main__":
