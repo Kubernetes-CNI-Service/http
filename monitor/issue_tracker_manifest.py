@@ -22,6 +22,12 @@ _METADATA_KEYS = {
     "template_contract_version", "template_sha256",
 }
 
+_RUNTIME_PANELS = {
+    "switch": "Switch Status",
+    "eth_cabling": "Eth Link Validation",
+    "ib_cabling": "IB Link Validation",
+}
+
 
 def _unique_pairs(pairs):
     result = {}
@@ -249,6 +255,7 @@ def freeze_qualified_manifest(qualified, *, metadata, expected_template_sha256):
 def freeze_prod_stage_l_manifest(
     qualified, store, *, http_root, settings, whitelist_snapshot,
     whitelist_path, metadata, expected_template_sha256, writer_token=None,
+    selected_panel=None,
 ):
     """Freeze a protected runtime C-5 intent only after replaying its sources.
 
@@ -267,6 +274,10 @@ def freeze_prod_stage_l_manifest(
             or qualified.qualified is not True
             or qualified.mode != "prod-runtime-protected-v1"):
         raise ValueError("runtime qualified-set mode or authority is invalid")
+    if selected_panel is not None and (
+            type(selected_panel) is not str
+            or selected_panel not in _RUNTIME_PANELS.values()):
+        raise ValueError("manual panel must be one exact Stage L panel")
     if not isinstance(metadata, dict) or set(metadata) != _METADATA_KEYS:
         raise ValueError("metadata must have exact C-5 keys")
     if (type(metadata["project_id"]) is not str or not metadata["project_id"]
@@ -310,7 +321,18 @@ def freeze_prod_stage_l_manifest(
             "action": "upsert",
         }:
             raise ValueError("runtime operation differs from reverified source")
+        if candidate.panel != _RUNTIME_PANELS.get(candidate.activity_key[0]):
+            raise ValueError("runtime candidate panel differs from source family")
     skips = [_runtime_skip(item) for item in actual.whitelist_skips]
+    if selected_panel is not None:
+        # The source digests below still bind all three fully replayed domains.
+        # Only the intent and W1 decisions for this human-confirmed panel may
+        # enter the manual receipt; the old automatic/full schema is unchanged.
+        operations = [operation for operation, candidate in
+                      zip(operations, actual.candidates)
+                      if candidate.panel == selected_panel]
+        skips = [item for item in skips
+                 if _RUNTIME_PANELS[item["source"]] == selected_panel]
     qualified_source = {
         "cycle_ids": list(actual.cycle_ids), "k": actual.k,
         "mode": actual.mode, "scope": actual.scope,
@@ -323,6 +345,19 @@ def freeze_prod_stage_l_manifest(
         "recorded_at_utc": _runtime_recorded_at(actual.recorded_at_utc),
         "whitelist_skips": skips,
     }
+    if selected_panel is not None:
+        qualified_source["selected_panel"] = selected_panel
+        qualified_source["panel_evaluation"] = {
+            panel: (
+                {"state": "evaluated", "whitelist_skips": (
+                    "skips-present" if any(
+                        _RUNTIME_PANELS[item["source"]] == panel for item in skips
+                    ) else "no-skips")}
+                if panel == selected_panel
+                else {"state": "not-evaluated-in-this-manifest"}
+            )
+            for panel in _RUNTIME_PANELS.values()
+        }
     body = _canonical_json({
         **metadata, "operations": operations,
         "qualified_source": qualified_source,

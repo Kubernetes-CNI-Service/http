@@ -58,6 +58,7 @@ class ManualPreviewWorkflowTests(RuntimeWorkerFixture, unittest.TestCase):
                     publication=self.publication, template_path=template,
                     expected_manual_preview=expected,
                     manual_admission=("f" * 64, 1, "fixture-boot", 1000),
+                    selected_panel="Switch Status",
                 )
         commit.assert_not_called()
         self.assertEqual((), tuple(self.publication.iterdir()))
@@ -73,9 +74,27 @@ class ManualPreviewWorkflowTests(RuntimeWorkerFixture, unittest.TestCase):
                 publication=self.publication, template_path=template,
                 expected_manual_preview=expected,
                 manual_admission=("f" * 64, 1, "fixture-boot", 1000),
+                selected_panel="Switch Status",
             )
         self.assertIs(marker, result)
         commit.assert_called_once()
+        self.assertEqual("Switch Status", commit.call_args.kwargs["selected_panel"])
+
+    def test_preview_bound_manual_writer_refuses_missing_or_ambiguous_panel(self):
+        template = self.root / "monitor/Issue_Tracker_Template_v1.xlsx"
+        template.parent.mkdir(parents=True, exist_ok=True)
+        template.write_bytes(self.workbook.read_bytes())
+        with mock.patch.object(self.store, "scope", "prod"):
+            for panel in (None, "all", "switch status"):
+                with self.subTest(panel=panel), self.assertRaises(StageLHold):
+                    commit_qualified_prod_local(
+                        self.store, http_root=self.root, project=self.project,
+                        publication=self.publication, template_path=template,
+                        expected_manual_preview={"project_key": self.store.project_key},
+                        manual_admission=("f" * 64, 1, "fixture-boot", 1000),
+                        selected_panel=panel,
+                    )
+        self.assertEqual((), tuple(self.publication.iterdir()))
 
 
 if __name__ == "__main__":

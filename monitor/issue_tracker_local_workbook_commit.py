@@ -9,8 +9,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+from io import BytesIO
 import os
 from pathlib import Path
+import zipfile
 
 from monitor.issue_tracker_local_commit import (
     Generation, LocalCommitHold, LocalReceipt, _GEN, _directory, _intent,
@@ -19,7 +21,7 @@ from monitor.issue_tracker_local_commit import (
 )
 from monitor.issue_tracker_local_workbook import (
     CablingSourceRow, PreparedLocalWorkbook, SwitchSourceWorkbookRow,
-    _read_bound_source, prepare_fake_local_workbook,
+    _read_bound_source, _sheet_paths, prepare_fake_local_workbook,
     project_cabling_workbook_image, project_switch_workbook_image,
     project_whitelist_skip_history_image,
     validate_operator_edited_workbook,
@@ -27,6 +29,81 @@ from monitor.issue_tracker_local_workbook import (
 from monitor.issue_tracker_manifest import freeze_prod_stage_l_manifest
 from monitor.issue_tracker_state_owner import require_current_k
 from monitor.issue_tracker_whitelist_workbook import read_whitelist_workbook
+
+
+_MANUAL_PANEL_SHEETS = {
+    "Switch Status": ("ETH&IB Switch", "switch"),
+    "Eth Link Validation": ("ETH Cabling", "eth_cabling"),
+    "IB Link Validation": ("IB Cabling", "ib_cabling"),
+}
+
+
+def _source_rows(qualified, *, selected_panel=None):
+    """Convert fully requalified C5 values, selecting only a human panel."""
+    cabling = []
+    switch = []
+    for candidate in qualified.candidates:
+        expected = next((name for name, (_, family) in
+                         _MANUAL_PANEL_SHEETS.items()
+                         if family == candidate.activity_key[0]), None)
+        if candidate.panel != expected:
+            raise LocalCommitHold("C6 candidate panel differs from source family")
+        if selected_panel is not None and candidate.panel != selected_panel:
+            continue
+        if candidate.panel in {"Eth Link Validation", "IB Link Validation"}:
+            sheet = _MANUAL_PANEL_SHEETS[candidate.panel][0]
+            actual = (() if sheet == "IB Cabling"
+                      and candidate.source_status == "Link Down"
+                      else candidate.actual_endpoints)
+            cabling.append(CablingSourceRow(
+                sheet=sheet, activity_key=candidate.activity_key,
+                expected_endpoints=candidate.expected_endpoints,
+                actual_endpoints=actual,
+                source_status=candidate.source_status,
+                evidence_description=candidate.evidence_description,
+                recorded_at_utc=candidate.recorded_at_utc,
+            ))
+        else:
+            switch.append(SwitchSourceWorkbookRow(
+                activity_key=candidate.activity_key,
+                evidence_description=candidate.evidence_description,
+                fabric=candidate.fabric, fabric_source=candidate.fabric_source,
+                priority="P2", recorded_at_utc=candidate.recorded_at_utc,
+            ))
+    return tuple(cabling), tuple(switch)
+
+
+def project_manual_panel_image(source, qualified, selected_panel, manifest_id):
+    """Project one C5 panel; enforce byte equality of both other XLSX sheets."""
+    from monitor.issue_tracker_manifest import _runtime_skip
+    from monitor.issue_tracker_stage_l_consumer import ProdStageLQualifiedSet
+
+    if (type(source) is not bytes or type(qualified) is not ProdStageLQualifiedSet
+            or type(selected_panel) is not str
+            or selected_panel not in _MANUAL_PANEL_SHEETS
+            or type(manifest_id) is not str or len(manifest_id) != 64
+            or any(char not in "0123456789abcdef" for char in manifest_id)):
+        raise LocalCommitHold("manual panel projection identity is invalid")
+    cabling, switch = _source_rows(qualified, selected_panel=selected_panel)
+    target, family = _MANUAL_PANEL_SHEETS[selected_panel]
+    skips = tuple(skip for skip in qualified.whitelist_skips
+                  if _runtime_skip(skip)["source"] == family)
+    image = project_cabling_workbook_image(source, cabling)
+    image = project_switch_workbook_image(image, switch)
+    image = project_whitelist_skip_history_image(
+        image, skips, recorded_at_utc=qualified.recorded_at_utc,
+        manifest_id=manifest_id,
+    )
+    try:
+        with zipfile.ZipFile(BytesIO(source)) as before, \
+             zipfile.ZipFile(BytesIO(image)) as after:
+            paths = _sheet_paths(before, set(before.namelist()))
+            for other in {name for name, _ in _MANUAL_PANEL_SHEETS.values()} - {target}:
+                if before.read(paths[other]) != after.read(paths[other]):
+                    raise LocalCommitHold("manual panel projection changed another sheet")
+    except (OSError, KeyError, zipfile.BadZipFile) as exc:
+        raise LocalCommitHold("manual panel preservation cannot be proved") from exc
+    return image
 
 
 @dataclass(frozen=True)
@@ -200,6 +277,7 @@ def commit_prod_stage_l_workbook(
     token, qualified, store, *, http_root, settings, whitelist_snapshot,
     whitelist_path, template_path, metadata, expected_template_sha256,
     apply_operator_edit=False, auto_admission=None, manual_admission=None,
+    selected_panel=None,
 ) -> CommittedProdWorkbook | ProdWorkbookNoop:
     """Requalify protected C-5 and commit its XLSX locally under one writer.
 
@@ -208,6 +286,11 @@ def commit_prod_stage_l_workbook(
     """
     if type(apply_operator_edit) is not bool:
         raise LocalCommitHold("operator edit request must be an explicit boolean")
+    if selected_panel is not None and (
+            type(selected_panel) is not str
+            or selected_panel not in _MANUAL_PANEL_SHEETS
+            or manual_admission is None or auto_admission is not None):
+        raise LocalCommitHold("selected panel requires manual-only admission")
     # The qualification type is imported only on this path so fake-only users
     # remain available while the protected-source integration is assembled.
     from monitor.issue_tracker_stage_l_consumer import ProdStageLQualifiedSet
@@ -229,7 +312,7 @@ def commit_prod_stage_l_workbook(
         qualified, store, http_root=http_root, settings=settings,
         whitelist_snapshot=snapshot, whitelist_path=whitelist_path,
         metadata=metadata, expected_template_sha256=expected_template_sha256,
-        writer_token=token,
+        writer_token=token, selected_panel=selected_panel,
     )
     prior_source = _latest_receipted_prod_xlsx(token, expected_template_sha256)
     operator_witness = None
@@ -239,42 +322,24 @@ def commit_prod_stage_l_workbook(
         source = (prior_source if prior_source is not None else
                   _read_bound_source(template_path, snapshot))
     source_sha = hashlib.sha256(source).hexdigest()
-    cabling = []
-    switch = []
-    for candidate in qualified.candidates:
-        if candidate.panel in {"Eth Link Validation", "IB Link Validation"}:
-            sheet = ("ETH Cabling" if candidate.panel == "Eth Link Validation"
-                     else "IB Cabling")
-            actual = (() if sheet == "IB Cabling"
-                      and candidate.source_status == "Link Down"
-                      else candidate.actual_endpoints)
-            cabling.append(CablingSourceRow(
-                sheet=sheet, activity_key=candidate.activity_key,
-                expected_endpoints=candidate.expected_endpoints,
-                actual_endpoints=actual,
-                source_status=candidate.source_status,
-                evidence_description=candidate.evidence_description,
-                recorded_at_utc=candidate.recorded_at_utc,
-            ))
-        elif candidate.panel == "Switch Status":
-            switch.append(SwitchSourceWorkbookRow(
-                activity_key=candidate.activity_key,
-                evidence_description=candidate.evidence_description,
-                fabric=candidate.fabric, fabric_source=candidate.fabric_source,
-                priority="P2", recorded_at_utc=candidate.recorded_at_utc,
-            ))
-        else:
-            raise LocalCommitHold("qualified C-6 candidate panel is unknown")
-    image = project_cabling_workbook_image(source, tuple(cabling))
-    image = project_switch_workbook_image(image, tuple(switch))
-    image = project_whitelist_skip_history_image(
-        image, qualified.whitelist_skips,
-        recorded_at_utc=qualified.recorded_at_utc,
-        manifest_id=manifest_id,
-    )
+    cabling, switch = _source_rows(qualified, selected_panel=selected_panel)
+    if selected_panel is None:
+        image = project_cabling_workbook_image(source, cabling)
+        image = project_switch_workbook_image(image, switch)
+        image = project_whitelist_skip_history_image(
+            image, qualified.whitelist_skips,
+            recorded_at_utc=qualified.recorded_at_utc,
+            manifest_id=manifest_id,
+        )
+    else:
+        image = project_manual_panel_image(
+            source, qualified, selected_panel, manifest_id,
+        )
     prepared = PreparedProdWorkbook(
         image, hashlib.sha256(image).hexdigest(), source_sha, manifest_id,
-        3, len({candidate.panel for candidate in qualified.candidates}),
+        3 if selected_panel is None else 1,
+        len({candidate.panel for candidate in qualified.candidates
+             if selected_panel is None or candidate.panel == selected_panel}),
         sum(item.fabric_source == "hostname-fallback" for item in switch),
         source_sha if apply_operator_edit else None,
     )
@@ -294,7 +359,7 @@ def commit_prod_stage_l_workbook(
         qualified, store, http_root=http_root, settings=settings,
         whitelist_snapshot=snapshot, whitelist_path=whitelist_path,
         metadata=metadata, expected_template_sha256=expected_template_sha256,
-        writer_token=token,
+        writer_token=token, selected_panel=selected_panel,
     )
     if (replay, replay_id) != (manifest, manifest_id):
         raise LocalCommitHold("C-6 source changed before generation")

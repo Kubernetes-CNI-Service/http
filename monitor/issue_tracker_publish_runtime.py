@@ -252,6 +252,7 @@ def commit_qualified_prod_local(
     store, *, http_root, project, publication, template_path,
     refuse_prior_without_admission=False, auto_admission=None,
     manual_admission=None, expected_manual_preview=None,
+    selected_panel=None,
 ):
     """Requalify protected prod sources under one writer and commit C6 only."""
     from monitor.issue_tracker_local_commit import LocalCommitHold
@@ -281,6 +282,11 @@ def commit_qualified_prod_local(
         if expected_manual_preview is not None and (
                 manual_admission is None or type(expected_manual_preview) is not dict):
             raise StageLHold("manual preview requires a manual admission witness")
+        if (expected_manual_preview is None) != (selected_panel is None):
+            raise StageLHold("manual preview and one selected panel must be bound together")
+        if selected_panel is not None and (
+                type(selected_panel) is not str or selected_panel not in _PANELS):
+            raise StageLHold("manual selected panel is invalid")
         with tracker_writer(project, publication) as token:
             settings = current_k(token)
             snapshot = read_whitelist_workbook(template)
@@ -369,6 +375,7 @@ def commit_qualified_prod_local(
                 expected_template_sha256=snapshot.workbook_sha256,
                 auto_admission=auto_admission,
                 manual_admission=manual_admission,
+                selected_panel=selected_panel,
             )
             return result
     except (OSError, TypeError, AttributeError, RuntimeError, ValueError,

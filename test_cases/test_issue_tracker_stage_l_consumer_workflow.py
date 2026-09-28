@@ -85,13 +85,18 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             skip_history=False, terminal_orphan_probe=True,
         )
 
+    def test_manual_switch_only_c5_to_c6_receipt_preserves_other_sheet_bytes(self):
+        self._exercise_real_protected_three_panel_fixture(
+            skip_history=False, selected_manual_panel="Switch Status",
+        )
+
     def _exercise_real_protected_three_panel_fixture(
         self, *, skip_history, automatic_first=False, replayed_auto=False,
         invalid_auto_clock=False, automatic_not_due=False,
         automatic_second_due=False, manual_second_probe=False,
         manual_second_admit=False,
         require_first_manual_admission=False, manual_after_manual=False,
-        terminal_orphan_probe=False,
+        terminal_orphan_probe=False, selected_manual_panel=None,
     ):
         from monitor.collection_ib_producer import (
             IbProducerAuthoritySnapshot, parse_ib_producer_authority,
@@ -307,6 +312,52 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             generation_root = project / ".tracker/generations"
             before_generations = tuple(sorted(generation_root.iterdir()))
             original_template = self.template.read_bytes()
+            if selected_manual_panel is not None:
+                selected_body, selected_id = freeze_prod_stage_l_manifest(
+                    qualified, self.store, metadata=metadata,
+                    expected_template_sha256=self.snapshot.workbook_sha256,
+                    selected_panel=selected_manual_panel, **args,
+                )
+                scoped = json.loads(selected_body)
+                self.assertEqual("Switch Status",
+                                 scoped["qualified_source"]["selected_panel"])
+                self.assertEqual({"Switch Status"},
+                                 {item.panel for item in qualified.candidates
+                                  if item.operation_id in {operation["operation_id"]
+                                      for operation in scoped["operations"]}})
+                (project / "01-global.yaml").write_text(
+                    "schema_version: 2\ncommon:\n  mgmt:\n"
+                    "    issue-tracker:\n      status: disabled\n",
+                    encoding="utf-8",
+                )
+                interval, policy_sha = local_publish_interval(project)
+                witness = (policy_sha, interval, "fixture-boot", time.monotonic_ns())
+                with tracker_writer(project, self.publication) as token:
+                    committed = commit_prod_stage_l_workbook(
+                        token, qualified, self.store,
+                        template_path=self.template, metadata=metadata,
+                        expected_template_sha256=self.snapshot.workbook_sha256,
+                        manual_admission=witness,
+                        selected_panel=selected_manual_panel, **args,
+                    )
+                self.assertIsInstance(committed, CommittedProdWorkbook)
+                self.assertEqual(selected_id, committed.receipt.manifest_id)
+                generation = (project / ".tracker/generations" /
+                              committed.generation.generation_id)
+                self.assertEqual(selected_body, (generation / "MANIFEST").read_bytes())
+                self.assertTrue((generation / "RECEIPT").is_file())
+                self.assertEqual(1 + len(before_generations),
+                                 len(tuple(generation_root.iterdir())))
+                with zipfile.ZipFile(BytesIO(original_template)) as before, \
+                     zipfile.ZipFile(BytesIO(committed.prepared.xlsx_bytes)) as after:
+                    for other in ("sheet3.xml", "sheet4.xml"):
+                        path = "xl/worksheets/" + other
+                        self.assertEqual(before.read(path), after.read(path), other)
+                    self.assertNotEqual(before.read("xl/worksheets/sheet2.xml"),
+                                        after.read("xl/worksheets/sheet2.xml"))
+                    self.assertNotEqual(before.read("xl/worksheets/sheet6.xml"),
+                                        after.read("xl/worksheets/sheet6.xml"))
+                return
             if automatic_first:
                 root_template = self.root / "monitor/Issue_Tracker_Template_v1.xlsx"
                 root_template.parent.mkdir(parents=True, exist_ok=True)
