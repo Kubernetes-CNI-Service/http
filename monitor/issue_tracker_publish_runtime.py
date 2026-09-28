@@ -15,7 +15,9 @@ from monitor.issue_tracker_cycle_source import (
     CycleSourceHoldError, read_completed_cycle_evidence,
 )
 from monitor.issue_tracker_k_chain import KChainHoldError, assess_k_window
-from monitor.issue_tracker_manifest import _runtime_skip
+from monitor.issue_tracker_manifest import (
+    _runtime_skip, selected_panel_decision_sha256,
+)
 from monitor.issue_tracker_state_owner import (
     TrackerStateHold, current_k, tracker_writer,
 )
@@ -233,6 +235,10 @@ def inspect_stage_l(store, *, http_root, project, publication, template_path):
                         "template_sha256": qualified.template_sha256,
                         "source_authority_sha256": qualified.source_authority_sha256,
                         "observations_sha256": qualified.observations_sha256,
+                        "selected_decision_sha256": {
+                            panel: selected_panel_decision_sha256(qualified, panel)
+                            for panel in _PANELS
+                        },
                     })
                     return status
         else:
@@ -359,6 +365,8 @@ def commit_qualified_prod_local(
                     "template_sha256": qualified.template_sha256,
                     "source_authority_sha256": qualified.source_authority_sha256,
                     "observations_sha256": qualified.observations_sha256,
+                    "selected_decision_sha256": selected_panel_decision_sha256(
+                        qualified, selected_panel),
                 }
                 if expected_manual_preview != actual_preview:
                     raise StageLHold("manual preview source changed before C6")

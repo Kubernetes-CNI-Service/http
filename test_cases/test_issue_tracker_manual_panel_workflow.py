@@ -8,7 +8,9 @@ import unittest
 from unittest import mock
 import zipfile
 
-from monitor.issue_tracker_manifest import freeze_prod_stage_l_manifest
+from monitor.issue_tracker_manifest import (
+    freeze_prod_stage_l_manifest, selected_panel_decision_sha256,
+)
 from monitor.issue_tracker_stage_l_consumer import (
     ProdStageLQualifiedSet, StageLQualifiedSkip, StageLSourceCandidate,
 )
@@ -138,6 +140,26 @@ class ManualPanelWorkflowTests(unittest.TestCase):
         for panel in ("all", "switch status", 1):
             with self.subTest(panel=panel), self.assertRaises(ValueError):
                 self._freeze(panel)
+
+    def test_selected_decision_digest_binds_rows_and_w1_of_one_panel(self):
+        baseline = selected_panel_decision_sha256(self.qualified, "Switch Status")
+        other = selected_panel_decision_sha256(self.qualified, "IB Link Validation")
+        candidate = replace(self.qualified.candidates[0],
+                            evidence_description="new sensor evidence")
+        changed = replace(self.qualified, candidates=(candidate,) +
+                          self.qualified.candidates[1:])
+        self.assertNotEqual(baseline,
+                            selected_panel_decision_sha256(changed, "Switch Status"))
+        self.assertEqual(other,
+                         selected_panel_decision_sha256(changed, "IB Link Validation"))
+        skipped = replace(self.qualified.whitelist_skips[0],
+                          matched_rule="new W1 decision")
+        changed = replace(self.qualified, whitelist_skips=(skipped,) +
+                          self.qualified.whitelist_skips[1:])
+        self.assertNotEqual(baseline,
+                            selected_panel_decision_sha256(changed, "Switch Status"))
+        with self.assertRaises(ValueError):
+            selected_panel_decision_sha256(self.qualified, "all")
 
     def test_single_panel_projection_changes_only_target_and_history_members(self):
         from monitor.issue_tracker_local_workbook_commit import project_manual_panel_image

@@ -46,6 +46,7 @@ class ManualPreviewWorkflowTests(RuntimeWorkerFixture, unittest.TestCase):
             "template_sha256": self.whitelist_snapshot.workbook_sha256,
             "source_authority_sha256": "e" * 64,
             "observations_sha256": "d" * 64,
+            "selected_decision_sha256": "f" * 64,
         }
         with (mock.patch.object(self.store, "scope", "prod"),
               mock.patch("monitor.issue_tracker_stage_l_consumer.qualify_prod_stage_l",
@@ -63,10 +64,29 @@ class ManualPreviewWorkflowTests(RuntimeWorkerFixture, unittest.TestCase):
         commit.assert_not_called()
         self.assertEqual((), tuple(self.publication.iterdir()))
         expected["source_authority_sha256"] = "c" * 64
+        with (mock.patch.object(self.store, "scope", "prod"),
+              mock.patch("monitor.issue_tracker_stage_l_consumer.qualify_prod_stage_l",
+                         return_value=qualified),
+              mock.patch("monitor.issue_tracker_publish_runtime.selected_panel_decision_sha256",
+                         return_value="9" * 64),
+              mock.patch("monitor.issue_tracker_local_workbook_commit.commit_prod_stage_l_workbook")
+              as commit):
+            with self.assertRaises(StageLHold):
+                commit_qualified_prod_local(
+                    self.store, http_root=self.root, project=self.project,
+                    publication=self.publication, template_path=template,
+                    expected_manual_preview=expected,
+                    manual_admission=("f" * 64, 1, "fixture-boot", 1000),
+                    selected_panel="Switch Status",
+                )
+        commit.assert_not_called()
+        self.assertEqual((), tuple(self.publication.iterdir()))
         marker = object()
         with (mock.patch.object(self.store, "scope", "prod"),
               mock.patch("monitor.issue_tracker_stage_l_consumer.qualify_prod_stage_l",
                          return_value=qualified),
+              mock.patch("monitor.issue_tracker_publish_runtime.selected_panel_decision_sha256",
+                         return_value="f" * 64),
               mock.patch("monitor.issue_tracker_local_workbook_commit.commit_prod_stage_l_workbook",
                          return_value=marker) as commit):
             result = commit_qualified_prod_local(

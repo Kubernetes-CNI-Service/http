@@ -58,6 +58,12 @@ def _bound_status(status, panel):
     for count in ("qualified_operation_count", "whitelist_skip_count"):
         if type(status.get(count)) is not int or status[count] < 0:
             raise ManualPreviewHold("Stage L preview counts are incomplete")
+    decisions = status.get("selected_decision_sha256")
+    selected_digest = decisions.get(panel) if type(decisions) is dict else None
+    if (type(selected_digest) is not str or len(selected_digest) != 64
+            or any(char not in "0123456789abcdef" for char in selected_digest)):
+        raise ManualPreviewHold("selected C5 decision identity is incomplete")
+    bound["selected_decision_sha256"] = selected_digest
     return bound
 
 
@@ -99,6 +105,7 @@ class ManualPreviewBroker:
             "token": token, "expires_in_seconds": _TTL_SECONDS,
             "panel": panel, "target_sheet": _SHEETS[panel],
             "source_authority_sha256": fingerprint["source_authority_sha256"],
+            "selected_decision_sha256": fingerprint["selected_decision_sha256"],
             "observations_sha256": fingerprint["observations_sha256"],
             "latest_cycle_id": fingerprint["latest_cycle_id"],
             "qualified_operation_count": status["qualified_operation_count"],

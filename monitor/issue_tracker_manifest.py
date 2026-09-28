@@ -5,6 +5,7 @@ path grants a network send, durable local journal, or publication receipt.
 """
 
 from datetime import datetime
+from dataclasses import asdict
 import hashlib
 import json
 import re
@@ -27,6 +28,51 @@ _RUNTIME_PANELS = {
     "eth_cabling": "Eth Link Validation",
     "ib_cabling": "IB Link Validation",
 }
+
+
+def selected_panel_decision_sha256(qualified, selected_panel):
+    """Fingerprint the selected C5 decisions, never a publication permit.
+
+    The full protected-source fingerprints are separately bound by the manual
+    preview. This digest makes a changed selected row or W1 exclusion visible
+    even when a source provider incorrectly reuses its aggregate fingerprint.
+    """
+    from monitor.issue_tracker_stage_l_consumer import ProdStageLQualifiedSet
+
+    if (type(qualified) is not ProdStageLQualifiedSet
+            or qualified.qualified is not True
+            or qualified.mode != "prod-runtime-protected-v1"
+            or type(selected_panel) is not str
+            or selected_panel not in _RUNTIME_PANELS.values()):
+        raise ValueError("selected C5 decision authority is invalid")
+    operations = _validated_operations(
+        _canonical_array(qualified.operations_json, "runtime operations"),
+        "runtime operations", validator=_runtime_operation,
+    )
+    if (len(operations) != len(qualified.candidates)
+            or [item["operation_id"] for item in operations]
+            != [item.operation_id for item in qualified.candidates]):
+        raise ValueError("selected C5 operation identities differ")
+    selected = []
+    for operation, candidate in zip(operations, qualified.candidates):
+        if (candidate.panel != _RUNTIME_PANELS.get(candidate.activity_key[0])
+                or operation != {
+                    "operation_id": candidate.operation_id,
+                    "activity_key": list(candidate.activity_key),
+                    "action": "upsert",
+                }):
+            raise ValueError("selected C5 operation differs from source")
+        if candidate.panel == selected_panel:
+            selected.append({"operation": operation, "candidate": asdict(candidate)})
+    skips = [_runtime_skip(item) for item in qualified.whitelist_skips]
+    selected_skips = [item for item in skips
+                      if _RUNTIME_PANELS[item["source"]] == selected_panel]
+    body = _canonical_json({
+        "panel": selected_panel,
+        "operations": selected,
+        "whitelist_skips": selected_skips,
+    })
+    return hashlib.sha256(body).hexdigest()
 
 
 def _unique_pairs(pairs):

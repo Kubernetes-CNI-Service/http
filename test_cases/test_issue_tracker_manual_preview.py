@@ -16,6 +16,11 @@ def qualified_status():
         "source_authority_sha256": "c" * 64,
         "observations_sha256": "d" * 64,
         "qualified_operation_count": 2, "whitelist_skip_count": 1,
+        "selected_decision_sha256": {
+            "Switch Status": "e" * 64,
+            "Eth Link Validation": "f" * 64,
+            "IB Link Validation": "1" * 64,
+        },
         "panels": {name: {"state": "qualified"} for name in (
             "Switch Status", "Eth Link Validation", "IB Link Validation")},
     }
@@ -44,6 +49,8 @@ class ManualPreviewDirectTests(unittest.TestCase):
         self.assertEqual("Switch Status", self.commit.call_args.args[0])
         self.assertEqual("c" * 64,
                          self.commit.call_args.args[1]["source_authority_sha256"])
+        self.assertEqual("e" * 64,
+                         self.commit.call_args.args[1]["selected_decision_sha256"])
         with self.assertRaises(ManualPreviewHold):
             self.broker.confirm("nvis", "Switch Status", preview["token"],
                                 confirmation="publish_local")
@@ -85,6 +92,19 @@ class ManualPreviewDirectTests(unittest.TestCase):
             self.broker.preview("anonymous", "Switch Status")
         with self.assertRaises(ManualPreviewHold):
             self.broker.preview(["nvis"], "Switch Status")
+
+    def test_selected_decision_missing_or_changed_holds_without_commit(self):
+        selected = self.status.pop("selected_decision_sha256")
+        with self.assertRaises(ManualPreviewHold):
+            self.broker.preview("nvis", "Switch Status")
+        self.status["selected_decision_sha256"] = selected
+        preview = self.broker.preview("nvis", "Switch Status")
+        self.assertEqual("e" * 64, preview["selected_decision_sha256"])
+        selected["Switch Status"] = "2" * 64
+        with self.assertRaises(ManualPreviewHold):
+            self.broker.confirm("nvis", "Switch Status", preview["token"],
+                                confirmation="publish_local")
+        self.commit.assert_not_called()
 
 
 if __name__ == "__main__":
