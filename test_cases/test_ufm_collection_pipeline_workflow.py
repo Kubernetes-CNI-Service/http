@@ -61,6 +61,49 @@ def _write_cvt(path: Path) -> None:
 
 
 class UfmCollectionPipelineWorkflowTests(unittest.TestCase):
+    def test_real_analyzer_reader_rejects_node_rebound_after_path_provenance_parse(self):
+        plan = COLLECTION.collection_plan("iblinkinfo", RUN_ID)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            vendor_output = root / "iblinkinfo.txt"
+            vendor_output.write_text(
+                "Switch: 0x1 MF0;leaf01:MQM9700/U1:\n"
+                ' 10 1[  ] ==( 4X 200 Gbps Active / LinkUp )==> '
+                '20 1[  ] "server01 mlx5_0"\n', encoding="utf-8",
+            )
+            ufm_dir = root / "ufm-private"
+            ufm_dir.mkdir()
+            archive = COLLECTION.publish_local_archive(plan, vendor_output, ufm_dir)
+            cvt = root / "cvt.xlsx"
+            _write_cvt(cvt)
+            project = root / "project"
+            project.mkdir()
+            final = PIPELINE.run_local_iblinkinfo(
+                plan, "EXAMPLE-UFM01", archive, cvt, project,
+            )
+            self.assertEqual(1, len(PIPELINE.validated_receipts(project, "air")))
+            report = final / f"iblinkinfo_{RUN_ID}-topology-validation.xlsx"
+            sidecar = PROVENANCE.sidecar_path(report)
+            real_reader = PIPELINE.read_report_provenance
+            rebound: list[bool] = []
+
+            def rebind_after_parse(path: Path) -> dict:
+                record = real_reader(path)
+                report_bytes, sidecar_bytes = report.read_bytes(), sidecar.read_bytes()
+                final.rename(final.with_name("moved-node"))
+                final.mkdir()
+                report.write_bytes(report_bytes)
+                sidecar.write_bytes(sidecar_bytes)
+                rebound.append(True)
+                return record
+
+            with mock.patch.object(PIPELINE, "read_report_provenance",
+                                   side_effect=rebind_after_parse):
+                self.assertEqual([], PIPELINE.validated_receipts(project, "air"))
+            self.assertEqual([True], rebound)
+            self.assertFalse((final / "receipt.json").exists())
+            self.assertFalse((final / plan.archive_name).exists())
+
     def test_real_analyzer_receipt_rejects_sidecar_replaced_before_provenance_parse(self):
         plan = COLLECTION.collection_plan("iblinkinfo", RUN_ID)
         with tempfile.TemporaryDirectory() as directory:

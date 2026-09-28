@@ -781,6 +781,10 @@ def validated_receipts(project_root: Path, environment: str) -> list[dict[str, s
                                     if _digest_regular_at(node_fd, provenance_name,
                                                           max_bytes=16 * 1024) != provenance_sha:
                                         continue
+                                    if (not _same_root_inode(project_root, root_fd)
+                                            or not _result_chain_still_bound(
+                                                root_fd, plan, node, run_fd, node_fd)):
+                                        continue
                                     if data == {
                                         "schema": "ufm-collection-v1", "status": "success",
                                         "kind": plan.kind, "run_id": run_name, "node": node,

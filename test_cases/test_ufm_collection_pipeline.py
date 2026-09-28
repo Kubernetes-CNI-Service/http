@@ -22,6 +22,46 @@ RUN_ID = "20260926-0315-air-0123456789abcdef"
 
 
 class UfmCollectionPipelineTests(unittest.TestCase):
+    def test_receipt_reader_rejects_node_rebind_after_path_provenance_parse(self):
+        plan = PIPELINE.collection_plan("iblinkinfo", RUN_ID)
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve()
+            node = project / "99-output-ufm" / "runs" / RUN_ID / "EXAMPLE-UFM01"
+            node.mkdir(parents=True)
+            report_name = PIPELINE._report_name(plan)
+            report = node / report_name
+            report.write_bytes(b"synthetic report")
+            (node / plan.archive_name).write_bytes(b"synthetic archive")
+            sidecar = PIPELINE.sidecar_path(report)
+            sidecar.write_bytes(b'{"report":"synthetic"}\n')
+            report_sha = hashlib.sha256(report.read_bytes()).hexdigest()
+            receipt = {
+                "schema": "ufm-collection-v1", "status": "success",
+                "kind": plan.kind, "run_id": RUN_ID, "node": "EXAMPLE-UFM01",
+                "archive": plan.archive_name,
+                "archive_sha256": hashlib.sha256(b"synthetic archive").hexdigest(),
+                "report": report_name, "report_sha256": report_sha,
+                "report_provenance_sha256": hashlib.sha256(sidecar.read_bytes()).hexdigest(),
+            }
+            (node / "receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
+            rebound: list[bool] = []
+
+            def rebind_after_parse(_report: Path) -> dict:
+                report_bytes, sidecar_bytes = report.read_bytes(), sidecar.read_bytes()
+                node.rename(node.with_name("moved-node"))
+                node.mkdir()
+                report.write_bytes(report_bytes)
+                sidecar.write_bytes(sidecar_bytes)
+                rebound.append(True)
+                return {"report": {"sha256": report_sha}}
+
+            with mock.patch.object(PIPELINE, "read_report_provenance",
+                                   side_effect=rebind_after_parse):
+                self.assertEqual([], PIPELINE.validated_receipts(project, "air"))
+            self.assertEqual([True], rebound)
+            self.assertFalse((node / "receipt.json").exists())
+            self.assertFalse((node / plan.archive_name).exists())
+
     def test_receipt_reader_rejects_sidecar_replaced_between_hash_and_provenance_parse(self):
         plan = PIPELINE.collection_plan("iblinkinfo", RUN_ID)
         with tempfile.TemporaryDirectory() as directory:
