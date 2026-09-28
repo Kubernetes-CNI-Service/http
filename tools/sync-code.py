@@ -1480,7 +1480,7 @@ def main(argv: list[str] | None = None) -> int:
                 "不会覆盖 service IP、公钥列表、版本或升级策略"
             )
         if not args.dry_run:
-            run_predeploy_test_gate(**({"validation_only": True} if args.validation_only else {}))
+            run_predeploy_test_gate(**({"validation_only": True} if getattr(args, "validation_only", False) else {}))
         # Freeze the exact post-gate source authority.  In formal mode these
         # bytes are generated only after a current full-suite attestation check,
         # so an older helper
@@ -1500,7 +1500,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         args.password_contract = load_frozen_password_contract(manifest_path)
         if not args.dry_run:
-            verify_predeploy_test_approval(**({"validation_only": True} if args.validation_only else {}))
+            verify_predeploy_test_approval(**({"validation_only": True} if getattr(args, "validation_only", False) else {}))
         # Publish the authority receipt last.  A partial rsync therefore
         # cannot authorize a mixed old/new source tree at image build time.
         jobs.append(deployment_source_manifest_job(
