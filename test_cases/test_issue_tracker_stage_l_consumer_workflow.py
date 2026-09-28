@@ -347,6 +347,17 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                               committed.generation.generation_id)
                 self.assertEqual(selected_body, (generation / "MANIFEST").read_bytes())
                 self.assertTrue((generation / "RECEIPT").is_file())
+                persisted_manifest = json.loads((generation / "MANIFEST").read_bytes())
+                self.assertEqual(selected_manual_panel,
+                                 persisted_manifest["qualified_source"]["selected_panel"])
+                evaluations = persisted_manifest["qualified_source"]["panel_evaluation"]
+                self.assertEqual({"state": "evaluated", "whitelist_skips": "no-skips"},
+                                 evaluations["Switch Status"])
+                for other in ("Eth Link Validation", "IB Link Validation"):
+                    self.assertEqual({"state": "not-evaluated-in-this-manifest"},
+                                     evaluations[other])
+                persisted_receipt = json.loads((generation / "RECEIPT").read_bytes())
+                self.assertEqual(selected_id, persisted_receipt["manifest_id"])
                 self.assertEqual(1 + len(before_generations),
                                  len(tuple(generation_root.iterdir())))
                 with zipfile.ZipFile(BytesIO(original_template)) as before, \
