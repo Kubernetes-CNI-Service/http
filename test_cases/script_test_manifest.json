@@ -16,6 +16,7 @@
         "test_cases.test_all_script_entrypoints",
         "test_cases.test_change_aware_test_runner",
         "test_cases.test_documentation_catalog",
+        "test_cases.test_req9_manual_preservation_workflow",
         "test_cases.test_private_documentation_contract",
         "test_cases.test_public_clean_clone_contract",
         "test_cases.test_public_clean_clone_workflow",
@@ -2470,6 +2471,7 @@
     {
       "id": "user_manual_publication",
       "members": [
+        "DAY0-Prepare/11-load.py",
         "tools/update-user-manual.py",
         "tools/_package_common.py",
         "tools/sync-code.py",
@@ -2478,6 +2480,7 @@
       ],
       "tests": [
         "test_cases.test_documentation_catalog",
+        "test_cases.test_req9_manual_preservation_workflow",
         "test_cases.test_project_contracts",
         "test_cases.test_upload_package_contract",
         "test_cases.test_deployment_writer_lock"
@@ -2648,6 +2651,7 @@
       ],
       "tests": [
         "test_cases.test_documentation_catalog",
+        "test_cases.test_req9_manual_preservation_workflow",
         "test_cases.test_project_contracts",
         "test_cases.test_upload_package_contract",
         "test_cases.test_deployment_writer_lock",
