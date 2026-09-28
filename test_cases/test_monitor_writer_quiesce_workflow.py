@@ -1540,19 +1540,9 @@ def _has_governed_literal(expression: ast.AST) -> bool:
     }
     for node in ast.walk(expression):
         value = _literal_string(node)
-        # An inner authority-looking fragment is not the destination when
-        # outer string syntax adds a suffix (or any other transformation).
-        ancestor = parents.get(node)
-        while ancestor is not None:
-            if (
-                isinstance(ancestor, ast.BinOp)
-                and isinstance(ancestor.op, ast.Add)
-            ) or isinstance(ancestor, (ast.JoinedStr, ast.FormattedValue)):
-                break
-            ancestor = parents.get(ancestor)
-        if ancestor is not None:
+        if value is None:
             continue
-        if value is not None and (
+        if not (
             value in accepted_relatives
             or (
                 value.startswith("/")
@@ -1562,7 +1552,54 @@ def _has_governed_literal(expression: ast.AST) -> bool:
                 )
             )
         ):
-            return True
+            continue
+        # A candidate must survive every outer path/string operation. A
+        # dynamic prefix is conservative (it may be a directory), but a known
+        # suffix or a later path component changes the final target.
+        current = node
+        ancestor = parents.get(current)
+        while ancestor is not None:
+            if isinstance(ancestor, (ast.BinOp, ast.JoinedStr)) and (
+                _literal_string(ancestor) is not None
+            ):
+                break  # Let the complete literal expression decide instead.
+            if isinstance(ancestor, ast.BinOp):
+                if isinstance(ancestor.op, ast.Add) and current is ancestor.left:
+                    if _literal_string(ancestor.right) != "":
+                        break
+                elif isinstance(ancestor.op, ast.Div) and current is ancestor.left:
+                    break
+            elif isinstance(ancestor, ast.JoinedStr):
+                position = ancestor.values.index(current)
+                if any(
+                    _literal_string(part) != ""
+                    for part in ancestor.values[position + 1:]
+                ):
+                    break
+            elif isinstance(ancestor, ast.FormattedValue):
+                if ancestor.conversion != -1 or ancestor.format_spec is not None:
+                    break
+            elif (
+                isinstance(ancestor, ast.Call)
+                and isinstance(ancestor.func, ast.Attribute)
+                and current is ancestor.func
+            ):
+                method = ancestor.func.attr
+                if method == "with_suffix":
+                    suffix = _literal_string(_argument(ancestor, 0, "suffix"))
+                    if suffix is not None and suffix != Path(value).suffix:
+                        break
+                elif method == "joinpath" and len(ancestor.args) == 1 \
+                        and not ancestor.keywords:
+                    child = _literal_string(ancestor.args[0])
+                    if child not in {None, "", ".", ".."} \
+                            and "/" not in child and "\\" not in child:
+                        break
+            current = ancestor
+            ancestor = parents.get(current)
+        if ancestor is not None:
+            continue
+        return True
     return False
 
 
@@ -4252,6 +4289,18 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             "import os\n"
             "def publish():\n"
             "    os.replace('staged', ('01-' + 'global') + '.yaml')\n",
+            "import os\n"
+            "def publish(root):\n"
+            "    os.replace('staged', root + '01-global.yaml')\n",
+            "import os\n"
+            "def publish(root):\n"
+            "    os.replace('staged', f'{root}01-global.yaml')\n",
+            "import os\nfrom pathlib import Path\n"
+            "def publish():\n"
+            "    os.replace('staged', Path('/srv/http/01-global.yaml').with_suffix('.yaml'))\n",
+            "import os\nfrom pathlib import Path\n"
+            "def publish():\n"
+            "    os.replace('staged', Path('/srv/http').joinpath('01-global.yaml'))\n",
         )
         for source in positive:
             with self.subTest(source=source):
@@ -4274,12 +4323,16 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             "('01-' + 'global.yaml') + '.tmp'",
             "Path('/srv/http') / (('01-' + 'global.yaml') + '.tmp')",
             "f\"{'01-global.yaml'}.tmp\"",
+            "Path('/srv/http') / ('01-' + 'global.yaml') / 'child'",
+            "root + '01-global.yaml' + '.tmp'",
+            "Path('/srv/http/01-global.yaml').with_suffix('.tmp')",
+            "Path('/srv/http/01-global.yaml').joinpath('child')",
         )
         for target in complete_target_negatives:
             with self.subTest(complete_target=target):
                 source = (
                     "import os\nfrom pathlib import Path\n"
-                    "def publish():\n"
+                    "def publish(root):\n"
                     f"    os.replace('staged', {target})\n"
                 )
                 self.assertEqual(
