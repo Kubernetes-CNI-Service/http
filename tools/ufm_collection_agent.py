@@ -49,7 +49,13 @@ _SAFE_HOSTNAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,252}\Z")
 
 def _invoke(argv: list[str]) -> InvocationResult:
     try:
-        result = subprocess.run(argv, capture_output=True, check=False, timeout=600)
+        # The vendor subprocess is bounded below the remote SSH limit. Other
+        # agent steps are not a guaranteed 120-second archive-handoff reserve.
+        diagnostic = argv[:4] == [
+            "docker", "exec", "ufm", "/opt/ufm/opensm/bin/ibdiagnet"]
+        result = subprocess.run(
+            argv, capture_output=True, check=False,
+            timeout=480 if diagnostic else 600)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise AgentError(f"UFM vendor command failed ({type(exc).__name__})") from None
     return InvocationResult(result.returncode, result.stdout, result.stderr)

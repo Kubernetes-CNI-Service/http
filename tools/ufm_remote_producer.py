@@ -40,6 +40,12 @@ _PART = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._-]*\Z")
 _REMOTE_KINDS = frozenset(("iblinkinfo", "ibdiagnet"))
 
 
+def _bounded_timeout(plan: CollectionPlan, timeout: object) -> bool:
+    """Per-command SSH bound; not a whole-agent archive handoff reserve."""
+    return (type(timeout) is int and
+            (timeout == 600 if plan.kind == "ibdiagnet" else 1 <= timeout <= 300))
+
+
 @dataclass(frozen=True)
 class RemoteAgentInstall:
     """Explicit server-owned install intent; never inferred from remote data."""
@@ -81,6 +87,9 @@ class VerifiedRetrievedObservation:
     identity_before_sha256: str
     identity_after_sha256: str
     state: str = "verified-retrieved"
+    project_path: Path | None = None
+    project_device: int | None = None
+    project_inode: int | None = None
 
 
 def _path(value: object) -> bool:
@@ -191,6 +200,27 @@ def _local_bound_digest(path: Path) -> str:
         os.close(fd)
 
 
+def _project_root_identity(project: Path) -> tuple[int, int]:
+    """Hold the exact project directory without following any ancestor link."""
+    directory_flag = getattr(os, "O_DIRECTORY", None)
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if (not isinstance(project, Path) or not project.is_absolute()
+            or ".." in project.parts or type(directory_flag) is not int
+            or not directory_flag or type(nofollow) is not int or not nofollow):
+        raise RemoteProducerError("retrieved UFM project identity is unavailable")
+    try:
+        fd = _open_collection_parent_no_follow(project, directory_flag, nofollow)
+        try:
+            root = os.fstat(fd)
+            if not stat.S_ISDIR(root.st_mode):
+                raise RemoteProducerError("retrieved UFM project is not a directory")
+            return root.st_dev, root.st_ino
+        finally:
+            os.close(fd)
+    except OSError:
+        raise RemoteProducerError("retrieved UFM project identity is unavailable") from None
+
+
 def _remote(jump: JumpEndpoint, far: BoundFarEndpoint, argv: list[str], *,
             runner: Callable[[list[str]], CommandResult], timeout: int) -> CommandResult:
     try:
@@ -266,7 +296,7 @@ def observe_remote_producer(
             or type(far) is not BoundFarEndpoint or far.jump != jump
             or type(known_hosts_pin) is not str
             or _DIGEST.fullmatch(known_hosts_pin) is None
-            or type(timeout) is not int or not 1 <= timeout <= 300
+            or not _bounded_timeout(plan, timeout)
             or not callable(clock) or not callable(runner)):
         raise RemoteProducerError("remote UFM producer scope is incomplete")
 
@@ -343,9 +373,9 @@ def observe_and_retrieve_remote_producer(
         raise RemoteProducerError("noncanonical UFM collection plan") from None
     _install(install)
     if (plan.kind not in _REMOTE_KINDS or not callable(clock)
-            or not callable(runner) or type(timeout) is not int
-            or not 1 <= timeout <= 300):
+            or not callable(runner) or not _bounded_timeout(plan, timeout)):
         raise RemoteProducerError("UFM remote retrieval scope is incomplete")
+    project_identity = _project_root_identity(project)
     destination = _destination_preflight(destination, plan)
 
     previous: dt.datetime | None = None
@@ -400,17 +430,151 @@ def observe_and_retrieve_remote_producer(
         if (type(final) is not VerifiedManagementIdentity
                 or _identity_key(final) != _identity_key(initial)):
             raise RemoteProducerError("UFM node identity changed during exact retrieval")
+        if _project_root_identity(project) != project_identity:
+            raise RemoteProducerError("UFM project root changed during exact retrieval")
         return VerifiedRetrievedObservation(
             remote=remote, local_path=retrieved, local_sha256=local_sha256,
             remote_sha256_before=remote.remote_sha256,
             remote_sha256_after=after_match.group(1),
             identity_before_sha256=_identity_digest(initial),
             identity_after_sha256=_identity_digest(final),
+            project_path=project, project_device=project_identity[0],
+            project_inode=project_identity[1],
         )
     except RemoteProducerError:
         raise
     except Exception:
         raise RemoteProducerError("verified UFM archive retrieval is unavailable") from None
+
+
+def retrieved_observation_receipt_gate(
+    plan: CollectionPlan, retrieved: VerifiedRetrievedObservation, *,
+    project: Path, lease_path: Path, jump: JumpEndpoint, far: BoundFarEndpoint,
+    known_hosts_pin: str, timeout: int,
+    clock: Callable[[], dt.datetime],
+    runner: Callable[[list[str]], CommandResult],
+) -> Callable[[], None]:
+    """Recheck the captured retrieval's bytes and source before receipt.
+
+    This low-level callback cannot bind the analyzer's chosen archive/project
+    arguments by itself. Remote-backed analysis must use the composed
+    ``run_verified_retrieved_ibdiagnet`` entry below; neither entry activates
+    a worker or a real endpoint.
+    """
+    try:
+        _validated_plan(plan)
+    except Exception:
+        raise RemoteProducerError("noncanonical UFM collection plan") from None
+    if (plan.kind != "ibdiagnet" or type(retrieved) is not VerifiedRetrievedObservation
+            or type(retrieved.remote) is not RemoteCollectionObservation
+            or retrieved.state != "verified-retrieved"
+            or retrieved.remote.state != "remote-final-observed"
+            or retrieved.remote.kind != plan.kind
+            or retrieved.remote.run_id != plan.run_id
+            or retrieved.remote.archive_path != plan.ufm_remote_path
+            or not isinstance(retrieved.local_path, Path)
+            or not retrieved.local_path.is_absolute()
+            or ".." in retrieved.local_path.parts
+            or retrieved.local_path.name != plan.archive_name
+            or any(type(value) is not str or _DIGEST.fullmatch(value) is None
+                   for value in (retrieved.local_sha256,
+                                 retrieved.remote.remote_sha256,
+                                 retrieved.remote_sha256_before,
+                                 retrieved.remote_sha256_after,
+                                 retrieved.identity_before_sha256,
+                                 retrieved.identity_after_sha256))
+            or len({retrieved.local_sha256, retrieved.remote.remote_sha256,
+                    retrieved.remote_sha256_before,
+                    retrieved.remote_sha256_after}) != 1
+            or retrieved.identity_before_sha256 != retrieved.identity_after_sha256
+            or not isinstance(project, Path) or not project.is_absolute()
+            or ".." in project.parts or not isinstance(lease_path, Path)
+            or not lease_path.is_absolute() or ".." in lease_path.parts
+            or type(jump) is not JumpEndpoint or type(far) is not BoundFarEndpoint
+            or far.jump != jump or type(known_hosts_pin) is not str
+            or _DIGEST.fullmatch(known_hosts_pin) is None
+            or not _bounded_timeout(plan, timeout)
+            or not callable(clock) or not callable(runner)):
+        raise RemoteProducerError("retrieved UFM receipt scope is incomplete")
+    if (retrieved.project_path != project
+            or type(retrieved.project_device) is not int
+            or type(retrieved.project_inode) is not int
+            or retrieved.project_device < 0 or retrieved.project_inode <= 0):
+        raise RemoteProducerError("retrieved UFM project identity differs")
+    if _project_root_identity(project) != (retrieved.project_device,
+                                           retrieved.project_inode):
+        raise RemoteProducerError("retrieved UFM project identity differs")
+
+    def require_current() -> None:
+        if _project_root_identity(project) != (retrieved.project_device,
+                                               retrieved.project_inode):
+            raise RemoteProducerError("retrieved UFM project identity changed")
+        if _local_bound_digest(retrieved.local_path) != retrieved.local_sha256:
+            raise RemoteProducerError("retrieved UFM bytes changed before receipt")
+        prior: dt.datetime | None = None
+        for check_remote in (True, False):
+            current = _now(clock, prior)
+            prior = current
+            try:
+                identity = verify_project_management_identity(
+                    project, lease_path, jump, far, known_hosts_pin,
+                    timeout=timeout, now=current, runner=runner)
+            except Exception:
+                raise RemoteProducerError(
+                    "current UFM receipt identity failed") from None
+            if (type(identity) is not VerifiedManagementIdentity
+                    or identity.address != far.host
+                    or identity.hostname != retrieved.remote.node
+                    or identity.observed_at > current
+                    or identity.lease_ends <= current
+                    or current - identity.observed_at > dt.timedelta(seconds=60)
+                    or _identity_digest(identity) != retrieved.identity_after_sha256):
+                raise RemoteProducerError(
+                    "UFM node identity changed before receipt")
+            if check_remote:
+                result = _remote(
+                    jump, far, ["sha256sum", "--", plan.ufm_remote_path],
+                    runner=runner, timeout=timeout)
+                if (result.returncode != 0 or result.stderr or
+                        result.stdout != f"{retrieved.remote.remote_sha256}  {plan.ufm_remote_path}\n"):
+                    raise RemoteProducerError(
+                        "remote UFM archive changed before receipt")
+        if _local_bound_digest(retrieved.local_path) != retrieved.local_sha256:
+            raise RemoteProducerError("retrieved UFM bytes changed before receipt")
+        if _project_root_identity(project) != (retrieved.project_device,
+                                               retrieved.project_inode):
+            raise RemoteProducerError("retrieved UFM project identity changed")
+
+    return require_current
+
+
+def run_verified_retrieved_ibdiagnet(
+    plan: CollectionPlan, retrieved: VerifiedRetrievedObservation, *,
+    archive: Path, cvt: Path, project: Path, lease_path: Path,
+    jump: JumpEndpoint, far: BoundFarEndpoint, known_hosts_pin: str,
+    timeout: int, clock: Callable[[], dt.datetime],
+    runner: Callable[[list[str]], CommandResult],
+) -> Path:
+    """Compose one retrieved source, original project and real local analyzer.
+
+    The archive argument is checked against the retrieved path before any
+    analysis. A caller cannot accidentally verify one file and analyze another.
+    This remains inactive until an independently authorized worker integrates it.
+    """
+    if (type(retrieved) is not VerifiedRetrievedObservation
+            or not isinstance(archive, Path) or archive != retrieved.local_path
+            or not isinstance(project, Path) or project != retrieved.project_path):
+        raise RemoteProducerError("retrieved UFM archive or project differs")
+    gate = retrieved_observation_receipt_gate(
+        plan, retrieved, project=project, lease_path=lease_path,
+        jump=jump, far=far, known_hosts_pin=known_hosts_pin,
+        timeout=timeout, clock=clock, runner=runner,
+    )
+    from tools.ufm_collection_pipeline import run_local_ibdiagnet
+    return run_local_ibdiagnet(
+        plan, retrieved.remote.node, retrieved.local_path, cvt, project,
+        before_receipt=gate,
+    )
 
 
 if __name__ == "__main__":

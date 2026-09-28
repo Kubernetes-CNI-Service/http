@@ -22,6 +22,14 @@ RUN_ID = "20260926-0315-prod-0123456789abcdef"
 
 
 class UfmCollectionAgentTests(unittest.TestCase):
+    def test_ibdiagnet_vendor_subprocess_has_480_second_bound(self):
+        argv = ["docker", "exec", "ufm", *CONTRACT.collection_plan(
+            "ibdiagnet", RUN_ID).vendor_argv]
+        with mock.patch.object(AGENT.subprocess, "run", return_value=mock.Mock(
+            returncode=0, stdout=b"", stderr=b"")) as invoked:
+            self.assertEqual(0, AGENT._invoke(argv).returncode)
+        self.assertEqual(480, invoked.call_args.kwargs["timeout"])
+
     def test_cli_entrypoint_is_importable_outside_repository_cwd(self):
         with tempfile.TemporaryDirectory() as directory:
             result = subprocess.run(
