@@ -90,6 +90,12 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             skip_history=False, selected_manual_panel="Switch Status",
         )
 
+    def test_manual_empty_switch_panel_creates_no_receipt_or_workbook_change(self):
+        self._exercise_real_protected_three_panel_fixture(
+            skip_history=False, selected_manual_panel="Switch Status",
+            selected_panel_empty=True,
+        )
+
     def _exercise_real_protected_three_panel_fixture(
         self, *, skip_history, automatic_first=False, replayed_auto=False,
         invalid_auto_clock=False, automatic_not_due=False,
@@ -97,6 +103,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         manual_second_admit=False,
         require_first_manual_admission=False, manual_after_manual=False,
         terminal_orphan_probe=False, selected_manual_panel=None,
+        selected_panel_empty=False,
     ):
         from monitor.collection_ib_producer import (
             IbProducerAuthoritySnapshot, parse_ib_producer_authority,
@@ -220,11 +227,34 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                                           tzinfo=dt.timezone.utc),
                 runner=lambda _argv: self.fail("transport is supplied by fixture"),
             )
-            cycle, artifacts = self._cycle(
-                activity=True, derivation=True, ib_analysis=binding,
-                fabric_templates={"ethernet/prod": "tan-leaf",
-                                  "nvlink/prod": "border-leaf"},
-            )
+            if selected_panel_empty:
+                from test_cases.test_issue_tracker_switch_info_source import (
+                    _info as healthy_info, _nvl_info as healthy_nvl_info,
+                )
+                switch_inputs = (
+                    mock.patch(
+                        "test_cases.test_issue_tracker_switch_runtime_workflow._info",
+                        side_effect=lambda host, **_kwargs: healthy_info(
+                            host, fan_state="ok"),
+                    ),
+                    mock.patch(
+                        "test_cases.test_issue_tracker_switch_runtime_workflow._nvl_info",
+                        side_effect=lambda host, **_kwargs: healthy_nvl_info(
+                            host, asic_current="30"),
+                    ),
+                )
+                with switch_inputs[0], switch_inputs[1]:
+                    cycle, artifacts = self._cycle(
+                        activity=True, derivation=True, ib_analysis=binding,
+                        fabric_templates={"ethernet/prod": "tan-leaf",
+                                          "nvlink/prod": "border-leaf"},
+                    )
+            else:
+                cycle, artifacts = self._cycle(
+                    activity=True, derivation=True, ib_analysis=binding,
+                    fabric_templates={"ethernet/prod": "tan-leaf",
+                                      "nvlink/prod": "border-leaf"},
+                )
             self.assertEqual(identity["cycle_id"], cycle["cycle_id"])
             self.publication = project / "99-output-monitor"
             self.publication.mkdir()
@@ -255,16 +285,20 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             self.assertTrue(qualified.qualified)
             self.assertEqual("prod-runtime-protected-v1", qualified.mode)
             self.assertEqual((cycle["cycle_id"],), qualified.cycle_ids)
-            self.assertEqual({"Switch Status", "Eth Link Validation",
-                              "IB Link Validation"},
+            expected_panels = ({"Eth Link Validation", "IB Link Validation"}
+                               if selected_panel_empty else
+                               {"Switch Status", "Eth Link Validation",
+                                "IB Link Validation"})
+            expected_count = 2 if selected_panel_empty else 4
+            self.assertEqual(expected_panels,
                              {item.panel for item in qualified.candidates})
-            self.assertEqual(4, len(qualified.candidates))
+            self.assertEqual(expected_count, len(qualified.candidates))
             stage_status = inspect_stage_l(
                 self.store, http_root=self.root, project=project,
                 publication=self.publication, template_path=self.template,
             )
             self.assertEqual("qualified", stage_status["state"])
-            self.assertEqual(4, stage_status["qualified_operation_count"])
+            self.assertEqual(expected_count, stage_status["qualified_operation_count"])
             self.assertEqual(0, stage_status["whitelist_skip_count"])
             self.assertEqual("disabled_no_send_authority", stage_status["online"])
             self.assertNotIn("receipt", stage_status)
@@ -321,7 +355,28 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                 scoped = json.loads(selected_body)
                 self.assertEqual("Switch Status",
                                  scoped["qualified_source"]["selected_panel"])
-                self.assertEqual({"Switch Status"},
+                if selected_panel_empty:
+                    self.assertEqual([], scoped["operations"])
+                    self.assertEqual([], scoped["qualified_source"]["whitelist_skips"])
+                    evaluations = scoped["qualified_source"]["panel_evaluation"]
+                    self.assertEqual(
+                        {"state": "evaluated", "whitelist_skips": "no-skips"},
+                        evaluations["Switch Status"],
+                    )
+                    for other in ("Eth Link Validation", "IB Link Validation"):
+                        self.assertEqual(
+                            {"state": "not-evaluated-in-this-manifest"},
+                            evaluations[other],
+                        )
+                    self.assertEqual(
+                        qualified.source_authority_sha256,
+                        scoped["qualified_source"]["source_authority_sha256"],
+                    )
+                    self.assertEqual(
+                        qualified.observations_sha256,
+                        scoped["qualified_source"]["observations_sha256"],
+                    )
+                self.assertEqual(set() if selected_panel_empty else {"Switch Status"},
                                  {item.panel for item in qualified.candidates
                                   if item.operation_id in {operation["operation_id"]
                                       for operation in scoped["operations"]}})
@@ -340,6 +395,20 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                         manual_admission=witness,
                         selected_panel=selected_manual_panel, **args,
                     )
+                if selected_panel_empty:
+                    self.assertIsInstance(committed, ProdWorkbookNoop)
+                    self.assertEqual("no_candidates", committed.status)
+                    self.assertEqual(selected_id, committed.manifest_id)
+                    self.assertEqual(before_generations,
+                                     tuple(sorted(generation_root.iterdir())))
+                    self.assertFalse(any(generation_root.glob("*/RECEIPT")))
+                    self.assertEqual(original_template, self.template.read_bytes())
+                    with zipfile.ZipFile(BytesIO(original_template)) as before, \
+                         zipfile.ZipFile(BytesIO(self.template.read_bytes())) as after:
+                        for other in ("sheet3.xml", "sheet4.xml"):
+                            path = "xl/worksheets/" + other
+                            self.assertEqual(before.read(path), after.read(path))
+                    return
                 self.assertIsInstance(committed, CommittedProdWorkbook)
                 self.assertEqual(3, committed.prepared.source_family_count)
                 self.assertEqual(selected_id, committed.receipt.manifest_id)

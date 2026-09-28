@@ -365,7 +365,7 @@ def commit_prod_stage_l_workbook(
         raise LocalCommitHold("C-6 source changed before generation")
     if prepared.xlsx_bytes == (prior_source if prior_source is not None else source):
         if prior_source is None:
-            if qualified.candidates:
+            if cabling or switch:
                 raise LocalCommitHold("C-6 has no changed row or prior local RECEIPT")
             return ProdWorkbookNoop("no_candidates", None, manifest_id)
         return ProdWorkbookNoop(
