@@ -71,8 +71,8 @@ workflow/scenario 覆盖，并重新执行目标分支的治理测试。
 
 ### V32-003：正式 load 复用精确 full proof，并把 proof 绑定到 push
 
-- 状态：实现与聚焦回归已完成；尚未提交，尚未为当前合并状态执行 full suite 或生成最终
-  proof，提交号与 full-proof 证据待补。
+- 状态：实现、聚焦回归及候选提交已完成；实现提交为 `d27c63c`，subprocess 治理兼容修复为
+  `0e977d9`。尚未为当前合并状态生成最终 full proof，proof ledger 提交号待补。
 - 需求：同一台 Mac 或同一执行环境的 fresh clone，在受管源码、测试、manifest、依赖锁和
   Python/平台身份完全不变、仅修改 `DAY0-Prepare/<项目>` 输入或运行输出时，不应重复执行耗时的
   full suite；Git push 必须携带已经提交且与待推送字节精确匹配的 proof。
@@ -93,13 +93,13 @@ workflow/scenario 覆盖，并重新执行目标分支的治理测试。
   snapshot、fresh clone 仅修改项目输入、未提交或 stale ledger、非 HEAD tip、删除 ref，以及
   release/validation wrong-intent。两个修复窗口合并后的聚焦回归最终 `115/115 PASS`；首次有
   3 项仅因 sandbox `PermissionError` 失败，授权环境重跑对应 3 项为 `3/3 PASS`，不是产品缺陷。
-- 合并注意：应先提交已审阅的实现、测试和文档候选，再运行 full suite 生成 ledger，最后单独
-  提交 ledger；当前“聚焦测试通过”不能写成已有 full proof，也不能据此 push。
+- 合并注意：候选实现已提交；下一步运行 full suite 生成 ledger，最后单独提交 ledger。当前
+  “聚焦测试通过”仍不能写成已有 full proof，也不能据此 push。
 
 ### V32-004：REQ10C crontab 更新前检测非协作同 UID 写者
 
-- 状态：实现与聚焦回归已完成；尚未提交，尚未执行当前合并状态的 full suite，提交号和
-  full-proof 证据待补。
+- 状态：实现、聚焦回归及候选提交已完成；实现包含在 `d27c63c`。尚未为当前合并状态生成最终
+  full proof，proof ledger 提交号待补。
 - 根因：REQ10C 的 watch 安装、自动移除和项目 unsetup 都以“读取整个当前用户 crontab、修改
   本项目行、整体写回”的方式工作。项目锁只能串行化本项目写者；其他不使用该锁的同 UID
   写者若在读取后插入任务，旧实现可能用旧快照覆盖其任务。
