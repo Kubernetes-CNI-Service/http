@@ -104,6 +104,11 @@ SECTION_SRC_KEYWORDS = ("source", "src")
 SECTION_DST_KEYWORDS = ("dest", "dst")
 NAME_KEYWORDS        = ("name",)
 PORT_KEYWORDS        = ("port",)
+# Exact workbook tabs used as visual summaries or planning matrices.  They
+# share the TAN/OOB prefix with physical-link sheets, but do not own endpoint
+# rows.  A future sheet with one of these names is still parsed when it has a
+# valid Source/Dest header; the exception applies only after detection fails.
+AUXILIARY_SHEET_NAMES = frozenset({"tan fabric", "oob fabric", "oob plan"})
 
 
 def cell_str(row, idx):
@@ -168,6 +173,12 @@ def _extract_xlsx_rows(xlsx_path, *, legacy_columns=False):
         field_cols = detect_field_cols(row1, row2)
         detected_columns = field_cols is not None
         if not detected_columns:
+            if sheet_name.strip().casefold() in AUXILIARY_SHEET_NAMES:
+                print(
+                    f"  INFO: 跳过辅助工作表 {sheet_name}（无 Source/Dest 链路表头）",
+                    file=sys.stderr,
+                )
+                continue
             if not legacy_columns:
                 wb.close()
                 raise ValueError(

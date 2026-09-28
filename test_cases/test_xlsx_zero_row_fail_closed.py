@@ -74,6 +74,23 @@ def make_legacy_column_workbook(path: Path) -> None:
     workbook.close()
 
 
+def make_auxiliary_and_link_workbook(path: Path) -> None:
+    """Model a real design workbook with display/plan tabs before link tabs."""
+    workbook = openpyxl.Workbook()
+    fabric = workbook.active
+    fabric.title = "OOB Fabric"
+    fabric.cell(524, 18)  # formatting-only extent; no cell contains a value
+    plan = workbook.create_sheet("OOB Plan")
+    plan.cell(1, 2, "Core POD")
+    plan.cell(2, 1, "sum")
+    plan.cell(2, 4, "HPS(Weka BMC)")
+    links = workbook.create_sheet("OOB Server-LF")
+    _detected_headers(links)
+    links.append(["leaf01", "swp1", "leaf02", "swp2"])
+    workbook.save(path)
+    workbook.close()
+
+
 def prepare_runtime(root: Path, workbook_writer) -> dict[str, Path]:
     p2p_dir = root / "ztp/config/cumulus/template/P2P"
     p2p_dir.mkdir(parents=True)
@@ -150,6 +167,27 @@ def invoke_main(
 
 
 class XlsxFailClosedDirectTests(unittest.TestCase):
+    def test_known_auxiliary_fabric_and_plan_tabs_do_not_hide_valid_link_tabs(self):
+        with tempfile.TemporaryDirectory() as name:
+            path = Path(name) / "design.xlsx"
+            make_auxiliary_and_link_workbook(path)
+
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                records = P2P._extract_xlsx_rows(path)
+
+            self.assertEqual([
+                {
+                    "sheet": "OOB Server-LF",
+                    "row": 3,
+                    "fields": ("leaf01", "swp1", "leaf02", "swp2"),
+                },
+            ], records)
+            diagnostics = stderr.getvalue()
+            self.assertIn("OOB Fabric", diagnostics)
+            self.assertIn("OOB Plan", diagnostics)
+            self.assertIn("跳过辅助工作表", diagnostics)
+
     def test_profile_writer_rejects_invalid_parent_and_mode_without_replacement(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

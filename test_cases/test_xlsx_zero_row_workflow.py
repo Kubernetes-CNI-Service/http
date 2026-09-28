@@ -40,7 +40,7 @@ LOAD = load_module("xlsx_zero_row_day0_load", ROOT / "DAY0-Prepare/11-load.py")
 
 
 class XlsxFailClosedWorkflowTests(unittest.TestCase):
-    def test_explicit_load_legacy_flag_reaches_real_producer_once_for_mixed_workbook(self):
+    def test_load_skips_known_auxiliary_tabs_without_legacy_mode(self):
         import openpyxl
 
         def write_mixed_workbook(path):
@@ -62,7 +62,7 @@ class XlsxFailClosedWorkflowTests(unittest.TestCase):
             book.save(path)
             book.close()
 
-        for flags, succeeds in (([], False), (["--p2p-legacy-columns"] * 2, True)):
+        for flags in ([], ["--p2p-legacy-columns"] * 2):
             with self.subTest(flags=flags), tempfile.TemporaryDirectory() as name:
                 root = Path(name)
                 paths = DIRECT.prepare_runtime(root, write_mixed_workbook)
@@ -79,27 +79,21 @@ class XlsxFailClosedWorkflowTests(unittest.TestCase):
                     self.assertEqual(paths["p2p_dir"], Path(cwd))
                     caught, stdout, stderr = DIRECT.invoke_main(paths, list(command[2:]))
                     if caught is not None:
-                        if not succeeds:
-                            self.assertIn("sheet OOB Fabric: 表头自动检测失败", stderr)
                         raise caught
 
                 with mock.patch.object(LOAD, "ZTP_DIR", root / "ztp"), mock.patch.object(
                     LOAD, "run", side_effect=run_producer,
-                ), self.assertRaises(DIRECT.LegacyReached if succeeds else SystemExit) as result:
+                ), self.assertRaises(DIRECT.LegacyReached):
                     LOAD.generate_configs(
                         frozenset({"eth"}), install_dhcp=False, deployment_scope="prod",
                         p2p_legacy_columns=args.p2p_legacy_columns, air_topology_policy=policy,
                     )
-                self.assertEqual(1 if succeeds else 0, commands[0].count("--legacy-columns"))
-                self.assertEqual(2 if succeeds else 1, len(commands))
-                if succeeds:
-                    doc = json.loads((paths["output"] / "rack-links-splitter-profiles.json").read_text())
-                    self.assertEqual([], doc["profiles"])
-                    self.assertIn('"leaf01":"swp1" -- "leaf02":"swp1"',
-                                  (paths["output"] / "rack-links-lldpq.dot").read_text())
-                else:
-                    self.assertEqual(1, result.exception.code)
-                    self.assertFalse((paths["output"] / "rack-links-splitter-profiles.json").exists())
+                self.assertEqual(1 if flags else 0, commands[0].count("--legacy-columns"))
+                self.assertEqual(2, len(commands))
+                doc = json.loads((paths["output"] / "rack-links-splitter-profiles.json").read_text())
+                self.assertEqual([], doc["profiles"])
+                self.assertIn('"leaf01":"swp1" -- "leaf02":"swp1"',
+                              (paths["output"] / "rack-links-lldpq.dot").read_text())
 
     def test_generate_configs_stops_before_dhcp_generator_and_publication(self):
         with tempfile.TemporaryDirectory() as name:
