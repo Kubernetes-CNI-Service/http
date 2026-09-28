@@ -221,6 +221,58 @@ def write_shared_artifact_receipt(
 
 
 class ReleaseTransactionTests(unittest.TestCase):
+    def test_project_switch_snapshots_materialized_latest_behind_rebound_output_link(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            old_project = root / "DAY0-Prepare/old"
+            new_project = root / "DAY0-Prepare/new"
+            old_output = old_project / "99-output-eth"
+            new_output = new_project / "99-output-eth"
+            release = new_output / "20260910_103416_combine"
+            materialized = new_output / "latest"
+            old_output.mkdir(parents=True)
+            for directory_path in (release, materialized):
+                directory_path.mkdir(parents=True)
+                (directory_path / ".published-complete").write_text(
+                    "complete\n", encoding="utf-8"
+                )
+                (directory_path / "leaf.yaml").write_bytes(b"hostname: leaf\n")
+
+            ztp = root / "ztp"
+            template = ztp / "config/cumulus/template"
+            template.mkdir(parents=True)
+            output_alias = template / "99-output"
+            output_alias.symlink_to(old_output)
+
+            with mock.patch.multiple(
+                SETUP,
+                HTTP_BASE=str(root),
+                ZTP=str(ztp),
+                MAPPINGS=[(
+                    "config/cumulus/template/99-output",
+                    "99-output-eth",
+                    "dir",
+                )],
+                LATEST_YAML_SPECS=(("cumulus", "99-output"),),
+                MANIFEST_FILE=str(ztp / ".setup_manifest"),
+                _DRY_RUN=False,
+                _LINK_ERRORS=0,
+                _LINK_TRANSACTION=None,
+            ):
+                transaction = SETUP._SetupLinkTransaction(
+                    SETUP._setup_transaction_paths(str(new_project))
+                )
+                SETUP._LINK_TRANSACTION = transaction
+                output_alias.unlink()
+                output_alias.symlink_to(new_output)
+                SETUP._process_latest_yaml(str(new_project))
+                transaction.commit()
+                SETUP._LINK_TRANSACTION = None
+
+            self.assertTrue(materialized.is_symlink())
+            self.assertEqual(release.name, os.readlink(materialized))
+            self.assertEqual(release.resolve(), materialized.resolve())
+
     def test_setup_materialized_latest_rollback_restores_directory_and_old_project_link(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

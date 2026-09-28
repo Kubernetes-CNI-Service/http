@@ -3812,7 +3812,17 @@ class _SetupLinkTransaction:
         path = os.path.abspath(path)
         target = os.path.abspath(target)
         if self.states.get(path) != ("other", None):
-            raise ValueError("materialized latest 不在 setup 事务的真实目录快照中")
+            # ``template/99-output`` itself is a setup-managed link.  During a
+            # project switch its lexical ``.../99-output/latest`` name resolves
+            # to the old project when the transaction is opened and to the new
+            # project by the time publication pointers are repaired.  Permit
+            # that rebound alias only when the new physical path was also
+            # captured as a real directory in this exact transaction.
+            resolved_path = os.path.realpath(path)
+            if self.states.get(resolved_path) != ("other", None):
+                raise ValueError("materialized latest 不在 setup 事务的真实目录快照中")
+            path = resolved_path
+            target = os.path.realpath(target)
         if any(item[0] == path for item in self.materialized_migrations):
             raise ValueError("materialized latest 已在当前 setup 事务中迁移")
         source_identity = os.lstat(path)
@@ -3997,9 +4007,26 @@ def _setup_transaction_paths(proj_dir):
     paths = set(_managed_ztp_link_candidates())
     paths.update(_collect_expected_links(proj_dir))
     for platform, output in LATEST_YAML_SPECS:
-        paths.add(os.path.join(
-            ZTP, "config", platform, "template", output, "latest",
-        ))
+        output_rel = os.path.join("config", platform, "template", output)
+        paths.add(os.path.join(ZTP, output_rel, "latest"))
+        project_outputs = {
+            project_rel
+            for link_rel, project_rel, kind in MAPPINGS
+            if os.path.normpath(link_rel) == os.path.normpath(output_rel)
+            and kind == "dir"
+        }
+        if len(project_outputs) > 1:
+            raise ValueError(
+                f"latest 发布目录映射必须唯一：{output_rel} -> "
+                f"{sorted(project_outputs)}"
+            )
+        if project_outputs:
+            # Canonicalize the physical project path so macOS' /var ->
+            # /private/var namespace alias cannot make the later
+            # realpath-bound lookup appear outside the transaction snapshot.
+            paths.add(os.path.realpath(
+                os.path.join(proj_dir, project_outputs.pop(), "latest")
+            ))
     paths.add(os.path.join(proj_dir, "p2p.xlsx"))
     return paths
 
