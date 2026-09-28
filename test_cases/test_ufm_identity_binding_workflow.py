@@ -118,6 +118,13 @@ class UfmIdentityBindingWorkflowTests(unittest.TestCase):
             real = root / "real"
             project.rename(real)
             project.symlink_to(real, target_is_directory=True)
+            discovery = subprocess.run([
+                sys.executable, "-B", str(Path(__file__).resolve().parents[1]
+                                           / "tools/ufm-discover.py"),
+                "--project", str(project), "--leases", str(lease),
+            ], text=True, capture_output=True, check=False)
+            self.assertNotEqual(0, discovery.returncode)
+            self.assertEqual("", discovery.stdout)
             seen: list[list[str]] = []
             with self.assertRaises(binding.IdentityBindingError):
                 binding.verify_project_management_identity(

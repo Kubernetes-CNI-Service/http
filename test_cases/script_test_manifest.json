@@ -2384,11 +2384,13 @@
       "members": [
         "tools/ufm-discover.py",
         "tools/ufm_input_contract.py",
+        "tools/ufm_identity_binding.py",
         "ztp/dhcp_runtime_inventory.py",
         "tools/project_contract.py"
       ],
       "tests": [
-        "test_cases.test_ufm_input_contract"
+        "test_cases.test_ufm_input_contract",
+        "test_cases.test_ufm_identity_binding_workflow"
       ]
     },
     {

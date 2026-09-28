@@ -142,6 +142,43 @@ class UfmInputContractTests(unittest.TestCase):
             self.assertEqual("", redaction.stdout)
             self.assertNotIn("SYNTHETIC-PRIVATE-PATH-TOKEN", redaction.stderr)
 
+    def test_discovery_cli_refuses_symlinked_global_csv_and_lease_snapshots(self):
+        script = ROOT / "tools/ufm-discover.py"
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory) / "project"
+            project.mkdir()
+            global_path = project / "01-global.yaml"
+            csv_path = project / "02-devices_config.csv"
+            leases = project / "synthetic.leases"
+            global_path.write_text(yaml.safe_dump(valid_document()), encoding="utf-8")
+            csv_path.write_text(
+                "hostname,type,template,eth0_ip,netmask,eth0_gw,eth0_mac\n"
+                "EXAMPLE-UFM01,ufm,NA,192.0.2.21,24,192.0.2.1,02:00:00:00:00:21\n"
+                "EXAMPLE-UFM02,ufm,NA,192.0.2.22,24,192.0.2.1,02:00:00:00:00:22\n",
+                encoding="utf-8",
+            )
+            leases.write_text(
+                lease_block("192.0.2.21", "02:00:00:00:00:21")
+                + lease_block("192.0.2.22", "02:00:00:00:00:22"),
+                encoding="utf-8",
+            )
+            command = [sys.executable, "-B", str(script), "--project", str(project),
+                       "--leases", str(leases)]
+            for source in (global_path, csv_path, leases):
+                with self.subTest(source=source.name):
+                    saved = source.with_name(source.name + ".real")
+                    source.rename(saved)
+                    source.symlink_to(saved)
+                    try:
+                        result = subprocess.run(command, text=True, capture_output=True,
+                                                check=False)
+                        self.assertNotEqual(0, result.returncode)
+                        self.assertEqual("", result.stdout)
+                        self.assertFalse((project / "99-output-ufm").exists())
+                    finally:
+                        source.unlink()
+                        saved.rename(source)
+
     def test_current_lease_authority_rejects_stale_reassigned_or_ambiguous_node(self):
         now = dt.datetime(2026, 9, 26, tzinfo=dt.timezone.utc)
         nodes = (

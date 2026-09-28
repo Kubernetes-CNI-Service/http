@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -15,8 +17,22 @@ for directory in (ROOT / "tools", ROOT):
         sys.path.insert(0, str(directory))
 
 from project_contract import safe_load_global_yaml
-from ufm_input_contract import bind_ufm_inventory, plan_ufm_vip
+from ufm_input_contract import bind_ufm_inventory_text, plan_ufm_vip
+from ufm_identity_binding import _read_regular_no_follow
 from ztp.dhcp_runtime_inventory import bind_ufm_current_leases
+
+
+def _system_root_alias(path: Path) -> Path:
+    """Honor macOS's fixed /var and /tmp aliases, not project-local links."""
+    parts = path.parts
+    if len(parts) > 1 and parts[1] in {"var", "tmp"}:
+        prefix = Path("/") / parts[1]
+        if prefix.is_symlink():
+            expected = f"private/{parts[1]}"
+            if os.readlink(prefix) not in {expected, f"/{expected}"}:
+                raise ValueError("unexpected system-root alias")
+            return Path("/private") / parts[1] / Path(*parts[2:])
+    return path
 
 
 def discover(project: Path, leases_path: Path) -> dict[str, object]:
@@ -25,14 +41,22 @@ def discover(project: Path, leases_path: Path) -> dict[str, object]:
     leases_path = Path(leases_path)
     if not project.is_absolute() or not leases_path.is_absolute():
         raise ValueError("UFM discovery requires absolute project and lease paths")
-    with (project / "01-global.yaml").open(encoding="utf-8") as stream:
-        document = safe_load_global_yaml(stream)
-    nodes = bind_ufm_inventory(document, project / "02-devices_config.csv")
+    project = _system_root_alias(project)
+    leases_path = _system_root_alias(leases_path)
+    # A discovery result is not an SSH identity proof, but it must not obtain
+    # its local intent from symlinked or unbounded path aliases.
+    global_bytes = _read_regular_no_follow(project / "01-global.yaml",
+                                           limit=4 * 1024 * 1024, private=False)
+    csv_bytes = _read_regular_no_follow(project / "02-devices_config.csv",
+                                        limit=4 * 1024 * 1024, private=False)
+    lease_bytes = _read_regular_no_follow(leases_path, limit=32 * 1024 * 1024,
+                                          private=False)
+    document = safe_load_global_yaml(io.StringIO(global_bytes.decode("utf-8")))
+    nodes = bind_ufm_inventory_text(document, csv_bytes.decode("utf-8-sig"))
     if not nodes:
         raise ValueError("project has no UFM HA nodes")
     vip_plan = plan_ufm_vip(document, nodes)
-    lease_text = leases_path.read_text(encoding="utf-8")
-    bound = bind_ufm_current_leases(nodes, lease_text)
+    bound = bind_ufm_current_leases(nodes, lease_bytes.decode("utf-8"))
     return {
         "phase": "discovery_only",
         "ha_requested": len(nodes) == 2,
