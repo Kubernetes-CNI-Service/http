@@ -124,6 +124,86 @@ class BackupPermissionConvergenceWorkflow(unittest.TestCase):
             self.assertEqual(old_digest, hashlib.sha256(old.read_bytes()).hexdigest())
             self.assert_private_tree(root)
 
+    def test_sweep_then_real_collection_deduplicates_and_prunes_without_widening(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, sentinel = self.make_old_tree(base)
+            sentinel_before = sentinel.stat()
+            sentinel_digest = hashlib.sha256(sentinel.read_bytes()).hexdigest()
+            oldest_name = "20260927_0001-prod-backup"
+            previous_names = [
+                "20260927_0002-prod-backup",
+                "20260927_0003-prod-backup",
+                "20260927_0004-prod-backup",
+            ]
+            current_name = "20260928_0001-prod-backup"
+            oldest_shared = root / oldest_name / "eth" / "leaf02.yaml"
+            oldest_shared.write_bytes(b"version-0\n")
+            oldest_shared.chmod(0o644)
+            for name, payload in zip(previous_names, (
+                b"version-1\n", b"version-2\n", NEW_YAML.encode(),
+            )):
+                family = root / name / "eth"
+                family.mkdir(parents=True, mode=0o700)
+                family.parent.chmod(0o700)
+                family.chmod(0o700)
+                leaf = family / "leaf02.yaml"
+                leaf.write_bytes(payload)
+                leaf.chmod(0o600)
+
+            state = base / "root-private-state"
+            frozen = SWEEP.freeze_manifest(root, state, project_name="project")
+            SWEEP.apply_manifest(
+                Path(frozen["manifest_path"]), frozen["sha256"],
+                state / "result.jsonl", resume=False,
+            )
+            self.assertEqual(0o600, stat.S_IMODE(sentinel.stat().st_mode))
+            self.assertEqual(0o600, stat.S_IMODE(oldest_shared.stat().st_mode))
+
+            # Scope the count cap to this synthetic five-batch fixture.  The
+            # production cap remains 100; this exercises the same real branch
+            # without fabricating 101 backup directories or changing code.
+            previous_umask = os.umask(0o022)
+            try:
+                staging, _final = BACKUP._stage_private_backup_tree(root, current_name)
+                with mock.patch.object(BACKUP, "_ssh", side_effect=synthetic_ssh):
+                    _log, result = BACKUP.collect_device(
+                        device(), staging, "synthetic-password", "", "",
+                    )
+                self.assertTrue(result["yaml_ok"])
+                with mock.patch.object(BACKUP, "BACKUP_RETENTION_CAP", 3):
+                    report = BACKUP._publish_and_retain_backup_batch(
+                        root, staging, current_name, environment="prod",
+                    )
+            finally:
+                os.umask(previous_umask)
+
+            self.assertEqual(
+                ["publish", "deduplicate", "version-prune",
+                 "batch-prune", "batch-prune"], report["events"],
+            )
+            self.assertEqual(
+                [f"{previous_names[-1]}/eth/leaf02.yaml"],
+                report["deduplicated"],
+            )
+            self.assertEqual(
+                [f"{oldest_name}/eth/leaf02.yaml"],
+                report["version_pruned"],
+            )
+            self.assertEqual(previous_names[:2], report["batch_pruned"])
+            self.assertFalse(oldest_shared.exists())
+            self.assertFalse((root / previous_names[0]).exists())
+            self.assertFalse((root / previous_names[1]).exists())
+            self.assertFalse((root / previous_names[2] / "eth" / "leaf02.yaml").exists())
+            self.assertEqual(
+                NEW_YAML.encode(),
+                (root / current_name / "eth" / "leaf02.yaml").read_bytes(),
+            )
+            self.assertEqual(sentinel_before.st_ino, sentinel.stat().st_ino)
+            self.assertEqual(sentinel_digest, hashlib.sha256(sentinel.read_bytes()).hexdigest())
+            self.assertEqual(OLD_YAML, sentinel.read_bytes())
+            self.assert_private_tree(root)
+
     def test_post_freeze_collector_activity_blocks_sweep_before_old_chmod(self):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
