@@ -1505,27 +1505,49 @@ def _is_governed_destination(expression: ast.AST, governed: set[str]) -> bool:
     )
 
 
+def _literal_string(expression: ast.AST) -> str | None:
+    """Fold only syntax whose string value is fixed without runtime inputs."""
+    if isinstance(expression, ast.Constant) and isinstance(expression.value, str):
+        return expression.value
+    if isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.Add):
+        left = _literal_string(expression.left)
+        right = _literal_string(expression.right)
+        return left + right if left is not None and right is not None else None
+    if isinstance(expression, ast.JoinedStr):
+        parts = []
+        for part in expression.values:
+            if isinstance(part, ast.FormattedValue):
+                if part.conversion != -1 or part.format_spec is not None:
+                    return None
+                part = part.value
+            value = _literal_string(part)
+            if value is None:
+                return None
+            parts.append(value)
+        return "".join(parts)
+    return None
+
+
 def _has_governed_literal(expression: ast.AST) -> bool:
     accepted_relatives = {
         *GOVERNED_AUTHORITY_NAMES,
         "99-output-ztp/current-release.json",
         "config/isc-dhcp-server/p2p-air.json",
     }
-    return any(
-        isinstance(node, ast.Constant)
-        and isinstance(node.value, str)
-        and (
-            node.value in accepted_relatives
+    for node in ast.walk(expression):
+        value = _literal_string(node)
+        if value is not None and (
+            value in accepted_relatives
             or (
-                node.value.startswith("/")
+                value.startswith("/")
                 and any(
-                    node.value.endswith("/" + authority)
+                    value.endswith("/" + authority)
                     for authority in GOVERNED_AUTHORITY_NAMES
                 )
             )
-        )
-        for node in ast.walk(expression)
-    )
+        ):
+            return True
+    return False
 
 
 def _governed_return_summaries(
@@ -1756,8 +1778,9 @@ def literal_governed_mutation_sinks(
     delegated_script_constants = _delegated_governed_script_constants(tree)
     module_governed = _source_bound_setup_mapping_seed(tree)
     string_values = {
-        node.value for node in ast.walk(tree)
-        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        value for node in ast.walk(tree)
+        if isinstance(node, (ast.Constant, ast.BinOp, ast.JoinedStr))
+        if (value := _literal_string(node)) is not None
     }
     has_literal_authority = bool(module_governed) or any(
         authority in value
@@ -4197,6 +4220,36 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
                     runtime_backend=SimpleNamespace(name="native"),
                 )
             stop.assert_called_once_with(unload.HTTP_ROOT)
+
+    def test_literal_composition_cannot_hide_governed_mutation_target(self) -> None:
+        """A fixed basename is authority even when syntax splits its spelling."""
+        positive = (
+            "import os\n"
+            "def publish():\n"
+            "    os.replace('staged', '01-' + 'global.yaml')\n",
+            "import os\nfrom pathlib import Path\n"
+            "def publish():\n"
+            "    os.replace('staged', Path('/srv/http') / ('01-' + 'global.yaml'))\n",
+            "import os\n"
+            "def publish():\n"
+            "    os.replace('staged', f\"01-{'global'}.yaml\")\n",
+        )
+        for source in positive:
+            with self.subTest(source=source):
+                self.assertEqual(
+                    {"publish"}, literal_governed_mutation_sinks(ast.parse(source)),
+                )
+
+        for suffix in ("global.yaml.tmp", "global.yaml.old"):
+            with self.subTest(unrelated_suffix=suffix):
+                source = (
+                    "import os\n"
+                    "def publish():\n"
+                    f"    os.replace('staged', '01-' + {suffix!r})\n"
+                )
+                self.assertEqual(
+                    set(), literal_governed_mutation_sinks(ast.parse(source)),
+                )
 
     def test_governed_resolver_return_taint_reaches_realistic_writer_sink(self) -> None:
         """A governed path returned by a resolver remains governed at its caller."""
