@@ -576,7 +576,7 @@
     },
     "ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py": {
       "canonical": "ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py",
-      "sha256": "c68726cd8d12888c7fa23bb252160ffe2b23b3b68c83fb5fcacb2dbfc404255c"
+      "sha256": "10add1286aad449e0a1eb8765c487dda5e5a943783d4e95df65a30dc9a0cb4a8"
     },
     "ztp/config/ib_topology_provenance.py": {
       "canonical": "ztp/config/ib_topology_provenance.py",
@@ -678,7 +678,7 @@
     "docs/deployment/README.md": "7e12ea5ce77afffb8db351a230e32e2c252f332252026eb05b16a6063c05cc25",
     "docs/operations/README.md": "560c0608221cd332165403a91a1d9b4bdd8a157327628d1fd2b56d1117528d01",
     "docs/reference/README.md": "717f023b3016420b61e8889493fd0e2ab9d0106388483025f8d66dee75c75039",
-    "docs/validation/README.md": "2a2ee457e01074db1994363a2f8ed62029a9febb14d7c4ea92243b93ec61d98f",
+    "docs/validation/README.md": "0afd7acf54b2984c70871d933a9bbf3b9e810b3784195b23d4d0bece7868e3f0",
     "examples/public-project/01-global.yaml.example": "539fc9ba304e21c465e2dcbbb1bdb8e2afb1063d421e3f947b05add144733928",
     "examples/public-project/02-devices_config.csv.example": "29be52a23309b415d8cbd9b314844aa4a4e6a0ad70f32b7bcce510a13fa39fd1",
     "examples/public-project/02-dhcp-subnet_config.csv.example": "f99e2e7e1ff7b7fb2089c1fe6bda42ac24394c0d04f89bfab3cc0dacd72b097c",
@@ -752,7 +752,7 @@
   },
   "tests": {
     "test_cases.test_air_link_endpoint_contract": "50e4888d658f92d82750b55b6f3504393dd9054a517beda729be63dd00b1e9b9",
-    "test_cases.test_air_retained_servers_contract": "b596435ca51fcdd0b711e7f4b20eecaf842f33c39705f15e5e6d504f8e0c4ddd",
+    "test_cases.test_air_retained_servers_contract": "1fedff4a87f18d84403afca6f7a5aed42f922b6ef1f39517955de76fc582c65b",
     "test_cases.test_all_script_entrypoints": "abdd61915eecc23dfcfe82128b0a1659f897a54193b74e0799259ab94f1ce709",
     "test_cases.test_apache_publication_boundary": "28360f5960fedf21f67496180b408e4ec60a4f81b4a2a86da5e9fee1d00dbb3e",
     "test_cases.test_backup_auth_transport_workflow": "e77cde061a7b180f627adadb4e2cf5de5ac6e5d0806057a460295d4d2ee603e2",
