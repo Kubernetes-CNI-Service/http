@@ -23,6 +23,11 @@ FILE_END = "        <!-- END GENERATED USER MANUAL FILE CATALOG -->"
 SCRIPT_BEGIN = "        <!-- BEGIN GENERATED USER MANUAL SCRIPT REFERENCE -->"
 SCRIPT_END = "        <!-- END GENERATED USER MANUAL SCRIPT REFERENCE -->"
 SCRIPT_SUFFIXES = {".py", ".sh", ".cgi"}
+UNINSTALLED_RUNTIME_COMPONENTS = frozenset({
+    "monitor/issue_tracker_manual_channel.py",
+    "monitor/issue_tracker_manual_listener.py",
+    "monitor/issue-tracker-control.cgi",
+})
 
 RUNTIME_PATTERNS = (
     (
@@ -360,8 +365,10 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
         "test_cases/run_related_tests.py",
         "test_cases/run_vm_validation.py",
     }
+    is_validation_report_helper = relative == "test_cases/validation_unittest.py"
     is_library = (
         path.name == "__init__.py" or "/lib/" in f"/{relative}"
+        or (relative in UNINSTALLED_RUNTIME_COMPONENTS and path.suffix.lower() == ".py")
         or path.name in {
             "_package_common.py", "deployment_lock.py", "deployment_prewrite_guard.py",
             "project_contract.py", "ztp_service_runtime.py", "switch_collection_gate.py",
@@ -370,6 +377,7 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
         }
     )
     is_cgi = path.suffix.lower() == ".cgi"
+    is_uninstalled = relative in UNINSTALLED_RUNTIME_COMPONENTS
     is_worker = path.name.endswith("-worker.py") or path.name.endswith("_worker.py")
     is_docker_internal = relative.startswith("infra/docker/") and path.name != "deploy.sh"
     is_docker_operator = relative == "infra/docker/deploy.sh"
@@ -380,13 +388,18 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
         direct = "是；这是开发治理或只读验收入口，不是生产服务依赖。"
         if relative == "test_cases/run_related_tests.py":
             environment = "canonical 开发工作树；使用当前仓库 Python、平台身份和 /tmp 下的 pycache。"
-            scenario = "开发时选择受影响的 direct/workflow，或在正式 load 前签发并复核绑定当前字节的 full proof。"
-            prerequisite = "工作树暂时冻结；manifest 映射完整；测试预期已独立评审；禁止手工修改批准 ledger。"
+            scenario = ("开发时选择受影响的 direct/workflow，或在正式 load 前签发并复核绑定当前字节的 full proof。"
+                        "--validation-only 仅供 owner 授权的 AIR/prod 验证，非 dry-run，绝非最终生产发布许可。")
+            prerequisite = ("工作树暂时冻结；manifest 映射完整；测试预期已独立评审；禁止手工修改批准 ledger。"
+                            "AIR/prod 验证还须见证其他同 UID crontab 写者在安装、自动移除和 unsetup 各自整个读—改—写窗口保持静默。")
             syntax = "python3 -B test_cases/run_related_tests.py [options]"
             parameters = ", ".join(script_options(source))
             inputs = "当前生产脚本、测试、script_test_manifest.json、批准状态以及 Python/平台身份。"
-            outputs = "选测清单、unittest 结果和退出码；只有成功的 related/full 才能按合同原子更新批准状态。"
-            success = "所有选中测试零 failure/error；正式发布还必须让 --all 成功，并让 --check --require-full 返回 0。"
+            outputs = ("选测清单、unittest 结果和退出码；普通 related/full 成功后可按合同原子更新批准状态。"
+                       "验证模式仍如实报告三项 FAIL，只签发与普通发布证明严格区分的验证证明。")
+            success = ("普通模式要求零 failure/error；正式发布还必须让 --all 成功，并让普通 --check --require-full 返回 0。"
+                       "--validation-only 只接受 ISSUE-0016 安装、自动移除、unsetup 的恰好三项原断言 FAIL，"
+                       "无其他 failure/error/新增 skip；普通发布证明检查必须拒绝该验证证明。")
             recovery = "按首个失败区分实现、测试、夹具或平台问题；修复后完整重跑，禁止弱化断言或手改 ledger。"
         else:
             environment = "已完成 Native load 的 Ubuntu 管理服务器；full-systemd 需要读取 systemd、DHCP、Apache 和 HTTP 状态。"
@@ -399,6 +412,18 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
             success = "退出码 0，选择的 strict/full-systemd 检查全部通过；mock 或局部 HTTP 成功不能替代设备验收。"
             recovery = "保留 JSON/终端证据，在受支持的 load 流程修复根因后重跑；不要由验收器修改服务、NIC 或项目。"
         example = OPERATOR_EXAMPLES[relative]
+    elif is_validation_report_helper:
+        direct = "是，仅供开发验证；这是治理 runner 的内部全量发现助手，不是普通 unittest 测试模块或生产入口。"
+        environment = "canonical 开发工作树；由 --validation-only 治理 runner 提供一次性报告路径和当前 Python 环境。"
+        scenario = "对当前测试树做完整 unittest discovery，保留原始三项 FAIL 并产生精确机器可读报告。"
+        prerequisite = "REPORT_PATH 必须是尚不存在的受控文件；只在授权的 AIR/prod 验证流程中解释其结果。"
+        syntax = "python3 -B -m test_cases.validation_unittest REPORT_PATH [-v]"
+        parameters = "必填 REPORT_PATH；可选 -v 输出详细测试结果。"
+        inputs = "当前测试树及独立断言；由父治理 runner 校验报告身份，不从实现复制预期。"
+        outputs = "标准 unittest 结果仍显示 FAIL；另将 tests_run、failures、errors、skipped 等写入机器可读 JSON 报告。"
+        success = "仅精确 ISSUE-0016 三项已知 FAIL、无其他失败或新增跳过时返回 0；不签发普通发布证明。"
+        recovery = "报告不精确或路径不安全时停止验证；保留原始 FAIL，勿改断言或手工修改批准 ledger。"
+        example = "PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m test_cases.validation_unittest REPORT_PATH"
     elif is_test:
         direct = "是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。"
         environment = "canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。"
@@ -438,6 +463,26 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
         success = "调用者完成后置校验且整个上层事务提交；单个函数返回不等于部署成功。"
         recovery = "让异常向上层 fail closed；保留锁、marker 和原始输入证据，不在库外手工补写。"
         example = f"rg -n \"{path.stem}\" DAY0-Prepare infra monitor tools ztp  # 查找受支持调用者"
+        if is_uninstalled:
+            direct = "否；这是未安装、未启用的库级接点，不是可直接运行的生产入口。"
+            environment = "当前未安装、未启用；未来仅在经真机验收的受管 Linux 环境中按正确身份导入，不是操作员 CLI。"
+            scenario = "仅供本地 direct/workflow 验证；未来受管 CGI/root worker 接入后才可处理手工请求。"
+            prerequisite = "启用前须完成真机验收，并配置独占 CGI UID/GID、受保护 socket、独立 root launcher 和私有队列。"
+            syntax = f"开发测试导入 {relative}；未来受管组件可按真机验收后的合同导入，当前无操作员 CLI。"
+            success = "本地测试只证明库级接点行为；不构成服务已启动、CGI 已发布或生产可用的证据。"
+            example = f"python3 -B -m unittest -v test_cases.test_{path.stem}  # 仅开发测试"
+    elif is_cgi and is_uninstalled:
+        direct = "否；这是未安装、未发布的 CGI 接点，不能作为当前可用的 HTTP 路由调用。"
+        environment = "当前 Apache/Native/Docker 均未发布此路由；未来身份和服务生命周期仍待真机验证。"
+        scenario = "仅在开发测试中验证 HTTP 边界与本地中继；不提供现行生产操作入口。"
+        prerequisite = "启用前须完成真机验收，并为该路由配置独占 CGI UID/GID、受保护 Unix socket 和 root worker。"
+        syntax = f"开发测试导入 {relative} 的 handle()/main() 并注入环境；当前无已安装 HTTP 调用方式。"
+        parameters = "未来 HTTP method、Content-Length、字段和身份边界以 direct/workflow 测试为准；当前无操作员参数。"
+        inputs = "开发测试中校验的有界 HTTP 请求；当前无生产请求入口。"
+        outputs = "测试中仅向受保护 Unix socket 转发规范请求并返回受限 HTTP/JSON；CGI 自身不写队列或控制文件。"
+        success = "本地测试验证失败关闭和中继协议；不证明 Apache 路由已发布或 root worker 已运行。"
+        recovery = "未安装状态保持不可用；未来接入失败时保留证据并按真机计划回退，不手工补写私有队列。"
+        example = "python3 -B -m unittest -v test_cases.test_issue_tracker_manual_channel  # 仅开发测试"
     elif is_cgi:
         direct = "否；由 Apache CGI 环境调用，不能在 shell 中伪造为生产成功。"
         environment = "Native Apache 或 Docker 容器 Apache，以受限请求方法和 www-data 权限运行。"

@@ -679,6 +679,12 @@ class DocumentationCatalogTests(unittest.TestCase):
         self.assertIn("--check", runner)
         self.assertIn("--require-full", runner)
         self.assertNotIn("-m unittest -v test_cases.run_related_tests", runner)
+        for required in (
+            "--validation-only", "AIR/prod", "非 dry-run", "ISSUE-0016",
+            "恰好三项", "FAIL", "无其他 failure/error/新增 skip",
+            "普通发布证明检查必须拒绝",
+        ):
+            self.assertIn(required, runner)
 
         validator = script_entry("test_cases/run_vm_validation.py")
         self.assertIn(
@@ -689,6 +695,96 @@ class DocumentationCatalogTests(unittest.TestCase):
         self.assertIn("--full-systemd", validator)
         self.assertIn("只读验收", validator)
         self.assertNotIn("-m unittest -v test_cases.run_vm_validation", validator)
+
+        validation_helper = script_entry("test_cases/validation_unittest.py")
+        self.assertIn(
+            "语法/调用方式： python3 -B -m test_cases.validation_unittest "
+            "REPORT_PATH [-v]", validation_helper,
+        )
+        self.assertIn("REPORT_PATH", validation_helper)
+        self.assertIn("机器可读", validation_helper)
+        self.assertNotIn("-m unittest -v test_cases.validation_unittest", validation_helper)
+
+    def test_validation_only_manual_body_states_the_narrow_non_release_exception(self):
+        updater = load_path("manual_validation_only_contract", USER_MANUAL_SCRIPT)
+        runner = updater.script_profile(ROOT, "test_cases/run_related_tests.py")
+        body = " ".join(runner.values())
+        for required in (
+            "--validation-only", "AIR/prod", "非 dry-run", "ISSUE-0016",
+            "恰好三项", "安装", "自动移除", "unsetup", "FAIL",
+            "无其他 failure/error/新增 skip", "普通发布证明", "拒绝",
+        ):
+            self.assertIn(required, body)
+
+        helper = updater.script_profile(ROOT, "test_cases/validation_unittest.py")
+        self.assertEqual(
+            "python3 -B -m test_cases.validation_unittest REPORT_PATH [-v]",
+            helper["syntax"],
+        )
+        self.assertIn("JSON", helper["outputs"])
+        self.assertNotIn("-m unittest -v test_cases.validation_unittest", helper["example"])
+
+    def test_uninstalled_manual_channel_profiles_do_not_claim_runtime_authority(self):
+        updater = load_path("manual_uninstalled_channel", USER_MANUAL_SCRIPT)
+        channel = updater.script_profile(ROOT, "monitor/issue_tracker_manual_channel.py")
+        self.assertTrue(channel["direct"].startswith("否"))
+        self.assertIn("未安装", channel["environment"])
+        self.assertIn("无操作员 CLI", channel["syntax"])
+
+        listener = updater.script_profile(ROOT, "monitor/issue_tracker_manual_listener.py")
+        self.assertTrue(listener["direct"].startswith("否"))
+        self.assertIn("未安装", listener["environment"])
+        self.assertIn("独占 CGI UID", listener["prerequisite"])
+        self.assertIn("导入", listener["syntax"])
+        self.assertNotIn("python3 -B monitor/issue_tracker_manual_listener.py", listener["example"])
+
+        cgi = updater.script_profile(ROOT, "monitor/issue-tracker-control.cgi")
+        self.assertTrue(cgi["direct"].startswith("否"))
+        self.assertIn("未发布", cgi["environment"])
+        self.assertIn("独占 CGI UID", cgi["prerequisite"])
+        self.assertIn("Unix socket", cgi["outputs"])
+        self.assertNotIn("已发布", cgi["syntax"])
+        self.assertNotIn("www-data", cgi["environment"])
+        self.assertNotIn("request 文件", cgi["outputs"])
+        self.assertNotIn("request 原子发布", cgi["success"])
+
+        # The existing installed CGI contract must not change with this correction.
+        existing = updater.script_profile(ROOT, "monitor/ztp-monitor-control.cgi")
+        self.assertIn("www-data", existing["environment"])
+        self.assertIn("已发布", existing["syntax"])
+
+    def test_real_manual_generator_renders_uninstalled_manual_channel_contract(self):
+        updater = load_path("manual_uninstalled_channel_workflow", USER_MANUAL_SCRIPT)
+        rendered = updater.render_manual(ROOT)
+        self.assertEqual(
+            (ROOT / "user-manual.html").read_text(encoding="utf-8"), rendered,
+            "generated manual must be current",
+        )
+
+        def entry(relative: str) -> str:
+            match = re.search(
+                rf'<details[^>]*data-script-reference="{re.escape(relative)}"[^>]*>'
+                r'(.*?)</details>', rendered, flags=re.DOTALL,
+            )
+            self.assertIsNotNone(match, relative)
+            return html.unescape(" ".join(re.sub(r"<[^>]+>", " ", match.group(1)).split()))
+
+        listener = entry("monitor/issue_tracker_manual_listener.py")
+        self.assertIn("是否直接运行： 否", listener)
+        self.assertIn("未安装", listener)
+        self.assertIn("独占 CGI UID", listener)
+        channel = entry("monitor/issue_tracker_manual_channel.py")
+        self.assertIn("是否直接运行： 否", channel)
+        self.assertIn("未安装", channel)
+        self.assertIn("无操作员 CLI", channel)
+        cgi = entry("monitor/issue-tracker-control.cgi")
+        self.assertIn("未发布", cgi)
+        self.assertIn("独占 CGI UID", cgi)
+        self.assertIn("Unix socket", cgi)
+        self.assertNotIn("www-data", cgi)
+        self.assertIn("不证明 Apache 路由已发布", cgi)
+        self.assertNotIn("由网页通过 HTTP 请求已发布", cgi)
+        self.assertNotIn("request 原子发布", cgi)
 
     def test_v3_generated_load_guidance_declares_the_real_host_role(self):
         updater = load_path("manual_v3_host_role", USER_MANUAL_SCRIPT)
