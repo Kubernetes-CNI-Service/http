@@ -1534,8 +1534,24 @@ def _has_governed_literal(expression: ast.AST) -> bool:
         "99-output-ztp/current-release.json",
         "config/isc-dhcp-server/p2p-air.json",
     }
+    parents = {
+        child: parent for parent in ast.walk(expression)
+        for child in ast.iter_child_nodes(parent)
+    }
     for node in ast.walk(expression):
         value = _literal_string(node)
+        # An inner authority-looking fragment is not the destination when
+        # outer string syntax adds a suffix (or any other transformation).
+        ancestor = parents.get(node)
+        while ancestor is not None:
+            if (
+                isinstance(ancestor, ast.BinOp)
+                and isinstance(ancestor.op, ast.Add)
+            ) or isinstance(ancestor, (ast.JoinedStr, ast.FormattedValue)):
+                break
+            ancestor = parents.get(ancestor)
+        if ancestor is not None:
+            continue
         if value is not None and (
             value in accepted_relatives
             or (
@@ -4233,6 +4249,9 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             "import os\n"
             "def publish():\n"
             "    os.replace('staged', f\"01-{'global'}.yaml\")\n",
+            "import os\n"
+            "def publish():\n"
+            "    os.replace('staged', ('01-' + 'global') + '.yaml')\n",
         )
         for source in positive:
             with self.subTest(source=source):
@@ -4246,6 +4265,22 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
                     "import os\n"
                     "def publish():\n"
                     f"    os.replace('staged', '01-' + {suffix!r})\n"
+                )
+                self.assertEqual(
+                    set(), literal_governed_mutation_sinks(ast.parse(source)),
+                )
+
+        complete_target_negatives = (
+            "('01-' + 'global.yaml') + '.tmp'",
+            "Path('/srv/http') / (('01-' + 'global.yaml') + '.tmp')",
+            "f\"{'01-global.yaml'}.tmp\"",
+        )
+        for target in complete_target_negatives:
+            with self.subTest(complete_target=target):
+                source = (
+                    "import os\nfrom pathlib import Path\n"
+                    "def publish():\n"
+                    f"    os.replace('staged', {target})\n"
                 )
                 self.assertEqual(
                     set(), literal_governed_mutation_sinks(ast.parse(source)),
