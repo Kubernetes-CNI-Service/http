@@ -7,6 +7,7 @@ import argparse
 import ast
 import copy
 from contextlib import contextmanager
+import hashlib
 import importlib.util
 import io
 import os
@@ -314,6 +315,48 @@ def _source_scope_bindings(scope: ast.AST) -> dict[str, list[tuple[str, ast.AST]
     return bindings
 
 
+def _ffi_module_reflection_innocent(tree: ast.AST) -> bool:
+    """Require absence of the dynamic module-rebinding forms in this FFI source.
+
+    This deliberately is not a complete Python effect proof. The exact AST
+    identity check remains the outer fail-closed boundary, while this separate
+    guard is tested against changed-source counterexamples on its own.
+    """
+    modules = {"ctypes", "os", "sys"}
+    reflective_calls = {
+        "setattr", "delattr", "globals", "vars", "locals",
+        "__import__", "eval", "exec", "compile",
+    }
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any(alias.name in modules and alias.asname is not None
+                   for alias in node.names):
+                return False
+        elif isinstance(node, ast.ImportFrom):
+            if node.module in modules or node.module in {"builtins", "importlib"}:
+                return False
+        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+            if isinstance(node.value, ast.Name) and node.value.id in modules:
+                return False
+        elif isinstance(node, ast.Call):
+            function = node.func
+            if isinstance(function, ast.Name) and function.id in reflective_calls:
+                return False
+            if isinstance(function, ast.Attribute) and function.attr in (
+                reflective_calls | {"__setattr__", "__delattr__", "reload"}
+            ):
+                return False
+        elif isinstance(node, ast.Attribute) and node.attr == "__dict__":
+            return False
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            if node.id in modules:
+                return False
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            if any(name in modules for name in node.names):
+                return False
+    return True
+
+
 def _source_bound_native_rename_calls(
     tree: ast.AST, relative: str,
 ) -> dict[ast.Call, str]:
@@ -326,8 +369,32 @@ def _source_bound_native_rename_calls(
     if relative != "tools/deploy-shared-artifacts.py":
         return {}
 
+    # Python's reflective module namespace has no closed spelling blacklist:
+    # aliases, setattr, globals/vars, and helper call side effects can all
+    # rebind ctypes.CDLL without an Attribute Store rooted at `ctypes`.  Pin
+    # this narrow FFI proof to the reviewed whole-module AST instead.  Any
+    # future production edit must be re-reviewed before these C calls count as
+    # destination-proven; the checks below still establish their exact ABI.
+    reviewed_ast_sha256 = {
+        # Complete production module at the independently reviewable H seed.
+        "6017578b64f2dee92105be5bb12857581172a4746e0aac64d43d0e2a9f61414a",
+        # Exact synthetic sink-oracle fixture below; a changed fixture still
+        # loses recognition rather than bypassing the byte-boundary rule.
+        "7e8af383d72f5da6f6d0efa31a8d4fd281805de93fcd37b293435daade817265",
+    }
+    observed_ast_sha256 = hashlib.sha256(
+        ast.dump(tree, include_attributes=False).encode(),
+    ).hexdigest()
+    if observed_ast_sha256 not in reviewed_ast_sha256:
+        return {}
+    if not _ffi_module_reflection_innocent(tree):
+        return {}
+
     def mutates_imported_modules(scope: ast.AST) -> bool:
-        for node in _walk_local_scope(scope):
+        # A helper defined elsewhere in the module may run before the FFI.
+        # Do not treat its body as invisible merely because local-scope
+        # traversal skips nested definitions; any such write withdraws proof.
+        for node in ast.walk(scope):
             if not isinstance(node, (ast.Attribute, ast.Subscript)) or not isinstance(
                 node.ctx, (ast.Store, ast.Del),
             ):
@@ -430,6 +497,116 @@ def _source_bound_native_rename_calls(
                 continue
             result[call] = "libc." + symbol
     return result
+
+
+def _source_bound_load_report_path(
+    load_tree: ast.AST, report_tree: ast.AST,
+) -> dict[str, ast.AST]:
+    """Certify one exact native load stop -> report handoff -> replace path.
+
+    These two reviewed source identities deliberately invalidate on *any*
+    source edit. This is a narrow path certificate, not WDISC completeness or
+    a general permission to discharge unknown destinations in either module.
+    """
+    reviewed = (
+        (load_tree, "6b6284a80ba6895bd2745d0eaf6a41faf8c04145ce6181ddefa76807293adc7a"),
+        (report_tree, "d2b79619b2ace8c4ea96edcf0ad599001d8f78af6a569168bc4971770e0bca05"),
+    )
+    if any(hashlib.sha256(ast.dump(tree, include_attributes=False).encode()).hexdigest()
+           != expected for tree, expected in reviewed):
+        return {}
+    load_bindings = _source_scope_bindings(load_tree)
+    report_bindings = _source_scope_bindings(report_tree)
+    imports = ((load_bindings, "generation_report"), (report_bindings, "os"))
+    if any(len(bindings.get(name, ())) != 1
+           or bindings[name][0][0] != "import"
+           or not isinstance(bindings[name][0][1], ast.alias)
+           or bindings[name][0][1].name != name
+           for bindings, name in imports):
+        return {}
+
+    def unique_function(bindings, name):
+        entries = bindings.get(name, ())
+        if (len(entries) == 1 and entries[0][0] == "definition"
+                and isinstance(entries[0][1], ast.FunctionDef)
+                and not entries[0][1].decorator_list):
+            return entries[0][1]
+        return None
+
+    main = unique_function(load_bindings, "main")
+    prepare = unique_function(report_bindings, "prepare_generation_report")
+    commit = unique_function(report_bindings, "commit_prepared_generation_report")
+    output = unique_function(report_bindings, "_output_directory")
+    held_directory = unique_function(report_bindings, "_open_prepared_directory")
+    if any(item is None for item in (main, prepare, commit, output, held_directory)):
+        return {}
+    if _source_scope_bindings(main).get("generation_report"):
+        return {}
+    report_name = [node.value for node in report_tree.body
+                   if isinstance(node, ast.Assign) and len(node.targets) == 1
+                   and isinstance(node.targets[0], ast.Name)
+                   and node.targets[0].id == "REPORT_NAME"]
+    if (len(report_name) != 1 or not isinstance(report_name[0], ast.Constant)
+            or report_name[0].value != "generation-report.json"):
+        return {}
+    if not any(isinstance(node, ast.Assign)
+               and ast.unparse(node) == "destination = output / REPORT_NAME"
+               for node in _walk_local_scope(prepare)):
+        return {}
+    if not any(isinstance(node, ast.Assign)
+               and ast.unparse(node) == "output = project / '99-output-ztp'"
+               for node in _walk_local_scope(output)):
+        return {}
+
+    candidate_values = [ast.unparse(node.value) for node in _walk_local_scope(main)
+                        if isinstance(node, ast.Assign) and len(node.targets) == 1
+                        and isinstance(node.targets[0], ast.Name)
+                        and node.targets[0].id == "report_candidate"]
+    if candidate_values != [
+        "None", "generation_report.prepare_generation_report(project, actual_key_report)",
+    ]:
+        return {}
+    calls = [node for node in _walk_local_scope(main) if isinstance(node, ast.Call)]
+    quiesce = [node for node in calls
+               if ast.unparse(node) == "stop_native_ztp_monitors(HTTP_ROOT)"]
+    handoff = [node for node in calls if ast.unparse(node) ==
+               "generation_report.commit_prepared_generation_report(report_candidate)"]
+    lock = [node for node in calls
+            if ast.unparse(node) == "acquire_deployment_lock(exclusive=True)"]
+    if any(len(group) != 1 for group in (quiesce, handoff, lock)):
+        return {}
+    guard = [node for node in _walk_local_scope(main)
+             if isinstance(node, ast.If)
+             and ast.unparse(node.test) == (
+                 "local_services_supported and runtime_backend_instance.name == 'systemd' "
+                 "and (not args.dry_run)"
+             )
+             and quiesce[0] in ast.walk(node)]
+    if (len(guard) != 1 or len(guard[0].body) != 3
+            or not isinstance(guard[0].body[1], ast.Expr)
+            or guard[0].body[1].value is not quiesce[0]
+            or not lock[0].lineno < quiesce[0].lineno < handoff[0].lineno):
+        return {}
+    mutations = [node for node in _walk_local_scope(commit)
+                 if isinstance(node, ast.Call)
+                 and ast.unparse(node) == (
+                     "os.replace(candidate.temporary.name, REPORT_NAME, "
+                     "src_dir_fd=descriptor, dst_dir_fd=descriptor)"
+                 )]
+    held_opens = [node for node in _walk_local_scope(commit)
+                  if isinstance(node, ast.Call)
+                  and ast.unparse(node) == (
+                      "_open_prepared_directory(output, candidate.directory_identity)"
+                  )]
+    if (len(mutations) != 1 or len(held_opens) != 1
+            or held_opens[0].lineno >= mutations[0].lineno):
+        return {}
+    return {
+        "native_guard": guard[0].test,
+        "quiesce": quiesce[0],
+        "handoff": handoff[0],
+        "mutation": mutations[0],
+    }
 
 
 def _mutation_destination(
@@ -3431,6 +3608,7 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             ("libc.renameatx_np", "os.fsencode(destination_name)"),
         ))
         self.assertEqual(expected, inspect(source))
+        self.assertTrue(_ffi_module_reflection_innocent(ast.parse(source)))
         mutations = (
             ("dynamic_symbol", 'getattr(libc, "renameat2", None)',
              'getattr(libc, os.environ["SYMBOL"], None)'),
@@ -3466,6 +3644,43 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
                 self.assertIn(before, source)
                 self.assertLess(len(inspect(source.replace(before, after, 1))), 3)
 
+        helper_side_effects = (
+            ("ctypes_loader_helper", "ctypes.CDLL", "\n        libc = ctypes.CDLL(None, use_errno=True)\n"),
+            ("os_encoder_helper", "os.fsencode", "\n    libc = ctypes.CDLL(None, use_errno=True)\n"),
+        )
+        for label, attribute, needle in helper_side_effects:
+            with self.subTest(mutation=label):
+                module_mutant = source.replace(
+                    "import ctypes\n",
+                    "import ctypes\n"
+                    f"def _evil():\n    {attribute} = lambda *args, **kw: None\n",
+                    1,
+                )
+                self.assertIn(needle, module_mutant)
+                indent = needle.split("libc =", 1)[0].rsplit("\n", 1)[-1]
+                module_mutant = module_mutant.replace(
+                    needle, needle.replace("libc =", f"_evil()\n{indent}libc ="), 1,
+                )
+                self.assertLess(len(inspect(module_mutant)), 3)
+
+        module_rebinding_shapes = (
+            ("setattr_loader", "setattr(ctypes, 'CDLL', other_loader)\n"),
+            ("globals_rebind", "globals()['ctypes'] = None\n"),
+            ("alias_loader", "import ctypes as _c\n_c.CDLL = other_loader\n"),
+            ("vars_rebind", "vars()['ctypes'] = None\n"),
+        )
+        for label, side_effect in module_rebinding_shapes:
+            with self.subTest(mutation=label):
+                module_mutant = source.replace(
+                    "import ctypes\n", "import ctypes\n" + side_effect, 1,
+                )
+                self.assertNotEqual(source, module_mutant)
+                self.assertFalse(
+                    _ffi_module_reflection_innocent(ast.parse(module_mutant)),
+                    "independent structural guard must reject even if source digest is updated",
+                )
+                self.assertEqual([], inspect(module_mutant))
+
     def test_proven_native_ffi_destination_reaches_governed_sink_oracle(self) -> None:
         """A proved alias is a sink; path or no-replace drift closes proof."""
         source = (
@@ -3497,6 +3712,55 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
                 source_path=relative,
             ),
         )
+
+    def test_native_load_report_commit_has_source_bound_quiesce_path(self) -> None:
+        """Native load's real report replace stays behind its prior stop."""
+        load = (ROOT / "DAY0-Prepare/11-load.py").read_text(encoding="utf-8")
+        report = (ROOT / "tools/generation_report.py").read_text(encoding="utf-8")
+
+        def inspect(load_text: str, report_text: str) -> dict[str, str]:
+            proven = _source_bound_load_report_path(
+                ast.parse(load_text), ast.parse(report_text),
+            )
+            return {role: ast.unparse(node) for role, node in proven.items()}
+
+        expected = {
+            "native_guard": "local_services_supported and runtime_backend_instance.name == 'systemd' and (not args.dry_run)",
+            "quiesce": "stop_native_ztp_monitors(HTTP_ROOT)",
+            "handoff": "generation_report.commit_prepared_generation_report(report_candidate)",
+            "mutation": "os.replace(candidate.temporary.name, REPORT_NAME, src_dir_fd=descriptor, dst_dir_fd=descriptor)",
+        }
+        self.assertEqual(expected, inspect(load, report))
+        load_mutations = (
+            ("fake_module", "import generation_report\n",
+             "import unrelated as generation_report\n"),
+            ("opaque_candidate", "report_candidate = generation_report.prepare_generation_report(",
+             "report_candidate = other_prepare_generation_report("),
+            ("candidate_rebound", "if report_candidate is not None:\n",
+             "report_candidate = other_candidate\n        if report_candidate is not None:\n"),
+            ("changed_handoff", "generation_report.commit_prepared_generation_report(report_candidate)",
+             "generation_report.commit_prepared_generation_report(parent_candidate)"),
+            ("removed_native_stop", "failure_phase = \"停止旧 Native Monitor\"\n            stop_native_ztp_monitors(HTTP_ROOT)",
+             "failure_phase = \"停止旧 Native Monitor\"\n            pass"),
+            ("wrong_native_guard", 'and runtime_backend_instance.name == "systemd"',
+             'and runtime_backend_instance.name == "supervisor"'),
+        )
+        report_mutations = (
+            ("changed_report_name", 'REPORT_NAME = "generation-report.json"',
+             'REPORT_NAME = "other.json"'),
+            ("fake_os", "import os\n", "import unrelated as os\n"),
+            ("changed_primitive", "        os.replace(\n", "        other_writer(\n"),
+            ("unbound_destination", "src_dir_fd=descriptor, dst_dir_fd=descriptor,",
+             "src_dir_fd=descriptor,"),
+        )
+        for label, before, after in load_mutations:
+            with self.subTest(module="load", mutation=label):
+                self.assertIn(before, load)
+                self.assertEqual({}, inspect(load.replace(before, after, 1), report))
+        for label, before, after in report_mutations:
+            with self.subTest(module="generation_report", mutation=label):
+                self.assertIn(before, report)
+                self.assertEqual({}, inspect(load, report.replace(before, after, 1)))
 
     def test_mutation_function_aliases_preserve_governed_destination_taint(self) -> None:
         """Imported and assigned aliases cannot disguise a mutation primitive."""
