@@ -1775,6 +1775,78 @@ def _argparse_terminal_functions(tree: ast.AST) -> dict[str, set[int]]:
     return terminal
 
 
+def _argparse_namespace_innocent(tree: ast.AST, aliases: set[str]) -> bool:
+    """Withdraw a parser certificate on module mutation or opaque reflection.
+
+    Feedback legitimately uses ``setattr(self, ...)``; that unrelated instance
+    mutation must not be mistaken for an argparse namespace write.
+    """
+    reflective_names = {"globals", "vars", "locals", "__import__", "eval", "exec", "compile"}
+    sys_aliases = {"sys"}
+    for node in getattr(tree, "body", ()):
+        if isinstance(node, ast.Import):
+            sys_aliases.update(
+                alias.asname or "sys" for alias in node.names if alias.name == "sys"
+            )
+        elif isinstance(node, ast.ImportFrom) and node.module == "sys":
+            if any(alias.name == "modules" for alias in node.names):
+                return False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            function = node.func
+            if isinstance(function, ast.Name):
+                if function.id in reflective_names:
+                    return False
+                if function.id == "getattr" and node.args and isinstance(
+                    node.args[0], ast.Name,
+                ) and node.args[0].id in sys_aliases | aliases:
+                    return False
+                if function.id in {"setattr", "delattr"} and (
+                    not node.args or not isinstance(node.args[0], ast.Name)
+                    or node.args[0].id != "self"
+                ):
+                    return False
+            elif isinstance(function, ast.Attribute) and function.attr in {
+                "__setattr__", "__delattr__", "reload",
+            }:
+                return False
+            if any(
+                isinstance(argument, ast.Name) and argument.id in aliases
+                for argument in (*node.args, *(item.value for item in node.keywords))
+            ):
+                return False
+        elif isinstance(node, ast.Attribute):
+            if node.attr == "__dict__":
+                return False
+            if node.attr == "modules" and isinstance(node.value, ast.Name):
+                if node.value.id in sys_aliases:
+                    return False
+            if isinstance(node.ctx, (ast.Store, ast.Del)):
+                root = node.value
+                while isinstance(root, (ast.Attribute, ast.Subscript)):
+                    root = root.value
+                if isinstance(root, ast.Name) and root.id in aliases | sys_aliases:
+                    return False
+        elif isinstance(node, ast.Subscript) and isinstance(
+            node.ctx, (ast.Store, ast.Del),
+        ):
+            root = node.value
+            while isinstance(root, (ast.Attribute, ast.Subscript)):
+                root = root.value
+            if isinstance(root, ast.Name) and root.id in aliases | sys_aliases:
+                return False
+        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+            if isinstance(node.value, ast.Name) and node.value.id in aliases:
+                return False
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            if node.id in aliases:
+                return False
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            if any(name in aliases for name in node.names):
+                return False
+    return True
+
+
 def _literal_argparse_receivers(tree: ast.AST, function_name: str) -> set[str]:
     """Prove a parser receiver from one literal argparse constructor binding.
 
@@ -1792,6 +1864,8 @@ def _literal_argparse_receivers(tree: ast.AST, function_name: str) -> set[str]:
             for alias in node.names:
                 if alias.name == "ArgumentParser":
                     constructor_aliases.add(alias.asname or alias.name)
+    if not _argparse_namespace_innocent(tree, module_aliases):
+        return set()
     function = production_functions(tree)[function_name]
     local_nodes = list(_walk_local_scope(function))
     candidates = set()
@@ -4429,6 +4503,26 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             with self.subTest(boundary="argparse-binding"):
                 self.assertNotEqual(source, feedback_source)
                 self.assertEqual(set(), _literal_argparse_receivers(ast.parse(source), "main"))
+        parser_namespace_mutants = (
+            "argparse.ArgumentParser = None",
+            "setattr(argparse, 'ArgumentParser', None)",
+            "argparse.__dict__['ArgumentParser'] = None",
+            "import argparse as _ap\n_ap.ArgumentParser = None",
+            "self = sys.modules['argparse']\nsetattr(self, 'ArgumentParser', None)",
+            "self = getattr(sys, 'modules')['argparse']\nsetattr(self, 'ArgumentParser', None)",
+        )
+        for mutation in parser_namespace_mutants:
+            with self.subTest(boundary="argparse-module-mutation", mutation=mutation):
+                source = feedback_source.replace(
+                    "import argparse\n", "import argparse\n" + mutation + "\n", 1,
+                )
+                self.assertNotEqual(source, feedback_source)
+                self.assertEqual(set(), _literal_argparse_receivers(ast.parse(source), "main"))
+        benign_alias = feedback_source.replace(
+            "import argparse\n", "import argparse\nimport argparse as _ap\n", 1,
+        )
+        self.assertNotEqual(benign_alias, feedback_source)
+        self.assertEqual({"parser"}, _literal_argparse_receivers(ast.parse(benign_alias), "main"))
         self.assertEqual(
             {"gate"}, _literal_argparse_receivers(ast.parse(
                 "import argparse as cli\n"
