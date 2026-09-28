@@ -476,8 +476,9 @@ def configure_local_pre_push_proof_gate() -> None:
         raise LoadError("Git pre-push proof hook 必须是单链接、当前用户可执行的普通文件")
 
     def git(*arguments: str) -> str:
-        completed = subprocess.run(
+        completed = _run_subprocess(
             ["git", "-C", str(HTTP_ROOT), *arguments],
+            cwd=HTTP_ROOT,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
