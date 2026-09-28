@@ -19,6 +19,40 @@ HTML = load_script("ufm_ibdiagnet_pipeline_html", Path(__file__).resolve().paren
 
 
 class UfmIbdiagnetPipelineWorkflowTests(unittest.TestCase):
+    def test_retrieved_source_drift_before_receipt_never_claims_success(self):
+        plan = collection_plan("ibdiagnet", RUN_ID)
+        for mutation in ("bytes", "same_bytes_new_inode"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                snapshot = root / "snapshot"
+                snapshot.mkdir()
+                write_ibdiagnet_fixture(snapshot)
+                private = root / "private"
+                private.mkdir()
+                archive = publish_local_archive(plan, snapshot, private)
+                cvt = root / "cvt.xlsx"
+                _write_cvt(cvt)
+                project = root / "project"
+                project.mkdir()
+
+                def change_retrieved_source():
+                    if mutation == "bytes":
+                        archive.write_bytes(archive.read_bytes() + b"changed")
+                    else:
+                        replacement = root / "same-content-replacement"
+                        replacement.write_bytes(archive.read_bytes())
+                        replacement.replace(archive)
+
+                with self.assertRaises(PipelineError):
+                    run_local_ibdiagnet(
+                        plan, "EXAMPLE-UFM01", archive, cvt, project,
+                        before_receipt=change_retrieved_source,
+                    )
+                target = project / "99-output-ufm" / "runs" / RUN_ID / "EXAMPLE-UFM01"
+                self.assertFalse((target / "receipt.json").exists())
+                self.assertEqual([], validated_receipts(project, "air"))
+                self.assertIn("未知", HTML.render_ufm_evidence_panel(project, "air"))
+
     def test_pre_receipt_gate_failure_never_claims_completed_ibdiagnet(self):
         plan = collection_plan("ibdiagnet", RUN_ID)
         with tempfile.TemporaryDirectory() as directory:

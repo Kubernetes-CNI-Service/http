@@ -22,6 +22,38 @@ RUN_ID = "20260926-0315-air-0123456789abcdef"
 
 
 class UfmCollectionPipelineTests(unittest.TestCase):
+    def test_source_archive_witness_rejects_byte_drift_and_same_byte_replace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            archive = root / "ibdiagnet2_example.tar.gz"
+            archive.write_bytes(b"independent-archive-input")
+            first = PIPELINE._source_archive_witness(archive)
+            PIPELINE._require_source_archive_witness(archive, first)
+            before = archive.stat()
+            archive.write_bytes(b"independent-archive-inpuT")
+            os.utime(archive, ns=(before.st_atime_ns, before.st_mtime_ns))
+            with self.assertRaises(PIPELINE.PipelineError):
+                PIPELINE._require_source_archive_witness(archive, first)
+
+            second = PIPELINE._source_archive_witness(archive)
+            replacement = root / "replacement"
+            replacement.write_bytes(archive.read_bytes())
+            replacement.replace(archive)
+            with self.assertRaises(PIPELINE.PipelineError):
+                PIPELINE._require_source_archive_witness(archive, second)
+
+            incoming = root / "incoming"
+            incoming.mkdir()
+            nested = incoming / archive.name
+            nested.write_bytes(archive.read_bytes())
+            third = PIPELINE._source_archive_witness(nested)
+            same_bytes = nested.read_bytes()
+            incoming.rename(root / "moved-incoming")
+            incoming.mkdir()
+            (incoming / archive.name).write_bytes(same_bytes)
+            with self.assertRaises(PIPELINE.PipelineError):
+                PIPELINE._require_source_archive_witness(nested, third)
+
     def test_candidate_panel_refuses_unbound_preview_without_publication(self):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory).resolve()

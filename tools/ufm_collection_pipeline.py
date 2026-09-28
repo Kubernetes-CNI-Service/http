@@ -22,7 +22,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-from typing import Callable
+from typing import Callable, NamedTuple
 import zipfile
 
 # Direct execution may start outside the repository; import only this fixed
@@ -67,6 +67,73 @@ def _sha256(path: Path) -> str:
         while block := stream.read(1024 * 1024):
             digest.update(block)
     return digest.hexdigest()
+
+
+class _ArchiveSourceWitness(NamedTuple):
+    parent_identity: tuple[int, int]
+    file_identity: tuple[int, int, int, int, int]
+    sha256: str
+
+
+def _source_archive_witness(path: Path) -> _ArchiveSourceWitness:
+    """Bind one retrieved archive name, inode and bytes for later comparison.
+
+    This detects an already completed change; it is not an atomic defense
+    against an arbitrary non-cooperating same-UID writer after final review.
+    """
+    if not getattr(os, "O_NOFOLLOW", 0) or not getattr(os, "O_DIRECTORY", 0):
+        raise PipelineError("source archive identity checks are unavailable")
+
+    def identity(observed: os.stat_result) -> tuple[int, int, int, int, int]:
+        return (observed.st_dev, observed.st_ino, observed.st_size,
+                observed.st_mtime_ns, observed.st_ctime_ns)
+
+    try:
+        parent_before = path.parent.lstat()
+        if not stat.S_ISDIR(parent_before.st_mode):
+            raise PipelineError("source archive parent is not a real directory")
+        parent_fd = _open_real_dir(path.parent)
+        try:
+            parent_opened = os.fstat(parent_fd)
+            parent_identity = (parent_opened.st_dev, parent_opened.st_ino)
+            if parent_identity != (parent_before.st_dev, parent_before.st_ino):
+                raise PipelineError("source archive parent changed before read")
+            named_before = os.stat(path.name, dir_fd=parent_fd,
+                                   follow_symlinks=False)
+            if not stat.S_ISREG(named_before.st_mode) or named_before.st_size <= 0:
+                raise PipelineError("source archive is not nonempty regular data")
+            source_fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW,
+                                dir_fd=parent_fd)
+            try:
+                opened = os.fstat(source_fd)
+                if identity(opened) != identity(named_before):
+                    raise PipelineError("source archive changed before read")
+                digest = hashlib.sha256()
+                while chunk := os.read(source_fd, 1024 * 1024):
+                    digest.update(chunk)
+                named_after = os.stat(path.name, dir_fd=parent_fd,
+                                      follow_symlinks=False)
+                if any(identity(current) != identity(opened)
+                       for current in (os.fstat(source_fd), named_after)):
+                    raise PipelineError("source archive changed during read")
+            finally:
+                os.close(source_fd)
+            parent_after = path.parent.lstat()
+            if (not stat.S_ISDIR(parent_after.st_mode)
+                    or (parent_after.st_dev, parent_after.st_ino) != parent_identity):
+                raise PipelineError("source archive parent was rebound")
+            return _ArchiveSourceWitness(parent_identity, identity(opened),
+                                         digest.hexdigest())
+        finally:
+            os.close(parent_fd)
+    except OSError as exc:
+        raise PipelineError("source archive identity cannot be verified") from exc
+
+
+def _require_source_archive_witness(path: Path,
+                                    expected: _ArchiveSourceWitness) -> None:
+    if _source_archive_witness(path) != expected:
+        raise PipelineError("retrieved source archive changed before receipt")
 
 
 def _fsync_regular(path: Path) -> None:
@@ -431,6 +498,7 @@ def _run_local_analysis(plan: CollectionPlan, node: str, archive: Path,
     if prepare_panel is not None and not callable(prepare_panel):
         raise PipelineError("pre-receipt panel preparation is invalid")
     _validate_args(plan, node, archive, cvt, project_root, kind=kind)
+    archive_witness = _source_archive_witness(archive)
     content = _read_one_log(archive) if kind == "iblinkinfo" else None
     if kind == "ibdiagnet":
         _validate_ibdiagnet_archive(archive)
@@ -449,8 +517,9 @@ def _run_local_analysis(plan: CollectionPlan, node: str, archive: Path,
         os.chmod(stage, 0o700)
         staged_archive = stage / plan.archive_name
         shutil.copyfile(archive, staged_archive, follow_symlinks=False)
-        if _sha256(staged_archive) != _sha256(archive):
+        if _sha256(staged_archive) != archive_witness.sha256:
             raise PipelineError("staged archive differs from source")
+        _require_source_archive_witness(archive, archive_witness)
         log = stage / f"iblinkinfo_{plan.run_id}.log" if content is not None else staged_archive
         if content is not None:
             log.write_bytes(content)
@@ -581,6 +650,7 @@ def _run_local_analysis(plan: CollectionPlan, node: str, archive: Path,
                                               max_bytes=(512 if name == plan.archive_name
                                                          else 128) * 1024 * 1024) != digest:
                             raise PipelineError("IB result changed during evidence gate")
+                _require_source_archive_witness(archive, archive_witness)
                 os.link(".receipt.prepared", "receipt.json",
                         src_dir_fd=target_fd, dst_dir_fd=target_fd,
                         follow_symlinks=False)
