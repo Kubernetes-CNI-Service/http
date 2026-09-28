@@ -230,6 +230,7 @@ def inspect_stage_l(store, *, http_root, project, publication, template_path):
                         "whitelist_skip_count": len(qualified.whitelist_skips),
                         "whitelist_skips": [_runtime_skip(item)
                                             for item in qualified.whitelist_skips],
+                        "template_sha256": qualified.template_sha256,
                         "source_authority_sha256": qualified.source_authority_sha256,
                         "observations_sha256": qualified.observations_sha256,
                     })
@@ -250,7 +251,7 @@ def inspect_stage_l(store, *, http_root, project, publication, template_path):
 def commit_qualified_prod_local(
     store, *, http_root, project, publication, template_path,
     refuse_prior_without_admission=False, auto_admission=None,
-    manual_admission=None,
+    manual_admission=None, expected_manual_preview=None,
 ):
     """Requalify protected prod sources under one writer and commit C6 only."""
     from monitor.issue_tracker_local_commit import LocalCommitHold
@@ -277,6 +278,9 @@ def commit_qualified_prod_local(
                 auto_admission is not None or type(manual_admission) is not tuple
                 or len(manual_admission) != 4):
             raise StageLHold("manual admission witness shape is invalid")
+        if expected_manual_preview is not None and (
+                manual_admission is None or type(expected_manual_preview) is not dict):
+            raise StageLHold("manual preview requires a manual admission witness")
         with tracker_writer(project, publication) as token:
             settings = current_k(token)
             snapshot = read_whitelist_workbook(template)
@@ -334,6 +338,24 @@ def commit_qualified_prod_local(
                 whitelist_snapshot=snapshot, whitelist_path=template,
                 writer_token=token,
             )
+            if expected_manual_preview is not None:
+                # This comparison remains inside LK-P and follows a fresh
+                # protected-source qualification.  A browser token alone can
+                # never authorize the subsequent C6 generation.
+                actual_preview = {
+                    "project_key": qualified.project_key,
+                    "scope": qualified.scope, "k": qualified.k,
+                    "k_revision": settings.revision,
+                    "latest_cycle_id": qualified.cycle_ids[-1]
+                    if qualified.cycle_ids else None,
+                    "window_cycle_ids": qualified.cycle_ids,
+                    "whitelist_sha256": qualified.whitelist_sha256,
+                    "template_sha256": qualified.template_sha256,
+                    "source_authority_sha256": qualified.source_authority_sha256,
+                    "observations_sha256": qualified.observations_sha256,
+                }
+                if expected_manual_preview != actual_preview:
+                    raise StageLHold("manual preview source changed before C6")
             metadata = {
                 "project_id": str(project), "schema_version": 1,
                 "producer_version": "stage-l-runtime-v1",
