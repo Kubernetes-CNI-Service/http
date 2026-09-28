@@ -609,6 +609,133 @@ def _source_bound_load_report_path(
     }
 
 
+def _feedback_recovery_structural_path(
+    feedback_tree: ast.AST, runtime_tree: ast.AST,
+) -> dict[str, ast.AST]:
+    """Check one feedback lock -> real runtime stop -> recovery path.
+
+    This independent shape check is intentionally narrower than a complete
+    writer census. The production-source wrapper also pins both whole ASTs.
+    """
+    imports = [node for node in getattr(feedback_tree, "body", ())
+               if isinstance(node, ast.ImportFrom)
+               and any(alias.name == "stop_native_ztp_monitors"
+                       for alias in node.names)]
+    if (len(imports) != 1
+            or imports[0].module != "tools.ztp_service_runtime"
+            or any(alias.name == "stop_native_ztp_monitors"
+                   and alias.asname is not None for alias in imports[0].names)):
+        return {}
+
+    feedback_bindings = _source_scope_bindings(feedback_tree)
+    runtime_bindings = _source_scope_bindings(runtime_tree)
+
+    def unique_function(bindings, name):
+        entries = bindings.get(name, ())
+        if (len(entries) == 1 and entries[0][0] == "definition"
+                and isinstance(entries[0][1], ast.FunctionDef)
+                and not entries[0][1].decorator_list):
+            return entries[0][1]
+        return None
+
+    main = unique_function(feedback_bindings, "main")
+    stop_function = unique_function(runtime_bindings, "stop_native_ztp_monitors")
+    if main is None or stop_function is None:
+        return {}
+    if any(_source_scope_bindings(main).get(name) for name in (
+        "deployment_lock", "stop_native_ztp_monitors",
+        "recover_global_writeback_state",
+    )):
+        return {}
+    stop_bindings = feedback_bindings.get("stop_native_ztp_monitors", ())
+    if (len(stop_bindings) != 1 or stop_bindings[0][0] != "import-from"
+            or stop_bindings[0][1] not in imports[0].names):
+        return {}
+
+    lock_scopes = [node for node in _walk_local_scope(main)
+                   if isinstance(node, ast.With) and len(node.items) == 1
+                   and ast.unparse(node.items[0].context_expr)
+                   == "deployment_lock(plan.http_base)"
+                   and isinstance(node.items[0].optional_vars, ast.Name)
+                   and node.items[0].optional_vars.id == "held_lock_fd"]
+    if len(lock_scopes) != 1:
+        return {}
+    lock = lock_scopes[0]
+    if (len(lock.body) < 3
+            or not isinstance(lock.body[0], ast.Expr)
+            or ast.unparse(lock.body[0].value) != "_revalidate_sample_plan(plan)"
+            or not isinstance(lock.body[1], ast.Expr)
+            or ast.unparse(lock.body[1].value)
+            != "stop_native_ztp_monitors(plan.http_base)"
+            or not isinstance(lock.body[2], ast.If)
+            or ast.unparse(lock.body[2].test)
+            != "args.recover_global_writeback_state"):
+        return {}
+    stop = lock.body[1].value
+    recovery_calls = [node for node in _walk_local_scope(lock.body[2])
+                      if isinstance(node, ast.Call)
+                      and ast.unparse(node) == (
+                          "recover_global_writeback_state(authority, "
+                          "workspace_root=plan.http_base, "
+                          "held_lock_fd=held_lock_fd)"
+                      )]
+    if (len(recovery_calls) != 1
+            or not stop.lineno < recovery_calls[0].lineno
+            or len([node for node in _walk_local_scope(main)
+                    if isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "stop_native_ztp_monitors"]) != 1):
+        return {}
+
+    pid_assignments = [node for node in _walk_local_scope(stop_function)
+                       if isinstance(node, ast.Assign)
+                       and len(node.targets) == 1
+                       and isinstance(node.targets[0], ast.Name)
+                       and node.targets[0].id == "pid_files"
+                       and isinstance(node.value, ast.Call)
+                       and ast.unparse(node.value)
+                       == "_native_monitor_pid_files(root)"]
+    proc_guards = [node for node in _walk_local_scope(stop_function)
+                   if isinstance(node, ast.If)
+                   and ast.unparse(node.test) == "not proc.is_dir()"]
+    if len(pid_assignments) != 1 or len(proc_guards) != 1:
+        return {}
+    proc_guard = proc_guards[0]
+    if (pid_assignments[0].lineno >= proc_guard.lineno
+            or len(proc_guard.body) != 2
+            or not isinstance(proc_guard.body[0], ast.If)
+            or ast.unparse(proc_guard.body[0].test) != "pid_files"
+            or len(proc_guard.body[0].body) != 1
+            or not isinstance(proc_guard.body[0].body[0], ast.Raise)
+            or ast.unparse(proc_guard.body[0].body[0].exc) != (
+                "RuntimeContractError('cannot validate Native Monitor PID "
+                "authority without /proc')"
+            )
+            or not isinstance(proc_guard.body[1], ast.Return)
+            or ast.unparse(proc_guard.body[1].value) != "()"):
+        return {}
+    return {
+        "lock": lock.items[0].context_expr,
+        "stop": stop,
+        "recover": recovery_calls[0],
+        "pid_files": pid_assignments[0].value,
+    }
+
+
+def _source_bound_feedback_recovery_path(
+    feedback_tree: ast.AST, runtime_tree: ast.AST,
+) -> dict[str, ast.AST]:
+    """Accept this bounded path only in both exactly reviewed source ASTs."""
+    reviewed = (
+        (feedback_tree, "7e472596fc86a656465a8ba1361a553486decf71e996d9d71e891744e6f47216"),
+        (runtime_tree, "7485574943486520ea584ae144801be19d9bdc1eacd79bc6302f9a7d43d282b0"),
+    )
+    if any(hashlib.sha256(ast.dump(tree, include_attributes=False).encode()).hexdigest()
+           != expected for tree, expected in reviewed):
+        return {}
+    return _feedback_recovery_structural_path(feedback_tree, runtime_tree)
+
+
 def _mutation_destination(
     call: ast.Call, aliases: dict[str, str] | None = None,
     static_integers: dict[str, int] | None = None,
@@ -2547,6 +2674,99 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
                 ])
         recovery.assert_not_called()
 
+    def test_feedback_runtime_stop_direct_uses_only_synthetic_proc(self) -> None:
+        """The imported real stop refuses an unprovable PID before signalling."""
+        runtime = load_module("h_feedback_runtime_direct", "tools/ztp_service_runtime.py")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "http"
+            root.mkdir()
+            proc = Path(temporary) / "proc"
+            proc.mkdir()
+            signal_attempt = mock.Mock(side_effect=AssertionError("real signal forbidden"))
+            self.assertEqual(
+                (), runtime.stop_native_ztp_monitors(
+                    root, proc_root=proc, kill=signal_attempt,
+                ),
+            )
+            pid_file = root / "DAY0-Prepare/project/99-output-ztp/ztp-monitor.pid"
+            pid_file.parent.mkdir(parents=True)
+            pid_file.write_text("123\n", encoding="ascii")
+            with self.assertRaisesRegex(runtime.RuntimeContractError, "without /proc"):
+                runtime.stop_native_ztp_monitors(
+                    root, proc_root=Path(temporary) / "absent-proc", kill=signal_attempt,
+                )
+            signal_attempt.assert_not_called()
+
+    def test_feedback_recovery_two_real_scripts_stop_before_mutation(self) -> None:
+        """Feedback invokes the actual runtime stop under lock before recovery."""
+        feedback = load_module("h_feedback_recovery", "ztp/optimize/feedback.py")
+        runtime = load_module("h_feedback_runtime", "tools/ztp_service_runtime.py")
+        events = []
+
+        @contextmanager
+        def held_lock(*_args, **_kwargs):
+            events.append("lock-enter")
+            try:
+                yield 97
+            finally:
+                events.append("lock-exit")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "http"
+            root.mkdir()
+            proc = Path(temporary) / "proc"
+            proc.mkdir()
+            plan = SimpleNamespace(http_base=root)
+            signal_attempt = mock.Mock(side_effect=AssertionError("real signal forbidden"))
+
+            def actual_stop(http_root):
+                events.append("runtime-stop")
+                self.assertEqual(
+                    (), runtime.stop_native_ztp_monitors(
+                        http_root, proc_root=proc, kill=signal_attempt,
+                    ),
+                )
+
+            recovery = mock.Mock(side_effect=lambda *_a, **_k: events.append("recovery"))
+            with mock.patch.object(feedback, "discover_sample_inputs", return_value=plan), \
+                 mock.patch.object(feedback, "_revalidate_sample_plan",
+                                   side_effect=lambda *_a: events.append("revalidate")), \
+                 mock.patch.object(feedback, "deployment_lock", held_lock), \
+                 mock.patch.object(feedback, "stop_native_ztp_monitors", actual_stop), \
+                 mock.patch.object(feedback, "find_global_config",
+                                   return_value=root / "global.yaml"), \
+                 mock.patch.object(feedback, "recover_global_writeback_state", recovery):
+                self.assertEqual(0, feedback.main([
+                    "--recover-global-writeback-state", "--global-config",
+                    os.fspath(root / "global.yaml"),
+                ]))
+                self.assertEqual(
+                    ["lock-enter", "revalidate", "runtime-stop", "recovery", "lock-exit"],
+                    events,
+                )
+                recovery.assert_called_once()
+                signal_attempt.assert_not_called()
+
+                events.clear()
+                pid_file = root / "DAY0-Prepare/project/99-output-ztp/ztp-monitor.pid"
+                pid_file.parent.mkdir(parents=True)
+                pid_file.write_text("123\n", encoding="ascii")
+                with mock.patch.object(
+                    feedback, "_bounded_parser_error",
+                    side_effect=RuntimeError("synthetic stop refusal"),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "synthetic stop refusal"):
+                        feedback.main([
+                            "--recover-global-writeback-state", "--global-config",
+                            os.fspath(root / "global.yaml"),
+                        ])
+                self.assertEqual(
+                    ["lock-enter", "revalidate", "runtime-stop", "lock-exit"],
+                    events,
+                )
+                recovery.assert_called_once()
+                signal_attempt.assert_not_called()
+
     def test_each_direct_writer_quiesce_call_survives_ast_mutation_oracle(self) -> None:
         contracts = (
             ("DAY0-Prepare/01-a-setup.py", "_main_locked", "setup"),
@@ -3761,6 +3981,66 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             with self.subTest(module="generation_report", mutation=label):
                 self.assertIn(before, report)
                 self.assertEqual({}, inspect(load, report.replace(before, after, 1)))
+
+    def test_feedback_recovery_structural_path_rejects_two_script_mutants(self) -> None:
+        """Feedback-to-runtime recovery proof is not merely an AST hash match."""
+        feedback = (ROOT / "ztp/optimize/feedback.py").read_text(encoding="utf-8")
+        runtime = (ROOT / "tools/ztp_service_runtime.py").read_text(encoding="utf-8")
+
+        def structural(feedback_text, runtime_text):
+            return {
+                role: ast.unparse(node)
+                for role, node in _feedback_recovery_structural_path(
+                    ast.parse(feedback_text), ast.parse(runtime_text),
+                ).items()
+            }
+
+        expected = {
+            "lock": "deployment_lock(plan.http_base)",
+            "stop": "stop_native_ztp_monitors(plan.http_base)",
+            "recover": "recover_global_writeback_state(authority, workspace_root=plan.http_base, held_lock_fd=held_lock_fd)",
+            "pid_files": "_native_monitor_pid_files(root)",
+        }
+        self.assertEqual(expected, structural(feedback, runtime))
+        self.assertEqual(expected, {
+            role: ast.unparse(node)
+            for role, node in _source_bound_feedback_recovery_path(
+                ast.parse(feedback), ast.parse(runtime),
+            ).items()
+        })
+        mutants = (
+            ("import_rebound", "feedback",
+             "from tools.ztp_service_runtime import (",
+             "from unrelated_runtime import ("),
+            ("stop_removed", "feedback",
+             "stop_native_ztp_monitors(plan.http_base)", "pass"),
+            ("wrong_lock", "feedback",
+             "with deployment_lock(plan.http_base) as held_lock_fd:",
+             "with no_lock(plan.http_base) as held_lock_fd:"),
+            ("runtime_pid_scan_removed", "runtime",
+             "pid_files = _native_monitor_pid_files(root)", "pid_files = ()"),
+            ("runtime_proc_refusal_removed", "runtime",
+             "if pid_files:\n            raise RuntimeContractError(\n                \"cannot validate Native Monitor PID authority without /proc\"\n            )",
+             "if pid_files:\n            pass"),
+        )
+        for label, which, before, after in mutants:
+            with self.subTest(mutation=label):
+                original = feedback if which == "feedback" else runtime
+                self.assertIn(before, original)
+                changed = original.replace(before, after, 1)
+                self.assertNotEqual(original, changed)
+                self.assertEqual(
+                    {}, structural(changed, runtime) if which == "feedback"
+                    else structural(feedback, changed),
+                    "independent structure must reject even with a newly approved digest",
+                )
+                self.assertEqual(
+                    {}, _source_bound_feedback_recovery_path(
+                        ast.parse(changed if which == "feedback" else feedback),
+                        ast.parse(changed if which == "runtime" else runtime),
+                    ),
+                    "the reviewed-source pin must also reject every changed AST",
+                )
 
     def test_mutation_function_aliases_preserve_governed_destination_taint(self) -> None:
         """Imported and assigned aliases cannot disguise a mutation primitive."""
