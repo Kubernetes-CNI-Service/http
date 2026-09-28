@@ -282,9 +282,160 @@ def _extend_mutation_aliases(
     return aliases
 
 
+def _source_scope_bindings(scope: ast.AST) -> dict[str, list[tuple[str, ast.AST]]]:
+    """Count every binding of names whose FFI provenance must stay unique."""
+    bindings: dict[str, list[tuple[str, ast.AST]]] = {}
+
+    def add(name: str, kind: str, node: ast.AST) -> None:
+        bindings.setdefault(name, []).append((kind, node))
+
+    if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        for name in _function_parameters(scope):
+            add(name, "parameter", scope)
+        for argument in (scope.args.vararg, scope.args.kwarg):
+            if argument is not None:
+                add(argument.arg, "parameter", argument)
+    for node in _walk_local_scope(scope):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                add(alias.asname or alias.name.split(".")[0], "import", alias)
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                add(alias.asname or alias.name, "import-from", alias)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            add(node.id, "store", node)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node is not scope:
+            add(node.name, "definition", node)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            add(node.name, "exception", node)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            for name in node.names:
+                add(name, "scope-directive", node)
+    return bindings
+
+
+def _source_bound_native_rename_calls(
+    tree: ast.AST, relative: str,
+) -> dict[ast.Call, str]:
+    """Prove only the three reviewed no-replace FFI calls in one source file.
+
+    A function/receiver spelling never grants the identity. Any ambiguous
+    import, local binding, C signature, platform guard, argv or flag removes
+    the corresponding proof; other native bridges remain unresolved.
+    """
+    if relative != "tools/deploy-shared-artifacts.py":
+        return {}
+
+    def mutates_imported_modules(scope: ast.AST) -> bool:
+        for node in _walk_local_scope(scope):
+            if not isinstance(node, (ast.Attribute, ast.Subscript)) or not isinstance(
+                node.ctx, (ast.Store, ast.Del),
+            ):
+                continue
+            receiver = node.value
+            while isinstance(receiver, (ast.Attribute, ast.Subscript)):
+                receiver = receiver.value
+            if isinstance(receiver, ast.Name) and receiver.id in {"ctypes", "os", "sys"}:
+                return True
+        return False
+
+    if mutates_imported_modules(tree):
+        return {}
+    module_bindings = _source_scope_bindings(tree)
+    for name in ("ctypes", "os", "sys"):
+        entries = module_bindings.get(name, ())
+        if (len(entries) != 1 or entries[0][0] != "import"
+                or not isinstance(entries[0][1], ast.alias)
+                or entries[0][1].name != name):
+            return {}
+    if module_bindings.get("getattr"):
+        return {}
+
+    def assigned_value(function: ast.AST, name: str) -> ast.AST | None:
+        values = [node.value for node in _walk_local_scope(function)
+                  if isinstance(node, ast.Assign) and len(node.targets) == 1
+                  and isinstance(node.targets[0], ast.Name)
+                  and node.targets[0].id == name]
+        return values[0] if len(values) == 1 else None
+
+    result: dict[ast.Call, str] = {}
+    signature = "(ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)"
+    cases = (
+        ("_rename_noreplace", "renameat2", "renameat2", "sys.platform.startswith('linux')", 1,
+         ("-100", "os.fsencode(source)", "-100", "os.fsencode(destination)")),
+        ("_rename_noreplace_at", "renameat2", "renameat2", "sys.platform.startswith('linux')", 1,
+         ("source_descriptor", "os.fsencode(source_name)",
+          "destination_descriptor", "os.fsencode(destination_name)")),
+        ("_rename_noreplace_at", "renameatx", "renameatx_np", "sys.platform == 'darwin'", 4,
+         ("source_descriptor", "os.fsencode(source_name)",
+          "destination_descriptor", "os.fsencode(destination_name)")),
+    )
+    for function_name, alias, symbol, guard_text, flag, expected_args in cases:
+        entries = module_bindings.get(function_name, ())
+        if (len(entries) != 1 or entries[0][0] != "definition"
+                or not isinstance(entries[0][1], ast.FunctionDef)):
+            continue
+        function = entries[0][1]
+        if function.decorator_list or mutates_imported_modules(function):
+            continue
+        bindings = _source_scope_bindings(function)
+        if any(bindings.get(name) for name in ("ctypes", "os", "sys", "getattr")):
+            continue
+        if (len(bindings.get("libc", ())) != 1
+                or len(bindings.get(alias, ())) != 1
+                or bindings["libc"][0][0] != "store"
+                or bindings[alias][0][0] != "store"):
+            continue
+        library = assigned_value(function, "libc")
+        operation = assigned_value(function, alias)
+        if (library is None or operation is None
+                or ast.unparse(library) != "ctypes.CDLL(None, use_errno=True)"
+                or ast.unparse(operation) != f"getattr(libc, '{symbol}', None)"):
+            continue
+        writes = [node for node in _walk_local_scope(function)
+                  if isinstance(node, ast.Assign) and len(node.targets) == 1
+                  and isinstance(node.targets[0], ast.Attribute)
+                  and isinstance(node.targets[0].value, ast.Name)
+                  and node.targets[0].value.id == alias]
+        if (len(writes) != 2 or {
+            ast.unparse(node.targets[0]): ast.unparse(node.value)
+            for node in writes
+        } != {f"{alias}.argtypes": signature,
+              f"{alias}.restype": "ctypes.c_int"}):
+            continue
+        for guard in (node for node in _walk_local_scope(function)
+                      if isinstance(node, ast.If)
+                      and ast.unparse(node.test) == guard_text):
+            body = ast.Module(body=guard.body, type_ignores=[])
+            descendants = set(ast.walk(body))
+            if operation not in descendants or any(write not in descendants for write in writes):
+                continue
+            if function_name == "_rename_noreplace":
+                if library not in descendants:
+                    continue
+            elif library.lineno >= guard.lineno:
+                continue
+            calls = [node for node in ast.walk(body)
+                     if isinstance(node, ast.Call)
+                     and isinstance(node.func, ast.Name) and node.func.id == alias]
+            if len(calls) != 1:
+                continue
+            call = calls[0]
+            if (len(call.args) != 5 or call.keywords
+                    or any(isinstance(arg, ast.Starred) for arg in call.args)
+                    or tuple(ast.unparse(arg) for arg in call.args[:4]) != expected_args
+                    or not isinstance(call.args[4], ast.Constant)
+                    or type(call.args[4].value) is not int
+                    or call.args[4].value != flag):
+                continue
+            result[call] = "libc." + symbol
+    return result
+
+
 def _mutation_destination(
     call: ast.Call, aliases: dict[str, str] | None = None,
     static_integers: dict[str, int] | None = None,
+    *, native_identity: str | None = None,
 ) -> ast.AST | None:
     aliases = aliases or {}
     name = called_name(call)
@@ -325,6 +476,15 @@ def _mutation_destination(
 
     if qualified in {"os.replace", "os.rename"}:
         return _argument(call, 1, "dst")
+    # A trusted source-bound proof, never a lexical `libc` spelling, grants
+    # the C ABI destination role. Expanded/starred argv is not an exact call.
+    if (native_identity == "libc.renamex_np" and len(call.args) == 3
+            and not call.keywords and not any(isinstance(arg, ast.Starred) for arg in call.args)):
+        return call.args[1]
+    if (native_identity in {"libc.renameat2", "libc.renameatx_np"}
+            and len(call.args) == 5 and not call.keywords
+            and not any(isinstance(arg, ast.Starred) for arg in call.args)):
+        return call.args[3]
     if name in {"replace", "rename"} and isinstance(call.func, ast.Attribute):
         return _argument(call, 0, "target")
     if name in {"copy", "copy2", "copyfile", "copytree", "move"}:
@@ -389,13 +549,19 @@ def _call_argument(
     )
 
 
-def generic_mutation_parameter_summaries(tree: ast.AST) -> dict[str, set[int]]:
+def generic_mutation_parameter_summaries(
+    tree: ast.AST, source_path: str | None = None,
+) -> dict[str, set[int]]:
     """Summarize which positional parameters can reach a mutation destination."""
-    cached = _GENERIC_MUTATION_SUMMARY_CACHE.get(tree)
+    cached = _GENERIC_MUTATION_SUMMARY_CACHE.get(tree) if source_path is None else None
     if cached is not None:
         return cached
     functions = production_functions(tree)
     module_aliases = _mutation_aliases(tree)
+    native_calls = (
+        _source_bound_native_rename_calls(tree, source_path)
+        if source_path is not None else {}
+    )
     summaries: dict[str, set[int]] = {}
     symbolic_by_function: dict[str, dict[str, set[int]]] = {}
     calls_by_function: dict[str, list[ast.Call]] = {}
@@ -451,7 +617,10 @@ def generic_mutation_parameter_summaries(tree: ast.AST) -> dict[str, set[int]]:
         static_integers = _function_static_integers(function)
         direct = set()
         for call in calls:
-            destination = _mutation_destination(call, aliases, static_integers)
+            destination = _mutation_destination(
+                call, aliases, static_integers,
+                native_identity=native_calls.get(call),
+            )
             if destination is not None:
                 direct.update(*(
                     symbolic.get(node.id, set())
@@ -492,7 +661,8 @@ def generic_mutation_parameter_summaries(tree: ast.AST) -> dict[str, set[int]]:
             before = len(summaries[name])
             summaries[name].update(discovered)
             changed |= len(summaries[name]) != before
-    _GENERIC_MUTATION_SUMMARY_CACHE[tree] = summaries
+    if source_path is None:
+        _GENERIC_MUTATION_SUMMARY_CACHE[tree] = summaries
     return summaries
 
 
@@ -945,10 +1115,16 @@ def _source_bound_setup_mapping_seed(
     return {"MAPPINGS"}
 
 
-def literal_governed_mutation_sinks(tree: ast.AST) -> set[str]:
+def literal_governed_mutation_sinks(
+    tree: ast.AST, source_path: str | None = None,
+) -> set[str]:
     """Find sinks from their destination spelling, independent of quiesce calls."""
     result = set()
     module_aliases = _mutation_aliases(tree)
+    native_calls = (
+        _source_bound_native_rename_calls(tree, source_path)
+        if source_path is not None else {}
+    )
     delegated_script_constants = _delegated_governed_script_constants(tree)
     module_governed = _source_bound_setup_mapping_seed(tree)
     string_values = {
@@ -998,10 +1174,23 @@ def literal_governed_mutation_sinks(tree: ast.AST) -> set[str]:
             node for node in _walk_local_scope(function)
             if isinstance(node, ast.Call)
         ):
-            destination = _mutation_destination(call, aliases, static_integers)
+            destination = _mutation_destination(
+                call, aliases, static_integers,
+                native_identity=native_calls.get(call),
+            )
             if destination is None:
                 continue
-            if _is_governed_destination(destination, governed):
+            governed_expression = destination
+            if (call in native_calls and isinstance(destination, ast.Call)
+                    and isinstance(destination.func, ast.Attribute)
+                    and isinstance(destination.func.value, ast.Name)
+                    and destination.func.value.id == "os"
+                    and destination.func.attr == "fsencode"
+                    and len(destination.args) == 1 and not destination.keywords):
+                # The source-bound ABI proof already verified this exact
+                # fsencode wrapper. Its argument is the filesystem path.
+                governed_expression = destination.args[0]
+            if _is_governed_destination(governed_expression, governed):
                 result.add(function.name)
         # A subprocess runner that consumes a command assembled from a
         # mechanically resolved governed-writer script is itself the mutation
@@ -1024,7 +1213,7 @@ def literal_governed_mutation_sinks(tree: ast.AST) -> set[str]:
             }
             if names & delegated_governed:
                 result.add(function.name)
-    summaries = generic_mutation_parameter_summaries(tree)
+    summaries = generic_mutation_parameter_summaries(tree, source_path)
     for function in functions.values():
         governed = semantic_governed_by_function[function.name]
         for call in (
@@ -2908,7 +3097,9 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             )
             production_trees[relative_path.as_posix()] = tree
             functions = production_functions(tree)
-            for name, indices in generic_mutation_parameter_summaries(tree).items():
+            for name, indices in generic_mutation_parameter_summaries(
+                tree, relative_path.as_posix(),
+            ).items():
                 if not indices:
                     continue
                 parameters = _function_parameters(functions[name])
@@ -2923,7 +3114,7 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
 
         for relative, tree in production_trees.items():
             relative_path = Path(relative)
-            discovered = literal_governed_mutation_sinks(tree)
+            discovered = literal_governed_mutation_sinks(tree, relative)
             external_hits = governed_external_sink_calls(
                 tree, repository_summaries,
             )
@@ -3193,6 +3384,119 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
                     expected,
                     None if destination is None else ast.unparse(destination),
                 )
+
+    def test_native_no_replace_ffi_destination_requires_proven_identity(self) -> None:
+        """A libc spelling alone never proves a native filesystem writer."""
+        cases = (
+            ("libc.renamex_np(source, destination, 4)", None, None),
+            ("libc.renameat2(-100, source, -100, destination, 1)", None, None),
+            ("libc.renameatx_np(-100, source, -100, destination, 4)", None, None),
+            ("libc.renamex_np(source, destination, 4)", "libc.renamex_np", "destination"),
+            ("renamer(-100, source, -100, destination, 1)", "libc.renameat2", "destination"),
+            ("renamer(-100, source, -100, destination, 4)", "libc.renameatx_np", "destination"),
+            ("renamer(-100, source, -100, destination, 1)", "libc.renamex_np", None),
+            ("renamer(-100, source, -100, destination, 1, 2)", "libc.renameat2", None),
+            ("renamer(-100, source, -100, destination, 1, 2)", "libc.renameatx_np", None),
+            ("renamer(-100, source, -100, dst=destination, flags=1)", "libc.renameat2", None),
+            ("renamer(-100, source, -100, *paths, 1)", "libc.renameat2", None),
+        )
+        for expression, identity, expected in cases:
+            with self.subTest(expression=expression):
+                call = ast.parse(expression, mode="eval").body
+                self.assertIsInstance(call, ast.Call)
+                destination = _mutation_destination(call, native_identity=identity)
+                self.assertEqual(
+                    expected,
+                    None if destination is None else ast.unparse(destination),
+                )
+
+    def test_native_no_replace_ffi_aliases_require_exact_source(self) -> None:
+        """The three reviewed C calls lose proof on provenance or ABI drift."""
+        relative = "tools/deploy-shared-artifacts.py"
+        source = (ROOT / relative).read_text(encoding="utf-8")
+
+        def inspect(text):
+            tree = ast.parse(text)
+            proven = _source_bound_native_rename_calls(tree, relative)
+            return sorted(
+                (identity, ast.unparse(_mutation_destination(
+                    call, native_identity=identity,
+                )))
+                for call, identity in proven.items()
+            )
+
+        expected = sorted((
+            ("libc.renameat2", "os.fsencode(destination)"),
+            ("libc.renameat2", "os.fsencode(destination_name)"),
+            ("libc.renameatx_np", "os.fsencode(destination_name)"),
+        ))
+        self.assertEqual(expected, inspect(source))
+        mutations = (
+            ("dynamic_symbol", 'getattr(libc, "renameat2", None)',
+             'getattr(libc, os.environ["SYMBOL"], None)'),
+            ("unknown_symbol", 'getattr(libc, "renameat2", None)',
+             'getattr(libc, "renameat3", None)'),
+            ("dynamic_library", "ctypes.CDLL(None, use_errno=True)",
+             'ctypes.CDLL(os.environ["LIB"], use_errno=True)'),
+            ("ctypes_shadow", "import ctypes\n", "import ctypes\nctypes = object()\n"),
+            ("os_shadow", "import os\n", "import os\nos = object()\n"),
+            ("ctypes_loader_rebound", "import ctypes\n",
+             "import ctypes\nctypes.CDLL = other_loader\n"),
+            ("os_encoder_rebound", "import os\n",
+             "import os\nos.fsencode = other_encoder\n"),
+            ("getattr_shadow", "libc = ctypes.CDLL(None, use_errno=True)",
+             "getattr = other_getattr\n        libc = ctypes.CDLL(None, use_errno=True)"),
+            ("libc_rebind", "renameat2 = getattr(libc, \"renameat2\", None)",
+             "libc = other_library\n        renameat2 = getattr(libc, \"renameat2\", None)"),
+            ("alias_rebind", "renameat2.restype = ctypes.c_int",
+             "renameat2.restype = ctypes.c_int\n            renameat2 = other_rename"),
+            ("missing_argtypes", "renameat2.argtypes = (", "renameat2.other_types = ("),
+            ("missing_restype", "renameat2.restype = ctypes.c_int",
+             "renameat2.other_type = ctypes.c_int"),
+            ("wrong_flag", "os.fsencode(destination_name), 1,",
+             "os.fsencode(destination_name), 2,"),
+            ("wrong_destination", "os.fsencode(destination_name), 1,",
+             "os.fsencode(source_name), 1,"),
+            ("starred_argv", "destination_descriptor, os.fsencode(destination_name), 1,",
+             "destination_descriptor, *[os.fsencode(destination_name)], 1,"),
+            ("darwin_wrong_flag", "0x00000004,", "0x00000008,"),
+        )
+        for label, before, after in mutations:
+            with self.subTest(mutation=label):
+                self.assertIn(before, source)
+                self.assertLess(len(inspect(source.replace(before, after, 1))), 3)
+
+    def test_proven_native_ffi_destination_reaches_governed_sink_oracle(self) -> None:
+        """A proved alias is a sink; path or no-replace drift closes proof."""
+        source = (
+            "import ctypes\nimport os\nimport sys\nfrom pathlib import Path\n"
+            "def _rename_noreplace(source, destination):\n"
+            "    destination = Path('/srv/http/01-global.yaml')\n"
+            "    if sys.platform.startswith('linux'):\n"
+            "        libc = ctypes.CDLL(None, use_errno=True)\n"
+            "        renameat2 = getattr(libc, 'renameat2', None)\n"
+            "        if renameat2 is not None:\n"
+            "            renameat2.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)\n"
+            "            renameat2.restype = ctypes.c_int\n"
+            "            renameat2(-100, os.fsencode(source), -100, os.fsencode(destination), 1)\n"
+        )
+        relative = "tools/deploy-shared-artifacts.py"
+        self.assertIn(
+            "_rename_noreplace",
+            literal_governed_mutation_sinks(ast.parse(source), source_path=relative),
+        )
+        self.assertNotIn(
+            "_rename_noreplace",
+            literal_governed_mutation_sinks(ast.parse(source), source_path="other.py"),
+        )
+        self.assertNotIn(
+            "_rename_noreplace",
+            literal_governed_mutation_sinks(
+                ast.parse(source.replace("os.fsencode(destination), 1)",
+                                         "os.fsencode(destination), 2)")),
+                source_path=relative,
+            ),
+        )
 
     def test_mutation_function_aliases_preserve_governed_destination_taint(self) -> None:
         """Imported and assigned aliases cannot disguise a mutation primitive."""
