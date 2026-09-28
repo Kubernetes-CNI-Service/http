@@ -40,4 +40,6 @@ PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B test_cases/run_related_tests.p
 
 任何失败、未批准变更或 runner 安全检查错误都必须阻断发布。禁止通过删除、跳过、弱化测试，手工编辑批准 ledger，或让测试从当前实现复制结果来绕过失败。若需求确实改变，应先独立确认新合同并更新相应预期，再修正实现并重新运行测试。
 
+2026-09-28 owner 明确授权的窄例外：仅 REQ10C 的三个“非协作的同 UID crontab 写者在读取后插入任务”测试，在 AIR/prod **验证**期间可作为已知 FAIL 接受；前提是其他同 UID crontab 写者在安装、自动移除和 unsetup 的整个读—改—写窗口保持静默，并按 `test_cases/REAL_ENVIRONMENT.md` 留存见证。这三项必须继续执行、保留原断言并在全量输出中如实报告 FAIL；只能用显式 `--validation-only` 取得与普通发布证明严格区分的验证证明。除此三项外的任何失败、错误、新增跳过、证明不一致或环境门禁错误仍阻断验证；本例外不授权最终生产发布，也不允许手工编辑 ledger 或绕过正式 load/sync/package 检查。
+
 详细规则见 `test_cases/README.md` 和 `test_cases/CHANGE_AWARE_TESTING.md`。`test_cases/` 只属于开发与验证，不进入生产 upload/sync 包。

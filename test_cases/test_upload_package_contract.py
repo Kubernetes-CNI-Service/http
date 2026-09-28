@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr
 import errno
 import hashlib
 import importlib.util
@@ -146,6 +146,51 @@ def write_sparse_self_extracting_image(path: Path) -> None:
 
 
 class UploadPackageContractTests(unittest.TestCase):
+    def test_issue0016_validation_only_intent_flows_across_load_sync_and_package(self):
+        self.assertTrue(load_tool.parse_args([
+            "sample", "--air", "--validation-only",
+        ]).validation_only)
+        self.assertTrue(upload_tool.parse_args([
+            "sample", "host.example", "--validation-only",
+        ]).validation_only)
+        sync_path = TOOLS / "sync-code.py"
+        spec = importlib.util.spec_from_file_location("sync_validation_contract", sync_path)
+        assert spec and spec.loader
+        sync_tool = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = sync_tool
+        spec.loader.exec_module(sync_tool)
+        self.assertTrue(sync_tool.parse_args([
+            "sample", "host.example", "--validation-only",
+        ]).validation_only)
+        for tool in (upload_tool, sync_tool):
+            with self.subTest(tool=tool.__name__), mock.patch.object(
+                tool.subprocess, "run",
+                return_value=subprocess.CompletedProcess([], 0),
+            ) as run:
+                tool.run_predeploy_test_gate(validation_only=True)
+                self.assertIn("--validation-only", run.call_args.args[0])
+                run.reset_mock()
+                tool.verify_predeploy_test_approval(validation_only=True)
+                self.assertIn("--validation-only", run.call_args.args[0])
+        with mock.patch.object(load_tool, "_run_local_test_runner") as run:
+            load_tool.run_local_full_test_gate(validation_only=True)
+            self.assertEqual(["--all", "--validation-only"], run.call_args_list[0].args[0])
+            self.assertEqual(
+                ["--check", "--require-full", "--validation-only"],
+                run.call_args_list[1].args[0],
+            )
+
+    def test_issue0016_validation_load_rejects_all_scope_and_preview(self):
+        for argv in (
+            ["sample", "--validation-only"],
+            ["sample", "--air", "--dry-run", "--validation-only"],
+        ):
+            with self.subTest(argv=argv), mock.patch.object(
+                load_tool, "run_local_full_test_gate",
+            ) as run, redirect_stderr(io.StringIO()):
+                self.assertEqual(1, load_tool.cli(argv))
+                run.assert_not_called()
+
     def test_upload_content_and_overwrite_options_explain_their_risks(self):
         result = subprocess.run(
             [sys.executable, "-B", str(TOOLS / "tar-for-upload.py"), "--help"],

@@ -246,6 +246,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "legacy_host", nargs="?", help=argparse.SUPPRESS,
     )
     parser.add_argument("--port", type=int, default=22, help="SSH 端口（默认 22）")
+    parser.add_argument(
+        "--validation-only", action="store_true",
+        help="仅 AIR/prod 验证：接受精确 ISSUE-0016 验证证明，不是生产发布证明",
+    )
     parser.add_argument("--identity", type=Path, help="SSH 私钥路径")
     parser.add_argument(
         "--remote-root", default="/var/www/html",
@@ -343,7 +347,7 @@ def validate_args(args: argparse.Namespace) -> None:
         raise RuntimeError("本机未找到 ssh")
 
 
-def run_predeploy_test_gate() -> None:
+def run_predeploy_test_gate(*, validation_only: bool = False) -> None:
     """Require the exact full-suite attestation created by local load."""
     runner = PREDEPLOY_TEST_RUNNER
     if not runner.is_file() or runner.is_symlink():
@@ -351,6 +355,8 @@ def run_predeploy_test_gate() -> None:
     check = [
         sys.executable, "-B", str(runner), "--check", "--require-full",
     ]
+    if validation_only:
+        check.append("--validation-only")
     print("[TEST] 正式同步前复用精确全量测试证明：" + shlex.join(check))
     completed = subprocess.run(check, cwd=ROOT, shell=False, check=False)
     if completed.returncode == 0:
@@ -362,7 +368,7 @@ def run_predeploy_test_gate() -> None:
     )
 
 
-def verify_predeploy_test_approval() -> None:
+def verify_predeploy_test_approval(*, validation_only: bool = False) -> None:
     """Recheck approved bytes after freezing the exact deployment receipt."""
     runner = PREDEPLOY_TEST_RUNNER
     if not runner.is_file() or runner.is_symlink():
@@ -370,6 +376,8 @@ def verify_predeploy_test_approval() -> None:
     command = [
         sys.executable, "-B", str(runner), "--check", "--require-full",
     ]
+    if validation_only:
+        command.append("--validation-only")
     print("[TEST] 冻结部署源码后的批准状态复核：" + shlex.join(command))
     completed = subprocess.run(
         command, cwd=ROOT, shell=False, check=False,
@@ -1472,7 +1480,7 @@ def main(argv: list[str] | None = None) -> int:
                 "不会覆盖 service IP、公钥列表、版本或升级策略"
             )
         if not args.dry_run:
-            run_predeploy_test_gate()
+            run_predeploy_test_gate(**({"validation_only": True} if args.validation_only else {}))
         # Freeze the exact post-gate source authority.  In formal mode these
         # bytes are generated only after a current full-suite attestation check,
         # so an older helper
@@ -1492,7 +1500,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         args.password_contract = load_frozen_password_contract(manifest_path)
         if not args.dry_run:
-            verify_predeploy_test_approval()
+            verify_predeploy_test_approval(**({"validation_only": True} if args.validation_only else {}))
         # Publish the authority receipt last.  A partial rsync therefore
         # cannot authorize a mixed old/new source tree at image build time.
         jobs.append(deployment_source_manifest_job(

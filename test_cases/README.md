@@ -89,6 +89,14 @@ PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B test_cases/run_related_tests.p
 发布前合同是：生产行为变更必须先或同时更新独立测试预期；确认
 `script_test_manifest.json` 的 direct 与 workflow 映射；执行 `--all` 并全部通过；随后执行
 `--check --require-full`，确认源码、测试、manifest、执行环境和批准状态仍是同一组精确身份。
+AIR/prod 验证阶段有且只有 ISSUE-0016 的三个同 UID 非协作 crontab 并发反例，经 owner
+2026-09-28 明确授权登记为已知 FAIL。三个测试仍实际运行且断言不变；全量结果必须
+明示 `failures=3`、`errors=0`，原有四项真实环境 skip 的身份不可增加或替换，不能把三项写成 PASS。
+使用 `--all --validation-only` 运行全量，并用 `--check --require-full --validation-only`
+复核；正式 AIR/prod 验证 load/sync/package 必须各自显式传 `--validation-only`。
+普通 `--all` 和不带验证意图的正式检查继续失败，验证证明不能作为最终发布证明。
+该例外以其他同 UID crontab 写者在安装、自动移除及 unsetup 的完整读—改—写窗口保持静默
+为前提，见 `REAL_ENVIRONMENT.md` 的 REQ10C 卡片；不证明任意并发安全，不授予最终生产发布。
 `sync-code.py` 与 `tar-for-upload.py` 只复核并复用这份证明，不会运行全量测试；证明缺失、过期
 或执行环境不匹配时必须要求重新完成本机正式 load，并在任何打包或远端连接前停止。Linux
 管理服务器 load 与 macOS `--dry-run` 不运行开发测试。任一步失败都必须阻断

@@ -53,6 +53,25 @@ ROOT_ENTRYPOINT_SCENARIO = "root-entrypoint-workflow"
 ROOT_ENTRYPOINT_NOT_COVERED = (
     "NOT COVERED (requires Linux EUID 0 private namespace)"
 )
+ISSUE0016_FAILURE_IDS = (
+    "test_cases.test_req10c_auto_workflow.Req10CAutoUnsetupWorkflowTests."
+    "test_install_preserves_noncooperating_foreign_cron_or_stops_before_write",
+    "test_cases.test_req10c_auto_workflow.Req10CAutoUnsetupWorkflowTests."
+    "test_remove_preserves_noncooperating_foreign_cron_or_stops_before_write",
+    "test_cases.test_req10c_auto_workflow.Req10CAutoUnsetupWorkflowTests."
+    "test_unsetup_preserves_noncooperating_foreign_cron_or_stops_before_write",
+)
+VALIDATION_BASELINE_SKIP_IDS = (
+    "test_cases.test_docker_management_ssh_key.DockerManagementSshKeyWorkflowTests."
+    "test_real_deploy_entrypoint_drives_locked_helper_then_11_load",
+    "test_cases.test_image_context_safety.SyntheticDockerMembershipTests."
+    "test_copy_membership_with_each_independent_ignore_entrypoint",
+    "test_cases.test_monitor_authority_entrypoints.MonitorAuthorityRootNamespaceScenario."
+    "test_real_root_entrypoint_workflow",
+    "test_cases.test_monitor_stack_review.ControlPlaneTests."
+    "test_yaml_backup_memory_socket_is_private_and_inode_pinned",
+)
+ISSUE0016_FAILURE_FRAGMENT = "silently erased a non-cooperating foreign entry"
 GENERATED_RUNTIME_SCRIPTS = frozenset({
     "ztp/ztp-bootstrap_oob.sh",
     "ztp/ztp-bootstrap_oobofoob.sh",
@@ -1075,6 +1094,7 @@ def full_suite_scenario_coverage() -> dict[str, str]:
 
 def full_suite_attestation(
     snapshot: Snapshot, *, environment: Mapping[str, object] | None = None,
+    validation_only: bool = False,
 ) -> dict:
     """Bind a successful full discovery run to exact bytes and environment."""
     canonical = json.dumps(
@@ -1092,12 +1112,20 @@ def full_suite_attestation(
         raise ImpactError(
             "full-suite environment lock does not match the tested source snapshot"
         )
-    return {
+    result = {
         "schema_version": 1,
         "snapshot_sha256": hashlib.sha256(canonical).hexdigest(),
         "environment": dict(environment),
         "scenario_coverage": full_suite_scenario_coverage(),
     }
+    if validation_only:
+        result["validation_only"] = {
+            "issue": "ISSUE-0016",
+            "known_failed_tests": list(ISSUE0016_FAILURE_IDS),
+            "baseline_skipped_tests": list(VALIDATION_BASELINE_SKIP_IDS),
+            "not_a_release_proof": True,
+        }
+    return result
 
 
 def full_suite_coverage_summary(value: Mapping[str, object]) -> str:
@@ -1108,11 +1136,13 @@ def full_suite_coverage_summary(value: Mapping[str, object]) -> str:
     return f"{ROOT_ENTRYPOINT_SCENARIO}: {ROOT_ENTRYPOINT_NOT_COVERED}"
 
 
-def full_suite_attestation_is_current(snapshot: Snapshot, value: object) -> bool:
+def full_suite_attestation_is_current(
+    snapshot: Snapshot, value: object, *, validation_only: bool = False,
+) -> bool:
     if not isinstance(value, dict):
         return False
     try:
-        current = full_suite_attestation(snapshot)
+        current = full_suite_attestation(snapshot, validation_only=validation_only)
     except ImpactError:
         return False
     return value == current
@@ -1124,6 +1154,7 @@ def atomic_write_approvals(
     *,
     full_suite: bool = False,
     full_suite_environment_value: Mapping[str, object] | None = None,
+    validation_only: bool = False,
     post_publish_verify: Callable[[], None] | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1152,6 +1183,7 @@ def atomic_write_approvals(
             )
         approved["full_suite_attestation"] = full_suite_attestation(
             snapshot, environment=full_suite_environment_value,
+            validation_only=validation_only,
         )
     payload = json.dumps(
         approved, ensure_ascii=False, indent=2, sort_keys=True,
@@ -1444,6 +1476,82 @@ def run_selection(root: Path, selection: Selection, verbose: bool) -> int:
     return 0 if result.returncode == 0 else 1
 
 
+def issue0016_validation_report_is_exact(value: object) -> bool:
+    """Approve only the original three FAILs, with no new skips or masking."""
+    if not isinstance(value, dict) or set(value) != {
+        "tests_run", "failures", "errors", "skipped", "expected_failures",
+        "unexpected_successes",
+    }:
+        return False
+    if type(value["tests_run"]) is not int or value["tests_run"] < 3735:
+        return False
+    for field in ("failures", "errors", "skipped", "expected_failures", "unexpected_successes"):
+        if not isinstance(value[field], list):
+            return False
+    if value["errors"] or value["expected_failures"] or value["unexpected_successes"]:
+        return False
+    failures = value["failures"]
+    if len(failures) != len(ISSUE0016_FAILURE_IDS):
+        return False
+    if not all(
+        isinstance(item, dict) and set(item) == {"id", "traceback"}
+        and isinstance(item["id"], str) and isinstance(item["traceback"], str)
+        and ISSUE0016_FAILURE_FRAGMENT in item["traceback"]
+        for item in failures
+    ):
+        return False
+    if {item["id"] for item in failures} != set(ISSUE0016_FAILURE_IDS):
+        return False
+    skipped = value["skipped"]
+    if len(skipped) != len(VALIDATION_BASELINE_SKIP_IDS):
+        return False
+    if not all(
+        isinstance(item, dict) and set(item) == {"id", "reason"}
+        and isinstance(item["id"], str) and isinstance(item["reason"], str)
+        for item in skipped
+    ):
+        return False
+    return {item["id"] for item in skipped} == set(VALIDATION_BASELINE_SKIP_IDS)
+
+
+def run_validation_selection(root: Path, selection: Selection, verbose: bool) -> int:
+    """Run unchanged assertions and accept only the exact validation exception."""
+    if not selection.full_suite:
+        raise ImpactError("validation-only mode requires canonical full discovery")
+    preflight_selection(root, selection)
+    with tempfile.TemporaryDirectory(prefix="http-v3-validation-report-") as directory:
+        report_path = Path(directory) / "unittest-result.json"
+        command = [
+            sys.executable, "-B", "-m", "test_cases.validation_unittest",
+            str(report_path),
+        ]
+        if verbose:
+            command.append("-v")
+        environment = os.environ.copy()
+        environment.setdefault("PYTHONPYCACHEPREFIX", "/tmp/http-related-test-pyc")
+        completed = subprocess.run(
+            command, cwd=root, env=environment, stdin=subprocess.DEVNULL,
+            check=False,
+        )
+        try:
+            info = report_path.lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 1_000_000:
+                raise ImpactError("unsafe or oversized validation test report")
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, ImpactError) as exc:
+            print(f"validation-only report unavailable: {exc}", file=sys.stderr)
+            return 1
+        if completed.returncode != 0 or not issue0016_validation_report_is_exact(report):
+            print("validation-only test report is not the exact ISSUE-0016 exception", file=sys.stderr)
+            return 1
+        print(
+            "VALIDATION ONLY: three ISSUE-0016 tests remain FAIL; "
+            "four unchanged real-environment skips; all others passed; "
+            "this is not a final release proof"
+        )
+        return 0
+
+
 def print_selection(selection: Selection) -> None:
     print("mode:", "full-suite" if selection.full_suite else "related-tests")
     if selection.changed_paths:
@@ -1485,6 +1593,11 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--git-base", metavar="REF")
     result.add_argument("--git", action="store_true", help="include staged, unstaged, and untracked Git paths")
     result.add_argument("--all", action="store_true", help="run canonical full unittest discovery")
+    result.add_argument(
+        "--validation-only", action="store_true",
+        help=("AIR/prod validation only: require exactly the three real ISSUE-0016 "
+              "FAILs and no other failure, error, or new skip; never a release proof"),
+    )
     result.add_argument("--check", action="store_true", help="validate mappings and require no unapproved hashes")
     result.add_argument(
         "--require-full", action="store_true",
@@ -1529,6 +1642,7 @@ def _one_cycle(args: argparse.Namespace, *, watch: bool = False) -> tuple[int, s
             return 4, json.dumps(snapshot_as_json(before), sort_keys=True)
         if args.require_full and not full_suite_attestation_is_current(
             before, approvals.get("full_suite_attestation"),
+            validation_only=args.validation_only,
         ):
             print(
                 "full-suite attestation is missing, stale, or from a different environment",
@@ -1585,7 +1699,10 @@ def _one_cycle(args: argparse.Namespace, *, watch: bool = False) -> tuple[int, s
     if args.list:
         return 0, state_key
     try:
-        result = run_selection(root, selection, args.verbose)
+        if args.validation_only:
+            result = run_validation_selection(root, selection, args.verbose)
+        else:
+            result = run_selection(root, selection, args.verbose)
     except ImpactError as exc:
         # Keep the failed source fingerprint for watch as well. A capability
         # refusal is an attempted selection, not a reason to busy-retry Git.
@@ -1597,6 +1714,7 @@ def _one_cycle(args: argparse.Namespace, *, watch: bool = False) -> tuple[int, s
     if selection.full_suite:
         print(full_suite_coverage_summary(full_suite_attestation(
             before, environment=before_environment,
+            validation_only=args.validation_only,
         )))
 
     after_manifest = load_and_validate_manifest(root, manifest_path)
@@ -1613,6 +1731,7 @@ def _one_cycle(args: argparse.Namespace, *, watch: bool = False) -> tuple[int, s
             full_suite_verified = True
         elif full_suite_attestation_is_current(
             after, approvals.get("full_suite_attestation"),
+            validation_only=args.validation_only,
         ):
             approval_environment = full_suite_environment(
                 expected_lock_sha256=_snapshot_toplevel_lock_sha256(after),
@@ -1646,6 +1765,7 @@ def _one_cycle(args: argparse.Namespace, *, watch: bool = False) -> tuple[int, s
             after,
             full_suite=full_suite_verified,
             full_suite_environment_value=approval_environment,
+            validation_only=args.validation_only,
             post_publish_verify=verify_published_approval,
         )
         print(f"approved hashes updated atomically: {approvals_path}")
@@ -1654,6 +1774,10 @@ def _one_cycle(args: argparse.Namespace, *, watch: bool = False) -> tuple[int, s
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
+    if args.validation_only and not (
+        args.all or (args.check and args.require_full)
+    ):
+        parser().error("--validation-only requires --all or --check --require-full")
     if args.interval < 0.2:
         parser().error("--interval must be at least 0.2 seconds")
     if args.preflight and (args.check or args.list or args.list_suites or args.watch):

@@ -178,6 +178,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help=("SSH destination, for example ubuntu@worker.example "
                               "(legacy alternative to positional HOST)"))
     parser.add_argument("--port", type=int, default=22, help="SSH port (default: 22)")
+    parser.add_argument(
+        "--validation-only", action="store_true",
+        help="AIR/prod validation only: exact ISSUE-0016 proof; not final release",
+    )
     parser.add_argument("--identity", type=Path, help="SSH private key")
     parser.add_argument(
         "--transport", choices=("auto", "rsync", "scp"), default="auto",
@@ -558,7 +562,7 @@ def run_streaming(command: list[str], *, timeout: int) -> None:
         )
 
 
-def run_predeploy_test_gate() -> None:
+def run_predeploy_test_gate(*, validation_only: bool = False) -> None:
     """Require the exact full-suite attestation created by local load."""
     runner = PREDEPLOY_TEST_RUNNER
     if not runner.is_file() or runner.is_symlink():
@@ -566,6 +570,8 @@ def run_predeploy_test_gate() -> None:
     check = [
         sys.executable, "-B", str(runner), "--check", "--require-full",
     ]
+    if validation_only:
+        check.append("--validation-only")
     print("[TEST] 正式上传/部署前复用精确全量测试证明：" + shlex.join(check))
     completed = subprocess.run(check, cwd=ROOT, shell=False, check=False)
     if completed.returncode == 0:
@@ -578,7 +584,7 @@ def run_predeploy_test_gate() -> None:
     )
 
 
-def verify_predeploy_test_approval() -> None:
+def verify_predeploy_test_approval(*, validation_only: bool = False) -> None:
     """Reject source/test drift after packaging and before the first SSH call."""
     runner = PREDEPLOY_TEST_RUNNER
     if not runner.is_file() or runner.is_symlink():
@@ -586,6 +592,8 @@ def verify_predeploy_test_approval() -> None:
     command = [
         sys.executable, "-B", str(runner), "--check", "--require-full",
     ]
+    if validation_only:
+        command.append("--validation-only")
     print("[TEST] 上传前复核批准状态：" + shlex.join(command))
     completed = subprocess.run(
         command, cwd=ROOT, shell=False, check=False,
@@ -596,6 +604,10 @@ def verify_predeploy_test_approval() -> None:
             "远端未连接、未修改，请重新运行"
         )
     print("[OK] 源码、测试和影响矩阵仍与全量测试批准状态一致")
+
+
+def _validation_gate_kwargs(args: argparse.Namespace) -> dict[str, bool]:
+    return {"validation_only": True} if getattr(args, "validation_only", False) else {}
 
 
 def _copy_stable_regular(
@@ -1082,7 +1094,7 @@ def build_relay_bundle(args: argparse.Namespace, project: Path) -> Path:
         )
         with frozen_archive_for_upload(archive) as frozen:
             frozen_archive, frozen_sha256 = frozen
-            verify_predeploy_test_approval()
+            verify_predeploy_test_approval(**_validation_gate_kwargs(args))
             return publish_relay_bundle(
                 args.relay_bundle,
                 frozen_archive,
@@ -1596,7 +1608,7 @@ def main(argv: list[str] | None = None) -> int:
         args = parse_args(argv)
         project = package_core.resolve_project(args.project)
         if getattr(args, "relay_bundle", None) is not None:
-            run_predeploy_test_gate()
+            run_predeploy_test_gate(**_validation_gate_kwargs(args))
             build_relay_bundle(args, project)
             print("[NEXT] Copy the complete directory to the target server, then run:")
             print("       sha256sum --check SHA256SUMS")
@@ -1613,10 +1625,10 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.deploy_uploaded is not None:
             args.deploy = True
-            run_predeploy_test_gate()
+            run_predeploy_test_gate(**_validation_gate_kwargs(args))
             with frozen_archive_for_upload(args.deploy_uploaded) as frozen:
                 frozen_archive, frozen_sha256 = frozen
-                verify_predeploy_test_approval()
+                verify_predeploy_test_approval(**_validation_gate_kwargs(args))
                 validate_uploaded_archive_for_deploy(frozen_archive, project)
                 args.deployment_guard_source = deployment_guard_source_from_archive(
                     frozen_archive,
@@ -1637,7 +1649,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         resolve_apps_policy(args)
         if not args.dry_run:
-            run_predeploy_test_gate()
+            run_predeploy_test_gate(**_validation_gate_kwargs(args))
         if args.output is None:
             if args.dry_run:
                 preview_dir = tempfile.TemporaryDirectory(prefix="http-upload-preview-")
@@ -1654,7 +1666,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         with frozen_archive_for_upload(archive) as frozen:
             frozen_archive, frozen_sha256 = frozen
-            verify_predeploy_test_approval()
+            verify_predeploy_test_approval(**_validation_gate_kwargs(args))
             args.deployment_guard_source = deployment_guard_source_from_archive(
                 frozen_archive,
             )

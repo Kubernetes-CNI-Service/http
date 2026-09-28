@@ -427,16 +427,18 @@ def _run_local_test_runner(arguments: list[str], label: str) -> None:
         raise LoadError(f"{label}失败（exit={completed.returncode}）")
 
 
-def run_local_full_test_gate() -> None:
+def run_local_full_test_gate(*, validation_only: bool = False) -> None:
     """Run the canonical full suite and issue an exact local attestation."""
-    _run_local_test_runner(["--all"], "本机正式 load 前全量测试")
-    verify_local_full_test_attestation()
+    intent = ["--validation-only"] if validation_only else []
+    _run_local_test_runner(["--all", *intent], "本机正式 load 前全量测试")
+    verify_local_full_test_attestation(validation_only=validation_only)
 
 
-def verify_local_full_test_attestation() -> None:
+def verify_local_full_test_attestation(*, validation_only: bool = False) -> None:
     """Require the exact full-suite attestation without running tests."""
+    intent = ["--validation-only"] if validation_only else []
     _run_local_test_runner(
-        ["--check", "--require-full"], "本机 load 全量测试证明复核",
+        ["--check", "--require-full", *intent], "本机 load 全量测试证明复核",
     )
 
 
@@ -7629,6 +7631,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--dry-run", action="store_true", help="仅显示动作，不安装、生成或启动")
     parser.add_argument(
+        "--validation-only", action="store_true",
+        help=("仅 AIR/prod 验证：正式门禁只接受精确三项 ISSUE-0016 已知 FAIL；"
+              "不是最终生产发布证明"),
+    )
+    parser.add_argument(
         "--no-upgrade", action="store_true",
         help="所有设备保留当前系统版本；跳过 .bin 检查并禁止 bootstrap 执行镜像升级",
     )
@@ -8272,14 +8279,16 @@ def cli(argv: list[str] | None = None) -> int:
         args = parse_args(requested_argv)
         deployment_scope = validate_deployment_scope_options(args)
         validate_switch_scope_options(args, deployment_scope)
+        if args.validation_only and (deployment_scope not in {"air", "prod"} or args.dry_run):
+            raise LoadError("--validation-only 仅可用于正式 AIR/prod 验证 load")
         local_formal_load = (
             runtime_os().casefold() == "darwin" and not args.dry_run
         )
         if local_formal_load:
-            run_local_full_test_gate()
+            run_local_full_test_gate(validation_only=args.validation_only)
         result = main(requested_argv)
         if result == 0 and local_formal_load:
-            verify_local_full_test_attestation()
+            verify_local_full_test_attestation(validation_only=args.validation_only)
         return result
     except (LoadError, OSError, ValueError, RuntimeError) as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)

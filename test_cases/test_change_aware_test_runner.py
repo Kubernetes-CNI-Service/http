@@ -1539,6 +1539,97 @@ class ImpactManifestTests(unittest.TestCase):
 
 
 class ApprovalLedgerTests(unittest.TestCase):
+    def test_issue0016_validation_report_accepts_only_three_real_known_failures(self):
+        report = {
+            "tests_run": 3735,
+            "failures": [
+                {"id": test_id,
+                 "traceback": "AssertionError: install silently erased a non-cooperating foreign entry"}
+                for test_id in RUNNER.ISSUE0016_FAILURE_IDS
+            ],
+            "errors": [],
+            "skipped": [
+                {"id": test_id, "reason": "existing real-environment exclusion"}
+                for test_id in RUNNER.VALIDATION_BASELINE_SKIP_IDS
+            ],
+            "expected_failures": [],
+            "unexpected_successes": [],
+        }
+        self.assertTrue(RUNNER.issue0016_validation_report_is_exact(report))
+        for changed in (
+            {**report, "tests_run": 3734},
+            {**report, "failures": report["failures"][:-1]},
+            {**report, "failures": report["failures"] + [{"id": "other", "traceback": "x"}]},
+            {**report, "failures": [{**report["failures"][0], "traceback": "unrelated failure"}] + report["failures"][1:]},
+            {**report, "errors": [{"id": "other", "traceback": "x"}]},
+            {**report, "skipped": report["skipped"][:-1]},
+            {**report, "skipped": report["skipped"] + [{"id": "other", "reason": "x"}]},
+            {**report, "expected_failures": [{"id": "other", "traceback": "x"}]},
+            {**report, "unexpected_successes": ["other"]},
+        ):
+            with self.subTest(changed=changed):
+                self.assertFalse(RUNNER.issue0016_validation_report_is_exact(changed))
+
+    def test_issue0016_validation_attestation_is_not_normal_release_proof(self):
+        manifest = RUNNER.load_and_validate_manifest(ROOT, MANIFEST_PATH)
+        snapshot = RUNNER.make_snapshot(ROOT, MANIFEST_PATH, manifest)
+        validation = RUNNER.full_suite_attestation(snapshot, validation_only=True)
+        self.assertEqual(
+            list(RUNNER.ISSUE0016_FAILURE_IDS),
+            validation["validation_only"]["known_failed_tests"],
+        )
+        self.assertTrue(RUNNER.full_suite_attestation_is_current(
+            snapshot, validation, validation_only=True,
+        ))
+        self.assertFalse(RUNNER.full_suite_attestation_is_current(snapshot, validation))
+        self.assertFalse(RUNNER.full_suite_attestation_is_current(
+            snapshot, RUNNER.full_suite_attestation(snapshot), validation_only=True,
+        ))
+
+    def test_validation_only_runner_intent_is_explicit(self):
+        self.assertTrue(RUNNER.parser().parse_args(["--all", "--validation-only"]).validation_only)
+        self.assertTrue(RUNNER.parser().parse_args([
+            "--check", "--require-full", "--validation-only",
+        ]).validation_only)
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            RUNNER.main(["--validation-only"])
+
+    def test_validation_only_ledger_cannot_pass_the_normal_full_gate(self):
+        manifest = RUNNER.load_and_validate_manifest(ROOT, MANIFEST_PATH)
+        snapshot = RUNNER.make_snapshot(ROOT, MANIFEST_PATH, manifest)
+        with tempfile.TemporaryDirectory() as directory:
+            approvals = Path(directory) / "approved.json"
+            RUNNER.atomic_write_approvals(
+                approvals, snapshot, full_suite=True, validation_only=True,
+            )
+            strict = RUNNER.parser().parse_args([
+                "--approvals", str(approvals), "--check", "--require-full",
+            ])
+            validation = RUNNER.parser().parse_args([
+                "--approvals", str(approvals), "--check", "--require-full",
+                "--validation-only",
+            ])
+            with redirect_stderr(io.StringIO()):
+                self.assertEqual(5, RUNNER._one_cycle(strict)[0])
+            self.assertEqual(0, RUNNER._one_cycle(validation)[0])
+
+    def test_validation_only_full_approval_requires_the_exact_runner_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            approvals = Path(directory) / "approved.json"
+            args = RUNNER.parser().parse_args([
+                "--approvals", str(approvals), "--all", "--validation-only",
+            ])
+            with mock.patch.object(RUNNER, "run_validation_selection", return_value=1):
+                self.assertEqual(1, RUNNER._one_cycle(args)[0])
+            self.assertFalse(approvals.exists())
+            with mock.patch.object(RUNNER, "run_validation_selection", return_value=0):
+                self.assertEqual(0, RUNNER._one_cycle(args)[0])
+            payload = json.loads(approvals.read_text(encoding="utf-8"))
+            self.assertEqual(
+                "ISSUE-0016",
+                payload["full_suite_attestation"]["validation_only"]["issue"],
+            )
+
     def test_hash_change_is_pending_and_approval_snapshot_is_exact(self):
         snapshot = RUNNER.Snapshot(
             manifest_sha256="a" * 64,
