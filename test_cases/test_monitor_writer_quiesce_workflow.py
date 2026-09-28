@@ -1783,33 +1783,95 @@ def _argparse_namespace_innocent(tree: ast.AST, aliases: set[str]) -> bool:
     """
     reflective_names = {"globals", "vars", "locals", "__import__", "eval", "exec", "compile"}
     sys_aliases = {"sys"}
+    importlib_aliases: set[str] = set()
+    import_module_aliases: set[str] = set()
+    parents = {
+        child: parent for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+
+    def trusted_instance_self(node: ast.AST) -> bool:
+        """Only a non-rebound class-method receiver may use benign setattr."""
+        scope = parents.get(node)
+        while scope is not None and not isinstance(
+            scope, (ast.FunctionDef, ast.AsyncFunctionDef),
+        ):
+            scope = parents.get(scope)
+        if not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return False
+        if not isinstance(parents.get(scope), ast.ClassDef) or scope.decorator_list:
+            return False
+        if not scope.args.args or scope.args.args[0].arg != "self":
+            return False
+        return not any(
+            (
+                isinstance(child, ast.Name) and child.id == "self"
+                and isinstance(child.ctx, (ast.Store, ast.Del))
+            ) or (
+                isinstance(child, (ast.Global, ast.Nonlocal))
+                and "self" in child.names
+            )
+            for child in _walk_local_scope(scope)
+        )
+
     for node in getattr(tree, "body", ()):
         if isinstance(node, ast.Import):
             sys_aliases.update(
                 alias.asname or "sys" for alias in node.names if alias.name == "sys"
             )
+            importlib_aliases.update(
+                alias.asname or "importlib" for alias in node.names
+                if alias.name == "importlib"
+            )
         elif isinstance(node, ast.ImportFrom) and node.module == "sys":
             if any(alias.name == "modules" for alias in node.names):
                 return False
+        elif isinstance(node, ast.ImportFrom) and node.module == "importlib":
+            import_module_aliases.update(
+                alias.asname or alias.name for alias in node.names
+                if alias.name == "import_module"
+            )
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             function = node.func
             if isinstance(function, ast.Name):
                 if function.id in reflective_names:
                     return False
+                if function.id in import_module_aliases and not (
+                    len(node.args) == 1 and not node.keywords
+                    and isinstance(node.args[0], ast.Constant)
+                    and node.args[0].value == "csv"
+                ):
+                    return False
                 if function.id == "getattr" and node.args and isinstance(
                     node.args[0], ast.Name,
-                ) and node.args[0].id in sys_aliases | aliases:
+                ) and (
+                    node.args[0].id in sys_aliases | aliases | importlib_aliases
+                    or node.args[0].id == "self" and not trusted_instance_self(node)
+                ):
                     return False
                 if function.id in {"setattr", "delattr"} and (
                     not node.args or not isinstance(node.args[0], ast.Name)
                     or node.args[0].id != "self"
+                    or not trusted_instance_self(node)
                 ):
                     return False
-            elif isinstance(function, ast.Attribute) and function.attr in {
-                "__setattr__", "__delattr__", "reload",
-            }:
-                return False
+            elif isinstance(function, ast.Attribute):
+                if function.attr in {
+                    "__setattr__", "__delattr__", "reload", "__import__",
+                }:
+                    return False
+                if (
+                    function.attr == "import_module"
+                    and isinstance(function.value, ast.Name)
+                    and function.value.id in importlib_aliases
+                    and not (
+                        len(node.args) == 1 and not node.keywords
+                        and isinstance(node.args[0], ast.Constant)
+                        and node.args[0].value == "csv"
+                    )
+                ):
+                    return False
             if any(
                 isinstance(argument, ast.Name) and argument.id in aliases
                 for argument in (*node.args, *(item.value for item in node.keywords))
@@ -1818,6 +1880,12 @@ def _argparse_namespace_innocent(tree: ast.AST, aliases: set[str]) -> bool:
         elif isinstance(node, ast.Attribute):
             if node.attr == "__dict__":
                 return False
+            if node.attr == "ArgumentParser" and isinstance(
+                node.ctx, (ast.Store, ast.Del),
+            ):
+                # The certified constructor slot must not be writable through
+                # a runtime-loaded module whose receiver escaped alias proof.
+                return False
             if node.attr == "modules" and isinstance(node.value, ast.Name):
                 if node.value.id in sys_aliases:
                     return False
@@ -1825,7 +1893,10 @@ def _argparse_namespace_innocent(tree: ast.AST, aliases: set[str]) -> bool:
                 root = node.value
                 while isinstance(root, (ast.Attribute, ast.Subscript)):
                     root = root.value
-                if isinstance(root, ast.Name) and root.id in aliases | sys_aliases:
+                if isinstance(root, ast.Name) and (
+                    root.id in aliases | sys_aliases
+                    or root.id == "self" and not trusted_instance_self(node)
+                ):
                     return False
         elif isinstance(node, ast.Subscript) and isinstance(
             node.ctx, (ast.Store, ast.Del),
@@ -1833,13 +1904,16 @@ def _argparse_namespace_innocent(tree: ast.AST, aliases: set[str]) -> bool:
             root = node.value
             while isinstance(root, (ast.Attribute, ast.Subscript)):
                 root = root.value
-            if isinstance(root, ast.Name) and root.id in aliases | sys_aliases:
+            if isinstance(root, ast.Name) and (
+                root.id in aliases | sys_aliases
+                or root.id == "self" and not trusted_instance_self(node)
+            ):
                 return False
         elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
             if isinstance(node.value, ast.Name) and node.value.id in aliases:
                 return False
         elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
-            if node.id in aliases:
+            if node.id in aliases | importlib_aliases | import_module_aliases:
                 return False
         elif isinstance(node, (ast.Global, ast.Nonlocal)):
             if any(name in aliases for name in node.names):
@@ -4510,6 +4584,23 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             "import argparse as _ap\n_ap.ArgumentParser = None",
             "self = sys.modules['argparse']\nsetattr(self, 'ArgumentParser', None)",
             "self = getattr(sys, 'modules')['argparse']\nsetattr(self, 'ArgumentParser', None)",
+            "import importlib\nself = importlib.import_module('argparse')\n"
+            "setattr(self, 'ArgumentParser', None)",
+            "from importlib import import_module as fetch_module\n"
+            "self = fetch_module('argparse')\nsetattr(self, 'ArgumentParser', None)",
+            "import importlib\nself = importlib.import_module('ar' + 'gparse')\n"
+            "setattr(self, 'ArgumentParser', None)",
+            "import importlib\nself = getattr(importlib, 'import_module')('argparse')\n"
+            "setattr(self, 'ArgumentParser', None)",
+            "import builtins\nself = builtins.__import__('argparse')\n"
+            "setattr(self, 'ArgumentParser', None)",
+            "import builtins as api\nself = getattr(api, '__import__')('argparse')\n"
+            "setattr(self, 'ArgumentParser', None)",
+            "self = resolve_runtime_module()\nsetattr(self, 'ArgumentParser', None)",
+            "import builtins as api\nmodule = api.__import__('argparse')\n"
+            "module.ArgumentParser = None",
+            "import builtins as api\nmodule = getattr(api, '__import__')('argparse')\n"
+            "module.ArgumentParser = None",
         )
         for mutation in parser_namespace_mutants:
             with self.subTest(boundary="argparse-module-mutation", mutation=mutation):
@@ -4523,6 +4614,15 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
         )
         self.assertNotEqual(benign_alias, feedback_source)
         self.assertEqual({"parser"}, _literal_argparse_receivers(ast.parse(benign_alias), "main"))
+        unrelated_import = feedback_source.replace(
+            "import argparse\n",
+            "import argparse\nimport importlib\nchecked = importlib.import_module('csv')\n",
+            1,
+        )
+        self.assertNotEqual(unrelated_import, feedback_source)
+        self.assertEqual(
+            {"parser"}, _literal_argparse_receivers(ast.parse(unrelated_import), "main"),
+        )
         self.assertEqual(
             {"gate"}, _literal_argparse_receivers(ast.parse(
                 "import argparse as cli\n"
