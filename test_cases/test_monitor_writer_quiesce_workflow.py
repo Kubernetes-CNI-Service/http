@@ -1062,10 +1062,12 @@ def governed_external_sink_calls(
 def _reject_relevant_unresolved_imports(
     tree: ast.AST, module_sources: dict[str, ast.AST],
 ) -> None:
-    """Never silently classify a governed path passed to an unknown import.
+    """Never silently classify an unknown import on a governed mutation flow.
 
     This is intentionally narrower than whole-program import resolution: the
-    admission point is an actual imported call with a governed path argument.
+    admission point is an actual imported call with a governed path argument
+    or a return value forwarded into a mutation destination when another
+    operand of that same mutation independently identifies governed authority.
     An unknown unrelated display/diagnostic import is not a writer claim.
     """
     bindings: dict[str, tuple[str, str | None]] = {}
@@ -1096,44 +1098,142 @@ def _reject_relevant_unresolved_imports(
     }
     for function in production_functions(tree).values():
         governed = _governed_locals(function, set(), set())
-        for call in (
-            node for node in _walk_local_scope(function)
-            if isinstance(node, ast.Call)
-        ):
+        local_nodes = list(_walk_local_scope(function))
+        local_calls = [node for node in local_nodes if isinstance(node, ast.Call)]
+        function_bindings = dict(bindings)
+        for node in local_nodes:
+            if isinstance(node, ast.ImportFrom) and node.module:
+                for alias in node.names:
+                    function_bindings[alias.asname or alias.name] = (
+                        node.module, alias.name,
+                    )
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    function_bindings[alias.asname or alias.name.split(".")[0]] = (
+                        alias.name, None,
+                    )
+        function_rebound_imports = rebound_imports | {
+            node.id for node in local_nodes
+            if isinstance(node, ast.Name)
+            and isinstance(node.ctx, (ast.Store, ast.Del))
+            and node.id in function_bindings
+        }
+
+        def imported_binding(call: ast.Call):
             imported = None
             import_name = None
             if isinstance(call.func, ast.Name):
                 import_name = call.func.id
-                imported = bindings.get(import_name)
+                imported = function_bindings.get(import_name)
             elif (
                 isinstance(call.func, ast.Attribute)
                 and isinstance(call.func.value, ast.Name)
             ):
                 import_name = call.func.value.id
-                binding = bindings.get(import_name)
+                binding = function_bindings.get(import_name)
                 if binding is not None and binding[1] is None:
                     imported = (binding[0], call.func.attr)
+            return import_name, imported
+
+        # A foreign call can supply the destination rather than receive it.
+        # Track only local assignment forwarding; unknown flows stay rejected
+        # without interpreting unrelated imports as writers.
+        returned_imports: dict[str, set[ast.Call]] = {}
+        changed = True
+        while changed:
+            changed = False
+            for assignment in local_nodes:
+                if not isinstance(assignment, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+                    continue
+                value = assignment.value
+                if value is None:
+                    continue
+                origins = {
+                    node for node in ast.walk(value)
+                    if isinstance(node, ast.Call) and imported_binding(node)[1] is not None
+                }
+                for node in ast.walk(value):
+                    if isinstance(node, ast.Name):
+                        origins.update(returned_imports.get(node.id, set()))
+                targets = assignment.targets if isinstance(assignment, ast.Assign) else [assignment.target]
+                for target in targets:
+                    for name in _assigned_names(target):
+                        previous = returned_imports.setdefault(name, set())
+                        if not origins <= previous:
+                            previous.update(origins)
+                            changed = True
+
+        aliases = _extend_mutation_aliases([function], _mutation_aliases(tree))
+        destination_imports: set[ast.Call] = set()
+        for call in local_calls:
+            destination = _mutation_destination(call, aliases)
+            if destination is None:
+                continue
+            other_operands = [*call.args, *(item.value for item in call.keywords)]
+            if isinstance(call.func, ast.Attribute):
+                other_operands.append(call.func.value)
+            if not any(
+                operand is not destination
+                and _is_governed_destination(operand, governed)
+                for operand in other_operands
+            ):
+                continue
+            for node in ast.walk(destination):
+                if isinstance(node, ast.Call) and imported_binding(node)[1] is not None:
+                    destination_imports.add(node)
+                elif isinstance(node, ast.Name):
+                    destination_imports.update(returned_imports.get(node.id, set()))
+
+        for call in local_calls:
+            import_name, imported = imported_binding(call)
             if (
                 imported is None or imported in harmless_path_constructors
                 or imported[0] in modeled_standard_modules
             ):
                 continue
-            if not any(
+            if call not in destination_imports and not any(
                 _is_governed_destination(argument, governed)
                 for argument in (*call.args, *(item.value for item in call.keywords))
             ):
                 continue
-            if import_name in rebound_imports:
+            if import_name in function_rebound_imports:
                 raise AssertionError(
                     "WDISC_UNRESOLVED:rebound imported governed destination "
                     f"{import_name}"
                 )
             source = module_sources.get(imported[0])
-            if source is None or imported[1] not in production_functions(source):
+            imported_function = (
+                production_functions(source).get(imported[1])
+                if source is not None else None
+            )
+            if imported_function is None:
                 raise AssertionError(
                     "WDISC_UNRESOLVED:imported governed destination "
                     f"{imported[0]}.{imported[1]}"
                 )
+            if call in destination_imports:
+                # This bounded resolver admits only a literally fixed returned
+                # path. A function merely existing in a source module does not
+                # resolve its runtime/path-return semantics.
+                statements = [
+                    node for node in imported_function.body
+                    if not (
+                        isinstance(node, ast.Expr)
+                        and isinstance(node.value, ast.Constant)
+                        and isinstance(node.value.value, str)
+                    )
+                ]
+                if (
+                    imported_function.decorator_list
+                    or len(statements) != 1
+                    or not isinstance(statements[0], ast.Return)
+                    or not isinstance(statements[0].value, ast.Constant)
+                    or not isinstance(statements[0].value.value, str)
+                ):
+                    raise AssertionError(
+                        "WDISC_UNRESOLVED:runtime imported destination return "
+                        f"{imported[0]}.{imported[1]}"
+                    )
 
 
 def _transparent_governed_expression(
@@ -4709,6 +4809,63 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             "project_contract": contract,
         })
         _reject_relevant_unresolved_imports(feedback, {})
+
+    def test_unresolved_import_return_used_as_mutation_destination_fails_closed(self) -> None:
+        """A foreign return may be the destination even with no governed input."""
+        destination_forms = (
+            "os.replace('01-global.yaml', authority())",
+            "os.replace(src='01-global.yaml', dst=authority())",
+            "destination = authority()\n    os.replace('01-global.yaml', destination)",
+            "destination = authority()\n    forwarded = destination\n"
+            "    os.replace('01-global.yaml', forwarded)",
+            "destination = authority()\n    os.replace('01-global.yaml', Path(destination))",
+        )
+        for body in destination_forms:
+            source = (
+                "import os\nfrom pathlib import Path\n"
+                "from review_paths import authority\n"
+                "def main():\n    " + body + "\n"
+            )
+            with self.subTest(destination=body):
+                with self.assertRaisesRegex(AssertionError, "WDISC_UNRESOLVED"):
+                    _reject_relevant_unresolved_imports(ast.parse(source), {})
+                with self.assertRaisesRegex(AssertionError, "WDISC_UNRESOLVED"):
+                    _reject_relevant_unresolved_imports(ast.parse(source), {
+                        "review_paths": ast.parse("def unrelated():\n    return 'status'\n"),
+                    })
+                _reject_relevant_unresolved_imports(ast.parse(source), {
+                    "review_paths": ast.parse("def authority():\n    return '01-global.yaml'\n"),
+                })
+
+        runtime_returns = (
+            "def authority():\n    return runtime_path()\n",
+            "import os\ndef authority():\n    return os.environ['DESTINATION']\n",
+        )
+        source = ast.parse(
+            "import os\nfrom review_paths import authority\n"
+            "def main():\n    os.replace('01-global.yaml', authority())\n"
+        )
+        for module_source in runtime_returns:
+            with self.subTest(return_source=module_source):
+                with self.assertRaisesRegex(AssertionError, "WDISC_UNRESOLVED"):
+                    _reject_relevant_unresolved_imports(source, {
+                        "review_paths": ast.parse(module_source),
+                    })
+
+        local_import = ast.parse(
+            "import os\ndef main():\n"
+            "    from review_paths import authority\n"
+            "    os.replace('01-global.yaml', authority())\n"
+        )
+        with self.assertRaisesRegex(AssertionError, "WDISC_UNRESOLVED"):
+            _reject_relevant_unresolved_imports(local_import, {})
+
+        unrelated = ast.parse(
+            "import os\nfrom review_paths import display\n"
+            "def main():\n    display('status')\n"
+            "    os.replace('tmp', 'unrelated-output')\n"
+        )
+        _reject_relevant_unresolved_imports(unrelated, {})
 
     def test_all_nine_declared_native_writers_are_mechanically_discovered(self) -> None:
         """Hand-maintained entry tables may classify discovery, never replace it."""
