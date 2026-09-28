@@ -2098,7 +2098,7 @@ def _air_drop_server_port(name, interface):
     """Apply management-link filtering, preserving retained-server links."""
     value = str(interface).strip().casefold()
     if _air_is_retained_server(name):
-        return value.startswith("bmc")
+        return "bmc" in value
     return _air_management_port(interface)
 
 
@@ -2587,6 +2587,24 @@ def _air_ztp_server_interfaces(ztp_links):
     return result
 
 
+def _air_retained_server_interfaces(retained_links):
+    """Map each BCM/UFM server's retained links independently to eth0..N.
+
+    BCM and UFM are ordinary Ubuntu VMs in AIR, so physical endpoint labels
+    such as P1, mgmt0, or enp9s0 are topology-source metadata rather than AIR
+    interface names.  The caller supplies links in a stable sort order; each
+    server receives its own zero-based interface sequence.
+    """
+    next_index = {}
+    result = []
+    for link in retained_links:
+        server = str(link[2]).casefold()
+        index = next_index.get(server, 0)
+        result.append((link, f"eth{index}"))
+        next_index[server] = index + 1
+    return result
+
+
 def _air_template_role(name):
     """Map a generated node name to a reference node in the AIR template."""
     lowered = str(name).casefold()
@@ -2691,8 +2709,10 @@ def generate_air_dot(
       switch-side interface from each removed link as an unconnected port.
       This is required for breakout names such as swp11s0; replacing them with
       a model-level parent such as swp11 changes the VX interface inventory.
-    - For the real ZTP server, drop only BMC and keep every other link.  The
-      switch side of a dropped BMC link is likewise preserved as unconnected.
+    - For ZTP/BCM/UFM servers, drop every endpoint whose name contains BMC and
+      keep every other link. The switch side of a dropped BMC link is likewise
+      preserved as unconnected. ZTP links map to eth1..N; each ordinary
+      BCM/UFM VM receives an independent eth0..N sequence.
     - Build ``ztp-server`` only from a real P2P device whose name contains
       ``ztp-server``; retain all of its non-management links.
     - Prefix every AIR node hostname and every link endpoint with ``AIR-``;
@@ -2865,8 +2885,8 @@ def generate_air_dot(
                               key=lambda d: (_dev_rank(d), d.lower()))
     net_devs_ordered = [device for device in net_devs_ordered if is_net(device)]
 
-    # ZTP keeps its singleton interface rewrite; other retained servers keep
-    # their own node identities and original physical endpoint names.
+    # ZTP keeps its singleton interface rewrite. BCM/UFM keep distinct node
+    # identities and each receive an independent eth0..N interface sequence.
     sw_sw_links = []
     ztp_links = []
     retained_links = []
@@ -3016,17 +3036,16 @@ def generate_air_dot(
         template_name, prototype = _air_retained_server_prototype(
             template_nodes, server,
         )
-        model = (prototype.get("labels") or {}).get("model") or "SERVERTEST"
-        node_os = str(prototype.get("os", "generic/ubuntu2204"))
-        oob = str(bool(prototype.get("oob", False))).lower()
         mgmt_attr = ""
         if assign_management_ips:
             mgmt_attr = f' mgmt_ip="192.168.200.{mgmt_base}"'
             mgmt_base += 1
         out.append(
-            f'"{_air_hostname(server)}" [ memory="{prototype.get("memory", 4096)}" '
-            f'model="{model}" os="{node_os}" '
-            f'cpus="{prototype.get("cpu", 1)}" oob="{oob}" '
+            f'"{_air_hostname(server)}" [ '
+            f'memory="{_AIR_ZTP_SERVER_MEMORY_MB}" '
+            f'os="generic/ubuntu2204" '
+            f'cpus="{_AIR_ZTP_SERVER_CPUS}" '
+            f'storage="{_AIR_ZTP_SERVER_STORAGE_GB}" oob="false" '
             f'template_node="{template_name}"{mgmt_attr} ]'
         )
     out.append("")
@@ -3050,10 +3069,11 @@ def generate_air_dot(
             f'"ztp-server":"{server_interface}"'
         )
 
-    for dev, sw_port, server, server_port in retained_links:
+    for (dev, sw_port, server, _server_port), server_interface in \
+            _air_retained_server_interfaces(retained_links):
         out.append(
             f'"{_air_hostname(dev)}":"{sw_port}" -- '
-            f'"{_air_hostname(server)}":"{server_port}"'
+            f'"{_air_hostname(server)}":"{server_interface}"'
         )
 
     out.append("")
@@ -3106,10 +3126,11 @@ def _air_json_links_from_lldpq(
     physical links and exact port names.  A link whose peer was removed from
     AIR becomes an unconnected endpoint on the retained node.
 
-    The ZTP server is the sole special case: generate_air_dot() maps its source
-    P1/P2-style names to AIR eth1..ethN.  Reuse that mapping, and treat a ZTP
-    link deliberately omitted from AIR DOT (notably BMC) as an unconnected
-    switch endpoint instead of reintroducing the filtered server port.
+    Server endpoints are special cases: generate_air_dot() maps the ZTP
+    server's source labels to eth1..ethN and independently maps every BCM/UFM
+    server to eth0..ethN. Reuse those mappings here. A server link deliberately
+    omitted from AIR DOT (notably any *BMC* endpoint) leaves the switch endpoint
+    unconnected instead of reintroducing the filtered server port.
     """
     selected = {}
     ztp_node = None
@@ -3134,6 +3155,25 @@ def _air_json_links_from_lldpq(
                 ztp_interfaces[(right_node.casefold(), right_port.casefold())] = left_port
             elif right_node == ztp_node and left_node != ztp_node:
                 ztp_interfaces[(left_node.casefold(), left_port.casefold())] = right_port
+
+    retained_interfaces = {}
+    for left_node, left_port, right_node, right_port in air_links:
+        left_retained = (
+            _air_is_retained_server(left_node)
+            and not _air_is_ztp_server(left_node)
+        )
+        right_retained = (
+            _air_is_retained_server(right_node)
+            and not _air_is_ztp_server(right_node)
+        )
+        if left_retained and not right_retained:
+            retained_interfaces[
+                (left_node.casefold(), right_node.casefold(), right_port.casefold())
+            ] = left_port
+        elif right_retained and not left_retained:
+            retained_interfaces[
+                (right_node.casefold(), left_node.casefold(), left_port.casefold())
+            ] = right_port
 
     with open(lldpq_file, encoding="utf-8") as stream:
         source_links = [
@@ -3197,7 +3237,36 @@ def _air_json_links_from_lldpq(
                 else:
                     connected.append((switch_node, switch_port, ztp_node, ztp_port))
             else:
-                connected.append((left_node, left_port, right_node, right_port))
+                mapped_left = left_port
+                mapped_right = right_port
+                left_retained = (
+                    _air_is_retained_server(left_node)
+                    and not _air_is_ztp_server(left_node)
+                )
+                right_retained = (
+                    _air_is_retained_server(right_node)
+                    and not _air_is_ztp_server(right_node)
+                )
+                if left_retained:
+                    mapped_left = retained_interfaces.get(
+                        (left_node.casefold(), right_node.casefold(),
+                         right_port.casefold())
+                    )
+                if right_retained:
+                    mapped_right = retained_interfaces.get(
+                        (right_node.casefold(), left_node.casefold(),
+                         left_port.casefold())
+                    )
+                if mapped_left is None or mapped_right is None:
+                    switch_node, switch_port = (
+                        (right_node, right_port) if left_retained
+                        else (left_node, left_port)
+                    )
+                    unconnected.append((switch_node, switch_port))
+                    continue
+                connected.append(
+                    (left_node, mapped_left, right_node, mapped_right)
+                )
         elif left_node and left_node != ztp_node:
             unconnected.append((left_node, left_port))
         elif right_node and right_node != ztp_node:
@@ -3719,6 +3788,9 @@ def generate_air_json(
             explicit_name=attrs.get("template_node"),
         )
         inherit_oob_leaf = "oobofoob" in name.casefold()
+        retained_non_ztp = (
+            _air_is_retained_server(name) and not _air_is_ztp_server(name)
+        )
         if _air_is_retained_server(name):
             node["cpu"] = _AIR_ZTP_SERVER_CPUS
             node["memory"] = _AIR_ZTP_SERVER_MEMORY_MB
@@ -3733,6 +3805,15 @@ def generate_air_json(
         # project --os-version selected by load and must win for every
         # generated Cumulus node.
         node["os"] = attrs.get("os", node.get("os", "")).strip()
+        if retained_non_ztp:
+            # BCM/UFM reuse the ZTP server's VM sizing and base prototype only.
+            # They are ordinary Ubuntu VMs, not oob-mgmt-server appliances, so
+            # they must not inherit its model label or OOB behavior.  Without a
+            # labels.model value their real retained endpoint names are also
+            # intentionally outside hardware model-profile validation.
+            node["os"] = "generic/ubuntu2204"
+            node["oob"] = False
+            node.pop("labels", None)
         # The ZTP server template deliberately carries a fixed eth0 MAC so
         # AIR can expose its outbound management connection predictably.
         # Other nodes keep their deterministic per-host management MAC.

@@ -32,14 +32,14 @@ SOURCE_EDGES = (
 )
 EXPECTED_SERVER_LINKS = {
     frozenset((("AIR-OOB-Leaf01", "swp7"), (ZTP, "eth1"))),
-    frozenset((("AIR-OOB-Leaf02", "swp8"), (BCM, "eth1"))),
-    frozenset((("AIR-OOB-Leaf02", "swp10"), (BCM, "mgmt0"))),
-    frozenset((("AIR-OOB-Leaf03", "swp9"), (UFM, "enp9s0"))),
+    frozenset((("AIR-OOB-Leaf02", "swp8"), (BCM, "eth0"))),
+    frozenset((("AIR-OOB-Leaf02", "swp10"), (BCM, "eth1"))),
+    frozenset((("AIR-OOB-Leaf03", "swp9"), (UFM, "eth0"))),
 }
 EXPECTED_RETAINED_SOURCE_ENDPOINTS = {
+    (BCM, "eth0"),
     (BCM, "eth1"),
-    (BCM, "mgmt0"),
-    (UFM, "enp9s0"),
+    (UFM, "eth0"),
 }
 
 
@@ -141,6 +141,9 @@ class AirRetainedServersContractTests(unittest.TestCase):
         self.assertTrue(EXPECTED_SERVER_LINKS <= self.endpoint_links(document))
         self.assertEqual("generic/ubuntu2204", nodes[BCM]["os"])
         self.assertEqual("generic/ubuntu2204", nodes[UFM]["os"])
+        for name in (BCM, UFM):
+            self.assertIs(False, nodes[name]["oob"])
+            self.assertNotIn("labels", nodes[name])
         ips = [nodes[name]["management_interfaces"]["eth0"]["ip"]
                for name in (ZTP, BCM, UFM)]
         macs = [nodes[name]["management_interfaces"]["eth0"]["mac_address"]
@@ -151,7 +154,7 @@ class AirRetainedServersContractTests(unittest.TestCase):
         self.assertEqual(FIXED_ZTP_MAC, macs[0])
         self.assertNotIn(FIXED_ZTP_MAC, macs[1:])
 
-    def assert_retained_original_endpoint_provenance(self, document):
+    def assert_retained_mapped_endpoint_provenance(self, document):
         _nodes, dot_links = P2P._parse_air_dot(self.air)
         dot_connections = {
             frozenset(((left, left_port), (right, right_port)))
@@ -174,11 +177,11 @@ class AirRetainedServersContractTests(unittest.TestCase):
         self.assertNotIn((BCM, "BMC"), dot_endpoints)
         self.assertNotIn((BCM, "BMC"), json_endpoints)
 
-    def test_retained_original_labels_match_dot_and_json(self):
+    def test_retained_interfaces_are_stably_mapped_in_dot_and_json(self):
         with self.source.open("a", encoding="utf-8") as stream:
             stream.write('"OOB-Leaf02":"swp11" -- "Rack-BCM-A":"BMC"\n')
         self.produce()
-        self.assert_retained_original_endpoint_provenance(self.json_document())
+        self.assert_retained_mapped_endpoint_provenance(self.json_document())
 
     def test_full_air_dot_and_json_keep_distinct_server_endpoint_owners(self):
         self.produce()
@@ -201,30 +204,80 @@ class AirRetainedServersContractTests(unittest.TestCase):
                      for field in ("cpu", "memory", "storage")},
                 )
 
-    def test_retained_bmc_dropped_from_dot_stays_out_of_json(self):
+    def test_production_template_fallback_keeps_bcm_ufm_as_generic_vms(self):
+        """The production template has only one oob-mgmt-server prototype."""
+        document = _template()
+        document["content"]["nodes"].pop("bcm")
+        document["content"]["nodes"].pop("ufm")
+        ztp = document["content"]["nodes"]["ztp-server"]
+        ztp["os"] = "oob-mgmt-server"
+        ztp["oob"] = True
+        ztp["labels"] = {"group": "SERVER", "model": "oob-mgmt-server"}
+        document["content"]["model_port_profiles"] = {
+            "oob-mgmt-server": ["eth0", "eth1-9"],
+        }
+        self.template.write_text(json.dumps(document), encoding="utf-8")
+        self.source.write_text(
+            self.source.read_text(encoding="utf-8")
+            + '\n"OOB-Leaf01":"swp11" -- "Rack-BCM-A":"P1"\n'
+            + '"OOB-Leaf01":"swp12" -- "Rack-BCM-A":"P2"\n'
+            + '"OOB-Leaf01":"swp13" -- "Rack-BCM-A":"BF3-BMC"\n'
+            + '"OOB-Leaf01":"swp14" -- "Rack-BCM-A":"BMC"\n',
+            encoding="utf-8",
+        )
+
+        self.produce()
+        dot_nodes, dot_links = P2P._parse_air_dot(self.air)
+        by_name = dict(dot_nodes)
+        for name in (BCM, UFM):
+            self.assertEqual("generic/ubuntu2204", by_name[name]["os"])
+            self.assertEqual("false", by_name[name]["oob"])
+            self.assertNotIn("model", by_name[name])
+            self.assertEqual("8", by_name[name]["cpus"])
+            self.assertEqual("8192", by_name[name]["memory"])
+            self.assertEqual("80", by_name[name]["storage"])
+        bcm_ports = {
+            interface
+            for left, left_port, right, right_port in dot_links
+            for node, interface in ((left, left_port), (right, right_port))
+            if node == BCM
+        }
+        self.assertEqual({"eth0", "eth1", "eth2", "eth3"}, bcm_ports)
+
+        air = self.json_document()
+        self.assert_servers_and_ports(air)
+        self.assertEqual("oob-mgmt-server", air["content"]["nodes"][ZTP]["os"])
+        self.assertIs(True, air["content"]["nodes"][ZTP]["oob"])
+        self.assertIn("labels", air["content"]["nodes"][ZTP])
+
+    def test_every_retained_bmc_named_port_is_dropped(self):
         with self.source.open("a", encoding="utf-8") as stream:
             stream.write('"OOB-Leaf02":"swp11" -- "Rack-BCM-A":"BMC"\n')
+            stream.write(
+                '"OOB-Leaf02":"swp12" -- "Rack-BCM-A":"BF3-BMC"\n'
+            )
         self.produce()
         _nodes, dot_links = P2P._parse_air_dot(self.air)
         self.assertFalse(any(
-            (left == BCM and left_port == "BMC")
-            or (right == BCM and right_port == "BMC")
+            (left == BCM and "bmc" in left_port.casefold())
+            or (right == BCM and "bmc" in right_port.casefold())
             for left, left_port, right, right_port in dot_links
         ))
         links = self.json_document()["content"]["links"]
         self.assertFalse(any(
             isinstance(endpoint, dict)
             and endpoint.get("node") == BCM
-            and endpoint.get("interface") == "BMC"
+            and "bmc" in endpoint.get("interface", "").casefold()
             for link in links for endpoint in link
         ))
-        self.assertTrue(any(
-            {"node": "AIR-OOB-Leaf02", "interface": "swp11"}.items()
-            <= endpoint.items()
-            and "unconnected" in link
-            for link in links for endpoint in link
-            if isinstance(endpoint, dict)
-        ))
+        for switch_port in ("swp11", "swp12"):
+            self.assertTrue(any(
+                {"node": "AIR-OOB-Leaf02", "interface": switch_port}.items()
+                <= endpoint.items()
+                and "unconnected" in link
+                for link in links for endpoint in link
+                if isinstance(endpoint, dict)
+            ))
 
     def test_mini_retains_servers_and_promotes_their_adjacent_switches(self):
         policy = self.produce(mini=True)
