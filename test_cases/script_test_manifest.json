@@ -1523,6 +1523,7 @@
     {
       "id": "issue_tracker_manual_preview_to_stage_l_writer",
       "members": [
+        "monitor/issue_tracker_manual_channel.py",
         "monitor/issue_tracker_manual_preview.py",
         "monitor/issue_tracker_manifest.py",
         "monitor/issue_tracker_publish_runtime.py",
@@ -1531,7 +1532,8 @@
       ],
       "tests": [
         "test_cases.test_issue_tracker_manual_preview_workflow",
-        "test_cases.test_issue_tracker_manual_panel_workflow"
+        "test_cases.test_issue_tracker_manual_panel_workflow",
+        "test_cases.test_issue_tracker_stage_l_consumer_workflow"
       ]
     },
     {

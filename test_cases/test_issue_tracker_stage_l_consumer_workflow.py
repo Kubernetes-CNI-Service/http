@@ -96,6 +96,154 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             selected_panel_empty=True,
         )
 
+    def test_manual_queue_broker_requalifies_selected_panel_before_real_c6(self):
+        self._exercise_real_protected_three_panel_fixture(
+            skip_history=False, selected_manual_panel="Switch Status",
+            manual_channel_bridge=True,
+        )
+
+    def _verify_manual_queue_protected_commit(
+        self, project, original_template, before_generations, qualified,
+    ):
+        from monitor.issue_tracker_manual_channel import (
+            DurableManualQueue, ManualChannelHold, ManualQueueWorker,
+        )
+        from monitor.issue_tracker_manual_preview import make_protected_stage_l_broker
+        from monitor.issue_tracker_manifest import selected_panel_decision_sha256
+        from monitor.issue_tracker_publish_runtime import (
+            StageLHold, commit_qualified_prod_local,
+        )
+        from monitor.issue_tracker_local_workbook_commit import CommittedProdWorkbook
+
+        queue_root = project / ".tracker/manual-fixture"
+        queue_root.mkdir(mode=0o700)
+        queue = DurableManualQueue(queue_root, boot_id="synthetic-boot")
+        broker = make_protected_stage_l_broker(
+            self.store, http_root=self.root, project=project,
+            publication=self.publication, template_path=self.template,
+            boot_id="synthetic-boot", monotonic_ns=time.monotonic_ns,
+            clock=lambda: 1000.0,
+        )
+        worker = ManualQueueWorker(queue, broker)
+        preview_request = {"action": "preview", "panel": "Switch Status",
+                           "principal": "nvis"}
+
+        def preview():
+            job = queue.enqueue(preview_request)
+            completed, result = worker.process_job(job)
+            self.assertEqual(job, completed)
+            self.assertEqual("done", queue.status(job)["state"])
+            self.assertEqual(
+                selected_panel_decision_sha256(qualified, "Switch Status"),
+                result["selected_decision_sha256"],
+            )
+            return result["token"]
+
+        def confirm(token, *, principal="nvis"):
+            return queue.enqueue({
+                "action": "confirm", "panel": "Switch Status",
+                "principal": principal, "token": token,
+                "confirmation": "publish_local",
+            })
+
+        generation_root = project / ".tracker/generations"
+
+        def no_receipt():
+            self.assertEqual(before_generations,
+                             tuple(sorted(generation_root.iterdir())))
+            self.assertFalse(any(generation_root.glob("*/RECEIPT")))
+
+        token = preview()
+        with self.assertRaises(ManualChannelHold):
+            queue.enqueue({**preview_request, "principal": ""})
+        wrong_job = confirm(token, principal="cumulus")
+        self.assertEqual({"error": "manual_hold"}, worker.process_job(wrong_job)[1])
+        self.assertEqual("done", queue.status(wrong_job)["state"])
+        no_receipt()
+
+        # The same preview is consumed before a failed source refresh.
+        self.template.write_bytes(b"corrupt-source")
+        drift_job = confirm(token)
+        with self.assertRaises(StageLHold):
+            worker.process_job(drift_job)
+        self.assertEqual("unknown_after_claim", queue.status(drift_job)["state"])
+        self.assertTrue((queue_root / f"claimed-{drift_job}.json").is_file())
+        no_receipt()
+        self.template.write_bytes(original_template)
+        replay_job = confirm(token)
+        self.assertEqual({"error": "manual_hold"}, worker.process_job(replay_job)[1])
+        no_receipt()
+
+        # A fresh status is valid, but a different selected C5 decision is
+        # injected only when the protected writer requalifies under LK-P.
+        token = preview()
+        real_commit = commit_qualified_prod_local
+
+        def changed_decision(*args, **kwargs):
+            with mock.patch(
+                "monitor.issue_tracker_publish_runtime.selected_panel_decision_sha256",
+                return_value="0" * 64,
+            ):
+                return real_commit(*args, **kwargs)
+
+        changed_job = confirm(token)
+        with mock.patch(
+            "monitor.issue_tracker_publish_runtime.commit_qualified_prod_local",
+            side_effect=changed_decision,
+        ), self.assertRaises(StageLHold):
+            worker.process_job(changed_job)
+        self.assertEqual("unknown_after_claim", queue.status(changed_job)["state"])
+        no_receipt()
+
+        token = preview()
+        error_job = confirm(token)
+        with mock.patch(
+            "monitor.issue_tracker_publish_runtime.commit_qualified_prod_local",
+            side_effect=RuntimeError("synthetic worker exception"),
+        ), self.assertRaises(RuntimeError):
+            worker.process_job(error_job)
+        self.assertEqual("unknown_after_claim", queue.status(error_job)["state"])
+        no_receipt()
+
+        token = preview()
+        real_results = []
+
+        def capture_commit(*args, **kwargs):
+            result = real_commit(*args, **kwargs)
+            real_results.append(result)
+            return result
+
+        success_job = confirm(token)
+        with mock.patch(
+            "monitor.issue_tracker_publish_runtime.commit_qualified_prod_local",
+            side_effect=capture_commit,
+        ):
+            completed, public = worker.process_job(success_job)
+        self.assertEqual(success_job, completed)
+        self.assertEqual("done", queue.status(success_job)["state"])
+        self.assertEqual(1, len(real_results))
+        committed = real_results[0]
+        self.assertIsInstance(committed, CommittedProdWorkbook)
+        self.assertEqual("committed", public["local"])
+        self.assertEqual(committed.receipt.manifest_id, public["manifest_id"])
+        self.assertEqual(committed.generation.generation_id,
+                         public["generation_id"])
+        self.assertIs(public["local_applied"], True)
+        self.assertEqual("disabled_no_send_authority", public["online"])
+        generation = generation_root / public["generation_id"]
+        persisted = json.loads((generation / "MANIFEST").read_bytes())
+        self.assertEqual("Switch Status",
+                         persisted["qualified_source"]["selected_panel"])
+        self.assertTrue((generation / "RECEIPT").is_file())
+        with zipfile.ZipFile(BytesIO(original_template)) as before, \
+             zipfile.ZipFile(BytesIO(committed.prepared.xlsx_bytes)) as after:
+            for other in ("sheet3.xml", "sheet4.xml"):
+                path = "xl/worksheets/" + other
+                self.assertEqual(before.read(path), after.read(path), other)
+        retry_job = confirm(token)
+        self.assertEqual({"error": "manual_hold"}, worker.process_job(retry_job)[1])
+        self.assertEqual(1, len(real_results))
+
     def _exercise_real_protected_three_panel_fixture(
         self, *, skip_history, automatic_first=False, replayed_auto=False,
         invalid_auto_clock=False, automatic_not_due=False,
@@ -103,7 +251,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         manual_second_admit=False,
         require_first_manual_admission=False, manual_after_manual=False,
         terminal_orphan_probe=False, selected_manual_panel=None,
-        selected_panel_empty=False,
+        selected_panel_empty=False, manual_channel_bridge=False,
     ):
         from monitor.collection_ib_producer import (
             IbProducerAuthoritySnapshot, parse_ib_producer_authority,
@@ -264,6 +412,11 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             )
             self.template = self.publication / "local.xlsx"
             self.template.write_bytes(fake_workbook(reserved_switch_rows=4))
+            if manual_channel_bridge:
+                root_template = self.root / "monitor/Issue_Tracker_Template_v1.xlsx"
+                root_template.parent.mkdir(parents=True, exist_ok=True)
+                root_template.write_bytes(self.template.read_bytes())
+                self.template = root_template
             self.snapshot = read_whitelist_workbook(self.template)
             with tracker_writer(project, self.publication) as token:
                 set_k(token, new_k=1, actor="operator:fixture",
@@ -385,6 +538,12 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                     "    issue-tracker:\n      status: disabled\n",
                     encoding="utf-8",
                 )
+                if manual_channel_bridge:
+                    self._verify_manual_queue_protected_commit(
+                        project, original_template, before_generations,
+                        qualified,
+                    )
+                    return
                 interval, policy_sha = local_publish_interval(project)
                 witness = (policy_sha, interval, "fixture-boot", time.monotonic_ns())
                 with tracker_writer(project, self.publication) as token:

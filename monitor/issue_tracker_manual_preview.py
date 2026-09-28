@@ -28,6 +28,11 @@ _MAX_PENDING = 128
 _TTL_SECONDS = 120
 
 
+def _sha256_text(value):
+    return (type(value) is str and len(value) == 64
+            and all(char in "0123456789abcdef" for char in value))
+
+
 def _bound_status(status, panel):
     if (type(status) is not dict or status.get("state") != "qualified"
             or status.get("online") != "disabled_no_send_authority"
@@ -129,3 +134,70 @@ class ManualPreviewBroker:
         if current != entry[2]:
             raise ManualPreviewHold("manual preview source changed; preview again")
         return self._commit_local(panel, current)
+
+
+def make_protected_stage_l_broker(
+    store, *, http_root, project, publication, template_path, boot_id,
+    monotonic_ns=time.monotonic_ns, clock=time.monotonic,
+):
+    """Bind a worker-owned preview to protected C5/C6 local publication.
+
+    Only the worker supplies paths, clock and boot identity.  The browser
+    supplies neither a source nor an admission witness.  This factory does
+    not install or enable the currently disabled manual control service.
+    """
+    if (type(boot_id) is not str or not boot_id or len(boot_id) > 128
+            or any(char.isspace() for char in boot_id)
+            or not callable(monotonic_ns) or not callable(clock)):
+        raise ManualPreviewHold("manual worker clock or boot identity is invalid")
+
+    from monitor import issue_tracker_publish_runtime as runtime
+    from monitor.issue_tracker_local_workbook_commit import (
+        CommittedProdWorkbook, ProdWorkbookNoop,
+    )
+
+    def read_status():
+        return runtime.inspect_stage_l(
+            store, http_root=http_root, project=project,
+            publication=publication, template_path=template_path,
+        )
+
+    def commit_local(panel, fingerprint):
+        interval, policy_sha = runtime.local_publish_interval(project)
+        now_ns = monotonic_ns()
+        if type(now_ns) is not int or now_ns < 1:
+            raise ManualPreviewHold("manual worker clock is invalid")
+        result = runtime.commit_qualified_prod_local(
+            store, http_root=http_root, project=project,
+            publication=publication, template_path=template_path,
+            manual_admission=(policy_sha, interval, boot_id, now_ns),
+            expected_manual_preview=fingerprint, selected_panel=panel,
+        )
+        if type(result) is CommittedProdWorkbook:
+            if (type(result.generation.generation_id) is not str
+                    or not result.generation.generation_id
+                    or not _sha256_text(result.receipt.manifest_id)
+                    or not _sha256_text(result.receipt.published_sha256)):
+                raise RuntimeError("protected local writer receipt is invalid")
+            return {
+                "local": "committed",
+                "local_applied": True,
+                "generation_id": result.generation.generation_id,
+                "manifest_id": result.receipt.manifest_id,
+                "published_sha256": result.receipt.published_sha256,
+                "online": "disabled_no_send_authority",
+            }
+        if type(result) is ProdWorkbookNoop and result.status in (
+                "no_candidates", "no_change"):
+            if not _sha256_text(result.manifest_id):
+                raise RuntimeError("protected local writer no-op receipt is invalid")
+            return {
+                "local": result.status, "manifest_id": result.manifest_id,
+                "local_applied": False,
+                "online": "disabled_no_send_authority",
+            }
+        # A surprising writer result is not a successful or retryable job.
+        # Let the claimed queue record remain UNKNOWN for reconciliation.
+        raise RuntimeError("protected local writer returned an unknown result")
+
+    return ManualPreviewBroker(read_status, commit_local, clock=clock)

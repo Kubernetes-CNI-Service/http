@@ -1,6 +1,7 @@
 """REQ7 manual preview is an opaque, one-use, principal-bound local admission."""
 
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 from monitor.issue_tracker_manual_preview import ManualPreviewHold, ManualPreviewBroker
@@ -105,6 +106,107 @@ class ManualPreviewDirectTests(unittest.TestCase):
             self.broker.confirm("nvis", "Switch Status", preview["token"],
                                 confirmation="publish_local")
         self.commit.assert_not_called()
+
+    def test_protected_stage_l_adapter_binds_worker_clock_policy_and_public_receipt(self):
+        from monitor.issue_tracker_manual_preview import make_protected_stage_l_broker
+        from monitor.issue_tracker_local_workbook_commit import (
+            CommittedProdWorkbook, ProdWorkbookNoop,
+        )
+
+        receipt = CommittedProdWorkbook(
+            SimpleNamespace(generation_id="gen-fixture"),
+            SimpleNamespace(manifest_id="f" * 64, published_sha256="a" * 64),
+            SimpleNamespace(),
+        )
+        with (mock.patch("monitor.issue_tracker_publish_runtime.inspect_stage_l",
+                         return_value=qualified_status()) as inspect,
+              mock.patch("monitor.issue_tracker_publish_runtime.local_publish_interval",
+                         return_value=(2, "b" * 64)) as policy,
+              mock.patch("monitor.issue_tracker_publish_runtime.commit_qualified_prod_local",
+                         return_value=receipt) as commit):
+            broker = make_protected_stage_l_broker(
+                object(), http_root="/synthetic/http", project="/synthetic/project",
+                publication="/synthetic/project/99-output-monitor",
+                template_path="/synthetic/http/monitor/Issue_Tracker_Template_v1.xlsx",
+                boot_id="synthetic-boot", monotonic_ns=lambda: 1234,
+                clock=lambda: 1000.0,
+            )
+            token = broker.preview("nvis", "Switch Status")["token"]
+            result = broker.confirm("nvis", "Switch Status", token,
+                                    confirmation="publish_local")
+        self.assertEqual({
+            "local": "committed", "generation_id": "gen-fixture",
+            "manifest_id": "f" * 64, "published_sha256": "a" * 64,
+            "local_applied": True,
+            "online": "disabled_no_send_authority",
+        }, result)
+        self.assertEqual(2, inspect.call_count)
+        policy.assert_called_once_with("/synthetic/project")
+        self.assertEqual("Switch Status", commit.call_args.kwargs["selected_panel"])
+        self.assertEqual(("b" * 64, 2, "synthetic-boot", 1234),
+                         commit.call_args.kwargs["manual_admission"])
+        self.assertEqual("e" * 64,
+                         commit.call_args.kwargs["expected_manual_preview"]
+                         ["selected_decision_sha256"])
+        with self.assertRaises(ManualPreviewHold):
+            broker.confirm("nvis", "Switch Status", token,
+                           confirmation="publish_local")
+
+        with (mock.patch("monitor.issue_tracker_publish_runtime.inspect_stage_l",
+                         return_value=qualified_status()),
+              mock.patch("monitor.issue_tracker_publish_runtime.local_publish_interval",
+                         return_value=(2, "b" * 64)),
+              mock.patch("monitor.issue_tracker_publish_runtime.commit_qualified_prod_local",
+                         return_value=ProdWorkbookNoop("no_candidates", None,
+                                                       "c" * 64))):
+            broker = make_protected_stage_l_broker(
+                object(), http_root="/synthetic/http", project="/synthetic/project",
+                publication="/synthetic/project/99-output-monitor",
+                template_path="/synthetic/http/monitor/Issue_Tracker_Template_v1.xlsx",
+                boot_id="synthetic-boot", monotonic_ns=lambda: 1234,
+                clock=lambda: 1000.0,
+            )
+            token = broker.preview("nvis", "Switch Status")["token"]
+            self.assertEqual({
+                "local": "no_candidates", "manifest_id": "c" * 64,
+                "local_applied": False,
+                "online": "disabled_no_send_authority",
+            }, broker.confirm("nvis", "Switch Status", token,
+                              confirmation="publish_local"))
+
+        malformed = CommittedProdWorkbook(
+            SimpleNamespace(generation_id="gen-fixture"),
+            SimpleNamespace(manifest_id="f" * 64, published_sha256="bad"),
+            SimpleNamespace(),
+        )
+        with (mock.patch("monitor.issue_tracker_publish_runtime.inspect_stage_l",
+                         return_value=qualified_status()),
+              mock.patch("monitor.issue_tracker_publish_runtime.local_publish_interval",
+                         return_value=(2, "b" * 64)),
+              mock.patch("monitor.issue_tracker_publish_runtime.commit_qualified_prod_local",
+                         return_value=malformed)):
+            broker = make_protected_stage_l_broker(
+                object(), http_root="/synthetic/http", project="/synthetic/project",
+                publication="/synthetic/project/99-output-monitor",
+                template_path="/synthetic/http/monitor/Issue_Tracker_Template_v1.xlsx",
+                boot_id="synthetic-boot", monotonic_ns=lambda: 1234,
+                clock=lambda: 1000.0,
+            )
+            token = broker.preview("nvis", "Switch Status")["token"]
+            with self.assertRaises(RuntimeError):
+                broker.confirm("nvis", "Switch Status", token,
+                               confirmation="publish_local")
+            with self.assertRaises(ManualPreviewHold):
+                broker.confirm("nvis", "Switch Status", token,
+                               confirmation="publish_local")
+
+        with self.assertRaises(ManualPreviewHold):
+            make_protected_stage_l_broker(
+                object(), http_root="/synthetic/http", project="/synthetic/project",
+                publication="/synthetic/project/99-output-monitor",
+                template_path="/synthetic/http/monitor/Issue_Tracker_Template_v1.xlsx",
+                boot_id="", monotonic_ns=lambda: 1234,
+            )
 
 
 if __name__ == "__main__":
