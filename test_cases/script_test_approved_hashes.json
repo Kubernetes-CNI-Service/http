@@ -1,5 +1,32 @@
 {
-  "impact_manifest_sha256": "3793925f40c15ee974984338a7e45e91d33d1a05c83eb33e6084966c3f440bcf",
+  "full_suite_attestation": {
+    "environment": {
+      "container_toplevel_lock_sha256": "3532f5208b462243bab779b01eb4deb21638ac05a9390c17ac997ba8d7f24998",
+      "container_toplevel_versions": [
+        "Jinja2==3.1.6",
+        "openpyxl==3.1.5",
+        "pandas==2.3.3",
+        "PyYAML==6.0.3",
+        "XlsxWriter==3.2.9"
+      ],
+      "machine": "arm64",
+      "platform": "darwin",
+      "python_cache_tag": "cpython-39",
+      "python_executable": "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/bin/python3.9",
+      "python_implementation": "CPython",
+      "python_version": [
+        3,
+        9,
+        6
+      ]
+    },
+    "scenario_coverage": {
+      "root-entrypoint-workflow": "NOT COVERED (requires Linux EUID 0 private namespace)"
+    },
+    "schema_version": 1,
+    "snapshot_sha256": "de937375f1b35ef597ee8fcad55e665cc66287a06e48061bb17f3af434710c01"
+  },
+  "impact_manifest_sha256": "81ba6afa5a5d6f283531955942e61bf19cbd033dacd9e4b68d3277090a2e8c20",
   "schema_version": 1,
   "scripts": {
     "DAY0-Prepare/01-a-setup.py": {
@@ -8,11 +35,11 @@
     },
     "DAY0-Prepare/02-unsetup.py": {
       "canonical": "DAY0-Prepare/02-unsetup.py",
-      "sha256": "cb7d491faa8a284e7052018b85d076a6594a90bf8d6104edcb35b416a686a9fd"
+      "sha256": "9e34947ace66e4c9e22809ceb5c123abd33b9fbbdccc439976d5330c642e921b"
     },
     "DAY0-Prepare/11-load.py": {
       "canonical": "DAY0-Prepare/11-load.py",
-      "sha256": "ae131e9c4fb3c9108234383d17bb23981925963a0d60654bd7f3c717c39bed45"
+      "sha256": "23be8d80088ba29417bf250fca3360de10329ae5ae4a3abc27f4d12969ac9e31"
     },
     "DAY0-Prepare/12-ztp-monitor.py": {
       "canonical": "DAY0-Prepare/12-ztp-monitor.py",
@@ -48,7 +75,7 @@
     },
     "infiniband/bringup/xdr-initial-setup/initial-setup.py": {
       "canonical": "infiniband/bringup/xdr-initial-setup/initial-setup.py",
-      "sha256": "ccd9d230ed5ccf937f21673596c6c9628732b9570d4afb380b67478d60f9c99e"
+      "sha256": "2e0818ac3dda902d7fe97bac88c0dd156223afa5253772ef55728efc451c929d"
     },
     "infiniband/bringup/xdr-upgrade/upgrade.sh": {
       "canonical": "infiniband/bringup/xdr-upgrade/upgrade.sh",
@@ -494,6 +521,10 @@
       "canonical": "tools/password-update.py",
       "sha256": "cf9cda386c00c811118bd5cd75ee7d7e18c21edae67a68758046c0cb26be5987"
     },
+    "tools/pre-push-proof.py": {
+      "canonical": "tools/pre-push-proof.py",
+      "sha256": "f426e97647e995e6d689271f30492c5f2f6eb9dcf8ab58894e82d7a48131a1dc"
+    },
     "tools/project_contract.py": {
       "canonical": "tools/project_contract.py",
       "sha256": "0377abb1b4dd64ea0219704fcf048cebec601716c86b766cbb8ca9f9462d3eda"
@@ -642,10 +673,11 @@
   "support": {
     ".dockerignore": "6c8e32553af17464f1fd621c787e654c9ce539da9fd3af8f5f8aa1c74a7e2b5b",
     ".gitattributes": "d7bfa1a8596479c7b28ac39bb094b2a389fc8dcf9c3cd923b66a95eff96d9f97",
+    ".githooks/pre-push": "82a3b7567ecd11a4f2ea35e715c028d5750e77373dbe0a7b110bb9a55b1c052e",
     ".github/workflows/monitor-authority-root.yml": "e2149e9b78f70bff197973bebf8609cb923925064671a363072c39e8a7b37e38",
     ".github/workflows/tests.yml": "a0db50165094f82ef45b87d7dfe42c4f6ed91bb7fa7b4060b6f22a03a9e02335",
     ".gitignore": "121ed8178b2dc6461a9ad8aaa3576707bcd11229460b8da8009a1c208159b8e4",
-    "AGENTS.md": "29cbf02d9d849e8a6007c7bab182d8b8de2bdc445f85c12ee01cd6d4928aad9f",
+    "AGENTS.md": "fbfaf5b671eb967e998b51d1b65f7fd0b21b9130ead5b619b50c687d2ef4ab90",
     "DAY0-Prepare/template/.management-pubkeys": "6bbef498c3d3a8a46290347f0d849048e16de36f906c85f08b49038c97c08f67",
     "DAY0-Prepare/template/01-global.yaml": "05f5487bc7e14aa1f56cbc5fb0e3e28592da8b2c65b48886b07f2c4f5e1ff7c6",
     "DAY0-Prepare/template/02-devices_config.csv": "3f0f797ccdf4a9c8103ab92d0edcd9e77ec29718f29c33ffef7637a6604a92cb",
@@ -678,7 +710,7 @@
     "docs/deployment/README.md": "7e12ea5ce77afffb8db351a230e32e2c252f332252026eb05b16a6063c05cc25",
     "docs/operations/README.md": "560c0608221cd332165403a91a1d9b4bdd8a157327628d1fd2b56d1117528d01",
     "docs/reference/README.md": "717f023b3016420b61e8889493fd0e2ab9d0106388483025f8d66dee75c75039",
-    "docs/validation/README.md": "0afd7acf54b2984c70871d933a9bbf3b9e810b3784195b23d4d0bece7868e3f0",
+    "docs/validation/README.md": "a062e4c87de1dc2e57d4d8b6abf9de31a98580f4efad423dcb43cb9135bb5a58",
     "examples/public-project/01-global.yaml.example": "539fc9ba304e21c465e2dcbbb1bdb8e2afb1063d421e3f947b05add144733928",
     "examples/public-project/02-devices_config.csv.example": "29be52a23309b415d8cbd9b314844aa4a4e6a0ad70f32b7bcce510a13fa39fd1",
     "examples/public-project/02-dhcp-subnet_config.csv.example": "f99e2e7e1ff7b7fb2089c1fe6bda42ac24394c0d04f89bfab3cc0dacd72b097c",
@@ -710,7 +742,7 @@
     "test_cases/splitter_profile_fixture.py": "7b0548d7d15b855278e21456d1ec2b667072d874ba68d527348f185f85d6d75f",
     "test_cases/user_manual_contract.json": "dc0bb8977038e9e326fa73c90fba1e992434752b89861a91d998c9d576eb6881",
     "tools/lldp-analyze-tool/04-lldp-device-aliases.json": "595529fac28098b504d67809026a59ecfa0345375ada9b16057ff069e5179250",
-    "user-manual.html": "8ed814f2c1e4c0b09aa3ede0d567a6ad45d2b457f3ca64e8902df65d8597202d",
+    "user-manual.html": "dbaf327a6e5b4d5dcfedec90549bcb070f7232d56bcfa853d41e2915537e1aff",
     "ztp/config/cumulus/ar_profile_custom.conf": "9316fe81c3238ef99076ee598abf303c955dc38343df4176ba22bc4c27729c1c",
     "ztp/config/cumulus/default.yaml": "6e3f950a5c964fabbac8106720920d3061e90bf94436f22b6ad049c64c1b5934",
     "ztp/config/cumulus/default_5.16.5.yaml": "6e3f950a5c964fabbac8106720920d3061e90bf94436f22b6ad049c64c1b5934",
@@ -759,7 +791,7 @@
     "test_cases.test_backup_zero_target_contract": "61091b3fb5f478af457692e9afff3475b9b88aa1f724f6af3a0e7ee19d84a3c2",
     "test_cases.test_bootstrap_config_fetch_contract": "e765f0df17bedc9ce4c5b163e2d2c0b7673ff359c3eabcc74fecfa9e8dd4cba2",
     "test_cases.test_bootstrap_config_fetch_workflow": "5ee6b791c98a4947739901768236ef578e40280a35dfaaa02cba3aeaa4f55923",
-    "test_cases.test_change_aware_test_runner": "9dacffbfad59ee7c1dfd27b57b336df0a2c95113cfb74482d547679efcfa18f4",
+    "test_cases.test_change_aware_test_runner": "67bbeefe464ce4e69856a5481680ff033b5e7eed0c98d02798065ea7323af416",
     "test_cases.test_collection_cycle_contract": "2ecb0d71c6e3d7e78fc54824e6bfadbaf6864ff2c9e37457874afefdbf1785cb",
     "test_cases.test_collection_cycle_handoff_workflow": "4dc4c368a6baceb08189f5c9c3323a860b5518eecc6f73f328aef38d76c8bfbc",
     "test_cases.test_collection_cycle_persistence": "97c259061c9565f7b0fbb19e33660a898db692f2bef211c065318fd7f3274689",
@@ -870,7 +902,7 @@
     "test_cases.test_p2p_selection_contract": "285efe456cb58ff312a3d9b1a64f34dac7350e14713030db11eaa08538f50945",
     "test_cases.test_p2p_selection_workflow": "72f2cc6f10fe4b57135f7a809e0ab0e70f17d887df6adea88c7e850dd7764a22",
     "test_cases.test_password_update": "2fe3f3e1f500ee8cc72dafbfdac14869f5642c6b84e1a7060c21e243587771f1",
-    "test_cases.test_predeploy_test_gate": "314149df6dec9c995f2ae629aad7f2f0ab4d792316c8c219b4da0de20a9e6a90",
+    "test_cases.test_predeploy_test_gate": "6dc4d78e5fac0f5b931c590eee80d80b1ebfb39893a7d3aac66b490d0d259f37",
     "test_cases.test_private_documentation_contract": "aea19926f10fe1a6a1f2df2c33658f40bbfc16b3074df0cc2febe2f5f3cf2dc8",
     "test_cases.test_project_contracts": "8a2316332d9dfe5487b01badcf03ea976d03783149b8dc9497aadb02bb4ff6ac",
     "test_cases.test_project_image_bundle": "a7d001684b49d093ac9ee6723786e03aeaf3ddc188b50c46644a5306790acc6f",
@@ -891,8 +923,8 @@
     "test_cases.test_req10b_global_link_workflow": "426749b24b5aa553670e094fcd77294cefab6a068764bc3faca144f95197559b",
     "test_cases.test_req10b_services_keys_contract": "415cf1f92ac19caa3bc95175c19f380595268618dd933f3e65823f996a57b1b0",
     "test_cases.test_req10b_services_keys_workflow": "0190e82be40799eb750f20ffc8d21ec9d19c5bf11dedb6c83e2eba7baad7eb92",
-    "test_cases.test_req10c_auto_contract": "ba4b6f85e089160eab61725dba6f85bd1add07f9db8c40f271d830f0c9bb4f64",
-    "test_cases.test_req10c_auto_workflow": "42da3b376a473575974b5fad24dac0c31f5466ae723d0e5769a0af92220451fd",
+    "test_cases.test_req10c_auto_contract": "6fc2b698921213b3c67080c4f940bbd3e48453d0f4f69eef50a3f584ba12ba1f",
+    "test_cases.test_req10c_auto_workflow": "14be4a6dfbbc5f71a218effac7ba133182894d48403a5d8301451f65caf68995",
     "test_cases.test_req14_active_provenance_workflow": "23fceb66c4ce89b30f3cdf34fa1fad205912a83dddd8fb0b6e51b46f7d22474a",
     "test_cases.test_req14_splitter_hostname_binding": "e17ce6fcfb2939be52f3f6ac042839f2c8ef6ccc835cde6689e0c15c72c14543",
     "test_cases.test_req19_infra_log_contract": "ef1c1133bbb6bc9ed19bd8b5de70f90e3559e86641714ae5ea4bcd7fc19cbf5c",
@@ -924,7 +956,7 @@
     "test_cases.test_ufm_local_archive_workflow": "c43cfa2ae5988c50b2d3519cdb20c534cc13c5b0228ab7b2ed5b7b90334587c9",
     "test_cases.test_ufm_remote_producer": "38363c09546951664c58c3a8ea13666a7681f7d620daff2b47384fa372e09ad6",
     "test_cases.test_ufm_remote_producer_workflow": "0af8e841718064e149d2d8b1c49b85800c3644b17b3f5b3284809ef196a994c1",
-    "test_cases.test_upload_package_contract": "8f820a54c849c21a3134e7cb3df7ea2f7e03ef961c4bb591a84ca0f207917adc",
+    "test_cases.test_upload_package_contract": "452187b71cdcb618e33d589aaaa43874ce895ef8302cab2dfcf6ab45248a4205",
     "test_cases.test_v2_generation_flow": "9e4e9c06fd1315b6c010246cf8470ec2e9e2a9ac9bf2e6b9b9e55c6da7cd64e4",
     "test_cases.test_v2_project_schema": "87a701ac45052a44c1336272f6c47fabc0f5e22ee3fed84a06c696657ad36590",
     "test_cases.test_vm_validation_runner": "e3cea3bccb662d899f748421598feb95298142b47928bc1c077909bb1af2c505",
