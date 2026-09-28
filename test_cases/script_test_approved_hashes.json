@@ -24,14 +24,14 @@
       "root-entrypoint-workflow": "NOT COVERED (requires Linux EUID 0 private namespace)"
     },
     "schema_version": 1,
-    "snapshot_sha256": "de937375f1b35ef597ee8fcad55e665cc66287a06e48061bb17f3af434710c01"
+    "snapshot_sha256": "ba5006fcb73e19843bcd52cf6007093dc8c9a5aee7e87a14fe7e6a0b24c783f8"
   },
   "impact_manifest_sha256": "81ba6afa5a5d6f283531955942e61bf19cbd033dacd9e4b68d3277090a2e8c20",
   "schema_version": 1,
   "scripts": {
     "DAY0-Prepare/01-a-setup.py": {
       "canonical": "DAY0-Prepare/01-a-setup.py",
-      "sha256": "6d3095e1a546d97c6eb645d13154279358e35e57d5558d11d1fa176596dda5e6"
+      "sha256": "32ca03b4552f82f833b7ea92126f14ed48f5b9f05249107a8bee78fb72ab65f3"
     },
     "DAY0-Prepare/02-unsetup.py": {
       "canonical": "DAY0-Prepare/02-unsetup.py",
@@ -887,7 +887,7 @@
     "test_cases.test_issue_tracker_whitelist_workbook": "6c4fd8bceec23e1fbfa1b9d8ecad78853058ee7f3ef93bd90b5f7906923c6eac",
     "test_cases.test_issue_tracker_whitelist_workbook_workflow": "2cc91998f5ee6c704f7b17b95bcc404dbfde4737092430a306485e5a39ace919",
     "test_cases.test_issue_tracker_whitelist_workflow": "b22e238ef2e8eedf29977486a6c170c7cf9158a126d7797d145109acf726c353",
-    "test_cases.test_load_release_transaction": "185610dfa1cb271fda4a2a6a83395825a948f296b6c916350355fed588984821",
+    "test_cases.test_load_release_transaction": "d74f6a3d5c6abadba1a02da2bedd41531f27bc972bbedc876196a36ba3e6710e",
     "test_cases.test_manual_applied_config": "4e265643d5fdd028b845298b9afec392d470b56d29141d8a3f6e8b96b7da84f9",
     "test_cases.test_mlag_evpn_generation": "7eb9edb511bc66c616b214903fbeef5c77df112c27990750fd6fb006a507cd7a",
     "test_cases.test_monitor_authority_entrypoints": "b40ed42fdac6c5fbc8a685514ad69452685e37691d7ada9458b6d5f4e1c302ae",
@@ -897,7 +897,7 @@
     "test_cases.test_monitor_writer_quiesce": "5efe4499c9ccb4f051d914a8584abcc0fc56023ac0bbc734c9c659a8967bed99",
     "test_cases.test_monitor_writer_quiesce_workflow": "22f2e505de1919e8c66a8a29c905d571a74ae590fa6c410cd28034982d99f9bc",
     "test_cases.test_nvue_normalizer": "6e22f0f89353d0042391330675e4cce387931e896f4b44f57911e2dccb85b230",
-    "test_cases.test_ops_deployment_review": "65ada29ce23301ff22b42b6b03103498086a7861968b21c28a90196454e1d5a4",
+    "test_cases.test_ops_deployment_review": "9e158b64b6b0802d38fa77e230b6aa643916a268218eea33adcdf3c8a152e218",
     "test_cases.test_optimize_output_layout": "b37ffae7f3f1c81af403c33efd981976e766ee1face193a43410a57fa4dd6b7f",
     "test_cases.test_p2p_selection_contract": "285efe456cb58ff312a3d9b1a64f34dac7350e14713030db11eaa08538f50945",
     "test_cases.test_p2p_selection_workflow": "72f2cc6f10fe4b57135f7a809e0ab0e70f17d887df6adea88c7e850dd7764a22",
@@ -919,8 +919,8 @@
     "test_cases.test_qos_evpn_uplink_generation": "35b8f6285be154b383030a7e6f479e99483f5bf51bbe18871a13079be5618638",
     "test_cases.test_reference_only_path_disposition": "3ed87c3b4437da622e73d3ffcdec95b17905f41a352dbdaf012ddc0d284e912b",
     "test_cases.test_reference_only_selector_workflow": "555fecb2632f014176d0790df9a1ac706143161e13118cee038d4a3bd532fe86",
-    "test_cases.test_req10b_global_link_contract": "48fc1067d97ea89ee90c66b5350df98827c91cece1fb557bd6cc81bfb8f9395f",
-    "test_cases.test_req10b_global_link_workflow": "426749b24b5aa553670e094fcd77294cefab6a068764bc3faca144f95197559b",
+    "test_cases.test_req10b_global_link_contract": "e06a434db95459dad063d2fd94d11558c12723217b72f419bfcede658573fb1d",
+    "test_cases.test_req10b_global_link_workflow": "9bad1ebe5e6b14b2159d62e2ed4600bb8d9fedfda9b9690496c2d383349ea833",
     "test_cases.test_req10b_services_keys_contract": "415cf1f92ac19caa3bc95175c19f380595268618dd933f3e65823f996a57b1b0",
     "test_cases.test_req10b_services_keys_workflow": "0190e82be40799eb750f20ffc8d21ec9d19c5bf11dedb6c83e2eba7baad7eb92",
     "test_cases.test_req10c_auto_contract": "6fc2b698921213b3c67080c4f940bbd3e48453d0f4f69eef50a3f584ba12ba1f",
