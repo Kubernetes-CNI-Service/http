@@ -205,11 +205,14 @@ def _prepare_output_parents(root_fd: int, plan: CollectionPlan) -> int:
 
 
 def _read_regular_at(parent_fd: int, name: str, *, max_bytes: int) -> bytes:
-    descriptor = os.open(name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
-                         dir_fd=parent_fd)
+    """Read a held receipt member only while its directory name stays bound."""
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not nofollow:
+        raise PipelineError("platform cannot bind UFM receipt reads")
+    descriptor = os.open(name, os.O_RDONLY | nofollow, dir_fd=parent_fd)
     try:
-        observed = os.fstat(descriptor)
-        if not stat.S_ISREG(observed.st_mode) or observed.st_size <= 0 or observed.st_size > max_bytes:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_size <= 0 or before.st_size > max_bytes:
             raise PipelineError("UFM receipt component is not bounded regular data")
         chunks: list[bytes] = []
         total = 0
@@ -218,6 +221,16 @@ def _read_regular_at(parent_fd: int, name: str, *, max_bytes: int) -> bytes:
             if total > max_bytes:
                 raise PipelineError("UFM receipt component exceeded bound")
             chunks.append(chunk)
+        after = os.fstat(descriptor)
+        named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        expected = (before.st_dev, before.st_ino, before.st_size,
+                    before.st_mtime_ns, before.st_ctime_ns)
+        if total != before.st_size or any(
+            (current.st_dev, current.st_ino, current.st_size,
+             current.st_mtime_ns, current.st_ctime_ns) != expected
+            for current in (after, named)
+        ):
+            raise PipelineError("UFM receipt component changed during read")
         return b"".join(chunks)
     finally:
         os.close(descriptor)

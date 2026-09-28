@@ -22,6 +22,38 @@ RUN_ID = "20260926-0315-air-0123456789abcdef"
 
 
 class UfmCollectionPipelineTests(unittest.TestCase):
+    def test_receipt_reader_rejects_replaced_name_and_missing_nofollow(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            receipt = root / "receipt.json"
+            receipt.write_bytes(b'{"status":"success"}')
+            original_inode = receipt.stat().st_ino
+            directory_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            real_read = os.read
+            replaced: list[bool] = []
+
+            def replace_after_read(descriptor: int, size: int) -> bytes:
+                data = real_read(descriptor, size)
+                if data and os.fstat(descriptor).st_ino == original_inode and not replaced:
+                    replacement = root / "replacement"
+                    replacement.write_bytes(b'{"status":"failed"}')
+                    replacement.replace(receipt)
+                    replaced.append(True)
+                return data
+
+            try:
+                with mock.patch.object(PIPELINE.os, "read", side_effect=replace_after_read):
+                    with self.assertRaises(PIPELINE.PipelineError):
+                        PIPELINE._read_regular_at(directory_fd, "receipt.json",
+                                                  max_bytes=4096)
+                self.assertEqual([True], replaced)
+                with mock.patch.object(PIPELINE.os, "O_NOFOLLOW", 0):
+                    with self.assertRaises(PIPELINE.PipelineError):
+                        PIPELINE._read_regular_at(directory_fd, "receipt.json",
+                                                  max_bytes=4096)
+            finally:
+                os.close(directory_fd)
+
     def test_receipt_json_duplicate_keys_cannot_become_a_success_claim(self):
         unique = b'{"schema":"ufm-collection-v1","status":"success"}'
         self.assertEqual("success", PIPELINE._parse_receipt_json(unique)["status"])

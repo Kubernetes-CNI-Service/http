@@ -61,6 +61,47 @@ def _write_cvt(path: Path) -> None:
 
 
 class UfmCollectionPipelineWorkflowTests(unittest.TestCase):
+    def test_real_receipt_reader_cannot_claim_a_replaced_success_receipt(self):
+        plan = COLLECTION.collection_plan("iblinkinfo", RUN_ID)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            vendor_output = root / "iblinkinfo.txt"
+            vendor_output.write_text(
+                "Switch: 0x1 MF0;leaf01:MQM9700/U1:\n"
+                ' 10 1[  ] ==( 4X 200 Gbps Active / LinkUp )==> '
+                '20 1[  ] "server01 mlx5_0"\n', encoding="utf-8",
+            )
+            ufm_dir = root / "ufm-private"
+            ufm_dir.mkdir()
+            archive = COLLECTION.publish_local_archive(plan, vendor_output, ufm_dir)
+            cvt = root / "cvt.xlsx"
+            _write_cvt(cvt)
+            project = root / "project"
+            project.mkdir()
+            final = PIPELINE.run_local_iblinkinfo(
+                plan, "EXAMPLE-UFM01", archive, cvt, project,
+            )
+            receipt = final / "receipt.json"
+            original_inode = receipt.stat().st_ino
+            self.assertEqual(1, len(PIPELINE.validated_receipts(project, "air")))
+            real_read = os.read
+            replaced: list[bool] = []
+
+            def replace_after_read(descriptor: int, size: int) -> bytes:
+                data = real_read(descriptor, size)
+                if data and os.fstat(descriptor).st_ino == original_inode and not replaced:
+                    replacement = final / "replacement-receipt"
+                    replacement.write_bytes(b'{"status":"failed"}')
+                    replacement.replace(receipt)
+                    replaced.append(True)
+                return data
+
+            with mock.patch.object(PIPELINE.os, "read", side_effect=replace_after_read):
+                self.assertEqual([], PIPELINE.validated_receipts(project, "air"))
+            self.assertEqual([True], replaced)
+            self.assertEqual(b'{"status":"failed"}', receipt.read_bytes())
+            self.assertNotIn(RUN_ID, HTML.render_ufm_evidence_panel(project, "air"))
+
     def test_duplicate_success_receipt_is_invisible_to_real_monitor_reader(self):
         plan = COLLECTION.collection_plan("iblinkinfo", RUN_ID)
         with tempfile.TemporaryDirectory() as directory:
