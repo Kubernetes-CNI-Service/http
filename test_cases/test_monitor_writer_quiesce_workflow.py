@@ -1080,6 +1080,44 @@ def _reject_relevant_unresolved_imports(
                 bindings[alias.asname or alias.name.split(".")[0]] = (
                     alias.name, None,
                 )
+
+    def extend_forwarded_aliases(
+        scope_nodes: list[ast.AST], direct_body: list[ast.stmt],
+        known: dict[str, tuple[str, str | None]],
+    ) -> tuple[dict[str, str], set[int], set[str]]:
+        """Preserve imported identity through bounded name-to-name forwarding."""
+        origins: dict[str, str] = {}
+        initial_stores: set[int] = set()
+        uncertain: set[str] = set()
+        changed = True
+        while changed:
+            changed = False
+            for assignment in scope_nodes:
+                if not (
+                    isinstance(assignment, ast.Assign)
+                    and len(assignment.targets) == 1
+                    and isinstance(assignment.targets[0], ast.Name)
+                    and isinstance(assignment.value, ast.Name)
+                ):
+                    continue
+                target = assignment.targets[0]
+                source_name = assignment.value.id
+                if source_name not in known or target.id in known:
+                    continue
+                known[target.id] = known[source_name]
+                origins[target.id] = origins.get(source_name, source_name)
+                if assignment in direct_body:
+                    initial_stores.add(id(target))
+                else:
+                    uncertain.add(target.id)
+                changed = True
+        return origins, initial_stores, uncertain
+
+    module_alias_origins, module_alias_stores, module_uncertain = (
+        extend_forwarded_aliases(
+            list(_walk_local_scope(tree)), getattr(tree, "body", []), bindings,
+        )
+    )
     # These standard-library modules are modeled by the local mutation sink
     # visitor or are read-only parser/serialization adapters. This gate is for
     # otherwise unresolved imported *repository/third-party* call targets.
@@ -1095,7 +1133,13 @@ def _reject_relevant_unresolved_imports(
         if isinstance(node, ast.Name)
         and isinstance(node.ctx, (ast.Store, ast.Del))
         and node.id in bindings
+        and id(node) not in module_alias_stores
     }
+    rebound_imports.update(module_uncertain)
+    rebound_imports.update(
+        alias for alias, origin in module_alias_origins.items()
+        if origin in rebound_imports
+    )
     for function in production_functions(tree).values():
         governed = _governed_locals(function, set(), set())
         local_nodes = list(_walk_local_scope(function))
@@ -1112,12 +1156,24 @@ def _reject_relevant_unresolved_imports(
                     function_bindings[alias.asname or alias.name.split(".")[0]] = (
                         alias.name, None,
                     )
+        # A local alias cannot erase an imported writer. Only unconditional
+        # forwarding is transparent; conditional aliases and later writes
+        # retain a fail-closed unresolved identity.
+        alias_origins, alias_initial_stores, uncertain_aliases = (
+            extend_forwarded_aliases(local_nodes, function.body, function_bindings)
+        )
         function_rebound_imports = rebound_imports | {
             node.id for node in local_nodes
             if isinstance(node, ast.Name)
             and isinstance(node.ctx, (ast.Store, ast.Del))
             and node.id in function_bindings
+            and id(node) not in alias_initial_stores
         }
+        function_rebound_imports.update(uncertain_aliases)
+        function_rebound_imports.update(
+            alias for alias, origin in alias_origins.items()
+            if origin in function_rebound_imports
+        )
 
         def imported_binding(call: ast.Call):
             imported = None
@@ -4864,6 +4920,68 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             "import os\nfrom review_paths import display\n"
             "def main():\n    display('status')\n"
             "    os.replace('tmp', 'unrelated-output')\n"
+        )
+        _reject_relevant_unresolved_imports(unrelated, {})
+
+    def test_forwarded_imported_writer_alias_requires_resolved_source(self) -> None:
+        """A local alias cannot erase an imported governed writer boundary."""
+        writer = ast.parse(
+            "import os\n"
+            "def publish(destination):\n    os.remove(destination)\n"
+        )
+        sources = (
+            "from review_writer import publish as commit\n"
+            "def main():\n    forward = commit\n"
+            "    forward('01-global.yaml')\n",
+            "from review_writer import publish as commit\n"
+            "def main():\n    forward = commit\n"
+            "    second = forward\n    second('01-global.yaml')\n",
+            "import review_writer as writer\n"
+            "def main():\n    forward = writer\n"
+            "    forward.publish('01-global.yaml')\n",
+            "from review_writer import publish as commit\n"
+            "forward = commit\n"
+            "def main():\n    forward('01-global.yaml')\n",
+            "import review_writer as writer\n"
+            "forward = writer\n"
+            "def main():\n    forward.publish('01-global.yaml')\n",
+        )
+        for source in sources:
+            with self.subTest(source=source):
+                tree = ast.parse(source)
+                with self.assertRaisesRegex(AssertionError, "WDISC_UNRESOLVED"):
+                    _reject_relevant_unresolved_imports(tree, {})
+                _reject_relevant_unresolved_imports(tree, {"review_writer": writer})
+
+        rebound = ast.parse(
+            "from review_writer import publish as commit\n"
+            "def main():\n    forward = commit\n"
+            "    forward = runtime_writer\n"
+            "    forward('01-global.yaml')\n"
+        )
+        with self.assertRaisesRegex(AssertionError, "WDISC_UNRESOLVED"):
+            _reject_relevant_unresolved_imports(rebound, {"review_writer": writer})
+
+        conditional = ast.parse(
+            "from review_writer import publish as commit\n"
+            "def main():\n    if runtime_choice:\n        forward = commit\n"
+            "    forward('01-global.yaml')\n"
+        )
+        with self.assertRaisesRegex(AssertionError, "WDISC_UNRESOLVED"):
+            _reject_relevant_unresolved_imports(conditional, {"review_writer": writer})
+
+        source_rebound = ast.parse(
+            "from review_writer import publish as commit\n"
+            "def main():\n    commit = runtime_writer\n"
+            "    forward = commit\n    forward('01-global.yaml')\n"
+        )
+        with self.assertRaisesRegex(AssertionError, "WDISC_UNRESOLVED"):
+            _reject_relevant_unresolved_imports(source_rebound, {"review_writer": writer})
+
+        unrelated = ast.parse(
+            "from review_writer import publish as commit\n"
+            "def main():\n    forward = commit\n"
+            "    forward('status-only')\n"
         )
         _reject_relevant_unresolved_imports(unrelated, {})
 
