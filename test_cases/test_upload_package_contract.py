@@ -96,6 +96,7 @@ REQUIRED_UPLOAD_SOURCES = (
     "tools/tar-for-download.py",
     "tools/sync-code.py",
     "tools/password-update.py",
+    "tools/pre-push-proof.py",
     "DAY0-Prepare/11-load.py",
     "DAY0-Prepare/12-ztp-monitor.py",
     "DAY0-Prepare/13-unload.py",
@@ -172,12 +173,25 @@ class UploadPackageContractTests(unittest.TestCase):
                 run.reset_mock()
                 tool.verify_predeploy_test_approval(validation_only=True)
                 self.assertIn("--validation-only", run.call_args.args[0])
-        with mock.patch.object(load_tool, "_run_local_test_runner") as run:
+        with mock.patch.object(
+            load_tool, "_run_local_test_runner", side_effect=(5, 0, 0),
+        ) as run:
             load_tool.run_local_full_test_gate(validation_only=True)
-            self.assertEqual(["--all", "--validation-only"], run.call_args_list[0].args[0])
             self.assertEqual(
                 ["--check", "--require-full", "--validation-only"],
+                run.call_args_list[0].args[0],
+            )
+            self.assertEqual(
+                frozenset({0, 4, 5}),
+                run.call_args_list[0].kwargs["accepted_returncodes"],
+            )
+            self.assertEqual(
+                ["--all", "--validation-only"],
                 run.call_args_list[1].args[0],
+            )
+            self.assertEqual(
+                ["--check", "--require-full", "--validation-only"],
+                run.call_args_list[2].args[0],
             )
 
     def test_issue0016_validation_load_rejects_all_scope_and_preview(self):

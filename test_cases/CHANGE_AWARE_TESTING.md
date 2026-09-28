@@ -115,11 +115,23 @@ roots。Jinja 全量合同还逐项解析 include/import/from-import/extends 的
 runner 位于 canonical `test_cases/`，不会进入 upload/sync 生产包。开发期间建议一直运行
 `--watch`。成功的 `--all` 会在批准 ledger 中额外记录 full-suite attestation，绑定当前完整
 snapshot、Python 解释器、版本、平台和架构；普通 related 通过本身不会伪造这份证明。本机
-macOS 正式 load 在实际生成前运行 `--all`，成功后运行 `--check --require-full`；Linux load 与
+macOS 正式 load 在实际生成前先运行 `--check --require-full`；有效证明直接复用，只有退出码
+4/5 才运行一次 `--all` 并再次复核，退出码 2 或其他治理错误直接阻断。DAY0 项目输入与运行
+输出不属于 governed snapshot，因此同一环境的 fresh clone 携带有效 ledger 且只修改项目输入时
+不会重复 full suite；load 的项目合法性、生成与发布门禁不缓存。成功后仍运行
+`--check --require-full`。Linux load 与
 macOS dry-run 不运行开发测试。正式 `sync-code` 或 `tar-for-upload` 只执行
 `--check --require-full`：精确证明有效就直接复用，缺失或过期则在任何打包、网络或远端写入前
 停止并要求重跑本机正式 load，绝不自行回退执行全量。`--check` 返回 4 表示字节未批准，
 `--check --require-full` 返回 5 表示全量证明缺失、过期或来自不同环境；两者都必须阻断发布。
+
+正式 macOS load 同时启用 `.githooks/pre-push`。hook 只验证当前 checkout HEAD，并要求 approval
+ledger 已被 Git 跟踪、其当前字节已经提交到该 HEAD，随后用 load 绑定的精确 Python 再执行
+`--check --require-full`。这样 push 的对象本身携带有效 proof，而不是仅依赖未提交工作树状态。
+非 HEAD tip、未提交 ledger、stale proof、错误 intent 或错误环境一律阻断；删除远端 ref 不要求
+proof。默认 push 只接受 release proof。owner 授权的 AIR/prod 验证可以显式设置
+`HTTP_VALIDATION_ONLY=1`，此时 runner 精确增加 `--validation-only`，只接受已提交且与当前字节
+匹配的 ISSUE-0016 validation proof；它不能替代最终生产发布 proof。
 
 ## 新脚本、新功能和新场景
 

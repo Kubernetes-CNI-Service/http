@@ -78,7 +78,11 @@ PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B test_cases/run_related_tests.p
 主分类，或分类引用了不存在的模块，manifest 校验都会 fail closed。
 
 正式发布需要一份绑定当前源码、测试、manifest 和 Python/平台身份的全量回归证明。本机
-macOS 正式 `DAY0-Prepare/11-load.py` 先解析并拒绝互相冲突的纯命令行参数，再在生成项目文件前执行全量回归，并在成功后做只读逐字节
+macOS 正式 `DAY0-Prepare/11-load.py` 先解析并拒绝互相冲突的纯命令行参数，再在生成项目文件前
+执行 `--check --require-full`。检查成功会直接复用证明；仅退出 4/5 会触发一次全量回归并复核，
+治理/安全错误不会被当成 cache miss。普通 DAY0 项目输入和运行输出不进入治理 snapshot，
+所以同一执行环境的 fresh clone 携带有效 ledger 后，仅修改项目 global/devices/subnet/P2P 等输入
+不会重跑 full suite；项目自身合法性、生成和发布检查仍每次执行。load 成功后继续做只读逐字节
 复核。也可以单独执行以下治理命令生成及检查证明：
 
 ```bash
@@ -102,6 +106,14 @@ AIR/prod 验证阶段有且只有 ISSUE-0016 的三个同 UID 非协作 crontab 
 管理服务器 load 与 macOS `--dry-run` 不运行开发测试。任一步失败都必须阻断
 `sync-code`、`tar-for-upload --deploy` 和正式部署。runner 只负责选测、执行及成功后的批准哈希
 更新，绝不会根据实现自动重写断言；禁止通过弱化、跳过或删除测试来接受失败。
+
+正式 macOS load 会把 `core.hooksPath` 固定为仓库跟踪的 `.githooks`，并记录签发证明时使用的
+精确 Python。pre-push gate 只接受当前 checkout HEAD；approval ledger 必须已跟踪且其工作树
+字节与该 HEAD 中的版本完全相同，再由同一解释器通过 `--check --require-full`。源代码、测试、
+manifest、依赖锁或环境身份变化会阻断 push；仅 DAY0 项目输入变化不会使代码 proof 失效。
+默认 push 只接受 release proof，validation-only proof 仍与最终发布严格隔离。仅执行经 owner
+授权的 AIR/prod 验证时，可显式使用 `HTTP_VALIDATION_ONLY=1 git push ...`；它只匹配已提交的
+validation-only proof，不能接受 release proof，也不会容许三项登记反例之外的任何失败。
 
 manifest 校验还会直接加载并合并三份真实部署选择器：`sync-code.py` 的根目录同步选择、
 `infra/docker/activate.py` 的镜像源码选择，以及 `_package_common.py` 的归档源码选择。任一选择器

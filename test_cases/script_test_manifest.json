@@ -263,6 +263,7 @@
   "tracked_support": [
     ".dockerignore",
     ".gitattributes",
+    ".githooks/pre-push",
     ".github/workflows/monitor-authority-root.yml",
     ".github/workflows/tests.yml",
     ".gitignore",
@@ -494,6 +495,7 @@
     "tools/lldp-analyze-tool/analyze_lldp.py": "tools/lldp-analyze-tool/analyze_lldp.py",
     "tools/lldp-analyze-tool/build_report.py": "tools/lldp-analyze-tool/build_report.py",
     "tools/password-update.py": "tools/password-update.py",
+    "tools/pre-push-proof.py": "tools/pre-push-proof.py",
     "tools/package-project-image.py": "tools/package-project-image.py",
     "tools/package-shared-artifacts.py": "tools/package-shared-artifacts.py",
     "tools/project_contract.py": "tools/project_contract.py",
@@ -721,6 +723,7 @@
         "tools/finished_project_state.py",
         "tools/deployment_prewrite_guard.py",
         "tools/import-from-download.py",
+        "tools/pre-push-proof.py",
         "tools/sync-code.py",
         "tools/tar-for-download.py",
         "tools/tar-for-upload.py"
@@ -1922,6 +1925,7 @@
         "tools/deployment_prewrite_guard.py",
         "tools/package-project-image.py",
         "tools/package-shared-artifacts.py",
+        "tools/pre-push-proof.py",
         "tools/sync-code.py",
         "tools/tar-for-upload.py",
         "tools/ztp_service_runtime.py",
@@ -2458,6 +2462,12 @@
     }
   ],
   "path_rules": [
+    {
+      "paths": [".githooks/pre-push"],
+      "tests": [
+        "test_cases.test_predeploy_test_gate"
+      ]
+    },
     {
       "paths": ["DAY0-Prepare/template/99-output-infra/.gitkeep"],
       "tests": [

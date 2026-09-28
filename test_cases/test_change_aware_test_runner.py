@@ -771,6 +771,7 @@ class ImpactManifestTests(unittest.TestCase):
             [
                 ".dockerignore",
                 ".gitattributes",
+                ".githooks/pre-push",
                 ".github/workflows/monitor-authority-root.yml",
                 ".github/workflows/tests.yml",
                 ".gitignore",

@@ -19,6 +19,7 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+import uuid
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -52,6 +53,9 @@ INSTALLER = load_module(
 LOAD = load_module("predeploy_gate_load", ROOT / "DAY0-Prepare/11-load.py")
 RUNNER = load_module(
     "predeploy_gate_runner", ROOT / "test_cases/run_related_tests.py",
+)
+PRE_PUSH = load_module(
+    "predeploy_gate_pre_push", TOOLS / "pre-push-proof.py",
 )
 
 
@@ -97,6 +101,9 @@ class GateCommandTests(unittest.TestCase):
             LOAD, "run_local_full_test_gate",
             side_effect=lambda: events.append("full"),
         ), mock.patch.object(
+            LOAD, "configure_local_pre_push_proof_gate",
+            side_effect=lambda: events.append("hook"),
+        ), mock.patch.object(
             LOAD, "acquire_deployment_lock",
             side_effect=AssertionError("invalid CLI must not acquire lock"),
         ), redirect_stdout(io.StringIO()), redirect_stderr(stderr):
@@ -107,7 +114,7 @@ class GateCommandTests(unittest.TestCase):
         self.assertEqual([], events)
         self.assertRegex(stderr.getvalue(), "--mini.*AIR|--prod")
 
-    def test_macos_real_load_runs_full_before_work_and_rechecks_after_success(self):
+    def test_macos_real_load_resolves_full_proof_before_work_and_rechecks_after_success(self):
         events = []
         args = SimpleNamespace(dry_run=False)
         with mock.patch.object(
@@ -118,13 +125,88 @@ class GateCommandTests(unittest.TestCase):
             LOAD, "run_local_full_test_gate",
             side_effect=lambda: events.append("full"),
         ), mock.patch.object(
+            LOAD, "configure_local_pre_push_proof_gate",
+            side_effect=lambda: events.append("hook"),
+        ), mock.patch.object(
             LOAD, "main", side_effect=lambda _argv: events.append("load") or 0,
         ), mock.patch.object(
             LOAD, "verify_local_full_test_attestation",
             side_effect=lambda: events.append("post-check"),
         ):
             self.assertEqual(0, LOAD.cli(["customer"]))
-        self.assertEqual(["full", "load", "post-check"], events)
+        self.assertEqual(["full", "hook", "load", "post-check"], events)
+
+    def test_current_full_proof_is_reused_without_running_full_suite(self):
+        calls = []
+
+        def run(arguments, label, **kwargs):
+            calls.append((arguments, label, kwargs))
+            return 0
+
+        with mock.patch.object(
+            LOAD, "_run_local_test_runner", side_effect=run,
+        ), redirect_stdout(io.StringIO()):
+            LOAD.run_local_full_test_gate()
+
+        self.assertEqual([
+            (
+                ["--check", "--require-full"],
+                "本机正式 load 前全量测试证明检查",
+                {"accepted_returncodes": frozenset({0, 4, 5})},
+            ),
+        ], calls)
+
+    def test_only_stale_or_missing_full_proof_falls_back_to_full_suite(self):
+        conditions = (
+            ("managed source changed", 4),
+            ("managed test changed", 4),
+            ("impact manifest changed", 4),
+            ("proof missing or execution environment changed", 5),
+        )
+        for condition, status in conditions:
+            with self.subTest(condition=condition):
+                calls = []
+
+                def run(arguments, label, **kwargs):
+                    calls.append((arguments, label, kwargs))
+                    if len(calls) == 1:
+                        return status
+                    return 0
+
+                with mock.patch.object(
+                    LOAD, "_run_local_test_runner", side_effect=run,
+                ), redirect_stdout(io.StringIO()):
+                    LOAD.run_local_full_test_gate()
+
+                self.assertEqual([
+                    (
+                        ["--check", "--require-full"],
+                        "本机正式 load 前全量测试证明检查",
+                        {"accepted_returncodes": frozenset({0, 4, 5})},
+                    ),
+                    (["--all"], "本机正式 load 前全量测试", {}),
+                    (
+                        ["--check", "--require-full"],
+                        "本机 load 全量测试证明复核",
+                        {},
+                    ),
+                ], calls)
+
+    def test_governance_safety_error_never_falls_back_to_full_suite(self):
+        calls = []
+
+        def run(arguments, label, **kwargs):
+            calls.append((arguments, label, kwargs))
+            return 2
+
+        with mock.patch.object(
+            LOAD, "_run_local_test_runner", side_effect=run,
+        ), redirect_stdout(io.StringIO()), self.assertRaisesRegex(
+            LOAD.LoadError, "exit=2",
+        ):
+            LOAD.run_local_full_test_gate()
+
+        self.assertEqual(1, len(calls))
 
     def test_air_validation_load_passes_explicit_intent_to_both_full_gates(self):
         requested = ["customer", "--air", "--validation-only"]
@@ -138,6 +220,8 @@ class GateCommandTests(unittest.TestCase):
         ), mock.patch.object(
             LOAD, "run_local_full_test_gate",
         ) as full, mock.patch.object(
+            LOAD, "configure_local_pre_push_proof_gate",
+        ) as hook, mock.patch.object(
             LOAD, "main", return_value=0,
         ) as work, mock.patch.object(
             LOAD, "verify_local_full_test_attestation",
@@ -145,6 +229,7 @@ class GateCommandTests(unittest.TestCase):
             self.assertEqual(0, LOAD.cli(requested))
         work.assert_called_once_with(requested)
         full.assert_called_once_with(validation_only=True)
+        hook.assert_called_once_with()
         verify.assert_called_once_with(validation_only=True)
 
     def test_linux_load_and_macos_dry_run_never_run_development_tests(self):
@@ -157,12 +242,15 @@ class GateCommandTests(unittest.TestCase):
                  ), mock.patch.object(
                      LOAD, "run_local_full_test_gate",
                  ) as full, mock.patch.object(
+                     LOAD, "configure_local_pre_push_proof_gate",
+                 ) as hook, mock.patch.object(
                      LOAD, "verify_local_full_test_attestation",
                  ) as verify, mock.patch.object(
                      LOAD, "main", return_value=0,
                  ):
                 self.assertEqual(0, LOAD.cli(["customer"]))
             full.assert_not_called()
+            hook.assert_not_called()
             verify.assert_not_called()
 
     def test_failed_macos_full_gate_stops_before_load(self):
@@ -173,12 +261,208 @@ class GateCommandTests(unittest.TestCase):
         ), mock.patch.object(
             LOAD, "run_local_full_test_gate",
             side_effect=RuntimeError("full tests failed"),
-        ), mock.patch.object(LOAD, "main") as load:
+        ), mock.patch.object(
+            LOAD, "configure_local_pre_push_proof_gate",
+        ) as hook, mock.patch.object(LOAD, "main") as load:
             stderr = io.StringIO()
             with redirect_stderr(stderr):
                 self.assertEqual(1, LOAD.cli(["customer"]))
         load.assert_not_called()
+        hook.assert_not_called()
         self.assertIn("full tests failed", stderr.getvalue())
+
+    def test_day0_project_inputs_do_not_change_governed_full_snapshot(self):
+        manifest = RUNNER.load_and_validate_manifest(ROOT, RUNNER.DEFAULT_MANIFEST)
+        before = RUNNER.make_snapshot(ROOT, RUNNER.DEFAULT_MANIFEST, manifest)
+        project = ROOT / "DAY0-Prepare" / f"proof-project-{uuid.uuid4().hex}"
+        try:
+            project.mkdir()
+            (project / "01-global.yaml").write_text("schema_version: 2\n", encoding="utf-8")
+            (project / "02-devices_config.csv").write_text(
+                "hostname,type\nleaf01,eth\n", encoding="utf-8",
+            )
+            (project / "02-dhcp-subnet_config.csv").write_text(
+                "shared_network,subnet\noob,192.0.2.0\n", encoding="utf-8",
+            )
+            after = RUNNER.make_snapshot(ROOT, RUNNER.DEFAULT_MANIFEST, manifest)
+        finally:
+            for child in project.iterdir() if project.exists() else ():
+                child.unlink()
+            if project.exists():
+                project.rmdir()
+        self.assertEqual(before, after)
+
+    def test_load_configures_tracked_pre_push_gate_with_exact_python(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory)
+            hook = repository / ".githooks/pre-push"
+            gate = repository / "tools/pre-push-proof.py"
+            hook.parent.mkdir()
+            gate.parent.mkdir()
+            hook.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            gate.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+            hook.chmod(0o755)
+            subprocess.run(["git", "init", "-q", repository], check=True)
+            subprocess.run(
+                ["git", "-C", repository, "add", ".githooks/pre-push", "tools/pre-push-proof.py"],
+                check=True,
+            )
+            with mock.patch.object(LOAD, "HTTP_ROOT", repository), \
+                    mock.patch.object(LOAD, "LOCAL_PRE_PUSH_HOOK", hook), \
+                    redirect_stdout(io.StringIO()):
+                LOAD.configure_local_pre_push_proof_gate()
+            hooks_path = subprocess.run(
+                ["git", "-C", repository, "config", "--local", "--get", "core.hooksPath"],
+                text=True, stdout=subprocess.PIPE, check=True,
+            ).stdout.strip()
+            proof_python = subprocess.run(
+                ["git", "-C", repository, "config", "--local", "--get", "http.fullProofPython"],
+                text=True, stdout=subprocess.PIPE, check=True,
+            ).stdout.strip()
+            self.assertEqual(".githooks", hooks_path)
+            self.assertEqual(str(Path(sys.executable).resolve()), proof_python)
+
+    def _proof_repository(
+        self, directory: Path, *, runner_exit: int = 0,
+        validation_proof: bool = False, intent_sensitive: bool = False,
+    ) -> Path:
+        repository = directory / "source"
+        (repository / "tools").mkdir(parents=True)
+        (repository / "test_cases").mkdir()
+        (repository / "DAY0-Prepare/customer").mkdir(parents=True)
+        (repository / "tools/pre-push-proof.py").write_bytes(
+            (TOOLS / "pre-push-proof.py").read_bytes()
+        )
+        runner_source = f"raise SystemExit({runner_exit})\n"
+        if intent_sensitive:
+            runner_source = (
+                "import json, pathlib, sys\n"
+                "value=json.loads(pathlib.Path('test_cases/script_test_approved_hashes.json').read_text())\n"
+                "is_validation='validation_only' in value['full_suite_attestation']\n"
+                "requested='--validation-only' in sys.argv\n"
+                "raise SystemExit(0 if is_validation == requested else 5)\n"
+            )
+        (repository / "test_cases/run_related_tests.py").write_text(
+            runner_source, encoding="utf-8",
+        )
+        validation_fragment = ',"validation_only":{"issue":"ISSUE-0016"}' \
+            if validation_proof else ""
+        (repository / "test_cases/script_test_approved_hashes.json").write_text(
+            '{"full_suite_attestation":{"synthetic":true'
+            + validation_fragment + '}}\n', encoding="utf-8",
+        )
+        (repository / "DAY0-Prepare/customer/01-global.yaml").write_text(
+            "schema_version: 2\n", encoding="utf-8",
+        )
+        subprocess.run(["git", "init", "-q", repository], check=True)
+        subprocess.run(["git", "-C", repository, "config", "user.name", "Proof Test"], check=True)
+        subprocess.run(["git", "-C", repository, "config", "user.email", "proof@example.invalid"], check=True)
+        subprocess.run(["git", "-C", repository, "add", "."], check=True)
+        subprocess.run(["git", "-C", repository, "commit", "-qm", "proof"], check=True)
+        clone = directory / "clone"
+        subprocess.run(["git", "clone", "-q", repository, clone], check=True)
+        return clone
+
+    def _run_cloned_push_gate(
+        self, clone: Path, *, validation_only: bool = False,
+    ) -> subprocess.CompletedProcess:
+        head = subprocess.run(
+            ["git", "-C", clone, "rev-parse", "HEAD"],
+            text=True, stdout=subprocess.PIPE, check=True,
+        ).stdout.strip()
+        environment = os.environ.copy()
+        if validation_only:
+            environment["HTTP_VALIDATION_ONLY"] = "1"
+        else:
+            environment.pop("HTTP_VALIDATION_ONLY", None)
+        return subprocess.run(
+            [sys.executable, "-B", str(clone / "tools/pre-push-proof.py")],
+            input=f"refs/heads/main {head} refs/heads/main {'0' * 40}\n",
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=environment, check=False,
+        )
+
+    def test_fresh_clone_with_only_project_input_changes_reuses_committed_proof(self):
+        with tempfile.TemporaryDirectory() as directory:
+            clone = self._proof_repository(Path(directory))
+            (clone / "DAY0-Prepare/customer/01-global.yaml").write_text(
+                "schema_version: 2\nsite: changed-only-project-input\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "-C", clone, "config", "user.name", "Proof Test"], check=True)
+            subprocess.run(["git", "-C", clone, "config", "user.email", "proof@example.invalid"], check=True)
+            subprocess.run(
+                ["git", "-C", clone, "add", "DAY0-Prepare/customer/01-global.yaml"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", clone, "commit", "-qm", "project input only"],
+                check=True,
+            )
+            result = self._run_cloned_push_gate(clone)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("有效的精确 release full proof", result.stdout)
+
+    def test_push_blocks_uncommitted_or_stale_full_proof(self):
+        for condition in ("uncommitted-ledger", "stale-proof"):
+            with self.subTest(condition=condition), tempfile.TemporaryDirectory() as directory:
+                clone = self._proof_repository(
+                    Path(directory), runner_exit=5 if condition == "stale-proof" else 0,
+                )
+                if condition == "uncommitted-ledger":
+                    ledger = clone / "test_cases/script_test_approved_hashes.json"
+                    ledger.write_text("{}\n", encoding="utf-8")
+                result = self._run_cloned_push_gate(clone)
+            self.assertNotEqual(0, result.returncode)
+            if condition == "uncommitted-ledger":
+                self.assertIn("尚未提交", result.stderr)
+            else:
+                self.assertIn("没有与当前受管字节", result.stderr)
+
+    def test_push_blocks_a_tip_other_than_checked_out_head(self):
+        with tempfile.TemporaryDirectory() as directory:
+            clone = self._proof_repository(Path(directory))
+            result = subprocess.run(
+                [sys.executable, "-B", str(clone / "tools/pre-push-proof.py")],
+                input=(
+                    f"refs/heads/other {'a' * 40} "
+                    f"refs/heads/other {'0' * 40}\n"
+                ),
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+            )
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("当前 checkout 的 HEAD", result.stderr)
+
+    def test_deleting_a_remote_ref_does_not_require_a_proof(self):
+        with tempfile.TemporaryDirectory() as directory:
+            clone = self._proof_repository(Path(directory), runner_exit=5)
+            result = subprocess.run(
+                [sys.executable, "-B", str(clone / "tools/pre-push-proof.py")],
+                input=(
+                    f"(delete) {'0' * 40} refs/heads/old {'a' * 40}\n"
+                ),
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+            )
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_validation_push_requires_explicit_matching_intent(self):
+        scenarios = (
+            (True, False, 1, "default rejects validation proof"),
+            (True, True, 0, "explicit validation accepts validation proof"),
+            (False, True, 1, "validation intent rejects release proof"),
+        )
+        for proof_is_validation, requested_validation, expected, label in scenarios:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                clone = self._proof_repository(
+                    Path(directory), validation_proof=proof_is_validation,
+                    intent_sensitive=True,
+                )
+                result = self._run_cloned_push_gate(
+                    clone, validation_only=requested_validation,
+                )
+            self.assertEqual(expected, result.returncode, result.stderr)
+            if expected == 0:
+                self.assertIn("validation-only full proof", result.stdout)
 
     def test_preapproved_full_attestation_is_reused_by_both_entrypoints(self):
         manifest = RUNNER.load_and_validate_manifest(ROOT, RUNNER.DEFAULT_MANIFEST)
@@ -240,13 +524,18 @@ class GateCommandTests(unittest.TestCase):
 
     def test_local_load_full_gate_reaches_a_noninteractive_unittest_child(self):
         unittest_calls = []
+        proof_checks = 0
 
         def dispatch(command, **kwargs):
+            nonlocal proof_checks
             if command == [
                 sys.executable, "-B", str(LOAD.LOCAL_TEST_RUNNER),
                 "--check", "--require-full",
             ]:
-                return subprocess.CompletedProcess(command, 0)
+                proof_checks += 1
+                return subprocess.CompletedProcess(
+                    command, 5 if proof_checks == 1 else 0,
+                )
             if command == [
                 sys.executable, "-B", str(LOAD.LOCAL_TEST_RUNNER), "--all",
             ]:

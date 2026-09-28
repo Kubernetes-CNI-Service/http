@@ -25,8 +25,12 @@ PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B test_cases/run_related_tests.p
 ```
 
 正式同步、打包或部署前必须具备绑定当前源码、测试、manifest 以及 Python/平台身份的全量测试
-证明。本机 macOS 上的正式 `DAY0-Prepare/11-load.py` 会在生成项目文件之前执行全量测试，
-成功完成 load 后再次确认当前状态仍逐字节一致。开发者也可以显式执行以下治理命令：
+证明。本机 macOS 上的正式 `DAY0-Prepare/11-load.py` 会先执行只读的
+`--check --require-full`：当前精确证明有效时直接复用；只有返回 4（受管字节变化）或
+5（证明缺失、过期或执行环境不一致）才执行一次全量测试并复核，其他错误 fail closed。
+普通 `DAY0-Prepare/<项目>` 输入和运行输出不属于代码治理快照；同一环境的 fresh clone
+只修改这些项目文件时也复用仓库随 commit 携带的有效证明，但每次 load 仍完整执行项目输入、
+生成和发布门禁。成功完成 load 后再次确认当前状态仍逐字节一致。开发者也可以显式执行：
 
 ```bash
 PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B test_cases/run_related_tests.py --all -v
@@ -37,6 +41,14 @@ PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B test_cases/run_related_tests.p
 过期、源码发生变化或执行环境不一致时，它们必须在任何打包、网络或远端写入前停止，并要求
 操作员先在当前工作树重新完成本机正式 load。Linux 管理服务器 load 与 macOS `--dry-run`
 不运行开发测试。不得提供或使用无条件跳过证明检查的发布参数。
+
+正式 macOS load 还会配置仓库跟踪的 `.githooks/pre-push`。push 只接受当前 checkout HEAD，
+要求 `test_cases/script_test_approved_hashes.json` 已被跟踪、提交到该 HEAD，并再次通过精确
+`--check --require-full`；因此 proof 必须与代码一起进入待推送 commit。仅删除远端 ref 不需要
+证明。默认 push 不接受 validation-only proof，validation proof 不能冒充最终生产发布证明。
+仅在上述 owner 授权的 AIR/prod 验证场景，操作员可显式执行
+`HTTP_VALIDATION_ONLY=1 git push ...`；此时 gate 只接受精确匹配、已提交的 validation-only
+proof，wrong intent、stale proof、未提交 ledger 或任何额外失败仍会阻断。
 
 任何失败、未批准变更或 runner 安全检查错误都必须阻断发布。禁止通过删除、跳过、弱化测试，手工编辑批准 ledger，或让测试从当前实现复制结果来绕过失败。若需求确实改变，应先独立确认新合同并更新相应预期，再修正实现并重新运行测试。
 

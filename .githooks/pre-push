@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+
+root=$(git rev-parse --show-toplevel)
+python_bin=$(git config --local --get http.fullProofPython) || {
+    echo "[BLOCK] 缺少本机正式 load 写入的 http.fullProofPython" >&2
+    exit 1
+}
+exec "$python_bin" -B "$root/tools/pre-push-proof.py" "$@"

@@ -274,9 +274,7 @@ def _cleanup_req10c_auto_watch(project_filter=None):
         _cleanup_req10c_auto_watch_locked(tool, credentials, marker, terminal)
 
 
-def _cleanup_req10c_auto_watch_locked(tool, credentials, marker, terminal):
-    if not any(os.path.lexists(path) for path in (credentials, marker, terminal)):
-        return
+def _read_req10c_crontab():
     try:
         listing = subprocess.run(
             ["crontab", "-l"], capture_output=True, text=True,
@@ -285,11 +283,28 @@ def _cleanup_req10c_auto_watch_locked(tool, credentials, marker, terminal):
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise OSError(f"REQ10C crontab read failed: {exc}") from exc
     if listing.returncode == 0:
-        existing = listing.stdout
-    elif listing.returncode == 1 and "no crontab" in listing.stderr.casefold():
-        existing = ""
-    else:
-        raise OSError(f"REQ10C crontab read failed (exit {listing.returncode})")
+        return listing.stdout
+    if listing.returncode == 1 and "no crontab" in listing.stderr.casefold():
+        return ""
+    raise OSError(f"REQ10C crontab read failed (exit {listing.returncode})")
+
+
+def _read_stable_req10c_crontab():
+    """Return two identical snapshots or fail before replacing crontab."""
+    first = _read_req10c_crontab()
+    second = _read_req10c_crontab()
+    if first != second:
+        raise OSError(
+            "REQ10C crontab changed during the protected read window; "
+            "refusing to replace it"
+        )
+    return second
+
+
+def _cleanup_req10c_auto_watch_locked(tool, credentials, marker, terminal):
+    if not any(os.path.lexists(path) for path in (credentials, marker, terminal)):
+        return
+    existing = _read_stable_req10c_crontab()
 
     def ours(line):
         if "# http-v3-req10c-auto" in line and os.path.join(tool, "initial-setup.py") in line:

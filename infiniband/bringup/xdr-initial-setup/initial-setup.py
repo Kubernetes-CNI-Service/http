@@ -2490,6 +2490,23 @@ def _read_auto_crontab() -> str:
     raise SetupError(f"cannot read current-user crontab (exit {result.returncode})")
 
 
+def _read_stable_auto_crontab() -> str:
+    """Return a byte-stable snapshot or stop before replacing the crontab.
+
+    The project lock serializes our own writers only.  A second read catches
+    an active same-UID writer that does not use that lock; writing from a
+    changing snapshot would silently erase its entry.
+    """
+    first = _read_auto_crontab()
+    second = _read_auto_crontab()
+    if first != second:
+        raise SetupError(
+            "current-user crontab changed during the protected read window; "
+            "refusing to replace it"
+        )
+    return second
+
+
 def _write_auto_crontab(contents: str) -> None:
     try:
         result = subprocess.run(
@@ -2549,7 +2566,7 @@ def _install_auto_watch_locked(tool: Path, credentials: Path, ib_csv: Path,
         + " 2>&1 " + _AUTO_CRON_MARKER
     )
     job = "*/10 * * * * " + shell + "\n"
-    existing = _read_auto_crontab()
+    existing = _read_stable_auto_crontab()
     retained = "".join(
         line for line in existing.splitlines(keepends=True)
         if not _own_auto_cron_line(line, tool, credentials)
@@ -2565,7 +2582,7 @@ def _remove_auto_watch(tool: Path, credentials: Path) -> None:
 
 
 def _remove_auto_watch_locked(tool: Path, credentials: Path) -> None:
-    existing = _read_auto_crontab()
+    existing = _read_stable_auto_crontab()
     retained = "".join(
         line for line in existing.splitlines(keepends=True)
         if not _own_auto_cron_line(line, tool, credentials)

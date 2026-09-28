@@ -56,7 +56,8 @@ workflow/scenario 覆盖，并重新执行目标分支的治理测试。
 
 ### V32-002：BCM/UFM 错误继承 ZTP appliance 身份
 
-- 状态：已在本地修复，提交号待补。
+- 状态：已修复，业务提交 `77c76e6`；`6e73de0` 仅为该组改动通过后的治理批准
+  ledger 提交，不应作为业务修复提交移植。
 - 问题：生产 AIR 模板没有独立 BCM/UFM 原型，节点回退到 `ztp-server` 后继承
   `model=oob-mgmt-server`，其 `eth0,eth1-9` 严格端口清单拒绝 `BF3-BMC/P1/P2` 等源端口。
 - 实现：AIR DOT 继续保留独立 BCM/UFM 节点及合格链路；所有名称含 `BMC` 的端口均过滤，
@@ -67,6 +68,52 @@ workflow/scenario 覆盖，并重新执行目标分支的治理测试。
 - 测试：`test_air_retained_servers_contract.py` 覆盖生产模板回退、节点身份隔离、全 BMC 过滤、
   DOT/JSON 一致映射和模型校验。真实 GB300 LLDPQ 成功生成 548 个 AIR 节点、3129 条连接，
   原 BCM 端口错误未复现。
+
+### V32-003：正式 load 复用精确 full proof，并把 proof 绑定到 push
+
+- 状态：实现与聚焦回归已完成；尚未提交，尚未为当前合并状态执行 full suite 或生成最终
+  proof，提交号与 full-proof 证据待补。
+- 需求：同一台 Mac 或同一执行环境的 fresh clone，在受管源码、测试、manifest、依赖锁和
+  Python/平台身份完全不变、仅修改 `DAY0-Prepare/<项目>` 输入或运行输出时，不应重复执行耗时的
+  full suite；Git push 必须携带已经提交且与待推送字节精确匹配的 proof。
+- 合同：正式 macOS load 先执行 `--check --require-full`。返回 0 时复用 proof；只有返回 4
+  （受管字节未批准）或 5（proof 缺失、过期或环境不匹配）才回退执行一次 `--all` 并复核；
+  返回 2 或其他治理/安全错误直接阻断。项目输入仍在每次 load 中完整执行合法性、生成与发布
+  门禁，不因代码 proof 命中而缓存。
+- Push 门禁：正式 load 配置仓库跟踪的 `.githooks/pre-push`，由
+  `tools/pre-push-proof.py` 要求待推送非删除 ref 全部指向当前 checkout HEAD、approval ledger
+  已被 Git 跟踪且其工作树字节已提交到该 HEAD，并用 load 绑定的精确 Python 再运行 proof
+  检查。默认只接受 release proof；owner 授权的 AIR/prod 验证 push 必须显式设置
+  `HTTP_VALIDATION_ONLY=1`，且只接受意图匹配的 validation-only proof，不能冒充最终发布证明。
+- 文件：`DAY0-Prepare/11-load.py`、`.githooks/pre-push`、`tools/pre-push-proof.py`、
+  `test_cases/script_test_manifest.json`、`test_cases/test_predeploy_test_gate.py`、
+  `test_cases/test_upload_package_contract.py`、`AGENTS.md`、`test_cases/README.md`、
+  `test_cases/CHANGE_AWARE_TESTING.md`。
+- 测试：覆盖 proof 命中、退出码 4/5 回退、退出码 2 阻断、DAY0 项目输入不改变 governed
+  snapshot、fresh clone 仅修改项目输入、未提交或 stale ledger、非 HEAD tip、删除 ref，以及
+  release/validation wrong-intent。两个修复窗口合并后的聚焦回归最终 `115/115 PASS`；首次有
+  3 项仅因 sandbox `PermissionError` 失败，授权环境重跑对应 3 项为 `3/3 PASS`，不是产品缺陷。
+- 合并注意：应先提交已审阅的实现、测试和文档候选，再运行 full suite 生成 ledger，最后单独
+  提交 ledger；当前“聚焦测试通过”不能写成已有 full proof，也不能据此 push。
+
+### V32-004：REQ10C crontab 更新前检测非协作同 UID 写者
+
+- 状态：实现与聚焦回归已完成；尚未提交，尚未执行当前合并状态的 full suite，提交号和
+  full-proof 证据待补。
+- 根因：REQ10C 的 watch 安装、自动移除和项目 unsetup 都以“读取整个当前用户 crontab、修改
+  本项目行、整体写回”的方式工作。项目锁只能串行化本项目写者；其他不使用该锁的同 UID
+  写者若在读取后插入任务，旧实现可能用旧快照覆盖其任务。
+- 实现：`initial-setup.py` 的安装/移除路径和 `02-unsetup.py` 的清理路径都在项目锁内连续读取
+  两次 crontab；两次字节不一致立即 fail closed，并保证在任何 crontab 写入前退出。原三条
+  并发反例及断言没有删除或弱化，修复后已转为通过。
+- 文件：`infiniband/bringup/xdr-initial-setup/initial-setup.py`、
+  `DAY0-Prepare/02-unsetup.py`、`infiniband/bringup/xdr-initial-setup/README.md`、
+  `test_cases/test_req10c_auto_contract.py`、`test_cases/test_req10c_auto_workflow.py`。
+- 测试：原三条并发反例及相关检查 `5/5 PASS`；REQ10C direct + workflow `33/33 PASS`；与
+  V32-003 合并后的聚焦回归包含在最终 `115/115 PASS` 中。
+- 限制：双读是活跃写者检测，不是 compare-and-swap。第二次读取与整体写回之间仍存在窄竞态，
+  因此 `REAL_ENVIRONMENT.md` 中“其他同 UID crontab 写者在完整读—改—写窗口保持静默”的真实
+  环境前置条件继续有效；不得把本地测试描述成任意并发安全证明。
 
 ### 非代码事项
 

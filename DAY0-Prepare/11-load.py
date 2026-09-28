@@ -168,6 +168,7 @@ APACHE_PUBLIC_BOUNDARY_SHA256 = (
 MANIFEST = ZTP_DIR / ".setup_manifest"
 DEPLOYMENT_LOCK = HTTP_ROOT / ".deployment.lock"
 LOCAL_TEST_RUNNER = HTTP_ROOT / "test_cases/run_related_tests.py"
+LOCAL_PRE_PUSH_HOOK = HTTP_ROOT / ".githooks/pre-push"
 ZTP_PREFIX_MARKER = HTTP_ROOT / ".ztp-prefix-publication.json"
 PROMPT_TIMEOUT = 15
 DEFAULT_ZTP_MONITOR_INTERVAL = 30
@@ -405,7 +406,10 @@ def warn(message: str) -> None:
     print(f"[WARN] {message}")
 
 
-def _run_local_test_runner(arguments: list[str], label: str) -> None:
+def _run_local_test_runner(
+    arguments: list[str], label: str, *,
+    accepted_returncodes: frozenset[int] = frozenset({0}),
+) -> int:
     try:
         runner_info = LOCAL_TEST_RUNNER.lstat()
     except FileNotFoundError as exc:
@@ -423,13 +427,28 @@ def _run_local_test_runner(arguments: list[str], label: str) -> None:
     completed = _run_subprocess(
         command, cwd=HTTP_ROOT, shell=False, check=False,
     )
-    if completed.returncode != 0:
+    if completed.returncode not in accepted_returncodes:
         raise LoadError(f"{label}失败（exit={completed.returncode}）")
+    return completed.returncode
 
 
 def run_local_full_test_gate(*, validation_only: bool = False) -> None:
-    """Run the canonical full suite and issue an exact local attestation."""
+    """Reuse an exact proof, or create one only for stale/missing proof state."""
     intent = ["--validation-only"] if validation_only else []
+    status = _run_local_test_runner(
+        ["--check", "--require-full", *intent],
+        "本机正式 load 前全量测试证明检查",
+        accepted_returncodes=frozenset({0, 4, 5}),
+    )
+    if status == 0:
+        info("已复用精确全量测试证明；本次不重复执行全量套件")
+        return
+    if status not in {4, 5}:
+        # _run_local_test_runner already rejects every other return code.  Keep
+        # this branch as a defensive contract if its implementation changes.
+        raise LoadError(f"本机正式 load 前测试门禁失败（exit={status}）")
+    reason = "受管字节未批准" if status == 4 else "全量证明缺失、过期或环境不匹配"
+    info(f"{reason}；开始执行一次全量测试")
     _run_local_test_runner(["--all", *intent], "本机正式 load 前全量测试")
     verify_local_full_test_attestation(validation_only=validation_only)
 
@@ -440,6 +459,53 @@ def verify_local_full_test_attestation(*, validation_only: bool = False) -> None
     _run_local_test_runner(
         ["--check", "--require-full", *intent], "本机 load 全量测试证明复核",
     )
+
+
+def configure_local_pre_push_proof_gate() -> None:
+    """Bind Git push to the same interpreter and exact proof used by load."""
+    try:
+        hook_info = LOCAL_PRE_PUSH_HOOK.lstat()
+    except FileNotFoundError as exc:
+        raise LoadError(f"Git pre-push proof hook 不存在：{LOCAL_PRE_PUSH_HOOK}") from exc
+    if (
+        not stat.S_ISREG(hook_info.st_mode)
+        or hook_info.st_nlink != 1
+        or LOCAL_PRE_PUSH_HOOK.is_symlink()
+        or not hook_info.st_mode & stat.S_IXUSR
+    ):
+        raise LoadError("Git pre-push proof hook 必须是单链接、当前用户可执行的普通文件")
+
+    def git(*arguments: str) -> str:
+        completed = subprocess.run(
+            ["git", "-C", str(HTTP_ROOT), *arguments],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            shell=False,
+            check=False,
+        )
+        if completed.returncode != 0:
+            detail = completed.stderr.strip() or "git command failed"
+            raise LoadError(f"无法配置 Git pre-push proof gate：{detail}")
+        return completed.stdout.strip()
+
+    repository = Path(git("rev-parse", "--show-toplevel")).resolve()
+    if repository != HTTP_ROOT.resolve():
+        raise LoadError(f"load 工作树不是预期 Git 根目录：{repository}")
+    git("ls-files", "--error-unmatch", "--", ".githooks/pre-push")
+    git("ls-files", "--error-unmatch", "--", "tools/pre-push-proof.py")
+    git("config", "--local", "core.hooksPath", ".githooks")
+    git(
+        "config", "--local", "http.fullProofPython",
+        str(Path(sys.executable).resolve()),
+    )
+    if git("config", "--local", "--get", "core.hooksPath") != ".githooks":
+        raise LoadError("Git core.hooksPath 配置后复核失败")
+    if git("config", "--local", "--get", "http.fullProofPython") != str(
+        Path(sys.executable).resolve()
+    ):
+        raise LoadError("Git full proof Python 配置后复核失败")
+    info("已启用 Git pre-push proof gate：push 必须携带已提交的有效 full proof")
 
 
 def acquire_deployment_lock(*, exclusive: bool = True) -> int:
@@ -8287,6 +8353,7 @@ def cli(argv: list[str] | None = None) -> int:
         )
         if local_formal_load:
             run_local_full_test_gate(**({"validation_only": True} if validation_only else {}))
+            configure_local_pre_push_proof_gate()
         result = main(requested_argv)
         if result == 0 and local_formal_load:
             verify_local_full_test_attestation(**({"validation_only": True} if validation_only else {}))
