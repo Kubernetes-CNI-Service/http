@@ -245,6 +245,35 @@ def _mutation_aliases(tree: ast.AST) -> dict[str, str]:
     return _extend_mutation_aliases(module_assignments, aliases)
 
 
+def _literal_reflected_mutation(
+    value: ast.AST, aliases: dict[str, str],
+) -> str | None:
+    """Resolve only a fixed getattr of an imported mutation module."""
+    if not (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Name)
+        and value.func.id == "getattr"
+        and len(value.args) == 2
+        and not value.keywords
+        and isinstance(value.args[0], ast.Name)
+        and isinstance(value.args[1], ast.Constant)
+        and type(value.args[1].value) is str
+    ):
+        return None
+    module = aliases.get(value.args[0].id)
+    attribute = value.args[1].value
+    supported = {
+        "os": {
+            "replace", "rename", "renames", "unlink", "remove",
+            "symlink", "link", "truncate", "open", "write",
+        },
+        "shutil": {"copy", "copy2", "copyfile", "copytree", "move"},
+    }
+    if attribute in supported.get(module, set()):
+        return f"{module}.{attribute}"
+    return None
+
+
 def _extend_mutation_aliases(
     nodes, seed: dict[str, str],
 ) -> dict[str, str]:
@@ -272,6 +301,8 @@ def _extend_mutation_aliases(
                     or value.attr in {"open", "remove", "write"}
                 ):
                     canonical = f"{module}.{value.attr}"
+            elif isinstance(value, ast.Call):
+                canonical = _literal_reflected_mutation(value, aliases)
             if canonical is None:
                 continue
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
@@ -753,14 +784,19 @@ def _mutation_destination(
     *, native_identity: str | None = None,
 ) -> ast.AST | None:
     aliases = aliases or {}
-    name = called_name(call)
+    reflected = _literal_reflected_mutation(call.func, aliases)
+    name = reflected.rsplit(".", 1)[-1] if reflected else called_name(call)
     if name is None:
         return None
-    qualified = name
-    if isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name):
+    qualified = reflected or name
+    if (
+        reflected is None
+        and isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+    ):
         module = aliases.get(call.func.value.id, call.func.value.id)
         qualified = f"{module}.{name}"
-    elif isinstance(call.func, ast.Name):
+    elif reflected is None and isinstance(call.func, ast.Name):
         qualified = aliases.get(call.func.id, call.func.id)
 
     if name == "open":
@@ -4590,6 +4626,65 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
                     {"publish"},
                     literal_governed_mutation_sinks(ast.parse(source)),
                 )
+
+    def test_literal_reflected_os_replace_is_not_an_undiscovered_writer(self) -> None:
+        """An exact getattr of os.replace still writes a governed authority."""
+        variants = (
+            "getattr(os, 'replace')(temporary, destination)",
+            "commit = getattr(os, 'replace')\n    commit(temporary, destination)",
+            "other = os\n    commit = getattr(other, 'replace')\n"
+            "    commit(temporary, destination)",
+        )
+        for expression in variants:
+            with self.subTest(expression=expression):
+                source = (
+                    "import os\n"
+                    "def publish(temporary):\n"
+                    "    destination = '/srv/http/DAY0-Prepare/customer/01-global.yaml'\n"
+                    f"    {expression}\n"
+                )
+                self.assertEqual(
+                    {"publish"}, literal_governed_mutation_sinks(ast.parse(source)),
+                )
+        module_alias = ast.parse(
+            "import os\n"
+            "commit = getattr(os, 'replace')\n"
+            "def publish(temporary):\n"
+            "    destination = '/srv/http/DAY0-Prepare/customer/01-global.yaml'\n"
+            "    commit(temporary, destination)\n"
+        )
+        self.assertEqual({"publish"}, literal_governed_mutation_sinks(module_alias))
+
+    def test_reflected_feedback_writer_still_binds_real_runtime_stop_path(self) -> None:
+        """A reflected real writer cannot disappear beside the two-script stop."""
+        feedback = (ROOT / "ztp/optimize/feedback.py").read_text(encoding="utf-8")
+        runtime = (ROOT / "tools/ztp_service_runtime.py").read_text(encoding="utf-8")
+        original = "os.replace(\n                    temporary_name, self.target_path.name,"
+        self.assertEqual(1, feedback.count(original))
+        reflected = feedback.replace(
+            original,
+            "getattr(os, 'replace')(\n                    temporary_name, self.target_path.name,",
+            1,
+        )
+        feedback_tree = ast.parse(reflected)
+        runtime_tree = ast.parse(runtime)
+        self.assertEqual(
+            {"lock", "stop", "recover", "pid_files"},
+            set(_feedback_recovery_structural_path(feedback_tree, runtime_tree)),
+        )
+        candidates = [
+            node for node in ast.walk(feedback_tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Call)
+            and isinstance(node.func.func, ast.Name)
+            and node.func.func.id == "getattr"
+            and len(node.args) > 1
+            and ast.unparse(node.args[1]) == "self.target_path.name"
+        ]
+        self.assertEqual(1, len(candidates))
+        destination = _mutation_destination(candidates[0], _mutation_aliases(feedback_tree))
+        self.assertIsNotNone(destination)
+        self.assertEqual("self.target_path.name", ast.unparse(destination))
 
     def test_imported_setup_mapping_reaches_real_link_sink(self) -> None:
         """A real imported authority must reach the link mutation, not a table."""
