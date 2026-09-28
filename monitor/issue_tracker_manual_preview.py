@@ -7,6 +7,7 @@ This module issues no online permit and accepts no browser-supplied rows.
 
 from __future__ import annotations
 
+import re
 import secrets
 import time
 
@@ -26,6 +27,7 @@ _FINGERPRINT = (
 )
 _MAX_PENDING = 128
 _TTL_SECONDS = 120
+_GENERATION = re.compile(r"gen-[0-9]{20}-[0-9a-f]{32}\Z")
 
 
 def _sha256_text(value):
@@ -174,8 +176,9 @@ def make_protected_stage_l_broker(
             expected_manual_preview=fingerprint, selected_panel=panel,
         )
         if type(result) is CommittedProdWorkbook:
-            if (type(result.generation.generation_id) is not str
-                    or not result.generation.generation_id
+            generation_id = result.generation.generation_id
+            if (type(generation_id) is not str
+                    or _GENERATION.fullmatch(generation_id) is None
                     or not _sha256_text(result.receipt.manifest_id)
                     or not _sha256_text(result.receipt.published_sha256)):
                 raise RuntimeError("protected local writer receipt is invalid")

@@ -114,7 +114,7 @@ class ManualPreviewDirectTests(unittest.TestCase):
         )
 
         receipt = CommittedProdWorkbook(
-            SimpleNamespace(generation_id="gen-fixture"),
+            SimpleNamespace(generation_id="gen-" + "0" * 19 + "1-" + "a" * 32),
             SimpleNamespace(manifest_id="f" * 64, published_sha256="a" * 64),
             SimpleNamespace(),
         )
@@ -135,7 +135,8 @@ class ManualPreviewDirectTests(unittest.TestCase):
             result = broker.confirm("nvis", "Switch Status", token,
                                     confirmation="publish_local")
         self.assertEqual({
-            "local": "committed", "generation_id": "gen-fixture",
+            "local": "committed",
+            "generation_id": "gen-" + "0" * 19 + "1-" + "a" * 32,
             "manifest_id": "f" * 64, "published_sha256": "a" * 64,
             "local_applied": True,
             "online": "disabled_no_send_authority",
@@ -207,6 +208,36 @@ class ManualPreviewDirectTests(unittest.TestCase):
                 template_path="/synthetic/http/monitor/Issue_Tracker_Template_v1.xlsx",
                 boot_id="", monotonic_ns=lambda: 1234,
             )
+
+    def test_protected_broker_rejects_non_c6_generation_identity(self):
+        from monitor.issue_tracker_manual_preview import make_protected_stage_l_broker
+        from monitor.issue_tracker_local_workbook_commit import CommittedProdWorkbook
+
+        malformed = CommittedProdWorkbook(
+            SimpleNamespace(generation_id="gen-fixture"),
+            SimpleNamespace(manifest_id="f" * 64, published_sha256="a" * 64),
+            SimpleNamespace(),
+        )
+        with (mock.patch("monitor.issue_tracker_publish_runtime.inspect_stage_l",
+                         return_value=qualified_status()),
+              mock.patch("monitor.issue_tracker_publish_runtime.local_publish_interval",
+                         return_value=(2, "b" * 64)),
+              mock.patch("monitor.issue_tracker_publish_runtime.commit_qualified_prod_local",
+                         return_value=malformed)):
+            broker = make_protected_stage_l_broker(
+                object(), http_root="/synthetic/http", project="/synthetic/project",
+                publication="/synthetic/project/99-output-monitor",
+                template_path="/synthetic/http/monitor/Issue_Tracker_Template_v1.xlsx",
+                boot_id="synthetic-boot", monotonic_ns=lambda: 1234,
+                clock=lambda: 1000.0,
+            )
+            token = broker.preview("nvis", "Switch Status")["token"]
+            with self.assertRaises(RuntimeError):
+                broker.confirm("nvis", "Switch Status", token,
+                               confirmation="publish_local")
+            with self.assertRaises(ManualPreviewHold):
+                broker.confirm("nvis", "Switch Status", token,
+                               confirmation="publish_local")
 
 
 if __name__ == "__main__":

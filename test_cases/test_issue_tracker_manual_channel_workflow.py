@@ -4,10 +4,15 @@ import importlib.machinery
 import importlib.util
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 from monitor.issue_tracker_manual_channel import DurableManualQueue, ManualQueueWorker
-from monitor.issue_tracker_manual_preview import ManualPreviewBroker
+from monitor.issue_tracker_manual_preview import (
+    ManualPreviewBroker, make_protected_stage_l_broker,
+)
+from monitor.issue_tracker_local_workbook_commit import CommittedProdWorkbook
 from test_cases.test_issue_tracker_manual_channel import valid_env
 from test_cases.test_issue_tracker_manual_preview import qualified_status
 
@@ -27,6 +32,58 @@ LOCAL_RECEIPT = {
 
 
 class ManualChannelWorkflowTests(unittest.TestCase):
+    def test_protected_stage_l_broker_to_queue_to_cgi_returns_actual_receipt_shape(self):
+        committed = CommittedProdWorkbook(
+            SimpleNamespace(generation_id=LOCAL_RECEIPT["generation_id"]),
+            SimpleNamespace(manifest_id=LOCAL_RECEIPT["manifest_id"],
+                            published_sha256=LOCAL_RECEIPT["published_sha256"]),
+            SimpleNamespace(),
+        )
+        with (mock.patch("monitor.issue_tracker_publish_runtime.inspect_stage_l",
+                         return_value=qualified_status()) as inspect,
+              mock.patch("monitor.issue_tracker_publish_runtime.local_publish_interval",
+                         return_value=(2, "b" * 64)),
+              mock.patch("monitor.issue_tracker_publish_runtime.commit_qualified_prod_local",
+                         return_value=committed) as commit,
+              tempfile.TemporaryDirectory() as tmp):
+            broker = make_protected_stage_l_broker(
+                object(), http_root="/synthetic/http", project="/synthetic/project",
+                publication="/synthetic/project/99-output-monitor",
+                template_path="/synthetic/http/monitor/Issue_Tracker_Template_v1.xlsx",
+                boot_id="synthetic-boot", monotonic_ns=lambda: 1234,
+                clock=lambda: 1000.0,
+            )
+            root = Path(tmp) / "manual"
+            root.mkdir(mode=0o700)
+            queue = DurableManualQueue(root, boot_id="synthetic-boot")
+            worker = ManualQueueWorker(queue, broker)
+            jobs = []
+
+            def submit(request):
+                job = queue.enqueue(request)
+                jobs.append(job)
+                processed, result = worker.process_job(job)
+                self.assertEqual(job, processed)
+                return result
+
+            preview_body = b"action=preview&panel=Switch+Status"
+            status, preview = cgi.handle(valid_env(preview_body), preview_body,
+                                         submit=submit)
+            self.assertEqual("200 OK", status)
+            confirm_body = (b"action=confirm&panel=Switch+Status&token="
+                            + preview["token"].encode()
+                            + b"&confirmation=publish_local")
+            status, result = cgi.handle(valid_env(confirm_body), confirm_body,
+                                        submit=submit)
+            self.assertEqual("200 OK", status)
+            self.assertEqual(LOCAL_RECEIPT, result)
+            self.assertEqual("done", queue.status(jobs[-1])["state"])
+            self.assertEqual(2, inspect.call_count)
+            commit.assert_called_once()
+            self.assertEqual("Switch Status", commit.call_args.kwargs["selected_panel"])
+            self.assertEqual("e" * 64, commit.call_args.kwargs[
+                "expected_manual_preview"]["selected_decision_sha256"])
+
     def test_incomplete_post_c6_reply_is_unknown_not_browser_success_or_replay(self):
         commits = []
         broker = ManualPreviewBroker(
