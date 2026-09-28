@@ -257,6 +257,8 @@
         "test_cases.test_ufm_remote_producer_workflow",
         "test_cases.test_ufm_collection_pipeline",
         "test_cases.test_ufm_collection_pipeline_workflow",
+        "test_cases.test_ufm_ibdiagnet_pipeline",
+        "test_cases.test_ufm_ibdiagnet_pipeline_workflow",
         "test_cases.test_collection_ib_producer",
         "test_cases.test_collection_ib_producer_workflow"
       ]
@@ -1099,7 +1101,8 @@
         "tools/ufm_collection_pipeline.py"
       ],
       "tests": [
-        "test_cases.test_ufm_collection_pipeline"
+        "test_cases.test_ufm_collection_pipeline",
+        "test_cases.test_ufm_ibdiagnet_pipeline"
       ]
     },
     {
@@ -2356,7 +2359,8 @@
         "tools/ibdiagnet-analyze-tool/scripts/validate_ib_topology.py"
       ],
       "tests": [
-        "test_cases.test_ufm_collection_pipeline_workflow"
+        "test_cases.test_ufm_collection_pipeline_workflow",
+        "test_cases.test_ufm_ibdiagnet_pipeline_workflow"
       ]
     },
     {

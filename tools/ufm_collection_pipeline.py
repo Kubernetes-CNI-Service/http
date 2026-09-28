@@ -308,11 +308,11 @@ def _same_root_inode(path: Path, held_fd: int) -> bool:
 
 
 def _validate_args(plan: CollectionPlan, node: str, archive: Path,
-                   cvt: Path, project_root: Path) -> None:
+                   cvt: Path, project_root: Path, *, kind: str) -> None:
     if not isinstance(plan, CollectionPlan) or plan != collection_plan(plan.kind, plan.run_id):
         raise PipelineError("noncanonical collection plan")
-    if plan.kind != "iblinkinfo":
-        raise PipelineError("only the iblinkinfo local handoff is implemented")
+    if plan.kind != kind:
+        raise PipelineError("UFM handoff kind does not match the requested analyzer")
     if type(node) is not str or _NODE_RE.fullmatch(node) is None or node in {".", ".."}:
         raise PipelineError("invalid real-node label")
     if any(not isinstance(path, Path) or not path.is_absolute() or ".." in path.parts
@@ -346,8 +346,39 @@ def _read_one_log(archive: Path) -> bytes:
         raise PipelineError("iblinkinfo archive is invalid") from exc
 
 
+def _validate_ibdiagnet_archive(archive: Path) -> None:
+    """Admit only one bounded, ordinary snapshot from the UFM producer."""
+    try:
+        with tarfile.open(archive, "r:gz") as bundle:
+            members = bundle.getmembers()
+            if not 1 <= len(members) <= 20_000:
+                raise PipelineError("ibdiagnet archive has an invalid member count")
+            total = 0
+            names: set[str] = set()
+            for member in members:
+                name = member.name.rstrip("/")
+                parts = name.split("/")
+                if (name in names or not name or parts[0] != "artifact"
+                        or any(part in ("", ".", "..") for part in parts)
+                        or "\\" in name or not (member.isfile() or member.isdir())):
+                    raise PipelineError("ibdiagnet archive has an unsafe member")
+                names.add(name)
+                total += max(0, member.size)
+                if total > 512 * 1024 * 1024:
+                    raise PipelineError("ibdiagnet archive exceeds the byte bound")
+            if "artifact/ibdiagnet2.net_dump" not in names:
+                raise PipelineError("ibdiagnet archive has no exact topology dump")
+            dump = next(item for item in members
+                        if item.name == "artifact/ibdiagnet2.net_dump")
+            if not dump.isfile() or dump.size <= 0:
+                raise PipelineError("ibdiagnet topology dump is not regular data")
+    except (OSError, tarfile.TarError, EOFError) as exc:
+        raise PipelineError("ibdiagnet archive is invalid") from exc
+
+
 def _report_name(plan: CollectionPlan) -> str:
-    return f"iblinkinfo_{plan.run_id}{_REPORT_SUFFIX}"
+    prefix = "iblinkinfo" if plan.kind == "iblinkinfo" else "ibdiagnet2"
+    return f"{prefix}_{plan.run_id}{_REPORT_SUFFIX}"
 
 
 def _staged_analysis_attestation(report: Path, log: Path, cvt: Path) -> dict:
@@ -376,12 +407,33 @@ def run_local_iblinkinfo(plan: CollectionPlan, node: str, archive: Path,
     External UFM collection/identity and remote copy are deliberately outside
     this function.  The caller must hold the project's single-writer lease.
     """
+    return _run_local_analysis(plan, node, archive, cvt, project_root,
+                               kind="iblinkinfo", before_receipt=before_receipt,
+                               prepare_panel=prepare_panel)
+
+
+def run_local_ibdiagnet(plan: CollectionPlan, node: str, archive: Path,
+                        cvt: Path, project_root: Path, *,
+                        before_receipt: Callable[[], None] | None = None,
+                        prepare_panel: Callable[[dict[str, str]], None] | None = None) -> Path:
+    """Analyze an already retrieved UFM ibdiagnet snapshot; no remote trigger."""
+    return _run_local_analysis(plan, node, archive, cvt, project_root,
+                               kind="ibdiagnet", before_receipt=before_receipt,
+                               prepare_panel=prepare_panel)
+
+
+def _run_local_analysis(plan: CollectionPlan, node: str, archive: Path,
+                        cvt: Path, project_root: Path, *, kind: str,
+                        before_receipt: Callable[[], None] | None,
+                        prepare_panel: Callable[[dict[str, str]], None] | None) -> Path:
     if before_receipt is not None and not callable(before_receipt):
         raise PipelineError("pre-receipt evidence gate is invalid")
     if prepare_panel is not None and not callable(prepare_panel):
         raise PipelineError("pre-receipt panel preparation is invalid")
-    _validate_args(plan, node, archive, cvt, project_root)
-    content = _read_one_log(archive)
+    _validate_args(plan, node, archive, cvt, project_root, kind=kind)
+    content = _read_one_log(archive) if kind == "iblinkinfo" else None
+    if kind == "ibdiagnet":
+        _validate_ibdiagnet_archive(archive)
     target = project_root / "99-output-ufm" / "runs" / plan.run_id / node
     if target.exists() or target.is_symlink():
         raise PipelineError("run-bound result already exists")
@@ -399,19 +451,21 @@ def run_local_iblinkinfo(plan: CollectionPlan, node: str, archive: Path,
         shutil.copyfile(archive, staged_archive, follow_symlinks=False)
         if _sha256(staged_archive) != _sha256(archive):
             raise PipelineError("staged archive differs from source")
-        log = stage / f"iblinkinfo_{plan.run_id}.log"
-        log.write_bytes(content)
+        log = stage / f"iblinkinfo_{plan.run_id}.log" if content is not None else staged_archive
+        if content is not None:
+            log.write_bytes(content)
         report = stage / _report_name(plan)
         try:
             result = subprocess.run(
-                [sys.executable, str(_ANALYZER), "--iblinkinfo", str(log),
+                [sys.executable, str(_ANALYZER),
+                 "--iblinkinfo" if kind == "iblinkinfo" else "--ibdiagnet", str(log),
                  "--p2p", str(cvt), "--output", str(report)],
                 capture_output=True, text=True, timeout=120, check=False,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            raise PipelineError("iblinkinfo analysis did not complete") from exc
+            raise PipelineError("UFM analysis did not complete") from exc
         if result.returncode != 0 or not _regular(report) or report.stat().st_size == 0:
-            raise PipelineError("iblinkinfo analysis failed; no receipt published")
+            raise PipelineError("UFM analysis failed; no receipt published")
         try:
             with zipfile.ZipFile(report) as workbook:
                 if workbook.testzip() is not None or "xl/workbook.xml" not in workbook.namelist():
@@ -419,7 +473,8 @@ def run_local_iblinkinfo(plan: CollectionPlan, node: str, archive: Path,
         except (OSError, zipfile.BadZipFile) as exc:
             raise PipelineError("analysis workbook is invalid") from exc
         stage_attestation = _staged_analysis_attestation(report, log, cvt)
-        for staged_file in (staged_archive, log, report, sidecar_path(report)):
+        staged_files = tuple(dict.fromkeys((staged_archive, log, report, sidecar_path(report))))
+        for staged_file in staged_files:
             _fsync_regular(staged_file)
         _fsync_directory(stage)
         run_fd = _prepare_output_parents(root_fd, plan)
@@ -432,7 +487,7 @@ def run_local_iblinkinfo(plan: CollectionPlan, node: str, archive: Path,
                 raise PipelineError("run-bound result already exists") from exc
             target_fd = _open_child_dir(run_fd, node)
             try:
-                for staged_file in (staged_archive, log, report):
+                for staged_file in dict.fromkeys((staged_archive, log, report)):
                     _copy_regular_to_at(staged_file, target_fd, staged_file.name)
                 os.fsync(target_fd)
                 final_report = target / report.name
@@ -451,7 +506,8 @@ def run_local_iblinkinfo(plan: CollectionPlan, node: str, archive: Path,
                     }
                     for name, digest in expected.items():
                         if _digest_regular_at(target_fd, name,
-                                              max_bytes=128 * 1024 * 1024) != digest:
+                                              max_bytes=(512 if name == plan.archive_name
+                                                         else 128) * 1024 * 1024) != digest:
                             raise PipelineError("published IB result differs from attested bytes")
                     final_attestation = dict(stage_attestation)
                     for role, path in (("report", final_report), ("actual", final_log)):
@@ -522,7 +578,8 @@ def run_local_iblinkinfo(plan: CollectionPlan, node: str, archive: Path,
                         raise PipelineError("IB source changed during evidence gate") from exc
                     for name, digest in expected.items():
                         if _digest_regular_at(target_fd, name,
-                                              max_bytes=128 * 1024 * 1024) != digest:
+                                              max_bytes=(512 if name == plan.archive_name
+                                                         else 128) * 1024 * 1024) != digest:
                             raise PipelineError("IB result changed during evidence gate")
                 os.link(".receipt.prepared", "receipt.json",
                         src_dir_fd=target_fd, dst_dir_fd=target_fd,
@@ -564,7 +621,8 @@ def validated_receipts(project_root: Path, environment: str) -> list[dict[str, s
                 try:
                     for run_name in sorted(os.listdir(runs_fd), reverse=True):
                         try:
-                            plan = collection_plan("iblinkinfo", run_name)
+                            plans = (collection_plan("iblinkinfo", run_name),
+                                     collection_plan("ibdiagnet", run_name))
                         except ValueError:
                             continue
                         if f"-{environment}-" not in run_name:
@@ -583,8 +641,16 @@ def validated_receipts(project_root: Path, environment: str) -> list[dict[str, s
                                     continue
                                 try:
                                     receipt = _read_regular_at(node_fd, "receipt.json", max_bytes=4096)
-                                    archive = _read_regular_at(node_fd, plan.archive_name,
-                                                               max_bytes=128 * 1024 * 1024)
+                                    data = json.loads(receipt.decode("utf-8"))
+                                    if type(data) is not dict:
+                                        continue
+                                    plan = next((item for item in plans
+                                                 if item.kind == data.get("kind")), None)
+                                    if plan is None:
+                                        continue
+                                    archive_sha = _digest_regular_at(
+                                        node_fd, plan.archive_name,
+                                        max_bytes=512 * 1024 * 1024)
                                     report_name = _report_name(plan)
                                     report = _read_regular_at(node_fd, report_name,
                                                               max_bytes=128 * 1024 * 1024)
@@ -594,19 +660,18 @@ def validated_receipts(project_root: Path, environment: str) -> list[dict[str, s
                                     report_path = (project_root / "99-output-ufm" / "runs"
                                                    / run_name / node / report_name)
                                     report_source = read_report_provenance(report_path)
-                                    data = json.loads(receipt.decode("utf-8"))
                                     if data == {
                                         "schema": "ufm-collection-v1", "status": "success",
-                                        "kind": "iblinkinfo", "run_id": run_name, "node": node,
+                                        "kind": plan.kind, "run_id": run_name, "node": node,
                                         "archive": plan.archive_name,
-                                        "archive_sha256": hashlib.sha256(archive).hexdigest(),
+                                        "archive_sha256": archive_sha,
                                         "report": report_name,
                                         "report_sha256": hashlib.sha256(report).hexdigest(),
                                         "report_provenance_sha256": hashlib.sha256(
                                             provenance).hexdigest(),
                                     } and report_source["report"]["sha256"] == data["report_sha256"]:
                                         results.append(data)
-                                except (OSError, ValueError, UnicodeError):
+                                except (OSError, ValueError, UnicodeError, KeyError):
                                     continue
                                 finally:
                                     os.close(node_fd)
@@ -624,21 +689,24 @@ def validated_receipts(project_root: Path, environment: str) -> list[dict[str, s
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Local-only UFM iblinkinfo handoff")
+    parser = argparse.ArgumentParser(description="Local-only UFM analysis handoff")
+    parser.add_argument("--kind", choices=("iblinkinfo", "ibdiagnet"),
+                        default="iblinkinfo", help="Exact retrieved archive kind")
     parser.add_argument("--run-id", required=True,
                         help="Run identifier matching the already retrieved archive")
     parser.add_argument("--node", required=True,
                         help="UFM node name from the caller's verified retrieval context")
     parser.add_argument("--archive", type=Path, required=True,
-                        help="Path to the complete, previously retrieved iblinkinfo tar.gz archive")
+                        help="Path to the complete, previously retrieved UFM tar.gz archive")
     parser.add_argument("--cvt", type=Path, required=True,
                         help="Path to the project P2P CVT input for local analysis")
     parser.add_argument("--project", type=Path, required=True,
                         help="Project root receiving the private 99-output-ufm run result")
     args = parser.parse_args(argv)
     try:
-        plan = collection_plan("iblinkinfo", args.run_id)
-        output = run_local_iblinkinfo(plan, args.node, args.archive, args.cvt, args.project)
+        plan = collection_plan(args.kind, args.run_id)
+        handoff = run_local_iblinkinfo if args.kind == "iblinkinfo" else run_local_ibdiagnet
+        output = handoff(plan, args.node, args.archive, args.cvt, args.project)
     except (PipelineError, ValueError):
         print("ERROR: local UFM handoff refused", file=sys.stderr)
         return 1

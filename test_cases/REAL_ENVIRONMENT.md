@@ -1734,6 +1734,7 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 前置条件：仅在 owner 明确批准的隔离 0700 stage 或可丢弃 Ubuntu 24.04 VM、经过授权的脱敏 UFM 归档和 P2P/CVT 副本上执行；保存候选 HEAD/tree、全量证明、归档/分析工具/项目目录/监控输出及外部哨兵的 dev/ino/mode/size/SHA、服务状态、同 UID 写者静默及快照。不得连接真实 UFM、写 live 项目或生产监控发布路径。
 - 步骤与预期：用真实归档→分析器→receipt 的固定路径走正常一次，再分别在 receipt 前修改 P2P/CVT/日志、在同步时替换归档/父目录、重复 run-id 和跨项目复用；均须非零拒绝且原产品和外部哨兵不变。setup 管理的 `99-output-ufm` 仅允许精确项目目标的链接，遇已有普通文件应拒绝不覆盖；HTML 三面板只能展示本地逐字节验真的 receipt，任何缺失/篡改/旧周期一律显示未知而非成功。
 - 证据、清理与风险：保留精确命令/退出码、归档、报告、receipt、页面与链接前后 SHA/身份、故障注入和恢复核对；仅回滚隔离副本。本卡未实测或完整 direct/workflow 有 RED 时保持 BLOCKED。页面展示不授予生产周期资格。
+- ibdiagnet 扩展（仍 **BLOCKED / NOT RUN**）：`test_cases.test_ufm_ibdiagnet_pipeline` direct 与 `test_cases.test_ufm_ibdiagnet_pipeline_workflow` 用合成设备归档走真实本地分析器；现场须另由 owner 授权已脱敏的真实 `ibdiagnet2` 归档及匹配 CVT，确认归档仅含单个 `artifact/` 快照、无链接/遍历/重复路径，记录压缩前后大小、成员与归档 SHA、分析报告/sidecar/receipt 的 inode/size/SHA。分别以受控坏归档、缺失 `ibdiagnet2.net_dump`、同 run-id 重放、分析期间输入漂移及写者冲突见证无成功 receipt；隔离 stage 与项目快照需可回滚且不碰真实 UFM、live 项目或生产监控。此本地卡不授权远端 ibdiagnet 执行、周期任务或 UI 按钮，也不证明 REQ-F01 完整落地。
 
 ## TC-REAL-REQ7-IB-PRODUCER-001 — 受保护的 IB 生产者完成见证
 

@@ -2015,7 +2015,8 @@ def render_ufm_candidate_panel(project_root: Path, scope: str,
     if (type(candidate) is not dict or set(candidate) != keys
             or any(type(value) is not str for value in candidate.values())
             or candidate["schema"] != "ufm-collection-v1"
-            or candidate["status"] != "success" or candidate["kind"] != "iblinkinfo"
+            or candidate["status"] != "success"
+            or candidate["kind"] not in {"iblinkinfo", "ibdiagnet"}
             or scope not in {"air", "prod"}
             or f"-{scope}-" not in candidate["run_id"]
             or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}", candidate["node"]) is None
@@ -2024,11 +2025,12 @@ def render_ufm_candidate_panel(project_root: Path, scope: str,
                                "report_provenance_sha256"))):
         raise ValueError("UFM panel candidate is not a canonical private receipt")
     try:
-        plan = ufm_collection_plan("iblinkinfo", candidate["run_id"])
+        plan = ufm_collection_plan(candidate["kind"], candidate["run_id"])
     except CollectionError:
         raise ValueError("UFM panel candidate has an invalid run ID") from None
+    report_prefix = "iblinkinfo" if plan.kind == "iblinkinfo" else "ibdiagnet2"
     if (candidate["archive"] != plan.archive_name
-            or candidate["report"] != f"iblinkinfo_{plan.run_id}-topology-validation.xlsx"):
+            or candidate["report"] != f"{report_prefix}_{plan.run_id}-topology-validation.xlsx"):
         raise ValueError("UFM panel candidate has mismatched artifact names")
     return _render_ufm_evidence_panel(project_root, scope, dict(candidate))
 
