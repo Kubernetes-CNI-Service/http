@@ -22,6 +22,22 @@ RUN_ID = "20260926-0315-air-0123456789abcdef"
 
 
 class UfmCollectionPipelineTests(unittest.TestCase):
+    def test_receipt_json_duplicate_keys_cannot_become_a_success_claim(self):
+        unique = b'{"schema":"ufm-collection-v1","status":"success"}'
+        self.assertEqual("success", PIPELINE._parse_receipt_json(unique)["status"])
+        for ambiguous in (
+            b'{"schema":"ufm-collection-v1","status":"failed","status":"success"}',
+            b'{"schema":"ufm-collection-v1","archive_sha256":"old",'
+            b'"archive_sha256":"new"}',
+            b'{"schema":"ufm-collection-v1","nested":{"kind":"old",'
+            b'"kind":"new"}}',
+        ):
+            with self.subTest(ambiguous=ambiguous):
+                with self.assertRaises(PIPELINE.PipelineError):
+                    PIPELINE._parse_receipt_json(ambiguous)
+        with self.assertRaises(PIPELINE.PipelineError):
+            PIPELINE._parse_receipt_json(b"[" * 1100 + b"0" + b"]" * 1100)
+
     def test_staged_archive_digest_must_match_independent_source_digest(self):
         with tempfile.TemporaryDirectory() as directory:
             staged = Path(directory) / "staged.tar.gz"

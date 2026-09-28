@@ -61,6 +61,38 @@ def _write_cvt(path: Path) -> None:
 
 
 class UfmCollectionPipelineWorkflowTests(unittest.TestCase):
+    def test_duplicate_success_receipt_is_invisible_to_real_monitor_reader(self):
+        plan = COLLECTION.collection_plan("iblinkinfo", RUN_ID)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            vendor_output = root / "iblinkinfo.txt"
+            vendor_output.write_text(
+                "Switch: 0x1 MF0;leaf01:MQM9700/U1:\n"
+                ' 10 1[  ] ==( 4X 200 Gbps Active / LinkUp )==> '
+                '20 1[  ] "server01 mlx5_0"\n', encoding="utf-8",
+            )
+            ufm_dir = root / "ufm-private"
+            ufm_dir.mkdir()
+            archive = COLLECTION.publish_local_archive(plan, vendor_output, ufm_dir)
+            cvt = root / "cvt.xlsx"
+            _write_cvt(cvt)
+            project = root / "project"
+            project.mkdir()
+            final = PIPELINE.run_local_iblinkinfo(
+                plan, "EXAMPLE-UFM01", archive, cvt, project,
+            )
+            self.assertEqual(1, len(PIPELINE.validated_receipts(project, "air")))
+            receipt = final / "receipt.json"
+            original = receipt.read_bytes()
+            self.assertEqual(1, original.count(b'"status":"success"'))
+            receipt.write_bytes(original.replace(
+                b'"status":"success"',
+                b'"status":"failed","status":"success"',
+                1,
+            ))
+            self.assertEqual([], PIPELINE.validated_receipts(project, "air"))
+            self.assertNotIn(RUN_ID, HTML.render_ufm_evidence_panel(project, "air"))
+
     def test_iblinkinfo_staged_archive_replacement_cannot_publish_divergent_receipt(self):
         plan = COLLECTION.collection_plan("iblinkinfo", RUN_ID)
         with tempfile.TemporaryDirectory() as directory:

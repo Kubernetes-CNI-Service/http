@@ -690,6 +690,27 @@ def _run_local_analysis(plan: CollectionPlan, node: str, archive: Path,
             os.close(root_fd)
 
 
+def _unique_receipt_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    document: dict[str, object] = {}
+    for key, value in pairs:
+        if key in document:
+            raise PipelineError("UFM receipt contains a duplicate JSON key")
+        document[key] = value
+    return document
+
+
+def _parse_receipt_json(raw: bytes) -> dict[str, object]:
+    """Reject ambiguous keys at every depth before a receipt can be trusted."""
+    try:
+        document = json.loads(raw.decode("utf-8"),
+                              object_pairs_hook=_unique_receipt_object)
+    except (UnicodeError, json.JSONDecodeError, RecursionError) as exc:
+        raise PipelineError("UFM receipt JSON is invalid") from exc
+    if type(document) is not dict:
+        raise PipelineError("UFM receipt must be a JSON object")
+    return document
+
+
 def validated_receipts(project_root: Path, environment: str) -> list[dict[str, str]]:
     """Read only complete, digest-bound UFM receipts for one environment."""
     if environment not in {"air", "prod"} or not isinstance(project_root, Path):
@@ -726,9 +747,7 @@ def validated_receipts(project_root: Path, environment: str) -> list[dict[str, s
                                     continue
                                 try:
                                     receipt = _read_regular_at(node_fd, "receipt.json", max_bytes=4096)
-                                    data = json.loads(receipt.decode("utf-8"))
-                                    if type(data) is not dict:
-                                        continue
+                                    data = _parse_receipt_json(receipt)
                                     plan = next((item for item in plans
                                                  if item.kind == data.get("kind")), None)
                                     if plan is None:
