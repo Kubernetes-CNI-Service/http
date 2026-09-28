@@ -8279,16 +8279,17 @@ def cli(argv: list[str] | None = None) -> int:
         args = parse_args(requested_argv)
         deployment_scope = validate_deployment_scope_options(args)
         validate_switch_scope_options(args, deployment_scope)
-        if args.validation_only and (deployment_scope not in {"air", "prod"} or args.dry_run):
+        validation_only = getattr(args, "validation_only", False)
+        if validation_only and (deployment_scope not in {"air", "prod"} or args.dry_run):
             raise LoadError("--validation-only 仅可用于正式 AIR/prod 验证 load")
         local_formal_load = (
             runtime_os().casefold() == "darwin" and not args.dry_run
         )
         if local_formal_load:
-            run_local_full_test_gate(validation_only=args.validation_only)
+            run_local_full_test_gate(**({"validation_only": True} if validation_only else {}))
         result = main(requested_argv)
         if result == 0 and local_formal_load:
-            verify_local_full_test_attestation(validation_only=args.validation_only)
+            verify_local_full_test_attestation(**({"validation_only": True} if validation_only else {}))
         return result
     except (LoadError, OSError, ValueError, RuntimeError) as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
