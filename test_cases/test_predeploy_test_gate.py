@@ -126,6 +126,27 @@ class GateCommandTests(unittest.TestCase):
             self.assertEqual(0, LOAD.cli(["customer"]))
         self.assertEqual(["full", "load", "post-check"], events)
 
+    def test_air_validation_load_passes_explicit_intent_to_both_full_gates(self):
+        requested = ["customer", "--air", "--validation-only"]
+        args = SimpleNamespace(
+            dry_run=False, deployment_scope="air", validation_only=True,
+        )
+        with mock.patch.object(
+            LOAD, "parse_args", return_value=args,
+        ), mock.patch.object(
+            LOAD, "runtime_os", return_value="Darwin",
+        ), mock.patch.object(
+            LOAD, "run_local_full_test_gate",
+        ) as full, mock.patch.object(
+            LOAD, "main", return_value=0,
+        ) as work, mock.patch.object(
+            LOAD, "verify_local_full_test_attestation",
+        ) as verify:
+            self.assertEqual(0, LOAD.cli(requested))
+        work.assert_called_once_with(requested)
+        full.assert_called_once_with(validation_only=True)
+        verify.assert_called_once_with(validation_only=True)
+
     def test_linux_load_and_macos_dry_run_never_run_development_tests(self):
         for host_os, dry_run in (("Linux", False), ("Darwin", True)):
             with self.subTest(host_os=host_os, dry_run=dry_run), \
@@ -509,6 +530,26 @@ class SyncGateTests(unittest.TestCase):
             events,
         )
 
+    def test_validation_sync_entrypoint_passes_intent_to_both_full_checks(self):
+        args = sync_args()
+        args.validation_only = True
+        patches = self._main_patches(args)
+        patches["gate"] = mock.patch.object(SYNC, "run_predeploy_test_gate")
+        patches["approval"] = mock.patch.object(SYNC, "verify_predeploy_test_approval")
+        patches["lock"] = mock.patch.object(
+            SYNC, "acquire_remote_deployment_lock", return_value=None,
+        )
+        with ExitStack() as stack:
+            entered = {
+                name: stack.enter_context(patcher)
+                for name, patcher in patches.items()
+            }
+            stack.enter_context(redirect_stdout(io.StringIO()))
+            stack.enter_context(redirect_stderr(io.StringIO()))
+            self.assertEqual(0, SYNC.main(["customer", "host", "--validation-only"]))
+        entered["gate"].assert_called_once_with(validation_only=True)
+        entered["approval"].assert_called_once_with(validation_only=True)
+
     def test_failed_sync_gate_has_no_remote_side_effect(self):
         patches = self._main_patches(sync_args())
         patches["gate"] = mock.patch.object(
@@ -879,6 +920,41 @@ class UploadGateTests(unittest.TestCase):
                     ],
                     events,
                 )
+
+    def test_validation_upload_entrypoint_passes_intent_to_both_full_checks(self):
+        args = upload_args(deploy=False, dry_run=False)
+        args.validation_only = True
+        with (
+            mock.patch.object(UPLOAD, "parse_args", return_value=args),
+            mock.patch.object(
+                UPLOAD.package_core, "resolve_project",
+                return_value=Path("/tmp/customer"),
+            ),
+            mock.patch.object(UPLOAD, "run_predeploy_test_gate") as gate,
+            mock.patch.object(UPLOAD, "verify_predeploy_test_approval") as verify,
+            mock.patch.object(UPLOAD, "resolve_apps_policy"),
+            mock.patch.object(
+                UPLOAD.package_core, "create_package",
+                return_value=Path("/tmp/customer-upload.tar.gz"),
+            ),
+            mock.patch.object(
+                UPLOAD, "frozen_archive_for_upload",
+                return_value=nullcontext((Path("/tmp/frozen-upload.tar.gz"), "f" * 64)),
+            ),
+            mock.patch.object(
+                UPLOAD, "deployment_guard_source_from_archive",
+                return_value="frozen guard fixture",
+            ),
+            mock.patch.object(
+                UPLOAD, "deployment_source_manifest_sha256_from_archive",
+                return_value="d" * 64,
+            ),
+            mock.patch.object(UPLOAD, "upload"),
+            redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()),
+        ):
+            self.assertEqual(0, UPLOAD.main(["customer", "host", "--validation-only"]))
+        gate.assert_called_once_with(validation_only=True)
+        verify.assert_called_once_with(validation_only=True)
 
     def test_failed_upload_gate_never_builds_or_connects(self):
         args = upload_args(deploy=False, dry_run=False)
