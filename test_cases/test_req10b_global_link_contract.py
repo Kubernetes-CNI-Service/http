@@ -33,6 +33,69 @@ EXPECTED_WORKSPACE_INPUTS = {
 
 
 class Req10BGlobalLinkContractTests(unittest.TestCase):
+    def _isolate_setup_manifest(self, root: Path) -> None:
+        patcher = mock.patch.object(SETUP, "MANIFEST_FILE", str(root / ".setup_manifest"))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_pubkey_root_transaction_owns_only_its_unchanged_empty_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._isolate_setup_manifest(root)
+            parent = root / "infiniband"
+            parent.mkdir()
+            created = parent / "publickey"
+            preexisting = root / "ztp/config/publickey"
+            preexisting.mkdir(parents=True)
+
+            transaction = SETUP._SetupLinkTransaction([])
+            self.assertTrue(transaction.ensure_directory(str(created)))
+            self.assertFalse(transaction.ensure_directory(str(preexisting)))
+            self.assertTrue(created.is_dir())
+            with redirect_stdout(io.StringIO()):
+                transaction.rollback()
+
+            self.assertFalse(created.exists(), "transaction-created empty root must roll back")
+            self.assertTrue(preexisting.is_dir(), "pre-existing root must never be removed")
+
+    def test_pubkey_root_rollback_preserves_operator_bytes_and_raced_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._isolate_setup_manifest(root)
+            parent = root / "infiniband"
+            parent.mkdir()
+
+            nonempty = parent / "publickey"
+            transaction = SETUP._SetupLinkTransaction([])
+            self.assertTrue(transaction.ensure_directory(str(nonempty)))
+            (nonempty / "operator.pub").write_bytes(b"operator-owned\n")
+            with redirect_stdout(io.StringIO()):
+                transaction.rollback()
+            self.assertEqual(b"operator-owned\n", (nonempty / "operator.pub").read_bytes())
+
+            raced = parent / "raced-publickey"
+            replacement = parent / "operator-root"
+            replacement.mkdir()
+            transaction = SETUP._SetupLinkTransaction([])
+            self.assertTrue(transaction.ensure_directory(str(raced)))
+            raced.rmdir()
+            raced.symlink_to(replacement, target_is_directory=True)
+            with redirect_stdout(io.StringIO()):
+                transaction.rollback()
+            self.assertTrue(raced.is_symlink(), "a raced replacement must be preserved")
+            self.assertEqual(str(replacement), os.readlink(raced))
+
+    def test_pubkey_root_successful_commit_keeps_transaction_created_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._isolate_setup_manifest(root)
+            (root / "infiniband").mkdir()
+            created = root / "infiniband/publickey"
+            transaction = SETUP._SetupLinkTransaction([])
+            self.assertTrue(transaction.ensure_directory(str(created)))
+            transaction.commit()
+            self.assertTrue(created.is_dir(), "successful setup owns the live publication root")
+
     def test_ib_public_key_foreign_link_and_regular_file_are_not_silently_replaced(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

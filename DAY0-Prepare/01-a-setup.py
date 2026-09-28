@@ -767,7 +767,10 @@ def _process_pubkeys(proj_dir):
     expected_names = {os.path.basename(src) for src in pubs}
     for key_dir in _publickey_roots():
         if not _DRY_RUN:
-            os.makedirs(key_dir, exist_ok=True)
+            if _LINK_TRANSACTION is not None and _LINK_TRANSACTION.active:
+                _LINK_TRANSACTION.ensure_directory(key_dir)
+            else:
+                os.makedirs(key_dir, exist_ok=True)
         # Public-key links project only active keys. Remove obsolete links,
         # but never touch an operator-managed regular file.
         for old in sorted(glob.glob(os.path.join(key_dir, "*.pub"))):
@@ -782,6 +785,29 @@ def _process_pubkeys(proj_dir):
             _make_link(os.path.join(key_dir, os.path.basename(src)), src)
 
 
+def _regular_publish_marker(directory):
+    """Return whether *directory* has a non-linked regular completion marker."""
+    marker = os.path.join(directory, ".published-complete")
+    try:
+        metadata = os.lstat(marker)
+    except OSError:
+        return False
+    return stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1
+
+
+def _cumulus_publish_dirs(parent):
+    """Return all complete Cumulus releases in deterministic timestamp order."""
+    candidates = []
+    pattern = re.compile(r"^(\d{8}_\d{6})_combine$")
+    for path in glob.glob(os.path.join(parent, "*")):
+        if not os.path.isdir(path) or os.path.islink(path):
+            continue
+        match = pattern.match(os.path.basename(path))
+        if match and _regular_publish_marker(path):
+            candidates.append((match.group(1), path))
+    return [path for _timestamp, path in sorted(candidates)]
+
+
 def _latest_cumulus_publish_dir(parent):
     """返回最新的、由 hostname2mac 完成发布的 Cumulus 合并目录。
 
@@ -790,30 +816,146 @@ def _latest_cumulus_publish_dir(parent):
     带有发布完成标记的 ``*_combine``，避免再次运行 setup/load 时把已
     发布链接回退到一个较新的中间目录。
     """
-    candidates = []
-    pattern = re.compile(r"^(\d{8}_\d{6})_combine$")
-    for path in glob.glob(os.path.join(parent, "*")):
-        if not os.path.isdir(path) or os.path.islink(path):
-            continue
-        match = pattern.match(os.path.basename(path))
-        if match and os.path.isfile(os.path.join(path, ".published-complete")):
-            candidates.append((match.group(1), path))
-    return max(candidates, default=(None, None))[1]
+    candidates = _cumulus_publish_dirs(parent)
+    return candidates[-1] if candidates else None
 
 
-def _latest_nvos_publish_dir(parent):
-    """返回最新的、已完成的 NVOS 发布目录，忽略尚未合并完成的批次。"""
+def _nvos_publish_dirs(parent):
+    """Return complete NVOS releases in the same order as latest selection."""
     candidates = []
     pattern = re.compile(r"^(\d{8}_\d{6})-(ib|nvl|combine)$")
     for path in glob.glob(os.path.join(parent, "*")):
         if not os.path.isdir(path) or os.path.islink(path):
             continue
         match = pattern.match(os.path.basename(path))
-        if match and os.path.isfile(os.path.join(path, ".published-complete")):
-            # 同一时间戳优先恢复 combine，避免退回只包含单一类型的目录。
+        if match and _regular_publish_marker(path):
             priority = 1 if match.group(2) == "combine" else 0
             candidates.append((match.group(1), priority, path))
-    return max(candidates, default=(None, -1, None))[2]
+    return [path for _timestamp, _priority, path in sorted(candidates)]
+
+
+def _latest_nvos_publish_dir(parent):
+    """返回最新的、已完成的 NVOS 发布目录，忽略尚未合并完成的批次。"""
+    candidates = _nvos_publish_dirs(parent)
+    return candidates[-1] if candidates else None
+
+
+def _regular_files_identical(left, right):
+    """Compare two regular files byte-for-byte while detecting replacement."""
+    left_before, right_before = os.lstat(left), os.lstat(right)
+    if not (stat.S_ISREG(left_before.st_mode) and stat.S_ISREG(right_before.st_mode)):
+        return False
+    if (stat.S_IMODE(left_before.st_mode) != stat.S_IMODE(right_before.st_mode)
+            or left_before.st_size != right_before.st_size):
+        return False
+    with open(left, "rb") as left_stream, open(right, "rb") as right_stream:
+        while True:
+            left_chunk = left_stream.read(1024 * 1024)
+            right_chunk = right_stream.read(1024 * 1024)
+            if left_chunk != right_chunk:
+                return False
+            if not left_chunk:
+                break
+    left_after, right_after = os.lstat(left), os.lstat(right)
+    return (
+        (left_before.st_dev, left_before.st_ino, left_before.st_size,
+         stat.S_IMODE(left_before.st_mode))
+        == (left_after.st_dev, left_after.st_ino, left_after.st_size,
+            stat.S_IMODE(left_after.st_mode))
+        and (right_before.st_dev, right_before.st_ino, right_before.st_size,
+             stat.S_IMODE(right_before.st_mode))
+        == (right_after.st_dev, right_after.st_ino, right_after.st_size,
+            stat.S_IMODE(right_after.st_mode))
+    )
+
+
+def _directory_trees_identical(left, right):
+    """Compare directory structure, regular-file bytes, and symlink text exactly."""
+    left = os.path.abspath(left)
+    right = os.path.abspath(right)
+    for root in (left, right):
+        metadata = os.lstat(root)
+        if not stat.S_ISDIR(metadata.st_mode):
+            return False
+    if stat.S_IMODE(os.lstat(left).st_mode) != stat.S_IMODE(os.lstat(right).st_mode):
+        return False
+    pending = [""]
+    while pending:
+        relative = pending.pop()
+        left_dir = os.path.join(left, relative)
+        right_dir = os.path.join(right, relative)
+        left_dir_info, right_dir_info = os.lstat(left_dir), os.lstat(right_dir)
+        if (not stat.S_ISDIR(left_dir_info.st_mode)
+                or not stat.S_ISDIR(right_dir_info.st_mode)
+                or stat.S_IMODE(left_dir_info.st_mode)
+                != stat.S_IMODE(right_dir_info.st_mode)):
+            return False
+        left_names = sorted(os.listdir(left_dir))
+        right_names = sorted(os.listdir(right_dir))
+        if left_names != right_names:
+            return False
+        for name in left_names:
+            child_relative = os.path.join(relative, name) if relative else name
+            left_child = os.path.join(left, child_relative)
+            right_child = os.path.join(right, child_relative)
+            left_info, right_info = os.lstat(left_child), os.lstat(right_child)
+            left_kind = stat.S_IFMT(left_info.st_mode)
+            right_kind = stat.S_IFMT(right_info.st_mode)
+            if left_kind != right_kind:
+                return False
+            if stat.S_ISDIR(left_info.st_mode):
+                if (stat.S_IMODE(left_info.st_mode)
+                        != stat.S_IMODE(right_info.st_mode)):
+                    return False
+                pending.append(child_relative)
+            elif stat.S_ISREG(left_info.st_mode):
+                if not _regular_files_identical(left_child, right_child):
+                    return False
+            elif stat.S_ISLNK(left_info.st_mode):
+                if os.readlink(left_child) != os.readlink(right_child):
+                    return False
+            else:
+                raise ValueError(
+                    f"发布目录含不安全的特殊文件：{child_relative}"
+                )
+    return True
+
+
+def _migrate_materialized_latest(path, candidates):
+    """Adopt a real ``latest`` directory only when one complete release matches."""
+    if os.path.islink(path) or not os.path.lexists(path):
+        return None
+    metadata = os.lstat(path)
+    if not stat.S_ISDIR(metadata.st_mode):
+        return None
+    matches = [candidate for candidate in candidates
+               if _directory_trees_identical(path, candidate)]
+    if not matches:
+        raise ValueError(
+            f"materialized latest 与任何带发布完成标记的同级发布目录均不逐字节/结构一致：{path}"
+        )
+    if len(matches) != 1:
+        names = ", ".join(os.path.basename(candidate) for candidate in matches)
+        raise ValueError(
+            f"materialized latest 匹配多个发布目录，无法唯一确认归属：{names}"
+        )
+    matched = matches[0]
+    if _DRY_RUN:
+        print(_c(CYAN, f"  [DRY] materialized latest 将安全迁移为 → {os.path.basename(matched)}"))
+        return matched
+    transaction = _LINK_TRANSACTION
+    local_transaction = transaction is None
+    if local_transaction:
+        transaction = _SetupLinkTransaction((path,))
+    try:
+        transaction.migrate_materialized_directory(path, matched)
+        if local_transaction:
+            transaction.commit()
+    except BaseException:
+        if local_transaction:
+            transaction.rollback()
+        raise
+    return matched
 
 
 # 网络类型目录下的 CSV 链接：(symlink路径, 项目中源文件名)
@@ -910,12 +1052,21 @@ def _process_latest_yaml(_proj_dir):
     删除 setup 管理的旧入口，避免留下指向不存在 ``latest`` 的断链。
     """
     resolvers = {"cumulus": _latest_cumulus_publish_dir, "nvos": _latest_nvos_publish_dir}
-    pairs = [(os.path.join(ZTP, "config", platform), output, resolvers[platform])
+    candidate_resolvers = {"cumulus": _cumulus_publish_dirs, "nvos": _nvos_publish_dirs}
+    pairs = [(os.path.join(ZTP, "config", platform), output, resolvers[platform],
+              candidate_resolvers[platform])
              for platform, output in LATEST_YAML_SPECS]
-    for ztp_dir, output_name, resolver in pairs:
+    for ztp_dir, output_name, resolver, candidate_resolver in pairs:
         out_base = os.path.join(ztp_dir, "template", output_name)
-        latest = resolver(out_base)
+        candidates = candidate_resolver(out_base)
         output_latest = os.path.join(out_base, "latest")
+        if os.path.lexists(output_latest) and not os.path.islink(output_latest):
+            if not stat.S_ISDIR(os.lstat(output_latest).st_mode):
+                raise ValueError(
+                    f"发布入口 latest 是实际文件或特殊路径，拒绝覆盖：{output_latest}"
+                )
+            _migrate_materialized_latest(output_latest, candidates)
+        latest = resolver(out_base)
         if latest:
             _make_exact_link(output_latest, latest)
             _make_exact_link(os.path.join(ztp_dir, "latest_yaml"), output_latest)
@@ -3593,6 +3744,8 @@ class _SetupLinkTransaction:
                 self.manifest = stream.read()
         else:
             self.manifest = None
+        self.materialized_migrations = []
+        self.created_directories = []
         self.active = True
 
     @staticmethod
@@ -3609,6 +3762,120 @@ class _SetupLinkTransaction:
         finally:
             if os.path.lexists(temporary):
                 os.remove(temporary)
+
+    def ensure_directory(self, path):
+        """Create and own one real directory for rollback, or accept an existing one.
+
+        A uniquely named empty directory is created first and then installed
+        with no-replace semantics.  This binds rollback authority to the inode
+        created by this transaction instead of merely remembering that the
+        destination used to be absent.
+        """
+        path = os.path.abspath(path)
+        if os.path.lexists(path):
+            metadata = os.lstat(path)
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise ValueError(f"setup 管理目录不是实际目录：{path}")
+            return False
+
+        parent = os.path.dirname(path)
+        os.makedirs(parent, exist_ok=True)
+        temporary = tempfile.mkdtemp(
+            prefix=f".{os.path.basename(path)}.setup-{os.getpid()}-", dir=parent,
+        )
+        created = os.lstat(temporary)
+        installed = False
+        try:
+            try:
+                _atomic_rename_noreplace(temporary, path)
+                installed = True
+            except OSError as exc:
+                if exc.errno != errno.EEXIST:
+                    raise
+                metadata = os.lstat(path)
+                if not stat.S_ISDIR(metadata.st_mode):
+                    raise ValueError(f"setup 管理目录在创建期间被非目录占用：{path}") from exc
+                return False
+
+            metadata = os.lstat(path)
+            if ((metadata.st_dev, metadata.st_ino) != (created.st_dev, created.st_ino)
+                    or not stat.S_ISDIR(metadata.st_mode)):
+                raise ValueError(f"setup 新建目录在登记前身份发生变化：{path}")
+            self.created_directories.append((path, created.st_dev, created.st_ino))
+            return True
+        finally:
+            if not installed and os.path.lexists(temporary):
+                os.rmdir(temporary)
+
+    def migrate_materialized_directory(self, path, target):
+        """Atomically replace one verified real directory, retaining rollback bytes."""
+        path = os.path.abspath(path)
+        target = os.path.abspath(target)
+        if self.states.get(path) != ("other", None):
+            raise ValueError("materialized latest 不在 setup 事务的真实目录快照中")
+        if any(item[0] == path for item in self.materialized_migrations):
+            raise ValueError("materialized latest 已在当前 setup 事务中迁移")
+        source_identity = os.lstat(path)
+        target_identity = os.lstat(target)
+        if not stat.S_ISDIR(source_identity.st_mode) or not stat.S_ISDIR(target_identity.st_mode):
+            raise ValueError("materialized latest 及匹配目标都必须是真实目录")
+        if not _regular_publish_marker(target):
+            raise ValueError("materialized latest 的匹配目标缺少真实发布完成标记")
+        if not _directory_trees_identical(path, target):
+            raise ValueError("materialized latest 在迁移前已与匹配发布目录不一致")
+
+        backup = None
+        for index in range(1000):
+            suffix = "" if index == 0 else f"-{index}"
+            candidate = os.path.join(
+                os.path.dirname(path),
+                f".{os.path.basename(path)}.materialized-{os.getpid()}-{time.monotonic_ns()}{suffix}",
+            )
+            try:
+                _atomic_rename_noreplace(path, candidate)
+                backup = candidate
+                break
+            except OSError as exc:
+                if exc.errno != errno.EEXIST:
+                    raise
+        if backup is None:
+            raise ValueError("materialized latest 迁移备份名称已全部被占用")
+
+        rel_target = os.path.relpath(target, os.path.dirname(path))
+        temporary = os.path.join(
+            os.path.dirname(path), f".{os.path.basename(path)}.tmp.{os.getpid()}"
+        )
+        try:
+            moved = os.lstat(backup)
+            current_target = os.lstat(target)
+            if ((moved.st_dev, moved.st_ino)
+                    != (source_identity.st_dev, source_identity.st_ino)):
+                raise ValueError("materialized latest 迁移备份身份发生变化")
+            if ((current_target.st_dev, current_target.st_ino)
+                    != (target_identity.st_dev, target_identity.st_ino)
+                    or not _regular_publish_marker(target)
+                    or not _directory_trees_identical(backup, target)):
+                raise ValueError("匹配发布目录在 materialized latest 迁移期间发生变化")
+            if os.path.lexists(temporary):
+                os.remove(temporary)
+            os.symlink(rel_target, temporary)
+            os.replace(temporary, path)
+        except BaseException:
+            if os.path.lexists(temporary):
+                os.remove(temporary)
+            if os.path.islink(path):
+                os.remove(path)
+            if not os.path.lexists(path) and os.path.lexists(backup):
+                _atomic_rename_noreplace(backup, path)
+            raise
+        self.materialized_migrations.append(
+            (path, backup, target, source_identity.st_dev, source_identity.st_ino,
+             target_identity.st_dev, target_identity.st_ino, rel_target)
+        )
+        print(_c(
+            GREEN,
+            f"  [MIGRATE] materialized {os.path.relpath(path, HTTP_BASE)} → {rel_target}",
+        ))
 
     def rollback(self):
         if not self.active or _DRY_RUN:
@@ -3628,6 +3895,38 @@ class _SetupLinkTransaction:
                 # Existing real files/directories are never setup mutations.
             except OSError as exc:
                 failures.append(f"{path}: {exc}")
+        for path, backup, _target, source_dev, source_ino, _target_dev, _target_ino, _rel_target in reversed(
+                self.materialized_migrations):
+            try:
+                if not os.path.lexists(backup):
+                    failures.append(f"{path}: materialized latest 回滚备份缺失")
+                    continue
+                backup_info = os.lstat(backup)
+                if ((backup_info.st_dev, backup_info.st_ino)
+                        != (source_dev, source_ino)
+                        or not stat.S_ISDIR(backup_info.st_mode)):
+                    failures.append(f"{path}: materialized latest 回滚备份身份改变")
+                    continue
+                if os.path.islink(path):
+                    os.remove(path)
+                elif os.path.lexists(path):
+                    failures.append(f"{path}: materialized latest 回滚位置被实际路径占用")
+                    continue
+                _atomic_rename_noreplace(backup, path)
+            except OSError as exc:
+                failures.append(f"{path}: {exc}")
+        for path, created_dev, created_ino in reversed(self.created_directories):
+            try:
+                if not os.path.lexists(path):
+                    continue
+                metadata = os.lstat(path)
+                if ((metadata.st_dev, metadata.st_ino) != (created_dev, created_ino)
+                        or not stat.S_ISDIR(metadata.st_mode)):
+                    failures.append(f"{path}: setup 新建目录已被替换，保留现有对象")
+                    continue
+                os.rmdir(path)
+            except OSError as exc:
+                failures.append(f"{path}: setup 新建目录非空或无法安全删除，已保留：{exc}")
         try:
             if self.manifest is None:
                 if os.path.isfile(MANIFEST_FILE):
@@ -3647,12 +3946,60 @@ class _SetupLinkTransaction:
             print(_c(GREEN, "  [ROLLBACK] 已恢复 setup 前的全部链接和 manifest"))
 
     def commit(self):
+        # Validate every migration before deleting any rollback bytes.  In
+        # particular, the managed path must still be the exact relative link
+        # created above; another actor replacing it makes the transaction
+        # unsafe and must send setup through its normal rollback path.
+        for path, backup, target, source_dev, source_ino, target_dev, target_ino, rel_target in (
+                self.materialized_migrations):
+            try:
+                backup_info = os.lstat(backup)
+                target_info = os.lstat(target)
+                path_info = os.lstat(path)
+                safe_to_remove = (
+                    (backup_info.st_dev, backup_info.st_ino) == (source_dev, source_ino)
+                    and stat.S_ISDIR(backup_info.st_mode)
+                    and (target_info.st_dev, target_info.st_ino) == (target_dev, target_ino)
+                    and stat.S_ISDIR(target_info.st_mode)
+                    and stat.S_ISLNK(path_info.st_mode)
+                    and not os.path.isabs(os.readlink(path))
+                    and os.readlink(path) == rel_target
+                    and os.path.realpath(path) == os.path.realpath(target)
+                    and _regular_publish_marker(target)
+                    and _directory_trees_identical(backup, target)
+                )
+                if not safe_to_remove:
+                    raise ValueError(
+                        f"materialized latest 提交安全校验失败，已保留回滚备份：{backup}"
+                    )
+            except OSError as exc:
+                raise ValueError(
+                    f"materialized latest 提交安全校验失败，已保留回滚备份：{backup}: {exc}"
+                ) from exc
+
+        # All managed links and all redundant copies are now known-good.  From
+        # this point the transaction is committed: cleanup must not trigger a
+        # rollback after an earlier backup has already been removed.  A failed
+        # cleanup therefore retains that redundant backup for inspection.
         self.active = False
+        for _path, backup, _target, _source_dev, _source_ino, _target_dev, _target_ino, _rel_target in (
+                self.materialized_migrations):
+            try:
+                shutil.rmtree(backup)
+            except OSError as exc:
+                print(_c(
+                    YELLOW,
+                    f"  [WARN] materialized latest 冗余备份清理失败，已保留：{backup}: {exc}",
+                ))
 
 
 def _setup_transaction_paths(proj_dir):
     paths = set(_managed_ztp_link_candidates())
     paths.update(_collect_expected_links(proj_dir))
+    for platform, output in LATEST_YAML_SPECS:
+        paths.add(os.path.join(
+            ZTP, "config", platform, "template", output, "latest",
+        ))
     paths.add(os.path.join(proj_dir, "p2p.xlsx"))
     return paths
 

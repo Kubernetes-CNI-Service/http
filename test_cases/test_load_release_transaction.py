@@ -221,6 +221,138 @@ def write_shared_artifact_receipt(
 
 
 class ReleaseTransactionTests(unittest.TestCase):
+    def test_setup_materialized_latest_rollback_restores_directory_and_old_project_link(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ztp = root / "ztp"
+            output = ztp / "config/cumulus/template/99-output"
+            release = output / "20260910_103416_combine"
+            materialized = output / "latest"
+            for directory_path in (release, materialized):
+                directory_path.mkdir(parents=True)
+                (directory_path / ".published-complete").write_text(
+                    "complete\n", encoding="utf-8"
+                )
+                (directory_path / "leaf.yaml").write_bytes(b"hostname: leaf\n")
+            public = ztp / "config/cumulus/latest_yaml"
+            public.parent.mkdir(parents=True, exist_ok=True)
+            old_target = "../../../../DAY0-Prepare/old/99-output-eth/latest"
+            public.symlink_to(old_target)
+
+            with mock.patch.multiple(
+                SETUP,
+                HTTP_BASE=str(root),
+                ZTP=str(ztp),
+                LATEST_YAML_SPECS=(("cumulus", "99-output"),),
+                MANIFEST_FILE=str(ztp / ".setup_manifest"),
+                _DRY_RUN=False,
+                _LINK_ERRORS=0,
+                _LINK_TRANSACTION=None,
+            ):
+                transaction = SETUP._SetupLinkTransaction((str(materialized), str(public)))
+                SETUP._LINK_TRANSACTION = transaction
+                public.unlink()
+                SETUP._process_latest_yaml("unused")
+                self.assertTrue(materialized.is_symlink())
+                with redirect_stdout(io.StringIO()):
+                    transaction.rollback()
+                SETUP._LINK_TRANSACTION = None
+
+            self.assertTrue(materialized.is_dir())
+            self.assertFalse(materialized.is_symlink())
+            self.assertEqual(b"hostname: leaf\n", (materialized / "leaf.yaml").read_bytes())
+            self.assertTrue(public.is_symlink())
+            self.assertEqual(old_target, os.readlink(public))
+            self.assertFalse(any(output.glob(".latest.materialized-*")))
+
+    def test_load_project_switch_authority_is_preserved_during_latest_migration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            old_project = root / "DAY0-Prepare/old"
+            project = root / "DAY0-Prepare/new"
+            old_project.mkdir(parents=True)
+            project.mkdir(parents=True)
+            p2p = project / "Fabric-P2P.xlsx"
+            with zipfile.ZipFile(p2p, "w") as archive:
+                archive.writestr("xl/workbook.xml", "<workbook/>")
+            (project / "p2p.xlsx").symlink_to(p2p.name)
+
+            ztp = root / "ztp"
+            output = ztp / "config/cumulus/template/99-output"
+            release = output / "20260910_103416_combine"
+            release.mkdir(parents=True)
+            (output / "latest").mkdir()
+            for directory_path in (release, output / "latest"):
+                (directory_path / ".published-complete").write_text(
+                    "complete\n", encoding="utf-8"
+                )
+                (directory_path / "leaf.yaml").write_bytes(b"hostname: leaf\n")
+            materialized = output / "latest"
+            public = ztp / "config/cumulus/latest_yaml"
+            public.parent.mkdir(parents=True, exist_ok=True)
+            public.symlink_to(old_project / "99-output-eth/latest")
+            calls = []
+
+            def run_setup(command, **_kwargs):
+                calls.append(list(command))
+                with mock.patch.multiple(
+                    SETUP,
+                    HTTP_BASE=str(root),
+                    HERE=str(root / "DAY0-Prepare"),
+                    ZTP=str(ztp),
+                    LATEST_YAML_SPECS=(("cumulus", "99-output"),),
+                    MANIFEST_FILE=str(ztp / ".setup_manifest"),
+                    _DRY_RUN=False,
+                    _LINK_ERRORS=0,
+                    _LINK_TRANSACTION=None,
+                ):
+                    transaction = SETUP._SetupLinkTransaction((str(materialized), str(public)))
+                    SETUP._LINK_TRANSACTION = transaction
+                    with mock.patch.object(
+                        SETUP, "_managed_ztp_link_candidates", return_value=[str(public)]
+                    ), mock.patch.object(
+                        SETUP, "_monitor_link_paths", return_value=[]
+                    ), mock.patch.object(
+                        SETUP, "_bringup_link_pairs", return_value=[]
+                    ), mock.patch.object(
+                        SETUP, "_analyzer_input_pairs", return_value=[]
+                    ), mock.patch.object(
+                        SETUP, "_analyzer_output_pairs", return_value=[]
+                    ), mock.patch.object(
+                        SETUP, "_monitor_inventory_link_pairs", return_value=[]
+                    ), mock.patch.object(
+                        SETUP, "_legacy_project_monitor_csv_links", return_value=[]
+                    ), mock.patch.object(
+                        SETUP, "_authorize_project_switch", return_value=True
+                    ):
+                        self.assertTrue(SETUP._unsetup_previous(str(project)))
+                    SETUP._process_latest_yaml(str(project))
+                    transaction.commit()
+                    SETUP._LINK_TRANSACTION = None
+                (ztp / ".setup_manifest").write_text(
+                    f"# proj: {project}\n", encoding="utf-8"
+                )
+
+            manifest = ztp / ".setup_manifest"
+            def active_project():
+                return project if manifest.is_file() else old_project
+
+            with mock.patch.multiple(
+                LOAD,
+                HERE=root / "DAY0-Prepare",
+                SETUP_SCRIPT=root / "DAY0-Prepare/01-a-setup.py",
+            ), mock.patch.object(LOAD, "active_project", side_effect=active_project), \
+                    mock.patch.object(LOAD, "run", side_effect=run_setup):
+                with redirect_stdout(io.StringIO()):
+                    LOAD.activate_project(project, p2p, strict=False, host_role="workstation")
+
+            self.assertEqual(1, len(calls))
+            self.assertIn("--confirm-project-switch", calls[0])
+            self.assertTrue(materialized.is_symlink())
+            self.assertEqual(release.name, os.readlink(materialized))
+            self.assertEqual(release.resolve(), materialized.resolve())
+            self.assertEqual("template/99-output/latest", os.readlink(public))
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)

@@ -963,6 +963,189 @@ class SetupUnloadAndTransportTests(unittest.TestCase):
             path.symlink_to(os.path.relpath(target, path.parent))
         return project, inventory
 
+    def _materialized_latest_layout(self, root: Path):
+        ztp = root / "ztp"
+        output = ztp / "config/cumulus/template/99-output"
+        release = output / "20260910_103416_combine"
+        release.mkdir(parents=True)
+        (release / ".published-complete").write_text("complete\n", encoding="utf-8")
+        (release / "leaf01.yaml").write_bytes(b"hostname: leaf01\n")
+        (release / "020000000001.yaml").symlink_to("leaf01.yaml")
+        latest = output / "latest"
+        latest.mkdir()
+        (latest / ".published-complete").write_text("complete\n", encoding="utf-8")
+        (latest / "leaf01.yaml").write_bytes(b"hostname: leaf01\n")
+        (latest / "020000000001.yaml").symlink_to("leaf01.yaml")
+        return ztp, release, latest
+
+    def _process_materialized_latest(self, ztp: Path):
+        output = io.StringIO()
+        with mock.patch.multiple(
+            SETUP,
+            HTTP_BASE=str(ztp.parent),
+            ZTP=str(ztp),
+            LATEST_YAML_SPECS=(("cumulus", "99-output"),),
+            _DRY_RUN=False,
+            _LINK_ERRORS=0,
+            _LINK_TRANSACTION=None,
+        ), redirect_stdout(output):
+            SETUP._process_latest_yaml("unused")
+        return output.getvalue()
+
+    def test_setup_adopts_only_one_identical_materialized_latest_release(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ztp, release, latest = self._materialized_latest_layout(Path(directory))
+            output = self._process_materialized_latest(ztp)
+            self.assertTrue(latest.is_symlink())
+            self.assertEqual(release.name, os.readlink(latest))
+            self.assertEqual(release.resolve(), latest.resolve())
+            self.assertIn("materialized", output.casefold())
+            self.assertFalse(any(latest.parent.glob(".latest.materialized-*")))
+            public = ztp / "config/cumulus/latest_yaml"
+            self.assertEqual("template/99-output/latest", os.readlink(public))
+
+    def test_setup_rejects_nonidentical_materialized_latest_without_data_loss(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ztp, _release, latest = self._materialized_latest_layout(Path(directory))
+            (latest / "leaf01.yaml").write_bytes(b"unique operator bytes\n")
+            with self.assertRaisesRegex(ValueError, "逐字节|一致|匹配"):
+                self._process_materialized_latest(ztp)
+            self.assertTrue(latest.is_dir())
+            self.assertFalse(latest.is_symlink())
+            self.assertEqual(b"unique operator bytes\n", (latest / "leaf01.yaml").read_bytes())
+
+    def test_setup_rejects_ambiguous_materialized_latest_matches(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ztp, release, latest = self._materialized_latest_layout(Path(directory))
+            duplicate = release.parent / "20260910_103417_combine"
+            duplicate.mkdir()
+            for name in (".published-complete", "leaf01.yaml"):
+                (duplicate / name).write_bytes((release / name).read_bytes())
+            (duplicate / "020000000001.yaml").symlink_to("leaf01.yaml")
+            with self.assertRaisesRegex(ValueError, "多个|唯一"):
+                self._process_materialized_latest(ztp)
+            self.assertTrue(latest.is_dir())
+            self.assertFalse(latest.is_symlink())
+
+    def test_setup_rejects_materialized_latest_without_completed_release(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ztp, release, latest = self._materialized_latest_layout(Path(directory))
+            (release / ".published-complete").unlink()
+            with self.assertRaisesRegex(ValueError, "发布完成|匹配"):
+                self._process_materialized_latest(ztp)
+            self.assertTrue(latest.is_dir())
+            self.assertFalse(latest.is_symlink())
+
+    def test_setup_rejects_regular_file_at_latest_without_replacing_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ztp, _release, latest = self._materialized_latest_layout(Path(directory))
+            for child in latest.iterdir():
+                child.unlink()
+            latest.rmdir()
+            latest.write_bytes(b"operator data\n")
+            with self.assertRaisesRegex(ValueError, "实际文件|特殊路径"):
+                self._process_materialized_latest(ztp)
+            self.assertFalse(latest.is_symlink())
+            self.assertEqual(b"operator data\n", latest.read_bytes())
+            self.assertFalse((ztp / "config/cumulus/latest_yaml").exists())
+
+    def test_setup_rejects_materialized_latest_with_different_file_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ztp, _release, latest = self._materialized_latest_layout(Path(directory))
+            (latest / "leaf01.yaml").chmod(0o600)
+            with self.assertRaisesRegex(ValueError, "逐字节|结构|一致|匹配"):
+                self._process_materialized_latest(ztp)
+            self.assertTrue(latest.is_dir())
+            self.assertFalse(latest.is_symlink())
+            self.assertEqual(0o600, stat.S_IMODE((latest / "leaf01.yaml").stat().st_mode))
+
+    def test_setup_commit_rejects_tampered_latest_link_and_rolls_back(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ztp, release, latest = self._materialized_latest_layout(root)
+            other = release.parent / "20260910_103417_combine"
+            other.mkdir()
+            (other / ".published-complete").write_text("complete\n", encoding="utf-8")
+            (other / "leaf01.yaml").write_bytes(b"hostname: other\n")
+            transaction = None
+            with mock.patch.multiple(
+                SETUP,
+                HTTP_BASE=str(root),
+                ZTP=str(ztp),
+                LATEST_YAML_SPECS=(("cumulus", "99-output"),),
+                MANIFEST_FILE=str(ztp / ".setup_manifest"),
+                _DRY_RUN=False,
+                _LINK_ERRORS=0,
+                _LINK_TRANSACTION=None,
+            ):
+                transaction = SETUP._SetupLinkTransaction((str(latest),))
+                SETUP._LINK_TRANSACTION = transaction
+                SETUP._process_latest_yaml("unused")
+                self.assertEqual(release.name, os.readlink(latest))
+                latest.unlink()
+                latest.symlink_to(other.name)
+                with self.assertRaisesRegex(ValueError, "latest|链接|变化|安全"):
+                    transaction.commit()
+                self.assertTrue(transaction.active)
+                transaction.rollback()
+                SETUP._LINK_TRANSACTION = None
+
+            self.assertTrue(latest.is_dir())
+            self.assertFalse(latest.is_symlink())
+            self.assertEqual(b"hostname: leaf01\n", (latest / "leaf01.yaml").read_bytes())
+            self.assertFalse(any(latest.parent.glob(".latest.materialized-*")))
+
+    def test_setup_commit_keeps_valid_links_when_later_backup_cleanup_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            transaction_paths = []
+            pairs = []
+            for platform in ("cumulus", "nvos"):
+                parent = root / platform
+                release = parent / "release"
+                latest = parent / "latest"
+                for candidate in (release, latest):
+                    candidate.mkdir(parents=True)
+                    (candidate / ".published-complete").write_text(
+                        "complete\n", encoding="utf-8"
+                    )
+                    (candidate / "config.yaml").write_text(
+                        f"platform: {platform}\n", encoding="utf-8"
+                    )
+                transaction_paths.append(str(latest))
+                pairs.append((latest, release))
+
+            with mock.patch.multiple(
+                SETUP,
+                HTTP_BASE=str(root),
+                MANIFEST_FILE=str(root / ".setup_manifest"),
+                _DRY_RUN=False,
+            ):
+                transaction = SETUP._SetupLinkTransaction(transaction_paths)
+                for latest, release in pairs:
+                    transaction.migrate_materialized_directory(str(latest), str(release))
+                first_backup = Path(transaction.materialized_migrations[0][1])
+                second_backup = Path(transaction.materialized_migrations[1][1])
+                real_rmtree = SETUP.shutil.rmtree
+
+                def cleanup(path):
+                    if Path(path) == second_backup:
+                        raise OSError("injected cleanup failure")
+                    return real_rmtree(path)
+
+                output = io.StringIO()
+                with mock.patch.object(SETUP.shutil, "rmtree", side_effect=cleanup), \
+                        redirect_stdout(output):
+                    transaction.commit()
+
+            self.assertFalse(transaction.active)
+            self.assertFalse(first_backup.exists())
+            self.assertTrue(second_backup.is_dir())
+            self.assertIn("injected cleanup failure", output.getvalue())
+            for latest, release in pairs:
+                self.assertTrue(latest.is_symlink())
+                self.assertEqual(release.resolve(), latest.resolve())
+
     def test_setup_recreates_fixed_monitor_inventory_aliases_with_exact_targets(
         self,
     ):

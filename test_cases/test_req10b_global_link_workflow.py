@@ -32,6 +32,64 @@ EXPECTED_WORKSPACE_LINKS = (
 
 
 class Req10BGlobalLinkWorkflowTests(unittest.TestCase):
+    def test_downstream_setup_failure_removes_only_new_empty_pubkey_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / "DAY0-Prepare/site-a"
+            project.mkdir(parents=True)
+            p2p = project / "p2p.xlsx"
+            p2p.write_bytes(b"fixture")
+            (project / "laptop.pub").write_text(public_key(31, "site-a"), encoding="utf-8")
+            (root / "ztp/config").mkdir(parents=True)
+            (root / "infiniband").mkdir()
+
+            inert_stages = (
+                "_initialize_project_from_template", "_prepare_laptop_public_key",
+                "_remove_legacy_nvos_output_links", "_process_bin_files",
+                "_process_xlsx_files", "_process_bringup_links",
+                "_process_analyzer_links", "_process_optimize_sample",
+                "_process_net_csv_links", "_process_monitor_links",
+            )
+            with ExitStack() as patches:
+                patches.enter_context(mock.patch.multiple(
+                    SETUP, HTTP_BASE=str(root), HERE=str(root / "DAY0-Prepare"),
+                    ZTP=str(root / "ztp"),
+                    MANIFEST_FILE=str(root / "ztp/.setup_manifest"),
+                    OUTPUT_DIRS=[], MAPPINGS=[], WORKSPACE_INPUT_MAPPINGS=[],
+                    _CSV_DIR=None, _DRY_RUN=False, _P2P_SOURCE=None,
+                    _LINK_TRANSACTION=None,
+                ))
+                for name in inert_stages:
+                    patches.enter_context(mock.patch.object(SETUP, name))
+                for name, result in (
+                    ("_select_p2p_source", str(p2p)),
+                    ("_validate_project", True),
+                    ("_ensure_project_p2p_link", str(p2p)),
+                    ("_unsetup_previous", True),
+                    ("_check_conflicts", True),
+                ):
+                    patches.enter_context(mock.patch.object(SETUP, name, return_value=result))
+                patches.enter_context(mock.patch.object(SETUP, "require_project_eligible"))
+                patches.enter_context(mock.patch.object(
+                    SETUP, "infra_log_root_lock", return_value=ExitStack()
+                ))
+                patches.enter_context(mock.patch.object(
+                    SETUP, "infra_log_pending_state_names", return_value=()
+                ))
+                patches.enter_context(mock.patch.object(SETUP, "_restore_pending_infra_log_backup"))
+                patches.enter_context(mock.patch.object(SETUP, "_rollback_infra_log_migration"))
+                patches.enter_context(mock.patch.object(
+                    SETUP, "_process_latest_yaml",
+                    side_effect=RuntimeError("injected downstream setup failure"),
+                ))
+                with redirect_stdout(io.StringIO()):
+                    with self.assertRaisesRegex(RuntimeError, "downstream setup failure"):
+                        SETUP.setup(str(project))
+
+            self.assertFalse((root / "ztp/config/publickey").exists())
+            self.assertFalse((root / "infiniband/publickey").exists())
+            self.assertTrue((project / "laptop.pub").is_file())
+
     def test_public_key_transaction_failure_restores_both_roots_and_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
