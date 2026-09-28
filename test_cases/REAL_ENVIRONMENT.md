@@ -1763,6 +1763,13 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 三来源组合补充：同一隔离真实完成周期必须同时具有 ETH/NVLink Switch、ETH 链接第四 role/P2P 派生和 IB 受保护报告九角色，三者 K/完成摘要/K 设置/W1 模板必须一致；任一角色缺失或不同周期均 HOLD。新增 hermetic 正向工作流使用本地受保护九角色 producer、真实 worker/emitter 完成记录和真实 K/Whitelist 重放，并可测试三面板 C5→C6；它仍以确定性检索替身代替远端 UFM，使用测试工作簿而非 owner 管理的正式模板，不能当成本卡真机或正式工作簿验收。本卡没有真实角色、正式输入与写者静默证据时保持 BLOCKED/NOT RUN。
 - 证据、清理与风险：保留脱敏精确命令/退出码、周期和来源摘要、拒绝原因、前后目录/服务状态、写者静默与独立快照恢复核验；仅回滚隔离副本。真实格式或保护链未证明、发生任何外部写入或没有授权时保持 BLOCKED/NOT RUN。本卡只证明只读来源，不能解除 `TC-REAL-REQ7-IB-CYCLE-BINDING-001` 或本地 C5/C6/线上发布门禁。
 
+## TC-REAL-REQ7-MANUAL-CGI-QUEUE-001 — 手动面板 CGI 到 root 私有队列
+
+- Case ID：`TC-REAL-REQ7-MANUAL-CGI-QUEUE-001`；类型：real-environment / Apache / root-worker / local-only；状态：**BLOCKED / NOT RUN / REAL_ENV REQUIRED**。本机先决为 `test_cases.test_issue_tracker_manual_channel` direct、`test_cases.test_issue_tracker_manual_channel_workflow` 多真实脚本 workflow，以及现有 Stage L/C5/C6 全量同树证明；当前 CGI、root socket listener、Apache 安装和受保护 C5/C6 回调尚未联通，自动化 GREEN 不代表可部署。
+- 前置条件：owner 另行批准可丢弃 Ubuntu 24.04 VM、私有 0700 项目与快照、独立真实 root worker、固定 Basic Auth 主体 `nvis`/`cumulus`、本机 HTTP 同源服务地址及最小权限 Apache 路由。先保存 HEAD/tree/full-proof、CGI、route、root-owned socket 父目录和 socket、root-owned 0700 queue 全部祖先、项目输入、C5/C6 模板与受保护 cycle 的 dev/ino/mode/SHA，记录唯一 worker 与同 UID 外部写者静默；不得连接线上 tracker、生产 Apache、真实项目、真实 crontab 或 owner 的 v3.1 验证树。
+- 步骤与预期：在完整安装生命周期和独立 root worker 落地后，使用真实 Apache CGI 以两个主体各验证单面板 preview、一次 confirm、本地 C6 RECEIPT 和只读状态；浏览器请求只能含 panel、action、一次性 token/确认，不能含工作簿行、项目路径、来源摘要或凭据。分别模拟未认证、跨源、重复参数、错主体/错面板、篡改 token、来源或 selected-decision 漂移、token 到期、worker 重启、socket 缺失、socket/queue 权限或祖先改绑、队列记录损坏、C6 后但队列完成回执前崩溃；必须 fail closed，claim 后未知结果不得自动重放，所有负例无第二个本地 RECEIPT、无在线写入。Stage O 在线编辑保持禁用。
+- 证据、清理与风险：保存脱敏请求/响应、精确命令/退出码、所有 root/Apache 身份与权限、queue 记录/receipt 与工作簿前后 SHA、故障注入点、同 UID 写者静默及快照恢复核验；仅清理获准 VM 隔离产物并确认原状态。若 CGI 路由/worker/C5-C6 未接、任一真实权限或恢复证据缺失，此卡保持 BLOCKED/NOT RUN；本卡不授权生产发布或 Stage O。
+
 ## TC-REAL-REQ7-STAGE-L-C5-C6-001 — 受保护三面板到正式工作簿本地凭证
 
 - Case ID：`TC-REAL-REQ7-STAGE-L-C5-C6-001`；类型：real-environment / protected-cycle / local-transaction；状态：**BLOCKED / NOT RUN / REAL_ENV REQUIRED**。本机自动化先决为 `test_cases.test_issue_tracker_ib_runtime`/`_workflow`、`test_cases.test_issue_tracker_switch_runtime`/`_workflow`、`test_cases.test_issue_tracker_stage_l_consumer`/`_workflow`、`test_cases.test_issue_tracker_manifest`/`_workflow`、`test_cases.test_issue_tracker_local_workbook`/`_workflow` 与 `test_cases.test_issue_tracker_local_workbook_commit`/`_workflow` 的 direct/workflow 全绿；只有同一逐字节候选的正式 Codex/Claude 两轮全量结果才可进入本卡。自动化正向夹具不等于远端真实来源、正式模板或线上写入。
