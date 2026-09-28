@@ -201,7 +201,8 @@ class ImageContextSafetyDirectTests(unittest.TestCase):
             "infra/docker/runtime-state.json", "ztp/status", "ztp/.setup_manifest",
             "ztp/config/isc-dhcp-server/dhcpd_synthetic.hosts", "ztp/optimize/site-a-sample",
             "monitor/monitor.html", "monitor/cabletracker-main", "monitor/cabletracker-main.zip",
-            "infra/logs", "infiniband/bringup", "monitor/status", "ztp/backup",
+            "infra/logs", "infiniband/bringup", "infiniband/publickey",
+            "monitor/status", "ztp/backup",
             "infra/.logs.lock", "infra/.logs-migration.json",
             "infra/.logs-migration.ABC123",
             "ztp/config/cumulus/template/.claude", "ztp/config/publickey", "ztp/image",
@@ -232,6 +233,11 @@ class ImageContextSafetyDirectTests(unittest.TestCase):
                      "ztp/optimize/neutral/site-sample/source.py", "infra/docker/container.env.example"):
             with self.subTest(name=name):
                 self.assertFalse(PRODUCER_CONTRACT.is_image_host_state_path(name))
+
+    def test_setup_managed_infiniband_inputs_are_git_ignored_runtime_state(self):
+        lines = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+        self.assertIn("/infiniband/01-global.yaml", lines)
+        self.assertIn("/infiniband/publickey/", lines)
 
     def test_shared_producer_contract_retains_independent_target_examples(self):
         expected = {

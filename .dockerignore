@@ -73,6 +73,8 @@ infiniband/monitor/ib.csv
 infiniband/monitor/ib.csv/**
 infiniband/p2p.xlsx
 infiniband/p2p.xlsx/**
+infiniband/publickey
+infiniband/publickey/**
 infra/.logs-migration.*
 infra/.logs-migration.*/**
 infra/.logs-migration.json

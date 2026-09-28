@@ -1333,6 +1333,7 @@ prepare_control_auth
             "infra/docker/desired-state.json",
             "infra/docker/runtime-state.json",
             "monitor/status/**",
+            "infiniband/publickey/**",
             "ztp/image/**",
             "ztp/backup/**",
             "ztp/config/publickey/**",
@@ -1355,7 +1356,8 @@ prepare_control_auth
                     self.assertGreater(lines.index(pattern), lines.index(broad))
         activate = load_script("activate.py")
         for runtime_prefix in (
-            "ztp/backup/", "ztp/config/publickey/", "monitor/status/",
+            "infiniband/publickey/", "ztp/backup/",
+            "ztp/config/publickey/", "monitor/status/",
         ):
             with self.subTest(runtime_prefix=runtime_prefix):
                 self.assertIn(
