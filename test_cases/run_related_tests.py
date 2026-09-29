@@ -1514,10 +1514,32 @@ def issue0016_validation_report_is_exact(value: object) -> bool:
     return {item["id"] for item in skipped} == set(VALIDATION_BASELINE_SKIP_IDS)
 
 
-def run_validation_selection(root: Path, selection: Selection, verbose: bool) -> int:
+def validate_timings_destination(root: Path, destination: Path) -> None:
+    """Require a new diagnostic file outside the governed checkout."""
+    if not destination.is_absolute():
+        raise ImpactError("--timings requires an absolute path")
+    if os.path.lexists(destination):
+        raise ImpactError("--timings destination already exists")
+    try:
+        repository = root.resolve(strict=True)
+        parent = destination.parent.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ImpactError("--timings parent directory is unavailable") from exc
+    if not parent.is_dir():
+        raise ImpactError("--timings parent is not a directory")
+    if parent == repository or repository in parent.parents:
+        raise ImpactError("--timings destination must be outside the repository")
+
+
+def run_validation_selection(
+    root: Path, selection: Selection, verbose: bool,
+    timings_path: Path | None = None,
+) -> int:
     """Run unchanged assertions and accept only the exact validation exception."""
     if not selection.full_suite:
         raise ImpactError("validation-only mode requires canonical full discovery")
+    if timings_path is not None:
+        validate_timings_destination(root, timings_path)
     preflight_selection(root, selection)
     with tempfile.TemporaryDirectory(prefix="http-v3-validation-report-") as directory:
         report_path = Path(directory) / "unittest-result.json"
@@ -1527,6 +1549,8 @@ def run_validation_selection(root: Path, selection: Selection, verbose: bool) ->
         ]
         if verbose:
             command.append("-v")
+        if timings_path is not None:
+            command.extend(("--timings", str(timings_path)))
         environment = os.environ.copy()
         environment.setdefault("PYTHONPYCACHEPREFIX", "/tmp/http-related-test-pyc")
         completed = subprocess.run(
@@ -1597,6 +1621,10 @@ def parser() -> argparse.ArgumentParser:
         "--validation-only", action="store_true",
         help=("AIR/prod validation only: require exactly the three real ISSUE-0016 "
               "FAILs and no other failure, error, or new skip; never a release proof"),
+    )
+    result.add_argument(
+        "--timings", type=Path, metavar="ABSOLUTE_NEW_PATH",
+        help="write opt-in per-test validation timings outside the repository",
     )
     result.add_argument("--check", action="store_true", help="validate mappings and require no unapproved hashes")
     result.add_argument(
@@ -1700,7 +1728,9 @@ def _one_cycle(args: argparse.Namespace, *, watch: bool = False) -> tuple[int, s
         return 0, state_key
     try:
         if args.validation_only:
-            result = run_validation_selection(root, selection, args.verbose)
+            result = run_validation_selection(
+                root, selection, args.verbose, args.timings,
+            )
         else:
             result = run_selection(root, selection, args.verbose)
     except ImpactError as exc:
@@ -1774,6 +1804,16 @@ def _one_cycle(args: argparse.Namespace, *, watch: bool = False) -> tuple[int, s
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
+    if args.timings is not None:
+        if not args.all or not args.validation_only or any((
+            args.check, args.require_full, args.list, args.preflight,
+            args.watch, args.suite, args.list_suites,
+        )):
+            parser().error("--timings requires --all --validation-only without other modes")
+        try:
+            validate_timings_destination(ROOT, args.timings)
+        except ImpactError as exc:
+            parser().error(str(exc))
     if args.validation_only and not (
         args.all or (args.check and args.require_full)
     ):

@@ -2154,6 +2154,36 @@ class ApprovalLedgerTests(unittest.TestCase):
 class ValidationTimingDiagnosticTests(unittest.TestCase):
     """Timing is diagnostic only; the canonical validation result stays exact."""
 
+    class _ExactValidationProbe(unittest.TestCase):
+        def __init__(self, identity, outcome):
+            super().__init__("runTest")
+            self.identity = identity
+            self.outcome = outcome
+
+        def id(self):
+            return self.identity
+
+        def runTest(self):
+            if self.outcome == "fail":
+                self.fail(RUNNER.ISSUE0016_FAILURE_FRAGMENT)
+            if self.outcome == "skip":
+                self.skipTest("unchanged real-environment skip")
+
+    def _exact_validation_suite(self):
+        cases = [
+            self._ExactValidationProbe(identity, "fail")
+            for identity in RUNNER.ISSUE0016_FAILURE_IDS
+        ]
+        cases.extend(
+            self._ExactValidationProbe(identity, "skip")
+            for identity in RUNNER.VALIDATION_BASELINE_SKIP_IDS
+        )
+        cases.extend(
+            self._ExactValidationProbe(f"synthetic.success.{index}", "pass")
+            for index in range(3735 - len(cases))
+        )
+        return unittest.TestSuite(cases)
+
     class _Probe(unittest.TestCase):
         def test_success(self):
             return None
@@ -2237,6 +2267,94 @@ class ValidationTimingDiagnosticTests(unittest.TestCase):
             discover.assert_not_called()
             self.assertEqual("keep\n", existing.read_text(encoding="utf-8"))
             self.assertFalse((root / "result.json").exists())
+
+    def test_governance_runner_rejects_invalid_timing_before_selection(self):
+        with tempfile.TemporaryDirectory(prefix="governance-timing-destination-") as directory:
+            root = Path(directory)
+            existing = root / "existing.jsonl"
+            existing.write_text("keep\n", encoding="utf-8")
+            into_repository = root / "repository-alias"
+            into_repository.symlink_to(ROOT, target_is_directory=True)
+            invalid = (
+                ("--all", "--validation-only", "--timings", "relative.jsonl"),
+                ("--all", "--validation-only", "--timings", str(existing)),
+                ("--all", "--validation-only", "--timings", str(ROOT / "timings.jsonl")),
+                ("--all", "--validation-only", "--timings", str(into_repository / "timings.jsonl")),
+                ("--all", "--timings", str(root / "ordinary.jsonl")),
+                ("--check", "--require-full", "--validation-only", "--timings", str(root / "check.jsonl")),
+                ("--all", "--validation-only", "--list", "--timings", str(root / "list.jsonl")),
+            )
+            with mock.patch.object(RUNNER, "_one_cycle") as cycle:
+                for arguments in invalid:
+                    with self.subTest(arguments=arguments), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
+                        RUNNER.main(list(arguments))
+                    self.assertEqual(2, raised.exception.code)
+            cycle.assert_not_called()
+            self.assertEqual("keep\n", existing.read_text(encoding="utf-8"))
+
+    def test_governance_runner_preserves_exact_validation_with_opt_in_timings(self):
+        selection = RUNNER.Selection(full_suite=True)
+        with tempfile.TemporaryDirectory(prefix="governance-timing-workflow-") as directory:
+            root = Path(directory)
+            timing_path = root / "timings.jsonl"
+            observed_commands = []
+            observed_reports = []
+
+            def run_helper(command, **kwargs):
+                observed_commands.append(list(command))
+                self.assertEqual(
+                    [sys.executable, "-B", "-m", "test_cases.validation_unittest"],
+                    list(command[:4]),
+                )
+                with mock.patch.object(
+                    VALIDATION_UNITTEST.unittest.defaultTestLoader,
+                    "discover", side_effect=lambda **_kwargs: self._exact_validation_suite(),
+                ):
+                    code = VALIDATION_UNITTEST.main(list(command[4:]))
+                observed_reports.append(json.loads(Path(command[4]).read_text(encoding="utf-8")))
+                return subprocess.CompletedProcess(command, code)
+
+            with mock.patch.object(RUNNER, "preflight_selection"), mock.patch.object(
+                RUNNER.subprocess, "run", side_effect=run_helper,
+            ), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                ordinary_code = RUNNER.run_validation_selection(ROOT, selection, False)
+                self.assertFalse(timing_path.exists())
+                timed_code = RUNNER.run_validation_selection(
+                    ROOT, selection, False, timing_path,
+                )
+
+            self.assertEqual(0, ordinary_code)
+            self.assertEqual(ordinary_code, timed_code)
+            self.assertEqual(observed_reports[0], observed_reports[1])
+            self.assertTrue(RUNNER.issue0016_validation_report_is_exact(observed_reports[1]))
+            self.assertEqual(2, len(observed_commands))
+            self.assertEqual(5, len(observed_commands[0]))
+            self.assertEqual(["--timings", str(timing_path)], observed_commands[1][-2:])
+            rows = [json.loads(line) for line in timing_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(3735, len(rows))
+            self.assertEqual(0o600, stat.S_IMODE(timing_path.stat().st_mode))
+
+    def test_opt_in_timings_do_not_change_validation_approval_payload(self):
+        with tempfile.TemporaryDirectory(prefix="governance-timing-ledger-") as directory:
+            root = Path(directory)
+            ordinary_ledger = root / "ordinary-approvals.json"
+            timed_ledger = root / "timed-approvals.json"
+            timing_path = root / "timings.jsonl"
+            ordinary = RUNNER.parser().parse_args([
+                "--approvals", str(ordinary_ledger), "--all", "--validation-only",
+            ])
+            timed = RUNNER.parser().parse_args([
+                "--approvals", str(timed_ledger), "--all", "--validation-only",
+                "--timings", str(timing_path),
+            ])
+            with mock.patch.object(RUNNER, "run_validation_selection", return_value=0) as run:
+                with redirect_stdout(io.StringIO()):
+                    self.assertEqual(0, RUNNER._one_cycle(ordinary)[0])
+                    self.assertEqual(0, RUNNER._one_cycle(timed)[0])
+            self.assertEqual(ordinary_ledger.read_bytes(), timed_ledger.read_bytes())
+            self.assertIsNone(run.call_args_list[0].args[3])
+            self.assertEqual(timing_path, run.call_args_list[1].args[3])
+            self.assertFalse(timing_path.exists())
 
 
 if __name__ == "__main__":

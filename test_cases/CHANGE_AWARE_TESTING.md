@@ -163,11 +163,26 @@ proof。默认 push 只接受 release proof。owner 授权的 AIR/prod 验证可
 也不能据此推算补丁收益。该测试通过固定 SHA 在私有 clone 中重放 `origin/v2` 历史源码；
 只改当前 V3 的解包或逐文件 `fsync` 不会加速这段历史回放，不得改历史锚点或弱化断言。
 
-`validation_unittest.py` 支持显式诊断参数 `--timings ABSOLUTE_NEW_PATH`。默认调用、
+`run_related_tests.py --all --validation-only` 支持显式诊断参数
+`--timings ABSOLUTE_NEW_PATH`，并原样传给 `validation_unittest.py`。默认调用、
 测试发现、原有结果 JSON 字段和 ISSUE-0016 精确判定不变。提供该参数时，额外写一个
 0600、独占创建的 JSONL 文件，每个已完成的 `unittest.TestCase` 记录 `id` 与
-`duration_seconds`（包含 setup/test/tearDown 及子测试总时长）。路径须是已存在目录中的
-绝对路径，目标不能已存在；中断可能使文件缺少未完成案例，不能把它当成完整证据。
+`duration_seconds`（包含 setup/test/tearDown 及子测试总时长）。路径须是仓库外、
+已存在目录中的绝对路径，目标不能已存在；无效路径会在测试和 ledger 写入前拒绝。
+中断可能使文件缺少未完成案例，不能把它当成完整证据。该参数仅能和
+`--all --validation-only` 的执行模式组合；不能用于普通发布证明、check、list 或 preflight。
+
+下一次本就需要运行 validation-only 全量套件时，可同时取得正式验证证明和诊断计时：
+
+```bash
+PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B test_cases/run_related_tests.py \
+  --all --validation-only -v --timings /tmp/http-full-timings-UNIQUE.jsonl
+PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B test_cases/run_related_tests.py \
+  --check --require-full --validation-only
+```
+
+`UNIQUE` 应替换为本次运行的唯一标识。成功的 validation-only 证明仍不是正式发布证明；
+计时文件不进入结果 JSON、批准 ledger 或证明指纹，计时写入失败时全量运行 fail closed。
 
 在没有并行 full proof、且当前 checkout 允许测试创建临时制品时，可单独诊断：
 
@@ -183,9 +198,9 @@ PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m test_cases.validation_unitt
 `Ran ... in ...` 摘要及其他重型进程。先核对 `tests_run` 等于计时行数且 ID 无重复；
 否则不形成新基线。该诊断不执行正式 runner 的 preflight/approval 流程，也不更新 ledger。
 
-下一迭代先依据当前 V3 的实测热点和微基准评估优化。可研究把可选计时安全透传给正式
-`--all --validation-only`，让一次本来就要运行的治理套件同时留下诊断数据；必须先补
-runner 参数与子进程合同测试，并保持默认结果、三项已知 FAIL 判定及 proof 输入输出不变。
+下一迭代先依据当前 V3 的实测热点和微基准评估优化。已通过可选计时安全透传给正式
+`--all --validation-only`，让一次本来就要运行的治理套件同时留下诊断数据；这只增加
+测量能力，**不是提速**。不得因计时输出修改三项已知 FAIL 判定或 proof 输入输出。
 当前 V3 的另一个候选热点是约 499 个 Git 对象逐个启动 `git cat-file --batch`；批量读取
 可能改变对象被替换时的可见性，未做前后微基准和恶意改写/竞态负例前不得落地。
 十个逻辑 suite 不是隔离证明：测试会创建仓库临时项目、monitor 锁、loopback sshd 和
