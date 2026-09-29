@@ -570,3 +570,29 @@ runner 选测：只改该测试模块时，runner 选 baseline 4 个模块加本
 的 import，所以 `test_eth_activity_cycle_handoff_workflow` 要另行加跑。本文件的改动在 runner 中
 属于未知路径，按规则要求 canonical full。以上运行都是诊断，不签发批准、不改 ledger；正式状态
 只看集成后的 full/check。
+
+## 全量计时诊断：`--timings`（2026-11-06，v3.1.0 从 TEST 合入）
+
+> 来源：TEST `99445b4`（`validation_unittest.py` 的逐测试计时）和 `9ef98fa`（runner 透传）。TEST 原文写在本文件另一处的段落和 `FULL_PROOF_PERFORMANCE.md` 里，DEV 的本文件结构不同，合在这一节。它只增加测量能力，**不是提速**。
+
+`run_related_tests.py --all --validation-only` 支持显式诊断参数
+`--timings ABSOLUTE_NEW_PATH`，并原样传给 `validation_unittest.py`。默认调用、
+测试发现、原有结果 JSON 字段和 ISSUE-0016 精确判定不变。提供该参数时，额外写一个
+0600、独占创建的 JSONL 文件，每个已完成的 `unittest.TestCase` 记录 `id` 与
+`duration_seconds`（包含 setup/test/tearDown 及子测试总时长）。路径须是仓库外、
+已存在目录中的绝对路径，目标不能已存在；无效路径会在测试和 ledger 写入前拒绝。
+中断可能使文件缺少未完成案例，不能把它当成完整证据。该参数仅能和
+`--all --validation-only` 的执行模式组合；不能用于普通发布证明、check、list 或 preflight。
+
+下一次本就需要运行 validation-only 全量套件时，可同时取得正式验证证明和诊断计时：
+
+```bash
+PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B test_cases/run_related_tests.py \
+  --all --validation-only -v --timings /tmp/http-full-timings-UNIQUE.jsonl
+PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B test_cases/run_related_tests.py \
+  --check --require-full --validation-only
+```
+
+`UNIQUE` 应替换为本次运行的唯一标识。成功的 validation-only 证明仍不是正式发布证明；
+计时文件不进入结果 JSON、批准 ledger 或证明指纹，计时写入失败时全量运行 fail closed。
+不得因计时输出修改已知 FAIL 判定或 proof 的输入输出。
