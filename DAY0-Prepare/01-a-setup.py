@@ -2143,16 +2143,24 @@ def _validate_eth_csv(path):
         with open(global_path, encoding="utf-8") as stream:
             global_document = safe_load_global_yaml(stream)
         schema_version = detect_global_schema_version(global_document)
+    except FileNotFoundError as exc:
+        if os.path.lexists(global_path):
+            errors.append(f"  无法确定 devices_config.csv schema：01-global.yaml 无效：{exc}")
+            return errors, warnings
+        # Standalone CSV checks retain the legacy v1 contract.  The project
+        # preflight separately requires 01-global.yaml before setup can run.
+        global_document = None
     except (OSError, ValueError, yaml.YAMLError) as exc:
         # A malformed or unsupported global cannot silently select the v1
         # layout: doing so misdiagnoses a valid v2 inventory as a v1 CSV.
         errors.append(f"  无法确定 devices_config.csv schema：01-global.yaml 无效：{exc}")
         return errors, warnings
 
-    try:
-        normalize_issue_tracker_policy(global_document)
-    except ValueError as exc:
-        errors.append(f"  01-global.yaml issue tracker 策略无效：{exc}")
+    if global_document is not None:
+        try:
+            normalize_issue_tracker_policy(global_document)
+        except ValueError as exc:
+            errors.append(f"  01-global.yaml issue tracker 策略无效：{exc}")
 
     # CSV layout is bound only to the declared schema.  ETH policy is relevant
     # to Cumulus setup, not to an IB/NVL-only setup of a mixed inventory.
@@ -2991,6 +2999,13 @@ def _validate_project(proj_dir):
         all_warnings.extend(warns)
 
     print("── 文件合法性检查 ────────────────────────────────────────────")
+
+    # A standalone CSV has legacy schema-1 compatibility, but a deployment
+    # project must carry its own global authority even with --force enabled.
+    global_path = os.path.join(proj_dir, "01-global.yaml")
+    if not os.path.isfile(global_path):
+        print(_c(RED, "  [ERR] 缺少 01-global.yaml；项目 setup 必须提供全局配置"))
+        return False
 
     # 先读取 CSV 中存在的设备类型，按需校验对应的全局配置区段
     csv_path = os.path.join(_CSV_DIR or proj_dir, "02-devices_config.csv")

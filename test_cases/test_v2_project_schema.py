@@ -223,6 +223,42 @@ def generate_v2_redundancy_project(
 
 
 class SchemaSelectionTests(unittest.TestCase):
+    def test_standalone_csv_without_global_keeps_legacy_v1_only(self):
+        legacy_header = (
+            list(CONTRACT.DEVICE_BASE_COLUMNS)
+            + list(CONTRACT.DEVICE_V1_VLAN_COLUMNS)
+            + list(CONTRACT.DEVICE_FIXED_COLUMNS)
+            + list(CONTRACT.DEVICE_V1_EVPN_COLUMNS)
+        )
+        legacy_row = [
+            "EXAMPLE-JUMP01", "eth_jump", "", "192.0.2.10", "", "",
+        ] + [""] * (len(legacy_header) - 6)
+        v2_header_without_repeated_groups = [
+            "hostname", "type", "template", "eth0_ip", "netmask", "eth0_gw",
+            "eth0_mac", "eth1_ip", "netmask", "eth1_gw", "eth1_mac", "lo_ip",
+            "bgp_asn", "bgp_ports", "bond_ports", "bond_type", "bond_mac",
+            "peerlink_ports", "vrl",
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            csv_path = Path(directory) / "02-devices_config.csv"
+            with csv_path.open("w", newline="", encoding="utf-8") as stream:
+                csv.writer(stream).writerows([legacy_header, legacy_row])
+            self.assertEqual(([], []), SETUP._validate_eth_csv(str(csv_path)))
+
+            with csv_path.open("w", newline="", encoding="utf-8") as stream:
+                csv.writer(stream).writerows([v2_header_without_repeated_groups])
+            errors, _warnings = SETUP._validate_eth_csv(str(csv_path))
+            self.assertTrue(any("schema 1" in error for error in errors), errors)
+            self.assertFalse(any("01-global.yaml 无效" in error for error in errors), errors)
+
+            with mock.patch.multiple(
+                SETUP, _SWITCH_SCOPE="ib", _CSV_DIR=None, _P2P_SOURCE=None,
+                _DRY_RUN=True, _FORCE=False, _STRICT=False,
+                IMAGE_DIR=str(Path(directory) / "image"),
+            ), redirect_stdout(io.StringIO()) as output:
+                self.assertFalse(SETUP._validate_project(directory))
+            self.assertIn("缺少 01-global.yaml", output.getvalue())
+
     def test_setup_csv_keeps_v2_layout_when_unselected_eth_vrr_is_missing(self):
         header = [
             "hostname", "type", "template", "eth0_ip", "netmask", "eth0_gw",
