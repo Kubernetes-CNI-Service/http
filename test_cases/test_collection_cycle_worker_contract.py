@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -114,6 +115,108 @@ def v2(slot: str) -> dict:
 
 
 class CollectionCycleWorkerContractTests(unittest.TestCase):
+    def test_run_interruptible_wakes_when_child_exits_without_fixed_poll_sleep(self):
+        """An already-finished collector must not pay the 200 ms poll interval."""
+        process = mock.Mock()
+        process.pid = 424242
+        process.returncode = 0
+        process.poll.side_effect = (None, 0)
+        process.wait.return_value = 0
+        with mock.patch.object(WORKER.subprocess, "Popen", return_value=process), \
+                mock.patch.object(WORKER, "_set_active_collector"), \
+                mock.patch.object(WORKER, "_clear_active_collector"), \
+                mock.patch.object(WORKER, "_process_group_exists", return_value=False), \
+                mock.patch.object(WORKER, "_shutdown_requested", return_value=False), \
+                mock.patch.object(WORKER, "lane_cancelled", return_value=False), \
+                mock.patch.object(WORKER.time, "sleep", side_effect=AssertionError(
+                    "completed collector must wake by wait, not a fixed sleep"
+                )):
+            result, cancelled = WORKER.run_interruptible(
+                [sys.executable, "-B", "-c", "pass"], ROOT, 5,
+            )
+        self.assertEqual(0, result["returncode"])
+        self.assertFalse(cancelled)
+        first_wait = process.wait.call_args_list[0]
+        self.assertEqual((), first_wait.args)
+        self.assertGreater(first_wait.kwargs["timeout"], 0)
+        self.assertLessEqual(first_wait.kwargs["timeout"], 0.2)
+
+    def test_run_interruptible_timeout_still_stops_the_collector(self):
+        with mock.patch.object(
+            WORKER, "terminate_collector_process",
+            wraps=WORKER.terminate_collector_process,
+        ) as terminate:
+            result, cancelled = WORKER.run_interruptible(
+                [sys.executable, "-B", "-c", "import time; time.sleep(5)"],
+                ROOT, 0.05,
+            )
+        self.assertEqual(124, result["returncode"])
+        self.assertFalse(cancelled)
+        self.assertEqual(1, terminate.call_count)
+        self.assertIsNotNone(terminate.call_args.args[0].poll())
+
+    def test_run_interruptible_cancel_still_stops_the_collector(self):
+        cancel = WORKER._LANE_CANCEL[WORKER.COLLECTION_LANE]
+        cancel.clear()
+        timer = threading.Timer(0.05, cancel.set)
+        timer.start()
+        try:
+            with mock.patch.object(
+                WORKER, "terminate_collector_process",
+                wraps=WORKER.terminate_collector_process,
+            ) as terminate:
+                result, cancelled = WORKER.run_interruptible(
+                    [sys.executable, "-B", "-c", "import time; time.sleep(5)"],
+                    ROOT, 5,
+                )
+        finally:
+            timer.join(timeout=1)
+            cancel.clear()
+        self.assertTrue(cancelled)
+        self.assertNotEqual(0, result["returncode"])
+        self.assertEqual(1, terminate.call_count)
+        self.assertIsNotNone(terminate.call_args.args[0].poll())
+
+    def test_run_interruptible_reaps_remaining_group_after_leader_exits(self):
+        process = mock.Mock()
+        process.pid = 424242
+        process.returncode = 0
+        process.poll.side_effect = (None, 0)
+        process.wait.return_value = 0
+        with mock.patch.object(WORKER.subprocess, "Popen", return_value=process), \
+                mock.patch.object(WORKER, "_set_active_collector"), \
+                mock.patch.object(WORKER, "_clear_active_collector") as clear, \
+                mock.patch.object(WORKER, "_process_group_exists", return_value=True), \
+                mock.patch.object(WORKER, "terminate_collector_process", return_value=True) as terminate, \
+                mock.patch.object(WORKER, "_shutdown_requested", return_value=False), \
+                mock.patch.object(WORKER, "lane_cancelled", return_value=False):
+            result, cancelled = WORKER.run_interruptible(
+                [sys.executable, "-B", "-c", "pass"], ROOT, 5,
+            )
+        self.assertEqual(0, result["returncode"])
+        self.assertFalse(cancelled)
+        terminate.assert_called_once_with(process)
+        clear.assert_called_once_with(process, WORKER.COLLECTION_LANE)
+
+    def test_run_interruptible_unexpected_wait_error_cleans_up_group(self):
+        process = mock.Mock()
+        process.pid = 424242
+        process.poll.return_value = None
+        process.wait.side_effect = RuntimeError("wait-failure")
+        with mock.patch.object(WORKER.subprocess, "Popen", return_value=process), \
+                mock.patch.object(WORKER, "_set_active_collector"), \
+                mock.patch.object(WORKER, "_clear_active_collector") as clear, \
+                mock.patch.object(WORKER, "_process_group_exists", return_value=True), \
+                mock.patch.object(WORKER, "terminate_collector_process", return_value=True) as terminate, \
+                mock.patch.object(WORKER, "_shutdown_requested", return_value=False), \
+                mock.patch.object(WORKER, "lane_cancelled", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "wait-failure"):
+                WORKER.run_interruptible(
+                    [sys.executable, "-B", "-c", "pass"], ROOT, 5,
+                )
+        terminate.assert_called_once_with(process)
+        clear.assert_called_once_with(process, WORKER.COLLECTION_LANE)
+
     def test_setup_managed_selected_p2p_symlink_freezes_real_stem_and_rejects_retarget(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

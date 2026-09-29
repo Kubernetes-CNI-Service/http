@@ -1370,13 +1370,19 @@ def run_interruptible(
                     cancelled = True
                     terminate_collector_process(process)
                     break
-                if time.monotonic() >= deadline:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
                     terminate_collector_process(process)
                     return {
                         "returncode": 124, "stdout": "",
                         "stderr": f"timeout after {timeout}s",
                     }, False
-                time.sleep(0.2)
+                # Preserve the 200 ms cancellation bound without imposing a
+                # full polling sleep on collectors that finish sooner.
+                try:
+                    process.wait(timeout=min(0.2, remaining))
+                except subprocess.TimeoutExpired:
+                    pass
         finally:
             # This also handles exceptions in request processing and prevents
             # a detached session from surviving an unexpected worker failure.

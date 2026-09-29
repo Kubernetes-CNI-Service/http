@@ -138,3 +138,38 @@ macOS dry-run 不运行开发测试。正式 `sync-code` 或 `tar-for-upload` �
 - `4`：`--check` 发现尚未批准的脚本、测试或 manifest 变化。
 - `5`：`--check --require-full` 未找到与当前精确字节和执行环境一致的全量测试证明。
 - `130`：持续观察被 Ctrl-C 中断。
+
+## Full proof 性能诊断记录
+
+> 合入 http dev 主树时的说明（2026-10-25）：本节只收录随性能单元合入 DEV 的条目；条目内的测量和运行证据都来自 http-test 树（TEST），不是在 DEV 上测得的；DEV 合入后的验证见合并窗口记录。
+
+### 2026-09-29 第二轮：collection worker 的结束唤醒
+
+完整计时文件 `/tmp/http-full-timings-20260929-codex-test-dba95de.jsonl` 中，
+`test_collection_cycle_handoff_workflow.CollectionCycleHandoffWorkflowTests.
+test_all_scope_order_and_every_slot_echo_mutation_fail_closed` 耗时 163.011 秒。
+该用例仍逐一运行全部 21 个异常变体；对其中一个变体在真实 Python 子进程内做
+`cProfile`，发现 `run_interruptible` 的 6 次调用累计 6.566 秒，其中固定
+`time.sleep(0.2)` 的 32 次调用累计 6.519 秒。历史固定 SHA 回放的 854.230 秒
+用例不经过当前 worker，因此这个优化不影响它，也不能推算出全量 suite 的最终收益。
+
+`monitor/switch-collection-worker.py` 改为在原有 200 ms 取消检查上界内调用
+`Popen.wait(timeout=min(0.2, remaining))`，子进程提前结束时立即继续；超时、
+取消、异常退出及残留进程组仍走原来的终止和清理路径。新增 direct 测试先确认
+旧实现会因固定 `sleep` 失败，再覆盖上述四类边界。六次短子进程微基准由
+0.205–0.208 秒/次降为 0.021–0.048 秒/次。上述真实跨脚本工作流用例在同一
+macOS/Python 3.9 环境独立重跑两次，分别为 135.575 秒和 135.096 秒，较原始
+163.011 秒减少约 27.4–27.9 秒（16.8–17.1%）。命令为：
+
+```bash
+/usr/bin/time -p env PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B \
+  -m unittest -v \
+  test_cases.test_collection_cycle_handoff_workflow.CollectionCycleHandoffWorkflowTests.test_all_scope_order_and_every_slot_echo_mutation_fail_closed
+```
+
+变更感知的 `run_related_tests.py --no-approve -v` 在本地 loopback 能力允许的环境下
+以 `related-tests` 模式完成 50 个模块并返回 0；`--no-approve` 没有写批准账本。
+本轮没有执行修改后正式 `--all`，不能声称已形成新 full proof 或全量提速数据。
+此处使用的是 Python 标准库跨 POSIX 平台支持的 `Popen.wait(timeout)`；上述
+运行证据来自 macOS，Linux 真机/容器还需单独验证。首次相关测试尝试在受限沙箱
+因 AF_INET loopback preflight 返回 2，不能算测试失败或证明。
