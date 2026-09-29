@@ -2395,7 +2395,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <dt>使用场景：</dt><dd>开发时选择受影响的 direct/workflow，或在正式 load 前签发并复核绑定当前字节的 full proof。</dd>
             <dt>前置条件：</dt><dd>工作树暂时冻结；manifest 映射完整；测试预期已独立评审；禁止手工修改批准 ledger。</dd>
             <dt>语法/调用方式：</dt><dd>python3 -B test_cases/run_related_tests.py [options]</dd>
-            <dt>主要参数：</dt><dd>--manifest, --approvals, --changed, --changed-file, --git-base, --git, --all, --validation-only, --check, --require-full, --list, --preflight, --suite, --list-suites, --no-approve, --watch, --interval, -v, --verbose</dd>
+            <dt>主要参数：</dt><dd>--manifest, --approvals, --changed, --changed-file, --git-base, --git, --all, --validation-only, --timings, --check, --require-full, --list, --preflight, --suite, --list-suites, --no-approve, --watch, --interval, -v, --verbose</dd>
             <dt>输入：</dt><dd>当前生产脚本、测试、script_test_manifest.json、批准状态以及 Python/平台身份。</dd>
             <dt>输出/状态：</dt><dd>选测清单、unittest 结果和退出码；只有成功的 related/full 才能按合同原子更新批准状态。</dd>
             <dt>成功判据：</dt><dd>所有选中测试零 failure/error；正式发布还必须让 --all 成功，并让 --check --require-full 返回 0。</dd>
