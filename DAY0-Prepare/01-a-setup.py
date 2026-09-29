@@ -503,7 +503,7 @@ def _check_p2p_source_identity(proj_dir):
         return bool(_DRY_RUN and _P2P_SOURCE)
     try:
         assert_p2p_source_snapshot(
-            Path(proj_dir), Path(proj_dir) / _P2P_SOURCE_IDENTITY[0],
+            Path(proj_dir), Path(proj_dir).resolve() / _P2P_SOURCE_IDENTITY[0],
             _P2P_SOURCE_IDENTITY,
         )
     except (OSError, P2PSelectionError) as exc:

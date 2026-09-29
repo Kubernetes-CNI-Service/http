@@ -689,6 +689,19 @@ class SyncGateTests(unittest.TestCase):
                 SYNC, "resolve_project", return_value=Path("/tmp/customer")
             ),
             "build_jobs": mock.patch.object(SYNC, "build_jobs", return_value=[job]),
+            # P2P source selection and byte transfer have separate direct and
+            # workflow contracts.  These cases isolate the predeploy gate.
+            "selected_p2p": mock.patch.object(
+                SYNC, "stage_selected_p2p",
+                return_value=(
+                    Path("/tmp/customer/Site-P2P-v1.0.xlsx"),
+                    Path("/tmp/selected-p2p-stage.xlsx"),
+                    "0" * 64,
+                ),
+            ),
+            "p2p_probe": mock.patch.object(
+                SYNC, "remote_p2p_action", return_value="CURRENT",
+            ),
             "prepare_global_sync": mock.patch.object(
                 SYNC, "prepare_global_sync",
                 return_value=SimpleNamespace(changed=False),

@@ -1342,6 +1342,26 @@ class TemplateContractTests(unittest.TestCase):
             finally:
                 setup._P2P_FILE, setup._DRY_RUN = original_file, original_dry
 
+    def test_setup_accepts_unchanged_p2p_through_project_parent_alias(self):
+        setup = load_module("day0_setup_p2p_parent_alias", ROOT / "DAY0-Prepare/01-a-setup.py")
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            actual = base / "actual"
+            actual.mkdir()
+            project = actual / "site"
+            project.mkdir()
+            source = project / "Fabric P2P_v3.2.xlsx"
+            source.write_bytes(b"unchanged workbook fixture")
+            alias = base / "alias"
+            alias.symlink_to(actual, target_is_directory=True)
+            original_file, original_dry = setup._P2P_FILE, setup._DRY_RUN
+            try:
+                setup._P2P_FILE, setup._DRY_RUN = None, False
+                self.assertEqual(str(source), setup._select_p2p_source(str(alias / "site")))
+                self.assertTrue(setup._check_p2p_source_identity(str(alias / "site")))
+            finally:
+                setup._P2P_FILE, setup._DRY_RUN = original_file, original_dry
+
     def test_load_passes_nested_p2p_source_to_setup_without_resolving_external_path(self):
         load = load_module("day0_load_nested_p2p", ROOT / "DAY0-Prepare/11-load.py")
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(load, "run") as run:

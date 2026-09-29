@@ -37,7 +37,7 @@ class Req10BGlobalLinkWorkflowTests(unittest.TestCase):
             root = Path(directory)
             project = root / "DAY0-Prepare/site-a"
             project.mkdir(parents=True)
-            p2p = project / "p2p.xlsx"
+            p2p = project / "Site-P2P-v1.0.xlsx"
             p2p.write_bytes(b"fixture")
             (project / "laptop.pub").write_text(public_key(31, "site-a"), encoding="utf-8")
             (root / "ztp/config").mkdir(parents=True)
@@ -57,12 +57,12 @@ class Req10BGlobalLinkWorkflowTests(unittest.TestCase):
                     MANIFEST_FILE=str(root / "ztp/.setup_manifest"),
                     OUTPUT_DIRS=[], MAPPINGS=[], WORKSPACE_INPUT_MAPPINGS=[],
                     _CSV_DIR=None, _DRY_RUN=False, _P2P_SOURCE=None,
+                    _P2P_SOURCE_IDENTITY=None, _P2P_FILE=None,
                     _LINK_TRANSACTION=None,
                 ))
                 for name in inert_stages:
                     patches.enter_context(mock.patch.object(SETUP, name))
                 for name, result in (
-                    ("_select_p2p_source", str(p2p)),
                     ("_validate_project", True),
                     ("_ensure_project_p2p_link", str(p2p)),
                     ("_unsetup_previous", True),
@@ -147,7 +147,7 @@ class Req10BGlobalLinkWorkflowTests(unittest.TestCase):
             project.mkdir(parents=True)
             (project / "01-global.yaml").write_bytes(GLOBAL_BYTES)
             (project / "02-devices_config.csv").write_bytes(DEVICES_BYTES)
-            p2p = project / "p2p.xlsx"
+            p2p = project / "Site-P2P-v1.0.xlsx"
             p2p.write_bytes(b"fixture")
             line = public_key(23, "site-a-laptop")
             (project / "laptop.pub").write_text(line, encoding="utf-8")
@@ -172,12 +172,12 @@ class Req10BGlobalLinkWorkflowTests(unittest.TestCase):
                     ZTP=str(root / "ztp"),
                     MANIFEST_FILE=str(root / "ztp/.setup_manifest"),
                     MAPPINGS=[], _CSV_DIR=None, _DRY_RUN=False,
-                    _P2P_SOURCE=None, _LINK_TRANSACTION=None,
+                    _P2P_SOURCE=None, _P2P_SOURCE_IDENTITY=None,
+                    _P2P_FILE=None, _LINK_TRANSACTION=None,
                 ))
                 for name in unrelated_stages:
                     patches.enter_context(mock.patch.object(SETUP, name))
                 for name, result in (
-                    ("_select_p2p_source", str(p2p)),
                     ("_validate_project", True),
                     ("_ensure_project_p2p_link", str(p2p)),
                     ("_unsetup_previous", True),
@@ -210,7 +210,7 @@ class Req10BGlobalLinkWorkflowTests(unittest.TestCase):
             project.mkdir(parents=True)
             (project / "01-global.yaml").write_bytes(GLOBAL_BYTES)
             (project / "02-devices_config.csv").write_bytes(DEVICES_BYTES)
-            p2p = project / "p2p.xlsx"
+            p2p = project / "Site-P2P-v1.0.xlsx"
             p2p.write_bytes(b"fixture")
             bridge = root / "infiniband/bringup/xdr-initial-setup/01-global.yaml"
             bridge.parent.mkdir(parents=True)
@@ -233,13 +233,11 @@ class Req10BGlobalLinkWorkflowTests(unittest.TestCase):
                     ZTP=str(root / "ztp"),
                     MANIFEST_FILE=str(root / "ztp/.setup_manifest"),
                     MAPPINGS=[], _CSV_DIR=None, _DRY_RUN=False,
+                    _P2P_SOURCE_IDENTITY=None, _P2P_FILE=None,
                     _P2P_SOURCE=None, _LINK_TRANSACTION=None,
                 ))
                 for name in unrelated_stages:
                     patches.enter_context(mock.patch.object(SETUP, name))
-                patches.enter_context(mock.patch.object(
-                    SETUP, "_select_p2p_source", return_value=str(p2p)
-                ))
                 patches.enter_context(mock.patch.object(
                     SETUP, "_validate_project", return_value=True
                 ))

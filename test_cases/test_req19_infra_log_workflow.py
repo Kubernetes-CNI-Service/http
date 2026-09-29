@@ -62,7 +62,7 @@ class Req19InfraLogWorkflowTests(unittest.TestCase):
         a, b = (root / "DAY0-Prepare/site-a", root / "DAY0-Prepare/site-b")
         for project in (a, b):
             project.mkdir(parents=True)
-            (project / "p2p.xlsx").write_bytes(b"isolated fixture")
+            (project / "Site-P2P-v1.0.xlsx").write_bytes(b"isolated fixture")
             (project / "99-output-infra").mkdir()
         return root, infra, a, b
 
@@ -87,15 +87,13 @@ class Req19InfraLogWorkflowTests(unittest.TestCase):
                 BRINGUP_OUTPUT_MAPPINGS=[], ANALYZER_INPUT_MAPPINGS=[],
                 ANALYZER_OUTPUT_MAPPINGS=[], _CSV_DIR=None, _DRY_RUN=False,
                 _AUTO_YES=True, _CONFIRM_PROJECT_SWITCH=True, _LINK_TRANSACTION=None,
+                _P2P_SOURCE_IDENTITY=None, _P2P_FILE=None,
             ))
             for name in unrelated:
                 patches.enter_context(mock.patch.object(SETUP, name))
-            patches.enter_context(mock.patch.object(
-                SETUP, "_select_p2p_source", return_value=str(project / "p2p.xlsx"),
-            ))
             patches.enter_context(mock.patch.object(SETUP, "_validate_project", return_value=True))
             patches.enter_context(mock.patch.object(
-                SETUP, "_ensure_project_p2p_link", return_value=str(project / "p2p.xlsx"),
+                SETUP, "_ensure_project_p2p_link", return_value=str(project / "Site-P2P-v1.0.xlsx"),
             ))
             patches.enter_context(mock.patch.object(SETUP, "_confirm_overwrite", return_value=True))
             with redirect_stdout(io.StringIO()):

@@ -2467,8 +2467,11 @@ class ReleaseTransactionTests(unittest.TestCase):
             switch_scope="all",
         )
         mount.assert_called_once_with(False, parent_candidate=None)
+        # Setup keeps the selected project-local P2P source as a lexical path;
+        # macOS may spell the same temporary inode as /var or /private/var.
+        self.assertEqual(self.p2p_source.name, os.readlink(self.p2p_file))
         expected_runtime_inputs = LOAD.replace(
-            inputs, p2p_file=inputs.p2p_file.resolve(),
+            inputs, p2p_file=self.project / self.p2p_source.name,
         )
         preflight.assert_called_once_with(
             expected_runtime_inputs, {}, False, dhcp_runtime_plan=plan,
