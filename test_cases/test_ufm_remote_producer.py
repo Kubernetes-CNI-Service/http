@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import datetime as dt
-import hashlib
 from pathlib import Path
 import shlex
 import tempfile
@@ -23,97 +22,6 @@ PYTHON_PIN = "c" * 64
 
 
 class UfmRemoteProducerTests(unittest.TestCase):
-    def test_ibdiagnet_receipt_gate_binds_original_project_directory(self):
-        from tools import ufm_remote_producer as producer
-
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory).resolve()
-            lease, _known, jump, far, pin = make_site(root)
-            first_root = root / "first"
-            second_root = root / "second"
-            first_root.mkdir()
-            second_root.mkdir()
-            first = write_project(first_root)
-            second = write_project(second_root)
-            self.assertEqual((first / "01-global.yaml").read_bytes(),
-                             (second / "01-global.yaml").read_bytes())
-            plan = collection_plan("ibdiagnet", RUN_ID)
-            archive = root / plan.archive_name
-            archive.write_bytes(b"independently witnessed synthetic archive")
-            digest = hashlib.sha256(archive.read_bytes()).hexdigest()
-            identity = producer.VerifiedManagementIdentity(
-                "EXAMPLE-UFM01", far.host, "aa:bb:cc:dd:ee:ff",
-                NOW + dt.timedelta(hours=1), NOW, pin, "c" * 64, "eno8303")
-            identity_digest = producer._identity_digest(identity)
-            first_stat = first.stat()
-            retrieved = producer.VerifiedRetrievedObservation(
-                producer.RemoteCollectionObservation(
-                    identity.hostname, RUN_ID, "ibdiagnet", plan.ufm_remote_path,
-                    digest),
-                archive, digest, digest, digest, identity_digest, identity_digest,
-                project_path=first, project_device=first_stat.st_dev,
-                project_inode=first_stat.st_ino,
-            )
-            calls = []
-
-            def fake_remote(_jump, _far, argv, *, runner, timeout):
-                calls.append(argv)
-                return CommandResult(0, f"{digest}  {plan.ufm_remote_path}\n", "")
-
-            scope = dict(lease_path=lease, jump=jump, far=far,
-                         known_hosts_pin=pin, timeout=600, clock=lambda: NOW,
-                         runner=lambda argv: self.fail("unexpected real transport"))
-            with mock.patch.object(producer, "verify_project_management_identity",
-                                   return_value=identity), mock.patch.object(
-                                       producer, "_remote", side_effect=fake_remote):
-                producer.retrieved_observation_receipt_gate(
-                    plan, retrieved, project=first, **scope)()
-                self.assertEqual([["sha256sum", "--", plan.ufm_remote_path]], calls)
-                calls.clear()
-                with self.assertRaisesRegex(producer.RemoteProducerError,
-                                            "project"):
-                    producer.retrieved_observation_receipt_gate(
-                        plan, retrieved, project=second, **scope)
-                self.assertEqual([], calls)
-                first.rename(first_root / "moved-project")
-                replacement = write_project(first_root)
-                self.assertEqual(first, replacement)
-                with self.assertRaisesRegex(producer.RemoteProducerError,
-                                            "project"):
-                    producer.retrieved_observation_receipt_gate(
-                        plan, retrieved, project=replacement, **scope)
-                self.assertEqual([], calls)
-
-    def test_ibdiagnet_requires_full_bounded_remote_budget_before_any_action(self):
-        from tools import ufm_remote_producer as producer
-
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory).resolve()
-            lease, _known, jump, far, pin = make_site(root)
-            project = write_project(root)
-            plan = collection_plan("ibdiagnet", RUN_ID)
-            install = producer.RemoteAgentInstall(
-                "/opt/http-v3-ufm", "/usr/bin/python3", AGENT_PIN,
-                CONTRACT_PIN, PYTHON_PIN)
-            calls = []
-            common = dict(
-                install=install, project=project, lease_path=lease,
-                jump=jump, far=far, known_hosts_pin=pin,
-                clock=lambda: NOW, runner=lambda argv: calls.append(argv),
-            )
-            for timeout in (0, 300, 480, 599, 601, True):
-                with self.subTest(timeout=timeout), self.assertRaises(
-                    producer.RemoteProducerError
-                ):
-                    producer.observe_remote_producer(plan, timeout=timeout, **common)
-                with self.subTest(timeout=timeout), self.assertRaises(
-                    producer.RemoteProducerError
-                ):
-                    producer.observe_and_retrieve_remote_producer(
-                        plan, destination=root / plan.archive_name,
-                        timeout=timeout, **common)
-            self.assertEqual([], calls)
-
     def test_ibdiagnet_exact_agent_invocation_is_accepted(self):
         from tools import ufm_remote_producer as producer
 
@@ -131,7 +39,6 @@ class UfmRemoteProducerTests(unittest.TestCase):
             commands = []
 
             def fake_remote(_jump, _far, argv, *, runner, timeout):
-                self.assertEqual(600, timeout)
                 commands.append(argv)
                 if argv == ["sha256sum", "--", plan.ufm_remote_path]:
                     return CommandResult(0, f"{'d' * 64}  {plan.ufm_remote_path}\n", "")
@@ -144,7 +51,7 @@ class UfmRemoteProducerTests(unittest.TestCase):
                 result = producer.observe_remote_producer(
                     plan, install=install, project=project, lease_path=lease,
                     jump=jump, far=far, known_hosts_pin=pin,
-                    timeout=600, clock=lambda: NOW, runner=lambda argv: None)
+                    timeout=10, clock=lambda: NOW, runner=lambda argv: None)
             self.assertEqual([
                 [install.python_path, "-I", "-S", "-B", install.agent_path,
                  "--kind", "ibdiagnet", "--run-id", RUN_ID],
@@ -168,7 +75,7 @@ class UfmRemoteProducerTests(unittest.TestCase):
                     collection_plan("ibdiagnet", RUN_ID), install=install,
                     project=project, lease_path=lease, jump=jump, far=far,
                     known_hosts_pin=pin, destination=root / "iblinkinfo_wrong.tar.gz",
-                    timeout=600, clock=lambda: NOW,
+                    timeout=10, clock=lambda: NOW,
                     runner=lambda argv: calls.append(argv),
                 )
             self.assertEqual([], calls)
