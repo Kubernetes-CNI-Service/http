@@ -12,6 +12,7 @@ import importlib.util
 import io
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -49,6 +50,35 @@ def function_node(relative: str, function_name: str) -> ast.FunctionDef:
         if isinstance(node, ast.FunctionDef) and node.name == function_name:
             return node
     raise AssertionError(f"missing function {function_name} in {relative}")
+
+
+def _tracked_production_python_paths(root: Path) -> tuple[Path, ...]:
+    """Use the exact indexed production source set, not ignored worktrees."""
+    result = subprocess.run(
+        ["git", "-C", os.fspath(root), "ls-files", "--cached", "--full-name",
+         "-z", "--", "*.py"],
+        check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    paths = []
+    for entry in result.stdout.split(b"\0"):
+        if not entry:
+            continue
+        relative = Path(os.fsdecode(entry))
+        if relative.parts[0] in {"test_cases", ".git"}:
+            continue
+        paths.append(root / relative)
+    return tuple(paths)
+
+
+def _assert_governed_writer_is_classified(
+    relative: str, discovered: set[str], external_hits: set[tuple[str, str]],
+    native_entries: dict[str, tuple[str, set[str] | None]],
+) -> None:
+    if relative not in native_entries:
+        raise AssertionError(
+            f"unclassified governed mutation sink in {relative}: "
+            f"local={discovered}, imported={external_hits}"
+        )
 
 
 def first_call_line(function: ast.FunctionDef, name: str) -> int:
@@ -3920,6 +3950,37 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
         self.assertIn("stop_native_ztp_monitors", call_names(load_stop))
         self.assertIn("stop_native_ztp_monitors", call_names(unload_stop))
 
+    def test_governed_writer_census_uses_tracked_sources_without_ignored_checkouts(self) -> None:
+        """A tracked new writer must fail classification; ignored clones are not sources."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            writer = root / "src/new_writer.py"
+            ignored = root / "src/.claude/worktrees/other/old_writer.py"
+            writer.parent.mkdir(parents=True)
+            ignored.parent.mkdir(parents=True)
+            source = (
+                "import os\n"
+                "def publish():\n"
+                "    os.replace('stage', '01-global.yaml')\n"
+            )
+            writer.write_text(source, encoding="utf-8")
+            ignored.write_text(source, encoding="utf-8")
+            (root / ".gitignore").write_text("**/.claude/\n", encoding="utf-8")
+            subprocess.run(["git", "init", "-q", os.fspath(root)], check=True)
+            subprocess.run(
+                ["git", "-C", os.fspath(root), "add", ".gitignore", "src/new_writer.py"],
+                check=True,
+            )
+
+            sources = tuple(_tracked_production_python_paths(root))
+            self.assertEqual((writer,), sources)
+            discovered = literal_governed_mutation_sinks(ast.parse(writer.read_text()))
+            self.assertEqual({"publish"}, discovered)
+            with self.assertRaisesRegex(AssertionError, "unclassified governed mutation sink"):
+                _assert_governed_writer_is_classified(
+                    "src/new_writer.py", discovered, set(), {},
+                )
+
     def test_governed_writers_are_derived_from_real_mutation_sinks(self) -> None:
         """W-1 walks from governed mutations, never from existing stop callers."""
         # Each row names a real production mutation sink and the supported
@@ -3969,10 +4030,8 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
         }
         production_trees = {}
         repository_summaries = {}
-        for source in ROOT.rglob("*.py"):
+        for source in _tracked_production_python_paths(ROOT):
             relative_path = source.relative_to(ROOT)
-            if relative_path.parts[0] in {"test_cases", ".git"}:
-                continue
             tree = ast.parse(
                 source.read_text(encoding="utf-8"), filename=str(relative_path),
             )
@@ -4001,10 +4060,8 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             )
             if not discovered and not external_hits:
                 continue
-            self.assertIn(
-                relative, native_entries,
-                f"unclassified governed mutation sink in {relative_path}: "
-                f"local={discovered}, imported={external_hits}",
+            _assert_governed_writer_is_classified(
+                relative, discovered, external_hits, native_entries,
             )
             entry, stop_names = native_entries[relative]
             graph = local_call_graph(tree)
