@@ -147,7 +147,12 @@ def repository_inventory(root: Path) -> tuple[str, ...]:
         check=True,
     )
     paths = result.stdout.decode("utf-8").split("\0")
-    inventory = tuple(sorted(path for path in paths if path))
+    # The Git index still lists a tracked file deleted in this worktree until
+    # deletion is staged.  The manual documents files present in the current
+    # tree, so omit those paths while retaining dangling symlink entries.
+    inventory = tuple(sorted(
+        path for path in paths if path and os.path.lexists(root / path)
+    ))
     for relative in inventory:
         candidate = Path(relative)
         if candidate.is_absolute() or ".." in candidate.parts:

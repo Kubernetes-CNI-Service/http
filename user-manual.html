@@ -456,7 +456,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
         <p>本目录由 <code>tools/update-user-manual.py</code> 从 Git tracked 与非忽略文件生成；每个受维护文件必须有独立说明。大量项目数据、镜像、缓存与运行输出按路径模式说明，不把二进制内容嵌入网页。</p>
         <!-- BEGIN GENERATED USER MANUAL FILE CATALOG -->
         <div class="catalog-summary">
-          <span><strong>500</strong> 个受维护文件</span>
+          <span><strong>499</strong> 个受维护文件</span>
           <span><strong>25</strong> 个根级分组</span>
           <span>清单范围：Git tracked + untracked/nonignored</span>
         </div>
@@ -487,7 +487,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </tbody></table></div>
         </details>
         <details id="v2-file-group-day0-prepare" data-nav-title="DAY0-Prepare/ 文件" class="catalog-group">
-          <summary><code>DAY0-Prepare/</code> — 29 个文件</summary>
+          <summary><code>DAY0-Prepare/</code> — 28 个文件</summary>
           <div><table class="file-catalog"><thead><tr><th>文件</th><th>说明</th></tr></thead><tbody>
             <tr data-file-path="DAY0-Prepare/01-a-setup.py"><td><code>DAY0-Prepare/01-a-setup.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>在 http/ 工作目录下创建指向部署项目文件夹的软链接，让 ZTP、设备工具和监控脚本。 <strong>维护/生成责任：</strong>项目输入由项目维护者编辑；发布链接、receipt、状态和输出只允许对应事务/worker 生成。</td></tr>
             <tr data-file-path="DAY0-Prepare/02-unsetup.py"><td><code>DAY0-Prepare/02-unsetup.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>删除 01-a-setup.py 在 http/ 工作目录中创建的项目相关软链接。 <strong>维护/生成责任：</strong>项目输入由项目维护者编辑；发布链接、receipt、状态和输出只允许对应事务/worker 生成。</td></tr>
@@ -517,7 +517,6 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="DAY0-Prepare/template/nvosv25-02-7002amd64.bin"><td><code>DAY0-Prepare/template/nvosv25-02-7002amd64.bin</code></td><td><strong>类别：</strong>制品/占位；<strong>作用：</strong>项目创建、输入校验、统一 load、监控与 unload 生命周期使用的二进制制品或受控空占位；不能仅凭文件名判断为可部署 payload。 <strong>维护/生成责任：</strong>模板/示例维护者修改；真实项目和生成输出不得反向覆盖模板。</td></tr>
             <tr data-file-path="DAY0-Prepare/template/nvosv25-02-8008amd64.bin"><td><code>DAY0-Prepare/template/nvosv25-02-8008amd64.bin</code></td><td><strong>类别：</strong>制品/占位；<strong>作用：</strong>项目创建、输入校验、统一 load、监控与 unload 生命周期使用的二进制制品或受控空占位；不能仅凭文件名判断为可部署 payload。 <strong>维护/生成责任：</strong>模板/示例维护者修改；真实项目和生成输出不得反向覆盖模板。</td></tr>
             <tr data-file-path="DAY0-Prepare/template/p2p.xlsx"><td><code>DAY0-Prepare/template/p2p.xlsx</code></td><td><strong>类别：</strong>数据/合同；<strong>作用：</strong>项目创建、输入校验、统一 load、监控与 unload 生命周期使用的 Excel 输入或空模板；正式项目源需要经过 parser、图片剥离和摘要校验。 <strong>维护/生成责任：</strong>模板/示例维护者修改；真实项目和生成输出不得反向覆盖模板。</td></tr>
-            <tr data-file-path="DAY0-Prepare/template/p2p/README.txt"><td><code>DAY0-Prepare/template/p2p/README.txt</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：此子目录不再作为 P2P 工作簿输入位置；请将候选 XLSX 直接放在项目根目录。 <strong>维护/生成责任：</strong>文档维护者随行为变更同步更新；生成索引不得手工改写生成块。</td></tr>
           </tbody></table></div>
         </details>
         <details id="v2-file-group-docs" data-nav-title="docs/ 文件" class="catalog-group">
@@ -817,7 +816,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="test_cases/test_nvue_normalizer.py"><td><code>test_cases/test_nvue_normalizer.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Regression tests for the shared NVUE selector normalizer。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_ops_deployment_review.py"><td><code>test_cases/test_ops_deployment_review.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Deployment, packaging, setup, unload, and infrastructure review cases。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_optimize_output_layout.py"><td><code>test_cases/test_optimize_output_layout.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Regression tests for optimize sample/comparison output placement。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
-            <tr data-file-path="test_cases/test_p2p_selection_contract.py"><td><code>test_cases/test_p2p_selection_contract.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>REQ-15 direct contracts for selecting one project-root P2P workbook。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_p2p_selection_contract.py"><td><code>test_cases/test_p2p_selection_contract.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct contracts for selecting one project-root or linked-directory P2P workbook。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_p2p_selection_workflow.py"><td><code>test_cases/test_p2p_selection_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>REQ-15 flow from setup&#x27;s selection record to load and upload transport。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_password_update.py"><td><code>test_cases/test_password_update.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct and generator-workflow contracts for project password rotation。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_predeploy_test_gate.py"><td><code>test_cases/test_predeploy_test_gate.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Fail-closed, pre-connection test gates for the two deployment entrypoints。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -4534,9 +4533,9 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_optimize_output_layout</code></pre></div>
         </details>
         <details data-script-reference="test_cases/test_p2p_selection_contract.py" class="script-reference">
-          <summary><code>test_cases/test_p2p_selection_contract.py</code> — REQ-15 direct contracts for selecting one project-root P2P workbook。</summary>
+          <summary><code>test_cases/test_p2p_selection_contract.py</code> — Direct contracts for selecting one project-root or linked-directory P2P workbook。</summary>
           <div class="script-body"><dl>
-            <dt>作用：</dt><dd>REQ-15 direct contracts for selecting one project-root P2P workbook。</dd>
+            <dt>作用：</dt><dd>Direct contracts for selecting one project-root or linked-directory P2P workbook。</dd>
             <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
             <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
             <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>

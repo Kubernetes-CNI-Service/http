@@ -257,6 +257,29 @@ class DocumentationCatalogTests(unittest.TestCase):
                 "x",
             )
 
+    def test_user_manual_inventory_excludes_unstaged_deleted_tracked_files(self):
+        updater = load_path("update_user_manual_deleted_direct", USER_MANUAL_SCRIPT)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            deleted = root / "template/p2p/README.txt"
+            deleted.parent.mkdir(parents=True)
+            deleted.write_text("retired\n", encoding="utf-8")
+            subprocess.run(["git", "add", "--", "template/p2p/README.txt"], cwd=root, check=True)
+            deleted.unlink()
+            current = root / "template/README.txt"
+            current.write_text("current\n", encoding="utf-8")
+            self.assertEqual(("template/README.txt",), updater.repository_inventory(root))
+
+    def test_generated_user_manual_has_no_deleted_file_catalog_entries(self):
+        manual = (ROOT / "user-manual.html").read_text(encoding="utf-8")
+        entries = [html.unescape(value) for value in re.findall(
+            r'<tr data-file-path="([^"]+)">', manual,
+        )]
+        self.assertTrue(entries)
+        missing = [relative for relative in entries if not os.path.lexists(ROOT / relative)]
+        self.assertEqual([], missing)
+
     def test_user_manual_full_render_preserves_registered_sentinels(self):
         updater = load_path("update_user_manual_sentinel", USER_MANUAL_SCRIPT)
         with tempfile.TemporaryDirectory() as directory:
@@ -558,7 +581,11 @@ class DocumentationCatalogTests(unittest.TestCase):
         )
         self.assertEqual(0, inventory_result.returncode, inventory_result.stderr)
         inventory = inventory_result.stdout.decode("utf-8").split("\0")
-        maintained = {path for path in inventory if path}
+        # The index lists an unstaged deletion; it is no longer a maintained
+        # file in this worktree and must not survive in the generated catalog.
+        maintained = {
+            path for path in inventory if path and os.path.lexists(ROOT / path)
+        }
         scripts = {
             path for path in maintained
             if Path(path).suffix.lower() in {".py", ".sh", ".cgi"}

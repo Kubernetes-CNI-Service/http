@@ -131,6 +131,84 @@ class RelayArchiveInstallerTests(unittest.TestCase):
             ["--host-role=management-server"], requested[4:],
         )
 
+    def test_native_installer_next_command_pins_verified_materialized_p2p(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / "DAY0-Prepare/customer"
+            project.mkdir(parents=True)
+            workbook = project / "Customer P2P_v3.2.xlsx"
+            workbook.write_bytes(b"image-free-payload")
+            (project / "03-selected-p2p.json").write_text(json.dumps({
+                "schema_version": 1, "basename": workbook.name,
+                "sha256": hashlib.sha256(workbook.read_bytes()).hexdigest(),
+            }) + "\n", encoding="ascii")
+            result = self.installer.DeployResult(
+                "customer", "native", "native", 0, "a" * 64, "b" * 64,
+                b"", b"",
+            )
+            command = self.installer.next_commands(result, root)[1]
+            self.assertIn(f"--p2p-file={workbook.name}", shlex.split(command))
+            workbook.write_bytes(b"changed-after-deploy")
+            with self.assertRaisesRegex(self.installer.InstallError, "P2P"):
+                self.installer.next_commands(result, root)
+
+    def test_archive_overlay_preserves_customer_workbook_on_same_name_digest_conflict(self):
+        installer_bytes = INSTALLER_PATH.read_bytes()
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            archive = base / "upload.tar.gz"
+            workbook_name = "Customer P2P_v2.1.xlsx"
+            incoming = b"incoming-authoritative-workbook"
+            receipt = json.dumps({
+                "schema_version": 1,
+                "basename": workbook_name,
+                "sha256": hashlib.sha256(incoming).hexdigest(),
+            }, sort_keys=True).encode() + b"\n"
+            project_prefix = "./DAY0-Prepare/customer/"
+            make_archive(archive, installer_bytes, extra_members=(
+                (project_prefix + workbook_name, incoming),
+                (project_prefix + "03-selected-p2p.json", receipt),
+            ))
+            guard = self._load_verified_guard(archive, base, "p2p_collision_guard")
+            live = base / "live"
+            project = live / "DAY0-Prepare/customer"
+            project.mkdir(parents=True)
+            target = project / workbook_name
+            target.write_bytes(b"customer-existing-workbook")
+            before = (target.read_bytes(), target.stat().st_ino)
+            with self.assertRaisesRegex(guard.GuardError, "P2P"):
+                guard.apply_archive_overlay(
+                    live, archive, hashlib.sha256(archive.read_bytes()).hexdigest(),
+                    lock_path=live / ".deployment.lock",
+                )
+            self.assertEqual(before, (target.read_bytes(), target.stat().st_ino))
+            self.assertFalse((project / "03-selected-p2p.json").exists())
+            self.assertFalse(any(".new." in path.name for path in project.iterdir()))
+
+    def test_archive_overlay_rejects_duplicate_p2p_receipt_keys_before_writing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            archive = base / "upload.tar.gz"
+            workbook_name = "Customer P2P_v2.1.xlsx"
+            payload = b"incoming workbook"
+            digest = hashlib.sha256(payload).hexdigest()
+            receipt = (f'{{"schema_version":1,"basename":"{workbook_name}",'
+                       f'"basename":"{workbook_name}","sha256":"{digest}"}}\n').encode()
+            project_prefix = "./DAY0-Prepare/customer/"
+            make_archive(archive, INSTALLER_PATH.read_bytes(), extra_members=(
+                (project_prefix + workbook_name, payload),
+                (project_prefix + "03-selected-p2p.json", receipt),
+            ))
+            guard = self._load_verified_guard(archive, base, "p2p_duplicate_receipt_guard")
+            live = base / "live"
+            live.mkdir()
+            with self.assertRaisesRegex(guard.GuardError, "P2P receipt"):
+                guard.apply_archive_overlay(
+                    live, archive, hashlib.sha256(archive.read_bytes()).hexdigest(),
+                    lock_path=live / ".deployment.lock",
+                )
+            self.assertFalse((live / "DAY0-Prepare/customer" / workbook_name).exists())
+
     def _load_verified_guard(self, archive: Path, base: Path, module_name: str):
         verified = self.installer.verify_inputs(
             archive, INSTALLER_PATH, required_uid=os.getuid(),

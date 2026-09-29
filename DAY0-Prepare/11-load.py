@@ -110,6 +110,11 @@ from project_contract import (
 )
 from _package_common import (
     P2PSelectionError,
+    assert_p2p_source_snapshot,
+    p2p_source_snapshot,
+    p2p_source_relative,
+    project_p2p_candidates,
+    read_p2p_receipt,
     select_project_p2p_source,
     select_upload_p2p,
 )
@@ -845,6 +850,9 @@ def initialize_from_template(project: Path, dry_run: bool = False) -> None:
     project.mkdir(parents=True, exist_ok=True)
     for source in sorted(TEMPLATE_DIR.rglob("*")):
         relative = source.relative_to(TEMPLATE_DIR)
+        if relative.parts and relative.parts[0] == "p2p":
+            # p2p/ is customer-owned and may be an external directory link.
+            continue
         destination = project / relative
         if source.is_symlink():
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -1486,10 +1494,18 @@ def load_device_types(
 def select_p2p(
     project: Path, explicit: str | None = None, *,
     migrate_legacy_canonical: bool = False,
+    management_server: bool = False,
 ) -> Path:
     project = project.resolve()
     canonical = project / "p2p.xlsx"
     try:
+        receipt = read_p2p_receipt(project) if management_server else None
+        if receipt is not None:
+            if explicit is not None and explicit != receipt["basename"]:
+                raise P2PSelectionError("--p2p-file 与本次传输的 P2P 收据选择不一致")
+            explicit = receipt["basename"]
+        elif management_server and explicit is None and len(project_p2p_candidates(project)) > 1:
+            raise P2PSelectionError("管理服务器存在多个 P2P 候选且缺少本次传输收据；请明确 --p2p-file")
         # A pre-link real canonical workbook is the sole migration exception:
         # setup rescues it using an atomic no-replace move before reconciliation.
         if (
@@ -1503,11 +1519,16 @@ def select_p2p(
     except (OSError, P2PSelectionError) as exc:
         raise LoadError(f"P2P 选择失败：{exc}") from exc
     _nonempty_file(path, "p2p.xlsx")
+    before = p2p_source_snapshot(project, path)
     if path.suffix.casefold() != ".xlsx" or not zipfile.is_zipfile(path):
         raise LoadError(f"P2P 文件不是合法 XLSX：{path.name}")
     with zipfile.ZipFile(path) as archive:
         if "xl/workbook.xml" not in archive.namelist():
             raise LoadError(f"P2P XLSX 缺少 xl/workbook.xml：{path.name}")
+    try:
+        assert_p2p_source_snapshot(project, path, before)
+    except P2PSelectionError as exc:
+        raise LoadError(str(exc)) from exc
     return path
 
 
@@ -4281,12 +4302,12 @@ def p2p_release_source_binding(project: Path, selected_input: Path) -> dict[str,
     """Bind the selected real project-root workbook, not its canonical link."""
     try:
         source = select_upload_p2p(project)
-        if selected_input.resolve(strict=True) != source:
+        if selected_input.resolve(strict=True) != source.resolve(strict=True):
             raise LoadError(
                 "P2P release 输入与 p2p.xlsx 选择记录不一致："
                 f"input={selected_input.name} selected={source.name}"
             )
-        return {"path": source.name, "sha256": _sha256_path(source)}
+        return {"path": p2p_source_relative(project, source), "sha256": _sha256_path(source)}
     except (OSError, ValueError) as exc:
         raise LoadError(f"P2P release 真实来源无效：{exc}") from exc
 
@@ -4903,11 +4924,11 @@ def _current_splitter_provenance(
 
     try:
         selected = select_upload_p2p(project)
-        if p2p_file.resolve(strict=True) != selected:
+        if p2p_file.resolve(strict=True) != selected.resolve(strict=True):
             raise LoadError("P2P splitter workbook 与本次选择不一致")
         p2p = ZTP_DIR / "config/cumulus/template/P2P"
         workbook = p2p / "p2p.xlsx"
-        if workbook.resolve(strict=True) != selected:
+        if workbook.resolve(strict=True) != selected.resolve(strict=True):
             raise LoadError("P2P splitter 固定 workbook 不是本次项目来源")
         output = p2p / "output-p2p"
         sidecar = output / f"{selected.stem}-splitter-profiles.json"
@@ -7446,6 +7467,7 @@ def validate_inputs(
     try:
         p2p_file = select_p2p(
             project, args.p2p_file, migrate_legacy_canonical=True,
+            management_server=host_role == "management-server",
         )
     except LoadError as exc:
         validation_errors.append(str(exc))
@@ -7730,7 +7752,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--host-role", choices=("workstation", "management-server"),
         help="Linux 必须显式声明本机角色；Darwin 默认为 workstation",
     )
-    parser.add_argument("--p2p-file", help="明确选择项目根目录内任意非空普通 XLSX 文件名")
+    parser.add_argument("--p2p-file", help="明确选择项目根目录或 p2p/ 下的非空普通 XLSX（name.xlsx 或 p2p/name.xlsx）")
     parser.add_argument(
         "--p2p-legacy-columns", action="store_true",
         help="显式允许 P2P 未识别表头使用历史固定列；默认严格检查，不自动回退",
@@ -8076,7 +8098,7 @@ def main(argv: list[str] | None = None) -> int:
             switch_scope=switch_scope,
         )
         if not args.dry_run and (project / "p2p.xlsx").is_symlink():
-            selected_runtime_p2p = (project / "p2p.xlsx").resolve()
+            selected_runtime_p2p = project / os.readlink(project / "p2p.xlsx")
             inputs = replace(inputs, p2p_file=selected_runtime_p2p)
 
         failure_phase = "同步 ZTP 运行时参数"

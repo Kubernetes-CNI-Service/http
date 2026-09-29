@@ -81,7 +81,9 @@ from project_contract import (
 from deployment_lock import LOCK_FD_ENV, DeploymentLockError, deployment_lock
 from _package_common import (
     P2PSelectionError,
+    assert_p2p_source_snapshot,
     newest_project_p2p,
+    p2p_source_snapshot,
     select_project_p2p_source,
 )
 from ztp_service_runtime import RuntimeContractError, stop_native_ztp_monitors
@@ -130,6 +132,7 @@ _CSV_DIR  = None   # --csv-dir 指定的 devices_config.csv 所在目录
 _P2P_FILE = None   # --p2p-file 指定的项目根目录 XLSX
 _SWITCH_SCOPE = "all"  # --switch：只严格校验所选设备族的 global 分支
 _P2P_SOURCE = None # 本次 setup 选定的唯一 P2P 源
+_P2P_SOURCE_IDENTITY = None  # 外部 p2p/ 目录与源文件的选择时身份
 _LINK_ERRORS = 0   # 本次 setup 中所有固定/动态链接错误数
 _LINK_TRANSACTION = None  # 当前 setup 的整批链接回滚快照
 _INFRA_LOG_MIGRATION = None  # 待 manifest 成功后清理的原目录备份
@@ -358,6 +361,10 @@ def _initialize_project_from_template(proj_dir):
     for src_root, dirnames, filenames in os.walk(TEMPLATE_DIR, topdown=True, followlinks=False):
         rel_root = os.path.relpath(src_root, TEMPLATE_DIR)
         rel_root = "" if rel_root == "." else rel_root
+        if not rel_root:
+            # Project p2p/ may be a customer-owned link to an external source.
+            # A retired template subtree must never manufacture or replace it.
+            dirnames[:] = [name for name in dirnames if name != "p2p"]
         dest_root = os.path.join(proj_dir, rel_root)
 
         if os.path.lexists(dest_root) and not os.path.isdir(dest_root):
@@ -462,6 +469,8 @@ def _process_bin_files():
 
 def _select_p2p_source(proj_dir):
     """Resolve the frozen project-root candidate set before changing runtime links."""
+    global _P2P_SOURCE_IDENTITY
+    _P2P_SOURCE_IDENTITY = None
     canonical = Path(proj_dir) / "p2p.xlsx"
     try:
         if canonical.exists() and not canonical.is_symlink() and canonical.stat().st_size:
@@ -481,10 +490,26 @@ def _select_p2p_source(proj_dir):
             if newest is not None and newest != selected:
                 print(_c(YELLOW, f"  [ADVISORY] 最新 P2P 是 {newest.name}；"
                       f"本次固定使用 {selected.name}。如需自动选择，可将所需文件重命名后不带 --p2p-file 重试"))
+        _P2P_SOURCE_IDENTITY = p2p_source_snapshot(Path(proj_dir), selected)
         return os.fspath(selected)
     except (OSError, P2PSelectionError) as exc:
         print(_c(RED, f"[ERROR] P2P 选择失败：{exc}"))
         return None
+
+
+def _check_p2p_source_identity(proj_dir):
+    """Reject a replaced external directory or workbook after setup reads it."""
+    if _P2P_SOURCE_IDENTITY is None:
+        return bool(_DRY_RUN and _P2P_SOURCE)
+    try:
+        assert_p2p_source_snapshot(
+            Path(proj_dir), Path(proj_dir) / _P2P_SOURCE_IDENTITY[0],
+            _P2P_SOURCE_IDENTITY,
+        )
+    except (OSError, P2PSelectionError) as exc:
+        print(_c(RED, f"[ERROR] P2P 来源在校验期间变化：{exc}"))
+        return False
+    return True
 
 
 def _atomic_rename_noreplace(source, destination):
@@ -534,8 +559,8 @@ def _ensure_project_p2p_link(proj_dir, source):
     if os.path.abspath(source) == os.path.abspath(canonical):
         return source
     relative = os.path.relpath(source, proj_dir)
-    if os.path.dirname(relative) or relative in {".", ".."}:
-        print(_c(RED, "[ERROR] P2P 链接目标必须是项目根目录普通文件"))
+    if relative != os.path.basename(source) and relative != os.path.join("p2p", os.path.basename(source)):
+        print(_c(RED, "[ERROR] P2P 链接目标必须是项目根目录或 p2p/ 普通文件"))
         return None
     old_target = None
     if os.path.islink(canonical):
@@ -4079,6 +4104,8 @@ def _setup_impl(proj_dir, *, server_delegated=False):
     if not _P2P_SOURCE:
         sys.exit(1)
     if not _validate_project(proj_dir):
+        sys.exit(1)
+    if not _check_p2p_source_identity(proj_dir):
         sys.exit(1)
     print()
 

@@ -17,6 +17,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -753,6 +754,63 @@ def load_command(
         command.append("--mini")
     if no_upgrade:
         command.append("--no-upgrade")
+    project = settings.http_root / "DAY0-Prepare" / settings.project_name
+    receipt_path = project / "03-selected-p2p.json"
+    if os.path.lexists(receipt_path):
+        def unique_receipt_pairs(pairs):
+            fields = {}
+            for name, value in pairs:
+                if name in fields:
+                    raise ControllerError(f"P2P receipt duplicate key: {name}")
+                fields[name] = value
+            return fields
+
+        try:
+            metadata = receipt_path.lstat()
+            if (not metadata.st_size or metadata.st_size > 4096
+                    or not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_nlink != 1):
+                raise ControllerError("P2P receipt is not a bounded regular file")
+            receipt = json.loads(
+                receipt_path.read_bytes(), object_pairs_hook=unique_receipt_pairs,
+            )
+            if (not isinstance(receipt, dict)
+                    or set(receipt) != {"schema_version", "basename", "sha256"}
+                    or receipt["schema_version"] != 1
+                    or not isinstance(receipt["basename"], str)
+                    or not isinstance(receipt["sha256"], str)):
+                raise ControllerError("P2P receipt fields are invalid")
+            basename, expected = receipt["basename"], receipt["sha256"]
+            if (Path(basename).name != basename or basename == "p2p.xlsx"
+                    or not basename.casefold().endswith(".xlsx")
+                    or re.fullmatch(r"[0-9a-f]{64}", expected) is None):
+                raise ControllerError("P2P receipt selection is invalid")
+            source = project / basename
+            source_metadata = source.lstat()
+            if not stat.S_ISREG(source_metadata.st_mode) or source_metadata.st_nlink != 1:
+                raise ControllerError("P2P receipt does not point to a regular workbook")
+            descriptor = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                opened = os.fstat(descriptor)
+                identity = (source_metadata.st_dev, source_metadata.st_ino,
+                            source_metadata.st_size, source_metadata.st_mtime_ns)
+                if (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns) != identity:
+                    raise ControllerError("P2P workbook changed before verification")
+                digest = hashlib.sha256()
+                while chunk := os.read(descriptor, 1024 * 1024):
+                    digest.update(chunk)
+                after = os.fstat(descriptor)
+                named = source.lstat()
+                if ((after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != identity
+                        or (named.st_dev, named.st_ino, named.st_size, named.st_mtime_ns) != identity):
+                    raise ControllerError("P2P workbook changed during verification")
+            finally:
+                os.close(descriptor)
+            if digest.hexdigest() != expected:
+                raise ControllerError("P2P receipt digest does not match workbook")
+            command.append(f"--p2p-file={basename}")
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ControllerError(f"P2P receipt cannot be validated: {exc}") from exc
     command.extend((
         "--ztp-monitor-scope", settings.scope,
         "--ztp-monitor-interval", str(settings.monitor_interval),

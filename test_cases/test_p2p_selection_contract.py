@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""REQ-15 direct contracts for selecting one project-root P2P workbook."""
+"""Direct contracts for selecting one project-root or linked-directory P2P workbook."""
 
 from __future__ import annotations
 
@@ -7,11 +7,13 @@ import contextlib
 import hashlib
 import importlib.util
 import io
+import json
 import os
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import zipfile
 
 
@@ -49,7 +51,7 @@ class P2PSelectionContractTests(unittest.TestCase):
     def setUpClass(cls):
         cls.load = load_day0()
 
-    def test_project_root_only_excludes_old_subdirectory_and_ip_assignment(self):
+    def test_root_and_p2p_directory_share_one_versioned_candidate_pool(self):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory).resolve()
             expected = workbook(project / "Fabric P2P_v2.1.xlsx")
@@ -57,7 +59,42 @@ class P2PSelectionContractTests(unittest.TestCase):
             nested = project / "p2p"
             nested.mkdir()
             workbook(nested / "Fabric P2P_v999.9.xlsx")
-            self.assertEqual(expected, self.load.select_p2p(project))
+            self.assertEqual(nested / "Fabric P2P_v999.9.xlsx", self.load.select_p2p(project))
+
+    def test_linked_external_p2p_directory_uses_same_version_date_mtime_order(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            project = root / "project"
+            external = root / "external"
+            project.mkdir()
+            external.mkdir()
+            root_candidate = workbook(
+                project / "Fabric P2P_v2.10_2026-0915-root.xlsx",
+                mtime_ns=1_600_000_000_000_000_000,
+            )
+            external_candidate = workbook(
+                external / "Fabric P2P_v2.10_2026-0915-external.xlsx",
+                mtime_ns=1_700_000_000_000_000_000,
+            )
+            (project / "p2p").symlink_to(external, target_is_directory=True)
+            self.assertEqual(project / "p2p" / external_candidate.name,
+                             self.load.select_p2p(project))
+            os.utime(root_candidate, ns=(1_800_000_000_000_000_000,) * 2)
+            self.assertEqual(root_candidate, self.load.select_p2p(project))
+
+    def test_cross_directory_equal_rank_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            project = root / "project"
+            external = root / "external"
+            project.mkdir()
+            external.mkdir()
+            tie_mtime_ns = 1_700_000_000_000_000_000
+            workbook(project / "A P2P_v2.10_2026-0915.xlsx", mtime_ns=tie_mtime_ns)
+            workbook(external / "B P2P_v2.10_2026-0915.xlsx", mtime_ns=tie_mtime_ns)
+            (project / "p2p").symlink_to(external, target_is_directory=True)
+            with self.assertRaisesRegex(self.load.LoadError, "无法裁决"):
+                self.load.select_p2p(project)
 
     def test_root_candidate_filter_ignores_temporary_empty_and_canonical(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -149,40 +186,104 @@ class P2PSelectionContractTests(unittest.TestCase):
             workbook(project / "Fabric P2P_v9.0.xlsx")
             self.assertEqual(expected, self.load.select_p2p(project, expected.name))
 
-    def test_p2p_guides_and_load_help_distinguish_auto_from_explicit(self):
+    def test_p2p_guide_lives_in_root_template_without_copying_p2p_directory(self):
         template = (ROOT / "DAY0-Prepare/template/README.txt").read_text(
-            encoding="utf-8",
-        )
-        guide = (ROOT / "DAY0-Prepare/template/p2p/README.txt").read_text(
             encoding="utf-8",
         )
         help_text = self.load._build_parser().format_help()
 
-        for source, text in (("template", template), ("p2p", guide)):
-            with self.subTest(source=source):
-                self.assertIn("自动选择候选", text)
-                self.assertIn("显式 --p2p-file", text)
-                self.assertIn("无需包含 p2p", text)
-        self.assertIn("唯一候选", guide)
-        self.assertIn("多候选", guide)
-        self.assertIn("[-N]", guide)
-        self.assertIn("无原子无覆盖移动能力时停止", guide)
-        self.assertIn("项目根目录", help_text)
-        self.assertNotIn("项目根目录或 p2p/ 下", help_text)
+        self.assertFalse((ROOT / "DAY0-Prepare/template/p2p").exists())
+        for expected in ("自动选择候选", "显式 --p2p-file", "无需包含 p2p",
+                         "唯一候选", "多候选", "[-N]", "无原子无覆盖移动能力时停止"):
+            self.assertIn(expected, template)
+        self.assertIn("项目根目录或 p2p/ 下", help_text)
 
-    def test_override_rejects_old_subdirectory_and_outside_symlink(self):
+    def test_transfer_help_explains_selected_workbook_receipt_and_conflicts(self):
+        sync_help = (ROOT / "tools/sync-code.py").read_text(encoding="utf-8")
+        upload_help = (ROOT / "tools/tar-for-upload.py").read_text(encoding="utf-8")
+        for text in (sync_help, upload_help):
+            self.assertIn("03-selected-p2p.json", text)
+            self.assertIn("同名不同摘要", text)
+            self.assertIn("p2p/", text)
+
+    def test_explicit_pin_distinguishes_same_basename_and_rejects_unsafe_paths(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             project = root / "project"
             project.mkdir()
             nested = project / "p2p"
             nested.mkdir()
-            workbook(nested / "Fabric P2P_v1.0.xlsx")
+            nested_source = workbook(nested / "Fabric P2P_v1.0.xlsx")
+            root_source = workbook(project / nested_source.name)
             outside = workbook(root / "outside P2P_v1.0.xlsx")
             (project / "outside P2P_v1.0.xlsx").symlink_to(outside)
-            for name in ("p2p/Fabric P2P_v1.0.xlsx", "outside P2P_v1.0.xlsx"):
+            self.assertEqual(root_source, self.load.select_p2p(project, root_source.name))
+            self.assertEqual(nested_source, self.load.select_p2p(
+                project, f"p2p/{nested_source.name}"))
+            for name in ("outside P2P_v1.0.xlsx", "../outside P2P_v1.0.xlsx",
+                         str(outside), "p2p/../Fabric P2P_v1.0.xlsx",
+                         "p2p/deeper/Fabric P2P_v1.0.xlsx"):
                 with self.subTest(name=name), self.assertRaises(self.load.LoadError):
                     self.load.select_p2p(project, name)
+
+    def test_dangling_p2p_directory_does_not_silently_select_stale_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve()
+            workbook(project / "Fabric P2P_v1.0.xlsx")
+            (project / "p2p").symlink_to(project / "gone", target_is_directory=True)
+            with self.assertRaises(self.load.LoadError):
+                self.load.select_p2p(project)
+
+    def test_management_server_receipt_pins_older_materialized_workbook(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve()
+            chosen = workbook(project / "Fabric P2P_v1.0.xlsx")
+            workbook(project / "Fabric P2P_v9.0.xlsx")
+            digest = hashlib.sha256(chosen.read_bytes()).hexdigest()
+            (project / "03-selected-p2p.json").write_text(json.dumps({
+                "schema_version": 1, "basename": chosen.name, "sha256": digest,
+            }) + "\n", encoding="ascii")
+            self.assertEqual(chosen, self.load.select_p2p(
+                project, management_server=True))
+            with self.assertRaisesRegex(self.load.LoadError, "收据"):
+                self.load.select_p2p(
+                    project, "Fabric P2P_v9.0.xlsx", management_server=True)
+            chosen.write_bytes(b"modified-after-transfer")
+            with self.assertRaisesRegex(self.load.LoadError, "收据"):
+                self.load.select_p2p(project, management_server=True)
+
+    def test_management_server_multiple_candidates_without_receipt_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve()
+            workbook(project / "Fabric P2P_v1.0.xlsx")
+            workbook(project / "Fabric P2P_v2.0.xlsx")
+            with self.assertRaisesRegex(self.load.LoadError, "缺少本次传输收据"):
+                self.load.select_p2p(project, management_server=True)
+
+    def test_external_directory_swap_between_selection_and_zip_read_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            project = base / "project"
+            first = base / "source-one"
+            second = base / "source-two"
+            project.mkdir()
+            first.mkdir()
+            second.mkdir()
+            name = "Fabric P2P_v2.0.xlsx"
+            workbook(first / name)
+            workbook(second / name)
+            alias = project / "p2p"
+            alias.symlink_to(first, target_is_directory=True)
+            original = zipfile.ZipFile
+
+            def swap_before_read(*args, **kwargs):
+                alias.unlink()
+                alias.symlink_to(second, target_is_directory=True)
+                return original(*args, **kwargs)
+
+            with mock.patch.object(self.load.zipfile, "ZipFile", side_effect=swap_before_read):
+                with self.assertRaisesRegex(self.load.LoadError, "变化"):
+                    self.load.select_p2p(project)
 
     def test_release_source_binding_names_selected_real_workbook_and_digest(self):
         with tempfile.TemporaryDirectory() as directory:

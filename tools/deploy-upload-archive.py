@@ -12,6 +12,7 @@ import os
 from pathlib import Path, PurePosixPath
 import secrets
 import selectors
+import shlex
 import stat
 import subprocess
 import sys
@@ -1087,12 +1088,41 @@ def deploy_archive(
 
 def next_commands(result: DeployResult, root: Path) -> tuple[str, str]:
     root_text = os.fspath(root)
+    project = root / "DAY0-Prepare" / result.project
+    receipt_path = project / "03-selected-p2p.json"
+    selected_option = ""
+    if os.path.lexists(receipt_path):
+        try:
+            metadata = receipt_path.lstat()
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or metadata.st_size > 4096:
+                raise InstallError("P2P receipt is not a safe ordinary file")
+            receipt = json.loads(receipt_path.read_bytes())
+            if (not isinstance(receipt, dict)
+                    or set(receipt) != {"schema_version", "basename", "sha256"}
+                    or receipt["schema_version"] != 1
+                    or not isinstance(receipt["basename"], str)
+                    or not isinstance(receipt["sha256"], str)):
+                raise InstallError("P2P receipt fields are invalid")
+            basename, digest = receipt["basename"], receipt["sha256"]
+            if (Path(basename).name != basename or basename == "p2p.xlsx"
+                    or not basename.casefold().endswith(".xlsx")
+                    or len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest)):
+                raise InstallError("P2P receipt identity is invalid")
+            workbook = project / basename
+            source = workbook.lstat()
+            if not stat.S_ISREG(source.st_mode) or source.st_nlink != 1:
+                raise InstallError("P2P received workbook is not a regular file")
+            if hashlib.sha256(workbook.read_bytes()).hexdigest() != digest:
+                raise InstallError("P2P receipt differs from received workbook")
+            selected_option = " " + shlex.quote(f"--p2p-file={basename}")
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise InstallError(f"P2P receipt cannot be validated: {exc}") from exc
     if result.next_runtime == "docker":
         return (f"cd {root_text}", "sudo ./infra/docker/deploy.sh deploy")
     return (
         f"cd {root_text}",
         "sudo python3 DAY0-Prepare/11-load.py "
-        f"DAY0-Prepare/{result.project} --host-role=management-server",
+        f"DAY0-Prepare/{result.project} --host-role=management-server{selected_option}",
     )
 
 

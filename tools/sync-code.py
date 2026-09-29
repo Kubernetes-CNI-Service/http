@@ -19,6 +19,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import secrets
 import select
 import shlex
 import shutil
@@ -104,6 +105,10 @@ PROJECT_RUNTIME_EXCLUDES = (
     "/99-backup-all/",
     "/old/",
     "/staging/",
+    "/p2p",
+    "/p2p.xlsx",
+    "/*.xlsx",
+    "/03-selected-p2p.json",
 )
 PROJECT_PROTECTED_FILES = (
     "/01-global.yaml",
@@ -121,6 +126,173 @@ PASSWORD_SECTIONS = ("eth", "ib", "nvl")
 PASSWORD_UPDATE_RELATIVE = "tools/password-update.py"
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
+# This exact local source is sent over SSH.  It does not execute an older
+# destination checkout's helper while its code tree is being replaced.
+P2P_REMOTE_SCRIPT = r'''
+import hashlib, json, os, pathlib, re, stat, sys
+action, project_text, stage_name, basename, expected = sys.argv[1:]
+project = pathlib.Path(project_text)
+receipt_name = "03-selected-p2p.json"
+if (action not in ("probe", "commit", "cleanup") or not re.fullmatch(r"[0-9a-f]{64}", expected)
+        or pathlib.Path(basename).name != basename or basename == "p2p.xlsx"
+        or not basename.lower().endswith(".xlsx")
+        or not re.fullmatch(r"\.p2p-stage-[0-9a-f]{16}\.xlsx", stage_name)):
+    raise SystemExit("P2P transfer arguments are unsafe")
+target = project / basename
+stage = project / stage_name
+receipt = project / receipt_name
+def digest(path):
+    before = path.lstat()
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise RuntimeError("P2P path is not a single regular file: " + str(path))
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns) != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns):
+            raise RuntimeError("P2P file identity changed: " + str(path))
+        h = hashlib.sha256()
+        while True:
+            block = os.read(fd, 1024 * 1024)
+            if not block: break
+            h.update(block)
+        after = os.fstat(fd)
+        if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns):
+            raise RuntimeError("P2P file changed while hashing: " + str(path))
+        return h.hexdigest()
+    finally:
+        os.close(fd)
+def receipt_data():
+    return (json.dumps({"schema_version":1,"basename":basename,"sha256":expected}, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+def existing_state():
+    if not os.path.lexists(target): return False
+    if digest(target) != expected:
+        raise RuntimeError("P2P same-name target has different SHA-256; refusing overwrite: " + str(target))
+    return True
+try:
+    if action == "cleanup":
+        if os.path.lexists(stage):
+            meta = stage.lstat()
+            if not stat.S_ISREG(meta.st_mode) or meta.st_nlink != 1:
+                raise RuntimeError("P2P stage is unsafe to clean")
+            stage.unlink()
+        print("P2P_CLEANED")
+    elif action == "probe":
+        present = existing_state() if project.is_dir() else False
+        current = False
+        if present and os.path.lexists(receipt):
+            if receipt.lstat().st_size > 4096:
+                raise RuntimeError("P2P existing receipt is oversized")
+            current = digest(receipt) == hashlib.sha256(receipt_data()).hexdigest()
+        print("CURRENT" if current else "NEEDS_TRANSFER")
+    else:
+        if not project.is_dir() or project.is_symlink():
+            raise RuntimeError("P2P project directory is unsafe")
+        created = False
+        temp_receipt = project / (".p2p-receipt-" + stage_name.split("-")[-1] + ".json")
+        try:
+            if digest(stage) != expected:
+                raise RuntimeError("P2P staged file digest differs from selected source")
+            present = existing_state()
+            if not present:
+                try:
+                    os.link(stage, target, follow_symlinks=False)
+                    created = True
+                except FileExistsError:
+                    existing_state()
+            if os.path.lexists(receipt):
+                meta = receipt.lstat()
+                if not stat.S_ISREG(meta.st_mode) or meta.st_nlink != 1:
+                    raise RuntimeError("P2P existing receipt is unsafe")
+            fd = os.open(temp_receipt, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o644)
+            try:
+                payload = receipt_data()
+                while payload:
+                    payload = payload[os.write(fd, payload):]
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(temp_receipt, receipt)
+            dirfd = os.open(project, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try: os.fsync(dirfd)
+            finally: os.close(dirfd)
+            print("P2P_COMMITTED")
+        except BaseException:
+            if created and os.path.lexists(target) and digest(target) == expected:
+                target.unlink()
+            raise
+        finally:
+            if os.path.lexists(temp_receipt): temp_receipt.unlink()
+            if os.path.lexists(stage): stage.unlink()
+except Exception as exc:
+    raise SystemExit("P2P transfer failed: " + str(exc))
+'''
+
+
+def stage_selected_p2p(project: Path, stage_root: Path) -> tuple[Path, Path, str]:
+    """Copy only setup's selected workbook, preserving sync's original bytes."""
+    selected = project_contract.select_upload_p2p(project)
+    identity = project_contract.p2p_source_snapshot(project, selected)
+    staged = stage_root / f".p2p-stage-{secrets.token_hex(8)}.xlsx"
+    shutil.copyfile(selected, staged, follow_symlinks=False)
+    project_contract.assert_p2p_source_snapshot(project, selected, identity)
+    digest = project_contract.sha256(staged)
+    if digest != project_contract.sha256(selected):
+        raise RuntimeError("P2P source changed while staging for sync")
+    return selected, staged, digest
+
+
+def remote_p2p_command(
+    args: argparse.Namespace, action: str, project: Path,
+    stage_name: str, basename: str, digest: str,
+) -> list[str]:
+    remote_project = f"{args.remote_root.rstrip('/')}/DAY0-Prepare/{project.name}"
+    invocation = (["sudo", "-n"] if args.sudo else []) + [
+        "python3", "-c", P2P_REMOTE_SCRIPT,
+        action, remote_project, stage_name, basename, digest,
+    ]
+    return ssh_command_base(args) + [args.host, shlex.join(invocation)]
+
+
+def remote_p2p_action(
+    args: argparse.Namespace, action: str, project: Path,
+    stage_name: str, basename: str, digest: str,
+) -> str:
+    completed = subprocess.run(
+        remote_p2p_command(args, action, project, stage_name, basename, digest),
+        check=False, capture_output=True, text=True,
+    )
+    output = completed.stdout.strip()
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"远端 P2P {action} 失败：" +
+            (completed.stderr.strip() or f"exit={completed.returncode}")
+        )
+    return output
+
+
+def sync_selected_p2p_stage(
+    args: argparse.Namespace, project: Path, staged: Path, basename: str, digest: str,
+) -> None:
+    remote_project = f"{args.remote_root.rstrip('/')}/DAY0-Prepare/{project.name}"
+    job = SyncJob("project:selected-p2p", (staged,), remote_project, ())
+    try:
+        run_job(job, args)
+        result = remote_p2p_action(
+            args, "commit", project, staged.name,
+            basename, digest,
+        )
+        if result != "P2P_COMMITTED":
+            raise RuntimeError(f"远端 P2P 提交未确认：{result!r}")
+    except BaseException:
+        try:
+            remote_p2p_action(
+                args, "cleanup", project, staged.name,
+                basename, digest,
+            )
+        except (OSError, RuntimeError) as cleanup_error:
+            print(f"[WARN] 远端 P2P stage 清理未确认：{cleanup_error}", file=sys.stderr)
+        raise
+
 
 HELP_EPILOG = """
 操作步骤：
@@ -132,6 +304,11 @@ HELP_EPILOG = """
      备份和 ZTP 运行状态不会从本地反向写回管理服务器。
      当前本机 setup 创建的动态链接也不传输，由远端 setup 维护自己的链接目标。
   3. rsync 只发送有差异的内容，默认不会删除远端多余文件。
+     项目根目录与可链接外部目录的 p2p/ 共同参加本地选择；只把本次 p2p.xlsx
+     选中的实体 XLSX 原字节传到远端项目根目录，不同步 p2p/、p2p.xlsx 链接或
+     旁支 XLSX。03-selected-p2p.json 记录所选文件名和传输后 SHA-256，远端
+     load/Docker 会重新核对；同名不同摘要时拒绝覆盖客户文件，旧的异名文件保留。
+     Native 后续 load 命令带本次 --p2p-file；远端无收据且有多候选时停止。
   4. 项目中的 mgmt-server.pub 和 .management-pubkeys 不同步，防止本地空
      占位文件覆盖管理服务器 load 已注入的公钥。首次同步到全新服务器时，
      如果远端两者都不存在，脚本会安全创建空 mgmt-server.pub 供 load 注入。
@@ -1450,6 +1627,7 @@ def sync_jobs_have_changes(
 
 def main(argv: list[str] | None = None) -> int:
     manifest_stage = None
+    p2p_stage_root = None
     try:
         args = parse_args(argv)
         validate_args(args)
@@ -1501,6 +1679,14 @@ def main(argv: list[str] | None = None) -> int:
         args.password_contract = load_frozen_password_contract(manifest_path)
         if not args.dry_run:
             verify_predeploy_test_approval(**({"validation_only": True} if getattr(args, "validation_only", False) else {}))
+        p2p_stage_root = tempfile.TemporaryDirectory(prefix="http-selected-p2p-sync-")
+        selected_p2p, staged_p2p, selected_p2p_sha = stage_selected_p2p(
+            project, Path(p2p_stage_root.name),
+        )
+        print(
+            f"[P2P] 本次选择：{selected_p2p.relative_to(project).as_posix()} "
+            f"→ {selected_p2p.name} sha256={selected_p2p_sha}"
+        )
         # Publish the authority receipt last.  A partial rsync therefore
         # cannot authorize a mixed old/new source tree at image build time.
         jobs.append(deployment_source_manifest_job(
@@ -1513,9 +1699,16 @@ def main(argv: list[str] | None = None) -> int:
             assert_remote_deployment_lock(remote_lock)
             global_plan = prepare_global_sync(project, args)
             assert_remote_deployment_lock(remote_lock)
+            p2p_probe = remote_p2p_action(
+                args, "probe", project, staged_p2p.name,
+                selected_p2p.name, selected_p2p_sha,
+            )
+            if p2p_probe not in {"CURRENT", "NEEDS_TRANSFER"}:
+                raise RuntimeError(f"远端 P2P 预检返回意外状态：{p2p_probe!r}")
+            p2p_needs_commit = p2p_probe == "NEEDS_TRANSFER"
             changed_jobs = sync_jobs_have_changes(jobs, args)
             placeholder_needed = remote_management_placeholder_needed(project, args)
-            if not (changed_jobs or placeholder_needed or global_plan.changed):
+            if not (changed_jobs or placeholder_needed or global_plan.changed or p2p_needs_commit):
                 print("[OK] 远端代码/输入已一致，密码哈希已保留；本次同步零写入")
                 return 0
             assert_remote_deployment_lock(remote_lock)
@@ -1535,6 +1728,14 @@ def main(argv: list[str] | None = None) -> int:
             for job in changed_jobs:
                 assert_remote_deployment_lock(remote_lock)
                 run_job(job, args)
+            if p2p_needs_commit:
+                assert_remote_deployment_lock(remote_lock)
+                if args.dry_run:
+                    print(f"[DRY] 将原字节传输所选 P2P：{selected_p2p.name}")
+                else:
+                    sync_selected_p2p_stage(
+                        args, project, staged_p2p, selected_p2p.name, selected_p2p_sha,
+                    )
             assert_remote_deployment_lock(remote_lock)
             ensure_remote_management_placeholder(project, args)
             assert_remote_deployment_lock(remote_lock)
@@ -1579,7 +1780,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(
                     f"       cd {args.remote_root}/DAY0-Prepare && "
                     f"sudo python3 11-load.py {project.name} "
-                    "--host-role=management-server"
+                    "--host-role=management-server "
+                    + shlex.quote(f"--p2p-file={selected_p2p.name}")
                 )
         return 0
     except (OSError, ValueError, RuntimeError) as exc:
@@ -1588,6 +1790,8 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if manifest_stage is not None:
             manifest_stage.cleanup()
+        if p2p_stage_root is not None:
+            p2p_stage_root.cleanup()
 
 
 if __name__ == "__main__":

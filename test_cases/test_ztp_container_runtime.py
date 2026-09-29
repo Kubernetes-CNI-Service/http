@@ -7817,6 +7817,38 @@ class ContainerTransactionContractTests(QuietContractTest):
                 hostctl.main([action, "--no-upgrade"])
             settings.assert_not_called()
 
+    def test_container_load_pins_and_verifies_transferred_p2p_receipt(self) -> None:
+        hostctl = load_script("hostctl.py")
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            project = base / "DAY0-Prepare/site-a"
+            project.mkdir(parents=True)
+            workbook = project / "Customer P2P_v2.1.xlsx"
+            workbook.write_bytes(b"transferred-workbook")
+            (project / "03-selected-p2p.json").write_text(json.dumps({
+                "schema_version": 1,
+                "basename": workbook.name,
+                "sha256": hashlib.sha256(workbook.read_bytes()).hexdigest(),
+            }) + "\n", encoding="ascii")
+            settings = SimpleNamespace(
+                http_root=base, project_name="site-a", scope="all",
+                switch_scope="all", mini=False, monitor_interval=30,
+            )
+            command = hostctl.load_command(settings)
+            self.assertIn(f"--p2p-file={workbook.name}", command)
+            workbook.write_bytes(b"changed-after-transfer")
+            with self.assertRaisesRegex(hostctl.ControllerError, "P2P"):
+                hostctl.load_command(settings)
+            workbook.write_bytes(b"transferred-workbook")
+            duplicate_receipt = (
+                '{"schema_version":1,"basename":"Customer P2P_v2.1.xlsx",'
+                '"basename":"Customer P2P_v2.1.xlsx","sha256":"'
+                + hashlib.sha256(workbook.read_bytes()).hexdigest() + '"}\n'
+            )
+            (project / "03-selected-p2p.json").write_text(duplicate_receipt, encoding="ascii")
+            with self.assertRaisesRegex(hostctl.ControllerError, "P2P"):
+                hostctl.load_command(settings)
+
     def test_deploy_no_upgrade_is_explicit_and_forwarded_only_to_load(self) -> None:
         source = (DOCKER_ROOT / "deploy.sh").read_text(encoding="utf-8")
         assert_published_docker_readme(

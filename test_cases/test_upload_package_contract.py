@@ -10,8 +10,10 @@ import hashlib
 import importlib.util
 import inspect
 import io
+import json
 import os
 from pathlib import Path
+import shlex
 import stat
 import subprocess
 import sys
@@ -1513,6 +1515,65 @@ class UploadPackageContractTests(unittest.TestCase):
                     self.assertEqual(0, member.gid)
                     self.assertEqual("", member.uname)
                     self.assertEqual("", member.gname)
+
+    def test_upload_materializes_only_selected_external_p2p_with_post_strip_receipt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            workspace, day0, project = self._minimal_package_workspace(base)
+            external = base / "authoritative-p2p"
+            external.mkdir()
+            selected = external / "Customer P2P v3.2.xlsx"
+            write_picture_workbook(selected, "selected-external")
+            write_picture_workbook(external / "other P2P v9.9.xlsx", "not-selected")
+            (project / "p2p.xlsx").unlink()
+            (project / "p2p").symlink_to(external, target_is_directory=True)
+            (project / "p2p.xlsx").symlink_to(f"p2p/{selected.name}")
+            output = base / "upload.tar.gz"
+            args = argparse.Namespace(
+                project=str(project), output=output, force=False,
+                max_file_size_mib=50, include_images=False,
+                include_apps=False, apps_platform=None,
+                apps_platforms=set(), include_firmware=False,
+                exclude_project_images=False,
+            )
+            with mock.patch.multiple(
+                package, ROOT=workspace, DAY0=day0,
+                MANIFEST=workspace / "ztp/.setup_manifest",
+                TOOLS_DIR=workspace / "tools",
+                write_deployment_source_manifest=self._stable_source_manifest,
+            ):
+                package.create_package(args, day0_all=False, artifact_kind="upload")
+            with tarfile.open(output, "r:gz") as archive:
+                prefix = "./DAY0-Prepare/customer/"
+                names = set(archive.getnames())
+                self.assertIn(prefix + selected.name, names)
+                self.assertNotIn(prefix + "p2p", names)
+                self.assertNotIn(prefix + "p2p.xlsx", names)
+                self.assertNotIn(prefix + "other P2P v9.9.xlsx", names)
+                payload = archive.extractfile(prefix + selected.name).read()
+                receipt = json.load(archive.extractfile(prefix + package.P2P_RECEIPT_NAME))
+            self.assertEqual(selected.name, receipt["basename"])
+            self.assertEqual(hashlib.sha256(payload).hexdigest(), receipt["sha256"])
+            self.assertNotEqual(hashlib.sha256(selected.read_bytes()).hexdigest(), receipt["sha256"])
+            with zipfile.ZipFile(io.BytesIO(payload)) as workbook:
+                self.assertFalse(any(name.startswith("xl/media/") for name in workbook.namelist()))
+
+    def test_upload_manual_remote_load_hint_names_selected_external_workbook(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            project = base / "DAY0-Prepare/customer"
+            external = base / "project-files"
+            project.mkdir(parents=True)
+            external.mkdir()
+            selected = external / "Customer P2P_v3.2.xlsx"
+            write_picture_workbook(selected)
+            (project / "p2p").symlink_to(external, target_is_directory=True)
+            (project / "p2p.xlsx").symlink_to(f"p2p/{selected.name}")
+            args = upload_tool.parse_args([
+                str(project), "ubuntu@server.example", "--exclude-apps",
+            ])
+            remote_command = upload_tool.recommended_remote_load_command(args, project)[-1]
+            self.assertIn(f"--p2p-file={selected.name}", shlex.split(remote_command.split("&&", 1)[1]))
 
     def test_upload_package_honors_canonical_p2p_pointer_across_mtime_changes(self):
         """A root-confined canonical pointer binds upload; absence fails closed."""

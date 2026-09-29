@@ -23,6 +23,7 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest import mock
+import zipfile
 
 from test_cases.public_project_fixture import materialized_public_project
 
@@ -881,6 +882,151 @@ class SyncDeploymentLockTests(unittest.TestCase):
         )
         self.assertIn("/01-global.yaml", project_job.excludes)
 
+    def test_project_sync_never_traverses_external_p2p_or_transfers_unselected_workbooks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            project = base / "project"
+            external = base / "authoritative-p2p"
+            project.mkdir()
+            external.mkdir()
+            (external / "Selected P2P_v2.0.xlsx").write_bytes(b"selected-source")
+            (external / "Other P2P_v9.0.xlsx").write_bytes(b"unselected-source")
+            (project / "p2p").symlink_to(external, target_is_directory=True)
+            (project / "p2p.xlsx").symlink_to("p2p/Selected P2P_v2.0.xlsx")
+            (project / "Old P2P_v1.0.xlsx").write_bytes(b"unselected-root")
+            job = next(
+                item for item in SYNC.build_jobs(project, "/var/www/html")
+                if item.label == "project:project"
+            )
+            self.assertIn("/p2p", job.excludes)
+            self.assertIn("/p2p.xlsx", job.excludes)
+            self.assertIn("/*.xlsx", job.excludes)
+            self.assertEqual((project,), job.sources)
+
+    def test_sync_selected_external_p2p_stages_original_bytes_not_upload_strip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            project = base / "project"
+            external = base / "source"
+            stage_root = base / "stage"
+            project.mkdir()
+            external.mkdir()
+            stage_root.mkdir()
+            workbook = external / "Customer P2P_v3.2.xlsx"
+            with zipfile.ZipFile(workbook, "w") as archive:
+                archive.writestr("xl/workbook.xml", "<workbook/>")
+                archive.writestr("xl/media/image1.png", b"raw-image-bytes")
+            (project / "p2p").symlink_to(external, target_is_directory=True)
+            (project / "p2p.xlsx").symlink_to(f"p2p/{workbook.name}")
+            selected, staged, digest = SYNC.stage_selected_p2p(project, stage_root)
+            self.assertEqual(project / "p2p" / workbook.name, selected)
+            self.assertEqual(workbook.read_bytes(), staged.read_bytes())
+            self.assertEqual(hashlib.sha256(workbook.read_bytes()).hexdigest(), digest)
+            self.assertNotEqual(workbook.name, staged.name)
+
+    def test_sync_selected_p2p_stage_commits_receipt_without_removing_stale_remote_workbook(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            project = base / "project"
+            external = base / "source"
+            stage_root = base / "stage"
+            remote = base / "remote"
+            for path in (project, external, stage_root, remote):
+                path.mkdir()
+            workbook = external / "Customer P2P_v1.0.xlsx"
+            with zipfile.ZipFile(workbook, "w") as archive:
+                archive.writestr("xl/workbook.xml", "<workbook/>")
+                archive.writestr("xl/media/image1.png", b"sync-keeps-original-image")
+            (project / "p2p").symlink_to(external, target_is_directory=True)
+            (project / "p2p.xlsx").symlink_to(f"p2p/{workbook.name}")
+            stale = remote / "Customer P2P_v9.9.xlsx"
+            stale.write_bytes(b"old remote customer workbook")
+            selected, staged, digest = SYNC.stage_selected_p2p(project, stage_root)
+
+            def local_rsync(job, _args):
+                self.assertEqual("project:selected-p2p", job.label)
+                self.assertEqual((staged,), job.sources)
+                shutil.copyfile(staged, remote / staged.name)
+
+            def local_remote_action(_args, action, _project, stage_name, basename, expected):
+                completed = subprocess.run([
+                    sys.executable, "-c", SYNC.P2P_REMOTE_SCRIPT,
+                    action, str(remote), stage_name, basename, expected,
+                ], check=False, capture_output=True, text=True)
+                if completed.returncode:
+                    raise RuntimeError(completed.stderr)
+                return completed.stdout.strip()
+
+            with (mock.patch.object(SYNC, "run_job", side_effect=local_rsync),
+                  mock.patch.object(SYNC, "remote_p2p_action", side_effect=local_remote_action)):
+                SYNC.sync_selected_p2p_stage(
+                    sync_args(), project, staged, selected.name, digest,
+                )
+            self.assertEqual(workbook.read_bytes(), (remote / workbook.name).read_bytes())
+            self.assertEqual(b"old remote customer workbook", stale.read_bytes())
+            self.assertFalse((remote / staged.name).exists())
+            self.assertEqual(
+                {"basename": workbook.name, "sha256": digest},
+                SYNC.project_contract.read_p2p_receipt(remote),
+            )
+
+    def test_sync_remote_p2p_commit_refuses_conflict_and_cleans_stage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve() / "project"
+            project.mkdir()
+            basename = "Customer P2P_v3.2.xlsx"
+            target = project / basename
+            target.write_bytes(b"customer-existing")
+            original_identity = (target.read_bytes(), target.stat().st_ino)
+            stage = project / ".p2p-stage-0123456789abcdef.xlsx"
+            incoming = b"selected-original-bytes"
+            stage.write_bytes(incoming)
+            digest = hashlib.sha256(incoming).hexdigest()
+            result = subprocess.run([
+                sys.executable, "-c", SYNC.P2P_REMOTE_SCRIPT,
+                "commit", str(project), stage.name, basename, digest,
+            ], capture_output=True, text=True, check=False)
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("P2P", result.stderr)
+            self.assertEqual(original_identity, (target.read_bytes(), target.stat().st_ino))
+            self.assertFalse(stage.exists())
+            self.assertFalse((project / "03-selected-p2p.json").exists())
+
+            target.unlink()
+            stage.write_bytes(incoming)
+            result = subprocess.run([
+                sys.executable, "-c", SYNC.P2P_REMOTE_SCRIPT,
+                "commit", str(project), stage.name, basename, digest,
+            ], capture_output=True, text=True, check=False)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual(incoming, target.read_bytes())
+            receipt = json.loads((project / "03-selected-p2p.json").read_text())
+            self.assertEqual({"schema_version": 1, "basename": basename,
+                              "sha256": digest}, receipt)
+            self.assertFalse(stage.exists())
+
+    def test_sync_remote_probe_preserves_stale_workbook_and_requires_current_receipt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve() / "project"
+            project.mkdir()
+            old = project / "Customer P2P_v9.9.xlsx"
+            old.write_bytes(b"old-remote-workbook")
+            new = project / "Customer P2P_v1.0.xlsx"
+            new.write_bytes(b"selected-content")
+            digest = hashlib.sha256(new.read_bytes()).hexdigest()
+            command = [sys.executable, "-c", SYNC.P2P_REMOTE_SCRIPT,
+                       "probe", str(project), ".p2p-stage-0123456789abcdef.xlsx",
+                       new.name, digest]
+            result = subprocess.run(command, capture_output=True, text=True, check=False)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual("NEEDS_TRANSFER", result.stdout.strip())
+            (project / "03-selected-p2p.json").write_text(json.dumps({
+                "schema_version": 1, "basename": new.name, "sha256": digest,
+            }, sort_keys=True, separators=(",", ":")) + "\n", encoding="ascii")
+            result = subprocess.run(command, capture_output=True, text=True, check=False)
+            self.assertEqual("CURRENT", result.stdout.strip())
+            self.assertEqual(b"old-remote-workbook", old.read_bytes())
+
     def test_global_plan_preserves_only_remote_password_hashes(self):
         local = global_yaml(timezone="Asia/Taipei").encode()
         remote = global_yaml(
@@ -1125,6 +1271,10 @@ class SyncDeploymentLockTests(unittest.TestCase):
             mock.patch.object(SYNC, "build_jobs", return_value=[job]),
             mock.patch.multiple(
                 SYNC,
+                stage_selected_p2p=mock.Mock(return_value=(
+                    project / "Customer P2P.xlsx", Path("/tmp/.p2p-stage-0123456789abcdef.xlsx"), "a" * 64,
+                )),
+                remote_p2p_action=mock.Mock(return_value="CURRENT"),
                 run_predeploy_test_gate=mock.Mock(
                     side_effect=lambda: events.append("gate"),
                 ),
@@ -1299,7 +1449,12 @@ class SyncDeploymentLockTests(unittest.TestCase):
             mock.patch.object(SYNC, "parse_args", return_value=args),
             mock.patch.object(SYNC, "validate_args"),
             mock.patch.object(SYNC, "resolve_project", return_value=project),
-            mock.patch.object(SYNC, "build_jobs", return_value=[job]),
+            mock.patch.multiple(SYNC,
+                build_jobs=mock.Mock(return_value=[job]),
+                stage_selected_p2p=mock.Mock(return_value=(
+                    project / "Customer P2P.xlsx", Path("/tmp/.p2p-stage-0123456789abcdef.xlsx"), "a" * 64,
+                )),
+                remote_p2p_action=mock.Mock(return_value="CURRENT")),
             mock.patch.object(SYNC, "run_predeploy_test_gate"),
             mock.patch.object(SYNC, "verify_predeploy_test_approval"),
             mock.patch.object(
@@ -1338,7 +1493,13 @@ class SyncDeploymentLockTests(unittest.TestCase):
             mock.patch.object(
                 SYNC, "resolve_project", return_value=Path("/tmp/customer"),
             ),
-            mock.patch.object(SYNC, "build_jobs", return_value=[job]),
+            mock.patch.multiple(SYNC,
+                build_jobs=mock.Mock(return_value=[job]),
+                stage_selected_p2p=mock.Mock(return_value=(
+                    Path("/tmp/customer/Customer P2P.xlsx"),
+                    Path("/tmp/.p2p-stage-0123456789abcdef.xlsx"), "a" * 64,
+                )),
+                remote_p2p_action=mock.Mock(return_value="CURRENT")),
             mock.patch.object(SYNC, "run_predeploy_test_gate"),
             mock.patch.object(SYNC, "verify_predeploy_test_approval"),
             mock.patch.object(
@@ -1376,7 +1537,13 @@ class SyncDeploymentLockTests(unittest.TestCase):
             mock.patch.object(
                 SYNC, "resolve_project", return_value=Path("/tmp/customer"),
             ),
-            mock.patch.object(SYNC, "build_jobs", return_value=[job]),
+            mock.patch.multiple(SYNC,
+                build_jobs=mock.Mock(return_value=[job]),
+                stage_selected_p2p=mock.Mock(return_value=(
+                    Path("/tmp/customer/Customer P2P.xlsx"),
+                    Path("/tmp/.p2p-stage-0123456789abcdef.xlsx"), "a" * 64,
+                )),
+                remote_p2p_action=mock.Mock(return_value="CURRENT")),
             mock.patch.object(SYNC, "run_predeploy_test_gate"),
             mock.patch.object(SYNC, "verify_predeploy_test_approval"),
             mock.patch.object(
@@ -1417,7 +1584,13 @@ class SyncDeploymentLockTests(unittest.TestCase):
             mock.patch.object(
                 SYNC, "resolve_project", return_value=Path("/tmp/customer"),
             ),
-            mock.patch.object(SYNC, "build_jobs", return_value=[job]),
+            mock.patch.multiple(SYNC,
+                build_jobs=mock.Mock(return_value=[job]),
+                stage_selected_p2p=mock.Mock(return_value=(
+                    Path("/tmp/customer/Customer P2P.xlsx"),
+                    Path("/tmp/.p2p-stage-0123456789abcdef.xlsx"), "a" * 64,
+                )),
+                remote_p2p_action=mock.Mock(return_value="CURRENT")),
             mock.patch.object(SYNC, "run_predeploy_test_gate"),
             mock.patch.object(SYNC, "verify_predeploy_test_approval"),
             mock.patch.object(
@@ -1462,7 +1635,13 @@ class SyncDeploymentLockTests(unittest.TestCase):
             mock.patch.object(SYNC, "parse_args", return_value=args),
             mock.patch.object(SYNC, "validate_args"),
             mock.patch.object(SYNC, "resolve_project", return_value=Path("/tmp/customer")),
-            mock.patch.object(SYNC, "build_jobs", return_value=[job]),
+            mock.patch.multiple(SYNC,
+                build_jobs=mock.Mock(return_value=[job]),
+                stage_selected_p2p=mock.Mock(return_value=(
+                    Path("/tmp/customer/Customer P2P.xlsx"),
+                    Path("/tmp/.p2p-stage-0123456789abcdef.xlsx"), "a" * 64,
+                )),
+                remote_p2p_action=mock.Mock(return_value="CURRENT")),
             mock.patch.object(SYNC, "run_predeploy_test_gate"),
             mock.patch.object(SYNC, "verify_predeploy_test_approval"),
             mock.patch.object(

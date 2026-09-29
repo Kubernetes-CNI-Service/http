@@ -85,6 +85,8 @@ REPRODUCIBLE_ARCHIVE_MTIME = 0
 
 P2P_VERSION_TOKEN = re.compile(r"(?<![A-Za-z0-9])v?\d+(?:\.\d+)+", re.IGNORECASE)
 P2P_DATE_TOKEN = re.compile(r"(?<!\d)(\d{4})-(\d{2})-?(\d{2})(?!\d)")
+P2P_RECEIPT_NAME = "03-selected-p2p.json"
+P2P_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
 class P2PSelectionError(ValueError):
@@ -104,15 +106,29 @@ def _p2p_regular_xlsx(path: Path) -> bool:
 
 
 def project_p2p_candidates(project: Path) -> tuple[Path, ...]:
-    """Use only real, nonempty root workbooks in the frozen R15 candidate set."""
+    """Select ordinary root and p2p/ XLSX files in one candidate pool.
+
+    Only the directory itself may be a symlink.  An absent p2p/ is fine, but a
+    dangling link or non-directory is an input error, not a reason to silently
+    fall back to a stale root workbook.
+    """
     project = project.resolve()
-    return tuple(sorted(
-        path for path in project.iterdir()
-        if path.name.casefold() != "p2p.xlsx"
-        and not path.name.startswith(("~$", "._"))
-        and "p2p" in path.name.casefold()
-        and _p2p_regular_xlsx(path)
-    ))
+    directories = [project]
+    nested = project / "p2p"
+    if os.path.lexists(nested):
+        if not nested.is_dir():
+            raise P2PSelectionError(f"项目 p2p/ 不可读取或不是目录：{nested}")
+        directories.append(nested)
+    candidates = []
+    for directory in directories:
+        for path in directory.iterdir():
+            if (directory == project and path.name.casefold() == "p2p.xlsx"):
+                continue
+            if (not path.name.startswith(("~$", "._"))
+                    and "p2p" in path.name.casefold()
+                    and _p2p_regular_xlsx(path)):
+                candidates.append(path)
+    return tuple(sorted(candidates))
 
 
 def _p2p_rank(path: Path) -> tuple[tuple[int, ...], int, int]:
@@ -139,7 +155,7 @@ def _p2p_rank(path: Path) -> tuple[tuple[int, ...], int, int]:
 def newest_project_p2p(project: Path) -> Path:
     candidates = project_p2p_candidates(project)
     if not candidates:
-        raise P2PSelectionError("项目根目录没有文件名含 P2P 的非空 XLSX")
+        raise P2PSelectionError("项目根目录或 p2p/ 没有文件名含 P2P 的非空 XLSX")
     if len(candidates) == 1:
         return candidates[0]
     ranked = sorted((_p2p_rank(path), path) for path in candidates)
@@ -152,16 +168,106 @@ def newest_project_p2p(project: Path) -> Path:
 
 
 def select_project_p2p_source(project: Path, explicit: str | None = None) -> Path:
-    """Select a root-local regular XLSX; explicit pins may have another basename."""
+    """Select a root/p2p workbook without resolving an external directory alias."""
     project = project.resolve()
     if explicit is None:
         return newest_project_p2p(project)
-    if not explicit or Path(explicit).name != explicit or explicit in {".", ".."}:
-        raise P2PSelectionError("--p2p-file 必须是项目根目录内的 XLSX 文件名")
+    parts = explicit.split("/") if isinstance(explicit, str) else []
+    if (len(parts) not in (1, 2)
+            or (len(parts) == 2 and parts[0] != "p2p")
+            or any(part in ("", ".", "..") for part in parts)
+            or "\\" in explicit or Path(explicit).is_absolute()
+            or not explicit.casefold().endswith(".xlsx")):
+        raise P2PSelectionError("--p2p-file 只能是 name.xlsx 或 p2p/name.xlsx")
+    if len(parts) == 2:
+        nested = project / "p2p"
+        if not nested.is_dir():
+            raise P2PSelectionError(f"项目 p2p/ 不可读取或不是目录：{nested}")
     path = project / explicit
     if not _p2p_regular_xlsx(path):
-        raise P2PSelectionError(f"--p2p-file 必须是项目根目录内的非空普通 XLSX：{explicit}")
+        raise P2PSelectionError(f"--p2p-file 必须是非空普通 XLSX：{explicit}")
     return path
+
+
+def p2p_source_relative(project: Path, source: Path) -> str:
+    """Return the sole accepted lexical source identity for a selected file."""
+    project = project.resolve()
+    try:
+        relative = source.relative_to(project).as_posix()
+    except ValueError as exc:
+        raise P2PSelectionError(f"P2P 来源不在项目候选位置：{source}") from exc
+    if relative != source.name and relative != f"p2p/{source.name}":
+        raise P2PSelectionError(f"P2P 来源不在项目候选位置：{source}")
+    if not _p2p_regular_xlsx(source):
+        raise P2PSelectionError(f"P2P 来源不是非空普通 XLSX：{source}")
+    return relative
+
+
+def p2p_source_snapshot(project: Path, source: Path) -> tuple[object, ...]:
+    """Bind lexical parent alias and inode metadata across each workbook read."""
+    relative = p2p_source_relative(project, source)
+    parent = project / "p2p" if relative.startswith("p2p/") else project
+    parent_metadata = parent.stat()
+    source_metadata = source.lstat()
+    alias = project / "p2p"
+    if relative.startswith("p2p/") and alias.is_symlink():
+        alias_metadata = alias.lstat()
+        alias_identity = (alias_metadata.st_dev, alias_metadata.st_ino,
+                          os.readlink(alias))
+    else:
+        alias_identity = None
+    return (
+        relative, alias_identity,
+        (parent_metadata.st_dev, parent_metadata.st_ino),
+        (source_metadata.st_dev, source_metadata.st_ino,
+         source_metadata.st_size, source_metadata.st_mtime_ns),
+    )
+
+
+def assert_p2p_source_snapshot(project: Path, source: Path, before: tuple[object, ...]) -> None:
+    if p2p_source_snapshot(project, source) != before:
+        raise P2PSelectionError(f"P2P 外部目录或源文件在选择/读取期间变化：{source}")
+
+
+def p2p_receipt_bytes(basename: str, digest: str) -> bytes:
+    if (Path(basename).name != basename or basename == "p2p.xlsx"
+            or not basename.casefold().endswith(".xlsx")
+            or not P2P_SHA256.fullmatch(digest)):
+        raise P2PSelectionError("P2P 收据 basename/SHA-256 无效")
+    return (json.dumps({"schema_version": 1, "basename": basename,
+                        "sha256": digest}, sort_keys=True, separators=(",", ":"))
+            + "\n").encode("ascii")
+
+
+def read_p2p_receipt(project: Path) -> dict[str, str] | None:
+    """Revalidate the transferred entity; a receipt is never a trust shortcut."""
+    receipt = project / P2P_RECEIPT_NAME
+    if not os.path.lexists(receipt):
+        return None
+    metadata = receipt.lstat()
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or metadata.st_size > 4096:
+        raise P2PSelectionError(f"P2P 收据不是安全的普通文件：{receipt}")
+    def unique_pairs(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise P2PSelectionError(f"P2P 收据重复 key：{key}")
+            result[key] = value
+        return result
+    try:
+        document = json.loads(receipt.read_bytes(), object_pairs_hook=unique_pairs)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise P2PSelectionError(f"P2P 收据格式无效：{receipt}") from exc
+    if not isinstance(document, dict) or set(document) != {"schema_version", "basename", "sha256"} or document["schema_version"] != 1:
+        raise P2PSelectionError("P2P 收据字段无效")
+    basename, expected = document["basename"], document["sha256"]
+    if not isinstance(basename, str) or not isinstance(expected, str):
+        raise P2PSelectionError("P2P 收据 basename/SHA-256 类型无效")
+    p2p_receipt_bytes(basename, expected)
+    source = project / basename
+    if not _p2p_regular_xlsx(source) or sha256(source) != expected:
+        raise P2PSelectionError(f"P2P 收据与真实文件不一致：{source}")
+    return {"basename": basename, "sha256": expected}
 
 
 def _reproducible_tarinfo(info: tarfile.TarInfo) -> tarfile.TarInfo:
@@ -911,22 +1017,23 @@ def sha256(path: Path) -> str:
 
 
 def select_upload_p2p(project: Path) -> Path:
-    """Bind a setup-selected real root workbook, never discover a fallback."""
+    """Bind a setup-selected root or p2p/ workbook, never discover a fallback."""
     project = project.resolve()
     canonical = project / "p2p.xlsx"
     if not canonical.is_symlink():
         raise ValueError(f"upload requires setup-selected p2p.xlsx symlink: {canonical}")
     link_target = os.readlink(canonical)
-    if Path(link_target).name != link_target or link_target in {".", ".."}:
-        raise ValueError(f"p2p.xlsx must be a relative project-root link: {canonical}")
-    selected = project / link_target
-    if not _p2p_regular_xlsx(selected):
-        raise ValueError(f"p2p.xlsx target is not a nonempty regular root XLSX: {selected}")
+    try:
+        selected = select_project_p2p_source(project, link_target)
+    except P2PSelectionError as exc:
+        raise ValueError(f"p2p.xlsx must target a selected root or p2p/ workbook: {exc}") from exc
     if selected.suffix.casefold() != ".xlsx" or not zipfile.is_zipfile(selected):
         raise ValueError(f"selected P2P input is not a valid XLSX: {selected}")
+    before = p2p_source_snapshot(project, selected)
     with zipfile.ZipFile(selected) as archive:
         if archive.testzip() is not None or "xl/workbook.xml" not in archive.namelist():
             raise ValueError(f"selected P2P XLSX is corrupt or incomplete: {selected}")
+    assert_p2p_source_snapshot(project, selected, before)
     return selected
 
 
@@ -1790,7 +1897,10 @@ def create_package(
                 )
             for index, (project_rel, selected) in enumerate(selected_p2p_by_project.items()):
                 p2p_staged = Path(p2p_stage_name) / f"p2p-image-free-{index}.xlsx"
+                selected_project = ROOT / project_rel
+                source_before = p2p_source_snapshot(selected_project, selected)
                 stats = strip_xlsx_images(selected, p2p_staged)
+                assert_p2p_source_snapshot(selected_project, selected, source_before)
                 staged_p2p_by_project[project_rel] = p2p_staged
                 if selected == selected_p2p:
                     p2p_stats = stats
@@ -1844,6 +1954,11 @@ def create_package(
                     _reproducible_tarinfo(info)
                     with staged.open("rb") as stream:
                         archive.addfile(info, stream)
+                    receipt_data = p2p_receipt_bytes(selected.name, sha256(staged))
+                    receipt_info = tarfile.TarInfo(f"./{project_rel}/{P2P_RECEIPT_NAME}")
+                    receipt_info.mode = 0o644
+                    receipt_info.size = len(receipt_data)
+                    archive.addfile(_reproducible_tarinfo(receipt_info), io.BytesIO(receipt_data))
                 # Preserve the project contract as an empty placeholder while never
                 # exporting the management server's runtime key material.
                 for relative in sorted(package_filter.managed_pubkeys):
@@ -1870,6 +1985,18 @@ def create_package(
                 member = archive.getmember(member_name) if member_name in names else None
                 if member is None or not member.isfile():
                     raise RuntimeError(f"packaged P2P workbook missing: {member_name}")
+                receipt_name = f"./{project_rel}/{P2P_RECEIPT_NAME}"
+                receipt_member = archive.getmember(receipt_name) if receipt_name in names else None
+                if receipt_member is None or not receipt_member.isfile():
+                    raise RuntimeError(f"packaged P2P receipt missing: {receipt_name}")
+                receipt_stream = archive.extractfile(receipt_member)
+                workbook_stream = archive.extractfile(member)
+                if receipt_stream is None or workbook_stream is None:
+                    raise RuntimeError("cannot verify packaged P2P workbook/receipt")
+                receipt = json.loads(receipt_stream.read())
+                if (receipt.get("basename") != selected.name
+                        or receipt.get("sha256") != hashlib.sha256(workbook_stream.read()).hexdigest()):
+                    raise RuntimeError("packaged P2P receipt digest mismatch")
             required = {
                 "./.dockerignore",
                 "./infra/docker/Dockerfile",
@@ -1912,7 +2039,7 @@ def create_package(
                 )
             if selected_p2p_relative is not None:
                 required.add(
-                    f"./{package_filter.project_rel}/{selected_p2p_relative.as_posix()}"
+                    f"./{package_filter.project_rel}/{selected_p2p.name}"
                 )
             policy_member_name = None
             if air_topology_policy is not None:
@@ -1945,7 +2072,7 @@ def create_package(
                     )
             if selected_p2p_relative is not None:
                 member_name = (
-                    f"./{package_filter.project_rel}/{selected_p2p_relative.as_posix()}"
+                    f"./{package_filter.project_rel}/{selected_p2p.name}"
                 )
                 extracted = archive.extractfile(member_name)
                 if extracted is None:

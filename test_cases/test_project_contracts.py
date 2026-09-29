@@ -1290,7 +1290,75 @@ class TemplateContractTests(unittest.TestCase):
             self.assertEqual("keep\n", (project / "customer.txt").read_text(encoding="utf-8"))
             self.assertTrue((project / "empty-required.pub").is_file())
             self.assertEqual(0, (project / "empty-required.pub").stat().st_size)
-            self.assertTrue((project / "p2p").is_dir())
+            self.assertFalse((project / "p2p").exists(), "template p2p/ is retired")
+            self.assertTrue((project / "empty-required.pub").is_file())
+
+    def test_setup_preserves_external_p2p_directory_and_links_selected_nested_source(self):
+        setup = load_module("day0_setup_external_p2p_contract", ROOT / "DAY0-Prepare/01-a-setup.py")
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            project = base / "project"
+            external = base / "authoritative-p2p"
+            project.mkdir()
+            external.mkdir()
+            selected = external / "Fabric P2P_v3.2_2026-0915.xlsx"
+            selected.write_bytes(b"customer-source")
+            (project / "p2p").symlink_to(external, target_is_directory=True)
+            (project / "p2p.xlsx").touch()
+            original_file, original_dry = setup._P2P_FILE, setup._DRY_RUN
+            try:
+                setup._P2P_FILE, setup._DRY_RUN = None, False
+                source = setup._select_p2p_source(str(project))
+                canonical = setup._ensure_project_p2p_link(str(project), source)
+            finally:
+                setup._P2P_FILE, setup._DRY_RUN = original_file, original_dry
+            self.assertEqual(project / "p2p" / selected.name, Path(source))
+            self.assertEqual(project / "p2p.xlsx", Path(canonical))
+            self.assertEqual(f"p2p/{selected.name}", os.readlink(canonical))
+            self.assertEqual(external, (project / "p2p").resolve())
+
+    def test_setup_rejects_external_p2p_directory_rebind_after_validation_read(self):
+        setup = load_module("day0_setup_external_p2p_rebind", ROOT / "DAY0-Prepare/01-a-setup.py")
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            project = base / "project"
+            first = base / "first"
+            second = base / "second"
+            for path in (project, first, second):
+                path.mkdir()
+            name = "Fabric P2P_v3.2.xlsx"
+            (first / name).write_bytes(b"first workbook")
+            (second / name).write_bytes(b"second workbook")
+            alias = project / "p2p"
+            alias.symlink_to(first, target_is_directory=True)
+            original_file, original_dry = setup._P2P_FILE, setup._DRY_RUN
+            try:
+                setup._P2P_FILE, setup._DRY_RUN = None, False
+                self.assertEqual(project / "p2p" / name, Path(setup._select_p2p_source(str(project))))
+                alias.unlink()
+                alias.symlink_to(second, target_is_directory=True)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertFalse(setup._check_p2p_source_identity(str(project)))
+            finally:
+                setup._P2P_FILE, setup._DRY_RUN = original_file, original_dry
+
+    def test_load_passes_nested_p2p_source_to_setup_without_resolving_external_path(self):
+        load = load_module("day0_load_nested_p2p", ROOT / "DAY0-Prepare/11-load.py")
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(load, "run") as run:
+            base = Path(directory).resolve()
+            project = base / "project"
+            external = base / "source"
+            project.mkdir()
+            external.mkdir()
+            workbook = external / "Customer-P2P-v2.xlsx"
+            with zipfile.ZipFile(workbook, "w") as archive:
+                archive.writestr("xl/workbook.xml", "<workbook/>")
+            (project / "p2p").symlink_to(external, target_is_directory=True)
+            source = project / "p2p" / workbook.name
+            (project / "p2p.xlsx").symlink_to(f"p2p/{workbook.name}")
+            with mock.patch.object(load, "active_project", side_effect=[None, project]):
+                load.activate_project(project, source)
+            self.assertIn(f"--p2p-file=p2p/{workbook.name}", run.call_args.args[0])
 
     def test_existing_project_template_dry_run_is_not_reported_as_creation(self):
         load = load_module("day0_load_template_dry_run_log", ROOT / "DAY0-Prepare/11-load.py")

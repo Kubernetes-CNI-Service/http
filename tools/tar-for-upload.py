@@ -70,6 +70,10 @@ HELP_EPILOG = """
      存在时的 03-air-topology-policy.json、setup/load 当前选择的 P2P XLSX、
      项目公钥和镜像文件。P2P 在临时副本中删除
      xl/media、图片关系和 drawing anchor 后以原文件名入包，源文件不会修改。
+     项目根目录与可链接外部目录的 p2p/ 只提供候选；包内只保留所选实体 XLSX
+     （放在项目根目录）与 03-selected-p2p.json，收据绑定剥图后的 SHA-256。
+     不打包 p2p/ 目录链接或旁支 XLSX。部署目标已有同名不同摘要文件时拒绝覆盖，
+     旧的异名文件保留；管理服务器 load 会按收据重新校验和钉选。
      其他规划附件、其他 XLSX、项目说明、Markdown/README/用户手册、
      其他 DAY0 项目和全部
      99-output-* 内容、历史监控、备份、运行时日志及 setup 管理的动态链接
@@ -1409,6 +1413,10 @@ def recommended_remote_load_command(
         f"{privilege}python3 11-load.py {shlex.quote(project.name)} "
         "--host-role=management-server"
     )
+    canonical = project / "p2p.xlsx"
+    if canonical.is_symlink():
+        selected = package_core.select_upload_p2p(project)
+        remote += " " + shlex.quote(f"--p2p-file={selected.name}")
     return command_base("ssh", args) + ["-t", args.host, remote]
 
 

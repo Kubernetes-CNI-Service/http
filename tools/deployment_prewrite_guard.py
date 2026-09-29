@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import signal
 import shutil
 import stat
@@ -1809,6 +1810,93 @@ def _preflight_live_overlay(http_root: Path, members: list) -> None:
             raise GuardError(f"incoming file conflicts with unsafe live path: {destination}")
 
 
+def _stable_file_sha256(path: Path, label: str) -> str:
+    """Hash one regular inode without following a final symlink or buffering XLSX."""
+    before = path.lstat()
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise GuardError(f"{label} must be one regular file: {path}")
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns) != (
+            before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns
+        ):
+            raise GuardError(f"{label} changed before hashing: {path}")
+        digest = hashlib.sha256()
+        while True:
+            block = os.read(descriptor, 1024 * 1024)
+            if not block:
+                break
+            digest.update(block)
+        after = os.fstat(descriptor)
+        named = path.lstat()
+        if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != (
+            before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns
+        ) or (named.st_dev, named.st_ino, named.st_size, named.st_mtime_ns) != (
+            before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns
+        ):
+            raise GuardError(f"{label} changed during hashing: {path}")
+        return digest.hexdigest()
+    finally:
+        os.close(descriptor)
+
+
+def _preflight_p2p_overlay(http_root: Path, staging: Path, members: list) -> dict[tuple[str, ...], str]:
+    """Bind each imported P2P payload to its receipt and protect existing bytes."""
+    def unique_pairs(pairs):
+        fields = {}
+        for name, value in pairs:
+            if name in fields:
+                raise GuardError(f"P2P receipt has duplicate key: {name}")
+            fields[name] = value
+        return fields
+
+    member_kinds = {parts: kind for _member, parts, kind in members}
+    guards: dict[tuple[str, ...], str] = {}
+    receipt_name = "03-selected-p2p.json"
+    for parts, kind in member_kinds.items():
+        if not (len(parts) == 3 and parts[0] == "DAY0-Prepare"
+                and parts[1] not in {"template", "tests", "test_cases"}
+                and parts[2] == receipt_name):
+            continue
+        if kind != "file":
+            raise GuardError("P2P receipt must be a regular archive member")
+        try:
+            receipt = json.loads(_read_stable_regular_bytes(
+                staging.joinpath(*parts), "P2P receipt", maximum_size=4096,
+            ), object_pairs_hook=unique_pairs)
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise GuardError(f"P2P receipt is invalid: {exc}") from exc
+        if (not isinstance(receipt, dict)
+                or set(receipt) != {"schema_version", "basename", "sha256"}
+                or receipt["schema_version"] != 1
+                or not isinstance(receipt["basename"], str)
+                or not isinstance(receipt["sha256"], str)):
+            raise GuardError("P2P receipt fields are invalid")
+        basename = receipt["basename"]
+        digest = receipt["sha256"]
+        if (basename in {"", ".", "..", "p2p.xlsx"}
+                or PurePosixPath(basename).name != basename
+                or not basename.casefold().endswith(".xlsx")
+                or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+            raise GuardError("P2P receipt basename or digest is unsafe")
+        workbook_parts = (parts[0], parts[1], basename)
+        if member_kinds.get(workbook_parts) != "file":
+            raise GuardError("P2P receipt has no matching workbook")
+        if _stable_file_sha256(staging.joinpath(*workbook_parts), "P2P staged workbook") != digest:
+            raise GuardError("P2P staged workbook digest differs from receipt")
+        live = http_root.joinpath(*workbook_parts)
+        if os.path.lexists(live) and _stable_file_sha256(live, "P2P existing workbook") != digest:
+            raise GuardError(f"P2P existing workbook has different content; refusing overwrite: {live}")
+        guards[workbook_parts] = digest
+    for _member, parts, kind in members:
+        if (kind == "file" and len(parts) == 3 and parts[0] == "DAY0-Prepare"
+                and parts[1] not in {"template", "tests", "test_cases"}
+                and parts[2].casefold().endswith(".xlsx") and parts not in guards):
+            raise GuardError("P2P workbook archive member has no matching selection receipt")
+    return guards
+
+
 def _verify_old_source(http_root: Path, relative: str, record: dict) -> Path:
     parts = _normalized_archive_parts(relative)
     if not (
@@ -3488,6 +3576,7 @@ def _promote_staged_member(
     staging_identity: tuple[int, int],
     item,
     transaction: _OverlayTransaction,
+    p2p_guards: dict[tuple[str, ...], str],
 ) -> None:
     member, parts, kind = item
     destination_name = parts[-1]
@@ -3678,6 +3767,14 @@ def _promote_staged_member(
                 raise GuardError(
                     "incoming file conflicts with unsafe live path: " + "/".join(parts)
                 )
+            expected_p2p = p2p_guards.get(parts)
+            if expected_p2p is not None:
+                live = http_root.joinpath(*parts)
+                if _stable_file_sha256(live, "P2P existing workbook") != expected_p2p:
+                    raise GuardError(
+                        "P2P existing workbook changed or has different content; "
+                        "refusing overwrite: " + str(live)
+                    )
             backup_name = _unused_leaf_name(
                 destination_parent_fd, destination_name, "old",
             )
@@ -3745,6 +3842,7 @@ def _apply_prepared_archive_overlay(
             staging, "deployment staging root",
         )
         _preflight_live_overlay(http_root, members)
+        p2p_guards = _preflight_p2p_overlay(http_root, staging, members)
         _validate_incoming_symlinks(http_root, staging, members)
         _assert_held_directory_path(
             http_root, root_fd, root_identity, "deployment root",
@@ -3819,6 +3917,7 @@ def _apply_prepared_archive_overlay(
                 staging_identity,
                 item,
                 transaction,
+                p2p_guards,
             )
         _assert_held_directory_path(
             http_root, root_fd, root_identity, "deployment root",
