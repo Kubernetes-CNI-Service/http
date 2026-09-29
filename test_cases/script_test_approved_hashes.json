@@ -24,7 +24,7 @@
       "root-entrypoint-workflow": "NOT COVERED (requires Linux EUID 0 private namespace)"
     },
     "schema_version": 1,
-    "snapshot_sha256": "e08e391e47143d514af984ec5a4f34d5d2f0286dee8536eff53fa7d63723bc07"
+    "snapshot_sha256": "885f21858ff8a54901888c22396b4c0a8edfd4b777252277af1b2bb993d4c32d"
   },
   "impact_manifest_sha256": "fa6a8beb36d1e9b017c33c59dc72c8b0c27f6447c50f579c6c7a7143089e0782",
   "schema_version": 1,
@@ -255,7 +255,7 @@
     },
     "monitor/switch-collection-worker.py": {
       "canonical": "monitor/switch-collection-worker.py",
-      "sha256": "c90fed4ce181a77be17413c280555357f5995eb9974f78d695ba1592ea12b7d9"
+      "sha256": "8c154ae375e3ea9fb5b734dc4145e41f7bba1af6b4ef1682048f9e7cd4b250af"
     },
     "monitor/switch_collection_gate.py": {
       "canonical": "monitor/switch_collection_gate.py",
@@ -791,7 +791,7 @@
     "test_cases.test_collection_cycle_contract": "2ecb0d71c6e3d7e78fc54824e6bfadbaf6864ff2c9e37457874afefdbf1785cb",
     "test_cases.test_collection_cycle_handoff_workflow": "4dc4c368a6baceb08189f5c9c3323a860b5518eecc6f73f328aef38d76c8bfbc",
     "test_cases.test_collection_cycle_persistence": "97c259061c9565f7b0fbb19e33660a898db692f2bef211c065318fd7f3274689",
-    "test_cases.test_collection_cycle_worker_contract": "d0a078ebb93cfe1ce193226c666d5766860b2d8ed00ae8a301e4496dba442981",
+    "test_cases.test_collection_cycle_worker_contract": "4cf86b6e7be5b2950d03ebdebce4514d83c95d3499a05fc6a91266772eb9c9bd",
     "test_cases.test_collection_ib_cycle_binding": "cf5152eb5d1a6195b093cf1fce882a5f9f964534743e94e63413ba49c009ad8e",
     "test_cases.test_collection_ib_cycle_binding_workflow": "7a65743ec9b86f18897583b295f94a6e395355072e3d7c46dd28d844b7ab6e2b",
     "test_cases.test_collection_ib_producer": "6f6d7a8a35743265b3c7f70f573cf2ac34cb1951a08bc3d0b1fcbcda5a0e9b0f",
