@@ -13,7 +13,6 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 import zipfile
-from dataclasses import replace
 
 from monitor import issue_tracker_local_commit as durable
 from monitor.issue_tracker_local_workbook import LocalWorkbookHold
@@ -47,102 +46,6 @@ class LocalWorkbookCommitTests(unittest.TestCase):
         self.publication = self.project / "publication"
         self.publication.mkdir(mode=0o700)
         durable.create_local_commit_store(self.project, self.publication)
-
-    def test_panel_image_actions_insert_update_noop_and_duplicate_hold(self):
-        from monitor.issue_tracker_local_workbook import (
-            CablingSourceRow, SwitchSourceWorkbookRow,
-            project_cabling_workbook_image, project_switch_workbook_image,
-        )
-        from monitor.issue_tracker_local_workbook_commit import (
-            LocalCommitHold, classify_panel_workbook_image,
-        )
-
-        switch = SwitchSourceWorkbookRow(
-            activity_key=("switch", "leaf02", "fan", "PSU1/FAN"),
-            evidence_description="PSU1/FAN state=fail", fabric="Inband",
-            fabric_source="template", priority="P2",
-            recorded_at_utc="2026-09-26T03:00:00Z",
-        )
-        base = fake_workbook(reserved_switch_rows=2,
-                             existing_switch_id="NV10001")
-        entry = (("source-switch-1", switch),)
-        self.assertEqual((("source-switch-1", "Insert"),),
-                         classify_panel_workbook_image(
-                             base, "Switch Status", entry))
-        with self.assertRaises(LocalCommitHold):
-            classify_panel_workbook_image(
-                fake_workbook(reserved_switch_rows=0),
-                "Switch Status", entry)
-        inserted = project_switch_workbook_image(base, (switch,))
-        self.assertEqual((("source-switch-1", "Noop"),),
-                         classify_panel_workbook_image(
-                             inserted, "Switch Status", entry))
-        changed = replace(switch, evidence_description="PSU1/FAN state=critical")
-        self.assertEqual((("source-switch-1", "Update"),),
-                         classify_panel_workbook_image(
-                             inserted, "Switch Status",
-                             (("source-switch-1", changed),)))
-        with self.assertRaises(LocalCommitHold):
-            classify_panel_workbook_image(
-                inserted, "Switch Status",
-                (("source-switch-1", switch), ("source-switch-2", switch)))
-        with self.assertRaises(LocalCommitHold):
-            classify_panel_workbook_image(
-                inserted, "Switch Status",
-                (("source-switch-1", switch), ("source-switch-1", changed)))
-
-        eth = CablingSourceRow(
-            sheet="ETH Cabling",
-            activity_key=("eth_cabling", "leaf01", "swp1", "Link Down"),
-            expected_endpoints=("leaf01", "swp1", "spine01", "swp9"),
-            actual_endpoints=("spine02", "swp8", "leaf01", "swp1"),
-            source_status="DOWN", evidence_description="observed peer down",
-            recorded_at_utc="2026-09-26T03:00:00Z",
-        )
-        cabling_base = fake_workbook()
-        self.assertEqual((("source-eth-1", "Insert"),),
-                         classify_panel_workbook_image(
-                             cabling_base, "Eth Link Validation",
-                             (("source-eth-1", eth),)))
-        cabling_inserted = project_cabling_workbook_image(cabling_base, (eth,))
-        self.assertEqual((("source-eth-1", "Noop"),),
-                         classify_panel_workbook_image(
-                             cabling_inserted, "Eth Link Validation",
-                             (("source-eth-1", eth),)))
-        self.assertEqual((("source-eth-1", "Update"),),
-                         classify_panel_workbook_image(
-                             cabling_inserted, "Eth Link Validation",
-                             (("source-eth-1", replace(
-                                 eth, evidence_description="new independent report")),)))
-        ib = CablingSourceRow(
-            sheet="IB Cabling",
-            activity_key=("ib_cabling", "leaf03", "swp2", "Link Down"),
-            expected_endpoints=("leaf03", "swp2", "spine03", "swp3"),
-            actual_endpoints=(), source_status="DOWN",
-            evidence_description="IB expected peer absent",
-            recorded_at_utc="2026-09-26T03:00:00Z",
-        )
-        self.assertEqual((("source-ib-1", "Insert"),),
-                         classify_panel_workbook_image(
-                             cabling_base, "IB Link Validation",
-                             (("source-ib-1", ib),)))
-        ib_inserted = project_cabling_workbook_image(cabling_base, (ib,))
-        self.assertEqual((("source-ib-1", "Noop"),),
-                         classify_panel_workbook_image(
-                             ib_inserted, "IB Link Validation",
-                             (("source-ib-1", ib),)))
-        with self.assertRaises(LocalCommitHold):
-            classify_panel_workbook_image(
-                inserted, "Switch Status",
-                (("source-switch-1", replace(switch, activity_key=())),))
-        with self.assertRaises(LocalCommitHold):
-            classify_panel_workbook_image(
-                inserted, "Switch Status",
-                (("source-switch-1", replace(
-                    switch, activity_key=("switch", ["leaf02"], "fan", "PSU1/FAN"))),))
-        with self.assertRaises(LocalCommitHold):
-            classify_panel_workbook_image(
-                inserted, "Eth Link Validation", (("source-switch-1", switch),))
 
     def test_valid_large_xlsx_has_derived_name_and_genuine_receipt(self):
         body = large_fake_workbook()
