@@ -20,8 +20,13 @@ from monitor.issue_tracker_local_commit import (
     begin_generation, commit, record_intent,
 )
 from monitor.issue_tracker_local_workbook import (
-    CablingSourceRow, PreparedLocalWorkbook, SwitchSourceWorkbookRow,
-    _read_bound_source, _sheet_paths, prepare_fake_local_workbook,
+    CablingSourceRow, LocalWorkbookHold, PreparedLocalWorkbook,
+    SwitchSourceWorkbookRow, _bounded_projectable_archive,
+    _cabling_active_row, _cabling_ids, _cell_text, _literal,
+    _MAX_FILE_BYTES, _read_bound_source, _shared_strings, _sheet_paths,
+    _switch_active_source_row, _validate_cabling_source_row,
+    _validate_headers, _validate_switch_source_row,
+    prepare_fake_local_workbook,
     project_cabling_workbook_image, project_switch_workbook_image,
     project_whitelist_skip_history_image,
     validate_operator_edited_workbook,
@@ -141,6 +146,161 @@ class ProdWorkbookNoop:
     status: str
     existing_published_sha256: str | None
     manifest_id: str
+
+
+@dataclass(frozen=True)
+class ProtectedPanelWorkbookActions:
+    """Read-only local action evidence; never an admission or send permit."""
+
+    actions: tuple[tuple[str, str], ...]
+    source_sha256: str
+    manifest_id: str
+
+
+def classify_panel_workbook_image(raw, panel, entries):
+    """Classify typed source rows against one immutable workbook image."""
+    if (type(raw) is not bytes or not 0 < len(raw) <= _MAX_FILE_BYTES
+            or type(panel) is not str
+            or panel not in _MANUAL_PANEL_SHEETS
+            or type(entries) is not tuple or len(entries) > 1000):
+        raise LocalCommitHold("panel action source or request is invalid")
+    target, family = _MANUAL_PANEL_SHEETS[panel]
+    seen_ids, seen_keys = set(), set()
+    for entry in entries:
+        if (type(entry) is not tuple or len(entry) != 2
+                or type(entry[0]) is not str or not 0 < len(entry[0]) <= 255
+                or entry[0] in seen_ids):
+            raise LocalCommitHold("panel action identity is invalid or duplicated")
+        row = entry[1]
+        key = (row.activity_key if type(row) in (
+            SwitchSourceWorkbookRow, CablingSourceRow) else None)
+        if (type(row) is not (SwitchSourceWorkbookRow if family == "switch"
+                             else CablingSourceRow)
+                or type(key) is not tuple or len(key) != 4
+                or any(type(part) is not str for part in key)
+                or key[0] != family
+                or (family != "switch" and row.sheet != target)
+                or key in seen_keys):
+            raise LocalCommitHold("panel action source key is invalid or duplicated")
+        seen_ids.add(entry[0])
+        seen_keys.add(key)
+    try:
+        with zipfile.ZipFile(BytesIO(raw)) as archive:
+            _, names = _bounded_projectable_archive(archive)
+            paths = _sheet_paths(archive, names)
+            strings = _shared_strings(archive, names)
+            parsed = _validate_headers(archive, names, paths, strings)
+            if family != "switch":
+                _cabling_ids(parsed, strings)
+            rows = parsed[target][1]
+            actions = []
+            for operation_id, row in entries:
+                if family == "switch":
+                    _validate_switch_source_row(row)
+                    key = row.activity_key
+                    description = (f"[MONITOR][{key[2]}][{key[3]}] "
+                                   f"[fabric_source={row.fabric_source}] "
+                                   f"{row.evidence_description}")
+                    _literal(description, "switch description")
+                    number = _switch_active_source_row(rows, strings, row)
+                    if number is None:
+                        action = "Insert"
+                    else:
+                        cell = rows[number][1].get(f"L{number}")
+                        action = ("Noop" if _cell_text(cell, strings) == description
+                                  else "Update")
+                else:
+                    digest = _validate_cabling_source_row(row)
+                    prefix = f"[MONITOR][{family}][{digest}]"
+                    description = (prefix + " " + row.source_status + ": "
+                                   + row.evidence_description)
+                    _literal(description, "cabling description")
+                    number = _cabling_active_row(rows, strings, row, prefix)
+                    if number is None:
+                        action = "Insert"
+                    else:
+                        cells = rows[number][1]
+                        def current(column):
+                            cell = cells.get(f"{column}{number}")
+                            return _cell_text(cell, strings) if cell is not None else None
+                        actual = row.actual_endpoints or ("", "", "", "")
+                        unchanged = (current("G") == description and
+                                     all((current(column) or "") == value
+                                         for column, value in
+                                         zip(("M", "N", "S", "T"), actual)))
+                        action = "Noop" if unchanged else "Update"
+                actions.append((operation_id, action))
+            # A count is actionable only when the complete selected panel can
+            # be projected. This remains an in-memory dry run: no generation,
+            # workbook file, receipt, or online request is created.
+            source_rows = tuple(row for _, row in entries)
+            if family == "switch":
+                project_switch_workbook_image(raw, source_rows)
+            else:
+                project_cabling_workbook_image(raw, source_rows)
+            return tuple(actions)
+    except (LocalWorkbookHold, zipfile.BadZipFile, zipfile.LargeZipFile,
+            OSError, ValueError, KeyError, IndexError) as exc:
+        raise LocalCommitHold("panel action classification cannot prove workbook") from exc
+
+
+def read_protected_prod_panel_workbook_actions(
+    token, qualified, store, *, http_root, settings, whitelist_snapshot,
+    whitelist_path, template_path, metadata, expected_template_sha256,
+    selected_panel,
+):
+    """Requalify C-5 and inspect the receipted local image without writing."""
+    from monitor.issue_tracker_stage_l_consumer import ProdStageLQualifiedSet
+
+    owner = _owner(token)
+    if (type(qualified) is not ProdStageLQualifiedSet
+            or type(selected_panel) is not str
+            or selected_panel not in _MANUAL_PANEL_SHEETS):
+        raise LocalCommitHold("panel action qualification or panel is invalid")
+    project = Path(store.project_identity)
+    publication = project / "99-output-monitor"
+    if (owner.project != project or owner.publication != publication
+            or Path(whitelist_path) != Path(template_path)):
+        raise LocalCommitHold("panel action owner or template is invalid")
+    require_current_k(token, project, publication, settings)
+    snapshot = read_whitelist_workbook(template_path)
+    if (snapshot != whitelist_snapshot
+            or snapshot.workbook_sha256 != expected_template_sha256):
+        raise LocalCommitHold("panel action template or Whitelist changed")
+    manifest, manifest_id = freeze_prod_stage_l_manifest(
+        qualified, store, http_root=http_root, settings=settings,
+        whitelist_snapshot=snapshot, whitelist_path=whitelist_path,
+        metadata=metadata, expected_template_sha256=expected_template_sha256,
+        writer_token=token, selected_panel=selected_panel,
+    )
+    prior = _latest_receipted_prod_xlsx(token, expected_template_sha256)
+    source = prior if prior is not None else _read_bound_source(template_path, snapshot)
+    cabling, switch = _source_rows(qualified, selected_panel=selected_panel)
+    selected = tuple(candidate for candidate in qualified.candidates
+                     if candidate.panel == selected_panel)
+    rows = switch if selected_panel == "Switch Status" else cabling
+    if len(selected) != len(rows):
+        raise LocalCommitHold("panel action source count differs from qualification")
+    actions = classify_panel_workbook_image(
+        source, selected_panel,
+        tuple((candidate.operation_id, row)
+              for candidate, row in zip(selected, rows)),
+    )
+    require_current_k(token, project, publication, settings)
+    if (read_whitelist_workbook(template_path) != snapshot
+            or _latest_receipted_prod_xlsx(token, expected_template_sha256) != prior
+            or (prior is None and _read_bound_source(template_path, snapshot) != source)):
+        raise LocalCommitHold("panel action workbook source changed")
+    replay, replay_id = freeze_prod_stage_l_manifest(
+        qualified, store, http_root=http_root, settings=settings,
+        whitelist_snapshot=snapshot, whitelist_path=whitelist_path,
+        metadata=metadata, expected_template_sha256=expected_template_sha256,
+        writer_token=token, selected_panel=selected_panel,
+    )
+    if (replay, replay_id) != (manifest, manifest_id):
+        raise LocalCommitHold("panel action source changed during read")
+    return ProtectedPanelWorkbookActions(
+        actions, hashlib.sha256(source).hexdigest(), manifest_id)
 
 
 def commit_fake_workbook(token, template_path, manifest_body, edits, *,

@@ -107,6 +107,12 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             skip_history=False, source_identity_probe=True,
         )
 
+    def test_real_three_panel_receipt_backed_actions_reopen_or_hold(self):
+        self._exercise_real_protected_three_panel_fixture(
+            skip_history=False, selected_manual_panel="Switch Status",
+            action_probe=True,
+        )
+
     def _verify_manual_queue_protected_commit(
         self, project, original_template, before_generations, qualified,
     ):
@@ -257,7 +263,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         require_first_manual_admission=False, manual_after_manual=False,
         terminal_orphan_probe=False, selected_manual_panel=None,
         selected_panel_empty=False, manual_channel_bridge=False,
-        source_identity_probe=False,
+        source_identity_probe=False, action_probe=False,
     ):
         from monitor.collection_ib_producer import (
             IbProducerAuthoritySnapshot, parse_ib_producer_authority,
@@ -560,6 +566,32 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             before_generations = tuple(sorted(generation_root.iterdir()))
             original_template = self.template.read_bytes()
             if selected_manual_panel is not None:
+                if action_probe:
+                    from monitor.issue_tracker_local_workbook_commit import (
+                        read_protected_prod_panel_workbook_actions,
+                    )
+                    initial_actions = {}
+                    with tracker_writer(project, self.publication) as token:
+                        for panel in ("Switch Status", "Eth Link Validation",
+                                      "IB Link Validation"):
+                            assessment = read_protected_prod_panel_workbook_actions(
+                                token, qualified, self.store,
+                                template_path=self.template, metadata=metadata,
+                                expected_template_sha256=self.snapshot.workbook_sha256,
+                                selected_panel=panel, **args,
+                            )
+                            expected_ids = {item.operation_id for item in
+                                            qualified.candidates if item.panel == panel}
+                            self.assertEqual(expected_ids,
+                                             {item[0] for item in assessment.actions})
+                            self.assertTrue(assessment.actions)
+                            self.assertEqual({"Insert"},
+                                             {item[1] for item in assessment.actions})
+                            self.assertEqual(hashlib.sha256(original_template).hexdigest(),
+                                             assessment.source_sha256)
+                            initial_actions[panel] = assessment.actions
+                    self.assertEqual(before_generations,
+                                     tuple(sorted(generation_root.iterdir())))
                 selected_body, selected_id = freeze_prod_stage_l_manifest(
                     qualified, self.store, metadata=metadata,
                     expected_template_sha256=self.snapshot.workbook_sha256,
@@ -648,6 +680,32 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
                 self.assertEqual(selected_id, persisted_receipt["manifest_id"])
                 self.assertEqual(1 + len(before_generations),
                                  len(tuple(generation_root.iterdir())))
+                if action_probe:
+                    with tracker_writer(project, self.publication) as token:
+                        current = read_protected_prod_panel_workbook_actions(
+                            token, qualified, self.store,
+                            template_path=self.template, metadata=metadata,
+                            expected_template_sha256=self.snapshot.workbook_sha256,
+                            selected_panel="Switch Status", **args,
+                        )
+                    self.assertEqual(
+                        tuple((operation_id, "Noop") for operation_id, _ in
+                              initial_actions["Switch Status"]), current.actions)
+                    self.assertEqual(committed.receipt.published_sha256,
+                                     current.source_sha256)
+                    published = self.publication / (
+                        committed.generation.generation_id + ".xlsx")
+                    replacement = published.with_name("synthetic-replacement.xlsx")
+                    replacement.write_bytes(published.read_bytes())
+                    os.replace(replacement, published)
+                    with tracker_writer(project, self.publication) as token:
+                        with self.assertRaises(LocalCommitHold):
+                            read_protected_prod_panel_workbook_actions(
+                                token, qualified, self.store,
+                                template_path=self.template, metadata=metadata,
+                                expected_template_sha256=self.snapshot.workbook_sha256,
+                                selected_panel="Switch Status", **args,
+                            )
                 with zipfile.ZipFile(BytesIO(original_template)) as before, \
                      zipfile.ZipFile(BytesIO(committed.prepared.xlsx_bytes)) as after:
                     for other in ("sheet3.xml", "sheet4.xml"):
