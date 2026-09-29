@@ -150,3 +150,43 @@ proof。默认 push 只接受 release proof。owner 授权的 AIR/prod 验证可
 - `4`：`--check` 发现尚未批准的脚本、测试或 manifest 变化。
 - `5`：`--check --require-full` 未找到与当前精确字节和执行环境一致的全量测试证明。
 - `130`：持续观察被 Ctrl-C 中断。
+
+## Full proof 性能诊断记录
+
+本节只记录测量方法与优化判定，不改变上面的测试和证明门禁。正式 full proof 仍须由
+`run_related_tests.py --all`（或明确授权的 `--all --validation-only`）执行；独立诊断
+不能生成、替代或延长证明，不能跳过测试、修改断言或手工更新批准账本。
+
+先前会话报告过一次 3,785 tests、2,897.740 秒的全量运行，但原始逐测试日志未保存，
+此处未复核；它只是历史参考，**不是可审计计时基线**。人工观察到
+`test_formal_children_share_one_isolated_dependency_capsule` 约耗时 12–13 分钟，
+也不能据此推算补丁收益。该测试通过固定 SHA 在私有 clone 中重放 `origin/v2` 历史源码；
+只改当前 V3 的解包或逐文件 `fsync` 不会加速这段历史回放，不得改历史锚点或弱化断言。
+
+`validation_unittest.py` 支持显式诊断参数 `--timings ABSOLUTE_NEW_PATH`。默认调用、
+测试发现、原有结果 JSON 字段和 ISSUE-0016 精确判定不变。提供该参数时，额外写一个
+0600、独占创建的 JSONL 文件，每个已完成的 `unittest.TestCase` 记录 `id` 与
+`duration_seconds`（包含 setup/test/tearDown 及子测试总时长）。路径须是已存在目录中的
+绝对路径，目标不能已存在；中断可能使文件缺少未完成案例，不能把它当成完整证据。
+
+在没有并行 full proof、且当前 checkout 允许测试创建临时制品时，可单独诊断：
+
+```bash
+PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m test_cases.validation_unittest \
+  /tmp/http-full-result-UNIQUE.json -v \
+  --timings /tmp/http-full-timings-UNIQUE.jsonl
+```
+
+将 `UNIQUE` 换成本次运行的唯一标识；两个输出文件都不能预先存在。可用
+`jq -s 'sort_by(.duration_seconds) | reverse | .[:20]' /tmp/http-full-timings-UNIQUE.jsonl`
+查看最慢案例。记录命令、UTC 时间、HEAD、Python/平台身份、完整结果与计时文件、
+`Ran ... in ...` 摘要及其他重型进程。先核对 `tests_run` 等于计时行数且 ID 无重复；
+否则不形成新基线。该诊断不执行正式 runner 的 preflight/approval 流程，也不更新 ledger。
+
+下一迭代先依据当前 V3 的实测热点和微基准评估优化。可研究把可选计时安全透传给正式
+`--all --validation-only`，让一次本来就要运行的治理套件同时留下诊断数据；必须先补
+runner 参数与子进程合同测试，并保持默认结果、三项已知 FAIL 判定及 proof 输入输出不变。
+当前 V3 的另一个候选热点是约 499 个 Git 对象逐个启动 `git cat-file --batch`；批量读取
+可能改变对象被替换时的可见性，未做前后微基准和恶意改写/竞态负例前不得落地。
+十个逻辑 suite 不是隔离证明：测试会创建仓库临时项目、monitor 锁、loopback sshd 和
+Git 检出，在证明共享写入、端口、引用及结果合并边界安全前，不启用 suite 并行。
