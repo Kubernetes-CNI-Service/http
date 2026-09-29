@@ -1068,8 +1068,12 @@ def _load_global_document(path: Path) -> dict[str, object]:
 
 def load_global(
     path: Path, *, global_data: dict[str, object] | None = None,
+    switch_scope: str = "all",
 ) -> GlobalSettings:
     data = _load_global_document(path) if global_data is None else global_data
+    selected_switch = str(switch_scope or "all").strip().casefold()
+    if selected_switch not in SWITCH_SCOPE_TYPES:
+        raise LoadError(f"无法识别 switch scope：{switch_scope!r}")
     try:
         schema_version = detect_global_schema_version(data)
         normalize_issue_tracker_policy(data)
@@ -1142,7 +1146,7 @@ def load_global(
         if version:
             _version_key(version)
             versions[kind] = version
-    if schema_version == 2:
+    if schema_version == 2 and selected_switch in {"all", "eth"}:
         eth_config = next(
             (entry["eth"] for entry in switches if isinstance(entry, dict) and "eth" in entry),
             None,
@@ -1157,10 +1161,11 @@ def load_global(
             (entry["eth"] for entry in switches if isinstance(entry, dict) and "eth" in entry),
             None,
         )
-    try:
-        validate_cumulus_dns_domain(eth_config)
-    except ValueError as exc:
-        raise LoadError(str(exc)) from exc
+    if selected_switch in {"all", "eth"}:
+        try:
+            validate_cumulus_dns_domain(eth_config)
+        except ValueError as exc:
+            raise LoadError(str(exc)) from exc
     return GlobalSettings(
         dhcp_enabled=dhcp_enabled,
         dhcp_package=dhcp_package,
@@ -3147,6 +3152,7 @@ def activate_project(
     project: Path, p2p_file: Path, *, strict: bool = True, dry_run: bool = False,
     deployment_lock_descriptor: int | None = None,
     host_role: str | None = None,
+    switch_scope: str = "all",
 ) -> None:
     host_role = resolve_host_role(host_role)
     current = active_project()
@@ -3162,6 +3168,11 @@ def activate_project(
     ]
     if strict:
         command.append("--strict")
+    selected_switch = str(switch_scope or "all").strip().casefold()
+    if selected_switch not in SWITCH_SCOPE_TYPES:
+        raise LoadError(f"无法识别 switch scope：{switch_scope!r}")
+    if selected_switch != "all":
+        command.append(f"--switch={selected_switch}")
     try:
         p2p_argument = p2p_file.relative_to(project).as_posix()
     except ValueError as exc:
@@ -7378,8 +7389,11 @@ def validate_inputs(
     global_file = project / "01-global.yaml"
     devices_file = project / "02-devices_config.csv"
     subnet_file = project / "02-dhcp-subnet_config.csv"
+    switch_scope = str(getattr(args, "switch_scope", "all") or "all")
     global_data = _load_global_document(global_file)
-    settings = load_global(global_file, global_data=global_data)
+    settings = load_global(
+        global_file, global_data=global_data, switch_scope=switch_scope,
+    )
     placeholder_sections = find_placeholder_password_sections(global_data)
     if placeholder_sections:
         raise _placeholder_password_error(
@@ -7393,7 +7407,6 @@ def validate_inputs(
     mini_source_file = None
     preview_images: dict[str, Path] = {}
     deployment_scope = str(getattr(args, "deployment_scope", "all") or "all")
-    switch_scope = str(getattr(args, "switch_scope", "all") or "all")
     try:
         settings = apply_subnet_service_ips(settings, subnet_file)
     except LoadError as exc:
@@ -8034,6 +8047,7 @@ def main(argv: list[str] | None = None) -> int:
             dry_run=args.dry_run,
             deployment_lock_descriptor=deployment_lock_descriptor,
             host_role=host_role,
+            switch_scope=switch_scope,
         )
         if not args.dry_run and (project / "p2p.xlsx").is_symlink():
             selected_runtime_p2p = (project / "p2p.xlsx").resolve()

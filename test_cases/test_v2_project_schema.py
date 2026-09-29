@@ -223,6 +223,43 @@ def generate_v2_redundancy_project(
 
 
 class SchemaSelectionTests(unittest.TestCase):
+    def test_setup_ib_scope_skips_unselected_eth_and_mlag_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "01-global.yaml").write_text(
+                "schema_version: 2\n", encoding="utf-8",
+            )
+            (project / "02-devices_config.csv").write_text(
+                "hostname,type\nib01,ib\n", encoding="utf-8",
+            )
+            (project / "02-dhcp-subnet_config.csv").write_text(
+                "subnet\n", encoding="utf-8",
+            )
+            sections = []
+
+            def global_validator(_path, section_key="eth"):
+                sections.append(section_key)
+                return [], []
+
+            old_scope = getattr(SETUP, "_SWITCH_SCOPE", "all")
+            SETUP._SWITCH_SCOPE = "ib"
+            try:
+                with mock.patch.object(
+                    SETUP, "_validate_global_yaml", side_effect=global_validator,
+                ), mock.patch.object(
+                    SETUP, "_validate_eth_csv", return_value=([], []),
+                ), mock.patch.object(
+                    SETUP, "_validate_subnet_csv", return_value=([], []),
+                ), mock.patch.object(
+                    SETUP, "_validate_v2_mlag_project", return_value=([], []),
+                ) as mlag_validator, redirect_stdout(io.StringIO()):
+                    self.assertTrue(SETUP._validate_project(str(project)))
+            finally:
+                SETUP._SWITCH_SCOPE = old_scope
+
+        self.assertEqual(["ib"], sections)
+        mlag_validator.assert_not_called()
+
     def test_canonical_project_template_starts_new_projects_as_v2(self):
         template = ROOT / "DAY0-Prepare/template"
         document = yaml.safe_load(

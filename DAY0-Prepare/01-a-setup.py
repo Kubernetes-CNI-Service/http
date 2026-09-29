@@ -128,6 +128,7 @@ _FORCE    = False  # --force：忽略校验错误强行继续（独立于 -y）
 _STRICT   = False  # --strict：把空公钥/xlsx/共享镜像占位文件视为错误
 _CSV_DIR  = None   # --csv-dir 指定的 devices_config.csv 所在目录
 _P2P_FILE = None   # --p2p-file 指定的项目根目录 XLSX
+_SWITCH_SCOPE = "all"  # --switch：只严格校验所选设备族的 global 分支
 _P2P_SOURCE = None # 本次 setup 选定的唯一 P2P 源
 _LINK_ERRORS = 0   # 本次 setup 中所有固定/动态链接错误数
 _LINK_TRANSACTION = None  # 当前 setup 的整批链接回滚快照
@@ -2925,15 +2926,18 @@ def _validate_project(proj_dir):
         except Exception:
             pass
 
-    # YAML 全局配置（合并格式），按 CSV 中出现的类型决定校验哪些区段
-    _run("01-global.yaml (eth)",
-         os.path.join(proj_dir, "01-global.yaml"),
-         _validate_global_yaml)  # section_key="eth" by default
-    if "ib" in types_in_csv:
+    # YAML 全局配置（合并格式）。完整 setup 校验所有出现的设备族；由
+    # 11-load --switch 委派的 scoped setup 只校验所选设备族，避免纯 IB/NVL
+    # 发布被未使用的 Cumulus 策略阻断。
+    if _SWITCH_SCOPE in {"all", "eth"}:
+        _run("01-global.yaml (eth)",
+             os.path.join(proj_dir, "01-global.yaml"),
+             _validate_global_yaml)  # section_key="eth" by default
+    if _SWITCH_SCOPE in {"all", "ib"} and "ib" in types_in_csv:
         _run("01-global.yaml (ib)",
              os.path.join(proj_dir, "01-global.yaml"),
              lambda p: _validate_global_yaml(p, section_key="ib"))
-    if "nvl" in types_in_csv:
+    if _SWITCH_SCOPE in {"all", "nvl"} and "nvl" in types_in_csv:
         _run("01-global.yaml (nvl)",
              os.path.join(proj_dir, "01-global.yaml"),
              lambda p: _validate_global_yaml(p, section_key="nvl"))
@@ -2945,7 +2949,8 @@ def _validate_project(proj_dir):
     # Keep this inside preflight and before _SetupLinkTransaction is created so
     # an invalid pair can never switch any runtime link.
     global_path = os.path.join(proj_dir, "01-global.yaml")
-    if os.path.isfile(global_path) and os.path.isfile(csv_path):
+    if (_SWITCH_SCOPE in {"all", "eth"}
+            and os.path.isfile(global_path) and os.path.isfile(csv_path)):
         _run(
             "schema v2 MLAG 跨文件合同",
             global_path,
@@ -4657,12 +4662,16 @@ def _parse_args(argv=None):
                         help="从指定目录读取 devices_config.csv")
     parser.add_argument("--p2p-file",
                         help="明确选择项目根目录或 p2p/ 下的 P2P XLSX")
+    parser.add_argument(
+        "--switch", choices=("eth", "ib", "nvl"), dest="switch_scope",
+        help="只严格校验所选设备族的 global 配置；供 scoped load 使用",
+    )
     args = parser.parse_args(argv)
     if args.status or args.list_projects:
         if args.project is not None or any((
             args.create, args.auto_yes, args.confirm_project_switch,
             args.force, args.strict, args.dry_run, args.csv_dir, args.p2p_file,
-            args.host_role,
+            args.host_role, getattr(args, "switch_scope", None),
         )):
             parser.error("--status/--list-projects 是独立只读动作，不能组合变更参数")
     elif args.project is None:
@@ -4742,6 +4751,7 @@ def _main_locked(args):
 
 def main(argv=None):
     global _AUTO_YES, _DRY_RUN, _FORCE, _STRICT, _CONFIRM_PROJECT_SWITCH
+    global _SWITCH_SCOPE
 
     args = _parse_args(argv)
     if getattr(args, "status", False) or getattr(args, "list_projects", False):
@@ -4774,6 +4784,7 @@ def main(argv=None):
     _FORCE = args.force
     _STRICT = args.strict
     _CONFIRM_PROJECT_SWITCH = args.confirm_project_switch
+    _SWITCH_SCOPE = getattr(args, "switch_scope", None) or "all"
     key_mode = os.environ.get("HTTP_SETUP_KEY_MODE", "")
     if key_mode not in ("", "server-delegated"):
         print(_c(RED, "[ERROR] invalid private setup key-preparation mode"))

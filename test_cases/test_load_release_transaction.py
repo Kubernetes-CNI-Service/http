@@ -2842,6 +2842,45 @@ class ReleaseTransactionTests(unittest.TestCase):
                     "air",
                 )
 
+    def test_ib_scope_ignores_unselected_eth_vrr_policy(self) -> None:
+        document = {
+            "schema_version": 2,
+            "common": {
+                "mgmt": {
+                    "dhcp-server": {"status": "enabled", "package": "isc-dhcp-server"},
+                    "http": {"status": "enabled", "package": "apache2", "http_root": "/var/www/html"},
+                    "ztp": {"status": "enabled", "ztp_url_prefix": "/ztp"},
+                },
+                "switch": {"system": {"dns": {}, "ntp": {}, "date-time": {}}},
+            },
+            "switches": [
+                {"eth": {"version": "5.16.4", "system": {}}},
+                {"ib": {"version": "25-02-8008", "system": {}}},
+            ],
+        }
+        with self.assertRaisesRegex(LOAD.LoadError, "switches.eth.vrr"):
+            LOAD.load_global(Path("unused"), global_data=document)
+
+        settings = LOAD.load_global(
+            Path("unused"), global_data=document, switch_scope="ib",
+        )
+        self.assertEqual("25-02-8008", settings.versions["ib"])
+
+    def test_scoped_activation_forwards_switch_to_setup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory) / "project"
+            project.mkdir()
+            p2p = project / "p2p.xlsx"
+            p2p.write_bytes(b"xlsx")
+            with mock.patch.object(LOAD, "active_project", return_value=project), \
+                    mock.patch.object(LOAD, "run") as runner:
+                LOAD.activate_project(
+                    project, p2p, strict=False, dry_run=True,
+                    host_role="workstation", switch_scope="ib",
+                )
+        command = runner.call_args.args[0]
+        self.assertIn("--switch=ib", command)
+
     def test_switch_scope_filters_platform_families_and_upgrade_images(self) -> None:
         settings = LOAD.replace(
             self.inputs.settings,
