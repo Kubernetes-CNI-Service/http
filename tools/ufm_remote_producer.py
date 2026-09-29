@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Inactive, pinned UFM agent invocation and exact archive retrieval.
+"""Inactive, pinned UFM agent invocation and remote-final observation.
 
 The caller owns every scope and approved installation digest. This module does
-not install an agent, register a worker, or claim a completed collection
-cycle. No real endpoint is configured by default.
+not install an agent, register a worker, retrieve an archive, or claim a
+completed collection cycle. No real endpoint is configured by default.
 """
 
 from __future__ import annotations
@@ -37,7 +37,6 @@ class RemoteProducerError(ValueError):
 
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _PART = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._-]*\Z")
-_REMOTE_KINDS = frozenset(("iblinkinfo", "ibdiagnet"))
 
 
 @dataclass(frozen=True)
@@ -259,7 +258,7 @@ def observe_remote_producer(
     except Exception:
         raise RemoteProducerError("noncanonical UFM collection plan") from None
     approved = _install(install)
-    if (plan.kind not in _REMOTE_KINDS or not isinstance(project, Path)
+    if (plan.kind != "iblinkinfo" or not isinstance(project, Path)
             or not isinstance(lease_path, Path) or not project.is_absolute()
             or not lease_path.is_absolute() or ".." in project.parts
             or ".." in lease_path.parts or type(jump) is not JumpEndpoint
@@ -342,7 +341,7 @@ def observe_and_retrieve_remote_producer(
     except Exception:
         raise RemoteProducerError("noncanonical UFM collection plan") from None
     _install(install)
-    if (plan.kind not in _REMOTE_KINDS or not callable(clock)
+    if (plan.kind != "iblinkinfo" or not callable(clock)
             or not callable(runner) or type(timeout) is not int
             or not 1 <= timeout <= 300):
         raise RemoteProducerError("UFM remote retrieval scope is incomplete")

@@ -22,64 +22,6 @@ PYTHON_PIN = "c" * 64
 
 
 class UfmRemoteProducerTests(unittest.TestCase):
-    def test_ibdiagnet_exact_agent_invocation_is_accepted(self):
-        from tools import ufm_remote_producer as producer
-
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory).resolve()
-            lease, _known, jump, far, pin = make_site(root)
-            project = write_project(root)
-            plan = collection_plan("ibdiagnet", RUN_ID)
-            install = producer.RemoteAgentInstall(
-                "/opt/http-v3-ufm", "/usr/bin/python3", AGENT_PIN,
-                CONTRACT_PIN, PYTHON_PIN)
-            observed = producer.VerifiedManagementIdentity(
-                "EXAMPLE-UFM01", far.host, "aa:bb:cc:dd:ee:ff",
-                NOW + dt.timedelta(hours=1), NOW, pin, "c" * 64, "eno8303")
-            commands = []
-
-            def fake_remote(_jump, _far, argv, *, runner, timeout):
-                commands.append(argv)
-                if argv == ["sha256sum", "--", plan.ufm_remote_path]:
-                    return CommandResult(0, f"{'d' * 64}  {plan.ufm_remote_path}\n", "")
-                return CommandResult(0, "", "")
-
-            with mock.patch.object(producer, "verify_project_management_identity",
-                                   return_value=observed), mock.patch.object(
-                                       producer, "_source_status"), mock.patch.object(
-                                           producer, "_remote", side_effect=fake_remote):
-                result = producer.observe_remote_producer(
-                    plan, install=install, project=project, lease_path=lease,
-                    jump=jump, far=far, known_hosts_pin=pin,
-                    timeout=10, clock=lambda: NOW, runner=lambda argv: None)
-            self.assertEqual([
-                [install.python_path, "-I", "-S", "-B", install.agent_path,
-                 "--kind", "ibdiagnet", "--run-id", RUN_ID],
-                ["sha256sum", "--", plan.ufm_remote_path],
-            ], commands)
-            self.assertEqual(plan.ufm_remote_path, result.archive_path)
-
-    def test_ibdiagnet_wrong_exact_destination_rejects_before_remote_action(self):
-        from tools import ufm_remote_producer as producer
-
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory).resolve()
-            lease, _known, jump, far, pin = make_site(root)
-            project = write_project(root)
-            install = producer.RemoteAgentInstall(
-                "/opt/http-v3-ufm", "/usr/bin/python3", AGENT_PIN,
-                CONTRACT_PIN, PYTHON_PIN)
-            calls = []
-            with self.assertRaises(producer.RemoteProducerError):
-                producer.observe_and_retrieve_remote_producer(
-                    collection_plan("ibdiagnet", RUN_ID), install=install,
-                    project=project, lease_path=lease, jump=jump, far=far,
-                    known_hosts_pin=pin, destination=root / "iblinkinfo_wrong.tar.gz",
-                    timeout=10, clock=lambda: NOW,
-                    runner=lambda argv: calls.append(argv),
-                )
-            self.assertEqual([], calls)
-
     def test_retrieved_handoff_rejects_wrong_destination_before_remote_action(self):
         from tools import ufm_remote_producer as producer
 
@@ -112,6 +54,7 @@ class UfmRemoteProducerTests(unittest.TestCase):
             scope = dict(project=project, lease_path=lease, jump=jump, far=far,
                          known_hosts_pin=pin, timeout=10,
                          clock=lambda: NOW, runner=lambda argv: calls.append(argv))
+            plan = collection_plan("iblinkinfo", RUN_ID)
             for install in (None,
                             producer.RemoteAgentInstall(
                                 "/tmp/../escape", "/usr/bin/python3",
@@ -125,12 +68,10 @@ class UfmRemoteProducerTests(unittest.TestCase):
                             producer.RemoteAgentInstall(
                                 "/opt/http-v3", "/usr/bin/python3", AGENT_PIN,
                                 CONTRACT_PIN, "")):
-                for kind in ("iblinkinfo", "ibdiagnet"):
-                    with self.subTest(install=install, kind=kind), self.assertRaises(
-                        producer.RemoteProducerError
-                    ):
-                        producer.observe_remote_producer(
-                            collection_plan(kind, RUN_ID), install=install, **scope)
+                with self.subTest(install=install), self.assertRaises(
+                    producer.RemoteProducerError
+                ):
+                    producer.observe_remote_producer(plan, install=install, **scope)
             self.assertEqual([], calls)
 
     def test_mismatched_install_digest_never_invokes_vendor_agent(self):

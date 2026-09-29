@@ -1737,7 +1737,6 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 前置条件：另获 owner 对可丢弃 UFM VM、跳板与管理网的逐节点、逐命令授权；目前无此授权，不得执行真实 SSH/SCP。先由独立渠道批准准确 known_hosts SHA 和真实主机密钥、当期 DHCP lease/CSV/global、已批准的远端 Python/agent/contract SHA、root 持有且 0600 的安装态、远端写者静默、备份/快照及回滚负责人；记录候选 HEAD/tree、全量证明、所有输入和输出 dev/ino/mode/size/SHA，不向公开日志写凭据或客户地址。
 - 步骤与预期：只在授权范围以 key-only、`StrictHostKeyChecking=yes` 经固定跳板观测准确 hostname/management MAC/IP；重分配、过期/截断 lease、变更钉扎密钥或项目输入必须在任何 vendor agent 命令前拒绝。对已批准安装态逐路径观测 root 所有权、非组/世界可写及三个精确 SHA；调用固定绝对 Python+agent，仅用一次受控 run-id，验证远端最终文件在拉取前、后 SHA 一致、本地归档及身份重新验证一致。远端源变化、中断、半成品、路径改绑、目标并发占用必须无成功 receipt、无外部写入；不重试未知结果。
 - 证据、清理与风险：保存脱敏 argv/exit、独立 host-pin 来源、lease/SSH/安装态前后摘要、远端前后及本地归档 SHA、负例拒绝、写者静默、节点和目录身份、快照恢复核验。只在批准的可丢弃节点卸载本卡产物并核对前像；不写生产 UFM/live 项目/真实 crontab。授权或任一物理证据缺失仍为 BLOCKED/NOT RUN；本卡即使完成也只证明归档来源，不证明六个 worker-owned IB 角色、受保护三面板同周期、REQ7 Stage L 或线上发布。
-- ibdiagnet 远端扩展（仍 **BLOCKED / NOT RUN**）：本地先决另含 `test_cases.test_ufm_ibdiagnet_remote_workflow` 的合成服务、真实 agent 归档、精确取回与真实本地分析器；该 GREEN 只证明代码契约。真实试验须单独取得逐节点、逐命令授权，核验容器内 `/var/tmp/ibdiagnet2` 在运行前不存在、完整 ibdiagnet argv 与 `docker cp` 的精确源、root 所有的安装态和目录、单写者静默、归档前后 SHA/成员/大小及本地 analyzer receipt。故障注入须分别覆盖远端 SHA 漂移、陈旧容器源、空或缺失快照、取回中断、身份/lease/host-pin 漂移，均不得产生成功 receipt；仅在可丢弃 UFM VM 和隔离项目快照内做并按本卡回滚。当前切片不安装 agent、不配置真实 endpoint、不接入周期/按钮/worker；本卡绝不许可真实 UFM 或生产执行。
 
 ## TC-REAL-UFM-LOCAL-PIPELINE-001 — 本地 UFM 归档、IB 分析与展示来源
 

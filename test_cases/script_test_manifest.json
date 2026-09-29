@@ -270,7 +270,6 @@
         "test_cases.test_ufm_collection_pipeline_workflow",
         "test_cases.test_ufm_ibdiagnet_pipeline",
         "test_cases.test_ufm_ibdiagnet_pipeline_workflow",
-        "test_cases.test_ufm_ibdiagnet_remote_workflow",
         "test_cases.test_collection_ib_producer",
         "test_cases.test_collection_ib_producer_workflow"
       ]
@@ -2463,8 +2462,7 @@
         "infra/ufm_jump_transport.py"
       ],
       "tests": [
-        "test_cases.test_ufm_remote_producer_workflow",
-        "test_cases.test_ufm_ibdiagnet_remote_workflow"
+        "test_cases.test_ufm_remote_producer_workflow"
       ]
     },
     {
@@ -2477,8 +2475,7 @@
       ],
       "tests": [
         "test_cases.test_ufm_collection_pipeline_workflow",
-        "test_cases.test_ufm_ibdiagnet_pipeline_workflow",
-        "test_cases.test_ufm_ibdiagnet_remote_workflow"
+        "test_cases.test_ufm_ibdiagnet_pipeline_workflow"
       ]
     },
     {
