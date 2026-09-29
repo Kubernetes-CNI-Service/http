@@ -17,10 +17,9 @@ from test_cases.test_ufm_collection_pipeline_workflow import _write_cvt
 from test_cases.test_ufm_identity_binding import NOW, NODES, make_site
 from test_cases.test_ufm_identity_binding_workflow import write_project
 from tools import ufm_collection_agent as agent
-from tools import ufm_collection_pipeline as pipeline
 from tools import ufm_remote_producer as remote
 from tools.ufm_collection_contract import collection_plan, publish_local_archive
-from tools.ufm_collection_pipeline import PipelineError, validated_receipts
+from tools.ufm_collection_pipeline import PipelineError, run_local_ibdiagnet, validated_receipts
 
 
 RUN_ID = "20260926-0000-air-0123456789abcdef"
@@ -245,41 +244,33 @@ class UfmIbdiagnetRemoteWorkflowTests(unittest.TestCase):
                 self.assertEqual("ufm:/var/tmp/ibdiagnet2", vendor_events[2][-2])
                 self.assertFalse(any("*" in arg or arg == "-it"
                                      for event in vendor_events for arg in event))
-                original_rmtree = pipeline.shutil.rmtree
-                injected = False
+                receipt_gate = remote.retrieved_observation_receipt_gate(
+                    plan, retrieved, project=project, lease_path=lease,
+                    jump=jump, far=far, known_hosts_pin=pin,
+                    timeout=600, clock=lambda: NOW, runner=fake_service,
+                )
 
-                def after_stage_cleanup(path, *args, **kwargs):
-                    nonlocal injected, remote_receipt_drift
-                    original_rmtree(path, *args, **kwargs)
-                    self.assertTrue(Path(path).name.startswith(".ufm-handoff-"))
-                    injected = True
+                def before_receipt():
+                    nonlocal remote_receipt_drift
                     if phase == "local-before-receipt":
                         destination.write_bytes(b"changed after retrieval")
                     elif phase == "remote-before-receipt":
                         remote_receipt_drift = True
                     elif phase == "lease-before-receipt":
                         lease.write_text("lease 192.0.2.21 { binding state free; }\n")
+                    receipt_gate()
 
-                with mock.patch.object(pipeline.shutil, "rmtree",
-                                       side_effect=after_stage_cleanup):
-                    if phase != "stable":
-                        with self.assertRaisesRegex(PipelineError,
-                                                    "pre-receipt evidence gate failed"):
-                            remote.run_verified_retrieved_ibdiagnet(
-                                plan, retrieved, archive=destination, cvt=cvt,
-                                project=project, lease_path=lease, jump=jump,
-                                far=far, known_hosts_pin=pin, timeout=600,
-                                clock=lambda: NOW, runner=fake_service)
-                    else:
-                        result = remote.run_verified_retrieved_ibdiagnet(
-                            plan, retrieved, archive=destination, cvt=cvt,
-                            project=project, lease_path=lease, jump=jump,
-                            far=far, known_hosts_pin=pin, timeout=600,
-                            clock=lambda: NOW, runner=fake_service)
-                self.assertTrue(injected)
                 if phase != "stable":
+                    with self.assertRaisesRegex(PipelineError,
+                                                "pre-receipt evidence gate failed"):
+                        run_local_ibdiagnet(
+                            plan, retrieved.remote.node, retrieved.local_path,
+                            cvt, project, before_receipt=before_receipt)
                     self.assertEqual([], validated_receipts(project, "air"))
                     continue
+                result = run_local_ibdiagnet(
+                    plan, retrieved.remote.node, retrieved.local_path, cvt,
+                    project, before_receipt=before_receipt)
                 self.assertTrue((result / f"ibdiagnet2_{RUN_ID}-topology-validation.xlsx").is_file())
                 receipt, = validated_receipts(project, "air")
                 self.assertEqual(retrieved.local_sha256, receipt["archive_sha256"])
