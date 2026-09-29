@@ -96,6 +96,7 @@ CUMULUS_GENERATOR = load_repository_module(
     "change_aware_cumulus_generator",
     ROOT / "ztp/config/cumulus/template/90-c2-generate_configs.py",
 )
+from test_cases import validation_unittest as VALIDATION_UNITTEST
 
 
 TEMPLATE_AUTHORITY_PATTERN = (
@@ -2148,6 +2149,94 @@ class ApprovalLedgerTests(unittest.TestCase):
             self.assertEqual(before, approvals.read_bytes())
             current = RUNNER.make_snapshot(ROOT, MANIFEST_PATH, manifest)
             self.assertEqual(test_hashes, current.tests)
+
+
+class ValidationTimingDiagnosticTests(unittest.TestCase):
+    """Timing is diagnostic only; the canonical validation result stays exact."""
+
+    class _Probe(unittest.TestCase):
+        def test_success(self):
+            return None
+
+        def test_failure(self):
+            self.fail("intentional diagnostic failure")
+
+    def _suite(self):
+        return unittest.TestSuite([
+            self._Probe("test_success"),
+            self._Probe("test_failure"),
+        ])
+
+    def test_result_measures_one_test_between_start_and_stop(self):
+        case = self._Probe("test_success")
+        result = VALIDATION_UNITTEST.TimedTextTestResult(io.StringIO(), True, 2)
+        with mock.patch.object(
+            VALIDATION_UNITTEST.time, "perf_counter", side_effect=[10.0, 10.375],
+        ):
+            result.startTest(case)
+            result.stopTest(case)
+        self.assertEqual([
+            {"id": case.id(), "duration_seconds": 0.375},
+        ], result.timings)
+
+    def test_opt_in_timing_preserves_result_and_writes_one_record_per_test(self):
+        with tempfile.TemporaryDirectory(prefix="validation-timing-contract-") as directory:
+            root = Path(directory)
+            ordinary_report = root / "ordinary-result.json"
+            timed_report = root / "timed-result.json"
+            timings = root / "timings.jsonl"
+            with mock.patch.object(
+                VALIDATION_UNITTEST.unittest.defaultTestLoader,
+                "discover", side_effect=lambda **_kwargs: self._suite(),
+            ), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                ordinary_code = VALIDATION_UNITTEST.main([str(ordinary_report)])
+                self.assertFalse(timings.exists())
+                timed_code = VALIDATION_UNITTEST.main([
+                    str(timed_report), "-v", "--timings", str(timings),
+                ])
+            self.assertEqual(1, ordinary_code)
+            self.assertEqual(ordinary_code, timed_code)
+            ordinary = json.loads(ordinary_report.read_text(encoding="utf-8"))
+            timed = json.loads(timed_report.read_text(encoding="utf-8"))
+            self.assertEqual(ordinary, timed)
+            self.assertEqual(2, ordinary["tests_run"])
+            self.assertEqual(1, len(ordinary["failures"]))
+            self.assertEqual([], ordinary["errors"])
+            self.assertEqual([], ordinary["skipped"])
+            self.assertEqual([], list(root.glob("ordinary-*.jsonl")))
+            rows = [json.loads(line) for line in timings.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(
+                {self._Probe("test_success").id(), self._Probe("test_failure").id()},
+                {row["id"] for row in rows},
+            )
+            self.assertEqual(2, len(rows))
+            for row in rows:
+                self.assertEqual({"id", "duration_seconds"}, set(row))
+                self.assertIsInstance(row["duration_seconds"], float)
+                self.assertGreaterEqual(row["duration_seconds"], 0.0)
+            self.assertEqual(0o600, stat.S_IMODE(timings.stat().st_mode))
+
+    def test_timing_requires_absolute_new_destination_before_discovery(self):
+        with tempfile.TemporaryDirectory(prefix="validation-timing-destination-") as directory:
+            root = Path(directory)
+            existing = root / "existing.jsonl"
+            existing.write_text("keep\n", encoding="utf-8")
+            with mock.patch.object(
+                VALIDATION_UNITTEST.unittest.defaultTestLoader, "discover",
+            ) as discover, redirect_stderr(io.StringIO()):
+                self.assertEqual(2, VALIDATION_UNITTEST.main([
+                    str(root / "result.json"), "--timings", "relative.jsonl",
+                ]))
+                self.assertEqual(2, VALIDATION_UNITTEST.main([
+                    str(root / "result.json"), "--timings", str(existing),
+                ]))
+                self.assertEqual(2, VALIDATION_UNITTEST.main([
+                    os.path.relpath(root / "result.json", start=Path.cwd()),
+                    "--timings", str(root / "result.json"),
+                ]))
+            discover.assert_not_called()
+            self.assertEqual("keep\n", existing.read_text(encoding="utf-8"))
+            self.assertFalse((root / "result.json").exists())
 
 
 if __name__ == "__main__":
