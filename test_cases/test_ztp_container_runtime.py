@@ -4447,6 +4447,33 @@ def monitor_authority_recovery_decision(_payload, _diagnostics):
 
 
 class ActivationContractTests(QuietContractTest):
+    def test_empty_subnet_hash_is_allowed_only_for_disabled_dhcp_and_ztp(self):
+        activate = load_script("activate.py")
+        with tempfile.TemporaryDirectory() as name:
+            project = Path(name)
+            subnet = project / "02-dhcp-subnet_config.csv"
+            subnet.write_bytes(b"")
+            global_file = project / "01-global.yaml"
+            global_file.write_text(
+                "common:\n  mgmt:\n    dhcp-server: {status: disabled}\n"
+                "    ztp: {status: disabled}\n", encoding="utf-8",
+            )
+            settings = SimpleNamespace(project_dir=project)
+            expected = hashlib.sha256(b"").hexdigest()
+            self.assertTrue(activate._empty_subnet_allowed(settings, subnet))
+            activate._hash_matches(subnet, expected, "subnet", allow_empty=True)
+            with self.assertRaisesRegex(activate.ActivationError, "empty"):
+                activate._hash_matches(subnet, expected, "subnet")
+            for service in ("dhcp-server", "ztp"):
+                with self.subTest(enabled=service):
+                    global_file.write_text(
+                        "common:\n  mgmt:\n"
+                        f"    {service}: {{status: enabled}}\n"
+                        f"    {'ztp' if service == 'dhcp-server' else 'dhcp-server'}: "
+                        "{status: disabled}\n", encoding="utf-8",
+                    )
+                    self.assertFalse(activate._empty_subnet_allowed(settings, subnet))
+
     @staticmethod
     def _dhcp_mode_fixture(http_root, mode, *, legacy=False):
         # The fixture is hand-authored in the manual consumer tests and is

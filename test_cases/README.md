@@ -157,6 +157,13 @@ Popen.wait 的内部退避不是同一轮询承诺，但仍受同一期限约束
 根目录 `USER_MANUAL.md` 为准，失败时再回到对应模块 README 定位接口。
 
 `test_project_contracts.py` 是跨目录契约主入口，按功能契约分组加载各目录模块。
+`test_dhcp_optional_contract.py`、`test_dhcp_optional_workflow.py` 与
+`test_ztp_service_runtime.py` 还锁定空 DHCP subnet 占位文件的唯一例外：
+`dhcp-server.status` 和 `ztp.status` 都显式为 `disabled` 时，已有的零字节或
+仅合法表头的 `02-dhcp-subnet_config.csv` 可继续参与来源哈希及 IB 配置流程，
+DHCP listener 和生成/安装/启动保持关闭；任一服务启用、非空畸形 CSV、
+无网络却指定 relay ingress 均拒绝。Docker 实际服务切换需另按
+`REAL_ENVIRONMENT.md` 留存证据。
 `test_load_release_transaction.py` 在隔离临时目录中验证 load 的统一 release：只有 DHCP 与
 Cumulus/NVOS 子 manifest 的设备身份、真实 YAML hash、完整 MAC 链接集合、effective default
 及 DHCP 输出都匹配当前输入时才发布 parent release；旧 `latest_yaml`、篡改 YAML/链接或

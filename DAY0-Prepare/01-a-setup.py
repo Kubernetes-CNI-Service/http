@@ -2583,9 +2583,13 @@ def _validate_eth_csv(path):
     return errors, warnings
 
 
-def _validate_subnet_csv(path):
+def _validate_subnet_csv(path, *, allow_empty=False):
     """校验 DHCP subnet CSV。"""
     errors, warnings = [], []
+    if os.path.getsize(path) == 0:
+        if allow_empty:
+            return errors, warnings
+        return ["  文件为空；启用 DHCP 或 ZTP 时必须提供 subnet 记录"], warnings
     seen_networks = {}
     profile_services = {}
     nvos_service = None
@@ -2614,9 +2618,11 @@ def _validate_subnet_csv(path):
                 errors.append(f"  缺少列：{sorted(missing)}")
                 return errors, warnings
             reader.fieldnames = fields
+            row_count = 0
             for row_n, row in enumerate(reader, start=2):
                 if not any(str(value or "").strip() for value in row.values()):
                     continue
+                row_count += 1
                 shared_network = row.get("shared_network", "").strip()
                 subnet  = row.get("subnet", "").strip()
                 netmask = row.get("netmask", "").strip()
@@ -2713,9 +2719,27 @@ def _validate_subnet_csv(path):
                 except ValueError:
                     # The field-specific checks above already provide the useful error.
                     pass
+            if row_count == 0 and not allow_empty:
+                errors.append("  没有 subnet 记录")
     except Exception as ex:
         errors.append(f"  读取失败：{ex}")
     return errors, warnings
+
+
+def _project_allows_empty_subnet(proj_dir):
+    """Only an explicitly disabled DHCP/ZTP pair may use an empty placeholder."""
+    try:
+        with open(os.path.join(proj_dir, "01-global.yaml"), encoding="utf-8") as stream:
+            data = safe_load_global_yaml(stream.read())
+        mgmt = data["common"]["mgmt"]
+        return all(
+            str(mgmt[key]["status"]).strip().casefold() == "disabled"
+            for key in ("dhcp-server", "ztp")
+        )
+    except Exception:
+        # Invalid/missing YAML never grants the optional-empty exception;
+        # the normal global validator reports the input error separately.
+        return False
 
 
 def _validate_global_yaml(path, section_key="eth"):
@@ -2958,8 +2982,10 @@ def _validate_project(proj_dir):
         )
 
     # DHCP subnet CSV
+    allow_empty_subnet = _project_allows_empty_subnet(proj_dir)
     _run("02-dhcp-subnet_config.csv",
-         os.path.join(proj_dir, "02-dhcp-subnet_config.csv"), _validate_subnet_csv)
+         os.path.join(proj_dir, "02-dhcp-subnet_config.csv"),
+         lambda path: _validate_subnet_csv(path, allow_empty=allow_empty_subnet))
 
     def _empty_artifact(label, kind="占位文件"):
         message = f"{label} 大小为 0（{kind}）"

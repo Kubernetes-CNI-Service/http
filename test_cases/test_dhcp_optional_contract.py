@@ -29,6 +29,9 @@ DHCP = load_script(
     "dhcp_optional_handoff_generator",
     ROOT / "ztp/config/isc-dhcp-server/c1-generate_dhcp.py",
 )
+SETUP = load_script(
+    "dhcp_optional_handoff_setup", ROOT / "DAY0-Prepare/01-a-setup.py",
+)
 
 _TEMPLATE_TEXT = (ROOT / "DAY0-Prepare/template/01-global.yaml").read_text(
     encoding="utf-8"
@@ -49,6 +52,45 @@ def settings_for(status: str):
 
 
 class DhcpOptionalDirectTests(unittest.TestCase):
+    def test_empty_subnet_requires_both_services_disabled(self):
+        with tempfile.TemporaryDirectory() as name:
+            subnet = Path(name) / "02-dhcp-subnet_config.csv"
+            subnet.write_bytes(b"")
+            disabled = LOAD.replace(settings_for("disabled"), ztp_enabled=False)
+            self.assertEqual(disabled, LOAD.apply_subnet_service_ips(disabled, subnet))
+            LOAD.validate_subnet_file(subnet, disabled)
+            self.assertEqual(([], []), SETUP._validate_subnet_csv(subnet, allow_empty=True))
+            for settings in (
+                LOAD.replace(disabled, dhcp_enabled=True),
+                LOAD.replace(disabled, ztp_enabled=True),
+            ):
+                with self.subTest(dhcp=settings.dhcp_enabled, ztp=settings.ztp_enabled):
+                    with self.assertRaises(LOAD.LoadError):
+                        LOAD.apply_subnet_service_ips(settings, subnet)
+                    with self.assertRaises(LOAD.LoadError):
+                        LOAD.validate_subnet_file(subnet, settings)
+
+    def test_header_only_subnet_is_optional_but_malformed_nonempty_is_not(self):
+        with tempfile.TemporaryDirectory() as name:
+            subnet = Path(name) / "02-dhcp-subnet_config.csv"
+            disabled = LOAD.replace(settings_for("disabled"), ztp_enabled=False)
+            subnet.write_text(
+                "shared_network,subnet,netmask,range_start,range_end,routers,"
+                "ztp_service_ip,cumulus_profile,nvos_ztp\n", encoding="utf-8",
+            )
+            self.assertEqual(disabled, LOAD.apply_subnet_service_ips(disabled, subnet))
+            LOAD.validate_subnet_file(subnet, disabled)
+            self.assertEqual(([], []), SETUP._validate_subnet_csv(subnet, allow_empty=True))
+            with self.assertRaises(LOAD.LoadError):
+                LOAD.validate_subnet_file(subnet, LOAD.replace(disabled, dhcp_enabled=True))
+            subnet.write_text("subnet,bad\n", encoding="utf-8")
+            with self.assertRaises(LOAD.LoadError):
+                LOAD.apply_subnet_service_ips(disabled, subnet)
+            with self.assertRaises(LOAD.LoadError):
+                LOAD.validate_subnet_file(subnet, disabled)
+            errors, _ = SETUP._validate_subnet_csv(subnet, allow_empty=True)
+            self.assertTrue(errors)
+
     def test_native_handoff_requires_explicit_server_role_without_changing_docker(self):
         guidance = DHCP._production_handoff_text()
         native = next(

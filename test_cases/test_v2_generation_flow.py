@@ -685,14 +685,17 @@ common:
             with self.assertRaisesRegex(LOAD.LoadError, "duplicate"):
                 LOAD.load_global(global_file)
 
-    def test_global_document_reader_census_has_no_strict_loader_bypass(self):
+    def test_four_global_document_readers_have_no_strict_loader_bypass(self):
         setup_source = (ROOT / "DAY0-Prepare/01-a-setup.py").read_text(
             encoding="utf-8",
         )
         load_source = (ROOT / "DAY0-Prepare/11-load.py").read_text(
             encoding="utf-8",
         )
-        self.assertEqual(3, setup_source.count("safe_load_global_yaml("))
+        # The fourth setup read decides whether a disabled DHCP/ZTP pair may
+        # retain an empty subnet placeholder; it must share the strict loader.
+        self.assertEqual(4, setup_source.count("safe_load_global_yaml("))
+        self.assertEqual(1, setup_source.count("safe_load_global_yaml(stream.read())"))
         self.assertEqual(1, load_source.count("safe_load_global_yaml("))
         self.assertNotIn("yaml.safe_load(f)", setup_source)
         self.assertNotIn("yaml.safe_load(", load_source)

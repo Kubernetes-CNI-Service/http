@@ -1326,8 +1326,14 @@ def apply_subnet_service_ips(
     settings: GlobalSettings, subnet_file: Path,
 ) -> GlobalSettings:
     """Populate service addresses from the authoritative DHCP subnet CSV."""
+    if (settings.dhcp_enabled is False and settings.ztp_enabled is False
+            and subnet_file.is_file() and subnet_file.stat().st_size == 0):
+        return replace(settings, ztp_ips={}, boot_ips=())
     derived = derive_service_ips_from_subnet(subnet_file, settings.ztp_prefix)
     boot_ips = derive_boot_ips_from_subnet(subnet_file, settings.ztp_prefix)
+    if (not settings.dhcp_enabled and not settings.ztp_enabled
+            and not any(derived.values()) and not boot_ips):
+        return replace(settings, ztp_ips={}, boot_ips=())
     updated = replace(settings, ztp_ips=derived, boot_ips=boot_ips)
     if settings.ztp_enabled and not updated.service_ips:
         raise LoadError(
@@ -1506,6 +1512,9 @@ def select_p2p(
 
 
 def validate_subnet_file(path: Path, settings: GlobalSettings) -> None:
+    optional_empty = not settings.dhcp_enabled and not settings.ztp_enabled
+    if optional_empty and path.is_file() and path.stat().st_size == 0:
+        return
     _nonempty_file(path, "02-dhcp-subnet_config.csv")
     with path.open(newline="", encoding="utf-8-sig") as stream:
         reader = csv.DictReader(stream)
@@ -1557,7 +1566,7 @@ def validate_subnet_file(path: Path, settings: GlobalSettings) -> None:
                         f"DHCP subnet CSV 第 {lineno} 行 service_ip={service_address} "
                         f"落入动态 range {start}-{end}"
                     )
-    if count == 0:
+    if count == 0 and not optional_empty:
         raise LoadError("02-dhcp-subnet_config.csv 没有 subnet 记录")
 
 
@@ -3304,6 +3313,8 @@ def plan_local_dhcp_runtime(
             address_snapshot=address_snapshot,
             allowlist=allowlist,
             relay_ingress=relay_ingress,
+            allow_empty_subnet=(not inputs.settings.dhcp_enabled
+                                and not inputs.settings.ztp_enabled),
         )
     except RuntimeContractError as exc:
         raise LoadError(f"DHCP listener 动态规划失败：{exc}") from exc

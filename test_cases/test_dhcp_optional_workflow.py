@@ -4,19 +4,138 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 from pathlib import Path
 import shlex
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from types import SimpleNamespace
 from unittest import mock
 
-from test_cases.test_dhcp_optional_contract import DHCP, LOAD
+from test_cases.test_dhcp_optional_contract import DHCP, LOAD, SETUP, global_document
 from test_cases.test_dhcp_switch_scope_preservation import ScopedDhcpFixture
 from test_cases import test_load_release_transaction as release_fixture
+from test_cases.module_loader import load_script
+import yaml
+
+ROOT = Path(__file__).resolve().parents[1]
+RUNTIME = load_script("optional_empty_subnet_runtime", ROOT / "tools/ztp_service_runtime.py")
+ACTIVATE = load_script("optional_empty_subnet_docker", ROOT / "infra/docker/activate.py")
 
 
 class DhcpOptionalWorkflowTests(unittest.TestCase):
+    def test_ib_load_input_transaction_keeps_empty_subnet_source_hash(self):
+        with tempfile.TemporaryDirectory() as name:
+            project = Path(name)
+            global_file = project / "01-global.yaml"
+            document = global_document("disabled")
+            document["common"]["mgmt"]["ztp"]["status"] = "disabled"
+            global_file.write_text(yaml.safe_dump(document), encoding="utf-8")
+            (project / "02-devices_config.csv").write_text("fixture\n", encoding="utf-8")
+            subnet = project / "02-dhcp-subnet_config.csv"
+            subnet.write_bytes(b"")
+            p2p = project / "real P2P_v1.0.xlsx"
+            p2p.write_bytes(b"fixture")
+            args = SimpleNamespace(
+                switch_scope="ib", deployment_scope="all", p2p_file=None,
+                no_upgrade=True, mini=None, ssh_dir=None, dry_run=True,
+            )
+            with mock.patch.object(LOAD, "find_placeholder_password_sections", return_value=()), \
+                    mock.patch.object(LOAD, "load_device_types", return_value=frozenset({"ib"})), \
+                    mock.patch.object(LOAD, "select_p2p", return_value=p2p), \
+                    mock.patch.object(LOAD, "project_air_topology_policy", return_value=None), \
+                    mock.patch.object(LOAD, "project_mini_air_devices", return_value=(None, None)), \
+                    mock.patch.object(LOAD, "prepare_pubkeys", return_value=()), \
+                    mock.patch.object(LOAD, "validate_shared_artifact_receipts"), \
+                    redirect_stdout(io.StringIO()):
+                inputs, images = LOAD.validate_inputs(
+                    project, args, allow_management_key_generation=False,
+                    host_role="workstation",
+                )
+            self.assertEqual({}, images)
+            self.assertEqual(frozenset({"ib"}), inputs.device_types)
+            self.assertEqual(hashlib.sha256(b"").hexdigest(),
+                             inputs.source_identities["subnet"])
+
+    def test_ib_empty_subnet_passes_setup_load_and_both_runtime_planners(self):
+        with tempfile.TemporaryDirectory() as name:
+            project = Path(name) / "project"
+            project.mkdir()
+            global_file = project / "01-global.yaml"
+            document = global_document("disabled")
+            document["common"]["mgmt"]["ztp"]["status"] = "disabled"
+            global_file.write_text(yaml.safe_dump(document), encoding="utf-8")
+            subnet = project / "02-dhcp-subnet_config.csv"
+            subnet.write_bytes(b"")
+            settings = LOAD.load_global(global_file, switch_scope="ib")
+            setup_output = io.StringIO()
+            with mock.patch.object(SETUP, "_validate_eth_csv", return_value=([], [])), \
+                    mock.patch.object(SETUP, "_validate_global_yaml", return_value=([], [])), \
+                    redirect_stdout(setup_output):
+                old_scope = SETUP._SWITCH_SCOPE
+                SETUP._SWITCH_SCOPE = "ib"
+                try:
+                    self.assertTrue(SETUP._validate_project(str(project)), setup_output.getvalue())
+                finally:
+                    SETUP._SWITCH_SCOPE = old_scope
+            settings = LOAD.apply_subnet_service_ips(settings, subnet)
+            LOAD.validate_subnet_file(subnet, settings)
+            inputs = SimpleNamespace(settings=settings, subnet_file=subnet)
+            native = LOAD.plan_local_dhcp_runtime(
+                inputs, link_snapshot=[], address_snapshot=[], environment={},
+            )
+            self.assertEqual((), native.listener_names)
+            self.assertEqual((), native.endpoint_ips)
+            docker_settings = SimpleNamespace(project_dir=project, subnet_csv=subnet,
+                                              http_root=ROOT,
+                                              project_name="project", scope="all",
+                                              switch_scope="ib", mini=False,
+                                              allowlist=(), relay_ingress=())
+            with mock.patch.object(ACTIVATE, "validate_project_mount"), \
+                    mock.patch.object(ACTIVATE, "capture_stable_network_snapshot", return_value=([], [])), \
+                    mock.patch.object(ACTIVATE, "_load_runtime_module", return_value=RUNTIME):
+                docker, _, _, _ = ACTIVATE.build_runtime_plan(docker_settings)
+            self.assertEqual((), docker.listener_names)
+            self.assertEqual(hashlib.sha256(b"").hexdigest(),
+                             ACTIVATE.sha256_path(subnet, allow_empty=True))
+            self.assertEqual((), docker.endpoint_ips)
+            self.assertEqual(
+                hashlib.sha256(b"").hexdigest(),
+                ACTIVATE.runtime_plan_payload(docker_settings, docker, [], [])["subnet_sha256"],
+            )
+
+            docker_settings.relay_ingress = ("eth0",)
+            links = [{"ifindex": 7, "ifname": "eth0", "link_type": "ether",
+                      "flags": ["BROADCAST", "MULTICAST", "UP", "LOWER_UP"],
+                      "operstate": "UP"}]
+            addresses = [{"ifindex": 7, "ifname": "eth0", "addr_info": [
+                {"family": "inet", "local": "192.0.2.10", "prefixlen": 24,
+                 "scope": "global"}]}]
+            with mock.patch.object(ACTIVATE, "validate_project_mount"), \
+                    mock.patch.object(ACTIVATE, "capture_stable_network_snapshot", return_value=(links, addresses)), \
+                    mock.patch.object(ACTIVATE, "_load_runtime_module", return_value=RUNTIME), \
+                    self.assertRaisesRegex(ACTIVATE.ActivationError, "no DHCP networks"):
+                ACTIVATE.build_runtime_plan(docker_settings)
+
+            docker_settings.relay_ingress = ()
+            for service in ("dhcp-server", "ztp"):
+                with self.subTest(enabled=service):
+                    changed = global_document("disabled")
+                    changed["common"]["mgmt"]["ztp"]["status"] = "disabled"
+                    changed["common"]["mgmt"][service]["status"] = "enabled"
+                    global_file.write_text(yaml.safe_dump(changed), encoding="utf-8")
+                    with mock.patch.object(ACTIVATE, "validate_project_mount"), \
+                            mock.patch.object(ACTIVATE, "capture_stable_network_snapshot", return_value=([], [])), \
+                            mock.patch.object(ACTIVATE, "_load_runtime_module", return_value=RUNTIME), \
+                            self.assertRaises(ACTIVATE.ActivationError):
+                        ACTIVATE.build_runtime_plan(docker_settings)
+                    with mock.patch.object(SETUP, "_validate_eth_csv", return_value=([], [])), \
+                            mock.patch.object(SETUP, "_validate_global_yaml", return_value=([], [])), \
+                            redirect_stdout(io.StringIO()):
+                        self.assertFalse(SETUP._validate_project(str(project)))
+
     def test_generator_native_handoff_is_accepted_by_real_linux_load_parser(self):
         guidance = DHCP._production_handoff_text()
         command = next(

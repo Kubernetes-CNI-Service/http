@@ -840,6 +840,7 @@ def build_runtime_plan(settings: Settings, runner=subprocess.run):
             address_snapshot=addresses,
             allowlist=settings.allowlist,
             relay_ingress=settings.relay_ingress,
+            allow_empty_subnet=_empty_subnet_allowed(settings, settings.subnet_csv),
         )
     except Exception as exc:
         if isinstance(exc, ActivationError):
@@ -848,12 +849,12 @@ def build_runtime_plan(settings: Settings, runner=subprocess.run):
     return selected, links, addresses, runtime
 
 
-def sha256_path(path: Path) -> str:
+def sha256_path(path: Path, *, allow_empty: bool = False) -> str:
     try:
         payload = path.read_bytes()
     except OSError as exc:
         raise ActivationError(f"cannot read activation input {path}: {exc}") from exc
-    if not payload:
+    if not payload and not allow_empty:
         raise ActivationError(f"activation input is empty: {path}")
     return hashlib.sha256(payload).hexdigest()
 
@@ -1369,6 +1370,25 @@ def current_project_dhcp_status(settings: Settings) -> str:
     return status
 
 
+def _empty_subnet_allowed(settings: Settings, subnet_csv: Path) -> bool:
+    """An empty subnet is valid only for an explicitly disabled service pair."""
+    try:
+        if subnet_csv.stat().st_size != 0:
+            return False
+        project = settings.project_dir
+        global_yaml = project / "01-global.yaml"
+        _canonical_regular_within(global_yaml, project, "project global YAML")
+        document = safe_load_global_yaml(global_yaml.read_text(encoding="utf-8"))
+        mgmt = document["common"]["mgmt"]
+        statuses = tuple(
+            str(mgmt[name]["status"] or "").strip().casefold()
+            for name in ("dhcp-server", "ztp")
+        )
+    except (OSError, UnicodeError, yaml.YAMLError, ValueError, KeyError, TypeError) as exc:
+        raise ActivationError(f"invalid empty-subnet service policy: {exc}") from exc
+    return statuses == ("disabled", "disabled")
+
+
 def render_apache_listener_config(
     endpoint_ips: Iterable[str], *, port: int = 80,
 ) -> str:
@@ -1547,7 +1567,10 @@ def runtime_plan_payload(
         "switch_scope": settings.switch_scope,
         "mini": settings.mini,
         "subnet_csv": os.fspath(settings.subnet_csv),
-        "subnet_sha256": sha256_path(settings.subnet_csv),
+        "subnet_sha256": sha256_path(
+            settings.subnet_csv,
+            allow_empty=_empty_subnet_allowed(settings, settings.subnet_csv),
+        ),
         "listener_names": list(selected.listener_names),
         "listener_ifindexes": list(selected.listener_ifindexes),
         "direct_shared_networks": list(selected.direct_shared_networks),
@@ -2451,11 +2474,13 @@ def _load_json_object(path: Path, label: str) -> dict:
     return payload
 
 
-def _hash_matches(path: Path, expected: object, label: str) -> None:
+def _hash_matches(
+    path: Path, expected: object, label: str, *, allow_empty: bool = False,
+) -> None:
     value = str(expected or "").strip().casefold()
     if not re.fullmatch(r"[0-9a-f]{64}", value):
         raise ActivationError(f"{label} has invalid SHA-256")
-    actual = sha256_path(path)
+    actual = sha256_path(path, allow_empty=allow_empty)
     if actual != value:
         raise ActivationError(
             f"{label} hash drift: {path}: actual={actual}, expected={value}"
@@ -2625,7 +2650,12 @@ def validate_parent_release(settings: Settings, release_manifest: Path) -> dict:
             _canonical_regular_within(
                 fixed[key], project, f"parent release input {key}",
             )
-            _hash_matches(fixed[key], expected, f"parent release input {key}")
+            _hash_matches(
+                fixed[key], expected, f"parent release input {key}",
+                allow_empty=(
+                    key == "subnet" and _empty_subnet_allowed(settings, fixed[key])
+                ),
+            )
 
     components = parent.get("components")
     if not isinstance(components, dict):
@@ -3088,7 +3118,9 @@ def build_activation_marker(
         "switch_scope": settings.switch_scope,
         "mini": settings.mini,
         "dhcp_status": dhcp_status,
-        "subnet_sha256": sha256_path(subnet),
+        "subnet_sha256": sha256_path(
+            subnet, allow_empty=_empty_subnet_allowed(settings, subnet),
+        ),
         "release_manifest_sha256": sha256_path(release),
         "services": list(expected_services(
             selected, dhcp_status=dhcp_status,
@@ -3455,6 +3487,7 @@ def exec_managed_service(name: str, settings: Settings) -> None:
             address_snapshot=addresses,
             allowlist=settings.allowlist,
             relay_ingress=settings.relay_ingress,
+            allow_empty_subnet=_empty_subnet_allowed(settings, settings.subnet_csv),
         )
         revalidated_fingerprints = selected_interface_fingerprints(
             selected, links, addresses,

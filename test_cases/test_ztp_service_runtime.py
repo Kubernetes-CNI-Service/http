@@ -138,6 +138,33 @@ class DynamicDhcpInterfaceContractTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_empty_subnet_requires_explicit_disabled_service_authority(self) -> None:
+        runtime = load_runtime_module()
+        subnet = self.root / "02-dhcp-subnet_config.csv"
+        subnet.write_bytes(b"")
+        empty = runtime.plan_dhcp_runtime(
+            subnet, link_snapshot=[], address_snapshot=[],
+            allow_empty_subnet=True,
+        )
+        self.assertEqual((), empty.listener_names)
+        self.assertEqual((), empty.endpoint_ips)
+        with self.assertRaisesRegex(runtime.RuntimeContractError, "no header"):
+            runtime.plan_dhcp_runtime(
+                subnet, link_snapshot=[], address_snapshot=[],
+            )
+        with self.assertRaisesRegex(runtime.RuntimeContractError, "no DHCP networks"):
+            runtime.plan_dhcp_runtime(
+                subnet, link_snapshot=[link(7, "eno7")],
+                address_snapshot=[addresses(7, "eno7", "192.0.2.10/24")],
+                relay_ingress=("eno7",), allow_empty_subnet=True,
+            )
+        subnet.write_text("wrong,columns\n", encoding="utf-8")
+        with self.assertRaisesRegex(runtime.RuntimeContractError, "missing columns"):
+            runtime.plan_dhcp_runtime(
+                subnet, link_snapshot=[], address_snapshot=[],
+                allow_empty_subnet=True,
+            )
+
     def test_http_owner_projection_retains_active_down_and_filtered_owners(self) -> None:
         runtime = load_runtime_module()
         links = [

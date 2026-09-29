@@ -1011,8 +1011,12 @@ def inspect_http_listener_owners(
     return tuple(owners)
 
 
-def _read_dhcp_networks(subnet_csv: Path) -> Tuple[DhcpNetwork, ...]:
+def _read_dhcp_networks(
+    subnet_csv: Path, *, allow_empty_subnet: bool = False,
+) -> Tuple[DhcpNetwork, ...]:
     path = Path(subnet_csv)
+    if allow_empty_subnet and path.is_file() and path.stat().st_size == 0:
+        return ()
     try:
         stream = path.open(newline="", encoding="utf-8-sig")
     except OSError as exc:
@@ -1218,6 +1222,7 @@ def plan_dhcp_runtime(
     address_snapshot: Any,
     allowlist: Iterable[str] = (),
     relay_ingress: Iterable[str] = (),
+    allow_empty_subnet: bool = False,
 ) -> DhcpRuntimePlan:
     """Return the exact ordered Linux interfaces allowed to run dhcpd.
 
@@ -1225,7 +1230,9 @@ def plan_dhcp_runtime(
     inside that row's subnet.  Off-link rows do not add one interface per pool;
     a relay-only deployment instead requires explicitly scoped ingress names.
     """
-    networks = _read_dhcp_networks(Path(subnet_csv))
+    networks = _read_dhcp_networks(
+        Path(subnet_csv), allow_empty_subnet=allow_empty_subnet,
+    )
     interfaces = _logical_interfaces(link_snapshot, address_snapshot)
     by_name = {interface.ifname: interface for interface in interfaces}
     by_index = {interface.ifindex: interface for interface in interfaces}
@@ -1389,6 +1396,7 @@ def revalidate_dhcp_runtime_plan(
     address_snapshot: Any,
     allowlist: Iterable[str] = (),
     relay_ingress: Iterable[str] = (),
+    allow_empty_subnet: bool = False,
 ) -> DhcpRuntimePlan:
     """Re-plan immediately before exec and reject interface identity changes.
 
@@ -1403,6 +1411,7 @@ def revalidate_dhcp_runtime_plan(
         address_snapshot=address_snapshot,
         allowlist=allowlist,
         relay_ingress=relay_ingress,
+        allow_empty_subnet=allow_empty_subnet,
     )
     fields = (
         "listener_names", "listener_ifindexes", "direct_shared_networks",
