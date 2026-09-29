@@ -44,6 +44,20 @@ def load_module(name: str, relative: str):
     return module
 
 
+@contextmanager
+def private_dhcp_output_paths(module, root: Path):
+    """Route every transaction target to one disposable fixture directory."""
+    parent = root / "dhcp-output"
+    parent.mkdir(mode=0o700)
+    names = ("OUTPUT_CONF", "OUTPUT_ETH", "OUTPUT_IB", "OUTPUT_NVL", "OUTPUT_MANIFEST")
+    replacements = {
+        name: os.fspath(parent / Path(getattr(module, name)).name)
+        for name in names
+    }
+    with mock.patch.multiple(module, **replacements):
+        yield parent
+
+
 def function_node(relative: str, function_name: str) -> ast.FunctionDef:
     tree = ast.parse((ROOT / relative).read_text(encoding="utf-8"))
     for node in tree.body:
@@ -3451,11 +3465,29 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
         for writer in writers.values():
             writer.assert_not_called()
 
+    def test_dhcp_lock_workflow_uses_private_output_fixture(self) -> None:
+        """The real transaction stage must never be allocated in the source tree."""
+        dhcp = load_module(
+            "mwq_dhcp_private_outputs", "ztp/config/isc-dhcp-server/c1-generate_dhcp.py",
+        )
+        names = ("OUTPUT_CONF", "OUTPUT_ETH", "OUTPUT_IB", "OUTPUT_NVL", "OUTPUT_MANIFEST")
+        originals = {name: getattr(dhcp, name) for name in names}
+        with tempfile.TemporaryDirectory() as temporary:
+            with private_dhcp_output_paths(dhcp, Path(temporary)) as output_dir:
+                self.assertEqual(
+                    {output_dir / Path(path).name for path in originals.values()},
+                    {Path(getattr(dhcp, name)) for name in names},
+                )
+                self.assertTrue(output_dir.is_dir())
+                self.assertNotEqual(Path(dhcp.SCRIPT_DIR).resolve(), output_dir.resolve())
+        self.assertEqual(originals, {name: getattr(dhcp, name) for name in names})
+
     def test_dhcp_generator_holds_lock_from_stop_through_active_csv_mutation(self) -> None:
         dhcp = load_module(
             "mwq_dhcp_lock", "ztp/config/isc-dhcp-server/c1-generate_dhcp.py",
         )
         events = []
+        staged_conf_paths = []
 
         @contextmanager
         def fake_lock(*_args, **_kwargs):
@@ -3468,13 +3500,17 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
         def event(name, result=None):
             return lambda *_a, **_k: events.append(name) or result
 
+        def staged_conf_writer(path, *_args, **_kwargs):
+            staged_conf_paths.append(Path(path))
+            events.append("dhcp-conf")
+
         patches = self.dhcp_main_patches(dhcp) + (
             mock.patch.object(dhcp, "deployment_lock", fake_lock, create=True),
             mock.patch.object(
                 dhcp, "stop_native_ztp_monitors", side_effect=event("monitor-stop", ()),
                 create=True,
             ),
-            mock.patch.object(dhcp, "write_dhcpd_conf", side_effect=event("dhcp-conf")),
+            mock.patch.object(dhcp, "write_dhcpd_conf", side_effect=staged_conf_writer),
             mock.patch.object(dhcp, "write_hosts", side_effect=event("hosts")),
             mock.patch.object(dhcp, "write_release_manifest", side_effect=event("manifest")),
             mock.patch.object(dhcp, "_candidate_mode", side_effect=event("candidate-mode")),
@@ -3486,8 +3522,16 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
                 side_effect=event("active-csv", (0, 0, 0)),
             ),
         )
-        with self.enter_all(patches):
-            dhcp.main()
+        with tempfile.TemporaryDirectory() as temporary:
+            with private_dhcp_output_paths(dhcp, Path(temporary)) as output_dir:
+                with self.enter_all(patches):
+                    dhcp.main()
+                self.assertEqual([], list(output_dir.iterdir()))
+                self.assertEqual(1, len(staged_conf_paths))
+                self.assertEqual(
+                    output_dir.resolve(), staged_conf_paths[0].parent.parent.resolve(),
+                )
+                self.assertTrue(staged_conf_paths[0].parent.name.startswith(".dhcp-generate-"))
         self.assertEqual("lock-enter", events[0])
         self.assertEqual("monitor-stop", events[1])
         self.assertIn("active-csv", events)
