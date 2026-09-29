@@ -1,31 +1,4 @@
 {
-  "full_suite_attestation": {
-    "environment": {
-      "container_toplevel_lock_sha256": "3532f5208b462243bab779b01eb4deb21638ac05a9390c17ac997ba8d7f24998",
-      "container_toplevel_versions": [
-        "Jinja2==3.1.6",
-        "openpyxl==3.1.5",
-        "pandas==2.3.3",
-        "PyYAML==6.0.3",
-        "XlsxWriter==3.2.9"
-      ],
-      "machine": "arm64",
-      "platform": "darwin",
-      "python_cache_tag": "cpython-39",
-      "python_executable": "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/bin/python3.9",
-      "python_implementation": "CPython",
-      "python_version": [
-        3,
-        9,
-        6
-      ]
-    },
-    "scenario_coverage": {
-      "root-entrypoint-workflow": "NOT COVERED (requires Linux EUID 0 private namespace)"
-    },
-    "schema_version": 1,
-    "snapshot_sha256": "a1bbc12058013487dc687ee5f6fe6f5beb1ac164e67f338144500924a40dd399"
-  },
   "impact_manifest_sha256": "81ba6afa5a5d6f283531955942e61bf19cbd033dacd9e4b68d3277090a2e8c20",
   "schema_version": 1,
   "scripts": {
@@ -39,7 +12,7 @@
     },
     "DAY0-Prepare/11-load.py": {
       "canonical": "DAY0-Prepare/11-load.py",
-      "sha256": "bd1d3d2a6f9bc2162eabbe9331692c88745f9910e706b56e08bf395a20d5c2f8"
+      "sha256": "b3f4ba714f19729c65e2315afba9003af3c09d26ebb56e28f8a8ae847b9ebd01"
     },
     "DAY0-Prepare/12-ztp-monitor.py": {
       "canonical": "DAY0-Prepare/12-ztp-monitor.py",
@@ -887,7 +860,7 @@
     "test_cases.test_issue_tracker_whitelist_workbook": "6c4fd8bceec23e1fbfa1b9d8ecad78853058ee7f3ef93bd90b5f7906923c6eac",
     "test_cases.test_issue_tracker_whitelist_workbook_workflow": "2cc91998f5ee6c704f7b17b95bcc404dbfde4737092430a306485e5a39ace919",
     "test_cases.test_issue_tracker_whitelist_workflow": "b22e238ef2e8eedf29977486a6c170c7cf9158a126d7797d145109acf726c353",
-    "test_cases.test_load_release_transaction": "72a31f367d63ee3d9c34682701db8041779f749c7a2f3c6681649249f73846f3",
+    "test_cases.test_load_release_transaction": "c0177dac041baec0b37f66a6684d60eec367aba5b4feb322a293ab7d6443e780",
     "test_cases.test_manual_applied_config": "4e265643d5fdd028b845298b9afec392d470b56d29141d8a3f6e8b96b7da84f9",
     "test_cases.test_mlag_evpn_generation": "7eb9edb511bc66c616b214903fbeef5c77df112c27990750fd6fb006a507cd7a",
     "test_cases.test_monitor_authority_entrypoints": "b40ed42fdac6c5fbc8a685514ad69452685e37691d7ada9458b6d5f4e1c302ae",
