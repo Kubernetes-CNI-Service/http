@@ -383,6 +383,7 @@ class NvosImageLoadContractTests(unittest.TestCase):
             project = root / "project"
             shared.mkdir()
             project.mkdir()
+            (project / "01-global.yaml").write_text("schema_version: 2\n", encoding="utf-8")
             (shared / NVOS_IMAGE_NAMES[0]).touch()
             with mock.patch.multiple(
                 SETUP, HTTP_BASE=str(root), IMAGE_DIR=str(shared), ZTP=str(ztp),
