@@ -1,37 +1,10 @@
 {
-  "full_suite_attestation": {
-    "environment": {
-      "container_toplevel_lock_sha256": "3532f5208b462243bab779b01eb4deb21638ac05a9390c17ac997ba8d7f24998",
-      "container_toplevel_versions": [
-        "Jinja2==3.1.6",
-        "openpyxl==3.1.5",
-        "pandas==2.3.3",
-        "PyYAML==6.0.3",
-        "XlsxWriter==3.2.9"
-      ],
-      "machine": "arm64",
-      "platform": "darwin",
-      "python_cache_tag": "cpython-39",
-      "python_executable": "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/bin/python3.9",
-      "python_implementation": "CPython",
-      "python_version": [
-        3,
-        9,
-        6
-      ]
-    },
-    "scenario_coverage": {
-      "root-entrypoint-workflow": "NOT COVERED (requires Linux EUID 0 private namespace)"
-    },
-    "schema_version": 1,
-    "snapshot_sha256": "30d60fd8876efb82c6bd25ac485c39a850154a9ffff6db752aec73d32d29c8fc"
-  },
   "impact_manifest_sha256": "81ba6afa5a5d6f283531955942e61bf19cbd033dacd9e4b68d3277090a2e8c20",
   "schema_version": 1,
   "scripts": {
     "DAY0-Prepare/01-a-setup.py": {
       "canonical": "DAY0-Prepare/01-a-setup.py",
-      "sha256": "2b1578f7c2d30ce1c7047334b31beeedd0ee553c28f392aa4363448992332572"
+      "sha256": "bf7b2a64bac71b485e81471dc425a7cb2daa5a2f2c072e8790efdfbcd6f1233e"
     },
     "DAY0-Prepare/02-unsetup.py": {
       "canonical": "DAY0-Prepare/02-unsetup.py",
@@ -39,7 +12,7 @@
     },
     "DAY0-Prepare/11-load.py": {
       "canonical": "DAY0-Prepare/11-load.py",
-      "sha256": "9e2b2f1b9e60ce44bd241ec87bb013bb1c5970f5910dd5e79cf08d86620c1c6d"
+      "sha256": "bd1d3d2a6f9bc2162eabbe9331692c88745f9910e706b56e08bf395a20d5c2f8"
     },
     "DAY0-Prepare/12-ztp-monitor.py": {
       "canonical": "DAY0-Prepare/12-ztp-monitor.py",
@@ -742,7 +715,7 @@
     "test_cases/splitter_profile_fixture.py": "7b0548d7d15b855278e21456d1ec2b667072d874ba68d527348f185f85d6d75f",
     "test_cases/user_manual_contract.json": "dc0bb8977038e9e326fa73c90fba1e992434752b89861a91d998c9d576eb6881",
     "tools/lldp-analyze-tool/04-lldp-device-aliases.json": "595529fac28098b504d67809026a59ecfa0345375ada9b16057ff069e5179250",
-    "user-manual.html": "dbaf327a6e5b4d5dcfedec90549bcb070f7232d56bcfa853d41e2915537e1aff",
+    "user-manual.html": "3af444d08a045632264f5c38e82845606db341cf9d09c4f5347a8ff0e153e2de",
     "ztp/config/cumulus/ar_profile_custom.conf": "9316fe81c3238ef99076ee598abf303c955dc38343df4176ba22bc4c27729c1c",
     "ztp/config/cumulus/default.yaml": "6e3f950a5c964fabbac8106720920d3061e90bf94436f22b6ad049c64c1b5934",
     "ztp/config/cumulus/default_5.16.5.yaml": "6e3f950a5c964fabbac8106720920d3061e90bf94436f22b6ad049c64c1b5934",
@@ -887,7 +860,7 @@
     "test_cases.test_issue_tracker_whitelist_workbook": "6c4fd8bceec23e1fbfa1b9d8ecad78853058ee7f3ef93bd90b5f7906923c6eac",
     "test_cases.test_issue_tracker_whitelist_workbook_workflow": "2cc91998f5ee6c704f7b17b95bcc404dbfde4737092430a306485e5a39ace919",
     "test_cases.test_issue_tracker_whitelist_workflow": "b22e238ef2e8eedf29977486a6c170c7cf9158a126d7797d145109acf726c353",
-    "test_cases.test_load_release_transaction": "ec319a6f17a5e9243694a0d61753e64e6b3ae80c998bf96ebd01ff0eda69d124",
+    "test_cases.test_load_release_transaction": "72a31f367d63ee3d9c34682701db8041779f749c7a2f3c6681649249f73846f3",
     "test_cases.test_manual_applied_config": "4e265643d5fdd028b845298b9afec392d470b56d29141d8a3f6e8b96b7da84f9",
     "test_cases.test_mlag_evpn_generation": "7eb9edb511bc66c616b214903fbeef5c77df112c27990750fd6fb006a507cd7a",
     "test_cases.test_monitor_authority_entrypoints": "b40ed42fdac6c5fbc8a685514ad69452685e37691d7ada9458b6d5f4e1c302ae",
@@ -958,7 +931,7 @@
     "test_cases.test_ufm_remote_producer_workflow": "0af8e841718064e149d2d8b1c49b85800c3644b17b3f5b3284809ef196a994c1",
     "test_cases.test_upload_package_contract": "452187b71cdcb618e33d589aaaa43874ce895ef8302cab2dfcf6ab45248a4205",
     "test_cases.test_v2_generation_flow": "9e4e9c06fd1315b6c010246cf8470ec2e9e2a9ac9bf2e6b9b9e55c6da7cd64e4",
-    "test_cases.test_v2_project_schema": "87a701ac45052a44c1336272f6c47fabc0f5e22ee3fed84a06c696657ad36590",
+    "test_cases.test_v2_project_schema": "38a8d9f2029c89d8e6b418ed8db9936550403589036e731e19b441b5cce99174",
     "test_cases.test_vm_validation_runner": "e3cea3bccb662d899f748421598feb95298142b47928bc1c077909bb1af2c505",
     "test_cases.test_xlsx_zero_row_fail_closed": "a5d69be6a27360c0ed620c9afd370a95843c20b914d26392960c4115845971df",
     "test_cases.test_xlsx_zero_row_workflow": "abe3f6447c702016761ff6c907f355faf153d071c3c4909c4a162123ed1950dd",
