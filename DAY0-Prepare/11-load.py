@@ -1182,10 +1182,20 @@ def load_global(
     )
 
 
-def find_placeholder_password_sections(global_data: object) -> tuple[str, ...]:
-    """Return ordered switch families whose managed credential is exactly ``*``."""
+def find_placeholder_password_sections(
+    global_data: object, *, switch_scope: str = "all",
+) -> tuple[str, ...]:
+    """Return selected switch families whose managed credential is exactly ``*``."""
     if set(SWITCH_CREDENTIAL_PATHS) != set(SWITCH_SCHEMA_FAMILIES):
         raise LoadError("switch credential contract does not cover every schema family")
+    selected_scope = str(switch_scope or "all").strip().casefold()
+    if selected_scope not in SWITCH_SCOPE_TYPES:
+        raise LoadError(f"无法识别 switch scope：{switch_scope!r}")
+    selected_families = (
+        set(SWITCH_SCHEMA_FAMILIES)
+        if selected_scope == "all"
+        else {selected_scope}
+    )
     if not isinstance(global_data, dict):
         raise LoadError("global.yaml 顶层必须是 mapping")
     switches = global_data.get("switches")
@@ -1203,6 +1213,9 @@ def find_placeholder_password_sections(global_data: object) -> tuple[str, ...]:
             )
         if family in values:
             raise LoadError(f"global.switches 包含重复设备类型：{family}")
+        if family not in selected_families:
+            values[family] = None
+            continue
         node: object = config
         traversed = f"switches.{family}"
         for key in SWITCH_CREDENTIAL_PATHS[family]:
@@ -7394,7 +7407,9 @@ def validate_inputs(
     settings = load_global(
         global_file, global_data=global_data, switch_scope=switch_scope,
     )
-    placeholder_sections = find_placeholder_password_sections(global_data)
+    placeholder_sections = find_placeholder_password_sections(
+        global_data, switch_scope=switch_scope,
+    )
     if placeholder_sections:
         raise _placeholder_password_error(
             project, placeholder_sections, host_role=host_role,

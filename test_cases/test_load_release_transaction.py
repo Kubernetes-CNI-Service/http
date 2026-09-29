@@ -592,6 +592,27 @@ class ReleaseTransactionTests(unittest.TestCase):
                     (), LOAD.find_placeholder_password_sections(document),
                 )
 
+    def test_placeholder_password_detector_honors_selected_switch_scope(self):
+        template = ROOT / "DAY0-Prepare/template/01-global.yaml"
+        document = yaml.safe_load(template.read_text(encoding="utf-8"))
+        switches = {
+            next(iter(item)): next(iter(item.values()))
+            for item in document["switches"]
+        }
+
+        self.assertEqual(
+            ("ib",),
+            LOAD.find_placeholder_password_sections(document, switch_scope="ib"),
+        )
+        del switches["eth"]["system"]["aaa"]
+        switches["nvl"]["system"]["aaa"] = "unused-invalid-shape"
+        self.assertEqual(
+            ("ib",),
+            LOAD.find_placeholder_password_sections(document, switch_scope="ib"),
+        )
+        with self.assertRaisesRegex(LOAD.LoadError, "switch scope"):
+            LOAD.find_placeholder_password_sections(document, switch_scope="future")
+
     def test_service_default_renderer_is_family_specific_and_preserves_neutral_silence(self):
         with tempfile.TemporaryDirectory() as directory:
             service = Path(directory)
