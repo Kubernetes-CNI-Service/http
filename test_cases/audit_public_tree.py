@@ -30,12 +30,8 @@ MAX_BLOB_BYTES = 5 * 1024 * 1024
 
 ZERO_BYTE_PLACEHOLDERS = frozenset(
     {
-        "DAY0-Prepare/template/cumulus-linux-5.16.4-mlx-amd64.bin",
-        "DAY0-Prepare/template/cumulus-linux-5.16.4-mlx-vx.bin",
         "DAY0-Prepare/template/laptop.pub",
         "DAY0-Prepare/template/mgmt-server.pub",
-        "DAY0-Prepare/template/nvosv25-02-7002amd64.bin",
-        "DAY0-Prepare/template/nvosv25-02-8008amd64.bin",
         "DAY0-Prepare/template/p2p.xlsx",
     }
 )

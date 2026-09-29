@@ -850,6 +850,10 @@ def initialize_from_template(project: Path, dry_run: bool = False) -> None:
     project.mkdir(parents=True, exist_ok=True)
     for source in sorted(TEMPLATE_DIR.rglob("*")):
         relative = source.relative_to(TEMPLATE_DIR)
+        if source.suffix.casefold() == ".bin":
+            # Image names come from the selected device families and global
+            # versions, never from a static project-template placeholder.
+            continue
         if relative.parts and relative.parts[0] == "p2p":
             # p2p/ is customer-owned and may be an external directory link.
             continue
@@ -3071,18 +3075,14 @@ def validate_shared_artifact_receipts(
 def prepare_images(
     project: Path, expected: dict[str, str], *, dry_run: bool = False, quiet: bool = False,
 ) -> dict[str, Path]:
-    if not dry_run:
-        IMAGE_DIR.mkdir(parents=True, exist_ok=True)
     expected_names = {
         candidate
         for filename in expected.values()
         for candidate in _image_filename_candidates(filename)
     }
     project_bins = sorted(project.glob("*.bin"))
-    # The complete project template intentionally carries zero-byte .bin files
-    # for every supported image as preparation reminders.  They are metadata,
-    # not candidate payloads, so only a non-empty unexpected image is a version
-    # conflict.  Exact expected placeholders are resolved from the shared store.
+    # Preserve zero-byte files in historical customer projects, but do not use
+    # them as image payloads or create any new placeholders.
     errors = []
     unexpected = []
     for item in project_bins:
@@ -3126,8 +3126,11 @@ def prepare_images(
                     message = (
                         f"缺少 {kind} NVOS 镜像：接受 " + " 或 ".join(candidate_names)
                     )
+                shared_candidates = " 或 ".join(
+                    f"image/{candidate}" for candidate in candidate_names
+                )
                 raise LoadError(
-                    message + f"；项目占位文件为空，且 {IMAGE_DIR} 中没有合法镜像"
+                    message + f"；请将真实升级镜像放到共享 {IMAGE_DIR}/：{shared_candidates}"
                 )
             if len(payloads) > 1:
                 fingerprints: dict[tuple[int, str], list[tuple[str, str, Path]]] = {}
@@ -3163,6 +3166,8 @@ def prepare_images(
             errors.append(str(exc))
     if errors:
         raise LoadError("镜像检查失败：\n  - " + "\n  - ".join(errors))
+    if copy_pairs and not dry_run:
+        IMAGE_DIR.mkdir(parents=True, exist_ok=True)
     for shared_image, project_image in copy_pairs.items():
         if not quiet:
             print(f"[IMAGE] {project_image} → {shared_image}")
@@ -3172,7 +3177,7 @@ def prepare_images(
         _selected, project_has_payload = resolution_cache[filename]
         if not project_has_payload:
             if not quiet:
-                info(f"项目镜像为空/缺失，复用共享镜像：image/{resolved[kind].name}")
+                info(f"使用共享升级镜像：image/{resolved[kind].name}")
     return resolved
 
 
@@ -3196,6 +3201,7 @@ def activate_project(
     deployment_lock_descriptor: int | None = None,
     host_role: str | None = None,
     switch_scope: str = "all",
+    no_upgrade: bool = False,
 ) -> None:
     host_role = resolve_host_role(host_role)
     current = active_project()
@@ -3211,6 +3217,8 @@ def activate_project(
     ]
     if strict:
         command.append("--strict")
+    if no_upgrade:
+        command.append("--no-upgrade")
     selected_switch = str(switch_scope or "all").strip().casefold()
     if selected_switch not in SWITCH_SCOPE_TYPES:
         raise LoadError(f"无法识别 switch scope：{switch_scope!r}")
@@ -8096,6 +8104,7 @@ def main(argv: list[str] | None = None) -> int:
             deployment_lock_descriptor=deployment_lock_descriptor,
             host_role=host_role,
             switch_scope=switch_scope,
+            no_upgrade=args.no_upgrade,
         )
         if not args.dry_run and (project / "p2p.xlsx").is_symlink():
             selected_runtime_p2p = project / os.readlink(project / "p2p.xlsx")

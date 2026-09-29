@@ -128,6 +128,7 @@ _AUTO_YES = False
 _DRY_RUN  = False
 _FORCE    = False  # --force：忽略校验错误强行继续（独立于 -y）
 _STRICT   = False  # --strict：把空公钥/xlsx/共享镜像占位文件视为错误
+_NO_UPGRADE = False  # load --no-upgrade：不检查或发布升级镜像
 _CSV_DIR  = None   # --csv-dir 指定的 devices_config.csv 所在目录
 _P2P_FILE = None   # --p2p-file 指定的项目根目录 XLSX
 _SWITCH_SCOPE = "all"  # --switch：只严格校验所选设备族的 global 分支
@@ -394,6 +395,10 @@ def _initialize_project_from_template(proj_dir):
             src = os.path.join(src_root, filename)
             dest = os.path.join(dest_root, filename)
             rel_path = os.path.join(rel_root, filename) if rel_root else filename
+            if filename.casefold().endswith(".bin"):
+                # Static template image names can be unrelated to this
+                # project's selected switch families and global versions.
+                continue
             if rel_path == "laptop.pub":
                 # This identity belongs to the local operator, never to a template.
                 continue
@@ -426,14 +431,16 @@ def _image_platform(filename):
 
 def _shared_image_pairs():
     """返回 (ZTP 链接路径, http/image 源文件)；忽略无法识别的平台文件。"""
+    if _NO_UPGRADE:
+        return []
     pairs = []
     for src in sorted(glob.glob(os.path.join(IMAGE_DIR, "*.bin"))):
         platform = _image_platform(os.path.basename(src))
         try:
-            regular = stat.S_ISREG(os.lstat(src).st_mode)
+            metadata = os.lstat(src)
         except OSError:
-            regular = False
-        if platform and regular:
+            continue
+        if platform and stat.S_ISREG(metadata.st_mode) and metadata.st_size > 0:
             pairs.append((os.path.join(ZTP, "image", platform, os.path.basename(src)), src))
     return pairs
 
@@ -441,6 +448,9 @@ def _shared_image_pairs():
 def _process_bin_files():
     """把 http/image/ 中的共享镜像链接到 ztp/image/cumulus|nvos/。"""
     global _LINK_ERRORS
+    if _NO_UPGRADE:
+        print("  [SKIP] --no-upgrade：不检查或发布升级镜像")
+        return
     bins = sorted(glob.glob(os.path.join(IMAGE_DIR, "*.bin")))
     if not bins:
         print(_c(YELLOW, f"  [MISS] {IMAGE_DIR}/ 下未找到 .bin 镜像文件"))
@@ -460,6 +470,9 @@ def _process_bin_files():
         if not stat.S_ISREG(metadata.st_mode):
             print(_c(RED, f"  [ERROR] 共享镜像必须是普通文件，跳过：image/{fname}"))
             _LINK_ERRORS += 1
+            continue
+        if metadata.st_size == 0:
+            print(_c(YELLOW, f"  [WARN] 共享镜像为空，跳过发布：image/{fname}"))
             continue
         img_dir = os.path.join(ZTP, "image", platform)
         if not _DRY_RUN:
@@ -2123,24 +2136,42 @@ def _validate_eth_csv(path):
     global_path = os.path.join(os.path.dirname(os.path.realpath(path)), "01-global.yaml")
     try:
         import yaml
+    except ImportError as exc:
+        errors.append(f"  无法确定 devices_config.csv schema：PyYAML 不可用：{exc}")
+        return errors, warnings
+    try:
         with open(global_path, encoding="utf-8") as stream:
             global_document = safe_load_global_yaml(stream)
         schema_version = detect_global_schema_version(global_document)
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        # A malformed or unsupported global cannot silently select the v1
+        # layout: doing so misdiagnoses a valid v2 inventory as a v1 CSV.
+        errors.append(f"  无法确定 devices_config.csv schema：01-global.yaml 无效：{exc}")
+        return errors, warnings
+
+    try:
         normalize_issue_tracker_policy(global_document)
-        if schema_version == 2 and isinstance(global_document, dict):
-            eth_config = next((
-                item["eth"] for item in global_document.get("switches", [])
-                if isinstance(item, dict) and isinstance(item.get("eth"), dict)
-            ), None)
-            if eth_config is not None:
+    except ValueError as exc:
+        errors.append(f"  01-global.yaml issue tracker 策略无效：{exc}")
+
+    # CSV layout is bound only to the declared schema.  ETH policy is relevant
+    # to Cumulus setup, not to an IB/NVL-only setup of a mixed inventory.
+    if schema_version == 2 and _SWITCH_SCOPE in {"all", "eth"}:
+        switches = global_document.get("switches", [])
+        eth_config = next((
+            item["eth"] for item in switches
+            if isinstance(item, dict) and isinstance(item.get("eth"), dict)
+        ), None) if isinstance(switches, list) else None
+        if eth_config is not None:
+            common = global_document.get("common")
+            common_switch = common.get("switch", {}) if isinstance(common, dict) else {}
+            eth_config = _v2_preflight_deep_merge(common_switch, eth_config)
+            try:
                 v2_vrr_gateway_mode = normalize_v2_vrr_policy(eth_config)[
                     "gateway_ip"
                 ]
-    except (OSError, ValueError, yaml.YAMLError):
-        # _validate_global_yaml reports the authoritative global error.  Keep
-        # the legacy layout here so this validator can still return useful
-        # inventory errors without masking that earlier diagnostic.
-        schema_version = 1
+            except ValueError as exc:
+                errors.append(f"  {exc}")
 
     # ETH 设备类型集合
     _ETH_TYPES  = {"eth", "eth_spx", "spx"}
@@ -3044,8 +3075,9 @@ def _validate_project(proj_dir):
             _run(label, _P2P_SOURCE, _validate_xlsx)
 
     # 共享系统镜像：http/image/ 是唯一来源，不再读取项目目录中的旧 .bin 文件。
-    shared_bins = sorted(glob.glob(os.path.join(IMAGE_DIR, "*.bin")))
-    if not shared_bins:
+    # --no-upgrade has no image dependency, including on empty legacy files.
+    shared_bins = [] if _NO_UPGRADE else sorted(glob.glob(os.path.join(IMAGE_DIR, "*.bin")))
+    if not _NO_UPGRADE and not shared_bins:
         message = f"共享镜像目录 {IMAGE_DIR}/ 下没有 .bin 文件"
         all_warnings.append(message)
         print(_c(YELLOW, f"  [WRN] {message}"))
@@ -3170,6 +3202,8 @@ def _unsetup_previous(proj_dir):
         # 旧版镜像链接即使指向当前项目也必须移除；镜像现由 http/image/ 统一提供。
         image_root = os.path.join(ZTP, "image") + os.sep
         if os.path.abspath(lp).startswith(image_root):
+            if _NO_UPGRADE:
+                continue
             to_del.append(lp)
             continue
         # 旧版项目监控 CSV 已由 monitor/02-devices_config.csv 取代。
@@ -4709,6 +4743,8 @@ def _parse_args(argv=None):
                         help="忽略输入校验错误继续（独立于 -y）")
     parser.add_argument("--strict", action="store_true",
                         help="把空公钥、XLSX 和共享镜像占位视为错误")
+    parser.add_argument("--no-upgrade", action="store_true",
+                        help="不检查或发布升级镜像；load --no-upgrade 委派时使用")
     parser.add_argument("--dry-run", action="store_true",
                         help="只显示操作，不创建项目、文件、目录或链接")
     parser.add_argument("--csv-dir",
@@ -4724,7 +4760,7 @@ def _parse_args(argv=None):
         if args.project is not None or any((
             args.create, args.auto_yes, args.confirm_project_switch,
             args.force, args.strict, args.dry_run, args.csv_dir, args.p2p_file,
-            args.host_role, getattr(args, "switch_scope", None),
+            args.host_role, args.no_upgrade, getattr(args, "switch_scope", None),
         )):
             parser.error("--status/--list-projects 是独立只读动作，不能组合变更参数")
     elif args.project is None:
@@ -4804,7 +4840,7 @@ def _main_locked(args):
 
 def main(argv=None):
     global _AUTO_YES, _DRY_RUN, _FORCE, _STRICT, _CONFIRM_PROJECT_SWITCH
-    global _SWITCH_SCOPE
+    global _SWITCH_SCOPE, _NO_UPGRADE
 
     args = _parse_args(argv)
     if getattr(args, "status", False) or getattr(args, "list_projects", False):
@@ -4836,6 +4872,7 @@ def main(argv=None):
     _AUTO_YES = args.auto_yes
     _FORCE = args.force
     _STRICT = args.strict
+    _NO_UPGRADE = args.no_upgrade
     _CONFIRM_PROJECT_SWITCH = args.confirm_project_switch
     _SWITCH_SCOPE = getattr(args, "switch_scope", None) or "all"
     key_mode = os.environ.get("HTTP_SETUP_KEY_MODE", "")

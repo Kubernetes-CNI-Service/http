@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import io
 import json
@@ -26,6 +27,48 @@ ACTIVATE = load_script("optional_empty_subnet_docker", ROOT / "infra/docker/acti
 
 
 class DhcpOptionalWorkflowTests(unittest.TestCase):
+    def test_ib_load_to_setup_preserves_mixed_v2_inventory_without_eth_vrr(self):
+        with tempfile.TemporaryDirectory() as name:
+            project = Path(name)
+            document = global_document("disabled")
+            document["common"]["mgmt"]["ztp"]["status"] = "disabled"
+            eth = next(item["eth"] for item in document["switches"] if "eth" in item)
+            eth.pop("vrr")
+            global_path = project / "01-global.yaml"
+            global_path.write_text(yaml.safe_dump(document), encoding="utf-8")
+            header = [
+                "hostname", "type", "template", "eth0_ip", "netmask", "eth0_gw",
+                "eth0_mac", "eth1_ip", "netmask", "eth1_gw", "eth1_mac", "lo_ip",
+                "bgp_asn", "bgp_ports", "bond_ports", "bond_type", "bond_mac",
+                "peerlink_ports", "vrl",
+            ]
+            with (project / "02-devices_config.csv").open(
+                "w", newline="", encoding="utf-8",
+            ) as stream:
+                csv.writer(stream).writerows([
+                    header,
+                    ["ib01", "ib", "", "192.0.2.10", "24", "192.0.2.1"] + [""] * 13,
+                    ["leaf01", "eth", "", "192.0.2.11", "24", "192.0.2.1"] + [""] * 13,
+                ])
+            (project / "02-dhcp-subnet_config.csv").write_bytes(b"")
+
+            settings = LOAD.load_global(global_path, switch_scope="ib")
+            self.assertEqual(2, settings.schema_version)
+            with mock.patch.multiple(
+                SETUP, _SWITCH_SCOPE="ib", _CSV_DIR=None, _P2P_SOURCE=None,
+                _DRY_RUN=True, _FORCE=False, _STRICT=False,
+                IMAGE_DIR=str(project / "image"),
+            ), redirect_stdout(io.StringIO()):
+                self.assertTrue(SETUP._validate_project(str(project)))
+            with mock.patch.multiple(
+                SETUP, _SWITCH_SCOPE="all", _CSV_DIR=None, _P2P_SOURCE=None,
+                _DRY_RUN=True, _FORCE=False, _STRICT=False,
+                IMAGE_DIR=str(project / "image"),
+            ), redirect_stdout(io.StringIO()) as output:
+                self.assertFalse(SETUP._validate_project(str(project)))
+            self.assertIn("switches.eth.vrr", output.getvalue())
+            self.assertNotIn("schema 1", output.getvalue())
+
     def test_ib_load_input_transaction_keeps_empty_subnet_source_hash(self):
         with tempfile.TemporaryDirectory() as name:
             project = Path(name)

@@ -297,6 +297,29 @@ class ScopedSourceAndEntryPointTests(unittest.TestCase):
 class NvosImageLoadContractTests(unittest.TestCase):
     """Direct DAY0 load contracts for exact, version-bound image aliases."""
 
+    def test_scoped_ib_upgrade_names_only_required_shared_image_and_never_creates_stub(self):
+        settings = LOAD.replace(
+            nvos_image_settings(),
+            versions={"eth": "5.16.4", "ib": "25.03.1010"},
+        )
+        required = LOAD.expected_images(
+            settings, frozenset({"eth", "ib"}), switch_scope="ib",
+        )
+        self.assertEqual({"ib": "nvosv25-03-1010amd64.bin"}, required)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / "project"
+            shared = root / "image"
+            project.mkdir()
+            with mock.patch.object(LOAD, "IMAGE_DIR", shared):
+                with self.assertRaises(LOAD.LoadError) as caught:
+                    LOAD.prepare_images(project, required, dry_run=True, quiet=True)
+            message = str(caught.exception)
+            self.assertIn("image/nvos-amd64-25.03.1010.bin", message)
+            self.assertIn("image/nvosv25-03-1010amd64.bin", message)
+            self.assertEqual([], list(project.glob("*.bin")))
+            self.assertFalse(shared.exists())
+
     def test_setup_classifies_only_the_two_exact_nvos_filename_formats(self):
         for filename in NVOS_IMAGE_NAMES:
             with self.subTest(filename=filename):
@@ -335,6 +358,71 @@ class NvosImageLoadContractTests(unittest.TestCase):
                 self.assertEqual(1, SETUP._LINK_ERRORS)
 
             self.assertFalse((ztp / "image/nvos" / candidate.name).exists())
+
+    def test_setup_does_not_publish_empty_shared_image_as_link(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shared = root / "image"
+            ztp = root / "ztp"
+            shared.mkdir()
+            (shared / NVOS_IMAGE_NAMES[0]).touch()
+            with mock.patch.multiple(
+                SETUP, HTTP_BASE=str(root), IMAGE_DIR=str(shared), ZTP=str(ztp),
+                _DRY_RUN=False, _LINK_ERRORS=0,
+            ):
+                self.assertEqual([], SETUP._shared_image_pairs())
+                SETUP._process_bin_files()
+                self.assertEqual(0, SETUP._LINK_ERRORS)
+            self.assertFalse((ztp / "image/nvos" / NVOS_IMAGE_NAMES[0]).exists())
+
+    def test_setup_no_upgrade_skips_shared_image_validation_and_linking(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shared = root / "image"
+            ztp = root / "ztp"
+            project = root / "project"
+            shared.mkdir()
+            project.mkdir()
+            (shared / NVOS_IMAGE_NAMES[0]).touch()
+            with mock.patch.multiple(
+                SETUP, HTTP_BASE=str(root), IMAGE_DIR=str(shared), ZTP=str(ztp),
+                _NO_UPGRADE=True, _STRICT=True, _SWITCH_SCOPE="ib", _P2P_SOURCE=None,
+            ):
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    self.assertTrue(SETUP._validate_project(str(project)))
+                    self.assertEqual([], SETUP._shared_image_pairs())
+                    SETUP._process_bin_files()
+                self.assertNotIn("image/", output.getvalue())
+            self.assertFalse((ztp / "image/nvos" / NVOS_IMAGE_NAMES[0]).exists())
+
+    def test_setup_no_upgrade_keeps_preexisting_published_project_image_link(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            day0 = root / "DAY0-Prepare"
+            previous = day0 / "old"
+            current = day0 / "new"
+            previous.mkdir(parents=True)
+            current.mkdir()
+            legacy = previous / NVOS_IMAGE_NAMES[0]
+            legacy.touch()
+            ztp = root / "ztp"
+            published = ztp / "image/nvos" / legacy.name
+            published.parent.mkdir(parents=True)
+            published.symlink_to(legacy)
+            with mock.patch.multiple(
+                SETUP, HTTP_BASE=str(root), HERE=str(day0), ZTP=str(ztp),
+                _NO_UPGRADE=True, _DRY_RUN=False,
+            ), mock.patch.object(SETUP, "_managed_ztp_link_candidates", return_value=[str(published)]), \
+                    mock.patch.object(SETUP, "_monitor_link_paths", return_value=[]), \
+                    mock.patch.object(SETUP, "_bringup_link_pairs", return_value=[]), \
+                    mock.patch.object(SETUP, "_analyzer_input_pairs", return_value=[]), \
+                    mock.patch.object(SETUP, "_analyzer_output_pairs", return_value=[]), \
+                    mock.patch.object(SETUP, "_monitor_inventory_link_pairs", return_value=[]), \
+                    mock.patch.object(SETUP, "_legacy_project_monitor_csv_links", return_value=[]), \
+                    mock.patch.object(SETUP, "_NET_CSV_LINKS", ()):
+                self.assertTrue(SETUP._unsetup_previous(str(current)))
+            self.assertTrue(published.is_symlink())
 
     def resolve_nvos_image(self, project: Path, shared: Path) -> dict[str, Path]:
         with mock.patch.object(LOAD, "IMAGE_DIR", shared):

@@ -643,12 +643,9 @@ class TemplateContractTests(unittest.TestCase):
             ROOT / "DAY0-Prepare/template/mgmt-server.pub",
         ):
             self.assertEqual(b"", key_path.read_bytes(), key_path)
-        binary_placeholders = list(
-            (ROOT / "DAY0-Prepare/template").glob("*.bin")
-        ) + [ROOT / "DAY0-Prepare/template/p2p.xlsx"]
-        self.assertTrue(binary_placeholders)
-        for placeholder in binary_placeholders:
-            self.assertEqual(0, placeholder.stat().st_size, placeholder)
+        self.assertEqual([], list((ROOT / "DAY0-Prepare/template").glob("*.bin")))
+        p2p_placeholder = ROOT / "DAY0-Prepare/template/p2p.xlsx"
+        self.assertEqual(0, p2p_placeholder.stat().st_size)
 
         for name in ("air-template.json", "air-template-no-oob.json"):
             air_text = (
@@ -1293,6 +1290,38 @@ class TemplateContractTests(unittest.TestCase):
             self.assertFalse((project / "p2p").exists(), "template p2p/ is retired")
             self.assertTrue((project / "empty-required.pub").is_file())
 
+    def test_load_and_setup_ignore_legacy_template_bins_without_removing_project_bins(self):
+        """Both real template writers leave image names to global/switch scope."""
+        load = load_module("day0_no_bin_template_load", ROOT / "DAY0-Prepare/11-load.py")
+        setup = load_module("day0_no_bin_template_setup", ROOT / "DAY0-Prepare/01-a-setup.py")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            template = root / "template"
+            template.mkdir()
+            (template / "input.txt").write_text("template input\n", encoding="utf-8")
+            (template / "nvosv25-02-7002amd64.bin").touch()
+            project = root / "project"
+            project.mkdir()
+            retained = project / "customer-image.bin"
+            retained.write_bytes(b"customer-owned")
+            legacy_empty = project / "cumulus-linux-5.16.4-mlx-amd64.bin"
+            legacy_empty.touch()
+
+            with mock.patch.object(load, "TEMPLATE_DIR", template):
+                load.initialize_from_template(project)
+            self.assertTrue((project / "input.txt").is_file())
+            self.assertFalse((project / "nvosv25-02-7002amd64.bin").exists())
+
+            (project / "input.txt").unlink()
+            with mock.patch.object(setup, "TEMPLATE_DIR", str(template)), \
+                    mock.patch.object(setup, "_DRY_RUN", False):
+                setup._initialize_project_from_template(str(project))
+            self.assertTrue((project / "input.txt").is_file())
+            self.assertFalse((project / "nvosv25-02-7002amd64.bin").exists())
+            self.assertEqual(b"customer-owned", retained.read_bytes())
+            self.assertTrue(legacy_empty.is_file())
+            self.assertEqual(0, legacy_empty.stat().st_size)
+
     def test_setup_preserves_external_p2p_directory_and_links_selected_nested_source(self):
         setup = load_module("day0_setup_external_p2p_contract", ROOT / "DAY0-Prepare/01-a-setup.py")
         with tempfile.TemporaryDirectory() as directory:
@@ -1475,6 +1504,21 @@ class TemplateContractTests(unittest.TestCase):
             command = run.call_args.args[0]
             self.assertIn("--p2p-file=Customer-P2P-v2.xlsx", command)
             self.assertIn("--confirm-project-switch", command)
+
+    def test_load_delegates_no_upgrade_image_policy_to_setup(self):
+        load = load_module("day0_load_no_upgrade_setup", ROOT / "DAY0-Prepare/11-load.py")
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(load, "run") as run:
+            project = Path(directory) / "project"
+            project.mkdir()
+            workbook = project / "Customer-P2P-v2.xlsx"
+            with zipfile.ZipFile(workbook, "w") as archive:
+                archive.writestr("xl/workbook.xml", "<workbook/>")
+            (project / "p2p.xlsx").symlink_to(workbook.name)
+            with mock.patch.object(load, "active_project", side_effect=[None, project]):
+                load.activate_project(project, workbook, strict=False, no_upgrade=True)
+            command = run.call_args.args[0]
+            self.assertIn("--no-upgrade", command)
+            self.assertNotIn("--strict", command)
 
     def test_setup_parser_separates_creation_and_automation_switch_ack(self):
         setup = load_module(

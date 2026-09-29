@@ -223,6 +223,79 @@ def generate_v2_redundancy_project(
 
 
 class SchemaSelectionTests(unittest.TestCase):
+    def test_setup_csv_keeps_v2_layout_when_unselected_eth_vrr_is_missing(self):
+        header = [
+            "hostname", "type", "template", "eth0_ip", "netmask", "eth0_gw",
+            "eth0_mac", "eth1_ip", "netmask", "eth1_gw", "eth1_mac", "lo_ip",
+            "bgp_asn", "bgp_ports", "bond_ports", "bond_type", "bond_mac",
+            "peerlink_ports", "vrl",
+        ]
+        ib_row = ["ib01", "ib", "", "192.0.2.10", "24", "192.0.2.1"] + [""] * 13
+        eth_row = ["leaf01", "eth", "", "192.0.2.11", "24", "192.0.2.1"] + [""] * 13
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "01-global.yaml").write_text(
+                "schema_version: 2\nswitches:\n  - eth: {version: 5.16.4}\n"
+                "  - ib: {version: 25.02.8008}\n", encoding="utf-8",
+            )
+            csv_path = project / "02-devices_config.csv"
+            with csv_path.open("w", newline="", encoding="utf-8") as stream:
+                csv.writer(stream).writerows([header, ib_row, eth_row])
+            with mock.patch.object(SETUP, "_SWITCH_SCOPE", "ib"):
+                errors, _warnings = SETUP._validate_eth_csv(str(csv_path))
+            self.assertEqual([], errors)
+            with mock.patch.object(SETUP, "_SWITCH_SCOPE", "all"):
+                errors, _warnings = SETUP._validate_eth_csv(str(csv_path))
+            self.assertTrue(any("switches.eth.vrr" in error for error in errors), errors)
+            self.assertFalse(any("schema 1" in error for error in errors), errors)
+
+    def test_setup_csv_reports_bad_global_schema_or_yaml_without_v1_misdiagnosis(self):
+        header = [
+            "hostname", "type", "template", "eth0_ip", "netmask", "eth0_gw",
+            "eth0_mac", "eth1_ip", "netmask", "eth1_gw", "eth1_mac", "lo_ip",
+            "bgp_asn", "bgp_ports", "bond_ports", "bond_type", "bond_mac",
+            "peerlink_ports", "vrl",
+        ]
+        row = ["ib01", "ib", "", "192.0.2.10", "24", "192.0.2.1"] + [""] * 13
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            global_path = project / "01-global.yaml"
+            csv_path = project / "02-devices_config.csv"
+            with csv_path.open("w", newline="", encoding="utf-8") as stream:
+                csv.writer(stream).writerows([header, row])
+            with mock.patch.object(SETUP, "_SWITCH_SCOPE", "ib"):
+                for global_text, expected in (
+                    ("schema_version: 3\n", "schema_version=3"),
+                    ("schema_version: [\n", "无法确定 devices_config.csv schema"),
+                ):
+                    with self.subTest(global_text=global_text):
+                        global_path.write_text(global_text, encoding="utf-8")
+                        errors, _warnings = SETUP._validate_eth_csv(str(csv_path))
+                        self.assertTrue(any(expected in error for error in errors), errors)
+                        self.assertFalse(any("schema 1" in error for error in errors), errors)
+
+    def test_setup_csv_uses_inherited_common_vrr_policy_in_eth_scope(self):
+        header = [
+            "hostname", "type", "template", "eth0_ip", "netmask", "eth0_gw",
+            "eth0_mac", "eth1_ip", "netmask", "eth1_gw", "eth1_mac", "lo_ip",
+            "bgp_asn", "bgp_ports", "bond_ports", "bond_type", "bond_mac",
+            "peerlink_ports", "vrl",
+        ]
+        row = ["ib01", "ib", "", "192.0.2.10", "24", "192.0.2.1"] + [""] * 13
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "01-global.yaml").write_text(
+                "schema_version: 2\ncommon:\n  switch:\n    vrr:\n"
+                "      base_mac: '02:00:5e:01:00:00'\n"
+                "switches:\n  - eth: {version: 5.16.4}\n", encoding="utf-8",
+            )
+            csv_path = project / "02-devices_config.csv"
+            with csv_path.open("w", newline="", encoding="utf-8") as stream:
+                csv.writer(stream).writerows([header, row])
+            with mock.patch.object(SETUP, "_SWITCH_SCOPE", "eth"):
+                errors, _warnings = SETUP._validate_eth_csv(str(csv_path))
+        self.assertEqual([], errors)
+
     def test_setup_ib_scope_skips_unselected_eth_and_mlag_validation(self):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)

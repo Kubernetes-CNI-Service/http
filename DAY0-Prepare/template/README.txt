@@ -17,7 +17,7 @@ DAY0 项目完整目录模板说明
 
 公开仓库中的本目录只包含不可直接上线的脱敏骨架：192.0.2.0/24、
 198.51.100.0/24 和 203.0.113.0/24 是文档地址，02:00 开头的 MAC 是本地管理
-示例；仓库模板中的 laptop.pub、mgmt-server.pub、镜像和 p2p.xlsx 都是空骨架，
+示例；仓库模板中的 laptop.pub、mgmt-server.pub 和 p2p.xlsx 都是空骨架，
 setup 不从模板复制 laptop.pub。所有密码值
 均为锁定值 `*`。其中 Cumulus global 输入写成 `"'*'"` 是有意的：Jinja 渲染
 后生成 YAML 才会得到安全的 `hashed-password: '*'`，不能简化成裸星号。
@@ -36,13 +36,15 @@ setup 不从模板复制 laptop.pub。所有密码值
   3. 真实项目中已经存在的同名文件或目录不会被覆盖。
   4. template 后续增加的文件或目录，会在项目下次 setup 时自动补齐。
 
-本目录中的空 `.bin` 文件是镜像名称占位符，setup/load 会像其他模板文件一样把它们
-复制到真实项目，用来提醒用户应准备哪些版本。真实 Cumulus/NVOS 镜像是所有项目
-共用的制品，统一放在：
+模板不创建任何空 `.bin` 文件或镜像软链接。load `--no-upgrade` 会向 setup
+传递同名选项，跳过升级镜像扫描和发布，不移除已有项目文件或镜像链接；
+正常升级时，load 根据 `--switch`、项目实际设备类型及 global 中对应的 version
+计算所需文件名。缺少真实镜像会报出应放在共享目录中的准确文件名并停止，而不会
+生成占位文件。真实 Cumulus/NVOS 镜像是所有项目共用的制品，统一放在：
 
   http/image/
 
-setup 会把它们链接到 ztp/image/cumulus/ 和 ztp/image/nvos/。
+setup 只把其中非空的真实镜像链接到 ztp/image/cumulus/ 和 ztp/image/nvos/。
 可能创建的连接：
   ztp/image/cumulus/<Cumulus镜像名>.bin -----> http/image/<Cumulus镜像名>.bin
   ztp/image/nvos/<NVOS镜像名>.bin       -----> http/image/<NVOS镜像名>.bin
@@ -343,5 +345,7 @@ README.txt
 2. 修改 template 不会覆盖既有项目的同名文件，只会补齐缺失项。
 3. 严格校验会拒绝未准备的 P2P 工作簿和所需镜像；公钥按本机 setup 与 Linux load
    的双身份流程准备、校验，不能把模板空公钥发布为运行时身份。
-4. template 和项目根目录只保留空 `.bin` 名称占位符；真实镜像只放在 http/image/ 中。
+4. template 不含 `.bin`；已有项目根目录中的旧空占位文件不会自动删除，也不会作为
+   镜像使用。升级所需真实镜像优先放在 http/image/；历史项目中同名的真实镜像仍可
+   由 load 校验后导入共享目录。
 5. 新增模板文件时，应在本 README 中补充用途、维护责任和可能的软链接。
