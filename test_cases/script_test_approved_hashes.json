@@ -24,7 +24,7 @@
       "root-entrypoint-workflow": "NOT COVERED (requires Linux EUID 0 private namespace)"
     },
     "schema_version": 1,
-    "snapshot_sha256": "885f21858ff8a54901888c22396b4c0a8edfd4b777252277af1b2bb993d4c32d"
+    "snapshot_sha256": "8cd6d4c083dd6968cf94a14e1f3f260c2bf84aec73001d00903a1a84248adf6a"
   },
   "impact_manifest_sha256": "fa6a8beb36d1e9b017c33c59dc72c8b0c27f6447c50f579c6c7a7143089e0782",
   "schema_version": 1,
@@ -279,7 +279,7 @@
     },
     "tools/_package_common.py": {
       "canonical": "tools/_package_common.py",
-      "sha256": "9aad75c34c042bbf23170c1089d5e56e9c2e7ba0b1430492a700265c480f908f"
+      "sha256": "1207f395559a7b5b807609fac1fe183cf67d4a089ea2823bb45e35c1672d075d"
     },
     "tools/collect-ztp-diagnostics.py": {
       "canonical": "tools/collect-ztp-diagnostics.py",
@@ -295,7 +295,7 @@
     },
     "tools/deploy-upload-archive.py": {
       "canonical": "tools/deploy-upload-archive.py",
-      "sha256": "3edd988e127ea6223202b48c24ae7a8fd8dc94558750dda44bf461e130847c15"
+      "sha256": "1c90974269e49f6ecabc2b8e29d7fb5fbee77eb74ea6e61730eb105349f1fbdc"
     },
     "tools/deployment_lock.py": {
       "canonical": "tools/deployment_lock.py",
@@ -539,7 +539,7 @@
     },
     "tools/sync-code.py": {
       "canonical": "tools/sync-code.py",
-      "sha256": "df2819d5010573530097509571c5d8aaee669a067634862c51233d9684264ff1"
+      "sha256": "0b753752a3dc54050adee126c9ee535f07c66c0aae254a362d2dee8d903a7518"
     },
     "tools/tar-for-download.py": {
       "canonical": "tools/tar-for-download.py",
@@ -547,7 +547,7 @@
     },
     "tools/tar-for-upload.py": {
       "canonical": "tools/tar-for-upload.py",
-      "sha256": "c89b74bb0bca9cf2adcccce48434ccc54ff6ab39dad690c5816f902302adb17c"
+      "sha256": "2368c4b63acdfd1c6db0fa4089da131e19eba911923299da8b9f5150bb2074bb"
     },
     "tools/ufm-discover.py": {
       "canonical": "tools/ufm-discover.py",
@@ -681,7 +681,7 @@
     "DAY0-Prepare/template/.management-pubkeys": "6bbef498c3d3a8a46290347f0d849048e16de36f906c85f08b49038c97c08f67",
     "DAY0-Prepare/template/01-global.yaml": "05f5487bc7e14aa1f56cbc5fb0e3e28592da8b2c65b48886b07f2c4f5e1ff7c6",
     "DAY0-Prepare/template/02-devices_config.csv": "3f0f797ccdf4a9c8103ab92d0edcd9e77ec29718f29c33ffef7637a6604a92cb",
-    "DAY0-Prepare/template/02-dhcp-subnet_config.csv": "511e576cde88ac1240f3ce49512093150f938c0daf0f8930dcd78cd229527f20",
+    "DAY0-Prepare/template/02-dhcp-subnet_config.csv": "18a579a2b0bbf0a34524ff4c609ce625d388f9bf90914d6a5a7efabb8ab81dd8",
     "DAY0-Prepare/template/99-output-backup/.gitkeep": "b8d5f8d9d6fbc9a6148dffadb85c5afdc65cd1b705ecc858f761afa902a98f44",
     "DAY0-Prepare/template/99-output-dhcp/.gitkeep": "b8d5f8d9d6fbc9a6148dffadb85c5afdc65cd1b705ecc858f761afa902a98f44",
     "DAY0-Prepare/template/99-output-eth/.gitkeep": "b8d5f8d9d6fbc9a6148dffadb85c5afdc65cd1b705ecc858f761afa902a98f44",
@@ -726,7 +726,7 @@
     "infra/infra-neutral.conf": "238bec3c9be34fc5a7bf097e36012133da4a30b90cabdf17d758796ecdab24f8",
     "requirements-container-top-level.lock": "3532f5208b462243bab779b01eb4deb21638ac05a9390c17ac997ba8d7f24998",
     "requirements-dev.txt": "2047cfeb6e7d7c3b02380624cd212528fb8416cf3e76dd924d2e2cba8567a50a",
-    "test_cases/REAL_ENVIRONMENT.md": "b89bc8f66af47978c05514a2b066ecb34a1c81920ecd0e67ff647301e097b4a1",
+    "test_cases/REAL_ENVIRONMENT.md": "7acdb7be5e2ea25498afb539b70f87e323d8e7837a3185cd9a5e19903fef2a20",
     "test_cases/audit_public_tree.py": "7e11f28fea3a95c78b2f498da0af4e1534ee84484caa01d14c6a6cabed81c45c",
     "test_cases/module_loader.py": "ef1e9b44f0272209378788ed6682b8a6a68c95a76a6d545c001ddc4762471ecf",
     "test_cases/monitor_authority_root_warden.py": "f4ac61acc04af33168aa01ba295a74fe036202b9179ad65f10e9db87375a2c4c",
@@ -802,8 +802,8 @@
     "test_cases.test_continuous_interval_handoff_workflow": "bbeeba908269873df3c6ecae9fd8860cf1acca7c6dd45787d24be52109613c4d",
     "test_cases.test_control_auth": "da27975ed095e2c7e88d32f4fd1cf0352a050541a6750b3548b3e5dffa6f092c",
     "test_cases.test_cumulus_snippet_rendering": "a9dc63b808ad3dce40f8ec831bc2ab1b50b5cfdec095280ea1511ec99b1f225c",
-    "test_cases.test_deploy_upload_archive": "7baf3777d6c9e1f8e85d7b26f694d86aaaf6add40d2232635408c6eabfb00011",
-    "test_cases.test_deployment_writer_lock": "4e6bd66fefca65b69ca2e4b636bd3d860c62fa37f34abab4f2da071da13299fb",
+    "test_cases.test_deploy_upload_archive": "69eda9a6e4213cb4d40406f790bbbd97e420f9f1701ea6888347f703d34030ef",
+    "test_cases.test_deployment_writer_lock": "08bd2fcc9012159a4f42ffacc42ccfdadc78f19b0b022aa27d7f6f9e1377c76e",
     "test_cases.test_dhcp_optional_contract": "5a74ad946befdc43625b32ad37d2409c6b0f03f0bb8b2e0c5ab3b91aa8deb116",
     "test_cases.test_dhcp_optional_workflow": "cede5984b2a7211811faa270817a4458b04811ac229734aabb7f63fc318f2785",
     "test_cases.test_dhcp_runtime_reassignment": "7ed63b5140210a46570d522cc115dcafe0daaabcfa758df47cf86002246c0bcf",
@@ -893,7 +893,7 @@
     "test_cases.test_monitor_writer_quiesce": "5efe4499c9ccb4f051d914a8584abcc0fc56023ac0bbc734c9c659a8967bed99",
     "test_cases.test_monitor_writer_quiesce_workflow": "22f2e505de1919e8c66a8a29c905d571a74ae590fa6c410cd28034982d99f9bc",
     "test_cases.test_nvue_normalizer": "6e22f0f89353d0042391330675e4cce387931e896f4b44f57911e2dccb85b230",
-    "test_cases.test_ops_deployment_review": "49b36eb452d4e213f17d481e01cffe9e304fd10a42de7f663890fc1de0d4ca2a",
+    "test_cases.test_ops_deployment_review": "6c99075e059541d423283579e7f4065b37ffcbd9ce514c8deae8b443b00a6853",
     "test_cases.test_optimize_output_layout": "b37ffae7f3f1c81af403c33efd981976e766ee1face193a43410a57fa4dd6b7f",
     "test_cases.test_p2p_selection_contract": "1ae3acea6949f668bf09c677b49e72d74389d488c4ecefe5fdb5975088560573",
     "test_cases.test_p2p_selection_workflow": "72f2cc6f10fe4b57135f7a809e0ab0e70f17d887df6adea88c7e850dd7764a22",
@@ -901,7 +901,7 @@
     "test_cases.test_predeploy_test_gate": "7b6d10f91a6ff6390f9cb89a5bdf39ee3daa3ed53a2b0d4754c21075407aeb22",
     "test_cases.test_private_documentation_contract": "aea19926f10fe1a6a1f2df2c33658f40bbfc16b3074df0cc2febe2f5f3cf2dc8",
     "test_cases.test_project_contracts": "39cea2d1064a33e553692757d2c6648c539b1e5310be6f8afb60525882673155",
-    "test_cases.test_project_image_bundle": "a7d001684b49d093ac9ee6723786e03aeaf3ddc188b50c46644a5306790acc6f",
+    "test_cases.test_project_image_bundle": "fc8a2ed91e37454de7de9fe37f582bf18f4fd65f98fbaf5c7f6bdefabd229488",
     "test_cases.test_public_clean_clone_contract": "f8b978c0c0a29e7dc83590b8306b647e1f191fef26101f093fca34bfe73abb75",
     "test_cases.test_public_clean_clone_workflow": "41f80694e3decc93e03ec4ddc412c11cf856b1060421630328d87d0a7beefea9",
     "test_cases.test_public_project_fixture_contract": "f4b142962882a296a79fe13e249403e72a583d500c237a76bb125cfcd70d38f2",
