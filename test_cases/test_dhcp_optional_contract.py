@@ -38,6 +38,13 @@ _TEMPLATE_TEXT = (ROOT / "DAY0-Prepare/template/01-global.yaml").read_text(
 )
 _TEMPLATE = yaml.safe_load(_TEMPLATE_TEXT)
 _STATUS_LABEL = "common.mgmt.dhcp-server.status"
+EMPTY_SUBNET_TABLE = (
+    b"shared_network,subnet,netmask,range_start,range_end,routers,"
+    b"ztp_service_ip,cumulus_profile,nvos_ztp\n"
+)
+EMPTY_SUBNET_TABLE_SHA256 = (
+    "1e4e2db5cbb609d34080451f7940ec84e6a396a7fe3627e4452980caac27c1c0"
+)
 
 
 def global_document(status: object = "disabled") -> dict[str, object]:
@@ -52,15 +59,13 @@ def settings_for(status: str):
 
 
 class DhcpOptionalDirectTests(unittest.TestCase):
-    def test_empty_subnet_requires_both_services_disabled(self):
+    def test_zero_byte_subnet_is_invalid_in_both_dhcp_modes(self):
         with tempfile.TemporaryDirectory() as name:
             subnet = Path(name) / "02-dhcp-subnet_config.csv"
             subnet.write_bytes(b"")
             disabled = LOAD.replace(settings_for("disabled"), ztp_enabled=False)
-            self.assertEqual(disabled, LOAD.apply_subnet_service_ips(disabled, subnet))
-            LOAD.validate_subnet_file(subnet, disabled)
-            self.assertEqual(([], []), SETUP._validate_subnet_csv(subnet, allow_empty=True))
             for settings in (
+                disabled,
                 LOAD.replace(disabled, dhcp_enabled=True),
                 LOAD.replace(disabled, ztp_enabled=True),
             ):
@@ -69,15 +74,49 @@ class DhcpOptionalDirectTests(unittest.TestCase):
                         LOAD.apply_subnet_service_ips(settings, subnet)
                     with self.assertRaises(LOAD.LoadError):
                         LOAD.validate_subnet_file(subnet, settings)
+            for allow_empty in (False, True):
+                with self.subTest(setup_allows_no_rows=allow_empty):
+                    errors, _warnings = SETUP._validate_subnet_csv(
+                        subnet, allow_empty=allow_empty,
+                    )
+                    self.assertTrue(errors, "zero bytes cannot be an empty CSV table")
+
+    def test_missing_whitespace_and_symlink_subnet_are_never_valid_inputs(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            subnet = root / "02-dhcp-subnet_config.csv"
+            disabled = LOAD.replace(settings_for("disabled"), ztp_enabled=False)
+            with self.assertRaises(LOAD.LoadError):
+                LOAD.apply_subnet_service_ips(disabled, subnet)
+            with self.assertRaises(LOAD.LoadError):
+                LOAD.validate_subnet_file(subnet, disabled)
+            for payload in (b" \t\r\n", b"wrong,columns\n"):
+                subnet.write_bytes(payload)
+                with self.subTest(payload=payload):
+                    with self.assertRaises(LOAD.LoadError):
+                        LOAD.apply_subnet_service_ips(disabled, subnet)
+                    with self.assertRaises(LOAD.LoadError):
+                        LOAD.validate_subnet_file(subnet, disabled)
+                    errors, _warnings = SETUP._validate_subnet_csv(
+                        subnet, allow_empty=True,
+                    )
+                    self.assertTrue(errors)
+            source = root / "elsewhere.csv"
+            source.write_bytes(EMPTY_SUBNET_TABLE)
+            subnet.unlink()
+            subnet.symlink_to(source)
+            with self.assertRaises(LOAD.LoadError):
+                LOAD.apply_subnet_service_ips(disabled, subnet)
+            with self.assertRaises(LOAD.LoadError):
+                LOAD.validate_subnet_file(subnet, disabled)
+            errors, _warnings = SETUP._validate_subnet_csv(subnet, allow_empty=True)
+            self.assertTrue(errors, "setup must reject a symlinked source CSV")
 
     def test_header_only_subnet_is_optional_but_malformed_nonempty_is_not(self):
         with tempfile.TemporaryDirectory() as name:
             subnet = Path(name) / "02-dhcp-subnet_config.csv"
             disabled = LOAD.replace(settings_for("disabled"), ztp_enabled=False)
-            subnet.write_text(
-                "shared_network,subnet,netmask,range_start,range_end,routers,"
-                "ztp_service_ip,cumulus_profile,nvos_ztp\n", encoding="utf-8",
-            )
+            subnet.write_bytes(EMPTY_SUBNET_TABLE)
             self.assertEqual(disabled, LOAD.apply_subnet_service_ips(disabled, subnet))
             LOAD.validate_subnet_file(subnet, disabled)
             self.assertEqual(([], []), SETUP._validate_subnet_csv(subnet, allow_empty=True))

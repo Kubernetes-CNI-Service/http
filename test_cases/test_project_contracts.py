@@ -6579,6 +6579,68 @@ PSU1-Temp-Sensor           28.0           85         63.0      5         ok
             self.assertIn("当前没有可用的 Switch Status 采集归档", card)
 
 
+class DhcpSubnetPlacementContractTests(unittest.TestCase):
+    """Direct, input-owned expectations for pure subnet address placement."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.contract = load_module(
+            "project_contract_subnet_placement", ROOT / "tools/project_contract.py",
+        )
+
+    @staticmethod
+    def row(**overrides):
+        row = {
+            "subnet": "192.0.2.0", "netmask": "255.255.255.0",
+            "range_start": "192.0.2.100", "range_end": "192.0.2.120",
+            "routers": "192.0.2.1", "ztp_service_ip": "192.0.2.10",
+        }
+        row.update(overrides)
+        return row
+
+    def test_accepts_header_only_rows_and_routed_service_endpoint(self):
+        validate = self.contract.validate_dhcp_subnet_placements
+        validate(())
+        validate(((2, self.row(ztp_service_ip="203.0.113.10")),))
+
+    def test_rejects_out_of_network_and_reversed_ranges_or_router_in_pool(self):
+        validate = self.contract.validate_dhcp_subnet_placements
+        cases = (
+            ({"range_start": "198.51.100.10"}, "range/router 不属于"),
+            ({"range_end": "198.51.100.20"}, "range/router 不属于"),
+            ({"range_start": "192.0.2.120", "range_end": "192.0.2.100"},
+             "range/router 不属于"),
+            ({"routers": "198.51.100.1"}, "range/router 不属于"),
+            ({"routers": "192.0.2.110"}, "routers=.*落入动态 range"),
+        )
+        for overrides, expected in cases:
+            with self.subTest(overrides=overrides), self.assertRaisesRegex(ValueError, expected):
+                validate(((2, self.row(**overrides)),))
+
+    def test_rejects_own_and_cross_row_service_pool_collisions(self):
+        validate = self.contract.validate_dhcp_subnet_placements
+        with self.assertRaisesRegex(ValueError, "ztp_service_ip=.*落入动态 range"):
+            validate(((2, self.row(ztp_service_ip="192.0.2.110")),))
+        with self.assertRaisesRegex(ValueError, "service_ip=.*落入动态 range"):
+            validate((
+                (2, self.row(ztp_service_ip="")),
+                (3, self.row(
+                    subnet="198.51.100.0", range_start="198.51.100.100",
+                    range_end="198.51.100.120", routers="198.51.100.1",
+                    ztp_service_ip="192.0.2.110",
+                )),
+            ))
+        with self.assertRaisesRegex(ValueError, "service_ip=.*落入动态 range"):
+            validate(((2, self.row(ztp_service_ip="")),), service_ips=("192.0.2.110",))
+
+    def test_rejects_unusable_endpoint_and_subnet_network_address(self):
+        validate = self.contract.validate_dhcp_subnet_placements
+        with self.assertRaisesRegex(ValueError, "ztp_service_ip=.*不是可用单播地址"):
+            validate(((2, self.row(ztp_service_ip="0.0.0.0")),))
+        with self.assertRaisesRegex(ValueError, "ztp_service_ip=.*不是 .*可用主机地址"):
+            validate(((2, self.row(ztp_service_ip="192.0.2.0")),))
+
+
 class TransferContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

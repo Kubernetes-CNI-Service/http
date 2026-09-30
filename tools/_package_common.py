@@ -8,6 +8,7 @@ packaging workflows live in tools/tar-for-upload.py and tools/tar-for-download.p
 from __future__ import annotations
 
 import argparse
+import csv
 from datetime import date
 import fnmatch
 import gzip
@@ -37,8 +38,10 @@ from project_contract import (
     path_disposition,
     require_project_eligible,
     transfer_exclude_reason,
+    validate_dhcp_subnet_placements,
     ztp_prefix_publication_relative,
 )
+from ztp_service_runtime import RuntimeContractError, _read_dhcp_networks
 
 
 TOOLS_DIR = Path(__file__).resolve().parent
@@ -941,6 +944,43 @@ def project_directories() -> list[Path]:
         if (item / "01-global.yaml").is_file() and (item / "02-devices_config.csv").is_file():
             selected.append(item)
     return sorted(selected)
+
+
+def _require_package_subnet_csv(project: Path) -> None:
+    """Reject an absent or malformed subnet before archive output begins."""
+    source = project / "02-dhcp-subnet_config.csv"
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not nofollow:
+        raise ValueError("subnet CSV cannot be safely opened without O_NOFOLLOW")
+    try:
+        descriptor = os.open(
+            source, os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0),
+        )
+    except OSError as exc:
+        raise ValueError(f"subnet CSV must be a non-symlink regular file: {source}") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(f"subnet CSV must be a non-symlink regular file: {source}")
+        if metadata.st_size == 0:
+            raise ValueError(f"subnet CSV must not be zero bytes: {source}")
+        try:
+            _read_dhcp_networks(source, allow_empty_subnet=True)
+            with os.fdopen(os.dup(descriptor), "r", newline="", encoding="utf-8-sig") as stream:
+                reader = csv.DictReader(stream)
+                reader.fieldnames = [
+                    str(field or "").strip() for field in (reader.fieldnames or ())
+                ]
+                rows = (
+                    (lineno, row)
+                    for lineno, row in enumerate(reader, 2)
+                    if any(str(value or "").strip() for value in row.values())
+                )
+                validate_dhcp_subnet_placements(rows)
+        except (RuntimeContractError, ValueError) as exc:
+            raise ValueError(f"subnet CSV has invalid rows: {source}: {exc}") from exc
+    finally:
+        os.close(descriptor)
 
 
 def setup_managed_links() -> set[str]:
@@ -1853,10 +1893,13 @@ def create_package(
     if artifact_kind not in ARTIFACT_KINDS:
         raise ValueError(f"unsupported artifact kind: {artifact_kind!r}")
     project = resolve_project(args.project)
+    included_projects = project_directories() if day0_all else [project]
+    for included_project in included_projects:
+        _require_package_subnet_csv(included_project)
     selected_p2p_by_project = (
         {
             item.relative_to(ROOT).as_posix(): select_upload_p2p(item)
-            for item in (project_directories() if day0_all else [project])
+            for item in included_projects
         }
         if artifact_kind != "download" else {}
     )

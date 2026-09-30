@@ -138,17 +138,31 @@ class DynamicDhcpInterfaceContractTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def test_empty_subnet_requires_explicit_disabled_service_authority(self) -> None:
+    def test_only_header_only_empty_subnet_can_have_no_dhcp_networks(self) -> None:
         runtime = load_runtime_module()
         subnet = self.root / "02-dhcp-subnet_config.csv"
-        subnet.write_bytes(b"")
+        for payload in (
+            b"", b" \t\r\n", b"wrong,columns\n",
+            b"shared_network,subnet,netmask,ztp_service_ip,cumulus_profile,nvos_ztp\n",
+            b"shared_network,subnet,netmask,range_start,range_end,routers,"
+            b"ztp_service_ip,cumulus_profile,nvos_ztp,nvos_ztp\n",
+        ):
+            subnet.write_bytes(payload)
+            with self.subTest(payload=payload), self.assertRaises(runtime.RuntimeContractError):
+                runtime.plan_dhcp_runtime(
+                    subnet, link_snapshot=[], address_snapshot=[],
+                    allow_empty_subnet=True,
+                )
+        subnet.write_bytes(
+            b"shared_network,subnet,netmask,range_start,range_end,routers,"
+            b"ztp_service_ip,cumulus_profile,nvos_ztp\n"
+        )
         empty = runtime.plan_dhcp_runtime(
-            subnet, link_snapshot=[], address_snapshot=[],
-            allow_empty_subnet=True,
+            subnet, link_snapshot=[], address_snapshot=[], allow_empty_subnet=True,
         )
         self.assertEqual((), empty.listener_names)
         self.assertEqual((), empty.endpoint_ips)
-        with self.assertRaisesRegex(runtime.RuntimeContractError, "no header"):
+        with self.assertRaisesRegex(runtime.RuntimeContractError, "no DHCP networks"):
             runtime.plan_dhcp_runtime(
                 subnet, link_snapshot=[], address_snapshot=[],
             )
@@ -158,8 +172,19 @@ class DynamicDhcpInterfaceContractTests(unittest.TestCase):
                 address_snapshot=[addresses(7, "eno7", "192.0.2.10/24")],
                 relay_ingress=("eno7",), allow_empty_subnet=True,
             )
-        subnet.write_text("wrong,columns\n", encoding="utf-8")
-        with self.assertRaisesRegex(runtime.RuntimeContractError, "missing columns"):
+        subnet.unlink()
+        with self.assertRaises(runtime.RuntimeContractError):
+            runtime.plan_dhcp_runtime(
+                subnet, link_snapshot=[], address_snapshot=[],
+                allow_empty_subnet=True,
+            )
+        source = self.root / "outside.csv"
+        source.write_bytes(
+            b"shared_network,subnet,netmask,range_start,range_end,routers,"
+            b"ztp_service_ip,cumulus_profile,nvos_ztp\n"
+        )
+        subnet.symlink_to(source)
+        with self.assertRaises(runtime.RuntimeContractError):
             runtime.plan_dhcp_runtime(
                 subnet, link_snapshot=[], address_snapshot=[],
                 allow_empty_subnet=True,
@@ -535,10 +560,12 @@ class DynamicDhcpInterfaceContractTests(unittest.TestCase):
                 link_snapshot=links,
                 address_snapshot=addr,
                 relay_ingress=("eno2",),
+                allow_empty_subnet=True,
             )
 
         plan = runtime.plan_dhcp_runtime(
             subnet_csv, link_snapshot=links, address_snapshot=addr,
+            allow_empty_subnet=True,
         )
         self.assertEqual((), plan.listener_names)
         self.assertEqual((), plan.listener_ifindexes)

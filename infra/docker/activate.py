@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import csv
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import fcntl
@@ -50,6 +51,11 @@ from project_contract import (  # noqa: E402
 
 
 DEFAULT_HTTP_ROOT = Path("/var/www/html")
+SUBNET_REQUIRED_COLUMNS = frozenset({
+    "shared_network", "subnet", "netmask", "range_start", "range_end",
+    "routers", "ztp_service_ip", "cumulus_profile", "nvos_ztp",
+})
+SUBNET_RETIRED_COLUMNS = frozenset({"bootfile_name", "cumulus_provision_url"})
 DEFAULT_STATE_ROOT = Path("/var/lib/http-ztp")
 DEFAULT_LOG_ROOT = Path("/var/log/http-ztp")
 DEFAULT_DHCP_CONFIG = Path("/etc/dhcp/dhcpd.conf")
@@ -1370,11 +1376,49 @@ def current_project_dhcp_status(settings: Settings) -> str:
     return status
 
 
-def _empty_subnet_allowed(settings: Settings, subnet_csv: Path) -> bool:
-    """An empty subnet is valid only for an explicitly disabled service pair."""
+def _require_subnet_header(subnet_csv: Path) -> None:
+    """Check the bound regular subnet input before a plan or marker can hash it."""
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not nofollow:
+        raise ActivationError("subnet CSV cannot be safely opened without O_NOFOLLOW")
     try:
-        if subnet_csv.stat().st_size != 0:
-            return False
+        descriptor = os.open(
+            subnet_csv, os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0),
+        )
+    except OSError as exc:
+        raise ActivationError(f"cannot open subnet CSV {subnet_csv}: {exc}") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise ActivationError("subnet CSV must be one non-symlink regular file")
+        if metadata.st_size == 0:
+            raise ActivationError("subnet CSV is empty; canonical header required")
+        first = os.read(descriptor, 4096).partition(b"\n")
+        if not first[1]:
+            raise ActivationError("subnet CSV has no complete header")
+        try:
+            fields = [str(field or "").strip() for field in next(
+                csv.reader([first[0].decode("utf-8-sig")]),
+            )]
+        except (UnicodeError, csv.Error, StopIteration) as exc:
+            raise ActivationError("subnet CSV has an invalid header") from exc
+        if (
+            len(fields) != len(set(fields))
+            or any(field.casefold() in SUBNET_RETIRED_COLUMNS for field in fields)
+            or not SUBNET_REQUIRED_COLUMNS.issubset(fields)
+        ):
+            raise ActivationError("subnet CSV has an invalid canonical header")
+    finally:
+        os.close(descriptor)
+
+
+def _empty_subnet_allowed(settings: Settings, subnet_csv: Path) -> bool:
+    """Only a disabled service pair may use a validated header-only subnet."""
+    try:
+        _require_subnet_header(subnet_csv)
+    except ActivationError:
+        return False
+    try:
         project = settings.project_dir
         global_yaml = project / "01-global.yaml"
         _canonical_regular_within(global_yaml, project, "project global YAML")
@@ -1559,6 +1603,7 @@ def selected_interface_fingerprints(selected, links: object, addresses: object) 
 def runtime_plan_payload(
     settings: Settings, selected, links: object, addresses: object,
 ) -> dict:
+    _require_subnet_header(settings.subnet_csv)
     return {
         "schema_version": PLAN_SCHEMA,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -1569,7 +1614,6 @@ def runtime_plan_payload(
         "subnet_csv": os.fspath(settings.subnet_csv),
         "subnet_sha256": sha256_path(
             settings.subnet_csv,
-            allow_empty=_empty_subnet_allowed(settings, settings.subnet_csv),
         ),
         "listener_names": list(selected.listener_names),
         "listener_ifindexes": list(selected.listener_ifindexes),
@@ -2477,6 +2521,8 @@ def _load_json_object(path: Path, label: str) -> dict:
 def _hash_matches(
     path: Path, expected: object, label: str, *, allow_empty: bool = False,
 ) -> None:
+    if "subnet" in label.casefold():
+        _require_subnet_header(path)
     value = str(expected or "").strip().casefold()
     if not re.fullmatch(r"[0-9a-f]{64}", value):
         raise ActivationError(f"{label} has invalid SHA-256")
@@ -2652,9 +2698,6 @@ def validate_parent_release(settings: Settings, release_manifest: Path) -> dict:
             )
             _hash_matches(
                 fixed[key], expected, f"parent release input {key}",
-                allow_empty=(
-                    key == "subnet" and _empty_subnet_allowed(settings, fixed[key])
-                ),
             )
 
     components = parent.get("components")
@@ -3102,6 +3145,7 @@ def build_activation_marker(
     subnet, dhcp, release = _activation_files(
         settings, subnet_csv, dhcp_config, release_manifest,
     )
+    _require_subnet_header(subnet)
     release_identity = validate_parent_release(settings, release)
     published_links = published_link_identity(settings)
     p2p_publication = published_links[PUBLISHED_P2P_INPUT_LINK.as_posix()]
@@ -3119,7 +3163,7 @@ def build_activation_marker(
         "mini": settings.mini,
         "dhcp_status": dhcp_status,
         "subnet_sha256": sha256_path(
-            subnet, allow_empty=_empty_subnet_allowed(settings, subnet),
+            subnet,
         ),
         "release_manifest_sha256": sha256_path(release),
         "services": list(expected_services(

@@ -105,6 +105,7 @@ from project_contract import (
     safe_load_global_yaml,
     service_url,
     validate_cumulus_dns_domain,
+    validate_dhcp_subnet_placements,
     validate_service_endpoint,
     validate_ztp_url_prefix,
 )
@@ -876,6 +877,18 @@ def _nonempty_file(path: Path, label: str) -> None:
         raise LoadError(f"{label} 大小为 0：{path.name}；请准备真实内容后再次执行 load")
 
 
+def _require_subnet_input_file(path: Path) -> None:
+    """Reject missing, linked, non-regular and zero-byte subnet authorities."""
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise LoadError(f"缺少 02-dhcp-subnet_config.csv：{exc}") from exc
+    if not stat.S_ISREG(metadata.st_mode):
+        raise LoadError("02-dhcp-subnet_config.csv 必须是非软链接普通文件")
+    if metadata.st_size == 0:
+        raise LoadError("02-dhcp-subnet_config.csv 为零字节；必须提供规范表头")
+
+
 def project_air_topology_policy(project: Path) -> Path | None:
     """Return the fixed optional AIR topology policy for one project."""
     path = project / AIR_TOPOLOGY_POLICY_NAME
@@ -1282,7 +1295,7 @@ def derive_service_ips_from_subnet(
     path: Path, ztp_prefix: str,
 ) -> dict[str, tuple[str, ...]]:
     """Derive Cumulus bootstrap service addresses from profile declarations."""
-    _nonempty_file(path, "02-dhcp-subnet_config.csv")
+    _require_subnet_input_file(path)
     _validate_ztp_prefix(ztp_prefix)
     found: dict[str, set[str]] = {profile: set() for profile in BOOTSTRAP_BY_PROFILE}
     with path.open(newline="", encoding="utf-8-sig") as stream:
@@ -1315,6 +1328,7 @@ def derive_boot_ips_from_subnet(
     path: Path, ztp_prefix: str,
 ) -> tuple[str, ...]:
     """Derive the single NVOS ztp.json service address from yes/no declarations."""
+    _require_subnet_input_file(path)
     _validate_ztp_prefix(ztp_prefix)
     found = set()
     with path.open(newline="", encoding="utf-8-sig") as stream:
@@ -1338,9 +1352,7 @@ def apply_subnet_service_ips(
     settings: GlobalSettings, subnet_file: Path,
 ) -> GlobalSettings:
     """Populate service addresses from the authoritative DHCP subnet CSV."""
-    if (settings.dhcp_enabled is False and settings.ztp_enabled is False
-            and subnet_file.is_file() and subnet_file.stat().st_size == 0):
-        return replace(settings, ztp_ips={}, boot_ips=())
+    _require_subnet_input_file(subnet_file)
     derived = derive_service_ips_from_subnet(subnet_file, settings.ztp_prefix)
     boot_ips = derive_boot_ips_from_subnet(subnet_file, settings.ztp_prefix)
     if (not settings.dhcp_enabled and not settings.ztp_enabled
@@ -1538,60 +1550,21 @@ def select_p2p(
 
 def validate_subnet_file(path: Path, settings: GlobalSettings) -> None:
     optional_empty = not settings.dhcp_enabled and not settings.ztp_enabled
-    if optional_empty and path.is_file() and path.stat().st_size == 0:
-        return
-    _nonempty_file(path, "02-dhcp-subnet_config.csv")
+    _require_subnet_input_file(path)
     with path.open(newline="", encoding="utf-8-sig") as stream:
         reader = csv.DictReader(stream)
         _prepare_subnet_reader(reader)
-        count = 0
+        rows = []
         for lineno, row in enumerate(reader, start=2):
             if not any(str(value or "").strip() for value in row.values()):
                 continue
-            count += 1
-            service_ip, _profile, _nvos_ztp = _parse_subnet_ztp_fields(row, lineno)
-            try:
-                network = ipaddress.IPv4Network(
-                    f"{row['subnet'].strip()}/{row['netmask'].strip()}", strict=False
-                )
-                start = ipaddress.IPv4Address(row["range_start"].strip())
-                end = ipaddress.IPv4Address(row["range_end"].strip())
-                router = ipaddress.IPv4Address(row["routers"].strip())
-            except (ValueError, AttributeError) as exc:
-                raise LoadError(f"DHCP subnet CSV 第 {lineno} 行网络字段无效：{exc}") from exc
-            if start not in network or end not in network or router not in network or start > end:
-                raise LoadError(f"DHCP subnet CSV 第 {lineno} 行 range/router 不属于 {network}")
-            if start <= router <= end:
-                raise LoadError(
-                    f"DHCP subnet CSV 第 {lineno} 行 routers={router} "
-                    f"落入动态 range {start}-{end}"
-                )
-            if service_ip:
-                service_address = ipaddress.IPv4Address(service_ip)
-                if service_address in network:
-                    if service_address in (
-                        network.network_address, network.broadcast_address,
-                    ):
-                        raise LoadError(
-                            f"DHCP subnet CSV 第 {lineno} 行 "
-                            f"ztp_service_ip={service_address} 不是 {network} 的可用主机地址"
-                        )
-                    if start <= service_address <= end:
-                        raise LoadError(
-                            f"DHCP subnet CSV 第 {lineno} 行 "
-                            f"ztp_service_ip={service_address} 落入动态 range {start}-{end}"
-                        )
-            for service_ip in settings.service_ips:
-                try:
-                    service_address = ipaddress.IPv4Address(service_ip)
-                except ipaddress.AddressValueError as exc:
-                    raise LoadError(f"推导出的 service_ip={service_ip!r} 无效") from exc
-                if service_address in network and start <= service_address <= end:
-                    raise LoadError(
-                        f"DHCP subnet CSV 第 {lineno} 行 service_ip={service_address} "
-                        f"落入动态 range {start}-{end}"
-                    )
-    if count == 0 and not optional_empty:
+            _parse_subnet_ztp_fields(row, lineno)
+            rows.append((lineno, row))
+    try:
+        validate_dhcp_subnet_placements(rows, service_ips=settings.service_ips)
+    except ValueError as exc:
+        raise LoadError(str(exc)) from exc
+    if not rows and not optional_empty:
         raise LoadError("02-dhcp-subnet_config.csv 没有 subnet 记录")
 
 
@@ -7467,6 +7440,14 @@ def validate_inputs(
     except LoadError as exc:
         validation_errors.append(str(exc))
     try:
+        validate_subnet_file(subnet_file, settings)
+    except LoadError as exc:
+        validation_errors.append(str(exc))
+    # P2P selection may migrate a legacy workbook.  An invalid subnet must
+    # stop before that or any later image/receipt preparation is attempted.
+    if validation_errors:
+        raise LoadError("项目输入检查失败：\n  - " + "\n  - ".join(validation_errors))
+    try:
         device_types = load_device_types(
             devices_file, settings.schema_version, switch_scope=switch_scope,
         )
@@ -7477,10 +7458,6 @@ def validate_inputs(
             project, args.p2p_file, migrate_legacy_canonical=True,
             management_server=host_role == "management-server",
         )
-    except LoadError as exc:
-        validation_errors.append(str(exc))
-    try:
-        validate_subnet_file(subnet_file, settings)
     except LoadError as exc:
         validation_errors.append(str(exc))
     try:

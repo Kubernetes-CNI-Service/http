@@ -33,7 +33,8 @@ DEFAULT_SUPERVISOR_DHCP_PID = Path("/run/http-ztp/dhcpd.pid")
 DEFAULT_SUPERVISOR_LOG_BYTES = 1024 * 1024
 MAX_SUPERVISOR_LOG_BYTES = 20 * 1024 * 1024
 REQUIRED_SUBNET_COLUMNS = frozenset({
-    "shared_network", "subnet", "netmask", "ztp_service_ip",
+    "shared_network", "subnet", "netmask", "range_start", "range_end",
+    "routers", "ztp_service_ip",
     "cumulus_profile", "nvos_ztp",
 })
 
@@ -1015,9 +1016,12 @@ def _read_dhcp_networks(
     subnet_csv: Path, *, allow_empty_subnet: bool = False,
 ) -> Tuple[DhcpNetwork, ...]:
     path = Path(subnet_csv)
-    if allow_empty_subnet and path.is_file() and path.stat().st_size == 0:
-        return ()
     try:
+        metadata = path.lstat()
+        if not stat.S_ISREG(metadata.st_mode):
+            raise RuntimeContractError("DHCP subnet CSV must be a non-symlink regular file")
+        if metadata.st_size == 0:
+            raise RuntimeContractError("DHCP subnet CSV is zero bytes; canonical header required")
         stream = path.open(newline="", encoding="utf-8-sig")
     except OSError as exc:
         raise RuntimeContractError(f"cannot read DHCP subnet CSV {path}: {exc}") from exc
@@ -1025,11 +1029,18 @@ def _read_dhcp_networks(
         reader = csv.DictReader(stream)
         if reader.fieldnames is None:
             raise RuntimeContractError("DHCP subnet CSV has no header")
-        missing = sorted(REQUIRED_SUBNET_COLUMNS - set(reader.fieldnames))
+        fields = [str(field or "").strip() for field in reader.fieldnames]
+        if len(fields) != len(set(fields)):
+            raise RuntimeContractError("DHCP subnet CSV has duplicate columns")
+        if any(field.casefold() in {"bootfile_name", "cumulus_provision_url"}
+               for field in fields):
+            raise RuntimeContractError("DHCP subnet CSV has retired URL columns")
+        missing = sorted(REQUIRED_SUBNET_COLUMNS - set(fields))
         if missing:
             raise RuntimeContractError(
                 "DHCP subnet CSV missing columns: " + ", ".join(missing)
             )
+        reader.fieldnames = fields
         result = []
         shared_lines = {}
         for lineno, row in enumerate(reader, 2):
@@ -1233,6 +1244,8 @@ def plan_dhcp_runtime(
     networks = _read_dhcp_networks(
         Path(subnet_csv), allow_empty_subnet=allow_empty_subnet,
     )
+    if not networks and not allow_empty_subnet:
+        raise RuntimeContractError("no DHCP networks are configured")
     interfaces = _logical_interfaces(link_snapshot, address_snapshot)
     by_name = {interface.ifname: interface for interface in interfaces}
     by_index = {interface.ifindex: interface for interface in interfaces}

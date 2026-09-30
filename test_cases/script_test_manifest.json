@@ -659,6 +659,7 @@
       ],
       "tests": [
         "test_cases.test_image_context_safety",
+        "test_cases.test_dhcp_optional_workflow",
         "test_cases.test_ztp_container_runtime",
         "test_cases.test_ztp_service_runtime",
         "test_cases.test_deployment_writer_lock",
@@ -1932,6 +1933,7 @@
         "test_cases.test_image_context_safety",
         "test_cases.test_ztp_container_runtime",
         "test_cases.test_ztp_service_runtime",
+        "test_cases.test_dhcp_optional_workflow",
         "test_cases.test_deployment_writer_lock",
         "test_cases.test_deploy_upload_archive",
         "test_cases.test_project_image_bundle",

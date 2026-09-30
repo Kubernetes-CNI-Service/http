@@ -2650,10 +2650,14 @@ def _validate_eth_csv(path):
 def _validate_subnet_csv(path, *, allow_empty=False):
     """校验 DHCP subnet CSV。"""
     errors, warnings = [], []
-    if os.path.getsize(path) == 0:
-        if allow_empty:
-            return errors, warnings
-        return ["  文件为空；启用 DHCP 或 ZTP 时必须提供 subnet 记录"], warnings
+    try:
+        metadata = os.lstat(path)
+    except OSError as exc:
+        return [f"  DHCP subnet CSV 不存在或无法读取：{exc}"], warnings
+    if not stat.S_ISREG(metadata.st_mode):
+        return ["  DHCP subnet CSV 必须是非软链接普通文件"], warnings
+    if metadata.st_size == 0:
+        return ["  DHCP subnet CSV 文件为零字节；必须提供规范表头"], warnings
     seen_networks = {}
     profile_services = {}
     nvos_service = None
@@ -2983,9 +2987,13 @@ def _validate_project(proj_dir):
     all_errors   = []
     all_warnings = []
 
-    def _run(label, path, fn):
-        if not os.path.exists(path):
-            return  # 文件不存在由 _process_mapping 报告
+    def _run(label, path, fn, *, required=False):
+        if not os.path.lexists(path):
+            if required:
+                message = f"  缺少必需输入文件：{label}"
+                all_errors.append(message)
+                print(_c(RED, f"  [ERR]{message}"))
+            return
         errs, warns = fn(path)
         if errs or warns:
             print(_c(YELLOW if not errs else RED, f"  {label}"))
@@ -3056,7 +3064,8 @@ def _validate_project(proj_dir):
     allow_empty_subnet = _project_allows_empty_subnet(proj_dir)
     _run("02-dhcp-subnet_config.csv",
          os.path.join(proj_dir, "02-dhcp-subnet_config.csv"),
-         lambda path: _validate_subnet_csv(path, allow_empty=allow_empty_subnet))
+         lambda path: _validate_subnet_csv(path, allow_empty=allow_empty_subnet),
+         required=True)
 
     def _empty_artifact(label, kind="占位文件"):
         message = f"{label} 大小为 0（{kind}）"
@@ -4143,6 +4152,12 @@ def _setup_impl(proj_dir, *, server_delegated=False):
     _LINK_ERRORS = 0
     print(f"\n项目目录：{proj_dir}")
     print(f"ZTP 目录：{ZTP}\n")
+
+    # Existing projects must supply this authority themselves.  Template
+    # initialization below cannot turn a missing required input into success.
+    if not os.path.lexists(os.path.join(proj_dir, "02-dhcp-subnet_config.csv")):
+        print(_c(RED, "  [ERR] 缺少必需输入文件：02-dhcp-subnet_config.csv"))
+        sys.exit(1)
 
     if server_delegated:
         _require_delegated_laptop_public_key(proj_dir)

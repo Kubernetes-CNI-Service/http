@@ -4447,23 +4447,92 @@ def monitor_authority_recovery_decision(_payload, _diagnostics):
 
 
 class ActivationContractTests(QuietContractTest):
-    def test_empty_subnet_hash_is_allowed_only_for_disabled_dhcp_and_ztp(self):
+    def test_invalid_subnet_header_cannot_be_allowed_hashed_or_marked(self):
+        activate = load_script("activate.py")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            http_root = root / "html"
+            project = http_root / "DAY0-Prepare/site-a"
+            project.mkdir(parents=True)
+            (project / "01-global.yaml").write_text(
+                "common:\n  mgmt:\n    dhcp-server: {status: disabled}\n"
+                "    ztp: {status: disabled}\n", encoding="utf-8",
+            )
+            subnet = project / "02-dhcp-subnet_config.csv"
+            settings = activate.Settings(
+                http_root=http_root, project_name="site-a", scope="air",
+            )
+            selected = plan(names=(), indexes=(), endpoints=())
+            for label, payload in (
+                ("wrong_header", b"shared_network,subnet\n"),
+                ("whitespace", b" \t\r\n"),
+            ):
+                subnet.write_bytes(payload)
+                with self.subTest(case=label, boundary="empty allowance"):
+                    self.assertFalse(activate._empty_subnet_allowed(settings, subnet))
+                with self.subTest(case=label, boundary="runtime plan hash"):
+                    with self.assertRaisesRegex(activate.ActivationError, "subnet"):
+                        activate.runtime_plan_payload(settings, selected, [], [])
+
+            for label, payload in (
+                ("wrong_header", b"shared_network,subnet\n"),
+                ("whitespace", b" \t\r\n"),
+            ):
+                with self.subTest(case=label, boundary="precommit marker"), \
+                     tempfile.TemporaryDirectory() as marker_temporary:
+                    marker_root = Path(marker_temporary) / "html"
+                    marker_project, parent_path, parent, _public_dhcp, _dhcp_dir = (
+                        self._dhcp_mode_fixture(marker_root, "disabled")
+                    )
+                    marker_subnet = marker_project / "02-dhcp-subnet_config.csv"
+                    marker_subnet.write_bytes(payload)
+                    parent["inputs"]["subnet"] = hashlib.sha256(payload).hexdigest()
+                    self._rebind_parent_id(parent)
+                    parent_path.write_text(json.dumps(parent) + "\n", encoding="utf-8")
+                    marker_settings = activate.Settings(
+                        http_root=marker_root, project_name="site-a",
+                        scope="air", switch_scope="eth",
+                    )
+                    public_p2p = activate.PUBLISHED_P2P_INPUT_LINK.as_posix()
+                    with mock.patch.object(activate, "_atomic_write") as atomic_write:
+                        with mock.patch.object(
+                            activate, "published_runtime_identity", return_value={},
+                        ), mock.patch.object(
+                            activate, "published_link_identity", return_value={
+                                public_p2p: {"sha256": parent["inputs"]["p2p"]},
+                            },
+                        ), mock.patch.object(
+                            activate, "validate_image_source_contract", return_value={},
+                        ), self.assertRaisesRegex(activate.ActivationError, "subnet"):
+                            activate.publish_precommit_activation(
+                                marker_settings, selected,
+                            )
+                    atomic_write.assert_not_called()
+
+    def test_header_only_subnet_hash_is_bound_but_zero_bytes_are_never_allowed(self):
         activate = load_script("activate.py")
         with tempfile.TemporaryDirectory() as name:
             project = Path(name)
             subnet = project / "02-dhcp-subnet_config.csv"
-            subnet.write_bytes(b"")
+            header = (
+                b"shared_network,subnet,netmask,range_start,range_end,routers,"
+                b"ztp_service_ip,cumulus_profile,nvos_ztp\n"
+            )
+            subnet.write_bytes(header)
             global_file = project / "01-global.yaml"
             global_file.write_text(
                 "common:\n  mgmt:\n    dhcp-server: {status: disabled}\n"
                 "    ztp: {status: disabled}\n", encoding="utf-8",
             )
             settings = SimpleNamespace(project_dir=project)
-            expected = hashlib.sha256(b"").hexdigest()
+            expected = "1e4e2db5cbb609d34080451f7940ec84e6a396a7fe3627e4452980caac27c1c0"
             self.assertTrue(activate._empty_subnet_allowed(settings, subnet))
-            activate._hash_matches(subnet, expected, "subnet", allow_empty=True)
+            activate._hash_matches(subnet, expected, "subnet")
+            subnet.write_bytes(b"")
             with self.assertRaisesRegex(activate.ActivationError, "empty"):
                 activate._hash_matches(subnet, expected, "subnet")
+            self.assertFalse(activate._empty_subnet_allowed(settings, subnet))
+            subnet.write_bytes(header)
             for service in ("dhcp-server", "ztp"):
                 with self.subTest(enabled=service):
                     global_file.write_text(
@@ -5318,16 +5387,19 @@ class ActivationContractTests(QuietContractTest):
             project = http_root / "DAY0-Prepare/site-a"
             project.mkdir(parents=True)
             (project / "01-global.yaml").write_text(
-                "project: independent-fixture\n", encoding="utf-8",
+                "common:\n  mgmt:\n    dhcp-server: {status: enabled}\n"
+                "    ztp: {status: enabled}\n", encoding="utf-8",
             )
             (project / "02-devices_config.csv").write_text(
                 "hostname,mac\nfixture,02:00:00:00:00:01\n", encoding="utf-8",
             )
             (project / "02-dhcp-subnet_config.csv").write_text(
-                "shared_network,subnet,netmask,ztp_service_ip,"
+                "shared_network,subnet,netmask,range_start,range_end,routers,ztp_service_ip,"
                 "cumulus_profile,nvos_ztp\n"
-                "fabric-b,198.51.100.0,255.255.255.192,198.51.100.50,oob,no\n"
-                "fabric-a,192.0.2.0,255.255.255.192,192.0.2.50,oob,no\n",
+                "fabric-b,198.51.100.0,255.255.255.192,198.51.100.10,"
+                "198.51.100.30,198.51.100.1,198.51.100.50,oob,no\n"
+                "fabric-a,192.0.2.0,255.255.255.192,192.0.2.10,"
+                "192.0.2.30,192.0.2.1,192.0.2.50,oob,no\n",
                 encoding="utf-8",
             )
             tools = http_root / "tools"
@@ -5470,6 +5542,10 @@ class ActivationContractTests(QuietContractTest):
             }
             for name, path in inputs.items():
                 path.write_text(f"independent-{name}-fixture\n", encoding="utf-8")
+            inputs["subnet"].write_text(
+                "shared_network,subnet,netmask,range_start,range_end,routers,"
+                "ztp_service_ip,cumulus_profile,nvos_ztp\n", encoding="utf-8",
+            )
             inputs["global"].write_text(
                 "common:\n  mgmt:\n    dhcp-server:\n      status: disabled\n",
                 encoding="utf-8",
@@ -5589,6 +5665,10 @@ class ActivationContractTests(QuietContractTest):
             }
             for name, path in inputs.items():
                 path.write_text(f"fixture-{name}\n", encoding="utf-8")
+            inputs["subnet"].write_text(
+                "shared_network,subnet,netmask,range_start,range_end,routers,"
+                "ztp_service_ip,cumulus_profile,nvos_ztp\n", encoding="utf-8",
+            )
             inputs["global"].write_text(
                 "common:\n  mgmt:\n    dhcp-server:\n      status: disabled\n",
                 encoding="utf-8",
@@ -5690,6 +5770,10 @@ class ActivationContractTests(QuietContractTest):
                 "02-dhcp-subnet_config.csv",
             ):
                 (project / name).write_text(f"site-a-{name}\n", encoding="utf-8")
+            (project / "02-dhcp-subnet_config.csv").write_text(
+                "shared_network,subnet,netmask,range_start,range_end,routers,"
+                "ztp_service_ip,cumulus_profile,nvos_ztp\n", encoding="utf-8",
+            )
             (project / "01-global.yaml").write_text(
                 "common:\n  mgmt:\n    dhcp-server:\n      status: enabled\n",
                 encoding="utf-8",
@@ -5883,7 +5967,8 @@ class ActivationContractTests(QuietContractTest):
             project = root / "html/DAY0-Prepare/site-a"
             project.mkdir(parents=True)
             (project / "02-dhcp-subnet_config.csv").write_text(
-                "independent-subnet-fixture\n", encoding="utf-8",
+                "shared_network,subnet,netmask,range_start,range_end,routers,"
+                "ztp_service_ip,cumulus_profile,nvos_ztp\n", encoding="utf-8",
             )
             settings = activate.Settings(
                 project_name="site-a", scope="air", http_root=root / "html",
@@ -5953,7 +6038,8 @@ class ActivationContractTests(QuietContractTest):
             project = root / "html/DAY0-Prepare/site-a"
             project.mkdir(parents=True)
             (project / "02-dhcp-subnet_config.csv").write_text(
-                "independent-subnet-fixture\n", encoding="utf-8",
+                "shared_network,subnet,netmask,range_start,range_end,routers,"
+                "ztp_service_ip,cumulus_profile,nvos_ztp\n", encoding="utf-8",
             )
             settings = SimpleNamespace(
                 project_name="site-a", scope="air", switch_scope="eth",
@@ -8320,15 +8406,17 @@ class ContainerTransactionContractTests(QuietContractTest):
             project = http_root / "DAY0-Prepare/site-a"
             project.mkdir(parents=True)
             (project / "01-global.yaml").write_text(
-                "project: independent-service-ip-move\n", encoding="utf-8",
+                "common:\n  mgmt:\n    dhcp-server: {status: enabled}\n"
+                "    ztp: {status: enabled}\n", encoding="utf-8",
             )
             (project / "02-devices_config.csv").write_text(
                 "hostname,mac\nfixture,02:00:00:00:00:01\n", encoding="utf-8",
             )
             (project / "02-dhcp-subnet_config.csv").write_text(
-                "shared_network,subnet,netmask,ztp_service_ip,"
+                "shared_network,subnet,netmask,range_start,range_end,routers,ztp_service_ip,"
                 "cumulus_profile,nvos_ztp\n"
-                "fabric,192.0.2.0,255.255.255.192,192.0.2.50,oob,no\n",
+                "fabric,192.0.2.0,255.255.255.192,192.0.2.10,"
+                "192.0.2.30,192.0.2.1,192.0.2.50,oob,no\n",
                 encoding="utf-8",
             )
             tools = http_root / "tools"

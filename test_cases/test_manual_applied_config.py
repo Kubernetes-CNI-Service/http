@@ -94,7 +94,13 @@ def dhcp_mode_release_fixture(http_root: Path, mode: str, *, legacy: bool = Fals
         yaml.safe_dump(global_data, sort_keys=True), encoding="utf-8",
     )
     (project / "02-devices_config.csv").write_text("hostname,type\nleaf01,eth\n", encoding="utf-8")
-    (project / "02-dhcp-subnet_config.csv").write_text("subnet\n192.0.2.0/24\n", encoding="utf-8")
+    (project / "02-dhcp-subnet_config.csv").write_text(
+        "shared_network,subnet,netmask,range_start,range_end,routers,"
+        "ztp_service_ip,cumulus_profile,nvos_ztp\n"
+        "fabric,192.0.2.0,255.255.255.0,192.0.2.10,192.0.2.20,"
+        "192.0.2.1,,none,no\n",
+        encoding="utf-8",
+    )
     source = project / "fixture-p2p.xlsx"
     source.write_bytes(b"independent-p2p-workbook-fixture\n")
     (project / "p2p.xlsx").symlink_to(source.name)

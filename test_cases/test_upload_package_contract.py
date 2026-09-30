@@ -34,6 +34,11 @@ if str(TOOLS) not in sys.path:
 
 import _package_common as package
 
+CANONICAL_SUBNET_HEADER = (
+    b"shared_network,subnet,netmask,range_start,range_end,routers,"
+    b"ztp_service_ip,cumulus_profile,nvos_ztp\n"
+)
+
 
 UPLOAD_SPEC = importlib.util.spec_from_file_location(
     "tar_for_upload_contract", TOOLS / "tar-for-upload.py"
@@ -277,9 +282,7 @@ class UploadPackageContractTests(unittest.TestCase):
         (project / "02-devices_config.csv").write_text(
             "hostname,type\nleaf01,eth\n", encoding="utf-8",
         )
-        (project / "02-dhcp-subnet_config.csv").write_text(
-            "shared_network,subnet\nmgmt,192.0.2.0\n", encoding="utf-8",
-        )
+        (project / "02-dhcp-subnet_config.csv").write_bytes(CANONICAL_SUBNET_HEADER)
         for relative in REQUIRED_UPLOAD_SOURCES:
             path = workspace / relative
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -961,6 +964,222 @@ class UploadPackageContractTests(unittest.TestCase):
                 self.assertEqual(0, len(drawing.findall(f"{{{XDR_NS}}}oneCellAnchor")))
                 self.assertEqual(1, len(drawing.findall(f"{{{XDR_NS}}}twoCellAnchor")))
 
+    def test_upload_rejects_invalid_subnet_before_creating_archive_output(self):
+        """The real shared packager must preflight every required subnet input."""
+        invalid_inputs = (
+            ("missing", None),
+            ("zero_byte", b""),
+            ("whitespace", b" \t\r\n"),
+            ("bad_header", b"shared_network,subnet\n"),
+            (
+                "malformed_row",
+                CANONICAL_SUBNET_HEADER
+                + b"fabric,192.0.2.0,255.255.255.0,192.0.2.10,192.0.2.20,"
+                  b"192.0.2.1,,invalid-profile,no\n",
+            ),
+            ("symlink", "symlink"),
+        )
+        for label, payload in invalid_inputs:
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                workspace, day0, project = self._minimal_package_workspace(base)
+                subnet = project / "02-dhcp-subnet_config.csv"
+                if payload is None:
+                    subnet.unlink()
+                elif payload == "symlink":
+                    target = project / "subnet-target.csv"
+                    target.write_bytes(subnet.read_bytes())
+                    subnet.unlink()
+                    subnet.symlink_to(target.name)
+                else:
+                    subnet.write_bytes(payload)
+                output = base / "uncreated-output" / "upload.tar.gz"
+                args = argparse.Namespace(
+                    project=str(project), output=output, force=False,
+                    max_file_size_mib=50, include_images=False,
+                    include_apps=False, apps_platform=None, apps_platforms=set(),
+                    include_firmware=False,
+                )
+                with mock.patch.multiple(
+                    package,
+                    ROOT=workspace,
+                    DAY0=day0,
+                    MANIFEST=workspace / "ztp/.setup_manifest",
+                    TOOLS_DIR=workspace / "tools",
+                    write_deployment_source_manifest=self._stable_source_manifest,
+                ), self.assertRaisesRegex(ValueError, "subnet"):
+                    package.create_package(
+                        args, day0_all=False, artifact_kind="upload",
+                    )
+                self.assertFalse(output.exists())
+                self.assertFalse(output.parent.exists(), "archive output started before rejection")
+
+    def test_upload_rejects_populated_subnet_placement_before_creating_output(self):
+        """A syntactically valid table must also satisfy load's address placement."""
+        header = CANONICAL_SUBNET_HEADER
+        cases = (
+            (
+                "range_start_outside",
+                b"fabric,192.0.2.0,255.255.255.0,198.51.100.10,192.0.2.120,"
+                b"192.0.2.1,,none,no\n",
+            ),
+            (
+                "range_end_outside",
+                b"fabric,192.0.2.0,255.255.255.0,192.0.2.100,198.51.100.120,"
+                b"192.0.2.1,,none,no\n",
+            ),
+            (
+                "range_reversed",
+                b"fabric,192.0.2.0,255.255.255.0,192.0.2.120,192.0.2.100,"
+                b"192.0.2.1,,none,no\n",
+            ),
+            (
+                "router_outside",
+                b"fabric,192.0.2.0,255.255.255.0,192.0.2.100,192.0.2.120,"
+                b"198.51.100.1,,none,no\n",
+            ),
+            (
+                "router_in_range",
+                b"fabric,192.0.2.0,255.255.255.0,192.0.2.100,192.0.2.120,"
+                b"192.0.2.110,,none,no\n",
+            ),
+            (
+                "service_in_own_range",
+                b"fabric,192.0.2.0,255.255.255.0,192.0.2.100,192.0.2.120,"
+                b"192.0.2.1,192.0.2.110,oob,no\n",
+            ),
+            (
+                "service_is_network_address",
+                b"fabric,192.0.2.0,255.255.255.0,192.0.2.100,192.0.2.120,"
+                b"192.0.2.1,192.0.2.0,oob,no\n",
+            ),
+            (
+                "invalid_service_endpoint",
+                b"fabric,192.0.2.0,255.255.255.0,192.0.2.100,192.0.2.120,"
+                b"192.0.2.1,0.0.0.0,oob,no\n",
+            ),
+            (
+                "derived_service_in_other_range",
+                b"fabric-a,192.0.2.0,255.255.255.0,192.0.2.100,192.0.2.120,"
+                b"192.0.2.1,,none,no\n"
+                b"fabric-b,198.51.100.0,255.255.255.0,198.51.100.100,"
+                b"198.51.100.120,198.51.100.1,192.0.2.110,oob,no\n",
+            ),
+        )
+        for label, rows in cases:
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                workspace, day0, project = self._minimal_package_workspace(base)
+                (project / "02-dhcp-subnet_config.csv").write_bytes(header + rows)
+                output = base / "uncreated-output" / "upload.tar.gz"
+                args = argparse.Namespace(
+                    project=str(project), output=output, force=False,
+                    max_file_size_mib=50, include_images=False,
+                    include_apps=False, apps_platform=None, apps_platforms=set(),
+                    include_firmware=False,
+                )
+                with mock.patch.multiple(
+                    package,
+                    ROOT=workspace,
+                    DAY0=day0,
+                    MANIFEST=workspace / "ztp/.setup_manifest",
+                    TOOLS_DIR=workspace / "tools",
+                    write_deployment_source_manifest=self._stable_source_manifest,
+                ), self.assertRaisesRegex(ValueError, "subnet"):
+                    package.create_package(
+                        args, day0_all=False, artifact_kind="upload",
+                    )
+                self.assertFalse(output.exists())
+                self.assertFalse(output.parent.exists(), "archive output started before rejection")
+
+    def test_load_and_first_package_share_populated_subnet_semantics(self):
+        """The real load and packager reject the same independently chosen rows."""
+        cases = (
+            (
+                "router_in_range",
+                b"fabric,192.0.2.0,255.255.255.0,192.0.2.100,192.0.2.120,"
+                b"192.0.2.110,,none,no\n",
+            ),
+            (
+                "derived_service_in_other_range",
+                b"fabric-a,192.0.2.0,255.255.255.0,192.0.2.100,192.0.2.120,"
+                b"192.0.2.1,,none,no\n"
+                b"fabric-b,198.51.100.0,255.255.255.0,198.51.100.100,"
+                b"198.51.100.120,198.51.100.1,192.0.2.110,oob,no\n",
+            ),
+        )
+        for label, rows in cases:
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                workspace, day0, project = self._minimal_package_workspace(base)
+                subnet = project / "02-dhcp-subnet_config.csv"
+                subnet.write_bytes(CANONICAL_SUBNET_HEADER + rows)
+                settings = load_tool.GlobalSettings(
+                    dhcp_enabled=True, dhcp_package="isc-dhcp-server",
+                    http_enabled=False, http_package="apache2", http_root=workspace,
+                    ztp_enabled=False, ztp_prefix="/ztp", ztp_ips={}, versions={},
+                )
+                settings = load_tool.apply_subnet_service_ips(settings, subnet)
+                with self.assertRaises(load_tool.LoadError):
+                    load_tool.validate_subnet_file(subnet, settings)
+                output = base / "uncreated-output" / "upload.tar.gz"
+                args = argparse.Namespace(
+                    project=str(project), output=output, force=False,
+                    max_file_size_mib=50, include_images=False,
+                    include_apps=False, apps_platform=None, apps_platforms=set(),
+                    include_firmware=False,
+                )
+                with mock.patch.multiple(
+                    package,
+                    ROOT=workspace,
+                    DAY0=day0,
+                    MANIFEST=workspace / "ztp/.setup_manifest",
+                    TOOLS_DIR=workspace / "tools",
+                ), self.assertRaisesRegex(ValueError, "subnet"):
+                    package.create_package(
+                        args, day0_all=False, artifact_kind="upload",
+                    )
+                self.assertFalse(output.exists())
+                self.assertFalse(output.parent.exists())
+
+    def test_upload_preserves_valid_reordered_subnet_headers(self):
+        """Existing nine-column semantics allow reordered populated and empty tables."""
+        reordered_header = (
+                b"subnet,shared_network,netmask,range_start,range_end,routers,"
+                b"ztp_service_ip,cumulus_profile,nvos_ztp\n"
+        )
+        for label, subnet_payload in (
+            ("populated", reordered_header +
+             b"192.0.2.0,fabric,255.255.255.0,192.0.2.10,192.0.2.20,"
+             b"192.0.2.1,,none,no\n"),
+            ("empty_with_trailing_blank_lines", reordered_header + b"\n\r\n"),
+        ):
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                workspace, day0, project = self._minimal_package_workspace(base)
+                (project / "02-dhcp-subnet_config.csv").write_bytes(subnet_payload)
+                output = base / "upload.tar.gz"
+                args = argparse.Namespace(
+                    project=str(project), output=output, force=False,
+                    max_file_size_mib=50, include_images=False, include_apps=False,
+                    apps_platform=None, apps_platforms=set(), include_firmware=False,
+                )
+                with mock.patch.multiple(
+                    package,
+                    ROOT=workspace,
+                    DAY0=day0,
+                    MANIFEST=workspace / "ztp/.setup_manifest",
+                    TOOLS_DIR=workspace / "tools",
+                    write_deployment_source_manifest=self._stable_source_manifest,
+                ):
+                    package.create_package(args, day0_all=False, artifact_kind="upload")
+                with tarfile.open(output, "r:gz") as archive:
+                    member = archive.extractfile(
+                        "./DAY0-Prepare/customer/02-dhcp-subnet_config.csv",
+                    )
+                    self.assertIsNotNone(member)
+                    self.assertEqual(subnet_payload, member.read())
+
     def test_upload_contains_only_consumed_project_inputs_and_sanitized_p2p(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = (Path(directory) / "http").resolve()
@@ -1044,6 +1263,8 @@ class UploadPackageContractTests(unittest.TestCase):
             )
             for name in package.PROJECT_DEPLOYMENT_INPUTS:
                 (project / name).write_text("input\n", encoding="utf-8")
+            subnet_table = CANONICAL_SUBNET_HEADER
+            (project / "02-dhcp-subnet_config.csv").write_bytes(subnet_table)
             policy_payload = b'{"node_allowlist": ["AIR-example-leaf01"]}\n'
             (project / "03-air-topology-policy.json").write_bytes(policy_payload)
             mini_payload = (
@@ -1085,6 +1306,13 @@ class UploadPackageContractTests(unittest.TestCase):
                 self.assertIn(prefix + "01-global.yaml", names)
                 self.assertIn(prefix + "02-devices_config.csv", names)
                 self.assertIn(prefix + "02-dhcp-subnet_config.csv", names)
+                archived_subnet = archive.extractfile(prefix + "02-dhcp-subnet_config.csv")
+                self.assertIsNotNone(archived_subnet)
+                self.assertEqual(subnet_table, archived_subnet.read())
+                self.assertEqual(
+                    "1e4e2db5cbb609d34080451f7940ec84e6a396a7fe3627e4452980caac27c1c0",
+                    hashlib.sha256(subnet_table).hexdigest(),
+                )
                 self.assertIn(prefix + "03-air-topology-policy.json", names)
                 self.assertIn(prefix + "04-air-mini-devices.txt", names)
                 self.assertIn(prefix + "laptop.pub", names)
@@ -1190,6 +1418,9 @@ class UploadPackageContractTests(unittest.TestCase):
                     target.write_text("# deployable\n", encoding="utf-8")
                 for name in package.PROJECT_DEPLOYMENT_INPUTS:
                     (project / name).write_text("input\n", encoding="utf-8")
+                (project / "02-dhcp-subnet_config.csv").write_bytes(
+                    CANONICAL_SUBNET_HEADER,
+                )
                 write_picture_workbook(project / "Customer P2P.xlsx")
                 (project / "p2p.xlsx").symlink_to("Customer P2P.xlsx")
                 write_sparse_self_extracting_image(workspace / "image" / image_name)
@@ -1266,6 +1497,9 @@ class UploadPackageContractTests(unittest.TestCase):
                 target.write_text("# deployable\n", encoding="utf-8")
             for name in package.PROJECT_DEPLOYMENT_INPUTS:
                 (project / name).write_text("input\n", encoding="utf-8")
+            (project / "02-dhcp-subnet_config.csv").write_bytes(
+                CANONICAL_SUBNET_HEADER,
+            )
             write_picture_workbook(project / "Customer P2P.xlsx")
             (project / "p2p.xlsx").symlink_to("Customer P2P.xlsx")
             output = workspace / "upload.tar.gz"
@@ -1303,6 +1537,9 @@ class UploadPackageContractTests(unittest.TestCase):
                 target.write_text("# deployable\n", encoding="utf-8")
             for name in package.PROJECT_DEPLOYMENT_INPUTS:
                 (project / name).write_text("input\n", encoding="utf-8")
+            (project / "02-dhcp-subnet_config.csv").write_bytes(
+                CANONICAL_SUBNET_HEADER,
+            )
             write_picture_workbook(project / "Customer P2P.xlsx")
             (project / "p2p.xlsx").symlink_to("Customer P2P.xlsx")
             (project / "03-air-topology-policy.json").write_text(
@@ -1353,6 +1590,9 @@ class UploadPackageContractTests(unittest.TestCase):
                     target.write_text("# deployable\n", encoding="utf-8")
                 for name in package.PROJECT_DEPLOYMENT_INPUTS:
                     (project / name).write_text("input\n", encoding="utf-8")
+                (project / "02-dhcp-subnet_config.csv").write_bytes(
+                    CANONICAL_SUBNET_HEADER,
+                )
                 write_picture_workbook(project / "Customer P2P.xlsx")
                 (project / "p2p.xlsx").symlink_to("Customer P2P.xlsx")
                 policy = project / "03-air-topology-policy.json"
@@ -1394,6 +1634,9 @@ class UploadPackageContractTests(unittest.TestCase):
                 target.write_text("# deployable\n", encoding="utf-8")
             for name in package.PROJECT_DEPLOYMENT_INPUTS:
                 (project / name).write_text("input\n", encoding="utf-8")
+            (project / "02-dhcp-subnet_config.csv").write_bytes(
+                CANONICAL_SUBNET_HEADER,
+            )
             write_picture_workbook(project / "Customer P2P.xlsx")
             (project / "p2p.xlsx").symlink_to("Customer P2P.xlsx")
             args = argparse.Namespace(

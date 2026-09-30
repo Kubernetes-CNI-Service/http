@@ -333,6 +333,81 @@ def validate_service_endpoint(
     return ServiceEndpoint(parsed, resolved_port)
 
 
+def validate_dhcp_subnet_placements(
+    rows: Iterable[tuple[int, Mapping[str, object]]],
+    *, service_ips: Iterable[str] = (),
+) -> None:
+    """Check DHCP pool and service address placement without reading or writing files.
+
+    The caller owns the CSV header and platform-profile contract.  Every
+    declared ZTP endpoint is included in the derived service set so an address
+    on one row cannot accidentally fall into another row's dynamic pool.
+    """
+    placements = []
+    derived_service_ips = []
+    for lineno, row in rows:
+        raw_service_ip = str(row.get("ztp_service_ip") or "").strip()
+        service_address = None
+        if raw_service_ip:
+            try:
+                service_address = validate_service_endpoint(
+                    raw_service_ip,
+                    field=f"DHCP subnet CSV 第 {lineno} 行 ztp_service_ip",
+                ).address
+            except ValueError as exc:
+                raise ValueError(
+                    f"DHCP subnet CSV 第 {lineno} 行 "
+                    f"ztp_service_ip={raw_service_ip!r} 不是可用单播地址"
+                ) from exc
+            derived_service_ips.append(str(service_address))
+        try:
+            network = ipaddress.IPv4Network(
+                f"{row['subnet'].strip()}/{row['netmask'].strip()}", strict=False,
+            )
+            start = ipaddress.IPv4Address(row["range_start"].strip())
+            end = ipaddress.IPv4Address(row["range_end"].strip())
+            router = ipaddress.IPv4Address(row["routers"].strip())
+        except (ValueError, AttributeError) as exc:
+            raise ValueError(
+                f"DHCP subnet CSV 第 {lineno} 行网络字段无效：{exc}"
+            ) from exc
+        if start not in network or end not in network or router not in network or start > end:
+            raise ValueError(
+                f"DHCP subnet CSV 第 {lineno} 行 range/router 不属于 {network}"
+            )
+        if start <= router <= end:
+            raise ValueError(
+                f"DHCP subnet CSV 第 {lineno} 行 routers={router} "
+                f"落入动态 range {start}-{end}"
+            )
+        if service_address is not None and service_address in network:
+            if service_address in (network.network_address, network.broadcast_address):
+                raise ValueError(
+                    f"DHCP subnet CSV 第 {lineno} 行 "
+                    f"ztp_service_ip={service_address} 不是 {network} 的可用主机地址"
+                )
+            if start <= service_address <= end:
+                raise ValueError(
+                    f"DHCP subnet CSV 第 {lineno} 行 "
+                    f"ztp_service_ip={service_address} 落入动态 range {start}-{end}"
+                )
+        placements.append((lineno, network, start, end))
+
+    addresses = []
+    for raw_service_ip in dict.fromkeys((*derived_service_ips, *service_ips)):
+        try:
+            addresses.append(ipaddress.IPv4Address(raw_service_ip))
+        except ipaddress.AddressValueError as exc:
+            raise ValueError(f"推导出的 service_ip={raw_service_ip!r} 无效") from exc
+    for lineno, network, start, end in placements:
+        for service_address in addresses:
+            if service_address in network and start <= service_address <= end:
+                raise ValueError(
+                    f"DHCP subnet CSV 第 {lineno} 行 service_ip={service_address} "
+                    f"落入动态 range {start}-{end}"
+                )
+
+
 def merge_http_listener_addresses(
     ztp_service_ips: Iterable[object], http_address: object | None,
 ) -> tuple[str, ...]:

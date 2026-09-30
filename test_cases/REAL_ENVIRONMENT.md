@@ -7,12 +7,12 @@
 [《四类交付制品与 2026-12 部署流程》](../docs/deployment/BUNDLE_WORKFLOWS.md)；下面只登记必须在
 Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
-## TC-REAL-IB-EMPTY-SUBNET-001 — 双禁用服务的空 subnet 部署验收
+## TC-REAL-IB-EMPTY-SUBNET-001 — 双禁用服务的规范表头空表部署验收
 
 - Case ID：`TC-REAL-IB-EMPTY-SUBNET-001`；类型：real-environment / Native / Docker；状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。自动化先决为 `test_dhcp_optional_contract`、`test_dhcp_optional_workflow`、`test_ztp_service_runtime` 和 `test_ztp_container_runtime` 的 direct/workflow 全绿；本机模拟不等于真实服务切换通过。
-- 前置条件：仅在 owner 授权的可丢弃 Ubuntu 管理 VM 或 Docker 测试机、私有项目副本与完整快照中执行；冻结 HEAD/tree、证明、项目 `01-global.yaml`、空 `02-dhcp-subnet_config.csv`、设备/P2P 输入的 SHA-256，以及 Apache/DHCP 服务与监听前像。不得在真实客户项目或生产 DHCP 服务上执行负例。
-- 步骤：以 `--switch ib --no-upgrade` 对双禁用项目分别执行 Native load 与 Docker 激活；确认输入校验、setup、统一 release 与启动前规划完成。再在隔离副本分别把 DHCP 或 ZTP 状态改为 enabled、置入非空畸形 CSV，以及指定无网络的 relay ingress，重跑只读预检；这些负例都必须在服务切换前拒绝。
-- 预期和证据：双禁用正例的 parent/runtime/activation manifest 均绑定空文件的 SHA-256 `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`，listener 集合为空，DHCP 生成/安装/启动未发生，旧 DHCP 输出未被误认作当前 release。记录脱敏 argv/退出码、manifest/服务/监听前后像、零字节文件 dev/ino/mode/hash、负例拒绝点及完整日志；不允许发布不完整配置。
+- 前置条件：仅在 owner 授权的可丢弃 Ubuntu 管理 VM 或 Docker 测试机、私有项目副本与完整快照中执行；冻结 HEAD/tree、正式证明、项目 `01-global.yaml`、100 字节规范表头且零语义行的普通非软链接 `02-dhcp-subnet_config.csv`、设备/P2P 输入的 SHA-256，以及 Apache/DHCP 服务与监听前像。零字节文件不是合法空表；不得在真实客户项目或生产 DHCP 服务上执行负例。
+- 步骤：以 `--switch ib --no-upgrade` 对 DHCP/ZTP 双禁用项目分别执行 Native load 与 Docker 激活；确认输入校验、setup、统一 release、启动前规划与来源归档均绑定同一规范表头文件。再在隔离副本分别验证缺失、零字节、纯空白、错误表头、软链接、DHCP enabled 加规范表头空表，以及 DHCP disabled 加 ZTP enabled 的拒绝；有数据但畸形的 CSV 与无网络 relay ingress 也须在服务切换前拒绝。每个负例先留存健康 release/服务前像，拒绝后复核不变。
+- 预期和证据：双禁用正例的 parent/runtime/activation manifest 与归档输入均绑定规范表头文件的 SHA-256 `1e4e2db5cbb609d34080451f7940ec84e6a396a7fe3627e4452980caac27c1c0`，listener 集合为空，DHCP 生成/安装/启动未发生，旧 DHCP 输出未被误认作当前 release。记录脱敏 argv/退出码、manifest/归档/服务/监听前后像、输入文件 dev/ino/mode/size/hash、负例拒绝点及完整日志；旧零字节哈希 `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` 的历史身份与收据不得冒充本轮成功证据。此处仅为待执行预期，不宣称真实验收已发生。
 - 清理与风险：只恢复可丢弃副本和 VM/容器快照，逐项核对服务与监听前像；缺批准、快照、负例证据或未真实执行时保持 OPEN。本卡不授权生产服务切换，也不代替正式 full proof。
 
 ## TC-REAL-RUNNER-PREFLIGHT-001 — 操作系统 loopback 限制与选测早拒绝

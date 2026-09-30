@@ -15,7 +15,10 @@ from contextlib import redirect_stdout
 from types import SimpleNamespace
 from unittest import mock
 
-from test_cases.test_dhcp_optional_contract import DHCP, LOAD, SETUP, global_document
+from test_cases.test_dhcp_optional_contract import (
+    DHCP, EMPTY_SUBNET_TABLE, EMPTY_SUBNET_TABLE_SHA256, LOAD, SETUP,
+    global_document,
+)
 from test_cases.test_dhcp_switch_scope_preservation import ScopedDhcpFixture
 from test_cases import test_load_release_transaction as release_fixture
 from test_cases.module_loader import load_script
@@ -27,6 +30,117 @@ ACTIVATE = load_script("optional_empty_subnet_docker", ROOT / "infra/docker/acti
 
 
 class DhcpOptionalWorkflowTests(unittest.TestCase):
+    def test_invalid_subnet_cannot_cross_setup_load_runtime_or_docker_boundary(self):
+        with tempfile.TemporaryDirectory() as name:
+            http_root = Path(name)
+            day0 = http_root / "DAY0-Prepare"
+            project = day0 / "project"
+            project.mkdir(parents=True)
+            document = global_document("disabled")
+            document["common"]["mgmt"]["ztp"]["status"] = "disabled"
+            (project / "01-global.yaml").write_text(
+                yaml.safe_dump(document), encoding="utf-8",
+            )
+            (project / "02-devices_config.csv").write_text(
+                "hostname,type\nib01,ib\n", encoding="utf-8",
+            )
+            subnet = project / "02-dhcp-subnet_config.csv"
+            source = project / "symlink-target.csv"
+            source.write_bytes(EMPTY_SUBNET_TABLE)
+            settings = LOAD.replace(LOAD.load_global(project / "01-global.yaml"), ztp_enabled=False)
+            docker_settings = SimpleNamespace(
+                project_dir=project, subnet_csv=subnet, http_root=http_root,
+                project_name="project", allowlist=(), relay_ingress=(),
+            )
+            cases = (
+                ("missing", None), ("zero", b""), ("whitespace", b" \t\r\n"),
+                ("wrong-header", b"wrong,columns\n"), ("symlink", "symlink"),
+            )
+            for label, payload in cases:
+                if subnet.exists() or subnet.is_symlink():
+                    subnet.unlink()
+                if payload == "symlink":
+                    subnet.symlink_to(source)
+                elif payload is not None:
+                    subnet.write_bytes(payload)
+                with self.subTest(case=label, script="setup"), \
+                        mock.patch.multiple(SETUP, _SWITCH_SCOPE="ib", _CSV_DIR=None), \
+                        mock.patch.object(SETUP, "_validate_eth_csv", return_value=([], [])), \
+                        mock.patch.object(SETUP, "_validate_global_yaml", return_value=([], [])), \
+                        redirect_stdout(io.StringIO()):
+                    self.assertFalse(SETUP._validate_project(str(project)))
+                with self.subTest(case=label, script="load"):
+                    with self.assertRaises(LOAD.LoadError):
+                        LOAD.apply_subnet_service_ips(settings, subnet)
+                    with self.assertRaises(LOAD.LoadError):
+                        LOAD.validate_subnet_file(subnet, settings)
+                with self.subTest(case=label, script="runtime"):
+                    with self.assertRaises(RUNTIME.RuntimeContractError):
+                        RUNTIME.plan_dhcp_runtime(
+                            subnet, link_snapshot=[], address_snapshot=[],
+                            allow_empty_subnet=True,
+                        )
+                with self.subTest(case=label, script="docker"), \
+                        mock.patch.object(ACTIVATE, "capture_stable_network_snapshot", return_value=([], [])), \
+                        mock.patch.object(ACTIVATE, "_load_runtime_module", return_value=RUNTIME):
+                    with self.assertRaises(ACTIVATE.ActivationError):
+                        ACTIVATE.build_runtime_plan(docker_settings)
+
+    def test_setup_rejects_missing_subnet_before_template_can_fill_it(self):
+        with tempfile.TemporaryDirectory() as name:
+            project = Path(name) / "project"
+            project.mkdir()
+            document = global_document("disabled")
+            document["common"]["mgmt"]["ztp"]["status"] = "disabled"
+            (project / "01-global.yaml").write_text(
+                yaml.safe_dump(document), encoding="utf-8",
+            )
+            subnet = project / "02-dhcp-subnet_config.csv"
+            self.assertFalse(subnet.exists())
+            with mock.patch.multiple(
+                SETUP, _DRY_RUN=False, _SWITCH_SCOPE="ib", _CSV_DIR=None,
+                _P2P_SOURCE=None, _STRICT=False,
+            ), mock.patch.object(SETUP, "_prepare_laptop_public_key"), \
+                    mock.patch.object(SETUP, "_select_p2p_source", return_value=project / "p2p.xlsx"), \
+                    mock.patch.object(SETUP, "_validate_eth_csv", return_value=([], [])), \
+                    mock.patch.object(SETUP, "_validate_global_yaml", return_value=([], [])), \
+                    mock.patch.object(SETUP, "_check_p2p_source_identity", return_value=False) as identity_check, \
+                    redirect_stdout(io.StringIO()):
+                with self.assertRaises(SystemExit) as stopped:
+                    SETUP._setup_impl(str(project))
+            self.assertEqual(1, stopped.exception.code)
+            identity_check.assert_not_called()
+            self.assertFalse(subnet.exists(), "setup must not materialize a missing required CSV")
+
+    def test_enabled_header_only_subnet_rejects_before_p2p_selection(self):
+        with tempfile.TemporaryDirectory() as name:
+            project = Path(name)
+            document = global_document("enabled")
+            document["common"]["mgmt"]["ztp"]["status"] = "disabled"
+            (project / "01-global.yaml").write_text(
+                yaml.safe_dump(document), encoding="utf-8",
+            )
+            (project / "02-devices_config.csv").write_text("fixture\n", encoding="utf-8")
+            (project / "02-dhcp-subnet_config.csv").write_bytes(EMPTY_SUBNET_TABLE)
+            args = SimpleNamespace(
+                switch_scope="ib", deployment_scope="all", p2p_file=None,
+                no_upgrade=True, mini=None, ssh_dir=None, dry_run=True,
+            )
+            with mock.patch.object(LOAD, "find_placeholder_password_sections", return_value=()), \
+                    mock.patch.object(LOAD, "load_device_types", return_value=frozenset({"ib"})), \
+                    mock.patch.object(LOAD, "select_p2p", return_value=project / "p2p.xlsx") as selector, \
+                    mock.patch.object(LOAD, "project_air_topology_policy", return_value=None), \
+                    mock.patch.object(LOAD, "project_mini_air_devices", return_value=(None, None)), \
+                    mock.patch.object(LOAD, "prepare_pubkeys", return_value=()), \
+                    mock.patch.object(LOAD, "validate_shared_artifact_receipts"), \
+                    redirect_stdout(io.StringIO()):
+                with self.assertRaises(LOAD.LoadError):
+                    LOAD.validate_inputs(
+                        project, args, allow_management_key_generation=False,
+                        host_role="workstation",
+                    )
+            selector.assert_not_called()
+
     def test_ib_load_to_setup_preserves_mixed_v2_inventory_without_eth_vrr(self):
         with tempfile.TemporaryDirectory() as name:
             project = Path(name)
@@ -50,7 +164,7 @@ class DhcpOptionalWorkflowTests(unittest.TestCase):
                     ["ib01", "ib", "", "192.0.2.10", "24", "192.0.2.1"] + [""] * 13,
                     ["leaf01", "eth", "", "192.0.2.11", "24", "192.0.2.1"] + [""] * 13,
                 ])
-            (project / "02-dhcp-subnet_config.csv").write_bytes(b"")
+            (project / "02-dhcp-subnet_config.csv").write_bytes(EMPTY_SUBNET_TABLE)
 
             settings = LOAD.load_global(global_path, switch_scope="ib")
             self.assertEqual(2, settings.schema_version)
@@ -69,7 +183,7 @@ class DhcpOptionalWorkflowTests(unittest.TestCase):
             self.assertIn("switches.eth.vrr", output.getvalue())
             self.assertNotIn("schema 1", output.getvalue())
 
-    def test_ib_load_input_transaction_keeps_empty_subnet_source_hash(self):
+    def test_ib_load_input_transaction_keeps_header_only_subnet_source_hash(self):
         with tempfile.TemporaryDirectory() as name:
             project = Path(name)
             global_file = project / "01-global.yaml"
@@ -78,7 +192,7 @@ class DhcpOptionalWorkflowTests(unittest.TestCase):
             global_file.write_text(yaml.safe_dump(document), encoding="utf-8")
             (project / "02-devices_config.csv").write_text("fixture\n", encoding="utf-8")
             subnet = project / "02-dhcp-subnet_config.csv"
-            subnet.write_bytes(b"")
+            subnet.write_bytes(EMPTY_SUBNET_TABLE)
             p2p = project / "real P2P_v1.0.xlsx"
             p2p.write_bytes(b"fixture")
             args = SimpleNamespace(
@@ -99,10 +213,10 @@ class DhcpOptionalWorkflowTests(unittest.TestCase):
                 )
             self.assertEqual({}, images)
             self.assertEqual(frozenset({"ib"}), inputs.device_types)
-            self.assertEqual(hashlib.sha256(b"").hexdigest(),
+            self.assertEqual(EMPTY_SUBNET_TABLE_SHA256,
                              inputs.source_identities["subnet"])
 
-    def test_ib_empty_subnet_passes_setup_load_and_both_runtime_planners(self):
+    def test_ib_header_only_subnet_passes_setup_load_and_both_runtime_planners(self):
         with tempfile.TemporaryDirectory() as name:
             project = Path(name) / "project"
             project.mkdir()
@@ -111,7 +225,7 @@ class DhcpOptionalWorkflowTests(unittest.TestCase):
             document["common"]["mgmt"]["ztp"]["status"] = "disabled"
             global_file.write_text(yaml.safe_dump(document), encoding="utf-8")
             subnet = project / "02-dhcp-subnet_config.csv"
-            subnet.write_bytes(b"")
+            subnet.write_bytes(EMPTY_SUBNET_TABLE)
             settings = LOAD.load_global(global_file, switch_scope="ib")
             setup_output = io.StringIO()
             with mock.patch.object(SETUP, "_validate_eth_csv", return_value=([], [])), \
@@ -141,11 +255,11 @@ class DhcpOptionalWorkflowTests(unittest.TestCase):
                     mock.patch.object(ACTIVATE, "_load_runtime_module", return_value=RUNTIME):
                 docker, _, _, _ = ACTIVATE.build_runtime_plan(docker_settings)
             self.assertEqual((), docker.listener_names)
-            self.assertEqual(hashlib.sha256(b"").hexdigest(),
-                             ACTIVATE.sha256_path(subnet, allow_empty=True))
+            self.assertEqual(EMPTY_SUBNET_TABLE_SHA256,
+                             ACTIVATE.sha256_path(subnet))
             self.assertEqual((), docker.endpoint_ips)
             self.assertEqual(
-                hashlib.sha256(b"").hexdigest(),
+                EMPTY_SUBNET_TABLE_SHA256,
                 ACTIVATE.runtime_plan_payload(docker_settings, docker, [], [])["subnet_sha256"],
             )
 
