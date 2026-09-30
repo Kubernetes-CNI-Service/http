@@ -1728,6 +1728,53 @@ def validate_deployment_archive_members(members: list[tarfile.TarInfo]) -> None:
             )
 
 
+REMOTE_GUARD_STDIN_BOOTSTRAP = (
+    "import hashlib,os,re,sys\n"
+    "try:\n"
+    " n=int(sys.argv.pop(1)); expected=sys.argv.pop(1)\n"
+    " if not 0<n<=4194304 or not re.fullmatch(r'[0-9a-f]{64}',expected): raise ValueError('invalid guard authority')\n"
+    " parts=[]\n"
+    " while n:\n"
+    "  chunk=os.read(0,min(n,65536))\n"
+    "  if not chunk: raise ValueError('guard source truncated')\n"
+    "  parts.append(chunk); n-=len(chunk)\n"
+    " source=b''.join(parts)\n"
+    " if hashlib.sha256(source).hexdigest()!=expected: raise ValueError('guard source digest mismatch')\n"
+    " code=compile(source.decode('utf-8'),'<verified-deployment-guard>','exec')\n"
+    "except (ValueError,UnicodeError,IndexError,SyntaxError) as error:\n"
+    " print('[ERROR] verified guard bootstrap refused: '+str(error),file=sys.stderr); sys.exit(74)\n"
+    "exec(code,{'__name__':'__main__','__package__':None})\n"
+)
+
+
+def remote_guard_source_bytes(guard_source: str | bytes | None) -> bytes:
+    """Freeze and bound the source sent before holder/shell runtime stdin."""
+    if guard_source is None:
+        encoded = _read_frozen_regular_bytes(
+            DEPLOYMENT_PREWRITE_GUARD, "deployment prewrite guard",
+        )
+    elif isinstance(guard_source, bytes):
+        encoded = guard_source
+    elif isinstance(guard_source, str):
+        encoded = guard_source.encode("utf-8")
+    else:
+        raise ValueError("verified deployment guard source must be text")
+    if not encoded or len(encoded) > 4 * 1024 * 1024:
+        raise ValueError("verified deployment guard source exceeds its bound")
+    try:
+        encoded.decode("utf-8")
+    except UnicodeError as exc:
+        raise ValueError("verified deployment guard source is not UTF-8") from exc
+    return encoded
+
+
+def _remote_guard_bootstrap_argv(source: bytes) -> list[str]:
+    return [
+        "python3", "-c", REMOTE_GUARD_STDIN_BOOTSTRAP,
+        str(len(source)), hashlib.sha256(source).hexdigest(),
+    ]
+
+
 def remote_locked_shell_argv(
     lock_path: str, script: str, *, use_sudo: bool,
     http_root: str | None = None, protect_docker: bool = False,
@@ -1735,24 +1782,18 @@ def remote_locked_shell_argv(
 ) -> list[str]:
     """Run a payload under the embedded, no-follow deployment-lock helper.
 
-    The helper source travels inside the already quoted SSH argv rather than
-    being loaded from the destination tree.  This permits a safe first deploy
-    and prevents an older/drifted remote helper from authorizing its own
-    replacement.  Docker protection runs after lock acquisition and before
-    the first byte of the shell payload.
+    Callers must send ``remote_guard_source_bytes(guard_source)`` as the first
+    bytes of SSH stdin. The short bootstrap reads exactly that authenticated
+    prelude, leaving subsequent stdin untouched for the protected payload.
+    No destination-tree helper authorizes its own replacement.
     """
     if protect_docker and http_root is None:
         raise ValueError("Docker-protected remote writer requires http_root")
     if runtime not in {"native", "docker"}:
         raise ValueError(f"unsupported runtime backend: {runtime!r}")
-    helper_source = guard_source
-    if helper_source is None:
-        helper_source = _read_frozen_regular_bytes(
-            DEPLOYMENT_PREWRITE_GUARD, "deployment prewrite guard",
-        ).decode("utf-8")
+    source = remote_guard_source_bytes(guard_source)
     root = http_root or posixpath.dirname(lock_path.rstrip("/")) or "/"
-    command = ([] if not use_sudo else ["sudo", "-n"]) + [
-        "python3", "-c", helper_source,
+    command = ([] if not use_sudo else ["sudo", "-n"]) + _remote_guard_bootstrap_argv(source) + [
         "--lock", lock_path, "--root", root,
     ]
     if protect_docker:
@@ -1770,15 +1811,10 @@ def remote_lock_holder_argv(
     """Start the embedded two-phase holder used by multi-SSH rsync."""
     if runtime not in {"native", "docker"}:
         raise ValueError(f"unsupported runtime backend: {runtime!r}")
-    helper_source = guard_source
-    if helper_source is None:
-        helper_source = _read_frozen_regular_bytes(
-            DEPLOYMENT_PREWRITE_GUARD, "deployment prewrite guard",
-        ).decode("utf-8")
+    source = remote_guard_source_bytes(guard_source)
     if not __import__("re").fullmatch(r"[0-9a-f]{64}", source_manifest_sha256):
         raise ValueError("verified source manifest SHA-256 is required")
-    return ([] if not use_sudo else ["sudo", "-n"]) + [
-        "python3", "-c", helper_source,
+    return ([] if not use_sudo else ["sudo", "-n"]) + _remote_guard_bootstrap_argv(source) + [
         "--lock", lock_path, "--root", http_root, "--holder",
         "--runtime", runtime,
         "--source-manifest-sha256", source_manifest_sha256,
@@ -1799,8 +1835,10 @@ def remote_locked_archive_argv(
         raise ValueError("verified archive deployment guard source is required")
     if not __import__("re").fullmatch(r"[0-9a-f]{64}", source_manifest_sha256):
         raise ValueError("verified source manifest SHA-256 is required")
+    # The authenticated guard is supplied on SSH stdin by the caller. Linux
+    # bounds each argv item independently, even when ARG_MAX remains ample.
     return ([] if not use_sudo else ["sudo", "-n"]) + [
-        "python3", "-c", guard_source,
+        "python3", "-",
         "--lock", lock_path, "--root", http_root,
         "--runtime", runtime,
         "--archive", archive_path,

@@ -1191,15 +1191,110 @@ class SyncDeploymentLockTests(unittest.TestCase):
         self.assertIn("ServerAliveInterval=15", command)
         remote = shlex.split(command[-1])
         self.assertEqual(["sudo", "-n", "python3", "-c"], remote[:4])
-        self.assertIn("O_NOFOLLOW", remote[4])
-        self.assertIn("flock", remote[4])
-        self.assertIn(SYNC.DEPLOYMENT_LOCK_READY, remote[4])
+        self.assertLess(len(command[-1].encode("utf-8")), 4096)
+        self.assertNotIn("def safe_lock", command[-1])
         self.assertIn("--holder", remote)
         self.assertEqual(
             "/var/www/html/.deployment.lock",
             remote[remote.index("--lock") + 1],
         )
         self.assertEqual("/var/www/html", remote[remote.index("--root") + 1])
+
+    def test_large_guard_holder_bootstrap_preserves_runtime_stdin_handshake(self):
+        source = (
+            "import sys\n"
+            "print('HOLDER_READY', flush=True)\n"
+            "print('ECHO:' + sys.stdin.readline().strip(), flush=True)\n"
+            + "# padding\n" * 14000
+        )
+        self.assertGreater(len(source.encode("utf-8")), 131072)
+        argv = SYNC.project_contract.remote_lock_holder_argv(
+            "/tmp/guard.lock", http_root="/tmp", use_sudo=False,
+            guard_source=source, source_manifest_sha256="b" * 64,
+        )
+        self.assertLess(len(shlex.join(argv).encode("utf-8")), 4096)
+        self.assertNotIn(source, shlex.join(argv))
+        with subprocess.Popen(
+            ["sh", "-c", shlex.join(argv)], stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        ) as process:
+            SYNC._send_guard_source_preamble(process, source, timeout=10)
+            self.assertEqual("HOLDER_READY\n", process.stdout.readline())
+            process.stdin.write("HTTP_ZTP_PREWRITE\n")
+            process.stdin.flush()
+            self.assertEqual("ECHO:HTTP_ZTP_PREWRITE\n", process.stdout.readline())
+            process.stdin.close()
+            process.stdin = None
+            self.assertEqual(0, process.wait(timeout=10), process.stderr.read())
+
+    def test_sync_acquire_sends_large_source_before_real_holder_ready(self):
+        source = (TOOLS / "deployment_prewrite_guard.py").read_text(
+            encoding="utf-8",
+        ) + "\n" + "# transport padding\n" * 8000
+        self.assertGreater(len(source.encode("utf-8")), 131072)
+        with tempfile.TemporaryDirectory() as directory:
+            args = sync_args(
+                remote_root=directory, sudo=False,
+                deployment_guard_source=source,
+                deployment_source_manifest_sha256="b" * 64,
+            )
+            remote = SYNC.project_contract.remote_lock_holder_argv(
+                f"{directory}/.deployment.lock", http_root=directory,
+                use_sudo=False, guard_source=source,
+                source_manifest_sha256="b" * 64,
+            )
+            local_shell = ["sh", "-c", shlex.join(remote)]
+            with mock.patch.object(
+                SYNC, "remote_deployment_lock_command", return_value=local_shell,
+            ), redirect_stdout(io.StringIO()):
+                lock = SYNC.acquire_remote_deployment_lock(args)
+            self.assertIsNotNone(lock)
+            self.assertIsNone(lock.process.poll())
+            SYNC.release_remote_deployment_lock(lock)
+            self.assertEqual(0, lock.process.returncode)
+
+    def test_large_guard_bootstrap_rejects_mismatched_stdin_before_execution(self):
+        source = "print('MUST_NOT_EXECUTE')\n" + "# padding\n" * 14000
+        argv = SYNC.project_contract.remote_lock_holder_argv(
+            "/tmp/guard.lock", http_root="/tmp", use_sudo=False,
+            guard_source=source, source_manifest_sha256="b" * 64,
+        )
+        changed = "x" + source[1:]
+        completed = subprocess.run(
+            [sys.executable, *argv[1:]], input=changed,
+            text=True, capture_output=True, check=False,
+        )
+        self.assertNotEqual(0, completed.returncode)
+        self.assertNotIn("MUST_NOT_EXECUTE", completed.stdout)
+
+        truncated = subprocess.run(
+            [sys.executable, *argv[1:]], input=source[:-1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertNotEqual(0, truncated.returncode)
+        self.assertIn("truncated", truncated.stderr)
+
+        with self.assertRaisesRegex(ValueError, "UTF-8"):
+            SYNC.project_contract.remote_guard_source_bytes(b"\xff")
+
+    def test_large_guard_shell_bootstrap_does_not_put_source_in_argv(self):
+        source = (
+            "import sys\n"
+            "print('SHELL:' + sys.stdin.readline().strip())\n"
+            + "# padding\n" * 14000
+        )
+        argv = SYNC.project_contract.remote_locked_shell_argv(
+            "/tmp/guard.lock", "true", use_sudo=False,
+            guard_source=source,
+        )
+        self.assertLess(len(shlex.join(argv).encode("utf-8")), 4096)
+        completed = subprocess.run(
+            [sys.executable, *argv[1:]],
+            input=source + "remaining stdin\n", text=True,
+            capture_output=True, check=False,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertEqual("SHELL:remaining stdin\n", completed.stdout)
 
     def test_prewrite_timeout_exceeds_bounded_inspect_stop_postinspect_window(self):
         self.assertGreaterEqual(SYNC.DEPLOYMENT_PREWRITE_TIMEOUT, 90)
@@ -4104,15 +4199,58 @@ class ArchiveDeploymentLockTests(unittest.TestCase):
         payload = UPLOAD.deployment_payload_command(
             args, "/tmp/customer-upload.tar.gz", "a" * 64,
         )
-        self.assertIn("approved archive guard", payload)
+        self.assertNotIn("approved archive guard", payload)
+        self.assertEqual(["sudo", "-n", "python3", "-"], shlex.split(payload)[:4])
+
+    def test_large_guard_runs_through_short_remote_shell_command(self):
+        source = "print('large guard started')\n" + ("# padding\n" * 14000)
+        self.assertGreater(len(source.encode("utf-8")), 131072)
+        args = upload_args(deployment_guard_source=source, no_sudo=True)
+        payload = UPLOAD.deployment_payload_command(
+            args, "/tmp/customer-upload.tar.gz", "a" * 64,
+        )
+        remote = shlex.split(payload)
+        self.assertLess(len(payload.encode("utf-8")), 4096)
+        self.assertNotIn(source, payload)
+        self.assertEqual(["python3", "-"], remote[:2])
+        completed = subprocess.run(
+            ["sh", "-c", payload], input=source,
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertEqual("large guard started\n", completed.stdout)
+
+    def test_actual_168664_byte_guard_starts_from_short_archive_command(self):
+        source = (TOOLS / "deployment_prewrite_guard.py").read_text(
+            encoding="utf-8",
+        )
+        self.assertEqual(168664, len(source.encode("utf-8")))
+        with tempfile.TemporaryDirectory() as directory:
+            args = upload_args(
+                deployment_guard_source=source, no_sudo=True,
+                remote_root=directory,
+            )
+            payload = UPLOAD.deployment_payload_command(
+                args, "/tmp/nonexistent-archive.tar.gz", "a" * 64,
+            )
+            self.assertLess(len(payload.encode("utf-8")), 4096)
+            # --help exits during parsing, before lock or live-root writes;
+            # this still proves the complete real guard starts via SSH shell.
+            completed = subprocess.run(
+                ["sh", "-c", payload + " --help"], input=source,
+                text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertIn("usage:", completed.stdout.lower())
+            self.assertEqual([], list(Path(directory).iterdir()))
 
     def test_extract_payload_holds_lock_and_clears_marker_only_after_tar(self):
         payload = UPLOAD.deployment_payload_command(
             upload_args(), "/tmp/customer-upload.tar.gz", "a" * 64,
         )
         remote = shlex.split(payload)
-        self.assertEqual(["sudo", "-n", "python3", "-c"], remote[:4])
-        self.assertIn("O_NOFOLLOW", remote[4])
+        self.assertEqual(["sudo", "-n", "python3", "-"], remote[:4])
+        self.assertLess(len(payload.encode("utf-8")), 4096)
         self.assertNotIn("/bin/sh", remote)
         self.assertNotIn("tar", remote)
         self.assertIn("--archive", remote)
@@ -4156,11 +4294,11 @@ class ArchiveDeploymentLockTests(unittest.TestCase):
         command = run.call_args.args[0]
         self.assertEqual("ssh", command[0])
         remote = shlex.split(command[-1])
-        self.assertEqual(["sudo", "-n", "python3", "-c"], remote[:4])
-        self.assertIn("O_NOFOLLOW", remote[4])
+        self.assertEqual(["sudo", "-n", "python3", "-"], remote[:4])
+        self.assertLess(len(command[-1].encode("utf-8")), 4096)
         self.assertIn("--archive", remote)
         self.assertIn("/var/www/html/.deployment.lock", remote)
-        self.assertIn(".sync-code-in-progress", remote[4])
+        self.assertEqual(args.deployment_guard_source, run.call_args.kwargs["input_text"])
 
     def test_managed_container_archive_deploy_only_recommends_image_rebuild(self):
         args = upload_args(deploy=True)

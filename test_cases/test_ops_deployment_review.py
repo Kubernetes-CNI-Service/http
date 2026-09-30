@@ -1819,7 +1819,10 @@ class SetupUnloadAndTransportTests(unittest.TestCase):
         )
         command = UPLOAD.deployment_payload_command(args, "/tmp/payload.tar.gz", digest)
         remote = __import__("shlex").split(command)
-        script = remote[4]
+        self.assertEqual(["sudo", "-n", "python3", "-"], remote[:4])
+        self.assertLess(len(command.encode("utf-8")), 4096)
+        script = args.deployment_guard_source
+        self.assertNotIn(script, command)
         self.assertIn("O_NOFOLLOW", script)
         self.assertIn("_write_sync_marker", script)
         self.assertIn("_extract_archive_staging", script)

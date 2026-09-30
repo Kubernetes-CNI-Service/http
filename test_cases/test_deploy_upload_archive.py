@@ -768,7 +768,8 @@ class RelayArchiveInstallerTests(unittest.TestCase):
             verified, 37, Path("/var/www/html"),
             "docker", python_executable="/usr/bin/python3",
         )
-        self.assertEqual(["/usr/bin/python3", "-c", "verified guard"], command[:3])
+        self.assertEqual(["/usr/bin/python3", "-"], command[:2])
+        self.assertNotIn("verified guard", command)
         self.assertEqual("a" * 64, command[command.index("--archive-sha256") + 1])
         self.assertEqual("b" * 64, command[command.index("--source-manifest-sha256") + 1])
         self.assertEqual("docker", command[command.index("--runtime") + 1])
@@ -776,6 +777,53 @@ class RelayArchiveInstallerTests(unittest.TestCase):
         self.assertNotIn("--archive", command)
         self.assertNotIn("/private/staged.tar.gz", command)
         self.assertNotIn("sh", command[:3])
+
+    def test_manifest_bound_large_guard_executes_only_after_verify_only(self):
+        code = (
+            "import hashlib, os, sys\n"
+            "fd = int(sys.argv[sys.argv.index('--archive-fd') + 1])\n"
+            "expected = sys.argv[sys.argv.index('--archive-sha256') + 1]\n"
+            "os.lseek(fd, 0, os.SEEK_SET)\n"
+            "digest = hashlib.sha256()\n"
+            "while True:\n"
+            "    block = os.read(fd, 65536)\n"
+            "    if not block: break\n"
+            "    digest.update(block)\n"
+            "assert digest.hexdigest() == expected\n"
+            "print('large guard started')\n"
+            + "# padding\n" * 14000
+        ).encode("utf-8")
+        self.assertGreater(len(code), 131072)
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            archive = base / "upload.tar.gz"
+            make_archive(archive, INSTALLER_PATH.read_bytes(), guard_bytes=code)
+            live = base / "live"
+            live.mkdir()
+            with mock.patch.object(
+                self.installer, "run_guard",
+                side_effect=AssertionError("verify-only must not start the guard"),
+            ):
+                preview = self.installer.deploy_archive(
+                    archive, root=live, runtime="native", verify_only=True,
+                    installer_path=INSTALLER_PATH, required_uid=os.getuid(),
+                )
+            self.assertIsNone(preview.next_runtime)
+            self.assertEqual([], list(live.iterdir()))
+            deployed = self.installer.deploy_archive(
+                archive, root=live, runtime="native", verify_only=False,
+                installer_path=INSTALLER_PATH, required_uid=os.getuid(),
+                staging_parent=base, python_executable=sys.executable,
+            )
+            self.assertEqual(b"large guard started\n", deployed.guard_stdout)
+            self.assertEqual("native", deployed.next_runtime)
+            self.assertEqual([], list(live.iterdir()))
+
+    def test_stdin_guard_command_without_verified_source_fails_closed(self):
+        with self.assertRaisesRegex(
+            self.installer.InstallError, "verified guard source is required",
+        ):
+            self.installer.run_guard([sys.executable, "-"])
 
     def test_run_guard_inherits_the_exact_archive_descriptor(self):
         with tempfile.TemporaryDirectory() as directory:

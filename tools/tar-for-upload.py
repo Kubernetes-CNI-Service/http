@@ -534,11 +534,14 @@ def command_base(tool: str, args: argparse.Namespace) -> list[str]:
     return command
 
 
-def run(command: list[str], *, timeout: int | None = None) -> str:
+def run(
+    command: list[str], *, timeout: int | None = None,
+    input_text: str | None = None,
+) -> str:
     try:
         completed = subprocess.run(
             command, text=True, check=False, timeout=timeout,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            input=input_text, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(
@@ -1566,7 +1569,8 @@ def upload(
             f"{args.remote_root.rstrip('/')}/.deployment.lock"
         )
         deployment_output = run(
-            remote_deployment_command(args, remote_path, local_hash)
+            remote_deployment_command(args, remote_path, local_hash),
+            input_text=args.deployment_guard_source,
         )
         args.docker_rebuild_required = (
             getattr(args, "runtime", "native") == "docker"

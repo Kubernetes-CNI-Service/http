@@ -17,6 +17,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 from typing import Iterator, Optional, Sequence
 
@@ -724,7 +725,7 @@ def guard_argv(
     *, python_executable: str = "/usr/bin/python3",
 ) -> list[str]:
     return [
-        python_executable, "-c", verified.guard_source,
+        python_executable, "-",
         "--lock", os.fspath(root / ".deployment.lock"),
         "--root", os.fspath(root), "--runtime", runtime,
         "--archive-fd", str(archive_fd),
@@ -778,18 +779,36 @@ def run_guard(
     command: Sequence[str], *, timeout: int = GUARD_TIMEOUT,
     env: Optional[dict[str, str]] = None,
     archive_fd: Optional[int] = None,
+    guard_source: Optional[str] = None,
 ):
     argv = list(command)
     inherited_fd = _guard_archive_fd(argv, archive_fd)
     pass_fds = () if inherited_fd is None else (inherited_fd,)
+    if len(argv) >= 2 and argv[1] == "-" and guard_source is None:
+        raise InstallError("verified guard source is required for stdin execution")
+    if guard_source is not None and (len(argv) < 2 or argv[1] != "-"):
+        raise InstallError("verified guard source requires stdin execution")
+    guard_input = None
     try:
+        if guard_source is not None:
+            source_bytes = guard_source.encode("utf-8")
+            if not source_bytes or len(source_bytes) > MAX_AUTHORITY_BYTES:
+                raise InstallError("embedded guard source is outside its verified bound")
+            # An anonymous descriptor transports the already-authenticated
+            # source without a named live-root file or a pipe deadlock.
+            guard_input = tempfile.TemporaryFile(mode="w+b")
+            guard_input.write(source_bytes)
+            guard_input.seek(0)
         process = subprocess.Popen(
-            argv, stdin=subprocess.DEVNULL,
+            argv, stdin=guard_input if guard_input is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             shell=False, bufsize=0, env=env, pass_fds=pass_fds,
         )
     except OSError as exc:
         raise InstallError(f"cannot start embedded deployment guard: {exc}") from exc
+    finally:
+        if guard_input is not None:
+            guard_input.close()
     assert process.stdout is not None and process.stderr is not None
     selector = selectors.DefaultSelector()
     selector.register(process.stdout, selectors.EVENT_READ, "stdout")
@@ -1065,6 +1084,7 @@ def deploy_archive(
                 ),
                 env=guard_environment,
                 archive_fd=snapshot_fd,
+                guard_source=verified.guard_source,
             )
         if completed.returncode != 0:
             detail = (completed.stderr or completed.stdout).decode(

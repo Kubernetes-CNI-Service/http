@@ -276,7 +276,7 @@ def trusted_installer_loader_for_workflow(
                 )
                 return original_deploy(*args, **kwargs)
 
-            def run_native_guard(command, **_kwargs):
+            def run_native_guard(command, **guard_kwargs):
                 state["upload_guard_calls"] += 1
                 if state["upload_guard_calls"] <= fail_upload_guard_times:
                     return SimpleNamespace(
@@ -285,7 +285,8 @@ def trusted_installer_loader_for_workflow(
                 command = list(command)
                 runtime_index = command.index("--runtime") + 1
                 command[runtime_index] = "native"
-                return original_guard(command, env={"PATH": "/nonexistent"})
+                guard_kwargs["env"] = {"PATH": "/nonexistent"}
+                return original_guard(command, **guard_kwargs)
 
             module.run_guard = run_native_guard
             module.deploy_archive = deploy_upload

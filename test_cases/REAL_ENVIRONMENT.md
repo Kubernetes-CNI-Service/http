@@ -577,6 +577,23 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   runtime 或并发 writer，必须 fail closed；verify-only 不得写 live、锁服务或停止容器。清理隔离
   root/marker，恢复原 release；禁止在生产 live root 做故障注入。
 
+## TC-REAL-GUARD-ARGV-001 — 大于 Linux 单参数上限的 guard 传输
+
+- 前置条件：仅在隔离 Linux 管理 VM 与隔离 live root 验证；准备与当前源码、manifest、installer
+  完全绑定且 `deployment_prewrite_guard.py` 超过 131072 字节的测试归档，并保存 root/lock、
+  服务、source manifest、归档与 installer 的前后摘要及文件身份。不得用旧生产归档或生产 live
+  root 做故障注入。
+- 步骤与证据：记录 `uname -srm`、`getconf PAGESIZE`、归档内 guard 字节数及 SHA-256。
+  在隔离 root 分别运行直连 SSH 归档部署、中转 installer 的 `--verify-only` 与正式 apply，
+  再运行一次 `sync-code.py` holder 握手。保存远端 shell 命令的字节长度与 argv、stdin 来源摘要、
+  archive FD/归档摘要、holder READY/PREWRITE/COMMIT 顺序及最终 live/marker 状态。
+- 正向结果：各路径的单个 argv 均远小于 131072 字节；guard 从受验证源码或归档来源执行，
+  正式 apply 与同步经过原有锁、no-follow、来源身份及 manifest 检查。`--verify-only` 不执行
+  guard，其成功不能代替正式 apply 的验收。
+- 拒绝与清理：在隔离 VM 单独注入截断/错误摘要的 guard 前缀、缺失 guard stdin、篡改归档
+  或 installer、并发锁持有者；必须在 live 改动前 fail closed。保存拒绝输出及 root 前后摘要，
+  仅清理由本案例创建的隔离 root/临时归档，恢复原服务状态；不得自动重试生产部署。
+
 ## TC-REAL-BUNDLE-SHARED-001 — 项目派生 shared artifacts 的选择与安装
 
 - 前置条件：准备 `2026-12-vb-gb300` 项目输入、各平台合法 switch image、完整离线 APT fixture 和

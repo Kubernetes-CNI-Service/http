@@ -27,6 +27,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import types
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -1244,13 +1245,18 @@ def commit_remote_global(
     print(f"[GLOBAL] 已原子提交合并内容：{plan.candidate_sha256}")
 
 
-def remote_deployment_lock_command(args: argparse.Namespace) -> list[str]:
+def remote_deployment_lock_command(
+    args: argparse.Namespace, *, guard_source: str | bytes | None = None,
+) -> list[str]:
     """Build a persistent remote command sharing 11-load.py's flock inode."""
     lock_path = f"{args.remote_root.rstrip('/')}/.deployment.lock"
     remote = project_contract.remote_lock_holder_argv(
         lock_path, http_root=args.remote_root.rstrip("/") or "/",
         use_sudo=args.sudo, runtime=args.runtime,
-        guard_source=getattr(args, "deployment_guard_source", None),
+        guard_source=(
+            getattr(args, "deployment_guard_source", None)
+            if guard_source is None else guard_source
+        ),
         source_manifest_sha256=getattr(
             args, "deployment_source_manifest_sha256", "",
         ),
@@ -1272,6 +1278,41 @@ def _finish_failed_lock_process(
     return process.stderr.read().strip() if process.stderr else ""
 
 
+def _send_guard_source_preamble(
+    process: subprocess.Popen, guard_source: str | bytes, *, timeout: int,
+) -> None:
+    """Send exactly the authenticated bootstrap prefix before holder frames."""
+    if process.stdin is None:
+        raise RuntimeError("远端部署锁没有可写的源码通道")
+    source = project_contract.remote_guard_source_bytes(guard_source)
+    descriptor = process.stdin.fileno()
+    was_blocking = os.get_blocking(descriptor)
+    deadline = time.monotonic() + timeout
+    offset = 0
+    try:
+        os.set_blocking(descriptor, False)
+        while offset < len(source):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError("传送远端部署锁源码超时")
+            _readable, writable, _exceptional = select.select(
+                [], [descriptor], [], remaining,
+            )
+            if not writable:
+                raise RuntimeError("传送远端部署锁源码超时")
+            try:
+                written = os.write(descriptor, source[offset:offset + 65536])
+            except BlockingIOError:
+                continue
+            if written <= 0:
+                raise RuntimeError("远端部署锁源码通道提前关闭")
+            offset += written
+    except OSError as exc:
+        raise RuntimeError(f"传送远端部署锁源码失败：{exc}") from exc
+    finally:
+        os.set_blocking(descriptor, was_blocking)
+
+
 def acquire_remote_deployment_lock(
     args: argparse.Namespace,
 ) -> RemoteDeploymentLock | None:
@@ -1285,7 +1326,10 @@ def acquire_remote_deployment_lock(
     if args.dry_run:
         print(f"[DRY] 正式同步会独占远端部署锁：{lock_path}")
         return None
-    command = remote_deployment_lock_command(args)
+    guard_source = project_contract.remote_guard_source_bytes(
+        getattr(args, "deployment_guard_source", None),
+    )
+    command = remote_deployment_lock_command(args, guard_source=guard_source)
     print("[LOCK] 独占远端部署锁：" + lock_path)
     process = subprocess.Popen(
         command,
@@ -1295,6 +1339,15 @@ def acquire_remote_deployment_lock(
         text=True,
         bufsize=1,
     )
+    try:
+        _send_guard_source_preamble(
+            process, guard_source, timeout=DEPLOYMENT_LOCK_TIMEOUT,
+        )
+    except RuntimeError as exc:
+        detail = _finish_failed_lock_process(process)
+        raise RuntimeError(
+            "无法传送远端部署锁源码：" + (detail or str(exc))
+        ) from exc
     if process.stdout is None:
         detail = _finish_failed_lock_process(process)
         raise RuntimeError(f"无法读取远端部署锁握手：{detail or lock_path}")
