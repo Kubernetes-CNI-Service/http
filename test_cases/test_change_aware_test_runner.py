@@ -253,6 +253,11 @@ class ImpactManifestTests(unittest.TestCase):
                 "02-dhcp-subnet_config.csv",
             ):
                 (project / name).write_text(f"fixture: {name}\n", encoding="utf-8")
+            (project / "02-dhcp-subnet_config.csv").write_text(
+                "shared_network,subnet,netmask,range_start,range_end,routers,"
+                "ztp_service_ip,cumulus_profile,nvos_ztp\n",
+                encoding="ascii",
+            )
             # The upload selector now requires the setup-selected real workbook.
             # Keep this archive-growth fixture on that supported path so a
             # missing selector entry, rather than an invalid P2P input, fails it.

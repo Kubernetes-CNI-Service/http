@@ -63,6 +63,11 @@ class Req19InfraLogWorkflowTests(unittest.TestCase):
         for project in (a, b):
             project.mkdir(parents=True)
             (project / "Site-P2P-v1.0.xlsx").write_bytes(b"isolated fixture")
+            (project / "02-dhcp-subnet_config.csv").write_text(
+                "shared_network,subnet,netmask,range_start,range_end,routers,"
+                "ztp_service_ip,cumulus_profile,nvos_ztp\n",
+                encoding="ascii",
+            )
             (project / "99-output-infra").mkdir()
         return root, infra, a, b
 

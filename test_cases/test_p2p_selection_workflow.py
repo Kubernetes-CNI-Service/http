@@ -24,6 +24,10 @@ from test_cases.test_load_release_transaction import ReleaseTransactionTests, LO
 
 
 ROOT = Path(__file__).resolve().parents[1]
+VALID_SUBNET_HEADER = (
+    "shared_network,subnet,netmask,range_start,range_end,routers,"
+    "ztp_service_ip,cumulus_profile,nvos_ztp\n"
+)
 
 
 def load_script(name: str, path: Path):
@@ -207,7 +211,7 @@ class P2PSelectionWorkflowTests(unittest.TestCase):
             (workspace / "tools").mkdir()
             (project / "01-global.yaml").write_text("schema_version: 2\ncommon: {}\n", encoding="utf-8")
             (project / "02-devices_config.csv").write_text("hostname,type\nleaf01,eth\n", encoding="utf-8")
-            (project / "02-dhcp-subnet_config.csv").write_text("shared_network,subnet\nmgmt,192.0.2.0\n", encoding="utf-8")
+            (project / "02-dhcp-subnet_config.csv").write_text(VALID_SUBNET_HEADER, encoding="ascii")
             for relative in REQUIRED_UPLOAD_SOURCES:
                 path = workspace / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -221,6 +225,7 @@ class P2PSelectionWorkflowTests(unittest.TestCase):
             second_project.mkdir()
             (second_project / "01-global.yaml").write_text("schema_version: 2\ncommon: {}\n", encoding="utf-8")
             (second_project / "02-devices_config.csv").write_text("hostname,type\nleaf02,eth\n", encoding="utf-8")
+            (second_project / "02-dhcp-subnet_config.csv").write_text(VALID_SUBNET_HEADER, encoding="ascii")
             second_selected = workbook(second_project / "Site P2P_v4.0.xlsx", "second-selected")
             second_other = workbook(second_project / "Site P2P_v5.0.xlsx", "second-not-selected")
             (second_project / "p2p.xlsx").symlink_to(second_selected.name)
@@ -271,6 +276,7 @@ class P2PSelectionWorkflowTests(unittest.TestCase):
             (workspace / "tools").mkdir()
             (project / "01-global.yaml").write_text("schema_version: 2\ncommon: {}\n", encoding="utf-8")
             (project / "02-devices_config.csv").write_text("hostname,type\nleaf01,eth\n", encoding="utf-8")
+            (project / "02-dhcp-subnet_config.csv").write_text(VALID_SUBNET_HEADER, encoding="ascii")
             workbook(project / "Fabric P2P_v1.0.xlsx", "unselected")
             args = argparse.Namespace(
                 project=str(project), output=base / "unsafe.tar.gz", force=False,
@@ -299,7 +305,7 @@ class P2PSelectionWorkflowTests(unittest.TestCase):
             (project / "01-global.yaml").write_text("schema_version: 2\ncommon: {}\n", encoding="utf-8")
             (project / "02-devices_config.csv").write_text("hostname,type\nleaf01,eth\n", encoding="utf-8")
             (project / "02-dhcp-subnet_config.csv").write_text(
-                "shared_network,subnet\nmgmt,192.0.2.0\n", encoding="utf-8",
+                VALID_SUBNET_HEADER, encoding="ascii",
             )
             for relative in REQUIRED_UPLOAD_SOURCES:
                 path = workspace / relative

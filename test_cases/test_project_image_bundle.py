@@ -1009,7 +1009,9 @@ class ProjectImageBundleTests(unittest.TestCase):
                 "hostname,type\nleaf01,eth\n", encoding="ascii",
             )
             (project / "02-dhcp-subnet_config.csv").write_text(
-                "subnet,netmask\n192.0.2.0,255.255.255.0\n", encoding="ascii",
+                "shared_network,subnet,netmask,range_start,range_end,routers,"
+                "ztp_service_ip,cumulus_profile,nvos_ztp\n",
+                encoding="ascii",
             )
             with zipfile.ZipFile(
                 project / "Customer P2P.xlsx", "w", compression=zipfile.ZIP_DEFLATED,
