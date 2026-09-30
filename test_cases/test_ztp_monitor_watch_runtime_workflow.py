@@ -7,6 +7,7 @@ from contextlib import redirect_stdout
 from contextlib import contextmanager
 import importlib.util
 import io
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -51,9 +52,94 @@ HTML = load_script(
     "ztp_monitor_watch_workflow_html",
     ROOT / "monitor/generate-monitor-html.py",
 )
+SETUP = load_script(
+    "ztp_monitor_watch_workflow_setup",
+    ROOT / "DAY0-Prepare/01-a-setup.py",
+)
 
 
 class MonitorWatchRuntimeWorkflowTests(unittest.TestCase):
+    def test_setup_published_large_air_json_survives_watch_identity_and_first_cycle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            project = root / "DAY0-Prepare/site-a"
+            output = project / "99-output-p2p"
+            status = project / "99-output-ztp"
+            runtime = root / "ztp/config/isc-dhcp-server"
+            output.mkdir(parents=True)
+            status.mkdir()
+            runtime.mkdir(parents=True)
+            workbook = project / "Customer Fabric.xlsx"
+            workbook.write_bytes(b"fixture workbook")
+            (project / "p2p.xlsx").symlink_to(workbook.name)
+            payload = b'{"content":{"nodes":{}}}' + b" " * (5 * 1024 * 1024)
+            generated = output / "Customer Fabric-air.json"
+            generated.write_bytes(payload)
+            link = runtime / "p2p-air.json"
+            with mock.patch.multiple(
+                SETUP, HTTP_BASE=str(root), P2P_INPUT_LINKS=[],
+                P2P_OUTPUT_LINKS=[], P2P_AIR_JSON_LINK=str(link), _DRY_RUN=False,
+                _remove_legacy_p2p_links=mock.Mock(),
+            ), mock.patch("sys.stdout", io.StringIO()):
+                SETUP._process_xlsx_files(str(project), str(project / "p2p.xlsx"))
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(os.path.relpath(generated, link.parent), os.readlink(link))
+
+            inventory = project / "02-devices_config.csv"
+            inventory.write_text("hostname,type,template\n", encoding="utf-8")
+            (project / "01-global.yaml").write_text("common: {}\n", encoding="utf-8")
+            (status / "current-release.json").write_text("{}\n", encoding="utf-8")
+            active_inventory = runtime / inventory.name
+            active_inventory.symlink_to(os.path.relpath(inventory, runtime))
+            status_link = root / "ztp/status"
+            status_link.symlink_to(os.path.relpath(status, status_link.parent))
+            manifest = root / "ztp/.setup_manifest"
+            manifest.write_text(
+                f"# setup manifest — proj: {project}\n"
+                f"{active_inventory}\n{status_link}\n", encoding="utf-8",
+            )
+            report = {"project": project.name, "scope": "air", "devices": []}
+            seen = []
+
+            def first_cycle(_args, selected):
+                self.assertEqual(
+                    [], MONITOR.read_devices(
+                        inventory, "all", air_json=link, dhcp_leases=None,
+                    ),
+                )
+                digests = MONITOR.collection_attribution_input_digests(
+                    {"air_json": link, "devices_csv": inventory}, project=selected,
+                )
+                seen.append(digests["air_json"])
+                return status
+
+            def validated(_args, _project):
+                _args._validated_live_watch = True
+
+            with mock.patch.multiple(
+                MONITOR, HERE=root / "DAY0-Prepare", HTTP_ROOT=root,
+                SETUP_MANIFEST=manifest, ACTIVE_INVENTORY=active_inventory,
+                ACTIVE_AIR_JSON=link, ZTP_STATUS_DIR=status_link,
+                resolve_project=mock.Mock(return_value=project),
+                validate_monitor_mode=mock.Mock(side_effect=validated),
+                load_release_identity=mock.Mock(return_value={"release_id": "fixed"}),
+                load_completion_handoff_signatures=mock.Mock(return_value={}),
+                monitor_control_state=mock.Mock(return_value="running"),
+                monitor_once=mock.Mock(side_effect=first_cycle),
+                read_report=mock.Mock(return_value=report),
+                print_environment_summary=mock.Mock(),
+                generate_monitor_html=mock.Mock(return_value=True),
+                remove_own_pid_file=mock.Mock(), log=mock.Mock(),
+            ):
+                self.assertEqual(
+                    0, MONITOR.main([
+                        str(project), "--scope", "air", "--generate-html",
+                        "--output-dir", str(status),
+                    ]),
+                )
+                MONITOR.generate_monitor_html.assert_called_once()
+            self.assertEqual([hashlib.sha256(payload).hexdigest()], seen)
+
     @staticmethod
     def _native_argv(project: Path, *, scope="prod", interval=7) -> list[str]:
         output = io.StringIO()

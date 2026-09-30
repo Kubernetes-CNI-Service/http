@@ -185,8 +185,15 @@ class MonitorWatchResilienceDirectTests(unittest.TestCase):
                 "switch-a,eth,prod,02:00:00:00:00:10\n",
                 encoding="utf-8",
             )
-            runtime_air = base / "p2p-air.json"
-            runtime_air.write_text("{}\n", encoding="utf-8")
+            workbook = project / "Fixture P2P.xlsx"
+            workbook.write_bytes(b"fixture workbook")
+            (project / "p2p.xlsx").symlink_to(workbook.name)
+            air_target = project / "99-output-p2p/Fixture P2P-air.json"
+            air_target.parent.mkdir()
+            air_target.write_text("{}\n", encoding="utf-8")
+            runtime_air = base / "ztp/config/isc-dhcp-server/p2p-air.json"
+            runtime_air.parent.mkdir(parents=True)
+            runtime_air.symlink_to(os.path.relpath(air_target, runtime_air.parent))
             output_root = base / "status"
             args = self._args(output_root)
             args.no_ssh = True
@@ -421,10 +428,18 @@ class MonitorWatchResilienceDirectTests(unittest.TestCase):
                 active_inventory = base / "ztp/config/isc-dhcp-server/02-devices_config.csv"
                 active_inventory.parent.mkdir(parents=True)
                 active_inventory.symlink_to(os.path.relpath(inventory, active_inventory.parent))
-                runtime_air = base / "ztp/config/isc-dhcp-server/p2p-air.json"
-                runtime_air.write_text(
+                workbook = project / "Fixture P2P.xlsx"
+                workbook.write_bytes(b"fixture workbook")
+                (project / "p2p.xlsx").symlink_to(workbook.name)
+                air_target = project / "99-output-p2p/Fixture P2P-air.json"
+                air_target.parent.mkdir()
+                air_target.write_text(
                     '{"schema_version":1,"devices":[]}\n', encoding="utf-8",
                 )
+                runtime_air = base / "ztp/config/isc-dhcp-server/p2p-air.json"
+                runtime_air.symlink_to(os.path.relpath(
+                    air_target, runtime_air.parent,
+                ))
                 status_link = base / "ztp/status"
                 status_link.symlink_to(os.path.relpath(output_root, status_link.parent))
                 setup_manifest = base / "ztp/.setup_manifest"
@@ -468,7 +483,7 @@ class MonitorWatchResilienceDirectTests(unittest.TestCase):
                         )
                     elif drift == "p2p-air":
                         atomic_replace(
-                            runtime_air,
+                            air_target,
                             b'{"schema_version":1,"devices":[{"hostname":"air-a"}]}\n',
                         )
                     elif drift == "setup-manifest":
@@ -1167,6 +1182,168 @@ raise SystemExit(module.main([]))
                 1, sum("recovered" in item.casefold() for item in messages),
             )
             self.assertEqual(5, context["html"].call_count)
+
+
+class PublishedAirJsonDirectTests(unittest.TestCase):
+    """The setup-managed AIR pointer is a link, not a metadata regular file."""
+
+    def _fixture(self, root: Path, payload: bytes = b"{}\n"):
+        project = root / "DAY0-Prepare/site-a"
+        output = project / "99-output-p2p"
+        runtime = root / "ztp/config/isc-dhcp-server"
+        output.mkdir(parents=True)
+        runtime.mkdir(parents=True)
+        workbook = project / "Fabric P2P.xlsx"
+        workbook.write_bytes(b"fixture workbook")
+        (project / "p2p.xlsx").symlink_to(workbook.name)
+        target = output / "Fabric P2P-air.json"
+        target.write_bytes(payload)
+        link = runtime / "p2p-air.json"
+        link.symlink_to(os.path.relpath(target, link.parent))
+        return project, target, link
+
+    def test_valid_published_link_larger_than_metadata_budget_hashes_exact_bytes(self):
+        payload = b'{"content":{}}' + b" " * (5 * 1024 * 1024)
+        with tempfile.TemporaryDirectory() as directory:
+            project, target, link = self._fixture(Path(directory), payload)
+            with mock.patch.object(MONITOR, "ACTIVE_AIR_JSON", link):
+                actual = MONITOR._active_air_json_digest(project)
+            self.assertEqual(hashlib.sha256(payload).hexdigest(), actual)
+            self.assertEqual(payload, target.read_bytes())
+            with self.assertRaises(ValueError):
+                MONITOR._read_bounded_regular_text(target, label="runtime metadata")
+
+    def test_published_link_rejects_wrong_project_detour_and_dangling_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project, target, link = self._fixture(root)
+            wrong = root / "DAY0-Prepare/site-b/99-output-p2p/Fabric P2P-air.json"
+            wrong.parent.mkdir(parents=True)
+            wrong.write_bytes(b"{}\n")
+            for replacement in (wrong, target.parent / "detour.json"):
+                with self.subTest(replacement=replacement):
+                    link.unlink()
+                    link.symlink_to(os.path.relpath(replacement, link.parent))
+                    with mock.patch.object(MONITOR, "ACTIVE_AIR_JSON", link), \
+                            self.assertRaises(ValueError):
+                        MONITOR._active_air_json_digest(project)
+            link.unlink()
+            link.symlink_to(os.path.relpath(target, link.parent))
+            target.unlink()
+            with mock.patch.object(MONITOR, "ACTIVE_AIR_JSON", link), \
+                    self.assertRaises(ValueError):
+                MONITOR._active_air_json_digest(project)
+
+    def test_published_link_rejects_multihop_nonregular_and_oversize_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project, target, link = self._fixture(root)
+            real = target.parent / "actual.json"
+            target.rename(real)
+            target.symlink_to(real.name)
+            with mock.patch.object(MONITOR, "ACTIVE_AIR_JSON", link), \
+                    self.assertRaises(ValueError):
+                MONITOR._active_air_json_digest(project)
+            target.unlink()
+            target.mkdir()
+            with mock.patch.object(MONITOR, "ACTIVE_AIR_JSON", link), \
+                    self.assertRaises(ValueError):
+                MONITOR._active_air_json_digest(project)
+            target.rmdir()
+            with target.open("wb") as stream:
+                stream.truncate(64 * 1024 * 1024 + 1)
+            with mock.patch.object(MONITOR, "ACTIVE_AIR_JSON", link), \
+                    self.assertRaises(ValueError):
+                MONITOR._active_air_json_digest(project)
+
+    def test_live_cycle_rejects_oversize_air_before_topology_parser_reads_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project, target, link = self._fixture(root)
+            with target.open("wb") as stream:
+                stream.truncate(64 * 1024 * 1024 + 1)
+            args = argparse.Namespace(
+                offline=False, output_dir=root / "status", scope="air",
+                air_json=None, dhcp_leases=None,
+            )
+            with mock.patch.object(MONITOR, "ACTIVE_AIR_JSON", link), \
+                    mock.patch.object(MONITOR, "load_release_identity") as release, \
+                    mock.patch.object(MONITOR, "service_runtime_backend"), \
+                    mock.patch.object(MONITOR, "_previous_report"), \
+                    mock.patch.object(MONITOR, "project_timezone"), \
+                    mock.patch.object(MONITOR, "read_devices") as parser, \
+                    self.assertRaises(ValueError):
+                MONITOR.monitor_once(args, project)
+            release.assert_called_once_with(project)
+            parser.assert_not_called()
+
+    def test_published_link_change_while_reading_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project, _target, link = self._fixture(root, b"x" * 100_000)
+            original_read = MONITOR.os.read
+            changed = False
+
+            def swapping_read(fd, count):
+                nonlocal changed
+                chunk = original_read(fd, count)
+                if not changed:
+                    changed = True
+                    link.unlink()
+                    link.symlink_to("missing-air.json")
+                return chunk
+
+            with mock.patch.object(MONITOR, "ACTIVE_AIR_JSON", link), \
+                    mock.patch.object(MONITOR.os, "read", side_effect=swapping_read), \
+                    self.assertRaises(ValueError):
+                MONITOR._active_air_json_digest(project)
+
+    def test_published_link_parent_must_not_be_a_symlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project, _target, link = self._fixture(Path(directory))
+            runtime = link.parent
+            moved = runtime.with_name("isc-dhcp-server-real")
+            runtime.rename(moved)
+            runtime.symlink_to(moved.name)
+            with mock.patch.object(MONITOR, "ACTIVE_AIR_JSON", link), \
+                    self.assertRaises(ValueError):
+                MONITOR._active_air_json_digest(project)
+
+    def test_published_link_and_selected_source_parents_cannot_change_during_read(self):
+        for changed_parent in ("publication", "source"):
+            with self.subTest(parent=changed_parent), \
+                    tempfile.TemporaryDirectory() as directory:
+                project, _target, link = self._fixture(
+                    Path(directory), b"x" * 100_000,
+                )
+                selected = project / "p2p.xlsx"
+                if changed_parent == "source":
+                    source = selected.resolve()
+                    source_directory = project / "p2p"
+                    source_directory.mkdir()
+                    source.rename(source_directory / source.name)
+                    selected.unlink()
+                    selected.symlink_to(f"p2p/{source.name}")
+                    parent = source_directory
+                else:
+                    parent = link.parent
+                moved = parent.with_name(parent.name + "-moved")
+                original_read = MONITOR.os.read
+                changed = False
+
+                def swapping_parent(fd, count):
+                    nonlocal changed
+                    chunk = original_read(fd, count)
+                    if not changed:
+                        changed = True
+                        parent.rename(moved)
+                        parent.symlink_to(moved.name)
+                    return chunk
+
+                with mock.patch.object(MONITOR, "ACTIVE_AIR_JSON", link), \
+                        mock.patch.object(MONITOR.os, "read", side_effect=swapping_parent), \
+                        self.assertRaises(ValueError):
+                    MONITOR._active_air_json_digest(project)
 
 
 if __name__ == "__main__":

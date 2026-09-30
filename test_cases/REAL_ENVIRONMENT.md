@@ -1063,6 +1063,24 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   root 在保证边界外。每个场景恢复 VM 快照并确认无 Monitor、Supervisor child、临时 PID 或锁
   holder；锁文件本身按合同保留，不手工删除。
 
+## TC-REAL-ZTP-MONITOR-AIR-LINK-001 — 正式 AIR 链接、首轮报告与页面
+
+- 状态：**NOT RUN / REAL_ENV REQUIRED**。本机 direct/workflow 仅在隔离目录模拟 setup 链接、
+  大文件、换链及首轮摘要；不构成真实 Native/Docker 服务、设备采集或 HTTP 页面证据。
+- 前置条件：一次性可回滚的 Ubuntu 管理 VM、已完成的正式 load/activation、无生产交换机流量；
+  记录项目 `p2p.xlsx` 所选真实源、`ztp/config/isc-dhcp-server/p2p-air.json` 原始链接文本、
+  `99-output-p2p/<source-stem>-air.json` 的 size/SHA-256、Monitor PID 与当前发布状态。
+- 步骤：确认 AIR JSON 是 setup 生成的精确相对链接，目标为单链接普通文件且大小在运行预算内；
+  启动受管 Monitor 并见证初始身份检查、首轮归属输入 SHA-256、report 与 `monitor.html` 均成功。
+  在快照副本分别注入错项目链接、间接链接、悬空链接、目标非普通文件和超过 64 MiB 的文件；
+  还要在读取期间换链/换发布目录，确认失败发生在报告发布前。核对页面认证及经批准隧道访问。
+- 预期：有效链接即使超过通用 4 MiB metadata 预算也能被读取；64 MiB 是监控资源预算，
+  超限必须拒绝并提示运维检查，不能把它解释为 AIR 拓扑无效。任何输入身份/内容漂移不得发布
+  新报告或页面成功标识，也不得自动覆盖链接、重新 load 或重启服务。
+- 证据、清理与风险：仅保存脱敏的链接文本、size/SHA-256、退出码、Monitor 日志、报告/页面状态及
+  失败前后发布树摘要；不得保存真实拓扑 JSON、凭据或 Authorization。每个故障注入从 VM 快照
+  恢复，并确认无残留 Monitor、临时文件、异常链接或服务状态变化；生产服务器不执行注入。
+
 ## TC-REAL-P-DEPENDENCY-CAPSULE-001 — macOS 正式证明的同 UID 并发边界
 
 - 状态：**NOT RUN / REAL_ENV REQUIRED**。自动化会验证 anonymous read-only archive、逐个依赖 child 的 snapshot 与 `sandbox-exec` 写保护；只使用标准库的 orchestration harness 不套外层 sandbox。仅 `-B test_cases/run_related_tests.py --all -v`、`-B test_cases/run_related_tests.py --suite repository-governance -v` 与 `-B test_cases/run_related_tests.py --all --no-approve -v` 三组精确审定的 runner argv 会在进入 child sandbox 前，由父进程预启动受管 loopback OpenSSH fixture。sshd 本身不在该 child profile 内启动，但只监听 `127.0.0.1` ephemeral port，使用临时 host key、禁用交互认证且不读取真实项目凭据。父进程只传 routing marker，不传 fixture 路径或 FD；child 先认证既有 exact-nine environment protocol 与 exact-seven dependency descriptor，再从 authenticated `snapshot.parent` 派生固定 sibling 并自行验证 fixture。自动化不会创建一个独立恶意同 UID 进程去抢占 archive 建立窗口；不得把单元/workflow 结果解释为抵御该外部进程。

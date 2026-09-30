@@ -1,31 +1,4 @@
 {
-  "full_suite_attestation": {
-    "environment": {
-      "container_toplevel_lock_sha256": "3532f5208b462243bab779b01eb4deb21638ac05a9390c17ac997ba8d7f24998",
-      "container_toplevel_versions": [
-        "Jinja2==3.1.6",
-        "openpyxl==3.1.5",
-        "pandas==2.3.3",
-        "PyYAML==6.0.3",
-        "XlsxWriter==3.2.9"
-      ],
-      "machine": "arm64",
-      "platform": "darwin",
-      "python_cache_tag": "cpython-39",
-      "python_executable": "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/bin/python3.9",
-      "python_implementation": "CPython",
-      "python_version": [
-        3,
-        9,
-        6
-      ]
-    },
-    "scenario_coverage": {
-      "root-entrypoint-workflow": "NOT COVERED (requires Linux EUID 0 private namespace)"
-    },
-    "schema_version": 1,
-    "snapshot_sha256": "8cd6d4c083dd6968cf94a14e1f3f260c2bf84aec73001d00903a1a84248adf6a"
-  },
   "impact_manifest_sha256": "fa6a8beb36d1e9b017c33c59dc72c8b0c27f6447c50f579c6c7a7143089e0782",
   "schema_version": 1,
   "scripts": {
@@ -43,7 +16,7 @@
     },
     "DAY0-Prepare/12-ztp-monitor.py": {
       "canonical": "DAY0-Prepare/12-ztp-monitor.py",
-      "sha256": "ccc50886428bed4a94c0a90f7fc22f6f88529f4ebb09fcd3ba62f30c28732836"
+      "sha256": "1de5e8ca42eb07359909d882063b85eb35157cbf79fb5f7ec77d41dee47f1ce7"
     },
     "DAY0-Prepare/13-unload.py": {
       "canonical": "DAY0-Prepare/13-unload.py",
@@ -726,7 +699,7 @@
     "infra/infra-neutral.conf": "238bec3c9be34fc5a7bf097e36012133da4a30b90cabdf17d758796ecdab24f8",
     "requirements-container-top-level.lock": "3532f5208b462243bab779b01eb4deb21638ac05a9390c17ac997ba8d7f24998",
     "requirements-dev.txt": "2047cfeb6e7d7c3b02380624cd212528fb8416cf3e76dd924d2e2cba8567a50a",
-    "test_cases/REAL_ENVIRONMENT.md": "7acdb7be5e2ea25498afb539b70f87e323d8e7837a3185cd9a5e19903fef2a20",
+    "test_cases/REAL_ENVIRONMENT.md": "fc466aed80bf6b83258546455911dbed7e8d32cfd18375e6e7f082fa8e340e82",
     "test_cases/audit_public_tree.py": "7e11f28fea3a95c78b2f498da0af4e1534ee84484caa01d14c6a6cabed81c45c",
     "test_cases/module_loader.py": "ef1e9b44f0272209378788ed6682b8a6a68c95a76a6d545c001ddc4762471ecf",
     "test_cases/monitor_authority_root_warden.py": "f4ac61acc04af33168aa01ba295a74fe036202b9179ad65f10e9db87375a2c4c",
@@ -891,7 +864,7 @@
     "test_cases.test_monitor_authority_source_guard": "bb1fd10fc83f7e4de2ae8c87c39cb5c3fd304fdfbc8a8404087e271d25db156e",
     "test_cases.test_monitor_stack_review": "febdfec1807167fff8721d2f33809ad491dc7eefba8a137817af5b585c9b5c28",
     "test_cases.test_monitor_writer_quiesce": "5efe4499c9ccb4f051d914a8584abcc0fc56023ac0bbc734c9c659a8967bed99",
-    "test_cases.test_monitor_writer_quiesce_workflow": "22f2e505de1919e8c66a8a29c905d571a74ae590fa6c410cd28034982d99f9bc",
+    "test_cases.test_monitor_writer_quiesce_workflow": "35348a251fe5cd32b1ed0fa7636433a1af52e7e247b3a72668a1588ead8d4b21",
     "test_cases.test_nvue_normalizer": "6e22f0f89353d0042391330675e4cce387931e896f4b44f57911e2dccb85b230",
     "test_cases.test_ops_deployment_review": "6c99075e059541d423283579e7f4065b37ffcbd9ce514c8deae8b443b00a6853",
     "test_cases.test_optimize_output_layout": "b37ffae7f3f1c81af403c33efd981976e766ee1face193a43410a57fa4dd6b7f",
@@ -965,8 +938,8 @@
     "test_cases.test_ztp_group_handoff": "ff7ac79536a7592dd925d18d75ef1a81cc508d5de5c4dff1d117a8d61b61af9d",
     "test_cases.test_ztp_group_handoff_display": "90533ce2862a16a92f7d4ac569d4acc3507398a0ff28f2ca03054c3262c69789",
     "test_cases.test_ztp_http_identity_binding": "304c24916962898a69b2f09d185cbae7a2b56d18777c23905f3ffe04f4581951",
-    "test_cases.test_ztp_monitor_watch_resilience": "ae53ff54f378f29dc837816dae5ab4ce44fc4919d540f849757699d8783dc20d",
-    "test_cases.test_ztp_monitor_watch_runtime_workflow": "f68fa02c79056f29d9c1f9ae78c30a0e716fc055cbf67224015688baca1aac4c",
+    "test_cases.test_ztp_monitor_watch_resilience": "a36fc6c29c32976b43821d342fe00f918b4dc2771510a248303196048ae5f8ad",
+    "test_cases.test_ztp_monitor_watch_runtime_workflow": "4ff4fca5c9f1fcfbd154cb4d5bd77f97d5cc1a938776ffa6d187afdb4f76efb7",
     "test_cases.test_ztp_prefix_runtime_boundary": "76a0c556fe2d570b60241a6d43e34aa591787596833d5a894deef19f7853bf90",
     "test_cases.test_ztp_release_core_review": "fa536103c10bc37b079078df70fb01fc8fec84850b776a5410df6eb446f09fdd",
     "test_cases.test_ztp_service_runtime": "5dbccd239c83b2f29566bfe0c777655c74efc87801ecff17cf3edaaa2bc1e273"

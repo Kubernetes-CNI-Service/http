@@ -2810,7 +2810,8 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
         }
         self.assertEqual({
             # Governed identity/config authority readers.
-            "_read_bounded_regular_text", "project_timezone", "read_devices",
+            "_read_bounded_regular_text", "_active_air_json_digest",
+            "project_timezone", "read_devices",
             # Explicit observations / previous output; never source identity.
             "_previous_report", "_snapshot_state_from_dir",
             "latest_manual_trigger_markers", "read_tail",

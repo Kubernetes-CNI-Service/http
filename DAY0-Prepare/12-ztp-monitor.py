@@ -109,6 +109,9 @@ _ZTP_LOG_LINE_RE = re.compile(
     r"^\[\d{4}-\d{2}-\d{2}(?:T|\s)[^\]\r\n]+\]\s.*$"
 )
 MAX_RUNTIME_METADATA_BYTES = 4 * 1024 * 1024
+# AIR topology is a generated input, not small runtime metadata.  Keep a
+# separate operational I/O budget; this is not a topology-validity limit.
+MAX_ACTIVE_AIR_JSON_BYTES = 64 * 1024 * 1024
 DEFAULT_STALL_WARNING_MINUTES = 60
 WATCH_STATE_NAME = ".ztp-monitor-watch-state.json"
 WATCH_STATE_SCHEMA = 1
@@ -1664,17 +1667,20 @@ def validate_collection_attribution_record(record: Any) -> dict[str, Any]:
 
 
 def collection_attribution_input_digests(
-    paths: dict[str, Path],
+    paths: dict[str, Path], *, project: Path | None = None,
 ) -> dict[str, str]:
     """Hash every authoritative input by content; mtime is deliberately absent."""
     digests: dict[str, str] = {}
     for label, path in sorted(paths.items()):
         if not isinstance(label, str) or not label or not isinstance(path, Path):
             raise ValueError("collection attribution input mapping is invalid")
-        content = _read_bounded_regular_text(
-            path, label=f"归属输入 {label}", max_bytes=64 * 1024 * 1024,
-        ).encode("utf-8")
-        digests[label] = hashlib.sha256(content).hexdigest()
+        if label == "air_json" and path == ACTIVE_AIR_JSON and project is not None:
+            digests[label] = _active_air_json_digest(project)
+        else:
+            content = _read_bounded_regular_text(
+                path, label=f"归属输入 {label}", max_bytes=64 * 1024 * 1024,
+            ).encode("utf-8")
+            digests[label] = hashlib.sha256(content).hexdigest()
     return digests
 
 
@@ -4272,6 +4278,10 @@ def monitor_once(args: argparse.Namespace, project: Path) -> Path:
     previous_report = _previous_report(output_root)
     switch_timezone = project_timezone(project)
     air_json = args.air_json if offline else ACTIVE_AIR_JSON
+    # Check the managed publication and its resource budget before any JSON
+    # parser follows the live link.  Re-hash after the parser through the
+    # attribution path so a mid-cycle source/link change cannot be published.
+    initial_air_digest = None if offline else _active_air_json_digest(project)
     dhcp_leases = args.dhcp_leases
     identity_devices = read_devices(
         project / "02-devices_config.csv",
@@ -4287,8 +4297,12 @@ def monitor_once(args: argparse.Namespace, project: Path) -> Path:
     if dhcp_leases is not None:
         attribution_inputs["dhcp_leases"] = dhcp_leases
     attribution_digests = collection_attribution_input_digests(
-        attribution_inputs,
+        attribution_inputs, project=project if not offline else None,
     )
+    if initial_air_digest is not None and (
+        attribution_digests.get("air_json") != initial_air_digest
+    ):
+        raise ValueError("活动 AIR JSON 在本轮设备读取期间发生变化")
     attribution_state_path = output_root / COLLECTION_ATTRIBUTION_STATE_NAME
     attribution_state_status: dict[str, Any] = {}
     attribution_records = load_collection_attribution(
@@ -5171,6 +5185,126 @@ def _read_bounded_regular_text(
             os.close(descriptor)
 
 
+def _file_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    """Identity and content-change fields for a stable runtime descriptor."""
+    return (
+        metadata.st_dev, metadata.st_ino, metadata.st_mode,
+        metadata.st_nlink, metadata.st_size,
+        metadata.st_mtime_ns, metadata.st_ctime_ns,
+    )
+
+
+def _active_air_json_digest(project: Path) -> str:
+    """Hash exactly setup's AIR publication, rejecting detours and races.
+
+    The 64 MiB ceiling is an operational resource budget for a generated JSON
+    input.  Hashing is streaming; ordinary runtime metadata retains its 4 MiB
+    ceiling and no-follow requirement.
+    """
+    link = ACTIVE_AIR_JSON
+    source_link = project / "p2p.xlsx"
+    source = None
+    directory_fd = descriptor = -1
+    try:
+        selected_before = source_link.lstat()
+        selected_raw = os.readlink(source_link)
+        if (
+            not stat.S_ISLNK(selected_before.st_mode)
+            or selected_before.st_nlink != 1
+            or os.path.isabs(selected_raw)
+        ):
+            raise ValueError(f"活动 P2P 来源链接无效: {source_link}")
+        source = source_link.parent / selected_raw
+        allowed = (
+            selected_raw == source.name
+            or selected_raw == os.path.join("p2p", source.name)
+        )
+        if not allowed or source.suffix.lower() != ".xlsx":
+            raise ValueError(f"活动 P2P 来源不在项目候选目录: {source_link}")
+        source_parent_before = source.parent.lstat()
+        if not stat.S_ISDIR(source_parent_before.st_mode):
+            raise ValueError(f"活动 P2P 来源目录无效: {source.parent}")
+        source_before = source.lstat()
+        if not stat.S_ISREG(source_before.st_mode) or source_before.st_nlink != 1:
+            raise ValueError(f"活动 P2P 来源不是单链接普通文件: {source}")
+
+        target_parent = project / "99-output-p2p"
+        target = target_parent / f"{source.stem}-air.json"
+        parent_before = target_parent.lstat()
+        if not stat.S_ISDIR(parent_before.st_mode):
+            raise ValueError(f"活动 AIR 输出目录无效: {target_parent}")
+        link_parent_before = link.parent.lstat()
+        if not stat.S_ISDIR(link_parent_before.st_mode):
+            raise ValueError(f"活动 AIR 发布目录无效: {link.parent}")
+        link_before = link.lstat()
+        raw_target = os.readlink(link)
+        expected_raw = os.path.relpath(target, link.parent)
+        if (
+            not stat.S_ISLNK(link_before.st_mode)
+            or link_before.st_nlink != 1
+            or raw_target != expected_raw
+        ):
+            raise ValueError(
+                f"活动 AIR 发布链接无效: expected={expected_raw}, "
+                f"actual={raw_target}: {link}"
+            )
+        target_before = target.lstat()
+        if (
+            not stat.S_ISREG(target_before.st_mode)
+            or target_before.st_nlink != 1
+            or target_before.st_size > MAX_ACTIVE_AIR_JSON_BYTES
+        ):
+            raise ValueError(
+                f"活动 AIR JSON 必须是单链接普通文件且不超过 "
+                f"{MAX_ACTIVE_AIR_JSON_BYTES} 字节: {target}"
+            )
+        directory_fd = os.open(
+            target_parent,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+        if _file_identity(os.fstat(directory_fd)) != _file_identity(parent_before):
+            raise ValueError(f"活动 AIR 输出目录在读取前发生变化: {target_parent}")
+        descriptor = os.open(
+            target.name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=directory_fd,
+        )
+        before = os.fstat(descriptor)
+        if _file_identity(before) != _file_identity(target_before):
+            raise ValueError(f"活动 AIR JSON 在读取前发生变化: {target}")
+        digest = hashlib.sha256()
+        remaining = before.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(65536, remaining))
+            if not chunk:
+                raise ValueError(f"活动 AIR JSON 在读取期间缩短: {target}")
+            digest.update(chunk)
+            remaining -= len(chunk)
+        if (
+            _file_identity(os.fstat(descriptor)) != _file_identity(before)
+            or _file_identity(target.lstat()) != _file_identity(before)
+            or _file_identity(target_parent.lstat()) != _file_identity(parent_before)
+            or _file_identity(link.parent.lstat()) != _file_identity(link_parent_before)
+            or _file_identity(link.lstat()) != _file_identity(link_before)
+            or os.readlink(link) != raw_target
+            or _file_identity(source_link.lstat()) != _file_identity(selected_before)
+            or os.readlink(source_link) != selected_raw
+            or _file_identity(source.lstat()) != _file_identity(source_before)
+            or _file_identity(source.parent.lstat()) != _file_identity(source_parent_before)
+        ):
+            raise ValueError(f"活动 AIR 输入在读取期间发生变化: {link}")
+        return digest.hexdigest()
+    except OSError as exc:
+        raise ValueError(f"无法安全读取活动 AIR JSON: {link}: {exc}") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if directory_fd >= 0:
+            os.close(directory_fd)
+
+
 def _require_exact_runtime_link(
     link: Path, target: Path, *, label: str, target_directory: bool = False,
 ) -> None:
@@ -5328,6 +5462,7 @@ def _governed_watch_identity(
         ACTIVE_AIR_JSON,
     )
     digests = tuple(
+        _active_air_json_digest(project) if path == ACTIVE_AIR_JSON else
         hashlib.sha256(
             _read_bounded_regular_text(path, label=f"monitor identity {path.name}")
             .encode("utf-8")
