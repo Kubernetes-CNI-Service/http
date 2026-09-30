@@ -23,6 +23,10 @@ INITIAL = load_script("req10b_global_link_initial_setup_flow", ROOT / "infiniban
 GLOBAL_MAPPING = ("infiniband/01-global.yaml", "01-global.yaml", "file")
 GLOBAL_BYTES = b"system:\n  timezone: Etc/UTC\n"
 DEVICES_BYTES = b"hostname,ip\nleaf-01,192.0.2.10\n"
+SUBNET_HEADER_BYTES = (
+    b"shared_network,subnet,netmask,range_start,range_end,routers,"
+    b"ztp_service_ip,cumulus_profile,nvos_ztp\n"
+)
 EXPECTED_WORKSPACE_LINKS = (
     ("infra/01-global.yaml", "01-global.yaml", GLOBAL_BYTES),
     ("infra/02-devices_config.csv", "02-devices_config.csv", DEVICES_BYTES),
@@ -37,6 +41,7 @@ class Req10BGlobalLinkWorkflowTests(unittest.TestCase):
             root = Path(directory)
             project = root / "DAY0-Prepare/site-a"
             project.mkdir(parents=True)
+            (project / "02-dhcp-subnet_config.csv").write_bytes(SUBNET_HEADER_BYTES)
             p2p = project / "Site-P2P-v1.0.xlsx"
             p2p.write_bytes(b"fixture")
             (project / "laptop.pub").write_text(public_key(31, "site-a"), encoding="utf-8")
@@ -145,6 +150,7 @@ class Req10BGlobalLinkWorkflowTests(unittest.TestCase):
             root = Path(directory)
             project = root / "DAY0-Prepare/site-a"
             project.mkdir(parents=True)
+            (project / "02-dhcp-subnet_config.csv").write_bytes(SUBNET_HEADER_BYTES)
             (project / "01-global.yaml").write_bytes(GLOBAL_BYTES)
             (project / "02-devices_config.csv").write_bytes(DEVICES_BYTES)
             p2p = project / "Site-P2P-v1.0.xlsx"
@@ -208,6 +214,7 @@ class Req10BGlobalLinkWorkflowTests(unittest.TestCase):
             root = Path(directory)
             project = root / "DAY0-Prepare/site-a"
             project.mkdir(parents=True)
+            (project / "02-dhcp-subnet_config.csv").write_bytes(SUBNET_HEADER_BYTES)
             (project / "01-global.yaml").write_bytes(GLOBAL_BYTES)
             (project / "02-devices_config.csv").write_bytes(DEVICES_BYTES)
             p2p = project / "Site-P2P-v1.0.xlsx"

@@ -43,6 +43,11 @@ class Req19InfraLogContractTests(unittest.TestCase):
         for project in projects:
             (project / "99-output-infra").mkdir(parents=True)
             (project / "Site-P2P-v1.0.xlsx").write_bytes(b"isolated fixture")
+            (project / "02-dhcp-subnet_config.csv").write_text(
+                "shared_network,subnet,netmask,range_start,range_end,routers,"
+                "ztp_service_ip,cumulus_profile,nvos_ztp\n",
+                encoding="ascii",
+            )
         return root, logs, *projects
 
     def bind(self, root, project, *, manifest_failure=False):
