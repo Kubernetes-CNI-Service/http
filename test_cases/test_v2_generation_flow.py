@@ -952,8 +952,177 @@ class DeepYamlFailClosedWorkflowTests(unittest.TestCase):
             self.assertFalse((output / ".published-complete").exists())
 
 
+class PublisherOutputContractTests(unittest.TestCase):
+    @staticmethod
+    def fixture(root):
+        document = [{"set": {"interface": {"eth0": {"ipv4": {
+            "address": {"192.0.2.70/24": {}},
+            "gateway": {"192.0.2.1": {}},
+        }}}}}]
+        devices = {}
+        for index in range(2):
+            hostname = f"ExampleLeaf{index + 1:02d}"
+            mac = f"02:00:00:00:00:{index + 1:02x}"
+            (root / f"{hostname}.yaml").write_text(
+                yaml.safe_dump(document), encoding="utf-8",
+            )
+            devices[hostname.casefold()] = {
+                "hostname": hostname,
+                "dev_type": "eth",
+                "eth0_mac": mac,
+                "eth1_mac": "",
+                "eth0_ip_cidr": "192.0.2.70/24",
+                "eth0_gw": "192.0.2.1",
+            }
+        return devices
+
+    def test_default_link_creation_and_existing_target_are_aggregated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            devices = self.fixture(root)
+            first = io.StringIO()
+            with mock.patch.object(PUBLISHER, "_VERBOSE", False, create=True), \
+                    redirect_stdout(first):
+                ok, counters, hosts = PUBLISHER._process_yaml_files(
+                    directory, devices, {"eth"},
+                )
+                PUBLISHER._print_process_summary(counters)
+            self.assertTrue(ok)
+            self.assertEqual(2, counters["linked"])
+            self.assertEqual(set(devices), hosts)
+            self.assertEqual(2, len(list(root.glob("*.yaml"))) - len(devices))
+            self.assertNotIn("[LINK]", first.getvalue())
+            self.assertIn("候选链接检查", first.getvalue())
+            self.assertNotIn("完成：", first.getvalue())
+
+            second = io.StringIO()
+            with mock.patch.object(PUBLISHER, "_VERBOSE", False, create=True), \
+                    redirect_stdout(second):
+                ok, counters, hosts = PUBLISHER._process_yaml_files(
+                    directory, devices, {"eth"},
+                )
+                PUBLISHER._print_process_summary(counters)
+            self.assertTrue(ok)
+            self.assertEqual(2, counters["skipped"])
+            self.assertNotIn("[SKIP]", second.getvalue())
+            self.assertIn("跳过 2 个", second.getvalue())
+
+    def test_verbose_keeps_link_identity_and_wrong_target_warning_is_immediate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            devices = self.fixture(root)
+            verbose = io.StringIO()
+            with mock.patch.object(PUBLISHER, "_VERBOSE", True, create=True), \
+                    redirect_stdout(verbose):
+                ok, counters, _ = PUBLISHER._process_yaml_files(
+                    directory, devices, {"eth"},
+                )
+            self.assertTrue(ok)
+            for device in devices.values():
+                self.assertIn(
+                    f"[LINK] {device['eth0_mac'].replace(':', '')}.yaml",
+                    verbose.getvalue(),
+                )
+
+            first_device = next(iter(devices.values()))
+            wrong_link = root / f"{first_device['eth0_mac'].replace(':', '')}.yaml"
+            wrong_link.unlink()
+            wrong_link.symlink_to("wrong-host.yaml")
+            transcript = io.StringIO()
+            with mock.patch.object(PUBLISHER, "_VERBOSE", False, create=True), \
+                    redirect_stdout(transcript):
+                ok, counters, _ = PUBLISHER._process_yaml_files(
+                    directory, devices, {"eth"},
+                )
+                PUBLISHER._print_process_summary(counters)
+            self.assertFalse(ok)
+            self.assertEqual(1, counters["warned"])
+            self.assertIn("[WARN]", transcript.getvalue())
+            self.assertIn(wrong_link.name, transcript.getvalue())
+            self.assertNotIn("完成：", transcript.getvalue())
+
+
 class V2GenerationWorkflowTests(unittest.TestCase):
     """Run the new declarative schema through all local production consumers."""
+
+    def test_load_generator_and_mac_publisher_keep_success_output_bounded(self):
+        from test_cases.test_terminal_l2_stp_generation import (
+            border_device, border_globals,
+        )
+
+        devices = {}
+        publisher_devices = {}
+        for index in range(2):
+            device = border_device()
+            device["hostname"] = f"EXAMPLE-LOG-LEAF{index + 1:02d}"
+            devices[device["hostname"]] = device
+            publisher_devices[device["hostname"].casefold()] = {
+                "hostname": device["hostname"],
+                "dev_type": "eth",
+                "eth0_mac": f"02:00:00:00:00:{index + 1:02x}",
+                "eth1_mac": "",
+                "eth0_ip_cidr": "192.0.2.10/24",
+                "eth0_gw": "192.0.2.1",
+            }
+
+        with tempfile.TemporaryDirectory() as directory:
+            ztp_root = Path(directory) / "ztp"
+            output = (
+                ztp_root / "config/cumulus/template/99-output/20260930_120000"
+            )
+            commands = []
+            transcript = io.StringIO()
+
+            def run_local_children(command, **_kwargs):
+                commands.append(command[1])
+                if command[1] == "90-c2-generate_configs.py":
+                    GENERATOR.generate_all()
+                elif command[1] == "d-hostname2mac.py":
+                    ok, counters, hosts = PUBLISHER._process_yaml_files(
+                        str(output), publisher_devices, {"eth"},
+                    )
+                    PUBLISHER._print_process_summary(counters)
+                    self.assertTrue(ok)
+                    self.assertEqual(set(publisher_devices), hosts)
+
+            with mock.patch.object(
+                LOAD, "ZTP_DIR", ztp_root,
+            ), mock.patch.object(
+                LOAD, "_device_types_after_dhcp",
+                return_value=frozenset({"eth"}),
+            ), mock.patch.object(
+                LOAD, "run", side_effect=run_local_children,
+            ), mock.patch.object(
+                GENERATOR, "load_devices",
+                return_value=(border_globals(), devices),
+            ), mock.patch.object(
+                GENERATOR, "OUTPUT_DIR", str(output),
+            ), redirect_stdout(transcript):
+                LOAD.generate_configs(
+                    frozenset({"eth"}), install_dhcp=False,
+                    dhcp_enabled=False, schema_version=2,
+                    eth_version="5.18.1",
+                )
+
+            self.assertEqual(
+                ["b-xlsx_to_dot.py", "90-c2-generate_configs.py",
+                 "d-hostname2mac.py"],
+                commands,
+            )
+            self.assertEqual(2, len([
+                path for path in output.glob("*.yaml") if not path.is_symlink()
+            ]))
+            self.assertEqual(2, len([
+                path for path in output.glob("*.yaml") if path.is_symlink()
+            ]))
+        log = transcript.getvalue()
+        self.assertIn("[STP] 2 台", log)
+        self.assertIn("候选链接检查", log)
+        self.assertNotIn("[LINK] 020000", log)
+        self.assertFalse(any(
+            name in line for name in devices
+            for line in log.splitlines() if "[STP]" in line
+        ))
 
     @classmethod
     def setUpClass(cls):

@@ -104,6 +104,7 @@ _EXPECTED_HEADER_PREFIX = (
 )
 
 _AUTO_YES  = False
+_VERBOSE = False  # Opt-in per-device successful-link diagnostics.
 _CONFIRM_TIMEOUT = 15
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))  # 保留通过软链接调用时的逻辑位置
 _HTTP_ROOT = Path(_SCRIPT_DIR).resolve().parents[2]
@@ -456,7 +457,8 @@ def _make_symlink(yaml_dir, mac, host_name, iface, ip_cidr):
     if os.path.islink(link):
         existing_target = os.readlink(link)
         if existing_target == expected_target:
-            print(f"[SKIP] {os.path.basename(link)} 已存在（→ {existing_target}）")
+            if _VERBOSE:
+                print(f"[SKIP] {os.path.basename(link)} 已存在（→ {existing_target}）")
             return "skipped"
         print(f"[WARN] {os.path.basename(link)} 已存在但目标不符："
               f" 当前={existing_target}  期望={expected_target}")
@@ -465,7 +467,11 @@ def _make_symlink(yaml_dir, mac, host_name, iface, ip_cidr):
         print(f"[WARN] {os.path.basename(link)} 已存在且不是软链接，无法创建 MAC 链接")
         return "warned"
     os.symlink(expected_target, link)
-    print(f"[LINK] {os.path.basename(link)} -> {expected_target}  ({iface} {ip_cidr.replace(' ','')})")
+    if _VERBOSE:
+        print(
+            f"[LINK] {os.path.basename(link)} -> {expected_target}  "
+            f"({iface} {ip_cidr.replace(' ','')})"
+        )
     return "linked"
 
 
@@ -539,10 +545,15 @@ def _sync_spx_marker(yaml_dir, mac, host_name, effective_type):
         if current != expected:
             with open(marker, "w", encoding="utf-8") as stream:
                 stream.write(expected)
-            print(f"[SPX] {os.path.basename(marker)} -> {host_name}")
+            if _VERBOSE:
+                print(f"[SPX] {os.path.basename(marker)} -> {host_name}")
+            return "spx_written"
     elif os.path.lexists(marker):
         os.unlink(marker)
-        print(f"[CLEAN] 删除非 SPX 设备的旧标记：{os.path.basename(marker)}")
+        if _VERBOSE:
+            print(f"[CLEAN] 删除非 SPX 设备的旧标记：{os.path.basename(marker)}")
+        return "spx_removed"
+    return None
 
 
 def _atomic_symlink(link_path, target, label):
@@ -1194,6 +1205,7 @@ def _process_yaml_files(yaml_dir, devices, allowed_types=None, profiles=None):
     counters = {
         "linked": 0, "skipped": 0, "pending": 0,
         "warned": 0, "yaml_error": 0,
+        "spx_written": 0, "spx_removed": 0,
     }
     hosts = set()
     hostname_yamls = [
@@ -1254,10 +1266,12 @@ def _process_yaml_files(yaml_dir, devices, allowed_types=None, profiles=None):
             result = _make_symlink(yaml_dir, mac, host_name, iface, ip_cidr)
             counters[result] += 1
             if result in {"linked", "skipped"}:
-                _sync_spx_marker(
+                marker_result = _sync_spx_marker(
                     yaml_dir, mac, host_name,
                     _effective_cumulus_type(dev, devices),
                 )
+                if marker_result is not None:
+                    counters[marker_result] += 1
     ok = counters["warned"] == 0 and counters["yaml_error"] == 0
     return ok, counters, hosts
 
@@ -2038,9 +2052,11 @@ def _publish_combined_cumulus(
 
 def _print_process_summary(counters):
     print(
-        f"\n完成：创建 {counters['linked']} 个链接，跳过 {counters['skipped']} 个，"
+        f"\n候选链接检查：创建 {counters['linked']} 个链接，跳过 {counters['skipped']} 个，"
         f"identity pending {counters.get('pending', 0)} 台，"
-        f"yaml 错误 {counters['yaml_error']} 个，其他警告 {counters['warned']} 个"
+        f"yaml 错误 {counters['yaml_error']} 个，其他警告 {counters['warned']} 个，"
+        f"SPX 标记创建/更新 {counters.get('spx_written', 0)} 个，"
+        f"过期标记清理 {counters.get('spx_removed', 0)} 个"
     )
 
 
@@ -2196,8 +2212,11 @@ def _resolve_yaml_dir():
 # ── 主流程 ────────────────────────────────────────────────────────────────────
 
 def main():
-    global _AUTO_YES
+    global _AUTO_YES, _VERBOSE
     args = sys.argv[1:]
+    _VERBOSE = "--verbose" in args
+    if _VERBOSE:
+        args = [a for a in args if a != "--verbose"]
     if "-y" in args:
         _AUTO_YES = True
         args = [a for a in args if a != "-y"]
@@ -2242,7 +2261,7 @@ def main():
         sys.exit(2)
 
     if "-h" in args or "--help" in args:
-        print("""usage: d-hostname2mac.py [-y] [--csv PATH] [--deployment-scope all|prod|air] [--switch eth|ib|nvl] YAML_DIR [YAML_DIR]
+        print("""usage: d-hostname2mac.py [-y] [--verbose] [--csv PATH] [--deployment-scope all|prod|air] [--switch eth|ib|nvl] YAML_DIR [YAML_DIR]
 
 一个 Cumulus 目录：自动补齐同时间戳 Production 与 _air 两个目录后发布。
           两套 YAML 除 set.system.hostname 外必须完全一致，各自 MAC 链接只指向

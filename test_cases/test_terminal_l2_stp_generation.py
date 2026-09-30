@@ -7,12 +7,14 @@ import base64
 import copy
 import csv
 import hashlib
+import io
 import importlib.util
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from unittest import mock
 
 import yaml
@@ -582,6 +584,214 @@ class TerminalL2StpDirectTests(unittest.TestCase):
                 any(name in error and "不得配置" in error for error in errors),
                 errors,
             )
+
+
+class GenerationOutputContractTests(unittest.TestCase):
+    @staticmethod
+    def devices(count):
+        devices = {}
+        for index in range(count):
+            device = border_device()
+            device["hostname"] = f"EXAMPLE-BORDER{index + 1:03d}"
+            devices[device["hostname"]] = device
+        return devices
+
+    @staticmethod
+    def nvos_devices(count, device_type="ib"):
+        return [
+            {
+                "hostname": f"EXAMPLE-{device_type.upper()}{index + 1:03d}",
+                "type": device_type,
+                "eth0_ip": f"192.0.2.{index + 10}",
+                "eth0_pfx": "24",
+                "eth0_gw": "192.0.2.1",
+                "eth0_mac": f"02:00:00:01:00:{index + 1:02x}",
+                "has_eth1": False,
+                "eth1_ip": "",
+                "eth1_pfx": "",
+                "eth1_gw": "",
+                "eth1_mac": "",
+            }
+            for index in range(count)
+        ]
+
+    def test_default_generation_summarizes_actions_and_bounds_progress(self):
+        devices = self.devices(24)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "generated"
+            transcript = io.StringIO()
+            with mock.patch.object(
+                GENERATOR, "load_devices",
+                return_value=(border_globals(), devices),
+            ), mock.patch.object(
+                GENERATOR, "OUTPUT_DIR", str(output),
+            ), redirect_stdout(transcript):
+                GENERATOR.generate_all()
+            self.assertEqual(24, len(list(output.glob("*.yaml"))))
+
+        lines = transcript.getvalue().splitlines()
+        progress = [line for line in lines if line.startswith("[PROGRESS] ETH")]
+        checked = [int(line.split("已检查 ", 1)[1].split("/", 1)[0]) for line in progress]
+        self.assertGreater(len(checked), 0)
+        self.assertLessEqual(len(checked), 10)
+        self.assertEqual(sorted(set(checked)), checked)
+        self.assertTrue(all(0 < value <= 24 for value in checked))
+        self.assertIn("[STP] 24 台", transcript.getvalue())
+        self.assertIn("[DOCKER] 24 台", transcript.getvalue())
+        self.assertFalse(any(
+            name in line for name in devices
+            for line in lines if "[STP]" in line or "[DOCKER]" in line
+        ))
+        self.assertIn("完成：生成 24 台", transcript.getvalue())
+
+    def test_verbose_restores_per_device_success_details(self):
+        devices = self.devices(2)
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = io.StringIO()
+            with mock.patch.object(
+                GENERATOR, "load_devices",
+                return_value=(border_globals(), devices),
+            ), mock.patch.object(
+                GENERATOR, "OUTPUT_DIR", str(Path(directory) / "generated"),
+            ), redirect_stdout(transcript):
+                GENERATOR.generate_all(verbose=True)
+        for name in devices:
+            self.assertIn(f"[STP] {name}:", transcript.getvalue())
+            self.assertIn(f"[DOCKER] {name}:", transcript.getvalue())
+
+    def test_render_failure_names_device_and_never_reports_completion(self):
+        devices = self.devices(2)
+        failed_name = next(reversed(devices))
+        real_render = GENERATOR.render
+
+        def render_with_failure(env, global_vars, name, device_vars):
+            if name == failed_name:
+                raise ValueError("synthetic render failure")
+            return real_render(env, global_vars, name, device_vars)
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "generated"
+            transcript = io.StringIO()
+            with mock.patch.object(
+                GENERATOR, "load_devices",
+                return_value=(border_globals(), devices),
+            ), mock.patch.object(
+                GENERATOR, "OUTPUT_DIR", str(output),
+            ), mock.patch.object(
+                GENERATOR, "render", side_effect=render_with_failure,
+            ), redirect_stdout(transcript):
+                with self.assertRaises(SystemExit):
+                    GENERATOR.generate_all()
+            self.assertFalse(output.exists())
+        diagnostic = transcript.getvalue()
+        self.assertIn(f"[ERROR] {failed_name}: synthetic render failure", diagnostic)
+        self.assertIn("[ABORT]", diagnostic)
+        self.assertNotIn("完成：", diagnostic)
+
+    def test_verify_summarizes_matches_but_keeps_missing_reference_identity(self):
+        devices = self.devices(2)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "generated"
+            reference = root / "reference"
+            reference.mkdir()
+            with mock.patch.object(
+                GENERATOR, "load_devices",
+                return_value=(border_globals(), devices),
+            ), mock.patch.object(
+                GENERATOR, "OUTPUT_DIR", str(output),
+            ), redirect_stdout(io.StringIO()):
+                GENERATOR.generate_all()
+            matched_name, missing_name = devices
+            (reference / f"{matched_name}.yaml").write_bytes(
+                (output / f"{matched_name}.yaml").read_bytes()
+            )
+            transcript = io.StringIO()
+            with mock.patch.object(
+                GENERATOR, "load_devices",
+                return_value=(border_globals(), devices),
+            ), redirect_stdout(transcript):
+                with self.assertRaises(SystemExit):
+                    GENERATOR.generate_all(
+                        verify=True, ref_dir=str(reference), fail_on_diff=True,
+                    )
+        diagnostic = transcript.getvalue()
+        self.assertNotIn(f"[MATCH] {matched_name}", diagnostic)
+        self.assertIn(f"[SKIP] {missing_name}: 无参考文件可比对", diagnostic)
+        self.assertIn("[ABORT]", diagnostic)
+        self.assertNotIn("完成：", diagnostic)
+
+    def test_nvos_generation_bounds_progress_and_verbose_restores_details(self):
+        devices = self.nvos_devices(12, "ib") + self.nvos_devices(12, "nvl")
+        with tempfile.TemporaryDirectory() as directory:
+            ib_dir = Path(directory) / "ib" / "output"
+            nvl_dir = Path(directory) / "nvl" / "output"
+            transcript = io.StringIO()
+            with mock.patch.object(
+                GENERATOR, "_load_csv_ib", return_value=(devices, []),
+            ), mock.patch.object(
+                GENERATOR, "load_global", return_value={"system": {}},
+            ), mock.patch.object(
+                GENERATOR, "OUTPUT_IB_DIR", str(ib_dir),
+            ), mock.patch.object(
+                GENERATOR, "OUTPUT_NVL_DIR", str(nvl_dir),
+            ), redirect_stdout(transcript):
+                self.assertEqual(24, GENERATOR._generate_all_ib())
+            self.assertEqual(12, len(list(ib_dir.glob("*.yaml"))))
+            self.assertEqual(12, len(list(nvl_dir.glob("*.yaml"))))
+            lines = transcript.getvalue().splitlines()
+            progress = [line for line in lines if line.startswith("[PROGRESS] NVOS")]
+            checked = [int(line.split("已检查 ", 1)[1].split("/", 1)[0]) for line in progress]
+            self.assertGreater(len(checked), 0)
+            self.assertLessEqual(len(checked), 10)
+            self.assertEqual(sorted(set(checked)), checked)
+            self.assertTrue(all(0 < value <= 24 for value in checked))
+            self.assertFalse(any(line.startswith("[OK]") for line in lines))
+            self.assertIn("完成：共生成 24 台", transcript.getvalue())
+
+            verbose_transcript = io.StringIO()
+            with mock.patch.object(
+                GENERATOR, "_load_csv_ib", return_value=(devices[:1] + devices[12:13], []),
+            ), mock.patch.object(
+                GENERATOR, "load_global", return_value={"system": {}},
+            ), mock.patch.object(
+                GENERATOR, "OUTPUT_IB_DIR", str(ib_dir),
+            ), mock.patch.object(
+                GENERATOR, "OUTPUT_NVL_DIR", str(nvl_dir),
+            ), redirect_stdout(verbose_transcript):
+                self.assertEqual(2, GENERATOR._generate_all_ib(verbose=True))
+            self.assertIn("[OK] EXAMPLE-IB001.yaml", verbose_transcript.getvalue())
+            self.assertIn("[OK] EXAMPLE-NVL001.yaml", verbose_transcript.getvalue())
+
+    def test_nvos_failure_names_device_and_has_no_final_completion(self):
+        devices = self.nvos_devices(2, "ib")
+        failed_name = devices[1]["hostname"]
+        real_write = GENERATOR._write_yaml_ib
+
+        def write_with_failure(data, path):
+            if Path(path).stem == failed_name:
+                raise ValueError("synthetic NVOS write failure")
+            return real_write(data, path)
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "ib" / "output"
+            transcript = io.StringIO()
+            with mock.patch.object(
+                GENERATOR, "_load_csv_ib", return_value=(devices, []),
+            ), mock.patch.object(
+                GENERATOR, "load_global", return_value={"system": {}},
+            ), mock.patch.object(
+                GENERATOR, "OUTPUT_IB_DIR", str(output),
+            ), mock.patch.object(
+                GENERATOR, "_write_yaml_ib", side_effect=write_with_failure,
+            ), redirect_stdout(transcript):
+                with self.assertRaises(SystemExit):
+                    GENERATOR._generate_all_ib()
+            self.assertFalse(output.exists())
+        diagnostic = transcript.getvalue()
+        self.assertIn(f"[ERROR] {failed_name}：synthetic NVOS write failure", diagnostic)
+        self.assertIn("[ABORT]", diagnostic)
+        self.assertNotIn("完成：", diagnostic)
 
 
 class TerminalL2StpWorkflowTests(unittest.TestCase):

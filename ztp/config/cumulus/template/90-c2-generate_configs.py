@@ -146,6 +146,10 @@ def generation_parser(branch):
     )
     parser.add_argument("-y", action="store_true", dest="auto_yes", help="自动确认受支持的交互提示")
     parser.add_argument(
+        "--verbose", action="store_true",
+        help="输出逐设备成功明细；默认仅显示有界进度与汇总",
+    )
+    parser.add_argument(
         "--deployment-scope", choices=("all", "prod", "air"), default="all",
         help="生成范围；all=Production+AIR，prod=Production，air=AIR",
     )
@@ -210,6 +214,21 @@ def parse_generation_args(argv, *, branch):
 def should_prompt_descriptions(args):
     """Keep prompting explicit and independently testable."""
     return not bool(args.verify) and not bool(args.skip_descriptions)
+
+
+class _BoundedProgress:
+    """Report completed checks at a bounded cadence, never per device."""
+
+    def __init__(self, total, label):
+        self.total = total
+        self.label = label
+        self.completed = 0
+        self.interval = max(10, (total + 9) // 10)
+
+    def advance(self):
+        self.completed += 1
+        if self.completed < self.total and self.completed % self.interval == 0:
+            print(f"[PROGRESS] {self.label} 已检查 {self.completed}/{self.total} 台")
 
 
 _BRANCH, _SCRIPT_ARGS = _parse_branch(sys.argv[1:])
@@ -5774,7 +5793,7 @@ def _air_source_hostnames_for_devices(devices):
 
 def generate_all(
     target=None, verify=False, ref_dir=None, fail_on_diff=False,
-    deployment_scope="all",
+    deployment_scope="all", verbose=False,
 ):
     global_vars, devices = load_devices()
     env = build_env()
@@ -5820,10 +5839,9 @@ def generate_all(
             preflight_errors += 1
     if preflight_errors:
         print(
-            "\n完成：生成 0 台，跳过 0 台，差异 0 台，"
-            f"错误 {preflight_errors} 台"
+            f"[ABORT] bond intent 预检失败：错误 {preflight_errors} 台；"
+            "未创建或发布输出目录"
         )
-        print("[ABORT] bond intent 预检失败，未创建或发布输出目录")
         sys.exit(1)
 
     staging_dir = OUTPUT_DIR + ".tmp"
@@ -5834,8 +5852,16 @@ def generate_all(
 
     ok = skipped = errors = diffs = 0
     validated_outputs = {}
+    progress = _BoundedProgress(len(devices), "ETH")
+    action_labels = (
+        "CLEAN", "VRL", "DOCKER", "SVI/VRR", "STP", "QOS", "EVPN-MH", "BOND",
+    )
+    action_counts = {label: 0 for label in action_labels}
+    removed_null_total = 0
 
-    for name, device_vars in devices.items():
+    for index, (name, device_vars) in enumerate(devices.items()):
+        if index:
+            progress.advance()  # The previous device has finished all checks.
         source_yaml_receipt = bool(device_vars.get("source_yaml_b64"))
         project_schema_version = device_vars.get("_project_schema_version", 1)
         device_template = device_vars.get("template")
@@ -5958,25 +5984,6 @@ def generate_all(
             print(f"[ERROR] {name}: 删除 null 占位后配置为空")
             errors += 1
             continue
-        if removed_nulls:
-            print(f"  [CLEAN] {name}: 已省略 {removed_nulls} 个 null NVUE 空操作")
-        if vrl_injected:
-            print(f"  [VRL] {name}: 已合并到原有单一 set 操作")
-        if docker_config_normalized:
-            print(
-                f"  [DOCKER] {name}: Cumulus {global_vars.get('version')} "
-                "已省略 docker.state"
-            )
-        if dhcp_relay_injected:
-            print(f"  [SVI/VRR] {name}: 已合并 VRF loopback/版本化 SVI MAC 配置")
-        if terminal_l2_stp_injected:
-            print(f"  [STP] {name}: 已为独立二层 swp/bond 启用 Edge + BPDU Guard")
-        if qos_injected:
-            print(f"  [QOS] {name}: 已生成全局 lossless RoCE 与物理端口 PFC watchdog")
-        if evpn_uplink_injected:
-            print(f"  [EVPN-MH] {name}: 已为全部 BGP 物理接口启用 uplink tracking")
-        if redundancy_policy_normalized:
-            print(f"  [BOND] {name}: 已移除无 active EVPN-MH bond 的全局 multihoming")
         if (removed_nulls or vrl_injected or docker_config_normalized
                 or dhcp_relay_injected
                 or terminal_l2_stp_injected or qos_injected
@@ -6007,6 +6014,30 @@ def generate_all(
             errors += 1
             continue
 
+        actions = (
+            ("CLEAN", removed_nulls,
+             f"已省略 {removed_nulls} 个 null NVUE 空操作"),
+            ("VRL", vrl_injected, "已合并到原有单一 set 操作"),
+            ("DOCKER", docker_config_normalized,
+             f"Cumulus {global_vars.get('version')} 已省略 docker.state"),
+            ("SVI/VRR", dhcp_relay_injected,
+             "已合并 VRF loopback/版本化 SVI MAC 配置"),
+            ("STP", terminal_l2_stp_injected,
+             "已为独立二层 swp/bond 启用 Edge + BPDU Guard"),
+            ("QOS", qos_injected,
+             "已生成全局 lossless RoCE 与物理端口 PFC watchdog"),
+            ("EVPN-MH", evpn_uplink_injected,
+             "已为全部 BGP 物理接口启用 uplink tracking"),
+            ("BOND", redundancy_policy_normalized,
+             "已移除无 active EVPN-MH bond 的全局 multihoming"),
+        )
+        for label, applied, detail in actions:
+            if applied:
+                action_counts[label] += 1
+                if verbose:
+                    print(f"  [{label}] {name}: {detail}")
+        removed_null_total += removed_nulls
+
         if verify:
             ref_path = ref_index.get(name.casefold())
             if ref_path:
@@ -6025,7 +6056,8 @@ def generate_all(
                     if len(diff) > 40:
                         print(f"  ... (共 {len(diff)} 行差异)")
                 else:
-                    print(f"[MATCH] {name}: 与参考文件一致")
+                    if verbose:
+                        print(f"[MATCH] {name}: 与参考文件一致")
             else:
                 print(f"[SKIP] {name}: 无参考文件可比对")
                 skipped += 1
@@ -6039,7 +6071,8 @@ def generate_all(
             )
             ok += 1
 
-    print(f"\n完成：生成 {ok} 台，跳过 {skipped} 台，差异 {diffs} 台，错误 {errors} 台")
+    if devices:
+        progress.advance()
 
     if not verify:
         if errors == 0:
@@ -6057,11 +6090,36 @@ def generate_all(
             print(f"输出目录：{OUTPUT_DIR}")
         else:
             shutil.rmtree(staging_dir, ignore_errors=True)
-            print(f"[ABORT] 存在错误，未写入输出目录")
+            print(
+                f"[ABORT] 已检查 {len(devices)} 台，候选通过 {ok} 台，"
+                f"错误 {errors} 项；未写入输出目录"
+            )
             sys.exit(1)
     else:
         if errors > 0 or (fail_on_diff and (diffs > 0 or skipped > 0)):
+            print(
+                f"[ABORT] 核对未通过：已检查 {len(devices)} 台，"
+                f"差异 {diffs} 台，缺少参考 {skipped} 台，错误 {errors} 项"
+            )
             sys.exit(1)
+
+    if any(action_counts.values()):
+        print("[SUMMARY] 已校验配置动作：")
+        for label in action_labels:
+            count = action_counts[label]
+            if count:
+                suffix = (
+                    f"，共省略 {removed_null_total} 个 null"
+                    if label == "CLEAN" else ""
+                )
+                print(f"  [{label}] {count} 台{suffix}")
+    if verify:
+        print(
+            f"核对完成：匹配 {ok - diffs - skipped} 台，差异 {diffs} 台，"
+            f"缺少参考 {skipped} 台，错误 {errors} 项"
+        )
+    else:
+        print(f"\n完成：生成 {ok} 台，跳过 {skipped} 台，差异 {diffs} 台，错误 {errors} 台")
 
 
 # ── ETH: patch_descriptions ───────────────────────────────────────────────────
@@ -7803,7 +7861,9 @@ def _write_yaml_ib(data, path):
     os.replace(tmp, path)
 
 
-def _generate_group_ib(devices, global_cfg, out_dir, target=None):
+def _generate_group_ib(
+    devices, global_cfg, out_dir, target=None, *, progress=None, verbose=False,
+):
     """为一组同类型设备生成 YAML，写入 out_dir/<timestamp>/。
 
     返回 (generated, errors) 计数。out_dir 的最后一级即时间戳目录。
@@ -7827,12 +7887,21 @@ def _generate_group_ib(devices, global_cfg, out_dir, target=None):
         try:
             data = _build_yaml_ib(dev, global_cfg)
             _write_yaml_ib(data, out_path)
-            eth1_info = f"  eth1={dev['eth1_ip']}/{dev['eth1_pfx']}" if dev["has_eth1"] else ""
-            print(f"[OK] {hostname}.yaml  (eth0={dev['eth0_ip']}/{dev['eth0_pfx']}{eth1_info})")
+            if verbose:
+                eth1_info = (
+                    f"  eth1={dev['eth1_ip']}/{dev['eth1_pfx']}"
+                    if dev["has_eth1"] else ""
+                )
+                print(
+                    f"[OK] {hostname}.yaml  "
+                    f"(eth0={dev['eth0_ip']}/{dev['eth0_pfx']}{eth1_info})"
+                )
             generated += 1
         except Exception as e:
             print(f"[ERROR] {hostname}：{e}")
             errors += 1
+        if progress is not None:
+            progress.advance()
 
     if errors == 0:
         directory_errors = _validate_yaml_directory(staging_dir)
@@ -7853,7 +7922,7 @@ def _generate_group_ib(devices, global_cfg, out_dir, target=None):
     return generated, errors
 
 
-def _generate_all_ib(target=None, *, switch_scope="all"):
+def _generate_all_ib(target=None, *, switch_scope="all", verbose=False):
     devices, parse_errors = _load_csv_ib()
 
     if parse_errors:
@@ -7894,28 +7963,43 @@ def _generate_all_ib(target=None, *, switch_scope="all"):
         nvl_devices = [d for d in matched if d["type"] == "nvl"]
 
     total_gen = total_err = 0
+    progress = _BoundedProgress(
+        (len(ib_devices) if not ib_errors else 0)
+        + (len(nvl_devices) if not nvl_errors else 0),
+        "NVOS",
+    )
 
     if ib_devices and not ib_errors:
         global_ib = load_global("ib")
         print(f"\n── 生成 IB 配置（{len(ib_devices)} 台）" + "─" * 40)
-        gen, err = _generate_group_ib(ib_devices, global_ib, OUTPUT_IB_DIR, target)
+        gen, err = _generate_group_ib(
+            ib_devices, global_ib, OUTPUT_IB_DIR, target,
+            progress=progress, verbose=verbose,
+        )
         total_gen += gen
         total_err += err
 
     if nvl_devices and not nvl_errors:
         global_nvl = load_global("nvl")
         print(f"\n── 生成 NVL 配置（{len(nvl_devices)} 台）" + "─" * 39)
-        gen, err = _generate_group_ib(nvl_devices, global_nvl, OUTPUT_NVL_DIR, target)
+        gen, err = _generate_group_ib(
+            nvl_devices, global_nvl, OUTPUT_NVL_DIR, target,
+            progress=progress, verbose=verbose,
+        )
         total_gen += gen
         total_err += err
 
-    print(f"\n完成：共生成 {total_gen} 台")
     if total_err:
         print(f"[WARN] 共 {total_err} 台生成失败")
     if ib_errors or nvl_errors:
         print("[WARN] 部分设备因 CSV 校验失败而未生成")
     if total_err or ib_errors or nvl_errors:
+        print(
+            f"[ABORT] NVOS 生成未全部通过：已生成候选 {total_gen} 台，"
+            f"设备错误 {total_err} 台，输入错误 {len(ib_errors) + len(nvl_errors)} 项"
+        )
         sys.exit(1)
+    print(f"\n完成：共生成 {total_gen} 台")
     return total_gen
 
 
@@ -8037,7 +8121,7 @@ if __name__ == "__main__":
         generate_all(
             target=target, verify=parsed.verify, ref_dir=parsed.ref_dir,
             fail_on_diff=parsed.fail_on_diff,
-            deployment_scope=parsed.deployment_scope,
+            deployment_scope=parsed.deployment_scope, verbose=parsed.verbose,
         )
         if not parsed.verify:
             if should_prompt_descriptions(parsed):
@@ -8072,6 +8156,7 @@ if __name__ == "__main__":
         target = parsed.hostname
         n = _generate_all_ib(
             target=target, switch_scope=parsed.switch_scope or "all",
+            verbose=parsed.verbose,
         )
         if n > 0:
             _print_info_block_ib()

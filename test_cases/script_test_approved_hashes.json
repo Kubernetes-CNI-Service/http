@@ -1,31 +1,4 @@
 {
-  "full_suite_attestation": {
-    "environment": {
-      "container_toplevel_lock_sha256": "3532f5208b462243bab779b01eb4deb21638ac05a9390c17ac997ba8d7f24998",
-      "container_toplevel_versions": [
-        "Jinja2==3.1.6",
-        "openpyxl==3.1.5",
-        "pandas==2.3.3",
-        "PyYAML==6.0.3",
-        "XlsxWriter==3.2.9"
-      ],
-      "machine": "arm64",
-      "platform": "darwin",
-      "python_cache_tag": "cpython-39",
-      "python_executable": "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/bin/python3.9",
-      "python_implementation": "CPython",
-      "python_version": [
-        3,
-        9,
-        6
-      ]
-    },
-    "scenario_coverage": {
-      "root-entrypoint-workflow": "NOT COVERED (requires Linux EUID 0 private namespace)"
-    },
-    "schema_version": 1,
-    "snapshot_sha256": "47036f7790219906b5d45ff8621d177bc5955dc9ec2e1051af98030a3022c564"
-  },
   "impact_manifest_sha256": "fa6a8beb36d1e9b017c33c59dc72c8b0c27f6447c50f579c6c7a7143089e0782",
   "schema_version": 1,
   "scripts": {
@@ -599,11 +572,11 @@
     },
     "ztp/config/cumulus/d-hostname2mac.py": {
       "canonical": "ztp/config/cumulus/d-hostname2mac.py",
-      "sha256": "58e3a8e80d66eeec77d9602299681b835be51a7fc9acb27acfc92b79f12fffec"
+      "sha256": "c3aef85dc48cf7d6c0046ec4376d8b3f72cbb52a426f42a8cdac7a1391f59cee"
     },
     "ztp/config/cumulus/template/90-c2-generate_configs.py": {
       "canonical": "ztp/config/cumulus/template/90-c2-generate_configs.py",
-      "sha256": "eb1596762917899705fcf7e3e4bca17816d5b4ba0ac458705c810afb8e171b90"
+      "sha256": "323f6160e9ec009d3eac7ded7657deb27522bf3edb87432fd510c80780e472bc"
     },
     "ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py": {
       "canonical": "ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py",
@@ -619,11 +592,11 @@
     },
     "ztp/config/nvos/d-hostname2mac.py": {
       "canonical": "ztp/config/cumulus/d-hostname2mac.py",
-      "sha256": "58e3a8e80d66eeec77d9602299681b835be51a7fc9acb27acfc92b79f12fffec"
+      "sha256": "c3aef85dc48cf7d6c0046ec4376d8b3f72cbb52a426f42a8cdac7a1391f59cee"
     },
     "ztp/config/nvos/template/90-c2-generate_configs.py": {
       "canonical": "ztp/config/cumulus/template/90-c2-generate_configs.py",
-      "sha256": "eb1596762917899705fcf7e3e4bca17816d5b4ba0ac458705c810afb8e171b90"
+      "sha256": "323f6160e9ec009d3eac7ded7657deb27522bf3edb87432fd510c80780e472bc"
     },
     "ztp/config/nvos/template/P2P/p2p-to-validation.py": {
       "canonical": "ztp/config/nvos/template/P2P/p2p-to-validation.py",
@@ -936,7 +909,7 @@
     "test_cases.test_splitter_profile_breakout_workflow": "6f12acec85f5540bde3de1ddf9670df2eeb3af56c150d8d52c6f6ba341285e75",
     "test_cases.test_ssh_key_preparation_contract": "25b1edad841b0075d563fc8ac57be5a4a3a889624a7d2166f15ac6250b860d23",
     "test_cases.test_ssh_key_preparation_workflow": "7c4763c4ed35b302af12ffb2177e6b2e5c29f1580e0fcbf6c937b9ae43ea3bc0",
-    "test_cases.test_terminal_l2_stp_generation": "fa322a659446400a75ae877a5badf73bfc939ad0345aa7717098bedd7689aa6e",
+    "test_cases.test_terminal_l2_stp_generation": "1243b41f15abc205ad4c600c17cb8879ce9a775bee8e9b8d7e2c049101e9cea7",
     "test_cases.test_test_case_repository": "25836532ef92cc4e8c5f3a2f02ffbb2fbae2073fba18de557d3d20128507df41",
     "test_cases.test_topology_consistency": "2ac10dfe93626f0302b12cf4fab5f36eeee73e6c624242307fafb59990fd46fb",
     "test_cases.test_ufm_collection_agent": "3ea34ce91866881926d822453d253546a0bea27b7cfd8cc3f78d6d46383fcbe6",
@@ -953,7 +926,7 @@
     "test_cases.test_ufm_remote_producer": "38363c09546951664c58c3a8ea13666a7681f7d620daff2b47384fa372e09ad6",
     "test_cases.test_ufm_remote_producer_workflow": "0af8e841718064e149d2d8b1c49b85800c3644b17b3f5b3284809ef196a994c1",
     "test_cases.test_upload_package_contract": "eeb6de435a715841aaec7a0b1c2f676cfdf3eda99afd399d1b00661f989ae572",
-    "test_cases.test_v2_generation_flow": "844d7b3f13042f1a80a805ce8c85b939c379a7477d745524d54a08484813e49a",
+    "test_cases.test_v2_generation_flow": "7731dc3a8257720de0324de3cc1a3cdc8806670b459dd74b92240b0c91e87608",
     "test_cases.test_v2_project_schema": "e905680d7ca87d9c7d0f0df6b1570cd656f518b90e03bb8cd860962de1490167",
     "test_cases.test_vm_validation_runner": "e3cea3bccb662d899f748421598feb95298142b47928bc1c077909bb1af2c505",
     "test_cases.test_xlsx_zero_row_fail_closed": "a5d69be6a27360c0ed620c9afd370a95843c20b914d26392960c4115845971df",
