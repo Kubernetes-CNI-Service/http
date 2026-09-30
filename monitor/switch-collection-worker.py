@@ -2606,6 +2606,118 @@ def _collection_snapshot_activity_sources(slot: str, bindings: dict) -> dict | N
     return activity
 
 
+def _collection_read_managed_air_json(link: Path) -> bytes:
+    """Read only setup's selected AIR JSON through its exact pinned link."""
+    maximum = 32 * 1024 * 1024
+    root = HTTP_ROOT
+    active = root / "monitor/02-devices_config.csv"
+    project_root = root / "DAY0-Prepare"
+    if link != root / "ztp/config/isc-dhcp-server/p2p-air.json":
+        raise ValueError("AIR JSON publication path is not fixed")
+    directory_fd = descriptor = -1
+    try:
+        active_binding = _collection_activity_link_identity(active)
+        active_raw = active_binding[1]
+        if not active_raw or os.path.isabs(active_raw):
+            raise ValueError("active project inventory link is invalid")
+        inventory = Path(os.path.abspath(os.path.join(active.parent, active_raw)))
+        relative = inventory.relative_to(project_root)
+        if (
+            len(relative.parts) != 2
+            or relative.parts[1] != "02-devices_config.csv"
+            or active_raw != os.path.relpath(inventory, active.parent)
+        ):
+            raise ValueError("active project inventory escapes project root")
+        project = inventory.parent
+        source_link = project / "p2p.xlsx"
+        source_binding = _collection_activity_link_identity(source_link)
+        source_raw = source_binding[1]
+        if not source_raw or os.path.isabs(source_raw):
+            raise ValueError("selected P2P source link is invalid")
+        selected = Path(os.path.abspath(os.path.join(project, source_raw)))
+        if (
+            source_raw not in {selected.name, os.path.join("p2p", selected.name)}
+            or selected.suffix.lower() != ".xlsx"
+        ):
+            raise ValueError("selected P2P source is outside project candidates")
+        target_parent = project / "99-output-p2p"
+        target = target_parent / f"{selected.stem}-air.json"
+        link_binding = _collection_activity_link_identity(link)
+        if link_binding[1] != os.path.relpath(target, link.parent):
+            raise ValueError("AIR JSON publication target is not setup-selected")
+
+        directories = (
+            root / "monitor", project_root, project, selected.parent,
+            target_parent, root / "ztp", root / "ztp/config", link.parent,
+        )
+        directory_metadata = {}
+        for directory in directories:
+            metadata = directory.lstat()
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise ValueError("AIR JSON publication parent is not a real directory")
+            directory_metadata[directory] = _collection_activity_file_identity(metadata)
+        inventory_metadata = inventory.lstat()
+        source_metadata = selected.lstat()
+        target_metadata = target.lstat()
+        for metadata in (inventory_metadata, source_metadata, target_metadata):
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                raise ValueError("AIR JSON publication member is not one regular file")
+        if target_metadata.st_size < 0 or target_metadata.st_size > maximum:
+            raise ValueError("AIR JSON exceeds runtime snapshot bound")
+
+        directory_fd = os.open(
+            target_parent,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+        if (_collection_activity_file_identity(os.fstat(directory_fd))
+                != directory_metadata[target_parent]):
+            raise ValueError("AIR JSON output directory changed before read")
+        descriptor = os.open(
+            target.name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=directory_fd,
+        )
+        target_identity = _collection_activity_file_identity(target_metadata)
+        if _collection_activity_file_identity(os.fstat(descriptor)) != target_identity:
+            raise ValueError("AIR JSON target changed before read")
+        chunks = []
+        remaining = target_metadata.st_size
+        while remaining:
+            part = os.read(descriptor, min(65536, remaining))
+            if not part:
+                raise ValueError("AIR JSON target shortened during read")
+            chunks.append(part)
+            remaining -= len(part)
+        if (
+            _collection_activity_file_identity(os.fstat(descriptor)) != target_identity
+            or _collection_activity_file_identity(target.lstat()) != target_identity
+            or _collection_activity_file_identity(inventory.lstat())
+            != _collection_activity_file_identity(inventory_metadata)
+            or _collection_activity_file_identity(selected.lstat())
+            != _collection_activity_file_identity(source_metadata)
+            or _collection_activity_link_identity(active) != active_binding
+            or _collection_activity_link_identity(source_link) != source_binding
+            or _collection_activity_link_identity(link) != link_binding
+            or any(
+                _collection_activity_file_identity(directory.lstat()) != identity
+                for directory, identity in directory_metadata.items()
+            )
+            or _collection_activity_file_identity(os.fstat(directory_fd))
+            != directory_metadata[target_parent]
+        ):
+            raise ValueError("AIR JSON publication changed during snapshot")
+        return b"".join(chunks)
+    except OSError as exc:
+        raise ValueError(f"AIR JSON publication is unavailable: {exc}") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if directory_fd >= 0:
+            os.close(directory_fd)
+
+
 def _collection_snapshot_runtime(slot: str, bindings: dict) -> dict:
     """Freeze dynamic resolver inputs and derived rows before cron planning."""
     source_inventory = Path(bindings["input_inventory"])
@@ -2621,10 +2733,10 @@ def _collection_snapshot_runtime(slot: str, bindings: dict) -> dict:
                 "runtime_input_hashes": {},
                 "v2_unavailable": "resolver_unavailable"}
 
-    def freeze(source: Path, suffix: str) -> Path:
-        if source.is_symlink():
+    def freeze(source: Path, suffix: str, *, pinned: bytes | None = None) -> Path:
+        if pinned is None and source.is_symlink():
             raise ValueError("runtime input symlink is not trusted")
-        data = source.read_bytes() if source.is_file() else b""
+        data = (source.read_bytes() if source.is_file() else b"") if pinned is None else pinned
         if len(data) > 32 * 1024 * 1024:
             raise ValueError("runtime input exceeds snapshot bound")
         target = directory / (source_inventory.stem + suffix)
@@ -2650,11 +2762,15 @@ def _collection_snapshot_runtime(slot: str, bindings: dict) -> dict:
     if slot == "ethernet/air":
         air_source = HTTP_ROOT / "ztp/config/isc-dhcp-server/p2p-air.json"
         helper = HTTP_ROOT / "ztp/dynamic_air_inventory.py"
-        if air_source.is_symlink() or helper.is_symlink():
-            raise ValueError("AIR resolver input or helper is unsafe")
+        if helper.is_symlink():
+            raise ValueError("AIR resolver helper is unsafe")
         if not air_source.is_file() or not helper.is_file():
             return unavailable()
-        frozen_air = freeze(air_source, ".air.json")
+        pinned_air = (
+            _collection_read_managed_air_json(air_source)
+            if air_source.is_symlink() else None
+        )
+        frozen_air = freeze(air_source, ".air.json", pinned=pinned_air)
         hashes["air_json"] = hashlib.sha256(frozen_air.read_bytes()).hexdigest()
         result = subprocess.run(
             [sys.executable, str(helper), "--inventory", str(source_inventory),

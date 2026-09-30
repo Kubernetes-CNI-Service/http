@@ -115,6 +115,153 @@ def v2(slot: str) -> dict:
 
 
 class CollectionCycleWorkerContractTests(unittest.TestCase):
+    @staticmethod
+    def _managed_air_fixture(root: Path):
+        """Setup's selected workbook and fixed AIR JSON publication shape."""
+        project = root / "DAY0-Prepare/site-a"
+        selected = project / "p2p/fixture.xlsx"
+        selected.parent.mkdir(parents=True)
+        selected.write_bytes(b"fixture workbook")
+        (project / "p2p.xlsx").symlink_to("p2p/fixture.xlsx")
+        output = project / "99-output-p2p"
+        output.mkdir()
+        target = output / "fixture-air.json"
+        payload = b'{"content":{"nodes":{}}}\n'
+        target.write_bytes(payload)
+        (project / "02-devices_config.csv").write_text(
+            "hostname,type,eth0_ip\nAIR-Leaf01,air,192.0.2.10\n",
+            encoding="utf-8",
+        )
+        monitor = root / "monitor"
+        monitor.mkdir()
+        active = monitor / "02-devices_config.csv"
+        active.symlink_to(os.path.relpath(
+            project / "02-devices_config.csv", monitor,
+        ))
+        air_link = root / "ztp/config/isc-dhcp-server/p2p-air.json"
+        air_link.parent.mkdir(parents=True)
+        air_link.symlink_to(os.path.relpath(target, air_link.parent))
+        return project, selected, target, air_link, payload
+
+    def test_managed_air_json_link_is_frozen_under_active_project_and_bound(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _project, _selected, target, air_link, payload = (
+                self._managed_air_fixture(root)
+            )
+            inventory = root / "inputs/ethernet-air.csv"
+            inventory.parent.mkdir()
+            inventory.write_text(
+                "hostname,type,eth0_ip\nAIR-Leaf01,air,192.0.2.10\n",
+                encoding="utf-8",
+            )
+            lease = root / "dhcpd.leases"
+            lease.write_bytes(b"")
+            helper = root / "ztp/dynamic_air_inventory.py"
+            helper.write_text("# fixture resolver\n", encoding="utf-8")
+            with mock.patch.object(WORKER, "HTTP_ROOT", root), mock.patch.dict(
+                os.environ, {"DHCP_LEASES_FILE": str(lease)}, clear=False,
+            ), mock.patch.object(
+                WORKER.subprocess, "run",
+                return_value=mock.Mock(returncode=0, stdout=""),
+            ):
+                snapshot = WORKER._collection_snapshot_runtime(
+                    "ethernet/air", {"input_inventory": str(inventory)}
+                )
+            self.assertEqual([], snapshot["air_dynamic_rows"])
+            self.assertEqual(
+                hashlib.sha256(payload).hexdigest(),
+                snapshot["runtime_input_hashes"]["air_json"],
+            )
+            self.assertEqual(payload, inventory.with_suffix(".air.json").read_bytes())
+            self.assertEqual(payload, target.read_bytes())
+            self.assertTrue(air_link.is_symlink())
+
+    def test_managed_air_json_rejects_wrong_target_detours_and_unsafe_members(self):
+        for mutation in (
+            "different_project", "equivalent_detour", "active_other_project",
+            "active_detour", "source_detour", "wrong_stem",
+            "target_symlink", "output_parent_symlink", "oversize",
+        ):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                project, selected, target, air_link, _payload = (
+                    self._managed_air_fixture(root)
+                )
+                if mutation == "different_project":
+                    other = root / "DAY0-Prepare/site-b/99-output-p2p/fixture-air.json"
+                    other.parent.mkdir(parents=True)
+                    other.write_bytes(b"{}\n")
+                    air_link.unlink()
+                    air_link.symlink_to(os.path.relpath(other, air_link.parent))
+                elif mutation == "equivalent_detour":
+                    air_link.unlink()
+                    air_link.symlink_to(
+                        "../../../DAY0-Prepare/site-a/99-output-p2p/../"
+                        "99-output-p2p/fixture-air.json"
+                    )
+                elif mutation == "active_other_project":
+                    other = root / "DAY0-Prepare/site-b/02-devices_config.csv"
+                    other.parent.mkdir(parents=True)
+                    other.write_text("hostname,type\nother,air\n", encoding="utf-8")
+                    active = root / "monitor/02-devices_config.csv"
+                    active.unlink()
+                    active.symlink_to(os.path.relpath(other, active.parent))
+                elif mutation == "active_detour":
+                    active = root / "monitor/02-devices_config.csv"
+                    active.unlink()
+                    active.symlink_to(
+                        "../DAY0-Prepare/site-a/../site-a/02-devices_config.csv"
+                    )
+                elif mutation == "source_detour":
+                    source_link = project / "p2p.xlsx"
+                    source_link.unlink()
+                    source_link.symlink_to("p2p/../p2p/fixture.xlsx")
+                elif mutation == "wrong_stem":
+                    (project / "p2p/other.xlsx").write_bytes(b"other workbook")
+                    (project / "p2p.xlsx").unlink()
+                    (project / "p2p.xlsx").symlink_to("p2p/other.xlsx")
+                elif mutation == "target_symlink":
+                    target.unlink()
+                    outside = root / "outside.json"
+                    outside.write_bytes(b"{}\n")
+                    target.symlink_to(outside)
+                elif mutation == "output_parent_symlink":
+                    output = project / "99-output-p2p"
+                    output.rename(project / "other-output")
+                    output.symlink_to("other-output", target_is_directory=True)
+                elif mutation == "oversize":
+                    with target.open("r+b") as stream:
+                        stream.truncate(32 * 1024 * 1024 + 1)
+                with mock.patch.object(WORKER, "HTTP_ROOT", root):
+                    with self.assertRaises(ValueError):
+                        WORKER._collection_read_managed_air_json(air_link)
+
+    def test_managed_air_json_rejects_link_swap_during_bounded_read(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _project, _selected, _target, air_link, _payload = (
+                self._managed_air_fixture(root)
+            )
+            original_read = os.read
+            swapped = False
+
+            def swap_after_read(descriptor, size):
+                nonlocal swapped
+                data = original_read(descriptor, size)
+                if data and not swapped:
+                    swapped = True
+                    air_link.unlink()
+                    air_link.symlink_to(root / "outside.json")
+                return data
+
+            with mock.patch.object(WORKER, "HTTP_ROOT", root), mock.patch.object(
+                WORKER.os, "read", side_effect=swap_after_read,
+            ):
+                with self.assertRaises(ValueError):
+                    WORKER._collection_read_managed_air_json(air_link)
+            self.assertTrue(swapped)
+
     def test_run_interruptible_wakes_when_child_exits_without_fixed_poll_sleep(self):
         """An already-finished collector must not pay the 200 ms poll interval."""
         process = mock.Mock()

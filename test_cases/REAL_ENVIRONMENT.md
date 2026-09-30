@@ -1433,6 +1433,15 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   原子持久化 provenance。切换地址实际 holder 后，较新的精确事后证据必须推翻旧绑定；注入 hostname
   与 MAC 分属两行、零匹配、多匹配、SSH 失败和第三方来源时，均须显式显示失败且不得把结果写入他行。
   修改无关清单行须保留仍成立绑定；删除、改 MAC 或改地址须逐行丢弃冲突绑定，mtime-only 变化不得失效。
+- AIR 单环境复用地址场景仍为 **OPEN / NOT RUN**：只对 AIR 行展示及完整采集，但共享地址身份候选
+  必须保留完整 AIR/Production 清单；AIR eth0 不通、同网段 VLAN/SVI 可通时，每个共享地址至多
+  一次当前轮次轻量 SSH 身份探测，只有远端 hostname 与清单 eth0 MAC 同时唯一匹配 AIR 行才可
+  把 VLAN/SVI 地址标为可采集。若匹配 scope 外 Production、身份冲突、探测失败或 AIR 行禁用采集，
+  AIR 地址保持不合格且 Production 行不进入 AIR 报告。保存只读设备 eth0/VLAN 地址与接口 MAC、
+  当前轮次私有探测状态、report.json 地址级准入、页面颜色及前后只读身份快照；不得因 ping/SSH
+  连接本身就判定归属。跨环境额外身份探测每轮最多 32 个地址；预算延后的地址仍不合格，旧精确
+  归属只保留为下轮重验提示，不得作为本轮放行证据。只在隔离副本或 owner 授权窗口执行；不改 live
+  清单、设备或管理服务器路由。
 - 证据、清理与风险：仅保存脱敏的 source/source_kind、输入与 sidecar 摘要、观测时间、地址代号、匹配
   行代号、探测次数与失败类别，不保存客户地址、hostname、MAC、设备输出或凭据正文。结束后停止隔离
   monitor，核对无遗留 SSH/collector 进程，删除本项隔离 sidecar 并恢复 VM/交换机快照。错误归属会造成

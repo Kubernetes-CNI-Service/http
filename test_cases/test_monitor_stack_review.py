@@ -2044,6 +2044,94 @@ class ControlPlaneTests(unittest.TestCase):
                     "\n".join(lines[index:index + 7]),
                 )
 
+    def test_switch_post_failures_explain_unknown_outcome_without_replaying_actions(self):
+        """A broken HTTP response cannot establish whether a control POST committed."""
+        source = (ROOT / "monitor/generate-monitor-html.py").read_text(
+            encoding="utf-8"
+        )
+        actions = (
+            "requestSwitchCollection",
+            "requestYamlBackup",
+            "requestContinuousCollectionStart",
+            "requestContinuousBackupStart",
+            "toggleContinuousCollection",
+            "toggleContinuousBackup",
+        )
+        for action in actions:
+            with self.subTest(action=action):
+                section = source.split(f"async function {action}(", 1)[1]
+                section = section.split("\n}}\n", 1)[0]
+                self.assertIn("fetch(SWITCH_COLLECTION_URL", section)
+                failure = section.rsplit("}} catch (error) {{", 1)[1]
+                self.assertIn("formatControlError(error)", failure)
+                self.assertNotIn("fetch(SWITCH_COLLECTION_URL", failure)
+
+    def test_switch_control_tunnel_post_is_a_json_denial_before_any_action(self):
+        """A localhost SSH -L URL is not the service-IP authority for POST."""
+        endpoint = self.switch_cgi
+        environment = {
+            "REQUEST_METHOD": "POST",
+            "CONTROL_REQUIRE_AUTH": "1",
+            "AUTH_TYPE": "Basic",
+            "REMOTE_USER": "nvis",
+            "PATH_INFO": "",
+            "SCRIPT_NAME": "/monitor/control/switch-collection",
+            "HTTP_X_REQUESTED_WITH": "SwitchCollectionControl",
+            "SERVER_ADDR": "192.0.2.40",
+            "SERVER_PORT": "80",
+            "REQUEST_SCHEME": "http",
+            "HTTPS": "off",
+            "HTTP_HOST": "127.0.0.1:8080",
+            "HTTP_ORIGIN": "http://127.0.0.1:8080",
+            "HTTP_SEC_FETCH_SITE": "same-origin",
+        }
+        for action in (
+            "collect", "yaml_backup", "continuous_collection_start",
+            "continuous_collection_stop", "continuous_backup_start",
+            "continuous_backup_stop",
+        ):
+            with self.subTest(action=action), mock.patch.dict(
+                os.environ, environment, clear=True
+            ), mock.patch.object(
+                endpoint, "respond"
+            ) as respond, mock.patch.object(
+                endpoint, "process_state",
+                side_effect=AssertionError("state read before authority guard"),
+            ), mock.patch.object(
+                sys, "stdin", io.StringIO(f"action={action}"),
+            ) as input_stream:
+                endpoint.main()
+                self.assertEqual(0, input_stream.tell())
+                respond.assert_called_once_with(
+                    {"error": "invalid Host header"}, "403 Forbidden"
+                )
+
+    def test_switch_control_tunnel_denial_has_complete_json_framing(self):
+        """The CGI's own 403 writer declares the exact UTF-8 body length."""
+        class CapturedOutput:
+            def __init__(self):
+                self.headers = io.StringIO()
+                self.buffer = io.BytesIO()
+
+            def write(self, value):
+                return self.headers.write(value)
+
+            def flush(self):
+                return None
+
+        output = CapturedOutput()
+        with mock.patch.object(sys, "stdout", output):
+            self.switch_cgi.respond(
+                {"error": "invalid Host header"}, "403 Forbidden"
+            )
+        headers = output.headers.getvalue()
+        body = output.buffer.getvalue()
+        self.assertIn("Status: 403 Forbidden\r\n", headers)
+        self.assertIn("Content-Type: application/json; charset=utf-8\r\n", headers)
+        self.assertIn(f"Content-Length: {len(body)}\r\n", headers)
+        self.assertTrue(headers.endswith("\r\n\r\n"))
+        self.assertEqual({"error": "invalid Host header"}, json.loads(body))
+
     def test_ztp_control_auth_status_failure_precedes_state_and_actions(self):
         environment = {
             "REQUEST_METHOD": "POST",
@@ -3870,11 +3958,34 @@ print('{{"factory_records_active":true,"valid":true}}')
         self.assertNotIn("停止信息收集", source)
 
         self.assertEqual(4, source.count('class="monitor-control-item"'))
-        for explanation in (
-            "单次执行；开始后不可中断",
-            "周期执行；停止只取消后续轮次",
+        toolbar = source.split('<div id="eth-toolbar">', 1)[1].split(
+            '    {auto_refresh_control(\'eth\')}', 1,
+        )[0]
+        button_boxes = toolbar.split(
+            '<span class="ztp-monitor-control">', 1,
+        )[1]
+        button_boxes = re.split(r'^    </span>$', button_boxes, maxsplit=1, flags=re.M)[0]
+        self.assertEqual(4, button_boxes.count('class="monitor-control-item"'))
+        self.assertNotIn('monitor-control-help', button_boxes)
+        for state_id in (
+            'switch-collect-state', 'continuous-collection-state',
+            'yaml-backup-state', 'continuous-backup-state',
         ):
-            self.assertIn(explanation, source)
+            with self.subTest(state_id=state_id):
+                self.assertIn(f'id="{state_id}"', button_boxes)
+        for redundant_text in (
+            '单次执行；开始后不可中断',
+            '周期执行；停止只取消后续轮次',
+        ):
+            self.assertNotIn(redundant_text, source)
+        self.assertIn('id="switch-collect-state" class="ztp-monitor-state" aria-live="polite">未知</span>', button_boxes)
+        self.assertIn('id="yaml-backup-state" class="ztp-monitor-state" aria-live="polite">备份：未知</span>', button_boxes)
+        for status_text in (
+            '可手工采集', '可手工备份',
+            '持续收集：未启用', '持续备份：未启用',
+            '上次失败：${{detail}}',
+        ):
+            self.assertIn(status_text, source)
         self.assertIn("停止后续持续收集", source)
         self.assertIn("停止后续持续备份", source)
         self.assertEqual(

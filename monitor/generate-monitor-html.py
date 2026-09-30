@@ -5166,7 +5166,6 @@ tr.grp-hidden {{ display: none; }}
   gap:3px; padding:5px 7px; border:1px solid #d7dde5; border-radius:5px;
   background:#f8fafc; }}
 .monitor-control-actions {{ display:flex; align-items:center; gap:6px; min-height:30px; }}
-.monitor-control-help {{ color:#667085; font-size:10px; line-height:1.25; white-space:nowrap; }}
 .monitor-control-item .ztp-monitor-state {{ max-width:260px; white-space:normal; }}
 .ztp-monitor-control button {{ border:1px solid #8290a3; border-radius:4px; padding:6px 10px;
   background:#fff; color:#26364a; cursor:pointer; font-weight:600; }}
@@ -5298,7 +5297,6 @@ tr.grp-hidden {{ display: none; }}
         <span class="monitor-control-actions">
           <button id="switch-collect-button" type="button" onclick="requestSwitchCollection()" disabled>信息收集</button>
         </span>
-        <small class="monitor-control-help">单次执行；开始后不可中断</small>
         <span id="switch-collect-state" class="ztp-monitor-state" aria-live="polite">未知</span>
       </span>
       <span class="monitor-control-item">
@@ -5308,14 +5306,12 @@ tr.grp-hidden {{ display: none; }}
           </label>
           <button id="continuous-collection-button" type="button" onclick="toggleContinuousCollection()" disabled>持续收集</button>
         </span>
-        <small class="monitor-control-help">周期执行；停止只取消后续轮次</small>
         <span id="continuous-collection-state" class="ztp-monitor-state" aria-live="polite">持续收集：未知</span>
       </span>
       <span class="monitor-control-item">
         <span class="monitor-control-actions">
           <button id="yaml-backup-button" type="button" onclick="openYamlBackupDialog('manual')" disabled>配置备份</button>
         </span>
-        <small class="monitor-control-help">单次执行；开始后不可中断</small>
         <span id="yaml-backup-state" class="ztp-monitor-state" aria-live="polite">备份：未知</span>
       </span>
       <span class="monitor-control-item">
@@ -5325,7 +5321,6 @@ tr.grp-hidden {{ display: none; }}
           </label>
           <button id="continuous-backup-button" type="button" onclick="toggleContinuousBackup()" disabled>持续备份</button>
         </span>
-        <small class="monitor-control-help">周期执行；停止只取消后续轮次</small>
         <span id="continuous-backup-state" class="ztp-monitor-state" aria-live="polite">持续备份：未知</span>
       </span>
     </span>
@@ -5567,6 +5562,22 @@ let autoRefreshDeadline = 0;
 const ZTP_CONTROL_URL = '/monitor/control/ztp-monitor';
 const SWITCH_COLLECTION_URL = '/monitor/control/switch-collection';
 const MANUAL_ZTP_URL = '/monitor/control/manual-ztp';
+function formatControlError(error) {{
+  const detail = String(error?.message || error);
+  const hostname = String(window.location.hostname || '').toLowerCase();
+  const transportFailed = error instanceof TypeError;
+  const originDenied = /invalid Host header|same-origin POST is required|cross-site control request rejected/.test(detail);
+  const messages = [detail];
+  if (transportFailed) messages.push(
+    'HTTP 响应未完整到达，提交结果未知；先查看控制状态，确认没有进行中的请求后再决定是否重试。'
+  );
+  if ((transportFailed || originDenied)
+      && ['127.0.0.1', 'localhost', '[::1]'].includes(hostname)) messages.push(
+    '当前页面使用本机转发地址；控制接口要求管理服务器服务 IPv4 的原始 Host/Origin。'
+    + 'SSH -L 的 127.0.0.1 地址会被拒绝；请从可达该服务 IPv4 的浏览器或可信 SOCKS5 代理打开页面。'
+  );
+  return messages.join(' ');
+}}
 const MANUAL_ZTP_INTENTS_KEY = 'monitor.manualZtpIntents.v1:'
   + {json.dumps(f"{ENVIRONMENT_SCOPE}|{ztp_status.get('project', '')}")};
 let ztpMonitorState = 'unknown';
@@ -5931,7 +5942,7 @@ async function toggleZtpMonitor() {{
     if (!response.ok) throw new Error(payload.error || `HTTP ${{response.status}}`);
     renderZtpMonitorControl(payload);
   }} catch (error) {{
-    window.alert(`ZTP 监控控制失败：${{error.message || error}}`);
+    window.alert(`ZTP 监控控制结果：${{formatControlError(error)}}`);
     await refreshZtpMonitorControl();
   }}
 }}
@@ -5959,7 +5970,7 @@ async function requestSwitchCollection() {{
     renderSwitchCollectionControl(payload);
     window.setTimeout(pollSwitchCollection, 1000);
   }} catch (error) {{
-    window.alert(`信息收集失败：${{error.message || error}}`);
+    window.alert(`信息收集请求结果：${{formatControlError(error)}}`);
     await refreshSwitchCollectionControl();
   }}
 }}
@@ -6103,7 +6114,7 @@ async function requestYamlBackup(password) {{
     renderYamlBackupControl(payload);
     window.setTimeout(pollYamlBackup, 1000);
   }} catch (error) {{
-    window.alert(`配置备份失败：${{error.message || error}}`);
+    window.alert(`配置备份请求结果：${{formatControlError(error)}}`);
     await refreshYamlBackupControl();
   }}
 }}
@@ -6298,7 +6309,7 @@ async function requestContinuousCollectionStart() {{
     renderContinuousCollectionControl(payload);
     window.setTimeout(pollContinuousCollection, 1000);
   }} catch (error) {{
-    window.alert(`持续收集启动失败：${{error.message || error}}`);
+    window.alert(`持续收集启动请求结果：${{formatControlError(error)}}`);
     await refreshContinuousCollectionControl();
   }}
 }}
@@ -6324,7 +6335,7 @@ async function requestContinuousBackupStart(password) {{
     renderContinuousBackupControl(payload);
     window.setTimeout(pollContinuousBackup, 1000);
   }} catch (error) {{
-    window.alert(`持续备份启动失败：${{error.message || error}}`);
+    window.alert(`持续备份启动请求结果：${{formatControlError(error)}}`);
     await refreshContinuousBackupControl();
   }}
 }}
@@ -6349,7 +6360,7 @@ async function toggleContinuousCollection() {{
     renderContinuousCollectionControl(payload);
     window.setTimeout(pollContinuousCollection, 1000);
   }} catch (error) {{
-    window.alert(`持续收集停止失败：${{error.message || error}}`);
+    window.alert(`持续收集停止请求结果：${{formatControlError(error)}}`);
   }}
 }}
 
@@ -6403,7 +6414,7 @@ async function toggleContinuousBackup() {{
     renderContinuousBackupControl(payload);
     window.setTimeout(pollContinuousBackup, 1000);
   }} catch (error) {{
-    window.alert(`持续备份停止失败：${{error.message || error}}`);
+    window.alert(`持续备份停止请求结果：${{formatControlError(error)}}`);
   }}
 }}
 
@@ -6864,7 +6875,7 @@ async function requestTimeSync(button) {{
     renderManualZtpControl(payload);
     scheduleManualZtpPoll(1000);
   }} catch (error) {{
-    window.alert(`时间同步提交失败：${{error.message || error}}`);
+    window.alert(`时间同步提交结果：${{formatControlError(error)}}`);
     await refreshManualZtpControl();
   }}
 }}
@@ -6946,7 +6957,7 @@ async function confirmManualPreview(button, suppliedDevice = null, force = false
       scheduleManualZtpPoll(500);
     }} catch (error) {{
       manualPreviewPromptKeys.delete(promptKey);
-      window.alert(`取消预检失败：${{error.message || error}}`);
+      window.alert(`取消预检提交结果：${{formatControlError(error)}}`);
       await refreshManualZtpControl();
     }}
     return;
@@ -6982,7 +6993,7 @@ async function confirmManualPreview(button, suppliedDevice = null, force = false
     scheduleManualZtpPoll(1000);
   }} catch (error) {{
     manualPreviewPromptKeys.delete(promptKey);
-    window.alert(`确认提交失败：${{error.message || error}}`);
+    window.alert(`确认提交结果：${{formatControlError(error)}}`);
     await refreshManualZtpControl();
   }}
 }}
@@ -7038,7 +7049,7 @@ async function requestManualOperation(button, action) {{
     renderManualZtpControl(payload);
     scheduleManualZtpPoll(1000);
   }} catch (error) {{
-    window.alert(`${{operationLabel}}预检提交失败：${{error.message || error}}`);
+    window.alert(`${{operationLabel}}预检提交结果：${{formatControlError(error)}}`);
     await refreshManualZtpControl();
   }}
 }}

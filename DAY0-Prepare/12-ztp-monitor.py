@@ -127,6 +127,10 @@ COLLECTION_ATTRIBUTION_RELATIONSHIPS = frozenset({
     "unknown", "local", "external", "mixed",
 })
 MAX_COLLECTION_ATTRIBUTION_BYTES = 4 * 1024 * 1024
+# The current AIR inventory has 13 alternate shared addresses.  Leave room
+# for growth, but never let a single scoped monitor cycle fan out without a
+# bound to hundreds of Production/AIR address aliases.
+MAX_CROSS_SCOPE_ATTRIBUTION_PROBES = 32
 
 RUNTIME_REPUBLISH_GUIDANCE = (
     "若修复会更新项目清单、配置或 release 输入，则属于 source write："
@@ -2176,14 +2180,84 @@ def _match_shared_address_observation(
 
 def resolve_shared_address_attributions(
     devices: list[dict[str, Any]], selected: list[dict[str, Any]], probe: Any,
+    *, identity_devices: Optional[list[dict[str, Any]]] = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, dict[str, Any]]]:
-    """Probe each unresolved shared address once and bind only an exact row."""
+    """Probe shared addresses against all identity rows, admitting only scope rows."""
+    def address_verdict(device: dict[str, Any], address: str) -> Optional[dict[str, Any]]:
+        admission = device.get("collection_admission")
+        if not isinstance(admission, dict):
+            return None
+        return next((
+            verdict for verdict in admission.get("addresses", [])
+            if isinstance(verdict, dict) and verdict.get("address") == address
+        ), None)
+
+    scoped_ids = {id(device) for device in devices}
     selected_ids = {id(device) for device in selected}
-    grouped = _devices_by_ip(devices)
+    grouped = _devices_by_ip(
+        identity_devices if identity_devices is not None else devices
+    )
     records: list[dict[str, Any]] = []
     attempts: dict[str, dict[str, Any]] = {}
+    pending: list[tuple[str, list[dict[str, Any]], bool]] = []
     for address, candidates in sorted(grouped.items()):
-        if len(candidates) < 2 or any(id(candidate) in selected_ids for candidate in candidates):
+        scoped_candidates = [
+            candidate for candidate in candidates if id(candidate) in scoped_ids
+        ]
+        crosses_scope = len(scoped_candidates) != len(candidates)
+        prior_binding_needs_verification = any(
+            str(candidate.get("ip") or "") != address
+            and
+            (
+                (address_verdict(candidate, address) or {}).get("paths") or {}
+            ).get("posthoc_identity", {}).get("status") == "verification_required"
+            for candidate in scoped_candidates
+        )
+        if (
+            len(candidates) < 2
+            # An AIR-only pass must not turn every Production/AIR inventory
+            # overlap into an SSH sweep.  An already admitted device may have
+            # an unresolved second (for example VLAN/SVI) address that needs
+            # current identity evidence; a previously verified row may also
+            # request a fresh proof, but never grants eligibility by itself.
+            or (crosses_scope and not any(
+                id(candidate) in selected_ids for candidate in scoped_candidates
+            ) and not prior_binding_needs_verification)
+            or not any(
+                candidate.get("ssh_collect_enabled") is not False
+                and address_verdict(candidate, address) is not None
+                for candidate in scoped_candidates
+            )
+            or any(
+                (address_verdict(candidate, address) or {}).get("eligible") is True
+                for candidate in scoped_candidates
+            )
+        ):
+            continue
+        pending.append((address, candidates, crosses_scope))
+
+    cross_pending = [address for address, _, cross in pending if cross]
+    cross_allowed = set(cross_pending)
+    if len(cross_pending) > MAX_CROSS_SCOPE_ATTRIBUTION_PROBES:
+        # Rotate a fixed-size contiguous window once a minute.  This bounds
+        # each cycle and eventually visits every pending address without
+        # privileging alphabetically early devices forever.
+        first = (
+            int(now_local().timestamp() // 60)
+            * MAX_CROSS_SCOPE_ATTRIBUTION_PROBES
+        ) % len(cross_pending)
+        cross_allowed = {
+            cross_pending[(first + index) % len(cross_pending)]
+            for index in range(MAX_CROSS_SCOPE_ATTRIBUTION_PROBES)
+        }
+    for address, candidates, crosses_scope in pending:
+        if crosses_scope and address not in cross_allowed:
+            attempts[address] = {
+                "status": "probe_budget_deferred",
+                "source": "posthoc_identity_budget",
+                "source_kind": "local_observation",
+                "observation_time": now_local().isoformat(timespec="seconds"),
+            }
             continue
         raw_observation = probe(address, candidates)
         if not isinstance(raw_observation, dict):
@@ -2202,8 +2276,19 @@ def resolve_shared_address_attributions(
             _match_shared_address_observation(address, candidates, raw_observation)
             if probe_status == "success" else None
         )
-        terminal_status = "matched" if matched is not None else (
-            "identity_mismatch" if probe_status == "success" else probe_status
+        matched_authorized = bool(
+            matched is not None
+            and id(matched) in scoped_ids
+            and matched.get("ssh_collect_enabled") is not False
+            and address_verdict(matched, address) is not None
+        )
+        terminal_status = (
+            "matched" if matched_authorized
+            else "out_of_scope_identity" if matched is not None
+            and id(matched) not in scoped_ids
+            else "not_admitted" if matched is not None
+            else "identity_mismatch" if probe_status == "success"
+            else probe_status
         )
         attempts[address] = {
             "status": terminal_status,
@@ -2212,7 +2297,7 @@ def resolve_shared_address_attributions(
             "observation_time": observation_time,
         }
         record = None
-        if matched is not None:
+        if matched_authorized:
             record = validate_collection_attribution_record({
                 "schema_version": COLLECTION_ATTRIBUTION_STATE_SCHEMA,
                 "address": address,
@@ -2230,6 +2315,8 @@ def resolve_shared_address_attributions(
                 selected.append(matched)
                 selected_ids.add(id(matched))
         for candidate in candidates:
+            if candidate.get("ssh_collect_enabled") is False:
+                continue
             admission = candidate.get("collection_admission")
             if not isinstance(admission, dict):
                 continue
@@ -2258,6 +2345,41 @@ def resolve_shared_address_attributions(
                     ]
                     admission["eligible"] = True
     return selected, records, attempts
+
+
+def current_collection_attributions(
+    devices: list[dict[str, Any]], prior_records: list[dict[str, Any]],
+    new_records: list[dict[str, Any]], attempts: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Retain only current proofs and budget-deferred prior bindings.
+
+    A deferred prior binding is a retry hint, never admission evidence.  Keep
+    it so a later bounded cycle can re-probe the address; any actual failed or
+    conflicting probe discards the old binding.
+    """
+    current_addresses = {
+        str(verdict.get("address") or "")
+        for device in devices
+        for verdict in (
+            device.get("collection_admission", {}).get("addresses", [])
+            if isinstance(device.get("collection_admission"), dict) else []
+        )
+        if isinstance(verdict, dict)
+        and isinstance(verdict.get("paths"), dict)
+        and verdict["paths"].get("posthoc_identity", {}).get("status")
+        == "matched"
+    }
+    deferred_addresses = {
+        address for address, result in attempts.items()
+        if result.get("status") == "probe_budget_deferred"
+    }
+    by_address = {
+        record["address"]: record for record in prior_records
+        if record["address"] in current_addresses | deferred_addresses
+    }
+    for record in new_records:
+        by_address[record["address"]] = record
+    return list(by_address.values())
 
 
 def correlate_server_events(devices: list[dict[str, Any]], dhcp_events: list[dict[str, str]],
@@ -4416,7 +4538,7 @@ def monitor_once(args: argparse.Namespace, project: Path) -> Path:
             http_identity_claims=http_identity_claims,
             attribution_records=attribution_records,
         )
-        collection_devices, new_attributions, _attribution_attempts = (
+        collection_devices, new_attributions, attribution_attempts = (
             resolve_shared_address_attributions(
                 devices,
                 collection_devices,
@@ -4424,30 +4546,15 @@ def monitor_once(args: argparse.Namespace, project: Path) -> Path:
                     address, candidates, args.ssh_timeout,
                     args.identity, args.known_hosts,
                 ),
+                identity_devices=identity_devices,
             )
         )
-        active_attribution_addresses = {
-            str(verdict.get("address") or "")
-            for device in devices
-            for verdict in (
-                device.get("collection_admission", {}).get("addresses", [])
-                if isinstance(device.get("collection_admission"), dict) else []
-            )
-            if isinstance(verdict, dict)
-            and isinstance(verdict.get("paths"), dict)
-            and verdict["paths"].get("posthoc_identity", {}).get("status")
-            == "matched"
-        }
-        attribution_by_address = {
-            record["address"]: record for record in attribution_records
-            if record["address"] in active_attribution_addresses
-        }
-        for record in new_attributions:
-            # Exact, newer post-hoc verification outranks older ownership.
-            attribution_by_address[record["address"]] = record
         persist_collection_attribution(
             attribution_state_path, attribution_digests,
-            list(attribution_by_address.values()),
+            current_collection_attributions(
+                devices, attribution_records, new_attributions,
+                attribution_attempts,
+            ),
         )
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
             futures = {

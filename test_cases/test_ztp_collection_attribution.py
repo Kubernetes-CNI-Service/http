@@ -97,6 +97,312 @@ class CollectionAttributionDirectTests(unittest.TestCase):
         self.assertFalse(prod["collection_admission"]["eligible"])
         self.assertTrue(air["collection_admission"]["eligible"])
 
+    def test_air_scope_probes_full_inventory_but_only_admits_air_identity(self):
+        address = "192.0.2.110"
+        primary = "192.0.2.109"
+        prod = device("prod-leaf-10", "0200000000a1", primary)
+        air = device("air-leaf-10", "0200000000b1", primary)
+        for row in (prod, air):
+            row["ssh_ips"].append(address)
+            row["candidate_identity"][address] = ("eth0", row["mac_plain"])
+        selected = self.monitor.devices_for_switch_collection(
+            [air], {primary: air}, identity_devices=[prod, air],
+        )
+        self.assertEqual([air], selected)
+        calls = []
+
+        def probe(candidate_address, candidates):
+            calls.append((candidate_address, tuple(row["hostname"] for row in candidates)))
+            return {
+                "status": "success", "source": "ssh-posthoc",
+                "source_kind": "device_reported", "address": candidate_address,
+                "observation_time": "2026-09-20T08:00:00+00:00",
+                "observed_identity": {
+                    "hostname": "air-leaf-10.example.test",
+                    "interface_macs": {"eth0": "02:00:00:00:00:b1"},
+                },
+            }
+
+        selected, records, attempts = self.monitor.resolve_shared_address_attributions(
+            [air], selected, probe, identity_devices=[prod, air],
+        )
+        self.assertEqual([(address, ("prod-leaf-10", "air-leaf-10"))], calls)
+        self.assertEqual([air], selected)
+        self.assertEqual(1, len(records))
+        self.assertEqual("air-leaf-10", records[0]["input_row_identity"]["hostname"])
+        self.assertEqual("matched", attempts[address]["status"])
+        verdict = next(
+            item for item in air["collection_admission"]["addresses"]
+            if item["address"] == address
+        )
+        self.assertTrue(verdict["eligible"])
+        self.assertEqual("matched", verdict["paths"]["posthoc_identity"]["status"])
+        self.assertNotIn("collection_admission", prod)
+
+    def test_air_scope_never_selects_prod_or_unverified_shared_address(self):
+        address = "192.0.2.111"
+        prod = device("prod-leaf-11", "0200000000a2", address)
+        air = device("air-leaf-11", "0200000000b2", "192.0.2.112")
+        air["ssh_ips"].append(address)
+        air["candidate_identity"][address] = ("eth0", air["mac_plain"])
+        cases = (
+            ("prod", "prod-leaf-11", "02:00:00:00:00:a2", "out_of_scope_identity"),
+            ("wrong_mac", "air-leaf-11", "02:00:00:00:00:a2", "identity_mismatch"),
+            ("probe_failed", "", "", "probe_failed"),
+        )
+        for label, hostname, mac, expected_attempt in cases:
+            with self.subTest(label=label):
+                selected = self.monitor.devices_for_switch_collection(
+                    [air], {}, identity_devices=[prod, air],
+                )
+                self.assertEqual([air], selected)
+
+                def probe(candidate_address, candidates):
+                    return {
+                        "status": "probe_failed" if label == "probe_failed" else "success",
+                        "source": "ssh-posthoc", "source_kind": "device_reported",
+                        "address": candidate_address,
+                        "observation_time": "2026-09-20T08:00:00+00:00",
+                        "observed_identity": (
+                            {"hostname": hostname, "interface_macs": {"eth0": mac}}
+                            if hostname else None
+                        ),
+                    }
+
+                selected, records, attempts = self.monitor.resolve_shared_address_attributions(
+                    [air], selected, probe, identity_devices=[prod, air],
+                )
+                self.assertEqual([air], selected)
+                self.assertEqual([], records)
+                self.assertEqual(expected_attempt, attempts[address]["status"])
+                self.assertTrue(air["collection_admission"]["eligible"])
+                verdict = next(
+                    item for item in air["collection_admission"]["addresses"]
+                    if item["address"] == address
+                )
+                self.assertFalse(verdict["eligible"])
+                self.assertNotIn("collection_admission", prod)
+
+    def test_prod_scope_never_selects_air_identity_at_shared_address(self):
+        alternate = "198.51.100.111"
+        prod = device("prod-leaf-scope", "0200000000a6", "192.0.2.117")
+        air = device("air-leaf-scope", "0200000000b6", alternate)
+        prod["ssh_ips"].append(alternate)
+        prod["candidate_identity"][alternate] = ("eth0", prod["mac_plain"])
+        selected = self.monitor.devices_for_switch_collection(
+            [prod], {}, identity_devices=[prod, air],
+        )
+        self.assertEqual([prod], selected)
+
+        def probe(address, candidates):
+            return {
+                "status": "success", "source": "ssh-posthoc",
+                "source_kind": "device_reported", "address": address,
+                "observation_time": "2026-09-30T12:05:00+00:00",
+                "observed_identity": {
+                    "hostname": air["hostname"],
+                    "interface_macs": {"eth0": air["mac_plain"]},
+                },
+            }
+
+        selected, records, attempts = self.monitor.resolve_shared_address_attributions(
+            [prod], selected, probe, identity_devices=[prod, air],
+        )
+        self.assertEqual([prod], selected)
+        self.assertEqual([], records)
+        self.assertEqual("out_of_scope_identity", attempts[alternate]["status"])
+        verdict = next(
+            item for item in prod["collection_admission"]["addresses"]
+            if item["address"] == alternate
+        )
+        self.assertFalse(verdict["eligible"])
+        self.assertNotIn("collection_admission", air)
+
+    def test_air_scope_does_not_probe_unselected_cross_environment_inventory(self):
+        rows = []
+        air_rows = []
+        for index in range(40):
+            address = f"192.0.2.{100 + index}"
+            prod = device(f"prod-{index}", f"02000001{index:04x}", address)
+            air = device(f"air-{index}", f"02000002{index:04x}", address)
+            rows.extend((prod, air))
+            air_rows.append(air)
+        selected = self.monitor.devices_for_switch_collection(
+            air_rows, {}, identity_devices=rows,
+        )
+        self.assertEqual([], selected)
+        calls = []
+
+        def probe(address, candidates):
+            calls.append(address)
+            raise AssertionError("unselected AIR inventory must not cause SSH probes")
+
+        selected, records, attempts = self.monitor.resolve_shared_address_attributions(
+            air_rows, selected, probe, identity_devices=rows,
+        )
+        self.assertEqual([], calls)
+        self.assertEqual([], selected)
+        self.assertEqual([], records)
+        self.assertEqual({}, attempts)
+
+    def test_cached_air_vlan_binding_triggers_fresh_probe_without_current_dhcp_owner(self):
+        primary = "192.0.2.115"
+        vlan_address = "192.0.2.116"
+        prod = device("prod-leaf-15", "0200000000a5", primary)
+        air = device("air-leaf-15", "0200000000b5", primary)
+        for row in (prod, air):
+            row["ssh_ips"].append(vlan_address)
+            row["candidate_identity"][vlan_address] = ("eth0", row["mac_plain"])
+        cached = record(self.monitor, air)
+        cached["address"] = vlan_address
+        selected = self.monitor.devices_for_switch_collection(
+            [air], {}, identity_devices=[prod, air],
+            attribution_records=[cached],
+        )
+        self.assertEqual([], selected)  # the cache is not current admission evidence
+        calls = []
+
+        def probe(address, candidates):
+            calls.append(address)
+            return {
+                "status": "success", "source": "ssh-posthoc",
+                "source_kind": "device_reported", "address": address,
+                "observation_time": "2026-09-30T12:05:00+00:00",
+                "observed_identity": {
+                    "hostname": air["hostname"],
+                    "interface_macs": {"eth0": air["mac_plain"]},
+                },
+            }
+
+        selected, records, attempts = self.monitor.resolve_shared_address_attributions(
+            [air], selected, probe, identity_devices=[prod, air],
+        )
+        self.assertEqual([vlan_address], calls)
+        self.assertEqual([air], selected)
+        self.assertEqual("matched", attempts[vlan_address]["status"])
+        self.assertEqual([vlan_address], [entry["address"] for entry in records])
+
+    def test_cross_scope_probe_budget_defers_unverified_addresses_fail_closed(self):
+        full = []
+        scoped = []
+        for index in range(40):
+            primary = f"192.0.2.{index + 10}"
+            alternate = f"198.51.100.{index + 10}"
+            prod = device(f"prod-budget-{index}", f"02000003{index:04x}", alternate)
+            air = device(f"air-budget-{index}", f"02000004{index:04x}", primary)
+            air["ssh_ips"].append(alternate)
+            air["candidate_identity"][alternate] = ("eth0", air["mac_plain"])
+            full.extend((prod, air))
+            scoped.append(air)
+        selected = self.monitor.devices_for_switch_collection(
+            scoped, {}, identity_devices=full,
+        )
+        self.assertEqual(scoped, selected)
+        calls = []
+
+        def probe(address, candidates):
+            calls.append(address)
+            observed = next(row for row in candidates if row["hostname"].startswith("air-"))
+            return {
+                "status": "success", "source": "ssh-posthoc",
+                "source_kind": "device_reported", "address": address,
+                "observation_time": "2026-09-30T12:05:00+00:00",
+                "observed_identity": {
+                    "hostname": observed["hostname"],
+                    "interface_macs": {"eth0": observed["mac_plain"]},
+                },
+            }
+
+        selected, records, attempts = self.monitor.resolve_shared_address_attributions(
+            scoped, selected, probe, identity_devices=full,
+        )
+        self.assertEqual(32, len(calls))
+        self.assertEqual(32, len(set(calls)))
+        self.assertEqual(scoped, selected)
+        self.assertEqual(32, len(records))
+        deferred = {
+            address for address, detail in attempts.items()
+            if detail["status"] == "probe_budget_deferred"
+        }
+        self.assertEqual(8, len(deferred))
+        for row in scoped:
+            alternate = row["ssh_ips"][1]
+            verdict = next(
+                item for item in row["collection_admission"]["addresses"]
+                if item["address"] == alternate
+            )
+            self.assertEqual(alternate not in deferred, verdict["eligible"])
+
+    def test_admitted_eth0_does_not_suppress_shared_vlan_identity_probe(self):
+        vlan_address = "192.0.2.113"
+        prod = device("prod-leaf-13", "0200000000a3", vlan_address)
+        air = device("air-leaf-13", "0200000000b3", "192.0.2.112")
+        air["ssh_ips"].append(vlan_address)
+        air["candidate_identity"][vlan_address] = ("eth0", air["mac_plain"])
+        selected = self.monitor.devices_for_switch_collection(
+            [air], {}, identity_devices=[prod, air],
+        )
+        self.assertEqual([air], selected)  # eth0 address is unique
+        before = {
+            verdict["address"]: verdict
+            for verdict in air["collection_admission"]["addresses"]
+        }
+        self.assertFalse(before[vlan_address]["eligible"])
+        calls = []
+
+        def probe(address, candidates):
+            calls.append(address)
+            return {
+                "status": "success", "source": "ssh-posthoc",
+                "source_kind": "device_reported", "address": address,
+                "observation_time": "2026-09-20T08:00:00+00:00",
+                "observed_identity": {
+                    "hostname": air["hostname"],
+                    "interface_macs": {"eth0": air["mac_plain"]},
+                },
+            }
+
+        selected, records, attempts = self.monitor.resolve_shared_address_attributions(
+            [air], selected, probe, identity_devices=[prod, air],
+        )
+        self.assertEqual([vlan_address], calls)
+        self.assertEqual([air], selected)
+        self.assertEqual("matched", attempts[vlan_address]["status"])
+        self.assertEqual([vlan_address], [row["address"] for row in records])
+        after = {
+            verdict["address"]: verdict
+            for verdict in air["collection_admission"]["addresses"]
+        }
+        self.assertTrue(after[vlan_address]["eligible"])
+
+    def test_disabled_air_row_cannot_be_admitted_by_posthoc_probe(self):
+        address = "192.0.2.114"
+        prod = device("prod-leaf-14", "0200000000a4", address)
+        air = device("air-leaf-14", "0200000000b4", address)
+        air["ssh_collect_enabled"] = False
+        selected = self.monitor.devices_for_switch_collection(
+            [air], {}, identity_devices=[prod, air],
+        )
+
+        def probe(candidate_address, candidates):
+            return {
+                "status": "success", "source": "ssh-posthoc",
+                "source_kind": "device_reported", "address": candidate_address,
+                "observation_time": "2026-09-20T08:00:00+00:00",
+                "observed_identity": {
+                    "hostname": air["hostname"],
+                    "interface_macs": {"eth0": air["mac_plain"]},
+                },
+            }
+
+        selected, records, _attempts = self.monitor.resolve_shared_address_attributions(
+            [air], selected, probe, identity_devices=[prod, air],
+        )
+        self.assertEqual([], selected)
+        self.assertEqual([], records)
+        self.assertFalse(air["collection_admission"]["eligible"])
+        self.assertFalse(air["collection_admission"]["addresses"][0]["eligible"])
+
     def test_ambiguous_or_conflicting_observation_never_selects_or_persists(self):
         address = "192.0.2.20"
         first = device("leaf-01", "020000000011", address)

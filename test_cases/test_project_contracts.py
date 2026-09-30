@@ -3966,6 +3966,76 @@ class TemplateContractTests(unittest.TestCase):
         self.assertEqual(first, same)
         self.assertNotEqual(first, second)
 
+    def test_manual_ztp_control_errors_distinguish_http_denial_from_unknown_post_result(self):
+        """All four ZTP actions share a fail-closed POST path and clear errors."""
+        html = (ROOT / "monitor/generate-monitor-html.py").read_text(encoding="utf-8")
+        self.assertIn("function formatControlError(error)", html)
+        self.assertIn("HTTP 响应未完整到达", html)
+        self.assertIn("提交结果未知", html)
+        self.assertIn("先查看控制状态", html)
+        self.assertIn("127.0.0.1", html)
+        self.assertIn("Host/Origin", html)
+        self.assertIn("管理服务器服务 IPv4", html)
+        self.assertIn("const payload = await postManualZtpControl(body);", html)
+        for request in (
+            "requestManualOperation(button, 'trigger')",
+            "requestManualOperation(button, 'reset')",
+            "requestManualOperation(button, 'renew')",
+            "requestManualOperation(button, 'replace-config')",
+        ):
+            self.assertTrue(request in html, request)
+        for prefix in (
+            "时间同步提交结果", "取消预检提交结果", "确认提交结果",
+            "预检提交结果",
+        ):
+            self.assertRegex(
+                html,
+                re.escape(prefix) + r"[^\n]*formatControlError\(error\)",
+            )
+
+    def test_manual_ztp_tunnel_origin_is_rejected_before_request_queue(self):
+        """The UI's tunnel guidance must match the CGI's authority boundary."""
+        endpoint = load_module(
+            "manual_ztp_tunnel_contract", ROOT / "monitor/manual-ztp-control.cgi",
+        )
+        environment = {
+            "REQUEST_METHOD": "POST",
+            "SERVER_ADDR": "192.0.2.40", "SERVER_PORT": "80",
+            "REQUEST_SCHEME": "http", "HTTP_HOST": "127.0.0.1:8080",
+            "HTTP_ORIGIN": "http://127.0.0.1:8080",
+            "HTTP_SEC_FETCH_SITE": "same-origin",
+            "HTTP_X_REQUESTED_WITH": "ManualZTPControl",
+            "CONTROL_REQUIRE_AUTH": "1", "AUTH_TYPE": "Basic",
+            "REMOTE_USER": "nvis", "PATH_INFO": "",
+            "SCRIPT_NAME": "/monitor/control/manual-ztp",
+        }
+        with mock.patch.dict(os.environ, environment, clear=True), \
+                mock.patch.object(endpoint, "process_state", side_effect=AssertionError("state read")), \
+                mock.patch.object(endpoint, "enqueue_request", side_effect=AssertionError("queue write")), \
+                mock.patch.object(endpoint, "respond") as respond:
+            endpoint.main()
+        respond.assert_called_once_with(
+            {"error": "invalid Host header"}, "403 Forbidden",
+        )
+        result = subprocess.run(
+            [sys.executable, "-B", str(ROOT / "monitor/manual-ztp-control.cgi")],
+            input=b"", capture_output=True, timeout=5,
+            env={
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "PYTHONPYCACHEPREFIX": "/tmp/http-test-pyc",
+                **environment, "CONTENT_LENGTH": "0",
+            },
+            check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stderr.decode(errors="replace"))
+        headers, separator, body = result.stdout.partition(b"\r\n\r\n")
+        self.assertEqual(b"\r\n\r\n", separator)
+        self.assertIn(b"Status: 403 Forbidden\r\n", headers + b"\r\n")
+        self.assertIn(
+            f"Content-Length: {len(body)}".encode("ascii"), headers,
+        )
+        self.assertEqual({"error": "invalid Host header"}, json.loads(body))
+
     def test_monitor_page_separates_ztp_start_stop_from_collection_controls(self):
         html = (ROOT / "monitor/generate-monitor-html.py").read_text(encoding="utf-8")
         ztp_cgi = (ROOT / "monitor/ztp-monitor-control.cgi").read_text(encoding="utf-8")

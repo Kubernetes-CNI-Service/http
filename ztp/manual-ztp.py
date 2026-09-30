@@ -1056,6 +1056,84 @@ def _changed_config_paths(current, expected, path=""):
     return [] if current == expected else [path or "<root>"]
 
 
+_RUNTIME_DRIFT_CATEGORIES = (
+    "acl", "bridge", "interface", "router", "service", "system", "vrf", "other",
+)
+_RUNTIME_DRIFT_REPORT_LIMIT = 100
+
+
+def _bounded_config_change_count(current, prior, limit):
+    """Count changed nodes without retaining config paths, keys, or values."""
+    if current == prior:
+        return 0
+    if isinstance(current, dict) and isinstance(prior, dict):
+        count = 0
+        for key in sorted(set(current) | set(prior), key=str):
+            if key not in current or key not in prior:
+                count += 1
+            else:
+                count += _bounded_config_change_count(
+                    current[key], prior[key], limit - count,
+                )
+            if count >= limit:
+                return limit
+        return count
+    if isinstance(current, list) and isinstance(prior, list):
+        count = 0
+        for index in range(max(len(current), len(prior))):
+            if index >= len(current) or index >= len(prior):
+                count += 1
+            else:
+                count += _bounded_config_change_count(
+                    current[index], prior[index], limit - count,
+                )
+            if count >= limit:
+                return limit
+        return count
+    return 1
+
+
+def _runtime_drift_summary(current, prior):
+    """Expose only a bounded count grouped by fixed, non-dynamic root labels."""
+    limit = _RUNTIME_DRIFT_REPORT_LIMIT
+    root_change = object()
+    grouped = {category: [] for category in _RUNTIME_DRIFT_CATEGORIES}
+    if isinstance(current, dict) and isinstance(prior, dict):
+        for key in sorted(set(current) | set(prior), key=str):
+            category = key if key in grouped else "other"
+            grouped[category].append(key)
+    else:
+        grouped["other"].append(root_change)
+    observed = 0
+    categories = {}
+    for category in _RUNTIME_DRIFT_CATEGORIES:
+        for key in grouped[category]:
+            if key is root_change:
+                changed = _bounded_config_change_count(
+                    current, prior, limit + 1 - observed,
+                )
+            elif key not in current or key not in prior:
+                changed = 1
+            else:
+                changed = _bounded_config_change_count(
+                    current[key], prior[key], limit + 1 - observed,
+                )
+            if changed:
+                visible = min(changed, limit - observed)
+                if visible:
+                    categories[category] = categories.get(category, 0) + visible
+                observed += changed
+            if observed > limit:
+                break
+        if observed > limit:
+            break
+    return {
+        "difference_count": min(observed, limit),
+        "capped": observed > limit,
+        "categories": categories,
+    }
+
+
 def _config_value(config, path):
     value = config
     for key in path:
@@ -1139,6 +1217,9 @@ def evaluate_replace_config_guard(
     result["runtime_matches_prior"] = current_runtime == prior_runtime
     if not result["runtime_matches_prior"]:
         result["reason_code"] = "runtime-drift"
+        result["runtime_drift_summary"] = _runtime_drift_summary(
+            current_runtime, prior_runtime,
+        )
         return result
 
     protected = _protected_subtree_changes(current_runtime, expected_runtime)
@@ -1374,6 +1455,16 @@ def preflight_one(
                 replace_guard.get("protected_changed_paths") or []
             )
             suffix = f" ({paths})" if paths else ""
+            drift_summary = replace_guard.get("runtime_drift_summary")
+            if drift_summary is not None:
+                count = drift_summary["difference_count"]
+                comparator = ">" if drift_summary["capped"] else "="
+                categories = ",".join(
+                    f"{category}:{amount}"
+                    for category, amount in drift_summary["categories"].items()
+                )
+                label = "类别(前100)" if drift_summary["capped"] else "类别"
+                suffix = f" [差异节点{comparator}{count}; {label}={categories}]"
             raise ManualZtpError(
                 "配置同步安全门禁拒绝执行: "
                 f"{replace_guard['reason_code']}{suffix}"

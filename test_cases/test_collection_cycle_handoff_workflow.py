@@ -1218,6 +1218,69 @@ class CollectionCycleHandoffWorkflowTests(unittest.TestCase):
         self.assertIn("AIR-FW01|192.0.2.21", traces[0]["context"]["target_plan"]["eth"])
         self.assertEqual(2, payload["result"]["outcomes"][0]["child_result"]["planned"])
 
+    def test_setup_managed_air_json_link_reaches_real_worker_and_collector(self):
+        """The setup publication is a pinned link, not an arbitrary JSON path."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.make_layout(directory)
+            (root / "ethernet/monitor/eth.csv").write_text(
+                "hostname,type,eth0_ip\nAIR-Leaf01,air,192.0.2.10\n",
+                encoding="utf-8",
+            )
+            project = root / "DAY0-Prepare/site-a"
+            selected = project / "p2p/fixture.xlsx"
+            selected.parent.mkdir(parents=True)
+            selected.write_bytes(b"fixture workbook")
+            (project / "p2p.xlsx").symlink_to("p2p/fixture.xlsx")
+            output = project / "99-output-p2p"
+            output.mkdir()
+            payload = json.dumps({"content": {"nodes": {
+                "AIR-Leaf01": {"os": "cumulus-vx-5.16.4",
+                               "management_interfaces": {"eth0": {
+                                   "mac_address": "02:00:00:00:00:10"}}},
+                "AIR-FW01": {"os": "cumulus-vx-5.16.4",
+                             "management_interfaces": {"eth0": {
+                                 "mac_address": "02:00:00:00:00:21"}}},
+            }}}).encode("utf-8")
+            target = output / "fixture-air.json"
+            target.write_bytes(payload)
+            (project / "02-devices_config.csv").write_text(
+                "hostname,type,eth0_ip\nAIR-Leaf01,air,192.0.2.10\n",
+                encoding="utf-8",
+            )
+            active = root / "monitor/02-devices_config.csv"
+            active.symlink_to(os.path.relpath(
+                project / "02-devices_config.csv", active.parent,
+            ))
+            air_link = root / "ztp/config/isc-dhcp-server/p2p-air.json"
+            air_link.unlink()
+            air_link.symlink_to(os.path.relpath(target, air_link.parent))
+            (root / "dhcpd.leases").write_text(
+                "lease 192.0.2.21 {\n  binding state active;\n"
+                "  hardware ethernet 02:00:00:00:00:21;\n  }\n",
+                encoding="utf-8",
+            )
+            (root / "tools/lldp-analyze-tool/99-output-p2p/fixture-lldpq-air.dot").write_text(
+                "digraph air_fixture {}\n", encoding="utf-8",
+            )
+
+            completed, result, traces = self.run_workflow(root, "air")
+            frozen = list((root / "monitor/status/collection-cycles").rglob(
+                "ethernet-air.air.json"
+            ))
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(result["returned"], result)
+        outcome = result["result"]["outcomes"][0]
+        self.assertEqual("ethernet/air", outcome["source_slot"])
+        self.assertEqual("accepted", outcome["outcome"], (
+            outcome, traces, completed.stderr,
+        ))
+        self.assertEqual(2, outcome["child_result"]["schema_version"], traces)
+        self.assertEqual(1, len(frozen))
+        self.assertEqual(
+            hashlib.sha256(payload).hexdigest(),
+            traces[0]["context"]["runtime_input_hashes"]["air_json"],
+        )
+
     def test_real_ib_and_nvlink_entrypoints_reject_an_empty_selected_lane(self):
         for area, inventory_name, slot in (
             ("infiniband", "ib.csv", "infiniband/prod"),

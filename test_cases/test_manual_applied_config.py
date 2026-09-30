@@ -42,6 +42,13 @@ try:
 finally:
     sys.modules.pop(MONITOR_SPEC.name, None)
 
+WORKER_SPEC = importlib.util.spec_from_file_location(
+    "manual_config_sync_worker_under_test", ROOT / "monitor/manual-ztp-worker.py",
+)
+WORKER = importlib.util.module_from_spec(WORKER_SPEC)
+assert WORKER_SPEC.loader is not None
+WORKER_SPEC.loader.exec_module(WORKER)
+
 
 MAC = "02:00:00:00:00:01"
 DEVICE = {
@@ -948,6 +955,56 @@ class ReplaceConfigGuardTests(unittest.TestCase):
         result = self.assert_refused("runtime-drift", current=drifted)
         self.assertFalse(result["runtime_matches_prior"])
 
+    def test_runtime_drift_reports_only_fixed_categories_and_bounded_counts(self):
+        secret_key = "tenant-super-secret-unique-key"
+        drifted = self.config().replace(
+            "      eth0:\n",
+            f"      {secret_key}:\n        type: swp\n      eth0:\n",
+        ).replace("hostname: leaf01", "hostname: hidden-new-name").replace(
+            "rule: accept", "rule: drop",
+        ).replace(
+            "    acl:\n", "    private-root-key:\n      private-leaf: 1\n    acl:\n",
+        )
+        result = self.assert_refused("runtime-drift", current=drifted)
+        self.assertEqual({
+            "difference_count": 4,
+            "capped": False,
+            "categories": {"acl": 1, "interface": 1, "system": 1, "other": 1},
+        }, result["runtime_drift_summary"])
+        self.assertNotIn(secret_key, json.dumps(result, ensure_ascii=False))
+        self.assertNotIn("hidden-new-name", json.dumps(result, ensure_ascii=False))
+        self.assertNotIn("drop", json.dumps(result, ensure_ascii=False))
+        self.assertNotIn("private-root-key", json.dumps(result, ensure_ascii=False))
+
+    def test_runtime_drift_summary_caps_unbounded_dynamic_map_keys(self):
+        added = "".join(
+            f"      tenant-private-{index}:\n        type: swp\n"
+            for index in range(130)
+        )
+        drifted = self.config().replace("      eth0:\n", added + "      eth0:\n")
+        result = self.assert_refused("runtime-drift", current=drifted)
+        self.assertEqual(100, result["runtime_drift_summary"]["difference_count"])
+        self.assertTrue(result["runtime_drift_summary"]["capped"])
+        self.assertEqual(
+            {"interface": 100}, result["runtime_drift_summary"]["categories"],
+        )
+        self.assertNotIn("tenant-private-", json.dumps(result, ensure_ascii=False))
+
+    def test_capped_summary_omits_unobserved_categories_instead_of_zero(self):
+        added = "".join(
+            f"      tenant-private-{index}:\n        type: swp\n"
+            for index in range(100)
+        )
+        drifted = self.config().replace(
+            "      eth0:\n", added + "      eth0:\n",
+        ).replace("hostname: leaf01", "hostname: changed")
+        result = self.assert_refused("runtime-drift", current=drifted)
+        self.assertEqual({
+            "difference_count": 100,
+            "capped": True,
+            "categories": {"interface": 100},
+        }, result["runtime_drift_summary"])
+
     def test_replace_flag_is_mutually_exclusive_with_original_operations(self):
         parser = MANUAL.parser()
         args = parser.parse_args(["leaf01", "--replace-config"])
@@ -956,6 +1013,83 @@ class ReplaceConfigGuardTests(unittest.TestCase):
             parser.parse_args([
                 "leaf01", "--replace-config", "--operation", "renew",
             ])
+
+
+class RuntimeDriftPreviewWorkflowTests(unittest.TestCase):
+    def test_worker_preview_refuses_drift_without_confirm_or_replace(self):
+        prior = ReplaceConfigGuardTests.config()
+        current = prior.replace("hostname: leaf01", "hostname: sensitive-live-value")
+        expected_text = ReplaceConfigGuardTests.config(hostname="leaf01-new")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            release = root / "release"
+            release.mkdir()
+            marker = release / ".published-complete"
+            marker.write_text("complete\n", encoding="utf-8")
+            expected = release / "leaf01.yaml"
+            expected.write_text(expected_text, encoding="utf-8")
+            evidence = root / "preview-evidence"
+            client = mock.Mock()
+            client.args.command_timeout = 20
+            client.run.side_effect = [
+                completed(current), completed(protocol(prior)),
+            ]
+            commands = []
+
+            def local_preflight(command, **_kwargs):
+                commands.append(command)
+                self.assertEqual(str(ROOT / "ztp/manual-ztp.py"), command[1])
+                self.assertIn("--replace-config", command)
+                self.assertIn("--preflight-only", command)
+                try:
+                    MANUAL.preflight_one(
+                        client, root, DEVICE, evidence, replace_config=True,
+                    )
+                except MANUAL.ManualZtpError as exc:
+                    return completed("", 1, str(exc))
+                return completed("unexpected preview success")
+
+            with mock.patch.object(
+                MANUAL, "validate_parent_release_binding",
+                return_value={"binding_sha256": "b" * 64},
+            ), mock.patch.object(
+                MANUAL, "connect_and_verify",
+                return_value=("192.0.2.10", "eth0"),
+            ), mock.patch.object(
+                MANUAL, "published_yaml_paths",
+                return_value=(marker, expected, release / "mac.yaml"),
+            ), mock.patch.object(
+                WORKER.subprocess, "run", side_effect=local_preflight,
+            ), mock.patch.object(
+                WORKER, "write_device_status",
+            ) as write_status, mock.patch.object(
+                WORKER, "preview_result", side_effect=AssertionError("preview ready"),
+            ) as preview_result, mock.patch.object(
+                MANUAL, "trigger_one", side_effect=AssertionError("replace"),
+            ) as trigger_one, redirect_stderr(io.StringIO()):
+                WORKER.execute_preview(
+                    "leaf01", "eth", 20, "replace-config", "operation-1", "trigger-1",
+                )
+
+            self.assertEqual(1, len(commands))
+            self.assertEqual(2, client.run.call_count)
+            self.assertEqual("nv config show", client.run.call_args_list[0].args[2])
+            self.assertEqual(
+                MANUAL.APPLIED_CONFIG_HELPER,
+                client.run.call_args_list[1].args[2],
+            )
+            self.assertFalse(evidence.exists())
+            preview_result.assert_not_called()
+            trigger_one.assert_not_called()
+            self.assertEqual(["previewing", "failed"], [
+                call.args[1] for call in write_status.call_args_list
+            ])
+            failure = write_status.call_args_list[-1].kwargs
+            self.assertEqual("preview", failure["phase"])
+            self.assertEqual("replace-config", failure["requested_operation"])
+            self.assertIn("runtime-drift", failure["reason"])
+            self.assertIn("差异节点=1; 类别=system:1", failure["reason"])
+            self.assertNotIn("sensitive-live-value", failure["reason"])
 
 
 class ManualCommandHelpTests(unittest.TestCase):
