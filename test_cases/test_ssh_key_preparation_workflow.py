@@ -39,6 +39,10 @@ def load_script(name: str, path: Path):
 
 def project_with_marker(path: Path, laptop: bytes, management: bytes) -> Path:
     path.mkdir(mode=0o700)
+    (path / "02-dhcp-subnet_config.csv").write_text(
+        "shared_network,subnet,netmask,range_start,range_end,routers,"
+        "ztp_service_ip,cumulus_profile,nvos_ztp\n", encoding="utf-8",
+    )
     marker = path / ".management-pubkeys"
     marker.write_bytes(b"mgmt-server.pub\n")
     marker.chmod(0o644)

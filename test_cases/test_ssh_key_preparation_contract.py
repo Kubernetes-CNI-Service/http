@@ -742,6 +742,10 @@ class DelegatedSetupPublicKeyContract(unittest.TestCase):
         (home / ".ssh/id_ed25519.pub").write_bytes(server)
         project = root / "project"
         project.mkdir(mode=0o700)
+        (project / "02-dhcp-subnet_config.csv").write_text(
+            "shared_network,subnet,netmask,range_start,range_end,routers,"
+            "ztp_service_ip,cumulus_profile,nvos_ztp\n", encoding="utf-8",
+        )
         (project / "mgmt-server.pub").write_bytes(server)
         if laptop is not None:
             (project / "laptop.pub").write_bytes(laptop)
