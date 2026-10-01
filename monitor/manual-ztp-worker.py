@@ -394,6 +394,25 @@ def latest_device_state(hostname):
     return max(candidates, key=lambda item: item[0])[1] if candidates else None
 
 
+def config_sync_verified(result, hostname, operation_id, trigger_id):
+    """Accept only current observable readback evidence, never a receipt refresh."""
+    evidence = result.get("config_sync_verification")
+    if (result.get("state") != "triggered" or result.get("config_sync_outcome") != "runtime-verified"
+            or not isinstance(evidence, dict)):
+        return False
+    return (
+        type(evidence.get("schema")) is int and evidence["schema"] == 1
+        and evidence.get("hostname") == hostname
+        and evidence.get("operation_id") == operation_id
+        and evidence.get("trigger_id") == trigger_id
+        and evidence.get("receipt_refreshed") is False
+        and bool(re.fullmatch(r"[0-9a-f]{12}", str(evidence.get("eth0_mac", ""))))
+        and all(re.fullmatch(r"[0-9a-f]{64}", str(evidence.get(key, ""))) for key in (
+            "expected_runtime_sha256", "actual_runtime_sha256", "expected_raw_sha256"))
+        and evidence["expected_runtime_sha256"] == evidence["actual_runtime_sha256"]
+    )
+
+
 def latest_cli_operations():
     """Return the newest explicit CLI operation for each active-project host."""
     try:
@@ -439,6 +458,8 @@ def latest_cli_operations():
             ))
             operation = {
                 "hostname": hostname, "state": state,
+                "config_sync_outcome": result.get("config_sync_outcome"),
+                "config_sync_verification": result.get("config_sync_verification"),
                 "type": str(target.get("type") or ""),
                 "operation_id": str(
                     result.get("operation_id") or summary.get("operation_id")
@@ -999,6 +1020,7 @@ def execute(
             reason=(
                 f"提交{'配置同步' if config_sync else '重置' if operation == 'reset' else ' ZTP'}"
                 f"命令超时（{trigger_timeout}s）"
+                + ("；结果未知，设备可能已变更，不要自动重试，请先核查设备状态" if config_sync else "")
             ),
         )
         return
@@ -1036,13 +1058,21 @@ def execute(
         return
     if config_sync:
         finished = timestamp()
+        if not config_sync_verified(accepted, hostname, operation_id, trigger_id):
+            write_device_status(
+                hostname, "failed", scope=scope, started_at=started, finished_at=finished,
+                operation_id=operation_id, trigger_id=trigger_id, trigger_source=trigger_source,
+                operation=operation, requested_operation=requested_operation, phase="config_sync",
+                reason="配置同步缺少本次保存后的身份/运行态验证证据；结果未确认，请勿自动重试",
+            )
+            return
         write_device_status(
             hostname, "config_sync_success", scope=scope, started_at=started,
             finished_at=finished, operation_id=operation_id,
             trigger_id=trigger_id, trigger_source=trigger_source,
             operation=operation, effective_operation=operation,
             requested_operation=requested_operation, phase="config_sync",
-            message="完整配置同步已应用并保存",
+            message="配置已应用保存，运行态回读一致；可信回执未刷新，连续同步闭环未完成",
         )
         print(f"[{finished}] [OK] {hostname} configuration synchronized", flush=True)
         return
@@ -1285,6 +1315,20 @@ def main():
                 if operation["state"] != "triggered":
                     continue
                 if is_config_sync:
+                    if not config_sync_verified(operation, hostname, operation_id, trigger_id):
+                        if (same_operation and current.get("trigger_id") == trigger_id
+                                and current.get("state") == "failed"
+                                and current.get("phase") == "config_sync"):
+                            continue
+                        write_device_status(
+                            hostname, "failed", scope=args.scope,
+                            started_at=operation["started_at"], finished_at=operation["updated_at"],
+                            operation_id=operation_id, trigger_id=trigger_id,
+                            trigger_source=operation["trigger_source"], operation="replace-config",
+                            requested_operation="replace-config", phase="config_sync",
+                            reason="命令行配置同步缺少本次身份/运行态回读证据；结果未确认，请勿自动重试",
+                        )
+                        continue
                     if not same_operation or current.get("state") != "config_sync_success":
                         write_device_status(
                             hostname, "config_sync_success", scope=args.scope,
@@ -1296,7 +1340,7 @@ def main():
                             effective_operation="replace-config",
                             requested_operation="replace-config",
                             phase="config_sync",
-                            message="命令行完整配置同步已应用并保存",
+                            message="命令行配置已应用保存，运行态回读一致；可信回执未刷新，连续同步闭环未完成",
                         )
                     continue
                 if same_operation and current.get("state") in {"success", "failed", "ztp_running"}:

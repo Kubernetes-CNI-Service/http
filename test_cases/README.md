@@ -159,10 +159,11 @@ Popen.wait 的内部退避不是同一轮询承诺，但仍受同一期限约束
 `test_project_contracts.py` 是跨目录契约主入口，按功能契约分组加载各目录模块。
 `test_dhcp_optional_contract.py`、`test_dhcp_optional_workflow.py` 与
 `test_ztp_service_runtime.py` 还锁定空 DHCP subnet 占位文件的唯一例外：
-`dhcp-server.status` 和 `ztp.status` 都显式为 `disabled` 时，已有的零字节或
-仅合法表头的 `02-dhcp-subnet_config.csv` 可继续参与来源哈希及 IB 配置流程，
-DHCP listener 和生成/安装/启动保持关闭；任一服务启用、非空畸形 CSV、
-无网络却指定 relay ingress 均拒绝。Docker 实际服务切换需另按
+`dhcp-server.status` 和 `ztp.status` 都显式为 `disabled` 时，仅含合法表头的
+`02-dhcp-subnet_config.csv` 可继续参与来源哈希及 IB 配置流程；缺失、零字节、
+纯空白、非法表头或符号链接输入仍拒绝。
+双 disabled 时 DHCP listener 和生成/安装/启动保持关闭；仅表头但任一服务启用、
+非空畸形 CSV、无网络却指定 relay ingress 均拒绝。Docker 实际服务切换需另按
 `REAL_ENVIRONMENT.md` 留存证据。
 `test_load_release_transaction.py` 在隔离临时目录中验证 load 的统一 release：只有 DHCP 与
 Cumulus/NVOS 子 manifest 的设备身份、真实 YAML hash、完整 MAC 链接集合、effective default
@@ -393,6 +394,13 @@ Production host-key mismatch 默认 fail closed，只有单台完整 hostname �
 失败、运行态/确认后指纹漂移均按独立原因 fail closed；ACL 明确不受该门禁保护。CGI、worker、页面
 按钮/状态列与 JS 状态名由同一 workflow 对账，未绑定身份按钮可见但 disabled，并发上限仍为 8。
 测试不会连接或触发真实交换机。
+配置同步在 apply/save 返回成功后还须向同一固定 host 新建两次独立 SSH 调用，分别核对
+eth0 MAC 与本次配置的 hostname、回读 `nv config show` 与冻结输入的可观测投影比较；
+它们不是原保存连接，也不是同一会话或原子快照。只有带本次 operation/trigger 绑定证据的
+结果才可由 Web/CLI 显示同步成功；旧 `triggered` 不足以证明成功。保存后核验失败标记
+`applied-but-unverified`，提交超时或非零退出标记 `outcome-unknown`，都不自动重试。
+此检查不读取 startup，也不验证不可观测密码散列，更不刷新设备 root-owned prior receipt；
+提示必须保留“可信回执未刷新，连续同步闭环未完成”，不能把单次运行态一致当作连续同步已修复。
 
 `test_ztp_applied_receipt.py` 覆盖 bootstrap 的 root-owned `/run` 独立工作区、原子
 `latest-log` 指针，以及在该指针成功发布后非致命创建的 `ztp-last-run.log` 固定名硬链接；测试验证

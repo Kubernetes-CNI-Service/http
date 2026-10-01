@@ -1319,7 +1319,12 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   AIR patch/baseline receipt 不得伪造成 full prior；没有完整 B 的设备只验证明确拒绝。
 - 步骤与预期：先生成仅改变 hostname/ACL 等非保护字段的新配置，经 CLI 与页面分别完成只读 preview，
   核对确认前设备字节和会话均不变；确认文案必须明确“本机手工配置若未出现在新生成配置中，将被删除”。
-  执行一次 `--replace-config`，验证只出现 `nv config replace`、apply、save，状态依次为同步中/已同步，
+  执行一次 `--replace-config`，验证写操作仅为 `nv config replace`、apply、save，随后向同一固定 host
+  新建两次独立 SSH 调用，分别只读复核 eth0 MAC/本次输入 hostname 和 `nv config show` 可观测投影；
+  不是原保存连接或同一会话/原子快照，仅回读通过才可显示同步成功。
+  分别注入身份不匹配、回读不一致/坏 YAML/超时，要求 `applied-but-unverified`、无成功证据和无自动重试；
+  提交阶段超时/非零退出标记 `outcome-unknown`，不得误称设备没有改变。Web 与 CLI 重启后结果投影
+  均拒绝只有旧 `triggered` 而没有本次版本化回读证据的成功晋级。另由操作员独立验收
   startup 与 latest 规范化一致且原 SSH 会话及新登录可用。随后逐项改变 eth0、ssh-server、AAA role、单/多
   用户 hash、新增/删除用户，注入 patch receipt、缺失 AAA、损坏 prior、运行态漂移、preview 后 receipt/
   release/current 变化和设备 ZTP 正在运行；全部必须在首次 replace 前以区分原因拒绝。ACL 变化按 owner
@@ -1329,6 +1334,8 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   SSH 凭据。每个负例从交换机/VM 快照恢复；成功例使用受管生成/replace 流程恢复原配置并再次验证
   startup 与登录。完整 replace 会删除未生成的现场配置，ACL 变化可能立即中断 SSH，因此首次只能在有
   console/OOB 和可回滚快照的实验设备执行，禁止在生产交换机首测。
+- 限制：自动回读仅证明当时可观测运行态与本次输入一致，不证明 startup 或不可观测密码散列；
+  不更新 root-owned prior receipt。连续 A→B→C 的可信回执闭环仍未实现，不得用本卡单次成功关闭。
 
 ## TC-REAL-COLLECTION-CYCLE-001 — AIR/Production cycle、进程绑定与真实制品
 

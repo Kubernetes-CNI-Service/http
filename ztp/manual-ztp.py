@@ -2180,6 +2180,45 @@ def acquire_operation_lock(output_root: Path, hostname: str) -> int:
     return descriptor
 
 
+def verify_config_sync_readback(client, device, host, expected_text):
+    """Read identity and config using two new SSH calls to the same fixed host.
+
+    These are not the apply/save connection or a single atomic observation.
+    Never refresh trust, switch candidates, or retry a write here.
+    """
+    expected, _, expected_digest = runtime_comparable_nvue_config(expected_text, label="本次同步配置")
+    # Hostname is not a protected field: a confirmed rename must be checked
+    # against this frozen input, while eth0 MAC remains the device identity.
+    expected_hostname = _config_value(expected, ("system", "hostname"))
+    if expected_hostname is _RUNTIME_VALUE_REMOVED:
+        expected_hostname = device["hostname"]
+    if not isinstance(expected_hostname, str) or not SAFE_HOSTNAME.fullmatch(expected_hostname):
+        raise ManualZtpError("本次同步配置的 hostname 无效")
+    identity = client.run(
+        device, host,
+        "printf '%s\\n%s\\n' \"$(hostname)\" \"$(cat /sys/class/net/eth0/address)\"",
+        timeout=client.args.command_timeout,
+    )
+    lines = identity.stdout.splitlines()
+    expected_mac = normalize_mac(device.get("mac_plain") or "")
+    if (identity.returncode or len(lines) != 2 or not expected_mac
+            or lines[0].strip().casefold() != expected_hostname.casefold()
+            or normalize_mac(lines[1]) != expected_mac):
+        raise ManualZtpError("配置同步保存后设备 hostname/eth0 MAC 身份复核失败")
+    readback = client.run(device, host, "nv config show", timeout=client.args.command_timeout)
+    if readback.returncode or not readback.stdout.strip():
+        raise ManualZtpError("配置同步保存后运行态回读失败")
+    actual, _, actual_digest = runtime_comparable_nvue_config(readback.stdout, label="同步保存后运行配置")
+    if actual != expected:
+        raise ManualZtpError("配置同步保存后运行态与本次配置不一致")
+    return {
+        "schema": 1, "hostname": device["hostname"], "eth0_mac": expected_mac,
+        "expected_runtime_sha256": expected_digest, "actual_runtime_sha256": actual_digest,
+        "expected_raw_sha256": _raw_text_sha256(expected_text),
+        "receipt_refreshed": False,
+    }
+
+
 def trigger_one(
     client: SshClient, device: dict, url: str, run_dir: Path,
     trigger_source: str = "manual_cli", trigger_id: str = "", operation: str = "ztp",
@@ -2188,6 +2227,8 @@ def trigger_one(
 ) -> dict:
     started = datetime.now().astimezone().isoformat(timespec="seconds")
     command_started_at = ""
+    sync_outcome = "not-submitted"
+    sync_verification = None
     target_dir = run_dir / device["hostname"]
     target_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(target_dir, 0o700)
@@ -2321,6 +2362,8 @@ def trigger_one(
             remote, stdin = "nv action run system ztp force", ""
             action = remote
         command_started_at = datetime.now().astimezone().isoformat(timespec="seconds")
+        if operation == "replace-config":
+            sync_outcome = "outcome-unknown"
         result = client.run(
             device, host, remote, timeout=client.args.command_timeout, stdin=stdin,
         )
@@ -2334,6 +2377,11 @@ def trigger_one(
                 f"触发命令失败 exit={result.returncode}: "
                 f"{result.stderr.strip() or result.stdout.strip() or 'no detail'}"
             )
+        if operation == "replace-config":
+            sync_outcome = "applied-but-unverified"
+            sync_verification = verify_config_sync_readback(client, device, host, expected_text)
+            sync_verification.update(operation_id=operation_id, trigger_id=trigger_id)
+            sync_outcome = "runtime-verified"
         command_log_sha256, command_log_complete = ztp_command_log_evidence(
             result.stdout
         )
@@ -2369,6 +2417,15 @@ def trigger_one(
                 fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
             finally:
                 os.close(lock_descriptor)
+    if operation == "replace-config":
+        payload["config_sync_outcome"] = sync_outcome
+        if sync_verification is not None:
+            payload["config_sync_verification"] = sync_verification
+        elif sync_outcome in {"applied-but-unverified", "outcome-unknown"}:
+            payload["reason"] = (
+                f"{sync_outcome}: {payload.get('reason', '')}；"
+                "设备可能已变更，不要自动重试；请先核查设备状态"
+            )
     atomic_json(target_dir / "result.json", payload)
     return payload
 

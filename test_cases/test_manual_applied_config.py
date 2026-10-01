@@ -1131,7 +1131,7 @@ class ConfirmAppliedFingerprintTests(unittest.TestCase):
             expected = release / "leaf01.yaml"
             prior = ReplaceConfigGuardTests.config()
             expected_text = ReplaceConfigGuardTests.config(
-                hostname="leaf01-new", acl_rule="drop",
+                hostname="leaf01", acl_rule="drop",
             )
             expected.write_text(expected_text, encoding="utf-8")
             applied_output = protocol(prior)
@@ -1146,6 +1146,7 @@ class ConfirmAppliedFingerprintTests(unittest.TestCase):
             client.args = SimpleNamespace(command_timeout=20)
             client.run.side_effect = [
                 completed(prior), completed(applied_output), completed("saved\n"),
+                completed("leaf01\n02:00:00:00:00:01\n"), completed(expected_text),
             ]
             prepared = {
                 "published_marker": str(marker),
@@ -1167,17 +1168,169 @@ class ConfirmAppliedFingerprintTests(unittest.TestCase):
                 MANUAL, "verify_prepared_release_binding",
             ):
                 result = MANUAL.trigger_one(
-                    client, DEVICE, "", root / "manual-config-sync/run1",
-                    operation="replace-config", prepared=prepared,
+                    client, DEVICE, "", root / "99-output-ztp/manual-config-sync/run1",
+                    operation="replace-config", prepared=prepared, operation_id="op", trigger_id="tr",
                 )
             self.assertEqual("triggered", result["state"], result)
-            remote_call = client.run.call_args_list[-1]
+            self.assertEqual("runtime-verified", result["config_sync_outcome"])
+            self.assertFalse(result["config_sync_verification"]["receipt_refreshed"])
+            for field, value in (
+                ("schema", True), ("hostname", "other"), ("eth0_mac", "invalid"),
+                ("trigger_id", "old"), ("operation_id", "old"),
+                ("actual_runtime_sha256", "f" * 64), ("expected_raw_sha256", "invalid"),
+                ("receipt_refreshed", True),
+            ):
+                with self.subTest(evidence_field=field):
+                    changed = dict(result, config_sync_verification=dict(result["config_sync_verification"]))
+                    changed["config_sync_verification"][field] = value
+                    self.assertFalse(WORKER.config_sync_verified(changed, "leaf01", "op", "tr"))
+            remote_call = client.run.call_args_list[2]
             remote = remote_call.args[2]
             self.assertIn("nv config replace", remote)
             self.assertIn("nv config apply -y", remote)
             self.assertIn("nv config save", remote)
             self.assertNotIn("nv config patch", remote)
             self.assertEqual(expected_text, remote_call.kwargs["stdin"])
+            failures = (
+                ("identity", [completed("saved"), completed("wrong\n02:00:00:00:00:01\n")], "applied-but-unverified"),
+                ("mismatch", [completed("saved"), completed("leaf01\n02:00:00:00:00:01\n"), completed(prior)], "applied-but-unverified"),
+                ("parse", [completed("saved"), completed("leaf01\n02:00:00:00:00:01\n"), completed("[invalid")], "applied-but-unverified"),
+                ("read-timeout", [completed("saved"), completed("leaf01\n02:00:00:00:00:01\n"), MANUAL.subprocess.TimeoutExpired("show", 1)], "applied-but-unverified"),
+                ("command-timeout", [MANUAL.subprocess.TimeoutExpired("replace", 1)], "outcome-unknown"),
+                ("command-error", [completed("", returncode=1)], "outcome-unknown"),
+            )
+            for name, replies, outcome in failures:
+                with self.subTest(name=name), mock.patch.object(
+                    MANUAL, "connect_and_verify", return_value=("192.0.2.10", "eth0"),
+                ), mock.patch.object(MANUAL, "verify_prepared_release_binding"):
+                    failed_client = mock.Mock(args=SimpleNamespace(command_timeout=1))
+                    failed_client.run.side_effect = [completed(prior), completed(applied_output), *replies]
+                    failed = MANUAL.trigger_one(
+                        failed_client, DEVICE, "", root / "failures" / name,
+                        operation="replace-config", prepared=prepared, operation_id="op", trigger_id=name,
+                    )
+                    self.assertEqual("failed", failed["state"])
+                    self.assertEqual(outcome, failed["config_sync_outcome"])
+                    self.assertNotIn("config_sync_verification", failed)
+                    self.assertIn("不要自动重试", failed["reason"])
+                    self.assertEqual(1, sum("nv config replace" in c.args[2]
+                                            for c in failed_client.run.call_args_list))
+                    self.assertEqual(failed, json.loads((root / "failures" / name / "leaf01/result.json").read_text()))
+            # Real producer result -> worker's durable Web reader and CLI reader.
+            inventory = root / "02-devices_config.csv"
+            inventory.write_text("hostname\nleaf01\n", encoding="utf-8")
+            writes = []
+            with mock.patch.object(WORKER, "DEVICES_CSV", inventory), \
+                 mock.patch.object(WORKER, "write_device_status", side_effect=lambda host, state, **kw: writes.append(state)), \
+                 mock.patch.object(WORKER, "latest_device_state", return_value={}), \
+                 mock.patch.object(WORKER, "command_for", return_value=["local-test"]), \
+                 mock.patch.object(WORKER.subprocess, "run", return_value=completed()):
+                WORKER.execute("leaf01", "prod", 1, 1, 1, operation="replace-config",
+                               operation_id="op", trigger_id="tr", requested_operation="replace-config",
+                               preview_fingerprint={"current_sha256": "a" * 64})
+                self.assertEqual(["config_sync_running", "config_sync_success"], writes)
+                summary = root / "99-output-ztp/manual-config-sync/run1/summary.json"
+                summary.write_text(json.dumps({
+                    "trigger_source": "manual_config_sync_cli", "operation": "replace-config",
+                    "targets": [DEVICE], "results": [result],
+                }), encoding="utf-8")
+                projected = WORKER.latest_cli_operations()["leaf01"]
+                self.assertTrue(WORKER.config_sync_verified(projected, "leaf01", "op", "tr"))
+                result.pop("config_sync_verification")
+                summary.write_text(json.dumps({
+                    "trigger_source": "manual_config_sync_cli", "operation": "replace-config",
+                    "targets": [DEVICE], "results": [result],
+                }), encoding="utf-8")
+                self.assertFalse(WORKER.config_sync_verified(WORKER.latest_cli_operations()["leaf01"], "leaf01", "op", "tr"))
+
+    def test_post_save_readback_rejects_mismatch_identity_and_timeout_without_retry(self):
+        expected = ReplaceConfigGuardTests.config()
+        cases = (
+            ([completed("other\n02:00:00:00:00:01\n")], 1),
+            ([completed("leaf01\n02:00:00:00:00:02\n")], 1),
+            ([completed("leaf01\n02:00:00:00:00:01\n"), completed(expected.replace("leaf01", "drifted"))], 2),
+            ([completed("leaf01\n02:00:00:00:00:01\n"), completed("", returncode=1)], 2),
+            ([MANUAL.subprocess.TimeoutExpired("identity", 1)], 1),
+            ([completed("leaf01\n02:00:00:00:00:01\n"), MANUAL.subprocess.TimeoutExpired("show", 1)], 2),
+        )
+        for replies, calls in cases:
+            with self.subTest(calls=calls, replies=str(replies)):
+                client = mock.Mock(args=SimpleNamespace(command_timeout=1))
+                client.run.side_effect = replies
+                with self.assertRaises((MANUAL.ManualZtpError, MANUAL.subprocess.TimeoutExpired)):
+                    MANUAL.verify_config_sync_readback(client, DEVICE, "192.0.2.10", expected)
+                self.assertEqual(calls, client.run.call_count)
+                self.assertFalse(any("config replace" in c.args[2] for c in client.run.call_args_list))
+
+    def test_post_save_readback_accepts_confirmed_hostname_change_with_same_mac(self):
+        expected = ReplaceConfigGuardTests.config(hostname="leaf01-renamed")
+        client = mock.Mock(args=SimpleNamespace(command_timeout=1))
+        client.run.side_effect = [completed("leaf01-renamed\n02:00:00:00:00:01\n"), completed(expected)]
+        evidence = MANUAL.verify_config_sync_readback(client, DEVICE, "192.0.2.10", expected)
+        self.assertEqual("leaf01", evidence["hostname"])
+        self.assertEqual("020000000001", evidence["eth0_mac"])
+        self.assertEqual(2, client.run.call_count)
+        self.assertEqual(["192.0.2.10", "192.0.2.10"], [c.args[1] for c in client.run.call_args_list])
+        self.assertIn("/sys/class/net/eth0/address", client.run.call_args_list[0].args[2])
+        self.assertEqual("nv config show", client.run.call_args_list[1].args[2])
+
+    def test_unverified_cli_two_polls_are_idempotent_but_new_trigger_is_not_hidden(self):
+        for triggers, expected_writes in ((["tr", "tr"], 1), (["tr", "new"], 2)):
+            with self.subTest(triggers=triggers), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                status = {"devices": {}}
+                writes = []
+                def write(host, state, **values):
+                    writes.append((host, state, values))
+                    status["devices"][host] = dict(values, state=state)
+                operation = {
+                    "hostname": "leaf01", "type": "eth", "state": "triggered",
+                    "operation": "replace-config", "operation_id": "op",
+                    "trigger_source": "manual_config_sync_cli",
+                    "started_at": "2026-10-01T00:00:00+00:00", "updated_at": "2026-10-01T00:00:01+00:00",
+                }
+                with mock.patch.object(WORKER, "STATUS_DIR", root), \
+                     mock.patch.object(WORKER, "PID_FILE", root / "absent.pid"), \
+                     mock.patch.object(sys, "argv", ["worker", "--scope", "prod"]), \
+                     mock.patch.object(WORKER, "initialize_status", return_value={"devices": {}}), \
+                     mock.patch.object(WORKER, "read_status", return_value=status), \
+                     mock.patch.object(WORKER, "write_device_status", side_effect=write), \
+                     mock.patch.object(WORKER, "reconcile_failed_operations"), \
+                     mock.patch.object(WORKER, "latest_cli_operations", side_effect=[{"leaf01": dict(operation, trigger_id=t)} for t in triggers]), \
+                     mock.patch.object(WORKER, "pop_requests", return_value=[]), \
+                     mock.patch.object(WORKER.time, "sleep", side_effect=[None, KeyboardInterrupt]):
+                    self.assertEqual(130, WORKER.main())
+                self.assertEqual(expected_writes, len(writes))
+                self.assertTrue(all(state == "failed" for _, state, _ in writes))
+
+    def test_config_sync_outer_timeout_warns_unknown_and_does_not_retry(self):
+        writes = []
+        with mock.patch.object(WORKER, "write_device_status", side_effect=lambda host, state, **kw: writes.append((state, kw))), \
+             mock.patch.object(WORKER, "latest_device_state", return_value={}), \
+             mock.patch.object(WORKER, "command_for", return_value=["local-test"]), \
+             mock.patch.object(WORKER.subprocess, "run", side_effect=MANUAL.subprocess.TimeoutExpired("sync", 1)) as run:
+            WORKER.execute("leaf01", "prod", 1, 1, 1, operation="replace-config",
+                           operation_id="op", trigger_id="tr", requested_operation="replace-config",
+                           preview_fingerprint={"current_sha256": "a" * 64})
+        self.assertEqual(["config_sync_running", "failed"], [state for state, _ in writes])
+        self.assertIn("结果未知", writes[-1][1]["reason"])
+        self.assertIn("不要自动重试", writes[-1][1]["reason"])
+        self.assertEqual(1, run.call_count)
+
+    def test_worker_rejects_unverified_triggered_for_web_and_cli_projection(self):
+        result = {"hostname": "leaf01", "state": "triggered", "operation": "replace-config",
+                  "operation_id": "op", "trigger_id": "tr"}
+        self.assertFalse(WORKER.config_sync_verified(result, "leaf01", "op", "tr"))
+        writes = []
+        with mock.patch.object(WORKER, "write_device_status", side_effect=lambda host, state, **kw: writes.append(state)), \
+             mock.patch.object(WORKER, "latest_device_state", return_value={}), \
+             mock.patch.object(WORKER, "command_for", return_value=["local-test"]), \
+             mock.patch.object(WORKER.subprocess, "run", return_value=completed()), \
+             mock.patch.object(WORKER, "accepted_result", return_value=result):
+            WORKER.execute("leaf01", "prod", 1, 1, 1, operation="replace-config",
+                           operation_id="op", trigger_id="tr", requested_operation="replace-config",
+                           preview_fingerprint={"current_sha256": "a" * 64})
+        self.assertEqual(["config_sync_running", "failed"], writes)
 
     def test_trigger_rechecks_applied_fingerprint_before_mutation(self):
         with tempfile.TemporaryDirectory() as directory:

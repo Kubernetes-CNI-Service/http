@@ -5769,6 +5769,13 @@ print('{{"factory_records_active":true,"valid":true}}')
             "state": "triggered", "operation": "replace-config",
             "effective_operation": "replace-config",
             "trigger_source": "manual_config_sync_web",
+            "config_sync_outcome": "runtime-verified",
+            "config_sync_verification": {
+                "schema": 1, "hostname": "EXAMPLE-Leaf01", "eth0_mac": "020000000001",
+                "operation_id": "operation-1", "trigger_id": "trigger-1",
+                "expected_runtime_sha256": "a" * 64, "actual_runtime_sha256": "a" * 64,
+                "expected_raw_sha256": "b" * 64, "receipt_refreshed": False,
+            },
         }
         with mock.patch.object(
             self.manual_worker, "write_device_status", side_effect=record,

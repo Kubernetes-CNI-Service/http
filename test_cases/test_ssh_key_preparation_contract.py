@@ -682,7 +682,7 @@ class DelegatedSetupPublicKeyContract(unittest.TestCase):
     """Direct setup key gate; every HOME, project, and lock is private."""
 
     def _invoke(self, setup, root: Path, project: Path, home: Path,
-                *, delegated: bool, inherited_fd: bool) -> tuple[str, int]:
+                *, delegated: bool, inherited_fd: bool) -> tuple[str, int, int, str]:
         class BeforeP2p(Exception):
             pass
 
@@ -694,6 +694,7 @@ class DelegatedSetupPublicKeyContract(unittest.TestCase):
             fcntl.flock(parent_fd, fcntl.LOCK_EX)
             child_fd = os.dup(parent_fd)
         environment = {"HOME": str(home)}
+        output = io.StringIO()
         if delegated:
             environment["HTTP_SETUP_KEY_MODE"] = "server-delegated"
         if child_fd is not None:
@@ -704,9 +705,11 @@ class DelegatedSetupPublicKeyContract(unittest.TestCase):
                  mock.patch.object(setup, "HTTP_BASE", str(root)), \
                  mock.patch.object(setup, "stop_native_ztp_monitors"), \
                  mock.patch.object(setup, "_initialize_project_from_template"), \
+                 mock.patch.object(setup, "_require_delegated_laptop_public_key",
+                                   wraps=setup._require_delegated_laptop_public_key) as key_gate, \
                  mock.patch.object(setup, "_select_p2p_source", side_effect=BeforeP2p) as p2p, \
                  mock.patch.dict(setup.deployment_lock.__globals__, {"assert_writer_allowed": lambda **_kw: None}), \
-                 redirect_stdout(io.StringIO()):
+                 redirect_stdout(output):
                 if child_fd is None:
                     os.environ.pop("HTTP_DEPLOYMENT_LOCK_FD", None)
                 if not delegated:
@@ -721,7 +724,7 @@ class DelegatedSetupPublicKeyContract(unittest.TestCase):
                     outcome = f"exit:{exc.code}"
                 else:
                     outcome = f"return:{result}"
-            return outcome, p2p.call_count
+            return outcome, p2p.call_count, key_gate.call_count, output.getvalue()
         finally:
             if child_fd is not None:
                 try:
@@ -759,11 +762,12 @@ class DelegatedSetupPublicKeyContract(unittest.TestCase):
             home, project, server = self._fixture(root, laptop=laptop_key)
             target = project / "laptop.pub"
             before = target.stat()
-            outcome, p2p_calls = self._invoke(
+            outcome, p2p_calls, key_gate_calls, _output = self._invoke(
                 setup, root, project, home, delegated=True, inherited_fd=True,
             )
             self.assertEqual("before-p2p", outcome)
             self.assertEqual(1, p2p_calls)
+            self.assertEqual(1, key_gate_calls)
             self.assertEqual(laptop_key, target.read_bytes())
             self.assertEqual((before.st_dev, before.st_ino),
                              (target.stat().st_dev, target.stat().st_ino))
@@ -778,17 +782,27 @@ class DelegatedSetupPublicKeyContract(unittest.TestCase):
             "malformed": b"ssh-ed25519 invalid!!!\n",
             "same-as-management": public_line("ssh-ed25519", 82, "server"),
         }
+        reasons = {
+            "missing": "server-delegated setup requires both project public keys",
+            "empty": "public key must be one bounded newline-terminated line",
+            "malformed": "invalid public key base64",
+            "same-as-management": "management and laptop public keys must be distinct",
+        }
         for label, payload in cases.items():
             with self.subTest(label=label), tempfile.TemporaryDirectory(prefix=f"r16-{label}-") as temporary:
                 root = Path(temporary).resolve()
                 home, project, server = self._fixture(root, laptop=payload)
                 target = project / "laptop.pub"
                 before_ino = target.stat().st_ino if target.exists() else None
-                outcome, p2p_calls = self._invoke(
+                outcome, p2p_calls, key_gate_calls, output = self._invoke(
                     setup, root, project, home, delegated=True, inherited_fd=True,
                 )
                 self.assertIn(outcome, ("exit:1", "return:1"))
                 self.assertEqual(0, p2p_calls)
+                self.assertEqual(1, key_gate_calls)
+                self.assertIn("server-delegated public key check failed", output)
+                self.assertIn(reasons[label], output)
+                self.assertNotIn("缺少必需输入文件", output)
                 self.assertEqual(payload, target.read_bytes() if target.exists() else None)
                 self.assertEqual(before_ino, target.stat().st_ino if target.exists() else None)
                 self.assertEqual(server, (project / "mgmt-server.pub").read_bytes())
@@ -801,11 +815,17 @@ class DelegatedSetupPublicKeyContract(unittest.TestCase):
             home, project, _server = self._fixture(root, laptop=laptop_key)
             target = project / "laptop.pub"
             before = target.stat()
-            outcome, p2p_calls = self._invoke(
+            outcome, p2p_calls, key_gate_calls, output = self._invoke(
                 setup, root, project, home, delegated=True, inherited_fd=False,
             )
             self.assertIn(outcome, ("exit:1", "return:1"))
             self.assertEqual(0, p2p_calls)
+            self.assertEqual(0, key_gate_calls)
+            self.assertIn(
+                "server-delegated setup requires the inherited deployment lock and load confirmation",
+                output,
+            )
+            self.assertNotIn("缺少必需输入文件", output)
             self.assertEqual(laptop_key, target.read_bytes())
             self.assertEqual(before.st_ino, target.stat().st_ino)
 
@@ -816,11 +836,12 @@ class DelegatedSetupPublicKeyContract(unittest.TestCase):
             home, project, _server = self._fixture(root, laptop=b"")
             local_key = public_line("ssh-ed25519", 81, "laptop")
             (home / ".ssh/id_ed25519.pub").write_bytes(local_key)
-            outcome, p2p_calls = self._invoke(
+            outcome, p2p_calls, key_gate_calls, _output = self._invoke(
                 setup, root, project, home, delegated=False, inherited_fd=False,
             )
             self.assertEqual("before-p2p", outcome)
             self.assertEqual(1, p2p_calls)
+            self.assertEqual(0, key_gate_calls)
             self.assertEqual(local_key, (project / "laptop.pub").read_bytes())
 
 
