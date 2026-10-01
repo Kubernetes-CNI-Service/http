@@ -363,14 +363,15 @@ TARGET = {TARGET!r}
 PINNED_BLOB = {PINNED_BLOB!r}
 OFFERED_BLOB = {OFFERED_BLOB!r}
 args = sys.argv[1:]
-expected = ["-T", "10", "-t", "ed25519", TARGET]
+target = args[-1] if args else ""
+expected = ["-T", "10", "-t", "ed25519", target]
 secret_env_keys = sorted(
     key for key, value in os.environ.items() if SECRET in value
 )
 event = {{
     "event_type": "keyscan",
     "argv": args,
-    "target": TARGET,
+    "target": target,
     "command": "ssh-keyscan",
     "options": {{}},
     "secret_env_keys": secret_env_keys,
@@ -389,9 +390,13 @@ with open(os.environ["FAKE_SSH_RECORD"], "a", encoding="utf-8") as handle:
 if args != expected or any(SECRET in value for value in args):
     print("unexpected ssh-keyscan invocation", file=sys.stderr)
     raise SystemExit(64)
+unavailable_targets = os.environ.get("FAKE_SCAN_UNAVAILABLE_TARGETS", "").split(",")
+if target in unavailable_targets:
+    print("keyscan connection refused " + SECRET, file=sys.stderr)
+    raise SystemExit(1)
 changed = os.environ.get("FAKE_SSH_CHANGED", "") not in ("", "0")
 blob = OFFERED_BLOB if changed else PINNED_BLOB
-print(TARGET + " ssh-ed25519 " + blob)
+print(target + " ssh-ed25519 " + blob)
 '''
         path.write_text(source, encoding="utf-8")
         path.chmod(0o755)
@@ -726,6 +731,79 @@ print(TARGET + " ssh-ed25519 " + blob)
             self.assertFalse(any(
                 event["command"].startswith("sudo ") for event in different_events
             ))
+
+    def test_real_worker_collector_keeps_other_device_when_first_use_scan_is_unavailable(self):
+        for all_unavailable in (False, True):
+            with self.subTest(all_unavailable=all_unavailable), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                collector, project_output = self._stage_real_collector(root)
+                inventory = (collector.parent / "02-devices_config.csv").resolve()
+                with inventory.open("a", encoding="utf-8") as handle:
+                    handle.write(
+                        "leaf02,eth,leaf,192.0.2.20,24,192.0.2.1,"
+                        "02:00:00:00:00:02,,,,\n"
+                    )
+                fake_bin = root / "fake-bin"
+                fake_bin.mkdir()
+                self._write_fake_ssh(fake_bin / "ssh")
+                self._write_fake_keyscan(fake_bin / "ssh-keyscan")
+                record = root / "fake-ssh.jsonl"
+                askpass_root = root / "askpass"
+                askpass_root.mkdir(mode=0o700)
+                unavailable = ["192.0.2.20", "leaf02"]
+                if all_unavailable:
+                    unavailable.extend([TARGET, "leaf01"])
+                environment = {
+                    "PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                    "HTTP_ZTP_RUNTIME_BACKEND": "supervisor",
+                    "HTTP_ZTP_ASKPASS_TMPDIR": str(askpass_root),
+                    "TEST_SECRET_SHA256": hashlib.sha256(SECRET.encode("utf-8")).hexdigest(),
+                    "FAKE_SSH_RECORD": str(record),
+                    "FAKE_SCAN_UNAVAILABLE_TARGETS": ",".join(unavailable),
+                }
+                with mock.patch.dict(os.environ, environment, clear=False):
+                    ok, statuses, stdout, stderr = self._run_worker(
+                        collector, SECRET, "prod",
+                    )
+
+                markers = [
+                    json.loads(line.split(" ", 1)[1])
+                    for line in stdout.splitlines()
+                    if line.startswith("[HTTP_ZTP_TASK_RESULT] ")
+                ]
+                self.assertEqual(1, len(markers), stdout + stderr)
+                result = markers[0]
+                expected_state = "failed" if all_unavailable else "partial"
+                self.assertEqual(expected_state, result["state"])
+                self.assertEqual((2, 0 if all_unavailable else 1, 2 if all_unavailable else 1), (
+                    result["planned"], result["succeeded"], result["failed_count"],
+                ))
+                self.assertEqual(expected_state, statuses[-1][0])
+                self.assertEqual(not all_unavailable, ok)
+                self.assertEqual(
+                    ["leaf01", "leaf02"] if all_unavailable else ["leaf02"],
+                    [item["hostname"] for item in result["failed_devices"]],
+                )
+                self.assertTrue(all(item["operation"] == "connect" for item in result["failed_devices"]))
+                self.assertIn("keyscan connection refused", stdout)
+                self.assertNotIn(SECRET, stdout + stderr + repr(statuses))
+                events = self._events(record)
+                self.assertFalse(any(
+                    event.get("options", {}).get("batchmode") == ["no"]
+                    and event["target"] in unavailable
+                    for event in events
+                ))
+                batches = [
+                    path for path in project_output.iterdir()
+                    if path.is_dir() and path.name.endswith("-prod-backup")
+                ]
+                if all_unavailable:
+                    self.assertEqual([], batches)
+                else:
+                    self.assertEqual(1, len(batches))
+                    self.assertTrue((batches[0] / "eth" / "leaf01.yaml").is_file())
+                    self.assertFalse((batches[0] / "eth" / "leaf02.yaml").exists())
 
     def test_pin_oracle_separates_same_target_between_prod_and_air(self):
         prod = self._expected_pin_name("prod", TARGET)

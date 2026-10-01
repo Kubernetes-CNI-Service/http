@@ -7,7 +7,7 @@ import base64
 import ast
 import datetime as dt
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import hashlib
 import importlib
 import importlib.util
@@ -2424,6 +2424,148 @@ class BackupAuthenticationContractTests(unittest.TestCase):
         if "platform inventory" in command:
             return "SN-LEAF01\n"
         return ""
+
+    def test_first_use_keyscan_unavailable_skips_only_that_candidate(self):
+        for returncode in (1, 124):
+            with self.subTest(returncode=returncode), tempfile.TemporaryDirectory() as directory:
+                project = Path(directory) / "project"
+                output = project / "batch"
+                (output / "eth").mkdir(parents=True)
+                device = self._device()
+                device["alternate_ssh_ips"] = ["192.0.2.11"]
+                attempts = []
+
+                def run_ssh(_user, target, command, _timeout, options, **_kwargs):
+                    attempts.append((target, command, tuple(options)))
+                    if target == self.TARGET:
+                        return subprocess.CompletedProcess([], 255, "", "Connection timed out")
+                    return subprocess.CompletedProcess([], 0, self._remote_result(command), "")
+
+                scan_result = subprocess.CompletedProcess(
+                    [], returncode, "", "keyscan transport unavailable\n",
+                )
+                with mock.patch.object(self.backup, "_ENVIRONMENT", "prod"), \
+                        mock.patch.object(self.backup, "_run_ssh", side_effect=run_ssh), \
+                        mock.patch.object(self.backup, "_ssh_keyscan_binary", return_value="/usr/bin/ssh-keyscan"), \
+                        mock.patch.object(self.backup, "_run_bounded_process", return_value=scan_result) as scan, \
+                        mock.patch.object(self.backup, "_trusted_known_hosts_command_helper", return_value="/usr/bin/printf"), \
+                        mock.patch.object(self.backup, "_require_known_hosts_command_support"), \
+                        mock.patch.object(self.backup, "_password_ssh_env") as askpass:
+                    log, result = self.backup.collect_device(
+                        device, str(output), self.SECRET, "", "",
+                    )
+
+                self.assertTrue(result and result["yaml_ok"], log)
+                self.assertIn("Able to use 192.0.2.11", "\n".join(log))
+                self.assertIn("keyscan transport unavailable", "\n".join(log))
+                self.assertNotIn(self.SECRET, "\n".join(log))
+                self.assertEqual(1, scan.call_count)
+                askpass.assert_not_called()
+                self.assertFalse((project / ".ssh-known-hosts" / self._expected_pin_name("prod", self.TARGET)).exists())
+                self.assertFalse(any(target == self.TARGET and command.startswith("sudo ") for target, command, _ in attempts))
+
+    def test_first_use_keyscan_unavailable_returns_device_failure_after_all_candidates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory) / "project"
+            output = project / "batch"
+            (output / "eth").mkdir(parents=True)
+            targets = []
+
+            def run_ssh(_user, target, command, _timeout, _options, **_kwargs):
+                targets.append((target, command))
+                return subprocess.CompletedProcess([], 255, "", "Connection refused")
+
+            scan_result = subprocess.CompletedProcess([], 1, "", "Connection refused")
+            with mock.patch.object(self.backup, "_ENVIRONMENT", "prod"), \
+                    mock.patch.object(self.backup, "_run_ssh", side_effect=run_ssh), \
+                    mock.patch.object(self.backup, "_ssh_keyscan_binary", return_value="/usr/bin/ssh-keyscan"), \
+                    mock.patch.object(self.backup, "_run_bounded_process", return_value=scan_result) as scan, \
+                    mock.patch.object(self.backup, "_trusted_known_hosts_command_helper", return_value="/usr/bin/printf"), \
+                    mock.patch.object(self.backup, "_require_known_hosts_command_support"), \
+                    mock.patch.object(self.backup, "_password_ssh_env") as askpass:
+                log, result = self.backup.collect_device(
+                    self._device(), str(output), self.SECRET, "", "",
+                )
+
+            self.assertIsNone(result)
+            self.assertEqual(2, scan.call_count)
+            self.assertEqual({self.TARGET, "leaf01"}, {target for target, _ in targets})
+            self.assertIn("Connection refused", "\n".join(log))
+            askpass.assert_not_called()
+            self.assertEqual([], list((project / ".ssh-known-hosts").glob("*.known_hosts")))
+
+    def test_keyscan_overflow_and_invalid_record_are_not_candidate_fallbacks(self):
+        for case, scan_result, error_type in (
+            ("overflow", subprocess.CompletedProcess([], 125, "", "output exceeded limit"), RuntimeError),
+            ("empty", subprocess.CompletedProcess([], 0, "", ""), ValueError),
+            ("malformed", subprocess.CompletedProcess([], 0, "invalid host key", ""), ValueError),
+        ):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / "project" / "batch"
+                (output / "eth").mkdir(parents=True)
+                device = self._device()
+                device["alternate_ssh_ips"] = ["192.0.2.11"]
+                targets = []
+
+                def run_ssh(_user, target, _command, _timeout, _options, **_kwargs):
+                    targets.append(target)
+                    return subprocess.CompletedProcess([], 255, "", "key rejected")
+
+                with mock.patch.object(self.backup, "_ENVIRONMENT", "prod"), \
+                        mock.patch.object(self.backup, "_run_ssh", side_effect=run_ssh), \
+                        mock.patch.object(self.backup, "_ssh_keyscan_binary", return_value="/usr/bin/ssh-keyscan"), \
+                        mock.patch.object(self.backup, "_run_bounded_process", return_value=scan_result), \
+                        mock.patch.object(self.backup, "_trusted_known_hosts_command_helper", return_value="/usr/bin/printf"), \
+                        mock.patch.object(self.backup, "_require_known_hosts_command_support"), \
+                        mock.patch.object(self.backup, "_password_ssh_env") as askpass, \
+                        self.assertRaises(error_type):
+                    self.backup.collect_device(device, str(output), self.SECRET, "", "")
+                self.assertEqual([self.TARGET], targets)
+                askpass.assert_not_called()
+
+    def test_changed_key_evidence_scan_unavailable_does_not_try_another_candidate(self):
+        pinned_blob = "AAAAC3NzaC1lZDI1NTE5AAAAIBERERERERERERERERERERERERERERERERERERERERER"
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory) / "project"
+            output = project / "batch"
+            (output / "eth").mkdir(parents=True)
+            known_dir = project / ".ssh-known-hosts"
+            known_dir.mkdir(mode=0o700)
+            pin = known_dir / self._expected_pin_name("prod", self.TARGET)
+            original = f"{self.TARGET} ssh-ed25519 {pinned_blob}\n"
+            pin.write_text(original, encoding="utf-8")
+            pin.chmod(0o600)
+            device = self._device()
+            device["alternate_ssh_ips"] = ["192.0.2.11"]
+            attempts = []
+
+            def run_ssh(_user, target, command, _timeout, options, **_kwargs):
+                attempts.append((target, command, tuple(options)))
+                if "BatchMode=yes" in options:
+                    return subprocess.CompletedProcess([], 255, "", "key rejected")
+                return subprocess.CompletedProcess(
+                    [], 255, "", "REMOTE HOST IDENTIFICATION HAS CHANGED!",
+                )
+
+            @contextmanager
+            def password_environment(_password):
+                yield {}
+
+            scan_result = subprocess.CompletedProcess([], 1, "", "connection refused")
+            with mock.patch.object(self.backup, "_ENVIRONMENT", "prod"), \
+                    mock.patch.object(self.backup, "_run_ssh", side_effect=run_ssh), \
+                    mock.patch.object(self.backup, "_ssh_keyscan_binary", return_value="/usr/bin/ssh-keyscan"), \
+                    mock.patch.object(self.backup, "_run_bounded_process", return_value=scan_result) as scan, \
+                    mock.patch.object(self.backup, "_trusted_known_hosts_command_helper", return_value="/usr/bin/printf"), \
+                    mock.patch.object(self.backup, "_require_known_hosts_command_support"), \
+                    mock.patch.object(self.backup, "_password_ssh_env", side_effect=password_environment), \
+                    self.assertRaises(RuntimeError):
+                self.backup.collect_device(device, str(output), self.SECRET, "", "")
+
+            self.assertEqual(1, scan.call_count)
+            self.assertEqual([self.TARGET, self.TARGET], [target for target, _, _ in attempts])
+            self.assertFalse(any(command.startswith("sudo ") for _, command, _ in attempts))
+            self.assertEqual(original, pin.read_text(encoding="utf-8"))
 
     def test_password_calls_use_verified_one_shot_fifos_and_project_tofu(self):
         seen_fifos = []

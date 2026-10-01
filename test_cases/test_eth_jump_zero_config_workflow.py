@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 from pathlib import Path
 import shlex
 import shutil
@@ -249,24 +250,50 @@ class EthJumpZeroConfigWorkflowTests(unittest.TestCase):
                 )
 
     def test_load_does_not_dispatch_a_generator_for_jump_only_inventory(self):
-        commands: list[list[str]] = []
+        dhcp_script = load_script(
+            "eth_jump_private_inventory_c1",
+            ROOT / "ztp/config/isc-dhcp-server/c1-generate_dhcp.py",
+        )
+        for air_json_present in (False, True):
+            with self.subTest(air_json_present=air_json_present), tempfile.TemporaryDirectory() as name:
+                ztp = Path(name).resolve()
+                dhcp = ztp / "config/isc-dhcp-server"
+                dhcp.mkdir(parents=True)
+                source = dhcp / "02-devices_config.csv"
+                write_devices(source, [jump_row()])
+                original = source.read_bytes()
+                if air_json_present:
+                    (dhcp / "p2p-air.json").write_text('{"nodes": {}}', encoding="utf-8")
+                commands: list[list[str]] = []
 
-        def record(command, **_kwargs):
-            commands.append([str(item) for item in command])
+                def record(command, **_kwargs):
+                    words = [str(item) for item in command]
+                    commands.append(words)
+                    if Path(words[1]).name == "c1-generate_dhcp.py" and "--inventory-output" in words:
+                        # Exercise the real private-artifact contract, not a claim
+                        # that jump-only inventory yields runnable DHCP records.
+                        destination = words[words.index("--inventory-output") + 1]
+                        dhcp_script.write_private_inventory(destination, str(source))
 
-        with mock.patch.object(LOAD, "run", side_effect=record), mock.patch.object(
-            LOAD, "_device_types_after_dhcp", return_value=frozenset({"eth_jump"}),
-        ):
-            LOAD.generate_configs(
-                frozenset({"eth_jump"}),
-                install_dhcp=False,
-                dry_run=False,
-            )
+                with mock.patch.object(LOAD, "ZTP_DIR", ztp), mock.patch.object(
+                    LOAD, "run", side_effect=record,
+                ):
+                    derived = LOAD.generate_configs(
+                        frozenset({"eth_jump"}), install_dhcp=False, dry_run=False,
+                    )
 
-        basenames = [Path(command[1]).name for command in commands if len(command) > 1]
-        self.assertIn("c1-generate_dhcp.py", basenames)
-        self.assertNotIn("90-c2-generate_configs.py", basenames)
-        self.assertNotIn("d-hostname2mac.py", basenames)
+                basenames = [Path(command[1]).name for command in commands if len(command) > 1]
+                self.assertIn("c1-generate_dhcp.py", basenames)
+                self.assertNotIn("90-c2-generate_configs.py", basenames)
+                self.assertNotIn("d-hostname2mac.py", basenames)
+                self.assertEqual(original, source.read_bytes())
+                if air_json_present:
+                    self.assertEqual(original, derived.path.read_bytes())
+                    self.assertEqual(hashlib.sha256(original).hexdigest(), derived.sha256)
+                    self.assertEqual(0o600, derived.path.stat().st_mode & 0o777)
+                    self.assertEqual(0o700, derived.path.parent.stat().st_mode & 0o777)
+                else:
+                    self.assertIsNone(derived)
 
     def test_nvos_entry_is_a_byte_identical_canonical_alias(self):
         canonical = ROOT / "ztp/config/cumulus/template/90-c2-generate_configs.py"

@@ -349,7 +349,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--service-ip", required=True, help="fixed target service IPv4 (port 80)")
     parser.add_argument("--bastion", required=True, help="existing trusted SSH user@hostname")
-    parser.add_argument("--ssh-port", type=int, default=22)
+    parser.add_argument("--ssh-port", type=int, default=22,
+                        help="bastion SSH port (default: 22; browser port remains 8080, service HTTP port 80)")
     args = parser.parse_args(argv)
     try:
         config = Config(args.service_ip, args.bastion, args.ssh_port)

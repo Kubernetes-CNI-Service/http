@@ -106,6 +106,14 @@ class BackupRetentionError(RuntimeError):
     """The backup tree cannot be safely deduplicated or retained."""
 
 
+class _HostKeyScanUnavailable(RuntimeError):
+    """A bounded key scan obtained no host key; caller decides its context."""
+
+
+class _FirstUseHostKeyUnavailable(RuntimeError):
+    """Only an unpinned target may be skipped as a connection candidate."""
+
+
 def _parse_backup_batch_name(name):
     """Parse every observed batch grammar without lexicographic guessing."""
     if Path(name).name != name:
@@ -2344,7 +2352,19 @@ def _scan_offered_host_key(target, timeout, secret=None, key_type=None):
         scan_timeout, env=environment,
     )
     if completed.returncode != 0:
-        raise RuntimeError("无法取得对端 SSH public key")
+        has_key_data = any(
+            line.strip() and not line.lstrip().startswith("#")
+            for line in completed.stdout.splitlines()
+        )
+        if completed.returncode in (1, 124) and not has_key_data:
+            diagnostic = _safe_ssh_diagnostic(completed.stderr, secret)
+            detail = f"ssh-keyscan exit={completed.returncode}"
+            if diagnostic:
+                detail += f": {diagnostic}"
+            raise _HostKeyScanUnavailable(f"无法取得对端 SSH public key: {detail}")
+        raise RuntimeError(
+            f"无法取得对端 SSH public key: ssh-keyscan exit={completed.returncode}"
+        )
     records = [
         line.strip() for line in completed.stdout.splitlines()
         if line.strip() and not line.lstrip().startswith("#")
@@ -2438,9 +2458,12 @@ def _password_ssh_attempt(
     ) as authority:
         records = authority["records"]
         if not records:
-            offered = _scan_offered_host_key(
-                target, timeout, password, key_type="ssh-ed25519",
-            )
+            try:
+                offered = _scan_offered_host_key(
+                    target, timeout, password, key_type="ssh-ed25519",
+                )
+            except _HostKeyScanUnavailable as exc:
+                raise _FirstUseHostKeyUnavailable(str(exc)) from exc
             authority["created_identity"] = _persist_first_use_pin(
                 authority["directory_fd"], authority["pin_name"],
                 offered, target,
@@ -2506,10 +2529,18 @@ def _ssh(
         elif password:
             if project_output is None:
                 raise ValueError("密码 SSH 需要 project-scoped known-host authority")
-            probe, safe_error, pin = _password_ssh_attempt(
-                user, password, ip, "true", timeout,
-                project_output, selected_scope,
-            )
+            try:
+                probe, safe_error, pin = _password_ssh_attempt(
+                    user, password, ip, "true", timeout,
+                    project_output, selected_scope,
+                )
+            except _FirstUseHostKeyUnavailable as exc:
+                diagnostic = _safe_ssh_diagnostic(probe.stderr, password)
+                if diagnostic:
+                    raise _FirstUseHostKeyUnavailable(
+                        f"{exc}; prior key-auth probe: {diagnostic}"
+                    ) from exc
+                raise
             if probe.returncode == 0:
                 mode = "password"
             else:
@@ -2546,6 +2577,18 @@ def _compact_error(message, limit=180):
     if len(text) > limit:
         return text[: limit - 3] + "..."
     return text
+
+
+def _safe_ssh_diagnostic(message, secret, limit=120):
+    """Keep untrusted SSH stderr bounded, single-line, and free of the password."""
+    value = message or ""
+    if secret:
+        value = value.replace(secret, "[REDACTED]")
+    printable = "".join(
+        character for character in value
+        if character.isprintable() or character.isspace()
+    )
+    return _compact_error(printable, limit=limit)
 
 # ── 单台设备收集 ──────────────────────────────────────────────────────────────
 
@@ -2587,10 +2630,16 @@ def collect_device(dev, out_dir, eth_pass, ib_pass, nvl_pass):
     for target, label in candidates:
         if not target:
             continue
-        actual_hostname, actual_err, actual_rc = _ssh(
-            user, password, target, "hostname -s 2>/dev/null",
-            project_output=project_output, scope=_ENVIRONMENT,
-        )
+        try:
+            actual_hostname, actual_err, actual_rc = _ssh(
+                user, password, target, "hostname -s 2>/dev/null",
+                project_output=project_output, scope=_ENVIRONMENT,
+            )
+        except _FirstUseHostKeyUnavailable as exc:
+            log.append(
+                f"Not able to use {target} ({label}): {_compact_error(str(exc))}"
+            )
+            continue
         actual_hostname = actual_hostname.strip().split(".", 1)[0]
         if actual_rc != 0:
             detail = _compact_error(actual_err) or f"exit={actual_rc}"
