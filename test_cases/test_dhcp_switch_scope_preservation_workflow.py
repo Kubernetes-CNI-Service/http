@@ -178,6 +178,29 @@ class DhcpSwitchScopeWorkflowTests(unittest.TestCase):
                     source_identities={"devices": new_hash})
                 self.assertIsInstance(result, LOAD.DerivedInventory)
 
+    def test_load_to_real_c1_rejects_redirected_private_output_before_downstream(self):
+        with tempfile.TemporaryDirectory() as name:
+            fixture = ScopedDhcpFixture(Path(name))
+            fixture.air_file.write_text('{"nodes": {}}')
+            source, outputs = fixture.devices_file.read_bytes(), fixture.snapshot()
+            destination = fixture.root / "unexpected-live-output.csv"
+            commands = []
+            def boundary(command, **_kwargs):
+                commands.append(command[1])
+                if command[1] == "c1-generate_dhcp.py":
+                    argv = [command[1], *command[2:]]
+                    argv[argv.index("--inventory-output") + 1] = str(destination)
+                    fixture.execute(argv)
+            with mock.patch.object(LOAD, "ZTP_DIR", fixture.root / "ztp"), \
+                    mock.patch.object(LOAD, "run", side_effect=boundary), \
+                    self.assertRaisesRegex(ValueError, "private inventory"):
+                LOAD.generate_configs(frozenset({"eth"}), install_dhcp=False,
+                    source_identities={"devices": hashlib.sha256(source).hexdigest()})
+            self.assertFalse(destination.exists())
+            self.assertNotIn("90-c2-generate_configs.py", commands)
+            self.assertEqual(source, fixture.devices_file.read_bytes())
+            self.assertEqual(outputs, fixture.snapshot())
+
     def test_explicit_air_without_mini_preserves_source_and_uses_derived_inventory(self):
         self._assert_539_old_air_rows_become_81_private_rows("air")
 

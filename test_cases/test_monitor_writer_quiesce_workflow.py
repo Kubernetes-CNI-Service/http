@@ -1826,18 +1826,28 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
 
     def test_load_passes_its_inherited_lock_to_both_locking_generators(self) -> None:
         load = load_module("mwq_load_child_lock", "DAY0-Prepare/11-load.py")
+        from test_cases.test_dhcp_switch_scope_preservation import ScopedDhcpFixture
         calls = []
-
-        def capture(command, **kwargs):
-            calls.append((tuple(command), kwargs))
-
-        with mock.patch.object(load, "run", side_effect=capture), \
-             mock.patch.object(load, "_device_types_after_dhcp", return_value=frozenset()):
-            load.generate_configs(
-                frozenset(), install_dhcp=False,
-                deployment_lock_descriptor=73,
-                switch_scope="eth",
-            )
+        with tempfile.TemporaryDirectory() as name:
+            fixture = ScopedDhcpFixture(Path(name))
+            fixture.air_file.write_text('{"nodes": {}}')
+            original = fixture.devices_file.read_bytes()
+            def capture(command, **kwargs):
+                calls.append((tuple(command), kwargs))
+                if Path(command[1]).name == "c1-generate_dhcp.py":
+                    # Exercise the real derived-file contract, not a no-output
+                    # run stub and never the checkout's setup-linked project.
+                    fixture.execute([command[1], *command[2:]])
+            with mock.patch.object(load, "ZTP_DIR", fixture.root / "ztp"), \
+                 mock.patch.object(load, "run", side_effect=capture), \
+                 mock.patch.object(load, "_device_types_after_dhcp", return_value=frozenset()):
+                derived = load.generate_configs(
+                    frozenset(), install_dhcp=False,
+                    deployment_lock_descriptor=73,
+                    switch_scope="eth",
+                )
+            self.assertEqual(original, fixture.devices_file.read_bytes())
+            self.assertEqual(original, derived.path.read_bytes())
 
         locking_children = {
             Path(command[1]).name: kwargs.get("inherited_lock_descriptor")
@@ -2294,6 +2304,10 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             first_call_line(dhcp_main, "stop_native_ztp_monitors"),
             first_call_line(dhcp_main, "append_air_records_to_csv"),
         )
+        # Private preparation is intentionally before quiesce, but never calls
+        # the live path writer. Its authority is separately exercised below.
+        self.assertLess(first_call_line(dhcp_main, "write_private_inventory"),
+                        first_call_line(dhcp_main, "stop_native_ztp_monitors"))
         p2p_main = function_node(
             "ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py", "main",
         )
@@ -2302,6 +2316,21 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
                 first_call_line(p2p_main, "stop_native_ztp_monitors"),
                 first_call_line(p2p_main, writer),
             )
+
+    def test_private_inventory_only_never_quiesces_or_writes_managed_outputs(self):
+        from test_cases.test_dhcp_switch_scope_preservation import ScopedDhcpFixture, DHCP
+        with tempfile.TemporaryDirectory() as name:
+            fixture = ScopedDhcpFixture(Path(name))
+            private = fixture.devices_file.resolve().parent / ".load-inventory-quiesce"
+            private.mkdir(mode=0o700)
+            destination = private / "02-devices_config.csv"
+            outputs, source = fixture.snapshot(), fixture.devices_file.read_bytes()
+            with mock.patch.object(DHCP, "stop_native_ztp_monitors", side_effect=AssertionError("private preparation stopped services")), mock.patch.object(DHCP, "append_air_records_to_csv", side_effect=AssertionError("live CSV writer used")):
+                fixture.execute(["c1-generate_dhcp.py", "-y", "--inventory-output", str(destination), "--inventory-only"])
+            self.assertEqual(source, destination.read_bytes())
+            self.assertEqual(source, fixture.devices_file.read_bytes())
+            self.assertEqual(outputs, fixture.snapshot())
+            self.assertEqual(0o600, destination.stat().st_mode & 0o777)
 
     def test_dhcp_generator_stop_failure_performs_zero_candidate_or_csv_writes(self) -> None:
         dhcp = load_module(
@@ -2820,6 +2849,7 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
         }, filesystem_readers)
         self.assertEqual(
             [
+                "_validate_release_generated_inputs",
                 "collection_attribution_input_digests",
                 "load_collection_attribution",
                 "load_release_identity",

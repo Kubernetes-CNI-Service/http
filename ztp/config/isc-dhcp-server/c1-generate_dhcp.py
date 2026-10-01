@@ -14,7 +14,8 @@ infra/docker/deploy.sh deploy-preloaded <IMAGE_ID>。Docker load 仅用于没有
   python3 c1-generate_dhcp.py [-y] [--deployment-scope all|prod|air]
       [--switch eth|ib|nvl] [--inventory-output PATH] [--inventory-only]
 
---inventory-output 在新文件中派生本轮 AIR 清单，保持客户 CSV 不变。
+--inventory-output 只接受客户 CSV 同目录下真实 0700 的 .load-inventory-<suffix>/02-devices_config.csv
+规范绝对路径；目标须不存在，原子发布为 single-link 0600，保持客户 CSV 不变。
 --inventory-only 只派生清单，不读取或改写五个 DHCP 输出，必须同时指定输出路径。
 --preserve-input-csv 禁止独立候选生成后的客户 CSV 回写；11-load 始终传入此参数。
 
@@ -35,6 +36,7 @@ import csv
 import glob
 import hashlib
 import ipaddress
+import io
 import json
 import os
 import re
@@ -494,8 +496,32 @@ def append_air_records_to_csv(path, air_records, subnets, production_path=None):
         raise ValueError(f"找不到 production CSV：{production}")
     with open(target, newline="", encoding="utf-8-sig") as f:
         rows = list(csv.reader(f))
+    new_rows, counts = _updated_air_inventory_rows(rows, air_records, production)
+    if new_rows == rows:
+        return counts
+    target_dir = os.path.dirname(target)
+    fd, temporary = tempfile.mkstemp(
+        prefix=f".{os.path.basename(target)}.", suffix=".tmp", dir=target_dir
+    )
+    try:
+        with os.fdopen(fd, "w", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerows(new_rows)
+        if os.path.isfile(target):
+            shutil.copymode(target, temporary)
+        else:
+            os.chmod(temporary, 0o644)
+        os.replace(temporary, target)
+    except BaseException:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+        raise
+    return counts
+
+
+def _updated_air_inventory_rows(rows, air_records, production):
+    """Render rows with read-only production inheritance; never publish files."""
     if not rows:
-        raise ValueError(f"{os.path.basename(path)} 是空文件")
+        raise ValueError(f"{os.path.basename(production)} 是空文件")
 
     header = [column.strip().lower() for column in rows[0]]
     required = (
@@ -504,7 +530,7 @@ def append_air_records_to_csv(path, air_records, subnets, production_path=None):
     )
     missing = [column for column in required if column not in header]
     if missing:
-        raise ValueError(f"{os.path.basename(path)} 缺少列：{missing}")
+        raise ValueError(f"{os.path.basename(production)} 缺少列：{missing}")
     indexes = {column: header.index(column) for column in required}
     column_count = len(rows[0])
 
@@ -545,26 +571,99 @@ def append_air_records_to_csv(path, air_records, subnets, production_path=None):
             updated += 1
 
     new_rows = [rows[0], *non_air_rows, *generated_rows]
-    if new_rows == rows:
-        return added, updated, already_exists
+    return new_rows, (added, updated, already_exists)
 
-    target_dir = os.path.dirname(target)
-    fd, temporary = tempfile.mkstemp(
-        prefix=f".{os.path.basename(target)}.", suffix=".tmp", dir=target_dir
-    )
+
+def write_private_inventory(destination, source, air_records=None):
+    """Publish only a new, project-private preparation file, never live output."""
+    source = os.path.realpath(source)
+    parent, filename = os.path.split(destination)
+    prefix = ".load-inventory-"
+    if (not os.path.isabs(destination) or os.path.normpath(destination) != destination
+            or "\\" in destination or filename != "02-devices_config.csv"
+            or os.path.dirname(parent) != os.path.dirname(source)
+            or not os.path.basename(parent).startswith(prefix)
+            or len(os.path.basename(parent)) == len(prefix)
+            or os.path.realpath(parent) != parent):
+        raise ValueError("private inventory destination is outside its authority")
+    identity = lambda item: (item.st_dev, item.st_ino, item.st_mode, item.st_uid)
+    def read_source():
+        descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "rb") as stream:
+            before = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                    or not 0 < before.st_size <= 64 * 1024 * 1024):
+                raise ValueError("private inventory source is not a bounded regular file")
+            content = stream.read(64 * 1024 * 1024 + 1)
+            after = os.fstat(stream.fileno())
+        fingerprint = lambda item: (identity(item), item.st_size, item.st_mtime_ns,
+                                     item.st_ctime_ns, item.st_nlink)
+        if (len(content) != before.st_size or fingerprint(before) != fingerprint(after)
+                or fingerprint(after) != fingerprint(os.lstat(source))):
+            raise ValueError("private inventory source changed while reading")
+        return content, fingerprint(after)
+    metadata = os.lstat(parent)
+    if (not stat.S_ISDIR(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o700
+            or metadata.st_uid != os.geteuid()):
+        raise ValueError("private inventory directory must be owned 0700")
+    directory = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    temporary = ".inventory-" + secrets.token_hex(12)
+    created = False
+    published = False
+    held = None
     try:
-        with os.fdopen(fd, "w", newline="", encoding="utf-8") as f:
-            csv.writer(f).writerows(new_rows)
-        if os.path.isfile(target):
-            shutil.copymode(target, temporary)
+        if identity(os.fstat(directory)) != identity(metadata):
+            raise ValueError("private inventory directory changed")
+        try:
+            os.stat(filename, dir_fd=directory, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
         else:
-            os.chmod(temporary, 0o644)
-        os.replace(temporary, target)
+            raise FileExistsError("private inventory destination already exists")
+        payload, source_identity = read_source()
+        original = payload
+        if air_records is not None:
+            rows = list(csv.reader(io.StringIO(payload.decode("utf-8-sig"))))
+            updated, _counts = _updated_air_inventory_rows(rows, air_records, source)
+            if updated != rows:
+                rendered = io.StringIO(newline="")
+                csv.writer(rendered).writerows(updated)
+                payload = rendered.getvalue().encode("utf-8")
+        if read_source() != (original, source_identity):
+            raise ValueError("private inventory customer source changed")
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                             0o600, dir_fd=directory)
+        created = True
+        held = os.fstat(descriptor)
+        with os.fdopen(descriptor, "wb") as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+            held = os.fstat(stream.fileno())
+        if identity(os.lstat(parent)) != identity(metadata) or os.path.realpath(parent) != parent:
+            raise ValueError("private inventory directory changed before publication")
+        os.link(temporary, filename, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
+        published = True
+        os.unlink(temporary, dir_fd=directory)
+        created = False
+        final = os.stat(filename, dir_fd=directory, follow_symlinks=False)
+        if (identity(final) != identity(held) or final.st_nlink != 1
+                or final.st_size != len(payload)
+                or identity(os.lstat(parent)) != identity(metadata)):
+            raise ValueError("private inventory publication identity changed")
     except BaseException:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+        for name, owned in ((temporary, created), (filename, published)):
+            if owned:
+                try:
+                    present = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                    if held is not None and (present.st_dev, present.st_ino) == (held.st_dev, held.st_ino):
+                        os.unlink(name, dir_fd=directory)
+                except FileNotFoundError:
+                    pass
         raise
-    return added, updated, already_exists
+    finally:
+        os.close(directory)
 
 # ── 验证 ──────────────────────────────────────────────────────────────────────
 
@@ -1726,17 +1825,11 @@ def main():
         print(f"[INFO] 当前目录未找到 {os.path.basename(P2P_AIR_JSON)}，跳过 AIR 节点")
 
     if inventory_output is not None:
-        # Exclusive creation prevents replacing customer files or following a
-        # pre-existing output symlink. The load owner supplies a private directory.
-        with open(DEVICES_CSV, "rb") as source:
-            payload = source.read()
-        descriptor = os.open(inventory_output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(payload)
-        if (switch_scope in {"all", "eth"} and deployment_scope != "prod"
-                and os.path.isfile(P2P_AIR_JSON)):
-            append_air_records_to_csv(inventory_output, air_records, subnets,
-                                      production_path=DEVICES_CSV)
+        # This intentionally precedes quiesce: only held private authority is
+        # written. The live CSV and five DHCP outputs remain below quiesce.
+        write_private_inventory(inventory_output, DEVICES_CSV,
+            air_records if (switch_scope in {"all", "eth"} and deployment_scope != "prod"
+                            and os.path.isfile(P2P_AIR_JSON)) else None)
         if inventory_only:
             return
 

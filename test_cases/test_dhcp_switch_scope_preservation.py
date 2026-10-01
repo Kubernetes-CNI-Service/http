@@ -477,12 +477,28 @@ class DhcpSwitchScopeDirectTests(unittest.TestCase):
 
 
 class DerivedInventoryTests(unittest.TestCase):
+    def test_private_publication_failure_cleans_only_owned_temporary_file(self):
+        with tempfile.TemporaryDirectory() as name:
+            fixture = ScopedDhcpFixture(Path(name))
+            private = fixture.devices_file.resolve().parent / ".load-inventory-test"
+            private.mkdir(mode=0o700)
+            destination = private / "02-devices_config.csv"
+            sentinel = private / "owner-note"
+            sentinel.write_bytes(b"keep")
+            with mock.patch.object(DHCP.os, "link", side_effect=OSError("fixture publication failed")):
+                with self.assertRaisesRegex(OSError, "fixture publication failed"):
+                    DHCP.write_private_inventory(str(destination), str(fixture.devices_file))
+            self.assertEqual(["owner-note"], [entry.name for entry in private.iterdir()])
+            self.assertEqual(b"keep", sentinel.read_bytes())
+
     def test_inventory_output_cannot_overwrite_source_existing_file_or_symlink(self):
         for target_kind in ("source", "existing", "symlink"):
             with self.subTest(target_kind=target_kind), tempfile.TemporaryDirectory() as name:
                 fixture = ScopedDhcpFixture(Path(name))
                 before = fixture.devices_file.read_bytes()
-                destination = fixture.root / "derived.csv"
+                private = fixture.devices_file.resolve().parent / ".load-inventory-test"
+                private.mkdir(mode=0o700)
+                destination = private / "02-devices_config.csv"
                 if target_kind == "source":
                     destination = fixture.devices_file
                 elif target_kind == "existing":
@@ -490,7 +506,7 @@ class DerivedInventoryTests(unittest.TestCase):
                 else:
                     destination.symlink_to(fixture.devices_file)
                 original = destination.read_bytes()
-                with self.assertRaises(FileExistsError):
+                with self.assertRaises(ValueError if target_kind == "source" else FileExistsError):
                     fixture.execute(["c1-generate_dhcp.py", "-y", "--inventory-output",
                                      str(destination), "--inventory-only"])
                 self.assertEqual(before, fixture.devices_file.read_bytes())
@@ -503,7 +519,9 @@ class DerivedInventoryTests(unittest.TestCase):
             fixture.air_file.write_text('{"nodes": {}}', encoding="utf-8")
             source = fixture.devices_file.read_bytes()
             outputs = fixture.snapshot()
-            derived = fixture.root / "derived.csv"
+            private = fixture.devices_file.resolve().parent / ".load-inventory-test"
+            private.mkdir(mode=0o700)
+            derived = private / "02-devices_config.csv"
             fixture.execute([
                 "c1-generate_dhcp.py", "-y", "--inventory-output", str(derived),
                 "--inventory-only",
@@ -512,6 +530,28 @@ class DerivedInventoryTests(unittest.TestCase):
             self.assertNotIn(AIR_HOST, derived.read_text())
             self.assertIn(FAMILY_HOST["eth"], derived.read_text())
             self.assertEqual(outputs, fixture.snapshot())
+
+    def test_inventory_destination_rejects_nonprivate_authority_before_any_write(self):
+        for kind in ("outside", "bad-name", "empty-suffix", "mode", "alias"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as name:
+                fixture = ScopedDhcpFixture(Path(name))
+                private = fixture.devices_file.resolve().parent / (".load-inventory-" if kind == "empty-suffix" else ".load-inventory-test")
+                private.mkdir(mode=0o700)
+                destination = private / ("wrong.csv" if kind == "bad-name" else "02-devices_config.csv")
+                if kind == "outside":
+                    destination = fixture.root / "outside.csv"
+                elif kind == "mode":
+                    private.chmod(0o755)
+                elif kind == "alias":
+                    alias = private.parent / ".load-inventory-alias"
+                    alias.symlink_to(private, target_is_directory=True)
+                    destination = alias / "02-devices_config.csv"
+                source, outputs = fixture.devices_file.read_bytes(), fixture.snapshot()
+                with self.assertRaisesRegex(ValueError, "private inventory"):
+                    fixture.execute(["c1-generate_dhcp.py", "-y", "--inventory-output", str(destination), "--inventory-only"])
+                self.assertFalse(destination.exists())
+                self.assertEqual(source, fixture.devices_file.read_bytes())
+                self.assertEqual(outputs, fixture.snapshot())
 
 
 if __name__ == "__main__":
