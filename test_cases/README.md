@@ -159,12 +159,17 @@ Popen.wait 的内部退避不是同一轮询承诺，但仍受同一期限约束
 `test_project_contracts.py` 是跨目录契约主入口，按功能契约分组加载各目录模块。
 `test_dhcp_optional_contract.py`、`test_dhcp_optional_workflow.py` 与
 `test_ztp_service_runtime.py` 还锁定空 DHCP subnet 占位文件的唯一例外：
-`dhcp-server.status` 和 `ztp.status` 都显式为 `disabled` 时，仅含合法表头的
-`02-dhcp-subnet_config.csv` 可继续参与来源哈希及 IB 配置流程；缺失、零字节、
-纯空白、非法表头或符号链接输入仍拒绝。
-双 disabled 时 DHCP listener 和生成/安装/启动保持关闭；仅表头但任一服务启用、
+`dhcp-server.status` 和 `ztp.status` 都显式为 `disabled` 时，仅有规范表头、没有
+语义数据行的 `02-dhcp-subnet_config.csv` 可继续参与来源哈希及 IB 配置流程；
+中间或尾部纯空行（含仅空格/Tab）允许，只有分隔符等伪装成空行的 CSV 记录拒绝，
+并按原始物理记录跨度报告行号。缺失、零字节、纯空白、非法表头或符号链接输入仍拒绝。
+双 disabled 时 DHCP listener 和生成/安装/启动保持关闭；仅表头但 DHCP/ZTP 任一启用、
 非空畸形 CSV、无网络却指定 relay ingress 均拒绝。Docker 实际服务切换需另按
 `REAL_ENVIRONMENT.md` 留存证据。
+Supervisor 的 Apache 判断还须独立使用已启用的 HTTP 服务和显式本机地址：
+DHCP/ZTP 双 disabled、无 ZTP endpoint 时仍可启动 HTTP-only Apache，启动前要通过
+本机地址门禁；HTTP disabled 即使留有 address 也不能启 Apache，DHCP-only/relay
+不能被空的 ZTP endpoint 误判为需要 Apache。
 `test_load_release_transaction.py` 在隔离临时目录中验证 load 的统一 release：只有 DHCP 与
 Cumulus/NVOS 子 manifest 的设备身份、真实 YAML hash、完整 MAC 链接集合、effective default
 及 DHCP 输出都匹配当前输入时才发布 parent release；旧 `latest_yaml`、篡改 YAML/链接或

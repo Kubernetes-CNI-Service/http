@@ -8,6 +8,7 @@ import io
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 import stat
+import tarfile
 import tempfile
 import unittest
 from unittest import mock
@@ -22,6 +23,77 @@ SPEC.loader.exec_module(DOWNLOAD)
 
 
 class DownloadCliContractTests(unittest.TestCase):
+    def test_selected_historical_project_without_devices_is_archival_only(self):
+        """Default single-project download retains raw history without device CSV."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / "DAY0-Prepare/old-project"
+            project.mkdir(parents=True)
+            (project / "01-global.yaml").write_bytes(b"legacy: true\n")
+            (project / "field-note.txt").write_bytes(b"customer note\n")
+            output = root / "single-history.tar.gz"
+            args = DOWNLOAD.parse_args([str(project), "-o", str(output)])
+            notice = io.StringIO()
+            with mock.patch.object(
+                DOWNLOAD.package_core, "resolve_project", return_value=project,
+            ), mock.patch.object(
+                DOWNLOAD.package_core, "managed_pubkey_paths", return_value=[],
+            ), redirect_stdout(notice):
+                DOWNLOAD.create_day0_archive(args)
+            with tarfile.open(output, "r:gz") as archive:
+                note = archive.extractfile(
+                    "DAY0-Prepare/old-project/field-note.txt"
+                )
+                self.assertIsNotNone(note)
+                self.assertEqual(b"customer note\n", note.read())
+            self.assertIn("[NON-DEPLOYABLE] old-project", notice.getvalue())
+            self.assertIn("02-devices_config.csv", notice.getvalue())
+            self.assertIn("02-dhcp-subnet_config.csv", notice.getvalue())
+
+    def test_incomplete_historical_day0_download_keeps_raw_files_and_lists_missing_core(self):
+        """A historical project is archived, never silently omitted as deployable."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            day0 = root / "DAY0-Prepare"
+            missing_global = day0 / "missing-global"
+            missing_devices = day0 / "missing-devices"
+            missing_subnet = day0 / "missing-subnet"
+            for project in (missing_global, missing_devices, missing_subnet):
+                project.mkdir(parents=True)
+                (project / "field-note.txt").write_bytes(project.name.encode())
+            (missing_global / "02-devices_config.csv").write_bytes(b"hostname\nleaf\n")
+            (missing_global / "02-dhcp-subnet_config.csv").write_bytes(b"legacy\n")
+            (missing_devices / "01-global.yaml").write_bytes(b"legacy: true\n")
+            (missing_devices / "02-dhcp-subnet_config.csv").write_bytes(b"legacy\n")
+            (missing_subnet / "01-global.yaml").write_bytes(b"legacy: true\n")
+            (missing_subnet / "02-devices_config.csv").write_bytes(b"hostname\nleaf\n")
+            output = root / "all-history.tar.gz"
+            args = DOWNLOAD.parse_args(["--all-day0", "-o", str(output)])
+            notice = io.StringIO()
+            with mock.patch.multiple(
+                DOWNLOAD.package_core, ROOT=root, DAY0=day0,
+                MANIFEST=root / "ztp/.setup_manifest",
+            ), mock.patch.object(
+                DOWNLOAD.package_core, "managed_pubkey_paths", return_value=[],
+            ), redirect_stdout(notice):
+                DOWNLOAD.create_day0_archive(args)
+            with tarfile.open(output, "r:gz") as archive:
+                names = set(archive.getnames())
+                for project in (missing_global, missing_devices, missing_subnet):
+                    member = archive.extractfile(
+                        f"DAY0-Prepare/{project.name}/field-note.txt"
+                    )
+                    self.assertIsNotNone(member)
+                    self.assertEqual(project.name.encode(), member.read())
+                self.assertNotIn("tools/deploy-upload-archive.py", names)
+            for project, absent in (
+                (missing_global, "01-global.yaml"),
+                (missing_devices, "02-devices_config.csv"),
+                (missing_subnet, "02-dhcp-subnet_config.csv"),
+            ):
+                self.assertIn(f"[NON-DEPLOYABLE] {project.name}", notice.getvalue())
+                self.assertIn(absent, notice.getvalue())
+
     def test_project_folder_is_the_default_positional_argument(self):
         expected = "DAY0-Prepare/2099-example-site/"
         self.assertEqual(expected, DOWNLOAD.parse_args([expected]).project)

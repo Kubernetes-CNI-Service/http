@@ -12,6 +12,7 @@ import csv
 from contextlib import contextmanager
 from dataclasses import dataclass
 import fcntl
+import io
 import ipaddress
 import json
 import os
@@ -1012,20 +1013,152 @@ def inspect_http_listener_owners(
     return tuple(owners)
 
 
-def _read_dhcp_networks(
-    subnet_csv: Path, *, allow_empty_subnet: bool = False,
-) -> Tuple[DhcpNetwork, ...]:
-    path = Path(subnet_csv)
+def snapshot_subnet_csv_text(stream: io.TextIOBase) -> io.TextIOBase:
+    """Own a regular held FD and parse only its single stable byte snapshot.
+
+    Copy in bounded chunks to a private temporary file, without imposing an
+    arbitrary CSV size limit or retaining the whole input in memory.  A
+    caller-supplied StringIO already represents a package byte capture.
+    """
+    if isinstance(stream, io.StringIO):
+        return stream
+    snapshot = tempfile.TemporaryFile(mode="w+b")
     try:
-        metadata = path.lstat()
-        if not stat.S_ISREG(metadata.st_mode):
-            raise RuntimeContractError("DHCP subnet CSV must be a non-symlink regular file")
-        if metadata.st_size == 0:
-            raise RuntimeContractError("DHCP subnet CSV is zero bytes; canonical header required")
-        stream = path.open(newline="", encoding="utf-8-sig")
-    except OSError as exc:
-        raise RuntimeContractError(f"cannot read DHCP subnet CSV {path}: {exc}") from exc
+        descriptor = stream.fileno()
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or os.lseek(descriptor, 0, os.SEEK_CUR) != 0:
+            raise RuntimeContractError("DHCP subnet CSV snapshot requires a fresh regular FD")
+        while True:
+            block = os.read(descriptor, 64 * 1024)
+            if not block:
+                break
+            snapshot.write(block)
+        after = os.fstat(descriptor)
+        identity = lambda item: (
+            item.st_dev, item.st_ino, item.st_mode, item.st_nlink,
+            item.st_size, item.st_mtime_ns, item.st_ctime_ns,
+        )
+        if identity(before) != identity(after) or snapshot.tell() != before.st_size:
+            raise RuntimeContractError("DHCP subnet CSV changed during byte snapshot")
+        snapshot.seek(0)
+        return io.TextIOWrapper(snapshot, encoding="utf-8-sig", newline="")
+    except (OSError, ValueError) as exc:
+        snapshot.close()
+        raise RuntimeContractError(f"cannot snapshot DHCP subnet CSV: {exc}") from exc
+    except Exception:
+        snapshot.close()
+        raise
+    finally:
+        stream.close()
+
+
+def subnet_csv_record_start_lines(stream: io.TextIOBase) -> Tuple[int, ...]:
+    """Preflight raw CSV records on one held stream, then restore its cursor.
+
+    Genuinely whitespace-only physical records may appear between data rows
+    or at the end. A delimiter/quote record is content even when DictReader
+    would normalize all its values to empty strings. csv.reader tracks quoted
+    multiline records, so diagnostics use their true first physical line.
+    """
+    class ObservedLines:
+        def __init__(self, source: io.TextIOBase) -> None:
+            self.source = source
+            self.current: list[str] = []
+
+        def __iter__(self):
+            return self
+
+        def __next__(self) -> str:
+            line = next(self.source)
+            self.current.append(line)
+            return line
+
+    initial = stream.tell()
+    observed = ObservedLines(stream)
+    reader = csv.reader(observed, strict=True)
+    starts: list[int] = []
+    try:
+        try:
+            next(reader)
+        except StopIteration:
+            return ()  # The owning reader reports the missing header.
+        if not "".join(observed.current).strip(" \t\r\n"):
+            raise RuntimeContractError(
+                "DHCP subnet CSV line 1 (行1) must contain the canonical header"
+            )
+        observed.current.clear()
+        previous_end = reader.line_num
+        for cells in reader:
+            start = previous_end + 1
+            previous_end = reader.line_num
+            raw = "".join(observed.current)
+            observed.current.clear()
+            if not raw.strip(" \t\r\n"):
+                # DictReader skips a physically empty csv.reader record ([]),
+                # but yields a whitespace-only field. Keep its index aligned
+                # with the later semantic pass, which skips that row itself.
+                if cells:
+                    starts.append(start)
+                continue
+            if not any(cell.strip() for cell in cells):
+                raise RuntimeContractError(
+                    f"DHCP subnet CSV line {start} (行{start}) "
+                    "contains an empty delimiter/quote record"
+                )
+            starts.append(start)
+    except csv.Error as exc:
+        line = reader.line_num
+        raise RuntimeContractError(
+            f"DHCP subnet CSV line {line} (行{line}) has invalid CSV syntax: {exc}"
+        ) from exc
+    finally:
+        stream.seek(initial)
+    return tuple(starts)
+
+
+def _read_dhcp_networks(
+    subnet_csv: Path, *, dhcp_enabled: bool, ztp_enabled: bool,
+    _held_stream: Optional[io.TextIOBase] = None,
+) -> Tuple[DhcpNetwork, ...]:
+    if type(dhcp_enabled) is not bool or type(ztp_enabled) is not bool:
+        raise RuntimeContractError("DHCP/ZTP modes must be explicit builtin bool values")
+    if ztp_enabled and not dhcp_enabled:
+        raise RuntimeContractError("DHCP disabled with ZTP enabled is invalid")
+    path = Path(subnet_csv)
+    if _held_stream is None:
+        try:
+            metadata = path.lstat()
+            if not stat.S_ISREG(metadata.st_mode):
+                raise RuntimeContractError("DHCP subnet CSV must be a non-symlink regular file")
+            if metadata.st_size == 0:
+                raise RuntimeContractError("DHCP subnet CSV is zero bytes; canonical header required")
+        except OSError as exc:
+            raise RuntimeContractError(f"cannot read DHCP subnet CSV {path}: {exc}") from exc
+        if any(not hasattr(os, name) for name in ("O_NOFOLLOW", "O_NONBLOCK", "O_CLOEXEC")):
+            raise RuntimeContractError("DHCP subnet CSV safe open requires O_NOFOLLOW/O_NONBLOCK/O_CLOEXEC")
+        descriptor = -1
+        try:
+            descriptor = os.open(
+                path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+            )
+            opened = os.fstat(descriptor)
+            if (not stat.S_ISREG(opened.st_mode)
+                    or (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino)):
+                raise RuntimeContractError("DHCP subnet CSV changed after check or is not regular")
+            if opened.st_size == 0:
+                raise RuntimeContractError("DHCP subnet CSV is zero bytes; canonical header required")
+            stream = os.fdopen(descriptor, "r", newline="", encoding="utf-8-sig")
+            descriptor = -1
+        except OSError as exc:
+            raise RuntimeContractError(f"cannot read DHCP subnet CSV {path}: {exc}") from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+    else:
+        stream = _held_stream
+    stream = snapshot_subnet_csv_text(stream)
     with stream:
+        line_starts = subnet_csv_record_start_lines(stream)
         reader = csv.DictReader(stream)
         if reader.fieldnames is None:
             raise RuntimeContractError("DHCP subnet CSV has no header")
@@ -1043,9 +1176,10 @@ def _read_dhcp_networks(
         reader.fieldnames = fields
         result = []
         shared_lines = {}
-        for lineno, row in enumerate(reader, 2):
+        for index, row in enumerate(reader):
             if not any(str(value or "").strip() for value in row.values()):
                 continue
+            lineno = line_starts[index]
             profile = str(row.get("cumulus_profile") or "").strip().casefold()
             nvos_ztp = str(row.get("nvos_ztp") or "").strip().casefold()
             if profile not in {"oob", "oobofoob", "none"}:
@@ -1059,6 +1193,10 @@ def _read_dhcp_networks(
                     f"nvos_ztp={nvos_ztp!r}"
                 )
             endpoint_enabled = profile in {"oob", "oobofoob"} or nvos_ztp == "yes"
+            if endpoint_enabled and not ztp_enabled:
+                raise RuntimeContractError(
+                    f"DHCP subnet CSV line {lineno} enables ZTP while global ZTP is disabled"
+                )
             raw_service_ip = str(row.get("ztp_service_ip") or "").strip()
             if endpoint_enabled and not raw_service_ip:
                 raise RuntimeContractError(
@@ -1108,7 +1246,30 @@ def _read_dhcp_networks(
                 service_ip=service_ip,
                 endpoint_enabled=endpoint_enabled,
             ))
+    if result and not dhcp_enabled:
+        raise RuntimeContractError("DHCP disabled cannot have subnet rows")
+    if not result and dhcp_enabled:
+        raise RuntimeContractError("no DHCP networks are configured")
+    if ztp_enabled and not any(item.endpoint_enabled for item in result):
+        raise RuntimeContractError("ZTP enabled requires an endpoint row")
     return tuple(result)
+
+
+def _read_dhcp_networks_from_bytes(
+    payload: bytes, *, dhcp_enabled: bool, ztp_enabled: bool,
+) -> Tuple[DhcpNetwork, ...]:
+    """Run the same row semantics on already-bound bytes without reopening a path."""
+    if not payload:
+        raise RuntimeContractError("DHCP subnet CSV is zero bytes; canonical header required")
+    try:
+        decoded = payload.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise RuntimeContractError("DHCP subnet CSV is not UTF-8") from exc
+    return _read_dhcp_networks(
+        Path("<held-subnet>"), dhcp_enabled=dhcp_enabled,
+        ztp_enabled=ztp_enabled,
+        _held_stream=io.StringIO(decoded),
+    )
 
 
 def _ordered_names(values: Iterable[str], label: str) -> Tuple[str, ...]:
@@ -1229,11 +1390,12 @@ def _validate_selected_interface_networks(
 def plan_dhcp_runtime(
     subnet_csv: Path,
     *,
+    dhcp_enabled: bool,
+    ztp_enabled: bool,
     link_snapshot: Any,
     address_snapshot: Any,
     allowlist: Iterable[str] = (),
     relay_ingress: Iterable[str] = (),
-    allow_empty_subnet: bool = False,
 ) -> DhcpRuntimePlan:
     """Return the exact ordered Linux interfaces allowed to run dhcpd.
 
@@ -1242,10 +1404,9 @@ def plan_dhcp_runtime(
     a relay-only deployment instead requires explicitly scoped ingress names.
     """
     networks = _read_dhcp_networks(
-        Path(subnet_csv), allow_empty_subnet=allow_empty_subnet,
+        Path(subnet_csv), dhcp_enabled=dhcp_enabled,
+        ztp_enabled=ztp_enabled,
     )
-    if not networks and not allow_empty_subnet:
-        raise RuntimeContractError("no DHCP networks are configured")
     interfaces = _logical_interfaces(link_snapshot, address_snapshot)
     by_name = {interface.ifname: interface for interface in interfaces}
     by_index = {interface.ifindex: interface for interface in interfaces}
@@ -1405,11 +1566,12 @@ def revalidate_dhcp_runtime_plan(
     expected_plan: DhcpRuntimePlan,
     subnet_csv: Path,
     *,
+    dhcp_enabled: bool,
+    ztp_enabled: bool,
     link_snapshot: Any,
     address_snapshot: Any,
     allowlist: Iterable[str] = (),
     relay_ingress: Iterable[str] = (),
-    allow_empty_subnet: bool = False,
 ) -> DhcpRuntimePlan:
     """Re-plan immediately before exec and reject interface identity changes.
 
@@ -1420,11 +1582,12 @@ def revalidate_dhcp_runtime_plan(
     """
     current = plan_dhcp_runtime(
         subnet_csv,
+        dhcp_enabled=dhcp_enabled,
+        ztp_enabled=ztp_enabled,
         link_snapshot=link_snapshot,
         address_snapshot=address_snapshot,
         allowlist=allowlist,
         relay_ingress=relay_ingress,
-        allow_empty_subnet=allow_empty_subnet,
     )
     fields = (
         "listener_names", "listener_ifindexes", "direct_shared_networks",

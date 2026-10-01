@@ -352,7 +352,7 @@ class QuietContractTest(unittest.TestCase):
         project = http_root / "DAY0-Prepare/site-a"
         project.mkdir(parents=True, exist_ok=True)
         (project / "01-global.yaml").write_text(
-            "common:\n  mgmt:\n    http:\n      port: 80\n"
+            "common:\n  mgmt:\n    http:\n      status: enabled\n      port: 80\n"
             "    dhcp-server:\n      status: enabled\n",
             encoding="utf-8",
         )
@@ -4447,6 +4447,42 @@ def monitor_authority_recovery_decision(_payload, _diagnostics):
 
 
 class ActivationContractTests(QuietContractTest):
+    def test_r22_docker_plan_passes_explicit_global_service_modes(self):
+        """The Docker boundary must not re-infer both modes from one empty flag."""
+        activate = load_script("activate.py")
+        with tempfile.TemporaryDirectory() as temporary:
+            http_root = Path(temporary) / "html"
+            project = http_root / "DAY0-Prepare/site-a"
+            project.mkdir(parents=True)
+            (project / "01-global.yaml").write_text(
+                "common:\n  mgmt:\n    dhcp-server: {status: disabled}\n"
+                "    ztp: {status: disabled}\n", encoding="utf-8",
+            )
+            (project / "02-dhcp-subnet_config.csv").write_bytes(
+                b"shared_network,subnet,netmask,range_start,range_end,routers,"
+                b"ztp_service_ip,cumulus_profile,nvos_ztp\n"
+            )
+            settings = activate.Settings(
+                http_root=http_root, project_name="site-a", scope="air",
+            )
+            selected = object()
+            runtime = SimpleNamespace(plan_dhcp_runtime=mock.Mock(return_value=selected))
+            with mock.patch.object(activate, "validate_project_mount"), \
+                    mock.patch.object(
+                        activate, "capture_stable_network_snapshot",
+                        return_value=([], []),
+                    ), mock.patch.object(
+                        activate, "_load_runtime_module", return_value=runtime,
+                    ):
+                result, links, addresses, loaded = activate.build_runtime_plan(settings)
+            self.assertIs(result, selected)
+            self.assertEqual(([], []), (links, addresses))
+            self.assertIs(loaded, runtime)
+            kwargs = runtime.plan_dhcp_runtime.call_args.kwargs
+            self.assertIs(kwargs["dhcp_enabled"], False)
+            self.assertIs(kwargs["ztp_enabled"], False)
+            self.assertNotIn("allow_empty_subnet", kwargs)
+
     def test_invalid_subnet_header_cannot_be_allowed_hashed_or_marked(self):
         activate = load_script("activate.py")
         with tempfile.TemporaryDirectory() as temporary:
@@ -5387,7 +5423,8 @@ class ActivationContractTests(QuietContractTest):
             project = http_root / "DAY0-Prepare/site-a"
             project.mkdir(parents=True)
             (project / "01-global.yaml").write_text(
-                "common:\n  mgmt:\n    dhcp-server: {status: enabled}\n"
+                "common:\n  mgmt:\n    http: {status: enabled}\n"
+                "    dhcp-server: {status: enabled}\n"
                 "    ztp: {status: enabled}\n", encoding="utf-8",
             )
             (project / "02-devices_config.csv").write_text(
@@ -5547,7 +5584,8 @@ class ActivationContractTests(QuietContractTest):
                 "ztp_service_ip,cumulus_profile,nvos_ztp\n", encoding="utf-8",
             )
             inputs["global"].write_text(
-                "common:\n  mgmt:\n    dhcp-server:\n      status: disabled\n",
+                "common:\n  mgmt:\n    http: {status: enabled}\n"
+                "    dhcp-server:\n      status: disabled\n",
                 encoding="utf-8",
             )
             p2p_source = project / "fixture-p2p.xlsx"
@@ -5926,7 +5964,8 @@ class ActivationContractTests(QuietContractTest):
             project = Path(temporary) / "DAY0-Prepare/site-a"
             project.mkdir(parents=True)
             (project / "01-global.yaml").write_text(
-                "common:\n  mgmt:\n    http:\n      address: 192.0.2.88\n"
+                "common:\n  mgmt:\n    http:\n      status: enabled\n"
+                "      address: 192.0.2.88\n"
                 "    dhcp-server:\n      status: disabled\n",
                 encoding="utf-8",
             )
@@ -5941,6 +5980,51 @@ class ActivationContractTests(QuietContractTest):
                     selected, dhcp_status="disabled", http_listener_ips=listeners,
                 ),
             )
+
+    def test_http_disabled_explicit_address_cannot_start_apache(self) -> None:
+        activate = load_script("activate.py")
+        selected = plan(names=(), indexes=(), endpoints=())
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary) / "DAY0-Prepare/site-a"
+            project.mkdir(parents=True)
+            (project / "01-global.yaml").write_text(
+                "common:\n  mgmt:\n    http:\n      status: disabled\n"
+                "      address: 192.0.2.88\n"
+                "    dhcp-server:\n      status: disabled\n",
+                encoding="utf-8",
+            )
+            settings = SimpleNamespace(project_dir=project)
+            listeners = activate.project_http_listener_ips(settings, selected)
+            self.assertEqual((), listeners)
+            self.assertEqual(
+                (), activate.expected_services(
+                    selected, dhcp_status="disabled", http_listener_ips=listeners,
+                ),
+            )
+            with self.assertRaisesRegex(activate.ActivationError, "HTTP disabled"):
+                activate.project_http_listener_ips(
+                    settings,
+                    plan(names=(), indexes=(), endpoints=("192.0.2.88",)),
+                )
+
+    def test_observe_runtime_uses_one_http_policy_snapshot(self) -> None:
+        """Port, status and listener must not come from different global reads."""
+        activate = load_script("activate.py")
+        selected = plan(names=(), indexes=(), endpoints=())
+        settings = SimpleNamespace(allowlist=())
+        runtime = SimpleNamespace(
+            inspect_http_listener_owners=mock.Mock(return_value=()),
+        )
+        with mock.patch.object(
+            activate, "project_http_policy",
+            side_effect=((80, "192.0.2.88", True), (80, None, False)),
+        ) as policy, mock.patch.object(
+            activate, "build_runtime_plan", return_value=(selected, [], [], runtime),
+        ), mock.patch.object(activate, "validate_http_listener_ownership"), \
+                mock.patch.object(activate, "runtime_plan_payload", return_value={}):
+            _selected, _runtime, _payload, apache = activate.observe_runtime(settings)
+        self.assertEqual(1, policy.call_count)
+        self.assertIn("192.0.2.88", apache)
 
     def test_dhcp_only_or_relay_ingress_plan_still_runs_exact_dhcp_service(self) -> None:
         activate = load_script("activate.py")
@@ -7238,7 +7322,8 @@ class HealthContractTests(QuietContractTest):
             project = root / "DAY0-Prepare/site-a"
             project.mkdir(parents=True)
             (project / "01-global.yaml").write_text(
-                "common:\n  mgmt:\n    http:\n      address: 192.0.2.88\n"
+                "common:\n  mgmt:\n    http:\n      status: enabled\n"
+                "      address: 192.0.2.88\n"
                 "    dhcp-server:\n      status: disabled\n",
                 encoding="utf-8",
             )
@@ -8260,7 +8345,8 @@ class ContainerTransactionContractTests(QuietContractTest):
             project = root / "DAY0-Prepare/site-a"
             project.mkdir(parents=True)
             (project / "01-global.yaml").write_text(
-                "common:\n  mgmt:\n    http:\n      address: 192.0.2.88\n"
+                "common:\n  mgmt:\n    http:\n      status: enabled\n"
+                "      address: 192.0.2.88\n"
                 "    dhcp-server:\n      status: disabled\n",
                 encoding="utf-8",
             )
@@ -8406,7 +8492,8 @@ class ContainerTransactionContractTests(QuietContractTest):
             project = http_root / "DAY0-Prepare/site-a"
             project.mkdir(parents=True)
             (project / "01-global.yaml").write_text(
-                "common:\n  mgmt:\n    dhcp-server: {status: enabled}\n"
+                "common:\n  mgmt:\n    http: {status: enabled}\n"
+                "    dhcp-server: {status: enabled}\n"
                 "    ztp: {status: enabled}\n", encoding="utf-8",
             )
             (project / "02-devices_config.csv").write_text(

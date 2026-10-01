@@ -135,6 +135,8 @@ from ztp_service_runtime import (
     monitor_pid_lock,
     plan_dhcp_runtime,
     runtime_backend_from_environment,
+    snapshot_subnet_csv_text,
+    subnet_csv_record_start_lines,
     stop_native_ztp_monitors,
     write_monitor_pid_record_locked,
 )
@@ -889,7 +891,7 @@ def _nonempty_file(path: Path, label: str) -> None:
         raise LoadError(f"{label} 大小为 0：{path.name}；请准备真实内容后再次执行 load")
 
 
-def _require_subnet_input_file(path: Path) -> None:
+def _require_subnet_input_file(path: Path) -> os.stat_result:
     """Reject missing, linked, non-regular and zero-byte subnet authorities."""
     try:
         metadata = path.lstat()
@@ -899,6 +901,33 @@ def _require_subnet_input_file(path: Path) -> None:
         raise LoadError("02-dhcp-subnet_config.csv 必须是非软链接普通文件")
     if metadata.st_size == 0:
         raise LoadError("02-dhcp-subnet_config.csv 为零字节；必须提供规范表头")
+    return metadata
+
+
+def _open_subnet_input_file(path: Path):
+    """Read the validated final CSV through the same regular nofollow inode."""
+    initial = _require_subnet_input_file(path)
+    if any(not hasattr(os, name) for name in ("O_NOFOLLOW", "O_NONBLOCK", "O_CLOEXEC")):
+        raise LoadError("02-dhcp-subnet_config.csv 安全打开要求 O_NOFOLLOW/O_NONBLOCK/O_CLOEXEC")
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+        )
+        opened = os.fstat(descriptor)
+        if (not stat.S_ISREG(opened.st_mode)
+                or (opened.st_dev, opened.st_ino) != (initial.st_dev, initial.st_ino)):
+            raise LoadError("02-dhcp-subnet_config.csv 在检查后被替换或不是普通文件")
+        if opened.st_size == 0:
+            raise LoadError("02-dhcp-subnet_config.csv 为零字节；必须提供规范表头")
+        stream = os.fdopen(descriptor, "r", newline="", encoding="utf-8-sig")
+        descriptor = -1
+        return stream
+    except OSError as exc:
+        raise LoadError(f"无法安全读取 02-dhcp-subnet_config.csv：{exc}") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def project_air_topology_policy(project: Path) -> Path | None:
@@ -1048,6 +1077,20 @@ def _prepare_subnet_reader(reader: csv.DictReader) -> None:
     if missing:
         raise LoadError(f"DHCP subnet CSV 缺少列：{', '.join(missing)}")
     reader.fieldnames = fields
+
+
+def _subnet_record_lines(stream) -> tuple[int, ...]:
+    try:
+        return subnet_csv_record_start_lines(stream)
+    except RuntimeContractError as exc:
+        raise LoadError(str(exc)) from exc
+
+
+def _snapshot_subnet_input_stream(stream):
+    try:
+        return snapshot_subnet_csv_text(stream)
+    except RuntimeContractError as exc:
+        raise LoadError(str(exc)) from exc
 
 
 def _parse_subnet_ztp_fields(
@@ -1310,12 +1353,14 @@ def derive_service_ips_from_subnet(
     _require_subnet_input_file(path)
     _validate_ztp_prefix(ztp_prefix)
     found: dict[str, set[str]] = {profile: set() for profile in BOOTSTRAP_BY_PROFILE}
-    with path.open(newline="", encoding="utf-8-sig") as stream:
+    with _snapshot_subnet_input_stream(_open_subnet_input_file(path)) as stream:
+        line_starts = _subnet_record_lines(stream)
         reader = csv.DictReader(stream)
         _prepare_subnet_reader(reader)
-        for lineno, row in enumerate(reader, 2):
+        for index, row in enumerate(reader):
             if not any(str(value or "").strip() for value in row.values()):
                 continue
+            lineno = line_starts[index]
             address, profile, _nvos_ztp = _parse_subnet_ztp_fields(row, lineno)
             if profile == "none":
                 continue
@@ -1343,12 +1388,14 @@ def derive_boot_ips_from_subnet(
     _require_subnet_input_file(path)
     _validate_ztp_prefix(ztp_prefix)
     found = set()
-    with path.open(newline="", encoding="utf-8-sig") as stream:
+    with _snapshot_subnet_input_stream(_open_subnet_input_file(path)) as stream:
+        line_starts = _subnet_record_lines(stream)
         reader = csv.DictReader(stream)
         _prepare_subnet_reader(reader)
-        for lineno, row in enumerate(reader, 2):
+        for index, row in enumerate(reader):
             if not any(str(value or "").strip() for value in row.values()):
                 continue
+            lineno = line_starts[index]
             address, _profile, nvos_ztp = _parse_subnet_ztp_fields(row, lineno)
             if nvos_ztp == "yes":
                 found.add(address)
@@ -1561,23 +1608,40 @@ def select_p2p(
 
 
 def validate_subnet_file(path: Path, settings: GlobalSettings) -> None:
-    optional_empty = not settings.dhcp_enabled and not settings.ztp_enabled
+    if type(settings.dhcp_enabled) is not bool or type(settings.ztp_enabled) is not bool:
+        raise LoadError("DHCP/ZTP 状态必须是显式布尔值")
+    if settings.ztp_enabled and not settings.dhcp_enabled:
+        raise LoadError("DHCP disabled 且 ZTP enabled 的全局组合非法")
     _require_subnet_input_file(path)
-    with path.open(newline="", encoding="utf-8-sig") as stream:
+    with _snapshot_subnet_input_stream(_open_subnet_input_file(path)) as stream:
+        line_starts = _subnet_record_lines(stream)
         reader = csv.DictReader(stream)
         _prepare_subnet_reader(reader)
         rows = []
-        for lineno, row in enumerate(reader, start=2):
+        active_ztp_rows = 0
+        for index, row in enumerate(reader):
             if not any(str(value or "").strip() for value in row.values()):
                 continue
-            _parse_subnet_ztp_fields(row, lineno)
+            lineno = line_starts[index]
+            _service_ip, profile, nvos_ztp = _parse_subnet_ztp_fields(row, lineno)
+            if profile in BOOTSTRAP_BY_PROFILE or nvos_ztp == "yes":
+                active_ztp_rows += 1
+                if not settings.ztp_enabled:
+                    raise LoadError(
+                        f"DHCP subnet CSV 第 {lineno} 行启用了平台 ZTP，"
+                        "但全局 ZTP disabled"
+                    )
             rows.append((lineno, row))
     try:
         validate_dhcp_subnet_placements(rows, service_ips=settings.service_ips)
     except ValueError as exc:
         raise LoadError(str(exc)) from exc
-    if not rows and not optional_empty:
+    if not rows and settings.dhcp_enabled:
         raise LoadError("02-dhcp-subnet_config.csv 没有 subnet 记录")
+    if rows and not settings.dhcp_enabled:
+        raise LoadError("DHCP disabled 时不能包含 subnet 记录")
+    if settings.ztp_enabled and rows and not active_ztp_rows:
+        raise LoadError("全局 ZTP enabled 但没有启用 ZTP 的 endpoint 行")
 
 
 def validate_pubkey(path: Path) -> None:
@@ -3328,8 +3392,8 @@ def plan_local_dhcp_runtime(
             address_snapshot=address_snapshot,
             allowlist=allowlist,
             relay_ingress=relay_ingress,
-            allow_empty_subnet=(not inputs.settings.dhcp_enabled
-                                and not inputs.settings.ztp_enabled),
+            dhcp_enabled=inputs.settings.dhcp_enabled,
+            ztp_enabled=inputs.settings.ztp_enabled,
         )
     except RuntimeContractError as exc:
         raise LoadError(f"DHCP listener 动态规划失败：{exc}") from exc
@@ -6753,12 +6817,16 @@ def service_ip_bindings(inputs: ProjectInputs) -> tuple[str, ...]:
     """Return service IP/prefix pairs sourced from enabled endpoint rows."""
     allowed = set(inputs.settings.service_ips)
     bindings: dict[str, int] = {}
-    with inputs.subnet_file.open(newline="", encoding="utf-8-sig") as stream:
+    with _snapshot_subnet_input_stream(
+        _open_subnet_input_file(inputs.subnet_file)
+    ) as stream:
+        line_starts = _subnet_record_lines(stream)
         reader = csv.DictReader(stream)
         _prepare_subnet_reader(reader)
-        for lineno, row in enumerate(reader, 2):
+        for index, row in enumerate(reader):
             if not any(str(value or "").strip() for value in row.values()):
                 continue
+            lineno = line_starts[index]
             try:
                 network = ipaddress.IPv4Network(
                     f"{str(row.get('subnet') or '').strip()}/"
@@ -7081,7 +7149,10 @@ def supervisor_service_availability(
     the legacy systemd decision unchanged while allowing only the services
     explicitly justified by the container plan.
     """
-    http_available = bool(plan.endpoint_ips)
+    http_available = bool(
+        plan.endpoint_ips
+        or (inputs.settings.http_enabled and inputs.settings.http_address)
+    )
     dhcp_available = bool(plan.listener_names)
     if http_available and not validate_management_host(inputs.settings, dry_run):
         raise LoadError(
@@ -7361,10 +7432,9 @@ def preflight_services(
     backend = runtime_backend or service_runtime_backend()
     if backend.name == "supervisor":
         plan = dhcp_runtime_plan or plan_local_dhcp_runtime(inputs)
-        http_required = bool(plan.endpoint_ips)
-        dhcp_required = bool(plan.listener_names)
-        if dhcp_required and not inputs.settings.dhcp_enabled:
-            raise LoadError("DHCP listener 规划非空，但 global 中 dhcp-server 未启用")
+        http_required, dhcp_required = supervisor_service_availability(
+            inputs, plan, dry_run,
+        )
         if http_required:
             verify_control_auth(runtime_backend=backend, dry_run=dry_run)
             verify_published_files(inputs, images, dry_run=dry_run)
@@ -7413,12 +7483,16 @@ def ztp_url_network_requirements(
     """Return URL service CIDRs and the DHCP networks which reference each IP."""
     bindings = service_ip_bindings(inputs)
     references: dict[str, list[tuple[str, str, str]]] = {}
-    with inputs.subnet_file.open(newline="", encoding="utf-8-sig") as stream:
+    with _snapshot_subnet_input_stream(
+        _open_subnet_input_file(inputs.subnet_file)
+    ) as stream:
+        line_starts = _subnet_record_lines(stream)
         reader = csv.DictReader(stream)
         _prepare_subnet_reader(reader)
-        for lineno, row in enumerate(reader, 2):
+        for index, row in enumerate(reader):
             if not any(str(value or "").strip() for value in row.values()):
                 continue
+            lineno = line_starts[index]
             try:
                 network = ipaddress.IPv4Network(
                     f"{str(row.get('subnet') or '').strip()}/"
@@ -7648,12 +7722,13 @@ def start_services(
     plan = dhcp_runtime_plan or plan_local_dhcp_runtime(inputs)
     backend = runtime_backend or service_runtime_backend()
     if backend.name == "supervisor":
-        http_required = bool(plan.endpoint_ips)
-        dhcp_required = bool(plan.listener_names)
+        http_required, dhcp_required = supervisor_service_availability(
+            inputs, plan, dry_run,
+        )
         # This endpoint check can prompt the operator, so it must finish before
         # the first Supervisor mutation.  DHCP-only plans have no URL endpoint
         # and must not be forced through an Apache-specific gate.
-        if http_required:
+        if plan.endpoint_ips:
             ensure_ztp_url_network_ready(inputs, dry_run=dry_run)
         if dry_run:
             if http_required:

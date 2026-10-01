@@ -397,7 +397,16 @@ def latest_device_state(hostname):
 def config_sync_verified(result, hostname, operation_id, trigger_id):
     """Accept only current observable readback evidence, never a receipt refresh."""
     evidence = result.get("config_sync_verification")
-    if (result.get("state") != "triggered" or result.get("config_sync_outcome") != "runtime-verified"
+    if (result.get("state") != "triggered"
+            or result.get("hostname") != hostname
+            or result.get("operation") != "replace-config"
+            or result.get("effective_operation") != "replace-config"
+            or result.get("trigger_source") not in {
+                "manual_config_sync_web", "manual_config_sync_cli",
+            }
+            or result.get("operation_id") != operation_id
+            or result.get("trigger_id") != trigger_id
+            or result.get("config_sync_outcome") != "runtime-verified"
             or not isinstance(evidence, dict)):
         return False
     return (
@@ -476,6 +485,11 @@ def latest_cli_operations():
                     or summary.get("effective_operation")
                     or summary.get("operation") or operation_name
                 ),
+                "effective_operation": str(
+                    result.get("effective_operation")
+                    or summary.get("effective_operation")
+                    or summary.get("operation") or operation_name
+                ),
                 "requested_operation": str(
                     summary.get("requested_operation") or operation_name
                 ),
@@ -492,20 +506,132 @@ def latest_cli_operations():
     return operations
 
 
-def accepted_result(trigger_id):
-    """Find the exact web/CLI result produced for this request."""
-    if not trigger_id:
+def _result_paths(project, operation):
+    directory = {
+        "ztp": "manual-trigger", "reset": "manual-reset",
+        "replace-config": "manual-config-sync",
+    }.get(operation)
+    if not directory:
+        return []
+    return list((project / "99-output-ztp" / directory).glob("*/*/result.json"))
+
+
+def _open_result_fd(project, operation, path):
+    """Hold each private result parent without following an intermediate link."""
+    directory = {
+        "ztp": "manual-trigger", "reset": "manual-reset",
+        "replace-config": "manual-config-sync",
+    }.get(operation)
+    try:
+        parts = path.relative_to(project).parts
+    except ValueError as exc:
+        raise OSError("result outside project") from exc
+    if (directory is None or len(parts) != 5
+            or parts[:2] != ("99-output-ztp", directory)
+            or parts[-1] != "result.json"
+            or any(part in {"", ".", ".."} for part in parts)):
+        raise OSError("invalid private result path")
+    if any(not hasattr(os, name) for name in (
+        "O_DIRECTORY", "O_NOFOLLOW", "O_CLOEXEC", "O_NONBLOCK",
+    )):
+        raise OSError("safe result open flags unavailable")
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    result_flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC
+    parent_fd = os.open(project, directory_flags)
+    try:
+        for component in parts[:-1]:
+            child_fd = os.open(component, directory_flags, dir_fd=parent_fd)
+            os.close(parent_fd)
+            parent_fd = child_fd
+        return os.open(parts[-1], result_flags, dir_fd=parent_fd)
+    finally:
+        os.close(parent_fd)
+
+
+def _result_snapshot(operation):
+    """Capture all existing result path and inode identities before launching."""
+    try:
+        project = DEVICES_CSV.resolve(strict=True).parent
+    except OSError:
+        return None
+    snapshot = set()
+    for path in _result_paths(project, operation):
+        descriptor = -1
+        try:
+            item = path.lstat()
+            descriptor = _open_result_fd(project, operation, path)
+            held = os.fstat(descriptor)
+        except OSError:
+            return None
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        if (not stat.S_ISREG(held.st_mode) or held.st_nlink != 1
+                or (item.st_dev, item.st_ino) != (held.st_dev, held.st_ino)):
+            return None
+        snapshot.add((str(path), item.st_dev, item.st_ino))
+    return snapshot
+
+
+def _read_result_json(project, operation, path):
+    """Read the produced result through one nofollow regular descriptor."""
+    descriptor = -1
+    try:
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            return {}
+        descriptor = _open_result_fd(project, operation, path)
+        held = os.fstat(descriptor)
+        if (not stat.S_ISREG(held.st_mode) or held.st_nlink != 1
+                or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+                != (held.st_dev, held.st_ino, held.st_size, held.st_mtime_ns)):
+            return {}
+        with os.fdopen(os.dup(descriptor), "r", encoding="utf-8") as stream:
+            value = json.load(stream)
+        after = os.fstat(descriptor)
+        visible = path.lstat()
+        if ((held.st_dev, held.st_ino, held.st_size, held.st_mtime_ns)
+                != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+                or (held.st_dev, held.st_ino, held.st_size, held.st_mtime_ns)
+                != (visible.st_dev, visible.st_ino, visible.st_size, visible.st_mtime_ns)):
+            return {}
+        return value if isinstance(value, dict) else {}
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def accepted_result(
+    hostname, operation_id, trigger_id, operation, trigger_source, prior_results,
+):
+    """Accept one new, unique and identity-matched result from this launch."""
+    if not all((hostname, operation_id, trigger_id, operation, trigger_source)) or prior_results is None:
         return {}
     try:
         project = DEVICES_CSV.resolve(strict=True).parent
     except OSError:
         return {}
-    for directory in ("manual-trigger", "manual-reset", "manual-config-sync"):
-        for path in (project / "99-output-ztp" / directory).glob("*/*/result.json"):
-            result = _read_json(path)
-            if str(result.get("trigger_id") or "") == trigger_id:
-                return result
-    return {}
+    prior_paths = {item[0] for item in prior_results}
+    prior_inodes = {(item[1], item[2]) for item in prior_results}
+    matching = []
+    for path in _result_paths(project, operation):
+        try:
+            item = path.lstat()
+        except OSError:
+            return {}
+        if (str(path) in prior_paths or (item.st_dev, item.st_ino) in prior_inodes):
+            continue
+        result = _read_result_json(project, operation, path)
+        if (result.get("hostname") == hostname
+                and result.get("operation_id") == operation_id
+                and result.get("trigger_id") == trigger_id
+                and result.get("operation") == operation
+                and result.get("effective_operation") == operation
+                and result.get("trigger_source") == trigger_source):
+            matching.append(result)
+    return matching[0] if len(matching) == 1 else {}
 
 
 def preview_result(operation_id, trigger_id, hostname):
@@ -1002,6 +1128,19 @@ def execute(
         hostname, scope, operation, operation_id, trigger_id,
         preview_fingerprint=preview_fingerprint,
     )
+    prior_results = _result_snapshot(operation)
+    if prior_results is None:
+        write_device_status(
+            hostname, "failed", scope=scope, started_at=started,
+            finished_at=timestamp(), baseline_round=baseline_round,
+            expected_round=expected_round,
+            operation_id=operation_id, trigger_id=trigger_id,
+            trigger_source=trigger_source, operation=operation,
+            requested_operation=requested_operation,
+            phase="config_sync" if config_sync else "confirm",
+            reason="无法冻结本次提交前的私有结果目录；未执行设备命令",
+        )
+        return
     print(f"[{timestamp()}] [RUN] {' '.join(command)}", flush=True)
     try:
         result = subprocess.run(
@@ -1042,7 +1181,10 @@ def execute(
             phase="config_sync" if config_sync else "confirm", reason=detail,
         )
         return
-    accepted = accepted_result(trigger_id)
+    accepted = accepted_result(
+        hostname, operation_id, trigger_id, operation, trigger_source,
+        prior_results,
+    )
     if not accepted or accepted.get("state") != "triggered":
         detail = (
             f"远程命令返回成功，但未找到本次 trigger_id={trigger_id} "

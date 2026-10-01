@@ -1144,6 +1144,63 @@ class UploadGateTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "missing required deployment members"):
                 UPLOAD.validate_uploaded_archive_for_deploy(archive, project)
 
+    def test_deploy_uploaded_warns_on_local_b_but_preserves_reviewed_a(self):
+        """A reviewed upload stays A after local edits, with visible drift notice."""
+        manifest = b'{"schema_version":1,"files":[]}\n'
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "http"
+            project = root / "DAY0-Prepare/customer"
+            project.mkdir(parents=True)
+            original = {
+                "01-global.yaml": b"global: A\n",
+                "02-devices_config.csv": b"hostname,type\nA,air\n",
+                "02-dhcp-subnet_config.csv": b"subnet-A\n",
+            }
+            for name, payload in original.items():
+                (project / name).write_bytes(payload)
+            archive_path = Path(directory) / "reviewed-A.tar.gz"
+            with tarfile.open(archive_path, "w:gz") as archive:
+                members = {
+                    "./infra/docker/deployment-source-manifest.json": manifest,
+                    "./tools/deployment_prewrite_guard.py": b"guard\n",
+                    **{
+                        f"./DAY0-Prepare/customer/{name}": payload
+                        for name, payload in original.items()
+                    },
+                }
+                for name, payload in members.items():
+                    info = tarfile.TarInfo(name)
+                    info.size = len(payload)
+                    archive.addfile(info, io.BytesIO(payload))
+            (project / "02-devices_config.csv").write_bytes(b"hostname,type\nB,air\n")
+            output = io.StringIO()
+
+            def write_current_manifest(path):
+                path.write_bytes(manifest)
+                return path
+
+            with mock.patch.object(UPLOAD, "ROOT", root), mock.patch.object(
+                UPLOAD.package_core, "ROOT", root,
+            ), mock.patch.object(
+                UPLOAD.package_core, "write_deployment_source_manifest",
+                side_effect=write_current_manifest,
+            ), redirect_stdout(output):
+                UPLOAD.validate_uploaded_archive_for_deploy(archive_path, project)
+            notice = output.getvalue()
+            self.assertIn("[WARN]", notice)
+            self.assertIn("02-devices_config.csv", notice)
+            self.assertIn("归档", notice)
+            self.assertIn("本地", notice)
+            self.assertEqual(b"hostname,type\nB,air\n", (
+                project / "02-devices_config.csv"
+            ).read_bytes())
+            with tarfile.open(archive_path, "r:gz") as archive:
+                member = archive.extractfile(
+                    "./DAY0-Prepare/customer/02-devices_config.csv"
+                )
+                self.assertIsNotNone(member)
+                self.assertEqual(original["02-devices_config.csv"], member.read())
+
     def test_every_real_upload_tests_packages_rechecks_then_connects(self):
         for deploy in (False, True):
             with self.subTest(deploy=deploy):

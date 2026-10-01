@@ -87,7 +87,11 @@ from _package_common import (
     p2p_source_snapshot,
     select_project_p2p_source,
 )
-from ztp_service_runtime import RuntimeContractError, stop_native_ztp_monitors
+from ztp_service_runtime import (
+    RuntimeContractError, stop_native_ztp_monitors,
+    snapshot_subnet_csv_text,
+    subnet_csv_record_start_lines,
+)
 import ssh_key_preparation as ssh_keys
 ZTP          = os.path.normpath(os.path.join(HERE, "..", "ztp"))
 TEMPLATE_DIR = os.path.join(HERE, "template")                # DAY0-Prepare/template/
@@ -2662,17 +2666,46 @@ def _validate_eth_csv(path):
     return errors, warnings
 
 
-def _validate_subnet_csv(path, *, allow_empty=False):
-    """校验 DHCP subnet CSV。"""
-    errors, warnings = [], []
+def _open_regular_subnet_csv(path):
+    """Open the checked final CSV through a nofollow, regular-file descriptor."""
+    if any(not hasattr(os, name) for name in ("O_NOFOLLOW", "O_NONBLOCK", "O_CLOEXEC")):
+        raise ValueError("DHCP subnet CSV 安全打开要求 O_NOFOLLOW/O_NONBLOCK/O_CLOEXEC")
     try:
         metadata = os.lstat(path)
     except OSError as exc:
-        return [f"  DHCP subnet CSV 不存在或无法读取：{exc}"], warnings
+        raise ValueError(f"DHCP subnet CSV 不存在或无法读取：{exc}") from exc
     if not stat.S_ISREG(metadata.st_mode):
-        return ["  DHCP subnet CSV 必须是非软链接普通文件"], warnings
+        raise ValueError("DHCP subnet CSV 必须是非软链接普通文件")
     if metadata.st_size == 0:
-        return ["  DHCP subnet CSV 文件为零字节；必须提供规范表头"], warnings
+        raise ValueError("DHCP subnet CSV 文件为零字节；必须提供规范表头")
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+        )
+        opened = os.fstat(descriptor)
+        if (not stat.S_ISREG(opened.st_mode)
+                or (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino)):
+            raise ValueError("DHCP subnet CSV 在检查后被替换或不是普通文件")
+        if opened.st_size == 0:
+            raise ValueError("DHCP subnet CSV 文件为零字节；必须提供规范表头")
+        stream = os.fdopen(descriptor, "r", newline="", encoding="utf-8-sig")
+        descriptor = -1
+        return stream
+    except OSError as exc:
+        raise ValueError(f"DHCP subnet CSV 无法安全打开：{exc}") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _validate_subnet_csv(path, *, dhcp_enabled: bool, ztp_enabled: bool):
+    """校验 DHCP subnet CSV。"""
+    errors, warnings = [], []
+    if type(dhcp_enabled) is not bool or type(ztp_enabled) is not bool:
+        return ["  DHCP/ZTP 状态必须是显式布尔值"], warnings
+    if ztp_enabled and not dhcp_enabled:
+        return ["  DHCP disabled 且 ZTP enabled 的全局组合非法"], warnings
     seen_networks = {}
     profile_services = {}
     nvos_service = None
@@ -2681,7 +2714,8 @@ def _validate_subnet_csv(path, *, allow_empty=False):
                      "cumulus_profile", "nvos_ztp"}
     legacy_cols = {"bootfile_name", "cumulus_provision_url"}
     try:
-        with open(path, newline="", encoding="utf-8-sig") as f:
+        with snapshot_subnet_csv_text(_open_regular_subnet_csv(path)) as f:
+            line_starts = subnet_csv_record_start_lines(f)
             reader = csv.DictReader(f)
             fields = [str(item or "").strip() for item in (reader.fieldnames or [])]
             if len(fields) != len(set(fields)):
@@ -2702,9 +2736,11 @@ def _validate_subnet_csv(path, *, allow_empty=False):
                 return errors, warnings
             reader.fieldnames = fields
             row_count = 0
-            for row_n, row in enumerate(reader, start=2):
+            active_ztp_rows = 0
+            for index, row in enumerate(reader):
                 if not any(str(value or "").strip() for value in row.values()):
                     continue
+                row_n = line_starts[index]
                 row_count += 1
                 shared_network = row.get("shared_network", "").strip()
                 subnet  = row.get("subnet", "").strip()
@@ -2734,6 +2770,12 @@ def _validate_subnet_csv(path, *, allow_empty=False):
                 profile = str(row.get("cumulus_profile") or "").strip().casefold()
                 nvos_ztp = str(row.get("nvos_ztp") or "").strip().casefold()
                 service_ip = str(row.get("ztp_service_ip") or "").strip()
+                if profile in {"oob", "oobofoob"} or nvos_ztp == "yes":
+                    active_ztp_rows += 1
+                    if not ztp_enabled:
+                        errors.append(
+                            f"  行{row_n} 启用了平台 ZTP，但全局 ZTP disabled"
+                        )
                 if profile not in {"oob", "oobofoob", "none"}:
                     errors.append(
                         f"  行{row_n} cumulus_profile='{profile}' 无效；"
@@ -2802,27 +2844,34 @@ def _validate_subnet_csv(path, *, allow_empty=False):
                 except ValueError:
                     # The field-specific checks above already provide the useful error.
                     pass
-            if row_count == 0 and not allow_empty:
+            if row_count == 0 and dhcp_enabled:
                 errors.append("  没有 subnet 记录")
+            if row_count and not dhcp_enabled:
+                errors.append("  DHCP disabled 时不能包含 subnet 记录")
+            if ztp_enabled and row_count and not active_ztp_rows:
+                errors.append("  全局 ZTP enabled 但没有启用 ZTP 的 endpoint 行")
     except Exception as ex:
         errors.append(f"  读取失败：{ex}")
     return errors, warnings
 
 
-def _project_allows_empty_subnet(proj_dir):
-    """Only an explicitly disabled DHCP/ZTP pair may use an empty placeholder."""
+def _project_subnet_service_modes(proj_dir):
+    """Read both global service states; never infer either from an empty CSV."""
     try:
         with open(os.path.join(proj_dir, "01-global.yaml"), encoding="utf-8") as stream:
             data = safe_load_global_yaml(stream.read())
         mgmt = data["common"]["mgmt"]
-        return all(
-            str(mgmt[key]["status"]).strip().casefold() == "disabled"
+        statuses = [
+            str(mgmt[key]["status"]).strip().casefold()
             for key in ("dhcp-server", "ztp")
-        )
+        ]
+        if any(status not in {"enabled", "disabled"} for status in statuses):
+            raise ValueError("DHCP/ZTP status must be enabled or disabled")
+        return tuple(status == "enabled" for status in statuses)
     except Exception:
-        # Invalid/missing YAML never grants the optional-empty exception;
-        # the normal global validator reports the input error separately.
-        return False
+        # The global validator reports invalid/missing YAML separately.
+        # Never grant the empty exception on an unknown global mode.
+        return True, True
 
 
 def _validate_global_yaml(path, section_key="eth"):
@@ -3076,10 +3125,12 @@ def _validate_project(proj_dir):
         )
 
     # DHCP subnet CSV
-    allow_empty_subnet = _project_allows_empty_subnet(proj_dir)
+    dhcp_enabled, ztp_enabled = _project_subnet_service_modes(proj_dir)
     _run("02-dhcp-subnet_config.csv",
          os.path.join(proj_dir, "02-dhcp-subnet_config.csv"),
-         lambda path: _validate_subnet_csv(path, allow_empty=allow_empty_subnet),
+         lambda path: _validate_subnet_csv(
+             path, dhcp_enabled=dhcp_enabled, ztp_enabled=ztp_enabled,
+         ),
          required=True)
 
     def _empty_artifact(label, kind="占位文件"):

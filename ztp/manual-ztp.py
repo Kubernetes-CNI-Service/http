@@ -1330,6 +1330,339 @@ def evaluate_replace_config_guard(
     return result
 
 
+_MANUAL_SYNC_STAMP = re.compile(r"^\d{8}_\d{6}_\d{6}$")
+
+
+def _read_private_sync_evidence(path: Path) -> bytes:
+    """Read a root-owned manual-sync artifact from a held, nofollow file."""
+    parent_fd = _open_receipt_parent(path, create=False)
+    descriptor = -1
+    try:
+        parent = os.fstat(parent_fd)
+        if parent.st_uid != os.geteuid() or parent.st_mode & 0o077:
+            raise ManualZtpError("历史配置同步证据目录不私有")
+        before = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                or before.st_uid != os.geteuid() or before.st_mode & 0o077):
+            raise ManualZtpError("历史配置同步证据文件不安全")
+        descriptor = os.open(
+            path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=parent_fd,
+        )
+        held = os.fstat(descriptor)
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+            held.st_dev, held.st_ino, held.st_size, held.st_mtime_ns,
+        ):
+            raise ManualZtpError("历史配置同步证据读取期间发生替换")
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            data = stream.read()
+        read_complete = os.fstat(descriptor)
+        after = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        if (held.st_dev, held.st_ino, held.st_size, held.st_mtime_ns, held.st_ctime_ns) != (
+            read_complete.st_dev, read_complete.st_ino, read_complete.st_size,
+            read_complete.st_mtime_ns, read_complete.st_ctime_ns,
+        ) or (held.st_dev, held.st_ino, held.st_size, held.st_mtime_ns) != (
+            after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns,
+        ):
+            raise ManualZtpError("历史配置同步证据读取期间发生替换")
+        _assert_receipt_parent_bound(path, parent_fd)
+        return data
+    except (OSError, ValueError) as exc:
+        raise ManualZtpError(f"无法核验历史配置同步证据: {exc}") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent_fd)
+
+
+def _private_sync_json(path: Path) -> tuple[dict, bytes]:
+    data = _read_private_sync_evidence(path)
+    try:
+        value = json.loads(data)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ManualZtpError("历史配置同步 JSON 证据无效") from exc
+    if not isinstance(value, dict):
+        raise ManualZtpError("历史配置同步 JSON 证据类型无效")
+    return value, data
+
+
+def confirmed_sync_anchor_path(project: Path, device: dict) -> Path:
+    hostname = str(device["hostname"])
+    key = hashlib.sha256(hostname.encode("utf-8")).hexdigest()
+    return (project / "99-output-ztp" / "manual-config-sync"
+            / ".confirmed-order" / f"{key}.json")
+
+
+_SYNC_ORDER_RECOVERY_GUIDANCE = (
+    "结果未知，配置同步已暂停。请保留原运行目录、顺序证据和日志；"
+    "由授权操作员只读核查设备身份、当前及启动配置、可信 ZTP 回执和最近操作记录，"
+    "确认后走受控恢复；不要删除或改写证据，不要盲目重试。"
+)
+
+
+def _sync_order_error(reason: str) -> ManualZtpError:
+    return ManualZtpError(f"{reason}；{_SYNC_ORDER_RECOVERY_GUIDANCE}")
+
+
+def _optional_private_sync_json(path: Path) -> dict | None:
+    try:
+        parent_fd = _open_receipt_parent(path, create=False)
+    except FileNotFoundError:
+        return None
+    try:
+        try:
+            os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+    finally:
+        os.close(parent_fd)
+    return _private_sync_json(path)[0]
+
+
+def _confirmed_sync_markers(base: Path, device: dict, stamps: list[str]) -> list[dict]:
+    markers = []
+    sequences = set()
+    for stamp in stamps:
+        marker_path = base / stamp / device["hostname"] / "confirmed-order.json"
+        marker = _optional_private_sync_json(marker_path)
+        if marker is None:
+            continue
+        sequence = marker.get("sequence")
+        if (type(marker.get("schema")) is not int or marker["schema"] != 1
+                or marker.get("hostname") != device["hostname"]
+                or marker.get("stamp") != stamp
+                or type(sequence) is not int or sequence < 1
+                or sequence in sequences
+                or not isinstance(marker.get("operation_id"), str)
+                or not marker["operation_id"]
+                or not isinstance(marker.get("trigger_id"), str)
+                or not marker["trigger_id"]
+                or not isinstance(marker.get("receipt_fingerprint"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", marker["receipt_fingerprint"])):
+            raise _sync_order_error("配置同步确认顺序证据无效或序号重复")
+        sequences.add(sequence)
+        markers.append(marker)
+    return markers
+
+
+def _latest_confirmed_sync_marker(project: Path, device: dict, stamps: list[str]) -> dict | None:
+    base = project / "99-output-ztp" / "manual-config-sync"
+    markers = _confirmed_sync_markers(base, device, stamps)
+    anchor = _optional_private_sync_json(confirmed_sync_anchor_path(project, device))
+    if not markers:
+        if anchor is not None:
+            raise _sync_order_error("配置同步顺序锚缺少对应运行证据")
+        return None
+    newest = max(markers, key=lambda item: item["sequence"])
+    if anchor is None or anchor != newest:
+        raise _sync_order_error("配置同步顺序锚缺失、回退或与最新运行不一致")
+    return newest
+
+
+def publish_confirmed_sync_anchor(
+    project: Path, device: dict, run_dir: Path,
+    operation_id: str, trigger_id: str, receipt_fingerprint: str,
+) -> int:
+    """Publish this device's monotonic submission order before remote replace.
+
+    The caller holds the existing device operation lock.  A crash after the
+    run marker but before the anchor leaves the selector fail closed.
+    """
+    base = project / "99-output-ztp" / "manual-config-sync"
+    if (run_dir.parent != base or not _MANUAL_SYNC_STAMP.fullmatch(run_dir.name)
+            or not operation_id or not trigger_id
+            or not re.fullmatch(r"[0-9a-f]{64}", receipt_fingerprint)):
+        raise ManualZtpError("配置同步确认顺序输入无效")
+    stamps = [name for name in os.listdir(base) if _MANUAL_SYNC_STAMP.fullmatch(name)]
+    newest = _latest_confirmed_sync_marker(project, device, stamps)
+    sequence = 1 if newest is None else newest["sequence"] + 1
+    marker = {
+        "schema": 1, "hostname": device["hostname"],
+        "stamp": run_dir.name, "sequence": sequence,
+        "operation_id": operation_id, "trigger_id": trigger_id,
+        "receipt_fingerprint": receipt_fingerprint,
+    }
+    marker_path = run_dir / device["hostname"] / "confirmed-order.json"
+    if _optional_private_sync_json(marker_path) is not None:
+        raise ManualZtpError("本次配置同步确认顺序证据已存在")
+    atomic_json(marker_path, marker)
+    atomic_json(confirmed_sync_anchor_path(project, device), marker)
+    return sequence
+
+
+def select_replace_guard_baseline(
+    project: Path, device: dict, applied: dict, *, exclude_run_dir: Path | None = None,
+) -> dict:
+    """Use a verified prior manual sync only when it is newer than the ZTP receipt.
+
+    The device receipt remains immutable.  A successful manual replace instead
+    supplies a separate, locally private readback witness for the next guard.
+    Any later submitted but unverified sync makes that witness unusable.
+    """
+    original = {
+        "source": "device-ztp-receipt", "applied": applied,
+        "fingerprint": str(applied.get("fingerprint") or ""),
+    }
+    base = project / "99-output-ztp" / "manual-config-sync"
+    try:
+        base_fd = _open_receipt_parent(base / ".evidence-scan", create=False)
+    except FileNotFoundError:
+        return original
+    try:
+        metadata = os.fstat(base_fd)
+        visible = base.lstat()
+        if (not stat.S_ISDIR(visible.st_mode)
+                or (visible.st_dev, visible.st_ino) != (metadata.st_dev, metadata.st_ino)
+                or metadata.st_uid != os.geteuid() or metadata.st_mode & 0o022):
+            raise ManualZtpError("历史配置同步目录可被其他用户改写")
+        stamps = sorted(
+            (name for name in os.listdir(base_fd) if _MANUAL_SYNC_STAMP.fullmatch(name)),
+            reverse=True,
+        )
+        order_marker = _latest_confirmed_sync_marker(project, device, stamps)
+        if order_marker is not None:
+            if (exclude_run_dir is not None
+                    and base / order_marker["stamp"] == exclude_run_dir):
+                raise ManualZtpError("本次配置同步确认顺序尚未完成；不能复用旧基线")
+            if not applied.get("trusted"):
+                raise ManualZtpError("已应用 ZTP 输入凭据不可信")
+            if order_marker["receipt_fingerprint"] != applied.get("fingerprint"):
+                return original  # A newly verified device ZTP receipt began a new epoch.
+            stamps = [order_marker["stamp"]]
+        else:
+            # Legacy runs have no durable submission order.  One confirmed run
+            # is unambiguous; two cannot safely be ordered by a wall clock.
+            confirmed_legacy = []
+            for stamp in stamps:
+                if exclude_run_dir is not None and base / stamp == exclude_run_dir:
+                    continue
+                entry = os.stat(stamp, dir_fd=base_fd, follow_symlinks=False)
+                if (not stat.S_ISDIR(entry.st_mode) or entry.st_uid != os.geteuid()
+                        or entry.st_mode & 0o077):
+                    raise ManualZtpError("历史配置同步运行目录不私有")
+                summary, _summary_bytes = _private_sync_json(base / stamp / "summary.json")
+                targets = summary.get("targets")
+                if not isinstance(targets, list):
+                    raise ManualZtpError("历史配置同步目标证据无效")
+                if any(isinstance(target, dict)
+                       and target.get("hostname") == device["hostname"]
+                       for target in targets) and summary.get("confirmed_at"):
+                    confirmed_legacy.append(stamp)
+                    if len(confirmed_legacy) > 1:
+                        raise ManualZtpError(
+                            "最近配置同步结果顺序不可信；多个历史已确认运行"
+                            "缺少可信顺序，拒绝复用旧成功基线"
+                        )
+        for stamp in stamps:
+            if exclude_run_dir is not None and base / stamp == exclude_run_dir:
+                continue
+            entry = os.stat(stamp, dir_fd=base_fd, follow_symlinks=False)
+            if (not stat.S_ISDIR(entry.st_mode) or entry.st_uid != os.geteuid()
+                    or entry.st_mode & 0o077):
+                raise ManualZtpError("历史配置同步运行目录不私有")
+            run_dir = base / stamp
+            summary, summary_bytes = _private_sync_json(run_dir / "summary.json")
+            targets = summary.get("targets")
+            if not isinstance(targets, list):
+                raise ManualZtpError("历史配置同步目标证据无效")
+            matching = [target for target in targets if isinstance(target, dict)
+                        and target.get("hostname") == device["hostname"]]
+            if not matching:
+                continue
+            if len(matching) != 1:
+                raise ManualZtpError("历史配置同步目标不唯一")
+            if not summary.get("confirmed_at"):
+                if summary.get("state") in {"preflight", "preview_ready", "failed", "cancelled"}:
+                    continue
+                raise ManualZtpError("历史配置同步缺少确认状态")
+            if (summary.get("state") != "triggered"
+                    or summary.get("operation") != "replace-config"
+                    or summary.get("effective_operation") != "replace-config"
+                    or summary.get("trigger_source") not in {
+                        "manual_config_sync_web", "manual_config_sync_cli",
+                    } or len(targets) != 1):
+                raise ManualZtpError("最近配置同步结果未能证明成功；请先核查设备")
+            target = matching[0]
+            operation_id = summary.get("operation_id")
+            trigger_id = target.get("trigger_id")
+            if (not isinstance(operation_id, str) or not operation_id
+                    or not isinstance(trigger_id, str) or not trigger_id
+                    or target.get("effective_operation") != "replace-config"
+                    or target.get("type") != device.get("type")):
+                raise ManualZtpError("历史配置同步操作身份不完整")
+            if (order_marker is not None
+                    and (operation_id != order_marker["operation_id"]
+                         or trigger_id != order_marker["trigger_id"])):
+                raise ManualZtpError("配置同步顺序锚与运行身份不一致")
+            evidence_dir = run_dir / device["hostname"]
+            preflight, preflight_bytes = _private_sync_json(evidence_dir / "preflight.json")
+            result, result_bytes = _private_sync_json(evidence_dir / "result.json")
+            results = summary.get("results")
+            previews = summary.get("preflight")
+            if (not isinstance(results, list) or results != [result]
+                    or not isinstance(previews, list) or previews != [preflight]):
+                raise ManualZtpError("历史配置同步汇总与设备证据不一致")
+            expected_bytes = _read_private_sync_evidence(evidence_dir / "expected.yaml")
+            try:
+                expected_text = expected_bytes.decode("utf-8")
+            except UnicodeError as exc:
+                raise ManualZtpError("历史配置同步 YAML 编码无效") from exc
+            raw_sha = hashlib.sha256(expected_bytes).hexdigest()
+            _value, _json, runtime_sha = runtime_comparable_nvue_config(
+                expected_text, label="上次已验证配置同步输入",
+            )
+            verification = result.get("config_sync_verification")
+            expected_mac = normalize_mac(device.get("mac_plain") or "")
+            if (not applied.get("trusted") or not isinstance(verification, dict)
+                    or type(verification.get("schema")) is not int
+                    or verification["schema"] != 1
+                    or not expected_mac
+                    or result.get("hostname") != device["hostname"]
+                    or result.get("type") != device.get("type")
+                    or result.get("state") != "triggered"
+                    or result.get("operation") != "replace-config"
+                    or result.get("effective_operation") != "replace-config"
+                    or result.get("trigger_source") != summary["trigger_source"]
+                    or result.get("operation_id") != operation_id
+                    or result.get("trigger_id") != trigger_id
+                    or result.get("config_sync_outcome") != "runtime-verified"
+                    or verification.get("hostname") != device["hostname"]
+                    or verification.get("eth0_mac") != expected_mac
+                    or verification.get("operation_id") != operation_id
+                    or verification.get("trigger_id") != trigger_id
+                    or verification.get("receipt_refreshed") is not False
+                    or verification.get("expected_raw_sha256") != raw_sha
+                    or verification.get("expected_runtime_sha256") != runtime_sha
+                    or verification.get("actual_runtime_sha256") != runtime_sha
+                    or preflight.get("hostname") != device["hostname"]
+                    or preflight.get("operation_id") != operation_id
+                    or preflight.get("trigger_id") != trigger_id
+                    or preflight.get("expected_yaml_raw_sha256") != raw_sha
+                    or not isinstance(preflight.get("replace_guard"), dict)
+                    or preflight["replace_guard"].get("allowed") is not True):
+                raise ManualZtpError("历史配置同步成功证据不完整或不一致")
+            if preflight.get("applied_fingerprint") != applied.get("fingerprint"):
+                # A later ZTP changed the trusted device receipt.  The old
+                # manual sync is no longer the current baseline.
+                return original
+            digest = hashlib.sha256()
+            for material in (summary_bytes, preflight_bytes, result_bytes, expected_bytes):
+                digest.update(len(material).to_bytes(8, "big"))
+                digest.update(material)
+            selected = dict(applied)
+            selected["raw_yaml"] = expected_text
+            selected["fingerprint"] = digest.hexdigest()
+            return {
+                "source": "manual-sync-readback", "applied": selected,
+                "fingerprint": selected["fingerprint"],
+            }
+        return original
+    except (OSError, ValueError) as exc:
+        raise ManualZtpError(f"无法安全选择历史配置同步基线: {exc}") from exc
+    finally:
+        os.close(base_fd)
+
+
 def normalized_yaml(text: str, *, label: str) -> tuple[object, str, str]:
     """Backward-compatible name for effective NVUE configuration parsing."""
     return normalized_nvue_config(text, label=label)
@@ -1518,9 +1851,13 @@ def preflight_one(
 
     applied = collect_applied_config(client, device, host)
     replace_guard = None
+    guard_baseline = None
     if replace_config:
+        guard_baseline = select_replace_guard_baseline(
+            project, device, applied, exclude_run_dir=target_dir.parent,
+        )
         replace_guard = evaluate_replace_config_guard(
-            current.stdout, applied, expected_text,
+            current.stdout, guard_baseline["applied"], expected_text,
         )
         if not replace_guard["allowed"]:
             paths = ", ".join(
@@ -1569,10 +1906,14 @@ def preflight_one(
             "变化路径以下方“当前运行配置”比较为准"
         )
 
+    baseline_suffix = (
+        f":{guard_baseline['fingerprint']}" if guard_baseline else ""
+    )
     expected_binding_digest = hashlib.sha256(
         (
             f"{expected_digest}:{release_binding['binding_sha256']}:"
-            f"{applied['fingerprint']}:{comparison_source}"
+            f"{applied['fingerprint']}{baseline_suffix}:"
+            f"{comparison_source}"
         ).encode("utf-8")
     ).hexdigest()
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -1614,6 +1955,12 @@ def preflight_one(
         "current_semantic_sha256": current_semantic_digest,
         "comparison_sha256": comparison_digest,
         "applied_fingerprint": applied["fingerprint"],
+        "replace_guard_baseline_source": (
+            guard_baseline["source"] if guard_baseline else ""
+        ),
+        "replace_guard_baseline_fingerprint": (
+            guard_baseline["fingerprint"] if guard_baseline else ""
+        ),
         # This is intentionally the user-confirmed fingerprint: it binds the
         # latest YAML/release to the exact applied-receipt state observed by
         # the preview.  Existing CGI fields therefore also cover the receipt.
@@ -2193,6 +2540,30 @@ def _assert_receipt_parent_bound(path: Path, parent_fd: int) -> None:
         os.close(visible_fd)
 
 
+def reserve_manual_run_dir(run_dir: Path) -> None:
+    """Reserve one stamped run exclusively before its first summary write."""
+    if (not _MANUAL_SYNC_STAMP.fullmatch(run_dir.name)
+            or run_dir.parent.name not in {
+                "manual-trigger", "manual-reset", "manual-config-sync",
+            }):
+        raise ManualZtpError("手工操作运行目录名称无效")
+    parent_fd = _open_receipt_parent(run_dir, create=True)
+    try:
+        try:
+            os.mkdir(run_dir.name, 0o700, dir_fd=parent_fd)
+        except FileExistsError as exc:
+            raise ManualZtpError(
+                "手工操作运行目录已存在；拒绝覆盖旧操作证据"
+            ) from exc
+        _assert_receipt_parent_bound(run_dir, parent_fd)
+        entry = os.stat(run_dir.name, dir_fd=parent_fd, follow_symlinks=False)
+        if (not stat.S_ISDIR(entry.st_mode) or entry.st_uid != os.geteuid()
+                or entry.st_mode & 0o077):
+            raise ManualZtpError("手工操作运行目录不私有")
+    finally:
+        os.close(parent_fd)
+
+
 def atomic_json(path: Path, value: dict) -> None:
     parent_fd = _open_receipt_parent(path, create=True)
     stage = f".{path.name}.{uuid.uuid4().hex}.tmp"
@@ -2378,8 +2749,20 @@ def trigger_one(
                     "已拒绝执行，请重新预检"
                 )
             if operation == "replace-config":
+                guard_baseline = select_replace_guard_baseline(
+                    run_dir.parent.parent.parent, device, applied_now,
+                    exclude_run_dir=run_dir,
+                )
+                if (
+                    guard_baseline["source"] != prepared.get("replace_guard_baseline_source")
+                    or guard_baseline["fingerprint"]
+                    != prepared.get("replace_guard_baseline_fingerprint")
+                ):
+                    raise ManualZtpError(
+                        "用户确认后配置同步历史基线变化；已拒绝执行，请重新预检"
+                    )
                 replace_guard = evaluate_replace_config_guard(
-                    backup.stdout, applied_now, expected_text,
+                    backup.stdout, guard_baseline["applied"], expected_text,
                 )
                 if not replace_guard["allowed"]:
                     raise ManualZtpError(
@@ -2433,6 +2816,11 @@ def trigger_one(
         else:
             remote, stdin = "nv action run system ztp force", ""
             action = remote
+        if operation == "replace-config":
+            publish_confirmed_sync_anchor(
+                run_dir.parent.parent.parent, device, run_dir,
+                operation_id, trigger_id, applied_now["fingerprint"],
+            )
         command_started_at = datetime.now().astimezone().isoformat(timespec="seconds")
         if operation == "replace-config":
             sync_outcome = "outcome-unknown"
@@ -2829,6 +3217,7 @@ def main(argv: list[str] | None = None) -> int:
             else "manual-trigger"
         )
         run_dir = project / "99-output-ztp" / operation_dir / stamp
+        reserve_manual_run_dir(run_dir)
         known_hosts = project / "99-output-ztp" / operation_dir / "known_hosts"
         known_hosts.parent.mkdir(parents=True, exist_ok=True)
         known_hosts.touch(exist_ok=True)

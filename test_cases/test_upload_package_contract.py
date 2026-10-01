@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager, redirect_stderr
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import errno
 import hashlib
 import importlib.util
@@ -37,6 +37,11 @@ import _package_common as package
 CANONICAL_SUBNET_HEADER = (
     b"shared_network,subnet,netmask,range_start,range_end,routers,"
     b"ztp_service_ip,cumulus_profile,nvos_ztp\n"
+)
+R22_DISABLED_GLOBAL = (
+    b"schema_version: 2\ncommon:\n  mgmt:\n"
+    b"    dhcp-server:\n      status: disabled\n"
+    b"    ztp:\n      status: disabled\n"
 )
 
 
@@ -276,9 +281,7 @@ class UploadPackageContractTests(unittest.TestCase):
         project.mkdir(parents=True)
         (workspace / "ztp").mkdir()
         (workspace / "tools").mkdir()
-        (project / "01-global.yaml").write_text(
-            "schema_version: 2\ncommon: {}\n", encoding="utf-8",
-        )
+        (project / "01-global.yaml").write_bytes(R22_DISABLED_GLOBAL)
         (project / "02-devices_config.csv").write_text(
             "hostname,type\nleaf01,eth\n", encoding="utf-8",
         )
@@ -296,6 +299,23 @@ class UploadPackageContractTests(unittest.TestCase):
             )
         (project / "p2p.xlsx").symlink_to(source.name)
         return workspace, day0, project
+
+    @staticmethod
+    def _present_historical_project(day0: Path) -> tuple[Path, bytes, bytes]:
+        """A complete old project whose input bytes predate current R22 modes."""
+        historical = day0 / "historical"
+        historical.mkdir()
+        global_bytes = (
+            b"schema_version: 1\ncommon:\n  mgmt:\n"
+            b"    dhcp-server:\n      status: legacy\n"
+        )
+        subnet_bytes = b"legacy-subnet,not-current-r22\n"
+        (historical / "01-global.yaml").write_bytes(global_bytes)
+        (historical / "02-devices_config.csv").write_bytes(
+            b"hostname,type\nold-leaf,eth\n"
+        )
+        (historical / "02-dhcp-subnet_config.csv").write_bytes(subnet_bytes)
+        return historical, global_bytes, subnet_bytes
 
     @staticmethod
     def _stable_source_manifest(destination: Path) -> Path:
@@ -489,6 +509,231 @@ class UploadPackageContractTests(unittest.TestCase):
                         self.assertLessEqual(deployment_authorities, names)
                     else:
                         self.assertTrue(deployment_authorities.isdisjoint(names))
+
+    def test_reviewed_upload_a_after_local_b_warns_and_never_repackages_b(self):
+        """Real package A and upload entrypoint retain A despite a later local B."""
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            workspace, day0, project = self._minimal_package_workspace(base)
+            output = base / "reviewed-A.tar.gz"
+            args = argparse.Namespace(
+                project=str(project), output=output, force=False,
+                max_file_size_mib=50, include_images=False,
+                include_apps=False, apps_platform=None, apps_platforms=set(),
+                include_firmware=False,
+            )
+            with mock.patch.multiple(
+                package, ROOT=workspace, DAY0=day0,
+                MANIFEST=workspace / "ztp/.setup_manifest",
+                TOOLS_DIR=workspace / "tools",
+                write_deployment_source_manifest=self._stable_source_manifest,
+            ):
+                package.create_package(args, day0_all=False, artifact_kind="upload")
+            archived_devices = (project / "02-devices_config.csv").read_bytes()
+            (project / "02-devices_config.csv").write_bytes(
+                b"hostname,type\nleaf02,eth\n"
+            )
+            reviewed_sha = file_digest(output)
+            args.deploy_uploaded = output
+            args.deploy = False
+            args.dry_run = False
+            args.relay_bundle = None
+            args.runtime = "native"
+            args.no_sudo = False
+            seen = []
+
+            def capture_upload(_args, frozen_archive, *, expected_sha256):
+                self.assertEqual(reviewed_sha, expected_sha256)
+                with tarfile.open(frozen_archive, "r:gz") as archive:
+                    member = archive.extractfile(
+                        "./DAY0-Prepare/customer/02-devices_config.csv"
+                    )
+                    self.assertIsNotNone(member)
+                    seen.append(member.read())
+
+            stdout = io.StringIO()
+            with mock.patch.multiple(
+                package, ROOT=workspace, DAY0=day0,
+                MANIFEST=workspace / "ztp/.setup_manifest",
+                TOOLS_DIR=workspace / "tools",
+                write_deployment_source_manifest=self._stable_source_manifest,
+            ), mock.patch.object(upload_tool, "ROOT", workspace), \
+                    mock.patch.object(upload_tool, "parse_args", return_value=args), \
+                    mock.patch.object(upload_tool, "run_predeploy_test_gate"), \
+                    mock.patch.object(upload_tool, "verify_predeploy_test_approval"), \
+                    mock.patch.object(
+                        upload_tool, "deployment_guard_source_from_archive",
+                        return_value="guard",
+                    ), mock.patch.object(
+                        upload_tool, "deployment_source_manifest_sha256_from_archive",
+                        return_value="a" * 64,
+                    ), mock.patch.object(
+                        upload_tool, "recommended_remote_load_command",
+                        return_value=["ssh", "load"],
+                    ), mock.patch.object(
+                        upload_tool, "upload", side_effect=capture_upload,
+                    ), mock.patch.object(
+                        package, "create_package",
+                        side_effect=AssertionError("reviewed A must not be repackaged"),
+                    ), redirect_stdout(stdout):
+                self.assertEqual(0, upload_tool.main([]))
+            self.assertEqual([archived_devices], seen)
+            self.assertIn("[WARN]", stdout.getvalue())
+            self.assertIn("02-devices_config.csv", stdout.getvalue())
+            self.assertEqual(reviewed_sha, file_digest(output))
+
+    def test_full_workspace_download_preserves_present_historical_inputs(self):
+        """Archival bytes need identity checks, not today's R22 deployability."""
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            workspace, day0, project = self._minimal_package_workspace(base)
+            historical, global_bytes, subnet_bytes = self._present_historical_project(day0)
+            output = base / "history-download.tar.gz"
+            args = argparse.Namespace(
+                project=str(project), output=output, force=False,
+                max_file_size_mib=50, include_images=False,
+                include_apps=False, apps_platform=None, apps_platforms=set(),
+                include_firmware=False,
+            )
+            with mock.patch.multiple(
+                package, ROOT=workspace, DAY0=day0,
+                MANIFEST=workspace / "ztp/.setup_manifest",
+                TOOLS_DIR=workspace / "tools",
+            ):
+                package.create_package(args, day0_all=True, artifact_kind="download")
+            prefix = f"./DAY0-Prepare/{historical.name}/"
+            with tarfile.open(output, "r:gz") as archive:
+                global_member = archive.extractfile(prefix + "01-global.yaml")
+                subnet_member = archive.extractfile(prefix + "02-dhcp-subnet_config.csv")
+                self.assertIsNotNone(global_member)
+                self.assertIsNotNone(subnet_member)
+                self.assertEqual(global_bytes, global_member.read())
+                self.assertEqual(subnet_bytes, subnet_member.read())
+                names = set(archive.getnames())
+                for authority in package.DEPLOYMENT_AUTHORITY_RELATIVES:
+                    self.assertNotIn(f"./{authority.as_posix()}", names)
+            with self.assertRaisesRegex(
+                installer_tool.InstallError,
+                "archive is missing (?:installer|guard|source manifest)",
+            ):
+                installer_tool.verify_inputs(
+                    output, workspace / "tools/deploy-upload-archive.py",
+                    required_uid=os.getuid(),
+                )
+
+    def test_full_workspace_download_keeps_missing_core_selected_and_other_projects(self):
+        """Archival download preserves available bytes and reports each missing core."""
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            workspace, day0, project = self._minimal_package_workspace(base)
+            selected_subnet = project / "02-dhcp-subnet_config.csv"
+            selected_subnet.unlink()
+            history = day0 / "missing-global"
+            history.mkdir()
+            (history / "02-devices_config.csv").write_bytes(b"hostname\nold-leaf\n")
+            (history / "field-note.txt").write_bytes(b"retain this raw note\n")
+            output = base / "history-download.tar.gz"
+            args = argparse.Namespace(
+                project=str(project), output=output, force=False,
+                max_file_size_mib=50, include_images=False,
+                include_apps=False, apps_platform=None, apps_platforms=set(),
+                include_firmware=False,
+            )
+            notice = io.StringIO()
+            with mock.patch.multiple(
+                package, ROOT=workspace, DAY0=day0,
+                MANIFEST=workspace / "ztp/.setup_manifest",
+                TOOLS_DIR=workspace / "tools",
+            ), redirect_stdout(notice):
+                package.create_package(args, day0_all=True, artifact_kind="download")
+            with tarfile.open(output, "r:gz") as archive:
+                note = archive.extractfile(
+                    "./DAY0-Prepare/missing-global/field-note.txt"
+                )
+                self.assertIsNotNone(note)
+                self.assertEqual(b"retain this raw note\n", note.read())
+                names = set(archive.getnames())
+                self.assertIn("./DAY0-Prepare/customer/01-global.yaml", names)
+                self.assertNotIn("./DAY0-Prepare/customer/02-dhcp-subnet_config.csv", names)
+                for authority in package.DEPLOYMENT_AUTHORITY_RELATIVES:
+                    self.assertNotIn(f"./{authority.as_posix()}", names)
+            self.assertIn("[NON-DEPLOYABLE] customer", notice.getvalue())
+            self.assertIn("02-dhcp-subnet_config.csv", notice.getvalue())
+            self.assertIn("[NON-DEPLOYABLE] missing-global", notice.getvalue())
+            self.assertIn("01-global.yaml", notice.getvalue())
+            with self.assertRaises(installer_tool.InstallError):
+                installer_tool.verify_inputs(
+                    output, workspace / "tools/deploy-upload-archive.py",
+                    required_uid=os.getuid(),
+                )
+
+    def test_full_workspace_historical_download_rejects_drift_and_keeps_force_target(self):
+        """Archival eligibility never waives held-source identity or old-tar safety."""
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            workspace, day0, project = self._minimal_package_workspace(base)
+            historical, _global_bytes, subnet_bytes = self._present_historical_project(day0)
+            subnet = historical / "02-dhcp-subnet_config.csv"
+            original_inode = subnet.stat().st_ino
+            output = base / "history-download.tar.gz"
+            output.write_bytes(b"prior archive must survive")
+            old_inode = output.stat().st_ino
+            old_digest = file_digest(output)
+            args = argparse.Namespace(
+                project=str(project), output=output, force=True,
+                max_file_size_mib=50, include_images=False,
+                include_apps=False, apps_platform=None, apps_platforms=set(),
+                include_firmware=False,
+            )
+            original_digest = package._digest_held_regular
+            mutated = []
+
+            def mutate_after_first_read(stream, expected_size):
+                result = original_digest(stream, expected_size)
+                if (not mutated and os.fstat(stream.fileno()).st_ino == original_inode):
+                    replacement = subnet_bytes.replace(b"legacy", b"LEGACY")
+                    self.assertEqual(len(subnet_bytes), len(replacement))
+                    subnet.write_bytes(replacement)
+                    mutated.append(True)
+                return result
+
+            with mock.patch.multiple(
+                package, ROOT=workspace, DAY0=day0,
+                MANIFEST=workspace / "ztp/.setup_manifest",
+                TOOLS_DIR=workspace / "tools",
+            ), mock.patch.object(
+                package, "_digest_held_regular", side_effect=mutate_after_first_read,
+            ), self.assertRaisesRegex(ValueError, "archive source changed"):
+                package.create_package(args, day0_all=True, artifact_kind="download")
+            self.assertEqual([True], mutated, "the archival stream gate was not reached")
+            self.assertEqual(original_inode, subnet.stat().st_ino)
+            self.assertEqual(old_inode, output.stat().st_ino)
+            self.assertEqual(old_digest, file_digest(output))
+
+    def test_full_workspace_upload_and_preview_still_gate_historical_project(self):
+        """The archival exception must never turn into a deployable-input bypass."""
+        for artifact_kind in ("upload", "preview"):
+            with self.subTest(artifact_kind=artifact_kind), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                workspace, day0, project = self._minimal_package_workspace(base)
+                self._present_historical_project(day0)
+                output = base / "uncreated-output" / f"{artifact_kind}.tar.gz"
+                args = argparse.Namespace(
+                    project=str(project), output=output, force=False,
+                    max_file_size_mib=50, include_images=False,
+                    include_apps=False, apps_platform=None, apps_platforms=set(),
+                    include_firmware=False,
+                )
+                with mock.patch.multiple(
+                    package, ROOT=workspace, DAY0=day0,
+                    MANIFEST=workspace / "ztp/.setup_manifest",
+                    TOOLS_DIR=workspace / "tools",
+                ), self.assertRaisesRegex(
+                    ValueError,
+                    r"global common\.mgmt\.dhcp-server\.status must be enabled or disabled",
+                ):
+                    package.create_package(args, day0_all=True, artifact_kind=artifact_kind)
+                self.assertFalse(output.parent.exists())
 
     def test_real_upload_archive_excludes_private_infra_log_receipt_and_temp(self):
         with tempfile.TemporaryDirectory(prefix="req19-private-package-") as temporary:
@@ -1015,6 +1260,159 @@ class UploadPackageContractTests(unittest.TestCase):
                 self.assertFalse(output.exists())
                 self.assertFalse(output.parent.exists(), "archive output started before rejection")
 
+    def test_r22_package_rejects_invalid_global_and_enabled_empty_before_output(self):
+        """The actual builder must bind explicit modes before any output write."""
+        cases = (
+            ("missing", None),
+            ("symlink", "symlink"),
+            ("missing_dhcp", b"common:\n  mgmt:\n    ztp:\n      status: disabled\n"),
+            ("boolean_dhcp", R22_DISABLED_GLOBAL.replace(b"status: disabled", b"status: false", 1)),
+            ("disabled_enabled", R22_DISABLED_GLOBAL.replace(b"    ztp:\n      status: disabled", b"    ztp:\n      status: enabled")),
+            ("enabled_empty", R22_DISABLED_GLOBAL.replace(b"dhcp-server:\n      status: disabled", b"dhcp-server:\n      status: enabled")),
+        )
+        for label, payload in cases:
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                workspace, day0, project = self._minimal_package_workspace(base)
+                global_path = project / "01-global.yaml"
+                if payload is None:
+                    global_path.unlink()
+                elif payload == "symlink":
+                    global_path.unlink()
+                    (project / "other-global.yaml").write_bytes(R22_DISABLED_GLOBAL)
+                    global_path.symlink_to("other-global.yaml")
+                else:
+                    global_path.write_bytes(payload)
+                output = base / "must-not-exist" / "upload.tar.gz"
+                args = argparse.Namespace(
+                    project=str(project), output=output, force=False,
+                    max_file_size_mib=50, include_images=False,
+                    include_apps=False, apps_platform=None, apps_platforms=set(),
+                    include_firmware=False,
+                )
+                with mock.patch.multiple(
+                    package, ROOT=workspace, DAY0=day0,
+                    MANIFEST=workspace / "ztp/.setup_manifest",
+                    TOOLS_DIR=workspace / "tools",
+                    write_deployment_source_manifest=self._stable_source_manifest,
+                ), self.assertRaisesRegex(ValueError, "global|subnet|DHCP"):
+                    package.create_package(args, day0_all=False, artifact_kind="upload")
+                self.assertFalse(output.exists())
+                self.assertFalse(output.parent.exists())
+
+    def test_r22_package_rejects_source_drift_and_preserves_old_archive(self):
+        """Checked inputs cannot be rebound or rewritten before publication."""
+        for source_name, mutation in (
+            ("01-global.yaml", "replace"),
+            ("01-global.yaml", "ancestor-rebind"),
+            ("02-dhcp-subnet_config.csv", "replace"),
+            ("02-dhcp-subnet_config.csv", "same-inode-write"),
+        ):
+            with self.subTest(source=source_name, mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                workspace, day0, project = self._minimal_package_workspace(base)
+                output = base / "upload.tar.gz"
+                args = argparse.Namespace(
+                    project=str(project), output=output, force=False,
+                    max_file_size_mib=50, include_images=False,
+                    include_apps=False, apps_platform=None, apps_platforms=set(),
+                    include_firmware=False,
+                )
+                with mock.patch.multiple(
+                    package, ROOT=workspace, DAY0=day0,
+                    MANIFEST=workspace / "ztp/.setup_manifest",
+                    TOOLS_DIR=workspace / "tools",
+                    write_deployment_source_manifest=self._stable_source_manifest,
+                ):
+                    package.create_package(args, day0_all=False, artifact_kind="upload")
+                    old_archive = output.read_bytes()
+                    old_identity = (output.stat().st_dev, output.stat().st_ino)
+                    source = project / source_name
+                    original = source.read_bytes()
+                    real_validate = package.validate_deployment_archive_members
+
+                    def change_after_archive(members):
+                        replacement = original + b"\n"
+                        if mutation == "ancestor-rebind":
+                            moved = project.with_name("customer-moved")
+                            project.rename(moved)
+                            project.symlink_to(moved.name, target_is_directory=True)
+                        elif mutation == "replace":
+                            alternate = source.with_name(source.name + ".replacement")
+                            alternate.write_bytes(replacement)
+                            os.replace(alternate, source)
+                        else:
+                            source.write_bytes(replacement)
+                        return real_validate(members)
+
+                    args.force = True
+                    with mock.patch.object(
+                        package, "validate_deployment_archive_members",
+                        side_effect=change_after_archive,
+                    ), self.assertRaisesRegex(ValueError, "changed|drift|authority"):
+                        package.create_package(args, day0_all=False, artifact_kind="upload")
+                self.assertEqual(old_archive, output.read_bytes())
+                self.assertEqual(old_identity, (output.stat().st_dev, output.stat().st_ino))
+
+    def test_r22_package_input_has_no_unapproved_64mib_ceiling(self):
+        """An implementation convenience cannot become an extra input contract."""
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source = base / "large-regular-input"
+            with source.open("wb") as stream:
+                stream.truncate(64 * 1024 * 1024 + 1)
+            with mock.patch.object(package, "ROOT", base):
+                bound = package._bind_package_input(source)
+            self.assertEqual(source.stat().st_size, len(bound.data))
+            self.assertEqual(b"\x00", bound.data[-1:])
+
+    def test_r22_package_input_rejects_project_ancestor_link_and_rebind(self):
+        """Leaf inode/data equality cannot launder a changed project path."""
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            workspace, _day0, project = self._minimal_package_workspace(base)
+            source = project / "01-global.yaml"
+            with mock.patch.object(package, "ROOT", workspace):
+                binding = package._bind_package_input(source)
+                moved = project.with_name("customer-moved")
+                project.rename(moved)
+                project.symlink_to(moved.name, target_is_directory=True)
+                with self.assertRaisesRegex(ValueError, "project|ancestor|authority|changed|symlink"):
+                    package._check_package_input_binding(binding)
+                with self.assertRaisesRegex(ValueError, "project|ancestor|authority|changed|symlink"):
+                    package._bind_package_input(source)
+
+    def test_r22_package_placement_reports_actual_multiline_record_start(self):
+        """A second CSV parser must not relabel a later physical row as line 3."""
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            workspace, day0, project = self._minimal_package_workspace(base)
+            (project / "01-global.yaml").write_bytes(
+                R22_DISABLED_GLOBAL.replace(
+                    b"dhcp-server:\n      status: disabled",
+                    b"dhcp-server:\n      status: enabled",
+                )
+            )
+            (project / "02-dhcp-subnet_config.csv").write_bytes(
+                CANONICAL_SUBNET_HEADER
+                + b'"fab\nric",192.0.2.0,255.255.255.0,192.0.2.100,192.0.2.120,192.0.2.1,,none,no\n'
+                + b"bad,198.51.100.0,255.255.255.0,198.51.100.100,198.51.100.120,198.51.100.110,,none,no\n"
+            )
+            output = base / "never-created" / "upload.tar.gz"
+            args = argparse.Namespace(
+                project=str(project), output=output, force=False,
+                max_file_size_mib=50, include_images=False,
+                include_apps=False, apps_platform=None, apps_platforms=set(),
+                include_firmware=False,
+            )
+            with mock.patch.multiple(
+                package, ROOT=workspace, DAY0=day0,
+                MANIFEST=workspace / "ztp/.setup_manifest",
+                TOOLS_DIR=workspace / "tools",
+            ), self.assertRaisesRegex(ValueError, "第 4 行"):
+                package.create_package(args, day0_all=False, artifact_kind="upload")
+            self.assertFalse(output.parent.exists())
+
     def test_upload_rejects_populated_subnet_placement_before_creating_output(self):
         """A syntactically valid table must also satisfy load's address placement."""
         header = CANONICAL_SUBNET_HEADER
@@ -1093,6 +1491,91 @@ class UploadPackageContractTests(unittest.TestCase):
                 self.assertFalse(output.exists())
                 self.assertFalse(output.parent.exists(), "archive output started before rejection")
 
+    def test_r22_package_cross_row_service_pool_collision_rejects_before_output(self):
+        """Reach the cross-row placement gate with both global services enabled."""
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            workspace, day0, project = self._minimal_package_workspace(base)
+            (project / "01-global.yaml").write_bytes(
+                R22_DISABLED_GLOBAL.replace(b"status: disabled", b"status: enabled")
+            )
+            (project / "02-dhcp-subnet_config.csv").write_bytes(
+                CANONICAL_SUBNET_HEADER
+                + b"fabric-a,192.0.2.0,255.255.255.0,192.0.2.100,192.0.2.120,"
+                  b"192.0.2.1,,none,no\n"
+                + b"fabric-b,198.51.100.0,255.255.255.0,198.51.100.100,"
+                  b"198.51.100.120,198.51.100.1,192.0.2.110,oob,no\n"
+            )
+            output = base / "uncreated-output" / "upload.tar.gz"
+            args = argparse.Namespace(
+                project=str(project), output=output, force=False,
+                max_file_size_mib=50, include_images=False,
+                include_apps=False, apps_platform=None, apps_platforms=set(),
+                include_firmware=False,
+            )
+            with mock.patch.multiple(
+                package, ROOT=workspace, DAY0=day0,
+                MANIFEST=workspace / "ztp/.setup_manifest",
+                TOOLS_DIR=workspace / "tools",
+            ), self.assertRaisesRegex(
+                ValueError, r"第 2 行 service_ip=192\.0\.2\.110 落入动态 range",
+            ):
+                package.create_package(args, day0_all=False, artifact_kind="upload")
+            self.assertFalse(output.parent.exists())
+
+    def test_r22_package_to_real_load_accepts_nonconflicting_two_row_service(self):
+        """The real package and load parsers agree on a two-row service layout."""
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            workspace, day0, project = self._minimal_package_workspace(base)
+            global_bytes = R22_DISABLED_GLOBAL.replace(
+                b"status: disabled", b"status: enabled"
+            )
+            subnet_bytes = (
+                CANONICAL_SUBNET_HEADER
+                + b"fabric-a,192.0.2.0,255.255.255.0,192.0.2.100,192.0.2.120,"
+                  b"192.0.2.1,,none,no\n"
+                + b"fabric-b,198.51.100.0,255.255.255.0,198.51.100.100,"
+                  b"198.51.100.120,198.51.100.1,198.51.100.10,oob,no\n"
+            )
+            (project / "01-global.yaml").write_bytes(global_bytes)
+            (project / "02-dhcp-subnet_config.csv").write_bytes(subnet_bytes)
+            output = base / "upload.tar.gz"
+            args = argparse.Namespace(
+                project=str(project), output=output, force=False,
+                max_file_size_mib=50, include_images=False,
+                include_apps=False, apps_platform=None, apps_platforms=set(),
+                include_firmware=False,
+            )
+            with mock.patch.multiple(
+                package, ROOT=workspace, DAY0=day0,
+                MANIFEST=workspace / "ztp/.setup_manifest",
+                TOOLS_DIR=workspace / "tools",
+                write_deployment_source_manifest=self._stable_source_manifest,
+            ):
+                package.create_package(args, day0_all=False, artifact_kind="upload")
+            with tarfile.open(output, "r:gz") as archive:
+                global_member = archive.extractfile(
+                    "./DAY0-Prepare/customer/01-global.yaml"
+                )
+                subnet_member = archive.extractfile(
+                    "./DAY0-Prepare/customer/02-dhcp-subnet_config.csv"
+                )
+                self.assertIsNotNone(global_member)
+                self.assertIsNotNone(subnet_member)
+                self.assertEqual(global_bytes, global_member.read())
+                self.assertEqual(subnet_bytes, subnet_member.read())
+            extracted_subnet = base / "archived-subnet.csv"
+            extracted_subnet.write_bytes(subnet_bytes)
+            settings = load_tool.GlobalSettings(
+                dhcp_enabled=True, dhcp_package="isc-dhcp-server",
+                http_enabled=False, http_package="", http_root=workspace,
+                ztp_enabled=True, ztp_prefix="/ztp", ztp_ips={}, versions={},
+            )
+            settings = load_tool.apply_subnet_service_ips(settings, extracted_subnet)
+            self.assertIn("198.51.100.10", settings.service_ips)
+            load_tool.validate_subnet_file(extracted_subnet, settings)
+
     def test_load_and_first_package_share_populated_subnet_semantics(self):
         """The real load and packager reject the same independently chosen rows."""
         cases = (
@@ -1159,6 +1642,13 @@ class UploadPackageContractTests(unittest.TestCase):
                 base = Path(directory)
                 workspace, day0, project = self._minimal_package_workspace(base)
                 (project / "02-dhcp-subnet_config.csv").write_bytes(subnet_payload)
+                if label == "populated":
+                    (project / "01-global.yaml").write_bytes(
+                        R22_DISABLED_GLOBAL.replace(
+                            b"dhcp-server:\n      status: disabled",
+                            b"dhcp-server:\n      status: enabled",
+                        )
+                    )
                 output = base / "upload.tar.gz"
                 args = argparse.Namespace(
                     project=str(project), output=output, force=False,
@@ -1179,7 +1669,25 @@ class UploadPackageContractTests(unittest.TestCase):
                         "./DAY0-Prepare/customer/02-dhcp-subnet_config.csv",
                     )
                     self.assertIsNotNone(member)
-                    self.assertEqual(subnet_payload, member.read())
+                    archived_subnet = member.read()
+                    self.assertEqual(subnet_payload, archived_subnet)
+                    global_member = archive.extractfile(
+                        "./DAY0-Prepare/customer/01-global.yaml",
+                    )
+                    self.assertIsNotNone(global_member)
+                    self.assertEqual(
+                        (project / "01-global.yaml").read_bytes(),
+                        global_member.read(),
+                    )
+                extracted_subnet = base / "archived-subnet.csv"
+                extracted_subnet.write_bytes(archived_subnet)
+                settings = load_tool.GlobalSettings(
+                    dhcp_enabled=(label == "populated"),
+                    dhcp_package="isc-dhcp-server" if label == "populated" else "",
+                    http_enabled=False, http_package="", http_root=workspace,
+                    ztp_enabled=False, ztp_prefix="/ztp", ztp_ips={}, versions={},
+                )
+                load_tool.validate_subnet_file(extracted_subnet, settings)
 
     def test_upload_contains_only_consumed_project_inputs_and_sanitized_p2p(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1264,6 +1772,7 @@ class UploadPackageContractTests(unittest.TestCase):
             )
             for name in package.PROJECT_DEPLOYMENT_INPUTS:
                 (project / name).write_text("input\n", encoding="utf-8")
+            (project / "01-global.yaml").write_bytes(R22_DISABLED_GLOBAL)
             subnet_table = CANONICAL_SUBNET_HEADER
             (project / "02-dhcp-subnet_config.csv").write_bytes(subnet_table)
             policy_payload = b'{"node_allowlist": ["AIR-example-leaf01"]}\n'
@@ -1419,6 +1928,7 @@ class UploadPackageContractTests(unittest.TestCase):
                     target.write_text("# deployable\n", encoding="utf-8")
                 for name in package.PROJECT_DEPLOYMENT_INPUTS:
                     (project / name).write_text("input\n", encoding="utf-8")
+                (project / "01-global.yaml").write_bytes(R22_DISABLED_GLOBAL)
                 (project / "02-dhcp-subnet_config.csv").write_bytes(
                     CANONICAL_SUBNET_HEADER,
                 )
@@ -1498,6 +2008,7 @@ class UploadPackageContractTests(unittest.TestCase):
                 target.write_text("# deployable\n", encoding="utf-8")
             for name in package.PROJECT_DEPLOYMENT_INPUTS:
                 (project / name).write_text("input\n", encoding="utf-8")
+            (project / "01-global.yaml").write_bytes(R22_DISABLED_GLOBAL)
             (project / "02-dhcp-subnet_config.csv").write_bytes(
                 CANONICAL_SUBNET_HEADER,
             )
@@ -1538,6 +2049,7 @@ class UploadPackageContractTests(unittest.TestCase):
                 target.write_text("# deployable\n", encoding="utf-8")
             for name in package.PROJECT_DEPLOYMENT_INPUTS:
                 (project / name).write_text("input\n", encoding="utf-8")
+            (project / "01-global.yaml").write_bytes(R22_DISABLED_GLOBAL)
             (project / "02-dhcp-subnet_config.csv").write_bytes(
                 CANONICAL_SUBNET_HEADER,
             )
@@ -1591,6 +2103,7 @@ class UploadPackageContractTests(unittest.TestCase):
                     target.write_text("# deployable\n", encoding="utf-8")
                 for name in package.PROJECT_DEPLOYMENT_INPUTS:
                     (project / name).write_text("input\n", encoding="utf-8")
+                (project / "01-global.yaml").write_bytes(R22_DISABLED_GLOBAL)
                 (project / "02-dhcp-subnet_config.csv").write_bytes(
                     CANONICAL_SUBNET_HEADER,
                 )
@@ -1635,6 +2148,7 @@ class UploadPackageContractTests(unittest.TestCase):
                 target.write_text("# deployable\n", encoding="utf-8")
             for name in package.PROJECT_DEPLOYMENT_INPUTS:
                 (project / name).write_text("input\n", encoding="utf-8")
+            (project / "01-global.yaml").write_bytes(R22_DISABLED_GLOBAL)
             (project / "02-dhcp-subnet_config.csv").write_bytes(
                 CANONICAL_SUBNET_HEADER,
             )

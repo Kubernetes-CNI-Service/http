@@ -5766,6 +5766,8 @@ print('{{"factory_records_active":true,"valid":true}}')
             ["replace-config"], 0, stdout="accepted\n", stderr="",
         )
         accepted = {
+            "hostname": "EXAMPLE-Leaf01",
+            "operation_id": "operation-1", "trigger_id": "trigger-1",
             "state": "triggered", "operation": "replace-config",
             "effective_operation": "replace-config",
             "trigger_source": "manual_config_sync_web",
@@ -5800,6 +5802,166 @@ print('{{"factory_records_active":true,"valid":true}}')
         self.assertEqual("config_sync_success", writes[-1][0])
         self.assertEqual("config_sync", writes[-1][1]["phase"])
         wait_for_completion.assert_not_called()
+
+    def test_config_sync_verifier_rejects_other_operation_even_with_matching_inner_ids(self):
+        result = {
+            "hostname": "EXAMPLE-Leaf01", "state": "triggered",
+            "operation": "ztp", "effective_operation": "ztp",
+            "operation_id": "operation-1", "trigger_id": "trigger-1",
+            "trigger_source": "manual_web",
+            "config_sync_outcome": "runtime-verified",
+            "config_sync_verification": {
+                "schema": 1, "hostname": "EXAMPLE-Leaf01",
+                "eth0_mac": "020000000001",
+                "operation_id": "operation-1", "trigger_id": "trigger-1",
+                "expected_runtime_sha256": "a" * 64,
+                "actual_runtime_sha256": "a" * 64,
+                "expected_raw_sha256": "b" * 64,
+                "receipt_refreshed": False,
+            },
+        }
+        self.assertFalse(self.manual_worker.config_sync_verified(
+            result, "EXAMPLE-Leaf01", "operation-1", "trigger-1",
+        ))
+
+    def test_replace_config_worker_rejects_preexisting_matching_result(self):
+        completed = subprocess.CompletedProcess(
+            ["replace-config"], 0, stdout="accepted\n", stderr="",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            devices_csv = project / "02-devices_config.csv"
+            devices_csv.write_text("hostname,type\nEXAMPLE-Leaf01,eth\n", encoding="utf-8")
+            old_result = (
+                project / "99-output-ztp/manual-config-sync"
+                / "20261001_100000_000001/EXAMPLE-Leaf01/result.json"
+            )
+            old_result.parent.mkdir(parents=True)
+            old_result.write_text(json.dumps({
+                "hostname": "EXAMPLE-Leaf01", "state": "triggered",
+                "operation": "replace-config", "effective_operation": "replace-config",
+                "operation_id": "operation-1", "trigger_id": "trigger-1",
+                "trigger_source": "manual_config_sync_web",
+                "config_sync_outcome": "runtime-verified",
+                "config_sync_verification": {
+                    "schema": 1, "hostname": "EXAMPLE-Leaf01",
+                    "eth0_mac": "020000000001",
+                    "operation_id": "operation-1", "trigger_id": "trigger-1",
+                    "expected_runtime_sha256": "a" * 64,
+                    "actual_runtime_sha256": "a" * 64,
+                    "expected_raw_sha256": "b" * 64,
+                    "receipt_refreshed": False,
+                },
+            }), encoding="utf-8")
+            writes = []
+
+            def record(_hostname, state, **_values):
+                writes.append(state)
+
+            with mock.patch.object(
+                self.manual_worker, "DEVICES_CSV", devices_csv,
+            ), mock.patch.object(
+                self.manual_worker, "write_device_status", side_effect=record,
+            ), mock.patch.object(
+                self.manual_worker, "latest_device_state", return_value={},
+            ), mock.patch.object(
+                self.manual_worker, "command_for", return_value=["fixed-helper"],
+            ), mock.patch.object(
+                self.manual_worker.subprocess, "run", return_value=completed,
+            ):
+                self.manual_worker.execute(
+                    "EXAMPLE-Leaf01", "prod", 30, 60, 1,
+                    operation="replace-config", operation_id="operation-1",
+                    trigger_id="trigger-1", requested_operation="replace-config",
+                    preview_fingerprint={"current_sha256": "a" * 64},
+                )
+            self.assertEqual("failed", writes[-1])
+            self.assertNotIn("config_sync_success", writes)
+
+    def test_replace_config_worker_refuses_to_submit_without_result_snapshot(self):
+        writes = []
+        with tempfile.TemporaryDirectory() as directory:
+            absent_devices_csv = Path(directory) / "missing-devices.csv"
+            with mock.patch.object(
+                self.manual_worker, "DEVICES_CSV", absent_devices_csv,
+            ), mock.patch.object(
+                self.manual_worker, "write_device_status",
+                side_effect=lambda _host, state, **_values: writes.append(state),
+            ), mock.patch.object(
+                self.manual_worker, "latest_device_state", return_value={},
+            ), mock.patch.object(
+                self.manual_worker, "command_for", return_value=["fixed-helper"],
+            ), mock.patch.object(
+                self.manual_worker.subprocess, "run",
+            ) as run:
+                self.manual_worker.execute(
+                    "EXAMPLE-Leaf01", "prod", 30, 60, 1,
+                    operation="replace-config", operation_id="operation-1",
+                    trigger_id="trigger-1", requested_operation="replace-config",
+                    preview_fingerprint={"current_sha256": "a" * 64},
+                )
+            run.assert_not_called()
+            self.assertEqual("failed", writes[-1])
+
+    def test_replace_config_worker_rejects_two_fresh_matching_results(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            devices_csv = project / "02-devices_config.csv"
+            devices_csv.write_text("hostname,type\nEXAMPLE-Leaf01,eth\n", encoding="utf-8")
+            payload = {
+                "hostname": "EXAMPLE-Leaf01", "state": "triggered",
+                "operation": "replace-config", "effective_operation": "replace-config",
+                "operation_id": "operation-1", "trigger_id": "trigger-1",
+                "trigger_source": "manual_config_sync_web",
+                "config_sync_outcome": "runtime-verified",
+                "config_sync_verification": {
+                    "schema": 1, "hostname": "EXAMPLE-Leaf01",
+                    "eth0_mac": "020000000001", "operation_id": "operation-1",
+                    "trigger_id": "trigger-1", "expected_runtime_sha256": "a" * 64,
+                    "actual_runtime_sha256": "a" * 64,
+                    "expected_raw_sha256": "b" * 64, "receipt_refreshed": False,
+                },
+            }
+            with mock.patch.object(self.manual_worker, "DEVICES_CSV", devices_csv):
+                prior = self.manual_worker._result_snapshot("replace-config")
+                self.assertEqual(set(), prior)
+                for run_name in ("20261001_100000_000001", "20261001_100000_000002"):
+                    receipt = (project / "99-output-ztp/manual-config-sync"
+                               / run_name / "EXAMPLE-Leaf01/result.json")
+                    receipt.parent.mkdir(parents=True)
+                    receipt.write_text(json.dumps(payload), encoding="utf-8")
+                self.assertEqual({}, self.manual_worker.accepted_result(
+                    "EXAMPLE-Leaf01", "operation-1", "trigger-1",
+                    "replace-config", "manual_config_sync_web", prior,
+                ))
+
+    def test_replace_config_worker_rejects_symlinked_run_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / "project"
+            project.mkdir()
+            devices_csv = project / "02-devices_config.csv"
+            devices_csv.write_text("hostname,type\nEXAMPLE-Leaf01,eth\n", encoding="utf-8")
+            outside = root / "outside/EXAMPLE-Leaf01"
+            outside.mkdir(parents=True)
+            (outside / "result.json").write_text(json.dumps({
+                "hostname": "EXAMPLE-Leaf01", "state": "triggered",
+                "operation": "replace-config", "effective_operation": "replace-config",
+                "operation_id": "operation-1", "trigger_id": "trigger-1",
+                "trigger_source": "manual_config_sync_web",
+            }), encoding="utf-8")
+            run = (project / "99-output-ztp/manual-config-sync"
+                   / "20261001_100000_000001")
+            run.parent.mkdir(parents=True)
+            run.symlink_to(outside.parent, target_is_directory=True)
+            with mock.patch.object(self.manual_worker, "DEVICES_CSV", devices_csv):
+                paths = self.manual_worker._result_paths(project, "replace-config")
+                self.assertIn(run / "EXAMPLE-Leaf01/result.json", paths)
+                self.assertIsNone(self.manual_worker._result_snapshot("replace-config"))
+                self.assertEqual({}, self.manual_worker.accepted_result(
+                    "EXAMPLE-Leaf01", "operation-1", "trigger-1",
+                    "replace-config", "manual_config_sync_web", set(),
+                ))
 
     def test_replace_config_page_contract_reconciles_button_column_and_states(self):
         html_source = (ROOT / "monitor/generate-monitor-html.py").read_text(

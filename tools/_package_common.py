@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+from dataclasses import dataclass
 from datetime import date
 import fnmatch
 import gzip
@@ -27,6 +28,7 @@ import tarfile
 import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
+import yaml
 
 from project_contract import (
     FINISHED_HISTORY_DIR_NAME,
@@ -37,11 +39,16 @@ from project_contract import (
     is_tools_deployable_file,
     path_disposition,
     require_project_eligible,
+    safe_load_global_yaml,
     transfer_exclude_reason,
     validate_dhcp_subnet_placements,
     ztp_prefix_publication_relative,
 )
-from ztp_service_runtime import RuntimeContractError, _read_dhcp_networks
+from ztp_service_runtime import (
+    RuntimeContractError,
+    _read_dhcp_networks_from_bytes,
+    subnet_csv_record_start_lines,
+)
 
 
 TOOLS_DIR = Path(__file__).resolve().parent
@@ -494,6 +501,7 @@ def _add_reproducible_source(
     recursive: bool = True,
     parent_fd: int | None = None,
     entry_name: str | None = None,
+    bound_inputs: dict[str, "_PackageInputBinding"] | None = None,
 ) -> None:
     """Add one entry while retaining its parent/entry filesystem authority."""
     try:
@@ -517,6 +525,17 @@ def _add_reproducible_source(
     info = _tarinfo_from_metadata(initial, arcname, linkname=linkname)
     selected = package_filter(info)
     if selected is None:
+        return
+
+    binding = (bound_inputs or {}).get(arcname)
+    if binding is not None:
+        if not stat.S_ISREG(initial.st_mode) or _source_identity(initial) != binding.identity:
+            raise ValueError(f"project input authority changed before archive read: {source}")
+        _check_package_input_binding(binding)
+        held_info = _materialize_reproducible_tarinfo(info, initial)
+        held_info.size = len(binding.data)
+        archive.addfile(held_info, io.BytesIO(binding.data))
+        _check_package_input_binding(binding)
         return
 
     if stat.S_ISREG(initial.st_mode):
@@ -655,6 +674,7 @@ def _add_reproducible_source(
                         recursive=True,
                         parent_fd=descriptor,
                         entry_name=child,
+                        bound_inputs=bound_inputs,
                     )
             after = os.fstat(descriptor)
             if _source_identity(after) != _source_identity(opened):
@@ -946,41 +966,204 @@ def project_directories() -> list[Path]:
     return sorted(selected)
 
 
-def _require_package_subnet_csv(project: Path) -> None:
-    """Reject an absent or malformed subnet before archive output begins."""
-    source = project / "02-dhcp-subnet_config.csv"
-    nofollow = getattr(os, "O_NOFOLLOW", 0)
-    if not nofollow:
-        raise ValueError("subnet CSV cannot be safely opened without O_NOFOLLOW")
-    try:
-        descriptor = os.open(
-            source, os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0),
-        )
-    except OSError as exc:
-        raise ValueError(f"subnet CSV must be a non-symlink regular file: {source}") from exc
-    try:
-        metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode):
-            raise ValueError(f"subnet CSV must be a non-symlink regular file: {source}")
-        if metadata.st_size == 0:
-            raise ValueError(f"subnet CSV must not be zero bytes: {source}")
+ARCHIVAL_CORE_INPUTS = (
+    "01-global.yaml", "02-devices_config.csv", "02-dhcp-subnet_config.csv",
+)
+
+
+def archive_project_directories() -> list[Path]:
+    """Include incomplete historical projects in a non-deployable download."""
+    selected: list[Path] = []
+    for item in DAY0.iterdir():
+        if (
+            not item.is_dir() or item.is_symlink()
+            or item.name in {"template", "tests", "test_cases", "dumps"}
+            or item.name.startswith(".")
+        ):
+            continue
+        require_project_eligible(item)
+        selected.append(item)
+    return sorted(selected)
+
+
+def missing_archive_project_core(project: Path) -> tuple[str, ...]:
+    """List absent core files; reject unsafe present paths, not their contents."""
+    missing: list[str] = []
+    for name in ARCHIVAL_CORE_INPUTS:
+        source = project / name
         try:
-            _read_dhcp_networks(source, allow_empty_subnet=True)
-            with os.fdopen(os.dup(descriptor), "r", newline="", encoding="utf-8-sig") as stream:
-                reader = csv.DictReader(stream)
-                reader.fieldnames = [
-                    str(field or "").strip() for field in (reader.fieldnames or ())
-                ]
-                rows = (
-                    (lineno, row)
-                    for lineno, row in enumerate(reader, 2)
-                    if any(str(value or "").strip() for value in row.values())
-                )
-                validate_dhcp_subnet_placements(rows)
-        except (RuntimeContractError, ValueError) as exc:
-            raise ValueError(f"subnet CSV has invalid rows: {source}: {exc}") from exc
+            metadata = source.lstat()
+        except FileNotFoundError:
+            missing.append(name)
+            continue
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(f"historical project core is not a regular file: {source}")
+    return tuple(missing)
+
+
+@dataclass(frozen=True)
+class _PackageInputBinding:
+    source: Path
+    parents: tuple[tuple[int, int, int], ...]
+    identity: tuple[int, ...]
+    data: bytes
+
+
+def _package_directory_identity(metadata: os.stat_result) -> tuple[int, int, int]:
+    # Package-generated children can change directory nlink/mtime, not its inode.
+    return metadata.st_dev, metadata.st_ino, metadata.st_mode
+
+
+def _open_package_input_parent(
+    source: Path,
+) -> tuple[int, tuple[tuple[int, int, int], ...]]:
+    """Walk the project path from ROOT using only held nofollow directory FDs."""
+    try:
+        relative = source.relative_to(ROOT)
+    except ValueError as exc:
+        raise ValueError(f"project input is outside package root: {source}") from exc
+    if not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+        raise ValueError(f"project input has an unsafe path: {source}")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    descriptor = -1
+    try:
+        initial = ROOT.lstat()
+        descriptor = os.open(ROOT, flags)
+        opened = os.fstat(descriptor)
+        if (not stat.S_ISDIR(opened.st_mode)
+                or _package_directory_identity(initial) != _package_directory_identity(opened)):
+            raise ValueError(f"package root authority changed: {ROOT}")
+        parents = [_package_directory_identity(opened)]
+        for name in relative.parts[:-1]:
+            initial = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+            next_descriptor = os.open(name, flags, dir_fd=descriptor)
+            try:
+                opened = os.fstat(next_descriptor)
+                if (not stat.S_ISDIR(opened.st_mode)
+                        or _package_directory_identity(initial) != _package_directory_identity(opened)):
+                    raise ValueError(f"project input ancestor changed: {source}")
+            except BaseException:
+                os.close(next_descriptor)
+                raise
+            os.close(descriptor)
+            descriptor = next_descriptor
+            parents.append(_package_directory_identity(opened))
+        return descriptor, tuple(parents)
+    except (OSError, ValueError) as exc:
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise ValueError(f"project input ancestor authority changed or unsafe: {source}: {exc}") from exc
+
+
+def _package_input_parent_identity(
+    source: Path,
+) -> tuple[tuple[int, int, int], ...]:
+    descriptor, parents = _open_package_input_parent(source)
+    os.close(descriptor)
+    return parents
+
+
+def _bind_package_input(source: Path) -> _PackageInputBinding:
+    """Read one regular authority through anchored nofollow FDs, retaining bytes."""
+    if not getattr(os, "O_NOFOLLOW", 0):
+        raise ValueError(f"project input cannot be safely opened without O_NOFOLLOW: {source}")
+    parent_descriptor = -1
+    descriptor = -1
+    try:
+        parent_descriptor, parents = _open_package_input_parent(source)
+        try:
+            initial = os.stat(source.name, dir_fd=parent_descriptor, follow_symlinks=False)
+            descriptor = os.open(
+                source.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                | os.O_CLOEXEC, dir_fd=parent_descriptor,
+            )
+        except OSError as exc:
+            raise ValueError(f"project input must be a non-symlink regular file: {source}") from exc
+        opened = os.fstat(descriptor)
+        if (not stat.S_ISREG(initial.st_mode)
+                or not stat.S_ISREG(opened.st_mode)
+                or _source_identity(initial) != _source_identity(opened)):
+            raise ValueError(f"project input changed before read: {source}")
+        if opened.st_size == 0:
+            raise ValueError(f"project input must not be zero bytes: {source}")
+        with os.fdopen(os.dup(descriptor), "rb") as stream:
+            data = stream.read(opened.st_size + 1)
+        if (len(data) != opened.st_size
+                or _source_identity(os.fstat(descriptor)) != _source_identity(opened)):
+            raise ValueError(f"project input changed during read: {source}")
+        if _package_input_parent_identity(source) != parents:
+            raise ValueError(f"project input ancestor changed during read: {source}")
+        _require_source_identity(source, opened, label="after read")
+        return _PackageInputBinding(source, parents, _source_identity(opened), data)
     finally:
-        os.close(descriptor)
+        if descriptor >= 0:
+            os.close(descriptor)
+        if parent_descriptor >= 0:
+            os.close(parent_descriptor)
+
+
+def _check_package_input_binding(binding: _PackageInputBinding) -> None:
+    """Detect path, inode, metadata or same-inode byte drift before publication."""
+    current = _bind_package_input(binding.source)
+    if current.parents != binding.parents:
+        raise ValueError(f"project input ancestor authority changed: {binding.source}")
+    if current.identity != binding.identity or current.data != binding.data:
+        raise ValueError(f"project input authority changed: {binding.source}")
+
+
+def _package_global_modes(binding: _PackageInputBinding) -> tuple[bool, bool]:
+    try:
+        document = safe_load_global_yaml(io.BytesIO(binding.data))
+    except (yaml.YAMLError, ValueError, UnicodeDecodeError) as exc:
+        raise ValueError(f"global YAML is invalid: {binding.source}: {exc}") from exc
+    if not isinstance(document, dict):
+        raise ValueError(f"global YAML must be a mapping: {binding.source}")
+    common = document.get("common")
+    mgmt = common.get("mgmt") if isinstance(common, dict) else None
+    if not isinstance(mgmt, dict):
+        raise ValueError(f"global common.mgmt must be a mapping: {binding.source}")
+    modes = []
+    for name in ("dhcp-server", "ztp"):
+        section = mgmt.get(name)
+        if not isinstance(section, dict):
+            raise ValueError(f"global common.mgmt.{name} must be a mapping: {binding.source}")
+        raw = section.get("status")
+        if type(raw) is not str or raw.strip().casefold() not in {"enabled", "disabled"}:
+            raise ValueError(f"global common.mgmt.{name}.status must be enabled or disabled: {binding.source}")
+        modes.append(raw.strip().casefold() == "enabled")
+    dhcp_enabled, ztp_enabled = modes
+    if ztp_enabled and not dhcp_enabled:
+        raise ValueError(f"global DHCP disabled with ZTP enabled is invalid: {binding.source}")
+    return dhcp_enabled, ztp_enabled
+
+
+def _bind_package_project_inputs(project: Path) -> dict[str, _PackageInputBinding]:
+    """Validate the exact two authorities that this package call will archive."""
+    global_binding = _bind_package_input(project / "01-global.yaml")
+    subnet_binding = _bind_package_input(project / "02-dhcp-subnet_config.csv")
+    dhcp_enabled, ztp_enabled = _package_global_modes(global_binding)
+    try:
+        _read_dhcp_networks_from_bytes(
+            subnet_binding.data, dhcp_enabled=dhcp_enabled,
+            ztp_enabled=ztp_enabled,
+        )
+        with io.StringIO(subnet_binding.data.decode("utf-8-sig"), newline="") as stream:
+            line_starts = subnet_csv_record_start_lines(stream)
+            reader = csv.DictReader(stream)
+            reader.fieldnames = [str(field or "").strip() for field in (reader.fieldnames or ())]
+            rows = [
+                (line_starts[index], row) for index, row in enumerate(reader)
+                if any(str(value or "").strip() for value in row.values())
+            ]
+            validate_dhcp_subnet_placements(rows)
+    except (RuntimeContractError, ValueError, UnicodeDecodeError) as exc:
+        raise ValueError(f"subnet CSV has invalid rows: {subnet_binding.source}: {exc}") from exc
+    _check_package_input_binding(global_binding)
+    _check_package_input_binding(subnet_binding)
+    return {
+        f"./{project.relative_to(ROOT).as_posix()}/01-global.yaml": global_binding,
+        f"./{project.relative_to(ROOT).as_posix()}/02-dhcp-subnet_config.csv": subnet_binding,
+    }
 
 
 def setup_managed_links() -> set[str]:
@@ -1361,7 +1544,9 @@ class PackageFilter:
         self.selected_p2p_by_project = selected_p2p_by_project or {}
         self.exclude_project_images = exclude_project_images
         self.artifact_kind = artifact_kind
-        projects = project_directories() if day0_all else [project]
+        projects = (
+            archive_project_directories() if artifact_kind == "download" else project_directories()
+        ) if day0_all else [project]
         self.managed_pubkeys = {
             item.relative_to(ROOT).as_posix()
             for item in managed_pubkey_paths(projects)
@@ -1893,9 +2078,17 @@ def create_package(
     if artifact_kind not in ARTIFACT_KINDS:
         raise ValueError(f"unsupported artifact kind: {artifact_kind!r}")
     project = resolve_project(args.project)
-    included_projects = project_directories() if day0_all else [project]
-    for included_project in included_projects:
-        _require_package_subnet_csv(included_project)
+    included_projects = (
+        archive_project_directories() if artifact_kind == "download" else project_directories()
+    ) if day0_all else [project]
+    missing_archive_core = (
+        {item: missing_archive_project_core(item) for item in included_projects}
+        if artifact_kind == "download" else {}
+    )
+    bound_inputs: dict[str, _PackageInputBinding] = {}
+    if artifact_kind != "download":
+        for included_project in included_projects:
+            bound_inputs.update(_bind_package_project_inputs(included_project))
     selected_p2p_by_project = (
         {
             item.relative_to(ROOT).as_posix(): select_upload_p2p(item)
@@ -2017,6 +2210,7 @@ def create_package(
                         arcname=f"./{source.name}",
                         package_filter=package_filter,
                         recursive=True,
+                        bound_inputs=bound_inputs,
                     )
                 if deployment_manifest is not None:
                     manifest_info = archive.gettarinfo(
@@ -2109,10 +2303,17 @@ def create_package(
                 "./ztp/optimize/sample_links.py",
                 "./ztp/templates/ztp-bootstrap.sh",
                 "./ztp/templates/ztp.json",
-                f"./{package_filter.project_rel}/01-global.yaml",
-                f"./{package_filter.project_rel}/02-devices_config.csv",
-                f"./{package_filter.project_rel}/02-dhcp-subnet_config.csv",
             }
+            if artifact_kind == "download":
+                for item, absent in missing_archive_core.items():
+                    for name in ARCHIVAL_CORE_INPUTS:
+                        if name not in absent:
+                            required.add(f"./{item.relative_to(ROOT).as_posix()}/{name}")
+            else:
+                required.update(
+                    f"./{package_filter.project_rel}/{name}"
+                    for name in ARCHIVAL_CORE_INPUTS
+                )
             if artifact_kind == "upload":
                 required.update(
                     f"./{relative.as_posix()}"
@@ -2137,6 +2338,13 @@ def create_package(
             missing = sorted(required - names)
             if missing:
                 raise RuntimeError("package verification missing: " + ", ".join(missing))
+            for member_name, binding in bound_inputs.items():
+                member = archive.getmember(member_name) if member_name in names else None
+                if member is None or not member.isfile() or member.size != len(binding.data):
+                    raise ValueError(f"bound project input missing from archive: {member_name}")
+                extracted = archive.extractfile(member)
+                if extracted is None or extracted.read() != binding.data:
+                    raise ValueError(f"bound project input changed in archive: {member_name}")
             if policy_member_name is not None:
                 policy_member = archive.getmember(policy_member_name)
                 if not policy_member.isfile():
@@ -2184,6 +2392,11 @@ def create_package(
         if (after_hash.st_nlink != 1 or identity(before_hash) != identity(after_hash)
                 or identity(after_hash) != identity(named_stage)):
             raise ValueError("temporary archive identity changed")
+        for binding in bound_inputs.values():
+            _check_package_input_binding(binding)
+        for item, absent in missing_archive_core.items():
+            if missing_archive_project_core(item) != absent:
+                raise ValueError(f"historical project core changed during archive: {item}")
         if args.force:
             try:
                 existing = os.stat(output.name, dir_fd=parent_fd,
@@ -2236,4 +2449,9 @@ def create_package(
     for reason, count in sorted(package_filter.reasons.items()):
         print(f"     {reason:<32} {count}")
     print(f"[OK] SHA-256          : {archive_sha256}")
+    if artifact_kind == "download":
+        print("[NON-DEPLOYABLE] 历史下载归档不含部署授权文件；不可用作 upload/deploy。")
+        for item, absent in missing_archive_core.items():
+            if absent:
+                print(f"[NON-DEPLOYABLE] {item.name}: 缺少 " + ", ".join(absent))
     return output

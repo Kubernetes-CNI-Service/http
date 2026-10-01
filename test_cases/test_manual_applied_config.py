@@ -1,5 +1,6 @@
 """Runtime NVUE normalization and manual ZTP preview/confirm comparisons."""
 
+import ast
 import hashlib
 import importlib.util
 import io
@@ -1098,6 +1099,616 @@ class RuntimeDriftPreviewWorkflowTests(unittest.TestCase):
             self.assertNotIn("sensitive-live-value", failure["reason"])
 
 
+class ConsecutiveConfigSyncBaselineTests(unittest.TestCase):
+    """A verified manual replace can become the next guarded prior input."""
+
+    @staticmethod
+    def previous_sync(
+        project, prior_text, receipt_fingerprint, *, state="triggered",
+        stamp="20261001_100000_000001",
+    ):
+        root = project / "99-output-ztp/manual-config-sync" / stamp
+        evidence = root / DEVICE["hostname"]
+        evidence.mkdir(parents=True)
+        root.chmod(0o700)
+        evidence.chmod(0o700)
+        raw_digest = hashlib.sha256(prior_text.encode("utf-8")).hexdigest()
+        runtime_digest = MANUAL.runtime_comparable_nvue_config(
+            prior_text, label="prior manual sync",
+        )[2]
+        expected = evidence / "expected.yaml"
+        expected.write_text(prior_text, encoding="utf-8")
+        expected.chmod(0o600)
+        preflight = {
+            "hostname": DEVICE["hostname"], "operation_id": "old-operation",
+            "trigger_id": "old-trigger", "applied_fingerprint": receipt_fingerprint,
+            "expected_yaml_raw_sha256": raw_digest,
+            "replace_guard_baseline_source": "device-ztp-receipt",
+            "replace_guard": {"allowed": True, "reason_code": "ready"},
+        }
+        result = {
+            "hostname": DEVICE["hostname"], "type": "eth",
+            "state": state, "operation": "replace-config",
+            "effective_operation": "replace-config",
+            "operation_id": "old-operation", "trigger_id": "old-trigger",
+            "trigger_source": "manual_config_sync_web",
+            "config_sync_outcome": "runtime-verified" if state == "triggered" else "outcome-unknown",
+            "config_sync_verification": {
+                "schema": 1, "hostname": DEVICE["hostname"],
+                "eth0_mac": DEVICE["mac_plain"],
+                "operation_id": "old-operation", "trigger_id": "old-trigger",
+                "expected_raw_sha256": raw_digest,
+                "expected_runtime_sha256": runtime_digest,
+                "actual_runtime_sha256": runtime_digest,
+                "receipt_refreshed": False,
+            },
+        }
+        summary = {
+            "state": state, "operation": "replace-config",
+            "effective_operation": "replace-config",
+            "operation_id": "old-operation", "trigger_source": "manual_config_sync_web",
+            "confirmed_at": "2026-10-01T10:00:00+08:00",
+            "targets": [{"hostname": DEVICE["hostname"], "type": "eth",
+                         "trigger_id": "old-trigger", "effective_operation": "replace-config"}],
+            "preflight": [preflight],
+            "results": [result],
+        }
+        for name, value, directory in (
+            ("preflight.json", preflight, evidence),
+            ("result.json", result, evidence),
+            ("summary.json", summary, root),
+        ):
+            path = directory / name
+            path.write_text(json.dumps(value), encoding="utf-8")
+            path.chmod(0o600)
+        return evidence
+
+    def test_verified_previous_sync_is_next_guard_baseline_but_not_device_receipt(self):
+        old_ztp = ReplaceConfigGuardTests.config()
+        prior_sync = old_ztp.replace(
+            "    acl:\n", "    vrf:\n      customer:\n        table: 1001\n    acl:\n",
+        )
+        desired = prior_sync.replace("rule: accept", "rule: drop")
+        applied = ReplaceConfigGuardTests.applied(old_ztp)
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            self.previous_sync(project, prior_sync, applied["fingerprint"])
+            selected = MANUAL.select_replace_guard_baseline(project, DEVICE, applied)
+            self.assertEqual("manual-sync-readback", selected["source"])
+            self.assertNotEqual(applied["raw_yaml"], selected["applied"]["raw_yaml"])
+            self.assertEqual(old_ztp, applied["raw_yaml"])
+            guard = MANUAL.evaluate_replace_config_guard(
+                prior_sync, selected["applied"], desired,
+            )
+            self.assertTrue(guard["allowed"], guard)
+            self.assertEqual("ready", guard["reason_code"])
+            drifted = old_ztp.replace("rule: accept", "rule: quarantine")
+            drift_guard = MANUAL.evaluate_replace_config_guard(
+                drifted, selected["applied"], desired,
+            )
+            self.assertFalse(drift_guard["allowed"])
+            self.assertEqual("runtime-drift", drift_guard["reason_code"])
+
+    def test_failed_or_tampered_later_sync_never_becomes_baseline(self):
+        old_ztp = ReplaceConfigGuardTests.config()
+        prior_sync = old_ztp.replace("rule: accept", "rule: drop")
+        applied = ReplaceConfigGuardTests.applied(old_ztp)
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            evidence = self.previous_sync(project, prior_sync, applied["fingerprint"])
+            result_path = evidence / "result.json"
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            result["config_sync_verification"]["actual_runtime_sha256"] = "f" * 64
+            result_path.write_text(json.dumps(result), encoding="utf-8")
+            with self.assertRaises(MANUAL.ManualZtpError):
+                MANUAL.select_replace_guard_baseline(project, DEVICE, applied)
+
+    def test_later_submitted_failure_blocks_reusing_older_success(self):
+        old_ztp = ReplaceConfigGuardTests.config()
+        prior_sync = old_ztp.replace("rule: accept", "rule: drop")
+        applied = ReplaceConfigGuardTests.applied(old_ztp)
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            self.previous_sync(project, prior_sync, applied["fingerprint"])
+            self.previous_sync(
+                project, prior_sync, applied["fingerprint"], state="failed",
+                stamp="20261001_110000_000001",
+            )
+            with self.assertRaisesRegex(MANUAL.ManualZtpError, "最近配置同步结果"):
+                MANUAL.select_replace_guard_baseline(project, DEVICE, applied)
+
+    def test_clock_rollback_cannot_reuse_success_before_later_failed_submit(self):
+        old_ztp = ReplaceConfigGuardTests.config()
+        prior_sync = old_ztp.replace("rule: accept", "rule: drop")
+        applied = ReplaceConfigGuardTests.applied(old_ztp)
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            self.previous_sync(
+                project, prior_sync, applied["fingerprint"],
+                stamp="20261001_120000_000001",
+            )
+            # The next confirmed attempt starts after the wall clock moves back.
+            self.previous_sync(
+                project, prior_sync, applied["fingerprint"], state="failed",
+                stamp="20261001_090000_000001",
+            )
+            with self.assertRaises(MANUAL.ManualZtpError):
+                MANUAL.select_replace_guard_baseline(project, DEVICE, applied)
+
+    def test_two_legacy_confirmed_successes_without_order_anchor_fail_closed(self):
+        old_ztp = ReplaceConfigGuardTests.config()
+        applied = ReplaceConfigGuardTests.applied(old_ztp)
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            for stamp in ("20261001_100000_000001", "20261001_110000_000001"):
+                self.previous_sync(
+                    project, old_ztp, applied["fingerprint"], stamp=stamp,
+                )
+            with self.assertRaises(MANUAL.ManualZtpError):
+                MANUAL.select_replace_guard_baseline(project, DEVICE, applied)
+
+    def test_order_anchor_selects_later_failed_submit_after_clock_rollback(self):
+        old_ztp = ReplaceConfigGuardTests.config()
+        applied = ReplaceConfigGuardTests.applied(old_ztp)
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            success = self.previous_sync(
+                project, old_ztp, applied["fingerprint"],
+                stamp="20261001_120000_000001",
+            )
+            failed = self.previous_sync(
+                project, old_ztp, applied["fingerprint"], state="failed",
+                stamp="20261001_090000_000001",
+            )
+            first = MANUAL.publish_confirmed_sync_anchor(
+                project, DEVICE, success.parent, "old-operation", "old-trigger",
+                applied["fingerprint"],
+            )
+            second = MANUAL.publish_confirmed_sync_anchor(
+                project, DEVICE, failed.parent, "old-operation", "old-trigger",
+                applied["fingerprint"],
+            )
+            self.assertEqual((1, 2), (first, second))
+            with self.assertRaises(MANUAL.ManualZtpError):
+                MANUAL.select_replace_guard_baseline(project, DEVICE, applied)
+
+    def test_order_anchor_rollback_is_detected_against_run_markers(self):
+        old_ztp = ReplaceConfigGuardTests.config()
+        applied = ReplaceConfigGuardTests.applied(old_ztp)
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            first = self.previous_sync(
+                project, old_ztp, applied["fingerprint"],
+                stamp="20261001_100000_000001",
+            )
+            second = self.previous_sync(
+                project, old_ztp, applied["fingerprint"],
+                stamp="20261001_110000_000001",
+            )
+            MANUAL.publish_confirmed_sync_anchor(
+                project, DEVICE, first.parent, "old-operation", "old-trigger",
+                applied["fingerprint"],
+            )
+            anchor = MANUAL.confirmed_sync_anchor_path(project, DEVICE)
+            older_anchor = anchor.read_bytes()
+            MANUAL.publish_confirmed_sync_anchor(
+                project, DEVICE, second.parent, "old-operation", "old-trigger",
+                applied["fingerprint"],
+            )
+            anchor.write_bytes(older_anchor)
+            evidence_paths = (
+                anchor,
+                first.parent / DEVICE["hostname"] / "confirmed-order.json",
+                second.parent / DEVICE["hostname"] / "confirmed-order.json",
+            )
+            before = {path: (path.stat().st_ino, path.read_bytes())
+                      for path in evidence_paths}
+            with self.assertRaises(MANUAL.ManualZtpError) as caught:
+                MANUAL.select_replace_guard_baseline(project, DEVICE, applied)
+            message = str(caught.exception)
+            for required in ("结果未知", "保留", "只读核查", "不要盲目重试"):
+                self.assertIn(required, message)
+            self.assertEqual(before, {
+                path: (path.stat().st_ino, path.read_bytes())
+                for path in evidence_paths
+            })
+
+    def test_crash_between_run_marker_and_order_anchor_fails_closed(self):
+        old_ztp = ReplaceConfigGuardTests.config()
+        applied = ReplaceConfigGuardTests.applied(old_ztp)
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            evidence = self.previous_sync(project, old_ztp, applied["fingerprint"])
+            anchor_path = MANUAL.confirmed_sync_anchor_path(project, DEVICE)
+            publish = MANUAL.atomic_json
+
+            def crash_before_anchor(path, value):
+                if path == anchor_path:
+                    raise OSError("simulated interruption before anchor publish")
+                return publish(path, value)
+
+            with mock.patch.object(MANUAL, "atomic_json", side_effect=crash_before_anchor):
+                with self.assertRaisesRegex(OSError, "simulated interruption"):
+                    MANUAL.publish_confirmed_sync_anchor(
+                        project, DEVICE, evidence.parent, "old-operation",
+                        "old-trigger", applied["fingerprint"],
+                    )
+            self.assertTrue((evidence / "confirmed-order.json").is_file())
+            self.assertFalse(anchor_path.exists())
+            marker_path = evidence / "confirmed-order.json"
+            marker_before = (marker_path.stat().st_ino, marker_path.read_bytes())
+            with self.assertRaises(MANUAL.ManualZtpError) as caught:
+                MANUAL.select_replace_guard_baseline(project, DEVICE, applied)
+            message = str(caught.exception)
+            for required in ("结果未知", "保留", "只读核查", "不要盲目重试"):
+                self.assertIn(required, message)
+            self.assertEqual(marker_before,
+                             (marker_path.stat().st_ino, marker_path.read_bytes()))
+            self.assertFalse(anchor_path.exists())
+
+    def test_orphan_order_guidance_reaches_web_worker_as_failure(self):
+        old_ztp = ReplaceConfigGuardTests.config()
+        applied = ReplaceConfigGuardTests.applied(old_ztp)
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            evidence = self.previous_sync(project, old_ztp, applied["fingerprint"])
+            marker_path = evidence / "confirmed-order.json"
+            MANUAL.atomic_json(marker_path, {
+                "schema": 1, "hostname": DEVICE["hostname"],
+                "stamp": evidence.parent.name, "sequence": 1,
+                "operation_id": "old-operation", "trigger_id": "old-trigger",
+                "receipt_fingerprint": applied["fingerprint"],
+            })
+            marker_before = (marker_path.stat().st_ino, marker_path.read_bytes())
+            with self.assertRaises(MANUAL.ManualZtpError) as caught:
+                MANUAL.select_replace_guard_baseline(project, DEVICE, applied)
+            self.assertIn("结果未知", str(caught.exception))
+
+            devices_csv = project / "02-devices_config.csv"
+            devices_csv.write_text("hostname,type\nleaf01,eth\n", encoding="utf-8")
+            writes = []
+            with mock.patch.object(WORKER, "DEVICES_CSV", devices_csv), \
+                 mock.patch.object(WORKER, "latest_device_state", return_value={}), \
+                 mock.patch.object(WORKER, "command_for", return_value=["fixed-helper"]), \
+                 mock.patch.object(
+                     WORKER, "write_device_status",
+                     side_effect=lambda _host, state, **kw: writes.append((state, kw)),
+                 ), mock.patch.object(
+                     WORKER.subprocess, "run",
+                     return_value=completed(
+                         returncode=1, stderr=f"[ERROR] {caught.exception}\n",
+                     ),
+                 ) as local_command:
+                WORKER.execute(
+                    "leaf01", "prod", 30, 60, 1,
+                    operation="replace-config", operation_id="new-operation",
+                    trigger_id="new-trigger", requested_operation="replace-config",
+                    preview_fingerprint={"current_sha256": "a" * 64},
+                )
+            local_command.assert_called_once()
+            self.assertEqual("failed", writes[-1][0])
+            self.assertNotIn("config_sync_success", [state for state, _ in writes])
+            self.assertEqual("config_sync", writes[-1][1]["phase"])
+            for required in ("结果未知", "保留", "只读核查", "不要盲目重试"):
+                self.assertIn(required, writes[-1][1]["reason"])
+            self.assertEqual(marker_before,
+                             (marker_path.stat().st_ino, marker_path.read_bytes()))
+            self.assertFalse(MANUAL.confirmed_sync_anchor_path(project, DEVICE).exists())
+
+    def test_main_reserves_single_manual_run_before_first_summary_write(self):
+        tree = ast.parse((ROOT / "ztp/manual-ztp.py").read_text(encoding="utf-8"))
+        main = next(node for node in tree.body
+                    if isinstance(node, ast.FunctionDef) and node.name == "main")
+        bindings = [node for node in ast.walk(main)
+                    if isinstance(node, ast.Assign)
+                    and any(isinstance(target, ast.Name) and target.id == "run_dir"
+                            for target in node.targets)]
+        reservations = [node for node in ast.walk(main)
+                        if isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Name)
+                        and node.func.id == "reserve_manual_run_dir"]
+        summary_writes = [node for node in ast.walk(main)
+                          if isinstance(node, ast.Call)
+                          and isinstance(node.func, ast.Name)
+                          and node.func.id == "atomic_json"
+                          and node.args and any(
+                              isinstance(child, ast.Name) and child.id == "run_dir"
+                              for child in ast.walk(node.args[0]))]
+        self.assertEqual(1, len(bindings))
+        self.assertEqual(1, len(reservations))
+        self.assertTrue(summary_writes)
+        self.assertEqual(bindings[0].end_lineno + 1, reservations[0].lineno)
+        self.assertLess(reservations[0].lineno,
+                        min(write.lineno for write in summary_writes))
+
+    def test_repeated_wall_clock_stamp_cannot_overwrite_old_run_evidence(self):
+        old_ztp = ReplaceConfigGuardTests.config()
+        applied = ReplaceConfigGuardTests.applied(old_ztp)
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            evidence = self.previous_sync(
+                project, old_ztp, applied["fingerprint"],
+                stamp="20261001_120000_000001",
+            )
+            summary = evidence.parent / "summary.json"
+            old_bytes = summary.read_bytes()
+            with self.assertRaises(MANUAL.ManualZtpError):
+                MANUAL.reserve_manual_run_dir(evidence.parent)
+            self.assertEqual(old_bytes, summary.read_bytes())
+
+    def test_symlinked_private_evidence_does_not_become_baseline(self):
+        old_ztp = ReplaceConfigGuardTests.config()
+        applied = ReplaceConfigGuardTests.applied(old_ztp)
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            evidence = self.previous_sync(project, old_ztp, applied["fingerprint"])
+            expected = evidence / "expected.yaml"
+            outside = project / "outside.yaml"
+            outside.write_bytes(expected.read_bytes())
+            expected.unlink()
+            expected.symlink_to(outside)
+            with self.assertRaises(MANUAL.ManualZtpError):
+                MANUAL.select_replace_guard_baseline(project, DEVICE, applied)
+
+    def test_new_device_ztp_receipt_invalidates_old_manual_baseline(self):
+        old_ztp = ReplaceConfigGuardTests.config()
+        applied = ReplaceConfigGuardTests.applied(old_ztp)
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            evidence = self.previous_sync(project, old_ztp, applied["fingerprint"])
+            MANUAL.publish_confirmed_sync_anchor(
+                project, DEVICE, evidence.parent, "old-operation", "old-trigger",
+                applied["fingerprint"],
+            )
+            newer = dict(applied, fingerprint="c" * 64)
+            selected = MANUAL.select_replace_guard_baseline(project, DEVICE, newer)
+            self.assertEqual("device-ztp-receipt", selected["source"])
+            self.assertIs(newer, selected["applied"])
+
+    def test_worker_preview_accepts_only_matching_verified_manual_prior(self):
+        old_ztp = ReplaceConfigGuardTests.config()
+        prior_sync = old_ztp.replace("rule: accept", "rule: drop")
+        desired = prior_sync.replace("      hostname: leaf01\n", "      hostname: leaf01-new\n")
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            release = project / "release"
+            release.mkdir()
+            marker = release / ".published-complete"
+            marker.write_text("ok\n", encoding="utf-8")
+            expected = release / "leaf01.yaml"
+            expected.write_text(desired, encoding="utf-8")
+            applied_output = protocol(old_ztp)
+            applied_reader = mock.Mock(
+                args=SimpleNamespace(command_timeout=20),
+                run=mock.Mock(return_value=completed(applied_output)),
+            )
+            applied = MANUAL.collect_applied_config(
+                applied_reader, DEVICE, "192.0.2.10",
+            )
+            self.previous_sync(project, prior_sync, applied["fingerprint"])
+            client = mock.Mock(args=SimpleNamespace(command_timeout=20))
+            client.run.side_effect = [completed(prior_sync), completed(applied_output)]
+            new_run = project / "99-output-ztp/manual-config-sync/20261001_120000_000001"
+            devices_csv = project / "02-devices_config.csv"
+            devices_csv.write_text("hostname,type\nleaf01,eth\n", encoding="utf-8")
+            previews = []
+
+            def local_preflight(command, **_kwargs):
+                self.assertEqual(str(ROOT / "ztp/manual-ztp.py"), command[1])
+                self.assertIn("--preflight-only", command)
+                evidence = MANUAL.preflight_one(
+                    client, project, DEVICE, new_run / DEVICE["hostname"],
+                    replace_config=True,
+                )
+                previews.append(evidence)
+                new_run.chmod(0o700)
+                evidence.update(operation_id="new-operation", trigger_id="new-trigger")
+                MANUAL.atomic_json(new_run / DEVICE["hostname"] / "preflight.json", evidence)
+                MANUAL.atomic_json(new_run / "summary.json", {
+                    "state": "preview_ready", "operation": "replace-config",
+                    "effective_operation": "replace-config",
+                    "operation_id": "new-operation", "trigger_source": "manual_config_sync_web",
+                    "generated_at": "2026-10-01T12:00:00+08:00",
+                    "targets": [{"hostname": DEVICE["hostname"],
+                                 "trigger_id": "new-trigger",
+                                 "effective_operation": "replace-config"}],
+                    "preflight": [evidence], "results": [],
+                })
+                return completed("preview prepared\n")
+
+            with mock.patch.object(
+                MANUAL, "validate_parent_release_binding",
+                return_value={"binding_sha256": "b" * 64},
+            ), mock.patch.object(
+                MANUAL, "connect_and_verify", return_value=("192.0.2.10", "eth0"),
+            ), mock.patch.object(
+                MANUAL, "published_yaml_paths",
+                return_value=(marker, expected, release / "mac.yaml"),
+            ), mock.patch.object(
+                WORKER, "DEVICES_CSV", devices_csv,
+            ), mock.patch.object(
+                WORKER.subprocess, "run", side_effect=local_preflight,
+            ), mock.patch.object(
+                WORKER, "write_device_status",
+            ) as write_status, mock.patch.object(
+                MANUAL, "trigger_one", side_effect=AssertionError("replace"),
+            ) as trigger_one:
+                WORKER.execute_preview(
+                    DEVICE["hostname"], "eth", 20, "replace-config",
+                    "new-operation", "new-trigger",
+                )
+            self.assertEqual(1, len(previews))
+            preview = previews[0]
+            self.assertTrue(preview["replace_guard"]["allowed"], preview)
+            self.assertEqual("manual-sync-readback", preview["replace_guard_baseline_source"])
+            self.assertEqual("preview_ready", write_status.call_args_list[-1].args[1])
+            self.assertTrue(write_status.call_args_list[-1].kwargs["replace_guard"]["allowed"])
+            trigger_one.assert_not_called()
+            self.assertEqual(2, client.run.call_count)
+
+    def test_confirm_rejects_changed_manual_evidence_before_remote_replace(self):
+        old_ztp = ReplaceConfigGuardTests.config()
+        prior_sync = old_ztp.replace("rule: accept", "rule: drop")
+        desired = prior_sync.replace("hostname: leaf01", "hostname: leaf01-new")
+        applied_output = protocol(old_ztp)
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            release = project / "release"
+            release.mkdir()
+            marker = release / ".published-complete"
+            marker.write_text("ok\n", encoding="utf-8")
+            expected = release / "leaf01.yaml"
+            expected.write_text(desired, encoding="utf-8")
+            applied_reader = mock.Mock(
+                args=SimpleNamespace(command_timeout=20),
+                run=mock.Mock(return_value=completed(applied_output)),
+            )
+            applied = MANUAL.collect_applied_config(
+                applied_reader, DEVICE, "192.0.2.10",
+            )
+            old_evidence = self.previous_sync(
+                project, prior_sync, applied["fingerprint"],
+            )
+            run_dir = project / "99-output-ztp/manual-config-sync/20261001_120000_000001"
+            preview_client = mock.Mock(args=SimpleNamespace(command_timeout=20))
+            preview_client.run.side_effect = [completed(prior_sync), completed(applied_output)]
+            with mock.patch.object(
+                MANUAL, "validate_parent_release_binding",
+                return_value={"binding_sha256": "b" * 64},
+            ), mock.patch.object(
+                MANUAL, "connect_and_verify", return_value=("192.0.2.10", "eth0"),
+            ), mock.patch.object(
+                MANUAL, "published_yaml_paths",
+                return_value=(marker, expected, release / "mac.yaml"),
+            ), mock.patch.object(
+                MANUAL, "published_mac_paths", return_value=[],
+            ):
+                prepared = MANUAL.preflight_one(
+                    preview_client, project, DEVICE, run_dir / DEVICE["hostname"],
+                    replace_config=True,
+                )
+            self.assertTrue(prepared["replace_guard"]["allowed"])
+            result_path = old_evidence / "result.json"
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            result["config_sync_verification"]["actual_runtime_sha256"] = "f" * 64
+            result_path.write_text(json.dumps(result), encoding="utf-8")
+            trigger_client = mock.Mock(args=SimpleNamespace(command_timeout=20))
+            trigger_client.run.side_effect = [completed(prior_sync), completed(applied_output)]
+            with mock.patch.object(
+                MANUAL, "connect_and_verify", return_value=("192.0.2.10", "eth0"),
+            ), mock.patch.object(
+                MANUAL, "verify_prepared_release_binding",
+            ):
+                outcome = MANUAL.trigger_one(
+                    trigger_client, DEVICE, "", run_dir,
+                    operation="replace-config", prepared=prepared,
+                    operation_id="new-operation", trigger_id="new-trigger",
+                )
+            self.assertEqual("failed", outcome["state"], outcome)
+            self.assertEqual("not-submitted", outcome["config_sync_outcome"])
+            self.assertEqual(2, trigger_client.run.call_count)
+            self.assertFalse(any(
+                "nv config replace" in call.args[2]
+                for call in trigger_client.run.call_args_list
+            ))
+
+    def test_second_verified_sync_can_confirm_and_submit_once(self):
+        old_ztp = ReplaceConfigGuardTests.config()
+        prior_sync = old_ztp.replace("rule: accept", "rule: drop")
+        desired = prior_sync.replace("hostname: leaf01", "hostname: leaf01-new")
+        applied = ReplaceConfigGuardTests.applied(old_ztp)
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            release = project / "release"
+            release.mkdir()
+            marker = release / ".published-complete"
+            marker.write_text("ok\n", encoding="utf-8")
+            expected = release / "leaf01.yaml"
+            expected.write_text(desired, encoding="utf-8")
+            self.previous_sync(project, prior_sync, applied["fingerprint"])
+            run_dir = project / "99-output-ztp/manual-config-sync/20261001_120000_000001"
+            preview_client = mock.Mock(args=SimpleNamespace(command_timeout=20))
+            preview_client.run.return_value = completed(prior_sync)
+            with mock.patch.object(
+                MANUAL, "validate_parent_release_binding",
+                return_value={"binding_sha256": "b" * 64},
+            ), mock.patch.object(
+                MANUAL, "connect_and_verify", return_value=("192.0.2.10", "eth0"),
+            ), mock.patch.object(
+                MANUAL, "published_yaml_paths",
+                return_value=(marker, expected, release / "mac.yaml"),
+            ), mock.patch.object(
+                MANUAL, "published_mac_paths", return_value=[],
+            ), mock.patch.object(
+                MANUAL, "collect_applied_config", return_value=applied,
+            ):
+                prepared = MANUAL.preflight_one(
+                    preview_client, project, DEVICE, run_dir / DEVICE["hostname"],
+                    replace_config=True,
+                )
+            self.assertTrue(prepared["replace_guard"]["allowed"])
+            trigger_client = mock.Mock(args=SimpleNamespace(command_timeout=20))
+            anchor_path = MANUAL.confirmed_sync_anchor_path(project, DEVICE)
+
+            def run_with_anchor_before_replace(*_args, **_kwargs):
+                if trigger_client.run.call_count == 1:
+                    return completed(prior_sync)
+                self.assertTrue(anchor_path.is_file(), "order anchor must precede remote replace")
+                published = json.loads(anchor_path.read_text(encoding="utf-8"))
+                self.assertEqual(run_dir.name, published["stamp"])
+                return completed("applied\n")
+
+            trigger_client.run.side_effect = run_with_anchor_before_replace
+            devices_csv = project / "02-devices_config.csv"
+            devices_csv.write_text("hostname,type\nleaf01,eth\n", encoding="utf-8")
+            with mock.patch.object(WORKER, "DEVICES_CSV", devices_csv):
+                prior_results = WORKER._result_snapshot("replace-config")
+            self.assertEqual(1, len(prior_results))
+            raw_sha = hashlib.sha256(desired.encode("utf-8")).hexdigest()
+            runtime_sha = MANUAL.runtime_comparable_nvue_config(
+                desired, label="second expected sync",
+            )[2]
+            verified = {
+                "schema": 1, "hostname": DEVICE["hostname"],
+                "eth0_mac": DEVICE["mac_plain"],
+                "expected_raw_sha256": raw_sha,
+                "expected_runtime_sha256": runtime_sha,
+                "actual_runtime_sha256": runtime_sha,
+                "receipt_refreshed": False,
+            }
+            with mock.patch.object(
+                MANUAL, "connect_and_verify", return_value=("192.0.2.10", "eth0"),
+            ), mock.patch.object(
+                MANUAL, "verify_prepared_release_binding",
+            ), mock.patch.object(
+                MANUAL, "collect_applied_config", return_value=applied,
+            ), mock.patch.object(
+                MANUAL, "verify_config_sync_readback", return_value=verified,
+            ) as readback:
+                outcome = MANUAL.trigger_one(
+                    trigger_client, DEVICE, "", run_dir,
+                    trigger_source="manual_config_sync_web", trigger_id="new-trigger",
+                    operation="replace-config", operation_id="new-operation",
+                    prepared=prepared,
+                )
+            self.assertEqual("triggered", outcome["state"], outcome)
+            self.assertEqual("runtime-verified", outcome["config_sync_outcome"])
+            with mock.patch.object(WORKER, "DEVICES_CSV", devices_csv):
+                accepted = WORKER.accepted_result(
+                    DEVICE["hostname"], "new-operation", "new-trigger",
+                    "replace-config", "manual_config_sync_web", prior_results,
+                )
+            self.assertEqual(outcome, accepted)
+            self.assertTrue(WORKER.config_sync_verified(
+                accepted, DEVICE["hostname"], "new-operation", "new-trigger",
+            ))
+            submit = [call for call in trigger_client.run.call_args_list
+                      if "nv config replace" in call.args[2]]
+            self.assertEqual(1, len(submit))
+            self.assertEqual(desired, submit[0].kwargs["stdin"])
+            readback.assert_called_once_with(trigger_client, DEVICE, "192.0.2.10", desired)
+
+
 class ManualCommandHelpTests(unittest.TestCase):
     def test_public_flags_explain_environment_and_timeout_units(self):
         public_help = " ".join(MANUAL.parser().format_help().split())
@@ -1139,9 +1750,10 @@ class ConfirmAppliedFingerprintTests(unittest.TestCase):
                 args=SimpleNamespace(command_timeout=20),
                 run=mock.Mock(return_value=completed(applied_output)),
             )
-            applied_fingerprint = MANUAL.collect_applied_config(
+            applied_record = MANUAL.collect_applied_config(
                 applied_reader, DEVICE, "192.0.2.10",
-            )["fingerprint"]
+            )
+            applied_fingerprint = applied_record["fingerprint"]
             client = mock.Mock()
             client.args = SimpleNamespace(command_timeout=20)
             client.run.side_effect = [
@@ -1159,8 +1771,11 @@ class ConfirmAppliedFingerprintTests(unittest.TestCase):
                     prior.encode("utf-8")
                 ).hexdigest(),
                 "applied_fingerprint": applied_fingerprint,
+                "replace_guard_baseline_source": "device-ztp-receipt",
+                "replace_guard_baseline_fingerprint": applied_fingerprint,
                 "published_mac_links": [],
             }
+            sync_run = root / "99-output-ztp/manual-config-sync/20261001_120000_000001"
             with mock.patch.object(
                 MANUAL, "connect_and_verify",
                 return_value=("192.0.2.10", "eth0"),
@@ -1168,7 +1783,8 @@ class ConfirmAppliedFingerprintTests(unittest.TestCase):
                 MANUAL, "verify_prepared_release_binding",
             ):
                 result = MANUAL.trigger_one(
-                    client, DEVICE, "", root / "99-output-ztp/manual-config-sync/run1",
+                    client, DEVICE, "", sync_run,
+                    trigger_source="manual_config_sync_web",
                     operation="replace-config", prepared=prepared, operation_id="op", trigger_id="tr",
                 )
             self.assertEqual("triggered", result["state"], result)
@@ -1199,14 +1815,17 @@ class ConfirmAppliedFingerprintTests(unittest.TestCase):
                 ("command-timeout", [MANUAL.subprocess.TimeoutExpired("replace", 1)], "outcome-unknown"),
                 ("command-error", [completed("", returncode=1)], "outcome-unknown"),
             )
-            for name, replies, outcome in failures:
+            for index, (name, replies, outcome) in enumerate(failures, start=2):
+                failure_run = (root / "failures" / name
+                               / "99-output-ztp/manual-config-sync"
+                               / f"20261001_120000_{index:06d}")
                 with self.subTest(name=name), mock.patch.object(
                     MANUAL, "connect_and_verify", return_value=("192.0.2.10", "eth0"),
                 ), mock.patch.object(MANUAL, "verify_prepared_release_binding"):
                     failed_client = mock.Mock(args=SimpleNamespace(command_timeout=1))
                     failed_client.run.side_effect = [completed(prior), completed(applied_output), *replies]
                     failed = MANUAL.trigger_one(
-                        failed_client, DEVICE, "", root / "failures" / name,
+                        failed_client, DEVICE, "", failure_run,
                         operation="replace-config", prepared=prepared, operation_id="op", trigger_id=name,
                     )
                     self.assertEqual("failed", failed["state"])
@@ -1215,21 +1834,37 @@ class ConfirmAppliedFingerprintTests(unittest.TestCase):
                     self.assertIn("不要自动重试", failed["reason"])
                     self.assertEqual(1, sum("nv config replace" in c.args[2]
                                             for c in failed_client.run.call_args_list))
-                    self.assertEqual(failed, json.loads((root / "failures" / name / "leaf01/result.json").read_text()))
+                    self.assertEqual(failed, json.loads((failure_run / "leaf01/result.json").read_text()))
+                    self.assertTrue(MANUAL.confirmed_sync_anchor_path(
+                        root / "failures" / name, DEVICE,
+                    ).is_file())
+                    with self.assertRaises(MANUAL.ManualZtpError):
+                        MANUAL.select_replace_guard_baseline(
+                            root / "failures" / name, DEVICE, applied_record,
+                        )
             # Real producer result -> worker's durable Web reader and CLI reader.
             inventory = root / "02-devices_config.csv"
             inventory.write_text("hostname\nleaf01\n", encoding="utf-8")
+            # The helper must publish this result during the worker's command,
+            # never leave a matching result on disk before the command starts.
+            produced_result = sync_run / "leaf01/result.json"
+            produced_result.unlink()
+
+            def publish_current_result(*_args, **_kwargs):
+                MANUAL.atomic_json(produced_result, result)
+                return completed()
+
             writes = []
             with mock.patch.object(WORKER, "DEVICES_CSV", inventory), \
                  mock.patch.object(WORKER, "write_device_status", side_effect=lambda host, state, **kw: writes.append(state)), \
                  mock.patch.object(WORKER, "latest_device_state", return_value={}), \
                  mock.patch.object(WORKER, "command_for", return_value=["local-test"]), \
-                 mock.patch.object(WORKER.subprocess, "run", return_value=completed()):
+                 mock.patch.object(WORKER.subprocess, "run", side_effect=publish_current_result):
                 WORKER.execute("leaf01", "prod", 1, 1, 1, operation="replace-config",
                                operation_id="op", trigger_id="tr", requested_operation="replace-config",
                                preview_fingerprint={"current_sha256": "a" * 64})
                 self.assertEqual(["config_sync_running", "config_sync_success"], writes)
-                summary = root / "99-output-ztp/manual-config-sync/run1/summary.json"
+                summary = sync_run / "summary.json"
                 summary.write_text(json.dumps({
                     "trigger_source": "manual_config_sync_cli", "operation": "replace-config",
                     "targets": [DEVICE], "results": [result],

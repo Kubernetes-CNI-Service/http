@@ -842,13 +842,15 @@ def build_runtime_plan(settings: Settings, runner=subprocess.run):
     links, addresses = capture_stable_network_snapshot(runner)
     runtime = _load_runtime_module(settings.http_root)
     try:
+        dhcp_enabled, ztp_enabled = _project_service_modes(settings)
         selected = runtime.plan_dhcp_runtime(
             settings.subnet_csv,
+            dhcp_enabled=dhcp_enabled,
+            ztp_enabled=ztp_enabled,
             link_snapshot=links,
             address_snapshot=addresses,
             allowlist=settings.allowlist,
             relay_ingress=settings.relay_ingress,
-            allow_empty_subnet=_empty_subnet_allowed(settings, settings.subnet_csv),
         )
     except Exception as exc:
         if isinstance(exc, ActivationError):
@@ -1316,7 +1318,7 @@ def restore_mutable_image_sources(
         _atomic_write_bytes(destination, (source_root / relative_name).read_bytes(), 0o644)
 
 
-def project_http_policy(settings: Settings) -> tuple[int, str | None]:
+def project_http_policy(settings: Settings) -> tuple[int, str | None, bool]:
     """Read independent HTTP listener authority from the bound project."""
     project = settings.project_dir
     global_yaml = project / "01-global.yaml"
@@ -1332,6 +1334,12 @@ def project_http_policy(settings: Settings) -> tuple[int, str | None]:
         http_policy = mgmt.get("http", {})
         if not isinstance(http_policy, dict):
             raise ValueError("common.mgmt.http must be a mapping")
+        raw_status = http_policy.get("status")
+        if type(raw_status) is not str or raw_status.strip().casefold() not in {
+            "enabled", "disabled",
+        }:
+            raise ValueError("common.mgmt.http.status must be enabled or disabled")
+        enabled = raw_status.strip().casefold() == "enabled"
         raw_port = http_policy.get("port", 80)
         port = validate_service_endpoint(
             "192.0.2.1", raw_port, field="common.mgmt.http.port"
@@ -1341,7 +1349,7 @@ def project_http_policy(settings: Settings) -> tuple[int, str | None]:
             address = validate_service_endpoint(
                 http_policy["address"], field="common.mgmt.http.address"
             ).host
-        return port, address
+        return port, address, enabled
     except (OSError, UnicodeError, yaml.YAMLError, ValueError, KeyError, TypeError) as exc:
         raise ActivationError(f"invalid project HTTP policy: {exc}") from exc
 
@@ -1351,13 +1359,24 @@ def project_http_port(settings: Settings) -> int:
     return project_http_policy(settings)[0]
 
 
-def project_http_listener_ips(settings: Settings, selected) -> tuple[str, ...]:
-    """Project HTTP listeners; selected.endpoint_ips remains ZTP-only."""
-    _port, address = project_http_policy(settings)
+def _http_listener_ips_from_policy(
+    selected, address: str | None, enabled: bool,
+) -> tuple[str, ...]:
+    """Use one bound policy snapshot for Apache's independently owned listener."""
+    if not enabled:
+        if selected.endpoint_ips:
+            raise ActivationError("HTTP disabled with a ZTP endpoint")
+        return ()
     try:
         return merge_http_listener_addresses(selected.endpoint_ips, address)
     except ValueError as exc:
         raise ActivationError(f"invalid project HTTP listener: {exc}") from exc
+
+
+def project_http_listener_ips(settings: Settings, selected) -> tuple[str, ...]:
+    """Project HTTP listeners; selected.endpoint_ips remains ZTP-only."""
+    _port, address, enabled = project_http_policy(settings)
+    return _http_listener_ips_from_policy(selected, address, enabled)
 
 
 def current_project_dhcp_status(settings: Settings) -> str:
@@ -1416,25 +1435,32 @@ def _require_subnet_header(subnet_csv: Path) -> None:
         os.close(descriptor)
 
 
-def _empty_subnet_allowed(settings: Settings, subnet_csv: Path) -> bool:
-    """Only a disabled service pair may use a validated header-only subnet."""
-    try:
-        _require_subnet_header(subnet_csv)
-    except ActivationError:
-        return False
+def _project_service_modes(settings: Settings) -> tuple[bool, bool]:
+    """Read the current bound global DHCP and ZTP modes independently."""
     try:
         project = settings.project_dir
         global_yaml = project / "01-global.yaml"
         _canonical_regular_within(global_yaml, project, "project global YAML")
         document = safe_load_global_yaml(global_yaml.read_text(encoding="utf-8"))
         mgmt = document["common"]["mgmt"]
-        statuses = tuple(
-            str(mgmt[name]["status"] or "").strip().casefold()
-            for name in ("dhcp-server", "ztp")
-        )
+        statuses = []
+        for name in ("dhcp-server", "ztp"):
+            raw = mgmt[name]["status"]
+            if type(raw) is not str or raw.strip().casefold() not in {"enabled", "disabled"}:
+                raise ValueError(f"common.mgmt.{name}.status must be enabled or disabled")
+            statuses.append(raw.strip().casefold() == "enabled")
     except (OSError, UnicodeError, yaml.YAMLError, ValueError, KeyError, TypeError) as exc:
-        raise ActivationError(f"invalid empty-subnet service policy: {exc}") from exc
-    return statuses == ("disabled", "disabled")
+        raise ActivationError(f"invalid DHCP/ZTP service policy: {exc}") from exc
+    return tuple(statuses)
+
+
+def _empty_subnet_allowed(settings: Settings, subnet_csv: Path) -> bool:
+    """Compatibility query for a validated header-only disabled pair."""
+    try:
+        _require_subnet_header(subnet_csv)
+    except ActivationError:
+        return False
+    return _project_service_modes(settings) == (False, False)
 
 
 def render_apache_listener_config(
@@ -2283,9 +2309,9 @@ def ensure_docker_deployment_owner(
 
 def observe_runtime(settings: Settings, runner=subprocess.run):
     """Build the current plan and rendered config without changing any file."""
-    port, address = project_http_policy(settings)
+    port, address, enabled = project_http_policy(settings)
     selected, links, addresses, runtime = build_runtime_plan(settings, runner)
-    if address is not None:
+    if enabled and address is not None:
         try:
             owners = runtime.inspect_http_listener_owners(
                 address, link_snapshot=links, address_snapshot=addresses,
@@ -2297,12 +2323,7 @@ def observe_runtime(settings: Settings, runner=subprocess.run):
             raise ActivationError(
                 f"invalid HTTP listener ownership: {exc}"
             ) from exc
-    try:
-        listener_ips = merge_http_listener_addresses(
-            selected.endpoint_ips, address
-        )
-    except ValueError as exc:
-        raise ActivationError(f"invalid project HTTP listener: {exc}") from exc
+    listener_ips = _http_listener_ips_from_policy(selected, address, enabled)
     apache = render_apache_listener_config(listener_ips, port=port)
     payload = runtime_plan_payload(settings, selected, links, addresses)
     payload["apache_listener_sha256"] = hashlib.sha256(
@@ -2313,8 +2334,8 @@ def observe_runtime(settings: Settings, runner=subprocess.run):
 
 def prepare_runtime(settings: Settings, runner=subprocess.run):
     """Explicitly publish a freshly observed plan and exact Apache listeners."""
-    _port, address = project_http_policy(settings)
-    if address is None:
+    _port, address, enabled = project_http_policy(settings)
+    if address is None or not enabled:
         # Keep the existing ZTP-only preparation order. An independently
         # declared HTTP address additionally requires prewrite ownership
         # admission, including before directory creation.
@@ -3592,14 +3613,16 @@ def exec_managed_service(name: str, settings: Settings) -> None:
         # so an ifindex/name/prefix change cannot turn an approved listener
         # name into a different logical interface.
         links, addresses = capture_stable_network_snapshot()
+        dhcp_enabled, ztp_enabled = _project_service_modes(settings)
         selected = runtime.revalidate_dhcp_runtime_plan(
             selected,
             settings.subnet_csv,
+            dhcp_enabled=dhcp_enabled,
+            ztp_enabled=ztp_enabled,
             link_snapshot=links,
             address_snapshot=addresses,
             allowlist=settings.allowlist,
             relay_ingress=settings.relay_ingress,
-            allow_empty_subnet=_empty_subnet_allowed(settings, settings.subnet_csv),
         )
         revalidated_fingerprints = selected_interface_fingerprints(
             selected, links, addresses,

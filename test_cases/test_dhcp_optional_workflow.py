@@ -7,6 +7,7 @@ import csv
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import shlex
 import shutil
@@ -31,6 +32,309 @@ ACTIVATE = load_script("optional_empty_subnet_docker", ROOT / "infra/docker/acti
 
 
 class DhcpOptionalWorkflowTests(unittest.TestCase):
+    def test_r22_http_only_supervisor_is_shared_by_setup_load_runtime_and_docker(self):
+        """Header-only off/off plus explicit HTTP address starts Apache alone."""
+        with tempfile.TemporaryDirectory() as name:
+            http_root = Path(name)
+            project = http_root / "DAY0-Prepare/project"
+            project.mkdir(parents=True)
+            document = global_document("disabled")
+            mgmt = document["common"]["mgmt"]
+            mgmt["ztp"]["status"] = "disabled"
+            mgmt["http"]["status"] = "enabled"
+            mgmt["http"]["address"] = "192.0.2.88"
+            global_yaml = project / "01-global.yaml"
+            global_yaml.write_text(yaml.safe_dump(document), encoding="utf-8")
+            subnet = project / "02-dhcp-subnet_config.csv"
+            subnet.write_bytes(EMPTY_SUBNET_TABLE)
+            self.assertEqual(([], []), SETUP._validate_subnet_csv(
+                subnet, dhcp_enabled=False, ztp_enabled=False,
+            ))
+            settings = LOAD.apply_subnet_service_ips(LOAD.load_global(global_yaml), subnet)
+            settings = LOAD.replace(settings, http_root=LOAD.HTTP_ROOT)
+            LOAD.validate_subnet_file(subnet, settings)
+            inputs = SimpleNamespace(settings=settings, subnet_file=subnet)
+            native = LOAD.plan_local_dhcp_runtime(
+                inputs, link_snapshot=[], address_snapshot=[], environment={},
+            )
+            runtime = RUNTIME.plan_dhcp_runtime(
+                subnet, link_snapshot=[], address_snapshot=[],
+                dhcp_enabled=False, ztp_enabled=False,
+            )
+            self.assertEqual(((), ()), (native.endpoint_ips, native.listener_names))
+            self.assertEqual(native.endpoint_ips, runtime.endpoint_ips)
+            docker_settings = ACTIVATE.Settings(
+                http_root=http_root, project_name="project", scope="air",
+            )
+            with mock.patch.object(ACTIVATE, "validate_project_mount"), \
+                    mock.patch.object(
+                        ACTIVATE, "capture_stable_network_snapshot", return_value=([], []),
+                    ), mock.patch.object(ACTIVATE, "_load_runtime_module", return_value=RUNTIME):
+                selected, _links, _addresses, _runtime = ACTIVATE.build_runtime_plan(
+                    docker_settings,
+                )
+            listeners = ACTIVATE.project_http_listener_ips(docker_settings, selected)
+            self.assertEqual(("192.0.2.88",), listeners)
+            self.assertEqual(("apache2",), ACTIVATE.expected_services(
+                selected, dhcp_status="disabled", http_listener_ips=listeners,
+            ))
+            with mock.patch.object(
+                LOAD, "local_ipv4_addresses", return_value={"192.0.2.88"},
+            ), mock.patch.object(LOAD, "verify_control_auth"), \
+                    mock.patch.object(LOAD, "verify_published_files"), \
+                    mock.patch.object(LOAD, "verify_apache_publication_boundary"), \
+                    mock.patch.object(LOAD, "verify_http_publication") as publication, \
+                    mock.patch.object(LOAD, "ensure_ztp_url_network_ready") as ztp_gate, \
+                    mock.patch.object(LOAD, "run") as command, \
+                    mock.patch.object(LOAD, "_runtime_service_action") as action:
+                self.assertEqual(
+                    (True, False), LOAD.supervisor_service_availability(inputs, native),
+                )
+                LOAD.preflight_services(
+                    inputs, {}, dry_run=True, dhcp_runtime_plan=native,
+                    runtime_backend=SimpleNamespace(name="supervisor"),
+                )
+                LOAD.start_services(
+                    inputs, {}, dry_run=True, dhcp_runtime_plan=native,
+                    runtime_backend=SimpleNamespace(name="supervisor"),
+                )
+            self.assertTrue(any("apache2ctl" in str(call) for call in command.call_args_list))
+            self.assertEqual("apache2", action.call_args.args[2])
+            self.assertEqual(1, action.call_count)
+            publication.assert_called_once_with(inputs, {}, True)
+            ztp_gate.assert_not_called()
+            with mock.patch.object(
+                LOAD, "local_ipv4_addresses", return_value={"192.0.2.99"},
+            ), self.assertRaisesRegex(LOAD.LoadError, "管理服务器门禁"):
+                LOAD.supervisor_service_availability(inputs, native)
+
+            mgmt["http"]["status"] = "disabled"
+            global_yaml.write_text(yaml.safe_dump(document), encoding="utf-8")
+            disabled = LOAD.apply_subnet_service_ips(LOAD.load_global(global_yaml), subnet)
+            disabled_inputs = SimpleNamespace(settings=disabled, subnet_file=subnet)
+            self.assertEqual(
+                (), ACTIVATE.project_http_listener_ips(docker_settings, selected),
+            )
+            self.assertEqual(
+                (), ACTIVATE.expected_services(
+                    selected, dhcp_status="disabled", http_listener_ips=(),
+                ),
+            )
+            self.assertEqual(
+                (False, False), LOAD.supervisor_service_availability(
+                    disabled_inputs, native,
+                ),
+            )
+
+    def test_r22_middle_blank_lines_are_shared_by_setup_load_runtime_and_docker(self):
+        """Four real entry points consume the same enabled row after a blank line."""
+        with tempfile.TemporaryDirectory() as name:
+            http_root = Path(name)
+            project = http_root / "DAY0-Prepare/project"
+            project.mkdir(parents=True)
+            document = global_document("enabled")
+            document["common"]["mgmt"]["ztp"]["status"] = "enabled"
+            global_yaml = project / "01-global.yaml"
+            global_yaml.write_text(yaml.safe_dump(document), encoding="utf-8")
+            subnet = project / "02-dhcp-subnet_config.csv"
+            subnet.write_bytes(
+                EMPTY_SUBNET_TABLE + b" \t\r\n"
+                + b"mgmt,192.0.2.0,255.255.255.0,192.0.2.100,192.0.2.120,"
+                  b"192.0.2.1,192.0.2.10,oob,no\n"
+            )
+            self.assertEqual(([], []), SETUP._validate_subnet_csv(
+                subnet, dhcp_enabled=True, ztp_enabled=True,
+            ))
+            settings = LOAD.load_global(global_yaml)
+            LOAD.validate_subnet_file(subnet, settings)
+            links = [{
+                "ifindex": 7, "ifname": "eno7", "link_type": "ether",
+                "flags": ["BROADCAST", "MULTICAST", "UP", "LOWER_UP"],
+                "operstate": "UP",
+            }]
+            addresses = [{
+                "ifindex": 7, "ifname": "eno7", "addr_info": [{
+                    "family": "inet", "local": "192.0.2.10", "prefixlen": 24,
+                    "scope": "global",
+                }],
+            }]
+            plan = RUNTIME.plan_dhcp_runtime(
+                subnet, link_snapshot=links, address_snapshot=addresses,
+                dhcp_enabled=True, ztp_enabled=True,
+            )
+            self.assertEqual(("192.0.2.10",), plan.endpoint_ips)
+            docker_settings = ACTIVATE.Settings(
+                http_root=http_root, project_name="project", scope="air",
+            )
+            with mock.patch.object(ACTIVATE, "validate_project_mount"), \
+                    mock.patch.object(
+                        ACTIVATE, "capture_stable_network_snapshot",
+                        return_value=(links, addresses),
+                    ), mock.patch.object(
+                        ACTIVATE, "_load_runtime_module", return_value=RUNTIME,
+                    ):
+                docker_plan, _links, _addresses, _runtime = ACTIVATE.build_runtime_plan(
+                    docker_settings,
+                )
+            self.assertEqual(plan.endpoint_ips, docker_plan.endpoint_ips)
+
+    def test_r22_whitespace_tail_is_valid_across_four_real_scripts(self):
+        """An off/off header may end with blank and whitespace-only lines."""
+        with tempfile.TemporaryDirectory() as name:
+            http_root = Path(name)
+            project = http_root / "DAY0-Prepare/project"
+            project.mkdir(parents=True)
+            document = global_document("disabled")
+            document["common"]["mgmt"]["ztp"]["status"] = "disabled"
+            global_yaml = project / "01-global.yaml"
+            global_yaml.write_text(yaml.safe_dump(document), encoding="utf-8")
+            subnet = project / "02-dhcp-subnet_config.csv"
+            subnet.write_bytes(EMPTY_SUBNET_TABLE + b" \t\r\n\t\n")
+            errors, warnings = SETUP._validate_subnet_csv(
+                subnet, dhcp_enabled=False, ztp_enabled=False,
+            )
+            self.assertEqual(([], []), (errors, warnings))
+            LOAD.validate_subnet_file(subnet, LOAD.load_global(global_yaml))
+            runtime_plan = RUNTIME.plan_dhcp_runtime(
+                subnet, link_snapshot=[], address_snapshot=[],
+                dhcp_enabled=False, ztp_enabled=False,
+            )
+            self.assertEqual((), runtime_plan.listener_names)
+            docker_settings = ACTIVATE.Settings(
+                http_root=http_root, project_name="project", scope="air",
+            )
+            with mock.patch.object(ACTIVATE, "validate_project_mount"), \
+                    mock.patch.object(
+                        ACTIVATE, "capture_stable_network_snapshot",
+                        return_value=([], []),
+                    ), mock.patch.object(
+                        ACTIVATE, "_load_runtime_module", return_value=RUNTIME,
+                    ):
+                selected, links, addresses, _runtime = ACTIVATE.build_runtime_plan(
+                    docker_settings,
+                )
+            self.assertEqual((), selected.listener_names)
+            self.assertEqual(([], []), (links, addresses))
+
+    def test_r22_inplace_write_cannot_change_bytes_between_lexing_and_semantics(self):
+        """A held inode may be edited; all readers must bind one byte snapshot."""
+        with tempfile.TemporaryDirectory() as name:
+            subnet = Path(name) / "02-dhcp-subnet_config.csv"
+            disabled = LOAD.replace(settings_for("disabled"), ztp_enabled=False)
+            original_read = os.read
+            for stage in ("setup", "load", "runtime"):
+                with self.subTest(stage=stage):
+                    subnet.write_bytes(EMPTY_SUBNET_TABLE)
+                    identity = (subnet.stat().st_dev, subnet.stat().st_ino)
+                    changed = False
+
+                    def edit_after_first_block(fd, size):
+                        nonlocal changed
+                        block = original_read(fd, size)
+                        try:
+                            metadata = os.fstat(fd)
+                        except OSError:
+                            return block
+                        if (block and not changed and
+                                (metadata.st_dev, metadata.st_ino) == identity):
+                            changed = True
+                            subnet.write_bytes(EMPTY_SUBNET_TABLE + b",,,,,,,,\n")
+                        return block
+
+                    with mock.patch.object(os, "read", side_effect=edit_after_first_block):
+                        if stage == "setup":
+                            errors, _warnings = SETUP._validate_subnet_csv(
+                                subnet, dhcp_enabled=False, ztp_enabled=False,
+                            )
+                            self.assertTrue(errors)
+                        elif stage == "load":
+                            with self.assertRaises(LOAD.LoadError):
+                                LOAD.validate_subnet_file(subnet, disabled)
+                        else:
+                            with self.assertRaises(RUNTIME.RuntimeContractError):
+                                RUNTIME._read_dhcp_networks(
+                                    subnet, dhcp_enabled=False, ztp_enabled=False,
+                                )
+                    self.assertTrue(changed, "race injection did not reach the held file")
+
+    def test_r22_delimiter_only_record_never_becomes_disabled_empty_table(self):
+        """All four real scripts reject a CSV record, not silently skip it."""
+        with tempfile.TemporaryDirectory() as name:
+            http_root = Path(name)
+            project = http_root / "DAY0-Prepare/project"
+            project.mkdir(parents=True)
+            document = global_document("disabled")
+            document["common"]["mgmt"]["ztp"]["status"] = "disabled"
+            (project / "01-global.yaml").write_text(
+                yaml.safe_dump(document), encoding="utf-8",
+            )
+            subnet = project / "02-dhcp-subnet_config.csv"
+            subnet.write_bytes(EMPTY_SUBNET_TABLE + b",,,,,,,,\n")
+            settings = LOAD.load_global(project / "01-global.yaml")
+            errors, _warnings = SETUP._validate_subnet_csv(
+                subnet, dhcp_enabled=False, ztp_enabled=False,
+            )
+            self.assertIn("行2", " ".join(errors))
+            with self.assertRaisesRegex(LOAD.LoadError, r"第 2 行|line 2"):
+                LOAD.validate_subnet_file(subnet, settings)
+            with self.assertRaisesRegex(RUNTIME.RuntimeContractError, r"line 2"):
+                RUNTIME.plan_dhcp_runtime(
+                    subnet, link_snapshot=[], address_snapshot=[],
+                    dhcp_enabled=False, ztp_enabled=False,
+                )
+            docker_settings = ACTIVATE.Settings(
+                http_root=http_root, project_name="project", scope="air",
+            )
+            with mock.patch.object(ACTIVATE, "validate_project_mount"), \
+                    mock.patch.object(
+                        ACTIVATE, "capture_stable_network_snapshot",
+                        return_value=([], []),
+                    ), mock.patch.object(
+                        ACTIVATE, "_load_runtime_module", return_value=RUNTIME,
+                    ), self.assertRaisesRegex(ACTIVATE.ActivationError, r"line 2"):
+                ACTIVATE.build_runtime_plan(docker_settings)
+
+    def test_r22_forbidden_global_pair_stops_all_four_real_script_boundaries(self):
+        """An empty CSV never licenses DHCP-off/ZTP-on in any entry point."""
+        with tempfile.TemporaryDirectory() as name:
+            http_root = Path(name)
+            project = http_root / "DAY0-Prepare/project"
+            project.mkdir(parents=True)
+            document = global_document("disabled")
+            document["common"]["mgmt"]["ztp"]["status"] = "enabled"
+            (project / "01-global.yaml").write_text(
+                yaml.safe_dump(document), encoding="utf-8",
+            )
+            subnet = project / "02-dhcp-subnet_config.csv"
+            subnet.write_bytes(EMPTY_SUBNET_TABLE)
+            settings = LOAD.replace(
+                LOAD.load_global(project / "01-global.yaml"),
+                dhcp_enabled=False, ztp_enabled=True,
+            )
+            errors, _warnings = SETUP._validate_subnet_csv(
+                subnet, dhcp_enabled=False, ztp_enabled=True,
+            )
+            self.assertIn("DHCP", " ".join(errors))
+            self.assertIn("ZTP", " ".join(errors))
+            with self.assertRaisesRegex(LOAD.LoadError, "DHCP.*ZTP"):
+                LOAD.validate_subnet_file(subnet, settings)
+            with self.assertRaisesRegex(RUNTIME.RuntimeContractError, "DHCP.*ZTP"):
+                RUNTIME.plan_dhcp_runtime(
+                    subnet, link_snapshot=[], address_snapshot=[],
+                    dhcp_enabled=False, ztp_enabled=True,
+                )
+            docker_settings = ACTIVATE.Settings(
+                http_root=http_root, project_name="project", scope="air",
+            )
+            with mock.patch.object(ACTIVATE, "validate_project_mount"), \
+                    mock.patch.object(
+                        ACTIVATE, "capture_stable_network_snapshot",
+                        return_value=([], []),
+                    ), mock.patch.object(
+                        ACTIVATE, "_load_runtime_module", return_value=RUNTIME,
+                    ), self.assertRaisesRegex(ACTIVATE.ActivationError, "DHCP.*ZTP"):
+                ACTIVATE.build_runtime_plan(docker_settings)
+
     def test_disabled_generation_and_preflight_ignore_missing_all_dhcp_outputs(self):
         with tempfile.TemporaryDirectory() as name:
             fixture = ScopedDhcpFixture(Path(name))
@@ -332,13 +636,67 @@ class DhcpOptionalWorkflowTests(unittest.TestCase):
                     with self.assertRaises(RUNTIME.RuntimeContractError):
                         RUNTIME.plan_dhcp_runtime(
                             subnet, link_snapshot=[], address_snapshot=[],
-                            allow_empty_subnet=True,
+                            dhcp_enabled=False, ztp_enabled=False,
                         )
                 with self.subTest(case=label, script="docker"), \
                         mock.patch.object(ACTIVATE, "capture_stable_network_snapshot", return_value=([], [])), \
                         mock.patch.object(ACTIVATE, "_load_runtime_module", return_value=RUNTIME):
                     with self.assertRaises(ACTIVATE.ActivationError):
                         ACTIVATE.build_runtime_plan(docker_settings)
+
+    def test_subnet_swap_after_check_stops_setup_load_and_runtime_workflow(self):
+        """The same project CSV authority must survive each real-script reader."""
+        with tempfile.TemporaryDirectory() as name:
+            project = Path(name) / "DAY0-Prepare" / "project"
+            project.mkdir(parents=True)
+            document = global_document("disabled")
+            document["common"]["mgmt"]["ztp"]["status"] = "disabled"
+            (project / "01-global.yaml").write_text(
+                yaml.safe_dump(document), encoding="utf-8",
+            )
+            settings = LOAD.load_global(project / "01-global.yaml")
+            subnet = project / "02-dhcp-subnet_config.csv"
+            alternate = project / "alternate.csv"
+            alternate.write_bytes(EMPTY_SUBNET_TABLE)
+
+            for stage in ("setup", "load", "runtime"):
+                with self.subTest(stage=stage):
+                    if subnet.exists() or subnet.is_symlink():
+                        subnet.unlink()
+                    subnet.write_bytes(EMPTY_SUBNET_TABLE)
+                    original_lstat = os.lstat if stage == "setup" else Path.lstat
+                    swapped = False
+
+                    def replace_after_check(path, *args, **kwargs):
+                        nonlocal swapped
+                        metadata = original_lstat(path, *args, **kwargs)
+                        if os.fspath(path) == os.fspath(subnet) and not swapped:
+                            swapped = True
+                            subnet.unlink()
+                            subnet.symlink_to(alternate)
+                        return metadata
+
+                    patcher = (
+                        mock.patch.object(os, "lstat", side_effect=replace_after_check)
+                        if stage == "setup" else
+                        mock.patch.object(Path, "lstat", new=replace_after_check)
+                    )
+                    with patcher:
+                        if stage == "setup":
+                            errors, _warnings = SETUP._validate_subnet_csv(
+                                subnet, dhcp_enabled=False, ztp_enabled=False,
+                            )
+                            self.assertTrue(errors, "setup followed the replacement")
+                        elif stage == "load":
+                            with self.assertRaises(LOAD.LoadError):
+                                LOAD.apply_subnet_service_ips(settings, subnet)
+                        else:
+                            with self.assertRaises(RUNTIME.RuntimeContractError):
+                                RUNTIME.plan_dhcp_runtime(
+                                    subnet, link_snapshot=[], address_snapshot=[],
+                                    dhcp_enabled=False, ztp_enabled=False,
+                                )
+                    self.assertTrue(swapped, "the post-check replacement did not run")
 
     def test_setup_rejects_missing_subnet_before_template_can_fill_it(self):
         with tempfile.TemporaryDirectory() as name:

@@ -8,6 +8,7 @@ expected listener/argv is stated explicitly.
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -138,6 +139,143 @@ class DynamicDhcpInterfaceContractTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_r22_planner_requires_both_builtin_bool_modes(self) -> None:
+        """The public planner has no implicit DHCP or global-ZTP state."""
+        runtime = load_runtime_module()
+        subnet = self.root / "02-dhcp-subnet_config.csv"
+        subnet.write_text(self.HEADER, encoding="utf-8")
+        base = {
+            "link_snapshot": [], "address_snapshot": [],
+            "dhcp_enabled": False, "ztp_enabled": False,
+        }
+        for omitted in ("dhcp_enabled", "ztp_enabled"):
+            with self.subTest(omitted=omitted):
+                kwargs = dict(base)
+                kwargs.pop(omitted)
+                with self.assertRaises(TypeError):
+                    runtime.plan_dhcp_runtime(subnet, **kwargs)
+                with self.assertRaises(TypeError):
+                    runtime._read_dhcp_networks(subnet, **{
+                        key: value for key, value in kwargs.items()
+                        if key in {"dhcp_enabled", "ztp_enabled"}
+                    })
+        for field in ("dhcp_enabled", "ztp_enabled"):
+            for invalid in (None, 0, 1, "disabled", "enabled"):
+                with self.subTest(field=field, invalid=invalid):
+                    kwargs = dict(base)
+                    kwargs[field] = invalid
+                    with self.assertRaisesRegex(runtime.RuntimeContractError, "bool"):
+                        runtime.plan_dhcp_runtime(subnet, **kwargs)
+                    with self.assertRaisesRegex(runtime.RuntimeContractError, "bool"):
+                        runtime._read_dhcp_networks(subnet, **{
+                            key: value for key, value in kwargs.items()
+                            if key in {"dhcp_enabled", "ztp_enabled"}
+                        })
+
+    def test_r22_runtime_rejects_forbidden_pair_and_accepts_off_off_header(self) -> None:
+        """The empty table exception never makes DHCP-off/ZTP-on legal."""
+        runtime = load_runtime_module()
+        subnet = self.root / "02-dhcp-subnet_config.csv"
+        subnet.write_text(self.HEADER, encoding="utf-8")
+        empty = runtime.plan_dhcp_runtime(
+            subnet, link_snapshot=[], address_snapshot=[],
+            dhcp_enabled=False, ztp_enabled=False,
+        )
+        self.assertEqual((), empty.listener_names)
+        with self.assertRaisesRegex(runtime.RuntimeContractError, "DHCP.*ZTP"):
+            runtime.plan_dhcp_runtime(
+                subnet, link_snapshot=[], address_snapshot=[],
+                dhcp_enabled=False, ztp_enabled=True,
+            )
+        with self.assertRaisesRegex(runtime.RuntimeContractError, "no DHCP networks"):
+            runtime.plan_dhcp_runtime(
+                subnet, link_snapshot=[], address_snapshot=[],
+                dhcp_enabled=True, ztp_enabled=False,
+            )
+
+    def test_r22_global_ztp_and_row_endpoints_agree_in_mixed_enabled_table(self) -> None:
+        """A DHCP-only row may coexist with ZTP, but cannot supply its endpoint."""
+        runtime = load_runtime_module()
+        subnet = self.root / "02-dhcp-subnet_config.csv"
+        subnet.write_text(
+            self.HEADER
+            + "active,192.0.2.0,255.255.255.0,192.0.2.100,192.0.2.120,"
+              "192.0.2.1,192.0.2.10,oob,yes\n"
+            + "dhcp-only,198.51.100.0,255.255.255.0,198.51.100.100,"
+              "198.51.100.120,198.51.100.1,,none,no\n",
+            encoding="utf-8",
+        )
+        links = [link(7, "eno7")]
+        addr = [addresses(7, "eno7", "192.0.2.10/24")]
+        plan = runtime.plan_dhcp_runtime(
+            subnet, link_snapshot=links, address_snapshot=addr,
+            relay_ingress=("eno7",), dhcp_enabled=True, ztp_enabled=True,
+        )
+        self.assertEqual(("192.0.2.10",), plan.endpoint_ips)
+        self.assertEqual(("dhcp-only",), plan.dhcp_only_shared_networks)
+        with self.assertRaisesRegex(runtime.RuntimeContractError, r"line 2.*ZTP"):
+            runtime.plan_dhcp_runtime(
+                subnet, link_snapshot=links, address_snapshot=addr,
+                relay_ingress=("eno7",), dhcp_enabled=True, ztp_enabled=False,
+            )
+        subnet.write_text(
+            self.HEADER
+            + "dhcp-only,198.51.100.0,255.255.255.0,198.51.100.100,"
+              "198.51.100.120,198.51.100.1,,none,no\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(runtime.RuntimeContractError, "ZTP.*endpoint"):
+            runtime.plan_dhcp_runtime(
+                subnet, link_snapshot=links, address_snapshot=addr,
+                relay_ingress=("eno7",), dhcp_enabled=True, ztp_enabled=True,
+            )
+
+    def test_r22_raw_csv_record_spans_report_physical_lines(self) -> None:
+        """Multiline quoted cells cannot shift a later bad record's line number."""
+        runtime = load_runtime_module()
+        subnet = self.root / "02-dhcp-subnet_config.csv"
+        valid_multiline = (
+            self.HEADER
+            + '"long\nname",192.0.2.0,255.255.255.0,192.0.2.100,'
+              '192.0.2.120,192.0.2.1,192.0.2.10,oob,yes\n'
+        )
+        subnet.write_text(valid_multiline + " \t\n", encoding="utf-8")
+        result = runtime._read_dhcp_networks(
+            subnet, dhcp_enabled=True, ztp_enabled=True,
+        )
+        self.assertEqual(1, len(result))
+        subnet.write_text(valid_multiline + ",,,,,,,,\n", encoding="utf-8")
+        with self.assertRaisesRegex(runtime.RuntimeContractError, r"line 4"):
+            runtime._read_dhcp_networks(
+                subnet, dhcp_enabled=True, ztp_enabled=True,
+            )
+        subnet.write_text(self.HEADER + " \t\n" + valid_multiline[len(self.HEADER):], encoding="utf-8")
+        self.assertEqual(
+            1,
+            len(runtime._read_dhcp_networks(
+                subnet, dhcp_enabled=True, ztp_enabled=True,
+            )),
+        )
+        subnet.write_text(
+            self.HEADER + " \t\n" + valid_multiline[len(self.HEADER):] + ",,,,,,,,\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(runtime.RuntimeContractError, r"line 5"):
+            runtime._read_dhcp_networks(
+                subnet, dhcp_enabled=True, ztp_enabled=True,
+            )
+
+    def test_r22_first_raw_record_must_be_header_not_a_blank_line(self) -> None:
+        runtime = load_runtime_module()
+        subnet = self.root / "02-dhcp-subnet_config.csv"
+        for prefix in ("\n", " \t\n"):
+            with self.subTest(prefix=prefix):
+                subnet.write_text(prefix + self.HEADER, encoding="utf-8")
+                with self.assertRaisesRegex(runtime.RuntimeContractError, r"line 1"):
+                    runtime._read_dhcp_networks(
+                        subnet, dhcp_enabled=False, ztp_enabled=False,
+                    )
+
     def test_only_header_only_empty_subnet_can_have_no_dhcp_networks(self) -> None:
         runtime = load_runtime_module()
         subnet = self.root / "02-dhcp-subnet_config.csv"
@@ -150,33 +288,35 @@ class DynamicDhcpInterfaceContractTests(unittest.TestCase):
             subnet.write_bytes(payload)
             with self.subTest(payload=payload), self.assertRaises(runtime.RuntimeContractError):
                 runtime.plan_dhcp_runtime(
-                    subnet, link_snapshot=[], address_snapshot=[],
-                    allow_empty_subnet=True,
+                    subnet, dhcp_enabled=False, ztp_enabled=False,
+                    link_snapshot=[], address_snapshot=[],
                 )
         subnet.write_bytes(
             b"shared_network,subnet,netmask,range_start,range_end,routers,"
             b"ztp_service_ip,cumulus_profile,nvos_ztp\n"
         )
         empty = runtime.plan_dhcp_runtime(
-            subnet, link_snapshot=[], address_snapshot=[], allow_empty_subnet=True,
+            subnet, dhcp_enabled=False, ztp_enabled=False,
+            link_snapshot=[], address_snapshot=[],
         )
         self.assertEqual((), empty.listener_names)
         self.assertEqual((), empty.endpoint_ips)
         with self.assertRaisesRegex(runtime.RuntimeContractError, "no DHCP networks"):
             runtime.plan_dhcp_runtime(
-                subnet, link_snapshot=[], address_snapshot=[],
+                subnet, dhcp_enabled=True, ztp_enabled=True, link_snapshot=[], address_snapshot=[],
             )
         with self.assertRaisesRegex(runtime.RuntimeContractError, "no DHCP networks"):
             runtime.plan_dhcp_runtime(
-                subnet, link_snapshot=[link(7, "eno7")],
+                subnet, dhcp_enabled=False, ztp_enabled=False,
+                link_snapshot=[link(7, "eno7")],
                 address_snapshot=[addresses(7, "eno7", "192.0.2.10/24")],
-                relay_ingress=("eno7",), allow_empty_subnet=True,
+                relay_ingress=("eno7",),
             )
         subnet.unlink()
         with self.assertRaises(runtime.RuntimeContractError):
             runtime.plan_dhcp_runtime(
-                subnet, link_snapshot=[], address_snapshot=[],
-                allow_empty_subnet=True,
+                subnet, dhcp_enabled=False, ztp_enabled=False,
+                link_snapshot=[], address_snapshot=[],
             )
         source = self.root / "outside.csv"
         source.write_bytes(
@@ -186,9 +326,37 @@ class DynamicDhcpInterfaceContractTests(unittest.TestCase):
         subnet.symlink_to(source)
         with self.assertRaises(runtime.RuntimeContractError):
             runtime.plan_dhcp_runtime(
-                subnet, link_snapshot=[], address_snapshot=[],
-                allow_empty_subnet=True,
+                subnet, dhcp_enabled=False, ztp_enabled=False,
+                link_snapshot=[], address_snapshot=[],
             )
+
+    def test_subnet_replacement_after_lstat_is_rejected_by_runtime(self) -> None:
+        """A checked path replaced by a symlink may not become runtime input."""
+        runtime = load_runtime_module()
+        subnet = self.root / "02-dhcp-subnet_config.csv"
+        alternate = self.root / "alternate.csv"
+        payload = self.HEADER.encode("ascii")
+        subnet.write_bytes(payload)
+        alternate.write_bytes(payload)
+        original_lstat = Path.lstat
+        swapped = False
+
+        def replace_after_stat(path, *args, **kwargs):
+            nonlocal swapped
+            metadata = original_lstat(path, *args, **kwargs)
+            if os.fspath(path) == os.fspath(subnet) and not swapped:
+                swapped = True
+                subnet.unlink()
+                subnet.symlink_to(alternate)
+            return metadata
+
+        with mock.patch.object(Path, "lstat", new=replace_after_stat):
+            with self.assertRaises(runtime.RuntimeContractError):
+                runtime.plan_dhcp_runtime(
+                    subnet, dhcp_enabled=False, ztp_enabled=False,
+                    link_snapshot=[], address_snapshot=[],
+                )
+        self.assertTrue(swapped, "race injection did not run")
 
     def test_http_owner_projection_retains_active_down_and_filtered_owners(self) -> None:
         runtime = load_runtime_module()
@@ -250,7 +418,7 @@ class DynamicDhcpInterfaceContractTests(unittest.TestCase):
             runtime.RuntimeContractError, "expected exactly one eligible interface"
         ):
             runtime.plan_dhcp_runtime(
-                subnet_csv,
+                subnet_csv, dhcp_enabled=True, ztp_enabled=True,
                 link_snapshot=duplicate_links,
                 address_snapshot=duplicate_addr,
             )
@@ -291,7 +459,7 @@ class DynamicDhcpInterfaceContractTests(unittest.TestCase):
         links, addr = self.vm_snapshot()
 
         plan = runtime.plan_dhcp_runtime(
-            subnet_csv, link_snapshot=links, address_snapshot=addr,
+            subnet_csv, dhcp_enabled=True, ztp_enabled=True, link_snapshot=links, address_snapshot=addr,
         )
 
         # Order comes from the project rows, not lexical interface naming or
@@ -326,7 +494,7 @@ class DynamicDhcpInterfaceContractTests(unittest.TestCase):
         ]
 
         plan = runtime.plan_dhcp_runtime(
-            subnet_csv,
+            subnet_csv, dhcp_enabled=True, ztp_enabled=True,
             link_snapshot=links,
             address_snapshot=addr,
             allowlist=("enp0s8", "enp0s10", "docker0"),
@@ -351,7 +519,7 @@ class DynamicDhcpInterfaceContractTests(unittest.TestCase):
             r"192\.0\.2\.10.*exactly one.*eno2.*dummy0",
         ):
             runtime.plan_dhcp_runtime(
-                subnet_csv,
+                subnet_csv, dhcp_enabled=True, ztp_enabled=True,
                 link_snapshot=links,
                 address_snapshot=addr,
                 allowlist=("eno2",),
@@ -403,7 +571,7 @@ class DynamicDhcpInterfaceContractTests(unittest.TestCase):
                         r"interface.*not eligible|unsafe link",
                     ):
                         runtime.plan_dhcp_runtime(
-                            subnet_csv,
+                            subnet_csv, dhcp_enabled=True, ztp_enabled=True,
                             link_snapshot=[unsafe],
                             address_snapshot=[addresses(
                                 unsafe["ifindex"], unsafe["ifname"],
@@ -437,7 +605,7 @@ class DynamicDhcpInterfaceContractTests(unittest.TestCase):
         ]
 
         plan = runtime.plan_dhcp_runtime(
-            subnet_csv, link_snapshot=links, address_snapshot=addr,
+            subnet_csv, dhcp_enabled=True, ztp_enabled=True, link_snapshot=links, address_snapshot=addr,
         )
 
         self.assertEqual(("eno1", "bond0", "bond0.114"), plan.listener_names)
@@ -459,7 +627,7 @@ class DynamicDhcpInterfaceContractTests(unittest.TestCase):
                     runtime.RuntimeContractError, r"parent|not eligible|unsafe link",
                 ):
                     runtime.plan_dhcp_runtime(
-                        subnet_csv,
+                        subnet_csv, dhcp_enabled=True, ztp_enabled=True,
                         link_snapshot=links,
                         address_snapshot=[addresses(10, links[-1]["ifname"], "192.0.2.10/24")],
                     )
@@ -478,7 +646,7 @@ class DynamicDhcpInterfaceContractTests(unittest.TestCase):
         addr = addresses(7, "eno2", "192.0.2.10/24")
 
         plan = runtime.plan_dhcp_runtime(
-            subnet_csv, link_snapshot=[nic], address_snapshot=[addr],
+            subnet_csv, dhcp_enabled=True, ztp_enabled=True, link_snapshot=[nic], address_snapshot=[addr],
         )
 
         self.assertEqual(("eno2",), plan.listener_names)
@@ -494,11 +662,12 @@ class DynamicDhcpInterfaceContractTests(unittest.TestCase):
 
         with self.assertRaisesRegex(runtime.RuntimeContractError, "DHCP.*ingress"):
             runtime.plan_dhcp_runtime(
-                subnet_csv, link_snapshot=links, address_snapshot=addr,
+                subnet_csv, dhcp_enabled=True, ztp_enabled=False,
+                link_snapshot=links, address_snapshot=addr,
             )
 
         plan = runtime.plan_dhcp_runtime(
-            subnet_csv,
+            subnet_csv, dhcp_enabled=True, ztp_enabled=False,
             link_snapshot=links,
             address_snapshot=addr,
             relay_ingress=("eno2",),
@@ -525,11 +694,11 @@ class DynamicDhcpInterfaceContractTests(unittest.TestCase):
             runtime.RuntimeContractError, r"DHCP-only.*explicit.*ingress",
         ):
             runtime.plan_dhcp_runtime(
-                subnet_csv, link_snapshot=links, address_snapshot=addr,
+                subnet_csv, dhcp_enabled=True, ztp_enabled=True, link_snapshot=links, address_snapshot=addr,
             )
 
         relayed = runtime.plan_dhcp_runtime(
-            subnet_csv,
+            subnet_csv, dhcp_enabled=True, ztp_enabled=True,
             link_snapshot=links,
             address_snapshot=addr,
             relay_ingress=("eno2",),
@@ -538,7 +707,7 @@ class DynamicDhcpInterfaceContractTests(unittest.TestCase):
         self.assertEqual(("dhcp-only",), relayed.dhcp_only_shared_networks)
 
         directly_attached = runtime.plan_dhcp_runtime(
-            subnet_csv,
+            subnet_csv, dhcp_enabled=True, ztp_enabled=True,
             link_snapshot=links,
             address_snapshot=addr,
             relay_ingress=("eno3",),
@@ -556,16 +725,15 @@ class DynamicDhcpInterfaceContractTests(unittest.TestCase):
             runtime.RuntimeContractError, r"no DHCP networks|empty.*ingress",
         ):
             runtime.plan_dhcp_runtime(
-                subnet_csv,
+                subnet_csv, dhcp_enabled=False, ztp_enabled=False,
                 link_snapshot=links,
                 address_snapshot=addr,
                 relay_ingress=("eno2",),
-                allow_empty_subnet=True,
             )
 
         plan = runtime.plan_dhcp_runtime(
-            subnet_csv, link_snapshot=links, address_snapshot=addr,
-            allow_empty_subnet=True,
+            subnet_csv, dhcp_enabled=False, ztp_enabled=False,
+            link_snapshot=links, address_snapshot=addr,
         )
         self.assertEqual((), plan.listener_names)
         self.assertEqual((), plan.listener_ifindexes)
@@ -582,7 +750,7 @@ class DynamicDhcpInterfaceContractTests(unittest.TestCase):
             runtime.RuntimeContractError, r"eno2.*usable.*IPv4",
         ):
             runtime.plan_dhcp_runtime(
-                subnet_csv,
+                subnet_csv, dhcp_enabled=True, ztp_enabled=False,
                 link_snapshot=[link(7, "eno2")],
                 address_snapshot=[addresses(7, "eno2")],
                 relay_ingress=("eno2",),
@@ -599,11 +767,11 @@ class DynamicDhcpInterfaceContractTests(unittest.TestCase):
 
         with self.assertRaisesRegex(runtime.RuntimeContractError, "relay.*ingress"):
             runtime.plan_dhcp_runtime(
-                subnet_csv, link_snapshot=[nic], address_snapshot=[addr],
+                subnet_csv, dhcp_enabled=True, ztp_enabled=True, link_snapshot=[nic], address_snapshot=[addr],
             )
 
         plan = runtime.plan_dhcp_runtime(
-            subnet_csv,
+            subnet_csv, dhcp_enabled=True, ztp_enabled=True,
             link_snapshot=[nic],
             address_snapshot=[addr],
             relay_ingress=("eno2",),
@@ -626,7 +794,7 @@ class DynamicDhcpInterfaceContractTests(unittest.TestCase):
             r"eno2.*ifindex.*7.*multiple shared networks",
         ):
             runtime.plan_dhcp_runtime(
-                subnet_csv, link_snapshot=links, address_snapshot=addr,
+                subnet_csv, dhcp_enabled=True, ztp_enabled=True, link_snapshot=links, address_snapshot=addr,
             )
 
     def test_secondary_ip_in_dhcp_only_shared_network_also_fails(self) -> None:
@@ -646,7 +814,7 @@ class DynamicDhcpInterfaceContractTests(unittest.TestCase):
             r"eno2.*ifindex.*7.*multiple shared networks.*direct.*dhcp-only",
         ):
             runtime.plan_dhcp_runtime(
-                subnet_csv, link_snapshot=links, address_snapshot=addr,
+                subnet_csv, dhcp_enabled=True, ztp_enabled=True, link_snapshot=links, address_snapshot=addr,
             )
 
     def test_exact_service_ip_with_wrong_prefix_is_not_a_direct_match(self) -> None:
@@ -662,7 +830,7 @@ class DynamicDhcpInterfaceContractTests(unittest.TestCase):
             runtime.RuntimeContractError, r"direct.*192\.0\.2\.10/24",
         ):
             runtime.plan_dhcp_runtime(
-                subnet_csv, link_snapshot=links, address_snapshot=addr,
+                subnet_csv, dhcp_enabled=True, ztp_enabled=True, link_snapshot=links, address_snapshot=addr,
             )
 
     def test_down_interface_cannot_satisfy_endpoint_or_listener(self) -> None:
@@ -676,7 +844,7 @@ class DynamicDhcpInterfaceContractTests(unittest.TestCase):
             runtime.RuntimeContractError, r"192\.0\.2\.10.*eligible interface",
         ):
             runtime.plan_dhcp_runtime(
-                subnet_csv,
+                subnet_csv, dhcp_enabled=True, ztp_enabled=True,
                 link_snapshot=[link(7, "eno2", up=False)],
                 address_snapshot=[addresses(7, "eno2", "192.0.2.10/24")],
             )
@@ -694,7 +862,7 @@ class DynamicDhcpInterfaceContractTests(unittest.TestCase):
             runtime.RuntimeContractError, r"192\.0\.2\.10.*eligible interface",
         ):
             runtime.plan_dhcp_runtime(
-                subnet_csv,
+                subnet_csv, dhcp_enabled=True, ztp_enabled=True,
                 link_snapshot=[link(7, "eno2")],
                 address_snapshot=[addr],
             )
@@ -710,7 +878,7 @@ class DynamicDhcpInterfaceContractTests(unittest.TestCase):
             runtime.RuntimeContractError, r"192\.0\.2\.10.*exactly one",
         ):
             runtime.plan_dhcp_runtime(
-                subnet_csv,
+                subnet_csv, dhcp_enabled=True, ztp_enabled=True,
                 link_snapshot=[link(7, "eno2")],
                 address_snapshot=[addresses(
                     7, "eno2", "192.0.2.10/24", valid_life_time=0,
@@ -729,7 +897,7 @@ class DynamicDhcpInterfaceContractTests(unittest.TestCase):
             r"192\.0\.2\.10.*exactly one eligible interface.*eno2.*eno3",
         ):
             runtime.plan_dhcp_runtime(
-                subnet_csv,
+                subnet_csv, dhcp_enabled=True, ztp_enabled=True,
                 link_snapshot=[link(7, "eno2"), link(8, "eno3")],
                 address_snapshot=[
                     addresses(7, "eno2", "192.0.2.10/24"),
@@ -757,7 +925,7 @@ class DynamicDhcpInterfaceContractTests(unittest.TestCase):
         ]
 
         plan = runtime.plan_dhcp_runtime(
-            subnet_csv, link_snapshot=links, address_snapshot=addr,
+            subnet_csv, dhcp_enabled=True, ztp_enabled=True, link_snapshot=links, address_snapshot=addr,
         )
 
         self.assertEqual(("eno1.100", "eno1.200"), plan.listener_names)
@@ -770,7 +938,7 @@ class DynamicDhcpInterfaceContractTests(unittest.TestCase):
             "192.0.2.1,192.0.2.10,oob,no",
         )
         initial = runtime.plan_dhcp_runtime(
-            subnet_csv,
+            subnet_csv, dhcp_enabled=True, ztp_enabled=True,
             link_snapshot=[link(7, "eno2")],
             address_snapshot=[addresses(7, "eno2", "192.0.2.10/24")],
         )
@@ -778,6 +946,7 @@ class DynamicDhcpInterfaceContractTests(unittest.TestCase):
         current = runtime.revalidate_dhcp_runtime_plan(
             initial,
             subnet_csv,
+            dhcp_enabled=True, ztp_enabled=True,
             link_snapshot=[link(7, "eno2")],
             address_snapshot=[addresses(7, "eno2", "192.0.2.10/24")],
         )
@@ -805,6 +974,7 @@ class DynamicDhcpInterfaceContractTests(unittest.TestCase):
                     runtime.revalidate_dhcp_runtime_plan(
                         initial,
                         subnet_csv,
+                        dhcp_enabled=True, ztp_enabled=True,
                         link_snapshot=links,
                         address_snapshot=addr,
                     )
@@ -836,7 +1006,7 @@ class DynamicDhcpInterfaceContractTests(unittest.TestCase):
         subnet_csv = self.write_subnets(*rows)
 
         plan = runtime.plan_dhcp_runtime(
-            subnet_csv, link_snapshot=links, address_snapshot=addr,
+            subnet_csv, dhcp_enabled=True, ztp_enabled=True, link_snapshot=links, address_snapshot=addr,
         )
 
         expected = tuple(f"eno1.{100 + number}" for number in range(1, 6))
@@ -1088,7 +1258,10 @@ class ContainerRuntimeWorkflowContractTests(unittest.TestCase):
                 return "DHCPDISCOVER from 02:00:00:00:00:01\n"
 
         plan = SimpleNamespace(listener_names=("eno2",), listener_ifindexes=(7,))
-        inputs = SimpleNamespace(settings=SimpleNamespace(service_ips=()))
+        inputs = SimpleNamespace(settings=SimpleNamespace(
+            service_ips=(), http_enabled=False, http_address=None,
+            dhcp_enabled=True,
+        ))
         forbidden = AssertionError(
             "supervisor workflow must not invoke systemctl or journalctl"
         )
@@ -1167,7 +1340,10 @@ class ContainerRuntimeWorkflowContractTests(unittest.TestCase):
                 events.append(("restart", service))
                 active[service] = True
 
-        inputs = SimpleNamespace(settings=SimpleNamespace(service_ips=()))
+        inputs = SimpleNamespace(settings=SimpleNamespace(
+            service_ips=(), http_enabled=False, http_address=None,
+            dhcp_enabled=True,
+        ))
         with mock.patch.object(
             load, "ensure_ztp_url_network_ready",
             side_effect=AssertionError("DHCP-only plan has no HTTP endpoint"),

@@ -1218,6 +1218,40 @@ def deployment_source_manifest_sha256_from_archive(archive_path: Path) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _local_reviewed_input_sha256(source: Path) -> str:
+    """Hash local comparison data without following a project input link."""
+    if not getattr(os, "O_NOFOLLOW", 0):
+        raise ValueError("local input comparison requires O_NOFOLLOW")
+    parent_fd = -1
+    descriptor = -1
+    try:
+        parent_fd, parents = package_core._open_package_input_parent(source)
+        before = os.stat(source.name, dir_fd=parent_fd, follow_symlinks=False)
+        descriptor = os.open(
+            source.name,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+            dir_fd=parent_fd,
+        )
+        opened = os.fstat(descriptor)
+        if (not stat.S_ISREG(before.st_mode)
+                or package_core._source_identity(before)
+                != package_core._source_identity(opened)):
+            raise ValueError("local input is not one stable regular file")
+        with os.fdopen(os.dup(descriptor), "rb") as stream:
+            _size, digest = package_core._digest_held_regular(stream, opened.st_size)
+        if (package_core._source_identity(os.fstat(descriptor))
+                != package_core._source_identity(opened)
+                or package_core._package_input_parent_identity(source) != parents):
+            raise ValueError("local input changed during comparison")
+        package_core._require_source_identity(source, opened, label="after comparison")
+        return digest
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if parent_fd >= 0:
+            os.close(parent_fd)
+
+
 def validate_uploaded_archive_for_deploy(archive_path: Path, project: Path) -> None:
     """Revalidate one reviewed archive without rebuilding it.
 
@@ -1235,6 +1269,10 @@ def validate_uploaded_archive_for_deploy(archive_path: Path, project: Path) -> N
         f"./{project_relative}/02-devices_config.csv",
         f"./{project_relative}/02-dhcp-subnet_config.csv",
     }
+    project_core = (
+        "01-global.yaml", "02-devices_config.csv", "02-dhcp-subnet_config.csv",
+    )
+    archived_input_sha256: dict[str, str] = {}
     try:
         with package_core.tarfile.open(archive_path, "r:gz") as archive:
             members = archive.getmembers()
@@ -1252,6 +1290,20 @@ def validate_uploaded_archive_for_deploy(archive_path: Path, project: Path) -> N
                     raise RuntimeError(
                         f"reviewed archive member must be a non-empty regular file: {name}"
                     )
+            for name in project_core:
+                member = by_name[f"./{project_relative}/{name}"]
+                payload = archive.extractfile(member)
+                if payload is None:
+                    raise RuntimeError(f"reviewed archive project input is unreadable: {name}")
+                digest = hashlib.sha256()
+                total = 0
+                with payload:
+                    while chunk := payload.read(1024 * 1024):
+                        total += len(chunk)
+                        digest.update(chunk)
+                if total != member.size:
+                    raise RuntimeError(f"reviewed archive project input was truncated: {name}")
+                archived_input_sha256[name] = digest.hexdigest()
             stream = archive.extractfile(manifest_name)
             if stream is None:
                 raise RuntimeError("reviewed archive source manifest is unreadable")
@@ -1268,6 +1320,28 @@ def validate_uploaded_archive_for_deploy(archive_path: Path, project: Path) -> N
         raise RuntimeError(
             "reviewed archive does not match the current tested production source; "
             "run local load and create a new upload archive"
+        )
+    changed: list[str] = []
+    unavailable: list[str] = []
+    for name in project_core:
+        try:
+            current_sha256 = _local_reviewed_input_sha256(project / name)
+        except (OSError, ValueError):
+            unavailable.append(name)
+            continue
+        if current_sha256 != archived_input_sha256[name]:
+            changed.append(name)
+    if changed:
+        print(
+            "[WARN] 已审归档 A 与本地 B 输入不同："
+            + ", ".join(changed)
+            + "；仍将部署精确归档 A，不会从本地 B 重新打包。"
+        )
+    if unavailable:
+        print(
+            "[WARN] 本地 B 输入无法安全核对："
+            + ", ".join(unavailable)
+            + "；仍将部署精确归档 A，不会从本地 B 重新打包。"
         )
 
 

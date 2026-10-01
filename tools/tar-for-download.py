@@ -161,12 +161,15 @@ def resolve_output(value: Path | None, label: str, source: Path, *, force: bool)
 def create_day0_archive(args: argparse.Namespace) -> Path:
     project = None if args.all_day0 else package_core.resolve_project(args.project)
     if args.all_day0:
-        sources = package_core.project_directories()
+        sources = package_core.archive_project_directories()
         if not sources:
             raise ValueError("DAY0-Prepare 下没有可归档的项目")
     else:
         assert project is not None
         sources = [project]
+    missing_core = {
+        item: package_core.missing_archive_project_core(item) for item in sources
+    }
     source = package_core.DAY0 if args.all_day0 else sources[0]
     label = "DAY0-Prepare-all" if args.all_day0 else project.name
     output_label = "DAY0-Prepare-all" if args.all_day0 else project.name
@@ -264,11 +267,12 @@ def create_day0_archive(args: argparse.Namespace) -> Path:
             fileobj=stream, mode="r:gz",
         ) as archive:
             names = set(archive.getnames())
-            required = (
-                {f"DAY0-Prepare/{item.name}/02-devices_config.csv" for item in sources}
-                if args.all_day0
-                else {f"DAY0-Prepare/{project.name}/02-devices_config.csv"}
-            )
+            required = {
+                f"DAY0-Prepare/{item.name}/{name}"
+                for item, absent in missing_core.items()
+                for name in package_core.ARCHIVAL_CORE_INPUTS
+                if name not in absent
+            }
             missing = sorted(required - names)
             if missing:
                 raise RuntimeError(f"归档验证缺少：{', '.join(missing)}")
@@ -293,6 +297,9 @@ def create_day0_archive(args: argparse.Namespace) -> Path:
         if (after_hash.st_nlink != 1 or identity(before_hash) != identity(after_hash)
                 or identity(after_hash) != identity(named_stage)):
             raise ValueError("临时归档身份已变化")
+        for item, absent in missing_core.items():
+            if package_core.missing_archive_project_core(item) != absent:
+                raise ValueError(f"历史项目核心文件状态在归档期间变化：{item}")
         if args.force:
             try:
                 existing = os.stat(output.name, dir_fd=parent_fd,
@@ -339,6 +346,10 @@ def create_day0_archive(args: argparse.Namespace) -> Path:
     print(f"[OK] Omitted entries  : {sum(omitted.values())}")
     for reason, count in sorted(omitted.items()):
         print(f"     {reason:<32} {count}")
+    print("[NON-DEPLOYABLE] 历史下载归档不含部署授权文件；不可用作 upload/deploy。")
+    for item, absent in missing_core.items():
+        if absent:
+            print(f"[NON-DEPLOYABLE] {item.name}: 缺少 " + ", ".join(absent))
     return output
 
 

@@ -1347,13 +1347,28 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   用户 hash、新增/删除用户，注入 patch receipt、缺失 AAA、损坏 prior、运行态漂移、preview 后 receipt/
   release/current 变化和设备 ZTP 正在运行；全部必须在首次 replace 前以区分原因拒绝。ACL 变化按 owner
   已接受风险允许进入执行，但必须通过 console 同时观察 SSH 是否被 ACL 中断。
+- 连续同步补充：在同一可回滚实验设备上先由 trusted full-replace ZTP A 启动，确认手工同步 B
+  经独立回读达到 `runtime-verified`，而设备 ZTP receipt 仍指向 A；随后只读预检 B→C，要求门禁
+  以私有的 B 成功回读证据作上次配置基线，但绝不改写 A 的设备 receipt。操作者确认后仅提交一次
+  C 的 replace/apply/save，再按上段重新回读。分别替换/删除 B 的 summary、preflight、result、
+  expected YAML，制造 B 后失败或结果未知的新一次同步、改变设备当前运行配置，或产生新的设备
+  ZTP receipt；预期均在 C 首次远端写入前拒绝或要求重新预检，不得退回旧成功证据、按 ping 判成功
+  或自动重试。CLI、页面和重启后的投影需分别核验。
+- 顺序证据故障与人工恢复：仅在可丢弃的私有项目副本中注入 run marker 已写而 anchor 未写、
+  anchor 回退或丢失、序号重复等故障；CLI 与页面均须显示“结果未知/已暂停”，说明保留运行目录、
+  顺序证据和日志，由授权操作员只读核查设备身份、当前及启动配置、可信 ZTP 回执和最近操作，
+  不得盲目重试、删除或改写证据。故障注入期间记录 marker/anchor 前后 inode/SHA、拒绝原因与
+  远端 replace 调用次数；不得自动补锚或以旧成功回退。若真实设备出现同类状态，先停止该设备
+  配置同步并保全证据，由授权操作员经 OOB/console 只读核查，再另行批准受控恢复；本卡不授权
+  在真实设备制造崩溃或手工修改 root-owned 顺序证据。该场景仍 **NOT RUN**。
 - 证据、清理与风险：保存脱敏后的 operation/trigger ID、状态时间线、原因码、value-free changed paths、
   receipt/release/current/expected SHA-256、NVUE exit、apply/save 与重连结果；不得保存配置值、密码散列或
   SSH 凭据。每个负例从交换机/VM 快照恢复；成功例使用受管生成/replace 流程恢复原配置并再次验证
   startup 与登录。完整 replace 会删除未生成的现场配置，ACL 变化可能立即中断 SSH，因此首次只能在有
   console/OOB 和可回滚快照的实验设备执行，禁止在生产交换机首测。
 - 限制：自动回读仅证明当时可观测运行态与本次输入一致，不证明 startup 或不可观测密码散列；
-  不更新 root-owned prior receipt。连续 A→B→C 的可信回执闭环仍未实现，不得用本卡单次成功关闭。
+  不更新 root-owned prior receipt。连续 A→B→C 的私有回读基线目前仅有本地候选和隔离测试，
+  真实设备、跨重启、并发及恢复验证仍 **NOT RUN**；不得用本卡单次成功或本地 GREEN 宣称闭环验收。
 
 ## TC-REAL-COLLECTION-CYCLE-001 — AIR/Production cycle、进程绑定与真实制品
 
