@@ -5167,6 +5167,24 @@ tr.grp-hidden {{ display: none; }}
   background:#f8fafc; }}
 .monitor-control-actions {{ display:flex; align-items:center; gap:6px; min-height:30px; }}
 .monitor-control-item .ztp-monitor-state {{ max-width:260px; white-space:normal; }}
+.collection-failure-detail-button {{ font-size:11px; padding:3px 6px !important; }}
+.collection-failure-dialog {{
+  border:0; border-radius:8px; padding:0; width:min(760px, calc(100vw - 32px));
+  max-height:calc(100vh - 32px); box-shadow:0 12px 40px #0005;
+}}
+.collection-failure-dialog::backdrop {{ background:#15203380; }}
+.collection-failure-dialog form {{ padding:18px; display:grid; gap:10px; }}
+.collection-failure-dialog header {{ display:flex; align-items:center; gap:12px; }}
+.collection-failure-dialog h2 {{ flex:1; font-size:16px; }}
+.collection-failure-dialog .dialog-close {{
+  border:1px solid #8290a3; border-radius:4px; padding:5px 9px; background:#fff;
+  cursor:pointer;
+}}
+.collection-failure-list {{
+  max-height:min(60vh, 520px); overflow-y:auto; overflow-wrap:anywhere;
+  padding:0 4px 0 28px; scrollbar-gutter:stable;
+}}
+.collection-failure-list li {{ margin:0 0 8px; line-height:1.4; }}
 .ztp-monitor-control button {{ border:1px solid #8290a3; border-radius:4px; padding:6px 10px;
   background:#fff; color:#26364a; cursor:pointer; font-weight:600; }}
 .ztp-monitor-control button.running {{ border-color:#c33; color:#a31515; }}
@@ -5298,6 +5316,8 @@ tr.grp-hidden {{ display: none; }}
           <button id="switch-collect-button" type="button" onclick="requestSwitchCollection()" disabled>信息收集</button>
         </span>
         <span id="switch-collect-state" class="ztp-monitor-state" aria-live="polite">未知</span>
+        <button id="switch-failure-detail-button" class="collection-failure-detail-button"
+          type="button" aria-haspopup="dialog" onclick="openSwitchFailureDetails()" hidden>查看失败明细</button>
       </span>
       <span class="monitor-control-item">
         <span class="monitor-control-actions">
@@ -5331,6 +5351,17 @@ tr.grp-hidden {{ display: none; }}
       <button id="btn-list" class="vtbtn"        onclick="setView('list')">列表</button>
     </div>
   </div>
+  <dialog id="switch-failure-detail-dialog" class="collection-failure-dialog"
+    aria-labelledby="switch-failure-detail-title">
+    <form method="dialog">
+      <header>
+        <h2 id="switch-failure-detail-title">Switch 信息收集失败明细</h2>
+        <button class="dialog-close" value="close" aria-label="关闭失败明细">关闭</button>
+      </header>
+      <p id="switch-failure-detail-summary"></p>
+      <ol id="switch-failure-detail-list" class="collection-failure-list"></ol>
+    </form>
+  </dialog>
   <dialog id="yaml-backup-dialog" class="yaml-backup-dialog">
     <form onsubmit="submitYamlBackupDialog(event)">
       <strong id="yaml-backup-dialog-title">配置备份</strong>
@@ -5562,6 +5593,8 @@ let autoRefreshDeadline = 0;
 const ZTP_CONTROL_URL = '/monitor/control/ztp-monitor';
 const SWITCH_COLLECTION_URL = '/monitor/control/switch-collection';
 const MANUAL_ZTP_URL = '/monitor/control/manual-ztp';
+const FAILURE_SUMMARY_LIMIT = 3;
+const FAILURE_SUMMARY_NAME_LIMIT = 40;
 function formatControlError(error) {{
   const detail = String(error?.message || error);
   const hostname = String(window.location.hostname || '').toLowerCase();
@@ -5571,10 +5604,11 @@ function formatControlError(error) {{
   if (transportFailed) messages.push(
     'HTTP 响应未完整到达，提交结果未知；先查看控制状态，确认没有进行中的请求后再决定是否重试。'
   );
-  if ((transportFailed || originDenied)
+  if (originDenied
       && ['127.0.0.1', 'localhost', '[::1]'].includes(hostname)) messages.push(
-    '当前页面使用本机转发地址；控制接口要求管理服务器服务 IPv4 的原始 Host/Origin。'
-    + 'SSH -L 的 127.0.0.1 地址会被拒绝；请从可达该服务 IPv4 的浏览器或可信 SOCKS5 代理打开页面。'
+    '当前页面使用本机地址，但服务器收到了非管理服务器服务 IPv4 的 Host/Origin。'
+    + '直通 SSH -L 的 127.0.0.1 地址会被拒绝；请使用受管本机代理，'
+    + '或从可达该服务 IPv4 的浏览器或可信 SOCKS5 代理打开页面。'
   );
   return messages.join(' ');
 }}
@@ -5583,6 +5617,7 @@ const MANUAL_ZTP_INTENTS_KEY = 'monitor.manualZtpIntents.v1:'
 let ztpMonitorState = 'unknown';
 let switchCollectionState = 'unknown';
 let switchCollectionCooling = false;
+let switchFailureDetailReturnFocus = null;
 let yamlBackupState = 'unknown';
 let yamlBackupCooling = false;
 let continuousCollectionEnabled = false;
@@ -5982,8 +6017,58 @@ function failedDeviceSummary(payload) {{
     .filter(Boolean);
   const count = Number.isInteger(payload?.failed_count)
     ? payload.failed_count : names.length;
-  return `${{count}} 台失败${{names.length ? `：${{names.join('、')}}` : ''}}`;
+  const preview = names.slice(0, FAILURE_SUMMARY_LIMIT).map(name =>
+    name.length > FAILURE_SUMMARY_NAME_LIMIT
+      ? `${{name.slice(0, FAILURE_SUMMARY_NAME_LIMIT - 1)}}…` : name
+  );
+  const remaining = Math.max(0, count - preview.length);
+  return `${{count}} 台失败${{preview.length ? `：${{preview.join('、')}}` : ''}}`
+    + `${{remaining ? ` 等（另 ${{remaining}} 台，查看明细）` : ''}}`;
 }}
+
+function renderSwitchFailureDetails(payload) {{
+  const button = document.getElementById('switch-failure-detail-button');
+  const dialog = document.getElementById('switch-failure-detail-dialog');
+  const summary = document.getElementById('switch-failure-detail-summary');
+  const list = document.getElementById('switch-failure-detail-list');
+  if (!button || !summary || !list) return;
+  const failures = Array.isArray(payload?.failed_devices)
+    ? payload.failed_devices : [];
+  if (failures.length === 0 && dialog?.open) {{
+    dialog.close();
+  }}
+  button.hidden = failures.length === 0;
+  button.textContent = `查看全部 ${{failures.length}} 台失败明细`;
+  summary.textContent = failures.length
+    ? `本次收集记录了 ${{failures.length}} 台设备失败。`
+    : '';
+  const fragment = document.createDocumentFragment();
+  failures.forEach((failure, index) => {{
+    const row = document.createElement('li');
+    const hostname = String(failure?.hostname || `设备 ${{index + 1}}`).trim();
+    const operation = String(failure?.operation || 'unknown').trim();
+    const reason = String(failure?.reason || '未提供失败原因').trim();
+    row.textContent = `${{hostname}} — ${{operation}} — ${{reason}}`;
+    fragment.appendChild(row);
+  }});
+  list.replaceChildren(fragment);
+}}
+
+function openSwitchFailureDetails() {{
+  const dialog = document.getElementById('switch-failure-detail-dialog');
+  const button = document.getElementById('switch-failure-detail-button');
+  if (!dialog || !button || button.hidden) return;
+  switchFailureDetailReturnFocus = button;
+  dialog.showModal();
+}}
+
+document.getElementById('switch-failure-detail-dialog')?.addEventListener('close', () => {{
+  if (switchFailureDetailReturnFocus?.isConnected
+      && !switchFailureDetailReturnFocus.hidden) {{
+    switchFailureDetailReturnFocus.focus();
+  }}
+  switchFailureDetailReturnFocus = null;
+}});
 
 function renderSwitchCollectionControl(payload) {{
   const button = document.getElementById('switch-collect-button');
@@ -5993,6 +6078,7 @@ function renderSwitchCollectionControl(payload) {{
   switchCollectionState = alive ? (payload?.state || 'idle') : 'stopped';
   const remaining = Math.max(0, Number(payload?.remaining_seconds) || 0);
   switchCollectionCooling = remaining > 0;
+  renderSwitchFailureDetails(payload);
   if (['queued', 'collecting'].includes(switchCollectionState)) {{
     button.textContent = '信息收集中…';
     button.disabled = true;

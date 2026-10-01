@@ -64,9 +64,9 @@ bash upgrade.sh --method scp --all
 
 | 方式 | 传输方向 | 管理服务器源 | 交换机暂存目录 |
 | --- | --- | --- | --- |
-| `scp` | NVUE通过SCP URI直接从管理服务器fetch | `--scp-root`，默认与`upgrade.sh`同目录 | 不提前暂存 |
+| `scp` | NVUE通过SCP URI直接从管理服务器fetch | `--scp-root`；默认 BIN=`http/image/`，CAB/VME=`http/firmware/` | 不提前暂存 |
 | `http` | 交换机通过curl下载，再由NVUE执行file fetch | HTTP `/image`、`/firmware` | `/home/admin` |
-| `local` | 使用交换机用户家目录中的文件；缺失时可由管理服务器补推 | `--source-root`，默认脚本目录 | `/home/admin` |
+| `local` | 使用交换机用户家目录中的文件；缺失时可由管理服务器补推 | `--source-root`；默认 BIN=`http/image/`，CAB/VME=`http/firmware/` | `/home/admin` |
 | `https` | NVUE通过HTTPS URL直接fetch；服务器证书必须被交换机信任 | HTTPS `/image`、`/firmware` | 不提前暂存 |
 
 ### 3.1 SCP方式
@@ -75,7 +75,7 @@ bash upgrade.sh --method scp --all
 bash upgrade.sh --method scp --all
 ```
 
-默认升级包目录是 `upgrade.sh` 所在目录。脚本先查询所有目标交换机的实际版本，只检查本轮确实需要的包：
+默认升级包按类型放在仓库根目录：OS `.bin` 位于 `image/`，BIOS `.cab` 和 CPLD `.vme` 位于 `firmware/`。两个目录通过公开 README 占位保留在干净 Git clone 中，真实升级包仍被 Git 忽略。脚本先查询所有目标交换机的实际版本，只检查本轮确实需要的包：
 
 - OS 只检查每台交换机当前版本的下一步包。
 - 当前 OS 为 `25.02.7002` 时只需要 `25.02.8008`，不会检查 `25.02.6077` 或 `25.02.7002`。
@@ -112,10 +112,10 @@ Management-server SCP username [cumulus]:
 
 直接回车使用该用户。随后输入一次管理服务器密码，供本次运行所有交换机使用。
 
-生成的 SCP 子脚本不会先运行 `scp` 下载，也不会再通过交换机本地 `file://` 路径 fetch。NVUE 直接使用管理服务器 URI，fetch 成功后再按 basename install。假设 `upgrade.sh` 位于 `/root/IB_Packages`，示例为：
+生成的 SCP 子脚本不会先运行 `scp` 下载，也不会再通过交换机本地 `file://` 路径 fetch。NVUE 直接使用管理服务器 URI，fetch 成功后再按 basename install。假设仓库位于 `/var/www/html`，示例为：
 
 ```bash
-nv action fetch platform firmware BIOS scp://root@192.0.2.10/root/IB_Packages/0ACQF.cab
+nv action fetch platform firmware BIOS scp://root@192.0.2.10/var/www/html/firmware/0ACQF.cab
 nv action install platform firmware BIOS files 0ACQF.cab force skip-version-check
 ```
 
@@ -136,7 +136,7 @@ URI 不包含密码。真实日志证明NVUE的交互包装器不会读取 `SSH_
 bash upgrade.sh --method local --all
 ```
 
-local 方式默认从脚本目录读取文件，并推送到交换机：
+local 方式同样默认按类型从仓库根目录的 `image/` 和 `firmware/` 读取文件，并推送到交换机：
 
 ```text
 /home/admin
@@ -219,7 +219,9 @@ nv action install platform firmware BIOS files 0ACQF.cab force skip-version-chec
 
 ### 4.1 ib.csv
 
-默认优先读取脚本目录中的 `ib.csv`。`type` 和 `eth0_ip` 是必需列；建议同时提供 `hostname` 用于一致性检查：
+DAY0 setup 会在脚本目录创建受管 `ib.csv` 链接，经仓库活动入口
+`infiniband/ib.csv` 指向当前项目清单；切换项目、回滚或 unsetup 时该链接与其他受管入口一起处理。
+因此进入脚本目录即可直接运行。`type` 和 `eth0_ip` 是必需列；建议同时提供 `hostname` 用于一致性检查：
 
 ```csv
 hostname,type,eth0_ip
@@ -623,8 +625,8 @@ bash upgrade.sh --all --phase-wait 600
 | `--public-key FILE` | 指定在可选安装提示中使用的 OpenSSH 公钥。 |
 | `--mgmt-server HOST` | SCP管理服务器地址；默认逐设备探测。 |
 | `--mgmt-user USER` | SCP管理服务器用户；默认 `id -un`。 |
-| `--scp-root DIR` | SCP源目录；默认脚本目录。 |
-| `--source-root DIR` | local源目录；默认脚本目录。 |
+| `--scp-root DIR` | 覆盖 SCP 的统一源目录；默认 BIN 使用仓库 `image/`，CAB/VME 使用 `firmware/`。 |
+| `--source-root DIR` | 覆盖 local 的统一源目录；默认 BIN 使用仓库 `image/`，CAB/VME 使用 `firmware/`。 |
 | `--local-dir DIR` | local/HTTP交换机升级包目录；默认 `/home/admin`。 |
 | `--http-server HOST` | HTTPS/HTTP服务地址；默认逐设备通过交换机 `w` 自动探测。 |
 | `--http-scheme https\|http` | 兼容参数，用于在HTTPS/HTTP之间选择；新命令应优先使用 `--method`。 |

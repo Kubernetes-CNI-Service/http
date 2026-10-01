@@ -273,6 +273,61 @@ def p2p_input_path(project: Path) -> Path:
     return candidates[0]
 
 
+def generated_input_errors(project: Path, parent: dict[str, Any]) -> list[str]:
+    """Check the optional load-owned derived inventory without trusting aliases."""
+    if "generated_inputs" not in parent:
+        return []
+    generated = parent["generated_inputs"]
+    if not isinstance(generated, dict) or set(generated) != {"effective_devices"}:
+        return ["parent generated_inputs 必须仅包含 effective_devices"]
+    authority = generated["effective_devices"]
+    if not isinstance(authority, dict) or set(authority) != {"path", "sha256"}:
+        return ["parent derived inventory authority 字段无效"]
+    raw_path = authority["path"]
+    wanted = authority["sha256"]
+    if not isinstance(raw_path, str) or "\\" in raw_path:
+        return ["parent derived inventory path 非法"]
+    relative = Path(raw_path)
+    prefix = ".load-inventory-"
+    if (
+        relative.is_absolute()
+        or len(relative.parts) != 2
+        or any(part in {"", ".", ".."} for part in relative.parts)
+        or relative.as_posix() != raw_path
+        or not relative.parts[0].startswith(prefix)
+        or len(relative.parts[0]) == len(prefix)
+        or relative.name != "02-devices_config.csv"
+    ):
+        return ["parent derived inventory path 不安全"]
+    if not isinstance(wanted, str) or not SHA256_RE.fullmatch(wanted):
+        return ["parent derived inventory SHA-256 非法"]
+    try:
+        canonical_project = project.resolve(strict=True)
+        directory = project / relative.parts[0]
+        directory_stat = directory.lstat()
+        if (
+            not stat.S_ISDIR(directory_stat.st_mode)
+            or stat.S_IMODE(directory_stat.st_mode) != 0o700
+            or directory.resolve(strict=True) != canonical_project / relative.parts[0]
+        ):
+            return ["parent derived inventory directory 不安全"]
+        derived = directory / relative.name
+        file_stat = derived.lstat()
+        if (
+            not stat.S_ISREG(file_stat.st_mode)
+            or file_stat.st_nlink != 1
+            or stat.S_IMODE(file_stat.st_mode) != 0o600
+            or derived.resolve(strict=True) != canonical_project / relative
+        ):
+            return ["parent derived inventory file 不安全"]
+        actual = sha256_file(derived)
+    except (OSError, RuntimeError, ValueError):
+        return ["parent derived inventory 无法安全读取"]
+    if actual != wanted:
+        return ["parent derived inventory SHA-256 与 parent release 不一致"]
+    return []
+
+
 def release_input_errors(
     project: Path, parent: dict[str, Any],
 ) -> list[str]:
@@ -310,6 +365,7 @@ def release_input_errors(
                 f"{label} SHA-256 与 parent release 不一致: "
                 f"current={actual}, release={wanted}"
             )
+    errors.extend(generated_input_errors(project, parent))
     return errors
 
 
@@ -347,6 +403,10 @@ def parent_release_errors(
     )
     if schema == 2:
         basis_keys += ("dhcp_status",)
+    if "generated_inputs" in parent:
+        if schema != 2:
+            errors.append("legacy v1 parent release 不允许 generated_inputs")
+        basis_keys += ("generated_inputs",)
     if all(key in parent for key in basis_keys):
         basis = {key: parent[key] for key in basis_keys}
         expected_id = hashlib.sha256(json.dumps(

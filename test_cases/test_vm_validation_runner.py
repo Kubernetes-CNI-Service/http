@@ -161,6 +161,63 @@ class VmReleaseAcceptanceTests(unittest.TestCase):
         )
         return fixture, parent
 
+    @staticmethod
+    def _real_derived_parent():
+        """Obtain a derived parent from load, without assembling its ID here."""
+        from test_cases import test_load_release_transaction as release_fixture
+
+        fixture = release_fixture.ReleaseTransactionTests(
+            "test_writes_parent_release_after_all_components_match"
+        )
+        fixture.setUp()
+        directory = Path(tempfile.mkdtemp(
+            prefix=".load-inventory-", dir=fixture.project,
+        ))
+        directory.chmod(0o700)
+        derived = directory / "02-devices_config.csv"
+        derived.write_bytes(fixture.devices_file.read_bytes() + b"\n")
+        derived.chmod(0o600)
+        inputs = release_fixture.LOAD.replace(
+            fixture.inputs, effective_devices_file=derived,
+            effective_devices_sha256=sha256(derived.read_bytes()),
+        )
+        parent = release_fixture.LOAD.validate_and_publish_release(
+            fixture.project, inputs, publish=True,
+        )
+        return fixture, parent, derived
+
+    def test_real_derived_parent_binds_identity_path_and_current_bytes(self) -> None:
+        fixture, parent, derived = self._real_derived_parent()
+        try:
+            self.assertIn("generated_inputs", parent)
+            self.assertEqual([], VM.parent_release_errors(parent, "demo"))
+            self.assertEqual([], VM.release_input_errors(fixture.project, parent))
+            self.assertEqual(
+                "enabled", VM.validated_parent_dhcp_status(fixture.project, parent),
+            )
+
+            changed_path = json.loads(json.dumps(parent))
+            changed_path["generated_inputs"]["effective_devices"]["path"] = (
+                "../outside/02-devices_config.csv"
+            )
+            self.assertTrue(VM.parent_release_errors(changed_path, "demo"))
+
+            changed_path["release_id"] = sha256(json.dumps(
+                {key: changed_path[key] for key in (
+                    "project", "deployment_scope", "switch_scope", "inputs",
+                    "input_sources", "components", "inventory", "dhcp_status",
+                    "generated_inputs",
+                )}, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8"))[:20]
+            with self.assertRaisesRegex(ValueError, "generated|derived|路径|path"):
+                VM.validated_parent_dhcp_status(fixture.project, changed_path)
+
+            derived.write_bytes(derived.read_bytes() + b"tampered\n")
+            with self.assertRaisesRegex(ValueError, "generated|derived|SHA|hash"):
+                VM.validated_parent_dhcp_status(fixture.project, parent)
+        finally:
+            fixture.tearDown()
+
     def test_real_load_v2_modes_and_legacy_v1_are_strictly_distinguished(self) -> None:
         for enabled in (False, True):
             with self.subTest(enabled=enabled):

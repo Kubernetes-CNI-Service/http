@@ -7336,7 +7336,7 @@ def generate_air_hostname_configs(source_dir, output_dir):
     # path so those existing schema checks remain self-contained.
     from dynamic_air_inventory import air_device_template
 
-    inventory_path = os.path.join(SCRIPT_DIR, "02-devices_config.csv")
+    inventory_path = _CSV_FILE
     inventory_templates = {}
     if os.path.isfile(inventory_path):
         with open(inventory_path, newline="", encoding="utf-8-sig") as stream:

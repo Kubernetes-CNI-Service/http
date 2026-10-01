@@ -297,6 +297,10 @@ class PreparedParentRelease:
     release_id: str
     committed: bool = False
     splitter_provenance: dict[str, object] | None = None
+    generated_inventory: dict[str, object] | None = None
+    source_inventory_sha256: str | None = None
+    source_authorities: dict[str, tuple[str, str]] | None = None
+    dhcp_manifest_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -394,6 +398,14 @@ class ProjectInputs:
     deployment_scope: str = "all"
     switch_scope: str = "all"
     source_identities: dict[str, str] | None = None
+    effective_devices_file: Path | None = None
+    effective_devices_sha256: str | None = None
+
+
+@dataclass(frozen=True)
+class DerivedInventory:
+    path: Path
+    sha256: str
 
 
 def section(title: str) -> None:
@@ -2618,6 +2630,7 @@ def _stable_regular_bytes(
 def _stable_regular_identity(
     path: Path, label: str, *, maximum_size: int | None = None,
     required_uid: int | None = None, exact_mode: int | None = None,
+    allow_writable: bool = False,
 ) -> dict[str, object]:
     """Hash a regular file through one stable descriptor."""
     descriptor = -1
@@ -2631,7 +2644,7 @@ def _stable_regular_identity(
             not stat.S_ISREG(before.st_mode)
             or before.st_nlink != 1
             or before.st_size <= 0
-            or before.st_mode & 0o022
+            or (not allow_writable and before.st_mode & 0o022)
             or (maximum_size is not None and before.st_size > maximum_size)
             or (required_uid is not None and before.st_uid != required_uid)
             or (exact_mode is not None and stat.S_IMODE(before.st_mode) != exact_mode)
@@ -4056,6 +4069,168 @@ def dhcp_file_mappings() -> dict[Path, Path]:
     }
 
 
+def validate_dhcp_output_sources(mappings: dict[Path, Path]) -> None:
+    """Admit an empty include only for a proven, unowned zero-host family.
+
+    A fresh project's setup creates zero-byte output placeholders. Scoped c1
+    generation owns only its selected family and preserves the other families,
+    so an empty unowned include is a valid absence of host declarations. The
+    exception never applies to dhcpd.conf or the currently selected family.
+    The real staged and installed ``dhcpd -t`` checks remain mandatory.
+    """
+    empty_hosts: list[Path] = []
+    conf_source: Path | None = None
+    for source in mappings:
+        if source.name == "dhcpd.conf":
+            conf_source = source
+        if not source.is_file():
+            _nonempty_file(source, f"DHCP 输出 {source.name}")
+        if source.stat().st_size:
+            continue
+        if source.name == "dhcpd.conf":
+            _nonempty_file(source, f"DHCP 输出 {source.name}")
+        if source.name not in {
+            "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts",
+        }:
+            raise LoadError(f"未知的零字节 DHCP 输出：{source.name}")
+        empty_hosts.append(source)
+    if not empty_hosts:
+        return
+    if conf_source is None:
+        raise LoadError("DHCP 输出缺少 dhcpd.conf")
+    manifest = _load_release_json(
+        conf_source.with_name("dhcp-release-manifest.json"),
+        "DHCP release manifest",
+    )
+    selected = manifest.get("switch_scope")
+    if selected not in {"eth", "ib", "nvl"}:
+        raise LoadError("零字节 DHCP host 仅允许在单一 switch scope 下保留")
+    counts = manifest.get("counts")
+    declarations = (
+        counts.get("host_declarations_by_family")
+        if isinstance(counts, dict) else None
+    )
+    if (
+        not isinstance(declarations, dict)
+        or set(declarations) != {"eth", "ib", "nvl"}
+        or any(type(value) is not int or value < 0
+               for value in declarations.values())
+    ):
+        raise LoadError("DHCP release manifest 缺少有效的各 family host 计数")
+    outputs = manifest.get("outputs")
+    if not isinstance(outputs, dict):
+        raise LoadError("DHCP release manifest 缺少 outputs hash")
+    for source in mappings:
+        item = outputs.get(source.name)
+        expected_hash = item.get("sha256") if isinstance(item, dict) else None
+        if expected_hash != _sha256_path(source):
+            raise LoadError(f"DHCP release 输出 hash 漂移：{source.name}")
+    for source in empty_hosts:
+        family = source.name.removeprefix("dhcpd_").removesuffix(".hosts")
+        if family == selected or declarations[family] != 0:
+            raise LoadError(
+                f"DHCP 输出 {source.name} 大小为 0，但本轮拥有该 family "
+                "或 manifest 声明了 host；请准备真实内容后再次执行 load"
+            )
+
+
+def bind_empty_dhcp_to_prepared_parent(
+    mappings: dict[Path, Path], candidate: PreparedParentRelease | None,
+) -> None:
+    """Recheck the exact child manifest frozen in the prepared parent.
+
+    A same-output-hash replacement manifest could otherwise change scope or
+    counts between release validation and installation. A standalone call
+    without a prepared parent remains a local install, not a formal release.
+    """
+    if candidate is None or not any(
+        source.name in {"dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts"}
+        and source.stat().st_size == 0 for source in mappings
+    ):
+        return
+    temporary = getattr(candidate, "temporary", None)
+    if not isinstance(temporary, Path):
+        raise LoadError("parent candidate 缺少已冻结的 DHCP manifest 绑定")
+    try:
+        parent = json.loads(temporary.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise LoadError(f"parent candidate 无法复核 DHCP manifest：{exc}") from exc
+    if not isinstance(parent, dict):
+        raise LoadError("parent candidate 结构无效，无法复核 DHCP manifest")
+    conf_source = next(
+        (source for source in mappings if source.name == "dhcpd.conf"), None,
+    )
+    if conf_source is None:
+        raise LoadError("DHCP 输出缺少 dhcpd.conf")
+    manifest_path = conf_source.with_name("dhcp-release-manifest.json")
+    manifest = _load_release_json(manifest_path, "DHCP release manifest")
+    components = parent.get("components")
+    dhcp = components.get("dhcp") if isinstance(components, dict) else None
+    expected_hash = dhcp.get("manifest_sha256") if isinstance(dhcp, dict) else None
+    if (
+        parent.get("schema_version") != 2
+        or parent.get("validation") != "passed"
+        or parent.get("dhcp_status") != "enabled"
+        or parent.get("release_id") != candidate.release_id
+        or parent.get("deployment_scope") != manifest.get("deployment_scope")
+        or parent.get("switch_scope") != manifest.get("switch_scope")
+        or not isinstance(expected_hash, str)
+        or not hmac.compare_digest(expected_hash, _sha256_path(manifest_path))
+    ):
+        raise LoadError(
+            "parent candidate 与当前 DHCP manifest 的 scope/身份不一致；"
+            "拒绝空 host 候选覆盖 live 文件"
+        )
+
+
+def recheck_prepared_dhcp_child(
+    candidate: PreparedParentRelease, mappings: dict[Path, Path],
+) -> None:
+    """Keep the prepared parent's DHCP child bound through its final commit."""
+    expected_manifest = candidate.dhcp_manifest_sha256
+    if expected_manifest is None:
+        return
+    try:
+        parent = json.loads(candidate.temporary.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise LoadError(f"DHCP parent candidate 无法复核：{exc}") from exc
+    components = parent.get("components") if isinstance(parent, dict) else None
+    dhcp = components.get("dhcp") if isinstance(components, dict) else None
+    if (
+        not isinstance(parent, dict)
+        or parent.get("schema_version") != 2
+        or parent.get("validation") != "passed"
+        or parent.get("dhcp_status") != "enabled"
+        or parent.get("release_id") != candidate.release_id
+        or not isinstance(dhcp, dict)
+        or dhcp.get("manifest_sha256") != expected_manifest
+    ):
+        raise LoadError("DHCP parent candidate authority changed before commit")
+    conf = next((source for source in mappings if source.name == "dhcpd.conf"), None)
+    if conf is None or len(mappings) != 4:
+        raise LoadError("DHCP child mappings incomplete before parent commit")
+    manifest_path = conf.with_name("dhcp-release-manifest.json")
+    if not hmac.compare_digest(_sha256_path(manifest_path), expected_manifest):
+        raise LoadError("DHCP child manifest changed before parent commit")
+    manifest = _load_release_json(manifest_path, "DHCP release manifest")
+    outputs = manifest.get("outputs")
+    if (
+        not isinstance(outputs, dict)
+        or parent.get("deployment_scope") != manifest.get("deployment_scope", "all")
+        or parent.get("switch_scope") != manifest.get("switch_scope", "all")
+    ):
+        raise LoadError("DHCP child manifest scope/outputs changed before parent commit")
+    for source in mappings:
+        record = outputs.get(source.name)
+        expected = record.get("sha256") if isinstance(record, dict) else None
+        if (
+            not isinstance(expected, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", expected)
+            or not hmac.compare_digest(_sha256_path(source), expected)
+        ):
+            raise LoadError(f"DHCP child output changed before parent commit: {source.name}")
+
+
 def _rewrite_dhcp_staging_includes(text: str, staged_dir: Path) -> str:
     """Bind exactly the three canonical live includes to an unpublished set."""
     for hosts_name in (
@@ -4085,8 +4260,8 @@ def mount_and_test_dhcp(
     destination (including a symlink) is restored before the error is raised.
     """
     mappings = dhcp_file_mappings()
-    for source in mappings:
-        _nonempty_file(source, f"DHCP 输出 {source.name}")
+    validate_dhcp_output_sources(mappings)
+    bind_empty_dhcp_to_prepared_parent(mappings, parent_candidate)
     if dry_run:
         info("dry-run：将先在 staging 检查四个 DHCP 文件，再事务式安装并复检")
         for source, destination in mappings.items():
@@ -4119,6 +4294,7 @@ def mount_and_test_dhcp(
         raise LoadError(f"DHCP 事务目录已存在：{transaction_dir}")
 
     transaction_created = False
+    build_workspace: tempfile.TemporaryDirectory[str] | None = None
     try:
         # Ubuntu's dhcpd AppArmor profile permits configuration reads below
         # /etc/dhcp but rejects arbitrary /tmp paths.  Create the unpublished
@@ -4136,23 +4312,35 @@ def mount_and_test_dhcp(
             "install", "-d", "-m", "0700", "--", str(backup_dir),
         ))
 
-        with tempfile.TemporaryDirectory(prefix="load-dhcp-build-") as temporary:
-            build_dir = Path(temporary)
-            for source in mappings:
-                shutil.copy2(source.resolve(), build_dir / source.name)
-            build_conf = build_dir / "dhcpd.conf"
-            staged_text = _rewrite_dhcp_staging_includes(
-                build_conf.read_text(encoding="utf-8"), staged_dir,
+        build_workspace = tempfile.TemporaryDirectory(prefix="load-dhcp-build-")
+        build_dir = Path(build_workspace.name)
+        for source in mappings:
+            shutil.copy2(source.resolve(), build_dir / source.name)
+        frozen_hashes = {
+            source.name: _sha256_path(build_dir / source.name) for source in mappings
+        }
+        staged_text = _rewrite_dhcp_staging_includes(
+            (build_dir / "dhcpd.conf").read_text(encoding="utf-8"), staged_dir,
+        )
+        staged_build_conf = build_dir / "staged-dhcpd.conf"
+        staged_build_conf.write_text(staged_text, encoding="utf-8")
+        for source in mappings:
+            stage_source = (
+                staged_build_conf if source.name == "dhcpd.conf"
+                else build_dir / source.name
             )
-            build_conf.write_text(staged_text, encoding="utf-8")
-            for source in mappings:
-                run(sudo_command(
-                    "install", "-m", "0644", "--",
-                    str(build_dir / source.name), str(staged_dir / source.name),
-                ))
+            run(sudo_command(
+                "install", "-m", "0644", "--",
+                str(stage_source), str(staged_dir / source.name),
+            ))
 
         staged_conf = staged_dir / "dhcpd.conf"
         run(sudo_command("dhcpd", "-t", "-cf", str(staged_conf)))
+        for source in mappings:
+            if _sha256_path(source) != frozen_hashes[source.name]:
+                raise LoadError(f"DHCP source changed after staged syntax: {source.name}")
+        if parent_candidate is not None:
+            recheck_prepared_dhcp_child(parent_candidate, mappings)
 
         existed: dict[Path, bool] = {}
         for destination in mappings.values():
@@ -4169,14 +4357,25 @@ def mount_and_test_dhcp(
             for source, destination in mappings.items():
                 # AppArmor resolves symlink targets and can deny HTTP-root
                 # paths.  The installed runtime artifact must be a regular
-                # file below /etc/dhcp.
+                # file below /etc/dhcp. Install the same original bytes used
+                # to build the staged candidate, never a second source read.
                 run(
                     sudo_command(
-                        "install", "-m", "0644", str(source.resolve()),
+                        "install", "-m", "0644", str(build_dir / source.name),
                         str(destination),
                     )
                 )
             run(sudo_command("dhcpd", "-t", "-cf", "/etc/dhcp/dhcpd.conf"))
+            for source, destination in mappings.items():
+                expected = frozen_hashes[source.name]
+                if (_sha256_path(source) != expected
+                        or _sha256_path(destination) != expected):
+                    raise LoadError(
+                        f"DHCP source/installed output changed before parent commit: {source.name}"
+                    )
+            # A cleanup failure must occur while rollback is still possible.
+            build_workspace.cleanup()
+            build_workspace = None
             if parent_candidate is not None:
                 # Keep the old DHCP files available until the only externally
                 # visible commit marker has been atomically replaced.  If the
@@ -4216,6 +4415,8 @@ def mount_and_test_dhcp(
                 )
             raise
     finally:
+        if build_workspace is not None:
+            build_workspace.cleanup()
         if transaction_created:
             cleanup_failed = False
             for directory in (staged_dir, backup_dir):
@@ -4857,6 +5058,34 @@ def _sidecar_profiles_for_child(
     return expected[matches[0]] if matches else None
 
 
+def _project_inventory_authority(
+    project: Path, devices_file: Path,
+) -> tuple[str, dict[str, object]]:
+    """Bind one safe inventory file to its canonical project-relative path."""
+    try:
+        project_root = project.resolve(strict=True)
+        if not project_root.is_dir():
+            raise LoadError(f"splitter inventory project 不是目录：{project}")
+        resolved = devices_file.resolve(strict=True)
+        relative = resolved.relative_to(project_root)
+    except LoadError:
+        raise
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise LoadError(
+            f"splitter inventory 必须位于当前 project 内：{devices_file}: {exc}"
+        ) from exc
+    if not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+        raise LoadError(f"splitter inventory project-relative path 无效：{relative}")
+    identity = _stable_regular_identity(
+        devices_file, "splitter inventory", maximum_size=64 * 1024 * 1024,
+        # The customer-authored project-root CSV historically permits normal
+        # collaborative 0664 permissions. Only load's private derived file is
+        # a generated trust anchor and must reject group/world write bits.
+        allow_writable=relative == Path("02-devices_config.csv"),
+    )
+    return PurePosixPath(*relative.parts).as_posix(), identity
+
+
 def _current_splitter_provenance(
     project: Path, devices_file: Path, p2p_file: Path, release_dir: Path,
     manifest: dict[str, object], schema_version: int,
@@ -4880,7 +5109,18 @@ def _current_splitter_provenance(
     if not breakouts:
         return None
 
+    devices_path, devices_identity = _project_inventory_authority(
+        project, devices_file,
+    )
     receipts = _source_yaml_receipts(devices_file, schema_version)
+    devices_path_after, devices_identity_after = _project_inventory_authority(
+        project, devices_file,
+    )
+    if (
+        devices_path_after != devices_path
+        or devices_identity_after != devices_identity
+    ):
+        raise LoadError("splitter inventory 在 provenance 读取期间发生变化")
     source_yaml: dict[str, str] = {}
     generated: dict[str, dict[str, str]] = {}
     for hostname, profiles in breakouts.items():
@@ -4896,7 +5136,8 @@ def _current_splitter_provenance(
         "schema_version": 1,
         "devices_schema_version": schema_version,
         "devices_name": devices_file.name,
-        "devices_sha256": _sha256_path(devices_file),
+        "devices_path": devices_path,
+        "devices_sha256": devices_identity["sha256"],
         "published_profiles": breakouts,
         "source_yaml_sha256": source_yaml,
     }
@@ -5068,8 +5309,15 @@ def validate_and_publish_release(
                 "generation and before release_basis"
             )
 
+    effective_devices = inputs.effective_devices_file or inputs.devices_file
+    if inputs.effective_devices_file is not None:
+        metadata = effective_devices.lstat()
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+                or not effective_devices.resolve().is_relative_to(project.resolve())
+                or _sha256_path(effective_devices) != inputs.effective_devices_sha256):
+            raise LoadError("derived inventory authority changed before release_basis")
     inventory = _augment_air_json_inventory(
-        _release_inventory(inputs.devices_file),
+        _release_inventory(effective_devices),
         ZTP_DIR / "config/isc-dhcp-server/p2p-air.json",
     )
     inventory = _inventory_for_release_scope(
@@ -5196,10 +5444,16 @@ def validate_and_publish_release(
         }
         if label == "cumulus":
             splitter_provenance = _current_splitter_provenance(
-                project, inputs.devices_file, inputs.p2p_file, release_dir,
+                project, effective_devices, inputs.p2p_file, release_dir,
                 manifest, inputs.settings.schema_version,
             )
             if splitter_provenance is not None:
+                if inputs.effective_devices_file is not None and (
+                    splitter_provenance.get("devices_path")
+                    != effective_devices.resolve().relative_to(project.resolve()).as_posix()
+                    or splitter_provenance.get("devices_sha256") != inputs.effective_devices_sha256
+                ):
+                    raise LoadError("splitter and derived inventory authorities disagree")
                 components[label]["splitter_provenance"] = splitter_provenance
 
     input_files = {
@@ -5212,7 +5466,9 @@ def validate_and_publish_release(
         input_files["air_topology_policy"] = inputs.air_topology_policy
     if inputs.mini_devices_file is not None:
         input_files["mini_air_devices"] = inputs.mini_devices_file
-    input_hashes = {name: _sha256_path(path) for name, path in input_files.items()}
+    # Keep the accepted snapshot: a later read must not silently adopt edits
+    # made while component validation was running.
+    input_hashes = {name: current_identities[name] for name in input_files}
     p2p_source = p2p_release_source_binding(project, inputs.p2p_file)
     if input_hashes["p2p"] != p2p_source["sha256"]:
         raise LoadError("P2P release 输入在摘要绑定时发生变化")
@@ -5233,6 +5489,11 @@ def validate_and_publish_release(
             "identity_source": item.get("identity_source", "devices_config"),
         } for item in inventory],
     }
+    if inputs.effective_devices_file is not None:
+        release_basis["generated_inputs"] = {"effective_devices": {
+            "path": effective_devices.resolve().relative_to(project.resolve()).as_posix(),
+            "sha256": inputs.effective_devices_sha256,
+        }}
     release_id = hashlib.sha256(
         json.dumps(
             release_basis, ensure_ascii=False, sort_keys=True,
@@ -5245,6 +5506,12 @@ def validate_and_publish_release(
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "validation": "passed",
         **release_basis,
+        # Transaction metadata, not a change to the established release-ID basis.
+        # Preserve the selected alias itself so retargeting is rechecked too.
+        "input_paths": {
+            name: (path.parent.resolve() / path.name).relative_to(project.resolve()).as_posix()
+            for name, path in input_files.items()
+        },
     }
     if publish:
         publish_current_release(project, parent)
@@ -5263,6 +5530,22 @@ def prepare_current_release(
     project: Path, parent: dict[str, object],
 ) -> PreparedParentRelease:
     """Write and fsync a parent candidate without making it visible yet."""
+    if parent.get("schema_version") == 2:
+        hashes = parent.get("inputs")
+        paths = parent.get("input_paths")
+        if (not isinstance(hashes, dict) or not isinstance(paths, dict)
+                or not {"global", "devices", "subnet", "p2p"}.issubset(hashes)
+                or set(paths) != set(hashes)
+                or any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+                       for value in hashes.values())):
+            raise LoadError("schema 2 parent input authority map is incomplete or invalid")
+        for relative in paths.values():
+            if not isinstance(relative, str):
+                raise LoadError("schema 2 parent input authority map contains an invalid path")
+            parsed = PurePosixPath(relative)
+            if (parsed.is_absolute() or not parsed.parts or ".." in parsed.parts
+                    or parsed.as_posix() != relative):
+                raise LoadError("schema 2 parent input authority map contains an unsafe path")
     destination = project / "99-output-ztp/current-release.json"
     destination.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(
@@ -5281,6 +5564,18 @@ def prepare_current_release(
         raise
     components = parent.get("components")
     cumulus = components.get("cumulus") if isinstance(components, dict) else None
+    dhcp = components.get("dhcp") if isinstance(components, dict) else None
+    dhcp_manifest_sha256 = None
+    if parent.get("schema_version") == 2 and parent.get("dhcp_status") == "enabled":
+        dhcp_manifest_sha256 = (
+            dhcp.get("manifest_sha256") if isinstance(dhcp, dict) else None
+        )
+        if (
+            not isinstance(dhcp_manifest_sha256, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", dhcp_manifest_sha256)
+        ):
+            Path(temporary).unlink(missing_ok=True)
+            raise LoadError("schema 2 parent 缺少有效 DHCP child manifest hash")
     provenance = (
         cumulus.get("splitter_provenance")
         if isinstance(cumulus, dict) else None
@@ -5298,6 +5593,17 @@ def prepare_current_release(
         temporary=Path(temporary),
         release_id=str(parent.get("release_id") or ""),
         splitter_provenance=guard,
+        generated_inventory=(
+            dict(parent["generated_inputs"]["effective_devices"])
+            if "generated_inputs" in parent else None
+        ),
+        source_inventory_sha256=(parent.get("inputs", {}).get("devices")
+                                 if "generated_inputs" in parent else None),
+        source_authorities={
+            name: (relative, parent["inputs"][name])
+            for name, relative in parent.get("input_paths", {}).items()
+        },
+        dhcp_manifest_sha256=dhcp_manifest_sha256,
     )
 
 
@@ -5308,13 +5614,25 @@ def _recheck_prepared_splitter_provenance(candidate: PreparedParentRelease) -> N
         return
     expected = guard.get("expected")
     release_name = guard.get("release_dir")
+    devices_path = expected.get("devices_path") if isinstance(expected, dict) else None
     if (not isinstance(expected, dict)
             or not isinstance(release_name, str)
             or not isinstance(expected.get("devices_name"), str)
-            or Path(expected["devices_name"]).name != expected["devices_name"]):
+            or Path(expected["devices_name"]).name != expected["devices_name"]
+            or not isinstance(devices_path, str)):
         raise LoadError("P2P splitter prepared provenance 结构无效")
+    parsed_devices_path = PurePosixPath(devices_path)
+    if (
+        parsed_devices_path.is_absolute()
+        or not parsed_devices_path.parts
+        or any(part in {"", ".", ".."} for part in parsed_devices_path.parts)
+        or parsed_devices_path.as_posix() != devices_path
+        or parsed_devices_path.name != expected["devices_name"]
+    ):
+        raise LoadError("P2P splitter prepared provenance devices_path 无效")
     project = candidate.destination.parent.parent
     release_dir = project / release_name
+    inventory_path = project.joinpath(*parsed_devices_path.parts)
     try:
         if (release_dir.resolve(strict=True)
                 != (ZTP_DIR / "config/cumulus/latest_yaml").resolve(strict=True)):
@@ -5326,7 +5644,7 @@ def _recheck_prepared_splitter_provenance(candidate: PreparedParentRelease) -> N
             raise LoadError("cumulus child release 在 parent commit 前已变化")
         manifest = _load_release_json(manifest_path, "cumulus release manifest")
         current = _current_splitter_provenance(
-            project, project / expected["devices_name"], project / "p2p.xlsx",
+            project, inventory_path, project / "p2p.xlsx",
             release_dir, manifest, expected["devices_schema_version"],
         )
     except (OSError, ValueError, RuntimeError) as exc:
@@ -5339,7 +5657,48 @@ def commit_prepared_release(candidate: PreparedParentRelease) -> Path:
     """Commit an already-fsynced parent candidate with one atomic replace."""
     if candidate.committed:
         return candidate.destination
+    authority = candidate.generated_inventory
+    if authority is not None:
+        try:
+            project = candidate.destination.parent.parent
+            if _sha256_path(project / "02-devices_config.csv") != candidate.source_inventory_sha256:
+                raise ValueError("customer source inventory changed")
+            relative = authority["path"]
+            path = PurePosixPath(relative)
+            if (not isinstance(relative, str) or path.is_absolute()
+                    or not path.parts or ".." in path.parts
+                    or path.as_posix() != relative):
+                raise ValueError("unsafe derived path")
+            actual_path, identity = _project_inventory_authority(
+                project, project.joinpath(*path.parts))
+            if actual_path != relative or identity["sha256"] != authority["sha256"]:
+                raise ValueError("derived content/path changed")
+        except (KeyError, TypeError, ValueError, OSError, LoadError) as exc:
+            raise LoadError(f"derived inventory changed before parent commit: {exc}") from exc
     _recheck_prepared_splitter_provenance(candidate)
+    # Recheck every frozen input, including loads with no derived inventory or
+    # splitter. This bounds cooperative drift, not an adversarial same-UID race.
+    project = candidate.destination.parent.parent
+    for name, (relative, expected) in (candidate.source_authorities or {}).items():
+        try:
+            path = PurePosixPath(relative)
+            if (path.is_absolute() or not path.parts or ".." in path.parts
+                    or path.as_posix() != relative):
+                raise ValueError("unsafe input path")
+            source = project.joinpath(*path.parts)
+            source.resolve(strict=True).relative_to(project.resolve())
+            if _sha256_path(source) != expected:
+                raise ValueError("content changed")
+            if name == "p2p":
+                binding = p2p_release_source_binding(project, source)
+                if binding["sha256"] != expected:
+                    raise ValueError("P2P source changed")
+        except (OSError, ValueError, RuntimeError, LoadError) as exc:
+            raise LoadError(
+                f"project input authority {name} changed before parent commit: {exc}"
+            ) from exc
+    if candidate.dhcp_manifest_sha256 is not None:
+        recheck_prepared_dhcp_child(candidate, dhcp_file_mappings())
     os.replace(candidate.temporary, candidate.destination)
     candidate.committed = True
     # fsync the containing directory so the rename itself survives a crash.
@@ -5453,7 +5812,8 @@ def generate_configs(
     switch_scope: str = "all",
     deployment_lock_descriptor: int | None = None,
     source_identities: dict[str, str] | None = None,
-) -> None:
+    inventory_directory: Path | None = None,
+) -> DerivedInventory | None:
     mini_policy_hash_before: str | None = None
     mini_customer_hash: str | None = None
     mini_generation_key: tuple[str, str] | None = None
@@ -5524,16 +5884,47 @@ def generate_configs(
     # template/IP/netmask/gateway from the matching production CSV row. It must
     # run before hostname2mac validates each pair and points both MACs at the
     # same production full-config YAML.
-    if dhcp_enabled:
+    derived_path = None
+    source_inventory = ZTP_DIR / "config/isc-dhcp-server/02-devices_config.csv"
+    source_hash = None
+    inventory_options = []
+    if (not dry_run and selected_switch in {"all", "eth"}
+            and deployment_scope != "prod"
+            and (ZTP_DIR / "config/isc-dhcp-server/p2p-air.json").is_file()):
+        source_inventory = source_inventory.resolve(strict=True)
+        source_hash = _sha256_path(source_inventory)
+        if (source_identities is not None
+                and source_identities.get("devices") != source_hash):
+            raise LoadError("customer inventory changed before generation")
+        private = inventory_directory or Path(tempfile.mkdtemp(
+            prefix=".load-inventory-", dir=source_inventory.parent))
+        private_stat = private.lstat()
+        if (not stat.S_ISDIR(private_stat.st_mode)
+                or stat.S_IMODE(private_stat.st_mode) != 0o700
+                or private.parent.resolve() != source_inventory.parent):
+            raise LoadError("derived inventory directory must be private and project-local")
+        derived_path = private / "02-devices_config.csv"
+        inventory_options = ["--inventory-output", str(derived_path)]
+    if dhcp_enabled or derived_path is not None:
         run(
             [
                 sys.executable, "c1-generate_dhcp.py", "-y",
+                "--preserve-input-csv",
                 *scope_args, *switch_args,
+                *inventory_options,
+                *([] if dhcp_enabled else ["--inventory-only"]),
             ],
             cwd=ZTP_DIR / "config/isc-dhcp-server",
             dry_run=dry_run,
             **inherited_lock,
         )
+    derived_sha = None
+    if derived_path is not None:
+        metadata = derived_path.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise LoadError("derived inventory must be a single-link regular file")
+        derived_sha = _sha256_path(derived_path)
+    effective_options = ["--csv", str(derived_path)] if derived_path else []
     device_types = _device_types_after_dhcp(
         device_types, dry_run=dry_run, schema_version=schema_version,
         deployment_scope=deployment_scope,
@@ -5544,7 +5935,7 @@ def generate_configs(
         template_dir = ZTP_DIR / "config/cumulus/template"
         run(
             [sys.executable, "90-c2-generate_configs.py", "--branch", "eth", "-y",
-             *scope_args, *switch_args],
+             *scope_args, *switch_args, *effective_options],
             cwd=template_dir, dry_run=dry_run,
         )
         if not dry_run:
@@ -5556,7 +5947,7 @@ def generate_configs(
             publish = with_desc if with_desc.is_dir() else generated
             run(
                 [sys.executable, "d-hostname2mac.py", "-y", *scope_args,
-                 *switch_args,
+                 *switch_args, *effective_options,
                  str(publish)],
                 cwd=ZTP_DIR / "config/cumulus",
             )
@@ -5612,6 +6003,12 @@ def generate_configs(
             _MINI_GENERATION_AUTHORITIES[mini_generation_key] = (
                 policy_hash_after, canonical_hash, mini_customer_hash,
             )
+    if derived_path is not None:
+        if (_sha256_path(source_inventory) != source_hash
+                or _sha256_path(derived_path) != derived_sha):
+            raise LoadError("source or derived inventory changed during generation")
+        return DerivedInventory(derived_path, derived_sha)
+    return None
 
 
 def confirm_service_start() -> bool:
@@ -6966,14 +7363,15 @@ def preflight_services(
         plan = dhcp_runtime_plan or plan_local_dhcp_runtime(inputs)
         http_required = bool(plan.endpoint_ips)
         dhcp_required = bool(plan.listener_names)
+        if dhcp_required and not inputs.settings.dhcp_enabled:
+            raise LoadError("DHCP listener 规划非空，但 global 中 dhcp-server 未启用")
         if http_required:
             verify_control_auth(runtime_backend=backend, dry_run=dry_run)
             verify_published_files(inputs, images, dry_run=dry_run)
             verify_apache_publication_boundary(dry_run=dry_run)
             run(sudo_command("apache2ctl", "configtest"), dry_run=dry_run)
         if dhcp_required:
-            for source in dhcp_file_mappings():
-                _nonempty_file(source, f"DHCP 输出 {source.name}")
+            validate_dhcp_output_sources(dhcp_file_mappings())
             run(
                 sudo_command("dhcpd", "-t", "-cf", "/etc/dhcp/dhcpd.conf"),
                 dry_run=dry_run,
@@ -6997,8 +7395,7 @@ def preflight_services(
     verify_published_files(inputs, images, dry_run=dry_run)
     verify_apache_publication_boundary(dry_run=dry_run)
     if inputs.settings.dhcp_enabled:
-        for source in dhcp_file_mappings():
-            _nonempty_file(source, f"DHCP 输出 {source.name}")
+        validate_dhcp_output_sources(dhcp_file_mappings())
         run(
             sudo_command("dhcpd", "-t", "-cf", "/etc/dhcp/dhcpd.conf"),
             dry_run=dry_run,
@@ -7860,6 +8257,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     release_link_snapshot: dict[Path, Optional[str]] = {}
     release_committed = False
+    inventory_directory = None
+    inventory_directory_identity = None
     deployment_lock_descriptor: int | None = None
     parent_candidate: PreparedParentRelease | None = None
     report_candidate = None
@@ -8161,6 +8560,7 @@ def main(argv: list[str] | None = None) -> int:
             if not args.dry_run:
                 release_link_snapshot = snapshot_release_links(project)
             generation_options = {
+                "source_identities": inputs.source_identities,
                 "install_dhcp": dhcp_service_available,
                 "dry_run": args.dry_run,
                 "schema_version": inputs.settings.schema_version,
@@ -8169,6 +8569,12 @@ def main(argv: list[str] | None = None) -> int:
                 "deployment_scope": deployment_scope,
                 "switch_scope": switch_scope,
             }
+            if not args.dry_run:
+                inventory_directory = Path(tempfile.mkdtemp(
+                    prefix=".load-inventory-", dir=project))
+                private_stat = inventory_directory.lstat()
+                inventory_directory_identity = (private_stat.st_dev, private_stat.st_ino)
+                generation_options["inventory_directory"] = inventory_directory
             if not inputs.settings.dhcp_enabled:
                 generation_options["dhcp_enabled"] = False
             # Keep the established full-topology call contract byte-for-byte
@@ -8182,11 +8588,18 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 generation_options["mini_devices_file"] = mini_source
                 generation_options["source_identities"] = inputs.source_identities
-            generate_configs(
+            generated_inventory = generate_configs(
                 inputs.device_types,
                 deployment_lock_descriptor=deployment_lock_descriptor,
                 **generation_options,
             )
+            if isinstance(generated_inventory, DerivedInventory):
+                inputs = replace(inputs,
+                    effective_devices_file=generated_inventory.path,
+                    effective_devices_sha256=generated_inventory.sha256)
+            elif inventory_directory is not None:
+                inventory_directory.rmdir()
+                inventory_directory = None
             retire_unselected_release_links(
                 project, switch_scope, dry_run=args.dry_run,
             )
@@ -8374,6 +8787,17 @@ def main(argv: list[str] | None = None) -> int:
         raise
     finally:
         final_cleanup_errors: list[tuple[str, BaseException]] = []
+        if inventory_directory is not None and not release_committed:
+            try:
+                # This exact private directory was created by this invocation;
+                # never sweep other runs' directories or a committed authority.
+                private_stat = inventory_directory.lstat()
+                if (not stat.S_ISDIR(private_stat.st_mode)
+                        or (private_stat.st_dev, private_stat.st_ino) != inventory_directory_identity):
+                    raise LoadError("private inventory directory identity changed before cleanup")
+                shutil.rmtree(inventory_directory)
+            except BaseException as cleanup_exc:
+                final_cleanup_errors.append(("派生库存暂存清理", cleanup_exc))
         try:
             generation_report.discard_prepared_generation_report(report_candidate)
         except BaseException as cleanup_exc:

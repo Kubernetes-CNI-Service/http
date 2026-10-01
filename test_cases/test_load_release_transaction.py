@@ -1137,6 +1137,348 @@ class ReleaseTransactionTests(unittest.TestCase):
         current = self.project / "99-output-ztp/current-release.json"
         self.assertEqual(json.loads(current.read_text())["release_id"], result["release_id"])
 
+    def test_parent_binds_source_and_effective_inventory_independently(self) -> None:
+        private = Path(tempfile.mkdtemp(prefix=".load-inventory-", dir=self.project))
+        derived = private / "02-devices_config.csv"
+        derived.write_bytes(self.devices_file.read_bytes() + b"\n")
+        derived.chmod(0o600)
+        inputs = LOAD.replace(self.inputs, effective_devices_file=derived,
+                              effective_devices_sha256=sha256(derived))
+        parent = LOAD.validate_and_publish_release(self.project, inputs, publish=False)
+        self.assertEqual(sha256(self.devices_file), parent["inputs"]["devices"])
+        self.assertEqual({"path": derived.relative_to(self.project).as_posix(),
+                          "sha256": sha256(derived)},
+                         parent["generated_inputs"]["effective_devices"])
+        candidate = LOAD.prepare_current_release(self.project, parent)
+        try:
+            self.assertIsNone(candidate.splitter_provenance)
+            derived.write_bytes(derived.read_bytes() + b"\n")
+            with self.assertRaisesRegex(LOAD.LoadError, "derived inventory.*commit"):
+                LOAD.commit_prepared_release(candidate)
+            self.assertFalse(candidate.committed)
+        finally:
+            LOAD.discard_prepared_release(candidate)
+
+    def test_manual_consumes_real_derived_parent_and_rejects_derived_drift(self) -> None:
+        private = Path(tempfile.mkdtemp(prefix=".load-inventory-", dir=self.project))
+        derived = private / "02-devices_config.csv"
+        original = self.devices_file.read_bytes() + b"\n"
+        derived.write_bytes(original)
+        derived.chmod(0o600)
+        inputs = LOAD.replace(self.inputs, effective_devices_file=derived,
+                              effective_devices_sha256=sha256(derived))
+        LOAD.validate_and_publish_release(self.project, inputs)
+        device = {"hostname": "leaf01", "type": "eth", "mac_plain": "020000000001",
+                  "identity_macs": {"eth0": "020000000001"}}
+        with mock.patch.object(MANUAL, "DHCP_RELEASE_MANIFEST",
+                               self.ztp / "config/isc-dhcp-server/dhcp-release-manifest.json"):
+            binding = MANUAL.validate_parent_release_binding(self.project, device)
+            self.assertEqual(sha256(derived), binding["effective_devices_sha256"])
+            derived.write_bytes(original + b"\n")
+            with self.assertRaisesRegex(MANUAL.ManualZtpError, "derived inventory"):
+                MANUAL.validate_parent_release_binding(self.project, device)
+            with self.assertRaises(MANUAL.ManualZtpError):
+                MANUAL.verify_prepared_release_binding(binding)
+            derived.unlink()
+            derived.symlink_to(self.devices_file)
+            with self.assertRaisesRegex(MANUAL.ManualZtpError, "derived inventory"):
+                MANUAL.validate_parent_release_binding(self.project, device)
+
+    def test_manual_derived_authority_rejects_unsafe_paths_before_release_id(self) -> None:
+        parent = LOAD.validate_and_publish_release(self.project, self.inputs)
+        destination = self.project / "99-output-ztp/current-release.json"
+        for path in ("../outside.csv", "/tmp/outside.csv", "./devices.csv"):
+            with self.subTest(path=path):
+                parent["generated_inputs"] = {"effective_devices": {"path": path, "sha256": "0" * 64}}
+                destination.write_text(json.dumps(parent))
+                with self.assertRaisesRegex(MANUAL.ManualZtpError, "derived inventory"):
+                    MANUAL.validate_parent_release_binding(self.project, {})
+
+    def test_manual_derived_authority_direct_rejects_alias_hardlink_and_writable_file(self) -> None:
+        private = self.project / ".load-inventory-direct"
+        private.mkdir(mode=0o700)
+        source = private / "02-devices_config.csv"
+        source.write_bytes(b"independent authority fixture\n")
+        source.chmod(0o600)
+        declaration = {"effective_devices": {
+            "path": ".load-inventory-direct/02-devices_config.csv", "sha256": sha256(source)}}
+        self.assertEqual((source.resolve(), sha256(source)),
+                         MANUAL.validate_derived_inventory(self.project, declaration))
+        source.chmod(0o666)
+        with self.assertRaisesRegex(MANUAL.ManualZtpError, "derived inventory"):
+            MANUAL.validate_derived_inventory(self.project, declaration)
+        source.chmod(0o600)
+        hardlink = private / "second-link"
+        os.link(source, hardlink)
+        with self.assertRaisesRegex(MANUAL.ManualZtpError, "derived inventory"):
+            MANUAL.validate_derived_inventory(self.project, declaration)
+        hardlink.unlink()
+        alias = self.project / ".load-inventory-alias"
+        alias.symlink_to(private, target_is_directory=True)
+        declaration["effective_devices"]["path"] = ".load-inventory-alias/02-devices_config.csv"
+        with self.assertRaisesRegex(MANUAL.ManualZtpError, "derived inventory"):
+            MANUAL.validate_derived_inventory(self.project, declaration)
+
+    def test_manual_derived_inventory_exact_producer_contract_direct(self) -> None:
+        cases = (
+            ("unmanaged/02-devices_config.csv", 0o700, 0o600, b"header\n"),
+            (".load-inventory-/02-devices_config.csv", 0o700, 0o600, b"header\n"),
+            (".load-inventory-a/inventory.csv", 0o700, 0o600, b"header\n"),
+            (".load-inventory-b/02-devices_config.csv", 0o755, 0o600, b"header\n"),
+            (".load-inventory-c/02-devices_config.csv", 0o700, 0o644, b"header\n"),
+            (".load-inventory-d/02-devices_config.csv", 0o700, 0o400, b"header\n"),
+            (".load-inventory-e/02-devices_config.csv", 0o700, 0o600, b""),
+        )
+        for relative, directory_mode, file_mode, payload in cases:
+            with self.subTest(relative=relative):
+                source = self.project / relative
+                source.parent.mkdir()
+                source.parent.chmod(directory_mode)
+                source.write_bytes(payload)
+                source.chmod(file_mode)
+                declaration = {"effective_devices": {"path": relative, "sha256": sha256(source)}}
+                with self.assertRaisesRegex(MANUAL.ManualZtpError, "derived inventory"):
+                    MANUAL.validate_derived_inventory(self.project, declaration)
+
+    def test_manual_real_parent_rejects_derived_permissions_and_empty_content(self) -> None:
+        private = Path(tempfile.mkdtemp(prefix=".load-inventory-", dir=self.project))
+        source = private / "02-devices_config.csv"
+        source.write_bytes(self.devices_file.read_bytes())
+        source.chmod(0o600)
+        inputs = LOAD.replace(self.inputs, effective_devices_file=source,
+                              effective_devices_sha256=sha256(source))
+        LOAD.validate_and_publish_release(self.project, inputs)
+        device = {"hostname": "leaf01", "type": "eth", "mac_plain": "020000000001",
+                  "identity_macs": {"eth0": "020000000001"}}
+        with mock.patch.object(MANUAL, "DHCP_RELEASE_MANIFEST",
+                               self.ztp / "config/isc-dhcp-server/dhcp-release-manifest.json"):
+            MANUAL.validate_parent_release_binding(self.project, device)
+            for directory_mode, file_mode in ((0o755, 0o600), (0o700, 0o644)):
+                with self.subTest(directory_mode=directory_mode, file_mode=file_mode):
+                    private.chmod(directory_mode)
+                    source.chmod(file_mode)
+                    with self.assertRaisesRegex(MANUAL.ManualZtpError, "derived inventory"):
+                        MANUAL.validate_parent_release_binding(self.project, device)
+            private.chmod(0o700)
+            source.chmod(0o600)
+            source.write_bytes(b"")
+            with self.assertRaisesRegex(MANUAL.ManualZtpError, "derived inventory"):
+                MANUAL.validate_parent_release_binding(self.project, device)
+
+    def test_all_customer_inputs_rechecked_without_derived_or_splitter(self) -> None:
+        for key, path in (("global", self.inputs.global_file),
+                          ("devices", self.inputs.devices_file),
+                          ("subnet", self.inputs.subnet_file),
+                          ("p2p", self.inputs.p2p_file)):
+            with self.subTest(input=key):
+                parent = LOAD.validate_and_publish_release(self.project, self.inputs, publish=False)
+                candidate = LOAD.prepare_current_release(self.project, parent)
+                self.assertIsNone(candidate.generated_inventory)
+                self.assertIsNone(candidate.splitter_provenance)
+                original = path.read_bytes()
+                try:
+                    path.write_bytes(original + b"\n")
+                    with self.assertRaisesRegex(LOAD.LoadError, "input authority.*before parent commit"):
+                        LOAD.commit_prepared_release(candidate)
+                    self.assertFalse(candidate.committed)
+                finally:
+                    path.write_bytes(original)
+                    LOAD.discard_prepared_release(candidate)
+
+    def test_optional_air_inputs_rechecked_at_commit_and_new_load_can_rebind(self) -> None:
+        policy = self.project / "03-air-topology-policy.json"
+        policy.write_text(json.dumps(h19_mini_policy()) + "\n")
+        mini = self.project / "04-air-mini-devices.txt"
+        mini.write_text("[minimum-required]\nleaf01\n\n[customer-provided]\nleaf01\n")
+        inputs = LOAD.replace(self.inputs, air_topology_policy=policy, mini_devices_file=mini)
+        previous = LOAD.validate_and_publish_release(self.project, inputs)
+        destination = self.project / "99-output-ztp/current-release.json"
+        previous_bytes = destination.read_bytes()
+        for path in (policy, mini):
+            for mutation in ("append", "delete"):
+                with self.subTest(path=path.name, mutation=mutation):
+                    parent = LOAD.validate_and_publish_release(self.project, inputs, publish=False)
+                    candidate = LOAD.prepare_current_release(self.project, parent)
+                    original = path.read_bytes()
+                    try:
+                        if mutation == "delete":
+                            path.unlink()
+                        else:
+                            path.write_bytes(original + b"\n")
+                        with self.assertRaisesRegex(LOAD.LoadError, "input authority.*before parent commit"):
+                            LOAD.commit_prepared_release(candidate)
+                        self.assertEqual(previous_bytes, destination.read_bytes())
+                    finally:
+                        path.write_bytes(original)
+                        LOAD.discard_prepared_release(candidate)
+        # Independent next invocation may legitimately accept new customer bytes.
+        policy.write_bytes(policy.read_bytes() + b"\n")
+        current = LOAD.validate_and_publish_release(self.project, inputs)
+        self.assertNotEqual(previous["release_id"], current["release_id"])
+        device = {"hostname": "leaf01", "type": "eth", "mac_plain": "020000000001",
+                  "identity_macs": {"eth0": "020000000001"}}
+        with mock.patch.object(MANUAL, "DHCP_RELEASE_MANIFEST",
+                               self.ztp / "config/isc-dhcp-server/dhcp-release-manifest.json"):
+            MANUAL.validate_parent_release_binding(self.project, device)
+
+    def test_component_validation_cannot_adopt_a_new_global_snapshot(self) -> None:
+        original_hash = sha256(self.inputs.global_file)
+        original_inventory = LOAD._release_inventory
+        def mutate_after_snapshot(path):
+            result = original_inventory(path)
+            with self.inputs.global_file.open("a") as stream:
+                stream.write("\n")
+            return result
+        with mock.patch.object(LOAD, "_release_inventory", side_effect=mutate_after_snapshot):
+            parent = LOAD.validate_and_publish_release(self.project, self.inputs, publish=False)
+        self.assertEqual(original_hash, parent["inputs"]["global"])
+        candidate = LOAD.prepare_current_release(self.project, parent)
+        try:
+            with self.assertRaisesRegex(LOAD.LoadError, "input authority global.*before parent commit"):
+                LOAD.commit_prepared_release(candidate)
+        finally:
+            LOAD.discard_prepared_release(candidate)
+
+    def test_schema2_parent_requires_complete_input_authority_map_before_prepare(self) -> None:
+        parent = LOAD.validate_and_publish_release(self.project, self.inputs, publish=False)
+        for kind in ("missing", "empty", "partial", "extra", "wrong_type", "bad_digest"):
+            with self.subTest(kind=kind):
+                altered = json.loads(json.dumps(parent))
+                if kind == "missing":
+                    del altered["input_paths"]
+                elif kind == "empty":
+                    altered["input_paths"] = {}
+                elif kind == "partial":
+                    del altered["input_paths"]["global"]
+                elif kind == "extra":
+                    altered["input_paths"]["unexpected"] = "other.csv"
+                elif kind == "wrong_type":
+                    altered["input_paths"] = []
+                else:
+                    altered["inputs"]["global"] = "not-a-sha256"
+                with self.assertRaisesRegex(LOAD.LoadError, "input authority map"):
+                    LOAD.prepare_current_release(self.project, altered)
+
+    def test_source_edit_after_parent_validation_still_blocks_commit(self) -> None:
+        private = Path(tempfile.mkdtemp(prefix=".load-inventory-", dir=self.project))
+        derived = private / "02-devices_config.csv"
+        derived.write_bytes(self.devices_file.read_bytes())
+        derived.chmod(0o600)
+        inputs = LOAD.replace(self.inputs, effective_devices_file=derived,
+                              effective_devices_sha256=sha256(derived))
+        parent = LOAD.validate_and_publish_release(self.project, inputs, publish=False)
+        candidate = LOAD.prepare_current_release(self.project, parent)
+        try:
+            with self.devices_file.open("a") as stream:
+                stream.write("\n")
+            with self.assertRaisesRegex(LOAD.LoadError, "customer source inventory changed"):
+                LOAD.commit_prepared_release(candidate)
+            self.assertFalse(candidate.committed)
+        finally:
+            LOAD.discard_prepared_release(candidate)
+
+    def test_parent_commit_rechecks_dhcp_child_manifest_and_outputs(self) -> None:
+        previous = LOAD.validate_and_publish_release(self.project, self.inputs)
+        destination = self.project / "99-output-ztp/current-release.json"
+        previous_bytes = destination.read_bytes()
+        dhcp_dir = self.ztp / "config/isc-dhcp-server"
+        manifest_path = dhcp_dir / "dhcp-release-manifest.json"
+        host_path = dhcp_dir / "dhcpd_eth.hosts"
+        for changed in (manifest_path, host_path):
+            with self.subTest(changed=changed.name):
+                parent = LOAD.validate_and_publish_release(
+                    self.project, self.inputs, publish=False,
+                )
+                candidate = LOAD.prepare_current_release(self.project, parent)
+                original = changed.read_bytes()
+                try:
+                    changed.write_bytes(original + b"\n")
+                    with self.assertRaisesRegex(LOAD.LoadError, "DHCP.*(manifest|output|changed)"):
+                        LOAD.commit_prepared_release(candidate)
+                    self.assertFalse(candidate.committed)
+                    self.assertEqual(previous_bytes, destination.read_bytes())
+                finally:
+                    changed.write_bytes(original)
+                    LOAD.discard_prepared_release(candidate)
+
+    def test_dhcp_source_edit_after_staged_syntax_never_installs_or_commits(self) -> None:
+        source_dir = self.ztp / "config/isc-dhcp-server"
+        live_dir = self.root / "etc-dhcp-source-drift"
+        live_dir.mkdir()
+        names = ("dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts")
+        mappings = {source_dir / name: live_dir / name for name in names}
+        original_conf = "".join(
+            f'include "/etc/dhcp/{name}";\n' for name in names[1:]
+        ).encode("ascii")
+        mappings_source = source_dir / "dhcpd.conf"
+        mappings_source.write_bytes(original_conf)
+        manifest_path = source_dir / "dhcp-release-manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["outputs"] = {
+            name: {"sha256": sha256(source_dir / name)} for name in names
+        }
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        before_live = {}
+        for destination in mappings.values():
+            destination.write_bytes(f"old:{destination.name}\n".encode("ascii"))
+            before_live[destination.name] = destination.read_bytes()
+        parent = LOAD.validate_and_publish_release(
+            self.project, self.inputs, publish=False,
+        )
+        candidate = LOAD.prepare_current_release(self.project, parent)
+        target = source_dir / "dhcpd_eth.hosts"
+        original_host = target.read_bytes()
+        checks = []
+
+        def fake_run(command, **_kwargs):
+            operation = command[0]
+            if operation == "install":
+                if "-d" in command:
+                    mode = int(command[command.index("-m") + 1], 8)
+                    for item in command[command.index("--") + 1:]:
+                        Path(item).mkdir(parents=True, exist_ok=True)
+                        Path(item).chmod(mode)
+                else:
+                    shutil.copy2(command[-2], command[-1])
+                return
+            if operation == "cp":
+                shutil.copy2(command[-2], command[-1])
+                return
+            if operation == "dhcpd":
+                checks.append(command[-1])
+                if len(checks) == 1:
+                    target.write_bytes(original_host + b"# changed after staged syntax\n")
+                return
+            raise AssertionError(command)
+
+        def fake_cleanup(command, **_kwargs):
+            target_path = Path(command[-1])
+            if command[0] == "rm":
+                target_path.unlink(missing_ok=True)
+            elif command[0] == "cp":
+                shutil.copy2(command[-2], command[-1])
+            elif command[0] == "rmdir":
+                target_path.rmdir()
+            else:
+                raise AssertionError(command)
+            return SimpleNamespace(returncode=0)
+
+        try:
+            with mock.patch.object(LOAD, "dhcp_file_mappings", return_value=mappings), \
+                    mock.patch.object(LOAD, "sudo_command", side_effect=lambda *args: list(args)), \
+                    mock.patch.object(LOAD, "run", side_effect=fake_run), \
+                    mock.patch.object(LOAD, "_run_subprocess", side_effect=fake_cleanup), \
+                    self.assertRaises(LOAD.LoadError):
+                LOAD.mount_and_test_dhcp(parent_candidate=candidate)
+            self.assertFalse(candidate.committed)
+            self.assertFalse(candidate.destination.exists())
+            self.assertEqual(before_live, {
+                destination.name: destination.read_bytes() for destination in mappings.values()
+            })
+        finally:
+            target.write_bytes(original_host)
+            LOAD.discard_prepared_release(candidate)
+
     def test_source_yaml_backed_breakout_needs_no_generator_sidecar(self) -> None:
         """A lossless CSV source receipt bypasses the template splitter input."""
         source = (
@@ -2458,6 +2800,8 @@ class ReleaseTransactionTests(unittest.TestCase):
         generate.assert_called_once_with(
             inputs.device_types,
             deployment_lock_descriptor=93,
+            source_identities=inputs.source_identities,
+            inventory_directory=mock.ANY,
             install_dhcp=True,
             dry_run=False,
             schema_version=inputs.settings.schema_version,
@@ -3642,7 +3986,7 @@ class ReleaseTransactionTests(unittest.TestCase):
 
         commands = [call.args[0] for call in runner.call_args_list]
         self.assertIn(
-            [sys.executable, "c1-generate_dhcp.py", "-y", "--deployment-scope", "air"],
+            [sys.executable, "c1-generate_dhcp.py", "-y", "--preserve-input-csv", "--deployment-scope", "air"],
             commands,
         )
         self.assertTrue(any(
@@ -4909,6 +5253,8 @@ class ReleaseTransactionTests(unittest.TestCase):
         generate_configs.assert_called_once_with(
             remote_inputs.device_types,
             deployment_lock_descriptor=73,
+            source_identities=remote_inputs.source_identities,
+            inventory_directory=mock.ANY,
             install_dhcp=False,
             dry_run=False,
             schema_version=remote_inputs.settings.schema_version,
@@ -5083,8 +5429,12 @@ class ReleaseTransactionTests(unittest.TestCase):
         def generate_dhcp(
             _device_types, *, install_dhcp, dry_run, schema_version,
             eth_version, air_topology_policy, deployment_scope, switch_scope,
-            deployment_lock_descriptor,
+            deployment_lock_descriptor, source_identities, inventory_directory,
         ):
+            self.assertIsNone(source_identities)
+            self.assertEqual(self.project, inventory_directory.parent)
+            self.assertTrue(inventory_directory.name.startswith(".load-inventory-"))
+            self.assertEqual(0o700, inventory_directory.stat().st_mode & 0o777)
             self.assertFalse(install_dhcp)
             self.assertFalse(dry_run)
             self.assertEqual(1, schema_version)

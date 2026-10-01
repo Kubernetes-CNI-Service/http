@@ -45,6 +45,7 @@ EMPTY_DENIED_DIRS = (
     "monitor/status",
 )
 DENIED = (
+    "tools/monitor-loopback-proxy.py",
     "DAY0-Prepare/site-a/01-global.yaml", "DAY0-Prepare/site-a/notes.txt",
     "DAY0-Prepare/site-a/subdir/fixture.py", "Finished-projects/site-a/data.json",
     "cre.json", "operator.service-account.json", "monitor/cre.json",
@@ -289,6 +290,8 @@ class ImageContextSafetyDirectTests(unittest.TestCase):
                 self.assertEqual("**", rules[0])
                 self.assertEqual(DAY0_INCLUDES, {r for r in rules if r.startswith("!DAY0-Prepare/")})
                 last_include = max(i for i, line in enumerate(rules) if line.startswith("!"))
+                self.assertIn("tools/monitor-loopback-proxy.py", rules)
+                self.assertGreater(rules.index("tools/monitor-loopback-proxy.py"), last_include)
                 contract = load_source("image_context_contract", ROOT / "tools/project_contract.py")
                 for denied in contract.image_credential_docker_patterns():
                     self.assertIn(denied, rules)

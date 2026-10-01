@@ -9,6 +9,7 @@ import io
 import json
 from pathlib import Path
 import shlex
+import shutil
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -17,9 +18,9 @@ from unittest import mock
 
 from test_cases.test_dhcp_optional_contract import (
     DHCP, EMPTY_SUBNET_TABLE, EMPTY_SUBNET_TABLE_SHA256, LOAD, SETUP,
-    global_document,
+    global_document, settings_for,
 )
-from test_cases.test_dhcp_switch_scope_preservation import ScopedDhcpFixture
+from test_cases.test_dhcp_switch_scope_preservation import AIR_HOST, ScopedDhcpFixture
 from test_cases import test_load_release_transaction as release_fixture
 from test_cases.module_loader import load_script
 import yaml
@@ -30,6 +31,259 @@ ACTIVATE = load_script("optional_empty_subnet_docker", ROOT / "infra/docker/acti
 
 
 class DhcpOptionalWorkflowTests(unittest.TestCase):
+    def test_disabled_generation_and_preflight_ignore_missing_all_dhcp_outputs(self):
+        with tempfile.TemporaryDirectory() as name:
+            fixture = ScopedDhcpFixture(Path(name))
+            for path in fixture.outputs.values():
+                path.unlink()
+            commands = []
+            with mock.patch.object(LOAD, "ZTP_DIR", fixture.root / "ztp"), \
+                    mock.patch.object(LOAD, "run", side_effect=lambda argv, **kwargs: commands.append(argv)), \
+                    mock.patch.object(LOAD, "_device_types_after_dhcp", return_value=frozenset({"ib"})), \
+                    mock.patch.object(LOAD, "newest_directory", return_value=fixture.root / "generated"):
+                LOAD.generate_configs(
+                    frozenset({"ib"}), install_dhcp=False, dhcp_enabled=False,
+                )
+            self.assertFalse(any(
+                token in str(command)
+                for argv in commands for command in argv
+                for token in ("c1-generate_dhcp.py", "dhcpd", "install")
+            ))
+            self.assertTrue(all(not path.exists() for path in fixture.outputs.values()))
+            disabled = LOAD.replace(settings_for("disabled"), ztp_enabled=False)
+            with mock.patch.object(LOAD, "dhcp_file_mappings", side_effect=AssertionError("DHCP artifacts consulted")), \
+                    mock.patch.object(LOAD, "run") as runtime_run:
+                LOAD.preflight_services(
+                    SimpleNamespace(settings=disabled), {},
+                    runtime_backend=SimpleNamespace(name="systemd"),
+                )
+                runtime_run.assert_not_called()
+
+    def test_air_scoped_setup_empty_hosts_cross_install_and_start_checks(self):
+        """Real setup placeholders and c1 output must survive both load gates."""
+        with tempfile.TemporaryDirectory() as name:
+            fixture = ScopedDhcpFixture(Path(name))
+            fixture.add_air_inventory()
+            project = fixture.root / "DAY0-Prepare/project"
+            project.mkdir(parents=True)
+            for label in ("conf", "eth", "ib", "nvl", "manifest"):
+                path = fixture.outputs[label]
+                path.unlink()
+                SETUP._process_mapping(
+                    str(project), f"config/isc-dhcp-server/{path.name}",
+                    f"99-output-dhcp/{path.name}", "output",
+                    link_root=str(fixture.root / "ztp"),
+                )
+                self.assertEqual(b"", path.read_bytes())
+            fixture.execute([
+                "c1-generate_dhcp.py", "-y", "--deployment-scope", "air",
+                "--switch", "eth",
+            ])
+            self.assertIn(AIR_HOST, fixture.outputs["eth"].read_text())
+            self.assertEqual(b"", fixture.outputs["ib"].read_bytes())
+            self.assertEqual(b"", fixture.outputs["nvl"].read_bytes())
+            manifest = json.loads(fixture.outputs["manifest"].read_text())
+            self.assertEqual(
+                {"eth": 1, "ib": 0, "nvl": 0},
+                manifest["counts"]["host_declarations_by_family"],
+            )
+
+            live = fixture.root / "etc-dhcp"
+            live.mkdir()
+            mappings = {
+                fixture.outputs[label]: live / fixture.outputs[label].name
+                for label in ("conf", "eth", "ib", "nvl")
+            }
+            for destination in mappings.values():
+                destination.write_bytes(f"OLD-{destination.name}\n".encode("ascii"))
+            before_live = {
+                destination.name: (destination.read_bytes(), destination.stat().st_ino)
+                for destination in mappings.values()
+            }
+            receipt = fixture.outputs["manifest"]
+            original_receipt = receipt.read_bytes()
+            invalid_receipt = json.loads(original_receipt)
+            invalid_receipt["outputs"]["dhcpd_ib.hosts"]["sha256"] = "0" * 64
+            receipt.write_text(json.dumps(invalid_receipt), encoding="utf-8")
+            import zipfile
+            workbook = io.BytesIO()
+            with zipfile.ZipFile(workbook, "w") as archive:
+                archive.writestr("xl/workbook.xml", "<workbook/>\n")
+            input_payloads = {
+                "global": ("01-global.yaml", fixture.global_file.read_bytes()),
+                "devices": ("02-devices_config.csv", fixture.devices_file.read_bytes()),
+                "subnet": ("02-dhcp-subnet_config.csv", fixture.subnet_file.read_bytes()),
+                "p2p": ("fixture-topology.xlsx", workbook.getvalue()),
+            }
+            for filename, payload in input_payloads.values():
+                (project / filename).write_bytes(payload)
+            (project / "p2p.xlsx").symlink_to("fixture-topology.xlsx")
+            parent = LOAD.prepare_current_release(project, {
+                "schema_version": 2, "release_id": "air-empty-parent-fixture",
+                "inputs": {key: hashlib.sha256(payload).hexdigest()
+                           for key, (_, payload) in input_payloads.items()},
+                "input_paths": {key: filename
+                                for key, (filename, _) in input_payloads.items()},
+                "validation": "passed", "dhcp_status": "enabled",
+                "deployment_scope": "air",
+                "switch_scope": "eth", "components": {"dhcp": {
+                    "manifest_sha256": hashlib.sha256(original_receipt).hexdigest(),
+                }},
+            })
+            with mock.patch.object(LOAD, "dhcp_file_mappings", return_value=mappings), \
+                    mock.patch.object(LOAD, "run", side_effect=AssertionError("unsafe install")) as forbidden_run, \
+                    mock.patch.object(LOAD, "sudo_command", side_effect=lambda *args: list(args)), \
+                    mock.patch.object(LOAD, "_run_subprocess", return_value=SimpleNamespace(returncode=0)), \
+                    mock.patch.object(LOAD, "commit_prepared_release") as forbidden_commit, \
+                    self.assertRaisesRegex(LOAD.LoadError, "DHCP release 输出 hash 漂移"):
+                LOAD.mount_and_test_dhcp(parent_candidate=parent)
+            forbidden_run.assert_not_called()
+            forbidden_commit.assert_not_called()
+            self.assertFalse(parent.committed)
+            self.assertEqual(before_live, {
+                destination.name: (destination.read_bytes(), destination.stat().st_ino)
+                for destination in mappings.values()
+            })
+            receipt.write_bytes(original_receipt)
+            stale_but_self_consistent = json.loads(original_receipt)
+            stale_but_self_consistent["generated_at"] = "different-generation"
+            receipt.write_text(json.dumps(stale_but_self_consistent), encoding="utf-8")
+            with mock.patch.object(LOAD, "dhcp_file_mappings", return_value=mappings), \
+                    mock.patch.object(LOAD, "run", side_effect=AssertionError("unsafe install")) as forbidden_run, \
+                    mock.patch.object(LOAD, "sudo_command", side_effect=lambda *args: list(args)), \
+                    mock.patch.object(LOAD, "_run_subprocess", return_value=SimpleNamespace(returncode=0)), \
+                    mock.patch.object(LOAD, "commit_prepared_release") as forbidden_commit, \
+                    self.assertRaisesRegex(LOAD.LoadError, "parent.*DHCP manifest"):
+                LOAD.mount_and_test_dhcp(parent_candidate=parent)
+            forbidden_run.assert_not_called()
+            forbidden_commit.assert_not_called()
+            self.assertFalse(parent.committed)
+            self.assertEqual(before_live, {
+                destination.name: (destination.read_bytes(), destination.stat().st_ino)
+                for destination in mappings.values()
+            })
+            receipt.write_bytes(original_receipt)
+            original_parent = parent.temporary.read_bytes()
+            wrong_scope_parent = json.loads(original_parent)
+            wrong_scope_parent["switch_scope"] = "ib"
+            parent.temporary.write_text(json.dumps(wrong_scope_parent), encoding="utf-8")
+            with mock.patch.object(LOAD, "dhcp_file_mappings", return_value=mappings), \
+                    mock.patch.object(LOAD, "run", side_effect=AssertionError("unsafe install")) as forbidden_run, \
+                    mock.patch.object(LOAD, "commit_prepared_release") as forbidden_commit, \
+                    self.assertRaisesRegex(LOAD.LoadError, "parent.*scope/身份"):
+                LOAD.mount_and_test_dhcp(parent_candidate=parent)
+            forbidden_run.assert_not_called()
+            forbidden_commit.assert_not_called()
+            self.assertFalse(parent.committed)
+            parent.temporary.write_bytes(original_parent)
+            checks = []
+            fail_final_syntax = [True]
+            drift_after_staged_syntax = [False]
+
+            def run_local(command, **_kwargs):
+                operation = command[0]
+                if operation == "install":
+                    if "-d" in command:
+                        for target in command[command.index("--") + 1:]:
+                            Path(target).mkdir(parents=True, exist_ok=True)
+                    else:
+                        shutil.copy2(command[-2], command[-1])
+                    return
+                if operation == "cp":
+                    shutil.copy2(command[-2], command[-1])
+                    return
+                if operation == "dhcpd":
+                    checks.append(tuple(command))
+                    self.assertEqual("-t", command[1])
+                    if command[-1] != "/etc/dhcp/dhcpd.conf":
+                        staged = Path(command[-1]).parent
+                        self.assertEqual(b"", (staged / "dhcpd_ib.hosts").read_bytes())
+                        self.assertEqual(b"", (staged / "dhcpd_nvl.hosts").read_bytes())
+                        if drift_after_staged_syntax[0]:
+                            fixture.outputs["eth"].write_bytes(
+                                original_eth + b"# late source drift\n"
+                            )
+                    if fail_final_syntax[0] and len(checks) == 2:
+                        raise OSError("injected final DHCP syntax failure")
+                    return
+                if operation == "apache2ctl":
+                    return
+                raise AssertionError(command)
+
+            def cleanup_local(command, **_kwargs):
+                target = Path(command[-1])
+                if command[0] == "rm":
+                    target.unlink(missing_ok=True)
+                elif command[0] == "cp":
+                    shutil.copy2(command[-2], command[-1])
+                elif command[0] == "rmdir":
+                    target.rmdir()
+                else:
+                    raise AssertionError(command)
+                return SimpleNamespace(returncode=0)
+
+            commit_parent = LOAD.commit_prepared_release
+            with mock.patch.object(LOAD, "dhcp_file_mappings", return_value=mappings), \
+                    mock.patch.object(LOAD, "sudo_command", side_effect=lambda *args: list(args)), \
+                    mock.patch.object(LOAD, "run", side_effect=run_local), \
+                    mock.patch.object(LOAD, "_run_subprocess", side_effect=cleanup_local), \
+                    mock.patch.object(LOAD, "commit_prepared_release") as forbidden_commit, \
+                    self.assertRaisesRegex(OSError, "injected final DHCP syntax failure"):
+                LOAD.mount_and_test_dhcp(parent_candidate=parent)
+            forbidden_commit.assert_not_called()
+            self.assertFalse(parent.committed)
+            self.assertFalse(parent.destination.exists())
+            self.assertEqual({
+                filename: payload for filename, (payload, _inode) in before_live.items()
+            }, {
+                destination.name: destination.read_bytes()
+                for destination in mappings.values()
+            })
+            self.assertEqual(2, len(checks))
+            checks.clear()
+            fail_final_syntax[0] = False
+            original_eth = fixture.outputs["eth"].read_bytes()
+            drift_after_staged_syntax[0] = True
+            with mock.patch.object(LOAD, "dhcp_file_mappings", return_value=mappings), \
+                    mock.patch.object(LOAD, "sudo_command", side_effect=lambda *args: list(args)), \
+                    mock.patch.object(LOAD, "run", side_effect=run_local), \
+                    mock.patch.object(LOAD, "_run_subprocess", side_effect=cleanup_local), \
+                    self.assertRaisesRegex(LOAD.LoadError, "DHCP source changed after staged syntax"):
+                LOAD.mount_and_test_dhcp(parent_candidate=parent)
+            self.assertEqual(1, len(checks))
+            self.assertFalse(parent.committed)
+            self.assertFalse(parent.destination.exists())
+            self.assertEqual({
+                filename: payload for filename, (payload, _inode) in before_live.items()
+            }, {
+                destination.name: destination.read_bytes()
+                for destination in mappings.values()
+            })
+            fixture.outputs["eth"].write_bytes(original_eth)
+            drift_after_staged_syntax[0] = False
+            checks.clear()
+            with mock.patch.object(LOAD, "dhcp_file_mappings", return_value=mappings), \
+                    mock.patch.object(LOAD, "sudo_command", side_effect=lambda *args: list(args)), \
+                    mock.patch.object(LOAD, "run", side_effect=run_local), \
+                    mock.patch.object(LOAD, "_run_subprocess", side_effect=cleanup_local), \
+                    mock.patch.object(
+                        LOAD, "commit_prepared_release", side_effect=commit_parent,
+                    ) as commit:
+                LOAD.mount_and_test_dhcp(parent_candidate=parent)
+                commit.assert_called_once_with(parent)
+                self.assertTrue(parent.committed)
+                self.assertEqual(b"", (live / "dhcpd_ib.hosts").read_bytes())
+                self.assertEqual(b"", (live / "dhcpd_nvl.hosts").read_bytes())
+                with mock.patch.object(LOAD, "validate_management_host", return_value=True), \
+                        mock.patch.object(LOAD, "verify_control_auth"), \
+                        mock.patch.object(LOAD, "verify_published_files"), \
+                        mock.patch.object(LOAD, "verify_apache_publication_boundary"):
+                    LOAD.preflight_services(
+                        SimpleNamespace(settings=settings_for("enabled")), {},
+                        runtime_backend=SimpleNamespace(name="systemd"),
+                    )
+            self.assertEqual(3, len(checks))
+
     def test_invalid_subnet_cannot_cross_setup_load_runtime_or_docker_boundary(self):
         with tempfile.TemporaryDirectory() as name:
             http_root = Path(name)

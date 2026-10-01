@@ -476,5 +476,43 @@ class DhcpSwitchScopeDirectTests(unittest.TestCase):
                     )
 
 
+class DerivedInventoryTests(unittest.TestCase):
+    def test_inventory_output_cannot_overwrite_source_existing_file_or_symlink(self):
+        for target_kind in ("source", "existing", "symlink"):
+            with self.subTest(target_kind=target_kind), tempfile.TemporaryDirectory() as name:
+                fixture = ScopedDhcpFixture(Path(name))
+                before = fixture.devices_file.read_bytes()
+                destination = fixture.root / "derived.csv"
+                if target_kind == "source":
+                    destination = fixture.devices_file
+                elif target_kind == "existing":
+                    destination.write_bytes(b"independent existing authority")
+                else:
+                    destination.symlink_to(fixture.devices_file)
+                original = destination.read_bytes()
+                with self.assertRaises(FileExistsError):
+                    fixture.execute(["c1-generate_dhcp.py", "-y", "--inventory-output",
+                                     str(destination), "--inventory-only"])
+                self.assertEqual(before, fixture.devices_file.read_bytes())
+                self.assertEqual(original, destination.read_bytes())
+
+    def test_private_inventory_removes_stale_air_without_changing_source_or_dhcp(self):
+        with tempfile.TemporaryDirectory() as name:
+            fixture = ScopedDhcpFixture(Path(name))
+            fixture.add_air_inventory()
+            fixture.air_file.write_text('{"nodes": {}}', encoding="utf-8")
+            source = fixture.devices_file.read_bytes()
+            outputs = fixture.snapshot()
+            derived = fixture.root / "derived.csv"
+            fixture.execute([
+                "c1-generate_dhcp.py", "-y", "--inventory-output", str(derived),
+                "--inventory-only",
+            ])
+            self.assertEqual(source, fixture.devices_file.read_bytes())
+            self.assertNotIn(AIR_HOST, derived.read_text())
+            self.assertIn(FAMILY_HOST["eth"], derived.read_text())
+            self.assertEqual(outputs, fixture.snapshot())
+
+
 if __name__ == "__main__":
     unittest.main()

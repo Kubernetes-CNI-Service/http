@@ -1,5 +1,23 @@
 # Real-environment acceptance cases
 
+## TC-REAL-MONITOR-LOOPBACK-PROXY-001 — 本机 SSH stdio 监控代理
+
+- 类型：real-environment / browser / SSH；状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。
+- 自动化：`test_monitor_loopback_proxy` 与 `test_monitor_loopback_proxy_workflow`；合成 Basic、固定 SSH argv、本机 HTTP→原三 CGI guard，不执行真实远端操作。
+- 前置：当前精确 full proof、可信本机及浏览器、已配置跳板密钥/known_hosts、owner 授权的隔离服务与可回滚设备；原 8080 转发已停止。使用 `docs/deployment/MONITOR_LOOPBACK_PROXY.md` 启动，服务器 CGI/Apache 不修改。
+- 步骤：验证页面 Basic 挑战、三个 GET 状态、只读图表/下载；在隔离环境对每类控制路由仅执行一次批准动作并核后台记录一次。验证错误 Origin 在 SSH 启动前拒绝；用隔离网络故障检验响应截断显示结果未知且不重试。不得对真实设备注入重试或破坏性故障。
+- 预期证据：浏览器脱敏状态码/结果、操作唯一记录、固定服务目标与 SSH 主机信任、拒绝时零请求证据；不得保存 Authorization、请求体秘密或完整配置。三 CGI 原 Host/Origin 拒绝测试继续成立。
+- 清理与风险：Ctrl-C、关闭浏览器页面，确认 8080 与 SSH 子进程结束，按既有设备操作方案恢复隔离前像。每请求握手成本、30 秒超时、16 MiB 上限、共享本机 origin 和同 UID 风险须记录；无法核实实际结果时保持未知，不自动重试。本卡不授权生产操作。
+
+## TC-REAL-AIR-DERIVED-INVENTORY-001 — load 客户输入与派生 AIR 清单分离
+
+- 状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**；类型：Native / Docker / AIR。
+- 前置条件：owner 授权的隔离管理机和项目副本；当前源码的正式 full proof；保存客户设备 CSV、P2P、全局配置、拓扑策略及健康 parent release 的 SHA-256，记录服务状态。不得在真实客户源文件上执行篡改负例。
+- 步骤：以含旧 539 条 AIR 行的独立输入执行 mini，使当前拓扑只有 81 条静态 AIR 和 2 条动态 baseline；分别验证 DHCP enabled/disabled。确认源 CSV 的字节、inode、mtime 不变，Cumulus/hostname2mac/父 release 使用同一私有派生清单，动态 baseline 仍由 AIR JSON 补入；disabled 时五个 DHCP 输出不变。两次 load 之间合法修改客户输入应建立新快照；同一轮生成中修改客户源或派生文件应在提交前拒绝。
+- 证据：完整终端、源/派生摘要、parent `inputs.devices` 与 `generated_inputs.effective_devices`、子 release 设备集合、提交前复验及失败回滚记录；本机模拟通过不能替代此验收。
+- 清理：保留已提交 parent 引用的派生目录和审计证据；仅清理本轮失败的私有暂存目录，恢复隔离副本和服务前像。不得删除其他运行或现有 parent 使用的目录。
+- 风险：AIR 地址冲突、服务切换、不同平台权限/文件系统行为；失败保持服务停止，不自动重试或放宽输入漂移门禁。
+
 这里保存不能在本机隔离测试中安全、真实地完成的验收案例。它们不是自动化回归的替代品；
 对应解析、事务和失败分支仍应在 `test_*.py` 中使用 fixture 自动覆盖。
 
@@ -1582,6 +1600,14 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   Apache/DHCP 服务 PID/argv、监听端口、HTTP 可达性与拒绝点；不保存客户数据或原始租约。
   恢复项目、服务、接口、文件及隔离 VM 快照，逐项核对前像。任一服务实测、故障拒绝、
   证据或清理缺失均保持 OPEN/BLOCKED，不得以本机测试 GREEN 代替现场验收。
+
+## TC-REAL-DHCP-EMPTY-SCOPE-001 — Scoped DHCP 空 include 与双门禁
+
+- Case ID：`TC-REAL-DHCP-EMPTY-SCOPE-001`；类型：real-environment / transaction / scenario；对应缺陷：新项目 AIR/eth load 在 setup 创建零字节 IB/NVL 占位后，于 DHCP 安装前误拒绝。适用平台：owner 批准的可丢弃 Ubuntu 管理 VM；状态：**NOT RUN / REAL_ENV REQUIRED**。自动化先决为 `test_cases.test_dhcp_optional_contract` direct 与 `test_cases.test_dhcp_optional_workflow` 的真实 setup→generator→load 模拟 workflow 全绿；模拟 `dhcpd -t` 调用不等于真实 ISC DHCP/AppArmor 验证。
+- 前置条件：隔离私有项目副本，准确的已批准 HEAD/tree、manifest、full proof、global、设备 CSV 和 AIR 清单；冻结四个项目 DHCP 输出及 manifest、`/etc/dhcp` 四文件、DHCP/Apache 服务 PID、监听接口、租约的前像与 SHA。具备独立控制台、服务/文件快照、回滚负责人和写者静默见证；不得在客户真实项目或生产接口测试。
+- 步骤与预期：先在显式 DHCP enabled 的全新项目上运行 setup，再用仅含有效 AIR/eth 的本轮 effective scope 执行正式 load。`dhcpd_eth.hosts` 应有真实生成内容；IB/NVL 零字节仅在它们非本轮拥有、manifest 各自声明数为 0 且四输出 SHA 精确匹配时可作为合法空 include。按 owner 对本场景的明确裁决，即使旧 `/etc/dhcp` IB/NVL 文件非零，也允许在上述证明成立时由项目零字节候选取代；须记录替换前像，不能把它解释为仍在发布旧 IB/NVL reservation。事务必须在未发布 staging 与安装后各执行一次真实 `dhcpd -t`，并在服务启动前再次通过相同空文件门禁与真实语法检查；统一 release 不得先于安装成功提交。不得向 IB/NVL 填假 host 或改变 scope 外项目输出。
+- 故障注入与拒绝：分别使本轮 selected family 或 `dhcpd.conf` 为零字节、删除任一 host/manifest、令非selected family 计数大于 0、篡改任一输出 SHA、破坏 staging 或最终 `dhcpd -t`。每项均须 fail closed，不能提交半套 release 或留下部分安装；故障注入时旧 live 非零 host 必须按事务恢复原字节与可用性，记录可能变化的 inode，不能误报成功。显式 DHCP disabled 对照中即使五制品缺失也不生成、安装或执行 `dhcpd -t`；Supervisor disabled 却出现非空 listener 应在服务动作前拒绝。
+- 证据与清理：保存脱敏精确 argv/exit、两次语法检查和启动前门禁、stage/live 文件 dev/ino/mode/size/SHA、release/manifest、服务 PID/监听与失败回滚时间线；仅恢复隔离项目及 VM 快照并核对前像。没有真实 AppArmor/ISC DHCP 正负见证、完整回滚或 owner 现场授权时保持 NOT RUN，不宣称生产验收。
 
 ## TC-REAL-REQ15-P2P-001 — 工作簿选择与旧列布局的真实语料核对
 

@@ -7333,6 +7333,59 @@ printf 'legacy=%s\n' "$(os_ver_from_file 'nvosv25-03-1010amd64.bin')"
             completed.stdout.splitlines(),
         )
 
+    def test_xdr_upgrade_defaults_packages_to_repository_image_and_firmware(self):
+        original = ROOT / "infiniband/bringup/xdr-upgrade/upgrade.sh"
+        source = original.read_text(encoding="utf-8")
+        self.assertTrue(source.endswith("\nmain\n"))
+        harness_source = source[:-len("main\n")] + r'''printf 'os=%s\n' "$(package_source_path 'nvosv25-02-8008amd64.bin' local)"
+printf 'bios=%s\n' "$(package_source_path '0ACQF.cab' local)"
+printf 'cpld=%s\n' "$(package_source_path 'bundle.vme' scp)"
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tool = root / "infiniband/bringup/xdr-upgrade"
+            tool.mkdir(parents=True)
+            script = tool / "upgrade.sh"
+            script.write_text(harness_source, encoding="utf-8")
+            completed = subprocess.run(
+                ["bash", str(script), "--method", "local", "--os"],
+                cwd=root, text=True, capture_output=True, timeout=10,
+                check=False,
+            )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertEqual(
+            [
+                f"os={root}/image/nvosv25-02-8008amd64.bin",
+                f"bios={root}/firmware/0ACQF.cab",
+                f"cpld={root}/firmware/bundle.vme",
+            ],
+            completed.stdout.splitlines(),
+        )
+
+    def test_xdr_upgrade_scp_scripts_embed_split_repository_package_roots(self):
+        original = ROOT / "infiniband/bringup/xdr-upgrade/upgrade.sh"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tool = root / "infiniband/bringup/xdr-upgrade"
+            tool.mkdir(parents=True)
+            script = tool / "upgrade.sh"
+            shutil.copy2(original, script)
+            completed = subprocess.run(
+                ["bash", str(script), "--method", "scp", "-A", "--scripts-only"],
+                cwd=root, text=True, capture_output=True, timeout=10,
+                check=False,
+            )
+            scripts = tool / "xdr-upgrade-logs/upgrade_scripts/scp"
+            os_text = (scripts / "os_upgrade_25.02.8008.sh").read_text(encoding="utf-8")
+            bios_text = (scripts / "bios_upgrade_0ACQF_06.01.009.sh").read_text(encoding="utf-8")
+            cpld_text = (scripts / "cpld_upgrade_FUI000557.sh").read_text(encoding="utf-8")
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertIn(f"{root}/image/nvosv25-02-8008amd64.bin", os_text)
+        self.assertIn(f"{root}/firmware/0ACQF.cab", bios_text)
+        self.assertIn(f"{root}/firmware/", cpld_text)
+
     def test_xdr_upgrade_generates_new_name_script_and_upgrade_path(self):
         original = ROOT / "infiniband/bringup/xdr-upgrade/upgrade.sh"
         source = original.read_text(encoding="utf-8")

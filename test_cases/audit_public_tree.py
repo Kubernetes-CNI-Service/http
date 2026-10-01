@@ -99,6 +99,10 @@ FORBIDDEN_ROOTS = frozenset(
     }
 )
 
+PUBLIC_PACKAGE_DIRECTORY_DOCS = frozenset(
+    {"image/README.md", "firmware/README.md"}
+)
+
 FORBIDDEN_EXACT_PATHS = frozenset(
     {
         "README.md",
@@ -545,7 +549,8 @@ def sensitive_path_finding(relative: str) -> Finding | None:
 def field_path_finding(relative: str) -> Finding | None:
     path = PurePosixPath(relative)
     parts = path.parts
-    if parts[0] in FORBIDDEN_ROOTS or parts[0].startswith(".codex_tmp"):
+    if ((parts[0] in FORBIDDEN_ROOTS and relative not in PUBLIC_PACKAGE_DIRECTORY_DOCS)
+            or parts[0].startswith(".codex_tmp")):
         return Finding("field-path", relative, "local/runtime root is not publishable")
     if parts[0] == "apps" and relative != "apps/README.md":
         return Finding("field-path", relative, "offline package content is not publishable")

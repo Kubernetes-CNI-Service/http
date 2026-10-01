@@ -451,6 +451,7 @@ switches:
         with mock.patch.multiple(
             CUMULUS_GENERATOR,
             SCRIPT_DIR=str(template),
+            _CSV_FILE=str(template / "02-devices_config.csv"),
             _GLOBAL_FILE=str(template / "01-global.yaml"),
             DEVICES_FILE=str(template / "91-devices.yaml"),
             TEMPLATES_DIR=str(templates),

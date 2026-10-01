@@ -129,7 +129,9 @@ IMAGE_SOURCE_EXACT_NAMES = frozenset({
     "Dockerfile", "Dockerfile.dockerignore",
 })
 IMAGE_SOURCE_EXCLUDED_PREFIXES = tuple(name + "/" for name in sorted(IMAGE_HOST_STATE_SUBTREES))
-IMAGE_SOURCE_EXCLUDED_PATHS = IMAGE_HOST_STATE_PATHS | {IMAGE_MANIFEST_CARRIER}
+IMAGE_SOURCE_EXCLUDED_PATHS = IMAGE_HOST_STATE_PATHS | {
+    IMAGE_MANIFEST_CARRIER, "tools/monitor-loopback-proxy.py",
+}
 MUTABLE_IMAGE_SOURCE_PATTERNS = (
     re.compile(r"^ztp/config/(?:cumulus|nvos)/default[^/]*[.]yaml$"),
 )
@@ -938,6 +940,8 @@ def _source_record(source_root: Path, relative_name: str) -> dict:
 
 
 def _image_runtime_or_credential_path(relative_name: str) -> bool:
+    if relative_name == "tools/monitor-loopback-proxy.py":
+        return True  # Workstation transport must never reside in a server image.
     if relative_name == CONTAINER_TOPLEVEL_LOCK_NAME:
         return False
     if is_image_host_state_path(relative_name):
@@ -2561,6 +2565,62 @@ def _canonical_regular_within(path: Path, root: Path, label: str) -> Path:
     return resolved
 
 
+def _validate_parent_generated_inputs(project: Path, value: object) -> None:
+    """Validate load's private derived inventory as a project-local authority."""
+    if not isinstance(value, dict) or set(value) != {"effective_devices"}:
+        raise ActivationError("parent generated_inputs must contain only effective_devices")
+    authority = value.get("effective_devices")
+    if not isinstance(authority, dict) or set(authority) != {"path", "sha256"}:
+        raise ActivationError("parent derived inventory authority is invalid")
+    raw_path = authority.get("path")
+    if not isinstance(raw_path, str) or "\\" in raw_path:
+        raise ActivationError("parent derived inventory path is invalid")
+    relative = Path(raw_path)
+    prefix = ".load-inventory-"
+    if (
+        relative.is_absolute()
+        or len(relative.parts) != 2
+        or any(part in {"", ".", ".."} for part in relative.parts)
+        or relative.as_posix() != raw_path
+        or not relative.parts[0].startswith(prefix)
+        or len(relative.parts[0]) == len(prefix)
+        or relative.name != "02-devices_config.csv"
+    ):
+        raise ActivationError("parent derived inventory path is unsafe")
+
+    canonical_project = project.resolve(strict=True)
+    directory = project / relative.parts[0]
+    try:
+        directory_metadata = directory.lstat()
+        canonical_directory = directory.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ActivationError(
+            f"parent derived inventory directory is unsafe: {exc}"
+        ) from exc
+    if (
+        not stat.S_ISDIR(directory_metadata.st_mode)
+        or stat.S_IMODE(directory_metadata.st_mode) != 0o700
+        or canonical_directory != canonical_project / relative.parts[0]
+    ):
+        raise ActivationError(
+            "parent derived inventory directory must be canonical and mode 0700"
+        )
+
+    derived = project / relative
+    canonical = _canonical_regular_within(
+        derived, project, "parent derived inventory",
+    )
+    try:
+        metadata = canonical.lstat()
+    except OSError as exc:
+        raise ActivationError(f"parent derived inventory is unsafe: {exc}") from exc
+    if stat.S_IMODE(metadata.st_mode) != 0o600:
+        raise ActivationError("parent derived inventory must have mode 0600")
+    _hash_matches(
+        canonical, authority.get("sha256"), "parent derived inventory",
+    )
+
+
 def _matching_p2p_input(project: Path, expected: object) -> Path:
     value = str(expected or "").strip().casefold()
     canonical_project = project.resolve(strict=True)
@@ -2637,6 +2697,12 @@ def validate_parent_release(settings: Settings, release_manifest: Path) -> dict:
         "project", "deployment_scope", "switch_scope", "inputs",
         "input_sources", "components", "inventory",
     )
+    has_generated_inputs = "generated_inputs" in parent
+    generated_inputs = parent.get("generated_inputs")
+    if has_generated_inputs:
+        if schema != 2:
+            raise ActivationError("legacy parent release cannot claim generated inputs")
+        basis_keys += ("generated_inputs",)
     if any(key not in parent for key in basis_keys):
         raise ActivationError("parent current release basis is incomplete")
     release_basis = {key: parent[key] for key in basis_keys}
@@ -2682,6 +2748,8 @@ def validate_parent_release(settings: Settings, release_manifest: Path) -> dict:
         )
     project = settings.project_dir
     canonical_project = project.resolve(strict=True)
+    if has_generated_inputs:
+        _validate_parent_generated_inputs(project, generated_inputs)
     fixed = {
         "global": project / "01-global.yaml",
         "devices": project / "02-devices_config.csv",

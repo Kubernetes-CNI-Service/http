@@ -716,6 +716,14 @@ class TemplateContractTests(unittest.TestCase):
         ))
         self.assertNotIn("lldp-analyze-tool/", contract.rsync_excludes())
 
+    def test_loopback_proxy_remains_governed_but_workstation_only(self):
+        contract = load_module("proxy_workstation_contract", ROOT / "tools/project_contract.py")
+        self.assertFalse(contract.is_tools_deployable_file("tools/monitor-loopback-proxy.py"))
+        self.assertEqual("production", contract.path_disposition("tools/monitor-loopback-proxy.py"))
+        self.assertEqual("workstation-only tool", contract.transfer_exclude_reason("tools/monitor-loopback-proxy.py"))
+        self.assertTrue(contract.is_tools_deployable_file("tools/control-auth.py"))
+        self.assertTrue(contract.is_tools_deployable_file("tools/monitor-loopback-proxy-helper.py"))
+
     def test_readmes_are_excluded_from_sync_and_shared_transfer_contract(self):
         contract = load_module(
             "project_contract_readme_exclude", ROOT / "tools/project_contract.py",
@@ -3976,6 +3984,8 @@ class TemplateContractTests(unittest.TestCase):
         self.assertIn("127.0.0.1", html)
         self.assertIn("Host/Origin", html)
         self.assertIn("管理服务器服务 IPv4", html)
+        self.assertIn("if (originDenied", html)
+        self.assertNotIn("if ((transportFailed || originDenied)", html)
         self.assertIn("const payload = await postManualZtpControl(body);", html)
         for request in (
             "requestManualOperation(button, 'trigger')",

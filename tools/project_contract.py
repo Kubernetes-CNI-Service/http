@@ -1258,6 +1258,13 @@ BRINGUP_OUTPUT_SPECS = tuple(
                        ("xdr-initial-setup", "xdr-initial-setup-logs"),
                        ("xdr-upgrade", "xdr-upgrade-logs"))
 )
+# Fixed XDR working inputs resolve through the active repository aliases.  The
+# third field records the project authority for manifest/audit consumers.
+BRINGUP_INPUT_SPECS = (
+    ("infiniband/bringup/xdr-initial-setup/ib.csv", "infiniband/ib.csv", "02-devices_config.csv"),
+    ("infiniband/bringup/xdr-initial-setup/p2p.xlsx", "infiniband/p2p.xlsx", "p2p.xlsx"),
+    ("infiniband/bringup/xdr-upgrade/ib.csv", "infiniband/ib.csv", "02-devices_config.csv"),
+)
 ANALYZER_INPUT_SPECS = (
     ("ztp/config/cumulus/template/P2P/eth-info", "99-output-monitor/ethernet/eth-info"),
     ("ztp/config/nvos/template/P2P/ib-info", "99-output-monitor/infiniband/ib-info"),
@@ -1329,6 +1336,10 @@ def runtime_link_specs():
     project_mappings += [(name, "99-output-p2p") for name in P2P_OUTPUT_PATHS]
     project_mappings += [(P2P_AIR_PATH, "99-output-p2p/p2p-air.json")]
     specs.update((name, _runtime_relative_target(name, target)) for name, target in project_mappings)
+    specs.update(
+        (name, _runtime_relative_target(name, project_target, alias))
+        for name, alias, project_target in BRINGUP_INPUT_SPECS
+    )
     specs.update(("ztp/config/" + platform + "/latest_yaml", "template/" + output + "/latest")
                  for platform, output in LATEST_YAML_SPECS)
     return tuple(sorted(specs.items()))
@@ -1961,6 +1972,7 @@ DEPLOYMENT_CODE_TREE_NAMES = frozenset({
 # DEPLOYABLE_TOOL_SUBTREES lists the small runtime exception.
 # Other subdirectories remain workstation-only analyzers, imports, or samples.
 TOOLS_CODE_SUFFIXES = frozenset({".py", ".sh", ".js", ".cjs", ".mjs"})
+WORKSTATION_ONLY_TOOLS = frozenset({"tools/monitor-loopback-proxy.py"})
 
 MANUAL_BACKUP_PATTERNS = (
     "*_副本.*",
@@ -2114,6 +2126,8 @@ def ztp_prefix_publication_relative(root: Path | str) -> PurePosixPath | None:
 def is_tools_deployable_file(path: PurePosixPath | str) -> bool:
     """Return whether a tools/ source file belongs on a management server."""
     value = PurePosixPath(path)
+    if value.as_posix() in WORKSTATION_ONLY_TOOLS:
+        return False
     if not value.parts or value.parts[0] != "tools":
         return False
     if len(value.parts) > 2:
@@ -2135,6 +2149,8 @@ def is_tools_deployable_file(path: PurePosixPath | str) -> bool:
 def transfer_exclude_reason(path: PurePosixPath | str) -> str | None:
     """Return why a workspace-relative path is not deployable, if applicable."""
     value = PurePosixPath(path)
+    if value.as_posix() in WORKSTATION_ONLY_TOOLS:
+        return "workstation-only tool"
     parts = value.parts
     if (
         len(parts) == 3

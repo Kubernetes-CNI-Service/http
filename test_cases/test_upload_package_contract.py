@@ -726,6 +726,7 @@ class UploadPackageContractTests(unittest.TestCase):
                     "nvlink/monitor/nvsw.csv",
                     "infiniband/bringup/xdr-upgrade/ib.csv",
                     "infiniband/bringup/xdr-initial-setup/ib.csv",
+                    "infiniband/bringup/xdr-initial-setup/p2p.xlsx",
                     "infiniband/bringup/xdr-initial-setup/01-global.yaml",
                 ):
                     with self.subTest(runtime_path=runtime_path):

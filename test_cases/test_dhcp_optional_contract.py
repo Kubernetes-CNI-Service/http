@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
 import importlib.util
+import json
 from pathlib import Path
 from types import SimpleNamespace
 import sys
@@ -59,6 +61,137 @@ def settings_for(status: str):
 
 
 class DhcpOptionalDirectTests(unittest.TestCase):
+    def test_empty_unowned_candidate_requires_proof_before_replacing_old_live_host(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            candidate_dir = directory / "candidate"
+            candidate_dir.mkdir()
+            payloads = {
+                "dhcpd.conf": b"include hosts;\n",
+                "dhcpd_eth.hosts": b"host current-air {}\n",
+                "dhcpd_ib.hosts": b"",
+                "dhcpd_nvl.hosts": b"",
+            }
+            for filename, payload in payloads.items():
+                (candidate_dir / filename).write_bytes(payload)
+            live = directory / "live/dhcpd_ib.hosts"
+            live.parent.mkdir()
+            live.write_bytes(b"host old-ib { hardware ethernet 02:00:00:00:00:01; }\n")
+            before = live.read_bytes(), live.stat().st_ino
+            mappings = {
+                candidate_dir / filename: live.parent / filename
+                for filename in payloads
+            }
+            manifest = {
+                "schema_version": 1, "release_id": "direct-old-live-fixture",
+                "switch_scope": "eth",
+                "counts": {"host_declarations_by_family": {
+                    "eth": 1, "ib": 0, "nvl": 0,
+                }},
+                "outputs": {
+                    filename: {"sha256": hashlib.sha256(payload).hexdigest()}
+                    for filename, payload in payloads.items()
+                },
+            }
+            receipt = candidate_dir / "dhcp-release-manifest.json"
+            receipt.write_text(json.dumps(manifest), encoding="utf-8")
+            LOAD.validate_dhcp_output_sources(mappings)
+            manifest["counts"]["host_declarations_by_family"]["ib"] = 1
+            receipt.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaises(LOAD.LoadError):
+                LOAD.validate_dhcp_output_sources(mappings)
+            manifest["counts"]["host_declarations_by_family"]["ib"] = 0
+            manifest["outputs"]["dhcpd_ib.hosts"]["sha256"] = "0" * 64
+            receipt.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaises(LOAD.LoadError):
+                LOAD.validate_dhcp_output_sources(mappings)
+            self.assertEqual(before, (live.read_bytes(), live.stat().st_ino))
+
+    def test_disabled_preflight_never_requires_missing_dhcp_artifacts(self):
+        disabled = LOAD.replace(settings_for("disabled"), ztp_enabled=False)
+        inputs = SimpleNamespace(settings=disabled)
+        missing = Path("/missing-dhcp-artifacts-for-disabled-contract")
+        mappings = {missing / filename: missing / filename for filename in (
+            "dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts",
+            "dhcpd_nvl.hosts",
+        )}
+        with mock.patch.object(LOAD, "dhcp_file_mappings", return_value=mappings), \
+                mock.patch.object(LOAD, "run") as command:
+            LOAD.preflight_services(
+                inputs, {}, runtime_backend=SimpleNamespace(name="systemd"),
+            )
+            LOAD.preflight_services(
+                inputs, {}, dhcp_runtime_plan=SimpleNamespace(
+                    listener_names=(), endpoint_ips=(),
+                ), runtime_backend=SimpleNamespace(name="supervisor"),
+            )
+            command.assert_not_called()
+        with self.assertRaisesRegex(LOAD.LoadError, "DHCP listener 规划非空"):
+            LOAD.preflight_services(
+                inputs, {}, dhcp_runtime_plan=SimpleNamespace(
+                    listener_names=("eno7",), endpoint_ips=(),
+                ), runtime_backend=SimpleNamespace(name="supervisor"),
+            )
+
+    def test_empty_unowned_host_requires_exact_zero_declaration_receipt(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            names = (
+                "dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts",
+                "dhcpd_nvl.hosts",
+            )
+            mappings = {}
+            for filename in names:
+                source = directory / filename
+                source.write_bytes(
+                    b"" if filename in {"dhcpd_ib.hosts", "dhcpd_nvl.hosts"}
+                    else b"valid generated DHCP text\n"
+                )
+                mappings[source] = directory / "live" / filename
+            manifest_path = directory / "dhcp-release-manifest.json"
+            manifest = {
+                "schema_version": 1, "release_id": "direct-fixture",
+                "switch_scope": "eth",
+                "counts": {"host_declarations_by_family": {
+                    "eth": 1, "ib": 0, "nvl": 0,
+                }},
+                "outputs": {
+                    source.name: {"sha256": hashlib.sha256(source.read_bytes()).hexdigest()}
+                    for source in mappings
+                },
+            }
+
+            def check():
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                LOAD.validate_dhcp_output_sources(mappings)
+
+            check()
+            for mutation in (
+                lambda: manifest.update(switch_scope="ib"),
+                lambda: manifest["counts"]["host_declarations_by_family"].update(ib=1),
+                lambda: manifest["outputs"]["dhcpd_ib.hosts"].update(sha256="0" * 64),
+                lambda: manifest.pop("counts"),
+            ):
+                with self.subTest(mutation=mutation):
+                    candidate = deepcopy(manifest)
+                    mutation()
+                    with self.assertRaises(LOAD.LoadError):
+                        check()
+                    manifest = candidate
+            manifest_path.unlink()
+            with self.assertRaises(LOAD.LoadError):
+                LOAD.validate_dhcp_output_sources(mappings)
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            (directory / "dhcpd.conf").write_bytes(b"")
+            with self.assertRaises(LOAD.LoadError):
+                LOAD.validate_dhcp_output_sources(mappings)
+            (directory / "dhcpd.conf").write_bytes(b"valid generated DHCP text\n")
+            (directory / "dhcpd_eth.hosts").write_bytes(b"")
+            manifest["counts"]["host_declarations_by_family"]["eth"] = 0
+            manifest["outputs"]["dhcpd_eth.hosts"]["sha256"] = hashlib.sha256(b"").hexdigest()
+            with self.assertRaises(LOAD.LoadError):
+                check()
+
     def test_zero_byte_subnet_is_invalid_in_both_dhcp_modes(self):
         with tempfile.TemporaryDirectory() as name:
             subnet = Path(name) / "02-dhcp-subnet_config.csv"

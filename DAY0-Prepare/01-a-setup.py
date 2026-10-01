@@ -61,7 +61,8 @@ from project_contract import (
     managed_infra_log_project,
     infra_log_root_lock, infra_log_pending_state_names,
     P2P_INPUT_PATHS, P2P_OUTPUT_PATHS, P2P_AIR_PATH,
-    BRINGUP_OUTPUT_SPECS, ANALYZER_INPUT_SPECS, ANALYZER_OUTPUT_SPECS,
+    BRINGUP_OUTPUT_SPECS, BRINGUP_INPUT_SPECS,
+    ANALYZER_INPUT_SPECS, ANALYZER_OUTPUT_SPECS,
     NETWORK_MONITOR_SPECS, NETWORK_CSV_MAPPINGS, NETWORK_INVENTORY_LINKS,
     MONITOR_RUNTIME_MAPPINGS, LATEST_YAML_SPECS,
     detect_global_schema_version,
@@ -653,6 +654,20 @@ def _process_bringup_links(proj_dir):
                 print(_c(CYAN, f"  [DRY] mkdir {os.path.relpath(target_path, HERE)}/"))
         else:
             os.makedirs(target_path, exist_ok=True)
+        _make_link(link_path, target_path)
+
+
+def _bringup_input_pairs(_proj_dir):
+    """Return XDR fixed inputs backed by the active repository aliases."""
+    return [
+        (os.path.join(HTTP_BASE, name), os.path.join(HTTP_BASE, alias))
+        for name, alias, _project_target in BRINGUP_INPUT_SPECS
+    ]
+
+
+def _process_bringup_input_links(proj_dir):
+    """Bind XDR tools to the same active inventory/P2P selected by setup."""
+    for link_path, target_path in _bringup_input_pairs(proj_dir):
         _make_link(link_path, target_path)
 
 
@@ -3176,6 +3191,7 @@ def _managed_ztp_link_candidates():
     ])
     paths.extend(P2P_INPUT_LINKS)
     paths.extend(link_path for link_path, _project_rel in BRINGUP_OUTPUT_MAPPINGS)
+    paths.extend(link_path for link_path, _target in _bringup_input_pairs(None))
     paths.extend(link_path for link_path, _project_rel in ANALYZER_INPUT_MAPPINGS)
     paths.extend(link_path for link_path, _project_rel in ANALYZER_OUTPUT_MAPPINGS)
     patterns = [
@@ -3328,6 +3344,7 @@ def _collect_expected_links(proj_dir):
     links.extend(P2P_OUTPUT_LINKS)
     links.append(P2P_AIR_JSON_LINK)
     links.extend(link_path for link_path, _target in _bringup_link_pairs(proj_dir))
+    links.extend(link_path for link_path, _target in _bringup_input_pairs(proj_dir))
     links.extend(link_path for link_path, _target in _analyzer_input_pairs(proj_dir))
     links.extend(link_path for link_path, _target in _analyzer_output_pairs(proj_dir))
 
@@ -4251,6 +4268,9 @@ def _setup_impl(proj_dir, *, server_delegated=False):
 
     print("\n── 网络类型 CSV 链接（ethernet / infiniband / nvlink）────────────")
     _process_net_csv_links(proj_dir)
+
+    print("\n── XDR 固定输入链接 ───────────────────────────────")
+    _process_bringup_input_links(proj_dir)
 
     print("\n── 监控输出链接（采集目录 / 日志 / 汇总页面）────────────────────")
     _process_monitor_links(proj_dir)

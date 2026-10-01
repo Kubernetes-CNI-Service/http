@@ -13,6 +13,14 @@ DAY0 项目完整目录模板说明
 共享镜像/离线包位于 image/ 和 apps/。setup 在 staging 中验证本文件描述的运行链接后原子
 激活项目；load 再负责生成、发布、服务和 worker。不要手工修改 setup 管理的公共链接。
 
+load 不会把本轮 AIR/mini 清单回写客户 02-devices_config.csv。客户可在两次 load 之间
+编辑输入并重跑；同一轮运行期间输入必须保持冻结。AIR 生成在本项目新建权限 700 的
+.load-inventory-* 私有目录，保存仅供本轮使用的派生设备清单；生成和发布消费者显式
+读取它，长期受管链接仍指向客户原输入。parent inputs.devices 绑定客户源摘要，
+generated_inputs.effective_devices 另记派生路径与摘要。DHCP disabled 也派生库存，
+但不生成五个 DHCP 输出。失败清理本轮暂存；已提交 parent 引用的目录须保留，不能
+手工删除或跨工作树链接。独立运行 c1 的交互回写合同不变，load 始终禁用该回写。
+
 本目录是所有 DAY0 真实项目的完整模板。
 
 公开仓库中的本目录只包含不可直接上线的脱敏骨架：192.0.2.0/24、

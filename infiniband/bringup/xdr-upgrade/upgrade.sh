@@ -25,6 +25,9 @@
 
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 BASE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPOSITORY_ROOT=$(cd "${BASE}/../../.." && pwd)
+DEFAULT_IMAGE_ROOT="${REPOSITORY_ROOT}/image"
+DEFAULT_FIRMWARE_ROOT="${REPOSITORY_ROOT}/firmware"
 
 # ─── Configuration ─────────────────────────────────────────────────────────────
 
@@ -33,10 +36,10 @@ METHOD_SELECTION_TIMEOUT=10
 METHOD_SELECTED_INTERACTIVELY=false
 
 MGMT_SERVER=""                # SCP optional override; empty = detect through switch w
-MGMT_SCP_ROOT="$BASE"          # SCP package directory on management server
+MGMT_SCP_ROOT=""               # explicit all-package override; defaults split by package type
 MGMT_SCP_ROOT_EXPLICIT=false
 DEFAULT_MGMT_SCP_USER=$(id -un 2>/dev/null || true)
-LOCAL_SOURCE_ROOT="$BASE"      # local-push package directory on management server
+LOCAL_SOURCE_ROOT=""           # explicit all-package override; defaults split by package type
 SWITCH_LOCAL_DIR="/home/admin" # package directory on switches for local method
 HTTP_SERVER=""               # HTTP optional override; empty = detect through switch w
 HTTP_SCHEME=""               # compatibility selector; canonical transport is METHOD
@@ -153,8 +156,10 @@ Options:
   --public-key FILE   Public key offered for optional installation on all selected switches
   --mgmt-server HOST  Explicit management-server address (default: auto-detect via switch w)
   --mgmt-user USER    Management-server SCP user (default: current id -un user)
-  --scp-root DIR      Package directory (default: directory containing this script)
-  --source-root DIR   Local-push package directory (default: script directory)
+  --scp-root DIR      Override one SCP directory for every package
+                      (default: repository image/ for BIN; firmware/ for CAB/VME)
+  --source-root DIR   Override one local-push directory for every package
+                      (default: repository image/ for BIN; firmware/ for CAB/VME)
   --local-dir DIR     Local/HTTP switch package directory (default: /home/admin)
   --http-server HOST  HTTPS/HTTP server address (default: auto-detect via switch w)
   --http-scheme NAME  Compatibility selector for https or http; prefer --method
@@ -267,11 +272,11 @@ if [[ -n "$MGMT_SERVER" && ! "$MGMT_SERVER" =~ ^[A-Za-z0-9._:-]+$ ]]; then
     echo "Invalid --mgmt-server value." >&2
     exit 1
 fi
-if [[ ! "$MGMT_SCP_ROOT" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
+if [[ -n "$MGMT_SCP_ROOT" && ! "$MGMT_SCP_ROOT" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
     echo "Invalid --scp-root: must be a safe absolute path." >&2
     exit 1
 fi
-if [[ ! "$LOCAL_SOURCE_ROOT" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
+if [[ -n "$LOCAL_SOURCE_ROOT" && ! "$LOCAL_SOURCE_ROOT" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
     echo "Invalid --source-root: must be a safe absolute path." >&2
     exit 1
 fi
@@ -286,6 +291,29 @@ fi
 [[ "$PARALLEL_LIMIT" =~ ^[0-9]+$ ]] || { echo "Invalid --parallel-limit: expected a non-negative integer." >&2; exit 1; }
 [[ "$PHASE_WAIT" =~ ^[0-9]+$ ]] || { echo "Invalid --phase-wait: expected a non-negative integer." >&2; exit 1; }
 $PHASE_WAIT_EXPLICIT && BIOS_PHASE_WAIT="$PHASE_WAIT"
+
+# Resolve management-server packages from the public repository payload
+# directories unless the operator explicitly supplied one legacy all-package
+# root. BIN images and CAB/VME firmware intentionally have separate defaults.
+package_source_path() {
+    local filename method="${2:-$METHOD}" override="" default_root
+    filename=$(basename "$1")
+    case "$method" in
+        scp) override="$MGMT_SCP_ROOT" ;;
+        local) override="$LOCAL_SOURCE_ROOT" ;;
+    esac
+    if [[ -n "$override" ]]; then
+        printf '%s/%s\n' "${override%/}" "$filename"
+        return 0
+    fi
+    case "$filename" in
+        *.bin|*.BIN) default_root="$DEFAULT_IMAGE_ROOT" ;;
+        *.cab|*.CAB|*.vme|*.VME) default_root="$DEFAULT_FIRMWARE_ROOT" ;;
+        *) echo "Unsupported package extension: ${filename}" >&2; return 1 ;;
+    esac
+    printf '%s/%s\n' "$default_root" "$filename"
+}
+
 if ! mkdir -p "$OUTPUT_DIR"; then
     echo "Cannot create local output directory: ${OUTPUT_DIR}" >&2
     exit 1
@@ -1276,9 +1304,10 @@ generate_scripts_scp() {
     mkdir -p "$SCRIPTS_DIR"
 
     # ── OS upgrade scripts (one per entry in TARGET_OS_FILES) ─────────────
-    local os_file os_ver os_script
+    local os_file os_ver os_script os_source
     for os_file in "${TARGET_OS_FILES[@]}"; do
         os_ver=$(os_ver_from_file "$os_file")
+        os_source=$(package_source_path "$os_file" scp) || return 1
         os_script="${SCRIPTS_DIR}/os_upgrade_${os_ver}.sh"
         cat > "$os_script" <<EOF
 #!/bin/bash
@@ -1293,7 +1322,7 @@ exec > >(tee -a "\$SCRIPT_LOG") 2>&1
 JITTER=${OS_DOWNLOAD_JITTER}
 LOCAL_FILE="$(basename "$os_file")"
 $(generated_scp_fetch_helper)
-SOURCE_URI="scp://\${MGMT_SCP_USER}@\${MGMT_SERVER_IP}${MGMT_SCP_ROOT}/${os_file}"
+SOURCE_URI="scp://\${MGMT_SCP_USER}@\${MGMT_SERVER_IP}${os_source}"
 
 if [[ "\${SKIP_OS_JITTER:-0}" != "1" ]] && (( JITTER > 0 )); then
     _delay=\$(( RANDOM % JITTER ))
@@ -1312,9 +1341,10 @@ EOF
     done
 
     # ── BIOS upgrade script ────────────────────────────────────────────────
-    local bios_ver bios_script
+    local bios_ver bios_script bios_source
     bios_ver="$TARGET_BIOS_VERSION"
     bios_script="${SCRIPTS_DIR}/bios_upgrade_${bios_ver}.sh"
+    bios_source=$(package_source_path "$TARGET_BIOS_FILE" scp) || return 1
     cat > "$bios_script" <<EOF
 #!/bin/bash
 # BIOS Upgrade Script — generated by upgrade_via_scp.sh
@@ -1326,7 +1356,7 @@ log() { echo "[\$(date '+%Y-%m-%d %H:%M:%S')] \$*"; }
 exec > >(tee -a "\$SCRIPT_LOG") 2>&1
 LOCAL_FILE="$(basename "$TARGET_BIOS_FILE")"
 $(generated_scp_fetch_helper)
-SOURCE_URI="scp://\${MGMT_SCP_USER}@\${MGMT_SERVER_IP}${MGMT_SCP_ROOT}/${TARGET_BIOS_FILE}"
+SOURCE_URI="scp://\${MGMT_SCP_USER}@\${MGMT_SERVER_IP}${bios_source}"
 
 log "[BIOS] Fetching firmware directly through NVUE: \$SOURCE_URI"
 run_nvue_scp_fetch nv action fetch platform firmware BIOS "\$SOURCE_URI"
@@ -1338,9 +1368,11 @@ EOF
     log "Generated: ${bios_script}  (BIOS: ${bios_ver})"
 
     # ── CPLD upgrade script ────────────────────────────────────────────────
-    local cpld_fui cpld_script
+    local cpld_fui cpld_script burn_source refresh_source
     cpld_fui=$(cpld_fui_from_file "$TARGET_CPLD_BURN_FILE")
     cpld_script="${SCRIPTS_DIR}/cpld_upgrade_${cpld_fui}.sh"
+    burn_source=$(package_source_path "$TARGET_CPLD_BURN_FILE" scp) || return 1
+    refresh_source=$(package_source_path "$TARGET_CPLD_REFRESH_FILE" scp) || return 1
     cat > "$cpld_script" <<EOF
 #!/bin/bash
 # CPLD Upgrade Script — generated by upgrade_via_scp.sh
@@ -1353,8 +1385,8 @@ exec > >(tee -a "\$SCRIPT_LOG") 2>&1
 BURN_LOCAL="$(basename "$TARGET_CPLD_BURN_FILE")"
 REFRESH_LOCAL="$(basename "$TARGET_CPLD_REFRESH_FILE")"
 $(generated_scp_fetch_helper)
-BURN_URI="scp://\${MGMT_SCP_USER}@\${MGMT_SERVER_IP}${MGMT_SCP_ROOT}/${TARGET_CPLD_BURN_FILE}"
-REFRESH_URI="scp://\${MGMT_SCP_USER}@\${MGMT_SERVER_IP}${MGMT_SCP_ROOT}/${TARGET_CPLD_REFRESH_FILE}"
+BURN_URI="scp://\${MGMT_SCP_USER}@\${MGMT_SERVER_IP}${burn_source}"
+REFRESH_URI="scp://\${MGMT_SCP_USER}@\${MGMT_SERVER_IP}${refresh_source}"
 
 log "[CPLD] Fetching BURN firmware directly through NVUE: \$BURN_URI"
 run_nvue_scp_fetch nv action fetch platform firmware CPLD1 "\$BURN_URI"
@@ -1970,10 +2002,11 @@ collect_scp_required_packages() {
 }
 
 missing_required_scp_packages() {
-    local root="$1" package_name missing=false
+    local package_name source_path missing=false
     for package_name in "${_SCP_REQUIRED_PACKAGES[@]}"; do
-        if [[ ! -s "${root}/${package_name}" ]]; then
-            printf '%s\n' "$package_name"
+        source_path=$(package_source_path "$package_name" scp) || return 2
+        if [[ ! -s "$source_path" ]]; then
+            printf '%s\n' "$source_path"
             missing=true
         fi
     done
@@ -1984,9 +2017,9 @@ ensure_scp_package_root() {
     [[ "$METHOD" == "scp" ]] || return 0
     (( ${#_SCP_REQUIRED_PACKAGES[@]} > 0 )) || return 0
     local missing answer
-    missing=$(missing_required_scp_packages "$MGMT_SCP_ROOT") || return 0
+    missing=$(missing_required_scp_packages) || return 0
 
-    printf 'SCP package directory is missing package(s) required by current device versions: %s\n' "$MGMT_SCP_ROOT" >&2
+    printf 'SCP source is missing package(s) required by current device versions:\n' >&2
     printf '%s\n' "$missing" | sed 's/^/  - /' >&2
     if $MGMT_SCP_ROOT_EXPLICIT; then
         die "The explicitly selected --scp-root is missing a required package."
@@ -1998,7 +2031,7 @@ ensure_scp_package_root() {
     [[ -n "$answer" ]] || die "No package directory entered; use --scp-root DIR."
     [[ "$answer" =~ ^/[A-Za-z0-9._/-]+$ ]] || die "Package directory must be a safe absolute path."
     MGMT_SCP_ROOT="$answer"
-    missing=$(missing_required_scp_packages "$MGMT_SCP_ROOT") || {
+    missing=$(missing_required_scp_packages) || {
         log "Using SCP package directory: ${MGMT_SCP_ROOT}"
         return 0
     }
@@ -2012,7 +2045,7 @@ ensure_remote_package_local() {
     local package_name package_path source_path delay
     package_name=$(basename "$filename")
     package_path="${SWITCH_LOCAL_DIR}/${package_name}"
-    source_path="${LOCAL_SOURCE_ROOT}/${package_name}"
+    source_path=$(package_source_path "$package_name" local) || return 1
 
     if ssh_with_auth "${SWITCH_USER}@${host}" "test -s '${package_path}'" </dev/null 2>/dev/null; then
         log "[${host}] ${label} package already exists; reusing ${package_path}"
@@ -2049,7 +2082,7 @@ method_prepare_package() {
     case "$METHOD" in
         local)
             if $DRY_RUN; then
-                source="${LOCAL_SOURCE_ROOT}/$(basename "$filename")"
+                source=$(package_source_path "$filename" local) || return 1
                 if ssh_with_auth "${SWITCH_USER}@${host}" "test -s '${SWITCH_LOCAL_DIR}/$(basename "$filename")'" </dev/null 2>/dev/null; then
                     _PACKAGE_STATUS="package=present"
                     return 0
@@ -2061,7 +2094,7 @@ method_prepare_package() {
             prepare_package_local "$host" "$filename" "$label" "$mode"
             ;;
         scp)
-            source="${MGMT_SCP_ROOT}/$(basename "$filename")"
+            source=$(package_source_path "$filename" scp) || return 1
             [[ -s "$source" ]] || { log "[${host}] ERROR: Required SCP source package disappeared or is empty: ${source}"; return 1; }
             $DRY_RUN && _PACKAGE_STATUS="source package=available"
             return 0
@@ -2614,13 +2647,16 @@ main() {
         log "Package method:    ${METHOD}"
         case "$METHOD" in
         scp)
+            local scp_source_label="${MGMT_SCP_ROOT:-BIN=${DEFAULT_IMAGE_ROOT}; CAB/VME=${DEFAULT_FIRMWARE_ROOT}}"
             if [[ -n "$MGMT_SERVER" ]]; then
-                log "SCP package source: ${MGMT_SERVER}:${MGMT_SCP_ROOT} (explicit address)"
+                log "SCP package source: ${MGMT_SERVER}:${scp_source_label} (explicit address)"
             else
-                log "SCP package source: <auto-detect from switch w>:${MGMT_SCP_ROOT}"
+                log "SCP package source: <auto-detect from switch w>:${scp_source_label}"
             fi
             ;;
-        local) log "Local-push source: ${LOCAL_SOURCE_ROOT}; switch package directory: ${SWITCH_LOCAL_DIR}" ;;
+        local)
+            log "Local-push source: ${LOCAL_SOURCE_ROOT:-BIN=${DEFAULT_IMAGE_ROOT}; CAB/VME=${DEFAULT_FIRMWARE_ROOT}}; switch package directory: ${SWITCH_LOCAL_DIR}"
+            ;;
         https)
             if [[ -n "$HTTP_SERVER" ]]; then
                 log "HTTPS package source: https://${HTTP_SERVER} (explicit address; direct NVUE fetch)"

@@ -243,3 +243,4 @@ ztp/ztp.json/**
 **/__pycache__/**
 **/*.pyc
 **/.DS_Store
+tools/monitor-loopback-proxy.py

@@ -407,6 +407,17 @@ class PublicRepositoryAuditContractTest(unittest.TestCase):
         self.write("src/payload.dat", b"safe-prefix\x00binary-tail")
         self.assert_rejected(self.audit(), "binary-content")
 
+    def test_public_package_directories_admit_only_their_readme_sentinels(self):
+        self.write("image/README.md", "# Switch images\n\nPayloads stay local.\n")
+        self.write("firmware/README.md", "# Switch firmware\n\nPayloads stay local.\n")
+        self.assertEqual(0, self.audit().returncode)
+
+        self.write("image/switch.bin", b"synthetic payload")
+        self.assert_rejected(self.audit(), "field-path")
+        (self.root / "image/switch.bin").unlink()
+        self.write("firmware/switch.cab", b"synthetic payload")
+        self.assert_rejected(self.audit(), "field-path")
+
     def test_blob_larger_than_five_mib_is_rejected(self):
         target = self.write("src/large.dat", b"")
         with target.open("wb") as handle:
@@ -703,6 +714,21 @@ class PublicRepositoryAuditContractTest(unittest.TestCase):
 
 
 class PublicRepositoryWorkflowContractTest(unittest.TestCase):
+    def test_public_package_readmes_are_publishable_while_payloads_stay_ignored(self):
+        for relative in ("image/README.md", "firmware/README.md"):
+            self.assertTrue((ROOT / relative).is_file(), relative)
+            result = subprocess.run(
+                ["git", "-C", str(ROOT), "check-ignore", "--no-index", "--quiet", "--", relative],
+                check=False,
+            )
+            self.assertEqual(1, result.returncode, relative)
+        for relative in ("image/example.bin", "firmware/example.cab", "firmware/example.vme"):
+            result = subprocess.run(
+                ["git", "-C", str(ROOT), "check-ignore", "--no-index", "--quiet", "--", relative],
+                check=False,
+            )
+            self.assertEqual(0, result.returncode, relative)
+
     def test_owner_held_live_only_paths_are_ignored_by_git_preflight(self):
         """Leave owner files in place while keeping Git's untracked scan clean."""
         ignore_payload = (ROOT / ".gitignore").read_text(encoding="utf-8")

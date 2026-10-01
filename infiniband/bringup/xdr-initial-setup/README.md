@@ -200,6 +200,8 @@ python3 initial-setup.py --plan
 `--generate-json` 不能与 `--plan` 或 `--apply` 同时使用。旧名称
 `--generate-json-only` 继续兼容，但新操作文档统一使用 `--generate-json`。
 
+DAY0 setup 会在本目录创建受管 `ib.csv` 和 `p2p.xlsx` 链接，分别通过仓库活动入口
+`infiniband/ib.csv`、`infiniband/p2p.xlsx` 指向当前项目。因此进入脚本目录后无需再传输入参数。
 默认从执行命令的当前目录自动查找输入：CSV 优先使用 `ib.csv`，XLSX 优先使用
 `p2p.xlsx`；标准文件名不存在时，分别接受唯一的 `.csv` 和唯一的 `.xlsx`。查找不递归，
 并忽略隐藏文件、Excel `~$` 临时文件以及名称包含 `TBD` 的文件。如果同类型存在多个

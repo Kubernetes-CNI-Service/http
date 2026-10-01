@@ -5478,6 +5478,81 @@ def require_active_project(project: Path) -> None:
     )
 
 
+def _validate_release_generated_inputs(project: Path, value: object) -> None:
+    """Bind monitor reports to load's private effective inventory bytes."""
+    if not isinstance(value, dict) or set(value) != {"effective_devices"}:
+        raise ValueError("current release 派生 inventory 结构无效")
+    authority = value.get("effective_devices")
+    if not isinstance(authority, dict) or set(authority) != {"path", "sha256"}:
+        raise ValueError("current release 派生 inventory authority 无效")
+    raw_path = authority.get("path")
+    if not isinstance(raw_path, str) or "\\" in raw_path:
+        raise ValueError("current release 派生 inventory 路径无效")
+    relative = Path(raw_path)
+    prefix = ".load-inventory-"
+    if (
+        relative.is_absolute()
+        or len(relative.parts) != 2
+        or any(part in {"", ".", ".."} for part in relative.parts)
+        or relative.as_posix() != raw_path
+        or not relative.parts[0].startswith(prefix)
+        or len(relative.parts[0]) == len(prefix)
+        or relative.name != "02-devices_config.csv"
+    ):
+        raise ValueError("current release 派生 inventory 路径不安全")
+
+    canonical_project = project.resolve(strict=True)
+    directory = project / relative.parts[0]
+    derived = project / relative
+    try:
+        directory_before = directory.lstat()
+        derived_before = derived.lstat()
+        if (
+            directory.resolve(strict=True)
+            != canonical_project / relative.parts[0]
+            or derived.resolve(strict=True)
+            != canonical_project.joinpath(*relative.parts)
+        ):
+            raise ValueError("current release 派生 inventory 不是 canonical 路径")
+    except OSError as exc:
+        raise ValueError(f"current release 派生 inventory 无法读取: {exc}") from exc
+    if (
+        not stat.S_ISDIR(directory_before.st_mode)
+        or stat.S_IMODE(directory_before.st_mode) != 0o700
+    ):
+        raise ValueError("current release 派生 inventory 目录必须是 mode 0700")
+    if (
+        not stat.S_ISREG(derived_before.st_mode)
+        or derived_before.st_nlink != 1
+        or derived_before.st_size <= 0
+        or stat.S_IMODE(derived_before.st_mode) != 0o600
+    ):
+        raise ValueError(
+            "current release 派生 inventory 必须是 mode 0600 single-link 普通文件"
+        )
+    text = _read_bounded_regular_text(
+        derived, label="current release 派生 inventory",
+        max_bytes=64 * 1024 * 1024,
+    )
+    try:
+        if (
+            _file_identity(directory.lstat()) != _file_identity(directory_before)
+            or _file_identity(derived.lstat()) != _file_identity(derived_before)
+        ):
+            raise ValueError("current release 派生 inventory 在读取期间发生变化")
+    except OSError as exc:
+        raise ValueError(
+            f"current release 派生 inventory 在读取后无法复验: {exc}"
+        ) from exc
+    expected = authority.get("sha256")
+    if (
+        not isinstance(expected, str)
+        or re.fullmatch(r"[0-9a-f]{64}", expected) is None
+        or hashlib.sha256(text.encode("utf-8")).hexdigest() != expected
+    ):
+        raise ValueError("current release 派生 inventory SHA-256 漂移")
+
+
 def load_release_identity(project: Path) -> dict[str, str]:
     """Load the content-addressed release named by a monitor report."""
     path = project / "99-output-ztp/current-release.json"
@@ -5520,6 +5595,14 @@ def load_release_identity(project: Path) -> dict[str, str]:
     )
     if schema == 2:
         basis_keys += ("dhcp_status",)
+    has_generated_inputs = "generated_inputs" in payload
+    generated_inputs = payload.get("generated_inputs")
+    if has_generated_inputs:
+        if schema != 2:
+            raise ValueError(
+                f"current release legacy v1 不允许 generated_inputs: {path}"
+            )
+        basis_keys += ("generated_inputs",)
     if any(key not in payload for key in basis_keys):
         raise ValueError(f"current release canonical basis 不完整: {path}")
     expected_id = hashlib.sha256(json.dumps(
@@ -5528,6 +5611,8 @@ def load_release_identity(project: Path) -> dict[str, str]:
     ).encode("utf-8")).hexdigest()[:20]
     if payload.get("release_id") != expected_id:
         raise ValueError(f"current release canonical release_id 无效: {path}")
+    if has_generated_inputs:
+        _validate_release_generated_inputs(project, generated_inputs)
     global_text = _read_bounded_regular_text(
         project / "01-global.yaml", label="current global YAML",
     )

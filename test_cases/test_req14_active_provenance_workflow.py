@@ -97,6 +97,26 @@ def _sha(path: Path) -> str:
 
 
 class Req14ActiveProvenanceWorkflow(unittest.TestCase):
+    def test_inventory_authority_preserves_customer_0664_but_rejects_it_for_derived(self):
+        """Only load's private generated inventory requires owner-only writes."""
+        with tempfile.TemporaryDirectory() as name:
+            project = Path(name) / "project"
+            project.mkdir()
+            customer = project / "02-devices_config.csv"
+            customer.write_text("hostname,type\nleaf01,eth\n", encoding="utf-8")
+            customer.chmod(0o664)
+            path, identity = LOAD._project_inventory_authority(project, customer)
+            self.assertEqual("02-devices_config.csv", path)
+            self.assertEqual(_sha(customer), identity["sha256"])
+
+            private = project / ".load-inventory-test"
+            private.mkdir(mode=0o700)
+            derived = private / "02-devices_config.csv"
+            derived.write_bytes(customer.read_bytes())
+            derived.chmod(0o664)
+            with self.assertRaisesRegex(LOAD.LoadError, "single-link"):
+                LOAD._project_inventory_authority(project, derived)
+
     def test_real_environment_card_distinguishes_private_positive_from_acceptance(self):
         card = (ROOT / "test_cases/REAL_ENVIRONMENT.md").read_text(encoding="utf-8")
         section = card.split(
@@ -522,6 +542,88 @@ class Req14ActiveProvenanceWorkflow(unittest.TestCase):
                         self.assertFalse(candidate.destination.exists())
                     finally:
                         LOAD.discard_prepared_release(candidate)
+
+    def test_parent_rechecks_nested_effective_inventory_at_atomic_commit(self):
+        """The precommit guard must reopen the exact private derived CSV."""
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            paths = self._fixture(root)
+            project, template, devices_file, inputs = self._private_parent_inputs(
+                root, paths,
+            )
+            production = template / "99-output/20260915_120000"
+            self._run_three_scripts(root, paths, legacy=True, output=production)
+            context = PUBLISHER._cumulus_dir_context(str(production))
+            with mock.patch.object(PUBLISHER, "_AUTO_YES", True), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertTrue(PUBLISHER._publish_production_cumulus(
+                    context, PUBLISHER.load_csv(devices_file),
+                    switch_scope="eth",
+                ))
+
+            private = project / ".load-inventory-test"
+            private.mkdir(mode=0o700)
+            effective = private / "02-devices_config.csv"
+            effective.write_bytes(devices_file.read_bytes())
+            effective.chmod(0o600)
+            release = (root / "ztp/config/cumulus/latest_yaml").resolve(strict=True)
+            manifest = json.loads((release / "release-manifest.json").read_text())
+
+            with mock.patch.object(LOAD, "ZTP_DIR", root / "ztp"):
+                parent = LOAD.validate_and_publish_release(
+                    project, inputs, publish=False,
+                )
+                provenance = LOAD._current_splitter_provenance(
+                    project, effective, inputs.p2p_file, release, manifest,
+                    inputs.settings.schema_version,
+                )
+                self.assertIsNotNone(provenance)
+                self.assertEqual(
+                    ".load-inventory-test/02-devices_config.csv",
+                    provenance["devices_path"],
+                )
+                self.assertEqual(_sha(effective), provenance["devices_sha256"])
+                parent["components"]["cumulus"]["splitter_provenance"] = provenance
+                candidate = LOAD.prepare_current_release(project, parent)
+                try:
+                    effective.write_bytes(effective.read_bytes() + b"\n")
+                    with self.assertRaisesRegex(
+                        LOAD.LoadError, "provenance|devices|inventory|changed|\u53d8\u5316",
+                    ):
+                        LOAD.commit_prepared_release(candidate)
+                    self.assertFalse(candidate.committed)
+                    self.assertFalse(candidate.destination.exists())
+                finally:
+                    LOAD.discard_prepared_release(candidate)
+
+    def test_splitter_effective_inventory_must_be_inside_project(self):
+        """A private generated authority cannot escape the project root."""
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            paths = self._fixture(root)
+            project, template, devices_file, inputs = self._private_parent_inputs(
+                root, paths,
+            )
+            production = template / "99-output/20260915_120000"
+            self._run_three_scripts(root, paths, legacy=True, output=production)
+            context = PUBLISHER._cumulus_dir_context(str(production))
+            with mock.patch.object(PUBLISHER, "_AUTO_YES", True), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertTrue(PUBLISHER._publish_production_cumulus(
+                    context, PUBLISHER.load_csv(devices_file),
+                    switch_scope="eth",
+                ))
+            outside = root / "outside-devices.csv"
+            outside.write_bytes(devices_file.read_bytes())
+            outside.chmod(0o600)
+            release = (root / "ztp/config/cumulus/latest_yaml").resolve(strict=True)
+            manifest = json.loads((release / "release-manifest.json").read_text())
+            with mock.patch.object(LOAD, "ZTP_DIR", root / "ztp"), \
+                    self.assertRaisesRegex(LOAD.LoadError, "project|\u9879\u76ee"):
+                LOAD._current_splitter_provenance(
+                    project, outside, inputs.p2p_file, release, manifest,
+                    inputs.settings.schema_version,
+                )
 
     def test_explicit_legacy_flag_reaches_bound_sidecar_and_four_real_renderers(self):
         with tempfile.TemporaryDirectory() as name:

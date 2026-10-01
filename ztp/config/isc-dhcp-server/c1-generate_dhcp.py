@@ -12,7 +12,11 @@ infra/docker/deploy.sh deploy-preloaded <IMAGE_ID>。Docker load 仅用于没有
 
 用法：
   python3 c1-generate_dhcp.py [-y] [--deployment-scope all|prod|air]
-      [--switch eth|ib|nvl]
+      [--switch eth|ib|nvl] [--inventory-output PATH] [--inventory-only]
+
+--inventory-output 在新文件中派生本轮 AIR 清单，保持客户 CSV 不变。
+--inventory-only 只派生清单，不读取或改写五个 DHCP 输出，必须同时指定输出路径。
+--preserve-input-csv 禁止独立候选生成后的客户 CSV 回写；11-load 始终传入此参数。
 
 默认 `all` 同时生成 Production 与 AIR host；`prod` 排除 AIR，`air` 只生成 AIR host。
 `--switch` 只保留对应平台族；AIR 未指定时由 11-load 默认选择 eth。
@@ -1572,11 +1576,23 @@ def main():
         args = [a for a in args if a != "-y"]
     deployment_scope = "all"
     switch_scope = "all"
+    inventory_output = None
+    inventory_only = False
+    preserve_input_csv = False
     remaining = []
     index = 0
     while index < len(args):
         argument = args[index]
-        if argument.startswith("--deployment-scope="):
+        if argument == "--inventory-output":
+            index += 1
+            if index >= len(args):
+                raise ValueError("--inventory-output requires a new file path")
+            inventory_output = args[index]
+        elif argument == "--inventory-only":
+            inventory_only = True
+        elif argument == "--preserve-input-csv":
+            preserve_input_csv = True
+        elif argument.startswith("--deployment-scope="):
             deployment_scope = argument.split("=", 1)[1]
         elif argument == "--deployment-scope":
             index += 1
@@ -1596,6 +1612,8 @@ def main():
             remaining.append(argument)
         index += 1
     args = remaining
+    if inventory_only and inventory_output is None:
+        raise ValueError("--inventory-only requires --inventory-output")
     if deployment_scope not in {"all", "prod", "air"}:
         print(
             f"[ERROR] unsupported deployment scope: {deployment_scope!r}",
@@ -1706,6 +1724,21 @@ def main():
             )
     else:
         print(f"[INFO] 当前目录未找到 {os.path.basename(P2P_AIR_JSON)}，跳过 AIR 节点")
+
+    if inventory_output is not None:
+        # Exclusive creation prevents replacing customer files or following a
+        # pre-existing output symlink. The load owner supplies a private directory.
+        with open(DEVICES_CSV, "rb") as source:
+            payload = source.read()
+        descriptor = os.open(inventory_output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+        if (switch_scope in {"all", "eth"} and deployment_scope != "prod"
+                and os.path.isfile(P2P_AIR_JSON)):
+            append_air_records_to_csv(inventory_output, air_records, subnets,
+                                      production_path=DEVICES_CSV)
+        if inventory_only:
+            return
 
     selected_records = records_for_release_scope(
         all_records,
@@ -1825,7 +1858,8 @@ def main():
                 )
                 for r in eth_records if not r.get("identity_pending")
             }
-            if deployment_scope != "prod" and os.path.isfile(P2P_AIR_JSON):
+            if (not preserve_input_csv and inventory_output is None and deployment_scope != "prod"
+                    and os.path.isfile(P2P_AIR_JSON)):
                 print(
                     f"\n检测到 {len(generated_air)} 台 AIR Cumulus 设备已写入 "
                     "dhcpd_eth.hosts。"

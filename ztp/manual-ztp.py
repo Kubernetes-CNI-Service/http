@@ -19,7 +19,7 @@ import ipaddress
 import json
 import math
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shlex
 import stat
@@ -254,6 +254,59 @@ def require_bound_regular_file(path: Path, label: str) -> None:
         raise ManualZtpError(
             f"{label} 必须是非符号链接、单硬链接的普通文件: {path}"
         )
+
+
+def validate_derived_inventory(project: Path, generated: object) -> tuple[Path, str]:
+    """Validate the private generated authority before trusting its release hash."""
+    try:
+        if not isinstance(generated, dict) or set(generated) != {"effective_devices"}:
+            raise ValueError("invalid generated inputs")
+        authority = generated["effective_devices"]
+        if not isinstance(authority, dict) or set(authority) != {"path", "sha256"}:
+            raise ValueError("invalid authority")
+        relative, expected = authority["path"], authority["sha256"]
+        if not isinstance(relative, str) or not isinstance(expected, str):
+            raise ValueError("invalid authority values")
+        path = PurePosixPath(relative)
+        prefix = ".load-inventory-"
+        if (path.is_absolute() or len(path.parts) != 2 or ".." in path.parts
+                or "\\" in relative or path.as_posix() != relative
+                or not path.parts[0].startswith(prefix) or len(path.parts[0]) == len(prefix)
+                or path.name != "02-devices_config.csv"
+                or not re.fullmatch(r"[0-9a-f]{64}", expected)):
+            raise ValueError("unsafe path or digest")
+        canonical_project = project.resolve(strict=True)
+        current = canonical_project / path.parts[0]
+        directory_before = current.lstat()
+        if (not stat.S_ISDIR(directory_before.st_mode)
+                or stat.S_IMODE(directory_before.st_mode) != 0o700
+                or current.resolve(strict=True) != current):
+            raise ValueError("unsafe private directory")
+        source = current / path.name
+        if source.resolve(strict=True) != source:
+            raise ValueError("aliased inventory")
+        descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "rb") as stream:
+            before = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                    or stat.S_IMODE(before.st_mode) != 0o600
+                    or not 0 < before.st_size <= 64 * 1024 * 1024):
+                raise ValueError("unsafe file identity or mode")
+            content = stream.read(64 * 1024 * 1024 + 1)
+            if len(content) != before.st_size:
+                raise ValueError("inventory size changed")
+            digest = hashlib.sha256(content).hexdigest()
+            after = os.fstat(stream.fileno())
+        identity = lambda item: (item.st_dev, item.st_ino, item.st_size, item.st_mtime_ns,
+                                 item.st_ctime_ns, item.st_mode, item.st_nlink)
+        if (identity(before) != identity(after) or identity(after) != identity(source.lstat())
+                or identity(directory_before) != identity(current.lstat())):
+            raise ValueError("file changed while reading")
+        if digest != expected:
+            raise ValueError("content hash changed")
+        return source, expected
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
+        raise ManualZtpError(f"derived inventory authority invalid: {exc}") from exc
 
 
 def normalize_mac(value: str) -> str:
@@ -622,6 +675,11 @@ def validate_parent_release_binding(project: Path, device: dict) -> dict[str, st
         parent_dhcp_status = parent.get("dhcp_status")
         if parent_dhcp_status not in {"enabled", "disabled"}:
             raise ManualZtpError("统一 current-release DHCP status 无效")
+    derived_binding = None
+    if "generated_inputs" in parent:
+        if schema != 2:
+            raise ManualZtpError("derived inventory requires schema 2 parent")
+        derived_binding = validate_derived_inventory(project, parent["generated_inputs"])
     release_basis = {
         "project": parent.get("project"),
         "deployment_scope": parent.get("deployment_scope", "all"),
@@ -633,6 +691,8 @@ def validate_parent_release_binding(project: Path, device: dict) -> dict[str, st
     }
     if schema == 2:
         release_basis["dhcp_status"] = parent_dhcp_status
+    if derived_binding is not None:
+        release_basis["generated_inputs"] = parent["generated_inputs"]
     calculated_release_id = hashlib.sha256(
         json.dumps(
             release_basis, ensure_ascii=False, sort_keys=True,
@@ -819,6 +879,9 @@ def validate_parent_release_binding(project: Path, device: dict) -> dict[str, st
         key = name.replace(".", "_")
         binding[f"dhcp_output_{key}_path"] = str(output_path)
         binding[f"dhcp_output_{key}_sha256"] = output_hash
+    if derived_binding is not None:
+        binding["effective_devices_path"] = str(derived_binding[0])
+        binding["effective_devices_sha256"] = derived_binding[1]
     binding["binding_sha256"] = hashlib.sha256(
         json.dumps(binding, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
@@ -827,6 +890,15 @@ def validate_parent_release_binding(project: Path, device: dict) -> dict[str, st
 
 def verify_prepared_release_binding(prepared: dict) -> None:
     """Recheck every committed release artifact immediately before mutation."""
+    if "effective_devices_path" in prepared or "effective_devices_sha256" in prepared:
+        try:
+            project = Path(prepared["parent_manifest_path"]).parent.parent
+            relative = Path(prepared["effective_devices_path"]).relative_to(project).as_posix()
+            validate_derived_inventory(project, {"effective_devices": {
+                "path": relative, "sha256": prepared["effective_devices_sha256"],
+            }})
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ManualZtpError(f"derived inventory prepared binding invalid: {exc}") from exc
     dhcp_status = prepared.get("dhcp_status")
     if dhcp_status not in {"enabled", "disabled"}:
         raise ManualZtpError("确认后 release DHCP status 无效")

@@ -1274,6 +1274,120 @@ class SetupUnloadAndTransportTests(unittest.TestCase):
                     self.assertEqual(target, os.readlink(alias))
                     self.assertEqual(inventory.resolve(), alias.resolve(strict=True))
 
+    def test_setup_recreates_xdr_fixed_inputs_from_active_aliases(self):
+        expected = {
+            "infiniband/bringup/xdr-initial-setup/ib.csv": "../../ib.csv",
+            "infiniband/bringup/xdr-initial-setup/p2p.xlsx": "../../p2p.xlsx",
+            "infiniband/bringup/xdr-upgrade/ib.csv": "../../ib.csv",
+        }
+        runtime_specs = dict(sys.modules["project_contract"].runtime_link_specs())
+        for relative, target in expected.items():
+            self.assertEqual(target, runtime_specs.get(relative))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / "DAY0-Prepare/project"
+            project.mkdir(parents=True)
+            inventory = project / "02-devices_config.csv"
+            workbook = project / "p2p.xlsx"
+            inventory.write_text("hostname,type\nib01,ib\n", encoding="utf-8")
+            workbook.write_bytes(b"xlsx fixture")
+            infiniband = root / "infiniband"
+            infiniband.mkdir()
+            (infiniband / "ib.csv").symlink_to(
+                os.path.relpath(inventory, infiniband),
+            )
+            (infiniband / "p2p.xlsx").symlink_to(
+                os.path.relpath(workbook, infiniband),
+            )
+            for tool in ("xdr-initial-setup", "xdr-upgrade"):
+                (infiniband / "bringup" / tool).mkdir(parents=True)
+
+            with mock.patch.multiple(
+                SETUP, HTTP_BASE=str(root), _DRY_RUN=False, _LINK_ERRORS=0,
+            ):
+                managed = set(SETUP._collect_expected_links(str(project)))
+                SETUP._process_bringup_input_links(str(project))
+
+            self.assertTrue(
+                {os.fspath(root / relative) for relative in expected} <= managed,
+            )
+            for relative, target in expected.items():
+                with self.subTest(alias=relative):
+                    alias = root / relative
+                    self.assertTrue(alias.is_symlink())
+                    self.assertEqual(target, os.readlink(alias))
+                    authority = inventory if alias.name == "ib.csv" else workbook
+                    self.assertEqual(authority.resolve(), alias.resolve(strict=True))
+
+            initial = load_module(
+                "ops_review_xdr_initial_inputs",
+                ROOT / "infiniband/bringup/xdr-initial-setup/initial-setup.py",
+            )
+            initial_tool = root / "infiniband/bringup/xdr-initial-setup"
+            with mock.patch.object(initial.Path, "cwd", return_value=initial_tool):
+                self.assertEqual(
+                    inventory.resolve(),
+                    initial.discover_input_file(None, "ib.csv", ".csv", "IB CSV"),
+                )
+                self.assertEqual(
+                    workbook.resolve(),
+                    initial.discover_input_file(None, "p2p.xlsx", ".xlsx", "P2P"),
+                )
+
+            next_project = root / "DAY0-Prepare/next"
+            next_project.mkdir()
+            next_inventory = next_project / "02-devices_config.csv"
+            next_workbook = next_project / "p2p.xlsx"
+            next_inventory.write_text("hostname,type\nib02,ib\n", encoding="utf-8")
+            next_workbook.write_bytes(b"next xlsx fixture")
+            for name, authority in (("ib.csv", next_inventory), ("p2p.xlsx", next_workbook)):
+                active = infiniband / name
+                active.unlink()
+                active.symlink_to(os.path.relpath(authority, infiniband))
+            with mock.patch.multiple(
+                SETUP, HTTP_BASE=str(root), _DRY_RUN=False,
+                _AUTO_YES=True, _LINK_ERRORS=0,
+            ):
+                SETUP._process_bringup_input_links(str(next_project))
+            for relative in expected:
+                alias = root / relative
+                authority = next_inventory if alias.name == "ib.csv" else next_workbook
+                self.assertEqual(authority.resolve(), alias.resolve(strict=True))
+
+    def test_xdr_input_links_participate_in_setup_rollback_and_unsetup(self):
+        relatives = (
+            "infiniband/bringup/xdr-initial-setup/ib.csv",
+            "infiniband/bringup/xdr-initial-setup/p2p.xlsx",
+            "infiniband/bringup/xdr-upgrade/ib.csv",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            old = root / "DAY0-Prepare/old"
+            new = root / "DAY0-Prepare/new"
+            old.mkdir(parents=True)
+            new.mkdir()
+            paths = []
+            for relative in relatives:
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.symlink_to(os.path.relpath(old / path.name, path.parent))
+                paths.append(path)
+            with mock.patch.multiple(
+                SETUP, HTTP_BASE=str(root), MANIFEST_FILE=str(root / ".setup_manifest"),
+            ):
+                transaction = SETUP._SetupLinkTransaction(paths)
+                for path in paths:
+                    path.unlink()
+                    path.symlink_to(os.path.relpath(new / path.name, path.parent))
+                transaction.rollback()
+            for path in paths:
+                self.assertTrue(path.is_symlink())
+                self.assertEqual((old / path.name).resolve(strict=False), path.resolve(strict=False))
+
+            with mock.patch.object(UNSETUP, "HTTP_BASE", str(root)):
+                known = set(UNSETUP._known_workspace_links())
+            self.assertTrue({os.fspath(path) for path in paths} <= known)
+
     def test_upload_omits_monitor_aliases_and_setup_recreates_them_before_collection(
         self,
     ):

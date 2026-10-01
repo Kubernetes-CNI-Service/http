@@ -98,6 +98,20 @@ class AirLinkEndpointDirectTests(unittest.TestCase):
 
 
 class AirLinkEndpointWorkflowTests(unittest.TestCase):
+    def test_air_generation_uses_explicit_csv_not_stale_default(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _air_json, sources, bindings = self.fixture(root)
+            default = Path(bindings["SCRIPT_DIR"]) / "02-devices_config.csv"
+            default.write_text("hostname,type,template\nAIR-stale,air,leaf\n")
+            effective = root / "effective.csv"
+            effective.write_text("hostname,type,template\n")
+            bindings["_CSV_FILE"] = str(effective)
+            with mock.patch.multiple(GENERATOR, **bindings), redirect_stdout(io.StringIO()):
+                GENERATOR.generate_air_hostname_configs(str(sources), str(root / "air"))
+            self.assertTrue((root / "air/AIR-fw-01.yaml").is_file())
+            self.assertEqual("hostname,type,template\nAIR-stale,air,leaf\n", default.read_text())
+
     def test_every_shared_loader_keeps_real_lazy_air_import_reachable(self):
         from test_cases.test_qos_evpn_uplink_generation import load_script as qos_load
         from test_cases.test_mlag_evpn_generation import load_script as mlag_load
@@ -167,6 +181,7 @@ class AirLinkEndpointWorkflowTests(unittest.TestCase):
         sources = root / "production"
         sources.mkdir()
         bindings = dict(SCRIPT_DIR=str(template), _GLOBAL_FILE=str(global_file),
+                        _CSV_FILE=str(template / "02-devices_config.csv"),
                         P2P_INPUT_DIR=str(p2p), P2P_OUTPUT_DIR=str(output))
         return air_json, sources, bindings
 

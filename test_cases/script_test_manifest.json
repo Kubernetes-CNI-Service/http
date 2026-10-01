@@ -71,6 +71,7 @@
         "test_cases.test_http_port_contract",
         "test_cases.test_http_port_workflow",
         "test_cases.test_docker_management_ssh_key",
+        "test_cases.test_docker_derived_parent_activation",
         "test_cases.test_dhcp_optional_contract",
         "test_cases.test_dhcp_optional_workflow",
         "test_cases.test_eth_jump_transport_contract",
@@ -152,6 +153,11 @@
         "test_cases.test_continuous_interval_handoff_workflow",
         "test_cases.test_ib_analysis_domain",
         "test_cases.test_manual_applied_config",
+        "test_cases.test_monitor_derived_parent_release",
+        "test_cases.test_monitor_failure_detail_ui",
+        "test_cases.test_monitor_failure_detail_workflow",
+        "test_cases.test_monitor_loopback_proxy",
+        "test_cases.test_monitor_loopback_proxy_workflow",
         "test_cases.test_monitor_stack_review",
         "test_cases.test_ztp_monitor_watch_resilience",
         "test_cases.test_ztp_monitor_watch_runtime_workflow",
@@ -491,6 +497,7 @@
     "tools/lldp-analyze-tool/analyze_lldp.py": "tools/lldp-analyze-tool/analyze_lldp.py",
     "tools/lldp-analyze-tool/build_report.py": "tools/lldp-analyze-tool/build_report.py",
     "tools/password-update.py": "tools/password-update.py",
+    "tools/monitor-loopback-proxy.py": "tools/monitor-loopback-proxy.py",
     "tools/pre-push-proof.py": "tools/pre-push-proof.py",
     "tools/package-project-image.py": "tools/package-project-image.py",
     "tools/package-shared-artifacts.py": "tools/package-shared-artifacts.py",
@@ -531,6 +538,11 @@
     "ztp/templates/ztp-bootstrap.sh": "ztp/templates/ztp-bootstrap.sh"
   },
   "test_rules": [
+    {
+      "id": "monitor_loopback_proxy_direct",
+      "paths": ["tools/monitor-loopback-proxy.py"],
+      "tests": ["test_cases.test_monitor_loopback_proxy"]
+    },
     {
       "id": "req14_splitter_hostname_binding_direct",
       "paths": [
@@ -604,7 +616,8 @@
         "test_cases.test_ztp_container_runtime",
         "test_cases.test_ztp_monitor_watch_resilience",
         "test_cases.test_ztp_monitor_watch_runtime_workflow",
-        "test_cases.test_ztp_collection_attribution"
+        "test_cases.test_ztp_collection_attribution",
+        "test_cases.test_monitor_derived_parent_release"
       ]
     },
     {
@@ -670,7 +683,8 @@
         "test_cases.test_docker_destructive_confirmation",
         "test_cases.test_docker_destructive_confirmation_workflow",
         "test_cases.test_ztp_monitor_watch_runtime_workflow",
-        "test_cases.test_reference_only_selector_workflow"
+        "test_cases.test_reference_only_selector_workflow",
+        "test_cases.test_docker_derived_parent_activation"
       ]
     },
     {
@@ -865,6 +879,16 @@
         "test_cases.test_splitter_profile_breakout",
         "test_cases.test_splitter_profile_breakout_workflow",
         "test_cases.test_air_retained_servers_contract"
+      ]
+    },
+    {
+      "id": "monitor_failure_detail_ui",
+      "paths": [
+        "monitor/generate-monitor-html.py"
+      ],
+      "tests": [
+        "test_cases.test_monitor_failure_detail_ui",
+        "test_cases.test_monitor_failure_detail_workflow"
       ]
     },
     {
@@ -1407,6 +1431,23 @@
     }
   ],
   "workflows": [
+    {
+      "id": "monitor_loopback_proxy_server_guards",
+      "members": ["tools/monitor-loopback-proxy.py", "monitor/ztp-monitor-control.cgi", "monitor/switch-collection-control.cgi", "monitor/manual-ztp-control.cgi", "tools/project_contract.py", "tools/_package_common.py", "tools/sync-code.py"],
+      "tests": ["test_cases.test_monitor_loopback_proxy_workflow"]
+    },
+    {
+      "id": "monitor_failure_detail_rendering",
+      "members": [
+        "monitor/generate-monitor-html.py",
+        "monitor/switch-collection-control.cgi",
+        "monitor/switch-collection-worker.py"
+      ],
+      "tests": [
+        "test_cases.test_monitor_failure_detail_ui",
+        "test_cases.test_monitor_failure_detail_workflow"
+      ]
+    },
     {
       "id": "issue_tracker_cold_generation_recovery",
       "members": [
@@ -1971,7 +2012,9 @@
       ],
       "tests": [
         "test_cases.test_ztp_monitor_watch_resilience",
-        "test_cases.test_ztp_monitor_watch_runtime_workflow"
+        "test_cases.test_ztp_monitor_watch_runtime_workflow",
+        "test_cases.test_monitor_derived_parent_release",
+        "test_cases.test_docker_derived_parent_activation"
       ]
     },
     {
@@ -2045,6 +2088,8 @@
         "test_cases.test_backup_auth_transport_workflow",
         "test_cases.test_collection_cycle_handoff_workflow",
         "test_cases.test_collection_cycle_persistence",
+        "test_cases.test_monitor_failure_detail_ui",
+        "test_cases.test_monitor_failure_detail_workflow",
         "test_cases.test_monitor_stack_review",
         "test_cases.test_project_contracts",
         "test_cases.test_ztp_container_runtime",
