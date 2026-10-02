@@ -483,8 +483,14 @@ class SplitterProfileWorkflowTests(unittest.TestCase):
             ), mock.patch.object(GENERATOR, "_CSV_FILE", str(source_csv)):
                 GENERATOR._run_patch_descriptions(str(dot), str(output))
             self.assertNotIn("P2P 标记为空的接口未出现在 yaml 中", stdout.getvalue())
+            current = Path(str(output) + "_with_desc_current")
+            self.assertTrue(current.is_symlink())
+            self.assertRegex(os.readlink(current), r"^\.generated_with_desc\.version\.[0-9a-f]{32}$")
+            version = current.resolve(strict=True)
+            self.assertEqual(root.resolve(), version.parent)
+            self.assertFalse(Path(str(output) + "_with_desc").exists())
             for endpoint in intent["empty_endpoints"]:
-                path = Path(str(output) + "_with_desc") / f"{endpoint['device']}.yaml"
+                path = version / f"{endpoint['device']}.yaml"
                 interfaces = yaml.safe_load(path.read_text())[0]["set"]["interface"]
                 self.assertEqual("P2P:----UNUSED-----NO-PEER",
                                  interfaces[endpoint["port"]]["description"])

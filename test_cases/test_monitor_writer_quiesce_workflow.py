@@ -2057,6 +2057,7 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
                  mock.patch.object(load, "service_runtime_backend", return_value=backend), \
                  mock.patch.object(load, "validate_runtime_options"), \
                  mock.patch.object(load, "resolve_project", return_value=project), \
+                 mock.patch.object(load, "active_project", return_value=project.resolve()), \
                  mock.patch.object(load, "sync_marker_present", return_value=False), \
                  mock.patch.object(
                      load, "stop_native_ztp_monitors", side_effect=event("monitor-stop"),

@@ -361,6 +361,9 @@ class GenerationReportWorkflow(unittest.TestCase):
         caught = None
         with ExitStack() as stack:
             stack.enter_context(mock.patch.object(LOAD, "parse_args", return_value=args))
+            stack.enter_context(mock.patch.object(
+                LOAD, "active_project", return_value=self.project.resolve(),
+            ))
             stack.enter_context(mock.patch.object(LOAD, "acquire_deployment_lock", return_value=97))
             stack.enter_context(mock.patch.object(LOAD, "release_deployment_lock", unlock))
             stack.enter_context(mock.patch.object(LOAD, "runtime_os", return_value="Linux"))
@@ -497,6 +500,9 @@ class GenerationReportWorkflow(unittest.TestCase):
         caught = None
         with ExitStack() as stack:
             stack.enter_context(mock.patch.object(LOAD, "parse_args", return_value=args))
+            stack.enter_context(mock.patch.object(
+                LOAD, "active_project", return_value=self.project.resolve(),
+            ))
             stack.enter_context(mock.patch.object(LOAD, "acquire_deployment_lock", return_value=98))
             stack.enter_context(mock.patch.object(LOAD, "release_deployment_lock", unlock))
             stack.enter_context(mock.patch.object(LOAD, "runtime_os", return_value="Linux"))

@@ -3247,10 +3247,11 @@ class DockerManagementSshKeyWorkflowTests(unittest.TestCase):
                 mock.patch.object(loader, "resolve_project", return_value=project),
                 mock.patch.object(loader, "sync_marker_present", return_value=False),
                 mock.patch.object(loader, "initialize_from_template"),
+                mock.patch.object(loader, "active_project", return_value=project.resolve()),
             )
             with common[0], common[1], common[2], common[3], common[4], common[5], \
                  common[6], common[7] as release_lock, common[8], common[9], \
-                 common[10] as initialize, mock.patch.object(
+                 common[10] as initialize, common[11], mock.patch.object(
                      loader, "ensure_management_key",
                      side_effect=loader.LoadError("service pair missing"),
                  ) as attest:
@@ -3284,10 +3285,11 @@ class DockerManagementSshKeyWorkflowTests(unittest.TestCase):
                     side_effect=loader.LoadError("project management key mismatch"),
                 ),
                 mock.patch.object(loader, "initialize_from_template"),
+                mock.patch.object(loader, "active_project", return_value=project.resolve()),
             )
             with common[0], common[1], common[2], common[3], common[4], common[5], \
                  common[6], common[7], common[8], common[9], common[10], \
-                 common[11] as project_attest, common[12] as initialize:
+                 common[11] as project_attest, common[12] as initialize, common[13]:
                 before = DockerManagementSshKeyDirectTests.snapshot(project)
                 self.assertEqual(1, loader.main([]))
                 self.assertEqual(before, DockerManagementSshKeyDirectTests.snapshot(project))
