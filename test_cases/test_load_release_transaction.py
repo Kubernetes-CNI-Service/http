@@ -982,6 +982,7 @@ class ReleaseTransactionTests(unittest.TestCase):
         parent_schema_version: int = 1,
         failure_at: str = "dhcp",
         observe_template_mutation: bool = False,
+        active_project_value: Path | None = None,
     ):
         args = SimpleNamespace(
             skip_doca=False, download_doca=False, dry_run=False,
@@ -1017,6 +1018,10 @@ class ReleaseTransactionTests(unittest.TestCase):
         result = None
         with ExitStack() as stack:
             stack.enter_context(mock.patch.object(LOAD, "parse_args", return_value=args))
+            stack.enter_context(mock.patch.object(
+                LOAD, "active_project",
+                return_value=(active_project_value or self.project).resolve(),
+            ))
             stack.enter_context(mock.patch.object(LOAD, "acquire_deployment_lock", return_value=91))
             stack.enter_context(mock.patch.object(LOAD, "release_deployment_lock", release_lock))
             stack.enter_context(mock.patch.object(LOAD, "runtime_os", return_value="Linux"))
@@ -1738,6 +1743,194 @@ class ReleaseTransactionTests(unittest.TestCase):
                 self.project, "generations/aaaaaaaaaaaaaaaaaaaa",
             )
         self.assertIsNone(receipt)
+        prepare.assert_not_called()
+
+    def _write_setup_manifest(self, project: Path, links: dict[Path, Path]) -> Path:
+        manifest = self.ztp / ".setup_manifest"
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        rows = [f"# setup manifest — proj: {project}\n"]
+        for link, target in sorted(links.items(), key=lambda item: str(item[0])):
+            link.parent.mkdir(parents=True, exist_ok=True)
+            if os.path.lexists(link):
+                link.unlink()
+            link.symlink_to(os.path.relpath(target.resolve(), link.parent.resolve()))
+            rows.append(f"{link}\n")
+        manifest.write_text("".join(rows), encoding="utf-8")
+        return manifest
+
+    def test_cross_project_setup_state_restores_old_links_and_removes_target_only(self) -> None:
+        old_project = self.project.resolve()
+        new_project = self.root / "DAY0-Prepare/new"
+        new_project.mkdir()
+        old_target = old_project / "01-global.yaml"
+        new_target = new_project / "01-global.yaml"
+        new_target.write_text("new\n", encoding="utf-8")
+        common = self.ztp / "config/cumulus/template/01-global.yaml"
+        old_only = self.ztp / "status"
+        old_status = old_project / "99-output-ztp"
+        old_status.mkdir(parents=True, exist_ok=True)
+        old_links = {common: old_target, old_only: old_status}
+        manifest = self._write_setup_manifest(old_project, old_links)
+
+        lock_path = self.root / ".deployment.lock"
+        with mock.patch.multiple(
+            LOAD,
+            HTTP_ROOT=self.root,
+            ZTP_DIR=self.ztp,
+            MANIFEST=manifest,
+            IMAGE_DIR=self.root / "image",
+            DEPLOYMENT_LOCK=lock_path,
+        ):
+            snapshot = LOAD.snapshot_active_setup_state(expected_project=old_project)
+            target_only = self.ztp / "config/cumulus/template/new-only.csv"
+            new_only_target = new_project / "new-only.csv"
+            new_only_target.write_text("new only\n", encoding="utf-8")
+            self._write_setup_manifest(
+                new_project, {common: new_target, target_only: new_only_target},
+            )
+            descriptor = LOAD.acquire_deployment_lock(exclusive=True)
+            fsynced_directories: list[int] = []
+            real_fsync = os.fsync
+
+            def record_fsync(fd: int) -> None:
+                metadata = os.fstat(fd)
+                if stat.S_ISDIR(metadata.st_mode):
+                    fsynced_directories.append(metadata.st_ino)
+                real_fsync(fd)
+
+            try:
+                with mock.patch.object(
+                    LOAD, "active_managed_services", return_value=(),
+                ), mock.patch.object(LOAD.os, "fsync", side_effect=record_fsync):
+                    LOAD.restore_active_setup_state(
+                        snapshot,
+                        current_project=new_project,
+                        deployment_lock_descriptor=descriptor,
+                        services_quiesced=True,
+                        runtime_backend=SimpleNamespace(name="supervisor"),
+                    )
+            finally:
+                LOAD.release_deployment_lock(descriptor)
+
+        self.assertEqual(snapshot.links[common], os.readlink(common))
+        self.assertEqual(snapshot.links[old_only], os.readlink(old_only))
+        self.assertFalse(os.path.lexists(target_only))
+        self.assertEqual(snapshot.manifest, manifest.read_bytes())
+        self.assertIn(common.parent.stat().st_ino, fsynced_directories)
+
+    def test_cross_project_setup_restore_rejects_real_path_before_any_write(self) -> None:
+        old_project = self.project.resolve()
+        new_project = self.root / "DAY0-Prepare/new"
+        new_project.mkdir()
+        common = self.ztp / "config/cumulus/template/01-global.yaml"
+        second = self.ztp / "status"
+        old_status = old_project / "99-output-ztp"
+        old_status.mkdir(parents=True, exist_ok=True)
+        manifest = self._write_setup_manifest(
+            old_project, {common: self.global_file, second: old_status},
+        )
+        lock_path = self.root / ".deployment.lock"
+
+        with mock.patch.multiple(
+            LOAD,
+            HTTP_ROOT=self.root,
+            ZTP_DIR=self.ztp,
+            MANIFEST=manifest,
+            IMAGE_DIR=self.root / "image",
+            DEPLOYMENT_LOCK=lock_path,
+        ):
+            snapshot = LOAD.snapshot_active_setup_state(expected_project=old_project)
+            new_target = new_project / "01-global.yaml"
+            new_target.write_text("new\n", encoding="utf-8")
+            new_status = new_project / "99-output-ztp"
+            new_status.mkdir()
+            self._write_setup_manifest(
+                new_project, {common: new_target, second: new_status},
+            )
+            second.unlink()
+            second.write_text("operator-owned\n", encoding="utf-8")
+            common_before = os.readlink(common)
+            manifest_before = manifest.read_bytes()
+            descriptor = LOAD.acquire_deployment_lock(exclusive=True)
+            try:
+                with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+                    with self.assertRaisesRegex(LOAD.LoadError, "managed link|real path"):
+                        LOAD.restore_active_setup_state(
+                            snapshot,
+                            current_project=new_project,
+                            deployment_lock_descriptor=descriptor,
+                            services_quiesced=True,
+                            runtime_backend=SimpleNamespace(name="supervisor"),
+                        )
+            finally:
+                LOAD.release_deployment_lock(descriptor)
+
+        self.assertEqual(common_before, os.readlink(common))
+        self.assertEqual(b"operator-owned\n", second.read_bytes())
+        self.assertEqual(manifest_before, manifest.read_bytes())
+
+    def test_cross_project_context_freezes_active_project_and_never_borrows_target_receipt(self) -> None:
+        active = self.root / "DAY0-Prepare/active"
+        target = self.root / "DAY0-Prepare/target"
+        active.mkdir()
+        target.mkdir()
+        setup = mock.sentinel.active_setup
+        receipt = active / "99-output-ztp/rollback-receipts/aaaaaaaaaaaaaaaaaaaa"
+        calls: list[tuple[str, Path]] = []
+
+        def freeze(project: Path) -> str:
+            calls.append(("freeze", project))
+            return (
+                "generations/aaaaaaaaaaaaaaaaaaaa"
+                if project == active.resolve()
+                else "generations/bbbbbbbbbbbbbbbbbbbb"
+            )
+
+        with mock.patch.object(LOAD, "active_project", return_value=active.resolve()), \
+                mock.patch.object(
+                    LOAD, "snapshot_active_setup_state", return_value=setup,
+                ), mock.patch.object(
+                    LOAD, "ensure_previous_generation_frozen", side_effect=freeze,
+                ), mock.patch.object(
+                    LOAD, "prepare_active_runtime_rollback_receipt", return_value=receipt,
+                ) as prepare:
+            target_selector, context = LOAD.prepare_cross_project_rollback_context(
+                target,
+            )
+
+        self.assertEqual("generations/bbbbbbbbbbbbbbbbbbbb", target_selector)
+        self.assertEqual(active.resolve(), context.project)
+        self.assertEqual(receipt, context.runtime_receipt)
+        self.assertIs(setup, context.setup_state)
+        self.assertEqual(
+            [("freeze", active.resolve()), ("freeze", target.resolve())], calls,
+        )
+        prepare.assert_called_once_with(
+            active.resolve(), "generations/aaaaaaaaaaaaaaaaaaaa",
+        )
+
+    def test_cross_project_legacy_active_without_selector_preserves_old_compatibility(self) -> None:
+        active = self.root / "DAY0-Prepare/legacy"
+        target = self.root / "DAY0-Prepare/target"
+        active.mkdir()
+        target.mkdir()
+
+        with mock.patch.object(LOAD, "active_project", return_value=active.resolve()), \
+                mock.patch.object(
+                    LOAD, "snapshot_active_setup_state",
+                    return_value=mock.sentinel.active_setup,
+                ), mock.patch.object(
+                    LOAD, "ensure_previous_generation_frozen",
+                    side_effect=(None, "generations/bbbbbbbbbbbbbbbbbbbb"),
+                ), mock.patch.object(
+                    LOAD, "prepare_active_runtime_rollback_receipt",
+                ) as prepare:
+            target_selector, context = LOAD.prepare_cross_project_rollback_context(
+                target,
+            )
+
+        self.assertEqual("generations/bbbbbbbbbbbbbbbbbbbb", target_selector)
+        self.assertIsNone(context)
         prepare.assert_not_called()
 
     def test_existing_receipt_is_not_reused_after_flat_a_drift(self) -> None:
@@ -3524,6 +3717,9 @@ class ReleaseTransactionTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(
                 LOAD, "acquire_deployment_lock", return_value=93,
             ))
+            stack.enter_context(mock.patch.object(
+                LOAD, "active_project", return_value=self.project.resolve(),
+            ))
             stack.enter_context(mock.patch.object(LOAD, "release_deployment_lock"))
             stack.enter_context(mock.patch.object(LOAD, "runtime_os", return_value="Linux"))
             stack.enter_context(mock.patch.object(
@@ -3794,6 +3990,9 @@ class ReleaseTransactionTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(
                 LOAD, "acquire_deployment_lock", return_value=94,
             ))
+            stack.enter_context(mock.patch.object(
+                LOAD, "active_project", return_value=self.project.resolve(),
+            ))
             stack.enter_context(mock.patch.object(LOAD, "release_deployment_lock"))
             stack.enter_context(mock.patch.object(LOAD, "runtime_os", return_value="Linux"))
             stack.enter_context(mock.patch.object(
@@ -3910,6 +4109,47 @@ class ReleaseTransactionTests(unittest.TestCase):
         commit.assert_not_called()
         prepare_receipt_mock.assert_called_once()
         restore_receipt_mock.assert_called_once()
+
+    def test_main_cross_project_failure_restores_actual_active_p_not_target_q(self) -> None:
+        active = self.root / "DAY0-Prepare/active"
+        active.mkdir()
+        setup_state = mock.sentinel.active_setup_state
+        context = LOAD.CrossProjectRollbackContext(
+            project=active.resolve(),
+            selector_target="generations/aaaaaaaaaaaaaaaaaaaa",
+            runtime_receipt=(
+                active / "99-output-ztp/rollback-receipts/aaaaaaaaaaaaaaaaaaaa"
+            ),
+            setup_state=setup_state,
+        )
+        events: list[str] = []
+
+        with mock.patch.object(
+            LOAD, "active_project", return_value=active.resolve(),
+        ), mock.patch.object(
+            LOAD, "prepare_cross_project_rollback_context",
+            return_value=("generations/bbbbbbbbbbbbbbbbbbbb", context),
+        ) as prepare_cross, mock.patch.object(
+            LOAD, "restore_cross_project_rollback_context",
+            side_effect=lambda *_args, **_kwargs: events.append("restore-active-p"),
+        ) as restore_cross, mock.patch.object(
+            LOAD, "prepare_active_runtime_rollback_receipt",
+        ) as prepare_target_receipt:
+            result = self._exercise_main_transaction_failure(
+                ValueError("injected cross-project generation failure"),
+                lifecycle_events=events,
+                active_project_value=active,
+            )[0]
+
+        self.assertEqual(1, result)
+        prepare_cross.assert_called_once_with(self.project)
+        prepare_target_receipt.assert_not_called()
+        restore_cross.assert_called_once()
+        self.assertIs(context, restore_cross.call_args.args[0])
+        self.assertEqual(self.project, restore_cross.call_args.kwargs["current_project"])
+        self.assertEqual(91, restore_cross.call_args.kwargs["deployment_lock_descriptor"])
+        self.assertTrue(restore_cross.call_args.kwargs["services_quiesced"])
+        self.assertIn("restore-active-p", events)
 
     def test_main_does_not_restore_receipt_when_failure_precedes_quiesce_and_mutation(self) -> None:
         receipt = self.project / "99-output-ztp/rollback-receipts/aaaaaaaaaaaaaaaaaaaa"
@@ -4961,6 +5201,59 @@ class ReleaseTransactionTests(unittest.TestCase):
             for command in commands
         ), commands)
 
+    def test_cumulus_load_prefers_current_description_pointer_over_legacy(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="r22-load-description-") as name:
+            root = Path(name)
+            output = root / "config/cumulus/template/99-output"
+            output.mkdir(parents=True)
+            base = output / "20261002_120000"
+            base.mkdir()
+            legacy = output / f"{base.name}_with_desc"
+            legacy.mkdir()
+            version = output / f".{base.name}_with_desc.version.{('a' * 32)}"
+            version.mkdir()
+            pointer = output / f"{base.name}_with_desc_current"
+            pointer.symlink_to(version.name)
+            with mock.patch.object(LOAD, "ZTP_DIR", root), mock.patch.object(
+                LOAD, "_device_types_after_dhcp", return_value=frozenset({"eth"}),
+            ), mock.patch.object(
+                LOAD, "newest_directory", return_value=base,
+            ), mock.patch.object(LOAD, "run") as runner:
+                LOAD.generate_configs(
+                    frozenset({"eth"}), install_dhcp=False, dhcp_enabled=False,
+                )
+            publisher = [
+                call.args[0] for call in runner.call_args_list
+                if call.args[0][1] == "d-hostname2mac.py"
+            ]
+            self.assertEqual(1, len(publisher))
+            self.assertEqual(str(pointer), publisher[0][-1])
+
+    def test_cumulus_load_rejects_invalid_current_pointer_without_legacy_fallback(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="r22-load-description-bad-") as name:
+            root = Path(name)
+            output = root / "config/cumulus/template/99-output"
+            output.mkdir(parents=True)
+            base = output / "20261002_120000"
+            base.mkdir()
+            (output / f"{base.name}_with_desc").mkdir()
+            pointer = output / f"{base.name}_with_desc_current"
+            pointer.symlink_to("../outside")
+            with mock.patch.object(LOAD, "ZTP_DIR", root), mock.patch.object(
+                LOAD, "_device_types_after_dhcp", return_value=frozenset({"eth"}),
+            ), mock.patch.object(
+                LOAD, "newest_directory", return_value=base,
+            ), mock.patch.object(LOAD, "run") as runner:
+                with self.assertRaisesRegex(LOAD.LoadError, "description|pointer"):
+                    LOAD.generate_configs(
+                        frozenset({"eth"}), install_dhcp=False,
+                        dhcp_enabled=False,
+                    )
+            self.assertFalse(any(
+                call.args[0][1] == "d-hostname2mac.py"
+                for call in runner.call_args_list
+            ))
+
     def test_schema_v1_bond_collision_stops_load_before_child_or_parent_publish(self) -> None:
         template_dir, devices = self._prepare_h04_schema_v1_collision_generator()
         current = self.project / "99-output-ztp/current-release.json"
@@ -5332,10 +5625,24 @@ class ReleaseTransactionTests(unittest.TestCase):
                     redirect_stdout(output_text):
                 GENERATOR._run_patch_descriptions(str(dot), str(output))
 
+            pointer = root / "generated_with_desc_current"
+            self.assertTrue(pointer.is_symlink())
+            self.assertRegex(
+                os.readlink(pointer), r"^\.generated_with_desc\.version\.[0-9a-f]{32}$",
+            )
+            version = pointer.resolve(strict=True)
+            self.assertEqual(root.resolve(), version.parent)
+            manifest = json.loads(
+                (version / ".description-version.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(1, manifest["schema_version"])
+            self.assertEqual("generated", manifest["timestamp"])
+            self.assertEqual(
+                hashlib.sha256((version / "leaf01.yaml").read_bytes()).hexdigest(),
+                manifest["files"]["leaf01.yaml"],
+            )
             generated = GENERATOR._load_generated_yaml(
-                (root / "generated_with_desc/leaf01.yaml").read_text(
-                    encoding="utf-8",
-                )
+                (version / "leaf01.yaml").read_text(encoding="utf-8")
             )
 
         interfaces = generated[0]["set"]["interface"]

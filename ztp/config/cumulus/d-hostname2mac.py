@@ -14,10 +14,12 @@
   template/99-output-ib_nvl/latest   → NVOS 当前发布目录
   nvos/latest_yaml                   → template/99-output-ib_nvl/latest（固定）
 
-Cumulus 规则：同时间戳存在 _with_desc 时优先使用；Production 与 AIR 分别使用
+Cumulus 规则：同时间戳有已验证的 _with_desc_current 时优先使用，
+否则保留 legacy _with_desc 优先于 base；Production 与 AIR 分别使用
 独立 YAML。full profile 的 AIR 文件仅允许 system.hostname 与配对的 Production 文件不同；
 baseline profile 只允许 effective default、hostname 与 manifest 声明的受管模板接口片段。
-最终发布为 *_combine，生成源目录归档为 *_combine_sources.tar.gz 后删除。
+最终发布为 *_combine；普通生成源目录归档后删除，活动 description
+版本目录与 current 指针保持可读，不纳入删源归档。
 
 CSV 格式（含表头，11 列）：
   hostname, type, template, eth0_ip, netmask, eth0_gw, eth0_mac,
@@ -711,7 +713,7 @@ def _cumulus_dir_context(yaml_dir):
     if os.path.basename(output_root) != "99-output":
         return None
     match = re.fullmatch(
-        r"(\d{8}_\d{6})(?:_(with_desc|air))?",
+        r"(\d{8}_\d{6})(?:_(with_desc|with_desc_current|air))?",
         os.path.basename(abs_yaml_dir),
         re.IGNORECASE,
     )
@@ -727,6 +729,79 @@ def _cumulus_dir_context(yaml_dir):
         "published_root": output_root,
         "combine_dir": os.path.join(output_root, f"{timestamp}_combine"),
     }
+
+
+def _description_unique_json_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("description version manifest contains duplicate keys")
+        result[key] = value
+    return result
+
+
+def _description_current_version(pointer, timestamp):
+    """Validate the active description pointer and every version file byte."""
+    if not os.path.islink(pointer):
+        raise ValueError("description current pointer is not a symlink")
+    name = os.readlink(pointer)
+    if not re.fullmatch(rf"\.{re.escape(timestamp)}_with_desc\.version\.[0-9a-f]{{32}}", name):
+        raise ValueError("description current pointer target is invalid")
+    version = os.path.join(os.path.dirname(pointer), name)
+    try:
+        metadata = os.lstat(version)
+    except OSError as exc:
+        raise ValueError("description current pointer version is missing") from exc
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise ValueError("description current pointer version is not a real directory")
+    manifest_path = os.path.join(version, ".description-version.json")
+    try:
+        manifest_metadata = os.lstat(manifest_path)
+        if (not stat.S_ISREG(manifest_metadata.st_mode)
+                or manifest_metadata.st_nlink != 1):
+            raise ValueError("description version manifest is not a regular file")
+        with open(manifest_path, encoding="utf-8") as stream:
+            manifest = json.load(stream, object_pairs_hook=_description_unique_json_pairs)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("description version manifest cannot be read") from exc
+    if (not isinstance(manifest, dict) or set(manifest) != {
+            "schema_version", "timestamp", "files",
+        } or manifest["schema_version"] != 1
+            or manifest["timestamp"] != timestamp
+            or not isinstance(manifest["files"], dict)):
+        raise ValueError("description version manifest is invalid")
+    actual = {}
+    for parent, names, basenames in os.walk(version, followlinks=False):
+        for child in names:
+            if not stat.S_ISDIR(os.lstat(os.path.join(parent, child)).st_mode):
+                raise ValueError("description version contains a linked directory")
+        for child in basenames:
+            path = os.path.join(parent, child)
+            relative = os.path.relpath(path, version)
+            metadata = os.lstat(path)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                raise ValueError("description version contains a linked file")
+            if relative == ".description-version.json":
+                continue
+            digest = hashlib.sha256()
+            with open(path, "rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            actual[relative] = digest.hexdigest()
+    if actual != manifest["files"]:
+        raise ValueError("description version manifest hash mismatch")
+    return version
+
+
+def _cumulus_source_path(ctx):
+    """Pin a current pointer to the exact verified version selected earlier."""
+    path = ctx["path"]
+    if not path.endswith("_with_desc_current"):
+        return path
+    version = _description_current_version(path, ctx["timestamp"])
+    if ctx.get("read_path", version) != version:
+        raise ValueError("description current pointer changed during publication")
+    return version
 
 
 def _preferred_cumulus_contexts(contexts):
@@ -749,20 +824,42 @@ def _preferred_cumulus_contexts(contexts):
     # those renames the final path is absent, so falling back to the plain
     # directory would publish unpatched YAML. Any leftover staging/backup
     # name is unresolved, including a symlink or an incomplete directory.
-    residue_prefix = f".{timestamp}_with_desc.tmp."
+    residue_prefixes = (
+        f".{timestamp}_with_desc.tmp.",
+        f".{timestamp}_with_desc.stage.",
+        f".{timestamp}_with_desc.current.tmp.",
+    )
+    version_prefix = f".{timestamp}_with_desc.version."
+    current_path = os.path.join(output_root, f"{timestamp}_with_desc_current")
     with os.scandir(output_root) as entries:
-        if any(entry.name.startswith(residue_prefix) for entry in entries):
-            raise ValueError(
-                "unresolved description output backup or staging directory; "
-                "stop publication and inspect the residue without modifying it"
-            )
+        names = [entry.name for entry in entries]
+    if any(name.startswith(residue_prefixes) for name in names):
+        raise ValueError(
+            "unresolved description output backup or staging directory; "
+            "stop publication and inspect the residue without modifying it"
+        )
+    if not os.path.lexists(current_path) and any(
+            name.startswith(version_prefix) for name in names):
+        raise ValueError(
+            "unresolved description version without a current pointer; "
+            "stop publication and inspect the orphan without modifying it"
+        )
     base_path = os.path.join(output_root, timestamp)
     patched_path = os.path.join(output_root, f"{timestamp}_with_desc")
-    production_path = patched_path if os.path.isdir(patched_path) else base_path
+    if os.path.lexists(patched_path) and (
+            os.path.islink(patched_path) or not os.path.isdir(patched_path)):
+        raise ValueError("legacy description output is not a real directory")
+    if os.path.lexists(current_path):
+        current_version = _description_current_version(current_path, timestamp)
+        production_path = current_path
+    else:
+        production_path = patched_path if os.path.isdir(patched_path) else base_path
 
     air_path = os.path.join(output_root, f"{timestamp}_air")
     if os.path.isdir(production_path):
         selected = _cumulus_dir_context(production_path)
+        if production_path == current_path:
+            selected["read_path"] = current_version
         if valid[0]["path"] != selected["path"]:
             print(f"[INFO] 检测到 patch 配置，改用：{production_path}")
         if os.path.isdir(air_path):
@@ -1128,7 +1225,20 @@ def _validate_air_baselines(staging_dir, profiles, default_text, default_name):
 
 def _archive_combined_sources(contexts):
     """Archive successful Cumulus publish inputs, then remove the directories."""
-    sources = [os.path.abspath(ctx["path"]) for ctx in contexts]
+    # Both the frozen legacy directory and the active current pointer are
+    # retained publication inputs.  Never archive/delete either one here.
+    retained = [
+        ctx for ctx in contexts
+        if ctx["path"].endswith(("_with_desc_current", "_with_desc"))
+    ]
+    for ctx in retained:
+        if ctx["path"].endswith("_with_desc_current"):
+            _cumulus_source_path(ctx)
+        elif os.path.islink(ctx["path"]) or not os.path.isdir(ctx["path"]):
+            raise ValueError("legacy description output is not a real directory")
+    sources = [os.path.abspath(ctx["path"]) for ctx in contexts if ctx not in retained]
+    if not sources:
+        return None
     if not sources or len(sources) > 2 or len(set(sources)) != len(sources):
         raise ValueError("combine 归档必须包含一到两个不同的源目录")
     output_root = os.path.abspath(contexts[0]["published_root"])
@@ -1583,6 +1693,7 @@ def _publish_combined_nvos(
 
 def _publish_production_cumulus(ctx, devices, *, switch_scope="all"):
     """Atomically publish a Production-only Cumulus child release."""
+    source_path = _cumulus_source_path(ctx)
     scoped_devices, profiles = scope_cumulus_publish_inventory(
         devices,
         {
@@ -1607,7 +1718,7 @@ def _publish_production_cumulus(ctx, devices, *, switch_scope="all"):
     os.makedirs(staging_dir)
     try:
         copied_hosts = set()
-        for src in sorted(glob.glob(os.path.join(ctx["path"], "*.yaml"))):
+        for src in sorted(glob.glob(os.path.join(source_path, "*.yaml"))):
             if os.path.islink(src):
                 continue
             hostname = os.path.splitext(os.path.basename(src))[0]
@@ -1709,6 +1820,8 @@ def _publish_production_cumulus(ctx, devices, *, switch_scope="all"):
                 f"mode_sidecars={mode_count}\n"
                 f"effective_default={default_name}\n"
             )
+        if _cumulus_source_path(ctx) != source_path:
+            raise ValueError("description source changed during publication")
         if not _confirm_replace(final_dir):
             return False
         backup_dir = None
@@ -1758,6 +1871,7 @@ def _publish_combined_cumulus(
     if len(roots) != 1:
         print("[ERROR] 两个 Cumulus 输入目录必须位于同一个 99-output 目录")
         return False
+    source_paths = {ctx["path"]: _cumulus_source_path(ctx) for ctx in contexts}
 
     timestamp = contexts[0]["timestamp"]
     service_dir = contexts[0]["service_dir"]
@@ -1867,7 +1981,7 @@ def _publish_combined_cumulus(
         for ctx in sorted(contexts, key=lambda item: item["kind"]):
             allowed = allowed_by_kind[ctx["kind"]]
             print(f"复制 {ctx['kind'].upper()} 配置：{ctx['path']}")
-            for src in sorted(glob.glob(os.path.join(ctx["path"], "*.yaml"))):
+            for src in sorted(glob.glob(os.path.join(source_paths[ctx["path"]], "*.yaml"))):
                 if os.path.islink(src):
                     continue
                 basename = os.path.basename(src)
@@ -2028,6 +2142,9 @@ def _publish_combined_cumulus(
                 f"effective_default={os.path.basename(release_default)}\n"
                 f"identity_pending={identity_pending_count}\n"
             )
+        if any(_cumulus_source_path(ctx) != source_paths[ctx["path"]]
+               for ctx in contexts):
+            raise ValueError("description source changed during publication")
         if not _confirm_replace(final_dir):
             print("[SKIP] 保留现有发布目录和 latest_yaml")
             return False
@@ -2128,7 +2245,11 @@ def _resolve_yaml_dir():
     if os.path.isdir(out_base):
         subs = [
             d for d in glob.glob(os.path.join(out_base, "*"))
-            if os.path.isdir(d) and not os.path.islink(d)
+            if (os.path.isdir(d) and not os.path.islink(d))
+            or (not is_nvos and os.path.lexists(d) and re.fullmatch(
+                r"\d{8}_\d{6}_with_desc_current", os.path.basename(d),
+                re.IGNORECASE,
+            ))
         ]
         if is_nvos:
             # 合并目录是发布结果，不是下一次 hostname2mac 的输入。
@@ -2157,7 +2278,7 @@ def _resolve_yaml_dir():
                 d for d in subs
                 if (
                     (match := re.fullmatch(
-                        r"(\d{8}_\d{6})(?:_(?:with_desc|air))?",
+                        r"(\d{8}_\d{6})(?:_(?:with_desc_current|with_desc|air))?",
                         os.path.basename(d),
                         re.IGNORECASE,
                     ))

@@ -7,6 +7,7 @@ import copy
 from contextlib import redirect_stdout
 import hashlib
 import io
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -28,6 +29,374 @@ D_PATH = ROOT / "ztp/config/cumulus/d-hostname2mac.py"
 
 class GenerationInputBindingDirectTests(unittest.TestCase):
     """A generator must not replace same-named output across input versions."""
+
+    def test_c2_description_single_pointer_keeps_legacy_and_binds_immutable_version(self):
+        rows = V2MlagSetupPreflightTests().pair()
+        fixture, project, errors, _warnings = run_v2_mlag_setup_preflight(rows)
+        try:
+            self.assertEqual([], errors)
+            with tempfile.TemporaryDirectory(prefix="r22-c2-pointer-") as name:
+                private = Path(name)
+                source = private / "02-devices_config.csv"
+                source.write_bytes((project / source.name).read_bytes())
+                generation = private / "generation"
+                generation.mkdir()
+                (generation / "candidate.txt").write_bytes(b"candidate B")
+                legacy = private / "generation_with_desc"
+                legacy.mkdir()
+                (legacy / "old-marker.txt").write_bytes(b"accepted legacy A")
+                pointer = private / "generation_with_desc_current"
+                c2 = load_script("r22_c2_pointer_direct", C2_PATH)
+
+                def patch_candidate(_dot, stage, _display, _authority):
+                    (Path(stage) / "patched-marker.txt").write_bytes(b"complete patch B")
+
+                with mock.patch.object(c2, "_CSV_FILE", str(source)), \
+                        mock.patch.object(c2, "_patch_descriptions_in_directory", side_effect=patch_candidate), \
+                        redirect_stdout(io.StringIO()):
+                    c2._run_patch_descriptions(str(private / "topology.dot"), str(generation))
+
+                self.assertEqual(b"accepted legacy A", (legacy / "old-marker.txt").read_bytes())
+                self.assertFalse((legacy / "patched-marker.txt").exists())
+                self.assertTrue(pointer.is_symlink())
+                target_name = os.readlink(pointer)
+                self.assertRegex(target_name, r"^\.generation_with_desc\.version\.[0-9a-f]+$")
+                version = private / target_name
+                self.assertTrue(version.is_dir())
+                self.assertFalse(version.is_symlink())
+                self.assertEqual(b"complete patch B", (version / "patched-marker.txt").read_bytes())
+                self.assertEqual(str(pointer), c2._selected_description_output(str(generation)))
+                manifest = json.loads((version / ".description-version.json").read_text())
+                self.assertEqual(1, manifest["schema_version"])
+                self.assertEqual("generation", manifest["timestamp"])
+                self.assertEqual(
+                    hashlib.sha256(b"complete patch B").hexdigest(),
+                    manifest["files"]["patched-marker.txt"],
+                )
+                with mock.patch.object(c2, "_CSV_FILE", str(source)), \
+                        mock.patch.object(c2, "_patch_descriptions_in_directory", side_effect=patch_candidate), \
+                        redirect_stdout(io.StringIO()):
+                    c2._run_patch_descriptions(str(private / "topology.dot"), str(generation))
+                self.assertNotEqual(target_name, os.readlink(pointer))
+                self.assertEqual(b"complete patch B", (pointer / "patched-marker.txt").read_bytes())
+                self.assertEqual(b"complete patch B", (version / "patched-marker.txt").read_bytes())
+                inventory = c2._inspect_description_output_recovery(str(legacy))
+                self.assertEqual("clean", inventory["state"])
+                self.assertEqual([str(version)], inventory["unreferenced_versions"])
+                self.assertEqual("historical-or-orphan", inventory["unreferenced_classification"])
+        finally:
+            fixture.cleanup()
+
+    def test_c2_abrupt_commit_never_removes_legacy_directory(self):
+        rows = V2MlagSetupPreflightTests().pair()
+        fixture, project, errors, _warnings = run_v2_mlag_setup_preflight(rows)
+        try:
+            self.assertEqual([], errors)
+            for crash_after in (1, 2):
+                with self.subTest(crash_after=crash_after), \
+                        tempfile.TemporaryDirectory(prefix="r22-c2-abrupt-") as name:
+                    private = Path(name)
+                    source = private / "02-devices_config.csv"
+                    source.write_bytes((project / source.name).read_bytes())
+                    generation = private / "generation"
+                    generation.mkdir()
+                    (generation / "candidate.txt").write_bytes(b"candidate B")
+                    legacy = private / "generation_with_desc"
+                    legacy.mkdir()
+                    (legacy / "old-marker.txt").write_bytes(b"accepted legacy A")
+                    pointer = private / "generation_with_desc_current"
+                    c2 = load_script("r22_c2_abrupt_direct", C2_PATH)
+                    real_replace = c2.os.replace
+                    observed = {"replaces": 0}
+
+                    def abrupt_after_replace(src, dst, *args, **kwargs):
+                        result = real_replace(src, dst, *args, **kwargs)
+                        observed["replaces"] += 1
+                        if observed["replaces"] == crash_after:
+                            raise BaseException("simulated abrupt process exit")
+                        return result
+
+                    with mock.patch.object(c2, "_CSV_FILE", str(source)), \
+                            mock.patch.object(c2, "_patch_descriptions_in_directory", return_value=None), \
+                            mock.patch.object(c2.os, "replace", side_effect=abrupt_after_replace), \
+                            redirect_stdout(io.StringIO()):
+                        with self.assertRaisesRegex(BaseException, "simulated abrupt"):
+                            c2._run_patch_descriptions(str(private / "topology.dot"), str(generation))
+
+                    self.assertGreaterEqual(observed["replaces"], crash_after)
+                    self.assertEqual(b"accepted legacy A", (legacy / "old-marker.txt").read_bytes())
+                    self.assertFalse((legacy / "candidate.txt").exists())
+                    if pointer.is_symlink():
+                        self.assertTrue(pointer.resolve(strict=True).is_dir())
+                        self.assertEqual(b"candidate B", (pointer / "candidate.txt").read_bytes())
+
+        finally:
+            fixture.cleanup()
+
+    def test_d_current_pointer_is_verified_and_never_falls_back_on_tampering(self):
+        with tempfile.TemporaryDirectory(prefix="r22-d-current-") as name:
+            output_root = Path(name) / "99-output"
+            output_root.mkdir()
+            timestamp = "20261002_010203"
+            base = output_root / timestamp
+            base.mkdir()
+            legacy = output_root / f"{timestamp}_with_desc"
+            legacy.mkdir()
+            (legacy / "legacy.txt").write_bytes(b"accepted legacy A")
+            version = output_root / f".{timestamp}_with_desc.version.abcdef12abcdef12abcdef12abcdef12"
+            version.mkdir()
+            (version / "spine.yaml").write_bytes(b"complete patched B")
+            manifest = {
+                "schema_version": 1,
+                "timestamp": timestamp,
+                "files": {"spine.yaml": hashlib.sha256(b"complete patched B").hexdigest()},
+            }
+            (version / ".description-version.json").write_text(
+                json.dumps(manifest), encoding="utf-8",
+            )
+            pointer = output_root / f"{timestamp}_with_desc_current"
+            pointer.symlink_to(version.name, target_is_directory=True)
+            d = load_script("r22_d_current_direct", D_PATH)
+            context = d._cumulus_dir_context(str(base))
+
+            selected = d._preferred_cumulus_contexts([context])
+            self.assertEqual([str(pointer)], [item["path"] for item in selected])
+            self.assertEqual(str(version), selected[0]["read_path"])
+            self.assertIsNone(d._archive_combined_sources(selected))
+            self.assertTrue(pointer.is_symlink())
+            self.assertEqual(b"complete patched B", (version / "spine.yaml").read_bytes())
+            old_residue = output_root / f".{timestamp}_with_desc.tmp.interrupted.old"
+            old_residue.mkdir()
+            with self.assertRaisesRegex(ValueError, "unresolved|backup|description"):
+                d._preferred_cumulus_contexts([context])
+            old_residue.rmdir()
+            manifest_path = version / ".description-version.json"
+            manifest_path.write_text(
+                '{"schema_version":2,"schema_version":1,'
+                f'"timestamp":"{timestamp}","files":'
+                f'{{"spine.yaml":"{manifest["files"]["spine.yaml"]}"}}}}',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "manifest|duplicate|description"):
+                d._preferred_cumulus_contexts([context])
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            (version / "spine.yaml").write_bytes(b"tampered patched C")
+            with self.assertRaisesRegex(ValueError, "pointer|version|manifest|hash|description"):
+                d._preferred_cumulus_contexts([context])
+            (version / "spine.yaml").write_bytes(b"complete patched B")
+            other = output_root / f".{timestamp}_with_desc.version.12345678123456781234567812345678"
+            other.mkdir()
+            (other / "spine.yaml").write_bytes(b"other complete patch C")
+            (other / ".description-version.json").write_text(json.dumps({
+                "schema_version": 1,
+                "timestamp": timestamp,
+                "files": {"spine.yaml": hashlib.sha256(b"other complete patch C").hexdigest()},
+            }), encoding="utf-8")
+            pointer.unlink()
+            pointer.symlink_to(other.name, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "pointer|changed|description"):
+                d._cumulus_source_path(selected[0])
+            pointer.unlink()
+            pointer.symlink_to(version.name, target_is_directory=True)
+            self.assertEqual(str(version), d._preferred_cumulus_contexts([context])[0]["read_path"])
+            pointer.unlink()
+            pointer.symlink_to("../outside", target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "pointer|version|manifest|description"):
+                d._preferred_cumulus_contexts([context])
+            pointer.unlink()
+            pointer.symlink_to(f".{timestamp}_with_desc.version.abcdef12", target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "pointer|version|manifest|description"):
+                d._preferred_cumulus_contexts([context])
+            self.assertEqual(b"accepted legacy A", (legacy / "legacy.txt").read_bytes())
+
+    def test_c2_rechecks_version_after_fsync_before_pointer_commit(self):
+        rows = V2MlagSetupPreflightTests().pair()
+        fixture, project, errors, _warnings = run_v2_mlag_setup_preflight(rows)
+        try:
+            self.assertEqual([], errors)
+            with tempfile.TemporaryDirectory(prefix="r22-c2-post-fsync-") as name:
+                private = Path(name)
+                source = private / "02-devices_config.csv"
+                source.write_bytes((project / source.name).read_bytes())
+                generation = private / "generation"
+                generation.mkdir()
+                (generation / "candidate.txt").write_bytes(b"candidate B")
+                legacy = private / "generation_with_desc"
+                legacy.mkdir()
+                (legacy / "old-marker.txt").write_bytes(b"accepted legacy A")
+                c2 = load_script("r22_c2_post_fsync_direct", C2_PATH)
+                real_fsync = c2._fsync_description_version
+
+                def tamper_after_fsync(directory):
+                    real_fsync(directory)
+                    (Path(directory) / "candidate.txt").write_bytes(b"tampered after fsync")
+
+                with mock.patch.object(c2, "_CSV_FILE", str(source)), \
+                        mock.patch.object(c2, "_patch_descriptions_in_directory", return_value=None), \
+                        mock.patch.object(c2, "_fsync_description_version", side_effect=tamper_after_fsync), \
+                        redirect_stdout(io.StringIO()):
+                    with self.assertRaisesRegex(ValueError, "description|version|hash|changed"):
+                        c2._run_patch_descriptions(str(private / "topology.dot"), str(generation))
+                self.assertFalse((private / "generation_with_desc_current").exists())
+                self.assertEqual(b"accepted legacy A", (legacy / "old-marker.txt").read_bytes())
+        finally:
+            fixture.cleanup()
+
+    def test_c2_final_yaml_validation_never_deletes_frozen_legacy_source(self):
+        with tempfile.TemporaryDirectory(prefix="r22-c2-legacy-validation-") as name:
+            legacy = Path(name) / "20261002_010203_with_desc"
+            legacy.mkdir()
+            invalid = legacy / "spine.yaml"
+            invalid.write_bytes(b"set: [not valid YAML")
+            c2 = load_script("r22_c2_legacy_validation_direct", C2_PATH)
+            with redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(ValueError, "YAML|校验|语法"):
+                    c2._validate_final_yaml_outputs(str(legacy))
+            self.assertEqual(b"set: [not valid YAML", invalid.read_bytes())
+
+    def test_d_default_input_discovers_current_pointer_without_base_or_legacy(self):
+        with tempfile.TemporaryDirectory(prefix="r22-d-current-default-") as name:
+            service = Path(name) / "cumulus"
+            output_root = service / "template/99-output"
+            output_root.mkdir(parents=True)
+            timestamp = "20261002_010203"
+            version = output_root / f".{timestamp}_with_desc.version.abcdef12abcdef12abcdef12abcdef12"
+            version.mkdir()
+            (version / "spine.yaml").write_bytes(b"complete patched B")
+            (version / ".description-version.json").write_text(json.dumps({
+                "schema_version": 1,
+                "timestamp": timestamp,
+                "files": {"spine.yaml": hashlib.sha256(b"complete patched B").hexdigest()},
+            }), encoding="utf-8")
+            pointer = output_root / f"{timestamp}_with_desc_current"
+            pointer.symlink_to(version.name, target_is_directory=True)
+            d = load_script("r22_d_current_default_direct", D_PATH)
+            with mock.patch.object(d.os, "getcwd", return_value=str(service)), \
+                    redirect_stdout(io.StringIO()):
+                self.assertEqual(str(pointer), d._resolve_yaml_dir())
+
+    def test_d_invalid_current_pointer_stops_main_before_publish_or_source_cleanup(self):
+        with tempfile.TemporaryDirectory(prefix="r22-d-invalid-current-") as name:
+            private = Path(name)
+            output_root = private / "99-output"
+            output_root.mkdir()
+            timestamp = "20261002_010203"
+            base = output_root / timestamp
+            base.mkdir()
+            legacy = output_root / f"{timestamp}_with_desc"
+            legacy.mkdir()
+            (legacy / "old-marker.txt").write_bytes(b"accepted legacy A")
+            pointer = output_root / f"{timestamp}_with_desc_current"
+            pointer.symlink_to("../outside", target_is_directory=True)
+            csv_file = private / "02-devices_config.csv"
+            csv_file.write_bytes(b"fixture only; load_csv is stubbed")
+            d = load_script("r22_d_invalid_current_main_direct", D_PATH)
+            devices = {"spine": {"hostname": "spine", "dev_type": "eth"}}
+            with mock.patch.object(d.sys, "argv", [
+                    "d-hostname2mac.py", "--csv", str(csv_file),
+                    "--deployment-scope", "prod", "--switch", "eth", str(base),
+                ]), mock.patch.object(d, "load_csv", return_value=devices), \
+                    mock.patch.object(d, "_publish_production_cumulus") as publish, \
+                    mock.patch.object(d, "_set_latest_yaml") as set_latest, \
+                    mock.patch.object(d, "_archive_combined_sources") as archive, \
+                    mock.patch.object(d, "_remove_superseded_cumulus_base") as remove_base, \
+                    redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(ValueError, "pointer|version|manifest|description"):
+                    d.main()
+                publish.assert_not_called()
+                set_latest.assert_not_called()
+                archive.assert_not_called()
+                remove_base.assert_not_called()
+            self.assertEqual(b"accepted legacy A", (legacy / "old-marker.txt").read_bytes())
+            self.assertEqual("../outside", os.readlink(pointer))
+
+    def test_d_legacy_description_path_must_be_a_real_directory(self):
+        for legacy_kind in ("symlink", "regular-file"):
+            with self.subTest(legacy_kind=legacy_kind), \
+                    tempfile.TemporaryDirectory(prefix="r22-d-legacy-type-") as name:
+                output_root = Path(name) / "99-output"
+                output_root.mkdir()
+                timestamp = "20261002_010203"
+                base = output_root / timestamp
+                base.mkdir()
+                legacy = output_root / f"{timestamp}_with_desc"
+                if legacy_kind == "symlink":
+                    legacy.symlink_to(base.name, target_is_directory=True)
+                else:
+                    legacy.write_bytes(b"not a directory")
+                d = load_script("r22_d_legacy_type_direct", D_PATH)
+                with self.assertRaisesRegex(ValueError, "legacy|description|directory"):
+                    d._preferred_cumulus_contexts([d._cumulus_dir_context(str(base))])
+                self.assertTrue(base.is_dir())
+                self.assertTrue(os.path.lexists(legacy))
+
+    def test_d_successful_publish_cleanup_retains_legacy_description_source(self):
+        with tempfile.TemporaryDirectory(prefix="r22-d-retain-legacy-") as name:
+            output_root = Path(name) / "99-output"
+            output_root.mkdir()
+            timestamp = "20261002_010203"
+            base = output_root / timestamp
+            base.mkdir()
+            legacy = output_root / f"{timestamp}_with_desc"
+            legacy.mkdir()
+            (legacy / "old-marker.txt").write_bytes(b"accepted legacy A")
+            d = load_script("r22_d_retain_legacy_direct", D_PATH)
+            selected = d._preferred_cumulus_contexts([d._cumulus_dir_context(str(base))])
+            self.assertEqual(str(legacy), selected[0]["path"])
+            self.assertIsNone(d._archive_combined_sources(selected))
+            self.assertEqual(b"accepted legacy A", (legacy / "old-marker.txt").read_bytes())
+            self.assertFalse((output_root / f"{timestamp}_combine_sources.tar.gz").exists())
+
+    def test_c2_and_d_cold_inventory_blocks_new_stage_or_unpointed_version(self):
+        for residue_kind in ("stage", "version"):
+            with self.subTest(residue_kind=residue_kind), \
+                    tempfile.TemporaryDirectory(prefix="r22-description-orphan-") as name:
+                output_root = Path(name) / "99-output"
+                output_root.mkdir()
+                timestamp = "20261002_010203"
+                base = output_root / timestamp
+                base.mkdir()
+                legacy = output_root / f"{timestamp}_with_desc"
+                legacy.mkdir()
+                (legacy / "old-marker.txt").write_bytes(b"accepted legacy A")
+                residue = output_root / f".{timestamp}_with_desc.{residue_kind}.abcdef12abcdef12abcdef12abcdef12"
+                residue.mkdir()
+                (residue / "marker.txt").write_bytes(b"inert uncertain B")
+                c2 = load_script("r22_c2_new_orphan_direct", C2_PATH)
+                d = load_script("r22_d_new_orphan_direct", D_PATH)
+
+                observed = c2._inspect_description_output_recovery(str(legacy))
+                self.assertIn(residue_kind, observed["state"])
+                self.assertEqual(b"inert uncertain B", (residue / "marker.txt").read_bytes())
+                with self.assertRaisesRegex(ValueError, "unresolved|stage|version|description"):
+                    c2._require_clean_description_output(str(legacy))
+                with self.assertRaisesRegex(ValueError, "unresolved|stage|version|description"):
+                    d._preferred_cumulus_contexts([d._cumulus_dir_context(str(base))])
+                self.assertEqual(b"accepted legacy A", (legacy / "old-marker.txt").read_bytes())
+                self.assertEqual(b"inert uncertain B", (residue / "marker.txt").read_bytes())
+
+    def test_c2_and_d_reject_orphaned_temporary_current_pointer(self):
+        with tempfile.TemporaryDirectory(prefix="r22-description-pointer-temp-") as name:
+            output_root = Path(name) / "99-output"
+            output_root.mkdir()
+            timestamp = "20261002_010203"
+            base = output_root / timestamp
+            base.mkdir()
+            legacy = output_root / f"{timestamp}_with_desc"
+            legacy.mkdir()
+            (legacy / "old-marker.txt").write_bytes(b"accepted legacy A")
+            pending = output_root / f".{timestamp}_with_desc.current.tmp.abcdef12abcdef12abcdef12abcdef12"
+            pending.symlink_to(f".{timestamp}_with_desc.version.abcdef12abcdef12abcdef12abcdef12")
+            c2 = load_script("r22_c2_pointer_temp_direct", C2_PATH)
+            d = load_script("r22_d_pointer_temp_direct", D_PATH)
+            inventory = c2._inspect_description_output_recovery(str(legacy))
+            self.assertIn("current", inventory["state"])
+            with self.assertRaisesRegex(ValueError, "unresolved|pointer|description"):
+                c2._require_clean_description_output(str(legacy))
+            with self.assertRaisesRegex(ValueError, "unresolved|pointer|description"):
+                d._preferred_cumulus_contexts([d._cumulus_dir_context(str(base))])
+            self.assertTrue(pending.is_symlink())
+            self.assertEqual(b"accepted legacy A", (legacy / "old-marker.txt").read_bytes())
 
     def test_d_description_rename_residue_rejects_base_fallback(self):
         """An interrupted patch must not make unpatched production the winner."""
@@ -465,23 +834,26 @@ class GenerationInputBindingDirectTests(unittest.TestCase):
                 with patches[0], patches[1], patches[2], patches[3], \
                         redirect_stdout(io.StringIO()):
                     c2._run_patch_descriptions(str(dot), str(generation))
-                self.assertEqual(b"new-generation", (existing / "new-marker.txt").read_bytes())
-                self.assertFalse(old_artifact.exists())
+                pointer = private / "generation_with_desc_current"
+                self.assertEqual(b"new-generation", (pointer / "new-marker.txt").read_bytes())
+                self.assertEqual(b"previous-generation", old_artifact.read_bytes())
                 self.assertEqual(source.read_bytes(), (project / source.name).read_bytes())
 
                 old_artifact.write_bytes(b"stable-before-error")
+                selected_before_error = os.readlink(pointer)
                 with patches[0], patches[1], patches[2], patches[3], \
                         mock.patch.object(c2, "_load_csv_hostnames", side_effect=ValueError("patch failed")), \
                         redirect_stdout(io.StringIO()):
                     with self.assertRaisesRegex(ValueError, "patch failed"):
                         c2._run_patch_descriptions(str(dot), str(generation))
                 self.assertEqual(b"stable-before-error", old_artifact.read_bytes())
-                self.assertEqual(b"new-generation", (existing / "new-marker.txt").read_bytes())
+                self.assertEqual(selected_before_error, os.readlink(pointer))
+                self.assertEqual(b"new-generation", (pointer / "new-marker.txt").read_bytes())
                 self.assertFalse(any(private.glob(".generation_with_desc.tmp.*")))
         finally:
             fixture.cleanup()
 
-    def test_c2_description_interrupted_after_second_rename_restores_old_directory(self):
+    def test_c2_description_interrupted_after_pointer_replace_keeps_both_complete_versions(self):
         rows = V2MlagSetupPreflightTests().pair()
         fixture, project, errors, _warnings = run_v2_mlag_setup_preflight(rows)
         try:
@@ -502,30 +874,31 @@ class GenerationInputBindingDirectTests(unittest.TestCase):
                 latest.symlink_to(existing.name, target_is_directory=True)
                 c2 = load_script("r22_c2_second_rename_direct", C2_PATH)
                 real_replace = c2.os.replace
-                observed = {"second_rename": False}
+                observed = {"pointer_replace": False}
 
-                def interrupt_after_second_rename(src, dst, *args, **kwargs):
+                def interrupt_after_pointer_replace(src, dst, *args, **kwargs):
                     result = real_replace(src, dst, *args, **kwargs)
-                    if dst == str(existing) and str(src).startswith(
-                        str(private / ".generation_with_desc.tmp.")
-                    ):
-                        observed["second_rename"] = True
-                        raise RuntimeError("interrupted after second rename")
+                    if dst == str(private / "generation_with_desc_current"):
+                        observed["pointer_replace"] = True
+                        raise RuntimeError("interrupted after pointer replace")
                     return result
 
                 with mock.patch.object(c2, "_CSV_FILE", str(source)), \
                         mock.patch.object(c2, "_load_description_intent", return_value=[]), \
                         mock.patch.object(c2, "_load_dot_lines", return_value=[]), \
                         mock.patch.object(c2, "_load_dot_devices", return_value=[]), \
-                        mock.patch.object(c2.os, "replace", side_effect=interrupt_after_second_rename), \
+                        mock.patch.object(c2.os, "replace", side_effect=interrupt_after_pointer_replace), \
                         redirect_stdout(io.StringIO()):
-                    with self.assertRaisesRegex(RuntimeError, "interrupted after second rename"):
+                    with self.assertRaisesRegex(RuntimeError, "interrupted after pointer replace"):
                         c2._run_patch_descriptions(str(dot), str(generation))
 
-                self.assertTrue(observed["second_rename"])
+                self.assertTrue(observed["pointer_replace"])
                 self.assertEqual(b"accepted-old", (existing / "old-marker.txt").read_bytes())
                 self.assertFalse((existing / "new-marker.txt").exists())
                 self.assertEqual(b"accepted-old", (latest / "old-marker.txt").read_bytes())
+                pointer = private / "generation_with_desc_current"
+                self.assertTrue(pointer.is_symlink())
+                self.assertEqual(b"new-generation", (pointer / "new-marker.txt").read_bytes())
                 self.assertFalse(any(private.glob(".generation_with_desc.tmp.*")))
         finally:
             fixture.cleanup()

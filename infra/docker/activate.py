@@ -2433,6 +2433,43 @@ def prepare_runtime(settings: Settings, runner=subprocess.run):
     return selected, runtime, payload
 
 
+def prepare_pinned_runtime(
+    settings: Settings, *, selector_path: Path, expected_release_id: str,
+    runner=subprocess.run,
+):
+    """Publish only a read-only A observation; never grant start authority.
+
+    Apache and plan files are replaced individually and durably.  A crash
+    between them remains safe because all activation/precommit authority is
+    revoked before either publication; a future marker/start path must first
+    prove every public and installed surface belongs to the same A release.
+    """
+    selected, runtime, payload, apache = observe_pinned_runtime(
+        settings, selector_path, expected_release_id=expected_release_id,
+        runner=runner,
+    )
+    # An A observation is not permission to publish it after current changes
+    # to B.  Re-pin immediately before the first mutation; even if current
+    # later moves, no service may start from this observation alone.
+    current = validate_pinned_generation(
+        settings, selector_path, expected_release_id=expected_release_id,
+    )
+    if (
+        current["parent_release_sha256"] != payload["pinned_parent_sha256"]
+        or current["parent_inputs"]["subnet"] != payload["subnet_sha256"]
+    ):
+        raise ActivationError("selected generation changed before pinned plan publication")
+    ensure_runtime_directories(settings)
+    clear_activation(settings)
+    _atomic_write(settings.apache_listeners, apache, 0o644)
+    _atomic_write(
+        settings.runtime_plan,
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        0o600,
+    )
+    return selected, runtime, payload
+
+
 def expected_services(
     selected, *, dhcp_status: str = "enabled",
     http_listener_ips: Iterable[str] | None = None,

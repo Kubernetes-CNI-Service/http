@@ -274,6 +274,116 @@ def _write_same_inode(path: Path, data: bytes, original: os.stat_result) -> None
 class GenerationInputBindingWorkflowTests(unittest.TestCase):
     """LOAD's frozen A authority must survive a real downstream c2 read."""
 
+    def test_c2_single_pointer_is_the_real_d_input_and_tamper_never_falls_back(self):
+        """C2's immutable publish pointer is what the real d resolver consumes."""
+        with tempfile.TemporaryDirectory(prefix="r22-description-pointer-") as name:
+            output = Path(name) / "ztp/config/cumulus/template/99-output"
+            output.mkdir(parents=True)
+            timestamp = "20261002_120000"
+            base = output / timestamp
+            base.mkdir()
+            (base / "Border01.yaml").write_bytes(b"plain base\n")
+            legacy = output / f"{timestamp}_with_desc"
+            legacy.mkdir()
+            (legacy / "Border01.yaml").write_bytes(b"complete legacy A\n")
+            pointer = output / f"{timestamp}_with_desc_current"
+
+            def patch_staged(_dot, staging, _display, _authority):
+                (Path(staging) / "Border01.yaml").write_bytes(b"patched B\n")
+
+            with mock.patch.object(
+                C2, "_require_csv_input_authority",
+            ), mock.patch.object(
+                C2, "_patch_descriptions_in_directory",
+                side_effect=patch_staged,
+            ):
+                C2._run_patch_descriptions(
+                    "private-topology.dot", str(base),
+                    expected_csv_authority=object(),
+                )
+            self.assertTrue(pointer.is_symlink())
+            self.assertEqual(pointer, LOAD._select_cumulus_description_publication(base))
+            self.assertEqual(b"complete legacy A\n",
+                             (legacy / "Border01.yaml").read_bytes())
+            context = PUBLISHER._cumulus_dir_context(str(base))
+            self.assertIsNotNone(context)
+            selected = PUBLISHER._preferred_cumulus_contexts([context])
+            self.assertEqual(str(pointer), selected[0]["path"])
+            version = PUBLISHER._description_current_version(str(pointer), timestamp)
+            self.assertEqual(version, selected[0]["read_path"])
+            self.assertEqual(b"patched B\n",
+                             (Path(version) / "Border01.yaml").read_bytes())
+            (Path(version) / "Border01.yaml").write_bytes(b"tampered\n")
+            with self.assertRaisesRegex(ValueError, "hash|manifest"):
+                PUBLISHER._preferred_cumulus_contexts([context])
+            self.assertEqual(b"complete legacy A\n",
+                             (legacy / "Border01.yaml").read_bytes())
+
+    def test_real_setup_manifest_switch_then_load_restores_previous_project(self):
+        """A failed Q generation restores P links and its setup authority."""
+        with tempfile.TemporaryDirectory(prefix="r22-project-rollback-") as name:
+            root = Path(name)
+            p = root / "DAY0-Prepare/p"
+            q = root / "DAY0-Prepare/q"
+            p.mkdir(parents=True)
+            q.mkdir(parents=True)
+            for project in (p, q):
+                (project / "01-global.yaml").write_text(project.name + "\n")
+            ztp = root / "ztp"
+            common = ztp / "config/cumulus/template/01-global.yaml"
+            p_only = ztp / "p-only"
+            q_only = ztp / "q-only"
+            for path in (common, p_only, q_only):
+                path.parent.mkdir(parents=True, exist_ok=True)
+            manifest = ztp / ".setup_manifest"
+            lock_path = root / ".deployment.lock"
+            with mock.patch.multiple(
+                LOAD, HTTP_ROOT=root, ZTP_DIR=ztp, MANIFEST=manifest,
+                IMAGE_DIR=root / "image", DEPLOYMENT_LOCK=lock_path,
+            ), mock.patch.object(SETUP, "MANIFEST_FILE", str(manifest)):
+                SETUP._SetupLinkTransaction._restore_link(
+                    str(common), os.path.relpath(p / "01-global.yaml", common.parent),
+                )
+                SETUP._SetupLinkTransaction._restore_link(
+                    str(p_only), os.path.relpath(p, p_only.parent),
+                )
+                with mock.patch.object(
+                    SETUP, "_collect_expected_links",
+                    return_value=[str(common), str(p_only)],
+                ):
+                    SETUP._write_manifest(str(p.resolve()))
+                old = LOAD.snapshot_active_setup_state(expected_project=p)
+                SETUP._SetupLinkTransaction._restore_link(
+                    str(common), os.path.relpath(q / "01-global.yaml", common.parent),
+                )
+                SETUP._SetupLinkTransaction._restore_link(
+                    str(q_only), os.path.relpath(q, q_only.parent),
+                )
+                with mock.patch.object(
+                    SETUP, "_collect_expected_links",
+                    return_value=[str(common), str(q_only)],
+                ):
+                    SETUP._write_manifest(str(q.resolve()))
+                self.assertEqual(q.resolve(), LOAD.active_project())
+                descriptor = LOAD.acquire_deployment_lock(exclusive=True)
+                try:
+                    with mock.patch.object(
+                        LOAD, "active_managed_services", return_value=(),
+                    ):
+                        LOAD.restore_active_setup_state(
+                            old, current_project=q,
+                            deployment_lock_descriptor=descriptor,
+                            services_quiesced=True,
+                            runtime_backend=SimpleNamespace(name="supervisor"),
+                        )
+                finally:
+                    LOAD.release_deployment_lock(descriptor)
+                self.assertEqual(p.resolve(), LOAD.active_project())
+                self.assertEqual(old.manifest, manifest.read_bytes())
+                self.assertEqual(old.links[common], os.readlink(common))
+                self.assertEqual(old.links[p_only], os.readlink(p_only))
+                self.assertFalse(os.path.lexists(q_only))
+
     def test_c2_crash_residue_blocks_real_publisher_base_fallback(self):
         """C2's cold gap cannot make d publish the unpatched base tree."""
         with tempfile.TemporaryDirectory(prefix="r22-c2-publisher-gap-") as name:
@@ -875,6 +985,38 @@ class GenerationInputBindingWorkflowTests(unittest.TestCase):
                     hashlib.sha256((committed_a / "inputs/subnet").read_bytes()).hexdigest(),
                     payload["subnet_sha256"],
                 )
+                # Exercise the real ACTIVATE publication boundary after the
+                # real LOAD/c1/c2/d chain rejects B.  Keep every destination
+                # private and leave service-start authority absent.
+                pinned_state = private / "pinned-state"
+                pinned_state.mkdir()
+                pinned_settings = ACTIVATE.Settings(
+                    http_root=private / "A", project_name=project.name,
+                    scope="prod", switch_scope="eth",
+                    state_root=pinned_state, log_root=private / "pinned-log",
+                    apache_listeners=private / "pinned-apache-listeners.conf",
+                    dhcp_config=private / "pinned-dhcpd.conf",
+                    dhcp_leases=private / "pinned-leases",
+                )
+                pinned_settings.activation_marker.write_text("old marker\n")
+                pinned_settings.precommit_marker.write_text("old precommit\n")
+                with mock.patch.object(
+                    ACTIVATE, "capture_stable_network_snapshot",
+                    return_value=(network_links, network_addresses),
+                ), mock.patch.object(ACTIVATE, "ensure_runtime_directories"):
+                    _selected, _runtime, published = ACTIVATE.prepare_pinned_runtime(
+                        pinned_settings, selector_path=selector,
+                        expected_release_id=parent["release_id"],
+                    )
+                self.assertEqual(parent["release_id"],
+                                 published["selected_generation_release_id"])
+                self.assertEqual(
+                    published,
+                    json.loads(pinned_settings.runtime_plan.read_text()),
+                )
+                self.assertTrue(pinned_settings.apache_listeners.is_file())
+                self.assertFalse(pinned_settings.activation_marker.exists())
+                self.assertFalse(pinned_settings.precommit_marker.exists())
             finally:
                 source.write_bytes(bytes_a)
 

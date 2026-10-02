@@ -37,6 +37,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import select
 import shutil
 import stat
@@ -513,8 +514,11 @@ def _validate_final_yaml_outputs(*directories):
                 f"({os.path.basename(directory)})：{detail}"
             )
         for directory in {item[0] for item in failures}:
-            shutil.rmtree(directory, ignore_errors=True)
-            print(f"[CLEAN] 已删除无效输出目录：{directory}")
+            if directory.endswith(("_with_desc", "_with_desc_current")):
+                print(f"[ABORT] 保留只读 description 目录/指针供排查：{directory}")
+            else:
+                shutil.rmtree(directory, ignore_errors=True)
+                print(f"[CLEAN] 已删除无效输出目录：{directory}")
         raise ValueError("最终 YAML 存在重复 key 或语法错误，拒绝保留和发布")
     if checked:
         print(f"[OK] 最终 YAML 严格校验通过：{checked} 个输出目录")
@@ -6694,23 +6698,58 @@ def _inspect_description_output_recovery(final_dir, *, ignore_staging=None):
     A real ``*.old`` directory in either recognized shape is only a candidate
     for the former complete directory: the first rename is atomic, but this
     inspection has no durable manifest proving provenance after a cold crash.
-    Any residue, including an ambiguous or symlinked one, blocks publication.
+    Old rename residue and new staging/temporary-pointer residue block
+    publication. A version without a current pointer also blocks fallback.
+    Other unreferenced versions remain uncertain historical-or-orphan evidence;
+    they are never selected or removed automatically.
     """
     parent = os.path.dirname(os.path.abspath(final_dir))
     staging_prefix = f".{os.path.basename(final_dir)}.tmp."
+    new_staging_prefix = f".{os.path.basename(final_dir)}.stage."
+    current_temp_prefix = f".{os.path.basename(final_dir)}.current.tmp."
+    version_prefix = f".{os.path.basename(final_dir)}.version."
     ignored = os.path.abspath(ignore_staging) if ignore_staging else None
     residue = []
+    new_staging = []
+    current_temps = []
+    versions = []
     with os.scandir(parent) as entries:
         for entry in entries:
-            if not entry.name.startswith(staging_prefix):
-                continue
             path = os.path.join(parent, entry.name)
             if path == ignored:
                 continue
-            metadata = entry.stat(follow_symlinks=False)
-            residue.append((path, stat.S_ISDIR(metadata.st_mode)))
+            if entry.name.startswith(staging_prefix):
+                metadata = entry.stat(follow_symlinks=False)
+                residue.append((path, stat.S_ISDIR(metadata.st_mode)))
+            elif entry.name.startswith(new_staging_prefix):
+                new_staging.append(path)
+            elif entry.name.startswith(current_temp_prefix):
+                current_temps.append(path)
+            elif entry.name.startswith(version_prefix):
+                versions.append(path)
+    current = final_dir + "_current"
+    selected_name = os.readlink(current) if os.path.islink(current) else None
+    unreferenced = sorted(
+        path for path in versions if os.path.basename(path) != selected_name
+    )
+    inventory = {
+        "state": "clean", "old_candidate": None, "staging_candidate": None,
+        "new_staging": sorted(new_staging),
+        "current_temps": sorted(current_temps),
+        "unreferenced_versions": unreferenced,
+        "unreferenced_classification": (
+            "historical-or-orphan" if unreferenced and os.path.lexists(current)
+            else None
+        ),
+    }
     if not residue:
-        return {"state": "clean", "old_candidate": None, "staging_candidate": None}
+        if new_staging:
+            inventory["state"] = "stage-residue"
+        elif current_temps:
+            inventory["state"] = "current-pointer-temp-residue"
+        elif versions and not os.path.lexists(current):
+            inventory["state"] = "version-residue-no-current"
+        return inventory
 
     backups = [(path, real_dir) for path, real_dir in residue if path.endswith(".old")]
     stages = [(path, real_dir) for path, real_dir in residue if not path.endswith(".old")]
@@ -6720,18 +6759,12 @@ def _inspect_description_output_recovery(final_dir, *, ignore_staging=None):
         old = backups[0][0]
         if (not final_exists and len(stages) == 1 and stages[0][1]
                 and old == stages[0][0] + ".old"):
-            return {
-                "state": "gap-after-old-rename",
-                "old_candidate": old,
-                "staging_candidate": stages[0][0],
-            }
+            return {**inventory, "state": "gap-after-old-rename",
+                    "old_candidate": old, "staging_candidate": stages[0][0]}
         if final_real_dir and not stages:
-            return {
-                "state": "new-visible-before-cleanup",
-                "old_candidate": old,
-                "staging_candidate": None,
-            }
-    return {"state": "ambiguous", "old_candidate": None, "staging_candidate": None}
+            return {**inventory, "state": "new-visible-before-cleanup",
+                    "old_candidate": old}
+    return {**inventory, "state": "ambiguous"}
 
 
 def _require_clean_description_output(final_dir, *, ignore_staging=None):
@@ -6740,61 +6773,169 @@ def _require_clean_description_output(final_dir, *, ignore_staging=None):
     )
     if inventory["state"] != "clean":
         raise ValueError(
-            "unresolved description output backup or staging directory; "
+            "unresolved description output backup, staging, or version directory; "
             f"cold recovery inventory={inventory['state']}; "
             "stop publication and inspect the old candidate without modifying residue"
         )
 
 
+def _description_version_hashes(directory):
+    """Hash every regular version file; refuse links and special files."""
+    files = {}
+    for parent, names, basenames in os.walk(directory, followlinks=False):
+        for name in names:
+            path = os.path.join(parent, name)
+            if not stat.S_ISDIR(os.lstat(path).st_mode):
+                raise ValueError("description version contains a non-directory child")
+        for name in basenames:
+            path = os.path.join(parent, name)
+            relative = os.path.relpath(path, directory)
+            metadata = os.lstat(path)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                raise ValueError("description version contains a non-regular file")
+            if relative == ".description-version.json":
+                continue
+            digest = hashlib.sha256()
+            with open(path, "rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            files[relative] = digest.hexdigest()
+    return files
+
+
+def _fsync_description_version(directory):
+    """Flush version bytes and directory entries before pointer publication."""
+    directories = []
+    for parent, names, basenames in os.walk(directory, followlinks=False):
+        directories.append(parent)
+        for name in basenames:
+            path = os.path.join(parent, name)
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(path, flags)
+            try:
+                metadata = os.fstat(fd)
+                if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                    raise ValueError("description version file changed during fsync")
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+    for path in reversed(directories):
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
+def _fsync_description_parent(parent):
+    fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _description_unique_json_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("description version manifest contains duplicate keys")
+        result[key] = value
+    return result
+
+
+def _description_current_target(pointer, timestamp):
+    if not os.path.lexists(pointer):
+        return None
+    if not os.path.islink(pointer):
+        raise ValueError("description current pointer is not a symlink")
+    name = os.readlink(pointer)
+    if not re.fullmatch(rf"\.{re.escape(timestamp)}_with_desc\.version\.[0-9a-f]{{32}}", name):
+        raise ValueError("description current pointer target is invalid")
+    version = os.path.join(os.path.dirname(pointer), name)
+    if not stat.S_ISDIR(os.lstat(version).st_mode):
+        raise ValueError("description current pointer target is not a real directory")
+    manifest_path = os.path.join(version, ".description-version.json")
+    with open(manifest_path, encoding="utf-8") as stream:
+        manifest = json.load(stream, object_pairs_hook=_description_unique_json_pairs)
+    if (not isinstance(manifest, dict) or set(manifest) != {
+            "schema_version", "timestamp", "files",
+        } or manifest.get("schema_version") != 1
+            or manifest.get("timestamp") != timestamp
+            or manifest.get("files") != _description_version_hashes(version)):
+        raise ValueError("description current pointer version manifest mismatch")
+    return name
+
+
+def _selected_description_output(output_dir):
+    """Select a verified current patch, or retain a real legacy directory."""
+    legacy = output_dir + "_with_desc"
+    current = output_dir + "_with_desc_current"
+    _require_clean_description_output(legacy)
+    if os.path.lexists(legacy) and (
+            os.path.islink(legacy) or not os.path.isdir(legacy)):
+        raise ValueError("legacy description output is not a real directory")
+    if os.path.lexists(current):
+        _description_current_target(current, os.path.basename(output_dir))
+        return current
+    return legacy if os.path.isdir(legacy) else None
+
+
 def _run_patch_descriptions(dot_file, output_dir, *, expected_csv_authority=None):
-    """Patch a staged copy and replace the old same-name output only on success."""
+    """Publish a complete immutable patch version through one symlink switch."""
     baseline = expected_csv_authority or _csv_input_authority()
     final_dir = output_dir + "_with_desc"
+    timestamp = os.path.basename(output_dir)
+    pointer = output_dir + "_with_desc_current"
     parent = os.path.dirname(os.path.abspath(final_dir))
-    staging_prefix = f".{os.path.basename(final_dir)}.tmp."
     _require_clean_description_output(final_dir)
-    staging = tempfile.mkdtemp(
-        prefix=staging_prefix, dir=parent,
-    )
-    backup = staging + ".old"
+    if os.path.lexists(final_dir) and (
+            os.path.islink(final_dir) or not os.path.isdir(final_dir)):
+        raise ValueError("legacy description output is not a real directory")
+    old_target = _description_current_target(pointer, timestamp)
+    nonce = secrets.token_hex(16)
+    staging = os.path.join(parent, f".{timestamp}_with_desc.stage.{nonce}")
+    version_name = f".{timestamp}_with_desc.version.{nonce}"
+    version = os.path.join(parent, version_name)
+    pointer_temp = os.path.join(parent, f".{timestamp}_with_desc.current.tmp.{nonce}")
+    os.mkdir(staging)
     transcript = io.StringIO()
     try:
         shutil.copytree(output_dir, staging, dirs_exist_ok=True)
         with redirect_stdout(transcript):
             _patch_descriptions_in_directory(
-                dot_file, staging, final_dir, baseline,
+                dot_file, staging, pointer, baseline,
             )
         _require_csv_input_authority(baseline)
-        staged_identity = os.lstat(staging)
         _require_clean_description_output(final_dir, ignore_staging=staging)
-        if os.path.lexists(final_dir):
-            if os.path.islink(final_dir) or not os.path.isdir(final_dir):
-                raise ValueError("description output authority is not a real directory")
-            os.replace(final_dir, backup)
-        try:
-            os.replace(staging, final_dir)
-        except Exception:
-            if os.path.lexists(final_dir):
-                published = os.lstat(final_dir)
-                if (not stat.S_ISDIR(published.st_mode)
-                        or (published.st_dev, published.st_ino)
-                        != (staged_identity.st_dev, staged_identity.st_ino)
-                        or os.path.lexists(staging)):
-                    raise ValueError(
-                        "description output authority changed during rollback"
-                    )
-                # A post-rename exception still owns this exact candidate.
-                # Move it aside before restoring the prior directory.
-                os.replace(final_dir, staging)
-            if os.path.lexists(backup):
-                os.replace(backup, final_dir)
-            raise
-        if os.path.lexists(backup):
-            shutil.rmtree(backup)
+        if old_target != _description_current_target(pointer, timestamp):
+            raise ValueError("description current pointer changed during staging")
+        files = _description_version_hashes(staging)
+        manifest = {"schema_version": 1, "timestamp": timestamp, "files": files}
+        with open(os.path.join(staging, ".description-version.json"), "w", encoding="utf-8") as stream:
+            json.dump(manifest, stream, sort_keys=True, indent=2)
+            stream.write("\n")
+        staged_identity = os.lstat(staging)
+        _fsync_description_version(staging)
+        os.replace(staging, version)
+        _fsync_description_parent(parent)
+        published_identity = os.lstat(version)
+        if ((published_identity.st_dev, published_identity.st_ino)
+                != (staged_identity.st_dev, staged_identity.st_ino)
+                or _description_version_hashes(version) != files):
+            raise ValueError("description version changed after fsync")
+        os.symlink(version_name, pointer_temp)
+        _fsync_description_parent(parent)
+        if old_target != _description_current_target(pointer, timestamp):
+            raise ValueError("description current pointer changed before commit")
+        os.replace(pointer_temp, pointer)
+        _fsync_description_parent(parent)
         print(transcript.getvalue(), end="")
     finally:
         if os.path.isdir(staging) and not os.path.islink(staging):
             shutil.rmtree(staging)
+        if os.path.lexists(pointer_temp):
+            os.unlink(pointer_temp)
 
 
 def _topology_dot_files(suffix):
@@ -8281,7 +8422,11 @@ def eth_followup_text(ts, *, has_patch, target=None):
         row(f"   自动优先使用 patch：{'是' if has_patch else '否'}"),
         row("   Production/AIR 各自链接到独立 YAML；两份配置仅 hostname 不同"),
         row(f"   发布目录：{ts}_combine/；AIR 输入为 {ts}_air/"),
-        row(f"   源目录归档为 {ts}_combine_sources.tar.gz 后删除"),
+        row(
+            "   patch 源目录与 current 指针保留；AIR 源另行归档"
+            if has_patch else
+            f"   源目录归档为 {ts}_combine_sources.tar.gz 后删除"
+        ),
         *_production_handoff_rows(row),
         "╚" + "═" * width + "╝",
     ])
@@ -8323,13 +8468,13 @@ if __name__ == "__main__":
 
             _require_csv_input_authority(generation_csv_authority)
             ts            = os.path.basename(OUTPUT_DIR)
-            with_desc_dir = OUTPUT_DIR + "_with_desc"
-            has_patch     = os.path.isdir(with_desc_dir)
             try:
+                selected_patch = _selected_description_output(OUTPUT_DIR)
+                has_patch = selected_patch is not None
                 _validate_final_yaml_outputs(
-                    OUTPUT_DIR, with_desc_dir if has_patch else None,
+                    OUTPUT_DIR, selected_patch,
                 )
-                air_source_dir = with_desc_dir if has_patch else OUTPUT_DIR
+                air_source_dir = selected_patch or OUTPUT_DIR
                 if parsed.deployment_scope != "prod":
                     generate_air_hostname_configs(
                         air_source_dir, OUTPUT_DIR + "_air",

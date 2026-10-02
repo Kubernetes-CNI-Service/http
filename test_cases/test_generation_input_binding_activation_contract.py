@@ -959,6 +959,105 @@ class PinnedGenerationActivationDirectTests(unittest.TestCase):
                         settings, selector, expected_release_id=parent["release_id"],
                     )
 
+    def test_explicit_prepare_publishes_only_a_plan_not_start_authority(self):
+        with tempfile.TemporaryDirectory(prefix="r22-pinned-prepare-a-") as name:
+            root = Path(name)
+            settings, selector, generations, a, _b = _versioned_fixture(
+                root, runtime_endpoint=True,
+            )
+            settings = replace(
+                settings, state_root=root / "state", apache_listeners=root / "listeners.conf",
+            )
+            settings.state_root.mkdir()
+            settings.activation_marker.write_text('{"old": true}\n', encoding="utf-8")
+            ACTIVATE._precommit_path(settings).write_text(
+                '{"old": true}\n', encoding="utf-8",
+            )
+            (settings.project_dir / "02-dhcp-subnet_config.csv").write_bytes(
+                b"flat B invalid subnet\n",
+            )
+            runtime = load_script(
+                "r22_pinned_prepare_runtime", ROOT / "tools/ztp_service_runtime.py",
+            )
+            with mock.patch.object(ACTIVATE, "_load_runtime_module", return_value=runtime), \
+                    mock.patch.object(
+                        ACTIVATE, "capture_stable_network_snapshot",
+                        return_value=self._pinned_network_snapshot(),
+                    ), mock.patch.object(ACTIVATE, "ensure_runtime_directories"):
+                selected, _runtime, payload = ACTIVATE.prepare_pinned_runtime(
+                    settings, selector_path=selector, expected_release_id=a,
+                )
+            self.assertEqual(a, payload["selected_generation_release_id"])
+            self.assertEqual(_digest(generations / a / "inputs/subnet"),
+                             payload["subnet_sha256"])
+            self.assertEqual(payload, json.loads(settings.runtime_plan.read_text()))
+            self.assertIn("Listen 192.0.2.50:80", settings.apache_listeners.read_text())
+            self.assertEqual(("eth0",), tuple(selected.listener_names))
+            self.assertFalse(settings.activation_marker.exists())
+            self.assertFalse(ACTIVATE._precommit_path(settings).exists())
+            with self.assertRaises(ACTIVATE.ActivationError):
+                ACTIVATE.require_service_start_authority("dhcpd", settings, selected)
+
+    def test_explicit_prepare_wrong_release_stops_before_any_public_write(self):
+        with tempfile.TemporaryDirectory(prefix="r22-pinned-prepare-wrong-") as name:
+            root = Path(name)
+            settings, selector, _generations, a, _b = _versioned_fixture(
+                root, runtime_endpoint=True,
+            )
+            settings = replace(
+                settings, state_root=root / "state", apache_listeners=root / "listeners.conf",
+            )
+            runtime = load_script(
+                "r22_pinned_prepare_wrong_runtime", ROOT / "tools/ztp_service_runtime.py",
+            )
+            with mock.patch.object(ACTIVATE, "_load_runtime_module", return_value=runtime), \
+                    mock.patch.object(
+                        ACTIVATE, "capture_stable_network_snapshot",
+                        return_value=self._pinned_network_snapshot(),
+                    ), mock.patch.object(ACTIVATE, "ensure_runtime_directories"):
+                with self.assertRaises(ACTIVATE.ActivationError):
+                    ACTIVATE.prepare_pinned_runtime(
+                        settings, selector_path=selector,
+                        expected_release_id="0" * len(a),
+                    )
+            self.assertFalse(settings.runtime_plan.exists())
+            self.assertFalse(settings.apache_listeners.exists())
+
+    def test_explicit_prepare_rejects_selector_switch_before_publication(self):
+        with tempfile.TemporaryDirectory(prefix="r22-pinned-prepare-race-") as name:
+            root = Path(name)
+            settings, selector, _generations, a, b = _versioned_fixture(
+                root, runtime_endpoint=True,
+            )
+            settings = replace(
+                settings, state_root=root / "state", apache_listeners=root / "listeners.conf",
+            )
+            settings.state_root.mkdir()
+            runtime = load_script(
+                "r22_pinned_prepare_race_runtime", ROOT / "tools/ztp_service_runtime.py",
+            )
+            real_observe = ACTIVATE.observe_pinned_runtime
+
+            def switch_after_observation(*args, **options):
+                observed = real_observe(*args, **options)
+                _select_generation(selector, b)
+                return observed
+
+            with mock.patch.object(ACTIVATE, "_load_runtime_module", return_value=runtime), \
+                    mock.patch.object(
+                        ACTIVATE, "capture_stable_network_snapshot",
+                        return_value=self._pinned_network_snapshot(),
+                    ), mock.patch.object(
+                        ACTIVATE, "observe_pinned_runtime",
+                        side_effect=switch_after_observation,
+                    ), mock.patch.object(ACTIVATE, "ensure_runtime_directories"):
+                with self.assertRaises(ACTIVATE.ActivationError):
+                    ACTIVATE.prepare_pinned_runtime(
+                        settings, selector_path=selector, expected_release_id=a,
+                    )
+            self.assertFalse(settings.runtime_plan.exists())
+            self.assertFalse(settings.apache_listeners.exists())
+
     def test_old_a_generated_inventory_uses_frozen_bytes_after_flat_source_changes(self):
         with tempfile.TemporaryDirectory(prefix="r22-pinned-derived-") as name:
             settings, selector, _generations, _a, _b = _versioned_fixture(

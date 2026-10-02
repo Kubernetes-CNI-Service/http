@@ -316,6 +316,26 @@ class ServiceRuntimeState:
 
 
 @dataclass(frozen=True)
+class ActiveSetupState:
+    """Exact setup manifest and managed-link state for the active project."""
+
+    project: Path
+    manifest: bytes
+    manifest_mode: int
+    links: dict[Path, str]
+
+
+@dataclass(frozen=True)
+class CrossProjectRollbackContext:
+    """Old active runtime authority retained while another project is built."""
+
+    project: Path
+    selector_target: str
+    runtime_receipt: Path
+    setup_state: ActiveSetupState
+
+
+@dataclass(frozen=True)
 class ZtpPrefixPublicationSnapshot:
     """Recoverable state spanning prefix publication through parent commit."""
 
@@ -4559,6 +4579,7 @@ _ROLLBACK_PAYLOAD_LIMIT = 32 * 1024 * 1024
 _ROLLBACK_TOTAL_LIMIT = 128 * 1024 * 1024
 _ROLLBACK_RECEIPT_LIMIT = 1024 * 1024
 _ROLLBACK_MARKER_LIMIT = 128 * 1024
+_SETUP_MANIFEST_LIMIT = 4 * 1024 * 1024
 
 
 def _read_rollback_regular(
@@ -4608,6 +4629,128 @@ def _read_rollback_regular(
     finally:
         if descriptor >= 0:
             os.close(descriptor)
+
+
+def _setup_link_target_allowed(target: Path, project: Path) -> bool:
+    """Limit a setup receipt to its project or the shared image authority."""
+    canonical_project = project.resolve(strict=True)
+    if target == canonical_project or canonical_project in target.parents:
+        return True
+    try:
+        image_root = IMAGE_DIR.resolve(strict=True)
+    except OSError:
+        return False
+    return target == image_root or image_root in target.parents
+
+
+def _parse_active_setup_state(
+    payload: bytes, mode: int, *, expected_project: Path | None,
+) -> ActiveSetupState:
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise LoadError(f"setup rollback manifest is not UTF-8: {exc}") from exc
+    lines = text.splitlines()
+    prefix = "# setup manifest — proj: "
+    if not lines or not lines[0].startswith(prefix):
+        raise LoadError("setup rollback manifest header is invalid")
+    try:
+        project = Path(lines[0][len(prefix):]).resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise LoadError(f"setup rollback project is unavailable: {exc}") from exc
+    if not project.is_dir():
+        raise LoadError("setup rollback project is not a directory")
+    if expected_project is not None:
+        try:
+            expected = expected_project.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise LoadError(f"expected setup rollback project is unavailable: {exc}") from exc
+        if project != expected:
+            raise LoadError("setup rollback manifest names a different active project")
+    try:
+        root = HTTP_ROOT.resolve(strict=True)
+    except OSError as exc:
+        raise LoadError(f"setup rollback HTTP root is unavailable: {exc}") from exc
+    links: dict[Path, str] = {}
+    for value in lines[1:]:
+        if not value:
+            raise LoadError("setup rollback manifest contains an empty managed link")
+        link = Path(value)
+        if (not link.is_absolute() or os.path.normpath(value) != value
+                or link in links):
+            raise LoadError("setup rollback manifest link inventory is invalid")
+        try:
+            link.parent.resolve(strict=True).relative_to(root)
+            metadata = link.lstat()
+            raw_target = os.readlink(link)
+            resolved_target = link.resolve(strict=True)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise LoadError(f"setup rollback managed link is invalid: {link}: {exc}") from exc
+        if (not stat.S_ISLNK(metadata.st_mode) or metadata.st_nlink != 1
+                or os.path.isabs(raw_target)
+                or os.path.normpath(raw_target) != raw_target
+                or not _setup_link_target_allowed(resolved_target, project)):
+            raise LoadError(f"setup rollback managed link is unsafe: {link}")
+        links[link] = raw_target
+    if not links:
+        raise LoadError("setup rollback manifest has no managed links")
+    return ActiveSetupState(
+        project=project, manifest=payload, manifest_mode=mode, links=links,
+    )
+
+
+def snapshot_active_setup_state(
+    *, expected_project: Path | None = None,
+) -> ActiveSetupState:
+    """Read the active setup authority through one held regular-file FD."""
+    opened = _read_rollback_regular(MANIFEST, limit=_SETUP_MANIFEST_LIMIT)
+    if opened is None:  # pragma: no cover - missing_ok is deliberately false.
+        raise LoadError("setup rollback manifest is absent")
+    payload, mode = opened
+    state = _parse_active_setup_state(
+        payload, mode, expected_project=expected_project,
+    )
+    if active_project() != state.project:
+        raise LoadError("setup rollback manifest is not the active project authority")
+    return state
+
+
+def _validate_setup_state_receipt(state: ActiveSetupState) -> ActiveSetupState:
+    """Validate a detached in-memory setup receipt without consulting live links."""
+    if not isinstance(state, ActiveSetupState):
+        raise LoadError("setup rollback state type is invalid")
+    try:
+        text = state.manifest.decode("utf-8")
+        project = state.project.resolve(strict=True)
+        root = HTTP_ROOT.resolve(strict=True)
+    except (UnicodeDecodeError, OSError, RuntimeError) as exc:
+        raise LoadError(f"setup rollback receipt is invalid: {exc}") from exc
+    lines = text.splitlines()
+    prefix = "# setup manifest — proj: "
+    if (not lines or not lines[0].startswith(prefix)
+            or Path(lines[0][len(prefix):]).resolve(strict=True) != project
+            or not isinstance(state.manifest_mode, int)
+            or state.manifest_mode < 0 or state.manifest_mode > 0o777):
+        raise LoadError("setup rollback receipt header is invalid")
+    paths = [Path(value) for value in lines[1:]]
+    if (not paths or len(paths) != len(set(paths))
+            or set(paths) != set(state.links)):
+        raise LoadError("setup rollback receipt inventory is invalid")
+    for path in paths:
+        raw_target = state.links.get(path)
+        if (not path.is_absolute() or os.path.normpath(str(path)) != str(path)
+                or not isinstance(raw_target, str) or not raw_target
+                or os.path.isabs(raw_target)
+                or os.path.normpath(raw_target) != raw_target):
+            raise LoadError("setup rollback receipt link record is invalid")
+        try:
+            path.parent.resolve(strict=True).relative_to(root)
+            resolved = (path.parent / raw_target).resolve(strict=True)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise LoadError(f"setup rollback receipt target is invalid: {path}: {exc}") from exc
+        if not _setup_link_target_allowed(resolved, project):
+            raise LoadError(f"setup rollback receipt target escaped its authority: {path}")
+    return state
 
 
 def _describe_receipt_file(path: Path) -> dict[str, object]:
@@ -5198,18 +5341,44 @@ def prepare_active_runtime_rollback_receipt(
     return receipt_path
 
 
-def restore_runtime_rollback_receipt(
-    project: Path, receipt_directory: Path, *, expected_current: str,
-    deployment_lock_descriptor: int | None,
+def prepare_cross_project_rollback_context(
+    target_project: Path,
+) -> tuple[str | None, CrossProjectRollbackContext | None]:
+    """Freeze the actual active P before a load switches setup links to Q.
+
+    The target project's historical receipt is never a runtime authority for
+    the current host.  A legacy active project without a selected generation
+    keeps the established switch behavior, but cannot claim complete rollback.
+    """
+    target = target_project.resolve(strict=True)
+    active = active_project()
+    if active is None or active == target:
+        raise LoadError("cross-project rollback requires a different active project")
+    setup_state = snapshot_active_setup_state(expected_project=active)
+    active_selector = ensure_previous_generation_frozen(active)
+    if active_selector is None:
+        warn(
+            f"active project {active.name} has no frozen generation; "
+            "cross-project runtime rollback remains unavailable"
+        )
+        return ensure_previous_generation_frozen(target), None
+    receipt = prepare_active_runtime_rollback_receipt(active, active_selector)
+    if receipt is None:
+        raise LoadError("active project rollback receipt was not created")
+    target_selector = ensure_previous_generation_frozen(target)
+    return target_selector, CrossProjectRollbackContext(
+        project=active,
+        selector_target=active_selector,
+        runtime_receipt=receipt,
+        setup_state=setup_state,
+    )
+
+
+def _require_runtime_restore_guard(
+    *, deployment_lock_descriptor: int | None,
     services_quiesced: bool,
     runtime_backend: ServiceRuntimeBackend | None,
 ) -> None:
-    """Restore A after an uncommitted B generation failure, then verify all.
-
-    This is intentionally not an after-commit rollback API.  The A selector,
-    parent, report and installed DHCP must still be unchanged.  Any mismatch
-    fails before the first write and services must remain stopped.
-    """
     if (deployment_lock_descriptor is None or services_quiesced is not True
             or runtime_backend is None):
         raise LoadError("runtime rollback requires the deployment lock and quiesced services")
@@ -5243,6 +5412,149 @@ def restore_runtime_rollback_receipt(
             "runtime rollback requires every managed service to be stopped: "
             + ", ".join(still_active)
         )
+
+
+def _atomic_restore_setup_link(path: Path, raw_target: str) -> None:
+    temporary = path.parent / (
+        f".{path.name}.setup-rollback.{os.getpid()}.{secrets.token_hex(8)}"
+    )
+    try:
+        temporary.symlink_to(raw_target)
+        os.replace(temporary, path)
+        _fsync_parent_directory(path.parent)
+    finally:
+        if os.path.lexists(temporary):
+            temporary.unlink()
+
+
+def _atomic_restore_setup_manifest(state: ActiveSetupState) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{MANIFEST.name}.rollback.", dir=MANIFEST.parent,
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(state.manifest)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.chmod(state.manifest_mode)
+        os.replace(temporary, MANIFEST)
+        parent_descriptor = os.open(MANIFEST.parent, os.O_RDONLY)
+        try:
+            os.fsync(parent_descriptor)
+        finally:
+            os.close(parent_descriptor)
+    finally:
+        if os.path.exists(temporary):
+            temporary.unlink()
+
+
+def restore_active_setup_state(
+    state: ActiveSetupState, *, current_project: Path,
+    deployment_lock_descriptor: int | None,
+    services_quiesced: bool,
+    runtime_backend: ServiceRuntimeBackend | None,
+) -> None:
+    """Restore every setup-managed P link after an uncommitted Q failure.
+
+    This multi-path operation is deliberately fail-closed and is reported as
+    successful only after the old manifest and every link are re-read.  The
+    caller must keep services stopped if any write or post-check fails.
+    """
+    _require_runtime_restore_guard(
+        deployment_lock_descriptor=deployment_lock_descriptor,
+        services_quiesced=services_quiesced,
+        runtime_backend=runtime_backend,
+    )
+    old_project = state.project.resolve(strict=True)
+    target = current_project.resolve(strict=True)
+    if target == old_project:
+        raise LoadError("cross-project setup restore target equals old active project")
+
+    # Validate the detached receipt before inspecting mutable Q.  Parsing it
+    # against live links would accidentally validate Q using P's manifest.
+    expected = _validate_setup_state_receipt(state)
+    current = snapshot_active_setup_state()
+    if current.project == old_project:
+        if current.manifest != expected.manifest or current.links != expected.links:
+            raise LoadError("old setup authority is only partially restored")
+        return
+    if current.project != target:
+        raise LoadError("setup rollback current project is neither P nor expected Q")
+
+    # Complete preflight: no real file/directory may be overwritten or removed,
+    # and every saved P target must still resolve inside P/shared-image authority.
+    for path, raw_target in expected.links.items():
+        if os.path.lexists(path) and not path.is_symlink():
+            raise LoadError(f"setup rollback managed link became a real path: {path}")
+        try:
+            resolved = (path.parent / raw_target).resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise LoadError(f"setup rollback P target is unavailable: {path}: {exc}") from exc
+        if not _setup_link_target_allowed(resolved, old_project):
+            raise LoadError(f"setup rollback P target escaped its authority: {path}")
+    for path, raw_target in current.links.items():
+        if not path.is_symlink() or os.readlink(path) != raw_target:
+            raise LoadError(f"setup rollback Q managed link changed before restore: {path}")
+
+    for path, raw_target in expected.links.items():
+        if not (path.is_symlink() and os.readlink(path) == raw_target):
+            _atomic_restore_setup_link(path, raw_target)
+    for path in sorted(
+        set(current.links) - set(expected.links),
+        key=lambda item: len(item.parts), reverse=True,
+    ):
+        if not path.is_symlink() or os.readlink(path) != current.links[path]:
+            raise LoadError(f"setup rollback target-only link changed during restore: {path}")
+        path.unlink()
+        _fsync_parent_directory(path.parent)
+    _atomic_restore_setup_manifest(expected)
+    verified = snapshot_active_setup_state(expected_project=old_project)
+    if verified.manifest != expected.manifest or verified.links != expected.links:
+        raise LoadError("setup rollback post-verify failed; services remain stopped")
+    ok(f"active setup restore verified: {old_project.name}")
+
+
+def restore_cross_project_rollback_context(
+    context: CrossProjectRollbackContext, *, current_project: Path,
+    deployment_lock_descriptor: int | None,
+    services_quiesced: bool,
+    runtime_backend: ServiceRuntimeBackend | None,
+) -> None:
+    """Restore P setup identity first, then its flat A runtime receipt."""
+    restore_active_setup_state(
+        context.setup_state,
+        current_project=current_project,
+        deployment_lock_descriptor=deployment_lock_descriptor,
+        services_quiesced=services_quiesced,
+        runtime_backend=runtime_backend,
+    )
+    restore_runtime_rollback_receipt(
+        context.project, context.runtime_receipt,
+        expected_current=context.selector_target,
+        deployment_lock_descriptor=deployment_lock_descriptor,
+        services_quiesced=services_quiesced,
+        runtime_backend=runtime_backend,
+    )
+
+
+def restore_runtime_rollback_receipt(
+    project: Path, receipt_directory: Path, *, expected_current: str,
+    deployment_lock_descriptor: int | None,
+    services_quiesced: bool,
+    runtime_backend: ServiceRuntimeBackend | None,
+) -> None:
+    """Restore A after an uncommitted B generation failure, then verify all.
+
+    This is intentionally not an after-commit rollback API.  The A selector,
+    parent, report and installed DHCP must still be unchanged.  Any mismatch
+    fails before the first write and services must remain stopped.
+    """
+    _require_runtime_restore_guard(
+        deployment_lock_descriptor=deployment_lock_descriptor,
+        services_quiesced=services_quiesced,
+        runtime_backend=runtime_backend,
+    )
     canonical_project = project.resolve(strict=True)
     output = canonical_project / "99-output-ztp"
     receipt = _load_runtime_rollback_receipt(canonical_project, receipt_directory)
@@ -7135,6 +7447,44 @@ def restore_release_links(snapshot: dict[Path, Optional[str]]) -> None:
         warn("统一 release 未提交；已恢复本次 load 前的 YAML latest 链接")
 
 
+def _select_cumulus_description_publication(base: Path) -> Path:
+    """Choose C2's immutable current pointer, never an unsafe legacy fallback.
+
+    The publisher independently validates the pointed-to version manifest and
+    every file hash.  LOAD checks the namespace before handing it off so a
+    malformed or dangling current pointer cannot silently choose legacy/base.
+    """
+    output_root = base.parent
+    pointer = output_root / f"{base.name}_with_desc_current"
+    if os.path.lexists(pointer):
+        metadata = pointer.lstat()
+        if not stat.S_ISLNK(metadata.st_mode):
+            raise LoadError("Cumulus description current pointer is not a symlink")
+        target_name = os.readlink(pointer)
+        if not re.fullmatch(
+            rf"\.{re.escape(base.name)}_with_desc\.version\.[0-9a-f]{{32}}",
+            target_name,
+        ):
+            raise LoadError("Cumulus description current pointer target is invalid")
+        version = output_root / target_name
+        try:
+            version_stat = version.lstat()
+            canonical_parent = output_root.resolve(strict=True)
+            canonical_version = version.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise LoadError(f"Cumulus description current pointer is broken: {exc}") from exc
+        if (not stat.S_ISDIR(version_stat.st_mode)
+                or canonical_version != canonical_parent / target_name):
+            raise LoadError("Cumulus description current pointer escaped its version")
+        return pointer
+    legacy = output_root / f"{base.name}_with_desc"
+    if os.path.lexists(legacy):
+        if not stat.S_ISDIR(legacy.lstat().st_mode):
+            raise LoadError("Cumulus legacy description output is not a real directory")
+        return legacy
+    return base
+
+
 def generate_configs(
     device_types: frozenset[str], *, install_dhcp: bool, dry_run: bool = False,
     dhcp_enabled: bool = True,
@@ -7286,8 +7636,7 @@ def generate_configs(
             generated = newest_directory(output_root, re.compile(r"\d{8}_\d{6}"))
             if not generated:
                 raise LoadError("Cumulus 生成器执行成功但没有找到输出目录")
-            with_desc = output_root / (generated.name + "_with_desc")
-            publish = with_desc if with_desc.is_dir() else generated
+            publish = _select_cumulus_description_publication(generated)
             run(
                 [sys.executable, "d-hostname2mac.py", "-y", *scope_args,
                  *switch_args, *effective_options,
@@ -9619,6 +9968,7 @@ def main(argv: list[str] | None = None) -> int:
     previous_selector_target: str | None = None
     pinned_generation_candidate: Path | None = None
     runtime_rollback_receipt: Path | None = None
+    cross_project_rollback: CrossProjectRollbackContext | None = None
     deployment_lock_descriptor: int | None = None
     parent_candidate: PreparedParentRelease | None = None
     report_candidate = None
@@ -9738,8 +10088,17 @@ def main(argv: list[str] | None = None) -> int:
             # Freeze an already committed generation before template backfill,
             # key placeholders, or password updates can change A's sources.
             failure_phase = "冻结旧版 release 以供显式回退"
-            previous_selector_target = ensure_previous_generation_frozen(project)
-            if local_services_supported and previous_selector_target:
+            active_before = active_project() if local_services_supported else None
+            if (active_before is not None
+                    and active_before.resolve(strict=True) != project.resolve(strict=True)):
+                (
+                    previous_selector_target,
+                    cross_project_rollback,
+                ) = prepare_cross_project_rollback_context(project)
+            else:
+                previous_selector_target = ensure_previous_generation_frozen(project)
+            if (local_services_supported and previous_selector_target
+                    and cross_project_rollback is None):
                 # Capture/revalidate the truly active A before any template,
                 # password, public-key, setup, or project-input mutation.
                 runtime_rollback_receipt = prepare_active_runtime_rollback_receipt(
@@ -10152,8 +10511,20 @@ def main(argv: list[str] | None = None) -> int:
                 restore_ztp_prefix_publication(prefix_publication_snapshot)
             except (LoadError, OSError) as rollback_exc:
                 cleanup_errors.append(str(rollback_exc))
-        if (runtime_rollback_receipt is not None and not release_committed
+        if (cross_project_rollback is not None and not release_committed
                 and runtime_mutation_started):
+            try:
+                restore_cross_project_rollback_context(
+                    cross_project_rollback,
+                    current_project=project,
+                    deployment_lock_descriptor=deployment_lock_descriptor,
+                    services_quiesced=runtime_restore_safe,
+                    runtime_backend=runtime_backend_instance,
+                )
+            except (LoadError, OSError, ValueError) as rollback_exc:
+                cleanup_errors.append(f"active project runtime rollback failed: {rollback_exc}")
+        elif (runtime_rollback_receipt is not None and not release_committed
+              and runtime_mutation_started):
             try:
                 if previous_selector_target is None:
                     raise LoadError("A runtime rollback selector target is absent")
