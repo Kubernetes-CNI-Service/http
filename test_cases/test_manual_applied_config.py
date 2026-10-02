@@ -1940,32 +1940,47 @@ class ConfirmAppliedFingerprintTests(unittest.TestCase):
 
     def test_config_sync_outer_timeout_warns_unknown_and_does_not_retry(self):
         writes = []
-        with mock.patch.object(WORKER, "write_device_status", side_effect=lambda host, state, **kw: writes.append((state, kw))), \
-             mock.patch.object(WORKER, "latest_device_state", return_value={}), \
-             mock.patch.object(WORKER, "command_for", return_value=["local-test"]), \
-             mock.patch.object(WORKER.subprocess, "run", side_effect=MANUAL.subprocess.TimeoutExpired("sync", 1)) as run:
-            WORKER.execute("leaf01", "prod", 1, 1, 1, operation="replace-config",
-                           operation_id="op", trigger_id="tr", requested_operation="replace-config",
-                           preview_fingerprint={"current_sha256": "a" * 64})
+        with tempfile.TemporaryDirectory() as directory:
+            devices_csv = Path(directory) / "02-devices_config.csv"
+            devices_csv.write_text("hostname,type\nleaf01,eth\n", encoding="utf-8")
+            with mock.patch.object(WORKER, "DEVICES_CSV", devices_csv), \
+                 mock.patch.object(WORKER, "write_device_status", side_effect=lambda host, state, **kw: writes.append((state, kw))), \
+                 mock.patch.object(WORKER, "latest_device_state", return_value={}), \
+                 mock.patch.object(WORKER, "command_for", return_value=["local-test"]), \
+                 mock.patch.object(WORKER.subprocess, "run", side_effect=MANUAL.subprocess.TimeoutExpired("sync", 1)) as run, \
+                 mock.patch.object(WORKER, "accepted_result") as accepted:
+                WORKER.execute("leaf01", "prod", 1, 1, 1, operation="replace-config",
+                               operation_id="op", trigger_id="tr", requested_operation="replace-config",
+                               preview_fingerprint={"current_sha256": "a" * 64})
         self.assertEqual(["config_sync_running", "failed"], [state for state, _ in writes])
         self.assertIn("结果未知", writes[-1][1]["reason"])
         self.assertIn("不要自动重试", writes[-1][1]["reason"])
         self.assertEqual(1, run.call_count)
+        run.assert_called_once()
+        accepted.assert_not_called()
 
     def test_worker_rejects_unverified_triggered_for_web_and_cli_projection(self):
         result = {"hostname": "leaf01", "state": "triggered", "operation": "replace-config",
                   "operation_id": "op", "trigger_id": "tr"}
         self.assertFalse(WORKER.config_sync_verified(result, "leaf01", "op", "tr"))
         writes = []
-        with mock.patch.object(WORKER, "write_device_status", side_effect=lambda host, state, **kw: writes.append(state)), \
-             mock.patch.object(WORKER, "latest_device_state", return_value={}), \
-             mock.patch.object(WORKER, "command_for", return_value=["local-test"]), \
-             mock.patch.object(WORKER.subprocess, "run", return_value=completed()), \
-             mock.patch.object(WORKER, "accepted_result", return_value=result):
-            WORKER.execute("leaf01", "prod", 1, 1, 1, operation="replace-config",
-                           operation_id="op", trigger_id="tr", requested_operation="replace-config",
-                           preview_fingerprint={"current_sha256": "a" * 64})
+        with tempfile.TemporaryDirectory() as directory:
+            devices_csv = Path(directory) / "02-devices_config.csv"
+            devices_csv.write_text("hostname,type\nleaf01,eth\n", encoding="utf-8")
+            with mock.patch.object(WORKER, "DEVICES_CSV", devices_csv), \
+                 mock.patch.object(WORKER, "write_device_status", side_effect=lambda host, state, **kw: writes.append(state)), \
+                 mock.patch.object(WORKER, "latest_device_state", return_value={}), \
+                 mock.patch.object(WORKER, "command_for", return_value=["local-test"]), \
+                 mock.patch.object(WORKER.subprocess, "run", return_value=completed()) as run, \
+                 mock.patch.object(WORKER, "accepted_result", return_value=result) as accepted:
+                WORKER.execute("leaf01", "prod", 1, 1, 1, operation="replace-config",
+                               operation_id="op", trigger_id="tr", requested_operation="replace-config",
+                               preview_fingerprint={"current_sha256": "a" * 64})
         self.assertEqual(["config_sync_running", "failed"], writes)
+        run.assert_called_once()
+        accepted.assert_called_once_with(
+            "leaf01", "op", "tr", "replace-config", "manual_config_sync_web", set(),
+        )
 
     def test_trigger_rechecks_applied_fingerprint_before_mutation(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -5779,24 +5779,36 @@ print('{{"factory_records_active":true,"valid":true}}')
                 "expected_raw_sha256": "b" * 64, "receipt_refreshed": False,
             },
         }
-        with mock.patch.object(
-            self.manual_worker, "write_device_status", side_effect=record,
-        ), mock.patch.object(
-            self.manual_worker, "latest_device_state", return_value={},
-        ), mock.patch.object(
-            self.manual_worker, "command_for", return_value=["fixed-helper"],
-        ), mock.patch.object(
-            self.manual_worker.subprocess, "run", return_value=completed,
-        ), mock.patch.object(
-            self.manual_worker, "accepted_result", return_value=accepted,
-        ), mock.patch.object(
-            self.manual_worker, "wait_for_completion",
-        ) as wait_for_completion:
-            self.manual_worker.execute(
-                "EXAMPLE-Leaf01", "prod", 30, 60, 1,
-                operation="replace-config", operation_id="operation-1",
-                trigger_id="trigger-1", requested_operation="replace-config",
-                preview_fingerprint={"current_sha256": "a" * 64},
+        with tempfile.TemporaryDirectory(prefix="replace-config-worker-") as directory:
+            devices_csv = Path(directory) / "02-devices_config.csv"
+            devices_csv.write_text(
+                "hostname,type\nEXAMPLE-Leaf01,eth\n", encoding="utf-8",
+            )
+            with mock.patch.object(
+                self.manual_worker, "DEVICES_CSV", devices_csv,
+            ), mock.patch.object(
+                self.manual_worker, "write_device_status", side_effect=record,
+            ), mock.patch.object(
+                self.manual_worker, "latest_device_state", return_value={},
+            ), mock.patch.object(
+                self.manual_worker, "command_for", return_value=["fixed-helper"],
+            ), mock.patch.object(
+                self.manual_worker.subprocess, "run", return_value=completed,
+            ) as run, mock.patch.object(
+                self.manual_worker, "accepted_result", return_value=accepted,
+            ) as accepted_result, mock.patch.object(
+                self.manual_worker, "wait_for_completion",
+            ) as wait_for_completion:
+                self.manual_worker.execute(
+                    "EXAMPLE-Leaf01", "prod", 30, 60, 1,
+                    operation="replace-config", operation_id="operation-1",
+                    trigger_id="trigger-1", requested_operation="replace-config",
+                    preview_fingerprint={"current_sha256": "a" * 64},
+                )
+            run.assert_called_once()
+            accepted_result.assert_called_once_with(
+                "EXAMPLE-Leaf01", "operation-1", "trigger-1",
+                "replace-config", "manual_config_sync_web", set(),
             )
         self.assertEqual("config_sync_running", writes[0][0])
         self.assertEqual("config_sync_success", writes[-1][0])
