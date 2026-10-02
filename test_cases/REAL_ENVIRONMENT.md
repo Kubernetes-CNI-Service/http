@@ -15,6 +15,10 @@
 - 前置条件：owner 授权的隔离管理机和项目副本；当前源码的正式 full proof；保存客户设备 CSV、P2P、全局配置、拓扑策略及健康 parent release 的 SHA-256，记录服务状态。不得在真实客户源文件上执行篡改负例。
 - 步骤：以含旧 539 条 AIR 行的独立输入执行 mini，使当前拓扑只有 81 条静态 AIR 和 2 条动态 baseline；分别验证 DHCP enabled/disabled。确认源 CSV 的字节、inode、mtime 不变，Cumulus/hostname2mac/父 release 使用同一私有派生清单，动态 baseline 仍由 AIR JSON 补入；disabled 时五个 DHCP 输出不变。两次 load 之间合法修改客户输入应建立新快照；同一轮生成中修改客户源或派生文件应在提交前拒绝。
 - 证据：完整终端、源/派生摘要、parent `inputs.devices` 与 `generated_inputs.effective_devices`、子 release 设备集合、提交前复验及失败回滚记录；本机模拟通过不能替代此验收。
+- 与公钥报告交叉验收：同一隔离 Linux `--mini` load 若发布了两把实际公钥，须见证 parent 的
+  `generated_inputs` 参与 `release_id` 摘要，报告生成/提交及同运行时 `inspect` 均绑定该
+  release ID；另在隔离副本篡改派生摘要但保留旧 ID 时，报告须拒绝且不得启动服务。
+  记录报告与 parent 的前后身份、负例退出码和回滚状态；direct/workflow 通过不替代此见证。
 - 清理：保留已提交 parent 引用的派生目录和审计证据；仅清理本轮失败的私有暂存目录，恢复隔离副本和服务前像。不得删除其他运行或现有 parent 使用的目录。
 - 风险：AIR 地址冲突、服务切换、不同平台权限/文件系统行为；失败保持服务停止，不自动重试或放宽输入漂移门禁。
 
@@ -1684,6 +1688,9 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   父记录必须是已验证 schema 2，其 release_id 可由既定 release basis 重算；报告只在
   `project/99-output-ztp/generation-report.json`，具有 schema 3、固定 record_type、相同的
   project/release_id/generated_at 与按 laptop、management 排序的两条 type + SSH wire-blob 指纹。
+  对 `--mini` 派生清单的 parent，既定 release basis 还须包含可选的 `generated_inputs`；
+  对未派生 parent 则不得凭空加入该字段。两种 parent 均须由真实 load 产生，并在报告
+  build、commit、inspect 全链通过；派生字段漂移且 ID 未更新时必须在报告发布前拒绝。
   检查器成功输出必须与报告记录一致；项目根旧 ad-hoc schema-2 同名文件保持逐字节不变。
   独立 macOS/config-only 与 `--dry-run` 隔离对照不得声称或生成两把实际管理/笔记本公钥报告。
 - 拒绝、故障注入与重复执行：只在可回滚 VM/项目副本中分别制造空管理公钥占位、跨项目/错角色/

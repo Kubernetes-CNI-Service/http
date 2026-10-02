@@ -186,7 +186,8 @@ def _validate_parent(project: Path, parent: dict[str, Any]) -> None:
     if not isinstance(release_id, str) or not _RELEASE_RE.fullmatch(release_id):
         raise GenerationReportError("invalid parent release ID")
     try:
-        basis = {key: parent[key] for key in PARENT_BASIS}
+        basis_keys = PARENT_BASIS + (("generated_inputs",) if "generated_inputs" in parent else ())
+        basis = {key: parent[key] for key in basis_keys}
         expected = hashlib.sha256(json.dumps(
             basis, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
         ).encode("utf-8")).hexdigest()[:20]

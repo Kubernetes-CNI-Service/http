@@ -148,6 +148,53 @@ class GenerationReportContract(unittest.TestCase):
         )
         self.assertEqual(LAPTOP_FINGERPRINT, self.build()["public_keys"][0]["fingerprint"])
 
+    def test_derived_parent_digest_includes_generated_inputs_without_weakening_legacy_parent(self):
+        helper = report_helper()
+        legacy = self.build()
+        self.assertEqual(self.parent["release_id"], legacy["release_id"])
+
+        derived = dict(self.parent)
+        derived["generated_inputs"] = {"effective_devices": {
+            "path": ".load-inventory-fixed/02-devices_config.csv",
+            "sha256": "a" * 64,
+        }}
+        # Independent schema-2 release basis oracle: generated_inputs belongs
+        # to the digest only when the parent declares a derived inventory.
+        basis = {key: derived[key] for key in (
+            "project", "deployment_scope", "switch_scope", "dhcp_status",
+            "inputs", "input_sources", "components", "inventory",
+            "generated_inputs",
+        )}
+        derived["release_id"] = hashlib.sha256(json.dumps(
+            basis, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()[:20]
+        self.assertNotEqual(self.parent["release_id"], derived["release_id"])
+        self.parent = derived
+        (self.output / "current-release.json").write_text(
+            json.dumps(derived, sort_keys=True) + "\n", encoding="utf-8",
+        )
+        _, report = self.publish()
+        self.assertEqual(derived["release_id"], report["release_id"])
+        self.assertEqual(report, helper.inspect_generation_report(
+            self.project, published_dir=self.published,
+        ))
+
+        for label, changed in (
+            ("changed generated hash", {
+                **derived, "generated_inputs": {"effective_devices": {
+                    **derived["generated_inputs"]["effective_devices"],
+                    "sha256": "b" * 64,
+                }},
+            }),
+            ("omitted generated input", {
+                key: value for key, value in derived.items() if key != "generated_inputs"
+            }),
+            ("wrong release ID", {**derived, "release_id": "0" * 20}),
+        ):
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(helper.GenerationReportError, "parent release digest mismatch"):
+                    helper.build_report(self.project, changed, published_dir=self.published)
+
     def test_published_link_must_bind_this_projects_same_name_regular_leaf(self):
         helper = report_helper()
         other = self.root / "DAY0-Prepare/other"

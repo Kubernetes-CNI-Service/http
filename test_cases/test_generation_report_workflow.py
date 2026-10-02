@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import ast
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
+import hashlib
 import inspect
 import io
 import json
 from pathlib import Path
+import tempfile
 import textwrap
 from types import SimpleNamespace
 import unittest
@@ -226,6 +228,35 @@ class GenerationReportWorkflow(unittest.TestCase):
             helper.inspect_generation_report(
                 self.project, published_dir=self.published,
             )
+
+    def test_real_load_derived_parent_and_setup_keys_commit_inspectable_report(self):
+        self.real_setup_publish()
+        private = Path(tempfile.mkdtemp(prefix=".load-inventory-report-", dir=self.project))
+        private.chmod(0o700)
+        derived = private / "02-devices_config.csv"
+        derived.write_bytes(self.fixture.devices_file.read_bytes() + b"\n")
+        derived.chmod(0o600)
+        derived_sha = hashlib.sha256(derived.read_bytes()).hexdigest()
+        inputs = LOAD.replace(
+            self.fixture.inputs, effective_devices_file=derived,
+            effective_devices_sha256=derived_sha,
+        )
+        parent = LOAD.validate_and_publish_release(self.project, inputs, publish=False)
+        self.assertEqual({"path": derived.relative_to(self.project).as_posix(),
+                          "sha256": derived_sha},
+                         parent["generated_inputs"]["effective_devices"])
+        # This is the real load producer, not a parent fixture synthesized by
+        # the report consumer.  The report must accept precisely its release ID.
+        helper = report_helper()
+        report = helper.build_report(self.project, parent, published_dir=self.published)
+        self.assertEqual(parent["release_id"], report["release_id"])
+        parent_candidate = LOAD.prepare_current_release(self.project, parent)
+        report_candidate = helper.prepare_generation_report(self.project, report)
+        LOAD.commit_prepared_release(parent_candidate)
+        helper.commit_prepared_generation_report(report_candidate)
+        self.assertEqual(report, helper.inspect_generation_report(
+            self.project, published_dir=self.published,
+        ))
 
     def test_parent_commit_before_report_commit_has_no_valid_inspection(self):
         self.real_setup_publish()
