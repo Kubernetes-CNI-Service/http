@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import stat
 import struct
 import subprocess
@@ -273,6 +274,79 @@ def _write_same_inode(path: Path, data: bytes, original: os.stat_result) -> None
 
 class GenerationInputBindingWorkflowTests(unittest.TestCase):
     """LOAD's frozen A authority must survive a real downstream c2 read."""
+
+    def test_c2_process_death_between_version_and_pointer_commits(self):
+        """Fresh readers reject an orphan but accept only a committed pointer."""
+        child = """
+import os
+from pathlib import Path
+import signal
+import sys
+from unittest import mock
+from test_cases.module_loader import load_script
+
+root, base_name, crash_after = sys.argv[1], sys.argv[2], int(sys.argv[3])
+c2 = load_script("r22_c2_sigkill_child", Path(root) / "ztp/config/cumulus/template/90-c2-generate_configs.py")
+base = Path(base_name)
+real_replace = os.replace
+replaces = 0
+
+def patch_candidate(_dot, staging, _display, _authority):
+    (Path(staging) / "Border01.yaml").write_bytes(b"patched B\\n")
+
+def die_after_replace(src, dst):
+    global replaces
+    result = real_replace(src, dst)
+    replaces += 1
+    if replaces == crash_after:
+        os.kill(os.getpid(), signal.SIGKILL)
+    return result
+
+with mock.patch.object(c2, "_require_csv_input_authority"), mock.patch.object(
+    c2, "_patch_descriptions_in_directory", side_effect=patch_candidate,
+), mock.patch.object(c2.os, "replace", side_effect=die_after_replace):
+    c2._run_patch_descriptions("private-topology.dot", str(base), expected_csv_authority=object())
+"""
+        for crash_after in (1, 2):
+            with self.subTest(crash_after=crash_after), tempfile.TemporaryDirectory(
+                prefix="r22-c2-sigkill-",
+            ) as name:
+                output = Path(name) / "ztp/config/cumulus/template/99-output"
+                output.mkdir(parents=True)
+                timestamp = "20261002_120000"
+                base = output / timestamp
+                base.mkdir()
+                (base / "Border01.yaml").write_bytes(b"plain base\n")
+                legacy = output / f"{timestamp}_with_desc"
+                legacy.mkdir()
+                (legacy / "Border01.yaml").write_bytes(b"accepted legacy A\n")
+                before_legacy = _artifact_tree(legacy)
+                result = subprocess.run(
+                    [sys.executable, "-B", "-c", child, str(ROOT), str(base),
+                     str(crash_after)],
+                    cwd=ROOT, capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(-signal.SIGKILL, result.returncode, result.stderr)
+                self.assertEqual(before_legacy, _artifact_tree(legacy))
+                pointer = output / f"{timestamp}_with_desc_current"
+                context = PUBLISHER._cumulus_dir_context(str(base))
+                self.assertIsNotNone(context)
+                if crash_after == 1:
+                    self.assertFalse(os.path.lexists(pointer))
+                    self.assertEqual(
+                        "version-residue-no-current",
+                        C2._inspect_description_output_recovery(str(legacy))["state"],
+                    )
+                    with self.assertRaisesRegex(ValueError, "version without a current pointer"):
+                        PUBLISHER._preferred_cumulus_contexts([context])
+                else:
+                    self.assertTrue(pointer.is_symlink())
+                    self.assertEqual(pointer, LOAD._select_cumulus_description_publication(base))
+                    selected = PUBLISHER._preferred_cumulus_contexts([context])
+                    self.assertEqual(str(pointer), selected[0]["path"])
+                    self.assertEqual(
+                        b"patched B\n", (Path(selected[0]["read_path"]) / "Border01.yaml").read_bytes(),
+                    )
 
     def test_c2_single_pointer_is_the_real_d_input_and_tamper_never_falls_back(self):
         """C2's immutable publish pointer is what the real d resolver consumes."""
