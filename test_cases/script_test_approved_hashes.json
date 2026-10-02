@@ -24,14 +24,14 @@
       "root-entrypoint-workflow": "NOT COVERED (requires Linux EUID 0 private namespace)"
     },
     "schema_version": 1,
-    "snapshot_sha256": "df20eb9ab39cf6f9bef347949ed0670ec1c27ae79a6a4958b166f28da4c6f3a9"
+    "snapshot_sha256": "a30dddd302f1ee534e487643ee9703ccd0651eeb5ac7df1c36037f6575d8244f"
   },
   "impact_manifest_sha256": "1256455c3a530b0268250811e47450a33afb270981cd6feb6026249d2e34b0ef",
   "schema_version": 1,
   "scripts": {
     "DAY0-Prepare/01-a-setup.py": {
       "canonical": "DAY0-Prepare/01-a-setup.py",
-      "sha256": "fce9f2ab3c4e3fcfa96da52d3cc337fe8121c39a6f80b38b96826e2a17746dea"
+      "sha256": "9f4263e0984839470b745090da2b2c342184964a4d09577ebdce17c60f67ca14"
     },
     "DAY0-Prepare/02-unsetup.py": {
       "canonical": "DAY0-Prepare/02-unsetup.py",
@@ -842,7 +842,7 @@
     "test_cases.test_full_flow_integration": "b36d9d5912e8458dcb99a92bf060e346717d0ff950c67086c47b6246a4e3fbbf",
     "test_cases.test_generation_input_binding_activation_contract": "75f6fb0ddc2bebf26560172316ac5a4f2bb0cb860d4a54ccfbc25080f9516760",
     "test_cases.test_generation_input_binding_contract": "0efdb5fe23c5c46b60747681105b3996e8049032b89702aac3003f3ab711eb67",
-    "test_cases.test_generation_input_binding_workflow": "6b36b36246ade27d8619e0621ba6b29e559f2caf9c9caa159993c9df08fa42ba",
+    "test_cases.test_generation_input_binding_workflow": "f83cdef8d802d1524e88c8f2f8a4788727c33de1ea97213217605f6a65d475f6",
     "test_cases.test_generation_report_contract": "8dee1457b79b2bfa92344c67499fd10671d5b4dec85fc64fc003f3c74fb3dfbc",
     "test_cases.test_generation_report_workflow": "f292f34cc2b7738c60a8b9874cc348c2045a8dfbbdac92b62deefca8dbd8a7f0",
     "test_cases.test_http_port_contract": "9ea7d6ed55a9564c05d6dbab1fad7cfbb82b46b90279f01b5ced7f66469c6839",
@@ -907,7 +907,7 @@
     "test_cases.test_monitor_writer_quiesce": "5efe4499c9ccb4f051d914a8584abcc0fc56023ac0bbc734c9c659a8967bed99",
     "test_cases.test_monitor_writer_quiesce_workflow": "90c51165076038c17908576ddb77ad0812c26d99fac644521e8649e346f6e291",
     "test_cases.test_nvue_normalizer": "6e22f0f89353d0042391330675e4cce387931e896f4b44f57911e2dccb85b230",
-    "test_cases.test_ops_deployment_review": "bc75830abca70681b5172ea481b04bbc17360c9ce6e977ca7b279a7028c8ec53",
+    "test_cases.test_ops_deployment_review": "1d74ba10b079c611744ba404f373e2d2f9d3a6d743c720f96630de2d75e234cf",
     "test_cases.test_optimize_output_layout": "b37ffae7f3f1c81af403c33efd981976e766ee1face193a43410a57fa4dd6b7f",
     "test_cases.test_p2p_selection_contract": "1ae3acea6949f668bf09c677b49e72d74389d488c4ecefe5fdb5975088560573",
     "test_cases.test_p2p_selection_workflow": "767c38145793262ffaa08c99d4010b8ca52668ef727ea42e4969b99152e64968",
