@@ -24,7 +24,7 @@
       "root-entrypoint-workflow": "NOT COVERED (requires Linux EUID 0 private namespace)"
     },
     "schema_version": 1,
-    "snapshot_sha256": "7cf2e01c3a69633d6d4e8f06c9de7b10241f612adf63998572255591d6382917"
+    "snapshot_sha256": "08a6529916d87fdab8a58c7064f8a39c5315ee775e421fbf4a5559a126ec71d9"
   },
   "impact_manifest_sha256": "1256455c3a530b0268250811e47450a33afb270981cd6feb6026249d2e34b0ef",
   "schema_version": 1,
@@ -607,7 +607,7 @@
     },
     "ztp/config/cumulus/template/90-c2-generate_configs.py": {
       "canonical": "ztp/config/cumulus/template/90-c2-generate_configs.py",
-      "sha256": "f3abd3fca652b0ed211a00ce6d94e470a030b2fcdd55801324719809d440d381"
+      "sha256": "d5dd10b6887e14ac65a4501709f428e3e15252c98cda6c95ea1a63cb0d87e998"
     },
     "ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py": {
       "canonical": "ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py",
@@ -627,7 +627,7 @@
     },
     "ztp/config/nvos/template/90-c2-generate_configs.py": {
       "canonical": "ztp/config/cumulus/template/90-c2-generate_configs.py",
-      "sha256": "f3abd3fca652b0ed211a00ce6d94e470a030b2fcdd55801324719809d440d381"
+      "sha256": "d5dd10b6887e14ac65a4501709f428e3e15252c98cda6c95ea1a63cb0d87e998"
     },
     "ztp/config/nvos/template/P2P/p2p-to-validation.py": {
       "canonical": "ztp/config/nvos/template/P2P/p2p-to-validation.py",
@@ -841,7 +841,7 @@
     "test_cases.test_flow_release_platform_matrix": "5393074aa3a6bff479be79d4e3f3b185acae2dc3fa58dedd8a7fa6afaa32ed09",
     "test_cases.test_full_flow_integration": "b36d9d5912e8458dcb99a92bf060e346717d0ff950c67086c47b6246a4e3fbbf",
     "test_cases.test_generation_input_binding_activation_contract": "75f6fb0ddc2bebf26560172316ac5a4f2bb0cb860d4a54ccfbc25080f9516760",
-    "test_cases.test_generation_input_binding_contract": "c4e495e5e4890389b9f1c6d0090a6f73e951a58ae3d1a8aa90b97bae2c23a795",
+    "test_cases.test_generation_input_binding_contract": "0efdb5fe23c5c46b60747681105b3996e8049032b89702aac3003f3ab711eb67",
     "test_cases.test_generation_input_binding_workflow": "3ceac324f1b4a0a944029bca6adf9eebcefdc67b14a59c024dc790fdc3ae4f1c",
     "test_cases.test_generation_report_contract": "8dee1457b79b2bfa92344c67499fd10671d5b4dec85fc64fc003f3c74fb3dfbc",
     "test_cases.test_generation_report_workflow": "f292f34cc2b7738c60a8b9874cc348c2045a8dfbbdac92b62deefca8dbd8a7f0",
