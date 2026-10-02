@@ -6881,6 +6881,59 @@ def _selected_description_output(output_dir):
     return legacy if os.path.isdir(legacy) else None
 
 
+def _pin_selected_description_output(output_dir):
+    """Bind this invocation's reader to one verified, real version directory."""
+    selected = _selected_description_output(output_dir)
+    if selected is None:
+        return None
+    if selected.endswith("_with_desc_current"):
+        timestamp = os.path.basename(output_dir)
+        pointer_before = os.lstat(selected)
+        target = _description_current_target(selected, timestamp)
+        read_path = os.path.join(os.path.dirname(selected), target)
+        version_before = os.lstat(read_path)
+        pointer_after = os.lstat(selected)
+        if ((pointer_before.st_dev, pointer_before.st_ino) !=
+                (pointer_after.st_dev, pointer_after.st_ino)):
+            raise ValueError("description current pointer changed while pinning")
+        return {
+            "display_path": selected,
+            "read_path": read_path,
+            "target": target,
+            "pointer_identity": (pointer_after.st_dev, pointer_after.st_ino),
+            "version_identity": (version_before.st_dev, version_before.st_ino),
+        }
+    metadata = os.lstat(selected)
+    return {
+        "display_path": selected,
+        "read_path": selected,
+        "target": None,
+        "pointer_identity": None,
+        "version_identity": (metadata.st_dev, metadata.st_ino),
+    }
+
+
+def _verify_pinned_description_output(output_dir, pinned):
+    """Reject a reselected publication after consuming the pinned directory."""
+    if pinned is None:
+        if _selected_description_output(output_dir) is not None:
+            raise ValueError("description output changed after selection")
+        return
+    if _selected_description_output(output_dir) != pinned["display_path"]:
+        raise ValueError("description output changed after selection")
+    if pinned["target"] is not None:
+        pointer = pinned["display_path"]
+        if (_description_current_target(pointer, os.path.basename(output_dir)) !=
+                pinned["target"]):
+            raise ValueError("description current pointer changed after selection")
+        metadata = os.lstat(pointer)
+        if (metadata.st_dev, metadata.st_ino) != pinned["pointer_identity"]:
+            raise ValueError("description current pointer changed after selection")
+    metadata = os.lstat(pinned["read_path"])
+    if (metadata.st_dev, metadata.st_ino) != pinned["version_identity"]:
+        raise ValueError("description version changed after selection")
+
+
 def _run_patch_descriptions(dot_file, output_dir, *, expected_csv_authority=None):
     """Publish a complete immutable patch version through one symlink switch."""
     baseline = expected_csv_authority or _csv_input_authority()
@@ -8469,16 +8522,19 @@ if __name__ == "__main__":
             _require_csv_input_authority(generation_csv_authority)
             ts            = os.path.basename(OUTPUT_DIR)
             try:
-                selected_patch = _selected_description_output(OUTPUT_DIR)
-                has_patch = selected_patch is not None
+                pinned_patch = _pin_selected_description_output(OUTPUT_DIR)
+                selected_patch = pinned_patch["read_path"] if pinned_patch else None
+                has_patch = pinned_patch is not None
                 _validate_final_yaml_outputs(
                     OUTPUT_DIR, selected_patch,
                 )
                 air_source_dir = selected_patch or OUTPUT_DIR
+                _verify_pinned_description_output(OUTPUT_DIR, pinned_patch)
                 if parsed.deployment_scope != "prod":
                     generate_air_hostname_configs(
                         air_source_dir, OUTPUT_DIR + "_air",
                     )
+                _verify_pinned_description_output(OUTPUT_DIR, pinned_patch)
             except ValueError as exc:
                 print(f"[ABORT] {exc}")
                 sys.exit(1)
