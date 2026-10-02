@@ -32,6 +32,7 @@ import os
 import platform
 from pathlib import Path
 import re
+import runpy
 import shutil
 import stat
 import subprocess
@@ -141,6 +142,7 @@ _P2P_SOURCE = None # 本次 setup 选定的唯一 P2P 源
 _P2P_SOURCE_IDENTITY = None  # 外部 p2p/ 目录与源文件的选择时身份
 _LINK_ERRORS = 0   # 本次 setup 中所有固定/动态链接错误数
 _LINK_TRANSACTION = None  # 当前 setup 的整批链接回滚快照
+_SETUP_SWITCH_WAL_CONTEXT = None  # 跨项目 setup 子进程的持锁 WAL 写前登记
 _INFRA_LOG_MIGRATION = None  # 待 manifest 成功后清理的原目录备份
 _CONFIRM_PROJECT_SWITCH = False  # 自动化对跨项目切换的独立显式确认
 
@@ -218,6 +220,7 @@ def _make_link(link_path, target_path):
         print(_c(CYAN, f"  [DRY] {os.path.relpath(link_path, HTTP_BASE)}  →  {rel_target}"))
         return "dry"
 
+    registered = False
     if os.path.islink(link_path):
         if os.path.realpath(link_path) == os.path.realpath(target_path):
             print(f"  [SKIP] {os.path.relpath(link_path, HTTP_BASE)} 已正确指向目标")
@@ -225,12 +228,16 @@ def _make_link(link_path, target_path):
         if not _confirm_overwrite(link_path):
             print(f"  [SKIP] 保留原链接")
             return "skipped"
+        _register_setup_switch_link_before_write(link_path, target_path)
+        registered = True
         os.remove(link_path)
     elif os.path.exists(link_path):
         print(_c(RED, f"  [ERROR] {link_path} 是实际文件/目录，跳过（请手动处理）"))
         _LINK_ERRORS += 1
         return "error"
 
+    if not registered:
+        _register_setup_switch_link_before_write(link_path, target_path)
     os.makedirs(link_dir, exist_ok=True)
     os.symlink(rel_target, link_path)
     print(_c(GREEN, f"  [LINK] {os.path.relpath(link_path, HTTP_BASE)}  →  {rel_target}"))
@@ -268,8 +275,17 @@ def _make_exact_link(link_path, target_path, canonical=False):
         print(_c(RED, f"  [ERROR] {link_path} 是实际文件/目录，跳过（请手动处理）"))
         _LINK_ERRORS += 1
         return "error"
-    os.makedirs(link_dir, exist_ok=True)
     temp_link = os.path.join(link_dir, f".{os.path.basename(link_path)}.tmp.{os.getpid()}")
+    if _SETUP_SWITCH_WAL_CONTEXT is not None:
+        if os.path.lexists(temp_link):
+            raise ValueError(f"setup 原子链接临时位置已占用：{temp_link}")
+        # Derive the target from the exact relative bytes the writer will put
+        # in both links.  A child killed after symlink() or replace() then has
+        # only WAL-declared P/Q link values on disk.
+        writer_target = os.path.normpath(os.path.join(link_dir, rel_target))
+        _register_setup_switch_link_before_write(link_path, writer_target)
+        _register_setup_switch_link_before_write(temp_link, writer_target)
+    os.makedirs(link_dir, exist_ok=True)
     try:
         if os.path.lexists(temp_link):
             os.remove(temp_link)
@@ -807,6 +823,23 @@ def _publickey_roots():
     )
 
 
+def _register_setup_switch_link_before_write(link, target):
+    """Durably record a cross-project link value before the shared write."""
+    if _SETUP_SWITCH_WAL_CONTEXT is None:
+        return
+    load_api, descriptor = _SETUP_SWITCH_WAL_CONTEXT
+    try:
+        load_api["register_setup_switch_journal_link"](
+            Path(ZTP) / ".setup-switch-journal.json", Path(link), Path(target),
+            deployment_lock_descriptor=descriptor,
+            services_quiesced=True,
+            runtime_backend=load_api["service_runtime_backend"](),
+            allow_existing_exact=True,
+        )
+    except load_api["LoadError"] as exc:
+        raise ValueError(f"setup 链接 WAL 写前登记失败：{link}: {exc}") from exc
+
+
 def _process_pubkeys(proj_dir):
     """Publish non-empty project keys to both managed public-key roots."""
     pubs = glob.glob(os.path.join(proj_dir, "*.pub"))
@@ -840,7 +873,8 @@ def _process_pubkeys(proj_dir):
                 os.remove(old)
                 print(_c(GREEN, f"  [DEL] 旧公钥链接 {os.path.relpath(old, HTTP_BASE)}"))
         for src in sorted(pubs):
-            _make_link(os.path.join(key_dir, os.path.basename(src)), src)
+            link = os.path.join(key_dir, os.path.basename(src))
+            _make_link(link, src)
 
 
 def _regular_publish_marker(directory):
@@ -3267,11 +3301,8 @@ def _managed_ztp_link_candidates():
     return sorted({path for path in paths if os.path.islink(path)})
 
 
-def _unsetup_previous(proj_dir):
-    """
-    在 setup 之前清理遗留链接：
-      1. setup 管理范围内所有指向其他 DAY0-Prepare 项目（非 proj_dir）的软链接
-    """
+def _previous_project_links_to_remove(proj_dir):
+    """Read the exact managed links that generic setup cleanup would unlink."""
     proj_real = os.path.realpath(proj_dir)
     here_real = os.path.realpath(HERE)   # DAY0-Prepare/
     to_del = []
@@ -3314,7 +3345,12 @@ def _unsetup_previous(proj_dir):
         to_del.append(lp)
 
     # 去重（同一路径可能来自多个固定管理集合）
-    seen = set(); to_del = [lp for lp in to_del if not (lp in seen or seen.add(lp))]
+    seen = set(); return [lp for lp in to_del if not (lp in seen or seen.add(lp))]
+
+
+def _unsetup_previous(proj_dir):
+    """Remove old managed project links after the cross-project prewrite fence."""
+    to_del = _previous_project_links_to_remove(proj_dir)
 
     if not to_del:
         return True
@@ -3883,6 +3919,7 @@ def _bind_infra_logs(proj_dir):
     if not os.path.lexists(path):
         if _read_infra_log_receipt() is not None:
             raise ValueError("日志迁移凭据存在，但原目录与备份均不可用")
+        _register_setup_switch_link_before_write(path, target)
         os.symlink(relative, path)
         return "linked"
     if not os.path.islink(path):
@@ -3899,10 +3936,12 @@ def _bind_infra_logs(proj_dir):
     if previous_project != Path(proj_dir):
         if not _authorize_project_switch(proj_dir, 1):
             raise ValueError(f"未授权切换 {INFRA_LOG_REL} 的归属")
+    _register_setup_switch_link_before_write(path, target)
     identity = os.lstat(path)
     temporary = os.path.join(os.path.dirname(path),
                              f".logs.setup.{os.getpid()}.{time.monotonic_ns()}")
     try:
+        _register_setup_switch_link_before_write(temporary, target)
         os.symlink(relative, temporary)
         current = os.lstat(path)
         if ((current.st_dev, current.st_ino) != (identity.st_dev, identity.st_ino)
@@ -4220,14 +4259,165 @@ def _setup_transaction_paths(proj_dir):
     return paths
 
 
+def inventory_setup_switch_shared_paths(old_project, new_project):
+    """Read-only P→Q write-surface inventory, never a setup/WAL authorization.
+
+    This deliberately cannot return ``complete=True``.  The current setup
+    creates some Q targets later in its transaction and may migrate real
+    latest/log directories; neither transition has a durable backup record in
+    this diagnostic.  A caller must not use this result to publish links.
+    """
+    root = os.path.realpath(HTTP_BASE)
+    projects_root = os.path.realpath(HERE)
+
+    def direct_project(value):
+        path = os.fspath(value)
+        if (not os.path.isabs(path) or os.path.normpath(path) != path
+                or os.path.islink(path) or os.path.realpath(path) != path
+                or os.path.dirname(path) != projects_root):
+            raise ValueError("setup switch inventory requires a real direct project")
+        metadata = os.lstat(path)
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError("setup switch inventory project is not a directory")
+        return path
+
+    old = direct_project(old_project)
+    new = direct_project(new_project)
+    if old == new:
+        raise ValueError("setup switch inventory requires distinct projects")
+
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(MANIFEST_FILE, flags)
+    try:
+        before = os.fstat(descriptor)
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                or before.st_size > 4 * 1024 * 1024):
+            raise ValueError("setup switch inventory manifest has an unsafe shape")
+        with os.fdopen(os.dup(descriptor), "rb") as stream:
+            payload = stream.read(4 * 1024 * 1024 + 1)
+        after = os.fstat(descriptor)
+        if (len(payload) != before.st_size or len(payload) > 4 * 1024 * 1024
+                or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+                != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)):
+            raise ValueError("setup switch inventory manifest changed while reading")
+    finally:
+        os.close(descriptor)
+    lines = payload.decode("utf-8").splitlines()
+    if not lines or lines[0] != f"# setup manifest — proj: {old}":
+        raise ValueError("setup switch inventory P manifest header is invalid")
+    old_links = set()
+    p_link_state = {}
+    for raw in lines[1:]:
+        path = os.path.abspath(raw)
+        if (not raw or not os.path.isabs(raw) or path != raw
+                or os.path.commonpath((root, path)) != root
+                or path in old_links):
+            raise ValueError("setup switch inventory P link is invalid")
+        before_link = os.lstat(path)
+        if not stat.S_ISLNK(before_link.st_mode) or before_link.st_nlink != 1:
+            raise ValueError("setup switch inventory P link shape is invalid")
+        target = os.readlink(path)
+        after_link = os.lstat(path)
+        if (before_link.st_dev, before_link.st_ino, before_link.st_mode,
+                before_link.st_size, before_link.st_mtime_ns) != (
+                after_link.st_dev, after_link.st_ino, after_link.st_mode,
+                after_link.st_size, after_link.st_mtime_ns):
+            raise ValueError("setup switch inventory P link changed while reading")
+        if not target or os.path.isabs(target) or os.path.normpath(target) != target:
+            raise ValueError("setup switch inventory P link target is invalid")
+        old_links.add(path)
+        p_link_state[path] = {
+            "dev": before_link.st_dev,
+            "ino": before_link.st_ino,
+            "mode": stat.S_IMODE(before_link.st_mode),
+            "raw_target": target,
+        }
+    if not old_links:
+        raise ValueError("setup switch inventory P manifest has no links")
+
+    # The expected Q list includes fixed and currently discoverable dynamic
+    # public keys, images, monitor links, and optimize aliases.  It remains a
+    # candidate list: setup can create inputs or outputs after this call.
+    q_candidates = set(_collect_expected_links(new))
+    transaction_paths = set(_setup_transaction_paths(new))
+    infra_logs = os.path.join(HTTP_BASE, INFRA_LOG_REL)
+    infra_receipt = _infra_log_receipt_path()
+    receipt_pending = os.path.lexists(infra_receipt)
+    if not os.path.lexists(infra_logs):
+        infra_kind = "missing"
+    else:
+        info = os.lstat(infra_logs)
+        if stat.S_ISLNK(info.st_mode):
+            infra_kind = "symlink"
+        elif stat.S_ISDIR(info.st_mode):
+            infra_kind = "real-directory"
+        else:
+            infra_kind = "unsafe"
+
+    materialized = []
+    for platform, output_name in LATEST_YAML_SPECS:
+        output_rel = os.path.join("config", platform, "template", output_name)
+        project_outputs = {
+            project_rel for link_rel, project_rel, kind in MAPPINGS
+            if os.path.normpath(link_rel) == output_rel and kind == "dir"
+        }
+        if len(project_outputs) != 1:
+            raise ValueError("setup switch inventory latest mapping is ambiguous")
+        latest = os.path.join(new, project_outputs.pop(), "latest")
+        if os.path.lexists(latest):
+            metadata = os.lstat(latest)
+            if stat.S_ISDIR(metadata.st_mode):
+                materialized.append(latest)
+            elif not stat.S_ISLNK(metadata.st_mode):
+                raise ValueError("setup switch inventory latest is not a directory or link")
+
+    managed = old_links | q_candidates | transaction_paths | {infra_logs}
+    if any(os.path.commonpath((root, os.path.abspath(path))) != root for path in managed):
+        raise ValueError("setup switch inventory managed path escaped HTTP root")
+    blockers = [
+        "exact Q targets and future dynamic links are not durably frozen",
+        "setup shared writes are not fenced by this diagnostic inventory",
+    ]
+    if materialized:
+        blockers.append("materialized latest backup identity is not durable")
+    if receipt_pending:
+        blockers.append("pending infra logs receipt requires separate reconciliation")
+    if infra_kind == "real-directory":
+        blockers.append("infra logs real-directory migration needs its separate receipt")
+    else:
+        blockers.append("infra logs binding is not covered by this inventory")
+    return {
+        "complete": False,
+        "blockers": tuple(blockers),
+        "old_project": old,
+        "new_project": new,
+        "p_manifest_state": {
+            "dev": before.st_dev,
+            "ino": before.st_ino,
+            "mode": stat.S_IMODE(before.st_mode),
+            "size": before.st_size,
+            "sha256": hashlib.sha256(payload).hexdigest(),
+        },
+        "managed_paths": tuple(sorted(managed)),
+        "p_link_state": p_link_state,
+        "p_only": tuple(sorted(old_links - q_candidates)),
+        "q_only_candidates": tuple(sorted(q_candidates - old_links)),
+        "materialized_latest": tuple(sorted(materialized)),
+        "infra_logs": {
+            "path": infra_logs, "kind": infra_kind,
+            "receipt_path": infra_receipt, "receipt_pending": receipt_pending,
+        },
+    }
+
+
 # ── 主流程 ────────────────────────────────────────────────────────────────────
 
-def _setup_impl(proj_dir, *, server_delegated=False):
-    global _LINK_ERRORS, _P2P_SOURCE, _LINK_TRANSACTION
-    _LINK_ERRORS = 0
-    print(f"\n项目目录：{proj_dir}")
-    print(f"ZTP 目录：{ZTP}\n")
+def _prepare_setup_local_inputs(proj_dir, *, server_delegated=False):
+    """Prepare Q-local inputs before any shared-root setup publication.
 
+    This is only a preparation boundary.  It does not attest a complete
+    P→Q write plan, create a WAL, or authorize a link switch.
+    """
     # Existing projects must supply this authority themselves.  Template
     # initialization below cannot turn a missing required input into success.
     if not os.path.lexists(os.path.join(proj_dir, "02-dhcp-subnet_config.csv")):
@@ -4239,14 +4429,41 @@ def _setup_impl(proj_dir, *, server_delegated=False):
     _initialize_project_from_template(proj_dir)
     if not server_delegated:
         _prepare_laptop_public_key(proj_dir)
-    _P2P_SOURCE = _select_p2p_source(proj_dir)
-    if not _P2P_SOURCE:
+    p2p_source = _select_p2p_source(proj_dir)
+    if not p2p_source:
         sys.exit(1)
     if not _validate_project(proj_dir):
         sys.exit(1)
     if not _check_p2p_source_identity(proj_dir):
         sys.exit(1)
     print()
+
+    # Q-local output roots are prepared before the first possible shared-root
+    # mutation below.  Their existence alone is not a WAL or publication
+    # authorization; the later setup transaction retains its existing gates.
+    print("── 创建输出目录 ──────────────────────────────────────────────────")
+    for d in OUTPUT_DIRS:
+        path = os.path.join(proj_dir, d)
+        if os.path.lexists(path):
+            if not stat.S_ISDIR(os.lstat(path).st_mode):
+                raise ValueError(f"项目输出目录不是实际目录：{path}")
+            print(f"  [OK]    {d}/")
+        elif _DRY_RUN:
+            print(_c(CYAN, f"  [DRY] mkdir {d}/"))
+        else:
+            os.mkdir(path)
+            print(_c(GREEN, f"  [MKDIR] {d}/"))
+    return p2p_source
+
+
+def _setup_impl(proj_dir, *, server_delegated=False):
+    global _LINK_ERRORS, _P2P_SOURCE, _LINK_TRANSACTION
+    _LINK_ERRORS = 0
+    print(f"\n项目目录：{proj_dir}")
+    print(f"ZTP 目录：{ZTP}\n")
+    _P2P_SOURCE = _prepare_setup_local_inputs(
+        proj_dir, server_delegated=server_delegated,
+    )
 
     if not _DRY_RUN:
         _restore_pending_infra_log_backup(
@@ -4262,17 +4479,6 @@ def _setup_impl(proj_dir, *, server_delegated=False):
 
     if not _check_conflicts(proj_dir):
         sys.exit(1)
-
-    print("── 创建输出目录 ──────────────────────────────────────────────────")
-    for d in OUTPUT_DIRS:
-        path = os.path.join(proj_dir, d)
-        if os.path.exists(path):
-            print(f"  [OK]    {d}/")
-        elif _DRY_RUN:
-            print(_c(CYAN, f"  [DRY] mkdir {d}/"))
-        else:
-            os.makedirs(path, exist_ok=True)
-            print(_c(GREEN, f"  [MKDIR] {d}/"))
 
     linked = skipped = missing = errors = 0
 
@@ -4360,15 +4566,76 @@ def _setup_impl(proj_dir, *, server_delegated=False):
         _LINK_TRANSACTION = None
 
 
-def setup(proj_dir, *, server_delegated=False):
+def _require_setup_switch_wal_prewrite(proj_dir, deployment_lock_descriptor):
+    """Validate P and a prepared P→Q WAL before any shared setup mutation."""
+    active_manifest = os.path.join(HTTP_BASE, "ztp", ".setup_manifest")
+    if _DRY_RUN or not os.path.lexists(active_manifest):
+        return
+    manifest = _read_bounded_regular_text(active_manifest, "setup manifest")
+    first = manifest.splitlines()[:1]
+    prefix = "# setup manifest — proj: "
+    if not first or not first[0].startswith(prefix):
+        raise ValueError("setup 写前活动 manifest 标头无效")
+    old_raw = first[0][len(prefix):]
+    if not os.path.isabs(old_raw) or os.path.normpath(old_raw) != old_raw:
+        raise ValueError("setup 写前活动项目路径不是规范绝对路径")
+    old_project = os.path.realpath(old_raw)
+    if old_project != os.path.realpath(proj_dir) and deployment_lock_descriptor is None:
+        raise ValueError("跨项目 setup 缺少受管部署锁/WAL 凭据")
+    load_api = runpy.run_path(os.path.join(HERE, "11-load.py"))
+    try:
+        old_state = load_api["snapshot_active_setup_state"]()
+    except load_api["LoadError"] as exc:
+        raise ValueError(f"setup 写前活动项目身份无效：{exc}") from exc
+    if old_state.project == Path(proj_dir):
+        return
+    try:
+        outcome = load_api["recover_setup_switch_journal"](
+            Path(ZTP) / ".setup-switch-journal.json",
+            deployment_lock_descriptor=deployment_lock_descriptor,
+            services_quiesced=True,
+            runtime_backend=load_api["service_runtime_backend"](),
+            verify_only=True,
+        )
+    except load_api["LoadError"] as exc:
+        raise ValueError(f"跨项目 setup WAL 写前核验失败：{exc}") from exc
+    if outcome != "prepared-p":
+        raise ValueError("跨项目 setup WAL 未证明精确 P 写前状态")
+    # Generic cleanup runs before the first Q link.  A stray P/legacy link
+    # that is not in the frozen P manifest cannot be restored after SIGKILL.
+    # Use the same selection function as the actual writer, and reject it
+    # before local preparation or any shared-root mutation.
+    for link in _previous_project_links_to_remove(proj_dir):
+        if old_state.links.get(Path(link)) != os.readlink(link):
+            raise ValueError(f"跨项目 setup WAL 未覆盖旧链接清理：{link}")
+    # The current WAL protects symlink values only.  A real latest directory
+    # would be renamed into an in-memory backup whose name/identity is not in
+    # that WAL, so reject it before the first shared write.  The inventory is
+    # diagnostic and never grants publication authority (complete=False).
+    plan = inventory_setup_switch_shared_paths(str(old_state.project), proj_dir)
+    if plan["materialized_latest"]:
+        raise ValueError("跨项目 setup WAL 未覆盖 materialized latest 实体目录备份")
+    infra = plan["infra_logs"]
+    if infra["kind"] in ("real-directory", "unsafe") or infra["receipt_pending"]:
+        raise ValueError("跨项目 setup WAL 未覆盖 infra logs 实体目录或待恢复凭据")
+    return load_api, deployment_lock_descriptor
+
+
+def setup(proj_dir, *, server_delegated=False, deployment_lock_descriptor=None):
     """Run setup as one link transaction; any failure restores prior state."""
-    global _LINK_TRANSACTION, _INFRA_LOG_MIGRATION
+    global _LINK_TRANSACTION, _INFRA_LOG_MIGRATION, _SETUP_SWITCH_WAL_CONTEXT
     require_project_eligible(Path(proj_dir))
+    # Imported callers must not bypass the CLI fence; check before even
+    # creating the infra lock file, then recheck while that lock is held.
+    _require_setup_switch_wal_prewrite(proj_dir, deployment_lock_descriptor)
     if _INFRA_LOG_MIGRATION is not None:
         raise ValueError("前次日志迁移仍在当前进程中待结清")
     lock = nullcontext() if _DRY_RUN else infra_log_root_lock(HTTP_BASE)
     with lock:
         try:
+            _SETUP_SWITCH_WAL_CONTEXT = _require_setup_switch_wal_prewrite(
+                proj_dir, deployment_lock_descriptor,
+            )
             if not _DRY_RUN:
                 # A crash before receipt replace can leave a newer fsynced
                 # temp alongside the old receipt.  Never infer a phase or
@@ -4389,6 +4656,8 @@ def setup(proj_dir, *, server_delegated=False):
                 _LINK_TRANSACTION.rollback()
                 _LINK_TRANSACTION = None
             raise
+        finally:
+            _SETUP_SWITCH_WAL_CONTEXT = None
 
 
 def _write_manifest(proj_dir):
@@ -4843,6 +5112,10 @@ def _parse_args(argv=None):
         help="只从模板初始化一个不存在的项目并退出，不创建或切换运行时链接",
     )
     parser.add_argument(
+        "--prepare-only", action="store_true",
+        help="仅准备并校验所选项目的本地输入/输出，不切换共享链接或 manifest",
+    )
+    parser.add_argument(
         "--host-role", choices=("workstation", "management-server"),
         help="Linux 必须显式声明本机角色；Darwin 默认为 workstation",
     )
@@ -4871,13 +5144,17 @@ def _parse_args(argv=None):
     args = parser.parse_args(argv)
     if args.status or args.list_projects:
         if args.project is not None or any((
-            args.create, args.auto_yes, args.confirm_project_switch,
+            args.create, args.prepare_only, args.auto_yes, args.confirm_project_switch,
             args.force, args.strict, args.dry_run, args.csv_dir, args.p2p_file,
             args.host_role, args.no_upgrade, getattr(args, "switch_scope", None),
         )):
             parser.error("--status/--list-projects 是独立只读动作，不能组合变更参数")
     elif args.project is None:
         parser.error("必须指定 project，或使用 --status/--list-projects")
+    if args.prepare_only and any((
+        args.create, args.dry_run, args.force, args.confirm_project_switch,
+    )):
+        parser.error("--prepare-only 不能组合 --create/--dry-run/--force/--confirm-project-switch")
     return args
 
 
@@ -4942,12 +5219,25 @@ def _main_locked(args):
     # monitor or entering setup's link transaction. Recheck in setup() for
     # callers that bypass this CLI entry point.
     require_project_eligible(Path(proj_dir))
+    if getattr(args, "prepare_only", False):
+        _prepare_setup_local_inputs(
+            proj_dir, server_delegated=getattr(args, "_server_delegated", False),
+        )
+        print(_c(GREEN, "[PREPARED] 项目本地输入/输出已准备；未切换共享链接或 manifest"))
+        return 0
+    _require_setup_switch_wal_prewrite(
+        proj_dir, getattr(args, "_deployment_lock_descriptor", None),
+    )
     if not _DRY_RUN and args.host_role == "management-server":
         stop_native_ztp_monitors(HTTP_BASE)
+    setup_kwargs = {}
+    descriptor = getattr(args, "_deployment_lock_descriptor", None)
+    if descriptor is not None:
+        setup_kwargs["deployment_lock_descriptor"] = descriptor
     if getattr(args, "_server_delegated", False):
-        setup(proj_dir, server_delegated=True)
+        setup(proj_dir, server_delegated=True, **setup_kwargs)
     else:
-        setup(proj_dir)
+        setup(proj_dir, **setup_kwargs)
     return 0
 
 
@@ -4993,7 +5283,8 @@ def main(argv=None):
         print(_c(RED, "[ERROR] invalid private setup key-preparation mode"))
         return 1
     if key_mode == "server-delegated" and (
-        args.create or args.dry_run or not args.confirm_project_switch
+        args.create or args.dry_run
+        or not (args.confirm_project_switch or args.prepare_only)
         or not os.environ.get(LOCK_FD_ENV)
     ):
         print(_c(RED, "[ERROR] server-delegated setup requires the inherited deployment lock and load confirmation"))
@@ -5003,7 +5294,8 @@ def main(argv=None):
         return 1
     args._server_delegated = key_mode == "server-delegated"
     try:
-        with deployment_lock(HTTP_BASE, dry_run=_DRY_RUN):
+        with deployment_lock(HTTP_BASE, dry_run=_DRY_RUN) as descriptor:
+            args._deployment_lock_descriptor = descriptor
             return _main_locked(args)
     except (DeploymentLockError, RuntimeContractError, ValueError) as exc:
         print(_c(RED, f"[ERROR] 部署/Monitor 写前保护失败：{exc}"))

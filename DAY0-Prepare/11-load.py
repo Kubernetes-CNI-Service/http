@@ -5405,7 +5405,9 @@ def _require_runtime_restore_guard(
     finally:
         os.close(probe)
     still_active = active_managed_services(
-        runtime_backend, host_role="management-server",
+        runtime_backend,
+        host_role="workstation" if runtime_os().casefold() == "darwin"
+        else "management-server",
     )
     if still_active:
         raise LoadError(
@@ -5513,6 +5515,394 @@ def restore_active_setup_state(
     if verified.manifest != expected.manifest or verified.links != expected.links:
         raise LoadError("setup rollback post-verify failed; services remain stopped")
     ok(f"active setup restore verified: {old_project.name}")
+
+
+_SETUP_SWITCH_JOURNAL_LIMIT = 12 * 1024 * 1024
+
+
+def _setup_switch_journal_path() -> Path:
+    return MANIFEST.parent / ".setup-switch-journal.json"
+
+
+def _setup_switch_directory_identity(path: Path) -> dict[str, object]:
+    try:
+        canonical = path.resolve(strict=True)
+        metadata = canonical.lstat()
+    except (OSError, RuntimeError) as exc:
+        raise LoadError(f"setup switch directory is unavailable: {path}: {exc}") from exc
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise LoadError(f"setup switch authority is not a directory: {path}")
+    return {"path": str(canonical), "dev": metadata.st_dev, "ino": metadata.st_ino}
+
+
+def _setup_switch_canonical_payload(body: dict[str, object]) -> bytes:
+    return json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+
+
+def _setup_switch_q_target(target: Path, project: Path) -> Path:
+    """Validate a Q link target while preserving its final raw symlink leaf.
+
+    Setup can publish a link to a Q output before producing that file.  Only
+    that final absent leaf is allowed: its parent must already exist, and an
+    existing (including dangling) symlink must resolve strictly.
+    """
+    parent = target.parent.resolve(strict=True)
+    if not parent.is_dir():
+        raise ValueError("Q target parent is not a directory")
+    raw = parent / target.name
+    resolved = target.resolve(strict=True) if os.path.lexists(target) else raw
+    if not _setup_link_target_allowed(resolved, project):
+        raise ValueError("Q target escaped its authority")
+    return raw
+
+
+def prepare_setup_switch_journal(
+    old_project: Path, new_project: Path, *,
+    expected_new_links: dict[Path, Path],
+    deployment_lock_descriptor: int | None,
+    services_quiesced: bool,
+    runtime_backend: ServiceRuntimeBackend | None,
+) -> Path:
+    """Durably freeze P and the permitted Q link values before setup's first write.
+
+    This narrow primitive does not switch projects, start services, or imply
+    that Q committed.  A caller must enumerate every path it permits setup to
+    mutate; any later dynamic path must be durably registered before writing.
+    """
+    _require_runtime_restore_guard(
+        deployment_lock_descriptor=deployment_lock_descriptor,
+        services_quiesced=services_quiesced,
+        runtime_backend=runtime_backend,
+    )
+    old = _setup_switch_directory_identity(old_project)
+    new = _setup_switch_directory_identity(new_project)
+    root = _setup_switch_directory_identity(HTTP_ROOT)
+    if old == new or old["path"] == new["path"]:
+        raise LoadError("setup switch journal requires distinct P and Q")
+    state = snapshot_active_setup_state(expected_project=Path(str(old["path"])))
+    _validate_setup_state_receipt(state)
+    if not isinstance(expected_new_links, dict):
+        raise LoadError("setup switch Q link inventory is invalid")
+    q_links: dict[Path, str] = {}
+    for raw_path, raw_target in expected_new_links.items():
+        path = Path(raw_path)
+        if (not path.is_absolute() or os.path.normpath(str(path)) != str(path)
+                or path in q_links):
+            raise LoadError("setup switch Q link path is invalid")
+        try:
+            path.parent.resolve(strict=True).relative_to(Path(str(root["path"])))
+            target_path = Path(raw_target)
+            if (not target_path.is_absolute()
+                    or os.path.normpath(str(target_path)) != str(target_path)):
+                raise ValueError("Q link target path is not canonical")
+            raw_target_in_physical_parent = _setup_switch_q_target(
+                target_path, Path(str(new["path"])),
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise LoadError(f"setup switch Q link target is invalid: {path}: {exc}") from exc
+        # The link's parent may use macOS' /var -> /private/var alias.  Both
+        # operands must share one physical namespace before deriving a raw
+        # relative symlink value.
+        q_links[path] = os.path.relpath(
+            raw_target_in_physical_parent, path.parent.resolve(strict=True),
+        )
+    rows = []
+    for path in sorted(set(state.links) | set(q_links), key=str):
+        before = state.links.get(path)
+        after = q_links.get(path)
+        if os.path.lexists(path):
+            metadata = path.lstat()
+            if (not stat.S_ISLNK(metadata.st_mode) or metadata.st_nlink != 1
+                    or os.readlink(path) != before):
+                raise LoadError(f"setup switch P link changed before journal: {path}")
+        elif before is not None:
+            raise LoadError(f"setup switch P link disappeared before journal: {path}")
+        rows.append({"path": str(path), "before": before, "after": after})
+    body = {
+        "schema_version": 1, "phase": "prepared",
+        "root": root, "old_project": old, "new_project": new,
+        "manifest": base64.b64encode(state.manifest).decode("ascii"),
+        "manifest_sha256": hashlib.sha256(state.manifest).hexdigest(),
+        "manifest_mode": state.manifest_mode, "links": rows,
+    }
+    body_bytes = _setup_switch_canonical_payload(body)
+    envelope = {
+        "body": body, "sha256": hashlib.sha256(body_bytes).hexdigest(),
+    }
+    payload = _setup_switch_canonical_payload(envelope) + b"\n"
+    if len(payload) > _SETUP_SWITCH_JOURNAL_LIMIT:
+        raise LoadError("setup switch journal exceeds the bounded size limit")
+    journal = _setup_switch_journal_path()
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(journal, flags, 0o600)
+    except OSError as exc:
+        raise LoadError(f"setup switch journal cannot be exclusively created: {exc}") from exc
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        _fsync_parent_directory(journal.parent)
+    except BaseException:
+        # A potentially partial WAL is evidence, never silently removed.
+        raise
+    return journal
+
+
+def register_setup_switch_journal_link(
+    journal: Path, link: Path, target: Path, *,
+    deployment_lock_descriptor: int | None,
+    services_quiesced: bool,
+    runtime_backend: ServiceRuntimeBackend | None,
+    allow_existing_exact: bool = False,
+) -> Path:
+    """Durably register one newly discovered Q-only link before its first write.
+
+    This narrow primitive does not authorize setup itself.  Every shared
+    writer must still enforce its own complete WAL fence before mutation.
+    """
+    _require_runtime_restore_guard(
+        deployment_lock_descriptor=deployment_lock_descriptor,
+        services_quiesced=services_quiesced,
+        runtime_backend=runtime_backend,
+    )
+    journal = Path(journal)
+    if journal != _setup_switch_journal_path():
+        raise LoadError("setup switch journal path is not the configured authority")
+    try:
+        before_name = journal.lstat()
+    except FileNotFoundError as exc:
+        raise LoadError("setup switch journal is absent") from exc
+    opened = _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT)
+    if opened is None or opened[1] != 0o600:
+        raise LoadError("setup switch journal is absent or not private")
+    payload, _mode = opened
+    try:
+        envelope = json.loads(payload)
+        body = envelope["body"]
+        if (not isinstance(body, dict) or body["schema_version"] != 1
+                or body["phase"] != "prepared"
+                or hashlib.sha256(_setup_switch_canonical_payload(body)).hexdigest()
+                != envelope["sha256"]):
+            raise ValueError("journal envelope is invalid")
+        root = body["root"]
+        old = body["old_project"]
+        new = body["new_project"]
+        if (root != _setup_switch_directory_identity(HTTP_ROOT)
+                or old != _setup_switch_directory_identity(Path(old["path"]))
+                or new != _setup_switch_directory_identity(Path(new["path"]))
+                or old == new):
+            raise ValueError("journal directory identity changed")
+        old_manifest = base64.b64decode(body["manifest"], validate=True)
+        if (hashlib.sha256(old_manifest).hexdigest() != body["manifest_sha256"]
+                or _read_rollback_regular(MANIFEST, limit=_SETUP_MANIFEST_LIMIT)
+                != (old_manifest, body["manifest_mode"])):
+            raise ValueError("P manifest is no longer exact")
+        rows = body["links"]
+        if (not isinstance(rows, list) or not rows
+                or len({row["path"] for row in rows}) != len(rows)):
+            raise ValueError("journal link inventory is invalid")
+        _validate_setup_state_receipt(ActiveSetupState(
+            project=Path(old["path"]), manifest=old_manifest,
+            manifest_mode=body["manifest_mode"],
+            links={Path(row["path"]): row["before"] for row in rows
+                   if row["before"] is not None},
+        ))
+        root_path = Path(root["path"])
+        for row in rows:
+            path = Path(row["path"])
+            if (not path.is_absolute() or os.path.normpath(str(path)) != str(path)
+                    or (row["before"] is None and row["after"] is None)):
+                raise ValueError("journal link row is invalid")
+            path.parent.resolve(strict=True).relative_to(root_path)
+            after = row["after"]
+            if after is not None:
+                if (not isinstance(after, str) or not after
+                        or os.path.isabs(after) or os.path.normpath(after) != after):
+                    raise ValueError("journal Q link value is invalid")
+                _setup_switch_q_target(
+                    Path(os.path.normpath(str(path.parent / after))),
+                    Path(new["path"]),
+                )
+            if os.path.lexists(path):
+                actual = path.lstat()
+                if (not stat.S_ISLNK(actual.st_mode) or actual.st_nlink != 1
+                        or os.readlink(path) not in (row["before"], row["after"])):
+                    raise ValueError("journal link disk state is unknown")
+        path = Path(link)
+        if (not path.is_absolute() or os.path.normpath(str(path)) != str(path)
+                or (not allow_existing_exact and
+                    str(path) in {row["path"] for row in rows})):
+            raise ValueError("dynamic Q-only link path is not new or canonical")
+        path.parent.resolve(strict=True).relative_to(root_path)
+        target_path = Path(target)
+        if (not target_path.is_absolute()
+                or os.path.normpath(str(target_path)) != str(target_path)):
+            raise ValueError("dynamic Q-only target path is not canonical")
+        raw_target_in_physical_parent = _setup_switch_q_target(
+            target_path, Path(new["path"]),
+        )
+        after = os.path.relpath(
+            raw_target_in_physical_parent,
+            path.parent.resolve(strict=True),
+        )
+        if os.path.isabs(after) or os.path.normpath(after) != after:
+            raise ValueError("dynamic Q-only relative target is invalid")
+        existing = next((row for row in rows if row["path"] == str(path)), None)
+        if existing is not None:
+            if existing["after"] != after:
+                raise ValueError("existing Q link value differs from the writer")
+            return journal
+        if os.path.lexists(path):
+            raise ValueError("dynamic Q-only link is not a new absent path")
+    except (KeyError, TypeError, ValueError, OSError, RuntimeError, binascii.Error,
+            LoadError) as exc:
+        raise LoadError(f"setup switch journal registration is invalid: {exc}") from exc
+    next_body = dict(body)
+    next_body["links"] = sorted(
+        [*rows, {"path": str(path), "before": None, "after": after}],
+        key=lambda row: row["path"],
+    )
+    body_bytes = _setup_switch_canonical_payload(next_body)
+    next_payload = _setup_switch_canonical_payload({
+        "body": next_body, "sha256": hashlib.sha256(body_bytes).hexdigest(),
+    }) + b"\n"
+    if len(next_payload) > _SETUP_SWITCH_JOURNAL_LIMIT:
+        raise LoadError("setup switch journal exceeds the bounded size limit")
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".setup-switch-journal.", dir=journal.parent,
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(next_payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        now = journal.lstat()
+        if any(getattr(before_name, name) != getattr(now, name) for name in (
+                "st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns")):
+            raise LoadError("setup switch journal changed before registration")
+        os.replace(temporary, journal)
+        _fsync_parent_directory(journal.parent)
+    finally:
+        if os.path.lexists(temporary):
+            temporary.unlink()
+    return journal
+
+
+def recover_setup_switch_journal(
+    journal: Path, *, deployment_lock_descriptor: int | None,
+    services_quiesced: bool, runtime_backend: ServiceRuntimeBackend | None,
+    verify_only: bool = False,
+) -> str:
+    """Verify or restore P from a complete WAL and a known P/Q disk state.
+
+    The read-only prewrite mode accepts only an untouched P state.  It never
+    interprets an in-flight P/Q mixture as permission to begin another setup.
+    """
+    _require_runtime_restore_guard(
+        deployment_lock_descriptor=deployment_lock_descriptor,
+        services_quiesced=services_quiesced,
+        runtime_backend=runtime_backend,
+    )
+    journal = Path(journal)
+    if journal != _setup_switch_journal_path():
+        raise LoadError("setup switch journal path is not the configured authority")
+    opened = _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT)
+    if opened is None:
+        raise LoadError("setup switch journal is absent")
+    payload, mode = opened
+    if mode != 0o600:
+        raise LoadError("setup switch journal mode is not private")
+    try:
+        envelope = json.loads(payload)
+        body = envelope["body"]
+        if (not isinstance(body, dict) or not isinstance(envelope["sha256"], str)
+                or hashlib.sha256(_setup_switch_canonical_payload(body)).hexdigest()
+                != envelope["sha256"] or body["schema_version"] != 1
+                or body["phase"] != "prepared"):
+            raise ValueError("journal envelope is invalid")
+        old = body["old_project"]
+        new = body["new_project"]
+        if (body["root"] != _setup_switch_directory_identity(HTTP_ROOT)
+                or old != _setup_switch_directory_identity(Path(old["path"]))
+                or new != _setup_switch_directory_identity(Path(new["path"]))
+                or old == new):
+            raise ValueError("journal directory identity changed")
+        manifest_bytes = base64.b64decode(body["manifest"], validate=True)
+        if hashlib.sha256(manifest_bytes).hexdigest() != body["manifest_sha256"]:
+            raise ValueError("journal P manifest digest is invalid")
+        state = _validate_setup_state_receipt(ActiveSetupState(
+            project=Path(old["path"]), manifest=manifest_bytes,
+            manifest_mode=body["manifest_mode"],
+            links={Path(row["path"]): row["before"] for row in body["links"]
+                   if row["before"] is not None},
+        ))
+        rows = body["links"]
+        if (not isinstance(rows, list) or not rows
+                or len({row["path"] for row in rows}) != len(rows)
+                or set(state.links) != {Path(row["path"]) for row in rows
+                                         if row["before"] is not None}):
+            raise ValueError("journal link inventory is invalid")
+    except (KeyError, TypeError, ValueError, UnicodeError, binascii.Error, LoadError) as exc:
+        raise LoadError(f"setup switch journal is invalid: {exc}") from exc
+    current_manifest = _read_rollback_regular(MANIFEST, limit=_SETUP_MANIFEST_LIMIT)
+    if current_manifest != (state.manifest, state.manifest_mode):
+        # Q manifest may have replaced P while the final journal phase was not
+        # durable.  This is in-doubt, not proof that either project committed.
+        raise LoadError("setup switch manifest is not exact P; recovery is in-doubt")
+    root_path = Path(body["root"]["path"])
+    q_project = Path(new["path"])
+    expected_rows = []
+    for row in rows:
+        try:
+            path = Path(row["path"])
+            before = row["before"]
+            after = row["after"]
+            if (not path.is_absolute() or os.path.normpath(str(path)) != str(path)
+                    or before != state.links.get(path)
+                    or (before is None and after is None)
+                    or (after is not None and
+                        (not isinstance(after, str) or not after
+                         or os.path.isabs(after) or os.path.normpath(after) != after))):
+                raise ValueError("invalid path or link value")
+            path.parent.resolve(strict=True).relative_to(root_path)
+            if after is not None:
+                _setup_switch_q_target(
+                    Path(os.path.normpath(str(path.parent / after))), q_project,
+                )
+            if os.path.lexists(path):
+                metadata = path.lstat()
+                if (not stat.S_ISLNK(metadata.st_mode) or metadata.st_nlink != 1
+                        or os.readlink(path) not in (before, after)):
+                    raise ValueError("current link is not an approved P/Q value")
+            expected_rows.append((path, before, after))
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise LoadError(f"setup switch disk state is unknown: {path}: {exc}") from exc
+    if verify_only:
+        if any(
+            (not path.is_symlink() or os.readlink(path) != before)
+            if before is not None else os.path.lexists(path)
+            for path, before, _after in expected_rows
+        ):
+            raise LoadError("setup switch prewrite state is not exact P")
+        return "prepared-p"
+    for path, before, after in expected_rows:
+        if before is not None:
+            if not (path.is_symlink() and os.readlink(path) == before):
+                _atomic_restore_setup_link(path, before)
+        elif os.path.lexists(path):
+            if not path.is_symlink() or os.readlink(path) != after:
+                raise LoadError(f"setup switch Q-only link changed during recovery: {path}")
+            path.unlink()
+            _fsync_parent_directory(path.parent)
+    verified = snapshot_active_setup_state(expected_project=state.project)
+    if verified.manifest != state.manifest or verified.links != state.links:
+        raise LoadError("setup switch P post-verify failed; journal retained")
+    journal.unlink()
+    _fsync_parent_directory(journal.parent)
+    return "restored-p"
 
 
 def restore_cross_project_rollback_context(

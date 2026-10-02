@@ -275,6 +275,760 @@ def _write_same_inode(path: Path, data: bytes, original: os.stat_result) -> None
 class GenerationInputBindingWorkflowTests(unittest.TestCase):
     """LOAD's frozen A authority must survive a real downstream c2 read."""
 
+    def _private_setup_switch_fixture(self, root: Path):
+        """Copy the real LOAD/SETUP scripts into a disposable HTTP root."""
+        root = root.resolve()
+        day0 = root / "DAY0-Prepare"
+        day0.mkdir()
+        for name in ("11-load.py", "01-a-setup.py"):
+            source = ROOT / "DAY0-Prepare" / name
+            destination = day0 / name
+            shutil.copy2(source, destination)
+            self.assertEqual(source.read_bytes(), destination.read_bytes())
+        shutil.copytree(ROOT / "DAY0-Prepare/template", day0 / "template")
+        shutil.copytree(ROOT / "tools", root / "tools")
+        optimize = root / "ztp/optimize"
+        optimize.mkdir(parents=True)
+        shutil.copy2(ROOT / "ztp/optimize/sample_links.py", optimize / "sample_links.py")
+        # Link-only WAL does not cover shared directory creation.  Model an
+        # initialized directory skeleton for these link crash witnesses.
+        for link_rel, _project_rel, _kind in SETUP.MAPPINGS:
+            (root / "ztp" / link_rel).parent.mkdir(parents=True, exist_ok=True)
+        for link_rel, _project_rel, _kind in SETUP.WORKSPACE_INPUT_MAPPINGS:
+            (root / link_rel).parent.mkdir(parents=True, exist_ok=True)
+        for link_path in (*SETUP.P2P_INPUT_LINKS, *SETUP.P2P_OUTPUT_LINKS):
+            (root / Path(link_path).relative_to(ROOT)).parent.mkdir(
+                parents=True, exist_ok=True,
+            )
+        for link_path, _target in SETUP.BRINGUP_OUTPUT_MAPPINGS:
+            (root / Path(link_path).relative_to(ROOT)).parent.mkdir(
+                parents=True, exist_ok=True,
+            )
+        for link_path, _target in (*SETUP.ANALYZER_INPUT_MAPPINGS,
+                                   *SETUP.ANALYZER_OUTPUT_MAPPINGS):
+            (root / Path(link_path).relative_to(ROOT)).parent.mkdir(
+                parents=True, exist_ok=True,
+            )
+        for link_path, _target in SETUP._NET_CSV_LINKS:
+            (root / Path(link_path).relative_to(ROOT)).parent.mkdir(
+                parents=True, exist_ok=True,
+            )
+        for link_path, _target in SETUP._monitor_inventory_link_pairs():
+            (root / Path(link_path).relative_to(ROOT)).parent.mkdir(
+                parents=True, exist_ok=True,
+            )
+        (root / "infra").mkdir(exist_ok=True)
+        (root / "image").mkdir(exist_ok=True)
+        p, q = day0 / "p", day0 / "q"
+        for project in (p, q):
+            _write_legal_project(project, V2MlagSetupPreflightTests().pair())
+        common = root / "ztp/config/cumulus/template/01-global.yaml"
+        p_only = root / "ztp/config/publickey/p-only.pub"
+        q_only = root / "ztp/config/publickey/operator.pub"
+        for path in (common, p_only, q_only):
+            path.parent.mkdir(parents=True, exist_ok=True)
+        common.symlink_to(os.path.relpath(p / "01-global.yaml", common.parent))
+        p_only.symlink_to(os.path.relpath(p / "operator.pub", p_only.parent))
+        manifest = root / "ztp/.setup_manifest"
+        manifest.write_bytes(
+            (f"# setup manifest — proj: {p}\n{common}\n{p_only}\n").encode("utf-8")
+        )
+        before = {
+            "manifest": manifest.read_bytes(),
+            "common": os.readlink(common),
+            "p_only": os.readlink(p_only),
+        }
+        hook = root / "test-hook"
+        hook.mkdir()
+        barrier = root / "q-first-link.observed"
+        (hook / "sitecustomize.py").write_text(
+            """
+import os
+from pathlib import Path
+import signal
+
+original_symlink = os.symlink
+def kill_after_real_q_link(source, destination, *args, **kwargs):
+    result = original_symlink(source, destination, *args, **kwargs)
+    prefix = os.environ.get('HTTP_TEST_FIRST_Q_LINK_PREFIX')
+    if (os.path.abspath(destination) == os.environ.get('HTTP_TEST_FIRST_Q_LINK')
+            or (prefix and os.path.abspath(destination).startswith(prefix))):
+        barrier = Path(os.environ['HTTP_TEST_Q_LINK_BARRIER'])
+        with barrier.open('wb') as stream:
+            stream.write((os.path.abspath(destination) + '\\n').encode()
+                         if os.environ.get('HTTP_TEST_BARRIER_RECORD_DEST')
+                         else b'first Q managed link written\\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.kill(os.getpid(), signal.SIGKILL)
+    return result
+os.symlink = kill_after_real_q_link
+original_replace = os.replace
+def kill_after_infra_repoint(source, destination, *args, **kwargs):
+    result = original_replace(source, destination, *args, **kwargs)
+    if os.path.abspath(destination) == os.environ.get('HTTP_TEST_KILL_AFTER_REPLACE'):
+        barrier = Path(os.environ['HTTP_TEST_Q_LINK_BARRIER'])
+        with barrier.open('wb') as stream:
+            stream.write(b'infra logs pointer replaced\\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.kill(os.getpid(), signal.SIGKILL)
+    return result
+os.replace = kill_after_infra_repoint
+""", encoding="utf-8",
+        )
+        home = root / "private-home"
+        home.mkdir()
+        return root, p, q, common, p_only, q_only, manifest, before, hook, barrier, home
+
+    @staticmethod
+    def _run_private_load_setup_switch(
+        fixture, *, prepare_journal: bool, corrupt_journal: bool = False,
+        first_link: Path | None = None, first_link_prefix: str | None = None,
+        kill_after_replace: Path | None = None,
+        omit_common_from_wal: bool = False,
+    ):
+        root, p, q, common, _p_only, q_only, _manifest, _before, hook, barrier, home = fixture
+        driver = """
+import importlib.util
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+root, p, q, common, q_only, prepared, omit_common = sys.argv[1:8]
+root, p, q, common, q_only = map(Path, (root, p, q, common, q_only))
+spec = importlib.util.spec_from_file_location('private_setup_switch_load', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    if prepared == 'yes':
+        expected = {common: q / '01-global.yaml', q_only: q / 'operator.pub'}
+        if omit_common == 'yes':
+            del expected[common]
+        logs = root / 'infra/logs'
+        if logs.is_symlink():
+            expected[logs] = q / '99-output-infra'
+        load.prepare_setup_switch_journal(
+            p, q, expected_new_links=expected,
+            deployment_lock_descriptor=descriptor, services_quiesced=True,
+            runtime_backend=SimpleNamespace(name='supervisor'),
+        )
+    if prepared == 'corrupt':
+        (root / 'ztp/.setup-switch-journal.json').write_bytes(b'{"schema_version":')
+    try:
+        load.activate_project(
+            q, q / 'p2p.xlsx', strict=False, no_upgrade=True,
+            deployment_lock_descriptor=descriptor, host_role='workstation',
+        )
+    except load.LoadError as exc:
+        if 'exit=-9' in str(exc):
+            raise SystemExit(23)
+        print('UNEXPECTED LOAD ERROR:', exc, file=sys.stderr)
+        raise SystemExit(24)
+    raise SystemExit(25)
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+        env = os.environ.copy()
+        env["HOME"] = str(home)
+        # HOME is private so setup cannot inspect or generate the operator's
+        # real key. Preserve the interpreter's pre-existing dependency paths
+        # because macOS user-site discovery otherwise follows the new HOME.
+        dependency_paths = [
+            item for item in sys.path
+            if item and item.endswith("site-packages") and Path(item).is_dir()
+        ]
+        env["PYTHONPATH"] = os.pathsep.join(
+            item for item in (str(hook), env.get("PYTHONPATH", ""), *dependency_paths)
+            if item
+        )
+        if first_link_prefix is not None:
+            env.pop("HTTP_TEST_FIRST_Q_LINK", None)
+            env["HTTP_TEST_FIRST_Q_LINK_PREFIX"] = first_link_prefix
+            env["HTTP_TEST_BARRIER_RECORD_DEST"] = "1"
+        elif kill_after_replace is not None:
+            env.pop("HTTP_TEST_FIRST_Q_LINK", None)
+            env.pop("HTTP_TEST_FIRST_Q_LINK_PREFIX", None)
+            env.pop("HTTP_TEST_BARRIER_RECORD_DEST", None)
+        else:
+            env["HTTP_TEST_FIRST_Q_LINK"] = str(first_link or common)
+            env.pop("HTTP_TEST_FIRST_Q_LINK_PREFIX", None)
+            env.pop("HTTP_TEST_BARRIER_RECORD_DEST", None)
+        if kill_after_replace is not None:
+            env["HTTP_TEST_KILL_AFTER_REPLACE"] = str(kill_after_replace)
+        else:
+            env.pop("HTTP_TEST_KILL_AFTER_REPLACE", None)
+        env["HTTP_TEST_Q_LINK_BARRIER"] = str(barrier)
+        return subprocess.run(
+            [sys.executable, "-B", "-c", driver, str(root), str(p), str(q),
+             str(common), str(q_only),
+             "corrupt" if corrupt_journal else "yes" if prepare_journal else "no",
+             "yes" if omit_common_from_wal else "no"],
+            cwd=root, env=env, capture_output=True, text=True, check=False,
+        )
+
+    def test_real_load_setup_child_sigkill_then_fresh_load_restores_p(self):
+        """The real setup child dies after Q's first link, before Q manifest."""
+        with tempfile.TemporaryDirectory(prefix="r22-real-setup-kill-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, p, _q, common, p_only, q_only, manifest, before, _hook, barrier, _home = fixture
+            first = self._run_private_load_setup_switch(fixture, prepare_journal=True)
+            self.assertEqual(23, first.returncode, first.stdout + first.stderr)
+            self.assertEqual(b"first Q managed link written\n", barrier.read_bytes())
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            self.assertNotEqual(before["common"], os.readlink(common))
+            self.assertFalse(os.path.lexists(p_only))
+            self.assertFalse(os.path.lexists(q_only))
+            journal = root / "ztp/.setup-switch-journal.json"
+            self.assertTrue(journal.is_file())
+
+            # A fresh interpreter and new deployment lock must recover from
+            # disk alone; no first-LOAD or setup-child Python objects survive.
+            recovery = """
+import importlib.util
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('fresh_setup_switch_load', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    outcome = load.recover_setup_switch_journal(
+        root / 'ztp/.setup-switch-journal.json',
+        deployment_lock_descriptor=descriptor, services_quiesced=True,
+        runtime_backend=SimpleNamespace(name='supervisor'),
+    )
+    if outcome != 'restored-p':
+        raise SystemExit('unexpected outcome: ' + repr(outcome))
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+            second = subprocess.run(
+                [sys.executable, "-B", "-c", recovery, str(root)],
+                cwd=root, capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            self.assertEqual(before["common"], os.readlink(common))
+            self.assertEqual(before["p_only"], os.readlink(p_only))
+            self.assertFalse(os.path.lexists(q_only))
+            self.assertFalse(os.path.lexists(journal))
+            self.assertEqual(p / "01-global.yaml", common.resolve())
+            self.assertFalse((root / "service-started").exists())
+
+    def test_real_setup_prepare_only_keeps_p_publication_unchanged(self):
+        """A separate Q-local preparation pass must not switch P's links."""
+        with tempfile.TemporaryDirectory(prefix="r22-setup-prepare-only-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, q, common, p_only, q_only, manifest, before, _hook, barrier, home = fixture
+            environment = os.environ.copy()
+            environment["HOME"] = str(home)
+            dependency_paths = [
+                item for item in sys.path
+                if item and item.endswith("site-packages") and Path(item).is_dir()
+            ]
+            environment["PYTHONPATH"] = os.pathsep.join(
+                item for item in (environment.get("PYTHONPATH", ""), *dependency_paths)
+                if item
+            )
+            result = subprocess.run(
+                [sys.executable, "-B", str(root / "DAY0-Prepare/01-a-setup.py"),
+                 "--prepare-only", "--no-upgrade", "--host-role=workstation", str(q)],
+                cwd=root, env=environment, capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertFalse(barrier.exists())
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            self.assertEqual(before["common"], os.readlink(common))
+            self.assertEqual(before["p_only"], os.readlink(p_only))
+            self.assertFalse(os.path.lexists(q_only))
+            self.assertFalse((root / "ztp/.setup-switch-journal.json").exists())
+            for output in ("99-output-dhcp", "99-output-eth", "99-output-infra"):
+                self.assertTrue((q / output).is_dir(), output)
+
+    def test_real_load_setup_child_requires_durable_wal_before_first_q_link(self):
+        """Without a WAL, LOAD/SETUP must not create even one Q managed link."""
+        with tempfile.TemporaryDirectory(prefix="r22-real-setup-no-wal-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, _q, common, p_only, q_only, manifest, before, _hook, barrier, _home = fixture
+            result = self._run_private_load_setup_switch(fixture, prepare_journal=False)
+            self.assertNotEqual(0, result.returncode)
+            self.assertFalse(barrier.exists(), result.stdout + result.stderr)
+            self.assertFalse((root / "ztp/.setup-switch-journal.json").exists())
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            self.assertEqual(before["common"], os.readlink(common))
+            self.assertEqual(before["p_only"], os.readlink(p_only))
+            self.assertFalse(os.path.lexists(q_only))
+
+    def test_real_load_setup_child_rejects_corrupt_wal_before_first_q_link(self):
+        """A malformed WAL is not authority to mutate the first Q link."""
+        with tempfile.TemporaryDirectory(prefix="r22-real-setup-bad-wal-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, _q, common, p_only, q_only, manifest, before, _hook, barrier, _home = fixture
+            result = self._run_private_load_setup_switch(
+                fixture, prepare_journal=True, corrupt_journal=True,
+            )
+            self.assertNotEqual(0, result.returncode)
+            self.assertFalse(barrier.exists(), result.stdout + result.stderr)
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            self.assertEqual(before["common"], os.readlink(common))
+            self.assertEqual(before["p_only"], os.readlink(p_only))
+            self.assertFalse(os.path.lexists(q_only))
+            self.assertEqual(
+                b'{"schema_version":',
+                (root / "ztp/.setup-switch-journal.json").read_bytes(),
+            )
+
+    def test_real_setup_rejects_forged_same_project_manifest_before_q_link(self):
+        """A forged Q header over P links must not bypass the WAL fence."""
+        with tempfile.TemporaryDirectory(prefix="r22-real-setup-forged-header-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, p, q, common, p_only, q_only, manifest, _before, _hook, barrier, _home = fixture
+            forged = manifest.read_text(encoding="utf-8").replace(
+                f"# setup manifest — proj: {p}\n",
+                f"# setup manifest — proj: {q}\n", 1,
+            )
+            manifest.write_text(forged, encoding="utf-8")
+            result = self._run_private_load_setup_switch(fixture, prepare_journal=False)
+            self.assertNotEqual(0, result.returncode)
+            self.assertFalse(barrier.exists(), result.stdout + result.stderr)
+            self.assertEqual(forged, manifest.read_text(encoding="utf-8"))
+            self.assertEqual(p / "01-global.yaml", common.resolve())
+            self.assertEqual(p / "operator.pub", p_only.resolve())
+            self.assertFalse(os.path.lexists(q_only))
+
+    def test_direct_setup_cli_without_wal_rejects_before_first_q_link(self):
+        """Direct setup cannot bypass LOAD's cross-project write fence."""
+        with tempfile.TemporaryDirectory(prefix="r22-direct-setup-no-wal-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, p, q, common, p_only, q_only, manifest, before, hook, barrier, home = fixture
+            environment = os.environ.copy()
+            environment["HOME"] = str(home)
+            dependency_paths = [
+                item for item in sys.path
+                if item and item.endswith("site-packages") and Path(item).is_dir()
+            ]
+            environment["PYTHONPATH"] = os.pathsep.join(
+                item for item in (str(hook), environment.get("PYTHONPATH", ""),
+                                  *dependency_paths) if item
+            )
+            environment["HTTP_TEST_FIRST_Q_LINK"] = str(common)
+            environment["HTTP_TEST_Q_LINK_BARRIER"] = str(barrier)
+            result = subprocess.run(
+                [sys.executable, "-B", str(root / "DAY0-Prepare/01-a-setup.py"),
+                 "-y", "--confirm-project-switch", "--no-upgrade",
+                 "--host-role=workstation", str(q)],
+                cwd=root, env=environment, capture_output=True, text=True, check=False,
+            )
+            self.assertNotEqual(0, result.returncode)
+            self.assertFalse(barrier.exists(), result.stdout + result.stderr)
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            self.assertEqual(before["common"], os.readlink(common))
+            self.assertEqual(before["p_only"], os.readlink(p_only))
+            self.assertFalse(os.path.lexists(q_only))
+            self.assertFalse((root / "ztp/.setup-switch-journal.json").exists())
+
+    def test_real_setup_wal_refuses_unjournaled_materialized_latest_before_q_link(self):
+        """A link-only WAL cannot authorize a real latest-directory rename."""
+        with tempfile.TemporaryDirectory(prefix="r22-real-latest-hold-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, q, common, p_only, q_only, manifest, before, _hook, barrier, _home = fixture
+            latest = q / "99-output-eth/latest"
+            latest.mkdir(parents=True)
+            marker = latest / "marker.yaml"
+            marker.write_bytes(b"PRESERVE-MATERIALIZED-LATEST\n")
+            result = self._run_private_load_setup_switch(fixture, prepare_journal=True)
+            self.assertNotEqual(23, result.returncode, result.stdout + result.stderr)
+            self.assertFalse(barrier.exists(), result.stdout + result.stderr)
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            self.assertEqual(before["common"], os.readlink(common))
+            self.assertEqual(before["p_only"], os.readlink(p_only))
+            self.assertFalse(os.path.lexists(q_only))
+            self.assertEqual(b"PRESERVE-MATERIALIZED-LATEST\n", marker.read_bytes())
+            self.assertTrue((root / "ztp/.setup-switch-journal.json").is_file())
+
+    def test_real_setup_wal_refuses_unjournaled_infra_log_directory_before_q_link(self):
+        """A link-only WAL cannot authorize moving a real infra logs directory."""
+        with tempfile.TemporaryDirectory(prefix="r22-real-infra-hold-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, _q, common, p_only, q_only, manifest, before, _hook, barrier, _home = fixture
+            logs = root / "infra/logs"
+            logs.mkdir(parents=True)
+            marker = logs / "audit.log"
+            marker.write_bytes(b"PRESERVE-INFRA-LOGS\n")
+            result = self._run_private_load_setup_switch(fixture, prepare_journal=True)
+            self.assertNotEqual(23, result.returncode, result.stdout + result.stderr)
+            self.assertFalse(barrier.exists(), result.stdout + result.stderr)
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            self.assertEqual(before["common"], os.readlink(common))
+            self.assertEqual(before["p_only"], os.readlink(p_only))
+            self.assertFalse(os.path.lexists(q_only))
+            self.assertEqual(b"PRESERVE-INFRA-LOGS\n", marker.read_bytes())
+            self.assertTrue((root / "ztp/.setup-switch-journal.json").is_file())
+
+    def test_real_setup_wal_refuses_unjournaled_p_only_cleanup_before_q_link(self):
+        """A P-owned legacy link absent from the WAL cannot be deleted silently."""
+        with tempfile.TemporaryDirectory(prefix="r22-real-p-only-hold-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, p, _q, common, p_only, q_only, manifest, before, _hook, barrier, _home = fixture
+            legacy = root / "ztp/config/publickey/legacy.pub"
+            legacy.symlink_to(os.path.relpath(p / "operator.pub", legacy.parent))
+            legacy_raw = os.readlink(legacy)
+            result = self._run_private_load_setup_switch(fixture, prepare_journal=True)
+            self.assertNotEqual(23, result.returncode, result.stdout + result.stderr)
+            self.assertFalse(barrier.exists(), result.stdout + result.stderr)
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            self.assertEqual(before["common"], os.readlink(common))
+            self.assertEqual(before["p_only"], os.readlink(p_only))
+            self.assertEqual(legacy_raw, os.readlink(legacy))
+            self.assertFalse(os.path.lexists(q_only))
+            self.assertTrue((root / "ztp/.setup-switch-journal.json").is_file())
+
+    def test_real_setup_wal_refuses_unlisted_fixed_q_repoint_before_write(self):
+        """P's fixed link cannot be repointed when its WAL row has no Q value."""
+        with tempfile.TemporaryDirectory(prefix="r22-real-fixed-q-hold-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, _q, common, p_only, q_only, manifest, before, _hook, barrier, _home = fixture
+            result = self._run_private_load_setup_switch(
+                fixture, prepare_journal=True, omit_common_from_wal=True,
+            )
+            self.assertNotEqual(23, result.returncode, result.stdout + result.stderr)
+            self.assertFalse(barrier.exists(), result.stdout + result.stderr)
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            self.assertEqual(before["common"], os.readlink(common))
+            self.assertEqual(before["p_only"], os.readlink(p_only))
+            self.assertFalse(os.path.lexists(q_only))
+            self.assertTrue((root / "ztp/.setup-switch-journal.json").is_file())
+
+    def test_real_setup_wal_registers_dynamic_q_key_before_child_write(self):
+        """A late-discovered Q key must be durable before a killed setup publishes it."""
+        with tempfile.TemporaryDirectory(prefix="r22-real-q-key-wal-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, q, _common, _p_only, _q_only, manifest, before, _hook, barrier, _home = fixture
+            (q / "late.pub").write_bytes((q / "operator.pub").read_bytes())
+            late = root / "ztp/config/publickey/late.pub"
+            result = self._run_private_load_setup_switch(
+                fixture, prepare_journal=True, first_link=late,
+            )
+            self.assertEqual(23, result.returncode, result.stdout + result.stderr)
+            self.assertEqual(b"first Q managed link written\n", barrier.read_bytes())
+            journal = root / "ztp/.setup-switch-journal.json"
+            body = json.loads(journal.read_bytes())["body"]
+            self.assertIn(str(late), {row["path"] for row in body["links"]})
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            recovery = """
+import importlib.util
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('fresh_dynamic_q_recovery', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    outcome = load.recover_setup_switch_journal(
+        root / 'ztp/.setup-switch-journal.json',
+        deployment_lock_descriptor=descriptor, services_quiesced=True,
+        runtime_backend=SimpleNamespace(name='supervisor'),
+    )
+    if outcome != 'restored-p':
+        raise SystemExit('unexpected outcome: ' + repr(outcome))
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+            second = subprocess.run(
+                [sys.executable, "-B", "-c", recovery, str(root)],
+                cwd=root, capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+            self.assertFalse(os.path.lexists(late))
+            self.assertFalse(journal.exists())
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+
+    def test_real_setup_wal_registers_missing_infra_logs_before_child_write(self):
+        """The first infra/logs link needs its own durable Q-only WAL row."""
+        with tempfile.TemporaryDirectory(prefix="r22-real-infra-link-wal-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, _q, _common, _p_only, _q_only, manifest, before, _hook, barrier, _home = fixture
+            logs = root / "infra/logs"
+            self.assertFalse(os.path.lexists(logs))
+            result = self._run_private_load_setup_switch(
+                fixture, prepare_journal=True, first_link=logs,
+            )
+            self.assertEqual(23, result.returncode, result.stdout + result.stderr)
+            self.assertEqual(b"first Q managed link written\n", barrier.read_bytes())
+            journal = root / "ztp/.setup-switch-journal.json"
+            body = json.loads(journal.read_bytes())["body"]
+            self.assertIn(str(logs), {row["path"] for row in body["links"]})
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            recovery = """
+import importlib.util
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('fresh_infra_link_recovery', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    outcome = load.recover_setup_switch_journal(
+        root / 'ztp/.setup-switch-journal.json',
+        deployment_lock_descriptor=descriptor, services_quiesced=True,
+        runtime_backend=SimpleNamespace(name='supervisor'),
+    )
+    if outcome != 'restored-p':
+        raise SystemExit('unexpected outcome: ' + repr(outcome))
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+            second = subprocess.run(
+                [sys.executable, "-B", "-c", recovery, str(root)],
+                cwd=root, capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+            self.assertFalse(os.path.lexists(logs))
+            self.assertFalse(journal.exists())
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+
+    def test_real_setup_exact_monitor_temp_sigkill_cold_recovers_p(self):
+        """An atomic exact-link temp must be WAL-known before SIGKILL."""
+        with tempfile.TemporaryDirectory(prefix="r22-real-exact-temp-wal-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, _q, common, p_only, _q_only, manifest, before, _hook, barrier, _home = fixture
+            prefix = str(root / "ethernet/monitor/.eth.csv.tmp.")
+            result = self._run_private_load_setup_switch(
+                fixture, prepare_journal=True, first_link_prefix=prefix,
+            )
+            self.assertEqual(23, result.returncode, result.stdout + result.stderr)
+            temporary = Path(barrier.read_text().strip())
+            self.assertTrue(str(temporary).startswith(prefix))
+            self.assertTrue(temporary.is_symlink())
+            journal = root / "ztp/.setup-switch-journal.json"
+            body = json.loads(journal.read_bytes())["body"]
+            final = root / "ethernet/monitor/eth.csv"
+            self.assertIn(str(temporary), {row["path"] for row in body["links"]})
+            self.assertIn(str(final), {row["path"] for row in body["links"]})
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            recovery = """
+import importlib.util
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('fresh_exact_temp_recovery', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    outcome = load.recover_setup_switch_journal(
+        root / 'ztp/.setup-switch-journal.json',
+        deployment_lock_descriptor=descriptor, services_quiesced=True,
+        runtime_backend=SimpleNamespace(name='supervisor'),
+    )
+    if outcome != 'restored-p':
+        raise SystemExit('unexpected outcome: ' + repr(outcome))
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+            second = subprocess.run(
+                [sys.executable, "-B", "-c", recovery, str(root)],
+                cwd=root, capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+            self.assertFalse(os.path.lexists(temporary))
+            self.assertFalse(journal.exists())
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            self.assertEqual(before["common"], os.readlink(common))
+            self.assertEqual(before["p_only"], os.readlink(p_only))
+
+    def test_real_setup_exact_monitor_replace_sigkill_cold_recovers_p(self):
+        """A completed exact-link replace is still Q-in-flight before commit."""
+        with tempfile.TemporaryDirectory(prefix="r22-real-exact-replace-wal-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, _q, common, p_only, _q_only, manifest, before, _hook, barrier, _home = fixture
+            final = root / "ethernet/monitor/eth.csv"
+            result = self._run_private_load_setup_switch(
+                fixture, prepare_journal=True, kill_after_replace=final,
+            )
+            self.assertEqual(23, result.returncode, result.stdout + result.stderr)
+            self.assertEqual(b"infra logs pointer replaced\n", barrier.read_bytes())
+            self.assertTrue(final.is_symlink())
+            journal = root / "ztp/.setup-switch-journal.json"
+            rows = json.loads(journal.read_bytes())["body"]["links"]
+            self.assertIn(str(final), {row["path"] for row in rows})
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            recovery = """
+import importlib.util
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('fresh_exact_replace_recovery', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    outcome = load.recover_setup_switch_journal(
+        root / 'ztp/.setup-switch-journal.json',
+        deployment_lock_descriptor=descriptor, services_quiesced=True,
+        runtime_backend=SimpleNamespace(name='supervisor'),
+    )
+    if outcome != 'restored-p':
+        raise SystemExit('unexpected outcome: ' + repr(outcome))
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+            second = subprocess.run(
+                [sys.executable, "-B", "-c", recovery, str(root)],
+                cwd=root, capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+            self.assertFalse(os.path.lexists(final))
+            self.assertFalse(journal.exists())
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            self.assertEqual(before["common"], os.readlink(common))
+            self.assertEqual(before["p_only"], os.readlink(p_only))
+
+    def test_real_setup_wal_registers_infra_repoint_temp_before_child_write(self):
+        """A killed infra/logs re-point leaves only journalled P and temp links."""
+        with tempfile.TemporaryDirectory(prefix="r22-real-infra-repoint-wal-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, p, q, common, p_only, q_only, manifest, before, _hook, barrier, _home = fixture
+            p_logs = p / "99-output-infra"
+            q_logs = q / "99-output-infra"
+            p_logs.mkdir(exist_ok=True)
+            q_logs.mkdir(exist_ok=True)
+            logs = root / "infra/logs"
+            logs.symlink_to(os.path.relpath(p_logs, logs.parent))
+            old_logs = os.readlink(logs)
+            manifest.write_bytes(before["manifest"] + (str(logs) + "\n").encode())
+            before["manifest"] = manifest.read_bytes()
+            result = self._run_private_load_setup_switch(
+                fixture, prepare_journal=True,
+                first_link_prefix=str(root / "infra/.logs.setup."),
+            )
+            self.assertEqual(23, result.returncode, result.stdout + result.stderr)
+            self.assertTrue(barrier.read_text().startswith(
+                str(root / "infra/.logs.setup.")), barrier.read_text())
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            self.assertEqual(old_logs, os.readlink(logs))
+            journal = root / "ztp/.setup-switch-journal.json"
+            body = json.loads(journal.read_bytes())["body"]
+            temp_rows = [row for row in body["links"]
+                         if row["path"].startswith(str(root / "infra/.logs.setup."))]
+            self.assertEqual(1, len(temp_rows), (body["links"], list((root / "infra").iterdir()), result.stdout, result.stderr))
+            temporary = Path(temp_rows[0]["path"])
+            self.assertTrue(temporary.is_symlink())
+            recovery = """
+import importlib.util
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('fresh_infra_repoint_recovery', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    outcome = load.recover_setup_switch_journal(
+        root / 'ztp/.setup-switch-journal.json',
+        deployment_lock_descriptor=descriptor, services_quiesced=True,
+        runtime_backend=SimpleNamespace(name='supervisor'),
+    )
+    if outcome != 'restored-p':
+        raise SystemExit('unexpected outcome: ' + repr(outcome))
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+            second = subprocess.run(
+                [sys.executable, "-B", "-c", recovery, str(root)],
+                cwd=root, capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+            self.assertFalse(os.path.lexists(temporary))
+            self.assertEqual(old_logs, os.readlink(logs))
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            self.assertEqual(before["common"], os.readlink(common))
+            self.assertEqual(before["p_only"], os.readlink(p_only))
+            self.assertFalse(os.path.lexists(q_only))
+            self.assertFalse(journal.exists())
+
+    def test_real_setup_wal_recovers_after_infra_logs_pointer_replace(self):
+        """A killed re-point after replace restores P using the durable WAL."""
+        with tempfile.TemporaryDirectory(prefix="r22-real-infra-replaced-wal-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, p, q, common, p_only, q_only, manifest, before, _hook, barrier, _home = fixture
+            p_logs, q_logs = p / "99-output-infra", q / "99-output-infra"
+            p_logs.mkdir(exist_ok=True)
+            q_logs.mkdir(exist_ok=True)
+            logs = root / "infra/logs"
+            logs.symlink_to(os.path.relpath(p_logs, logs.parent))
+            old_logs = os.readlink(logs)
+            manifest.write_bytes(before["manifest"] + (str(logs) + "\n").encode())
+            before["manifest"] = manifest.read_bytes()
+            result = self._run_private_load_setup_switch(
+                fixture, prepare_journal=True, kill_after_replace=logs,
+            )
+            self.assertEqual(23, result.returncode, result.stdout + result.stderr)
+            self.assertEqual(b"infra logs pointer replaced\n", barrier.read_bytes())
+            self.assertEqual(q_logs, logs.resolve())
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            journal = root / "ztp/.setup-switch-journal.json"
+            self.assertTrue(journal.is_file())
+            recovery = """
+import importlib.util
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('fresh_infra_replaced_recovery', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    outcome = load.recover_setup_switch_journal(
+        root / 'ztp/.setup-switch-journal.json',
+        deployment_lock_descriptor=descriptor, services_quiesced=True,
+        runtime_backend=SimpleNamespace(name='supervisor'),
+    )
+    if outcome != 'restored-p':
+        raise SystemExit('unexpected outcome: ' + repr(outcome))
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+            second = subprocess.run(
+                [sys.executable, "-B", "-c", recovery, str(root)],
+                cwd=root, capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+            self.assertEqual(old_logs, os.readlink(logs))
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            self.assertEqual(before["common"], os.readlink(common))
+            self.assertEqual(before["p_only"], os.readlink(p_only))
+            self.assertFalse(os.path.lexists(q_only))
+            self.assertFalse(journal.exists())
+
     def test_c2_process_death_between_version_and_pointer_commits(self):
         """Fresh readers reject an orphan but accept only a committed pointer."""
         child = """
