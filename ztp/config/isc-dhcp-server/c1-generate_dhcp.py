@@ -145,9 +145,17 @@ def load_project_global(path):
         with open(path, encoding="utf-8") as stream:
             data = yaml.safe_load(stream)
         value = data["common"]["mgmt"]["ztp"]["ztp_url_prefix"]
-        http_policy = data["common"]["mgmt"].get("http", {})
+        mgmt = data["common"]["mgmt"]
+        http_policy = mgmt.get("http", {})
         if not isinstance(http_policy, dict):
             raise ValueError("common.mgmt.http 必须是 mapping")
+        if "http" in mgmt:
+            status = http_policy.get("status")
+            if (type(status) is not str or
+                    status.strip().casefold() not in {"enabled", "disabled"}):
+                raise ValueError(
+                    "common.mgmt.http.status 必须是 enabled 或 disabled"
+                )
         port_value = http_policy.get("port", 80)
         schema_version = detect_global_schema_version(data)
     except (OSError, yaml.YAMLError) as exc:

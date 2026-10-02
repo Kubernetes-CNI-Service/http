@@ -2917,12 +2917,19 @@ def _validate_global_yaml(path, section_key="eth"):
             http_policy = mgmt.get("http", {})
             if not isinstance(http_policy, dict):
                 raise ValueError("common.mgmt.http 必须是 mapping")
+            if "http" in mgmt:
+                status = http_policy.get("status")
+                if (type(status) is not str or
+                        status.strip().casefold() not in {"enabled", "disabled"}):
+                    raise ValueError(
+                        "common.mgmt.http.status 必须是 enabled 或 disabled"
+                    )
             http_port = http_policy.get("port", 80)
             validate_service_endpoint(
                 "192.0.2.1", http_port, field="common.mgmt.http.port"
             )
         except (KeyError, TypeError, ValueError, AttributeError) as exc:
-            errors.append(f"  common.mgmt.http.port 无效：{exc}")
+            errors.append(f"  common.mgmt.http 配置无效：{exc}")
         else:
             if "address" in http_policy:
                 try:

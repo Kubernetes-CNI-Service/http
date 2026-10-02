@@ -1003,7 +1003,10 @@ class ProjectImageBundleTests(unittest.TestCase):
             project = workspace / "DAY0-Prepare/customer"
             project.mkdir(parents=True, exist_ok=True)
             (project / "01-global.yaml").write_text(
-                "schema_version: 2\n", encoding="ascii",
+                "schema_version: 2\ncommon:\n  mgmt:\n"
+                "    dhcp-server:\n      status: disabled\n"
+                "    ztp:\n      status: disabled\n",
+                encoding="ascii",
             )
             (project / "02-devices_config.csv").write_text(
                 "hostname,type\nleaf01,eth\n", encoding="ascii",

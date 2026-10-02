@@ -2044,9 +2044,17 @@ def global_ztp_http_policy(global_yaml: Path) -> tuple[str, int]:
             global_yaml.read_text(encoding="utf-8")
         )
         prefix = str(document["common"]["mgmt"]["ztp"]["ztp_url_prefix"]).strip()
-        http_policy = document["common"]["mgmt"].get("http", {})
+        mgmt = document["common"]["mgmt"]
+        http_policy = mgmt.get("http", {})
         if not isinstance(http_policy, dict):
             raise ManualZtpError("common.mgmt.http 必须是 mapping")
+        if "http" in mgmt:
+            status = http_policy.get("status")
+            if (type(status) is not str or
+                    status.strip().casefold() not in {"enabled", "disabled"}):
+                raise ManualZtpError(
+                    "common.mgmt.http.status 必须是 enabled 或 disabled"
+                )
         port_value = http_policy.get("port", 80)
     except (OSError, KeyError, TypeError, yaml.YAMLError) as exc:
         raise ManualZtpError(

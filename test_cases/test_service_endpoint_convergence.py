@@ -572,7 +572,9 @@ class ServiceEndpointConvergenceTests(unittest.TestCase):
                 csv_path = Path(temporary) / "02-dhcp-subnet_config.csv"
                 csv_path.write_text(subnet_csv(value), encoding="utf-8")
                 with self.subTest(caller="setup", value=value):
-                    errors, _warnings = SETUP._validate_subnet_csv(csv_path)
+                    errors, _warnings = SETUP._validate_subnet_csv(
+                        csv_path, dhcp_enabled=True, ztp_enabled=True,
+                    )
                     self.assertTrue(
                         any("ztp_service_ip" in error for error in errors), errors
                     )
@@ -601,7 +603,9 @@ class ServiceEndpointConvergenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             csv_path = Path(temporary) / "02-dhcp-subnet_config.csv"
             csv_path.write_text(subnet_csv("192.0.2.10"), encoding="utf-8")
-            self.assertEqual(([], []), SETUP._validate_subnet_csv(csv_path))
+            self.assertEqual(([], []), SETUP._validate_subnet_csv(
+                csv_path, dhcp_enabled=True, ztp_enabled=True,
+            ))
             rows = DHCP.load_subnet_csv(csv_path, "/ztp")
             self.assertEqual(1, len(rows))
             self.assertEqual(

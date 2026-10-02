@@ -1165,7 +1165,12 @@ def load_global(
         common = data["common"]
         mgmt = common["mgmt"]
         dhcp = mgmt["dhcp-server"]
-        http = mgmt["http"]
+        # Projects predating the HTTP section retain their port-80 listener.
+        # A section that is present must still pass every explicit field gate.
+        http = mgmt.get("http", {
+            "status": "enabled", "package": "apache2",
+            "http_root": "/var/www/html", "port": 80,
+        })
         ztp = mgmt["ztp"]
         switch_system = common["switch"]["system"]
     except (KeyError, TypeError) as exc:

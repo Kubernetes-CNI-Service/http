@@ -253,6 +253,13 @@ def _load_common_with_http_port(
         http = mgmt.get("http", {})
         if not isinstance(http, dict):
             raise TypeError("common.mgmt.http")
+        if "http" in mgmt:
+            status = http.get("status")
+            if (type(status) is not str or
+                    status.strip().casefold() not in {"enabled", "disabled"}):
+                raise ValueError(
+                    "common.mgmt.http.status must be enabled or disabled"
+                )
         http_port = validate_service_endpoint(
             "192.0.2.1", http.get("port", 80), field="common.mgmt.http.port"
         ).port

@@ -1334,7 +1334,11 @@ def project_http_policy(settings: Settings) -> tuple[int, str | None, bool]:
         http_policy = mgmt.get("http", {})
         if not isinstance(http_policy, dict):
             raise ValueError("common.mgmt.http must be a mapping")
-        raw_status = http_policy.get("status")
+        # Older project globals had no HTTP section.  Keep their existing
+        # ZTP-endpoint listener behavior; a present section must be explicit.
+        raw_status = (
+            "enabled" if "http" not in mgmt else http_policy.get("status")
+        )
         if type(raw_status) is not str or raw_status.strip().casefold() not in {
             "enabled", "disabled",
         }:

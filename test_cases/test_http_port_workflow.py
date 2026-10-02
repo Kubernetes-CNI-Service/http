@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 
 import yaml
 
-from test_cases.test_http_port_contract import DEPLOY, load_module, ROOT
+from test_cases.test_http_port_contract import DEPLOY, SETUP, load_module, ROOT
 
 
 LOAD = load_module("http_port_workflow_load", "DAY0-Prepare/11-load.py")
@@ -46,6 +46,96 @@ SUBNET_TWO = (
 
 
 class HttpPortWorkflowTests(unittest.TestCase):
+    def test_legacy_missing_http_section_reaches_dhcp_manual_and_docker_listener(self):
+        """A wholly absent optional HTTP section retains the old port-80 path."""
+        document = yaml.safe_load(
+            (ROOT / "DAY0-Prepare/template/01-global.yaml").read_text(
+                encoding="utf-8"
+            )
+        )
+        document["common"]["mgmt"].pop("http")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            global_yaml = root / "01-global.yaml"
+            subnet_csv = root / "02-dhcp-subnet_config.csv"
+            global_yaml.write_text(yaml.safe_dump(document), encoding="utf-8")
+            subnet_csv.write_text(SUBNET, encoding="utf-8")
+            neutral = root / "infra-neutral.conf"
+            neutral.write_text(
+                "DNS=8.8.8.8\nNTP=ntp.ubuntu.com\nTIMEZONE=Etc/UTC\n",
+                encoding="utf-8",
+            )
+
+            errors, _warnings = SETUP._validate_global_yaml(global_yaml)
+            self.assertEqual([], errors)
+            loaded = LOAD.load_global(global_yaml)
+            self.assertTrue(loaded.http_enabled)
+            self.assertEqual(80, loaded.http_port)
+            self.assertEqual(80, DEPLOY._load_common_with_http_port(
+                global_yaml, neutral,
+            )[3])
+
+            prefix, _schema, dhcp_port = DHCP.load_project_global(global_yaml)
+            manual_prefix, manual_port = MANUAL.global_ztp_http_policy(global_yaml)
+            self.assertEqual((prefix, 80), (manual_prefix, manual_port))
+            self.assertEqual(80, dhcp_port)
+            rows = DHCP.load_subnet_csv(subnet_csv, prefix, port=dhcp_port)
+            self.assertEqual(1, len(rows))
+            self.assertEqual(
+                "http://192.0.2.10/ztp/ztp-bootstrap_oob.sh",
+                rows[0]["cumulus_provision_url"],
+            )
+
+            project = root / "container/DAY0-Prepare/fixture"
+            project.mkdir(parents=True)
+            (project / "01-global.yaml").write_bytes(global_yaml.read_bytes())
+            settings = ACTIVATE.Settings(
+                project_name="fixture", scope="prod", http_root=root / "container"
+            )
+            selected = SimpleNamespace(
+                endpoint_ips=(rows[0]["ztp_service_ip"],), listener_names=(),
+            )
+            listeners = ACTIVATE.project_http_listener_ips(settings, selected)
+            self.assertEqual(("192.0.2.10",), listeners)
+            rendered = ACTIVATE.render_apache_listener_config(listeners, port=80)
+            self.assertIn("Listen 192.0.2.10:80", rendered)
+            no_ztp_endpoint = SimpleNamespace(endpoint_ips=(), listener_names=())
+            self.assertEqual(
+                (), ACTIVATE.project_http_listener_ips(settings, no_ztp_endpoint)
+            )
+            self.assertEqual(
+                (), ACTIVATE.expected_services(
+                    no_ztp_endpoint, dhcp_status="disabled", http_listener_ips=(),
+                ),
+            )
+
+            # A present but incomplete or malformed section is not legacy.
+            for policy in ({"port": 80}, {"port": 80, "status": "bogus"}):
+                with self.subTest(policy=policy):
+                    document["common"]["mgmt"]["http"] = policy
+                    global_yaml.write_text(
+                        yaml.safe_dump(document), encoding="utf-8"
+                    )
+                    (project / "01-global.yaml").write_text(
+                        yaml.safe_dump(document), encoding="utf-8"
+                    )
+                    errors, _warnings = SETUP._validate_global_yaml(global_yaml)
+                    self.assertTrue(any(
+                        "common.mgmt.http.status" in item for item in errors
+                    ), errors)
+                    with self.assertRaises(LOAD.LoadError):
+                        LOAD.load_global(global_yaml)
+                    with self.assertRaises(ValueError):
+                        DHCP.load_project_global(global_yaml)
+                    with self.assertRaises(MANUAL.ManualZtpError):
+                        MANUAL.global_ztp_http_policy(global_yaml)
+                    with self.assertRaises(DEPLOY.DeployError):
+                        DEPLOY._load_common_with_http_port(global_yaml, neutral)
+                    with self.assertRaisesRegex(
+                        ACTIVATE.ActivationError, "common.mgmt.http.status"
+                    ):
+                        ACTIVATE.project_http_listener_ips(settings, selected)
+
     def test_project_http_port_reaches_actual_infra_probe_and_render_before_write(self):
         document = yaml.safe_load(
             (ROOT / "DAY0-Prepare/template/01-global.yaml").read_text(

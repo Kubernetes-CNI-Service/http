@@ -19,7 +19,9 @@ import unittest
 from unittest import mock
 import zipfile
 
-from test_cases.test_upload_package_contract import REQUIRED_UPLOAD_SOURCES
+from test_cases.test_upload_package_contract import (
+    REQUIRED_UPLOAD_SOURCES, R22_DISABLED_GLOBAL,
+)
 from test_cases.test_load_release_transaction import ReleaseTransactionTests, LOAD, MANUAL
 
 
@@ -209,7 +211,7 @@ class P2PSelectionWorkflowTests(unittest.TestCase):
             project.mkdir(parents=True)
             (workspace / "ztp").mkdir()
             (workspace / "tools").mkdir()
-            (project / "01-global.yaml").write_text("schema_version: 2\ncommon: {}\n", encoding="utf-8")
+            (project / "01-global.yaml").write_bytes(R22_DISABLED_GLOBAL)
             (project / "02-devices_config.csv").write_text("hostname,type\nleaf01,eth\n", encoding="utf-8")
             (project / "02-dhcp-subnet_config.csv").write_text(VALID_SUBNET_HEADER, encoding="ascii")
             for relative in REQUIRED_UPLOAD_SOURCES:
@@ -223,7 +225,7 @@ class P2PSelectionWorkflowTests(unittest.TestCase):
             (project / "p2p.xlsx").symlink_to(selected.name)
             second_project = day0 / "second-customer"
             second_project.mkdir()
-            (second_project / "01-global.yaml").write_text("schema_version: 2\ncommon: {}\n", encoding="utf-8")
+            (second_project / "01-global.yaml").write_bytes(R22_DISABLED_GLOBAL)
             (second_project / "02-devices_config.csv").write_text("hostname,type\nleaf02,eth\n", encoding="utf-8")
             (second_project / "02-dhcp-subnet_config.csv").write_text(VALID_SUBNET_HEADER, encoding="ascii")
             second_selected = workbook(second_project / "Site P2P_v4.0.xlsx", "second-selected")
@@ -274,7 +276,7 @@ class P2PSelectionWorkflowTests(unittest.TestCase):
             project.mkdir(parents=True)
             (workspace / "ztp").mkdir()
             (workspace / "tools").mkdir()
-            (project / "01-global.yaml").write_text("schema_version: 2\ncommon: {}\n", encoding="utf-8")
+            (project / "01-global.yaml").write_bytes(R22_DISABLED_GLOBAL)
             (project / "02-devices_config.csv").write_text("hostname,type\nleaf01,eth\n", encoding="utf-8")
             (project / "02-dhcp-subnet_config.csv").write_text(VALID_SUBNET_HEADER, encoding="ascii")
             workbook(project / "Fabric P2P_v1.0.xlsx", "unselected")

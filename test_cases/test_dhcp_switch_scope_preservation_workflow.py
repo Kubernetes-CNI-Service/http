@@ -53,7 +53,10 @@ class DhcpSwitchScopeWorkflowTests(unittest.TestCase):
     def _v2_validated_generation(self, fixture, status, *, invalid=None):
         from test_cases.test_dhcp_optional_contract import global_document
         document = global_document(status)
-        document["common"]["mgmt"]["ztp"]["status"] = "disabled"
+        # The enabled fixture has a real ZTP endpoint row.  The disabled
+        # fixture is a canonical empty table, so neither masks the intended
+        # generation/invalid-input assertion with an unrelated R22 mismatch.
+        document["common"]["mgmt"]["ztp"]["status"] = status
         fixture.global_file.write_text(yaml.safe_dump(document))
         lines = fixture.devices_file.read_text().splitlines()
         fixture.devices_file.write_text(lines[0] + ",lo_ip,bgp_asn,bgp_ports,bond_ports,bond_type,bond_mac,peerlink_ports,vrl\n" +
@@ -61,6 +64,8 @@ class DhcpSwitchScopeWorkflowTests(unittest.TestCase):
         project = fixture.global_file.parent
         subnet = project / "02-dhcp-subnet_config.csv"
         subnet.write_bytes(fixture.subnet_file.read_bytes())
+        if status == "disabled":
+            subnet.write_bytes(subnet.read_bytes().splitlines(keepends=True)[0])
         if invalid == "missing":
             subnet.unlink()
         elif invalid == "symlink":
@@ -90,7 +95,7 @@ class DhcpSwitchScopeWorkflowTests(unittest.TestCase):
             inputs, _ = LOAD.validate_inputs(project, args, allow_management_key_generation=False,
                                              host_role="workstation")
             self.assertEqual(2, inputs.settings.schema_version)
-            self.assertFalse(inputs.settings.ztp_enabled)
+            self.assertEqual(status == "enabled", inputs.settings.ztp_enabled)
             LOAD.generate_configs(inputs.device_types, install_dhcp=False,
                                   dhcp_enabled=inputs.settings.dhcp_enabled, deployment_scope="prod",
                                   source_identities=inputs.source_identities)
@@ -111,7 +116,82 @@ class DhcpSwitchScopeWorkflowTests(unittest.TestCase):
                         self.assertGreater(path.stat().st_size, 0)
                     self.assertNotEqual(before, fixture.snapshot())
 
+    def test_dhcp_enabled_ztp_disabled_with_real_non_ztp_row_generates_five_outputs(self):
+        from test_cases.test_dhcp_optional_contract import global_document
+
+        with tempfile.TemporaryDirectory() as name:
+            fixture = ScopedDhcpFixture(Path(name))
+            project = fixture.global_file.parent
+            document = global_document("enabled")
+            document["common"]["mgmt"]["ztp"]["status"] = "disabled"
+            fixture.global_file.write_text(yaml.safe_dump(document))
+            lines = fixture.devices_file.read_text().splitlines()
+            fixture.devices_file.write_text(
+                lines[0] + ",lo_ip,bgp_asn,bgp_ports,bond_ports,bond_type,bond_mac,peerlink_ports,vrl\n"
+                + "\n".join(line + ",NA,NA,NA,NA,NA,NA,NA,NA" for line in lines[1:]) + "\n"
+            )
+            subnet = project / "02-dhcp-subnet_config.csv"
+            subnet.write_bytes(
+                b"shared_network,subnet,netmask,range_start,range_end,routers,"
+                b"ztp_service_ip,cumulus_profile,nvos_ztp\n"
+                b"mgmt,192.0.2.0,255.255.255.0,192.0.2.100,192.0.2.200,"
+                b"192.0.2.1,,none,no\n"
+            )
+            fixture.subnet_file.unlink()
+            fixture.subnet_file.symlink_to(subnet.name)
+            self.assertEqual(2, len(subnet.read_text().splitlines()))
+            self.assertTrue(fixture.subnet_file.is_symlink())
+            self.assertEqual(subnet.resolve(strict=True), fixture.subnet_file.resolve(strict=True))
+            self.assertEqual(subnet.read_bytes(), fixture.subnet_file.read_bytes())
+            p2p = project / "p2p.xlsx"
+            p2p.write_bytes(b"unrelated workbook selection is stubbed")
+            args = SimpleNamespace(switch_scope="all", deployment_scope="prod", p2p_file=None,
+                                   no_upgrade=True, mini=None, ssh_dir=None, dry_run=True)
+            commands = []
+
+            def boundary(command, **_kwargs):
+                commands.append(command[1])
+                if command[1] == "c1-generate_dhcp.py":
+                    fixture.execute([command[1], *command[2:]])
+
+            before = fixture.snapshot()
+            with ExitStack() as stack:
+                for name, value in (("find_placeholder_password_sections", ()),
+                                    ("select_p2p", p2p), ("project_air_topology_policy", None),
+                                    ("project_mini_air_devices", (None, None)), ("prepare_pubkeys", ()),
+                                    ("validate_shared_artifact_receipts", None)):
+                    stack.enter_context(mock.patch.object(LOAD, name, return_value=value))
+                stack.enter_context(mock.patch.object(LOAD, "ZTP_DIR", fixture.root / "ztp"))
+                stack.enter_context(mock.patch.object(LOAD, "run", side_effect=boundary))
+                stack.enter_context(mock.patch.object(LOAD, "newest_directory", return_value=fixture.root / "generated"))
+                inputs, _ = LOAD.validate_inputs(project, args, allow_management_key_generation=False,
+                                                 host_role="workstation")
+                self.assertTrue(inputs.settings.dhcp_enabled)
+                self.assertFalse(inputs.settings.ztp_enabled)
+                LOAD.generate_configs(inputs.device_types, install_dhcp=False,
+                                      dhcp_enabled=inputs.settings.dhcp_enabled, deployment_scope="prod",
+                                      source_identities=inputs.source_identities)
+            self.assertEqual(1, commands.count("c1-generate_dhcp.py"))
+            self.assertIn("90-c2-generate_configs.py", commands)
+            self.assertNotEqual(before, fixture.snapshot())
+            for label, path in fixture.outputs.items():
+                self.assertGreater(path.stat().st_size, 0)
+                self.assertNotEqual(before[label][0], path.read_bytes())
+            config = fixture.outputs["conf"].read_bytes()
+            self.assertIn(b"192.0.2.100", config)
+            for forbidden in (b'option cumulus-provision-url "', b'option bootfile-name "',
+                              b"/ztp.json", b"http://"):
+                self.assertNotIn(forbidden, config)
+
     def test_v2_invalid_subnet_stops_before_generation_and_preserves_old_outputs(self):
+        expected_reason = {
+            "missing": "缺少 02-dhcp-subnet_config.csv",
+            "zero": "为零字节",
+            "whitespace": "must contain the canonical header",
+            "badheader": "缺少列",
+            "symlink": "非软链接普通文件",
+            "header-only": "02-dhcp-subnet_config.csv 没有 subnet 记录",
+        }
         for status in ("enabled", "disabled"):
             cases = ["missing", "zero", "whitespace", "badheader", "symlink"]
             if status == "enabled":
@@ -126,7 +206,9 @@ class DhcpSwitchScopeWorkflowTests(unittest.TestCase):
                     with mock.patch.object(LOAD, "generate_configs", wraps=LOAD.generate_configs) as generate, \
                             mock.patch.object(LOAD, "stop_other_ztp_monitors") as stop, \
                             mock.patch.object(LOAD, "publish_current_release") as publish:
-                        with self.assertRaisesRegex(LOAD.LoadError, "项目输入检查失败"):
+                        with self.assertRaisesRegex(
+                            LOAD.LoadError, expected_reason[invalid]
+                        ):
                             self._v2_validated_generation(fixture, status, invalid=invalid)
                         generate.assert_not_called()
                         stop.assert_not_called()

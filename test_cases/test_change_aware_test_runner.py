@@ -253,6 +253,12 @@ class ImpactManifestTests(unittest.TestCase):
                 "02-dhcp-subnet_config.csv",
             ):
                 (project / name).write_text(f"fixture: {name}\n", encoding="utf-8")
+            (project / "01-global.yaml").write_text(
+                "schema_version: 2\ncommon:\n  mgmt:\n"
+                "    dhcp-server:\n      status: disabled\n"
+                "    ztp:\n      status: disabled\n",
+                encoding="utf-8",
+            )
             (project / "02-dhcp-subnet_config.csv").write_text(
                 "shared_network,subnet,netmask,range_start,range_end,routers,"
                 "ztp_service_ip,cumulus_profile,nvos_ztp\n",

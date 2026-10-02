@@ -323,8 +323,21 @@ class HttpPortDirectTests(unittest.TestCase):
             global_yaml.write_text(yaml.safe_dump(document), encoding="utf-8")
             errors, _warnings = SETUP._validate_global_yaml(global_yaml)
             self.assertEqual([], errors)
+            loaded = LOAD.load_global(global_yaml)
+            self.assertTrue(loaded.http_enabled)
+            self.assertEqual("apache2", loaded.http_package)
+            self.assertEqual(Path("/var/www/html"), loaded.http_root)
+            self.assertEqual(80, loaded.http_port)
             self.assertEqual(80, DHCP.load_project_global(global_yaml)[2])
             self.assertEqual(80, MANUAL.global_ztp_http_policy(global_yaml)[1])
+            neutral = root / "infra-neutral.conf"
+            neutral.write_text(
+                "DNS=8.8.8.8\nNTP=ntp.ubuntu.com\nTIMEZONE=Etc/UTC\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                80, DEPLOY._load_common_with_http_port(global_yaml, neutral)[3]
+            )
             container_root = root / "container"
             project = container_root / "DAY0-Prepare" / "fixture"
             project.mkdir(parents=True)
@@ -364,6 +377,62 @@ class HttpPortDirectTests(unittest.TestCase):
             )
             with self.assertRaises(ACTIVATE.ActivationError):
                 ACTIVATE.project_http_port(settings)
+
+    def test_present_http_without_valid_status_is_not_legacy_in_any_consumer(self):
+        document = yaml.safe_load(
+            (ROOT / "DAY0-Prepare/template/01-global.yaml").read_text(
+                encoding="utf-8"
+            )
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            global_yaml = root / "01-global.yaml"
+            neutral = root / "infra-neutral.conf"
+            neutral.write_text(
+                "DNS=8.8.8.8\nNTP=ntp.ubuntu.com\nTIMEZONE=Etc/UTC\n",
+                encoding="utf-8",
+            )
+            container_root = root / "container"
+            project = container_root / "DAY0-Prepare" / "fixture"
+            project.mkdir(parents=True)
+            settings = ACTIVATE.Settings(
+                project_name="fixture", scope="prod", http_root=container_root,
+            )
+            for policy in ({"port": 80}, {"status": "bogus", "port": 80},
+                           {"status": True, "port": 80}):
+                with self.subTest(policy=policy):
+                    document["common"]["mgmt"]["http"] = policy
+                    global_yaml.write_text(
+                        yaml.safe_dump(document), encoding="utf-8"
+                    )
+                    (project / "01-global.yaml").write_bytes(
+                        global_yaml.read_bytes()
+                    )
+                    errors, _warnings = SETUP._validate_global_yaml(global_yaml)
+                    self.assertTrue(
+                        any("common.mgmt.http.status" in item for item in errors),
+                        errors,
+                    )
+                    with self.assertRaisesRegex(
+                        LOAD.LoadError, "common.mgmt.http.status"
+                    ):
+                        LOAD.load_global(global_yaml)
+                    with self.assertRaisesRegex(
+                        ValueError, "common.mgmt.http.status"
+                    ):
+                        DHCP.load_project_global(global_yaml)
+                    with self.assertRaisesRegex(
+                        MANUAL.ManualZtpError, "common.mgmt.http.status"
+                    ):
+                        MANUAL.global_ztp_http_policy(global_yaml)
+                    with self.assertRaisesRegex(
+                        DEPLOY.DeployError, "common.mgmt.http.status"
+                    ):
+                        DEPLOY._load_common_with_http_port(global_yaml, neutral)
+                    with self.assertRaisesRegex(
+                        ACTIVATE.ActivationError, "common.mgmt.http.status"
+                    ):
+                        ACTIVATE.project_http_port(settings)
 
     def test_both_apache_renderers_use_one_configured_port_without_changing_host(self):
         for renderer in (

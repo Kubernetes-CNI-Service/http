@@ -1537,7 +1537,8 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 状态：**NOT RUN / REAL_ENV REQUIRED**。自动化 direct/workflow 仅证明配置渲染和 CGI 请求语义，
   不能冒充真实 Apache bind、DHCP DORA、设备 bootstrap 或现场端口可达性。
 - 前置条件：仅由 owner 在批准的隔离管理 VM 与可回滚 AIR 实验交换机执行；准备一份
-  `common.mgmt.http.port=8080` 的非生产项目和一份缺省端口对照项目，独立 console/OOB、
+  `common.mgmt.http.port=8080` 的非生产项目、一份显式 HTTP 但缺省 port 的对照项目，
+  及一份整个 `common.mgmt.http` 区块缺席的旧项目副本；独立 console/OOB、
   可回滚 Apache/DHCP 配置及设备快照。冻结 candidate HEAD/tree、源码、测试、manifest、
   global YAML、生成配置与服务监听地址摘要；先确认 8080 未被占用，不使用生产地址、凭据或设备。
 - 步骤与预期：在隔离项目完成正式 load，分别检查 native/container Apache renderer 生成的
@@ -1545,8 +1546,11 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   指定服务 IPv4 的 8080 监听；DHCP option 239/67、manual ZTP URL、NVOS JSON 与 bootstrap
   三个目标 URL 均指向相同 `http://<SERVICE_IP>:8080` origin。用真实实验交换机完成一次 DHCP
   与 bootstrap 读取，核对实际 HTTP 请求抵达该 listener；三条 CGI 分别验证正确 Host/Origin/
-  SERVER_PORT 被接受，错端口、错 host、错 origin 在动作执行前拒绝。缺省对照项目仍用 80，
-  且不输出额外 `SetEnv`。另注入 8080 已占用、Apache configtest 失败、DHCP 发布失败和设备无法
+  SERVER_PORT 被接受，错端口、错 host、错 origin 在动作执行前拒绝。两个 80 对照均须经
+  setup、load、DHCP/manual 和 Native/Docker listener 实测保持旧端口及预期 ZTP endpoint，
+  且不输出额外 `SetEnv`；另用隔离副本将 HTTP 区块改为显式存在但缺 status 或非法 status，
+  六个读取入口均须在服务动作前拒绝，不能冒充整段缺席。再注入 8080 已占用、
+  Apache configtest 失败、DHCP 发布失败和设备无法
   回连，均须显式阻断，不能回退到错误端口或悄然继续。
 - 证据：只保留脱敏的完整命令、退出码、端口/listener 与网络请求计数、配置/制品 SHA-256、
   Apache/DHCP 状态、失败注入和回滚时间线，不保存客户地址、设备输出、凭据或原始租约。
