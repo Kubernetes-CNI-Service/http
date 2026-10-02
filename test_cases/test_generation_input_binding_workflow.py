@@ -433,11 +433,24 @@ with mock.patch.object(c2, "_require_csv_input_authority"), mock.patch.object(
                 SETUP._SetupLinkTransaction._restore_link(
                     str(q_only), os.path.relpath(q, q_only.parent),
                 )
+                fsynced_directories = []
+                real_fsync = os.fsync
+
+                def record_fsync(descriptor):
+                    metadata = os.fstat(descriptor)
+                    if stat.S_ISDIR(metadata.st_mode):
+                        fsynced_directories.append(metadata.st_ino)
+                    return real_fsync(descriptor)
+
                 with mock.patch.object(
                     SETUP, "_collect_expected_links",
                     return_value=[str(common), str(q_only)],
-                ):
+                ), mock.patch.object(SETUP.os, "fsync", side_effect=record_fsync):
                     SETUP._write_manifest(str(q.resolve()))
+                self.assertIn(
+                    manifest.parent.stat().st_ino, fsynced_directories,
+                    "Q manifest replacement must fsync its parent directory",
+                )
                 self.assertEqual(q.resolve(), LOAD.active_project())
                 descriptor = LOAD.acquire_deployment_lock(exclusive=True)
                 try:

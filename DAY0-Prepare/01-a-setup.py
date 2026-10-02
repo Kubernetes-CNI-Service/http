@@ -4409,6 +4409,11 @@ def _write_manifest(proj_dir):
             os.fsync(f.fileno())
         os.chmod(temporary, 0o644)
         os.replace(temporary, MANIFEST_FILE)
+        parent_fd = os.open(manifest_dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
         print(_c(CYAN, f"  [MANIFEST] 已写入 {MANIFEST_FILE}（{len(links)} 条实际链接）"))
     except BaseException:
         if os.path.lexists(temporary):

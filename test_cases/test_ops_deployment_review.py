@@ -1857,14 +1857,24 @@ class SetupUnloadAndTransportTests(unittest.TestCase):
             manifest = root / ".setup_manifest"
             link = root / "managed-link"
             link.symlink_to("target")
+            fsynced = []
+            real_fsync = os.fsync
+
+            def record_fsync(descriptor):
+                metadata = os.fstat(descriptor)
+                fsynced.append((metadata.st_ino, stat.S_IFMT(metadata.st_mode)))
+                return real_fsync(descriptor)
+
             with (
                 mock.patch.object(SETUP, "MANIFEST_FILE", str(manifest)),
                 mock.patch.object(SETUP, "_collect_expected_links", return_value=[str(link)]),
+                mock.patch.object(SETUP.os, "fsync", side_effect=record_fsync),
                 redirect_stdout(io.StringIO()),
             ):
                 SETUP._write_manifest(str(root))
             self.assertIn(str(link), manifest.read_text(encoding="utf-8"))
             self.assertEqual(0o644, stat.S_IMODE(manifest.stat().st_mode))
+            self.assertIn((root.stat().st_ino, stat.S_IFDIR), fsynced)
 
     def test_unsetup_rolls_back_links_after_mid_delete_failure(self):
         with tempfile.TemporaryDirectory() as directory:
