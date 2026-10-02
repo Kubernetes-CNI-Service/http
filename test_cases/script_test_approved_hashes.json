@@ -24,7 +24,7 @@
       "root-entrypoint-workflow": "NOT COVERED (requires Linux EUID 0 private namespace)"
     },
     "schema_version": 1,
-    "snapshot_sha256": "08a6529916d87fdab8a58c7064f8a39c5315ee775e421fbf4a5559a126ec71d9"
+    "snapshot_sha256": "df20eb9ab39cf6f9bef347949ed0670ec1c27ae79a6a4958b166f28da4c6f3a9"
   },
   "impact_manifest_sha256": "1256455c3a530b0268250811e47450a33afb270981cd6feb6026249d2e34b0ef",
   "schema_version": 1,
@@ -842,7 +842,7 @@
     "test_cases.test_full_flow_integration": "b36d9d5912e8458dcb99a92bf060e346717d0ff950c67086c47b6246a4e3fbbf",
     "test_cases.test_generation_input_binding_activation_contract": "75f6fb0ddc2bebf26560172316ac5a4f2bb0cb860d4a54ccfbc25080f9516760",
     "test_cases.test_generation_input_binding_contract": "0efdb5fe23c5c46b60747681105b3996e8049032b89702aac3003f3ab711eb67",
-    "test_cases.test_generation_input_binding_workflow": "3ceac324f1b4a0a944029bca6adf9eebcefdc67b14a59c024dc790fdc3ae4f1c",
+    "test_cases.test_generation_input_binding_workflow": "6b36b36246ade27d8619e0621ba6b29e559f2caf9c9caa159993c9df08fa42ba",
     "test_cases.test_generation_report_contract": "8dee1457b79b2bfa92344c67499fd10671d5b4dec85fc64fc003f3c74fb3dfbc",
     "test_cases.test_generation_report_workflow": "f292f34cc2b7738c60a8b9874cc348c2045a8dfbbdac92b62deefca8dbd8a7f0",
     "test_cases.test_http_port_contract": "9ea7d6ed55a9564c05d6dbab1fad7cfbb82b46b90279f01b5ced7f66469c6839",
