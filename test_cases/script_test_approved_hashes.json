@@ -24,7 +24,7 @@
       "root-entrypoint-workflow": "NOT COVERED (requires Linux EUID 0 private namespace)"
     },
     "schema_version": 1,
-    "snapshot_sha256": "72f6a3ea0c4de31dd89edfa903bd5d2677ef00787e2ef9ec0694718ee7f82b9b"
+    "snapshot_sha256": "c4c4c5684d8edf6406ba2b26c185df481c77cfc5d9a16c645bda5315610df8e4"
   },
   "impact_manifest_sha256": "ad9fe642ca2bfd66f6943f7bee1ab9875bd5f5b45abc015b35c045e36e18be72",
   "schema_version": 1,
@@ -319,7 +319,7 @@
     },
     "tools/generation_report.py": {
       "canonical": "tools/generation_report.py",
-      "sha256": "e4dde3d0de684dcb352a33532222d26afbb3a56ba3c6099918cbb38e778f1353"
+      "sha256": "4eb96456d1aa98bd9186eb01ceef68f839582f56906aad2530ec0979d2016416"
     },
     "tools/ib-tool-Jie/ib_tool_box/lib/__init__.py": {
       "canonical": "tools/ib-tool-Jie/ib_tool_box/lib/__init__.py",
@@ -730,7 +730,7 @@
     "infra/infra-neutral.conf": "238bec3c9be34fc5a7bf097e36012133da4a30b90cabdf17d758796ecdab24f8",
     "requirements-container-top-level.lock": "3532f5208b462243bab779b01eb4deb21638ac05a9390c17ac997ba8d7f24998",
     "requirements-dev.txt": "2047cfeb6e7d7c3b02380624cd212528fb8416cf3e76dd924d2e2cba8567a50a",
-    "test_cases/REAL_ENVIRONMENT.md": "34abfc3f3e58ebaf69fabff59edcc9f51a8aefc130cb45560417925a1e1092fc",
+    "test_cases/REAL_ENVIRONMENT.md": "5d7cee3223d56b1f523913727054617af65d691fc3a7d1200dd3fafdbfd85537",
     "test_cases/audit_public_tree.py": "82a0c8dbb507f8ee21b1781eba4f4d4e158142a3c7d3c70da8c1cd2e1daae433",
     "test_cases/module_loader.py": "ef1e9b44f0272209378788ed6682b8a6a68c95a76a6d545c001ddc4762471ecf",
     "test_cases/monitor_authority_root_warden.py": "f4ac61acc04af33168aa01ba295a74fe036202b9179ad65f10e9db87375a2c4c",
@@ -839,8 +839,8 @@
     "test_cases.test_finished_project_rehydrate": "e103e7c6d5c0ecaef260b5806d145ef61ab92141ec862bebc9a3fa843ad19d38",
     "test_cases.test_flow_release_platform_matrix": "5393074aa3a6bff479be79d4e3f3b185acae2dc3fa58dedd8a7fa6afaa32ed09",
     "test_cases.test_full_flow_integration": "b36d9d5912e8458dcb99a92bf060e346717d0ff950c67086c47b6246a4e3fbbf",
-    "test_cases.test_generation_report_contract": "2817b522b5a202ca2217eaad2bf948822a0e7f3e14077e7e1af3344285b8c482",
-    "test_cases.test_generation_report_workflow": "d1b4a361c074fa75f56309a7a304ff4f7c5508c9eb362be6929eee0521a2c4f1",
+    "test_cases.test_generation_report_contract": "8dee1457b79b2bfa92344c67499fd10671d5b4dec85fc64fc003f3c74fb3dfbc",
+    "test_cases.test_generation_report_workflow": "f4ce719c20557fdfdaf9756ce1877ce3a203ba21151d55bf13a61e8b89fb3308",
     "test_cases.test_http_port_contract": "9ea7d6ed55a9564c05d6dbab1fad7cfbb82b46b90279f01b5ced7f66469c6839",
     "test_cases.test_http_port_workflow": "b343e2b2375c3d814d60bc9d608b28a17e2e0d478713b9a0cdf80f1534fe8914",
     "test_cases.test_ib_analysis_domain": "a305748cdde9b69b50a55a34c4c1d54c381aa56b0181af0831a5a96cf9185964",
