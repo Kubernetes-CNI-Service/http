@@ -303,6 +303,7 @@ class PreparedParentRelease:
     source_inventory_sha256: str | None = None
     source_authorities: dict[str, tuple[str, str]] | None = None
     dhcp_manifest_sha256: str | None = None
+    dhcp_source_dir: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -784,6 +785,7 @@ def run(
     command: list[str], *, cwd: Path | None = None, dry_run: bool = False,
     inherited_lock_descriptor: int | None = None,
     setup_key_context: bool | None = None,
+    expected_global_sha256: str | None = None,
 ) -> None:
     display = " ".join(shlex_quote(item) for item in command)
     if dry_run:
@@ -791,6 +793,12 @@ def run(
         return
     print(f"[RUN] ({cwd or Path.cwd()}) {display}")
     child_kwargs = inherited_lock_subprocess_kwargs(inherited_lock_descriptor)
+    if expected_global_sha256 is not None:
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_global_sha256):
+            raise LoadError("invalid global source authority")
+        child_env = dict(child_kwargs.get("env") or os.environ)
+        child_env["HTTP_EXPECTED_GLOBAL_SHA256"] = expected_global_sha256
+        child_kwargs["env"] = child_env
     if setup_key_context is not None:
         # This private mode is scoped to the setup child.  Never let an
         # unrelated parent environment silently decide the child's key role.
@@ -4128,14 +4136,323 @@ def newest_directory(parent: Path, pattern: re.Pattern[str]) -> Path | None:
     return max(candidates, key=lambda item: item.stat().st_mtime_ns) if candidates else None
 
 
-def dhcp_file_mappings() -> dict[Path, Path]:
-    dhcp_dir = ZTP_DIR / "config/isc-dhcp-server"
+def dhcp_file_mappings(source_directory: Path | None = None) -> dict[Path, Path]:
+    dhcp_dir = source_directory or ZTP_DIR / "config/isc-dhcp-server"
     return {
         dhcp_dir / "dhcpd.conf": Path("/etc/dhcp/dhcpd.conf"),
         dhcp_dir / "dhcpd_eth.hosts": Path("/etc/dhcp/dhcpd_eth.hosts"),
         dhcp_dir / "dhcpd_ib.hosts": Path("/etc/dhcp/dhcpd_ib.hosts"),
         dhcp_dir / "dhcpd_nvl.hosts": Path("/etc/dhcp/dhcpd_nvl.hosts"),
     }
+
+
+def _create_dhcp_candidate_dir(project: Path) -> Path:
+    """Create one LOAD-owned private child without replacing a committed A."""
+    canonical_project = project.resolve(strict=True)
+    output = canonical_project / "99-output-dhcp"
+    output.mkdir(mode=0o755, exist_ok=True)
+    metadata = output.lstat()
+    if (not stat.S_ISDIR(metadata.st_mode)
+            or output.resolve(strict=True) != output):
+        raise LoadError("DHCP output directory is not canonical")
+    for _ in range(3):
+        candidate = output / f".load-dhcp-candidate-{secrets.token_hex(16)}"
+        try:
+            candidate.mkdir(mode=0o700)
+            return candidate
+        except FileExistsError:
+            continue
+    raise LoadError("cannot allocate a unique DHCP candidate directory")
+
+
+def _validated_dhcp_candidate_dir(project: Path, candidate: Path) -> Path:
+    """Require one complete, private c1 candidate under this project only."""
+    canonical_project = project.resolve(strict=True)
+    output = canonical_project / "99-output-dhcp"
+    candidate_name = candidate.name
+    if not re.fullmatch(r"\.load-dhcp-candidate-[A-Za-z0-9-]{8,64}", candidate_name):
+        raise LoadError("DHCP candidate name is not LOAD-owned")
+    try:
+        output_stat = output.lstat()
+        candidate_stat = candidate.lstat()
+        if (not stat.S_ISDIR(output_stat.st_mode)
+                or not stat.S_ISDIR(candidate_stat.st_mode)
+                or stat.S_IMODE(candidate_stat.st_mode) != 0o700
+                or candidate.resolve(strict=True) != output / candidate_name
+                or candidate.parent.resolve(strict=True) != output):
+            raise LoadError("DHCP candidate is not a private canonical project directory")
+        names = {item.name for item in candidate.iterdir()}
+        expected = {
+            "dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts",
+            "dhcpd_nvl.hosts", "dhcp-release-manifest.json",
+        }
+        if names != expected:
+            raise LoadError("DHCP candidate does not contain exactly five artifacts")
+        for name in expected:
+            metadata = (candidate / name).lstat()
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                raise LoadError(f"DHCP candidate artifact is not a regular single-link file: {name}")
+    except LoadError:
+        raise
+    except OSError as exc:
+        raise LoadError(f"DHCP candidate cannot be verified: {exc}") from exc
+    return output / candidate_name
+
+
+def _pinned_generation_payloads(
+    project: Path, parent_file: Path, dhcp_source_dir: Path,
+) -> tuple[str, dict[str, bytes]]:
+    """Freeze a schema-2 parent, its source inputs and bound DHCP child bytes."""
+    canonical_project = project.resolve(strict=True)
+    output = canonical_project / "99-output-ztp"
+    parent_directory = parent_file.parent.resolve(strict=True)
+    snapshot_directory = (
+        parent_directory.parent == output / "generations"
+        and bool(re.fullmatch(r"[0-9a-f]{20}", parent_directory.name))
+    )
+    source_name_valid = (
+        parent_file.name == "current-release.json"
+        or (parent_directory == output and bool(re.fullmatch(
+            r"\.current-release\.[A-Za-z0-9_-]+\.tmp", parent_file.name,
+        )))
+    )
+    if (parent_directory != output and not snapshot_directory
+            or not source_name_valid
+            or not stat.S_ISREG(parent_file.lstat().st_mode)
+            or parent_file.lstat().st_nlink != 1):
+        raise LoadError("pinned parent source is not an owned regular file")
+    parent_bytes = parent_file.read_bytes()
+    try:
+        parent = json.loads(parent_bytes)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise LoadError(f"pinned parent is not JSON: {exc}") from exc
+    if not isinstance(parent, dict) or parent.get("schema_version") != 2:
+        raise LoadError("pinned generation requires a schema 2 parent")
+    release_id = parent.get("release_id")
+    if not isinstance(release_id, str) or not re.fullmatch(r"[0-9a-f]{20}", release_id):
+        raise LoadError("pinned parent release ID is invalid")
+    if snapshot_directory and parent_directory.name != release_id:
+        raise LoadError("pinned generation directory differs from parent ID")
+    basis_keys = (
+        "project", "deployment_scope", "switch_scope", "inputs",
+        "input_sources", "components", "inventory", "dhcp_status",
+    )
+    if "generated_inputs" in parent:
+        basis_keys += ("generated_inputs",)
+    if any(key not in parent for key in basis_keys):
+        raise LoadError("pinned parent basis is incomplete")
+    basis = {key: parent[key] for key in basis_keys}
+    calculated = hashlib.sha256(json.dumps(
+        basis, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()[:20]
+    if (calculated != release_id or parent.get("project") != canonical_project.name
+            or parent.get("dhcp_status") != "enabled"
+            or parent.get("validation") != "passed"):
+        raise LoadError("pinned parent basis/project/DHCP does not match release ID")
+    components = parent["components"]
+    child = components.get("dhcp") if isinstance(components, dict) else None
+    expected_manifest = child.get("manifest_sha256") if isinstance(child, dict) else None
+    if (not isinstance(expected_manifest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", expected_manifest)):
+        raise LoadError("pinned parent has no valid DHCP child binding")
+    if snapshot_directory:
+        if dhcp_source_dir.resolve(strict=True) != parent_directory / "dhcp":
+            raise LoadError("pinned snapshot DHCP directory is not generation-local")
+    else:
+        flat = ZTP_DIR / "config/isc-dhcp-server"
+        if dhcp_source_dir.resolve(strict=True) != flat.resolve(strict=True):
+            dhcp_source_dir = _validated_dhcp_candidate_dir(project, dhcp_source_dir)
+    names = (
+        "dhcp-release-manifest.json", "dhcpd.conf", "dhcpd_eth.hosts",
+        "dhcpd_ib.hosts", "dhcpd_nvl.hosts",
+    )
+    input_hashes = parent.get("inputs")
+    fixed_sources = {
+        "global": "01-global.yaml",
+        "devices": "02-devices_config.csv",
+        "subnet": "02-dhcp-subnet_config.csv",
+        "air_topology_policy": "03-air-topology-policy.json",
+        "mini_air_devices": "04-air-mini-devices.txt",
+    }
+    if (not isinstance(input_hashes, dict)
+            or not {"global", "devices", "subnet", "p2p"}.issubset(input_hashes)
+            or set(input_hashes) - (set(fixed_sources) | {"p2p"})):
+        raise LoadError("pinned parent input inventory is incomplete or unsupported")
+    p2p_record = parent.get("input_sources", {}).get("p2p")
+    if (not isinstance(p2p_record, dict)
+            or p2p_record.get("sha256") != input_hashes["p2p"]):
+        raise LoadError("pinned P2P source does not match parent input")
+    source_names = dict(fixed_sources)
+    source_names["p2p"] = p2p_record.get("path")
+    generated = parent.get("generated_inputs", {})
+    if generated:
+        if (not isinstance(generated, dict)
+                or set(generated) != {"effective_devices"}
+                or not isinstance(generated["effective_devices"], dict)):
+            raise LoadError("pinned generated input inventory is unsupported")
+        source_names["effective_devices"] = generated["effective_devices"].get("path")
+        input_hashes = {**input_hashes,
+                        "effective_devices": generated["effective_devices"].get("sha256")}
+    source_names = {key: source_names[key] for key in input_hashes}
+    if snapshot_directory:
+        if ({entry.name for entry in parent_directory.iterdir()}
+                != {"current-release.json", "dhcp", "inputs"}):
+            raise LoadError("pinned generation contains an unexpected artifact")
+        if (not stat.S_ISDIR(dhcp_source_dir.lstat().st_mode)
+                or {entry.name for entry in dhcp_source_dir.iterdir()} != set(names)):
+            raise LoadError("pinned generation DHCP directory is incomplete or extended")
+        frozen_inputs = parent_directory / "inputs"
+        if (not stat.S_ISDIR(frozen_inputs.lstat().st_mode)
+                or {entry.name for entry in frozen_inputs.iterdir()} != set(input_hashes)):
+            raise LoadError("pinned generation input directory is incomplete or extended")
+    payloads = {"current-release.json": parent_bytes}
+    for key, expected in input_hashes.items():
+        relative_text = source_names[key]
+        if not isinstance(relative_text, str):
+            raise LoadError(f"pinned input {key} has no source path")
+        relative = Path(relative_text)
+        if (relative.is_absolute() or not relative.parts
+                or any(part in {".", ".."} for part in relative.parts)
+                or relative.as_posix() != relative_text
+                or not isinstance(expected, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", expected)):
+            raise LoadError(f"pinned input {key} has an unsafe source or digest")
+        source = ((parent_directory / "inputs" / key) if snapshot_directory
+                  else canonical_project / relative)
+        if (not stat.S_ISREG(source.lstat().st_mode)
+                or source.lstat().st_nlink != 1
+                or source.resolve(strict=True) != source):
+            raise LoadError(f"pinned input {key} is not an owned regular file")
+        before = source.stat()
+        content = source.read_bytes()
+        after = source.stat()
+        identity = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if (any(getattr(before, field) != getattr(after, field) for field in identity)
+                or hashlib.sha256(content).hexdigest() != expected):
+            raise LoadError(f"pinned input {key} changed or differs from parent")
+        payloads[f"inputs/{key}"] = content
+    for name in names:
+        source = dhcp_source_dir / name
+        if not source.is_file():
+            raise LoadError(f"pinned DHCP child is missing: {name}")
+        if snapshot_directory:
+            source_stat = source.lstat()
+            if (not stat.S_ISREG(source_stat.st_mode)
+                    or source_stat.st_nlink != 1):
+                raise LoadError(f"pinned DHCP child is not an owned regular file: {name}")
+        data = source.read_bytes()
+        if _sha256_path(source) != hashlib.sha256(data).hexdigest():
+            raise LoadError(f"pinned DHCP child changed while freezing: {name}")
+        payloads[f"dhcp/{name}"] = data
+    if hashlib.sha256(payloads["dhcp/dhcp-release-manifest.json"]).hexdigest() != expected_manifest:
+        raise LoadError("pinned DHCP manifest differs from parent component")
+    try:
+        manifest = json.loads(payloads["dhcp/dhcp-release-manifest.json"])
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise LoadError(f"pinned DHCP manifest is not JSON: {exc}") from exc
+    outputs = manifest.get("outputs") if isinstance(manifest, dict) else None
+    if (not isinstance(outputs, dict) or set(outputs) != set(names[1:])
+            or manifest.get("release_id") != child.get("release_id")):
+        raise LoadError("pinned DHCP child identity/outputs are incomplete")
+    for name in names[1:]:
+        record = outputs[name]
+        expected = record.get("sha256") if isinstance(record, dict) else None
+        if expected != hashlib.sha256(payloads[f"dhcp/{name}"]).hexdigest():
+            raise LoadError(f"pinned DHCP output differs from child manifest: {name}")
+    return release_id, payloads
+
+
+def stage_pinned_generation(
+    project: Path, parent_file: Path, dhcp_source_dir: Path,
+) -> Path:
+    """Persist an unselected generation; never change the public selector."""
+    release_id, payloads = _pinned_generation_payloads(
+        project, parent_file, dhcp_source_dir,
+    )
+    output = project.resolve(strict=True) / "99-output-ztp"
+    generations = output / "generations"
+    generations.mkdir(mode=0o755, exist_ok=True)
+    if (not stat.S_ISDIR(generations.lstat().st_mode)
+            or generations.resolve(strict=True) != generations):
+        raise LoadError("pinned generations directory is not canonical")
+    destination = generations / release_id
+    if destination.exists():
+        if not stat.S_ISDIR(destination.lstat().st_mode):
+            raise LoadError("existing generation is not a real directory")
+        if ({entry.name for entry in destination.iterdir()}
+                != {"current-release.json", "dhcp", "inputs"}):
+            raise LoadError("existing generation contains an unexpected artifact")
+        existing = {}
+        for path in destination.rglob("*"):
+            metadata = path.lstat()
+            if stat.S_ISDIR(metadata.st_mode):
+                continue
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                raise LoadError("existing generation contains a non-regular artifact")
+            existing[path.relative_to(destination).as_posix()] = path.read_bytes()
+        if existing != payloads:
+            raise LoadError("existing generation differs from the selected parent")
+        return destination
+    stage = Path(tempfile.mkdtemp(prefix=".load-generation-", dir=generations))
+    try:
+        (stage / "dhcp").mkdir(mode=0o755)
+        (stage / "inputs").mkdir(mode=0o755)
+        for relative, content in payloads.items():
+            target = stage / relative
+            with target.open("xb") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            target.chmod(0o644)
+        for directory in (stage / "dhcp", stage / "inputs", stage):
+            descriptor = os.open(directory, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        if destination.exists() or destination.is_symlink():
+            raise LoadError("generation destination appeared during staging")
+        os.rename(stage, destination)
+        descriptor = os.open(generations, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    finally:
+        if stage.exists():
+            shutil.rmtree(stage)
+    return destination
+
+
+def commit_pinned_generation(
+    project: Path, generation: Path, *, expected_current: str | None,
+) -> None:
+    """Make one already-frozen generation visible with one atomic link replace."""
+    output = project.resolve(strict=True) / "99-output-ztp"
+    if (generation.parent != output / "generations"
+            or not re.fullmatch(r"[0-9a-f]{20}", generation.name)
+            or not stat.S_ISDIR(generation.lstat().st_mode)
+            or generation.resolve(strict=True) != generation):
+        raise LoadError("generation selection target is not canonical")
+    parent = generation / "current-release.json"
+    _pinned_generation_payloads(project, parent, generation / "dhcp")
+    selector = output / "current"
+    observed = os.readlink(selector) if selector.is_symlink() else None
+    if (observed != expected_current
+            or (observed is None and os.path.lexists(selector))):
+        raise LoadError("generation selector changed before commit")
+    target = f"generations/{generation.name}"
+    temporary = output / f".current-{secrets.token_hex(16)}"
+    try:
+        temporary.symlink_to(target)
+        os.replace(temporary, selector)
+        descriptor = os.open(output, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def validate_dhcp_output_sources(mappings: dict[Path, Path]) -> None:
@@ -4259,6 +4576,23 @@ def recheck_prepared_dhcp_child(
     expected_manifest = candidate.dhcp_manifest_sha256
     if expected_manifest is None:
         return
+    if candidate.dhcp_source_dir is not None:
+        project = candidate.destination.parent.parent
+        source = _validated_dhcp_candidate_dir(project, candidate.dhcp_source_dir)
+        expected_mappings = dhcp_file_mappings(source)
+        try:
+            actual = {
+                (path.parent.resolve(strict=True), path.name, destination)
+                for path, destination in mappings.items()
+            }
+            expected = {
+                (path.parent.resolve(strict=True), path.name, destination)
+                for path, destination in expected_mappings.items()
+            }
+        except OSError as exc:
+            raise LoadError(f"DHCP child mappings cannot be resolved: {exc}") from exc
+        if actual != expected:
+            raise LoadError("DHCP child mappings are not the prepared private candidate")
     try:
         parent = json.loads(candidate.temporary.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
@@ -4328,7 +4662,9 @@ def mount_and_test_dhcp(
     check.  If an install or the final syntax check fails, every previous
     destination (including a symlink) is restored before the error is raised.
     """
-    mappings = dhcp_file_mappings()
+    mappings = dhcp_file_mappings(
+        parent_candidate.dhcp_source_dir if parent_candidate is not None else None
+    )
     validate_dhcp_output_sources(mappings)
     bind_empty_dhcp_to_prepared_parent(mappings, parent_candidate)
     if dry_run:
@@ -5291,6 +5627,7 @@ def _current_splitter_provenance(
 def validate_and_publish_release(
     project: Path, inputs: ProjectInputs, *, dry_run: bool = False,
     publish: bool = True,
+    dhcp_candidate_dir: Path | None = None,
 ) -> dict[str, object] | None:
     """Bind DHCP, Cumulus and NVOS child releases to one validated release.
 
@@ -5400,9 +5737,15 @@ def validate_and_publish_release(
             f"switch scope={inputs.switch_scope} 没有可发布设备"
         )
     dhcp_status = "enabled" if inputs.settings.dhcp_enabled else "disabled"
+    if dhcp_candidate_dir is not None and dhcp_status != "enabled":
+        raise LoadError("disabled DHCP release cannot bind a DHCP candidate")
+    dhcp_source = (
+        _validated_dhcp_candidate_dir(project, dhcp_candidate_dir)
+        if dhcp_candidate_dir is not None else ZTP_DIR / "config/isc-dhcp-server"
+    )
     components: dict[str, dict[str, object]] = {}
     if inputs.settings.dhcp_enabled:
-        dhcp_path = ZTP_DIR / "config/isc-dhcp-server/dhcp-release-manifest.json"
+        dhcp_path = dhcp_source / "dhcp-release-manifest.json"
         dhcp = _load_release_json(dhcp_path, "DHCP release manifest")
         if str(dhcp.get("deployment_scope") or "all") != inputs.deployment_scope:
             raise LoadError(
@@ -5462,7 +5805,7 @@ def validate_and_publish_release(
         output_hashes = dhcp.get("outputs")
         if not isinstance(output_hashes, dict):
             raise LoadError("DHCP release manifest 缺少 outputs hash")
-        for source in dhcp_file_mappings():
+        for source in dhcp_file_mappings(dhcp_source):
             item = output_hashes.get(source.name)
             expected_hash = item.get("sha256") if isinstance(item, dict) else None
             if expected_hash != _sha256_path(source):
@@ -5597,6 +5940,7 @@ def validate_and_publish_release(
 
 def prepare_current_release(
     project: Path, parent: dict[str, object],
+    *, dhcp_candidate_dir: Path | None = None,
 ) -> PreparedParentRelease:
     """Write and fsync a parent candidate without making it visible yet."""
     if parent.get("schema_version") == 2:
@@ -5615,6 +5959,18 @@ def prepare_current_release(
             if (parsed.is_absolute() or not parsed.parts or ".." in parsed.parts
                     or parsed.as_posix() != relative):
                 raise LoadError("schema 2 parent input authority map contains an unsafe path")
+    dhcp_source_dir = None
+    if dhcp_candidate_dir is not None:
+        if parent.get("schema_version") != 2 or parent.get("dhcp_status") != "enabled":
+            raise LoadError("private DHCP candidate requires enabled schema 2 parent")
+        dhcp_source_dir = _validated_dhcp_candidate_dir(project, dhcp_candidate_dir)
+        components = parent.get("components")
+        dhcp = components.get("dhcp") if isinstance(components, dict) else None
+        expected = dhcp.get("manifest_sha256") if isinstance(dhcp, dict) else None
+        if (not isinstance(expected, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", expected)
+                or _sha256_path(dhcp_source_dir / "dhcp-release-manifest.json") != expected):
+            raise LoadError("private DHCP candidate does not match prepared parent")
     destination = project / "99-output-ztp/current-release.json"
     destination.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(
@@ -5673,6 +6029,7 @@ def prepare_current_release(
             for name, relative in parent.get("input_paths", {}).items()
         },
         dhcp_manifest_sha256=dhcp_manifest_sha256,
+        dhcp_source_dir=dhcp_source_dir,
     )
 
 
@@ -5767,7 +6124,9 @@ def commit_prepared_release(candidate: PreparedParentRelease) -> Path:
                 f"project input authority {name} changed before parent commit: {exc}"
             ) from exc
     if candidate.dhcp_manifest_sha256 is not None:
-        recheck_prepared_dhcp_child(candidate, dhcp_file_mappings())
+        recheck_prepared_dhcp_child(
+            candidate, dhcp_file_mappings(candidate.dhcp_source_dir),
+        )
     os.replace(candidate.temporary, candidate.destination)
     candidate.committed = True
     # fsync the containing directory so the rename itself survives a crash.
@@ -5882,7 +6241,10 @@ def generate_configs(
     deployment_lock_descriptor: int | None = None,
     source_identities: dict[str, str] | None = None,
     inventory_directory: Path | None = None,
+    dhcp_candidate_dir: Path | None = None,
 ) -> DerivedInventory | None:
+    if dhcp_candidate_dir is not None and not dhcp_enabled:
+        raise LoadError("DHCP disabled generation cannot accept a DHCP candidate")
     mini_policy_hash_before: str | None = None
     mini_customer_hash: str | None = None
     mini_generation_key: tuple[str, str] | None = None
@@ -5981,10 +6343,13 @@ def generate_configs(
                 "--preserve-input-csv",
                 *scope_args, *switch_args,
                 *inventory_options,
+                *(["--candidate-dir", str(dhcp_candidate_dir)]
+                  if dhcp_candidate_dir is not None else []),
                 *([] if dhcp_enabled else ["--inventory-only"]),
             ],
             cwd=ZTP_DIR / "config/isc-dhcp-server",
             dry_run=dry_run,
+            expected_global_sha256=(source_identities or {}).get("global"),
             **inherited_lock,
         )
     derived_sha = None
@@ -6006,6 +6371,7 @@ def generate_configs(
             [sys.executable, "90-c2-generate_configs.py", "--branch", "eth", "-y",
              *scope_args, *switch_args, *effective_options],
             cwd=template_dir, dry_run=dry_run,
+            expected_global_sha256=(source_identities or {}).get("global"),
         )
         if not dry_run:
             output_root = template_dir / "99-output"
@@ -6027,6 +6393,7 @@ def generate_configs(
             [sys.executable, "90-c2-generate_configs.py", "--branch", "ib", "-y",
              *scope_args, *switch_args],
             cwd=template_dir, dry_run=dry_run,
+            expected_global_sha256=(source_identities or {}).get("global"),
         )
         if not dry_run:
             output_root = template_dir / "99-output-ib_nvl"
@@ -8339,6 +8706,8 @@ def main(argv: list[str] | None = None) -> int:
     release_committed = False
     inventory_directory = None
     inventory_directory_identity = None
+    dhcp_candidate_dir: Path | None = None
+    dhcp_candidate_identity: tuple[int, int] | None = None
     deployment_lock_descriptor: int | None = None
     parent_candidate: PreparedParentRelease | None = None
     report_candidate = None
@@ -8655,6 +9024,13 @@ def main(argv: list[str] | None = None) -> int:
                 private_stat = inventory_directory.lstat()
                 inventory_directory_identity = (private_stat.st_dev, private_stat.st_ino)
                 generation_options["inventory_directory"] = inventory_directory
+                if inputs.settings.dhcp_enabled:
+                    dhcp_candidate_dir = _create_dhcp_candidate_dir(project)
+                    candidate_stat = dhcp_candidate_dir.lstat()
+                    dhcp_candidate_identity = (
+                        candidate_stat.st_dev, candidate_stat.st_ino,
+                    )
+                    generation_options["dhcp_candidate_dir"] = dhcp_candidate_dir
             if not inputs.settings.dhcp_enabled:
                 generation_options["dhcp_enabled"] = False
             # Keep the established full-topology call contract byte-for-byte
@@ -8691,14 +9067,21 @@ def main(argv: list[str] | None = None) -> int:
 
         failure_phase = "统一 release 一致性与 DHCP 事务安装"
         section("统一 release 一致性与 DHCP 事务安装")
+        dhcp_candidate_option = (
+            {} if dhcp_candidate_dir is None
+            else {"dhcp_candidate_dir": dhcp_candidate_dir}
+        )
         parent_release = validate_and_publish_release(
             project, inputs, dry_run=args.dry_run, publish=False,
+            **dhcp_candidate_option,
         )
         if parent_release is not None:
             # Materialize and fsync the parent before touching /etc/dhcp.  The
             # remaining commit is one os.replace performed while DHCP backups
             # and the global deployment lock are still held.
-            parent_candidate = prepare_current_release(project, parent_release)
+            parent_candidate = prepare_current_release(
+                project, parent_release, **dhcp_candidate_option,
+            )
         if local_services_supported and not args.dry_run and parent_release is not None:
             failure_phase = "准备本次实际使用公钥报告"
             actual_key_report = generation_report.build_report(
@@ -8867,6 +9250,16 @@ def main(argv: list[str] | None = None) -> int:
         raise
     finally:
         final_cleanup_errors: list[tuple[str, BaseException]] = []
+        if dhcp_candidate_dir is not None and not release_committed:
+            try:
+                private_stat = dhcp_candidate_dir.lstat()
+                if (not stat.S_ISDIR(private_stat.st_mode)
+                        or (private_stat.st_dev, private_stat.st_ino)
+                        != dhcp_candidate_identity):
+                    raise LoadError("private DHCP candidate identity changed before cleanup")
+                shutil.rmtree(dhcp_candidate_dir)
+            except BaseException as cleanup_exc:
+                final_cleanup_errors.append(("DHCP 候选暂存清理", cleanup_exc))
         if inventory_directory is not None and not release_committed:
             try:
                 # This exact private directory was created by this invocation;

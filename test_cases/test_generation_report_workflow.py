@@ -15,6 +15,7 @@ import inspect
 import io
 import json
 from pathlib import Path
+import shutil
 import tempfile
 import textwrap
 from types import SimpleNamespace
@@ -139,6 +140,17 @@ class GenerationReportWorkflow(unittest.TestCase):
             published = self.published / name
             self.assertTrue(published.is_symlink())
             self.assertEqual((self.project / name).resolve(), published.resolve(strict=True))
+
+    def populate_private_dhcp_candidate(self, *_args, **kwargs) -> None:
+        """Model c1's private five-file output without publishing over old flat files."""
+        candidate = kwargs.get("dhcp_candidate_dir")
+        self.assertIsNotNone(candidate)
+        source = self.ztp / "config/isc-dhcp-server"
+        for name in (
+            "dhcp-release-manifest.json", "dhcpd.conf", "dhcpd_eth.hosts",
+            "dhcpd_ib.hosts", "dhcpd_nvl.hosts",
+        ):
+            shutil.copy2(source / name, candidate / name)
 
     def real_load_prepare(self):
         parent = LOAD.validate_and_publish_release(
@@ -376,7 +388,9 @@ class GenerationReportWorkflow(unittest.TestCase):
                 LOAD, "snapshot_release_links",
                 return_value={self.project / "99-output-eth/latest": "old-release"},
             ))
-            stack.enter_context(mock.patch.object(LOAD, "generate_configs"))
+            stack.enter_context(mock.patch.object(
+                LOAD, "generate_configs", side_effect=self.populate_private_dhcp_candidate,
+            ))
             stack.enter_context(mock.patch.object(LOAD, "retire_unselected_release_links"))
             stack.enter_context(mock.patch.object(
                 LOAD, "validate_and_publish_release", return_value=parent,
@@ -511,7 +525,9 @@ class GenerationReportWorkflow(unittest.TestCase):
                 LOAD, "snapshot_release_links",
                 return_value={self.project / "99-output-eth/latest": "old-release"},
             ))
-            stack.enter_context(mock.patch.object(LOAD, "generate_configs"))
+            stack.enter_context(mock.patch.object(
+                LOAD, "generate_configs", side_effect=self.populate_private_dhcp_candidate,
+            ))
             stack.enter_context(mock.patch.object(LOAD, "retire_unselected_release_links"))
             stack.enter_context(mock.patch.object(
                 LOAD, "validate_and_publish_release", return_value=parent,

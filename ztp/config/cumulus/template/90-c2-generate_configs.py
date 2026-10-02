@@ -32,6 +32,7 @@ import gzip
 import hashlib
 import ipaddress
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -40,7 +41,10 @@ import select
 import shutil
 import stat
 import sys
+import tempfile
 import yaml
+from contextlib import redirect_stdout
+from contextvars import ContextVar
 from datetime import datetime
 
 try:
@@ -519,10 +523,18 @@ def _validate_final_yaml_outputs(*directories):
 def _load_global_document():
     """Load and schema-check the authoritative project global document."""
     try:
-        with open(_GLOBAL_FILE, encoding="utf-8") as f:
-            data = _load_yaml_bounded_nesting(f, Loader=_MacStringSafeLoader)
+        with open(_GLOBAL_FILE, "rb") as f:
+            source = f.read()
     except FileNotFoundError:
         print(f"[ERROR] 找不到配置文件: {_GLOBAL_FILE}"); sys.exit(1)
+    expected = os.environ.get("HTTP_EXPECTED_GLOBAL_SHA256")
+    if expected is not None:
+        if not re.fullmatch(r"[0-9a-f]{64}", expected):
+            raise ValueError("invalid global source authority")
+        if hashlib.sha256(source).hexdigest() != expected:
+            raise ValueError("global input source drift from LOAD authority")
+    try:
+        data = _load_yaml_bounded_nesting(io.BytesIO(source), Loader=_MacStringSafeLoader)
     except yaml.YAMLError as e:
         print(f"[ERROR] {_GLOBAL_FILE} YAML 语法错误: {e}"); sys.exit(1)
     try:
@@ -6315,9 +6327,14 @@ def _empty_intent_descriptions(endpoints, hostname):
 def _load_csv_hostnames():
     csv_path = _CSV_FILE
     if not os.path.isfile(csv_path):
+        # A real read that found no CSV must differ from every accepted input
+        # authority. None is reserved for callers that did not record a read.
+        _CSV_HOSTNAMES_READ_AUTHORITY.set(_CSV_MISSING_READ_AUTHORITY)
         return set()
+    authority, content = _csv_input_snapshot()
+    _CSV_HOSTNAMES_READ_AUTHORITY.set(authority)
     hosts = set()
-    with open(csv_path, encoding="utf-8", newline="") as f:
+    with io.StringIO(content.decode("utf-8"), newline="") as f:
         for row in csv.DictReader(f):
             # AIR rows deliberately reuse the production device's complete
             # YAML and therefore are not expected to appear in the production
@@ -6474,17 +6491,65 @@ def _port_sort_key(p):
     return [int(c) if c.isdigit() else c for c in re.split(r'(\d+)', p)]
 
 
-def _run_patch_descriptions(dot_file, output_dir):
-    """Inline equivalent of patch_descriptions.main()."""
-    empty_intents = _load_description_intent(dot_file)
-    dest_dir = output_dir + "_with_desc"
-    if os.path.exists(dest_dir):
-        shutil.rmtree(dest_dir)
-    shutil.copytree(output_dir, dest_dir)
+_CSV_MISSING_READ_AUTHORITY = object()
+_CSV_HOSTNAMES_READ_AUTHORITY = ContextVar(
+    "c2_csv_hostnames_read_authority", default=None,
+)
 
+
+def _csv_input_snapshot():
+    """Read one CSV identity and its exact bytes through a held leaf handle."""
+    source = Path(_CSV_FILE)
+    before_link = source.lstat()
+    target = source.resolve(strict=True)
+    descriptor = os.open(target, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            raise ValueError("CSV input authority must be a single-link regular file")
+        digest = hashlib.sha256()
+        chunks = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    identity = lambda value: (
+        value.st_dev, value.st_ino, value.st_mode, value.st_nlink,
+        value.st_size, value.st_mtime_ns, value.st_ctime_ns,
+    )
+    if (identity(before) != identity(after)
+            or identity(before_link) != identity(source.lstat())
+            or source.resolve(strict=True) != target):
+        raise ValueError("CSV input authority changed during read")
+    authority = str(target), identity(before_link), identity(after), digest.hexdigest()
+    return authority, b"".join(chunks)
+
+
+def _csv_input_authority():
+    return _csv_input_snapshot()[0]
+
+
+def _require_csv_input_authority(expected):
+    if _csv_input_authority() != expected:
+        raise ValueError("CSV input authority changed during c2 generation")
+
+
+def _patch_descriptions_in_directory(dot_file, dest_dir, display_dir, expected_csv_authority):
+    """Build one private description candidate without touching prior output."""
+    empty_intents = _load_description_intent(dot_file)
     dot_lines   = _load_dot_lines(dot_file)
     dot_devices = _load_dot_devices(dot_lines)
+    _CSV_HOSTNAMES_READ_AUTHORITY.set(None)
     csv_hosts   = _load_csv_hostnames()
+    observed = _CSV_HOSTNAMES_READ_AUTHORITY.get()
+    if observed is not None and observed != expected_csv_authority:
+        raise ValueError("CSV input authority changed during description read")
+    _require_csv_input_authority(expected_csv_authority)
     print(f"Loaded dot file: {dot_file}")
 
     if csv_hosts:
@@ -6581,7 +6646,7 @@ def _run_patch_descriptions(dot_file, output_dir):
 
     print(f"\nPatched:  {patched_count} files")
     print(f"Skipped:  {skipped_count} files (no matching descriptions)")
-    print(f"Output:   {dest_dir}")
+    print(f"Output:   {display_dir}")
 
     if no_desc_skipped:
         print(f"\n[已忽略] swp1-48（1G 接入口）有部分未在 dot 文件中出现（端口未使用），已跳过（共 {len(no_desc_skipped)} 台）：")
@@ -6623,6 +6688,54 @@ def _run_patch_descriptions(dot_file, output_dir):
             print(f"  {host_lower}: {', '.join(compressed)}")
 
 
+def _run_patch_descriptions(dot_file, output_dir, *, expected_csv_authority=None):
+    """Patch a staged copy and replace the old same-name output only on success."""
+    baseline = expected_csv_authority or _csv_input_authority()
+    final_dir = output_dir + "_with_desc"
+    parent = os.path.dirname(os.path.abspath(final_dir))
+    staging = tempfile.mkdtemp(
+        prefix=f".{os.path.basename(final_dir)}.tmp.", dir=parent,
+    )
+    backup = staging + ".old"
+    transcript = io.StringIO()
+    try:
+        shutil.copytree(output_dir, staging, dirs_exist_ok=True)
+        with redirect_stdout(transcript):
+            _patch_descriptions_in_directory(
+                dot_file, staging, final_dir, baseline,
+            )
+        _require_csv_input_authority(baseline)
+        staged_identity = os.lstat(staging)
+        if os.path.lexists(final_dir):
+            if os.path.islink(final_dir) or not os.path.isdir(final_dir):
+                raise ValueError("description output authority is not a real directory")
+            os.replace(final_dir, backup)
+        try:
+            os.replace(staging, final_dir)
+        except Exception:
+            if os.path.lexists(final_dir):
+                published = os.lstat(final_dir)
+                if (not stat.S_ISDIR(published.st_mode)
+                        or (published.st_dev, published.st_ino)
+                        != (staged_identity.st_dev, staged_identity.st_ino)
+                        or os.path.lexists(staging)):
+                    raise ValueError(
+                        "description output authority changed during rollback"
+                    )
+                # A post-rename exception still owns this exact candidate.
+                # Move it aside before restoring the prior directory.
+                os.replace(final_dir, staging)
+            if os.path.lexists(backup):
+                os.replace(backup, final_dir)
+            raise
+        if os.path.lexists(backup):
+            shutil.rmtree(backup)
+        print(transcript.getvalue(), end="")
+    finally:
+        if os.path.isdir(staging) and not os.path.islink(staging):
+            shutil.rmtree(staging)
+
+
 def _topology_dot_files(suffix):
     """优先使用固定输入 p2p.xlsx 所指真实文件名对应的 DOT。"""
     candidates = sorted(glob.glob(os.path.join(P2P_OUTPUT_DIR, f"*-{suffix}.dot")))
@@ -6641,7 +6754,7 @@ def _topology_air_json_files():
     return [expected] if os.path.isfile(expected) else candidates
 
 
-def prompt_patch_descriptions(output_dir):
+def _prompt_patch_descriptions_impl(output_dir, *, expected_csv_authority=None):
     """Ask whether to patch swp descriptions using DOT files in P2P/output-p2p."""
     try:
         answer = _timed_input("\n是否要 patch swp 接口 description？[Y/n] ", default="y").strip().lower()
@@ -6698,7 +6811,20 @@ def prompt_patch_descriptions(output_dir):
                 print("已取消。")
                 return
 
-    _run_patch_descriptions(dot_file, output_dir)
+    _run_patch_descriptions(
+        dot_file, output_dir, expected_csv_authority=expected_csv_authority,
+    )
+
+
+def prompt_patch_descriptions(output_dir, *, expected_csv_authority=None):
+    """Recheck the command's CSV even when the operator skips patching."""
+    try:
+        return _prompt_patch_descriptions_impl(
+            output_dir, expected_csv_authority=expected_csv_authority,
+        )
+    finally:
+        if expected_csv_authority is not None:
+            _require_csv_input_authority(expected_csv_authority)
 
 
 # ── ETH: air_configs ──────────────────────────────────────────────────────────
@@ -8116,6 +8242,7 @@ if __name__ == "__main__":
         if parsed.csv_file:
             _CSV_FILE = os.path.abspath(parsed.csv_file)
             print(f"[INFO] 使用指定 CSV: {_CSV_FILE}")
+        generation_csv_authority = _csv_input_authority()
         _generate_devices_yaml()
         target = parsed.hostname
         generate_all(
@@ -8123,12 +8250,17 @@ if __name__ == "__main__":
             fail_on_diff=parsed.fail_on_diff,
             deployment_scope=parsed.deployment_scope, verbose=parsed.verbose,
         )
+        _require_csv_input_authority(generation_csv_authority)
         if not parsed.verify:
             if should_prompt_descriptions(parsed):
-                prompt_patch_descriptions(OUTPUT_DIR)
+                prompt_patch_descriptions(
+                    OUTPUT_DIR,
+                    expected_csv_authority=generation_csv_authority,
+                )
             else:
                 print("[INFO] --skip-descriptions：已显式跳过 LLDP 描述 patch")
 
+            _require_csv_input_authority(generation_csv_authority)
             ts            = os.path.basename(OUTPUT_DIR)
             with_desc_dir = OUTPUT_DIR + "_with_desc"
             has_patch     = os.path.isdir(with_desc_dir)
@@ -8145,6 +8277,7 @@ if __name__ == "__main__":
                 print(f"[ABORT] {exc}")
                 sys.exit(1)
 
+            _require_csv_input_authority(generation_csv_authority)
             print(eth_followup_text(
                 ts, has_patch=has_patch, target=target,
             ))

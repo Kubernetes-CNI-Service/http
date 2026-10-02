@@ -1104,7 +1104,14 @@ class ReleaseTransactionTests(unittest.TestCase):
             report_commit.assert_not_called()
             if authority_failure is None:
                 parent_validate.assert_called_once()
-                parent_stage.assert_called_once_with(self.project, fake_parent)
+                private_dhcp = parent_validate.call_args.kwargs["dhcp_candidate_dir"]
+                self.assertEqual(
+                    (self.project / "99-output-dhcp").resolve(),
+                    private_dhcp.parent,
+                )
+                parent_stage.assert_called_once_with(
+                    self.project, fake_parent, dhcp_candidate_dir=private_dhcp,
+                )
                 report_build.assert_called_once_with(
                     self.project, fake_parent,
                     published_dir=LOAD.ZTP_DIR / "config/publickey",
@@ -1136,6 +1143,256 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertEqual(set(result["components"]), {"dhcp", "cumulus"})
         current = self.project / "99-output-ztp/current-release.json"
         self.assertEqual(json.loads(current.read_text())["release_id"], result["release_id"])
+
+    def test_parent_validation_binds_private_dhcp_candidate_not_old_flat_a(self) -> None:
+        dhcp_dir = self.ztp / "config/isc-dhcp-server"
+        old_manifest = dhcp_dir / "dhcp-release-manifest.json"
+        old_bytes = {
+            path.name: path.read_bytes()
+            for path in dhcp_dir.iterdir() if path.is_file()
+        }
+        candidate = self.project / "99-output-dhcp/.load-dhcp-candidate-0123456789abcdef"
+        candidate.mkdir(parents=True, mode=0o700)
+        manifest = json.loads(old_manifest.read_text(encoding="utf-8"))
+        manifest["release_id"] = "dhcp-candidate-b"
+        for filename in (
+            "dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts",
+        ):
+            content = old_bytes[filename]
+            if filename == "dhcpd.conf":
+                content += b"# independently expected B candidate\n"
+            (candidate / filename).write_bytes(content)
+            manifest["outputs"][filename]["sha256"] = sha256(candidate / filename)
+        (candidate / "dhcp-release-manifest.json").write_text(
+            json.dumps(manifest), encoding="utf-8",
+        )
+
+        parent = LOAD.validate_and_publish_release(
+            self.project, self.inputs, publish=False,
+            dhcp_candidate_dir=candidate,
+        )
+        self.assertEqual("dhcp-candidate-b", parent["components"]["dhcp"]["release_id"])
+        self.assertEqual(
+            sha256(candidate / "dhcp-release-manifest.json"),
+            parent["components"]["dhcp"]["manifest_sha256"],
+        )
+        self.assertEqual(
+            old_bytes,
+            {path.name: path.read_bytes() for path in dhcp_dir.iterdir() if path.is_file()},
+        )
+
+    def test_prepared_parent_rechecks_candidate_not_changed_old_flat_files(self) -> None:
+        dhcp_dir = self.ztp / "config/isc-dhcp-server"
+        candidate = self.project / "99-output-dhcp/.load-dhcp-candidate-0123456789abcdef"
+        candidate.mkdir(parents=True, mode=0o700)
+        for filename in (
+            "dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts",
+        ):
+            (candidate / filename).write_bytes((dhcp_dir / filename).read_bytes())
+        manifest = json.loads(
+            (dhcp_dir / "dhcp-release-manifest.json").read_text(encoding="utf-8")
+        )
+        (candidate / "dhcp-release-manifest.json").write_text(
+            json.dumps(manifest), encoding="utf-8",
+        )
+        parent = LOAD.validate_and_publish_release(
+            self.project, self.inputs, publish=False, dhcp_candidate_dir=candidate,
+        )
+        prepared = LOAD.prepare_current_release(
+            self.project, parent, dhcp_candidate_dir=candidate,
+        )
+        try:
+            (dhcp_dir / "dhcpd.conf").write_bytes(b"old flat A changed\n")
+            LOAD.recheck_prepared_dhcp_child(
+                prepared, LOAD.dhcp_file_mappings(candidate),
+            )
+            (candidate / "dhcpd.conf").write_bytes(b"candidate B changed\n")
+            with self.assertRaisesRegex(LOAD.LoadError, "DHCP child"):
+                LOAD.recheck_prepared_dhcp_child(
+                    prepared, LOAD.dhcp_file_mappings(candidate),
+                )
+        finally:
+            LOAD.discard_prepared_release(prepared)
+
+    def test_dhcp_install_reads_prepared_private_candidate_not_old_flat_a(self) -> None:
+        dhcp_dir = self.ztp / "config/isc-dhcp-server"
+        private = self.project / "99-output-dhcp/.load-dhcp-candidate-0123456789abcdef"
+        private.mkdir(parents=True, mode=0o700)
+        for filename in (
+            "dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts",
+            "dhcp-release-manifest.json",
+        ):
+            (private / filename).write_bytes((dhcp_dir / filename).read_bytes())
+        parent = LOAD.validate_and_publish_release(
+            self.project, self.inputs, publish=False, dhcp_candidate_dir=private,
+        )
+        prepared = LOAD.prepare_current_release(
+            self.project, parent, dhcp_candidate_dir=private,
+        )
+        try:
+            with mock.patch.object(LOAD, "validate_dhcp_output_sources") as validate, \
+                    mock.patch.object(LOAD, "run"), \
+                    mock.patch.object(LOAD, "sudo_command", side_effect=lambda *args: list(args)):
+                LOAD.mount_and_test_dhcp(True, parent_candidate=prepared)
+            sources = validate.call_args.args[0]
+            self.assertEqual(
+                {path.parent.resolve() for path in sources}, {private.resolve()},
+            )
+        finally:
+            LOAD.discard_prepared_release(prepared)
+
+    def test_versioned_snapshot_keeps_old_a_when_flat_dhcp_changes(self) -> None:
+        parent = LOAD.validate_and_publish_release(self.project, self.inputs)
+        parent_path = self.project / "99-output-ztp/current-release.json"
+        flat = self.ztp / "config/isc-dhcp-server"
+        old_conf = (flat / "dhcpd.conf").read_bytes()
+        generation = LOAD.stage_pinned_generation(
+            self.project, parent_path, flat,
+        )
+        self.assertEqual(parent["release_id"], generation.name)
+        frozen_inputs = {
+            name: (generation / "inputs" / name).read_bytes()
+            for name in ("global", "devices", "subnet", "p2p")
+        }
+        self.assertEqual(self.global_file.read_bytes(), frozen_inputs["global"])
+        self.assertEqual(self.devices_file.read_bytes(), frozen_inputs["devices"])
+        self.assertEqual(self.subnet_file.read_bytes(), frozen_inputs["subnet"])
+        self.assertEqual(self.p2p_source.read_bytes(), frozen_inputs["p2p"])
+        self.assertFalse((self.project / "99-output-ztp/current").exists())
+        (flat / "dhcpd.conf").write_bytes(b"new B in legacy flat output\n")
+        self.global_file.write_bytes(b"B global after A snapshot\n")
+        self.subnet_file.write_bytes(b"shared_network,subnet\nnet,198.51.100.0\n")
+        for name, original in frozen_inputs.items():
+            self.assertEqual(original, (generation / "inputs" / name).read_bytes())
+        self.assertEqual(old_conf, (generation / "dhcp/dhcpd.conf").read_bytes())
+        LOAD.commit_pinned_generation(
+            self.project, generation, expected_current=None,
+        )
+        self.assertEqual(
+            f"generations/{parent['release_id']}",
+            os.readlink(self.project / "99-output-ztp/current"),
+        )
+        self.assertEqual(old_conf, (generation / "dhcp/dhcpd.conf").read_bytes())
+
+    def test_versioned_snapshot_can_freeze_prepared_b_without_selecting_it(self) -> None:
+        flat = self.ztp / "config/isc-dhcp-server"
+        private = self.project / "99-output-dhcp/.load-dhcp-candidate-0123456789abcdef"
+        private.mkdir(parents=True, mode=0o700)
+        for name in (
+            "dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts",
+            "dhcpd_nvl.hosts", "dhcp-release-manifest.json",
+        ):
+            (private / name).write_bytes((flat / name).read_bytes())
+        parent = LOAD.validate_and_publish_release(
+            self.project, self.inputs, publish=False, dhcp_candidate_dir=private,
+        )
+        prepared = LOAD.prepare_current_release(
+            self.project, parent, dhcp_candidate_dir=private,
+        )
+        try:
+            generation = LOAD.stage_pinned_generation(
+                self.project, prepared.temporary, private,
+            )
+            self.assertEqual(parent["release_id"], generation.name)
+            self.assertEqual(
+                prepared.temporary.read_bytes(),
+                (generation / "current-release.json").read_bytes(),
+            )
+            self.assertFalse((self.project / "99-output-ztp/current").exists())
+            (generation / "dhcp/dhcpd.conf").write_bytes(b"corrupt B snapshot\n")
+            with self.assertRaisesRegex(LOAD.LoadError, "pinned DHCP output"):
+                LOAD.commit_pinned_generation(
+                    self.project, generation, expected_current=None,
+                )
+            self.assertFalse((self.project / "99-output-ztp/current").exists())
+        finally:
+            LOAD.discard_prepared_release(prepared)
+
+    def test_selector_explicitly_returns_from_b_to_unchanged_a(self) -> None:
+        flat = self.ztp / "config/isc-dhcp-server"
+        parent_a = LOAD.validate_and_publish_release(self.project, self.inputs)
+        output = self.project / "99-output-ztp"
+        generation_a = LOAD.stage_pinned_generation(
+            self.project, output / "current-release.json", flat,
+        )
+        LOAD.commit_pinned_generation(
+            self.project, generation_a, expected_current=None,
+        )
+        a_conf = (generation_a / "dhcp/dhcpd.conf").read_bytes()
+
+        private_b = self.project / "99-output-dhcp/.load-dhcp-candidate-0123456789abcdef"
+        private_b.mkdir(parents=True, mode=0o700)
+        for name in (
+            "dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts",
+            "dhcpd_nvl.hosts", "dhcp-release-manifest.json",
+        ):
+            (private_b / name).write_bytes((flat / name).read_bytes())
+        (private_b / "dhcpd.conf").write_bytes(a_conf + b"# B candidate\n")
+        manifest_b = json.loads(
+            (private_b / "dhcp-release-manifest.json").read_text(encoding="utf-8")
+        )
+        manifest_b["release_id"] = "candidate-b-child"
+        manifest_b["outputs"]["dhcpd.conf"]["sha256"] = sha256(
+            private_b / "dhcpd.conf"
+        )
+        (private_b / "dhcp-release-manifest.json").write_text(
+            json.dumps(manifest_b), encoding="utf-8",
+        )
+        parent_b = LOAD.validate_and_publish_release(
+            self.project, self.inputs, publish=False, dhcp_candidate_dir=private_b,
+        )
+        self.assertNotEqual(parent_a["release_id"], parent_b["release_id"])
+        prepared_b = LOAD.prepare_current_release(
+            self.project, parent_b, dhcp_candidate_dir=private_b,
+        )
+        try:
+            generation_b = LOAD.stage_pinned_generation(
+                self.project, prepared_b.temporary, private_b,
+            )
+        finally:
+            LOAD.discard_prepared_release(prepared_b)
+        selector_a = f"generations/{parent_a['release_id']}"
+        selector_b = f"generations/{parent_b['release_id']}"
+        LOAD.commit_pinned_generation(
+            self.project, generation_b, expected_current=selector_a,
+        )
+        self.assertEqual(selector_b, os.readlink(output / "current"))
+        LOAD.commit_pinned_generation(
+            self.project, generation_a, expected_current=selector_b,
+        )
+        self.assertEqual(selector_a, os.readlink(output / "current"))
+        self.assertEqual(a_conf, (generation_a / "dhcp/dhcpd.conf").read_bytes())
+        self.assertEqual(a_conf, (flat / "dhcpd.conf").read_bytes())
+
+    def test_pinned_generation_rejects_same_byte_symlink_replacement(self) -> None:
+        LOAD.validate_and_publish_release(self.project, self.inputs)
+        parent_path = self.project / "99-output-ztp/current-release.json"
+        flat = self.ztp / "config/isc-dhcp-server"
+        generation = LOAD.stage_pinned_generation(self.project, parent_path, flat)
+        selected = generation / "dhcp/dhcpd.conf"
+        selected.unlink()
+        selected.symlink_to(flat / "dhcpd.conf")
+        with self.assertRaisesRegex(LOAD.LoadError, "generation|DHCP child"):
+            LOAD.stage_pinned_generation(self.project, parent_path, flat)
+        with self.assertRaisesRegex(LOAD.LoadError, "generation|DHCP child"):
+            LOAD.commit_pinned_generation(
+                self.project, generation, expected_current=None,
+            )
+        self.assertFalse((self.project / "99-output-ztp/current").exists())
+
+    def test_pinned_generation_rejects_extra_empty_directory(self) -> None:
+        LOAD.validate_and_publish_release(self.project, self.inputs)
+        parent_path = self.project / "99-output-ztp/current-release.json"
+        flat = self.ztp / "config/isc-dhcp-server"
+        generation = LOAD.stage_pinned_generation(self.project, parent_path, flat)
+        (generation / "unowned-empty").mkdir()
+        with self.assertRaisesRegex(LOAD.LoadError, "generation"):
+            LOAD.stage_pinned_generation(self.project, parent_path, flat)
+        with self.assertRaisesRegex(LOAD.LoadError, "generation"):
+            LOAD.commit_pinned_generation(
+                self.project, generation, expected_current=None,
+            )
+        self.assertFalse((self.project / "99-output-ztp/current").exists())
 
     def test_parent_binds_source_and_effective_inventory_independently(self) -> None:
         private = Path(tempfile.mkdtemp(prefix=".load-inventory-", dir=self.project))
@@ -2700,6 +2957,7 @@ class ReleaseTransactionTests(unittest.TestCase):
 
     def test_supervisor_dhcp_only_main_installs_current_release_without_http(self) -> None:
         """The child load must install the DHCP release before hostctl converges it."""
+        (self.project / "99-output-dhcp").mkdir(exist_ok=True)
         args = SimpleNamespace(
             skip_doca=False, download_doca=False, dry_run=False,
             project=str(self.project), no_upgrade=True, p2p_file=None,
@@ -2802,6 +3060,7 @@ class ReleaseTransactionTests(unittest.TestCase):
             deployment_lock_descriptor=93,
             source_identities=inputs.source_identities,
             inventory_directory=mock.ANY,
+            dhcp_candidate_dir=mock.ANY,
             install_dhcp=True,
             dry_run=False,
             schema_version=inputs.settings.schema_version,
@@ -2810,6 +3069,12 @@ class ReleaseTransactionTests(unittest.TestCase):
             deployment_scope="all",
             switch_scope="all",
         )
+        private_candidate = generate.call_args.kwargs["dhcp_candidate_dir"]
+        self.assertEqual(
+            (self.project / "99-output-dhcp").resolve(), private_candidate.parent,
+        )
+        self.assertTrue(private_candidate.name.startswith(".load-dhcp-candidate-"))
+        self.assertFalse(private_candidate.exists())  # no parent was committed
         mount.assert_called_once_with(False, parent_candidate=None)
         # Setup keeps the selected project-local P2P source as a lexical path;
         # macOS may spell the same temporary inode as /var or /private/var.
@@ -4168,10 +4433,13 @@ class ReleaseTransactionTests(unittest.TestCase):
                 '"site-leaf01":"swp13s0" -- "peer01":"swp1"\n',
                 encoding="utf-8",
             )
+            source_csv = root / "02-devices_config.csv"
+            source_csv.write_text("hostname,type\nleaf01,eth\n", encoding="utf-8")
             output_text = io.StringIO()
             with mock.patch.object(
                 GENERATOR, "_load_csv_hostnames", return_value={"leaf01"},
-            ), redirect_stdout(output_text):
+            ), mock.patch.object(GENERATOR, "_CSV_FILE", str(source_csv)), \
+                    redirect_stdout(output_text):
                 GENERATOR._run_patch_descriptions(str(dot), str(output))
 
         report = output_text.getvalue()
@@ -4361,10 +4629,13 @@ class ReleaseTransactionTests(unittest.TestCase):
             )
             TOPOLOGY._write_description_intent(dot, intent)
 
+            source_csv = root / "02-devices_config.csv"
+            source_csv.write_text("hostname,type\nleaf01,eth\n", encoding="utf-8")
             output_text = io.StringIO()
             with mock.patch.object(
                 GENERATOR, "_load_csv_hostnames", return_value={"leaf01"},
-            ), redirect_stdout(output_text):
+            ), mock.patch.object(GENERATOR, "_CSV_FILE", str(source_csv)), \
+                    redirect_stdout(output_text):
                 GENERATOR._run_patch_descriptions(str(dot), str(output))
 
             generated = GENERATOR._load_generated_yaml(
@@ -5255,6 +5526,7 @@ class ReleaseTransactionTests(unittest.TestCase):
             deployment_lock_descriptor=73,
             source_identities=remote_inputs.source_identities,
             inventory_directory=mock.ANY,
+            dhcp_candidate_dir=mock.ANY,
             install_dhcp=False,
             dry_run=False,
             schema_version=remote_inputs.settings.schema_version,
@@ -5430,6 +5702,7 @@ class ReleaseTransactionTests(unittest.TestCase):
             _device_types, *, install_dhcp, dry_run, schema_version,
             eth_version, air_topology_policy, deployment_scope, switch_scope,
             deployment_lock_descriptor, source_identities, inventory_directory,
+            dhcp_candidate_dir,
         ):
             self.assertIsNone(source_identities)
             self.assertEqual(self.project, inventory_directory.parent)
@@ -5443,24 +5716,22 @@ class ReleaseTransactionTests(unittest.TestCase):
             self.assertEqual("all", deployment_scope)
             self.assertEqual("all", switch_scope)
             self.assertEqual(75, deployment_lock_descriptor)
-            DHCP.write_dhcpd_conf(runtime_paths["dhcpd.conf"], subnets)
-            DHCP.write_hosts(runtime_paths["dhcpd_eth.hosts"], records)
-            DHCP.write_hosts(runtime_paths["dhcpd_ib.hosts"], [])
-            DHCP.write_hosts(runtime_paths["dhcpd_nvl.hosts"], [])
-            # c1 computes OUTPUT_MANIFEST from realpath(OUTPUT_CONF), so it
-            # writes directly into the project output directory.  The setup
-            # link must make that exact file visible to the parent validator.
-            output_manifest = (
-                runtime_paths["dhcpd.conf"].resolve().parent
-                / "dhcp-release-manifest.json"
-            )
             self.assertEqual(
-                runtime_paths["dhcp-release-manifest.json"].resolve(),
-                output_manifest,
+                (self.project / "99-output-dhcp").resolve(),
+                dhcp_candidate_dir.parent,
             )
+            self.assertEqual(0o700, dhcp_candidate_dir.stat().st_mode & 0o777)
+            candidate_paths = {
+                name: dhcp_candidate_dir / name for name in names
+            }
+            DHCP.write_dhcpd_conf(candidate_paths["dhcpd.conf"], subnets)
+            DHCP.write_hosts(candidate_paths["dhcpd_eth.hosts"], records)
+            DHCP.write_hosts(candidate_paths["dhcpd_ib.hosts"], [])
+            DHCP.write_hosts(candidate_paths["dhcpd_nvl.hosts"], [])
+            output_manifest = candidate_paths["dhcp-release-manifest.json"]
             DHCP.write_release_manifest(
                 output_manifest, records, subnets,
-                tuple(runtime_paths[name] for name in names[:4]),
+                tuple(candidate_paths[name] for name in names[:4]),
                 deployment_scope=deployment_scope,
                 switch_scope=switch_scope,
             )
@@ -5533,7 +5804,7 @@ class ReleaseTransactionTests(unittest.TestCase):
         project_manifest = self.project / mapped[manifest_rel][0]
         self.assertTrue(runtime_manifest.is_symlink())
         self.assertEqual(project_manifest.resolve(), runtime_manifest.resolve())
-        self.assertGreater(project_manifest.stat().st_size, 0)
+        self.assertEqual(0, project_manifest.stat().st_size)
         parent = json.loads(
             (self.project / "99-output-ztp/current-release.json").read_text(
                 encoding="utf-8"
@@ -5541,6 +5812,13 @@ class ReleaseTransactionTests(unittest.TestCase):
         )
         self.assertEqual("passed", parent["validation"])
         self.assertEqual({"dhcp", "cumulus"}, set(parent["components"]))
+        retained = self.project / "99-output-dhcp"
+        private_dirs = list(retained.glob(".load-dhcp-candidate-*"))
+        self.assertEqual(1, len(private_dirs))
+        self.assertEqual(
+            sha256(private_dirs[0] / "dhcp-release-manifest.json"),
+            parent["components"]["dhcp"]["manifest_sha256"],
+        )
 
         with mock.patch.object(UNSETUP, "ZTP", str(self.ztp)):
             self.assertIn(

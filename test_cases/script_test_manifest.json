@@ -72,6 +72,7 @@
         "test_cases.test_http_port_workflow",
         "test_cases.test_docker_management_ssh_key",
         "test_cases.test_docker_derived_parent_activation",
+        "test_cases.test_generation_input_binding_activation_contract",
         "test_cases.test_dhcp_optional_contract",
         "test_cases.test_dhcp_optional_workflow",
         "test_cases.test_eth_jump_transport_contract",
@@ -105,6 +106,7 @@
       "description": "项目 schema、Cumulus/NVUE、MLAG/EVPN、QoS、STP 和配置生成",
       "tests": [
         "test_cases.test_cumulus_snippet_rendering",
+        "test_cases.test_dhcp_deferred_candidate_contract",
         "test_cases.test_dhcp_switch_scope_preservation",
         "test_cases.test_dhcp_switch_scope_preservation_workflow",
         "test_cases.test_eth_jump_duplicate_identity",
@@ -113,6 +115,8 @@
         "test_cases.test_feedback_global_writeback",
         "test_cases.test_feedback_global_writeback_workflow",
         "test_cases.test_flow_release_platform_matrix",
+        "test_cases.test_generation_input_binding_contract",
+        "test_cases.test_generation_input_binding_workflow",
         "test_cases.test_mlag_evpn_generation",
         "test_cases.test_nvue_normalizer",
         "test_cases.test_optimize_output_layout",
@@ -998,6 +1002,25 @@
       "tests": ["test_cases.test_req7_ib_provenance_workflow"]
     },
     {
+      "id": "generation_input_binding_direct",
+      "paths": [
+        "ztp/config/cumulus/template/90-c2-generate_configs.py"
+      ],
+      "tests": [
+        "test_cases.test_generation_input_binding_contract"
+      ]
+    },
+    {
+      "id": "r22_dhcp_private_candidate_direct",
+      "paths": ["ztp/config/isc-dhcp-server/c1-generate_dhcp.py"],
+      "tests": ["test_cases.test_dhcp_deferred_candidate_contract"]
+    },
+    {
+      "id": "r22_scoped_empty_host_activation_direct",
+      "paths": ["infra/docker/activate.py"],
+      "tests": ["test_cases.test_generation_input_binding_activation_contract"]
+    },
+    {
       "id": "ztp_config_generation",
       "paths": [
         "ztp/config/*"
@@ -1672,6 +1695,26 @@
       "tests": [
         "test_cases.test_issue_tracker_manifest_workflow"
       ]
+    },
+    {
+      "id": "generation_input_binding_setup_load_c2",
+      "members": [
+        "DAY0-Prepare/01-a-setup.py",
+        "DAY0-Prepare/11-load.py",
+        "ztp/config/cumulus/template/90-c2-generate_configs.py"
+      ],
+      "tests": [
+        "test_cases.test_generation_input_binding_workflow"
+      ]
+    },
+    {
+      "id": "r22_scoped_dhcp_activation_workflow",
+      "members": [
+        "DAY0-Prepare/11-load.py",
+        "ztp/config/isc-dhcp-server/c1-generate_dhcp.py",
+        "infra/docker/activate.py"
+      ],
+      "tests": ["test_cases.test_generation_input_binding_workflow"]
     },
     {
       "id": "req8_template_refactor_to_config_generation",

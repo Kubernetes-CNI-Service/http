@@ -475,10 +475,12 @@ class SplitterProfileWorkflowTests(unittest.TestCase):
             self.assertEqual({(host, port) for host, ports in UNUSED_PORTS.items() for port in ports},
                              {(entry["device"], entry["port"]) for entry in intent["empty_endpoints"]})
             P2P._write_description_intent(str(dot), intent)
+            source_csv = root / "02-devices_config.csv"
+            source_csv.write_text("hostname,type\n", encoding="utf-8")
             stdout = io.StringIO()
             with contextlib.redirect_stdout(stdout), mock.patch.object(
                 GENERATOR, "_load_csv_hostnames", return_value=set(),
-            ):
+            ), mock.patch.object(GENERATOR, "_CSV_FILE", str(source_csv)):
                 GENERATOR._run_patch_descriptions(str(dot), str(output))
             self.assertNotIn("P2P 标记为空的接口未出现在 yaml 中", stdout.getvalue())
             for endpoint in intent["empty_endpoints"]:

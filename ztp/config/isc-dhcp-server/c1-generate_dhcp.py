@@ -13,11 +13,15 @@ infra/docker/deploy.sh deploy-preloaded <IMAGE_ID>。Docker load 仅用于没有
 用法：
   python3 c1-generate_dhcp.py [-y] [--deployment-scope all|prod|air]
       [--switch eth|ib|nvl] [--inventory-output PATH] [--inventory-only]
+      [--candidate-dir ABSOLUTE_PROJECT_PRIVATE_DIRECTORY]
 
 --inventory-output 只接受客户 CSV 同目录下真实 0700 的 .load-inventory-<suffix>/02-devices_config.csv
 规范绝对路径；目标须不存在，原子发布为 single-link 0600，保持客户 CSV 不变。
 --inventory-only 只派生清单，不读取或改写五个 DHCP 输出，必须同时指定输出路径。
 --preserve-input-csv 禁止独立候选生成后的客户 CSV 回写；11-load 始终传入此参数。
+--candidate-dir 是 11-load 的私有 prepare-only 模式：目录须由 LOAD 在当前项目
+99-output-dhcp 下预建为空的 0700 .load-dhcp-candidate-* 目录；本脚本只写完整五件，
+不改变项目平铺 DHCP 输出、latest 或客户 CSV。此目录不是可发布 release。
 
 默认 `all` 同时生成 Production 与 AIR host；`prod` 排除 AIR，`air` 只生成 AIR host。
 `--switch` 只保留对应平台族；AIR 未指定时由 11-load 默认选择 eth。
@@ -33,6 +37,7 @@ shared-network/subnet 声明是两个环境复用的管理网络合同，不按�
 """
 
 import csv
+from contextlib import ExitStack, contextmanager
 import glob
 import hashlib
 import ipaddress
@@ -142,8 +147,15 @@ def load_project_global(path):
     if not os.path.isfile(path):
         raise ValueError(f"找不到 {os.path.basename(path)}")
     try:
-        with open(path, encoding="utf-8") as stream:
-            data = yaml.safe_load(stream)
+        with open(path, "rb") as stream:
+            source = stream.read()
+        expected = os.environ.get("HTTP_EXPECTED_GLOBAL_SHA256")
+        if expected is not None:
+            if not re.fullmatch(r"[0-9a-f]{64}", expected):
+                raise ValueError("invalid global source authority")
+            if hashlib.sha256(source).hexdigest() != expected:
+                raise ValueError("global input source drift from LOAD authority")
+        data = yaml.safe_load(source)
         value = data["common"]["mgmt"]["ztp"]["ztp_url_prefix"]
         mgmt = data["common"]["mgmt"]
         http_policy = mgmt.get("http", {})
@@ -884,7 +896,24 @@ def records_for_release_scope(
 
 # ── 生成输出文件 ──────────────────────────────────────────────────────────────
 
-def write_hosts(path, records):
+@contextmanager
+def _text_output(path, *, directory_fd=None):
+    if directory_fd is None:
+        with open(path, "w", encoding="utf-8") as stream:
+            yield stream
+        return
+    descriptor = os.open(
+        os.path.basename(path),
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+        0o600, dir_fd=directory_fd,
+    )
+    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        yield stream
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def write_hosts(path, records, *, directory_fd=None):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     declarations = [r for r in records if not r.get("identity_pending")]
     order_key = lambda r: (
@@ -900,7 +929,7 @@ def write_hosts(path, records):
         (r for r in declarations if str(r.get("type") or "").casefold() == "air"),
         key=order_key,
     )
-    with open(path, "w", encoding="utf-8") as f:
+    with _text_output(path, directory_fd=directory_fd) as f:
         f.write(f"##### Generated at {now}\n\n")
         for label, grouped in (("Production", production), ("AIR", air)):
             if not grouped:
@@ -924,9 +953,22 @@ def write_hosts(path, records):
     print(f"[OK] {os.path.basename(path)}：{len(declarations)} 条记录{suffix}")
 
 
-def _sha256_file(path):
+def _sha256_file(path, *, directory_fd=None):
     digest = hashlib.sha256()
-    with open(path, "rb") as stream:
+    if directory_fd is None:
+        stream = open(path, "rb")
+    else:
+        descriptor = os.open(
+            os.path.basename(path),
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=directory_fd,
+        )
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            os.close(descriptor)
+            raise OSError(f"unsafe DHCP candidate file: {path}")
+        stream = os.fdopen(descriptor, "rb")
+    with stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
@@ -934,7 +976,7 @@ def _sha256_file(path):
 
 def write_release_manifest(
     path, records, subnets, output_paths, *, deployment_scope="all",
-    switch_scope="all", host_declarations_by_family=None,
+    switch_scope="all", host_declarations_by_family=None, directory_fd=None,
 ):
     """Atomically publish machine-readable planned identity/DHCP metadata."""
     devices = []
@@ -1022,24 +1064,50 @@ def write_release_manifest(
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "counts": counts,
         "outputs": {
-            os.path.basename(item): {"sha256": _sha256_file(item)}
+            os.path.basename(item): {
+                "sha256": _sha256_file(item, directory_fd=directory_fd)
+            }
             for item in output_paths
         },
     }
-    directory = os.path.dirname(os.path.realpath(path))
-    os.makedirs(directory, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(
-        prefix=f".{os.path.basename(path)}.", suffix=".tmp", dir=directory
-    )
+    if directory_fd is None:
+        directory = os.path.dirname(os.path.realpath(path))
+        os.makedirs(directory, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(
+            prefix=f".{os.path.basename(path)}.", suffix=".tmp", dir=directory
+        )
+    else:
+        temporary = f".{os.path.basename(path)}.{secrets.token_hex(16)}.tmp"
+        fd = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+            0o600, dir_fd=directory_fd,
+        )
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             json.dump(manifest, stream, ensure_ascii=False, indent=2, sort_keys=True)
             stream.write("\n")
-        os.chmod(temporary, 0o644)
-        os.replace(temporary, os.path.realpath(path))
+            if directory_fd is not None:
+                stream.flush()
+                os.fsync(stream.fileno())
+        if directory_fd is None:
+            os.chmod(temporary, 0o644)
+            os.replace(temporary, os.path.realpath(path))
+        else:
+            os.replace(
+                temporary, os.path.basename(path),
+                src_dir_fd=directory_fd, dst_dir_fd=directory_fd,
+            )
+            os.fsync(directory_fd)
     except BaseException:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+        if directory_fd is None:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+        else:
+            try:
+                os.unlink(temporary, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
         raise
     print(
         f"[OK] {os.path.basename(path)}：release_id={manifest['release_id']}，"
@@ -1324,6 +1392,188 @@ def _prepare_dhcp_output_transaction(*, family_records, switch_scope):
         "publish": publish,
     }
 
+
+_CANDIDATE_FILES = (
+    "dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts",
+    "dhcpd_nvl.hosts", "dhcp-release-manifest.json",
+)
+
+
+@contextmanager
+def _held_private_candidate(candidate_dir):
+    """Pin one empty LOAD-owned directory in the current canonical project.
+
+    No path-based output write is allowed after this validation: a same-UID
+    rename or symlink rebound can at most detach the held directory, not send
+    bytes to the replacement pathname.
+    """
+    if not isinstance(candidate_dir, str) or not os.path.isabs(candidate_dir):
+        raise ValueError("--candidate-dir requires an absolute project path")
+    candidate_dir = os.path.normpath(candidate_dir)
+    project_root = os.path.join(os.path.realpath(HTTP_ROOT), "DAY0-Prepare")
+    global_source = os.path.realpath(GLOBAL_YAML)
+    project = os.path.dirname(global_source)
+    project_name = os.path.basename(project)
+    if (os.path.basename(global_source) != "01-global.yaml"
+            or os.path.dirname(project) != project_root
+            or project_name in {"", ".", ".."}):
+        raise ValueError("DHCP candidate has no canonical current project")
+    output = os.path.join(project, "99-output-dhcp")
+    candidate_name = os.path.basename(candidate_dir)
+    if (not re.fullmatch(r"\.load-dhcp-candidate-[A-Za-z0-9-]{8,64}", candidate_name)
+            or os.path.normpath(os.path.dirname(candidate_dir)) !=
+            os.path.normpath(os.path.join(
+                HTTP_ROOT, "DAY0-Prepare", project_name, "99-output-dhcp",
+            ))
+            or os.path.realpath(os.path.dirname(candidate_dir)) != output):
+        raise ValueError("DHCP candidate must be in current project 99-output-dhcp")
+    for label, public in (
+        ("conf", OUTPUT_CONF), ("eth", OUTPUT_ETH),
+        ("ib", OUTPUT_IB), ("nvl", OUTPUT_NVL),
+        ("manifest", OUTPUT_MANIFEST),
+    ):
+        expected = "dhcp-release-manifest.json" if label == "manifest" else (
+            "dhcpd.conf" if label == "conf" else f"dhcpd_{label}.hosts"
+        )
+        if os.path.realpath(public) != os.path.join(output, expected):
+            raise ValueError(f"DHCP {label} publication does not belong to project")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    with ExitStack() as descriptors:
+        projects_fd = os.open(project_root, flags)
+        descriptors.callback(os.close, projects_fd)
+        project_fd = os.open(project_name, flags, dir_fd=projects_fd)
+        descriptors.callback(os.close, project_fd)
+        output_fd = os.open("99-output-dhcp", flags, dir_fd=project_fd)
+        descriptors.callback(os.close, output_fd)
+        candidate_fd = os.open(candidate_name, flags, dir_fd=output_fd)
+        descriptors.callback(os.close, candidate_fd)
+        metadata = os.fstat(candidate_fd)
+
+        def check_visible():
+            for visible, held in (
+                (os.lstat(project_root), os.fstat(projects_fd)),
+                (os.stat(project_name, dir_fd=projects_fd,
+                         follow_symlinks=False), os.fstat(project_fd)),
+                (os.stat("99-output-dhcp", dir_fd=project_fd,
+                         follow_symlinks=False), os.fstat(output_fd)),
+                (os.stat(candidate_name, dir_fd=output_fd,
+                         follow_symlinks=False), os.fstat(candidate_fd)),
+            ):
+                if (not stat.S_ISDIR(visible.st_mode)
+                        or (visible.st_dev, visible.st_ino) !=
+                        (held.st_dev, held.st_ino)):
+                    raise OSError("DHCP candidate ancestor changed during generation")
+
+        check_visible()
+        if (not stat.S_ISDIR(metadata.st_mode)
+                or stat.S_IMODE(metadata.st_mode) != 0o700
+                or os.listdir(candidate_fd)):
+            raise OSError("DHCP candidate must be an empty private directory")
+        yield candidate_dir, output_fd, candidate_fd, check_visible
+
+
+def _candidate_file_bytes(directory_fd, filename):
+    descriptor = os.open(
+        filename, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        dir_fd=directory_fd,
+    )
+    with os.fdopen(descriptor, "rb") as stream:
+        metadata = os.fstat(stream.fileno())
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise OSError(f"unsafe DHCP candidate input: {filename}")
+        return stream.read()
+
+
+def _write_candidate_bytes(directory_fd, filename, content):
+    descriptor = os.open(
+        filename,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+        0o600, dir_fd=directory_fd,
+    )
+    with os.fdopen(descriptor, "wb") as stream:
+        stream.write(content)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def _prepare_private_dhcp_candidate(
+    candidate_dir, *, family_records, scoped_records, subnets,
+    deployment_scope, switch_scope,
+):
+    """Produce a complete, fsynced five-file set without changing flat A."""
+    with _held_private_candidate(candidate_dir) as (
+        candidate_path, output_fd, candidate_fd, check_visible,
+    ):
+        try:
+            owned = ({"eth", "ib", "nvl"} if switch_scope == "all"
+                     else {switch_scope})
+            preserved = {}
+            counts = {}
+            for family in ("eth", "ib", "nvl"):
+                if family in owned:
+                    counts[family] = sum(
+                        not row.get("identity_pending")
+                        for row in family_records[family]
+                    )
+                else:
+                    filename = f"dhcpd_{family}.hosts"
+                    content = _candidate_file_bytes(output_fd, filename)
+                    preserved[family] = content
+                    counts[family] = len(_HOST_DECLARATION_RE.findall(
+                        content.decode("utf-8")
+                    ))
+            write_dhcpd_conf(
+                os.path.join(candidate_path, "dhcpd.conf"), subnets,
+                directory_fd=candidate_fd,
+            )
+            for family in ("eth", "ib", "nvl"):
+                filename = f"dhcpd_{family}.hosts"
+                path = os.path.join(candidate_path, filename)
+                if family in owned:
+                    write_hosts(path, family_records[family],
+                                directory_fd=candidate_fd)
+                else:
+                    _write_candidate_bytes(candidate_fd, filename,
+                                           preserved[family])
+            manifest_path = os.path.join(
+                candidate_path, "dhcp-release-manifest.json",
+            )
+            manifest = write_release_manifest(
+                manifest_path, scoped_records, subnets,
+                tuple(os.path.join(candidate_path, name)
+                      for name in _CANDIDATE_FILES[:-1]),
+                deployment_scope=deployment_scope, switch_scope=switch_scope,
+                host_declarations_by_family=counts,
+                directory_fd=candidate_fd,
+            )
+            if set(os.listdir(candidate_fd)) != set(_CANDIDATE_FILES):
+                raise OSError("DHCP candidate does not contain exactly five files")
+            for filename in _CANDIDATE_FILES[:-1]:
+                content = _candidate_file_bytes(candidate_fd, filename)
+                if (hashlib.sha256(content).hexdigest()
+                        != manifest["outputs"][filename]["sha256"]):
+                    raise OSError(f"DHCP candidate hash changed: {filename}")
+            receipt = json.loads(_candidate_file_bytes(
+                candidate_fd, _CANDIDATE_FILES[-1],
+            ))
+            if receipt != manifest:
+                raise OSError("DHCP candidate manifest changed after generation")
+            os.fsync(candidate_fd)
+            check_visible()
+            print(f"[OK] unpublished DHCP candidate: {candidate_path}")
+        except BaseException:
+            for filename in os.listdir(candidate_fd):
+                if filename in _CANDIDATE_FILES or (
+                    filename.startswith(".dhcp-release-manifest.json.")
+                    and filename.endswith(".tmp")
+                ):
+                    try:
+                        os.unlink(filename, dir_fd=candidate_fd)
+                    except FileNotFoundError:
+                        pass
+            os.fsync(candidate_fd)
+            raise
+
 # ── Subnet 配置 ───────────────────────────────────────────────────────────────
 
 def load_subnet_csv(path, ztp_prefix, port=80):
@@ -1565,7 +1815,7 @@ def _dhcp_lease_event_lines(indent="    "):
     return result
 
 
-def write_dhcpd_conf(path, subnets):
+def write_dhcpd_conf(path, subnets, *, directory_fd=None):
     """根据 subnet 列表生成 dhcpd.conf，并按客户端平台互斥下发 ZTP。"""
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -1650,7 +1900,7 @@ def write_dhcpd_conf(path, subnets):
         "",
     ]
 
-    with open(path, "w", encoding="utf-8") as f:
+    with _text_output(path, directory_fd=directory_fd) as f:
         f.write("\n".join(lines))
     print(f"[OK] {os.path.basename(path)}：{len(subnets)} 条 subnet")
 
@@ -1686,6 +1936,7 @@ def main():
     inventory_output = None
     inventory_only = False
     preserve_input_csv = False
+    candidate_dir = None
     remaining = []
     index = 0
     while index < len(args):
@@ -1699,6 +1950,11 @@ def main():
             inventory_only = True
         elif argument == "--preserve-input-csv":
             preserve_input_csv = True
+        elif argument == "--candidate-dir":
+            index += 1
+            if index >= len(args):
+                raise ValueError("--candidate-dir requires an absolute project path")
+            candidate_dir = args[index]
         elif argument.startswith("--deployment-scope="):
             deployment_scope = argument.split("=", 1)[1]
         elif argument == "--deployment-scope":
@@ -1721,6 +1977,8 @@ def main():
     args = remaining
     if inventory_only and inventory_output is None:
         raise ValueError("--inventory-only requires --inventory-output")
+    if inventory_only and candidate_dir is not None:
+        raise ValueError("--candidate-dir cannot be combined with --inventory-only")
     if deployment_scope not in {"all", "prod", "air"}:
         print(
             f"[ERROR] unsupported deployment scope: {deployment_scope!r}",
@@ -1889,6 +2147,23 @@ def main():
 
     try:
         with deployment_lock(HTTP_ROOT):
+            if candidate_dir is not None:
+                _prepare_private_dhcp_candidate(
+                    candidate_dir,
+                    family_records={
+                        "eth": eth_records,
+                        "ib": ib_records,
+                        "nvl": nvl_records,
+                    },
+                    scoped_records=scoped_records,
+                    subnets=subnets,
+                    deployment_scope=deployment_scope,
+                    switch_scope=switch_scope,
+                )
+                # The caller owns the unpublished directory.  In particular,
+                # do not quiesce monitors, rewrite customer CSV, or publish
+                # any flat DHCP authority from this private prepare step.
+                return
             stop_native_ztp_monitors(HTTP_ROOT)
             print()
             transaction = _prepare_dhcp_output_transaction(

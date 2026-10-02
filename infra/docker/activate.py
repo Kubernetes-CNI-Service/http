@@ -2562,6 +2562,106 @@ def _hash_matches(
         )
 
 
+def _held_dhcp_output_hash(
+    path: Path, root: Path, anchor: Path, label: str,
+) -> tuple[int, str]:
+    """Hash a DHCP leaf through a held no-follow chain from the HTTP root."""
+    _canonical_regular_within(path, root, label)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory_flag = getattr(os, "O_DIRECTORY", 0)
+    if not nofollow or not directory_flag:
+        raise ActivationError(f"{label} cannot be safely opened on this platform")
+    try:
+        relative = path.relative_to(anchor)
+        root.relative_to(anchor)
+        canonical_anchor = anchor.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ActivationError(f"{label} is outside its HTTP authority: {exc}") from exc
+    if not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+        raise ActivationError(f"{label} has an unsafe HTTP-relative path")
+    identity = lambda value: (
+        value.st_dev, value.st_ino, value.st_mode, value.st_nlink,
+        value.st_size, value.st_mtime_ns, value.st_ctime_ns,
+    )
+    directory_identity = lambda value: (
+        value.st_dev, value.st_ino, value.st_mode,
+    )
+    flags = os.O_RDONLY | directory_flag | nofollow | getattr(os, "O_CLOEXEC", 0)
+    held_directories = []
+    file_fd = None
+    try:
+        # Resolve only the configured anchor once.  From the filesystem root
+        # onward, never allow an ancestor component to be followed as a link.
+        directory_fd = os.open("/", flags)
+        held_directories.append((Path("/"), directory_fd, os.fstat(directory_fd)))
+        canonical_cursor = Path("/")
+        for part in canonical_anchor.parts[1:]:
+            canonical_cursor /= part
+            next_fd = os.open(part, flags, dir_fd=directory_fd)
+            opened_directory = os.fstat(next_fd)
+            held_directories.append((canonical_cursor, next_fd, opened_directory))
+            directory_fd = next_fd
+        lexical_cursor = anchor
+        for part in relative.parts[:-1]:
+            lexical_cursor /= part
+            next_fd = os.open(part, flags, dir_fd=directory_fd)
+            opened_directory = os.fstat(next_fd)
+            held_directories.append((lexical_cursor, next_fd, opened_directory))
+            directory_fd = next_fd
+        for directory_path, _descriptor, opened_directory in held_directories:
+            visible = directory_path.lstat()
+            if (
+                not stat.S_ISDIR(opened_directory.st_mode)
+                or directory_identity(visible) != directory_identity(opened_directory)
+            ):
+                raise ActivationError(f"{label} has a rebound directory ancestor")
+        leaf_before = path.lstat()
+        file_fd = os.open(
+            path.name, os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=directory_fd,
+        )
+        opened = os.fstat(file_fd)
+        if (
+            not stat.S_ISREG(leaf_before.st_mode)
+            or not stat.S_ISREG(opened.st_mode)
+            or leaf_before.st_nlink != 1
+            or opened.st_nlink != 1
+            or identity(leaf_before) != identity(opened)
+        ):
+            raise ActivationError(f"{label} changed before its held read")
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(file_fd, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+        file_after = os.fstat(file_fd)
+        leaf_after = path.lstat()
+        if (
+            identity(opened) != identity(file_after)
+            or identity(opened) != identity(leaf_after)
+            or anchor.resolve(strict=True) != canonical_anchor
+        ):
+            raise ActivationError(f"{label} changed during its held read")
+        for directory_path, _descriptor, opened_directory in held_directories:
+            visible = directory_path.lstat()
+            if (
+                not stat.S_ISDIR(visible.st_mode)
+                or directory_identity(visible) != directory_identity(opened_directory)
+            ):
+                raise ActivationError(f"{label} has a rebound directory ancestor")
+        return opened.st_size, digest.hexdigest()
+    except ActivationError:
+        raise
+    except OSError as exc:
+        raise ActivationError(f"{label} cannot be safely read: {exc}") from exc
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        for _directory_path, descriptor, _metadata in reversed(held_directories):
+            os.close(descriptor)
+
+
 def _canonical_regular_within(path: Path, root: Path, label: str) -> Path:
     """Require a single-link regular leaf with no alias in its path."""
     canonical_root = root.resolve(strict=True)
@@ -2933,11 +3033,122 @@ def validate_parent_release(settings: Settings, release_manifest: Path) -> dict:
                     raise ActivationError(
                         f"parent release DHCP manifest lacks {output_name} hash"
                     )
-                _hash_matches(
-                    dhcp_directory / output_name,
-                    item.get("sha256"),
-                    f"parent release DHCP output {output_name}",
-                )
+                output_path = dhcp_directory / output_name
+                try:
+                    is_empty = output_path.stat().st_size == 0
+                except OSError as exc:
+                    raise ActivationError(
+                        f"parent release DHCP output {output_name} is unavailable: {exc}"
+                    ) from exc
+                if is_empty:
+                    # A scoped c1 child may preserve setup's zero-byte host
+                    # placeholder for a family it does not own.  The child
+                    # receipt must prove both absence of declarations and
+                    # exact bytes.  Never apply this to the selected family,
+                    # dhcpd.conf, or a legacy receipt with no counts.
+                    selected = dhcp_manifest.get("switch_scope")
+                    counts = dhcp_manifest.get("counts")
+                    declarations = (
+                        counts.get("host_declarations_by_family")
+                        if isinstance(counts, dict) else None
+                    )
+                    if (
+                        output_name == "dhcpd.conf"
+                        or selected not in {"eth", "ib", "nvl"}
+                        or selected != parent_switch_scope
+                        or not isinstance(declarations, dict)
+                        or set(declarations) != {"eth", "ib", "nvl"}
+                        or any(type(value) is not int or value < 0
+                               for value in declarations.values())
+                    ):
+                        raise ActivationError(
+                            f"parent release DHCP output {output_name} has no "
+                            "valid scoped zero-host receipt"
+                        )
+                    family = output_name.removeprefix("dhcpd_").removesuffix(".hosts")
+                    if family == selected or declarations[family] != 0:
+                        raise ActivationError(
+                            f"parent release DHCP output {output_name} is empty "
+                            "for a selected or declared family"
+                        )
+                    # The empty exception must not turn an arbitrary symlink
+                    # into a trusted publication.  Accept either a canonical
+                    # local regular output or setup's exact project-owned
+                    # publication link, never an alias outside that pair.
+                    label = f"parent release DHCP output {output_name}"
+                    try:
+                        metadata = output_path.lstat()
+                    except OSError as exc:
+                        raise ActivationError(
+                            f"{label} is unavailable: {exc}"
+                        ) from exc
+                    publication_target = None
+                    if stat.S_ISLNK(metadata.st_mode):
+                        expected = project / "99-output-dhcp" / output_name
+                        try:
+                            target = os.readlink(output_path)
+                        except OSError as exc:
+                            raise ActivationError(
+                                f"{label} has an unsafe empty alias: {exc}"
+                            ) from exc
+                        if (
+                            metadata.st_nlink != 1
+                            or target != os.path.relpath(
+                                expected, dhcp_directory,
+                            )
+                        ):
+                            raise ActivationError(f"{label} has an unsafe empty alias")
+                        _canonical_regular_within(
+                            expected, project / "99-output-dhcp", label,
+                        )
+                        publication_target = target
+                        held_path = expected
+                        held_root = project / "99-output-dhcp"
+                    else:
+                        _canonical_regular_within(output_path, dhcp_directory, label)
+                        held_path = output_path
+                        held_root = dhcp_directory
+                    opened_size, actual = _held_dhcp_output_hash(
+                        held_path, held_root, settings.http_root, label,
+                    )
+                    if opened_size != 0:
+                        raise ActivationError(
+                            f"{label} changed from empty before its held read"
+                        )
+                    if publication_target is not None:
+                        try:
+                            after = output_path.lstat()
+                            target_after = os.readlink(output_path)
+                        except OSError as exc:
+                            raise ActivationError(
+                                f"{label} publication changed during its held read: {exc}"
+                            ) from exc
+                        identity = lambda value: (
+                            value.st_dev, value.st_ino, value.st_mode,
+                            value.st_nlink, value.st_size,
+                            value.st_mtime_ns, value.st_ctime_ns,
+                        )
+                        if (
+                            not stat.S_ISLNK(after.st_mode)
+                            or identity(metadata) != identity(after)
+                            or target_after != publication_target
+                        ):
+                            raise ActivationError(
+                                f"{label} publication changed during its held read"
+                            )
+                    expected_hash = str(item.get("sha256") or "").strip().casefold()
+                    if not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
+                        raise ActivationError(f"{label} has invalid SHA-256")
+                    if actual != expected_hash:
+                        raise ActivationError(
+                            f"{label} hash drift: {held_path}: "
+                            f"actual={actual}, expected={expected_hash}"
+                        )
+                else:
+                    _hash_matches(
+                        output_path, item.get("sha256"),
+                        f"parent release DHCP output {output_name}",
+                    )
         component_identity[name] = {
             "release_id": str(raw_component.get("release_id") or ""),
             "manifest_sha256": str(raw_component.get("manifest_sha256") or ""),
@@ -2948,6 +3159,442 @@ def validate_parent_release(settings: Settings, release_manifest: Path) -> dict:
         "parent_inputs": dict(sorted((str(k), str(v)) for k, v in inputs.items())),
         "parent_components": component_identity,
     }
+
+
+def _pinned_file_identity(metadata: os.stat_result) -> tuple:
+    return (
+        metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_nlink,
+        metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns,
+    )
+
+
+def _read_pinned_generation_file(
+    generation_fd: int, relative: str, label: str,
+    maximum_size: Optional[int] = 16 * 1024 * 1024,
+) -> bytes:
+    """Read one leaf beneath an already-pinned generation, never following links."""
+    parts = relative.split("/")
+    if not parts or any(not part or part in {".", ".."} for part in parts):
+        raise ActivationError(f"{label} has an unsafe generation-relative path")
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory = getattr(os, "O_DIRECTORY", 0)
+    if not nofollow or not directory:
+        raise ActivationError(f"{label} cannot be safely opened on this platform")
+    held = []
+    leaf_fd = None
+    current_fd = generation_fd
+    try:
+        for part in parts[:-1]:
+            next_fd = os.open(
+                part, os.O_RDONLY | directory | nofollow | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=current_fd,
+            )
+            held.append(next_fd)
+            if not stat.S_ISDIR(os.fstat(next_fd).st_mode):
+                raise ActivationError(f"{label} has a non-directory ancestor")
+            current_fd = next_fd
+        before = os.stat(parts[-1], dir_fd=current_fd, follow_symlinks=False)
+        leaf_fd = os.open(
+            parts[-1], os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=current_fd,
+        )
+        opened = os.fstat(leaf_fd)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or _pinned_file_identity(before) != _pinned_file_identity(opened)
+            or (maximum_size is not None and opened.st_size > maximum_size)
+        ):
+            raise ActivationError(f"{label} is not one bounded immutable regular file")
+        chunks = []
+        size = 0
+        while True:
+            limit = (1024 * 1024 if maximum_size is None else
+                     min(1024 * 1024, maximum_size + 1 - size))
+            chunk = os.read(leaf_fd, limit)
+            if not chunk:
+                break
+            size += len(chunk)
+            if maximum_size is not None and size > maximum_size:
+                raise ActivationError(f"{label} exceeds its maximum size")
+            chunks.append(chunk)
+        after = os.fstat(leaf_fd)
+        visible = os.stat(parts[-1], dir_fd=current_fd, follow_symlinks=False)
+        if (
+            _pinned_file_identity(opened) != _pinned_file_identity(after)
+            or _pinned_file_identity(opened) != _pinned_file_identity(visible)
+        ):
+            raise ActivationError(f"{label} changed during its pinned read")
+        return b"".join(chunks)
+    except ActivationError:
+        raise
+    except OSError as exc:
+        raise ActivationError(f"{label} cannot be safely read: {exc}") from exc
+    finally:
+        if leaf_fd is not None:
+            os.close(leaf_fd)
+        for descriptor in reversed(held):
+            os.close(descriptor)
+
+
+def validate_pinned_generation(
+    settings: Settings, selector_path: Path, *, expected_release_id: Optional[str] = None,
+) -> dict:
+    """Validate one explicit TEST generation without mixing an A/B selector transition.
+
+    This read-only API does not activate services or choose a fallback.  An old
+    generation may be re-selected only by an external, explicit selector
+    transaction; callers needing a particular release pass expected_release_id.
+    """
+    validate_project_mount(settings)
+    project = settings.project_dir
+    output = project / "99-output-ztp"
+    if Path(selector_path) != output / "current":
+        raise ActivationError("generation selector must be the project current link")
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory = getattr(os, "O_DIRECTORY", 0)
+    if not nofollow or not directory:
+        raise ActivationError("generation selector cannot be safely pinned")
+    flags = os.O_RDONLY | directory | nofollow | getattr(os, "O_CLOEXEC", 0)
+    descriptors = []
+    try:
+        root_fd = os.open(settings.http_root, flags)
+        descriptors.append(root_fd)
+        day0_fd = os.open("DAY0-Prepare", flags, dir_fd=root_fd)
+        descriptors.append(day0_fd)
+        day0 = settings.http_root / "DAY0-Prepare"
+        if _pinned_file_identity(day0.lstat()) != _pinned_file_identity(
+            os.fstat(day0_fd)
+        ):
+            raise ActivationError("DAY0 ancestor changed before generation pin")
+        project_fd = os.open(settings.project_name, flags, dir_fd=day0_fd)
+        descriptors.append(project_fd)
+        project_stat = project.lstat()
+        if _pinned_file_identity(project_stat) != _pinned_file_identity(os.fstat(project_fd)):
+            raise ActivationError("project directory changed before generation pin")
+        output_fd = os.open("99-output-ztp", flags, dir_fd=project_fd)
+        descriptors.append(output_fd)
+        before_selector = os.stat("current", dir_fd=output_fd, follow_symlinks=False)
+        if not stat.S_ISLNK(before_selector.st_mode) or before_selector.st_nlink != 1:
+            raise ActivationError("generation selector must be one symlink")
+        target = os.readlink("current", dir_fd=output_fd)
+        after_selector = os.stat("current", dir_fd=output_fd, follow_symlinks=False)
+        if _pinned_file_identity(before_selector) != _pinned_file_identity(after_selector):
+            raise ActivationError("generation selector changed before pin")
+        match = re.fullmatch(r"generations/([0-9a-f]{20})", target)
+        if match is None:
+            raise ActivationError("generation selector has an unsafe relative target")
+        release_id = match.group(1)
+        if expected_release_id is not None and expected_release_id != release_id:
+            raise ActivationError("selected generation is not the expected release")
+        generations_fd = os.open("generations", flags, dir_fd=output_fd)
+        descriptors.append(generations_fd)
+        before_generation = os.stat(
+            release_id, dir_fd=generations_fd, follow_symlinks=False,
+        )
+        generation_fd = os.open(release_id, flags, dir_fd=generations_fd)
+        descriptors.append(generation_fd)
+        if (
+            not stat.S_ISDIR(before_generation.st_mode)
+            or _pinned_file_identity(before_generation)
+            != _pinned_file_identity(os.fstat(generation_fd))
+        ):
+            raise ActivationError("selected generation changed before pin")
+
+        parent_bytes = _read_pinned_generation_file(
+            generation_fd, "current-release.json", "pinned parent release",
+        )
+        try:
+            parent = json.loads(parent_bytes.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise ActivationError(f"pinned parent release is invalid JSON: {exc}") from exc
+        if not isinstance(parent, dict) or parent.get("schema_version") != 2:
+            raise ActivationError("pinned parent release requires schema 2")
+        if (
+            parent.get("validation") != "passed"
+            or parent.get("project") != settings.project_name
+            or parent.get("deployment_scope") != settings.scope
+            or parent.get("switch_scope") != settings.switch_scope
+            or parent.get("dhcp_status") != "enabled"
+        ):
+            raise ActivationError("pinned parent release project/scope/DHCP is invalid")
+        keys = (
+            "project", "deployment_scope", "switch_scope", "inputs",
+            "input_sources", "components", "inventory", "dhcp_status",
+        )
+        if "generated_inputs" in parent:
+            keys += ("generated_inputs",)
+        if any(key not in parent for key in keys):
+            raise ActivationError("pinned parent release basis is incomplete")
+        basis = {key: parent[key] for key in keys}
+        calculated = hashlib.sha256(json.dumps(
+            basis, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()[:20]
+        if parent.get("release_id") != release_id or calculated != release_id:
+            raise ActivationError("pinned parent release ID does not match selected basis")
+        inputs = parent.get("inputs")
+        allowed_inputs = {
+            "global", "devices", "subnet", "p2p",
+            "air_topology_policy", "mini_air_devices",
+        }
+        if (not isinstance(inputs, dict)
+                or not {"global", "devices", "subnet", "p2p"}.issubset(inputs)
+                or set(inputs) - allowed_inputs
+                or ("mini_air_devices" in inputs) != settings.mini):
+            raise ActivationError("pinned parent input/mini scope is invalid")
+        frozen_hashes = dict(inputs)
+        if "generated_inputs" in parent:
+            generated = parent["generated_inputs"]
+            if (not isinstance(generated, dict)
+                    or set(generated) != {"effective_devices"}
+                    or not isinstance(generated["effective_devices"], dict)):
+                raise ActivationError("pinned generated input record is invalid")
+            frozen_hashes["effective_devices"] = generated["effective_devices"].get(
+                "sha256"
+            )
+        frozen_before = os.stat("inputs", dir_fd=generation_fd, follow_symlinks=False)
+        frozen_fd = os.open("inputs", flags, dir_fd=generation_fd)
+        descriptors.append(frozen_fd)
+        if (not stat.S_ISDIR(frozen_before.st_mode)
+                or _pinned_file_identity(frozen_before)
+                != _pinned_file_identity(os.fstat(frozen_fd))
+                or set(os.listdir(frozen_fd)) != set(frozen_hashes)):
+            raise ActivationError("pinned input directory is incomplete or changed")
+        for name, expected in frozen_hashes.items():
+            if (not isinstance(expected, str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", expected)):
+                raise ActivationError(f"pinned input {name} hash is invalid")
+            content = _read_pinned_generation_file(
+                frozen_fd, name, f"pinned input {name}", maximum_size=None,
+            )
+            if hashlib.sha256(content).hexdigest() != expected:
+                raise ActivationError(f"pinned input {name} hash drift")
+        frozen_after = os.stat("inputs", dir_fd=generation_fd, follow_symlinks=False)
+        if (_pinned_file_identity(frozen_before) != _pinned_file_identity(frozen_after)
+                or _pinned_file_identity(frozen_before)
+                != _pinned_file_identity(os.fstat(frozen_fd))):
+            raise ActivationError("pinned input directory changed during read")
+        components = parent.get("components")
+        if not isinstance(components, dict) or not isinstance(components.get("dhcp"), dict):
+            raise ActivationError("pinned parent lacks bound DHCP component")
+        if set(components) - {"cumulus", "nvos", "dhcp"}:
+            raise ActivationError("pinned parent has unknown component")
+        dhcp_component = components["dhcp"]
+        dhcp_before = os.stat("dhcp", dir_fd=generation_fd, follow_symlinks=False)
+        dhcp_fd = os.open("dhcp", flags, dir_fd=generation_fd)
+        descriptors.append(dhcp_fd)
+        if (
+            not stat.S_ISDIR(dhcp_before.st_mode)
+            or _pinned_file_identity(dhcp_before) != _pinned_file_identity(
+                os.fstat(dhcp_fd)
+            )
+        ):
+            raise ActivationError("pinned DHCP directory changed before read")
+        dhcp_bytes = _read_pinned_generation_file(
+            dhcp_fd, "dhcp-release-manifest.json", "pinned DHCP manifest",
+        )
+        dhcp_sha = hashlib.sha256(dhcp_bytes).hexdigest()
+        if dhcp_component.get("manifest_sha256") != dhcp_sha:
+            raise ActivationError("pinned DHCP manifest differs from parent component")
+        try:
+            dhcp_manifest = json.loads(dhcp_bytes.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise ActivationError(f"pinned DHCP manifest is invalid JSON: {exc}") from exc
+        if (
+            not isinstance(dhcp_manifest, dict)
+            or dhcp_manifest.get("release_id") != dhcp_component.get("release_id")
+        ):
+            raise ActivationError("pinned DHCP child release ID mismatch")
+        outputs = dhcp_manifest.get("outputs")
+        names = ("dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts")
+        if not isinstance(outputs, dict) or set(outputs) != set(names):
+            raise ActivationError("pinned DHCP manifest must cover the complete four outputs")
+        output_hashes = {}
+        for name in names:
+            item = outputs[name]
+            expected = item.get("sha256") if isinstance(item, dict) else None
+            if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+                raise ActivationError(f"pinned DHCP output {name} has invalid hash")
+            data = _read_pinned_generation_file(
+                dhcp_fd, name, f"pinned DHCP output {name}",
+                maximum_size=128 * 1024 * 1024,
+            )
+            actual = hashlib.sha256(data).hexdigest()
+            if actual != expected:
+                raise ActivationError(f"pinned DHCP output {name} hash drift")
+            if not data:
+                selected = dhcp_manifest.get("switch_scope")
+                counts = dhcp_manifest.get("counts")
+                declarations = (
+                    counts.get("host_declarations_by_family")
+                    if isinstance(counts, dict) else None
+                )
+                family = name.removeprefix("dhcpd_").removesuffix(".hosts")
+                if (
+                    name == "dhcpd.conf"
+                    or selected != settings.switch_scope
+                    or not isinstance(declarations, dict)
+                    or set(declarations) != {"eth", "ib", "nvl"}
+                    or any(type(value) is not int or value < 0
+                           for value in declarations.values())
+                    or family == selected
+                    or declarations[family] != 0
+                ):
+                    raise ActivationError(f"pinned DHCP output {name} has no valid empty receipt")
+            output_hashes[name] = actual
+        visible_dhcp = os.stat(
+            "dhcp", dir_fd=generation_fd, follow_symlinks=False,
+        )
+        if _pinned_file_identity(visible_dhcp) != _pinned_file_identity(
+            os.fstat(dhcp_fd)
+        ):
+            raise ActivationError("pinned DHCP directory inode changed")
+        # A rollback may select an older parent while a public latest_yaml
+        # already names B.  Validate the immutable child named by A itself;
+        # do not resolve or trust the mutable public latest_yaml here.
+        for name in ("cumulus", "nvos"):
+            raw_component = components.get(name)
+            if raw_component is None:
+                continue
+            if not isinstance(raw_component, dict):
+                raise ActivationError(f"pinned {name} component is invalid")
+            relative_text = raw_component.get("release_dir")
+            if not isinstance(relative_text, str):
+                raise ActivationError(f"pinned {name} release directory is missing")
+            relative = Path(relative_text)
+            if (
+                relative.is_absolute()
+                or not relative.parts
+                or any(part in {"", ".", ".."} for part in relative.parts)
+                or relative.as_posix() != relative_text
+            ):
+                raise ActivationError(f"pinned {name} release directory is unsafe")
+            release_directory = project / relative
+            try:
+                directory_meta = release_directory.lstat()
+                canonical_release = release_directory.resolve(strict=True)
+                canonical_project = project.resolve(strict=True)
+                canonical_release.relative_to(canonical_project)
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise ActivationError(
+                    f"pinned {name} release directory is unavailable: {exc}"
+                ) from exc
+            if (
+                not stat.S_ISDIR(directory_meta.st_mode)
+                or canonical_release != canonical_project / relative
+            ):
+                raise ActivationError(f"pinned {name} release directory is not canonical")
+            yaml_parent_fd = project_fd
+            for index, part in enumerate(relative.parts):
+                next_fd = os.open(part, flags, dir_fd=yaml_parent_fd)
+                descriptors.append(next_fd)
+                if index < len(relative.parts) - 1:
+                    yaml_parent_fd = next_fd
+                else:
+                    release_fd = next_fd
+            if _pinned_file_identity(directory_meta) != _pinned_file_identity(
+                os.fstat(release_fd)
+            ):
+                raise ActivationError(f"pinned {name} release directory changed before read")
+            manifest_bytes = None
+            for file_name, field in (
+                (".published-complete", "published_marker_sha256"),
+                ("release-manifest.json", "manifest_sha256"),
+            ):
+                payload = _read_pinned_generation_file(
+                    release_fd, file_name,
+                    f"pinned {name} {file_name}",
+                )
+                actual = hashlib.sha256(payload).hexdigest()
+                expected = raw_component.get(field)
+                if (
+                    not isinstance(expected, str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", expected)
+                    or actual != expected
+                ):
+                    raise ActivationError(f"pinned {name} {file_name} hash drift")
+                if file_name == "release-manifest.json":
+                    manifest_bytes = payload
+            try:
+                child = json.loads(manifest_bytes.decode("utf-8"))
+            except (UnicodeError, json.JSONDecodeError) as exc:
+                raise ActivationError(
+                    f"pinned {name} release manifest is invalid JSON: {exc}"
+                ) from exc
+            if not isinstance(child, dict):
+                raise ActivationError(f"pinned {name} release manifest is not an object")
+            if child.get("release_id") != raw_component.get("release_id"):
+                raise ActivationError(f"pinned {name} child release ID mismatch")
+            rows = child.get("devices")
+            if not isinstance(rows, list):
+                raise ActivationError(f"pinned {name} child has no devices")
+            for item in rows:
+                if not isinstance(item, dict):
+                    raise ActivationError(f"pinned {name} child device is invalid")
+                config = item.get("config")
+                hostname = item.get("hostname")
+                expected = item.get("config_sha256")
+                if (
+                    not isinstance(config, str)
+                    or not isinstance(hostname, str)
+                    or config != f"{hostname}.yaml"
+                    or Path(config).name != config
+                    or not isinstance(expected, str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", expected)
+                ):
+                    raise ActivationError(f"pinned {name} child config receipt is invalid")
+                config_bytes = _read_pinned_generation_file(
+                    release_fd, config,
+                    f"pinned {name} config {config}",
+                    maximum_size=128 * 1024 * 1024,
+                )
+                actual = hashlib.sha256(config_bytes).hexdigest()
+                if actual != expected:
+                    raise ActivationError(f"pinned {name} config {config} hash drift")
+            visible_yaml = os.stat(
+                relative.parts[-1], dir_fd=yaml_parent_fd, follow_symlinks=False,
+            )
+            if _pinned_file_identity(visible_yaml) != _pinned_file_identity(
+                os.fstat(release_fd)
+            ):
+                raise ActivationError(f"pinned {name} release directory inode changed")
+        visible_generation = os.stat(
+            release_id, dir_fd=generations_fd, follow_symlinks=False,
+        )
+        if _pinned_file_identity(visible_generation) != _pinned_file_identity(
+            os.fstat(generation_fd)
+        ):
+            raise ActivationError("selected generation inode changed during pinned read")
+        if _pinned_file_identity(project.lstat()) != _pinned_file_identity(
+            os.fstat(project_fd)
+        ):
+            raise ActivationError("project directory changed during generation pin")
+        if _pinned_file_identity(day0.lstat()) != _pinned_file_identity(
+            os.fstat(day0_fd)
+        ):
+            raise ActivationError("DAY0 ancestor changed during generation pin")
+        return {
+            "release_id": release_id,
+            "parent_release_sha256": hashlib.sha256(parent_bytes).hexdigest(),
+            "parent_dhcp_status": "enabled",
+            "parent_inputs": dict(sorted((str(k), str(v)) for k, v in inputs.items())),
+            "parent_components": {
+                name: {
+                    "release_id": str(component.get("release_id") or ""),
+                    "manifest_sha256": str(component.get("manifest_sha256") or ""),
+                }
+                for name, component in components.items()
+            },
+            "dhcp_manifest_sha256": dhcp_sha,
+            "dhcp_output_sha256": output_hashes,
+        }
+    except ActivationError:
+        raise
+    except OSError as exc:
+        raise ActivationError(f"generation selector cannot be safely read: {exc}") from exc
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
 
 
 def published_runtime_identity(settings: Settings) -> dict:
