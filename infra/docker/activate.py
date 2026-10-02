@@ -30,6 +30,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from types import MappingProxyType
 from typing import Iterable, Mapping, NamedTuple, Optional, Sequence, Tuple
 import yaml
 
@@ -1636,8 +1637,10 @@ def selected_interface_fingerprints(selected, links: object, addresses: object) 
 
 def runtime_plan_payload(
     settings: Settings, selected, links: object, addresses: object,
+    *, subnet_csv: Optional[Path] = None,
 ) -> dict:
-    _require_subnet_header(settings.subnet_csv)
+    source = settings.subnet_csv if subnet_csv is None else Path(subnet_csv)
+    _require_subnet_header(source)
     return {
         "schema_version": PLAN_SCHEMA,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -1645,10 +1648,8 @@ def runtime_plan_payload(
         "scope": settings.scope,
         "switch_scope": settings.switch_scope,
         "mini": settings.mini,
-        "subnet_csv": os.fspath(settings.subnet_csv),
-        "subnet_sha256": sha256_path(
-            settings.subnet_csv,
-        ),
+        "subnet_csv": os.fspath(source),
+        "subnet_sha256": sha256_path(source),
         "listener_names": list(selected.listener_names),
         "listener_ifindexes": list(selected.listener_ifindexes),
         "direct_shared_networks": list(selected.direct_shared_networks),
@@ -2336,8 +2337,83 @@ def observe_runtime(settings: Settings, runner=subprocess.run):
     return selected, runtime, payload, apache
 
 
+def observe_pinned_runtime(
+    settings: Settings, selector_path: Path, *, expected_release_id: str,
+    runner=subprocess.run,
+):
+    """Plan from one verified immutable generation without publishing anything.
+
+    The existing planner accepts a path, not a held descriptor.  Give it only
+    the already-verified A subnet bytes in a private, short-lived file; never
+    let the mutable flat project inputs stand in for a selected generation.
+    This observation grants no marker or service-start authority.
+    """
+    if not expected_release_id:
+        raise ActivationError("pinned runtime observation requires an expected release")
+    pinned = validate_pinned_generation(
+        settings, selector_path, expected_release_id=expected_release_id,
+    )
+    frozen = pinned["frozen_source_bytes"]
+    policy = pinned["frozen_policy"]
+    port, address, enabled = policy["http"]
+    dhcp_enabled, ztp_enabled = policy["service_modes"]
+    links, addresses = capture_stable_network_snapshot(runner)
+    runtime = _load_runtime_module(settings.http_root)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not nofollow:
+        raise ActivationError("pinned subnet cannot be safely staged without O_NOFOLLOW")
+    try:
+        with tempfile.TemporaryDirectory(prefix="http-ztp-pinned-plan-") as temporary:
+            source = Path(temporary) / "subnet.csv"
+            flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow
+                     | getattr(os, "O_CLOEXEC", 0))
+            descriptor = os.open(source, flags, 0o600)
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(frozen["subnet"])
+                stream.flush()
+                os.fsync(stream.fileno())
+            selected = runtime.plan_dhcp_runtime(
+                source,
+                dhcp_enabled=dhcp_enabled,
+                ztp_enabled=ztp_enabled,
+                link_snapshot=links,
+                address_snapshot=addresses,
+                allowlist=settings.allowlist,
+                relay_ingress=settings.relay_ingress,
+            )
+            if enabled and address is not None:
+                owners = runtime.inspect_http_listener_owners(
+                    address, link_snapshot=links, address_snapshot=addresses,
+                )
+                validate_http_listener_ownership(
+                    address, owners, allowlist=settings.allowlist,
+                )
+            listener_ips = _http_listener_ips_from_policy(selected, address, enabled)
+            apache = render_apache_listener_config(listener_ips, port=port)
+            payload = runtime_plan_payload(
+                settings, selected, links, addresses, subnet_csv=source,
+            )
+            if payload["subnet_sha256"] != pinned["parent_inputs"]["subnet"]:
+                raise ActivationError("staged pinned subnet hash drift")
+            payload["subnet_csv"] = os.fspath(
+                settings.project_dir / "99-output-ztp" / "generations"
+                / pinned["release_id"] / "inputs" / "subnet"
+            )
+            payload["selected_generation_release_id"] = pinned["release_id"]
+            payload["pinned_parent_sha256"] = pinned["parent_release_sha256"]
+            payload["apache_listener_sha256"] = hashlib.sha256(
+                apache.encode("utf-8")
+            ).hexdigest()
+            return selected, runtime, payload, apache
+    except ActivationError:
+        raise
+    except Exception as exc:
+        raise ActivationError(f"pinned runtime observation failed: {exc}") from exc
+
+
 def prepare_runtime(settings: Settings, runner=subprocess.run):
     """Explicitly publish a freshly observed plan and exact Apache listeners."""
+    _require_no_implicit_generation_selector(settings)
     _port, address, enabled = project_http_policy(settings)
     if address is None or not enabled:
         # Keep the existing ZTP-only preparation order. An independently
@@ -3237,6 +3313,142 @@ def _read_pinned_generation_file(
             os.close(descriptor)
 
 
+def _frozen_generation_policy(global_bytes: bytes) -> Mapping:
+    """Parse only the policy needed by a future pinned runtime reader.
+
+    The source is the already-hashed generation byte string, never the
+    customer's mutable flat global YAML.  No service authority is granted by
+    this read-only receipt.
+    """
+    try:
+        document = safe_load_global_yaml(global_bytes.decode("utf-8"))
+        common = document["common"]
+        mgmt = common["mgmt"]
+        if not isinstance(mgmt, dict):
+            raise ValueError("common.mgmt must be a mapping")
+        modes = []
+        for name in ("dhcp-server", "ztp"):
+            raw = mgmt[name]["status"]
+            if type(raw) is not str or raw.strip().casefold() not in {
+                "enabled", "disabled",
+            }:
+                raise ValueError(f"common.mgmt.{name}.status must be enabled or disabled")
+            modes.append(raw.strip().casefold() == "enabled")
+        http_policy = mgmt.get("http", {})
+        if not isinstance(http_policy, dict):
+            raise ValueError("common.mgmt.http must be a mapping")
+        http_status = (
+            "enabled" if "http" not in mgmt else http_policy.get("status")
+        )
+        if type(http_status) is not str or http_status.strip().casefold() not in {
+            "enabled", "disabled",
+        }:
+            raise ValueError("common.mgmt.http.status must be enabled or disabled")
+        port = validate_service_endpoint(
+            "192.0.2.1", http_policy.get("port", 80),
+            field="common.mgmt.http.port",
+        ).port
+        address = None
+        if "address" in http_policy:
+            address = validate_service_endpoint(
+                http_policy["address"], field="common.mgmt.http.address",
+            ).host
+    except (UnicodeError, yaml.YAMLError, ValueError, KeyError, TypeError) as exc:
+        raise ActivationError(f"pinned global runtime policy is invalid: {exc}") from exc
+    return MappingProxyType({
+        "service_modes": tuple(modes),
+        "http": (port, address, http_status.strip().casefold() == "enabled"),
+    })
+
+
+def _require_disabled_frozen_subnet(subnet_bytes: bytes) -> None:
+    """A DHCP-disabled generation has a canonical header and no DHCP rows."""
+    try:
+        rows = list(csv.reader(subnet_bytes.decode("utf-8-sig").splitlines(), strict=True))
+    except (UnicodeError, csv.Error) as exc:
+        raise ActivationError(f"disabled pinned subnet CSV is invalid: {exc}") from exc
+    if len(rows) != 1:
+        raise ActivationError("disabled pinned subnet must be header-only")
+    fields = [str(field or "").strip() for field in rows[0]]
+    if (
+        len(fields) != len(set(fields))
+        or any(field.casefold() in SUBNET_RETIRED_COLUMNS for field in fields)
+        or not SUBNET_REQUIRED_COLUMNS.issubset(fields)
+    ):
+        raise ActivationError("disabled pinned subnet has no canonical header")
+
+
+def _validate_pinned_dhcp_child(
+    generation_fd: int, flags: int, descriptors: list,
+    settings: Settings, component: dict,
+) -> tuple[str, dict]:
+    """Read the enabled generation's complete bound DHCP child via held FDs."""
+    before = os.stat("dhcp", dir_fd=generation_fd, follow_symlinks=False)
+    dhcp_fd = os.open("dhcp", flags, dir_fd=generation_fd)
+    descriptors.append(dhcp_fd)
+    if (
+        not stat.S_ISDIR(before.st_mode)
+        or _pinned_file_identity(before) != _pinned_file_identity(os.fstat(dhcp_fd))
+    ):
+        raise ActivationError("pinned DHCP directory changed before read")
+    manifest_bytes = _read_pinned_generation_file(
+        dhcp_fd, "dhcp-release-manifest.json", "pinned DHCP manifest",
+    )
+    manifest_sha = hashlib.sha256(manifest_bytes).hexdigest()
+    if component.get("manifest_sha256") != manifest_sha:
+        raise ActivationError("pinned DHCP manifest differs from parent component")
+    try:
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ActivationError(f"pinned DHCP manifest is invalid JSON: {exc}") from exc
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("release_id") != component.get("release_id")
+    ):
+        raise ActivationError("pinned DHCP child release ID mismatch")
+    outputs = manifest.get("outputs")
+    names = ("dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts")
+    if not isinstance(outputs, dict) or set(outputs) != set(names):
+        raise ActivationError("pinned DHCP manifest must cover the complete four outputs")
+    output_hashes = {}
+    for name in names:
+        item = outputs[name]
+        expected = item.get("sha256") if isinstance(item, dict) else None
+        if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+            raise ActivationError(f"pinned DHCP output {name} has invalid hash")
+        data = _read_pinned_generation_file(
+            dhcp_fd, name, f"pinned DHCP output {name}",
+            maximum_size=128 * 1024 * 1024,
+        )
+        actual = hashlib.sha256(data).hexdigest()
+        if actual != expected:
+            raise ActivationError(f"pinned DHCP output {name} hash drift")
+        if not data:
+            selected = manifest.get("switch_scope")
+            counts = manifest.get("counts")
+            declarations = (
+                counts.get("host_declarations_by_family")
+                if isinstance(counts, dict) else None
+            )
+            family = name.removeprefix("dhcpd_").removesuffix(".hosts")
+            if (
+                name == "dhcpd.conf"
+                or selected != settings.switch_scope
+                or not isinstance(declarations, dict)
+                or set(declarations) != {"eth", "ib", "nvl"}
+                or any(type(value) is not int or value < 0
+                       for value in declarations.values())
+                or family == selected
+                or declarations[family] != 0
+            ):
+                raise ActivationError(f"pinned DHCP output {name} has no valid empty receipt")
+        output_hashes[name] = actual
+    visible = os.stat("dhcp", dir_fd=generation_fd, follow_symlinks=False)
+    if _pinned_file_identity(visible) != _pinned_file_identity(os.fstat(dhcp_fd)):
+        raise ActivationError("pinned DHCP directory inode changed")
+    return manifest_sha, output_hashes
+
+
 def validate_pinned_generation(
     settings: Settings, selector_path: Path, *, expected_release_id: Optional[str] = None,
 ) -> dict:
@@ -3315,7 +3527,7 @@ def validate_pinned_generation(
             or parent.get("project") != settings.project_name
             or parent.get("deployment_scope") != settings.scope
             or parent.get("switch_scope") != settings.switch_scope
-            or parent.get("dhcp_status") != "enabled"
+            or parent.get("dhcp_status") not in {"enabled", "disabled"}
         ):
             raise ActivationError("pinned parent release project/scope/DHCP is invalid")
         keys = (
@@ -3360,6 +3572,7 @@ def validate_pinned_generation(
                 != _pinned_file_identity(os.fstat(frozen_fd))
                 or set(os.listdir(frozen_fd)) != set(frozen_hashes)):
             raise ActivationError("pinned input directory is incomplete or changed")
+        frozen_source_bytes = {}
         for name, expected in frozen_hashes.items():
             if (not isinstance(expected, str)
                     or not re.fullmatch(r"[0-9a-f]{64}", expected)):
@@ -3369,86 +3582,42 @@ def validate_pinned_generation(
             )
             if hashlib.sha256(content).hexdigest() != expected:
                 raise ActivationError(f"pinned input {name} hash drift")
+            frozen_source_bytes[name] = content
         frozen_after = os.stat("inputs", dir_fd=generation_fd, follow_symlinks=False)
         if (_pinned_file_identity(frozen_before) != _pinned_file_identity(frozen_after)
                 or _pinned_file_identity(frozen_before)
                 != _pinned_file_identity(os.fstat(frozen_fd))):
             raise ActivationError("pinned input directory changed during read")
+        frozen_policy = _frozen_generation_policy(frozen_source_bytes["global"])
+        if parent["dhcp_status"] == "enabled":
+            if not frozen_policy["service_modes"][0]:
+                raise ActivationError("enabled pinned DHCP differs from frozen global")
+        else:
+            if frozen_policy["service_modes"] != (False, False):
+                raise ActivationError("disabled pinned DHCP/ZTP differs from frozen global")
+            _require_disabled_frozen_subnet(frozen_source_bytes["subnet"])
         components = parent.get("components")
-        if not isinstance(components, dict) or not isinstance(components.get("dhcp"), dict):
-            raise ActivationError("pinned parent lacks bound DHCP component")
+        if not isinstance(components, dict):
+            raise ActivationError("pinned parent components are invalid")
         if set(components) - {"cumulus", "nvos", "dhcp"}:
             raise ActivationError("pinned parent has unknown component")
-        dhcp_component = components["dhcp"]
-        dhcp_before = os.stat("dhcp", dir_fd=generation_fd, follow_symlinks=False)
-        dhcp_fd = os.open("dhcp", flags, dir_fd=generation_fd)
-        descriptors.append(dhcp_fd)
-        if (
-            not stat.S_ISDIR(dhcp_before.st_mode)
-            or _pinned_file_identity(dhcp_before) != _pinned_file_identity(
-                os.fstat(dhcp_fd)
+        if parent["dhcp_status"] == "enabled":
+            component = components.get("dhcp")
+            if not isinstance(component, dict):
+                raise ActivationError("pinned parent lacks bound DHCP component")
+            dhcp_sha, output_hashes = _validate_pinned_dhcp_child(
+                generation_fd, flags, descriptors, settings, component,
             )
-        ):
-            raise ActivationError("pinned DHCP directory changed before read")
-        dhcp_bytes = _read_pinned_generation_file(
-            dhcp_fd, "dhcp-release-manifest.json", "pinned DHCP manifest",
-        )
-        dhcp_sha = hashlib.sha256(dhcp_bytes).hexdigest()
-        if dhcp_component.get("manifest_sha256") != dhcp_sha:
-            raise ActivationError("pinned DHCP manifest differs from parent component")
-        try:
-            dhcp_manifest = json.loads(dhcp_bytes.decode("utf-8"))
-        except (UnicodeError, json.JSONDecodeError) as exc:
-            raise ActivationError(f"pinned DHCP manifest is invalid JSON: {exc}") from exc
-        if (
-            not isinstance(dhcp_manifest, dict)
-            or dhcp_manifest.get("release_id") != dhcp_component.get("release_id")
-        ):
-            raise ActivationError("pinned DHCP child release ID mismatch")
-        outputs = dhcp_manifest.get("outputs")
-        names = ("dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts")
-        if not isinstance(outputs, dict) or set(outputs) != set(names):
-            raise ActivationError("pinned DHCP manifest must cover the complete four outputs")
-        output_hashes = {}
-        for name in names:
-            item = outputs[name]
-            expected = item.get("sha256") if isinstance(item, dict) else None
-            if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
-                raise ActivationError(f"pinned DHCP output {name} has invalid hash")
-            data = _read_pinned_generation_file(
-                dhcp_fd, name, f"pinned DHCP output {name}",
-                maximum_size=128 * 1024 * 1024,
-            )
-            actual = hashlib.sha256(data).hexdigest()
-            if actual != expected:
-                raise ActivationError(f"pinned DHCP output {name} hash drift")
-            if not data:
-                selected = dhcp_manifest.get("switch_scope")
-                counts = dhcp_manifest.get("counts")
-                declarations = (
-                    counts.get("host_declarations_by_family")
-                    if isinstance(counts, dict) else None
-                )
-                family = name.removeprefix("dhcpd_").removesuffix(".hosts")
-                if (
-                    name == "dhcpd.conf"
-                    or selected != settings.switch_scope
-                    or not isinstance(declarations, dict)
-                    or set(declarations) != {"eth", "ib", "nvl"}
-                    or any(type(value) is not int or value < 0
-                           for value in declarations.values())
-                    or family == selected
-                    or declarations[family] != 0
-                ):
-                    raise ActivationError(f"pinned DHCP output {name} has no valid empty receipt")
-            output_hashes[name] = actual
-        visible_dhcp = os.stat(
-            "dhcp", dir_fd=generation_fd, follow_symlinks=False,
-        )
-        if _pinned_file_identity(visible_dhcp) != _pinned_file_identity(
-            os.fstat(dhcp_fd)
-        ):
-            raise ActivationError("pinned DHCP directory inode changed")
+        else:
+            if "dhcp" in components:
+                raise ActivationError("disabled pinned parent contains DHCP component")
+            try:
+                os.stat("dhcp", dir_fd=generation_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise ActivationError("disabled pinned generation contains DHCP directory")
+            dhcp_sha, output_hashes = None, {}
         # A rollback may select an older parent while a public latest_yaml
         # already names B.  Validate the immutable child named by A itself;
         # do not resolve or trust the mutable public latest_yaml here.
@@ -3575,8 +3744,17 @@ def validate_pinned_generation(
             raise ActivationError("DAY0 ancestor changed during generation pin")
         return {
             "release_id": release_id,
+            "frozen_source_bytes": MappingProxyType(frozen_source_bytes),
+            "frozen_policy": frozen_policy,
+            # A held A read may finish after current selects B. Marker publication
+            # must independently reject that stale selector identity.
+            "_selector_identity": _pinned_file_identity(before_selector),
+            "_day0_identity": _pinned_file_identity(os.fstat(day0_fd)),
+            "_project_identity": _pinned_file_identity(os.fstat(project_fd)),
+            "_output_identity": _pinned_file_identity(os.fstat(output_fd)),
+            "_generation_identity": _pinned_file_identity(os.fstat(generation_fd)),
             "parent_release_sha256": hashlib.sha256(parent_bytes).hexdigest(),
-            "parent_dhcp_status": "enabled",
+            "parent_dhcp_status": parent["dhcp_status"],
             "parent_inputs": dict(sorted((str(k), str(v)) for k, v in inputs.items())),
             "parent_components": {
                 name: {
@@ -3874,6 +4052,13 @@ def published_link_identity(settings: Settings) -> dict:
     return dict(sorted(identity.items()))
 
 
+def _require_no_implicit_generation_selector(settings: Settings) -> None:
+    if os.path.lexists(settings.project_dir / "99-output-ztp/current"):
+        raise ActivationError(
+            "selected generation requires an explicit selector binding"
+        )
+
+
 def build_activation_marker(
     settings: Settings,
     selected,
@@ -3881,10 +4066,31 @@ def build_activation_marker(
     subnet_csv: Optional[Path] = None,
     dhcp_config: Optional[Path] = None,
     release_manifest: Optional[Path] = None,
+    selector_path: Optional[Path] = None,
+    expected_release_id: Optional[str] = None,
 ) -> dict:
+    if selector_path is None:
+        _require_no_implicit_generation_selector(settings)
+    if selector_path is None and expected_release_id is not None:
+        raise ActivationError("expected generation requires an explicit selector")
+    if selector_path is not None and expected_release_id is None:
+        raise ActivationError("explicit selector requires an expected release ID")
+    pinned = (
+        validate_pinned_generation(
+            settings, selector_path, expected_release_id=expected_release_id,
+        ) if selector_path is not None else None
+    )
     subnet, dhcp, release = _activation_files(
         settings, subnet_csv, dhcp_config, release_manifest,
     )
+    if pinned is not None and (
+        subnet != settings.subnet_csv
+        or dhcp != settings.dhcp_config
+        or release != settings.release_manifest
+    ):
+        raise ActivationError(
+            "pinned flat-match activation cannot override current runtime inputs"
+        )
     _require_subnet_header(subnet)
     release_identity = validate_parent_release(settings, release)
     published_links = published_link_identity(settings)
@@ -3917,6 +4123,53 @@ def build_activation_marker(
     }
     if dhcp_status == "enabled":
         marker["dhcp_config_sha256"] = sha256_path(dhcp)
+    if pinned is not None:
+        for field in (
+            "parent_release_sha256", "parent_dhcp_status", "parent_inputs",
+            "parent_components",
+        ):
+            if marker[field] != pinned[field]:
+                raise ActivationError(
+                    f"flat activation {field} differs from pinned generation"
+                )
+        if dhcp != settings.dhcp_config or dhcp.name != "dhcpd.conf":
+            raise ActivationError("pinned activation requires the configured DHCP runtime set")
+        for name, expected_hash in pinned["dhcp_output_sha256"].items():
+            runtime_file = dhcp.parent / name
+            _size, actual_hash = _held_dhcp_output_hash(
+                runtime_file, dhcp.parent, dhcp.parent,
+                f"pinned runtime DHCP {name}",
+            )
+            if actual_hash != expected_hash:
+                raise ActivationError(f"runtime DHCP {name} differs from pinned generation")
+        try:
+            selector_before = os.stat(selector_path, follow_symlinks=False)
+            selector_target = os.readlink(selector_path)
+            selector_after = os.stat(selector_path, follow_symlinks=False)
+            day0_visible = (settings.http_root / "DAY0-Prepare").lstat()
+            project_visible = settings.project_dir.lstat()
+            output_visible = (settings.project_dir / "99-output-ztp").lstat()
+            generation_visible = (
+                settings.project_dir / "99-output-ztp/generations"
+                / expected_release_id
+            ).lstat()
+        except OSError as exc:
+            raise ActivationError(
+                f"generation selector changed during marker build: {exc}"
+            ) from exc
+        if (
+            not stat.S_ISLNK(selector_before.st_mode)
+            or _pinned_file_identity(selector_before) != pinned["_selector_identity"]
+            or _pinned_file_identity(selector_after) != pinned["_selector_identity"]
+            or selector_target != f"generations/{expected_release_id}"
+            or _pinned_file_identity(day0_visible) != pinned["_day0_identity"]
+            or _pinned_file_identity(project_visible) != pinned["_project_identity"]
+            or _pinned_file_identity(output_visible) != pinned["_output_identity"]
+            or _pinned_file_identity(generation_visible) != pinned["_generation_identity"]
+        ):
+            raise ActivationError("generation selector changed during marker build")
+        marker["selected_generation_release_id"] = pinned["release_id"]
+        marker["generation_authority"] = "pinned-flat-match"
     return marker
 
 
@@ -3928,6 +4181,8 @@ def validate_activation_marker(
     subnet_csv: Optional[Path] = None,
     dhcp_config: Optional[Path] = None,
     release_manifest: Optional[Path] = None,
+    selector_path: Optional[Path] = None,
+    expected_release_id: Optional[str] = None,
 ):
     if not isinstance(marker, dict):
         return False, "activation marker is not an object"
@@ -3938,6 +4193,8 @@ def validate_activation_marker(
             subnet_csv=subnet_csv,
             dhcp_config=dhcp_config,
             release_manifest=release_manifest,
+            selector_path=selector_path,
+            expected_release_id=expected_release_id,
         )
     except ActivationError as exc:
         return False, str(exc)
@@ -3955,6 +4212,12 @@ def validate_activation_marker(
             return False, "activation marker dhcp_config_sha256 does not match current runtime"
     elif "dhcp_config_sha256" in marker:
         return False, "disabled activation marker contains stale DHCP hash"
+    if selector_path is not None:
+        for key in ("selected_generation_release_id", "generation_authority"):
+            if marker.get(key) != expected[key]:
+                return False, f"activation marker {key} does not match selected generation"
+    elif "selected_generation_release_id" in marker or "generation_authority" in marker:
+        return False, "pinned activation marker requires an explicit selector"
     return True, "active runtime matches current inputs"
 
 

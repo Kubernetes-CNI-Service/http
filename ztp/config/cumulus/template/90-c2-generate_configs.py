@@ -6688,13 +6688,73 @@ def _patch_descriptions_in_directory(dot_file, dest_dir, display_dir, expected_c
             print(f"  {host_lower}: {', '.join(compressed)}")
 
 
+def _inspect_description_output_recovery(final_dir, *, ignore_staging=None):
+    """Read only: classify crash residue, never authenticate or repair its contents.
+
+    A real ``*.old`` directory in either recognized shape is only a candidate
+    for the former complete directory: the first rename is atomic, but this
+    inspection has no durable manifest proving provenance after a cold crash.
+    Any residue, including an ambiguous or symlinked one, blocks publication.
+    """
+    parent = os.path.dirname(os.path.abspath(final_dir))
+    staging_prefix = f".{os.path.basename(final_dir)}.tmp."
+    ignored = os.path.abspath(ignore_staging) if ignore_staging else None
+    residue = []
+    with os.scandir(parent) as entries:
+        for entry in entries:
+            if not entry.name.startswith(staging_prefix):
+                continue
+            path = os.path.join(parent, entry.name)
+            if path == ignored:
+                continue
+            metadata = entry.stat(follow_symlinks=False)
+            residue.append((path, stat.S_ISDIR(metadata.st_mode)))
+    if not residue:
+        return {"state": "clean", "old_candidate": None, "staging_candidate": None}
+
+    backups = [(path, real_dir) for path, real_dir in residue if path.endswith(".old")]
+    stages = [(path, real_dir) for path, real_dir in residue if not path.endswith(".old")]
+    final_exists = os.path.lexists(final_dir)
+    final_real_dir = final_exists and stat.S_ISDIR(os.lstat(final_dir).st_mode)
+    if len(backups) == 1 and backups[0][1]:
+        old = backups[0][0]
+        if (not final_exists and len(stages) == 1 and stages[0][1]
+                and old == stages[0][0] + ".old"):
+            return {
+                "state": "gap-after-old-rename",
+                "old_candidate": old,
+                "staging_candidate": stages[0][0],
+            }
+        if final_real_dir and not stages:
+            return {
+                "state": "new-visible-before-cleanup",
+                "old_candidate": old,
+                "staging_candidate": None,
+            }
+    return {"state": "ambiguous", "old_candidate": None, "staging_candidate": None}
+
+
+def _require_clean_description_output(final_dir, *, ignore_staging=None):
+    inventory = _inspect_description_output_recovery(
+        final_dir, ignore_staging=ignore_staging,
+    )
+    if inventory["state"] != "clean":
+        raise ValueError(
+            "unresolved description output backup or staging directory; "
+            f"cold recovery inventory={inventory['state']}; "
+            "stop publication and inspect the old candidate without modifying residue"
+        )
+
+
 def _run_patch_descriptions(dot_file, output_dir, *, expected_csv_authority=None):
     """Patch a staged copy and replace the old same-name output only on success."""
     baseline = expected_csv_authority or _csv_input_authority()
     final_dir = output_dir + "_with_desc"
     parent = os.path.dirname(os.path.abspath(final_dir))
+    staging_prefix = f".{os.path.basename(final_dir)}.tmp."
+    _require_clean_description_output(final_dir)
     staging = tempfile.mkdtemp(
-        prefix=f".{os.path.basename(final_dir)}.tmp.", dir=parent,
+        prefix=staging_prefix, dir=parent,
     )
     backup = staging + ".old"
     transcript = io.StringIO()
@@ -6706,6 +6766,7 @@ def _run_patch_descriptions(dot_file, output_dir, *, expected_csv_authority=None
             )
         _require_csv_input_authority(baseline)
         staged_identity = os.lstat(staging)
+        _require_clean_description_output(final_dir, ignore_staging=staging)
         if os.path.lexists(final_dir):
             if os.path.islink(final_dir) or not os.path.isdir(final_dir):
                 raise ValueError("description output authority is not a real directory")

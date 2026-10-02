@@ -11,6 +11,9 @@ import tempfile
 import unittest
 from unittest import mock
 import copy
+from dataclasses import replace
+from types import SimpleNamespace
+import yaml
 
 from test_cases.module_loader import load_script
 from test_cases.test_manual_applied_config import dhcp_mode_release_fixture
@@ -29,9 +32,10 @@ def _digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _seal_parent(parent_path: Path, parent: dict, manifest: Path) -> None:
+def _seal_parent(parent_path: Path, parent: dict, manifest: Path | None) -> None:
     """Keep the independent fixture's parent bound to its edited child."""
-    parent["components"]["dhcp"]["manifest_sha256"] = _digest(manifest)
+    if manifest is not None:
+        parent["components"]["dhcp"]["manifest_sha256"] = _digest(manifest)
     basis_keys = (
         "project", "deployment_scope", "switch_scope", "inputs",
         "input_sources", "dhcp_status", "components", "inventory",
@@ -174,6 +178,7 @@ class ScopedEmptyHostActivationDirectTests(unittest.TestCase):
 
 def _versioned_fixture(
     root: Path, *, mode: str = "enabled", generated_authority: bool = False,
+    runtime_endpoint: bool = False,
 ):
     """Independently seal two complete generations; never derive expected bytes from reader."""
     if mode == "enabled":
@@ -188,6 +193,25 @@ def _versioned_fixture(
             http_root=root, project_name=project.name, scope="air", switch_scope="eth",
         )
         manifest = json.loads(public.resolve(strict=True).read_text(encoding="utf-8"))
+        global_path = project / "01-global.yaml"
+        global_data = yaml.safe_load(global_path.read_text(encoding="utf-8"))
+        global_data["common"]["mgmt"]["ztp"]["status"] = "disabled"
+        global_data["common"]["mgmt"]["http"]["address"] = "192.0.2.50"
+        global_path.write_text(yaml.safe_dump(global_data, sort_keys=True), encoding="utf-8")
+        subnet = project / "02-dhcp-subnet_config.csv"
+        subnet.write_text(subnet.read_text(encoding="utf-8").splitlines()[0] + "\n",
+                          encoding="utf-8")
+        parent["inputs"]["global"] = _digest(global_path)
+        parent["inputs"]["subnet"] = _digest(subnet)
+    if runtime_endpoint:
+        subnet = settings.project_dir / "02-dhcp-subnet_config.csv"
+        original = subnet.read_text(encoding="utf-8")
+        assert ",,none,no\n" in original
+        subnet.write_text(
+            original.replace(",,none,no\n", ",192.0.2.50,oob,no\n"),
+            encoding="utf-8",
+        )
+        parent["inputs"]["subnet"] = _digest(subnet)
     if generated_authority:
         private = settings.project_dir / ".load-inventory-independent"
         private.mkdir(mode=0o700)
@@ -206,17 +230,20 @@ def _versioned_fixture(
         staging = generations / f".staging-{label}"
         staging.mkdir(mode=0o700)
         dhcp = staging / "dhcp"
-        dhcp.mkdir(mode=0o700)
+        if mode == "enabled":
+            dhcp.mkdir(mode=0o700)
         frozen_inputs = staging / "inputs"
         frozen_inputs.mkdir(mode=0o700)
-        for name in OUTPUTS:
-            shutil.copy2(dhcp_dir / name, dhcp / name)
-        child = copy.deepcopy(manifest)
-        if new_conf:
-            (dhcp / "dhcpd.conf").write_bytes(b"independent-generation-B-config\n")
-            child["outputs"]["dhcpd.conf"]["sha256"] = _digest(dhcp / "dhcpd.conf")
-        child_path = dhcp / "dhcp-release-manifest.json"
-        child_path.write_text(json.dumps(child, sort_keys=True) + "\n", encoding="utf-8")
+        child_path = None
+        if mode == "enabled":
+            for name in OUTPUTS:
+                shutil.copy2(dhcp_dir / name, dhcp / name)
+            child = copy.deepcopy(manifest)
+            if new_conf:
+                (dhcp / "dhcpd.conf").write_bytes(b"independent-generation-B-config\n")
+                child["outputs"]["dhcpd.conf"]["sha256"] = _digest(dhcp / "dhcpd.conf")
+            child_path = dhcp / "dhcp-release-manifest.json"
+            child_path.write_text(json.dumps(child, sort_keys=True) + "\n", encoding="utf-8")
         sealed = copy.deepcopy(parent)
         if new_conf:
             yaml_a = settings.project_dir / "99-output-eth/release-a"
@@ -236,10 +263,7 @@ def _versioned_fixture(
             )
             sealed["components"]["cumulus"]["manifest_sha256"] = _digest(child_yaml)
         version_parent = staging / "current-release.json"
-        if mode == "enabled":
-            _seal_parent(version_parent, sealed, child_path)
-        else:
-            version_parent.write_bytes(parent_path.read_bytes())
+        _seal_parent(version_parent, sealed, child_path)
         source_paths = {
             "global": "01-global.yaml",
             "devices": "02-devices_config.csv",
@@ -275,6 +299,384 @@ def _select_generation(selector: Path, release_id: str) -> None:
 
 
 class PinnedGenerationActivationDirectTests(unittest.TestCase):
+    def _pinned_network_snapshot(self):
+        links = [{
+            "ifindex": 4, "ifname": "eth0",
+            "flags": ["BROADCAST", "MULTICAST", "UP", "LOWER_UP"],
+            "address": "02:00:00:00:00:04", "operstate": "UP",
+            "link_type": "ether",
+        }]
+        addresses = [{
+            "ifindex": 4, "ifname": "eth0",
+            "addr_info": [{
+                "family": "inet", "local": "192.0.2.50", "prefixlen": 24,
+                "scope": "global", "flags": [],
+                "valid_life_time": "forever", "preferred_life_time": "forever",
+            }],
+        }]
+        return links, addresses
+
+    def test_observe_pinned_runtime_plans_from_a_without_flat_b_or_state_writes(self):
+        with tempfile.TemporaryDirectory(prefix="r22-pinned-observe-a-") as name:
+            root = Path(name)
+            settings, selector, generations, a, _b = _versioned_fixture(
+                root, runtime_endpoint=True,
+            )
+            settings = replace(
+                settings, state_root=root / "state", apache_listeners=root / "listeners",
+            )
+            source = (generations / a / "inputs/subnet").read_bytes()
+            (settings.project_dir / "02-dhcp-subnet_config.csv").write_bytes(b"B invalid subnet\n")
+            flat_global = settings.project_dir / "01-global.yaml"
+            changed = yaml.safe_load(flat_global.read_text(encoding="utf-8"))
+            changed["common"]["mgmt"]["dhcp-server"]["status"] = "disabled"
+            changed["common"]["mgmt"]["ztp"]["status"] = "disabled"
+            flat_global.write_text(yaml.safe_dump(changed), encoding="utf-8")
+            runtime = load_script(
+                "r22_pinned_observe_runtime", ROOT / "tools/ztp_service_runtime.py",
+            )
+            real_plan = runtime.plan_dhcp_runtime
+            observed_paths = []
+
+            def capture_subnet(path, **options):
+                temporary = Path(path)
+                observed_paths.append(temporary)
+                self.assertEqual(source, temporary.read_bytes())
+                self.assertEqual(0o600, temporary.stat().st_mode & 0o777)
+                self.assertEqual(0o700, temporary.parent.stat().st_mode & 0o777)
+                self.assertEqual((True, True), (
+                    options["dhcp_enabled"], options["ztp_enabled"],
+                ))
+                return real_plan(path, **options)
+
+            with mock.patch.object(ACTIVATE, "_load_runtime_module", return_value=runtime), \
+                    mock.patch.object(
+                        ACTIVATE, "capture_stable_network_snapshot",
+                        return_value=self._pinned_network_snapshot(),
+                    ), mock.patch.object(runtime, "plan_dhcp_runtime", side_effect=capture_subnet):
+                selected, _runtime, payload, apache = ACTIVATE.observe_pinned_runtime(
+                    settings, selector, expected_release_id=a,
+                )
+            self.assertEqual(1, len(observed_paths))
+            self.assertFalse(observed_paths[0].exists())
+            self.assertEqual(a, payload["selected_generation_release_id"])
+            self.assertEqual(_digest(generations / a / "inputs/subnet"),
+                             payload["subnet_sha256"])
+            self.assertEqual(str(generations / a / "inputs/subnet"),
+                             payload["subnet_csv"])
+            self.assertEqual(tuple(selected.endpoint_ips), tuple(payload["endpoint_ips"]))
+            self.assertIn("Listen", apache)
+            self.assertFalse(settings.state_root.exists())
+            self.assertFalse(settings.apache_listeners.exists())
+
+    def test_observe_pinned_runtime_cleans_temporary_source_on_planner_failure(self):
+        with tempfile.TemporaryDirectory(prefix="r22-pinned-observe-fail-") as name:
+            root = Path(name)
+            settings, selector, _generations, a, _b = _versioned_fixture(root)
+            settings = replace(settings, state_root=root / "state")
+            observed_paths = []
+            runtime = SimpleNamespace()
+
+            def fail_plan(path, **_options):
+                observed_paths.append(Path(path))
+                raise ValueError("independent planner refusal")
+
+            runtime.plan_dhcp_runtime = fail_plan
+            with mock.patch.object(ACTIVATE, "_load_runtime_module", return_value=runtime), \
+                    mock.patch.object(
+                        ACTIVATE, "capture_stable_network_snapshot",
+                        return_value=self._pinned_network_snapshot(),
+                    ):
+                with self.assertRaises(ACTIVATE.ActivationError):
+                    ACTIVATE.observe_pinned_runtime(
+                        settings, selector, expected_release_id=a,
+                    )
+            self.assertEqual(1, len(observed_paths))
+            self.assertFalse(observed_paths[0].exists())
+            self.assertFalse(settings.state_root.exists())
+
+    def test_frozen_policy_keeps_legacy_http_80_when_whole_section_is_absent(self):
+        global_source = (
+            b"common:\n  mgmt:\n    dhcp-server: {status: enabled}\n"
+            b"    ztp: {status: enabled}\n"
+        )
+        policy = ACTIVATE._frozen_generation_policy(global_source)
+        self.assertEqual((True, True), policy["service_modes"])
+        self.assertEqual((80, None, True), policy["http"])
+        with self.assertRaises(ACTIVATE.ActivationError):
+            ACTIVATE._frozen_generation_policy(
+                global_source + b"    http: {status: maybe}\n",
+            )
+
+    def test_pinned_source_view_keeps_a_policy_and_bytes_when_flat_inputs_become_b(self):
+        with tempfile.TemporaryDirectory(prefix="r22-pinned-source-a-") as name:
+            settings, selector, generations, a, _b = _versioned_fixture(Path(name))
+            original = (settings.project_dir / "01-global.yaml").read_bytes()
+            flat_global = settings.project_dir / "01-global.yaml"
+            changed = yaml.safe_load(original)
+            changed["common"]["mgmt"]["dhcp-server"]["status"] = "disabled"
+            changed["common"]["mgmt"]["ztp"]["status"] = "disabled"
+            changed["common"]["mgmt"]["http"]["status"] = "disabled"
+            flat_global.write_text(yaml.safe_dump(changed), encoding="utf-8")
+            self.assertEqual((False, False), ACTIVATE._project_service_modes(settings))
+
+            pinned = ACTIVATE.validate_pinned_generation(
+                settings, selector, expected_release_id=a,
+            )
+            sources = pinned["frozen_source_bytes"]
+            policy = pinned["frozen_policy"]
+            self.assertEqual(a, pinned["release_id"])
+            self.assertEqual(original, sources["global"])
+            self.assertEqual(
+                (generations / a / "inputs/subnet").read_bytes(), sources["subnet"],
+            )
+            self.assertEqual((True, True), policy["service_modes"])
+            self.assertEqual((80, None, True), policy["http"])
+            with self.assertRaises(TypeError):
+                sources["global"] = flat_global.read_bytes()
+            with self.assertRaises(TypeError):
+                policy["service_modes"] = (False, False)
+
+    def test_pinned_source_view_switch_during_read_remains_a_and_corruption_blocks(self):
+        with tempfile.TemporaryDirectory(prefix="r22-pinned-source-switch-") as name:
+            settings, selector, generations, a, b = _versioned_fixture(Path(name))
+            original = ACTIVATE._read_pinned_generation_file
+            a_global = (generations / a / "inputs/global").read_bytes()
+            switched = []
+
+            def switch_after_parent(*args, **kwargs):
+                payload = original(*args, **kwargs)
+                if args[1] == "current-release.json" and not switched:
+                    _select_generation(selector, b)
+                    switched.append(True)
+                return payload
+
+            with mock.patch.object(
+                ACTIVATE, "_read_pinned_generation_file", side_effect=switch_after_parent,
+            ):
+                pinned = ACTIVATE.validate_pinned_generation(
+                    settings, selector, expected_release_id=a,
+                )
+            self.assertEqual([True], switched)
+            self.assertEqual(a_global, pinned["frozen_source_bytes"]["global"])
+            self.assertEqual(b, ACTIVATE.validate_pinned_generation(
+                settings, selector,
+            )["release_id"])
+            _select_generation(selector, a)
+            (generations / a / "inputs/global").write_bytes(b"corrupt-old-a\n")
+            with self.assertRaises(ACTIVATE.ActivationError):
+                ACTIVATE.validate_pinned_generation(
+                    settings, selector, expected_release_id=a,
+                )
+
+    def _marker_fixture(self, root: Path):
+        settings, selector, generations, a, b = _versioned_fixture(root)
+        settings = replace(
+            settings,
+            dhcp_config=settings.http_root / "ztp/config/isc-dhcp-server/dhcpd.conf",
+        )
+        selected = SimpleNamespace(
+            endpoint_ips=("192.0.2.1",), listener_names=("eth0",),
+        )
+        return settings, selector, generations, a, b, selected
+
+    def _marker_publication_patches(self, settings, a, *, after_runtime=None):
+        parent = json.loads((settings.project_dir / "99-output-ztp/generations"
+                             / a / "current-release.json").read_text(encoding="utf-8"))
+        p2p = ACTIVATE.PUBLISHED_P2P_INPUT_LINK.as_posix()
+        def runtime_identity(_settings):
+            if after_runtime is not None:
+                after_runtime()
+            return {}
+        return (
+            mock.patch.object(ACTIVATE, "published_link_identity", return_value={
+                p2p: {"sha256": parent["inputs"]["p2p"]},
+            }),
+            mock.patch.object(ACTIVATE, "published_runtime_identity",
+                              side_effect=runtime_identity),
+            mock.patch.object(ACTIVATE, "validate_image_source_contract",
+                              return_value=[]),
+        )
+
+    def test_explicit_a_marker_rejects_b_flat_runtime_and_publication(self):
+        with tempfile.TemporaryDirectory(prefix="r22-pinned-marker-mixed-") as name:
+            settings, selector, generations, a, b, selected = self._marker_fixture(
+                Path(name),
+            )
+            project = settings.project_dir
+            flat_parent = project / "99-output-ztp/current-release.json"
+            flat_parent.write_bytes((generations / b / "current-release.json").read_bytes())
+            flat_dhcp = settings.dhcp_config.parent
+            for output in (*OUTPUTS, "dhcp-release-manifest.json"):
+                (flat_dhcp / output).write_bytes(
+                    (generations / b / "dhcp" / output).read_bytes()
+                )
+            latest = settings.http_root / "ztp/config/cumulus/latest_yaml"
+            latest.unlink()
+            latest.symlink_to(project / "99-output-eth/release-b")
+            self.assertEqual(a, ACTIVATE.validate_pinned_generation(
+                settings, selector, expected_release_id=a,
+            )["release_id"])
+            patches = self._marker_publication_patches(settings, a)
+            with patches[0], patches[1], patches[2]:
+                with self.assertRaises(ACTIVATE.ActivationError):
+                    ACTIVATE.build_activation_marker(
+                        settings, selected,
+                        selector_path=selector, expected_release_id=a,
+                    )
+
+    def test_explicit_a_marker_accepts_only_matching_flat_a(self):
+        with tempfile.TemporaryDirectory(prefix="r22-pinned-marker-a-") as name:
+            settings, selector, _generations, a, _b, selected = (
+                self._marker_fixture(Path(name))
+            )
+            patches = self._marker_publication_patches(settings, a)
+            with patches[0], patches[1], patches[2]:
+                marker = ACTIVATE.build_activation_marker(
+                    settings, selected,
+                    selector_path=selector, expected_release_id=a,
+                )
+                valid, reason = ACTIVATE.validate_activation_marker(
+                    marker, settings, selected,
+                    selector_path=selector, expected_release_id=a,
+                )
+                self.assertTrue(valid, reason)
+                legacy_valid, _reason = ACTIVATE.validate_activation_marker(
+                    marker, settings, selected,
+                )
+                self.assertFalse(legacy_valid)
+            self.assertEqual(a, marker["selected_generation_release_id"])
+            self.assertEqual("pinned-flat-match", marker["generation_authority"])
+            self.assertEqual(
+                _digest(settings.project_dir / "99-output-ztp/generations"
+                        / a / "current-release.json"),
+                marker["parent_release_sha256"],
+            )
+
+    def test_default_marker_cannot_ignore_an_existing_generation_selector(self):
+        with tempfile.TemporaryDirectory(prefix="r22-default-marker-selector-") as name:
+            settings, _selector, _generations, a, _b, selected = (
+                self._marker_fixture(Path(name))
+            )
+            patches = self._marker_publication_patches(settings, a)
+            with patches[0], patches[1], patches[2]:
+                with self.assertRaisesRegex(
+                    ACTIVATE.ActivationError, "selector|generation",
+                ):
+                    ACTIVATE.build_activation_marker(settings, selected)
+
+    def test_default_runtime_prepare_cannot_overwrite_a_with_flat_b_under_selector(self):
+        with tempfile.TemporaryDirectory(prefix="r22-default-runtime-selector-") as name:
+            settings, _selector, _generations, _a, _b, selected = (
+                self._marker_fixture(Path(name))
+            )
+            with mock.patch.object(
+                ACTIVATE, "project_http_policy", return_value=(80, None, True),
+            ), mock.patch.object(
+                ACTIVATE, "observe_runtime",
+                return_value=(selected, object(), {}, "apache config\n"),
+            ), mock.patch.object(
+                ACTIVATE, "ensure_runtime_directories",
+            ) as directories, mock.patch.object(
+                ACTIVATE, "_atomic_write",
+            ) as write:
+                with self.assertRaisesRegex(
+                    ACTIVATE.ActivationError, "selector|generation",
+                ):
+                    ACTIVATE.prepare_runtime(settings)
+            directories.assert_not_called()
+            write.assert_not_called()
+
+    def test_explicit_a_marker_rejects_public_yaml_b_with_flat_a(self):
+        with tempfile.TemporaryDirectory(prefix="r22-pinned-marker-yaml-") as name:
+            settings, selector, _generations, a, _b, selected = (
+                self._marker_fixture(Path(name))
+            )
+            latest = settings.http_root / "ztp/config/cumulus/latest_yaml"
+            latest.unlink()
+            latest.symlink_to(settings.project_dir / "99-output-eth/release-b")
+            patches = self._marker_publication_patches(settings, a)
+            with patches[0], patches[1], patches[2]:
+                with self.assertRaises(ACTIVATE.ActivationError):
+                    ACTIVATE.build_activation_marker(
+                        settings, selected,
+                        selector_path=selector, expected_release_id=a,
+                    )
+
+    def test_explicit_a_marker_rejects_b_runtime_dhcp_even_with_flat_a(self):
+        with tempfile.TemporaryDirectory(prefix="r22-pinned-marker-dhcp-") as name:
+            settings, selector, generations, a, b, selected = (
+                self._marker_fixture(Path(name))
+            )
+            installed = settings.project_dir / "installed-dhcp"
+            shutil.copytree(settings.dhcp_config.parent, installed)
+            (installed / "dhcpd.conf").write_bytes(
+                (generations / b / "dhcp/dhcpd.conf").read_bytes()
+            )
+            settings = replace(settings, dhcp_config=installed / "dhcpd.conf")
+            patches = self._marker_publication_patches(settings, a)
+            with patches[0], patches[1], patches[2]:
+                with self.assertRaises(ACTIVATE.ActivationError):
+                    ACTIVATE.build_activation_marker(
+                        settings, selected,
+                        selector_path=selector, expected_release_id=a,
+                    )
+
+    def test_explicit_a_marker_cannot_override_b_flat_parent_with_a_snapshot(self):
+        with tempfile.TemporaryDirectory(prefix="r22-pinned-marker-override-") as name:
+            settings, selector, generations, a, b, selected = (
+                self._marker_fixture(Path(name))
+            )
+            settings.release_manifest.write_bytes(
+                (generations / b / "current-release.json").read_bytes()
+            )
+            patches = self._marker_publication_patches(settings, a)
+            with patches[0], patches[1], patches[2]:
+                with self.assertRaises(ACTIVATE.ActivationError):
+                    ACTIVATE.build_activation_marker(
+                        settings, selected,
+                        release_manifest=generations / a / "current-release.json",
+                        selector_path=selector, expected_release_id=a,
+                    )
+
+    def test_explicit_a_marker_rejects_selector_switch_during_build(self):
+        with tempfile.TemporaryDirectory(prefix="r22-pinned-marker-switch-") as name:
+            settings, selector, _generations, a, b, selected = (
+                self._marker_fixture(Path(name))
+            )
+            patches = self._marker_publication_patches(
+                settings, a, after_runtime=lambda: _select_generation(selector, b),
+            )
+            with patches[0], patches[1], patches[2]:
+                with self.assertRaises(ACTIVATE.ActivationError):
+                    ACTIVATE.build_activation_marker(
+                        settings, selected,
+                        selector_path=selector, expected_release_id=a,
+                    )
+
+    def test_explicit_a_marker_rejects_wrong_expected_release_and_later_switch(self):
+        with tempfile.TemporaryDirectory(prefix="r22-pinned-marker-expected-") as name:
+            settings, selector, _generations, a, b, selected = (
+                self._marker_fixture(Path(name))
+            )
+            patches = self._marker_publication_patches(settings, a)
+            with patches[0], patches[1], patches[2]:
+                with self.assertRaises(ACTIVATE.ActivationError):
+                    ACTIVATE.build_activation_marker(
+                        settings, selected,
+                        selector_path=selector, expected_release_id=b,
+                    )
+                marker = ACTIVATE.build_activation_marker(
+                    settings, selected,
+                    selector_path=selector, expected_release_id=a,
+                )
+                _select_generation(selector, b)
+                valid, _reason = ACTIVATE.validate_activation_marker(
+                    marker, settings, selected,
+                    selector_path=selector, expected_release_id=a,
+                )
+                self.assertFalse(valid)
+
     def test_selected_generation_and_explicit_rollback_are_distinct_from_b_success(self):
         with tempfile.TemporaryDirectory(prefix="r22-pinned-rollback-") as name:
             settings, selector, generations, a, b = _versioned_fixture(Path(name))
@@ -468,13 +870,94 @@ class PinnedGenerationActivationDirectTests(unittest.TestCase):
                             ACTIVATE.validate_pinned_generation(settings, selector)
                     self.assertEqual([True], swapped)
 
-    def test_disabled_generation_has_no_parent_dhcp_binding_and_fails_closed(self):
+    def test_disabled_generation_has_no_dhcp_child_and_validates_frozen_http_only(self):
         with tempfile.TemporaryDirectory(prefix="r22-pinned-disabled-") as name:
-            settings, selector, _generations, _a, _b = _versioned_fixture(
+            settings, selector, generations, a, _b = _versioned_fixture(
                 Path(name), mode="disabled",
             )
-            with self.assertRaises(ACTIVATE.ActivationError):
+            self.assertFalse((generations / a / "dhcp").exists())
+            pinned = ACTIVATE.validate_pinned_generation(
+                settings, selector, expected_release_id=a,
+            )
+            self.assertEqual("disabled", pinned["parent_dhcp_status"])
+            self.assertEqual({}, pinned["dhcp_output_sha256"])
+            self.assertIsNone(pinned["dhcp_manifest_sha256"])
+            self.assertEqual((False, False), pinned["frozen_policy"]["service_modes"])
+            self.assertEqual((80, "192.0.2.50", True), pinned["frozen_policy"]["http"])
+
+            (generations / a / "dhcp").mkdir()
+            with self.assertRaisesRegex(ACTIVATE.ActivationError, "disabled.*DHCP"):
                 ACTIVATE.validate_pinned_generation(settings, selector)
+
+    def test_disabled_pinned_observation_uses_a_http_with_flat_b_and_no_dhcp(self):
+        with tempfile.TemporaryDirectory(prefix="r22-disabled-observe-") as name:
+            root = Path(name)
+            settings, selector, generations, a, _b = _versioned_fixture(
+                root, mode="disabled",
+            )
+            settings = replace(settings, state_root=root / "state")
+            self.assertFalse((generations / a / "dhcp").exists())
+            (settings.project_dir / "02-dhcp-subnet_config.csv").write_bytes(
+                b"flat B invalid subnet\n",
+            )
+            flat_global = settings.project_dir / "01-global.yaml"
+            changed = yaml.safe_load(flat_global.read_text(encoding="utf-8"))
+            changed["common"]["mgmt"]["http"]["address"] = "198.51.100.77"
+            changed["common"]["mgmt"]["dhcp-server"]["status"] = "enabled"
+            flat_global.write_text(yaml.safe_dump(changed), encoding="utf-8")
+            runtime = load_script(
+                "r22_disabled_observe_runtime", ROOT / "tools/ztp_service_runtime.py",
+            )
+            with mock.patch.object(ACTIVATE, "_load_runtime_module", return_value=runtime), \
+                    mock.patch.object(
+                        ACTIVATE, "capture_stable_network_snapshot",
+                        return_value=self._pinned_network_snapshot(),
+                    ):
+                selected, _runtime, payload, apache = ACTIVATE.observe_pinned_runtime(
+                    settings, selector, expected_release_id=a,
+                )
+            self.assertEqual((), tuple(selected.listener_names))
+            self.assertEqual((), tuple(selected.endpoint_ips))
+            self.assertEqual(_digest(generations / a / "inputs/subnet"),
+                             payload["subnet_sha256"])
+            self.assertEqual(a, payload["selected_generation_release_id"])
+            self.assertIn("Listen 192.0.2.50:80", apache)
+            self.assertNotIn("198.51.100.77", apache)
+            self.assertFalse(settings.state_root.exists())
+
+    def test_disabled_parent_cannot_bind_enabled_policy_or_subnet_rows(self):
+        for changed_input in ("global", "subnet"):
+            with self.subTest(changed_input=changed_input), tempfile.TemporaryDirectory(
+                prefix="r22-disabled-forged-source-",
+            ) as name:
+                settings, selector, generations, a, _b = _versioned_fixture(
+                    Path(name), mode="disabled",
+                )
+                generation = generations / a
+                source = generation / "inputs" / changed_input
+                if changed_input == "global":
+                    policy = yaml.safe_load(source.read_text(encoding="utf-8"))
+                    policy["common"]["mgmt"]["ztp"]["status"] = "enabled"
+                    source.write_text(yaml.safe_dump(policy), encoding="utf-8")
+                    expected_error = "disabled pinned DHCP/ZTP"
+                else:
+                    source.write_text(
+                        source.read_text(encoding="utf-8")
+                        + "fabric,192.0.2.0,255.255.255.0,192.0.2.10,"
+                        "192.0.2.20,192.0.2.1,,none,no\n",
+                        encoding="utf-8",
+                    )
+                    expected_error = "header-only"
+                parent_path = generation / "current-release.json"
+                parent = json.loads(parent_path.read_text(encoding="utf-8"))
+                parent["inputs"][changed_input] = _digest(source)
+                _seal_parent(parent_path, parent, None)
+                generation.rename(generations / parent["release_id"])
+                _select_generation(selector, parent["release_id"])
+                with self.assertRaisesRegex(ACTIVATE.ActivationError, expected_error):
+                    ACTIVATE.validate_pinned_generation(
+                        settings, selector, expected_release_id=parent["release_id"],
+                    )
 
     def test_old_a_generated_inventory_uses_frozen_bytes_after_flat_source_changes(self):
         with tempfile.TemporaryDirectory(prefix="r22-pinned-derived-") as name:

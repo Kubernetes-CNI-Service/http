@@ -745,6 +745,17 @@ def _preferred_cumulus_contexts(contexts):
 
     timestamp = valid[0]["timestamp"]
     output_root = valid[0]["published_root"]
+    # The description patch replaces _with_desc via two renames. Between
+    # those renames the final path is absent, so falling back to the plain
+    # directory would publish unpatched YAML. Any leftover staging/backup
+    # name is unresolved, including a symlink or an incomplete directory.
+    residue_prefix = f".{timestamp}_with_desc.tmp."
+    with os.scandir(output_root) as entries:
+        if any(entry.name.startswith(residue_prefix) for entry in entries):
+            raise ValueError(
+                "unresolved description output backup or staging directory; "
+                "stop publication and inspect the residue without modifying it"
+            )
     base_path = os.path.join(output_root, timestamp)
     patched_path = os.path.join(output_root, f"{timestamp}_with_desc")
     production_path = patched_path if os.path.isdir(patched_path) else base_path

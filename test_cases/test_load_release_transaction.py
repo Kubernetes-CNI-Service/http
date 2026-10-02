@@ -432,6 +432,19 @@ class ReleaseTransactionTests(unittest.TestCase):
                 "  mgmt:\n"
                 "    dhcp-server:\n"
                 "      status: enabled\n"
+                "      package: isc-dhcp-server\n"
+                "    http:\n"
+                "      status: enabled\n"
+                "      package: apache2\n"
+                f"      http_root: {LOAD.HTTP_ROOT}\n"
+                "    ztp:\n"
+                "      status: enabled\n"
+                "      ztp_url_prefix: /ztp\n"
+                "  switch:\n"
+                "    system:\n"
+                "      dns: {}\n"
+                "      ntp: {}\n"
+                "      date-time: {}\n"
                 "switches:\n"
                 "- eth:\n"
                 "    system:\n"
@@ -966,6 +979,9 @@ class ReleaseTransactionTests(unittest.TestCase):
         self, failure: BaseException, argv: list[str] | None = None,
         *, lifecycle_events: list[str] | None = None,
         authority_failure: BaseException | None = None,
+        parent_schema_version: int = 1,
+        failure_at: str = "dhcp",
+        observe_template_mutation: bool = False,
     ):
         args = SimpleNamespace(
             skip_doca=False, download_doca=False, dry_run=False,
@@ -977,7 +993,14 @@ class ReleaseTransactionTests(unittest.TestCase):
         )
         # Keep the deliberately minimal parent: this fixture tests load's
         # transaction cleanup, not generation-report schema validation.
-        fake_parent = {"schema_version": 1, "release_id": "failure-candidate"}
+        fake_parent = (
+            LOAD.validate_and_publish_release(
+                self.project, self.inputs, publish=False,
+            ) if parent_schema_version == 2 else {
+                "schema_version": 1,
+                "release_id": "failure-candidate",
+            }
+        )
         candidate = LOAD.prepare_current_release(self.project, fake_parent)
         report_payload = mock.sentinel.generation_report_payload
         staged_report = mock.sentinel.staged_generation_report
@@ -1004,7 +1027,16 @@ class ReleaseTransactionTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(LOAD, "ensure_management_key"))
             stack.enter_context(mock.patch.object(LOAD, "prepare_pubkeys"))
             stack.enter_context(mock.patch.object(LOAD, "resolve_project", return_value=self.project))
-            stack.enter_context(mock.patch.object(LOAD, "initialize_from_template"))
+            stack.enter_context(mock.patch.object(
+                LOAD, "initialize_from_template",
+                side_effect=(
+                    (lambda *_args: (_ for _ in ()).throw(failure))
+                    if failure_at == "template" else
+                    (lambda *_args: lifecycle_events.append("template-mutation"))
+                    if observe_template_mutation and lifecycle_events is not None
+                    else None
+                ),
+            ))
             stack.enter_context(mock.patch.object(LOAD, "validate_inputs", return_value=(self.inputs, {})))
             stack.enter_context(mock.patch.object(LOAD, "validate_management_host", return_value=True))
             stack.enter_context(mock.patch.object(
@@ -1077,6 +1109,10 @@ class ReleaseTransactionTests(unittest.TestCase):
             ))
             report_commit = stack.enter_context(mock.patch.object(
                 LOAD.generation_report, "commit_prepared_generation_report",
+                side_effect=(
+                    (lambda *_args: lifecycle_events.append("report-commit"))
+                    if lifecycle_events is not None else None
+                ),
             ))
             report_discard = stack.enter_context(mock.patch.object(
                 LOAD.generation_report, "discard_prepared_generation_report",
@@ -1086,11 +1122,22 @@ class ReleaseTransactionTests(unittest.TestCase):
                 transaction_events.append("dhcp-transaction")
                 if lifecycle_events is not None:
                     lifecycle_events.append("dhcp-transaction")
-                raise failure
+                if failure_at == "dhcp":
+                    raise failure
+                candidate.committed = True
 
             stack.enter_context(mock.patch.object(
                 LOAD, "mount_and_test_dhcp", side_effect=fail_dhcp_transaction,
             ))
+            if failure_at == "preflight":
+                def fail_service_preflight(*_args, **_kwargs):
+                    if lifecycle_events is not None:
+                        lifecycle_events.append("service-preflight")
+                    raise failure
+
+                stack.enter_context(mock.patch.object(
+                    LOAD, "preflight_services", side_effect=fail_service_preflight,
+                ))
             stack.enter_context(mock.patch.object(
                 LOAD, "restore_release_links", restore_links,
             ))
@@ -1101,8 +1148,11 @@ class ReleaseTransactionTests(unittest.TestCase):
                 result = LOAD.main([] if argv is None else argv)
             except BaseException as exc:  # Assert propagation after cleanup below.
                 caught = exc
-            report_commit.assert_not_called()
-            if authority_failure is None:
+            if failure_at in {"dhcp", "template"}:
+                report_commit.assert_not_called()
+            else:
+                report_commit.assert_called_once_with(staged_report)
+            if authority_failure is None and failure_at != "template":
                 parent_validate.assert_called_once()
                 private_dhcp = parent_validate.call_args.kwargs["dhcp_candidate_dir"]
                 self.assertEqual(
@@ -1118,13 +1168,11 @@ class ReleaseTransactionTests(unittest.TestCase):
                 )
                 report_stage.assert_called_once_with(self.project, report_payload)
                 report_discard.assert_called_once_with(staged_report)
-                self.assertEqual(
-                    [
-                        "parent-validate", "parent-stage", "report-build",
-                        "report-stage", "dhcp-transaction", "report-discard",
-                    ],
-                    transaction_events,
-                )
+                expected = [
+                    "parent-validate", "parent-stage", "report-build",
+                    "report-stage", "dhcp-transaction", "report-discard",
+                ]
+                self.assertEqual(expected, transaction_events)
             else:
                 parent_validate.assert_not_called()
                 parent_stage.assert_not_called()
@@ -1274,6 +1322,101 @@ class ReleaseTransactionTests(unittest.TestCase):
         )
         self.assertEqual(old_conf, (generation / "dhcp/dhcpd.conf").read_bytes())
 
+    def test_existing_a_must_be_frozen_before_b_can_replace_legacy_flat_inputs(self) -> None:
+        parent_a = LOAD.validate_and_publish_release(self.project, self.inputs)
+        output = self.project / "99-output-ztp"
+        flat = self.ztp / "config/isc-dhcp-server"
+        a_global = self.global_file.read_bytes()
+        b_global = a_global + b"\n# independently valid B edit\n"
+        self.global_file.write_bytes(b_global)
+        with self.assertRaises(LOAD.LoadError):
+            LOAD.ensure_previous_generation_frozen(self.project)
+        self.assertFalse(os.path.lexists(output / "current"))
+        self.global_file.write_bytes(a_global)
+
+        selector_target = LOAD.ensure_previous_generation_frozen(self.project)
+        self.assertEqual(f"generations/{parent_a['release_id']}", selector_target)
+        self.assertEqual(selector_target, os.readlink(output / "current"))
+        generation_a = output / selector_target
+        self.assertEqual(a_global, (generation_a / "inputs/global").read_bytes())
+        self.assertEqual(
+            (flat / "dhcpd.conf").read_bytes(),
+            (generation_a / "dhcp/dhcpd.conf").read_bytes(),
+        )
+        self.global_file.write_bytes(b_global)
+        self.assertEqual(
+            selector_target, LOAD.ensure_previous_generation_frozen(self.project),
+        )
+        self.assertEqual(a_global, (generation_a / "inputs/global").read_bytes())
+
+    def test_previous_generation_preflight_rejects_dangling_output_authority(self) -> None:
+        output = self.project / "99-output-ztp"
+        output.symlink_to("missing-authority")
+        with self.assertRaises(LOAD.LoadError):
+            LOAD.ensure_previous_generation_frozen(self.project)
+        self.assertEqual("missing-authority", os.readlink(output))
+
+    def test_previous_generation_preflight_rejects_same_target_selector_replacement(self) -> None:
+        LOAD.validate_and_publish_release(self.project, self.inputs)
+        output = self.project / "99-output-ztp"
+        flat = self.ztp / "config/isc-dhcp-server"
+        generation = LOAD.stage_pinned_generation(
+            self.project, output / "current-release.json", flat,
+        )
+        LOAD.commit_pinned_generation(
+            self.project, generation, expected_current=None,
+        )
+        selector = output / "current"
+        old_identity = (selector.lstat().st_dev, selector.lstat().st_ino)
+        real_validate = LOAD._pinned_generation_payloads
+
+        def replace_after_validation(*args):
+            result = real_validate(*args)
+            replacement = output / ".current-same-target-replacement"
+            replacement.symlink_to(os.readlink(selector))
+            os.replace(replacement, selector)
+            return result
+
+        with mock.patch.object(
+            LOAD, "_pinned_generation_payloads", side_effect=replace_after_validation,
+        ):
+            with self.assertRaisesRegex(LOAD.LoadError, "selector changed"):
+                LOAD.ensure_previous_generation_frozen(self.project)
+        self.assertNotEqual(
+            old_identity, (selector.lstat().st_dev, selector.lstat().st_ino),
+        )
+
+    def test_generation_commit_rejects_same_target_selector_aba_during_candidate_check(self) -> None:
+        LOAD.validate_and_publish_release(self.project, self.inputs)
+        output = self.project / "99-output-ztp"
+        flat = self.ztp / "config/isc-dhcp-server"
+        generation = LOAD.stage_pinned_generation(
+            self.project, output / "current-release.json", flat,
+        )
+        LOAD.commit_pinned_generation(
+            self.project, generation, expected_current=None,
+        )
+        selector = output / "current"
+        target = os.readlink(selector)
+        real_validate = LOAD._pinned_generation_payloads
+
+        def replace_during_candidate_check(*args):
+            result = real_validate(*args)
+            replacement = output / ".current-same-target-replacement"
+            replacement.symlink_to(target)
+            os.replace(replacement, selector)
+            return result
+
+        with mock.patch.object(
+            LOAD, "_pinned_generation_payloads",
+            side_effect=replace_during_candidate_check,
+        ):
+            with self.assertRaisesRegex(LOAD.LoadError, "selector changed"):
+                LOAD.commit_pinned_generation(
+                    self.project, generation, expected_current=target,
+                )
+        self.assertEqual(target, os.readlink(selector))
+
     def test_versioned_snapshot_can_freeze_prepared_b_without_selecting_it(self) -> None:
         flat = self.ztp / "config/isc-dhcp-server"
         private = self.project / "99-output-dhcp/.load-dhcp-candidate-0123456789abcdef"
@@ -1307,6 +1450,395 @@ class ReleaseTransactionTests(unittest.TestCase):
             self.assertFalse((self.project / "99-output-ztp/current").exists())
         finally:
             LOAD.discard_prepared_release(prepared)
+
+    def _publish_a_with_runtime_rollback_receipt(self):
+        parent = LOAD.validate_and_publish_release(self.project, self.inputs)
+        output = self.project / "99-output-ztp"
+        generation = LOAD.stage_pinned_generation(
+            self.project, output / "current-release.json",
+            self.ztp / "config/isc-dhcp-server",
+        )
+        LOAD.commit_pinned_generation(
+            self.project, generation, expected_current=None,
+        )
+        for name, content in {
+            "ztp-bootstrap_oob.sh": b"A oob bootstrap\n",
+            "ztp-bootstrap_oobofoob.sh": b"A oobofoob bootstrap\n",
+            "ztp.json": b'{"release":"A"}\n',
+        }.items():
+            (self.ztp / name).write_bytes(content)
+        publickeys = self.ztp / "config/publickey"
+        publickeys.mkdir(parents=True)
+        (publickeys / "laptop.pub").write_bytes(b"A laptop key\n")
+        (publickeys / "mgmt-server.pub").write_bytes(b"A management key\n")
+        receipt = LOAD.prepare_runtime_rollback_receipt(
+            self.project, generation,
+        )
+        return parent, generation, receipt
+
+    def test_failed_b_generation_can_restore_and_verify_complete_a_runtime_receipt(self) -> None:
+        _parent, generation, receipt = self._publish_a_with_runtime_rollback_receipt()
+        selector = self.project / "99-output-ztp/current"
+        expected_selector = os.readlink(selector)
+        old_latest = os.readlink(self.project / "99-output-eth/latest")
+        receipt_snapshot = receipt / "files/ztp-bootstrap_oob.sh"
+        receipt_identity = (
+            receipt_snapshot.lstat().st_dev, receipt_snapshot.lstat().st_ino,
+            receipt_snapshot.read_bytes(),
+        )
+
+        (self.ztp / "ztp-bootstrap_oob.sh").write_bytes(b"partial B bootstrap\n")
+        (self.ztp / "ztp.json").write_bytes(b'{"release":"partial-B"}\n')
+        (self.ztp / "config/publickey/laptop.pub").write_bytes(b"partial B key\n")
+        (self.ztp / "config/publickey/partial-b.pub").write_bytes(b"partial B extra key\n")
+        replacement = self.project / "99-output-eth/.partial-b"
+        replacement.mkdir()
+        latest = self.project / "99-output-eth/latest"
+        latest.unlink()
+        latest.symlink_to(replacement.name)
+
+        lock_path = self.root / ".deployment.lock"
+        with mock.patch.object(LOAD, "DEPLOYMENT_LOCK", lock_path), \
+                mock.patch.object(
+                    LOAD, "active_project", return_value=self.project.resolve(),
+                ), mock.patch.object(
+                    LOAD, "active_managed_services", return_value=(),
+                ):
+            descriptor = LOAD.acquire_deployment_lock(exclusive=True)
+            try:
+                LOAD.restore_runtime_rollback_receipt(
+                    self.project, receipt, expected_current=expected_selector,
+                    deployment_lock_descriptor=descriptor,
+                    services_quiesced=True,
+                    runtime_backend=SimpleNamespace(name="supervisor"),
+                )
+            finally:
+                LOAD.release_deployment_lock(descriptor)
+
+        self.assertEqual(expected_selector, os.readlink(selector))
+        self.assertEqual(old_latest, os.readlink(latest))
+        self.assertEqual(
+            b"A oob bootstrap\n",
+            (self.ztp / "ztp-bootstrap_oob.sh").read_bytes(),
+        )
+        self.assertEqual(
+            b'{"release":"A"}\n', (self.ztp / "ztp.json").read_bytes(),
+        )
+        self.assertEqual(
+            b"A laptop key\n",
+            (self.ztp / "config/publickey/laptop.pub").read_bytes(),
+        )
+        self.assertFalse((self.ztp / "config/publickey/partial-b.pub").exists())
+        self.assertEqual(
+            (generation / "current-release.json").resolve(),
+            (self.project / "99-output-ztp" / expected_selector
+             / "current-release.json").resolve(),
+        )
+        self.assertEqual(
+            receipt_identity,
+            (receipt_snapshot.lstat().st_dev, receipt_snapshot.lstat().st_ino,
+             receipt_snapshot.read_bytes()),
+            "post-verify must never rewrite the immutable A receipt",
+        )
+
+    def test_incomplete_a_runtime_receipt_fails_before_restoring_or_switching_selector(self) -> None:
+        _parent, _generation, receipt = self._publish_a_with_runtime_rollback_receipt()
+        selector = self.project / "99-output-ztp/current"
+        expected_selector = os.readlink(selector)
+        current = b"partial B bootstrap must remain for audit\n"
+        runtime = self.ztp / "ztp-bootstrap_oob.sh"
+        runtime.write_bytes(current)
+        (receipt / "files/ztp-bootstrap_oob.sh").unlink()
+
+        lock_path = self.root / ".deployment.lock"
+        with mock.patch.object(LOAD, "DEPLOYMENT_LOCK", lock_path), \
+                mock.patch.object(
+                    LOAD, "active_project", return_value=self.project.resolve(),
+                ), mock.patch.object(
+                    LOAD, "active_managed_services", return_value=(),
+                ):
+            descriptor = LOAD.acquire_deployment_lock(exclusive=True)
+            try:
+                with self.assertRaisesRegex(LOAD.LoadError, "rollback receipt.*incomplete"):
+                    LOAD.restore_runtime_rollback_receipt(
+                        self.project, receipt, expected_current=expected_selector,
+                        deployment_lock_descriptor=descriptor,
+                        services_quiesced=True,
+                        runtime_backend=SimpleNamespace(name="supervisor"),
+                    )
+            finally:
+                LOAD.release_deployment_lock(descriptor)
+
+        self.assertEqual(expected_selector, os.readlink(selector))
+        self.assertEqual(current, runtime.read_bytes())
+
+    def test_tampered_a_yaml_tree_blocks_restore_before_runtime_write(self) -> None:
+        _parent, _generation, receipt = self._publish_a_with_runtime_rollback_receipt()
+        selector = self.project / "99-output-ztp/current"
+        expected_selector = os.readlink(selector)
+        runtime = self.ztp / "ztp-bootstrap_oob.sh"
+        partial_b = b"partial B remains for audit\n"
+        runtime.write_bytes(partial_b)
+        release = (self.project / "99-output-eth/latest").resolve(strict=True)
+        (release / "leaf01.yaml").write_text("set:\n  tampered: true\n", encoding="utf-8")
+
+        lock_path = self.root / ".deployment.lock"
+        with mock.patch.object(LOAD, "DEPLOYMENT_LOCK", lock_path), \
+                mock.patch.object(
+                    LOAD, "active_project", return_value=self.project.resolve(),
+                ), mock.patch.object(
+                    LOAD, "active_managed_services", return_value=(),
+                ):
+            descriptor = LOAD.acquire_deployment_lock(exclusive=True)
+            try:
+                with self.assertRaisesRegex(LOAD.LoadError, "YAML hash|hash.*YAML"):
+                    LOAD.restore_runtime_rollback_receipt(
+                        self.project, receipt, expected_current=expected_selector,
+                        deployment_lock_descriptor=descriptor,
+                        services_quiesced=True,
+                        runtime_backend=SimpleNamespace(name="supervisor"),
+                    )
+            finally:
+                LOAD.release_deployment_lock(descriptor)
+
+        self.assertEqual(partial_b, runtime.read_bytes())
+        self.assertEqual(expected_selector, os.readlink(selector))
+
+    def test_runtime_rollback_refuses_after_parent_has_advanced_to_b(self) -> None:
+        _parent, _generation, receipt = self._publish_a_with_runtime_rollback_receipt()
+        selector = self.project / "99-output-ztp/current"
+        expected_selector = os.readlink(selector)
+        parent = self.project / "99-output-ztp/current-release.json"
+        parent.write_bytes(b'{"schema_version":2,"release_id":"B"}\n')
+        before = (self.ztp / "ztp-bootstrap_oob.sh").read_bytes()
+
+        lock_path = self.root / ".deployment.lock"
+        with mock.patch.object(LOAD, "DEPLOYMENT_LOCK", lock_path), \
+                mock.patch.object(
+                    LOAD, "active_project", return_value=self.project.resolve(),
+                ), mock.patch.object(
+                    LOAD, "active_managed_services", return_value=(),
+                ):
+            descriptor = LOAD.acquire_deployment_lock(exclusive=True)
+            try:
+                with self.assertRaisesRegex(LOAD.LoadError, "parent.*A|A.*parent"):
+                    LOAD.restore_runtime_rollback_receipt(
+                        self.project, receipt, expected_current=expected_selector,
+                        deployment_lock_descriptor=descriptor,
+                        services_quiesced=True,
+                        runtime_backend=SimpleNamespace(name="supervisor"),
+                    )
+            finally:
+                LOAD.release_deployment_lock(descriptor)
+
+        self.assertEqual(expected_selector, os.readlink(selector))
+        self.assertEqual(before, (self.ztp / "ztp-bootstrap_oob.sh").read_bytes())
+
+    def test_disabled_dhcp_a_can_be_frozen_and_receipted_without_dhcp_payload(self) -> None:
+        disabled = LOAD.replace(
+            self.inputs,
+            settings=LOAD.replace(self.inputs.settings, dhcp_enabled=False),
+        )
+        parent = LOAD.validate_and_publish_release(
+            self.project, disabled, publish=False,
+        )
+        self.assertEqual("disabled", parent["dhcp_status"])
+        candidate = LOAD.prepare_current_release(self.project, parent)
+        try:
+            generation = LOAD.stage_pinned_generation(
+                self.project, candidate.temporary, None,
+            )
+        finally:
+            LOAD.discard_prepared_release(candidate)
+        self.assertFalse((generation / "dhcp").exists())
+        LOAD.commit_pinned_generation(
+            self.project, generation, expected_current=None,
+        )
+        for name in (
+            "ztp-bootstrap_oob.sh", "ztp-bootstrap_oobofoob.sh", "ztp.json",
+        ):
+            (self.ztp / name).write_text("disabled A runtime\n", encoding="utf-8")
+        publickeys = self.ztp / "config/publickey"
+        publickeys.mkdir(parents=True)
+        (publickeys / "laptop.pub").write_text("A key\n", encoding="utf-8")
+        receipt = LOAD.prepare_runtime_rollback_receipt(
+            self.project, generation,
+        )
+        payload = json.loads((receipt / "receipt.json").read_text())
+        self.assertEqual("disabled", payload["dhcp_status"])
+        self.assertNotIn("dhcp", payload["unchanged_authorities"])
+
+    def test_runtime_receipt_uses_frozen_a_global_not_mutated_project_b(self) -> None:
+        original = yaml.safe_load(self.global_file.read_text(encoding="utf-8"))
+        original["common"]["mgmt"]["http"]["http_root"] = str(LOAD.HTTP_ROOT)
+        original["common"]["mgmt"]["ztp"]["ztp_url_prefix"] = "/a-prefix"
+        self.global_file.write_text(
+            yaml.safe_dump(original, sort_keys=False), encoding="utf-8",
+        )
+        parent = LOAD.validate_and_publish_release(self.project, self.inputs)
+        output = self.project / "99-output-ztp"
+        generation = LOAD.stage_pinned_generation(
+            self.project, output / "current-release.json",
+            self.ztp / "config/isc-dhcp-server",
+        )
+        LOAD.commit_pinned_generation(
+            self.project, generation, expected_current=None,
+        )
+        for name in LOAD._ROLLBACK_RUNTIME_FILES:
+            (self.ztp / name).write_text("A runtime\n", encoding="utf-8")
+        publickeys = self.ztp / "config/publickey"
+        publickeys.mkdir(parents=True)
+        (publickeys / "laptop.pub").write_text("A key\n", encoding="utf-8")
+
+        mutated = yaml.safe_load(self.global_file.read_text(encoding="utf-8"))
+        mutated["common"]["mgmt"]["ztp"]["ztp_url_prefix"] = "/partial-b"
+        self.global_file.write_text(
+            yaml.safe_dump(mutated, sort_keys=False), encoding="utf-8",
+        )
+        captured = []
+        with mock.patch.object(
+            LOAD, "snapshot_ztp_prefix_publication",
+            side_effect=lambda settings: captured.append(settings.ztp_prefix)
+            or LOAD.ZtpPrefixPublicationSnapshot(marker=None, links={}),
+        ):
+            LOAD.prepare_runtime_rollback_receipt(self.project, generation)
+
+        self.assertEqual(["/a-prefix"], captured)
+        self.assertEqual(parent["release_id"], generation.name)
+
+    def test_runtime_receipt_rejects_bad_existing_generation_report(self) -> None:
+        _parent, generation, _receipt = self._publish_a_with_runtime_rollback_receipt()
+        receipts = self.project / "99-output-ztp/rollback-receipts"
+        shutil.rmtree(receipts)
+        report = self.project / "99-output-ztp" / LOAD.generation_report.REPORT_NAME
+        report.write_text(
+            json.dumps({"release_id": "ffffffffffffffffffff"}), encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(LOAD.LoadError, "generation report|report.*A"):
+            LOAD.prepare_runtime_rollback_receipt(self.project, generation)
+        self.assertFalse(receipts.exists())
+
+    def test_unactivated_prepared_a_does_not_create_runtime_receipt(self) -> None:
+        generation = self.project / "99-output-ztp/generations/aaaaaaaaaaaaaaaaaaaa"
+        with mock.patch.object(LOAD, "active_project", return_value=None), \
+                mock.patch.object(LOAD, "prepare_runtime_rollback_receipt") as prepare:
+            receipt = LOAD.prepare_active_runtime_rollback_receipt(
+                self.project, "generations/aaaaaaaaaaaaaaaaaaaa",
+            )
+        self.assertIsNone(receipt)
+        prepare.assert_not_called()
+
+    def test_active_other_project_never_reuses_target_receipt(self) -> None:
+        other = self.root / "other-project"
+        other.mkdir()
+        with mock.patch.object(LOAD, "active_project", return_value=other.resolve()), \
+                mock.patch.object(LOAD, "prepare_runtime_rollback_receipt") as prepare:
+            receipt = LOAD.prepare_active_runtime_rollback_receipt(
+                self.project, "generations/aaaaaaaaaaaaaaaaaaaa",
+            )
+        self.assertIsNone(receipt)
+        prepare.assert_not_called()
+
+    def test_existing_receipt_is_not_reused_after_flat_a_drift(self) -> None:
+        _parent, _generation, receipt = self._publish_a_with_runtime_rollback_receipt()
+        selector_target = os.readlink(self.project / "99-output-ztp/current")
+        runtime = self.ztp / "ztp-bootstrap_oob.sh"
+        runtime.write_bytes(b"unexpected drift before next load\n")
+
+        with mock.patch.object(
+            LOAD, "active_project", return_value=self.project.resolve(),
+        ):
+            with self.assertRaisesRegex(LOAD.LoadError, "no longer matches A runtime"):
+                LOAD.prepare_active_runtime_rollback_receipt(
+                    self.project, selector_target,
+                )
+        self.assertTrue(receipt.is_dir())
+        self.assertEqual(b"unexpected drift before next load\n", runtime.read_bytes())
+
+    def test_extended_receipt_tree_is_rejected_before_restore(self) -> None:
+        _parent, _generation, receipt = self._publish_a_with_runtime_rollback_receipt()
+        (receipt / "unexpected").write_text("not governed\n", encoding="utf-8")
+        runtime = self.ztp / "ztp-bootstrap_oob.sh"
+        before = runtime.read_bytes()
+
+        with self.assertRaisesRegex(LOAD.LoadError, "tree.*unknown|unknown.*entries"):
+            LOAD._load_runtime_rollback_receipt(self.project, receipt)
+        self.assertEqual(before, runtime.read_bytes())
+
+    def test_runtime_rollback_refuses_writes_without_lock_and_quiesced_services(self) -> None:
+        _parent, _generation, receipt = self._publish_a_with_runtime_rollback_receipt()
+        selector = self.project / "99-output-ztp/current"
+        expected_selector = os.readlink(selector)
+        runtime = self.ztp / "ztp-bootstrap_oob.sh"
+        runtime.write_bytes(b"partial B remains\n")
+
+        with self.assertRaisesRegex(LOAD.LoadError, "lock.*quiesced|quiesced.*lock"):
+            LOAD.restore_runtime_rollback_receipt(
+                self.project, receipt, expected_current=expected_selector,
+                deployment_lock_descriptor=None, services_quiesced=False,
+                runtime_backend=None,
+            )
+
+        self.assertEqual(b"partial B remains\n", runtime.read_bytes())
+        self.assertEqual(expected_selector, os.readlink(selector))
+
+    def test_runtime_rollback_refuses_while_any_managed_service_is_active(self) -> None:
+        _parent, _generation, receipt = self._publish_a_with_runtime_rollback_receipt()
+        selector = self.project / "99-output-ztp/current"
+        expected_selector = os.readlink(selector)
+        runtime = self.ztp / "ztp-bootstrap_oob.sh"
+        runtime.write_bytes(b"partial B remains\n")
+        lock_path = self.root / ".deployment.lock"
+
+        with mock.patch.object(LOAD, "DEPLOYMENT_LOCK", lock_path), \
+                mock.patch.object(
+                    LOAD, "active_managed_services", return_value=("apache2",),
+                ):
+            descriptor = LOAD.acquire_deployment_lock(exclusive=True)
+            try:
+                with self.assertRaisesRegex(LOAD.LoadError, "service.*stopped"):
+                    LOAD.restore_runtime_rollback_receipt(
+                        self.project, receipt, expected_current=expected_selector,
+                        deployment_lock_descriptor=descriptor,
+                        services_quiesced=True,
+                        runtime_backend=SimpleNamespace(name="supervisor"),
+                    )
+            finally:
+                LOAD.release_deployment_lock(descriptor)
+
+        self.assertEqual(b"partial B remains\n", runtime.read_bytes())
+
+    def test_runtime_rollback_rejects_symlinked_receipt_before_any_write(self) -> None:
+        _parent, _generation, receipt = self._publish_a_with_runtime_rollback_receipt()
+        selector = self.project / "99-output-ztp/current"
+        expected_selector = os.readlink(selector)
+        alias = receipt.parent / "ffffffffffffffffffff"
+        alias.symlink_to(receipt.name)
+        runtime = self.ztp / "ztp-bootstrap_oob.sh"
+        before = runtime.read_bytes()
+        lock_path = self.root / ".deployment.lock"
+
+        with mock.patch.object(LOAD, "DEPLOYMENT_LOCK", lock_path), \
+                mock.patch.object(
+                    LOAD, "active_project", return_value=self.project.resolve(),
+                ), mock.patch.object(
+                    LOAD, "active_managed_services", return_value=(),
+                ):
+            descriptor = LOAD.acquire_deployment_lock(exclusive=True)
+            try:
+                with self.assertRaisesRegex(LOAD.LoadError, "real directory"):
+                    LOAD.restore_runtime_rollback_receipt(
+                        self.project, alias, expected_current=expected_selector,
+                        deployment_lock_descriptor=descriptor,
+                        services_quiesced=True,
+                        runtime_backend=SimpleNamespace(name="supervisor"),
+                    )
+            finally:
+                LOAD.release_deployment_lock(descriptor)
+
+        self.assertEqual(before, runtime.read_bytes())
+        self.assertEqual(expected_selector, os.readlink(selector))
 
     def test_selector_explicitly_returns_from_b_to_unchanged_a(self) -> None:
         flat = self.ztp / "config/isc-dhcp-server"
@@ -3318,6 +3850,168 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertIn("[NEXT] 修复上述错误后完整重跑：", output)
         self.assertIn("11-load.py", output)
         self.assertIn("--ztp-monitor-scope air", output)
+
+    def test_main_stages_schema2_b_before_dhcp_install_and_keeps_a_selected_on_failure(self) -> None:
+        selector = self.project / "99-output-ztp/current"
+        selector.parent.mkdir(parents=True, exist_ok=True)
+        selector.symlink_to("generations/aaaaaaaaaaaaaaaaaaaa")
+        staged_b = self.project / "99-output-ztp/generations/bbbbbbbbbbbbbbbbbbbb"
+        lifecycle_events: list[str] = []
+
+        def stage_candidate(*_args):
+            lifecycle_events.append("stage-b")
+            return staged_b
+
+        def freeze_previous(*_args):
+            lifecycle_events.append("freeze-a")
+            return "generations/aaaaaaaaaaaaaaaaaaaa"
+
+        receipt = self.project / "99-output-ztp/rollback-receipts/aaaaaaaaaaaaaaaaaaaa"
+
+        def prepare_receipt(*_args):
+            lifecycle_events.append("receipt-a")
+            return receipt
+
+        def restore_receipt(*_args, **kwargs):
+            self.assertEqual(91, kwargs["deployment_lock_descriptor"])
+            self.assertTrue(kwargs["services_quiesced"])
+            self.assertEqual("supervisor", kwargs["runtime_backend"].name)
+            lifecycle_events.append("restore-a")
+
+        with mock.patch.object(
+            LOAD, "ensure_previous_generation_frozen", side_effect=freeze_previous,
+        ) as freeze, mock.patch.object(
+            LOAD, "stage_pinned_generation", side_effect=stage_candidate,
+        ) as stage, mock.patch.object(
+            LOAD, "prepare_active_runtime_rollback_receipt", side_effect=prepare_receipt,
+        ) as prepare_receipt_mock, mock.patch.object(
+            LOAD, "restore_runtime_rollback_receipt", side_effect=restore_receipt,
+        ) as restore_receipt_mock, mock.patch.object(
+            LOAD, "commit_pinned_generation",
+        ) as commit:
+            result = self._exercise_main_transaction_failure(
+                ValueError("injected DHCP install failure"),
+                lifecycle_events=lifecycle_events,
+                parent_schema_version=2,
+                observe_template_mutation=True,
+            )[0]
+
+        self.assertEqual(1, result)
+        freeze.assert_called_once_with(self.project)
+        stage.assert_called_once()
+        self.assertEqual(self.project, stage.call_args.args[0])
+        self.assertEqual(
+            ["freeze-a", "receipt-a", "template-mutation",
+             "monitor-authority-attest", "generate",
+             "stage-b", "dhcp-transaction", "restore-a"],
+            lifecycle_events,
+        )
+        self.assertEqual("generations/aaaaaaaaaaaaaaaaaaaa", os.readlink(selector))
+        commit.assert_not_called()
+        prepare_receipt_mock.assert_called_once()
+        restore_receipt_mock.assert_called_once()
+
+    def test_main_does_not_restore_receipt_when_failure_precedes_quiesce_and_mutation(self) -> None:
+        receipt = self.project / "99-output-ztp/rollback-receipts/aaaaaaaaaaaaaaaaaaaa"
+        with mock.patch.object(
+            LOAD, "ensure_previous_generation_frozen",
+            return_value="generations/aaaaaaaaaaaaaaaaaaaa",
+        ), mock.patch.object(
+            LOAD, "prepare_active_runtime_rollback_receipt",
+            return_value=receipt,
+        ) as prepare, mock.patch.object(
+            LOAD, "restore_runtime_rollback_receipt",
+        ) as restore:
+            result = self._exercise_main_transaction_failure(
+                LOAD.LoadError("template preflight failed before quiesce"),
+                failure_at="template",
+            )[0]
+
+        self.assertEqual(1, result)
+        prepare.assert_called_once_with(
+            self.project, "generations/aaaaaaaaaaaaaaaaaaaa",
+        )
+        restore.assert_not_called()
+
+    def test_main_freezes_existing_a_before_any_template_mutation(self) -> None:
+        events: list[str] = []
+        with mock.patch.object(
+            LOAD, "ensure_previous_generation_frozen",
+            side_effect=lambda _project: events.append("freeze-a") or None,
+        ):
+            result = self._exercise_main_transaction_failure(
+                ValueError("stop after ordered workflow"),
+                lifecycle_events=events,
+                observe_template_mutation=True,
+            )[0]
+
+        self.assertEqual(1, result)
+        self.assertLess(events.index("freeze-a"), events.index("template-mutation"))
+
+    def test_main_selects_b_after_report_before_service_preflight(self) -> None:
+        events: list[str] = []
+        generation_b = self.project / "99-output-ztp/generations/bbbbbbbbbbbbbbbbbbbb"
+        with mock.patch.object(
+            LOAD, "ensure_previous_generation_frozen",
+            side_effect=lambda _project: events.append("freeze-a")
+            or "generations/aaaaaaaaaaaaaaaaaaaa",
+        ), mock.patch.object(
+            LOAD, "prepare_active_runtime_rollback_receipt",
+            side_effect=lambda *_args: events.append("receipt-a")
+            or self.project / "99-output-ztp/rollback-receipts/aaaaaaaaaaaaaaaaaaaa",
+        ), mock.patch.object(
+            LOAD, "stage_pinned_generation",
+            side_effect=lambda *_args: events.append("stage-b") or generation_b,
+        ), mock.patch.object(
+            LOAD, "commit_pinned_generation",
+            side_effect=lambda *_args, **_kwargs: events.append("select-b"),
+        ) as commit:
+            result = self._exercise_main_transaction_failure(
+                LOAD.LoadError("injected service preflight failure"),
+                lifecycle_events=events, parent_schema_version=2,
+                failure_at="preflight",
+            )[0]
+
+        self.assertEqual(1, result)
+        self.assertEqual(
+            ["freeze-a", "receipt-a", "monitor-authority-attest", "generate", "stage-b",
+             "dhcp-transaction", "report-commit", "select-b", "service-preflight"],
+            events,
+        )
+        commit.assert_called_once_with(
+            self.project, generation_b,
+            expected_current="generations/aaaaaaaaaaaaaaaaaaaa",
+        )
+
+    def test_failed_b_selector_commit_never_claims_b_success_or_starts_service(self) -> None:
+        selector = self.project / "99-output-ztp/current"
+        selector.parent.mkdir(parents=True, exist_ok=True)
+        selector.symlink_to("generations/aaaaaaaaaaaaaaaaaaaa")
+        generation_b = self.project / "99-output-ztp/generations/bbbbbbbbbbbbbbbbbbbb"
+        stderr = io.StringIO()
+        with mock.patch.object(
+            LOAD, "ensure_previous_generation_frozen",
+            return_value="generations/aaaaaaaaaaaaaaaaaaaa",
+        ), mock.patch.object(
+            LOAD, "prepare_active_runtime_rollback_receipt",
+            return_value=self.project / "99-output-ztp/rollback-receipts/aaaaaaaaaaaaaaaaaaaa",
+        ), mock.patch.object(
+            LOAD, "stage_pinned_generation", return_value=generation_b,
+        ), mock.patch.object(
+            LOAD, "commit_pinned_generation",
+            side_effect=LOAD.LoadError("selector changed before B commit"),
+        ), mock.patch.object(LOAD, "preflight_services") as preflight, \
+                redirect_stderr(stderr):
+            result = self._exercise_main_transaction_failure(
+                LOAD.LoadError("DHCP step should not fail"),
+                parent_schema_version=2, failure_at="select",
+            )[0]
+
+        self.assertEqual(1, result)
+        self.assertEqual("generations/aaaaaaaaaaaaaaaaaaaa", os.readlink(selector))
+        preflight.assert_not_called()
+        self.assertIn("[FAILED] load 阶段失败：提交本轮已封存代次指针", stderr.getvalue())
+        self.assertNotIn("load 流程完成", stderr.getvalue())
 
     def test_skip_infra_real_main_attests_monitor_authority_before_generation(self) -> None:
         lifecycle_events: list[str] = []

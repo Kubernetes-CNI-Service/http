@@ -52,6 +52,10 @@ C2 = load_script(
 ACTIVATE = load_script(
     "r22_generation_binding_workflow_activate", ROOT / "infra/docker/activate.py",
 )
+PUBLISHER = load_script(
+    "r22_generation_binding_workflow_publisher",
+    ROOT / "ztp/config/cumulus/d-hostname2mac.py",
+)
 SUBNET_HEADER = (
     "shared_network,subnet,netmask,range_start,range_end,routers,"
     "ztp_service_ip,cumulus_profile,nvos_ztp\n"
@@ -118,7 +122,9 @@ def _write_legal_project(project: Path, rows: list[list[str]]) -> None:
     (project / "mgmt-server.pub").write_bytes(b"")
 
 
-def _private_real_chain(root: Path, dns_ip: str) -> tuple[Path, Path]:
+def _private_real_chain(
+    root: Path, dns_ip: str, *, http_enabled: bool = False,
+) -> tuple[Path, Path]:
     """Build only the files real LOAD/b/c1/c2/d read under a private root."""
     project = root / "DAY0-Prepare/project"
     project.parent.mkdir(parents=True)
@@ -127,6 +133,8 @@ def _private_real_chain(root: Path, dns_ip: str) -> tuple[Path, Path]:
     document = yaml.safe_load(global_file.read_text(encoding="utf-8"))
     document["common"]["mgmt"]["dhcp-server"]["status"] = "enabled"
     document["common"]["mgmt"]["ztp"]["status"] = "enabled"
+    if http_enabled:
+        document["common"]["mgmt"]["http"]["status"] = "enabled"
     complete = border_globals()
     eth = document["switches"][0]["eth"]
     eth["bridge"] = complete["bridge"]
@@ -265,6 +273,33 @@ def _write_same_inode(path: Path, data: bytes, original: os.stat_result) -> None
 
 class GenerationInputBindingWorkflowTests(unittest.TestCase):
     """LOAD's frozen A authority must survive a real downstream c2 read."""
+
+    def test_c2_crash_residue_blocks_real_publisher_base_fallback(self):
+        """C2's cold gap cannot make d publish the unpatched base tree."""
+        with tempfile.TemporaryDirectory(prefix="r22-c2-publisher-gap-") as name:
+            output = Path(name) / "ztp/config/cumulus/template/99-output"
+            output.mkdir(parents=True)
+            timestamp = "20261002_120000"
+            base = output / timestamp
+            base.mkdir()
+            (base / "Border01.yaml").write_bytes(b"base without descriptions\n")
+            final = output / f"{timestamp}_with_desc"
+            old = output / f".{final.name}.tmp.crash.old"
+            stage = output / f".{final.name}.tmp.crash"
+            old.mkdir()
+            stage.mkdir()
+            (old / "Border01.yaml").write_bytes(b"complete A descriptions\n")
+            (stage / "Border01.yaml").write_bytes(b"incomplete B descriptions\n")
+            before = _artifact_tree(output)
+
+            inventory = C2._inspect_description_output_recovery(str(final))
+            self.assertEqual("gap-after-old-rename", inventory["state"])
+            self.assertEqual(str(old), inventory["old_candidate"])
+            context = PUBLISHER._cumulus_dir_context(str(base))
+            self.assertIsNotNone(context)
+            with self.assertRaisesRegex(ValueError, "unresolved description"):
+                PUBLISHER._preferred_cumulus_contexts([context])
+            self.assertEqual(before, _artifact_tree(output))
 
     def test_real_nvos_scoped_generation_parent_remains_activatable(self):
         """Real IB/NVL generation must retain accepted empty unselected hosts."""
@@ -537,8 +572,12 @@ class GenerationInputBindingWorkflowTests(unittest.TestCase):
             # macOS may report /var for a /private/var subprocess cwd; the
             # candidate API deliberately requires one canonical project path.
             private = Path(name).resolve()
-            project, ztp = _private_real_chain(private / "A", "192.0.2.53")
-            project_b, _ = _private_real_chain(private / "B", "192.0.2.54")
+            project, ztp = _private_real_chain(
+                private / "A", "192.0.2.53", http_enabled=True,
+            )
+            project_b, _ = _private_real_chain(
+                private / "B", "192.0.2.54", http_enabled=True,
+            )
             # Activation currently requires nonempty private includes even
             # when this scoped ETH run does not own IB/NVL.  Valid DHCP
             # comments model pre-existing, unchanged family files; c1 still
@@ -678,11 +717,15 @@ class GenerationInputBindingWorkflowTests(unittest.TestCase):
                     hashlib.sha256(parent_path.read_bytes()).hexdigest(),
                     accepted_parent["parent_release_sha256"],
                 )
-                committed_a = LOAD.stage_pinned_generation(
-                    project, parent_path, dhcp_dir,
+                # The same preflight LOAD now uses before any B generation
+                # must migrate the already committed A while its source bytes
+                # and published DHCP child are still independently verifiable.
+                self.assertEqual(
+                    f"generations/{parent['release_id']}",
+                    LOAD.ensure_previous_generation_frozen(project),
                 )
-                LOAD.commit_pinned_generation(
-                    project, committed_a, expected_current=None,
+                committed_a = (
+                    project / "99-output-ztp/generations" / parent["release_id"]
                 )
                 selector = project / "99-output-ztp/current"
                 self.assertEqual(
@@ -691,6 +734,19 @@ class GenerationInputBindingWorkflowTests(unittest.TestCase):
                         settings, selector, expected_release_id=parent["release_id"],
                     )["release_id"],
                 )
+                # LOAD has selected A, so ACTIVATE's legacy flat-input writer
+                # must not publish a runtime plan without binding that selector.
+                with mock.patch.object(
+                    ACTIVATE, "ensure_runtime_directories",
+                ) as runtime_dirs, mock.patch.object(
+                    ACTIVATE, "_atomic_write",
+                ) as runtime_write:
+                    with self.assertRaisesRegex(
+                        ACTIVATE.ActivationError, "selector|generation",
+                    ):
+                        ACTIVATE.prepare_runtime(settings)
+                runtime_dirs.assert_not_called()
+                runtime_write.assert_not_called()
                 frozen_global = committed_a / "inputs/global"
                 original_global = frozen_global.read_bytes()
                 frozen_global.write_bytes(b"other generation input\n")
@@ -782,6 +838,45 @@ class GenerationInputBindingWorkflowTests(unittest.TestCase):
                     set(DHCP_OUTPUTS),
                     {item.name for item in private_candidate.iterdir()}, detail,
                 )
+            # The actual LOAD child chain has left the previously committed A
+            # selected.  A subsequent, independently legal B edit to the
+            # mutable source must not be used when ACTIVATE observes A's plan.
+            # This is read-only planning, not a service activation receipt.
+            network_links = [{
+                "ifindex": 4, "ifname": "eth0",
+                "flags": ["BROADCAST", "MULTICAST", "UP", "LOWER_UP"],
+                "address": "02:00:00:00:00:04", "operstate": "UP",
+                "link_type": "ether",
+            }]
+            network_addresses = [{
+                "ifindex": 4, "ifname": "eth0",
+                "addr_info": [{
+                    "family": "inet", "local": "192.0.2.20", "prefixlen": 24,
+                    "scope": "global", "flags": [],
+                    "valid_life_time": "forever",
+                    "preferred_life_time": "forever",
+                }],
+            }]
+            source.write_bytes(bytes_b)
+            try:
+                with mock.patch.object(
+                    ACTIVATE, "capture_stable_network_snapshot",
+                    return_value=(network_links, network_addresses),
+                ):
+                    _plan, _runtime, payload, _apache = (
+                        ACTIVATE.observe_pinned_runtime(
+                            settings, selector,
+                            expected_release_id=parent["release_id"],
+                        )
+                    )
+                self.assertEqual(parent["release_id"],
+                                 payload["selected_generation_release_id"])
+                self.assertEqual(
+                    hashlib.sha256((committed_a / "inputs/subnet").read_bytes()).hexdigest(),
+                    payload["subnet_sha256"],
+                )
+            finally:
+                source.write_bytes(bytes_a)
 
     def test_load_setup_c2_rejects_same_inode_second_read_and_preserves_existing_same_name_output(self):
         rows_a = V2MlagSetupPreflightTests().pair()

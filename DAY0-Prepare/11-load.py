@@ -19,6 +19,7 @@ import binascii
 import csv
 from dataclasses import dataclass, replace
 from datetime import datetime
+import fcntl
 import getpass
 import gzip
 import hashlib
@@ -4200,7 +4201,7 @@ def _validated_dhcp_candidate_dir(project: Path, candidate: Path) -> Path:
 
 
 def _pinned_generation_payloads(
-    project: Path, parent_file: Path, dhcp_source_dir: Path,
+    project: Path, parent_file: Path, dhcp_source_dir: Path | None,
 ) -> tuple[str, dict[str, bytes]]:
     """Freeze a schema-2 parent, its source inputs and bound DHCP child bytes."""
     canonical_project = project.resolve(strict=True)
@@ -4245,23 +4246,29 @@ def _pinned_generation_payloads(
     calculated = hashlib.sha256(json.dumps(
         basis, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
     ).encode("utf-8")).hexdigest()[:20]
+    dhcp_status = parent.get("dhcp_status")
     if (calculated != release_id or parent.get("project") != canonical_project.name
-            or parent.get("dhcp_status") != "enabled"
+            or dhcp_status not in {"enabled", "disabled"}
             or parent.get("validation") != "passed"):
         raise LoadError("pinned parent basis/project/DHCP does not match release ID")
     components = parent["components"]
     child = components.get("dhcp") if isinstance(components, dict) else None
-    expected_manifest = child.get("manifest_sha256") if isinstance(child, dict) else None
-    if (not isinstance(expected_manifest, str)
-            or not re.fullmatch(r"[0-9a-f]{64}", expected_manifest)):
-        raise LoadError("pinned parent has no valid DHCP child binding")
-    if snapshot_directory:
-        if dhcp_source_dir.resolve(strict=True) != parent_directory / "dhcp":
-            raise LoadError("pinned snapshot DHCP directory is not generation-local")
-    else:
-        flat = ZTP_DIR / "config/isc-dhcp-server"
-        if dhcp_source_dir.resolve(strict=True) != flat.resolve(strict=True):
-            dhcp_source_dir = _validated_dhcp_candidate_dir(project, dhcp_source_dir)
+    expected_manifest = None
+    if dhcp_status == "enabled":
+        expected_manifest = child.get("manifest_sha256") if isinstance(child, dict) else None
+        if (not isinstance(expected_manifest, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", expected_manifest)
+                or dhcp_source_dir is None):
+            raise LoadError("pinned parent has no valid DHCP child binding")
+        if snapshot_directory:
+            if dhcp_source_dir.resolve(strict=True) != parent_directory / "dhcp":
+                raise LoadError("pinned snapshot DHCP directory is not generation-local")
+        else:
+            flat = ZTP_DIR / "config/isc-dhcp-server"
+            if dhcp_source_dir.resolve(strict=True) != flat.resolve(strict=True):
+                dhcp_source_dir = _validated_dhcp_candidate_dir(project, dhcp_source_dir)
+    elif child is not None or dhcp_source_dir is not None:
+        raise LoadError("pinned DHCP-disabled parent must not bind a DHCP child")
     names = (
         "dhcp-release-manifest.json", "dhcpd.conf", "dhcpd_eth.hosts",
         "dhcpd_ib.hosts", "dhcpd_nvl.hosts",
@@ -4295,12 +4302,16 @@ def _pinned_generation_payloads(
                         "effective_devices": generated["effective_devices"].get("sha256")}
     source_names = {key: source_names[key] for key in input_hashes}
     if snapshot_directory:
-        if ({entry.name for entry in parent_directory.iterdir()}
-                != {"current-release.json", "dhcp", "inputs"}):
+        expected_entries = {"current-release.json", "inputs"}
+        if dhcp_status == "enabled":
+            expected_entries.add("dhcp")
+        if {entry.name for entry in parent_directory.iterdir()} != expected_entries:
             raise LoadError("pinned generation contains an unexpected artifact")
-        if (not stat.S_ISDIR(dhcp_source_dir.lstat().st_mode)
-                or {entry.name for entry in dhcp_source_dir.iterdir()} != set(names)):
-            raise LoadError("pinned generation DHCP directory is incomplete or extended")
+        if dhcp_status == "enabled":
+            assert dhcp_source_dir is not None
+            if (not stat.S_ISDIR(dhcp_source_dir.lstat().st_mode)
+                    or {entry.name for entry in dhcp_source_dir.iterdir()} != set(names)):
+                raise LoadError("pinned generation DHCP directory is incomplete or extended")
         frozen_inputs = parent_directory / "inputs"
         if (not stat.S_ISDIR(frozen_inputs.lstat().st_mode)
                 or {entry.name for entry in frozen_inputs.iterdir()} != set(input_hashes)):
@@ -4331,39 +4342,41 @@ def _pinned_generation_payloads(
                 or hashlib.sha256(content).hexdigest() != expected):
             raise LoadError(f"pinned input {key} changed or differs from parent")
         payloads[f"inputs/{key}"] = content
-    for name in names:
-        source = dhcp_source_dir / name
-        if not source.is_file():
-            raise LoadError(f"pinned DHCP child is missing: {name}")
-        if snapshot_directory:
-            source_stat = source.lstat()
-            if (not stat.S_ISREG(source_stat.st_mode)
-                    or source_stat.st_nlink != 1):
-                raise LoadError(f"pinned DHCP child is not an owned regular file: {name}")
-        data = source.read_bytes()
-        if _sha256_path(source) != hashlib.sha256(data).hexdigest():
-            raise LoadError(f"pinned DHCP child changed while freezing: {name}")
-        payloads[f"dhcp/{name}"] = data
-    if hashlib.sha256(payloads["dhcp/dhcp-release-manifest.json"]).hexdigest() != expected_manifest:
-        raise LoadError("pinned DHCP manifest differs from parent component")
-    try:
-        manifest = json.loads(payloads["dhcp/dhcp-release-manifest.json"])
-    except (UnicodeError, json.JSONDecodeError) as exc:
-        raise LoadError(f"pinned DHCP manifest is not JSON: {exc}") from exc
-    outputs = manifest.get("outputs") if isinstance(manifest, dict) else None
-    if (not isinstance(outputs, dict) or set(outputs) != set(names[1:])
-            or manifest.get("release_id") != child.get("release_id")):
-        raise LoadError("pinned DHCP child identity/outputs are incomplete")
-    for name in names[1:]:
-        record = outputs[name]
-        expected = record.get("sha256") if isinstance(record, dict) else None
-        if expected != hashlib.sha256(payloads[f"dhcp/{name}"]).hexdigest():
-            raise LoadError(f"pinned DHCP output differs from child manifest: {name}")
+    if dhcp_status == "enabled":
+        assert dhcp_source_dir is not None and isinstance(child, dict)
+        for name in names:
+            source = dhcp_source_dir / name
+            if not source.is_file():
+                raise LoadError(f"pinned DHCP child is missing: {name}")
+            if snapshot_directory:
+                source_stat = source.lstat()
+                if (not stat.S_ISREG(source_stat.st_mode)
+                        or source_stat.st_nlink != 1):
+                    raise LoadError(f"pinned DHCP child is not an owned regular file: {name}")
+            data = source.read_bytes()
+            if _sha256_path(source) != hashlib.sha256(data).hexdigest():
+                raise LoadError(f"pinned DHCP child changed while freezing: {name}")
+            payloads[f"dhcp/{name}"] = data
+        if hashlib.sha256(payloads["dhcp/dhcp-release-manifest.json"]).hexdigest() != expected_manifest:
+            raise LoadError("pinned DHCP manifest differs from parent component")
+        try:
+            manifest = json.loads(payloads["dhcp/dhcp-release-manifest.json"])
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise LoadError(f"pinned DHCP manifest is not JSON: {exc}") from exc
+        outputs = manifest.get("outputs") if isinstance(manifest, dict) else None
+        if (not isinstance(outputs, dict) or set(outputs) != set(names[1:])
+                or manifest.get("release_id") != child.get("release_id")):
+            raise LoadError("pinned DHCP child identity/outputs are incomplete")
+        for name in names[1:]:
+            record = outputs[name]
+            expected = record.get("sha256") if isinstance(record, dict) else None
+            if expected != hashlib.sha256(payloads[f"dhcp/{name}"]).hexdigest():
+                raise LoadError(f"pinned DHCP output differs from child manifest: {name}")
     return release_id, payloads
 
 
 def stage_pinned_generation(
-    project: Path, parent_file: Path, dhcp_source_dir: Path,
+    project: Path, parent_file: Path, dhcp_source_dir: Path | None,
 ) -> Path:
     """Persist an unselected generation; never change the public selector."""
     release_id, payloads = _pinned_generation_payloads(
@@ -4379,8 +4392,8 @@ def stage_pinned_generation(
     if destination.exists():
         if not stat.S_ISDIR(destination.lstat().st_mode):
             raise LoadError("existing generation is not a real directory")
-        if ({entry.name for entry in destination.iterdir()}
-                != {"current-release.json", "dhcp", "inputs"}):
+        expected_entries = {Path(relative).parts[0] for relative in payloads}
+        if {entry.name for entry in destination.iterdir()} != expected_entries:
             raise LoadError("existing generation contains an unexpected artifact")
         existing = {}
         for path in destination.rglob("*"):
@@ -4395,8 +4408,9 @@ def stage_pinned_generation(
         return destination
     stage = Path(tempfile.mkdtemp(prefix=".load-generation-", dir=generations))
     try:
-        (stage / "dhcp").mkdir(mode=0o755)
         (stage / "inputs").mkdir(mode=0o755)
+        if any(relative.startswith("dhcp/") for relative in payloads):
+            (stage / "dhcp").mkdir(mode=0o755)
         for relative, content in payloads.items():
             target = stage / relative
             with target.open("xb") as stream:
@@ -4404,7 +4418,10 @@ def stage_pinned_generation(
                 stream.flush()
                 os.fsync(stream.fileno())
             target.chmod(0o644)
-        for directory in (stage / "dhcp", stage / "inputs", stage):
+        directories = [stage / "inputs", stage]
+        if (stage / "dhcp").exists():
+            directories.insert(0, stage / "dhcp")
+        for directory in directories:
             descriptor = os.open(directory, os.O_RDONLY)
             try:
                 os.fsync(descriptor)
@@ -4434,12 +4451,27 @@ def commit_pinned_generation(
             or not stat.S_ISDIR(generation.lstat().st_mode)
             or generation.resolve(strict=True) != generation):
         raise LoadError("generation selection target is not canonical")
-    parent = generation / "current-release.json"
-    _pinned_generation_payloads(project, parent, generation / "dhcp")
     selector = output / "current"
-    observed = os.readlink(selector) if selector.is_symlink() else None
-    if (observed != expected_current
-            or (observed is None and os.path.lexists(selector))):
+    before = selector.lstat() if os.path.lexists(selector) else None
+    if before is not None and not stat.S_ISLNK(before.st_mode):
+        raise LoadError("generation selector changed before commit")
+    before_target = os.readlink(selector) if before is not None else None
+    if before_target != expected_current:
+        raise LoadError("generation selector changed before commit")
+    parent = generation / "current-release.json"
+    generation_dhcp = generation / "dhcp"
+    _pinned_generation_payloads(
+        project, parent, generation_dhcp if generation_dhcp.is_dir() else None,
+    )
+    after = selector.lstat() if os.path.lexists(selector) else None
+    if ((before is None) != (after is None)
+            or after is not None and not stat.S_ISLNK(after.st_mode)
+            or after is not None and any(
+                getattr(before, field) != getattr(after, field)
+                for field in ("st_dev", "st_ino", "st_mode", "st_mtime_ns", "st_ctime_ns")
+            )
+            or (os.readlink(selector) if after is not None else None)
+            != expected_current):
         raise LoadError("generation selector changed before commit")
     target = f"generations/{generation.name}"
     temporary = output / f".current-{secrets.token_hex(16)}"
@@ -4453,6 +4485,882 @@ def commit_pinned_generation(
             os.close(descriptor)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def ensure_previous_generation_frozen(project: Path) -> str | None:
+    """Keep a committed A recoverable before a later load can generate B.
+
+    A pre-versioned flat parent can be migrated only while its original
+    project inputs and DHCP child still validate.  If those bytes have already
+    changed, refusing before generation is safer than signing B over A.
+    """
+    output = project.resolve(strict=True) / "99-output-ztp"
+    if os.path.lexists(output) and (
+        not stat.S_ISDIR(output.lstat().st_mode)
+        or output.resolve(strict=True) != output
+    ):
+        raise LoadError("previous generation output directory is not canonical")
+    selector = output / "current"
+    if os.path.lexists(selector):
+        selector_before = selector.lstat()
+        if not stat.S_ISLNK(selector_before.st_mode):
+            raise LoadError("previous generation selector is not a symlink")
+        target = os.readlink(selector)
+        match = re.fullmatch(r"generations/([0-9a-f]{20})", target)
+        if match is None:
+            raise LoadError("previous generation selector has an unsafe target")
+        generation = output / target
+        generation_dhcp = generation / "dhcp"
+        release_id, _payloads = _pinned_generation_payloads(
+            project, generation / "current-release.json",
+            generation_dhcp if generation_dhcp.is_dir() else None,
+        )
+        try:
+            selector_after = selector.lstat()
+            current_target = os.readlink(selector)
+        except OSError as exc:
+            raise LoadError("previous generation selector changed while validating") from exc
+        identity_fields = ("st_dev", "st_ino", "st_mode", "st_mtime_ns", "st_ctime_ns")
+        if (release_id != match.group(1) or current_target != target
+                or any(getattr(selector_before, field) != getattr(selector_after, field)
+                       for field in identity_fields)):
+            raise LoadError("previous generation selector changed while validating")
+        return target
+
+    parent = output / "current-release.json"
+    if not os.path.lexists(parent):
+        return None
+    try:
+        parent_payload = json.loads(parent.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise LoadError(f"previous parent release is invalid: {exc}") from exc
+    if not isinstance(parent_payload, dict) or parent_payload.get("schema_version") != 2:
+        raise LoadError("previous parent release must use schema 2")
+    flat_dhcp = (
+        ZTP_DIR / "config/isc-dhcp-server"
+        if parent_payload.get("dhcp_status") == "enabled" else None
+    )
+    release_id, _payloads = _pinned_generation_payloads(
+        project, parent, flat_dhcp,
+    )
+    generation = stage_pinned_generation(
+        project, parent, flat_dhcp,
+    )
+    if generation.name != release_id:
+        raise LoadError("previous generation changed during migration")
+    commit_pinned_generation(project, generation, expected_current=None)
+    return f"generations/{release_id}"
+
+
+_ROLLBACK_RUNTIME_FILES = (
+    "ztp-bootstrap_oob.sh", "ztp-bootstrap_oobofoob.sh", "ztp.json",
+)
+_ROLLBACK_PAYLOAD_LIMIT = 32 * 1024 * 1024
+_ROLLBACK_TOTAL_LIMIT = 128 * 1024 * 1024
+_ROLLBACK_RECEIPT_LIMIT = 1024 * 1024
+_ROLLBACK_MARKER_LIMIT = 128 * 1024
+
+
+def _read_rollback_regular(
+    path: Path, *, limit: int = _ROLLBACK_PAYLOAD_LIMIT,
+    missing_ok: bool = False,
+) -> tuple[bytes, int] | None:
+    """Read one immutable-by-name rollback input through a held descriptor."""
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        if missing_ok and not os.path.lexists(path):
+            return None
+        raise LoadError(f"rollback input disappeared while opening: {path}")
+    except OSError as exc:
+        raise LoadError(f"rollback input cannot be inspected: {path}: {exc}") from exc
+    if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+            or before.st_size < 0 or before.st_size > limit):
+        raise LoadError(f"rollback input is not a bounded single-link file: {path}")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    descriptor = -1
+    try:
+        descriptor = os.open(path, flags)
+        opened = os.fstat(descriptor)
+        identity = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns")
+        if any(getattr(before, field) != getattr(opened, field) for field in identity):
+            raise LoadError(f"rollback input changed while opening: {path}")
+        chunks = []
+        remaining = limit + 1
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        after_fd = os.fstat(descriptor)
+        after_name = path.lstat()
+        if len(payload) > limit or any(
+            getattr(opened, field) != getattr(after_fd, field)
+            or getattr(opened, field) != getattr(after_name, field)
+            for field in identity
+        ):
+            raise LoadError(f"rollback input changed while reading: {path}")
+        return payload, stat.S_IMODE(opened.st_mode)
+    except OSError as exc:
+        raise LoadError(f"rollback input cannot be read safely: {path}: {exc}") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _describe_receipt_file(path: Path) -> dict[str, object]:
+    opened = _read_rollback_regular(path, missing_ok=True)
+    if opened is None:
+        return {"state": "missing"}
+    payload, mode = opened
+    return {
+        "state": "file", "sha256": hashlib.sha256(payload).hexdigest(),
+        "mode": mode,
+    }
+
+
+def _snapshot_receipt_file(path: Path, snapshot: Path) -> dict[str, object]:
+    opened = _read_rollback_regular(path, missing_ok=True)
+    if opened is None:
+        return {"state": "missing"}
+    payload, mode = opened
+    record = {
+        "state": "file", "sha256": hashlib.sha256(payload).hexdigest(),
+        "mode": mode,
+    }
+    if record["state"] == "file":
+        snapshot.parent.mkdir(parents=True, exist_ok=True)
+        snapshot.write_bytes(payload)
+        snapshot.chmod(int(record["mode"]))
+    return record
+
+
+def _receipt_authority(path: Path) -> dict[str, object]:
+    opened = _read_rollback_regular(path, missing_ok=True)
+    if opened is None:
+        return {"state": "missing"}
+    payload, _mode = opened
+    return {"state": "file", "sha256": hashlib.sha256(payload).hexdigest()}
+
+
+def prepare_runtime_rollback_receipt(
+    project: Path, generation: Path,
+) -> Path:
+    """Persist every flat surface needed to recover A after B generation fails.
+
+    The receipt does not authorize rollback after a new parent has committed.
+    It binds the still-active A parent/report/DHCP authorities and snapshots the
+    flat bootstrap, key, YAML-latest and prefix surfaces which generation may
+    change before the parent commit.
+    """
+    canonical_project = project.resolve(strict=True)
+    output = canonical_project / "99-output-ztp"
+    selector = output / "current"
+    if (not selector.is_symlink()
+            or os.readlink(selector) != f"generations/{generation.name}"):
+        raise LoadError("A rollback receipt requires the selected frozen generation")
+    generation_dhcp = generation / "dhcp"
+    release_id, _payloads = _pinned_generation_payloads(
+        canonical_project, generation / "current-release.json",
+        generation_dhcp if generation_dhcp.is_dir() else None,
+    )
+    try:
+        parent = json.loads(
+            (generation / "current-release.json").read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise LoadError(f"A rollback parent is invalid: {exc}") from exc
+    dhcp_status = parent.get("dhcp_status")
+    # The URL publication belongs to A.  Project inputs may already contain
+    # B, so derive this policy only from A's immutable generation snapshot.
+    settings = load_global(generation / "inputs/global")
+    report_path = output / generation_report.REPORT_NAME
+    if os.path.lexists(report_path):
+        try:
+            report = generation_report.inspect_generation_report(
+                canonical_project, published_dir=ZTP_DIR / "config/publickey",
+            )
+        except generation_report.GenerationReportError as exc:
+            raise LoadError(f"A generation report is invalid: {exc}") from exc
+        if report.get("release_id") != release_id:
+            raise LoadError("A generation report does not bind the selected parent")
+    receipts = output / "rollback-receipts"
+    receipts.mkdir(mode=0o755, exist_ok=True)
+    if (not stat.S_ISDIR(receipts.lstat().st_mode)
+            or receipts.resolve(strict=True) != receipts):
+        raise LoadError("A rollback receipt root is not canonical")
+    destination = receipts / release_id
+    if os.path.lexists(destination):
+        if not stat.S_ISDIR(destination.lstat().st_mode):
+            raise LoadError("existing A rollback receipt is not a directory")
+        # A receipt is immutable. Reuse is allowed only after full validation.
+        _load_runtime_rollback_receipt(canonical_project, destination)
+        return destination
+    stage = Path(tempfile.mkdtemp(prefix=".rollback-receipt-", dir=receipts))
+    try:
+        files = stage / "files"
+        keys = stage / "publickeys"
+        files.mkdir(mode=0o755)
+        keys.mkdir(mode=0o755)
+        frozen_files = {
+            name: _snapshot_receipt_file(ZTP_DIR / name, files / name)
+            for name in _ROLLBACK_RUNTIME_FILES
+        }
+        publickey_name = ZTP_DIR / "config/publickey"
+        if not publickey_name.is_dir() or publickey_name.is_symlink():
+            raise LoadError("A rollback publickey directory is not canonical")
+        publickey_dir = publickey_name.resolve(strict=True)
+        publickey_dir.relative_to(ZTP_DIR.resolve(strict=True))
+        publickeys: dict[str, dict[str, object]] = {}
+        for source in sorted(publickey_dir.glob("*.pub"), key=lambda item: item.name):
+            publickeys[source.name] = _snapshot_receipt_file(source, keys / source.name)
+        if not publickeys or any(record.get("state") != "file" for record in publickeys.values()):
+            raise LoadError("A rollback receipt requires at least one published public key")
+        yaml_latest: dict[str, dict[str, object]] = {}
+        for relative in ("99-output-eth/latest", "99-output-ib_nvl/latest"):
+            path = canonical_project / relative
+            if not os.path.lexists(path):
+                yaml_latest[relative] = {"state": "missing"}
+                continue
+            if not path.is_symlink():
+                raise LoadError(f"A rollback YAML latest is not a symlink: {relative}")
+            target = os.readlink(path)
+            resolved = path.resolve(strict=True)
+            resolved.relative_to(path.parent.resolve(strict=True))
+            manifest = resolved / "release-manifest.json"
+            if not manifest.is_file():
+                raise LoadError(f"A rollback YAML release has no manifest: {relative}")
+            yaml_latest[relative] = {
+                "state": "link", "target": target,
+                "manifest_sha256": _sha256_path(manifest),
+            }
+        # /ztp itself is not an alias, but an earlier managed custom prefix and
+        # its ownership marker are still part of the flat A runtime surface.
+        prefix = snapshot_ztp_prefix_publication(settings)
+        prefix_links = {}
+        for path, (kind, target) in prefix.links.items():
+            relative = path.relative_to(HTTP_ROOT).as_posix()
+            prefix_links[relative] = {"kind": kind, "target": target}
+        unchanged = {
+            "parent": _receipt_authority(output / "current-release.json"),
+            "report": _receipt_authority(output / generation_report.REPORT_NAME),
+        }
+        if dhcp_status == "enabled":
+            unchanged["dhcp"] = {
+                name: _receipt_authority(ZTP_DIR / "config/isc-dhcp-server" / name)
+                for name in (
+                    "dhcp-release-manifest.json", "dhcpd.conf",
+                    "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts",
+                )
+            }
+        receipt = {
+            "schema_version": 1,
+            "record_type": "http-ztp-runtime-rollback-receipt",
+            "project": canonical_project.name,
+            "release_id": release_id,
+            "selector_target": f"generations/{release_id}",
+            "dhcp_status": dhcp_status,
+            "frozen_files": frozen_files,
+            "publickeys": publickeys,
+            "yaml_latest": yaml_latest,
+            "prefix": {
+                "marker_b64": (
+                    base64.b64encode(prefix.marker).decode("ascii")
+                    if prefix.marker is not None else None
+                ),
+                "links": prefix_links,
+            },
+            "unchanged_authorities": unchanged,
+        }
+        receipt_path = stage / "receipt.json"
+        receipt_path.write_text(
+            json.dumps(receipt, ensure_ascii=True, indent=2, sort_keys=True) + "\n",
+            encoding="ascii",
+        )
+        receipt_path.chmod(0o644)
+        for directory in (files, keys, stage):
+            descriptor = os.open(directory, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        os.rename(stage, destination)
+        descriptor = os.open(receipts, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    finally:
+        if stage.exists():
+            shutil.rmtree(stage)
+    _load_runtime_rollback_receipt(canonical_project, destination)
+    return destination
+
+
+def _load_runtime_rollback_receipt(
+    project: Path, receipt_directory: Path,
+) -> dict[str, object]:
+    """Validate a receipt and every frozen payload before any restore write."""
+    canonical_project = project.resolve(strict=True)
+    root = canonical_project / "99-output-ztp/rollback-receipts"
+    try:
+        directory_stat = receipt_directory.lstat()
+        if (not stat.S_ISDIR(directory_stat.st_mode)
+                or receipt_directory.is_symlink()
+                or directory_stat.st_nlink < 2):
+            raise LoadError("rollback receipt directory is not a real directory")
+        relative = receipt_directory.resolve(strict=True).relative_to(root.resolve(strict=True))
+    except (OSError, ValueError) as exc:
+        raise LoadError("rollback receipt path is outside the project authority") from exc
+    if len(relative.parts) != 1 or not re.fullmatch(r"[0-9a-f]{20}", relative.name):
+        raise LoadError("rollback receipt path is invalid")
+    expected_top = {"receipt.json", "files", "publickeys"}
+    if {entry.name for entry in receipt_directory.iterdir()} != expected_top:
+        raise LoadError("rollback receipt tree contains unknown or missing entries")
+    for name in ("files", "publickeys"):
+        child = receipt_directory / name
+        child_stat = child.lstat()
+        if (not stat.S_ISDIR(child_stat.st_mode) or child.is_symlink()
+                or child.resolve(strict=True).parent != receipt_directory.resolve(strict=True)):
+            raise LoadError("rollback receipt payload directory is unsafe")
+    path = receipt_directory / "receipt.json"
+    try:
+        opened = _read_rollback_regular(path, limit=_ROLLBACK_RECEIPT_LIMIT)
+        assert opened is not None
+        receipt = json.loads(opened[0].decode("ascii"))
+    except (OSError, UnicodeError, json.JSONDecodeError, LoadError) as exc:
+        raise LoadError(f"rollback receipt is incomplete or invalid: {exc}") from exc
+    required = {
+        "schema_version", "record_type", "project", "release_id",
+        "selector_target", "dhcp_status", "frozen_files", "publickeys",
+        "yaml_latest", "prefix", "unchanged_authorities",
+    }
+    if (not isinstance(receipt, dict) or set(receipt) != required
+            or receipt.get("schema_version") != 1
+            or receipt.get("record_type") != "http-ztp-runtime-rollback-receipt"
+            or receipt.get("project") != canonical_project.name
+            or receipt.get("release_id") != relative.name
+            or receipt.get("selector_target") != f"generations/{relative.name}"
+            or receipt.get("dhcp_status") not in {"enabled", "disabled"}):
+        raise LoadError("rollback receipt is incomplete or invalid")
+    frozen = receipt.get("frozen_files")
+    keys = receipt.get("publickeys")
+    if not isinstance(frozen, dict) or set(frozen) != set(_ROLLBACK_RUNTIME_FILES):
+        raise LoadError("rollback receipt frozen file inventory is incomplete")
+    if not isinstance(keys, dict) or not keys:
+        raise LoadError("rollback receipt public key inventory is incomplete")
+    expected_payloads = {
+        "files": {name for name, record in frozen.items()
+                  if isinstance(record, dict) and record.get("state") == "file"},
+        "publickeys": {name for name, record in keys.items()
+                       if isinstance(record, dict) and record.get("state") == "file"},
+    }
+    for directory, names in expected_payloads.items():
+        actual = {entry.name for entry in (receipt_directory / directory).iterdir()}
+        if actual != names:
+            raise LoadError("rollback receipt payload inventory is incomplete or extended")
+    for group, directory in ((frozen, "files"), (keys, "publickeys")):
+        for name, record in group.items():
+            if (not isinstance(name, str) or Path(name).name != name
+                    or not isinstance(record, dict)
+                    or record.get("state") not in {"file", "missing"}):
+                raise LoadError("rollback receipt file record is incomplete")
+            snapshot = receipt_directory / directory / name
+            if record["state"] == "missing":
+                if os.path.lexists(snapshot):
+                    raise LoadError("rollback receipt contains an unexpected payload")
+                continue
+            opened = _read_rollback_regular(snapshot)
+            if opened is None:
+                raise LoadError("rollback receipt payload is absent")
+            payload, payload_mode = opened
+            if (set(record) != {"state", "sha256", "mode"}
+                    or isinstance(record.get("mode"), bool)
+                    or not isinstance(record.get("mode"), int)
+                    or int(record["mode"]) < 0 or int(record["mode"]) > 0o777
+                    or not isinstance(record.get("sha256"), str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", str(record["sha256"]))
+                    or payload_mode != record.get("mode")
+                    or hashlib.sha256(payload).hexdigest() != record.get("sha256")):
+                raise LoadError("rollback receipt payload is incomplete or changed")
+    latest = receipt.get("yaml_latest")
+    if not isinstance(latest, dict) or set(latest) != {
+        "99-output-eth/latest", "99-output-ib_nvl/latest",
+    }:
+        raise LoadError("rollback receipt YAML inventory is incomplete")
+    for relative, record in latest.items():
+        if (not isinstance(record, dict)
+                or record.get("state") not in {"missing", "link"}):
+            raise LoadError("rollback receipt YAML record is invalid")
+        if record["state"] == "missing" and set(record) != {"state"}:
+            raise LoadError("rollback receipt missing YAML record is extended")
+        if record["state"] == "link":
+            target = record.get("target")
+            digest = record.get("manifest_sha256")
+            if (set(record) != {"state", "target", "manifest_sha256"}
+                    or not isinstance(target, str) or Path(target).is_absolute()
+                    or not target or any(part in {"", ".", ".."} for part in Path(target).parts)
+                    or not isinstance(digest, str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+                raise LoadError("rollback receipt YAML link record is invalid")
+    prefix = receipt.get("prefix")
+    if (not isinstance(prefix, dict) or set(prefix) != {"marker_b64", "links"}
+            or prefix["marker_b64"] is not None
+            and not isinstance(prefix["marker_b64"], str)
+            or not isinstance(prefix["links"], dict)):
+        raise LoadError("rollback receipt prefix record is incomplete")
+    if prefix["marker_b64"] is not None:
+        if len(prefix["marker_b64"]) > _ROLLBACK_MARKER_LIMIT * 2:
+            raise LoadError("rollback receipt prefix marker is oversized")
+        try:
+            marker_payload = base64.b64decode(prefix["marker_b64"], validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise LoadError("rollback receipt prefix marker is invalid") from exc
+        if len(marker_payload) > _ROLLBACK_MARKER_LIMIT:
+            raise LoadError("rollback receipt prefix marker is oversized")
+    for relative, record in prefix["links"].items():
+        if not isinstance(relative, str):
+            raise LoadError("rollback receipt prefix link record is invalid")
+        path = Path(relative)
+        if (path.is_absolute() or not path.parts
+                or any(part in {"", ".", ".."} for part in path.parts)
+                or not isinstance(record, dict)
+                or set(record) != {"kind", "target"}
+                or record.get("kind") not in {"link", "missing", "other"}
+                or record.get("target") is not None
+                and not isinstance(record.get("target"), str)):
+            raise LoadError("rollback receipt prefix link record is invalid")
+        kind = record["kind"]
+        target = record.get("target")
+        if kind == "link":
+            if target is None:
+                raise LoadError("rollback receipt prefix link target is absent")
+            destination = HTTP_ROOT / path
+            if (destination.parent / target).resolve(strict=False) != ZTP_DIR.resolve(strict=True):
+                raise LoadError("rollback receipt prefix link target is outside ZTP")
+        elif target is not None:
+            raise LoadError("rollback receipt non-link prefix target must be null")
+    authorities = receipt.get("unchanged_authorities")
+    expected_authorities = {"parent", "report"}
+    if receipt["dhcp_status"] == "enabled":
+        expected_authorities.add("dhcp")
+    if not isinstance(authorities, dict) or set(authorities) != expected_authorities:
+        raise LoadError("rollback receipt unchanged authority inventory is incomplete")
+    for name in ("parent", "report"):
+        record = authorities.get(name)
+        if (not isinstance(record, dict) or record.get("state") not in {"file", "missing"}
+                or record["state"] == "missing" and set(record) != {"state"}
+                or record["state"] == "file" and (
+                    set(record) != {"state", "sha256"}
+                    or not isinstance(record.get("sha256"), str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", record["sha256"])
+                )):
+            raise LoadError("rollback receipt unchanged authority record is invalid")
+    if "dhcp" in authorities:
+        expected_dhcp = {
+            "dhcp-release-manifest.json", "dhcpd.conf", "dhcpd_eth.hosts",
+            "dhcpd_ib.hosts", "dhcpd_nvl.hosts",
+        }
+        if not isinstance(authorities["dhcp"], dict) or set(authorities["dhcp"]) != expected_dhcp:
+            raise LoadError("rollback receipt DHCP authority inventory is invalid")
+        for record in authorities["dhcp"].values():
+            if (not isinstance(record, dict) or set(record) != {"state", "sha256"}
+                    or record.get("state") != "file"
+                    or not isinstance(record.get("sha256"), str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", record["sha256"])):
+                raise LoadError("rollback receipt DHCP authority record is invalid")
+    return receipt
+
+
+def _restore_receipt_file(
+    path: Path, record: dict[str, object], payload: bytes | None,
+) -> None:
+    if record["state"] == "missing":
+        if payload is not None:
+            raise LoadError("rollback missing-file record has an unexpected payload")
+        if os.path.lexists(path):
+            if path.is_dir() and not path.is_symlink():
+                raise LoadError(f"rollback target became a directory: {path}")
+            path.unlink()
+        return
+    if payload is None or hashlib.sha256(payload).hexdigest() != record["sha256"]:
+        raise LoadError("rollback receipt payload changed before restore")
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.rollback-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, int(record["mode"]))
+        if os.path.lexists(path) and path.is_dir() and not path.is_symlink():
+            raise LoadError(f"rollback target became a directory: {path}")
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _verify_rollback_authorities(
+    project: Path, receipt: dict[str, object],
+) -> None:
+    output = project / "99-output-ztp"
+    authorities = receipt.get("unchanged_authorities")
+    if not isinstance(authorities, dict):
+        raise LoadError("rollback receipt authority inventory is incomplete")
+    for name, path in {
+        "parent": output / "current-release.json",
+        "report": output / generation_report.REPORT_NAME,
+    }.items():
+        if authorities.get(name) != _receipt_authority(path):
+            raise LoadError(f"{name} authority no longer equals A; rollback is blocked")
+    if receipt["dhcp_status"] == "enabled":
+        dhcp = authorities.get("dhcp")
+        if not isinstance(dhcp, dict):
+            raise LoadError("rollback receipt DHCP authority is incomplete")
+        current = {
+            name: _receipt_authority(ZTP_DIR / "config/isc-dhcp-server" / name)
+            for name in dhcp
+        }
+        if current != dhcp:
+            raise LoadError("DHCP authority no longer equals A; rollback is blocked")
+    elif "dhcp" in authorities:
+        raise LoadError("rollback receipt disabled DHCP authority is invalid")
+
+
+def _validate_rollback_yaml_release(
+    project: Path, relative: str, record: dict[str, object],
+) -> Path | None:
+    if record["state"] == "missing":
+        return None
+    latest = project / relative
+    resolved = (latest.parent / str(record["target"])).resolve(strict=True)
+    resolved.relative_to(latest.parent.resolve(strict=True))
+    metadata = resolved.lstat()
+    if not stat.S_ISDIR(metadata.st_mode) or resolved.is_symlink():
+        raise LoadError("rollback YAML release target is not a real directory")
+    manifest_path = resolved / "release-manifest.json"
+    manifest = _load_release_json(manifest_path, f"{relative} rollback manifest")
+    if _receipt_authority(manifest_path).get("sha256") != record["manifest_sha256"]:
+        raise LoadError("rollback YAML release manifest no longer equals A")
+    _nonempty_file(resolved / ".published-complete", f"{relative} completion marker")
+    label = "cumulus" if relative == "99-output-eth/latest" else "nvos"
+    _validate_child_artifacts(label=label, release_dir=resolved, manifest=manifest)
+    return resolved
+
+
+def _prevalidate_rollback_latest_targets(
+    project: Path, records: dict[str, dict[str, object]],
+) -> None:
+    for relative, record in records.items():
+        latest = project / relative
+        parent = latest.parent
+        if os.path.lexists(parent):
+            if (not parent.is_dir() or parent.is_symlink()
+                    or parent.resolve(strict=True) != parent):
+                raise LoadError("rollback YAML latest parent is not canonical")
+        elif record["state"] != "missing":
+            raise LoadError("rollback YAML latest parent is absent")
+        else:
+            ancestor = parent.parent
+            if (not ancestor.is_dir() or ancestor.is_symlink()
+                    or ancestor.resolve(strict=True) != ancestor):
+                raise LoadError("rollback YAML latest ancestor is not canonical")
+        if os.path.lexists(latest) and not latest.is_symlink():
+            raise LoadError("rollback YAML latest target became a non-link")
+        _validate_rollback_yaml_release(project, relative, record)
+
+
+def _verify_rollback_latest_state(
+    project: Path, records: dict[str, dict[str, object]],
+) -> None:
+    for relative, record in records.items():
+        latest = project / relative
+        if record["state"] == "missing":
+            if os.path.lexists(latest):
+                raise LoadError("rollback YAML latest should be absent")
+            continue
+        if not latest.is_symlink() or os.readlink(latest) != record["target"]:
+            raise LoadError("rollback YAML latest does not select A")
+        _validate_rollback_yaml_release(project, relative, record)
+
+
+def _prevalidate_prefix_restore(snapshot: ZtpPrefixPublicationSnapshot) -> None:
+    if snapshot.marker is not None and len(snapshot.marker) > _ROLLBACK_MARKER_LIMIT:
+        raise LoadError("rollback prefix marker is oversized")
+    if os.path.lexists(ZTP_PREFIX_MARKER) and ZTP_PREFIX_MARKER.is_symlink():
+        raise LoadError("rollback prefix marker became a symlink")
+    for path, (kind, target) in snapshot.links.items():
+        path.parent.resolve(strict=True).relative_to(HTTP_ROOT.resolve(strict=True))
+        if kind == "other":
+            if not os.path.lexists(path) or path.is_symlink():
+                raise LoadError("rollback prefix non-link authority changed")
+        elif os.path.lexists(path) and not path.is_symlink():
+            raise LoadError("rollback prefix target became a non-link")
+        if kind == "link" and target is None:
+            raise LoadError("rollback prefix link target is absent")
+
+
+def _verify_prefix_snapshot(snapshot: ZtpPrefixPublicationSnapshot) -> None:
+    marker = None
+    if os.path.lexists(ZTP_PREFIX_MARKER):
+        opened = _read_rollback_regular(
+            ZTP_PREFIX_MARKER, limit=_ROLLBACK_MARKER_LIMIT,
+        )
+        assert opened is not None
+        marker = opened[0]
+    if marker != snapshot.marker:
+        raise LoadError("rollback prefix marker post-verify failed")
+    for path, (kind, target) in snapshot.links.items():
+        if kind == "missing":
+            if os.path.lexists(path):
+                raise LoadError("rollback prefix path should be absent")
+        elif kind == "link":
+            if not path.is_symlink() or os.readlink(path) != target:
+                raise LoadError("rollback prefix link post-verify failed")
+        elif kind == "other":
+            if not os.path.lexists(path) or path.is_symlink():
+                raise LoadError("rollback prefix non-link post-verify failed")
+        else:
+            raise LoadError("rollback prefix snapshot kind is invalid")
+
+
+def _verify_active_runtime_receipt(
+    project: Path, receipt_directory: Path, receipt: dict[str, object],
+) -> None:
+    """Prove a reusable receipt still describes the active flat A exactly."""
+    _verify_rollback_authorities(project, receipt)
+    for name, record in receipt["frozen_files"].items():
+        if _describe_receipt_file(ZTP_DIR / name) != record:
+            raise LoadError("existing rollback receipt no longer matches A runtime")
+    publickey_dir = ZTP_DIR / "config/publickey"
+    if not publickey_dir.is_dir() or publickey_dir.is_symlink():
+        raise LoadError("existing rollback receipt publickey authority changed")
+    records = receipt["publickeys"]
+    actual_names = {path.name for path in publickey_dir.glob("*.pub")}
+    if actual_names != set(records):
+        raise LoadError("existing rollback receipt public key set changed")
+    for name, record in records.items():
+        if _describe_receipt_file(publickey_dir / name) != record:
+            raise LoadError("existing rollback receipt public key changed")
+    _verify_rollback_latest_state(project, receipt["yaml_latest"])
+    prefix = receipt["prefix"]
+    snapshot = ZtpPrefixPublicationSnapshot(
+        marker=(None if prefix["marker_b64"] is None else base64.b64decode(
+            prefix["marker_b64"], validate=True,
+        )),
+        links={
+            HTTP_ROOT / relative: (record["kind"], record.get("target"))
+            for relative, record in prefix["links"].items()
+        },
+    )
+    _verify_prefix_snapshot(snapshot)
+
+
+def prepare_active_runtime_rollback_receipt(
+    project: Path, selector_target: str,
+) -> Path | None:
+    """Prepare/reuse A only when this project's A is the active Linux runtime.
+
+    A selector created on a workstation is a preparation proof, not evidence
+    that the flat Linux runtime belongs to A.  Cross-project switches retain
+    their established behavior but cannot claim this same-project rollback.
+    """
+    canonical_project = project.resolve(strict=True)
+    match = re.fullmatch(r"generations/([0-9a-f]{20})", selector_target)
+    if match is None:
+        raise LoadError("selected A generation target is invalid")
+    active = active_project()
+    if active != canonical_project:
+        if active is None:
+            info(
+                "selected A is preparation-only on this host; "
+                "no flat runtime rollback receipt is created"
+            )
+        else:
+            warn(
+                f"active runtime belongs to {active.name}; target A rollback receipt "
+                "is not reusable during this cross-project switch"
+            )
+        return None
+    generation = canonical_project / "99-output-ztp" / selector_target
+    receipt_path = (
+        canonical_project / "99-output-ztp/rollback-receipts" / match.group(1)
+    )
+    if os.path.lexists(receipt_path):
+        receipt = _load_runtime_rollback_receipt(canonical_project, receipt_path)
+        _verify_active_runtime_receipt(canonical_project, receipt_path, receipt)
+        return receipt_path
+    receipt_path = prepare_runtime_rollback_receipt(canonical_project, generation)
+    receipt = _load_runtime_rollback_receipt(canonical_project, receipt_path)
+    _verify_active_runtime_receipt(canonical_project, receipt_path, receipt)
+    return receipt_path
+
+
+def restore_runtime_rollback_receipt(
+    project: Path, receipt_directory: Path, *, expected_current: str,
+    deployment_lock_descriptor: int | None,
+    services_quiesced: bool,
+    runtime_backend: ServiceRuntimeBackend | None,
+) -> None:
+    """Restore A after an uncommitted B generation failure, then verify all.
+
+    This is intentionally not an after-commit rollback API.  The A selector,
+    parent, report and installed DHCP must still be unchanged.  Any mismatch
+    fails before the first write and services must remain stopped.
+    """
+    if (deployment_lock_descriptor is None or services_quiesced is not True
+            or runtime_backend is None):
+        raise LoadError("runtime rollback requires the deployment lock and quiesced services")
+    try:
+        descriptor_stat = os.fstat(deployment_lock_descriptor)
+        lock_stat = DEPLOYMENT_LOCK.lstat()
+    except (OSError, ValueError) as exc:
+        raise LoadError(f"runtime rollback deployment lock is invalid: {exc}") from exc
+    if (not stat.S_ISREG(descriptor_stat.st_mode)
+            or not stat.S_ISREG(lock_stat.st_mode)
+            or descriptor_stat.st_nlink != 1 or lock_stat.st_nlink != 1
+            or (descriptor_stat.st_dev, descriptor_stat.st_ino)
+            != (lock_stat.st_dev, lock_stat.st_ino)):
+        raise LoadError("runtime rollback deployment lock identity is invalid")
+    probe = os.open(DEPLOYMENT_LOCK, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        try:
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            pass
+        else:
+            fcntl.flock(probe, fcntl.LOCK_UN)
+            raise LoadError("runtime rollback deployment lock is not held")
+    finally:
+        os.close(probe)
+    still_active = active_managed_services(
+        runtime_backend, host_role="management-server",
+    )
+    if still_active:
+        raise LoadError(
+            "runtime rollback requires every managed service to be stopped: "
+            + ", ".join(still_active)
+        )
+    canonical_project = project.resolve(strict=True)
+    output = canonical_project / "99-output-ztp"
+    receipt = _load_runtime_rollback_receipt(canonical_project, receipt_directory)
+    if active_project() != canonical_project:
+        raise LoadError("runtime rollback project is not the active project")
+    if expected_current != receipt["selector_target"]:
+        raise LoadError("rollback expected selector does not name receipt A")
+    selector = output / "current"
+    if not selector.is_symlink() or os.readlink(selector) != expected_current:
+        raise LoadError("rollback selector no longer selects A")
+    selector_before = selector.lstat()
+    generation = output / expected_current
+    generation_dhcp = generation / "dhcp"
+    _pinned_generation_payloads(
+        canonical_project, generation / "current-release.json",
+        generation_dhcp if generation_dhcp.is_dir() else None,
+    )
+    _verify_rollback_authorities(canonical_project, receipt)
+    latest_records = receipt.get("yaml_latest")
+    if not isinstance(latest_records, dict):
+        raise LoadError("rollback receipt YAML inventory is incomplete")
+    _prevalidate_rollback_latest_targets(canonical_project, latest_records)
+    prefix_record = receipt.get("prefix")
+    if not isinstance(prefix_record, dict) or set(prefix_record) != {"marker_b64", "links"}:
+        raise LoadError("rollback receipt prefix record is incomplete")
+    links = {}
+    for relative, record in prefix_record["links"].items():
+        path = HTTP_ROOT / relative
+        path.resolve(strict=False).parent.relative_to(HTTP_ROOT.resolve())
+        links[path] = (record["kind"], record.get("target"))
+    marker = (
+        None if prefix_record["marker_b64"] is None
+        else base64.b64decode(prefix_record["marker_b64"], validate=True)
+    )
+    prefix_snapshot = ZtpPrefixPublicationSnapshot(marker=marker, links=links)
+    _prevalidate_prefix_restore(prefix_snapshot)
+
+    # All immutable and unchanged authorities are proven before the first write.
+    frozen = receipt["frozen_files"]
+    for name in frozen:
+        target = ZTP_DIR / name
+        if os.path.lexists(target) and target.is_dir() and not target.is_symlink():
+            raise LoadError(f"rollback target became a directory: {target}")
+    publickey_name = ZTP_DIR / "config/publickey"
+    if not publickey_name.is_dir() or publickey_name.is_symlink():
+        raise LoadError("rollback publickey directory changed; services must remain stopped")
+    publickey_dir = publickey_name.resolve(strict=True)
+    publickey_dir.relative_to(ZTP_DIR.resolve(strict=True))
+    key_records = receipt["publickeys"]
+    for current in publickey_dir.glob("*.pub"):
+        if current.is_dir() and not current.is_symlink():
+            raise LoadError("rollback publickey target became a directory")
+    # Hold every immutable receipt payload in memory before the first flat
+    # write. A later receipt-tree race can no longer produce a half restore.
+    payload_groups: dict[str, dict[str, bytes | None]] = {
+        "files": {}, "publickeys": {},
+    }
+    payload_total = 0
+    for group_name, records in (("files", frozen), ("publickeys", key_records)):
+        for name, record in records.items():
+            if record["state"] == "missing":
+                payload_groups[group_name][name] = None
+                continue
+            opened = _read_rollback_regular(receipt_directory / group_name / name)
+            if opened is None:
+                raise LoadError("rollback receipt payload disappeared before restore")
+            payload, mode = opened
+            if (mode != record["mode"]
+                    or hashlib.sha256(payload).hexdigest() != record["sha256"]):
+                raise LoadError("rollback receipt payload changed before restore")
+            payload_total += len(payload)
+            if payload_total > _ROLLBACK_TOTAL_LIMIT:
+                raise LoadError("rollback receipt payload set is oversized")
+            payload_groups[group_name][name] = payload
+    for name, record in frozen.items():
+        _restore_receipt_file(
+            ZTP_DIR / name, record, payload_groups["files"][name],
+        )
+    for extra in set(path.name for path in publickey_dir.glob("*.pub")) - set(key_records):
+        path = publickey_dir / extra
+        if path.is_dir() and not path.is_symlink():
+            raise LoadError("rollback publickey target became a directory")
+        path.unlink()
+    for name, record in key_records.items():
+        _restore_receipt_file(
+            publickey_dir / name, record, payload_groups["publickeys"][name],
+        )
+    restore_release_links({
+        canonical_project / relative: (
+            record.get("target") if record["state"] == "link" else None
+        )
+        for relative, record in latest_records.items()
+    })
+    if prefix_snapshot.links or prefix_snapshot.marker is not None:
+        restore_ztp_prefix_publication(prefix_snapshot)
+
+    # A multi-path restore is not an atomic selector switch.  Report success
+    # only after every surface and the unchanged selector have been rechecked.
+    for name, record in frozen.items():
+        path = ZTP_DIR / name
+        actual = _describe_receipt_file(path)
+        if actual != record:
+            raise LoadError(f"rollback post-verify failed for {name}; services remain stopped")
+    for name, record in key_records.items():
+        if _describe_receipt_file(publickey_dir / name) != record:
+            raise LoadError(f"rollback post-verify failed for public key {name}")
+    if {path.name for path in publickey_dir.glob("*.pub")} != set(key_records):
+        raise LoadError("rollback public key set post-verify failed")
+    _verify_rollback_latest_state(canonical_project, latest_records)
+    _verify_prefix_snapshot(prefix_snapshot)
+    _verify_rollback_authorities(canonical_project, receipt)
+    selector_after = selector.lstat()
+    identity = ("st_dev", "st_ino", "st_mode", "st_mtime_ns", "st_ctime_ns")
+    if (os.readlink(selector) != expected_current
+            or any(getattr(selector_before, field) != getattr(selector_after, field)
+                   for field in identity)):
+        raise LoadError("rollback selector changed during A restore")
+    ok(f"A runtime restore verified: {receipt['release_id']}")
 
 
 def validate_dhcp_output_sources(mappings: dict[Path, Path]) -> None:
@@ -8708,6 +9616,9 @@ def main(argv: list[str] | None = None) -> int:
     inventory_directory_identity = None
     dhcp_candidate_dir: Path | None = None
     dhcp_candidate_identity: tuple[int, int] | None = None
+    previous_selector_target: str | None = None
+    pinned_generation_candidate: Path | None = None
+    runtime_rollback_receipt: Path | None = None
     deployment_lock_descriptor: int | None = None
     parent_candidate: PreparedParentRelease | None = None
     report_candidate = None
@@ -8717,6 +9628,8 @@ def main(argv: list[str] | None = None) -> int:
     http_service_available = False
     dhcp_service_available = False
     services_must_remain_stopped = False
+    runtime_restore_safe = False
+    runtime_mutation_started = False
     native_monitor_quiesced = False
     allow_management_key_generation=False
     should_monitor = False
@@ -8821,6 +9734,18 @@ def main(argv: list[str] | None = None) -> int:
         if not project.is_dir():
             raise LoadError(f"参数不是目录：{project}")
 
+        if not args.dry_run:
+            # Freeze an already committed generation before template backfill,
+            # key placeholders, or password updates can change A's sources.
+            failure_phase = "冻结旧版 release 以供显式回退"
+            previous_selector_target = ensure_previous_generation_frozen(project)
+            if local_services_supported and previous_selector_target:
+                # Capture/revalidate the truly active A before any template,
+                # password, public-key, setup, or project-input mutation.
+                runtime_rollback_receipt = prepare_active_runtime_rollback_receipt(
+                    project, previous_selector_target,
+                )
+
         if (
             local_services_supported
             and runtime_backend_instance is not None
@@ -8858,7 +9783,6 @@ def main(argv: list[str] | None = None) -> int:
             allow_management_key_generation=allow_management_key_generation,
             host_role=host_role,
         )
-
         section("活动项目 setup 检查/切换")
         if local_services_supported and runtime_backend_instance.name == "supervisor":
             # The exact listener/ifindex plan is a pre-mutation gate.  If this
@@ -8914,12 +9838,17 @@ def main(argv: list[str] | None = None) -> int:
                 native_monitor_already_quiesced=native_monitor_quiesced,
                 host_role=host_role,
             )
+            runtime_restore_safe = True
         elif local_services_supported:
             require_artifact_builder_services_inactive(
                 args.dry_run, runtime_backend=runtime_backend_instance,
                 host_role=host_role,
             )
+            runtime_restore_safe = True
         failure_phase = "活动项目 setup 检查/切换"
+        # setup is the first post-quiesce operation allowed to rewrite managed
+        # links.  Mark before entry because a child failure may be partial.
+        runtime_mutation_started = local_services_supported and not args.dry_run
         activate_project(
             project, inputs.p2p_file,
             # Configuration-only platforms cannot inject the management-host
@@ -9082,6 +10011,13 @@ def main(argv: list[str] | None = None) -> int:
             parent_candidate = prepare_current_release(
                 project, parent_release, **dhcp_candidate_option,
             )
+            if (not args.dry_run and parent_release.get("schema_version") == 2):
+                # Freeze B while its private DHCP candidate and generated
+                # inputs still exist.  No selector changes before the
+                # installation and report gates have completed.
+                pinned_generation_candidate = stage_pinned_generation(
+                    project, parent_candidate.temporary, dhcp_candidate_dir,
+                )
         if local_services_supported and not args.dry_run and parent_release is not None:
             failure_phase = "准备本次实际使用公钥报告"
             actual_key_report = generation_report.build_report(
@@ -9114,6 +10050,12 @@ def main(argv: list[str] | None = None) -> int:
             # the inspector fails closed until a full rerun under this lock.
             failure_phase = "提交本次实际使用公钥报告"
             generation_report.commit_prepared_generation_report(report_candidate)
+        if pinned_generation_candidate is not None:
+            failure_phase = "提交本轮已封存代次指针"
+            commit_pinned_generation(
+                project, pinned_generation_candidate,
+                expected_current=previous_selector_target,
+            )
 
         failure_phase = "服务启动门禁"
         section("服务启动门禁")
@@ -9210,6 +10152,20 @@ def main(argv: list[str] | None = None) -> int:
                 restore_ztp_prefix_publication(prefix_publication_snapshot)
             except (LoadError, OSError) as rollback_exc:
                 cleanup_errors.append(str(rollback_exc))
+        if (runtime_rollback_receipt is not None and not release_committed
+                and runtime_mutation_started):
+            try:
+                if previous_selector_target is None:
+                    raise LoadError("A runtime rollback selector target is absent")
+                restore_runtime_rollback_receipt(
+                    project, runtime_rollback_receipt,
+                    expected_current=previous_selector_target,
+                    deployment_lock_descriptor=deployment_lock_descriptor,
+                    services_quiesced=runtime_restore_safe,
+                    runtime_backend=runtime_backend_instance,
+                )
+            except (LoadError, OSError, ValueError) as rollback_exc:
+                cleanup_errors.append(f"A runtime rollback failed: {rollback_exc}")
         print(f"[FAILED] load 阶段失败：{failure_phase}", file=sys.stderr)
         if services_must_remain_stopped:
             print(
