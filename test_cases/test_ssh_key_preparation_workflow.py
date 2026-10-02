@@ -98,10 +98,13 @@ class SshKeyPreparationWorkflow(unittest.TestCase):
             root = Path(temporary).resolve()
             project = root / "project"
             project.mkdir(mode=0o700)
+            lock = mock.MagicMock()
+            descriptor = mock.sentinel.workstation_deployment_lock
+            lock.__enter__.return_value = descriptor
             with mock.patch("platform.system", return_value="Linux"), \
                  mock.patch.object(setup, "HERE", str(root)), \
                  mock.patch.object(setup, "HTTP_BASE", str(root)), \
-                 mock.patch.object(setup, "deployment_lock", return_value=mock.MagicMock()), \
+                 mock.patch.object(setup, "deployment_lock", return_value=lock), \
                  mock.patch.object(setup, "require_project_eligible"), \
                  mock.patch.object(setup, "stop_native_ztp_monitors") as stop, \
                  mock.patch.object(setup, "setup") as setup_transaction, \
@@ -109,7 +112,9 @@ class SshKeyPreparationWorkflow(unittest.TestCase):
                 result = setup.main(["--host-role=workstation", str(project)])
             self.assertEqual(0, result)
             stop.assert_not_called()
-            setup_transaction.assert_called_once_with(str(project))
+            setup_transaction.assert_called_once_with(
+                str(project), deployment_lock_descriptor=descriptor,
+            )
 
     @unittest.skipUnless(Path("/usr/bin/ssh-keygen").is_file(),
                          "requires pinned synthetic Ed25519 key generator")
