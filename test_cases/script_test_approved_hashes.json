@@ -24,14 +24,14 @@
       "root-entrypoint-workflow": "NOT COVERED (requires Linux EUID 0 private namespace)"
     },
     "schema_version": 1,
-    "snapshot_sha256": "61068d0d1ce4f90abe765d84947acbc57a205da4aa80208b9ad6b15d43077e62"
+    "snapshot_sha256": "13c7900980cf7ddd377a7c0a666dabbc8706fc1e237a058036ca3a85b14b2e06"
   },
-  "impact_manifest_sha256": "5662907e2ec3b0b0c43f865a94eff15c007183d0722fcca179a16f37720e1291",
+  "impact_manifest_sha256": "d76f9f78d0a6b480dfb7b1529909fa7ae70c6a9e50de16431ad69d9ebace9c97",
   "schema_version": 1,
   "scripts": {
     "DAY0-Prepare/01-a-setup.py": {
       "canonical": "DAY0-Prepare/01-a-setup.py",
-      "sha256": "eb33c1b6809cab0fdeb9f06346c5c0200fcb5e098f1c499f5c910a7cabbcbdc2"
+      "sha256": "379bdae44190c2bc98f0115fe3fc80d2f8a6f6cde3f0ed78a0eb7c666bed8453"
     },
     "DAY0-Prepare/02-unsetup.py": {
       "canonical": "DAY0-Prepare/02-unsetup.py",
@@ -39,11 +39,11 @@
     },
     "DAY0-Prepare/11-load.py": {
       "canonical": "DAY0-Prepare/11-load.py",
-      "sha256": "86c8d7c4d2189726eec302750ee479f2b8bb7d55904dbe489099dbfed9e09b83"
+      "sha256": "c6da0e27859587dd88b1c6cb794051cb833735503d938c80fe21a15ff2caee8d"
     },
     "DAY0-Prepare/12-ztp-monitor.py": {
       "canonical": "DAY0-Prepare/12-ztp-monitor.py",
-      "sha256": "4dd8c16fda2d938fc4ec71db63627f4ebf9daa2e0c01a9c08ef7117d6cdf328a"
+      "sha256": "75e6cbdbcab93eee70b86a0eb7ad4fdbf98b14acafa15c4ba7c36715cc33f4f6"
     },
     "DAY0-Prepare/13-unload.py": {
       "canonical": "DAY0-Prepare/13-unload.py",
@@ -103,7 +103,7 @@
     },
     "infra/docker/activate.py": {
       "canonical": "infra/docker/activate.py",
-      "sha256": "53a03035697896d34d8502c72e89267bd2bd2238ce21fd84f9dab35daaf1101b"
+      "sha256": "0a89e78f71d26382f2ccf1d4cfdb53bdb65d43adf2aa60d98adae7de59d5a02c"
     },
     "infra/docker/deploy.sh": {
       "canonical": "infra/docker/deploy.sh",
@@ -319,7 +319,7 @@
     },
     "tools/generation_report.py": {
       "canonical": "tools/generation_report.py",
-      "sha256": "4eb96456d1aa98bd9186eb01ceef68f839582f56906aad2530ec0979d2016416"
+      "sha256": "9ac2950b054e7dace4fdbdd7eca8404640fb2209b6f08e8b5ecebe116da8ef9f"
     },
     "tools/ib-tool-Jie/ib_tool_box/lib/__init__.py": {
       "canonical": "tools/ib-tool-Jie/ib_tool_box/lib/__init__.py",
@@ -655,7 +655,7 @@
     },
     "ztp/manual-ztp.py": {
       "canonical": "ztp/manual-ztp.py",
-      "sha256": "bbee5b22594b2134d2cbfd186a74ff4cadeec8a049fc4574012a9b9f9484bc45"
+      "sha256": "2752457eb8127e4fa6b1b0f16f530ec861187cb6afd22afc7b3d4b370a2df2ba"
     },
     "ztp/nvue_normalizer.py": {
       "canonical": "ztp/nvue_normalizer.py",
@@ -708,7 +708,7 @@
     "docs/architecture/README.md": "153837bcd62f49edf8591ceec8b1b6ccefe9a3b5638a91bed6452ac87264a0e4",
     "docs/deployment/BUNDLE_WORKFLOWS.md": "9aeabcfbadd720fb0e3ff53bc86b642d8cc4240b3315a07855f875210ce5de73",
     "docs/deployment/README.md": "7e12ea5ce77afffb8db351a230e32e2c252f332252026eb05b16a6063c05cc25",
-    "docs/operations/README.md": "560c0608221cd332165403a91a1d9b4bdd8a157327628d1fd2b56d1117528d01",
+    "docs/operations/README.md": "dc6efdeaa66ad93ed0106ca1c05cdf881bc81abd443467f713f037ba5eab413d",
     "docs/reference/README.md": "717f023b3016420b61e8889493fd0e2ab9d0106388483025f8d66dee75c75039",
     "docs/validation/README.md": "a062e4c87de1dc2e57d4d8b6abf9de31a98580f4efad423dcb43cb9135bb5a58",
     "examples/public-project/01-global.yaml.example": "539fc9ba304e21c465e2dcbbb1bdb8e2afb1063d421e3f947b05add144733928",
@@ -730,7 +730,7 @@
     "infra/infra-neutral.conf": "238bec3c9be34fc5a7bf097e36012133da4a30b90cabdf17d758796ecdab24f8",
     "requirements-container-top-level.lock": "3532f5208b462243bab779b01eb4deb21638ac05a9390c17ac997ba8d7f24998",
     "requirements-dev.txt": "2047cfeb6e7d7c3b02380624cd212528fb8416cf3e76dd924d2e2cba8567a50a",
-    "test_cases/REAL_ENVIRONMENT.md": "a70993af556f682eabaf3e319200457155a2fe918c80477b49510b247c9df476",
+    "test_cases/REAL_ENVIRONMENT.md": "4eced763f1a515bfbc27a31759787562e1a7f2117aaeb53f0325dd8948bb21f6",
     "test_cases/audit_public_tree.py": "82a0c8dbb507f8ee21b1781eba4f4d4e158142a3c7d3c70da8c1cd2e1daae433",
     "test_cases/module_loader.py": "ef1e9b44f0272209378788ed6682b8a6a68c95a76a6d545c001ddc4762471ecf",
     "test_cases/monitor_authority_root_warden.py": "f4ac61acc04af33168aa01ba295a74fe036202b9179ad65f10e9db87375a2c4c",
@@ -742,7 +742,7 @@
     "test_cases/splitter_profile_fixture.py": "7b0548d7d15b855278e21456d1ec2b667072d874ba68d527348f185f85d6d75f",
     "test_cases/user_manual_contract.json": "dc0bb8977038e9e326fa73c90fba1e992434752b89861a91d998c9d576eb6881",
     "tools/lldp-analyze-tool/04-lldp-device-aliases.json": "595529fac28098b504d67809026a59ecfa0345375ada9b16057ff069e5179250",
-    "user-manual.html": "7a5af0723eebcdffafae02120fd9533ec284331c8165a4f80177b144e3a37e7f",
+    "user-manual.html": "9f8df505b401bfe29ee84eef99141b45dab55535ade41b4c5ce1a33e4bbce492",
     "ztp/config/cumulus/ar_profile_custom.conf": "9316fe81c3238ef99076ee598abf303c955dc38343df4176ba22bc4c27729c1c",
     "ztp/config/cumulus/default.yaml": "6e3f950a5c964fabbac8106720920d3061e90bf94436f22b6ad049c64c1b5934",
     "ztp/config/cumulus/default_5.16.5.yaml": "6e3f950a5c964fabbac8106720920d3061e90bf94436f22b6ad049c64c1b5934",
@@ -843,7 +843,7 @@
     "test_cases.test_generation_input_binding_activation_contract": "75f6fb0ddc2bebf26560172316ac5a4f2bb0cb860d4a54ccfbc25080f9516760",
     "test_cases.test_generation_input_binding_contract": "0efdb5fe23c5c46b60747681105b3996e8049032b89702aac3003f3ab711eb67",
     "test_cases.test_generation_input_binding_workflow": "637e0b805bd910450f9e9a67f3b05240b256b31b8d9701d38f9025694843e91b",
-    "test_cases.test_generation_report_contract": "8dee1457b79b2bfa92344c67499fd10671d5b4dec85fc64fc003f3c74fb3dfbc",
+    "test_cases.test_generation_report_contract": "2bd4ba4e4f84c40c3c47a7f1ac8a9296b8be32c7f0b0abb3321c67e90299c494",
     "test_cases.test_generation_report_workflow": "f292f34cc2b7738c60a8b9874cc348c2045a8dfbbdac92b62deefca8dbd8a7f0",
     "test_cases.test_http_port_contract": "9ea7d6ed55a9564c05d6dbab1fad7cfbb82b46b90279f01b5ced7f66469c6839",
     "test_cases.test_http_port_workflow": "b343e2b2375c3d814d60bc9d608b28a17e2e0d478713b9a0cdf80f1534fe8914",
@@ -939,6 +939,8 @@
     "test_cases.test_req14_splitter_hostname_binding": "9ac9141b018feab33a0d5e74508242df2a612af433a6eed10d76d7dc6df59619",
     "test_cases.test_req19_infra_log_contract": "2ef87d2816ac13f920364b95c96dd9c97cda5f1d8cbaf1afe744c636cc5f95b4",
     "test_cases.test_req19_infra_log_workflow": "7c934b54215a3fde4f458d842c6e841ff158eb77d556f93e701e7c434dcf62c8",
+    "test_cases.test_req23_import_contract": "5a84aa5385b1b6db513fb856506eb84d18ba964c6801f7b59dfd3b5b2c60a080",
+    "test_cases.test_req23_import_workflow": "d64c9d88c0279d97eb11349f8e120a9d79214e71420f073e6a2fb405f326b37c",
     "test_cases.test_req7_ib_provenance": "e3d73ac32b5f4b82b8e4eec83a2a6eb7025154b19c58c0f5d6f1177ba5228595",
     "test_cases.test_req7_ib_provenance_workflow": "a0814742c6261da6a81ed53aed00f06b3dee76daef985b4fc820d3f2ac60ed89",
     "test_cases.test_req8_public_cli_help_contract": "3d3e622eab7728a7b36184fb18ba50040e80cab6dc1915a9b89965b1a96a501b",
