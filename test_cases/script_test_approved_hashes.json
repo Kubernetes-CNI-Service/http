@@ -1,31 +1,4 @@
 {
-  "full_suite_attestation": {
-    "environment": {
-      "container_toplevel_lock_sha256": "3532f5208b462243bab779b01eb4deb21638ac05a9390c17ac997ba8d7f24998",
-      "container_toplevel_versions": [
-        "Jinja2==3.1.6",
-        "openpyxl==3.1.5",
-        "pandas==2.3.3",
-        "PyYAML==6.0.3",
-        "XlsxWriter==3.2.9"
-      ],
-      "machine": "arm64",
-      "platform": "darwin",
-      "python_cache_tag": "cpython-39",
-      "python_executable": "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/bin/python3.9",
-      "python_implementation": "CPython",
-      "python_version": [
-        3,
-        9,
-        6
-      ]
-    },
-    "scenario_coverage": {
-      "root-entrypoint-workflow": "NOT COVERED (requires Linux EUID 0 private namespace)"
-    },
-    "schema_version": 1,
-    "snapshot_sha256": "13c7900980cf7ddd377a7c0a666dabbc8706fc1e237a058036ca3a85b14b2e06"
-  },
   "impact_manifest_sha256": "d76f9f78d0a6b480dfb7b1529909fa7ae70c6a9e50de16431ad69d9ebace9c97",
   "schema_version": 1,
   "scripts": {
@@ -39,7 +12,7 @@
     },
     "DAY0-Prepare/11-load.py": {
       "canonical": "DAY0-Prepare/11-load.py",
-      "sha256": "c6da0e27859587dd88b1c6cb794051cb833735503d938c80fe21a15ff2caee8d"
+      "sha256": "4d607ee6b6cdcf40677c3197f8a67615114cfc6bcec23332a988cdffd22f4431"
     },
     "DAY0-Prepare/12-ztp-monitor.py": {
       "canonical": "DAY0-Prepare/12-ztp-monitor.py",
@@ -730,7 +703,7 @@
     "infra/infra-neutral.conf": "238bec3c9be34fc5a7bf097e36012133da4a30b90cabdf17d758796ecdab24f8",
     "requirements-container-top-level.lock": "3532f5208b462243bab779b01eb4deb21638ac05a9390c17ac997ba8d7f24998",
     "requirements-dev.txt": "2047cfeb6e7d7c3b02380624cd212528fb8416cf3e76dd924d2e2cba8567a50a",
-    "test_cases/REAL_ENVIRONMENT.md": "4eced763f1a515bfbc27a31759787562e1a7f2117aaeb53f0325dd8948bb21f6",
+    "test_cases/REAL_ENVIRONMENT.md": "877a379973b8162dd2984fb66d16ac1edff6d2cc04b75d9c46bc4946487f7dd5",
     "test_cases/audit_public_tree.py": "82a0c8dbb507f8ee21b1781eba4f4d4e158142a3c7d3c70da8c1cd2e1daae433",
     "test_cases/module_loader.py": "ef1e9b44f0272209378788ed6682b8a6a68c95a76a6d545c001ddc4762471ecf",
     "test_cases/monitor_authority_root_warden.py": "f4ac61acc04af33168aa01ba295a74fe036202b9179ad65f10e9db87375a2c4c",
@@ -939,8 +912,8 @@
     "test_cases.test_req14_splitter_hostname_binding": "9ac9141b018feab33a0d5e74508242df2a612af433a6eed10d76d7dc6df59619",
     "test_cases.test_req19_infra_log_contract": "2ef87d2816ac13f920364b95c96dd9c97cda5f1d8cbaf1afe744c636cc5f95b4",
     "test_cases.test_req19_infra_log_workflow": "7c934b54215a3fde4f458d842c6e841ff158eb77d556f93e701e7c434dcf62c8",
-    "test_cases.test_req23_import_contract": "5a84aa5385b1b6db513fb856506eb84d18ba964c6801f7b59dfd3b5b2c60a080",
-    "test_cases.test_req23_import_workflow": "d64c9d88c0279d97eb11349f8e120a9d79214e71420f073e6a2fb405f326b37c",
+    "test_cases.test_req23_import_contract": "87c6803ebd4acd971110400eb2c3c54a5ea9c69c368bbf3605c953abe6e14e6c",
+    "test_cases.test_req23_import_workflow": "841bbbfbc05e5be407dbde67dbedf19fd3ba701fc086dd1f34de1fede5b509cb",
     "test_cases.test_req7_ib_provenance": "e3d73ac32b5f4b82b8e4eec83a2a6eb7025154b19c58c0f5d6f1177ba5228595",
     "test_cases.test_req7_ib_provenance_workflow": "a0814742c6261da6a81ed53aed00f06b3dee76daef985b4fc820d3f2ac60ed89",
     "test_cases.test_req8_public_cli_help_contract": "3d3e622eab7728a7b36184fb18ba50040e80cab6dc1915a9b89965b1a96a501b",
