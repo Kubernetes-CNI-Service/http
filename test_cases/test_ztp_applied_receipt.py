@@ -432,6 +432,48 @@ class AppliedReceiptPersistenceTests(unittest.TestCase):
             self.assertEqual(previous_receipt, (state / "receipt.env").read_bytes())
             self.assertEqual([], list(state.glob(".receipt.env.*")))
 
+    def test_writer_rejects_fifo_rebound_before_stage_fsync_without_blocking(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            source = root / "next.yaml"
+            source.write_bytes(b"- set:\n    system:\n      hostname: next\n")
+            state = root / "state"
+            state.mkdir(mode=0o711)
+            state.chmod(0o711)
+            previous_yaml = b"previous protected YAML\n"
+            previous_receipt = b"previous protected receipt\n"
+            (state / "last-success.yaml").write_bytes(previous_yaml)
+            (state / "receipt.env").write_bytes(previous_receipt)
+            harness = library_harness(root, """
+                chown() {
+                    local target="${@: -1}"
+                    case "$target" in
+                        */.receipt.env.*)
+                            rm -f -- "$target" || return
+                            mkfifo -- "$target" || return
+                            ;;
+                    esac
+                }
+                persist_applied_receipt \
+                    "$1" success dedicated replace next.yaml \
+                    02:00:00:00:00:01
+            """)
+            process = subprocess.Popen(
+                ["bash", str(harness), str(source)],
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+            try:
+                _, stderr = process.communicate(timeout=3)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.communicate()
+                self.fail("FIFO substitution blocked staged receipt fsync")
+            self.assertEqual(0, process.returncode, stderr)
+            self.assertEqual(previous_yaml, (state / "last-success.yaml").read_bytes())
+            self.assertEqual(previous_receipt, (state / "receipt.env").read_bytes())
+            self.assertEqual([], list(state.glob(".receipt.env.*")))
+
     def test_writer_rejects_degenerate_receipt_budget_and_retains_prior(self):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
