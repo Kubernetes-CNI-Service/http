@@ -1051,6 +1051,8 @@ def load_global(
         except ValueError as exc:
             raise LoadError(str(exc)) from exc
     ztp_enabled = _enabled(ztp.get("status"), "common.mgmt.ztp.status")
+    if not dhcp_enabled and ztp_enabled:
+        raise LoadError("DHCP disabled + ZTP enabled 是非法组合")
     prefix = _validate_ztp_prefix(ztp.get("ztp_url_prefix"))
     # service_ip is intentionally not part of global.yaml. It is derived from
     # the declarative endpoint fields in 02-dhcp-subnet_config.csv.
@@ -1420,17 +1422,96 @@ def select_p2p(
     return path
 
 
+def _open_regular_subnet_csv(path: Path):
+    """Bind CSV parsing to one non-symlink regular-file descriptor."""
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise LoadError(f"缺少 02-dhcp-subnet_config.csv：{path.name}") from exc
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise LoadError("02-dhcp-subnet_config.csv 必须是非软链接 single-link 普通文件")
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise LoadError("当前平台无法安全地拒绝 DHCP subnet CSV symlink")
+    try:
+        descriptor = os.open(path, os.O_RDONLY | nofollow | os.O_CLOEXEC)
+    except OSError as exc:
+        raise LoadError(f"DHCP subnet CSV 来源无法安全打开：{exc}") from exc
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino)
+        ):
+            raise LoadError("DHCP subnet CSV 来源身份在读取前变化")
+        if opened.st_size == 0:
+            raise LoadError(
+                f"02-dhcp-subnet_config.csv 大小为 0：{path.name}；"
+                "请准备真实内容后再次执行 load"
+            )
+        return os.fdopen(descriptor, "r", newline="", encoding="utf-8-sig")
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _subnet_source_token(path: Path) -> tuple[object, ...]:
+    """Bind the current CSV bytes and inode across LOAD validation phases."""
+    with _open_regular_subnet_csv(path) as stream:
+        before = os.fstat(stream.fileno())
+        digest = hashlib.sha256()
+        for block in iter(lambda: stream.buffer.read(1024 * 1024), b""):
+            digest.update(block)
+        after = os.fstat(stream.fileno())
+        try:
+            current = path.lstat()
+        except OSError as exc:
+            raise LoadError(f"DHCP subnet CSV 来源在读取中消失：{exc}") from exc
+    fields = lambda value: (
+        value.st_dev, value.st_ino, value.st_size,
+        value.st_mtime_ns, value.st_ctime_ns,
+    )
+    if (
+        not stat.S_ISREG(after.st_mode) or after.st_nlink != 1
+        or not stat.S_ISREG(current.st_mode) or current.st_nlink != 1
+        or fields(before) != fields(after) or fields(before) != fields(current)
+    ):
+        raise LoadError("DHCP subnet CSV 来源身份在哈希期间变化")
+    return (*fields(before), digest.hexdigest())
+
+
 def validate_subnet_file(path: Path, settings: GlobalSettings) -> None:
-    _nonempty_file(path, "02-dhcp-subnet_config.csv")
-    with path.open(newline="", encoding="utf-8-sig") as stream:
-        reader = csv.DictReader(stream)
+    with _open_regular_subnet_csv(path) as stream:
+        physical_lines: list[str] = []
+
+        def captured_lines():
+            for line in stream:
+                physical_lines.append(line)
+                yield line
+
+        reader = csv.DictReader(captured_lines())
         _prepare_subnet_reader(reader)
+        physical_lines.clear()  # The header is not part of the first record.
         count = 0
-        for lineno, row in enumerate(reader, start=2):
+        for row in reader:
+            lineno = reader.line_num
+            source_record = "".join(physical_lines)
+            physical_lines.clear()
             if not any(str(value or "").strip() for value in row.values()):
-                continue
+                if not source_record.strip():
+                    continue  # A physical whitespace-only line, not an empty CSV record.
+                raise LoadError(
+                    f"DHCP subnet CSV 第 {lineno} 行是仅含分隔符或引号的空字段记录；"
+                    "若该行无意义请整行删除"
+                )
             count += 1
-            service_ip, _profile, _nvos_ztp = _parse_subnet_ztp_fields(row, lineno)
+            service_ip, profile, nvos_ztp = _parse_subnet_ztp_fields(row, lineno)
+            if not settings.ztp_enabled and (profile != "none" or nvos_ztp == "yes"):
+                raise LoadError(
+                    f"DHCP subnet CSV 第 {lineno} 行启用了平台 ZTP，"
+                    "但 global ZTP disabled"
+                )
             try:
                 network = ipaddress.IPv4Network(
                     f"{row['subnet'].strip()}/{row['netmask'].strip()}", strict=False
@@ -1472,7 +1553,7 @@ def validate_subnet_file(path: Path, settings: GlobalSettings) -> None:
                         f"DHCP subnet CSV 第 {lineno} 行 service_ip={service_address} "
                         f"落入动态 range {start}-{end}"
                     )
-    if count == 0:
+    if count == 0 and (settings.dhcp_enabled or settings.ztp_enabled):
         raise LoadError("02-dhcp-subnet_config.csv 没有 subnet 记录")
 
 
