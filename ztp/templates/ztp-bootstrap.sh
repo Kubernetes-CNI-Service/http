@@ -1113,7 +1113,8 @@ try:
                 or hashlib.sha256(raw).hexdigest() != expected_hash):
             raise SystemExit("applied source changed after preflight")
         target_fd = os.open(
-            os.path.basename(target_path), os.O_WRONLY | os.O_NOFOLLOW,
+            os.path.basename(target_path),
+            os.O_WRONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
             dir_fd=state_fd,
         )
         try:

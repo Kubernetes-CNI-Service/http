@@ -4,6 +4,7 @@ import hashlib
 import os
 from pathlib import Path
 import re
+import signal
 import shlex
 import shutil
 import stat
@@ -328,6 +329,57 @@ class AppliedReceiptPersistenceTests(unittest.TestCase):
             self.assertTrue(source.is_symlink(), "test did not reach the post-hash swap")
             self.assertFalse((root / "state/receipt.env").exists())
             self.assertFalse((root / "state/last-success.yaml").exists())
+
+    def test_writer_rejects_fifo_rebound_at_yaml_stage_without_blocking(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            source = root / "next.yaml"
+            source.write_bytes(b"- set:\n    system:\n      hostname: next\n")
+            state = root / "state"
+            state.mkdir(mode=0o711)
+            state.chmod(0o711)
+            previous_yaml = b"previous protected YAML\n"
+            previous_receipt = b"previous protected receipt\n"
+            (state / "last-success.yaml").write_bytes(previous_yaml)
+            (state / "receipt.env").write_bytes(previous_receipt)
+
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            real_mktemp = shutil.which("mktemp")
+            self.assertIsNotNone(real_mktemp)
+            mktemp_shim = fake_bin / "mktemp"
+            mktemp_shim.write_text(
+                "#!/bin/sh\n"
+                f"created=$({shlex.quote(real_mktemp)} \"$@\") || exit $?\n"
+                'case "$created" in\n'
+                '  */.last-success.yaml.*) unlink "$created" || exit $?; '
+                'mkfifo "$created" || exit $?;;\n'
+                "esac\n"
+                'printf "%s\\n" "$created"\n',
+                encoding="utf-8",
+            )
+            mktemp_shim.chmod(0o755)
+            harness = library_harness(root, """
+                persist_applied_receipt \
+                    "$1" success dedicated replace next.yaml \
+                    02:00:00:00:00:01
+            """)
+            env = {**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"}
+            process = subprocess.Popen(
+                ["bash", str(harness), str(source)],
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                env=env, start_new_session=True,
+            )
+            try:
+                _, stderr = process.communicate(timeout=3)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.communicate()
+                self.fail("FIFO stage replacement blocked applied receipt persistence")
+            self.assertEqual(0, process.returncode, stderr)
+            self.assertEqual(previous_yaml, (state / "last-success.yaml").read_bytes())
+            self.assertEqual(previous_receipt, (state / "receipt.env").read_bytes())
+            self.assertEqual([], list(state.glob(".last-success.yaml.*")))
 
     def test_writer_rejects_degenerate_receipt_budget_and_retains_prior(self):
         with tempfile.TemporaryDirectory() as name:
