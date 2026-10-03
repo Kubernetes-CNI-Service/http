@@ -2536,11 +2536,16 @@ def _load_json_object(path: Path, label: str) -> dict:
     return payload
 
 
-def _hash_matches(path: Path, expected: object, label: str) -> None:
+def _hash_matches(path: Path, expected: object, label: str, *,
+                  allow_empty: bool = False,
+                  expected_host_count: Optional[int] = None) -> None:
     value = str(expected or "").strip().casefold()
     if not re.fullmatch(r"[0-9a-f]{64}", value):
         raise ActivationError(f"{label} has invalid SHA-256")
-    actual = sha256_path(path)
+    actual = sha256_path(
+        path, allow_empty=allow_empty,
+        expected_host_count=expected_host_count,
+    )
     if actual != value:
         raise ActivationError(
             f"{label} hash drift: {path}: actual={actual}, expected={value}"
@@ -2844,6 +2849,38 @@ def validate_parent_release(settings: Settings, release_manifest: Path) -> dict:
             outputs = dhcp_manifest.get("outputs")
             if not isinstance(outputs, dict):
                 raise ActivationError("parent release DHCP manifest has no outputs")
+            counts = dhcp_manifest.get("counts")
+            family_counts = (counts.get("host_declarations_by_family")
+                             if isinstance(counts, dict) else None)
+            legacy_nonempty = counts is None
+            if not legacy_nonempty and (
+                not isinstance(family_counts, dict)
+                or set(family_counts) != {"eth", "ib", "nvl"}
+                or any(type(value) is not int or value < 0
+                       for value in family_counts.values())
+            ):
+                raise ActivationError(
+                    "parent release DHCP host_declarations_by_family is invalid"
+                )
+            if not legacy_nonempty:
+                selected_families = set()
+                inventory = parent.get("inventory")
+                if not isinstance(inventory, list):
+                    raise ActivationError("parent release inventory is invalid")
+                for device in inventory:
+                    if not isinstance(device, dict):
+                        raise ActivationError("parent release inventory is invalid")
+                    device_type = device.get("type")
+                    family = ("eth" if device_type in {"eth", "eth_spx", "spx", "air"}
+                              else device_type if device_type in {"ib", "nvl"}
+                              else None)
+                    if family is not None:
+                        selected_families.add(family)
+                if any(family_counts[family] == 0
+                       for family in selected_families):
+                    raise ActivationError(
+                        "parent release selected DHCP family has no host declaration"
+                    )
             for output_name in (
                 "dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts",
             ):
@@ -2852,10 +2889,19 @@ def validate_parent_release(settings: Settings, release_manifest: Path) -> dict:
                     raise ActivationError(
                         f"parent release DHCP manifest lacks {output_name} hash"
                     )
+                family = {
+                    "dhcpd_eth.hosts": "eth",
+                    "dhcpd_ib.hosts": "ib",
+                    "dhcpd_nvl.hosts": "nvl",
+                }.get(output_name)
+                count = (family_counts[family] if family is not None
+                         and not legacy_nonempty else None)
                 _hash_matches(
                     dhcp_directory / output_name,
                     item.get("sha256"),
                     f"parent release DHCP output {output_name}",
+                    allow_empty=count == 0,
+                    expected_host_count=count,
                 )
         component_identity[name] = {
             "release_id": str(raw_component.get("release_id") or ""),

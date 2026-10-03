@@ -5,6 +5,8 @@ from __future__ import annotations
 import ast
 import hashlib
 import inspect
+import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -209,6 +211,92 @@ class Req22RuntimeInputTests(unittest.TestCase):
             mkdir.assert_not_called()
             write.assert_not_called()
             planner.assert_not_called()
+
+    def test_parent_release_accepts_only_counted_empty_unselected_hosts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = self._project(root, dhcp="enabled", ztp="disabled")
+            devices = project / "02-devices_config.csv"
+            devices.write_text("hostname,type\nsw1,eth\n", encoding="utf-8")
+            private = project / "99-output-dhcp"
+            private.mkdir()
+            public = root / "ztp/config/isc-dhcp-server"
+            public.mkdir(parents=True)
+            outputs = {}
+            for name, body in (
+                ("dhcpd.conf", b"subnet 192.0.2.0 netmask 255.255.255.0 {}\n"),
+                ("dhcpd_eth.hosts", b"host sw1 {\n}\n"),
+                ("dhcpd_ib.hosts", b""),
+                ("dhcpd_nvl.hosts", b""),
+            ):
+                target = private / name
+                target.write_bytes(body)
+                (public / name).symlink_to(target)
+                outputs[name] = {"sha256": hashlib.sha256(body).hexdigest()}
+            child_path = private / "dhcp-release-manifest.json"
+            child = {
+                "release_id": "dhcp-child", "outputs": outputs,
+                "counts": {"host_declarations_by_family": {
+                    "eth": 1, "ib": 0, "nvl": 0,
+                }},
+            }
+            child_path.write_text(json.dumps(child), encoding="utf-8")
+            (public / child_path.name).symlink_to(os.path.relpath(child_path, public))
+            parent_path = project / "99-output-ztp/current-release.json"
+            parent_path.parent.mkdir()
+            parent = {
+                "schema_version": 2, "project": "fixture", "validation": "passed",
+                "dhcp_status": "enabled", "deployment_scope": "prod",
+                "switch_scope": "eth", "input_sources": {},
+                "inventory": [{"hostname": "sw1", "type": "eth"}],
+                "inputs": {
+                    "global": hashlib.sha256(
+                        (project / "01-global.yaml").read_bytes(),
+                    ).hexdigest(),
+                    "devices": hashlib.sha256(devices.read_bytes()).hexdigest(),
+                    "subnet": hashlib.sha256(
+                        (project / "02-dhcp-subnet_config.csv").read_bytes(),
+                    ).hexdigest(),
+                    "p2p": "0" * 64,
+                },
+                "components": {"dhcp": {
+                    "release_id": "dhcp-child",
+                    "manifest_sha256": hashlib.sha256(
+                        child_path.read_bytes(),
+                    ).hexdigest(),
+                }},
+            }
+
+            def write_parent():
+                keys = (
+                    "project", "deployment_scope", "switch_scope", "inputs",
+                    "input_sources", "components", "inventory", "dhcp_status",
+                )
+                basis = {key: parent[key] for key in keys}
+                parent["release_id"] = hashlib.sha256(json.dumps(
+                    basis, ensure_ascii=False, sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")).hexdigest()[:20]
+                parent_path.write_text(json.dumps(parent), encoding="utf-8")
+
+            write_parent()
+            settings = ACTIVATE.Settings(
+                project_name="fixture", scope="prod", switch_scope="eth",
+                http_root=root,
+            )
+            with mock.patch.object(ACTIVATE, "validate_project_mount"), \
+                    mock.patch.object(ACTIVATE, "_matching_p2p_input"):
+                ACTIVATE.validate_parent_release(settings, parent_path)
+                child["counts"]["host_declarations_by_family"]["eth"] = 0
+                child_path.write_text(json.dumps(child), encoding="utf-8")
+                parent["components"]["dhcp"]["manifest_sha256"] = (
+                    hashlib.sha256(child_path.read_bytes()).hexdigest()
+                )
+                write_parent()
+                with self.assertRaisesRegex(
+                    ACTIVATE.ActivationError, "selected DHCP family",
+                ):
+                    ACTIVATE.validate_parent_release(settings, parent_path)
 
 
 if __name__ == "__main__":
