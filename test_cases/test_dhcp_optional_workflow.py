@@ -146,6 +146,51 @@ def prepare_r22_selected_nvos_core_flow(
 
 
 class DhcpOptionalWorkflowTests(unittest.TestCase):
+    def test_f02_dhcp_on_ztp_off_real_load_and_c1_emit_no_ztp_options(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            flow = type("F02DhcpOnlyFlow", (platform_fixture.PlatformReleaseFlowTests,), {})
+            flow._build_flow(root)
+            document = yaml.safe_load(flow.global_file.read_text(encoding="utf-8"))
+            mgmt = document["common"]["mgmt"]
+            mgmt["dhcp-server"] = {"status": "enabled", "package": "isc-dhcp-server"}
+            mgmt["ztp"]["status"] = "disabled"
+            mgmt["http"].update({
+                "status": "disabled", "package": "apache2",
+                "http_root": str(root), "port": 80,
+            })
+            system = document["common"]["switch"]["system"]
+            system["dns"] = {"server": ["192.0.2.53"]}
+            system["ntp"] = {"server": ["192.0.2.123"]}
+            flow.global_file.write_text(yaml.safe_dump(document), encoding="utf-8")
+            flow.subnet_file.write_text(
+                _R22_SUBNET_HEADER + _R22_ACTIVE_ROW.replace(
+                    "192.0.2.10,oob,no", ",none,no",
+                ), encoding="utf-8",
+            )
+            settings = LOAD.load_global(flow.global_file)
+            LOAD.validate_subnet_file(flow.subnet_file, settings)
+            output = flow.dhcp / "dhcpd.conf"
+            with mock.patch.object(sys, "argv", ["c1-generate_dhcp.py", "-y"]), \
+                    mock.patch.multiple(
+                        DHCP, SCRIPT_DIR=str(flow.dhcp), HTTP_ROOT=str(root),
+                        GLOBAL_YAML=str(flow.global_file),
+                        SUBNET_CSV=str(flow.subnet_file),
+                        DEVICES_CSV=str(flow.devices_file),
+                        P2P_AIR_JSON=str(root / "missing-air.json"),
+                        OUTPUT_CONF=str(output),
+                        OUTPUT_ETH=str(flow.dhcp / "dhcpd_eth.hosts"),
+                        OUTPUT_IB=str(flow.dhcp / "dhcpd_ib.hosts"),
+                        OUTPUT_NVL=str(flow.dhcp / "dhcpd_nvl.hosts"),
+                        OUTPUT_MANIFEST=str(flow.dhcp / "dhcp-release-manifest.json"),
+                        _AUTO_YES=False,
+                    ), mock.patch.object(DHCP, "stop_native_ztp_monitors"):
+                DHCP.main()
+            generated = output.read_text(encoding="utf-8")
+            self.assertIn("range 192.0.2.100 192.0.2.120", generated)
+            self.assertNotIn("option cumulus-provision-url", generated)
+            self.assertNotIn("option bootfile-name", generated)
+
     def test_f02_dhcp_off_ztp_on_rejected_by_load_and_generator_before_output(self):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)

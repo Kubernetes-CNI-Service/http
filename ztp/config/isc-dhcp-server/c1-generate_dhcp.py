@@ -1542,10 +1542,13 @@ def write_dhcpd_conf(path, subnets):
         "ddns-update-style none;",
         "authoritative;",
         "",
-        "# ZTP of Cumulus switches",
-        "option cumulus-provision-url code 239 = text;",
-        "",
     ]
+    if any(s.get("cumulus_provision_url") for s in subnets):
+        lines.extend([
+            "# ZTP of Cumulus switches",
+            "option cumulus-provision-url code 239 = text;",
+            "",
+        ])
 
     # 每个三层 subnet 使用独立的 shared-network。禁止名称重复，避免 ISC DHCP
     # 把多个地址池视为同一二层广播域并跨 subnet 分配地址。
