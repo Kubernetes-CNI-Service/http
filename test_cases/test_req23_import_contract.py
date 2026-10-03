@@ -20,10 +20,10 @@ CSV_HEADER = (
     "hostname,type,template,eth0_ip,netmask,eth0_gw,eth0_mac,"
     "eth1_ip,netmask,eth1_gw,eth1_mac\n"
 )
-HOST_ROW = "leaf01,eth,NA,10.0.0.1,24,NA,00:11:22:33:44:55,NA,NA,NA,NA\n"
+HOST_ROW = "leaf01,eth,NA,192.0.2.10,24,NA,02:00:00:00:00:10,NA,NA,NA,NA\n"
 HOST_YAML = (
     b"- set:\n    interface:\n      eth0:\n        ipv4:\n"
-    b"          address:\n            10.0.0.1/24: {}\n"
+    b"          address:\n            192.0.2.10/24: {}\n"
 )
 
 
