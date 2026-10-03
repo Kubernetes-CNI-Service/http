@@ -217,6 +217,20 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 重启 ZTP monitor 后已成功组不重复采集；后完成组仍能独立交接。
 - TAN、OOB、OOBofOOB 和角色等 AIR/Production 展示子类不作为独立门禁，按所属采集组验收。
 
+## TC-REAL-F02-6-001 — 当前轮九阶段证据与交接一致性
+
+- 对应 F02-6；自动化 direct 为 `test_ztp_group_handoff.py`，跨真实脚本场景为
+  `test_ztp_group_handoff.py` 与 `test_ztp_group_handoff_display.py`。状态：**NOT RUN / REAL_ENV REQUIRED**。
+- 前置条件：owner 单独批准的隔离项目、受控交换机及采集窗口；保存监控脚本与页面生成器的
+  SHA256、设备启动 ID、服务器本地轮次边界、九阶段来源收据和采集器启动前状态。
+- 先产生 `complete=skipped`、未应用的 DNS/NTP/timezone/key、缺时间戳与上一轮旧阶段证据；
+  逐一留存 `report.json`、HTML 页面和交接状态，均不得显示完成或启动该类型采集。
+- 再完成同一轮九阶段并留存各阶段时间、来源与 `success_index`；允许有界手工时钟偏差，
+  超界仅在精确命令日志 SHA256 与本轮 HTTP/bootstrap 证据共同绑定时接受。页面与机器
+  判据必须同时转为完成，且该类型采集只执行一次；篡改摘要或把旧阶段伪造成当前索引须拒绝。
+- 保存采集命令/退出码、归档、交接签名和重启后的幂等结果。只清理本案私有项目/测试产物，
+  不清理线上采集状态。风险：错误晋升会提前触发真实设备采集；本卡不授权执行。
+
 ## TC-REAL-MONITOR-INVENTORY-LINK-001 — Fresh load 重建采集清单入口
 
 - 前置条件：使用受控 upload overlay 得到不携带 setup-managed runtime links 的 fresh 管理服务器

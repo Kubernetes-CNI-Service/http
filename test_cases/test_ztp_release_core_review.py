@@ -129,7 +129,8 @@ class BootstrapPublicationContractTests(unittest.TestCase):
             settings = load.GlobalSettings(
                 dhcp_enabled=True, dhcp_package="isc-dhcp-server",
                 http_enabled=True, http_package="apache2",
-                http_root=ROOT, ztp_enabled=True, ztp_prefix="/ztp",
+                http_root=ROOT, http_address="198.51.100.20",
+                ztp_enabled=True, ztp_prefix="/ztp",
                 ztp_ips={
                     "air_oob": ("192.0.2.10",),
                     "air_oobofoob": ("198.51.100.10",),
@@ -734,6 +735,8 @@ class DhcpAndInventoryBoundaryTests(unittest.TestCase):
                 "schema_version: 1\n"
                 "common:\n"
                 "  mgmt:\n"
+                "    http:\n"
+                "      address: 198.51.100.20\n"
                 "    ztp:\n"
                 "      ztp_url_prefix: /ztp\n",
                 encoding="utf-8",

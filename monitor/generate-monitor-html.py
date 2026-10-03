@@ -846,26 +846,113 @@ def ztp_device_group(device: dict) -> str:
 
 
 def ztp_completed(device: dict) -> bool:
-    """Return whether a device has successfully completed the ZTP workflow."""
+    """Show completion only for the current nine-stage machine handoff proof."""
+    if not isinstance(device, dict):
+        return False
+    device_type = str(device.get("type") or "").strip().casefold()
+    progress = device.get("progress")
+    if (device_type.startswith("pending_") or not isinstance(progress, dict)
+            or progress.get("percent") != 100
+            or device.get("unbound_identity") or device.get("identity_pending")
+            or device.get("promotion_pending")
+            or device.get("overall") not in {"success", "warning"}):
+        return False
+    try:
+        current_round = int(device["ztp_round"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    if current_round < 1:
+        return False
+
+    def comparable_time(value: object) -> bool:
+        text = str(value or "").strip().replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return False
+        return parsed.tzinfo is not None and parsed.utcoffset() is not None
+
+    if current_round > 1 and not comparable_time(device.get("cycle_started_at")):
+        return False
+    boundary = str(device.get("cycle_started_at") or "")
+    boundary_time = (
+        datetime.fromisoformat(boundary.replace("Z", "+00:00"))
+        if current_round > 1 else None
+    )
     stages = device.get("stages")
-    if isinstance(stages, dict):
-        complete = stages.get("complete")
-        if isinstance(complete, dict) and complete.get("status"):
-            if str(complete.get("status")).casefold() != "success":
+    if not isinstance(stages, dict):
+        return False
+    manual_current_cycle = (
+        str(device.get("trigger_source") or "") in {
+            "manual_web", "manual_cli", "manual_reset_web", "manual_reset_cli",
+        }
+        and str(device.get("manual_cycle_marker") or "") == boundary
+    )
+    command_digest = str(device.get("manual_command_ztp_log_sha256") or "")
+    operation_start = str(device.get("manual_command_started_at") or "")
+    operation_finish = str(device.get("manual_command_finished_at") or boundary)
+
+    def in_operation_window(value: object) -> bool:
+        if not all(comparable_time(item) for item in (
+            value, operation_start, operation_finish,
+        )):
+            return False
+        event_time = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        start_time = datetime.fromisoformat(operation_start.replace("Z", "+00:00"))
+        finish_time = datetime.fromisoformat(operation_finish.replace("Z", "+00:00"))
+        return (finish_time >= start_time and
+                start_time - timedelta(seconds=30) <= event_time <=
+                finish_time + timedelta(seconds=30))
+
+    manual_command_log_current = bool(
+        manual_current_cycle
+        and device.get("manual_operation") != "reset"
+        and device.get("manual_command_ztp_complete") is True
+        and re.fullmatch(r"[0-9a-f]{64}", command_digest)
+        and command_digest == str(device.get("ztp_log_sha256") or "")
+        and device.get("ztp_log_current_boot")
+        and "complete" in (device.get("ztp_log_stage_names") or [])
+        and all(
+            isinstance(stages.get(name), dict)
+            and stages[name].get("status") in {"success", "warning"}
+            and in_operation_window(stages[name].get("timestamp"))
+            for name in ("bootstrap", "config_http")
+        )
+    )
+    for name in (
+        "dhcp", "bootstrap", "config_http", "ssh", "network", "version",
+        "config_apply", "ssh_keys", "complete",
+    ):
+        stage_value = stages.get(name)
+        if not isinstance(stage_value, dict):
+            return False
+        stage_status = str(stage_value.get("status") or "")
+        if stage_status not in {"success", "warning", "skipped"}:
+            return False
+        if name in {"config_apply", "ssh_keys"} and stage_status != "success":
+            return False
+        try:
+            stage_round = int(stage_value.get("success_index") or 0)
+        except (TypeError, ValueError):
+            return False
+        if stage_round != current_round:
+            return False
+        if current_round > 1:
+            timestamp = stage_value.get("timestamp")
+            if not comparable_time(timestamp):
                 return False
-            # Reports produced before per-cycle indices existed are accepted
-            # as legacy current state.  An explicit index=0 is different: the
-            # current monitor deliberately cleared stale evidence (notably
-            # while a factory reset is waiting for a reboot/new DHCP cycle).
-            if "success_index" not in complete:
-                return True
-            try:
-                ztp_round = max(1, int(device.get("ztp_round", 1)))
-                return int(complete.get("success_index") or 0) == ztp_round
-            except (TypeError, ValueError):
+            stage_time = datetime.fromisoformat(
+                str(timestamp).replace("Z", "+00:00")
+            )
+            if not (
+                stage_time >= boundary_time
+                or (manual_current_cycle
+                    and stage_time >= boundary_time - timedelta(seconds=30))
+                or (manual_command_log_current
+                    and name in (device.get("ztp_log_stage_names") or []))
+            ):
                 return False
-    # Older reports did not always include the complete stage details.
-    return str(device.get("overall") or "").casefold() == "success"
+    return stages["complete"]["status"] == "success"
 
 
 def render_ztp_status_rows(status: dict) -> str:

@@ -44,6 +44,114 @@ HTML = load_module(
     ROOT / "monitor/generate-monitor-html.py",
 )
 
+EXPECTED_NINE_STAGES = (
+    "dhcp", "bootstrap", "config_http", "ssh", "network", "version",
+    "config_apply", "ssh_keys", "complete",
+)
+
+
+class CompletionDisplayParityTests(unittest.TestCase):
+    def test_html_completion_uses_same_current_nine_stage_proof_as_handoff(self):
+        timestamp = "2026-09-01T12:00:00+08:00"
+        boundary = "2026-09-01T11:59:00+08:00"
+        current = {
+            "hostname": "Leaf01", "type": "eth", "ztp_round": 2,
+            "cycle_started_at": boundary, "overall": "success",
+            "progress": {"done": 9, "total": 9, "percent": 100},
+            "stages": {
+                name: {
+                    "status": "success", "detail": "fixture source receipt",
+                    "timestamp": timestamp, "success_index": 2,
+                }
+                for name in EXPECTED_NINE_STAGES
+            },
+        }
+        self.assertTrue(MONITOR.completion_handoff_device_complete(current))
+        self.assertTrue(HTML.ztp_completed(current))
+
+        skipped = json.loads(json.dumps(current))
+        skipped["stages"]["complete"]["status"] = "skipped"
+        skipped["overall"] = "running"
+        self.assertFalse(MONITOR.completion_handoff_device_complete(skipped))
+        self.assertFalse(HTML.ztp_completed(skipped))
+
+        untimed = json.loads(json.dumps(current))
+        untimed["stages"]["ssh_keys"]["timestamp"] = ""
+        self.assertFalse(MONITOR.completion_handoff_device_complete(untimed))
+        self.assertFalse(HTML.ztp_completed(untimed))
+
+        preboundary = json.loads(json.dumps(current))
+        preboundary["stages"]["config_apply"]["timestamp"] = (
+            "2026-09-01T10:00:00+08:00"
+        )
+        self.assertFalse(MONITOR.completion_handoff_device_complete(preboundary))
+        self.assertFalse(HTML.ztp_completed(preboundary))
+
+        manual_skew = json.loads(json.dumps(current))
+        manual_skew.update({
+            "trigger_source": "manual_web", "manual_cycle_marker": boundary,
+        })
+        for stage_value in manual_skew["stages"].values():
+            stage_value["timestamp"] = "2026-09-01T11:58:57+08:00"
+        self.assertTrue(MONITOR.completion_handoff_device_complete(manual_skew))
+        self.assertTrue(HTML.ztp_completed(manual_skew))
+
+        manual_digest = json.loads(json.dumps(current))
+        digest = "a" * 64
+        manual_digest.update({
+            "trigger_source": "manual_web", "manual_cycle_marker": boundary,
+            "manual_command_started_at": boundary,
+            "manual_command_finished_at": "2026-09-01T11:59:10+08:00",
+            "manual_command_ztp_complete": True,
+            "manual_command_ztp_log_sha256": digest,
+            "ztp_log_sha256": digest, "ztp_log_current_boot": True,
+            "ztp_log_stage_names": [
+                "network", "version", "config_apply", "ssh_keys", "complete",
+            ],
+        })
+        for name in manual_digest["ztp_log_stage_names"]:
+            manual_digest["stages"][name]["timestamp"] = (
+                "2026-09-01T11:56:00+08:00"
+            )
+        manual_digest["stages"]["bootstrap"]["timestamp"] = (
+            "2026-09-01T11:59:04+08:00"
+        )
+        manual_digest["stages"]["config_http"]["timestamp"] = (
+            "2026-09-01T11:59:05+08:00"
+        )
+        self.assertTrue(MONITOR.completion_handoff_device_complete(manual_digest))
+        self.assertTrue(HTML.ztp_completed(manual_digest))
+        bad_digest = json.loads(json.dumps(manual_digest))
+        bad_digest["ztp_log_sha256"] = "0" * 64
+        self.assertFalse(MONITOR.completion_handoff_device_complete(bad_digest))
+        self.assertFalse(HTML.ztp_completed(bad_digest))
+
+        for stage_name, status in (
+            ("config_apply", "skipped"),
+            ("config_apply", "warning"),
+            ("ssh_keys", "skipped"),
+            ("ssh_keys", "warning"),
+        ):
+            with self.subTest(stage=stage_name, status=status):
+                not_applied = json.loads(json.dumps(current))
+                not_applied["stages"][stage_name]["status"] = status
+                self.assertFalse(
+                    MONITOR.completion_handoff_device_complete(not_applied),
+                )
+                self.assertFalse(HTML.ztp_completed(not_applied))
+
+        for stage_name, device_type in (("dhcp", "eth"), ("version", "ib")):
+            with self.subTest(legitimate_skip=stage_name):
+                allowed = json.loads(json.dumps(current))
+                allowed["type"] = device_type
+                allowed["stages"][stage_name]["status"] = "skipped"
+                self.assertTrue(MONITOR.completion_handoff_device_complete(allowed))
+                self.assertTrue(HTML.ztp_completed(allowed))
+
+        sparse = {"ztp_round": 1, "stages": {"complete": {"status": "success"}}}
+        self.assertFalse(MONITOR.completion_handoff_device_complete(sparse))
+        self.assertFalse(HTML.ztp_completed(sparse))
+
 
 def runtime_device(hostname: str, *, environment: str = "unknown") -> dict:
     return {
@@ -100,12 +208,20 @@ class CompletionStateAuditTests(unittest.TestCase):
 
 class AutomaticHandoffNamingTests(unittest.TestCase):
     def test_process_calls_gate_only_automatic_handoff(self):
+        timestamp = "2026-09-01T12:00:00+08:00"
         report = {
             "scope": "all",
             "devices": [{
                 "hostname": "AIR-Leaf01", "type": "air", "boot_id": "boot-a",
-                "progress": {"percent": 100},
-                "stages": {"complete": {"timestamp": "done-a"}},
+                "ztp_round": 1, "overall": "success",
+                "progress": {"done": 9, "total": 9, "percent": 100},
+                "stages": {
+                    name: {
+                        "status": "success", "detail": "fixture source receipt",
+                        "timestamp": timestamp, "success_index": 1,
+                    }
+                    for name in EXPECTED_NINE_STAGES
+                },
             }],
         }
         with tempfile.TemporaryDirectory() as directory:

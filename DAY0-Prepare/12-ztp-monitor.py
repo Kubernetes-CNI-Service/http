@@ -3299,6 +3299,10 @@ def finalize_device(device: dict[str, Any]) -> None:
         current_round = 1
     done = sum(
         device["stages"][name]["status"] in {"success", "warning", "skipped"}
+        and (
+            name not in {"config_apply", "ssh_keys"}
+            or device["stages"][name]["status"] == "success"
+        )
         and int(device["stages"][name].get("success_index") or 0) == current_round
         for name in STAGE_NAMES
     )
@@ -4086,14 +4090,29 @@ def assign_stage_success_indices(
             else:
                 proven_this_round = current_success and (
                     current_round == 1
-                    or not boundary
-                    or _timestamp_at_or_after(current_timestamp, boundary)
-                    or manual_skew_evidence
                     or (
-                        manual_evidence_bundle_current
-                        and name in log_stage_names
+                        _aware_event_time(boundary) is not None
+                        and _aware_event_time(current_timestamp) is not None
+                        and (
+                            _timestamp_at_or_after(current_timestamp, boundary)
+                            or manual_skew_evidence
+                            or (
+                                manual_evidence_bundle_current
+                                and name in log_stage_names
+                            )
+                        )
                     )
                 )
+            # A second or later cycle cannot promote an untimed stage merely
+            # because a reset/log bundle or previous report exists.  The
+            # event and accepted cycle boundary must at least be comparable;
+            # the existing clock-skew and exact-log-bundle paths still decide
+            # whether a comparable event belongs to this cycle.
+            if current_round > 1 and (
+                _aware_event_time(boundary) is None
+                or _aware_event_time(current_timestamp) is None
+            ):
+                proven_this_round = False
             if proven_this_round:
                 current["success_index"] = current_round
             else:
@@ -4558,18 +4577,86 @@ def all_devices_complete(report: dict[str, Any]) -> bool:
 
 
 def completion_handoff_device_complete(device: Any) -> bool:
-    """Require a formal, fully identified device to complete its type group."""
+    """Require current-round nine-stage proof, not a percentage alone."""
     if not isinstance(device, dict):
         return False
     device_type = str(device.get("type") or "").strip().casefold()
-    return bool(
-        not device_type.startswith("pending_")
-        and isinstance(device.get("progress"), dict)
-        and device["progress"].get("percent") == 100
-        and not device.get("unbound_identity")
-        and not device.get("identity_pending")
-        and not device.get("promotion_pending")
+    if (device_type.startswith("pending_")
+            or not isinstance(device.get("progress"), dict)
+            or device["progress"].get("percent") != 100
+            or device.get("unbound_identity")
+            or device.get("identity_pending")
+            or device.get("promotion_pending")
+            or device.get("overall") not in {"success", "warning"}):
+        return False
+    try:
+        current_round = int(device["ztp_round"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    if current_round < 1:
+        return False
+    if current_round > 1 and _aware_event_time(device.get("cycle_started_at")) is None:
+        return False
+    boundary = str(device.get("cycle_started_at") or "")
+    manual_current_cycle = (
+        str(device.get("trigger_source") or "") in {
+            "manual_web", "manual_cli", "manual_reset_web", "manual_reset_cli",
+        }
+        and str(device.get("manual_cycle_marker") or "") == boundary
     )
+    command_digest = str(device.get("manual_command_ztp_log_sha256") or "")
+    operation_started = str(device.get("manual_command_started_at") or "")
+    operation_finished = str(device.get("manual_command_finished_at") or boundary)
+    stages = device.get("stages")
+    if not isinstance(stages, dict):
+        return False
+    http_evidence_current = all(
+        isinstance(stages.get(name), dict)
+        and stages[name].get("status") in {"success", "warning"}
+        and _timestamp_within_operation_window(
+            str(stages[name].get("timestamp") or ""),
+            operation_started, operation_finished,
+        )
+        for name in ("bootstrap", "config_http")
+    )
+    manual_command_log_current = bool(
+        manual_current_cycle
+        and device.get("manual_operation") != "reset"
+        and device.get("manual_command_ztp_complete") is True
+        and re.fullmatch(r"[0-9a-f]{64}", command_digest)
+        and command_digest == str(device.get("ztp_log_sha256") or "")
+        and device.get("ztp_log_current_boot")
+        and "complete" in (device.get("ztp_log_stage_names") or [])
+        and http_evidence_current
+    )
+    for name in STAGE_NAMES:
+        stage_value = stages.get(name)
+        if not isinstance(stage_value, dict):
+            return False
+        status = str(stage_value.get("status") or "")
+        if status not in {"success", "warning", "skipped"}:
+            return False
+        if name in {"config_apply", "ssh_keys"} and status != "success":
+            return False
+        try:
+            stage_round = int(stage_value.get("success_index") or 0)
+        except (TypeError, ValueError):
+            return False
+        if stage_round != current_round:
+            return False
+        if current_round > 1:
+            timestamp = str(stage_value.get("timestamp") or "")
+            if _aware_event_time(timestamp) is None:
+                return False
+            if not (
+                _timestamp_at_or_after(timestamp, boundary)
+                or (manual_current_cycle
+                    and _timestamp_near_boundary(timestamp, boundary))
+                or (manual_command_log_current
+                    and name in (device.get("ztp_log_stage_names") or []))
+            ):
+                return False
+    return stages["complete"]["status"] == "success"
 
 
 def completion_handoff_group(device: Any) -> Optional[str]:

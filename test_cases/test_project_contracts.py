@@ -4650,7 +4650,19 @@ class ZtpDhcpLifecycleContractTests(unittest.TestCase):
         monitor = load_module(
             "day0_completion_identity_gate", ROOT / "DAY0-Prepare/12-ztp-monitor.py",
         )
-        base = {"hostname": "EXAMPLE-Leaf01", "progress": {"percent": 100}}
+        sparse = {"hostname": "EXAMPLE-Leaf01", "progress": {"percent": 100}}
+        self.assertFalse(monitor.all_devices_complete({"devices": [sparse]}))
+        base = {
+            **sparse,
+            "type": "eth",
+            "ztp_round": 1,
+            "overall": "success",
+            "progress": {"done": 9, "total": 9, "percent": 100},
+            "stages": {
+                name: {"status": "success", "success_index": 1}
+                for name in monitor.STAGE_NAMES
+            },
+        }
         for flag in ("unbound_identity", "identity_pending", "promotion_pending"):
             device = dict(base, **{flag: True})
             self.assertFalse(monitor.all_devices_complete({"devices": [device]}), flag)
@@ -7906,7 +7918,21 @@ class ManualZtpContractTests(unittest.TestCase):
             "ztp_round": 1,
             "stages": {"complete": {"status": "success"}},
         }
-        self.assertTrue(monitor.ztp_completed(legacy_device))
+        self.assertFalse(monitor.ztp_completed(legacy_device))
+        complete_device = {
+            "type": "eth",
+            "ztp_round": 1,
+            "overall": "success",
+            "progress": {"done": 9, "total": 9, "percent": 100},
+            "stages": {
+                name: {"status": "success", "success_index": 1}
+                for name in (
+                    "dhcp", "bootstrap", "config_http", "ssh", "network",
+                    "version", "config_apply", "ssh_keys", "complete",
+                )
+            },
+        }
+        self.assertTrue(monitor.ztp_completed(complete_device))
 
     def test_monitor_converts_all_displayed_times_in_the_browser(self):
         source = (ROOT / "monitor/generate-monitor-html.py").read_text(encoding="utf-8")

@@ -44,19 +44,338 @@ WORKER = load_module(
     "ztp_group_handoff_worker", ROOT / "monitor/switch-collection-worker.py",
 )
 
+EXPECTED_NINE_STAGES = (
+    "dhcp", "bootstrap", "config_http", "ssh", "network", "version",
+    "config_apply", "ssh_keys", "complete",
+)
+
 
 def device(hostname: str, device_type: str, percent: int = 100, **extra):
+    completed = percent == 100
+    timestamp = "2026-09-01T12:00:00+08:00" if completed else ""
     value = {
         "hostname": hostname,
         "type": device_type,
         "boot_id": f"boot-{hostname}",
-        "progress": {"percent": percent},
+        "ztp_round": 1,
+        "overall": "success" if completed else "running",
+        "progress": {"done": 9 if completed else 0, "total": 9, "percent": percent},
         "stages": {
-            "complete": {"timestamp": f"2026-09-01T12:00:00+08:00-{hostname}"},
+            name: {
+                "status": "success" if completed else "pending",
+                "detail": "fixture source receipt", "timestamp": timestamp,
+                "success_index": 1 if completed else 0,
+            }
+            for name in EXPECTED_NINE_STAGES
         },
+        "issues": [],
     }
     value.update(extra)
     return value
+
+
+def round_device(
+    hostname: str, device_type: str, *, round_index: int = 2,
+    complete_status: str = "success", cycle_started_at: str = "2026-09-01T11:59:00+08:00",
+    stage_timestamp: str = "2026-09-01T12:00:00+08:00",
+    stage_statuses: dict[str, str] | None = None,
+) -> dict:
+    """Independent nine-stage report fixture; never derive expectations from code."""
+    value = {
+        "hostname": hostname,
+        "type": device_type,
+        "boot_id": f"boot-{hostname}",
+        "ztp_round": round_index,
+        "cycle_started_at": cycle_started_at,
+        "stages": {
+            name: {
+                "status": complete_status if name == "complete" else "success",
+                "detail": "fixture source receipt",
+                "timestamp": stage_timestamp,
+                "success_index": round_index,
+            }
+            for name in EXPECTED_NINE_STAGES
+        },
+        "issues": [],
+    }
+    for name, status in (stage_statuses or {}).items():
+        if name not in EXPECTED_NINE_STAGES:
+            raise ValueError(f"unknown fixture stage: {name}")
+        value["stages"][name]["status"] = status
+    MONITOR.finalize_device(value)
+    return value
+
+
+class CurrentRoundCompletionTests(unittest.TestCase):
+    def test_unapplied_config_and_missing_key_do_not_count_as_completed_stages(self):
+        for stage_name, status in (
+            ("config_apply", "skipped"),
+            ("config_apply", "warning"),
+            ("ssh_keys", "skipped"),
+            ("ssh_keys", "warning"),
+        ):
+            with self.subTest(stage=stage_name, status=status):
+                row = round_device(
+                    "Leaf01", "eth", stage_statuses={stage_name: status},
+                )
+                self.assertEqual(8, row["progress"]["done"])
+                self.assertEqual(89, row["progress"]["percent"])
+                self.assertNotEqual("success", row["overall"])
+                self.assertEqual(
+                    {}, MONITOR.ready_completion_handoff_reports(
+                        {"scope": "prod", "devices": [row]},
+                    ),
+                )
+
+    def test_deliberate_dhcp_and_version_skips_preserve_nine_stage_handoff(self):
+        for device_type, skipped, expected_group in (
+            ("eth", "dhcp", "prod-ethernet"),
+            ("ib", "version", "prod-infiniband"),
+        ):
+            with self.subTest(device_type=device_type, skipped=skipped):
+                row = round_device(
+                    "Leaf01", device_type, stage_statuses={skipped: "skipped"},
+                )
+                self.assertEqual(9, row["progress"]["done"])
+                self.assertEqual(100, row["progress"]["percent"])
+                self.assertEqual("success", row["overall"])
+                self.assertEqual(
+                    [expected_group],
+                    list(MONITOR.ready_completion_handoff_reports(
+                        {"scope": "prod", "devices": [row]},
+                    )),
+                )
+
+    def test_complete_skipped_cannot_promote_handoff_despite_100_percent(self):
+        row = round_device("Leaf01", "eth", complete_status="skipped")
+        self.assertEqual(100, row["progress"]["percent"])
+        self.assertEqual("running", row["overall"])
+        self.assertEqual(
+            {}, MONITOR.ready_completion_handoff_reports(
+                {"scope": "prod", "devices": [row]},
+            ),
+        )
+
+    def test_second_round_without_comparable_boundary_cannot_index_stages(self):
+        row = round_device(
+            "Leaf01", "eth", cycle_started_at="", stage_timestamp="",
+        )
+        for stage_value in row["stages"].values():
+            stage_value["success_index"] = 0
+        MONITOR.assign_stage_success_indices([row], None)
+        MONITOR.finalize_device(row)
+        self.assertEqual(
+            0, row["progress"]["done"],
+            "round 2 cannot infer a fresh success from missing timestamps",
+        )
+        self.assertNotEqual("success", row["overall"])
+        self.assertEqual(
+            {}, MONITOR.ready_completion_handoff_reports(
+                {"scope": "prod", "devices": [row]},
+            ),
+        )
+
+    def test_second_round_forged_index_without_timestamp_cannot_handoff(self):
+        row = round_device("Leaf01", "eth", stage_timestamp="")
+        self.assertEqual(100, row["progress"]["percent"])
+        self.assertEqual(
+            {}, MONITOR.ready_completion_handoff_reports(
+                {"scope": "prod", "devices": [row]},
+            ),
+        )
+
+    def test_second_round_preboundary_stage_with_forged_index_cannot_handoff(self):
+        row = round_device("Leaf01", "eth")
+        row["stages"]["config_apply"]["timestamp"] = "2026-09-01T10:00:00+08:00"
+        self.assertEqual(100, row["progress"]["percent"])
+        self.assertEqual("success", row["overall"])
+        self.assertEqual(
+            {}, MONITOR.ready_completion_handoff_reports(
+                {"scope": "prod", "devices": [row]},
+            ),
+        )
+
+    def test_accepted_manual_three_second_clock_skew_still_handoffs(self):
+        boundary = "2026-09-01T11:59:00+08:00"
+        row = round_device(
+            "Leaf01", "eth", stage_timestamp="2026-09-01T11:58:57+08:00",
+        )
+        row.update({
+            "trigger_source": "manual_web", "manual_cycle_marker": boundary,
+        })
+        previous = {"devices": [{
+            "hostname": "Leaf01", "ztp_round": 1,
+            "stages": {
+                name: {
+                    "status": "success", "detail": "old source receipt",
+                    "timestamp": "2026-09-01T10:00:00+08:00", "success_index": 1,
+                }
+                for name in EXPECTED_NINE_STAGES
+            },
+        }]}
+        for stage_value in row["stages"].values():
+            stage_value["success_index"] = 0
+        MONITOR.assign_stage_success_indices([row], previous)
+        MONITOR.finalize_device(row)
+        self.assertTrue(all(
+            stage_value["success_index"] == 2
+            for stage_value in row["stages"].values()
+        ))
+        self.assertEqual(
+            ["prod-ethernet"],
+            list(MONITOR.ready_completion_handoff_reports(
+                {"scope": "prod", "devices": [row]},
+            )),
+        )
+
+    def test_exact_manual_log_digest_allows_minutes_of_device_clock_skew(self):
+        boundary = "2026-09-01T11:59:00+08:00"
+        digest = "a" * 64
+        row = round_device(
+            "Leaf01", "eth", stage_timestamp="2026-09-01T11:56:00+08:00",
+        )
+        row.update({
+            "trigger_source": "manual_web", "manual_cycle_marker": boundary,
+            "manual_command_started_at": boundary,
+            "manual_command_finished_at": "2026-09-01T11:59:10+08:00",
+            "manual_command_ztp_complete": True,
+            "manual_command_ztp_log_sha256": digest,
+            "ztp_log_sha256": digest, "ztp_log_current_boot": True,
+            "ztp_log_stage_names": [
+                "network", "version", "config_apply", "ssh_keys", "complete",
+            ],
+        })
+        row["stages"]["bootstrap"]["timestamp"] = "2026-09-01T11:59:04+08:00"
+        row["stages"]["config_http"]["timestamp"] = "2026-09-01T11:59:05+08:00"
+        row["stages"]["ssh"]["timestamp"] = "2026-09-01T11:59:06+08:00"
+        previous = {"devices": [{
+            "hostname": "Leaf01", "ztp_round": 1,
+            "stages": {
+                name: {
+                    "status": "success", "detail": "old source receipt",
+                    "timestamp": "2026-09-01T10:00:00+08:00", "success_index": 1,
+                }
+                for name in EXPECTED_NINE_STAGES
+            },
+        }]}
+        for stage_value in row["stages"].values():
+            stage_value["success_index"] = 0
+        MONITOR.assign_stage_success_indices([row], previous)
+        MONITOR.finalize_device(row)
+        self.assertTrue(all(
+            stage_value["success_index"] == 2
+            for stage_value in row["stages"].values()
+        ))
+        self.assertEqual(
+            ["prod-ethernet"],
+            list(MONITOR.ready_completion_handoff_reports(
+                {"scope": "prod", "devices": [row]},
+            )),
+        )
+
+        wrong_digest = json.loads(json.dumps(row))
+        wrong_digest["ztp_log_sha256"] = "0" * 64
+        self.assertEqual(
+            {}, MONITOR.ready_completion_handoff_reports(
+                {"scope": "prod", "devices": [wrong_digest]},
+            ),
+        )
+
+    def test_reset_log_bundle_cannot_promote_untimed_second_round_stages(self):
+        boundary = "2026-09-01T11:59:00+08:00"
+        row = round_device("Leaf01", "eth", stage_timestamp="")
+        for stage_value in row["stages"].values():
+            stage_value["success_index"] = 0
+        row.update({
+            "trigger_source": "manual_reset_cli",
+            "manual_operation": "reset",
+            "manual_cycle_marker": boundary,
+            "reset_reboot_observed": True,
+            "ztp_log_mtime": boundary,
+            "ztp_log_current_boot": True,
+            "ztp_log_stage_names": list(EXPECTED_NINE_STAGES),
+        })
+        MONITOR.assign_stage_success_indices([row], None)
+        MONITOR.finalize_device(row)
+        self.assertEqual(0, row["progress"]["done"])
+        self.assertNotEqual("success", row["overall"])
+
+    def test_current_nine_stage_success_can_handoff_even_with_observation_warning(self):
+        row = round_device("Leaf01", "eth")
+        row["issues"].append({"code": "PROGRESS_STALLED", "severity": "warning"})
+        MONITOR.finalize_device(row)
+        self.assertEqual("warning", row["overall"])
+        self.assertEqual(
+            ["prod-ethernet"],
+            list(MONITOR.ready_completion_handoff_reports(
+                {"scope": "prod", "devices": [row]},
+            )),
+        )
+
+
+class CurrentRoundGateWorkflowTests(unittest.TestCase):
+    def test_monitor_to_real_collection_gate_rejects_skipped_then_collects_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / "project"
+            project.mkdir()
+            collector = root / "collector.sh"
+            collector.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            status_dir = root / "status"
+            status_dir.mkdir()
+            state = root / MONITOR.HANDOFF_STATE_NAME
+            calls = []
+
+            def external_collector(command, *, timeout):
+                calls.append((command, timeout))
+                return {"returncode": 0, "stdout": "", "stderr": ""}
+
+            with mock.patch.dict(MONITOR.COLLECTOR_SCRIPTS, {"ethernet": collector}), \
+                    mock.patch.object(MONITOR, "run_command", side_effect=external_collector), \
+                    mock.patch.object(MONITOR, "generate_monitor_html", return_value=True):
+                for invalid in (
+                    round_device("Leaf01", "eth", complete_status="skipped"),
+                    round_device(
+                        "Leaf01", "eth",
+                        stage_statuses={"config_apply": "skipped"},
+                    ),
+                    round_device(
+                        "Leaf01", "eth",
+                        stage_statuses={"ssh_keys": "warning"},
+                    ),
+                    round_device(
+                        "Leaf01", "eth",
+                        stage_timestamp="2026-09-01T10:00:00+08:00",
+                    ),
+                ):
+                    handed_off, retries, retry_after = (
+                        MONITOR.process_ready_completion_handoffs(
+                            {"scope": "prod", "devices": [invalid]},
+                            root / "monitor-html.py", 60, project,
+                            state, {}, {}, {}, 5, monotonic=lambda: 100.0,
+                            status_dir=status_dir,
+                        )
+                    )
+                    self.assertEqual([], calls)
+                    self.assertEqual({}, handed_off)
+                    self.assertFalse(state.exists())
+
+                valid = {"scope": "prod", "devices": [
+                    round_device("Leaf01", "eth"),
+                ]}
+                handed_off, retries, retry_after = (
+                    MONITOR.process_ready_completion_handoffs(
+                        valid, root / "monitor-html.py", 60, project,
+                        state, handed_off, retries, retry_after, 5,
+                        monotonic=lambda: 100.0, status_dir=status_dir,
+                    )
+                )
+            self.assertEqual(1, len(calls))
+            self.assertEqual(["bash", str(collector), "--prod"], calls[0][0])
+            self.assertIn("prod-ethernet", handed_off)
+            self.assertEqual(
+                handed_off, MONITOR.load_completion_handoff_signatures(state, project),
+            )
 
 
 class CompletionGroupTests(unittest.TestCase):
