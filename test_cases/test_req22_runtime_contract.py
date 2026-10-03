@@ -451,6 +451,60 @@ class Req22RuntimeInputTests(unittest.TestCase):
                 candidate.discard()
             self.assertFalse(candidate.stage.exists())
 
+    def test_load_generator_keeps_c1_private_when_c2_rejects(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            private = root / "DAY0-Prepare/fixture/99-output-dhcp"
+            private.mkdir(parents=True)
+            public = root / "ztp/config/isc-dhcp-server"
+            public.mkdir(parents=True)
+            names = (
+                "dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts",
+                "dhcpd_nvl.hosts", "dhcp-release-manifest.json",
+            )
+            before = {}
+            for name in names:
+                target = private / name
+                target.write_bytes(b"accepted:" + name.encode("ascii"))
+                (public / name).symlink_to(target)
+                before[name] = (target.stat().st_ino, target.read_bytes())
+            reached = []
+
+            def generator(command, **_kwargs):
+                script = command[1]
+                reached.append(script)
+                if script == "c1-generate_dhcp.py":
+                    self.assertIn("--candidate-output-dir", command)
+                    candidate = Path(command[command.index("--candidate-output-dir") + 1])
+                    for name in names:
+                        (candidate / name).write_bytes(
+                            b"candidate:" + name.encode("ascii"),
+                        )
+                if script == "90-c2-generate_configs.py":
+                    raise LOAD.LoadError("controlled C2 rejection")
+
+            with mock.patch.object(LOAD, "ZTP_DIR", root / "ztp"), \
+                    mock.patch.object(LOAD, "run", side_effect=generator), \
+                    mock.patch.object(
+                        LOAD, "_device_types_after_dhcp",
+                        return_value=frozenset({"eth"}),
+                    ):
+                with self.assertRaisesRegex(LOAD.LoadError, "controlled C2 rejection"):
+                    LOAD.generate_configs(
+                        frozenset({"eth"}), install_dhcp=False,
+                        defer_dhcp_publication=True,
+                    )
+            self.assertEqual(
+                ["b-xlsx_to_dot.py", "c1-generate_dhcp.py",
+                 "90-c2-generate_configs.py"], reached,
+            )
+            self.assertEqual(
+                before,
+                {name: ((private / name).stat().st_ino,
+                        (private / name).read_bytes()) for name in names},
+            )
+            self.assertEqual([], list(private.glob(".load-dhcp-*")))
+
 
 if __name__ == "__main__":
     unittest.main()

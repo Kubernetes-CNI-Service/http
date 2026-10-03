@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+from contextvars import ContextVar
 import csv
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -5483,6 +5484,7 @@ _DHCP_OUTPUT_NAMES = (
     "dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts",
     "dhcpd_nvl.hosts", "dhcp-release-manifest.json",
 )
+_LOAD_DEFER_DHCP = ContextVar("load_defer_dhcp_publication", default=False)
 
 
 class DeferredDHCPOutput:
@@ -5721,7 +5723,7 @@ class DeferredDHCPOutput:
         self.discard()
 
 
-def generate_configs(
+def _generate_configs_impl(
     device_types: frozenset[str], *, install_dhcp: bool, dry_run: bool = False,
     dhcp_enabled: bool = True,
     schema_version: int = GLOBAL_SCHEMA_VERSION,
@@ -5734,6 +5736,7 @@ def generate_configs(
     switch_scope: str = "all",
     deployment_lock_descriptor: int | None = None,
     source_identities: dict[str, str] | None = None,
+    deferred_dhcp_candidate: DeferredDHCPOutput | None = None,
 ) -> None:
     mini_policy_hash_before: str | None = None
     mini_customer_hash: str | None = None
@@ -5806,10 +5809,14 @@ def generate_configs(
     # run before hostname2mac validates each pair and points both MACs at the
     # same production full-config YAML.
     if dhcp_enabled:
+        candidate_args = (
+            ["--candidate-output-dir", str(deferred_dhcp_candidate.stage)]
+            if deferred_dhcp_candidate is not None else []
+        )
         run(
             [
                 sys.executable, "c1-generate_dhcp.py", "-y",
-                *scope_args, *switch_args,
+                *scope_args, *switch_args, *candidate_args,
             ],
             cwd=ZTP_DIR / "config/isc-dhcp-server",
             dry_run=dry_run,
@@ -5893,6 +5900,48 @@ def generate_configs(
             _MINI_GENERATION_AUTHORITIES[mini_generation_key] = (
                 policy_hash_after, canonical_hash, mini_customer_hash,
             )
+
+
+def generate_configs(
+    device_types: frozenset[str], *, install_dhcp: bool, dry_run: bool = False,
+    dhcp_enabled: bool = True,
+    schema_version: int = GLOBAL_SCHEMA_VERSION,
+    eth_version: str | None = None,
+    air_topology_policy: Path | None = None,
+    p2p_legacy_columns: bool = False,
+    mini_air: bool = False,
+    mini_devices_file: Path | None = None,
+    deployment_scope: str = "all",
+    switch_scope: str = "all",
+    deployment_lock_descriptor: int | None = None,
+    source_identities: dict[str, str] | None = None,
+    defer_dhcp_publication: bool = False,
+) -> DeferredDHCPOutput | None:
+    """Keep C1 outputs private through C2; DHCP 安装已延后到统一 release 验证通过之后。"""
+    candidate = None
+    if (defer_dhcp_publication or _LOAD_DEFER_DHCP.get()) and dhcp_enabled and not dry_run:
+        candidate_switch = (
+            "eth" if deployment_scope == "air" and switch_scope == "all"
+            else switch_scope
+        )
+        candidate = DeferredDHCPOutput.create(ZTP_DIR, candidate_switch)
+    try:
+        _generate_configs_impl(
+            device_types, install_dhcp=install_dhcp, dry_run=dry_run,
+            dhcp_enabled=dhcp_enabled, schema_version=schema_version,
+            eth_version=eth_version, air_topology_policy=air_topology_policy,
+            p2p_legacy_columns=p2p_legacy_columns, mini_air=mini_air,
+            mini_devices_file=mini_devices_file,
+            deployment_scope=deployment_scope, switch_scope=switch_scope,
+            deployment_lock_descriptor=deployment_lock_descriptor,
+            source_identities=source_identities,
+            deferred_dhcp_candidate=candidate,
+        )
+    except BaseException:
+        if candidate is not None:
+            candidate.discard()
+        raise
+    return candidate
 
 
 def confirm_service_start() -> bool:
