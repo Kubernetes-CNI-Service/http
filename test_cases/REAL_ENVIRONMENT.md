@@ -1677,6 +1677,13 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 证据与判定：保存每次完整 argv、退出码、进程/锁/挂载身份、注入点、前后对象清单和 SHA、可见 RECEIPT 与实际 fsync 结果、只读返回状态、未发在线请求的独立观察、卷快照/恢复日志。分别报告冷启动正例、故障/竞态负例、跨卷 HOLD、回滚核对为 PASS/FAIL/NOT RUN；任一缺失时本卡仍 OPEN。全程不动真实 crontab、服务、设备、Google 或生产数据。
 - 清理：按已批准隔离 VM 快照恢复或只删除本案逐一列出的临时项目/证据副本；先验证前像，保留故障证据与完整回滚收据。不能用全局清理、删除真实 tracker 或手改 ledger/RECEIPT 作为收尾。
 
+## TC-REAL-R22-DHCP-C2-TRANSACTION-001 — C1 私有候选至父 release 提交
+
+- Case ID：`TC-REAL-R22-DHCP-C2-TRANSACTION-001`；类型：real-environment / transaction / service；状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。自动先决为 `test_cases.test_load_release_transaction` 的 C1 私有候选、C2 拒绝、发布失败和旧 inode 回滚 direct，以及 `test_cases.test_dhcp_optional_workflow`、`test_cases.test_dhcp_switch_scope_preservation_workflow` 多脚本 GREEN；本机结果不是本卡 PASS。
+- 前置条件：仅在 owner 明确批准的可丢弃管理 VM 与隔离项目副本执行；冻结 HEAD/tree、manifest、正式 full proof、C1/C2 源码与测试 SHA，保存五个受管输出、父 release、当前服务/监听/租约的 dev/ino/mode/mtime/SHA 前像和可恢复快照。非协作同 UID 写者须在整个窗口静默；不得触及真实 `/etc/dhcp`、客户项目或线上服务。
+- 步骤与预期：先验证健康 A 父 release 可激活；将合法 subnet 输入改为 B，执行真实 `11-load.py`→`c1-generate_dhcp.py`→`90-c2-generate_configs.py`。在 C1 完成、C2 前注入受控拒绝，五个公开输出及 A 父 release 内容、inode、mtime 均应保持不变，B 只能在私有 0700 候选中，服务仍保持原健康态。再次运行正常链，检查五个 B 输出与新父 release、实际 Native `/etc/dhcp` 安装及 `dhcpd -t` 对齐；分别注入 C2 失败、DHCP 第 2 个文件替换失败、父 release 验证失败，逐项证明 A 的原 inode/字节恢复、无混代 manifest、私有候选清理且未启动半成品服务。
+- 证据、清理与风险：保存脱敏精确 argv/exit、锁与写者静默见证、C1/C2/父 release 时间线、五文件和候选目录前后身份/SHA、服务与监听前后像、注入点、回滚日志；按 VM 快照恢复并逐项核对 A。若需触碰真实服务、缺独立快照/正式证明/写者静默、未实际验证 Native 安装，保持 OPEN，不能以本机测试代替真机证据。
+
 ## TC-REAL-DHCP-PUBLISH-REBOUND-001 — DHCP 候选发布目录改绑
 
 - Case ID：`TC-REAL-DHCP-PUBLISH-REBOUND-001`；类型：real-environment / transaction / race；状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。本机先决测试为 `test_cases.test_dhcp_switch_scope_preservation` 的父目录改绑 direct 与真实生成流程用例，以及 `test_cases.test_dhcp_switch_scope_preservation_workflow`；其 GREEN 不等于本卡通过。

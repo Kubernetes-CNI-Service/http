@@ -27,6 +27,7 @@ import zipfile
 import yaml
 
 from test_cases.splitter_profile_fixture import write_splitter_fixture
+from test_cases.module_loader import load_script
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -112,6 +113,74 @@ UNSETUP_SPEC.loader.exec_module(UNSETUP)
 
 def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def prepare_r22_empty_unselected_dhcp_fixture(fixture):
+    """Generate a real eth-only child with zero-byte unselected host files."""
+    project = fixture.project
+    dhcp_dir = fixture.ztp / "config/isc-dhcp-server"
+    outputs = project / "99-output-dhcp"
+    outputs.mkdir()
+    global_document = yaml.safe_load(
+        (ROOT / "DAY0-Prepare/template/01-global.yaml").read_text(
+            encoding="utf-8",
+        )
+    )
+    global_document["schema_version"] = 1
+    global_document["common"]["mgmt"].pop("issue-tracker", None)
+    global_document["common"]["mgmt"]["dhcp-server"]["status"] = "enabled"
+    global_document["common"]["mgmt"]["ztp"]["status"] = "enabled"
+    global_document["common"]["mgmt"]["ztp"]["ztp_url_prefix"] = "/ztp"
+    fixture.global_file.write_text(
+        yaml.safe_dump(global_document), encoding="utf-8",
+    )
+    fixture.subnet_file.write_text(
+        "shared_network,subnet,netmask,range_start,range_end,routers,"
+        "ztp_service_ip,cumulus_profile,nvos_ztp\n"
+        "oob,192.0.2.0,255.255.255.0,192.0.2.100,192.0.2.120,"
+        "192.0.2.1,192.0.2.2,oob,no\n",
+        encoding="utf-8",
+    )
+    names = (
+        "dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts",
+        "dhcpd_nvl.hosts", "dhcp-release-manifest.json",
+    )
+    for name in names:
+        public = dhcp_dir / name
+        public.unlink()
+        target = outputs / name
+        if name in {"dhcpd_ib.hosts", "dhcpd_nvl.hosts"}:
+            target.write_bytes(b"")
+        public.symlink_to(os.path.relpath(target, dhcp_dir))
+    with mock.patch.object(sys, "argv", [
+        "c1-generate_dhcp.py", "-y", "--deployment-scope", "prod",
+        "--switch", "eth",
+    ]), mock.patch.multiple(
+        DHCP, HTTP_ROOT=str(fixture.root), SCRIPT_DIR=str(dhcp_dir),
+        OUTPUT_CONF=str(outputs / "dhcpd.conf"),
+        OUTPUT_ETH=str(outputs / "dhcpd_eth.hosts"),
+        OUTPUT_IB=str(outputs / "dhcpd_ib.hosts"),
+        OUTPUT_NVL=str(outputs / "dhcpd_nvl.hosts"),
+        OUTPUT_MANIFEST=str(outputs / "dhcp-release-manifest.json"),
+        GLOBAL_YAML=str(fixture.global_file),
+        DEVICES_CSV=str(fixture.devices_file),
+        SUBNET_CSV=str(fixture.subnet_file),
+        P2P_AIR_JSON=str(project / "p2p-air.json"), _AUTO_YES=False,
+    ), mock.patch.object(DHCP, "stop_native_ztp_monitors"):
+        DHCP.main()
+    child = json.loads(
+        (outputs / "dhcp-release-manifest.json").read_text(encoding="utf-8")
+    )
+    cumulus_manifest = (
+        project / "99-output-eth/20260830_120000_combine/release-manifest.json"
+    )
+    cumulus = json.loads(cumulus_manifest.read_text(encoding="utf-8"))
+    cumulus["deployment_scope"] = "prod"
+    cumulus["switch_scope"] = "eth"
+    cumulus_manifest.write_text(json.dumps(cumulus), encoding="utf-8")
+    return LOAD.replace(
+        fixture.inputs, deployment_scope="prod", switch_scope="eth",
+    ), outputs, child
 
 
 def h19_mini_policy(*, unknown_role_action: str = "error") -> dict:
@@ -678,6 +747,501 @@ class ReleaseTransactionTests(unittest.TestCase):
             self.assertNotIn("$y$", message)
             for downstream_mock in mocks:
                 downstream_mock.assert_not_called()
+
+    def test_c2_rejection_keeps_prior_accepted_dhcp_release_activatable(self):
+        """A successful c1 must not strand an accepted parent after c2 rejects."""
+        activate = load_script(
+            "r22_prior_dhcp_activation_after_c2_reject",
+            ROOT / "infra/docker/activate.py",
+        )
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name).resolve()
+            project = root / "DAY0-Prepare" / "site-a"
+            project.mkdir(parents=True)
+            global_yaml = project / "01-global.yaml"
+            global_yaml.write_text(
+                "schema_version: 1\ncommon:\n  mgmt:\n"
+                "    dhcp-server:\n      status: enabled\n"
+                "    http:\n      status: enabled\n"
+                "      address: 192.0.2.2\n"
+                "    ztp:\n      status: enabled\n"
+                "      ztp_url_prefix: /ztp\n",
+                encoding="utf-8",
+            )
+            devices = project / "02-devices_config.csv"
+            devices.write_text(
+                "hostname,type,template,eth0_ip,netmask,eth0_gw,eth0_mac,"
+                "eth1_ip,netmask,eth1_gw,eth1_mac\n"
+                "border01,eth,leaf,192.0.2.12,24,192.0.2.1,"
+                "02:00:00:00:00:12,,,,\n",
+                encoding="utf-8",
+            )
+            subnet = project / "02-dhcp-subnet_config.csv"
+            source_a = (
+                "shared_network,subnet,netmask,range_start,range_end,routers,"
+                "ztp_service_ip,cumulus_profile,nvos_ztp\n"
+                "oob,192.0.2.0,255.255.255.0,192.0.2.200,192.0.2.220,"
+                "192.0.2.1,192.0.2.2,oob,no\n"
+            )
+            source_b = source_a.replace("192.0.2.200", "192.0.2.201")
+            self.assertEqual(len(source_a), len(source_b))
+            subnet.write_text(source_a, encoding="utf-8")
+            workbook = project / "site-a P2P.xlsx"
+            workbook.write_bytes(b"fixture workbook identity\n")
+            (project / "p2p.xlsx").symlink_to(workbook.name)
+            dhcp_outputs = project / "99-output-dhcp"
+            dhcp_outputs.mkdir()
+            public = root / "ztp/config/isc-dhcp-server"
+            public.mkdir(parents=True)
+            output_names = (
+                "dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts",
+                "dhcpd_nvl.hosts", "dhcp-release-manifest.json",
+            )
+            for output_name in output_names:
+                target = dhcp_outputs / output_name
+                (public / output_name).symlink_to(
+                    os.path.relpath(target, public),
+                )
+
+            def generate_dhcp(candidate_dir=None):
+                output_dir = Path(candidate_dir) if candidate_dir else dhcp_outputs
+                with mock.patch.object(sys, "argv", ["c1-generate_dhcp.py", "-y"]), \
+                     mock.patch.multiple(
+                         DHCP, HTTP_ROOT=str(root), SCRIPT_DIR=str(public),
+                         OUTPUT_ETH=str(output_dir / "dhcpd_eth.hosts"),
+                         OUTPUT_IB=str(output_dir / "dhcpd_ib.hosts"),
+                         OUTPUT_NVL=str(output_dir / "dhcpd_nvl.hosts"),
+                         OUTPUT_CONF=str(output_dir / "dhcpd.conf"),
+                         OUTPUT_MANIFEST=str(output_dir / "dhcp-release-manifest.json"),
+                         SUBNET_CSV=str(subnet), GLOBAL_YAML=str(global_yaml),
+                         P2P_AIR_JSON=str(project / "p2p-air.json"),
+                         DEVICES_CSV=str(devices), _AUTO_YES=False,
+                     ):
+                    DHCP.main()
+
+            generate_dhcp()
+            accepted_outputs = {
+                path.name: path.read_bytes() for path in dhcp_outputs.iterdir()
+            }
+            manifest = json.loads(
+                (dhcp_outputs / "dhcp-release-manifest.json").read_text(
+                    encoding="utf-8",
+                )
+            )
+            input_paths = {
+                "global": global_yaml, "devices": devices,
+                "subnet": subnet, "p2p": workbook,
+            }
+            basis = {
+                "project": "site-a", "deployment_scope": "air",
+                "switch_scope": "eth",
+                "inputs": {
+                    key: sha256(path) for key, path in input_paths.items()
+                },
+                "input_sources": {"p2p": {
+                    "path": workbook.name, "sha256": sha256(workbook),
+                }},
+                "components": {"dhcp": {
+                    "release_id": manifest["release_id"],
+                    "manifest_sha256": sha256(
+                        dhcp_outputs / "dhcp-release-manifest.json"
+                    ),
+                }},
+                "inventory": [{"hostname": "border01", "type": "eth"}],
+                "dhcp_status": "enabled",
+            }
+            release_id = hashlib.sha256(json.dumps(
+                basis, ensure_ascii=False, sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")).hexdigest()[:20]
+            current = project / "99-output-ztp/current-release.json"
+            current.parent.mkdir()
+            current.write_text(json.dumps({
+                "schema_version": 2, "validation": "passed",
+                "release_id": release_id, **basis,
+            }) + "\n", encoding="utf-8")
+            settings = activate.Settings(
+                project_name="site-a", scope="air", switch_scope="eth",
+                http_root=root,
+            )
+            activate.validate_parent_release(settings, current)
+            accepted_parent = current.read_bytes()
+
+            subnet.write_text(source_b, encoding="utf-8")
+            reached = []
+            pre_c2_observation = {}
+
+            def fail_at_c2(command, **_kwargs):
+                script = command[1]
+                reached.append(script)
+                if script == "c1-generate_dhcp.py":
+                    self.assertIn("--candidate-output-dir", command)
+                    candidate_dir = command[
+                        command.index("--candidate-output-dir") + 1
+                    ]
+                    generate_dhcp(candidate_dir)
+                    pre_c2_observation["changed"] = tuple(sorted(
+                        name for name, accepted in accepted_outputs.items()
+                        if (dhcp_outputs / name).read_bytes() != accepted
+                    ))
+                    # Isolate the G2 publication boundary: the accepted
+                    # input bytes are A again, while c1's B outputs remain.
+                    subnet.write_text(source_a, encoding="utf-8")
+                    try:
+                        activate.validate_parent_release(settings, current)
+                    except activate.ActivationError as exc:
+                        pre_c2_observation["activation_error"] = exc
+                    finally:
+                        subnet.write_text(source_b, encoding="utf-8")
+                elif script == "90-c2-generate_configs.py":
+                    raise LOAD.LoadError("controlled c2 rejection after c1 success")
+
+            with mock.patch.object(LOAD, "ZTP_DIR", root / "ztp"), \
+                 mock.patch.object(LOAD, "run", side_effect=fail_at_c2), \
+                 mock.patch.object(
+                     LOAD, "_device_types_after_dhcp",
+                     return_value=frozenset({"eth"}),
+                 ):
+                with self.assertRaisesRegex(
+                    LOAD.LoadError, "controlled c2 rejection",
+                ):
+                    LOAD.generate_configs(
+                        frozenset({"eth"}), install_dhcp=False,
+                        dhcp_enabled=True, switch_scope="eth",
+                        defer_dhcp_publication=True,
+                    )
+            subnet.write_text(source_a, encoding="utf-8")
+            self.assertEqual(
+                ["b-xlsx_to_dot.py", "c1-generate_dhcp.py",
+                 "90-c2-generate_configs.py"],
+                reached,
+            )
+            self.assertEqual(accepted_parent, current.read_bytes())
+            self.assertEqual([], list(dhcp_outputs.glob(".load-dhcp-*")))
+            with self.subTest(gate="old parent remains accepted before c2"):
+                self.assertNotIn(
+                    "activation_error", pre_c2_observation,
+                    str(pre_c2_observation.get("activation_error")),
+                )
+            with self.subTest(gate="five fixed DHCP candidates private until commit"):
+                self.assertEqual((), pre_c2_observation["changed"])
+            with self.subTest(gate="five fixed DHCP candidates roll back"):
+                changed = tuple(sorted(
+                    name for name, accepted in accepted_outputs.items()
+                    if (dhcp_outputs / name).read_bytes() != accepted
+                ))
+                self.assertEqual(
+                    (), changed,
+                )
+            activation_error = None
+            try:
+                activate.validate_parent_release(settings, current)
+            except activate.ActivationError as exc:
+                activation_error = exc
+            with self.subTest(gate="accepted parent remains activatable"):
+                self.assertIsNone(activation_error, str(activation_error))
+
+    def test_deferred_dhcp_publication_restores_original_inodes_on_rejection(self):
+        """The parent rejection restores all prior fixed-output file identities."""
+        parent = self.ztp / "config/isc-dhcp-server"
+        names = ("dhcpd.conf", "dhcpd_eth.hosts", "dhcp-release-manifest.json")
+        before = {
+            name: ((parent / name).stat().st_ino, (parent / name).read_bytes())
+            for name in names
+        }
+        candidate = LOAD.DeferredDHCPOutput.create(self.ztp, "eth")
+        try:
+            for name in names:
+                (candidate.stage / name).write_bytes(b"candidate " + name.encode())
+            candidate.publish()
+            self.assertEqual(
+                b"candidate dhcpd.conf", (parent / "dhcpd.conf").read_bytes(),
+            )
+            candidate.rollback()
+            for name in names:
+                self.assertEqual(
+                    before[name],
+                    ((parent / name).stat().st_ino, (parent / name).read_bytes()),
+                )
+        finally:
+            candidate.discard()
+        self.assertFalse(candidate.stage.exists())
+
+    def test_deferred_dhcp_partial_publish_failure_restores_prior_set(self):
+        parent = self.ztp / "config/isc-dhcp-server"
+        names = ("dhcpd.conf", "dhcpd_eth.hosts", "dhcp-release-manifest.json")
+        before = {
+            name: ((parent / name).stat().st_ino, (parent / name).read_bytes())
+            for name in names
+        }
+        candidate = LOAD.DeferredDHCPOutput.create(self.ztp, "eth")
+        for name in names:
+            (candidate.stage / name).write_bytes(b"candidate " + name.encode())
+        replace = os.replace
+        failed = False
+
+        def fail_second_install(source, destination, **kwargs):
+            nonlocal failed
+            if (not failed and source == destination == "dhcpd_eth.hosts"
+                    and kwargs.get("src_dir_fd") is not None):
+                failed = True
+                raise OSError("controlled second DHCP publish failure")
+            return replace(source, destination, **kwargs)
+
+        try:
+            with mock.patch.object(LOAD.os, "replace", side_effect=fail_second_install):
+                with self.assertRaisesRegex(OSError, "controlled second DHCP publish failure"):
+                    candidate.publish()
+            self.assertTrue(failed)
+            for name in names:
+                self.assertEqual(
+                    before[name],
+                    ((parent / name).stat().st_ino, (parent / name).read_bytes()),
+                )
+        finally:
+            candidate.discard()
+        self.assertFalse(candidate.stage.exists())
+
+    def test_deferred_dhcp_rejects_backup_name_collision_without_overwrite(self):
+        parent = self.ztp / "config/isc-dhcp-server"
+        names = ("dhcpd.conf", "dhcpd_eth.hosts", "dhcp-release-manifest.json")
+        before = {
+            name: ((parent / name).stat().st_ino, (parent / name).read_bytes())
+            for name in names
+        }
+        candidate = LOAD.DeferredDHCPOutput.create(self.ztp, "eth")
+        collision = candidate.stage / "backup-dhcpd_eth.hosts"
+        collision.write_bytes(b"independent stage sentinel")
+        for name in names:
+            (candidate.stage / name).write_bytes(b"candidate " + name.encode())
+        try:
+            with self.assertRaisesRegex(LOAD.LoadError, "backup name collision"):
+                candidate.publish()
+            self.assertEqual(b"independent stage sentinel", collision.read_bytes())
+            for name in names:
+                self.assertEqual(
+                    before[name],
+                    ((parent / name).stat().st_ino, (parent / name).read_bytes()),
+                )
+        finally:
+            collision.unlink(missing_ok=True)
+            candidate.rollback()
+            candidate.discard()
+
+    def test_deferred_dhcp_copy_rejects_source_rebind_before_open(self):
+        source = self.ztp / "config/isc-dhcp-server/dhcpd.conf"
+        previous = source.lstat()
+        alternate = source.with_name("dhcpd.conf.alternate")
+        alternate.write_bytes(b"X" * previous.st_size)
+        os.utime(alternate, ns=(previous.st_atime_ns, previous.st_mtime_ns))
+        destination = self.root / "copied.conf"
+        open_file = os.open
+        rebound = False
+
+        def swap_before_open(path, *args, **kwargs):
+            nonlocal rebound
+            if not rebound and os.fspath(path) == os.fspath(source):
+                rebound = True
+                os.replace(alternate, source)
+            return open_file(path, *args, **kwargs)
+
+        with mock.patch.object(LOAD.os, "open", side_effect=swap_before_open):
+            with self.assertRaisesRegex(LOAD.LoadError, "changed before copy"):
+                LOAD.DeferredDHCPOutput._copy_prior_output(
+                    source, destination, previous,
+                )
+        self.assertTrue(rebound)
+        self.assertFalse(destination.exists())
+
+    def test_deferred_dhcp_accept_cleans_backups_only_after_commit(self):
+        parent = self.ztp / "config/isc-dhcp-server"
+        candidate = LOAD.DeferredDHCPOutput.create(self.ztp, "eth")
+        names = ("dhcpd.conf", "dhcpd_eth.hosts", "dhcp-release-manifest.json")
+        for name in names:
+            (candidate.stage / name).write_bytes(b"accepted " + name.encode())
+        candidate.publish()
+        with self.assertRaisesRegex(LOAD.LoadError, "cannot discard"):
+            candidate.discard()
+        candidate.accept_committed()
+        self.assertFalse(candidate.stage.exists())
+        for name in names:
+            self.assertEqual(b"accepted " + name.encode(),
+                             (parent / name).read_bytes())
+
+    def test_deferred_dhcp_parent_rebind_never_publishes_foreign_outputs(self):
+        parent = self.ztp / "config/isc-dhcp-server"
+        candidate = LOAD.DeferredDHCPOutput.create(self.ztp, "eth")
+        for name in ("dhcpd.conf", "dhcpd_eth.hosts", "dhcp-release-manifest.json"):
+            (candidate.stage / name).write_bytes(b"candidate " + name.encode())
+        held_parent = parent.with_name("held-isc-dhcp-server")
+        parent.rename(held_parent)
+        parent.mkdir()
+        sentinel = parent / "dhcpd.conf"
+        sentinel.write_bytes(b"foreign sentinel")
+        foreign_identity = (sentinel.stat().st_ino, sentinel.read_bytes())
+        with self.assertRaisesRegex(LOAD.LoadError, "directory changed"):
+            candidate.publish()
+        self.assertEqual(foreign_identity,
+                         (sentinel.stat().st_ino, sentinel.read_bytes()))
+        candidate.discard()
+        self.assertEqual([], list(held_parent.glob(".load-dhcp-*")))
+        self.assertEqual(b"dhcpd.conf\n", (held_parent / "dhcpd.conf").read_bytes())
+
+    def test_c1_private_candidate_flag_keeps_five_public_outputs_unchanged(self):
+        """The real C1 CLI writes only the load-owned sibling candidate."""
+        _inputs, outputs, _child = prepare_r22_empty_unselected_dhcp_fixture(self)
+        before = {
+            name: (path.stat().st_ino, path.stat().st_mtime_ns, path.read_bytes())
+            for name in LOAD._DHCP_OUTPUT_NAMES
+            for path in (outputs / name,)
+        }
+        candidate = outputs / ".load-dhcp-direct-proof"
+        candidate.mkdir(mode=0o700)
+        for name in LOAD._DHCP_OUTPUT_NAMES:
+            shutil.copy2(outputs / name, candidate / name)
+        with mock.patch.object(sys, "argv", [
+            "c1-generate_dhcp.py", "-y", "--deployment-scope", "prod",
+            "--switch", "eth", "--candidate-output-dir", str(candidate),
+        ]), mock.patch.multiple(
+            DHCP, HTTP_ROOT=str(self.root),
+            SCRIPT_DIR=str(self.ztp / "config/isc-dhcp-server"),
+            OUTPUT_CONF=str(outputs / "dhcpd.conf"),
+            OUTPUT_ETH=str(outputs / "dhcpd_eth.hosts"),
+            OUTPUT_IB=str(outputs / "dhcpd_ib.hosts"),
+            OUTPUT_NVL=str(outputs / "dhcpd_nvl.hosts"),
+            OUTPUT_MANIFEST=str(outputs / "dhcp-release-manifest.json"),
+            GLOBAL_YAML=str(self.global_file),
+            DEVICES_CSV=str(self.devices_file),
+            SUBNET_CSV=str(self.subnet_file),
+            P2P_AIR_JSON=str(self.project / "p2p-air.json"), _AUTO_YES=False,
+        ), mock.patch.object(DHCP, "stop_native_ztp_monitors"):
+            DHCP.main()
+        for name, expected in before.items():
+            path = outputs / name
+            self.assertEqual(
+                expected, (path.stat().st_ino, path.stat().st_mtime_ns,
+                           path.read_bytes()),
+            )
+        self.assertTrue((candidate / "dhcp-release-manifest.json").is_file())
+        self.assertTrue((candidate / "dhcpd.conf").is_file())
+
+    def test_c1_private_candidate_flag_rejects_foreign_directory_before_writes(self):
+        foreign = self.root / ".load-dhcp-foreign"
+        foreign.mkdir(mode=0o700)
+        public = self.ztp / "config/isc-dhcp-server/dhcpd.conf"
+        before = (public.stat().st_ino, public.read_bytes())
+        with mock.patch.object(sys, "argv", [
+            "c1-generate_dhcp.py", "-y", "--candidate-output-dir", str(foreign),
+        ]), mock.patch.object(DHCP, "OUTPUT_CONF", str(public)):
+            with self.assertRaises(SystemExit) as caught:
+                DHCP.main()
+        self.assertEqual(2, caught.exception.code)
+        self.assertEqual(before, (public.stat().st_ino, public.read_bytes()))
+        self.assertEqual([], list(foreign.iterdir()))
+
+    def test_c2_description_aba_source_rejects_without_replacing_same_name_output(self):
+        """A restored path digest cannot authorize a mid-command B consumer."""
+        work = self.root / "c2-aba"
+        work.mkdir()
+        csv_path = work / "02-devices_config.csv"
+        source_a = "hostname,type\nborder01,eth\n"
+        source_b = "hostname,type\nborder02,eth\n"
+        self.assertEqual(len(source_a), len(source_b))
+        csv_path.write_text(source_a, encoding="utf-8")
+        before = csv_path.stat()
+        output = work / "20261002_020000"
+        output.mkdir()
+        prior = work / "20261002_020000_with_desc"
+        prior.mkdir()
+        marker = prior / "old-marker.txt"
+        marker.write_bytes(b"old healthy description output\n")
+        prior_identity = (
+            marker.read_bytes(), marker.stat().st_ino, marker.stat().st_mtime_ns,
+        )
+        copytree = GENERATOR.shutil.copytree
+        read_hostnames = GENERATOR._load_csv_hostnames
+        consumed = None
+
+        def change_after_copy(*args, **kwargs):
+            result = copytree(*args, **kwargs)
+            csv_path.write_text(source_b, encoding="utf-8")
+            os.utime(csv_path, ns=(before.st_atime_ns, before.st_mtime_ns))
+            return result
+
+        def restore_after_read():
+            nonlocal consumed
+            consumed = read_hostnames()
+            csv_path.write_text(source_a, encoding="utf-8")
+            os.utime(csv_path, ns=(before.st_atime_ns, before.st_mtime_ns))
+            return consumed
+
+        caught = None
+        with mock.patch.object(GENERATOR, "_CSV_FILE", os.fspath(csv_path)), mock.patch.object(
+            GENERATOR, "_load_description_intent", return_value={},
+        ), mock.patch.object(
+            GENERATOR, "_load_dot_lines", return_value=[],
+        ), mock.patch.object(
+            GENERATOR, "_load_dot_devices", return_value=set(),
+        ), mock.patch.object(
+            GENERATOR.shutil, "copytree", side_effect=change_after_copy,
+        ), mock.patch.object(
+            GENERATOR, "_load_csv_hostnames", side_effect=restore_after_read,
+        ):
+            try:
+                GENERATOR._run_patch_descriptions(
+                    os.fspath(work / "unused.dot"), os.fspath(output),
+                )
+            except ValueError as exc:
+                caught = exc
+
+        after = csv_path.stat()
+        self.assertEqual((before.st_ino, before.st_size, before.st_mtime_ns),
+                         (after.st_ino, after.st_size, after.st_mtime_ns))
+        self.assertEqual(source_a.encode("utf-8"), csv_path.read_bytes())
+        self.assertEqual({"border02"}, consumed)
+        with self.subTest(gate="mixed-generation rejection"):
+            self.assertIsNotNone(caught, "c2 consumed B while source returned to A")
+        with self.subTest(gate="old same-name output preservation"):
+            self.assertTrue(marker.is_file())
+            if marker.is_file():
+                self.assertEqual(
+                    prior_identity,
+                    (marker.read_bytes(), marker.stat().st_ino, marker.stat().st_mtime_ns),
+                )
+
+    def test_c2_description_publish_failure_restores_prior_output(self):
+        """A failed final rename must leave the last accepted description tree."""
+        work = self.root / "c2-publish-rollback"
+        work.mkdir()
+        output = work / "generated"
+        output.mkdir()
+        prior = work / "generated_with_desc"
+        prior.mkdir()
+        marker = prior / "old-marker.txt"
+        marker.write_bytes(b"previous accepted description\n")
+        original_identity = (marker.stat().st_ino, marker.read_bytes())
+        original_replace = os.replace
+        failed = False
+
+        def fail_once(source, destination):
+            nonlocal failed
+            if os.fspath(destination) == os.fspath(prior) and not failed:
+                failed = True
+                raise OSError("controlled description publish failure")
+            return original_replace(source, destination)
+
+        with mock.patch.object(GENERATOR, "_load_description_intent", return_value={}), \
+             mock.patch.object(GENERATOR, "_load_dot_lines", return_value=[]), \
+             mock.patch.object(GENERATOR, "_load_dot_devices", return_value=set()), \
+             mock.patch.object(GENERATOR, "_load_csv_hostnames", return_value=set()), \
+             mock.patch.object(GENERATOR.os, "replace", side_effect=fail_once):
+            with self.assertRaisesRegex(OSError, "controlled description publish failure"):
+                GENERATOR._run_patch_descriptions(
+                    os.fspath(work / "unused.dot"), os.fspath(output),
+                )
+        self.assertTrue(failed)
+        self.assertEqual(original_identity, (marker.stat().st_ino, marker.read_bytes()))
+        self.assertEqual([], list(work.glob(".description-stage-*")))
 
     def _prepare_h04_schema_v1_collision_generator(self) -> tuple[Path, Path]:
         template_dir = self.ztp / "config/cumulus/template"

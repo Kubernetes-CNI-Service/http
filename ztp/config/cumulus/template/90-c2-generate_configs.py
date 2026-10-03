@@ -38,6 +38,7 @@ from pathlib import Path
 import re
 import select
 import shutil
+import tempfile
 import stat
 import sys
 import yaml
@@ -6417,11 +6418,39 @@ def _port_sort_key(p):
 
 
 def _run_patch_descriptions(dot_file, output_dir):
-    """Inline equivalent of patch_descriptions.main()."""
+    """Build descriptions privately and preserve the last accepted output on error."""
+    published_dir = output_dir + "_with_desc"
+    parent = os.path.dirname(os.path.abspath(published_dir))
+    expected_intents = _load_description_intent(dot_file)
+    expected_lines = _load_dot_lines(dot_file)
+    expected_hosts = _load_csv_hostnames()
+    with tempfile.TemporaryDirectory(prefix=".description-stage-", dir=parent) as stage:
+        candidate = os.path.join(stage, "candidate")
+        observed_intents, observed_lines, observed_hosts = _build_patch_descriptions(
+            dot_file, output_dir, candidate, published_dir,
+        )
+        if (observed_intents != expected_intents
+                or observed_lines != expected_lines
+                or observed_hosts != expected_hosts):
+            raise ValueError("description sources changed during generation")
+        previous = os.path.join(stage, "previous")
+        had_previous = os.path.lexists(published_dir)
+        if had_previous:
+            if not os.path.isdir(published_dir) or os.path.islink(published_dir):
+                raise ValueError("previous description output is not a directory")
+            os.replace(published_dir, previous)
+        try:
+            os.replace(candidate, published_dir)
+        except BaseException:
+            if had_previous:
+                os.replace(previous, published_dir)
+            raise
+    print(f"Output:   {published_dir}")
+
+
+def _build_patch_descriptions(dot_file, output_dir, dest_dir, published_dir):
+    """Inline equivalent of patch_descriptions.main() in a private directory."""
     empty_intents = _load_description_intent(dot_file)
-    dest_dir = output_dir + "_with_desc"
-    if os.path.exists(dest_dir):
-        shutil.rmtree(dest_dir)
     shutil.copytree(output_dir, dest_dir)
 
     dot_lines   = _load_dot_lines(dot_file)
@@ -6523,7 +6552,6 @@ def _run_patch_descriptions(dot_file, output_dir):
 
     print(f"\nPatched:  {patched_count} files")
     print(f"Skipped:  {skipped_count} files (no matching descriptions)")
-    print(f"Output:   {dest_dir}")
 
     if no_desc_skipped:
         print(f"\n[已忽略] swp1-48（1G 接入口）有部分未在 dot 文件中出现（端口未使用），已跳过（共 {len(no_desc_skipped)} 台）：")
@@ -6563,6 +6591,7 @@ def _run_patch_descriptions(dot_file, output_dir):
         for host_lower, ports in sorted(extra_in_dot.items()):
             compressed = _compress_ports(sorted(ports, key=_port_sort_key))
             print(f"  {host_lower}: {', '.join(compressed)}")
+    return empty_intents, dot_lines, csv_hosts
 
 
 def _topology_dot_files(suffix):
