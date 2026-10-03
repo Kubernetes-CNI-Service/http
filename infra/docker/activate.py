@@ -3478,6 +3478,7 @@ def exec_managed_service(name: str, settings: Settings) -> None:
         # Config validation may take time.  Re-observe immediately before exec
         # so an ifindex/name/prefix change cannot turn an approved listener
         # name into a different logical interface.
+        dhcp_enabled, ztp_enabled = current_project_dhcp_ztp_modes(settings)
         links, addresses = capture_stable_network_snapshot()
         selected = runtime.revalidate_dhcp_runtime_plan(
             selected,
@@ -3486,6 +3487,8 @@ def exec_managed_service(name: str, settings: Settings) -> None:
             address_snapshot=addresses,
             allowlist=settings.allowlist,
             relay_ingress=settings.relay_ingress,
+            dhcp_enabled=dhcp_enabled,
+            ztp_enabled=ztp_enabled,
         )
         revalidated_fingerprints = selected_interface_fingerprints(
             selected, links, addresses,

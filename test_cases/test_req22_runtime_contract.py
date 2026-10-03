@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ast
+import inspect
 from pathlib import Path
 import tempfile
 import unittest
@@ -117,6 +119,19 @@ class Req22RuntimeInputTests(unittest.TestCase):
             self.assertEqual((), selected.endpoint_ips)
             self.assertIs(False, planner.call_args.kwargs["dhcp_enabled"])
             self.assertIs(False, planner.call_args.kwargs["ztp_enabled"])
+
+    def test_dhcp_exec_revalidation_carries_current_explicit_modes(self):
+        tree = ast.parse(inspect.getsource(ACTIVATE.exec_managed_service))
+        calls = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "revalidate_dhcp_runtime_plan"
+        ]
+        self.assertEqual(1, len(calls))
+        keywords = {item.arg for item in calls[0].keywords}
+        self.assertIn("dhcp_enabled", keywords)
+        self.assertIn("ztp_enabled", keywords)
 
 
 if __name__ == "__main__":
