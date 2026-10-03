@@ -836,13 +836,14 @@ valid_hash "${receipt_digest}" || fail "invalid receipt snapshot hash"
 # links, validate the exact receipt and YAML bytes held on those descriptors,
 # then emit the complete protocol once; never cat a pathname after hashing it.
 python3 - "${STATE_DIR}" "${MAX_YAML_BYTES}" "${MAX_RECEIPT_BYTES}" \
-    "${raw_sha256}" "${receipt_digest}" <<'PY_BOUND_OUTPUT' || fail "applied evidence changed before output"
+    "${raw_sha256}" "${receipt_digest}" "${failed_raw_sha256}" \
+    <<'PY_BOUND_OUTPUT' || fail "applied evidence changed before output"
 import hashlib
 import os
 import stat
 import sys
 
-state_dir, yaml_limit_text, receipt_limit_text, yaml_digest, receipt_digest = sys.argv[1:]
+state_dir, yaml_limit_text, receipt_limit_text, yaml_digest, receipt_digest, failed_digest = sys.argv[1:]
 yaml_limit = int(yaml_limit_text)
 receipt_limit = int(receipt_limit_text)
 directory_fd = os.open(state_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -890,6 +891,10 @@ try:
     if (hashlib.sha256(receipt).hexdigest() != receipt_digest
             or hashlib.sha256(yaml_bytes).hexdigest() != yaml_digest):
         raise SystemExit("applied evidence hash mismatch")
+    if failed_digest:
+        failed_bytes = read_bound("last-failed-dedicated.yaml", yaml_limit)
+        if hashlib.sha256(failed_bytes).hexdigest() != failed_digest:
+            raise SystemExit("failed dedicated evidence hash mismatch")
     current_dir = os.stat(state_dir, follow_symlinks=False)
     if (directory.st_dev, directory.st_ino, directory.st_mode, directory.st_uid) != (
             current_dir.st_dev, current_dir.st_ino,

@@ -1140,6 +1140,54 @@ class AppliedConfigHelperTests(unittest.TestCase):
             self.assertNotEqual(0, result.returncode)
             self.assertEqual("", result.stdout)
 
+    def test_failed_dedicated_yaml_rebind_after_hash_vetoes_fallback_receipt(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            _receipt, _applied = self.prepare_state(root, b"- set: {}\n", fallback=True)
+            failed = root / "state/last-failed-dedicated.yaml"
+            replacement = root / "replacement-failed.yaml"
+            replacement.write_bytes(b"- set:\n    attacker: true\n")
+            replacement.chmod(0o600)
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            real_hash = shutil.which("sha256sum")
+            self.assertIsNotNone(real_hash)
+            hash_shim = fake_bin / "sha256sum"
+            hash_shim.write_text(
+                "#!/bin/sh\n"
+                f"{shlex.quote(real_hash)} \"$@\"\n"
+                "rc=$?\n"
+                'if [ "$1" = "$FAILED_TO_REBIND" ] && [ "$rc" -eq 0 ]; then\n'
+                '  mv "$FAILED_TO_REBIND" "$ORIGINAL_FAILED"\n'
+                '  mv "$REPLACEMENT_FAILED" "$FAILED_TO_REBIND"\n'
+                "fi\n"
+                "exit $rc\n",
+                encoding="utf-8",
+            )
+            hash_shim.chmod(0o755)
+            helper = self.write_helper(root)
+            helper.write_text(
+                helper.read_text(encoding="utf-8").replace(
+                    "PATH=/usr/sbin:/usr/bin:/sbin:/bin",
+                    f"PATH={shlex.quote(str(fake_bin))}:/usr/sbin:/usr/bin:/sbin:/bin",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            env = {
+                **os.environ,
+                "FAILED_TO_REBIND": str(failed),
+                "ORIGINAL_FAILED": str(root / "original-failed.yaml"),
+                "REPLACEMENT_FAILED": str(replacement),
+            }
+            result = run_bash(helper, env=env)
+            self.assertEqual(
+                b"- set:\n    attacker: true\n", failed.read_bytes(),
+                "test did not reach the post-hash replacement",
+            )
+            self.assertNotEqual(0, result.returncode)
+            self.assertEqual("", result.stdout)
+
     def test_helper_validates_optional_failed_mode_source_name(self):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
