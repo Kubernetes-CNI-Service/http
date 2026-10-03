@@ -1039,7 +1039,7 @@ import sys
 
 state_dir = sys.argv[1]
 flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-file_flags = os.O_RDONLY | os.O_NOFOLLOW
+file_flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
 directory_fd = os.open(state_dir, flags)
 try:
     directory_identity = os.fstat(directory_fd)
@@ -1137,6 +1137,58 @@ try:
         os.close(source_fd)
 finally:
     os.close(state_fd)
+PY
+}
+
+stage_applied_receipt_bound() {
+    python3 - "$1" "${APPLIED_STATE_DIR}" "${APPLIED_RECEIPT_MAX_BYTES}" 3<&0 <<'PY'
+import os
+import stat
+import sys
+
+target_path, state_dir, maximum_text = sys.argv[1:]
+maximum = int(maximum_text)
+if maximum < 1 or os.path.dirname(target_path) != state_dir:
+    raise SystemExit("unsafe applied receipt stage path or budget")
+raw = bytearray()
+while len(raw) <= maximum:
+    chunk = os.read(3, maximum + 1 - len(raw))
+    if not chunk:
+        break
+    raw.extend(chunk)
+if not raw or len(raw) > maximum or os.read(3, 1):
+    raise SystemExit("applied receipt exceeds schema-1 safety budget")
+state_fd = os.open(state_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+try:
+    state_info = os.fstat(state_fd)
+    if (not stat.S_ISDIR(state_info.st_mode)
+            or state_info.st_uid != os.geteuid()
+            or stat.S_IMODE(state_info.st_mode) != 0o711):
+        raise SystemExit("unsafe applied receipt staging directory")
+    target_fd = os.open(
+        os.path.basename(target_path),
+        os.O_WRONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
+        dir_fd=state_fd,
+    )
+    try:
+        target_info = os.fstat(target_fd)
+        if (not stat.S_ISREG(target_info.st_mode) or target_info.st_nlink != 1
+                or target_info.st_uid != os.geteuid()
+                or stat.S_IMODE(target_info.st_mode) != 0o600):
+            raise SystemExit("unsafe applied receipt stage")
+        os.ftruncate(target_fd, 0)
+        view = memoryview(raw)
+        while view:
+            written = os.write(target_fd, view)
+            if written <= 0:
+                raise SystemExit("applied receipt stage write did not progress")
+            view = view[written:]
+        os.fsync(target_fd)
+    finally:
+        os.close(target_fd)
+finally:
+    os.close(state_fd)
+print(len(raw))
 PY
 }
 
@@ -1305,7 +1357,7 @@ persist_applied_receipt() {
         log "[ZTP] WARN: Could not generate a safe applied-config timestamp"
         return 0
     fi
-    if ! {
+    if ! receipt_size=$({
         printf 'schema=1\n'
         printf 'status=%s\n' "${receipt_status}"
         printf 'source_kind=%s\n' "${source_kind}"
@@ -1320,17 +1372,16 @@ persist_applied_receipt() {
         if [[ -n "${failed_source_name}" ]]; then
             printf 'failed_source_name=%s\n' "${failed_source_name}"
         fi
-    } > "${receipt_tmp}" || ! chown root:root "${receipt_tmp}" || ! chmod 0600 "${receipt_tmp}"; then
+    } | stage_applied_receipt_bound "${receipt_tmp}"); then
+        cleanup_applied_receipt_temps
+        log "[ZTP] WARN: Applied-config receipt exceeds schema-1 safety budget or stage is unsafe"
+        return 0
+    fi
+    if ! chown root:root "${receipt_tmp}" || ! chmod 0600 "${receipt_tmp}"; then
         cleanup_applied_receipt_temps
         log "[ZTP] WARN: Could not stage applied-config receipt"
         return 0
     fi
-    if ! receipt_size=$(wc -c < "${receipt_tmp}"); then
-        cleanup_applied_receipt_temps
-        log "[ZTP] WARN: Could not size staged applied-config receipt"
-        return 0
-    fi
-    receipt_size=${receipt_size//[[:space:]]/}
     if [[ ! "${receipt_size}" =~ ^[0-9]+$ ]] ||
        (( receipt_size < 1 || receipt_size > APPLIED_RECEIPT_MAX_BYTES )); then
         cleanup_applied_receipt_temps
