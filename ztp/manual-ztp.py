@@ -1263,12 +1263,27 @@ def collect_applied_config(
     missing = sorted(required - set(receipt))
     if missing:
         return unavailable("设备 ZTP receipt 缺少字段: " + ", ".join(missing))
+    optional = {"failed_raw_sha256", "failed_source_name"}
+    unknown = sorted(set(receipt) - required - optional)
+    if unknown:
+        return unavailable("设备 ZTP receipt 含未知字段: " + ", ".join(unknown))
     if receipt["schema"] != "1" or receipt["status"] != "success":
         return unavailable("设备 ZTP receipt schema/status 不是成功的 V1 凭据")
     if receipt["source_kind"] not in APPLIED_SOURCE_KINDS:
         return unavailable("设备 ZTP receipt source_kind 无效")
     if receipt["apply_mode"] not in APPLIED_MODES:
         return unavailable("设备 ZTP receipt apply_mode 无效")
+    if (receipt["source_kind"], receipt["apply_mode"]) not in {
+        ("dedicated", "replace"), ("dedicated", "patch"),
+        ("default", "patch"), ("fallback", "patch"),
+        ("fallback_default", "patch"),
+    }:
+        return unavailable("设备 ZTP receipt 来源与应用模式不一致")
+    if receipt["source_kind"] == "fallback_default":
+        if "failed_raw_sha256" not in receipt:
+            return unavailable("设备 ZTP receipt 缺少失败专属来源摘要")
+    elif set(receipt) & optional:
+        return unavailable("设备 ZTP receipt 含非回退模式的失败来源字段")
     if not SAFE_SOURCE_NAME.fullmatch(receipt["source_name"]):
         return unavailable("设备 ZTP receipt source_name 不是安全文件名")
     if not _validate_applied_at(receipt["applied_at"]):
@@ -1280,12 +1295,19 @@ def collect_applied_config(
     ):
         return unavailable("设备 ZTP receipt 的 YAML SHA-256 校验失败")
     failed_digest = receipt.get("failed_raw_sha256", "")
-    if failed_digest and not re.fullmatch(r"[0-9a-f]{64}", failed_digest):
+    if "failed_raw_sha256" in receipt and not re.fullmatch(
+        r"[0-9a-f]{64}", failed_digest,
+    ):
         return unavailable("设备 ZTP receipt failed_raw_sha256 无效")
     expected_mac = normalize_mac(device.get("mac_plain") or "")
     receipt_mac = normalize_mac(receipt["eth0_mac"])
     if not expected_mac or receipt_mac != expected_mac:
         return unavailable("设备 ZTP receipt 的 eth0 MAC 与清单身份不一致")
+    failed_source_name = receipt.get("failed_source_name")
+    if failed_source_name is not None and failed_source_name != (
+        expected_mac.replace(":", "") + ".mode"
+    ):
+        return unavailable("设备 ZTP receipt failed_source_name 与设备身份不一致")
 
     stable_receipt = {key: receipt[key] for key in sorted(receipt)}
     trusted_fingerprint = hashlib.sha256(

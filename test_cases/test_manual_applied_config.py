@@ -408,6 +408,48 @@ class AppliedHelperProtocolTests(unittest.TestCase):
             client.run.call_args.args[2],
         )
 
+    def test_applied_receipt_schema_rejects_unknown_remote_field(self):
+        raw = "- set:\n    system:\n      hostname: leaf01\n"
+        forged = protocol(raw).replace(
+            "applied_at=2026-08-31T12:34:56+00:00\n",
+            "applied_at=2026-08-31T12:34:56+00:00\nforeign_authority=success\n",
+            1,
+        )
+        parsed = MANUAL.collect_applied_config(
+            self.client(completed(forged)), DEVICE, "192.0.2.10",
+        )
+        self.assertFalse(parsed["trusted"])
+        self.assertIn("receipt", parsed["reason"])
+
+    def test_applied_receipt_rejects_inconsistent_optional_and_mode_fields(self):
+        raw = "- set:\n    system:\n      hostname: leaf01\n"
+        base = protocol(raw)
+        cases = {
+            "failed hash on dedicated": base.replace(
+                "applied_at=2026-08-31T12:34:56+00:00\n",
+                "applied_at=2026-08-31T12:34:56+00:00\n"
+                + "failed_raw_sha256=" + "a" * 64 + "\n",
+            ),
+            "default replace": protocol(raw, source_kind="default", apply_mode="replace"),
+            "fallback without failed hash": protocol(
+                raw, source_kind="fallback_default", apply_mode="patch",
+            ),
+            "foreign failed mode source": protocol(
+                raw, source_kind="fallback_default", apply_mode="patch",
+                failed_raw_sha256="a" * 64,
+            ).replace(
+                "failed_raw_sha256=" + "a" * 64 + "\n",
+                "failed_raw_sha256=" + "a" * 64 + "\n"
+                "failed_source_name=020000000002.mode\n",
+            ),
+        }
+        for label, forged in cases.items():
+            with self.subTest(label=label):
+                parsed = MANUAL.collect_applied_config(
+                    self.client(completed(forged)), DEVICE, "192.0.2.10",
+                )
+                self.assertFalse(parsed["trusted"], label)
+
     def test_corrupt_missing_oversize_or_wrong_identity_is_untrusted(self):
         raw = "- set:\n    system:\n      hostname: leaf01\n"
         cases = {
