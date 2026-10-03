@@ -21,7 +21,15 @@ UNSETUP = load_script("req10b_global_link_unsetup_flow", ROOT / "DAY0-Prepare/02
 INITIAL = load_script("req10b_global_link_initial_setup_flow", ROOT / "infiniband/bringup/xdr-initial-setup/initial-setup.py")
 
 GLOBAL_MAPPING = ("infiniband/01-global.yaml", "01-global.yaml", "file")
-GLOBAL_BYTES = b"system:\n  timezone: Etc/UTC\n"
+GLOBAL_BYTES = (
+    b"common:\n  mgmt:\n    dhcp-server:\n      status: disabled\n"
+    b"    ztp:\n      status: disabled\n"
+    b"system:\n  timezone: Etc/UTC\n"
+)
+SUBNET_BYTES = (
+    b"shared_network,subnet,netmask,range_start,range_end,routers,"
+    b"ztp_service_ip,cumulus_profile,nvos_ztp\n"
+)
 DEVICES_BYTES = b"hostname,ip\nleaf-01,192.0.2.10\n"
 EXPECTED_WORKSPACE_LINKS = (
     ("infra/01-global.yaml", "01-global.yaml", GLOBAL_BYTES),
@@ -88,6 +96,7 @@ class Req10BGlobalLinkWorkflowTests(unittest.TestCase):
             project = root / "DAY0-Prepare/site-a"
             project.mkdir(parents=True)
             (project / "01-global.yaml").write_bytes(GLOBAL_BYTES)
+            (project / "02-dhcp-subnet_config.csv").write_bytes(SUBNET_BYTES)
             (project / "02-devices_config.csv").write_bytes(DEVICES_BYTES)
             p2p = project / "p2p.xlsx"
             p2p.write_bytes(b"fixture")
@@ -151,6 +160,7 @@ class Req10BGlobalLinkWorkflowTests(unittest.TestCase):
             project = root / "DAY0-Prepare/site-a"
             project.mkdir(parents=True)
             (project / "01-global.yaml").write_bytes(GLOBAL_BYTES)
+            (project / "02-dhcp-subnet_config.csv").write_bytes(SUBNET_BYTES)
             (project / "02-devices_config.csv").write_bytes(DEVICES_BYTES)
             p2p = project / "p2p.xlsx"
             p2p.write_bytes(b"fixture")
