@@ -17,7 +17,7 @@
 
 import argparse
 import base64
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 import ctypes
 import csv
 from datetime import datetime
@@ -2431,9 +2431,88 @@ def _validate_eth_csv(path):
     return errors, warnings
 
 
-def _validate_subnet_csv(path):
-    """校验 DHCP subnet CSV。"""
+def _r22_csv_file_identity(metadata):
+    return (
+        metadata.st_dev, metadata.st_ino, metadata.st_size,
+        metadata.st_mtime_ns, metadata.st_ctime_ns,
+    )
+
+
+@contextmanager
+def _open_bound_subnet_csv(path):
+    """Keep one nofollow CSV FD bound to the checked pathname and metadata."""
+    before = os.lstat(path)
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise ValueError("DHCP subnet CSV 必须是非软链接单硬链接普通文件")
+    if before.st_size == 0:
+        raise ValueError("DHCP subnet CSV 大小为 0")
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise ValueError("当前平台无法安全拒绝 DHCP subnet CSV symlink")
+    descriptor = os.open(path, os.O_RDONLY | nofollow | os.O_CLOEXEC)
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or _r22_csv_file_identity(opened) != _r22_csv_file_identity(before)
+        ):
+            raise ValueError("DHCP subnet CSV 来源身份在打开前变化")
+        with os.fdopen(descriptor, "r", newline="", encoding="utf-8-sig") as stream:
+            descriptor = -1
+            yield stream
+            after = os.fstat(stream.fileno())
+            current = os.lstat(path)
+            if (
+                not stat.S_ISREG(current.st_mode)
+                or current.st_nlink != 1
+                or _r22_csv_file_identity(after) != _r22_csv_file_identity(before)
+                or _r22_csv_file_identity(current) != _r22_csv_file_identity(before)
+            ):
+                raise ValueError("DHCP subnet CSV 来源身份在读取中变化")
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _r22_subnet_source_fingerprint(path):
+    """Hash a validated single-link source without following path changes."""
+    before = os.lstat(path)
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise ValueError("DHCP subnet CSV 必须是非软链接单硬链接普通文件")
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise ValueError("当前平台无法安全拒绝 DHCP subnet CSV symlink")
+    descriptor = os.open(path, os.O_RDONLY | nofollow | os.O_CLOEXEC)
+    try:
+        opened = os.fstat(descriptor)
+        if _r22_csv_file_identity(opened) != _r22_csv_file_identity(before):
+            raise ValueError("DHCP subnet CSV 来源身份在哈希前变化")
+        digest = hashlib.sha256()
+        for block in iter(lambda: os.read(descriptor, 1024 * 1024), b""):
+            digest.update(block)
+        after = os.fstat(descriptor)
+        current = os.lstat(path)
+        if (
+            _r22_csv_file_identity(after) != _r22_csv_file_identity(before)
+            or _r22_csv_file_identity(current) != _r22_csv_file_identity(before)
+        ):
+            raise ValueError("DHCP subnet CSV 来源身份在哈希中变化")
+        return (*_r22_csv_file_identity(before), digest.hexdigest())
+    finally:
+        os.close(descriptor)
+
+
+def _validate_subnet_csv(path, *, dhcp_enabled=None, ztp_enabled=None):
+    """校验 CSV；显式模式由项目入口提供，旧调用仅作行语义检查。"""
     errors, warnings = [], []
+    if (dhcp_enabled is None) != (ztp_enabled is None):
+        return ["  DHCP/ZTP 状态必须同时提供"], warnings
+    mode_bound = dhcp_enabled is not None
+    if mode_bound and (type(dhcp_enabled) is not bool or type(ztp_enabled) is not bool):
+        return ["  DHCP/ZTP 状态必须是精确布尔值"], warnings
+    if mode_bound and not dhcp_enabled and ztp_enabled:
+        return ["  DHCP disabled + ZTP enabled 是非法组合"], warnings
     seen_networks = {}
     profile_services = {}
     nvos_service = None
@@ -2442,8 +2521,15 @@ def _validate_subnet_csv(path):
                      "cumulus_profile", "nvos_ztp"}
     legacy_cols = {"bootfile_name", "cumulus_provision_url"}
     try:
-        with open(path, newline="", encoding="utf-8-sig") as f:
-            reader = csv.DictReader(f)
+        with _open_bound_subnet_csv(path) as f:
+            physical_lines = []
+
+            def captured_lines():
+                for line in f:
+                    physical_lines.append(line)
+                    yield line
+
+            reader = csv.DictReader(captured_lines())
             fields = [str(item or "").strip() for item in (reader.fieldnames or [])]
             if len(fields) != len(set(fields)):
                 errors.append("  CSV 存在重复列名")
@@ -2462,9 +2548,18 @@ def _validate_subnet_csv(path):
                 errors.append(f"  缺少列：{sorted(missing)}")
                 return errors, warnings
             reader.fieldnames = fields
+            physical_lines.clear()
+            row_count = 0
             for row_n, row in enumerate(reader, start=2):
+                source_record = "".join(physical_lines)
+                physical_lines.clear()
                 if not any(str(value or "").strip() for value in row.values()):
+                    if source_record.strip():
+                        errors.append(
+                            f"  行{reader.line_num} 仅含分隔符或引号的空字段记录"
+                        )
                     continue
+                row_count += 1
                 shared_network = row.get("shared_network", "").strip()
                 subnet  = row.get("subnet", "").strip()
                 netmask = row.get("netmask", "").strip()
@@ -2561,9 +2656,58 @@ def _validate_subnet_csv(path):
                 except ValueError:
                     # The field-specific checks above already provide the useful error.
                     pass
+            if mode_bound and row_count == 0 and (dhcp_enabled or ztp_enabled):
+                errors.append("  DHCP enabled 的 CSV 没有 subnet 记录")
     except Exception as ex:
         errors.append(f"  读取失败：{ex}")
     return errors, warnings
+
+
+def _r22_project_modes(proj_dir):
+    """Read both explicit service modes from this project's current global."""
+    global_path = Path(proj_dir) / "01-global.yaml"
+    try:
+        with global_path.open(encoding="utf-8") as stream:
+            document = safe_load_global_yaml(stream)
+        mgmt = document["common"]["mgmt"]
+        raw_dhcp = mgmt["dhcp-server"]["status"]
+        raw_ztp = mgmt["ztp"]["status"]
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise ValueError(f"R22 global DHCP/ZTP 状态不可读：{exc}") from exc
+    values = []
+    for label, raw in (("dhcp-server", raw_dhcp), ("ztp", raw_ztp)):
+        status = str(raw or "").strip().casefold()
+        if status not in {"enabled", "disabled"}:
+            raise ValueError(
+                f"common.mgmt.{label}.status 必须是 enabled 或 disabled"
+            )
+        values.append(status == "enabled")
+    dhcp_enabled, ztp_enabled = values
+    if not dhcp_enabled and ztp_enabled:
+        raise ValueError("DHCP disabled + ZTP enabled 是非法组合")
+    return dhcp_enabled, ztp_enabled
+
+
+def _require_r22_subnet_input(proj_dir):
+    """Mandatory, non-bypassable input gate before setup side effects."""
+    dhcp_enabled, ztp_enabled = _r22_project_modes(proj_dir)
+    subnet = Path(proj_dir) / "02-dhcp-subnet_config.csv"
+    try:
+        source_before = _r22_subnet_source_fingerprint(subnet)
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"R22 DHCP subnet 来源无效：{exc}") from exc
+    errors, _warnings = _validate_subnet_csv(
+        subnet, dhcp_enabled=dhcp_enabled, ztp_enabled=ztp_enabled,
+    )
+    if errors:
+        raise ValueError("R22 DHCP subnet 输入无效：" + "；".join(errors))
+    try:
+        source_after = _r22_subnet_source_fingerprint(subnet)
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"R22 DHCP subnet 来源无效：{exc}") from exc
+    if source_after != source_before:
+        raise ValueError("R22 DHCP subnet 来源在校验期间变化")
+    return dhcp_enabled, ztp_enabled, source_before
 
 
 def _validate_global_yaml(path, section_key="eth"):

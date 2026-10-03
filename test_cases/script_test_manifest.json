@@ -74,6 +74,7 @@
         "test_cases.test_docker_management_ssh_key",
         "test_cases.test_dhcp_optional_contract",
         "test_cases.test_dhcp_optional_workflow",
+        "test_cases.test_req22_setup_contract",
         "test_cases.test_eth_jump_transport_contract",
         "test_cases.test_eth_jump_transport_workflow",
         "test_cases.test_infra_check_and_manual_reset",
