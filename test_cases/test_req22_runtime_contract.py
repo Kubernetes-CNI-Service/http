@@ -133,6 +133,37 @@ class Req22RuntimeInputTests(unittest.TestCase):
         self.assertIn("dhcp_enabled", keywords)
         self.assertIn("ztp_enabled", keywords)
 
+    def test_docker_observation_rejects_same_size_csv_replacement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = self._project(root, dhcp="disabled", ztp="disabled")
+            source = project / "02-dhcp-subnet_config.csv"
+            replacement = project / "replacement.csv"
+            source.write_text(HEADER + " \n", encoding="utf-8")
+            replacement.write_text(HEADER + "\t\n", encoding="utf-8")
+            self.assertEqual(source.stat().st_size, replacement.stat().st_size)
+            settings = ACTIVATE.Settings(
+                project_name="fixture", scope="prod", http_root=root,
+                state_root=root / "state", log_root=root / "log",
+                apache_listeners=root / "apache.conf",
+            )
+
+            def replace_after_parse(*_args):
+                source.rename(project / "old-subnet.csv")
+                replacement.rename(source)
+                selected = SimpleNamespace(endpoint_ips=())
+                return selected, [], [], SimpleNamespace()
+
+            with mock.patch.object(
+                ACTIVATE, "build_runtime_plan", side_effect=replace_after_parse,
+            ), mock.patch.object(
+                ACTIVATE, "runtime_plan_payload", return_value={},
+            ), mock.patch.object(ACTIVATE, "_atomic_write") as write:
+                with self.assertRaisesRegex(ACTIVATE.ActivationError, "subnet.*changed"):
+                    ACTIVATE.observe_runtime(settings)
+            write.assert_not_called()
+            self.assertFalse(settings.state_root.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -861,6 +861,47 @@ def sha256_path(path: Path) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _subnet_source_token(path: Path) -> tuple[tuple[int, ...], str]:
+    """Bind one direct CSV pathname, held file identity, and its exact bytes."""
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise ActivationError("platform cannot safely bind subnet CSV source")
+
+    def identity(metadata: os.stat_result) -> tuple[int, ...]:
+        return (
+            metadata.st_dev, metadata.st_ino, metadata.st_mode,
+            metadata.st_nlink, metadata.st_size, metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+        )
+
+    try:
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            raise ActivationError("subnet CSV must be one direct regular file")
+        descriptor = os.open(
+            path, os.O_RDONLY | nofollow | os.O_NONBLOCK | os.O_CLOEXEC,
+        )
+    except OSError as exc:
+        raise ActivationError(f"cannot bind subnet CSV source {path}: {exc}") from exc
+    with os.fdopen(descriptor, "rb") as stream:
+        opened = os.fstat(stream.fileno())
+        if not stat.S_ISREG(opened.st_mode) or identity(opened) != identity(before):
+            raise ActivationError("subnet CSV source changed before read")
+        digest = hashlib.sha256()
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+        after = os.fstat(stream.fileno())
+        try:
+            visible = path.lstat()
+        except OSError as exc:
+            raise ActivationError(f"subnet CSV source changed after read: {exc}") from exc
+        if identity(opened) != identity(after) or identity(after) != identity(visible):
+            raise ActivationError("subnet CSV source changed during read")
+        if after.st_size == 0:
+            raise ActivationError("subnet CSV source is empty")
+        return identity(after), digest.hexdigest()
+
+
 def _source_record(source_root: Path, relative_name: str) -> dict:
     """Describe one fixed runtime dependency without following an unsafe link."""
     relative = Path(relative_name)
@@ -1569,6 +1610,7 @@ def selected_interface_fingerprints(selected, links: object, addresses: object) 
 
 def runtime_plan_payload(
     settings: Settings, selected, links: object, addresses: object,
+    *, subnet_sha256: str | None = None,
 ) -> dict:
     return {
         "schema_version": PLAN_SCHEMA,
@@ -1578,7 +1620,10 @@ def runtime_plan_payload(
         "switch_scope": settings.switch_scope,
         "mini": settings.mini,
         "subnet_csv": os.fspath(settings.subnet_csv),
-        "subnet_sha256": sha256_path(settings.subnet_csv),
+        "subnet_sha256": (
+            sha256_path(settings.subnet_csv)
+            if subnet_sha256 is None else subnet_sha256
+        ),
         "listener_names": list(selected.listener_names),
         "listener_ifindexes": list(selected.listener_ifindexes),
         "direct_shared_networks": list(selected.direct_shared_networks),
@@ -2244,6 +2289,7 @@ def ensure_docker_deployment_owner(
 def observe_runtime(settings: Settings, runner=subprocess.run):
     """Build the current plan and rendered config without changing any file."""
     port, address = project_http_policy(settings)
+    subnet_source = _subnet_source_token(settings.subnet_csv)
     selected, links, addresses, runtime = build_runtime_plan(settings, runner)
     if address is not None:
         try:
@@ -2264,7 +2310,11 @@ def observe_runtime(settings: Settings, runner=subprocess.run):
     except ValueError as exc:
         raise ActivationError(f"invalid project HTTP listener: {exc}") from exc
     apache = render_apache_listener_config(listener_ips, port=port)
-    payload = runtime_plan_payload(settings, selected, links, addresses)
+    if _subnet_source_token(settings.subnet_csv) != subnet_source:
+        raise ActivationError("subnet CSV source changed between parsing and plan identity")
+    payload = runtime_plan_payload(
+        settings, selected, links, addresses, subnet_sha256=subnet_source[1],
+    )
     payload["apache_listener_sha256"] = hashlib.sha256(
         apache.encode("utf-8")
     ).hexdigest()
