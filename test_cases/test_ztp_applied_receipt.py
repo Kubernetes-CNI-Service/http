@@ -7,6 +7,7 @@ import re
 import shlex
 import stat
 import subprocess
+import sys
 import tempfile
 import textwrap
 from typing import Optional
@@ -801,8 +802,9 @@ class AppliedConfigHelperTests(unittest.TestCase):
         )
         # The production helper deliberately uses GNU stat and root uid.  Adapt
         # only those platform assertions for the macOS unit-test host.
-        source = source.replace("stat -c '%u'", "stat -f '%u'")
-        source = source.replace("stat -c '%a'", "stat -f '%Lp'")
+        if sys.platform == "darwin":
+            source = source.replace("stat -c '%u'", "stat -f '%u'")
+            source = source.replace("stat -c '%a'", "stat -f '%Lp'")
         source = source.replace('= "0" ]', f'= "{os.getuid()}" ]')
         helper = root / "helper.sh"
         helper.write_text(source, encoding="utf-8")

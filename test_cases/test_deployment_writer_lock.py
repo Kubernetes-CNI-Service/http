@@ -3302,6 +3302,69 @@ class ArchiveDeploymentLockTests(unittest.TestCase):
             ))
             receipt.assert_not_called()
 
+    def test_finalize_rejects_same_inode_stale_content_swap_after_verification(self):
+        guard = guard_module()
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            root = base / "html"
+            tools = root / "tools"
+            tools.mkdir(parents=True)
+            original_payload = b"receipt-bound-old\n"
+            replacement_payload = b"X" * len(original_payload)
+            old = tools / "old.py"
+            old.write_bytes(original_payload)
+            (tools / "new.py").write_bytes(b"new\n")
+            manifest = root / "infra/docker/deployment-source-manifest.json"
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text(json.dumps({
+                "schema_version": 1,
+                "files": [{
+                    "path": "tools/new.py", "type": "file", "target": None,
+                    "sha256": hashlib.sha256(b"new\n").hexdigest(),
+                }],
+            }) + "\n", encoding="ascii")
+            old_records = {
+                "tools/old.py": {
+                    "path": "tools/old.py", "type": "file", "target": None,
+                    "sha256": hashlib.sha256(original_payload).hexdigest(),
+                },
+            }
+            original_replace = guard.os.replace
+            raced = False
+
+            def mutate_stale_at_rename(source, destination, *args, **kwargs):
+                nonlocal raced
+                if (
+                    not raced
+                    and os.fspath(source) == "old.py"
+                    and ".old.py.http-ztp-stale-" in os.fspath(destination)
+                ):
+                    with old.open("r+b") as stream:
+                        stream.write(replacement_payload)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    raced = True
+                return original_replace(source, destination, *args, **kwargs)
+
+            with mock.patch.object(
+                guard.os, "replace", side_effect=mutate_stale_at_rename,
+            ), mock.patch.object(
+                guard, "write_deployment_owner",
+            ) as receipt, self.assertRaisesRegex(
+                guard.GuardError, "stale.*changed|rollback|roll back|identity",
+            ):
+                guard._finalize_live_source_update(
+                    root, base / "state", old_records, docker_managed=True,
+                    _ownership_target=(os.getuid(), os.getgid()),
+                )
+            self.assertTrue(raced)
+            self.assertEqual(replacement_payload, old.read_bytes())
+            self.assertFalse(any(
+                ".old.py.http-ztp-stale-" in path.name
+                for path in tools.iterdir()
+            ))
+            receipt.assert_not_called()
+
     def test_finalize_rejects_in_place_manifest_mutation_before_receipt(self):
         guard = guard_module()
         with tempfile.TemporaryDirectory() as directory:
@@ -4220,11 +4283,11 @@ class ArchiveDeploymentLockTests(unittest.TestCase):
         self.assertEqual(0, completed.returncode, completed.stderr)
         self.assertEqual("large guard started\n", completed.stdout)
 
-    def test_actual_168664_byte_guard_starts_from_short_archive_command(self):
+    def test_actual_169715_byte_guard_starts_from_short_archive_command(self):
         source = (TOOLS / "deployment_prewrite_guard.py").read_text(
             encoding="utf-8",
         )
-        self.assertEqual(168664, len(source.encode("utf-8")))
+        self.assertEqual(169715, len(source.encode("utf-8")))
         with tempfile.TemporaryDirectory() as directory:
             args = upload_args(
                 deployment_guard_source=source, no_sudo=True,

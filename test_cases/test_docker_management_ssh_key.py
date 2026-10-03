@@ -2746,7 +2746,7 @@ class DockerManagementSshKeyWorkflowTests(unittest.TestCase):
 
             dispatcher = bin_dir / "dispatcher.py"
             dispatcher.write_text(textwrap.dedent(
-                r'''#!/usr/bin/python3
+                r'''                #!/usr/bin/python3
                 import importlib.util
                 import json
                 import os

@@ -4136,8 +4136,10 @@ def _historical_p_checkout(repository: Path, anchor: str) -> Path:
         if _P_HISTORY_ANCHOR != anchor:
             raise AssertionError("published V2 authority changed during the test process")
         return _P_HISTORY_CHECKOUT
+    # Keep Darwin's short canonical path, but do not require that alias on Linux.
+    history_temp_root = "/private/tmp" if sys.platform == "darwin" else "/tmp"
     _P_HISTORY_TEMP = tempfile.TemporaryDirectory(
-        prefix="http-p-v2-history-", dir="/private/tmp",
+        prefix="http-p-v2-history-", dir=history_temp_root,
     )
     checkout = Path(_P_HISTORY_TEMP.name) / "repository"
     cloned = _git_run(

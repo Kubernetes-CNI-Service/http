@@ -3544,7 +3544,30 @@ def _prune_verified_stale_member(
             backup_name, dir_fd=parent_fd, follow_symlinks=False,
         )
         moved_identity = (moved.st_dev, moved.st_ino)
-        if moved_identity != original_identity:
+        moved_matches = (
+            moved_identity == original_identity
+            and (moved.st_mode, moved.st_uid, moved.st_gid, moved.st_nlink)
+            == (before.st_mode, before.st_uid, before.st_gid, before.st_nlink)
+        )
+        if moved_matches:
+            try:
+                if record.get("type") == "file":
+                    moved_matches = _read_stable_regular_at(
+                        parent_fd, backup_name, f"stale source backup {relative}",
+                        maximum_size=1024 * 1024 * 1024,
+                    ) == content
+                else:
+                    moved_matches = (
+                        os.readlink(backup_name, dir_fd=parent_fd)
+                        == record.get("target")
+                        and _read_resolved_record_target_held(
+                            root_fd, target_parts,
+                            label=f"stale source backup target {relative}",
+                        ) == content
+                    )
+            except (GuardError, OSError):
+                moved_matches = False
+        if not moved_matches:
             try:
                 _restore_unexpected_stale_move(
                     parent_fd, name, backup_name, moved_identity, relative,
