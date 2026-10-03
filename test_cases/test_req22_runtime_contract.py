@@ -110,6 +110,40 @@ class Req22RuntimeInputTests(unittest.TestCase):
                 self.assertTrue(swapped)
                 receipts.assert_not_called()
 
+    def test_preserved_empty_host_count_rejects_rebound_leaf(self):
+        for replacement_kind in ("symlink", "same-byte new inode"):
+            with self.subTest(replacement=replacement_kind), \
+                    tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                output = root / "dhcpd_ib.hosts"
+                output.write_bytes(b"")
+                detached = root / "detached.hosts"
+                foreign = root / "foreign.hosts"
+                foreign.write_bytes(b"")
+                actual_lstat = os.lstat
+                switched = False
+
+                def rebind_after_checked_stat(path, *args, **kwargs):
+                    nonlocal switched
+                    metadata = actual_lstat(path, *args, **kwargs)
+                    if os.fspath(path) == os.fspath(output) and not switched:
+                        switched = True
+                        output.rename(detached)
+                        if replacement_kind == "symlink":
+                            output.symlink_to(foreign)
+                        else:
+                            output.write_bytes(b"")
+                    return metadata
+
+                with mock.patch.object(
+                    DHCP.os, "lstat", side_effect=rebind_after_checked_stat,
+                ):
+                    with self.assertRaises(OSError):
+                        DHCP._count_preserved_host_declarations(output)
+                self.assertTrue(switched)
+                self.assertEqual(b"", detached.read_bytes())
+                self.assertEqual(b"", foreign.read_bytes())
+
     def test_disabled_header_only_csv_produces_no_local_listeners(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "02-dhcp-subnet_config.csv"

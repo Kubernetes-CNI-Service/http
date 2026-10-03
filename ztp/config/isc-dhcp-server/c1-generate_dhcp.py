@@ -944,6 +944,14 @@ _HOST_DECLARATION_RE = re.compile(
 
 def _count_preserved_host_declarations(path):
     """Count declarations in a host file owned by another switch family."""
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise OSError("platform cannot bind scoped DHCP preserved host file")
+
+    def identity(info):
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink,
+                info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
     try:
         info = os.lstat(path)
     except OSError as exc:
@@ -954,8 +962,23 @@ def _count_preserved_host_declarations(path):
         raise OSError(
             f"scoped DHCP preserved host file must be single-link regular: {path}"
         )
-    with open(path, "r", encoding="utf-8") as stream:
+    try:
+        descriptor = os.open(
+            path, os.O_RDONLY | nofollow | os.O_NONBLOCK | os.O_CLOEXEC,
+        )
+    except OSError as exc:
+        raise OSError(f"scoped DHCP preserved host file changed: {path}: {exc}") from exc
+    with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
+        opened = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1
+                or identity(opened) != identity(info)):
+            raise OSError(f"scoped DHCP preserved host file changed: {path}")
         text = stream.read()
+        after = os.fstat(stream.fileno())
+        visible = os.lstat(path)
+        if (identity(after) != identity(opened)
+                or identity(visible) != identity(after)):
+            raise OSError(f"scoped DHCP preserved host file changed: {path}")
     return len(_HOST_DECLARATION_RE.findall(text))
 
 
