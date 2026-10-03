@@ -146,6 +146,43 @@ def prepare_r22_selected_nvos_core_flow(
 
 
 class DhcpOptionalWorkflowTests(unittest.TestCase):
+    def test_r22_empty_subnet_parent_and_standalone_generator_disagree_no_longer(self):
+        for dhcp_status in ("disabled", "enabled"):
+            with self.subTest(dhcp_status=dhcp_status), tempfile.TemporaryDirectory() as name:
+                root = Path(name)
+                global_yaml = root / "01-global.yaml"
+                subnet = root / "02-dhcp-subnet_config.csv"
+                document = global_document(dhcp_status)
+                document["common"]["mgmt"]["ztp"]["status"] = "disabled"
+                global_yaml.write_text(yaml.safe_dump(document), encoding="utf-8")
+                subnet.write_text(_R22_SUBNET_HEADER, encoding="utf-8")
+                settings = LOAD.load_global(global_yaml)
+                if dhcp_status == "disabled":
+                    LOAD.validate_subnet_file(subnet, settings)
+                else:
+                    with self.assertRaises(LOAD.LoadError):
+                        LOAD.validate_subnet_file(subnet, settings)
+                output_names = (
+                    "dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts",
+                    "dhcpd_nvl.hosts", "dhcp-release-manifest.json",
+                )
+                with mock.patch.object(sys, "argv", ["c1-generate_dhcp.py", "-y"]), \
+                        mock.patch.multiple(
+                            DHCP, GLOBAL_YAML=str(global_yaml), SUBNET_CSV=str(subnet),
+                            DEVICES_CSV=str(root / "missing-devices.csv"),
+                            OUTPUT_CONF=str(root / output_names[0]),
+                            OUTPUT_ETH=str(root / output_names[1]),
+                            OUTPUT_IB=str(root / output_names[2]),
+                            OUTPUT_NVL=str(root / output_names[3]),
+                            OUTPUT_MANIFEST=str(root / output_names[4]),
+                            _AUTO_YES=False,
+                        ), mock.patch.object(sys, "stdout", io.StringIO()) as output:
+                    with self.assertRaises(SystemExit) as rejected:
+                        DHCP.main()
+                self.assertEqual(1, rejected.exception.code)
+                self.assertIn(f"DHCP {dhcp_status}", output.getvalue())
+                self.assertTrue(all(not (root / item).exists() for item in output_names))
+
     def test_f02_dhcp_on_ztp_off_real_load_and_c1_emit_no_ztp_options(self):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)

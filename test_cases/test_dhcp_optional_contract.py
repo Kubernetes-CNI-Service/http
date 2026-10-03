@@ -71,6 +71,33 @@ def settings_for(status: str):
 
 
 class DhcpOptionalDirectTests(unittest.TestCase):
+    def test_r22_standalone_generator_rejects_disabled_and_empty_enabled(self):
+        for dhcp_status, reason in (
+            ("disabled", "DHCP disabled"),
+            ("enabled", "DHCP enabled.*空表"),
+        ):
+            with self.subTest(dhcp_status=dhcp_status), tempfile.TemporaryDirectory() as name:
+                root = Path(name)
+                global_yaml = root / "01-global.yaml"
+                document = global_document(dhcp_status)
+                document["common"]["mgmt"]["ztp"]["status"] = "disabled"
+                global_yaml.write_text(yaml.safe_dump(document), encoding="utf-8")
+                subnet = root / "02-dhcp-subnet_config.csv"
+                subnet.write_text(_R22_SUBNET_HEADER, encoding="utf-8")
+                output = io.StringIO()
+                with mock.patch.object(sys, "argv", ["c1-generate_dhcp.py", "-y"]), \
+                        mock.patch.multiple(
+                            DHCP, GLOBAL_YAML=str(global_yaml), SUBNET_CSV=str(subnet),
+                            DEVICES_CSV=str(root / "missing-devices.csv"),
+                            OUTPUT_CONF=str(root / "dhcpd.conf"), _AUTO_YES=False,
+                        ), mock.patch.object(sys, "stdout", output):
+                    with self.assertRaises(SystemExit) as rejected:
+                        DHCP.main()
+                self.assertEqual(1, rejected.exception.code)
+                self.assertRegex(output.getvalue(), reason)
+                self.assertNotIn("未找到 02-devices_config.csv", output.getvalue())
+                self.assertFalse((root / "dhcpd.conf").exists())
+
     def test_f02_generator_rejects_dhcp_disabled_with_ztp_enabled(self):
         with tempfile.TemporaryDirectory() as name:
             global_yaml = Path(name) / "01-global.yaml"

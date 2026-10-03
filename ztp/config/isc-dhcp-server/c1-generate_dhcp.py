@@ -129,7 +129,8 @@ def _validate_ztp_url_prefix(value):
     return validate_ztp_url_prefix(value)
 
 
-def load_project_global(path, *, include_ztp_status=False):
+def load_project_global(path, *, include_ztp_status=False,
+                        include_dhcp_status=False):
     """Read the URL prefix and authoritative input schema from global YAML."""
     if yaml is None:
         raise ValueError("缺少 PyYAML，无法读取 01-global.yaml")
@@ -155,6 +156,7 @@ def load_project_global(path, *, include_ztp_status=False):
         else:
             ztp_enabled = raw_ztp_status.strip().casefold() == "enabled"
         dhcp_policy = data["common"]["mgmt"].get("dhcp-server")
+        dhcp_enabled = None
         if dhcp_policy is not None:
             if not isinstance(dhcp_policy, dict):
                 raise ValueError("common.mgmt.dhcp-server 必须是 mapping")
@@ -164,7 +166,8 @@ def load_project_global(path, *, include_ztp_status=False):
                 raise ValueError(
                     "common.mgmt.dhcp-server.status 必须显式为 enabled/disabled"
                 )
-            if raw_dhcp_status.strip().casefold() == "disabled" and ztp_enabled is True:
+            dhcp_enabled = raw_dhcp_status.strip().casefold() == "enabled"
+            if dhcp_enabled is False and ztp_enabled is True:
                 raise ValueError("DHCP disabled + ZTP enabled 是非法组合")
         if (http_enabled or ztp_enabled) and "address" not in http_policy:
             raise ValueError(
@@ -187,7 +190,9 @@ def load_project_global(path, *, include_ztp_status=False):
         "192.0.2.1", port_value, field="common.mgmt.http.port"
     ).port
     result = (_validate_ztp_url_prefix(value), schema_version, port, http_address)
-    return (*result, ztp_enabled) if include_ztp_status else result
+    if include_ztp_status:
+        result = (*result, ztp_enabled)
+    return (*result, dhcp_enabled) if include_dhcp_status else result
 
 
 def load_ztp_url_prefix(path):
@@ -1730,11 +1735,16 @@ def main():
         print(f"[ERROR] 找不到 {os.path.basename(SUBNET_CSV)}")
         sys.exit(1)
     try:
-        ztp_prefix, schema_version, http_port, http_address, ztp_enabled = (
-            load_project_global(GLOBAL_YAML, include_ztp_status=True)
+        ztp_prefix, schema_version, http_port, http_address, ztp_enabled, dhcp_enabled = (
+            load_project_global(
+                GLOBAL_YAML, include_ztp_status=True, include_dhcp_status=True,
+            )
         )
     except ValueError as exc:
         print(f"[ERROR] {exc}")
+        sys.exit(1)
+    if dhcp_enabled is False:
+        print("[ERROR] DHCP disabled：独立 DHCP 生成器不得写入本地 DHCP 制品")
         sys.exit(1)
     print(f"读取：{os.path.basename(GLOBAL_YAML)}（ztp_url_prefix={ztp_prefix}）")
     print(f"读取：{os.path.basename(SUBNET_CSV)}")
@@ -1742,6 +1752,9 @@ def main():
         SUBNET_CSV, ztp_prefix, port=http_port, http_address=http_address,
         ztp_enabled=ztp_enabled,
     )
+    if dhcp_enabled is True and not subnets:
+        print("[ERROR] DHCP enabled 但 subnet CSV 是空表；不得生成空 DHCP 配置")
+        sys.exit(1)
     print(f"  已加载 {len(subnets)} 条 subnet 配置\n")
 
     csv_files = [DEVICES_CSV]
