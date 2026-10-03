@@ -912,6 +912,44 @@ persist_failed_config() {
 # the fixed reader detects the old-receipt/new-YAML hash mismatch and fails
 # closed.  Persistence is diagnostic evidence only, so every local I/O failure
 # is downgraded to WARN and must not turn an already successful ZTP into failure.
+fsync_applied_state() {
+    python3 - "${APPLIED_STATE_DIR}" "$@" <<'PY'
+import os
+import stat
+import sys
+
+state_dir = sys.argv[1]
+flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+file_flags = os.O_RDONLY | os.O_NOFOLLOW
+directory_fd = os.open(state_dir, flags)
+try:
+    directory_identity = os.fstat(directory_fd)
+    if (not stat.S_ISDIR(directory_identity.st_mode)
+            or directory_identity.st_uid != os.geteuid()
+            or stat.S_IMODE(directory_identity.st_mode) != 0o711):
+        raise SystemExit("unsafe applied-config state directory")
+    for path in sys.argv[2:]:
+        if os.path.dirname(path) != state_dir:
+            raise SystemExit("applied-config fsync path escaped state directory")
+        name = os.path.basename(path)
+        if name in ("", ".", ".."):
+            raise SystemExit("unsafe applied-config fsync name")
+        descriptor = os.open(name, file_flags, dir_fd=directory_fd)
+        try:
+            identity = os.fstat(descriptor)
+            if (not stat.S_ISREG(identity.st_mode) or identity.st_nlink != 1
+                    or identity.st_uid != os.geteuid()
+                    or stat.S_IMODE(identity.st_mode) != 0o600):
+                raise SystemExit("unsafe applied-config fsync file")
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    os.fsync(directory_fd)
+finally:
+    os.close(directory_fd)
+PY
+}
+
 persist_applied_receipt() {
     local source_file="$1"
     local receipt_status="$2"
@@ -924,6 +962,7 @@ persist_applied_receipt() {
     local source_size raw_sha256 copied_sha256 applied_at receipt_size
     local failed_size failed_raw_sha256 failed_copied_sha256=""
     local yaml_tmp="" receipt_tmp="" failed_tmp=""
+    local -a stage_paths=()
 
     cleanup_applied_receipt_temps() {
         [[ -z "${yaml_tmp}" ]] || rm -f -- "${yaml_tmp}" || true
@@ -1108,6 +1147,15 @@ persist_applied_receipt() {
         log "[ZTP] WARN: Applied-config receipt exceeds schema-1 safety budget"
         return 0
     fi
+    stage_paths=("${yaml_tmp}" "${receipt_tmp}")
+    if [[ -n "${failed_tmp}" ]]; then
+        stage_paths+=("${failed_tmp}")
+    fi
+    if ! fsync_applied_state "${stage_paths[@]}"; then
+        cleanup_applied_receipt_temps
+        log "[ZTP] WARN: Could not fsync staged applied-config evidence"
+        return 0
+    fi
 
     # Promote data first and the receipt last.  The reader fails closed if an
     # interruption leaves a receipt/YAML pair with different hashes.
@@ -1125,12 +1173,21 @@ persist_applied_receipt() {
         fi
         failed_tmp=""
     fi
+    if ! fsync_applied_state; then
+        cleanup_applied_receipt_temps
+        log "[ZTP] WARN: Could not fsync applied-config data promotion; reader will reject mismatched prior receipt"
+        return 0
+    fi
     if ! mv -f -- "${receipt_tmp}" "${APPLIED_RECEIPT_PATH}"; then
         cleanup_applied_receipt_temps
         log "[ZTP] WARN: Could not promote applied-config receipt; reader will reject any mismatched prior receipt"
         return 0
     fi
     receipt_tmp=""
+    if ! fsync_applied_state; then
+        log "[ZTP] WARN: Applied-config receipt is visible but directory fsync failed; durability is uncertain"
+        return 0
+    fi
     log "[ZTP] Applied-config receipt saved: status=${receipt_status}, source=${source_name}, sha256=${raw_sha256}"
     return 0
 }

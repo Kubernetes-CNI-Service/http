@@ -314,6 +314,36 @@ class AppliedReceiptPersistenceTests(unittest.TestCase):
             self.assertEqual([], list(state.glob(".*.??????")))
             self.assertIn("exceeds schema-1 safety budget", (root / "test.log").read_text())
 
+    def test_fsync_failure_vetoes_receipt_promotion_and_cleans_stage(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            source = root / "next.yaml"
+            source.write_bytes(b"- set:\n    system:\n      hostname: next\n")
+            state = root / "state"
+            state.mkdir(mode=0o711)
+            state.chmod(0o711)
+            old_yaml = b"- set:\n    system:\n      hostname: prior\n"
+            old_receipt = b"prior protected receipt\n"
+            (state / "last-success.yaml").write_bytes(old_yaml)
+            (state / "receipt.env").write_bytes(old_receipt)
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            failing_python = fake_bin / "python3"
+            failing_python.write_text("#!/bin/sh\nexit 86\n", encoding="utf-8")
+            failing_python.chmod(0o755)
+            harness = library_harness(root, """
+                persist_applied_receipt \
+                    "$1" success dedicated replace 020000000001.yaml \
+                    02:00:00:00:00:01
+            """)
+            env = {**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"}
+            result = run_bash(harness, source, env=env)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual(old_yaml, (state / "last-success.yaml").read_bytes())
+            self.assertEqual(old_receipt, (state / "receipt.env").read_bytes())
+            self.assertEqual([], list(state.glob(".*.??????")))
+            self.assertIn("fsync", (root / "test.log").read_text())
+
     def test_persistent_log_is_unique_regular_and_written_from_first_line(self):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
