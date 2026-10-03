@@ -266,7 +266,13 @@ class PlatformReleaseFlowTests(unittest.TestCase):
             """schema_version: 1
 common:
   mgmt:
+    dhcp-server:
+      status: enabled
+    http:
+      status: enabled
+      address: 192.0.2.2
     ztp:
+      status: enabled
       ztp_url_prefix: /ztp
   switch:
     system:

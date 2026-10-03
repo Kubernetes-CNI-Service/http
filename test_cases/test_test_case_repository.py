@@ -8,6 +8,7 @@ import importlib.util
 import os
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 
 from tools.project_contract import path_disposition
@@ -18,24 +19,31 @@ CASES = ROOT / "test_cases"
 LEGACY = ROOT / "tests"
 
 
+def repository_test_paths(root: Path) -> list[Path]:
+    """Find tests in this checkout, never in an embedded Git checkout."""
+    discovered = []
+    for current, directories, files in os.walk(root, followlinks=False):
+        current_path = Path(current)
+        directories[:] = [
+            name for name in directories
+            if name not in {".git", "__pycache__", "99-output-eth",
+                            "99-output-ib_nvl", "99-output-p2p",
+                            "99-output-ztp"}
+            and not os.path.lexists(current_path / name / ".git")
+        ]
+        for name in files:
+            if name.startswith("test_") and name.endswith(".py"):
+                discovered.append(current_path / name)
+    return discovered
+
+
 class TestCaseRepositoryTests(unittest.TestCase):
     def test_canonical_directory_is_unique(self):
         self.assertTrue(CASES.is_dir())
         self.assertFalse(os.path.lexists(LEGACY))
 
     def test_all_repository_regressions_live_in_canonical_directory(self):
-        discovered = []
-        for current, directories, files in os.walk(ROOT, followlinks=False):
-            current_path = Path(current)
-            directories[:] = [
-                name for name in directories
-                if name not in {".git", "__pycache__", "99-output-eth",
-                                "99-output-ib_nvl", "99-output-p2p",
-                                "99-output-ztp"}
-            ]
-            for name in files:
-                if name.startswith("test_") and name.endswith(".py"):
-                    discovered.append(current_path / name)
+        discovered = repository_test_paths(ROOT)
         outside = [
             path.relative_to(ROOT).as_posix()
             for path in discovered
@@ -51,6 +59,17 @@ class TestCaseRepositoryTests(unittest.TestCase):
         for relative in outside:
             self.assertEqual("reference-only", path_disposition(relative))
         self.assertGreaterEqual(len(discovered), 20)
+
+    def test_embedded_checkout_is_excluded_but_main_tree_rogue_test_is_found(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            embedded = root / "vendor/other-checkout"
+            embedded.mkdir(parents=True)
+            (embedded / ".git").write_text("gitdir: elsewhere\n", encoding="ascii")
+            (embedded / "test_foreign.py").write_text("", encoding="ascii")
+            rogue = root / "vendor/test_rogue.py"
+            rogue.write_text("", encoding="ascii")
+            self.assertEqual([rogue], repository_test_paths(root))
 
     def test_no_alias_or_persistent_symlink_can_duplicate_discovery(self):
         for alias in ("test", "tests", "test-case", "test-cases"):

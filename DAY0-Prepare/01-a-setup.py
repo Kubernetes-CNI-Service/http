@@ -2669,6 +2669,7 @@ def _r22_project_modes(proj_dir):
     try:
         with global_path.open(encoding="utf-8") as stream:
             document = safe_load_global_yaml(stream)
+        normalize_issue_tracker_policy(document)
         mgmt = document["common"]["mgmt"]
         raw_dhcp = mgmt["dhcp-server"]["status"]
         raw_ztp = mgmt["ztp"]["status"]

@@ -122,13 +122,21 @@ class FinishedProjectLifecycleWorkflowTests(unittest.TestCase):
             self.assertEqual(global_bytes, (day0 / "restored-default/01-global.yaml").read_bytes())
 
     def test_real_rehydrate_must_commit_before_setup_stops_monitor_or_links(self):
+        global_text = (
+            "common:\n  mgmt:\n    dhcp-server: {status: disabled}\n"
+            "    ztp: {status: disabled}\n"
+        )
+        subnet_text = (
+            "shared_network,subnet,netmask,range_start,range_end,routers,"
+            "ztp_service_ip,cumulus_profile,nvos_ztp\n"
+        )
         with tempfile.TemporaryDirectory(prefix="finished-rehydrate-setup-") as directory:
             workspace = Path(directory) / "http"
             day0 = workspace / "DAY0-Prepare"
             day0.mkdir(parents=True)
             record, _record_id = FinishedProjectRehydrateTests(
                 "test_default_materializes_only_working_inputs_and_source_receipt"
-            )._record(workspace)
+            )._record(workspace, global_text=global_text, subnet_text=subnet_text)
             rehydrate = load_module(
                 "finished_lifecycle_setup_rehydrate", ROOT / "tools/rehydrate-finished.py"
             )
@@ -139,19 +147,22 @@ class FinishedProjectLifecycleWorkflowTests(unittest.TestCase):
                 record=record, day0_root=day0,
                 new_project="customer-restored", include_history=False,
             )
-            # This input is normally supplied during project preparation. It
-            # keeps the restored fixture eligible for setup's older core-input
-            # contract without changing the receipt or commit marker.
-            (project / "02-dhcp-subnet_config.csv").write_bytes(b"subnet\n")
+            self.assertEqual(
+                subnet_text, (project / "02-dhcp-subnet_config.csv").read_text(
+                    encoding="utf-8",
+                ),
+            )
             original_receipt = (project / ".finished-source.json").read_bytes()
             self.assertTrue((project / ".finished-commit.json").is_file())
             ordinary = day0 / "ordinary"
             ordinary.mkdir()
-            for target in (ordinary,):
-                for input_name in (
-                    "01-global.yaml", "02-devices_config.csv", "02-dhcp-subnet_config.csv",
-                ):
-                    (target / input_name).touch(exist_ok=True)
+            (ordinary / "01-global.yaml").write_text(global_text, encoding="utf-8")
+            (ordinary / "02-devices_config.csv").write_text(
+                "name,ip\nleaf,1.2.3.4\n", encoding="utf-8",
+            )
+            (ordinary / "02-dhcp-subnet_config.csv").write_text(
+                subnet_text, encoding="utf-8",
+            )
             sentinel = workspace / "outside.txt"
             sentinel.write_bytes(b"outside unchanged\n")
 

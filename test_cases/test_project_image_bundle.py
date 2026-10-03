@@ -62,7 +62,7 @@ schema_version: 1
 common:
   mgmt:
     dhcp-server: {status: enabled, package: isc-dhcp-server}
-    http: {status: enabled, package: apache2, http_root: /var/www/html}
+    http: {status: enabled, address: 192.0.2.10, package: apache2, http_root: /var/www/html}
     ztp: {status: enabled, ztp_url_prefix: /ztp}
   switch:
     system: {dns: [], ntp: [], date-time: {}}
@@ -1001,14 +1001,11 @@ class ProjectImageBundleTests(unittest.TestCase):
 
             project = workspace / "DAY0-Prepare/customer"
             project.mkdir(parents=True, exist_ok=True)
-            (project / "01-global.yaml").write_text(
-                "schema_version: 2\n", encoding="ascii",
-            )
-            (project / "02-devices_config.csv").write_text(
-                "hostname,type\nleaf01,eth\n", encoding="ascii",
-            )
-            (project / "02-dhcp-subnet_config.csv").write_text(
-                "subnet,netmask\n192.0.2.0,255.255.255.0\n", encoding="ascii",
+            (project / "01-global.yaml").write_bytes(SHARED_GLOBAL)
+            (project / "02-devices_config.csv").write_bytes(SHARED_DEVICES)
+            (project / "02-dhcp-subnet_config.csv").write_bytes(
+                (ROOT / "examples/public-project/02-dhcp-subnet_config.csv.example")
+                .read_bytes()
             )
             with zipfile.ZipFile(
                 project / "Customer P2P.xlsx", "w", compression=zipfile.ZIP_DEFLATED,

@@ -72,6 +72,7 @@ common:
       package: isc-dhcp-server
     http:
       status: enabled
+      address: 192.0.2.10
       package: apache2
       http_root: /var/www/html
     ztp:

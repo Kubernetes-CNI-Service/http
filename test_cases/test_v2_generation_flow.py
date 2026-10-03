@@ -134,7 +134,10 @@ def v2_mlag_preflight_global(shared_addresses=None):
         mlag["shared-addresses"] = copy.deepcopy(shared_addresses)
     return {
         "schema_version": 2,
-        "common": {"mgmt": {"ztp": {"ztp_url_prefix": "/ztp"}}},
+        "common": {"mgmt": {
+            "dhcp-server": {"status": "disabled"},
+            "ztp": {"status": "disabled", "ztp_url_prefix": "/ztp"},
+        }},
         "switches": [{"eth": {
             "bridge": {},
             "vrr": {
@@ -178,6 +181,10 @@ def run_v2_mlag_setup_preflight(rows, shared_addresses=None):
             v2_mlag_preflight_global(shared_addresses), sort_keys=False,
         ),
         encoding="utf-8",
+    )
+    (root / "02-dhcp-subnet_config.csv").write_text(
+        "shared_network,subnet,netmask,range_start,range_end,routers,"
+        "ztp_service_ip,cumulus_profile,nvos_ztp\n", encoding="utf-8",
     )
     with devices_file.open("w", newline="", encoding="utf-8") as stream:
         csv.writer(stream).writerows([header, *rows])
@@ -692,28 +699,42 @@ common:
         load_source = (ROOT / "DAY0-Prepare/11-load.py").read_text(
             encoding="utf-8",
         )
-        self.assertEqual(3, setup_source.count("safe_load_global_yaml("))
+        self.assertEqual(4, setup_source.count("safe_load_global_yaml("))
         self.assertEqual(1, load_source.count("safe_load_global_yaml("))
         self.assertNotIn("yaml.safe_load(f)", setup_source)
         self.assertNotIn("yaml.safe_load(", load_source)
 
-    def test_all_three_measured_global_call_sites_share_both_authorities(self):
+    def test_global_readers_include_r22_admission_and_policy_authority(self):
         setup_source = (ROOT / "DAY0-Prepare/01-a-setup.py").read_text(
             encoding="utf-8",
         )
         load_source = (ROOT / "DAY0-Prepare/11-load.py").read_text(
             encoding="utf-8",
         )
-        self.assertEqual(2, setup_source.count("safe_load_global_yaml(stream)"))
+        self.assertEqual(3, setup_source.count("safe_load_global_yaml(stream)"))
         self.assertEqual(2, setup_source.count(
             "normalize_issue_tracker_policy(global_document)"
         ))
+        self.assertEqual(1, setup_source.count("normalize_issue_tracker_policy(document)"))
         self.assertEqual(1, load_source.count(
             "safe_load_global_yaml(path.read_text(encoding=\"utf-8\"))"
         ))
         self.assertEqual(1, load_source.count(
             "normalize_issue_tracker_policy(data)"
         ))
+
+    def test_r22_setup_input_reader_rejects_invalid_issue_tracker_policy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "01-global.yaml").write_text(
+                "schema_version: 2\ncommon:\n  mgmt:\n"
+                "    dhcp-server: {status: disabled}\n"
+                "    ztp: {status: disabled}\n"
+                "    issue-tracker: {status: enabled, spreadsheet_id: short}\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "issue-tracker"):
+                SETUP._r22_project_modes(project)
 
     def test_invalid_policy_stops_setup_before_link_transaction(self):
         temporary, root, _errors, _warnings = run_v2_mlag_setup_preflight(
@@ -723,13 +744,18 @@ common:
             document = yaml.safe_load(
                 (root / "01-global.yaml").read_text(encoding="utf-8")
             )
-            document.setdefault("common", {}).setdefault("mgmt", {})[
-                "issue-tracker"
-            ] = {
+            mgmt = document.setdefault("common", {}).setdefault("mgmt", {})
+            mgmt["dhcp-server"] = {"status": "disabled"}
+            mgmt.setdefault("ztp", {})["status"] = "disabled"
+            mgmt["issue-tracker"] = {
                 "status": "enabled", "spreadsheet_id": "A" * 19,
             }
             (root / "01-global.yaml").write_text(
                 yaml.safe_dump(document, sort_keys=False), encoding="utf-8",
+            )
+            (root / "02-dhcp-subnet_config.csv").write_text(
+                "shared_network,subnet,netmask,range_start,range_end,routers,"
+                "ztp_service_ip,cumulus_profile,nvos_ztp\n", encoding="utf-8",
             )
             p2p = root / "p2p.xlsx"
             p2p.write_bytes(b"fixture")
@@ -757,7 +783,7 @@ common:
                 ), mock.patch.object(
                     SETUP, "_SetupLinkTransaction",
                 ) as transaction, redirect_stdout(io.StringIO()):
-                    with self.assertRaises(SystemExit):
+                    with self.assertRaisesRegex(ValueError, "issue-tracker"):
                         SETUP._setup_impl(str(root))
                 transaction.assert_not_called()
             finally:
@@ -1342,7 +1368,7 @@ class V2GenerationWorkflowTests(unittest.TestCase):
 common:
   mgmt:
     dhcp-server: {status: enabled, package: isc-dhcp-server}
-    http: {status: enabled, package: apache2, http_root: /var/www/html}
+    http: {status: enabled, address: 192.0.2.2, package: apache2, http_root: /var/www/html}
     ztp: {status: enabled, ztp_url_prefix: /ztp}
   switch:
     system:
@@ -1523,7 +1549,10 @@ switches:
         ):
             DHCP.main()
 
-        subnets = DHCP.load_subnet_csv(cls.subnet_file, "/ztp")
+        subnets = DHCP.load_subnet_csv(
+            cls.subnet_file, "/ztp", http_address="192.0.2.2",
+            ztp_enabled=True,
+        )
         DHCP.append_air_records_to_csv(
             cls.devices_file,
             [{

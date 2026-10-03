@@ -79,14 +79,21 @@ class FinishedProjectRehydrateTests(unittest.TestCase):
             with self.subTest(destination=destination):
                 self.assertIn(phrase, actions[destination].help or "")
 
-    def _record(self, root: Path) -> tuple[Path, str]:
+    def _record(
+        self, root: Path, *, global_text: str = "project: customer\n",
+        subnet_text: str | None = None,
+    ) -> tuple[Path, str]:
         record_id = "20260916T083250Z-0123456789ab"
         record = root / "Finished-projects/customer" / record_id
         final = record / "reconstructed-final"
         output = final / "99-output-ztp"
         output.mkdir(parents=True)
-        (final / "01-global.yaml").write_text("project: customer\n", encoding="utf-8")
+        (final / "01-global.yaml").write_text(global_text, encoding="utf-8")
         (final / "02-devices_config.csv").write_text("name,ip\nleaf,1.2.3.4\n", encoding="utf-8")
+        if subnet_text is not None:
+            (final / "02-dhcp-subnet_config.csv").write_text(
+                subnet_text, encoding="utf-8",
+            )
         (output / "result.txt").write_text("done\n", encoding="utf-8")
         (output / "worker.pid").write_text("123\n", encoding="utf-8")
         (output / "latest").symlink_to("run-1")

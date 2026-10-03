@@ -2671,6 +2671,17 @@ def project_live_management_setup(tree: ast.AST) -> ast.AST:
 
 class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
     @staticmethod
+    def seed_disabled_r22_inputs(project):
+        (project / "01-global.yaml").write_text(
+            "common:\n  mgmt:\n    dhcp-server: {status: disabled}\n"
+            "    ztp: {status: disabled}\n", encoding="utf-8",
+        )
+        (project / "02-dhcp-subnet_config.csv").write_text(
+            "shared_network,subnet,netmask,range_start,range_end,routers,"
+            "ztp_service_ip,cumulus_profile,nvos_ztp\n", encoding="utf-8",
+        )
+
+    @staticmethod
     def dhcp_main_patches(module, *, events=None):
         record = {
             "type": "eth", "iface": "eth0", "hostname": "leaf01",
@@ -2680,7 +2691,10 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
         return (
             mock.patch.object(sys, "argv", ["c1-generate_dhcp.py", "-y"]),
             mock.patch.object(module.os.path, "isfile", return_value=True),
-            mock.patch.object(module, "load_project_global", return_value=("ztp", 2, 80)),
+            mock.patch.object(
+                module, "load_project_global",
+                return_value=("ztp", 2, 80, None, None, None),
+            ),
             mock.patch.object(module, "load_subnet_csv", return_value=[{}]),
             mock.patch.object(module, "load_csv", return_value=[record]),
             mock.patch.object(module, "load_p2p_air_json", return_value=[]),
@@ -2723,6 +2737,7 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             http_root = Path(temporary) / "http"
             day0 = http_root / "DAY0-Prepare"
             (day0 / "customer").mkdir(parents=True)
+            self.seed_disabled_r22_inputs(day0 / "customer")
             with mock.patch.object(setup, "HERE", os.fspath(day0)), \
                  mock.patch.object(setup, "HTTP_BASE", os.fspath(http_root)), \
                  mock.patch.object(setup, "_parse_args", return_value=args), \
@@ -2810,6 +2825,7 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             http_root = Path(temporary) / "http"
             day0 = http_root / "DAY0-Prepare"
             (day0 / "customer").mkdir(parents=True)
+            self.seed_disabled_r22_inputs(day0 / "customer")
             with mock.patch.object(setup, "HERE", os.fspath(day0)), \
                  mock.patch.object(setup, "HTTP_BASE", os.fspath(http_root)), \
                  mock.patch.object(setup, "_parse_args", return_value=args), \
@@ -3002,6 +3018,7 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             day0 = Path(temporary) / "DAY0-Prepare"
             (day0 / "customer").mkdir(parents=True)
+            self.seed_disabled_r22_inputs(day0 / "customer")
             with mock.patch.object(setup, "HERE", os.fspath(day0)), \
                  mock.patch.object(setup, "_parse_args", return_value=dry_setup_args), \
                  mock.patch.object(setup, "deployment_lock", mock.MagicMock()), \

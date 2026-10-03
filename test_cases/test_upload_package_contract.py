@@ -703,8 +703,8 @@ class UploadPackageContractTests(unittest.TestCase):
             # the host-bit subnet spelling is accepted by real 11-load.
             csv_bytes = (
                 (public / "02-dhcp-subnet_config.csv.example").read_bytes()
-                + b"example-external,10.20.30.7,255.255.255.0,10.20.30.100,"
-                  b"10.20.30.149,10.20.30.1,,none,no\n"
+                + b"example-external,198.18.0.7,255.255.255.0,198.18.0.100,"
+                  b"198.18.0.149,198.18.0.1,,none,no\n"
             )
             (project / "01-global.yaml").write_bytes(global_bytes)
             (project / "02-dhcp-subnet_config.csv").write_bytes(csv_bytes)

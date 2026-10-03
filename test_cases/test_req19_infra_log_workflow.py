@@ -64,6 +64,14 @@ class Req19InfraLogWorkflowTests(unittest.TestCase):
             project.mkdir(parents=True)
             (project / "p2p.xlsx").write_bytes(b"isolated fixture")
             (project / "99-output-infra").mkdir()
+            (project / "01-global.yaml").write_text(
+                "common:\n  mgmt:\n    dhcp-server: {status: disabled}\n"
+                "    ztp: {status: disabled}\n", encoding="utf-8",
+            )
+            (project / "02-dhcp-subnet_config.csv").write_text(
+                "shared_network,subnet,netmask,range_start,range_end,routers,"
+                "ztp_service_ip,cumulus_profile,nvos_ztp\n", encoding="utf-8",
+            )
         return root, infra, a, b
 
     def setup_project(self, root, project):
