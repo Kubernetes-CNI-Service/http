@@ -8,6 +8,7 @@ import inspect
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -20,6 +21,10 @@ ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = load_script("req22_runtime_contract", ROOT / "tools/ztp_service_runtime.py")
 ACTIVATE = load_script("req22_activate_contract", ROOT / "infra/docker/activate.py")
 LOAD = load_script("req22_load_contract", ROOT / "DAY0-Prepare/11-load.py")
+DHCP = load_script(
+    "req22_dhcp_generator_contract",
+    ROOT / "ztp/config/isc-dhcp-server/c1-generate_dhcp.py",
+)
 HEADER = (
     "shared_network,subnet,netmask,range_start,range_end,routers,"
     "ztp_service_ip,cumulus_profile,nvos_ztp\n"
@@ -388,6 +393,26 @@ class Req22RuntimeInputTests(unittest.TestCase):
             self.assertEqual(before, current.read_bytes())
         finally:
             fixture.tearDown()
+
+    def test_generator_candidate_option_targets_protected_sibling_before_inputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            public = root / "dhcpd.conf"
+            public.write_bytes(b"accepted DHCP output\n")
+            candidate = root / ".load-dhcp-contract"
+            candidate.mkdir(mode=0o700)
+            missing_subnet = root / "missing-subnet.csv"
+            with mock.patch.object(sys, "argv", [
+                "c1-generate_dhcp.py", "-y", "--candidate-output-dir",
+                str(candidate),
+            ]), mock.patch.object(DHCP, "OUTPUT_CONF", str(public)), \
+                    mock.patch.object(DHCP, "SUBNET_CSV", str(missing_subnet)):
+                with self.assertRaises(SystemExit) as caught:
+                    DHCP.main()
+                self.assertEqual(1, caught.exception.code)
+                self.assertEqual(str(candidate / public.name), DHCP.OUTPUT_CONF)
+            self.assertEqual(b"accepted DHCP output\n", public.read_bytes())
+            self.assertEqual([], list(candidate.iterdir()))
 
 
 if __name__ == "__main__":

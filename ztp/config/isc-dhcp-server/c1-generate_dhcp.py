@@ -1562,7 +1562,7 @@ def _production_handoff_text():
 
 
 def main():
-    global _AUTO_YES
+    global _AUTO_YES, OUTPUT_CONF, OUTPUT_ETH, OUTPUT_IB, OUTPUT_NVL, OUTPUT_MANIFEST
     args = sys.argv[1:]
     if any(arg in ("-h", "--help") for arg in args):
         print(__doc__.strip())
@@ -1572,6 +1572,7 @@ def main():
         args = [a for a in args if a != "-y"]
     deployment_scope = "all"
     switch_scope = "all"
+    candidate_output_dir = None
     remaining = []
     index = 0
     while index < len(args):
@@ -1592,6 +1593,12 @@ def main():
                 print("[ERROR] --switch requires eth, ib, or nvl", file=sys.stderr)
                 sys.exit(2)
             switch_scope = args[index]
+        elif argument == "--candidate-output-dir":
+            index += 1
+            if index >= len(args):
+                print("[ERROR] --candidate-output-dir requires a directory", file=sys.stderr)
+                sys.exit(2)
+            candidate_output_dir = args[index]
         else:
             remaining.append(argument)
         index += 1
@@ -1617,6 +1624,28 @@ def main():
         print(f"[ERROR] 不支持的参数：{' '.join(args)}", file=sys.stderr)
         print("使用 -h 或 --help 查看用法", file=sys.stderr)
         sys.exit(2)
+
+    if candidate_output_dir is not None:
+        public_parent = os.path.dirname(os.path.realpath(OUTPUT_CONF))
+        candidate = os.path.abspath(candidate_output_dir)
+        try:
+            info = os.lstat(candidate)
+        except OSError as exc:
+            print(f"[ERROR] DHCP candidate directory unavailable: {exc}", file=sys.stderr)
+            sys.exit(2)
+        if (os.path.realpath(os.path.dirname(candidate)) != public_parent
+                or not os.path.basename(candidate).startswith(".load-dhcp-")
+                or not stat.S_ISDIR(info.st_mode)
+                or stat.S_IMODE(info.st_mode) != 0o700
+                or info.st_uid != os.geteuid()):
+            print("[ERROR] DHCP candidate directory is not a protected output sibling",
+                  file=sys.stderr)
+            sys.exit(2)
+        OUTPUT_CONF = os.path.join(candidate, "dhcpd.conf")
+        OUTPUT_ETH = os.path.join(candidate, "dhcpd_eth.hosts")
+        OUTPUT_IB = os.path.join(candidate, "dhcpd_ib.hosts")
+        OUTPUT_NVL = os.path.join(candidate, "dhcpd_nvl.hosts")
+        OUTPUT_MANIFEST = os.path.join(candidate, "dhcp-release-manifest.json")
 
     if not os.path.isfile(SUBNET_CSV):
         print(f"[ERROR] 找不到 {os.path.basename(SUBNET_CSV)}")
