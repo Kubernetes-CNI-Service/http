@@ -146,6 +146,30 @@ def prepare_r22_selected_nvos_core_flow(
 
 
 class DhcpOptionalWorkflowTests(unittest.TestCase):
+    def test_f02_dhcp_off_ztp_on_rejected_by_load_and_generator_before_output(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            global_yaml = root / "01-global.yaml"
+            subnet = root / "02-dhcp-subnet_config.csv"
+            document = global_document("disabled")
+            document["common"]["mgmt"]["ztp"]["status"] = "enabled"
+            global_yaml.write_text(yaml.safe_dump(document), encoding="utf-8")
+            subnet.write_text(_R22_SUBNET_HEADER + _R22_ACTIVE_ROW, encoding="utf-8")
+            with self.assertRaisesRegex(LOAD.LoadError, "DHCP disabled.*ZTP enabled"):
+                LOAD.load_global(global_yaml)
+            output = root / "dhcpd.conf"
+            with mock.patch.object(sys, "argv", ["c1-generate_dhcp.py", "-y"]), \
+                    mock.patch.multiple(
+                        DHCP, GLOBAL_YAML=str(global_yaml), SUBNET_CSV=str(subnet),
+                        DEVICES_CSV=str(root / "02-devices_config.csv"),
+                        OUTPUT_CONF=str(output), _AUTO_YES=False,
+                    ), mock.patch.object(sys, "stdout", io.StringIO()) as stdout:
+                with self.assertRaises(SystemExit) as rejected:
+                    DHCP.main()
+            self.assertEqual(1, rejected.exception.code)
+            self.assertIn("DHCP disabled + ZTP enabled", stdout.getvalue())
+            self.assertFalse(output.exists())
+
     def test_f02_load_and_generator_both_reject_ztp_disabled_row_conflict(self):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)

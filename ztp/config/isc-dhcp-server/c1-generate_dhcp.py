@@ -154,6 +154,18 @@ def load_project_global(path, *, include_ztp_status=False):
             raise ValueError("common.mgmt.ztp.status 必须显式为 enabled/disabled")
         else:
             ztp_enabled = raw_ztp_status.strip().casefold() == "enabled"
+        dhcp_policy = data["common"]["mgmt"].get("dhcp-server")
+        if dhcp_policy is not None:
+            if not isinstance(dhcp_policy, dict):
+                raise ValueError("common.mgmt.dhcp-server 必须是 mapping")
+            raw_dhcp_status = dhcp_policy.get("status")
+            if (not isinstance(raw_dhcp_status, str)
+                    or raw_dhcp_status.strip().casefold() not in {"enabled", "disabled"}):
+                raise ValueError(
+                    "common.mgmt.dhcp-server.status 必须显式为 enabled/disabled"
+                )
+            if raw_dhcp_status.strip().casefold() == "disabled" and ztp_enabled is True:
+                raise ValueError("DHCP disabled + ZTP enabled 是非法组合")
         if (http_enabled or ztp_enabled) and "address" not in http_policy:
             raise ValueError(
                 "common.mgmt.http.address 必须显式指定独立的 HTTP 服务 IPv4"

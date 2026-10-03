@@ -71,6 +71,15 @@ def settings_for(status: str):
 
 
 class DhcpOptionalDirectTests(unittest.TestCase):
+    def test_f02_generator_rejects_dhcp_disabled_with_ztp_enabled(self):
+        with tempfile.TemporaryDirectory() as name:
+            global_yaml = Path(name) / "01-global.yaml"
+            document = global_document("disabled")
+            document["common"]["mgmt"]["ztp"]["status"] = "enabled"
+            global_yaml.write_text(yaml.safe_dump(document), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "DHCP disabled.*ZTP enabled"):
+                DHCP.load_project_global(global_yaml, include_ztp_status=True)
+
     def test_f02_generator_binds_global_ztp_status_to_each_subnet_row(self):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
