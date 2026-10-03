@@ -109,6 +109,19 @@ class Req22SetupInputTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "DHCP disabled.*ZTP enabled"):
                     SETUP._main_locked(args)
 
+    def test_internal_setup_rejects_invalid_csv_before_template_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = self._project(
+                Path(directory), dhcp="enabled", ztp="disabled", subnet=HEADER,
+            )
+            with mock.patch.object(
+                SETUP, "_initialize_project_from_template",
+                side_effect=AssertionError("template write reached before CSV gate"),
+            ) as initialize:
+                with self.assertRaisesRegex(ValueError, "没有 subnet 记录"):
+                    SETUP._setup_impl(str(project))
+            initialize.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

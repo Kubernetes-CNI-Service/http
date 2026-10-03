@@ -2878,7 +2878,7 @@ def _validate_xlsx(path):
     return errors, warnings
 
 
-def _validate_project(proj_dir):
+def _validate_project(proj_dir, *, expected_r22_source=None):
     """
     在创建软链接前对项目文件做合法性检查。
     返回 True 表示可继续（错误为 0），False 表示有错误。
@@ -2886,6 +2886,13 @@ def _validate_project(proj_dir):
     """
     all_errors   = []
     all_warnings = []
+    try:
+        dhcp_enabled, ztp_enabled, r22_source = _require_r22_subnet_input(proj_dir)
+        if expected_r22_source is not None and r22_source != expected_r22_source:
+            raise ValueError("R22 DHCP subnet 来源在 setup 阶段间变化")
+    except ValueError as exc:
+        print(_c(RED, f"  [ERR] {exc}"))
+        return False
 
     def _run(label, path, fn):
         if not os.path.exists(path):
@@ -2946,8 +2953,27 @@ def _validate_project(proj_dir):
         )
 
     # DHCP subnet CSV
+    try:
+        if _r22_subnet_source_fingerprint(
+            Path(proj_dir) / "02-dhcp-subnet_config.csv"
+        ) != r22_source:
+            raise ValueError("R22 DHCP subnet 来源在二次校验前变化")
+    except (OSError, ValueError) as exc:
+        print(_c(RED, f"  [ERR] {exc}"))
+        return False
     _run("02-dhcp-subnet_config.csv",
-         os.path.join(proj_dir, "02-dhcp-subnet_config.csv"), _validate_subnet_csv)
+         os.path.join(proj_dir, "02-dhcp-subnet_config.csv"),
+         lambda path: _validate_subnet_csv(
+             path, dhcp_enabled=dhcp_enabled, ztp_enabled=ztp_enabled,
+         ))
+    try:
+        if _r22_subnet_source_fingerprint(
+            Path(proj_dir) / "02-dhcp-subnet_config.csv"
+        ) != r22_source:
+            raise ValueError("R22 DHCP subnet 来源在二次校验期间变化")
+    except (OSError, ValueError) as exc:
+        print(_c(RED, f"  [ERR] {exc}"))
+        return False
 
     def _empty_artifact(label, kind="占位文件"):
         message = f"{label} 大小为 0（{kind}）"
@@ -3805,6 +3831,11 @@ def _setup_transaction_paths(proj_dir):
 
 def _setup_impl(proj_dir, *, server_delegated=False):
     global _LINK_ERRORS, _P2P_SOURCE, _LINK_TRANSACTION
+    _dhcp_enabled, _ztp_enabled, r22_source = _require_r22_subnet_input(proj_dir)
+    if _r22_subnet_source_fingerprint(
+        Path(proj_dir) / "02-dhcp-subnet_config.csv"
+    ) != r22_source:
+        raise ValueError("R22 DHCP subnet 来源在 setup 写入前变化")
     _LINK_ERRORS = 0
     print(f"\n项目目录：{proj_dir}")
     print(f"ZTP 目录：{ZTP}\n")
@@ -3817,7 +3848,7 @@ def _setup_impl(proj_dir, *, server_delegated=False):
     _P2P_SOURCE = _select_p2p_source(proj_dir)
     if not _P2P_SOURCE:
         sys.exit(1)
-    if not _validate_project(proj_dir):
+    if not _validate_project(proj_dir, expected_r22_source=r22_source):
         sys.exit(1)
     print()
 
