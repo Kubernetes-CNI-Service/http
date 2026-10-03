@@ -290,6 +290,45 @@ class AppliedReceiptPersistenceTests(unittest.TestCase):
             self.assertNotIn("failed_raw_sha256", fields)
             self.assertGreaterEqual(receipt.stat().st_mtime_ns, applied.stat().st_mtime_ns)
 
+    def test_writer_rejects_source_rebound_to_same_byte_symlink_after_hash(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            source = root / "020000000001.yaml"
+            source.write_bytes(b"- set:\n    system:\n      hostname: leaf01\n")
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            real_mktemp = shutil.which("mktemp")
+            self.assertIsNotNone(real_mktemp)
+            mktemp_shim = fake_bin / "mktemp"
+            mktemp_shim.write_text(
+                "#!/bin/sh\n"
+                'if [ ! -e "$SWAP_MARKER" ]; then\n'
+                '  mv "$SOURCE_TO_REBIND" "$ORIGINAL_SOURCE"\n'
+                '  ln -s "$ORIGINAL_SOURCE" "$SOURCE_TO_REBIND"\n'
+                '  : > "$SWAP_MARKER"\n'
+                "fi\n"
+                f"exec {shlex.quote(real_mktemp)} \"$@\"\n",
+                encoding="utf-8",
+            )
+            mktemp_shim.chmod(0o755)
+            harness = library_harness(root, """
+                persist_applied_receipt \
+                    "$1" success dedicated replace 020000000001.yaml \
+                    02:00:00:00:00:01
+            """)
+            env = {
+                **os.environ,
+                "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                "SOURCE_TO_REBIND": str(source),
+                "ORIGINAL_SOURCE": str(root / "original-source.yaml"),
+                "SWAP_MARKER": str(root / "swap-reached"),
+            }
+            result = run_bash(harness, source, env=env)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertTrue(source.is_symlink(), "test did not reach the post-hash swap")
+            self.assertFalse((root / "state/receipt.env").exists())
+            self.assertFalse((root / "state/last-success.yaml").exists())
+
     def test_writer_rejects_degenerate_receipt_budget_and_retains_prior(self):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
@@ -327,18 +366,13 @@ class AppliedReceiptPersistenceTests(unittest.TestCase):
             old_receipt = b"prior protected receipt\n"
             (state / "last-success.yaml").write_bytes(old_yaml)
             (state / "receipt.env").write_bytes(old_receipt)
-            fake_bin = root / "bin"
-            fake_bin.mkdir()
-            failing_python = fake_bin / "python3"
-            failing_python.write_text("#!/bin/sh\nexit 86\n", encoding="utf-8")
-            failing_python.chmod(0o755)
             harness = library_harness(root, """
+                fsync_applied_state() { return 86; }
                 persist_applied_receipt \
                     "$1" success dedicated replace 020000000001.yaml \
                     02:00:00:00:00:01
             """)
-            env = {**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"}
-            result = run_bash(harness, source, env=env)
+            result = run_bash(harness, source)
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertEqual(old_yaml, (state / "last-success.yaml").read_bytes())
             self.assertEqual(old_receipt, (state / "receipt.env").read_bytes())

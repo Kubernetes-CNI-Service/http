@@ -1069,6 +1069,76 @@ finally:
 PY
 }
 
+stage_applied_source_bound() {
+    python3 - "$1" "$2" "$3" "${APPLIED_STATE_DIR}" "${APPLIED_CONFIG_MAX_BYTES}" <<'PY'
+import hashlib
+import os
+import stat
+import sys
+
+source_path, target_path, expected_hash, state_dir, maximum_text = sys.argv[1:]
+maximum = int(maximum_text)
+if os.path.dirname(target_path) != state_dir:
+    raise SystemExit("staged applied source escaped state directory")
+state_fd = os.open(state_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+try:
+    state_info = os.fstat(state_fd)
+    if (not stat.S_ISDIR(state_info.st_mode)
+            or state_info.st_uid != os.geteuid()
+            or stat.S_IMODE(state_info.st_mode) != 0o711):
+        raise SystemExit("unsafe applied source staging directory")
+    source_fd = os.open(source_path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    try:
+        before = os.fstat(source_fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                or before.st_uid != os.geteuid()
+                or before.st_mode & 0o022
+                or before.st_size < 1 or before.st_size > maximum):
+            raise SystemExit("unsafe applied source identity")
+        raw = bytearray()
+        while len(raw) <= maximum:
+            chunk = os.read(source_fd, maximum + 1 - len(raw))
+            if not chunk:
+                break
+            raw.extend(chunk)
+        after = os.fstat(source_fd)
+        path_now = os.stat(source_path, follow_symlinks=False)
+        identity = lambda info: (
+            info.st_dev, info.st_ino, info.st_mode, info.st_uid,
+            info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+        )
+        if (len(raw) != before.st_size or len(raw) > maximum
+                or identity(before) != identity(after)
+                or identity(before) != identity(path_now)
+                or hashlib.sha256(raw).hexdigest() != expected_hash):
+            raise SystemExit("applied source changed after preflight")
+        target_fd = os.open(
+            os.path.basename(target_path), os.O_WRONLY | os.O_NOFOLLOW,
+            dir_fd=state_fd,
+        )
+        try:
+            target_info = os.fstat(target_fd)
+            if (not stat.S_ISREG(target_info.st_mode) or target_info.st_nlink != 1
+                    or target_info.st_uid != os.geteuid()
+                    or stat.S_IMODE(target_info.st_mode) != 0o600):
+                raise SystemExit("unsafe applied source stage")
+            os.ftruncate(target_fd, 0)
+            view = memoryview(raw)
+            while view:
+                written = os.write(target_fd, view)
+                if written <= 0:
+                    raise SystemExit("applied source stage write did not progress")
+                view = view[written:]
+            os.fsync(target_fd)
+        finally:
+            os.close(target_fd)
+    finally:
+        os.close(source_fd)
+finally:
+    os.close(state_fd)
+PY
+}
+
 persist_applied_receipt() {
     local source_file="$1"
     local receipt_status="$2"
@@ -1196,7 +1266,7 @@ persist_applied_receipt() {
         log "[ZTP] WARN: Could not create failed dedicated temporary file"
         return 0
     fi
-    if ! cp -- "${source_file}" "${yaml_tmp}" ||
+    if ! stage_applied_source_bound "${source_file}" "${yaml_tmp}" "${raw_sha256}" ||
        ! chown root:root "${yaml_tmp}" || ! chmod 0600 "${yaml_tmp}" ||
        ! copied_sha256=$(sha256sum "${yaml_tmp}"); then
         cleanup_applied_receipt_temps
@@ -1210,7 +1280,7 @@ persist_applied_receipt() {
         return 0
     fi
     if [[ -n "${failed_tmp}" ]]; then
-        if ! cp -- "${failed_source}" "${failed_tmp}" ||
+        if ! stage_applied_source_bound "${failed_source}" "${failed_tmp}" "${failed_raw_sha256}" ||
            ! chown root:root "${failed_tmp}" || ! chmod 0600 "${failed_tmp}" ||
            ! failed_copied_sha256=$(sha256sum "${failed_tmp}"); then
             cleanup_applied_receipt_temps
