@@ -244,6 +244,26 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 保存 result/summary、worker 状态、页面与归档的前后摘要及拒绝原因。只清理本案隔离
   项目副本，设备配置按事先批准的回滚源恢复并复核；风险是错误成功会掩盖实际配置漂移。
 
+## TC-REAL-F02-8-001 — 设备收据持久化、断电边界与读取身份
+
+- 对应 F02-8；状态：**NOT RUN / REAL_ENV REQUIRED**。本地 direct 为
+  `test_ztp_applied_receipt.py`，真实脚本 workflow 为
+  `test_bootstrap_config_fetch_workflow.py`；两者不能替代隔离设备文件系统的断电验证。
+- 前置条件：owner 另行批准的可恢复隔离 Cumulus/NVOS 设备或同文件系统特性的 VM；冻结
+  HEAD/tree、bootstrap 模板及渲染脚本 SHA256、Python/coreutils 版本、设备文件系统类型、
+  旧 `last-success.yaml`/`receipt.env` 的 inode/大小/SHA256、root 属主和权限，以及完整快照。
+  不在 AIR/Production、真实客户设备或在线项目注入故障。
+- 正向：写入 schema-1 最大合法 608 字节收据及匹配 YAML，确认固定 helper 原样接受，
+  `fsync` 暂存文件、数据 rename 后目录和收据 rename 后目录均成功；检查 single-link、0600、
+  受管 0711 目录及同源摘要。上界须由 schema 重新核算，不把本卡数值推广到后续版本。
+- 拒绝：在暂存 fsync、数据目录 fsync 和收据目录 fsync 各边界分别故障注入并恢复快照；
+  检查旧收据不被静默晋升、临时文件清理、旧收据／新 YAML 不匹配时读取失败。
+  超限和上界低于合法正例时拒绝且不截断；软／硬链接、属主／权限错误、旧收据重放、
+  generation 回退或撤销后再出现旧成功均不得取得当前权威。
+- 证据与清理：保存脱敏命令/退出码、fsync/rename 顺序、故障注入点、文件身份与摘要、
+  helper 输出和恢复后前像；只恢复隔离设备快照。当前仅大小、fsync 和硬链接的本地
+  切片已验证，generation/veto、回放／回滚拒绝及本卡真机步骤均保持 OPEN。
+
 ## TC-REAL-MONITOR-INVENTORY-LINK-001 — Fresh load 重建采集清单入口
 
 - 前置条件：使用受控 upload overlay 得到不携带 setup-managed runtime links 的 fresh 管理服务器
