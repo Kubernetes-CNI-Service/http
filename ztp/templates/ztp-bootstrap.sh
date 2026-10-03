@@ -1320,7 +1320,6 @@ persist_applied_receipt() {
         return 0
     fi
     if ! stage_applied_source_bound "${source_file}" "${yaml_tmp}" "${raw_sha256}" ||
-       ! chown root:root "${yaml_tmp}" || ! chmod 0600 "${yaml_tmp}" ||
        ! copied_sha256=$(sha256sum "${yaml_tmp}"); then
         cleanup_applied_receipt_temps
         log "[ZTP] WARN: Could not stage applied-config YAML"
@@ -1334,7 +1333,6 @@ persist_applied_receipt() {
     fi
     if [[ -n "${failed_tmp}" ]]; then
         if ! stage_applied_source_bound "${failed_source}" "${failed_tmp}" "${failed_raw_sha256}" ||
-           ! chown root:root "${failed_tmp}" || ! chmod 0600 "${failed_tmp}" ||
            ! failed_copied_sha256=$(sha256sum "${failed_tmp}"); then
             cleanup_applied_receipt_temps
             log "[ZTP] WARN: Could not stage failed dedicated YAML"
@@ -1375,11 +1373,6 @@ persist_applied_receipt() {
     } | stage_applied_receipt_bound "${receipt_tmp}"); then
         cleanup_applied_receipt_temps
         log "[ZTP] WARN: Applied-config receipt exceeds schema-1 safety budget or stage is unsafe"
-        return 0
-    fi
-    if ! chown root:root "${receipt_tmp}" || ! chmod 0600 "${receipt_tmp}"; then
-        cleanup_applied_receipt_temps
-        log "[ZTP] WARN: Could not stage applied-config receipt"
         return 0
     fi
     if [[ ! "${receipt_size}" =~ ^[0-9]+$ ]] ||

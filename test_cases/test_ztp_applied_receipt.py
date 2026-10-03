@@ -248,8 +248,11 @@ class AppliedReceiptPersistenceTests(unittest.TestCase):
         self.assertIn('RUNTIME_WORK_ROOT="/run"', TEMPLATE)
         self.assertNotIn('TMP_DIR="/tmp/ztp"', TEMPLATE)
         self.assertIn('PERSISTENT_LOG_POINTER="${PERSISTENT_LOG_DIR}/latest-log"', TEMPLATE)
-        self.assertIn('chmod 0600 "${yaml_tmp}"', TEMPLATE)
-        self.assertIn('chmod 0600 "${receipt_tmp}"', TEMPLATE)
+        self.assertIn('stat.S_IMODE(target_info.st_mode) != 0o600', TEMPLATE)
+        self.assertIn('stage_applied_source_bound "${source_file}" "${yaml_tmp}"', TEMPLATE)
+        self.assertIn('stage_applied_receipt_bound "${receipt_tmp}"', TEMPLATE)
+        self.assertNotIn('chmod 0600 "${yaml_tmp}"', TEMPLATE)
+        self.assertNotIn('chmod 0600 "${receipt_tmp}"', TEMPLATE)
         self.assertLess(
             TEMPLATE.index('mv -f -- "${yaml_tmp}" "${APPLIED_YAML_PATH}"'),
             TEMPLATE.index('mv -f -- "${receipt_tmp}" "${APPLIED_RECEIPT_PATH}"'),
@@ -445,14 +448,19 @@ class AppliedReceiptPersistenceTests(unittest.TestCase):
             (state / "last-success.yaml").write_bytes(previous_yaml)
             (state / "receipt.env").write_bytes(previous_receipt)
             harness = library_harness(root, """
-                chown() {
-                    local target="${@: -1}"
-                    case "$target" in
-                        */.receipt.env.*)
-                            rm -f -- "$target" || return
-                            mkfifo -- "$target" || return
-                            ;;
-                    esac
+                original_fsync_definition=$(declare -f fsync_applied_state)
+                eval "${original_fsync_definition/fsync_applied_state/fsync_applied_state_original}"
+                fsync_applied_state() {
+                    local target
+                    for target in "$@"; do
+                        case "$target" in
+                            */.receipt.env.*)
+                                rm -f -- "$target" || return
+                                mkfifo -- "$target" || return
+                                ;;
+                        esac
+                    done
+                    fsync_applied_state_original "$@"
                 }
                 persist_applied_receipt \
                     "$1" success dedicated replace next.yaml \
@@ -473,6 +481,46 @@ class AppliedReceiptPersistenceTests(unittest.TestCase):
             self.assertEqual(previous_yaml, (state / "last-success.yaml").read_bytes())
             self.assertEqual(previous_receipt, (state / "receipt.env").read_bytes())
             self.assertEqual([], list(state.glob(".receipt.env.*")))
+
+    def test_writer_never_mutates_rebound_stage_path_after_descriptor_validation(self):
+        for staged_name in (".last-success.yaml.", ".receipt.env."):
+            with self.subTest(staged_name=staged_name), tempfile.TemporaryDirectory() as name:
+                root = Path(name)
+                source = root / "next.yaml"
+                raw = b"- set:\n    system:\n      hostname: next\n"
+                source.write_bytes(raw)
+                victim = root / "unrelated.txt"
+                victim.write_bytes(b"unrelated content\n")
+                victim.chmod(0o644)
+                marker = root / "rebound-at-chown"
+                harness = library_harness(root, """
+                    chown() {
+                        local target="${@: -1}"
+                        case "$target" in
+                            *"$STAGED_NAME"*)
+                                rm -f -- "$target" || return
+                                ln -s -- "$VICTIM" "$target" || return
+                                : > "$REBOUND_MARKER"
+                                ;;
+                        esac
+                    }
+                    persist_applied_receipt \
+                        "$1" success dedicated replace next.yaml \
+                        02:00:00:00:00:01
+                """)
+                env = {
+                    **os.environ,
+                    "STAGED_NAME": staged_name,
+                    "VICTIM": str(victim),
+                    "REBOUND_MARKER": str(marker),
+                }
+                result = run_bash(harness, source, env=env)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertFalse(marker.exists(), "post-validation path mutation was attempted")
+                self.assertEqual(0o644, stat.S_IMODE(victim.stat().st_mode))
+                self.assertEqual(b"unrelated content\n", victim.read_bytes())
+                self.assertEqual(raw, (root / "state/last-success.yaml").read_bytes())
+                self.assertTrue((root / "state/receipt.env").is_file())
 
     def test_writer_rejects_degenerate_receipt_budget_and_retains_prior(self):
         with tempfile.TemporaryDirectory() as name:
