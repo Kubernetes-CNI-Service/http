@@ -637,6 +637,12 @@ def _remove_legacy_p2p_links():
         for path in glob.glob(os.path.join(directory, "*.xlsx")):
             if os.path.basename(path) == "p2p.xlsx" or not os.path.islink(path):
                 continue
+            # The cross-project WAL only authorizes its frozen P link rows.
+            # A legacy link still present here was not retired by the
+            # prewrite cleanup (or appeared after that check); never unlink
+            # it without durable recovery authority.
+            if _SETUP_SWITCH_WAL_CONTEXT is not None:
+                raise ValueError(f"旧 P2P 链接缺少 WAL 写前登记：{path}")
             if _DRY_RUN:
                 print(_c(CYAN, f"  [DRY] 删除旧 P2P 链接 {os.path.relpath(path, HTTP_BASE)}"))
             else:

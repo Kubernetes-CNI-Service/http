@@ -174,6 +174,16 @@ class SetupSwitchPlanContractTests(unittest.TestCase):
         self.assertEqual(os.path.relpath(target, self.common.parent), os.readlink(self.common))
         self.assertFalse(os.path.lexists(calls[1][0]))
 
+    def test_legacy_p2p_cleanup_requires_wal_authority_before_unlink(self) -> None:
+        legacy = self.root / "ztp/config/cumulus/template/P2P/legacy.xlsx"
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.symlink_to(os.path.relpath(self.p / "01-global.yaml", legacy.parent))
+        original = os.readlink(legacy)
+        with mock.patch.object(self.setup, "_SETUP_SWITCH_WAL_CONTEXT", ({}, 9)):
+            with self.assertRaisesRegex(ValueError, "WAL"):
+                self.setup._remove_legacy_p2p_links()
+        self.assertEqual(original, os.readlink(legacy))
+
     def test_inventory_identifies_real_latest_and_infra_logs_without_migration(self) -> None:
         latest = self.q / "99-output-eth/latest"
         latest.mkdir(parents=True)

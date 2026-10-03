@@ -691,6 +691,64 @@ finally:
             self.assertFalse(os.path.lexists(q_only))
             self.assertTrue((root / "ztp/.setup-switch-journal.json").is_file())
 
+    def test_real_setup_wal_refuses_unlisted_legacy_p2p_before_any_shared_write(self):
+        """A legacy P2P link outside P's manifest cannot be silently removed."""
+        with tempfile.TemporaryDirectory(prefix="r22-real-p2p-hold-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, p, _q, common, p_only, q_only, manifest, before, _hook, barrier, _home = fixture
+            legacy = root / "ztp/config/cumulus/template/P2P/legacy.xlsx"
+            legacy.parent.mkdir(parents=True, exist_ok=True)
+            legacy.symlink_to(os.path.relpath(p / "p2p.xlsx", legacy.parent))
+            original = os.readlink(legacy)
+            result = self._run_private_load_setup_switch(fixture, prepare_journal=True)
+            self.assertNotEqual(23, result.returncode, result.stdout + result.stderr)
+            self.assertIn("WAL 未覆盖旧链接清理", result.stdout + result.stderr)
+            self.assertFalse(barrier.exists(), result.stdout + result.stderr)
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            self.assertEqual(before["common"], os.readlink(common))
+            self.assertEqual(before["p_only"], os.readlink(p_only))
+            self.assertEqual(original, os.readlink(legacy))
+            self.assertFalse(os.path.lexists(q_only))
+            self.assertTrue((root / "ztp/.setup-switch-journal.json").is_file())
+
+    def test_real_setup_wal_retains_legacy_p2p_inserted_after_preflight(self):
+        """A new same-UID legacy link at cleanup time must survive the switch."""
+        with tempfile.TemporaryDirectory(prefix="r22-real-p2p-race-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, p, _q, common, p_only, _q_only, manifest, before, hook, _barrier, _home = fixture
+            legacy = root / "ztp/config/cumulus/template/P2P/raced.xlsx"
+            legacy.parent.mkdir(parents=True, exist_ok=True)
+            raw_target = os.path.relpath(p / "p2p.xlsx", legacy.parent)
+            hook_file = hook / "sitecustomize.py"
+            hook_file.write_text(hook_file.read_text(encoding="utf-8") + """
+import glob
+import inspect
+original_glob = glob.glob
+def insert_at_legacy_cleanup(pattern, *args, **kwargs):
+    legacy = Path(os.environ['HTTP_TEST_RACE_LEGACY_LINK'])
+    if (pattern == str(legacy.parent / '*.xlsx')
+            and any(frame.function == '_remove_legacy_p2p_links'
+                    for frame in inspect.stack())
+            and not os.path.lexists(legacy)):
+        os.symlink(os.environ['HTTP_TEST_RACE_LEGACY_TARGET'], legacy)
+    return original_glob(pattern, *args, **kwargs)
+glob.glob = insert_at_legacy_cleanup
+""", encoding="utf-8")
+            with mock.patch.dict(os.environ, {
+                "HTTP_TEST_RACE_LEGACY_LINK": str(legacy),
+                "HTTP_TEST_RACE_LEGACY_TARGET": raw_target,
+            }):
+                result = self._run_private_load_setup_switch(
+                    fixture, prepare_journal=True,
+                    first_link=root / "never-created-link",
+                )
+            self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn("旧 P2P 链接缺少 WAL", result.stdout + result.stderr)
+            self.assertEqual(raw_target, os.readlink(legacy))
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            self.assertEqual(before["common"], os.readlink(common))
+            self.assertEqual(before["p_only"], os.readlink(p_only))
+
     def test_real_setup_wal_refuses_unlisted_fixed_q_repoint_before_write(self):
         """P's fixed link cannot be repointed when its WAL row has no Q value."""
         with tempfile.TemporaryDirectory(prefix="r22-real-fixed-q-hold-") as name:
