@@ -127,6 +127,8 @@
         "test_cases.test_qos_evpn_uplink_generation",
         "test_cases.test_req14_active_provenance_workflow",
         "test_cases.test_req14_splitter_hostname_binding",
+        "test_cases.test_req23_import_contract",
+        "test_cases.test_req23_import_workflow",
         "test_cases.test_req7_ib_provenance",
         "test_cases.test_req7_ib_provenance_workflow",
         "test_cases.test_req8_template_refactor_contract",
@@ -543,6 +545,11 @@
     "ztp/templates/ztp-bootstrap.sh": "ztp/templates/ztp-bootstrap.sh"
   },
   "test_rules": [
+    {
+      "id": "req23_external_config_import_direct",
+      "paths": ["DAY0-Prepare/01-a-setup.py", "DAY0-Prepare/11-load.py"],
+      "tests": ["test_cases.test_req23_import_contract"]
+    },
     {
       "id": "monitor_loopback_proxy_direct",
       "paths": ["tools/monitor-loopback-proxy.py"],
@@ -1456,6 +1463,19 @@
     }
   ],
   "workflows": [
+    {
+      "id": "req23_external_config_import_release",
+      "members": [
+        "DAY0-Prepare/11-load.py",
+        "ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py",
+        "ztp/config/isc-dhcp-server/c1-generate_dhcp.py",
+        "ztp/config/cumulus/d-hostname2mac.py",
+        "infra/docker/activate.py",
+        "DAY0-Prepare/12-ztp-monitor.py",
+        "tools/generation_report.py"
+      ],
+      "tests": ["test_cases.test_req23_import_workflow"]
+    },
     {
       "id": "monitor_loopback_proxy_server_guards",
       "members": ["tools/monitor-loopback-proxy.py", "monitor/ztp-monitor-control.cgi", "monitor/switch-collection-control.cgi", "monitor/manual-ztp-control.cgi", "tools/project_contract.py", "tools/_package_common.py", "tools/sync-code.py"],

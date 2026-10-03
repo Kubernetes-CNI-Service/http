@@ -25,6 +25,7 @@ import gzip
 import hashlib
 import hmac
 import importlib.util
+import io
 import ipaddress
 import json
 import os
@@ -259,6 +260,351 @@ _MINI_GENERATION_AUTHORITIES: dict[
 
 class LoadError(RuntimeError):
     pass
+
+
+@dataclass
+class ImportConfigSelection:
+    """An fd-bound external configuration set, not a pathname to reopen."""
+
+    name: str
+    root_fd: int
+    directory_fd: int
+    root_path: Path
+    root_alias_identity: tuple[int, int, str | None]
+    root_identity: tuple[int, int]
+    directory_identity: tuple[int, int]
+    eligible_names: tuple[str, ...]
+    automatic: bool
+
+    def close(self) -> None:
+        for fd_name in ("directory_fd", "root_fd"):
+            descriptor = getattr(self, fd_name)
+            if descriptor >= 0:
+                os.close(descriptor)
+                setattr(self, fd_name, -1)
+
+    def __enter__(self) -> ImportConfigSelection:
+        return self
+
+    def __exit__(self, _type, _value, _traceback) -> None:
+        self.close()
+
+
+@dataclass(frozen=True)
+class ImportedConfigSnapshot:
+    source_name: str
+    files: tuple[tuple[str, bytes], ...]
+    digest: str
+    member_identities: tuple[tuple[str, int, int, int, int, int], ...]
+
+
+def _import_set_name(name: str) -> bool:
+    # fullmatch is intentional: `$` would accept a trailing newline.
+    return re.fullmatch(r"\d{8}_\d{6}", name, flags=re.ASCII) is not None
+
+
+def _import_root_alias_identity(root: Path) -> tuple[int, int, str | None]:
+    metadata = root.lstat()
+    if not (stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode)):
+        raise LoadError("import-configs must be a directory or owned directory alias")
+    return (
+        metadata.st_dev, metadata.st_ino,
+        os.readlink(root) if stat.S_ISLNK(metadata.st_mode) else None,
+    )
+
+
+def select_import_config_set(project: Path, selector: str) -> ImportConfigSelection:
+    """Freeze the newest named set, or one explicitly named set, by dirfd."""
+    if selector and not _import_set_name(selector):
+        raise LoadError("--import-configs accepts one YYYYMMDD_HHMMSS name only")
+    root = project / "import-configs"
+    root_fd = -1
+    directory_fd = -1
+    try:
+        alias_identity = _import_root_alias_identity(root)
+        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        root_stat = os.fstat(root_fd)
+        if not stat.S_ISDIR(root_stat.st_mode):
+            raise LoadError("import-configs target is not a directory")
+        eligible = tuple(sorted(name for name in os.listdir(root_fd)
+                                if _import_set_name(name)))
+        if not eligible:
+            raise LoadError("import-configs has no YYYYMMDD_HHMMSS configuration set")
+        selected = selector or eligible[-1]
+        if selected not in eligible:
+            raise LoadError(f"import-configs configuration set is missing: {selected}")
+        entry = os.stat(selected, dir_fd=root_fd, follow_symlinks=False)
+        if not stat.S_ISDIR(entry.st_mode):
+            raise LoadError("selected import-configs set must be a real directory")
+        directory_fd = os.open(
+            selected, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=root_fd,
+        )
+        opened = os.fstat(directory_fd)
+        if (entry.st_dev, entry.st_ino) != (opened.st_dev, opened.st_ino):
+            raise LoadError("selected import-configs set changed during opening")
+        if alias_identity != _import_root_alias_identity(root):
+            raise LoadError("import-configs alias changed during selection")
+        return ImportConfigSelection(
+            name=selected, root_fd=root_fd, directory_fd=directory_fd,
+            root_path=root, root_alias_identity=alias_identity,
+            root_identity=(root_stat.st_dev, root_stat.st_ino),
+            directory_identity=(opened.st_dev, opened.st_ino),
+            eligible_names=eligible, automatic=not bool(selector),
+        )
+    except (OSError, LoadError) as exc:
+        if directory_fd >= 0:
+            os.close(directory_fd)
+        if root_fd >= 0:
+            os.close(root_fd)
+        if isinstance(exc, LoadError):
+            raise
+        raise LoadError(f"cannot select import-configs source: {exc}") from exc
+
+
+def _import_publisher_module():
+    """Use the actual Cumulus parser/checker at the import preflight gate."""
+    name = "_http_import_cumulus_publisher"
+    existing = sys.modules.get(name)
+    if existing is not None:
+        return existing
+    path = HTTP_ROOT / "ztp/config/cumulus/d-hostname2mac.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise LoadError("cannot load Cumulus publication validator")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(name, None)
+        raise
+    return module
+
+
+def _reject_import_yaml_nulls(value: object, *, location: str = "$") -> None:
+    if value is None:
+        raise LoadError(f"imported Cumulus YAML contains null: {location}")
+    if isinstance(value, dict):
+        for key, child in value.items():
+            key_text = str(key)
+            if key is None or key_text.casefold() in {"none", "null", "vlannone"}:
+                raise LoadError(f"imported Cumulus YAML has forbidden key: {location}.{key_text}")
+            _reject_import_yaml_nulls(child, location=f"{location}.{key_text}")
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            _reject_import_yaml_nulls(child, location=f"{location}[{index}]")
+
+
+def preflight_import_configs(
+    selected: ImportConfigSelection, devices_file: Path,
+) -> ImportedConfigSnapshot:
+    """Read only fd-bound input bytes and reject an incomplete foreign set."""
+    publisher = _import_publisher_module()
+    try:
+        devices = publisher.load_csv(str(devices_file), switch_scope="eth")
+        names = tuple(sorted(os.listdir(selected.directory_fd)))
+        if not names or len(names) > 10000:
+            raise LoadError("import-configs set is empty or exceeds the member limit")
+        expected = {
+            key for key, device in devices.items()
+            if device["dev_type"] in {"eth", "eth_spx", "spx"}
+        }
+        if not expected:
+            raise LoadError("import-configs has no Cumulus devices in the CSV")
+        copied: list[tuple[str, bytes]] = []
+        identities: list[tuple[str, int, int, int, int, int]] = []
+        seen: set[str] = set()
+        total = 0
+        for name in names:
+            if name == "default.yaml":
+                raise LoadError("default.yaml is publisher output, not an import source")
+            if not name.endswith(".yaml") or "/" in name or "\\" in name:
+                raise LoadError(f"import-configs contains an unsupported member: {name!r}")
+            host = name[:-5].casefold()
+            device = devices.get(host)
+            if host in seen or host not in expected or device is None:
+                raise LoadError(f"import-configs contains an unknown/duplicate Cumulus host: {name!r}")
+            if name != f"{device['hostname']}.yaml":
+                raise LoadError(f"import-configs member has noncanonical hostname case: {name!r}")
+            metadata = os.stat(name, dir_fd=selected.directory_fd, follow_symlinks=False)
+            if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+                    or metadata.st_size <= 0 or metadata.st_size > 8 * 1024 * 1024):
+                raise LoadError(f"import-configs member is not a bounded single-link file: {name!r}")
+            fd = os.open(
+                name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=selected.directory_fd,
+            )
+            try:
+                opened = os.fstat(fd)
+                if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+                    raise LoadError(f"import-configs member changed while opening: {name!r}")
+                with os.fdopen(os.dup(fd), "rb") as stream:
+                    data = stream.read(8 * 1024 * 1024 + 1)
+                after = os.fstat(fd)
+            finally:
+                os.close(fd)
+            if len(data) != metadata.st_size or len(data) > 8 * 1024 * 1024:
+                raise LoadError(f"import-configs member size changed: {name!r}")
+            identity = (
+                name, metadata.st_dev, metadata.st_ino, metadata.st_size,
+                metadata.st_mtime_ns, metadata.st_ctime_ns,
+            )
+            after_identity = (
+                name, after.st_dev, after.st_ino, after.st_size,
+                after.st_mtime_ns, after.st_ctime_ns,
+            )
+            if identity != after_identity:
+                raise LoadError(f"import-configs member changed while reading: {name!r}")
+            try:
+                document = publisher._strict_yaml_load(io.StringIO(data.decode("utf-8")))
+            except (UnicodeError, yaml.YAMLError) as exc:
+                raise LoadError(f"invalid imported Cumulus YAML {name!r}: {exc}") from exc
+            _reject_import_yaml_nulls(document)
+            checks = [("eth0", device["eth0_ip_cidr"], device["eth0_gw"])]
+            if device["eth1_mac"]:
+                checks.append(("eth1", device["eth1_ip_cidr"], device["eth1_gw"]))
+            for iface, cidr, gateway in checks:
+                if not publisher._check_iface(document, name, iface, cidr, gateway):
+                    raise LoadError(f"imported Cumulus YAML address differs from CSV: {name!r} {iface}")
+            copied.append((name, data))
+            identities.append(identity)
+            seen.add(host)
+            total += len(data)
+            if total > 256 * 1024 * 1024:
+                raise LoadError("import-configs set exceeds the total byte limit")
+        missing = expected - seen
+        if missing:
+            raise LoadError("import-configs is missing Cumulus hosts: "
+                            + ", ".join(sorted(missing)[:10]))
+        basis = {
+            "source_name": selected.name,
+            "root_alias": selected.root_alias_identity,
+            "root_identity": selected.root_identity,
+            "directory_identity": selected.directory_identity,
+            "members": [(name, hashlib.sha256(data).hexdigest()) for name, data in copied],
+        }
+        digest = hashlib.sha256(json.dumps(
+            basis, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
+        return ImportedConfigSnapshot(selected.name, tuple(copied), digest, tuple(identities))
+    except (OSError, ValueError) as exc:
+        if isinstance(exc, LoadError):
+            raise
+        raise LoadError(f"import-configs preflight failed: {exc}") from exc
+
+
+def assert_import_source_unchanged(
+    selected: ImportConfigSelection, snapshot: ImportedConfigSnapshot,
+    devices_file: Path,
+) -> None:
+    """Recheck alias, chosen dir, set inventory and bytes before publication."""
+    if selected.directory_fd < 0 or selected.root_fd < 0:
+        raise LoadError("import-configs source descriptor is already closed")
+    try:
+        if _import_root_alias_identity(selected.root_path) != selected.root_alias_identity:
+            raise LoadError("import-configs root alias changed during load")
+        root = os.fstat(selected.root_fd)
+        if (root.st_dev, root.st_ino) != selected.root_identity:
+            raise LoadError("import-configs root changed during load")
+        child = os.stat(selected.name, dir_fd=selected.root_fd,
+                        follow_symlinks=False)
+        held = os.fstat(selected.directory_fd)
+        if (not stat.S_ISDIR(child.st_mode)
+                or (child.st_dev, child.st_ino) != selected.directory_identity
+                or (held.st_dev, held.st_ino) != selected.directory_identity):
+            raise LoadError("selected import-configs directory changed during load")
+        if selected.automatic:
+            names = tuple(sorted(name for name in os.listdir(selected.root_fd)
+                                 if _import_set_name(name)))
+            if names != selected.eligible_names:
+                raise LoadError("import-configs latest selection changed during load")
+        again = preflight_import_configs(selected, devices_file)
+        if again != snapshot:
+            raise LoadError("import-configs member identity or bytes changed during load")
+    except OSError as exc:
+        raise LoadError(f"cannot recheck import-configs source: {exc}") from exc
+
+
+def publish_imported_output(
+    snapshot: ImportedConfigSnapshot, output_root: Path, timestamp: str,
+) -> Path:
+    """Commit one entirely new, fsynced Cumulus source directory."""
+    if not _import_set_name(timestamp):
+        raise LoadError("imported output timestamp is invalid")
+    try:
+        alias_before = _import_root_alias_identity(output_root)
+        root_fd = os.open(output_root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError as exc:
+        raise LoadError(f"Cumulus output root is absent: {exc}") from exc
+    output = output_root / timestamp
+    stage_name = f".{timestamp}.import.{secrets.token_hex(16)}"
+    stage_fd = -1
+    created = False
+    committed = False
+    try:
+        try:
+            os.stat(timestamp, dir_fd=root_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise LoadError("Cumulus output timestamp already exists; refuse replacement")
+        os.mkdir(stage_name, mode=0o700, dir_fd=root_fd)
+        created = True
+        stage_fd = os.open(
+            stage_name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=root_fd,
+        )
+        if stat.S_IMODE(os.fstat(stage_fd).st_mode) != 0o700:
+            raise LoadError("imported configuration stage is not private")
+        for name, data in snapshot.files:
+            if not name.endswith(".yaml") or name == "default.yaml" or "/" in name:
+                raise LoadError("imported configuration snapshot contains an unsafe member")
+            fd = os.open(name,
+                         os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                         0o600, dir_fd=stage_fd)
+            try:
+                with os.fdopen(os.dup(fd), "wb") as stream:
+                    stream.write(data)
+                    stream.flush()
+                os.fsync(fd)
+                os.fchmod(fd, 0o644)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            check_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=stage_fd)
+            with os.fdopen(check_fd, "rb") as stream:
+                staged = stream.read(len(data) + 1)
+            if staged != data:
+                raise LoadError(f"imported configuration stage changed: {name!r}")
+        os.fchmod(stage_fd, 0o755)
+        os.fsync(stage_fd)
+        try:
+            os.stat(timestamp, dir_fd=root_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise LoadError("Cumulus output timestamp was claimed during staging")
+        if _import_root_alias_identity(output_root) != alias_before:
+            raise LoadError("Cumulus output root alias changed before publication")
+        os.rename(stage_name, timestamp, src_dir_fd=root_fd, dst_dir_fd=root_fd)
+        committed = True
+        os.fsync(root_fd)
+        if _import_root_alias_identity(output_root) != alias_before:
+            raise LoadError("Cumulus output root alias changed after publication")
+        return output
+    finally:
+        if not committed and created:
+            if stage_fd >= 0:
+                for name, _ in snapshot.files:
+                    try:
+                        os.unlink(name, dir_fd=stage_fd)
+                    except FileNotFoundError:
+                        pass
+            os.rmdir(stage_name, dir_fd=root_fd)
+        if stage_fd >= 0:
+            os.close(stage_fd)
+        os.close(root_fd)
 
 
 def _device_csv_na(value: object) -> bool:
@@ -4260,6 +4606,8 @@ def _pinned_generation_payloads(
     )
     if "generated_inputs" in parent:
         basis_keys += ("generated_inputs",)
+    if "imported_configs" in parent:
+        basis_keys += ("imported_configs",)
     if any(key not in parent for key in basis_keys):
         raise LoadError("pinned parent basis is incomplete")
     basis = {key: parent[key] for key in basis_keys}
@@ -7238,6 +7586,7 @@ def validate_and_publish_release(
     project: Path, inputs: ProjectInputs, *, dry_run: bool = False,
     publish: bool = True,
     dhcp_candidate_dir: Path | None = None,
+    imported_configs: ImportedConfigSnapshot | None = None,
 ) -> dict[str, object] | None:
     """Bind DHCP, Cumulus and NVOS child releases to one validated release.
 
@@ -7465,6 +7814,21 @@ def validate_and_publish_release(
             "release_dir": str(release_dir.relative_to(project.resolve())),
         }
         if label == "cumulus":
+            if imported_configs is not None:
+                for name, expected_bytes in imported_configs.files:
+                    candidate = release_dir / name
+                    try:
+                        metadata = candidate.lstat()
+                        if (not stat.S_ISREG(metadata.st_mode)
+                                or metadata.st_nlink != 1
+                                or candidate.read_bytes() != expected_bytes):
+                            raise LoadError(
+                                f"imported Cumulus child differs from frozen source: {name}"
+                            )
+                    except OSError as exc:
+                        raise LoadError(
+                            f"imported Cumulus child is missing: {name}: {exc}"
+                        ) from exc
             splitter_provenance = _current_splitter_provenance(
                 project, effective_devices, inputs.p2p_file, release_dir,
                 manifest, inputs.settings.schema_version,
@@ -7516,6 +7880,11 @@ def validate_and_publish_release(
             "path": effective_devices.resolve().relative_to(project.resolve()).as_posix(),
             "sha256": inputs.effective_devices_sha256,
         }}
+    if imported_configs is not None:
+        release_basis["imported_configs"] = {
+            "source_name": imported_configs.source_name,
+            "sha256": imported_configs.digest,
+        }
     release_id = hashlib.sha256(
         json.dumps(
             release_basis, ensure_ascii=False, sort_keys=True,
@@ -7890,6 +8259,10 @@ def generate_configs(
     source_identities: dict[str, str] | None = None,
     inventory_directory: Path | None = None,
     dhcp_candidate_dir: Path | None = None,
+    imported_configs: ImportedConfigSnapshot | None = None,
+    import_selection: ImportConfigSelection | None = None,
+    import_devices_file: Path | None = None,
+    import_output_timestamp: str | None = None,
 ) -> DerivedInventory | None:
     if dhcp_candidate_dir is not None and not dhcp_enabled:
         raise LoadError("DHCP disabled generation cannot accept a DHCP candidate")
@@ -8015,15 +8388,28 @@ def generate_configs(
 
     if device_types & {"eth", "eth_spx", "spx", "air"}:
         template_dir = ZTP_DIR / "config/cumulus/template"
-        run(
-            [sys.executable, "90-c2-generate_configs.py", "--branch", "eth", "-y",
-             *scope_args, *switch_args, *effective_options],
-            cwd=template_dir, dry_run=dry_run,
-            expected_global_sha256=(source_identities or {}).get("global"),
-        )
+        if imported_configs is None:
+            run(
+                [sys.executable, "90-c2-generate_configs.py", "--branch", "eth", "-y",
+                 *scope_args, *switch_args, *effective_options],
+                cwd=template_dir, dry_run=dry_run,
+                expected_global_sha256=(source_identities or {}).get("global"),
+            )
+        elif (deployment_scope != "prod" or selected_switch != "eth"
+              or import_selection is None or import_devices_file is None
+              or import_output_timestamp is None):
+            raise LoadError("import-configs requires Production Cumulus source authority")
         if not dry_run:
             output_root = template_dir / "99-output"
-            generated = newest_directory(output_root, re.compile(r"\d{8}_\d{6}"))
+            if imported_configs is None:
+                generated = newest_directory(output_root, re.compile(r"\d{8}_\d{6}"))
+            else:
+                assert_import_source_unchanged(
+                    import_selection, imported_configs, import_devices_file,
+                )
+                generated = publish_imported_output(
+                    imported_configs, output_root, import_output_timestamp,
+                )
             if not generated:
                 raise LoadError("Cumulus 生成器执行成功但没有找到输出目录")
             publish = _select_cumulus_description_publication(generated)
@@ -10230,6 +10616,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--p2p-file", help="明确选择项目根目录或 p2p/ 下的非空普通 XLSX（name.xlsx 或 p2p/name.xlsx）")
     parser.add_argument(
+        "--import-configs", nargs="?", const="", metavar="YYYYMMDD_HHMMSS",
+        help=("从项目 import-configs/ 下导入 Cumulus 配置；无值选择最新命名目录，"
+              "带值则选择指定的时间戳目录"),
+    )
+    parser.add_argument(
         "--p2p-legacy-columns", action="store_true",
         help="显式允许 P2P 未识别表头使用历史固定列；默认严格检查，不自动回退",
     )
@@ -10346,9 +10737,19 @@ def dry_run_next_step(requested_argv: list[str]) -> str:
     )
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(
+    argv: list[str] | None = None, *,
+    import_started_at: datetime | None = None,
+) -> int:
     requested_argv = list(sys.argv[1:] if argv is None else argv)
     args = parse_args(argv)
+    import_selector = getattr(args, "import_configs", None)
+    import_output_timestamp = (
+        (import_started_at or datetime.now().astimezone()).strftime("%Y%m%d_%H%M%S")
+        if import_selector is not None else None
+    )
+    import_selection: ImportConfigSelection | None = None
+    import_snapshot: ImportedConfigSnapshot | None = None
     release_link_snapshot: dict[Path, Optional[str]] = {}
     release_committed = False
     inventory_directory = None
@@ -10389,6 +10790,12 @@ def main(argv: list[str] | None = None) -> int:
         switch_scope = validate_switch_scope_options(args, deployment_scope)
         args.deployment_scope = deployment_scope
         args.switch_scope = switch_scope
+        if (import_selector is not None
+                and (deployment_scope != "prod" or switch_scope != "eth")):
+            raise LoadError(
+                "--import-configs 首批仅支持 --prod --switch eth；"
+                "不得隐式混入 AIR/NVOS 生成"
+            )
         if host_os.casefold() == "darwin":
             macos_requirements = print_macos_client_requirements(
                 update_passwords=bool(getattr(args, "update_passwords", False)),
@@ -10436,6 +10843,14 @@ def main(argv: list[str] | None = None) -> int:
                 f"检测到代码/项目同步尚未完成：{sync_marker}\n"
                 "请等待 sync-code.py 打印 [OK] 同步完成后再执行 load；"
                 "若同步进程已异常退出，请先重新完成一次 sync-code.py"
+            )
+        if import_selector is not None:
+            if not project.is_dir() or not _meaningful_entries(project):
+                raise LoadError("--import-configs requires an initialized project")
+            failure_phase = "外部 Cumulus 配置只读前置闸门"
+            import_selection = select_import_config_set(project, import_selector)
+            import_snapshot = preflight_import_configs(
+                import_selection, project / "02-devices_config.csv",
             )
         if (
             local_services_supported
@@ -10722,6 +11137,13 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 generation_options["mini_devices_file"] = mini_source
                 generation_options["source_identities"] = inputs.source_identities
+            if import_snapshot is not None:
+                generation_options.update({
+                    "imported_configs": import_snapshot,
+                    "import_selection": import_selection,
+                    "import_devices_file": project / "02-devices_config.csv",
+                    "import_output_timestamp": import_output_timestamp,
+                })
             generated_inventory = generate_configs(
                 inputs.device_types,
                 deployment_lock_descriptor=deployment_lock_descriptor,
@@ -10749,8 +11171,13 @@ def main(argv: list[str] | None = None) -> int:
             {} if dhcp_candidate_dir is None
             else {"dhcp_candidate_dir": dhcp_candidate_dir}
         )
+        if import_snapshot is not None:
+            assert_import_source_unchanged(
+                import_selection, import_snapshot, project / "02-devices_config.csv",
+            )
         parent_release = validate_and_publish_release(
             project, inputs, dry_run=args.dry_run, publish=False,
+            **({"imported_configs": import_snapshot} if import_snapshot is not None else {}),
             **dhcp_candidate_option,
         )
         if parent_release is not None:
@@ -10777,6 +11204,12 @@ def main(argv: list[str] | None = None) -> int:
                 project, actual_key_report,
             )
         failure_phase = "统一 release 一致性与 DHCP 事务安装"
+        if import_snapshot is not None:
+            # The report and candidate preparation can take time.  Never
+            # commit B using a source which ceased to match the frozen bytes.
+            assert_import_source_unchanged(
+                import_selection, import_snapshot, project / "02-devices_config.csv",
+            )
         if local_services_supported and dhcp_service_available:
             mount_and_test_dhcp(
                 args.dry_run, parent_candidate=parent_candidate,
@@ -11000,6 +11433,11 @@ def main(argv: list[str] | None = None) -> int:
             release_deployment_lock(deployment_lock_descriptor)
         except BaseException as cleanup_exc:
             final_cleanup_errors.append(("部署锁释放", cleanup_exc))
+        if import_selection is not None:
+            try:
+                import_selection.close()
+            except BaseException as cleanup_exc:
+                final_cleanup_errors.append(("导入来源描述符关闭", cleanup_exc))
         for label, cleanup_exc in final_cleanup_errors:
             print(f"[ERROR] {label}失败：{cleanup_exc}", file=sys.stderr)
         if final_cleanup_errors and not primary_failure:
@@ -11012,6 +11450,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def cli(argv: list[str] | None = None) -> int:
     """Own the workstation test gate while keeping Linux production load lean."""
+    invocation_started_at = datetime.now().astimezone()
     requested_argv = list(sys.argv[1:] if argv is None else argv)
     try:
         args = parse_args(requested_argv)
@@ -11026,7 +11465,10 @@ def cli(argv: list[str] | None = None) -> int:
         if local_formal_load:
             run_local_full_test_gate(**({"validation_only": True} if validation_only else {}))
             configure_local_pre_push_proof_gate()
-        result = main(requested_argv)
+        result = (
+            main(requested_argv, import_started_at=invocation_started_at)
+            if getattr(args, "import_configs", None) is not None else main(requested_argv)
+        )
         if result == 0 and local_formal_load:
             verify_local_full_test_attestation(**({"validation_only": True} if validation_only else {}))
         return result

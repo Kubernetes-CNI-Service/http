@@ -384,9 +384,13 @@ def _initialize_project_from_template(proj_dir):
         rel_root = os.path.relpath(src_root, TEMPLATE_DIR)
         rel_root = "" if rel_root == "." else rel_root
         if not rel_root:
-            # Project p2p/ may be a customer-owned link to an external source.
-            # A retired template subtree must never manufacture or replace it.
-            dirnames[:] = [name for name in dirnames if name != "p2p"]
+            # Project p2p/ and import-configs/ may be customer-owned links to
+            # external sources. A retired template subtree must never enter,
+            # manufacture, or replace either authority.
+            dirnames[:] = [
+                name for name in dirnames
+                if name not in {"p2p", "import-configs"}
+            ]
         dest_root = os.path.join(proj_dir, rel_root)
 
         if os.path.lexists(dest_root) and not os.path.isdir(dest_root):

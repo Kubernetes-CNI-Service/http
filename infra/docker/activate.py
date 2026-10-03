@@ -2941,6 +2941,10 @@ def validate_parent_release(settings: Settings, release_manifest: Path) -> dict:
         if schema != 2:
             raise ActivationError("legacy parent release cannot claim generated inputs")
         basis_keys += ("generated_inputs",)
+    if "imported_configs" in parent:
+        if schema != 2:
+            raise ActivationError("legacy parent release cannot claim imported configs")
+        basis_keys += ("imported_configs",)
     if any(key not in parent for key in basis_keys):
         raise ActivationError("parent current release basis is incomplete")
     release_basis = {key: parent[key] for key in basis_keys}
@@ -3573,6 +3577,8 @@ def validate_pinned_generation(
         )
         if "generated_inputs" in parent:
             keys += ("generated_inputs",)
+        if "imported_configs" in parent:
+            keys += ("imported_configs",)
         if any(key not in parent for key in keys):
             raise ActivationError("pinned parent release basis is incomplete")
         basis = {key: parent[key] for key in keys}

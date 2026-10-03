@@ -1889,3 +1889,10 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 前置条件：仅在 owner 授权的可丢弃 Linux 管理服务器及独立私有项目副本操作，完成当期正式 full proof；项目根目录与外部链接的 `p2p/` 准备不同版本、相同版本不同日期、同版本同日期不同 mtime、以及精确平局的 XLSX。记录源码 HEAD/tree、proof、项目/外部目录链接文字和 dev/ino、全部候选 SHA、远端旧同名与异名文件、`03-selected-p2p.json`、服务/容器状态和可回滚快照。不得用真实客户项目、生产服务或未经授权的主机。
 - 步骤与预期：本地 setup/load 选择并显示完整项目相对来源；分别用 tar 首次上传/受控部署及 sync 增量传输，仅所选实体 XLSX 出现在远端项目根目录，`p2p/` 链接、旁支 XLSX 和图片（tar 路径）不传输；sync 路径保留源字节。核对收据绑定传输后 SHA，Native 手动提示带所选 `--p2p-file`，Docker hostctl 也钉选同一实体。远端旧高版本异名文件保留但不被无意采用；缺收据且多候选、收据摘要漂移、外部目录改绑、精确排序平局以及远端同名异摘要均须非零拒绝，不覆盖旧文件、不留下截断临时文件或错误地启动服务。重复同步同一来源应零写入或维持同一收据身份。
 - 证据、清理与风险：保存脱敏命令/退出码、选择日志、归档成员、前后 inode/size/SHA、收据、远端项目目录清单、Native/Docker 命令及服务状态、拒绝日志与快照回滚核验；只恢复隔离项目和服务器快照。若真实 Docker/native 路径未分别执行、目标冲突或回滚无法证实，则保持 OPEN，不将本机聚焦测试视为 AIR/prod 验收。远端同 UID 非协作写者及在最后一次身份核验之后的竞态仍需单独控制。
+## TC-REAL-REQ23-IMPORT-001 — 第三方 Cumulus 配置导入与真实设备取回
+
+- Case ID：`TC-REAL-REQ23-IMPORT-001`；类型：real-environment / setup-load / publication / device；状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。本地自动化先决为 `test_cases.test_req23_import_contract` direct、`test_cases.test_req23_import_workflow` 真实跨脚本 workflow 和同一精确干净树正式 full/check 通过；本地 GREEN 不构成真机验收。
+- 前置条件：仅在 owner 单独许可的可丢弃 Linux 管理服务器、私有项目与测试设备/模拟取回端执行；先保存 HEAD/tree/full proof、项目及外部 `import-configs` 根别名文字和 dev/ino、两个 `YYYYMMDD_HHMMSS` 套件的有序成员名与 SHA、CSV、旧 parent release/`latest_yaml`/服务状态、卷快照和同 UID 外部写者静默见证。首批只用 Production Cumulus `--prod --switch eth`；不把此卡当作生产发布许可。
+- 步骤与预期：用无值 `--import-configs` 验证按命名最新套件被一次选定，用 `--import-configs=<较旧时间戳>` 验证显式回选；检查新本地输出以本次 load 开始时间命名、来源目录未被改写、只复制经闸门接受的设备 YAML 字节且不复制 `default.yaml`。核对 Cumulus child manifest、parent `imported_configs` 可选 basis、报告、Docker/Native 读者与真实设备取回配置一致；旧 parent 可显式验证，不被导入模式误判成功。
+- 负例：最新套件坏件、空/缺/未知/重复/非 Cumulus 成员、软链/硬链、YAML null、CSV 地址不符、导入期间根或子目录换绑、同 inode A→B→A、增添更新名字、输出时间戳冲突，以及在预检、复制、子发布和 parent commit 前故障注入。预期 fail closed，不退选次新、不读取换绑外部字节、不覆盖现有输出，旧 release/`latest_yaml`/受管服务状态按事务合同留存；任何无法证明完整恢复的窗口保持 HOLD/停服。
+- 证据与清理：保存脱敏 argv/exit、每阶段前后 inode/size/SHA/链接文字、有序成员快照、release ID 与报告、设备请求/响应、服务状态、写者静默和快照恢复核对。仅清理本卡隔离项目/VM，禁止直接改生产来源或已部署包；缺独立真实 Linux/设备见证时保持 OPEN。

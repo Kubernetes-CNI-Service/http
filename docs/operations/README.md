@@ -89,6 +89,23 @@ recovery，并要求 `exactly one fixed warning`；随后重复同一个 N=1→2
 
 ## 运行操作轴
 
+### REQ23 第三方 Cumulus 配置导入（TEST 合同）
+
+首批仅支持 Production Cumulus：操作员先把已经规范化、逐台命名的配置放到
+`<project>/import-configs/YYYYMMDD_HHMMSS/<hostname>.yaml`。`import-configs` 可为项目下受管的
+外部目录别名；每套时间戳子目录必须是实体目录。项目只读检查内容，不替操作员修改原件。
+`default.yaml`、缺失/多余设备、未知文件、软链、硬链、空文件、无效 YAML 或与 CSV 不符的
+管理地址都会阻断导入。
+
+在完整 load 命令中加 `--prod --switch eth --import-configs`，无值时按时间戳目录名选择
+本次输入检查时最新的一套；`--import-configs=YYYYMMDD_HHMMSS` 可明确选择旧套件。
+选择不按 mtime，也不接受任意路径。选定后本次 load 始终使用该套已冻结的字节；
+外部目录不会被当作发布目录或被改写。成功时会在本地以本次 load 开始时间创建新的输出目录，
+将通过检查的设备 YAML 字节交给现有描述/发布链，再将导入来源与内容摘要写入新 parent release。
+同秒已有输出目录则停止，不覆盖或加随机后缀。旧 parent 无导入分量，仍按旧合同验证。
+真机验证步骤与风险见 `test_cases/REAL_ENVIRONMENT.md` 的
+`TC-REAL-REQ23-IMPORT-001`；本地 TEST full proof 不是远端发布许可。
+
 ### P2P 拆分模式与生成配置
 
 P2P 推断出的 splitter profile 是硬件拆分模式的唯一来源：`1to2 → 2x/4 lanes`、

@@ -195,6 +195,35 @@ class GenerationReportContract(unittest.TestCase):
                 with self.assertRaisesRegex(helper.GenerationReportError, "parent release digest mismatch"):
                     helper.build_report(self.project, changed, published_dir=self.published)
 
+    def test_imported_configs_is_optional_parent_basis_and_changes_release_id(self):
+        helper = report_helper()
+        ordinary_id = self.parent["release_id"]
+        imported = dict(self.parent)
+        imported["imported_configs"] = {
+            "source_name": "20261003_101112", "sha256": "a" * 64,
+        }
+        basis = {key: imported[key] for key in (
+            "project", "deployment_scope", "switch_scope", "dhcp_status",
+            "inputs", "input_sources", "components", "inventory",
+            "imported_configs",
+        )}
+        imported["release_id"] = hashlib.sha256(json.dumps(
+            basis, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()[:20]
+        self.assertNotEqual(ordinary_id, imported["release_id"])
+        self.parent = imported
+        (self.output / "current-release.json").write_text(
+            json.dumps(imported, sort_keys=True) + "\n", encoding="utf-8",
+        )
+        report = self.build()
+        self.assertEqual(report["release_id"], imported["release_id"])
+        changed = dict(imported)
+        changed["imported_configs"] = {
+            "source_name": "20261003_101112", "sha256": "b" * 64,
+        }
+        with self.assertRaisesRegex(helper.GenerationReportError, "parent release digest mismatch"):
+            helper.build_report(self.project, changed, published_dir=self.published)
+
     def test_published_link_must_bind_this_projects_same_name_regular_leaf(self):
         helper = report_helper()
         other = self.root / "DAY0-Prepare/other"

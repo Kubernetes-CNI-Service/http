@@ -5603,6 +5603,10 @@ def load_release_identity(project: Path) -> dict[str, str]:
                 f"current release legacy v1 不允许 generated_inputs: {path}"
             )
         basis_keys += ("generated_inputs",)
+    if "imported_configs" in payload:
+        if schema != 2:
+            raise ValueError(f"current release legacy v1 不允许 imported_configs: {path}")
+        basis_keys += ("imported_configs",)
     if any(key not in payload for key in basis_keys):
         raise ValueError(f"current release canonical basis 不完整: {path}")
     expected_id = hashlib.sha256(json.dumps(

@@ -693,6 +693,10 @@ def validate_parent_release_binding(project: Path, device: dict) -> dict[str, st
         release_basis["dhcp_status"] = parent_dhcp_status
     if derived_binding is not None:
         release_basis["generated_inputs"] = parent["generated_inputs"]
+    if "imported_configs" in parent:
+        if schema != 2:
+            raise ManualZtpError("imported configs require schema 2 parent")
+        release_basis["imported_configs"] = parent["imported_configs"]
     calculated_release_id = hashlib.sha256(
         json.dumps(
             release_basis, ensure_ascii=False, sort_keys=True,
