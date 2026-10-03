@@ -19,6 +19,7 @@ from test_cases.module_loader import load_script
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = load_script("req22_runtime_contract", ROOT / "tools/ztp_service_runtime.py")
 ACTIVATE = load_script("req22_activate_contract", ROOT / "infra/docker/activate.py")
+LOAD = load_script("req22_load_contract", ROOT / "DAY0-Prepare/11-load.py")
 HEADER = (
     "shared_network,subnet,netmask,range_start,range_end,routers,"
     "ztp_service_ip,cumulus_profile,nvos_ztp\n"
@@ -297,6 +298,42 @@ class Req22RuntimeInputTests(unittest.TestCase):
                     ACTIVATE.ActivationError, "selected DHCP family",
                 ):
                     ACTIVATE.validate_parent_release(settings, parent_path)
+
+    def test_native_dhcp_dry_run_accepts_receipt_proven_empty_hosts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            bodies = {
+                "dhcpd.conf": b'include "/etc/dhcp/dhcpd_eth.hosts";\n'
+                b'include "/etc/dhcp/dhcpd_ib.hosts";\n'
+                b'include "/etc/dhcp/dhcpd_nvl.hosts";\n',
+                "dhcpd_eth.hosts": b"host sw1 {\n}\n",
+                "dhcpd_ib.hosts": b"",
+                "dhcpd_nvl.hosts": b"",
+            }
+            for name, body in bodies.items():
+                (output / name).write_bytes(body)
+            child = {
+                "schema_version": 1, "release_id": "fixture-dhcp",
+                "counts": {"host_declarations_by_family": {
+                    "eth": 1, "ib": 0, "nvl": 0,
+                }},
+                "outputs": {
+                    name: {"sha256": hashlib.sha256(body).hexdigest()}
+                    for name, body in bodies.items()
+                },
+            }
+            (output / "dhcp-release-manifest.json").write_text(
+                json.dumps(child), encoding="utf-8",
+            )
+            mappings = {
+                output / name: Path("/etc/dhcp") / name
+                for name in bodies
+            }
+            with mock.patch.object(
+                LOAD, "dhcp_file_mappings", return_value=mappings,
+            ), mock.patch.object(LOAD, "run") as run:
+                LOAD.mount_and_test_dhcp(dry_run=True)
+            self.assertEqual(5, run.call_count)
 
 
 if __name__ == "__main__":

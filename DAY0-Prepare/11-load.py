@@ -4062,8 +4062,40 @@ def mount_and_test_dhcp(
     destination (including a symlink) is restored before the error is raised.
     """
     mappings = dhcp_file_mappings()
+    zero_hosts = []
     for source in mappings:
-        _nonempty_file(source, f"DHCP 输出 {source.name}")
+        if source.name == "dhcpd.conf":
+            _nonempty_file(source, f"DHCP 输出 {source.name}")
+        elif source.is_file() and source.stat().st_size == 0:
+            zero_hosts.append(source)
+        else:
+            _nonempty_file(source, f"DHCP 输出 {source.name}")
+    if zero_hosts:
+        dhcp_dir = next(iter(mappings)).parent
+        child = _load_release_json(
+            dhcp_dir / "dhcp-release-manifest.json", "DHCP release manifest",
+        )
+        counts = child.get("counts")
+        family_counts = (counts.get("host_declarations_by_family")
+                         if isinstance(counts, dict) else None)
+        outputs = child.get("outputs")
+        if (not isinstance(family_counts, dict)
+                or set(family_counts) != {"eth", "ib", "nvl"}
+                or any(type(value) is not int or value < 0
+                       for value in family_counts.values())
+                or not isinstance(outputs, dict)):
+            raise LoadError("DHCP 空 hosts 缺少精确子收据计数证明")
+        host_declaration = re.compile(
+            rb"(?m)^\s*host\s+[A-Za-z0-9][A-Za-z0-9._-]*\s*\{\s*$"
+        )
+        for family in ("eth", "ib", "nvl"):
+            source = dhcp_dir / f"dhcpd_{family}.hosts"
+            payload = source.read_bytes()
+            expected = outputs.get(source.name)
+            if (not isinstance(expected, dict)
+                    or expected.get("sha256") != hashlib.sha256(payload).hexdigest()
+                    or len(host_declaration.findall(payload)) != family_counts[family]):
+                raise LoadError(f"DHCP 空 hosts 子收据或内容不一致：{source.name}")
     if dry_run:
         info("dry-run：将先在 staging 检查四个 DHCP 文件，再事务式安装并复检")
         for source, destination in mappings.items():
