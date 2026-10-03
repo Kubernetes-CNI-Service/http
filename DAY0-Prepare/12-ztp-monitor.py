@@ -3297,13 +3297,20 @@ def finalize_device(device: dict[str, Any]) -> None:
         current_round = max(1, int(device.get("ztp_round", 1)))
     except (TypeError, ValueError):
         current_round = 1
+
+    def stage_success_index(name: str) -> int:
+        try:
+            return int(device["stages"][name].get("success_index") or 0)
+        except (TypeError, ValueError):
+            return 0
+
     done = sum(
         device["stages"][name]["status"] in {"success", "warning", "skipped"}
         and (
             name not in {"config_apply", "ssh_keys"}
             or device["stages"][name]["status"] == "success"
         )
-        and int(device["stages"][name].get("success_index") or 0) == current_round
+        and stage_success_index(name) == current_round
         for name in STAGE_NAMES
     )
     device["progress"] = {"done": done, "total": len(STAGE_NAMES),
@@ -3314,8 +3321,7 @@ def finalize_device(device: dict[str, Any]) -> None:
         device["overall"] = "warning"
     elif (done == len(STAGE_NAMES)
           and device["stages"]["complete"]["status"] == "success"
-          and int(device["stages"]["complete"].get("success_index") or 0)
-          == current_round):
+          and stage_success_index("complete") == current_round):
         device["overall"] = "success"
     elif any(value in {"success", "running"} for value in statuses):
         device["overall"] = "running"

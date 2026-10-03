@@ -156,6 +156,18 @@ class CurrentRoundCompletionTests(unittest.TestCase):
             ),
         )
 
+    def test_malformed_current_round_index_cannot_crash_or_promote(self):
+        row = round_device("Leaf01", "eth")
+        row["stages"]["config_apply"]["success_index"] = "not-an-integer"
+        MONITOR.finalize_device(row)
+        self.assertEqual(8, row["progress"]["done"])
+        self.assertNotEqual("success", row["overall"])
+        self.assertEqual(
+            {}, MONITOR.ready_completion_handoff_reports(
+                {"scope": "prod", "devices": [row]},
+            ),
+        )
+
     def test_second_round_without_comparable_boundary_cannot_index_stages(self):
         row = round_device(
             "Leaf01", "eth", cycle_started_at="", stage_timestamp="",
