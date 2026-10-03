@@ -19,7 +19,7 @@ from unittest import mock
 import yaml
 from test_cases.module_loader import load_script
 from test_cases.test_dhcp_optional_contract import (
-    DHCP, LOAD, RUNTIME, SETUP, ROOT, _R22_SUBNET_HEADER,
+    DHCP, LOAD, RUNTIME, SETUP, ROOT, _R22_ACTIVE_ROW, _R22_SUBNET_HEADER,
     global_document, settings_for,
 )
 from test_cases.test_dhcp_switch_scope_preservation import (
@@ -146,6 +146,84 @@ def prepare_r22_selected_nvos_core_flow(
 
 
 class DhcpOptionalWorkflowTests(unittest.TestCase):
+    def test_f02_load_and_generator_both_reject_ztp_disabled_row_conflict(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            global_yaml = root / "01-global.yaml"
+            subnet = root / "02-dhcp-subnet_config.csv"
+            document = global_document("enabled")
+            document["common"]["mgmt"]["ztp"]["status"] = "disabled"
+            global_yaml.write_text(yaml.safe_dump(document), encoding="utf-8")
+            subnet.write_text(_R22_SUBNET_HEADER + _R22_ACTIVE_ROW, encoding="utf-8")
+            settings = LOAD.load_global(global_yaml)
+            with self.assertRaisesRegex(LOAD.LoadError, "第 2 行.*global ZTP disabled"):
+                LOAD.validate_subnet_file(subnet, settings)
+            prefix, _schema, port, address, enabled = DHCP.load_project_global(
+                global_yaml, include_ztp_status=True,
+            )
+            with mock.patch.object(sys, "stdout", io.StringIO()), self.assertRaises(SystemExit):
+                DHCP.load_subnet_csv(
+                    subnet, prefix, port=port, http_address=address,
+                    ztp_enabled=enabled,
+                )
+            output_names = (
+                "dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts",
+                "dhcpd_nvl.hosts", "dhcp-release-manifest.json",
+            )
+            with mock.patch.object(sys, "argv", ["c1-generate_dhcp.py", "-y"]), \
+                    mock.patch.multiple(
+                        DHCP,
+                        GLOBAL_YAML=str(global_yaml), SUBNET_CSV=str(subnet),
+                        DEVICES_CSV=str(root / "02-devices_config.csv"),
+                        OUTPUT_CONF=str(root / output_names[0]),
+                        OUTPUT_ETH=str(root / output_names[1]),
+                        OUTPUT_IB=str(root / output_names[2]),
+                        OUTPUT_NVL=str(root / output_names[3]),
+                        OUTPUT_MANIFEST=str(root / output_names[4]),
+                        _AUTO_YES=False,
+                    ), mock.patch.object(sys, "stdout", io.StringIO()) as stdout:
+                with self.assertRaises(SystemExit) as rejected:
+                    DHCP.main()
+            self.assertEqual(1, rejected.exception.code)
+            self.assertIn("第 2 行", stdout.getvalue())
+            self.assertIn("global ZTP disabled", stdout.getvalue())
+            self.assertTrue(all(not (root / item).exists() for item in output_names))
+
+    def test_f02_mixed_rows_emit_no_platform_options_in_none_row(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            global_yaml = root / "01-global.yaml"
+            subnet = root / "02-dhcp-subnet_config.csv"
+            output = root / "dhcpd.conf"
+            document = global_document("enabled")
+            global_yaml.write_text(yaml.safe_dump(document), encoding="utf-8")
+            active = _R22_ACTIVE_ROW
+            inactive = active.replace("mgmt,", "mgmt2,", 1).replace(
+                "192.0.2.", "198.51.100.",
+            ).replace("198.51.100.10,oob,no", ",none,no")
+            subnet.write_text(
+                _R22_SUBNET_HEADER + active + inactive, encoding="utf-8",
+            )
+            settings = LOAD.load_global(global_yaml)
+            LOAD.validate_subnet_file(subnet, settings)
+            prefix, _schema, port, address, enabled = DHCP.load_project_global(
+                global_yaml, include_ztp_status=True,
+            )
+            rows = DHCP.load_subnet_csv(
+                subnet, prefix, port=port, http_address=address,
+                ztp_enabled=enabled,
+            )
+            DHCP.write_dhcpd_conf(output, rows)
+            generated = output.read_text(encoding="utf-8")
+            active_block = generated.split("shared-network mgmt {", 1)[1].split(
+                "shared-network mgmt2 {", 1,
+            )[0]
+            inactive_block = generated.split("shared-network mgmt2 {", 1)[1]
+            self.assertIn('option cumulus-provision-url "', active_block)
+            self.assertNotIn('option cumulus-provision-url "', inactive_block)
+            self.assertNotIn('option bootfile-name "', inactive_block)
+            self.assertIn("range 198.51.100.100 198.51.100.120", inactive_block)
+
     def test_f02_load_to_infra_http_ip_requires_independent_project_input(self):
         deploy = load_script(
             "f02_independent_http_infra_consumer", ROOT / "infra/deploy_infra.py",

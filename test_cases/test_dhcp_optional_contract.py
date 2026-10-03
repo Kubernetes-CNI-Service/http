@@ -71,6 +71,74 @@ def settings_for(status: str):
 
 
 class DhcpOptionalDirectTests(unittest.TestCase):
+    def test_f02_generator_binds_global_ztp_status_to_each_subnet_row(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            global_yaml = root / "01-global.yaml"
+            subnet = root / "02-dhcp-subnet_config.csv"
+            document = global_document("enabled")
+            document["common"]["mgmt"]["ztp"]["status"] = "disabled"
+            global_yaml.write_text(yaml.safe_dump(document), encoding="utf-8")
+            subnet.write_text(_R22_SUBNET_HEADER + _R22_ACTIVE_ROW, encoding="utf-8")
+            prefix, _schema, port, address, ztp_enabled = DHCP.load_project_global(
+                global_yaml, include_ztp_status=True,
+            )
+            self.assertIs(ztp_enabled, False)
+            output = io.StringIO()
+            with mock.patch.object(sys, "stdout", output), self.assertRaises(SystemExit):
+                DHCP.load_subnet_csv(
+                    subnet, prefix, port=port, http_address=address,
+                    ztp_enabled=ztp_enabled,
+                )
+            self.assertIn("第 2 行", output.getvalue())
+            self.assertIn("cumulus_profile=oob", output.getvalue())
+            self.assertIn("global ZTP disabled", output.getvalue())
+
+            subnet.write_text(
+                _R22_SUBNET_HEADER + _R22_ACTIVE_ROW.replace(
+                    "192.0.2.10,oob,no", ",none,no",
+                ), encoding="utf-8",
+            )
+            rows = DHCP.load_subnet_csv(
+                subnet, prefix, port=port, http_address=address,
+                ztp_enabled=False,
+            )
+            self.assertEqual("", rows[0]["cumulus_provision_url"])
+            self.assertEqual("", rows[0]["bootfile_name"])
+
+            document["common"]["mgmt"]["ztp"]["status"] = "enabled"
+            global_yaml.write_text(yaml.safe_dump(document), encoding="utf-8")
+            _, _, _, _, enabled = DHCP.load_project_global(
+                global_yaml, include_ztp_status=True,
+            )
+            self.assertIs(enabled, True)
+            output = io.StringIO()
+            with mock.patch.object(sys, "stdout", output), self.assertRaises(SystemExit):
+                DHCP.load_subnet_csv(
+                    subnet, prefix, port=port, http_address=address,
+                    ztp_enabled=enabled,
+                )
+            self.assertIn("all rows", output.getvalue())
+            self.assertIn("none/no", output.getvalue())
+
+            mixed_none = _R22_ACTIVE_ROW.replace("mgmt,", "mgmt2,", 1).replace(
+                "192.0.2.", "198.51.100.",
+            ).replace(
+                "198.51.100.10,oob,no", ",none,no",
+            )
+            subnet.write_text(
+                _R22_SUBNET_HEADER + _R22_ACTIVE_ROW + mixed_none,
+                encoding="utf-8",
+            )
+            mixed = DHCP.load_subnet_csv(
+                subnet, prefix, port=port, http_address=address,
+                ztp_enabled=True,
+            )
+            self.assertEqual(2, len(mixed))
+            self.assertTrue(mixed[0]["cumulus_provision_url"])
+            self.assertEqual("", mixed[1]["cumulus_provision_url"])
+            self.assertEqual("", mixed[1]["bootfile_name"])
+
     def test_f02_infra_cli_describes_explicit_http_input_as_required(self):
         deploy = load_script(
             "f02_infra_http_cli_help", ROOT / "infra/deploy_infra.py",

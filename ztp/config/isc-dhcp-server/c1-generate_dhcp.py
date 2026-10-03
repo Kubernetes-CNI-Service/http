@@ -129,7 +129,7 @@ def _validate_ztp_url_prefix(value):
     return validate_ztp_url_prefix(value)
 
 
-def load_project_global(path):
+def load_project_global(path, *, include_ztp_status=False):
     """Read the URL prefix and authoritative input schema from global YAML."""
     if yaml is None:
         raise ValueError("缺少 PyYAML，无法读取 01-global.yaml")
@@ -143,9 +143,17 @@ def load_project_global(path):
         if not isinstance(http_policy, dict):
             raise ValueError("common.mgmt.http 必须是 mapping")
         http_enabled = str(http_policy.get("status") or "").strip().casefold() == "enabled"
-        ztp_enabled = str(
-            data["common"]["mgmt"]["ztp"].get("status") or ""
-        ).strip().casefold() == "enabled"
+        raw_ztp_status = data["common"]["mgmt"]["ztp"].get("status")
+        if raw_ztp_status is None:
+            # Legacy standalone generator inputs may omit this field.  The
+            # parent load validates its own complete global contract; absence
+            # is not an explicit disabled/enabled policy for row comparison.
+            ztp_enabled = None
+        elif (not isinstance(raw_ztp_status, str)
+              or raw_ztp_status.strip().casefold() not in {"enabled", "disabled"}):
+            raise ValueError("common.mgmt.ztp.status 必须显式为 enabled/disabled")
+        else:
+            ztp_enabled = raw_ztp_status.strip().casefold() == "enabled"
         if (http_enabled or ztp_enabled) and "address" not in http_policy:
             raise ValueError(
                 "common.mgmt.http.address 必须显式指定独立的 HTTP 服务 IPv4"
@@ -166,7 +174,8 @@ def load_project_global(path):
     port = validate_service_endpoint(
         "192.0.2.1", port_value, field="common.mgmt.http.port"
     ).port
-    return _validate_ztp_url_prefix(value), schema_version, port, http_address
+    result = (_validate_ztp_url_prefix(value), schema_version, port, http_address)
+    return (*result, ztp_enabled) if include_ztp_status else result
 
 
 def load_ztp_url_prefix(path):
@@ -1251,8 +1260,11 @@ def _prepare_dhcp_output_transaction(*, family_records, switch_scope):
 
 # ── Subnet 配置 ───────────────────────────────────────────────────────────────
 
-def load_subnet_csv(path, ztp_prefix, port=80, *, http_address=None):
+def load_subnet_csv(path, ztp_prefix, port=80, *, http_address=None,
+                    ztp_enabled=None):
     """Read declarative subnet rows and derive the two platform ZTP URLs."""
+    if ztp_enabled is not None and type(ztp_enabled) is not bool:
+        raise ValueError("global ZTP status must be an explicit boolean")
     ztp_prefix = _validate_ztp_url_prefix(ztp_prefix)
     http_endpoint = (
         validate_service_endpoint(
@@ -1306,6 +1318,11 @@ def load_subnet_csv(path, ztp_prefix, port=80, *, http_address=None):
             if nvos_ztp not in {"yes", "no"}:
                 errors.append(
                     f"  第 {lineno} 行 nvos_ztp={nvos_ztp!r} 无效；只允许 yes/no"
+                )
+            if ztp_enabled is False and (profile != "none" or nvos_ztp == "yes"):
+                errors.append(
+                    f"  第 {lineno} 行 cumulus_profile={profile}, "
+                    f"nvos_ztp={nvos_ztp} 与 global ZTP disabled 冲突"
                 )
             service_address = None
             if service_ip:
@@ -1425,6 +1442,12 @@ def load_subnet_csv(path, ztp_prefix, port=80, *, http_address=None):
                 errors.append(f"  第 {lineno} 行 subnet/netmask 或地址无效：{exc}")
             subnets.append(row)
     parsed = [(index + 2, item.get("_network")) for index, item in enumerate(subnets)]
+    if ztp_enabled is True and not any(
+        item.get("cumulus_profile") in _CUMULUS_BOOTSTRAP_BY_PROFILE
+        or item.get("nvos_ztp") == "yes"
+        for item in subnets
+    ):
+        errors.append("  global ZTP enabled 但 all rows none/no，未启用任何平台 ZTP")
     for position, (line_a, network_a) in enumerate(parsed):
         if network_a is None:
             continue
@@ -1692,7 +1715,9 @@ def main():
         print(f"[ERROR] 找不到 {os.path.basename(SUBNET_CSV)}")
         sys.exit(1)
     try:
-        ztp_prefix, schema_version, http_port, http_address = load_project_global(GLOBAL_YAML)
+        ztp_prefix, schema_version, http_port, http_address, ztp_enabled = (
+            load_project_global(GLOBAL_YAML, include_ztp_status=True)
+        )
     except ValueError as exc:
         print(f"[ERROR] {exc}")
         sys.exit(1)
@@ -1700,6 +1725,7 @@ def main():
     print(f"读取：{os.path.basename(SUBNET_CSV)}")
     subnets = load_subnet_csv(
         SUBNET_CSV, ztp_prefix, port=http_port, http_address=http_address,
+        ztp_enabled=ztp_enabled,
     )
     print(f"  已加载 {len(subnets)} 条 subnet 配置\n")
 
