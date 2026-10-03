@@ -414,6 +414,43 @@ class Req22RuntimeInputTests(unittest.TestCase):
             self.assertEqual(b"accepted DHCP output\n", public.read_bytes())
             self.assertEqual([], list(candidate.iterdir()))
 
+    def test_deferred_dhcp_set_rolls_back_original_file_identities(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            private = root / "DAY0-Prepare/fixture/99-output-dhcp"
+            private.mkdir(parents=True)
+            public = root / "ztp/config/isc-dhcp-server"
+            public.mkdir(parents=True)
+            names = (
+                "dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts",
+                "dhcpd_nvl.hosts", "dhcp-release-manifest.json",
+            )
+            before = {}
+            for name in names:
+                target = private / name
+                target.write_bytes(b"old:" + name.encode("ascii"))
+                (public / name).symlink_to(target)
+                before[name] = (target.stat().st_ino, target.read_bytes())
+            candidate = LOAD.DeferredDHCPOutput.create(root / "ztp", "all")
+            try:
+                for name in names:
+                    (candidate.stage / name).write_bytes(
+                        b"new:" + name.encode("ascii"),
+                    )
+                candidate.publish()
+                self.assertEqual(
+                    b"new:dhcpd.conf", (private / "dhcpd.conf").read_bytes(),
+                )
+                candidate.rollback()
+                self.assertEqual(
+                    before,
+                    {name: ((private / name).stat().st_ino,
+                            (private / name).read_bytes()) for name in names},
+                )
+            finally:
+                candidate.discard()
+            self.assertFalse(candidate.stage.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -5479,6 +5479,248 @@ def restore_release_links(snapshot: dict[Path, Optional[str]]) -> None:
         warn("统一 release 未提交；已恢复本次 load 前的 YAML latest 链接")
 
 
+_DHCP_OUTPUT_NAMES = (
+    "dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts",
+    "dhcpd_nvl.hosts", "dhcp-release-manifest.json",
+)
+
+
+class DeferredDHCPOutput:
+    """Keep five C1 outputs private until the parent release can be checked."""
+
+    def __init__(self, public_parent: Path, selected_switch: str):
+        self.public_parent = public_parent
+        self.selected_switch = selected_switch
+        self.stage = Path(tempfile.mkdtemp(prefix=".load-dhcp-", dir=public_parent))
+        self.stage_identity = self.stage.lstat()
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        self._parent_fd = self._stage_fd = None
+        self._parent_fd = os.open(public_parent, flags)
+        try:
+            self._stage_fd = os.open(
+                self.stage.name, flags, dir_fd=self._parent_fd,
+            )
+        except BaseException:
+            os.close(self._parent_fd)
+            self._parent_fd = None
+            raise
+        self.parent_identity = os.fstat(self._parent_fd)
+        self.published: list[tuple[str, bool]] = []
+        try:
+            self._verify_visible(self._parent_fd, self._stage_fd)
+            for name in _DHCP_OUTPUT_NAMES:
+                source = public_parent / name
+                try:
+                    info = source.lstat()
+                except FileNotFoundError:
+                    continue
+                self._copy_prior_output(
+                    source, self.stage / name, info,
+                    source_dir_fd=self._parent_fd,
+                    destination_dir_fd=self._stage_fd,
+                )
+            self._verify_visible(self._parent_fd, self._stage_fd)
+        except BaseException:
+            self.discard()
+            raise
+
+    @staticmethod
+    def _copy_prior_output(
+        source: Path, destination: Path, info, *,
+        source_dir_fd=None, destination_dir_fd=None,
+    ):
+        """Copy one prior output from a held regular inode, detecting A/B/A."""
+        def identity(item):
+            return (item.st_dev, item.st_ino, item.st_mode, item.st_nlink,
+                    item.st_size, item.st_mtime_ns, item.st_ctime_ns)
+
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or info.st_size > 128 * 1024 * 1024):
+            raise LoadError(f"unsafe prior DHCP output: {source}")
+        source_fd = os.open(
+            source.name if source_dir_fd is not None else source,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=source_dir_fd,
+        )
+        try:
+            if identity(os.fstat(source_fd)) != identity(info):
+                raise LoadError(f"prior DHCP output changed before copy: {source}")
+            destination_fd = os.open(
+                destination.name if destination_dir_fd is not None else destination,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600,
+                dir_fd=destination_dir_fd,
+            )
+            try:
+                copied = 0
+                while True:
+                    chunk = os.read(source_fd, 65536)
+                    if not chunk:
+                        break
+                    copied += len(chunk)
+                    if copied > info.st_size:
+                        raise LoadError(f"prior DHCP output grew during copy: {source}")
+                    view = memoryview(chunk)
+                    while view:
+                        view = view[os.write(destination_fd, view):]
+                if (copied != info.st_size
+                        or identity(os.fstat(source_fd)) != identity(info)
+                        or identity(source.lstat()) != identity(info)):
+                    raise LoadError(f"prior DHCP output changed during copy: {source}")
+                os.fchmod(destination_fd, stat.S_IMODE(info.st_mode))
+                os.fsync(destination_fd)
+            finally:
+                os.close(destination_fd)
+        finally:
+            os.close(source_fd)
+
+    @classmethod
+    def create(cls, ztp_dir: Path, selected_switch: str):
+        links = ztp_dir / "config/isc-dhcp-server"
+        targets = [(links / name).resolve(strict=False) for name in _DHCP_OUTPUT_NAMES]
+        parents = {target.parent for target in targets}
+        if len(parents) != 1:
+            raise LoadError("DHCP output links do not share one project directory")
+        parent = parents.pop()
+        if not parent.is_dir() or parent.is_symlink():
+            raise LoadError("DHCP output parent is not a regular directory")
+        return cls(parent, selected_switch)
+
+    def _verify_visible(self, parent_fd, stage_fd):
+        try:
+            named_parent = self.public_parent.lstat()
+            named_stage = self.stage.lstat()
+        except OSError as exc:
+            raise LoadError(f"DHCP candidate directory changed: {exc}") from exc
+        held_parent = os.fstat(parent_fd)
+        held_stage = os.fstat(stage_fd)
+        if ((named_parent.st_dev, named_parent.st_ino)
+                != (held_parent.st_dev, held_parent.st_ino)
+                or (held_parent.st_dev, held_parent.st_ino)
+                != (self.parent_identity.st_dev, self.parent_identity.st_ino)
+                or (named_stage.st_dev, named_stage.st_ino)
+                != (held_stage.st_dev, held_stage.st_ino)
+                or (held_stage.st_dev, held_stage.st_ino)
+                != (self.stage_identity.st_dev, self.stage_identity.st_ino)):
+            raise LoadError("DHCP candidate directory changed")
+
+    def _open_directories(self, *, require_visible=True):
+        if self._parent_fd is None or self._stage_fd is None:
+            raise LoadError("DHCP candidate descriptors already closed")
+        parent_fd = os.dup(self._parent_fd)
+        try:
+            stage_fd = os.dup(self._stage_fd)
+            if require_visible:
+                self._verify_visible(parent_fd, stage_fd)
+            return parent_fd, stage_fd
+        except BaseException:
+            if 'stage_fd' in locals():
+                os.close(stage_fd)
+            os.close(parent_fd)
+            raise
+
+    def _publish_names(self):
+        if self.selected_switch == "all":
+            return _DHCP_OUTPUT_NAMES
+        return (
+            "dhcpd.conf", f"dhcpd_{self.selected_switch}.hosts",
+            "dhcp-release-manifest.json",
+        )
+
+    def publish(self):
+        if self.published:
+            raise LoadError("DHCP candidate already published")
+        parent_fd, stage_fd = self._open_directories()
+        try:
+            for name in self._publish_names():
+                try:
+                    os.stat(f"backup-{name}", dir_fd=stage_fd,
+                            follow_symlinks=False)
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise LoadError(f"DHCP backup name collision: {name}")
+            for name in self._publish_names():
+                self._verify_visible(parent_fd, stage_fd)
+                candidate = os.stat(name, dir_fd=stage_fd, follow_symlinks=False)
+                if not stat.S_ISREG(candidate.st_mode) or candidate.st_nlink != 1:
+                    raise LoadError(f"unsafe DHCP candidate: {name}")
+                try:
+                    previous = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    existed = False
+                else:
+                    if not stat.S_ISREG(previous.st_mode) or previous.st_nlink != 1:
+                        raise LoadError(f"unsafe prior DHCP output: {name}")
+                    existed = True
+                    os.replace(name, f"backup-{name}",
+                               src_dir_fd=parent_fd, dst_dir_fd=stage_fd)
+                try:
+                    os.replace(name, name, src_dir_fd=stage_fd, dst_dir_fd=parent_fd)
+                except BaseException:
+                    if existed:
+                        os.replace(f"backup-{name}", name,
+                                   src_dir_fd=stage_fd, dst_dir_fd=parent_fd)
+                    raise
+                self.published.append((name, existed))
+                self._verify_visible(parent_fd, stage_fd)
+            os.fsync(parent_fd)
+        except BaseException:
+            self.rollback()
+            raise
+        finally:
+            os.close(stage_fd)
+            os.close(parent_fd)
+
+    def rollback(self):
+        if not self.published:
+            return
+        parent_fd, stage_fd = self._open_directories(require_visible=False)
+        try:
+            for name, existed in reversed(self.published):
+                os.unlink(name, dir_fd=parent_fd)
+                if existed:
+                    os.replace(f"backup-{name}", name,
+                               src_dir_fd=stage_fd, dst_dir_fd=parent_fd)
+            os.fsync(parent_fd)
+            self.published.clear()
+        finally:
+            os.close(stage_fd)
+            os.close(parent_fd)
+
+    def discard(self):
+        if self.published:
+            raise LoadError("cannot discard a published DHCP candidate")
+        if self._stage_fd is None:
+            return
+        parent_fd, stage_fd = self._open_directories(require_visible=False)
+        try:
+            named = os.stat(self.stage.name, dir_fd=parent_fd,
+                            follow_symlinks=False)
+            if (named.st_dev, named.st_ino) != (
+                self.stage_identity.st_dev, self.stage_identity.st_ino,
+            ):
+                raise LoadError("DHCP candidate stage changed before cleanup")
+            for name in os.listdir(stage_fd):
+                info = os.stat(name, dir_fd=stage_fd, follow_symlinks=False)
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                    raise LoadError(f"unexpected DHCP stage entry: {name}")
+                os.unlink(name, dir_fd=stage_fd)
+            os.rmdir(self.stage.name, dir_fd=parent_fd)
+        finally:
+            os.close(stage_fd)
+            os.close(parent_fd)
+        os.close(self._stage_fd)
+        os.close(self._parent_fd)
+        self._stage_fd = self._parent_fd = None
+
+    def accept_committed(self):
+        """Forget rollback authority only after the parent commit is durable."""
+        if not self.published:
+            raise LoadError("DHCP candidate was not published before parent commit")
+        self.published.clear()
+        self.discard()
+
+
 def generate_configs(
     device_types: frozenset[str], *, install_dhcp: bool, dry_run: bool = False,
     dhcp_enabled: bool = True,
