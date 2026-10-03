@@ -851,13 +851,23 @@ def build_runtime_plan(settings: Settings, runner=subprocess.run):
     return selected, links, addresses, runtime
 
 
-def sha256_path(path: Path) -> str:
+def sha256_path(path: Path, *, allow_empty: bool = False,
+                expected_host_count: Optional[int] = None) -> str:
     try:
         payload = path.read_bytes()
     except OSError as exc:
         raise ActivationError(f"cannot read activation input {path}: {exc}") from exc
-    if not payload:
+    if not payload and not allow_empty:
         raise ActivationError(f"activation input is empty: {path}")
+    if expected_host_count is not None:
+        declarations = re.findall(
+            rb"(?m)^\s*host\s+[A-Za-z0-9][A-Za-z0-9._-]*\s*\{\s*$",
+            payload,
+        )
+        if len(declarations) != expected_host_count:
+            raise ActivationError(
+                f"activation host count differs from DHCP receipt: {path}"
+            )
     return hashlib.sha256(payload).hexdigest()
 
 

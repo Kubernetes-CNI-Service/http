@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import inspect
 from pathlib import Path
 import tempfile
@@ -163,6 +164,28 @@ class Req22RuntimeInputTests(unittest.TestCase):
                     ACTIVATE.observe_runtime(settings)
             write.assert_not_called()
             self.assertFalse(settings.state_root.exists())
+
+    def test_parent_hash_accepts_only_receipt_proven_empty_host_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "dhcpd_ib.hosts"
+            output.write_bytes(b"")
+            with self.assertRaises(ACTIVATE.ActivationError):
+                ACTIVATE.sha256_path(output)
+            self.assertEqual(
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                ACTIVATE.sha256_path(
+                    output, allow_empty=True, expected_host_count=0,
+                ),
+            )
+            output.write_text("host sw1 {\n}\n", encoding="utf-8")
+            with self.assertRaises(ACTIVATE.ActivationError):
+                ACTIVATE.sha256_path(
+                    output, allow_empty=True, expected_host_count=0,
+                )
+            self.assertEqual(
+                hashlib.sha256(b"host sw1 {\n}\n").hexdigest(),
+                ACTIVATE.sha256_path(output, expected_host_count=1),
+            )
 
 
 if __name__ == "__main__":
