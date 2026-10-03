@@ -1014,11 +1014,41 @@ def inspect_http_listener_owners(
 def _read_dhcp_networks(subnet_csv: Path) -> Tuple[DhcpNetwork, ...]:
     path = Path(subnet_csv)
     try:
-        stream = path.open(newline="", encoding="utf-8-sig")
+        metadata = path.lstat()
     except OSError as exc:
         raise RuntimeContractError(f"cannot read DHCP subnet CSV {path}: {exc}") from exc
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise RuntimeContractError(
+            "DHCP subnet CSV must be a non-symlink single-link regular file"
+        )
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise RuntimeContractError("platform cannot safely reject DHCP subnet CSV symlinks")
+    try:
+        descriptor = os.open(path, os.O_RDONLY | nofollow | os.O_CLOEXEC)
+    except OSError as exc:
+        raise RuntimeContractError(f"cannot safely open DHCP subnet CSV {path}: {exc}") from exc
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino)
+        ):
+            raise RuntimeContractError("DHCP subnet CSV source identity changed")
+        stream = os.fdopen(descriptor, "r", newline="", encoding="utf-8-sig")
+    except BaseException:
+        os.close(descriptor)
+        raise
     with stream:
-        reader = csv.DictReader(stream)
+        physical_lines: list[str] = []
+
+        def captured_lines():
+            for line in stream:
+                physical_lines.append(line)
+                yield line
+
+        reader = csv.DictReader(captured_lines())
         if reader.fieldnames is None:
             raise RuntimeContractError("DHCP subnet CSV has no header")
         missing = sorted(REQUIRED_SUBNET_COLUMNS - set(reader.fieldnames))
@@ -1028,9 +1058,17 @@ def _read_dhcp_networks(subnet_csv: Path) -> Tuple[DhcpNetwork, ...]:
             )
         result = []
         shared_lines = {}
+        physical_lines.clear()
         for lineno, row in enumerate(reader, 2):
+            source_record = "".join(physical_lines)
+            physical_lines.clear()
             if not any(str(value or "").strip() for value in row.values()):
-                continue
+                if not source_record.strip():
+                    continue
+                raise RuntimeContractError(
+                    f"DHCP subnet CSV line {reader.line_num} is an empty "
+                    "delimiter/quote record, not a blank physical line"
+                )
             profile = str(row.get("cumulus_profile") or "").strip().casefold()
             nvos_ztp = str(row.get("nvos_ztp") or "").strip().casefold()
             if profile not in {"oob", "oobofoob", "none"}:
@@ -1218,6 +1256,8 @@ def plan_dhcp_runtime(
     address_snapshot: Any,
     allowlist: Iterable[str] = (),
     relay_ingress: Iterable[str] = (),
+    dhcp_enabled: Optional[bool] = None,
+    ztp_enabled: Optional[bool] = None,
 ) -> DhcpRuntimePlan:
     """Return the exact ordered Linux interfaces allowed to run dhcpd.
 
@@ -1225,7 +1265,26 @@ def plan_dhcp_runtime(
     inside that row's subnet.  Off-link rows do not add one interface per pool;
     a relay-only deployment instead requires explicitly scoped ingress names.
     """
+    if (dhcp_enabled is None) != (ztp_enabled is None):
+        raise RuntimeContractError("DHCP/ZTP mode must be supplied together")
+    mode_bound = dhcp_enabled is not None
+    if mode_bound and (type(dhcp_enabled) is not bool or type(ztp_enabled) is not bool):
+        raise RuntimeContractError("DHCP/ZTP mode must be exact booleans")
+    if mode_bound and not dhcp_enabled and ztp_enabled:
+        raise RuntimeContractError("DHCP disabled + ZTP enabled is invalid")
     networks = _read_dhcp_networks(Path(subnet_csv))
+    if mode_bound:
+        if not networks and (dhcp_enabled or ztp_enabled):
+            raise RuntimeContractError("DHCP enabled CSV requires a subnet row")
+        endpoint_rows = tuple(item for item in networks if item.endpoint_enabled)
+        if not ztp_enabled and endpoint_rows:
+            raise RuntimeContractError(
+                "global ZTP disabled conflicts with a platform ZTP row"
+            )
+        if ztp_enabled and not endpoint_rows:
+            raise RuntimeContractError("global ZTP enabled requires a platform ZTP row")
+        if not dhcp_enabled:
+            return DhcpRuntimePlan((), (), (), (), (), ())
     interfaces = _logical_interfaces(link_snapshot, address_snapshot)
     by_name = {interface.ifname: interface for interface in interfaces}
     by_index = {interface.ifindex: interface for interface in interfaces}
@@ -1389,6 +1448,8 @@ def revalidate_dhcp_runtime_plan(
     address_snapshot: Any,
     allowlist: Iterable[str] = (),
     relay_ingress: Iterable[str] = (),
+    dhcp_enabled: Optional[bool] = None,
+    ztp_enabled: Optional[bool] = None,
 ) -> DhcpRuntimePlan:
     """Re-plan immediately before exec and reject interface identity changes.
 
@@ -1403,6 +1464,8 @@ def revalidate_dhcp_runtime_plan(
         address_snapshot=address_snapshot,
         allowlist=allowlist,
         relay_ingress=relay_ingress,
+        dhcp_enabled=dhcp_enabled,
+        ztp_enabled=ztp_enabled,
     )
     fields = (
         "listener_names", "listener_ifindexes", "direct_shared_networks",
