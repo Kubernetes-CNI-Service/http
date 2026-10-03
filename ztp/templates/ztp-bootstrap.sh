@@ -829,10 +829,76 @@ actual_sha256=$(sha256sum "${YAML_PATH}" 2>/dev/null) || fail "cannot hash appli
 actual_sha256=${actual_sha256%% *}
 [ "${actual_sha256}" = "${raw_sha256}" ] || fail "applied YAML hash mismatch"
 
-printf '%s\n' 'ZTP_APPLIED_CONFIG_V1'
-printf '%s\n' "${receipt_payload}"
-printf '%s\n' '---'
-cat "${YAML_PATH}"
+receipt_digest=$(printf '%s\n' "${receipt_payload}" | sha256sum) || fail "cannot hash receipt snapshot"
+receipt_digest=${receipt_digest%% *}
+valid_hash "${receipt_digest}" || fail "invalid receipt snapshot hash"
+# The earlier path hash is only a preflight.  Reopen both files without following
+# links, validate the exact receipt and YAML bytes held on those descriptors,
+# then emit the complete protocol once; never cat a pathname after hashing it.
+python3 - "${STATE_DIR}" "${MAX_YAML_BYTES}" "${MAX_RECEIPT_BYTES}" \
+    "${raw_sha256}" "${receipt_digest}" <<'PY_BOUND_OUTPUT' || fail "applied evidence changed before output"
+import hashlib
+import os
+import stat
+import sys
+
+state_dir, yaml_limit_text, receipt_limit_text, yaml_digest, receipt_digest = sys.argv[1:]
+yaml_limit = int(yaml_limit_text)
+receipt_limit = int(receipt_limit_text)
+directory_fd = os.open(state_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+try:
+    directory = os.fstat(directory_fd)
+    if (not stat.S_ISDIR(directory.st_mode)
+            or directory.st_uid != os.geteuid()
+            or stat.S_IMODE(directory.st_mode) != 0o711):
+        raise SystemExit("unsafe applied evidence directory")
+
+    def read_bound(name, maximum):
+        descriptor = os.open(
+            name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
+            dir_fd=directory_fd,
+        )
+        try:
+            before = os.fstat(descriptor)
+            if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                    or before.st_uid != os.geteuid()
+                    or stat.S_IMODE(before.st_mode) != 0o600
+                    or before.st_size < 1 or before.st_size > maximum):
+                raise SystemExit("unsafe applied evidence file")
+            data = bytearray()
+            while len(data) <= maximum:
+                chunk = os.read(descriptor, maximum + 1 - len(data))
+                if not chunk:
+                    break
+                data.extend(chunk)
+            after = os.fstat(descriptor)
+            path_now = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            identity = lambda info: (
+                info.st_dev, info.st_ino, info.st_mode, info.st_uid,
+                info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+            )
+            if (len(data) != before.st_size or len(data) > maximum
+                    or identity(before) != identity(after)
+                    or identity(before) != identity(path_now)):
+                raise SystemExit("applied evidence changed during read")
+            return bytes(data)
+        finally:
+            os.close(descriptor)
+
+    receipt = read_bound("receipt.env", receipt_limit)
+    yaml_bytes = read_bound("last-success.yaml", yaml_limit)
+    if (hashlib.sha256(receipt).hexdigest() != receipt_digest
+            or hashlib.sha256(yaml_bytes).hexdigest() != yaml_digest):
+        raise SystemExit("applied evidence hash mismatch")
+    current_dir = os.stat(state_dir, follow_symlinks=False)
+    if (directory.st_dev, directory.st_ino, directory.st_mode, directory.st_uid) != (
+            current_dir.st_dev, current_dir.st_ino,
+            current_dir.st_mode, current_dir.st_uid):
+        raise SystemExit("applied evidence directory changed")
+    sys.stdout.buffer.write(b"ZTP_APPLIED_CONFIG_V1\n" + receipt + b"---\n" + yaml_bytes)
+finally:
+    os.close(directory_fd)
+PY_BOUND_OUTPUT
 EOF
     then
         rm -f -- "${helper_tmp}" || true
