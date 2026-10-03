@@ -2702,6 +2702,7 @@ printf 'capture=%s rc=%s token=<%s>\\n' \
                 )
                 capture += test_timeout_shell()
                 harness = capture + f'''
+export HTTP_ZTP_TEST_TIMEOUT_READY_FILE={shlex.quote(os.fspath(holder_pid_file))}
 monitor_authority_result_directory() {{ printf '%s\\n' {shlex.quote(temporary)}; }}
 if capture_monitor_authority_decision \
     {shlex.quote(os.fspath(helper))} {shlex.quote(os.fspath(holder_pid_file))}; then

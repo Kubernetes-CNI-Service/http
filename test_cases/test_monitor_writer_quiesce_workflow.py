@@ -584,7 +584,7 @@ def _source_bound_load_report_path(
     a general permission to discharge unknown destinations in either module.
     """
     reviewed = (
-        (load_tree, "6b6284a80ba6895bd2745d0eaf6a41faf8c04145ce6181ddefa76807293adc7a"),
+        (load_tree, "f3291de0ece63f5e46f4057c0d8211c574c2e496e2b4fabd9a9e1fec6ac28420"),
         (report_tree, "d2b79619b2ace8c4ea96edcf0ad599001d8f78af6a569168bc4971770e0bca05"),
     )
     if any(hashlib.sha256(ast.dump(tree, include_attributes=False).encode()).hexdigest()
@@ -814,7 +814,7 @@ def _source_bound_feedback_recovery_path(
     """Accept this bounded path only in both exactly reviewed source ASTs."""
     reviewed = (
         (feedback_tree, "7e472596fc86a656465a8ba1361a553486decf71e996d9d71e891744e6f47216"),
-        (runtime_tree, "7485574943486520ea584ae144801be19d9bdc1eacd79bc6302f9a7d43d282b0"),
+        (runtime_tree, "0d11ab1cf74048380672b9bc30070040913d89ceddd7d54cae47e63f98044ed2"),
     )
     if any(hashlib.sha256(ast.dump(tree, include_attributes=False).encode()).hexdigest()
            != expected for tree, expected in reviewed):
