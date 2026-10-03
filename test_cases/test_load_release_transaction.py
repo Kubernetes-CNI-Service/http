@@ -865,7 +865,7 @@ class ReleaseTransactionTests(unittest.TestCase):
             global_file.write_bytes(
                 (ROOT / "DAY0-Prepare/template/01-global.yaml").read_bytes()
             )
-            args = SimpleNamespace()
+            args = SimpleNamespace(host_role="workstation")
             downstream = (
                 "apply_subnet_service_ips", "load_device_types", "select_p2p",
                 "validate_subnet_file", "project_air_topology_policy",
@@ -3087,7 +3087,9 @@ os.kill(os.getpid(), signal.SIGKILL)
                 mock.patch.object(LOAD, "quiesce_services") as quiesce, \
                 mock.patch.object(LOAD, "activate_project") as activate, \
                 mock.patch("builtins.print", output):
-            result = LOAD.main([str(self.project), "--skip-generate"])
+            result = LOAD.main([
+                str(self.project), "--host-role=workstation", "--skip-generate",
+            ])
         self.assertEqual(1, result)
         lock.assert_not_called()
         quiesce.assert_not_called()
@@ -3309,6 +3311,7 @@ os.kill(os.getpid(), signal.SIGKILL)
             mini=customer.name, no_upgrade=True, p2p_file=None,
             deployment_scope="all", switch_scope="all",
             ssh_dir=Path("/root/.ssh"), dry_run=True,
+            host_role="workstation",
         )
         with mock.patch.object(
             LOAD, "load_global", return_value=self.inputs.settings,
@@ -4951,7 +4954,7 @@ os.kill(os.getpid(), signal.SIGKILL)
         args = SimpleNamespace(
             deployment_scope="air", switch_scope="eth", mini=None,
             p2p_file=None, no_upgrade=False, ssh_dir=self.root / "ssh",
-            dry_run=False,
+            dry_run=False, host_role="workstation",
         )
         selected_image = self.root / "image/cumulus-linux-5.18.1-mlx-amd64.bin"
         write_valid_nvos_image(selected_image)

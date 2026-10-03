@@ -1414,8 +1414,9 @@ class TemplateContractTests(unittest.TestCase):
             source = project / "p2p" / workbook.name
             (project / "p2p.xlsx").symlink_to(f"p2p/{workbook.name}")
             with mock.patch.object(load, "active_project", side_effect=[None, project]):
-                load.activate_project(project, source)
+                load.activate_project(project, source, host_role="workstation")
             self.assertIn(f"--p2p-file=p2p/{workbook.name}", run.call_args.args[0])
+            self.assertIn("--host-role=workstation", run.call_args.args[0])
 
     def test_existing_project_template_dry_run_is_not_reported_as_creation(self):
         load = load_module("day0_load_template_dry_run_log", ROOT / "DAY0-Prepare/11-load.py")
@@ -1454,7 +1455,9 @@ class TemplateContractTests(unittest.TestCase):
                 load.HERE = root
                 load.TEMPLATE_DIR = template
                 with contextlib.redirect_stdout(output):
-                    result = load.main([str(project), "--dry-run"])
+                    result = load.main([
+                        str(project), "--host-role=workstation", "--dry-run",
+                    ])
             finally:
                 load.HERE = original_here
                 load.TEMPLATE_DIR = original_template
@@ -1508,10 +1511,11 @@ class TemplateContractTests(unittest.TestCase):
                 archive.writestr("xl/workbook.xml", "<workbook/>")
             (project / "p2p.xlsx").symlink_to(p2p.name)
             with mock.patch.object(load, "active_project", side_effect=[None, project]):
-                load.activate_project(project, p2p)
+                load.activate_project(project, p2p, host_role="workstation")
             command = run.call_args.args[0]
             self.assertIn("--p2p-file=Customer-P2P-v2.xlsx", command)
             self.assertIn("--confirm-project-switch", command)
+            self.assertIn("--host-role=workstation", command)
 
     def test_load_delegates_no_upgrade_image_policy_to_setup(self):
         load = load_module("day0_load_no_upgrade_setup", ROOT / "DAY0-Prepare/11-load.py")
@@ -1523,10 +1527,14 @@ class TemplateContractTests(unittest.TestCase):
                 archive.writestr("xl/workbook.xml", "<workbook/>")
             (project / "p2p.xlsx").symlink_to(workbook.name)
             with mock.patch.object(load, "active_project", side_effect=[None, project]):
-                load.activate_project(project, workbook, strict=False, no_upgrade=True)
+                load.activate_project(
+                    project, workbook, strict=False, no_upgrade=True,
+                    host_role="workstation",
+                )
             command = run.call_args.args[0]
             self.assertIn("--no-upgrade", command)
             self.assertNotIn("--strict", command)
+            self.assertIn("--host-role=workstation", command)
 
     def test_setup_parser_separates_creation_and_automation_switch_ack(self):
         setup = load_module(

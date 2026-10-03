@@ -925,7 +925,8 @@ class PasswordUpdateGeneratorWorkflowTests(unittest.TestCase):
                 LOAD, "generate_configs",
             ) as generate:
                 status = LOAD.main([
-                    str(project), "--no-upgrade", "--update-passwords",
+                    str(project), "--host-role=workstation",
+                    "--no-upgrade", "--update-passwords",
                     "--air", "--mini", customer.name,
                 ])
 
