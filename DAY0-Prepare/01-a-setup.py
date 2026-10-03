@@ -3934,6 +3934,7 @@ def setup(proj_dir, *, server_delegated=False):
     """Run setup as one link transaction; any failure restores prior state."""
     global _LINK_TRANSACTION, _INFRA_LOG_MIGRATION
     require_project_eligible(Path(proj_dir))
+    _require_r22_subnet_input(proj_dir)
     if _INFRA_LOG_MIGRATION is not None:
         raise ValueError("前次日志迁移仍在当前进程中待结清")
     lock = nullcontext() if _DRY_RUN else infra_log_root_lock(HTTP_BASE)
@@ -4501,6 +4502,7 @@ def _main_locked(args):
     # monitor or entering setup's link transaction. Recheck in setup() for
     # callers that bypass this CLI entry point.
     require_project_eligible(Path(proj_dir))
+    _require_r22_subnet_input(proj_dir)
     if not _DRY_RUN and args.host_role == "management-server":
         stop_native_ztp_monitors(HTTP_BASE)
     if getattr(args, "_server_delegated", False):

@@ -94,10 +94,24 @@ class TemplateContractTests(unittest.TestCase):
             day0.mkdir()
             project = day0 / "restored"
             project.mkdir()
-            for input_name in (
-                "01-global.yaml", "02-devices_config.csv", "02-dhcp-subnet_config.csv",
-            ):
-                (project / input_name).write_bytes(b"fixture input\n")
+            (project / "01-global.yaml").write_text(
+                "project: restored\n"
+                "common:\n"
+                "  mgmt:\n"
+                "    dhcp-server:\n"
+                "      status: disabled\n"
+                "    ztp:\n"
+                "      status: disabled\n",
+                encoding="utf-8",
+            )
+            (project / "02-devices_config.csv").write_text(
+                "hostname,type,mac\n", encoding="utf-8",
+            )
+            (project / "02-dhcp-subnet_config.csv").write_text(
+                "shared_network,subnet,netmask,range_start,range_end,routers,"
+                "ztp_service_ip,cumulus_profile,nvos_ztp\n",
+                encoding="utf-8",
+            )
             receipt_path = project / ".finished-source.json"
             marker_path = project / ".finished-commit.json"
             receipt = {
