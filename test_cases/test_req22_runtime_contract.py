@@ -47,6 +47,69 @@ class Req22RuntimeInputTests(unittest.TestCase):
         )
         return project
 
+    def test_load_rejects_subnet_replacement_before_receipt_admission(self):
+        for phase in ("after_validation", "during_source_hash"):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as directory:
+                project = Path(directory)
+                subnet = project / "02-dhcp-subnet_config.csv"
+                subnet.write_text(HEADER, encoding="utf-8")
+                replacement = project / "replacement.csv"
+                replacement.write_text(
+                    HEADER if phase == "during_source_hash"
+                    else HEADER.replace("shared_network", "shared_networb"),
+                    encoding="utf-8",
+                )
+                self.assertEqual(subnet.stat().st_size, replacement.stat().st_size)
+                (project / "01-global.yaml").write_text("common: {}\n", encoding="utf-8")
+                (project / "02-devices_config.csv").write_text("hostname,type\n", encoding="utf-8")
+                p2p = project / "p2p.xlsx"
+                p2p.write_bytes(b"read-only fixture\n")
+                args = SimpleNamespace(
+                    p2p_file=None, deployment_scope="all", switch_scope="all",
+                    no_upgrade=True, mini=None, ssh_dir=None,
+                )
+                real_sha = LOAD._sha256_path
+                swapped = False
+
+                def swap():
+                    nonlocal swapped
+                    subnet.rename(project / "old.csv")
+                    replacement.rename(subnet)
+                    swapped = True
+
+                def validate_then_swap(_path, _settings):
+                    if phase == "after_validation":
+                        swap()
+
+                def hash_then_swap(path):
+                    if phase == "during_source_hash" and Path(path) == subnet and not swapped:
+                        swap()
+                    return real_sha(path)
+
+                with mock.patch.object(LOAD, "_load_global_document", return_value={}), \
+                        mock.patch.object(
+                            LOAD, "load_global", return_value=SimpleNamespace(schema_version="test"),
+                        ), \
+                        mock.patch.object(LOAD, "find_placeholder_password_sections", return_value=()), \
+                        mock.patch.object(LOAD, "apply_subnet_service_ips", side_effect=lambda s, _: s), \
+                        mock.patch.object(LOAD, "load_device_types", return_value=frozenset()), \
+                        mock.patch.object(LOAD, "select_p2p", return_value=p2p), \
+                        mock.patch.object(LOAD, "project_air_topology_policy", return_value=None), \
+                        mock.patch.object(LOAD, "project_mini_air_devices", return_value=(None, None)), \
+                        mock.patch.object(LOAD, "validate_subnet_file", side_effect=validate_then_swap), \
+                        mock.patch.object(LOAD, "_sha256_path", side_effect=hash_then_swap), \
+                        mock.patch.object(
+                            LOAD, "validate_shared_artifact_receipts",
+                            side_effect=AssertionError("receipt admission reached"),
+                        ) as receipts:
+                    with self.assertRaisesRegex(LOAD.LoadError, "subnet source changed"):
+                        LOAD.validate_inputs(
+                            project, args, allow_management_key_generation=False,
+                            host_role="workstation",
+                        )
+                self.assertTrue(swapped)
+                receipts.assert_not_called()
+
     def test_disabled_header_only_csv_produces_no_local_listeners(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "02-dhcp-subnet_config.csv"

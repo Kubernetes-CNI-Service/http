@@ -7785,7 +7785,11 @@ def validate_inputs(
     except LoadError as exc:
         validation_errors.append(str(exc))
     try:
+        subnet_source_before = _subnet_source_token(subnet_file)
         validate_subnet_file(subnet_file, settings)
+        subnet_source_after = _subnet_source_token(subnet_file)
+        if subnet_source_after != subnet_source_before:
+            raise LoadError("DHCP subnet source changed after validation")
     except LoadError as exc:
         validation_errors.append(str(exc))
     try:
@@ -7864,6 +7868,11 @@ def validate_inputs(
             ),
         }.items()
     }
+    if (
+        source_identities["subnet"] != subnet_source_after[-1]
+        or _subnet_source_token(subnet_file) != subnet_source_after
+    ):
+        raise LoadError("DHCP subnet source changed before release prewrite admission")
     provisional_inputs = replace(
         provisional_inputs, source_identities=source_identities,
     )
