@@ -2852,7 +2852,10 @@ def validate_parent_release(settings: Settings, release_manifest: Path) -> dict:
             counts = dhcp_manifest.get("counts")
             family_counts = (counts.get("host_declarations_by_family")
                              if isinstance(counts, dict) else None)
-            legacy_nonempty = counts is None
+            legacy_nonempty = counts is None or (
+                isinstance(counts, dict)
+                and "host_declarations_by_family" not in counts
+            )
             if not legacy_nonempty and (
                 not isinstance(family_counts, dict)
                 or set(family_counts) != {"eth", "ib", "nvl"}

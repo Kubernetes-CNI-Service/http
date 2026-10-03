@@ -299,6 +299,21 @@ class Req22RuntimeInputTests(unittest.TestCase):
                 ):
                     ACTIVATE.validate_parent_release(settings, parent_path)
 
+                for family in ("ib", "nvl"):
+                    name = f"dhcpd_{family}.hosts"
+                    body = f"host legacy-{family} {{\n}}\n".encode("ascii")
+                    (private / name).write_bytes(body)
+                    child["outputs"][name]["sha256"] = (
+                        hashlib.sha256(body).hexdigest()
+                    )
+                child["counts"] = {"legacy_total": 3}
+                child_path.write_text(json.dumps(child), encoding="utf-8")
+                parent["components"]["dhcp"]["manifest_sha256"] = (
+                    hashlib.sha256(child_path.read_bytes()).hexdigest()
+                )
+                write_parent()
+                ACTIVATE.validate_parent_release(settings, parent_path)
+
     def test_native_dhcp_dry_run_accepts_receipt_proven_empty_hosts(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)
