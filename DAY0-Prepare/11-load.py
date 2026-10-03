@@ -8190,6 +8190,7 @@ def main(argv: list[str] | None = None) -> int:
     release_committed = False
     deployment_lock_descriptor: int | None = None
     parent_candidate: PreparedParentRelease | None = None
+    deferred_dhcp_candidate: DeferredDHCPOutput | None = None
     report_candidate = None
     prefix_publication_snapshot: ZtpPrefixPublicationSnapshot | None = None
     dhcp_runtime_plan: DhcpRuntimePlan | None = None
@@ -8508,11 +8509,17 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 generation_options["mini_devices_file"] = mini_source
                 generation_options["source_identities"] = inputs.source_identities
-            generate_configs(
-                inputs.device_types,
-                deployment_lock_descriptor=deployment_lock_descriptor,
-                **generation_options,
+            defer_token = _LOAD_DEFER_DHCP.set(
+                inputs.settings.dhcp_enabled and not args.dry_run,
             )
+            try:
+                deferred_dhcp_candidate = generate_configs(
+                    inputs.device_types,
+                    deployment_lock_descriptor=deployment_lock_descriptor,
+                    **generation_options,
+                )
+            finally:
+                _LOAD_DEFER_DHCP.reset(defer_token)
             retire_unselected_release_links(
                 project, switch_scope, dry_run=args.dry_run,
             )
@@ -8524,6 +8531,8 @@ def main(argv: list[str] | None = None) -> int:
 
         failure_phase = "统一 release 一致性与 DHCP 事务安装"
         section("统一 release 一致性与 DHCP 事务安装")
+        if deferred_dhcp_candidate is not None:
+            deferred_dhcp_candidate.publish()
         parent_release = validate_and_publish_release(
             project, inputs, dry_run=args.dry_run, publish=False,
         )
@@ -8639,6 +8648,11 @@ def main(argv: list[str] | None = None) -> int:
         release_committed = release_committed or bool(
             parent_candidate is not None and parent_candidate.committed
         )
+        if deferred_dhcp_candidate is not None and not release_committed:
+            try:
+                deferred_dhcp_candidate.rollback()
+            except (LoadError, OSError) as rollback_exc:
+                cleanup_errors.append(f"DHCP 候选回滚失败：{rollback_exc}")
         if services_must_remain_stopped:
             try:
                 quiesce_services(
@@ -8700,6 +8714,14 @@ def main(argv: list[str] | None = None) -> int:
         raise
     finally:
         final_cleanup_errors: list[tuple[str, BaseException]] = []
+        if deferred_dhcp_candidate is not None:
+            try:
+                if release_committed:
+                    deferred_dhcp_candidate.accept_committed()
+                else:
+                    deferred_dhcp_candidate.discard()
+            except BaseException as cleanup_exc:
+                final_cleanup_errors.append(("DHCP 候选清理", cleanup_exc))
         try:
             generation_report.discard_prepared_generation_report(report_candidate)
         except BaseException as cleanup_exc:

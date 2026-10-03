@@ -505,6 +505,18 @@ class Req22RuntimeInputTests(unittest.TestCase):
             )
             self.assertEqual([], list(private.glob(".load-dhcp-*")))
 
+    def test_load_main_defers_dhcp_until_parent_transaction(self):
+        source = inspect.getsource(LOAD.main)
+        prepare = source.index("_LOAD_DEFER_DHCP.set(")
+        publish = source.index("deferred_dhcp_candidate.publish()")
+        validate = source.index("parent_release = validate_and_publish_release(")
+        rollback = source.index("deferred_dhcp_candidate.rollback()")
+        accept = source.index("deferred_dhcp_candidate.accept_committed()")
+        self.assertLess(prepare, publish)
+        self.assertLess(publish, validate)
+        self.assertLess(validate, rollback)
+        self.assertLess(rollback, accept)
+
 
 if __name__ == "__main__":
     unittest.main()
