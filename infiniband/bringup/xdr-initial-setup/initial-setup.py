@@ -332,6 +332,11 @@ def load_devices(path: Path) -> tuple[dict[str, Device], dict[str, Device]]:
             hostname = row_value(row, indexes, "hostname")
             dev_type = row_value(row, indexes, "type").casefold()
             config_method = row_value(row, indexes, "config_method").casefold()
+            if hostname and dev_type == "ib" and config_method not in {"", "initial-setup"}:
+                raise SetupError(
+                    f"{path}:{line_number}: {hostname} 声明 {config_method}，"
+                    "与当前 initial-setup 执行者不兼容"
+                )
             if hostname and dev_type == "nvl" and config_method == "initial-setup":
                 raise SetupError(
                     f"{path}:{line_number}: {hostname} 声明 initial-setup，"
