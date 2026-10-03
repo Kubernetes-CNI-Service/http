@@ -261,8 +261,8 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   超限和上界低于合法正例时拒绝且不截断；软／硬链接、属主／权限错误、旧收据重放、
   generation 回退或撤销后再出现旧成功均不得取得当前权威。
 - 证据与清理：保存脱敏命令/退出码、fsync/rename 顺序、故障注入点、文件身份与摘要、
-  helper 输出和恢复后前像；只恢复隔离设备快照。当前仅大小、fsync 和硬链接的本地
-  切片已验证，generation/veto、回放／回滚拒绝及本卡真机步骤均保持 OPEN。
+  helper 输出和恢复后前像；只恢复隔离设备快照。当前仅大小、fsync、硬链接和管理端
+  闭合 schema 的本地切片已验证；generation/veto、回放／回滚拒绝及本卡真机步骤均保持 OPEN。
 
 ## TC-REAL-MONITOR-INVENTORY-LINK-001 — Fresh load 重建采集清单入口
 
