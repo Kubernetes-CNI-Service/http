@@ -647,7 +647,9 @@ check_root_file() {
     [ ! -L "${check_path}" ] && [ -f "${check_path}" ] || fail "unsafe or missing ${check_path}"
     check_uid=$(stat -c '%u' "${check_path}" 2>/dev/null) || fail "cannot stat ${check_path}"
     check_mode=$(stat -c '%a' "${check_path}" 2>/dev/null) || fail "cannot stat ${check_path}"
-    [ "${check_uid}" = "0" ] && [ "${check_mode}" = "600" ] || fail "unsafe owner or mode for ${check_path}"
+    check_links=$(stat -c '%h' "${check_path}" 2>/dev/null) || fail "cannot stat ${check_path}"
+    [ "${check_uid}" = "0" ] && [ "${check_mode}" = "600" ] &&
+        [ "${check_links}" = "1" ] || fail "unsafe owner, mode or link count for ${check_path}"
 }
 
 [ "$#" -eq 0 ] || fail "helper accepts no arguments"

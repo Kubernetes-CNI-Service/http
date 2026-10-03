@@ -864,6 +864,7 @@ class AppliedConfigHelperTests(unittest.TestCase):
         # only those platform assertions for the macOS unit-test host.
         source = source.replace("stat -c '%u'", "stat -f '%u'")
         source = source.replace("stat -c '%a'", "stat -f '%Lp'")
+        source = source.replace("stat -c '%h'", "stat -f '%l'")
         source = source.replace('= "0" ]', f'= "{os.getuid()}" ]')
         helper = root / "helper.sh"
         helper.write_text(source, encoding="utf-8")
@@ -1023,6 +1024,20 @@ class AppliedConfigHelperTests(unittest.TestCase):
             result = run_bash(helper)
             self.assertNotEqual(0, result.returncode)
             self.assertIn("unknown receipt key", result.stderr)
+
+    def test_helper_rejects_hardlinked_receipt_without_emitting_protocol(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            receipt, _applied = self.prepare_state(root, b"- set: {}\n")
+            original = receipt.read_bytes()
+            outside = root / "outside-receipt.env"
+            os.link(receipt, outside)
+            self.assertEqual(2, receipt.stat().st_nlink)
+            result = run_bash(self.write_helper(root))
+            self.assertNotEqual(0, result.returncode)
+            self.assertEqual("", result.stdout)
+            self.assertEqual(original, receipt.read_bytes())
+            self.assertEqual(original, outside.read_bytes())
 
     def test_helper_validates_optional_failed_mode_source_name(self):
         with tempfile.TemporaryDirectory() as name:
