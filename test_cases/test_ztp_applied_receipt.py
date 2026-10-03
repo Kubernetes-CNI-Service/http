@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -1038,6 +1039,57 @@ class AppliedConfigHelperTests(unittest.TestCase):
             self.assertEqual("", result.stdout)
             self.assertEqual(original, receipt.read_bytes())
             self.assertEqual(original, outside.read_bytes())
+
+    def test_receipt_rebind_after_stat_cannot_change_helper_output(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            receipt, _applied = self.prepare_state(root, b"- set: {}\n")
+            alternate = root / "alternate-receipt.env"
+            alternate.write_bytes(receipt.read_bytes().replace(
+                b"source_name=020000000001.yaml",
+                b"source_name=attacker.yaml",
+            ))
+            alternate.chmod(0o600)
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            real_stat = shutil.which("stat")
+            self.assertIsNotNone(real_stat)
+            stat_shim = fake_bin / "stat"
+            stat_shim.write_text(
+                "#!/bin/sh\n"
+                f"{shlex.quote(real_stat)} \"$@\"\n"
+                "rc=$?\n"
+                'if [ "$2" = "%l" ] && [ "$3" = "$RECEIPT_TO_REBIND" ]; then\n'
+                '  mv "$RECEIPT_TO_REBIND" "$ORIGINAL_RECEIPT"\n'
+                '  ln -s "$ALTERNATE_RECEIPT" "$RECEIPT_TO_REBIND"\n'
+                "fi\n"
+                "exit $rc\n",
+                encoding="utf-8",
+            )
+            stat_shim.chmod(0o755)
+            env = {
+                **os.environ,
+                "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                "RECEIPT_TO_REBIND": str(receipt),
+                "ORIGINAL_RECEIPT": str(root / "original-receipt.env"),
+                "ALTERNATE_RECEIPT": str(alternate),
+            }
+            helper = self.write_helper(root)
+            helper.write_text(
+                helper.read_text(encoding="utf-8").replace(
+                    "PATH=/usr/sbin:/usr/bin:/sbin:/bin",
+                    f"PATH={shlex.quote(str(fake_bin))}:/usr/sbin:/usr/bin:/sbin:/bin",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            result = run_bash(helper, env=env)
+            self.assertTrue(
+                receipt.is_symlink(),
+                "test did not reach the post-stat swap: " + result.stderr + result.stdout,
+            )
+            self.assertNotEqual(0, result.returncode)
+            self.assertEqual("", result.stdout)
 
     def test_helper_validates_optional_failed_mode_source_name(self):
         with tempfile.TemporaryDirectory() as name:

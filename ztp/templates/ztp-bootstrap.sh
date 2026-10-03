@@ -659,8 +659,52 @@ state_mode=$(stat -c '%a' "${STATE_DIR}" 2>/dev/null) || fail "cannot stat state
 [ "${state_uid}" = "0" ] && [ "${state_mode}" = "711" ] || fail "unsafe state directory owner or mode"
 check_root_file "${RECEIPT_PATH}"
 check_root_file "${YAML_PATH}"
-receipt_size=$(file_size "${RECEIPT_PATH}") || fail "cannot size receipt"
-[ "${receipt_size}" -gt 0 ] && [ "${receipt_size}" -le "${MAX_RECEIPT_BYTES}" ] || fail "receipt size out of range"
+receipt_payload=$(python3 - "${STATE_DIR}" "${MAX_RECEIPT_BYTES}" <<'PY_RECEIPT'
+import os
+import stat
+import sys
+
+state_dir, maximum_text = sys.argv[1:]
+maximum = int(maximum_text)
+directory_fd = os.open(state_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+try:
+    directory = os.fstat(directory_fd)
+    if (not stat.S_ISDIR(directory.st_mode)
+            or directory.st_uid != os.geteuid()
+            or stat.S_IMODE(directory.st_mode) != 0o711):
+        raise SystemExit("unsafe receipt directory")
+    fd = os.open(
+        "receipt.env", os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
+        dir_fd=directory_fd,
+    )
+    try:
+        before = os.fstat(fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                or before.st_uid != os.geteuid()
+                or stat.S_IMODE(before.st_mode) != 0o600
+                or before.st_size < 1 or before.st_size > maximum):
+            raise SystemExit("receipt size out of range or unsafe identity")
+        raw = bytearray()
+        while len(raw) <= maximum:
+            chunk = os.read(fd, maximum + 1 - len(raw))
+            if not chunk:
+                break
+            raw.extend(chunk)
+        after = os.fstat(fd)
+        if (len(raw) != before.st_size or len(raw) > maximum
+                or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+                != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+                or not raw.endswith(b"\n") or raw.endswith(b"\n\n")
+                or b"\0" in raw or b"\r" in raw):
+            raise SystemExit("receipt changed or contains unsafe bytes")
+        raw.decode("ascii")
+        sys.stdout.buffer.write(raw)
+    finally:
+        os.close(fd)
+finally:
+    os.close(directory_fd)
+PY_RECEIPT
+) || fail "unsafe receipt identity or bytes"
 yaml_size=$(file_size "${YAML_PATH}") || fail "cannot size applied YAML"
 [ "${yaml_size}" -gt 0 ] && [ "${yaml_size}" -le "${MAX_YAML_BYTES}" ] || fail "applied YAML size out of range"
 
@@ -725,7 +769,9 @@ while IFS= read -r receipt_line || [ -n "${receipt_line}" ]; do
             failed_source_name=${receipt_value}; seen_failed_source_name=1 ;;
         *) fail "unknown receipt key ${receipt_key}" ;;
     esac
-done < "${RECEIPT_PATH}"
+done <<RECEIPT_DATA
+${receipt_payload}
+RECEIPT_DATA
 
 [ "${schema}" = "1" ] || fail "unsupported receipt schema"
 valid_hash "${raw_sha256}" || fail "invalid applied YAML hash"
@@ -784,7 +830,7 @@ actual_sha256=${actual_sha256%% *}
 [ "${actual_sha256}" = "${raw_sha256}" ] || fail "applied YAML hash mismatch"
 
 printf '%s\n' 'ZTP_APPLIED_CONFIG_V1'
-cat "${RECEIPT_PATH}"
+printf '%s\n' "${receipt_payload}"
 printf '%s\n' '---'
 cat "${YAML_PATH}"
 EOF
