@@ -39,6 +39,16 @@ def load_script(name: str, path: Path):
 
 def project_with_marker(path: Path, laptop: bytes, management: bytes) -> Path:
     path.mkdir(mode=0o700)
+    # REQ16 workflow reaches real setup/load, whose R22 preflight requires
+    # these inputs even when local DHCP and ZTP are both disabled.
+    (path / "01-global.yaml").write_text(
+        "common:\n  mgmt:\n    dhcp-server:\n      status: disabled\n"
+        "    ztp:\n      status: disabled\n", encoding="utf-8",
+    )
+    (path / "02-dhcp-subnet_config.csv").write_text(
+        "shared_network,subnet,netmask,range_start,range_end,routers,"
+        "ztp_service_ip,cumulus_profile,nvos_ztp\n", encoding="utf-8",
+    )
     marker = path / ".management-pubkeys"
     marker.write_bytes(b"mgmt-server.pub\n")
     marker.chmod(0o644)
@@ -50,6 +60,282 @@ def project_with_marker(path: Path, laptop: bytes, management: bytes) -> Path:
 
 
 class SshKeyPreparationWorkflow(unittest.TestCase):
+    def test_setup_then_load_rejects_rebound_staged_management_private(self):
+        """Real setup→load must not publish a different private inode at install."""
+        setup = load_script("r16_staged_rebind_setup", SETUP_PATH)
+        loader = load_script("r16_staged_rebind_load", LOAD_PATH)
+        with tempfile.TemporaryDirectory(prefix="r16-staged-rebind-workflow-") as temporary:
+            root = Path(temporary).resolve()
+            laptop_home = root / "laptop-home"
+            laptop_ssh = laptop_home / ".ssh"
+            laptop_ssh.mkdir(parents=True, mode=0o700)
+            laptop_key = public_line("ssh-ed25519", 152, "operator@laptop")
+            (laptop_ssh / "id_ed25519.pub").write_bytes(laptop_key)
+            server_ssh = root / "server-home/.ssh"
+            server_ssh.mkdir(parents=True, mode=0o700)
+            management = public_line("ssh-ed25519", 153, "root@management-server")
+            project = project_with_marker(root / "project", b"", management)
+            with mock.patch.dict(os.environ, {"HOME": str(laptop_home)}), \
+                 mock.patch.object(setup, "_DRY_RUN", False), \
+                 redirect_stdout(io.StringIO()):
+                setup._prepare_laptop_public_key(project)
+            laptop = project / "laptop.pub"
+            self.assertEqual(laptop_key, laptop.read_bytes())
+            project_before = {
+                path: (path.stat().st_ino, path.read_bytes())
+                for path in (laptop, project / "mgmt-server.pub")
+            }
+            fake_keygen = root / "ssh-keygen"
+            fake_keygen.write_bytes(b"synthetic-only-keygen-fixture")
+            outside = root / "outside-sentinel"
+            outside.write_bytes(b"synthetic-foreign-private")
+            outside.chmod(0o600)
+            outside_before = outside.stat()
+            held_original = root / "held-generated-private"
+            final_private = server_ssh / "id_ed25519"
+            original_link = os.link
+            injection_count = 0
+
+            def generate_staged_pair(argv, **kwargs):
+                staged_private = Path(argv[argv.index("-f") + 1])
+                self.assertEqual(str(fake_keygen), argv[0])
+                staged_private.write_bytes(b"synthetic-generated-private")
+                staged_private.with_suffix(".pub").write_bytes(management)
+                return SimpleNamespace(returncode=0)
+
+            def rebind_private_at_install(source, destination, **kwargs):
+                nonlocal injection_count
+                if Path(destination) == final_private:
+                    staged_private = Path(source)
+                    staged_private.rename(held_original)
+                    original_link(outside, staged_private)
+                    injection_count += 1
+                return original_link(source, destination, **kwargs)
+
+            with mock.patch.object(loader.ssh_keys, "KEYGEN", fake_keygen), \
+                 mock.patch.object(loader.ssh_keys.subprocess, "run", side_effect=generate_staged_pair), \
+                 mock.patch.object(loader.ssh_keys.os, "link", side_effect=rebind_private_at_install), \
+                 mock.patch.object(loader, "_open_management_pair", side_effect=AssertionError("must reject before private open")) as open_pair, \
+                 redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(loader.LoadError, "staged private|private key"):
+                    loader.ensure_management_key(
+                        server_ssh, dry_run=False, allow_generation=True,
+                    )
+            open_pair.assert_not_called()
+            self.assertEqual(1, injection_count)
+            self.assertEqual(b"synthetic-generated-private", held_original.read_bytes())
+            self.assertEqual(
+                (outside_before.st_dev, outside_before.st_ino, outside_before.st_size),
+                (outside.stat().st_dev, outside.stat().st_ino, outside.stat().st_size),
+            )
+            self.assertEqual(b"synthetic-foreign-private", outside.read_bytes())
+            self.assertFalse(final_private.exists())
+            self.assertFalse((server_ssh / "id_ed25519.pub").exists())
+            self.assertEqual([], list(server_ssh.glob(".ssh-key-prep-*")))
+            for path, (inode, data) in project_before.items():
+                self.assertEqual((inode, data), (path.stat().st_ino, path.read_bytes()))
+
+    def test_setup_then_load_private_chmod_race_preserves_external_inode(self):
+        """The management-key stage cannot change an external inode's mode."""
+        setup = load_script("r16_chmod_race_setup", SETUP_PATH)
+        loader = load_script("r16_chmod_race_load", LOAD_PATH)
+        with tempfile.TemporaryDirectory(prefix="r16-chmod-race-workflow-") as temporary:
+            root = Path(temporary).resolve()
+            laptop_home = root / "laptop-home"
+            laptop_ssh = laptop_home / ".ssh"
+            laptop_ssh.mkdir(parents=True, mode=0o700)
+            laptop_key = public_line("ssh-ed25519", 155, "operator@laptop")
+            (laptop_ssh / "id_ed25519.pub").write_bytes(laptop_key)
+            server_ssh = root / "server-home/.ssh"
+            server_ssh.mkdir(parents=True, mode=0o700)
+            management = public_line("ssh-ed25519", 156, "root@management-server")
+            project = project_with_marker(root / "project", b"", management)
+            with mock.patch.dict(os.environ, {"HOME": str(laptop_home)}), \
+                 mock.patch.object(setup, "_DRY_RUN", False), \
+                 redirect_stdout(io.StringIO()):
+                setup._prepare_laptop_public_key(project)
+            laptop = project / "laptop.pub"
+            self.assertEqual(laptop_key, laptop.read_bytes())
+            project_before = {
+                path: (path.stat().st_ino, path.read_bytes())
+                for path in (laptop, project / "mgmt-server.pub")
+            }
+            fake_keygen = root / "ssh-keygen"
+            fake_keygen.write_bytes(b"synthetic-only-keygen-fixture")
+            outside = root / "outside-private-sentinel"
+            outside.write_bytes(b"synthetic-foreign-private")
+            outside.chmod(0o640)
+            outside_before = outside.stat()
+            held_original = root / "held-generated-private"
+            staged_private = None
+            generated_inode = None
+            injected = False
+            original_chmod = os.chmod
+            original_fchmod = os.fchmod
+            original_link = os.link
+
+            def generate_staged_pair(argv, **kwargs):
+                nonlocal staged_private, generated_inode
+                staged_private = Path(argv[argv.index("-f") + 1])
+                self.assertEqual(str(fake_keygen), argv[0])
+                staged_private.write_bytes(b"synthetic-generated-private")
+                generated_inode = staged_private.stat().st_ino
+                staged_private.with_suffix(".pub").write_bytes(management)
+                return SimpleNamespace(returncode=0)
+
+            def replace_stage_name():
+                nonlocal injected
+                self.assertFalse(injected)
+                self.assertIsNotNone(staged_private)
+                staged_private.rename(held_original)
+                original_link(outside, staged_private)
+                injected = True
+
+            def path_chmod(path, mode, **kwargs):
+                if Path(path) == staged_private and not injected:
+                    replace_stage_name()
+                return original_chmod(path, mode, **kwargs)
+
+            def fd_chmod(fd, mode):
+                if generated_inode is not None and os.fstat(fd).st_ino == generated_inode and not injected:
+                    replace_stage_name()
+                return original_fchmod(fd, mode)
+
+            with mock.patch.object(loader.ssh_keys, "KEYGEN", fake_keygen), \
+                 mock.patch.object(loader.ssh_keys.subprocess, "run", side_effect=generate_staged_pair), \
+                 mock.patch.object(loader.ssh_keys.os, "chmod", side_effect=path_chmod), \
+                 mock.patch.object(loader.ssh_keys.os, "fchmod", side_effect=fd_chmod), \
+                 mock.patch.object(loader, "_open_management_pair", side_effect=AssertionError("must reject before private open")) as open_pair, \
+                 redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(loader.LoadError, "staged private|private key"):
+                    loader.ensure_management_key(server_ssh, dry_run=False, allow_generation=True)
+            open_pair.assert_not_called()
+            self.assertTrue(injected, "the stage-private mode boundary must be exercised")
+            outside_after = outside.stat()
+            self.assertEqual(
+                (outside_before.st_dev, outside_before.st_ino, outside_before.st_size,
+                 outside_before.st_mode & 0o777, outside_before.st_mtime_ns),
+                (outside_after.st_dev, outside_after.st_ino, outside_after.st_size,
+                 outside_after.st_mode & 0o777, outside_after.st_mtime_ns),
+            )
+            self.assertEqual(b"synthetic-foreign-private", outside.read_bytes())
+            self.assertEqual(b"synthetic-generated-private", held_original.read_bytes())
+            self.assertFalse((server_ssh / "id_ed25519").exists())
+            self.assertFalse((server_ssh / "id_ed25519.pub").exists())
+            self.assertEqual([], list(server_ssh.glob(".ssh-key-prep-*")))
+            for path, (inode, data) in project_before.items():
+                self.assertEqual((inode, data), (path.stat().st_ino, path.read_bytes()))
+
+    def test_setup_then_load_rejects_staged_public_chmod_and_link_rebind(self):
+        """Two real scripts cannot promote an external management public key."""
+        setup = load_script("r16_public_rebind_setup", SETUP_PATH)
+        loader = load_script("r16_public_rebind_load", LOAD_PATH)
+        for at_mode_update in (True, False):
+            with self.subTest(at_mode_update=at_mode_update), \
+                 tempfile.TemporaryDirectory(prefix="r16-public-rebind-workflow-") as temporary:
+                root = Path(temporary).resolve()
+                laptop_home = root / "laptop-home"
+                laptop_ssh = laptop_home / ".ssh"
+                laptop_ssh.mkdir(parents=True, mode=0o700)
+                laptop_key = public_line("ssh-ed25519", 159, "operator@laptop")
+                (laptop_ssh / "id_ed25519.pub").write_bytes(laptop_key)
+                server_ssh = root / "server-home/.ssh"
+                server_ssh.mkdir(parents=True, mode=0o700)
+                management = public_line("ssh-ed25519", 160, "root@management-server")
+                foreign = public_line("ssh-ed25519", 161, "foreign-server")
+                project = project_with_marker(root / "project", b"", management)
+                with mock.patch.dict(os.environ, {"HOME": str(laptop_home)}), \
+                     mock.patch.object(setup, "_DRY_RUN", False), \
+                     redirect_stdout(io.StringIO()):
+                    setup._prepare_laptop_public_key(project)
+                laptop = project / "laptop.pub"
+                self.assertEqual(laptop_key, laptop.read_bytes())
+                project_before = {
+                    path: (path.stat().st_ino, path.read_bytes())
+                    for path in (laptop, project / "mgmt-server.pub")
+                }
+                fake_keygen = root / "ssh-keygen"
+                fake_keygen.write_bytes(b"synthetic-only-keygen-fixture")
+                outside = root / "outside-public-sentinel"
+                outside.write_bytes(foreign)
+                outside.chmod(0o600 if at_mode_update else 0o644)
+                outside_before = outside.stat()
+                held_original = root / "held-generated-public"
+                public = server_ssh / "id_ed25519.pub"
+                staged_public = None
+                generated_inode = None
+                injected = False
+                original_chmod = os.chmod
+                original_fchmod = os.fchmod
+                original_link = os.link
+
+                def generate_staged_pair(argv, **kwargs):
+                    nonlocal staged_public, generated_inode
+                    staged_private = Path(argv[argv.index("-f") + 1])
+                    self.assertEqual(str(fake_keygen), argv[0])
+                    staged_private.write_bytes(b"synthetic-generated-private")
+                    staged_public = staged_private.with_suffix(".pub")
+                    staged_public.write_bytes(management)
+                    generated_inode = staged_public.stat().st_ino
+                    return SimpleNamespace(returncode=0)
+
+                def replace_stage_name():
+                    nonlocal injected
+                    self.assertFalse(injected)
+                    self.assertIsNotNone(staged_public)
+                    staged_public.rename(held_original)
+                    original_link(outside, staged_public)
+                    injected = True
+
+                def path_chmod(path, mode, **kwargs):
+                    if at_mode_update and Path(path) == staged_public and not injected:
+                        replace_stage_name()
+                    return original_chmod(path, mode, **kwargs)
+
+                def fd_chmod(fd, mode):
+                    if (at_mode_update and generated_inode is not None
+                            and os.fstat(fd).st_ino == generated_inode and not injected):
+                        replace_stage_name()
+                    return original_fchmod(fd, mode)
+
+                def link_at_publish(source, destination, **kwargs):
+                    if not at_mode_update and Path(destination) == public and not injected:
+                        replace_stage_name()
+                    return original_link(source, destination, **kwargs)
+
+                rejected = False
+                with mock.patch.object(loader.ssh_keys, "KEYGEN", fake_keygen), \
+                     mock.patch.object(loader.ssh_keys.subprocess, "run", side_effect=generate_staged_pair), \
+                     mock.patch.object(loader.ssh_keys.os, "chmod", side_effect=path_chmod), \
+                     mock.patch.object(loader.ssh_keys.os, "fchmod", side_effect=fd_chmod), \
+                     mock.patch.object(loader.ssh_keys.os, "link", side_effect=link_at_publish), \
+                     mock.patch.object(loader, "_open_management_pair", side_effect=AssertionError("must reject before private open")) as open_pair, \
+                     redirect_stdout(io.StringIO()):
+                    try:
+                        loader.ensure_management_key(
+                            server_ssh, dry_run=False, allow_generation=True,
+                        )
+                    except loader.LoadError as exc:
+                        self.assertRegex(str(exc), "staged public|public key")
+                        rejected = True
+                open_pair.assert_not_called()
+                self.assertTrue(injected, "the public-key mode/link boundary must be exercised")
+                outside_after = outside.stat()
+                self.assertEqual(
+                    (outside_before.st_dev, outside_before.st_ino, outside_before.st_size,
+                     outside_before.st_mode & 0o777, outside_before.st_mtime_ns),
+                    (outside_after.st_dev, outside_after.st_ino, outside_after.st_size,
+                     outside_after.st_mode & 0o777, outside_after.st_mtime_ns),
+                )
+                self.assertEqual(foreign, outside.read_bytes())
+                self.assertTrue(rejected, "a foreign management key must not be published")
+                self.assertEqual(management, held_original.read_bytes())
+                self.assertFalse((server_ssh / "id_ed25519").exists())
+                self.assertFalse(public.exists())
+                self.assertEqual([], list(server_ssh.glob(".ssh-key-prep-*")))
+                for path, (inode, data) in project_before.items():
+                    self.assertEqual((inode, data), (path.stat().st_ino, path.read_bytes()))
+
     def test_darwin_sparse_setup_namespace_defaults_workstation_before_transaction(self):
         """Older embedding Namespace objects remain safe on Darwin."""
         setup = load_script("r16_darwin_sparse_setup", SETUP_PATH)
@@ -94,6 +380,14 @@ class SshKeyPreparationWorkflow(unittest.TestCase):
             root = Path(temporary).resolve()
             project = root / "project"
             project.mkdir(mode=0o700)
+            (project / "01-global.yaml").write_text(
+                "common:\n  mgmt:\n    dhcp-server:\n      status: disabled\n"
+                "    ztp:\n      status: disabled\n", encoding="utf-8",
+            )
+            (project / "02-dhcp-subnet_config.csv").write_text(
+                "shared_network,subnet,netmask,range_start,range_end,routers,"
+                "ztp_service_ip,cumulus_profile,nvos_ztp\n", encoding="utf-8",
+            )
             with mock.patch("platform.system", return_value="Linux"), \
                  mock.patch.object(setup, "HERE", str(root)), \
                  mock.patch.object(setup, "HTTP_BASE", str(root)), \
@@ -383,10 +677,9 @@ class SshKeyPreparationWorkflow(unittest.TestCase):
             host_key = public_line("ssh-ed25519", 87, "operator-laptop")
             (ssh / "id_ed25519.pub").write_bytes(host_key)
             project = project_with_marker(root / "project", b"", b"")
-            for name in (
-                "01-global.yaml", "02-devices_config.csv",
-                "02-dhcp-subnet_config.csv", "p2p.xlsx",
-            ):
+            # Keep the fixture's R22-valid global/subnet inputs intact; only
+            # these unrelated loader placeholders are deliberately inert.
+            for name in ("02-devices_config.csv", "p2p.xlsx"):
                 (project / name).write_bytes(name.encode("ascii") + b"\n")
             laptop = project / "laptop.pub"
             management = project / "mgmt-server.pub"

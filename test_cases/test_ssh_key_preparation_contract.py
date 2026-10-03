@@ -16,6 +16,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -405,6 +406,236 @@ class ExistingProjectKeyNoTouchContract(unittest.TestCase):
 
 
 class SharedSshKeyPreparationContract(unittest.TestCase):
+    def _assert_staged_private_rebind_is_rejected(self, *, as_symlink: bool):
+        helper = helper_module()
+        with tempfile.TemporaryDirectory(prefix="r16-staged-private-race-") as temporary:
+            root = Path(temporary)
+            fake_keygen = root / "ssh-keygen"
+            fake_keygen.write_bytes(b"synthetic-keygen-fixture")
+            ssh_dir = root / ".ssh"
+            ssh_dir.mkdir(mode=0o700)
+            private = ssh_dir / "id_ed25519"
+            public = ssh_dir / "id_ed25519.pub"
+            outside = root / "outside-sentinel"
+            outside.write_bytes(b"synthetic-outside-sentinel")
+            outside.chmod(0o600)
+            outside_before = outside.stat()
+            held_original = root / "held-generated-private"
+            injected = False
+            original_link = os.link
+
+            def generate_staged_pair(argv, **kwargs):
+                staged_private = Path(argv[argv.index("-f") + 1])
+                self.assertEqual(str(fake_keygen), argv[0])
+                self.assertTrue(staged_private.parent.is_relative_to(ssh_dir))
+                staged_private.write_bytes(b"synthetic-generated-private")
+                staged_private.with_suffix(".pub").write_bytes(
+                    public_line("ssh-ed25519", 151, "operator@laptop")
+                )
+                return SimpleNamespace(returncode=0)
+
+            def rebind_private_before_link(source, destination, **kwargs):
+                nonlocal injected
+                if Path(destination) == private:
+                    self.assertFalse(injected)
+                    staged_private = Path(source)
+                    staged_private.rename(held_original)
+                    if as_symlink:
+                        staged_private.symlink_to(outside)
+                    else:
+                        original_link(outside, staged_private)
+                    injected = True
+                return original_link(source, destination, **kwargs)
+
+            with mock.patch.object(helper, "KEYGEN", fake_keygen), \
+                 mock.patch.object(helper.subprocess, "run", side_effect=generate_staged_pair), \
+                 mock.patch.object(helper.os, "link", side_effect=rebind_private_before_link):
+                with self.assertRaisesRegex(
+                    helper.SshKeyPreparationError, "staged private|private key",
+                ):
+                    helper.generate_ed25519_pair(ssh_dir, comment="operator@laptop")
+
+            self.assertTrue(injected, "the private install boundary must be exercised")
+            self.assertEqual(b"synthetic-generated-private", held_original.read_bytes())
+            self.assertEqual(
+                (outside_before.st_dev, outside_before.st_ino, outside_before.st_size),
+                (outside.stat().st_dev, outside.stat().st_ino, outside.stat().st_size),
+            )
+            self.assertEqual(b"synthetic-outside-sentinel", outside.read_bytes())
+            self.assertFalse(private.exists() or private.is_symlink())
+            self.assertFalse(public.exists() or public.is_symlink())
+            self.assertEqual([], list(ssh_dir.glob(".ssh-key-prep-*")))
+
+    def test_staged_private_symlink_rebind_cannot_install_pair(self):
+        self._assert_staged_private_rebind_is_rejected(as_symlink=True)
+
+    def test_staged_private_regular_inode_rebind_cannot_install_pair(self):
+        self._assert_staged_private_rebind_is_rejected(as_symlink=False)
+
+    def test_staged_private_chmod_rebind_preserves_external_inode(self):
+        """A stage-name replacement must not chmod a foreign private inode."""
+        helper = helper_module()
+        with tempfile.TemporaryDirectory(prefix="r16-staged-chmod-race-") as temporary:
+            root = Path(temporary)
+            fake_keygen = root / "ssh-keygen"
+            fake_keygen.write_bytes(b"synthetic-keygen-fixture")
+            ssh_dir = root / ".ssh"
+            ssh_dir.mkdir(mode=0o700)
+            outside = root / "outside-private-sentinel"
+            outside.write_bytes(b"synthetic-foreign-private")
+            outside.chmod(0o640)
+            outside_before = outside.stat()
+            held_original = root / "held-generated-private"
+            staged_private = None
+            generated_inode = None
+            injected = False
+            original_chmod = os.chmod
+            original_fchmod = os.fchmod
+            original_link = os.link
+
+            def generate_staged_pair(argv, **kwargs):
+                nonlocal staged_private, generated_inode
+                staged_private = Path(argv[argv.index("-f") + 1])
+                self.assertEqual(str(fake_keygen), argv[0])
+                staged_private.write_bytes(b"synthetic-generated-private")
+                generated_inode = staged_private.stat().st_ino
+                staged_private.with_suffix(".pub").write_bytes(
+                    public_line("ssh-ed25519", 154, "operator@laptop")
+                )
+                return SimpleNamespace(returncode=0)
+
+            def replace_stage_name():
+                nonlocal injected
+                self.assertFalse(injected)
+                self.assertIsNotNone(staged_private)
+                staged_private.rename(held_original)
+                original_link(outside, staged_private)
+                injected = True
+
+            def path_chmod(path, mode, **kwargs):
+                if Path(path) == staged_private and not injected:
+                    replace_stage_name()
+                return original_chmod(path, mode, **kwargs)
+
+            def fd_chmod(fd, mode):
+                if generated_inode is not None and os.fstat(fd).st_ino == generated_inode and not injected:
+                    replace_stage_name()
+                return original_fchmod(fd, mode)
+
+            with mock.patch.object(helper, "KEYGEN", fake_keygen), \
+                 mock.patch.object(helper.subprocess, "run", side_effect=generate_staged_pair), \
+                 mock.patch.object(helper.os, "chmod", side_effect=path_chmod), \
+                 mock.patch.object(helper.os, "fchmod", side_effect=fd_chmod):
+                with self.assertRaisesRegex(
+                    helper.SshKeyPreparationError, "staged private|private key",
+                ):
+                    helper.generate_ed25519_pair(ssh_dir, comment="operator@laptop")
+
+            self.assertTrue(injected, "the stage-private mode boundary must be exercised")
+            outside_after = outside.stat()
+            self.assertEqual(
+                (outside_before.st_dev, outside_before.st_ino, outside_before.st_size,
+                 stat.S_IMODE(outside_before.st_mode), outside_before.st_mtime_ns),
+                (outside_after.st_dev, outside_after.st_ino, outside_after.st_size,
+                 stat.S_IMODE(outside_after.st_mode), outside_after.st_mtime_ns),
+            )
+            self.assertEqual(b"synthetic-foreign-private", outside.read_bytes())
+            self.assertEqual(b"synthetic-generated-private", held_original.read_bytes())
+            self.assertFalse((ssh_dir / "id_ed25519").exists())
+            self.assertFalse((ssh_dir / "id_ed25519.pub").exists())
+            self.assertEqual([], list(ssh_dir.glob(".ssh-key-prep-*")))
+
+    def _assert_staged_public_rebind_is_rejected(self, *, at_mode_update: bool):
+        helper = helper_module()
+        with tempfile.TemporaryDirectory(prefix="r16-staged-public-race-") as temporary:
+            root = Path(temporary)
+            fake_keygen = root / "ssh-keygen"
+            fake_keygen.write_bytes(b"synthetic-keygen-fixture")
+            ssh_dir = root / ".ssh"
+            ssh_dir.mkdir(mode=0o700)
+            private = ssh_dir / "id_ed25519"
+            public = ssh_dir / "id_ed25519.pub"
+            generated_line = public_line("ssh-ed25519", 157, "operator@laptop")
+            foreign_line = public_line("ssh-ed25519", 158, "foreign-operator")
+            outside = root / "outside-public-sentinel"
+            outside.write_bytes(foreign_line)
+            outside.chmod(0o600 if at_mode_update else 0o644)
+            outside_before = outside.stat()
+            held_original = root / "held-generated-public"
+            staged_public = None
+            generated_inode = None
+            injected = False
+            original_chmod = os.chmod
+            original_fchmod = os.fchmod
+            original_link = os.link
+
+            def generate_staged_pair(argv, **kwargs):
+                nonlocal staged_public, generated_inode
+                staged_private = Path(argv[argv.index("-f") + 1])
+                self.assertEqual(str(fake_keygen), argv[0])
+                staged_private.write_bytes(b"synthetic-generated-private")
+                staged_public = staged_private.with_suffix(".pub")
+                staged_public.write_bytes(generated_line)
+                generated_inode = staged_public.stat().st_ino
+                return SimpleNamespace(returncode=0)
+
+            def replace_stage_name():
+                nonlocal injected
+                self.assertFalse(injected)
+                self.assertIsNotNone(staged_public)
+                staged_public.rename(held_original)
+                original_link(outside, staged_public)
+                injected = True
+
+            def path_chmod(path, mode, **kwargs):
+                if at_mode_update and Path(path) == staged_public and not injected:
+                    replace_stage_name()
+                return original_chmod(path, mode, **kwargs)
+
+            def fd_chmod(fd, mode):
+                if (at_mode_update and generated_inode is not None
+                        and os.fstat(fd).st_ino == generated_inode and not injected):
+                    replace_stage_name()
+                return original_fchmod(fd, mode)
+
+            def link_at_publish(source, destination, **kwargs):
+                if not at_mode_update and Path(destination) == public and not injected:
+                    replace_stage_name()
+                return original_link(source, destination, **kwargs)
+
+            rejected = False
+            with mock.patch.object(helper, "KEYGEN", fake_keygen), \
+                 mock.patch.object(helper.subprocess, "run", side_effect=generate_staged_pair), \
+                 mock.patch.object(helper.os, "chmod", side_effect=path_chmod), \
+                 mock.patch.object(helper.os, "fchmod", side_effect=fd_chmod), \
+                 mock.patch.object(helper.os, "link", side_effect=link_at_publish):
+                try:
+                    helper.generate_ed25519_pair(ssh_dir, comment="operator@laptop")
+                except helper.SshKeyPreparationError as exc:
+                    self.assertRegex(str(exc), "staged public|public key")
+                    rejected = True
+
+            self.assertTrue(injected, "the selected public-key boundary must be exercised")
+            outside_after = outside.stat()
+            self.assertEqual(
+                (outside_before.st_dev, outside_before.st_ino, outside_before.st_size,
+                 stat.S_IMODE(outside_before.st_mode), outside_before.st_mtime_ns),
+                (outside_after.st_dev, outside_after.st_ino, outside_after.st_size,
+                 stat.S_IMODE(outside_after.st_mode), outside_after.st_mtime_ns),
+            )
+            self.assertEqual(foreign_line, outside.read_bytes())
+            self.assertTrue(rejected, "a foreign public inode must not be accepted")
+            self.assertEqual(generated_line, held_original.read_bytes())
+            self.assertFalse(private.exists() or private.is_symlink())
+            self.assertFalse(public.exists() or public.is_symlink())
+            self.assertEqual([], list(ssh_dir.glob(".ssh-key-prep-*")))
+
+    def test_staged_public_chmod_rebind_preserves_external_inode(self):
+        self._assert_staged_public_rebind_is_rejected(at_mode_update=True)
+
+    def test_staged_public_link_rebind_cannot_publish_foreign_key(self):
+        self._assert_staged_public_rebind_is_rejected(at_mode_update=False)
+
     def test_existing_static_public_types_share_one_identity_parser(self):
         helper = helper_module()
         cases = (
@@ -452,6 +683,98 @@ class SharedSshKeyPreparationContract(unittest.TestCase):
             self.assertNotEqual(helper.public_key_identity(first), helper.public_key_identity(other_blob))
             self.assertNotEqual(helper.public_key_identity(first), helper.public_key_identity(other_type))
 
+    def test_public_source_same_size_rewrite_with_restored_mtime_is_rejected(self):
+        """A held public FD must not return a pre-rewrite key identity."""
+        helper = helper_module()
+        with tempfile.TemporaryDirectory(prefix="r16-public-rewrite-") as temporary:
+            source = Path(temporary) / "id_ed25519.pub"
+            original = public_line("ssh-ed25519", 141, "stable")
+            replacement = public_line("ssh-ed25519", 142, "stable")
+            self.assertNotEqual(original, replacement)
+            self.assertEqual(len(original), len(replacement))
+            source.write_bytes(original)
+            before = source.stat()
+            original_read = os.read
+            mutated = False
+
+            def rewrite_after_first_read(descriptor, limit):
+                nonlocal mutated
+                chunk = original_read(descriptor, limit)
+                if chunk and not mutated:
+                    self.assertEqual((before.st_dev, before.st_ino),
+                                     (os.fstat(descriptor).st_dev, os.fstat(descriptor).st_ino))
+                    time.sleep(0.02)
+                    with source.open("r+b") as writer:
+                        self.assertEqual(len(replacement), writer.write(replacement))
+                        writer.flush()
+                        os.fsync(writer.fileno())
+                    os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns))
+                    after = source.stat()
+                    self.assertEqual((before.st_dev, before.st_ino, before.st_size,
+                                      before.st_mtime_ns),
+                                     (after.st_dev, after.st_ino, after.st_size,
+                                      after.st_mtime_ns))
+                    self.assertNotEqual(before.st_ctime_ns, after.st_ctime_ns)
+                    mutated = True
+                return chunk
+
+            with mock.patch.object(helper.os, "read", side_effect=rewrite_after_first_read):
+                with self.assertRaisesRegex(
+                    helper.SshKeyPreparationError, "public key changed during read",
+                ):
+                    helper.public_key_identity(source)
+            self.assertTrue(mutated)
+            self.assertEqual(replacement, source.read_bytes())
+
+    def test_project_leaf_same_size_rewrite_with_restored_mtime_is_rejected(self):
+        """A held project leaf cannot return bytes from before an in-place rewrite."""
+        helper = helper_module()
+        with tempfile.TemporaryDirectory(prefix="r16-project-rewrite-") as temporary:
+            project = Path(temporary) / "project"
+            project.mkdir(mode=0o700)
+            leaf = project / "laptop.pub"
+            original = public_line("ssh-ed25519", 143, "stable")
+            replacement = public_line("ssh-ed25519", 144, "stable")
+            self.assertEqual(len(original), len(replacement))
+            leaf.write_bytes(original)
+            before = leaf.stat()
+            original_read = os.read
+            mutated = False
+            directory_fd = os.open(project, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                def rewrite_after_first_read(descriptor, limit):
+                    nonlocal mutated
+                    chunk = original_read(descriptor, limit)
+                    if chunk and not mutated:
+                        self.assertEqual(
+                            (before.st_dev, before.st_ino),
+                            (os.fstat(descriptor).st_dev, os.fstat(descriptor).st_ino),
+                        )
+                        time.sleep(0.02)
+                        with leaf.open("r+b") as writer:
+                            self.assertEqual(len(replacement), writer.write(replacement))
+                            writer.flush()
+                            os.fsync(writer.fileno())
+                        os.utime(leaf, ns=(before.st_atime_ns, before.st_mtime_ns))
+                        after = leaf.stat()
+                        self.assertEqual(
+                            (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns),
+                            (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns),
+                        )
+                        self.assertNotEqual(before.st_ctime_ns, after.st_ctime_ns)
+                        mutated = True
+                    return chunk
+
+                with mock.patch.object(helper.os, "read", side_effect=rewrite_after_first_read):
+                    with self.assertRaisesRegex(
+                        helper.SshKeyPreparationError, "project public key changed during read",
+                    ):
+                        helper._read_project_leaf(directory_fd, "laptop.pub")
+            finally:
+                os.close(directory_fd)
+            self.assertTrue(mutated)
+            self.assertEqual(replacement, leaf.read_bytes())
+
     def test_generation_conflict_is_fail_closed_and_comment_is_literal_allowlist(self):
         with tempfile.TemporaryDirectory(prefix="r16-generate-") as temporary:
             root = Path(temporary)
@@ -494,6 +817,74 @@ class SharedSshKeyPreparationContract(unittest.TestCase):
             rsa_after = rsa_private.stat()
             self.assertEqual((rsa_before.st_dev, rsa_before.st_ino, rsa_before.st_size),
                              (rsa_after.st_dev, rsa_after.st_ino, rsa_after.st_size))
+
+    def test_generated_pair_public_link_race_rolls_back_only_installed_private(self):
+        """A rival public leaf cannot strand our newly installed private half."""
+        helper = helper_module()
+        with tempfile.TemporaryDirectory(prefix="r16-public-link-race-") as temporary:
+            root = Path(temporary)
+            fake_keygen = root / "ssh-keygen"
+            fake_keygen.write_bytes(b"synthetic-keygen-fixture")
+            ssh_dir = root / ".ssh"
+            ssh_dir.mkdir(mode=0o700)
+            other_private = ssh_dir / "id_rsa"
+            other_private.write_bytes(b"synthetic-rsa-private-do-not-read")
+            other_private.chmod(0o600)
+            other_before = other_private.stat()
+            private = ssh_dir / "id_ed25519"
+            public = ssh_dir / "id_ed25519.pub"
+            rival = public_line("ssh-ed25519", 131, "rival")
+            original_link = os.link
+            calls = []
+            rival_before = None
+
+            def generate_staged_pair(argv, **kwargs):
+                self.assertEqual(str(fake_keygen), argv[0])
+                self.assertEqual("operator@laptop", argv[argv.index("-C") + 1])
+                staged_private = Path(argv[argv.index("-f") + 1])
+                self.assertTrue(staged_private.parent.is_relative_to(ssh_dir))
+                staged_private.write_bytes(b"synthetic-generated-private-do-not-read")
+                staged_private.with_suffix(".pub").write_bytes(
+                    public_line("ssh-ed25519", 132, "operator@laptop")
+                )
+                return SimpleNamespace(returncode=0)
+
+            def insert_rival_before_public_link(source, destination, **kwargs):
+                nonlocal rival_before
+                calls.append(Path(destination).name)
+                if Path(destination) == public:
+                    self.assertTrue(private.is_file())
+                    public.write_bytes(rival)
+                    rival_before = public.stat()
+                return original_link(source, destination, **kwargs)
+
+            with mock.patch.object(helper, "KEYGEN", fake_keygen), \
+                 mock.patch.object(helper.subprocess, "run", side_effect=generate_staged_pair), \
+                 mock.patch.object(helper.os, "link", side_effect=insert_rival_before_public_link):
+                with self.assertRaisesRegex(
+                    helper.SshKeyPreparationError, "cannot safely install generated key",
+                ):
+                    helper.generate_ed25519_pair(ssh_dir, comment="operator@laptop")
+
+            self.assertEqual(["id_ed25519", "id_ed25519.pub"], calls)
+            self.assertIsNotNone(rival_before)
+            self.assertEqual(rival, public.read_bytes())
+            rival_after = public.stat()
+            self.assertEqual(
+                (rival_before.st_dev, rival_before.st_ino, rival_before.st_size,
+                 rival_before.st_mtime_ns),
+                (rival_after.st_dev, rival_after.st_ino, rival_after.st_size,
+                 rival_after.st_mtime_ns),
+            )
+            self.assertFalse(private.exists(), "the failed pair must not leave our private half")
+            self.assertEqual([], list(ssh_dir.glob(".ssh-key-prep-*")))
+            other_after = other_private.stat()
+            self.assertEqual(
+                (other_before.st_dev, other_before.st_ino, other_before.st_size,
+                 other_before.st_mtime_ns),
+                (other_after.st_dev, other_after.st_ino, other_after.st_size,
+                 other_after.st_mtime_ns),
+            )
 
     def test_mismatch_publication_is_atomic_no_follow_and_reports_both_fingerprints(self):
         with tempfile.TemporaryDirectory(prefix="r16-publish-") as temporary:
@@ -554,6 +945,58 @@ class SharedSshKeyPreparationContract(unittest.TestCase):
             with self.assertRaises(Exception):
                 helper.prepare_project_public_key(project, "../outside.pub", source)
             self.assertEqual(old, outside.read_bytes())
+
+    def test_source_same_size_rewrite_before_publication_rejects_stale_key(self):
+        """Publication must not succeed from a key that changed after its first read."""
+        helper = helper_module()
+        with tempfile.TemporaryDirectory(prefix="r16-source-republish-") as temporary:
+            root = Path(temporary)
+            project = root / "project"
+            project.mkdir(mode=0o700)
+            source = root / "source.pub"
+            original = public_line("ssh-ed25519", 145, "stable")
+            replacement = public_line("ssh-ed25519", 146, "stable")
+            self.assertEqual(len(original), len(replacement))
+            source.write_bytes(original)
+            before = source.stat()
+            destination = project / "laptop.pub"
+            destination.write_bytes(b"")
+            destination_inode = destination.stat().st_ino
+            original_lstat = os.lstat
+            source_probes = 0
+            mutated = False
+
+            def rewrite_before_source_revalidation(path, *args, **kwargs):
+                nonlocal source_probes, mutated
+                if os.fspath(path) == str(source):
+                    source_probes += 1
+                    if source_probes == 3:
+                        time.sleep(0.02)
+                        with source.open("r+b") as writer:
+                            self.assertEqual(len(replacement), writer.write(replacement))
+                            writer.flush()
+                            os.fsync(writer.fileno())
+                        os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns))
+                        after = source.stat()
+                        self.assertEqual(
+                            (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns),
+                            (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns),
+                        )
+                        self.assertNotEqual(before.st_ctime_ns, after.st_ctime_ns)
+                        mutated = True
+                return original_lstat(path, *args, **kwargs)
+
+            with mock.patch.object(helper.os, "lstat", side_effect=rewrite_before_source_revalidation):
+                with self.assertRaisesRegex(
+                    helper.SshKeyPreparationError, "source public key changed before publication",
+                ):
+                    helper.prepare_project_public_key(project, "laptop.pub", source)
+            self.assertEqual(3, source_probes)
+            self.assertTrue(mutated)
+            self.assertEqual(replacement, source.read_bytes())
+            self.assertEqual(b"", destination.read_bytes())
+            self.assertEqual(destination_inode, destination.stat().st_ino)
+            self.assertEqual([], list(project.glob(".laptop.pub.*.tmp")))
 
     def test_explicit_rotation_rejects_target_rebind_without_touching_outside(self):
         """The retained explicit rotation primitive still detects a leaf race."""
@@ -742,6 +1185,16 @@ class DelegatedSetupPublicKeyContract(unittest.TestCase):
         (home / ".ssh/id_ed25519.pub").write_bytes(server)
         project = root / "project"
         project.mkdir(mode=0o700)
+        # This fixture exercises the REQ16 key boundary after setup's R22
+        # preflight, so provide independently valid disabled-mode inputs.
+        (project / "01-global.yaml").write_text(
+            "common:\n  mgmt:\n    dhcp-server:\n      status: disabled\n"
+            "    ztp:\n      status: disabled\n", encoding="utf-8",
+        )
+        (project / "02-dhcp-subnet_config.csv").write_text(
+            "shared_network,subnet,netmask,range_start,range_end,routers,"
+            "ztp_service_ip,cumulus_profile,nvos_ztp\n", encoding="utf-8",
+        )
         (project / "mgmt-server.pub").write_bytes(server)
         if laptop is not None:
             (project / "laptop.pub").write_bytes(laptop)

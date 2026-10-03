@@ -129,10 +129,15 @@ def _read_public(path: Path) -> tuple[bytes, os.stat_result]:
             raise SshKeyPreparationError(f"public key too large: {path}")
         after = os.fstat(fd)
         named = os.lstat(path)
+
+        def stable(metadata: os.stat_result) -> tuple[int, int, int, int, int]:
+            return (
+                metadata.st_dev, metadata.st_ino, metadata.st_size,
+                metadata.st_mtime_ns, metadata.st_ctime_ns,
+            )
         if (
-            (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
-            != (held.st_dev, held.st_ino, held.st_size, held.st_mtime_ns)
-            or (named.st_dev, named.st_ino) != (held.st_dev, held.st_ino)
+            stable(after) != stable(held)
+            or stable(named) != stable(held)
         ):
             raise SshKeyPreparationError(f"public key changed during read: {path}")
         _identity(bytes(data))
@@ -208,6 +213,8 @@ def generate_ed25519_pair(ssh_dir: Path, *, comment: str) -> Path:
     staged_private = stage / "id_ed25519"
     staged_public = stage / "id_ed25519.pub"
     installed_private: tuple[int, int] | None = None
+    linked_public: tuple[int, int] | None = None
+    installed_public = False
     try:
         try:
             result = subprocess.run(
@@ -219,22 +226,148 @@ def generate_ed25519_pair(ssh_dir: Path, *, comment: str) -> Path:
             raise SshKeyPreparationError(f"ssh-keygen failed: {exc}") from exc
         if result.returncode != 0:
             raise SshKeyPreparationError("ssh-keygen rejected Ed25519 generation")
-        generated, _ = _read_public(staged_public)
+        generated_private = os.lstat(staged_private)
+        if (not stat.S_ISREG(generated_private.st_mode)
+                or generated_private.st_uid != os.geteuid()
+                or generated_private.st_nlink != 1
+                or generated_private.st_size == 0):
+            raise SshKeyPreparationError("staged private key is not an owned single-link regular file")
+        generated, generated_public = _read_public(staged_public)
         if _identity(generated)[0] != b"ssh-ed25519":
             raise SshKeyPreparationError("ssh-keygen did not produce Ed25519 public key")
-        os.chmod(staged_private, 0o600, follow_symlinks=False)
-        os.chmod(staged_public, 0o644, follow_symlinks=False)
+        private_fd = -1
+        try:
+            private_fd = os.open(
+                staged_private,
+                os.O_WRONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            )
+            opened = os.fstat(private_fd)
+            if (not stat.S_ISREG(opened.st_mode)
+                    or (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+                    != (generated_private.st_dev, generated_private.st_ino,
+                        generated_private.st_size, generated_private.st_mtime_ns)
+                    or opened.st_uid != os.geteuid() or opened.st_nlink != 1):
+                raise SshKeyPreparationError("staged private key changed before mode update")
+            # The held descriptor, not its mutable pathname, owns the mode update.
+            # O_WRONLY is intentional: no private-key bytes are read.
+            os.fchmod(private_fd, 0o600)
+            mode_updated = os.fstat(private_fd)
+            if (not stat.S_ISREG(mode_updated.st_mode)
+                    or (mode_updated.st_dev, mode_updated.st_ino,
+                        mode_updated.st_size, mode_updated.st_mtime_ns)
+                    != (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+                    or mode_updated.st_uid != os.geteuid()
+                    or stat.S_IMODE(mode_updated.st_mode) != 0o600
+                    or mode_updated.st_nlink != 1):
+                raise SshKeyPreparationError("staged private key changed during mode update")
+        finally:
+            if private_fd >= 0:
+                os.close(private_fd)
+        public_fd = -1
+        try:
+            public_fd = os.open(
+                staged_public,
+                os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            )
+            opened_public = os.fstat(public_fd)
+            if (not stat.S_ISREG(opened_public.st_mode)
+                    or (opened_public.st_dev, opened_public.st_ino,
+                        opened_public.st_size, opened_public.st_mtime_ns,
+                        opened_public.st_ctime_ns)
+                    != (generated_public.st_dev, generated_public.st_ino,
+                        generated_public.st_size, generated_public.st_mtime_ns,
+                        generated_public.st_ctime_ns)
+                    or opened_public.st_uid != os.geteuid()
+                    or opened_public.st_nlink != 1):
+                raise SshKeyPreparationError("staged public key changed before mode update")
+            os.fchmod(public_fd, 0o644)
+            mode_updated_public = os.fstat(public_fd)
+            if (not stat.S_ISREG(mode_updated_public.st_mode)
+                    or (mode_updated_public.st_dev, mode_updated_public.st_ino,
+                        mode_updated_public.st_size, mode_updated_public.st_mtime_ns)
+                    != (opened_public.st_dev, opened_public.st_ino,
+                        opened_public.st_size, opened_public.st_mtime_ns)
+                    or mode_updated_public.st_uid != os.geteuid()
+                    or stat.S_IMODE(mode_updated_public.st_mode) != 0o644
+                    or mode_updated_public.st_nlink != 1):
+                raise SshKeyPreparationError("staged public key changed during mode update")
+        finally:
+            if public_fd >= 0:
+                os.close(public_fd)
+        confirmed, public_source = _read_public(staged_public)
+        if (confirmed != generated
+                or (public_source.st_dev, public_source.st_ino,
+                    public_source.st_size, public_source.st_mtime_ns,
+                    public_source.st_ctime_ns)
+                != (mode_updated_public.st_dev, mode_updated_public.st_ino,
+                    mode_updated_public.st_size, mode_updated_public.st_mtime_ns,
+                    mode_updated_public.st_ctime_ns)):
+            raise SshKeyPreparationError("staged public key changed before installation")
+        source = os.lstat(staged_private)
+        if (not stat.S_ISREG(source.st_mode)
+                or (source.st_dev, source.st_ino, source.st_size, source.st_mtime_ns)
+                != (generated_private.st_dev, generated_private.st_ino,
+                    generated_private.st_size, generated_private.st_mtime_ns)
+                or source.st_uid != os.geteuid()
+                or stat.S_IMODE(source.st_mode) != 0o600
+                or source.st_nlink != 1):
+            raise SshKeyPreparationError("staged private key changed before installation")
         # link is no-replace for each final name. A second failure rolls back only
         # the inode we installed; no existing user's private key can be replaced.
         os.link(staged_private, private, follow_symlinks=False)
         held = os.lstat(private)
         installed_private = held.st_dev, held.st_ino
+        after = os.lstat(staged_private)
+        if (not stat.S_ISREG(held.st_mode)
+                or not stat.S_ISREG(after.st_mode)
+                or (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+                != (source.st_dev, source.st_ino, source.st_size, source.st_mtime_ns)
+                or (held.st_dev, held.st_ino, held.st_size, held.st_mtime_ns)
+                != (source.st_dev, source.st_ino, source.st_size, source.st_mtime_ns)
+                or held.st_uid != os.geteuid()
+                or after.st_uid != os.geteuid()
+                or stat.S_IMODE(held.st_mode) != 0o600
+                or stat.S_IMODE(after.st_mode) != 0o600
+                or held.st_nlink != 2 or after.st_nlink != 2):
+            raise SshKeyPreparationError("staged private key changed during installation")
         os.link(staged_public, public, follow_symlinks=False)
+        published = os.lstat(public)
+        linked_public = published.st_dev, published.st_ino
+        named_public = os.lstat(staged_public)
+        if (not stat.S_ISREG(published.st_mode)
+                or not stat.S_ISREG(named_public.st_mode)
+                or (published.st_dev, published.st_ino,
+                    published.st_size, published.st_mtime_ns)
+                != (public_source.st_dev, public_source.st_ino,
+                    public_source.st_size, public_source.st_mtime_ns)
+                or (named_public.st_dev, named_public.st_ino,
+                    named_public.st_size, named_public.st_mtime_ns)
+                != (public_source.st_dev, public_source.st_ino,
+                    public_source.st_size, public_source.st_mtime_ns)
+                or published.st_uid != os.geteuid()
+                or named_public.st_uid != os.geteuid()
+                or stat.S_IMODE(published.st_mode) != 0o644
+                or stat.S_IMODE(named_public.st_mode) != 0o644
+                or published.st_nlink != 2 or named_public.st_nlink != 2):
+            raise SshKeyPreparationError("staged public key changed during installation")
+        installed_line, installed_metadata = _read_public(public)
+        if (installed_line != generated
+                or (installed_metadata.st_dev, installed_metadata.st_ino)
+                != linked_public):
+            raise SshKeyPreparationError("staged public key changed after installation")
+        installed_public = True
         return public
     except OSError as exc:
         raise SshKeyPreparationError(f"cannot safely install generated key: {exc}") from exc
     finally:
-        if installed_private is not None and not public.exists():
+        if linked_public is not None and not installed_public:
+            try:
+                named = os.lstat(public)
+                if (named.st_dev, named.st_ino) == linked_public:
+                    public.unlink()
+            except FileNotFoundError:
+                pass
+        if installed_private is not None and not installed_public:
             try:
                 named = os.lstat(private)
                 if (named.st_dev, named.st_ino) == installed_private:
@@ -270,7 +403,14 @@ def _read_project_leaf(directory_fd: int, name: str) -> tuple[bytes, tuple[int, 
     try:
         fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
         held = os.fstat(fd)
-        if (held.st_dev, held.st_ino) != (metadata.st_dev, metadata.st_ino):
+
+        def stable(info: os.stat_result) -> tuple[int, int, int, int, int]:
+            return (
+                info.st_dev, info.st_ino, info.st_size,
+                info.st_mtime_ns, info.st_ctime_ns,
+            )
+
+        if stable(held) != stable(metadata):
             raise SshKeyPreparationError("project public key changed while opening")
         data = bytearray()
         while len(data) <= PUBLIC_KEY_LIMIT:
@@ -280,6 +420,10 @@ def _read_project_leaf(directory_fd: int, name: str) -> tuple[bytes, tuple[int, 
             data.extend(part)
         if len(data) > PUBLIC_KEY_LIMIT:
             raise SshKeyPreparationError("project public key too large")
+        after = os.fstat(fd)
+        named = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if stable(after) != stable(held) or stable(named) != stable(held):
+            raise SshKeyPreparationError("project public key changed during read")
         return bytes(data), (held.st_dev, held.st_ino)
     except OSError as exc:
         raise SshKeyPreparationError(f"cannot safely read project public key: {exc}") from exc
@@ -365,8 +509,12 @@ def prepare_project_public_key(
         if (rebound[0] if rebound else b"") != old_data:
             raise SshKeyPreparationError("project public-key content changed before publication")
         rebound_source = os.lstat(source)
-        if (rebound_source.st_dev, rebound_source.st_ino, rebound_source.st_mtime_ns) != (
-            source_stat.st_dev, source_stat.st_ino, source_stat.st_mtime_ns
+        if (
+            rebound_source.st_dev, rebound_source.st_ino, rebound_source.st_size,
+            rebound_source.st_mtime_ns, rebound_source.st_ctime_ns,
+        ) != (
+            source_stat.st_dev, source_stat.st_ino, source_stat.st_size,
+            source_stat.st_mtime_ns, source_stat.st_ctime_ns,
         ):
             raise SshKeyPreparationError("source public key changed before publication")
         os.replace(stage_name, destination_name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
