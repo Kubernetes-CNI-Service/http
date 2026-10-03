@@ -831,6 +831,7 @@ def validate_project_mount(settings: Settings) -> None:
 
 def build_runtime_plan(settings: Settings, runner=subprocess.run):
     validate_project_mount(settings)
+    dhcp_enabled, ztp_enabled = current_project_dhcp_ztp_modes(settings)
     links, addresses = capture_stable_network_snapshot(runner)
     runtime = _load_runtime_module(settings.http_root)
     try:
@@ -840,6 +841,8 @@ def build_runtime_plan(settings: Settings, runner=subprocess.run):
             address_snapshot=addresses,
             allowlist=settings.allowlist,
             relay_ingress=settings.relay_ingress,
+            dhcp_enabled=dhcp_enabled,
+            ztp_enabled=ztp_enabled,
         )
     except Exception as exc:
         if isinstance(exc, ActivationError):
@@ -1347,6 +1350,34 @@ def project_http_listener_ips(settings: Settings, selected) -> tuple[str, ...]:
         return merge_http_listener_addresses(selected.endpoint_ips, address)
     except ValueError as exc:
         raise ActivationError(f"invalid project HTTP listener: {exc}") from exc
+
+
+def current_project_dhcp_ztp_modes(settings: Settings) -> tuple[bool, bool]:
+    """Bind both runtime modes to explicit values in the current global."""
+    project = settings.project_dir
+    global_yaml = project / "01-global.yaml"
+    _canonical_regular_within(global_yaml, project, "project global YAML")
+    try:
+        document = safe_load_global_yaml(global_yaml.read_text(encoding="utf-8"))
+        mgmt = document["common"]["mgmt"]
+        raw_dhcp = mgmt["dhcp-server"]["status"]
+        raw_ztp = mgmt["ztp"]["status"]
+    except (OSError, UnicodeError, yaml.YAMLError, ValueError, KeyError, TypeError) as exc:
+        raise ActivationError(
+            f"invalid common.mgmt.dhcp-server.status: {exc}"
+        ) from exc
+    modes = []
+    for label, raw in (("dhcp-server", raw_dhcp), ("ztp", raw_ztp)):
+        status = str(raw or "").strip().casefold()
+        if status not in {"enabled", "disabled"}:
+            raise ActivationError(
+                f"common.mgmt.{label}.status must be enabled or disabled"
+            )
+        modes.append(status == "enabled")
+    dhcp_enabled, ztp_enabled = modes
+    if not dhcp_enabled and ztp_enabled:
+        raise ActivationError("DHCP disabled + ZTP enabled is invalid")
+    return dhcp_enabled, ztp_enabled
 
 
 def current_project_dhcp_status(settings: Settings) -> str:

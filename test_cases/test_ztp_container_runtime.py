@@ -5289,7 +5289,17 @@ class ActivationContractTests(QuietContractTest):
             project = http_root / "DAY0-Prepare/site-a"
             project.mkdir(parents=True)
             (project / "01-global.yaml").write_text(
-                "project: independent-fixture\n", encoding="utf-8",
+                "project: independent-fixture\n"
+                "common:\n"
+                "  mgmt:\n"
+                "    dhcp-server:\n"
+                "      status: enabled\n"
+                "    ztp:\n"
+                "      status: enabled\n"
+                "    http:\n"
+                "      status: enabled\n"
+                "      address: 192.0.2.50\n",
+                encoding="utf-8",
             )
             (project / "02-devices_config.csv").write_text(
                 "hostname,mac\nfixture,02:00:00:00:00:01\n", encoding="utf-8",
@@ -5383,7 +5393,8 @@ class ActivationContractTests(QuietContractTest):
                             first_addresses,
                         ),
                     )
-            ensure_directories.assert_called_once_with(settings)
+            # F02-5: reject a drifted network snapshot before creating runtime dirs.
+            ensure_directories.assert_not_called()
             atomic_write.assert_not_called()
             self.assertFalse(settings.runtime_plan.exists())
             self.assertFalse(settings.apache_listeners.exists())
@@ -5419,7 +5430,8 @@ class ActivationContractTests(QuietContractTest):
                             second_routes=drifted_routes,
                         ),
                     )
-            ensure_directories.assert_called_once_with(settings)
+            # F02-5: route drift must fail before any runtime directory exists.
+            ensure_directories.assert_not_called()
             atomic_write.assert_not_called()
             self.assertFalse(settings.runtime_plan.exists())
             self.assertFalse(settings.apache_listeners.exists())
@@ -8259,7 +8271,17 @@ class ContainerTransactionContractTests(QuietContractTest):
             project = http_root / "DAY0-Prepare/site-a"
             project.mkdir(parents=True)
             (project / "01-global.yaml").write_text(
-                "project: independent-service-ip-move\n", encoding="utf-8",
+                "project: independent-service-ip-move\n"
+                "common:\n"
+                "  mgmt:\n"
+                "    dhcp-server:\n"
+                "      status: enabled\n"
+                "    ztp:\n"
+                "      status: enabled\n"
+                "    http:\n"
+                "      status: enabled\n"
+                "      address: 192.0.2.50\n",
+                encoding="utf-8",
             )
             (project / "02-devices_config.csv").write_text(
                 "hostname,mac\nfixture,02:00:00:00:00:01\n", encoding="utf-8",
