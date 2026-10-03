@@ -205,9 +205,18 @@ class P2PSelectionWorkflowTests(unittest.TestCase):
             project.mkdir(parents=True)
             (workspace / "ztp").mkdir()
             (workspace / "tools").mkdir()
-            (project / "01-global.yaml").write_text("schema_version: 2\ncommon: {}\n", encoding="utf-8")
+            valid_global = (
+                "schema_version: 2\ncommon:\n  mgmt:\n"
+                "    dhcp-server:\n      status: disabled\n"
+                "    ztp:\n      status: disabled\n"
+            )
+            subnet_header = (
+                "shared_network,subnet,netmask,range_start,range_end,routers,"
+                "ztp_service_ip,cumulus_profile,nvos_ztp\n"
+            )
+            (project / "01-global.yaml").write_text(valid_global, encoding="utf-8")
             (project / "02-devices_config.csv").write_text("hostname,type\nleaf01,eth\n", encoding="utf-8")
-            (project / "02-dhcp-subnet_config.csv").write_text("shared_network,subnet\nmgmt,192.0.2.0\n", encoding="utf-8")
+            (project / "02-dhcp-subnet_config.csv").write_text(subnet_header, encoding="utf-8")
             for relative in REQUIRED_UPLOAD_SOURCES:
                 path = workspace / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -219,8 +228,9 @@ class P2PSelectionWorkflowTests(unittest.TestCase):
             (project / "p2p.xlsx").symlink_to(selected.name)
             second_project = day0 / "second-customer"
             second_project.mkdir()
-            (second_project / "01-global.yaml").write_text("schema_version: 2\ncommon: {}\n", encoding="utf-8")
+            (second_project / "01-global.yaml").write_text(valid_global, encoding="utf-8")
             (second_project / "02-devices_config.csv").write_text("hostname,type\nleaf02,eth\n", encoding="utf-8")
+            (second_project / "02-dhcp-subnet_config.csv").write_text(subnet_header, encoding="utf-8")
             second_selected = workbook(second_project / "Site P2P_v4.0.xlsx", "second-selected")
             second_other = workbook(second_project / "Site P2P_v5.0.xlsx", "second-not-selected")
             (second_project / "p2p.xlsx").symlink_to(second_selected.name)

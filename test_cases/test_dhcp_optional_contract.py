@@ -29,18 +29,34 @@ DHCP = load_script(
     "dhcp_optional_handoff_generator",
     ROOT / "ztp/config/isc-dhcp-server/c1-generate_dhcp.py",
 )
+SETUP = load_script("r22_csv_setup_direct", ROOT / "DAY0-Prepare/01-a-setup.py")
+RUNTIME = load_script("r22_csv_runtime_direct", ROOT / "tools/ztp_service_runtime.py")
+ACTIVATE = load_script("r22_subnet_identity_docker_direct", ROOT / "infra/docker/activate.py")
 
 _TEMPLATE_TEXT = (ROOT / "DAY0-Prepare/template/01-global.yaml").read_text(
     encoding="utf-8"
 )
 _TEMPLATE = yaml.safe_load(_TEMPLATE_TEXT)
 _STATUS_LABEL = "common.mgmt.dhcp-server.status"
+_R22_SUBNET_HEADER = (
+    "shared_network,subnet,netmask,range_start,range_end,routers,"
+    "ztp_service_ip,cumulus_profile,nvos_ztp\n"
+)
+_R22_ACTIVE_ROW = (
+    "mgmt,192.0.2.0,255.255.255.0,192.0.2.100,192.0.2.120,"
+    "192.0.2.1,192.0.2.10,oob,no\n"
+)
 
 
 def global_document(status: object = "disabled") -> dict[str, object]:
     """Fresh, otherwise-valid input; package and siblings cannot pre-empt status."""
     document = deepcopy(_TEMPLATE)
+    document["common"]["mgmt"]["http"]["address"] = "192.0.2.10"
     document["common"]["mgmt"]["dhcp-server"]["status"] = status
+    if isinstance(status, str) and status.strip().casefold() == "disabled":
+        # R22 forbids DHCP-off/ZTP-on.  Keep ordinary disabled fixtures legal;
+        # dedicated matrix tests above construct the illegal combination.
+        document["common"]["mgmt"]["ztp"]["status"] = "disabled"
     return document
 
 
@@ -138,7 +154,11 @@ class DhcpOptionalDirectTests(unittest.TestCase):
             LOAD.load_global(Path("unused-global.yaml"), global_data=document)
 
     def test_dhcp_status_does_not_change_http_or_ztp_siblings(self):
-        enabled = settings_for("enabled")
+        enabled_document = global_document("enabled")
+        enabled_document["common"]["mgmt"]["ztp"]["status"] = "disabled"
+        enabled = LOAD.load_global(
+            Path("unused-global.yaml"), global_data=enabled_document,
+        )
         disabled = settings_for("disabled")
         self.assertEqual(enabled.http_enabled, disabled.http_enabled)
         self.assertEqual(enabled.ztp_enabled, disabled.ztp_enabled)
@@ -200,7 +220,7 @@ class DhcpOptionalDirectTests(unittest.TestCase):
     def test_disabled_dhcp_native_start_keeps_active_apache_and_does_not_start_dhcp(self):
         settings = LOAD.replace(
             settings_for("disabled"), http_root=LOAD.HTTP_ROOT,
-            ztp_ips={"air_oob": ("192.0.2.10",)},
+            http_address="192.0.2.10",
         )
         inputs = SimpleNamespace(settings=settings)
         plan = SimpleNamespace(listener_names=(), endpoint_ips=("192.0.2.10",))

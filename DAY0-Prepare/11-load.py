@@ -6956,25 +6956,32 @@ def preflight_services(
             ]
             ok("启动前检查通过：" + "/".join(labels) + " 配置有效")
         return
-    if not inputs.settings.ztp_enabled:
-        info("global 中 ZTP status=disabled，不启动服务")
+    http_required = bool(
+        inputs.settings.http_enabled and inputs.settings.http_listener_ips
+    )
+    dhcp_required = inputs.settings.dhcp_enabled
+    if not http_required and not dhcp_required:
+        info("当前项目没有需启动的 Apache/DHCP 服务")
         return
-    if not validate_management_host(inputs.settings, dry_run):
-        raise LoadError("本机服务启动条件不满足")
-    verify_control_auth(runtime_backend=backend, dry_run=dry_run)
-    verify_published_files(inputs, images, dry_run=dry_run)
-    verify_apache_publication_boundary(dry_run=dry_run)
-    if inputs.settings.dhcp_enabled:
+    if http_required:
+        if not validate_management_host(inputs.settings, dry_run):
+            raise LoadError("本机服务启动条件不满足")
+        verify_control_auth(runtime_backend=backend, dry_run=dry_run)
+        verify_published_files(inputs, images, dry_run=dry_run)
+        verify_apache_publication_boundary(dry_run=dry_run)
+    if dhcp_required:
         for source in dhcp_file_mappings():
             _nonempty_file(source, f"DHCP 输出 {source.name}")
         run(
             sudo_command("dhcpd", "-t", "-cf", "/etc/dhcp/dhcpd.conf"),
             dry_run=dry_run,
         )
-    run(sudo_command("apache2ctl", "configtest"), dry_run=dry_run)
+    if http_required:
+        run(sudo_command("apache2ctl", "configtest"), dry_run=dry_run)
     ok(
-        "启动前检查通过：公钥、Apache 配置和 HTTP 发布文件均有效"
-        + ("；DHCP 配置有效" if inputs.settings.dhcp_enabled else "；DHCP 已禁用")
+        "启动前检查通过："
+        + ("Apache/HTTP 有效" if http_required else "Apache/HTTP 不启动")
+        + ("；DHCP 配置有效" if dhcp_required else "；DHCP 已禁用")
     )
 
 
