@@ -2333,16 +2333,10 @@ def observe_runtime(settings: Settings, runner=subprocess.run):
 
 def prepare_runtime(settings: Settings, runner=subprocess.run):
     """Explicitly publish a freshly observed plan and exact Apache listeners."""
-    _port, address = project_http_policy(settings)
-    if address is None:
-        # Keep the existing ZTP-only preparation order. An independently
-        # declared HTTP address additionally requires prewrite ownership
-        # admission, including before directory creation.
-        ensure_runtime_directories(settings)
-        selected, runtime, payload, apache = observe_runtime(settings, runner)
-    else:
-        selected, runtime, payload, apache = observe_runtime(settings, runner)
-        ensure_runtime_directories(settings)
+    # Admit project and network inputs before creating runtime paths.
+    project_http_policy(settings)
+    selected, runtime, payload, apache = observe_runtime(settings, runner)
+    ensure_runtime_directories(settings)
     _atomic_write(settings.apache_listeners, apache, 0o644)
     _atomic_write(
         settings.runtime_plan,

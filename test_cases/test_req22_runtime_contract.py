@@ -187,6 +187,29 @@ class Req22RuntimeInputTests(unittest.TestCase):
                 ACTIVATE.sha256_path(output, expected_host_count=1),
             )
 
+    def test_docker_prepare_rejects_invalid_subnet_before_runtime_directories(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = self._project(root, dhcp="disabled", ztp="disabled")
+            (project / "02-dhcp-subnet_config.csv").write_bytes(b"")
+            settings = ACTIVATE.Settings(
+                project_name="fixture", scope="prod", http_root=root,
+                state_root=root / "state", log_root=root / "log",
+                apache_listeners=root / "apache.conf",
+            )
+            with mock.patch.object(
+                ACTIVATE, "ensure_runtime_directories",
+            ) as mkdir, mock.patch.object(
+                ACTIVATE, "_atomic_write",
+            ) as write, mock.patch.object(
+                ACTIVATE, "build_runtime_plan",
+            ) as planner:
+                with self.assertRaises(ACTIVATE.ActivationError):
+                    ACTIVATE.prepare_runtime(settings)
+            mkdir.assert_not_called()
+            write.assert_not_called()
+            planner.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
