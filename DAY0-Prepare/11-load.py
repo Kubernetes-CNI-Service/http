@@ -17,6 +17,7 @@ import argparse
 import base64
 import binascii
 import csv
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
 import fcntl
@@ -518,7 +519,10 @@ def assert_import_source_unchanged(
             names = tuple(sorted(name for name in os.listdir(selected.root_fd)
                                  if _import_set_name(name)))
             if names != selected.eligible_names:
-                raise LoadError("import-configs latest selection changed during load")
+                raise LoadError(
+                    "import-configs latest selection changed during load；"
+                    "请重新运行 load 以使用最新配置目录"
+                )
         again = preflight_import_configs(selected, devices_file)
         if again != snapshot:
             raise LoadError("import-configs member identity or bytes changed during load")
@@ -651,6 +655,7 @@ class PreparedParentRelease:
     source_authorities: dict[str, tuple[str, str]] | None = None
     dhcp_manifest_sha256: str | None = None
     dhcp_source_dir: Path | None = None
+    precommit_check: Callable[[], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -8106,6 +8111,8 @@ def commit_prepared_release(candidate: PreparedParentRelease) -> Path:
         recheck_prepared_dhcp_child(
             candidate, dhcp_file_mappings(candidate.dhcp_source_dir),
         )
+    if candidate.precommit_check is not None:
+        candidate.precommit_check()
     os.replace(candidate.temporary, candidate.destination)
     candidate.committed = True
     # fsync the containing directory so the rename itself survives a crash.
@@ -11187,6 +11194,10 @@ def main(
             parent_candidate = prepare_current_release(
                 project, parent_release, **dhcp_candidate_option,
             )
+            if import_snapshot is not None:
+                parent_candidate.precommit_check = lambda: assert_import_source_unchanged(
+                    import_selection, import_snapshot, project / "02-devices_config.csv",
+                )
             if (not args.dry_run and parent_release.get("schema_version") == 2):
                 # Freeze B while its private DHCP candidate and generated
                 # inputs still exist.  No selector changes before the

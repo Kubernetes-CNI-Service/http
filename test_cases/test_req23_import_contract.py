@@ -211,6 +211,37 @@ class ImportSelectorTests(unittest.TestCase):
                         selected, snapshot, project / "02-devices_config.csv",
                     )
 
+    def test_auto_selection_is_rechecked_at_parent_atomic_commit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            self._source(project)
+            release_dir = project / "99-output-ztp"
+            release_dir.mkdir()
+            destination = release_dir / "current-release.json"
+            destination.write_bytes(b"old committed parent")
+            staged = release_dir / ".new-parent"
+            staged.write_bytes(b"new candidate parent")
+            candidate = LOAD.PreparedParentRelease(
+                destination=destination, temporary=staged, release_id="new",
+            )
+            with LOAD.select_import_config_set(project, "") as selected:
+                snapshot = LOAD.preflight_import_configs(
+                    selected, project / "02-devices_config.csv",
+                )
+
+                def final_source_check():
+                    (project / "import-configs" / "20261004_000000").mkdir()
+                    LOAD.assert_import_source_unchanged(
+                        selected, snapshot, project / "02-devices_config.csv",
+                    )
+
+                candidate.precommit_check = final_source_check
+                with self.assertRaisesRegex(LOAD.LoadError, "重新运行 load"):
+                    LOAD.commit_prepared_release(candidate)
+            self.assertFalse(candidate.committed)
+            self.assertEqual(b"old committed parent", destination.read_bytes())
+            self.assertEqual(b"new candidate parent", staged.read_bytes())
+
     def test_output_is_new_load_timestamp_directory_and_never_overwrites(self):
         with tempfile.TemporaryDirectory() as temporary:
             project = Path(temporary)

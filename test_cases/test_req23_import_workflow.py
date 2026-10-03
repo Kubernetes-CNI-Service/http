@@ -151,6 +151,74 @@ class ImportedConfigurationWorkflow(unittest.TestCase):
                 )
                 self.assertEqual(report["release_id"], new["release_id"])
 
+                # The real setup/generator/publisher chain above has produced B.
+                # Model the final DHCP transaction in a private directory: a
+                # newer operator set arriving after installation must prevent
+                # the parent commit and restore every previously live file.
+                source_dir = ztp / "config/isc-dhcp-server"
+                live_dir = private / "etc-dhcp"
+                live_dir.mkdir()
+                names = (
+                    "dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts",
+                    "dhcpd_nvl.hosts",
+                )
+                mappings = {source_dir / name: live_dir / name for name in names}
+                for destination in mappings.values():
+                    destination.write_text(
+                        f"old:{destination.name}\n", encoding="utf-8",
+                    )
+                parent_before = parent_path.read_bytes()
+                candidate = LOAD.prepare_current_release(project, new)
+                newer = project / "import-configs" / "20261004_000000"
+                syntax_checks = []
+
+                def fake_dhcp_run(command, **_kwargs):
+                    operation = command[0]
+                    if operation == "install":
+                        if "-d" in command:
+                            mode = int(command[command.index("-m") + 1], 8)
+                            for item in command[command.index("--") + 1:]:
+                                Path(item).mkdir(parents=True, exist_ok=True)
+                                Path(item).chmod(mode)
+                        else:
+                            shutil.copy2(command[-2], command[-1])
+                    elif operation == "cp":
+                        shutil.copy2(command[-2], command[-1])
+                    elif operation == "dhcpd":
+                        syntax_checks.append(command[-1])
+                        if command[-1] == "/etc/dhcp/dhcpd.conf":
+                            newer.mkdir()
+                    else:
+                        self.fail(f"unexpected DHCP command: {command!r}")
+
+                try:
+                    with LOAD.select_import_config_set(project, "") as selected:
+                        snapshot = LOAD.preflight_import_configs(
+                            selected, project / "02-devices_config.csv",
+                        )
+                        candidate.precommit_check = lambda: LOAD.assert_import_source_unchanged(
+                            selected, snapshot, project / "02-devices_config.csv",
+                        )
+                        with mock.patch.object(
+                            LOAD, "dhcp_file_mappings", return_value=mappings,
+                        ), mock.patch.object(
+                            LOAD, "sudo_command", side_effect=lambda *args: list(args),
+                        ), mock.patch.object(
+                            LOAD, "run", side_effect=fake_dhcp_run,
+                        ):
+                            with self.assertRaisesRegex(LOAD.LoadError, "重新运行 load"):
+                                LOAD.mount_and_test_dhcp(parent_candidate=candidate)
+                    self.assertEqual(2, len(syntax_checks))
+                    self.assertFalse(candidate.committed)
+                    self.assertEqual(parent_before, parent_path.read_bytes())
+                    for destination in mappings.values():
+                        self.assertEqual(
+                            f"old:{destination.name}\n",
+                            destination.read_text(encoding="utf-8"),
+                        )
+                finally:
+                    LOAD.discard_prepared_release(candidate)
+
 
 if __name__ == "__main__":
     unittest.main()
