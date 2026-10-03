@@ -53,6 +53,23 @@ class EthJumpTransportContractTests(unittest.TestCase):
             "", "", "", "",
         )
 
+    def test_f02_nvl_declared_initial_setup_is_not_silently_skipped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            devices_path = Path(directory) / "devices.csv"
+            devices_path.write_text(
+                "hostname,type,eth0_ip,netmask,eth0_gw,eth0_mac,"
+                "eth1_ip,netmask,eth1_gw,config_method\n"
+                "EXAMPLE-IB01,ib,203.0.113.2,24,203.0.113.1,,,,,initial-setup\n"
+                "EXAMPLE-OOB01,eth,192.0.2.11,,,,,,,ztp\n"
+                "EXAMPLE-NVL01,nvl,203.0.113.3,24,203.0.113.1,,,,,initial-setup\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                self.module.SetupError,
+                r"devices\.csv:4:.*EXAMPLE-NVL01.*initial-setup.*NVL",
+            ):
+                self.module.load_devices(devices_path)
+
     def test_eth_jump_is_admitted_as_transit_and_resolves_p2p(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

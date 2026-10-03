@@ -331,6 +331,12 @@ def load_devices(path: Path) -> tuple[dict[str, Device], dict[str, Device]]:
         for line_number, row in enumerate(reader, 2):
             hostname = row_value(row, indexes, "hostname")
             dev_type = row_value(row, indexes, "type").casefold()
+            config_method = row_value(row, indexes, "config_method").casefold()
+            if hostname and dev_type == "nvl" and config_method == "initial-setup":
+                raise SetupError(
+                    f"{path}:{line_number}: {hostname} 声明 initial-setup，"
+                    "但当前 NVL 执行者只支持 IB；拒绝静默跳过 NVL"
+                )
             if not hostname or dev_type not in ({"ib"} | TRANSIT_DEVICE_TYPES):
                 continue
             if not valid_hostname(hostname):
