@@ -12,6 +12,7 @@ import inspect
 import io
 import os
 from pathlib import Path
+import shutil
 import stat
 import subprocess
 import sys
@@ -107,6 +108,19 @@ REQUIRED_UPLOAD_SOURCES = (
     "ztp/templates/ztp.json",
 )
 
+R22_SUBNET_HEADER = (
+    "shared_network,subnet,netmask,range_start,range_end,routers,"
+    "ztp_service_ip,cumulus_profile,nvos_ztp\n"
+)
+R22_SUBNET_ROW = (
+    "mgmt,192.0.2.0,255.255.255.0,192.0.2.100,192.0.2.110,"
+    "192.0.2.1,,none,no\n"
+)
+R22_ZTP_ROW = (
+    "mgmt,192.0.2.0,255.255.255.0,192.0.2.100,192.0.2.110,"
+    "192.0.2.1,198.51.100.10,oob,no\n"
+)
+
 
 def write_picture_workbook(path: Path, marker: str = "cells") -> None:
     drawing = f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -146,6 +160,695 @@ def write_sparse_self_extracting_image(path: Path) -> None:
 
 
 class UploadPackageContractTests(unittest.TestCase):
+    @staticmethod
+    def _public_r22_global_for_load() -> bytes:
+        """Give package-to-load fixtures an explicit, independent HTTP IPv4."""
+        source = (ROOT / "examples/public-project/01-global.yaml.example").read_bytes()
+        marker = b"    http:\n      status: enabled\n"
+        if source.count(marker) != 1:
+            raise AssertionError("public project HTTP fixture changed")
+        return source.replace(marker, marker + b"      address: 203.0.113.10\n", 1)
+
+    @staticmethod
+    def _r22_package_args(project: Path, output: Path, *, force: bool = False):
+        return argparse.Namespace(
+            project=str(project), output=output, force=force,
+            max_file_size_mib=50, include_images=False, include_apps=False,
+            apps_platform=None, apps_platforms=set(), include_firmware=False,
+            exclude_project_images=False,
+        )
+
+    @staticmethod
+    def _write_r22_inputs(
+        project: Path, *, dhcp: str = "enabled", ztp: str = "disabled",
+        subnet: str = R22_SUBNET_HEADER + R22_SUBNET_ROW,
+    ) -> None:
+        (project / "01-global.yaml").write_text(
+            "schema_version: 2\ncommon:\n  mgmt:\n"
+            f"    dhcp-server:\n      status: {dhcp}\n"
+            f"    ztp:\n      status: {ztp}\n",
+            encoding="utf-8",
+        )
+        (project / "02-dhcp-subnet_config.csv").write_text(
+            subnet, encoding="utf-8",
+        )
+
+    def test_r22_package_input_matrix_is_checked_before_output_creation(self):
+        cases = (
+            ("disabled", "disabled", R22_SUBNET_HEADER, False),
+            ("disabled", "disabled", R22_SUBNET_HEADER + "\n \n", False),
+            ("disabled", "disabled", R22_SUBNET_HEADER + R22_SUBNET_ROW, False),
+            ("disabled", "disabled", "\ufeff" + R22_SUBNET_HEADER + R22_SUBNET_ROW, False),
+            ("enabled", "disabled", R22_SUBNET_HEADER.rstrip("\n") + ",note\n"
+             + R22_SUBNET_ROW.rstrip("\n") + ",kept\n", False),
+            ("enabled", "disabled", R22_SUBNET_HEADER + R22_SUBNET_ROW, False),
+            ('" Enabled "', '" Disabled "', R22_SUBNET_HEADER + R22_SUBNET_ROW, False),
+            ("enabled", "disabled", R22_SUBNET_HEADER + R22_SUBNET_ROW.replace(
+                "mgmt,192.0.2.0,", "mgmt,192.0.2.10,"
+            ), False),  # 11-load accepts host bits and normalizes the network.
+            ("enabled", "enabled", R22_SUBNET_HEADER + R22_ZTP_ROW, False),
+            ("enabled", "disabled", R22_SUBNET_HEADER, True),
+            ("disabled", "enabled", R22_SUBNET_HEADER + R22_SUBNET_ROW, True),
+            ("enabled", "disabled", "", True),
+            ("disabled", "disabled", "", True),
+            ("disabled", "disabled", " \n\t\n", True),
+            ("enabled", "disabled", " \n\t\n", True),
+            ("enabled", "disabled", R22_SUBNET_HEADER + "mgmt,not-ip,,,,,,,\n", True),
+            ("enabled", "disabled", R22_SUBNET_HEADER + R22_ZTP_ROW, True),
+            ("enabled", "enabled", R22_SUBNET_HEADER + R22_SUBNET_ROW, True),
+            ("true", "disabled", R22_SUBNET_HEADER + R22_SUBNET_ROW, True),
+            ("1", "disabled", R22_SUBNET_HEADER + R22_SUBNET_ROW, True),
+            ("null", "disabled", R22_SUBNET_HEADER + R22_SUBNET_ROW, True),
+        )
+        for dhcp, ztp, subnet, reject in cases:
+            with self.subTest(dhcp=dhcp, ztp=ztp, subnet=subnet), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                workspace, day0, project = self._minimal_package_workspace(base)
+                self._write_r22_inputs(project, dhcp=dhcp, ztp=ztp, subnet=subnet)
+                output = base / "not-created" / "upload.tar.gz"
+                args = self._r22_package_args(project, output)
+                with mock.patch.multiple(
+                    package, ROOT=workspace, DAY0=day0,
+                    MANIFEST=workspace / "ztp/.setup_manifest",
+                    TOOLS_DIR=workspace / "tools",
+                ):
+                    if reject:
+                        with self.assertRaises(ValueError):
+                            package.create_package(args, day0_all=False, artifact_kind="upload")
+                        self.assertFalse(output.parent.exists())
+                    else:
+                        self.assertEqual(
+                            output.resolve(),
+                            package.create_package(args, day0_all=False, artifact_kind="upload"),
+                        )
+                        with tarfile.open(output, "r:gz") as archive:
+                            member = archive.extractfile(
+                                "./DAY0-Prepare/customer/02-dhcp-subnet_config.csv"
+                            )
+                            self.assertIsNotNone(member)
+                            self.assertEqual(subnet.encode(), member.read())
+
+    def test_r22_package_rejects_symlinked_required_input_before_output_creation(self):
+        for source_name in ("01-global.yaml", "02-dhcp-subnet_config.csv"):
+            with self.subTest(source=source_name), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                workspace, day0, project = self._minimal_package_workspace(base)
+                self._write_r22_inputs(project)
+                source = project / source_name
+                detached = base / f"detached-{source_name}"
+                source.rename(detached)
+                source.symlink_to(detached)
+                output = base / "not-created" / "upload.tar.gz"
+                with mock.patch.multiple(
+                    package, ROOT=workspace, DAY0=day0,
+                    MANIFEST=workspace / "ztp/.setup_manifest",
+                    TOOLS_DIR=workspace / "tools",
+                ), self.assertRaises(ValueError):
+                    package.create_package(
+                        self._r22_package_args(project, output),
+                        day0_all=False, artifact_kind="upload",
+                    )
+                self.assertFalse(output.parent.exists())
+
+    def test_r22_package_rejects_nonregular_required_input_before_output_creation(self):
+        for source_name in ("01-global.yaml", "02-dhcp-subnet_config.csv"):
+            with self.subTest(source=source_name), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                workspace, day0, project = self._minimal_package_workspace(base)
+                source = project / source_name
+                source.unlink()
+                os.mkfifo(source)
+                output = base / "not-created" / "upload.tar.gz"
+                with mock.patch.multiple(
+                    package, ROOT=workspace, DAY0=day0,
+                    MANIFEST=workspace / "ztp/.setup_manifest",
+                    TOOLS_DIR=workspace / "tools",
+                ), self.assertRaises(ValueError):
+                    package.create_package(
+                        self._r22_package_args(project, output),
+                        day0_all=False, artifact_kind="upload",
+                    )
+                self.assertFalse(output.parent.exists())
+
+    def test_r22_package_rejects_missing_empty_or_blank_required_inputs(self):
+        for source_name in ("01-global.yaml", "02-dhcp-subnet_config.csv"):
+            for payload in (None, b"", b" \n\t\n"):
+                with self.subTest(source=source_name, payload=payload), tempfile.TemporaryDirectory() as directory:
+                    base = Path(directory)
+                    workspace, day0, project = self._minimal_package_workspace(base)
+                    if payload is None:
+                        (project / source_name).unlink()
+                    else:
+                        (project / source_name).write_bytes(payload)
+                    output = base / "not-created" / "upload.tar.gz"
+                    with mock.patch.multiple(
+                        package, ROOT=workspace, DAY0=day0,
+                        MANIFEST=workspace / "ztp/.setup_manifest",
+                        TOOLS_DIR=workspace / "tools",
+                    ), self.assertRaises(ValueError):
+                        package.create_package(
+                            self._r22_package_args(project, output),
+                            day0_all=False, artifact_kind="upload",
+                        )
+                    self.assertFalse(output.parent.exists())
+
+    def test_r22_package_requires_explicit_dhcp_mapping_and_status(self):
+        replacements = (
+            ("    dhcp-server:\n      status: enabled\n", ""),
+            ("    dhcp-server:\n      status: enabled\n", "    dhcp-server: {}\n"),
+            ("      status: enabled\n", "      status: bogus\n"),
+        )
+        for old, new in replacements:
+            with self.subTest(replacement=new), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                workspace, day0, project = self._minimal_package_workspace(base)
+                global_path = project / "01-global.yaml"
+                source = global_path.read_text(encoding="utf-8")
+                self.assertIn(old, source)
+                global_path.write_text(source.replace(old, new, 1), encoding="utf-8")
+                output = base / "not-created" / "upload.tar.gz"
+                with mock.patch.multiple(
+                    package, ROOT=workspace, DAY0=day0,
+                    MANIFEST=workspace / "ztp/.setup_manifest",
+                    TOOLS_DIR=workspace / "tools",
+                ), self.assertRaises(ValueError):
+                    package.create_package(
+                        self._r22_package_args(project, output),
+                        day0_all=False, artifact_kind="upload",
+                    )
+                self.assertFalse(output.parent.exists())
+
+    def test_r22_package_rejects_nonblank_empty_records_with_physical_line_span(self):
+        rejected = (
+            (",,,,,,,,\n", "2"),
+            ("\n,,,,,,,,\n", "3"),
+            ('"",,,,,,,,\n', "2"),
+            ('"\n",,,,,,,,\n', "2-3"),
+        )
+        for suffix, line in rejected:
+            with self.subTest(suffix=suffix, line=line), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                workspace, day0, project = self._minimal_package_workspace(base)
+                self._write_r22_inputs(
+                    project, dhcp="disabled", ztp="disabled",
+                    subnet=R22_SUBNET_HEADER + suffix,
+                )
+                output = base / "not-created" / "upload.tar.gz"
+                with mock.patch.multiple(
+                    package, ROOT=workspace, DAY0=day0,
+                    MANIFEST=workspace / "ztp/.setup_manifest",
+                    TOOLS_DIR=workspace / "tools",
+                ), self.assertRaisesRegex(
+                    ValueError, rf"row {line} has no semantic fields",
+                ):
+                    package.create_package(
+                        self._r22_package_args(project, output),
+                        day0_all=False, artifact_kind="upload",
+                    )
+                self.assertFalse(output.parent.exists())
+
+        # A truly blank physical tail does not invent a CSV record.
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            workspace, day0, project = self._minimal_package_workspace(base)
+            payload = R22_SUBNET_HEADER + "\n \n\t\n"
+            self._write_r22_inputs(
+                project, dhcp="disabled", ztp="disabled", subnet=payload,
+            )
+            output = base / "upload.tar.gz"
+            with mock.patch.multiple(
+                package, ROOT=workspace, DAY0=day0,
+                MANIFEST=workspace / "ztp/.setup_manifest",
+                TOOLS_DIR=workspace / "tools",
+            ):
+                package.create_package(
+                    self._r22_package_args(project, output),
+                    day0_all=False, artifact_kind="upload",
+                )
+            with tarfile.open(output, "r:gz") as archive:
+                member = archive.extractfile(
+                    "./DAY0-Prepare/customer/02-dhcp-subnet_config.csv"
+                )
+                self.assertIsNotNone(member)
+                self.assertEqual(payload.encode(), member.read())
+
+    def test_r22_package_rejects_disabled_global_ztp_selection_at_exact_row(self):
+        for separator, label in (("\n", "4"), ("", "3-4")):
+            with self.subTest(separator=separator, label=label), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                workspace, day0, project = self._minimal_package_workspace(base)
+                ztp_row = R22_ZTP_ROW.replace("mgmt,", "ztp-mgmt,", 1)
+                if not separator:
+                    ztp_row = ztp_row.replace("ztp-mgmt,", '"ztp\nmgmt",', 1)
+                self._write_r22_inputs(
+                    project, dhcp="disabled", ztp="disabled",
+                    subnet=R22_SUBNET_HEADER + R22_SUBNET_ROW + separator + ztp_row,
+                )
+                output = base / "not-created" / "upload.tar.gz"
+                with mock.patch.multiple(
+                    package, ROOT=workspace, DAY0=day0,
+                    MANIFEST=workspace / "ztp/.setup_manifest",
+                    TOOLS_DIR=workspace / "tools",
+                ), self.assertRaisesRegex(
+                    ValueError, rf"row {label} enables platform ZTP while global ZTP is disabled",
+                ):
+                    package.create_package(
+                        self._r22_package_args(project, output),
+                        day0_all=False, artifact_kind="upload",
+                    )
+                self.assertFalse(output.parent.exists())
+
+    def test_r22_package_rejects_service_inside_another_row_dynamic_pool(self):
+        first = (
+            "first,192.0.2.0,255.255.255.0,192.0.2.100,192.0.2.110,"
+            "192.0.2.1,198.51.100.105,oob,no\n"
+        )
+        second = (
+            "second,198.51.100.0,255.255.255.0,198.51.100.100,"
+            "198.51.100.110,198.51.100.1,,none,no\n"
+        )
+        for service, rejected, reverse_rows in (
+            ("198.51.100.105", True, False),
+            ("198.51.100.105", True, True),
+            ("198.51.101.10", False, False),
+            ("198.51.101.10", False, True),
+        ):
+            with self.subTest(service=service, reverse_rows=reverse_rows), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                workspace, day0, project = self._minimal_package_workspace(base)
+                selected = first.replace("198.51.100.105", service)
+                subnet = R22_SUBNET_HEADER + (
+                    second + selected if reverse_rows else selected + second
+                )
+                self._write_r22_inputs(
+                    project, dhcp="enabled", ztp="enabled", subnet=subnet,
+                )
+                output = base / "not-created" / "upload.tar.gz"
+                with mock.patch.multiple(
+                    package, ROOT=workspace, DAY0=day0,
+                    MANIFEST=workspace / "ztp/.setup_manifest",
+                    TOOLS_DIR=workspace / "tools",
+                ):
+                    if rejected:
+                        with self.assertRaisesRegex(ValueError, "dynamic range"):
+                            package.create_package(
+                                self._r22_package_args(project, output),
+                                day0_all=False, artifact_kind="upload",
+                            )
+                        self.assertFalse(output.parent.exists())
+                    else:
+                        package.create_package(
+                            self._r22_package_args(project, output),
+                            day0_all=False, artifact_kind="upload",
+                        )
+                        with tarfile.open(output, "r:gz") as archive:
+                            member = archive.extractfile(
+                                "./DAY0-Prepare/customer/02-dhcp-subnet_config.csv"
+                            )
+                            self.assertIsNotNone(member)
+                            self.assertEqual(subnet.encode(), member.read())
+
+    def test_r22_cross_row_rejection_preserves_force_target(self):
+        subnet = (
+            R22_SUBNET_HEADER
+            + "first,192.0.2.0,255.255.255.0,192.0.2.100,192.0.2.110,"
+              "192.0.2.1,198.51.100.105,oob,no\n"
+            + "second,198.51.100.0,255.255.255.0,198.51.100.100,"
+              "198.51.100.110,198.51.100.1,,none,no\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            workspace, day0, project = self._minimal_package_workspace(base)
+            self._write_r22_inputs(
+                project, dhcp="enabled", ztp="enabled", subnet=subnet,
+            )
+            output = base / "previous-upload.tar.gz"
+            healthy = b"previous-healthy-archive-placeholder"
+            output.write_bytes(healthy)
+            prior = output.stat()
+            with mock.patch.multiple(
+                package, ROOT=workspace, DAY0=day0,
+                MANIFEST=workspace / "ztp/.setup_manifest",
+                TOOLS_DIR=workspace / "tools",
+            ), self.assertRaisesRegex(ValueError, "dynamic range"):
+                package.create_package(
+                    self._r22_package_args(project, output, force=True),
+                    day0_all=False, artifact_kind="upload",
+                )
+            self.assertEqual(healthy, output.read_bytes())
+            self.assertEqual(prior.st_ino, output.stat().st_ino)
+
+    def test_r22_preview_checks_every_selected_project_before_output_creation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            workspace, day0, project = self._minimal_package_workspace(base)
+            sibling = day0 / "another-project"
+            shutil.copytree(project, sibling, symlinks=True)
+            self._write_r22_inputs(sibling, dhcp="enabled", subnet="")
+            output = base / "not-created" / "preview.tar.gz"
+            with mock.patch.multiple(
+                package, ROOT=workspace, DAY0=day0,
+                MANIFEST=workspace / "ztp/.setup_manifest",
+                TOOLS_DIR=workspace / "tools",
+            ):
+                with self.assertRaises(ValueError):
+                    package.create_package(
+                        self._r22_package_args(project, output),
+                        day0_all=True, artifact_kind="preview",
+                    )
+                self.assertFalse(output.parent.exists())
+                self._write_r22_inputs(sibling)
+                package.create_package(
+                    self._r22_package_args(project, output),
+                    day0_all=True, artifact_kind="preview",
+                )
+            with tarfile.open(output, "r:gz") as archive:
+                for selected in (project, sibling):
+                    for name in ("01-global.yaml", "02-dhcp-subnet_config.csv"):
+                        member = archive.extractfile(
+                            f"./DAY0-Prepare/{selected.name}/{name}"
+                        )
+                        self.assertIsNotNone(member)
+                        self.assertEqual((selected / name).read_bytes(), member.read())
+
+    def test_r22_upload_all_checks_every_selected_project_before_output_creation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            workspace, day0, project = self._minimal_package_workspace(base)
+            sibling = day0 / "another-project"
+            shutil.copytree(project, sibling, symlinks=True)
+            self._write_r22_inputs(sibling, dhcp="enabled", subnet="")
+            output = base / "not-created" / "upload.tar.gz"
+            with mock.patch.multiple(
+                package, ROOT=workspace, DAY0=day0,
+                MANIFEST=workspace / "ztp/.setup_manifest",
+                TOOLS_DIR=workspace / "tools",
+            ):
+                with self.assertRaises(ValueError):
+                    package.create_package(
+                        self._r22_package_args(project, output),
+                        day0_all=True, artifact_kind="upload",
+                    )
+                self.assertFalse(output.parent.exists())
+                self._write_r22_inputs(sibling)
+                package.create_package(
+                    self._r22_package_args(project, output),
+                    day0_all=True, artifact_kind="upload",
+                )
+            with tarfile.open(output, "r:gz") as archive:
+                for selected in (project, sibling):
+                    for name in ("01-global.yaml", "02-dhcp-subnet_config.csv"):
+                        member = archive.extractfile(
+                            f"./DAY0-Prepare/{selected.name}/{name}"
+                        )
+                        self.assertIsNotNone(member)
+                        self.assertEqual((selected / name).read_bytes(), member.read())
+
+    def test_r22_package_keeps_bound_inputs_after_unrelated_project_entry_churn(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            workspace, day0, project = self._minimal_package_workspace(base)
+            output = base / "upload.tar.gz"
+            original_add = package._add_reproducible_source
+            churned = False
+
+            def add_after_unrelated_churn(*add_args, **add_kwargs):
+                nonlocal churned
+                if not churned:
+                    churned = True
+                    marker = project / "temporary-unrelated-entry.txt"
+                    marker.write_text("not a packaged source\n", encoding="utf-8")
+                    marker.unlink()
+                return original_add(*add_args, **add_kwargs)
+
+            with mock.patch.multiple(
+                package, ROOT=workspace, DAY0=day0,
+                MANIFEST=workspace / "ztp/.setup_manifest",
+                TOOLS_DIR=workspace / "tools",
+            ), mock.patch.object(
+                package, "_add_reproducible_source", side_effect=add_after_unrelated_churn,
+            ):
+                package.create_package(
+                    self._r22_package_args(project, output),
+                    day0_all=False, artifact_kind="upload",
+                )
+            self.assertTrue(churned)
+            with tarfile.open(output, "r:gz") as archive:
+                for name in ("01-global.yaml", "02-dhcp-subnet_config.csv"):
+                    member = archive.extractfile(f"./DAY0-Prepare/customer/{name}")
+                    self.assertIsNotNone(member)
+                    self.assertEqual((project / name).read_bytes(), member.read())
+
+    def test_r22_package_rejects_input_rebind_or_same_inode_edit_and_keeps_force_target(self):
+        for source_name in ("01-global.yaml", "02-dhcp-subnet_config.csv"):
+          for mutation in (
+              "rename-before-archive", "edit-before-archive",
+              "edit-before-publish", "edit-at-publish-stat",
+          ):
+            with self.subTest(source=source_name, mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                workspace, day0, project = self._minimal_package_workspace(base)
+                self._write_r22_inputs(project)
+                output = base / "healthy.tar.gz"
+                with mock.patch.multiple(
+                    package, ROOT=workspace, DAY0=day0,
+                    MANIFEST=workspace / "ztp/.setup_manifest",
+                    TOOLS_DIR=workspace / "tools",
+                ):
+                    package.create_package(
+                        self._r22_package_args(project, output),
+                        day0_all=False, artifact_kind="upload",
+                    )
+                with tarfile.open(output, "r:gz") as archive:
+                    self.assertEqual(
+                        (project / source_name).read_bytes(),
+                        archive.extractfile(
+                            f"./DAY0-Prepare/customer/{source_name}"
+                        ).read(),
+                    )
+                healthy = output.read_bytes()
+                healthy_inode = output.stat().st_ino
+                source = project / source_name
+                original_add = package._add_reproducible_source
+                original_chmod = package.os.fchmod
+                original_stat = package.os.stat
+                changed = False
+
+                def mutate_source():
+                    nonlocal changed
+                    if changed:
+                        return
+                    changed = True
+                    if mutation == "rename-before-archive":
+                        payload = source.read_bytes()
+                        source.rename(project / f"old-{source_name}")
+                        source.write_bytes(payload)
+                    else:
+                        payload = bytearray(source.read_bytes())
+                        if source_name == "01-global.yaml":
+                            offset = payload.index(b"status: enabled") + len(b"status: ")
+                            payload[offset:offset + 7] = b"invalid"
+                        else:
+                            offset = payload.index(b"192.0.2.100")
+                            payload[offset:offset + 11] = b"192.0.2.101"
+                        with source.open("r+b") as stream:
+                            stream.write(payload)
+                            stream.flush()
+                            os.fsync(stream.fileno())
+
+                def add_with_mutation(*add_args, **add_kwargs):
+                    if not changed and mutation.endswith("before-archive"):
+                        mutate_source()
+                    return original_add(*add_args, **add_kwargs)
+
+                def chmod_with_mutation(*chmod_args, **chmod_kwargs):
+                    if not changed and mutation == "edit-before-publish":
+                        mutate_source()
+                    return original_chmod(*chmod_args, **chmod_kwargs)
+
+                def stat_with_mutation(path, *stat_args, **stat_kwargs):
+                    if (not changed and mutation == "edit-at-publish-stat"
+                            and path == output.name
+                            and stat_kwargs.get("dir_fd") is not None):
+                        mutate_source()
+                    return original_stat(path, *stat_args, **stat_kwargs)
+
+                with mock.patch.multiple(
+                    package, ROOT=workspace, DAY0=day0,
+                    MANIFEST=workspace / "ztp/.setup_manifest",
+                    TOOLS_DIR=workspace / "tools",
+                ), mock.patch.object(
+                    package, "_add_reproducible_source", side_effect=add_with_mutation,
+                ), mock.patch.object(
+                    package.os, "fchmod", side_effect=chmod_with_mutation,
+                ), mock.patch.object(
+                    package.os, "stat", side_effect=stat_with_mutation,
+                ), self.assertRaises(ValueError):
+                    package.create_package(
+                        self._r22_package_args(project, output, force=True),
+                        day0_all=False, artifact_kind="upload",
+                    )
+                self.assertTrue(changed)
+                self.assertEqual(healthy, output.read_bytes())
+                self.assertEqual(healthy_inode, output.stat().st_ino)
+                self.assertEqual([], list(base.glob(".http-air-package-*")))
+
+    def test_r22_package_to_real_load_parsers_preserves_bound_input_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            workspace, day0, project = self._minimal_package_workspace(base)
+            public = ROOT / "examples/public-project"
+            global_bytes = self._public_r22_global_for_load()
+            # Three active platform rows plus one ordinary external-DHCP row;
+            # the host-bit subnet spelling is accepted by real 11-load.
+            csv_bytes = (
+                (public / "02-dhcp-subnet_config.csv.example").read_bytes()
+                + b"example-external,10.20.30.7,255.255.255.0,10.20.30.100,"
+                  b"10.20.30.149,10.20.30.1,,none,no\n"
+            )
+            (project / "01-global.yaml").write_bytes(global_bytes)
+            (project / "02-dhcp-subnet_config.csv").write_bytes(csv_bytes)
+            output = base / "upload.tar.gz"
+            with mock.patch.multiple(
+                package, ROOT=workspace, DAY0=day0,
+                MANIFEST=workspace / "ztp/.setup_manifest",
+                TOOLS_DIR=workspace / "tools",
+            ):
+                package.create_package(
+                    self._r22_package_args(project, output),
+                    day0_all=False, artifact_kind="upload",
+                )
+            extracted = base / "extracted"
+            extracted.mkdir()
+            with tarfile.open(output, "r:gz") as archive:
+                for filename, expected in (
+                    ("01-global.yaml", global_bytes),
+                    ("02-dhcp-subnet_config.csv", csv_bytes),
+                ):
+                    member = archive.extractfile(f"./DAY0-Prepare/customer/{filename}")
+                    self.assertIsNotNone(member)
+                    actual = member.read()
+                    self.assertEqual(expected, actual)
+                    (extracted / filename).write_bytes(actual)
+            settings = load_tool.load_global(extracted / "01-global.yaml")
+            self.assertTrue(settings.dhcp_enabled)
+            self.assertTrue(settings.ztp_enabled)
+            settings = load_tool.apply_subnet_service_ips(
+                settings, extracted / "02-dhcp-subnet_config.csv",
+            )
+            load_tool.validate_subnet_file(
+                extracted / "02-dhcp-subnet_config.csv", settings,
+            )
+            self.assertTrue(load_tool.derive_service_ips_from_subnet(
+                extracted / "02-dhcp-subnet_config.csv", settings.ztp_prefix,
+            ))
+
+    def test_r22_cross_row_service_control_survives_package_to_load(self):
+        subnet = (
+            R22_SUBNET_HEADER
+            + "first,192.0.2.0,255.255.255.0,192.0.2.100,192.0.2.110,"
+              "192.0.2.1,198.51.101.10,oob,no\n"
+            + "second,198.51.100.0,255.255.255.0,198.51.100.100,"
+              "198.51.100.110,198.51.100.1,,none,no\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            workspace, day0, project = self._minimal_package_workspace(base)
+            (project / "01-global.yaml").write_bytes(
+                self._public_r22_global_for_load()
+            )
+            (project / "02-dhcp-subnet_config.csv").write_text(
+                subnet, encoding="utf-8",
+            )
+            output = base / "upload.tar.gz"
+            with mock.patch.multiple(
+                package, ROOT=workspace, DAY0=day0,
+                MANIFEST=workspace / "ztp/.setup_manifest",
+                TOOLS_DIR=workspace / "tools",
+            ):
+                package.create_package(
+                    self._r22_package_args(project, output),
+                    day0_all=False, artifact_kind="upload",
+                )
+            extracted = base / "extracted"
+            extracted.mkdir()
+            with tarfile.open(output, "r:gz") as archive:
+                for name in ("01-global.yaml", "02-dhcp-subnet_config.csv"):
+                    member = archive.extractfile(f"./DAY0-Prepare/customer/{name}")
+                    self.assertIsNotNone(member)
+                    (extracted / name).write_bytes(member.read())
+            self.assertEqual(
+                subnet.encode(),
+                (extracted / "02-dhcp-subnet_config.csv").read_bytes(),
+            )
+            settings = load_tool.load_global(extracted / "01-global.yaml")
+            self.assertTrue(settings.dhcp_enabled)
+            self.assertTrue(settings.ztp_enabled)
+            settings = load_tool.apply_subnet_service_ips(
+                settings, extracted / "02-dhcp-subnet_config.csv",
+            )
+            load_tool.validate_subnet_file(
+                extracted / "02-dhcp-subnet_config.csv", settings,
+            )
+            crossing = subnet.replace("198.51.101.10", "198.51.100.105")
+            (extracted / "02-dhcp-subnet_config.csv").write_text(
+                crossing, encoding="utf-8",
+            )
+            settings = load_tool.apply_subnet_service_ips(
+                load_tool.load_global(extracted / "01-global.yaml"),
+                extracted / "02-dhcp-subnet_config.csv",
+            )
+            with self.assertRaisesRegex(load_tool.LoadError, "落入动态 range"):
+                load_tool.validate_subnet_file(
+                    extracted / "02-dhcp-subnet_config.csv", settings,
+                )
+
+    def test_r22_package_to_real_load_accepts_disabled_header_only_archive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            workspace, day0, project = self._minimal_package_workspace(base)
+            global_bytes = self._public_r22_global_for_load()
+            dhcp_status = b"dhcp-server:\n      status: enabled"
+            ztp_status = b"ztp:\n      status: enabled"
+            self.assertIn(dhcp_status, global_bytes)
+            self.assertIn(ztp_status, global_bytes)
+            global_bytes = global_bytes.replace(
+                dhcp_status, b"dhcp-server:\n      status: disabled", 1,
+            ).replace(
+                ztp_status, b"ztp:\n      status: disabled", 1,
+            )
+            csv_bytes = (R22_SUBNET_HEADER + "\n\n").encode("utf-8")
+            (project / "01-global.yaml").write_bytes(global_bytes)
+            (project / "02-dhcp-subnet_config.csv").write_bytes(csv_bytes)
+            output = base / "upload.tar.gz"
+            with mock.patch.multiple(
+                package, ROOT=workspace, DAY0=day0,
+                MANIFEST=workspace / "ztp/.setup_manifest",
+                TOOLS_DIR=workspace / "tools",
+            ):
+                package.create_package(
+                    self._r22_package_args(project, output),
+                    day0_all=False, artifact_kind="upload",
+                )
+            extracted = base / "extracted"
+            extracted.mkdir()
+            with tarfile.open(output, "r:gz") as archive:
+                for filename, expected in (
+                    ("01-global.yaml", global_bytes),
+                    ("02-dhcp-subnet_config.csv", csv_bytes),
+                ):
+                    member = archive.extractfile(f"./DAY0-Prepare/customer/{filename}")
+                    self.assertIsNotNone(member)
+                    actual = member.read()
+                    self.assertEqual(expected, actual)
+                    (extracted / filename).write_bytes(actual)
+            settings = load_tool.load_global(extracted / "01-global.yaml")
+            self.assertFalse(settings.dhcp_enabled)
+            self.assertFalse(settings.ztp_enabled)
+            load_tool.validate_subnet_file(
+                extracted / "02-dhcp-subnet_config.csv", settings,
+            )
+
     def test_issue0016_validation_only_intent_flows_across_load_sync_and_package(self):
         self.assertTrue(load_tool.parse_args([
             "sample", "--air", "--validation-only",
@@ -256,13 +959,15 @@ class UploadPackageContractTests(unittest.TestCase):
         (workspace / "ztp").mkdir()
         (workspace / "tools").mkdir()
         (project / "01-global.yaml").write_text(
-            "schema_version: 2\ncommon: {}\n", encoding="utf-8",
+            "schema_version: 2\ncommon:\n  mgmt:\n"
+            "    dhcp-server:\n      status: enabled\n"
+            "    ztp:\n      status: disabled\n", encoding="utf-8",
         )
         (project / "02-devices_config.csv").write_text(
             "hostname,type\nleaf01,eth\n", encoding="utf-8",
         )
         (project / "02-dhcp-subnet_config.csv").write_text(
-            "shared_network,subnet\nmgmt,192.0.2.0\n", encoding="utf-8",
+            R22_SUBNET_HEADER + R22_SUBNET_ROW, encoding="utf-8",
         )
         for relative in REQUIRED_UPLOAD_SOURCES:
             path = workspace / relative
@@ -1028,6 +1733,7 @@ class UploadPackageContractTests(unittest.TestCase):
             )
             for name in package.PROJECT_DEPLOYMENT_INPUTS:
                 (project / name).write_text("input\n", encoding="utf-8")
+            self._write_r22_inputs(project)
             policy_payload = b'{"node_allowlist": ["AIR-example-leaf01"]}\n'
             (project / "03-air-topology-policy.json").write_bytes(policy_payload)
             mini_payload = (
@@ -1174,6 +1880,7 @@ class UploadPackageContractTests(unittest.TestCase):
                     target.write_text("# deployable\n", encoding="utf-8")
                 for name in package.PROJECT_DEPLOYMENT_INPUTS:
                     (project / name).write_text("input\n", encoding="utf-8")
+                self._write_r22_inputs(project)
                 write_picture_workbook(project / "Customer P2P.xlsx")
                 (project / "p2p.xlsx").symlink_to("Customer P2P.xlsx")
                 write_sparse_self_extracting_image(workspace / "image" / image_name)
@@ -1250,6 +1957,7 @@ class UploadPackageContractTests(unittest.TestCase):
                 target.write_text("# deployable\n", encoding="utf-8")
             for name in package.PROJECT_DEPLOYMENT_INPUTS:
                 (project / name).write_text("input\n", encoding="utf-8")
+            self._write_r22_inputs(project)
             write_picture_workbook(project / "Customer P2P.xlsx")
             (project / "p2p.xlsx").symlink_to("Customer P2P.xlsx")
             output = workspace / "upload.tar.gz"
@@ -1287,6 +1995,7 @@ class UploadPackageContractTests(unittest.TestCase):
                 target.write_text("# deployable\n", encoding="utf-8")
             for name in package.PROJECT_DEPLOYMENT_INPUTS:
                 (project / name).write_text("input\n", encoding="utf-8")
+            self._write_r22_inputs(project)
             write_picture_workbook(project / "Customer P2P.xlsx")
             (project / "p2p.xlsx").symlink_to("Customer P2P.xlsx")
             (project / "03-air-topology-policy.json").write_text(
@@ -1337,6 +2046,7 @@ class UploadPackageContractTests(unittest.TestCase):
                     target.write_text("# deployable\n", encoding="utf-8")
                 for name in package.PROJECT_DEPLOYMENT_INPUTS:
                     (project / name).write_text("input\n", encoding="utf-8")
+                self._write_r22_inputs(project)
                 write_picture_workbook(project / "Customer P2P.xlsx")
                 (project / "p2p.xlsx").symlink_to("Customer P2P.xlsx")
                 policy = project / "03-air-topology-policy.json"
@@ -1378,6 +2088,7 @@ class UploadPackageContractTests(unittest.TestCase):
                 target.write_text("# deployable\n", encoding="utf-8")
             for name in package.PROJECT_DEPLOYMENT_INPUTS:
                 (project / name).write_text("input\n", encoding="utf-8")
+            self._write_r22_inputs(project)
             write_picture_workbook(project / "Customer P2P.xlsx")
             (project / "p2p.xlsx").symlink_to("Customer P2P.xlsx")
             args = argparse.Namespace(

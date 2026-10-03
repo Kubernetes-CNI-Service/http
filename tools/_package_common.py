@@ -8,10 +8,12 @@ packaging workflows live in tools/tar-for-upload.py and tools/tar-for-download.p
 from __future__ import annotations
 
 import argparse
+import csv
 from datetime import date
 import fnmatch
 import gzip
 import hashlib
+import ipaddress
 import io
 import json
 import os
@@ -27,6 +29,8 @@ import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
 
+import yaml
+
 from project_contract import (
     FINISHED_HISTORY_DIR_NAME,
     REHYDRATE_COMMIT_NAME,
@@ -36,7 +40,9 @@ from project_contract import (
     is_tools_deployable_file,
     path_disposition,
     require_project_eligible,
+    safe_load_global_yaml,
     transfer_exclude_reason,
+    validate_service_endpoint,
     ztp_prefix_publication_relative,
 )
 
@@ -407,7 +413,28 @@ def _add_reproducible_source(
     )
     info = _tarinfo_from_metadata(initial, arcname, linkname=linkname)
     selected = package_filter(info)
+    bound_input = getattr(package_filter, "bound_inputs_by_member", {}).get(arcname)
     if selected is None:
+        if bound_input is not None:
+            raise ValueError(f"bound package input was excluded: {arcname}")
+        return
+
+    if bound_input is not None:
+        if (not stat.S_ISREG(initial.st_mode)
+                or _source_identity(initial) != bound_input.identity
+                or initial.st_size != len(bound_input.payload)):
+            raise ValueError(f"bound package input changed before archive: {source}")
+        held_info = _materialize_reproducible_tarinfo(
+            _tarinfo_from_metadata(initial, arcname), initial,
+        )
+        selected_held = package_filter(held_info)
+        if selected_held is None:
+            raise ValueError(f"bound package input was excluded: {arcname}")
+        archive.addfile(selected_held, fileobj=io.BytesIO(bound_input.payload))
+        _require_entry_identity(
+            source, initial, parent_fd=parent_fd, entry_name=entry_name,
+            label="after bound-byte archive",
+        )
         return
 
     if stat.S_ISREG(initial.st_mode):
@@ -1702,16 +1729,263 @@ def remote_locked_archive_argv(
     ]
 
 
+PACKAGE_SUBNET_COLUMNS = frozenset({
+    "shared_network", "subnet", "netmask", "range_start", "range_end",
+    "routers", "ztp_service_ip", "cumulus_profile", "nvos_ztp",
+})
+PACKAGE_LEGACY_SUBNET_COLUMNS = frozenset({
+    "bootfile_name", "cumulus_provision_url",
+})
+
+
+class _BoundProjectInput:
+    """One pre-output no-follow source snapshot, including its pathname identity."""
+
+    def __init__(self, project: Path, name: str, project_identity: tuple[int, ...],
+                 identity: tuple[int, ...], payload: bytes):
+        self.project = project
+        self.name = name
+        self.project_identity = project_identity
+        self.identity = identity
+        self.payload = payload
+        self.sha256 = hashlib.sha256(payload).hexdigest()
+
+    @property
+    def member_name(self) -> str:
+        return f"./{self.project.relative_to(ROOT).as_posix()}/{self.name}"
+
+
+def _package_project_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    """Bind the directory object, not unrelated child-entry timestamps."""
+    return metadata.st_dev, metadata.st_ino, metadata.st_mode
+
+
+def _read_package_project_input(
+    project: Path, name: str, *, maximum_size: int | None = None,
+) -> _BoundProjectInput:
+    """Bind a project member via held directory and leaf descriptors."""
+    required = getattr(os, "O_DIRECTORY", 0) and getattr(os, "O_NOFOLLOW", 0)
+    if not required:
+        raise ValueError("package input no-follow directory binding is unavailable")
+    directory_flags = (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                       | getattr(os, "O_CLOEXEC", 0))
+    source_flags = (os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                    | getattr(os, "O_CLOEXEC", 0))
+    try:
+        directory_fd = os.open(project, directory_flags)
+    except OSError as exc:
+        raise ValueError(f"cannot bind package project: {project}") from exc
+    try:
+        project_stat = os.fstat(directory_fd)
+        if (not stat.S_ISDIR(project_stat.st_mode)
+                or _package_project_identity(project.lstat())
+                != _package_project_identity(project_stat)):
+            raise ValueError(f"package project identity changed: {project}")
+        try:
+            leaf_stat = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            source_fd = os.open(name, source_flags, dir_fd=directory_fd)
+        except OSError as exc:
+            raise ValueError(f"cannot bind package input {project / name}") from exc
+        try:
+            before = os.fstat(source_fd)
+            if (not stat.S_ISREG(before.st_mode)
+                    or _source_identity(before) != _source_identity(leaf_stat)
+                    or before.st_size <= 0
+                    or (maximum_size is not None and before.st_size > maximum_size)):
+                raise ValueError(f"package input must be a regular file within the selected size limit: {project / name}")
+            remaining = before.st_size
+            chunks = []
+            while remaining:
+                chunk = os.read(source_fd, min(remaining, 65536))
+                if not chunk:
+                    raise ValueError(f"package input changed while reading: {project / name}")
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            if os.read(source_fd, 1):
+                raise ValueError(f"package input grew while reading: {project / name}")
+            if (_source_identity(os.fstat(source_fd)) != _source_identity(before)
+                    or _source_identity(os.stat(
+                        name, dir_fd=directory_fd, follow_symlinks=False,
+                    )) != _source_identity(before)):
+                raise ValueError(f"package input changed while reading: {project / name}")
+            return _BoundProjectInput(
+                project, name, _package_project_identity(project_stat),
+                _source_identity(before), b"".join(chunks),
+            )
+        finally:
+            os.close(source_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _package_status(mapping: object, field: str) -> bool:
+    if not isinstance(mapping, dict):
+        raise ValueError(f"{field} must be an explicit mapping")
+    value = mapping.get("status")
+    if not isinstance(value, str):
+        raise ValueError(f"{field}.status must be enabled or disabled")
+    normalized = value.strip().casefold()
+    if normalized not in {"enabled", "disabled"}:
+        raise ValueError(f"{field}.status must be enabled or disabled")
+    return normalized == "enabled"
+
+
+def _validate_package_project_inputs(
+    global_input: _BoundProjectInput, subnet_input: _BoundProjectInput,
+) -> None:
+    """Parse only the R22 cross-input contract from the exact held bytes."""
+    try:
+        data = safe_load_global_yaml(global_input.payload.decode("utf-8"))
+    except (UnicodeError, yaml.YAMLError, ValueError) as exc:
+        raise ValueError(f"package global YAML is invalid: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError("package global YAML must be a mapping")
+    common = data.get("common")
+    mgmt = common.get("mgmt") if isinstance(common, dict) else None
+    if not isinstance(mgmt, dict):
+        raise ValueError("package global common.mgmt must be a mapping")
+    dhcp_enabled = _package_status(mgmt.get("dhcp-server"), "common.mgmt.dhcp-server")
+    ztp_enabled = _package_status(mgmt.get("ztp"), "common.mgmt.ztp")
+    if not dhcp_enabled and ztp_enabled:
+        raise ValueError("DHCP disabled with global ZTP enabled is illegal")
+    try:
+        source = subnet_input.payload.decode("utf-8-sig")
+    except UnicodeError as exc:
+        raise ValueError("package subnet CSV must be UTF-8") from exc
+    if not source.strip():
+        raise ValueError("package subnet CSV cannot be zero-byte or whitespace-only")
+    reader = csv.DictReader(io.StringIO(source, newline=""))
+    fields = [str(item or "").strip() for item in (reader.fieldnames or [])]
+    if (len(fields) != len(set(fields))
+            or not PACKAGE_SUBNET_COLUMNS.issubset(fields)
+            or PACKAGE_LEGACY_SUBNET_COLUMNS & {field.casefold() for field in fields}):
+        raise ValueError("package subnet CSV header is not canonical")
+    reader.fieldnames = fields
+    rows = 0
+    any_platform_ztp = False
+    seen_network_names: set[str] = set()
+    dynamic_ranges: list[tuple[str, ipaddress.IPv4Address, ipaddress.IPv4Address]] = []
+    service_endpoints: list[tuple[str, ipaddress.IPv4Address]] = []
+    # DictReader counts records, not physical source lines. Preserve the
+    # original line span in diagnostics, including skipped empty lines and
+    # quoted fields that contain newlines.
+    physical_lines = source.splitlines(keepends=True)
+    previous_record_end = reader.line_num
+    for row in reader:
+        record_end = reader.line_num
+        record_start = previous_record_end + 1
+        while (record_start < record_end
+               and physical_lines[record_start - 1] in {"\n", "\r\n", "\r"}):
+            record_start += 1
+        line = (str(record_start) if record_start == record_end
+                else f"{record_start}-{record_end}")
+        previous_record_end = record_end
+        if None in row:
+            raise ValueError(f"package subnet CSV row {line} has surplus fields")
+        if not any(str(value or "").strip() for value in row.values()):
+            # A physical blank/whitespace tail is harmless. A parsed record
+            # made of delimiters or quoted empty cells is not that tail and
+            # must not masquerade as the disabled/header-only empty table.
+            if "".join(physical_lines[record_start - 1:record_end]).strip():
+                raise ValueError(
+                    f"package subnet CSV row {line} has no semantic fields"
+                )
+            continue
+        rows += 1
+        name = str(row.get("shared_network") or "").strip()
+        if not name or name in seen_network_names:
+            raise ValueError(f"package subnet CSV row {line} has empty/duplicate shared_network")
+        seen_network_names.add(name)
+        profile = str(row.get("cumulus_profile") or "").strip().casefold()
+        nvos = str(row.get("nvos_ztp") or "").strip().casefold()
+        if profile not in {"oob", "oobofoob", "none"} or nvos not in {"yes", "no"}:
+            raise ValueError(f"package subnet CSV row {line} has invalid ZTP selection")
+        selected = profile != "none" or nvos == "yes"
+        any_platform_ztp |= selected
+        service_text = str(row.get("ztp_service_ip") or "").strip()
+        if selected != bool(service_text):
+            raise ValueError(f"package subnet CSV row {line} has inconsistent ZTP service IP")
+        try:
+            network = ipaddress.IPv4Network(
+                f"{str(row['subnet']).strip()}/{str(row['netmask']).strip()}",
+                strict=False,
+            )
+            start = ipaddress.IPv4Address(str(row["range_start"]).strip())
+            end = ipaddress.IPv4Address(str(row["range_end"]).strip())
+            router = ipaddress.IPv4Address(str(row["routers"]).strip())
+            if not (start in network and end in network and router in network
+                    and start <= end and not start <= router <= end):
+                raise ValueError("range/router not valid for network")
+            if service_text:
+                service = validate_service_endpoint(
+                    service_text, field=f"package subnet CSV row {line} ztp_service_ip",
+                ).address
+                if (service in network
+                        and (service in (network.network_address, network.broadcast_address)
+                             or start <= service <= end)):
+                    raise ValueError("ZTP service IP is not a usable host outside dynamic range")
+                service_endpoints.append((line, service))
+        except (ValueError, AttributeError, TypeError) as exc:
+            raise ValueError(f"package subnet CSV row {line} is invalid: {exc}") from exc
+        dynamic_ranges.append((line, start, end))
+        if selected and not ztp_enabled:
+            raise ValueError(
+                f"package subnet CSV row {line} enables platform ZTP while global ZTP is disabled"
+            )
+    for service_line, service in service_endpoints:
+        for range_line, start, end in dynamic_ranges:
+            if start <= service <= end:
+                raise ValueError(
+                    f"package subnet CSV row {service_line} ZTP service IP is "
+                    f"inside row {range_line} dynamic range"
+                )
+    if dhcp_enabled and rows == 0:
+        raise ValueError("DHCP enabled requires at least one valid subnet row")
+    if ztp_enabled and rows and not any_platform_ztp:
+        raise ValueError("global ZTP enabled requires at least one selected platform row")
+
+
+def _bind_package_project_inputs(
+    projects: list[Path], *, maximum_size: int | None,
+) -> dict[str, tuple[_BoundProjectInput, ...]]:
+    bound: dict[str, tuple[_BoundProjectInput, ...]] = {}
+    for project in projects:
+        inputs = (
+            _read_package_project_input(project, "01-global.yaml", maximum_size=maximum_size),
+            _read_package_project_input(project, "02-dhcp-subnet_config.csv", maximum_size=maximum_size),
+        )
+        _validate_package_project_inputs(*inputs)
+        bound[project.relative_to(ROOT).as_posix()] = inputs
+    return bound
+
+
+def _recheck_package_project_inputs(
+    bound: dict[str, tuple[_BoundProjectInput, ...]],
+) -> None:
+    for inputs in bound.values():
+        for item in inputs:
+            fresh = _read_package_project_input(
+                item.project, item.name, maximum_size=len(item.payload),
+            )
+            if (fresh.project_identity != item.project_identity
+                    or fresh.identity != item.identity
+                    or fresh.payload != item.payload):
+                raise ValueError(f"package input drifted before publication: {item.project / item.name}")
+
+
 def create_package(
     args: argparse.Namespace, *, day0_all: bool = True, artifact_kind: str,
 ) -> Path:
     if artifact_kind not in ARTIFACT_KINDS:
         raise ValueError(f"unsupported artifact kind: {artifact_kind!r}")
     project = resolve_project(args.project)
+    packaged_projects = (
+        sorted({project, *project_directories()}) if day0_all else [project]
+    ) if artifact_kind != "download" else []
     selected_p2p_by_project = (
         {
             item.relative_to(ROOT).as_posix(): select_upload_p2p(item)
-            for item in (project_directories() if day0_all else [project])
+            for item in packaged_projects
         }
         if artifact_kind != "download" else {}
     )
@@ -1755,6 +2029,14 @@ def create_package(
         artifact_kind=artifact_kind,
     )
     _reject_selected_special_sources(package_filter)
+    bound_inputs = _bind_package_project_inputs(
+        packaged_projects,
+        maximum_size=(package_filter.max_file_size or None),
+    ) if artifact_kind != "download" else {}
+    package_filter.bound_inputs_by_member = {
+        item.member_name: item
+        for inputs in bound_inputs.values() for item in inputs
+    }
     output.parent.mkdir(parents=True, exist_ok=True)
     directory_flags = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
                        | getattr(os, "O_NOFOLLOW", 0)
@@ -1929,6 +2211,14 @@ def create_package(
             missing = sorted(required - names)
             if missing:
                 raise RuntimeError("package verification missing: " + ", ".join(missing))
+            for inputs in bound_inputs.values():
+                for item in inputs:
+                    member = archive.getmember(item.member_name)
+                    if not member.isfile():
+                        raise ValueError(f"bound package input is not regular: {item.member_name}")
+                    extracted = archive.extractfile(member)
+                    if extracted is None or extracted.read() != item.payload:
+                        raise ValueError(f"bound package input bytes differ in archive: {item.member_name}")
             if policy_member_name is not None:
                 policy_member = archive.getmember(policy_member_name)
                 if not policy_member.isfile():
@@ -1985,9 +2275,11 @@ def create_package(
             else:
                 if not stat.S_ISREG(existing.st_mode):
                     raise ValueError("--force can replace only a regular archive")
+            _recheck_package_project_inputs(bound_inputs)
             os.replace(temporary_name, output.name,
                        src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
         else:
+            _recheck_package_project_inputs(bound_inputs)
             os.link(temporary_name, output.name,
                     src_dir_fd=parent_fd, dst_dir_fd=parent_fd,
                     follow_symlinks=False)
