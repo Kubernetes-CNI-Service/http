@@ -5145,11 +5145,50 @@ def validate_and_publish_release(
         output_hashes = dhcp.get("outputs")
         if not isinstance(output_hashes, dict):
             raise LoadError("DHCP release manifest 缺少 outputs hash")
+        counts = dhcp.get("counts")
+        family_counts = (counts.get("host_declarations_by_family")
+                         if isinstance(counts, dict) else None)
+        legacy_nonempty = counts is None or (
+            isinstance(counts, dict)
+            and "host_declarations_by_family" not in counts
+        )
+        if not legacy_nonempty and (
+            not isinstance(family_counts, dict)
+            or set(family_counts) != {"eth", "ib", "nvl"}
+            or any(type(value) is not int or value < 0
+                   for value in family_counts.values())
+        ):
+            raise LoadError("DHCP release host_declarations_by_family 无效")
+        host_declaration = re.compile(
+            rb"(?m)^\s*host\s+[A-Za-z0-9][A-Za-z0-9._-]*\s*\{\s*$"
+        )
         for source in dhcp_file_mappings():
             item = output_hashes.get(source.name)
             expected_hash = item.get("sha256") if isinstance(item, dict) else None
-            if expected_hash != _sha256_path(source):
+            family = {
+                "dhcpd_eth.hosts": "eth",
+                "dhcpd_ib.hosts": "ib",
+                "dhcpd_nvl.hosts": "nvl",
+            }.get(source.name)
+            if family is None:
+                actual_hash = _sha256_path(source)
+            else:
+                host_bytes = source.read_bytes()
+                actual_hash = hashlib.sha256(host_bytes).hexdigest()
+            if expected_hash != actual_hash:
                 raise LoadError(f"DHCP release 输出 hash 漂移：{source.name}")
+            if family is not None:
+                if legacy_nonempty:
+                    if not host_bytes:
+                        raise LoadError(
+                            f"DHCP release {source.name} 无计数证明且内容为空"
+                        )
+                    continue
+                actual_count = len(host_declaration.findall(host_bytes))
+                if actual_count != family_counts[family]:
+                    raise LoadError(
+                        f"DHCP release {source.name} host count 与当前内容不一致"
+                    )
         components["dhcp"] = {
             "release_id": str(dhcp["release_id"]),
             "manifest_sha256": _sha256_path(dhcp_path),

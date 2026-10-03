@@ -335,6 +335,45 @@ class Req22RuntimeInputTests(unittest.TestCase):
                 LOAD.mount_and_test_dhcp(dry_run=True)
             self.assertEqual(5, run.call_count)
 
+    def test_parent_publication_checks_exact_host_counts(self):
+        from test_cases import test_load_release_transaction as release_fixture
+
+        fixture = release_fixture.ReleaseTransactionTests(
+            "test_writes_parent_release_after_all_components_match",
+        )
+        fixture.setUp()
+        try:
+            output = fixture.ztp / "config/isc-dhcp-server"
+            child_path = output / "dhcp-release-manifest.json"
+            child = json.loads(child_path.read_text(encoding="utf-8"))
+            for family, body in (
+                ("eth", b"host leaf01 {\n}\n"),
+                ("ib", b""),
+                ("nvl", b""),
+            ):
+                name = f"dhcpd_{family}.hosts"
+                (output / name).write_bytes(body)
+                child["outputs"][name]["sha256"] = hashlib.sha256(body).hexdigest()
+            child["counts"] = {"host_declarations_by_family": {
+                "eth": 1, "ib": 0, "nvl": 0,
+            }}
+            child_path.write_text(json.dumps(child), encoding="utf-8")
+            parent = release_fixture.LOAD.validate_and_publish_release(
+                fixture.project, fixture.inputs,
+            )
+            self.assertEqual("passed", parent["validation"])
+            current = fixture.project / "99-output-ztp/current-release.json"
+            before = current.read_bytes()
+            child["counts"]["host_declarations_by_family"]["ib"] = 1
+            child_path.write_text(json.dumps(child), encoding="utf-8")
+            with self.assertRaises(release_fixture.LOAD.LoadError):
+                release_fixture.LOAD.validate_and_publish_release(
+                    fixture.project, fixture.inputs,
+                )
+            self.assertEqual(before, current.read_bytes())
+        finally:
+            fixture.tearDown()
+
 
 if __name__ == "__main__":
     unittest.main()
