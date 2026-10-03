@@ -1527,8 +1527,8 @@ def display_preflight_diff(target_dir: Path, *, limit: int = 240) -> None:
         print(f"完整 diff: {diff_path}")
 
 
-def global_ztp_http_policy(global_yaml: Path) -> tuple[str, int]:
-    """Return the project URL prefix and HTTP listener port together."""
+def global_ztp_http_policy(global_yaml: Path) -> tuple[str, int, str | None]:
+    """Return the project URL prefix, port, and explicit HTTP authority."""
     try:
         document = safe_load_yaml_preserving_mac(
             global_yaml.read_text(encoding="utf-8")
@@ -1538,6 +1538,15 @@ def global_ztp_http_policy(global_yaml: Path) -> tuple[str, int]:
         if not isinstance(http_policy, dict):
             raise ManualZtpError("common.mgmt.http 必须是 mapping")
         port_value = http_policy.get("port", 80)
+        http_address = http_policy.get("address")
+        ztp_policy = document["common"]["mgmt"]["ztp"]
+        if (
+            str(http_policy.get("status") or "").strip().casefold() == "enabled"
+            or str(ztp_policy.get("status") or "").strip().casefold() == "enabled"
+        ) and http_address is None:
+            raise ManualZtpError(
+                "common.mgmt.http.address 必须显式指定独立的 HTTP 服务 IPv4"
+            )
     except (OSError, KeyError, TypeError, yaml.YAMLError) as exc:
         raise ManualZtpError(
             f"无法读取 01-global.yaml 的 common.mgmt.ztp.ztp_url_prefix: {exc}"
@@ -1546,7 +1555,12 @@ def global_ztp_http_policy(global_yaml: Path) -> tuple[str, int]:
         port = validate_service_endpoint(
             "192.0.2.1", port_value, field="common.mgmt.http.port"
         ).port
-        return validate_ztp_url_prefix(prefix), port
+        address = (
+            validate_service_endpoint(
+                http_address, field="common.mgmt.http.address",
+            ).host if http_address is not None else None
+        )
+        return validate_ztp_url_prefix(prefix), port, address
     except ValueError as exc:
         raise ManualZtpError(str(exc)) from exc
 
@@ -1560,7 +1574,7 @@ def provision_urls(
     subnet_csv: Path, global_yaml: Path,
 ) -> list[tuple[ipaddress.IPv4Network, str]]:
     """Derive Cumulus bootstrap URLs from the declarative subnet contract."""
-    prefix, http_port = global_ztp_http_policy(global_yaml)
+    prefix, http_port, http_address = global_ztp_http_policy(global_yaml)
     result = []
     profile_services: dict[str, tuple[ipaddress.IPv4Address, int]] = {}
     nvos_service: tuple[ipaddress.IPv4Address, int] | None = None
@@ -1671,9 +1685,13 @@ def provision_urls(
             if profile == "none":
                 continue
             assert service_ip is not None
+            if http_address is None:
+                raise ManualZtpError(
+                    "common.mgmt.http.address 必须显式指定独立的 HTTP 服务 IPv4"
+                )
             filename = f"ztp-bootstrap_{profile}.sh"
             endpoint = validate_service_endpoint(
-                str(service_ip), http_port, field="manual ZTP service IPv4"
+                http_address, http_port, field="common.mgmt.http.address"
             )
             url = service_url(
                 endpoint, f"/{filename}", prefix=prefix, channel="manual-ztp"

@@ -2760,6 +2760,11 @@ def _validate_global_yaml(path, section_key="eth"):
         except (KeyError, TypeError, ValueError, AttributeError) as exc:
             errors.append(f"  common.mgmt.http.port 无效：{exc}")
         else:
+            if (str(http_policy.get("status", "")).strip().casefold() == "enabled"
+                    and "address" not in http_policy):
+                errors.append(
+                    "  common.mgmt.http.address 必须显式指定独立的 HTTP 服务 IPv4"
+                )
             if "address" in http_policy:
                 try:
                     validate_service_endpoint(

@@ -354,44 +354,20 @@ def detect_route_source_ipv4(target: str) -> str:
 def determine_http_source_ip(
     servers: list[dict[str, str]], explicit_ip: str | None = None
 ) -> str:
-    if explicit_ip:
-        try:
-            return validate_local_service_endpoint(
-                explicit_ip,
-                field="--http-server-ip",
-                local_addresses=_local_ipv4_addresses,
-            ).host
-        except ValueError as exc:
-            raise DeployError(
-                f"--http-server-ip 不是本机可用服务 IPv4：{explicit_ip}"
-            ) from exc
-    if not servers:
-        raise DeployError("没有有效的 type=server 目标，无法通过设备路由确定 HTTP Server 地址")
-
-    routes: list[tuple[str, str, str]] = []
-    for server in servers:
-        source = detect_route_source_ipv4(server["address"])
-        routes.append((server["hostname"], server["address"], source))
-        print(f"[INFO] 路由 {server['hostname']} ({server['address']}) → 本机源地址 {source}")
-
-    unique_sources = {source for _hostname, _address, source in routes}
-    if len(unique_sources) != 1:
-        details = "; ".join(
-            f"{hostname}({address})={source}" for hostname, address, source in routes
-        )
+    if not explicit_ip:
         raise DeployError(
-            "目标设备使用了不同的本机出接口源地址，单一 setup 脚本无法安全复用：" + details
+            "必须显式提供独立的 --http-server-ip；"
+            "不得根据目标设备路由推导 HTTP 服务 IPv4"
         )
-    source = unique_sources.pop()
     try:
         return validate_local_service_endpoint(
-            source,
-            field="route-selected HTTP source IPv4",
+            explicit_ip,
+            field="--http-server-ip",
             local_addresses=_local_ipv4_addresses,
         ).host
     except ValueError as exc:
         raise DeployError(
-            f"路由选择的 HTTP 源地址不是本机可用服务 IPv4：{source}"
+            f"--http-server-ip 不是本机可用服务 IPv4：{explicit_ip}"
         ) from exc
 
 
@@ -871,7 +847,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--http-server-ip", "--bond0-ip", dest="http_server_ip",
-        help="特殊环境显式指定 HTTP Server IPv4；--bond0-ip 作为兼容别名保留",
+        help="setup 必须显式指定 HTTP Server IPv4；--bond0-ip 作为兼容别名保留",
     )
     parser.add_argument("--user", default=getpass.getuser(), help="首次尝试免密登录的 SSH 用户")
     parser.add_argument("--identity", type=Path, help="SSH 私钥或公钥路径")

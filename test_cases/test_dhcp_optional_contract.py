@@ -86,11 +86,13 @@ class DhcpOptionalDirectTests(unittest.TestCase):
     @staticmethod
     def _real_one_listener_plan(root: Path, status: str):
         subnet = root / "02-dhcp-subnet_config.csv"
+        selected = status == "enabled"
         subnet.write_text(
             "shared_network,subnet,netmask,range_start,range_end,routers,"
             "ztp_service_ip,cumulus_profile,nvos_ztp\n"
             "mgmt,192.0.2.0,255.255.255.0,192.0.2.100,192.0.2.120,"
-            "192.0.2.1,192.0.2.10,oob,no\n",
+            + ("192.0.2.1,192.0.2.10,oob,no\n" if selected else
+               "192.0.2.1,,none,no\n"),
             encoding="utf-8",
         )
         links = [{
@@ -117,9 +119,13 @@ class DhcpOptionalDirectTests(unittest.TestCase):
         self.assertEqual(("eno7",), enabled.listener_names)
         self.assertEqual((7,), enabled.listener_ifindexes)
         self.assertEqual(("192.0.2.10",), enabled.endpoint_ips)
-        self.assertEqual(enabled.endpoint_ips, disabled.endpoint_ips)
+        self.assertEqual((), disabled.endpoint_ips)
         self.assertEqual((), disabled.listener_names)
         self.assertEqual((), disabled.listener_ifindexes)
+        self.assertEqual(
+            ("192.0.2.10",),
+            LOAD.replace(settings_for("disabled"), http_address="192.0.2.10").http_listener_ips,
+        )
 
     def test_disabled_supervisor_rejects_nonempty_real_listener_plan(self):
         with tempfile.TemporaryDirectory() as name:
@@ -167,7 +173,7 @@ class DhcpOptionalDirectTests(unittest.TestCase):
     def test_disabled_dhcp_keeps_eligible_native_http_available(self):
         settings = LOAD.replace(
             settings_for("disabled"), http_root=LOAD.HTTP_ROOT,
-            ztp_ips={"air_oob": ("192.0.2.10",)},
+            http_address="192.0.2.10",
         )
         with mock.patch.object(
             LOAD, "local_ipv4_addresses", return_value={"192.0.2.10"},
@@ -183,7 +189,7 @@ class DhcpOptionalDirectTests(unittest.TestCase):
     def test_disabled_dhcp_keeps_http_only_supervisor_plan_available(self):
         settings = LOAD.replace(
             settings_for("disabled"), http_root=LOAD.HTTP_ROOT,
-            ztp_ips={"air_oob": ("192.0.2.10",)},
+            http_address="192.0.2.10",
         )
         inputs = SimpleNamespace(settings=settings)
         plan = SimpleNamespace(listener_names=(), endpoint_ips=("192.0.2.10",))
@@ -245,8 +251,12 @@ class DhcpOptionalDirectTests(unittest.TestCase):
         verify_http.assert_called_once_with(inputs, {}, False)
 
     def test_disabled_status_still_rejects_nonempty_listener_plan(self):
-        disabled = SimpleNamespace(settings=settings_for("disabled"))
-        enabled = SimpleNamespace(settings=settings_for("enabled"))
+        disabled = SimpleNamespace(settings=LOAD.replace(
+            settings_for("disabled"), http_enabled=False,
+        ))
+        enabled = SimpleNamespace(settings=LOAD.replace(
+            settings_for("enabled"), http_enabled=False,
+        ))
         plan = SimpleNamespace(listener_names=("eno7",), endpoint_ips=())
         with self.assertRaisesRegex(LOAD.LoadError, "DHCP listener 规划非空"):
             LOAD.supervisor_service_availability(disabled, plan)
@@ -257,7 +267,7 @@ class DhcpOptionalDirectTests(unittest.TestCase):
 
     def test_disabled_status_still_omits_infra_install_flag(self):
         settings = LOAD.replace(
-            settings_for("disabled"), ztp_ips={"air_oob": ("192.0.2.10",)},
+            settings_for("disabled"), http_address="192.0.2.10",
         )
         inputs = SimpleNamespace(
             settings=settings, global_file=Path("01-global.yaml"),

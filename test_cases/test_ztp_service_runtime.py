@@ -1034,7 +1034,9 @@ class ContainerRuntimeWorkflowContractTests(unittest.TestCase):
                 return "DHCPDISCOVER from 02:00:00:00:00:01\n"
 
         plan = SimpleNamespace(listener_names=("eno2",), listener_ifindexes=(7,))
-        inputs = SimpleNamespace(settings=SimpleNamespace(service_ips=()))
+        inputs = SimpleNamespace(settings=SimpleNamespace(
+            service_ips=(), http_enabled=False, http_address=None,
+        ))
         forbidden = AssertionError(
             "supervisor workflow must not invoke systemctl or journalctl"
         )
@@ -1113,7 +1115,9 @@ class ContainerRuntimeWorkflowContractTests(unittest.TestCase):
                 events.append(("restart", service))
                 active[service] = True
 
-        inputs = SimpleNamespace(settings=SimpleNamespace(service_ips=()))
+        inputs = SimpleNamespace(settings=SimpleNamespace(
+            service_ips=(), http_enabled=False, http_address=None,
+        ))
         with mock.patch.object(
             load, "ensure_ztp_url_network_ready",
             side_effect=AssertionError("DHCP-only plan has no HTTP endpoint"),

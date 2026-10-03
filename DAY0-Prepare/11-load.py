@@ -96,7 +96,6 @@ from project_contract import (
     SWITCH_SCHEMA_FAMILIES,
     detect_global_schema_version,
     device_visible_urls,
-    merge_http_listener_addresses,
     normalize_issue_tracker_policy,
     normalize_v2_mlag_policy,
     normalize_v2_vrr_policy,
@@ -338,8 +337,12 @@ class GlobalSettings:
 
     @property
     def http_listener_ips(self) -> tuple[str, ...]:
-        """Apache listens on the union of ZTP and independent HTTP authority."""
-        return merge_http_listener_addresses(self.service_ips, self.http_address)
+        """Apache binds only the explicitly declared HTTP authority."""
+        if not self.http_enabled:
+            return ()
+        if not self.http_address:
+            raise LoadError("common.mgmt.http.address 必须显式指定独立的 HTTP 服务 IPv4")
+        return (self.http_address,)
 
 
 def publication_plan_for(
@@ -347,25 +350,25 @@ def publication_plan_for(
     image_names: tuple[tuple[str, str], ...],
 ) -> PublicationPlan:
     """Bind declarative project URLs to the same endpoints Apache will listen on."""
+    http_addresses = settings.http_listener_ips
+    active_roles = tuple(
+        role for role in SERVICE_IP_PRIORITY if settings.ztp_ips.get(role)
+    )
+    if (active_roles or settings.boot_ips) and not http_addresses:
+        raise LoadError(
+            "ZTP publication requires enabled common.mgmt.http.address"
+        )
+    http_endpoint = (
+        validate_service_endpoint(
+            http_addresses[0], settings.http_port,
+            field="common.mgmt.http.address",
+        ) if http_addresses else None
+    )
     return PublicationPlan(
         endpoints_by_role=tuple(
-            (role, tuple(
-                validate_service_endpoint(
-                    address, settings.http_port,
-                    field=f"{role} ZTP service IPv4",
-                )
-                for address in settings.ztp_ips.get(role, ())
-            ))
-            for role in SERVICE_IP_PRIORITY
-            if settings.ztp_ips.get(role)
+            (role, (http_endpoint,)) for role in active_roles
         ),
-        boot_endpoints=tuple(dict.fromkeys(
-            validate_service_endpoint(
-                address, settings.http_port,
-                field="NVOS boot service IPv4",
-            )
-            for address in settings.boot_ips
-        )),
+        boot_endpoints=(http_endpoint,) if settings.boot_ips else (),
         ztp_prefix=settings.ztp_prefix,
         pubkey_names=pubkey_names,
         image_names=image_names,
@@ -1044,6 +1047,10 @@ def load_global(
     except ValueError as exc:
         raise LoadError(str(exc)) from exc
     http_address = None
+    if http_enabled and "address" not in http:
+        raise LoadError(
+            "common.mgmt.http.address 必须显式指定独立的 HTTP 服务 IPv4"
+        )
     if "address" in http:
         try:
             http_address = validate_service_endpoint(
@@ -3277,6 +3284,12 @@ def plan_local_dhcp_runtime(
     """
     if (link_snapshot is None) != (address_snapshot is None):
         raise LoadError("DHCP listener 规划必须同时提供 link/address 快照")
+    if not inputs.settings.dhcp_enabled:
+        # External DHCP may still use fully validated address data, but it
+        # must not require or authorize this project's relay/listener plan.
+        validate_subnet_file(inputs.subnet_file, inputs.settings)
+        info("DHCP 已禁用；CSV 已校验，本地 listener 规划为 0")
+        return DhcpRuntimePlan((), (), (), (), (), ())
     if link_snapshot is None:
         link_snapshot, address_snapshot = _local_ip_json_snapshots(
             command_runner=command_runner,
@@ -3295,17 +3308,11 @@ def plan_local_dhcp_runtime(
             address_snapshot=address_snapshot,
             allowlist=allowlist,
             relay_ingress=relay_ingress,
+            dhcp_enabled=inputs.settings.dhcp_enabled,
+            ztp_enabled=inputs.settings.ztp_enabled,
         )
     except RuntimeContractError as exc:
         raise LoadError(f"DHCP listener 动态规划失败：{exc}") from exc
-    if not inputs.settings.dhcp_enabled:
-        # The CSV still supplies HTTP/ZTP endpoint identity, but a disabled
-        # DHCP service must not inherit a listener from otherwise valid rows.
-        plan = replace(
-            plan, listener_names=(), listener_ifindexes=(),
-            direct_shared_networks=(), relay_shared_networks=(),
-            dhcp_only_shared_networks=(),
-        )
     if plan.listener_names:
         ok(
             "DHCP listener 动态规划通过："
@@ -3819,6 +3826,19 @@ def render_ztp_runtime(
             )
         if configured:
             scripts.append((filename, next(iter(configured))))
+    http_endpoint = None
+    if scripts or prod_oob_ips:
+        if not settings.http_address:
+            raise LoadError(
+                "common.mgmt.http.address 必须显式指定独立的 HTTP 服务 IPv4"
+            )
+        try:
+            http_endpoint = validate_service_endpoint(
+                settings.http_address, settings.http_port,
+                field="common.mgmt.http.address",
+            )
+        except ValueError as exc:
+            raise LoadError(str(exc)) from exc
     deployable_keys = deployable_pubkeys(pubkeys)
     if not deployable_keys:
         raise LoadError("ZTP 至少需要一个非空 SSH 公钥")
@@ -3836,24 +3856,21 @@ def render_ztp_runtime(
     template_text = template.read_text(encoding="utf-8")
     manual_urls = {}
     for filename, address in scripts:
-        endpoint = validate_service_endpoint(
-            address, settings.http_port, field="bootstrap service IPv4"
-        )
         if filename == "ztp-bootstrap_oobofoob.sh":
             manual_urls[filename] = service_url(
-                endpoint, f"/{filename}", prefix=settings.ztp_prefix,
+                http_endpoint, f"/{filename}", prefix=settings.ztp_prefix,
                 channel="bootstrap-manual-oobofoob",
             )
         else:
             manual_urls[filename] = service_url(
-                endpoint, f"/{filename}", prefix=settings.ztp_prefix,
+                http_endpoint, f"/{filename}", prefix=settings.ztp_prefix,
                 channel="bootstrap-manual-oob",
             )
     for filename, address in scripts:
         script = ZTP_DIR / filename
 
         rendered = render_bootstrap_script_text(
-            template_text, address=address, port=settings.http_port,
+            template_text, address=http_endpoint.host, port=settings.http_port,
             prefix=settings.ztp_prefix, manual_urls=manual_urls,
             upgrade_enabled=upgrade_enabled, key_names=key_names,
             eth_version=eth_version, script_name=script.name,
@@ -3889,19 +3906,16 @@ def render_ztp_runtime(
             ping_hosts = ztp["01-connectivity-check"]["ping-hosts"]
             if not isinstance(ping_hosts, list) or not ping_hosts:
                 raise TypeError("01-connectivity-check.ping-hosts 必须是非空列表")
-            ping_hosts[0] = prod_oob_ips[0]
-            endpoint = validate_service_endpoint(
-                prod_oob_ips[0], settings.http_port, field="NVOS ZTP service IPv4"
-            )
+            ping_hosts[0] = http_endpoint.host
             ztp["02-commands-list"]["url"] = (
                 service_url(
-                    endpoint, "/config/nvos/disable-password-hardening.nv",
+                    http_endpoint, "/config/nvos/disable-password-hardening.nv",
                     prefix=settings.ztp_prefix, channel="nvos-commands-list",
                 )
             )
             ztp["03-provisioning-script"]["url"] = (
                 service_url(
-                    endpoint, "/ztp-bootstrap_oob.sh",
+                    http_endpoint, "/ztp-bootstrap_oob.sh",
                     prefix=settings.ztp_prefix, channel="nvos-provisioning",
                 )
             )
@@ -3939,13 +3953,17 @@ def render_ztp_runtime(
 
 
 def select_http_ip(settings: GlobalSettings) -> str:
-    local = local_ipv4_addresses()
-    for address in settings.service_ips:
-        if address in local:
-            return address
-    if settings.service_ips:
-        return settings.service_ips[0]
-    raise LoadError("DHCP subnet CSV 没有可用于 HTTP Server 的 service_ip")
+    if not settings.http_address:
+        raise LoadError(
+            "common.mgmt.http.address 必须显式指定独立的 HTTP 服务 IPv4；"
+            "不得从 DHCP subnet 的 ztp_service_ip 推导"
+        )
+    try:
+        return validate_service_endpoint(
+            settings.http_address, field="common.mgmt.http.address",
+        ).host
+    except ValueError as exc:
+        raise LoadError(str(exc)) from exc
 
 
 def management_has_mellanox_nic() -> bool:
@@ -7002,6 +7020,14 @@ def validate_management_host(settings: GlobalSettings, dry_run: bool = False) ->
     return False
 
 
+def supervisor_http_required(inputs: ProjectInputs, plan: DhcpRuntimePlan) -> bool:
+    """Include explicit HTTP authority even when DHCP has no local plan."""
+    return bool(
+        plan.endpoint_ips
+        or (inputs.settings.http_enabled and inputs.settings.http_address)
+    )
+
+
 def supervisor_service_availability(
     inputs: ProjectInputs, plan: DhcpRuntimePlan, dry_run: bool = False,
 ) -> tuple[bool, bool]:
@@ -7014,7 +7040,9 @@ def supervisor_service_availability(
     the legacy systemd decision unchanged while allowing only the services
     explicitly justified by the container plan.
     """
-    http_available = bool(plan.endpoint_ips)
+    # A disabled local DHCP server has no DHCP runtime endpoints, but an
+    # independently configured HTTP listener can still serve this host.
+    http_available = supervisor_http_required(inputs, plan)
     dhcp_available = bool(plan.listener_names)
     if http_available and not validate_management_host(inputs.settings, dry_run):
         raise LoadError(
@@ -7294,7 +7322,7 @@ def preflight_services(
     backend = runtime_backend or service_runtime_backend()
     if backend.name == "supervisor":
         plan = dhcp_runtime_plan or plan_local_dhcp_runtime(inputs)
-        http_required = bool(plan.endpoint_ips)
+        http_required = supervisor_http_required(inputs, plan)
         dhcp_required = bool(plan.listener_names)
         if http_required:
             verify_control_auth(runtime_backend=backend, dry_run=dry_run)
@@ -7431,53 +7459,42 @@ def ensure_ztp_url_network_ready(
     inputs: ProjectInputs, *, dry_run: bool = False,
 ) -> None:
     """Gate the DHCP restart on every URL IP being configured locally."""
-    bindings, references = ztp_url_network_requirements(inputs)
+    addresses = inputs.settings.http_listener_ips
+    if not addresses:
+        raise LoadError("ZTP URL 发布需要启用 common.mgmt.http.address")
     if dry_run:
         info(
             "dry-run：重启 DHCP 前将逐一检查本地 endpoint："
-            + ", ".join(inputs.settings.service_ips)
+            + ", ".join(addresses)
         )
-        if bindings:
-            info("dry-run：其中 on-link endpoint 还将校验前缀：" + ", ".join(bindings))
         return
     while True:
         assignments = _local_ipv4_assignments()
         missing_addresses = missing_service_ip_addresses(
-            inputs.settings.service_ips, assignments,
+            addresses, assignments,
         )
-        missing_bindings = missing_ztp_url_bindings(bindings, assignments)
-        if not missing_addresses and not missing_bindings:
+        if not missing_addresses:
             details = []
-            expected = {binding.split("/", 1)[0]: binding for binding in bindings}
-            for address in inputs.settings.service_ips:
+            for address in addresses:
                 names = ",".join(
                     sorted(
                         f"{name}/{prefix}"
                         for name, prefix in assignments.get(address, set())
                     )
                 )
-                label = expected.get(address, address)
-                details.append(f"{label} dev {names}")
+                details.append(f"{address} dev {names}")
             ok(
-                "DHCP 重启门禁：全部 ZTP endpoint 均已配置在本地接口（"
+                "DHCP 重启门禁：全部 HTTP URL endpoint 均已配置在本地接口（"
                 + "；".join(details) + "）"
             )
             return
         if missing_addresses:
             warn(
-                "以下启用 endpoint IP 未配置在本机任何接口："
+                "以下 HTTP URL endpoint IP 未配置在本机任何接口："
                 + ", ".join(missing_addresses)
             )
-            onlink_addresses = {
-                binding.split("/", 1)[0] for binding in bindings
-            }
             for address in missing_addresses:
-                if address not in onlink_addresses:
-                    print(
-                        f"  - {address}（routed/off-link；请按管理网络规划配置正确 CIDR）"
-                    )
-        if missing_bindings:
-            print_ztp_url_network_guidance(missing_bindings, references)
+                print(f"  - {address}（请按管理网络规划配置正确 CIDR）")
         if not sys.stdin.isatty():
             raise LoadError(
                 "非交互模式无法确认接口/路由配置；为避免启动不可用的 DHCP，已停止服务启动"
@@ -7588,7 +7605,7 @@ def start_services(
     plan = dhcp_runtime_plan or plan_local_dhcp_runtime(inputs)
     backend = runtime_backend or service_runtime_backend()
     if backend.name == "supervisor":
-        http_required = bool(plan.endpoint_ips)
+        http_required = supervisor_http_required(inputs, plan)
         dhcp_required = bool(plan.listener_names)
         # This endpoint check can prompt the operator, so it must finish before
         # the first Supervisor mutation.  DHCP-only plans have no URL endpoint

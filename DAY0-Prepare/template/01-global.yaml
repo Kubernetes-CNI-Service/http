@@ -14,6 +14,8 @@ common:
       package: isc-dhcp-server
     http:
       status: enabled
+      # Replace with this management host's explicit HTTP service IPv4.
+      address: 203.0.113.80
       http_root: /var/www/html
       package: apache2
       port: 80

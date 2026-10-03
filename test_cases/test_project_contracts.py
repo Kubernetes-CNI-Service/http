@@ -3072,6 +3072,7 @@ class TemplateContractTests(unittest.TestCase):
                 dhcp_enabled=True, dhcp_package="isc-dhcp-server",
                 http_enabled=True, http_package="apache2",
                 http_root=ROOT, ztp_enabled=True, ztp_prefix="/ztp",
+                http_address="203.0.113.80",
                 ztp_ips={
                     "air_oob": ("192.0.2.10",),
                     "air_oobofoob": ("198.51.100.10",),
@@ -3094,13 +3095,14 @@ class TemplateContractTests(unittest.TestCase):
                 rendered_path = ztp_root / filename
                 rendered = rendered_path.read_text(encoding="utf-8")
                 self.assertIn(
-                    'MANUAL_ZTP_OOB_URL="http://192.0.2.10/ztp/ztp-bootstrap_oob.sh"',
+                    'MANUAL_ZTP_OOB_URL="http://203.0.113.80/ztp/ztp-bootstrap_oob.sh"',
                     rendered,
                 )
                 self.assertIn(
-                    'MANUAL_ZTP_OOBOFOOB_URL="http://198.51.100.10/ztp/ztp-bootstrap_oobofoob.sh"',
+                    'MANUAL_ZTP_OOBOFOOB_URL="http://203.0.113.80/ztp/ztp-bootstrap_oobofoob.sh"',
                     rendered,
                 )
+                self.assertIn('ZTP_SERVER="http://203.0.113.80"', rendered)
                 self.assertNotIn('reset_helper="/usr/local/sbin/http-manual-reset-${role}"', rendered)
                 self.assertNotIn("scheduled Cumulus reinstall", rendered)
                 self.assertIn("legacy reset helpers removed", rendered)
@@ -3137,6 +3139,7 @@ class TemplateContractTests(unittest.TestCase):
                 dhcp_enabled=True, dhcp_package="isc-dhcp-server",
                 http_enabled=True, http_package="apache2",
                 http_root=ROOT, ztp_enabled=True, ztp_prefix="/day0-ztp",
+                http_address="203.0.113.80",
                 ztp_ips={"prod_oob": ("192.0.2.20",)},
                 versions={"eth": "5.16.4"},
             )
@@ -3158,15 +3161,15 @@ class TemplateContractTests(unittest.TestCase):
             self.assertEqual(template_before, (templates / "ztp.json").read_bytes())
             rendered = json.loads((ztp_root / "ztp.json").read_text(encoding="utf-8"))
             self.assertEqual(
-                ["192.0.2.20", "localhost"],
+                ["203.0.113.80", "localhost"],
                 rendered["ztp"]["01-connectivity-check"]["ping-hosts"],
             )
             self.assertEqual(
-                "http://192.0.2.20/day0-ztp/config/nvos/disable-password-hardening.nv",
+                "http://203.0.113.80/day0-ztp/config/nvos/disable-password-hardening.nv",
                 rendered["ztp"]["02-commands-list"]["url"],
             )
             self.assertEqual(
-                "http://192.0.2.20/day0-ztp/ztp-bootstrap_oob.sh",
+                "http://203.0.113.80/day0-ztp/ztp-bootstrap_oob.sh",
                 rendered["ztp"]["03-provisioning-script"]["url"],
             )
 
@@ -4662,14 +4665,19 @@ class DhcpUnifiedInventoryContractTests(unittest.TestCase):
             ROOT / "ztp/config/isc-dhcp-server/c1-generate_dhcp.py",
         )
 
-    def load_subnets(self, root: Path, rows: str, *, prefix: str = "/ztp"):
+    def load_subnets(
+        self, root: Path, rows: str, *, prefix: str = "/ztp",
+        http_address: str = "192.0.2.2",
+    ):
         source = root / "02-dhcp-subnet_config.csv"
         source.write_text(
             "shared_network,subnet,netmask,range_start,range_end,routers,"
             "ztp_service_ip,cumulus_profile,nvos_ztp\n" + rows,
             encoding="utf-8",
         )
-        return self.dhcp.load_subnet_csv(source, prefix)
+        return self.dhcp.load_subnet_csv(
+            source, prefix, http_address=http_address,
+        )
 
     def write_air_production_inventory(self, root: Path, hostnames: list[str]):
         inventory = root / "02-devices_config.csv"
@@ -4942,6 +4950,7 @@ class DhcpUnifiedInventoryContractTests(unittest.TestCase):
                 "cumulus,192.0.2.0,255.255.255.0,192.0.2.100,192.0.2.200,"
                 "192.0.2.1,198.51.100.20,oobofoob,no\n",
                 prefix="/day0/project-ztp/",
+                http_address="198.51.100.20",
             )
             self.dhcp.write_dhcpd_conf(target, subnets)
             subnet_body = target.read_text(encoding="utf-8").split(
@@ -4963,6 +4972,7 @@ class DhcpUnifiedInventoryContractTests(unittest.TestCase):
                 "nvos,192.0.2.0,255.255.255.0,192.0.2.100,192.0.2.200,"
                 "192.0.2.1,198.51.100.30,none,yes\n",
                 prefix="/project-ztp",
+                http_address="198.51.100.30",
             )
             self.dhcp.write_dhcpd_conf(target, subnets)
             subnet_body = target.read_text(encoding="utf-8").split(
@@ -5023,7 +5033,9 @@ class DhcpUnifiedInventoryContractTests(unittest.TestCase):
                 source.write_text(content, encoding="utf-8")
                 output = io.StringIO()
                 with contextlib.redirect_stdout(output), self.assertRaises(SystemExit):
-                    self.dhcp.load_subnet_csv(source, "/ztp")
+                    self.dhcp.load_subnet_csv(
+                        source, "/ztp", http_address="192.0.2.2",
+                    )
                 self.assertRegex(output.getvalue(), message)
 
     def test_pending_mac_and_transit_assignment_do_not_create_fixed_reservation(self):
@@ -6603,6 +6615,7 @@ class ManualZtpContractTests(unittest.TestCase):
         global_yaml.write_text(
             "common:\n"
             "  mgmt:\n"
+            "    http: {address: 192.0.2.2}\n"
             "    ztp:\n"
             f"      ztp_url_prefix: {prefix}\n",
             encoding="utf-8",
@@ -6615,7 +6628,7 @@ class ManualZtpContractTests(unittest.TestCase):
         )
         return subnet_csv, global_yaml
 
-    def test_manual_urls_are_derived_from_service_ip_profile_and_global_prefix(self):
+    def test_manual_urls_use_explicit_http_authority_and_subnet_profile(self):
         with tempfile.TemporaryDirectory() as directory:
             subnet, global_yaml = self.write_ztp_inputs(
                 Path(directory),
@@ -6633,7 +6646,7 @@ class ManualZtpContractTests(unittest.TestCase):
             ),
             (
                 __import__("ipaddress").ip_network("198.51.100.0/24"),
-                "http://198.51.100.2/day0/ztp/ztp-bootstrap_oobofoob.sh",
+                "http://192.0.2.2/day0/ztp/ztp-bootstrap_oobofoob.sh",
             ),
         ], urls)
 

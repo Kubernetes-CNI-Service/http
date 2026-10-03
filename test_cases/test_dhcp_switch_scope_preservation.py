@@ -109,6 +109,7 @@ class ScopedDhcpFixture:
             "schema_version: 1\n"
             "common:\n"
             "  mgmt:\n"
+            "    http: {address: 192.0.2.2}\n"
             "    ztp:\n"
             "      ztp_url_prefix: /ztp\n",
             encoding="utf-8",

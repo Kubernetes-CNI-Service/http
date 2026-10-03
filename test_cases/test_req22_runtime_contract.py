@@ -39,6 +39,7 @@ class Req22RuntimeInputTests(unittest.TestCase):
         (project / "01-global.yaml").write_text(
             "common:\n  mgmt:\n"
             f"    dhcp-server:\n      status: {dhcp}\n"
+            "    http:\n      status: enabled\n      address: 192.0.2.10\n"
             f"    ztp:\n      status: {ztp}\n",
             encoding="utf-8",
         )
@@ -258,7 +259,13 @@ class Req22RuntimeInputTests(unittest.TestCase):
                 source.rename(project / "old-subnet.csv")
                 replacement.rename(source)
                 selected = SimpleNamespace(endpoint_ips=())
-                return selected, [], [], SimpleNamespace()
+                runtime = SimpleNamespace(
+                    inspect_http_listener_owners=lambda *_args, **_kwargs: (
+                        {"ifname": "eno7", "ifindex": 7,
+                         "eligible": True, "reason": None},
+                    ),
+                )
+                return selected, [], [], runtime
 
             with mock.patch.object(
                 ACTIVATE, "build_runtime_plan", side_effect=replace_after_parse,

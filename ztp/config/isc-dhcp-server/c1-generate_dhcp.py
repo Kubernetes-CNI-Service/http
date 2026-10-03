@@ -142,6 +142,19 @@ def load_project_global(path):
         http_policy = data["common"]["mgmt"].get("http", {})
         if not isinstance(http_policy, dict):
             raise ValueError("common.mgmt.http 必须是 mapping")
+        http_enabled = str(http_policy.get("status") or "").strip().casefold() == "enabled"
+        ztp_enabled = str(
+            data["common"]["mgmt"]["ztp"].get("status") or ""
+        ).strip().casefold() == "enabled"
+        if (http_enabled or ztp_enabled) and "address" not in http_policy:
+            raise ValueError(
+                "common.mgmt.http.address 必须显式指定独立的 HTTP 服务 IPv4"
+            )
+        http_address = None
+        if "address" in http_policy:
+            http_address = validate_service_endpoint(
+                http_policy["address"], field="common.mgmt.http.address"
+            ).host
         port_value = http_policy.get("port", 80)
         schema_version = detect_global_schema_version(data)
     except (OSError, yaml.YAMLError) as exc:
@@ -153,7 +166,7 @@ def load_project_global(path):
     port = validate_service_endpoint(
         "192.0.2.1", port_value, field="common.mgmt.http.port"
     ).port
-    return _validate_ztp_url_prefix(value), schema_version, port
+    return _validate_ztp_url_prefix(value), schema_version, port, http_address
 
 
 def load_ztp_url_prefix(path):
@@ -1238,9 +1251,14 @@ def _prepare_dhcp_output_transaction(*, family_records, switch_scope):
 
 # ── Subnet 配置 ───────────────────────────────────────────────────────────────
 
-def load_subnet_csv(path, ztp_prefix, port=80):
+def load_subnet_csv(path, ztp_prefix, port=80, *, http_address=None):
     """Read declarative subnet rows and derive the two platform ZTP URLs."""
     ztp_prefix = _validate_ztp_url_prefix(ztp_prefix)
+    http_endpoint = (
+        validate_service_endpoint(
+            http_address, port, field="HTTP service IPv4",
+        ) if http_address is not None else None
+    )
     required = (
         "shared_network", "subnet", "netmask", "range_start", "range_end",
         "routers", "ztp_service_ip", "cumulus_profile", "nvos_ztp",
@@ -1313,11 +1331,13 @@ def load_subnet_csv(path, ztp_prefix, port=80):
             row["ztp_service_ip"] = service_ip
             row["cumulus_profile"] = profile
             row["nvos_ztp"] = nvos_ztp
+            if service_address is not None and (
+                profile in _CUMULUS_BOOTSTRAP_BY_PROFILE or nvos_ztp == "yes"
+            ) and http_endpoint is None:
+                raise ValueError("HTTP service IPv4 must be explicit")
             row["cumulus_provision_url"] = (
                 service_url(
-                    validate_service_endpoint(
-                        service_ip, port, field="DHCP ZTP service IPv4"
-                    ),
+                    http_endpoint,
                     f"/{_CUMULUS_BOOTSTRAP_BY_PROFILE[profile]}",
                     prefix=ztp_prefix, channel="dhcp-provision-url",
                 )
@@ -1325,9 +1345,7 @@ def load_subnet_csv(path, ztp_prefix, port=80):
             )
             row["bootfile_name"] = (
                 service_url(
-                    validate_service_endpoint(
-                        service_ip, port, field="DHCP ZTP service IPv4"
-                    ),
+                    http_endpoint,
                     "/ztp.json", prefix=ztp_prefix, channel="dhcp-bootfile",
                 )
                 if service_address is not None and nvos_ztp == "yes" else ""
@@ -1674,13 +1692,15 @@ def main():
         print(f"[ERROR] 找不到 {os.path.basename(SUBNET_CSV)}")
         sys.exit(1)
     try:
-        ztp_prefix, schema_version, http_port = load_project_global(GLOBAL_YAML)
+        ztp_prefix, schema_version, http_port, http_address = load_project_global(GLOBAL_YAML)
     except ValueError as exc:
         print(f"[ERROR] {exc}")
         sys.exit(1)
     print(f"读取：{os.path.basename(GLOBAL_YAML)}（ztp_url_prefix={ztp_prefix}）")
     print(f"读取：{os.path.basename(SUBNET_CSV)}")
-    subnets = load_subnet_csv(SUBNET_CSV, ztp_prefix, port=http_port)
+    subnets = load_subnet_csv(
+        SUBNET_CSV, ztp_prefix, port=http_port, http_address=http_address,
+    )
     print(f"  已加载 {len(subnets)} 条 subnet 配置\n")
 
     csv_files = [DEVICES_CSV]

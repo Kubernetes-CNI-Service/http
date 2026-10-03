@@ -88,6 +88,238 @@ def http_owner(
 
 
 class ServiceEndpointConvergenceTests(unittest.TestCase):
+    def test_f02_enabled_http_requires_independent_explicit_address_at_admission(self):
+        document = yaml.safe_load(
+            (ROOT / "DAY0-Prepare/template/01-global.yaml").read_text(
+                encoding="utf-8"
+            )
+        )
+        document["common"]["mgmt"]["http"].pop("address", None)
+        with tempfile.TemporaryDirectory() as directory:
+            global_yaml = Path(directory) / "01-global.yaml"
+            global_yaml.write_text(yaml.safe_dump(document), encoding="utf-8")
+            errors, _warnings = SETUP._validate_global_yaml(global_yaml)
+            self.assertTrue(
+                any("common.mgmt.http.address" in error for error in errors), errors,
+            )
+            with self.assertRaisesRegex(LOAD.LoadError, "common.mgmt.http.address"):
+                LOAD.load_global(global_yaml)
+
+    def test_f02_docker_rejects_missing_explicit_http_address_before_network(self):
+        template = yaml.safe_load(
+            (ROOT / "DAY0-Prepare/template/01-global.yaml").read_text(
+                encoding="utf-8"
+            )
+        )
+        for absent_section in (False, True):
+            with self.subTest(absent_section=absent_section), \
+                    tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                project = root / "DAY0-Prepare" / "fixture"
+                project.mkdir(parents=True)
+                document = yaml.safe_load(yaml.safe_dump(template))
+                if absent_section:
+                    document["common"]["mgmt"].pop("http")
+                else:
+                    document["common"]["mgmt"]["http"].pop("address")
+                (project / "01-global.yaml").write_text(
+                    yaml.safe_dump(document), encoding="utf-8",
+                )
+                (project / "02-dhcp-subnet_config.csv").write_text(
+                    "shared_network,subnet,netmask,range_start,range_end,routers,"
+                    "ztp_service_ip,cumulus_profile,nvos_ztp\n",
+                    encoding="utf-8",
+                )
+                settings = ACTIVATE.Settings(
+                    project_name="fixture", scope="prod", http_root=root,
+                )
+                with mock.patch.object(
+                    ACTIVATE, "build_runtime_plan",
+                    side_effect=AssertionError("network snapshot before HTTP admission"),
+                ) as network, self.assertRaisesRegex(
+                    ACTIVATE.ActivationError, "common.mgmt.http.address",
+                ):
+                    ACTIVATE.observe_runtime(settings)
+                network.assert_not_called()
+
+    def test_f02_dhcp_generator_rejects_missing_independent_http_address(self):
+        document = yaml.safe_load(
+            (ROOT / "DAY0-Prepare/template/01-global.yaml").read_text(
+                encoding="utf-8"
+            )
+        )
+        document["common"]["mgmt"]["http"].pop("address")
+        with tempfile.TemporaryDirectory() as directory:
+            global_yaml = Path(directory) / "01-global.yaml"
+            global_yaml.write_text(yaml.safe_dump(document), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "common.mgmt.http.address"):
+                DHCP.load_project_global(global_yaml)
+
+    def test_f02_dhcp_urls_use_independent_http_address_not_ztp_service_ip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            subnet = Path(directory) / "02-dhcp-subnet_config.csv"
+            subnet.write_text(subnet_csv("192.0.2.10"), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "HTTP service IPv4"):
+                DHCP.load_subnet_csv(subnet, "/ztp")
+            rows = DHCP.load_subnet_csv(
+                subnet, "/ztp", http_address="198.51.100.20",
+            )
+            self.assertEqual("192.0.2.10", rows[0]["ztp_service_ip"])
+            self.assertEqual(
+                "http://198.51.100.20/ztp/ztp-bootstrap_oob.sh",
+                rows[0]["cumulus_provision_url"],
+            )
+
+    def test_f02_global_load_and_dhcp_generator_share_explicit_http_authority(self):
+        document = yaml.safe_load(
+            (ROOT / "DAY0-Prepare/template/01-global.yaml").read_text(
+                encoding="utf-8",
+            )
+        )
+        document["common"]["mgmt"]["http"]["address"] = "198.51.100.20"
+        document["common"]["mgmt"]["http"]["port"] = 8080
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            global_yaml = root / "01-global.yaml"
+            subnet = root / "02-dhcp-subnet_config.csv"
+            global_yaml.write_text(yaml.safe_dump(document), encoding="utf-8")
+            subnet.write_text(subnet_csv("192.0.2.10"), encoding="utf-8")
+            settings = LOAD.load_global(global_yaml)
+            prefix, _schema, port, address = DHCP.load_project_global(global_yaml)
+            self.assertEqual("198.51.100.20", settings.http_address)
+            self.assertEqual(("/ztp", 8080, "198.51.100.20"), (prefix, port, address))
+            rows = DHCP.load_subnet_csv(
+                subnet, prefix, port=port, http_address=address,
+            )
+            self.assertEqual("192.0.2.10", rows[0]["ztp_service_ip"])
+            self.assertEqual(
+                "http://198.51.100.20:8080/ztp/ztp-bootstrap_oob.sh",
+                rows[0]["cumulus_provision_url"],
+            )
+            self.assertEqual(
+                [(ipaddress.IPv4Network("192.0.2.0/24"),
+                  "http://198.51.100.20:8080/ztp/ztp-bootstrap_oob.sh")],
+                MANUAL.provision_urls(subnet, global_yaml),
+            )
+            ztp_root = root / "ztp"
+            templates = ztp_root / "templates"
+            templates.mkdir(parents=True)
+            for filename in ("ztp-bootstrap.sh", "ztp.json"):
+                (templates / filename).write_bytes(
+                    (ROOT / "ztp/templates" / filename).read_bytes()
+                )
+            pubkey = root / "operator.pub"
+            pubkey.write_text("ssh-ed25519 AAAATEST operator\n", encoding="utf-8")
+            settings = LOAD.apply_subnet_service_ips(settings, subnet)
+            with mock.patch.object(LOAD, "ZTP_DIR", ztp_root):
+                LOAD.render_ztp_runtime(settings, (pubkey,), frozenset({"eth"}))
+            bootstrap = (ztp_root / "ztp-bootstrap_oob.sh").read_text(
+                encoding="utf-8",
+            )
+            self.assertIn('ZTP_SERVER="http://198.51.100.20:8080"', bootstrap)
+            self.assertIn(
+                'MANUAL_ZTP_OOB_URL="http://198.51.100.20:8080/'
+                'ztp/ztp-bootstrap_oob.sh"', bootstrap,
+            )
+            ztp_json = (ztp_root / "ztp.json").read_text(encoding="utf-8")
+            self.assertIn(
+                '"url": "http://198.51.100.20:8080/ztp/'
+                'ztp-bootstrap_oob.sh"', ztp_json,
+            )
+
+    def test_f02_publication_plan_uses_explicit_http_authority(self):
+        settings = LOAD.GlobalSettings(
+            dhcp_enabled=True, dhcp_package="isc-dhcp-server",
+            http_enabled=True, http_package="apache2", http_root=ROOT,
+            ztp_enabled=True, ztp_prefix="/ztp",
+            ztp_ips={"prod_oob": ("192.0.2.10",)},
+            boot_ips=("192.0.2.11",), versions={},
+            http_port=8080, http_address="198.51.100.20",
+        )
+        plan = LOAD.publication_plan_for(
+            settings, pubkey_names=("operator.pub",), image_names=(),
+        )
+        published = LOAD.device_visible_urls(plan)
+        self.assertTrue(published)
+        self.assertEqual(
+            {"198.51.100.20"},
+            {str(row.endpoint.address) for row in published},
+        )
+        self.assertTrue(all(
+            row.url.startswith("http://198.51.100.20:8080")
+            for row in published
+        ))
+
+    def test_f02_publication_plan_rejects_missing_http_address(self):
+        settings = LOAD.GlobalSettings(
+            dhcp_enabled=True, dhcp_package="isc-dhcp-server",
+            http_enabled=True, http_package="apache2", http_root=ROOT,
+            ztp_enabled=True, ztp_prefix="/ztp",
+            ztp_ips={"prod_oob": ("192.0.2.10",)}, versions={},
+        )
+        with self.assertRaisesRegex(LOAD.LoadError, "common.mgmt.http.address"):
+            LOAD.publication_plan_for(
+                settings, pubkey_names=(), image_names=(),
+            )
+
+    def test_f02_url_network_gate_checks_explicit_http_address_not_subnet_ztp_ip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subnet = root / "02-dhcp-subnet_config.csv"
+            subnet.write_text(subnet_csv("192.0.2.10"), encoding="utf-8")
+            settings = LOAD.GlobalSettings(
+                dhcp_enabled=True, dhcp_package="isc-dhcp-server",
+                http_enabled=True, http_package="apache2", http_root=root,
+                ztp_enabled=True, ztp_prefix="/ztp",
+                ztp_ips={"prod_oob": ("192.0.2.10",)}, versions={},
+                http_address="198.51.100.20",
+            )
+            inputs = LOAD.ProjectInputs(
+                global_file=root / "01-global.yaml",
+                devices_file=root / "02-devices_config.csv",
+                subnet_file=subnet, p2p_file=root / "p2p.xlsx",
+                device_types=frozenset({"eth"}), pubkeys=(), settings=settings,
+            )
+            with mock.patch.object(
+                LOAD, "_local_ipv4_assignments",
+                return_value={"198.51.100.20": {("eno2", 24)}},
+            ):
+                LOAD.ensure_ztp_url_network_ready(inputs)
+
+    def test_f02_manual_ztp_rejects_active_subnet_without_http_address(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subnet = root / "02-dhcp-subnet_config.csv"
+            global_yaml = root / "01-global.yaml"
+            subnet.write_text(subnet_csv("192.0.2.10"), encoding="utf-8")
+            global_yaml.write_text(
+                "common:\n  mgmt:\n    ztp:\n      ztp_url_prefix: /ztp\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                MANUAL.ManualZtpError, "common.mgmt.http.address",
+            ):
+                MANUAL.provision_urls(subnet, global_yaml)
+
+    def test_f02_load_render_rejects_missing_http_address_before_output(self):
+        settings = LOAD.GlobalSettings(
+            dhcp_enabled=True, dhcp_package="isc-dhcp-server",
+            http_enabled=True, http_package="apache2", http_root=ROOT,
+            ztp_enabled=True, ztp_prefix="/ztp",
+            ztp_ips={"prod_oob": ("192.0.2.10",)}, versions={},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            ztp_root = Path(directory) / "ztp"
+            ztp_root.mkdir()
+            pubkey = Path(directory) / "operator.pub"
+            pubkey.write_text("ssh-ed25519 AAAATEST operator\n", encoding="utf-8")
+            with mock.patch.object(LOAD, "ZTP_DIR", ztp_root), \
+                    self.assertRaisesRegex(LOAD.LoadError, "common.mgmt.http.address"):
+                LOAD.render_ztp_runtime(
+                    settings, (pubkey,), frozenset({"eth"}), dry_run=False,
+                )
+            self.assertEqual([], list(ztp_root.iterdir()))
+
     def test_shared_http_ownership_allows_eligible_duplicates_with_optional_ceiling(self):
         owners = (
             http_owner("eno2", 7, eligible=True),
@@ -165,6 +397,11 @@ class ServiceEndpointConvergenceTests(unittest.TestCase):
             project.mkdir(parents=True)
             (project / "01-global.yaml").write_text(
                 yaml.safe_dump(document), encoding="utf-8"
+            )
+            (project / "02-dhcp-subnet_config.csv").write_text(
+                "shared_network,subnet,netmask,range_start,range_end,routers,"
+                "ztp_service_ip,cumulus_profile,nvos_ztp\n",
+                encoding="utf-8",
             )
             selected = SimpleNamespace(endpoint_ips=(), listener_names=())
             base_links = (
@@ -352,6 +589,11 @@ class ServiceEndpointConvergenceTests(unittest.TestCase):
             project.mkdir(parents=True)
             global_yaml = project / "01-global.yaml"
             global_yaml.write_text(yaml.safe_dump(document), encoding="utf-8")
+            (project / "02-dhcp-subnet_config.csv").write_text(
+                "shared_network,subnet,netmask,range_start,range_end,routers,"
+                "ztp_service_ip,cumulus_profile,nvos_ztp\n",
+                encoding="utf-8",
+            )
             native_settings = LOAD.load_global(global_yaml)
             self.assertEqual((), native_settings.service_ips)
             with self.subTest(backend="native"):
@@ -404,7 +646,7 @@ class ServiceEndpointConvergenceTests(unittest.TestCase):
                     & set(ACTIVATE.expected_services(selected, dhcp_status="disabled"))
                 )
 
-    def test_declared_http_and_ztp_addresses_form_one_deduplicated_listener_set(self):
+    def test_http_listener_uses_only_explicit_address_not_subnet_ztp_address(self):
         document = yaml.safe_load(
             (ROOT / "DAY0-Prepare/template/01-global.yaml").read_text(
                 encoding="utf-8"
@@ -441,9 +683,7 @@ class ServiceEndpointConvergenceTests(unittest.TestCase):
             )
             for address, expected in (
                 ("192.0.2.10", {"Listen 192.0.2.10:8080"}),
-                ("198.51.100.5", {
-                    "Listen 192.0.2.10:8080", "Listen 198.51.100.5:8080"
-                }),
+                ("198.51.100.5", {"Listen 198.51.100.5:8080"}),
             ):
                 document["common"]["mgmt"]["http"]["address"] = address
                 global_yaml.write_text(
@@ -602,7 +842,9 @@ class ServiceEndpointConvergenceTests(unittest.TestCase):
             csv_path = Path(temporary) / "02-dhcp-subnet_config.csv"
             csv_path.write_text(subnet_csv("192.0.2.10"), encoding="utf-8")
             self.assertEqual(([], []), SETUP._validate_subnet_csv(csv_path))
-            rows = DHCP.load_subnet_csv(csv_path, "/ztp")
+            rows = DHCP.load_subnet_csv(
+                csv_path, "/ztp", http_address="192.0.2.10",
+            )
             self.assertEqual(1, len(rows))
             self.assertEqual(
                 {
@@ -629,7 +871,8 @@ class ServiceEndpointConvergenceTests(unittest.TestCase):
             )
             global_path = Path(temporary) / "01-global.yaml"
             global_path.write_text(
-                "common:\n  mgmt:\n    ztp:\n      ztp_url_prefix: /ztp\n",
+                "common:\n  mgmt:\n    http: {address: 192.0.2.10}\n"
+                "    ztp:\n      ztp_url_prefix: /ztp\n",
                 encoding="utf-8",
             )
             self.assertEqual(

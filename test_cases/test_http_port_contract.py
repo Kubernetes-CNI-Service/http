@@ -270,11 +270,14 @@ class HttpPortDirectTests(unittest.TestCase):
         self.assertEqual(len(urls), len(set(urls)))
 
     def test_publication_probes_use_the_same_port_as_switch_urls(self):
-        settings = SimpleNamespace(
+        settings = LOAD.GlobalSettings(
+            dhcp_enabled=True, dhcp_package="isc-dhcp-server",
+            http_enabled=True, http_package="apache2", http_root=ROOT,
+            ztp_enabled=True,
             ztp_ips={"air_oob": ("192.0.2.10",)},
             boot_ips=("192.0.2.10",),
-            service_ips=("192.0.2.10",),
             ztp_prefix="/ztp", http_port=8080,
+            http_address="198.51.100.20", versions={},
         )
         inputs = SimpleNamespace(settings=settings, pubkeys=(Path("operator.pub"),))
         with mock.patch.object(
@@ -286,7 +289,7 @@ class HttpPortDirectTests(unittest.TestCase):
         urls = [call.args[0][-1] for call in runner.call_args_list]
         self.assertGreaterEqual(len(urls), 3)
         self.assertTrue(
-            all(url.startswith("http://192.0.2.10:8080/") for url in urls),
+            all(url.startswith("http://198.51.100.20:8080/") for url in urls),
             urls,
         )
 
@@ -310,7 +313,7 @@ class HttpPortDirectTests(unittest.TestCase):
                     with self.assertRaises(LOAD.LoadError):
                         LOAD.load_global(path)
 
-    def test_legacy_global_without_http_section_preserves_port_80_in_consumers(self):
+    def test_legacy_global_without_http_section_rejects_url_consumers(self):
         document = yaml.safe_load(
             (ROOT / "DAY0-Prepare/template/01-global.yaml").read_text(
                 encoding="utf-8"
@@ -323,8 +326,14 @@ class HttpPortDirectTests(unittest.TestCase):
             global_yaml.write_text(yaml.safe_dump(document), encoding="utf-8")
             errors, _warnings = SETUP._validate_global_yaml(global_yaml)
             self.assertEqual([], errors)
-            self.assertEqual(80, DHCP.load_project_global(global_yaml)[2])
-            self.assertEqual(80, MANUAL.global_ztp_http_policy(global_yaml)[1])
+            with self.assertRaisesRegex(
+                ValueError, "common.mgmt.http.address",
+            ):
+                DHCP.load_project_global(global_yaml)
+            with self.assertRaisesRegex(
+                MANUAL.ManualZtpError, "common.mgmt.http.address",
+            ):
+                MANUAL.global_ztp_http_policy(global_yaml)
             container_root = root / "container"
             project = container_root / "DAY0-Prepare" / "fixture"
             project.mkdir(parents=True)
@@ -332,7 +341,110 @@ class HttpPortDirectTests(unittest.TestCase):
             settings = ACTIVATE.Settings(
                 project_name="fixture", scope="prod", http_root=container_root
             )
-            self.assertEqual(80, ACTIVATE.project_http_port(settings))
+            with self.assertRaisesRegex(
+                ACTIVATE.ActivationError, "common.mgmt.http.address",
+            ):
+                ACTIVATE.project_http_port(settings)
+
+    def test_docker_http_status_controls_listener_without_inventing_endpoint(self):
+        document = yaml.safe_load(
+            (ROOT / "DAY0-Prepare/template/01-global.yaml").read_text(
+                encoding="utf-8"
+            )
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            container_root = Path(directory)
+            project = container_root / "DAY0-Prepare" / "fixture"
+            project.mkdir(parents=True)
+            global_yaml = project / "01-global.yaml"
+            settings = ACTIVATE.Settings(
+                project_name="fixture", scope="prod", http_root=container_root
+            )
+            selected = SimpleNamespace(
+                endpoint_ips=("192.0.2.10",), listener_names=()
+            )
+            cases = (
+                ("legacy selected", None, selected, ("192.0.2.10",), 80),
+                ("legacy empty", None, SimpleNamespace(endpoint_ips=(), listener_names=()), (), 80),
+                ("explicit disabled", "disabled", selected, (), 8080),
+            )
+            for label, status, selection, expected_ips, expected_port in cases:
+                with self.subTest(label=label):
+                    policy = document["common"]["mgmt"]
+                    if status is None:
+                        policy.pop("http", None)
+                    else:
+                        policy["http"] = {
+                            "status": status, "port": 8080,
+                            "address": "198.51.100.10",
+                        }
+                    global_yaml.write_text(
+                        yaml.safe_dump(document), encoding="utf-8"
+                    )
+                    if status is None:
+                        with self.assertRaisesRegex(
+                            ACTIVATE.ActivationError,
+                            "common.mgmt.http.address",
+                        ):
+                            ACTIVATE.project_http_listener_ips(settings, selection)
+                        continue
+                    self.assertEqual(expected_port, ACTIVATE.project_http_port(settings))
+                    self.assertEqual(
+                        expected_ips,
+                        ACTIVATE.project_http_listener_ips(settings, selection),
+                    )
+                    self.assertEqual(
+                        () if not expected_ips else ("apache2",),
+                        ACTIVATE.expected_services(
+                            selection, dhcp_status="disabled",
+                            http_listener_ips=ACTIVATE.project_http_listener_ips(
+                                settings, selection
+                            ),
+                        ),
+                    )
+
+    def test_docker_present_http_section_requires_valid_explicit_status(self):
+        document = yaml.safe_load(
+            (ROOT / "DAY0-Prepare/template/01-global.yaml").read_text(
+                encoding="utf-8"
+            )
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            container_root = Path(directory)
+            project = container_root / "DAY0-Prepare" / "fixture"
+            project.mkdir(parents=True)
+            global_yaml = project / "01-global.yaml"
+            settings = ACTIVATE.Settings(
+                project_name="fixture", scope="prod", http_root=container_root
+            )
+            selected = SimpleNamespace(endpoint_ips=("192.0.2.10",))
+            for status in (None, "bogus", True, 1):
+                with self.subTest(status=status):
+                    document["common"]["mgmt"]["http"] = {
+                        "port": 80,
+                        **({} if status is None else {"status": status}),
+                    }
+                    global_yaml.write_text(
+                        yaml.safe_dump(document), encoding="utf-8"
+                    )
+                    with self.assertRaisesRegex(
+                        ACTIVATE.ActivationError, "common.mgmt.http.status"
+                    ):
+                        ACTIVATE.project_http_listener_ips(settings, selected)
+                    with mock.patch.object(
+                        ACTIVATE, "ensure_runtime_directories"
+                    ) as mkdir, mock.patch.object(
+                        ACTIVATE, "observe_runtime"
+                    ) as observe, mock.patch.object(
+                        ACTIVATE, "_atomic_write"
+                    ) as write:
+                        with self.assertRaisesRegex(
+                            ACTIVATE.ActivationError, "common.mgmt.http.status"
+                        ):
+                            ACTIVATE.prepare_runtime(settings)
+                    mkdir.assert_not_called()
+                    observe.assert_not_called()
+                    write.assert_not_called()
 
     def test_malformed_http_policy_fails_closed_in_all_port_consumers(self):
         document = yaml.safe_load(
@@ -621,6 +733,32 @@ class HttpPortDirectTests(unittest.TestCase):
                 "SetEnv CONTROL_SERVICE_PORT not-a-port"
             ),
         )
+
+    def test_f02_native_http_authority_is_only_the_explicit_global_address(self):
+        document = yaml.safe_load(
+            (ROOT / "DAY0-Prepare/template/01-global.yaml").read_text(encoding="utf-8")
+        )
+        mgmt = document["common"]["mgmt"]
+        mgmt["dhcp-server"]["status"] = "enabled"
+        mgmt["ztp"]["status"] = "enabled"
+        mgmt["http"]["status"] = "enabled"
+        mgmt["http"]["address"] = "198.51.100.25"
+        settings = LOAD.replace(
+            LOAD.load_global(Path("unused-global.yaml"), global_data=document),
+            ztp_ips={"air_oob": ("192.0.2.10",)},
+        )
+        self.assertEqual(("198.51.100.25",), settings.http_listener_ips)
+        plan = LOAD.publication_plan_for(
+            settings, pubkey_names=(), image_names=(),
+        )
+        self.assertEqual(
+            ("198.51.100.25",),
+            tuple(endpoint.host for _role, endpoints in plan.endpoints_by_role
+                  for endpoint in endpoints),
+        )
+        mgmt["http"].pop("address")
+        with self.assertRaisesRegex(LOAD.LoadError, "common.mgmt.http.address"):
+            LOAD.load_global(Path("unused-global.yaml"), global_data=document)
 
 
 if __name__ == "__main__":

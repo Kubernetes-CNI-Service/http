@@ -46,12 +46,123 @@ SUBNET_TWO = (
 
 
 class HttpPortWorkflowTests(unittest.TestCase):
+    def test_legacy_docker_http_listener_matrix_preserves_strict_load_input(self):
+        """Real LOAD parses the same YAML that real Docker activation consumes."""
+        template = yaml.safe_load(
+            (ROOT / "DAY0-Prepare/template/01-global.yaml").read_text(
+                encoding="utf-8"
+            )
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / "DAY0-Prepare" / "fixture"
+            project.mkdir(parents=True)
+            global_yaml = project / "01-global.yaml"
+            (project / "02-dhcp-subnet_config.csv").write_text(
+                SUBNET, encoding="utf-8",
+            )
+            settings = ACTIVATE.Settings(
+                project_name="fixture", scope="prod", http_root=root
+            )
+            for label, section, ips, expected, load_valid in (
+                ("legacy selected", None, ("192.0.2.10",), ("192.0.2.10",), False),
+                ("legacy empty", None, (), (), False),
+                ("enabled", {"status": "enabled"}, ("192.0.2.10",),
+                 ("203.0.113.80",), True),
+                ("disabled", {"status": "disabled"}, ("192.0.2.10",), (), True),
+            ):
+                with self.subTest(label=label):
+                    document = yaml.safe_load(yaml.safe_dump(template))
+                    if section is None:
+                        document["common"]["mgmt"].pop("http")
+                    else:
+                        document["common"]["mgmt"]["http"].update(section)
+                    global_yaml.write_text(
+                        yaml.safe_dump(document), encoding="utf-8"
+                    )
+                    if load_valid:
+                        self.assertEqual(
+                            section["status"] == "enabled",
+                            LOAD.load_global(global_yaml).http_enabled,
+                        )
+                    else:
+                        with self.assertRaises(LOAD.LoadError):
+                            LOAD.load_global(global_yaml)
+                    if section is None:
+                        with mock.patch.object(
+                            ACTIVATE, "build_runtime_plan",
+                        ) as network, self.assertRaisesRegex(
+                            ACTIVATE.ActivationError, "common.mgmt.http.address",
+                        ):
+                            ACTIVATE.observe_runtime(settings)
+                        network.assert_not_called()
+                        continue
+                    selected = SimpleNamespace(endpoint_ips=ips, listener_names=())
+                    with mock.patch.object(
+                        ACTIVATE, "build_runtime_plan",
+                        return_value=(selected, [], [], SimpleNamespace(
+                            inspect_http_listener_owners=lambda *_args, **_kwargs: (
+                                {"ifname": "eno7", "ifindex": 7,
+                                 "eligible": True, "reason": None},
+                            ),
+                        )),
+                    ), mock.patch.object(
+                        ACTIVATE, "runtime_plan_payload", return_value={}
+                    ):
+                        observed, _runtime, _payload, apache = ACTIVATE.observe_runtime(
+                            settings
+                        )
+                    self.assertIs(selected, observed)
+                    self.assertEqual(
+                        tuple(f"Listen {ip}:80" for ip in expected),
+                        tuple(
+                            line for line in apache.splitlines()
+                            if line.startswith("Listen ")
+                        ),
+                    )
+                    self.assertEqual(
+                        ("apache2",) if expected else (),
+                        ACTIVATE.expected_services(
+                            observed, dhcp_status="disabled",
+                            http_listener_ips=ACTIVATE.project_http_listener_ips(
+                                settings, observed
+                            ),
+                        ),
+                    )
+
+            for label, http_policy in (
+                ("missing status", {"port": 80}),
+                ("invalid status", {"status": "bogus", "port": 80}),
+            ):
+                with self.subTest(label=label):
+                    document = yaml.safe_load(yaml.safe_dump(template))
+                    document["common"]["mgmt"]["http"] = http_policy
+                    global_yaml.write_text(
+                        yaml.safe_dump(document), encoding="utf-8"
+                    )
+                    with self.assertRaises(LOAD.LoadError):
+                        LOAD.load_global(global_yaml)
+                    selected = SimpleNamespace(
+                        endpoint_ips=("192.0.2.10",), listener_names=()
+                    )
+                    with mock.patch.object(
+                        ACTIVATE, "build_runtime_plan",
+                        return_value=(selected, [], [], SimpleNamespace()),
+                    ), mock.patch.object(
+                        ACTIVATE, "runtime_plan_payload", return_value={}
+                    ):
+                        with self.assertRaisesRegex(
+                            ACTIVATE.ActivationError, "common.mgmt.http.status"
+                        ):
+                            ACTIVATE.observe_runtime(settings)
+
     def test_project_http_port_reaches_actual_infra_probe_and_render_before_write(self):
         document = yaml.safe_load(
             (ROOT / "DAY0-Prepare/template/01-global.yaml").read_text(
                 encoding="utf-8"
             )
         )
+        document["common"]["mgmt"]["http"]["address"] = "192.0.2.10"
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             global_yaml = root / "01-global.yaml"
@@ -102,7 +213,8 @@ class HttpPortWorkflowTests(unittest.TestCase):
                     settings = LOAD.load_global(global_yaml)
                     self.assertEqual(configured_port or 80, settings.http_port)
                     dhcp = DHCP.load_subnet_csv(
-                        subnet_csv, settings.ztp_prefix, port=settings.http_port
+                        subnet_csv, settings.ztp_prefix, port=settings.http_port,
+                        http_address=settings.http_address,
                     )
                     status, urlopen, update = run_infra()
                     self.assertEqual(0, status)
@@ -276,7 +388,7 @@ class HttpPortWorkflowTests(unittest.TestCase):
             self.assertEqual(a, b)
             self.assertEqual(b, b_container)
             self.assertEqual({endpoint.origin for endpoint in a}, c)
-            self.assertEqual(c, d)
+            self.assertEqual({expected_http_origin}, d)
             self.assertEqual({endpoint.port for endpoint in a}, e)
 
         template = (ROOT / "ztp/templates/ztp-bootstrap.sh").read_text(
@@ -284,6 +396,10 @@ class HttpPortWorkflowTests(unittest.TestCase):
         )
         for port in (80, 1024, 8080, 65535):
             with self.subTest(port=port), tempfile.TemporaryDirectory() as directory:
+                expected_http_origin = (
+                    "http://203.0.113.20" if port == 80
+                    else f"http://203.0.113.20:{port}"
+                )
                 root = Path(directory)
                 document = yaml.safe_load(
                     (ROOT / "DAY0-Prepare/template/01-global.yaml").read_text(
@@ -291,6 +407,7 @@ class HttpPortWorkflowTests(unittest.TestCase):
                     )
                 )
                 document["common"]["mgmt"]["http"]["port"] = port
+                document["common"]["mgmt"]["http"]["address"] = "203.0.113.20"
                 global_yaml = root / "01-global.yaml"
                 global_yaml.write_text(yaml.safe_dump(document), encoding="utf-8")
                 subnet_csv = root / "02-dhcp-subnet_config.csv"
@@ -312,21 +429,21 @@ class HttpPortWorkflowTests(unittest.TestCase):
                     if item.audience == AUDIENCE_DEVICE
                 }
                 native = LOAD.render_native_apache_listener_config(
-                    settings.service_ips, port=port
+                    settings.http_listener_ips, port=port
                 )
                 container = ACTIVATE.render_apache_listener_config(
-                    settings.service_ips, port=port
+                    settings.http_listener_ips, port=port
                 )
                 b = listen_endpoints(native)
                 b_container = listen_endpoints(container)
                 c = set()
-                for role, addresses in settings.ztp_ips.items():
+                for role in settings.ztp_ips:
                     script = (
                         "ztp-bootstrap_oobofoob.sh" if role.endswith("oobofoob")
                         else "ztp-bootstrap_oob.sh"
                     )
                     rendered = LOAD.render_bootstrap_script_text(
-                        template, address=addresses[0], port=port,
+                        template, address=settings.http_address, port=port,
                         prefix=settings.ztp_prefix, manual_urls={},
                         upgrade_enabled=True, key_names=("operator.pub",),
                         eth_version=None, script_name=script,
@@ -335,7 +452,8 @@ class HttpPortWorkflowTests(unittest.TestCase):
                         r'^ZTP_SERVER="([^"]+)"$', rendered, re.MULTILINE
                     ).group(1))
                 dhcp_rows = DHCP.load_subnet_csv(
-                    subnet_csv, settings.ztp_prefix, port=port
+                    subnet_csv, settings.ztp_prefix, port=port,
+                    http_address=settings.http_address,
                 )
                 d = {
                     from_url(row[key]).origin for row in dhcp_rows
@@ -374,6 +492,7 @@ class HttpPortWorkflowTests(unittest.TestCase):
                 )
             )
             document["common"]["mgmt"]["http"]["port"] = 8080
+            document["common"]["mgmt"]["http"]["address"] = "192.0.2.10"
             global_yaml = root / "01-global.yaml"
             global_yaml.write_text(yaml.safe_dump(document), encoding="utf-8")
             subnet_csv = root / "02-dhcp-subnet_config.csv"
@@ -400,7 +519,8 @@ class HttpPortWorkflowTests(unittest.TestCase):
                 eth_version=None, script_name="ztp-bootstrap_oob.sh",
             )
             dhcp_rows = DHCP.load_subnet_csv(
-                subnet_csv, settings.ztp_prefix, port=settings.http_port
+                subnet_csv, settings.ztp_prefix, port=settings.http_port,
+                http_address=settings.http_address,
             )
             manual = MANUAL.provision_urls(subnet_csv, global_yaml)
 
@@ -425,13 +545,21 @@ class HttpPortWorkflowTests(unittest.TestCase):
             container_project = container_root / "DAY0-Prepare" / "test-project"
             container_project.mkdir(parents=True)
             (container_project / "01-global.yaml").write_bytes(global_yaml.read_bytes())
+            (container_project / "02-dhcp-subnet_config.csv").write_bytes(
+                subnet_csv.read_bytes()
+            )
             container_settings = ACTIVATE.Settings(
                 project_name="test-project", scope="prod", http_root=container_root
             )
             selected = SimpleNamespace(endpoint_ips=("192.0.2.10",))
             with mock.patch.object(
                 ACTIVATE, "build_runtime_plan",
-                return_value=(selected, [], [], SimpleNamespace()),
+                return_value=(selected, [], [], SimpleNamespace(
+                    inspect_http_listener_owners=lambda *_args, **_kwargs: (
+                        {"ifname": "eno7", "ifindex": 7,
+                         "eligible": True, "reason": None},
+                    ),
+                )),
             ), mock.patch.object(
                 ACTIVATE, "runtime_plan_payload", return_value={}
             ):

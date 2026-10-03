@@ -352,7 +352,8 @@ class QuietContractTest(unittest.TestCase):
         project = http_root / "DAY0-Prepare/site-a"
         project.mkdir(parents=True, exist_ok=True)
         (project / "01-global.yaml").write_text(
-            "common:\n  mgmt:\n    http:\n      port: 80\n"
+            "common:\n  mgmt:\n    http:\n      status: enabled\n"
+            "      address: 192.0.2.10\n      port: 80\n"
             "    dhcp-server:\n      status: enabled\n",
             encoding="utf-8",
         )
@@ -5454,7 +5455,8 @@ class ActivationContractTests(QuietContractTest):
             for name, path in inputs.items():
                 path.write_text(f"independent-{name}-fixture\n", encoding="utf-8")
             inputs["global"].write_text(
-                "common:\n  mgmt:\n    dhcp-server:\n      status: disabled\n",
+                "common:\n  mgmt:\n    dhcp-server:\n      status: disabled\n"
+                "    http:\n      status: disabled\n",
                 encoding="utf-8",
             )
             p2p_source = project / "fixture-p2p.xlsx"
@@ -5825,7 +5827,7 @@ class ActivationContractTests(QuietContractTest):
             project = Path(temporary) / "DAY0-Prepare/site-a"
             project.mkdir(parents=True)
             (project / "01-global.yaml").write_text(
-                "common:\n  mgmt:\n    http:\n      address: 192.0.2.88\n"
+                "common:\n  mgmt:\n    http:\n      status: enabled\n      address: 192.0.2.88\n"
                 "    dhcp-server:\n      status: disabled\n",
                 encoding="utf-8",
             )
@@ -7135,7 +7137,7 @@ class HealthContractTests(QuietContractTest):
             project = root / "DAY0-Prepare/site-a"
             project.mkdir(parents=True)
             (project / "01-global.yaml").write_text(
-                "common:\n  mgmt:\n    http:\n      address: 192.0.2.88\n"
+                "common:\n  mgmt:\n    http:\n      status: enabled\n      address: 192.0.2.88\n"
                 "    dhcp-server:\n      status: disabled\n",
                 encoding="utf-8",
             )
@@ -7215,6 +7217,13 @@ class HealthContractTests(QuietContractTest):
         health = load_script("healthcheck.py")
         selected = plan(names=(), indexes=(), endpoints=())
         project = self.http_project_fixture()
+        global_yaml = project / "01-global.yaml"
+        global_yaml.write_text(
+            global_yaml.read_text(encoding="utf-8").replace(
+                "http:\n      status: enabled", "http:\n      status: disabled",
+            ),
+            encoding="utf-8",
+        )
         control = {
             "rsyslog": "RUNNING", "logrotate": "RUNNING",
             "runtime-guardian": "RUNNING",
@@ -8125,7 +8134,7 @@ class ContainerTransactionContractTests(QuietContractTest):
             project = root / "DAY0-Prepare/site-a"
             project.mkdir(parents=True)
             (project / "01-global.yaml").write_text(
-                "common:\n  mgmt:\n    http:\n      address: 192.0.2.88\n"
+                "common:\n  mgmt:\n    http:\n      status: enabled\n      address: 192.0.2.88\n"
                 "    dhcp-server:\n      status: disabled\n",
                 encoding="utf-8",
             )

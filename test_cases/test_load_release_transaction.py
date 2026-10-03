@@ -2470,7 +2470,7 @@ class ReleaseTransactionTests(unittest.TestCase):
         with self.assertRaisesRegex(MANUAL.ManualZtpError, "安全绝对 URL path"):
             MANUAL.global_ztp_url_prefix(global_yaml)
 
-    def test_off_link_endpoint_has_no_binding_but_still_requires_exact_local_ip(self) -> None:
+    def test_off_link_subnet_ztp_ip_does_not_replace_explicit_http_url_ip(self) -> None:
         subnet = self.root / "off-link-service.csv"
         subnet.write_text(
             "shared_network,subnet,netmask,range_start,range_end,routers,"
@@ -2482,21 +2482,22 @@ class ReleaseTransactionTests(unittest.TestCase):
         settings = LOAD.replace(
             self.inputs.settings,
             ztp_ips={"prod_oob": ("198.51.100.10",)},
+            http_address="198.51.100.20",
         )
         inputs = LOAD.replace(
             self.inputs, subnet_file=subnet, settings=settings,
         )
         self.assertEqual((), LOAD.service_ip_bindings(inputs))
         self.assertEqual(
-            ["198.51.100.10"],
-            LOAD.missing_service_ip_addresses(settings.service_ips, {}),
+            ["198.51.100.20"],
+            LOAD.missing_service_ip_addresses(settings.http_listener_ips, {}),
         )
-        # Routed endpoints have no CIDR inferred from the client subnet. The
-        # exact address may use any real local prefix and must not be skipped.
-        assignments = {"198.51.100.10": {("eth9", 30)}}
+        # The independent HTTP address may use any real local prefix. The
+        # subnet ZTP address alone does not satisfy the URL network gate.
+        assignments = {"198.51.100.20": {("eth9", 30)}}
         self.assertEqual(
             [],
-            LOAD.missing_service_ip_addresses(settings.service_ips, assignments),
+            LOAD.missing_service_ip_addresses(settings.http_listener_ips, assignments),
         )
 
         noninteractive = mock.Mock()
@@ -2845,7 +2846,10 @@ class ReleaseTransactionTests(unittest.TestCase):
 
     def test_parent_load_is_the_only_dhcp_runtime_publication_owner(self) -> None:
         generator_main = inspect.getsource(DHCP.main)
-        parent_generation = inspect.getsource(LOAD.generate_configs)
+        parent_generation = (
+            inspect.getsource(LOAD.generate_configs)
+            + inspect.getsource(LOAD._generate_configs_impl)
+        )
         parent_install = inspect.getsource(LOAD.mount_and_test_dhcp)
 
         self.assertNotIn("subprocess.run", generator_main)
@@ -4823,7 +4827,7 @@ class ReleaseTransactionTests(unittest.TestCase):
                 "common:\n"
                 "  mgmt:\n"
                 "    dhcp-server: {status: enabled, package: isc-dhcp-server}\n"
-                "    http: {status: enabled, package: apache2, http_root: /srv/http}\n"
+                "    http: {status: enabled, package: apache2, http_root: /srv/http, address: 203.0.113.80}\n"
                 "    ztp: {status: enabled, ztp_url_prefix: /ztp}\n"
                 "  switch:\n"
                 "    system:\n"
@@ -4898,6 +4902,9 @@ class ReleaseTransactionTests(unittest.TestCase):
             global_file.write_text(
                 "common:\n"
                 "  mgmt:\n"
+                "    http:\n"
+                "      status: enabled\n"
+                "      address: 198.51.100.20\n"
                 "    ztp:\n"
                 "      ztp_url_prefix: /ztp\n",
                 encoding="utf-8",

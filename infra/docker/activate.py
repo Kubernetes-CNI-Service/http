@@ -44,7 +44,7 @@ from project_contract import (  # noqa: E402
     IMAGE_HOST_STATE_PATHS, IMAGE_HOST_STATE_SUBTREES, IMAGE_MANIFEST_CARRIER,
     PUBLISHED_RUNTIME_FILE_PATHS, published_runtime_link_specs, P2P_INPUT_PATHS, P2P_AIR_PATH,
     path_disposition, transfer_exclude_reason, validate_service_endpoint,
-    merge_http_listener_addresses, safe_load_global_yaml,
+    safe_load_global_yaml,
     validate_http_listener_ownership,
 )
 
@@ -1359,8 +1359,10 @@ def restore_mutable_image_sources(
         _atomic_write_bytes(destination, (source_root / relative_name).read_bytes(), 0o644)
 
 
-def project_http_policy(settings: Settings) -> tuple[int, str | None]:
-    """Read independent HTTP listener authority from the bound project."""
+def _project_http_policy_with_status(
+    settings: Settings,
+) -> tuple[int, str | None, bool]:
+    """Read Docker listener policy, retaining the absent-section legacy case."""
     project = settings.project_dir
     global_yaml = project / "01-global.yaml"
     _canonical_regular_within(global_yaml, project, "project global YAML")
@@ -1375,18 +1377,40 @@ def project_http_policy(settings: Settings) -> tuple[int, str | None]:
         http_policy = mgmt.get("http", {})
         if not isinstance(http_policy, dict):
             raise ValueError("common.mgmt.http must be a mapping")
+        # Only a wholly absent legacy section inherits enabled port-80
+        # behavior.  An explicit section must declare its own status.
+        if "http" in mgmt:
+            raw_status = http_policy.get("status")
+            status = str(raw_status or "").strip().casefold()
+            if status not in {"enabled", "disabled"}:
+                raise ValueError(
+                    "common.mgmt.http.status must be enabled or disabled"
+                )
+            enabled = status == "enabled"
+        else:
+            enabled = True
         raw_port = http_policy.get("port", 80)
         port = validate_service_endpoint(
             "192.0.2.1", raw_port, field="common.mgmt.http.port"
         ).port
         address = None
+        if enabled and "address" not in http_policy:
+            raise ValueError(
+                "common.mgmt.http.address must explicitly identify the HTTP service IPv4"
+            )
         if "address" in http_policy:
             address = validate_service_endpoint(
                 http_policy["address"], field="common.mgmt.http.address"
             ).host
-        return port, address
+        return port, address, enabled
     except (OSError, UnicodeError, yaml.YAMLError, ValueError, KeyError, TypeError) as exc:
         raise ActivationError(f"invalid project HTTP policy: {exc}") from exc
+
+
+def project_http_policy(settings: Settings) -> tuple[int, str | None]:
+    """Keep the existing port/address interface for Docker callers."""
+    port, address, _enabled = _project_http_policy_with_status(settings)
+    return port, address
 
 
 def project_http_port(settings: Settings) -> int:
@@ -1395,12 +1419,11 @@ def project_http_port(settings: Settings) -> int:
 
 
 def project_http_listener_ips(settings: Settings, selected) -> tuple[str, ...]:
-    """Project HTTP listeners; selected.endpoint_ips remains ZTP-only."""
-    _port, address = project_http_policy(settings)
-    try:
-        return merge_http_listener_addresses(selected.endpoint_ips, address)
-    except ValueError as exc:
-        raise ActivationError(f"invalid project HTTP listener: {exc}") from exc
+    """Project HTTP listener comes only from the explicit HTTP authority."""
+    _port, address, enabled = _project_http_policy_with_status(settings)
+    if not enabled:
+        return ()
+    return (address,)
 
 
 def current_project_dhcp_ztp_modes(settings: Settings) -> tuple[bool, bool]:
@@ -1432,7 +1455,7 @@ def current_project_dhcp_ztp_modes(settings: Settings) -> tuple[bool, bool]:
 
 
 def current_project_dhcp_status(settings: Settings) -> str:
-    """Bind activation to the validated current global mode, not stale files."""
+    """Bind parent release to current DHCP status without changing its API."""
     project = settings.project_dir
     global_yaml = project / "01-global.yaml"
     _canonical_regular_within(global_yaml, project, "project global YAML")
@@ -2298,10 +2321,10 @@ def ensure_docker_deployment_owner(
 
 def observe_runtime(settings: Settings, runner=subprocess.run):
     """Build the current plan and rendered config without changing any file."""
-    port, address = project_http_policy(settings)
+    port, address, enabled = _project_http_policy_with_status(settings)
     subnet_source = _subnet_source_token(settings.subnet_csv)
     selected, links, addresses, runtime = build_runtime_plan(settings, runner)
-    if address is not None:
+    if enabled and address is not None:
         try:
             owners = runtime.inspect_http_listener_owners(
                 address, link_snapshot=links, address_snapshot=addresses,
@@ -2313,12 +2336,7 @@ def observe_runtime(settings: Settings, runner=subprocess.run):
             raise ActivationError(
                 f"invalid HTTP listener ownership: {exc}"
             ) from exc
-    try:
-        listener_ips = merge_http_listener_addresses(
-            selected.endpoint_ips, address
-        )
-    except ValueError as exc:
-        raise ActivationError(f"invalid project HTTP listener: {exc}") from exc
+    listener_ips = (address,) if enabled else ()
     apache = render_apache_listener_config(listener_ips, port=port)
     if _subnet_source_token(settings.subnet_csv) != subnet_source:
         raise ActivationError("subnet CSV source changed between parsing and plan identity")
@@ -2333,8 +2351,10 @@ def observe_runtime(settings: Settings, runner=subprocess.run):
 
 def prepare_runtime(settings: Settings, runner=subprocess.run):
     """Explicitly publish a freshly observed plan and exact Apache listeners."""
-    # Admit project and network inputs before creating runtime paths.
-    project_http_policy(settings)
+    # All project inputs and the stable network snapshot must be accepted
+    # before creating runtime directories, regardless of HTTP address mode.
+    # Reject a malformed explicit HTTP policy before invoking observation.
+    _project_http_policy_with_status(settings)
     selected, runtime, payload, apache = observe_runtime(settings, runner)
     ensure_runtime_directories(settings)
     _atomic_write(settings.apache_listeners, apache, 0o644)

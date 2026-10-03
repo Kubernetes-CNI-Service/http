@@ -1473,7 +1473,7 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 ## TC-REAL-HTTP-ADDRESS-001 — 独立 HTTP 地址与多接口归属的真实服务门禁
 
 - Case ID：`TC-REAL-HTTP-ADDRESS-001`；类型：real-environment / scenario / failure-injection；
-  对应 endpoint/address convergence 与 REQ-14 port；状态：**NOT RUN / REAL_ENV REQUIRED**。
+  对应 F02-5 独立 HTTP 来源、endpoint/address convergence 与 REQ-14 port；状态：**NOT RUN / REAL_ENV REQUIRED**。
   本机 direct/workflow 只证明解析、计划、写前拒绝和配置字节，不能证明真实接口归属、Apache bind、
   Docker/Supervisor 启停及健康检查。
 - 前置条件：仅在 owner 后续批准的隔离 Native 与 Docker 管理 VM 中运行；每台具备可回滚的接口、
@@ -1481,8 +1481,9 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   HEAD/tree、源码/测试/manifest/ledger、global YAML、接口名称与 ifindex、地址/路由、服务配置
   摘要；记录 80 与非默认 8080 的端口占用前像。不得使用生产地址、凭据、设备或服务。
 - 正向矩阵：分别运行没有 ZTP endpoint 的 `common.mgmt.http.address` HTTP-only 项目，以及 HTTP
-  地址与 ZTP endpoint 相等和不等的项目。Native 与 Docker 均须只生成精确的 `Listen <IP>:<port>`
-  集合：相等只一条，不等各一条；HTTP-only 只启动 Apache，不产生 DHCP/ZTP worker、DORA 或
+  地址与 ZTP endpoint 相等和不等的项目。Native 与 Docker 均须只生成显式 HTTP 地址对应的
+  单条 `Listen <IP>:<port>`，即使 ZTP endpoint 不同也不得为其另开 HTTP listener；DHCP
+  地址来源与 HTTP listener 身份仍各自独立。HTTP-only 只启动 Apache，不产生 DHCP/ZTP worker、DORA 或
   bootstrap 发布身份。两种后端的实际 listener、服务集、precommit/committed marker、健康检查
   与 HTTP 回读必须一致；默认端口仍为 80，8080 不得回退 80 或 wildcard。
 - 归属与拒绝矩阵：记录指定 HTTP 地址的**全部**观测接口及其 ifindex、up/down/可监听资格、
