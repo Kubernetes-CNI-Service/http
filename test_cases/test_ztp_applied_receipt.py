@@ -289,6 +289,31 @@ class AppliedReceiptPersistenceTests(unittest.TestCase):
             self.assertNotIn("failed_raw_sha256", fields)
             self.assertGreaterEqual(receipt.stat().st_mtime_ns, applied.stat().st_mtime_ns)
 
+    def test_writer_rejects_degenerate_receipt_budget_and_retains_prior(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            source = root / "next.yaml"
+            source.write_bytes(b"- set:\n    system:\n      hostname: next\n")
+            state = root / "state"
+            state.mkdir(mode=0o711)
+            state.chmod(0o711)
+            previous_yaml = b"- set:\n    system:\n      hostname: prior\n"
+            previous_receipt = b"prior protected receipt\n"
+            (state / "last-success.yaml").write_bytes(previous_yaml)
+            (state / "receipt.env").write_bytes(previous_receipt)
+            harness = library_harness(root, """
+                APPLIED_RECEIPT_MAX_BYTES=1
+                persist_applied_receipt \
+                    "$1" success dedicated replace 020000000001.yaml \
+                    02:00:00:00:00:01
+            """)
+            result = run_bash(harness, source)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual(previous_yaml, (state / "last-success.yaml").read_bytes())
+            self.assertEqual(previous_receipt, (state / "receipt.env").read_bytes())
+            self.assertEqual([], list(state.glob(".*.??????")))
+            self.assertIn("exceeds schema-1 safety budget", (root / "test.log").read_text())
+
     def test_persistent_log_is_unique_regular_and_written_from_first_line(self):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
@@ -792,6 +817,12 @@ class ModeSidecarFailClosedTests(unittest.TestCase):
 
 
 class AppliedConfigHelperTests(unittest.TestCase):
+    # Schema-1's largest legitimate fallback receipt is fixed independently
+    # of the helper: 255-byte source, 64-byte hashes, and a 35-byte RFC3339
+    # timestamp with nanoseconds and a numeric timezone.  The failed-mode
+    # name is necessarily the 12-byte MAC plus ".mode".
+    MAX_SCHEMA1_TIMESTAMP = "2026-08-31T12:34:56.123456789+00:00"
+
     def write_helper(self, root: Path) -> Path:
         state = root / "state"
         source = helper_source().replace(
@@ -855,6 +886,82 @@ class AppliedConfigHelperTests(unittest.TestCase):
             denied = run_bash(helper, "unexpected")
             self.assertNotEqual(0, denied.returncode)
             self.assertIn("accepts no arguments", denied.stderr)
+
+    def test_schema1_maximal_positive_receipt_and_degenerate_limit(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            raw = b"- set:\n    system:\n      hostname: leaf01\n"
+            receipt, _applied = self.prepare_state(root, raw, fallback=True)
+            failed_raw = b"- set:\n    broken: true\n"
+            self.assertEqual(failed_raw, (root / "state/last-failed-dedicated.yaml").read_bytes())
+            fields = [
+                "schema=1",
+                "status=success",
+                "source_kind=fallback_default",
+                "apply_mode=patch",
+                "raw_sha256=" + hashlib.sha256(raw).hexdigest(),
+                "source_name=" + "A" * 255,
+                "eth0_mac=" + MAC,
+                "applied_at=" + self.MAX_SCHEMA1_TIMESTAMP,
+                "failed_raw_sha256=" + hashlib.sha256(failed_raw).hexdigest(),
+                "failed_source_name=" + MAC.replace(":", "") + ".mode",
+            ]
+            maximal = ("\n".join(fields) + "\n").encode("ascii")
+            self.assertEqual(608, len(maximal))  # schema-1 fixed maximum fixture
+            receipt.write_bytes(maximal)
+            helper = self.write_helper(root)
+
+            accepted = run_bash(helper)
+            self.assertEqual(0, accepted.returncode, accepted.stderr)
+            self.assertIn(maximal, accepted.stdout.encode("utf-8"))
+            self.assertEqual(maximal, receipt.read_bytes())
+
+            # A bound smaller than this independent positive fixture cannot
+            # satisfy schema-1 merely by passing negative-size tests.
+            source = helper.read_text(encoding="utf-8")
+            bound = len(maximal) - 1
+            self.assertIn("MAX_RECEIPT_BYTES=1024", source)
+            helper.write_text(
+                source.replace("MAX_RECEIPT_BYTES=1024", f"MAX_RECEIPT_BYTES={bound}", 1),
+                encoding="utf-8",
+            )
+            denied = run_bash(helper)
+            self.assertNotEqual(0, denied.returncode)
+            self.assertIn("receipt size out of range", denied.stderr)
+            self.assertEqual(maximal, receipt.read_bytes())
+
+    def test_schema1_oversized_timestamp_is_rejected_without_truncation(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            raw = b"- set:\n    system:\n      hostname: leaf01\n"
+            receipt, _applied = self.prepare_state(root, raw)
+            initial = receipt.read_bytes()
+            oversized = initial.replace(
+                b"applied_at=2026-08-31T12:34:56+00:00",
+                b"applied_at=" + b"2" * 1200,
+            )
+            self.assertGreater(len(oversized), 1024)
+            self.assertLess(len(oversized), 4096)
+            receipt.write_bytes(oversized)
+            denied = run_bash(self.write_helper(root))
+            self.assertNotEqual(0, denied.returncode)
+            self.assertEqual("", denied.stdout)
+            self.assertEqual(oversized, receipt.read_bytes())
+
+    def test_schema1_timestamp_cannot_expand_inside_receipt_budget(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            receipt, _applied = self.prepare_state(root, b"- set: {}\n")
+            oversized = receipt.read_bytes().replace(
+                b"applied_at=2026-08-31T12:34:56+00:00",
+                b"applied_at=2026-08-31T12:34:56." + b"1" * 40 + b"+00:00",
+            )
+            self.assertLess(len(oversized), 1024)
+            receipt.write_bytes(oversized)
+            denied = run_bash(self.write_helper(root))
+            self.assertNotEqual(0, denied.returncode)
+            self.assertEqual("", denied.stdout)
+            self.assertEqual(oversized, receipt.read_bytes())
 
     def test_helper_fails_closed_on_hash_mismatch_symlink_or_unsafe_receipt(self):
         with tempfile.TemporaryDirectory() as name:

@@ -54,6 +54,7 @@ class RenderedBootstrapFetchWorkflowTests(unittest.TestCase):
             http_enabled=True,
             http_package="apache2",
             http_root=root,
+            http_address="203.0.113.20",
             ztp_enabled=True,
             ztp_prefix="/ztp",
             ztp_ips={

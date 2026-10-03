@@ -56,6 +56,10 @@ TIME_SYNC_SUDOERS="/etc/sudoers.d/http-sync-management-time"
 # Keep the helper's complete protocol below the management reader's 8 MiB cap,
 # including receipt/magic/delimiter overhead.
 APPLIED_CONFIG_MAX_BYTES=$((8 * 1024 * 1024 - 8192))
+# Schema-1's maximal legal fallback receipt is under 1 KiB (255-byte source
+# name, two 64-byte hashes, bounded timestamp and fixed failed-mode name).
+# This is a finite safety budget, not a truncation target.
+APPLIED_RECEIPT_MAX_BYTES=1024
 ZTP_DHCP_STATE=""
 ZTP_INTERFACE=""
 ZTP_VRF=""
@@ -615,7 +619,7 @@ YAML_PATH=${STATE_DIR}/last-success.yaml
 RECEIPT_PATH=${STATE_DIR}/receipt.env
 FAILED_YAML_PATH=${STATE_DIR}/last-failed-dedicated.yaml
 MAX_YAML_BYTES=8380416
-MAX_RECEIPT_BYTES=4096
+MAX_RECEIPT_BYTES=1024
 
 fail() {
     echo "ZTP applied-config evidence unavailable: $*" >&2
@@ -738,6 +742,7 @@ esac
 case "${applied_at}" in
     ''|*[!0-9TZ:+.-]*) fail "unsafe applied timestamp" ;;
 esac
+[ "${#applied_at}" -le 35 ] || fail "unsafe applied timestamp"
 case "${status}|${source_kind}|${apply_mode}" in
     success\|dedicated\|replace|success\|dedicated\|patch|success\|default\|patch|success\|fallback\|patch) ;;
     success\|fallback_default\|patch)
@@ -916,7 +921,7 @@ persist_applied_receipt() {
     local eth0_mac="$6"
     local failed_source="${7:-}"
     local failed_source_name="${8:-}"
-    local source_size raw_sha256 copied_sha256 applied_at
+    local source_size raw_sha256 copied_sha256 applied_at receipt_size
     local failed_size failed_raw_sha256 failed_copied_sha256=""
     local yaml_tmp="" receipt_tmp="" failed_tmp=""
 
@@ -1089,6 +1094,18 @@ persist_applied_receipt() {
     } > "${receipt_tmp}" || ! chown root:root "${receipt_tmp}" || ! chmod 0600 "${receipt_tmp}"; then
         cleanup_applied_receipt_temps
         log "[ZTP] WARN: Could not stage applied-config receipt"
+        return 0
+    fi
+    if ! receipt_size=$(wc -c < "${receipt_tmp}"); then
+        cleanup_applied_receipt_temps
+        log "[ZTP] WARN: Could not size staged applied-config receipt"
+        return 0
+    fi
+    receipt_size=${receipt_size//[[:space:]]/}
+    if [[ ! "${receipt_size}" =~ ^[0-9]+$ ]] ||
+       (( receipt_size < 1 || receipt_size > APPLIED_RECEIPT_MAX_BYTES )); then
+        cleanup_applied_receipt_temps
+        log "[ZTP] WARN: Applied-config receipt exceeds schema-1 safety budget"
         return 0
     fi
 
