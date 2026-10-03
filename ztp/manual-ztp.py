@@ -2261,6 +2261,47 @@ def trigger_one(
                 f"触发命令失败 exit={result.returncode}: "
                 f"{result.stderr.strip() or result.stdout.strip() or 'no detail'}"
             )
+        live_state_sha256 = ""
+        batch_identity_verified = False
+        batch_identity_verified_at = ""
+        if operation == "replace-config":
+            # An accepted command exit is not a configuration receipt.  The
+            # password/interactive route may execute, but cannot promote a
+            # Switch/host success without a fresh BatchMode identity and live
+            # NVUE observation from this same execution session.
+            if getattr(client.args, "ssh_password", None) is not False:
+                raise ManualZtpError(
+                    "配置已尝试执行，但缺少非交互 BatchMode 身份证明；"
+                    "不得晋升配置同步成功"
+                )
+            verified_host, verified_interface = connect_and_verify(client, device)
+            if (verified_host, verified_interface) != (host, interface):
+                raise ManualZtpError("配置同步后设备身份/路径已变更；不得晋升成功")
+            live_state = client.run(
+                device, host, "nv config show", timeout=client.args.command_timeout,
+            )
+            if live_state.returncode or not live_state.stdout.strip():
+                raise ManualZtpError(
+                    "配置同步后未取得 live-state；不得晋升成功: "
+                    f"{live_state.stderr.strip() or 'empty nv config show'}"
+                )
+            live_value, _live_json, _live_digest = runtime_comparable_nvue_config(
+                live_state.stdout, label=f"{device['hostname']} 同会话 live-state",
+            )
+            expected_value, _expected_json, _expected_digest = (
+                runtime_comparable_nvue_config(
+                    expected_text, label=f"{device['hostname']} 发布配置",
+                )
+            )
+            if live_value != expected_value:
+                raise ManualZtpError(
+                    "配置同步后 live-state 与发布配置不一致；不得晋升成功"
+                )
+            live_state_sha256 = _raw_text_sha256(live_state.stdout)
+            batch_identity_verified = True
+            batch_identity_verified_at = datetime.now().astimezone().isoformat(
+                timespec="seconds"
+            )
         command_log_sha256, command_log_complete = ztp_command_log_evidence(
             result.stdout
         )
@@ -2276,6 +2317,9 @@ def trigger_one(
             "trigger_source": trigger_source, "trigger_id": trigger_id,
             "command_ztp_log_sha256": command_log_sha256,
             "command_ztp_complete": command_log_complete,
+            "batch_identity_verified": batch_identity_verified,
+            "batch_identity_verified_at": batch_identity_verified_at,
+            "live_state_sha256": live_state_sha256,
             "finished_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         }
     except (ManualZtpError, subprocess.TimeoutExpired) as exc:

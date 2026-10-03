@@ -5658,7 +5658,27 @@ print('{{"factory_records_active":true,"valid":true}}')
             "state": "triggered", "operation": "replace-config",
             "effective_operation": "replace-config",
             "trigger_source": "manual_config_sync_web",
+            "transport_ip": "192.0.2.10", "interface": "eth0",
+            "command_started_at": "2026-10-03T10:00:00+08:00",
+            "batch_identity_verified": True,
+            "batch_identity_verified_at": "2026-10-03T10:00:01+08:00",
+            "live_state_sha256": "a" * 64,
         }
+        self.assertTrue(self.manual_worker.config_sync_promotion_ready(accepted))
+        for field, invalid in (
+            ("batch_identity_verified", False),
+            ("batch_identity_verified_at", ""),
+            ("batch_identity_verified_at", "2026-10-03T09:59:59+08:00"),
+            ("batch_identity_verified_at", "2026-10-03T10:00:01"),
+            ("live_state_sha256", ""),
+            ("live_state_sha256", "0" * 63),
+            ("transport_ip", ""),
+            ("interface", ""),
+        ):
+            with self.subTest(field=field, invalid=invalid):
+                self.assertFalse(self.manual_worker.config_sync_promotion_ready({
+                    **accepted, field: invalid,
+                }))
         with mock.patch.object(
             self.manual_worker, "write_device_status", side_effect=record,
         ), mock.patch.object(
@@ -5682,6 +5702,672 @@ print('{{"factory_records_active":true,"valid":true}}')
         self.assertEqual("config_sync_success", writes[-1][0])
         self.assertEqual("config_sync", writes[-1][1]["phase"])
         wait_for_completion.assert_not_called()
+
+        writes.clear()
+        with mock.patch.object(
+            self.manual_worker, "write_device_status", side_effect=record,
+        ), mock.patch.object(
+            self.manual_worker, "latest_device_state", return_value={},
+        ), mock.patch.object(
+            self.manual_worker, "command_for", return_value=["fixed-helper"],
+        ), mock.patch.object(
+            self.manual_worker.subprocess, "run", return_value=completed,
+        ), mock.patch.object(
+            self.manual_worker, "accepted_result",
+            return_value={**accepted, "live_state_sha256": ""},
+        ):
+            self.manual_worker.execute(
+                "EXAMPLE-Leaf01", "prod", 30, 60, 1,
+                operation="replace-config", operation_id="operation-2",
+                trigger_id="trigger-2", requested_operation="replace-config",
+                preview_fingerprint={"current_sha256": "a" * 64},
+            )
+        self.assertEqual("failed", writes[-1][0], writes)
+        self.assertNotIn("config_sync_success", [state for state, _ in writes])
+
+    def test_replace_config_rejects_a_foreign_persisted_acceptance_receipt(self):
+        """A successful helper exit cannot turn another operation's receipt into success."""
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            devices = project / "02-devices_config.csv"
+            devices.write_text("hostname,type\nEXAMPLE-Leaf01,eth\n", encoding="utf-8")
+            foreign = (
+                project / "99-output-ztp" / "manual-trigger" / "foreign"
+                / "EXAMPLE-Leaf01" / "result.json"
+            )
+            foreign.parent.mkdir(parents=True)
+            foreign.write_text(json.dumps({
+                "hostname": "EXAMPLE-Leaf01", "state": "triggered",
+                "operation": "ztp", "effective_operation": "ztp",
+                "operation_id": "different-operation",
+                "trigger_id": "req-5-trigger",
+                "trigger_source": "manual_web",
+            }), encoding="utf-8")
+            writes = []
+
+            def record(_hostname, state, **values):
+                writes.append((state, values))
+
+            completed = subprocess.CompletedProcess(
+                ["replace-config"], 0, stdout="accepted\n", stderr="",
+            )
+            with mock.patch.object(
+                self.manual_worker, "DEVICES_CSV", devices,
+            ), mock.patch.object(
+                self.manual_worker, "write_device_status", side_effect=record,
+            ), mock.patch.object(
+                self.manual_worker, "latest_device_state", return_value={},
+            ), mock.patch.object(
+                self.manual_worker, "command_for", return_value=["fixed-helper"],
+            ), mock.patch.object(
+                self.manual_worker.subprocess, "run", return_value=completed,
+            ), mock.patch.object(self.manual_worker, "wait_for_completion") as wait:
+                self.manual_worker.execute(
+                    "EXAMPLE-Leaf01", "prod", 30, 60, 1,
+                    operation="replace-config", operation_id="req-5-operation",
+                    trigger_id="req-5-trigger", requested_operation="replace-config",
+                    preview_fingerprint={"current_sha256": "a" * 64},
+                )
+            self.assertEqual("config_sync_running", writes[0][0])
+            self.assertEqual("failed", writes[-1][0], writes)
+            self.assertNotIn("config_sync_success", [state for state, _ in writes])
+            self.assertIn("req-5-trigger", writes[-1][1]["reason"])
+            wait.assert_not_called()
+
+            foreign.unlink()
+            stale = (
+                project / "99-output-ztp" / "manual-config-sync" / "old-run"
+                / "EXAMPLE-Leaf01" / "result.json"
+            )
+            stale.parent.mkdir(parents=True)
+            stale.write_text(json.dumps({
+                "hostname": "EXAMPLE-Leaf01", "state": "triggered",
+                "operation": "replace-config", "effective_operation": "replace-config",
+                "operation_id": "req-5-operation", "trigger_id": "req-5-trigger",
+                "trigger_source": "manual_config_sync_web",
+            }), encoding="utf-8")
+            writes.clear()
+            with mock.patch.object(
+                self.manual_worker, "DEVICES_CSV", devices,
+            ), mock.patch.object(
+                self.manual_worker, "write_device_status", side_effect=record,
+            ), mock.patch.object(
+                self.manual_worker, "latest_device_state", return_value={},
+            ), mock.patch.object(
+                self.manual_worker, "command_for", return_value=["fixed-helper"],
+            ), mock.patch.object(
+                self.manual_worker.subprocess, "run", return_value=completed,
+            ):
+                self.manual_worker.execute(
+                    "EXAMPLE-Leaf01", "prod", 30, 60, 1,
+                    operation="replace-config", operation_id="req-5-operation",
+                    trigger_id="req-5-trigger", requested_operation="replace-config",
+                    preview_fingerprint={"current_sha256": "a" * 64},
+                )
+            self.assertEqual("failed", writes[-1][0], writes)
+            self.assertNotIn("config_sync_success", [state for state, _ in writes])
+
+    def test_replace_config_acceptance_requires_unique_full_receipt_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            devices = project / "02-devices_config.csv"
+            devices.write_text("hostname,type\nEXAMPLE-Leaf01,eth\n", encoding="utf-8")
+            receipt = (
+                project / "99-output-ztp" / "manual-config-sync" / "run1"
+                / "EXAMPLE-Leaf01" / "result.json"
+            )
+            receipt.parent.mkdir(parents=True)
+            expected = {
+                "hostname": "EXAMPLE-Leaf01", "state": "triggered",
+                "operation_id": "req-5-operation", "trigger_id": "req-5-trigger",
+                "operation": "replace-config", "effective_operation": "replace-config",
+                "trigger_source": "manual_config_sync_web",
+            }
+
+            def write_summary(path, result):
+                path.write_text(json.dumps({
+                    "state": "triggered", "operation": "replace-config",
+                    "effective_operation": "replace-config",
+                    "operation_id": "req-5-operation",
+                    "trigger_source": "manual_config_sync_web",
+                    "targets": [{
+                        "hostname": "EXAMPLE-Leaf01", "trigger_id": "req-5-trigger",
+                        "effective_operation": "replace-config",
+                    }],
+                    "results": [result],
+                }), encoding="utf-8")
+
+            def read(hostname="EXAMPLE-Leaf01"):
+                return self.manual_worker.accepted_result(
+                    "req-5-trigger", hostname=hostname,
+                    operation_id="req-5-operation", operation="replace-config",
+                    trigger_source="manual_config_sync_web",
+                )
+
+            with mock.patch.object(self.manual_worker, "DEVICES_CSV", devices):
+                receipt.write_text(json.dumps(expected), encoding="utf-8")
+                write_summary(receipt.parent.parent / "summary.json", expected)
+                self.assertEqual(expected, read())
+                self.assertEqual(expected, read("example-leaf01"))
+                for field, wrong in (
+                    ("hostname", "EXAMPLE-Other"),
+                    ("operation_id", "other-operation"),
+                    ("trigger_id", "other-trigger"),
+                    ("operation", "ztp"),
+                    ("effective_operation", "ztp"),
+                    ("trigger_source", "manual_web"),
+                ):
+                    with self.subTest(field=field):
+                        receipt.write_text(
+                            json.dumps({**expected, field: wrong}), encoding="utf-8",
+                        )
+                        self.assertEqual({}, read())
+                receipt.write_text(json.dumps(expected), encoding="utf-8")
+                duplicate = receipt.parents[2] / "run2" / "EXAMPLE-Leaf01" / "result.json"
+                duplicate.parent.mkdir(parents=True)
+                duplicate.write_text(json.dumps(expected), encoding="utf-8")
+                write_summary(duplicate.parent.parent / "summary.json", expected)
+                self.assertEqual({}, read())
+
+    def test_replace_config_rejects_orphan_or_nonfinal_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            devices = project / "02-devices_config.csv"
+            devices.write_text("hostname,type\nEXAMPLE-Leaf01,eth\n", encoding="utf-8")
+            receipt = (
+                project / "99-output-ztp" / "manual-config-sync" / "new-run"
+                / "EXAMPLE-Leaf01" / "result.json"
+            )
+            receipt.parent.mkdir(parents=True)
+            result = {
+                "hostname": "EXAMPLE-Leaf01", "state": "triggered",
+                "operation_id": "req-5-operation", "trigger_id": "req-5-trigger",
+                "operation": "replace-config", "effective_operation": "replace-config",
+                "trigger_source": "manual_config_sync_web",
+            }
+            receipt.write_text(json.dumps(result), encoding="utf-8")
+            summary = receipt.parent.parent / "summary.json"
+            final = {
+                "state": "triggered", "operation": "replace-config",
+                "effective_operation": "replace-config",
+                "operation_id": "req-5-operation",
+                "trigger_source": "manual_config_sync_web",
+                "targets": [{
+                    "hostname": "EXAMPLE-Leaf01", "trigger_id": "req-5-trigger",
+                    "effective_operation": "replace-config",
+                }],
+                "results": [result],
+            }
+            def read():
+                return self.manual_worker.accepted_result(
+                    "req-5-trigger", hostname="EXAMPLE-Leaf01",
+                    operation_id="req-5-operation", operation="replace-config",
+                    trigger_source="manual_config_sync_web",
+                )
+
+            with mock.patch.object(self.manual_worker, "DEVICES_CSV", devices):
+                self.assertEqual({}, read(), "result alone is not CLI completion")
+                for variant in (
+                    {**final, "state": "running"},
+                    {**final, "operation_id": "another-operation"},
+                    {**final, "results": [{**result, "trigger_id": "another-trigger"}]},
+                    {**final, "results": [result, dict(result)]},
+                    {**final, "targets": [{**final["targets"][0], "trigger_id": "another-trigger"}]},
+                    {**final, "targets": [final["targets"][0], dict(final["targets"][0])]},
+                ):
+                    with self.subTest(variant=variant):
+                        summary.write_text(json.dumps(variant), encoding="utf-8")
+                        self.assertEqual({}, read())
+                summary.write_text(json.dumps(final), encoding="utf-8")
+                self.assertEqual(result, read())
+
+    def test_replace_config_receipt_reader_rejects_short_prefix_read(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory).resolve() / "result.json"
+            valid_prefix = b'{"state":"triggered"}'
+            path.write_bytes(valid_prefix + b"trailing garbage")
+            with mock.patch.object(
+                self.manual_worker.os, "read", side_effect=[valid_prefix, b""],
+            ):
+                self.assertEqual(
+                    {}, self.manual_worker._read_new_config_sync_receipt(path),
+                )
+
+    def test_replace_config_rejects_new_linked_receipts_after_helper_exit(self):
+        """A new path is not proof when it aliases another receipt file."""
+        for alias_kind in ("symlink", "hardlink"):
+            with self.subTest(alias_kind=alias_kind), tempfile.TemporaryDirectory() as directory:
+                project = Path(directory)
+                devices = project / "02-devices_config.csv"
+                devices.write_text("hostname,type\nEXAMPLE-Leaf01,eth\n", encoding="utf-8")
+                source = project / "external-result.json"
+                source.write_text(json.dumps({
+                    "hostname": "EXAMPLE-Leaf01", "state": "triggered",
+                    "operation_id": "req-5-operation", "trigger_id": "req-5-trigger",
+                    "operation": "replace-config",
+                    "effective_operation": "replace-config",
+                    "trigger_source": "manual_config_sync_web",
+                }), encoding="utf-8")
+                receipt = (
+                    project / "99-output-ztp" / "manual-config-sync" / "new-run"
+                    / "EXAMPLE-Leaf01" / "result.json"
+                )
+                receipt.parent.mkdir(parents=True)
+                writes = []
+
+                def run_helper(command, **_kwargs):
+                    if alias_kind == "symlink":
+                        receipt.symlink_to(source)
+                    else:
+                        os.link(source, receipt)
+                    return subprocess.CompletedProcess(
+                        command, 0, stdout="accepted\n", stderr="",
+                    )
+
+                with mock.patch.object(
+                    self.manual_worker, "DEVICES_CSV", devices,
+                ), mock.patch.object(
+                    self.manual_worker, "write_device_status",
+                    side_effect=lambda _host, state, **values: writes.append((state, values)),
+                ), mock.patch.object(
+                    self.manual_worker, "latest_device_state", return_value={},
+                ), mock.patch.object(
+                    self.manual_worker, "command_for", return_value=["fixed-helper"],
+                ), mock.patch.object(
+                    self.manual_worker.subprocess, "run", side_effect=run_helper,
+                ), mock.patch.object(self.manual_worker, "wait_for_completion") as wait:
+                    self.manual_worker.execute(
+                        "EXAMPLE-Leaf01", "prod", 30, 60, 1,
+                        operation="replace-config", operation_id="req-5-operation",
+                        trigger_id="req-5-trigger",
+                        requested_operation="replace-config",
+                        preview_fingerprint={"current_sha256": "a" * 64},
+                    )
+                self.assertEqual("config_sync_running", writes[0][0])
+                self.assertEqual("failed", writes[-1][0], writes)
+                self.assertNotIn("config_sync_success", [state for state, _ in writes])
+                wait.assert_not_called()
+
+    def test_replace_config_rejects_renamed_old_run_after_helper_exit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            devices = project / "02-devices_config.csv"
+            devices.write_text("hostname,type\nEXAMPLE-Leaf01,eth\n", encoding="utf-8")
+            old_run = project / "99-output-ztp" / "manual-config-sync" / "old-run"
+            new_run = old_run.with_name("new-run")
+            receipt = old_run / "EXAMPLE-Leaf01" / "result.json"
+            result = {
+                "hostname": "EXAMPLE-Leaf01", "state": "triggered",
+                "operation_id": "req-5-operation", "trigger_id": "req-5-trigger",
+                "operation": "replace-config", "effective_operation": "replace-config",
+                "trigger_source": "manual_config_sync_web",
+            }
+            self.manual.atomic_json(receipt, result)
+            self.manual.atomic_json(old_run / "summary.json", {
+                "state": "triggered", "operation": "replace-config",
+                "effective_operation": "replace-config",
+                "operation_id": "req-5-operation",
+                "trigger_source": "manual_config_sync_web",
+                "targets": [{
+                    "hostname": "EXAMPLE-Leaf01", "trigger_id": "req-5-trigger",
+                    "effective_operation": "replace-config",
+                }],
+                "results": [result],
+            })
+            writes = []
+
+            def run_helper(command, **_kwargs):
+                old_run.rename(new_run)
+                return subprocess.CompletedProcess(
+                    command, 0, stdout="accepted\n", stderr="",
+                )
+
+            with mock.patch.object(
+                self.manual_worker, "DEVICES_CSV", devices,
+            ), mock.patch.object(
+                self.manual_worker, "write_device_status",
+                side_effect=lambda _host, state, **values: writes.append((state, values)),
+            ), mock.patch.object(
+                self.manual_worker, "latest_device_state", return_value={},
+            ), mock.patch.object(
+                self.manual_worker, "command_for", return_value=["fixed-helper"],
+            ), mock.patch.object(
+                self.manual_worker.subprocess, "run", side_effect=run_helper,
+            ), mock.patch.object(self.manual_worker, "wait_for_completion") as wait:
+                self.manual_worker.execute(
+                    "EXAMPLE-Leaf01", "prod", 30, 60, 1,
+                    operation="replace-config", operation_id="req-5-operation",
+                    trigger_id="req-5-trigger", requested_operation="replace-config",
+                    preview_fingerprint={"current_sha256": "a" * 64},
+                )
+            self.assertEqual("config_sync_running", writes[0][0])
+            self.assertEqual("failed", writes[-1][0], writes)
+            self.assertNotIn("config_sync_success", [state for state, _ in writes])
+            wait.assert_not_called()
+
+    def test_replace_config_real_cli_receipt_is_consumed_by_real_worker(self):
+        """The actual CLI writer and worker reader agree on the web request identity."""
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            devices = project / "02-devices_config.csv"
+            devices.write_text("hostname,type\nEXAMPLE-Leaf01,eth\n", encoding="utf-8")
+            queue = project / "manual-ztp.request.json"
+            queue.write_text("{}\n", encoding="utf-8")
+            with mock.patch.object(
+                self.manual_cgi, "REQUEST_FILE", queue,
+            ), mock.patch.object(self.manual_worker, "REQUEST_FILE", queue):
+                self.assertTrue(self.manual_cgi.enqueue_request(
+                    "example-leaf01", action="replace-config",
+                    operation_id="req-5-operation", trigger_id="req-5-trigger",
+                    phase="config_sync",
+                ))
+                encoded = queue.read_bytes()
+                self.assertEqual(
+                    self.manual_cgi._decode_queue(encoded),
+                    self.manual_worker._decode_queue(encoded),
+                )
+                requests = self.manual_worker.pop_requests()
+                self.assertEqual(1, len(requests))
+                request = requests[0]
+                self.assertEqual([], self.manual_worker._decode_queue(queue.read_bytes()))
+            self.assertEqual("replace-config", request["action"])
+            self.assertEqual("example-leaf01", request["hostname"])
+            self.assertEqual("config_sync", request["phase"])
+            self.assertEqual("req-5-operation", request["operation_id"])
+            self.assertEqual("req-5-trigger", request["trigger_id"])
+            command = self.manual_worker.command_for(
+                request["hostname"], "prod", operation=request["action"],
+                operation_id=request["operation_id"],
+                trigger_id=request["trigger_id"],
+                preview_fingerprint={"current_sha256": "a" * 64},
+            )
+            self.assertIn("--replace-config", command)
+            self.assertEqual("web", command[command.index("--origin") + 1])
+            self.assertEqual("req-5-operation", command[command.index("--operation-id") + 1])
+            self.assertEqual("req-5-trigger", command[command.index("--trigger-id") + 1])
+
+            release = project / "release"
+            release.mkdir()
+            marker = release / ".published-complete"
+            marker.write_text("ok\n", encoding="utf-8")
+            expected = release / "EXAMPLE-Leaf01.yaml"
+            expected_text = "- set:\n    system:\n      hostname: EXAMPLE-Leaf01\n"
+            expected.write_text(expected_text, encoding="utf-8")
+            prior = expected_text
+            client = mock.Mock()
+            client.args.command_timeout = 20
+            client.args.ssh_password = False
+            client.run.side_effect = [
+                SimpleNamespace(returncode=0, stdout=prior, stderr=""),
+                SimpleNamespace(returncode=0, stdout="saved\n", stderr=""),
+                SimpleNamespace(returncode=0, stdout=expected_text, stderr=""),
+            ]
+            prepared = {
+                "published_marker": str(marker),
+                "expected_yaml": str(expected),
+                "published_release_dir": str(release.resolve()),
+                "expected_yaml_sha256": self.manual.normalized_nvue_config(
+                    expected_text, label="expected",
+                )[2],
+                "current_sha256": hashlib.sha256(prior.encode("utf-8")).hexdigest(),
+                "applied_fingerprint": "a" * 64,
+                "published_mac_links": [],
+            }
+            run_dir = project / "99-output-ztp" / "manual-config-sync" / "run1"
+            receipt = run_dir / "EXAMPLE-Leaf01" / "result.json"
+            self.assertFalse(receipt.exists())
+            produced = None
+
+            def run_cli(_command, **_kwargs):
+                nonlocal produced
+                self.assertEqual(command, _command)
+                with mock.patch.object(
+                    self.manual, "connect_and_verify", return_value=("192.0.2.10", "eth0"),
+                ), mock.patch.object(
+                    self.manual, "verify_prepared_release_binding",
+                ), mock.patch.object(
+                    self.manual, "collect_applied_config", return_value={"fingerprint": "a" * 64},
+                ), mock.patch.object(
+                    self.manual, "evaluate_replace_config_guard", return_value={"allowed": True},
+                ):
+                    produced = self.manual.trigger_one(
+                        client, {"hostname": "EXAMPLE-Leaf01", "type": "eth"},
+                        "", run_dir, trigger_source="manual_config_sync_web",
+                        trigger_id=request["trigger_id"], operation="replace-config",
+                        operation_id=request["operation_id"], prepared=prepared,
+                        requested_operation="replace-config",
+                    )
+                    self.manual.atomic_json(run_dir / "summary.json", {
+                        "state": "triggered", "operation": "replace-config",
+                        "effective_operation": "replace-config",
+                        "operation_id": request["operation_id"],
+                        "trigger_source": "manual_config_sync_web",
+                        "targets": [{
+                            "hostname": "EXAMPLE-Leaf01",
+                            "trigger_id": request["trigger_id"],
+                            "effective_operation": "replace-config",
+                        }],
+                        "results": [produced],
+                    })
+                return subprocess.CompletedProcess(
+                    _command, 0, stdout="accepted\n", stderr="",
+                )
+
+            writes = []
+
+            def record(_hostname, state, **values):
+                writes.append((state, values))
+
+            with mock.patch.object(
+                self.manual_worker, "DEVICES_CSV", devices,
+            ), mock.patch.object(
+                self.manual_worker, "write_device_status", side_effect=record,
+            ), mock.patch.object(
+                self.manual_worker, "latest_device_state", return_value={},
+            ), mock.patch.object(
+                self.manual_worker.subprocess, "run", side_effect=run_cli,
+            ), mock.patch.object(self.manual_worker, "wait_for_completion") as wait:
+                self.manual_worker.execute(
+                    request["hostname"], "prod", 30, 60, 1,
+                    operation=request["action"], operation_id=request["operation_id"],
+                    trigger_id=request["trigger_id"], requested_operation="replace-config",
+                    preview_fingerprint={"current_sha256": "a" * 64},
+                )
+            self.assertEqual("triggered", produced["state"], produced)
+            self.assertIs(produced["batch_identity_verified"], True)
+            self.assertEqual(
+                hashlib.sha256(expected_text.encode("utf-8")).hexdigest(),
+                produced["live_state_sha256"],
+            )
+            self.assertEqual(produced, json.loads(receipt.read_text(encoding="utf-8")))
+            self.assertEqual("config_sync_running", writes[0][0])
+            self.assertEqual("config_sync_success", writes[-1][0], writes)
+            self.assertEqual("req-5-trigger", writes[-1][1]["trigger_id"])
+            wait.assert_not_called()
+
+    def test_replace_config_real_cli_final_summary_is_consumed_by_worker(self):
+        """CLI main, not a test-authored summary, completes the worker receipt."""
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            devices = project / "02-devices_config.csv"
+            devices.write_text(
+                "hostname,type,eth0_ip,netmask,eth0_mac\n"
+                "EXAMPLE-Leaf01,eth,192.0.2.10,24,02:00:00:00:00:10\n",
+                encoding="utf-8",
+            )
+            release = project / "release"
+            release.mkdir()
+            marker = release / ".published-complete"
+            marker.write_text("ok\n", encoding="utf-8")
+            expected = release / "EXAMPLE-Leaf01.yaml"
+            expected_text = "- set:\n    system:\n      hostname: EXAMPLE-Leaf01\n"
+            expected.write_text(expected_text, encoding="utf-8")
+            prior = expected_text
+            current_sha = hashlib.sha256(prior.encode("utf-8")).hexdigest()
+            expected_sha = self.manual.normalized_nvue_config(
+                expected_text, label="expected",
+            )[2]
+            prepared = {
+                "published_marker": str(marker),
+                "expected_yaml": str(expected),
+                "published_release_dir": str(release.resolve()),
+                "expected_yaml_sha256": expected_sha,
+                "expected_sha256": expected_sha,
+                "current_sha256": current_sha,
+                "applied_fingerprint": "a" * 64,
+                "published_mac_links": [],
+                "transport_ip": "192.0.2.10",
+                "interface": "eth0",
+            }
+            fingerprint = {
+                "current_sha256": current_sha,
+                "expected_sha256": expected_sha,
+                "published_release_dir": str(release.resolve()),
+                "effective_operation": "replace-config",
+                "transport_ip": "192.0.2.10",
+                "interface": "eth0",
+            }
+            client = mock.Mock()
+            client.args.command_timeout = 20
+            client.args.ssh_password = False
+            client.run.side_effect = [
+                SimpleNamespace(returncode=0, stdout=prior, stderr=""),
+                SimpleNamespace(returncode=0, stdout="saved\n", stderr=""),
+                SimpleNamespace(returncode=0, stdout=expected_text, stderr=""),
+            ]
+            operation_id = "req-5-main-operation"
+            trigger_id = "req-5-main-trigger"
+            command = self.manual_worker.command_for(
+                "EXAMPLE-Leaf01", "prod", operation="replace-config",
+                operation_id=operation_id, trigger_id=trigger_id,
+                preview_fingerprint=fingerprint,
+            )
+            preview_command = self.manual_worker.command_for(
+                "EXAMPLE-Leaf01", "prod", operation="replace-config",
+                operation_id="req-5-preview-operation",
+                trigger_id="req-5-preview-trigger", preflight_only=True,
+            )
+            self.assertEqual(sys.executable, command[0])
+            self.assertEqual(str(self.manual_worker.MANUAL_SCRIPT), command[1])
+            writes = []
+
+            def run_cli(actual_command, **_kwargs):
+                self.assertIn(actual_command, (command, preview_command))
+                with mock.patch.object(
+                    self.manual, "resolve_project", return_value=project,
+                ), mock.patch.object(
+                    self.manual, "apply_sudo_policy",
+                ), mock.patch.object(
+                    self.manual, "acquire_deployment_lock", return_value=None,
+                ), mock.patch.object(
+                    self.manual, "release_deployment_lock",
+                ), mock.patch.object(
+                    self.manual, "dedicated_yaml_ready", return_value=(True, ""),
+                ), mock.patch.object(
+                    self.manual, "SshClient", return_value=client,
+                ), mock.patch.object(
+                    self.manual, "preflight_one", return_value=dict(prepared),
+                ), mock.patch.object(
+                    self.manual, "display_preflight_diff",
+                ), mock.patch.object(
+                    self.manual, "connect_and_verify",
+                    return_value=("192.0.2.10", "eth0"),
+                ), mock.patch.object(
+                    self.manual, "verify_prepared_release_binding",
+                ), mock.patch.object(
+                    self.manual, "collect_applied_config",
+                    return_value={"fingerprint": "a" * 64},
+                ), mock.patch.object(
+                    self.manual, "evaluate_replace_config_guard",
+                    return_value={"allowed": True},
+                ):
+                    result = self.manual.main(actual_command[2:])
+                return subprocess.CompletedProcess(actual_command, result, "", "")
+
+            with mock.patch.object(
+                self.manual_worker, "DEVICES_CSV", devices,
+            ), mock.patch.object(
+                self.manual_worker, "write_device_status",
+                side_effect=lambda _host, state, **values: writes.append((state, values)),
+            ), mock.patch.object(
+                self.manual_worker, "latest_device_state", return_value={},
+            ), mock.patch.object(
+                self.manual_worker.subprocess, "run", side_effect=run_cli,
+            ), mock.patch.object(self.manual_worker, "wait_for_completion") as wait:
+                self.manual_worker.execute(
+                    "EXAMPLE-Leaf01", "prod", 30, 60, 1,
+                    operation="replace-config", operation_id=operation_id,
+                    trigger_id=trigger_id, requested_operation="replace-config",
+                    preview_fingerprint=fingerprint,
+                )
+            summaries = list((project / "99-output-ztp/manual-config-sync").glob(
+                "*/summary.json",
+            ))
+            self.assertEqual(1, len(summaries))
+            summary = json.loads(summaries[0].read_text(encoding="utf-8"))
+            self.assertEqual("triggered", summary["state"])
+            self.assertEqual("replace-config", summary["operation"])
+            self.assertEqual("replace-config", summary["effective_operation"])
+            self.assertEqual("manual_config_sync_web", summary["trigger_source"])
+            self.assertEqual(operation_id, summary["operation_id"])
+            self.assertEqual(trigger_id, summary["targets"][0]["trigger_id"])
+            self.assertEqual(1, len(summary["results"]))
+            receipt = summaries[0].parent / "EXAMPLE-Leaf01/result.json"
+            self.assertEqual(summary["results"][0], json.loads(receipt.read_text()))
+            self.assertEqual("config_sync_running", writes[0][0])
+            self.assertEqual("config_sync_success", writes[-1][0], writes)
+            self.assertEqual(trigger_id, writes[-1][1]["trigger_id"])
+            wait.assert_not_called()
+
+            preview = run_cli(preview_command)
+            self.assertEqual(0, preview.returncode)
+            with mock.patch.object(self.manual_worker, "DEVICES_CSV", devices):
+                self.assertEqual({}, self.manual_worker.accepted_result(
+                    "req-5-preview-trigger", hostname="EXAMPLE-Leaf01",
+                    operation_id="req-5-preview-operation",
+                    operation="replace-config",
+                    trigger_source="manual_config_sync_web",
+                ))
+            preview_summaries = [
+                json.loads(path.read_text(encoding="utf-8"))
+                for path in (project / "99-output-ztp/manual-config-sync").glob(
+                    "*/summary.json",
+                )
+                if json.loads(path.read_text(encoding="utf-8")).get("operation_id")
+                == "req-5-preview-operation"
+            ]
+            self.assertEqual(1, len(preview_summaries))
+            self.assertEqual("preview_ready", preview_summaries[0]["state"])
+            self.assertEqual([], preview_summaries[0]["results"])
+
+    def test_replace_config_receipt_hardening_preserves_legacy_ztp_reset_reads(self):
+        """Old ZTP/reset receipts do not acquire the new config-sync summary gate."""
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            devices = project / "02-devices_config.csv"
+            devices.write_text("hostname,type\nEXAMPLE-Leaf01,eth\n", encoding="utf-8")
+            for operation, folder in (
+                ("ztp", "manual-trigger"), ("reset", "manual-reset"),
+            ):
+                with self.subTest(operation=operation):
+                    result = {
+                        "hostname": "EXAMPLE-Leaf01", "state": "triggered",
+                        "operation": operation,
+                        "trigger_id": f"legacy-{operation}-trigger",
+                    }
+                    receipt = (
+                        project / "99-output-ztp" / folder / "old-run"
+                        / "EXAMPLE-Leaf01" / "result.json"
+                    )
+                    receipt.parent.mkdir(parents=True)
+                    receipt.write_text(json.dumps(result), encoding="utf-8")
+                    self.assertFalse((receipt.parent.parent / "summary.json").exists())
+                    with mock.patch.object(self.manual_worker, "DEVICES_CSV", devices):
+                        self.assertEqual(result, self.manual_worker.accepted_result(
+                            result["trigger_id"], hostname="EXAMPLE-Leaf01",
+                            operation_id="legacy-operation", operation=operation,
+                            trigger_source="manual_web",
+                        ))
 
     def test_replace_config_page_contract_reconciles_button_column_and_states(self):
         html_source = (ROOT / "monitor/generate-monitor-html.py").read_text(

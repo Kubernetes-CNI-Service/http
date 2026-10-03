@@ -82,6 +82,80 @@ def _read_json(path):
         return {}
 
 
+def _open_config_sync_file(path):
+    """Open every parent and the final file without following a project link."""
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    file_flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC
+    parent_fd = None
+    try:
+        parent = path.parent.absolute()
+        parent_fd = os.open(parent.anchor, directory_flags)
+        for component in parent.parts[1:]:
+            if component in ("", "."):
+                continue
+            if component == "..":
+                raise ValueError("unsafe config-sync path")
+            child_fd = os.open(component, directory_flags, dir_fd=parent_fd)
+            os.close(parent_fd)
+            parent_fd = child_fd
+        return os.open(path.name, file_flags, dir_fd=parent_fd)
+    finally:
+        if parent_fd is not None:
+            os.close(parent_fd)
+
+
+def _config_sync_file_identity(path):
+    """Identify a pre-launch file using the same no-follow open as the reader."""
+    try:
+        descriptor = _open_config_sync_file(path)
+    except (OSError, ValueError):
+        return None
+    try:
+        identity = os.fstat(descriptor)
+        if stat.S_ISREG(identity.st_mode) and identity.st_nlink == 1:
+            return identity.st_dev, identity.st_ino
+        return None
+    finally:
+        os.close(descriptor)
+
+
+def _read_new_config_sync_receipt(path, *, exclude_inodes=()):
+    """Read a bounded CLI receipt on the same FD used for replay identity."""
+    receipt_fd = None
+    try:
+        receipt_fd = _open_config_sync_file(path)
+        identity = os.fstat(receipt_fd)
+        if (
+            not stat.S_ISREG(identity.st_mode) or identity.st_nlink != 1
+            or identity.st_size > QUEUE_MAX_BYTES
+            or (identity.st_dev, identity.st_ino) in exclude_inodes
+        ):
+            return {}
+        chunks = []
+        remaining = QUEUE_MAX_BYTES + 1
+        while remaining:
+            chunk = os.read(receipt_fd, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        after = os.fstat(receipt_fd)
+        if (
+            len(raw) > QUEUE_MAX_BYTES or len(raw) != identity.st_size
+            or (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+            != (identity.st_dev, identity.st_ino, identity.st_size, identity.st_mtime_ns)
+        ):
+            return {}
+        value = json.loads(raw.decode("utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    finally:
+        if receipt_fd is not None:
+            os.close(receipt_fd)
+
+
 def normalize_status(value, scope=""):
     """Read the current per-device schema and migrate the old single state."""
     if not isinstance(value, dict):
@@ -464,6 +538,13 @@ def latest_cli_operations():
                     result.get("reason") or summary.get("reason")
                     or ("用户取消" if summary_state == "cancelled" else "")
                 ),
+                "transport_ip": result.get("transport_ip"),
+                "interface": result.get("interface"),
+                "command_started_at": result.get("command_started_at"),
+                "batch_identity_verified": result.get("batch_identity_verified"),
+                "batch_identity_verified_at": result.get("batch_identity_verified_at"),
+                "live_state_sha256": result.get("live_state_sha256"),
+                "effective_operation": result.get("effective_operation"),
             }
             previous = operations.get(hostname.casefold())
             if previous is None or _iso_time(operation["started_at"]) >= _iso_time(previous["started_at"]):
@@ -471,20 +552,105 @@ def latest_cli_operations():
     return operations
 
 
-def accepted_result(trigger_id):
-    """Find the exact web/CLI result produced for this request."""
+def accepted_result(
+    trigger_id, *, hostname="", operation_id="", operation="", trigger_source="",
+    exclude_paths=(), exclude_inodes=(),
+):
+    """Find one matching web/CLI result outside the pre-launch path snapshot."""
     if not trigger_id:
         return {}
     try:
         project = DEVICES_CSV.resolve(strict=True).parent
     except OSError:
         return {}
+    if operation == "replace-config":
+        if not (
+            SAFE_HOSTNAME.fullmatch(hostname) and operation_id and trigger_source
+        ):
+            return {}
+        matches = []
+        directory = project / "99-output-ztp" / "manual-config-sync"
+        for path in directory.glob("*/*/result.json"):
+            if path in exclude_paths or path.parent.name.casefold() != hostname.casefold():
+                continue
+            result = _read_new_config_sync_receipt(
+                path, exclude_inodes=exclude_inodes,
+            )
+            if not all((
+                str(result.get("hostname") or "").casefold() == hostname.casefold(),
+                str(result.get("operation_id") or "") == operation_id,
+                str(result.get("trigger_id") or "") == trigger_id,
+                str(result.get("operation") or "") == operation,
+                str(result.get("effective_operation") or "") == operation,
+                str(result.get("trigger_source") or "") == trigger_source,
+            )):
+                continue
+            summary = _read_new_config_sync_receipt(
+                path.parent.parent / "summary.json", exclude_inodes=exclude_inodes,
+            )
+            if not all((
+                summary.get("state") == "triggered",
+                summary.get("operation") == operation,
+                summary.get("effective_operation") == operation,
+                summary.get("operation_id") == operation_id,
+                summary.get("trigger_source") == trigger_source,
+            )):
+                continue
+            targets = summary.get("targets")
+            results = summary.get("results")
+            if not isinstance(targets, list) or not isinstance(results, list):
+                continue
+            matching_targets = [
+                item for item in targets
+                if isinstance(item, dict)
+                and str(item.get("hostname") or "").casefold() == hostname.casefold()
+                and item.get("trigger_id") == trigger_id
+                and item.get("effective_operation") == operation
+            ]
+            matching_results = [
+                item for item in results
+                if isinstance(item, dict)
+                and str(item.get("hostname") or "").casefold() == hostname.casefold()
+                and item.get("trigger_id") == trigger_id
+            ]
+            if len(matching_targets) == 1 and matching_results == [result]:
+                matches.append(result)
+        return matches[0] if len(matches) == 1 else {}
     for directory in ("manual-trigger", "manual-reset", "manual-config-sync"):
         for path in (project / "99-output-ztp" / directory).glob("*/*/result.json"):
             result = _read_json(path)
             if str(result.get("trigger_id") or "") == trigger_id:
                 return result
     return {}
+
+
+def config_sync_promotion_ready(receipt):
+    """Require a post-apply BatchMode identity and live-state receipt."""
+    if not isinstance(receipt, dict):
+        return False
+    if (receipt.get("state") != "triggered"
+            or receipt.get("operation") != "replace-config"
+            or receipt.get("effective_operation") != "replace-config"
+            or receipt.get("batch_identity_verified") is not True
+            or not str(receipt.get("transport_ip") or "")
+            or not str(receipt.get("interface") or "")
+            or not re.fullmatch(
+                r"[0-9a-f]{64}", str(receipt.get("live_state_sha256") or ""),
+            )):
+        return False
+    try:
+        started = datetime.fromisoformat(
+            str(receipt.get("command_started_at") or "").replace("Z", "+00:00")
+        )
+        verified = datetime.fromisoformat(
+            str(receipt.get("batch_identity_verified_at") or "").replace("Z", "+00:00")
+        )
+        if (started.tzinfo is None or started.utcoffset() is None
+                or verified.tzinfo is None or verified.utcoffset() is None):
+            return False
+        return verified >= started
+    except (TypeError, ValueError):
+        return False
 
 
 def preview_result(operation_id, trigger_id, hostname):
@@ -981,6 +1147,22 @@ def execute(
         hostname, scope, operation, operation_id, trigger_id,
         preview_fingerprint=preview_fingerprint,
     )
+    previous_receipt_paths = frozenset()
+    previous_receipt_inodes = frozenset()
+    if config_sync:
+        try:
+            project = DEVICES_CSV.resolve(strict=True).parent
+        except OSError:
+            pass
+        else:
+            receipt_root = project / "99-output-ztp" / "manual-config-sync"
+            previous_receipt_paths = frozenset(receipt_root.glob("*/*/result.json"))
+            previous_receipt_inodes = frozenset(
+                identity for path in (
+                    *previous_receipt_paths, *receipt_root.glob("*/summary.json")
+                )
+                if (identity := _config_sync_file_identity(path)) is not None
+            )
     print(f"[{timestamp()}] [RUN] {' '.join(command)}", flush=True)
     try:
         result = subprocess.run(
@@ -1020,7 +1202,14 @@ def execute(
             phase="config_sync" if config_sync else "confirm", reason=detail,
         )
         return
-    accepted = accepted_result(trigger_id)
+    accepted = (
+        accepted_result(
+            trigger_id, hostname=hostname, operation_id=operation_id,
+            operation=operation, trigger_source=trigger_source,
+            exclude_paths=previous_receipt_paths,
+            exclude_inodes=previous_receipt_inodes,
+        ) if config_sync else accepted_result(trigger_id)
+    )
     if not accepted or accepted.get("state") != "triggered":
         detail = (
             f"远程命令返回成功，但未找到本次 trigger_id={trigger_id} "
@@ -1032,6 +1221,16 @@ def execute(
             expected_round=expected_round, operation_id=operation_id,
             trigger_id=trigger_id, trigger_source=trigger_source,
             operation=operation, requested_operation=requested_operation, reason=detail,
+        )
+        return
+    if config_sync and not config_sync_promotion_ready(accepted):
+        write_device_status(
+            hostname, "failed", scope=scope, started_at=started,
+            finished_at=timestamp(), baseline_round=baseline_round,
+            expected_round=expected_round, operation_id=operation_id,
+            trigger_id=trigger_id, trigger_source=trigger_source,
+            operation=operation, requested_operation=requested_operation,
+            reason="缺少同会话 BatchMode 身份与 live-state digest；不得晋升配置同步成功",
         )
         return
     if config_sync:
@@ -1285,6 +1484,20 @@ def main():
                 if operation["state"] != "triggered":
                     continue
                 if is_config_sync:
+                    if not config_sync_promotion_ready(operation):
+                        write_device_status(
+                            hostname, "failed", scope=args.scope,
+                            started_at=operation["started_at"],
+                            finished_at=operation["updated_at"],
+                            operation_id=operation_id, trigger_id=trigger_id,
+                            trigger_source=operation["trigger_source"],
+                            operation="replace-config",
+                            effective_operation="replace-config",
+                            requested_operation="replace-config",
+                            phase="config_sync",
+                            reason="缺少同会话 BatchMode 身份与 live-state digest",
+                        )
+                        continue
                     if not same_operation or current.get("state") != "config_sync_success":
                         write_device_status(
                             hostname, "config_sync_success", scope=args.scope,

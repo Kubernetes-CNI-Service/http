@@ -1003,9 +1003,10 @@ class ConfirmAppliedFingerprintTests(unittest.TestCase):
                 applied_reader, DEVICE, "192.0.2.10",
             )["fingerprint"]
             client = mock.Mock()
-            client.args = SimpleNamespace(command_timeout=20)
+            client.args = SimpleNamespace(command_timeout=20, ssh_password=False)
             client.run.side_effect = [
                 completed(prior), completed(applied_output), completed("saved\n"),
+                completed(expected_text),
             ]
             prepared = {
                 "published_marker": str(marker),
@@ -1031,13 +1032,46 @@ class ConfirmAppliedFingerprintTests(unittest.TestCase):
                     operation="replace-config", prepared=prepared,
                 )
             self.assertEqual("triggered", result["state"], result)
-            remote_call = client.run.call_args_list[-1]
+            self.assertIs(result.get("batch_identity_verified"), True)
+            self.assertEqual(
+                hashlib.sha256(expected_text.encode("utf-8")).hexdigest(),
+                result.get("live_state_sha256"),
+            )
+            self.assertEqual(4, client.run.call_count)
+            remote_call = client.run.call_args_list[-2]
             remote = remote_call.args[2]
             self.assertIn("nv config replace", remote)
             self.assertIn("nv config apply -y", remote)
             self.assertIn("nv config save", remote)
             self.assertNotIn("nv config patch", remote)
             self.assertEqual(expected_text, remote_call.kwargs["stdin"])
+
+            for label, password_auth, post_state in (
+                ("interactive", True, expected_text),
+                ("live-drift", False, prior),
+            ):
+                with self.subTest(case=label):
+                    unsafe = mock.Mock()
+                    unsafe.args = SimpleNamespace(
+                        command_timeout=20, ssh_password=password_auth,
+                    )
+                    unsafe.run.side_effect = [
+                        completed(prior), completed(applied_output),
+                        completed("saved\n"), completed(post_state),
+                    ]
+                    with mock.patch.object(
+                        MANUAL, "connect_and_verify",
+                        return_value=("192.0.2.10", "eth0"),
+                    ), mock.patch.object(
+                        MANUAL, "verify_prepared_release_binding",
+                    ):
+                        rejected = MANUAL.trigger_one(
+                            unsafe, DEVICE, "",
+                            root / f"manual-config-sync/{label}",
+                            operation="replace-config", prepared=prepared,
+                        )
+                    self.assertEqual("failed", rejected["state"], rejected)
+                    self.assertNotIn("live_state_sha256", rejected)
 
     def test_trigger_rechecks_applied_fingerprint_before_mutation(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -231,6 +231,19 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 保存采集命令/退出码、归档、交接签名和重启后的幂等结果。只清理本案私有项目/测试产物，
   不清理线上采集状态。风险：错误晋升会提前触发真实设备采集；本卡不授权执行。
 
+## TC-REAL-F02-7-001 — 配置同步的同会话身份与 live-state 晋升
+
+- 对应 F02-7；状态：**NOT RUN / REAL_ENV REQUIRED**。前置条件是 owner 单独批准的隔离
+  Switch/host、受控项目和可回滚窗口；记录脚本/发布配置摘要、目标身份和启动前 live-state，
+  不读取或归档私钥。server/UFM 不作为 Switch Status 设备或类型组 handoff 成员。
+- 在同一配置同步执行会话中，保存 apply/save 命令退出码、随后非交互 BatchMode 再认证的
+  目标 IP/接口/host-key 证据、`nv config show` 原始 SHA256 和去不可观测字段后的语义比对。
+  只有再认证同一目标且 live-state 与发布配置匹配，才允许生成可晋升收据和成功状态。
+- 分别注入交互密码认证、再认证失败、身份/路径变更、空 live-state、实际配置漂移、旧收据
+  重放与收据摘要篡改；这些情况即使命令曾返回 0，worker 和页面也不得晋升成功。
+- 保存 result/summary、worker 状态、页面与归档的前后摘要及拒绝原因。只清理本案隔离
+  项目副本，设备配置按事先批准的回滚源恢复并复核；风险是错误成功会掩盖实际配置漂移。
+
 ## TC-REAL-MONITOR-INVENTORY-LINK-001 — Fresh load 重建采集清单入口
 
 - 前置条件：使用受控 upload overlay 得到不携带 setup-managed runtime links 的 fresh 管理服务器
