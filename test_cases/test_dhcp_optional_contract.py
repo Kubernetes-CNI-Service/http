@@ -71,6 +71,55 @@ def settings_for(status: str):
 
 
 class DhcpOptionalDirectTests(unittest.TestCase):
+    def test_f02_explicit_device_method_cannot_claim_incompatible_executor(self):
+        header = (
+            "hostname,type,template,eth0_ip,netmask,eth0_gw,eth0_mac,"
+            "eth1_ip,netmask,eth1_gw,eth1_mac,lo_ip,config_method\n"
+        )
+        cases = (
+            ("eth", "initial-setup"),
+            ("nvl", "initial-setup"),
+            ("ib", "unreviewed-method"),
+            ("ib", ""),
+        )
+        for kind, method in cases:
+            with self.subTest(kind=kind, method=method), tempfile.TemporaryDirectory() as name:
+                inventory = Path(name) / "02-devices_config.csv"
+                inventory.write_text(
+                    header + ",".join((
+                        "Leaf01", kind, "oob", "192.0.2.10", "24", "192.0.2.1",
+                        "", "", "", "", "", "", method,
+                    )) + "\n", encoding="utf-8",
+                )
+                with self.assertRaisesRegex(LOAD.LoadError, "config_method"):
+                    LOAD.load_device_types(inventory, schema_version=1)
+
+        for kind, method in (("eth", "ztp"), ("ib", "initial-setup"), ("nvl", "ztp")):
+            with self.subTest(accepted_kind=kind, method=method), tempfile.TemporaryDirectory() as name:
+                inventory = Path(name) / "02-devices_config.csv"
+                inventory.write_text(
+                    header + ",".join((
+                        "Leaf01", kind, "oob", "192.0.2.10", "24", "192.0.2.1",
+                        "", "", "", "", "", "", method,
+                    )) + "\n", encoding="utf-8",
+                )
+                self.assertIn(kind, LOAD.load_device_types(inventory, schema_version=1))
+
+        with tempfile.TemporaryDirectory() as name:
+            inventory = Path(name) / "02-devices_config.csv"
+            prefix = ",".join((
+                "Leaf01", "ib", "oob", "192.0.2.10", "24", "192.0.2.1",
+                "", "", "", "", "", "",
+            ))
+            for raw_header, row in (
+                (header, prefix),
+                (header.rstrip("\n") + ",config_method\n", prefix + ",ztp,ztp"),
+            ):
+                with self.subTest(raw_header=raw_header, row=row):
+                    inventory.write_text(raw_header + row + "\n", encoding="utf-8")
+                    with self.assertRaisesRegex(LOAD.LoadError, "config_method"):
+                        LOAD.load_device_types(inventory, schema_version=1)
+
     def test_r22_standalone_generator_rejects_disabled_and_empty_enabled(self):
         for dhcp_status, reason in (
             ("disabled", "DHCP disabled"),

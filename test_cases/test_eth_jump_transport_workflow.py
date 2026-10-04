@@ -48,6 +48,42 @@ class EthJumpPhaseBWorkflowTests(unittest.TestCase):
         cls.loader = load_module("eth_jump_workflow_loader", LOAD)
         cls.setup = load_module("eth_jump_workflow_setup", SETUP)
 
+    def test_f02_declared_method_is_compatible_at_load_and_executor_boundary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            inventory = Path(directory) / "02-devices_config.csv"
+            header = [
+                "hostname", "type", "template", "eth0_ip", "netmask",
+                "eth0_gw", "eth0_mac", "eth1_ip", "netmask", "eth1_gw",
+                "eth1_mac", "lo_ip", "config_method",
+            ]
+            rows = [
+                ["EXAMPLE-IB01", "ib", "NA", "203.0.113.2", "24",
+                 "203.0.113.1", "", "", "", "", "", "", "initial-setup"],
+                ["EXAMPLE-OOB01", "eth", "oob", "192.0.2.11", "24",
+                 "192.0.2.1", "", "", "", "", "", "", "ztp"],
+            ]
+            with inventory.open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.writer(stream)
+                writer.writerow(header)
+                writer.writerows(rows)
+            self.assertEqual(
+                frozenset({"ib", "eth"}),
+                self.loader.load_device_types(inventory, schema_version=1),
+            )
+            ib_devices, _transit = self.initial_setup.load_devices(inventory)
+            self.assertIn("example-ib01", ib_devices)
+
+            rows[0][-1] = "ztp"
+            with inventory.open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.writer(stream)
+                writer.writerow(header)
+                writer.writerows(rows)
+            self.assertIn(
+                "ib", self.loader.load_device_types(inventory, schema_version=1),
+            )
+            with self.assertRaises(self.initial_setup.SetupError):
+                self.initial_setup.load_devices(inventory)
+
     def test_phase_b_admits_transit_independently_of_schema_consumers(self):
         """The Phase-B transit proof remains independent after Phase C opens."""
         with tempfile.TemporaryDirectory() as directory:

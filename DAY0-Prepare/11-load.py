@@ -180,6 +180,14 @@ SHARED_ARTIFACT_MAX_BYTES = 16 * 1024 * 1024 * 1024
 VALID_TYPES = {
     "eth", "eth_spx", "spx", "ib", "nvl", "server", "air", "eth_jump",
 }
+# Explicit CSV claims are checked against the executors currently wired for
+# those device families. New methods require an audited registry entry and an
+# actual executor; accepting an arbitrary string here would misstate success.
+DEVICE_CONFIG_METHOD_TYPES = {
+    "ztp": frozenset({"eth", "eth_spx", "spx", "ib", "nvl", "air"}),
+    "initial-setup": frozenset({"ib"}),
+    "deploy_infra": frozenset({"server"}),
+}
 BOOTSTRAP_BY_ROLE = {
     "air_oobofoob": "ztp-bootstrap_oobofoob.sh",
     "air_oob": "ztp-bootstrap_oob.sh",
@@ -1287,6 +1295,9 @@ def load_device_types(
             for required in ("hostname", "type", "template", "eth0_ip"):
                 if required not in fields:
                     raise LoadError(f"devices_config.csv 缺少列：{required}")
+            if fields.count("config_method") > 1:
+                raise LoadError("devices_config.csv config_method 列重复")
+            method_index = fields.index("config_method") if "config_method" in fields else None
             types: set[str] = set()
             seen_hostnames: set[str] = set()
             seen_eth0_addr: dict[str, tuple[int, str]] = {}
@@ -1322,6 +1333,17 @@ def load_device_types(
                 seen_hostnames.add(hostname_key)
                 if kind not in VALID_TYPES:
                     raise LoadError(f"devices_config.csv 第 {lineno} 行 type={kind!r} 无效")
+                if method_index is not None:
+                    if len(row) <= method_index:
+                        raise LoadError(
+                            f"devices_config.csv 第 {lineno} 行 {hostname} config_method 列缺失"
+                        )
+                    method = str(row[method_index] or "").strip().casefold()
+                    if kind not in DEVICE_CONFIG_METHOD_TYPES.get(method, ()):
+                        raise LoadError(
+                            f"devices_config.csv 第 {lineno} 行 {hostname} "
+                            f"type={kind} config_method={method!r} 无已绑定兼容执行者"
+                        )
                 selected_kind = (
                     selected_scope == "all"
                     or kind in SWITCH_SCOPE_TYPES[selected_scope]

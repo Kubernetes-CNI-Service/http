@@ -217,6 +217,19 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 重启 ZTP monitor 后已成功组不重复采集；后完成组仍能独立交接。
 - TAN、OOB、OOBofOOB 和角色等 AIR/Production 展示子类不作为独立门禁，按所属采集组验收。
 
+## TC-REAL-F02-2-001 — 每设备配置方法与执行者绑定
+
+- 对应 F02-2；本地 direct 为 `test_dhcp_optional_contract.py`，跨真实脚本场景为
+  `test_eth_jump_transport_workflow.py`。状态：**NOT RUN / REAL_ENV REQUIRED**。
+- 前置条件：owner 分别批准的隔离 ETH、IB、NVL、server/UFM 目标及对应执行者，
+  保存项目 CSV、每设备声明方法、实际执行器与启动前设备状态的 SHA256/身份快照。
+- 对兼容方法分别留存设备级执行收据；对 ETH 声明 initial-setup、NVL 声明
+  尚未实施的 initial-setup、IB 声明 ZTP 却进入 initial-setup 的反例，
+  确认写入前拒绝且不产生伪成功。新增方法须先审查执行器兼容性再扩展矩阵。
+- 清理：撤销隔离项目产生的候选配置、临时收据与临时账号，复核目标状态；
+  不触碰 Production 设备。风险：错误方法可能覆盖设备配置或误报成功，
+  本卡不授权真机执行。
+
 ## TC-REAL-F02-6-001 — 当前轮九阶段证据与交接一致性
 
 - 对应 F02-6；自动化 direct 为 `test_ztp_group_handoff.py`，跨真实脚本场景为
