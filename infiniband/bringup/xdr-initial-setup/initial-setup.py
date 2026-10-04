@@ -323,6 +323,10 @@ def load_devices(path: Path) -> tuple[dict[str, Device], dict[str, Device]]:
         except StopIteration as exc:
             raise SetupError(f"device CSV is empty: {path}") from exc
         indexes = header_indexes(raw_header)
+        if len(indexes.get("config_method", ())) > 1:
+            raise SetupError(
+                f"device CSV config_method duplicate column: {path}"
+            )
         required_headers = {"hostname", "type", "eth0_ip"}
         missing = sorted(required_headers - indexes.keys())
         if missing:

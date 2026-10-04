@@ -99,6 +99,33 @@ class EthJumpPhaseBWorkflowTests(unittest.TestCase):
             with self.assertRaisesRegex(self.initial_setup.SetupError, "config_method"):
                 self.initial_setup.load_devices(inventory)
 
+    def test_f02_duplicate_method_header_fails_both_input_consumers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            inventory = Path(directory) / "02-devices_config.csv"
+            header = [
+                "hostname", "type", "template", "eth0_ip", "netmask",
+                "eth0_gw", "eth0_mac", "eth1_ip", "netmask", "eth1_gw",
+                "eth1_mac", "lo_ip", "config_method", "config_method",
+            ]
+            row = [
+                "EXAMPLE-IB01", "ib", "NA", "203.0.113.2", "24",
+                "203.0.113.1", "", "", "", "", "", "",
+                "initial-setup", "ztp",
+            ]
+            transit = [
+                "EXAMPLE-OOB01", "eth", "oob", "192.0.2.11", "24",
+                "192.0.2.1", "", "", "", "", "", "", "ztp",
+                "deploy_infra",
+            ]
+            with inventory.open("w", newline="", encoding="utf-8") as stream:
+                csv.writer(stream).writerows([header, row, transit])
+            with self.assertRaisesRegex(self.loader.LoadError, "config_method"):
+                self.loader.load_device_types(inventory, schema_version=1)
+            with self.assertRaisesRegex(
+                self.initial_setup.SetupError, r"config_method.*duplicate",
+            ):
+                self.initial_setup.load_devices(inventory)
+
     def test_f02_transit_deploy_infra_fails_load_and_initial_setup_together(self):
         with tempfile.TemporaryDirectory() as directory:
             inventory = Path(directory) / "02-devices_config.csv"

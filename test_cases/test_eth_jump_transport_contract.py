@@ -102,6 +102,21 @@ class EthJumpTransportContractTests(unittest.TestCase):
             ):
                 self.module.load_devices(devices_path)
 
+    def test_f02_duplicate_method_columns_cannot_select_first_executor_claim(self):
+        with tempfile.TemporaryDirectory() as directory:
+            devices_path = Path(directory) / "devices.csv"
+            devices_path.write_text(
+                "hostname,type,eth0_ip,netmask,eth0_gw,eth0_mac,"
+                "eth1_ip,netmask,eth1_gw,config_method,config_method\n"
+                "EXAMPLE-IB01,ib,203.0.113.2,24,203.0.113.1,,,,,initial-setup,ztp\n"
+                "EXAMPLE-OOB01,eth,192.0.2.11,,,,,,,ztp,deploy_infra\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                self.module.SetupError, r"config_method.*duplicate",
+            ):
+                self.module.load_devices(devices_path)
+
     def test_f02_transit_and_nvl_methods_cannot_claim_other_executors(self):
         for device_type, method in (
             ("eth", "deploy_infra"),
