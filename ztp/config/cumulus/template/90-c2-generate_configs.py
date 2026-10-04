@@ -88,6 +88,7 @@ from project_contract import (
     normalize_v2_vrr_policy,
     parse_device_csv_layout,
     require_device_csv_row_width,
+    resolve_device_config_method,
     validate_cumulus_dns_domain,
     validate_device_config_method,
     v2_vrr_ipv4_plan,
@@ -2861,6 +2862,7 @@ def _triage_device_csv_row(
         if type_col is not None and len(row) > type_col
         else "ib" if row[0].strip().lower().startswith("ib") else "eth"
     )
+    config_method = None
     if method_index is not None:
         if len(raw) <= method_index:
             errors.append(
@@ -2868,7 +2870,7 @@ def _triage_device_csv_row(
             )
             return None
         try:
-            validate_device_config_method(row_type, row[method_index])
+            config_method = validate_device_config_method(row_type, row[method_index])
         except ValueError as exc:
             errors.append(f"  devices_config.csv 第 {lineno} 行 {row[0]} {exc}")
             return None
@@ -2877,6 +2879,12 @@ def _triage_device_csv_row(
         return None
     if row_type not in ("eth", "eth_spx", "spx"):
         return None
+    if config_method is None:
+        try:
+            config_method = resolve_device_config_method(row_type)
+        except ValueError as exc:
+            errors.append(f"  devices_config.csv 第 {lineno} 行 {row[0]} {exc}")
+            return None
     hostname, csv_template = row[0], row[2]
     if not hostname:
         if csv_template:
@@ -2892,7 +2900,7 @@ def _triage_device_csv_row(
         errors.append(f"  重复 hostname: {hostname!r}")
         return None
     hostname_owners[hostname_key] = hostname
-    return row, row_type, hostname, csv_template
+    return row, row_type, hostname, csv_template, config_method
 
 
 def _populate_device_csv_interfaces(row, hostname, dev, mac_map):
@@ -3328,7 +3336,7 @@ def _ingest_device_csv_row(
     )
     if triaged is None:
         return
-    row, row_type, hostname, csv_template = triaged
+    row, row_type, hostname, csv_template, config_method = triaged
     template = _resolve_device_csv_template(
         hostname, row_type, csv_template,
         tmpl_map.get(hostname.lower()), dup_errs,
@@ -3341,6 +3349,7 @@ def _ingest_device_csv_row(
     )
     if dev is None:
         return
+    dev["config_method"] = config_method
     receipt = _apply_source_yaml_metadata(
         row, hostname, dev, context, dup_errs,
     )
@@ -7688,12 +7697,13 @@ def _load_csv_ib():
                 errors.append(f"  {exc}")
                 continue
             dev_type = _row_type_ib(row, type_col)
+            config_method = None
             if method_col is not None:
                 if len(row) <= method_col:
                     errors.append(f"  devices_config.csv 第 {lineno} 行 config_method 列缺失")
                     continue
                 try:
-                    validate_device_config_method(dev_type, row[method_col])
+                    config_method = validate_device_config_method(dev_type, row[method_col])
                 except ValueError as exc:
                     errors.append(
                         f"  devices_config.csv 第 {lineno} 行 {row[0]} {exc}"
@@ -7704,6 +7714,14 @@ def _load_csv_ib():
                 continue
             if dev_type not in ("ib", "nvl"):
                 continue
+            if config_method is None:
+                try:
+                    config_method = resolve_device_config_method(dev_type)
+                except ValueError as exc:
+                    errors.append(
+                        f"  devices_config.csv 第 {lineno} 行 {row[0]} {exc}"
+                    )
+                    continue
             if len(row) < _IB_NCOLS:
                 errors.append(f"  第 {lineno} 行列数不足（{len(row)} < {_IB_NCOLS}）：{raw}")
                 continue
@@ -7713,6 +7731,7 @@ def _load_csv_ib():
             devices.append({
                 "type":       dev_type,
                 "hostname":   row[_IB_COL_HOSTNAME],
+                "config_method": config_method,
                 "eth0_ip":    row[_IB_COL_ETH0_IP],
                 "eth0_pfx":   row[_IB_COL_ETH0_PFX],
                 "eth0_gw":    row[_IB_COL_ETH0_GW],

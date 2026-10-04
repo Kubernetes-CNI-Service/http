@@ -978,6 +978,73 @@ class DeepYamlFailClosedWorkflowTests(unittest.TestCase):
 class V2GenerationWorkflowTests(unittest.TestCase):
     """Run the new declarative schema through all local production consumers."""
 
+    def test_f02_defaults_agree_across_load_dhcp_and_both_c2_paths(self):
+        header = BASE_HEADER + FIXED_HEADER
+        rows = [
+            ["EXAMPLE-Leaf01", "eth", "oob", "192.0.2.11", "24", "192.0.2.1",
+             "02:00:00:00:00:11"],
+            ["EXAMPLE-IB01", "ib", "NA", "203.0.113.11", "24", "203.0.113.1",
+             "02:00:00:00:00:12"],
+            ["EXAMPLE-NVL01", "nvl", "NA", "203.0.113.12", "24", "203.0.113.1",
+             "02:00:00:00:00:13"],
+        ]
+        for row in rows:
+            row.extend([""] * (len(header) - len(row)))
+        with tempfile.TemporaryDirectory() as name:
+            inventory = Path(name) / "02-devices_config.csv"
+            with inventory.open("w", newline="", encoding="utf-8") as stream:
+                csv.writer(stream).writerows([header, *rows])
+            load_methods = {}
+            LOAD.load_device_types(inventory, schema_version=2, methods_out=load_methods)
+            dhcp_methods = {
+                record["hostname"].casefold(): record["config_method"]
+                for record in DHCP.load_csv(inventory, schema_version=2)
+            }
+            context = GENERATOR._device_csv_header_context(header, 2)
+            triaged = GENERATOR._triage_device_csv_row(
+                rows[0], 2, len(header), 2, context["type_col"],
+                [], {}, {}, method_index=context["layout"].config_method_index,
+            )
+            with mock.patch.multiple(
+                GENERATOR, _CSV_FILE=str(inventory), _load_global_document=mock.DEFAULT,
+            ) as patched:
+                patched["_load_global_document"].return_value = ({}, 2)
+                ib_devices, errors = GENERATOR._load_csv_ib()
+        self.assertEqual([], errors)
+        expected = {
+            "example-leaf01": "ztp", "example-ib01": "ztp", "example-nvl01": "ztp",
+        }
+        self.assertEqual(expected, load_methods)
+        self.assertEqual(expected, dhcp_methods)
+        self.assertEqual("ztp", triaged[4])
+        self.assertEqual(
+            {"example-ib01": "ztp", "example-nvl01": "ztp"},
+            {device["hostname"].casefold(): device["config_method"] for device in ib_devices},
+        )
+
+    def test_f02_explicit_ib_initial_setup_agrees_across_three_consumers(self):
+        header = BASE_HEADER + FIXED_HEADER + ["config_method"]
+        row = ["EXAMPLE-IB01", "ib", "NA", "203.0.113.11", "24", "203.0.113.1",
+               "02:00:00:00:00:12"]
+        row.extend([""] * (len(header) - len(row)))
+        row[-1] = "initial-setup"
+        with tempfile.TemporaryDirectory() as name:
+            inventory = Path(name) / "02-devices_config.csv"
+            with inventory.open("w", newline="", encoding="utf-8") as stream:
+                csv.writer(stream).writerows([header, row])
+            load_methods = {}
+            LOAD.load_device_types(inventory, schema_version=2, methods_out=load_methods)
+            dhcp_records = DHCP.load_csv(inventory, schema_version=2)
+            with mock.patch.multiple(
+                GENERATOR, _CSV_FILE=str(inventory), _load_global_document=mock.DEFAULT,
+            ) as patched:
+                patched["_load_global_document"].return_value = ({}, 2)
+                ib_devices, errors = GENERATOR._load_csv_ib()
+        self.assertEqual([], errors)
+        self.assertEqual({"example-ib01": "initial-setup"}, load_methods)
+        self.assertEqual("initial-setup", dhcp_records[0]["config_method"])
+        self.assertEqual("initial-setup", ib_devices[0]["config_method"])
+
     def test_f02_incompatible_eth_method_is_rejected_by_load_and_c2(self):
         header = BASE_HEADER + FIXED_HEADER + ["config_method"]
         row = ["EXAMPLE-Leaf01", "eth", "oob", "192.0.2.11", "24", "192.0.2.1"]

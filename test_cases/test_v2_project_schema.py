@@ -223,6 +223,57 @@ def generate_v2_redundancy_project(
 
 
 class SchemaSelectionTests(unittest.TestCase):
+    def test_f02_c2_materializes_per_device_default_and_declared_method(self):
+        header = v2_header(vlan_groups=0, evpn_groups=0)
+        row = ["EXAMPLE-Leaf01", "eth", "oob", "192.0.2.11", "24", "192.0.2.1"]
+        row.extend([""] * (len(header) - len(row)))
+        context = GENERATOR._device_csv_header_context(header, 2)
+        errors = []
+        triaged = GENERATOR._triage_device_csv_row(
+            row, 2, len(header), 2, context["type_col"],
+            errors, {}, {}, method_index=context["layout"].config_method_index,
+        )
+        self.assertEqual([], errors)
+        self.assertEqual("ztp", triaged[4])
+
+        declared_header = header + ["config_method"]
+        declared_row = row + ["ztp"]
+        declared_context = GENERATOR._device_csv_header_context(declared_header, 2)
+        declared = GENERATOR._triage_device_csv_row(
+            declared_row, 2, len(declared_header), 2, declared_context["type_col"],
+            errors, {}, {},
+            method_index=declared_context["layout"].config_method_index,
+        )
+        self.assertEqual([], errors)
+        self.assertEqual("ztp", declared[4])
+
+    def test_f02_nvos_c2_materializes_ib_default_and_initial_setup(self):
+        header = v2_header(vlan_groups=0, evpn_groups=0)
+        rows = [
+            ["EXAMPLE-IB01", "ib", "NA", "203.0.113.11", "24", "203.0.113.1"],
+            ["EXAMPLE-IB02", "ib", "NA", "203.0.113.12", "24", "203.0.113.1"],
+        ]
+        for row in rows:
+            row.extend([""] * (len(header) - len(row)))
+        declared_header = header + ["config_method"]
+        with tempfile.TemporaryDirectory() as name:
+            inventory = Path(name) / "02-devices_config.csv"
+            with inventory.open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.writer(stream)
+                writer.writerow(declared_header)
+                writer.writerow(rows[0] + ["ztp"])
+                writer.writerow(rows[1] + ["initial-setup"])
+            with mock.patch.multiple(
+                GENERATOR, _CSV_FILE=str(inventory), _load_global_document=mock.DEFAULT,
+            ) as patched:
+                patched["_load_global_document"].return_value = ({}, 2)
+                devices, errors = GENERATOR._load_csv_ib()
+        self.assertEqual([], errors)
+        self.assertEqual(
+            {"EXAMPLE-IB01": "ztp", "EXAMPLE-IB02": "initial-setup"},
+            {device["hostname"]: device["config_method"] for device in devices},
+        )
+
     def test_f02_nvos_c2_rejects_nvl_initial_setup_before_generation(self):
         header = v2_header(vlan_groups=0, evpn_groups=0) + ["config_method"]
         row = ["EXAMPLE-NVL01", "nvl", "NA", "203.0.113.11", "24", "203.0.113.1"]
@@ -570,6 +621,10 @@ switches:
 
         model, output = generate_v2_redundancy_project(
             [row], v2_mlag_global(),
+        )
+
+        self.assertEqual(
+            "ztp", model["devices"]["tan-hps-leaf05"]["config_method"],
         )
 
         self.assertEqual(
