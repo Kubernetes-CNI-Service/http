@@ -56,6 +56,7 @@ from project_contract import (
     parse_device_csv_layout,
     require_device_csv_row_width,
     service_url,
+    validate_device_config_method,
     validate_service_endpoint,
     validate_ztp_url_prefix,
 )
@@ -225,6 +226,9 @@ def load_csv(path, schema_version=1):
                 + ",".join(_EXPECTED_DEVICE_HEADER_PREFIX)
             )
         type_col = h_lower.index("type") if "type" in h_lower else None
+        if h_lower.count("config_method") > 1:
+            raise ValueError("devices_config.csv config_method 列重复")
+        method_col = h_lower.index("config_method") if "config_method" in h_lower else None
 
         for lineno, raw in enumerate(reader, start=2):
             row = [c.strip() for c in raw]
@@ -240,14 +244,25 @@ def load_csv(path, schema_version=1):
 
             if type_col is not None and len(row) > type_col:
                 fmt = row[type_col].strip().lower()
-                if fmt in {"server", "eth_jump"}:
-                    continue
-                if fmt not in ("eth", "eth_spx", "spx", "ib", "nvl", "air"):
+                if fmt not in ("eth", "eth_spx", "spx", "ib", "nvl", "air", "server", "eth_jump"):
                     raise ValueError(
                         f"{os.path.basename(path)} 第 {lineno} 行 type={fmt!r} 无效"
                     )
             else:
                 fmt = _fallback_fmt(row[0])
+            if method_col is not None:
+                if len(row) <= method_col:
+                    raise ValueError(
+                        f"{os.path.basename(path)} 第 {lineno} 行 config_method 列缺失"
+                    )
+                try:
+                    validate_device_config_method(fmt, row[method_col])
+                except ValueError as exc:
+                    raise ValueError(
+                        f"{os.path.basename(path)} 第 {lineno} 行 {row[0]} {exc}"
+                    ) from exc
+            if fmt in {"server", "eth_jump"}:
+                continue
 
             records.append({
                 "src":      f"{os.path.basename(path)}:{lineno}",

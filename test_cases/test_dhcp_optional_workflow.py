@@ -172,6 +172,16 @@ class DhcpOptionalWorkflowTests(unittest.TestCase):
             records = DHCP.load_csv(str(inventory), schema_version=2)
             self.assertEqual(2, len(records))
 
+            rows[1][-1] = "initial-setup"
+            with inventory.open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.writer(stream)
+                writer.writerow(header)
+                writer.writerows(rows)
+            with self.assertRaisesRegex(LOAD.LoadError, "config_method"):
+                LOAD.load_device_types(inventory, schema_version=2)
+            with self.assertRaisesRegex(ValueError, "config_method"):
+                DHCP.load_csv(str(inventory), schema_version=2)
+
     def test_r22_empty_subnet_parent_and_standalone_generator_disagree_no_longer(self):
         for dhcp_status in ("disabled", "enabled"):
             with self.subTest(dhcp_status=dhcp_status), tempfile.TemporaryDirectory() as name:
