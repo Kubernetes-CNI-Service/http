@@ -51,6 +51,28 @@ EXPECTED_NINE_STAGES = (
 
 
 class CompletionDisplayParityTests(unittest.TestCase):
+    def test_f02_collector_health_classifies_without_ztp_completion(self):
+        unavailable = {"available": False, "error": "no ZTP report"}
+        self.assertIn("no ZTP report", HTML.render_ztp_status_rows(unavailable))
+        self.assertFalse(MONITOR.completion_handoff_device_complete({
+            "hostname": "Leaf01", "type": "eth", "ztp_round": 1,
+            "overall": "pending", "progress": {"percent": 0},
+        }))
+
+        for raw_health, badge in (("OK", "h-ok"), ("Not OK", "h-err")):
+            with self.subTest(raw_health=raw_health):
+                info = HTML.parse_info_file(
+                    "Leaf01",
+                    "Switch Type: ETH (VX)\n"
+                    "####################################################\n"
+                    "# Execute Command: nv show system health\n"
+                    "####################################################\n"
+                    f"status      {raw_health}\n",
+                )
+                self.assertEqual(raw_health.lower(), info["health"])
+                self.assertIn(f'h-badge {badge}', HTML.render_eth_card(info))
+                self.assertIn(f'h-badge {badge}', HTML.render_sw_list_row(info))
+
     def test_html_completion_uses_same_current_nine_stage_proof_as_handoff(self):
         timestamp = "2026-09-01T12:00:00+08:00"
         boundary = "2026-09-01T11:59:00+08:00"

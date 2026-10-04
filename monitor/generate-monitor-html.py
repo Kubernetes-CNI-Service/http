@@ -3490,7 +3490,7 @@ def render_eth_card(sw: dict) -> str:
     )
 
     h = sw["health"].lower()
-    h_cls = {"ok": "h-ok", "error": "h-err", "warning": "h-warn", "missing": "h-miss"}.get(h, "h-unk")
+    h_cls = {"ok": "h-ok", "not ok": "h-err", "error": "h-err", "warning": "h-warn", "missing": "h-miss"}.get(h, "h-unk")
     h_lbl = "MISSING" if h == "missing" else (h.upper() if h else "N/A")
 
     if h == "missing":
@@ -3926,7 +3926,7 @@ def render_sw_list_row(sw: dict) -> str:
     uptime = escape(sw.get("uptime") or "—")
 
     h = sw["health"].lower()
-    h_cls = {"ok": "h-ok", "error": "h-err", "warning": "h-warn", "missing": "h-miss"}.get(h, "h-unk")
+    h_cls = {"ok": "h-ok", "not ok": "h-err", "error": "h-err", "warning": "h-warn", "missing": "h-miss"}.get(h, "h-unk")
     h_lbl = "MISSING" if h == "missing" else (h.upper() if h else "N/A")
 
     if h == "missing":
