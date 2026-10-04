@@ -342,6 +342,12 @@ def load_devices(path: Path) -> tuple[dict[str, Device], dict[str, Device]]:
                     f"{path}:{line_number}: {hostname} 声明 initial-setup，"
                     "但当前 NVL 执行者只支持 IB；拒绝静默跳过 NVL"
                 )
+            if (hostname and dev_type in TRANSIT_DEVICE_TYPES
+                    and config_method == "initial-setup"):
+                raise SetupError(
+                    f"{path}:{line_number}: {hostname} 声明 initial-setup，"
+                    "但此执行者仅将 Ethernet 设备作为 transit，不能将其配置计为成功"
+                )
             if not hostname or dev_type not in ({"ib"} | TRANSIT_DEVICE_TYPES):
                 continue
             if not valid_hostname(hostname):

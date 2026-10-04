@@ -86,6 +86,22 @@ class EthJumpTransportContractTests(unittest.TestCase):
             ):
                 self.module.load_devices(devices_path)
 
+    def test_f02_ethernet_initial_setup_claim_cannot_be_transit_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            devices_path = Path(directory) / "devices.csv"
+            devices_path.write_text(
+                "hostname,type,eth0_ip,netmask,eth0_gw,eth0_mac,"
+                "eth1_ip,netmask,eth1_gw,config_method\n"
+                "EXAMPLE-IB01,ib,203.0.113.2,24,203.0.113.1,,,,,initial-setup\n"
+                "EXAMPLE-OOB01,eth,192.0.2.11,,,,,,,initial-setup\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                self.module.SetupError,
+                r"devices\.csv:3:.*EXAMPLE-OOB01.*initial-setup.*transit",
+            ):
+                self.module.load_devices(devices_path)
+
     def test_eth_jump_is_admitted_as_transit_and_resolves_p2p(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
