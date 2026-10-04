@@ -1352,6 +1352,10 @@ DEVICE_CONFIG_METHOD_TYPES = {
     "initial-setup": frozenset({"ib"}),
     "deploy_infra": frozenset({"server"}),
 }
+DEVICE_DEFAULT_CONFIG_METHODS = {
+    "eth": "ztp", "eth_spx": "ztp", "spx": "ztp", "air": "ztp",
+    "ib": "ztp", "nvl": "ztp", "server": "deploy_infra",
+}
 
 
 def validate_device_config_method(kind: str, method: str) -> str:
@@ -1363,6 +1367,17 @@ def validate_device_config_method(kind: str, method: str) -> str:
             f"type={device_kind} config_method={normalized!r} 无已绑定兼容执行者"
         )
     return normalized
+
+
+def resolve_device_config_method(kind: str, declared: str | None = None) -> str:
+    """Materialize a legacy family default, then check its executor binding.
+
+    An explicitly present but empty value is not a request for a default.
+    eth_jump is transport rather than a configurable device.
+    """
+    device_kind = str(kind or "").strip().casefold()
+    method = DEVICE_DEFAULT_CONFIG_METHODS.get(device_kind) if declared is None else declared
+    return validate_device_config_method(device_kind, method)
 
 
 @dataclass(frozen=True)

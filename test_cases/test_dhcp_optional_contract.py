@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import ast
+import csv
 from copy import deepcopy
 import hashlib
 import importlib.util
@@ -39,6 +40,7 @@ SETUP = load_script("r22_csv_setup_direct", ROOT / "DAY0-Prepare/01-a-setup.py")
 RUNTIME = load_script("r22_csv_runtime_direct", ROOT / "tools/ztp_service_runtime.py")
 ACTIVATE = load_script("r22_subnet_identity_docker_direct", ROOT / "infra/docker/activate.py")
 from project_contract import DEVICE_BASE_COLUMNS, DEVICE_FIXED_COLUMNS
+import project_contract as CONTRACT
 
 _TEMPLATE_TEXT = (ROOT / "DAY0-Prepare/template/01-global.yaml").read_text(
     encoding="utf-8"
@@ -72,6 +74,46 @@ def settings_for(status: str):
 
 
 class DhcpOptionalDirectTests(unittest.TestCase):
+    def test_f02_each_configurable_family_has_a_valid_legacy_default(self):
+        expected = {
+            "eth": "ztp", "eth_spx": "ztp", "spx": "ztp",
+            "air": "ztp", "ib": "ztp", "nvl": "ztp",
+            "server": "deploy_infra",
+        }
+        for kind, method in expected.items():
+            with self.subTest(kind=kind):
+                self.assertEqual(method, CONTRACT.resolve_device_config_method(kind))
+                self.assertEqual(
+                    method, CONTRACT.validate_device_config_method(kind, method),
+                )
+        with self.assertRaisesRegex(ValueError, "eth_jump"):
+            CONTRACT.resolve_device_config_method("eth_jump")
+
+    def test_f02_load_materializes_each_legacy_device_method(self):
+        header = list(DEVICE_BASE_COLUMNS + DEVICE_FIXED_COLUMNS)
+        with tempfile.TemporaryDirectory() as name:
+            inventory = Path(name) / "02-devices_config.csv"
+            rows = []
+            for hostname, kind, address in (
+                ("EXAMPLE-OOB01", "eth", "192.0.2.11"),
+                ("EXAMPLE-IB01", "ib", "203.0.113.2"),
+            ):
+                row = [hostname, kind, "oob", address, "24", "192.0.2.1"]
+                row.extend([""] * (len(header) - len(row)))
+                rows.append(row)
+            with inventory.open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.writer(stream)
+                writer.writerow(header)
+                writer.writerows(rows)
+            methods = {}
+            self.assertEqual(
+                frozenset({"eth", "ib"}),
+                LOAD.load_device_types(inventory, schema_version=2, methods_out=methods),
+            )
+            self.assertEqual(
+                {"example-oob01": "ztp", "example-ib01": "ztp"}, methods,
+            )
+
     def test_f02_v2_explicit_method_is_checked_at_load(self):
         header = list(DEVICE_BASE_COLUMNS + DEVICE_FIXED_COLUMNS) + ["config_method"]
         with tempfile.TemporaryDirectory() as name:

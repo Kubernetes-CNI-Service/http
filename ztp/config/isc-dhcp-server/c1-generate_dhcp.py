@@ -57,6 +57,7 @@ from project_contract import (
     require_device_csv_row_width,
     service_url,
     validate_device_config_method,
+    resolve_device_config_method,
     validate_service_endpoint,
     validate_ztp_url_prefix,
 )
@@ -250,13 +251,21 @@ def load_csv(path, schema_version=1):
                     )
             else:
                 fmt = _fallback_fmt(row[0])
+            method = None
             if method_col is not None:
                 if len(row) <= method_col:
                     raise ValueError(
                         f"{os.path.basename(path)} 第 {lineno} 行 config_method 列缺失"
                     )
                 try:
-                    validate_device_config_method(fmt, row[method_col])
+                    method = validate_device_config_method(fmt, row[method_col])
+                except ValueError as exc:
+                    raise ValueError(
+                        f"{os.path.basename(path)} 第 {lineno} 行 {row[0]} {exc}"
+                    ) from exc
+            elif fmt != "eth_jump":
+                try:
+                    method = resolve_device_config_method(fmt)
                 except ValueError as exc:
                     raise ValueError(
                         f"{os.path.basename(path)} 第 {lineno} 行 {row[0]} {exc}"
@@ -270,6 +279,7 @@ def load_csv(path, schema_version=1):
                 "ip":       row[3],
                 "mac":      row[6],
                 "type":     fmt,
+                "config_method": method,
                 "iface":    "eth0",
                 "netmask":  row[4],
             })
@@ -280,6 +290,7 @@ def load_csv(path, schema_version=1):
                     "ip":       row[7],
                     "mac":      row[10],
                     "type":     fmt,
+                    "config_method": method,
                     "iface":    "eth1",
                     "netmask":  row[8],
                 })

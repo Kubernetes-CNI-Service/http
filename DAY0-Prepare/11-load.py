@@ -106,6 +106,7 @@ from project_contract import (
     service_url,
     validate_cumulus_dns_domain,
     validate_device_config_method,
+    resolve_device_config_method,
     validate_service_endpoint,
     validate_ztp_url_prefix,
 )
@@ -392,6 +393,7 @@ class ProjectInputs:
     deployment_scope: str = "all"
     switch_scope: str = "all"
     source_identities: dict[str, str] | None = None
+    device_methods: dict[str, str] | None = None
 
 
 def section(title: str) -> None:
@@ -1265,6 +1267,7 @@ def apply_subnet_service_ips(
 def load_device_types(
     path: Path, schema_version: int = GLOBAL_SCHEMA_VERSION,
     switch_scope: str = "all",
+    methods_out: dict[str, str] | None = None,
 ) -> frozenset[str]:
     selected_scope = str(switch_scope or "").strip().casefold()
     if selected_scope not in SWITCH_SCOPE_TYPES:
@@ -1292,6 +1295,7 @@ def load_device_types(
                 raise LoadError("devices_config.csv config_method 列重复")
             method_index = fields.index("config_method") if "config_method" in fields else None
             types: set[str] = set()
+            methods: dict[str, str] = {}
             seen_hostnames: set[str] = set()
             seen_eth0_addr: dict[str, tuple[int, str]] = {}
             seen_eth0_mac: dict[str, tuple[int, str]] = {}
@@ -1332,11 +1336,20 @@ def load_device_types(
                             f"devices_config.csv 第 {lineno} 行 {hostname} config_method 列缺失"
                         )
                     try:
-                        validate_device_config_method(kind, row[method_index])
+                        method = validate_device_config_method(kind, row[method_index])
                     except ValueError as exc:
                         raise LoadError(
                             f"devices_config.csv 第 {lineno} 行 {hostname} {exc}"
                         ) from exc
+                elif kind != "eth_jump":
+                    try:
+                        method = resolve_device_config_method(kind)
+                    except ValueError as exc:
+                        raise LoadError(
+                            f"devices_config.csv 第 {lineno} 行 {hostname} {exc}"
+                        ) from exc
+                if kind != "eth_jump":
+                    methods[hostname_key] = method
                 selected_kind = (
                     selected_scope == "all"
                     or kind in SWITCH_SCOPE_TYPES[selected_scope]
@@ -1414,6 +1427,9 @@ def load_device_types(
         raise LoadError(f"devices_config.csv 不是有效 UTF-8：{exc}") from exc
     if rows == 0:
         raise LoadError("devices_config.csv 没有设备记录")
+    if methods_out is not None:
+        methods_out.clear()
+        methods_out.update(methods)
     return frozenset(types)
 
 
@@ -7793,6 +7809,7 @@ def validate_inputs(
         )
     validation_errors = []
     device_types: frozenset[str] = frozenset()
+    device_methods: dict[str, str] = {}
     p2p_file = project / (args.p2p_file or "p2p.xlsx")
     air_topology_policy = None
     mini_devices_file = None
@@ -7807,6 +7824,7 @@ def validate_inputs(
     try:
         device_types = load_device_types(
             devices_file, settings.schema_version, switch_scope=switch_scope,
+            methods_out=device_methods,
         )
     except LoadError as exc:
         validation_errors.append(str(exc))
@@ -7861,6 +7879,7 @@ def validate_inputs(
         subnet_file=subnet_file,
         p2p_file=p2p_file,
         device_types=device_types,
+        device_methods=device_methods,
         pubkeys=(),
         settings=settings,
         air_topology_policy=air_topology_policy,

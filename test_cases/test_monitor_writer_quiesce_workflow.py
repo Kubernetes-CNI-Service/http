@@ -584,7 +584,7 @@ def _source_bound_load_report_path(
     a general permission to discharge unknown destinations in either module.
     """
     reviewed = (
-        (load_tree, "c6ca755defb62769eaeaf80cd7f36d631597fb3360e419fd351f9fd403c04fdf"),
+        (load_tree, "d9c67b110d7a2ce6cc3c17bd956164e3906ae08d1807c889ab7786d47ca05ca6"),
         (report_tree, "d2b79619b2ace8c4ea96edcf0ad599001d8f78af6a569168bc4971770e0bca05"),
     )
     if any(hashlib.sha256(ast.dump(tree, include_attributes=False).encode()).hexdigest()

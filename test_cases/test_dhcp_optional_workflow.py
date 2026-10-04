@@ -148,6 +148,40 @@ def prepare_r22_selected_nvos_core_flow(
 
 
 class DhcpOptionalWorkflowTests(unittest.TestCase):
+    def test_f02_legacy_rows_materialize_valid_methods_in_real_c1_records(self):
+        header = list(DEVICE_BASE_COLUMNS + DEVICE_FIXED_COLUMNS)
+        with tempfile.TemporaryDirectory() as name:
+            inventory = Path(name) / "02-devices_config.csv"
+            rows = []
+            for hostname, kind, address in (
+                ("EXAMPLE-OOB01", "eth", "192.0.2.11"),
+                ("EXAMPLE-IB01", "ib", "203.0.113.2"),
+                ("EXAMPLE-NVL01", "nvl", "203.0.113.3"),
+            ):
+                row = [hostname, kind, "oob", address, "24", "192.0.2.1"]
+                row.extend([""] * (len(header) - len(row)))
+                rows.append(row)
+            with inventory.open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.writer(stream)
+                writer.writerow(header)
+                writer.writerows(rows)
+            methods = {}
+            self.assertEqual(
+                frozenset({"eth", "ib", "nvl"}),
+                LOAD.load_device_types(
+                    inventory, schema_version=2, methods_out=methods,
+                ),
+            )
+            records = DHCP.load_csv(str(inventory), schema_version=2)
+            self.assertEqual(
+                {"EXAMPLE-OOB01": "ztp", "EXAMPLE-IB01": "ztp", "EXAMPLE-NVL01": "ztp"},
+                {record["hostname"]: record["config_method"] for record in records},
+            )
+            self.assertEqual(
+                {record["hostname"].casefold(): record["config_method"] for record in records},
+                methods,
+            )
+
     def test_f02_v2_method_column_survives_load_to_dhcp_generator(self):
         header = list(DEVICE_BASE_COLUMNS + DEVICE_FIXED_COLUMNS) + ["config_method"]
         with tempfile.TemporaryDirectory() as name:
@@ -171,6 +205,10 @@ class DhcpOptionalWorkflowTests(unittest.TestCase):
             )
             records = DHCP.load_csv(str(inventory), schema_version=2)
             self.assertEqual(2, len(records))
+            self.assertEqual(
+                {"EXAMPLE-IB01": "initial-setup", "EXAMPLE-OOB01": "ztp"},
+                {record["hostname"]: record["config_method"] for record in records},
+            )
 
             rows[1][-1] = "initial-setup"
             with inventory.open("w", newline="", encoding="utf-8") as stream:
