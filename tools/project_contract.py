@@ -1359,6 +1359,7 @@ class DeviceCsvLayout:
     evpn_group_starts: tuple[int, ...]
     metadata_start: int
     fixed_columns: tuple[str, ...] = DEVICE_FIXED_COLUMNS
+    config_method_index: int | None = None
 
     @property
     def fixed_indices(self) -> dict[str, int]:
@@ -1710,6 +1711,14 @@ def parse_device_csv_layout(
             + ",".join(DEVICE_SOURCE_METADATA_COLUMNS)
         )
     body = columns[:metadata_start]
+    config_method_index = None
+    if body and body[-1] == "config_method":
+        config_method_index = len(body) - 1
+        body = body[:-1]
+    if "config_method" in body:
+        raise ValueError(
+            "devices_config.csv config_method 必须唯一且位于 source metadata 前"
+        )
 
     if schema_version == 1:
         legacy_fixed = DEVICE_FIXED_COLUMNS[:-1]
@@ -1735,6 +1744,7 @@ def parse_device_csv_layout(
             evpn_group_starts=evpn_starts,
             metadata_start=metadata_start,
             fixed_columns=fixed_columns,
+            config_method_index=config_method_index,
         )
 
     try:
@@ -1767,6 +1777,7 @@ def parse_device_csv_layout(
         fixed_start=fixed_start,
         evpn_group_starts=evpn_starts,
         metadata_start=metadata_start,
+        config_method_index=config_method_index,
     )
 
 

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import csv
 import io
 import json
 import os
@@ -27,6 +28,7 @@ from test_cases.test_dhcp_switch_scope_preservation import (
 )
 from test_cases import test_load_release_transaction as release_fixture
 from test_cases import test_flow_release_platform_matrix as platform_fixture
+from project_contract import DEVICE_BASE_COLUMNS, DEVICE_FIXED_COLUMNS
 
 
 def prepare_r22_selected_nvos_core_flow(
@@ -146,6 +148,30 @@ def prepare_r22_selected_nvos_core_flow(
 
 
 class DhcpOptionalWorkflowTests(unittest.TestCase):
+    def test_f02_v2_method_column_survives_load_to_dhcp_generator(self):
+        header = list(DEVICE_BASE_COLUMNS + DEVICE_FIXED_COLUMNS) + ["config_method"]
+        with tempfile.TemporaryDirectory() as name:
+            inventory = Path(name) / "02-devices_config.csv"
+            rows = []
+            for hostname, kind, address, method in (
+                ("EXAMPLE-IB01", "ib", "203.0.113.2", "initial-setup"),
+                ("EXAMPLE-OOB01", "eth", "192.0.2.11", "ztp"),
+            ):
+                row = [hostname, kind, "oob", address, "24", "192.0.2.1"]
+                row.extend([""] * (len(header) - len(row)))
+                row[-1] = method
+                rows.append(row)
+            with inventory.open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.writer(stream)
+                writer.writerow(header)
+                writer.writerows(rows)
+            self.assertEqual(
+                frozenset({"ib", "eth"}),
+                LOAD.load_device_types(inventory, schema_version=2),
+            )
+            records = DHCP.load_csv(str(inventory), schema_version=2)
+            self.assertEqual(2, len(records))
+
     def test_r22_empty_subnet_parent_and_standalone_generator_disagree_no_longer(self):
         for dhcp_status in ("disabled", "enabled"):
             with self.subTest(dhcp_status=dhcp_status), tempfile.TemporaryDirectory() as name:

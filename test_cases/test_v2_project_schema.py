@@ -300,6 +300,24 @@ class SchemaSelectionTests(unittest.TestCase):
         self.assertEqual((27, 36, 45), repeated.evpn_group_starts)
         self.assertEqual(20, repeated.fixed_start)
 
+    def test_f02_v2_layout_preserves_terminal_device_method_before_source_metadata(self):
+        bare = v2_header(vlan_groups=1, evpn_groups=1)
+        for metadata in ([], list(CONTRACT.DEVICE_SOURCE_METADATA_COLUMNS)):
+            with self.subTest(metadata=metadata):
+                header = bare + ["config_method"] + metadata
+                layout = CONTRACT.parse_device_csv_layout(header, 2)
+                self.assertEqual(len(bare), layout.config_method_index)
+                self.assertEqual(len(bare) + 1, layout.metadata_start)
+                self.assertEqual((12,), layout.vlan_group_starts)
+                self.assertEqual((23,), layout.evpn_group_starts)
+        for misplaced in (
+            ["config_method"] + bare,
+            bare + ["config_method", "config_method"],
+            bare + list(CONTRACT.DEVICE_SOURCE_METADATA_COLUMNS) + ["config_method"],
+        ):
+            with self.subTest(misplaced=misplaced), self.assertRaises(ValueError):
+                CONTRACT.parse_device_csv_layout(misplaced, 2)
+
     def test_v2_rejects_v1_only_columns_and_partial_groups(self):
         v1_header = (
             list(CONTRACT.DEVICE_BASE_COLUMNS)

@@ -38,6 +38,7 @@ DHCP = load_script(
 SETUP = load_script("r22_csv_setup_direct", ROOT / "DAY0-Prepare/01-a-setup.py")
 RUNTIME = load_script("r22_csv_runtime_direct", ROOT / "tools/ztp_service_runtime.py")
 ACTIVATE = load_script("r22_subnet_identity_docker_direct", ROOT / "infra/docker/activate.py")
+from project_contract import DEVICE_BASE_COLUMNS, DEVICE_FIXED_COLUMNS
 
 _TEMPLATE_TEXT = (ROOT / "DAY0-Prepare/template/01-global.yaml").read_text(
     encoding="utf-8"
@@ -71,6 +72,26 @@ def settings_for(status: str):
 
 
 class DhcpOptionalDirectTests(unittest.TestCase):
+    def test_f02_v2_explicit_method_is_checked_at_load(self):
+        header = list(DEVICE_BASE_COLUMNS + DEVICE_FIXED_COLUMNS) + ["config_method"]
+        with tempfile.TemporaryDirectory() as name:
+            inventory = Path(name) / "02-devices_config.csv"
+            row = ["Leaf01", "ib", "NA", "192.0.2.10", "24", "192.0.2.1"]
+            row.extend([""] * (len(header) - len(row)))
+            row[-1] = "initial-setup"
+            inventory.write_text(
+                ",".join(header) + "\n" + ",".join(row) + "\n",
+                encoding="utf-8",
+            )
+            self.assertIn("ib", LOAD.load_device_types(inventory, schema_version=2))
+            row[-1] = "unreviewed-method"
+            inventory.write_text(
+                ",".join(header) + "\n" + ",".join(row) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(LOAD.LoadError, "config_method"):
+                LOAD.load_device_types(inventory, schema_version=2)
+
     def test_f02_explicit_device_method_cannot_claim_incompatible_executor(self):
         header = (
             "hostname,type,template,eth0_ip,netmask,eth0_gw,eth0_mac,"
