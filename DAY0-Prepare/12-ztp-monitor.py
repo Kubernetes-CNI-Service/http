@@ -4053,11 +4053,15 @@ def assign_stage_success_indices(
         for name in STAGE_NAMES:
             current = device["stages"][name]
             old = previous_stages.get(name, {}) if isinstance(previous_stages, dict) else {}
-            try:
-                old_index = max(0, int(old.get("success_index", 0)))
-            except (TypeError, ValueError, AttributeError):
-                old_index = 0
-            if not old_index and isinstance(old, dict) and old.get("status") in {"success", "warning", "skipped"}:
+            old_raw_index = old.get("success_index") if isinstance(old, dict) else None
+            old_index = (
+                old_raw_index
+                if type(old_raw_index) is int and 0 <= old_raw_index <= previous_round
+                else 0
+            )
+            if ((old_raw_index is None or type(old_raw_index) is int and old_raw_index == 0)
+                    and isinstance(old, dict)
+                    and old.get("status") in {"success", "warning", "skipped"}):
                 old_index = previous_round
             if reset_current_cycle:
                 old_index = 0

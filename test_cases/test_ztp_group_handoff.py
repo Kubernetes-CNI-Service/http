@@ -140,6 +140,28 @@ def forged_reset_reboot_device() -> dict:
     return row
 
 
+def forged_future_previous_receipt_device(index: object = 2) -> dict:
+    """A prior round-one snapshot cannot carry a future or noninteger receipt."""
+    row = round_device(
+        "Leaf01", "eth", stage_statuses={"config_apply": "pending"},
+    )
+    for stage in row["stages"].values():
+        stage["success_index"] = 0
+    previous = {"devices": [{
+        "hostname": "Leaf01", "ztp_round": 1,
+        "stages": {
+            "config_apply": {
+                "status": "success", "detail": "forged future receipt",
+                "timestamp": "2026-09-01T12:00:00+08:00",
+                "success_index": index,
+            },
+        },
+    }]}
+    MONITOR.assign_stage_success_indices([row], previous)
+    MONITOR.finalize_device(row)
+    return row
+
+
 class CurrentRoundCompletionTests(unittest.TestCase):
     def test_unapplied_config_and_missing_key_do_not_count_as_completed_stages(self):
         for stage_name, status in (
@@ -391,6 +413,17 @@ class CurrentRoundCompletionTests(unittest.TestCase):
             ),
         )
 
+    def test_prior_snapshot_future_index_cannot_promote_pending_stage(self):
+        for index in (2, "2", True):
+            with self.subTest(index=index):
+                row = forged_future_previous_receipt_device(index)
+                self.assertNotEqual(2, row["stages"]["config_apply"]["success_index"])
+                self.assertEqual(
+                    {}, MONITOR.ready_completion_handoff_reports(
+                        {"scope": "prod", "devices": [row]},
+                    ),
+                )
+
     def test_reset_log_bundle_cannot_promote_untimed_second_round_stages(self):
         boundary = "2026-09-01T11:59:00+08:00"
         row = round_device("Leaf01", "eth", stage_timestamp="")
@@ -466,6 +499,7 @@ class CurrentRoundGateWorkflowTests(unittest.TestCase):
                     forged_stage,
                     forged_manual_boot_evidence_device(),
                     forged_reset_reboot_device(),
+                    forged_future_previous_receipt_device(),
                 ):
                     handed_off, retries, retry_after = (
                         MONITOR.process_ready_completion_handoffs(
