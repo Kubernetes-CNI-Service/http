@@ -523,6 +523,62 @@ finally:
             self.assertEqual(p / "01-global.yaml", common.resolve())
             self.assertFalse((root / "service-started").exists())
 
+    def test_real_setup_wal_cold_recovery_rejects_rebound_link_parent(self):
+        """A killed SETUP must not let fresh LOAD restore P into a new parent."""
+        with tempfile.TemporaryDirectory(prefix="r22-parent-rebind-cold-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, _q, common, p_only, _q_only, manifest, before, _hook, barrier, _home = fixture
+            first = self._run_private_load_setup_switch(fixture, prepare_journal=True)
+            self.assertEqual(23, first.returncode, first.stdout + first.stderr)
+            self.assertTrue(barrier.is_file())
+            journal = root / "ztp/.setup-switch-journal.json"
+            frozen_journal = journal.read_bytes()
+            original_parent = common.parent.with_name(common.parent.name + "-original")
+            common.parent.rename(original_parent)
+            common.parent.mkdir()
+            common.symlink_to(os.readlink(original_parent / common.name))
+            replacement_link = os.readlink(common)
+
+            recovery = """
+import importlib.util
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location(
+    'fresh_rebound_setup_switch_load', root / 'DAY0-Prepare/11-load.py',
+)
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    try:
+        load.recover_setup_switch_journal(
+            root / 'ztp/.setup-switch-journal.json',
+            deployment_lock_descriptor=descriptor, services_quiesced=True,
+            runtime_backend=SimpleNamespace(name='supervisor'),
+        )
+    except load.LoadError as exc:
+        if any(word in str(exc) for word in ('parent', 'directory', 'identity')):
+            raise SystemExit(27)
+        raise
+    raise SystemExit(28)
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+            second = subprocess.run(
+                [sys.executable, "-B", "-c", recovery, str(root)],
+                cwd=root, capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(27, second.returncode, second.stdout + second.stderr)
+            self.assertEqual(replacement_link, os.readlink(common))
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            self.assertFalse(os.path.lexists(p_only))
+            self.assertEqual(frozen_journal, journal.read_bytes())
+            self.assertFalse((root / "service-started").exists())
+
     def test_real_setup_prepare_only_keeps_p_publication_unchanged(self):
         """A separate Q-local preparation pass must not switch P's links."""
         with tempfile.TemporaryDirectory(prefix="r22-setup-prepare-only-") as name:

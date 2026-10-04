@@ -5888,6 +5888,18 @@ def _setup_switch_directory_identity(path: Path) -> dict[str, object]:
     return {"path": str(canonical), "dev": metadata.st_dev, "ino": metadata.st_ino}
 
 
+def _setup_switch_link_parent_identity(path: Path) -> dict[str, object]:
+    """Bind a WAL row to the directory that owns its lexical link name."""
+    try:
+        parent = path.parent.resolve(strict=True)
+        metadata = parent.stat()
+    except (OSError, RuntimeError) as exc:
+        raise LoadError(f"setup switch link parent is unavailable: {path}: {exc}") from exc
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise LoadError(f"setup switch link parent is not a directory: {path}")
+    return {"path": str(parent), "dev": metadata.st_dev, "ino": metadata.st_ino}
+
+
 def _setup_switch_canonical_payload(body: dict[str, object]) -> bytes:
     return json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
 
@@ -5970,9 +5982,12 @@ def prepare_setup_switch_journal(
                 raise LoadError(f"setup switch P link changed before journal: {path}")
         elif before is not None:
             raise LoadError(f"setup switch P link disappeared before journal: {path}")
-        rows.append({"path": str(path), "before": before, "after": after})
+        rows.append({
+            "path": str(path), "parent": _setup_switch_link_parent_identity(path),
+            "before": before, "after": after,
+        })
     body = {
-        "schema_version": 1, "phase": "prepared",
+        "schema_version": 2, "phase": "prepared",
         "root": root, "old_project": old, "new_project": new,
         "manifest": base64.b64encode(state.manifest).decode("ascii"),
         "manifest_sha256": hashlib.sha256(state.manifest).hexdigest(),
@@ -6034,7 +6049,7 @@ def register_setup_switch_journal_link(
     try:
         envelope = json.loads(payload)
         body = envelope["body"]
-        if (not isinstance(body, dict) or body["schema_version"] != 1
+        if (not isinstance(body, dict) or body["schema_version"] != 2
                 or body["phase"] != "prepared"
                 or hashlib.sha256(_setup_switch_canonical_payload(body)).hexdigest()
                 != envelope["sha256"]):
@@ -6069,6 +6084,8 @@ def register_setup_switch_journal_link(
                     or (row["before"] is None and row["after"] is None)):
                 raise ValueError("journal link row is invalid")
             path.parent.resolve(strict=True).relative_to(root_path)
+            if row["parent"] != _setup_switch_link_parent_identity(path):
+                raise ValueError("journal link parent identity changed")
             after = row["after"]
             if after is not None:
                 if (not isinstance(after, str) or not after
@@ -6114,7 +6131,10 @@ def register_setup_switch_journal_link(
         raise LoadError(f"setup switch journal registration is invalid: {exc}") from exc
     next_body = dict(body)
     next_body["links"] = sorted(
-        [*rows, {"path": str(path), "before": None, "after": after}],
+        [*rows, {
+            "path": str(path), "parent": _setup_switch_link_parent_identity(path),
+            "before": None, "after": after,
+        }],
         key=lambda row: row["path"],
     )
     body_bytes = _setup_switch_canonical_payload(next_body)
@@ -6173,7 +6193,7 @@ def recover_setup_switch_journal(
         body = envelope["body"]
         if (not isinstance(body, dict) or not isinstance(envelope["sha256"], str)
                 or hashlib.sha256(_setup_switch_canonical_payload(body)).hexdigest()
-                != envelope["sha256"] or body["schema_version"] != 1
+                != envelope["sha256"] or body["schema_version"] != 2
                 or body["phase"] != "prepared"):
             raise ValueError("journal envelope is invalid")
         old = body["old_project"]
@@ -6221,6 +6241,8 @@ def recover_setup_switch_journal(
                          or os.path.isabs(after) or os.path.normpath(after) != after))):
                 raise ValueError("invalid path or link value")
             path.parent.resolve(strict=True).relative_to(root_path)
+            if row["parent"] != _setup_switch_link_parent_identity(path):
+                raise ValueError("journal link parent identity changed")
             if after is not None:
                 _setup_switch_q_target(
                     Path(os.path.normpath(str(path.parent / after))), q_project,

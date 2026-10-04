@@ -1846,6 +1846,65 @@ os.kill(os.getpid(), signal.SIGKILL)
         self.assertEqual(old_project, LOAD.active_project())
         backend.start.assert_not_called()
 
+    def test_setup_wal_recovery_rejects_rebound_link_parent_before_writing(self) -> None:
+        """A journal for P's link must not restore into a replacement directory."""
+        (
+            _old_project, _new_project, common, old_only, _new_only,
+            new_target, _new_only_target, manifest, old_manifest, old_links,
+            journal, descriptor, backend,
+        ) = self._prepare_cross_project_setup_crash()
+        original_parent = common.parent.with_name(common.parent.name + "-original")
+        common.parent.rename(original_parent)
+        common.parent.mkdir()
+        common.symlink_to(os.path.relpath(new_target, common.parent))
+        intruder_link = os.readlink(common)
+        frozen_journal = journal.read_bytes()
+
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with self.assertRaisesRegex(LOAD.LoadError, "parent|directory|identity"):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertEqual(intruder_link, os.readlink(common))
+        self.assertEqual(old_links[common], os.readlink(original_parent / common.name))
+        self.assertEqual(old_links[old_only], os.readlink(old_only))
+        self.assertEqual(old_manifest, manifest.read_bytes())
+        self.assertEqual(frozen_journal, journal.read_bytes())
+        backend.start.assert_not_called()
+
+    def test_setup_wal_recovery_rejects_legacy_rows_without_parent_identity(self) -> None:
+        """An old link-only receipt cannot authorize writes after a cold restart."""
+        (
+            _old_project, _new_project, common, old_only, _new_only,
+            new_target, _new_only_target, manifest, old_manifest, old_links,
+            journal, descriptor, backend,
+        ) = self._prepare_cross_project_setup_crash()
+        envelope = json.loads(journal.read_bytes())
+        envelope["body"]["schema_version"] = 1
+        for row in envelope["body"]["links"]:
+            row.pop("parent")
+        envelope["sha256"] = hashlib.sha256(
+            LOAD._setup_switch_canonical_payload(envelope["body"]),
+        ).hexdigest()
+        old_journal = LOAD._setup_switch_canonical_payload(envelope) + b"\n"
+        journal.write_bytes(old_journal)
+        common.unlink()
+        common.symlink_to(os.path.relpath(new_target, common.parent))
+        mixed_link = os.readlink(common)
+
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with self.assertRaisesRegex(LOAD.LoadError, "journal|envelope|invalid"):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertEqual(mixed_link, os.readlink(common))
+        self.assertEqual(old_links[old_only], os.readlink(old_only))
+        self.assertEqual(old_manifest, manifest.read_bytes())
+        self.assertEqual(old_journal, journal.read_bytes())
+        backend.start.assert_not_called()
+
     def test_setup_wal_registers_dynamic_q_only_link_before_child_write(self) -> None:
         """A later-discovered Q-only path is recoverable only after durable registration."""
         (
@@ -1866,10 +1925,15 @@ os.kill(os.getpid(), signal.SIGKILL)
             )
         envelope = json.loads(journal.read_bytes())
         expected_raw = os.path.relpath(dynamic_target, dynamic_link.parent)
-        self.assertIn(
-            {"path": str(dynamic_link), "before": None, "after": expected_raw},
-            envelope["body"]["links"],
-        )
+        dynamic_rows = [
+            row for row in envelope["body"]["links"]
+            if row["path"] == str(dynamic_link)
+        ]
+        self.assertEqual(1, len(dynamic_rows))
+        self.assertEqual({
+            "path": str(dynamic_link), "before": None, "after": expected_raw,
+            "parent": LOAD._setup_switch_link_parent_identity(dynamic_link),
+        }, dynamic_rows[0])
         self.assertEqual(0o600, stat.S_IMODE(journal.stat().st_mode))
         child = """
 import os
