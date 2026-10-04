@@ -3726,10 +3726,18 @@ def assign_ztp_rounds(
                 )
             )
             continue
-        try:
-            previous_round = max(1, int(previous.get("ztp_round", 1)))
-        except (TypeError, ValueError):
-            previous_round = 1
+        raw_previous_round = previous.get("ztp_round", 1)
+        invalid_round_authority = (
+            type(raw_previous_round) is not int
+            or raw_previous_round < 1
+            or previous.get("round_authority_invalid") is True
+        )
+        if invalid_round_authority:
+            device["round_authority_invalid"] = True
+            device.setdefault("issues", []).append(
+                "Previous ZTP generation authority is invalid"
+            )
+        previous_round = raw_previous_round if not invalid_round_authority else 1
         previous_marker = str(previous.get("cycle_marker") or "")
         previous_manual_marker = str(previous.get("manual_cycle_marker") or "")
         previous_source = str(previous.get("trigger_source") or "automatic")
@@ -4596,6 +4604,7 @@ def completion_handoff_device_complete(device: Any) -> bool:
             or device.get("unbound_identity")
             or device.get("identity_pending")
             or device.get("promotion_pending")
+            or device.get("round_authority_invalid")
             or device.get("overall") not in {"success", "warning"}):
         return False
     try:
