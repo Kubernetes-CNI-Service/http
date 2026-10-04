@@ -84,6 +84,21 @@ class EthJumpPhaseBWorkflowTests(unittest.TestCase):
             with self.assertRaises(self.initial_setup.SetupError):
                 self.initial_setup.load_devices(inventory)
 
+    def test_f02_explicit_empty_method_fails_load_and_initial_setup_together(self):
+        with tempfile.TemporaryDirectory() as directory:
+            inventory = Path(directory) / "02-devices_config.csv"
+            inventory.write_text(
+                "hostname,type,template,eth0_ip,netmask,eth0_gw,eth0_mac,"
+                "eth1_ip,netmask,eth1_gw,eth1_mac,lo_ip,config_method\n"
+                "EXAMPLE-IB01,ib,NA,203.0.113.2,24,203.0.113.1,,,,,,,\n"
+                "EXAMPLE-OOB01,eth,oob,192.0.2.11,24,192.0.2.1,,,,,,,ztp\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(self.loader.LoadError, "config_method"):
+                self.loader.load_device_types(inventory, schema_version=1)
+            with self.assertRaisesRegex(self.initial_setup.SetupError, "config_method"):
+                self.initial_setup.load_devices(inventory)
+
     def test_phase_b_admits_transit_independently_of_schema_consumers(self):
         """The Phase-B transit proof remains independent after Phase C opens."""
         with tempfile.TemporaryDirectory() as directory:
