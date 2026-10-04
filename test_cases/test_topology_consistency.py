@@ -191,6 +191,39 @@ class InventoryResolutionDirectTests(unittest.TestCase):
 
 
 class LldpIdentityDirectTests(unittest.TestCase):
+    def test_frozen_evidence_rechecks_copied_bytes_when_metadata_is_coarse(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "input.dot"
+            source.write_bytes(b"alpha")
+            private = root / "private"
+            private.mkdir()
+            initial = source.lstat()
+            real_read = os.read
+            real_lstat = Path.lstat
+            changed = False
+
+            def rewrite_after_first_read(descriptor, length):
+                nonlocal changed
+                chunk = real_read(descriptor, length)
+                if chunk and not changed:
+                    changed = True
+                    source.write_bytes(b"ALPHA")
+                    os.utime(source, ns=(initial.st_atime_ns, initial.st_mtime_ns))
+                return chunk
+
+            def coarse_lstat(path, *args, **kwargs):
+                if Path(path) == source:
+                    return initial
+                return real_lstat(path, *args, **kwargs)
+
+            with mock.patch.object(LLDP.os, "read", side_effect=rewrite_after_first_read), \
+                    mock.patch.object(LLDP.os, "fstat", return_value=initial), \
+                    mock.patch.object(Path, "lstat", autospec=True, side_effect=coarse_lstat):
+                with self.assertRaisesRegex(ValueError, "changed during snapshot"):
+                    LLDP.freeze_evidence_input(source, private)
+            self.assertTrue(changed)
+
     def test_exact_normalized_names_match(self):
         self.assertTrue(LLDP.device_names_match(" LEAF1. ", "leaf1"))
         self.assertTrue(LLDP.device_names_match("Leaf1.dc.example.", "leaf1.dc.example"))

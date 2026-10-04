@@ -701,6 +701,38 @@ raise SystemExit(module.main([]))
             self.assertTrue(rebound)
             self.assertEqual(replacement, pid_file.read_text(encoding="ascii"))
 
+    def test_pid_cleanup_preserves_in_place_replacement_with_same_inode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pid_file = Path(directory) / "ztp-monitor.pid"
+            owned = f"{os.getpid()}\n"
+            replacement_pid = os.getpid() + 1
+            if len(str(replacement_pid)) != len(str(os.getpid())):
+                replacement_pid = os.getpid() - 1
+            replacement = f"{replacement_pid}\n"
+            self.assertEqual(len(owned), len(replacement))
+            pid_file.write_text(owned, encoding="ascii")
+            original_inode = pid_file.stat().st_ino
+            original_read = Path.read_text
+            replaced = False
+
+            def read_then_replace_in_place(path, *args, **kwargs):
+                nonlocal replaced
+                content = original_read(path, *args, **kwargs)
+                if Path(path) == pid_file and not replaced:
+                    replaced = True
+                    pid_file.write_text(replacement, encoding="ascii")
+                return content
+
+            with mock.patch.object(
+                Path, "read_text", autospec=True,
+                side_effect=read_then_replace_in_place,
+            ):
+                MONITOR.remove_own_pid_file(pid_file)
+            self.assertTrue(replaced)
+            self.assertTrue(pid_file.exists(), "cleanup unlinked the replacement PID")
+            self.assertEqual(original_inode, pid_file.stat().st_ino)
+            self.assertEqual(replacement, pid_file.read_text(encoding="ascii"))
+
     def test_pid_cleanup_serializes_with_supported_writer_and_preserves_new_record(self):
         with tempfile.TemporaryDirectory() as directory:
             pid_file = Path(directory) / "ztp-monitor.pid"

@@ -436,6 +436,21 @@ def freeze_evidence_input(source: Path, directory: Path) -> tuple[Path, str]:
         if copied != before.st_size or identity(before) != identity(after) \
                 or identity(after) != identity(named_after):
             raise ValueError(f"evidence input changed during snapshot: {source}")
+        # Some Linux filesystems can report unchanged coarse ctime for a
+        # same-length rewrite.  Re-read the held inode and compare it with the
+        # bytes actually copied, rather than treating metadata as a content
+        # witness.
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        confirmed = 0
+        readback = hashlib.sha256()
+        while True:
+            part = os.read(descriptor, 1024 * 1024)
+            if not part:
+                break
+            readback.update(part)
+            confirmed += len(part)
+        if confirmed != copied or readback.digest() != digest.digest():
+            raise ValueError(f"evidence input changed during snapshot: {source}")
         return destination, digest.hexdigest()
     finally:
         os.close(descriptor)

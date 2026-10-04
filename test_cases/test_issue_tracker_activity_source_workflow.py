@@ -68,6 +68,47 @@ class EthActivitySourceWorkflowTests(unittest.TestCase):
                     module.freeze_evidence_input(source, destination)
             self.assertTrue(changed)
 
+    def test_analyzer_frozen_input_rejects_rewrite_even_with_coarse_metadata(self):
+        spec = importlib.util.spec_from_file_location("eth_activity_analyzer_coarse", ANALYZER)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source = base / "planned.dot"
+            source.write_bytes(b"alpha")
+            destination = base / "private"
+            destination.mkdir()
+            original = source.lstat()
+            real_read = module.os.read
+            real_lstat = Path.lstat
+            changed = False
+
+            def rewrite_after_first_read(descriptor, length):
+                nonlocal changed
+                chunk = real_read(descriptor, length)
+                if chunk and not changed:
+                    changed = True
+                    source.write_bytes(b"ALPHA")
+                    os.utime(source, ns=(original.st_atime_ns, original.st_mtime_ns))
+                return chunk
+
+            def coarse_lstat(path, *args, **kwargs):
+                if Path(path) == source:
+                    return original
+                return real_lstat(path, *args, **kwargs)
+
+            # ext3 can present the same size, mtime, and coarse ctime after a
+            # same-length rewrite.  Simulate that exact metadata observation on
+            # every platform; the copied bytes must still be rejected.
+            with mock.patch.object(module.os, "read", side_effect=rewrite_after_first_read), \
+                    mock.patch.object(module.os, "fstat", return_value=original), \
+                    mock.patch.object(Path, "lstat", autospec=True, side_effect=coarse_lstat):
+                with self.assertRaisesRegex(ValueError, "changed during snapshot"):
+                    module.freeze_evidence_input(source, destination)
+            self.assertTrue(changed)
+
     def test_real_analyzer_and_reader_bind_four_literal_inputs_without_cycle_promotion(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)

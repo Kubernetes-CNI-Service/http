@@ -5151,7 +5151,8 @@ def remove_own_pid_file(pid_file: Path) -> None:
             before = pid_file.lstat()
             if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
                 return
-            if int(pid_file.read_text(encoding="utf-8").strip()) != os.getpid():
+            recorded_pid = pid_file.read_text(encoding="utf-8")
+            if int(recorded_pid.strip()) != os.getpid():
                 return
             after = pid_file.lstat()
             if (
@@ -5159,6 +5160,11 @@ def remove_own_pid_file(pid_file: Path) -> None:
                 or after.st_nlink != 1
                 or (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino)
             ):
+                return
+            # A replacement can reuse the inode (and coarse ctime) on Linux,
+            # or rewrite the same inode in place after the first read.  The
+            # metadata check alone cannot authorize removing its PID record.
+            if pid_file.read_text(encoding="utf-8") != recorded_pid:
                 return
             pid_file.unlink(missing_ok=True)
     except (OSError, ValueError, RuntimeContractError):

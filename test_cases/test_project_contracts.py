@@ -2605,11 +2605,13 @@ class TemplateContractTests(unittest.TestCase):
             command = selector.replace(
                 "log_dir=/var/lib/nvidia-ztp/logs",
                 f"log_dir={str(logs)!r}",
-            ).replace("root:644", owner_mode).replace(
-                "stat -c '%U:%a' --", "stat -f '%Su:%Lp'",
-            ).replace(
-                "stat -c '%Y' --", "stat -f '%m'",
-            )
+            ).replace("root:644", owner_mode)
+            if sys.platform == "darwin":
+                command = command.replace(
+                    "stat -c '%U:%a' --", "stat -f '%Su:%Lp'",
+                ).replace(
+                    "stat -c '%Y' --", "stat -f '%m'",
+                )
             result = subprocess.run(
                 ["sh", "-c", command], text=True, capture_output=True,
                 env={**os.environ, "HOME": str(home)}, check=False,
