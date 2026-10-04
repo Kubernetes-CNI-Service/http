@@ -69,6 +69,26 @@ class CompletionDisplayParityTests(unittest.TestCase):
         self.assertTrue(MONITOR.completion_handoff_device_complete(current))
         self.assertTrue(HTML.ztp_completed(current))
 
+        invalid_generation = json.loads(json.dumps(current))
+        invalid_generation["round_authority_invalid"] = True
+        invalid_generation["overall"] = "warning"
+        self.assertFalse(MONITOR.completion_handoff_device_complete(invalid_generation))
+        self.assertFalse(HTML.ztp_completed(invalid_generation))
+
+        invalid_reset = json.loads(json.dumps(current))
+        invalid_reset["manual_operation"] = "reset"
+        invalid_reset["reset_reboot_observed"] = "false"
+        self.assertFalse(MONITOR.completion_handoff_device_complete(invalid_reset))
+        self.assertFalse(HTML.ztp_completed(invalid_reset))
+
+        boolean_stage = json.loads(json.dumps(current))
+        boolean_stage["ztp_round"] = 1
+        for stage in boolean_stage["stages"].values():
+            stage["success_index"] = 1
+        boolean_stage["stages"]["config_apply"]["success_index"] = True
+        self.assertFalse(MONITOR.completion_handoff_device_complete(boolean_stage))
+        self.assertFalse(HTML.ztp_completed(boolean_stage))
+
         skipped = json.loads(json.dumps(current))
         skipped["stages"]["complete"]["status"] = "skipped"
         skipped["overall"] = "running"
@@ -121,6 +141,10 @@ class CompletionDisplayParityTests(unittest.TestCase):
         )
         self.assertTrue(MONITOR.completion_handoff_device_complete(manual_digest))
         self.assertTrue(HTML.ztp_completed(manual_digest))
+        nonboolean_boot = json.loads(json.dumps(manual_digest))
+        nonboolean_boot["ztp_log_current_boot"] = "true"
+        self.assertFalse(MONITOR.completion_handoff_device_complete(nonboolean_boot))
+        self.assertFalse(HTML.ztp_completed(nonboolean_boot))
         bad_digest = json.loads(json.dumps(manual_digest))
         bad_digest["ztp_log_sha256"] = "0" * 64
         self.assertFalse(MONITOR.completion_handoff_device_complete(bad_digest))

@@ -855,13 +855,14 @@ def ztp_completed(device: dict) -> bool:
             or progress.get("percent") != 100
             or device.get("unbound_identity") or device.get("identity_pending")
             or device.get("promotion_pending")
+            or device.get("round_authority_invalid")
             or device.get("overall") not in {"success", "warning"}):
         return False
-    try:
-        current_round = int(device["ztp_round"])
-    except (KeyError, TypeError, ValueError):
+    current_round = device.get("ztp_round")
+    if type(current_round) is not int or current_round < 1:
         return False
-    if current_round < 1:
+    if (device.get("manual_operation") == "reset"
+            and device.get("reset_reboot_observed") is not True):
         return False
 
     def comparable_time(value: object) -> bool:
@@ -910,7 +911,7 @@ def ztp_completed(device: dict) -> bool:
         and device.get("manual_command_ztp_complete") is True
         and re.fullmatch(r"[0-9a-f]{64}", command_digest)
         and command_digest == str(device.get("ztp_log_sha256") or "")
-        and device.get("ztp_log_current_boot")
+        and device.get("ztp_log_current_boot") is True
         and "complete" in (device.get("ztp_log_stage_names") or [])
         and all(
             isinstance(stages.get(name), dict)
@@ -931,9 +932,8 @@ def ztp_completed(device: dict) -> bool:
             return False
         if name in {"config_apply", "ssh_keys"} and stage_status != "success":
             return False
-        try:
-            stage_round = int(stage_value.get("success_index") or 0)
-        except (TypeError, ValueError):
+        stage_round = stage_value.get("success_index")
+        if type(stage_round) is not int:
             return False
         if stage_round != current_round:
             return False
