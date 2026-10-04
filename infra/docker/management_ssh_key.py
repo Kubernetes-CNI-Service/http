@@ -1031,6 +1031,11 @@ def _publish_held_inode(
     )
     if result != 0:
         error_number = ctypes.get_errno()
+        if error_number == errno.EEXIST:
+            raise ManagementKeyError(
+                "held candidate canonical-name collision during no-replace "
+                f"linkat publication: {target_name}"
+            )
         raise ManagementKeyError(
             f"held no-replace linkat publication failed: {os.strerror(error_number)}"
         )

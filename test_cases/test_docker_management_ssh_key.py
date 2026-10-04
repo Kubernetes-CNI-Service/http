@@ -2106,6 +2106,28 @@ class DockerManagementSshKeyDirectTests(unittest.TestCase):
             self.assertFalse(any(path.name.startswith(".") for path in self.service.iterdir()))
         self.assertIs(real_publish, helper._publish_held_inode)
 
+    def test_linkat_existing_canonical_leaf_reports_candidate_collision(self) -> None:
+        """Linux EEXIST must identify the held candidate's no-replace collision."""
+        helper = load_module(
+            HELPER_PATH,
+            f"docker_management_ssh_key_linkat_errno_{id(self)}",
+        )
+        linkat = mock.Mock(return_value=-1)
+        fake_ctypes = SimpleNamespace(
+            CDLL=lambda *_args, **_kwargs: SimpleNamespace(linkat=linkat),
+            c_int=int,
+            c_char_p=bytes,
+            set_errno=lambda _value: None,
+            get_errno=lambda: errno.EEXIST,
+        )
+        with mock.patch.object(helper, "sys", SimpleNamespace(platform="linux")), \
+                mock.patch.object(helper, "ctypes", fake_ctypes), \
+                self.assertRaisesRegex(
+                    helper.ManagementKeyError, r"candidate.*collision",
+                ):
+            helper._publish_held_inode(11, 12, "id_ed25519")
+        linkat.assert_called_once_with(11, b"", 12, b"id_ed25519", helper.AT_EMPTY_PATH)
+
     def test_candidate_name_replacement_cannot_publish_attacker_inode(self) -> None:
         expected = self.fixture.generate(self.host_home / ".ssh")
         helper = self.helper()
@@ -2736,6 +2758,7 @@ class DockerManagementSshKeyWorkflowTests(unittest.TestCase):
                 (ROOT / "tools/_package_common.py", tools_dir / "_package_common.py"),
                 (ROOT / "tools/project_contract.py", tools_dir / "project_contract.py"),
                 (ROOT / "tools/deployment_lock.py", tools_dir / "deployment_lock.py"),
+                (ROOT / "tools/finished_project_state.py", tools_dir / "finished_project_state.py"),
                 (ROOT / "tools/ztp_service_runtime.py", tools_dir / "ztp_service_runtime.py"),
             )
             for source, destination in copied:
