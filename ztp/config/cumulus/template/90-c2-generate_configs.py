@@ -2900,6 +2900,11 @@ def _triage_device_csv_row(
         errors.append(f"  重复 hostname: {hostname!r}")
         return None
     hostname_owners[hostname_key] = hostname
+    # A CSV without the new optional column retains the REQ8 tuple contract.
+    # The per-device default was validated above; LOAD/DHCP carry its
+    # materialized value, while legacy C2 YAML remains byte-identical.
+    if method_index is None:
+        return row, row_type, hostname, csv_template
     return row, row_type, hostname, csv_template, config_method
 
 
@@ -3336,7 +3341,8 @@ def _ingest_device_csv_row(
     )
     if triaged is None:
         return
-    row, row_type, hostname, csv_template, config_method = triaged
+    row, row_type, hostname, csv_template = triaged[:4]
+    config_method = triaged[4] if len(triaged) == 5 else None
     template = _resolve_device_csv_template(
         hostname, row_type, csv_template,
         tmpl_map.get(hostname.lower()), dup_errs,
@@ -3349,7 +3355,8 @@ def _ingest_device_csv_row(
     )
     if dev is None:
         return
-    dev["config_method"] = config_method
+    if config_method is not None:
+        dev["config_method"] = config_method
     receipt = _apply_source_yaml_metadata(
         row, hostname, dev, context, dup_errs,
     )

@@ -1016,7 +1016,7 @@ class V2GenerationWorkflowTests(unittest.TestCase):
         }
         self.assertEqual(expected, load_methods)
         self.assertEqual(expected, dhcp_methods)
-        self.assertEqual("ztp", triaged[4])
+        self.assertEqual(4, len(triaged))  # legacy C2 shape stays byte-compatible
         self.assertEqual(
             {"example-ib01": "ztp", "example-nvl01": "ztp"},
             {device["hostname"].casefold(): device["config_method"] for device in ib_devices},

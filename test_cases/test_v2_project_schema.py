@@ -187,9 +187,12 @@ def v2_redundant_row(
 
 
 def generate_v2_redundancy_project(
-        rows: list[list[str]], global_document: dict) -> tuple[dict, str]:
+        rows: list[list[str]], global_document: dict, *,
+        method_column: bool = False) -> tuple[dict, str]:
     """Run the real generator and require failure to leave no partial model."""
     header = v2_header(vlan_groups=0, evpn_groups=1)
+    if method_column:
+        header.append("config_method")
     if any(len(row) != len(header) for row in rows):
         raise AssertionError("fixture row width does not match v2 header")
     output = io.StringIO()
@@ -229,12 +232,17 @@ class SchemaSelectionTests(unittest.TestCase):
         row.extend([""] * (len(header) - len(row)))
         context = GENERATOR._device_csv_header_context(header, 2)
         errors = []
-        triaged = GENERATOR._triage_device_csv_row(
-            row, 2, len(header), 2, context["type_col"],
-            errors, {}, {}, method_index=context["layout"].config_method_index,
-        )
+        with mock.patch.object(
+            GENERATOR, "resolve_device_config_method",
+            wraps=CONTRACT.resolve_device_config_method,
+        ) as resolve_default:
+            triaged = GENERATOR._triage_device_csv_row(
+                row, 2, len(header), 2, context["type_col"],
+                errors, {}, {}, method_index=context["layout"].config_method_index,
+            )
+        resolve_default.assert_called_once_with("eth")
         self.assertEqual([], errors)
-        self.assertEqual("ztp", triaged[4])
+        self.assertEqual(4, len(triaged))  # legacy REQ8 triage shape
 
         declared_header = header + ["config_method"]
         declared_row = row + ["ztp"]
@@ -246,6 +254,18 @@ class SchemaSelectionTests(unittest.TestCase):
         )
         self.assertEqual([], errors)
         self.assertEqual("ztp", declared[4])
+
+    def test_f02_explicit_eth_method_is_published_without_legacy_byte_drift(self):
+        row = v2_redundant_row(
+            "EXAMPLE-Leaf01", 11, "198.51.100.11", "evpn",
+            "46:38:39:20:00:03",
+        ) + ["ztp"]
+        model, _output = generate_v2_redundancy_project(
+            [row], v2_mlag_global(), method_column=True,
+        )
+        self.assertEqual(
+            "ztp", model["devices"]["EXAMPLE-Leaf01"]["config_method"],
+        )
 
     def test_f02_nvos_c2_materializes_ib_default_and_initial_setup(self):
         header = v2_header(vlan_groups=0, evpn_groups=0)
@@ -621,10 +641,6 @@ switches:
 
         model, output = generate_v2_redundancy_project(
             [row], v2_mlag_global(),
-        )
-
-        self.assertEqual(
-            "ztp", model["devices"]["tan-hps-leaf05"]["config_method"],
         )
 
         self.assertEqual(
