@@ -7,11 +7,12 @@ import io
 import json
 import os
 import sys
-from contextlib import redirect_stderr
+from contextlib import contextmanager, redirect_stderr
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
+import time
 import unittest
 from unittest import mock
 import yaml
@@ -60,6 +61,22 @@ DEVICE = {
 
 def completed(stdout="", returncode=0, stderr=""):
     return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
+
+
+@contextmanager
+def host_timezone_utc():
+    """Exercise timestamp contracts independently of the runner host zone."""
+    previous = os.environ.get("TZ")
+    try:
+        os.environ["TZ"] = "UTC"
+        time.tzset()
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous
+        time.tzset()
 
 
 def protocol(
@@ -2112,6 +2129,28 @@ class ManualReceiptPublicationBoundaryTests(unittest.TestCase):
 
 
 class ManualMarkerMonitorWorkflowTests(unittest.TestCase):
+    def test_trigger_one_preserves_aware_clock_offset_under_utc_host(self):
+        """One script must not rewrite an aware command timestamp to host UTC."""
+        marker = "2026-09-24T08:45:00+08:00"
+        client = mock.Mock()
+        client.args.command_timeout = 10
+        client.args.non_interactive = True
+        client.sudo_command.return_value = ("sudo -n helper", "")
+        client.run.side_effect = [completed("config\n"), completed("done\n")]
+        with tempfile.TemporaryDirectory() as directory, host_timezone_utc():
+            with mock.patch.object(
+                MANUAL, "connect_and_verify", return_value=("192.0.2.10", "eth0"),
+            ), mock.patch.object(MANUAL, "datetime") as clock:
+                clock.now.return_value = datetime.fromisoformat(marker)
+                result = MANUAL.trigger_one(
+                    client, DEVICE, "http://192.0.2.2/ztp/ztp-bootstrap_oob.sh",
+                    Path(directory) / "manual-trigger" / "same", "manual_cli", "same",
+                )
+        self.assertEqual("triggered", result["state"], result)
+        self.assertEqual(marker, result["started_at"])
+        self.assertEqual(marker, result["command_started_at"])
+        self.assertEqual(marker, result["finished_at"])
+
     def test_issue0014_invalid_only_result_is_rejected_with_visible_diagnostic(self):
         for label, value in (("junk", "zzz"), ("blank", "   "), ("missing", None)):
             with self.subTest(case=label), tempfile.TemporaryDirectory() as directory:
@@ -2163,7 +2202,7 @@ class ManualMarkerMonitorWorkflowTests(unittest.TestCase):
         ]
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            with mock.patch.object(
+            with host_timezone_utc(), mock.patch.object(
                 MANUAL, "connect_and_verify", return_value=("192.0.2.10", "eth0"),
             ), mock.patch.object(MANUAL, "datetime") as clock:
                 clock.now.return_value = datetime.fromisoformat(valid_marker)

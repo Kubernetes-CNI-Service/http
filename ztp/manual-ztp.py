@@ -2674,13 +2674,21 @@ def verify_config_sync_readback(client, device, host, expected_text):
     }
 
 
+def _manual_command_timestamp() -> str:
+    """Retain an aware command clock's offset; localize only a naive clock."""
+    now = datetime.now()
+    if now.tzinfo is None or now.utcoffset() is None:
+        now = now.astimezone()
+    return now.isoformat(timespec="seconds")
+
+
 def trigger_one(
     client: SshClient, device: dict, url: str, run_dir: Path,
     trigger_source: str = "manual_cli", trigger_id: str = "", operation: str = "ztp",
     direct_privileged: bool = False, operation_id: str = "",
     prepared: dict | None = None, requested_operation: str = "",
 ) -> dict:
-    started = datetime.now().astimezone().isoformat(timespec="seconds")
+    started = _manual_command_timestamp()
     command_started_at = ""
     sync_outcome = "not-submitted"
     sync_verification = None
@@ -2833,7 +2841,7 @@ def trigger_one(
                 run_dir.parent.parent.parent, device, run_dir,
                 operation_id, trigger_id, applied_now["fingerprint"],
             )
-        command_started_at = datetime.now().astimezone().isoformat(timespec="seconds")
+        command_started_at = _manual_command_timestamp()
         if operation == "replace-config":
             sync_outcome = "outcome-unknown"
         result = client.run(
@@ -2869,7 +2877,7 @@ def trigger_one(
             "trigger_source": trigger_source, "trigger_id": trigger_id,
             "command_ztp_log_sha256": command_log_sha256,
             "command_ztp_complete": command_log_complete,
-            "finished_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "finished_at": _manual_command_timestamp(),
         }
     except (ManualZtpError, subprocess.TimeoutExpired) as exc:
         payload = {
@@ -2881,7 +2889,7 @@ def trigger_one(
             "requested_operation": requested_operation or operation,
             "operation_id": operation_id,
             "trigger_source": trigger_source, "trigger_id": trigger_id,
-            "finished_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "finished_at": _manual_command_timestamp(),
         }
     finally:
         if lock_descriptor is not None:
