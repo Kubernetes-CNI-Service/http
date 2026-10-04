@@ -106,6 +106,40 @@ def round_device(
     return value
 
 
+def forged_manual_boot_evidence_device() -> dict:
+    """An otherwise complete second-round report with a non-boolean boot claim."""
+    boundary = "2026-09-01T11:59:00+08:00"
+    digest = "a" * 64
+    row = round_device(
+        "Leaf01", "eth", stage_timestamp="2026-09-01T11:56:00+08:00",
+    )
+    row.update({
+        "trigger_source": "manual_web", "manual_cycle_marker": boundary,
+        "manual_command_started_at": boundary,
+        "manual_command_finished_at": "2026-09-01T11:59:10+08:00",
+        "manual_command_ztp_complete": True,
+        "manual_command_ztp_log_sha256": digest,
+        "ztp_log_sha256": digest,
+        "ztp_log_current_boot": "true",
+        "ztp_log_stage_names": list(EXPECTED_NINE_STAGES),
+    })
+    row["stages"]["bootstrap"]["timestamp"] = "2026-09-01T11:59:04+08:00"
+    row["stages"]["config_http"]["timestamp"] = "2026-09-01T11:59:05+08:00"
+    return row
+
+
+def forged_reset_reboot_device() -> dict:
+    """A reset report whose apparent reboot proof is a truthy string."""
+    boundary = "2026-09-01T11:59:00+08:00"
+    row = round_device("Leaf01", "eth")
+    row.update({
+        "trigger_source": "manual_reset_cli", "manual_operation": "reset",
+        "manual_cycle_marker": boundary,
+        "reset_reboot_observed": "false",
+    })
+    return row
+
+
 class CurrentRoundCompletionTests(unittest.TestCase):
     def test_unapplied_config_and_missing_key_do_not_count_as_completed_stages(self):
         for stage_name, status in (
@@ -309,6 +343,54 @@ class CurrentRoundCompletionTests(unittest.TestCase):
             ),
         )
 
+    def test_non_boolean_current_boot_claim_cannot_advance_old_stages(self):
+        row = forged_manual_boot_evidence_device()
+        for stage in row["stages"].values():
+            stage["success_index"] = 0
+        previous = {"devices": [{
+            "hostname": "Leaf01", "ztp_round": 1,
+            "stages": {
+                name: {
+                    "status": "success", "detail": "old source receipt",
+                    "timestamp": "2026-09-01T10:00:00+08:00",
+                    "success_index": 1,
+                }
+                for name in EXPECTED_NINE_STAGES
+            },
+        }]}
+        MONITOR.assign_stage_success_indices([row], previous)
+        MONITOR.finalize_device(row)
+        self.assertNotEqual(2, row["stages"]["config_apply"]["success_index"])
+        self.assertEqual(
+            {}, MONITOR.ready_completion_handoff_reports(
+                {"scope": "prod", "devices": [row]},
+            ),
+        )
+
+    def test_non_boolean_reset_reboot_claim_cannot_advance_or_handoff(self):
+        row = forged_reset_reboot_device()
+        for stage in row["stages"].values():
+            stage["success_index"] = 0
+        previous = {"devices": [{
+            "hostname": "Leaf01", "ztp_round": 1,
+            "stages": {
+                name: {
+                    "status": "success", "detail": "old source receipt",
+                    "timestamp": "2026-09-01T10:00:00+08:00",
+                    "success_index": 1,
+                }
+                for name in EXPECTED_NINE_STAGES
+            },
+        }]}
+        MONITOR.assign_stage_success_indices([row], previous)
+        MONITOR.finalize_device(row)
+        self.assertNotEqual(2, row["stages"]["complete"]["success_index"])
+        self.assertEqual(
+            {}, MONITOR.ready_completion_handoff_reports(
+                {"scope": "prod", "devices": [forged_reset_reboot_device()]},
+            ),
+        )
+
     def test_reset_log_bundle_cannot_promote_untimed_second_round_stages(self):
         boundary = "2026-09-01T11:59:00+08:00"
         row = round_device("Leaf01", "eth", stage_timestamp="")
@@ -382,6 +464,8 @@ class CurrentRoundGateWorkflowTests(unittest.TestCase):
                     ),
                     forged_round,
                     forged_stage,
+                    forged_manual_boot_evidence_device(),
+                    forged_reset_reboot_device(),
                 ):
                     handed_off, retries, retry_after = (
                         MONITOR.process_ready_completion_handoffs(

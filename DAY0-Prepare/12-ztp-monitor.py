@@ -3318,6 +3318,8 @@ def finalize_device(device: dict[str, Any]) -> None:
         device["overall"] = "warning"
     elif (done == len(STAGE_NAMES)
           and device["stages"]["complete"]["status"] == "success"
+          and (device.get("manual_operation") != "reset"
+               or device.get("reset_reboot_observed") is True)
           and stage_success_index("complete") == current_round):
         device["overall"] = "success"
     elif any(value in {"success", "running"} for value in statuses):
@@ -3925,7 +3927,7 @@ def assign_ztp_rounds(
                 )
             else:
                 reset_reboot_observed = bool(
-                    previous.get("reset_reboot_observed")
+                    previous.get("reset_reboot_observed") is True
                     or boot_boundary is True
                     or (marker and reset_boundary
                         and _timestamp_after(marker, reset_boundary))
@@ -3966,7 +3968,7 @@ def assign_stage_success_indices(
             manual_current_cycle
             and str(device.get("manual_operation") or "") == "reset"
         )
-        reset_reboot_observed = bool(device.get("reset_reboot_observed"))
+        reset_reboot_observed = device.get("reset_reboot_observed") is True
         log_stage_names = {
             str(name) for name in (device.get("ztp_log_stage_names") or [])
             if str(name) in STAGE_NAMES
@@ -3993,7 +3995,7 @@ def assign_stage_success_indices(
             reset_current_cycle
             and reset_reboot_observed
             and reset_generation_proven
-            and device.get("ztp_log_current_boot")
+            and device.get("ztp_log_current_boot") is True
             and bool(log_mtime)
             and (not boundary or _timestamp_near_boundary(log_mtime, boundary))
             and "complete" in log_stage_names
@@ -4001,7 +4003,7 @@ def assign_stage_success_indices(
         manual_log_bundle_current = bool(
             manual_current_cycle
             and not reset_current_cycle
-            and device.get("ztp_log_current_boot")
+            and device.get("ztp_log_current_boot") is True
             and bool(log_mtime)
             and "complete" in log_stage_names
             and _timestamp_within_operation_window(
@@ -4040,7 +4042,7 @@ def assign_stage_success_indices(
             and device.get("manual_command_ztp_complete") is True
             and re.fullmatch(r"[0-9a-f]{64}", command_log_sha256)
             and command_log_sha256 == device_log_sha256
-            and device.get("ztp_log_current_boot")
+            and device.get("ztp_log_current_boot") is True
             and "complete" in log_stage_names
             and http_evidence_current
         )
@@ -4598,6 +4600,9 @@ def completion_handoff_device_complete(device: Any) -> bool:
         return False
     if type(current_round) is not int or current_round < 1:
         return False
+    if (device.get("manual_operation") == "reset"
+            and device.get("reset_reboot_observed") is not True):
+        return False
     if current_round > 1 and _aware_event_time(device.get("cycle_started_at")) is None:
         return False
     boundary = str(device.get("cycle_started_at") or "")
@@ -4628,7 +4633,7 @@ def completion_handoff_device_complete(device: Any) -> bool:
         and device.get("manual_command_ztp_complete") is True
         and re.fullmatch(r"[0-9a-f]{64}", command_digest)
         and command_digest == str(device.get("ztp_log_sha256") or "")
-        and device.get("ztp_log_current_boot")
+        and device.get("ztp_log_current_boot") is True
         and "complete" in (device.get("ztp_log_stage_names") or [])
         and http_evidence_current
     )
