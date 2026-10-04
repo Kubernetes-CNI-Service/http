@@ -978,6 +978,28 @@ class DeepYamlFailClosedWorkflowTests(unittest.TestCase):
 class V2GenerationWorkflowTests(unittest.TestCase):
     """Run the new declarative schema through all local production consumers."""
 
+    def test_f02_incompatible_eth_method_is_rejected_by_load_and_c2(self):
+        header = BASE_HEADER + FIXED_HEADER + ["config_method"]
+        row = ["EXAMPLE-Leaf01", "eth", "oob", "192.0.2.11", "24", "192.0.2.1"]
+        row.extend([""] * (len(header) - len(row)))
+        row[-1] = "initial-setup"
+        with tempfile.TemporaryDirectory() as name:
+            inventory = Path(name) / "02-devices_config.csv"
+            with inventory.open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.writer(stream)
+                writer.writerow(header)
+                writer.writerow(row)
+            with self.assertRaisesRegex(LOAD.LoadError, "config_method"):
+                LOAD.load_device_types(inventory, schema_version=2)
+            context = GENERATOR._device_csv_header_context(header, 2)
+            errors = []
+            self.assertIsNone(GENERATOR._triage_device_csv_row(
+                row, 2, len(header), 2, context["type_col"],
+                errors, {}, {},
+                method_index=context["layout"].config_method_index,
+            ))
+            self.assertTrue(any("config_method" in error for error in errors))
+
     @classmethod
     def setUpClass(cls):
         cls.temporary = tempfile.TemporaryDirectory()

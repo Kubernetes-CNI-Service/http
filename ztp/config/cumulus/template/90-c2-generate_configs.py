@@ -89,6 +89,7 @@ from project_contract import (
     parse_device_csv_layout,
     require_device_csv_row_width,
     validate_cumulus_dns_domain,
+    validate_device_config_method,
     v2_vrr_ipv4_plan,
 )
 from nvue_normalizer import expand_nvue_selector
@@ -2840,7 +2841,7 @@ def _device_csv_header_context(header, schema_version):
 
 def _triage_device_csv_row(
         raw, lineno, header_width, schema_version, type_col,
-        errors, skipped_excluded, hostname_owners):
+        errors, skipped_excluded, hostname_owners, *, method_index=None):
     """Reject rows that cannot become ETH devices before parsing fields."""
     row = [cell.strip() for cell in raw]
     if not any(row):
@@ -2860,6 +2861,17 @@ def _triage_device_csv_row(
         if type_col is not None and len(row) > type_col
         else "ib" if row[0].strip().lower().startswith("ib") else "eth"
     )
+    if method_index is not None:
+        if len(raw) <= method_index:
+            errors.append(
+                f"  devices_config.csv 第 {lineno} 行 config_method 列缺失"
+            )
+            return None
+        try:
+            validate_device_config_method(row_type, row[method_index])
+        except ValueError as exc:
+            errors.append(f"  devices_config.csv 第 {lineno} 行 {row[0]} {exc}")
+            return None
     if _exclude_config_type(row_type):
         skipped_excluded[row_type] = skipped_excluded.get(row_type, 0) + 1
         return None
@@ -3312,6 +3324,7 @@ def _ingest_device_csv_row(
     triaged = _triage_device_csv_row(
         raw, lineno, header_width, schema_version,
         context["type_col"], dup_errs, skipped_excluded, hostname_owners,
+        method_index=context["layout"].config_method_index,
     )
     if triaged is None:
         return

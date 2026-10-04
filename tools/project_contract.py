@@ -1347,6 +1347,22 @@ DEVICE_V2_EVPN_COLUMNS = (
 DEVICE_SOURCE_METADATA_COLUMNS = (
     "source_yaml_b64", "source_yaml_sha256", "source_fields_sha256",
 )
+DEVICE_CONFIG_METHOD_TYPES = {
+    "ztp": frozenset({"eth", "eth_spx", "spx", "ib", "nvl", "air"}),
+    "initial-setup": frozenset({"ib"}),
+    "deploy_infra": frozenset({"server"}),
+}
+
+
+def validate_device_config_method(kind: str, method: str) -> str:
+    """Reject a declared method without an audited device-family executor."""
+    normalized = str(method or "").strip().casefold()
+    device_kind = str(kind or "").strip().casefold()
+    if device_kind not in DEVICE_CONFIG_METHOD_TYPES.get(normalized, ()):
+        raise ValueError(
+            f"type={device_kind} config_method={normalized!r} 无已绑定兼容执行者"
+        )
+    return normalized
 
 
 @dataclass(frozen=True)

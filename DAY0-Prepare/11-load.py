@@ -105,6 +105,7 @@ from project_contract import (
     safe_load_global_yaml,
     service_url,
     validate_cumulus_dns_domain,
+    validate_device_config_method,
     validate_service_endpoint,
     validate_ztp_url_prefix,
 )
@@ -179,14 +180,6 @@ SHARED_ARTIFACT_RECEIPT_MAX_ENTRIES = 10_000
 SHARED_ARTIFACT_MAX_BYTES = 16 * 1024 * 1024 * 1024
 VALID_TYPES = {
     "eth", "eth_spx", "spx", "ib", "nvl", "server", "air", "eth_jump",
-}
-# Explicit CSV claims are checked against the executors currently wired for
-# those device families. New methods require an audited registry entry and an
-# actual executor; accepting an arbitrary string here would misstate success.
-DEVICE_CONFIG_METHOD_TYPES = {
-    "ztp": frozenset({"eth", "eth_spx", "spx", "ib", "nvl", "air"}),
-    "initial-setup": frozenset({"ib"}),
-    "deploy_infra": frozenset({"server"}),
 }
 BOOTSTRAP_BY_ROLE = {
     "air_oobofoob": "ztp-bootstrap_oobofoob.sh",
@@ -1338,12 +1331,12 @@ def load_device_types(
                         raise LoadError(
                             f"devices_config.csv 第 {lineno} 行 {hostname} config_method 列缺失"
                         )
-                    method = str(row[method_index] or "").strip().casefold()
-                    if kind not in DEVICE_CONFIG_METHOD_TYPES.get(method, ()):
+                    try:
+                        validate_device_config_method(kind, row[method_index])
+                    except ValueError as exc:
                         raise LoadError(
-                            f"devices_config.csv 第 {lineno} 行 {hostname} "
-                            f"type={kind} config_method={method!r} 无已绑定兼容执行者"
-                        )
+                            f"devices_config.csv 第 {lineno} 行 {hostname} {exc}"
+                        ) from exc
                 selected_kind = (
                     selected_scope == "all"
                     or kind in SWITCH_SCOPE_TYPES[selected_scope]
