@@ -388,6 +388,10 @@ def _open_leaf(
         direct = os.stat(name, dir_fd=directory_descriptor, follow_symlinks=False)
         if stat.S_ISLNK(direct.st_mode):
             raise ManagementKeyError(f"{label} symlink is rejected by NOFOLLOW policy")
+        if not stat.S_ISREG(direct.st_mode):
+            raise ManagementKeyError(
+                f"{label} must be a regular file; special/FIFO/socket objects are unsafe"
+            )
         descriptor = os.open(name, _leaf_flags(), dir_fd=directory_descriptor)
         before = os.fstat(descriptor)
         _validate_leaf_metadata(

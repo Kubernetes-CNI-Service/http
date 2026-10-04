@@ -8,7 +8,6 @@ import json
 import os
 from pathlib import Path
 import tempfile
-import time
 import unittest
 
 
@@ -677,8 +676,10 @@ class CollectionAttributionDirectTests(unittest.TestCase):
                 "inventory": source,
             })
             before = source.stat().st_mtime_ns
-            time.sleep(0.002)
-            os.utime(source, None)
+            # Set an explicit distinct timestamp: filesystems with coarse or
+            # virtualized clocks need not advance after a short sleep.
+            changed_mtime = before + 2_000_000_000
+            os.utime(source, ns=(changed_mtime, changed_mtime))
             self.assertNotEqual(before, source.stat().st_mtime_ns)
             second = self.monitor.collection_attribution_input_digests({
                 "inventory": source,

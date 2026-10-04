@@ -889,6 +889,32 @@ class DockerManagementSshKeyDirectTests(unittest.TestCase):
                             expected_gid=self.gid,
                         )
 
+    def test_special_socket_type_is_rejected_before_open(self) -> None:
+        """An OS that refuses open(socket) must still report the unsafe type."""
+        helper = self.helper()
+        with tempfile.TemporaryDirectory(dir=self.root) as directory:
+            directory_fd = os.open(directory, os.O_RDONLY)
+            try:
+                socket_metadata = os.stat_result((
+                    stat.S_IFSOCK | 0o600, 0, 0, 1,
+                    self.uid, self.gid, 0, 0, 0, 0,
+                ))
+                with mock.patch.object(
+                    helper.os, "stat", return_value=socket_metadata,
+                ), mock.patch.object(
+                    helper.os, "open", side_effect=AssertionError("opened socket"),
+                ) as opened, self.assertRaisesRegex(
+                    helper.ManagementKeyError, "regular|socket|special|type",
+                ):
+                    helper._open_leaf(
+                        directory_fd, "id_ed25519.pub", label="host public key",
+                        expected_mode=0o644, expected_uid=self.uid,
+                        expected_gid=self.gid, limit=helper.MAX_PUBLIC_KEY_BYTES,
+                    )
+                opened.assert_not_called()
+            finally:
+                os.close(directory_fd)
+
     def test_oversize_and_noncanonical_public_payloads_are_rejected_without_read_hang(self) -> None:
         helper = self.helper()
         self.assertLessEqual(helper.MAX_PRIVATE_KEY_BYTES, 64 * 1024)
@@ -2705,6 +2731,9 @@ class DockerManagementSshKeyWorkflowTests(unittest.TestCase):
                 (DOCKER_ROOT / "hostlock.py", docker_dir / "hostlock.py"),
                 (HELPER_PATH, docker_dir / "management_ssh_key.py"),
                 (LOAD_PATH, day0 / "11-load.py"),
+                (ROOT / "tools/generation_report.py", tools_dir / "generation_report.py"),
+                (ROOT / "tools/ssh_key_preparation.py", tools_dir / "ssh_key_preparation.py"),
+                (ROOT / "tools/_package_common.py", tools_dir / "_package_common.py"),
                 (ROOT / "tools/project_contract.py", tools_dir / "project_contract.py"),
                 (ROOT / "tools/deployment_lock.py", tools_dir / "deployment_lock.py"),
                 (ROOT / "tools/ztp_service_runtime.py", tools_dir / "ztp_service_runtime.py"),
