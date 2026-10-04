@@ -102,6 +102,28 @@ class EthJumpTransportContractTests(unittest.TestCase):
             ):
                 self.module.load_devices(devices_path)
 
+    def test_f02_transit_and_nvl_methods_cannot_claim_other_executors(self):
+        for device_type, method in (
+            ("eth", "deploy_infra"),
+            ("eth_jump", "ztp"),
+            ("nvl", "deploy_infra"),
+        ):
+            with self.subTest(device_type=device_type, method=method):
+                with tempfile.TemporaryDirectory() as directory:
+                    devices_path = Path(directory) / "devices.csv"
+                    devices_path.write_text(
+                        "hostname,type,eth0_ip,netmask,eth0_gw,eth0_mac,"
+                        "eth1_ip,netmask,eth1_gw,config_method\n"
+                        "EXAMPLE-IB01,ib,203.0.113.2,24,203.0.113.1,,,,,initial-setup\n"
+                        f"EXAMPLE-OTHER01,{device_type},192.0.2.11,,,,,,,{method}\n",
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(
+                        self.module.SetupError,
+                        rf"devices\.csv:3:.*EXAMPLE-OTHER01.*{method}.*incompatible",
+                    ):
+                        self.module.load_devices(devices_path)
+
     def test_f02_ethernet_initial_setup_claim_cannot_be_transit_only(self):
         with tempfile.TemporaryDirectory() as directory:
             devices_path = Path(directory) / "devices.csv"

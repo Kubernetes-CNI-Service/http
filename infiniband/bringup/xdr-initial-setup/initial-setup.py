@@ -352,6 +352,15 @@ def load_devices(path: Path) -> tuple[dict[str, Device], dict[str, Device]]:
                     f"{path}:{line_number}: {hostname} 声明 initial-setup，"
                     "但此执行者仅将 Ethernet 设备作为 transit，不能将其配置计为成功"
                 )
+            if hostname and config_method and (
+                (dev_type == "eth_jump")
+                or (dev_type in TRANSIT_DEVICE_TYPES and config_method != "ztp")
+                or (dev_type == "nvl" and config_method != "ztp")
+            ):
+                raise SetupError(
+                    f"{path}:{line_number}: {hostname} config_method="
+                    f"{config_method} incompatible with initial-setup inventory binding"
+                )
             if not hostname or dev_type not in ({"ib"} | TRANSIT_DEVICE_TYPES):
                 continue
             if not valid_hostname(hostname):
