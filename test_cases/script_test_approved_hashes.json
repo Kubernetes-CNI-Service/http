@@ -1,31 +1,4 @@
 {
-  "full_suite_attestation": {
-    "environment": {
-      "container_toplevel_lock_sha256": "3532f5208b462243bab779b01eb4deb21638ac05a9390c17ac997ba8d7f24998",
-      "container_toplevel_versions": [
-        "Jinja2==3.1.6",
-        "openpyxl==3.1.5",
-        "pandas==2.3.3",
-        "PyYAML==6.0.3",
-        "XlsxWriter==3.2.9"
-      ],
-      "machine": "arm64",
-      "platform": "darwin",
-      "python_cache_tag": "cpython-39",
-      "python_executable": "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/bin/python3.9",
-      "python_implementation": "CPython",
-      "python_version": [
-        3,
-        9,
-        6
-      ]
-    },
-    "scenario_coverage": {
-      "root-entrypoint-workflow": "NOT COVERED (requires Linux EUID 0 private namespace)"
-    },
-    "schema_version": 1,
-    "snapshot_sha256": "929ba46dc033632c752213418eae46cd65ddc7a374de55698ee8437414714ed7"
-  },
   "impact_manifest_sha256": "d76f9f78d0a6b480dfb7b1529909fa7ae70c6a9e50de16431ad69d9ebace9c97",
   "schema_version": 1,
   "scripts": {
@@ -127,7 +100,7 @@
     },
     "infra/docker/management_ssh_key.py": {
       "canonical": "infra/docker/management_ssh_key.py",
-      "sha256": "c72fbe78c543f681e9a3daf6fb49b23f39d68b54f410c613e49f758a96400728"
+      "sha256": "36b66660f40591c566b0a17f877acc30ec8fcece9765c8fd499b69de8317f68c"
     },
     "infra/infra-setup.sh": {
       "canonical": "infra/infra-setup.sh",
@@ -818,7 +791,7 @@
     "test_cases.test_docker_derived_parent_activation": "a4123e989e3cdef966e6975ddd748bc31d1804cadb244d5daa8b55717be4a5a1",
     "test_cases.test_docker_destructive_confirmation": "19d6611b10ee4e5683af0d64598875b806a9667dd622c2b8cd41c60db566ebe9",
     "test_cases.test_docker_destructive_confirmation_workflow": "b470ede5b50261700ab5bed68e5abe7c5b5caa4f296b6eac270672fdf21d5b54",
-    "test_cases.test_docker_management_ssh_key": "3689eef92978361919d1c81ebace6ebff36d20f11a0e163b9e6f56a8b64dc512",
+    "test_cases.test_docker_management_ssh_key": "12b25385c4370b4776a2e5293eb01acef2048828ad191128a6ab8a0cf73580b8",
     "test_cases.test_documentation_catalog": "9755152c7cecd7cba3e43596b7c2d67c6e275c31a02b7fc2d0e451083aae9805",
     "test_cases.test_download_cli_contract": "ddafa1aa293e167a81b9267413a2cb3fa43b43fa17b55ca18e92df62e5f47412",
     "test_cases.test_eth_activity_cycle_handoff_workflow": "679e7c02aebf05ed79a4101294da04f09ebceaa6377d9d34c07e357ebf60defe",
