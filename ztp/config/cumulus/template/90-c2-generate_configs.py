@@ -7671,6 +7671,10 @@ def _load_csv_ib():
             )
             return devices, errors
         type_col = h_lower.index("type") if "type" in h_lower else None
+        if h_lower.count("config_method") > 1:
+            errors.append("  devices_config.csv config_method 列重复")
+            return devices, errors
+        method_col = h_lower.index("config_method") if "config_method" in h_lower else None
 
         for lineno, raw in enumerate(reader, start=2):
             row = [c.strip() for c in raw]
@@ -7684,6 +7688,17 @@ def _load_csv_ib():
                 errors.append(f"  {exc}")
                 continue
             dev_type = _row_type_ib(row, type_col)
+            if method_col is not None:
+                if len(row) <= method_col:
+                    errors.append(f"  devices_config.csv 第 {lineno} 行 config_method 列缺失")
+                    continue
+                try:
+                    validate_device_config_method(dev_type, row[method_col])
+                except ValueError as exc:
+                    errors.append(
+                        f"  devices_config.csv 第 {lineno} 行 {row[0]} {exc}"
+                    )
+                    continue
             if _exclude_config_type(dev_type):
                 skipped_excluded[dev_type] = skipped_excluded.get(dev_type, 0) + 1
                 continue

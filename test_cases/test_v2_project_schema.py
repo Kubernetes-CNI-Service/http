@@ -223,6 +223,25 @@ def generate_v2_redundancy_project(
 
 
 class SchemaSelectionTests(unittest.TestCase):
+    def test_f02_nvos_c2_rejects_nvl_initial_setup_before_generation(self):
+        header = v2_header(vlan_groups=0, evpn_groups=0) + ["config_method"]
+        row = ["EXAMPLE-NVL01", "nvl", "NA", "203.0.113.11", "24", "203.0.113.1"]
+        row.extend([""] * (len(header) - len(row)))
+        row[-1] = "initial-setup"
+        with tempfile.TemporaryDirectory() as name:
+            inventory = Path(name) / "02-devices_config.csv"
+            with inventory.open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.writer(stream)
+                writer.writerow(header)
+                writer.writerow(row)
+            with mock.patch.multiple(
+                GENERATOR, _CSV_FILE=str(inventory), _load_global_document=mock.DEFAULT,
+            ) as patched:
+                patched["_load_global_document"].return_value = ({}, 2)
+                devices, errors = GENERATOR._load_csv_ib()
+        self.assertEqual([], devices)
+        self.assertTrue(any("config_method" in error for error in errors))
+
     def test_canonical_project_template_starts_new_projects_as_v2(self):
         template = ROOT / "DAY0-Prepare/template"
         document = yaml.safe_load(

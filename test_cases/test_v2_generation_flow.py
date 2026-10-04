@@ -1000,6 +1000,28 @@ class V2GenerationWorkflowTests(unittest.TestCase):
             ))
             self.assertTrue(any("config_method" in error for error in errors))
 
+    def test_f02_nvl_initial_setup_is_rejected_by_load_and_nvos_c2(self):
+        header = BASE_HEADER + FIXED_HEADER + ["config_method"]
+        row = ["EXAMPLE-NVL01", "nvl", "NA", "203.0.113.11", "24", "203.0.113.1"]
+        row.extend([""] * (len(header) - len(row)))
+        row[-1] = "initial-setup"
+        with tempfile.TemporaryDirectory() as name:
+            inventory = Path(name) / "02-devices_config.csv"
+            with inventory.open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.writer(stream)
+                writer.writerow(header)
+                writer.writerow(row)
+            with self.assertRaisesRegex(LOAD.LoadError, "config_method"):
+                LOAD.load_device_types(inventory, schema_version=2)
+            with mock.patch.multiple(
+                GENERATOR, _CSV_FILE=str(inventory),
+                _load_global_document=mock.DEFAULT,
+            ) as patched:
+                patched["_load_global_document"].return_value = ({}, 2)
+                devices, errors = GENERATOR._load_csv_ib()
+            self.assertEqual([], devices)
+            self.assertTrue(any("config_method" in error for error in errors))
+
     @classmethod
     def setUpClass(cls):
         cls.temporary = tempfile.TemporaryDirectory()
