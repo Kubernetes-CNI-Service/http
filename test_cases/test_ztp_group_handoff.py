@@ -168,6 +168,22 @@ class CurrentRoundCompletionTests(unittest.TestCase):
             ),
         )
 
+    def test_boolean_round_or_stage_index_cannot_promote(self):
+        for forged_field in ("ztp_round", "config_apply.success_index"):
+            with self.subTest(forged_field=forged_field):
+                row = round_device("Leaf01", "eth", round_index=1)
+                if forged_field == "ztp_round":
+                    row["ztp_round"] = True
+                else:
+                    row["stages"]["config_apply"]["success_index"] = True
+                MONITOR.finalize_device(row)
+                self.assertNotEqual("success", row["overall"])
+                self.assertEqual(
+                    {}, MONITOR.ready_completion_handoff_reports(
+                        {"scope": "prod", "devices": [row]},
+                    ),
+                )
+
     def test_second_round_without_comparable_boundary_cannot_index_stages(self):
         row = round_device(
             "Leaf01", "eth", cycle_started_at="", stage_timestamp="",
@@ -342,6 +358,11 @@ class CurrentRoundGateWorkflowTests(unittest.TestCase):
                 calls.append((command, timeout))
                 return {"returncode": 0, "stdout": "", "stderr": ""}
 
+            forged_round = round_device("Leaf01", "eth", round_index=1)
+            forged_round["ztp_round"] = True
+            forged_stage = round_device("Leaf01", "eth", round_index=1)
+            forged_stage["stages"]["config_apply"]["success_index"] = True
+
             with mock.patch.dict(MONITOR.COLLECTOR_SCRIPTS, {"ethernet": collector}), \
                     mock.patch.object(MONITOR, "run_command", side_effect=external_collector), \
                     mock.patch.object(MONITOR, "generate_monitor_html", return_value=True):
@@ -359,6 +380,8 @@ class CurrentRoundGateWorkflowTests(unittest.TestCase):
                         "Leaf01", "eth",
                         stage_timestamp="2026-09-01T10:00:00+08:00",
                     ),
+                    forged_round,
+                    forged_stage,
                 ):
                     handed_off, retries, retry_after = (
                         MONITOR.process_ready_completion_handoffs(

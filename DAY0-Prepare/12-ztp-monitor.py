@@ -3293,19 +3293,16 @@ def annotate_progress_stall(
 
 def finalize_device(device: dict[str, Any]) -> None:
     statuses = [device["stages"][name]["status"] for name in STAGE_NAMES]
-    try:
-        current_round = max(1, int(device.get("ztp_round", 1)))
-    except (TypeError, ValueError):
-        current_round = 1
+    raw_round = device.get("ztp_round", 1)
+    current_round = raw_round if type(raw_round) is int and raw_round >= 1 else 0
 
     def stage_success_index(name: str) -> int:
-        try:
-            return int(device["stages"][name].get("success_index") or 0)
-        except (TypeError, ValueError):
-            return 0
+        value = device["stages"][name].get("success_index")
+        return value if type(value) is int and value >= 1 else 0
 
     done = sum(
-        device["stages"][name]["status"] in {"success", "warning", "skipped"}
+        current_round > 0
+        and device["stages"][name]["status"] in {"success", "warning", "skipped"}
         and (
             name not in {"config_apply", "ssh_keys"}
             or device["stages"][name]["status"] == "success"
@@ -4596,10 +4593,10 @@ def completion_handoff_device_complete(device: Any) -> bool:
             or device.get("overall") not in {"success", "warning"}):
         return False
     try:
-        current_round = int(device["ztp_round"])
-    except (KeyError, TypeError, ValueError):
+        current_round = device["ztp_round"]
+    except KeyError:
         return False
-    if current_round < 1:
+    if type(current_round) is not int or current_round < 1:
         return False
     if current_round > 1 and _aware_event_time(device.get("cycle_started_at")) is None:
         return False
@@ -4644,9 +4641,8 @@ def completion_handoff_device_complete(device: Any) -> bool:
             return False
         if name in {"config_apply", "ssh_keys"} and status != "success":
             return False
-        try:
-            stage_round = int(stage_value.get("success_index") or 0)
-        except (TypeError, ValueError):
+        stage_round = stage_value.get("success_index")
+        if type(stage_round) is not int:
             return False
         if stage_round != current_round:
             return False
