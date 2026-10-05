@@ -3755,6 +3755,19 @@ def assign_ztp_rounds(
         previous_boot = str(previous.get("boot_id") or "")
         previous_reset_boot = str(previous.get("reset_boot_id_before") or "")
         complete = previous.get("stages", {}).get("complete", {})
+        invalid_complete_authority = (
+            isinstance(complete, dict)
+            and complete.get("status") == "success"
+            and (
+                type(complete.get("success_index")) is not int
+                or complete["success_index"] != previous_round
+            )
+        )
+        if invalid_complete_authority:
+            device["round_authority_invalid"] = True
+            device.setdefault("issues", []).append(
+                "Previous ZTP completion receipt authority is invalid"
+            )
         previous_complete = str(complete.get("timestamp") or "") if isinstance(complete, dict) else ""
         boot_cycle = bool(current_boot and previous_boot and current_boot != previous_boot)
         dhcp_cycle = False
@@ -3786,7 +3799,8 @@ def assign_ztp_rounds(
             and not (
                 isinstance(complete, dict)
                 and complete.get("status") == "success"
-                and int(complete.get("success_index") or 0) == previous_round
+                and type(complete.get("success_index")) is int
+                and complete["success_index"] == previous_round
             )
         )
         if reset_in_progress and (boot_cycle or dhcp_cycle) and not manual_cycle:
