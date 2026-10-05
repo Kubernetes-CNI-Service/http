@@ -837,7 +837,7 @@ def _register_setup_switch_link_before_write(link, target):
     """Durably record a cross-project link value before the shared write."""
     if _SETUP_SWITCH_WAL_CONTEXT is None:
         return
-    load_api, descriptor = _SETUP_SWITCH_WAL_CONTEXT
+    load_api, descriptor = _SETUP_SWITCH_WAL_CONTEXT[:2]
     try:
         load_api["register_setup_switch_journal_link"](
             Path(ZTP) / ".setup-switch-journal.json", Path(link), Path(target),
@@ -3362,6 +3362,26 @@ def _unsetup_previous(proj_dir):
     """Remove old managed project links after the cross-project prewrite fence."""
     to_del = _previous_project_links_to_remove(proj_dir)
 
+    def require_frozen_p_link(path):
+        if _SETUP_SWITCH_WAL_CONTEXT is None:
+            return
+        if len(_SETUP_SWITCH_WAL_CONTEXT) != 3:
+            raise ValueError("旧项目链接清理缺少完整 WAL 冻结状态")
+        load_api, _descriptor, frozen = _SETUP_SWITCH_WAL_CONTEXT
+        row = frozen.get(path)
+        if row is None:
+            raise ValueError(f"旧项目链接清理路径缺少 WAL：{path}")
+        raw_target, parent = row
+        if (not os.path.islink(path) or os.readlink(path) != raw_target
+                or load_api["_setup_switch_link_parent_identity"](Path(path)) != parent):
+            raise ValueError(f"旧项目链接清理状态偏离 WAL：{path}")
+
+    # Cleanup takes a fresh dynamic inventory after the earlier WAL preflight.
+    # Reject a P-looking link inserted in that interval before prompting or
+    # unlinking any old link, then recheck each row at its actual write edge.
+    for lp in to_del:
+        require_frozen_p_link(lp)
+
     if not to_del:
         return True
 
@@ -3378,6 +3398,7 @@ def _unsetup_previous(proj_dir):
         if _DRY_RUN:
             print(_c(CYAN,  f"  [DRY] 删除 {rel}"))
         else:
+            require_frozen_p_link(lp)
             os.remove(lp)
             print(_c(GREEN, f"  [DEL] {rel}"))
     return True
@@ -4599,6 +4620,13 @@ def _require_setup_switch_wal_prewrite(proj_dir, deployment_lock_descriptor):
         raise ValueError(f"setup 写前活动项目身份无效：{exc}") from exc
     if old_state.project == Path(proj_dir):
         return
+    # Freeze cleanup's P names and their owning directory identities before
+    # verifying the WAL.  The verification below then proves this snapshot
+    # still names WAL-authorized P paths; a later rebind fails at cleanup.
+    frozen_p_links = {
+        str(path): (raw, load_api["_setup_switch_link_parent_identity"](path))
+        for path, raw in old_state.links.items()
+    }
     try:
         outcome = load_api["recover_setup_switch_journal"](
             Path(ZTP) / ".setup-switch-journal.json",
@@ -4628,7 +4656,7 @@ def _require_setup_switch_wal_prewrite(proj_dir, deployment_lock_descriptor):
     infra = plan["infra_logs"]
     if infra["kind"] in ("real-directory", "unsafe") or infra["receipt_pending"]:
         raise ValueError("跨项目 setup WAL 未覆盖 infra logs 实体目录或待恢复凭据")
-    return load_api, deployment_lock_descriptor
+    return load_api, deployment_lock_descriptor, frozen_p_links
 
 
 def setup(proj_dir, *, server_delegated=False, deployment_lock_descriptor=None):

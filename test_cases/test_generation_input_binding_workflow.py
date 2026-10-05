@@ -805,6 +805,44 @@ glob.glob = insert_at_legacy_cleanup
             self.assertEqual(before["common"], os.readlink(common))
             self.assertEqual(before["p_only"], os.readlink(p_only))
 
+    def test_real_setup_wal_retains_generic_cleanup_link_inserted_after_preflight(self):
+        """The actual LOAD→SETUP cleanup cannot delete an unjournaled late P link."""
+        with tempfile.TemporaryDirectory(prefix="r22-real-cleanup-race-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, p, _q, common, p_only, q_only, manifest, before, hook, barrier, _home = fixture
+            late = root / "ztp/config/publickey/late.pub"
+            raw_target = os.path.relpath(p / "operator.pub", late.parent)
+            hook_file = hook / "sitecustomize.py"
+            hook_file.write_text(hook_file.read_text(encoding="utf-8") + """
+import glob
+import inspect
+original_glob_for_cleanup = glob.glob
+def insert_at_generic_cleanup(pattern, *args, **kwargs):
+    late = Path(os.environ['HTTP_TEST_RACE_GENERIC_LINK'])
+    if (pattern == str(late.parent / '*.pub')
+            and any(frame.function == '_unsetup_previous' for frame in inspect.stack())
+            and not os.path.lexists(late)):
+        os.symlink(os.environ['HTTP_TEST_RACE_GENERIC_TARGET'], late)
+    return original_glob_for_cleanup(pattern, *args, **kwargs)
+glob.glob = insert_at_generic_cleanup
+""", encoding="utf-8")
+            with mock.patch.dict(os.environ, {
+                "HTTP_TEST_RACE_GENERIC_LINK": str(late),
+                "HTTP_TEST_RACE_GENERIC_TARGET": raw_target,
+            }):
+                result = self._run_private_load_setup_switch(
+                    fixture, prepare_journal=True,
+                    first_link=root / "never-created-link",
+                )
+            self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn("WAL", result.stdout + result.stderr)
+            self.assertEqual(raw_target, os.readlink(late))
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            self.assertEqual(before["common"], os.readlink(common))
+            self.assertEqual(before["p_only"], os.readlink(p_only))
+            self.assertFalse(os.path.lexists(q_only))
+            self.assertFalse(barrier.exists())
+
     def test_real_setup_wal_refuses_unlisted_fixed_q_repoint_before_write(self):
         """P's fixed link cannot be repointed when its WAL row has no Q value."""
         with tempfile.TemporaryDirectory(prefix="r22-real-fixed-q-hold-") as name:

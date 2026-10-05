@@ -184,6 +184,21 @@ class SetupSwitchPlanContractTests(unittest.TestCase):
                 self.setup._remove_legacy_p2p_links()
         self.assertEqual(original, os.readlink(legacy))
 
+    def test_generic_cleanup_refuses_link_inserted_after_wal_preflight(self) -> None:
+        """A later P-looking link absent from the frozen WAL must survive cleanup."""
+        late = self.root / "ztp/config/publickey/late.pub"
+        late.symlink_to(os.path.relpath(self.p / "p-only.pub", late.parent))
+        raw = os.readlink(late)
+        frozen = {str(self.p_only): (os.readlink(self.p_only), {})}
+        with mock.patch.object(self.setup, "_SETUP_SWITCH_WAL_CONTEXT", ({}, 9, frozen)), \
+             mock.patch.object(self.setup, "_previous_project_links_to_remove", return_value=[str(late)]), \
+             mock.patch.object(self.setup, "_authorize_project_switch", return_value=True), \
+             redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(ValueError, "WAL|frozen|清理"):
+                self.setup._unsetup_previous(str(self.q))
+        self.assertEqual(raw, os.readlink(late))
+        self.assertEqual(os.readlink(self.p_only), frozen[str(self.p_only)][0])
+
     def test_inventory_identifies_real_latest_and_infra_logs_without_migration(self) -> None:
         latest = self.q / "99-output-eth/latest"
         latest.mkdir(parents=True)
