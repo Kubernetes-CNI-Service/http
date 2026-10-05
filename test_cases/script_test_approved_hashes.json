@@ -4,7 +4,7 @@
   "scripts": {
     "DAY0-Prepare/01-a-setup.py": {
       "canonical": "DAY0-Prepare/01-a-setup.py",
-      "sha256": "379bdae44190c2bc98f0115fe3fc80d2f8a6f6cde3f0ed78a0eb7c666bed8453"
+      "sha256": "e4f49a9985764e06a32ce85eddf0f992a74f7d5be145656e563c1c7df35caf6d"
     },
     "DAY0-Prepare/02-unsetup.py": {
       "canonical": "DAY0-Prepare/02-unsetup.py",
@@ -815,7 +815,7 @@
     "test_cases.test_full_flow_integration": "b36d9d5912e8458dcb99a92bf060e346717d0ff950c67086c47b6246a4e3fbbf",
     "test_cases.test_generation_input_binding_activation_contract": "75f6fb0ddc2bebf26560172316ac5a4f2bb0cb860d4a54ccfbc25080f9516760",
     "test_cases.test_generation_input_binding_contract": "0efdb5fe23c5c46b60747681105b3996e8049032b89702aac3003f3ab711eb67",
-    "test_cases.test_generation_input_binding_workflow": "3b74d0c6cce5372101cca55a53e82a41b65f634e0590b43a762f24c2ea402472",
+    "test_cases.test_generation_input_binding_workflow": "d5c8827941bdb0617670994f874c0afad94daca2b6d45b71a7a346fb7f71fe66",
     "test_cases.test_generation_report_contract": "2bd4ba4e4f84c40c3c47a7f1ac8a9296b8be32c7f0b0abb3321c67e90299c494",
     "test_cases.test_generation_report_workflow": "f292f34cc2b7738c60a8b9874cc348c2045a8dfbbdac92b62deefca8dbd8a7f0",
     "test_cases.test_http_port_contract": "9ea7d6ed55a9564c05d6dbab1fad7cfbb82b46b90279f01b5ced7f66469c6839",
@@ -920,7 +920,7 @@
     "test_cases.test_req8_template_refactor_contract": "6a221c6e40dfe7b9f14aa68d44b89ba1963ebcb56d517b99cbb44725622c2c87",
     "test_cases.test_runner_preflight": "9bc720575a1f6206a66d481e3bd7b0f6a8d02b10fe49e4647de4558be8e855c8",
     "test_cases.test_service_endpoint_convergence": "b9c5d9975f400315669f9ee0c76d6ea22fb06a9256d82b85cf21d6ad62307f2a",
-    "test_cases.test_setup_switch_plan_contract": "e21f9cdaade357e9b7eb929ff7be6df50a42e680e2219ccbee0010e8e0d30584",
+    "test_cases.test_setup_switch_plan_contract": "551adbb6ee5eb1053edd7295dca70e129b310a95af4a9cdc5eed89e15effddcc",
     "test_cases.test_shared_artifact_bundle": "d428e11f8daae4ae97aa9a68ed6f4b7b8b02128d999e5d879ebd8df612414db5",
     "test_cases.test_splitter_profile_breakout": "5fe0566fc1a2a6614e8ce19706effe97e9a5b1aea8be56422b2a66bd3b82872f",
     "test_cases.test_splitter_profile_breakout_workflow": "3fa6d32f2df3898ea2c57db18c5b38b8b30e1bedaf123dbc6d88654e24565daf",
