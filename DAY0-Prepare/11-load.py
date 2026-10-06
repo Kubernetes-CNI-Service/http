@@ -8388,6 +8388,7 @@ def mount_and_test_dhcp(
         raise LoadError(f"DHCP 事务目录已存在：{transaction_dir}")
 
     transaction_created = False
+    backup_unconfirmed = False
     restore_incomplete = False
     build_workspace: tempfile.TemporaryDirectory[str] | None = None
     try:
@@ -8451,6 +8452,23 @@ def mount_and_test_dhcp(
                         str(backup_dir / destination.name),
                     )
                 )
+
+        # A successful copy command is not proof of a usable A preimage.
+        # Check every backup (including original absence/links) before the
+        # first B install. Keep an invalid/unknown backup as incident evidence.
+        backup_unconfirmed = True
+        for destination, expected_state in original_states.items():
+            try:
+                backup_state = _dhcp_restore_leaf_state(backup_dir / destination.name)
+            except LoadError as exc:
+                raise LoadError(
+                    f"DHCP A backup verification failed; HOLD: {destination.name}: {exc}"
+                ) from exc
+            if backup_state != expected_state:
+                raise LoadError(
+                    f"DHCP A backup verification failed; HOLD: {destination.name}"
+                )
+        backup_unconfirmed = False
 
         try:
             for source, destination in mappings.items():
@@ -8532,15 +8550,16 @@ def mount_and_test_dhcp(
     finally:
         if build_workspace is not None:
             build_workspace.cleanup()
-        if transaction_created and (restore_incomplete or (
+        if transaction_created and (backup_unconfirmed or restore_incomplete or (
                 parent_candidate is not None and parent_candidate.committed
                 and not parent_candidate.directory_synced)):
-            # Neither a partial A restore nor uncertain visible B may erase
-            # the original backup. Retention alone is not proof of complete
-            # rollback, healthy activation or survival across a power failure.
+            # Invalid backups, partial A restore and uncertain visible B may
+            # not erase incident evidence. Retention alone proves neither
+            # complete rollback, activation nor power-loss durability.
             try:
                 warn(
-                    ("HOLD：DHCP 旧文件恢复未完成；" if restore_incomplete
+                    ("HOLD：DHCP 原 A 备份未验证；" if backup_unconfirmed
+                     else "HOLD：DHCP 旧文件恢复未完成；" if restore_incomplete
                      else "HOLD：B 已可见但目录持久化未确认；")
                     + f"保留 DHCP 事务及 root-only A 备份：{transaction_dir}；"
                     "服务保持停止，须人工核验实际 A/B 状态，不自动回退或清理"

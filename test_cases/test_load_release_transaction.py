@@ -143,7 +143,7 @@ def assert_private_dhcp_transaction_retention(
     candidate = api.prepare_current_release(project, parent_payload)
     parent_identity = candidate.destination.parent.stat()
     real_open, real_sync = os.open, os.fsync
-    injected, warnings, cleanup, restore_phase, sync_events = [], [], [], [], []
+    injected, warnings, cleanup, restore_phase, sync_events, installed_b = [], [], [], [], [], []
 
     def private_destination(value):
         path = Path(value)
@@ -161,6 +161,8 @@ def assert_private_dhcp_transaction_retention(
             if "-d" in command:
                 target.mkdir(parents=True, exist_ok=True)
             else:
+                if target in mappings.values():
+                    installed_b.append(target)
                 if target.is_symlink():
                     target.unlink()
                 shutil.copy2(command[-2], target)
@@ -173,6 +175,16 @@ def assert_private_dhcp_transaction_retention(
                     raise OSError("independent A restore copy fault")
                 return SimpleNamespace(returncode=1)
             shutil.copy2(command[-2], target, follow_symlinks=False)
+            if (outcome in {"backup-bytes", "backup-mode", "backup-link"}
+                    and target.parent.name == "backup" and target.name == "dhcpd_eth.hosts"):
+                injected.append(outcome)
+                if outcome == "backup-bytes":
+                    target.write_bytes(b"independent unaccepted backup bytes\n")
+                elif outcome == "backup-mode":
+                    target.chmod(0o600)
+                else:
+                    target.unlink()
+                    target.symlink_to("independent-absent-backup-source")
             if (outcome in {"restore-bytes", "restore-mode", "restore-link"}
                     and target == live_dir / "dhcpd_eth.hosts"):
                 injected.append(outcome)
@@ -225,6 +237,10 @@ def assert_private_dhcp_transaction_retention(
         return real_sync(descriptor)
 
     def open_parent(path, flags, *args, **kwargs):
+        if outcome == "backup-read" and isinstance(path, (str, os.PathLike)) \
+                and Path(path).parent.name == "backup" and Path(path).name == "dhcpd_eth.hosts":
+            injected.append(outcome)
+            raise PermissionError("independent backup read refusal")
         if outcome == "restore-dir-open" and restore_phase and isinstance(path, (str, os.PathLike)) \
                 and Path(path) == live_dir and flags & os.O_DIRECTORY:
             injected.append(outcome)
@@ -265,11 +281,46 @@ def assert_private_dhcp_transaction_retention(
                     assert "DHCP A restore verification failed" in str(exc), str(exc)
                 elif outcome in {"restore-file-sync", "restore-dir-open", "restore-dir-sync"}:
                     assert "DHCP A restore durability unconfirmed" in str(exc), str(exc)
+                elif outcome in {"backup-bytes", "backup-mode", "backup-link", "backup-read"}:
+                    assert "DHCP A backup verification failed" in str(exc), str(exc)
                 else:
                     raise
             else:
                 assert outcome == "success", "failure must propagate before service continuation"
         transactions = list(live_dir.glob(".load-dhcp-transaction-*"))
+        if outcome in {"backup-bytes", "backup-mode", "backup-link", "backup-read"}:
+            assert injected == [outcome], injected
+            assert installed_b == [], "bad A backup must reject before the first B install"
+            assert not candidate.committed and not candidate.directory_synced
+            assert not candidate.destination.exists()
+            assert {name: (live_dir / name).read_bytes() for name in names} == expected_a
+            assert len(transactions) == 1, "bad A backup is retained evidence, not cleanup authority"
+            transaction, = transactions
+            backup = transaction / "backup"
+            assert stat.S_IMODE(backup.stat().st_mode) == 0o700
+            bad_backup = backup / "dhcpd_eth.hosts"
+            if outcome == "backup-bytes":
+                assert bad_backup.read_bytes() == b"independent unaccepted backup bytes\n"
+            elif outcome == "backup-mode":
+                assert bad_backup.read_bytes() == expected_a["dhcpd_eth.hosts"]
+                assert stat.S_IMODE(bad_backup.lstat().st_mode) == 0o600
+            elif outcome == "backup-link":
+                assert os.readlink(bad_backup) == "independent-absent-backup-source"
+            else:
+                assert bad_backup.read_bytes() == expected_a["dhcpd_eth.hosts"]
+            for name in ("dhcpd.conf", "dhcpd_ib.hosts", "dhcpd_nvl.hosts"):
+                assert (backup / name).read_bytes() == expected_a[name]
+            assert {p.name for p in (transaction / "staged").iterdir()} == set(names)
+            assert not cleanup, "unverified backups must not be silently erased"
+            assert any("HOLD" in warning and str(transaction) in warning for warning in warnings)
+            assert not any("手工删除" in warning for warning in warnings)
+            try:
+                api.require_no_pending_dhcp_transaction(live_dir)
+            except api.LoadError as exc:
+                assert "pending DHCP transaction" in str(exc), str(exc)
+            else:
+                raise AssertionError("bad backup evidence failed to fence a fresh LOAD")
+            return
         if outcome == "precommit-shapes":
             assert not candidate.committed and not candidate.directory_synced
             assert not candidate.destination.exists()
@@ -6475,6 +6526,13 @@ os.kill(os.getpid(), signal.SIGKILL)
 
     def test_verified_dhcp_a_restore_sync_failure_retains_evidence(self) -> None:
         for boundary in ("restore-file-sync", "restore-dir-open", "restore-dir-sync"):
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as name:
+                root, project = Path(name), Path(name) / "project"
+                project.mkdir()
+                assert_private_dhcp_transaction_retention(LOAD, root, project, boundary)
+
+    def test_unverified_dhcp_a_backup_rejects_before_first_b_install(self) -> None:
+        for boundary in ("backup-bytes", "backup-mode", "backup-link", "backup-read"):
             with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as name:
                 root, project = Path(name), Path(name) / "project"
                 project.mkdir()

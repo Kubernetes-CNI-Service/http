@@ -384,6 +384,49 @@ size 117203，SHA256
 完整身份和字节未改；这不是整个 generation workflow 模块或正式 related/full，
 该源候选仍未批准，不称 R22 整体正式落地。
 
+### R22 DHCP A backup 读回必须在首个 B install 前完成候选
+
+前一算法只确认 cp 命令返回，没有核备份与初始 A 预像，就覆盖 A 并正常提交 B。
+新 independent direct 与真实 SETUP→实际 LOAD 安装 API workflow 在备份复制返回
+0 后分别注入错误字节、0644→0600 模式、regular→悬空链接；原实现三个分支均
+成功返回并清理事务，2 tests / 6 FAIL / exit1 的独立拒绝断言稳定失败。原日志
+`outputs/test-diagnostics/r22-dhcp-backup-prewrite-red.log`，inode 145919750，size 7513，
+SHA256 `b607fcc374fcd58d5128c5e4f8420b1623d5a2f7a024be884aac99c155ffcca2`。
+
+候选只在备份命令全部结束后、第一条 B install 之前，读回所有原 A backup 与
+初始 leaf 预像比较，原缺席也必须在备份空间缺席。读取失败或类型/内容/元数据不符
+时保留 backup 未验证标志，以 LoadError/HOLD 留存 0700 backup/staged/事务，
+原 A 四文件不变、零 B install、parent 未提交；不把错误备份当作完整 A，也不
+授权清理。新进程残留事务闸门继续拒绝。已验证备份的正常成功、完整恢复以及旧
+链接/原缺席恢复继续走原合同。新两项与原四项共 6 tests / OK / exit0（38.212 秒），
+日志 `r22-dhcp-backup-prewrite-green.log`，inode 145948236，size 1412，SHA256
+`af5c56bf8957d52da8018cd795833330923f227ff5649e563be91b9c39d1d1e9`。
+追加 backup held-FD 打开 PermissionError 负例，原断言保持，direct/workflow 的
+四类备份分支共 2 tests / OK / exit0（46.076 秒），完整日志
+`r22-dhcp-backup-prewrite-read-negative.log`，inode 145983403，size 511，SHA256
+`9d7abc046de71c88eda362a6ab7f38ee44b6e911829a5b744a8d579f8b470172`。
+均核物理完整 Ran/OK/FAILED/footer、读前后 stat/inode 稳定和实际 exec 退出码。
+
+这只是第一次 B 覆盖前的字段集读回，不是原子 compare-and-write、完整 backup
+WAL/receipt、备份文件/目录 fsync、掉电见证、备份之后的同 UID 篡改免疫、完整
+root 入口、B 成功退休或旧 A 显式健康激活。排他锁与其它写者静默仍为前提。
+manifest 的 LOAD direct 和实际 SETUP/LOAD workflow 映射仍有效，REAL_ENV 继续
+OPEN。原 bootstrap/REQ19 超时原因仍待核；诊断 PASS 不解除 related/full 闸门，
+不手改 ledger，不套上一个源候选或历史 full proof。
+
+最终候选的完整 LOAD transaction、完整 DHCP optional workflow 模块，加八项
+明确选择的真实 SETUP→LOAD workflow，共 340 tests / OK / exit0（202.083 秒）。
+完整日志 `outputs/test-diagnostics/r22-dhcp-backup-prewrite-load-workflows.log`，
+inode 146018409，size 117572，SHA256
+`7f770b0690c7fa56c9673c2dcd7fac552870ae29231c87cb53d498023ac70a7e`；
+读前后 stat/inode 一致，运行中 61231 字节旧前缀 SHA256
+`98ec4598a3643159d3690fe7c0f5bf42e361a444f64e5105de03840cbfc885cf` 未变。
+物理第 1093 行 Ran、1095 行 OK、原 fixture 缓冲 stdout 后第 1183 行完整
+`R22_DHCP_BACKUP_PREWRITE_LOAD_WORKFLOWS_EXIT=0` 与实际 exec exit0 一致。
+运行期间源码/测试/文档冻结，前后完整身份/字节复核一致，approved ledger、
+manifest 与运行态 setup manifest 未改。该诊断不是整个 generation workflow
+模块或正式 related/full，不是性能验收，源候选仍未批准，R22 整体继续 OPEN。
+
 ### R22 未结清 DHCP 事务的新进程写前闸门候选
 
 内存候选重入闸门不能保护新 LOAD。独立新候选 direct 和真实 SETUP→父 B

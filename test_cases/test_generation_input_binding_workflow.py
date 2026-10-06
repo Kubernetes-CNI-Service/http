@@ -1989,6 +1989,12 @@ finally:
             reenter=False, outcomes=("restore-file-sync", "restore-dir-open", "restore-dir-sync"),
         )
 
+    def test_real_setup_then_unverified_dhcp_a_backup_blocks_first_b_install(self):
+        """An exit0 copy with a wrong backup cannot authorize overwriting A."""
+        self._real_setup_uncertain_parent_dhcp_evidence(
+            reenter=False, outcomes=("backup-bytes", "backup-mode", "backup-link", "backup-read"),
+        )
+
     def _real_setup_uncertain_parent_dhcp_evidence(
         self, *, reenter, cold=False, outcomes=("open", "fsync"),
     ):
