@@ -219,6 +219,45 @@ inode 144208691，size 616，SHA256
 后代状态仍 unknown，不能据此放行正式 related/full 或称 R22 恢复完成。approved ledger
 保持原字节，Linux/断电、完整写集、显式旧 A 健康激活及其它未闭项不变。
 
+### R22 父 B 可见但目录同步失败的 HOLD 候选
+
+`commit_prepared_release` 原实现忽略 parent directory open 错误，并把 fsync
+失败仅写为 warning；B 已 replace 后仍向调用方返回成功。两个 direct 与真实
+SETUP→父 LOAD 提交 API→新 LOAD 冷恢复 workflow 独立要求报错、不进入后续
+成功步骤、保留可见 B/Q manifest/链接/WAL，拒绝 P 冷回退。原实现 4 tests /
+4 FAIL / exit1（workflow 有两个故障 subtest，另含健康同步正例），完整日志
+`outputs/test-diagnostics/r22-parent-visible-sync-red.log`，inode 145226743，size
+5082，SHA256 `97887b2f9abf1e786ab6e44d80a3b58dd199a0e14e257c4f0782c325fff0f525`。
+候选保持 `committed=True` 表示可见 B，新增 `directory_synced` 区分成功；
+open/fsync 失败传播 LoadError，重复调用同一未确认候选保持 HOLD。main 的
+失败清理应停服、不还原 P 链接/旧 prefix、不提交报告/选择器，状态文字不能
+冒称持久提交成功。该独立 main 断言先 RED（1 test / 1 FAIL / exit1），日志
+`r22-parent-visible-main-state-red.log`，inode 145240494，size 2785，SHA256
+`f49588c606b380742f85dc0b7d2f84d8eadbbbc301687953b2abf20fca32f569`，随后修正提示。
+
+最终 scoped direct/main/workflow 及原健康 SETUP→parent commit 正例 6 tests /
+OK / exit0（15.333 秒）；完整日志 `r22-parent-visible-sync-main-green.log`，
+inode 145241002，size 2404，SHA256
+`651e95af1980fa47a24c10d1072fb7d79eff9c8db643e484c7b22f3acf40dd03`。各日志读取
+前后 stat 一致，完整 Ran/FAILED 或 OK 与物理退出标记/实际 exec exit 相符。
+manifest 原 LOAD direct `day0_release_operations` 和真实多脚本
+`generation_input_binding_setup_load_c2` 映射保留。workflow 的 B marker 是独立
+最小 payload，main 运行平台/服务接口是受控替身；不声称真实根入口、完整 B
+schema 或服务验证。此修复不实现父 B 健康成功收口/可重入退休 WAL，亦不解除
+原 bootstrap 15 秒、REQ19 probe 10 秒原因 unknown 的正式 related/full 重试门禁；
+approved ledger 不手改，Linux/断电、旧 A 显式激活及 DEV ACK 仍 OPEN。
+
+两个完整 LOAD transaction / generation-input-binding workflow 模块及其正常导入
+用例诊断为 352 tests / OK / exit0（228.248 秒）。完整日志
+`outputs/test-diagnostics/r22-parent-visible-sync-modules.log`，inode 145251175，
+size 115733，SHA256 `3311ac49a7b60fcda798dc084f5621bbc6ec0d6f494f88c947bdf263a765f69d`；
+读前后 stat 一致，运行中已核 100169 字节旧前缀 SHA256
+`be6b34da2871f51b5a2cb55b93ca5873e380a2b80ee4ffc0fdcab4a097b6133d` 保持不变。
+物理第 1101 行 Ran、1103 行 OK，经过原用例缓冲 stdout 后第 1113 行
+`R22_PARENT_VISIBLE_SYNC_MODULES_EXIT=0`，实际 exec exit0。源/测试运行期间未改，
+manifest、approved ledger 和运行态 setup manifest 原字节未变。这是局部完整模块
+诊断，不是 related runner、正式 full/check 或 R22 整体验收。
+
 ### R22 materialized latest 临时链接写集候选
 
 实体 latest 迁移原先未登记 `.latest.tmp.<PID>`，创建临时链接后死亡时冷恢复会

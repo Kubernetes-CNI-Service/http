@@ -1953,6 +1953,117 @@ finally:
             self.assertEqual(payload, parent.with_name("operator-retained-parent.json").read_bytes())
             self.assertFalse((root / "service-started").exists())
 
+    def test_real_setup_parent_visible_sync_failure_stops_success_and_cold_p_rollback(self):
+        """A visible B with unconfirmed directory durability is HOLD, not A rollback."""
+        for boundary in ("open", "fsync"):
+            with self.subTest(boundary=boundary), \
+                    tempfile.TemporaryDirectory(prefix="r22-parent-visible-sync-") as name:
+                fixture = self._private_setup_switch_fixture(Path(name))
+                root, _p, q, common, _p_only, _q_only, manifest, before, _hook, _barrier, _home = fixture
+                for relative in ("tools/lldp-analyze-tool/99-output-p2p",
+                                 "tools/lldp-analyze-tool/99-output-monitor",
+                                 "tools/ibdiagnet-analyze-tool/99-output-p2p"):
+                    path = root / relative
+                    if path.is_dir() and not path.is_symlink():
+                        shutil.rmtree(path)
+                first = self._run_private_load_setup_switch(
+                    fixture, prepare_journal=False, auto_prepare_journal=True,
+                    first_link=root / "never-created-link",
+                )
+                self.assertEqual(25, first.returncode, first.stdout + first.stderr)
+                q_manifest, q_link = manifest.read_bytes(), os.readlink(common)
+                self.assertNotEqual(before["manifest"], q_manifest)
+                journal = root / "ztp/.setup-switch-journal.json"
+                wal = journal.read_bytes()
+                operation = """
+import importlib.util, os, stat, sys
+from pathlib import Path
+root, q = map(Path, sys.argv[1:3])
+boundary = sys.argv[3]
+spec = importlib.util.spec_from_file_location('visible_parent_sync_writer', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+parent = q / '99-output-ztp/current-release.json'
+parent.parent.mkdir(exist_ok=True)
+temporary = parent.with_name('.independent-parent-B.json')
+payload = b'{"release_id":"independent-Q-B"}\\n'
+with temporary.open('wb') as stream:
+    stream.write(payload)
+    stream.flush()
+    os.fsync(stream.fileno())
+candidate = load.PreparedParentRelease(parent, temporary, 'independent-Q-B')
+descriptor = load.acquire_deployment_lock(exclusive=True)
+real_open, real_sync = os.open, os.fsync
+injected = []
+def fail_open(path, flags, *args, **kwargs):
+    if boundary == 'open' and Path(path) == parent.parent:
+        injected.append('open')
+        raise OSError('independent directory open failure')
+    return real_open(path, flags, *args, **kwargs)
+def fail_sync(fd):
+    metadata = os.fstat(fd)
+    if boundary == 'fsync' and stat.S_ISDIR(metadata.st_mode) and metadata.st_ino == parent.parent.stat().st_ino:
+        injected.append('fsync')
+        raise OSError('independent directory sync failure')
+    return real_sync(fd)
+os.open, os.fsync = fail_open, fail_sync
+try:
+    try:
+        load.commit_prepared_release(candidate)
+        (root / 'service-started').write_bytes(b'UNEXPECTED SUCCESS CONTINUATION')
+    except load.LoadError as exc:
+        assert '持久化' in str(exc) and '未确认' in str(exc), str(exc)
+    else:
+        raise AssertionError('unconfirmed parent durability was reported as success')
+    assert candidate.committed and parent.read_bytes() == payload
+    assert injected == [boundary], injected
+finally:
+    os.open, os.fsync = real_open, real_sync
+    load.release_deployment_lock(descriptor)
+"""
+                second = subprocess.run(
+                    [sys.executable, "-B", "-c", operation, str(root), str(q), boundary],
+                    cwd=root, capture_output=True, text=True, check=False, timeout=30,
+                )
+                self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+                self.assertFalse((root / "service-started").exists())
+                recovery = """
+import importlib.util, sys
+from pathlib import Path
+from types import SimpleNamespace
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('visible_parent_sync_cold_load', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    try:
+        load.recover_setup_switch_journal(
+            root / 'ztp/.setup-switch-journal.json', deployment_lock_descriptor=descriptor,
+            services_quiesced=True, runtime_backend=SimpleNamespace(name='supervisor'),
+        )
+    except load.LoadError as exc:
+        assert 'Q parent' in str(exc), str(exc)
+    else:
+        raise AssertionError('visible B licensed P rollback after sync failure')
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+                third = subprocess.run(
+                    [sys.executable, "-B", "-c", recovery, str(root)],
+                    cwd=root, capture_output=True, text=True, check=False, timeout=30,
+                )
+                self.assertEqual(0, third.returncode, third.stdout + third.stderr)
+                self.assertEqual(q_manifest, manifest.read_bytes())
+                self.assertEqual(q_link, os.readlink(common))
+                self.assertEqual(wal, journal.read_bytes())
+                self.assertEqual(b'{"release_id":"independent-Q-B"}\n',
+                                 (q / "99-output-ztp/current-release.json").read_bytes())
+                self.assertFalse((root / "service-started").exists())
+
     def test_real_setup_then_parent_commit_cannot_cold_restore_p(self):
         """Actual Q parent replace must revoke the old P rollback authority."""
         with tempfile.TemporaryDirectory(prefix="r22-q-parent-commit-") as name:

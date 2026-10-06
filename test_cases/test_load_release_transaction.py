@@ -1137,6 +1137,21 @@ class ReleaseTransactionTests(unittest.TestCase):
                     lifecycle_events.append("dhcp-transaction")
                 if failure_at == "dhcp":
                     raise failure
+                if failure_at == "parent_sync":
+                    parent_identity = candidate.destination.parent.stat()
+                    real_fsync = LOAD.os.fsync
+
+                    def fail_parent_sync(descriptor):
+                        identity = os.fstat(descriptor)
+                        if (identity.st_dev, identity.st_ino) == (
+                            parent_identity.st_dev, parent_identity.st_ino,
+                        ):
+                            raise failure
+                        return real_fsync(descriptor)
+
+                    with mock.patch.object(LOAD.os, "fsync", side_effect=fail_parent_sync):
+                        LOAD.commit_prepared_release(candidate)
+                    self.fail("unconfirmed parent durability must not return success")
                 candidate.committed = True
 
             stack.enter_context(mock.patch.object(
@@ -1161,7 +1176,7 @@ class ReleaseTransactionTests(unittest.TestCase):
                 result = LOAD.main([] if argv is None else argv)
             except BaseException as exc:  # Assert propagation after cleanup below.
                 caught = exc
-            if failure_at in {"dhcp", "template"}:
+            if failure_at in {"dhcp", "template", "parent_sync"}:
                 report_commit.assert_not_called()
             else:
                 report_commit.assert_called_once_with(staged_report)
@@ -5049,6 +5064,75 @@ os.kill(os.getpid(), signal.SIGKILL)
             )
         self.assertFalse((self.project / "99-output-ztp/current").exists())
 
+    def _assert_parent_visible_commit_sync_failure_is_not_success(self, boundary):
+        parent = self.project / "99-output-ztp/current-release.json"
+        parent.parent.mkdir(parents=True, exist_ok=True)
+        parent.write_bytes(b'{"release_id":"independent-A"}\n')
+        temporary = parent.with_name(".independent-parent-B.json")
+        payload = b'{"release_id":"independent-B"}\n'
+        temporary.write_bytes(payload)
+        candidate = LOAD.PreparedParentRelease(parent, temporary, "independent-B")
+        original_open, original_sync = os.open, os.fsync
+        parent_inode = parent.parent.stat().st_ino
+        injected = []
+
+        def fail_open(path, flags, *args, **kwargs):
+            if boundary == "open" and Path(path) == parent.parent:
+                injected.append("open")
+                raise OSError("independent parent directory open fault")
+            return original_open(path, flags, *args, **kwargs)
+
+        def fail_sync(descriptor):
+            metadata = os.fstat(descriptor)
+            if boundary == "fsync" and stat.S_ISDIR(metadata.st_mode) and metadata.st_ino == parent_inode:
+                injected.append("fsync")
+                raise OSError("independent parent directory fsync fault")
+            return original_sync(descriptor)
+
+        with mock.patch.object(LOAD.os, "open", side_effect=fail_open), \
+             mock.patch.object(LOAD.os, "fsync", side_effect=fail_sync):
+            with self.assertRaisesRegex(LOAD.LoadError, "持久化.*未确认"):
+                LOAD.commit_prepared_release(candidate)
+        self.assertEqual([boundary], injected)
+        self.assertTrue(candidate.committed, "visible B must not be described as uncommitted A")
+        self.assertEqual(payload, parent.read_bytes())
+        self.assertFalse(os.path.lexists(temporary))
+        LOAD.discard_prepared_release(candidate)
+        self.assertEqual(payload, parent.read_bytes(), "cleanup must retain visible B")
+        with self.assertRaisesRegex(LOAD.LoadError, "持久化.*未确认"):
+            LOAD.commit_prepared_release(candidate)
+
+    def test_parent_visible_commit_directory_open_failure_remains_hold(self):
+        self._assert_parent_visible_commit_sync_failure_is_not_success("open")
+
+    def test_parent_visible_commit_directory_fsync_failure_remains_hold(self):
+        self._assert_parent_visible_commit_sync_failure_is_not_success("fsync")
+
+    def test_parent_visible_commit_success_returns_only_after_directory_sync(self):
+        parent = self.project / "99-output-ztp/current-release.json"
+        parent.parent.mkdir(parents=True, exist_ok=True)
+        temporary = parent.with_name(".independent-parent-B.json")
+        payload = b'{"release_id":"independent-B"}\n'
+        temporary.write_bytes(payload)
+        candidate = LOAD.PreparedParentRelease(parent, temporary, "independent-B")
+        events = []
+        real_sync = os.fsync
+
+        def observe_sync(descriptor):
+            self.assertTrue(stat.S_ISDIR(os.fstat(descriptor).st_mode))
+            self.assertEqual(payload, parent.read_bytes())
+            self.assertTrue(candidate.committed)
+            events.append("parent-synced")
+            return real_sync(descriptor)
+
+        with mock.patch.object(LOAD.os, "fsync", side_effect=observe_sync), \
+             mock.patch.object(LOAD, "ok", side_effect=lambda *args: events.append("success")):
+            self.assertEqual(parent, LOAD.commit_prepared_release(candidate))
+        self.assertEqual(["parent-synced", "success"], events)
+        with mock.patch.object(LOAD.os, "replace", side_effect=AssertionError("second replace")), \
+             mock.patch.object(LOAD.os, "fsync", side_effect=AssertionError("second sync")):
+            self.assertEqual(parent, LOAD.commit_prepared_release(candidate))
+
     def test_parent_binds_source_and_effective_inventory_independently(self) -> None:
         private = Path(tempfile.mkdtemp(prefix=".load-inventory-", dir=self.project))
         derived = private / "02-devices_config.csv"
@@ -7196,6 +7280,38 @@ os.kill(os.getpid(), signal.SIGKILL)
 
         self.assertEqual(1, result)
         self.assertLess(events.index("freeze-a"), events.index("template-mutation"))
+
+    def test_main_visible_parent_sync_failure_stops_without_claiming_durable_commit(self) -> None:
+        stderr = io.StringIO()
+        with mock.patch.object(LOAD, "preflight_services") as preflight, \
+                mock.patch.object(LOAD, "start_services") as start, \
+                mock.patch.object(LOAD, "commit_pinned_generation") as select, \
+                redirect_stderr(stderr):
+            result, caught, candidate, quiesce, restore_links, restore_prefix, \
+                release_lock, _backend, _plan = self._exercise_main_transaction_failure(
+                    OSError("independent main parent directory sync fault"),
+                    failure_at="parent_sync",
+                )
+
+        self.assertEqual(1, result)
+        self.assertIsNone(caught)
+        self.assertTrue(candidate.committed)
+        self.assertFalse(candidate.directory_synced)
+        self.assertEqual(
+            {"schema_version": 1, "release_id": "failure-candidate"},
+            json.loads(candidate.destination.read_text(encoding="utf-8")),
+        )
+        self.assertFalse(candidate.temporary.exists())
+        self.assertEqual(2, quiesce.call_count)
+        restore_links.assert_not_called()
+        restore_prefix.assert_not_called()
+        release_lock.assert_called_once_with(91)
+        preflight.assert_not_called()
+        start.assert_not_called()
+        select.assert_not_called()
+        self.assertIn("[STATE] release B 已可见，目录持久化未确认", stderr.getvalue())
+        self.assertNotIn("[STATE] release 已提交", stderr.getvalue())
+        self.assertNotIn("未提交 release 的发布状态已回滚", stderr.getvalue())
 
     def test_main_selects_b_after_report_before_service_preflight(self) -> None:
         events: list[str] = []

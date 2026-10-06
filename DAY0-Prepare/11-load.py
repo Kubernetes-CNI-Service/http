@@ -657,6 +657,7 @@ class PreparedParentRelease:
     dhcp_manifest_sha256: str | None = None
     dhcp_source_dir: Path | None = None
     precommit_check: Callable[[], None] | None = None
+    directory_synced: bool = False
 
 
 @dataclass(frozen=True)
@@ -8310,10 +8311,10 @@ def mount_and_test_dhcp(
                 commit_prepared_release(parent_candidate)
         except BaseException:
             if parent_candidate is not None and parent_candidate.committed:
-                # Nothing runs after the atomic replace inside the try block;
-                # this branch is defensive against future refactors.  Rolling
-                # DHCP back after advertising the new parent would create the
-                # inverse split-brain and is therefore forbidden.
+                # Directory fsync can fail after the atomic parent replace.
+                # Keep visible B and installed B DHCP together, but propagate
+                # the HOLD before any service start. Rolling DHCP back behind
+                # the new parent would create the inverse split-brain.
                 raise
             warn("DHCP 安装或最终语法检查失败；正在恢复本次操作前的四个文件")
             restore_errors = []
@@ -9624,6 +9625,11 @@ def _recheck_prepared_splitter_provenance(candidate: PreparedParentRelease) -> N
 def commit_prepared_release(candidate: PreparedParentRelease) -> Path:
     """Commit an already-fsynced parent candidate with one atomic replace."""
     if candidate.committed:
+        if not candidate.directory_synced:
+            raise LoadError(
+                "current-release B 已可见，但目录持久化仍未确认；HOLD，"
+                "保留 B 与原凭据，不得假报成功、自动回退或启动服务"
+            )
         return candidate.destination
     authority = candidate.generated_inventory
     if authority is not None:
@@ -9673,22 +9679,25 @@ def commit_prepared_release(candidate: PreparedParentRelease) -> Path:
         candidate.precommit_check()
     os.replace(candidate.temporary, candidate.destination)
     candidate.committed = True
-    # fsync the containing directory so the rename itself survives a crash.
+    # Visibility and confirmed persistence are distinct. A sync failure must
+    # propagate while committed remains True, so outer cleanup stops services
+    # without restoring A behind an already externally visible B marker.
     try:
-        descriptor = os.open(candidate.destination.parent, os.O_RDONLY)
-    except OSError:
-        descriptor = None
-    if descriptor is not None:
+        descriptor = os.open(
+            candidate.destination.parent,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
         try:
-            try:
-                os.fsync(descriptor)
-            except OSError as exc:
-                # The atomic replace is already externally visible.  Report
-                # the durability warning without pretending the commit failed
-                # and rolling another component back behind its marker.
-                warn(f"current-release 目录 fsync 失败（原子提交已完成）：{exc}")
+            os.fsync(descriptor)
         finally:
             os.close(descriptor)
+    except OSError as exc:
+        raise LoadError(
+            f"current-release B 已可见，但目录持久化未确认：{exc}；HOLD，"
+            "保留 B 与原凭据，不得自动回退或启动服务"
+        ) from exc
+    candidate.directory_synced = True
     try:
         ok(
             f"统一 release {candidate.release_id} 已提交：{candidate.destination}"
@@ -12949,10 +12958,17 @@ def main(
                     file=sys.stderr,
                 )
             elif release_committed:
-                print(
-                    "[STATE] release 已提交，但受管服务因后续失败保持停止",
-                    file=sys.stderr,
-                )
+                if parent_candidate is not None and not parent_candidate.directory_synced:
+                    print(
+                        "[STATE] release B 已可见，目录持久化未确认；"
+                        "HOLD，受管服务保持停止，不自动回退 A",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(
+                        "[STATE] release 已提交，但受管服务因后续失败保持停止",
+                        file=sys.stderr,
+                    )
         rerun = sudo_command(
             sys.executable, str(Path(__file__).resolve()), *requested_argv,
         )
