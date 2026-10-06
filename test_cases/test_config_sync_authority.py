@@ -14,6 +14,129 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSyncAuthorityTests(unittest.TestCase):
+    def bound_reader(self):
+        reader = getattr(self.authority, "read_current_receipt", None)
+        self.assertTrue(callable(reader), "observers must authenticate the current receipt under its local generation lock")
+        return reader
+
+    def publish_read_fixture(self):
+        ticket = self.begin()
+        receipt = self.receipt_v1(source_identity=ticket["source_identity"])
+        path = self.root / "run-1/leaf1/result.json"
+        path.parent.mkdir(parents=True, mode=0o700)
+        path.write_text(json.dumps(receipt) + "\n", encoding="ascii")
+        path.chmod(0o600)
+        self.authority.finish(self.root, ticket, receipt)
+        return path, receipt
+
+    def test_current_receipt_reader_is_read_only_and_cannot_reuse_an_old_generation(self):
+        path, receipt = self.publish_read_fixture()
+        raw, metadata = path.read_bytes(), path.stat()
+        reader = self.bound_reader()
+        self.assertEqual(receipt, reader(self.root, "leaf1", path))
+        self.assertEqual((raw, metadata.st_ino), (path.read_bytes(), path.stat().st_ino))
+        next_ticket = self.begin("operation-2", "trigger-2")
+        self.assertEqual(2, next_ticket["generation"])
+        self.assertIsNone(reader(self.root, "leaf1", path))
+        self.assertEqual(raw, path.read_bytes())
+        self.authority.revoke(self.root, "leaf1")
+        self.assertIsNone(reader(self.root, "leaf1", path))
+
+    def test_current_receipt_reader_rejects_unsafe_images_and_retains_exact_bytes(self):
+        path, receipt = self.publish_read_fixture()
+        reader = self.bound_reader()
+        original = path.read_bytes()
+        for mode in (0o644, 0o666):
+            with self.subTest(mode=mode):
+                path.chmod(mode)
+                with self.assertRaises(self.authority.AuthorityError):
+                    reader(self.root, "leaf1", path)
+                self.assertEqual(original, path.read_bytes())
+        path.chmod(0o600)
+        for raw in (b'{"schema_version":1,"schema_version":1}\n',
+                    json.dumps({**receipt, "live_state_sha256": "b" * 64}).encode("ascii")):
+            with self.subTest(raw=raw[:50]):
+                path.write_bytes(raw)
+                with self.assertRaises(self.authority.AuthorityError):
+                    reader(self.root, "leaf1", path)
+                self.assertEqual(raw, path.read_bytes())
+        path.write_bytes(original)
+        foreign = self.root / "foreign.json"
+        foreign.write_bytes(original)
+        foreign.chmod(0o600)
+        path.unlink()
+        path.symlink_to(foreign)
+        with self.assertRaises(self.authority.AuthorityError):
+            reader(self.root, "leaf1", path)
+        self.assertTrue(path.is_symlink())
+        self.assertEqual(original, foreign.read_bytes())
+
+    def test_current_receipt_reader_rechecks_the_named_parent_after_read(self):
+        path, _receipt = self.publish_read_fixture()
+        reader = self.bound_reader()
+        original_read = self.authority._read
+        moved = path.parent.with_name("isolated-old-parent")
+        changed = []
+        def rebind_after_read(descriptor, name, *args, **kwargs):
+            raw = original_read(descriptor, name, *args, **kwargs)
+            if name == "result.json" and not changed:
+                path.parent.rename(moved)
+                path.parent.mkdir(mode=0o700)
+                changed.append(True)
+            return raw
+        with mock.patch.object(self.authority, "_read", side_effect=rebind_after_read):
+            with self.assertRaises(self.authority.AuthorityError):
+                reader(self.root, "leaf1", path)
+        self.assertEqual([True], changed)
+        self.assertTrue((moved / "result.json").is_file())
+        self.assertEqual([], list(path.parent.iterdir()))
+
+    def test_current_receipt_reader_rechecks_the_image_after_decode_boundary(self):
+        path, _receipt = self.publish_read_fixture()
+        reader = self.bound_reader()
+        original_read = self.authority._read
+        changed = []
+        altered = b'{"state":"failed","reason":"new image after read"}\n'
+        def alter_after_read(descriptor, name, *args, **kwargs):
+            raw = original_read(descriptor, name, *args, **kwargs)
+            if name == "result.json" and not changed:
+                path.write_bytes(altered)
+                changed.append(True)
+            return raw
+        with mock.patch.object(self.authority, "_read", side_effect=alter_after_read):
+            with self.assertRaises(self.authority.AuthorityError):
+                reader(self.root, "leaf1", path)
+        self.assertEqual([True], changed)
+        self.assertEqual(altered, path.read_bytes())
+
+    def test_current_receipt_reader_rejects_outside_and_noncanonical_paths_without_creating_state(self):
+        path, receipt = self.publish_read_fixture()
+        reader = self.bound_reader()
+        journal = self.authority.read_current(self.root, "leaf1")
+        for candidate in (self.root.parent / "outside/result.json", self.root / "../run-1/leaf1/result.json",
+                          self.root / "run-1/foreign/result.json", self.root / "run-1/leaf1/summary.json"):
+            with self.subTest(path=candidate):
+                with self.assertRaises(self.authority.AuthorityError):
+                    reader(self.root, "leaf1", candidate)
+        self.assertEqual(journal, self.authority.read_current(self.root, "leaf1"))
+        self.assertEqual(receipt, json.loads(path.read_bytes()))
+
+    def test_current_receipt_reader_accepts_independent_full_wire_budget_and_rejects_degenerate_bound(self):
+        path, receipt = self.publish_read_fixture()
+        raw = path.read_bytes()
+        maximum = b" " * (16384 - len(raw)) + raw
+        self.assertEqual(16384, len(maximum))
+        path.write_bytes(maximum)
+        reader = self.bound_reader()
+        self.assertEqual(receipt, reader(self.root, "leaf1", path))
+        with mock.patch.object(self.authority, "RECEIPT_MAX_BYTES", 16383):
+            with self.assertRaises(self.authority.AuthorityError):
+                reader(self.root, "leaf1", path)
+        path.write_bytes(b" " + maximum)
+        with self.assertRaises(self.authority.AuthorityError):
+            reader(self.root, "leaf1", path)
+        self.assertEqual(b" " + maximum, path.read_bytes())
+
     @staticmethod
     def receipt_v1(**updates):
         value = {

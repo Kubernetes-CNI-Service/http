@@ -24,6 +24,18 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
+    def test_real_writer_receipt_is_readable_only_in_its_current_local_generation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            receipt, produced = self.published_receipt(Path(directory).resolve())
+            authority = self.manual.config_sync_authority
+            root = receipt.parents[2]
+            original, inode = receipt.read_bytes(), receipt.stat().st_ino
+            self.assertEqual(produced, authority.read_current_receipt(root, "EXAMPLE-Leaf01", receipt))
+            newer = authority.begin(root, "EXAMPLE-Leaf01", "op-2", "trigger-2", "manual_config_sync_cli")
+            self.assertEqual(2, newer["generation"])
+            self.assertIsNone(authority.read_current_receipt(root, "EXAMPLE-Leaf01", receipt))
+            self.assertEqual((original, inode), (receipt.read_bytes(), receipt.stat().st_ino))
+
     def test_real_writer_and_monitor_observe_own_identity_and_same_live_digest_without_inheriting_receipt(self):
         from test_cases.module_loader import load_script
         monitor = load_script("f02_writer_monitor_bound_live_workflow", ROOT / "DAY0-Prepare/12-ztp-monitor.py")

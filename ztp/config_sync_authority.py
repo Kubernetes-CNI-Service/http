@@ -388,6 +388,68 @@ def read_current(root, hostname):
         raise AuthorityError("authority storage could not be authenticated") from exc
 
 
+def read_current_receipt(root, hostname, path):
+    """Authenticate one existing receipt while holding its generation lock.
+
+    Readers never create history, accept a path outside run/host/result.json,
+    or infer the current generation from receipt/report wall clocks. A valid
+    historical receipt is not current evidence; unsafe or contradictory images
+    are explicit errors and are retained untouched.
+    """
+    root = Path(root).absolute()
+    path = Path(path)
+    path = path.absolute() if path.is_absolute() else root / path
+    try:
+        relative = path.relative_to(root)
+    except ValueError as exc:
+        raise AuthorityError("receipt path is outside authority namespace") from exc
+    parts = relative.parts
+    if (len(parts) != 3 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,199}", parts[0])
+            or not isinstance(hostname, str) or not HOST.fullmatch(hostname)
+            or parts[1].casefold() != hostname.casefold()
+            or parts[2] != "result.json"):
+        raise AuthorityError("receipt path is not a closed run/hostname/result.json")
+    try:
+        with _scope(root, hostname) as (descriptor, key, namespace, validate, _advance):
+            current = _current(descriptor, key, namespace)
+            if current is None or current["state"] != "success" or current["veto"] is not False:
+                return None
+            parent = _parent(path.parent)
+            try:
+                held = _identity(os.fstat(parent))
+                receipt_image = _snapshot(parent, "result.json")
+                raw = _read(parent, "result.json", RECEIPT_MAX_BYTES)
+                if raw is None:
+                    return None
+                receipt = decode_receipt(raw)
+                visible = _parent(path.parent)
+                try:
+                    if held != _identity(os.fstat(visible)):
+                        raise AuthorityError("receipt parent rebound during read")
+                finally:
+                    os.close(visible)
+                validate()
+                if _current(descriptor, key, namespace) != current:
+                    raise AuthorityError("receipt generation changed during read")
+                if _snapshot(parent, "result.json") != receipt_image:
+                    raise AuthorityError("receipt image changed after read")
+                if (receipt["state"] != "triggered"
+                        or any(receipt[field] != current[field] for field in (
+                            "hostname", "generation", "source_identity", "operation_id",
+                            "trigger_id", "trigger_source",
+                        ))):
+                    return None
+                if receipt_digest(receipt) != current["receipt_sha256"]:
+                    raise AuthorityError("current receipt digest disagrees with local authority")
+                return receipt
+            finally:
+                os.close(parent)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise AuthorityError("receipt storage could not be authenticated") from exc
+
+
 def _snapshot(descriptor, name):
     try:
         value = os.stat(name, dir_fd=descriptor, follow_symlinks=False)

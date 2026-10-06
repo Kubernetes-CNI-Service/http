@@ -445,6 +445,11 @@ hostname 不自动成为配置证明；缺失或失败的新观察清空旧正�
 eth1 时的零行空字段仍允许 eth0 证明，重复/多行身份拒绝。此字段只用于诊断，**不是**
 持久收据或 generation 权威，不授权九阶段晋升；当前代次接入仍须独立完成。
 
+本地 generation 的只读回执 API 持同一 authority 锁核验 run/hostname/result.json，
+不按 report 时间选择代次。读取包含 owner/0600/no-follow、闭合 schema、当前 journal
+摘要和读取后文件/父目录复核；旧代返回不可用，矛盾或不安全原像报错并保留，读取不会
+建立新 history。独立 16384 B 合法原始 wire 正例、16383 B 退化界及超限保留均有测试。
+
 九阶段历史不能把已有但不可读、非对象、非列表或重复大小写主机成员的快照当作空历史。
 `test_ztp_group_handoff.py` 独立验证负向历史权威跨轮保持及 JSON/CSV/Markdown 诊断；
 `test_ztp_group_handoff_display.py` 串联真实监控快照写入、下一轮读取与真实 HTML 判据，
