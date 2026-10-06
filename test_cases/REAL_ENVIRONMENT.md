@@ -255,6 +255,8 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   owner/mode/no-follow、原始响应与完整退出码、当前本地代次和 live 摘要；缺失/拒绝/HOLD
   不得借旧来源晋升或阻断独立健康采集。清理只处理本案临时证据，不改历史成功文件或
   他方 pending writer；风险是旧 bootstrap 来源被误作当前配置成功，本卡不授权设备操作。
+  来源 MAC 和清单身份须为合法 12 位或六组冒号格式，畸形输入不得归一化成有效身份。
+  私有 manual/monitor 共同 decoder 反例已覆盖；真机仍 NOT RUN。
 
 - 来源消费否决：私有 analyzer → JSON → HTML/机器流程覆盖本次来源缺失、严格布尔、
   摘要重放、原始 YAML 漂移及后续失联；来源必须同时绑定当前 BatchMode/live 和

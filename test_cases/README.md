@@ -439,6 +439,8 @@ shell workflow 核对同一 live 文本。此字段只是传输观察，不是�
 来源凭据。与 manual reader 共用无 I/O 的 V1 decoder：校验闭合字段、来源/模式、
 设备 eth0 身份与原始 YAML 摘要；缺失、HOLD、拒绝、歧义、截断和前一次失败连接均不能
 提供来源 YAML。完整协议响应独立固定 8 MiB 正例可接受，退化界和超限拒绝且不截断。
+清单及来源 MAC 只接受 12 位十六进制或六组冒号格式；额外字符、重复分隔符、空白
+不能通过删字符“修复”为本设备身份，manual 与 monitor reader 均按同一合同拒绝。
 私有真实 helper → 完整 collector remote shell → 共同 decoder workflow 验证两次单连接
 及 HOLD 原像保留，未连接真机或执行 sudo。这只是来源诊断，不铸造/复用本地代次，不将
 旧 applied_at 或 YAML 等同当前 live state，也不授权九阶段完成；bootstrap generation

@@ -258,9 +258,13 @@ def decode_applied_config(returncode, stdout, expected_mac, *, max_bytes=APPLIED
         r"[0-9a-f]{64}", failed_digest,
     ):
         return unavailable("设备 ZTP receipt failed_raw_sha256 无效")
-    expected_mac = re.sub(r"[^0-9a-f]", "", str(expected_mac or "").casefold())
-    receipt_mac = re.sub(r"[^0-9a-f]", "", receipt["eth0_mac"].casefold())
-    if not expected_mac or receipt_mac != expected_mac:
+    mac_pattern = r"(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}|[0-9A-Fa-f]{12}"
+    if (not isinstance(expected_mac, str) or not re.fullmatch(mac_pattern, expected_mac)
+            or not re.fullmatch(mac_pattern, receipt["eth0_mac"])):
+        return unavailable("设备 ZTP receipt 或清单 eth0 MAC 格式无效")
+    expected_mac = expected_mac.replace(":", "").lower()
+    receipt_mac = receipt["eth0_mac"].replace(":", "").lower()
+    if receipt_mac != expected_mac:
         return unavailable("设备 ZTP receipt 的 eth0 MAC 与清单身份不一致")
     failed_source_name = receipt.get("failed_source_name")
     if failed_source_name is not None and failed_source_name != (

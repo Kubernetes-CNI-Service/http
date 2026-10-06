@@ -14,6 +14,22 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSyncAuthorityTests(unittest.TestCase):
+    def test_source_decoder_rejects_malformed_mac_instead_of_stripping_foreign_characters(self):
+        from test_cases.test_manual_applied_config import MonitorAppliedConfigObservationTests
+        payload = MonitorAppliedConfigObservationTests.wire("- set: {}\n")
+        for expected in ("020000000001", "02:00:00:00:00:01"):
+            self.assertIs(True, self.authority.decode_applied_config(0, payload, expected)["trusted"])
+        for malformed in ("g020000000001", "020000000001g", "02::00:00:00:00:01",
+                          "02-00-00-00-00-01", "0200.0000.0001", " 020000000001", "020000000001 "):
+            for where in ("inventory", "receipt"):
+                with self.subTest(mac=malformed, where=where):
+                    wire = payload if where == "inventory" else payload.replace("eth0_mac=02:00:00:00:00:01", "eth0_mac=" + malformed)
+                    expected = malformed if where == "inventory" else "020000000001"
+                    parsed = self.authority.decode_applied_config(0, wire, expected)
+                    self.assertIs(False, parsed["trusted"], "malformed identity is not the same valid MAC")
+                    self.assertEqual({}, parsed["receipt"])
+                    self.assertEqual("", parsed["raw_yaml"])
+
     def test_explicit_source_observation_requires_closed_strict_own_identity(self):
         gate = getattr(self.authority, "monitor_source_observation_allows_completion", None)
         self.assertTrue(callable(gate), "both completion consumers must honor explicit source veto")
