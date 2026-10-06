@@ -193,6 +193,11 @@ direct 与真实 LOAD→SETUP→新 LOAD workflow 覆盖临时链接、指针替
 恢复两类旧指针；未知指针、目标换绑及外部发布目录软链接保持 HOLD。局部恢复仅证明
 链接前像，不证明完整旧 A 制品安全激活或断电持久性。
 
+R22 的 P 恢复还须证明 Q 父提交仍为写前状态：WAL 冻结 Q 的 `current-release.json`
+缺席或完整身份/摘要，并在恢复写入、后核验和收尾前重核。Q 父提交出现、同字节换 inode
+或同 inode 写后复原均阻断恢复，保留 WAL；缺前像的旧凭据不自动升级。
+这只是禁止提交后误回 P 的围栏，不是成功 B 的备份/receipt 收尾或旧 A 激活协议。
+
 同一模块还覆盖端到端 deployment scope：默认 `all` 同时生成 Production/AIR；`prod` 只发布
 Production Cumulus/IB/NVL；`air` 只发布 AIR DHCP/YAML/release，并只临时渲染 AIR full profile
 实际引用的 Production 来源；单独指定 `mini` 会自动选择 AIR scope 和 `eth`，显式 `prod+mini`

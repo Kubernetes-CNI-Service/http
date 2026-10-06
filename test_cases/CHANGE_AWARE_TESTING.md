@@ -294,6 +294,34 @@ manifest 映射沿用；REAL_ENV 补充三处死亡边界和独立现场核验�
 仍待核，未凭模块 PASS 直接重跑 related/full。其它完整写集、父 B 收口、main 显式恢复、
 完整旧 A 安全激活和 Linux/断电见证继续独立收口。
 
+### R22 Q 父提交之后误恢复 P 的本地候选记录
+
+原 WAL 未冻结 Q 的父提交前像：Q 已出现父文件、同字节替换既有父文件或缺少前像的旧
+WAL 都仍可恢复 P。独立 direct 与真实 SETUP→LOAD 父提交/冷恢复边界共 5 tests，
+4 FAIL / exit 1；日志 `outputs/test-diagnostics/r22-q-parent-preimage-red.log`，
+inode 143180217，size 3536，SHA256
+`44688ad03ca3b386b28efa7fcbcc9cb07baa1f89b5aa01cc17e59a62852bf432`。
+候选在 WAL 写前冻结 Q 父文件缺席或完整身份/摘要，恢复全过程重新核对；变化 HOLD，
+不删除提交文件或原凭据，不事后升级无前像的旧 WAL。既有且未变的 Q 历史父文件正例保留。
+
+补充同 inode/mtime 复原和 P 后核验才出现 Q 提交的负例，真实 workflow 增强为 SETUP
+完整提交 Q manifest 后调用真实 parent replace，再由新 LOAD 拒绝恢复。共 7 tests / OK /
+exit 0，日志 `outputs/test-diagnostics/r22-q-parent-preimage-complete-green.log`，
+inode 143188699，size 1152，SHA256
+`206af5aca02fba153995484544e89dd8be83b5e8757882090072c1473adf1c7e`。
+父候选字节是独立合成夹具；这不等于完整 B 发布、五 DHCP/YAML 制品或服务健康验收。
+原断言和时限未放宽。
+
+四个完整模块共 315 tests / OK / exit 0（227.553 秒），日志
+`outputs/test-diagnostics/r22-q-parent-preimage-modules.log`，inode 143191157，size 105980，
+SHA256 `ad9db3f930fec5b64294fb1204114d533eb5a61a0fa453f231537ea5c73f8ce2`。
+读前后身份稳定，旧 93189 字节前缀 SHA256
+`af3da1b8f31b1a0bd176aa9174e9d590f6418d907a635ad3fc8a7ce6581a063e` 保持，
+物理末尾 `R22_Q_PARENT_MODULES_EXIT=0` 与 exec exit 0 一致。沿用 LOAD direct 与
+真实 LOAD/SETUP workflow 映射，REAL_ENV 增加提交后边界与现场恢复风险，仍 OPEN。
+本候选未修原 bootstrap 超时原因，未以局部 PASS 重跑 related/full 或编辑 approved ledger；
+成功 B 的备份/receipt 收口、完整写集、main 显式恢复及旧 A 安全激活继续独立实现。
+
 ## Full proof 性能诊断记录
 
 本节只记录测量方法与优化判定，不改变上面的测试和证明门禁。正式 full proof 仍须由

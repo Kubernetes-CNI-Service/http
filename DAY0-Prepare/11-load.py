@@ -5955,6 +5955,51 @@ def _setup_switch_q_target(target: Path, project: Path) -> Path:
     return raw
 
 
+def _setup_switch_q_parent_authority(project: Path) -> dict[str, object]:
+    """Snapshot Q's parent commit marker without following output aliases."""
+    path = project / "99-output-ztp/current-release.json"
+    try:
+        parent = None
+        if os.path.lexists(path.parent):
+            if (not stat.S_ISDIR(path.parent.lstat().st_mode)
+                    or path.parent.resolve(strict=True) != path.parent):
+                raise ValueError("parent output is not a canonical real directory")
+            parent = _setup_switch_directory_identity(path.parent)
+        opened = _read_rollback_regular(path, missing_ok=True)
+        file = None
+        if opened is not None:
+            before = path.lstat()
+            # Tie the payload and complete metadata to one stable read, not
+            # an earlier read followed by a later owner's same-name inode.
+            if _read_rollback_regular(path) != opened:
+                raise ValueError("parent bytes changed while freezing")
+            after = path.lstat()
+            fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_size",
+                      "st_mtime_ns", "st_ctime_ns")
+            if any(getattr(before, field) != getattr(after, field) for field in fields):
+                raise ValueError("parent identity changed while freezing")
+            file = {
+                "sha256": hashlib.sha256(opened[0]).hexdigest(), "mode": opened[1],
+                "identity": {field: getattr(before, field) for field in fields},
+            }
+        return {"path": str(path), "parent": parent, "file": file}
+    except (OSError, ValueError, RuntimeError, LoadError) as exc:
+        raise LoadError(f"setup switch Q parent authority is unknown: {exc}") from exc
+
+
+def _require_setup_switch_q_parent_preimage(body) -> None:
+    """P rollback is allowed only while Q's parent is still precommit."""
+    before = body.get("q_parent_preimage")
+    if not isinstance(before, dict) or set(before) != {"path", "parent", "file"}:
+        raise LoadError("setup switch Q parent preimage is missing or invalid; HOLD")
+    current = _setup_switch_q_parent_authority(Path(body["new_project"]["path"]))
+    # A missing Q-local output directory may be prepared after freezing the
+    # WAL. It must remain canonical and its commit marker must remain absent.
+    if (before["path"] != current["path"] or before["file"] != current["file"]
+            or (before["parent"] is not None and before["parent"] != current["parent"])):
+        raise LoadError("setup switch Q parent changed or committed; P rollback is blocked")
+
+
 def prepare_setup_switch_journal(
     old_project: Path, new_project: Path, *,
     expected_new_links: dict[Path, Path],
@@ -6030,6 +6075,7 @@ def prepare_setup_switch_journal(
         "manifest_sha256": hashlib.sha256(state.manifest).hexdigest(),
         "manifest_mode": state.manifest_mode, "links": rows,
         "allow_late_q_values": allow_late_q_values,
+        "q_parent_preimage": _setup_switch_q_parent_authority(Path(new["path"])),
     }
     body_bytes = _setup_switch_canonical_payload(body)
     envelope = {
@@ -6104,6 +6150,7 @@ def register_setup_switch_journal_link(
                 or new != _setup_switch_directory_identity(Path(new["path"]))
                 or old == new):
             raise ValueError("journal directory identity changed")
+        _require_setup_switch_q_parent_preimage(body)
         old_manifest = base64.b64decode(body["manifest"], validate=True)
         if (hashlib.sha256(old_manifest).hexdigest() != body["manifest_sha256"]
                 or _read_rollback_regular(MANIFEST, limit=_SETUP_MANIFEST_LIMIT)
@@ -7140,6 +7187,15 @@ def _recover_setup_switch_journal_snapshot(
             raise ValueError("journal link inventory is invalid")
     except (KeyError, TypeError, ValueError, UnicodeError, binascii.Error, LoadError) as exc:
         raise LoadError(f"setup switch journal is invalid: {exc}") from exc
+    require_wal_unchanged = require_journal_unchanged
+
+    def require_journal_unchanged():
+        require_wal_unchanged()
+        _require_setup_switch_q_parent_preimage(body)
+
+    # A pending SETUP WAL is not authorization to roll P back after Q's
+    # parent commit. Recheck this at every recovery mutation and retirement.
+    require_journal_unchanged()
     current_manifest = _read_rollback_regular(MANIFEST, limit=_SETUP_MANIFEST_LIMIT)
     q_manifest = None
     if "q_manifest_intent" in body:

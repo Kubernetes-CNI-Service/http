@@ -1345,6 +1345,74 @@ finally:
                     self.assertFalse(journal.exists())
                     self.assertFalse((root / "service-started").exists())
 
+    def test_real_setup_then_parent_commit_cannot_cold_restore_p(self):
+        """Actual Q parent replace must revoke the old P rollback authority."""
+        with tempfile.TemporaryDirectory(prefix="r22-q-parent-commit-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, q, common, _p_only, _q_only, manifest, before, _hook, _barrier, _home = fixture
+            for relative in ("tools/lldp-analyze-tool/99-output-p2p",
+                             "tools/lldp-analyze-tool/99-output-monitor",
+                             "tools/ibdiagnet-analyze-tool/99-output-p2p"):
+                leaf = root / relative
+                if leaf.is_dir() and not leaf.is_symlink():
+                    shutil.rmtree(leaf)
+            first = self._run_private_load_setup_switch(
+                fixture, prepare_journal=False, auto_prepare_journal=True,
+                first_link=root / "never-created-link",
+            )
+            self.assertEqual(25, first.returncode, first.stdout + first.stderr)
+            committed_setup_manifest = manifest.read_bytes()
+            self.assertNotEqual(before["manifest"], committed_setup_manifest)
+            mixed = os.readlink(common)
+            evidence = (root / "ztp/.setup-switch-journal.json").read_bytes()
+            operation = """
+import importlib.util
+import os
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+root, q = map(Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location('fresh_parent_commit_guard', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+parent = q / '99-output-ztp/current-release.json'
+parent.parent.mkdir(exist_ok=True)
+temporary = parent.with_name('.candidate-parent.json')
+with temporary.open('wb') as stream:
+    stream.write(b'{"release_id":"Q-committed-B"}\\n')
+    stream.flush()
+    os.fsync(stream.fileno())
+candidate = load.PreparedParentRelease(parent, temporary, 'Q-committed-B')
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    load.commit_prepared_release(candidate)
+    assert candidate.committed
+    try:
+        load.recover_setup_switch_journal(
+            root / 'ztp/.setup-switch-journal.json', deployment_lock_descriptor=descriptor,
+            services_quiesced=True, runtime_backend=SimpleNamespace(name='supervisor'),
+        )
+    except load.LoadError as exc:
+        assert 'Q parent' in str(exc), str(exc)
+    else:
+        raise AssertionError('committed Q parent incorrectly licensed P restoration')
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+            second = subprocess.run(
+                [sys.executable, "-B", "-c", operation, str(root), str(q)],
+                cwd=root, capture_output=True, text=True, check=False, timeout=30,
+            )
+            self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+            self.assertEqual(mixed, os.readlink(common))
+            self.assertEqual(committed_setup_manifest, manifest.read_bytes())
+            self.assertEqual(evidence, (root / "ztp/.setup-switch-journal.json").read_bytes())
+            self.assertEqual(b'{"release_id":"Q-committed-B"}\n',
+                             (q / "99-output-ztp/current-release.json").read_bytes())
+            self.assertFalse((root / "service-started").exists())
+
     def test_real_setup_q_local_latest_preimage_survives_temp_and_pointer_death(self):
         """Q's old latest is not a P manifest link or an absent Q-only name."""
         for boundary in ("temporary", "pointer", "q-manifest-committed"):

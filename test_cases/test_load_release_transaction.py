@@ -1766,7 +1766,7 @@ class ReleaseTransactionTests(unittest.TestCase):
         manifest.write_text("".join(rows), encoding="utf-8")
         return manifest
 
-    def _prepare_cross_project_setup_crash(self, *, freeze_q_links=True):
+    def _prepare_cross_project_setup_crash(self, *, freeze_q_links=True, q_parent_payload=None):
         """Freeze P before a Q setup child can rewrite any managed link."""
         old_project = self.project.resolve()
         new_project = self.root / "DAY0-Prepare/new"
@@ -1775,6 +1775,10 @@ class ReleaseTransactionTests(unittest.TestCase):
         new_target.write_bytes(b"Q global\n")
         new_only_target = new_project / "new-only.csv"
         new_only_target.write_bytes(b"Q only\n")
+        if q_parent_payload is not None:
+            q_parent = new_project / "99-output-ztp/current-release.json"
+            q_parent.parent.mkdir()
+            q_parent.write_bytes(q_parent_payload)
         old_status = old_project / "99-output-ztp"
         old_status.mkdir(parents=True, exist_ok=True)
         common = self.ztp / "config/cumulus/template/01-global.yaml"
@@ -3234,6 +3238,137 @@ os.kill(os.getpid(), signal.SIGKILL)
         self.assertEqual(old_links, {path: os.readlink(path) for path in old_links})
         self.assertFalse(os.path.lexists(new_only))
         self.assertFalse(journal.exists())
+        backend.start.assert_not_called()
+
+    def test_setup_wal_q_parent_commit_fences_p_restore(self) -> None:
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        common = state[2]
+        common.unlink()
+        common.symlink_to(os.path.relpath(state[5], common.parent))
+        mixed = os.readlink(common)
+        parent = state[1] / "99-output-ztp/current-release.json"
+        parent.parent.mkdir()
+        parent.write_bytes(b'{"release_id":"Q-committed-B"}\n')
+        evidence = journal.read_bytes()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with self.assertRaisesRegex(LOAD.LoadError, "Q parent.*changed|Q parent.*commit"):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertEqual(mixed, os.readlink(common), "committed Q cannot license restoring P")
+        self.assertEqual(state[8], state[7].read_bytes())
+        self.assertEqual(b'{"release_id":"Q-committed-B"}\n', parent.read_bytes())
+        self.assertEqual(evidence, journal.read_bytes())
+        backend.start.assert_not_called()
+
+    def test_setup_wal_existing_q_parent_preimage_allows_uncommitted_restore(self) -> None:
+        payload = b'{"release_id":"Q-historical"}\n'
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash(
+            q_parent_payload=payload,
+        )
+        common = state[2]
+        common.unlink()
+        common.symlink_to(os.path.relpath(state[5], common.parent))
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            self.assertEqual("restored-p", LOAD.recover_setup_switch_journal(
+                journal, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            ))
+        self.assertEqual(payload, (state[1] / "99-output-ztp/current-release.json").read_bytes())
+        self.assertEqual(state[9][common], os.readlink(common))
+        self.assertFalse(journal.exists())
+        backend.start.assert_not_called()
+
+    def test_setup_wal_same_bytes_replaced_q_parent_fences_p_restore(self) -> None:
+        payload = b'{"release_id":"Q-historical"}\n'
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash(
+            q_parent_payload=payload,
+        )
+        parent = state[1] / "99-output-ztp/current-release.json"
+        parent.rename(parent.with_name("operator-retained-parent.json"))
+        parent.write_bytes(payload)
+        evidence = journal.read_bytes()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with self.assertRaisesRegex(LOAD.LoadError, "Q parent.*changed|Q parent.*commit"):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertEqual(state[8], state[7].read_bytes())
+        self.assertEqual(evidence, journal.read_bytes())
+        self.assertEqual(payload, parent.read_bytes())
+        backend.start.assert_not_called()
+
+    def test_setup_wal_inplace_q_parent_aba_fences_p_restore(self) -> None:
+        payload = b'{"release_id":"Q-historical"}\n'
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash(
+            q_parent_payload=payload,
+        )
+        parent = state[1] / "99-output-ztp/current-release.json"
+        frozen = parent.stat()
+        parent.write_bytes(b'{"release_id":"Q-other-data"}\n')
+        parent.write_bytes(payload)
+        os.utime(parent, ns=(frozen.st_atime_ns, frozen.st_mtime_ns))
+        self.assertEqual(frozen.st_ino, parent.stat().st_ino)
+        self.assertEqual(frozen.st_mtime_ns, parent.stat().st_mtime_ns)
+        evidence = journal.read_bytes()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with self.assertRaisesRegex(LOAD.LoadError, "Q parent.*changed|Q parent.*commit"):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertEqual(state[8], state[7].read_bytes())
+        self.assertEqual(evidence, journal.read_bytes())
+        self.assertEqual(payload, parent.read_bytes())
+        backend.start.assert_not_called()
+
+    def test_setup_wal_q_parent_commit_at_p_postverify_retains_evidence(self) -> None:
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        common = state[2]
+        common.unlink()
+        common.symlink_to(os.path.relpath(state[5], common.parent))
+        parent = state[1] / "99-output-ztp/current-release.json"
+        evidence = journal.read_bytes()
+        real_snapshot = LOAD.snapshot_active_setup_state
+
+        def commit_after_p_verified(*args, **kwargs):
+            result = real_snapshot(*args, **kwargs)
+            parent.parent.mkdir(exist_ok=True)
+            parent.write_bytes(b'{"release_id":"Q-late-commit"}\n')
+            return result
+
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "snapshot_active_setup_state", side_effect=commit_after_p_verified):
+            with self.assertRaisesRegex(LOAD.LoadError, "Q parent.*changed|Q parent.*commit"):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertEqual(state[9][common], os.readlink(common))
+        self.assertEqual(state[8], state[7].read_bytes())
+        self.assertEqual(evidence, journal.read_bytes(), "postverify does not license WAL retirement")
+        self.assertEqual(b'{"release_id":"Q-late-commit"}\n', parent.read_bytes())
+        backend.start.assert_not_called()
+
+    def test_setup_wal_missing_q_parent_preimage_is_not_rollback_authority(self) -> None:
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        envelope = json.loads(journal.read_bytes())
+        envelope["body"].pop("q_parent_preimage", None)
+        envelope["sha256"] = hashlib.sha256(
+            LOAD._setup_switch_canonical_payload(envelope["body"]),
+        ).hexdigest()
+        journal.write_bytes(LOAD._setup_switch_canonical_payload(envelope) + b"\n")
+        evidence = journal.read_bytes()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with self.assertRaisesRegex(LOAD.LoadError, "Q parent.*preimage"):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertEqual(state[8], state[7].read_bytes())
+        self.assertEqual(evidence, journal.read_bytes())
         backend.start.assert_not_called()
 
     def _q_local_latest_fixture(self, q):

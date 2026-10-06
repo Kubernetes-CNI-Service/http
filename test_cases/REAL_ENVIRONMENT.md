@@ -1662,6 +1662,8 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 - Q 已有 ETH/NVOS latest 指针前像的窄范围候选：TEST 在首次共享写入前，为 Q 内 `99-output-eth/latest` 与 `99-output-ib_nvl/latest` 的原始/候选链接文字、旧/新真实完成目录身份及父目录身份单独持久化 WAL 行，不将其登记为 P manifest 成员或缺席的 Q-only 名称。实际 writer 使用 Q 的物理父目录，稳定共享 `latest_yaml` 入口保留原相对文字，指针 replace 后同步父目录。direct 与真实 LOAD→SETUP→新 LOAD workflow 覆盖 NVOS 临时链接创建后、指针替换后及 Q manifest 已提交三个边界，同时恢复先前已切换的 ETH 指针；旧/新 YAML 字节保持不变且不启动服务。未知指针、旧目标同名换 inode、外部发布目录软链接，以及 Q-local writer 遇未知共享链接均须拒绝并保留原 WAL/对象。现场须独立记录两类指针和旧/新目录身份、WAL 完整字节、同步/死亡屏障及新进程停服见证；本机 SIGKILL 和 fsync 调用预期不证明 Linux/断电持久性或任意非合作写者免疫。此窄修不关闭其余完整写集、父 B 成功收口、main 显式恢复、完整旧 A 激活或 DEV ACK；本卡继续 OPEN。
 
+- Q 父提交后的 P 恢复围栏候选：TEST 在 SETUP 首次共享写入前将 Q 的 `99-output-ztp/current-release.json` 缺席或普通单链接文件的摘要、模式、dev/ino/size/mtime_ns/ctime_ns 及已有父目录身份冻结到 WAL。direct 与真实 LOAD→SETUP 完成→新 LOAD 父文件原子提交→冷恢复 workflow 要求父提交已变化时保留精确 Q manifest、链接、父文件和 WAL，不恢复 P、不启动服务；同字节换 inode、同 inode 改写后复原 mtime、无父前像旧 WAL 均 HOLD。原有 Q 历史父文件未变时仍可恢复未提交切换；P 后核验时才出现 Q 提交也不得按旧授权删除 WAL。该 workflow 只验证真实 parent commit primitive 与恢复边界，父候选使用独立合成字节，不冒称完整 B 制品生成/验证或健康激活。现场须在本卡已授权隔离 VM 内冻结完整真实 A/B 输入与制品，分别保存提交前像、原子 replace/fsync 和故障屏障、Q/P/WAL 完整身份及时间线，使用快照恢复已辨认对象；正常窗口要求独立写者静默。缺前像不得事后补造授权；本地 ctime/进程测试不替代 Linux/断电见证。本卡仍 OPEN，父 B 成功后的安全收尾、main 显式恢复、完整旧 A 激活及 DEV ACK 未关闭。
+
 ## TC-REAL-R22-C2-DESCRIPTION-PUBLISH-001 — c2 同名描述输出的故障窗口
 
 - Case ID：`TC-REAL-R22-C2-DESCRIPTION-PUBLISH-001`；类型：real-environment / transaction / crash-recovery；对应 R22 c2 对 `*_with_desc` 的既有同名输出替换。状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。自动化先决为 `test_cases.test_generation_input_binding_contract` 的二次读取、早返及 staging direct，`test_cases.test_generation_input_binding_workflow` 的 setup/load/c2 workflow，和当前候选正式 full/check；现有定向通过不证明进程死亡后的原子性。
