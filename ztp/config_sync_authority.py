@@ -143,7 +143,8 @@ class ManagedInitialMethodCycle:
         self._check_project()
         paths = [self.cache, self.cache.with_name(self.cache.name + ".sha256"),
                  self.csv, self.p2p, self.tool / "01-global.yaml"]
-        paths.extend(sorted((self.tool / "publickey").glob("*.pub")))
+        key_paths = sorted((self.tool / "publickey").glob("*.pub"))
+        paths.extend(key_paths)
         images = [self._image(path) for path in paths]
         # Fresh parser/profile validation is required too, not merely an old checksum.
         candidate = self.initial.load_target_cache(self.cache, self.csv, self.p2p,
@@ -153,6 +154,8 @@ class ManagedInitialMethodCycle:
         self._check_project()
         if images != [self._image(path) for path in paths]:
             raise AuthorityError("managed initial input changed during parser validation")
+        if sorted((self.tool / "publickey").glob("*.pub")) != key_paths:
+            raise AuthorityError("managed initial public-key membership changed during validation")
         self._check_project()
         return images
 

@@ -84,6 +84,24 @@ class ConfigSyncAuthorityTests(unittest.TestCase):
             with self.assertRaises(self.authority.AuthorityError):
                 cycle._inputs()
 
+    def test_managed_initial_input_snapshot_rechecks_public_key_membership_after_parser(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve()
+            tool = project / "tool"
+            (tool / "publickey").mkdir(parents=True)
+            for path in (project / "cache", project / "cache.sha256", project / "csv", project / "p2p",
+                         tool / "01-global.yaml", tool / "publickey/management.pub"):
+                path.write_text("independent original input image\n")
+            target = SimpleNamespace(ib=SimpleNamespace(hostname="IB01", dev_type="ib"))
+            def parser_then_new_member(*args, **kwargs):
+                (tool / "publickey/new.pub").write_text("independent late key addition\n")
+                return 1, [target]
+            cycle = self.authority.ManagedInitialMethodCycle(project, SimpleNamespace(load_target_cache=parser_then_new_member))
+            cycle.tool, cycle.cache, cycle.csv, cycle.p2p, cycle.targets = tool, project / "cache", project / "csv", project / "p2p", [target]
+            with self.assertRaises(self.authority.AuthorityError):
+                cycle._inputs()
+            self.assertTrue((tool / "publickey/new.pub").exists(), "foreign input must be retained")
+
     def test_managed_initial_cli_safe_help_and_no_implicit_project(self):
         entry = getattr(self.authority, "managed_initial_main", None)
         self.assertTrue(callable(entry), "the managed producer must be reachable by a real entrypoint")
