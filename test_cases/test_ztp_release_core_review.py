@@ -4118,8 +4118,22 @@ class BackupAuthenticationContractTests(unittest.TestCase):
                         break
                     time.sleep(0.02)
                 else:
+                    # kill(pid, 0) alone cannot distinguish a running survivor
+                    # from an unreaped zombie. Keep the original disappearance
+                    # requirement and attach state evidence before cleanup.
+                    try:
+                        state = subprocess.run(
+                            ["/bin/ps", "-p", str(descendant), "-o",
+                             "pid,ppid,pgid,state,etime,command"],
+                            capture_output=True, text=True, timeout=1,
+                            check=False,
+                        )
+                        diagnostic = repr((state.returncode, state.stdout, state.stderr))
+                    except (OSError, subprocess.TimeoutExpired) as exc:
+                        diagnostic = type(exc).__name__
                     self.fail(
-                        f"successful SSH leader detached descendant: {descendant}"
+                        f"successful SSH leader detached descendant: {descendant}; "
+                        f"process state={diagnostic}"
                     )
                 self.assertEqual(
                     before_fds, len(list(Path("/dev/fd").iterdir())),

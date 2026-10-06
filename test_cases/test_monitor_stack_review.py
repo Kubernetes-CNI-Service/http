@@ -7323,18 +7323,41 @@ while True:
 
             environment = dict(os.environ)
             environment["PYTHONDONTWRITEBYTECODE"] = "1"
-            worker = subprocess.Popen(
-                [
-                    sys.executable, "-B", str(monitor / "switch-collection-worker.py"),
-                    "--scope", "air", "--poll", "1", "--timeout", "60",
-                    "--lock-wait", "0",
-                ],
-                cwd=root, env=environment,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
+            worker_stdout = root / "worker.stdout"
+            worker_stderr = root / "worker.stderr"
+            with worker_stdout.open("wb") as output, worker_stderr.open("wb") as errors:
+                worker = subprocess.Popen(
+                    [
+                        sys.executable, "-B", str(monitor / "switch-collection-worker.py"),
+                        "--scope", "air", "--poll", "1", "--timeout", "60",
+                        "--lock-wait", "0",
+                    ],
+                    cwd=root, env=environment,
+                    stdin=subprocess.DEVNULL,
+                    stdout=output,
+                    stderr=errors,
+                    start_new_session=True,
+                )
+
+            def startup_diagnostics():
+                # TemporaryDirectory cleanup removes this evidence after the
+                # assertion. Include bounded snapshots in the failure itself.
+                details = {"worker_returncode": worker.poll()}
+                for path in (
+                    worker_stdout, worker_stderr,
+                    status / "switch-collection.status.json",
+                    ethernet / "collector.pid", ethernet / "descendant.pid",
+                ):
+                    try:
+                        with path.open("rb") as stream:
+                            stream.seek(0, os.SEEK_END)
+                            stream.seek(max(0, stream.tell() - 4096))
+                            details[str(path.relative_to(root))] = stream.read().decode(
+                                "utf-8", errors="replace",
+                            )
+                    except OSError as exc:
+                        details[str(path.relative_to(root))] = type(exc).__name__
+                return repr(details)
             collector_pid = 0
             descendant_pid = 0
             try:
@@ -7347,7 +7370,7 @@ while True:
                         and descendant_pid_path.is_file()
                         and heartbeat.is_file(),
                     ),
-                    "worker did not launch the collector tree",
+                    "worker did not launch the collector tree: " + startup_diagnostics(),
                 )
                 collector_pid = int(collector_pid_path.read_text().strip())
                 descendant_pid = int(descendant_pid_path.read_text().strip())
