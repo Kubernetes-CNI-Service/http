@@ -7,6 +7,7 @@
 - 步骤：执行真实配置写入前观察 pending/veto 及严格递增整数；确认后以同会话 BatchMode 身份和 live digest 产生本代回执，再使下一轮预检失败、交互身份不足或 teardown，旧成功不得重新成为当前。只读 preview 不得铸造或撤销代次。分别重放 journal、witness、writer witness 或旧 replaceable pair，必须拒绝并保留原像；合法 schema-v1 最大 journal 正例为独立 1852 B，有限读取上界 2048 B，低于正例的退化界必须拒绝，不能截断。
 - 故障与证据：在受控临时文件 fsync、rename、目录 fsync、HOLD 删除及最终目录同步边界注入崩溃/错误/名称交换；重启后只能保留 HOLD/未知，不补造成功。记录完整 argv/exit、原始 traceback、物理日志顺序、前后 inode/size/SHA、owner/mode、目录清单和清理路径。最终同步时替换 journal/witness 也必须拒绝、保留外来对象并重新保留 HOLD。
 - 消费端步骤：真实 worker 接纳后再撤销或启动下一代 pending，旧回执字节虽保留也不得继续晋升；篡改自身 generation/命名空间/摘要或 summary/target generation 均拒绝。读取 summary 期间换代必须在最终代次复核时撤销正向返回；移走本地历史后只读查询不得重建历史。保存 writer → worker 两端身份、回执原像和每次查询结果；本机 workflow 不替代本卡现场执行。
+- 后台状态：成功状态保存自身证明后，使回执丢失或本地权威撤销，再重启 worker 并恢复原回执；该代旧成功须保持持久撤销。下一合法同源更高代次才可替代否决，不受旧状态未来墙钟影响。记录状态与 journal/receipt 三方原像、撤销记录及重启后结果；断电期间未持久化的状态不得猜作成功，本卡仍 NOT RUN。
 - 范围与清理：journal、witness 和持锁 writer witness 在同一恢复域；**不抵御三份镜像一起或整机/整卷回滚**，不得宣称独立防回滚后端。仅恢复隔离卷与自建对象，保留故障证据，核对原像与无残留写者。此卡 NOT RUN 不阻断 owner 授权的本地开发，但不构成发布证明或 F02 整体完成。
 
 ## TC-REAL-ISSUE-0007-ROLE-LINK-001 — J2 模板不强制物理链路 FEC/MTU

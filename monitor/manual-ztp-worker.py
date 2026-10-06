@@ -50,6 +50,11 @@ ACTIVE_REQUEST_STATES = (
 STATUS_LOCK = threading.Lock()
 QUEUE_MAX_BYTES = 1024 * 1024
 QUEUE_MAX_REQUESTS = 256
+CONFIG_SYNC_PROOF_FIELDS = (
+    "command_started_at", "batch_identity_verified",
+    "batch_identity_verified_at", "finished_at", "live_state_sha256",
+    "transport_ip", "interface", "generation", "source_identity",
+)
 
 
 def timestamp():
@@ -994,6 +999,46 @@ def matching_terminal_failure(
     return str(state.get("failure_reason") or "ZTP 监控报告已标记本次操作失败")
 
 
+def reconcile_config_sync_authority(scope, active_hostnames=()):
+    """Persist withdrawal of a success whose producing evidence is no longer current."""
+    active = {str(hostname).casefold() for hostname in active_hostnames}
+    revoked = 0
+    for status_hostname, current in read_status(scope).get("devices", {}).items():
+        if not isinstance(current, dict) or current.get("state") != "config_sync_success":
+            continue
+        hostname = str(current.get("hostname") or status_hostname)
+        if hostname.casefold() in active or not SAFE_HOSTNAME.fullmatch(hostname):
+            continue
+        receipt = accepted_result(
+            str(current.get("trigger_id") or ""), hostname=hostname,
+            operation_id=str(current.get("operation_id") or ""),
+            operation="replace-config", trigger_source=str(current.get("trigger_source") or ""),
+        )
+        if (hostname.casefold() == str(status_hostname).casefold()
+                and current.get("operation") == "replace-config"
+                and current.get("effective_operation") == "replace-config"
+                and current.get("authority_revoked", False) is False
+                and current.get("batch_identity_verified") is True
+                and type(current.get("generation")) is int
+                and config_sync_promotion_ready(receipt)
+                and all(current.get(field) == receipt.get(field) for field in CONFIG_SYNC_PROOF_FIELDS)):
+            continue
+        write_device_status(
+            status_hostname, "failed", scope=scope,
+            started_at=str(current.get("started_at") or ""), finished_at=timestamp(),
+            operation_id=str(current.get("operation_id") or ""),
+            trigger_id=str(current.get("trigger_id") or ""),
+            trigger_source=str(current.get("trigger_source") or ""),
+            operation="replace-config", effective_operation="replace-config",
+            requested_operation="replace-config", phase="config_sync",
+            authority_revoked=True, generation=current.get("generation"),
+            source_identity=current.get("source_identity"),
+            reason="配置同步收据已丢失、撤销或改变；旧成功权威已撤销",
+        )
+        revoked += 1
+    return revoked
+
+
 def reconcile_failed_operations(scope, active_hostnames=()):
     """Correct a stale worker failure only from its exact completed report.
 
@@ -1013,6 +1058,8 @@ def reconcile_failed_operations(scope, active_hostnames=()):
         hostname_key = hostname.casefold()
         if (
             operation_state.get("state") != "failed"
+            or operation_state.get("operation") == "replace-config"
+            or operation_state.get("phase") == "config_sync"
             or hostname_key in active
             or not SAFE_HOSTNAME.fullmatch(hostname)
             or hostname_key != str(status_hostname).casefold()
@@ -1380,10 +1427,11 @@ def execute(
         finished = timestamp()
         write_device_status(
             hostname, "config_sync_success", scope=scope, started_at=started,
-            finished_at=finished, operation_id=operation_id,
+            operation_id=operation_id,
             trigger_id=trigger_id, trigger_source=trigger_source,
             operation=operation, effective_operation=operation,
             requested_operation=requested_operation, phase="config_sync",
+            **{field: accepted[field] for field in CONFIG_SYNC_PROOF_FIELDS},
             message="完整配置同步已应用并保存",
         )
         print(f"[{finished}] [OK] {hostname} configuration synchronized", flush=True)
@@ -1552,6 +1600,7 @@ def main():
             )
         while True:
             active = {key: future for key, future in active.items() if not future.done()}
+            reconcile_config_sync_authority(args.scope, active)
             reconcile_failed_operations(args.scope, active)
             for key, operation in latest_cli_operations().items():
                 if (args.scope == "air") != (operation.get("type") == "air"):
@@ -1567,12 +1616,23 @@ def main():
                 current_started = str(
                     current.get("started_at") or current.get("requested_at") or ""
                 )
-                if current_started and _iso_time(current_started) > _iso_time(operation["started_at"]):
+                is_config_sync = operation.get("operation") == "replace-config"
+                if (not is_config_sync and current_started
+                        and _iso_time(current_started) > _iso_time(operation["started_at"])):
                     continue
                 operation_id = operation["operation_id"]
                 trigger_id = operation["trigger_id"]
                 same_operation = current.get("operation_id") == operation_id
-                is_config_sync = operation.get("operation") == "replace-config"
+                if (is_config_sync and same_operation
+                        and current.get("authority_revoked", False) is not False
+                        and not (
+                            type(current.get("generation")) is int
+                            and operation["generation"] > current["generation"]
+                            and current.get("source_identity") == operation.get("source_identity")
+                        )):
+                    # Only a genuinely newer same-namespace era can supersede
+                    # a veto. Corrupt/missing old proof cannot erase withdrawal.
+                    continue
                 if operation["state"] == "running":
                     wanted_state = (
                         "config_sync_running" if is_config_sync else "running"
@@ -1627,7 +1687,14 @@ def main():
                 if operation["state"] != "triggered":
                     continue
                 if is_config_sync:
-                    if not config_sync_promotion_ready(operation):
+                    receipt = accepted_result(
+                        trigger_id, hostname=hostname, operation_id=operation_id,
+                        operation="replace-config", trigger_source=operation["trigger_source"],
+                    )
+                    if (not config_sync_promotion_ready(operation)
+                            or not config_sync_promotion_ready(receipt)
+                            or any(operation.get(field) != receipt.get(field)
+                                   for field in CONFIG_SYNC_PROOF_FIELDS)):
                         write_device_status(
                             hostname, "failed", scope=args.scope,
                             started_at=operation["started_at"],
@@ -1638,6 +1705,8 @@ def main():
                             effective_operation="replace-config",
                             requested_operation="replace-config",
                             phase="config_sync",
+                            authority_revoked=True, generation=operation.get("generation"),
+                            source_identity=operation.get("source_identity"),
                             reason="缺少同会话 BatchMode 身份与 live-state digest",
                         )
                         continue
@@ -1645,13 +1714,13 @@ def main():
                         write_device_status(
                             hostname, "config_sync_success", scope=args.scope,
                             started_at=operation["started_at"],
-                            finished_at=operation["updated_at"],
                             operation_id=operation_id, trigger_id=trigger_id,
                             trigger_source=operation["trigger_source"],
                             operation="replace-config",
                             effective_operation="replace-config",
                             requested_operation="replace-config",
                             phase="config_sync",
+                            **{field: receipt[field] for field in CONFIG_SYNC_PROOF_FIELDS},
                             message="命令行完整配置同步已应用并保存",
                         )
                     continue

@@ -500,6 +500,117 @@ class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
                         self.manual.atomic_json(path, mutant)
                         self.assertEqual({}, self.worker.latest_cli_operations())
 
+    def run_worker_once(self, project, devices):
+        """Execute the real poll/status path, entirely inside our private fixture."""
+        status_dir = project / "worker-status"
+        status_dir.mkdir(exist_ok=True)
+        queue = status_dir / "request.json"
+        if not queue.exists():
+            queue.write_text("{}\n", encoding="utf-8")
+        with ExitStack() as stack:
+            for name, path in (
+                ("DEVICES_CSV", devices), ("STATUS_DIR", status_dir),
+                ("STATUS_FILE", status_dir / "status.json"),
+                ("REQUEST_FILE", queue), ("PID_FILE", status_dir / "own.pid"),
+                ("ZTP_STATUS_DIR", project / "isolated-ztp-status"),
+            ):
+                stack.enter_context(mock.patch.object(self.worker, name, path))
+            stack.enter_context(mock.patch("sys.argv", ["fixture-worker", "--scope", "prod"]))
+            stack.enter_context(mock.patch.object(self.worker.time, "sleep", side_effect=KeyboardInterrupt))
+            self.assertEqual(130, self.worker.main())
+        return json.loads((status_dir / "status.json").read_text())["devices"]
+
+    def test_real_worker_persists_own_proof_and_receipt_loss_withdrawal_is_sticky(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve()
+            devices, receipt, produced, _summary = self.worker_bundle(project)
+            states = self.run_worker_once(project, devices)
+            current = states["EXAMPLE-Leaf01"]
+            self.assertEqual("config_sync_success", current["state"])
+            for field in ("generation", "source_identity", "command_started_at", "finished_at",
+                          "batch_identity_verified", "batch_identity_verified_at", "live_state_sha256",
+                          "transport_ip", "interface"):
+                with self.subTest(proof_field=field):
+                    self.assertEqual(produced[field], current.get(field))
+            original = receipt.read_bytes()
+            retained = receipt.with_name("retained-result.json")
+            receipt.rename(retained)
+            revoked = self.run_worker_once(project, devices)["EXAMPLE-Leaf01"]
+            self.assertEqual("failed", revoked["state"])
+            self.assertIs(revoked.get("authority_revoked"), True)
+            retained.rename(receipt)
+            restored = self.run_worker_once(project, devices)["EXAMPLE-Leaf01"]
+            self.assertEqual("failed", restored["state"], "restoring the same old receipt cannot undo withdrawal")
+            self.assertIs(restored.get("authority_revoked"), True)
+            self.assertEqual(original, receipt.read_bytes())
+
+    def test_real_worker_adopts_new_causal_generation_despite_old_status_future_clock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve()
+            devices, receipt, produced, summary = self.worker_bundle(project)
+            status_dir = project / "worker-status"
+            status_dir.mkdir()
+            self.manual.atomic_json(status_dir / "status.json", {
+                "scope": "prod", "devices": {"EXAMPLE-Leaf01": {
+                    **produced, "state": "config_sync_success",
+                    "started_at": "9999-01-01T00:00:00Z",
+                }},
+            })
+            root = receipt.parents[2]
+            client, prepared, _text = self.fixture(project)
+            ticket = self.manual.config_sync_authority.begin(
+                root, "EXAMPLE-Leaf01", "op-2", "trigger-2", "manual_config_sync_cli",
+            )
+            self.assertEqual(2, ticket["generation"])
+            with mock.patch.object(self.manual, "datetime") as clock:
+                clock.now.return_value = datetime.fromisoformat("2020-01-01T00:00:00+00:00")
+                new = self.run_writer(project, client, prepared, run="next", ticket=ticket)
+            self.manual.atomic_json(root / "next/summary.json", {
+                **summary, "generation": 2, "operation_id": "op-2",
+                "targets": [{**summary["targets"][0], "generation": 2, "trigger_id": "trigger-2"}],
+                "results": [new],
+            })
+            current = self.run_worker_once(project, devices)["EXAMPLE-Leaf01"]
+            self.assertEqual(("config_sync_success", "op-2", 2), (
+                current["state"], current["operation_id"], current.get("generation"),
+            ))
+            self.assertIs(current["batch_identity_verified"], True)
+            self.assertEqual(new["live_state_sha256"], current["live_state_sha256"])
+            # Reusing labels is not authority: a truly newer local integer
+            # era may supersede the old veto, but generation 2 cannot do so.
+            client, prepared, _text = self.fixture(project)
+            ticket = self.manual.config_sync_authority.begin(
+                root, "EXAMPLE-Leaf01", "op-2", "trigger-2", "manual_config_sync_cli",
+            )
+            self.assertEqual(3, ticket["generation"])
+            third = self.run_writer(project, client, prepared, run="third", ticket=ticket)
+            self.manual.atomic_json(root / "third/summary.json", {
+                **summary, "generation": 3, "operation_id": "op-2",
+                "targets": [{**summary["targets"][0], "generation": 3, "trigger_id": "trigger-2"}],
+                "results": [third],
+            })
+            current = self.run_worker_once(project, devices)["EXAMPLE-Leaf01"]
+            self.assertEqual(("config_sync_success", "op-2", 3), (
+                current["state"], current["operation_id"], current["generation"],
+            ))
+            self.assertEqual(third["finished_at"], current["finished_at"])
+
+    def test_real_worker_rejects_corrupt_saved_proof_without_repromoting_same_era(self):
+        for field, invalid in (("batch_identity_verified", 1), ("generation", True),
+                               ("source_identity", "0:0"), ("authority_revoked", 0),
+                               ("live_state_sha256", "b" * 64)):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
+                project = Path(directory).resolve()
+                devices, _receipt, _produced, _summary = self.worker_bundle(project)
+                self.run_worker_once(project, devices)
+                path = project / "worker-status/status.json"
+                previous = json.loads(path.read_text())
+                previous["devices"]["EXAMPLE-Leaf01"][field] = invalid
+                self.manual.atomic_json(path, previous)
+                value = self.run_worker_once(project, devices)["EXAMPLE-Leaf01"]
+                self.assertEqual("failed", value["state"])
+                self.assertIs(value.get("authority_revoked"), True)
+
     def test_real_worker_rejects_writer_receipt_with_unsafe_mode_or_foreign_owner(self):
         with tempfile.TemporaryDirectory() as directory:
             receipt, produced = self.published_receipt(Path(directory).resolve())
