@@ -24,6 +24,38 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
+    def test_real_writer_and_monitor_observe_own_identity_and_same_live_digest_without_inheriting_receipt(self):
+        from test_cases.module_loader import load_script
+        monitor = load_script("f02_writer_monitor_bound_live_workflow", ROOT / "DAY0-Prepare/12-ztp-monitor.py")
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve()
+            client, prepared, text = self.fixture(project)
+            root = project / "99-output-ztp/manual-config-sync"
+            authority = self.manual.config_sync_authority
+            ticket = authority.begin(root, "EXAMPLE-Leaf01", "op-1", "trigger-1", "manual_config_sync_cli")
+            written = self.run_writer(project, client, prepared, run="first", ticket=ticket)
+            raw = (
+                "__HOSTNAME_BEGIN__\nEXAMPLE-Leaf01\n__HOSTNAME_END__\n"
+                "__ETH0_MAC_BEGIN__\n02:00:00:00:00:01\n__ETH0_MAC_END__\n"
+                "__ETH1_MAC_BEGIN__\n\n__ETH1_MAC_END__\n"
+                "__HTTP_MONITOR_LIVE_V1_BEGIN__\n" + text + "\n__HTTP_MONITOR_LIVE_V1_END__=0\n"
+            )
+            device = {"hostname": "EXAMPLE-Leaf01", "type": "eth", "ip": "192.0.2.10",
+                      "mac_plain": "020000000001", "ssh_user": "cumulus", "ssh_ips": ["192.0.2.10"]}
+            with mock.patch.object(monitor, "run_command", return_value={"returncode": 0, "stdout": raw, "stderr": ""}) as run:
+                observed = monitor.collect_switch(device, 5, None, project / "known-hosts")
+            self.assertEqual(1, run.call_count)
+            self.assertIn("BatchMode=yes", run.call_args.args[0])
+            proof = monitor.bind_monitor_live_observation(device, observed)
+            expected = hashlib.sha256(text.encode()).hexdigest()
+            self.assertIs(True, proof["batch_identity_verified"])
+            self.assertEqual(expected, proof["live_state_sha256"])
+            self.assertEqual(expected, written["live_state_sha256"])
+            self.assertNotIn("generation", proof, "observer must not invent a generation from an old writer receipt")
+            missing = {**observed, "live_config_observation": {"kind": "missing", "text": "", "sha256": ""}}
+            self.assertIs(False, monitor.bind_monitor_live_observation(device, missing)["batch_identity_verified"])
+            self.assertEqual("success", authority.read_current(root, "EXAMPLE-Leaf01")["state"])
+
     def test_same_connection_identity_mismatch_withdraws_previous_success(self):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory).resolve()

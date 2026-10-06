@@ -439,6 +439,12 @@ monitor inventory 逐设备物化并验证 `config_method`，与真实 load 的�
 主机；合法 server 声明验证后仍不进入 Switch Status，动态 AIR 使用受管默认值。
 方法变化属于 snapshot 状态变化，但声明方法本身不证明任何配置已执行或完成。
 
+monitor 的 `configuration_observation` 用严格布尔 BatchMode 标志、唯一身份 frame、
+完整 hostname 与选定管理接口 MAC 绑定本次 live 文本重新计算的摘要。采集允许的过渡
+hostname 不自动成为配置证明；缺失或失败的新观察清空旧正向观察。真实远端脚本没有
+eth1 时的零行空字段仍允许 eth0 证明，重复/多行身份拒绝。此字段只用于诊断，**不是**
+持久收据或 generation 权威，不授权九阶段晋升；当前代次接入仍须独立完成。
+
 九阶段历史不能把已有但不可读、非对象、非列表或重复大小写主机成员的快照当作空历史。
 `test_ztp_group_handoff.py` 独立验证负向历史权威跨轮保持及 JSON/CSV/Markdown 诊断；
 `test_ztp_group_handoff_display.py` 串联真实监控快照写入、下一轮读取与真实 HTML 判据，

@@ -273,6 +273,10 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 在同一配置同步执行会话中，保存 apply/save 命令退出码、随后非交互 BatchMode 再认证的
   目标 IP/接口/host-key 证据、`nv config show` 原始 SHA256 和去不可观测字段后的语义比对。
   只有再认证同一目标且 live-state 与发布配置匹配，才允许生成可晋升收据和成功状态。
+- monitor 自己的同一次 BatchMode 采集须记录唯一 hostname/MAC frame、完整 hostname、
+  选定管理接口 MAC 和当次 live digest；核对没有 eth1 的设备仍可按 eth0 取得观察，
+  过渡 hostname、重复 frame 和错误接口不可取得配置证明。观察字段本身不是当前代次
+  的持久成功收据，本卡仍为 NOT RUN，未授权真实设备操作。
 - 分别注入交互密码认证、再认证失败、身份/路径变更、空 live-state、实际配置漂移、旧收据
   重放与收据摘要篡改；这些情况即使命令曾返回 0，worker 和页面也不得晋升成功。
 - 保存 result/summary、worker 状态、页面与归档的前后摘要及拒绝原因。只清理本案隔离

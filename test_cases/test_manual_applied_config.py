@@ -1293,6 +1293,129 @@ class MonitorConfigMethodInventoryTests(unittest.TestCase):
                 MONITOR.read_devices(path, scope="air", dhcp_leases=None)
 
 
+class MonitorBoundLiveObservationTests(unittest.TestCase):
+    LIVE = "- set:\n    system:\n      hostname: leaf01\n"
+
+    def result(self):
+        return {
+            "kind": "ok", "returncode": 0, "batch_mode_verified": True,
+            "identity_frame_valid": True, "connected_ip": "192.0.2.10",
+            "remote_hostname": "leaf01", "remote_eth0_mac": MAC,
+            "remote_eth1_mac": "", "remote_interface_macs": {"eth0": MAC},
+            "live_config_observation": {"kind": "ok", "text": self.LIVE,
+                "sha256": hashlib.sha256(self.LIVE.encode()).hexdigest()},
+            "ztp_log": "", "ifreload_log": "", "failed_yaml": "",
+            "stderr": "", "attempts": [], "host_key_commands": [],
+        }
+
+    def observer(self):
+        observer = getattr(MONITOR, "bind_monitor_live_observation", None)
+        self.assertTrue(callable(observer), "monitor must bind its own live digest to the same BatchMode identity")
+        return observer
+
+    def test_positive_observation_is_closed_and_carries_only_own_digest_and_identity(self):
+        proof = self.observer()(DEVICE, self.result())
+        self.assertEqual({
+            "schema_version": 1, "source": "monitor_batchmode",
+            "batch_identity_verified": True, "hostname": "leaf01",
+            "interface": "eth0", "transport_ip": "192.0.2.10",
+            "mac_plain": "020000000001", "reason": "",
+            "live_state_sha256": hashlib.sha256(self.LIVE.encode()).hexdigest(),
+        }, proof)
+
+    def test_missing_ambiguous_nonboolean_transport_and_foreign_identity_have_no_proof(self):
+        for mutation in (
+            {"batch_mode_verified": 1}, {"batch_mode_verified": False},
+            {"identity_frame_valid": 1}, {"identity_frame_valid": False},
+            {"returncode": True}, {"returncode": 255}, {"kind": "ssh_failed"},
+            {"remote_hostname": "leaf01.foreign.example"},
+            {"remote_eth0_mac": "02:00:00:00:00:02"},
+            {"remote_eth0_mac": ""}, {"connected_ip": "192.0.2.99"},
+        ):
+            with self.subTest(mutation=mutation):
+                proof = self.observer()(DEVICE, {**self.result(), **mutation})
+                self.assertIs(False, proof["batch_identity_verified"])
+                self.assertEqual("", proof["live_state_sha256"])
+        for mutation in ({"kind": "missing"}, {"sha256": "a" * 64}, {"text": ""}, {"foreign": True}):
+            with self.subTest(live=mutation):
+                result = self.result()
+                result["live_config_observation"] = {**result["live_config_observation"], **mutation}
+                proof = self.observer()(DEVICE, result)
+                self.assertIs(False, proof["batch_identity_verified"])
+                self.assertEqual("", proof["live_state_sha256"])
+
+    def test_selected_secondary_interface_cannot_borrow_primary_mac(self):
+        device = {**DEVICE, "candidate_identity": {"192.0.2.11": ("eth1", "020000000002")}}
+        result = {**self.result(), "connected_ip": "192.0.2.11", "remote_eth1_mac": "02:00:00:00:00:02"}
+        proof = self.observer()(device, result)
+        self.assertIs(True, proof["batch_identity_verified"])
+        self.assertEqual(("eth1", "192.0.2.11", "020000000002"), (proof["interface"], proof["transport_ip"], proof["mac_plain"]))
+        result["remote_eth1_mac"] = MAC
+        self.assertIs(False, self.observer()(device, result)["batch_identity_verified"])
+
+    def test_transition_hostname_can_be_collected_but_cannot_prove_configuration(self):
+        device = {**DEVICE, "dynamic_dhcp": True, "ssh_ips": [DEVICE["ip"]],
+            "stages": {name: MONITOR.stage() for name in MONITOR.STAGE_NAMES}, "issues": [], "events": []}
+        MONITOR.analyze_switch(device, {**self.result(), "remote_hostname": "cumulus"})
+        self.assertEqual("success", device["stages"]["ssh"]["status"])
+        proof = device.get("configuration_observation", {})
+        self.assertIs(False, proof.get("batch_identity_verified"))
+        self.assertEqual("", proof.get("live_state_sha256"))
+
+    def test_next_failed_observation_withdraws_previous_in_memory_proof_before_early_return(self):
+        device = {**DEVICE, "ssh_ips": [DEVICE["ip"]],
+            "stages": {name: MONITOR.stage() for name in MONITOR.STAGE_NAMES}, "issues": [], "events": []}
+        MONITOR.analyze_switch(device, self.result())
+        self.assertIs(True, device.get("configuration_observation", {}).get("batch_identity_verified"))
+        MONITOR.analyze_switch(device, {**self.result(), "kind": "unreachable", "returncode": 255})
+        proof = device["configuration_observation"]
+        self.assertIs(False, proof["batch_identity_verified"])
+        self.assertEqual("", proof["live_state_sha256"])
+
+    def test_collector_duplicate_identity_frames_never_bind_first_match_to_live_state(self):
+        output = (
+            "__HOSTNAME_BEGIN__\nleaf01\n__HOSTNAME_END__\n"
+            "__ETH0_MAC_BEGIN__\n02:00:00:00:00:01\n__ETH0_MAC_END__\n"
+            "__ETH1_MAC_BEGIN__\n\n__ETH1_MAC_END__\n"
+            + MonitorLiveConfigTransportTests.frame(self.LIVE)
+        )
+        device = {**DEVICE, "ssh_user": "cumulus", "ssh_ips": [DEVICE["ip"]]}
+        for extra in ("", "__HOSTNAME_BEGIN__\nforeign\n__HOSTNAME_END__\n",
+                      "__ETH0_MAC_BEGIN__\n02:00:00:00:00:02\n__ETH0_MAC_END__\n"):
+            with self.subTest(extra=extra), mock.patch.object(MONITOR, "run_command", return_value={"returncode": 0, "stdout": output + extra, "stderr": ""}) as run:
+                result = MONITOR.collect_switch(device, 5, None, Path("/private/fixture-known-hosts"))
+                self.assertEqual(1, run.call_count)
+                proof = self.observer()(device, result)
+                self.assertIs(not bool(extra), proof["batch_identity_verified"])
+                if extra:
+                    self.assertEqual("", proof["live_state_sha256"])
+
+    def test_optional_missing_interface_uses_real_zero_line_framing_not_a_synthetic_blank_line(self):
+        raw = (
+            "__HOSTNAME_BEGIN__\nleaf01\n__HOSTNAME_END__\n"
+            "__ETH0_MAC_BEGIN__\n02:00:00:00:00:01\n__ETH0_MAC_END__\n"
+            "__ETH1_MAC_BEGIN__\n__ETH1_MAC_END__\n"
+        )
+        self.assertIs(True, MONITOR.monitor_identity_frame_valid(raw))
+        self.assertIs(False, MONITOR.monitor_identity_frame_valid(raw.replace("leaf01\n", "leaf01\nforeign\n")))
+
+    def test_malformed_candidate_interface_is_a_negative_observation_not_a_monitor_crash(self):
+        for selected in (([], "020000000001"), (None, "020000000001"), ("eth0", "unsafe-020000000001")):
+            with self.subTest(selected=selected):
+                device = {**DEVICE, "candidate_identity": {"192.0.2.10": selected}}
+                proof = self.observer()(device, self.result())
+                self.assertIs(False, proof["batch_identity_verified"])
+                self.assertEqual("", proof["live_state_sha256"])
+
+    def test_server_unknown_and_unbound_identity_cannot_acquire_switch_configuration_proof(self):
+        for mutation in ({"type": "server"}, {"type": "ufm"}, {"type": "unknown"},
+                         {"unbound_identity": True}, {"unbound_identity": 0}):
+            with self.subTest(mutation=mutation):
+                proof = self.observer()({**DEVICE, **mutation}, self.result())
+                self.assertIs(False, proof["batch_identity_verified"])
+                self.assertEqual("", proof["live_state_sha256"])
+
+
 class MonitorLiveConfigTransportTests(unittest.TestCase):
     LIVE = "- set:\n    system:\n      hostname: leaf01\n\n"
 
@@ -1420,6 +1543,11 @@ class MonitorLiveConfigTransportTests(unittest.TestCase):
             self.assertEqual(self.LIVE, result["live_config_observation"]["text"])
             self.assertEqual(hashlib.sha256(self.LIVE.encode()).hexdigest(), result["live_config_observation"]["sha256"])
             self.assertEqual(["SSH", "hostname", "mac", "live"], trace.read_text().splitlines())
+            proof = MONITOR.bind_monitor_live_observation(device, result)
+            self.assertIs(True, proof["batch_identity_verified"])
+            self.assertEqual(("leaf01", "eth0", "192.0.2.10", "020000000001"),
+                             (proof["hostname"], proof["interface"], proof["transport_ip"], proof["mac_plain"]))
+            self.assertEqual(hashlib.sha256(self.LIVE.encode()).hexdigest(), proof["live_state_sha256"])
 
 
 class ConfigSyncSingleConnectionProofTests(unittest.TestCase):

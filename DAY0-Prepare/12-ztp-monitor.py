@@ -2529,6 +2529,101 @@ def parse_remote_interface_macs(text: str) -> dict[str, str]:
     return parsed
 
 
+def monitor_identity_frame_valid(text: str) -> bool:
+    """Do not let first-match marker parsing hide a second identity frame."""
+    for name in ("HOSTNAME", "ETH0_MAC", "ETH1_MAC"):
+        begin, end = f"__{name}_BEGIN__", f"__{name}_END__"
+        if text.count(begin) != 1 or text.count(end) != 1:
+            return False
+        framed = re.findall(
+            rf"(?m)^{re.escape(begin)}\n(?:([^\n]*)\n)?{re.escape(end)}(?:\n|$)", text,
+        )
+        if len(framed) != 1:
+            return False
+    return True
+
+
+def bind_monitor_live_observation(
+    device: dict[str, Any], result: dict[str, Any],
+) -> dict[str, Any]:
+    """Read-only observation, not a persisted receipt or generation authority.
+
+    The collector's own successful BatchMode connection must provide *both*
+    full inventory identity and the raw live digest. Transitional collection
+    identities are useful diagnostics but cannot prove intended configuration.
+    Never copy a previous device observation into a new result.
+    """
+    rejected = {
+        "schema_version": 1, "source": "monitor_batchmode",
+        "batch_identity_verified": False, "hostname": "", "interface": "",
+        "transport_ip": "", "mac_plain": "", "live_state_sha256": "",
+        "reason": "transport-not-verified",
+    }
+    if (result.get("kind") != "ok" or type(result.get("returncode")) is not int
+            or result["returncode"] != 0
+            or result.get("batch_mode_verified") is not True
+            or result.get("identity_frame_valid") is not True):
+        return rejected
+    rejected = {**rejected, "reason": "inventory-identity-not-matched"}
+    hostname = str(device.get("hostname") or "").strip()
+    remote_hostname = str(result.get("remote_hostname") or "").strip()
+    address = result.get("connected_ip")
+    if (str(device.get("type") or "").casefold() not in {"eth", "eth_spx", "spx", "air", "ib", "nvl"}
+            or device.get("unbound_identity", False) is not False
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,252}", hostname)
+            or remote_hostname.casefold() != hostname.casefold()
+            or not isinstance(address, str) or len(address) > 45):
+        return rejected
+    try:
+        ipaddress.ip_address(address)
+    except ValueError:
+        return rejected
+    candidates = device.get("candidate_identity") or {}
+    if not isinstance(candidates, dict):
+        return rejected
+    if address in candidates:
+        expected = candidates[address]
+        if not isinstance(expected, (tuple, list)) or len(expected) != 2:
+            return rejected
+        interface, raw_expected = expected
+    elif address == device.get("ip"):
+        interface, raw_expected = "eth0", device.get("mac_plain")
+    else:
+        return rejected
+    # These are the two explicit management identities collected by the
+    # fixed remote probe, not a guessed MAC from another interface.
+    if (not isinstance(interface, str) or interface not in {"eth0", "eth1"}
+            or not isinstance(raw_expected, str)
+            or not re.fullmatch(r"(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}|[0-9A-Fa-f]{12}", raw_expected)):
+        return rejected
+    expected_mac = normalize_mac(raw_expected)
+    raw_remote = result.get(f"remote_{interface}_mac")
+    if (not re.fullmatch(r"[0-9a-f]{12}", expected_mac)
+            or not isinstance(raw_remote, str)
+            or not re.fullmatch(r"(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}|[0-9A-Fa-f]{12}", raw_remote)
+            or normalize_mac(raw_remote) != expected_mac):
+        return rejected
+    rejected = {**rejected, "reason": "live-state-not-verified"}
+    live = result.get("live_config_observation")
+    if (not isinstance(live, dict) or set(live) != {"kind", "text", "sha256"}
+            or live["kind"] != "ok" or not isinstance(live["text"], str)):
+        return rejected
+    try:
+        payload = live["text"].encode("utf-8")
+    except UnicodeEncodeError:
+        return rejected
+    if not live["text"].strip() or len(payload) > MAX_LIVE_CONFIG_BYTES:
+        return rejected
+    digest = hashlib.sha256(payload).hexdigest()
+    if live["sha256"] != digest:
+        return rejected
+    return {
+        **rejected, "batch_identity_verified": True, "hostname": hostname,
+        "interface": interface, "transport_ip": address, "mac_plain": expected_mac,
+        "live_state_sha256": digest, "reason": "",
+    }
+
+
 def probe_shared_address_identity(
     address: str, candidates: list[dict[str, Any]], timeout: int,
     identity: Optional[Path], known_hosts: Path,
@@ -2759,6 +2854,8 @@ def collect_switch(device: dict[str, Any], timeout: int, identity: Optional[Path
         kind = "unreachable"
     return {
         "kind": kind, "returncode": result["returncode"], "stderr": stderr,
+        "batch_mode_verified": kind == "ok" and bool(connected_ip),
+        "identity_frame_valid": monitor_identity_frame_valid(result["stdout"]),
         "live_config_observation": (
             parse_live_config_observation(result["stdout"])
             if result["returncode"] == 0
@@ -2878,6 +2975,9 @@ def analyze_switch(
     device: dict[str, Any], result: dict[str, Any],
     source_timezone: dt.tzinfo = dt.timezone.utc,
 ) -> None:
+    # Replace even on an early transport/log return: a failed new observation
+    # must not inherit a preceding successful connection's proof.
+    device["configuration_observation"] = bind_monitor_live_observation(device, result)
     kind = result["kind"]
     observed_at = str(result.get("observed_at") or now_local().isoformat(timespec="seconds"))
     device["observed_at"] = observed_at
@@ -3558,6 +3658,7 @@ def snapshot_device_state(report: dict[str, Any]) -> dict[str, Any]:
             "mac": device.get("mac", ""),
             "template": device.get("template", ""),
             "config_method": device.get("config_method", ""),
+            "configuration_observation": device.get("configuration_observation", {}),
             "dynamic_dhcp": bool(device.get("dynamic_dhcp")),
             "unbound_identity": bool(device.get("unbound_identity")),
             "managed_ztp": bool(device.get("managed_ztp")),
