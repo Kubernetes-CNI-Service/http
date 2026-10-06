@@ -1867,6 +1867,24 @@ FANupper        A3          M4      S4      OK     fan
 
 
 class ControlPlaneTests(unittest.TestCase):
+    def bind_owned_config_receipt(self, project, result):
+        """Positive fixture now includes a real local single-writer era.
+
+        Keep the existing identity/duplicate/summary assertions. Do not make
+        an unbound legacy receipt pass the new generation contract.
+        """
+        root = project.resolve() / "99-output-ztp/manual-config-sync"
+        authority = self.manual.config_sync_authority
+        ticket = authority.begin(root, result["hostname"], result["operation_id"],
+                                 result["trigger_id"], result["trigger_source"])
+        self.assertEqual(1, ticket["generation"])
+        namespace = f"{root.stat().st_dev}:{root.stat().st_ino}"
+        bound = {**result, "generation": 1, "source_identity": namespace,
+                 "batch_identity_verified": True, "live_state_sha256": "a" * 64}
+        current = authority.finish(root, ticket, bound)
+        self.assertEqual((1, "success", False), (current["generation"], current["state"], current["veto"]))
+        return bound
+
     @classmethod
     def setUpClass(cls):
         cls.manual_cgi = load_module(
@@ -5863,9 +5881,11 @@ print('{{"factory_records_active":true,"valid":true}}')
                 "operation": "replace-config", "effective_operation": "replace-config",
                 "trigger_source": "manual_config_sync_web",
             }
+            expected = self.bind_owned_config_receipt(project, expected)
 
             def write_summary(path, result):
                 path.write_text(json.dumps({
+                    "generation": 1,
                     "state": "triggered", "operation": "replace-config",
                     "effective_operation": "replace-config",
                     "operation_id": "req-5-operation",
@@ -5873,6 +5893,7 @@ print('{{"factory_records_active":true,"valid":true}}')
                     "targets": [{
                         "hostname": "EXAMPLE-Leaf01", "trigger_id": "req-5-trigger",
                         "effective_operation": "replace-config",
+                        "generation": 1,
                     }],
                     "results": [result],
                 }), encoding="utf-8")
@@ -5925,9 +5946,11 @@ print('{{"factory_records_active":true,"valid":true}}')
                 "operation": "replace-config", "effective_operation": "replace-config",
                 "trigger_source": "manual_config_sync_web",
             }
+            result = self.bind_owned_config_receipt(project, result)
             receipt.write_text(json.dumps(result), encoding="utf-8")
             summary = receipt.parent.parent / "summary.json"
             final = {
+                "generation": 1,
                 "state": "triggered", "operation": "replace-config",
                 "effective_operation": "replace-config",
                 "operation_id": "req-5-operation",
@@ -5935,6 +5958,7 @@ print('{{"factory_records_active":true,"valid":true}}')
                 "targets": [{
                     "hostname": "EXAMPLE-Leaf01", "trigger_id": "req-5-trigger",
                     "effective_operation": "replace-config",
+                    "generation": 1,
                 }],
                 "results": [result],
             }
@@ -6088,7 +6112,9 @@ print('{{"factory_records_active":true,"valid":true}}')
     def test_replace_config_real_cli_receipt_is_consumed_by_real_worker(self):
         """The actual CLI writer and worker reader agree on the web request identity."""
         with tempfile.TemporaryDirectory() as directory:
-            project = Path(directory)
+            # CLI main canonicalizes the project before opening its no-follow
+            # authority scope; preserve that precondition at this lower boundary.
+            project = Path(directory).resolve()
             devices = project / "02-devices_config.csv"
             devices.write_text("hostname,type\nEXAMPLE-Leaf01,eth\n", encoding="utf-8")
             queue = project / "manual-ztp.request.json"
@@ -6161,6 +6187,11 @@ print('{{"factory_records_active":true,"valid":true}}')
             def run_cli(_command, **_kwargs):
                 nonlocal produced
                 self.assertEqual(command, _command)
+                ticket = self.manual.config_sync_authority.begin(
+                    run_dir.parent.resolve(), "EXAMPLE-Leaf01", request["operation_id"],
+                    request["trigger_id"], "manual_config_sync_web",
+                )
+                self.assertEqual(1, ticket["generation"])
                 with mock.patch.object(
                     self.manual, "connect_and_verify", return_value=("192.0.2.10", "eth0"),
                 ), mock.patch.object(
@@ -6176,8 +6207,10 @@ print('{{"factory_records_active":true,"valid":true}}')
                         trigger_id=request["trigger_id"], operation="replace-config",
                         operation_id=request["operation_id"], prepared=prepared,
                         requested_operation="replace-config",
+                        authority_ticket=ticket,
                     )
                     self.manual.atomic_json(run_dir / "summary.json", {
+                        "generation": 1,
                         "state": "triggered", "operation": "replace-config",
                         "effective_operation": "replace-config",
                         "operation_id": request["operation_id"],
@@ -6186,6 +6219,7 @@ print('{{"factory_records_active":true,"valid":true}}')
                             "hostname": "EXAMPLE-Leaf01",
                             "trigger_id": request["trigger_id"],
                             "effective_operation": "replace-config",
+                            "generation": 1,
                         }],
                         "results": [produced],
                     })

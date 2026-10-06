@@ -21,6 +21,10 @@ import time
 
 
 HTTP_ROOT = Path(__file__).resolve().parent.parent
+if str(HTTP_ROOT) not in sys.path:
+    sys.path.insert(0, str(HTTP_ROOT))
+from ztp import config_sync_authority
+
 STATUS_DIR = HTTP_ROOT / "monitor/status"
 REQUEST_FILE = STATUS_DIR / "manual-ztp.request.json"
 STATUS_FILE = STATUS_DIR / "manual-ztp.status.json"
@@ -592,6 +596,16 @@ def _config_sync_summary_members(summary):
     return targets, indexed_results
 
 
+def _current_config_sync_authority(project, hostname):
+    """Read local causal history; missing/unsafe authority cannot promote."""
+    try:
+        return config_sync_authority.read_current(
+            project / "99-output-ztp/manual-config-sync", hostname,
+        )
+    except (OSError, config_sync_authority.AuthorityError):
+        return None
+
+
 def accepted_result(
     trigger_id, *, hostname="", operation_id="", operation="", trigger_source="",
     exclude_paths=(), exclude_inodes=(),
@@ -610,12 +624,25 @@ def accepted_result(
             return {}
         matches = []
         directory = project / "99-output-ztp" / "manual-config-sync"
+        authority = _current_config_sync_authority(project, hostname)
+        if (not authority or authority["state"] != "success"
+                or authority["veto"] is not False
+                or any(authority[field] != value for field, value in (
+                    ("operation_id", operation_id), ("trigger_id", trigger_id),
+                    ("trigger_source", trigger_source),
+                ))):
+            return {}
         for path in directory.glob("*/*/result.json"):
             if path in exclude_paths or path.parent.name.casefold() != hostname.casefold():
                 continue
             result = _read_new_config_sync_receipt(
                 path, exclude_inodes=exclude_inodes,
             )
+            if (type(result.get("generation")) is not int
+                    or result["generation"] != authority["generation"]
+                    or result.get("source_identity") != authority["source_identity"]
+                    or config_sync_authority.receipt_digest(result) != authority["receipt_sha256"]):
+                continue
             if not all((
                 str(result.get("hostname") or "").casefold() == hostname.casefold(),
                 str(result.get("operation_id") or "") == operation_id,
@@ -634,6 +661,8 @@ def accepted_result(
                 summary.get("effective_operation") == operation,
                 summary.get("operation_id") == operation_id,
                 summary.get("trigger_source") == trigger_source,
+                type(summary.get("generation")) is int,
+                summary.get("generation") == authority["generation"],
             )):
                 continue
             members = _config_sync_summary_members(summary)
@@ -647,6 +676,8 @@ def accepted_result(
                 and str(item.get("hostname") or "").casefold() == hostname.casefold()
                 and item.get("trigger_id") == trigger_id
                 and item.get("effective_operation") == operation
+                and type(item.get("generation")) is int
+                and item.get("generation") == authority["generation"]
             ]
             matching_results = [
                 item for item in results
@@ -656,6 +687,10 @@ def accepted_result(
             ]
             if len(matching_targets) == 1 and matching_results == [result]:
                 matches.append(result)
+        # Another writer may withdraw/advance the era while these files are
+        # read. Recheck its local history before returning positive evidence.
+        if _current_config_sync_authority(project, hostname) != authority:
+            return {}
         return matches[0] if len(matches) == 1 else {}
     for directory in ("manual-trigger", "manual-reset", "manual-config-sync"):
         for path in (project / "99-output-ztp" / directory).glob("*/*/result.json"):

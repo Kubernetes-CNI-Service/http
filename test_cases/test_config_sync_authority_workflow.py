@@ -263,6 +263,101 @@ class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
         produced = self.run_writer(project, client, prepared, run="first", ticket=ticket)
         return root / "first/EXAMPLE-Leaf01/result.json", produced
 
+    def worker_bundle(self, project):
+        receipt, produced = self.published_receipt(project)
+        devices = project / "02-devices_config.csv"
+        devices.write_text("hostname,type\nEXAMPLE-Leaf01,eth\n", encoding="utf-8")
+        summary = {
+            "state": "triggered", "operation": "replace-config",
+            "effective_operation": "replace-config", "operation_id": "op-1",
+            "trigger_source": "manual_config_sync_cli", "generation": 1,
+            "targets": [{"hostname": "EXAMPLE-Leaf01", "trigger_id": "trigger-1",
+                         "effective_operation": "replace-config", "generation": 1}],
+            "results": [produced],
+        }
+        self.manual.atomic_json(receipt.parent.parent / "summary.json", summary)
+        return devices, receipt, produced, summary
+
+    def accept_own_writer(self):
+        return self.worker.accepted_result(
+            "trigger-1", hostname="EXAMPLE-Leaf01", operation_id="op-1",
+            operation="replace-config", trigger_source="manual_config_sync_cli",
+        )
+
+    def test_worker_cannot_reuse_success_after_local_revocation_or_new_pending_era(self):
+        for transition in ("revoke", "next-era", "missing-authority"):
+            with self.subTest(transition=transition), tempfile.TemporaryDirectory() as directory:
+                project = Path(directory).resolve()
+                devices, receipt, produced, _summary = self.worker_bundle(project)
+                root = receipt.parents[2]
+                before = receipt.read_bytes()
+                authority = self.manual.config_sync_authority
+                with mock.patch.object(self.worker, "DEVICES_CSV", devices):
+                    self.assertEqual(produced, self.accept_own_writer())
+                    if transition == "revoke":
+                        authority.revoke(root, "EXAMPLE-Leaf01")
+                    elif transition == "next-era":
+                        pending = authority.begin(root, "EXAMPLE-Leaf01", "op-2", "trigger-2", "manual_config_sync_cli")
+                        self.assertEqual((2, "pending", True), (pending["generation"], pending["state"], pending["veto"]))
+                    else:
+                        (root / ".authority").rename(root / "isolated-old-authority")
+                    self.assertEqual({}, self.accept_own_writer())
+                self.assertEqual(before, receipt.read_bytes())
+                if transition == "missing-authority":
+                    self.assertFalse((root / ".authority").exists(), "reader cannot mint replacement history")
+
+    def test_worker_checks_own_generation_namespace_digest_and_summary_generation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve()
+            devices, receipt, produced, summary = self.worker_bundle(project)
+            summary_path = receipt.parent.parent / "summary.json"
+            with mock.patch.object(self.worker, "DEVICES_CSV", devices):
+                self.assertEqual(produced, self.accept_own_writer())
+                for field, value in (("generation", None), ("generation", True),
+                                     ("generation", 1.0), ("generation", 2),
+                                     ("source_identity", "0:0"),
+                                     ("live_state_sha256", "b" * 64)):
+                    with self.subTest(receipt_field=field, value=value):
+                        mutant = {**produced, field: value}
+                        self.manual.atomic_json(receipt, mutant)
+                        self.manual.atomic_json(summary_path, {**summary, "results": [mutant]})
+                        before = receipt.read_bytes()
+                        self.assertEqual({}, self.accept_own_writer())
+                        self.assertEqual(before, receipt.read_bytes())
+                self.manual.atomic_json(receipt, produced)
+                for value in (None, True, 1.0, 2):
+                    with self.subTest(summary_generation=value):
+                        self.manual.atomic_json(summary_path, {**summary, "generation": value})
+                        self.assertEqual({}, self.accept_own_writer())
+                    with self.subTest(target_generation=value):
+                        self.manual.atomic_json(summary_path, {**summary, "targets": [
+                            {**summary["targets"][0], "generation": value},
+                        ]})
+                        self.assertEqual({}, self.accept_own_writer())
+                self.manual.atomic_json(summary_path, summary)
+                self.assertEqual(produced, self.accept_own_writer())
+
+    def test_worker_rechecks_local_era_after_receipt_and_summary_read(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve()
+            devices, receipt, produced, _summary = self.worker_bundle(project)
+            original_read = self.worker._read_new_config_sync_receipt
+            changed = False
+            def next_era_after_summary(path, **kwargs):
+                nonlocal changed
+                value = original_read(path, **kwargs)
+                if path.name == "summary.json" and not changed:
+                    changed = True
+                    self.manual.config_sync_authority.begin(
+                        receipt.parents[2], "EXAMPLE-Leaf01", "op-2", "trigger-2", "manual_config_sync_cli",
+                    )
+                return value
+            with mock.patch.object(self.worker, "DEVICES_CSV", devices), \
+                    mock.patch.object(self.worker, "_read_new_config_sync_receipt", side_effect=next_era_after_summary):
+                self.assertEqual({}, self.accept_own_writer())
+            self.assertTrue(changed)
+            self.assertEqual(produced, json.loads(receipt.read_text()))
+
     def test_real_worker_rejects_writer_receipt_with_unsafe_mode_or_foreign_owner(self):
         with tempfile.TemporaryDirectory() as directory:
             receipt, produced = self.published_receipt(Path(directory).resolve())
