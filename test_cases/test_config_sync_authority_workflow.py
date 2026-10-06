@@ -24,6 +24,64 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
+    def test_no_ssh_current_cycle_cannot_borrow_persisted_nine_stage_completion(self):
+        from test_cases.module_loader import load_script
+        from test_cases import test_load_release_transaction as release_fixture
+        monitor = load_script("f02_uncollected_current_observation", ROOT / "DAY0-Prepare/12-ztp-monitor.py")
+        html = load_script("f02_uncollected_completion_html", ROOT / "monitor/generate-monitor-html.py")
+        expected_stages = ("dhcp", "bootstrap", "config_http", "ssh", "network",
+                           "version", "config_apply", "ssh_keys", "complete")
+        for history in (False, True):
+            with self.subTest(history=history):
+                fixture = release_fixture.ReleaseTransactionTests("test_writes_parent_release_after_all_components_match")
+                fixture.setUp()
+                try:
+                    project = fixture.project.resolve()
+                    fixture.global_file.write_text(fixture.global_file.read_text().replace("status: enabled", "status: disabled"))
+                    inputs = release_fixture.LOAD.replace(fixture.inputs, settings=release_fixture.LOAD.replace(fixture.inputs.settings, dhcp_enabled=False))
+                    release_fixture.LOAD.validate_and_publish_release(project, inputs, publish=True)
+                    apache, air, reports = project / "apache.log", project / "air.json", project / "reports"
+                    apache.write_text("")
+                    air.write_text('{"nodes": {}}')
+                    old_path, old_bytes = None, None
+                    if history:
+                        prior = {"hostname": "leaf01", "type": "eth", "ip": "192.0.2.10",
+                                 "mac": "02:00:00:00:00:01", "mac_plain": "020000000001", "ztp_round": 1, "overall": "success",
+                                 "issues": [], "events": [], "progress": {"done": 9, "total": 9, "percent": 100},
+                                 "stages": {name: {"status": "success", "detail": "independent old success",
+                                                     "timestamp": "2026-09-01T12:00:00+08:00", "success_index": 1}
+                                            for name in expected_stages}}
+                        self.assertTrue(monitor.completion_handoff_device_complete(prior))
+                        self.assertTrue(html.ztp_completed(prior))
+                        report = {"project": "demo", "scope": "prod", "devices": [prior], "services": {},
+                                  "collection_errors": [], "generated_at": "2026-09-01T12:00:00+08:00", "since_minutes": 10}
+                        old_path = monitor.write_report(report, reports, {}) / "report.json"
+                        old_bytes = old_path.read_bytes()
+                    args = monitor.parser().parse_args([str(project), "--offline", "--no-ssh", "--apache-log", str(apache),
+                                                       "--air-json", str(air), "--output-dir", str(reports)])
+                    monitor.validate_monitor_mode(args, project)
+                    with mock.patch.object(monitor, "collect_switch", side_effect=AssertionError("no SSH admitted")), \
+                            mock.patch.object(monitor, "collect_dhcp", side_effect=AssertionError("disabled cannot read DHCP")), \
+                            mock.patch.object(monitor, "service_state", side_effect=AssertionError("offline cannot query services")):
+                        current = monitor.monitor_once(args, project)
+                    device = json.loads((current / "report.json").read_text())["devices"][0]
+                    with self.subTest(history=history, check="current-observation"):
+                        observation = device.get("configuration_observation", {})
+                        self.assertIs(False, observation.get("batch_identity_verified"))
+                        self.assertEqual("", observation.get("live_state_sha256"))
+                        self.assertEqual("transport-not-verified", observation.get("reason"))
+                    with self.subTest(history=history, check="overall"):
+                        self.assertNotEqual("success", device["overall"])
+                    with self.subTest(history=history, check="machine"):
+                        self.assertFalse(monitor.completion_handoff_device_complete(device))
+                    with self.subTest(history=history, check="html"):
+                        self.assertFalse(html.ztp_completed(device))
+                    if old_path is not None:
+                        self.assertEqual(old_bytes, old_path.read_bytes(), "retain prior snapshot as history, never rewrite it as current proof")
+                    self.assertFalse((project / "99-output-ztp/manual-config-sync").exists(), "absent collection cannot mint an era or receipt")
+                finally:
+                    fixture.tearDown()
+
     def test_disabled_offline_admission_cannot_be_reused_after_real_release_mode_changes(self):
         from test_cases.module_loader import load_script
         from test_cases import test_load_release_transaction as release_fixture

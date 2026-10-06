@@ -4897,6 +4897,13 @@ def monitor_once(args: argparse.Namespace, project: Path) -> Path:
                 switch_results[device["hostname"]] = result
                 analyze_switch(device, result, switch_timezone)
     for device in devices:
+        if device["hostname"] not in switch_results:
+            # No current collector session is evidence too: make the veto
+            # explicit before old stages are carried into this report. Never
+            # borrow a preceding cycle's identity or mint a writer generation.
+            device["configuration_observation"] = bind_monitor_live_observation(
+                device, {"kind": "not-collected"},
+            )
         device.setdefault("observed_at", now_local().isoformat(timespec="seconds"))
     assign_ztp_rounds(
         devices, previous_report, latest_manual_trigger_markers(output_root),

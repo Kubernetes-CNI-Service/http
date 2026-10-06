@@ -2435,7 +2435,7 @@
     {
       "id": "f02_fresh_observation_to_report_completion",
       "members": ["ztp/config_sync_authority.py", "DAY0-Prepare/12-ztp-monitor.py", "monitor/generate-monitor-html.py"],
-      "tests": ["test_cases.test_ztp_group_handoff_display"]
+      "tests": ["test_cases.test_ztp_group_handoff_display", "test_cases.test_config_sync_authority_workflow"]
     },
     {
       "id": "f02_info_health_without_ztp_completion",

@@ -249,6 +249,12 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-F02-6-001 — 当前轮九阶段证据与交接一致性
 
+- 未采集当前轮：在精确授权后暂时禁用本案 SSH 采集或构造无采集资格的目标，保留旧
+  九阶段成功快照；新报告须明示未验证的当前观察，overall/HTML/机器不得借旧阶段
+  放行。恢复后仅凭实际同会话 BatchMode 身份和 live 证据再判定，保留旧快照及前后
+  字节/inode/摘要。私有真实 load → 离线监控 → JSON → HTML workflow 已登记；真机
+  NOT RUN，不因此取得设备/服务权限，不新建收据/代次或清除他方写者历史。
+
 - 显式新观察否决：独立 direct 与真实 analyzer → report → HTML/机器 workflow 覆盖
   无手工配置 journal 的当前失败观察、闭合 schema、严格布尔、inventory 接口身份和
   digest；旧九阶段成功不得掩盖失败，所选 eth1 正例保留。真机仍 NOT RUN，需精确
