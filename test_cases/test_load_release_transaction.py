@@ -1814,6 +1814,74 @@ class ReleaseTransactionTests(unittest.TestCase):
             journal, descriptor, backend,
         )
 
+    def test_cross_project_failure_restore_uses_wal_before_runtime_receipt(self) -> None:
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash(freeze_q_links=False)
+        old_project, project, common = state[:3]
+        snapshot = LOAD.snapshot_active_setup_state(expected_project=old_project)
+        context = LOAD.CrossProjectRollbackContext(
+            old_project, "generations/aaaaaaaaaaaaaaaaaaaa",
+            old_project / "99-output-ztp/rollback-receipts/aaaaaaaaaaaaaaaaaaaa", snapshot,
+        )
+        directory = self.ztp / "config/new-key-root"
+        link = directory / "operator.pub"
+        target = project / "operator.pub"
+        target.write_bytes(b"Q key fixture\n")
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(SETUP, "ZTP", str(self.ztp)), \
+                mock.patch.object(SETUP, "_SETUP_SWITCH_WAL_CONTEXT", (vars(LOAD), descriptor)):
+            SETUP._SetupLinkTransaction([]).ensure_directory(str(directory))
+            LOAD.register_setup_switch_journal_link(
+                journal, link, target, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            )
+            link.symlink_to(os.path.relpath(target, link.parent))
+            LOAD.register_setup_switch_journal_link(
+                journal, common, state[5], deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+                allow_existing_exact=True,
+            )
+            common.unlink()
+            common.symlink_to(os.path.relpath(state[5], common.parent))
+
+            def restore_runtime(*args, **kwargs):
+                self.assertFalse(os.path.lexists(directory), "runtime restore bypassed owned-directory WAL")
+                self.assertFalse(os.path.lexists(journal))
+                self.assertEqual(snapshot.manifest, state[7].read_bytes())
+                self.assertEqual(snapshot.links, {path: os.readlink(path) for path in snapshot.links})
+
+            with mock.patch.object(LOAD, "restore_runtime_rollback_receipt", side_effect=restore_runtime) as runtime:
+                LOAD.restore_cross_project_rollback_context(
+                    context, current_project=project, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+            runtime.assert_called_once()
+        backend.start.assert_not_called()
+
+    def test_cross_project_context_mode_mismatch_cannot_consume_pending_wal(self) -> None:
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        old_project, project = state[:2]
+        snapshot = LOAD.snapshot_active_setup_state(expected_project=old_project)
+        wrong = LOAD.ActiveSetupState(snapshot.project, snapshot.manifest,
+                                      0o600 if snapshot.manifest_mode != 0o600 else 0o644,
+                                      snapshot.links)
+        context = LOAD.CrossProjectRollbackContext(
+            old_project, "generations/aaaaaaaaaaaaaaaaaaaa",
+            old_project / "99-output-ztp/rollback-receipts/aaaaaaaaaaaaaaaaaaaa", wrong,
+        )
+        original_wal = journal.read_bytes()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "restore_runtime_rollback_receipt") as runtime:
+            with self.assertRaisesRegex(LOAD.LoadError, "context.*WAL|WAL.*context"):
+                LOAD.restore_cross_project_rollback_context(
+                    context, current_project=project, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+            runtime.assert_not_called()
+        self.assertEqual(original_wal, journal.read_bytes())
+        self.assertEqual(snapshot.manifest, state[7].read_bytes())
+        self.assertEqual(snapshot.links, {path: os.readlink(path) for path in snapshot.links})
+        backend.start.assert_not_called()
+
     def test_setup_sample_directory_has_owned_wal_before_first_shared_link(self) -> None:
         (*state, journal, descriptor, _backend) = self._prepare_cross_project_setup_crash(freeze_q_links=False)
         project = state[1]

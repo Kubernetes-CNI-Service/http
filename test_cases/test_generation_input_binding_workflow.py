@@ -696,6 +696,64 @@ finally:
             self.assertFalse((root / "ztp/.setup-switch-journal.json").exists())
             self.assertFalse((root / "service-started").exists())
 
+    def test_real_setup_failure_context_restores_durable_sample_before_runtime_phase(self):
+        """Parent's failure API must use disk WAL, not only its detached P links."""
+        with tempfile.TemporaryDirectory(prefix="r22-parent-wal-restore-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, p, q, common, p_only, _q_only, manifest, before, _hook, barrier, _home = fixture
+            sample = root / "ztp/optimize/q-sample"
+            first = self._run_private_load_setup_switch(
+                fixture, prepare_journal=True, first_link_prefix=str(sample) + os.sep,
+            )
+            self.assertEqual(23, first.returncode, first.stdout + first.stderr)
+            self.assertTrue(barrier.is_file())
+            recovery = """
+import importlib.util
+import json
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+root, p, q, common, p_only = map(Path, sys.argv[1:6])
+before = json.loads(sys.argv[6])
+spec = importlib.util.spec_from_file_location('fresh_parent_failure_recovery', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+wal = root / 'ztp/.setup-switch-journal.json'
+body = json.loads(wal.read_bytes())['body']
+state = load.ActiveSetupState(p, before['manifest'].encode(), body['manifest_mode'],
+                             {common: before['common'], p_only: before['p_only']})
+context = load.CrossProjectRollbackContext(p, 'generations/aaaaaaaaaaaaaaaaaaaa',
+                                          p / '99-output-ztp/rollback-receipts/aaaaaaaaaaaaaaaaaaaa', state)
+def runtime_phase(*args, **kwargs):
+    assert not (root / 'ztp/optimize/q-sample').exists()
+    assert not wal.exists()
+    assert (root / 'ztp/.setup_manifest').read_bytes() == state.manifest
+    assert load.snapshot_active_setup_state(expected_project=p).links == state.links
+    (root / 'runtime-phase-reached').write_bytes(b'after-durable-P-restore\\n')
+load.restore_runtime_rollback_receipt = runtime_phase
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    load.restore_cross_project_rollback_context(
+        context, current_project=q, deployment_lock_descriptor=descriptor,
+        services_quiesced=True, runtime_backend=SimpleNamespace(name='supervisor'),
+    )
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+            encoded = json.dumps({**before, "manifest": before["manifest"].decode()})
+            second = subprocess.run(
+                [sys.executable, "-B", "-c", recovery, str(root), str(p), str(q),
+                 str(common), str(p_only), encoded],
+                cwd=root, capture_output=True, text=True, check=False, timeout=30,
+            )
+            self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+            self.assertFalse(os.path.lexists(sample))
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            self.assertEqual(b"after-durable-P-restore\n", (root / "runtime-phase-reached").read_bytes())
+            self.assertFalse((root / "service-started").exists())
+
     def test_real_setup_legacy_sample_comparison_holds_before_first_shared_write(self):
         with tempfile.TemporaryDirectory(prefix="r22-sample-legacy-hold-") as name:
             fixture = self._private_setup_switch_fixture(Path(name))

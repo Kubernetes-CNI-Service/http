@@ -6888,6 +6888,8 @@ def recover_setup_switch_journal(
     services_quiesced: bool, runtime_backend: ServiceRuntimeBackend | None,
     verify_only: bool = False, manifest_candidate: bytes | None = None,
     inspect_only: bool = False,
+    expected_old_state: ActiveSetupState | None = None,
+    expected_new_project: Path | None = None,
 ) -> str:
     """Verify or restore P from a complete WAL and a known P/Q disk state.
 
@@ -6899,6 +6901,8 @@ def recover_setup_switch_journal(
         services_quiesced=services_quiesced,
         runtime_backend=runtime_backend,
     )
+    if (expected_old_state is None) != (expected_new_project is None):
+        raise LoadError("setup switch WAL context requires both P state and Q project")
     if type(inspect_only) is not bool or (inspect_only and (verify_only or manifest_candidate is not None)):
         raise LoadError("journal inspection must be read-only and unambiguous")
     if manifest_candidate is not None and not verify_only:
@@ -6938,6 +6942,11 @@ def recover_setup_switch_journal(
             links={Path(row["path"]): row["before"] for row in body["links"]
                    if row["before"] is not None},
         ))
+        if expected_old_state is not None:
+            expected = _validate_setup_state_receipt(expected_old_state)
+            if (state != expected
+                    or Path(new["path"]) != expected_new_project.resolve(strict=True)):
+                raise LoadError("setup switch WAL differs from the parent rollback context")
         rows = body["links"]
         if (not isinstance(rows, list) or not rows
                 or len({row["path"] for row in rows}) != len(rows)
@@ -7142,14 +7151,30 @@ def restore_cross_project_rollback_context(
     services_quiesced: bool,
     runtime_backend: ServiceRuntimeBackend | None,
 ) -> None:
-    """Restore P setup identity first, then its flat A runtime receipt."""
-    restore_active_setup_state(
-        context.setup_state,
-        current_project=current_project,
-        deployment_lock_descriptor=deployment_lock_descriptor,
-        services_quiesced=services_quiesced,
-        runtime_backend=runtime_backend,
-    )
+    """Restore all WAL-owned P/Q mutations first, then P's A runtime receipt.
+
+    The detached P link snapshot cannot describe a half-written Q manifest,
+    newly created shared directories, or retained real-directory backups.
+    A pending WAL must be consumed by its guarded recovery API, not bypassed
+    by the older link-only in-memory restore.  This never activates services.
+    """
+    journal = _setup_switch_journal_path()
+    if os.path.lexists(journal):
+        if context.project.resolve(strict=True) != context.setup_state.project.resolve(strict=True):
+            raise LoadError("setup switch WAL context has inconsistent P projects")
+        recover_setup_switch_journal(
+            journal, deployment_lock_descriptor=deployment_lock_descriptor,
+            services_quiesced=services_quiesced, runtime_backend=runtime_backend,
+            expected_old_state=context.setup_state, expected_new_project=current_project,
+        )
+    else:
+        restore_active_setup_state(
+            context.setup_state,
+            current_project=current_project,
+            deployment_lock_descriptor=deployment_lock_descriptor,
+            services_quiesced=services_quiesced,
+            runtime_backend=runtime_backend,
+        )
     restore_runtime_rollback_receipt(
         context.project, context.runtime_receipt,
         expected_current=context.selector_target,
