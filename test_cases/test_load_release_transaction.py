@@ -158,6 +158,12 @@ def assert_private_dhcp_transaction_retention(
                 shutil.copy2(command[-2], target)
             target.chmod(mode)
         elif operation == "cp":
+            if (outcome in {"restore-return", "restore-raise"}
+                    and target == live_dir / "dhcpd_eth.hosts"):
+                injected.append(outcome)
+                if outcome == "restore-raise":
+                    raise OSError("independent A restore copy fault")
+                return SimpleNamespace(returncode=1)
             shutil.copy2(command[-2], target, follow_symlinks=False)
         elif operation == "rm":
             cleanup.append(target)
@@ -185,7 +191,7 @@ def assert_private_dhcp_transaction_retention(
             raise OSError("independent DHCP parent directory open fault")
         return real_open(path, flags, *args, **kwargs)
 
-    if outcome == "precommit":
+    if outcome in {"precommit", "restore-return", "restore-raise"}:
         def fail_precommit():
             raise api.LoadError("independent precommit rejection")
         candidate.precommit_check = fail_precommit
@@ -199,16 +205,42 @@ def assert_private_dhcp_transaction_retention(
                 mock.patch.object(api.os, "fsync", side_effect=sync_parent):
             try:
                 api.mount_and_test_dhcp(parent_candidate=candidate)
-            except api.LoadError as exc:
+            except (api.LoadError, OSError) as exc:
                 if outcome in {"open", "fsync"}:
                     assert "持久化" in str(exc) and "未确认" in str(exc), str(exc)
                 elif outcome == "precommit":
                     assert "independent precommit rejection" in str(exc), str(exc)
+                elif outcome == "restore-return":
+                    assert "旧文件未能自动恢复" in str(exc), str(exc)
+                elif outcome == "restore-raise":
+                    assert "independent A restore copy fault" in str(exc), str(exc)
                 else:
                     raise
             else:
                 assert outcome == "success", "failure must propagate before service continuation"
         transactions = list(live_dir.glob(".load-dhcp-transaction-*"))
+        if outcome in {"restore-return", "restore-raise"}:
+            assert injected == [outcome], injected
+            assert not candidate.committed and not candidate.directory_synced
+            assert not candidate.destination.exists()
+            assert len(transactions) == 1, "incomplete A restore must retain original backups"
+            transaction, = transactions
+            backup = transaction / "backup"
+            assert stat.S_IMODE(backup.stat().st_mode) == 0o700
+            assert {p.name: p.read_bytes() for p in backup.iterdir()} == expected_a
+            assert {p.name for p in (transaction / "staged").iterdir()} == set(names)
+            assert not (live_dir / "dhcpd_eth.hosts").exists(), "fixture must reach partial restore"
+            assert not any(path == transaction or transaction in path.parents for path in cleanup), \
+                "failed A restore must not delete transaction evidence"
+            assert any("HOLD" in warning and str(transaction) in warning for warning in warnings)
+            assert not any("手工删除" in warning for warning in warnings)
+            try:
+                api.require_no_pending_dhcp_transaction(live_dir)
+            except api.LoadError as exc:
+                assert "pending DHCP transaction" in str(exc), str(exc)
+            else:
+                raise AssertionError("failed restore evidence did not fence a new LOAD")
+            return
         installed = {name: (live_dir / name).read_bytes() for name in names}
         if outcome in {"open", "fsync"}:
             assert injected == [outcome], injected
@@ -6344,6 +6376,13 @@ os.kill(os.getpid(), signal.SIGKILL)
             project = root / "project"
             project.mkdir()
             assert_private_dhcp_transaction_retention(LOAD, root, project, "precommit")
+
+    def test_failed_dhcp_a_restore_retains_transaction_evidence_and_fences_retry(self) -> None:
+        for boundary in ("restore-return", "restore-raise"):
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as name:
+                root, project = Path(name), Path(name) / "project"
+                project.mkdir()
+                assert_private_dhcp_transaction_retention(LOAD, root, project, boundary)
 
     def test_pending_dhcp_guard_preserves_every_occupied_evidence_shape(self) -> None:
         live = self.root / "private-dhcp-guard"

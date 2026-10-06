@@ -1965,8 +1965,16 @@ finally:
         """A new LOAD process must honor retained disk evidence, not candidate flags."""
         self._real_setup_uncertain_parent_dhcp_evidence(reenter=False, cold=True)
 
-    def _real_setup_uncertain_parent_dhcp_evidence(self, *, reenter, cold=False):
-        for boundary in ("open", "fsync"):
+    def test_real_setup_then_failed_dhcp_a_restore_preserves_transaction_evidence(self):
+        """A partial precommit restore cannot erase the only intact A copies."""
+        self._real_setup_uncertain_parent_dhcp_evidence(
+            reenter=False, outcomes=("restore-return", "restore-raise"),
+        )
+
+    def _real_setup_uncertain_parent_dhcp_evidence(
+        self, *, reenter, cold=False, outcomes=("open", "fsync"),
+    ):
+        for boundary in outcomes:
             with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as name:
                 fixture = self._private_setup_switch_fixture(Path(name))
                 root, _p, q, common, _p_only, _q_only, manifest, before, _hook, _barrier, _home = fixture

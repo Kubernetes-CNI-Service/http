@@ -256,6 +256,38 @@ unknown 超时重试门禁不解除，不手改 ledger 或套用上一候选的�
 `R22_DHCP_UNCERTAIN_REENTRY_LOAD_WORKFLOWS_EXIT=0` 与实际 exec exit0 相符。
 运行期间源/测试冻结，approved ledger、manifest 和运行态 setup manifest 字节未变。
 
+### R22 部分 DHCP A 恢复不得删除原备份候选
+
+旧安装算法在 parent replace 前失败后尝试回滚；恢复复制返回非零或抛 OSError 时，
+finally 仍删掉唯一完整 A backup/staged/事务。新独立 direct 和真实 SETUP→实际
+LOAD 安装 API workflow 以固定 A/B 字节、一次预提交拒绝、一次恢复复制故障覆盖
+该窗口：2 tests 的四个 subtest 均在原实现备份被删除处 FAIL / exit1。完整 RED 日志
+`outputs/test-diagnostics/r22-dhcp-restore-failure-evidence-red.log`，inode 145640130，
+size 4244，SHA256
+`e987e2c4bc3a7dbea8f43469d8cadf7c2692f38bae8933daf6aee0005c95367f`。
+
+候选在第一条回滚命令/提示之前标记恢复未完成，只在所有原恢复命令正常结束后
+清除此状态。非零、异常或中断不能授权 finally 清理 A 备份；原错误继续传播，
+事务/0700 backup/固定原 A 字节/B staged 保留并报告 HOLD，不提示手工删除。
+parent 候选仍未提交，故障目标保持缺席的部分恢复状态，不能假报完整 A；已保留
+的事务由新进程前置闸门拒绝。SETUP 后的 Q manifest/共享链接/WAL 原字节保留，
+无服务启动。原正常成功、完整预提交回滚清理、B 可见但未同步及新候选拒绝四个
+合同原样保留，新例与其共 6 tests / OK / exit0，日志
+`r22-dhcp-restore-failure-evidence-green.log`，inode 145644602，size 1360，SHA256
+`34a109d1ddd38033955c32e52a03ecc6d47653f40d29c4e25bf6d4fa0e352034`。
+
+完整 LOAD 模块加五项相关 workflow 共 301 tests / OK / exit0（55.937 秒），完整
+日志 `r22-dhcp-restore-failure-evidence-load-workflows.log`，inode 145650290，size 100480，
+SHA256 `cc7af3a4a21d1a0449536281b09f01e29f6a3086257e26cdbf44392e27a16a87`。
+读前后 stat/inode 稳定，运行中 97347 字节旧前缀 SHA256
+`ff3622d3855426b0d89242814b5e94582a1ce4ca336bba5ecdff01b0dc08a118` 未变。
+物理第 946 行 Ran、948 行 OK、原缓冲 stdout 后第 981 行完整
+`R22_DHCP_RESTORE_FAILURE_EVIDENCE_LOAD_WORKFLOWS_EXIT=0` 与实际 exec exit0 一致。
+源码/测试冻结，approved ledger、manifest 与运行态 setup manifest 未改。文件命令
+和 dhcpd 是私有端口；这里不是 root 真实入口、完整恢复后校验或恢复 fsync/断电
+证明，更不是旧 A 健康激活或 R22 整体验收。原 bootstrap/REQ19 超时原因仍待核，
+只做诊断回归，不因局部 PASS 盲跑 related/full，不手改 ledger，现场卡继续 OPEN。
+
 ### R22 未结清 DHCP 事务的新进程写前闸门候选
 
 内存候选重入闸门不能保护新 LOAD。独立新候选 direct 和真实 SETUP→父 B

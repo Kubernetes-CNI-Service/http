@@ -8233,6 +8233,8 @@ def mount_and_test_dhcp(
     copy rewrites only those three include statements for the first syntax
     check.  If an install or the final syntax check fails, every previous
     destination (including a symlink) is restored before the error is raised.
+    An incomplete restore instead retains its transaction and A evidence;
+    reported command failure is never permission to delete the only backups.
     Once B is visible, unconfirmed parent directory durability instead keeps
     installed B and the root-only A backup together for manual HOLD review.
     """
@@ -8281,6 +8283,7 @@ def mount_and_test_dhcp(
         raise LoadError(f"DHCP 事务目录已存在：{transaction_dir}")
 
     transaction_created = False
+    restore_incomplete = False
     build_workspace: tempfile.TemporaryDirectory[str] | None = None
     try:
         # Ubuntu's dhcpd AppArmor profile permits configuration reads below
@@ -8376,6 +8379,9 @@ def mount_and_test_dhcp(
                 # the HOLD before any service start. Rolling DHCP back behind
                 # the new parent would create the inverse split-brain.
                 raise
+            # Set before any rollback command (or warning). Return-code failure,
+            # exception, interruption or death cannot license A backup deletion.
+            restore_incomplete = True
             warn("DHCP 安装或最终语法检查失败；正在恢复本次操作前的四个文件")
             restore_errors = []
             for destination in mappings.values():
@@ -8400,19 +8406,22 @@ def mount_and_test_dhcp(
                     "DHCP 安装失败，且以下旧文件未能自动恢复："
                     + ", ".join(restore_errors)
                 )
+            restore_incomplete = False
             raise
     finally:
         if build_workspace is not None:
             build_workspace.cleanup()
-        if (transaction_created and parent_candidate is not None
-                and parent_candidate.committed and not parent_candidate.directory_synced):
-            # A is not automatically restored behind visible B, but neither
-            # may its recovery evidence be erased while B durability is unknown.
-            # Retention is not proof these copies survived a power failure.
+        if transaction_created and (restore_incomplete or (
+                parent_candidate is not None and parent_candidate.committed
+                and not parent_candidate.directory_synced)):
+            # Neither a partial A restore nor uncertain visible B may erase
+            # the original backup. Retention alone is not proof of complete
+            # rollback, healthy activation or survival across a power failure.
             try:
                 warn(
-                    "HOLD：B 已可见但目录持久化未确认；"
-                    f"保留 DHCP 事务及 root-only A 备份：{transaction_dir}；"
+                    ("HOLD：DHCP 旧文件恢复未完成；" if restore_incomplete
+                     else "HOLD：B 已可见但目录持久化未确认；")
+                    + f"保留 DHCP 事务及 root-only A 备份：{transaction_dir}；"
                     "服务保持停止，须人工核验实际 A/B 状态，不自动回退或清理"
                 )
             except BrokenPipeError:
