@@ -479,6 +479,10 @@ Apache/AIR、single-link 文件、独立输出及 no-SSH/no-watch/no-HTML/no-han
 `test_ztp_group_handoff_display.py` 串联真实监控快照写入、下一轮读取与真实 HTML 判据，
 证明历史损坏不能恢复“完成”。四个身份/晋升/轮次否决字段存在时必须是严格 boolean false；
 0、空字符串、null、数组和对象均不等价于没有否决，页面与机器交接遵守相同合同。
+`finalize_device` 的 overall success 同样受当前九阶段交接判据限制：第二轮缺失、无效、
+无时区或过期阶段时间不能仅凭复制的 success_index 宣称成功。真实快照/CSV/Markdown
+须保留 CURRENT_NINE_STAGE_PROOF_INCOMPLETE 诊断；新鲜可比证据可以消除此派生诊断，
+但不得改写旧快照。配置、代际权威本身没有因此新建或放宽。
 这些本地证据不证明真实采集器已执行，也不关闭 F02 的配置同步消费端剩余工作。
 
 SSH 身份负例夹具执行真实生成的 askpass Python body 时绑定当前测试解释器，

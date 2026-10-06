@@ -3608,7 +3608,9 @@ def finalize_device(device: dict[str, Any]) -> None:
     ]
     device["issues"][:] = [
         issue for issue in device["issues"]
-        if not isinstance(issue, dict) or issue.get("code") != "AUTHORITY_VETO_INVALID"
+        if not isinstance(issue, dict) or issue.get("code") not in {
+            "AUTHORITY_VETO_INVALID", "CURRENT_NINE_STAGE_PROOF_INCOMPLETE",
+        }
     ]
     if invalid_vetoes:
         device["issues"].append({
@@ -3653,6 +3655,16 @@ def finalize_device(device: dict[str, Any]) -> None:
         device["overall"] = "running"
     else:
         device["overall"] = "pending"
+    # The overall summary cannot claim more than the machine/HTML handoff
+    # predicate. In particular a copied index cannot make untimed or stale
+    # second-round stages complete. This is a derived diagnostic, not a new
+    # generation or a mutation of the original source receipts.
+    if device["overall"] == "success" and not completion_handoff_device_complete(device):
+        device["overall"] = "warning"
+        device["issues"].append({
+            "code": "CURRENT_NINE_STAGE_PROOF_INCOMPLETE", "severity": "warning",
+            "message": "当前轮九阶段证据不完整或时间不可比；总体成功与完成交接均不放行",
+        })
 
 
 def md_cell(value: Any) -> str:

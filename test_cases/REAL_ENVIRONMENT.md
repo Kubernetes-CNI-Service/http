@@ -249,6 +249,11 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-F02-6-001 — 当前轮九阶段证据与交接一致性
 
+- 第二轮总体状态一致性：私有 direct 覆盖九阶段各自缺失、无效、无时区及过期时间，
+  真实监控报告写入 → HTML/机器判据 workflow 核对总体不成功、无交接、诊断与旧快照
+  保留，以及新鲜可比证据恢复。该本地证据没有铸造配置来源收据或真机代际；真机
+  当前轮各阶段来源仍须另取证，仍 NOT RUN。
+
 - 离线静态入口：私有真实 load → release → validate_monitor_mode → monitor_once
   已覆盖可信 disabled 无 DHCP 文件、传入但不读取的旧路径、enabled 正反例和入口后
   release 模式切换。离线绝不访问设备或服务、不放行完成交接；该本地证据不等于

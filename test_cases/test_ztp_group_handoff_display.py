@@ -131,6 +131,50 @@ class CompletionDisplayParityTests(unittest.TestCase):
             self.assertTrue(HTML.ztp_completed(row))
             self.assertTrue(MONITOR.completion_handoff_device_complete(row))
 
+    def test_finalized_second_round_unknown_time_cannot_publish_overall_success(self):
+        invalid_times = ("", "not-a-time", "2026-09-01T12:00:00", None, True,
+                         "2026-09-01T10:00:00+08:00")
+        for name in EXPECTED_NINE_STAGES:
+            for invalid in invalid_times:
+                with self.subTest(stage=name, timestamp=invalid):
+                    row = self.complete_fixture()
+                    row.update(ztp_round=2, cycle_started_at="2026-09-01T11:59:00+08:00")
+                    for value in row["stages"].values():
+                        value["success_index"] = 2
+                    row["stages"][name]["timestamp"] = invalid
+                    MONITOR.finalize_device(row)
+                    self.assertNotEqual("success", row["overall"], "overall must obey the same current nine-stage proof")
+                    self.assertFalse(MONITOR.completion_handoff_device_complete(row))
+                    self.assertFalse(HTML.ztp_completed(row))
+
+    def test_real_report_unknown_second_round_time_remains_incomplete_then_current_evidence_recovers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            row = self.complete_fixture()
+            row.update(ztp_round=2, cycle_started_at="2026-09-01T11:59:00+08:00")
+            for value in row["stages"].values():
+                value["success_index"] = 2
+            row["stages"]["config_apply"]["timestamp"] = ""
+            MONITOR.finalize_device(row)
+            report = {"project": "private-fixture", "scope": "prod", "devices": [row],
+                      "generated_at": "2026-09-01T12:00:00+08:00", "since_minutes": 10,
+                      "services": {}, "collection_errors": []}
+            snapshot = MONITOR.write_report(report, root, {})
+            saved = json.loads((snapshot / "report.json").read_text())["devices"][0]
+            self.assertNotEqual("success", saved["overall"])
+            self.assertFalse(HTML.ztp_completed(saved))
+            self.assertEqual({}, MONITOR.ready_completion_handoff_reports({"scope": "prod", "devices": [saved]}))
+            self.assertIn("CURRENT_NINE_STAGE_PROOF_INCOMPLETE", (snapshot / "devices.csv").read_text())
+            self.assertIn("CURRENT_NINE_STAGE_PROOF_INCOMPLETE", (snapshot / "report.md").read_text())
+            # New independent, comparable source evidence can recover this
+            # derived diagnostic; the original negative snapshot is retained.
+            saved["stages"]["config_apply"]["timestamp"] = "2026-09-01T12:00:00+08:00"
+            MONITOR.finalize_device(saved)
+            self.assertEqual("success", saved["overall"])
+            self.assertTrue(MONITOR.completion_handoff_device_complete(saved))
+            self.assertTrue(HTML.ztp_completed(saved))
+            self.assertNotEqual("success", json.loads((snapshot / "report.json").read_text())["devices"][0]["overall"])
+
     def test_real_snapshot_history_veto_survives_html_and_next_monitor_cycle(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
