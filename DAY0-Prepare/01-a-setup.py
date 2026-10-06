@@ -845,6 +845,7 @@ def _register_setup_switch_link_before_write(link, target):
             services_quiesced=True,
             runtime_backend=load_api["service_runtime_backend"](),
             allow_existing_exact=True,
+            raw_target=os.path.relpath(target, os.path.dirname(link)),
         )
     except load_api["LoadError"] as exc:
         raise ValueError(f"setup 链接 WAL 写前登记失败：{link}: {exc}") from exc
@@ -3930,6 +3931,11 @@ def _finalize_infra_log_migration():
     state = _INFRA_LOG_MIGRATION
     if state is None:
         return
+    if _SETUP_SWITCH_WAL_CONTEXT is not None:
+        # Successful SETUP is not successful LOAD/B. Keep the receipt and
+        # original inode for disk-only recovery after Q manifest publication.
+        _INFRA_LOG_MIGRATION = None
+        return
     source, _, destination, receipt = state
     _mark_infra_log_receipt_finalizing(receipt)
     _complete_infra_log_finalization(source, destination, dict(receipt, phase="finalizing"))
@@ -4269,6 +4275,9 @@ class _SetupLinkTransaction:
         # rollback after an earlier backup has already been removed.  A failed
         # cleanup therefore retains that redundant backup for inspection.
         self.active = False
+        if _SETUP_SWITCH_WAL_CONTEXT is not None:
+            # The parent LOAD still owns the durable P→Q transaction.
+            return
         for _path, backup, _target, _source_dev, _source_ino, _target_dev, _target_ino, _rel_target in (
                 self.materialized_migrations):
             try:
@@ -4757,6 +4766,18 @@ def _write_manifest(proj_dir):
     """只记录本项目实际创建成功的链接，避免清单与文件系统状态不一致。"""
     expected = sorted(set(_collect_expected_links(proj_dir)))
     links = [lp for lp in expected if os.path.islink(lp)]
+    payload = (f"# setup manifest — proj: {proj_dir}\n"
+               + "".join(lp + "\n" for lp in links)).encode("utf-8")
+    if _SETUP_SWITCH_WAL_CONTEXT is not None:
+        load_api, lock_descriptor, *_rest = _SETUP_SWITCH_WAL_CONTEXT
+        try:
+            load_api["register_setup_switch_manifest"](
+                Path(ZTP) / ".setup-switch-journal.json", payload,
+                deployment_lock_descriptor=lock_descriptor, services_quiesced=True,
+                runtime_backend=load_api["service_runtime_backend"](),
+            )
+        except load_api["LoadError"] as exc:
+            raise ValueError(f"setup manifest WAL 写前登记失败：{exc}") from exc
     manifest_dir = os.path.dirname(MANIFEST_FILE)
     os.makedirs(manifest_dir, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(
@@ -4764,9 +4785,7 @@ def _write_manifest(proj_dir):
     )
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as f:
-            f.write(f"# setup manifest — proj: {proj_dir}\n")
-            for lp in links:
-                f.write(lp + "\n")
+            f.write(payload.decode("utf-8"))
             f.flush()
             os.fsync(f.fileno())
         os.chmod(temporary, 0o644)

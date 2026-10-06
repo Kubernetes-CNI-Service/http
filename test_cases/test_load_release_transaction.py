@@ -2456,6 +2456,111 @@ os.kill(os.getpid(), signal.SIGKILL)
         self.assertFalse(os.path.lexists(new_only))
         backend.start.assert_not_called()
 
+    def test_setup_wal_preserves_writer_relative_bytes_through_q_directory_alias(self) -> None:
+        (
+            _p, q, _common, _old_only, _new_only, _new_target, _new_only_target,
+            _manifest, _old_manifest, _old_links, journal, descriptor, backend,
+        ) = self._prepare_cross_project_setup_crash()
+        target = q / "owned.txt"
+        target.write_bytes(b"Q owned bytes\n")
+        alias = self.ztp / "q-output"
+        alias.symlink_to(os.path.relpath(q, alias.parent))
+        leaf = self.ztp / "q-readable"
+        raw = "q-output/owned.txt"
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.register_setup_switch_journal_link(
+                journal, leaf, alias / "owned.txt", raw_target=raw,
+                deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            )
+            leaf.symlink_to(raw)
+            rows = json.loads(journal.read_bytes())["body"]["links"]
+            self.assertEqual(raw, next(row["after"] for row in rows if row["path"] == str(leaf)))
+            self.assertEqual("restored-p", LOAD.recover_setup_switch_journal(
+                journal, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            ))
+        self.assertFalse(os.path.lexists(leaf))
+        self.assertTrue(alias.is_symlink())
+        backend.start.assert_not_called()
+
+    def test_setup_wal_registered_q_manifest_cold_restores_exact_p(self) -> None:
+        (
+            _p, q, common, old_only, new_only, new_target, new_only_target,
+            manifest, old_manifest, old_links, journal, descriptor, backend,
+        ) = self._prepare_cross_project_setup_crash()
+        common.unlink()
+        common.symlink_to(os.path.relpath(new_target, common.parent))
+        old_only.unlink()
+        new_only.symlink_to(os.path.relpath(new_only_target, new_only.parent))
+        candidate = (f"# setup manifest — proj: {q}\n"
+                     f"{common}\n{new_only}\n").encode()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.register_setup_switch_manifest(
+                journal, candidate, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            )
+            self.assertEqual(old_manifest, manifest.read_bytes())
+            manifest.write_bytes(candidate)
+            self.assertEqual("restored-p", LOAD.recover_setup_switch_journal(
+                journal, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            ))
+        self.assertEqual(old_manifest, manifest.read_bytes())
+        self.assertEqual(old_links, {path: os.readlink(path) for path in old_links})
+        self.assertFalse(os.path.lexists(new_only))
+        self.assertFalse(journal.exists())
+        backend.start.assert_not_called()
+
+    def test_setup_wal_registered_q_manifest_changed_bytes_hold_before_p_restore(self) -> None:
+        (
+            _p, q, common, old_only, new_only, new_target, new_only_target,
+            manifest, _old_manifest, _old_links, journal, descriptor, backend,
+        ) = self._prepare_cross_project_setup_crash()
+        common.unlink()
+        common.symlink_to(os.path.relpath(new_target, common.parent))
+        old_only.unlink()
+        new_only.symlink_to(os.path.relpath(new_only_target, new_only.parent))
+        candidate = (f"# setup manifest — proj: {q}\n"
+                     f"{common}\n{new_only}\n").encode()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.register_setup_switch_manifest(
+                journal, candidate, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            )
+            changed = candidate + b"# unapproved manifest suffix\n"
+            manifest.write_bytes(changed)
+            wal = journal.read_bytes()
+            q_links = {common: os.readlink(common), new_only: os.readlink(new_only)}
+            with self.assertRaisesRegex(LOAD.LoadError, "in-doubt"):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertEqual(changed, manifest.read_bytes())
+        self.assertEqual(wal, journal.read_bytes())
+        self.assertEqual(q_links, {path: os.readlink(path) for path in q_links})
+        self.assertFalse(os.path.lexists(old_only))
+        backend.start.assert_not_called()
+
+    def test_setup_wal_manifest_intent_rejects_unowned_q_manifest_without_writes(self) -> None:
+        (
+            _p, q, common, _old_only, _new_only, _target, _new_only_target,
+            manifest, old_manifest, old_links, journal, descriptor, backend,
+        ) = self._prepare_cross_project_setup_crash()
+        before = journal.read_bytes()
+        candidate = (f"# setup manifest — proj: {q}\n{common}\n").encode()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with self.assertRaises(LOAD.LoadError):
+                LOAD.register_setup_switch_manifest(
+                    journal, candidate, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertEqual(before, journal.read_bytes())
+        self.assertEqual(old_manifest, manifest.read_bytes())
+        self.assertEqual(old_links, {path: os.readlink(path) for path in old_links})
+        backend.start.assert_not_called()
+
     def test_setup_cold_recovery_q_manifest_without_commit_marker_is_in_doubt(self) -> None:
         (
             _old_project, new_project, common, old_only, new_only,

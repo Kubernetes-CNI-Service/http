@@ -885,6 +885,93 @@ finally:
             self.assertEqual(b'{"unowned":true}\n', receipt.read_bytes())
             self.assertTrue((root / "ztp/.setup-switch-journal.json").is_file())
 
+    def test_real_setup_q_manifest_commit_cold_recovers_p_and_original_logs(self):
+        """Q manifest publication and successful SETUP must retain P recovery bytes."""
+        for death_at_manifest in (True, False):
+            with self.subTest(death_at_manifest=death_at_manifest):
+                with tempfile.TemporaryDirectory(prefix="r22-q-manifest-cold-") as name:
+                    fixture = self._private_setup_switch_fixture(Path(name))
+                    root, _p, q, common, p_only, q_only, manifest, before, _hook, barrier, _home = fixture
+                    # The source tools tree contains real output placeholders.
+                    # This initialized switch fixture needs absent link leaves,
+                    # not unrelated copies blocking SETUP before manifest commit.
+                    for relative in (
+                        "tools/lldp-analyze-tool/99-output-p2p",
+                        "tools/lldp-analyze-tool/99-output-monitor",
+                        "tools/ibdiagnet-analyze-tool/99-output-p2p",
+                    ):
+                        leaf = root / relative
+                        if leaf.is_dir() and not leaf.is_symlink():
+                            shutil.rmtree(leaf)
+                    logs = root / "infra/logs"
+                    logs.mkdir()
+                    latest = q / "99-output-eth/latest"
+                    release = q / "99-output-eth/20261005_120000_combine"
+                    for path in (latest, release):
+                        path.mkdir(parents=True)
+                        (path / ".published-complete").write_bytes(b"complete\n")
+                        (path / "leaf.yaml").write_bytes(b"hostname: leaf\n")
+                    latest_identity = (latest.stat().st_dev, latest.stat().st_ino)
+                    payload = b"P-era logs must survive Q setup success\n"
+                    (logs / "audit.log").write_bytes(payload)
+                    identity = (logs.stat().st_dev, logs.stat().st_ino)
+                    first = self._run_private_load_setup_switch(
+                        fixture, prepare_journal=False, auto_prepare_journal=True,
+                        kill_after_replace=manifest if death_at_manifest else root / "never-replaced",
+                    )
+                    self.assertEqual(23 if death_at_manifest else 25, first.returncode,
+                                     first.stdout + first.stderr)
+                    self.assertNotEqual(before["manifest"], manifest.read_bytes())
+                    self.assertTrue(logs.is_symlink())
+                    journal = root / "ztp/.setup-switch-journal.json"
+                    body = json.loads(journal.read_bytes())["body"]
+                    backup = Path(body["infra_logs"][0]["backup"])
+                    self.assertEqual(identity, (backup.stat().st_dev, backup.stat().st_ino))
+                    latest_backup = Path(body["directories"][0]["backup"])
+                    self.assertEqual(latest_identity, (
+                        latest_backup.stat().st_dev, latest_backup.stat().st_ino,
+                    ))
+                    recovery = """
+import importlib.util
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('fresh_q_manifest_load', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    assert load.recover_setup_switch_journal(
+        root / 'ztp/.setup-switch-journal.json',
+        deployment_lock_descriptor=descriptor, services_quiesced=True,
+        runtime_backend=SimpleNamespace(name='supervisor'),
+    ) == 'restored-p'
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+                    second = subprocess.run(
+                        [sys.executable, "-B", "-c", recovery, str(root)],
+                        cwd=root, capture_output=True, text=True, check=False,
+                    )
+                    self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+                    self.assertEqual(before["manifest"], manifest.read_bytes())
+                    self.assertEqual(before["common"], os.readlink(common))
+                    self.assertEqual(before["p_only"], os.readlink(p_only))
+                    self.assertFalse(os.path.lexists(q_only))
+                    self.assertFalse(logs.is_symlink())
+                    self.assertFalse(latest.is_symlink())
+                    self.assertEqual(latest_identity, (latest.stat().st_dev, latest.stat().st_ino))
+                    self.assertEqual(b"hostname: leaf\n", (latest / "leaf.yaml").read_bytes())
+                    self.assertEqual(identity, (logs.stat().st_dev, logs.stat().st_ino))
+                    self.assertEqual(payload, (logs / "audit.log").read_bytes())
+                    self.assertFalse(os.path.lexists(q / "99-output-infra/audit.log"))
+                    self.assertFalse(os.path.lexists(root / "infra/.logs-migration.json"))
+                    self.assertFalse(journal.exists())
+                    self.assertFalse((root / "service-started").exists())
+
     def test_real_setup_infra_log_pointer_death_cold_restores_real_directory(self):
         """LOAD→SETUP death after real log migration restores exact old bytes."""
         with tempfile.TemporaryDirectory(prefix="r22-real-infra-restore-") as name:

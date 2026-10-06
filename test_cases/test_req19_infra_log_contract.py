@@ -32,6 +32,17 @@ EXPECTED_OUTPUTS = {
 
 
 class Req19InfraLogContractTests(unittest.TestCase):
+    def test_setup_switch_defers_original_logs_finalization_to_parent_load(self):
+        state = ("source", "backup", "destination", {"phase": "repointed"})
+        with mock.patch.multiple(SETUP, _INFRA_LOG_MIGRATION=state,
+                                 _SETUP_SWITCH_WAL_CONTEXT=("load-api", 23)):
+            with mock.patch.object(SETUP, "_mark_infra_log_receipt_finalizing") as mark:
+                with mock.patch.object(SETUP, "_complete_infra_log_finalization") as complete:
+                    SETUP._finalize_infra_log_migration()
+                    mark.assert_not_called()
+                    complete.assert_not_called()
+                    self.assertIsNone(SETUP._INFRA_LOG_MIGRATION)
+
     def fixture(self, directory):
         root = Path(directory).resolve() / "http"
         logs = root / "infra/logs"

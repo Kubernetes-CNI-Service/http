@@ -6041,6 +6041,7 @@ def register_setup_switch_journal_link(
     services_quiesced: bool,
     runtime_backend: ServiceRuntimeBackend | None,
     allow_existing_exact: bool = False,
+    raw_target: str | None = None,
 ) -> Path:
     """Durably register one newly discovered Q-only link before its first write.
 
@@ -6137,6 +6138,15 @@ def register_setup_switch_journal_link(
             raw_target_in_physical_parent,
             path.parent.resolve(strict=True),
         )
+        if raw_target is not None:
+            if (not isinstance(raw_target, str) or not raw_target
+                    or os.path.isabs(raw_target) or os.path.normpath(raw_target) != raw_target):
+                raise ValueError("writer relative link bytes are invalid")
+            planned = Path(os.path.normpath(str(path.parent / raw_target)))
+            if (_setup_switch_q_target(planned, Path(new["path"]))
+                    != raw_target_in_physical_parent):
+                raise ValueError("writer relative link bytes name a different Q target")
+            after = raw_target
         if os.path.isabs(after) or os.path.normpath(after) != after:
             raise ValueError("dynamic Q-only relative target is invalid")
         existing = next((row for row in rows if row["path"] == str(path)), None)
@@ -6633,10 +6643,97 @@ def _setup_switch_restore_infra_log_tree(state) -> None:
         _fsync_parent_directory(receipt.parent)
 
 
+def _setup_switch_q_manifest_paths(body, candidate: bytes) -> set[Path]:
+    """Validate a detached Q manifest against WAL-authorized shared names."""
+    try:
+        if not isinstance(candidate, bytes) or len(candidate) > _SETUP_MANIFEST_LIMIT:
+            raise ValueError("Q manifest bytes are invalid")
+        lines = candidate.decode("utf-8").splitlines()
+        prefix = "# setup manifest — proj: "
+        if not lines or not lines[0].startswith(prefix) or not candidate.endswith(b"\n"):
+            raise ValueError("Q manifest header is invalid")
+        project = Path(lines[0][len(prefix):])
+        if (not project.is_absolute() or os.path.normpath(str(project)) != str(project)
+                or project.resolve(strict=True) != Path(body["new_project"]["path"])):
+            raise ValueError("Q manifest project identity is invalid")
+        paths = [Path(value) for value in lines[1:]]
+        rows = {Path(row["path"]): row for row in body["links"]}
+        infra_paths = {Path(row["source"]) for row in body.get("infra_logs", [])}
+        if not paths or len(set(paths)) != len(paths):
+            raise ValueError("Q manifest inventory is invalid")
+        for path in paths:
+            if (not path.is_absolute() or os.path.normpath(str(path)) != str(path)
+                    or (path not in infra_paths and
+                        (path not in rows or rows[path]["after"] is None))):
+                raise ValueError(f"Q manifest contains an unregistered name: {path}")
+        return set(paths)
+    except (KeyError, TypeError, ValueError, UnicodeError, OSError, RuntimeError) as exc:
+        raise LoadError(f"setup switch Q manifest is invalid: {exc}") from exc
+
+
+def register_setup_switch_manifest(
+    journal: Path, candidate: bytes, *, deployment_lock_descriptor: int | None,
+    services_quiesced: bool, runtime_backend: ServiceRuntimeBackend | None,
+) -> Path:
+    """Fsync the exact Q manifest intent before replacing the P authority.
+
+    This authorizes recovery, not acceptance of B or service activation.
+    """
+    journal = Path(journal)
+    _require_runtime_restore_guard(
+        deployment_lock_descriptor=deployment_lock_descriptor,
+        services_quiesced=services_quiesced, runtime_backend=runtime_backend,
+    )
+    if journal != _setup_switch_journal_path():
+        raise LoadError("setup switch journal path is not the configured authority")
+    before = journal.lstat()
+    opened = _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT)
+    recover_setup_switch_journal(
+        journal, deployment_lock_descriptor=deployment_lock_descriptor,
+        services_quiesced=services_quiesced, runtime_backend=runtime_backend,
+        verify_only=True, manifest_candidate=candidate,
+    )
+    envelope = json.loads(opened[0])
+    body = dict(envelope["body"])
+    intent = {
+        "bytes": base64.b64encode(candidate).decode("ascii"),
+        "sha256": hashlib.sha256(candidate).hexdigest(), "mode": 0o644,
+        "parent": _setup_switch_link_parent_identity(MANIFEST),
+    }
+    if "q_manifest_intent" in body and body["q_manifest_intent"] != intent:
+        raise LoadError("setup switch Q manifest intent cannot be changed")
+    body["q_manifest_intent"] = intent
+    payload = _setup_switch_canonical_payload({
+        "body": body,
+        "sha256": hashlib.sha256(_setup_switch_canonical_payload(body)).hexdigest(),
+    }) + b"\n"
+    if len(payload) > _SETUP_SWITCH_JOURNAL_LIMIT:
+        raise LoadError("setup switch journal exceeds the bounded size limit")
+    descriptor, name = tempfile.mkstemp(prefix=".setup-switch-journal.", dir=journal.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        now = journal.lstat()
+        if (any(getattr(before, key) != getattr(now, key) for key in (
+                "st_dev", "st_ino", "st_mode", "st_nlink", "st_size",
+                "st_mtime_ns", "st_ctime_ns"))
+                or _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT) != opened):
+            raise LoadError("setup switch journal changed before manifest registration")
+        os.replace(temporary, journal)
+        _fsync_parent_directory(journal.parent)
+    finally:
+        if os.path.lexists(temporary):
+            temporary.unlink()
+    return journal
+
+
 def recover_setup_switch_journal(
     journal: Path, *, deployment_lock_descriptor: int | None,
     services_quiesced: bool, runtime_backend: ServiceRuntimeBackend | None,
-    verify_only: bool = False,
+    verify_only: bool = False, manifest_candidate: bytes | None = None,
 ) -> str:
     """Verify or restore P from a complete WAL and a known P/Q disk state.
 
@@ -6648,6 +6745,8 @@ def recover_setup_switch_journal(
         services_quiesced=services_quiesced,
         runtime_backend=runtime_backend,
     )
+    if manifest_candidate is not None and not verify_only:
+        raise LoadError("manifest candidate verification is read-only")
     journal = Path(journal)
     if journal != _setup_switch_journal_path():
         raise LoadError("setup switch journal path is not the configured authority")
@@ -6692,7 +6791,21 @@ def recover_setup_switch_journal(
     except (KeyError, TypeError, ValueError, UnicodeError, binascii.Error, LoadError) as exc:
         raise LoadError(f"setup switch journal is invalid: {exc}") from exc
     current_manifest = _read_rollback_regular(MANIFEST, limit=_SETUP_MANIFEST_LIMIT)
-    if current_manifest != (state.manifest, state.manifest_mode):
+    q_manifest = None
+    if "q_manifest_intent" in body:
+        try:
+            intent = body["q_manifest_intent"]
+            q_bytes = base64.b64decode(intent["bytes"], validate=True)
+            if (hashlib.sha256(q_bytes).hexdigest() != intent["sha256"]
+                    or intent["mode"] != 0o644
+                    or intent["parent"] != _setup_switch_link_parent_identity(MANIFEST)):
+                raise ValueError("Q manifest digest, mode or parent changed")
+            _setup_switch_q_manifest_paths(body, q_bytes)
+            q_manifest = (q_bytes, intent["mode"])
+        except (KeyError, TypeError, ValueError, binascii.Error) as exc:
+            raise LoadError(f"setup switch Q manifest intent is invalid: {exc}") from exc
+    if (current_manifest != (state.manifest, state.manifest_mode)
+            and (verify_only or q_manifest is None or current_manifest != q_manifest)):
         # Q manifest may have replaced P while the final journal phase was not
         # durable.  This is in-doubt, not proof that either project committed.
         raise LoadError("setup switch manifest is not exact P; recovery is in-doubt")
@@ -6778,6 +6891,15 @@ def recover_setup_switch_journal(
         if infra_rows else None
     )
     if verify_only:
+        if manifest_candidate is not None:
+            candidate_paths = _setup_switch_q_manifest_paths(body, manifest_candidate)
+            for path, _before, after in expected_rows:
+                if path in candidate_paths or os.path.lexists(path):
+                    if after is None or not path.is_symlink() or os.readlink(path) != after:
+                        raise LoadError("setup switch manifest prewrite state is not exact Q")
+            if any(not path.is_symlink() for path in candidate_paths):
+                raise LoadError("setup switch Q manifest name is absent")
+            return "prepared-q-manifest"
         if any(
             (not path.is_symlink() or os.readlink(path) != before)
             if before is not None else os.path.lexists(path)
@@ -6807,6 +6929,8 @@ def recover_setup_switch_journal(
                 raise LoadError(f"setup switch Q-only link changed during recovery: {path}")
             path.unlink()
             _fsync_parent_directory(path.parent)
+    if current_manifest != (state.manifest, state.manifest_mode):
+        _atomic_restore_setup_manifest(state)
     verified = snapshot_active_setup_state(expected_project=state.project)
     if verified.manifest != state.manifest or verified.links != state.links:
         raise LoadError("setup switch P post-verify failed; journal retained")
