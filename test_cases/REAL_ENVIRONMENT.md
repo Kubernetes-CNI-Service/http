@@ -1,5 +1,13 @@
 # Real-environment acceptance cases
 
+## TC-REAL-F02-LOCAL-GENERATION-001 — 本地配置代次的持久化与部分回放拒绝
+
+- 类型：transaction / real-environment / isolated management filesystem；状态：**OPEN / NOT RUN**。本机先决为 `test_config_sync_authority.py` direct 与 `test_config_sync_authority_workflow.py` 的真实 manual writer → generation journal 流程；它们不证明真实设备、断电或整卷恢复。
+- 前置：另行授权的可恢复隔离管理 VM/卷、脱敏项目和唯一受管写者；冻结 HEAD/tree、源码/测试/manifest、Python/平台身份、文件系统、UID/mode 与输入 SHA。禁止使用 live/AIR/prod、实际设备或真实服务。独立 S5 后端按 owner 窄豁免保持 owner-waived，不计 PASS。
+- 步骤：执行真实配置写入前观察 pending/veto 及严格递增整数；确认后以同会话 BatchMode 身份和 live digest 产生本代回执，再使下一轮预检失败、交互身份不足或 teardown，旧成功不得重新成为当前。只读 preview 不得铸造或撤销代次。分别重放 journal、witness、writer witness 或旧 replaceable pair，必须拒绝并保留原像；合法 schema-v1 最大 journal 正例为独立 1852 B，有限读取上界 2048 B，低于正例的退化界必须拒绝，不能截断。
+- 故障与证据：在受控临时文件 fsync、rename、目录 fsync、HOLD 删除及最终目录同步边界注入崩溃/错误/名称交换；重启后只能保留 HOLD/未知，不补造成功。记录完整 argv/exit、原始 traceback、物理日志顺序、前后 inode/size/SHA、owner/mode、目录清单和清理路径。最终同步时替换 journal/witness 也必须拒绝、保留外来对象并重新保留 HOLD。
+- 范围与清理：journal、witness 和持锁 writer witness 在同一恢复域；**不抵御三份镜像一起或整机/整卷回滚**，不得宣称独立防回滚后端。仅恢复隔离卷与自建对象，保留故障证据，核对原像与无残留写者。此卡 NOT RUN 不阻断 owner 授权的本地开发，但不构成发布证明或 F02 整体完成。
+
 ## TC-REAL-ISSUE-0007-ROLE-LINK-001 — J2 模板不强制物理链路 FEC/MTU
 
 - Case ID：`TC-REAL-ISSUE-0007-ROLE-LINK-001`；类型：real-environment / Cumulus NVUE / link behavior；状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。本机先决为 `test_cases.test_issue0007_role_link_contract` 的独立 direct 和 `test_cases.test_issue0007_role_link_workflow` 的真实生成器→发布脚本工作流 GREEN；本机合成通过不证明设备对省略字段的行为。

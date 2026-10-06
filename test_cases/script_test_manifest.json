@@ -173,6 +173,8 @@
       "tests": [
         "test_cases.test_bootstrap_config_fetch_contract",
         "test_cases.test_bootstrap_config_fetch_workflow",
+        "test_cases.test_config_sync_authority",
+        "test_cases.test_config_sync_authority_workflow",
         "test_cases.test_dhcp_runtime_reassignment",
         "test_cases.test_full_flow_integration",
         "test_cases.test_ztp_applied_receipt",
@@ -448,6 +450,7 @@
     "monitor/generate-monitor-html.py": "monitor/generate-monitor-html.py",
     "monitor/manual-ztp-control.cgi": "monitor/manual-ztp-control.cgi",
     "monitor/manual-ztp-worker.py": "monitor/manual-ztp-worker.py",
+    "ztp/config_sync_authority.py": "ztp/config_sync_authority.py",
     "monitor/switch-collection-control.cgi": "monitor/switch-collection-control.cgi",
     "monitor/switch-collection-worker.py": "monitor/switch-collection-worker.py",
     "monitor/switch_collection_gate.py": "monitor/switch_collection_gate.py",
@@ -1029,6 +1032,16 @@
         "test_cases.test_xlsx_zero_row_fail_closed",
         "test_cases.test_xlsx_zero_row_workflow"
       ]
+    },
+    {
+      "id": "f02_config_sync_generation_direct",
+      "paths": ["ztp/config_sync_authority.py"],
+      "tests": ["test_cases.test_config_sync_authority"]
+    },
+    {
+      "id": "f02_config_sync_writer_direct",
+      "paths": ["ztp/manual-ztp.py"],
+      "tests": ["test_cases.test_config_sync_authority_workflow"]
     },
     {
       "id": "req8_public_cli_help",
@@ -2406,6 +2419,11 @@
         "test_cases.test_project_contracts",
         "test_cases.test_ib_analysis_domain"
       ]
+    },
+    {
+      "id": "f02_config_sync_writer_to_generation_journal",
+      "members": ["ztp/manual-ztp.py", "ztp/config_sync_authority.py"],
+      "tests": ["test_cases.test_config_sync_authority_workflow"]
     },
     {
       "id": "ufm_readonly_discovery_from_inventory_and_leases",

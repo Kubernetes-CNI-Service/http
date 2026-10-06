@@ -375,6 +375,14 @@ Production host-key mismatch 默认 fail closed，只有单台完整 hostname �
 按钮/状态列与 JS 状态名由同一 workflow 对账，未绑定身份按钮可见但 disabled，并发上限仍为 8。
 测试不会连接或触发真实交换机。
 
+`test_config_sync_authority.py` 的独立 v1 正例/边界覆盖本地严格递增整数代次、
+闭合 schema、owner/mode/no-follow、受控暂存、file/directory fsync、部分回放与持久 HOLD。
+`test_config_sync_authority_workflow.py` 执行真实 manual writer → journal/receipt：
+同会话身份和 live digest 只绑定自身代次；下一轮失败先撤销旧成功，preview 不改代次，
+最终目录同步期间的 journal/witness rebind 拒绝并保留外来对象。三份见证共享恢复域，
+不宣称抵御全部镜像或整卷回滚。worker/九阶段监控消费端尚未完成接入，F02 整体仍 OPEN；
+真机持久化卡 `TC-REAL-F02-LOCAL-GENERATION-001` 仍 NOT RUN。
+
 SSH 身份负例夹具执行真实生成的 askpass Python body 时绑定当前测试解释器，
 并以污染 PATH 的独立负例核验，不依赖 `/usr/bin/env` 选择其他 Python；原 2 秒限制与
 FIFO rebind 的原断言保持。其他 askpass 用例继续覆盖直接 executable/shebang 路径。

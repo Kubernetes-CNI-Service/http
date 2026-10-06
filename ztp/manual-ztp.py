@@ -60,6 +60,7 @@ from ztp.nvue_normalizer import (
     expand_nvue_selector as _expand_nvue_selector,
     normalize_nvue_selectors as _normalize_nvue_selectors,
 )
+from ztp import config_sync_authority
 
 DAY0_ROOT = HTTP_ROOT / "DAY0-Prepare"
 STATUS_LINK = HTTP_ROOT / "ztp/status"
@@ -2134,6 +2135,7 @@ def trigger_one(
     trigger_source: str = "manual_cli", trigger_id: str = "", operation: str = "ztp",
     direct_privileged: bool = False, operation_id: str = "",
     prepared: dict | None = None, requested_operation: str = "",
+    authority_ticket: dict | None = None,
 ) -> dict:
     started = datetime.now().astimezone().isoformat(timespec="seconds")
     command_started_at = ""
@@ -2362,7 +2364,12 @@ def trigger_one(
                 fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
             finally:
                 os.close(lock_descriptor)
+    if authority_ticket is not None:
+        payload["generation"] = authority_ticket["generation"]
+        payload["source_identity"] = authority_ticket["source_identity"]
     atomic_json(target_dir / "result.json", payload)
+    if authority_ticket is not None:
+        config_sync_authority.finish(run_dir.parent, authority_ticket, payload)
     return payload
 
 
@@ -2508,7 +2515,7 @@ def main(argv: list[str] | None = None) -> int:
             raise ManualZtpError("--trigger-id 必须与 --operation-id 同时使用")
         if args.preflight_only and args.dry_run:
             raise ManualZtpError("--preflight-only 与 --dry-run 不能同时使用")
-        project = resolve_project(args.project)
+        project = resolve_project(args.project).resolve()
         if not args.dry_run:
             deployment_lock_descriptor = acquire_deployment_lock()
         devices = select_devices(
@@ -2714,6 +2721,24 @@ def main(argv: list[str] | None = None) -> int:
             )
             for device, _url, _actual in plans
         }
+        authority_tickets = {}
+        if actual_operation == "replace-config" and not args.preflight_only:
+            authority_root = project.resolve() / "99-output-ztp/manual-config-sync"
+            # Allocate before preflight/apply: a failed or cancelled attempt
+            # must not leave the previous configuration success current.
+            for device, _url, _actual in plans:
+                authority_tickets[device["hostname"]] = config_sync_authority.begin(
+                    authority_root, device["hostname"], operation_id,
+                    trigger_ids[device["hostname"]], trigger_source,
+                )
+        elif actual_operation in {"reset", "ztp"} and not args.preflight_only:
+            # Teardown/reprovision has its own receipts, never a new config
+            # success. Withdraw any prior config-sync authority before it can
+            # change the device; a failed attempt must not re-expose that era.
+            for device, _url, _actual in plans:
+                config_sync_authority.revoke(
+                    project / "99-output-ztp/manual-config-sync", device["hostname"],
+                )
         summary = {
             "project": project.name, "selectors": args.selectors,
             "requested_type": args.type, "trigger_source": trigger_source,
@@ -2734,6 +2759,10 @@ def main(argv: list[str] | None = None) -> int:
             "preflight": [],
             "results": [],
         }
+        if authority_tickets:
+            summary["generation"] = authority_tickets[plans[0][0]["hostname"]]["generation"]
+            for target in summary["targets"]:
+                target["generation"] = authority_tickets[target["hostname"]]["generation"]
         atomic_json(run_dir / "summary.json", summary)
         prepared = {}
         try:
@@ -2852,10 +2881,14 @@ def main(argv: list[str] | None = None) -> int:
         results = []
         for device, url, actual in plans:
             trigger_id = trigger_ids[device["hostname"]]
+            trigger_arguments = {}
+            if device["hostname"] in authority_tickets:
+                trigger_arguments["authority_ticket"] = authority_tickets[device["hostname"]]
             results.append(trigger_one(
                 client, device, url, run_dir, trigger_source, trigger_id,
                 actual, bool(args.url), operation_id,
                 prepared[device["hostname"]], args.operation,
+                **trigger_arguments,
             ))
             summary["results"] = results
             summary["generated_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
@@ -2872,7 +2905,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[{label}] {item['hostname']}: {detail}")
         print(f"日志：{run_dir}")
         return 0 if all(item["state"] == "triggered" for item in results) else 1
-    except (ManualZtpError, OSError, csv.Error) as exc:
+    except (ManualZtpError, config_sync_authority.AuthorityError, OSError, csv.Error) as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:
