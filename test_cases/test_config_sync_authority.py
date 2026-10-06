@@ -1,11 +1,13 @@
 """Independent F02 local generation/veto contracts (no device operations)."""
 
 import importlib.util
+from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
 import stat
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -14,6 +16,93 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSyncAuthorityTests(unittest.TestCase):
+    def test_managed_initial_cycle_strict_observation_and_late_failure_withdrawal(self):
+        target = SimpleNamespace(ib=SimpleNamespace(hostname="IB01", dev_type="ib", login_ip="192.0.2.10", eth0_mac="02:00:00:00:00:01"))
+        proof = {"schema_version": 1, "hostname": "IB01", "batch_identity_verified": True, "config_verified": True,
+                 "interface": "eth0", "transport_ip": "192.0.2.10", "mac_plain": "020000000001",
+                 "live_state_sha256": "a" * 64, "input_sha256": "b" * 64, "observation_sha256": "c" * 64, "reason": ""}
+        initial = SimpleNamespace(desired_service_commands=lambda *a: None, key_install_command=lambda *a: None,
+            initial_method_input_digest=lambda *a: "b" * 64, normalize_mac=lambda *a, **k: "02:00:00:00:00:01",
+            observe_managed_initial_configuration=lambda *a: dict(proof))
+        services, keys = {"dns": ["192.0.2.53"], "ntp": ["time.example.test"], "timezone": "Etc/UTC"}, [{"name": "fixture"}]
+        for case in ("positive", "boolean", "foreign-host", "foreign-input", "extra-generation", "late-read-failure", "late-input-change", "newer-writer"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                project = Path(directory).resolve()
+                cycle = self.authority.ManagedInitialMethodCycle(project, initial)
+                observed = dict(proof)
+                if case == "boolean": observed["config_verified"] = 1
+                if case == "foreign-host": observed["hostname"] = "IB02"
+                if case == "foreign-input": observed["input_sha256"] = "d" * 64
+                if case == "extra-generation": observed["generation"] = 1
+                initial.observe_managed_initial_configuration = lambda *args: observed
+                with mock.patch.object(cycle, "_inputs", return_value=["literal-original-input"]):
+                    cycle.start(project, project / "cache", project / "csv", project / "p2p", [target], services, keys)
+                    with ExitStack() as stack:
+                        if case == "late-read-failure":
+                            stack.enter_context(mock.patch.object(self.authority, "read_method_receipt",
+                                side_effect=self.authority.AuthorityError("injected held-read failure")))
+                        elif case == "late-input-change":
+                            stack.enter_context(mock.patch.object(cycle, "_inputs", side_effect=(
+                                ["literal-original-input"], ["literal-original-input"], ["changed-at-publication"])))
+                        elif case == "newer-writer":
+                            def newer_writer(*args):
+                                self.authority.begin_method(cycle.root, "IB01", "new-writer", "own-new-writer", "initial_setup_managed")
+                                return observed
+                            stack.enter_context(mock.patch.object(initial, "observe_managed_initial_configuration", side_effect=newer_writer))
+                        else:
+                            stack.enter_context(mock.patch.object(initial, "observe_managed_initial_configuration", return_value=observed))
+                        result = cycle.complete(target, "admin", project / "key", 5, services, keys)
+                current = self.authority.read_method_current(cycle.root, "IB01")
+                self.assertEqual(case == "positive", result)
+                self.assertEqual("success" if case == "positive" else "pending" if case == "newer-writer" else "failed", current["state"])
+                self.assertEqual(2 if case == "newer-writer" else 1, current["generation"])
+
+    def test_managed_initial_input_snapshot_rechecks_root_after_last_parser(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            project = base / "project"
+            project.mkdir()
+            tool = project / "tool"
+            (tool / "publickey").mkdir(parents=True)
+            for path in (project / "cache", project / "cache.sha256", project / "csv", project / "p2p",
+                         tool / "01-global.yaml", tool / "publickey/management.pub"):
+                path.write_text("independent finite fixture bytes\n")
+            target = SimpleNamespace(ib=SimpleNamespace(hostname="IB01", dev_type="ib"))
+            def late_parser(*args, **kwargs):
+                project.rename(base / "retained-original-project")
+                project.mkdir()
+                return 1, [target]
+            cycle = self.authority.ManagedInitialMethodCycle(project, SimpleNamespace(load_target_cache=late_parser))
+            cycle.tool, cycle.cache, cycle.csv, cycle.p2p, cycle.targets = tool, project / "cache", project / "csv", project / "p2p", [target]
+            with self.assertRaises(self.authority.AuthorityError):
+                cycle._inputs()
+
+    def test_managed_initial_cli_safe_help_and_no_implicit_project(self):
+        entry = getattr(self.authority, "managed_initial_main", None)
+        self.assertTrue(callable(entry), "the managed producer must be reachable by a real entrypoint")
+        with self.assertRaises(SystemExit) as absent:
+            entry([])
+        self.assertEqual(2, absent.exception.code)
+        with self.assertRaises(SystemExit) as help_exit:
+            entry(["--help"])
+        self.assertEqual(0, help_exit.exception.code)
+
+    def test_managed_initial_partial_begin_failure_withdraws_only_minted_prefix(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve()
+            targets = [SimpleNamespace(ib=SimpleNamespace(hostname=name, dev_type="ib")) for name in ("IB01", "IB02")]
+            cycle = self.authority.ManagedInitialMethodCycle(project, SimpleNamespace())
+            real_begin = self.authority.begin_method
+            def first_then_failure(*args):
+                if args[1] == "IB02":
+                    raise self.authority.AuthorityError("independent second writer admission failure")
+                return real_begin(*args)
+            with mock.patch.object(self.authority, "begin_method", side_effect=first_then_failure), self.assertRaises(self.authority.AuthorityError):
+                cycle.start(project, project / "cache", project / "csv", project / "p2p", targets, {"dns": []}, [{"name": "fixture"}])
+            self.assertEqual("failed", self.authority.read_method_current(cycle.root, "IB01")["state"])
+            self.assertIsNone(self.authority.read_method_current(cycle.root, "IB02"))
+            cycle.close()
+
     @staticmethod
     def method_receipt_v2(ticket=None, **updates):
         # Independent method contract: deliberately NOT replace-config v1.

@@ -203,8 +203,95 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
         cache = root / "out/targets.json"
         return root, tool, global_path, ib_csv, p2p, pubdir, cache, laptop, management
 
+    def test_f02_managed_main_pending_precedes_writes_and_failed_cycle_revokes(self):
+        authority = load_script("f02_managed_initial_main_authority", ROOT / "ztp/config_sync_authority.py")
+        cycle_type = getattr(authority, "ManagedInitialMethodCycle", None)
+        self.assertTrue(callable(cycle_type), "managed initial main must produce its own causal receipt")
+        with tempfile.TemporaryDirectory(prefix="f02-managed-initial-main-") as directory:
+            root, tool, _, ib_csv, p2p, _, cache, laptop, management = self.fixture(directory)
+            root = root.resolve()
+            tool, ib_csv, p2p = tool.resolve(), ib_csv.resolve(), p2p.resolve()
+            ib_csv.write_text("hostname,type,eth0_ip,netmask,eth0_gw,eth0_mac,eth1_ip,netmask,eth1_gw,config_method\n"
+                              "EXAMPLE-IB01,ib,203.0.113.2,24,203.0.113.1,02:00:00:00:00:01,,,,initial-setup\n"
+                              "EXAMPLE-JUMP01,eth_jump,192.0.2.10,,,,,,,\n")
+            private = root / ".ssh/id_ed25519"
+            private.parent.mkdir(mode=0o700)
+            private.write_text("fixture identity")
+            private.chmod(0o600)
+            cache = cache.parent.resolve() / cache.name
+            state = ("nv set interface eth0 ipv4 address 203.0.113.2/24\n"
+                     "nv set interface eth0-1 ipv4 gateway 203.0.113.1\n"
+                     "nv set system hostname EXAMPLE-IB01\n"
+                     "nv set system dns server 203.0.113.53\n"
+                     "nv set system ntp server ntp.ubuntu.com\n"
+                     "nv set system ntp server time.ib.example.test\n"
+                     "nv set system date-time timezone Asia/Taipei\n")
+            storage = root / "99-output-ztp/configuration-methods"
+            basis = {"schema_version": 1, "type": "ib", "config_method": "initial-setup", "hostname": "EXAMPLE-IB01",
+                     "eth0": "203.0.113.2/24", "eth0_gateway": "203.0.113.1", "eth1": "", "eth1_gateway": "",
+                     "eth0_mac": "02:00:00:00:00:01", "dns": ["203.0.113.53"],
+                     "ntp": ["ntp.ubuntu.com", "time.ib.example.test"], "timezone": "Asia/Taipei",
+                     "key_fingerprints": sorted([fingerprint(laptop), fingerprint(management)])}
+            expected_input = hashlib.sha256(json.dumps(basis, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+            for cycle in (1, 2, 3):
+                executor = cycle_type(root, self.initial)
+                def device_boundary(*args, **kwargs):
+                    current = authority.read_method_current(storage, "EXAMPLE-IB01")
+                    self.assertEqual((cycle, "pending", True), tuple(current[name] for name in ("generation", "state", "veto")))
+                    if cycle == 2:
+                        raise self.initial.SetupError("independent transport failure")
+                    return self.initial.SessionResult(state, 0)
+                def batch_observer(target, user, key, timeout, services, keys):
+                    if cycle == 3:
+                        ib_csv.write_text(ib_csv.read_text().replace("203.0.113.2", "203.0.113.3"))
+                    return {"schema_version": 1, "hostname": "EXAMPLE-IB01", "batch_identity_verified": True,
+                            "config_verified": True, "interface": "eth0", "transport_ip": "203.0.113.2",
+                            "mac_plain": "020000000001", "live_state_sha256": hashlib.sha256(state.encode()).hexdigest(),
+                            "input_sha256": expected_input, "observation_sha256": "b" * 64, "reason": ""}
+                neighbor = self.initial.Neighbor("fe80::1", "swp7", "02:00:00:00:00:01")
+                with ExitStack() as stack:
+                    stack.enter_context(mock.patch.dict(os.environ, {"NVOS_INITIAL_PASSWORD": "fixture"}))
+                    for name, value in (("local_ethernet_keys", set()), ("prompt_ethernet_passwords", {"example-jump01": "fixture"}),
+                            ("collect_ethernet_interfaces", ("EXAMPLE-JUMP01", "table")),
+                            ("collect_ethernet_network_tables", ("links", "fdb", "neighbors")),
+                            ("save_ethernet_snapshot", root / "snapshot"), ("interface_status_line", "swp7 up"),
+                            ("interface_oper_status", "up"), ("fdb_port_for_interface", "swp7"),
+                            ("neighbor_for_port", neighbor), ("interface_vrf", "default")):
+                        stack.enter_context(mock.patch.object(self.initial, name, return_value=value))
+                    stack.enter_context(mock.patch.object(self.initial, "run_on_ib", side_effect=device_boundary))
+                    stack.enter_context(mock.patch.object(self.initial, "verify_management_key_possession"))
+                    stack.enter_context(mock.patch.object(self.initial, "observe_managed_initial_configuration", side_effect=batch_observer))
+                    result = self.run_initial(tool, ib_csv, p2p, cache, "--apply", "--yes", "--execution-mode", "management",
+                                              method_cycle=executor)
+                current = authority.read_method_current(storage, "EXAMPLE-IB01")
+                self.assertEqual((cycle, "success" if cycle == 1 else "failed", cycle != 1),
+                                 tuple(current[name] for name in ("generation", "state", "veto")))
+                self.assertEqual(0 if cycle == 1 else 1, result)
+                receipt = authority.read_method_receipt(storage, "EXAMPLE-IB01")
+                self.assertEqual(cycle == 1, receipt is not None)
+                if receipt:
+                    self.assertEqual("initial_setup_managed", receipt["trigger_source"])
+                    self.assertNotIn("complete", receipt)
+
+    def test_f02_managed_method_admission_rejects_before_outputs(self):
+        authority = load_script("f02_managed_initial_admission", ROOT / "ztp/config_sync_authority.py")
+        for method in ("ztp", "", "initial-setup"):
+            with self.subTest(method=method), tempfile.TemporaryDirectory() as directory:
+                root, tool, _, csv_path, p2p, _, cache, _, _ = self.fixture(directory)
+                if method:
+                    csv_path.write_text(csv_path.read_text().replace("eth1_gw\n", "eth1_gw,config_method\n")
+                        .replace("203.0.113.1,,,,\n", "203.0.113.1,,,,," + method + "\n")
+                        .replace("192.0.2.10,,,,,,\n", "192.0.2.10,,,,,,,\n"))
+                # Neither an incompatible/default method nor check-only mode
+                # may create the method namespace or ancillary output dirs.
+                cycle = authority.ManagedInitialMethodCycle(root.resolve(), self.initial)
+                with self.assertRaises(self.initial.SetupError):
+                    self.run_initial(tool, csv_path, p2p, cache, "--plan" if method == "initial-setup" else "--apply", method_cycle=cycle)
+                self.assertFalse(cache.parent.exists(), "admission must precede report/cache writes")
+                self.assertFalse((root / "99-output-ztp").exists())
+
     def run_initial(self, tool: Path, ib_csv: Path, p2p: Path,
-                    cache: Path, *extra: str) -> int:
+                    cache: Path, *extra: str, method_cycle=None) -> int:
         argv = [
             "initial-setup.py", "--ib-csv", str(ib_csv), "--p2p", str(p2p),
             "--target-cache", str(cache), "--report", str(cache.parent / "report.log"),
@@ -215,7 +302,7 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
         ), mock.patch.object(Path, "home", return_value=tool.parents[2]), \
              redirect_stdout(io.StringIO()):
             try:
-                return self.initial.main()
+                return self.initial.main() if method_cycle is None else self.initial.main(method_cycle=method_cycle)
             finally:
                 report = self.initial.REPORT_HANDLE
                 if report is not None:

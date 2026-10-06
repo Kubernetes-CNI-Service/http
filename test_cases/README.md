@@ -131,7 +131,13 @@ stdout/stderr 共享 8 MiB 上限并受单一 deadline 约束，不在捕获结�
 direct 覆盖漂移、冲突、期望中途修改、密钥替换和不安全文件；真实脚本 workflow
 执行 cache → batch shell → V2 generation/veto，下一轮缺失密钥必须撤销旧成功。
 现有 key-possession 的 `ssh true` 保持原合同，不作为配置证明。
-这不补造其他九阶段，也不代表 F02 整体验收；initial-setup 生产者接入与完整方法
+管理入口 `python3 ztp/config_sync_authority.py --project <project> -- <initial-setup arguments>`
+通过可选周期对象接入原 initial-setup main；显式 `--apply` 和逐 IB 的 `config_method=initial-setup`
+在 report/cache/authority 写入前验证，eth_jump 仅为 transport。项目输入必须位于显式项目内，
+由 owned/single-link/no-follow 有限读取绑定，重新验证 cache/parser 后再次核验输入与项目根。
+操作前 pending，完成后同会话观察及发布后重读；失败撤销自己的当前代次，不触碰新写者。
+默认单文件离线入口不依赖后端、不产生方法权威；REQ10B 密钥探针和 REQ10C 的 cron 条件不变。
+这不补造其他九阶段，也不代表 F02 整体验收；initial-setup 消费端与完整方法
 生命周期仍需继续实现、测试，真机保持 `REAL_ENVIRONMENT.md` 的 NOT RUN。
 
 1. 功能或缺陷修复必须先在 `test_<area>.py` 中增加可稳定复现的案例，再修改实现。

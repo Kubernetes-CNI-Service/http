@@ -8,6 +8,7 @@ An interrupted publication leaves a persistent hold, not a previous success.
 """
 
 from contextlib import contextmanager
+import copy
 from datetime import datetime
 import fcntl
 import hashlib
@@ -78,6 +79,157 @@ METHOD_SUCCESS_FIELDS = METHOD_COMMON_FIELDS | {
 
 class AuthorityError(ValueError):
     pass
+
+
+class ManagedInitialMethodCycle:
+    """Management-host producer; never a replacement for nine-stage proof.
+
+    The stdlib leaf accepts this optional object, not an import dependency.
+    Its default disconnected execution remains unchanged and supplies no V2
+    method authority. Current inputs are re-observed before and after BatchMode.
+    """
+    def __init__(self, project, initial):
+        self.project = Path(project).resolve(strict=True)
+        descriptor = _parent(self.project)
+        try:
+            self.project_identity = _identity(os.fstat(descriptor))[:5]
+        finally:
+            os.close(descriptor)
+        self.initial = initial
+        self.root = self.project / "99-output-ztp/configuration-methods"
+        self.tickets, self.finished = {}, set()
+        self.targets = []
+
+    def _image(self, path):
+        path = Path(path).resolve(strict=True)
+        path.relative_to(self.project)
+        descriptor = _parent(path.parent)
+        fd = None
+        try:
+            fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=descriptor)
+            before = os.fstat(fd)
+            if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                    or before.st_uid != os.geteuid() or before.st_mode & 0o022
+                    or not 0 < before.st_size <= 8 * 1024 * 1024):
+                raise AuthorityError("unsafe managed initial input image")
+            chunks, remaining = [], 8 * 1024 * 1024 + 1
+            while remaining:
+                chunk = os.read(fd, min(remaining, 65536))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            raw = b"".join(chunks)
+            if (len(raw) != before.st_size or _identity(os.fstat(fd)) != _identity(before)
+                    or _identity(os.stat(path, follow_symlinks=False)) != _identity(before)):
+                raise AuthorityError("managed initial input changed during held read")
+            return str(path), _identity(before), hashlib.sha256(raw).hexdigest()
+        finally:
+            if fd is not None:
+                os.close(fd)
+            os.close(descriptor)
+
+    def _check_project(self):
+        descriptor = _parent(self.project)
+        try:
+            if _identity(os.fstat(descriptor))[:5] != self.project_identity:
+                raise AuthorityError("managed initial project root changed")
+        finally:
+            os.close(descriptor)
+
+    def _inputs(self):
+        self._check_project()
+        paths = [self.cache, self.cache.with_name(self.cache.name + ".sha256"),
+                 self.csv, self.p2p, self.tool / "01-global.yaml"]
+        paths.extend(sorted((self.tool / "publickey").glob("*.pub")))
+        images = [self._image(path) for path in paths]
+        # Fresh parser/profile validation is required too, not merely an old checksum.
+        candidate = self.initial.load_target_cache(self.cache, self.csv, self.p2p,
+                                                   public_key_tool=self.tool)
+        if candidate is None or candidate[1] != self.targets:
+            raise AuthorityError("managed initial current cache/input contract differs")
+        self._check_project()
+        if images != [self._image(path) for path in paths]:
+            raise AuthorityError("managed initial input changed during parser validation")
+        self._check_project()
+        return images
+
+    def start(self, tool, cache, csv_path, p2p, targets, services, keys):
+        if self.tickets or not targets or any(target.ib.dev_type != "ib" for target in targets):
+            raise AuthorityError("managed initial cycle has incompatible or reused targets")
+        names = [target.ib.hostname.casefold() for target in targets]
+        if len(names) != len(set(names)):
+            raise AuthorityError("managed initial cycle has duplicate device identities")
+        self.tool, self.cache, self.csv, self.p2p = map(Path, (tool, cache, csv_path, p2p))
+        self.targets = list(targets)
+        self.services, self.keys = copy.deepcopy(services), copy.deepcopy(keys)
+        try:
+            for target in targets:
+                operation = "initial-" + uuid.uuid4().hex
+                ticket = begin_method(self.root, target.ib.hostname, operation,
+                                      operation + ":" + target.ib.hostname, "initial_setup_managed")
+                self.tickets[target.ib.hostname.casefold()] = ticket
+            if services is None or not keys:
+                raise AuthorityError("managed initial method requires a complete services/key profile")
+            self.initial.desired_service_commands(services, "")
+            self.initial.key_install_command(keys)
+            self.images = self._inputs()
+            self.expected = {target.ib.hostname.casefold(): self.initial.initial_method_input_digest(target, services, keys)
+                             for target in targets}
+        except Exception:
+            self.close()
+            raise
+
+    def complete(self, target, user, private_key, timeout, services, keys):
+        name = target.ib.hostname.casefold()
+        ticket = self.tickets[name]
+        try:
+            if (name in self.finished or self._inputs() != self.images
+                    or services != self.services or keys != self.keys or private_key is None):
+                raise AuthorityError("managed initial expected input changed or is incomplete")
+            proof = self.initial.observe_managed_initial_configuration(target, user, private_key, timeout, services, keys)
+            fields = {"schema_version", "hostname", "batch_identity_verified", "config_verified", "interface",
+                      "transport_ip", "mac_plain", "live_state_sha256", "input_sha256", "observation_sha256", "reason"}
+            if (not isinstance(proof, dict) or set(proof) != fields or type(proof["schema_version"]) is not int
+                    or proof["schema_version"] != 1 or proof["hostname"] != target.ib.hostname
+                    or proof["batch_identity_verified"] is not True or proof["config_verified"] is not True
+                    or proof["interface"] != "eth0" or proof["transport_ip"] != target.ib.login_ip
+                    or proof["mac_plain"] != self.initial.normalize_mac(target.ib.eth0_mac, field="managed initial eth0 MAC").replace(":", "")
+                    or proof["input_sha256"] != self.expected[name] or proof["reason"] != ""
+                    or self._inputs() != self.images or services != self.services or keys != self.keys):
+                raise AuthorityError("managed initial own-session observation does not match current inputs")
+            receipt = {"schema_version": 2, "record_type": "configuration_method", "hostname": target.ib.hostname,
+                       "type": "ib", "config_method": "initial-setup", "state": "success", "reason": "",
+                       **{field: ticket[field] for field in ("generation", "source_identity", "operation_id", "trigger_id", "trigger_source")},
+                       **{field: proof[field] for field in ("batch_identity_verified", "config_verified", "interface", "transport_ip",
+                                                         "mac_plain", "live_state_sha256", "input_sha256")},
+                       "source_receipt_sha256": proof["observation_sha256"]}
+            finish_method(self.root, ticket, receipt)
+            if (read_method_receipt(self.root, target.ib.hostname) != receipt
+                    or self._inputs() != self.images):
+                raise AuthorityError("managed initial publication could not be re-observed")
+            self.finished.add(name)
+            return True
+        except Exception:
+            self.fail_unfinished(target)
+            return False
+
+    def fail_unfinished(self, target):
+        name = target.ib.hostname.casefold()
+        if name in self.tickets and name not in self.finished:
+            ticket = self.tickets[name]
+            current = read_method_current(self.root, target.ib.hostname)
+            if current is not None and all(current[field] == ticket[field] for field in (
+                    "generation", "source_identity", "hostname", "operation_id", "trigger_id", "trigger_source")):
+                # A failed post-publication read may follow our own success.
+                # Compare the exact newly observed image under the writer lock;
+                # never revoke an unrelated/newer writer's work.
+                revoke_method(self.root, target.ib.hostname, expected=current)
+            self.finished.add(name)
+
+    def close(self):
+        for target in self.targets:
+            self.fail_unfinished(target)
 
 
 def monitor_source_observation_allows_completion(device):
@@ -1153,3 +1305,49 @@ def read_method_receipt(root, hostname):
         return None
     except OSError as exc:
         raise AuthorityError("method receipt storage could not be authenticated") from exc
+
+
+def managed_initial_main(argv=None):
+    """Explicit management entry; no implicit active project or device action."""
+    import argparse
+    import importlib.util
+    import sys
+    parser = argparse.ArgumentParser(description="Managed initial-setup with causal local method receipts")
+    parser.add_argument("--project", type=Path, required=True, help="explicit owned project containing all runtime inputs")
+    parser.add_argument("initial_args", nargs=argparse.REMAINDER, help="after --, the original initial-setup arguments (requires --apply)")
+    args = parser.parse_args(argv)
+    source = Path(__file__).resolve().parent.parent / "infiniband/bringup/xdr-initial-setup/initial-setup.py"
+    spec = importlib.util.spec_from_file_location("_http_managed_initial_setup", source)
+    if spec is None or spec.loader is None:
+        raise AuthorityError("managed initial executor is unavailable")
+    initial = importlib.util.module_from_spec(spec)
+    previous_module = sys.modules.get(spec.name)
+    previous_argv = sys.argv
+    sys.modules[spec.name] = initial
+    cycle = None
+    try:
+        spec.loader.exec_module(initial)
+        cycle = ManagedInitialMethodCycle(args.project, initial)
+        forwarded = args.initial_args[1:] if args.initial_args[:1] == ["--"] else args.initial_args
+        sys.argv = [str(source), *forwarded]
+        return initial.main(method_cycle=cycle)
+    except (AuthorityError, OSError, ValueError, initial.SetupError) as exc:
+        # No remote output or credentials enter this local diagnostic.
+        print("managed initial-setup rejected: " + type(exc).__name__, file=sys.stderr)
+        return 2
+    finally:
+        try:
+            if cycle is not None and hasattr(cycle, "targets"):
+                cycle.close()
+        finally:
+            if getattr(initial, "REPORT_HANDLE", None) is not None:
+                initial.REPORT_HANDLE.close()
+            sys.argv = previous_argv
+            if previous_module is None:
+                sys.modules.pop(spec.name, None)
+            else:
+                sys.modules[spec.name] = previous_module
+
+
+if __name__ == "__main__":
+    raise SystemExit(managed_initial_main())

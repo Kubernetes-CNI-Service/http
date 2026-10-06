@@ -412,10 +412,11 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 状态：**NOT RUN / REAL_ENV REQUIRED**；本地 direct 为
   `test_req10b_services_keys_contract.py`，真实脚本 workflow 为
   `test_req10b_services_keys_workflow.py`。本地只在隔离目录执行替代 SSH 的真实 shell，
-  不连接真实设备；不证明生产主入口已接入方法生命周期，也不关闭 F02。
+  不连接真实设备；管理 main 的本地 pending/观察/发布/撤销已覆盖，不关闭消费端或 F02。
 - 前置：owner 精确授权的可恢复 IB 隔离设备、管理主机和输入项目；冻结 HEAD/tree、
   CSV/P2P/global/cache/公钥摘要，管理私钥 owned 0600 single-link，固定 eth0 MAC/IP，
-  已授权的 initial-setup 操作。NVL 在支持合同建立前显式拒绝。
+  已授权的 initial-setup 操作；只通过显式项目的管理入口和逐 IB `config_method=initial-setup`
+  获取 V2 方法权威，原单文件离线入口不提供该权威。NVL 在支持合同建立前显式拒绝。
 - 正向：保留原独立密钥登录探针；再用 public-key-only BatchMode 的同一会话读取
   hostname/eth0 MAC、`nv config show -o commands`、当前 authorized_keys。逐项核验
   本设备 Day-0、DNS/NTP/timezone 和所需公钥，不凭交互日志或旧收据晋升。

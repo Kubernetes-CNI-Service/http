@@ -336,7 +336,7 @@ def load_devices(path: Path) -> tuple[dict[str, Device], dict[str, Device]]:
             hostname = row_value(row, indexes, "hostname")
             dev_type = row_value(row, indexes, "type").casefold()
             config_method = row_value(row, indexes, "config_method").casefold()
-            if hostname and "config_method" in indexes and not config_method:
+            if hostname and dev_type != "eth_jump" and "config_method" in indexes and not config_method:
                 raise SetupError(
                     f"{path}:{line_number}: {hostname} config_method is empty"
                 )
@@ -2782,6 +2782,19 @@ def _initial_observation_key(private_key):
             os.close(descriptor)
 
 
+def initial_method_input_digest(target, services, keys):
+    device = target.ib
+    expected = {"schema_version": 1, "type": "ib", "config_method": "initial-setup",
+                "hostname": device.hostname, "eth0": device.eth0_prefix,
+                "eth0_gateway": device.eth0_gateway, "eth1": device.eth1_prefix,
+                "eth1_gateway": device.eth1_gateway,
+                "eth0_mac": normalize_mac(device.eth0_mac, field="initial method eth0 MAC"),
+                "dns": services["dns"], "ntp": services["ntp"], "timezone": services["timezone"],
+                "key_fingerprints": sorted({entry["fingerprint"] for entry in keys})}
+    return hashlib.sha256(json.dumps(expected, sort_keys=True, separators=(",", ":"),
+                                     ensure_ascii=False).encode()).hexdigest()
+
+
 def observe_managed_initial_configuration(
     target: Target, ib_user: str, private_key: Path, timeout: int,
     services: dict[str, object], keys: list[dict[str, str]],
@@ -2812,14 +2825,7 @@ def observe_managed_initial_configuration(
         desired_service_commands(services, "")  # Typed profile validation, no I/O.
         key_install_command(keys)  # Closed, fingerprint-checked public profile.
         captured_services, captured_keys = copy.deepcopy(services), copy.deepcopy(keys)
-        expected = {"schema_version": 1, "type": "ib", "config_method": "initial-setup",
-                    "hostname": device.hostname, "eth0": device.eth0_prefix,
-                    "eth0_gateway": device.eth0_gateway, "eth1": device.eth1_prefix,
-                    "eth1_gateway": device.eth1_gateway, "eth0_mac": expected_mac,
-                    "dns": services["dns"], "ntp": services["ntp"], "timezone": services["timezone"],
-                    "key_fingerprints": sorted({entry["fingerprint"] for entry in keys})}
-        input_digest = hashlib.sha256(json.dumps(expected, sort_keys=True, separators=(",", ":"),
-                                                 ensure_ascii=False).encode()).hexdigest()
+        input_digest = initial_method_input_digest(target, captured_services, captured_keys)
         script = (
             "set -eu; printf '__HTTP_INITIAL_METHOD_V1_IDENTITY_BEGIN__\\n'; "
             "hostname; cat /sys/class/net/eth0/address; "
@@ -2875,7 +2881,7 @@ def observe_managed_initial_configuration(
                 if re.fullmatch(r"(?:ssh-|ecdsa-|sk-)[A-Za-z0-9@._+-]+", token):
                     actual_keys.add(_public_key_fingerprint(" ".join(tokens[index:index + 2])))
                     break
-        if not set(expected["key_fingerprints"]).issubset(actual_keys):
+        if not {entry["fingerprint"] for entry in captured_keys}.issubset(actual_keys):
             raise SetupError("initial method current authorized keys differ")
         if services != captured_services or keys != captured_keys:
             raise SetupError("initial method expected profile changed during the session")
@@ -3003,7 +3009,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> int:
+def main(*, method_cycle=None) -> int:
     global REPORT_HANDLE
     args = parse_args()
     if args.plan and args.apply:
@@ -3023,6 +3029,9 @@ def main() -> int:
         args.yes = True
     elif args.credentials_file is not None:
         raise SetupError("--credentials-file is only valid with --auto")
+    if method_cycle is not None and (not args.apply or args.plan or args.generate_json
+                                      or args.execution_mode == "ethernet"):
+        raise SetupError("managed method authority requires management --apply, not plan/generation/ethernet mode")
     auto_credentials = (
         read_auto_credentials(args.credentials_file)
         if args.credentials_file is not None else None
@@ -3045,6 +3054,17 @@ def main() -> int:
     p2p_path = discover_input_file(
         args.p2p, "p2p.xlsx", ".xlsx", "P2P workbook"
     )
+    if method_cycle is not None:
+        # Typed/executor admission must precede report/cache/authority writes.
+        load_devices(ib_csv_path)
+        with ib_csv_path.open(encoding="utf-8-sig", newline="") as stream:
+            reader = csv.reader(stream)
+            indexes = header_indexes(next(reader))
+            if "config_method" not in indexes:
+                raise SetupError("managed initial-setup requires an explicit per-device config_method column")
+            for line, row in enumerate(reader, 2):
+                if row_value(row, indexes, "type").casefold() == "ib" and row_value(row, indexes, "config_method").casefold() != "initial-setup":
+                    raise SetupError(f"{ib_csv_path}:{line}: managed IB config_method must be initial-setup")
     cache_path = args.target_cache.resolve()
     report_path = args.report.resolve()
     snapshot_directory = args.snapshot_dir.resolve()
@@ -3219,6 +3239,10 @@ def main() -> int:
         log("Local Ethernet execution: " + ", ".join(sorted(local_keys)))
     else:
         log("Execution location: management server (all Ethernet access uses SSH)")
+    if method_cycle is not None:
+        if local_keys or args.execution_mode == "ethernet" or not args.apply:
+            raise SetupError("managed method authority requires an explicit management --apply execution")
+        method_cycle.start(tool, cache_path, ib_csv_path, p2p_path, targets, services, public_keys)
     passwords = (
         _auto_passwords_for_targets(auto_credentials, targets)
         if auto_credentials is not None else prompt_ethernet_passwords(
@@ -3420,6 +3444,10 @@ def main() -> int:
                     management_private_key=management_private_key,
                 )
                 completed_targets.add(normalize_name(target.ib.hostname))
+                if method_cycle is not None:
+                    if not apply_authorized or not method_cycle.complete(target, args.ib_user, management_private_key,
+                                                                          args.connect_timeout, services, public_keys):
+                        raise SetupError("managed current initial-setup configuration was not verified")
                 continue
 
             commands = desired_commands(target.ib)
@@ -3484,9 +3512,19 @@ def main() -> int:
                 management_private_key=management_private_key,
             )
             completed_targets.add(normalize_name(target.ib.hostname))
+            if method_cycle is not None:
+                if not apply_authorized or not method_cycle.complete(target, args.ib_user, management_private_key,
+                                                                      args.connect_timeout, services, public_keys):
+                    raise SetupError("managed current initial-setup configuration was not verified")
         except SetupError as exc:
             failures += 1
             log(f"  ERROR: {exc}")
+        finally:
+            if method_cycle is not None:
+                method_cycle.fail_unfinished(target)
+
+    if method_cycle is not None:
+        method_cycle.close()
 
     oob_key_pending = False
     if args.auto:
