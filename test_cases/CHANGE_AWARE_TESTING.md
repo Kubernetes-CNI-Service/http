@@ -259,6 +259,35 @@ uid/gid。自己的合法变更之后更新对应期望；每次源删除、备�
 原 bootstrap15s/REQ19 probe10s 原因仍待核，正式 related/full 重跑闸门未解除，
 未更新批准 ledger、未形成当前树正式 proof。
 
+### R22 DHCP 盘上前像只读核验的 parent 目录持有复核
+
+此前 `inspect_dhcp_a_preimage` 只在解析 record 时比较 parent 目录，未持有该目录
+FD 或在返回前复核；最后一轮 leaf 核验后，即使原 parent 文件 inode/字节被移到
+新目录，也会报 `b-visible`。独立 direct 与真实 SETUP→保留 DHCP A/B 事务→新进程
+LOAD 只读核验两项先 RED（2 FAIL / 6.125 秒 / exit1），原断言不变。日志
+`outputs/test-diagnostics/r22-dhcp-inspection-parent-owner-red.log`，inode146576039、
+size2612、SHA256 `c88d0cdf291564a92c8fcaee5341f3304585c68ca6c3d0c25cb557a7c426fe8e`。
+
+核验现在持有 owner 指定 parent 目录的 NOFOLLOW FD，打开时比较完整名称/FD 身份，
+用该 FD 核 record 的目录绑定，并将其加入既有返回前完整 FD/名称复核（含 ctime）
+及 finally 关闭。换绑须 HOLD；注入后的原/新目录、原 parent inode/字节、A/B/
+backup/record 原样保留，零恢复、清理或服务命令。两项修后 OK / 5.823 秒 / exit0，
+日志 `r22-dhcp-inspection-parent-owner-green.log`，inode146578861、size469、SHA256
+`36f6986269608c53761f08132a466e245e28a9cbdc0b84c7df9827ba3250498d`。
+
+完整 LOAD 模块与四项真实持久凭据/新进程 pending HOLD/只读正负流程合计 325 tests
+OK / 48.116 秒 / exit0，无 skip；这是有界 unittest，不是正式 related/full。日志
+`r22-dhcp-inspection-parent-owner-regressions.log`，inode146584360、size104393、SHA256
+`47a9d17628c462ef9cb671629ee82fad32ab6961079b9b215803278156c6ca32`；原 100679 字节
+前缀 SHA256 `a4ad108463de26d6d75d968703c7e9475e8f08c0397eb7bbc84c06014b1815c3` 保持。
+完整物理 Ran/OK/退出标记与实际 exec exit0 一致，源码/测试/manifest/ledger/runtime
+运行前后 stat/摘要不变；manifest 的 LOAD direct 与真实多脚本映射原样有效。
+
+此修复不解释原 bootstrap15s/REQ19 probe10s 超时原因，也不放行正式重跑；ledger
+不变。只读结果仍不是后续写入权限，不证明原子组快照、任意祖先/非合作写者免疫、
+完整 grouped DHCP 冷恢复、B 健康收口、旧 A 显式激活或 Linux/断电见证；REAL_ENV
+的 R22 卡仍 OPEN，完整 R22 未验收。
+
 ### R22 related 的 bootstrap 超时诊断记录（未收口）
 
 代码候选 `01cf5bcd08758a26146dd1b857f291411ca55d3f` 的 related 原日志

@@ -553,7 +553,61 @@ def assert_private_dhcp_preimage_disk_inspection(api, root: Path, project: Path,
     assert before == snapshot(), "inspection changed retained A/B/receipt/name authority"
 
 
-def assert_private_dhcp_cold_pending_hold(api, root: Path, project: Path, *, inspect_preimage=False) -> None:
+def assert_private_dhcp_inspection_parent_rebind_hold(api, root: Path, project: Path) -> None:
+    """A matching parent leaf cannot transfer its containing directory authority."""
+    live = root.resolve() / "private-etc-dhcp"
+    transaction, = live.glob(".load-dhcp-transaction-*")
+    parent = project / "99-output-ztp/current-release.json"
+    original_directory = parent.parent.lstat()
+    original_leaf = parent.lstat()
+    original_bytes = parent.read_bytes()
+    retained = parent.parent.with_name("operator-retained-parent-directory")
+    verifier = api._verify_dhcp_a_preimage_receipt
+    injected = []
+    commands = []
+
+    def evidence_snapshot():
+        paths = [live, transaction, transaction / "backup", transaction / "a-preimage.json", parent.parent, parent]
+        paths += list((transaction / "backup").iterdir())
+        paths += [live / leaf for leaf in ("dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts")]
+        paths += [retained]
+        return {str(path): ((path.lstat().st_dev, path.lstat().st_ino, path.lstat().st_mode,
+                            path.lstat().st_nlink, path.lstat().st_size,
+                            path.lstat().st_mtime_ns, path.lstat().st_ctime_ns),
+                           path.read_bytes() if path.is_file() else None) for path in paths}
+
+    def replace_parent_after_leaf_verification(*args, **kwargs):
+        verifier(*args, **kwargs)
+        assert not injected, "injection must occur only at final receipt verification"
+        parent.parent.rename(retained)
+        parent.parent.mkdir()
+        (retained / parent.name).rename(parent)
+        injected.append(evidence_snapshot())
+
+    def forbidden(*args, **kwargs):
+        commands.append(args)
+        raise AssertionError("read-only inspection attempted an external command")
+
+    with mock.patch.object(api, "_verify_dhcp_a_preimage_receipt", side_effect=replace_parent_after_leaf_verification), \
+            mock.patch.object(api, "run", side_effect=forbidden), \
+            mock.patch.object(api, "_run_subprocess", side_effect=forbidden):
+        try:
+            api.inspect_dhcp_a_preimage(transaction, runtime_directory=live, parent_destination=parent)
+        except api.LoadError as exc:
+            assert "HOLD" in str(exc) and "authority changed" in str(exc), str(exc)
+        else:
+            raise AssertionError("DHCP disk inspection accepted a replaced parent directory")
+    assert len(injected) == 1, "test did not reach the final directory authority boundary"
+    assert commands == []
+    assert evidence_snapshot() == injected[0], "inspection changed evidence after the injected replacement"
+    assert retained.lstat().st_ino == original_directory.st_ino
+    assert parent.parent.lstat().st_ino != original_directory.st_ino
+    assert parent.lstat().st_ino == original_leaf.st_ino
+    assert parent.read_bytes() == original_bytes
+
+
+def assert_private_dhcp_cold_pending_hold(api, root: Path, project: Path, *, inspect_preimage=False,
+                                        inspect_parent_rebind=False) -> None:
     """A fresh candidate has no memory of the first HOLD; disk evidence must fence it."""
     source, live = project / "independent-dhcp-B", root / "private-etc-dhcp"
     names = ("dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts")
@@ -566,6 +620,9 @@ def assert_private_dhcp_cold_pending_hold(api, root: Path, project: Path, *, ins
     transaction, = transactions
     backup = transaction / "backup"
     identities = [(path, path.lstat()) for path in (transaction, backup)]
+    if inspect_parent_rebind:
+        assert_private_dhcp_inspection_parent_rebind_hold(api, root, project)
+        return
     if inspect_preimage:
         assert_private_dhcp_preimage_disk_inspection(api, root, project)
     for name in names:
@@ -6860,6 +6917,13 @@ os.kill(os.getpid(), signal.SIGKILL)
                 project.mkdir()
                 assert_private_dhcp_transaction_retention(LOAD, root, project, "fsync")
                 assert_private_dhcp_preimage_disk_inspection(LOAD, root, project, invalid=invalid)
+
+    def test_dhcp_disk_preimage_inspection_rejects_parent_directory_rebind_after_leaf_checks(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root, project = Path(name), Path(name) / "project"
+            project.mkdir()
+            assert_private_dhcp_transaction_retention(LOAD, root, project, "fsync")
+            assert_private_dhcp_inspection_parent_rebind_hold(LOAD, root, project)
 
     def test_dhcp_disk_preimage_inspection_rejects_unregistered_backup_child(self) -> None:
         with tempfile.TemporaryDirectory() as name:

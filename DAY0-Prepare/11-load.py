@@ -8716,6 +8716,12 @@ def inspect_dhcp_a_preimage(
                 raise LoadError("inspection ancestor changed while opening")
         if stat.S_IMODE(os.fstat(descriptors[-1][1]).st_mode) != 0o700:
             raise LoadError("inspection backup is not private")
+        parent_directory = parent_destination.parent
+        before = parent_directory.lstat()
+        parent_descriptor = os.open(parent_directory, flags | os.O_DIRECTORY)
+        descriptors.append((parent_directory, parent_descriptor, _dhcp_a_preimage_receipt_identity(before)))
+        if _dhcp_a_preimage_receipt_identity(os.fstat(parent_descriptor)) != descriptors[-1][2]:
+            raise LoadError("inspection parent directory authority changed while opening")
         receipt = transaction / "a-preimage.json"
         before = receipt.lstat()
         if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
@@ -8786,7 +8792,7 @@ def inspect_dhcp_a_preimage(
         parent = body["parent"]
         if (not isinstance(parent, dict) or set(parent) != {"destination", "directory", "before", "candidate"}
                 or parent["destination"] != str(parent_destination)
-                or parent["directory"] != directory_binding(parent_destination.parent, parent_destination.parent.lstat())):
+                or parent["directory"] != directory_binding(parent_directory, os.fstat(parent_descriptor))):
             raise LoadError("inspection parent authority is invalid")
         validate_leaf_state(parent["before"])
         candidate = parent["candidate"]
