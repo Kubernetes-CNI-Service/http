@@ -267,6 +267,12 @@ Q manifest/链接/WAL 与 B，拒绝旧 P 回退。本机故障注入不证明�
 安装算法 workflow 使用固定独立 A/B 字节，仅将 sudo/文件命令/dhcpd 替换为私有
 文件系统端口，不触碰 `/etc/dhcp`，不证明真实语法、root 权限或备份断电持久性。
 保留的事务不是完整恢复凭据/WAL 自动登记，不能冒称完整旧 A 激活或 B 成功收口。
+非 dry-run main 的成功出口还须重新检查 SETUP WAL 缺席：若切换期间留下未结清
+WAL，即使父 B replace/目录同步和后续步骤返回，也不得返回 0 或打印 load 完成。
+按既有提交后失败路径保持 B、WAL 与恢复凭据并停止受管服务，不自动回 A。
+direct 与真实 SETUP 成功→受控 main workflow 覆盖此守卫；main 的输入、生成及
+服务端口使用替身，父提交使用私有真实 primitive，不是 root 入口/真实服务验收。
+WAL 缺席只是必要条件，不是完整 B 健康或成功退休的证明；finalizer 仍未完成。
 父 B 尚未 replace 时，安装失败后的 A 恢复若有命令非零或抛异常，同样不得从
 finally 删除 A backup/staged/事务。恢复开始即进入“未完成”状态，仅所有原恢复
 命令正常结束才走原清理路径；异常仍传播、报告 HOLD 与事务路径，禁止提示手工

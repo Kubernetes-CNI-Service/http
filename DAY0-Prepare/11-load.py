@@ -13688,6 +13688,10 @@ def main(
             warn(f"{host_os} 不运行 ZTP 后台监控，已忽略 --start-ztp-monitor")
         if args.dry_run:
             print(dry_run_next_step(requested_argv))
+        if not args.dry_run:
+            failure_phase = "未结清 SETUP WAL 成功收口闸门"
+            require_no_pending_setup_switch_journal()
+
         completed_successfully = True
         return 0
     except BaseException as exc:

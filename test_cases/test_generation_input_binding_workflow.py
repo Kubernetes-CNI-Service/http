@@ -1173,6 +1173,41 @@ finally:
             self.assertEqual(selector, os.readlink(project / "99-output-ztp/current"))
             self.assertFalse((root / "service-started").exists())
 
+    def test_real_setup_success_then_main_retains_wal_and_refuses_whole_b_completion(self):
+        with tempfile.TemporaryDirectory(prefix="r22-main-pending-wal-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, _q, common, _p_only, _q_only, manifest, _before, _hook, _barrier, _home = fixture
+            for relative in ("tools/lldp-analyze-tool/99-output-p2p",
+                             "tools/lldp-analyze-tool/99-output-monitor",
+                             "tools/ibdiagnet-analyze-tool/99-output-p2p"):
+                leaf = root / relative
+                if leaf.is_dir() and not leaf.is_symlink():
+                    shutil.rmtree(leaf)
+            journal = root / "ztp/.setup-switch-journal.json"
+            setup_state = []
+
+            def real_setup_action():
+                result = self._run_private_load_setup_switch(
+                    fixture, prepare_journal=False, auto_prepare_journal=True,
+                    kill_after_replace=root / "never-replaced",
+                )
+                self.assertEqual(25, result.returncode, result.stdout + result.stderr)
+                self.assertTrue(journal.is_file())
+                setup_state.append((manifest.read_bytes(), os.readlink(common), journal.read_bytes()))
+
+            harness = RELEASE_FIXTURE.ReleaseTransactionTests()
+            harness.setUp()
+            try:
+                harness._assert_main_pending_wal_completion_holds(
+                    activation_action=real_setup_action, journal=journal,
+                )
+            finally:
+                harness.tearDown()
+                harness.doCleanups()
+            self.assertEqual([setup_state[0]],
+                             [(manifest.read_bytes(), os.readlink(common), journal.read_bytes())])
+            self.assertFalse((root / "service-started").exists())
+
     def test_real_setup_materialized_registration_rejects_wal_write_aba(self):
         with tempfile.TemporaryDirectory(prefix="r22-registration-wal-aba-") as name:
             fixture = self._private_setup_switch_fixture(Path(name))

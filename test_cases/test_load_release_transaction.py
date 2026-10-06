@@ -1576,6 +1576,8 @@ class ReleaseTransactionTests(unittest.TestCase):
         observe_template_mutation: bool = False,
         active_project_value: Path | None = None,
         activation_calls: list[dict] | None = None,
+        activation_action=None,
+        after_parent_commit=None,
     ):
         args = SimpleNamespace(
             skip_doca=False, download_doca=False, dry_run=False,
@@ -1645,12 +1647,13 @@ class ReleaseTransactionTests(unittest.TestCase):
                 LOAD, "confirm_ztp_monitor_start", return_value=False,
             ))
             stack.enter_context(mock.patch.object(LOAD, "quiesce_services", quiesce))
+            def activate_fixture(*_args, **kwargs):
+                if activation_calls is not None:
+                    activation_calls.append(kwargs)
+                if activation_action is not None:
+                    activation_action()
             stack.enter_context(mock.patch.object(
-                LOAD, "activate_project",
-                side_effect=(
-                    (lambda *_args, **kwargs: activation_calls.append(kwargs))
-                    if activation_calls is not None else None
-                ),
+                LOAD, "activate_project", side_effect=activate_fixture,
             ))
             stack.enter_context(mock.patch.object(LOAD, "render_ztp_runtime"))
             stack.enter_context(mock.patch.object(
@@ -1743,7 +1746,12 @@ class ReleaseTransactionTests(unittest.TestCase):
                     with mock.patch.object(LOAD.os, "fsync", side_effect=fail_parent_sync):
                         LOAD.commit_prepared_release(candidate)
                     self.fail("unconfirmed parent durability must not return success")
-                candidate.committed = True
+                if failure_at == "completion":
+                    LOAD.commit_prepared_release(candidate)
+                    if after_parent_commit is not None:
+                        after_parent_commit()
+                else:
+                    candidate.committed = True
 
             stack.enter_context(mock.patch.object(
                 LOAD, "mount_and_test_dhcp", side_effect=fail_dhcp_transaction,
@@ -8646,6 +8654,61 @@ os.kill(os.getpid(), signal.SIGKILL)
 
         self.assertEqual(1, result)
         self.assertLess(events.index("freeze-a"), events.index("template-mutation"))
+
+    def _assert_main_pending_wal_completion_holds(self, activation_action=None, journal=None):
+        journal = journal or self.ztp / ".setup-switch-journal.json"
+        stdout, stderr = io.StringIO(), io.StringIO()
+        evidence = []
+
+        def retain_unresolved_evidence():
+            if activation_action is None:
+                journal.write_bytes(b"independent unresolved SETUP evidence\n")
+                journal.chmod(0o600)
+            self.assertTrue(journal.is_file())
+            evidence.append((journal.read_bytes(), journal.stat().st_ino))
+
+        with mock.patch.object(LOAD, "MANIFEST", journal.parent / ".setup_manifest"), \
+                mock.patch.object(LOAD, "preflight_services"), \
+                mock.patch.object(LOAD, "confirm_service_start", return_value=False), \
+                mock.patch.object(LOAD, "start_services") as start, \
+                redirect_stdout(stdout), redirect_stderr(stderr):
+            result, caught, candidate, quiesce, restore_links, restore_prefix, \
+                release_lock, _backend, _plan = self._exercise_main_transaction_failure(
+                    LOAD.LoadError("unused completion fixture failure"), failure_at="completion",
+                    activation_action=activation_action, after_parent_commit=retain_unresolved_evidence,
+                )
+        self.assertEqual(1, result, stdout.getvalue() + stderr.getvalue())
+        self.assertIsNone(caught)
+        self.assertTrue(candidate.committed and candidate.directory_synced)
+        self.assertEqual({"schema_version": 1, "release_id": "failure-candidate"},
+                         json.loads(candidate.destination.read_bytes()))
+        self.assertEqual([evidence[0]], [(journal.read_bytes(), journal.stat().st_ino)])
+        self.assertEqual(2, quiesce.call_count)
+        restore_links.assert_not_called()
+        restore_prefix.assert_not_called()
+        start.assert_not_called()
+        release_lock.assert_called_once_with(91)
+        self.assertIn("pending setup switch WAL", stderr.getvalue())
+        self.assertIn("受管服务因后续失败保持停止", stderr.getvalue())
+        self.assertNotIn("load 流程完成", stdout.getvalue())
+
+    def test_main_pending_setup_wal_cannot_claim_whole_b_completion(self):
+        self._assert_main_pending_wal_completion_holds()
+
+    def test_main_without_pending_wal_keeps_existing_normal_success(self):
+        stdout = io.StringIO()
+        with mock.patch.object(LOAD, "MANIFEST", self.ztp / ".setup_manifest"), \
+                mock.patch.object(LOAD, "preflight_services"), \
+                mock.patch.object(LOAD, "confirm_service_start", return_value=False), \
+                redirect_stdout(stdout):
+            result, caught, candidate, quiesce, *_rest = self._exercise_main_transaction_failure(
+                LOAD.LoadError("unused completion fixture failure"), failure_at="completion",
+            )
+        self.assertEqual(0, result)
+        self.assertIsNone(caught)
+        self.assertTrue(candidate.committed and candidate.directory_synced)
+        self.assertEqual(1, quiesce.call_count)
+        self.assertIn("load 流程完成", stdout.getvalue())
 
     def test_main_visible_parent_sync_failure_stops_without_claiming_durable_commit(self) -> None:
         stderr = io.StringIO()
