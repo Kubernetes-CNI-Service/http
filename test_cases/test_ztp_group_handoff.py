@@ -176,6 +176,21 @@ def forged_previous_round_device(round_value: object = "2") -> dict:
     return row
 
 
+def forged_previous_authority_flag_device(flag: object = 1) -> dict:
+    """A persisted non-boolean authority flag cannot certify a cycle."""
+    row = round_device("Leaf01", "eth")
+    previous = {"devices": [{
+        "hostname": "Leaf01", "ztp_round": 2,
+        "boot_id": row["boot_id"],
+        "cycle_started_at": row["cycle_started_at"],
+        "round_authority_invalid": flag,
+        "stages": row["stages"],
+    }]}
+    MONITOR.assign_ztp_rounds([row], previous)
+    MONITOR.finalize_device(row)
+    return row
+
+
 def forged_previous_reset_receipt_device(index: object = "invalid") -> dict:
     """A malformed previous reset completion cannot mint a new authority."""
     row = round_device("Leaf01", "eth", round_index=1)
@@ -512,6 +527,18 @@ class CurrentRoundCompletionTests(unittest.TestCase):
                     ),
                 )
 
+    def test_nonboolean_previous_authority_flag_cannot_promote_or_handoff(self):
+        for flag in (1, "false", None):
+            with self.subTest(flag=flag):
+                row = forged_previous_authority_flag_device(flag)
+                self.assertIs(row.get("round_authority_invalid"), True)
+                self.assertNotEqual("success", row["overall"])
+                self.assertEqual(
+                    {}, MONITOR.ready_completion_handoff_reports(
+                        {"scope": "prod", "devices": [row]},
+                    ),
+                )
+
     def test_malformed_persisted_stage_container_cannot_promote_or_handoff(self):
         for stages in (None, []):
             with self.subTest(stages=stages):
@@ -613,6 +640,7 @@ class CurrentRoundGateWorkflowTests(unittest.TestCase):
                     forged_reset_reboot_device(),
                     forged_future_previous_receipt_device(),
                     forged_previous_round_device(),
+                    forged_previous_authority_flag_device(),
                     forged_previous_reset_receipt_device(),
                     forged_previous_stage_container_device(),
                     forged_previous_completion_container_device(),

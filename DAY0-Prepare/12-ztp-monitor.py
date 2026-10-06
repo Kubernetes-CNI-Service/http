@@ -3730,7 +3730,7 @@ def assign_ztp_rounds(
         invalid_round_authority = (
             type(raw_previous_round) is not int
             or raw_previous_round < 1
-            or previous.get("round_authority_invalid") is True
+            or previous.get("round_authority_invalid", False) is not False
         )
         if invalid_round_authority:
             device["round_authority_invalid"] = True
