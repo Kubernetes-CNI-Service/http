@@ -5304,6 +5304,7 @@ def monitor_once(args: argparse.Namespace, project: Path) -> Path:
     config_sync_contexts: dict[str, Optional[dict[str, Any]]] = {}
     method_root = project / "99-output-ztp/configuration-methods"
     method_contexts: dict[str, dict[str, Any]] = {}
+    initial_contexts: dict[str, dict[str, Any]] = {}
     for device in devices:
         try:
             config_sync_contexts[device["hostname"]] = config_sync_authority.read_current(
@@ -5352,6 +5353,29 @@ def monitor_once(args: argparse.Namespace, project: Path) -> Path:
             attribution_state_path, attribution_digests,
             list(attribution_by_address.values()),
         )
+        initial_reader = None
+        initial_error = ""
+        for device in collection_devices:
+            if device.get("config_method") != "initial-setup":
+                continue
+            context = {}
+            initial_contexts[device["hostname"]] = context
+            try:
+                # Latch the existing local writer BEFORE any collector/session.
+                context["current"] = config_sync_authority.read_method_current(method_root, device["hostname"])
+            except (OSError, ValueError, TypeError, KeyError, UnicodeError) as exc:
+                context["error"] = str(exc)
+        if initial_contexts:
+            try:
+                paths = [getattr(args, field, None) for field in (
+                    "initial_tool_inputs", "initial_target_cache", "initial_device_csv", "initial_p2p")]
+                if any(path is None for path in paths):
+                    raise ValueError("initial monitor requires explicit tool/cache/CSV/P2P inputs")
+                initial_reader = config_sync_authority.InitialMethodMonitorInputs(
+                    project, config_sync_authority.load_initial_method_executor(), *paths,
+                    inventory=project / "02-devices_config.csv")
+            except (OSError, ValueError, TypeError, KeyError, UnicodeError, RuntimeError) as exc:
+                initial_error = str(exc)
         for device in collection_devices:
             if device.get("config_method") != "ztp" or device.get("type") not in {"eth", "eth_spx", "spx", "air", "ib", "nvl"}:
                 continue
@@ -5400,6 +5424,24 @@ def monitor_once(args: argparse.Namespace, project: Path) -> Path:
             device, switch_results.get(device["hostname"], {"kind": "not-collected"}),
             config_sync_root, config_sync_contexts.get(device["hostname"]),
         )
+        initial_context = initial_contexts.get(device["hostname"])
+        if initial_context is not None:
+            initial_observation, initial_input = {}, ""
+            try:
+                if initial_reader is None or initial_error or "error" in initial_context:
+                    raise ValueError(initial_context.get("error") or initial_error or "initial inputs unavailable")
+                initial_observation, initial_input = initial_reader.observe(device, args.identity, args.ssh_timeout)
+            except (OSError, ValueError, TypeError, KeyError, UnicodeError, RuntimeError) as exc:
+                initial_observation = {"reason": str(exc)}
+            apply_current_initial_method_authority(device, method_root, initial_context.get("current"),
+                                                   initial_observation, initial_input)
+            if initial_reader is not None:
+                try:
+                    # Include mutations at the held receipt/current read boundary.
+                    initial_reader.recheck()
+                except (OSError, ValueError, TypeError, KeyError, UnicodeError, RuntimeError) as exc:
+                    apply_current_initial_method_authority(device, method_root, initial_context.get("current"),
+                                                           {"reason": str(exc)}, "")
         context = method_contexts.get(device["hostname"])
         if context is not None:
             expected_text = ""
@@ -6519,6 +6561,10 @@ def parser() -> argparse.ArgumentParser:
     )
     result.set_defaults(scope="all")
     result.add_argument("--identity", type=Path, help="SSH 私钥路径")
+    result.add_argument("--initial-target-cache", type=Path, help="initial-setup 本轮输入 cache；需同时指定其余三项输入")
+    result.add_argument("--initial-device-csv", type=Path, help="initial-setup 原始设备 CSV")
+    result.add_argument("--initial-p2p", type=Path, help="initial-setup 原始 P2P 输入")
+    result.add_argument("--initial-tool-inputs", type=Path, help="项目内 initial-setup global/publickey 输入目录（不加载其代码）")
     result.add_argument("--known-hosts", type=Path, default=Path.home() / ".ssh" / "known_hosts", help="SSH 已知主机文件（默认 ~/.ssh/known_hosts）")
     result.add_argument(
         "--generate-html", action="store_true",

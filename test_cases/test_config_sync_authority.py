@@ -16,6 +16,25 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSyncAuthorityTests(unittest.TestCase):
+    def test_initial_monitor_profile_target_has_no_default_or_foreign_identity(self):
+        reader = object.__new__(self.authority.InitialMethodMonitorInputs)
+        reader.initial = SimpleNamespace(normalize_mac=lambda value, **kwargs: value.lower())
+        target = SimpleNamespace(ib=SimpleNamespace(hostname="IB01", dev_type="ib", login_ip="192.0.2.10", eth0_mac="02:00:00:00:00:01"))
+        reader.targets = [target]
+        device = {"hostname": "IB01", "type": "ib", "config_method": "initial-setup", "ip": "192.0.2.10", "mac_plain": "020000000001"}
+        self.assertIs(target, reader.target(device))
+        for update in ({"hostname": "IB02"}, {"type": "nvl"}, {"config_method": "ztp"}, {"config_method": ""},
+                       {"ip": "192.0.2.11"}, {"mac_plain": "020000000002"}):
+            with self.subTest(update=update), self.assertRaises(self.authority.AuthorityError):
+                reader.target({**device, **update})
+        reader.targets.append(target)
+        with self.assertRaises(self.authority.AuthorityError): reader.target(device)
+
+    def test_initial_monitor_reader_cannot_inherit_writer_entry_points(self):
+        reader = object.__new__(self.authority.InitialMethodMonitorInputs)
+        with self.assertRaises(self.authority.AuthorityError): reader.start()
+        with self.assertRaises(self.authority.AuthorityError): reader.complete()
+
     def test_initial_method_projection_requires_own_fresh_configuration_not_bootstrap(self):
         receipt = self.method_receipt_v2(hostname="IB01", type="ib", config_method="initial-setup",
                                          trigger_source="initial_setup_managed")

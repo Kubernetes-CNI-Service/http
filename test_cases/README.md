@@ -143,9 +143,14 @@ initial-setup 消费端原语 `apply_current_initial_method_authority` 只消费
 核验本轮闭合身份/配置观察、显式当前输入摘要，并在 held 收据读取后再次核验代次与字节。
 缺失、漂移和晚期失败只撤销该原代次；pending 或较新写者不被撤销。它不创建 generation，
 不借 bootstrap 来源、不补造九阶段，未尝试设备仍 pending。direct 与 backend → monitor → HTML
-流程覆盖正向、漂移、晚期读取错误、较新写者和完成拒绝；当前 monitor_once 尚未接入此原语，
-调用方仍须提供本轮实际 observer 和前后项目输入复核，不能把保存的报告作为观察传入。
-这不补造其他九阶段，也不代表 F02 整体验收；initial-setup 消费端主流程接入与完整方法
+流程覆盖正向、漂移、晚期读取错误、较新写者和完成拒绝。
+`monitor_once` 接入此原语：显式 `--initial-target-cache`、`--initial-device-csv`、
+`--initial-p2p`、`--initial-tool-inputs` 四项绑定项目内当前 cache/CSV/P2P/global/publickey，
+并绑定监控设备 CSV；缺输入不回退。实际 observer 前后及收据读取后复核输入，
+操作前捕获原本地代次，不创建新代次。坏 JSON、observer 错误、清单或配置中途变化均拒绝。
+真实本地 BatchMode shell → readonly 输入 → backend/monitor 流程另验证配置和密钥漂移，
+不把保存的报告作为观察传入；管理监控 main workflow 只替代设备 I/O 与 runtime/release 前提。
+这不补造其他九阶段，也不代表 F02 整体验收；完整方法
 生命周期仍需继续实现、测试，真机保持 `REAL_ENVIRONMENT.md` 的 NOT RUN。
 
 1. 功能或缺陷修复必须先在 `test_<area>.py` 中增加可稳定复现的案例，再修改实现。

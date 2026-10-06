@@ -102,7 +102,7 @@ class ManagedInitialMethodCycle:
         self.tickets, self.finished = {}, set()
         self.targets = []
 
-    def _image(self, path):
+    def _image(self, path, *, content=False):
         path = Path(path).resolve(strict=True)
         path.relative_to(self.project)
         descriptor = _parent(path.parent)
@@ -125,7 +125,8 @@ class ManagedInitialMethodCycle:
             if (len(raw) != before.st_size or _identity(os.fstat(fd)) != _identity(before)
                     or _identity(os.stat(path, follow_symlinks=False)) != _identity(before)):
                 raise AuthorityError("managed initial input changed during held read")
-            return str(path), _identity(before), hashlib.sha256(raw).hexdigest()
+            image = str(path), _identity(before), hashlib.sha256(raw).hexdigest()
+            return (image, raw) if content else image
         finally:
             if fd is not None:
                 os.close(fd)
@@ -235,6 +236,96 @@ class ManagedInitialMethodCycle:
     def close(self):
         for target in self.targets:
             self.fail_unfinished(target)
+
+
+class InitialMethodMonitorInputs(ManagedInitialMethodCycle):
+    """Read-only current profile/session binding; never start a writer cycle."""
+    def start(self, *args, **kwargs):
+        raise AuthorityError("initial monitor inputs cannot start a writer")
+
+    def complete(self, *args, **kwargs):
+        raise AuthorityError("initial monitor inputs cannot publish a writer result")
+
+    def __init__(self, project, initial, tool, cache, csv_path, p2p, *, inventory=None):
+        super().__init__(project, initial)
+        self.inventory = Path(inventory) if inventory is not None else None
+        self.inventory_image = self._image(self.inventory) if self.inventory is not None else None
+        self.tool, self.cache, self.csv, self.p2p = [Path(path).resolve(strict=True) for path in (tool, cache, csv_path, p2p)]
+        paths = [self.cache, self.cache.with_name(self.cache.name + ".sha256"),
+                 self.csv, self.p2p, self.tool / "01-global.yaml"]
+        key_paths = sorted((self.tool / "publickey").glob("*.pub"))
+        paths.extend(key_paths)
+        before = [self._image(path) for path in paths]
+        cache_image, raw = self._image(self.cache, content=True)
+        if cache_image != before[0]:
+            raise AuthorityError("initial monitor cache changed before profile decoding")
+        profile = json.loads(raw.decode("utf-8"), object_pairs_hook=_members)
+        candidate = initial.load_target_cache(self.cache, self.csv, self.p2p, public_key_tool=self.tool)
+        if candidate is None:
+            raise AuthorityError("initial monitor current profile contract is unavailable")
+        self.targets = candidate[1]
+        names = [target.ib.hostname.casefold() for target in self.targets]
+        if len(set(names)) != len(names):
+            raise AuthorityError("initial monitor profile has duplicate identities")
+        self.services, self.keys = copy.deepcopy(profile["services"]), copy.deepcopy(profile["public_keys"])
+        if self.services is None or not self.keys:
+            raise AuthorityError("initial monitor requires complete service/key inputs")
+        initial.desired_service_commands(self.services, "")
+        initial.key_install_command(self.keys)
+        self.images = self._inputs()
+        if self.images != before:
+            raise AuthorityError("initial monitor profile changed while being captured")
+
+    def target(self, device):
+        matched = [target for target in self.targets if target.ib.hostname == device.get("hostname")]
+        if (len(matched) != 1 or device.get("type") != "ib" or device.get("config_method") != "initial-setup"
+                or matched[0].ib.dev_type != "ib" or matched[0].ib.login_ip != device.get("ip")
+                or self.initial.normalize_mac(matched[0].ib.eth0_mac, field="initial monitor MAC").replace(":", "")
+                != device.get("mac_plain")):
+            raise AuthorityError("initial monitor target differs from current inventory")
+        return matched[0]
+
+    def observe(self, device, private_key, timeout):
+        target = self.target(device)
+        if private_key is None:
+            raise AuthorityError("initial monitor inputs unavailable or changed before session")
+        self.recheck()
+        services, keys = copy.deepcopy(self.services), copy.deepcopy(self.keys)
+        expected = self.initial.initial_method_input_digest(target, services, keys)
+        proof = self.initial.observe_managed_initial_configuration(
+            target, device.get("ssh_user", "admin"), private_key, timeout, services, keys)
+        self.recheck()
+        if (services != self.services or keys != self.keys
+                or self.target(device) != target):
+            raise AuthorityError("initial monitor inputs changed during session")
+        return proof, expected
+
+    def recheck(self):
+        if (self._inputs() != self.images or (self.inventory is not None
+                and self._image(self.inventory) != self.inventory_image)):
+            raise AuthorityError("initial monitor current project inputs changed")
+
+
+def load_initial_method_executor():
+    """Load repository code, never executable code from a mutable project."""
+    import importlib.util
+    import sys
+    source = Path(__file__).resolve().parent.parent / "infiniband/bringup/xdr-initial-setup/initial-setup.py"
+    name = "_http_initial_monitor_executor"
+    spec = importlib.util.spec_from_file_location(name, source)
+    if spec is None or spec.loader is None:
+        raise AuthorityError("initial method executor is unavailable")
+    initial = importlib.util.module_from_spec(spec)
+    previous = sys.modules.get(name)
+    sys.modules[name] = initial
+    try:
+        spec.loader.exec_module(initial)
+    finally:
+        if previous is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = previous
+    return initial
 
 
 def monitor_source_observation_allows_completion(device):

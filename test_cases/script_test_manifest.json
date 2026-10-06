@@ -1839,6 +1839,7 @@
       "members": [
         "infiniband/bringup/xdr-initial-setup/initial-setup.py",
         "ztp/config_sync_authority.py",
+        "DAY0-Prepare/12-ztp-monitor.py",
         "ztp/config/nvos/template/90-c2-generate_configs.py",
         "DAY0-Prepare/11-load.py"
       ],

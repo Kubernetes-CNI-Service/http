@@ -173,6 +173,101 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                 receipt = authority.read_method_receipt(storage, target.ib.hostname)
                 self.assertEqual(result if cycle == 1 else None, receipt)
                 self.assertNotIn("complete", result, "method proof never supplies missing bootstrap stages")
+                if cycle == 1:
+                    # Real same-shell observer -> read-only current input binder
+                    # -> monitor consumer. No persisted report is an observer.
+                    monitor = load_script("f02_initial_real_shell_monitor", ROOT / "DAY0-Prepare/12-ztp-monitor.py")
+                    reader = authority.InitialMethodMonitorInputs(root, self.initial, tool, cache, ib_csv, p2p)
+                    device = {"hostname": "EXAMPLE-IB01", "type": "ib", "config_method": "initial-setup",
+                        "ip": "203.0.113.2", "mac_plain": "020000000001", "ssh_user": "admin", "ztp_round": 1,
+                        "stages": {name: monitor.stage("pending") for name in monitor.STAGE_NAMES}, "issues": [], "events": []}
+                    captured = authority.read_method_current(storage, target.ib.hostname)
+                    for drift in (False, True):
+                        if drift: (remote / ".ssh/authorized_keys").write_text(laptop)
+                        with mock.patch.dict(os.environ, {"PATH": str(executables) + ":/usr/bin:/bin", "HOME": str(remote)}):
+                            proof, expected_input = reader.observe(device, private, 5)
+                        monitor.apply_current_initial_method_authority(device, storage, captured, proof, expected_input)
+                        self.assertEqual("warning" if drift else "success", device["stages"]["config_apply"]["status"])
+                        current = authority.read_method_current(storage, target.ib.hostname)
+                        self.assertEqual((1, "failed" if drift else "success"), (current["generation"], current["state"]))
+                        self.assertFalse(monitor.completion_handoff_device_complete(device))
+
+    def test_f02_monitor_entry_reads_initial_profile_and_rejects_mid_session_changes(self):
+        from types import SimpleNamespace
+        monitor = load_script("f02_initial_monitor_entry", ROOT / "DAY0-Prepare/12-ztp-monitor.py")
+        authority = monitor.config_sync_authority
+        from test_cases.test_config_sync_authority import ConfigSyncAuthorityTests
+        for case in ("positive", "profile-change", "new-writer", "missing-profile", "deep-profile", "observer-error", "inventory-change", "late-receipt-change"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                project, tool, global_path, csv_path, p2p, _, cache, laptop, management = self.fixture(directory)
+                project = project.resolve()
+                csv_path.write_text("hostname,type,eth0_ip,netmask,eth0_gw,eth0_mac,eth1_ip,netmask,eth1_gw,config_method\n"
+                    "EXAMPLE-IB01,ib,203.0.113.2,24,203.0.113.1,02:00:00:00:00:01,,,,initial-setup\n"
+                    "EXAMPLE-JUMP01,eth_jump,192.0.2.10,,,,,,,\n")
+                self.assertEqual(0, self.run_initial(tool, csv_path, p2p, cache, "--generate-json"))
+                (project / "02-devices_config.csv").write_bytes(csv_path.read_bytes())
+                (project / "01-global.yaml").write_text(GLOBAL)
+                apache, dhcp, air = project / "apache.log", project / "dhcp.log", project / "air.json"
+                apache.write_text(""); dhcp.write_text(""); air.write_text('{"nodes": {}}')
+                key = project / "management-key"; key.write_text("fixture-only"); key.chmod(0o600)
+                args = monitor.parser().parse_args([str(project), "--output-dir", str(project / "reports"),
+                    "--apache-log", str(apache), "--dhcp-log", str(dhcp), "--identity", str(key),
+                    "--initial-target-cache", str(cache), "--initial-device-csv", str(csv_path),
+                    "--initial-p2p", str(p2p), "--initial-tool-inputs", str(tool)])
+                expected = {"schema_version": 1, "type": "ib", "config_method": "initial-setup",
+                    "hostname": "EXAMPLE-IB01", "eth0": "203.0.113.2/24", "eth0_gateway": "203.0.113.1",
+                    "eth1": "", "eth1_gateway": "", "eth0_mac": "02:00:00:00:00:01",
+                    "dns": ["203.0.113.53"], "ntp": ["ntp.ubuntu.com", "time.ib.example.test"],
+                    "timezone": "Asia/Taipei", "key_fingerprints": sorted([fingerprint(laptop), fingerprint(management)])}
+                digest = hashlib.sha256(json.dumps(expected, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+                storage = project / "99-output-ztp/configuration-methods"
+                ticket = authority.begin_method(storage, "EXAMPLE-IB01", "writer-1", "initial-IB01", "initial_setup_managed")
+                receipt = ConfigSyncAuthorityTests.method_receipt_v2(ticket, hostname="EXAMPLE-IB01", type="ib",
+                    config_method="initial-setup", trigger_source="initial_setup_managed", transport_ip="203.0.113.2",
+                    mac_plain="020000000001", live_state_sha256="a" * 64, input_sha256=digest, source_receipt_sha256="c" * 64)
+                authority.finish_method(storage, ticket, receipt)
+                if case == "missing-profile": cache.unlink()
+                if case == "deep-profile": cache.write_text("[" * 1100 + "0" + "]" * 1100)
+                def fresh_observer(target, user, private, timeout, services, keys):
+                    self.assertEqual("EXAMPLE-IB01", target.ib.hostname)
+                    self.assertEqual("admin", user)
+                    self.assertEqual(key, private)
+                    self.assertEqual(list(EXPECTED_IB["dns"]), services["dns"])
+                    self.assertEqual(1, authority.read_method_current(storage, "EXAMPLE-IB01")["generation"])
+                    if case == "profile-change": global_path.write_text(GLOBAL.replace("Asia/Taipei", "UTC"))
+                    if case == "new-writer": authority.begin_method(storage, "EXAMPLE-IB01", "writer-2", "new-IB01", "initial_setup_managed")
+                    if case == "observer-error": raise self.initial.SetupError("independent observer protocol error")
+                    if case == "inventory-change":
+                        inventory = project / "02-devices_config.csv"
+                        inventory.write_text(inventory.read_text().replace("203.0.113.2", "203.0.113.3"))
+                    return {"schema_version": 1, "hostname": "EXAMPLE-IB01", "batch_identity_verified": True,
+                        "config_verified": True, "interface": "eth0", "transport_ip": "203.0.113.2", "mac_plain": "020000000001",
+                        "live_state_sha256": "a" * 64, "input_sha256": digest, "observation_sha256": "c" * 64, "reason": ""}
+                original_read = authority.read_method_receipt
+                changed_at_read = False
+                def held_receipt(*args):
+                    nonlocal changed_at_read
+                    value = original_read(*args)
+                    if case == "late-receipt-change" and not changed_at_read:
+                        changed_at_read = True
+                        global_path.write_text(GLOBAL.replace("Asia/Taipei", "UTC"))
+                    return value
+                with mock.patch.object(authority, "load_initial_method_executor", return_value=self.initial), \
+                        mock.patch.object(authority, "read_method_receipt", side_effect=held_receipt), \
+                        mock.patch.object(self.initial, "observe_managed_initial_configuration", side_effect=fresh_observer) as observe, \
+                        mock.patch.object(monitor, "load_release_identity", return_value={"dhcp_status": "disabled", "release_id": "fixture-release", "generated_at": "2026-10-07T07:00:00+08:00"}), \
+                        mock.patch.object(monitor, "service_runtime_backend", return_value=SimpleNamespace(name="systemd")), \
+                        mock.patch.object(monitor, "service_state", return_value={"active": "fixture", "enabled": "fixture", "error": ""}), \
+                        mock.patch.object(monitor, "ACTIVE_AIR_JSON", air), \
+                        mock.patch.object(monitor, "run_command", return_value={"returncode": 1, "stdout": "", "stderr": "fixture collection unavailable"}):
+                    output = monitor.monitor_once(args, project)
+                device = json.loads((output / "report.json").read_text())["devices"][0]
+                self.assertEqual(0 if case in {"missing-profile", "deep-profile"} else 1, observe.call_count, device.get("configuration_method_observation"))
+                self.assertEqual("success" if case == "positive" else "warning", device["stages"]["config_apply"]["status"])
+                current = authority.read_method_current(storage, "EXAMPLE-IB01")
+                self.assertEqual("success" if case == "positive" else "pending" if case == "new-writer" else "failed", current["state"])
+                self.assertEqual(2 if case == "new-writer" else 1, current["generation"])
+                self.assertFalse(monitor.completion_handoff_device_complete(device))
 
     def fixture(self, directory: str):
         root = Path(directory)

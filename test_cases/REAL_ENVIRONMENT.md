@@ -414,7 +414,8 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   `test_req10b_services_keys_workflow.py`。本地只在隔离目录执行替代 SSH 的真实 shell，
   不连接真实设备；管理 main 的本地 pending/观察/发布/撤销已覆盖，不关闭消费端或 F02。
   本地消费端原语另验证 current-era latch → fresh observer 投影 → monitor/HTML 完成拒绝；
-  它尚非 monitor_once 实际接入证据，后续真机须核验当前输入前后绑定和本轮实际 BatchMode 观察。
+  monitor_once 本地入口另验证显式输入、前后绑定、晚期漂移、旧代撤销和较新写者保留；
+  runtime/release 与远端 I/O 使用隔离替代，真机仍须核验真实项目输入与本轮实际 BatchMode 观察。
 - 前置：owner 精确授权的可恢复 IB 隔离设备、管理主机和输入项目；冻结 HEAD/tree、
   CSV/P2P/global/cache/公钥摘要，管理私钥 owned 0600 single-link，固定 eth0 MAC/IP，
   已授权的 initial-setup 操作；只通过显式项目的管理入口和逐 IB `config_method=initial-setup`
