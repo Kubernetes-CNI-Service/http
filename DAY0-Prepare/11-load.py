@@ -8871,6 +8871,9 @@ def mount_and_test_dhcp(
     before the first B write; an unconfirmed backup leaves original A intact.
     Once B is visible, unconfirmed parent directory durability instead keeps
     installed B and the root-only A backup together for manual HOLD review.
+    A synchronized parent alone is not whole LOAD health acceptance: while a
+    setup switch WAL remains, retain the DHCP evidence for later guarded
+    finalization, never retire it here merely because installation succeeded.
     """
     if (parent_candidate is not None and parent_candidate.committed
             and not parent_candidate.directory_synced):
@@ -9085,9 +9088,24 @@ def mount_and_test_dhcp(
     finally:
         if build_workspace is not None:
             build_workspace.cleanup()
+        setup_acceptance_pending = False
+        if (transaction_created and parent_candidate is not None
+                and parent_candidate.committed and parent_candidate.directory_synced):
+            try:
+                _setup_switch_journal_path().lstat()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                # An unreadable WAL name is not evidence that the whole B
+                # transaction is closed. Leave A/record/staged intact.
+                raise LoadError("DHCP A cleanup cannot confirm SETUP WAL absence; HOLD") from exc
+            else:
+                setup_acceptance_pending = True
+                if preimage_receipt is not None:
+                    _verify_dhcp_a_preimage_receipt(preimage_receipt)
         if transaction_created and (backup_unconfirmed or restore_incomplete or (
                 parent_candidate is not None and parent_candidate.committed
-                and not parent_candidate.directory_synced)):
+                and not parent_candidate.directory_synced) or setup_acceptance_pending):
             # Invalid backups, partial A restore and uncertain visible B may
             # not erase incident evidence. Retention alone proves neither
             # complete rollback, activation nor power-loss durability.
@@ -9095,6 +9113,7 @@ def mount_and_test_dhcp(
                 warn(
                     ("HOLD：DHCP 原 A 备份校验/持久化未确认；" if backup_unconfirmed
                      else "HOLD：DHCP 旧文件恢复未完成；" if restore_incomplete
+                     else "HOLD：SETUP WAL 未结清，整个 LOAD 的 B 健康收口尚未确认；" if setup_acceptance_pending
                      else "HOLD：B 已可见但目录持久化未确认；")
                     + f"保留 DHCP 事务及 root-only A 备份：{transaction_dir}；"
                     "服务保持停止，须人工核验实际 A/B 状态，不自动回退或清理"

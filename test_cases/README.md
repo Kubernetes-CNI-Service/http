@@ -299,7 +299,11 @@ DHCP 安装另在第一次 B 覆盖前创建事务内独占、0600 的 `a-preima
 缺席、四个拟安装 B 摘要、runtime/transaction/backup 目录身份和父提交前像及
 候选摘要；body 校验和与完整 record 文件同步后，还必须完成上述备份/目录链同步。
 凭据创建、同步或后核验失败仍零 B 写入并保留原证据；清理前必须核原凭据身份、
-字节及目录 ancestry，不消费换绑对象。正常成功/完整 A 恢复才按既有合同清理。
+字节及目录 ancestry，不消费换绑对象。无跨项目 SETUP WAL 的正常成功、或已完整
+恢复 A 的前提交拒绝才按既有合同清理。parent 提交/目录同步成功不等于整个 LOAD
+的 B 健康确认：只要 SETUP WAL 名称仍被占据，DHCP API 保留 A backup、staged 和
+`a-preimage.json`；无法核 WAL 名称是否缺席须 HOLD，不清理，也不自动回 A。
+这只是防止提前删除，不提供完整 B 健康 finalizer；WAL 缺席本身也不证明 B 健康。
 这是持久四文件写前证据，不是新进程恢复/激活权限：普通新 LOAD 仍 HOLD，
 完整 R22 分组恢复、B 健康成功收口、旧 A 显式激活和断电见证仍未完成。
 `inspect_dhcp_a_preimage` 是显式只读 API：调用方给定原 runtime/transaction/parent

@@ -141,6 +141,22 @@ def assert_private_dhcp_transaction_retention(
         (live_dir / "dhcpd_nvl.hosts").unlink()
     parent_payload = {"schema_version": 1, "release_id": "independent-B"}
     candidate = api.prepare_current_release(project, parent_payload)
+    setup_wal = root / "ztp/.setup-switch-journal.json"
+    setup_wal_bytes = None
+    if outcome in {"success-setup-wal", "success-setup-wal-probe-error"}:
+        if not os.path.lexists(setup_wal):
+            setup_wal.parent.mkdir(parents=True, exist_ok=True)
+            setup_wal.write_bytes(b"independent unresolved SETUP evidence\n")
+            setup_wal.chmod(0o600)
+    if os.path.lexists(setup_wal):
+        # Independent fixture authority: a real SETUP workflow already has
+        # this WAL before DHCP. Parent-only success is not whole B success.
+        setup_wal_bytes = setup_wal.read_bytes()
+    wal_probe = setup_wal
+    if outcome == "success-setup-wal-probe-error":
+        wal_probe = SimpleNamespace(lstat=mock.Mock(side_effect=PermissionError(
+            "independent SETUP WAL namespace denial",
+        )))
     parent_identity = candidate.destination.parent.stat()
     real_open, real_sync = os.open, os.fsync
     injected, warnings, cleanup, restore_phase, sync_events, installed_b = [], [], [], [], [], []
@@ -314,6 +330,7 @@ def assert_private_dhcp_transaction_retention(
                 mock.patch.object(api, "run", side_effect=private_command), \
                 mock.patch.object(api, "_run_subprocess", side_effect=private_command), \
                 mock.patch.object(api, "warn", side_effect=warnings.append), \
+                mock.patch.object(api, "_setup_switch_journal_path", return_value=wal_probe), \
                 mock.patch.object(api.os, "open", side_effect=open_parent), \
                 mock.patch.object(api.os, "fsync", side_effect=sync_parent):
             try:
@@ -337,10 +354,12 @@ def assert_private_dhcp_transaction_retention(
                     assert "DHCP A backup durability unconfirmed" in str(exc), str(exc)
                 elif outcome == "preimage-file-sync":
                     assert "DHCP A preimage receipt" in str(exc) and "HOLD" in str(exc), str(exc)
+                elif outcome == "success-setup-wal-probe-error":
+                    assert "cleanup cannot confirm SETUP WAL absence" in str(exc) and "HOLD" in str(exc), str(exc)
                 else:
                     raise
             else:
-                assert outcome in {"success", "backup-sync-success", "preimage-before-write"}, "failure must propagate before service continuation"
+                assert outcome in {"success", "backup-sync-success", "preimage-before-write", "success-setup-wal"}, "failure must propagate before service continuation"
         transactions = list(live_dir.glob(".load-dhcp-transaction-*"))
         if outcome in {"backup-bytes", "backup-mode", "backup-link", "backup-read", "preimage-file-sync", *backup_sync_faults}:
             assert injected == [outcome], injected
@@ -469,6 +488,24 @@ def assert_private_dhcp_transaction_retention(
                     backup_identity.st_dev, backup_identity.st_ino,
                 )
                 assert json.loads(candidate.destination.read_text()) == parent_payload
+        elif (outcome in {"success", "backup-sync-success", "preimage-before-write", "success-setup-wal",
+                          "success-setup-wal-probe-error"} and setup_wal_bytes is not None):
+            assert candidate.committed and candidate.directory_synced
+            assert json.loads(candidate.destination.read_text()) == parent_payload
+            assert installed == expected_b
+            assert len(transactions) == 1, "parent-only success deleted A before whole LOAD B health acceptance"
+            transaction, = transactions
+            backup = transaction / "backup"
+            assert stat.S_IMODE(backup.stat().st_mode) == 0o700
+            assert {path.name: path.read_bytes() for path in backup.iterdir()} == expected_a
+            assert {path.name for path in (transaction / "staged").iterdir()} == set(names)
+            record = transaction / "a-preimage.json"
+            assert stat.S_IMODE(record.stat().st_mode) == 0o600
+            assert set(json.loads(record.read_bytes())["body"]["before"]) == set(names)
+            assert not cleanup, "unresolved SETUP WAL must defer DHCP evidence deletion"
+            assert setup_wal.read_bytes() == setup_wal_bytes
+            if outcome != "success-setup-wal-probe-error":
+                assert any("HOLD" in warning and "B" in warning for warning in warnings)
         else:
             assert transactions == [], "normal success and precommit rollback still clean up"
             assert installed == (expected_a if outcome == "precommit" else expected_b)
@@ -6909,6 +6946,18 @@ os.kill(os.getpid(), signal.SIGKILL)
             project.mkdir()
             assert_private_dhcp_transaction_retention(LOAD, root, project, "fsync")
             assert_private_dhcp_preimage_disk_inspection(LOAD, root, project)
+
+    def test_dhcp_parent_success_preserves_a_evidence_while_setup_wal_is_pending(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root, project = Path(name), Path(name) / "project"
+            project.mkdir()
+            assert_private_dhcp_transaction_retention(LOAD, root, project, "success-setup-wal")
+
+    def test_dhcp_parent_success_unknown_wal_namespace_holds_before_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root, project = Path(name), Path(name) / "project"
+            project.mkdir()
+            assert_private_dhcp_transaction_retention(LOAD, root, project, "success-setup-wal-probe-error")
 
     def test_dhcp_disk_preimage_inspection_rejects_unknown_authority(self) -> None:
         for invalid in ("inventory", "escaped-runtime", "checksum", "backup", "parent", "mode"):

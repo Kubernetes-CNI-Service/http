@@ -2095,6 +2095,11 @@ finally:
             reenter=False, cold=True, inspect_parent_rebind=True, outcomes=("fsync",),
         )
 
+    def test_real_setup_then_parent_success_retains_dhcp_a_until_whole_b_acceptance(self):
+        self._real_setup_uncertain_parent_dhcp_evidence(
+            reenter=False, cold=True, inspect_preimage=True, outcomes=("success-setup-wal",),
+        )
+
     def test_real_setup_then_failed_dhcp_a_restore_preserves_transaction_evidence(self):
         """A partial precommit restore cannot erase the only intact A copies."""
         self._real_setup_uncertain_parent_dhcp_evidence(

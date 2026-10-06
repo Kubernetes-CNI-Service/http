@@ -288,6 +288,40 @@ OK / 48.116 秒 / exit0，无 skip；这是有界 unittest，不是正式 relate
 完整 grouped DHCP 冷恢复、B 健康收口、旧 A 显式激活或 Linux/断电见证；REAL_ENV
 的 R22 卡仍 OPEN，完整 R22 未验收。
 
+### R22 parent-only 成功不得提前清理 DHCP A 凭据
+
+DHCP API 曾在四文件安装及 parent replace/目录同步成功后删除 A backup、staged 和
+`a-preimage.json`，但 report、代次指针和服务健康仍在父 LOAD 的后续阶段；SETUP WAL
+仍在时，这会丢失完整 B 接受之前的 A 证据。新增 direct 与真实 SETUP→LOAD 两项
+先 RED：2 FAIL / 7.049 秒 / exit1。完整日志
+`outputs/test-diagnostics/r22-dhcp-parent-only-cleanup-red.log`，inode146629562、size2835、
+SHA256 `6e8c51b47025a0d735bbe45ed7841ae37f738e63e037ce59e090fb7ecc8b4075`。
+
+候选只改变清理时机：已提交并同步的 parent 下，SETUP WAL 名称任意占据均保留
+DHCP 事务及已核原凭据，不解析未知 WAL 以制造删除权；lstat 错误则 HOLD，保留
+原证据。未确认 B 同步、坏 backup、部分 A 恢复的原保留合同不变。无 SETUP WAL
+的正常成功和完整 A 恢复仍验证原清理断言；真实跨项目 success 用例则依据测试在
+安装前已经持有的真实 SETUP WAL，独立要求延后清理，不再把 parent-only 成功当
+作 whole B 健康。没有从实现结果生成预期，没有隐藏实际 WAL 或删原正常断言。
+
+新增两项修后 OK / 5.278 秒 / exit0，日志 `r22-dhcp-parent-only-cleanup-green.log`，
+SHA256 `0afe79ce1bddfbc270a2a870b70cf9b486ef17855cf3276b9eb69936cb09a33e`。
+另核 WAL namespace 无法读取、真实成功备份同步及持久凭据共五项 OK / exit0，
+日志 `r22-dhcp-parent-only-cleanup-boundaries.log`，SHA256
+`7bfea1158716fc07999f4266d68850f4dab63a0a1ccb2800f177849f0d636f0b`。
+完整 LOAD 模块及六项真实成功/前提交恢复/新进程只读和 pending HOLD 流程共
+329 tests OK / 59.710 秒 / exit0，无 skip；日志
+`r22-dhcp-parent-only-cleanup-regressions.log`，inode146640452、size106012、SHA256
+`3f361dd4ff3154f824299ee64bccaf2c37799e30dab488638d4db61a4a47771b`，已知 101365
+字节前缀 SHA256 `58c7994e6f76554e4e7ecc019d99c2d6933c957600761e81ca28404e3dc11291`
+保持；完整物理 Ran/OK/退出标记与实际 exec exit0 一致。源码/测试/manifest/ledger/
+runtime 前后 stat/摘要不变，原 direct 与真实多脚本 workflow 映射已核。
+
+保留不是恢复/服务激活或成功退休授权；本次不实现整个 B 健康 finalizer、跨重启
+DHCP 分组恢复、旧 A 显式激活或任意非合作写者免疫。WAL 缺席也不能被当成健康
+证据；禁止人工删除 WAL/事务来重入。REAL_ENV 仍 OPEN；原 bootstrap15s/REQ19
+probe10s 原因待核，未以局部 PASS 重跑正式 related/full 或改 approved ledger。
+
 ### R22 related 的 bootstrap 超时诊断记录（未收口）
 
 代码候选 `01cf5bcd08758a26146dd1b857f291411ca55d3f` 的 related 原日志

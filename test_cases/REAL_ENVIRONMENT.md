@@ -1719,6 +1719,8 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 - DHCP 盘上前像只读核验 parent 目录持有复核候选：TEST direct 与真实 SETUP→保留 A/B/凭据→新 LOAD 在最后 leaf 复核后保留原 parent 目录、将同一 parent 文件 inode 移入新目录，先 RED 后 GREEN；须持有 owner 指定目录 NOFOLLOW FD，将 record 绑定该 FD，并在返回前核 FD/名称完整身份含 ctime，换绑 HOLD。现场仅限本卡授权隔离 VM、root、完整 P/Q/A/B/WAL/receipt、可恢复卷快照、排他部署锁、明确停服及其它正常写者静默。独立记录原/新/retained parent 目录与文件 FD/名称 dev/ino/mode/uid/gid/mtime/ctime、原链接/字节摘要、A/B/backup/record、注入及只读返回/退出物理时序；受控在打开前/后、record 绑定后及最后 leaf 核验后换绑，负例保留注入后全部证据，零恢复/清理/服务命令，正例保留原 A/B 可见性分类。核验结果不得被当作后续写入或旧 A 激活授权，返回后 FD 已关闭。封存后仅负责人按核实隔离快照恢复，不对 live 注入、glob 清理或自动回 A。局部检查不证明原子组快照、任意祖先/非合作写者免疫、全组冷恢复、B 健康退休、旧 A 激活、Linux/断电或 DEV ACK，本卡继续 OPEN。
 
+- parent-only 成功保留 DHCP A 凭据候选：TEST direct 与真实 SETUP→LOAD 四文件安装、parent replace/目录同步成功但整个 B 尚未接受的边界先 RED 后 GREEN；只要 SETUP WAL 名称仍被占据，不删除原 A backup、staged 或 `a-preimage.json`，无法核 WAL 缺席则 HOLD。现场仍仅限本卡授权隔离 VM、root、完整 P/Q/A/B/WAL/receipt、可恢复卷快照、排他部署锁、明确停服及其它正常写者静默。独立冻结 WAL/parent/四文件/A backup/record 的名称/FD 身份、模式/摘要，记录安装、语法检查、parent replace/fsync、report、代次指针、健康检查及清理物理顺序；在 parent 成功后的后续阶段受控失败/死亡，须保留 A/B/事务证据，不自动回 A、启动服务或删除未知对象，新 LOAD 仍被残留闸门阻断。另核无 SETUP WAL 的普通成功及已完整恢复 A 的前提交失败仍满足原清理合同；WAL 名称读取失败必须停止清理。封存后仅负责人按核实隔离快照恢复，禁止 live 注入、glob 清理、人工删 WAL/事务后重入。此窄修只阻止提前删除，WAL 缺席不是 B 健康证据，不实现完整 B finalizer/成功退休、跨重启 DHCP 全组恢复、旧 A 激活、Linux/断电或 DEV ACK；本卡继续 OPEN。
+
 ## TC-REAL-R22-C2-DESCRIPTION-PUBLISH-001 — c2 同名描述输出的故障窗口
 
 - Case ID：`TC-REAL-R22-C2-DESCRIPTION-PUBLISH-001`；类型：real-environment / transaction / crash-recovery；对应 R22 c2 对 `*_with_desc` 的既有同名输出替换。状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。自动化先决为 `test_cases.test_generation_input_binding_contract` 的二次读取、早返及 staging direct，`test_cases.test_generation_input_binding_workflow` 的 setup/load/c2 workflow，和当前候选正式 full/check；现有定向通过不证明进程死亡后的原子性。
