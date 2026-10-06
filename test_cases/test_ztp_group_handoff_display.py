@@ -131,6 +131,41 @@ class CompletionDisplayParityTests(unittest.TestCase):
             self.assertTrue(HTML.ztp_completed(row))
             self.assertTrue(MONITOR.completion_handoff_device_complete(row))
 
+    def test_server_ufm_unknown_types_cannot_use_switch_completion_even_with_nine_successes(self):
+        for kind in ("server", "ufm", "UFM", "server-ufm", "eth_jump", "future-switch", "", None):
+            with self.subTest(kind=kind):
+                row = self.complete_fixture()
+                row["type"] = kind
+                for consumer, predicate in (("machine", MONITOR.completion_handoff_device_complete), ("html", HTML.ztp_completed)):
+                    with self.subTest(consumer=consumer):
+                        self.assertFalse(predicate(row))
+                MONITOR.finalize_device(row)
+                self.assertNotEqual("success", row["overall"])
+        # Independent declared supported switch families retain completion;
+        # future types need reviewed inventory/executor contracts, not inference.
+        for kind in ("eth", "eth_spx", "spx", "air", "ib", "nvl"):
+            with self.subTest(supported=kind):
+                row = self.complete_fixture()
+                row["type"] = kind
+                MONITOR.finalize_device(row)
+                self.assertEqual("success", row["overall"])
+                self.assertTrue(MONITOR.completion_handoff_device_complete(row))
+                self.assertTrue(HTML.ztp_completed(row))
+
+    def test_real_report_server_or_ufm_completion_claim_cannot_reach_machine_or_html_completion(self):
+        for kind in ("server", "ufm"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                row = self.complete_fixture()
+                row["type"] = kind
+                report = {"project": "private-fixture", "scope": "prod", "devices": [row],
+                          "generated_at": "2026-09-01T12:00:00+08:00", "since_minutes": 10,
+                          "services": {}, "collection_errors": []}
+                snapshot = MONITOR.write_report(report, Path(directory), {})
+                saved = json.loads((snapshot / "report.json").read_text())["devices"][0]
+                self.assertFalse(MONITOR.completion_handoff_device_complete(saved))
+                self.assertFalse(HTML.ztp_completed(saved))
+                self.assertEqual({}, MONITOR.ready_completion_handoff_reports(report))
+
     def test_finalized_second_round_unknown_time_cannot_publish_overall_success(self):
         invalid_times = ("", "not-a-time", "2026-09-01T12:00:00", None, True,
                          "2026-09-01T10:00:00+08:00")

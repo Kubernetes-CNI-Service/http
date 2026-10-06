@@ -851,7 +851,8 @@ def ztp_completed(device: dict) -> bool:
         return False
     device_type = str(device.get("type") or "").strip().casefold()
     progress = device.get("progress")
-    if (device_type.startswith("pending_") or not isinstance(progress, dict)
+    if (device_type not in {"eth", "eth_spx", "spx", "air", "ib", "nvl"}
+            or not isinstance(progress, dict)
             or progress.get("percent") != 100
             or any(device.get(flag, False) is not False for flag in (
                 "unbound_identity", "identity_pending", "promotion_pending",

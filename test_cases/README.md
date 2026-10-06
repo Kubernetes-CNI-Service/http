@@ -483,6 +483,9 @@ Apache/AIR、single-link 文件、独立输出及 no-SSH/no-watch/no-HTML/no-han
 无时区或过期阶段时间不能仅凭复制的 success_index 宣称成功。真实快照/CSV/Markdown
 须保留 CURRENT_NINE_STAGE_PROOF_INCOMPLETE 诊断；新鲜可比证据可以消除此派生诊断，
 但不得改写旧快照。配置、代际权威本身没有因此新建或放宽。
+机器/HTML 完成资格只接受当前受支持的 ETH/ETH_SPX/SPX/AIR/IB/NVL 类型；server/UFM、
+未知或空类型即使持有声称九阶段全部成功的旧快照，也不得取得 Switch/host 完成。
+真实报告写入 → HTML/机器判据正反例不改变 server/UFM 的独立部署合同。
 这些本地证据不证明真实采集器已执行，也不关闭 F02 的配置同步消费端剩余工作。
 
 SSH 身份负例夹具执行真实生成的 askpass Python body 时绑定当前测试解释器，

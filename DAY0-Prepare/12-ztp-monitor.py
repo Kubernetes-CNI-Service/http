@@ -5015,7 +5015,8 @@ def completion_handoff_device_complete(device: Any) -> bool:
     if not isinstance(device, dict):
         return False
     device_type = str(device.get("type") or "").strip().casefold()
-    if (device_type.startswith("pending_")
+    if (completion_handoff_group(device) is None
+            or device_type.startswith("pending_")
             or not isinstance(device.get("progress"), dict)
             or device["progress"].get("percent") != 100
             or any(device.get(flag, False) is not False for flag in (
