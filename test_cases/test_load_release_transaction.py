@@ -115,7 +115,9 @@ def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def assert_private_dhcp_transaction_retention(api, root: Path, project: Path, outcome: str) -> None:
+def assert_private_dhcp_transaction_retention(
+    api, root: Path, project: Path, outcome: str, *, reenter: bool = False,
+) -> None:
     """Exercise real LOAD filesystem logic; never execute sudo, dhcpd or live writes."""
     root = root.resolve()
     source_dir, live_dir = project / "independent-dhcp-B", root / "private-etc-dhcp"
@@ -222,6 +224,39 @@ def assert_private_dhcp_transaction_retention(api, root: Path, project: Path, ou
             assert not cleanup, "HOLD must not delete staged/backup evidence"
             assert any("HOLD" in warning and str(transaction) in warning for warning in warnings)
             assert not any("手工删除" in warning for warning in warnings)
+            if reenter:
+                identity = transaction.stat()
+                backup_identity = backup.stat()
+                for source in mappings:
+                    source.write_bytes(expected_b[source.name] + b"# independent unaccepted retry\n")
+                commands = []
+
+                def retry_command(command, **kwargs):
+                    commands.append(command)
+                    return private_command(command, **kwargs)
+
+                with mock.patch.object(api, "dhcp_file_mappings", return_value=mappings), \
+                        mock.patch.object(api, "sudo_command", side_effect=lambda *args: list(args)), \
+                        mock.patch.object(api, "run", side_effect=retry_command), \
+                        mock.patch.object(api, "_run_subprocess", side_effect=retry_command), \
+                        mock.patch.object(api, "warn", side_effect=warnings.append):
+                    try:
+                        api.mount_and_test_dhcp(parent_candidate=candidate)
+                    except api.LoadError as exc:
+                        assert "持久化" in str(exc) and "未确认" in str(exc), str(exc)
+                    else:
+                        raise AssertionError("unconfirmed B installation reentry returned success")
+                assert commands == [], "HOLD reentry must reject before all DHCP commands"
+                assert list(live_dir.glob(".load-dhcp-transaction-*")) == transactions
+                assert {name: (live_dir / name).read_bytes() for name in names} == expected_b
+                assert {p.name: p.read_bytes() for p in backup.iterdir()} == expected_a
+                assert (transaction.stat().st_dev, transaction.stat().st_ino) == (
+                    identity.st_dev, identity.st_ino,
+                )
+                assert (backup.stat().st_dev, backup.stat().st_ino) == (
+                    backup_identity.st_dev, backup_identity.st_ino,
+                )
+                assert json.loads(candidate.destination.read_text()) == parent_payload
         else:
             assert transactions == [], "normal success and precommit rollback still clean up"
             assert installed == (expected_a if outcome == "precommit" else expected_b)
@@ -6220,6 +6255,16 @@ os.kill(os.getpid(), signal.SIGKILL)
                 project = root / "project"
                 project.mkdir()
                 assert_private_dhcp_transaction_retention(LOAD, root, project, boundary)
+
+    def test_unconfirmed_parent_reentry_refuses_dhcp_commands_and_retains_first_evidence(self) -> None:
+        for boundary in ("open", "fsync"):
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as name:
+                root = Path(name)
+                project = root / "project"
+                project.mkdir()
+                assert_private_dhcp_transaction_retention(
+                    LOAD, root, project, boundary, reenter=True,
+                )
 
     def test_confirmed_parent_success_cleans_private_dhcp_transaction(self) -> None:
         with tempfile.TemporaryDirectory() as name:

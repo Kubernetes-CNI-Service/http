@@ -219,6 +219,43 @@ inode 144208691，size 616，SHA256
 后代状态仍 unknown，不能据此放行正式 related/full 或称 R22 恢复完成。approved ledger
 保持原字节，Linux/断电、完整写集、显式旧 A 健康激活及其它未闭项不变。
 
+### R22 未确认 B 的 DHCP API 重入首写前拒绝
+
+已可见但目录持久化未确认的同一父候选再次进入 DHCP 安装 API 时，原路径会
+先建立第二事务、备份并安装变化后的输入，直到最后 parent commit 才 HOLD。
+新增 direct 与真实 SETUP→LOAD 故障→同一候选重入 workflow 要求任何 DHCP
+命令之前拒绝，保留第一次 B/A 字节、事务及 backup inode 和 Q manifest/链接/WAL。
+固定 A/B 预期及故障后追加输入独立于实现；两项原实现 2 tests / 4 FAIL /
+exit1（各有 open/fsync 两个 subtest，12.997 秒），完整 RED 日志
+`outputs/test-diagnostics/r22-dhcp-uncertain-reentry-red.log`，inode 145519200，
+size 4150，SHA256 `5ad44b790de6ce1b4b4ba2f918b413c0121a82339866d11124d4c506aa4a6ce1`。
+候选只增加未确认可见父候选的入口 HOLD，不修改未提交候选的原安装/清理合同。
+新 direct/workflow 加原保留备份、成功清理、precommit 回滚清理和真实 SETUP
+备份保留例共 6 tests / OK / exit0（15.703 秒）；完整日志
+`r22-dhcp-uncertain-reentry-green.log`，inode 145523546，size 1439，SHA256
+`8a95584cc8bb2416c381716f0bb1aa2688bd72777395efa947f13e575afb932d`。读前后 stat
+一致，完整 Ran/OK 与物理退出标记、实际 exec exit0 相符。原两个测试仅抽取
+相同断言/真实脚本步骤到私有 helper，原预期和 open/fsync 两个边界均保留。
+
+manifest 原 LOAD direct 和 generation-input-binding 多脚本 workflow 映射有效；
+REAL_ENV 继续 OPEN。此检查依赖同一进程内候选的 visible/synced 状态，不是
+跨重启凭据或所有孤儿事务闸门；文件命令/dhcpd 仍为私有端口替身，不证明真机、
+完整 B schema、Linux/断电、完整 WAL 写集或旧 A 健康激活。原正式 related/full
+unknown 超时重试门禁不解除，不手改 ledger 或套用上一候选的模块诊断。
+
+本候选完整 LOAD transaction 模块加四项相关真实 SETUP→LOAD workflow（重入、
+备份保留、visible parent 同步失败、健康 parent commit 拒绝冷 P 回退）诊断为
+292 tests / OK / exit0（46.361 秒）。这是完整 LOAD 模块加明确选择的 workflow，
+不是整个 workflow 模块或正式 related/full。完整日志
+`outputs/test-diagnostics/r22-dhcp-uncertain-reentry-load-workflows.log`，inode
+145532273，size 99084，SHA256
+`f0344bf3051259d38a08510b78a28f4cc899a2d39b9d5ad37712a0cb20308b64`，读前后 stat
+一致，运行中 95513 字节旧前缀 SHA256
+`684184b91612555f1c9394c9bbc9574aa40a2ccd357997ca04fc858de56db21e` 未变。
+物理第 936 行 Ran、938 行 OK，原用例缓冲 stdout 后 971 行
+`R22_DHCP_UNCERTAIN_REENTRY_LOAD_WORKFLOWS_EXIT=0` 与实际 exec exit0 相符。
+运行期间源/测试冻结，approved ledger、manifest 和运行态 setup manifest 字节未变。
+
 ### R22 未确认 B 时 DHCP A 备份保留候选
 
 父 B 目录 open/fsync 错误已传播 HOLD，但 `mount_and_test_dhcp` 的 finally

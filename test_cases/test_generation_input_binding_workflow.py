@@ -1955,6 +1955,13 @@ finally:
 
     def test_real_setup_then_uncertain_parent_retains_dhcp_a_evidence(self):
         """SETUP success must not license deleting A backups behind uncertain B."""
+        self._real_setup_uncertain_parent_dhcp_evidence(reenter=False)
+
+    def test_real_setup_then_uncertain_parent_reentry_refuses_new_dhcp_writes(self):
+        """An already-visible uncertain B cannot authorize a second installation."""
+        self._real_setup_uncertain_parent_dhcp_evidence(reenter=True)
+
+    def _real_setup_uncertain_parent_dhcp_evidence(self, *, reenter):
         for boundary in ("open", "fsync"):
             with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as name:
                 fixture = self._private_setup_switch_fixture(Path(name))
@@ -1978,7 +1985,9 @@ finally:
                                   root / "DAY0-Prepare/11-load.py")
                 descriptor = api.acquire_deployment_lock(exclusive=True)
                 try:
-                    RELEASE_FIXTURE.assert_private_dhcp_transaction_retention(api, root, q, boundary)
+                    RELEASE_FIXTURE.assert_private_dhcp_transaction_retention(
+                        api, root, q, boundary, reenter=reenter,
+                    )
                 finally:
                     api.release_deployment_lock(descriptor)
                 self.assertEqual(q_manifest, manifest.read_bytes())

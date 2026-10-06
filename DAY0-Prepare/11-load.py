@@ -8186,6 +8186,12 @@ def mount_and_test_dhcp(
     Once B is visible, unconfirmed parent directory durability instead keeps
     installed B and the root-only A backup together for manual HOLD review.
     """
+    if (parent_candidate is not None and parent_candidate.committed
+            and not parent_candidate.directory_synced):
+        raise LoadError(
+            "DHCP 安装拒绝重入：B 已可见，但目录持久化仍未确认；HOLD，"
+            "保留第一次事务的 B/A 备份，不得重新安装、回退或清理；须人工核验"
+        )
     mappings = dhcp_file_mappings(
         parent_candidate.dhcp_source_dir if parent_candidate is not None else None
     )
