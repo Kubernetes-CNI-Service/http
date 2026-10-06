@@ -384,6 +384,9 @@ Production host-key mismatch 默认 fail closed，只有单台完整 hostname �
 不得截断或清除拒绝证据。三份见证共享恢复域，
 消费回执之前还要完整校验 summary 全部 targets/results：未知主机、缺少或重复主机、
 casefold 冲突、非对象成员和完成结果集合不闭合均拒绝，不能只检查所选主机然后忽略其余错误。
+worker 的身份观察必须位于同一命令的开始与完成时间闭区间内，三者均须有时区；
+结束时间缺失、倒序、无时区或身份观察晚于结束均不能晋升。真实 CLI 结果到后台导入
+保留原 `finished_at`，不能用后台更新时间伪造该执行窗口的结束边界。
 不宣称抵御全部镜像或整卷回滚。worker/九阶段监控消费端尚未完成接入，F02 整体仍 OPEN；
 真机持久化卡 `TC-REAL-F02-LOCAL-GENERATION-001` 仍 NOT RUN。
 

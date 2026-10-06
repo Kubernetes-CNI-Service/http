@@ -556,6 +556,7 @@ def latest_cli_operations():
                 "transport_ip": result.get("transport_ip"),
                 "interface": result.get("interface"),
                 "command_started_at": result.get("command_started_at"),
+                "finished_at": result.get("finished_at"),
                 "batch_identity_verified": result.get("batch_identity_verified"),
                 "batch_identity_verified_at": result.get("batch_identity_verified_at"),
                 "live_state_sha256": result.get("live_state_sha256"),
@@ -685,10 +686,14 @@ def config_sync_promotion_ready(receipt):
         verified = datetime.fromisoformat(
             str(receipt.get("batch_identity_verified_at") or "").replace("Z", "+00:00")
         )
+        finished = datetime.fromisoformat(
+            str(receipt.get("finished_at") or "").replace("Z", "+00:00")
+        )
         if (started.tzinfo is None or started.utcoffset() is None
-                or verified.tzinfo is None or verified.utcoffset() is None):
+                or verified.tzinfo is None or verified.utcoffset() is None
+                or finished.tzinfo is None or finished.utcoffset() is None):
             return False
-        return verified >= started
+        return started <= verified <= finished
     except (TypeError, ValueError):
         return False
 

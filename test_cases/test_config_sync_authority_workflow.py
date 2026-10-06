@@ -124,6 +124,43 @@ class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
                 authority.finish(root, first, previous)
             self.assertEqual(current, authority.read_current(root, "EXAMPLE-Leaf01"))
 
+    def test_real_writer_identity_proof_must_be_inside_its_finished_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            receipt, produced = self.published_receipt(Path(directory).resolve())
+            before = receipt.read_bytes()
+            self.assertTrue(self.worker.config_sync_promotion_ready(produced))
+            independent = {
+                **produced, "command_started_at": "2026-10-03T10:00:00+08:00",
+                "batch_identity_verified_at": "2026-10-03T10:00:01+08:00",
+                "finished_at": "2026-10-03T10:00:02+08:00",
+            }
+            for updates in (
+                {"finished_at": ""}, {"finished_at": None},
+                {"finished_at": "2026-10-03T10:00:02"},
+                {"finished_at": "2026-10-03T09:59:59+08:00"},
+                {"batch_identity_verified_at": "2026-10-03T10:00:03+08:00"},
+            ):
+                with self.subTest(updates=updates):
+                    self.assertFalse(self.worker.config_sync_promotion_ready({
+                        **independent, **updates,
+                    }))
+            self.assertEqual(before, receipt.read_bytes())
+            project = Path(directory).resolve()
+            devices = project / "02-devices_config.csv"
+            devices.write_text("hostname,type\nEXAMPLE-Leaf01,eth\n", encoding="utf-8")
+            self.manual.atomic_json(receipt.parent.parent / "summary.json", {
+                "state": "triggered", "operation": "replace-config",
+                "effective_operation": "replace-config", "operation_id": "op-1",
+                "trigger_source": "manual_config_sync_cli", "generation": 1,
+                "targets": [{"hostname": "EXAMPLE-Leaf01", "trigger_id": "trigger-1",
+                             "effective_operation": "replace-config", "generation": 1}],
+                "results": [produced],
+            })
+            with mock.patch.object(self.worker, "DEVICES_CSV", devices):
+                imported = self.worker.latest_cli_operations()["example-leaf01"]
+            self.assertEqual(produced["finished_at"], imported["finished_at"])
+            self.assertTrue(self.worker.config_sync_promotion_ready(imported))
+
     def test_interactive_writer_cannot_publish_successful_authority(self):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory).resolve()

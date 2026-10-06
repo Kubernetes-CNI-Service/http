@@ -5682,11 +5682,29 @@ print('{{"factory_records_active":true,"valid":true}}')
             "trigger_source": "manual_config_sync_web",
             "transport_ip": "192.0.2.10", "interface": "eth0",
             "command_started_at": "2026-10-03T10:00:00+08:00",
+            "finished_at": "2026-10-03T10:00:02+08:00",
             "batch_identity_verified": True,
             "batch_identity_verified_at": "2026-10-03T10:00:01+08:00",
             "live_state_sha256": "a" * 64,
         }
         self.assertTrue(self.manual_worker.config_sync_promotion_ready(accepted))
+        # The identity observation must belong to this completed execution,
+        # not merely be newer than its start. Boundaries are independent UTCs.
+        for field, invalid in (
+            ("finished_at", None),
+            ("finished_at", ""),
+            ("finished_at", "2026-10-03T10:00:02"),
+            ("finished_at", "2026-10-03T09:59:59+08:00"),
+            ("finished_at", "2026-10-03T10:00:00+08:00"),
+            ("batch_identity_verified_at", "2026-10-03T10:00:03+08:00"),
+        ):
+            with self.subTest(window_field=field, invalid=invalid):
+                self.assertFalse(self.manual_worker.config_sync_promotion_ready({
+                    **accepted, field: invalid,
+                }))
+        self.assertTrue(self.manual_worker.config_sync_promotion_ready({
+            **accepted, "batch_identity_verified_at": "2026-10-03T02:00:02Z",
+        }))
         for field, invalid in (
             ("batch_identity_verified", False),
             ("batch_identity_verified_at", ""),
