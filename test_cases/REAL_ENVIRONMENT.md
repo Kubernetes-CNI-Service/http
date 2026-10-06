@@ -1725,6 +1725,8 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 - main 未结清 WAL 成功出口候选：TEST direct 和真实 SETUP 完成→受控 main 私有父提交 workflow 先 RED 后 GREEN，要求 parent 已提交但 SETUP WAL 仍在时返回失败、停止受管服务、保留 B/WAL/恢复凭据，不打印完成、不自动回 A。现场仍限本卡授权隔离 VM、root、完整 P/Q/A/B/WAL/receipt、可恢复卷快照、排他锁及其它正常写者静默；独立记录真实输入/制品、parent replace/fsync、report/selector/服务与健康阶段、成功出口检查及停服的物理时间线、文件/FD 身份和摘要。在后续阶段保留未结清 WAL 后核失败、证据不被消费及独立停服见证；无 WAL 的正常出口另核既有合同，但不得以缺席替代 B 健康证据。封存后仅负责人按已核隔离快照恢复，不在 live 注入、不删 WAL 后重入或自动回 A。main 的本地输入/生成/服务端口使用替身，实际 SETUP 与私有 parent primitive 不证明完整 root 入口、全组 DHCP 冷恢复、B finalizer/成功退休、旧 A 激活、Linux/断电或 DEV ACK；本卡仍 OPEN。
 
+- main 未结清 WAL 启动前围栏候选：TEST direct 和真实 SETUP 完成→受控 main 的明确启动请求先 RED 后 GREEN，要求在首个启动端口调用前 HOLD，保留 B/WAL/恢复凭据，不先启后停、不自动回 A；无 WAL 的明确启动正例维持原合同。现场仍限本卡授权隔离 VM、root、完整 P/Q/A/B/WAL/receipt、可恢复卷快照、排他锁、受管服务明确停止及其它正常写者静默。冻结 WAL/parent/report/selector、服务配置、名称/FD 身份和摘要，独立记录服务门禁检查、preflight、启动命令及退出的物理顺序；在持有未结清 WAL 的明确启动请求中要求零启动命令和独立停服见证。封存后仅负责人按核实隔离快照恢复，不在 live 注入、不删除 WAL 后重入或自动回 A。本地 supervisor 服务端口使用替身，未证明实际 systemd/supervisor/Apache/DHCP 行为、root 全流程、B finalizer/成功退休、旧 A 激活或 Linux/断电/DEV ACK；WAL 缺席不是 B 健康验收，本卡仍 OPEN。
+
 ## TC-REAL-R22-C2-DESCRIPTION-PUBLISH-001 — c2 同名描述输出的故障窗口
 
 - Case ID：`TC-REAL-R22-C2-DESCRIPTION-PUBLISH-001`；类型：real-environment / transaction / crash-recovery；对应 R22 c2 对 `*_with_desc` 的既有同名输出替换。状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。自动化先决为 `test_cases.test_generation_input_binding_contract` 的二次读取、早返及 staging direct，`test_cases.test_generation_input_binding_workflow` 的 setup/load/c2 workflow，和当前候选正式 full/check；现有定向通过不证明进程死亡后的原子性。

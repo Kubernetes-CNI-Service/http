@@ -1174,6 +1174,12 @@ finally:
             self.assertFalse((root / "service-started").exists())
 
     def test_real_setup_success_then_main_retains_wal_and_refuses_whole_b_completion(self):
+        self._assert_real_setup_main_pending_wal_holds(start_services=False)
+
+    def test_real_setup_pending_wal_blocks_main_before_requested_service_start(self):
+        self._assert_real_setup_main_pending_wal_holds(start_services=True)
+
+    def _assert_real_setup_main_pending_wal_holds(self, *, start_services):
         with tempfile.TemporaryDirectory(prefix="r22-main-pending-wal-") as name:
             fixture = self._private_setup_switch_fixture(Path(name))
             root, _p, _q, common, _p_only, _q_only, manifest, _before, _hook, _barrier, _home = fixture
@@ -1200,6 +1206,7 @@ finally:
             try:
                 harness._assert_main_pending_wal_completion_holds(
                     activation_action=real_setup_action, journal=journal,
+                    start_services=start_services,
                 )
             finally:
                 harness.tearDown()

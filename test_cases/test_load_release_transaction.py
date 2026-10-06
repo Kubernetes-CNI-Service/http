@@ -1578,11 +1578,12 @@ class ReleaseTransactionTests(unittest.TestCase):
         activation_calls: list[dict] | None = None,
         activation_action=None,
         after_parent_commit=None,
+        start_services: bool = False,
     ):
         args = SimpleNamespace(
             skip_doca=False, download_doca=False, dry_run=False,
             project=str(self.project), no_upgrade=True, p2p_file=None,
-            skip_infra=True, skip_generate=False, start_services=False,
+            skip_infra=True, skip_generate=False, start_services=start_services,
             start_ztp_monitor=False, ztp_monitor_scope="auto",
             ztp_monitor_interval=30, ssh_dir=Path("/root/.ssh"),
             host_role="management-server",
@@ -8655,7 +8656,9 @@ os.kill(os.getpid(), signal.SIGKILL)
         self.assertEqual(1, result)
         self.assertLess(events.index("freeze-a"), events.index("template-mutation"))
 
-    def _assert_main_pending_wal_completion_holds(self, activation_action=None, journal=None):
+    def _assert_main_pending_wal_completion_holds(
+        self, activation_action=None, journal=None, *, start_services=False,
+    ):
         journal = journal or self.ztp / ".setup-switch-journal.json"
         stdout, stderr = io.StringIO(), io.StringIO()
         evidence = []
@@ -8676,6 +8679,7 @@ os.kill(os.getpid(), signal.SIGKILL)
                 release_lock, _backend, _plan = self._exercise_main_transaction_failure(
                     LOAD.LoadError("unused completion fixture failure"), failure_at="completion",
                     activation_action=activation_action, after_parent_commit=retain_unresolved_evidence,
+                    start_services=start_services,
                 )
         self.assertEqual(1, result, stdout.getvalue() + stderr.getvalue())
         self.assertIsNone(caught)
@@ -8694,6 +8698,26 @@ os.kill(os.getpid(), signal.SIGKILL)
 
     def test_main_pending_setup_wal_cannot_claim_whole_b_completion(self):
         self._assert_main_pending_wal_completion_holds()
+
+    def test_main_pending_setup_wal_blocks_requested_services_before_first_start(self):
+        self._assert_main_pending_wal_completion_holds(start_services=True)
+
+    def test_main_without_pending_wal_preserves_requested_service_start(self):
+        stdout = io.StringIO()
+        with mock.patch.object(LOAD, "MANIFEST", self.ztp / ".setup_manifest"), \
+                mock.patch.object(LOAD, "preflight_services"), \
+                mock.patch.object(LOAD, "start_services") as start, \
+                redirect_stdout(stdout):
+            result, caught, candidate, quiesce, *_rest = self._exercise_main_transaction_failure(
+                LOAD.LoadError("unused completion fixture failure"), failure_at="completion",
+                start_services=True,
+            )
+        self.assertEqual(0, result)
+        self.assertIsNone(caught)
+        self.assertTrue(candidate.committed and candidate.directory_synced)
+        start.assert_called_once()
+        self.assertEqual(1, quiesce.call_count)
+        self.assertIn("load 流程完成", stdout.getvalue())
 
     def test_main_without_pending_wal_keeps_existing_normal_success(self):
         stdout = io.StringIO()

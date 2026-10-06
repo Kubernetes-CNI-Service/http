@@ -176,6 +176,35 @@ full。失败、未知原因、日志缺失或中断仍保持无证明状态，�
    自动生成的 ledger 单独提交、干净树的 `--check --require-full` exit0 才算本地正式
    证明。局部回归和旧树证明不能代替它；本地 proof 不关闭独立 Linux/设备/断电见证卡。
 
+### R22 main 未结清 WAL 须在服务启动前 HOLD
+
+仅成功出口拒绝仍允许带未结清 SETUP WAL 的 B 先执行 start_services，再由末尾
+守卫停下。独立 direct 及真实 SETUP 完成→受控 main 的启动请求负例要求零启动
+调用；原实现两项均调用一次，3 tests / 2 FAIL / 4.178 秒 / exit1。无 WAL 的
+明确启动正例仍正常返回。原日志 `outputs/test-diagnostics/r22-main-wal-prestart-red.log`，
+inode146853888、size5366、SHA256
+`7e1c370da847eba191373c60e636e13bad59e2d674a87b98b0c8d735ee63c003`。
+实现只在非 dry-run 服务门禁、preflight 之前再核原 SETUP WAL 闸门；保留既有
+末尾检查和提交后停服/HOLD 路径，不清理 WAL、不回 P/A，不提供 B finalizer。
+三项 GREEN / 4.886 秒 / exit0，日志 `r22-main-wal-prestart-green.log`，
+inode146858770、size585、SHA256
+`fa294cde7cd5d7cd1672e2ddd2fdbfeb3ad982abb6fc2c938c1c60fd56b41677`。
+
+完整 LOAD 模块及八项选定真实 SETUP workflow 共 338 tests OK / 50.643 秒 / exit0，
+日志 `r22-main-wal-prestart-regressions.log`，inode146861444、size106630、SHA256
+`a5bbbba514b289148cfea59cb286c1b8487dc8cc3acf0918ada8154e021f2565`；前后 stat 一致，
+81703 字节旧前缀 SHA256
+`885114047fefd76aef61577790def17b1147bc2e1c007bca748c8655e1ba0f5f` 未变。
+物理第990行 Ran、992行 OK、缓冲 stdout 后第1025行退出标记与实际 exec exit0 一致。
+源码/测试冻结，原 manifest、ledger、运行态 setup manifest 身份/摘要保持；沿用已有
+LOAD direct 和 generation_input_binding_setup_load_c2 映射。
+
+本地 supervisor 服务端口是替身，只证明真实 main 不调用启动端口；实际 SETUP 子进程、
+私有 parent primitive 与原 WAL 保留被执行，不是 root 完整入口、真实服务状态或 B
+健康验收。WAL 缺席不授权完整 B 退休或旧 A 激活。正式 related/full 未运行，原
+bootstrap15s/REQ19 probe10s 原因和重跑闸门继续 OPEN；不手改 ledger，不把局部
+GREEN 冒称完整 R22 或 full proof。
+
 ### R22 main 未结清 WAL 不得报告整体完成
 
 原 main 在父 B 及后续步骤返回后直接报告成功，没有重新检查切换产生的 SETUP WAL。

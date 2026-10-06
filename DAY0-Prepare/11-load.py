@@ -13624,6 +13624,8 @@ def main(
 
         failure_phase = "服务启动门禁"
         section("服务启动门禁")
+        if not args.dry_run:
+            require_no_pending_setup_switch_journal()
         if not local_services_supported:
             if args.start_services:
                 warn(f"{host_os} 不支持本流程的 --start-services，已忽略")
