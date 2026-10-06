@@ -442,7 +442,14 @@ shell workflow 核对同一 live 文本。此字段只是传输观察，不是�
 私有真实 helper → 完整 collector remote shell → 共同 decoder workflow 验证两次单连接
 及 HOLD 原像保留，未连接真机或执行 sudo。这只是来源诊断，不铸造/复用本地代次，不将
 旧 applied_at 或 YAML 等同当前 live state，也不授权九阶段完成；bootstrap generation
-与 analyzer 的因果消费接入仍未完成，F02 整体 OPEN。
+与本地代次的因果消费接入仍未完成，F02 整体 OPEN。
+
+analyzer 现在以本次连接的 BatchMode、live 摘要和 inventory 主接口身份重新验证
+bootstrap 来源响应，向报告写入闭合的紧凑来源观察，不写原始 YAML 或 generation。
+显式来源缺失、畸形、摘要漂移或后续连接失败均否决旧 config_apply/complete 成功；
+JSON、HTML 和机器判据保持一致，不降低既有 failed，不阻断独立健康采集。
+来源变化属于独立快照状态，保存后不随输入对象变化；此必要条件不等于当前本地代次
+或本轮配置应用成功，bootstrap/initial-setup 的代次接入与 F02 整体仍 OPEN。
 
 monitor inventory 逐设备物化并验证 `config_method`，与真实 load 的同一输入结果一致。
 重复方法列、显式空值、未知或设备不兼容执行者在监控/范围过滤前拒绝，错误带行号与

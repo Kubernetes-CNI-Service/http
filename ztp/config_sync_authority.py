@@ -61,6 +61,32 @@ class AuthorityError(ValueError):
     pass
 
 
+def monitor_source_observation_allows_completion(device):
+    """Explicit bootstrap source veto, not current generation/application proof."""
+    if "configuration_source_observation" not in device:
+        return True
+    observed = device["configuration_source_observation"]
+    fields = {"schema_version", "source", "source_receipt_verified", "hostname",
+              "mac_plain", "raw_sha256", "source_fingerprint", "reason"}
+    if (not isinstance(observed, dict) or set(observed) != fields
+            or type(observed["schema_version"]) is not int or observed["schema_version"] != 1
+            or observed["source_receipt_verified"] is not True
+            or any(not isinstance(observed[key], str) for key in fields - {
+                "schema_version", "source_receipt_verified"})):
+        return False
+    hostname = device.get("hostname")
+    mac = device.get("mac_plain") or device.get("mac")
+    return (device.get("config_method") == "ztp"
+            and observed["source"] == "monitor_bootstrap_applied" and observed["reason"] == ""
+            and isinstance(hostname, str) and HOST.fullmatch(hostname) is not None
+            and observed["hostname"].casefold() == hostname.casefold()
+            and isinstance(mac, str) and re.fullmatch(
+                r"(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}|[0-9A-Fa-f]{12}", mac) is not None
+            and observed["mac_plain"] == mac.replace(":", "").lower()
+            and DIGEST.fullmatch(observed["raw_sha256"]) is not None
+            and DIGEST.fullmatch(observed["source_fingerprint"]) is not None)
+
+
 def monitor_observation_allows_completion(device):
     """Honor an explicit fresh observation's veto; never mint a receipt.
 
@@ -69,6 +95,8 @@ def monitor_observation_allows_completion(device):
     on early failure. A structurally positive observation is only a necessary
     condition, not configuration application or generation authority.
     """
+    if not monitor_source_observation_allows_completion(device):
+        return False
     if "configuration_observation" not in device:
         return True
     observed = device["configuration_observation"]

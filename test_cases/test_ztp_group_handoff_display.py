@@ -55,6 +55,86 @@ EXPECTED_NINE_STAGES = (
 
 
 class CompletionDisplayParityTests(unittest.TestCase):
+    def test_source_change_is_a_snapshot_change_without_a_new_generation(self):
+        row = self.complete_fixture()
+        row["configuration_source_observation"] = {
+            "schema_version": 1, "source": "monitor_bootstrap_applied", "source_receipt_verified": True,
+            "hostname": "Leaf01", "mac_plain": "001122334455", "raw_sha256": "a" * 64,
+            "source_fingerprint": "b" * 64, "reason": ""}
+        first = MONITOR.snapshot_device_state({"devices": [row]})
+        row["configuration_source_observation"]["source_fingerprint"] = "c" * 64
+        self.assertNotEqual(first, MONITOR.snapshot_device_state({"devices": [row]}),
+                            "source provenance changes cannot disappear as an unchanged report")
+        self.assertNotIn("generation", row["configuration_source_observation"])
+
+    def test_next_missing_source_observation_cannot_keep_old_source_or_downgrade_failure(self):
+        row = self.complete_fixture()
+        row.update(config_method="ztp", mac_plain="001122334455", events=[])
+        row["configuration_source_observation"] = {
+            "schema_version": 1, "source": "monitor_bootstrap_applied", "source_receipt_verified": True,
+            "hostname": "Leaf01", "mac_plain": "001122334455", "raw_sha256": "a" * 64,
+            "source_fingerprint": "b" * 64, "reason": ""}
+        result = {"kind": "unreachable", "returncode": 255, "stderr": "closed", "attempts": [], "host_key_commands": []}
+        MONITOR.analyze_switch(row, result)
+        self.assertIs(False, row["configuration_source_observation"]["source_receipt_verified"])
+        self.assertEqual("", row["configuration_source_observation"]["raw_sha256"])
+        self.assertEqual("", row["configuration_source_observation"]["source_fingerprint"])
+        for name in ("config_apply", "complete"):
+            row["stages"][name]["status"] = "failed"
+        MONITOR.finalize_device(row)
+        for name in ("config_apply", "complete"):
+            self.assertEqual("failed", row["stages"][name]["status"], "a missing receipt must never soften a hard failure")
+        self.assertEqual("failed", row["overall"])
+        self.assertFalse(HTML.ztp_completed(row))
+
+    def test_current_bootstrap_source_failure_cannot_borrow_old_nine_stage_success(self):
+        from test_cases.test_manual_applied_config import MonitorAppliedConfigObservationTests
+        raw = "- set:\n    system:\n      hostname: leaf01\n\n"
+        payload = MonitorAppliedConfigObservationTests.wire(raw)
+        collector_source = MONITOR.parse_applied_config_observation(
+            MonitorAppliedConfigObservationTests.frame(payload), {"mac_plain": "020000000001"})
+        for label, source in (
+            ("own-source", collector_source),
+            ("missing-source", MONITOR.parse_applied_config_observation("", {"mac_plain": "020000000001"})),
+            ("not-strict-boolean", {**collector_source, "trusted": 1}),
+            ("replayed-fingerprint", {**collector_source, "fingerprint": "a" * 64}),
+            ("changed-source-yaml", {**collector_source, "raw_yaml": raw + "# changed\n"}),
+        ):
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as directory:
+                row = self.complete_fixture()
+                row.update(hostname="leaf01", ip="192.0.2.10", mac="02:00:00:00:00:01",
+                           mac_plain="020000000001", config_method="ztp", events=[])
+                prior_stages = copy.deepcopy(row["stages"])
+                result = {"kind": "ok", "returncode": 0, "batch_mode_verified": True,
+                          "identity_frame_valid": True, "connected_ip": "192.0.2.10",
+                          "remote_hostname": "leaf01", "remote_eth0_mac": "02:00:00:00:00:01", "remote_eth1_mac": "",
+                          "live_config_observation": {"kind": "ok", "text": raw, "sha256": hashlib.sha256(raw.encode()).hexdigest()},
+                          "applied_config_observation": copy.deepcopy(source), "ztp_log": "", "ifreload_log": "",
+                          "failed_yaml": "", "stderr": "", "attempts": [], "host_key_commands": []}
+                MONITOR.analyze_switch(row, result)
+                self.assertIs(True, row["configuration_observation"]["batch_identity_verified"])
+                # Adversarial old-stage carry must not hide this connection's
+                # explicit missing/invalid bootstrap source observation.
+                row.update(stages=prior_stages, issues=[], overall="success")
+                MONITOR.finalize_device(row)
+                expected = label == "own-source"
+                with self.subTest(case=label, check="source"):
+                    self.assertIs(expected, row.get("configuration_source_observation", {}).get("source_receipt_verified"))
+                with self.subTest(case=label, check="stage"):
+                    self.assertEqual("success" if expected else "warning", row["stages"]["config_apply"]["status"])
+                with self.subTest(case=label, check="overall"):
+                    self.assertIs(expected, row["overall"] == "success")
+                report = {"project": "private-source-fixture", "scope": "prod", "devices": [row], "services": {},
+                          "generated_at": "2026-09-01T12:00:00+08:00", "since_minutes": 10, "collection_errors": []}
+                saved_path = MONITOR.write_report(report, Path(directory), {}) / "report.json"
+                saved = json.loads(saved_path.read_text())["devices"][0]
+                self.assertNotIn("raw_yaml", saved.get("configuration_source_observation", {}))
+                with self.subTest(case=label, check="machine"):
+                    self.assertIs(expected, MONITOR.completion_handoff_device_complete(saved))
+                with self.subTest(case=label, check="html"):
+                    self.assertIs(expected, HTML.ztp_completed(saved))
+                self.assertFalse((Path(directory) / "manual-config-sync").exists(), "a source observation cannot mint a generation")
+
     def test_real_info_collector_classifies_health_without_any_ztp_completion_or_config_receipt(self):
         # Execute the complete production shell collector. Only hardware/system
         # commands are private fixtures; no device/network/service is touched.

@@ -2660,6 +2660,47 @@ def bind_monitor_live_observation(
     }
 
 
+def bind_monitor_applied_source_observation(
+    device: dict[str, Any], result: dict[str, Any],
+) -> dict[str, Any]:
+    """Necessary source evidence only; never copy an old observation or era."""
+    rejected = {
+        "schema_version": 1, "source": "monitor_bootstrap_applied",
+        "source_receipt_verified": False, "hostname": "", "mac_plain": "",
+        "raw_sha256": "", "source_fingerprint": "", "reason": "source-not-verified",
+    }
+    if bind_monitor_live_observation(device, result)["batch_identity_verified"] is not True:
+        return {**rejected, "reason": "source-session-identity-not-verified"}
+    mac, remote_mac = device.get("mac_plain"), result.get("remote_eth0_mac")
+    mac_pattern = r"(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}|[0-9A-Fa-f]{12}"
+    if (not isinstance(mac, str) or not re.fullmatch(mac_pattern, mac)
+            or not isinstance(remote_mac, str) or not re.fullmatch(mac_pattern, remote_mac)
+            or normalize_mac(mac) != normalize_mac(remote_mac)):
+        return {**rejected, "reason": "source-primary-identity-not-matched"}
+    source = result.get("applied_config_observation")
+    if (not isinstance(source, dict)
+            or set(source) != {"trusted", "fingerprint", "reason", "receipt", "raw_yaml"}
+            or source["trusted"] is not True or source["reason"] != ""
+            or not isinstance(source["raw_yaml"], str) or not isinstance(source["receipt"], dict)
+            or any(not isinstance(key, str) or not isinstance(value, str)
+                   for key, value in source["receipt"].items())):
+        return rejected
+    # Revalidate the complete helper contract and own raw bytes before the
+    # bounded report projection; a forged trusted flag/fingerprint is not proof.
+    wire = (config_sync_authority.APPLIED_CONFIG_MAGIC + "\n"
+            + "\n".join(key + "=" + value for key, value in sorted(source["receipt"].items()))
+            + "\n---\n" + source["raw_yaml"])
+    try:
+        checked = config_sync_authority.decode_applied_config(0, wire, mac, max_bytes=MAX_APPLIED_CONFIG_BYTES)
+    except (UnicodeError, ValueError, TypeError):
+        return rejected
+    if checked["trusted"] is not True or checked["fingerprint"] != source["fingerprint"]:
+        return rejected
+    return {**rejected, "source_receipt_verified": True, "hostname": device["hostname"],
+            "mac_plain": normalize_mac(mac), "raw_sha256": checked["receipt"]["raw_sha256"],
+            "source_fingerprint": checked["fingerprint"], "reason": ""}
+
+
 def apply_current_config_sync_authority(
     device: dict[str, Any], result: dict[str, Any], root: Path,
     expected: Optional[dict[str, Any]],
@@ -3115,6 +3156,9 @@ def analyze_switch(
     # Replace even on an early transport/log return: a failed new observation
     # must not inherit a preceding successful connection's proof.
     device["configuration_observation"] = bind_monitor_live_observation(device, result)
+    if device.get("config_method") == "ztp" and (
+            "applied_config_observation" in result or "configuration_source_observation" in device):
+        device["configuration_source_observation"] = bind_monitor_applied_source_observation(device, result)
     kind = result["kind"]
     observed_at = str(result.get("observed_at") or now_local().isoformat(timespec="seconds"))
     device["observed_at"] = observed_at
@@ -3648,9 +3692,17 @@ def finalize_device(device: dict[str, Any]) -> None:
     device["issues"][:] = [
         issue for issue in device["issues"]
         if not isinstance(issue, dict) or issue.get("code") not in {
-            "AUTHORITY_VETO_INVALID", "CURRENT_NINE_STAGE_PROOF_INCOMPLETE",
+            "AUTHORITY_VETO_INVALID", "CURRENT_NINE_STAGE_PROOF_INCOMPLETE", "APPLIED_CONFIG_SOURCE_NOT_VERIFIED",
         }
     ]
+    if not config_sync_authority.monitor_source_observation_allows_completion(device):
+        for name in ("config_apply", "complete"):
+            if device["stages"][name]["status"] != "failed":
+                set_stage(device, name, "warning", "当前 bootstrap 来源未验证，不能复用旧配置完成证据")
+        device["issues"].append({
+            "code": "APPLIED_CONFIG_SOURCE_NOT_VERIFIED", "severity": "warning",
+            "message": "当前同会话 bootstrap 来源凭据缺失或无效；独立 live/健康采集不因此停止，配置完成不放行",
+        })
     if invalid_vetoes:
         device["issues"].append({
             "code": "AUTHORITY_VETO_INVALID", "severity": "warning",
@@ -3808,6 +3860,7 @@ def snapshot_device_state(report: dict[str, Any]) -> dict[str, Any]:
             "template": device.get("template", ""),
             "config_method": device.get("config_method", ""),
             "configuration_observation": device.get("configuration_observation", {}),
+            "configuration_source_observation": copy.deepcopy(device.get("configuration_source_observation", {})),
             "configuration_authority": device.get("configuration_authority", {}),
             "dynamic_dhcp": bool(device.get("dynamic_dhcp")),
             "unbound_identity": bool(device.get("unbound_identity")),

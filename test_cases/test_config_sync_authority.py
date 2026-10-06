@@ -14,6 +14,26 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSyncAuthorityTests(unittest.TestCase):
+    def test_explicit_source_observation_requires_closed_strict_own_identity(self):
+        gate = getattr(self.authority, "monitor_source_observation_allows_completion", None)
+        self.assertTrue(callable(gate), "both completion consumers must honor explicit source veto")
+        row = {"hostname": "leaf01", "mac_plain": "020000000001", "config_method": "ztp"}
+        source = {"schema_version": 1, "source": "monitor_bootstrap_applied", "source_receipt_verified": True,
+                  "hostname": "leaf01", "mac_plain": "020000000001", "raw_sha256": "a" * 64,
+                  "source_fingerprint": "b" * 64, "reason": ""}
+        self.assertTrue(gate(row), "absence of this transitional field cannot mint a source receipt")
+        row["configuration_source_observation"] = source
+        self.assertTrue(gate(row))
+        for value in (None, {}, {**source, "source_receipt_verified": 1}, {**source, "schema_version": True},
+                      {**source, "hostname": "foreign"}, {**source, "mac_plain": "020000000002"},
+                      {**source, "raw_sha256": ""}, {**source, "source_fingerprint": "A" * 64},
+                      {**source, "generation": 999}, {**source, "reason": "HOLD"}):
+            with self.subTest(source=value):
+                row["configuration_source_observation"] = value
+                before = json.dumps(row, sort_keys=True)
+                self.assertFalse(gate(row))
+                self.assertEqual(before, json.dumps(row, sort_keys=True))
+
     def test_applied_source_decoder_is_closed_read_only_and_shared_without_minting_an_era(self):
         from test_cases.test_manual_applied_config import MonitorAppliedConfigObservationTests
         raw = "- set:\n    system:\n      hostname: leaf01\n\n"
