@@ -195,6 +195,36 @@ direct → 真实 rendered workflow 的小范围复核，外加诊断预期，36
 该结果只说明本次小范围未重现，不解释原超时、不更新 approved ledger，也不满足下一次
 related/full 的原因收口或重跑闸门。R22 新修复与整树正式证明仍须分别如实报告。
 
+### R22 SETUP 回滚与次级清理的本地候选记录
+
+SETUP 的进程内异常回滚原来按内存 `missing` 前像删除后来出现的同名链接，并在完整
+WAL 预检前单独恢复 infra/logs。独立 direct 与真实 LOAD→SETUP 异常 workflow 已重现；
+候选改为使用同一停服、持锁的磁盘恢复 API，未知状态在任何 P 恢复写入前 HOLD。
+首轮完整模块 263 tests / 1 FAIL（日志 `r22-setup-rollback-wal-modules.log`，SHA256
+`cd7c9d118a4f54738df949ca4c883e08f85bfb029aa8a0bffdb54e02704e46f6`）
+证明自动恢复错误地移除了拒绝未授权 Q 写入后原合同要求保留的 WAL；保留该断言，修为
+自动异常恢复即使已还原 P 也保留逐字节失败 WAL，另行显式恢复才能收口。不是以单项
+PASS 直接重跑正式 full。
+
+夹具另有两个独立隔离缺陷：SETUP manifest 未绑定私有根，以及 `addCleanup` 在
+`tearDown` 后重新把 LOAD 的 ZTP 根绑定到已删除临时目录。各自新增独立预期并 RED→GREEN；
+私有路径明确绑定，ZTP 生命周期只由已有 setUp/tearDown 管理。测试期间 TEST 运行目录
+`ztp/.setup_manifest` 保持此次观察到的 inode、mtime 与摘要不变；未对缺失事前快照的
+更早修改猜测还原，也不将该隔离缺陷推定为原 bootstrap 超时原因。
+
+旧公钥、旧 NVOS、失效 latest/latest_yaml 与冲突清理的四个 unlink 边界也被 direct
+重现为可删除未登记对象；真实 LOAD→SETUP 公钥清理的晚插入负例同样 RED→GREEN。
+候选要求精确冻结 P 行、raw target、父目录身份与删除后父目录 fsync，补了合法 P 正例
+及父目录换绑负例；尚无适用前像的 Q 自有路径保持 HOLD，不宣称完整写集已经实现。
+
+上述候选及原始模块测试最终完整 270 tests / OK / exit 0：
+`outputs/test-diagnostics/r22-setup-rollback-secondary-modules.log`，inode 142698827，
+size 97739，SHA256
+`0ed83941d7d6f986a4a39a28fad91674064e4f409ab7ae7748e3642c5f6fa7aa`。
+读前后 stat 一致，已知旧前缀保持，物理末尾 `R22_ROLLBACK_SECONDARY_MODULES_EXIT=0`。
+这是局部模块候选证据，**不是 related 批准、full proof 或整体 R22 验收**；批准 ledger
+不手工更新，原 bootstrap 原因待核及 R22 的现场/其它本地未闭边界保持原状态。
+
 ## Full proof 性能诊断记录
 
 本节只记录测量方法与优化判定，不改变上面的测试和证明门禁。正式 full proof 仍须由

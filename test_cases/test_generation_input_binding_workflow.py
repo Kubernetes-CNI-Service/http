@@ -696,6 +696,44 @@ finally:
             self.assertFalse((root / "ztp/.setup-switch-journal.json").exists())
             self.assertFalse((root / "service-started").exists())
 
+    def test_real_setup_inprocess_error_retains_unknown_replacement_and_wal(self):
+        with tempfile.TemporaryDirectory(prefix="r22-setup-rollback-hold-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, p, q, common, _p_only, q_only, manifest, before, hook, barrier, _home = fixture
+            original = os.path.relpath(p / "operator.pub", q_only.parent)
+            hook_file = hook / "sitecustomize.py"
+            hook_file.write_text(hook_file.read_text(encoding="utf-8") + """
+import hashlib
+original_for_rollback = os.symlink
+def replace_at_setup_write(source, destination, *args, **kwargs):
+    result = original_for_rollback(source, destination, *args, **kwargs)
+    if os.path.abspath(destination) == os.environ['HTTP_TEST_UNKNOWN_Q_LINK']:
+        os.unlink(destination)
+        # Bypass the failure/kill hooks while installing the unrelated object.
+        original_symlink(os.environ['HTTP_TEST_UNKNOWN_Q_TARGET'], destination)
+        wal = Path(os.environ['HTTP_TEST_WAL_NAME'])
+        Path(os.environ['HTTP_TEST_Q_LINK_BARRIER']).write_text(hashlib.sha256(wal.read_bytes()).hexdigest())
+        raise ValueError('injected setup failure after unknown replacement')
+    return result
+os.symlink = replace_at_setup_write
+""", encoding="utf-8")
+            with mock.patch.dict(os.environ, {
+                "HTTP_TEST_UNKNOWN_Q_LINK": str(q_only),
+                "HTTP_TEST_UNKNOWN_Q_TARGET": original,
+                "HTTP_TEST_WAL_NAME": str(root / "ztp/.setup-switch-journal.json"),
+            }):
+                result = self._run_private_load_setup_switch(
+                    fixture, prepare_journal=True, first_link=root / "never-created-link",
+                )
+            self.assertEqual(24, result.returncode, result.stdout + result.stderr)
+            self.assertTrue(barrier.exists())
+            self.assertEqual(original, os.readlink(q_only), "real SETUP rollback deleted the unknown link")
+            journal = root / "ztp/.setup-switch-journal.json"
+            self.assertEqual(barrier.read_text(), hashlib.sha256(journal.read_bytes()).hexdigest())
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            self.assertEqual(q / "01-global.yaml", common.resolve(), "unknown state did not fence P writes")
+            self.assertFalse((root / "service-started").exists())
+
     def test_real_setup_failure_context_restores_durable_sample_before_runtime_phase(self):
         """Parent's failure API must use disk WAL, not only its detached P links."""
         with tempfile.TemporaryDirectory(prefix="r22-parent-wal-restore-") as name:
@@ -1504,6 +1542,45 @@ glob.glob = insert_at_generic_cleanup
             self.assertEqual(before["p_only"], os.readlink(p_only))
             self.assertFalse(os.path.lexists(q_only))
             self.assertFalse(barrier.exists())
+
+    def test_real_setup_pubkey_cleanup_retains_late_unowned_link(self):
+        """A real secondary writer must not delete a link inserted after generic cleanup."""
+        with tempfile.TemporaryDirectory(prefix="r22-real-pub-cleanup-hold-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, _q, common, p_only, q_only, manifest, before, hook, _barrier, _home = fixture
+            late = root / "ztp/config/publickey/late-foreign.pub"
+            foreign = root / "operator-owned.pub"
+            foreign.write_bytes(b"operator-owned sentinel\n")
+            raw = os.path.relpath(foreign, late.parent)
+            hook_file = hook / "sitecustomize.py"
+            hook_file.write_text(hook_file.read_text(encoding="utf-8") + """
+import glob
+import inspect
+original_glob_for_secondary_cleanup = glob.glob
+def insert_before_public_key_cleanup(pattern, *args, **kwargs):
+    late = Path(os.environ['HTTP_TEST_SECONDARY_LINK'])
+    if (pattern == str(late.parent / '*.pub')
+            and any(frame.function == '_process_pubkeys' for frame in inspect.stack())
+            and not os.path.lexists(late)):
+        original_symlink(os.environ['HTTP_TEST_SECONDARY_TARGET'], late)
+    return original_glob_for_secondary_cleanup(pattern, *args, **kwargs)
+glob.glob = insert_before_public_key_cleanup
+""", encoding="utf-8")
+            with mock.patch.dict(os.environ, {
+                "HTTP_TEST_SECONDARY_LINK": str(late), "HTTP_TEST_SECONDARY_TARGET": raw,
+            }):
+                result = self._run_private_load_setup_switch(
+                    fixture, prepare_journal=True, first_link=root / "never-created-link",
+                )
+            self.assertEqual(24, result.returncode, result.stdout + result.stderr)
+            self.assertIn("WAL", result.stdout + result.stderr)
+            self.assertEqual(raw, os.readlink(late))
+            self.assertEqual(b"operator-owned sentinel\n", foreign.read_bytes())
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            self.assertEqual(before["common"], os.readlink(common))
+            self.assertEqual(before["p_only"], os.readlink(p_only))
+            self.assertFalse(os.path.lexists(q_only))
+            self.assertTrue((root / "ztp/.setup-switch-journal.json").is_file())
 
     def test_real_setup_wal_refuses_unlisted_fixed_q_repoint_before_write(self):
         """P's fixed link cannot be repointed when its WAL row has no Q value."""

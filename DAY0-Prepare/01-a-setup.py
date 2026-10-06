@@ -881,7 +881,7 @@ def _process_pubkeys(proj_dir):
             if _DRY_RUN:
                 print(_c(CYAN, f"  [DRY] 删除旧公钥链接 {os.path.relpath(old, HTTP_BASE)}"))
             else:
-                os.remove(old)
+                _remove_frozen_setup_cleanup_link(old, "旧公钥链接清理")
                 print(_c(GREEN, f"  [DEL] 旧公钥链接 {os.path.relpath(old, HTTP_BASE)}"))
         for src in sorted(pubs):
             link = os.path.join(key_dir, os.path.basename(src))
@@ -1183,7 +1183,7 @@ def _process_latest_yaml(_proj_dir):
             if _DRY_RUN:
                 print(_c(CYAN, f"  [DRY] 删除无效发布链接 {os.path.relpath(stale, HTTP_BASE)}"))
             else:
-                os.remove(stale)
+                _remove_frozen_setup_cleanup_link(stale, "失效发布链接清理")
                 print(_c(GREEN, f"  [DEL] 无效发布链接 {os.path.relpath(stale, HTTP_BASE)}"))
 
 
@@ -1201,6 +1201,14 @@ def _require_frozen_setup_cleanup_link(path, context, label):
     if (not os.path.islink(path) or os.readlink(path) != raw_target
             or load_api["_setup_switch_link_parent_identity"](Path(path)) != parent):
         raise ValueError(f"{label}状态偏离 WAL：{path}")
+
+
+def _remove_frozen_setup_cleanup_link(path, label):
+    """Unlink only a frozen P name and make that WAL-owned mutation durable."""
+    _require_frozen_setup_cleanup_link(path, _SETUP_SWITCH_WAL_CONTEXT, label)
+    os.remove(path)
+    if _SETUP_SWITCH_WAL_CONTEXT is not None:
+        _fsync_directory(os.path.dirname(path))
 
 
 def _require_sample_wal_surface(proj_dir, context):
@@ -1271,7 +1279,7 @@ def _remove_legacy_nvos_output_links():
             if _DRY_RUN:
                 print(_c(CYAN, f"  [DRY] 删除旧链接 {os.path.relpath(path, HTTP_BASE)}"))
             else:
-                os.remove(path)
+                _remove_frozen_setup_cleanup_link(path, "旧 NVOS 链接清理")
                 print(_c(GREEN, f"  [DEL] 旧链接 {os.path.relpath(path, HTTP_BASE)}"))
         elif os.path.exists(path):
             print(_c(YELLOW, f"  [WARN] 旧路径是实际文件或目录，未删除：{path}"))
@@ -3559,6 +3567,9 @@ def _check_conflicts(proj_dir):
     if not conflicts:
         return True
 
+    for link_path, _raw, _target in conflicts:
+        _require_frozen_setup_cleanup_link(link_path, _SETUP_SWITCH_WAL_CONTEXT, "冲突链接清理")
+
     print(_c(YELLOW, f"\n发现 {len(conflicts)} 个链接指向其他项目："))
     for link_path, cur_target, _ in conflicts:
         print(f"  {os.path.relpath(link_path, HTTP_BASE)}")
@@ -3570,7 +3581,7 @@ def _check_conflicts(proj_dir):
 
     for link_path, _, _ in conflicts:
         if not _DRY_RUN:
-            os.remove(link_path)
+            _remove_frozen_setup_cleanup_link(link_path, "冲突链接清理")
         print(_c(CYAN if _DRY_RUN else GREEN,
                  f"  {'[DRY] 删除' if _DRY_RUN else '[DEL]'} {os.path.relpath(link_path, HTTP_BASE)}"))
     return True
@@ -4229,10 +4240,30 @@ class _SetupLinkTransaction:
             f"  [MIGRATE] materialized {os.path.relpath(path, HTTP_BASE)} → {rel_target}",
         ))
 
-    def rollback(self):
+    def rollback(self, *, retain_wal=False):
         if not self.active or _DRY_RUN:
             return
         print(_c(YELLOW, "\n── setup 失败，回滚全部链接切换 ────────────────────────────────"))
+        if _SETUP_SWITCH_WAL_CONTEXT is not None:
+            load_api, descriptor = _SETUP_SWITCH_WAL_CONTEXT[:2]
+            try:
+                outcome = load_api["recover_setup_switch_journal"](
+                    Path(ZTP) / ".setup-switch-journal.json",
+                    deployment_lock_descriptor=descriptor, services_quiesced=True,
+                    runtime_backend=load_api["service_runtime_backend"](),
+                    retain_journal=retain_wal,
+                )
+                if outcome != "restored-p":
+                    raise ValueError(f"unexpected setup WAL recovery result: {outcome}")
+                evidence = "；失败 WAL 保留，待显式核验收口" if retain_wal else ""
+                print(_c(GREEN, f"  [ROLLBACK] 已按持久 WAL 恢复精确 P；服务保持停止{evidence}"))
+            except (load_api["LoadError"], OSError, ValueError, RuntimeError) as exc:
+                # A "missing" snapshot entry is not ownership of whatever
+                # appeared there later. Never fall back to the memory-only
+                # remover after a disk preflight rejects an unknown state.
+                print(_c(RED, f"  [HOLD] setup WAL 回滚未完成，保留原凭据与对象：{exc}"))
+            self.active = False
+            return
         failures = []
         for path, (kind, target) in self.states.items():
             try:
@@ -4815,10 +4846,16 @@ def setup(proj_dir, *, server_delegated=False, deployment_lock_descriptor=None):
                     )
             return _setup_impl(proj_dir, server_delegated=server_delegated)
         except BaseException:
-            _rollback_infra_log_migration()
+            if _SETUP_SWITCH_WAL_CONTEXT is None:
+                _rollback_infra_log_migration()
             if _LINK_TRANSACTION is not None:
-                _LINK_TRANSACTION.rollback()
+                _LINK_TRANSACTION.rollback(retain_wal=_SETUP_SWITCH_WAL_CONTEXT is not None)
                 _LINK_TRANSACTION = None
+            if _SETUP_SWITCH_WAL_CONTEXT is not None:
+                # The same WAL covers the infra source/receipt and every
+                # link. Do not perform a separate eager migration rollback
+                # before its all-surface unknown-state fence.
+                _INFRA_LOG_MIGRATION = None
             raise
         finally:
             _SETUP_SWITCH_WAL_CONTEXT = None

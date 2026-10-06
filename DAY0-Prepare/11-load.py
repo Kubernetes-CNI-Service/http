@@ -6890,11 +6890,14 @@ def recover_setup_switch_journal(
     inspect_only: bool = False,
     expected_old_state: ActiveSetupState | None = None,
     expected_new_project: Path | None = None,
+    retain_journal: bool = False,
 ) -> str:
     """Verify or restore P from a complete WAL and a known P/Q disk state.
 
     The read-only prewrite mode accepts only an untouched P state.  It never
     interprets an in-flight P/Q mixture as permission to begin another setup.
+    Automatic failed SETUP recovery retains the original journal for incident
+    review; a separate explicit recovery uses the default finalization mode.
     """
     _require_runtime_restore_guard(
         deployment_lock_descriptor=deployment_lock_descriptor,
@@ -6903,6 +6906,8 @@ def recover_setup_switch_journal(
     )
     if (expected_old_state is None) != (expected_new_project is None):
         raise LoadError("setup switch WAL context requires both P state and Q project")
+    if type(retain_journal) is not bool or (retain_journal and (verify_only or inspect_only)):
+        raise LoadError("journal retention requires an unambiguous recovery mode")
     if type(inspect_only) is not bool or (inspect_only and (verify_only or manifest_candidate is not None)):
         raise LoadError("journal inspection must be read-only and unambiguous")
     if manifest_candidate is not None and not verify_only:
@@ -7140,8 +7145,12 @@ def recover_setup_switch_journal(
     verified = snapshot_active_setup_state(expected_project=state.project)
     if verified.manifest != state.manifest or verified.links != state.links:
         raise LoadError("setup switch P post-verify failed; journal retained")
-    journal.unlink()
-    _fsync_parent_directory(journal.parent)
+    # A failed SETUP must not erase its durable authorization/incident
+    # evidence merely because P is recoverable. Explicit recovery keeps the
+    # default finalization behavior; automatic child failure recovery does not.
+    if not retain_journal:
+        journal.unlink()
+        _fsync_parent_directory(journal.parent)
     return "restored-p"
 
 

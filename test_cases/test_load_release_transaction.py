@@ -1787,11 +1787,14 @@ class ReleaseTransactionTests(unittest.TestCase):
         old_links = {common: os.readlink(common), old_only: os.readlink(old_only)}
         lock_path = self.root / ".deployment.lock"
         constants = mock.patch.multiple(
-            LOAD, HTTP_ROOT=self.root, ZTP_DIR=self.ztp, MANIFEST=manifest,
+            LOAD, HTTP_ROOT=self.root, MANIFEST=manifest,
             IMAGE_DIR=self.root / "image", DEPLOYMENT_LOCK=lock_path,
         )
         constants.start()
         self.addCleanup(constants.stop)
+        setup_manifest = mock.patch.object(SETUP, "MANIFEST_FILE", str(manifest))
+        setup_manifest.start()
+        self.addCleanup(setup_manifest.stop)
         descriptor = LOAD.acquire_deployment_lock(exclusive=True)
         self.addCleanup(LOAD.release_deployment_lock, descriptor)
         backend = SimpleNamespace(name="supervisor", start=mock.Mock())
@@ -1813,6 +1816,167 @@ class ReleaseTransactionTests(unittest.TestCase):
             new_target, new_only_target, manifest, old_manifest, old_links,
             journal, descriptor, backend,
         )
+
+    def test_cross_project_crash_fixture_isolates_setup_manifest(self) -> None:
+        self._prepare_cross_project_setup_crash()
+        self.assertEqual(str(self.ztp / ".setup_manifest"), SETUP.MANIFEST_FILE)
+
+    def test_cross_project_crash_fixture_restores_load_root_after_cleanup(self) -> None:
+        before = LOAD.ZTP_DIR
+        nested = ReleaseTransactionTests("test_cross_project_crash_fixture_isolates_setup_manifest")
+        result = unittest.TestResult()
+        nested.run(result)
+        self.assertTrue(result.wasSuccessful(), (result.failures, result.errors))
+        self.assertEqual(before, LOAD.ZTP_DIR, "cleanup leaked a deleted private ZTP root")
+
+    def test_setup_failure_known_rollback_preserves_wal_for_explicit_recovery(self) -> None:
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        common, new_only = state[2], state[4]
+        transaction = SETUP._SetupLinkTransaction([str(common), str(new_only)])
+        common.unlink()
+        common.symlink_to(os.path.relpath(state[5], common.parent))
+        new_only.symlink_to(os.path.relpath(state[6], new_only.parent))
+        evidence = journal.read_bytes()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(SETUP, "ZTP", str(self.ztp)), \
+                mock.patch.object(SETUP, "_SETUP_SWITCH_WAL_CONTEXT", (vars(LOAD), descriptor)):
+            transaction.rollback(retain_wal=True)
+            self.assertEqual(state[9][common], os.readlink(common))
+            self.assertFalse(os.path.lexists(new_only))
+            self.assertEqual(state[8], state[7].read_bytes())
+            self.assertEqual(evidence, journal.read_bytes(), "failure evidence must remain byte-exact")
+            self.assertEqual("restored-p", LOAD.recover_setup_switch_journal(
+                journal, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            ))
+        self.assertFalse(os.path.lexists(journal))
+        backend.start.assert_not_called()
+
+    def test_setup_wal_retention_mode_rejects_ambiguous_flags_before_writes(self) -> None:
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        common = state[2]
+        common.unlink()
+        common.symlink_to(os.path.relpath(state[5], common.parent))
+        mixed = os.readlink(common)
+        evidence = journal.read_bytes()
+        for flags in ({"retain_journal": "yes"}, {"retain_journal": 1},
+                      {"retain_journal": True, "verify_only": True},
+                      {"retain_journal": True, "inspect_only": True}):
+            with self.subTest(flags=flags), \
+                    mock.patch.object(LOAD, "active_managed_services", return_value=()):
+                with self.assertRaisesRegex(LOAD.LoadError, "retention"):
+                    LOAD.recover_setup_switch_journal(
+                        journal, deployment_lock_descriptor=descriptor,
+                        services_quiesced=True, runtime_backend=backend, **flags,
+                    )
+                self.assertEqual(mixed, os.readlink(common))
+                self.assertEqual(state[8], state[7].read_bytes())
+                self.assertEqual(evidence, journal.read_bytes())
+        backend.start.assert_not_called()
+
+    def test_setup_inprocess_rollback_does_not_remove_unknown_wal_link(self) -> None:
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        common, new_only = state[2], state[4]
+        transaction = SETUP._SetupLinkTransaction([str(common), str(new_only)])
+        common.unlink()
+        common.symlink_to(os.path.relpath(state[5], common.parent))
+        new_only.symlink_to(os.path.relpath(self.global_file, new_only.parent))
+        mixed_common, unknown = os.readlink(common), os.readlink(new_only)
+        original_wal = journal.read_bytes()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(SETUP, "ZTP", str(self.ztp)), \
+                mock.patch.object(SETUP, "_SETUP_SWITCH_WAL_CONTEXT", (vars(LOAD), descriptor)):
+            transaction.rollback()
+        self.assertEqual(unknown, os.readlink(new_only), "memory rollback deleted an unowned replacement")
+        self.assertEqual(mixed_common, os.readlink(common), "unknown WAL state did not fence all P writes")
+        self.assertEqual(original_wal, journal.read_bytes())
+        backend.start.assert_not_called()
+
+    def test_setup_secondary_cleanup_requires_frozen_p_authority(self) -> None:
+        """Each remaining unlink edge must reject an unowned link, not just generic cleanup."""
+        public = self.ztp / "config/publickey"
+        public.mkdir(parents=True)
+        (self.project / "operator.pub").write_bytes(b"ssh-ed25519 AAAA test\n")
+        nvos = self.ztp / "config/nvos/template"
+        nvos.mkdir(parents=True)
+        output = self.ztp / "config/cumulus/template/99-output"
+        output.mkdir(parents=True)
+        foreign = self.root / "operator-owned.pub"
+        foreign.write_bytes(b"operator data\n")
+        operations = (
+            (public / "late.pub", lambda: SETUP._process_pubkeys(str(self.project))),
+            (nvos / "99-output-ib", SETUP._remove_legacy_nvos_output_links),
+            (output / "latest", lambda: SETUP._process_latest_yaml(str(self.project))),
+            (self.ztp / "foreign-conflict", lambda: SETUP._check_conflicts(str(self.project))),
+        )
+        for link, operation in operations:
+            with self.subTest(link=link), ExitStack() as patches:
+                raw = os.path.relpath(foreign, link.parent)
+                link.symlink_to(raw)
+                identity = link.lstat()
+                for name, value in {
+                    "HTTP_BASE": str(self.root), "ZTP": str(self.ztp),
+                    "_DRY_RUN": False, "_LINK_TRANSACTION": None,
+                    "_SETUP_SWITCH_WAL_CONTEXT": (vars(LOAD), None, {}, {}),
+                    "LATEST_YAML_SPECS": (("cumulus", "99-output"),),
+                }.items():
+                    patches.enter_context(mock.patch.object(SETUP, name, value))
+                patches.enter_context(mock.patch.object(SETUP, "_publickey_roots", return_value=(str(public),)))
+                patches.enter_context(mock.patch.object(SETUP, "_make_link", return_value="linked"))
+                patches.enter_context(mock.patch.object(SETUP, "_cumulus_publish_dirs", return_value=[]))
+                patches.enter_context(mock.patch.object(SETUP, "_latest_cumulus_publish_dir", return_value=None))
+                patches.enter_context(mock.patch.object(SETUP, "_collect_expected_links", return_value=[str(link)]))
+                patches.enter_context(mock.patch.object(SETUP, "_shared_image_pairs", return_value=[]))
+                patches.enter_context(mock.patch.object(SETUP, "_authorize_project_switch", return_value=True))
+                with self.assertRaisesRegex(ValueError, "WAL"):
+                    operation()
+                self.assertEqual(raw, os.readlink(link))
+                self.assertEqual((identity.st_dev, identity.st_ino), (link.lstat().st_dev, link.lstat().st_ino))
+                link.unlink()
+
+    def test_setup_secondary_cleanup_fsyncs_known_p_and_rejects_rebound_parent(self) -> None:
+        parent = self.ztp / "config/publickey"
+        parent.mkdir(parents=True)
+        link = parent / "owned.pub"
+        raw = "../../../operator.pub"
+        link.symlink_to(raw)
+        info = parent.stat()
+        frozen = {str(link): (raw, {"path": str(parent.resolve()), "dev": info.st_dev, "ino": info.st_ino})}
+        context = (vars(LOAD), None, frozen, {})
+        with mock.patch.object(SETUP, "_SETUP_SWITCH_WAL_CONTEXT", context), \
+                mock.patch.object(SETUP, "_fsync_directory", wraps=SETUP._fsync_directory) as sync:
+            SETUP._remove_frozen_setup_cleanup_link(str(link), "test frozen cleanup")
+            self.assertFalse(os.path.lexists(link))
+            sync.assert_called_once_with(str(parent))
+            link.symlink_to(raw)
+            original_parent = parent.with_name("original-publickey")
+            parent.rename(original_parent)
+            parent.mkdir()
+            link.symlink_to(raw)
+            replaced = link.lstat()
+            with self.assertRaisesRegex(ValueError, "WAL"):
+                SETUP._remove_frozen_setup_cleanup_link(str(link), "test frozen cleanup")
+            self.assertEqual(raw, os.readlink(link))
+            self.assertEqual((replaced.st_dev, replaced.st_ino), (link.lstat().st_dev, link.lstat().st_ino))
+            self.assertEqual(raw, os.readlink(original_parent / link.name))
+            sync.assert_called_once()
+
+    def test_setup_inprocess_known_rollback_consumes_wal_and_restores_p(self) -> None:
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        common, new_only = state[2], state[4]
+        transaction = SETUP._SetupLinkTransaction([str(common), str(new_only)])
+        common.unlink()
+        common.symlink_to(os.path.relpath(state[5], common.parent))
+        new_only.symlink_to(os.path.relpath(state[6], new_only.parent))
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(SETUP, "ZTP", str(self.ztp)), \
+                mock.patch.object(SETUP, "_SETUP_SWITCH_WAL_CONTEXT", (vars(LOAD), descriptor)):
+            transaction.rollback()
+        self.assertEqual(state[9][common], os.readlink(common))
+        self.assertFalse(os.path.lexists(new_only))
+        self.assertEqual(state[8], state[7].read_bytes())
+        self.assertFalse(os.path.lexists(journal), "known rollback bypassed durable WAL finalization")
+        backend.start.assert_not_called()
 
     def test_cross_project_failure_restore_uses_wal_before_runtime_receipt(self) -> None:
         (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash(freeze_q_links=False)
