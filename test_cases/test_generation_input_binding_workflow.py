@@ -1983,6 +1983,12 @@ finally:
             reenter=False, outcomes=("precommit-shapes",),
         )
 
+    def test_real_setup_then_dhcp_a_restore_sync_failure_retains_evidence(self):
+        """Verified A bytes must not license cleanup after a sync failure."""
+        self._real_setup_uncertain_parent_dhcp_evidence(
+            reenter=False, outcomes=("restore-file-sync", "restore-dir-open", "restore-dir-sync"),
+        )
+
     def _real_setup_uncertain_parent_dhcp_evidence(
         self, *, reenter, cold=False, outcomes=("open", "fsync"),
     ):

@@ -8273,6 +8273,58 @@ def _dhcp_restore_leaf_state(path: Path) -> dict[str, object]:
             os.close(descriptor)
 
 
+def _sync_verified_dhcp_a_restore(
+    runtime_directory: Path, original_states: dict[Path, dict[str, object]],
+) -> None:
+    """Sync restored regular leaves, then names, before backup cleanup.
+
+    Held nofollow descriptors and postchecks reject known rebinds. This is
+    neither a persistent grouped recovery receipt nor a power-loss witness.
+    """
+    try:
+        if any(not hasattr(os, flag) for flag in ("O_DIRECTORY", "O_NOFOLLOW")):
+            raise LoadError("restored DHCP A requires nofollow directory support")
+        before_directory = runtime_directory.lstat()
+        if not stat.S_ISDIR(before_directory.st_mode):
+            raise LoadError("restored DHCP A runtime directory is not a real directory")
+        directory_identity = _management_directory_identity(before_directory)
+        flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        directory_fd = os.open(runtime_directory, flags | os.O_DIRECTORY)
+        try:
+            if _management_directory_identity(os.fstat(directory_fd)) != directory_identity:
+                raise LoadError("restored DHCP A directory changed while opening")
+            for path, expected_state in original_states.items():
+                if path.parent != runtime_directory:
+                    raise LoadError("restored DHCP A leaf escaped its runtime directory")
+                if expected_state["state"] != "file":
+                    continue  # Names/links are persisted by the parent fsync.
+                before = path.lstat()
+                descriptor = os.open(path.name, flags, dir_fd=directory_fd)
+                try:
+                    opened = os.fstat(descriptor)
+                    if (not stat.S_ISREG(opened.st_mode)
+                            or _runtime_key_identity(opened) != _runtime_key_identity(before)
+                            or (opened.st_uid, opened.st_gid) != (before.st_uid, before.st_gid)):
+                        raise LoadError("restored DHCP A leaf changed while opening for sync")
+                    os.fsync(descriptor)
+                    if (_runtime_key_identity(os.fstat(descriptor)) != _runtime_key_identity(before)
+                            or _runtime_key_identity(path.lstat()) != _runtime_key_identity(before)):
+                        raise LoadError("restored DHCP A leaf changed during sync")
+                finally:
+                    os.close(descriptor)
+            os.fsync(directory_fd)
+            if (_management_directory_identity(os.fstat(directory_fd)) != directory_identity
+                    or _management_directory_identity(runtime_directory.lstat()) != directory_identity):
+                raise LoadError("restored DHCP A directory changed during sync")
+            for path, expected_state in original_states.items():
+                if _dhcp_restore_leaf_state(path) != expected_state:
+                    raise LoadError("restored DHCP A preimage changed during sync")
+        finally:
+            os.close(directory_fd)
+    except (OSError, LoadError) as exc:
+        raise LoadError(f"DHCP A restore durability unconfirmed; HOLD: {exc}") from exc
+
+
 def mount_and_test_dhcp(
     dry_run: bool = False,
     *,
@@ -8286,7 +8338,8 @@ def mount_and_test_dhcp(
     destination (including a symlink) is restored before the error is raised.
     An incomplete restore instead retains its transaction and A evidence;
     command exit0 also requires exact restored leaf/content/metadata checks
-    before deleting backups. These checks are not fsync or healthy activation.
+    before syncing restored files/names and deleting backups. This still does
+    not prove a complete persistent recovery receipt or healthy activation.
     Once B is visible, unconfirmed parent directory durability instead keeps
     installed B and the root-only A backup together for manual HOLD review.
     """
@@ -8473,6 +8526,7 @@ def mount_and_test_dhcp(
                     raise LoadError(
                         f"DHCP A restore verification failed; HOLD: {destination}"
                     )
+            _sync_verified_dhcp_a_restore(dhcp_runtime_dir, original_states)
             restore_incomplete = False
             raise
     finally:

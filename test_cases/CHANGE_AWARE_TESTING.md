@@ -335,6 +335,55 @@ inode 145750085，size 116568，SHA256
 运行期间源码/测试/文档冻结，approved ledger、manifest 与运行态 setup manifest
 身份和字节均未改；该源候选仍未批准，不能写作 R22 正式 full 落地。
 
+### R22 已后验证的 DHCP A 恢复同步失败仍须保留备份候选
+
+前一候选只核恢复文件预像，没有恢复 regular/父目录同步步骤，就清理 A backup。
+新的独立 direct/真实 SETUP→实际 LOAD 安装 API workflow 注入文件 fsync、目录
+open、目录 fsync 失败。首轮日志 `r22-dhcp-restore-sync-red.log`，inode 145788627，
+size 10448，SHA256
+`722547c9fb46f451b22cc107c6adf2e65277072e690ff6c4aa639485519ad023`
+完整 2 tests / 6 FAIL / exit1：四个文件/目录 fsync subtest 因原实现缺少同步失败；
+另两个目录 open 注入误命中安装前 pending 扫描，是夹具阶段错误，不能当作修复 RED。
+保留原日志/断言，仅将目录 open 注入限定到独立 precommit 拒绝后的恢复阶段，
+生产字节未改。修正夹具后的全部六个 subtest 均因缺少恢复同步步骤 FAIL / exit1，
+原日志 `r22-dhcp-restore-sync-phase-corrected-red.log`，inode 145795288，size 8885，
+SHA256 `1b6db33f8822ded08962d144b4e0123efb1b95b37563c172a09067bee0fad97a`。
+
+候选在所有恢复命令 exit0 且预像后验证完成后，通过持有的 NOFOLLOW 目录 FD
+逐个打开恢复 regular 文件，核名称/FD 身份、fsync 文件、重核，再 fsync 父目录、
+重核目录身份与全部原预像；symlink/缺席由父目录同步。文件/目录同步、读取、
+身份或预像校验失败仍以 LoadError/HOLD 保留原 backup/staged/事务，阻断新 LOAD；
+全部成功才解除恢复未完成标志，正常预提交拒绝仍传播原错误并走原清理路径。
+新 direct/workflow 与健康成功、正常四文件恢复、旧链接/缺席正例共 6 tests / OK /
+exit0（26.686 秒），日志 `r22-dhcp-restore-sync-green.log`，inode 145812217，size 1402，
+SHA256 `d90bfbd277dd339685bd12d15a2d3416406650410a6f6a1ad363b3b01476fc51`。
+正例独立断言文件逐个同步→目录同步的顺序，不以 fsync mock 次数代替恢复内容。
+另有打开时目录换绑、目录同步后内容漂移两个 direct 负例，要求 HOLD、关闭持有
+FD 且不跟随未知目录/错误宣称稳定预像；不主张顺序读回是原子 compare-and-write。
+
+manifest 原 LOAD direct 与 generation-input-binding 多脚本 workflow 映射继续有效，
+REAL_ENV 卡继续 OPEN。本地私有文件端口/同步注入不证明真实 root 入口、其它写者
+竞态免疫、完整 grouped receipt/WAL、备份本身持久性、Linux 断电、B 成功收口或
+旧 A 显式健康激活。原正式 bootstrap/REQ19 超时原因仍待核，本诊断 PASS 不放行
+related/full，不手改 ledger 或套旧证明。
+
+目录换绑/同步后漂移的完整负例日志
+`outputs/test-diagnostics/r22-dhcp-restore-sync-identity-boundaries.log`，inode 145832390，
+size 431，SHA256
+`8b51180821489f74dde360263546c201db01472af7e46773e47865611c273a43`，2 tests OK / exit0。
+最终候选的完整 LOAD transaction、完整 DHCP optional workflow 模块，加七项明确
+选择的真实 SETUP→LOAD workflow 共 338 tests / OK / exit0（86.782 秒）。完整日志
+`outputs/test-diagnostics/r22-dhcp-restore-sync-load-workflows.log`，inode 145832601，
+size 117203，SHA256
+`156980fdfb2e9c410e7e7bb8a6a851e69a693431feba5718885396e7bed7def1`；
+读前后 stat/inode 一致，运行中 61231 字节旧前缀 SHA256
+`61538b3ccf8c1ae9d764f4f63f929bd1554de7c8b0faae3085b074f97a0bcc62` 未变。
+物理第 1090 行 Ran、1092 行 OK、原 fixture 缓冲 stdout 后第 1180 行
+`R22_DHCP_RESTORE_SYNC_LOAD_WORKFLOWS_EXIT=0` 与实际 exec exit0 相符。
+运行中源码/测试/文档冻结，approved ledger、manifest 与运行态 setup manifest 的
+完整身份和字节未改；这不是整个 generation workflow 模块或正式 related/full，
+该源候选仍未批准，不称 R22 整体正式落地。
+
 ### R22 未结清 DHCP 事务的新进程写前闸门候选
 
 内存候选重入闸门不能保护新 LOAD。独立新候选 direct 和真实 SETUP→父 B

@@ -143,7 +143,7 @@ def assert_private_dhcp_transaction_retention(
     candidate = api.prepare_current_release(project, parent_payload)
     parent_identity = candidate.destination.parent.stat()
     real_open, real_sync = os.open, os.fsync
-    injected, warnings, cleanup = [], [], []
+    injected, warnings, cleanup, restore_phase, sync_events = [], [], [], [], []
 
     def private_destination(value):
         path = Path(value)
@@ -195,6 +195,28 @@ def assert_private_dhcp_transaction_retention(
 
     def sync_parent(descriptor):
         metadata = os.fstat(descriptor)
+        if restore_phase:
+            if stat.S_ISDIR(metadata.st_mode):
+                target = live_dir.stat()
+                if (metadata.st_dev, metadata.st_ino) == (target.st_dev, target.st_ino):
+                    sync_events.append("directory")
+            elif stat.S_ISREG(metadata.st_mode):
+                for name in names:
+                    path = live_dir / name
+                    if os.path.lexists(path) and not path.is_symlink():
+                        target = path.lstat()
+                        if (metadata.st_dev, metadata.st_ino) == (target.st_dev, target.st_ino):
+                            sync_events.append(name)
+        if outcome == "restore-file-sync" and stat.S_ISREG(metadata.st_mode):
+            target = (live_dir / "dhcpd_eth.hosts").stat()
+            if (metadata.st_dev, metadata.st_ino) == (target.st_dev, target.st_ino):
+                injected.append(outcome)
+                raise OSError("independent restored A file sync fault")
+        if outcome == "restore-dir-sync" and stat.S_ISDIR(metadata.st_mode):
+            target = live_dir.stat()
+            if (metadata.st_dev, metadata.st_ino) == (target.st_dev, target.st_ino):
+                injected.append(outcome)
+                raise OSError("independent restored A directory sync fault")
         if outcome == "fsync" and (metadata.st_dev, metadata.st_ino) == (
             parent_identity.st_dev, parent_identity.st_ino,
         ):
@@ -203,6 +225,10 @@ def assert_private_dhcp_transaction_retention(
         return real_sync(descriptor)
 
     def open_parent(path, flags, *args, **kwargs):
+        if outcome == "restore-dir-open" and restore_phase and isinstance(path, (str, os.PathLike)) \
+                and Path(path) == live_dir and flags & os.O_DIRECTORY:
+            injected.append(outcome)
+            raise OSError("independent restored A directory open fault")
         if outcome == "open" and isinstance(path, (str, os.PathLike)) \
                 and Path(path) == candidate.destination.parent:
             injected.append("open")
@@ -210,8 +236,10 @@ def assert_private_dhcp_transaction_retention(
         return real_open(path, flags, *args, **kwargs)
 
     if outcome in {"precommit", "precommit-shapes", "restore-return", "restore-raise",
-                   "restore-bytes", "restore-mode", "restore-link"}:
+                   "restore-bytes", "restore-mode", "restore-link",
+                   "restore-file-sync", "restore-dir-open", "restore-dir-sync"}:
         def fail_precommit():
+            restore_phase.append("independent precommit rejection")
             raise api.LoadError("independent precommit rejection")
         candidate.precommit_check = fail_precommit
     try:
@@ -235,6 +263,8 @@ def assert_private_dhcp_transaction_retention(
                     assert "independent A restore copy fault" in str(exc), str(exc)
                 elif outcome in {"restore-bytes", "restore-mode", "restore-link"}:
                     assert "DHCP A restore verification failed" in str(exc), str(exc)
+                elif outcome in {"restore-file-sync", "restore-dir-open", "restore-dir-sync"}:
+                    assert "DHCP A restore durability unconfirmed" in str(exc), str(exc)
                 else:
                     raise
             else:
@@ -244,6 +274,7 @@ def assert_private_dhcp_transaction_retention(
             assert not candidate.committed and not candidate.directory_synced
             assert not candidate.destination.exists()
             assert transactions == [], "verified link/missing restore must keep normal cleanup"
+            assert sync_events == ["dhcpd.conf", "dhcpd_ib.hosts", "directory"], sync_events
             assert os.readlink(live_dir / "dhcpd_eth.hosts") == "../independent-original-A-source"
             assert original_link_source.read_bytes() == expected_a["dhcpd_eth.hosts"]
             assert not os.path.lexists(live_dir / "dhcpd_nvl.hosts")
@@ -251,7 +282,8 @@ def assert_private_dhcp_transaction_retention(
                 assert (live_dir / name).read_bytes() == expected_a[name]
             return
         if outcome in {"restore-return", "restore-raise", "restore-bytes",
-                       "restore-mode", "restore-link"}:
+                       "restore-mode", "restore-link", "restore-file-sync",
+                       "restore-dir-open", "restore-dir-sync"}:
             assert injected == [outcome], injected
             assert not candidate.committed and not candidate.directory_synced
             assert not candidate.destination.exists()
@@ -268,8 +300,11 @@ def assert_private_dhcp_transaction_retention(
                 assert fault_target.read_bytes() == b"independent unaccepted restored bytes\n"
             elif outcome == "restore-mode":
                 assert stat.S_IMODE(fault_target.lstat().st_mode) == 0o600
-            else:
+            elif outcome == "restore-link":
                 assert os.readlink(fault_target) == "independent-absent-target"
+            else:
+                assert {name: (live_dir / name).read_bytes() for name in names} == expected_a, \
+                    "restore bytes alone do not prove durable A"
             assert not any(path == transaction or transaction in path.parents for path in cleanup), \
                 "failed A restore must not delete transaction evidence"
             assert any("HOLD" in warning and str(transaction) in warning for warning in warnings)
@@ -336,6 +371,7 @@ def assert_private_dhcp_transaction_retention(
             assert candidate.directory_synced == (outcome == "success")
             if outcome == "precommit":
                 assert not candidate.destination.exists()
+                assert sync_events == list(names) + ["directory"], sync_events
     finally:
         api.discard_prepared_release(candidate)
 
@@ -6436,6 +6472,68 @@ os.kill(os.getpid(), signal.SIGKILL)
             root, project = Path(name), Path(name) / "project"
             project.mkdir()
             assert_private_dhcp_transaction_retention(LOAD, root, project, "precommit-shapes")
+
+    def test_verified_dhcp_a_restore_sync_failure_retains_evidence(self) -> None:
+        for boundary in ("restore-file-sync", "restore-dir-open", "restore-dir-sync"):
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as name:
+                root, project = Path(name), Path(name) / "project"
+                project.mkdir()
+                assert_private_dhcp_transaction_retention(LOAD, root, project, boundary)
+
+    def test_restored_dhcp_sync_rejects_directory_rebind_before_file_sync(self) -> None:
+        live, retained = self.root / "private-restored-A", self.root / "retained-restored-A"
+        live.mkdir()
+        target = live / "dhcpd.conf"
+        target.write_bytes(b"independent restored A\n")
+        real_open = os.open
+        opened = []
+
+        def swapped_open(path, flags, *args, **kwargs):
+            if Path(path) == live:
+                live.rename(retained)
+                live.mkdir()
+                (live / "operator-sentinel").write_bytes(b"independent unknown directory\n")
+            descriptor = real_open(path, flags, *args, **kwargs)
+            opened.append(descriptor)
+            return descriptor
+
+        with mock.patch.object(LOAD.os, "open", side_effect=swapped_open), \
+                mock.patch.object(LOAD.os, "fsync", side_effect=AssertionError("no unknown sync")), \
+                self.assertRaisesRegex(LOAD.LoadError, "durability unconfirmed.*directory changed while opening"):
+            LOAD._sync_verified_dhcp_a_restore(live, {})
+        self.assertEqual(1, len(opened))
+        with self.assertRaises(OSError):
+            os.fstat(opened[0])
+        self.assertEqual(b"independent restored A\n", (retained / "dhcpd.conf").read_bytes())
+        self.assertEqual(b"independent unknown directory\n", (live / "operator-sentinel").read_bytes())
+
+    def test_restored_dhcp_sync_postcheck_rejects_drift_after_directory_sync(self) -> None:
+        live = self.root / "private-restored-A"
+        live.mkdir()
+        target, timestamp = live / "dhcpd.conf", 1600000000123456789
+        payload = b"independent restored A\n"
+        target.write_bytes(payload)
+        target.chmod(0o640)
+        os.utime(target, ns=(timestamp, timestamp))
+        expected = {target: {
+            "state": "file", "sha256": hashlib.sha256(payload).hexdigest(),
+            "size": len(payload), "mode": 0o640, "uid": os.getuid(),
+            "gid": os.getgid(), "mtime_ns": timestamp,
+        }}
+        real_sync, events = os.fsync, []
+
+        def drifting_sync(descriptor):
+            is_directory = stat.S_ISDIR(os.fstat(descriptor).st_mode)
+            events.append("directory" if is_directory else "file")
+            real_sync(descriptor)
+            if is_directory:
+                target.write_bytes(b"independent unaccepted after-sync bytes\n")
+
+        with mock.patch.object(LOAD.os, "fsync", side_effect=drifting_sync), \
+                self.assertRaisesRegex(LOAD.LoadError, "durability unconfirmed.*preimage changed during sync"):
+            LOAD._sync_verified_dhcp_a_restore(live, expected)
+        self.assertEqual(["file", "directory"], events)
+        self.assertEqual(b"independent unaccepted after-sync bytes\n", target.read_bytes())
 
     def test_dhcp_a_leaf_state_preserves_missing_regular_and_raw_link_contracts(self) -> None:
         path = self.root / "private-a-leaf"
