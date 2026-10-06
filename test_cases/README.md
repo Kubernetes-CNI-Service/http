@@ -111,6 +111,14 @@ fail closed，`--check --require-full`、`--list` 与 `--list-suites` 也不能�
 
 ## 新功能、流程和场景的补充规则
 
+`test_config_sync_authority.py` 的方法 V2 后端与手工 replace-config V1 分开：
+本地代次、固定私有 receipt、writer witness 和失败 veto 不依赖 reporter 墙钟。
+V2 最大合法 canonical 成功/失败夹具分别是独立推导的 2270/14134 B，有限 wire
+上界为 16 KiB；缩小到正例以下必须使 ACCEPTED 断言失败。真实 writer/reader →
+monitor JSON/HTML 负向流程确认该后端不能借旧九阶段或手工应用收据取得完成资格。
+这只是后端合同；bootstrap/initial-setup 生产者接入、自身新鲜配置比较和完整九阶段
+消费者验收仍未因此完成，真机保持 `REAL_ENVIRONMENT.md` 的 NOT RUN。
+
 1. 功能或缺陷修复必须先在 `test_<area>.py` 中增加可稳定复现的案例，再修改实现。
 2. 单函数行为写 unit/contract case；跨文件提交与回滚写 transaction case；跨 DHCP、Apache、
    monitor、worker 或设备身份边界的行为写 integration/scenario case。

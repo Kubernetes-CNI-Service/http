@@ -55,6 +55,25 @@ RECEIPT_SUCCESS_FIELDS = RECEIPT_COMMON_FIELDS | {
     "live_state_sha256",
 }
 RECEIPT_ACTION = "nv config replace <latest-hostname.yaml>; nv config apply -y; nv config save"
+# Method V2 is a separate authority, not an alias for replace-config V1.
+# The independent largest canonical success is 2270 B, failed diagnostic
+# image 14134 B. Fixed identifiers plus <=1024 Unicode code points fit 16 KiB
+# even in escaped ASCII JSON. Independent maximum-positive tests pin this
+# budget; receipt bytes are rejected and retained, never truncated.
+METHOD_RECEIPT_MAX_BYTES = 16384
+METHOD_EXECUTORS = {
+    "ztp_monitor_cycle": ("ztp", frozenset({"eth", "eth_spx", "spx", "air", "ib", "nvl"})),
+    "initial_setup_managed": ("initial-setup", frozenset({"ib"})),
+}
+METHOD_COMMON_FIELDS = {
+    "schema_version", "record_type", "hostname", "type", "config_method",
+    "generation", "source_identity", "operation_id", "trigger_id",
+    "trigger_source", "state", "reason",
+}
+METHOD_SUCCESS_FIELDS = METHOD_COMMON_FIELDS | {
+    "batch_identity_verified", "config_verified", "interface", "transport_ip",
+    "mac_plain", "live_state_sha256", "input_sha256", "source_receipt_sha256",
+}
 
 
 class AuthorityError(ValueError):
@@ -418,10 +437,71 @@ def decode_receipt(raw):
     return value
 
 
+def decode_method_receipt(raw):
+    """Closed V2 method proof; no clock, manual action or legacy promotion.
+
+    Necessary producer evidence only: consumers must additionally bind their
+    own current session and expected state. This codec does not execute a
+    method, observe a device, or supply missing nine-stage completion.
+    """
+    value = _decode(raw, METHOD_RECEIPT_MAX_BYTES)
+    success = value.get("state") == "success"
+    fields = METHOD_SUCCESS_FIELDS if success else METHOD_COMMON_FIELDS
+    if (set(value) != fields
+            or type(value["schema_version"]) is not int or value["schema_version"] != 2
+            or type(value["generation"]) is not int
+            or not 1 <= value["generation"] <= MAX_GENERATION
+            or any(not isinstance(value[name], str) for name in fields - {
+                "schema_version", "generation", "batch_identity_verified", "config_verified"})
+            or value["record_type"] != "configuration_method"
+            or value["state"] not in {"success", "failed"}
+            or value["trigger_source"] not in METHOD_EXECUTORS):
+        raise AuthorityError("closed method receipt V2 schema mismatch")
+    method, types = METHOD_EXECUTORS[value["trigger_source"]]
+    if value["config_method"] != method or value["type"] not in types:
+        raise AuthorityError("method receipt executor/type mismatch")
+    for name, pattern in (("hostname", HOST), ("operation_id", IDENTIFIER),
+                          ("trigger_id", TRIGGER_IDENTIFIER), ("source_identity", NAMESPACE)):
+        if not pattern.fullmatch(value[name]):
+            raise AuthorityError("invalid method receipt identity")
+    if any(int(part) > 2 ** 64 - 1 for part in value["source_identity"].split(":")):
+        raise AuthorityError("method receipt namespace exceeds uint64")
+    try:
+        value["reason"].encode("utf-8")
+    except UnicodeError as exc:
+        raise AuthorityError("method diagnostic is not valid Unicode") from exc
+    if len(value["reason"]) > 1024 or (success and value["reason"] != ""):
+        raise AuthorityError("method diagnostic exceeds V2 contract")
+    if success:
+        if (value["batch_identity_verified"] is not True or value["config_verified"] is not True
+                or value["interface"] not in {"eth0", "eth1"}
+                or not re.fullmatch(r"[0-9a-f]{12}", value["mac_plain"])
+                or len(value["transport_ip"]) > 45
+                or any(not DIGEST.fullmatch(value[name]) for name in (
+                    "live_state_sha256", "input_sha256", "source_receipt_sha256"))):
+            raise AuthorityError("method receipt lacks strict own-session proof")
+        try:
+            ipaddress.ip_address(value["transport_ip"])
+        except ValueError as exc:
+            raise AuthorityError("invalid method transport address") from exc
+    return value
+
+
 def decode_journal(raw, namespace):
+    return _decode_journal(raw, namespace, version=1, sources=SOURCES)
+
+
+def decode_method_journal(raw, namespace):
+    value = _decode_journal(raw, namespace, version=2, sources=METHOD_EXECUTORS)
+    if any(int(part) > 2 ** 64 - 1 for part in value["source_identity"].split(":")):
+        raise AuthorityError("method journal namespace exceeds uint64")
+    return value
+
+
+def _decode_journal(raw, namespace, *, version, sources):
     value = _decode(raw, JOURNAL_MAX_BYTES)
     if (set(value) != JOURNAL_FIELDS
-            or type(value["schema_version"]) is not int or value["schema_version"] != 1
+            or type(value["schema_version"]) is not int or value["schema_version"] != version
             or type(value["generation"]) is not int
             or not 1 <= value["generation"] <= MAX_GENERATION
             or type(value["veto"]) is not bool
@@ -429,7 +509,7 @@ def decode_journal(raw, namespace):
             or value["state"] not in {"pending", "success", "failed"}
             or value["veto"] is not (value["state"] != "success")
             or not isinstance(value["trigger_source"], str)
-            or value["trigger_source"] not in SOURCES
+            or value["trigger_source"] not in sources
             or not isinstance(value["source_identity"], str)
             or not NAMESPACE.fullmatch(value["source_identity"])
             or value["source_identity"] != namespace):
@@ -609,7 +689,7 @@ def _read(descriptor, name, limit, allow_empty=False):
         os.close(file_fd)
 
 
-def _current(descriptor, key, namespace):
+def _current(descriptor, key, namespace, *, decoder=decode_journal):
     try:
         os.stat(key + ".pending", dir_fd=descriptor, follow_symlinks=False)
     except FileNotFoundError:
@@ -625,7 +705,7 @@ def _current(descriptor, key, namespace):
         return None
     if raw is None or witness_raw is None:
         raise AuthorityError("incomplete authority pair")
-    value = decode_journal(raw, namespace)
+    value = decoder(raw, namespace)
     decode_witness(
         witness_raw, generation=value["generation"], namespace=namespace,
         journal_sha256=hashlib.sha256(raw).hexdigest(),
@@ -780,9 +860,9 @@ def _stage(descriptor, name, raw, expected, validate):
                 os.close(held_fd)
 
 
-def _publish(descriptor, key, value, validate, advance_writer_witness):
+def _publish(descriptor, key, value, validate, advance_writer_witness, *, decoder=decode_journal):
     raw = wire(value)
-    decode_journal(raw, value["source_identity"])
+    decoder(raw, value["source_identity"])
     validate()
     names = (key + ".witness.json", key + ".journal.json")
     expected = {name: _snapshot(descriptor, name) for name in names}
@@ -922,3 +1002,129 @@ def finish(root, ticket, result):
                  "veto": not success, "receipt_sha256": receipt_digest(result)}
         _publish(descriptor, key, value, validate, advance)
         return value
+
+
+def read_method_current(root, hostname):
+    """Read-only V2 boundary; absent storage remains unknown, not success."""
+    try:
+        with _scope(root, hostname) as (descriptor, key, namespace, _validate, _advance):
+            return _current(descriptor, key, namespace, decoder=decode_method_journal)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise AuthorityError("method storage could not be authenticated") from exc
+
+
+def begin_method(root, hostname, operation_id, trigger_id, trigger_source):
+    """Mint a local boundary BEFORE observation/application, never from time."""
+    # Reject invalid/foreign sources and identities before _scope can create
+    # a directory or lock.  This prototype is never written or returned;
+    # the actual namespace/era are captured under the held local writer.
+    prototype = {"schema_version": 2, "hostname": hostname, "generation": 1,
+                 "operation_id": operation_id, "trigger_id": trigger_id,
+                 "trigger_source": trigger_source, "source_identity": "0:0",
+                 "state": "pending", "veto": True, "receipt_sha256": ""}
+    try:
+        decode_method_journal(wire(prototype), "0:0")
+    except (TypeError, UnicodeError) as exc:
+        raise AuthorityError("method boundary is not serializable") from exc
+    with _scope(root, hostname, write=True) as (descriptor, key, namespace, validate, advance):
+        previous = _current(descriptor, key, namespace, decoder=decode_method_journal)
+        value = {**prototype, "generation": previous["generation"] + 1 if previous else 1,
+                 "source_identity": namespace}
+        _publish(descriptor, key, value, validate, advance, decoder=decode_method_journal)
+        return value
+
+
+def revoke_method(root, hostname, *, expected):
+    """Compare under the writer lock; an older observer cannot revoke newer work."""
+    _validate_method_ticket(expected)
+    if not isinstance(hostname, str) or expected["hostname"].casefold() != hostname.casefold():
+        raise AuthorityError("method revocation hostname disagrees with ticket")
+    with _scope(root, hostname, write=True) as (descriptor, key, namespace, validate, advance):
+        decode_method_journal(wire(expected), namespace)
+        current = _current(descriptor, key, namespace, decoder=decode_method_journal)
+        if current is None or current != expected:
+            return None
+        value = {**current, "state": "failed", "veto": True, "receipt_sha256": ""}
+        if value != current:
+            _publish(descriptor, key, value, validate, advance, decoder=decode_method_journal)
+        return value
+
+
+def _validate_method_ticket(ticket):
+    """Validate the wire contract before any storage side effect."""
+    if not isinstance(ticket, dict):
+        raise AuthorityError("method ticket is not a closed object")
+    try:
+        decode_method_journal(wire(ticket), ticket.get("source_identity"))
+    except (TypeError, UnicodeError) as exc:
+        raise AuthorityError("method ticket is not serializable") from exc
+
+
+def finish_method(root, ticket, result):
+    """Publish only an own-ticket V2 result, under the existing durable fence.
+
+    A receipt may be visible while its journal is still pending: that window
+    cannot authorize success. Publication/cleanup failure retains the hold.
+    The root must be dedicated to method V2; V1 readers/writers reject it.
+    """
+    _validate_method_ticket(ticket)
+    try:
+        result = decode_method_receipt(wire(result))
+    except (TypeError, UnicodeError) as exc:
+        raise AuthorityError("method receipt is not serializable") from exc
+    with _scope(root, ticket.get("hostname"), write=True) as (descriptor, key, namespace, validate, advance):
+        decode_method_journal(wire(ticket), namespace)
+        current = _current(descriptor, key, namespace, decoder=decode_method_journal)
+        if current != ticket or current["state"] != "pending":
+            raise AuthorityError("method completion is not the current pending generation")
+        if any(result[field] != ticket[field] for field in (
+                "hostname", "generation", "source_identity", "operation_id", "trigger_id", "trigger_source")):
+            raise AuthorityError("method completion does not carry its own local ticket")
+        name = key + ".method.json"
+        expected = _snapshot(descriptor, name)
+        # Authenticate a prior image before replacing it; do not repair a
+        # foreign/symlink/multi-link object into an apparently trusted receipt.
+        _read(descriptor, name, METHOD_RECEIPT_MAX_BYTES)
+        image = _stage(descriptor, name, wire(result), expected, validate)
+
+        def validate_receipt():
+            validate()
+            if _snapshot(descriptor, name) != image:
+                raise AuthorityError("method receipt rebound during publication")
+
+        success = result["state"] == "success"
+        value = {**current, "state": "success" if success else "failed", "veto": not success,
+                 "receipt_sha256": receipt_digest(result)}
+        _publish(descriptor, key, value, validate_receipt, advance, decoder=decode_method_journal)
+        return value
+
+
+def read_method_receipt(root, hostname):
+    """Read the one fixed private method receipt while holding its local era."""
+    try:
+        with _scope(root, hostname) as (descriptor, key, namespace, validate, _advance):
+            current = _current(descriptor, key, namespace, decoder=decode_method_journal)
+            if current is None or current["state"] != "success" or current["veto"] is not False:
+                return None
+            name = key + ".method.json"
+            image = _snapshot(descriptor, name)
+            raw = _read(descriptor, name, METHOD_RECEIPT_MAX_BYTES)
+            if raw is None:
+                raise AuthorityError("current method receipt is missing")
+            receipt = decode_method_receipt(raw)
+            validate()
+            if (_snapshot(descriptor, name) != image
+                    or _current(descriptor, key, namespace, decoder=decode_method_journal) != current):
+                raise AuthorityError("method receipt or generation changed during read")
+            if (receipt["state"] != "success"
+                    or any(receipt[field] != current[field] for field in (
+                        "hostname", "generation", "source_identity", "operation_id", "trigger_id", "trigger_source"))
+                    or receipt_digest(receipt) != current["receipt_sha256"]):
+                raise AuthorityError("current method receipt disagrees with local era")
+            return receipt
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise AuthorityError("method receipt storage could not be authenticated") from exc

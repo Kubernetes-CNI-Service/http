@@ -24,6 +24,53 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
+    def test_method_v2_backend_does_not_launder_nine_stage_or_manual_application_authority(self):
+        from test_cases.module_loader import load_script
+        from test_cases.test_config_sync_authority import ConfigSyncAuthorityTests
+        authority = load_script("f02_method_v2_writer_reader", ROOT / "ztp/config_sync_authority.py")
+        monitor = load_script("f02_method_v2_report_consumer", ROOT / "DAY0-Prepare/12-ztp-monitor.py")
+        html = load_script("f02_method_v2_html_consumer", ROOT / "monitor/generate-monitor-html.py")
+        text = "- set:\n    system:\n      hostname: leaf1\n"
+        digest = hashlib.sha256(text.encode()).hexdigest()
+        # The receipt's positive schema is not evidence for old nine stages.
+        # Do not obtain an expected success by calling any analyzer under test.
+        device = {"hostname": "leaf1", "type": "eth", "config_method": "ztp", "ip": "192.0.2.10",
+                  "mac": "02:00:00:00:00:01", "mac_plain": "020000000001", "ztp_round": 1, "issues": [], "events": [],
+                  "stages": {name: {"status": "success", "timestamp": "2026-09-01T12:00:00+08:00",
+                                    "success_index": 1, "detail": "independent old success"}
+                             for name in ("dhcp", "bootstrap", "config_http", "ssh", "network", "version",
+                                          "config_apply", "ssh_keys", "complete")}}
+        result = {"kind": "ok", "returncode": 0, "batch_mode_verified": True, "identity_frame_valid": True,
+                  "connected_ip": "192.0.2.10", "remote_hostname": "leaf1", "remote_eth0_mac": "02:00:00:00:00:01",
+                  "live_config_observation": {"kind": "ok", "text": text, "sha256": digest}}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve() / "configuration-methods"
+            first = authority.begin_method(root, "leaf1", "cycle-1", "leaf1-cycle-1", "ztp_monitor_cycle")
+            authority.finish_method(root, first, ConfigSyncAuthorityTests.method_receipt_v2(first, live_state_sha256=digest))
+            observed = authority.read_method_receipt(root, "leaf1")
+            self.assertEqual((2, 1, "success"), tuple(observed[k] for k in ("schema_version", "generation", "state")))
+            device["configuration_observation"] = monitor.bind_monitor_live_observation(device, result)
+            self.assertIs(True, device["configuration_observation"]["batch_identity_verified"])
+            self.assertEqual(digest, device["configuration_observation"]["live_state_sha256"])
+            device["configuration_source_observation"] = None
+            device["configuration_authority"] = observed
+            self.assertFalse(authority.monitor_current_config_sync_allows_application(device))
+            monitor.finalize_device(device)
+            self.assertNotEqual("success", device["stages"]["config_apply"]["status"])
+            self.assertNotEqual("success", device["overall"])
+            self.assertFalse(monitor.completion_handoff_device_complete(device))
+            self.assertFalse(html.ztp_completed(device))
+            report = {"generated_at": "2026-09-01T12:00:00+08:00", "project": "demo", "scope": "prod",
+                      "devices": [device], "services": {}, "collection_errors": [], "since_minutes": 10}
+            output = monitor.write_report(report, root.parent / "reports", {})
+            stored = json.loads((output / "report.json").read_text())["devices"][0]
+            self.assertEqual(observed, stored["configuration_authority"])
+            self.assertFalse(html.ztp_completed(stored))
+            second = authority.begin_method(root, "leaf1", "cycle-2", "leaf1-cycle-2", "ztp_monitor_cycle")
+            self.assertIsNone(authority.read_method_receipt(root, "leaf1"))
+            self.assertIsNone(authority.revoke_method(root, "leaf1", expected=first))
+            self.assertEqual(second, authority.read_method_current(root, "leaf1"))
+
     def test_no_ssh_current_cycle_cannot_borrow_persisted_nine_stage_completion(self):
         from test_cases.module_loader import load_script
         from test_cases import test_load_release_transaction as release_fixture

@@ -14,6 +14,179 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSyncAuthorityTests(unittest.TestCase):
+    @staticmethod
+    def method_receipt_v2(ticket=None, **updates):
+        # Independent method contract: deliberately NOT replace-config v1.
+        value = {"schema_version": 2, "record_type": "configuration_method",
+                 "hostname": "leaf1", "type": "eth", "config_method": "ztp",
+                 "generation": 1, "source_identity": "1:2", "operation_id": "cycle-1",
+                 "trigger_id": "leaf1-cycle-1", "trigger_source": "ztp_monitor_cycle",
+                 "state": "success", "reason": "", "batch_identity_verified": True,
+                 "config_verified": True, "interface": "eth0", "transport_ip": "192.0.2.10",
+                 "mac_plain": "020000000001", "live_state_sha256": "a" * 64,
+                 "input_sha256": "b" * 64, "source_receipt_sha256": "c" * 64}
+        if ticket is not None:
+            for field in ("hostname", "generation", "source_identity", "operation_id",
+                          "trigger_id", "trigger_source"):
+                value[field] = ticket[field]
+        return {**value, **updates}
+
+    def test_method_v2_local_cycle_cannot_borrow_manual_schema_or_reporter_clock(self):
+        for name in ("begin_method", "finish_method", "read_method_current", "read_method_receipt", "revoke_method"):
+            self.assertTrue(callable(getattr(self.authority, name, None)), name)
+        root = self.root.parent / "configuration-methods"
+        self.assertIsNone(self.authority.read_method_current(root, "leaf1"))
+        self.assertFalse(root.exists(), "readers cannot manufacture history")
+        first = self.authority.begin_method(root, "leaf1", "cycle-1", "leaf1-cycle-1", "ztp_monitor_cycle")
+        self.assertEqual((2, 1, "pending", True), tuple(first[k] for k in ("schema_version", "generation", "state", "veto")))
+        receipt = self.method_receipt_v2(first)
+        self.authority.finish_method(root, first, receipt)
+        self.assertEqual(receipt, self.authority.read_method_receipt(root, "leaf1"))
+        for value in (receipt, self.receipt_v1(), {**receipt, "started_at": "2099-01-01T00:00:00+00:00"}):
+            with self.subTest(value=value):
+                decoder = self.authority.decode_receipt if value is receipt else self.authority.decode_method_receipt
+                with self.assertRaises(self.authority.AuthorityError):
+                    decoder(self.authority.wire(value))
+        with self.assertRaises(self.authority.AuthorityError):
+            self.authority.read_current(root, "leaf1")
+        second = self.authority.begin_method(root, "leaf1", "cycle-2", "leaf1-cycle-2", "ztp_monitor_cycle")
+        self.assertEqual(2, second["generation"])
+        self.assertIsNone(self.authority.read_method_receipt(root, "leaf1"))
+        with self.assertRaises(self.authority.AuthorityError):
+            self.authority.finish_method(root, first, receipt)
+        self.assertIsNone(self.authority.revoke_method(root, "leaf1", expected=first))
+        self.assertEqual(second, self.authority.read_method_current(root, "leaf1"))
+        revoked = self.authority.revoke_method(root, "leaf1", expected=second)
+        self.assertEqual((2, "failed", True), tuple(revoked[k] for k in ("generation", "state", "veto")))
+        self.assertIsNone(self.authority.read_method_receipt(root, "leaf1"))
+        self.assertEqual(3, self.authority.begin_method(root, "leaf1", "cycle-3", "leaf1-cycle-3", "ztp_monitor_cycle")["generation"])
+
+    def test_method_v2_closed_schema_keeps_own_strict_proof_and_executor(self):
+        decoder = getattr(self.authority, "decode_method_receipt", None)
+        self.assertTrue(callable(decoder))
+        valid = self.method_receipt_v2()
+        self.assertEqual(valid, decoder(self.authority.wire(valid)))
+        initial = self.method_receipt_v2(type="ib", config_method="initial-setup", trigger_source="initial_setup_managed")
+        self.assertEqual(initial, decoder(self.authority.wire(initial)))
+        for updates in ({"schema_version": True}, {"generation": True}, {"generation": 1.0},
+                        {"generation": 0}, {"generation": 9223372036854775808},
+                        {"batch_identity_verified": 1}, {"config_verified": "true"},
+                        {"type": "server"}, {"type": "pending_ib"}, {"type": "eth", "config_method": "initial-setup"},
+                        {"type": "nvl", "config_method": "initial-setup", "trigger_source": "initial_setup_managed"},
+                        {"trigger_source": "manual_config_sync_cli"}, {"state": "pending"}, {"state": "failed"},
+                        {"input_sha256": ""}, {"source_receipt_sha256": "A" * 64},
+                        {"live_state_sha256": ""}, {"mac_plain": "g020000000001"},
+                        {"transport_ip": "host.example.invalid"}, {"interface": "lo"},
+                        {"source_identity": "18446744073709551616:1"}, {"reason": "HOLD"}, {"extra": "not closed"}):
+            with self.subTest(updates=updates), self.assertRaises(self.authority.AuthorityError):
+                decoder(self.authority.wire({**valid, **updates}))
+
+    def test_method_v2_maximum_literal_acceptance_rejects_degenerate_budget(self):
+        decoder = getattr(self.authority, "decode_method_receipt", None)
+        self.assertTrue(callable(decoder))
+        maximum = self.method_receipt_v2(hostname="h" * 253, operation_id="o" * 512,
+                                       trigger_id="t" * 766, generation=9223372036854775807,
+                                       source_identity="18446744073709551615:18446744073709551615",
+                                       type="ib", config_method="initial-setup", trigger_source="initial_setup_managed",
+                                       transport_ip="ffff:ffff:ffff:ffff:ffff:ffff:255.255.255.255")
+        # Fixed v2 fields, signed64/uint64 limits and diagnostics <=1024 code
+        # points. The larger failed image has no success members at all.
+        failed = {k: v for k, v in maximum.items() if k in {
+            "schema_version", "record_type", "hostname", "type", "config_method", "generation",
+            "source_identity", "operation_id", "trigger_id", "trigger_source", "state", "reason"}}
+        failed.update(state="failed", reason="\U0001f642" * 1024)
+        for value, maximum_bytes in ((maximum, 2270), (failed, 14134)):
+            raw = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+            self.assertEqual(maximum_bytes, len(raw), "independent V2 fixed-field canonical derivation")
+            self.assertLessEqual(len(raw), 16384, "independent finite v2 bound")
+            self.assertEqual(value, decoder(raw), "schema maximum MUST be ACCEPTED")
+            def acceptance():
+                try:
+                    accepted = decoder(raw)
+                except self.authority.AuthorityError:
+                    accepted = None
+                self.assertEqual(value, accepted, "maximum positive acceptance")
+            for smaller in (0, len(raw) // 2, len(raw) - 1):
+                with self.subTest(limit=smaller), mock.patch.object(self.authority, "METHOD_RECEIPT_MAX_BYTES", smaller):
+                    with self.assertRaises(AssertionError):
+                        acceptance()
+        with self.assertRaises(self.authority.AuthorityError):
+            decoder(self.authority.wire({**failed, "reason": "\U0001f642" * 1025}))
+
+    def test_method_v2_durability_fault_after_receipt_keeps_pending_or_hold(self):
+        self.assertTrue(callable(getattr(self.authority, "finish_method", None)))
+        for fail_at in range(1, 11):
+            with self.subTest(sync=fail_at):
+                root = self.root.parent / ("method-sync-" + str(fail_at))
+                ticket = self.authority.begin_method(root, "leaf1", "cycle-1", "leaf1-cycle-1", "ztp_monitor_cycle")
+                actual_sync = self.authority.os.fsync
+                calls = [0]
+                def injected(fd):
+                    calls[0] += 1
+                    if calls[0] == fail_at:
+                        raise OSError("independent method durability fault")
+                    return actual_sync(fd)
+                with mock.patch.object(self.authority.os, "fsync", side_effect=injected):
+                    with self.assertRaises((OSError, self.authority.AuthorityError)):
+                        self.authority.finish_method(root, ticket, self.method_receipt_v2(ticket))
+                try:
+                    current = self.authority.read_method_current(root, "leaf1")
+                except self.authority.AuthorityError:
+                    self.assertTrue((root / ".authority/leaf1.pending").exists())
+                else:
+                    self.assertEqual(("pending", True), (current["state"], current["veto"]))
+                    self.assertIsNone(self.authority.read_method_receipt(root, "leaf1"))
+
+    def test_method_invalid_boundary_is_rejected_before_any_storage_write(self):
+        self.assertTrue(callable(getattr(self.authority, "begin_method", None)))
+        for source in ("manual_config_sync_cli", "unknown_method", "", True, None):
+            root = self.root.parent / "invalid-method-boundary"
+            with self.subTest(source=source), self.assertRaises(self.authority.AuthorityError):
+                self.authority.begin_method(root, "leaf1", "cycle-1", "leaf1-cycle-1", source)
+            self.assertFalse(root.exists(), "an incompatible source must fail BEFORE directory, lock or journal writes")
+
+    def test_method_invalid_completion_and_revocation_do_not_create_history(self):
+        invalid = {"schema_version": 2, "hostname": "leaf1", "generation": True,
+                   "operation_id": "cycle-1", "trigger_id": "leaf1-cycle-1",
+                   "trigger_source": "ztp_monitor_cycle", "source_identity": "1:2",
+                   "state": "pending", "veto": True, "receipt_sha256": ""}
+        root = self.root.parent / "invalid-method-completion"
+        with self.assertRaises(self.authority.AuthorityError):
+            self.authority.finish_method(root, invalid, self.method_receipt_v2())
+        self.assertFalse(root.exists(), "invalid ticket cannot create storage before rejection")
+        with self.assertRaises(self.authority.AuthorityError):
+            self.authority.revoke_method(root, "leaf1", expected=invalid)
+        self.assertFalse(root.exists(), "invalid revocation cannot create storage before rejection")
+
+    def test_method_v2_replay_and_unsafe_receipt_are_reject_and_retain(self):
+        self.assertTrue(callable(getattr(self.authority, "begin_method", None)))
+        root = self.root.parent / "configuration-methods"
+        first = self.authority.begin_method(root, "leaf1", "cycle-1", "leaf1-cycle-1", "ztp_monitor_cycle")
+        self.authority.finish_method(root, first, self.method_receipt_v2(first))
+        private = root / ".authority"
+        receipt = private / "leaf1.method.json"
+        original = receipt.read_bytes()
+        receipt.chmod(0o644)
+        with self.assertRaises(self.authority.AuthorityError):
+            self.authority.read_method_receipt(root, "leaf1")
+        self.assertEqual(original, receipt.read_bytes())
+        receipt.chmod(0o600)
+        old_pair = {name: (private / name).read_bytes() for name in ("leaf1.journal.json", "leaf1.witness.json")}
+        second = self.authority.begin_method(root, "leaf1", "cycle-2", "leaf1-cycle-2", "ztp_monitor_cycle")
+        self.authority.finish_method(root, second, self.method_receipt_v2(second, live_state_sha256="d" * 64))
+        current_pair = {name: (private / name).read_bytes() for name in old_pair}
+        receipt.write_bytes(original)
+        with self.assertRaises(self.authority.AuthorityError):
+            self.authority.read_method_receipt(root, "leaf1")
+        self.assertEqual(original, receipt.read_bytes())
+        for name in old_pair:
+            (private / name).write_bytes(old_pair[name])
+        with self.assertRaises(self.authority.AuthorityError):
+            self.authority.read_method_current(root, "leaf1")
+        self.assertEqual(old_pair, {name: (private / name).read_bytes() for name in old_pair})
+        for name in current_pair:
+            (private / name).write_bytes(current_pair[name])
+
     def test_current_manual_application_requires_closed_authority_and_own_live_proof(self):
         gate = getattr(self.authority, "monitor_current_config_sync_allows_application", None)
         self.assertTrue(callable(gate), "manual application and bootstrap completion have independent sources")

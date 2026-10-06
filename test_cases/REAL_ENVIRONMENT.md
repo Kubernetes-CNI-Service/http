@@ -2,6 +2,14 @@
 
 ## TC-REAL-F02-LOCAL-GENERATION-001 — 本地配置代次的持久化与部分回放拒绝
 
+- 方法 V2 后端补充（NOT RUN）：在另行授权的隔离存储中验证 ZTP/initial-setup 的
+  私有 method receipt 与 replace-config V1 来源/schema 不能互借；非法方法来源必须
+  在目录、锁及 journal 写入前拒绝。核对 V2 本地 pending → success/failed、旧观察
+  不能撤销新代、receipt/replaceable pair 回放拒绝、10 个 fsync 故障点的 pending/HOLD
+  和原像保留；独立 2270/14134 B canonical 最大正例接受、16 KiB 有限 wire 上界及
+  任意低于正例的退化界不能通过 ACCEPTED。此项仅记录后端待验场景；生产方法接入
+  和完整消费者验收仍 OPEN，不将本机合成 writer/reader 当作真机完成。
+
 - 类型：transaction / real-environment / isolated management filesystem；状态：**OPEN / NOT RUN**。本机先决为 `test_config_sync_authority.py` direct 与 `test_config_sync_authority_workflow.py` 的真实 manual writer → generation journal 流程；它们不证明真实设备、断电或整卷恢复。
 - 前置：另行授权的可恢复隔离管理 VM/卷、脱敏项目和唯一受管写者；冻结 HEAD/tree、源码/测试/manifest、Python/平台身份、文件系统、UID/mode 与输入 SHA。禁止使用 live/AIR/prod、实际设备或真实服务。独立 S5 后端按 owner 窄豁免保持 owner-waived，不计 PASS。
 - 步骤：执行真实配置写入前观察 pending/veto 及严格递增整数；确认后以同会话 BatchMode 身份和 live digest 产生本代回执，再使下一轮预检失败、交互身份不足或 teardown，旧成功不得重新成为当前。只读 preview 不得铸造或撤销代次。分别重放 journal、witness、writer witness 或旧 replaceable pair，必须拒绝并保留原像；合法 schema-v1 最大 journal 正例为独立 1852 B，有限读取上界 2048 B，低于正例的退化界必须拒绝，不能截断。
