@@ -1543,6 +1543,92 @@ glob.glob = insert_at_generic_cleanup
             self.assertFalse(os.path.lexists(q_only))
             self.assertFalse(barrier.exists())
 
+    def test_real_setup_sample_unlink_is_durable_before_next_link_and_cold_recovers_p(self):
+        """SETUP must fsync the known P unlink before publishing another sample name."""
+        with tempfile.TemporaryDirectory(prefix="r22-real-sample-unlink-fsync-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, p, q, common, p_only, q_only, manifest, before, hook, barrier, _home = fixture
+            sample = root / f"ztp/optimize/{q.name}-sample"
+            sample.mkdir()
+            stale = sample / "old-managed-link"
+            raw = os.path.relpath(p / "01-global.yaml", sample)
+            stale.symlink_to(raw)
+            manifest.write_bytes(before["manifest"] + (str(stale) + "\n").encode())
+            before_manifest = manifest.read_bytes()
+            hook_file = hook / "sitecustomize.py"
+            hook_file.write_text(hook_file.read_text(encoding="utf-8") + """
+sample_unlink_pending = False
+original_sample_remove = os.remove
+original_sample_unlink = os.unlink
+original_sample_fsync = os.fsync
+def record_sample_remove(path, *args, **kwargs):
+    global sample_unlink_pending
+    result = original_sample_remove(path, *args, **kwargs)
+    if os.path.abspath(path) == os.environ['HTTP_TEST_SAMPLE_OLD_LINK']:
+        sample_unlink_pending = True
+    return result
+def record_sample_unlink(path, *args, **kwargs):
+    global sample_unlink_pending
+    result = original_sample_unlink(path, *args, **kwargs)
+    if os.path.abspath(path) == os.environ['HTTP_TEST_SAMPLE_OLD_LINK']:
+        sample_unlink_pending = True
+    return result
+def kill_after_sample_parent_sync(fd):
+    result = original_sample_fsync(fd)
+    if sample_unlink_pending:
+        held = os.fstat(fd)
+        named = Path(os.environ['HTTP_TEST_SAMPLE_OLD_LINK']).parent.stat()
+        if (held.st_dev, held.st_ino) == (named.st_dev, named.st_ino):
+            Path(os.environ['HTTP_TEST_Q_LINK_BARRIER']).write_bytes(b'sample unlink parent fsynced\\n')
+            os.kill(os.getpid(), signal.SIGKILL)
+    return result
+def refuse_next_sample_symlink(source, destination, *args, **kwargs):
+    if sample_unlink_pending:
+        raise ValueError('sample unlink not durable before next publication')
+    return kill_after_real_q_link(source, destination, *args, **kwargs)
+os.remove = record_sample_remove
+os.unlink = record_sample_unlink
+os.fsync = kill_after_sample_parent_sync
+os.symlink = refuse_next_sample_symlink
+""", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"HTTP_TEST_SAMPLE_OLD_LINK": str(stale)}):
+                first = self._run_private_load_setup_switch(
+                    fixture, prepare_journal=True, first_link=root / "never-created-link",
+                )
+            self.assertEqual(23, first.returncode, first.stdout + first.stderr)
+            self.assertEqual(b"sample unlink parent fsynced\n", barrier.read_bytes())
+            self.assertFalse(os.path.lexists(stale))
+            recovery = """
+import importlib.util
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('sample_unlink_fresh_load', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *a, **k: ()
+fd = load.acquire_deployment_lock(exclusive=True)
+try:
+    assert load.recover_setup_switch_journal(root / 'ztp/.setup-switch-journal.json',
+        deployment_lock_descriptor=fd, services_quiesced=True,
+        runtime_backend=SimpleNamespace(name='supervisor')) == 'restored-p'
+finally:
+    load.release_deployment_lock(fd)
+"""
+            second = subprocess.run(
+                [sys.executable, "-B", "-c", recovery, str(root)], cwd=root,
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+            self.assertEqual(raw, os.readlink(stale))
+            self.assertEqual(before_manifest, manifest.read_bytes())
+            self.assertEqual(before["common"], os.readlink(common))
+            self.assertEqual(before["p_only"], os.readlink(p_only))
+            self.assertFalse(os.path.lexists(q_only))
+            self.assertFalse((root / "ztp/.setup-switch-journal.json").exists())
+
     def test_real_setup_pubkey_cleanup_retains_late_unowned_link(self):
         """A real secondary writer must not delete a link inserted after generic cleanup."""
         with tempfile.TemporaryDirectory(prefix="r22-real-pub-cleanup-hold-") as name:

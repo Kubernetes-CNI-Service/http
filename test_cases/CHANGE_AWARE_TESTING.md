@@ -225,6 +225,19 @@ size 97739，SHA256
 这是局部模块候选证据，**不是 related 批准、full proof 或整体 R22 验收**；批准 ledger
 不手工更新，原 bootstrap 原因待核及 R22 的现场/其它本地未闭边界保持原状态。
 
+随后两个 direct 及真实 LOAD→SETUP 的下一次写入屏障重现了 generic/sample unlink
+之后缺少父目录 fsync 的缺陷（`r22-cleanup-unlink-durability-red.log`，3 FAIL / exit 1，
+SHA256 `3f1d5aeb226a7478f29e4a4cdbc2e47e847490cdfbd65d4de22bdd76a915805e`）。
+候选在实际删除边界使用同一冻结 P 检查和父目录同步，增加同步报错停止后续删除的预期；
+真实 workflow 在删除同步完成后强杀，再用新 LOAD 按 WAL 恢复 P。四项定向 GREEN 后，
+扩至 release transaction、真实 input binding workflow、sample 布局和 setup 写集盘点
+四个完整模块，296 tests / OK / exit 0：
+`outputs/test-diagnostics/r22-cleanup-unlink-durability-modules.log`，inode 142790184，
+size 102891，SHA256
+`49e2506a166495a4c0ff71e9e760debbc853d68c8da961c37b5fadf701b88450`。
+读前后 stat 一致、已知旧前缀保持且物理末尾 `R22_UNLINK_DURABILITY_MODULES_EXIT=0`；
+仍只是本地候选回归，不更新 related/full ledger，不替代断电见证或整体 R22 验收。
+
 ## Full proof 性能诊断记录
 
 本节只记录测量方法与优化判定，不改变上面的测试和证明门禁。正式 full proof 仍须由

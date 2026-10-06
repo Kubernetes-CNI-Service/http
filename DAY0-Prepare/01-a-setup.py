@@ -1255,16 +1255,14 @@ def _process_optimize_sample(proj_dir):
         managed_names = set(LINK_NAMES.values())
         for old in sample.iterdir():
             if old.is_symlink() and old.name not in managed_names:
-                _require_frozen_setup_cleanup_link(str(old), _SETUP_SWITCH_WAL_CONTEXT, "sample 链接清理")
-                old.unlink()
+                _remove_frozen_setup_cleanup_link(str(old), "sample 链接清理")
                 print(_c(GREEN, f"  [DEL] 旧 sample 链接 {old.name}"))
     for name, target in sample_link_targets(proj_dir).items():
         link = sample / name
         if target is None:
             print(_c(YELLOW, f"  [WARN] {name}: 当前项目没有可用目标"))
             if not _DRY_RUN and link.is_symlink():
-                _require_frozen_setup_cleanup_link(str(link), _SETUP_SWITCH_WAL_CONTEXT, "sample 链接清理")
-                link.unlink()
+                _remove_frozen_setup_cleanup_link(str(link), "sample 链接清理")
                 print(_c(GREEN, f"  [DEL] 失效 sample 链接 {name}"))
             continue
         _make_exact_link(str(link), str(target), canonical=True)
@@ -3441,8 +3439,7 @@ def _unsetup_previous(proj_dir):
         if _DRY_RUN:
             print(_c(CYAN,  f"  [DRY] 删除 {rel}"))
         else:
-            require_frozen_p_link(lp)
-            os.remove(lp)
+            _remove_frozen_setup_cleanup_link(lp, "旧项目链接清理")
             print(_c(GREEN, f"  [DEL] {rel}"))
     return True
 

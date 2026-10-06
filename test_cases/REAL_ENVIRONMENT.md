@@ -1656,6 +1656,8 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 - SETUP 次级清理 writer 的窄范围候选：旧公钥、旧 NVOS 输出、无效 latest/latest_yaml 与交互冲突清理均须在实际 unlink 前核对冻结 P 行的 raw target 和父目录身份，成功删除后 fsync 父目录；未登记对象不得因名称匹配而被删除。direct 覆盖四个拒绝入口、精确 P 正例及父目录换绑；真实 LOAD→SETUP workflow 在 generic cleanup 结束后、publickey cleanup 前插入未登记的外部链接，要求保留原链接和外部字节，恢复已知 P 链接与 manifest，保留失败 WAL 且不启动服务。Q 自有 latest 等尚未具备适用前像的对象仍 HOLD，不能用该拒绝行为冒称完整共享写集完成。现场须记录每个 unlink 的身份/屏障/fsync 顺序、原 WAL 与恢复前后全部受管路径；本卡仍 OPEN，Linux/断电和不合作写者风险需另行见证。
 
+- generic/sample 删除的持久化补充候选：原 direct 和真实 LOAD→SETUP witness 证明已登记 P 链接可在 unlink 后、父目录尚未 fsync 时继续下一次链接发布。候选将这两个 writer 的实际 unlink 接入同一冻结 P 检查与父目录 fsync；同步报错必须在后续 unlink/发布前停止，WAL 与尚未修改的对象保持原字节。真实 workflow 在 sample 旧链接父目录 fsync 完成后强杀 SETUP，要求新 LOAD 仅凭 WAL 恢复原链接、P manifest 与其它受管链接，不启动服务。SIGKILL witness 不能替代 Linux/断电持久性；完整 writer 盘点、comparison 迁移、父 B 收口及旧 A 激活仍 OPEN。
+
 ## TC-REAL-R22-C2-DESCRIPTION-PUBLISH-001 — c2 同名描述输出的故障窗口
 
 - Case ID：`TC-REAL-R22-C2-DESCRIPTION-PUBLISH-001`；类型：real-environment / transaction / crash-recovery；对应 R22 c2 对 `*_with_desc` 的既有同名输出替换。状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。自动化先决为 `test_cases.test_generation_input_binding_contract` 的二次读取、早返及 staging direct，`test_cases.test_generation_input_binding_workflow` 的 setup/load/c2 workflow，和当前候选正式 full/check；现有定向通过不证明进程死亡后的原子性。

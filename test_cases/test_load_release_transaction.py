@@ -1961,6 +1961,62 @@ class ReleaseTransactionTests(unittest.TestCase):
             self.assertEqual(raw, os.readlink(original_parent / link.name))
             sync.assert_called_once()
 
+    def test_setup_generic_cleanup_fsyncs_wal_owned_parent(self) -> None:
+        (*state, _journal, descriptor, _backend) = self._prepare_cross_project_setup_crash()
+        common = state[2]
+        parent = common.parent.stat()
+        frozen = {str(common): (state[9][common], {
+            "path": str(common.parent.resolve()), "dev": parent.st_dev, "ino": parent.st_ino,
+        })}
+        with mock.patch.multiple(SETUP, HTTP_BASE=str(self.root), _DRY_RUN=False,
+                                 _SETUP_SWITCH_WAL_CONTEXT=(vars(LOAD), descriptor, frozen, {})), \
+                mock.patch.object(SETUP, "_previous_project_links_to_remove", return_value=[str(common)]), \
+                mock.patch.object(SETUP, "_authorize_project_switch", return_value=True), \
+                mock.patch.object(SETUP, "_fsync_directory", wraps=SETUP._fsync_directory) as sync:
+            self.assertTrue(SETUP._unsetup_previous(str(state[1])))
+            self.assertFalse(os.path.lexists(common))
+            sync.assert_called_once_with(str(common.parent))
+
+    def test_setup_sample_cleanup_fsyncs_wal_owned_parent(self) -> None:
+        sample = self.ztp / "optimize/demo-sample"
+        sample.mkdir(parents=True)
+        stale = sample / "old-managed-link"
+        raw = os.path.relpath(self.global_file, sample)
+        stale.symlink_to(raw)
+        parent = sample.stat()
+        frozen = {str(stale): (raw, {"path": str(sample.resolve()), "dev": parent.st_dev, "ino": parent.st_ino})}
+        with mock.patch.multiple(SETUP, HTTP_BASE=str(self.root), ZTP=str(self.ztp), _DRY_RUN=False,
+                                 _SETUP_SWITCH_WAL_CONTEXT=(vars(LOAD), None, frozen, {}),
+                                 _LINK_TRANSACTION=SimpleNamespace(ensure_directory=mock.Mock())), \
+                mock.patch.object(SETUP, "prepare_comparison_output"), \
+                mock.patch.object(SETUP, "sample_link_targets", return_value={}), \
+                mock.patch.object(SETUP, "_fsync_directory", wraps=SETUP._fsync_directory) as sync:
+            SETUP._process_optimize_sample(str(self.project))
+            self.assertFalse(os.path.lexists(stale))
+            sync.assert_called_once_with(str(sample))
+
+    def test_setup_cleanup_directory_sync_failure_stops_following_unlink(self) -> None:
+        (*state, journal, descriptor, _backend) = self._prepare_cross_project_setup_crash()
+        common, old_only = state[2], state[3]
+        frozen = {}
+        for path in (common, old_only):
+            info = path.parent.stat()
+            frozen[str(path)] = (state[9][path], {
+                "path": str(path.parent.resolve()), "dev": info.st_dev, "ino": info.st_ino,
+            })
+        before = journal.read_bytes()
+        with mock.patch.multiple(SETUP, HTTP_BASE=str(self.root), _DRY_RUN=False,
+                                 _SETUP_SWITCH_WAL_CONTEXT=(vars(LOAD), descriptor, frozen, {})), \
+                mock.patch.object(SETUP, "_previous_project_links_to_remove", return_value=[str(common), str(old_only)]), \
+                mock.patch.object(SETUP, "_authorize_project_switch", return_value=True), \
+                mock.patch.object(SETUP, "_fsync_directory", side_effect=OSError("injected directory sync failure")):
+            with self.assertRaisesRegex(OSError, "directory sync failure"):
+                SETUP._unsetup_previous(str(state[1]))
+        self.assertFalse(os.path.lexists(common))
+        self.assertEqual(state[9][old_only], os.readlink(old_only))
+        self.assertEqual(state[8], state[7].read_bytes())
+        self.assertEqual(before, journal.read_bytes())
+
     def test_setup_inprocess_known_rollback_consumes_wal_and_restores_p(self) -> None:
         (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
         common, new_only = state[2], state[4]
