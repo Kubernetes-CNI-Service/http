@@ -59,7 +59,7 @@ class CompletionDisplayParityTests(unittest.TestCase):
         row = self.complete_fixture()
         row["configuration_source_observation"] = {
             "schema_version": 1, "source": "monitor_bootstrap_applied", "source_receipt_verified": True,
-            "hostname": "Leaf01", "mac_plain": "001122334455", "raw_sha256": "a" * 64,
+            "hostname": "Leaf01", "mac_plain": "021122334455", "raw_sha256": "a" * 64,
             "source_fingerprint": "b" * 64, "reason": ""}
         first = MONITOR.snapshot_device_state({"devices": [row]})
         row["configuration_source_observation"]["source_fingerprint"] = "c" * 64
@@ -69,10 +69,10 @@ class CompletionDisplayParityTests(unittest.TestCase):
 
     def test_next_missing_source_observation_cannot_keep_old_source_or_downgrade_failure(self):
         row = self.complete_fixture()
-        row.update(config_method="ztp", mac_plain="001122334455", events=[])
+        row.update(config_method="ztp", mac_plain="021122334455", events=[])
         row["configuration_source_observation"] = {
             "schema_version": 1, "source": "monitor_bootstrap_applied", "source_receipt_verified": True,
-            "hostname": "Leaf01", "mac_plain": "001122334455", "raw_sha256": "a" * 64,
+            "hostname": "Leaf01", "mac_plain": "021122334455", "raw_sha256": "a" * 64,
             "source_fingerprint": "b" * 64, "reason": ""}
         result = {"kind": "unreachable", "returncode": 255, "stderr": "closed", "attempts": [], "host_key_commands": []}
         MONITOR.analyze_switch(row, result)
@@ -194,7 +194,7 @@ class CompletionDisplayParityTests(unittest.TestCase):
         return {
             "hostname": "Leaf01", "type": "eth", "ztp_round": 1,
             "boot_id": "boot-Leaf01", "ip": "192.0.2.1",
-            "mac": "00:11:22:33:44:55", "overall": "success",
+            "mac": "02:11:22:33:44:55", "overall": "success",
             "progress": {"done": 9, "total": 9, "percent": 100},
             "issues": [],
             "stages": {
@@ -224,7 +224,7 @@ class CompletionDisplayParityTests(unittest.TestCase):
         return {"schema_version": 1, "source": "monitor_batchmode",
                 "batch_identity_verified": True, "hostname": "Leaf01",
                 "interface": "eth0", "transport_ip": "192.0.2.1",
-                "mac_plain": "001122334455", "live_state_sha256": "a" * 64,
+                "mac_plain": "021122334455", "live_state_sha256": "a" * 64,
                 "reason": ""}
 
     def test_explicit_invalid_fresh_observation_vetoes_both_completion_consumers(self):
@@ -234,7 +234,7 @@ class CompletionDisplayParityTests(unittest.TestCase):
             {"source": "manual_config_sync_cli"}, {"batch_identity_verified": 1},
             {"batch_identity_verified": False}, {"hostname": "foreign"},
             {"interface": "eth2"}, {"transport_ip": "192.0.2.99"},
-            {"mac_plain": "001122334466"}, {"live_state_sha256": ""},
+            {"mac_plain": "021122334466"}, {"live_state_sha256": ""},
             {"live_state_sha256": "A" * 64}, {"reason": "identity-not-matched"},
             {"old_receipt": True},
         ))]
@@ -256,8 +256,8 @@ class CompletionDisplayParityTests(unittest.TestCase):
             row = self.complete_fixture()
             row["configuration_observation"] = copy.deepcopy(positive)
             if secondary:
-                row["candidate_identity"] = {"192.0.2.2": ["eth1", "001122334466"]}
-                row["configuration_observation"].update(interface="eth1", transport_ip="192.0.2.2", mac_plain="001122334466")
+                row["candidate_identity"] = {"192.0.2.2": ["eth1", "021122334466"]}
+                row["configuration_observation"].update(interface="eth1", transport_ip="192.0.2.2", mac_plain="021122334466")
             MONITOR.finalize_device(row)
             self.assertEqual("success", row["overall"])
             self.assertTrue(MONITOR.completion_handoff_device_complete(row))
@@ -275,13 +275,13 @@ class CompletionDisplayParityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             row = self.complete_fixture()
-            row.update(mac_plain="001122334455", events=[])
+            row.update(mac_plain="021122334455", events=[])
             stale_stages = copy.deepcopy(row["stages"])
             # Successful SSH/log input without same-session BatchMode/live proof.
             # No configuration journal exists; its absence cannot erase this
             # real analyzer's explicit new negative observation.
             result = {"kind": "ok", "returncode": 0, "connected_ip": "192.0.2.1",
-                      "remote_hostname": "Leaf01", "remote_eth0_mac": "00:11:22:33:44:55",
+                      "remote_hostname": "Leaf01", "remote_eth0_mac": "02:11:22:33:44:55",
                       "remote_eth1_mac": "", "ztp_log": "", "ifreload_log": "",
                       "failed_yaml": "", "stderr": "", "attempts": [], "host_key_commands": []}
             MONITOR.analyze_switch(row, result)
@@ -328,14 +328,14 @@ class CompletionDisplayParityTests(unittest.TestCase):
         text = "- set: {}\n"
         result = {"kind": "ok", "returncode": 0, "batch_mode_verified": True, "identity_frame_valid": True,
                   "connected_ip": "192.0.2.1", "remote_hostname": "Leaf01",
-                  "remote_eth0_mac": "00:11:22:33:44:55", "remote_eth1_mac": "",
+                  "remote_eth0_mac": "02:11:22:33:44:55", "remote_eth1_mac": "",
                   "ztp_log": "", "ifreload_log": "", "failed_yaml": "", "stderr": "",
                   "attempts": [], "host_key_commands": [],
                   "live_config_observation": {"kind": "ok", "text": text, "sha256": hashlib.sha256(text.encode()).hexdigest()}}
         for mapping, valid in ((False, False), (None, False), (0, False), ("", False), ([], False), ({}, True)):
             with self.subTest(mapping=mapping), tempfile.TemporaryDirectory() as directory:
                 row = self.complete_fixture()
-                row.update(candidate_identity=mapping, mac_plain="001122334455", events=[])
+                row.update(candidate_identity=mapping, mac_plain="021122334455", events=[])
                 old = copy.deepcopy(row["stages"])
                 MONITOR.analyze_switch(row, result)
                 with self.subTest(mapping=mapping, phase="own-observation"):

@@ -875,7 +875,7 @@ class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory).resolve()
             client, prepared, _text = self.fixture(project)
-            device = {"hostname": "EXAMPLE-Leaf01", "type": "eth", "ip": "192.0.2.10", "mac_plain": "001122334455"}
+            device = {"hostname": "EXAMPLE-Leaf01", "type": "eth", "ip": "192.0.2.10", "mac_plain": "021122334455"}
             root = project / "99-output-ztp/manual-config-sync"
             authority = self.manual.config_sync_authority
             first = authority.begin(root, device["hostname"], "op-1", "trigger-1", "manual_config_sync_cli")

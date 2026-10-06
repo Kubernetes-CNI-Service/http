@@ -2315,7 +2315,7 @@ class TemplateContractTests(unittest.TestCase):
             "operation": "reset",
         }}
         before_reboot = [{
-            "hostname": "AIR-EXAMPLE-Leaf01", "boot_id": "old-boot", "events": [],
+            "hostname": "AIR-EXAMPLE-Leaf01", "type": "air", "boot_id": "old-boot", "events": [],
             "issues": [],
             "stages": {
                 name: monitor.stage(
@@ -2335,7 +2335,7 @@ class TemplateContractTests(unittest.TestCase):
         ))
 
         after_reboot = [{
-            "hostname": "AIR-EXAMPLE-Leaf01", "boot_id": "new-boot", "events": [],
+            "hostname": "AIR-EXAMPLE-Leaf01", "type": "air", "boot_id": "new-boot", "events": [],
             "issues": [],
             "stages": {
                 name: monitor.stage(
@@ -2408,8 +2408,12 @@ class TemplateContractTests(unittest.TestCase):
         log_mtime = int(monitor.dt.datetime.fromisoformat(
             "2026-08-31T04:57:40+00:00",
         ).timestamp())
+        live = "- set:\n    system:\n      hostname: AIR-EXAMPLE-OOB-Core01\n"
         monitor.analyze_switch(device, {
             "kind": "ok", "observed_at": "2026-08-31T13:00:00+08:00",
+            "returncode": 0, "batch_mode_verified": True, "identity_frame_valid": True,
+            "live_config_observation": {"kind": "ok", "text": live,
+                "sha256": hashlib.sha256(live.encode("utf-8")).hexdigest()},
             "connected_ip": "192.0.2.3", "attempts": [], "stderr": "",
             "remote_hostname": "AIR-EXAMPLE-OOB-Core01",
             "remote_eth0_mac": "02:00:00:00:00:5b", "remote_eth1_mac": "",
@@ -2442,6 +2446,61 @@ class TemplateContractTests(unittest.TestCase):
             monitor.REMOTE_SCRIPT.index('log_pointer="$log_dir/latest-log"'),
             monitor.REMOTE_SCRIPT.index('"$HOME"/ztp-result.log_*'),
         )
+
+    def test_nine_stage_summary_cannot_borrow_missing_or_foreign_current_session(self):
+        monitor = load_module("day0_current_session_summary_contract",
+                              ROOT / "DAY0-Prepare/12-ztp-monitor.py")
+        live = "- set:\n    system:\n      hostname: AIR-EXAMPLE-Leaf01\n"
+        # Literal session inputs; no expected value is copied from the observer.
+        result = {
+            "kind": "ok", "returncode": 0, "batch_mode_verified": True,
+            "identity_frame_valid": True, "connected_ip": "192.0.2.10",
+            "remote_hostname": "AIR-EXAMPLE-Leaf01",
+            "remote_eth0_mac": "02:00:00:00:00:01",
+            "live_config_observation": {"kind": "ok", "text": live,
+                "sha256": hashlib.sha256(live.encode("utf-8")).hexdigest()},
+        }
+
+        def device():
+            return {"hostname": "AIR-EXAMPLE-Leaf01", "type": "air",
+                "ip": "192.0.2.10", "mac_plain": "020000000001",
+                "candidate_identity": {"192.0.2.10": ("eth0", "020000000001")},
+                "ztp_round": 1, "events": [], "issues": [],
+                "stages": {name: monitor.stage("success", "current",
+                    "2026-08-31T13:00:00+08:00", 1) for name in monitor.STAGE_NAMES}}
+
+        positive = device()
+        positive["configuration_observation"] = monitor.bind_monitor_live_observation(positive, result)
+        monitor.finalize_device(positive)
+        self.assertEqual("success", positive["overall"])
+        self.assertTrue(monitor.completion_handoff_device_complete(positive))
+        mutations = [
+            {"returncode": True}, {"returncode": 0.0}, {"returncode": 255},
+            {"batch_mode_verified": 1}, {"batch_mode_verified": False},
+            {"identity_frame_valid": 1}, {"identity_frame_valid": False},
+            {"remote_hostname": "OTHER-Leaf01"},
+            {"remote_eth0_mac": "02:00:00:00:00:02"},
+            {"live_config_observation": {"kind": "ok", "text": live, "sha256": "a" * 64}},
+        ]
+        negative_inputs = [(str(mutation), {**result, **mutation}) for mutation in mutations]
+        negative_inputs += [("missing " + field, {key: value for key, value in result.items() if key != field})
+            for field in ("returncode", "batch_mode_verified", "identity_frame_valid", "live_config_observation")]
+        for label, observed in negative_inputs:
+            with self.subTest(session=label):
+                current = device()
+                current["configuration_observation"] = monitor.bind_monitor_live_observation(current, observed)
+                monitor.finalize_device(current)
+                self.assertEqual({"done": 9, "total": 9, "percent": 100}, current["progress"])
+                self.assertEqual("warning", current["overall"])
+                self.assertFalse(monitor.completion_handoff_device_complete(current))
+                self.assertFalse(monitor.all_devices_complete({"devices": [current]}))
+        for kind in (None, "", "server", "ufm", "pending_air"):
+            with self.subTest(device_type=kind):
+                current = device()
+                current["type"] = kind
+                monitor.finalize_device(current)
+                self.assertEqual("warning", current["overall"])
+                self.assertFalse(monitor.completion_handoff_device_complete(current))
 
     def test_log_pointer_beats_future_mtime_and_invalid_pointer_fails_closed(self):
         monitor = load_module(
@@ -4584,8 +4643,12 @@ class ZtpDhcpLifecycleContractTests(unittest.TestCase):
             "[2026-08-30 20:00:06] [ZTP] NVOS provision complete",
             "[2026-08-30 20:00:06] [ZTP] ZTP FINISH",
         ))
+        live = "- set:\n    system:\n      hostname: EXAMPLE-IB-Leaf01\n"
         monitor.analyze_switch(device, {
             "kind": "ok", "observed_at": "2026-08-30T20:00:07+08:00",
+            "returncode": 0, "batch_mode_verified": True, "identity_frame_valid": True,
+            "live_config_observation": {"kind": "ok", "text": live,
+                "sha256": hashlib.sha256(live.encode("utf-8")).hexdigest()},
             "connected_ip": "192.0.2.31", "attempts": [],
             "remote_hostname": "EXAMPLE-IB-Leaf01",
             "remote_eth0_mac": "02:00:00:00:00:31", "remote_eth1_mac": "",

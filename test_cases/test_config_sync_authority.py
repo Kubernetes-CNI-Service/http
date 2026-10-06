@@ -19,11 +19,11 @@ class ConfigSyncAuthorityTests(unittest.TestCase):
         self.assertTrue(callable(gate), "manual application and bootstrap completion have independent sources")
         observed = {"schema_version": 1, "source": "monitor_batchmode", "batch_identity_verified": True,
                     "hostname": "leaf1", "interface": "eth0", "transport_ip": "192.0.2.1",
-                    "mac_plain": "001122334455", "live_state_sha256": "a" * 64, "reason": ""}
+                    "mac_plain": "021122334455", "live_state_sha256": "a" * 64, "reason": ""}
         authority = {"schema_version": 1, "source": "local_config_sync_authority",
                      "observation_source": "monitor_batchmode", "state": "success", "veto": False,
                      "generation": 1, "source_identity": "123:456", "live_state_sha256": "a" * 64, "reason": ""}
-        device = {"hostname": "leaf1", "ip": "192.0.2.1", "mac_plain": "001122334455",
+        device = {"hostname": "leaf1", "ip": "192.0.2.1", "mac_plain": "021122334455",
                   "configuration_observation": observed, "configuration_authority": authority,
                   "configuration_source_observation": None}
         self.assertTrue(gate(device))
@@ -111,10 +111,10 @@ class ConfigSyncAuthorityTests(unittest.TestCase):
     def test_completion_observation_gate_is_read_only_and_requires_own_closed_identity(self):
         gate = getattr(self.authority, "monitor_observation_allows_completion", None)
         self.assertTrue(callable(gate), "both completion consumers must share the explicit-observation veto")
-        device = {"hostname": "leaf1", "ip": "192.0.2.1", "mac_plain": "001122334455"}
+        device = {"hostname": "leaf1", "ip": "192.0.2.1", "mac_plain": "021122334455"}
         observed = {"schema_version": 1, "source": "monitor_batchmode",
                     "batch_identity_verified": True, "hostname": "leaf1", "interface": "eth0",
-                    "transport_ip": "192.0.2.1", "mac_plain": "001122334455",
+                    "transport_ip": "192.0.2.1", "mac_plain": "021122334455",
                     "live_state_sha256": "a" * 64, "reason": ""}
         device["configuration_observation"] = observed
         before = json.dumps(device, sort_keys=True)
@@ -136,8 +136,8 @@ class ConfigSyncAuthorityTests(unittest.TestCase):
     def test_present_malformed_candidate_identity_is_not_absent_primary_identity(self):
         observed = {"schema_version": 1, "source": "monitor_batchmode", "batch_identity_verified": True,
                     "hostname": "leaf1", "interface": "eth0", "transport_ip": "192.0.2.1",
-                    "mac_plain": "001122334455", "live_state_sha256": "a" * 64, "reason": ""}
-        device = {"hostname": "leaf1", "ip": "192.0.2.1", "mac_plain": "001122334455",
+                    "mac_plain": "021122334455", "live_state_sha256": "a" * 64, "reason": ""}
+        device = {"hostname": "leaf1", "ip": "192.0.2.1", "mac_plain": "021122334455",
                   "configuration_observation": observed}
         gate = self.authority.monitor_observation_allows_completion
         self.assertTrue(gate(device))

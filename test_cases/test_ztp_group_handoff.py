@@ -306,7 +306,7 @@ class CurrentRoundCompletionTests(unittest.TestCase):
             (root / "latest").symlink_to(broken.name)
             row = invalid_previous_report_device(MONITOR._previous_report(root))
             for poll in range(2):
-                row.update({"ip": "192.0.2.1", "mac": "00:11:22:33:44:55"})
+                row.update({"ip": "192.0.2.1", "mac": "02:11:22:33:44:55"})
                 report = {
                     "project": "private-fixture", "generated_at": "2026-09-01T12:00:00+08:00",
                     "since_minutes": 10, "services": {}, "devices": [row],

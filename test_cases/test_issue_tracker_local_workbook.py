@@ -122,8 +122,13 @@ def fake_workbook(*, switch_rows=1, switch_status="Open", bad_header=None,
         )
     with zipfile.ZipFile(result, "w", zipfile.ZIP_DEFLATED) as output:
         for info in source_zip.infolist():
+            # Literal fixtures have no wall-clock authority. Keep all OOXML
+            # payloads/metadata while fixing only their ZIP container time.
+            info.date_time = (1980, 1, 1, 0, 0, 0)
             output.writestr(info, overrides.get(info.filename, source_zip.read(info.filename)))
-        output.writestr("xl/drawings/drawing1.xml", b"<drawing>unchanged</drawing>")
+        drawing = zipfile.ZipInfo("xl/drawings/drawing1.xml", (1980, 1, 1, 0, 0, 0))
+        drawing.compress_type = zipfile.ZIP_DEFLATED
+        output.writestr(drawing, b"<drawing>unchanged</drawing>")
     return result.getvalue()
 
 
@@ -142,6 +147,21 @@ def fixture_manifest(workbook_sha, operations=(OP,)):
 
 
 class LocalWorkbookTests(unittest.TestCase):
+    def test_literal_workbook_bytes_do_not_depend_on_zip_wall_clock(self):
+        images = []
+        for clock in ((2026, 10, 7, 4, 0, 0, 2, 280, 0),
+                      (2026, 10, 7, 4, 0, 4, 2, 280, 0)):
+            with mock.patch.object(zipfile.time, "localtime", return_value=clock):
+                images.append(fake_workbook(reserved_switch_rows=2,
+                                            existing_switch_id="NV10001"))
+        self.assertEqual(images[0], images[1], "identical literal input must have identical ZIP bytes")
+        with zipfile.ZipFile(BytesIO(images[0])) as archive:
+            self.assertTrue(archive.infolist())
+            for entry in archive.infolist():
+                self.assertEqual((1980, 1, 1, 0, 0, 0), entry.date_time)
+            self.assertEqual(b"<drawing>unchanged</drawing>",
+                             archive.read("xl/drawings/drawing1.xml"))
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
