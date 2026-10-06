@@ -460,7 +460,7 @@ def begin(root, hostname, operation_id, trigger_id, trigger_source):
         return value
 
 
-def revoke(root, hostname):
+def revoke(root, hostname, *, expected=None):
     """Withdraw the existing configuration era before another mutating action.
 
     This negative transition cannot mint a new successful observation or borrow
@@ -469,6 +469,12 @@ def revoke(root, hostname):
     """
     with _scope(root, hostname, write=True) as (descriptor, key, namespace, validate, advance):
         current = _current(descriptor, key, namespace)
+        if expected is not None:
+            # Observers must compare while holding the same writer lock. A
+            # read-before-lock check could withdraw another writer's new era.
+            decode_journal(wire(expected), namespace)
+            if current != expected:
+                return None
         if current is None:
             return None
         value = {**current, "state": "failed", "veto": True, "receipt_sha256": ""}

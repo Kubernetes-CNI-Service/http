@@ -400,6 +400,9 @@ CLI 配置同步导入同样使用 held/no-follow summary 和本地代次，不�
 撤销该否决。只有真正更高且同命名空间的代次才能覆盖该操作的否决；新代次不被旧状态的
 未来墙钟挡住。配置同步失败不能借旧九阶段 ZTP 报告被修正为成功。真实轮询 workflow
 覆盖这些边界，状态文件自身的断电耐久性仍须独立验证。
+当旧状态仍绑定当前精确代次时，worker 的撤销还更新本地 generation journal；随后恢复旧
+worker 状态和旧回执不能复活成功。观察者使用持锁 compare-and-revoke，完整版本化预期
+须与锁内当前像一致，不能把读取之后并发启动的新 pending/成功代次一起撤销。
 不宣称抵御全部镜像或整卷回滚。worker/九阶段监控消费端尚未完成接入，F02 整体仍 OPEN；
 真机持久化卡 `TC-REAL-F02-LOCAL-GENERATION-001` 仍 NOT RUN。
 

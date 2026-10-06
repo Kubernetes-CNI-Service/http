@@ -1023,6 +1023,21 @@ def reconcile_config_sync_authority(scope, active_hostnames=()):
                 and config_sync_promotion_ready(receipt)
                 and all(current.get(field) == receipt.get(field) for field in CONFIG_SYNC_PROOF_FIELDS)):
             continue
+        try:
+            project = DEVICES_CSV.resolve(strict=True).parent
+            authority = _current_config_sync_authority(project, hostname)
+            if (authority and type(current.get("generation")) is int
+                    and current["generation"] == authority["generation"]
+                    and all(current.get(field) == authority[field] for field in (
+                        "operation_id", "trigger_id", "trigger_source", "source_identity",
+                    ))):
+                config_sync_authority.revoke(
+                    project / "99-output-ztp/manual-config-sync", hostname, expected=authority,
+                )
+        except (OSError, config_sync_authority.AuthorityError) as exc:
+            # No success escapes on a failed journal write. Retain the local
+            # sticky veto and its diagnostic; never repair unknown history.
+            print(f"[WARN] config-sync withdrawal not durably witnessed: {hostname}: {exc}", file=sys.stderr)
         write_device_status(
             status_hostname, "failed", scope=scope,
             started_at=str(current.get("started_at") or ""), finished_at=timestamp(),

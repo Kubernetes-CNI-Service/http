@@ -69,6 +69,22 @@ class ConfigSyncAuthorityTests(unittest.TestCase):
         with self.assertRaises(self.authority.AuthorityError):
             self.authority.finish(self.root, second, self.result(second))
 
+    def test_observer_revocation_compares_exact_current_era_under_writer_lock(self):
+        first = self.begin()
+        success = self.authority.finish(self.root, first, self.result(first))
+        for mutant in ({**success, "generation": True}, {**success, "unknown": "field"}):
+            with self.subTest(mutant=mutant), self.assertRaises(self.authority.AuthorityError):
+                self.authority.revoke(self.root, "leaf1", expected=mutant)
+            self.assertEqual(success, self.authority.read_current(self.root, "leaf1"))
+        second = self.begin("operation-2", "trigger-2")
+        self.assertIsNone(self.authority.revoke(self.root, "leaf1", expected=success))
+        self.assertEqual(second, self.authority.read_current(self.root, "leaf1"))
+        latest = self.authority.finish(self.root, second, self.result(second))
+        revoked = self.authority.revoke(self.root, "leaf1", expected=latest)
+        self.assertEqual((2, "failed", True, ""), tuple(
+            revoked[field] for field in ("generation", "state", "veto", "receipt_sha256")
+        ))
+
     def test_completion_must_carry_its_own_local_source_identity(self):
         first = self.begin()
         namespace = f"{self.root.stat().st_dev}:{self.root.stat().st_ino}"

@@ -611,6 +611,45 @@ class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
                 self.assertEqual("failed", value["state"])
                 self.assertIs(value.get("authority_revoked"), True)
 
+    def test_receipt_loss_revokes_journal_even_if_old_worker_status_is_replayed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve()
+            devices, receipt, _produced, _summary = self.worker_bundle(project)
+            self.run_worker_once(project, devices)
+            status_path = project / "worker-status/status.json"
+            previous = status_path.read_bytes()
+            retained = receipt.with_name("retained-result.json")
+            receipt.rename(retained)
+            self.assertEqual("failed", self.run_worker_once(project, devices)["EXAMPLE-Leaf01"]["state"])
+            current = self.manual.config_sync_authority.read_current(receipt.parents[2], "EXAMPLE-Leaf01")
+            self.assertEqual((1, "failed", True), tuple(current[field] for field in ("generation", "state", "veto")))
+            retained.rename(receipt)
+            status_path.write_bytes(previous)
+            self.assertEqual("failed", self.run_worker_once(project, devices)["EXAMPLE-Leaf01"]["state"])
+
+    def test_receipt_loss_observer_cannot_revoke_a_concurrently_started_new_era(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve()
+            devices, receipt, _produced, _summary = self.worker_bundle(project)
+            self.run_worker_once(project, devices)
+            receipt.rename(receipt.with_name("retained-result.json"))
+            authority = self.manual.config_sync_authority
+            original = authority.revoke
+            advanced = False
+            def begin_before_revocation(root, hostname, **kwargs):
+                nonlocal advanced
+                self.assertEqual(1, kwargs["expected"]["generation"])
+                advanced = True
+                authority.begin(root, hostname, "op-2", "trigger-2", "manual_config_sync_cli")
+                return original(root, hostname, **kwargs)
+            with mock.patch.object(authority, "revoke", side_effect=begin_before_revocation):
+                self.assertEqual("failed", self.run_worker_once(project, devices)["EXAMPLE-Leaf01"]["state"])
+            self.assertTrue(advanced, "observer must attempt a guarded local revocation")
+            current = authority.read_current(receipt.parents[2], "EXAMPLE-Leaf01")
+            self.assertEqual((2, "pending", True, "op-2"), tuple(
+                current[field] for field in ("generation", "state", "veto", "operation_id")
+            ))
+
     def test_real_worker_rejects_writer_receipt_with_unsafe_mode_or_foreign_owner(self):
         with tempfile.TemporaryDirectory() as directory:
             receipt, produced = self.published_receipt(Path(directory).resolve())
