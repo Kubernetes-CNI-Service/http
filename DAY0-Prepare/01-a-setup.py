@@ -291,6 +291,8 @@ def _make_exact_link(link_path, target_path, canonical=False):
             os.remove(temp_link)
         os.symlink(rel_target, temp_link)
         os.replace(temp_link, link_path)
+        if _SETUP_SWITCH_WAL_CONTEXT is not None:
+            _fsync_directory(link_dir)
     finally:
         if os.path.lexists(temp_link):
             os.remove(temp_link)
@@ -1161,6 +1163,11 @@ def _process_latest_yaml(_proj_dir):
              for platform, output in LATEST_YAML_SPECS]
     for ztp_dir, output_name, resolver, candidate_resolver in pairs:
         out_base = os.path.join(ztp_dir, "template", output_name)
+        output_entry = os.path.join(out_base, "latest")
+        if _SETUP_SWITCH_WAL_CONTEXT is not None:
+            # Q-local writes must name Q's physical parent. Restoring the P
+            # shared output alias must not redirect later recovery into P.
+            out_base = os.path.realpath(out_base)
         candidates = candidate_resolver(out_base)
         output_latest = os.path.join(out_base, "latest")
         if os.path.lexists(output_latest) and not os.path.islink(output_latest):
@@ -1172,7 +1179,7 @@ def _process_latest_yaml(_proj_dir):
         latest = resolver(out_base)
         if latest:
             _make_exact_link(output_latest, latest)
-            _make_exact_link(os.path.join(ztp_dir, "latest_yaml"), output_latest)
+            _make_exact_link(os.path.join(ztp_dir, "latest_yaml"), output_entry)
             continue
 
         label = os.path.relpath(out_base, ZTP)
@@ -4500,6 +4507,7 @@ def inventory_setup_switch_shared_paths(old_project, new_project):
             infra_kind = "unsafe"
 
     materialized = []
+    q_local_latest = []
     for platform, output_name in LATEST_YAML_SPECS:
         output_rel = os.path.join("config", platform, "template", output_name)
         project_outputs = {
@@ -4513,6 +4521,8 @@ def inventory_setup_switch_shared_paths(old_project, new_project):
             metadata = os.lstat(latest)
             if stat.S_ISDIR(metadata.st_mode):
                 materialized.append(latest)
+            elif stat.S_ISLNK(metadata.st_mode):
+                q_local_latest.append(latest)
             elif not stat.S_ISLNK(metadata.st_mode):
                 raise ValueError("setup switch inventory latest is not a directory or link")
 
@@ -4548,6 +4558,7 @@ def inventory_setup_switch_shared_paths(old_project, new_project):
         "p_only": tuple(sorted(old_links - q_candidates)),
         "q_only_candidates": tuple(sorted(q_candidates - old_links)),
         "materialized_latest": tuple(sorted(materialized)),
+        "q_local_latest": tuple(sorted(q_local_latest)),
         "infra_logs": {
             "path": infra_logs, "kind": infra_kind,
             "receipt_path": infra_receipt, "receipt_pending": receipt_pending,
@@ -4786,6 +4797,21 @@ def _require_setup_switch_wal_prewrite(proj_dir, deployment_lock_descriptor):
     # name, in the WAL before the first shared write.  This is only one part
     # of the write set; the inventory remains diagnostic (complete=False).
     plan = inventory_setup_switch_shared_paths(str(old_state.project), proj_dir)
+    for latest in plan["q_local_latest"]:
+        parent = os.path.dirname(latest)
+        resolver = (_latest_cumulus_publish_dir if os.path.basename(parent) == "99-output-eth"
+                    else _latest_nvos_publish_dir)
+        target = resolver(parent)
+        if target is None:
+            raise ValueError("跨项目 setup Q-local latest 缺少完整发布目标")
+        try:
+            load_api["register_setup_switch_q_local_latest"](
+                Path(ZTP) / ".setup-switch-journal.json", Path(latest), Path(target),
+                deployment_lock_descriptor=deployment_lock_descriptor,
+                services_quiesced=True, runtime_backend=load_api["service_runtime_backend"](),
+            )
+        except load_api["LoadError"] as exc:
+            raise ValueError(f"跨项目 setup Q-local latest WAL 登记失败：{exc}") from exc
     materialized = {}
     for latest in plan["materialized_latest"]:
         parent = os.path.dirname(latest)

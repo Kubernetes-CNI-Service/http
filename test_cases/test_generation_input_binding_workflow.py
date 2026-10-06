@@ -1345,6 +1345,96 @@ finally:
                     self.assertFalse(journal.exists())
                     self.assertFalse((root / "service-started").exists())
 
+    def test_real_setup_q_local_latest_preimage_survives_temp_and_pointer_death(self):
+        """Q's old latest is not a P manifest link or an absent Q-only name."""
+        for boundary in ("temporary", "pointer", "q-manifest-committed"):
+            with self.subTest(boundary=boundary), \
+                    tempfile.TemporaryDirectory(prefix="r22-q-local-latest-") as name:
+                fixture = self._private_setup_switch_fixture(Path(name))
+                root, _p, q, common, p_only, q_only, manifest, before, _hook, _barrier, _home = fixture
+                for relative in ("tools/lldp-analyze-tool/99-output-p2p",
+                                 "tools/lldp-analyze-tool/99-output-monitor",
+                                 "tools/ibdiagnet-analyze-tool/99-output-p2p"):
+                    leaf = root / relative
+                    if leaf.is_dir() and not leaf.is_symlink():
+                        shutil.rmtree(leaf)
+                output = q / "99-output-eth"
+                output.mkdir()
+                old, new = (output / value for value in (
+                    "20261005_110000_combine", "20261005_120000_combine",
+                ))
+                for release in (old, new):
+                    release.mkdir()
+                    (release / ".published-complete").write_bytes(b"complete\n")
+                    (release / "leaf.yaml").write_bytes(release.name.encode() + b"\n")
+                latest = output / "latest"
+                latest.symlink_to(old.name)
+                nvos_output = q / "99-output-ib_nvl"
+                nvos_output.mkdir()
+                nvos_old, nvos_new = (nvos_output / value for value in (
+                    "20261005_110000-ib", "20261005_120000-combine",
+                ))
+                for release in (nvos_old, nvos_new):
+                    release.mkdir()
+                    (release / ".published-complete").write_bytes(b"complete\n")
+                    (release / "leaf.yaml").write_bytes(release.name.encode() + b"\n")
+                nvos_latest = nvos_output / "latest"
+                nvos_latest.symlink_to(nvos_old.name)
+                first = self._run_private_load_setup_switch(
+                    fixture, prepare_journal=False, auto_prepare_journal=True,
+                    first_link=root / "never-created-link",
+                    first_link_prefix=str(nvos_output / ".latest.tmp.") if boundary == "temporary" else None,
+                    kill_after_replace=nvos_latest if boundary == "pointer" else root / "never-replaced",
+                )
+                self.assertEqual(25 if boundary == "q-manifest-committed" else 23,
+                                 first.returncode, first.stdout + first.stderr)
+                self.assertEqual(new.name, os.readlink(latest))
+                self.assertEqual(nvos_old.name if boundary == "temporary" else nvos_new.name,
+                                 os.readlink(nvos_latest))
+                if boundary == "q-manifest-committed":
+                    self.assertNotEqual(before["manifest"], manifest.read_bytes())
+                    self.assertEqual("template/99-output/latest", os.readlink(root / "ztp/config/cumulus/latest_yaml"))
+                journal = root / "ztp/.setup-switch-journal.json"
+                body = json.loads(journal.read_bytes())["body"]
+                self.assertEqual(old.name, body["q_local_links"][0]["before"])
+                self.assertEqual(new.name, body["q_local_links"][0]["after"])
+                self.assertEqual(2, len(body["q_local_links"]))
+                recovery = """
+import importlib.util
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('fresh_q_local_latest', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    assert load.recover_setup_switch_journal(
+        root / 'ztp/.setup-switch-journal.json', deployment_lock_descriptor=descriptor,
+        services_quiesced=True, runtime_backend=SimpleNamespace(name='supervisor'),
+    ) == 'restored-p'
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+                second = subprocess.run([sys.executable, "-B", "-c", recovery, str(root)],
+                                        cwd=root, capture_output=True, text=True, check=False)
+                self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+                self.assertEqual(old.name, os.readlink(latest))
+                self.assertEqual(nvos_old.name, os.readlink(nvos_latest))
+                self.assertEqual(before["manifest"], manifest.read_bytes())
+                self.assertEqual(before["common"], os.readlink(common))
+                self.assertEqual(before["p_only"], os.readlink(p_only))
+                self.assertFalse(os.path.lexists(q_only))
+                self.assertFalse(list(output.glob(".latest.tmp.*")))
+                self.assertFalse(list(nvos_output.glob(".latest.tmp.*")))
+                for release in (old, new, nvos_old, nvos_new):
+                    self.assertEqual(release.name.encode() + b"\n", (release / "leaf.yaml").read_bytes())
+                self.assertFalse(journal.exists())
+                self.assertFalse((root / "service-started").exists())
+
     def test_real_setup_infra_log_pointer_death_cold_restores_real_directory(self):
         """LOAD→SETUP death after real log migration restores exact old bytes."""
         with tempfile.TemporaryDirectory(prefix="r22-real-infra-restore-") as name:

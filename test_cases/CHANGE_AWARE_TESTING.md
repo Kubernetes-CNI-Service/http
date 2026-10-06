@@ -262,6 +262,38 @@ SHA256 `7454d6432b32ece04f30336fd7d99121dd8cf96b02bd65151c809dda5e06e571`。
 原 bootstrap 超时仍待核，未以这次 PASS 直接重跑 related/full。现场及不合作写者风险、
 comparison 实体迁移、Q 自有前像、父 B 收口、main 显式恢复和旧 A 激活等仍需独立收口。
 
+### R22 Q-local latest 前像的本地候选记录
+
+独立 direct 与真实 LOAD→SETUP workflow 重现已有 Q latest 被错误当成缺席 Q-only 名称，
+导致切换拒绝：原始 4 tests / 2 FAIL / 3 ERROR / exit 1（含 workflow 两个子场景），日志
+`outputs/test-diagnostics/r22-q-local-latest-red.log`，inode 143019842，size 25987，SHA256
+`62aa858fefadb865ec51f794298b657edf05fb86481778d0c11a1d7ed75c0083`。
+候选为 ETH/NVOS 旧/新真实完成目录与 latest 原文字单独冻结前像，使用 Q 物理父目录
+写入和恢复；不修改 P manifest 合同或自动接纳未知名称。
+候选审阅又以独立负例重现 Q-local 提前返回绕过未知共享行、外部完成目录软链接被接纳，
+并以 direct 重现 exact pointer replace 后未同步父目录；三个 RED 原日志分别为
+`r22-q-local-writer-preflight-red.log`（SHA256
+`f81c04d4c0f889da7477fcfd32d7e886d4d7c9fe8bb94809df478018d1ffe6da`）、
+`r22-q-local-release-symlink-red.log`（SHA256
+`54cb424d265900a58082fc60d20a7f725d70d7c4c86e5cea35c44196517c9d12`）和
+`r22-q-local-pointer-sync-red.log`（SHA256
+`809d03ef4f4460ba20a93a5b1770ab56cc6829ae547b297172a1d6ecdb893259`）。
+修复保留原预期和时限，未知状态拒绝；指针成功替换后同步其父目录。
+
+新增 8 项 direct/真实 workflow 完整 OK / exit 0 后，四个完整模块共
+308 tests / OK / exit 0（210.512 秒）。日志
+`outputs/test-diagnostics/r22-q-local-latest-modules.log`，inode 143057950，size 104962，SHA256
+`792c9ff52fdce441a1c66a4e487167722bf68c04eae989e8137f4e912756a862`。
+读前后身份稳定，已核旧 90543 字节前缀 SHA256
+`3dc3dc8bd20d58a4e75479352ff2a26ceae2f432b636914010abf590f94d1b3b`，
+完整物理末尾 `R22_Q_LOCAL_LATEST_MODULES_EXIT=0` 与 exec exit 0 一致。
+TEST 运行目录 manifest 的已观察身份/字节未变。既有 LOAD/SETUP direct 与真实 workflow
+manifest 映射沿用；REAL_ENV 补充三处死亡边界和独立现场核验，仍 OPEN。
+
+这不是 related 批准、full proof 或完整 R22 验收；未手改 ledger，原 bootstrap 超时原因
+仍待核，未凭模块 PASS 直接重跑 related/full。其它完整写集、父 B 收口、main 显式恢复、
+完整旧 A 安全激活和 Linux/断电见证继续独立收口。
+
 ## Full proof 性能诊断记录
 
 本节只记录测量方法与优化判定，不改变上面的测试和证明门禁。正式 full proof 仍须由

@@ -3236,6 +3236,198 @@ os.kill(os.getpid(), signal.SIGKILL)
         self.assertFalse(journal.exists())
         backend.start.assert_not_called()
 
+    def _q_local_latest_fixture(self, q):
+        output = q / "99-output-eth"
+        output.mkdir()
+        releases = [output / name for name in (
+            "20261005_110000_combine", "20261005_120000_combine",
+        )]
+        for index, release in enumerate(releases):
+            release.mkdir()
+            (release / ".published-complete").write_bytes(b"complete\n")
+            (release / "leaf.yaml").write_bytes(f"hostname: q-{index}\n".encode())
+        latest = output / "latest"
+        latest.symlink_to(releases[0].name)
+        return latest, releases
+
+    def test_setup_wal_q_local_latest_restores_preimage_separately_from_p_manifest(self) -> None:
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        latest, releases = self._q_local_latest_fixture(state[1])
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.register_setup_switch_q_local_latest(
+                journal, latest, releases[1], deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            )
+            self.assertEqual(releases[0].name, os.readlink(latest), "registration must not publish Q")
+            body = json.loads(journal.read_bytes())["body"]
+            self.assertEqual(state[8], base64.b64decode(body["manifest"]))
+            self.assertNotIn(str(latest), [row["path"] for row in body["links"]])
+            self.assertEqual(releases[0].name, body["q_local_links"][0]["before"])
+            self.assertEqual(releases[1].name, body["q_local_links"][0]["after"])
+            self.assertEqual("prepared-p", LOAD.recover_setup_switch_journal(
+                journal, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend, verify_only=True,
+            ))
+            latest.unlink()
+            latest.symlink_to(releases[1].name)
+            common = state[2]
+            common.unlink()
+            common.symlink_to(os.path.relpath(state[5], common.parent))
+            self.assertEqual("restored-p", LOAD.recover_setup_switch_journal(
+                journal, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            ))
+        self.assertEqual(releases[0].name, os.readlink(latest))
+        self.assertEqual(state[8], state[7].read_bytes())
+        self.assertEqual(state[9][common], os.readlink(common))
+        self.assertEqual(b"hostname: q-0\n", (releases[0] / "leaf.yaml").read_bytes())
+        self.assertEqual(b"hostname: q-1\n", (releases[1] / "leaf.yaml").read_bytes())
+        self.assertFalse(journal.exists())
+        backend.start.assert_not_called()
+
+    def test_setup_wal_q_local_latest_unknown_pointer_fences_all_p_writes(self) -> None:
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        latest, releases = self._q_local_latest_fixture(state[1])
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.register_setup_switch_q_local_latest(
+                journal, latest, releases[1], deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            )
+            latest.unlink()
+            latest.symlink_to("operator-owned-unknown")
+            common = state[2]
+            common.unlink()
+            common.symlink_to(os.path.relpath(state[5], common.parent))
+            mixed = os.readlink(common)
+            evidence = journal.read_bytes()
+            with self.assertRaisesRegex(LOAD.LoadError, "Q.local"):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertEqual(mixed, os.readlink(common))
+        self.assertEqual("operator-owned-unknown", os.readlink(latest))
+        self.assertEqual(state[8], state[7].read_bytes())
+        self.assertEqual(evidence, journal.read_bytes())
+        backend.start.assert_not_called()
+
+    def test_setup_wal_q_local_writer_cannot_bypass_unknown_shared_link(self) -> None:
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        latest, releases = self._q_local_latest_fixture(state[1])
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.register_setup_switch_q_local_latest(
+                journal, latest, releases[1], deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            )
+            common = state[2]
+            common.unlink()
+            common.symlink_to("unknown-shared-owner")
+            evidence = journal.read_bytes()
+            with self.assertRaisesRegex(LOAD.LoadError, "disk state is unknown"):
+                LOAD.register_setup_switch_journal_link(
+                    journal, latest, releases[1], deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                    allow_existing_exact=True, raw_target=releases[1].name,
+                )
+        self.assertEqual("unknown-shared-owner", os.readlink(common))
+        self.assertEqual(releases[0].name, os.readlink(latest))
+        self.assertEqual(state[8], state[7].read_bytes())
+        self.assertEqual(evidence, journal.read_bytes())
+        backend.start.assert_not_called()
+
+    def test_setup_wal_q_local_latest_target_rebind_fences_all_p_writes(self) -> None:
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        latest, releases = self._q_local_latest_fixture(state[1])
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.register_setup_switch_q_local_latest(
+                journal, latest, releases[1], deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            )
+            releases[0].rename(releases[0].with_name("operator-retained-release"))
+            releases[0].mkdir()
+            (releases[0] / ".published-complete").write_bytes(b"complete\n")
+            (releases[0] / "leaf.yaml").write_bytes(b"hostname: q-0\n")
+            common = state[2]
+            common.unlink()
+            common.symlink_to(os.path.relpath(state[5], common.parent))
+            mixed = os.readlink(common)
+            evidence = journal.read_bytes()
+            with self.assertRaisesRegex(LOAD.LoadError, "Q.local"):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertEqual(mixed, os.readlink(common))
+        self.assertEqual(releases[0].name, os.readlink(latest))
+        self.assertEqual(state[8], state[7].read_bytes())
+        self.assertEqual(evidence, journal.read_bytes())
+        backend.start.assert_not_called()
+
+    def test_setup_wal_q_local_latest_rejects_external_release_symlink_before_registration(self) -> None:
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        latest, releases = self._q_local_latest_fixture(state[1])
+        external = self.root / "operator-release"
+        external.mkdir()
+        (external / ".published-complete").write_bytes(b"complete\n")
+        (external / "leaf.yaml").write_bytes(b"external must remain untouched\n")
+        releases[0].rename(releases[0].with_name("operator-retained-release"))
+        releases[0].symlink_to(external, target_is_directory=True)
+        evidence = journal.read_bytes()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with self.assertRaisesRegex(LOAD.LoadError, "Q.local"):
+                LOAD.register_setup_switch_q_local_latest(
+                    journal, latest, releases[1], deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertEqual(releases[0].name, os.readlink(latest))
+        self.assertEqual(state[8], state[7].read_bytes())
+        self.assertEqual(evidence, journal.read_bytes())
+        self.assertEqual(b"external must remain untouched\n", (external / "leaf.yaml").read_bytes())
+        backend.start.assert_not_called()
+
+    def test_setup_wal_q_local_nvos_latest_restores_exact_preimage(self) -> None:
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        output = state[1] / "99-output-ib_nvl"
+        output.mkdir()
+        old, new = (output / name for name in (
+            "20261005_110000-ib", "20261005_120000-combine",
+        ))
+        for release in (old, new):
+            release.mkdir()
+            (release / ".published-complete").write_bytes(b"complete\n")
+        latest = output / "latest"
+        latest.symlink_to(old.name)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.register_setup_switch_q_local_latest(
+                journal, latest, new, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            )
+            latest.unlink()
+            latest.symlink_to(new.name)
+            self.assertEqual("restored-p", LOAD.recover_setup_switch_journal(
+                journal, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            ))
+        self.assertEqual(old.name, os.readlink(latest))
+        self.assertFalse(journal.exists())
+        backend.start.assert_not_called()
+
+    def test_setup_wal_exact_pointer_fsyncs_parent_before_return(self) -> None:
+        parent = self.root / "private-pointers"
+        parent.mkdir()
+        target = parent / "new-release"
+        target.mkdir()
+        link = parent / "latest"
+        link.symlink_to("old-release")
+        with mock.patch.object(SETUP, "_SETUP_SWITCH_WAL_CONTEXT", (object(), None)), \
+                mock.patch.object(SETUP, "_DRY_RUN", False), \
+                mock.patch.object(SETUP, "_confirm_overwrite", return_value=True), \
+                mock.patch.object(SETUP, "_register_setup_switch_link_before_write"), \
+                mock.patch.object(SETUP, "_fsync_directory", wraps=SETUP._fsync_directory) as sync:
+            self.assertEqual("linked", SETUP._make_exact_link(str(link), str(target)))
+            self.assertEqual("new-release", os.readlink(link))
+            sync.assert_called_once_with(str(parent))
+
     def test_setup_wal_registered_q_manifest_changed_bytes_hold_before_p_restore(self) -> None:
         (
             _p, q, common, old_only, new_only, new_target, new_only_target,

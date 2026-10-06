@@ -6120,6 +6120,7 @@ def register_setup_switch_journal_link(
                    if row["before"] is not None},
         ))
         root_path = Path(root["path"])
+        q_local_states = _setup_switch_q_local_link_states(body)
         for row in rows:
             path = Path(row["path"])
             if (not path.is_absolute() or os.path.normpath(str(path)) != str(path)
@@ -6142,6 +6143,15 @@ def register_setup_switch_journal_link(
                 if (not stat.S_ISLNK(actual.st_mode) or actual.st_nlink != 1
                         or os.readlink(path) not in (row["before"], row["after"])):
                     raise ValueError("journal link disk state is unknown")
+        physical_link = Path(link).parent.resolve(strict=True) / Path(link).name
+        for local_path, local_row in q_local_states:
+            if physical_link != local_path:
+                continue
+            physical_target = Path(target).parent.resolve(strict=True) / Path(target).name
+            if (physical_target != Path(local_row["after_target"]["path"])
+                    or raw_target != local_row["after"]):
+                raise ValueError("Q-local latest writer differs from its frozen plan")
+            return journal
         path = Path(link)
         if (not path.is_absolute() or os.path.normpath(str(path)) != str(path)
                 or (not allow_existing_exact and
@@ -6216,6 +6226,115 @@ def register_setup_switch_journal_link(
         if any(getattr(before_name, name) != getattr(now, name) for name in (
                 "st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns")):
             raise LoadError("setup switch journal changed before registration")
+        os.replace(temporary, journal)
+        _fsync_parent_directory(journal.parent)
+    finally:
+        if os.path.lexists(temporary):
+            temporary.unlink()
+    return journal
+
+
+def _setup_switch_q_local_link_states(body) -> list[tuple[Path, dict]]:
+    """Validate Q's existing latest preimages separately from P's manifest."""
+    try:
+        rows = body.get("q_local_links", [])
+        if (not isinstance(rows, list) or len(rows) > 2
+                or len({row["path"] for row in rows}) != len(rows)):
+            raise ValueError("invalid Q-local link inventory")
+        q = Path(body["new_project"]["path"])
+        shared_names = {row["path"] for row in body["links"]}
+        states = []
+        for row in rows:
+            path = Path(row["path"])
+            if (path not in {q / "99-output-eth/latest", q / "99-output-ib_nvl/latest"}
+                    or str(path) in shared_names
+                    or row["parent"] != _setup_switch_link_parent_identity(path)
+                    or path.parent.resolve(strict=True) != path.parent):
+                raise ValueError("Q-local latest path or parent differs")
+            for phase in ("before", "after"):
+                raw = row[phase]
+                pattern = (r"\d{8}_\d{6}_combine" if path.parent.name == "99-output-eth"
+                           else r"\d{8}_\d{6}-(?:ib|nvl|combine)")
+                if not isinstance(raw, str) or re.fullmatch(pattern, raw) is None:
+                    raise ValueError("Q-local latest target is not a complete release basename")
+                target = path.parent / raw
+                if (not stat.S_ISDIR(target.lstat().st_mode)
+                        or row[phase + "_target"]["path"] != str(target)
+                        or row[phase + "_target"] != _setup_switch_directory_identity(target)):
+                    raise ValueError("Q-local complete release identity changed")
+                _read_rollback_regular(target / ".published-complete", limit=_ROLLBACK_MARKER_LIMIT)
+            info = path.lstat()
+            if (not stat.S_ISLNK(info.st_mode) or info.st_nlink != 1
+                    or os.readlink(path) not in (row["before"], row["after"])):
+                raise ValueError("Q-local latest pointer is not its frozen preimage or candidate")
+            states.append((path, row))
+        return states
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError, LoadError) as exc:
+        raise LoadError(f"setup switch Q-local latest state is unknown: {exc}") from exc
+
+
+def register_setup_switch_q_local_latest(
+    journal: Path, path: Path, target: Path, *, deployment_lock_descriptor: int | None,
+    services_quiesced: bool, runtime_backend: ServiceRuntimeBackend | None,
+) -> Path:
+    """Freeze an existing Q-local latest pointer before the first shared write."""
+    journal, path, target = Path(journal), Path(path), Path(target)
+    # Normalize the parent namespace only, never resolve away the pointer
+    # leaf itself (Darwin's /var and /private/var may denote the same parent).
+    path = path.parent.resolve(strict=True) / path.name
+    target = target.parent.resolve(strict=True) / target.name
+    # Only the untouched P state licenses this preimage capture. A late writer
+    # cannot adopt an in-flight or unregistered pointer as the original Q state.
+    recover_setup_switch_journal(
+        journal, deployment_lock_descriptor=deployment_lock_descriptor,
+        services_quiesced=services_quiesced, runtime_backend=runtime_backend,
+        verify_only=True,
+    )
+    before_name = journal.lstat()
+    opened = _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT)
+    try:
+        envelope = json.loads(opened[0])
+        body = envelope["body"]
+        if "q_manifest_intent" in body:
+            raise ValueError("Q manifest intent is already frozen")
+        q = Path(body["new_project"]["path"])
+        if (path not in {q / "99-output-eth/latest", q / "99-output-ib_nvl/latest"}
+                or target.parent != path.parent):
+            raise ValueError("Q-local latest path or candidate is outside its output")
+        row = {
+            "path": str(path), "parent": _setup_switch_link_parent_identity(path),
+            "before": os.readlink(path), "after": target.name,
+            "before_target": _setup_switch_directory_identity(path.parent / os.readlink(path)),
+            "after_target": _setup_switch_directory_identity(target),
+        }
+        rows = body.get("q_local_links", [])
+        existing = next((item for item in rows if item["path"] == str(path)), None)
+        if existing is not None:
+            if existing != row:
+                raise ValueError("Q-local latest preimage cannot be changed")
+            return journal
+        next_body = dict(body, q_local_links=[*rows, row])
+        _setup_switch_q_local_link_states(next_body)
+        payload = _setup_switch_canonical_payload({
+            "body": next_body,
+            "sha256": hashlib.sha256(_setup_switch_canonical_payload(next_body)).hexdigest(),
+        }) + b"\n"
+        if len(payload) > _SETUP_SWITCH_JOURNAL_LIMIT:
+            raise ValueError("journal exceeds the bounded size limit")
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError, LoadError) as exc:
+        raise LoadError(f"setup switch Q-local latest registration is invalid: {exc}") from exc
+    descriptor, name = tempfile.mkstemp(prefix=".setup-switch-journal.", dir=journal.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        now = journal.lstat()
+        if (any(getattr(before_name, field) != getattr(now, field) for field in (
+                "st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns"))
+                or _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT) != opened):
+            raise LoadError("setup switch journal changed before Q-local registration")
         os.replace(temporary, journal)
         _fsync_parent_directory(journal.parent)
     finally:
@@ -7042,6 +7161,7 @@ def _recover_setup_switch_journal_snapshot(
         raise LoadError("setup switch manifest is not exact P; recovery is in-doubt")
     root_path = Path(body["root"]["path"])
     q_project = Path(new["path"])
+    q_local_states = _setup_switch_q_local_link_states(body)
     # A previous recovery may have removed an owned Q-only directory and died
     # before retiring the journal. Its child link rows remain valid absence
     # evidence only when the exact created-directory row and surviving outer
@@ -7151,6 +7271,8 @@ def _recover_setup_switch_journal_snapshot(
         return "prepared-known-disk-state"
     if verify_only:
         if manifest_candidate is not None:
+            if any(os.readlink(path) != row["after"] for path, row in q_local_states):
+                raise LoadError("setup switch Q-local latest precommit is not exact Q")
             if any(present != path for path, _staged, present, _row in created_directory_states):
                 raise LoadError("setup switch Q manifest lacks an installed created directory")
             candidate_paths = _setup_switch_q_manifest_paths(body, manifest_candidate)
@@ -7162,6 +7284,8 @@ def _recover_setup_switch_journal_snapshot(
                 raise LoadError("setup switch Q manifest name is absent")
             require_journal_unchanged()
             return "prepared-q-manifest"
+        if any(os.readlink(path) != row["before"] for path, row in q_local_states):
+            raise LoadError("setup switch Q-local latest prewrite is not exact Q preimage")
         if any(
             (not path.is_symlink() or os.readlink(path) != before)
             if before is not None else os.path.lexists(path)
@@ -7179,6 +7303,11 @@ def _recover_setup_switch_journal_snapshot(
     require_journal_unchanged()
     if infra_state is not None:
         _setup_switch_restore_infra_log_tree(infra_state)
+    for path, row in q_local_states:
+        require_journal_unchanged()
+        _setup_switch_q_local_link_states(body)
+        if os.readlink(path) != row["before"]:
+            _atomic_restore_setup_link(path, row["before"])
     for source, backup, has_backup in expected_directories:
         require_journal_unchanged()
         if has_backup:
@@ -7214,6 +7343,9 @@ def _recover_setup_switch_journal_snapshot(
     verified = snapshot_active_setup_state(expected_project=state.project)
     if verified.manifest != state.manifest or verified.links != state.links:
         raise LoadError("setup switch P post-verify failed; journal retained")
+    if any(os.readlink(path) != row["before"]
+           for path, row in _setup_switch_q_local_link_states(body)):
+        raise LoadError("setup switch Q-local latest post-verify failed; journal retained")
     require_journal_unchanged()
     # A failed SETUP must not erase its durable authorization/incident
     # evidence merely because P is recoverable. Explicit recovery keeps the

@@ -186,6 +186,13 @@ direct 和真实 LOAD→SETUP 强杀→新 LOAD workflow 覆盖凭据读入后�
 这不构成对任意同 UID 非合作写者的原子 compare-and-unlink 承诺，仍须排他写者静默和
 REAL_ENV 见证，也不关闭完整共享写集、父 B 收口或旧 A 显式激活。
 
+Q 已有的 ETH/NVOS `latest` 软链接须在首次共享写入前单独记录原始链接文字、
+旧/新真实完成目录和父目录身份，不混入 P manifest，也不当作原本缺席的 Q-only 名称。
+SETUP 通过 Q 的物理父目录写入，稳定共享入口仍保留原有相对链接合同；替换后同步父目录。
+direct 与真实 LOAD→SETUP→新 LOAD workflow 覆盖临时链接、指针替换和 Q manifest 提交后
+恢复两类旧指针；未知指针、目标换绑及外部发布目录软链接保持 HOLD。局部恢复仅证明
+链接前像，不证明完整旧 A 制品安全激活或断电持久性。
+
 同一模块还覆盖端到端 deployment scope：默认 `all` 同时生成 Production/AIR；`prod` 只发布
 Production Cumulus/IB/NVL；`air` 只发布 AIR DHCP/YAML/release，并只临时渲染 AIR full profile
 实际引用的 Production 来源；单独指定 `mini` 会自动选择 AIR scope 和 `eth`，显式 `prod+mini`
