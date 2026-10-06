@@ -1201,6 +1201,63 @@ finally:
             self.assertEqual(b'{"unowned":true}\n', receipt.read_bytes())
             self.assertTrue((root / "ztp/.setup-switch-journal.json").is_file())
 
+    def test_real_setup_cold_recovery_preserves_replacement_wal_at_retirement(self):
+        """Real SETUP death and a fresh LOAD cannot retire a later WAL owner."""
+        with tempfile.TemporaryDirectory(prefix="r22-wal-retirement-owner-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, _q, common, p_only, q_only, manifest, before, _hook, _barrier, _home = fixture
+            first = self._run_private_load_setup_switch(fixture, prepare_journal=True)
+            self.assertEqual(23, first.returncode, first.stdout + first.stderr)
+            journal = root / "ztp/.setup-switch-journal.json"
+            original = journal.read_bytes()
+            retained = journal.with_name("operator-retained-wal.json")
+            recovery = """
+import importlib.util
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('fresh_wal_retirement_load', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+journal = root / 'ztp/.setup-switch-journal.json'
+snapshot = load.snapshot_active_setup_state
+def replace_after_postverify(*args, **kwargs):
+    state = snapshot(*args, **kwargs)
+    journal.rename(journal.with_name('operator-retained-wal.json'))
+    journal.write_bytes(b'operator replacement evidence\\n')
+    journal.chmod(0o600)
+    return state
+load.snapshot_active_setup_state = replace_after_postverify
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    try:
+        load.recover_setup_switch_journal(
+            journal, deployment_lock_descriptor=descriptor, services_quiesced=True,
+            runtime_backend=SimpleNamespace(name='supervisor'),
+        )
+    except load.LoadError as exc:
+        assert 'journal' in str(exc) and 'changed' in str(exc), str(exc)
+    else:
+        raise AssertionError('recovery retired another owner WAL')
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+            second = subprocess.run(
+                [sys.executable, "-B", "-c", recovery, str(root)],
+                cwd=root, capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            self.assertEqual(before["common"], os.readlink(common))
+            self.assertEqual(before["p_only"], os.readlink(p_only))
+            self.assertFalse(os.path.lexists(q_only))
+            self.assertEqual(original, retained.read_bytes())
+            self.assertEqual(b"operator replacement evidence\n", journal.read_bytes())
+            self.assertFalse((root / "service-started").exists())
+
     def test_real_setup_q_manifest_commit_cold_recovers_p_and_original_logs(self):
         """Q manifest publication and successful SETUP must retain P recovery bytes."""
         for death_at_manifest in (True, False):

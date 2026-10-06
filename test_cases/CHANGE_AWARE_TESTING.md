@@ -238,6 +238,30 @@ size 102891，SHA256
 读前后 stat 一致、已知旧前缀保持且物理末尾 `R22_UNLINK_DURABILITY_MODULES_EXIT=0`；
 仍只是本地候选回归，不更新 related/full ledger，不替代断电见证或整体 R22 验收。
 
+### R22 冷恢复 WAL authority 换绑的本地候选记录
+
+独立 direct 重现读后同字节新 inode、同 inode/尺寸/mtime 改写仍可继续恢复，以及 P
+后核验后被替换的 WAL 会被旧收尾删除；真实 LOAD→SETUP 强杀→新 LOAD 的后核验
+注入同样失败。四项 RED / exit 1 的原日志
+`outputs/test-diagnostics/r22-wal-retirement-owner-red.log`，inode 142900081，size 3234，
+SHA256 `ca7f35551d8dea1bb6c2968af85acfa65edd7e755f300568e9af2cec03163dde`。
+候选保持原 WAL inode 的 descriptor，恢复阶段及收尾前核对原文件/父目录身份和完整字节；
+漂移 HOLD 并保留证据，不以文件名相同或 P 已恢复推定删除权。原时限和断言未放宽，
+不将这项修复认作 bootstrap 原超时的原因或修复。
+
+包含原有保留 WAL 重入和 Q manifest 恢复正例的定向 6 tests / OK / exit 0 后，四个
+完整模块 release transaction、真实 input binding workflow、sample 布局和 setup 写集盘点
+共 300 tests / OK / exit 0（180.282 秒）：
+`outputs/test-diagnostics/r22-wal-retirement-owner-modules.log`，inode 142904246，size 103513，
+SHA256 `7454d6432b32ece04f30336fd7d99121dd8cf96b02bd65151c809dda5e06e571`。
+读前后 stat 一致、逐次旧前缀保持，物理末尾 `R22_WAL_OWNER_MODULES_EXIT=0` 与 exec exit 0
+一致；TEST 运行目录 manifest 保持此前观察到的身份/字节，不触碰或猜测还原。
+现有 manifest 的 LOAD direct 与 LOAD/SETUP 多脚本 workflow 映射已核，不新增脚本或跳过。
+
+这仍是本地候选模块回归，不是 related 批准、full proof 或完整 R22 验收；ledger 未手改，
+原 bootstrap 超时仍待核，未以这次 PASS 直接重跑 related/full。现场及不合作写者风险、
+comparison 实体迁移、Q 自有前像、父 B 收口、main 显式恢复和旧 A 激活等仍需独立收口。
+
 ## Full proof 性能诊断记录
 
 本节只记录测量方法与优化判定，不改变上面的测试和证明门禁。正式 full proof 仍须由

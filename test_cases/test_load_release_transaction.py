@@ -1852,6 +1852,98 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertFalse(os.path.lexists(journal))
         backend.start.assert_not_called()
 
+    def test_setup_recovery_wal_name_replacement_is_zero_write(self) -> None:
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        common = state[2]
+        common.unlink()
+        common.symlink_to(os.path.relpath(state[5], common.parent))
+        mixed = os.readlink(common)
+        evidence = journal.read_bytes()
+        retained = journal.with_name("operator-retained-wal.json")
+        inspect_directories = LOAD._setup_switch_created_directory_states
+
+        def replace_after_read(body):
+            result = inspect_directories(body)
+            journal.rename(retained)
+            journal.write_bytes(evidence)
+            journal.chmod(0o600)
+            return result
+
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "_setup_switch_created_directory_states", side_effect=replace_after_read):
+            with self.assertRaisesRegex(LOAD.LoadError, "journal.*changed"):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertEqual(mixed, os.readlink(common))
+        self.assertEqual(state[8], state[7].read_bytes())
+        self.assertEqual(evidence, retained.read_bytes())
+        self.assertEqual(evidence, journal.read_bytes())
+        self.assertNotEqual(retained.stat().st_ino, journal.stat().st_ino)
+        backend.start.assert_not_called()
+
+    def test_setup_recovery_wal_same_inode_edit_is_zero_write(self) -> None:
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        common = state[2]
+        common.unlink()
+        common.symlink_to(os.path.relpath(state[5], common.parent))
+        mixed = os.readlink(common)
+        original = journal.stat()
+        changed = journal.read_bytes()[:-1] + b"!"
+        inspect_directories = LOAD._setup_switch_created_directory_states
+
+        def edit_after_read(body):
+            result = inspect_directories(body)
+            journal.write_bytes(changed)
+            os.utime(journal, ns=(original.st_atime_ns, original.st_mtime_ns))
+            return result
+
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "_setup_switch_created_directory_states", side_effect=edit_after_read):
+            with self.assertRaisesRegex(LOAD.LoadError, "journal.*changed"):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertEqual(mixed, os.readlink(common))
+        self.assertEqual(state[8], state[7].read_bytes())
+        self.assertEqual(changed, journal.read_bytes())
+        after = journal.stat()
+        self.assertEqual((original.st_ino, original.st_size, original.st_mtime_ns),
+                         (after.st_ino, after.st_size, after.st_mtime_ns))
+        backend.start.assert_not_called()
+
+    def test_setup_recovery_never_retires_replacement_wal_after_postverify(self) -> None:
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        common = state[2]
+        common.unlink()
+        common.symlink_to(os.path.relpath(state[5], common.parent))
+        original = journal.read_bytes()
+        retained = journal.with_name("operator-retained-wal.json")
+        replacement = b"operator evidence must not be retired\n"
+        snapshot = LOAD.snapshot_active_setup_state
+
+        def replace_after_postverify(*args, **kwargs):
+            result = snapshot(*args, **kwargs)
+            journal.rename(retained)
+            journal.write_bytes(replacement)
+            journal.chmod(0o600)
+            return result
+
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "snapshot_active_setup_state", side_effect=replace_after_postverify):
+            with self.assertRaisesRegex(LOAD.LoadError, "journal.*changed"):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertEqual(state[9][common], os.readlink(common))
+        self.assertEqual(state[8], state[7].read_bytes())
+        self.assertEqual(original, retained.read_bytes())
+        self.assertEqual(replacement, journal.read_bytes())
+        backend.start.assert_not_called()
+
     def test_setup_wal_retention_mode_rejects_ambiguous_flags_before_writes(self) -> None:
         (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
         common = state[2]

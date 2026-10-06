@@ -179,6 +179,13 @@ Cumulus/NVOS 子 manifest 的设备身份、真实 YAML hash、完整 MAC 链接
 current。由于 child manifest 尚无输入来源证明，非 dry-run `--skip-generate` 必须在任何状态
 修改前失败。
 
+R22 setup WAL 冷恢复还必须持有原凭据文件的 descriptor，并在恢复写入及收尾前复核文件、
+父目录身份和完整原字节；同字节换 inode 或同 inode/尺寸/mtime 改写都不得继续授权。
+direct 和真实 LOAD→SETUP 强杀→新 LOAD workflow 覆盖凭据读入后及 P 后核验后的换绑，
+后者即使 P 已恢复也必须 HOLD 并保留替换凭据，不能按旧路径删除新的所有者文件。
+这不构成对任意同 UID 非合作写者的原子 compare-and-unlink 承诺，仍须排他写者静默和
+REAL_ENV 见证，也不关闭完整共享写集、父 B 收口或旧 A 显式激活。
+
 同一模块还覆盖端到端 deployment scope：默认 `all` 同时生成 Production/AIR；`prod` 只发布
 Production Cumulus/IB/NVL；`air` 只发布 AIR DHCP/YAML/release，并只临时渲染 AIR full profile
 实际引用的 Production 来源；单独指定 `mini` 会自动选择 AIR scope 和 `eth`，显式 `prod+mini`

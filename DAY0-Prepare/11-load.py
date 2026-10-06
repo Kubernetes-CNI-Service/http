@@ -6915,12 +6915,73 @@ def recover_setup_switch_journal(
     journal = Path(journal)
     if journal != _setup_switch_journal_path():
         raise LoadError("setup switch journal path is not the configured authority")
-    opened = _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT)
-    if opened is None:
-        raise LoadError("setup switch journal is absent")
-    payload, mode = opened
-    if mode != 0o600:
-        raise LoadError("setup switch journal mode is not private")
+    # Keep the original inode alive for this recovery. A second owner may
+    # replace the authority name, even with identical bytes; an unrelated
+    # replacement is neither permission to restore P nor ours to retire.
+    identity_fields = (
+        "st_dev", "st_ino", "st_mode", "st_nlink", "st_size",
+        "st_mtime_ns", "st_ctime_ns",
+    )
+    descriptor = -1
+    try:
+        parent_identity = _setup_switch_link_parent_identity(journal)
+        try:
+            before = journal.lstat()
+        except OSError as exc:
+            raise LoadError(f"setup switch journal cannot be inspected safely: {exc}") from exc
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                or before.st_size < 0 or before.st_size > _SETUP_SWITCH_JOURNAL_LIMIT):
+            raise LoadError("setup switch journal is not a bounded single-link file")
+        flags = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                 | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0))
+        try:
+            descriptor = os.open(journal, flags)
+            held = os.fstat(descriptor)
+        except OSError as exc:
+            raise LoadError(f"setup switch journal cannot be held safely: {exc}") from exc
+        if any(getattr(before, field) != getattr(held, field) for field in identity_fields):
+            raise LoadError("setup switch journal changed while opening")
+        opened = _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT)
+        if opened is None or opened[1] != 0o600:
+            raise LoadError("setup switch journal mode is not private")
+
+        def require_journal_unchanged() -> None:
+            try:
+                named = journal.lstat()
+                still_held = os.fstat(descriptor)
+                if (parent_identity != _setup_switch_link_parent_identity(journal)
+                        or any(getattr(held, field) != getattr(named, field)
+                               or getattr(held, field) != getattr(still_held, field)
+                               for field in identity_fields)
+                        or _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT) != opened):
+                    raise LoadError("authority identity or bytes differ")
+                after = journal.lstat()
+                if any(getattr(held, field) != getattr(after, field) for field in identity_fields):
+                    raise LoadError("authority changed during revalidation")
+            except (OSError, RuntimeError, ValueError, LoadError) as exc:
+                raise LoadError(f"setup switch journal changed during recovery: {exc}") from exc
+
+        require_journal_unchanged()
+        return _recover_setup_switch_journal_snapshot(
+            journal, opened=opened, require_journal_unchanged=require_journal_unchanged,
+            verify_only=verify_only, manifest_candidate=manifest_candidate,
+            inspect_only=inspect_only, expected_old_state=expected_old_state,
+            expected_new_project=expected_new_project, retain_journal=retain_journal,
+        )
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _recover_setup_switch_journal_snapshot(
+    journal: Path, *, opened: tuple[bytes, int],
+    require_journal_unchanged: Callable[[], None],
+    verify_only: bool, manifest_candidate: bytes | None,
+    inspect_only: bool, expected_old_state: ActiveSetupState | None,
+    expected_new_project: Path | None, retain_journal: bool,
+) -> str:
+    """Recover only from the immutable authority held by the guarded API."""
+    payload, _mode = opened
     try:
         envelope = json.loads(payload)
         body = envelope["body"]
@@ -7086,6 +7147,7 @@ def recover_setup_switch_journal(
         if infra_rows else None
     )
     if inspect_only:
+        require_journal_unchanged()
         return "prepared-known-disk-state"
     if verify_only:
         if manifest_candidate is not None:
@@ -7098,6 +7160,7 @@ def recover_setup_switch_journal(
                         raise LoadError("setup switch manifest prewrite state is not exact Q")
             if any(not path.is_symlink() for path in candidate_paths):
                 raise LoadError("setup switch Q manifest name is absent")
+            require_journal_unchanged()
             return "prepared-q-manifest"
         if any(
             (not path.is_symlink() or os.readlink(path) != before)
@@ -7111,10 +7174,13 @@ def recover_setup_switch_journal(
             raise LoadError("setup switch infra log prewrite state is not exact Q")
         if any(present is not None for _path, _staged, present, _row in created_directory_states):
             raise LoadError("setup switch created directory prewrite state is not exact P")
+        require_journal_unchanged()
         return "prepared-p"
+    require_journal_unchanged()
     if infra_state is not None:
         _setup_switch_restore_infra_log_tree(infra_state)
     for source, backup, has_backup in expected_directories:
+        require_journal_unchanged()
         if has_backup:
             if os.path.islink(source):
                 source.unlink()
@@ -7122,6 +7188,7 @@ def recover_setup_switch_journal(
             _setup_switch_rename_directory_noreplace(backup, source)
             _fsync_parent_directory(source.parent)
     for path, before, after in expected_rows:
+        require_journal_unchanged()
         if before is not None:
             if not (path.is_symlink() and os.readlink(path) == before):
                 _atomic_restore_setup_link(path, before)
@@ -7132,6 +7199,7 @@ def recover_setup_switch_journal(
             _fsync_parent_directory(path.parent)
     for _path, _staged, present, row in sorted(
             created_directory_states, key=lambda state: len(state[0].parts), reverse=True):
+        require_journal_unchanged()
         if present is not None:
             metadata = present.lstat()
             if (not stat.S_ISDIR(metadata.st_mode)
@@ -7141,10 +7209,12 @@ def recover_setup_switch_journal(
             present.rmdir()
             _fsync_parent_directory(present.parent)
     if current_manifest != (state.manifest, state.manifest_mode):
+        require_journal_unchanged()
         _atomic_restore_setup_manifest(state)
     verified = snapshot_active_setup_state(expected_project=state.project)
     if verified.manifest != state.manifest or verified.links != state.links:
         raise LoadError("setup switch P post-verify failed; journal retained")
+    require_journal_unchanged()
     # A failed SETUP must not erase its durable authorization/incident
     # evidence merely because P is recoverable. Explicit recovery keeps the
     # default finalization behavior; automatic child failure recovery does not.

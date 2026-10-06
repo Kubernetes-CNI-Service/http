@@ -1658,6 +1658,8 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 - generic/sample 删除的持久化补充候选：原 direct 和真实 LOAD→SETUP witness 证明已登记 P 链接可在 unlink 后、父目录尚未 fsync 时继续下一次链接发布。候选将这两个 writer 的实际 unlink 接入同一冻结 P 检查与父目录 fsync；同步报错必须在后续 unlink/发布前停止，WAL 与尚未修改的对象保持原字节。真实 workflow 在 sample 旧链接父目录 fsync 完成后强杀 SETUP，要求新 LOAD 仅凭 WAL 恢复原链接、P manifest 与其它受管链接，不启动服务。SIGKILL witness 不能替代 Linux/断电持久性；完整 writer 盘点、comparison 迁移、父 B 收口及旧 A 激活仍 OPEN。
 
+- 恢复过程中 WAL authority 的窄范围候选：原实现读入 WAL 后未再核对授权文件，读后换成同字节新 inode 或同 inode/尺寸/mtime 改写仍会执行 P 恢复，P 后核验后插入的新文件也会被按旧路径收尾删除。三个 direct 与真实 LOAD→SETUP 强杀→新 LOAD workflow 先 RED 后 GREEN；候选持有原 inode descriptor，在恢复阶段与收尾前复核原身份、父目录与完整字节。首个写入前识别漂移须零恢复写入；已恢复 P 后识别漂移则保留 P、原封存 WAL 和替换凭据，明确 HOLD 而非成功，且不启动服务。现场须记录注入屏障、原/新文件和父目录身份及完整摘要、持锁/停服状态、全部 P/Q 恢复时间线；只在已授权隔离副本受控注入，正常读—改—写窗口仍要求其它写者静默。POSIX 名称 recheck 与 unlink 不是原子 compare-and-unlink，本候选不宣称任意不合作同 UID 写者免疫；完整共享写集、父 B 收口、显式恢复入口、旧 A 激活及 Linux/断电见证仍 OPEN。
+
 ## TC-REAL-R22-C2-DESCRIPTION-PUBLISH-001 — c2 同名描述输出的故障窗口
 
 - Case ID：`TC-REAL-R22-C2-DESCRIPTION-PUBLISH-001`；类型：real-environment / transaction / crash-recovery；对应 R22 c2 对 `*_with_desc` 的既有同名输出替换。状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。自动化先决为 `test_cases.test_generation_input_binding_contract` 的二次读取、早返及 staging direct，`test_cases.test_generation_input_binding_workflow` 的 setup/load/c2 workflow，和当前候选正式 full/check；现有定向通过不证明进程死亡后的原子性。
