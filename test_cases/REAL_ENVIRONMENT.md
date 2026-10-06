@@ -8,6 +8,7 @@
 - 故障与证据：在受控临时文件 fsync、rename、目录 fsync、HOLD 删除及最终目录同步边界注入崩溃/错误/名称交换；重启后只能保留 HOLD/未知，不补造成功。记录完整 argv/exit、原始 traceback、物理日志顺序、前后 inode/size/SHA、owner/mode、目录清单和清理路径。最终同步时替换 journal/witness 也必须拒绝、保留外来对象并重新保留 HOLD。
 - 消费端步骤：真实 worker 接纳后再撤销或启动下一代 pending，旧回执字节虽保留也不得继续晋升；篡改自身 generation/命名空间/摘要或 summary/target generation 均拒绝。读取 summary 期间换代必须在最终代次复核时撤销正向返回；移走本地历史后只读查询不得重建历史。保存 writer → worker 两端身份、回执原像和每次查询结果；本机 workflow 不替代本卡现场执行。
 - 同连接观察：在精确授权的隔离设备上验证 post-apply 的 hostname、所选 endpoint MAC 与 live NVUE 由同一次 BatchMode SSH 返回；两次连接之间的目标替换不得通过旧身份探针授权。缺少协议头、MAC/hostname 不符或 NVUE 非零退出使当前代 failed/veto，旧成功不得回放恢复。保存原始受限证据、同连接 argv/退出码和 journal 前后像；本机私有 shell 与 writer workflow 不等于现场执行，本卡仍 NOT RUN。
+- 九阶段传输观察：在授权隔离设备核对 monitor 原 BatchMode SSH 的 live NVUE v1 frame 与实际命令退出，保留尾部换行及原始文本 SHA256；缺失、重复、截断、非零和不同连接的输出不得提供成功摘要。无 NVUE 的适用设备保留 unavailable/failed 诊断，不因此伪造配置收据或更改健康分类。该传输字段不是本地代次或完成权威；现场卡仍 NOT RUN，本机仅执行私有 fake SSH/remote shell。
 - 配置 result v1：成功对象为闭合 23 字段，失败对象为闭合 16 字段且不携带成功证明；独立最大 canonical 正例 14331 B、固定有限读取预算 16384 B。在现场副本检查未知版本/成员、非严格类型和超限原始文件（含空白填充）拒绝且保留；退化预算小于最大合法正例时不得声称接受。保存 writer/worker 原始像与 journal 对应摘要，本机最大正例和真实 writer → worker 测试不替代本卡 NOT RUN 状态。
 - 后台状态：成功状态保存自身证明后，使回执丢失或本地权威撤销，再重启 worker 并恢复原回执；该代旧成功须保持持久撤销。下一合法同源更高代次才可替代否决，不受旧状态未来墙钟影响。记录状态与 journal/receipt 三方原像、撤销记录及重启后结果；断电期间未持久化的状态不得猜作成功，本卡仍 NOT RUN。
 - 观察者撤销竞态：在 worker 读取旧权威后、持写锁比较之前，让唯一受管配置写者启动新代次；旧代 compare-and-revoke 必须不改动新代次。旧状态仍精确绑定当前代时，撤销须持久写入本地 journal；回放旧状态与旧回执仍不得恢复成功。仅在本卡隔离副本故障注入，保留三方前后像和锁内比较结果。

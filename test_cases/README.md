@@ -427,6 +427,13 @@ worker 状态和旧回执不能复活成功。观察者使用持锁 compare-and-
 不宣称抵御全部镜像或整卷回滚。worker/九阶段监控消费端尚未完成接入，F02 整体仍 OPEN；
 真机持久化卡 `TC-REAL-F02-LOCAL-GENERATION-001` 仍 NOT RUN。
 
+九阶段 collector 现在在原 BatchMode SSH 中读取 live NVUE，独立的版本 1 frame 保留
+原始文本（含尾部换行）和摘要；缺失、重复、截断、NVUE 非零退出或另一失败连接的
+输出不能提供正向摘要。固定合法正例为 8 MiB，退化预算及超限均拒绝且不截断。
+私有 fake SSH 运行完整真实 remote script，未连接设备；与真实 manual observer 的
+shell workflow 核对同一 live 文本。此字段只是传输观察，不是持久配置成功收据，
+也不是 generation 权威；九阶段晋升与当前本地代次的接入仍须完成，不能据此关闭 F02。
+
 九阶段历史不能把已有但不可读、非对象、非列表或重复大小写主机成员的快照当作空历史。
 `test_ztp_group_handoff.py` 独立验证负向历史权威跨轮保持及 JSON/CSV/Markdown 诊断；
 `test_ztp_group_handoff_display.py` 串联真实监控快照写入、下一轮读取与真实 HTML 判据，

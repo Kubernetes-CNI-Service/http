@@ -1222,6 +1222,135 @@ class ManualCommandHelpTests(unittest.TestCase):
         self.assertNotIn("--http-timeout", reset_help)
 
 
+class MonitorLiveConfigTransportTests(unittest.TestCase):
+    LIVE = "- set:\n    system:\n      hostname: leaf01\n\n"
+
+    @staticmethod
+    def frame(text, code=0):
+        return "__HTTP_MONITOR_LIVE_V1_BEGIN__\n" + text + "\n__HTTP_MONITOR_LIVE_V1_END__=" + str(code) + "\n"
+
+    def parser(self):
+        parser = getattr(MONITOR, "parse_live_config_observation", None)
+        self.assertTrue(callable(parser), "monitor must collect its own same-connection live state")
+        return parser
+
+    def test_collector_retains_exact_live_bytes_from_its_one_batch_connection(self):
+        output = "__HOSTNAME_BEGIN__\nleaf01\n__HOSTNAME_END__\n" + self.frame(self.LIVE)
+        device = {**DEVICE, "ssh_user": "cumulus", "ssh_ips": [DEVICE["ip"]]}
+        with mock.patch.object(MONITOR, "run_command", return_value={"returncode": 0, "stdout": output, "stderr": ""}) as run:
+            result = MONITOR.collect_switch(device, 5, None, Path("/private/fixture-known-hosts"))
+        self.assertEqual({"kind": "ok", "text": self.LIVE, "sha256": hashlib.sha256(self.LIVE.encode()).hexdigest()}, result.get("live_config_observation"))
+        self.assertEqual(1, run.call_count)
+        self.assertIn("BatchMode=yes", run.call_args.args[0])
+        self.assertIn("nv config show", run.call_args.args[0][-1])
+
+    def test_missing_failed_ambiguous_or_truncated_frame_has_no_positive_digest(self):
+        valid = self.frame(self.LIVE)
+        for label, text in (
+            ("missing", "old apply and save complete"),
+            ("duplicate", valid + valid),
+            ("truncated", valid[:-5]),
+            ("nonzero", self.frame(self.LIVE, 23)),
+            ("empty", self.frame("")),
+            ("bad-status", self.frame(self.LIVE, "0junk")),
+            ("foreign-version", valid.replace("_V1_", "_V2_")),
+        ):
+            with self.subTest(case=label):
+                observation = self.parser()(text)
+                self.assertNotEqual("ok", observation["kind"])
+                self.assertEqual("", observation["sha256"])
+                self.assertEqual("", observation["text"])
+
+    def test_live_frame_independent_maximum_and_degenerate_budget(self):
+        # Version 1 accepts an independently fixed 8 MiB live payload; this
+        # fixture length does not come from a production constant.
+        text = "- set: {}\n#" + "x" * (8 * 1024 * 1024 - 12) + "\n"
+        self.assertEqual(8388608, len(text.encode()))
+        parsed = self.parser()(self.frame(text))
+        self.assertEqual("ok", parsed["kind"])
+        self.assertEqual(text, parsed["text"])
+        with mock.patch.object(MONITOR, "MAX_LIVE_CONFIG_BYTES", 8388607):
+            rejected = self.parser()(self.frame(text))
+            self.assertNotEqual("ok", rejected["kind"])
+            self.assertEqual("", rejected["sha256"])
+        self.assertNotEqual("ok", self.parser()(self.frame(text + "x"))["kind"])
+
+    def test_failed_attempt_cannot_supply_live_digest_to_another_connection(self):
+        device = {**DEVICE, "ssh_user": "cumulus", "ssh_ips": [DEVICE["ip"], "192.0.2.11"]}
+        with mock.patch.object(MONITOR, "run_command", side_effect=[
+            {"returncode": 255, "stdout": self.frame(self.LIVE), "stderr": "connection closed"},
+            {"returncode": 0, "stdout": "__HOSTNAME_BEGIN__\nleaf01\n__HOSTNAME_END__\n", "stderr": ""},
+        ]):
+            result = MONITOR.collect_switch(device, 5, None, Path("/private/fixture-known-hosts"))
+        self.assertEqual("192.0.2.11", result["connected_ip"])
+        self.assertEqual({"kind": "missing", "text": "", "sha256": ""}, result.get("live_config_observation"))
+
+    def test_actual_private_shell_monitor_and_manual_observe_same_raw_live_bytes(self):
+        script = getattr(MONITOR, "REMOTE_LIVE_CONFIG_SCRIPT", None)
+        self.assertIsInstance(script, str)
+        self.assertIn(script, MONITOR.REMOTE_SCRIPT)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            live = root / "live.yaml"
+            live.write_text(self.LIVE, encoding="utf-8")
+            for name, body in {
+                "hostname": 'printf "leaf01\\n"\n',
+                "cat": 'printf "02:00:00:00:00:01\\n"\n',
+                "nv": 'test "$*" = "config show" || exit 92\n/bin/cat "$LIVE"\nexit "$NV_EXIT"\n',
+            }.items():
+                executable = root / name
+                executable.write_text("#!/bin/sh\n" + body, encoding="utf-8")
+                executable.chmod(0o700)
+            for code in (0, 23):
+                with self.subTest(nv_exit=code):
+                    def execute(command):
+                        return subprocess.run(["/bin/sh", "-c", command], capture_output=True, text=True, check=False,
+                                              timeout=5, env={"PATH": str(root) + ":/usr/bin:/bin", "LIVE": str(live), "NV_EXIT": str(code)})
+                    observed = self.parser()(execute(script).stdout)
+                    client = mock.Mock(args=SimpleNamespace(command_timeout=5, ssh_password=False))
+                    client.run.side_effect = lambda _device, _host, command, **_kwargs: execute(command)
+                    if code:
+                        self.assertEqual("failed", observed["kind"])
+                        with self.assertRaises(MANUAL.ManualZtpError):
+                            MANUAL.collect_config_sync_live_state(client, DEVICE, DEVICE["ip"], "eth0")
+                    else:
+                        manual = MANUAL.collect_config_sync_live_state(client, DEVICE, DEVICE["ip"], "eth0")
+                        self.assertEqual(self.LIVE, observed["text"])
+                        self.assertEqual(manual, observed["text"])
+                        self.assertEqual(hashlib.sha256(self.LIVE.encode()).hexdigest(), observed["sha256"])
+
+    def test_real_collector_command_runs_full_remote_script_without_network_or_prior_receipt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            live = root / "live.yaml"
+            live.write_text(self.LIVE, encoding="utf-8")
+            trace = root / "trace"
+            bodies = {
+                "ssh": 'printf "SSH\\n" >> "$TRACE"\nfor argument do remote=$argument; done\nexec /bin/sh -c "$remote"\n',
+                "hostname": 'printf "hostname\\n" >> "$TRACE"\nprintf "leaf01\\n"\n',
+                "cat": 'case "$1" in /sys/class/net/eth0/address) printf "mac\\n" >> "$TRACE"; printf "02:00:00:00:00:01\\n";; /proc/sys/kernel/random/boot_id) printf "private-boot\\n";; *) exit 1;; esac\n',
+                "nv": 'test "$*" = "config show" || exit 92\nprintf "live\\n" >> "$TRACE"\n/bin/cat "$LIVE"\n',
+                "date": 'printf "1000\\n"\n',
+                "awk": 'exit 0\n',
+                "ls": 'exit 0\n',
+                "sudo": 'exit 0\n',
+                "journalctl": 'exit 0\n',
+            }
+            for name, body in bodies.items():
+                executable = root / name
+                executable.write_text("#!/bin/sh\n" + body, encoding="utf-8")
+                executable.chmod(0o700)
+            device = {**DEVICE, "ssh_user": "cumulus", "ssh_ips": [DEVICE["ip"]]}
+            with mock.patch.dict(os.environ, {"PATH": str(root) + ":/usr/bin:/bin", "TRACE": str(trace), "LIVE": str(live)}):
+                result = MONITOR.collect_switch(device, 5, None, root / "known-hosts")
+            self.assertEqual("ok", result["kind"], result["stderr"])
+            self.assertEqual("leaf01", result["remote_hostname"])
+            self.assertEqual(MAC, result["remote_eth0_mac"])
+            self.assertEqual(self.LIVE, result["live_config_observation"]["text"])
+            self.assertEqual(hashlib.sha256(self.LIVE.encode()).hexdigest(), result["live_config_observation"]["sha256"])
+            self.assertEqual(["SSH", "hostname", "mac", "live"], trace.read_text().splitlines())
+
+
 class ConfigSyncSingleConnectionProofTests(unittest.TestCase):
     LIVE = "- set:\n    system:\n      hostname: leaf01\n"
 

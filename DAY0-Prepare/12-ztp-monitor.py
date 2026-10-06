@@ -2325,6 +2325,18 @@ def correlate_server_events(devices: list[dict[str, Any]], dhcp_events: list[dic
     return owners
 
 
+# Raw observation only: this frame is not a durable configuration receipt or
+# a generation authority. Later stage promotion must bind current local era,
+# identity and expected configuration; log presence alone remains insufficient.
+MAX_LIVE_CONFIG_BYTES = 8 * 1024 * 1024
+REMOTE_LIVE_CONFIG_SCRIPT = r'''
+printf '__HTTP_MONITOR_LIVE_V1_BEGIN__\n'
+nv config show 2>/dev/null
+live_config_rc=$?
+printf '\n__HTTP_MONITOR_LIVE_V1_END__=%s\n' "$live_config_rc"
+'''
+
+
 REMOTE_SCRIPT = r'''
 set +e
 printf '__REMOTE_TIME_START_BEGIN__\n'
@@ -2408,6 +2420,7 @@ if [ -z "$failed" ]; then failed="/tmp/ztp/__MAC_PLAIN__.yaml"; fi
 if [ ! -f "$failed" ]; then failed=$(ls -1t /tmp/ztp/*.yaml 2>/dev/null | head -n 1); fi
 if [ -n "$failed" ]; then printf '__FILE__=%s\n' "$failed"; cat "$failed"; fi
 printf '__FAILED_YAML_END__\n'
+''' + REMOTE_LIVE_CONFIG_SCRIPT + r'''
 printf '__REMOTE_TIME_END_BEGIN__\n'
 date -u '+%s.%N' 2>/dev/null || date -u '+%s' 2>/dev/null || true
 printf '__REMOTE_TIME_END_END__\n'
@@ -2442,6 +2455,42 @@ def marker(text: str, name: str) -> str:
         rf"__{re.escape(name)}_BEGIN__\n(.*?)__{re.escape(name)}_END__", text, re.S
     )
     return match.group(1).strip() if match else ""
+
+
+def parse_live_config_observation(text: str) -> dict[str, str]:
+    """Retain exact raw bytes of one closed successful live-state frame.
+
+    This transport value carries no success authority on its own. Reject
+    ambiguous/truncated framing instead of borrowing logs or older digests.
+    The inserted newline before the end marker is framing, not NVUE output.
+    """
+    empty = {"kind": "invalid", "text": "", "sha256": ""}
+    begin = "__HTTP_MONITOR_LIVE_V1_BEGIN__\n"
+    end = "\n__HTTP_MONITOR_LIVE_V1_END__="
+    if not isinstance(text, str):
+        return empty
+    if begin not in text and end not in text:
+        return {**empty, "kind": "missing"}
+    if text.count(begin) != 1 or text.count(end) != 1:
+        return empty
+    head, _separator, rest = text.partition(begin)
+    if head and not head.endswith("\n"):
+        return empty
+    raw, _separator, tail = rest.partition(end)
+    status, separator, _remaining = tail.partition("\n")
+    if not separator or not re.fullmatch(r"0|[1-9][0-9]{0,2}", status):
+        return empty
+    if int(status) > 255:
+        return empty
+    if status != "0":
+        return {**empty, "kind": "failed"}
+    try:
+        payload = raw.encode("utf-8")
+    except UnicodeEncodeError:
+        return empty
+    if not payload or not raw.strip() or len(payload) > MAX_LIVE_CONFIG_BYTES:
+        return empty
+    return {"kind": "ok", "text": raw, "sha256": hashlib.sha256(payload).hexdigest()}
 
 
 def parse_remote_interface_macs(text: str) -> dict[str, str]:
@@ -2597,6 +2646,7 @@ def collect_switch(device: dict[str, Any], timeout: int, identity: Optional[Path
             "ifreload_log": "", "failed_yaml": "",
             "host_key_refreshed": False,
             "refreshed_host_key_targets": [], "host_key_commands": [],
+            "live_config_observation": {"kind": "missing", "text": "", "sha256": ""},
         }
 
     def connect(host: str, remote_script: str = REMOTE_SCRIPT) -> dict[str, Any]:
@@ -2689,6 +2739,11 @@ def collect_switch(device: dict[str, Any], timeout: int, identity: Optional[Path
         kind = "unreachable"
     return {
         "kind": kind, "returncode": result["returncode"], "stderr": stderr,
+        "live_config_observation": (
+            parse_live_config_observation(result["stdout"])
+            if result["returncode"] == 0
+            else {"kind": "failed", "text": "", "sha256": ""}
+        ),
         "connected_ip": connected_ip,
         "attempt_errors": attempt_errors,
         "attempts": attempts,
