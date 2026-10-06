@@ -1867,6 +1867,100 @@ FANupper        A3          M4      S4      OK     fan
 
 
 class ControlPlaneTests(unittest.TestCase):
+    def test_worker_state_requires_file_and_directory_sync_and_safe_rollback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory).resolve() / "status.json"
+            old = b'{"state":"failed","authority_revoked":true}\n'
+            path.write_bytes(old)
+            path.chmod(0o640)
+            real_sync = os.fsync
+            synced = []
+            def observe(descriptor):
+                synced.append("directory" if stat.S_ISDIR(os.fstat(descriptor).st_mode) else "file")
+                real_sync(descriptor)
+            with mock.patch.object(self.manual_worker.os, "fsync", side_effect=observe):
+                self.manual_worker.atomic_json(path, {"state": "failed", "authority_revoked": True})
+            self.assertEqual(["file", "directory"], synced)
+            for initially_present in (True, False):
+                with self.subTest(initially_present=initially_present):
+                    if initially_present:
+                        path.write_bytes(old)
+                        path.chmod(0o640)
+                    else:
+                        path.unlink()
+                    injected = False
+                    def fail_directory(descriptor):
+                        nonlocal injected
+                        if stat.S_ISDIR(os.fstat(descriptor).st_mode) and not injected:
+                            injected = True
+                            raise OSError("injected state directory sync failure")
+                        real_sync(descriptor)
+                    with mock.patch.object(self.manual_worker.os, "fsync", side_effect=fail_directory):
+                        with self.assertRaisesRegex(OSError, "directory sync failure"):
+                            self.manual_worker.atomic_json(path, {"state": "config_sync_success"})
+                    self.assertTrue(injected)
+                    if initially_present:
+                        self.assertEqual(old, path.read_bytes())
+                        self.assertEqual(0o640, stat.S_IMODE(path.stat().st_mode))
+                    else:
+                        self.assertFalse(path.exists())
+                    self.assertFalse(list(path.parent.glob(".status.json.*")))
+
+    def test_worker_state_rejects_and_retains_foreign_stage_and_late_image(self):
+        for mutation in ("symlink", "hardlink", "regular", "mode", "late-image"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                path = root / "status.json"
+                old = b'{"state":"failed","authority_revoked":true}\n'
+                path.write_bytes(old)
+                path.chmod(0o640)
+                foreign = root / "foreign.json"
+                image = b'{"state":"failed","reason":"foreign-writer"}\n'
+                foreign.write_bytes(image)
+                foreign.chmod(0o600)
+                real_sync = os.fsync
+                changed = []
+                def change_after_sync(descriptor):
+                    real_sync(descriptor)
+                    held = os.fstat(descriptor)
+                    if changed:
+                        return
+                    if mutation == "late-image":
+                        if stat.S_ISDIR(held.st_mode):
+                            changed.append(path)
+                            foreign.replace(path)
+                        return
+                    if not stat.S_ISREG(held.st_mode):
+                        return
+                    stages = list(root.glob(".status.json.*"))
+                    self.assertEqual(1, len(stages), "must hit the actual held stage")
+                    stage = stages[0]
+                    self.assertEqual(held.st_ino, stage.stat().st_ino)
+                    changed.append(stage)
+                    if mutation == "mode":
+                        stage.chmod(0o666)
+                    else:
+                        stage.unlink()
+                        if mutation == "symlink":
+                            stage.symlink_to(foreign)
+                        elif mutation == "hardlink":
+                            os.link(foreign, stage)
+                        else:
+                            stage.write_bytes(image)
+                            stage.chmod(0o600)
+                with mock.patch.object(self.manual_worker.os, "fsync", side_effect=change_after_sync):
+                    with self.assertRaises(OSError):
+                        self.manual_worker.atomic_json(path, {"state": "config_sync_success"})
+                self.assertEqual(1, len(changed))
+                if mutation == "late-image":
+                    self.assertEqual(image, path.read_bytes(), "never rollback over a foreign final image")
+                else:
+                    self.assertEqual(old, path.read_bytes())
+                    self.assertEqual(0o640, stat.S_IMODE(path.stat().st_mode))
+                    self.assertTrue(changed[0].exists(), "retain the changed stage as evidence")
+                    self.assertEqual(image, foreign.read_bytes())
+                    self.assertEqual(0o600, stat.S_IMODE(foreign.stat().st_mode))
+
     def bind_owned_config_receipt(self, project, result):
         """Positive fixture now includes a real local single-writer era.
 

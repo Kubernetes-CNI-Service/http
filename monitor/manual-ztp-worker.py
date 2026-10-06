@@ -15,9 +15,9 @@ import re
 import stat
 import subprocess
 import sys
-import tempfile
 import threading
 import time
+import uuid
 
 
 HTTP_ROOT = Path(__file__).resolve().parent.parent
@@ -62,25 +62,120 @@ def timestamp():
 
 
 def atomic_json(path, payload, mode=0o644):
+    """Durably replace only our held image; never clean up a foreign writer."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        existing = path.stat()
-    except OSError:
-        existing = None
-    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            json.dump(payload, stream, ensure_ascii=False, indent=2)
-            stream.write("\n")
+    parent_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY
+                        | os.O_NOFOLLOW | os.O_CLOEXEC)
+    temporary = None
+    staged = None
+    staged_fd = None
+    published = None
+    existing = None
+    previous = None
+
+    def identity(value):
+        if value is None:
+            return None
+        return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns,
+                value.st_ctime_ns, value.st_mode, value.st_uid, value.st_gid,
+                value.st_nlink)
+
+    def current(name):
+        try:
+            return os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+
+    def stable_parent():
+        visible = path.parent.lstat()
+        held = os.fstat(parent_fd)
+        if (not stat.S_ISDIR(visible.st_mode)
+                or (visible.st_dev, visible.st_ino) != (held.st_dev, held.st_ino)):
+            raise OSError("worker state parent changed")
+
+    def stage(contents, permissions, owner):
+        nonlocal temporary, staged, staged_fd
+        if staged_fd is not None:
+            os.close(staged_fd)
+            staged_fd = None
+        temporary = f".{path.name}.{uuid.uuid4().hex}.tmp"
+        staged = None
+        staged_fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                            | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=parent_fd)
+        staged = os.fstat(staged_fd)
+        with os.fdopen(os.dup(staged_fd), "wb") as stream:
+            stream.write(contents)
             stream.flush()
-            os.fsync(stream.fileno())
-        os.chmod(temporary, mode)
+        if owner is not None:
+            os.fchown(staged_fd, owner.st_uid, owner.st_gid)
+        os.fchmod(staged_fd, permissions)
+        staged = os.fstat(staged_fd)
+        os.fsync(staged_fd)
+        named = current(temporary)
+        if (named is None or not stat.S_ISREG(named.st_mode) or named.st_nlink != 1
+                or identity(staged) != identity(os.fstat(staged_fd))
+                or identity(staged) != identity(named)):
+            raise OSError("worker state stage changed")
+
+    try:
+        stable_parent()
+        existing = current(path.name)
         if existing is not None:
-            os.chown(temporary, existing.st_uid, existing.st_gid)
-        os.replace(temporary, path)
+            descriptor = os.open(path.name, os.O_RDONLY | os.O_NONBLOCK
+                                 | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
+            try:
+                held = os.fstat(descriptor)
+                if (not stat.S_ISREG(held.st_mode) or held.st_nlink != 1
+                        or identity(existing) != identity(held)):
+                    raise OSError("unsafe previous worker state")
+                with os.fdopen(os.dup(descriptor), "rb") as stream:
+                    previous = stream.read()
+                if (identity(existing) != identity(os.fstat(descriptor))
+                        or identity(existing) != identity(current(path.name))):
+                    raise OSError("previous worker state changed")
+            finally:
+                os.close(descriptor)
+        contents = (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+        stage(contents, mode, existing)
+        stable_parent()
+        if identity(existing) != identity(current(path.name)):
+            raise OSError("worker state destination changed")
+        os.replace(temporary, path.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        temporary = None
+        published = os.fstat(staged_fd)
+        # Rename may change ctime, but none of the other held metadata.
+        if (identity(staged)[:4] + identity(staged)[5:]
+                != identity(published)[:4] + identity(published)[5:]
+                or identity(published) != identity(current(path.name))):
+            raise OSError("worker state publication changed")
+        os.fsync(parent_fd)
+        stable_parent()
+        if (identity(published) != identity(os.fstat(staged_fd))
+                or identity(published) != identity(current(path.name))):
+            raise OSError("worker state changed during directory sync")
+    except Exception:
+        if published is not None:
+            if identity(current(path.name)) != identity(published):
+                raise OSError("worker state rollback refused: foreign final image")
+            if existing is None:
+                os.unlink(path.name, dir_fd=parent_fd)
+            else:
+                stage(previous, stat.S_IMODE(existing.st_mode), existing)
+                os.replace(temporary, path.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+                temporary = None
+            os.fsync(parent_fd)
+        raise
     finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+        try:
+            if temporary is not None:
+                named = current(temporary)
+                if (named is not None and stat.S_ISREG(named.st_mode)
+                        and named.st_nlink == 1 and identity(named) == identity(staged)):
+                    os.unlink(temporary, dir_fd=parent_fd)
+        finally:
+            if staged_fd is not None:
+                os.close(staged_fd)
+            os.close(parent_fd)
 
 
 def _read_json(path):

@@ -650,6 +650,34 @@ class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
                 current[field] for field in ("generation", "state", "veto", "operation_id")
             ))
 
+    def test_real_worker_cannot_leave_success_after_state_directory_sync_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve()
+            devices, receipt, produced, _summary = self.worker_bundle(project)
+            status_dir = project / "worker-status"
+            status_dir.mkdir()
+            status_path = status_dir / "status.json"
+            real_sync = os.fsync
+            injected = False
+            def fail_success_directory_sync(descriptor):
+                nonlocal injected
+                held = os.fstat(descriptor)
+                if (stat.S_ISDIR(held.st_mode) and held.st_ino == status_dir.stat().st_ino
+                        and status_path.exists() and not injected):
+                    value = json.loads(status_path.read_text())
+                    if value.get("devices", {}).get("EXAMPLE-Leaf01", {}).get("state") == "config_sync_success":
+                        injected = True
+                        raise OSError("injected worker success directory durability failure")
+                real_sync(descriptor)
+            with mock.patch.object(self.worker.os, "fsync", side_effect=fail_success_directory_sync):
+                with self.assertRaisesRegex(OSError, "success directory durability failure"):
+                    self.run_worker_once(project, devices)
+            self.assertTrue(injected)
+            saved = json.loads(status_path.read_text())
+            self.assertNotEqual("config_sync_success", saved["devices"].get("EXAMPLE-Leaf01", {}).get("state"))
+            self.assertEqual(produced, json.loads(receipt.read_text()))
+            self.assertFalse(list(status_dir.glob(".status.json.*")))
+
     def test_real_worker_rejects_writer_receipt_with_unsafe_mode_or_foreign_owner(self):
         with tempfile.TemporaryDirectory() as directory:
             receipt, produced = self.published_receipt(Path(directory).resolve())
