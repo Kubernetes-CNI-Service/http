@@ -24,6 +24,57 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
+    def test_initial_method_reader_latches_own_era_and_withdraws_drift_without_nine_stage_laundering(self):
+        from test_cases.module_loader import load_script
+        from test_cases.test_config_sync_authority import ConfigSyncAuthorityTests
+        monitor = load_script("f02_initial_current_method_reader", ROOT / "DAY0-Prepare/12-ztp-monitor.py")
+        html = load_script("f02_initial_current_method_html", ROOT / "monitor/generate-monitor-html.py")
+        authority = monitor.config_sync_authority
+        reconcile = getattr(monitor, "apply_current_initial_method_authority", None)
+        self.assertTrue(callable(reconcile), "initial-setup authority needs a current reader, not a bootstrap receipt")
+        for case in ("positive", "drift", "late-new-writer", "late-read-error"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve() / "configuration-methods"
+                ticket = authority.begin_method(root, "IB01", "initial-own", "initial-own-IB01", "initial_setup_managed")
+                receipt = ConfigSyncAuthorityTests.method_receipt_v2(ticket, hostname="IB01", type="ib", config_method="initial-setup",
+                    trigger_source="initial_setup_managed", transport_ip="192.0.2.10", mac_plain="020000000001",
+                    live_state_sha256="a" * 64, input_sha256="b" * 64, source_receipt_sha256="c" * 64)
+                authority.finish_method(root, ticket, receipt)
+                captured = authority.read_method_current(root, "IB01")
+                proof = {"schema_version": 1, "hostname": "IB01", "batch_identity_verified": True, "config_verified": case != "drift",
+                         "interface": "eth0", "transport_ip": "192.0.2.10", "mac_plain": "020000000001",
+                         "live_state_sha256": "a" * 64, "input_sha256": "b" * 64, "observation_sha256": "c" * 64,
+                         "reason": "" if case != "drift" else "independent missing installed key"}
+                device = {"hostname": "IB01", "type": "ib", "config_method": "initial-setup", "ip": "192.0.2.10",
+                          "mac_plain": "020000000001", "ztp_round": 1, "observed_at": "2026-10-07T07:00:00+08:00",
+                          "configuration_source_observation": {"reason": "old unrelated bootstrap"},
+                          "issues": [], "events": [], "stages": {name: monitor.stage("pending") for name in monitor.STAGE_NAMES}}
+                with ExitStack() as stack:
+                    if case == "late-read-error":
+                        real_read = authority.read_method_receipt
+                        stack.enter_context(mock.patch.object(authority, "read_method_receipt", side_effect=(receipt, authority.AuthorityError("late read fault"))))
+                    elif case == "late-new-writer":
+                        real_read = authority.read_method_receipt
+                        inserted = False
+                        def concurrent_writer(*args):
+                            nonlocal inserted
+                            value = real_read(*args)
+                            if not inserted:
+                                inserted = True
+                                authority.begin_method(root, "IB01", "newer", "newer-IB01", "initial_setup_managed")
+                            return value
+                        stack.enter_context(mock.patch.object(authority, "read_method_receipt", side_effect=concurrent_writer))
+                    reconcile(device, root, captured, proof, "b" * 64)
+                self.assertEqual("success" if case == "positive" else "warning", device["stages"]["config_apply"]["status"])
+                current = authority.read_method_current(root, "IB01")
+                self.assertEqual("success" if case == "positive" else "pending" if case == "late-new-writer" else "failed", current["state"])
+                self.assertEqual(2 if case == "late-new-writer" else 1, current["generation"])
+                monitor.finalize_device(device)
+                self.assertNotEqual("success", device["overall"])
+                self.assertFalse(monitor.completion_handoff_device_complete(device))
+                self.assertFalse(html.ztp_completed(device))
+                self.assertEqual("pending" if case == "positive" else "warning", device["stages"]["complete"]["status"])
+
     def test_monitor_once_mints_method_boundary_before_session_and_rechecks_current_release_input(self):
         from test_cases.module_loader import load_script
         from test_cases import test_load_release_transaction as fixture_module

@@ -239,6 +239,11 @@ class ManagedInitialMethodCycle:
 
 def monitor_source_observation_allows_completion(device):
     """Explicit bootstrap source veto, not current generation/application proof."""
+    if device.get("config_method") == "initial-setup":
+        # The initial executor's source is not the ZTP bootstrap. An explicit
+        # current method proof is still required; absence is never success.
+        return ("configuration_method_authority" in device
+                and monitor_method_observation_allows_completion(device))
     if "configuration_source_observation" not in device:
         return True
     observed = device["configuration_source_observation"]
@@ -287,6 +292,17 @@ def monitor_method_observation_allows_completion(device):
         receipt = decode_method_receipt(wire(device["configuration_method_authority"]))
     except (AuthorityError, TypeError, UnicodeError):
         return False
+    if receipt["config_method"] == "initial-setup":
+        observed = device.get("configuration_method_observation")
+        if (receipt["state"] != "success" or receipt["trigger_source"] != "initial_setup_managed"
+                or not initial_method_observation_verified(device, observed)
+                or not monitor_live_observation_verified(device)):
+            return False
+        fresh = device["configuration_observation"]
+        return (all(receipt[field] == observed[field] == fresh[field] for field in (
+                    "hostname", "interface", "transport_ip", "mac_plain", "live_state_sha256"))
+                and receipt["input_sha256"] == observed["input_sha256"]
+                and receipt["source_receipt_sha256"] == observed["observation_sha256"])
     if (receipt["state"] != "success" or receipt["config_method"] != "ztp"
             or receipt["trigger_source"] != "ztp_monitor_cycle"
             or device.get("config_method") != receipt["config_method"]
@@ -301,6 +317,32 @@ def monitor_method_observation_allows_completion(device):
                 "hostname", "interface", "transport_ip", "mac_plain", "live_state_sha256"))
             and receipt["input_sha256"] == source.get("raw_sha256")
             and receipt["source_receipt_sha256"] == source.get("source_fingerprint"))
+
+
+def initial_method_observation_verified(device, observed):
+    """Pure closed own-session projection, never an era or persisted proof."""
+    fields = {"schema_version", "hostname", "batch_identity_verified", "config_verified", "interface",
+              "transport_ip", "mac_plain", "live_state_sha256", "input_sha256", "observation_sha256", "reason"}
+    if (not isinstance(observed, dict) or set(observed) != fields
+            or type(observed["schema_version"]) is not int or observed["schema_version"] != 1
+            or observed["batch_identity_verified"] is not True or observed["config_verified"] is not True
+            or any(not isinstance(observed[field], str) for field in fields - {
+                "schema_version", "batch_identity_verified", "config_verified"})
+            or observed["reason"] != "" or device.get("type") != "ib"
+            or device.get("config_method") != "initial-setup" or observed["interface"] != "eth0"
+            or observed["hostname"] != device.get("hostname")
+            or observed["transport_ip"] != device.get("ip")
+            or not all(DIGEST.fullmatch(observed[field]) for field in (
+                "live_state_sha256", "input_sha256", "observation_sha256"))):
+        return False
+    mac = device.get("mac_plain") or device.get("mac")
+    try:
+        address = ipaddress.ip_address(observed["transport_ip"])
+    except ValueError:
+        return False
+    return (address.version == 4 and isinstance(mac, str)
+            and re.fullmatch(r"(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}|[0-9A-Fa-f]{12}", mac) is not None
+            and observed["mac_plain"] == mac.replace(":", "").lower())
 
 
 def monitor_live_observation_verified(device):

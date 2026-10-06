@@ -2873,6 +2873,65 @@ def finish_monitor_method_cycle(
             set_stage(device, "config_apply", "warning", "当前方法配置不可晋升：" + reason, observed_at)
 
 
+def apply_current_initial_method_authority(
+    device: dict[str, Any], root: Path, expected: Optional[dict[str, Any]],
+    observation: dict[str, Any], expected_input_sha256: str,
+) -> None:
+    """Consume a pre-session local era and independently observed initial input.
+
+    Caller must capture/recheck its current project profile and perform the
+    fresh initial-setup observer in this cycle. Never feed a saved report as
+    observation. This consumer does not begin a writer or synthesize nine
+    stages; it can withdraw only the exact completed era captured beforehand.
+    """
+    hostname = device["hostname"]
+    device["configuration_method_observation"] = copy.deepcopy(observation)
+    device["configuration_observation"] = {
+        "schema_version": 1, "source": "monitor_batchmode", "batch_identity_verified": False,
+        "hostname": "", "interface": "", "transport_ip": "", "mac_plain": "",
+        "live_state_sha256": "", "reason": "initial-method-observation-not-verified",
+    }
+    matched = False
+    reason = "initial-method-current-era-not-verified"
+    try:
+        if not isinstance(expected, dict):
+            raise ValueError("initial method has no captured writer era")
+        config_sync_authority.decode_method_journal(config_sync_authority.wire(expected), expected["source_identity"])
+        if (expected["hostname"] != hostname or expected["state"] != "success"
+                or expected["trigger_source"] != "initial_setup_managed"
+                or config_sync_authority.read_method_current(root, hostname) != expected):
+            raise ValueError("initial method current era changed or is not completed")
+        receipt = config_sync_authority.read_method_receipt(root, hostname)
+        if (not config_sync_authority.initial_method_observation_verified(device, observation)
+                or observation["input_sha256"] != expected_input_sha256):
+            raise ValueError("initial method own observation does not match current inputs")
+        device["configuration_observation"] = {
+            "schema_version": 1, "source": "monitor_batchmode", "batch_identity_verified": True, "reason": "",
+            **{field: observation[field] for field in (
+                "hostname", "interface", "transport_ip", "mac_plain", "live_state_sha256")},
+        }
+        device["configuration_method_authority"] = receipt
+        if not config_sync_authority.monitor_method_observation_allows_completion(device):
+            raise ValueError("initial method receipt differs from this cycle's own observation")
+        if (config_sync_authority.read_method_receipt(root, hostname) != receipt
+                or config_sync_authority.read_method_current(root, hostname) != expected):
+            raise ValueError("initial method era or receipt changed after held read")
+        matched = True
+    except (OSError, ValueError, TypeError, KeyError, UnicodeError) as exc:
+        reason = str(exc)
+        device["configuration_method_authority"] = {"state": "veto", "reason": reason}
+        if isinstance(expected, dict) and expected.get("state") == "success":
+            try:
+                config_sync_authority.revoke_method(root, hostname, expected=expected)
+            except (OSError, ValueError, TypeError, KeyError, UnicodeError):
+                pass  # Unsafe/uncertain storage is a veto, never a repair opportunity.
+    if device["stages"]["config_apply"]["status"] != "failed":
+        device["stages"]["config_apply"] = stage(
+            "success" if matched else "warning", "本轮 initial-setup 身份与配置一致" if matched else reason,
+            str(device.get("observed_at") or ""), device.get("ztp_round", 0),
+        )
+
+
 def _method_release_text(project: Path, relative: Path) -> str:
     """Bounded held-descriptor read of an owned, immutable release member.
 
@@ -4000,8 +4059,15 @@ def finalize_device(device: dict[str, Any]) -> None:
             "AUTHORITY_VETO_INVALID", "CURRENT_NINE_STAGE_PROOF_INCOMPLETE", "APPLIED_CONFIG_SOURCE_NOT_VERIFIED",
         }
     ]
-    if (not config_sync_authority.monitor_source_observation_allows_completion(device)
-            or not config_sync_authority.monitor_method_observation_allows_completion(device)):
+    initial_not_attempted = (
+        device.get("config_method") == "initial-setup"
+        and not any(field in device for field in (
+            "configuration_observation", "configuration_method_observation", "configuration_method_authority"))
+        and all(device["stages"][name]["status"] == "pending" for name in STAGE_NAMES)
+    )
+    if (not initial_not_attempted and (
+            not config_sync_authority.monitor_source_observation_allows_completion(device)
+            or not config_sync_authority.monitor_method_observation_allows_completion(device))):
         manual_apply_verified = config_sync_authority.monitor_current_config_sync_allows_application(device)
         for name in ("config_apply", "complete"):
             if name == "config_apply" and manual_apply_verified:

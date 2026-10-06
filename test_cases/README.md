@@ -139,7 +139,13 @@ direct 覆盖漂移、冲突、期望中途修改、密钥替换和不安全文�
 由 owned/single-link/no-follow 有限读取绑定，重新验证 cache/parser 后再次核验输入与项目根。
 操作前 pending，完成后同会话观察及发布后重读；失败撤销自己的当前代次，不触碰新写者。
 默认单文件离线入口不依赖后端、不产生方法权威；REQ10B 密钥探针和 REQ10C 的 cron 条件不变。
-这不补造其他九阶段，也不代表 F02 整体验收；initial-setup 消费端与完整方法
+initial-setup 消费端原语 `apply_current_initial_method_authority` 只消费操作前捕获的已完成本地代次，
+核验本轮闭合身份/配置观察、显式当前输入摘要，并在 held 收据读取后再次核验代次与字节。
+缺失、漂移和晚期失败只撤销该原代次；pending 或较新写者不被撤销。它不创建 generation，
+不借 bootstrap 来源、不补造九阶段，未尝试设备仍 pending。direct 与 backend → monitor → HTML
+流程覆盖正向、漂移、晚期读取错误、较新写者和完成拒绝；当前 monitor_once 尚未接入此原语，
+调用方仍须提供本轮实际 observer 和前后项目输入复核，不能把保存的报告作为观察传入。
+这不补造其他九阶段，也不代表 F02 整体验收；initial-setup 消费端主流程接入与完整方法
 生命周期仍需继续实现、测试，真机保持 `REAL_ENVIRONMENT.md` 的 NOT RUN。
 
 1. 功能或缺陷修复必须先在 `test_<area>.py` 中增加可稳定复现的案例，再修改实现。

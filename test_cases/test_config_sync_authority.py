@@ -16,6 +16,38 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSyncAuthorityTests(unittest.TestCase):
+    def test_initial_method_projection_requires_own_fresh_configuration_not_bootstrap(self):
+        receipt = self.method_receipt_v2(hostname="IB01", type="ib", config_method="initial-setup",
+                                         trigger_source="initial_setup_managed")
+        fresh = {"schema_version": 1, "hostname": "IB01", "batch_identity_verified": True, "config_verified": True,
+                 "interface": "eth0", "transport_ip": "192.0.2.10", "mac_plain": "020000000001",
+                 "live_state_sha256": "a" * 64, "input_sha256": "b" * 64, "observation_sha256": "c" * 64, "reason": ""}
+        receipt.update(transport_ip="192.0.2.10", live_state_sha256="a" * 64, input_sha256="b" * 64,
+                       source_receipt_sha256="c" * 64)
+        device = {"hostname": "IB01", "type": "ib", "config_method": "initial-setup", "ip": "192.0.2.10",
+                  "mac_plain": "020000000001", "configuration_method_authority": receipt,
+                  "configuration_method_observation": fresh,
+                  "configuration_observation": {"schema_version": 1, "source": "monitor_batchmode", "hostname": "IB01",
+                    "batch_identity_verified": True, "interface": "eth0", "transport_ip": "192.0.2.10",
+                    "mac_plain": "020000000001", "live_state_sha256": "a" * 64, "reason": ""}}
+        self.assertTrue(self.authority.monitor_method_observation_allows_completion(device))
+        self.assertTrue(self.authority.monitor_source_observation_allows_completion(
+            {**device, "configuration_source_observation": {"reason": "unrelated old bootstrap"}}),
+            "a current initial-setup proof must not depend on bootstrap provenance")
+        self.assertFalse(self.authority.monitor_source_observation_allows_completion(
+            {key: value for key, value in device.items() if key != "configuration_method_authority"}),
+            "initial-setup has no implicit completion authority")
+        for update in ({"config_verified": 1}, {"batch_identity_verified": 1}, {"input_sha256": "d" * 64},
+                       {"hostname": "IB02"}, {"transport_ip": "192.0.2.11"}, {"mac_plain": "020000000002"},
+                       {"live_state_sha256": "d" * 64}, {"generation": 1}, {"reason": "stale"}):
+            with self.subTest(update=update):
+                self.assertFalse(self.authority.monitor_method_observation_allows_completion(
+                    {**device, "configuration_method_observation": {**fresh, **update}}))
+        self.assertFalse(self.authority.monitor_method_observation_allows_completion(
+            {key: value for key, value in device.items() if key != "configuration_method_observation"}))
+        self.assertFalse(self.authority.monitor_method_observation_allows_completion(
+            {**device, "type": "nvl"}))
+
     def test_managed_initial_profile_root_is_the_explicit_project_not_loaded_code(self):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory).resolve()
