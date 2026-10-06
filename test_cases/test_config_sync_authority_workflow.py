@@ -24,6 +24,38 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
+    def test_real_writer_stage_rebind_cannot_mint_current_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve()
+            client, prepared, _text = self.fixture(project)
+            root = project / "99-output-ztp/manual-config-sync"
+            ticket = self.manual.config_sync_authority.begin(root, "EXAMPLE-Leaf01", "op-1", "trigger-1", "manual_config_sync_cli")
+            foreign = project / "foreign.json"
+            image = b'{"state":"triggered","reason":"foreign"}\n'
+            foreign.write_bytes(image)
+            real_sync = os.fsync
+            changed = []
+            def replace_result_stage(descriptor):
+                real_sync(descriptor)
+                if changed or not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                    return
+                stages = list(root.glob("first/EXAMPLE-Leaf01/.result.json.*"))
+                if not stages:
+                    return
+                self.assertEqual(1, len(stages))
+                stage = stages[0]
+                self.assertEqual(os.fstat(descriptor).st_ino, stage.stat().st_ino)
+                stage.unlink()
+                stage.symlink_to(foreign)
+                changed.append(stage)
+            with mock.patch.object(self.manual.os, "fsync", side_effect=replace_result_stage):
+                with self.assertRaises(OSError):
+                    self.run_writer(project, client, prepared, run="first", ticket=ticket)
+            self.assertEqual(1, len(changed))
+            self.assertTrue(changed[0].is_symlink())
+            self.assertEqual(image, foreign.read_bytes())
+            self.assertEqual(ticket, self.manual.config_sync_authority.read_current(root, "EXAMPLE-Leaf01"))
+
     def test_worker_receipt_wire_budget_rejects_and_retains_padding_without_truncation(self):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory).resolve()

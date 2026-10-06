@@ -383,6 +383,10 @@ Production host-key mismatch 默认 fail closed，只有单台完整 hostname �
 固定读取预算 16384 B；退化到正例长度减一须拒绝。超过原始文件预算的空白填充也拒绝并
 保留原字节，不以解析后的小对象掩盖超限；未知成员或无版本旧配置回执不能晋升。
 这条 schema 不改变 ZTP/reset 旧收据的读取合同，也不关闭 F02 其他消费端工作。
+manual writer 的 result/summary 发布同样校验暂存 FD 与命名对象的完整身份；同步期间的
+链接、文件和权限置换不能被 rename 为本写者成功，外来最终像不能被回退覆盖。
+目录同步失败恢复仍属于本写者的旧像及原权限，新增父目录的目录项也逐级 fsync。
+真实 writer 的 result stage 被置换时，本地 journal 保持 pending/veto，不铸造成功。
 `test_config_sync_authority_workflow.py` 执行真实 manual writer → journal/receipt：
 同会话身份和 live digest 只绑定自身代次；下一轮失败先撤销旧成功，preview 不改代次，
 最终目录同步期间的 journal/witness rebind 拒绝并保留外来对象。真实 worker 读取本代回执

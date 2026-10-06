@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import os
+import stat
 import sys
 from contextlib import redirect_stderr
 from datetime import datetime, timedelta, timezone
@@ -1363,6 +1364,85 @@ class ConfirmAppliedFingerprintTests(unittest.TestCase):
 
 
 class ManualReceiptPublicationBoundaryTests(unittest.TestCase):
+    def test_new_receipt_parent_entries_are_synced_before_publication(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            target = root / "new-run" / "leaf1" / "result.json"
+            observed = []
+            real_sync = os.fsync
+            def observe(descriptor):
+                held = os.fstat(descriptor)
+                if stat.S_ISDIR(held.st_mode):
+                    observed.append((held.st_dev, held.st_ino))
+                real_sync(descriptor)
+            with mock.patch.object(MANUAL.os, "fsync", side_effect=observe):
+                MANUAL.atomic_json(target, {"state": "failed"})
+            expected = [(p.stat().st_dev, p.stat().st_ino)
+                        for p in (root, root / "new-run", target.parent)]
+            self.assertEqual(expected, observed)
+            self.assertEqual({"state": "failed"}, json.loads(target.read_text()))
+
+    def test_manual_receipt_rollback_preserves_old_image_and_foreign_stage(self):
+        for mutation in ("directory-failure", "symlink", "hardlink", "regular", "mode", "late-image"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                target = root / "result.json"
+                old = b'{"state":"failed","reason":"prior-veto"}\n'
+                target.write_bytes(old)
+                target.chmod(0o640)
+                foreign = root / "foreign.json"
+                image = b'{"state":"failed","reason":"foreign-writer"}\n'
+                foreign.write_bytes(image)
+                foreign.chmod(0o600)
+                real_sync = os.fsync
+                changed = []
+                def inject(descriptor):
+                    held = os.fstat(descriptor)
+                    if mutation == "directory-failure" and stat.S_ISDIR(held.st_mode) and not changed:
+                        changed.append(target)
+                        raise OSError("injected manual receipt directory sync failure")
+                    real_sync(descriptor)
+                    if changed:
+                        return
+                    if mutation == "late-image":
+                        if stat.S_ISDIR(held.st_mode):
+                            changed.append(target)
+                            foreign.replace(target)
+                        return
+                    if mutation == "directory-failure" or not stat.S_ISREG(held.st_mode):
+                        return
+                    stages = list(root.glob(".result.json.*"))
+                    self.assertEqual(1, len(stages))
+                    stage = stages[0]
+                    self.assertEqual(held.st_ino, stage.stat().st_ino)
+                    changed.append(stage)
+                    if mutation == "mode":
+                        stage.chmod(0o666)
+                    else:
+                        stage.unlink()
+                        if mutation == "symlink":
+                            stage.symlink_to(foreign)
+                        elif mutation == "hardlink":
+                            os.link(foreign, stage)
+                        else:
+                            stage.write_bytes(image)
+                            stage.chmod(0o600)
+                with mock.patch.object(MANUAL.os, "fsync", side_effect=inject):
+                    with self.assertRaises(OSError):
+                        MANUAL.atomic_json(target, {"state": "triggered"})
+                self.assertEqual(1, len(changed))
+                if mutation == "late-image":
+                    self.assertEqual(image, target.read_bytes())
+                else:
+                    self.assertEqual(old, target.read_bytes())
+                    self.assertEqual(0o640, stat.S_IMODE(target.stat().st_mode))
+                    self.assertEqual(image, foreign.read_bytes())
+                    self.assertEqual(0o600, stat.S_IMODE(foreign.stat().st_mode))
+                    if mutation == "directory-failure":
+                        self.assertFalse(list(root.glob(".result.json.*")))
+                    else:
+                        self.assertTrue(changed[0].exists(), "retain a foreign stage")
+
     def test_rebind_after_visible_check_cannot_redirect_fd_relative_rename(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()

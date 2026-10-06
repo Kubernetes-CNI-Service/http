@@ -2030,6 +2030,8 @@ def _open_receipt_parent(path: Path, *, create: bool) -> int:
                     os.mkdir(component, 0o700, dir_fd=descriptor)
                 except FileExistsError:
                     pass
+                else:
+                    os.fsync(descriptor)
             try:
                 child = os.open(component, flags, dir_fd=descriptor)
             except OSError:
@@ -2072,47 +2074,111 @@ def _assert_receipt_parent_bound(path: Path, parent_fd: int) -> None:
 
 
 def atomic_json(path: Path, value: dict) -> None:
+    """Publish a durable held image, preserving foreign replacement evidence."""
     parent_fd = _open_receipt_parent(path, create=True)
-    stage = f".{path.name}.{uuid.uuid4().hex}.tmp"
-    staged = False
-    renamed = False
-    existed = False
-    published = False
-    try:
+    temporary = None
+    staged = None
+    staged_fd = None
+    published = None
+    existing = None
+    previous = None
+
+    def identity(item):
+        if item is None:
+            return None
+        return (item.st_dev, item.st_ino, item.st_size, item.st_mtime_ns,
+                item.st_ctime_ns, item.st_mode, item.st_uid, item.st_gid, item.st_nlink)
+
+    def current(name):
         try:
-            current = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+            return os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
         except FileNotFoundError:
-            pass
-        else:
-            if not stat.S_ISREG(current.st_mode) or current.st_nlink != 1:
-                raise ValueError("unsafe manual receipt target")
-            existed = True
-        descriptor = os.open(
-            stage,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
-            0o600,
-            dir_fd=parent_fd,
-        )
-        staged = True
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            json.dump(value, stream, ensure_ascii=False, indent=2)
-            stream.write("\n")
+            return None
+
+    def stage(contents, permissions, owner):
+        nonlocal temporary, staged, staged_fd
+        if staged_fd is not None:
+            os.close(staged_fd)
+            staged_fd = None
+        temporary = f".{path.name}.{uuid.uuid4().hex}.tmp"
+        staged = None
+        staged_fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                            | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=parent_fd)
+        staged = os.fstat(staged_fd)
+        with os.fdopen(os.dup(staged_fd), "wb") as stream:
+            stream.write(contents)
             stream.flush()
-            os.fsync(stream.fileno())
+        if owner is not None:
+            os.fchown(staged_fd, owner.st_uid, owner.st_gid)
+        os.fchmod(staged_fd, permissions)
+        staged = os.fstat(staged_fd)
+        os.fsync(staged_fd)
+        named = current(temporary)
+        if (named is None or not stat.S_ISREG(named.st_mode) or named.st_nlink != 1
+                or identity(staged) != identity(os.fstat(staged_fd))
+                or identity(staged) != identity(named)):
+            raise OSError("manual receipt stage changed")
+
+    try:
+        existing = current(path.name)
+        if existing is not None:
+            if not stat.S_ISREG(existing.st_mode) or existing.st_nlink != 1:
+                raise ValueError("unsafe manual receipt target")
+            descriptor = os.open(path.name, os.O_RDONLY | os.O_NONBLOCK
+                                 | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
+            try:
+                held = os.fstat(descriptor)
+                if (not stat.S_ISREG(held.st_mode) or held.st_nlink != 1
+                        or identity(existing) != identity(held)):
+                    raise OSError("previous manual receipt changed")
+                with os.fdopen(os.dup(descriptor), "rb") as stream:
+                    previous = stream.read()
+                if (identity(existing) != identity(os.fstat(descriptor))
+                        or identity(existing) != identity(current(path.name))):
+                    raise OSError("previous manual receipt changed")
+            finally:
+                os.close(descriptor)
+        contents = (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+        stage(contents, 0o600, existing)
         _assert_receipt_parent_bound(path, parent_fd)
-        # Both paths are anchored to the held directory, even if the visible
-        # project path is rebound after the check.
-        os.rename(stage, path.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
-        renamed = True
+        if identity(existing) != identity(current(path.name)):
+            raise OSError("manual receipt destination changed")
+        os.rename(temporary, path.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        temporary = None
+        published = os.fstat(staged_fd)
+        # Rename may change ctime, but no other held stage metadata.
+        if (identity(staged)[:4] + identity(staged)[5:]
+                != identity(published)[:4] + identity(published)[5:]
+                or identity(published) != identity(current(path.name))):
+            raise OSError("manual receipt publication changed")
         os.fsync(parent_fd)
         _assert_receipt_parent_bound(path, parent_fd)
-        published = True
+        if (identity(published) != identity(os.fstat(staged_fd))
+                or identity(published) != identity(current(path.name))):
+            raise OSError("manual receipt changed during directory sync")
+    except Exception:
+        if published is not None:
+            if identity(current(path.name)) != identity(published):
+                raise OSError("manual receipt rollback refused: foreign final image")
+            if existing is None:
+                os.unlink(path.name, dir_fd=parent_fd)
+            else:
+                stage(previous, stat.S_IMODE(existing.st_mode), existing)
+                os.rename(temporary, path.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+                temporary = None
+            os.fsync(parent_fd)
+        raise
     finally:
-        if staged and not renamed:
-            os.unlink(stage, dir_fd=parent_fd)
-        if renamed and not published and not existed:
-            os.unlink(path.name, dir_fd=parent_fd)
-        os.close(parent_fd)
+        try:
+            if temporary is not None:
+                named = current(temporary)
+                if (named is not None and stat.S_ISREG(named.st_mode)
+                        and named.st_nlink == 1 and identity(named) == identity(staged)):
+                    os.unlink(temporary, dir_fd=parent_fd)
+        finally:
+            if staged_fd is not None:
+                os.close(staged_fd)
+            os.close(parent_fd)
 
 
 def acquire_operation_lock(output_root: Path, hostname: str) -> int:
