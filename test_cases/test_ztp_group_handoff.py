@@ -539,6 +539,30 @@ class CurrentRoundCompletionTests(unittest.TestCase):
                     ),
                 )
 
+    def test_current_nonboolean_authority_flag_cannot_complete_or_handoff(self):
+        for flag in (0, "", None):
+            with self.subTest(flag=flag):
+                row = round_device("Leaf01", "eth")
+                row["round_authority_invalid"] = flag
+                MONITOR.finalize_device(row)
+                self.assertNotEqual("success", row["overall"])
+                self.assertEqual(
+                    {}, MONITOR.ready_completion_handoff_reports(
+                        {"scope": "prod", "devices": [row]},
+                    ),
+                )
+
+        valid = round_device("Leaf01", "eth")
+        valid["round_authority_invalid"] = False
+        MONITOR.finalize_device(valid)
+        self.assertEqual("success", valid["overall"])
+        self.assertEqual(
+            ["prod-ethernet"],
+            list(MONITOR.ready_completion_handoff_reports(
+                {"scope": "prod", "devices": [valid]},
+            )),
+        )
+
     def test_malformed_persisted_stage_container_cannot_promote_or_handoff(self):
         for stages in (None, []):
             with self.subTest(stages=stages):
@@ -616,6 +640,8 @@ class CurrentRoundGateWorkflowTests(unittest.TestCase):
             forged_round["ztp_round"] = True
             forged_stage = round_device("Leaf01", "eth", round_index=1)
             forged_stage["stages"]["config_apply"]["success_index"] = True
+            forged_current_authority = round_device("Leaf01", "eth")
+            forged_current_authority["round_authority_invalid"] = 0
 
             with mock.patch.dict(MONITOR.COLLECTOR_SCRIPTS, {"ethernet": collector}), \
                     mock.patch.object(MONITOR, "run_command", side_effect=external_collector), \
@@ -636,6 +662,7 @@ class CurrentRoundGateWorkflowTests(unittest.TestCase):
                     ),
                     forged_round,
                     forged_stage,
+                    forged_current_authority,
                     forged_manual_boot_evidence_device(),
                     forged_reset_reboot_device(),
                     forged_future_previous_receipt_device(),

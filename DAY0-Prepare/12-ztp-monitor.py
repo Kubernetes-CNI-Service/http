@@ -3318,6 +3318,7 @@ def finalize_device(device: dict[str, Any]) -> None:
         device["overall"] = "warning"
     elif (done == len(STAGE_NAMES)
           and device["stages"]["complete"]["status"] == "success"
+          and device.get("round_authority_invalid", False) is False
           and (device.get("manual_operation") != "reset"
                or device.get("reset_reboot_observed") is True)
           and stage_success_index("complete") == current_round):
@@ -4632,7 +4633,7 @@ def completion_handoff_device_complete(device: Any) -> bool:
             or device.get("unbound_identity")
             or device.get("identity_pending")
             or device.get("promotion_pending")
-            or device.get("round_authority_invalid")
+            or device.get("round_authority_invalid", False) is not False
             or device.get("overall") not in {"success", "warning"}):
         return False
     try:
