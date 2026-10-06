@@ -257,9 +257,7 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 保存 result/summary、worker 状态、页面与归档的前后摘要及拒绝原因。只清理本案隔离
   项目副本，设备配置按事先批准的回滚源恢复并复核；风险是错误成功会掩盖实际配置漂移。
 
-## TC-REAL-F02-8-001 — 设备收据持久化、断电边界与读取身份
-
-### TC-REAL-F02-PUBLICATION-HOLD-001 — 应用/升级前撤销与监控负向否决
+## TC-REAL-F02-PUBLICATION-HOLD-001 — 应用/升级前撤销与监控负向否决
 
 - 对应 F02-8/9；类型：transaction / integration / real-environment；状态：**NOT RUN / REAL_ENV REQUIRED**。
   本地 direct：`test_ztp_applied_receipt.py`、`test_monitor_stack_review.py`；多真实脚本 workflow：
@@ -276,6 +274,8 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   重启后 guard 保留及只读拒绝证据。只按授权快照回滚镜像与配置；不得为恢复成功删除 HOLD。
   本地安装/重启采用受控替身，真机仍 NOT RUN；负向 guard 不替代设备 generation/veto、
   同会话 BatchMode/live digest、回放/回滚拒绝或 F02 整项验收，也不授权生产发布。
+
+## TC-REAL-F02-8-001 — 设备收据持久化、断电边界与读取身份
 
 - 对应 F02-8；状态：**NOT RUN / REAL_ENV REQUIRED**。本地 direct 为
   `test_ztp_applied_receipt.py`，真实脚本 workflow 为
