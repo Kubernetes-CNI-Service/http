@@ -1464,7 +1464,7 @@ class ReleaseTransactionTests(unittest.TestCase):
         finally:
             LOAD.discard_prepared_release(prepared)
 
-    def _publish_a_with_runtime_rollback_receipt(self):
+    def _publish_a_with_runtime_rollback_receipt(self, *, prepare_receipt=True):
         parent = LOAD.validate_and_publish_release(self.project, self.inputs)
         output = self.project / "99-output-ztp"
         generation = LOAD.stage_pinned_generation(
@@ -1484,10 +1484,76 @@ class ReleaseTransactionTests(unittest.TestCase):
         publickeys.mkdir(parents=True)
         (publickeys / "laptop.pub").write_bytes(b"A laptop key\n")
         (publickeys / "mgmt-server.pub").write_bytes(b"A management key\n")
-        receipt = LOAD.prepare_runtime_rollback_receipt(
-            self.project, generation,
-        )
+        receipt = (LOAD.prepare_runtime_rollback_receipt(self.project, generation)
+                   if prepare_receipt else None)
         return parent, generation, receipt
+
+    def test_runtime_receipt_snapshot_syncs_payload_and_final_mode(self) -> None:
+        source = self.root / "A-input"
+        source.write_bytes(b"independent frozen A bytes\n")
+        source.chmod(0o640)
+        snapshot = self.root / "private-receipt/payload"
+        observed = []
+        real_fsync = os.fsync
+
+        def observe(descriptor):
+            metadata = os.fstat(descriptor)
+            if stat.S_ISREG(metadata.st_mode):
+                observed.append((metadata.st_ino, stat.S_IMODE(metadata.st_mode)))
+            return real_fsync(descriptor)
+
+        with mock.patch.object(LOAD.os, "fsync", side_effect=observe):
+            record = LOAD._snapshot_receipt_file(source, snapshot)
+        self.assertEqual([(snapshot.stat().st_ino, 0o640)], observed)
+        self.assertEqual(b"independent frozen A bytes\n", snapshot.read_bytes())
+        self.assertEqual({"state": "file", "sha256": hashlib.sha256(b"independent frozen A bytes\n").hexdigest(),
+                          "mode": 0o640}, record)
+
+    def test_runtime_receipt_root_name_is_synced_before_publication(self) -> None:
+        _parent, generation, _receipt = self._publish_a_with_runtime_rollback_receipt(prepare_receipt=False)
+        output = (self.project / "99-output-ztp").resolve()
+        parent_identity = (output.stat().st_dev, output.stat().st_ino)
+        observed = []
+        real_fsync, real_rename = os.fsync, os.rename
+
+        def observe(descriptor):
+            metadata = os.fstat(descriptor)
+            if (metadata.st_dev, metadata.st_ino) == parent_identity:
+                observed.append("receipt root name durable")
+            return real_fsync(descriptor)
+
+        def publish(source, destination):
+            if Path(destination).parent == output / "rollback-receipts":
+                self.assertEqual(["receipt root name durable"], observed,
+                                 "fsync(receipts) alone cannot persist its parent's new name")
+            return real_rename(source, destination)
+
+        with mock.patch.object(LOAD.os, "fsync", side_effect=observe), \
+                mock.patch.object(LOAD.os, "rename", side_effect=publish):
+            receipt = LOAD.prepare_runtime_rollback_receipt(self.project, generation)
+        self.assertTrue(receipt.is_dir())
+
+    def test_runtime_receipt_payload_sync_failure_blocks_publication(self) -> None:
+        _parent, generation, _receipt = self._publish_a_with_runtime_rollback_receipt(prepare_receipt=False)
+        selector = self.project / "99-output-ztp/current"
+        before = (selector.lstat().st_ino, os.readlink(selector))
+        observed = []
+        real_fsync = os.fsync
+
+        def reject_payload(descriptor):
+            if stat.S_ISREG(os.fstat(descriptor).st_mode):
+                observed.append(True)
+                raise OSError("independent receipt payload sync fault")
+            return real_fsync(descriptor)
+
+        with mock.patch.object(LOAD.os, "fsync", side_effect=reject_payload):
+            with self.assertRaisesRegex(OSError, "receipt payload sync fault"):
+                LOAD.prepare_runtime_rollback_receipt(self.project, generation)
+        self.assertTrue(observed)
+        self.assertEqual(before, (selector.lstat().st_ino, os.readlink(selector)))
+        receipts = self.project / "99-output-ztp/rollback-receipts"
+        self.assertFalse(os.path.lexists(receipts / generation.name))
+        self.assertEqual([], list(receipts.iterdir()))
 
     def test_runtime_receipt_restore_syncs_mode_and_parent_before_return(self) -> None:
         target = self.root / "runtime-restore.pub"

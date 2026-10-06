@@ -37,6 +37,7 @@ from test_cases.test_v2_generation_flow import (
 )
 from test_cases.test_mlag_evpn_generation import border_globals
 from test_cases import test_flow_release_platform_matrix as PLATFORM_FLOW
+from test_cases import test_load_release_transaction as RELEASE_FIXTURE
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -959,6 +960,74 @@ finally:
             self.assertEqual(b"parent sync observed\n", (root / "runtime-parent-synced").read_bytes())
             self.assertEqual(b"independent A runtime witness\n", (root / "ztp/runtime-durability-witness").read_bytes())
             self.assertFalse(os.path.lexists(journal))
+            self.assertFalse((root / "service-started").exists())
+
+    def test_real_setup_manifest_then_load_receipt_syncs_all_authority_before_publish(self):
+        """SETUP's real manifest selects A; LOAD must durably publish its receipt."""
+        fixture = RELEASE_FIXTURE.ReleaseTransactionTests(
+            methodName="test_failed_b_generation_can_restore_and_verify_complete_a_runtime_receipt")
+        fixture.setUp()
+        self.addCleanup(fixture.tearDown)
+        api = RELEASE_FIXTURE.LOAD
+        root, project, ztp = fixture.root.resolve(), fixture.project.resolve(), fixture.ztp.resolve()
+        settings = yaml.safe_load(fixture.global_file.read_text())
+        settings["common"]["mgmt"]["http"]["http_root"] = str(root)
+        fixture.global_file.write_text(yaml.safe_dump(settings, sort_keys=False))
+        manifest = ztp / ".setup_manifest"
+        link = ztp / "config/cumulus/template/01-global.yaml"
+        link.parent.mkdir(parents=True)
+        SETUP._SetupLinkTransaction._restore_link(str(link), os.path.relpath(fixture.global_file, link.parent))
+        with mock.patch.object(SETUP, "MANIFEST_FILE", str(manifest)), \
+                mock.patch.object(SETUP, "_collect_expected_links", return_value=[str(link)]):
+            SETUP._write_manifest(str(project.resolve()))
+        preimage = manifest.read_bytes()
+        with mock.patch.multiple(api, HTTP_ROOT=root, MANIFEST=manifest,
+                                 ZTP_PREFIX_MARKER=root / ".prefix-marker"):
+            _parent, generation, _receipt = fixture._publish_a_with_runtime_rollback_receipt(prepare_receipt=False)
+            selector = project / "99-output-ztp/current"
+            expected = os.readlink(selector)
+            receipts = project / "99-output-ztp/rollback-receipts"
+            real_fsync, real_rename = os.fsync, os.rename
+            synced = set()
+            fault_seen = []
+
+            def sync(descriptor):
+                metadata = os.fstat(descriptor)
+                if stat.S_ISREG(metadata.st_mode):
+                    stage = next(receipts.glob(".rollback-receipt-*"))
+                    record = stage / "receipt.json"
+                    if record.exists() and record.stat().st_ino == metadata.st_ino and not fault_seen:
+                        fault_seen.append(True)
+                        raise OSError("independent receipt metadata sync fault")
+                    synced.add((metadata.st_dev, metadata.st_ino, stat.S_IMODE(metadata.st_mode)))
+                return real_fsync(descriptor)
+
+            def publish(source, destination):
+                source, destination = Path(source), Path(destination)
+                if destination == receipts / generation.name:
+                    expected_files = {"receipt.json", "files/ztp-bootstrap_oob.sh", "files/ztp-bootstrap_oobofoob.sh",
+                                      "files/ztp.json", "publickeys/laptop.pub", "publickeys/mgmt-server.pub"}
+                    actual = {p.relative_to(source).as_posix() for p in source.rglob("*") if p.is_file()}
+                    self.assertEqual(expected_files, actual)
+                    for name in expected_files:
+                        metadata = (source / name).stat()
+                        self.assertIn((metadata.st_dev, metadata.st_ino, stat.S_IMODE(metadata.st_mode)), synced,
+                                      "receipt publication preceded durable file authority: " + name)
+                return real_rename(source, destination)
+
+            with mock.patch.object(api.os, "fsync", side_effect=sync), \
+                    mock.patch.object(api.os, "rename", side_effect=publish):
+                with self.assertRaisesRegex(OSError, "receipt metadata sync fault"):
+                    api.prepare_active_runtime_rollback_receipt(project, expected)
+                self.assertTrue(fault_seen)
+                self.assertEqual([], list(receipts.iterdir()))
+                self.assertEqual(preimage, manifest.read_bytes())
+                self.assertEqual(expected, os.readlink(selector))
+                synced.clear()
+                receipt = api.prepare_active_runtime_rollback_receipt(project, expected)
+            self.assertEqual(receipts / generation.name, receipt)
+            self.assertEqual(preimage, manifest.read_bytes())
+            self.assertEqual(expected, os.readlink(selector))
             self.assertFalse((root / "service-started").exists())
 
     def test_real_setup_legacy_sample_comparison_holds_before_first_shared_write(self):

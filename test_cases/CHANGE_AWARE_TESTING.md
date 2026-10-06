@@ -444,6 +444,43 @@ SHA256 `8ae545c81dcce7d9a76b1200b946db738ce797e58a838b445ed6d96c895caa96`；
 LOAD 原 direct/workflow 映射有效；TEST 运行 manifest 与 approved ledger 摘要未变。
 以上仅独立模块回归，未进入正式 related/full，也未形成自动批准证明。
 
+### R22 旧 A receipt 发布前逐文件持久化候选
+
+原 receipt preparer 只同步 stage 目录，payload 和 receipt.json 使用普通 write/chmod，
+未逐文件同步；新 rollback-receipts 根名也未同步其父目录。direct 独立核查 0640 模式和
+payload 同步错误，workflow 执行真实 SETUP manifest writer 与 LOAD active receipt API，
+要求六个实际 receipt 文件在最终 rename 前已完成同步，metadata 同步失败不得发布。
+该 workflow 的生成制品采用独立私有夹具、SETUP 清单输入限定一条实际链接，
+不是完整 SETUP 主流程、完整 A 制品生成或健康激活。
+
+初轮日志 `r22-receipt-payload-sync-red.log`（SHA256
+`d3532ec9dcce012d691389d7c71dcd0cc94e8df8e244caecea7b884c3d27b972`）包含 workflow
+私有 http_root 前提错误，不把该 ERROR 算作持久化缺陷重现；第二轮正例日志
+`r22-receipt-payload-sync-green.log`（SHA256
+`a760a85ef1b59181a6b94ee52a43db407fcaba5fdc29572ff0bebd2116512d7f`）包含 macOS
+/var 与 /private/var 别名比较失败。两份原日志保留，不改生产安全根目录校验或成功断言。
+修正私有 fixture 根路径后，原可执行 writer 行为四项均 RED：4 tests / 4 FAIL / exit1，
+日志 `r22-receipt-payload-sync-red-canonical.log`，inode 143911239，size 6432，SHA256
+`554f903ee3f238e6d2a9d7b327e8a65f927cd7cfbf5ee09efb23c350ac6cccce`。
+
+候选使用新建私有 FD，设最终模式后 flush/fsync 文件；目录原同步与完整加载校验保留，
+创建 receipt 根后先同步 output 父目录。payload/metadata 同步错误保留 A selector、
+SETUP manifest 与原字节，清理本次自有 staging，不生成最终 receipt。正式 related/full
+仍受此前 bootstrap 401 原因未收口门禁阻断，不能据这些局部回归自动重跑或修改 ledger。
+新增四项加原有实际 A runtime receipt 恢复正例 5 tests / OK / exit0；日志
+`r22-receipt-payload-sync-green-canonical.log`，inode 143911517，size 1964，SHA256
+`a02399a958617d57427444a3f6c8994f3bbd0709325f985eee5c69aab2d95f07`，物理退出标记与
+exec exit0 一致。模式和同步错误断言保持，不把夹具修正或局部正例称为整树证明。
+四个完整 release/generation workflow/optimize/setup plan 模块 333 tests / OK / exit0
+（216.553 秒）；日志 `outputs/test-diagnostics/r22-receipt-payload-sync-modules.log`，
+inode 143912122，size 109620，SHA256
+`2622d624531742320fbb95d9ff071d4ac50ca525597e75282eb6e9a456ecb1a8`。
+读前后精确 stat 一致；旧 97551 字节前缀 SHA256
+`d2c7b50c1e256c40d3e27f1315e14190d18b8f06aee903d1226273360b44e2b7` 未变，完整 Ran/OK
+位于物理退出标记 `R22_RECEIPT_PAYLOAD_SYNC_MODULES_EXIT=0` 之前，exec exit0 一致。
+LOAD direct/workflow 原映射有效；TEST 运行 manifest 与 approved ledger 摘要未变。
+未以此独立模块回归更新批准证明，bootstrap 原因闸门与其余 R22 未闭项仍保持 OPEN。
+
 ## Full proof 性能诊断记录
 
 本节只记录测量方法与优化判定，不改变上面的测试和证明门禁。正式 full proof 仍须由

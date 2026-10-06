@@ -1675,6 +1675,9 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - runtime 普通文件恢复的持久化窄修：独立 direct 与真实复制 LOAD→SETUP 强杀→新 LOAD workflow 证明原 writer 的 replace/unlink 后缺少父目录同步，可能在 runtime 名称未持久化时退休 WAL。候选在写 FD 上设最终模式、flush/fsync 内容后 replace，再 fsync 父目录；missing 前像即使重入时已缺席也须同步。父目录同步错误必须返回失败并保留原 WAL，后续新进程完成同步后方可收尾；服务保持停止。workflow 使用真实 runtime 文件 writer 与独立边界 receipt 替身，不证明完整 A 恢复或激活。
   现场前置限本卡授权的隔离 VM、排他锁、明确停服、写者静默、完整真实 A receipt/输入/制品和可恢复卷快照；在最终文件模式/内容 fsync、replace/unlink 与父目录 fsync 之间分别注入同步错误、进程死亡和受控断电，包括上次 unlink 已完成但同步失败后的缺席重入。独立记录原 WAL/文件/父目录身份、摘要和事件物理顺序，并在新进程冷恢复后核对 A 内容/模式及 WAL 生命周期；不能以 API 调用观察替代断电持久性。只恢复已登记隔离快照，不修改 live 或未知对象；本卡与完整旧 A 健康激活仍 OPEN。
 
+- 旧 A runtime receipt 发布前的持久化窄修：原实现只同步目录，未同步 payload/receipt.json 及新 receipt 根名的父目录。TEST direct 与真实 SETUP manifest writer→LOAD active receipt API workflow 先 RED 后 GREEN；候选采用独占新文件 FD，在最终模式/完整内容 fsync 后同步 stage 目录并 rename，先同步新 receipt 根名的父目录。文件同步失败不发布最终 receipt、不改变 selector/SETUP manifest，只清理自有 stage。workflow 使用独立生成制品夹具和限定实际链接清单，不冒称完整 SETUP/真实 A 生成或激活。
+  现场前置为本卡授权隔离 VM、排他锁、明确停服和写者静默、完整真实 A 输入/制品/运行计划及可恢复卷快照；分别在 receipt 根创建/父同步、每个 payload 最终模式/内容同步、receipt.json 同步、stage 目录同步、rename 和 receipts 目录同步边界注入同步错误/进程死亡/受控断电。独立记录全部文件、目录、selector 和 manifest 的身份/摘要及物理时间线；重启后只有可完整加载验证的 receipt 方可消费，缺失/不完整凭据 HOLD，不补造证据。保存证据后按登记隔离快照恢复，不注入 live；本机 fsync 调用预期不证明断电、Linux 或完整旧 A 健康激活，本卡仍 OPEN。
+
 ## TC-REAL-R22-C2-DESCRIPTION-PUBLISH-001 — c2 同名描述输出的故障窗口
 
 - Case ID：`TC-REAL-R22-C2-DESCRIPTION-PUBLISH-001`；类型：real-environment / transaction / crash-recovery；对应 R22 c2 对 `*_with_desc` 的既有同名输出替换。状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。自动化先决为 `test_cases.test_generation_input_binding_contract` 的二次读取、早返及 staging direct，`test_cases.test_generation_input_binding_workflow` 的 setup/load/c2 workflow，和当前候选正式 full/check；现有定向通过不证明进程死亡后的原子性。

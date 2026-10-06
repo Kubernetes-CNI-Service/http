@@ -5124,6 +5124,17 @@ def _describe_receipt_file(path: Path) -> dict[str, object]:
     }
 
 
+def _write_rollback_receipt_payload(path: Path, payload: bytes, mode: int) -> None:
+    """Complete one private new receipt file before publishing its directory."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    descriptor = os.open(path, flags, 0o600)
+    with os.fdopen(descriptor, "wb") as stream:
+        stream.write(payload)
+        os.fchmod(stream.fileno(), mode)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
 def _snapshot_receipt_file(path: Path, snapshot: Path) -> dict[str, object]:
     opened = _read_rollback_regular(path, missing_ok=True)
     if opened is None:
@@ -5135,8 +5146,7 @@ def _snapshot_receipt_file(path: Path, snapshot: Path) -> dict[str, object]:
     }
     if record["state"] == "file":
         snapshot.parent.mkdir(parents=True, exist_ok=True)
-        snapshot.write_bytes(payload)
-        snapshot.chmod(int(record["mode"]))
+        _write_rollback_receipt_payload(snapshot, payload, int(record["mode"]))
     return record
 
 
@@ -5194,6 +5204,8 @@ def prepare_runtime_rollback_receipt(
     if (not stat.S_ISDIR(receipts.lstat().st_mode)
             or receipts.resolve(strict=True) != receipts):
         raise LoadError("A rollback receipt root is not canonical")
+    # Its own fsync cannot persist a newly-created receipt-root name.
+    _fsync_parent_directory(output)
     destination = receipts / release_id
     if os.path.lexists(destination):
         if not stat.S_ISDIR(destination.lstat().st_mode):
@@ -5278,11 +5290,11 @@ def prepare_runtime_rollback_receipt(
             "unchanged_authorities": unchanged,
         }
         receipt_path = stage / "receipt.json"
-        receipt_path.write_text(
-            json.dumps(receipt, ensure_ascii=True, indent=2, sort_keys=True) + "\n",
-            encoding="ascii",
+        _write_rollback_receipt_payload(
+            receipt_path,
+            (json.dumps(receipt, ensure_ascii=True, indent=2, sort_keys=True) + "\n").encode("ascii"),
+            0o644,
         )
-        receipt_path.chmod(0o644)
         for directory in (files, keys, stage):
             descriptor = os.open(directory, os.O_RDONLY)
             try:

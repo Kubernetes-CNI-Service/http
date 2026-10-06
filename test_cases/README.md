@@ -204,6 +204,12 @@ R22 停服恢复门禁必须使用服务后端的明确状态合同。Systemd �
 LOAD→SETUP 强杀→新 LOAD workflow 覆盖未知状态下 P/Q 链接、manifest 和 WAL 零恢复写入。
 本机注入的是查询边界，不是 Linux 实际停服或完整旧 A 安全激活见证。
 
+R22 旧 A runtime receipt 发布前须用独占创建的私有文件 FD 写入 payload 和 receipt.json，
+最终模式、完整内容逐文件 fsync 后，再同步 stage 目录并发布；新 receipt 根名须先同步
+其父目录。任一文件同步失败不得发布最终 receipt 或变更 A selector。
+direct 与真实 SETUP manifest→LOAD active receipt API workflow 覆盖同步次序、payload/
+metadata 同步错误及私有 staging 清理；生成制品采用独立夹具，不证明完整 A 激活或断电。
+
 R22 runtime 普通文件恢复须在最终模式及文件内容 fsync 后 replace，再 fsync 父目录；
 missing 前像的 unlink 和已经缺席的重入也须同步父目录。同步失败不得报成功或退休 WAL。
 direct 覆盖实际模式/同步顺序和写入/删除同步异常；真实 LOAD→SETUP 强杀→新 LOAD
