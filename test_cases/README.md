@@ -386,6 +386,9 @@ Production host-key mismatch 默认 fail closed，只有单台完整 hostname �
 manual writer 的 result/summary 发布同样校验暂存 FD 与命名对象的完整身份；同步期间的
 链接、文件和权限置换不能被 rename 为本写者成功，外来最终像不能被回退覆盖。
 目录同步失败恢复仍属于本写者的旧像及原权限，新增父目录的目录项也逐级 fsync。
+manual/worker 在发布前拒绝非当前 EUID 或 group/other 可写的旧像及最终父目录，
+不能靠 chown/chmod 把不安全旧证据修补为成功；暂存同步后重验父目录权限。
+worker 的调用参数也不得请求 group/other 可写的新状态，拒绝时旧字节、inode 和权限保留。
 真实 writer 的 result stage 被置换时，本地 journal 保持 pending/veto，不铸造成功。
 `test_config_sync_authority_workflow.py` 执行真实 manual writer → journal/receipt：
 同会话身份和 live digest 只绑定自身代次；下一轮失败先撤销旧成功，preview 不改代次，

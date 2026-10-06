@@ -1364,6 +1364,65 @@ class ConfirmAppliedFingerprintTests(unittest.TestCase):
 
 
 class ManualReceiptPublicationBoundaryTests(unittest.TestCase):
+    def test_manual_publication_rechecks_parent_permissions_after_stage_sync(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            target = root / "result.json"
+            original = b'{"state":"failed"}\n'
+            target.write_bytes(original)
+            target.chmod(0o600)
+            real_sync = os.fsync
+            changed = []
+            def change_permissions(descriptor):
+                real_sync(descriptor)
+                if not changed and stat.S_ISREG(os.fstat(descriptor).st_mode):
+                    root.chmod(0o777)
+                    changed.append(True)
+            with mock.patch.object(MANUAL.os, "fsync", side_effect=change_permissions):
+                with self.assertRaises((OSError, ValueError)):
+                    MANUAL.atomic_json(target, {"state": "triggered"})
+            self.assertEqual([True], changed)
+            self.assertEqual(original, target.read_bytes())
+            self.assertEqual(0o777, stat.S_IMODE(root.stat().st_mode))
+            self.assertFalse(list(root.glob(".result.json.*")))
+
+    def test_manual_publication_requires_current_principal_without_chown_repair(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            target = root / "result.json"
+            original = b'{"state":"failed"}\n'
+            target.write_bytes(original)
+            target.chmod(0o600)
+            principal = os.geteuid()
+            with mock.patch.object(MANUAL.os, "geteuid", return_value=principal + 1), \
+                    mock.patch.object(MANUAL.os, "fchown") as chown:
+                with self.assertRaises((OSError, ValueError)):
+                    MANUAL.atomic_json(target, {"state": "triggered"})
+            chown.assert_not_called()
+            self.assertEqual(original, target.read_bytes())
+            self.assertEqual(principal, target.stat().st_uid)
+            self.assertFalse(list(root.glob(".result.json.*")))
+
+    def test_manual_publication_rejects_unsafe_prior_image_and_parent_without_repair(self):
+        for location in ("target", "parent"):
+            for unsafe_mode in (0o022, 0o002):
+                with self.subTest(location=location, mode=unsafe_mode), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory).resolve()
+                    target = root / "result.json"
+                    original = b'{"state":"failed","reason":"retained"}\n'
+                    target.write_bytes(original)
+                    target.chmod(0o600)
+                    subject = target if location == "target" else root
+                    mode = (0o600 if location == "target" else 0o700) | unsafe_mode
+                    subject.chmod(mode)
+                    before = subject.stat()
+                    with self.assertRaises((OSError, ValueError)):
+                        MANUAL.atomic_json(target, {"state": "triggered"})
+                    self.assertEqual(original, target.read_bytes())
+                    self.assertEqual(before.st_ino, subject.stat().st_ino)
+                    self.assertEqual(mode, stat.S_IMODE(subject.stat().st_mode))
+                    self.assertFalse(list(root.glob(".result.json.*")))
+
     def test_new_receipt_parent_entries_are_synced_before_publication(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()

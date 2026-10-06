@@ -1867,6 +1867,57 @@ FANupper        A3          M4      S4      OK     fan
 
 
 class ControlPlaneTests(unittest.TestCase):
+    def test_worker_publication_cannot_request_a_group_or_other_writable_image(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            path = root / "status.json"
+            original = b'{"state":"failed","authority_revoked":true}\n'
+            path.write_bytes(original)
+            path.chmod(0o600)
+            for mode in (0o620, 0o602, 0o666):
+                with self.subTest(mode=mode), self.assertRaises(OSError):
+                    self.manual_worker.atomic_json(path, {"state": "config_sync_success"}, mode=mode)
+                self.assertEqual(original, path.read_bytes())
+                self.assertEqual(0o600, stat.S_IMODE(path.stat().st_mode))
+                self.assertFalse(list(root.glob(".status.json.*")))
+
+    def test_worker_publication_requires_current_principal_without_chown_repair(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            path = root / "status.json"
+            original = b'{"state":"failed","authority_revoked":true}\n'
+            path.write_bytes(original)
+            path.chmod(0o600)
+            principal = os.geteuid()
+            with mock.patch.object(self.manual_worker.os, "geteuid", return_value=principal + 1), \
+                    mock.patch.object(self.manual_worker.os, "fchown") as chown:
+                with self.assertRaises(OSError):
+                    self.manual_worker.atomic_json(path, {"state": "config_sync_success"})
+            chown.assert_not_called()
+            self.assertEqual(original, path.read_bytes())
+            self.assertEqual(principal, path.stat().st_uid)
+            self.assertFalse(list(root.glob(".status.json.*")))
+
+    def test_worker_publication_rejects_unsafe_prior_image_and_parent_without_repair(self):
+        for location in ("target", "parent"):
+            for unsafe_mode in (0o022, 0o002):
+                with self.subTest(location=location, mode=unsafe_mode), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory).resolve()
+                    path = root / "status.json"
+                    original = b'{"state":"failed","authority_revoked":true}\n'
+                    path.write_bytes(original)
+                    path.chmod(0o600)
+                    subject = path if location == "target" else root
+                    mode = (0o600 if location == "target" else 0o700) | unsafe_mode
+                    subject.chmod(mode)
+                    before = subject.stat()
+                    with self.assertRaises(OSError):
+                        self.manual_worker.atomic_json(path, {"state": "config_sync_success"})
+                    self.assertEqual(original, path.read_bytes())
+                    self.assertEqual(before.st_ino, subject.stat().st_ino)
+                    self.assertEqual(mode, stat.S_IMODE(subject.stat().st_mode))
+                    self.assertFalse(list(root.glob(".status.json.*")))
+
     def test_worker_state_requires_file_and_directory_sync_and_safe_rollback(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory).resolve() / "status.json"

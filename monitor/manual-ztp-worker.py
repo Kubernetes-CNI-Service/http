@@ -63,6 +63,8 @@ def timestamp():
 
 def atomic_json(path, payload, mode=0o644):
     """Durably replace only our held image; never clean up a foreign writer."""
+    if mode & 0o022:
+        raise OSError("unsafe worker state output mode")
     path.parent.mkdir(parents=True, exist_ok=True)
     parent_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY
                         | os.O_NOFOLLOW | os.O_CLOEXEC)
@@ -90,7 +92,8 @@ def atomic_json(path, payload, mode=0o644):
         visible = path.parent.lstat()
         held = os.fstat(parent_fd)
         if (not stat.S_ISDIR(visible.st_mode)
-                or (visible.st_dev, visible.st_ino) != (held.st_dev, held.st_ino)):
+                or (visible.st_dev, visible.st_ino) != (held.st_dev, held.st_ino)
+                or held.st_uid != os.geteuid() or held.st_mode & 0o022):
             raise OSError("worker state parent changed")
 
     def stage(contents, permissions, owner):
@@ -126,6 +129,7 @@ def atomic_json(path, payload, mode=0o644):
             try:
                 held = os.fstat(descriptor)
                 if (not stat.S_ISREG(held.st_mode) or held.st_nlink != 1
+                        or held.st_uid != os.geteuid() or held.st_mode & 0o022
                         or identity(existing) != identity(held)):
                     raise OSError("unsafe previous worker state")
                 with os.fdopen(os.dup(descriptor), "rb") as stream:

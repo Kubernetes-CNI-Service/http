@@ -24,6 +24,26 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
+    def test_real_writer_cannot_launder_an_unsafe_previous_receipt_into_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve()
+            client, prepared, _text = self.fixture(project)
+            root = project / "99-output-ztp/manual-config-sync"
+            ticket = self.manual.config_sync_authority.begin(root, "EXAMPLE-Leaf01", "op-1", "trigger-1", "manual_config_sync_cli")
+            receipt = root / "first/EXAMPLE-Leaf01/result.json"
+            receipt.parent.mkdir(parents=True)
+            original = b'{"state":"failed","reason":"unsafe-existing-evidence"}\n'
+            receipt.write_bytes(original)
+            receipt.chmod(0o666)
+            before = receipt.stat()
+            with self.assertRaises((OSError, ValueError)):
+                self.run_writer(project, client, prepared, run="first", ticket=ticket)
+            self.assertEqual(original, receipt.read_bytes())
+            self.assertEqual(before.st_ino, receipt.stat().st_ino)
+            self.assertEqual(0o666, stat.S_IMODE(receipt.stat().st_mode))
+            self.assertEqual(ticket, self.manual.config_sync_authority.read_current(root, "EXAMPLE-Leaf01"))
+            self.assertFalse(list(receipt.parent.glob(".result.json.*")))
+
     def test_real_writer_stage_rebind_cannot_mint_current_success(self):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory).resolve()

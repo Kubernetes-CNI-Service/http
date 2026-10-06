@@ -2067,7 +2067,8 @@ def _assert_receipt_parent_bound(path: Path, parent_fd: int) -> None:
     try:
         held = os.fstat(parent_fd)
         visible = os.fstat(visible_fd)
-        if (held.st_dev, held.st_ino) != (visible.st_dev, visible.st_ino):
+        if ((held.st_dev, held.st_ino) != (visible.st_dev, visible.st_ino)
+                or held.st_uid != os.geteuid() or held.st_mode & 0o022):
             raise ValueError("manual receipt publication parent changed")
     finally:
         os.close(visible_fd)
@@ -2120,9 +2121,13 @@ def atomic_json(path: Path, value: dict) -> None:
             raise OSError("manual receipt stage changed")
 
     try:
+        held_parent = os.fstat(parent_fd)
+        if held_parent.st_uid != os.geteuid() or held_parent.st_mode & 0o022:
+            raise ValueError("unsafe manual receipt parent owner or mode")
         existing = current(path.name)
         if existing is not None:
-            if not stat.S_ISREG(existing.st_mode) or existing.st_nlink != 1:
+            if (not stat.S_ISREG(existing.st_mode) or existing.st_nlink != 1
+                    or existing.st_uid != os.geteuid() or existing.st_mode & 0o022):
                 raise ValueError("unsafe manual receipt target")
             descriptor = os.open(path.name, os.O_RDONLY | os.O_NONBLOCK
                                  | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
