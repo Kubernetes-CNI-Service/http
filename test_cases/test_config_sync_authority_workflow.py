@@ -30,6 +30,11 @@ class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
         )
         cls.manual = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(cls.manual)
+        worker_spec = importlib.util.spec_from_file_location(
+            "f02_authority_worker_reader", ROOT / "monitor/manual-ztp-worker.py",
+        )
+        cls.worker = importlib.util.module_from_spec(worker_spec)
+        worker_spec.loader.exec_module(cls.worker)
 
     def fixture(self, project):
         release = project / "release"
@@ -211,6 +216,73 @@ class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
             failed = next(item for item in summaries if item["state"] == "failed")
             self.assertEqual((2, 2), (failed["generation"], failed["targets"][0]["generation"]))
             self.assertEqual([], failed["results"])
+
+    def published_receipt(self, project):
+        client, prepared, _text = self.fixture(project)
+        root = project / "99-output-ztp/manual-config-sync"
+        ticket = self.manual.config_sync_authority.begin(
+            root, "EXAMPLE-Leaf01", "op-1", "trigger-1", "manual_config_sync_cli",
+        )
+        produced = self.run_writer(project, client, prepared, run="first", ticket=ticket)
+        return root / "first/EXAMPLE-Leaf01/result.json", produced
+
+    def test_real_worker_rejects_writer_receipt_with_unsafe_mode_or_foreign_owner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            receipt, produced = self.published_receipt(Path(directory).resolve())
+            self.assertEqual(produced, self.worker._read_new_config_sync_receipt(receipt))
+            receipt.chmod(0o666)
+            with self.subTest(metadata="unsafe-mode"):
+                self.assertEqual({}, self.worker._read_new_config_sync_receipt(receipt))
+            receipt.chmod(0o600)
+            real_fstat = os.fstat
+
+            def foreign_owner(descriptor):
+                observed = real_fstat(descriptor)
+                fields = {name: getattr(observed, name) for name in (
+                    "st_dev", "st_ino", "st_size", "st_nlink", "st_mode", "st_uid", "st_gid",
+                    "st_mtime_ns", "st_ctime_ns",
+                )}
+                fields["st_uid"] = os.geteuid() + 1
+                return SimpleNamespace(**fields)
+
+            with mock.patch.object(self.worker.os, "fstat", side_effect=foreign_owner):
+                with self.subTest(metadata="foreign-owner"):
+                    self.assertEqual({}, self.worker._read_new_config_sync_receipt(receipt))
+            self.assertEqual(produced, self.worker._read_new_config_sync_receipt(receipt))
+
+    def test_real_worker_rejects_duplicate_members_in_writer_receipt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            receipt, produced = self.published_receipt(Path(directory).resolve())
+            raw = receipt.read_bytes()
+            duplicate = raw.rstrip()[:-1] + b',"hostname":"EXAMPLE-Leaf01"}\n'
+            receipt.write_bytes(duplicate)
+            self.assertEqual({}, self.worker._read_new_config_sync_receipt(receipt))
+            self.assertEqual(duplicate, receipt.read_bytes(), "reject-and-retain malformed evidence")
+            self.assertEqual("EXAMPLE-Leaf01", produced["hostname"])
+
+    def test_real_worker_rechecks_visible_writer_receipt_after_held_read(self):
+        with tempfile.TemporaryDirectory() as directory:
+            receipt, _produced = self.published_receipt(Path(directory).resolve())
+            foreign = receipt.parent / "foreign.json"
+            foreign.write_bytes(b'{"foreign":true}\n')
+            foreign.chmod(0o600)
+            real_read = os.read
+            changed = False
+
+            def rebind_visible_path(descriptor, count):
+                nonlocal changed
+                raw = real_read(descriptor, count)
+                if raw and not changed:
+                    changed = True
+                    receipt.unlink()
+                    receipt.symlink_to(foreign)
+                return raw
+
+            with mock.patch.object(self.worker.os, "read", side_effect=rebind_visible_path):
+                self.assertEqual({}, self.worker._read_new_config_sync_receipt(receipt))
+            self.assertTrue(changed)
+            self.assertTrue(receipt.is_symlink())
+            self.assertEqual(b'{"foreign":true}\n', foreign.read_bytes())
 
 
 if __name__ == "__main__":

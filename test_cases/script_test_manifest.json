@@ -1040,7 +1040,7 @@
     },
     {
       "id": "f02_config_sync_writer_direct",
-      "paths": ["ztp/manual-ztp.py"],
+      "paths": ["ztp/manual-ztp.py", "monitor/manual-ztp-worker.py"],
       "tests": ["test_cases.test_config_sync_authority_workflow"]
     },
     {
@@ -2422,7 +2422,7 @@
     },
     {
       "id": "f02_config_sync_writer_to_generation_journal",
-      "members": ["ztp/manual-ztp.py", "ztp/config_sync_authority.py"],
+      "members": ["ztp/manual-ztp.py", "ztp/config_sync_authority.py", "monitor/manual-ztp-worker.py"],
       "tests": ["test_cases.test_config_sync_authority_workflow"]
     },
     {

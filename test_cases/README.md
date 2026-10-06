@@ -379,7 +379,9 @@ Production host-key mismatch 默认 fail closed，只有单台完整 hostname �
 闭合 schema、owner/mode/no-follow、受控暂存、file/directory fsync、部分回放与持久 HOLD。
 `test_config_sync_authority_workflow.py` 执行真实 manual writer → journal/receipt：
 同会话身份和 live digest 只绑定自身代次；下一轮失败先撤销旧成功，preview 不改代次，
-最终目录同步期间的 journal/witness rebind 拒绝并保留外来对象。三份见证共享恢复域，
+最终目录同步期间的 journal/witness rebind 拒绝并保留外来对象。真实 worker 读取本代回执
+还须拒绝重复 JSON 成员、非当前 EUID、group/other 可写和 held read 后的路径/元数据替换，
+不得截断或清除拒绝证据。三份见证共享恢复域，
 不宣称抵御全部镜像或整卷回滚。worker/九阶段监控消费端尚未完成接入，F02 整体仍 OPEN；
 真机持久化卡 `TC-REAL-F02-LOCAL-GENERATION-001` 仍 NOT RUN。
 

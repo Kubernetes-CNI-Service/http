@@ -112,11 +112,24 @@ def _config_sync_file_identity(path):
         return None
     try:
         identity = os.fstat(descriptor)
-        if stat.S_ISREG(identity.st_mode) and identity.st_nlink == 1:
+        if (stat.S_ISREG(identity.st_mode) and identity.st_nlink == 1
+                and identity.st_uid == os.geteuid() and not identity.st_mode & 0o022):
             return identity.st_dev, identity.st_ino
         return None
     finally:
         os.close(descriptor)
+
+
+def _unique_receipt_members(pairs):
+    value = dict(pairs)
+    if len(value) != len(pairs):
+        raise ValueError("duplicate config-sync receipt member")
+    return value
+
+
+def _receipt_identity(value):
+    return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns,
+            value.st_ctime_ns, value.st_mode, value.st_uid, value.st_gid, value.st_nlink)
 
 
 def _read_new_config_sync_receipt(path, *, exclude_inodes=()):
@@ -127,6 +140,7 @@ def _read_new_config_sync_receipt(path, *, exclude_inodes=()):
         identity = os.fstat(receipt_fd)
         if (
             not stat.S_ISREG(identity.st_mode) or identity.st_nlink != 1
+            or identity.st_uid != os.geteuid() or identity.st_mode & 0o022
             or identity.st_size > QUEUE_MAX_BYTES
             or (identity.st_dev, identity.st_ino) in exclude_inodes
         ):
@@ -143,11 +157,12 @@ def _read_new_config_sync_receipt(path, *, exclude_inodes=()):
         after = os.fstat(receipt_fd)
         if (
             len(raw) > QUEUE_MAX_BYTES or len(raw) != identity.st_size
-            or (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
-            != (identity.st_dev, identity.st_ino, identity.st_size, identity.st_mtime_ns)
+            or _receipt_identity(after) != _receipt_identity(identity)
+            or _config_sync_file_identity(path) != (identity.st_dev, identity.st_ino)
+            or _receipt_identity(Path(path).lstat()) != _receipt_identity(identity)
         ):
             return {}
-        value = json.loads(raw.decode("utf-8"))
+        value = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_receipt_members)
         return value if isinstance(value, dict) else {}
     except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
         return {}
