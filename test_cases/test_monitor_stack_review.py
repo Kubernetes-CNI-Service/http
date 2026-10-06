@@ -1417,6 +1417,7 @@ class MonitorEvidenceAndModeContractTests(unittest.TestCase):
                 {
                     "release_id": payload["release_id"],
                     "generated_at": "2026-09-06T12:00:00+08:00",
+                    "dhcp_status": "enabled",
                 },
                 self.monitor.load_release_identity(project),
             )
@@ -1455,6 +1456,7 @@ class MonitorEvidenceAndModeContractTests(unittest.TestCase):
             self.assertEqual(2, parent["schema_version"])
             self.assertEqual("disabled", parent["dhcp_status"])
             self.assertNotIn("dhcp", parent["components"])
+            self.assertEqual("disabled", self.monitor.load_release_identity(fixture.project).get("dhcp_status"))
             self.assertEqual(
                 parent["release_id"],
                 self.monitor.load_release_identity(fixture.project)["release_id"],

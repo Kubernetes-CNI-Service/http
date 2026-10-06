@@ -2427,6 +2427,11 @@
       "tests": ["test_cases.test_config_sync_authority_workflow"]
     },
     {
+      "id": "f02_release_mode_to_static_monitor",
+      "members": ["DAY0-Prepare/11-load.py", "DAY0-Prepare/12-ztp-monitor.py", "ztp/dynamic_air_inventory.py"],
+      "tests": ["test_cases.test_config_sync_authority_workflow", "test_cases.test_monitor_stack_review"]
+    },
+    {
       "id": "ufm_readonly_discovery_from_inventory_and_leases",
       "members": [
         "tools/ufm-discover.py",

@@ -24,6 +24,86 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
+    def test_monitor_rejects_missing_or_untyped_release_mode_before_inventory_or_report_io(self):
+        from test_cases.module_loader import load_script
+        monitor = load_script("f02_unbound_release_mode_monitor", ROOT / "DAY0-Prepare/12-ztp-monitor.py")
+        for mode in (None, True, 0, "", "DISABLED", [], {}):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                project = Path(directory)
+                args = monitor.parser().parse_args([str(project), "--offline", "--no-ssh", "--output-dir", str(project / "reports")])
+                release = {"release_id": "a" * 20, "generated_at": "2026-10-07T01:00:00+08:00", "dhcp_status": mode}
+                with mock.patch.object(monitor, "load_release_identity", return_value=release), \
+                        mock.patch.object(monitor, "read_devices", side_effect=AssertionError("must not read inventory under an unbound mode")) as inventory:
+                    with self.assertRaisesRegex(ValueError, "可信 DHCP 模式"):
+                        monitor.monitor_once(args, project)
+                inventory.assert_not_called()
+                self.assertFalse((project / "reports").exists())
+
+    def test_current_disabled_release_does_not_read_dhcp_sources_and_static_collection_continues(self):
+        from test_cases.module_loader import load_script
+        from test_cases import test_load_release_transaction as release_fixture
+        from ztp import dynamic_air_inventory
+        monitor = load_script("f02_disabled_monitor_workflow", ROOT / "DAY0-Prepare/12-ztp-monitor.py")
+        for enabled, absent in ((False, False), (False, True), (True, False)):
+            with self.subTest(enabled=enabled, absent=absent):
+                fixture = release_fixture.ReleaseTransactionTests("test_writes_parent_release_after_all_components_match")
+                fixture.setUp()
+                try:
+                    project = fixture.project
+                    if not enabled:
+                        fixture.global_file.write_text(fixture.global_file.read_text().replace("status: enabled", "status: disabled"))
+                    inputs = release_fixture.LOAD.replace(fixture.inputs, settings=release_fixture.LOAD.replace(fixture.inputs.settings, dhcp_enabled=enabled))
+                    parent = release_fixture.LOAD.validate_and_publish_release(project, inputs, publish=True)
+                    self.assertEqual("enabled" if enabled else "disabled", parent["dhcp_status"])
+                    apache, dhcp, leases, air = [project / name for name in ("apache.log", "dhcp.log", "leases", "air.json")]
+                    apache.write_text("")
+                    dhcp.write_text("2026-10-07T01:00:00+08:00 host dhcpd: DHCPACK on 192.0.2.10 to 02:00:00:00:00:01 (leaf01) via eth0\n")
+                    leases.write_text("lease 192.0.2.99 { binding state active; hardware ethernet 02:00:00:00:00:01; ends never; }\n")
+                    air.write_text('{"nodes": {}}')
+                    args = monitor.parser().parse_args([str(project), "--output-dir", str(project / "reports"), "--apache-log", str(apache), "--dhcp-log", str(dhcp), "--dhcp-leases", str(leases)])
+                    original = {path: (path.read_bytes(), path.stat().st_ino) for path in (dhcp, leases)}
+                    if absent:
+                        for path in original:
+                            path.rename(path.with_name(path.name + ".retained"))
+                    real_leases = dynamic_air_inventory.active_leases
+                    real_read = monitor._read_bounded_regular_text
+                    def lease_read(path, **kwargs):
+                        if not enabled:
+                            self.assertIsNone(path, "disabled cannot use a local lease file for addresses")
+                        return real_leases(path, **kwargs)
+                    def bounded_read(path, **kwargs):
+                        if not enabled:
+                            self.assertNotIn(path, (dhcp, leases), "disabled must not hash/read local DHCP evidence either")
+                        return real_read(path, **kwargs)
+                    text = "- set: {}\n"
+                    observed = {"kind": "ok", "returncode": 0, "batch_mode_verified": True, "identity_frame_valid": True,
+                                "connected_ip": "192.0.2.10", "remote_hostname": "leaf01", "remote_eth0_mac": "02:00:00:00:00:01", "remote_eth1_mac": "",
+                                "observed_at": "2026-10-07T01:00:05+08:00", "ztp_log": "", "ifreload_log": "", "failed_yaml": "", "stderr": "", "attempts": [], "host_key_commands": [],
+                                "live_config_observation": {"kind": "ok", "text": text, "sha256": hashlib.sha256(text.encode()).hexdigest()}}
+                    with mock.patch.object(monitor, "ACTIVE_AIR_JSON", air), \
+                            mock.patch.object(monitor, "service_runtime_backend", return_value=SimpleNamespace(name="systemd")), \
+                            mock.patch.object(monitor, "service_state", return_value={"active": "fixture", "enabled": "fixture", "error": ""}) as services, \
+                            mock.patch.object(monitor, "collect_switch", return_value=observed) as collect, \
+                            mock.patch.object(monitor, "collect_dhcp", wraps=monitor.collect_dhcp) as local_dhcp, \
+                            mock.patch.object(monitor, "_read_bounded_regular_text", side_effect=bounded_read), \
+                            mock.patch.object(dynamic_air_inventory, "active_leases", side_effect=lease_read):
+                        run = monitor.monitor_once(args, project)
+                    report = json.loads((run / "report.json").read_text())
+                    self.assertEqual(1, collect.call_count, "DHCP disabled must preserve independent static SSH collection")
+                    self.assertEqual("192.0.2.10", collect.call_args.args[0]["ip"])
+                    self.assertEqual(int(enabled), local_dhcp.call_count)
+                    self.assertEqual(["apache2", "isc-dhcp-server"] if enabled else ["apache2"], [call.args[0] for call in services.call_args_list])
+                    self.assertEqual("enabled" if enabled else "disabled", report.get("dhcp_status"))
+                    self.assertEqual("success" if enabled else "pending", report["devices"][0]["stages"]["dhcp"]["status"])
+                    self.assertNotEqual("success", report["devices"][0]["overall"])
+                    sidecar = json.loads((project / "reports" / monitor.COLLECTION_ATTRIBUTION_STATE_NAME).read_text())
+                    self.assertEqual(enabled, "dhcp_leases" in sidecar["input_digests"])
+                    for path, before in original.items():
+                        retained = path.with_name(path.name + ".retained") if absent else path
+                        self.assertEqual(before, (retained.read_bytes(), retained.stat().st_ino))
+                finally:
+                    fixture.tearDown()
+
     def monitor_cycle_fixture(self, project, *, live_text=None):
         from test_cases.module_loader import load_script
         monitor = load_script("f02_current_generation_monitor_workflow", ROOT / "DAY0-Prepare/12-ztp-monitor.py")
@@ -223,7 +303,7 @@ class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
                     return {**result, "ztp_log": "", "ifreload_log": "", "failed_yaml": "", "stderr": "",
                             "attempts": [], "remote_eth1_mac": "", "host_key_commands": [],
                             "live_config_observation": {"kind": "ok", "text": live, "sha256": hashlib.sha256(live.encode()).hexdigest()}}
-                with mock.patch.object(monitor, "load_release_identity", return_value={"release_id": "isolated-fixture", "generated_at": "2026-10-07T01:00:00+08:00"}), \
+                with mock.patch.object(monitor, "load_release_identity", return_value={"release_id": "isolated-fixture", "generated_at": "2026-10-07T01:00:00+08:00", "dhcp_status": "enabled"}), \
                         mock.patch.object(monitor, "service_runtime_backend", return_value=SimpleNamespace(name="systemd")), \
                         mock.patch.object(monitor, "service_state", return_value={"active": "fixture", "enabled": "fixture", "error": ""}), \
                         mock.patch.object(monitor, "ACTIVE_AIR_JSON", air), \

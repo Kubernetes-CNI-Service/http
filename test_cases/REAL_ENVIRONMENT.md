@@ -249,6 +249,14 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-F02-6-001 — 当前轮九阶段证据与交接一致性
 
+- DHCP 模式跨真实 load/release → 监控轮次的静态路径：在单独授权的隔离部署机将当前
+  parent release/global 置为 disabled，并保留旧租约/日志，再移走仅本案旧来源副本；两轮
+  监控均不打开本地 DHCP 日志/租约，不查询 DHCP 服务，仍对同一静态设备做独立 SSH
+  和 Apache 观察。恢复 enabled 的受管 release 后正向核对 DHCPACK 与服务观察。
+  留存来源 open/argv 见证、report.dhcp_status、归属 input_digests、前后 inode/size/SHA，
+  不因 disabled 凭空放行九阶段/handoff。本机 `test_config_sync_authority_workflow.py`
+  已有实际 load/monitor_once 私有流程；真机步骤仍 NOT RUN，不授权服务切换。
+
 - 对应 F02-6；自动化 direct 为 `test_ztp_group_handoff.py`，跨真实脚本场景为
   `test_ztp_group_handoff.py` 与 `test_ztp_group_handoff_display.py`。状态：**NOT RUN / REAL_ENV REQUIRED**。
 - 前置条件：owner 单独批准的隔离项目、受控交换机及采集窗口；保存监控脚本与页面生成器的

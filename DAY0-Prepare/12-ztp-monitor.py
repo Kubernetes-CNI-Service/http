@@ -4684,10 +4684,14 @@ def monitor_once(args: argparse.Namespace, project: Path) -> Path:
     offline = bool(getattr(args, "offline", False))
     runtime_backend = None if offline else service_runtime_backend()
     release = load_release_identity(project)
+    dhcp_status = release.get("dhcp_status")
+    if type(dhcp_status) is not str or dhcp_status not in {"enabled", "disabled"}:
+        raise ValueError("current release 缺少可信 DHCP 模式")
+    dhcp_enabled = dhcp_status == "enabled"
     previous_report = _previous_report(output_root)
     switch_timezone = project_timezone(project)
     air_json = args.air_json if offline else ACTIVE_AIR_JSON
-    dhcp_leases = args.dhcp_leases
+    dhcp_leases = args.dhcp_leases if dhcp_enabled else None
     identity_devices = read_devices(
         project / "02-devices_config.csv",
         "all",
@@ -4710,24 +4714,26 @@ def monitor_once(args: argparse.Namespace, project: Path) -> Path:
         attribution_state_path, identity_devices, attribution_digests,
         status=attribution_state_status,
     )
-    dhcp_read = collect_dhcp(
-        args.since, args.dhcp_log, runtime_backend=runtime_backend,
+    dhcp_read = (
+        collect_dhcp(args.since, args.dhcp_log, runtime_backend=runtime_backend)
+        if dhcp_enabled else TailRead("", "", "disabled:current-release")
     )
     dhcp_text, dhcp_error = dhcp_read
     dhcp_events = parse_dhcp(dhcp_text)
-    apply_static_runtime_lease_fallbacks(
-        identity_devices,
-        project / "02-devices_config.csv",
-        dhcp_text,
-        dhcp_leases=dhcp_leases,
-    )
-    identity_devices.extend(runtime_unknown_devices(
-        project / "02-devices_config.csv",
-        dhcp_text,
-        scope=scope,
-        dhcp_leases=dhcp_leases,
-    ))
-    apply_dynamic_dhcp_addresses(identity_devices, dhcp_events)
+    if dhcp_enabled:
+        apply_static_runtime_lease_fallbacks(
+            identity_devices,
+            project / "02-devices_config.csv",
+            dhcp_text,
+            dhcp_leases=dhcp_leases,
+        )
+        identity_devices.extend(runtime_unknown_devices(
+            project / "02-devices_config.csv",
+            dhcp_text,
+            scope=scope,
+            dhcp_leases=dhcp_leases,
+        ))
+        apply_dynamic_dhcp_addresses(identity_devices, dhcp_events)
     if scope == "air":
         devices = [
             device for device in identity_devices
@@ -4917,8 +4923,9 @@ def monitor_once(args: argparse.Namespace, project: Path) -> Path:
             "apache2": service_state(
                 "apache2", runtime_backend=runtime_backend,
             ),
-            "isc-dhcp-server": service_state(
-                "isc-dhcp-server", runtime_backend=runtime_backend,
+            "isc-dhcp-server": (
+                service_state("isc-dhcp-server", runtime_backend=runtime_backend)
+                if dhcp_enabled else {"active": "disabled", "enabled": "disabled", "error": ""}
             ),
         }
     report = {
@@ -4926,6 +4933,7 @@ def monitor_once(args: argparse.Namespace, project: Path) -> Path:
         "mode": "offline" if offline else "live",
         "release_id": release["release_id"],
         "release_generated_at": release["generated_at"],
+        "dhcp_status": dhcp_status,
         "generated_at": now_local().isoformat(timespec="seconds"),
         "since_minutes": args.since,
         "evidence_window": {
@@ -5812,7 +5820,7 @@ def load_release_identity(project: Path) -> dict[str, str]:
         raise ValueError(f"current release generated_at 无效: {generated_at!r}") from exc
     if generated.tzinfo is None or generated.utcoffset() is None:
         raise ValueError(f"current release generated_at 必须包含时区: {generated_at!r}")
-    return {"release_id": release_id, "generated_at": generated_at}
+    return {"release_id": release_id, "generated_at": generated_at, "dhcp_status": dhcp_status}
 
 
 def _governed_watch_identity(

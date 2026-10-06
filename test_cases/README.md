@@ -459,6 +459,12 @@ workflow 覆盖匹配、漂移与采集中换代，另外覆盖读取后换代�
 此接入仅覆盖 manual-config-sync；bootstrap/initial-setup 当前轮权威及非 ZTP 健康
 分类仍须单独完成，F02 整体仍 OPEN，真实环境卡仍 NOT RUN。
 
+monitor 的 DHCP 模式来自已核验的当前 parent release/global 绑定（legacy v1 仅 enabled），
+不能按旧 DHCP manifest 或租约存在推断。disabled 周期不读/哈希租约、不采集 DHCP 日志、
+不创建本地 DHCP 归属或查询该服务状态；静态 SSH 与独立 Apache 证据继续，report 明示
+disabled。真实 load 发布 → monitor_once workflow 保留 enabled 正向 DHCPACK，并证明
+disabled 在旧日志/租约存在及完全缺失时均无需读取，也不改写原始来源文件。
+
 九阶段历史不能把已有但不可读、非对象、非列表或重复大小写主机成员的快照当作空历史。
 `test_ztp_group_handoff.py` 独立验证负向历史权威跨轮保持及 JSON/CSV/Markdown 诊断；
 `test_ztp_group_handoff_display.py` 串联真实监控快照写入、下一轮读取与真实 HTML 判据，

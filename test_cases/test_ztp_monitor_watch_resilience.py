@@ -231,6 +231,7 @@ class MonitorWatchResilienceDirectTests(unittest.TestCase):
                 load_release_identity=mock.Mock(return_value={
                     "release_id": "a" * 20,
                     "generated_at": "2026-09-12T12:00:00+08:00",
+                    "dhcp_status": "enabled",
                 }),
                 _previous_report=mock.Mock(return_value={}),
                 project_timezone=mock.Mock(return_value=None),
