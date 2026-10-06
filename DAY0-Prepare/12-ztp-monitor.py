@@ -3232,6 +3232,40 @@ def analyze_switch(
                               log, r"ACCESS_NOT_READY:|No non-empty SSH public key",
                               source_timezone,
                           ))
+    # A successful NVUE command is not a durable receipt publication. Honor
+    # the writer's negative fence even when its nonfatal persistence failure
+    # is followed by the usual provision-complete marker. Physical log order
+    # matters: an older saved receipt cannot clear a later attempt's HOLD.
+    # Absence of this diagnostic veto is NOT a fresh identity/digest proof.
+    publication_hold = False
+    for line in log.splitlines():
+        if any(marker in line for marker in (
+            "Applied-config attempt started; prior success is on HOLD",
+            "Cannot durably revoke prior applied receipt",
+            "Applied-config publication is on HOLD",
+            "Applied-config attempt HOLD changed",
+            "Applied-config guard completion failed",
+            "Applied-config receipt is visible but directory fsync failed",
+        )):
+            publication_hold = True
+        elif re.search(
+            r"\[ZTP\] Applied-config receipt saved: status=success, "
+            r"source=[A-Za-z0-9][A-Za-z0-9._-]{0,254}, sha256=[0-9a-f]{64}$", line,
+        ):
+            publication_hold = False
+    if publication_hold:
+        hold_time = observed_at
+        if device["stages"]["config_apply"]["status"] != "failed":
+            set_log_stage(
+                "config_apply", "warning",
+                "配置收据发布仍在 HOLD；apply/save 日志不能证明持久成功", hold_time,
+            )
+        set_log_stage("complete", "warning", "配置收据未完成可信发布", hold_time)
+        device["issues"].append({
+            "code": "APPLIED_CONFIG_PUBLICATION_HOLD", "severity": "warning",
+            "message": "当前配置收据仍在 HOLD，不能以旧收据或 provision complete 晋升成功。",
+            "timestamp": hold_time,
+        })
     if "provision complete" in log and "ZTP FINISH" in log:
         config_state = device["stages"]["config_apply"]["status"]
         set_log_stage("complete", "warning" if config_state in {"failed", "warning"} else "success",

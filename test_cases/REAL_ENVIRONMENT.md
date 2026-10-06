@@ -259,6 +259,24 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-F02-8-001 — 设备收据持久化、断电边界与读取身份
 
+### TC-REAL-F02-PUBLICATION-HOLD-001 — 应用/升级前撤销与监控负向否决
+
+- 对应 F02-8/9；类型：transaction / integration / real-environment；状态：**NOT RUN / REAL_ENV REQUIRED**。
+  本地 direct：`test_ztp_applied_receipt.py`、`test_monitor_stack_review.py`；多真实脚本 workflow：
+  `test_manual_applied_config.py` 的 bootstrap→固定 helper→manual reader / monitor analyzer。
+- 目标与前置：仅在另行精确授权的可丢弃 Cumulus/IB/NVL 设备及 SN/VX 升级环境执行；
+  先记录 HEAD/tree、源码/渲染脚本/镜像 SHA、root 身份与文件系统、原收据/YAML/日志的
+  inode/模式/大小/SHA、可恢复镜像和配置快照、单写者窗口与恢复责任人。禁止在在线设备注入。
+- 步骤/预期：见证首个 NVUE 写入或 onie-install/reboot 前受控 HOLD 的文件与目录 fsync；
+  在后续 staging、数据/收据 rename、最后目录 fsync 和 guard 清理边界注入失败。原收据即使
+  与新 YAML 同字节也不得可信，helper 不输出成功，manual 不晋升，monitor 的 config_apply/
+  complete 及 HTML/机器判据不显示成功。既存或被替换的外来 HOLD 保留并在写入前拒绝；
+  只有本次 held 身份完成持久发布后才清理。旧 saved 日志、未知状态、不安全来源不可清除新 HOLD。
+- 故障/证据/清理：保存脱敏命令/退出码、物理日志顺序、写入与刷盘故障点、前后文件身份、
+  重启后 guard 保留及只读拒绝证据。只按授权快照回滚镜像与配置；不得为恢复成功删除 HOLD。
+  本地安装/重启采用受控替身，真机仍 NOT RUN；负向 guard 不替代设备 generation/veto、
+  同会话 BatchMode/live digest、回放/回滚拒绝或 F02 整项验收，也不授权生产发布。
+
 - 对应 F02-8；状态：**NOT RUN / REAL_ENV REQUIRED**。本地 direct 为
   `test_ztp_applied_receipt.py`，真实脚本 workflow 为
   `test_bootstrap_config_fetch_workflow.py`；两者不能替代隔离设备文件系统的断电验证。

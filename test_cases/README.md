@@ -375,8 +375,24 @@ Production host-key mismatch 默认 fail closed，只有单台完整 hostname �
 按钮/状态列与 JS 状态名由同一 workflow 对账，未绑定身份按钮可见但 disabled，并发上限仍为 8。
 测试不会连接或触发真实交换机。
 
+SSH 身份负例夹具执行真实生成的 askpass Python body 时绑定当前测试解释器，
+并以污染 PATH 的独立负例核验，不依赖 `/usr/bin/env` 选择其他 Python；原 2 秒限制与
+FIFO rebind 的原断言保持。其他 askpass 用例继续覆盖直接 executable/shebang 路径。
+这不是生产 SSH 超时合同的变更，也不证明其他启动/banner/清理超时的根因已闭合。
+进程 I/O/deadline 的受控 fake SSH 夹具显式使用指定的 shell/Python；仍运行真实子进程，
+保留原 SSH 参数、new session、FD 白名单、输出上限、子孙清理断言及 0.1/1/2/5 秒期限。
+真实 stock OpenSSH 的参数与路径不被该夹具适配器改写；loopback 失败保留 daemon trace，
+不把 banner 超时当作 host-key 拒绝或隐式重试通过。
+
 `test_ztp_applied_receipt.py` 覆盖 bootstrap 的 root-owned `/run` 独立工作区、原子
-`latest-log` 指针，以及在该指针成功发布后非致命创建的 `ztp-last-run.log` 固定名硬链接；测试验证
+applied-receipt publication HOLD：受控负向 guard 须在数据/收据 rename 前刷盘，且真实
+Cumulus/IB/NVL 配置以及 SN/VX 镜像升级分支须在首次 NVUE/安装/重启前撤销旧成功。
+只读 helper 拒绝任何 guard 占位并在输出前复核；末次目录 fsync 或 guard 清理失败保留 HOLD。
+实际 bootstrap→helper→manual/monitor workflow 证明早期 staging 或晚期持久化失败不能借同字节
+旧成功晋升，外来 HOLD 不得自动采用或删除。monitor 按物理日志顺序保留未清除 HOLD 的
+负向否决，旧 saved 日志、未知状态或不安全来源不能清除后来的 HOLD。无诊断否决不是
+同会话 BatchMode/live digest 或设备 generation 的正向证明，F02 整体仍 OPEN；真实升级未执行。
+该模块也覆盖 `latest-log` 指针，以及在该指针成功发布后非致命创建的 `ztp-last-run.log` 固定名硬链接；测试验证
 同 device/inode、0644、实时追加、下次运行原子替换、旧时间戳日志保留、不安全目标原样保留和失败
 只清理私有暂存目录。真实 `11-load.py` 渲染 workflow 另证明 `_oob`/`_oobofoob` 只继承唯一模板源，
 不会生成第二套固定名逻辑。该套件还覆盖未来 mtime 旧日志反例、apply/save receipt、原始 YAML

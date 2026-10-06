@@ -45,6 +45,48 @@ def _different_host_key_blob(blob: bytes) -> bytes:
     return blob[:-1] + bytes((blob[-1] ^ 0x01,))
 
 
+def _fixture_interpreter_popen(spawn, fixture, interpreter):
+    """Only a controlled fake SSH body uses its explicit fixture interpreter.
+
+    Keep the real Popen, pipes, new session, FD whitelist and SSH arguments;
+    the production wall still starts before launching the real child. Avoid
+    attributing a temporary script's OS shebang launch to the I/O contract.
+    Stock SSH and every other executable remain untouched.
+    """
+    def execute(argv, *args, **kwargs):
+        if isinstance(argv, (list, tuple)) and argv and argv[0] == str(fixture):
+            argv = [interpreter, *argv]
+        return spawn(argv, *args, **kwargs)
+    return execute
+
+
+def _askpass_identity_probe_argv(helper):
+    # This probe tests FIFO identity validation in the real generated Python
+    # body, not the platform's /usr/bin/env or an unrelated PATH interpreter.
+    # Direct executable/shebang coverage remains in the other askpass tests.
+    return [sys.executable, "-B", str(helper)]
+
+
+def _stock_loopback_ssh_argv(ssh, port, known_hosts_command, algorithm):
+    argv = [
+        str(ssh), "-vv", "-F", "/dev/null", "-p", str(port),
+        # -F /dev/null alone still opens the real user's default identities.
+        # This host-key-only fixture must neither read them nor consult an agent.
+        "-o", "IdentityFile=none", "-o", "IdentityAgent=none",
+        "-o", "IdentitiesOnly=yes",
+        "-o", "BatchMode=yes", "-o", "PasswordAuthentication=no",
+        "-o", "StrictHostKeyChecking=yes",
+        "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "GlobalKnownHostsFile=/dev/null",
+        "-o", "KnownHostsCommand=" + known_hosts_command,
+        "-o", "CheckHostIP=no", "-o", "UpdateHostKeys=no",
+        "-o", "ConnectTimeout=2", "nobody@127.0.0.1", "true",
+    ]
+    if algorithm is not None:
+        argv[-2:-2] = ["-o", f"HostKeyAlgorithms={algorithm}"]
+    return argv
+
+
 def _scan_loopback_until_deadline(
     *, deadline, daemon_alive, scan_once, monotonic, sleeper,
 ):
@@ -2372,6 +2414,22 @@ class BackupAuthenticationContractTests(unittest.TestCase):
         self.backup._AUTH_MODES.clear()
         self.backup._ASKPASS_PATH = None
 
+    def test_stock_loopback_argv_excludes_ambient_user_credentials(self):
+        argv = _stock_loopback_ssh_argv(
+            "/usr/bin/ssh", 2222, "/fixture/helper.py %I %H", "ssh-ed25519",
+        )
+        options = [argv[i + 1] for i, value in enumerate(argv[:-1]) if value == "-o"]
+        for expected in (
+            "IdentityFile=none", "IdentityAgent=none", "IdentitiesOnly=yes",
+            "BatchMode=yes", "PasswordAuthentication=no", "StrictHostKeyChecking=yes",
+            "UserKnownHostsFile=/dev/null", "GlobalKnownHostsFile=/dev/null",
+            "KnownHostsCommand=/fixture/helper.py %I %H", "ConnectTimeout=2",
+            "HostKeyAlgorithms=ssh-ed25519",
+        ):
+            self.assertEqual(1, options.count(expected), expected)
+        self.assertEqual(["nobody@127.0.0.1", "true"], argv[-2:])
+        self.assertEqual(["-F", "/dev/null"], argv[2:4])
+
     def tearDown(self):
         try:
             self.backup._cleanup_askpass()
@@ -3007,7 +3065,7 @@ class BackupAuthenticationContractTests(unittest.TestCase):
                     "StrictModes no\n"
                     "MaxStartups 100\n"
                     "PerSourcePenalties no\n"
-                    "LogLevel ERROR\n",
+                    "LogLevel DEBUG3\n",
                     encoding="utf-8",
                 )
             else:
@@ -3132,24 +3190,9 @@ class BackupAuthenticationContractTests(unittest.TestCase):
                         "KHC_CALLS": str(calls), "KHC_MODE": mode,
                         "KHC_RECORD": record,
                     })
-                    argv = [
-                            str(ssh), "-vv", "-F", "/dev/null", "-p", str(port),
-                            "-o", "BatchMode=yes",
-                            "-o", "PasswordAuthentication=no",
-                            "-o", "StrictHostKeyChecking=yes",
-                            "-o", "UserKnownHostsFile=/dev/null",
-                            "-o", "GlobalKnownHostsFile=/dev/null",
-                            "-o", "KnownHostsCommand=" + (
-                                known_hosts_command
-                                or f"{helper_path} %I %H"
-                            ),
-                            "-o", "CheckHostIP=no",
-                            "-o", "UpdateHostKeys=no",
-                            "-o", "ConnectTimeout=2",
-                            "nobody@127.0.0.1", "true",
-                    ]
-                    if algorithm is not None:
-                        argv[-2:-2] = ["-o", f"HostKeyAlgorithms={algorithm}"]
+                    argv = _stock_loopback_ssh_argv(
+                        ssh, port, known_hosts_command or f"{helper_path} %I %H", algorithm,
+                    )
                     completed = subprocess.run(
                         argv,
                         env=environment, text=True, capture_output=True,
@@ -3408,6 +3451,13 @@ class BackupAuthenticationContractTests(unittest.TestCase):
                             completed.stderr.casefold(),
                         )
                         self.assertIn(rejection, completed.stderr.casefold())
+            except BaseException:
+                # Preserve the test-owned daemon's actual fault phase before
+                # TemporaryDirectory cleanup. A solo PASS is not a diagnosis
+                # of a previous banner/host-key failure.
+                print("LOOPBACK_SSH_FAILURE_DAEMON_TRACE:\n" + daemon_diagnostics(),
+                      file=sys.stderr)
+                raise
             finally:
                 if daemon is not None:
                     try:
@@ -3606,6 +3656,42 @@ class BackupAuthenticationContractTests(unittest.TestCase):
             self.assertNotEqual(simultaneous[0], simultaneous[1])
             self.assertTrue(all(not path.exists() for path in simultaneous))
 
+    def test_fixture_interpreter_spawn_preserves_ssh_arguments_and_process_contract(self):
+        spawn = mock.Mock(return_value="fixture-child")
+        execute = _fixture_interpreter_popen(spawn, Path("/fixture/ssh"), "/bin/sh")
+        contract = {"start_new_session": True, "close_fds": True, "pass_fds": (),
+                    "stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "env": {"A": "B"}}
+        self.assertEqual("fixture-child", execute(["/fixture/ssh", "-C", "target", "true"], **contract))
+        spawn.assert_called_once_with(["/bin/sh", "/fixture/ssh", "-C", "target", "true"], **contract)
+        spawn.reset_mock()
+        execute(["/usr/bin/ssh", "-V"], **contract)
+        spawn.assert_called_once_with(["/usr/bin/ssh", "-V"], **contract)
+
+    def test_askpass_identity_probe_uses_bound_python_not_ambient_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            marker = root / "ambient-python-ran"
+            poisoned = bin_dir / "python3"
+            poisoned.write_text(
+                "#!/bin/sh\n: > \"$PROBE_POISON_MARKER\"\nexit 0\n",
+                encoding="utf-8",
+            )
+            poisoned.chmod(0o700)
+            probe = root / "probe.py"
+            probe.write_text("raise SystemExit(17)\n", encoding="utf-8")
+            argv = _askpass_identity_probe_argv(probe)
+            self.assertEqual([sys.executable, "-B", str(probe)], argv)
+            result = subprocess.run(
+                argv, env={**os.environ, "PATH": str(bin_dir),
+                           "PROBE_POISON_MARKER": str(marker)},
+                text=True, capture_output=True, timeout=2, check=False,
+            )
+            self.assertEqual(17, result.returncode, result.stderr)
+            self.assertEqual("", result.stdout)
+            self.assertFalse(marker.exists(), "ambient interpreter executed")
+
     def test_fifo_runtime_identity_rejects_path_rebind_without_unlinking_replacement(self):
         """The real helper must bind its read to the FIFO identity primed by parent."""
         replacement_kinds = ("symlink", "hardlink", "second-fifo", "regular")
@@ -3644,10 +3730,22 @@ class BackupAuthenticationContractTests(unittest.TestCase):
                     else:
                         fifo.write_text("attacker replacement\n", encoding="utf-8")
                     helper = Path(env["SSH_ASKPASS"])
-                    asked = subprocess.run(
-                        [str(helper)], env=env, text=True, capture_output=True,
-                        timeout=2, check=False,
-                    )
+                    try:
+                        asked = subprocess.run(
+                            _askpass_identity_probe_argv(helper),
+                            env={**env, "PYTHONPROFILEIMPORTTIME": "1"},
+                            text=True, capture_output=True, timeout=2, check=False,
+                        )
+                    except subprocess.TimeoutExpired as error:
+                        diagnostics = error.stderr or b""
+                        if isinstance(diagnostics, bytes):
+                            diagnostics = diagnostics.decode("utf-8", errors="replace")
+                        print(
+                            "ASKPASS_REBIND_TIMEOUT kind=" + kind + " import-phase:\n"
+                            + diagnostics.replace(self.SECRET, "<test-secret>"),
+                            file=sys.stderr,
+                        )
+                        raise
                     observed.append((fifo, displaced, asked.returncode))
                     raise RuntimeError("synthetic stop after identity rebind")
 
@@ -3780,7 +3878,7 @@ class BackupAuthenticationContractTests(unittest.TestCase):
                 "PID_FILE": str(pid_file),
             })
             spawn_kwargs = []
-            real_popen = subprocess.Popen
+            real_popen = _fixture_interpreter_popen(subprocess.Popen, fake_ssh, sys.executable)
 
             def recording_popen(*args, **kwargs):
                 spawn_kwargs.append(dict(kwargs))
@@ -3855,10 +3953,14 @@ class BackupAuthenticationContractTests(unittest.TestCase):
                 "CHILD_PID": str(child_file),
             })
             started = time.monotonic()
-            result = self.backup._run_ssh(
-                "cumulus", self.TARGET, "true", 5,
-                self.backup._KEY_AUTH_OPTS, env=environment,
-            )
+            with mock.patch.object(
+                self.backup.subprocess, "Popen",
+                side_effect=_fixture_interpreter_popen(subprocess.Popen, fake_ssh, sys.executable),
+            ):
+                result = self.backup._run_ssh(
+                    "cumulus", self.TARGET, "true", 5,
+                    self.backup._KEY_AUTH_OPTS, env=environment,
+                )
             elapsed = time.monotonic() - started
             self.assertLess(elapsed, 1.5, "output flood was buffered until timeout")
             self.assertEqual(125, result.returncode)
@@ -3905,10 +4007,14 @@ class BackupAuthenticationContractTests(unittest.TestCase):
             })
             before_fds = len(list(Path("/dev/fd").iterdir()))
             started = time.monotonic()
-            result = self.backup._run_ssh(
-                "cumulus", self.TARGET, "true", 1,
-                self.backup._KEY_AUTH_OPTS, env=environment,
-            )
+            with mock.patch.object(
+                self.backup.subprocess, "Popen",
+                side_effect=_fixture_interpreter_popen(subprocess.Popen, fake_ssh, "/bin/sh"),
+            ):
+                result = self.backup._run_ssh(
+                    "cumulus", self.TARGET, "true", 1,
+                    self.backup._KEY_AUTH_OPTS, env=environment,
+                )
             self.assertLess(time.monotonic() - started, 1.5)
             self.assertNotEqual(0, result.returncode)
             self.assertTrue(child_file.is_file())
@@ -3943,7 +4049,7 @@ class BackupAuthenticationContractTests(unittest.TestCase):
                 "PATH": str(fake_bin) + os.pathsep + environment.get("PATH", ""),
                 "CHILD_PID": str(child_file),
             })
-            real_popen = subprocess.Popen
+            real_popen = _fixture_interpreter_popen(subprocess.Popen, fake_ssh, "/bin/sh")
             spawned = []
 
             def recording_popen(*args, **kwargs):

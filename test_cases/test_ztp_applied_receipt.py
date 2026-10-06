@@ -9,6 +9,7 @@ import shlex
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import textwrap
 from typing import Optional
@@ -62,6 +63,9 @@ def run_cumulus_mode_bootstrap(
     release_dir: Optional[Path] = None,
     mac: str = MAC,
     template_source: Optional[str] = None,
+    product: str = "SN5600",
+    prior_applied: Optional[bytes] = None,
+    upgrade_enabled: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], list[str], dict[str, str]]:
     """Run the real Cumulus bootstrap with hermetic HTTP/NVUE shims."""
     root.mkdir(parents=True, exist_ok=True)
@@ -73,6 +77,8 @@ def run_cumulus_mode_bootstrap(
     runtime_root.mkdir()
     home.mkdir(parents=True)
     fake_bin.mkdir()
+    if prior_applied is not None:
+        AppliedConfigHelperTests().prepare_state(root, prior_applied)
 
     def executable(name: str, content: str) -> None:
         path = fake_bin / name
@@ -139,9 +145,28 @@ def run_cumulus_mode_bootstrap(
     """)
     executable("nv", """
         #!/bin/sh
+        if [ "$OBSERVE_RECEIPT_GUARD" = 1 ]; then
+            if [ -e "$TEST_STATE_DIR/.receipt-publication.pending" ]; then
+                printf 'guard:present\n' >> "$EVENTS"
+            else
+                printf 'guard:absent\n' >> "$EVENTS"
+            fi
+        fi
         printf 'nv:%s\n' "$*" >> "$EVENTS"
         exit 0
     """)
+    # Never let a branch under test reach the host's image installer or reboot.
+    for command in ("onie-install", "reboot"):
+        executable(command, """
+            #!/bin/sh
+            if [ -e "$TEST_STATE_DIR/.receipt-publication.pending" ]; then
+                printf 'guard:present\n' >> "$EVENTS"
+            else
+                printf 'guard:absent\n' >> "$EVENTS"
+            fi
+            printf '%s:%s\n' "${0##*/}" "$*" >> "$EVENTS"
+            exit 0
+        """)
 
     source = (TEMPLATE if template_source is None else template_source).replace(
         'RUNTIME_WORK_ROOT="/run"',
@@ -151,7 +176,7 @@ def run_cumulus_mode_bootstrap(
         f"APPLIED_STATE_DIR={shlex.quote(str(state))}", 1,
     ).replace(
         "PROD_NAME=$(decode-syseeprom 2>/dev/null | grep '^Product Name' | awk '{print $NF}' || echo \"unknown\")",
-        'PROD_NAME="SN5600"', 1,
+        f'PROD_NAME={shlex.quote(product)}', 1,
     ).replace(
         "IMG_VER=$(grep '^IMAGE_RELEASE=' /etc/image-release | awk -F'=' '{print $2}')",
         'IMG_VER="5.16.4"', 1,
@@ -160,9 +185,9 @@ def run_cumulus_mode_bootstrap(
         'RUN_VER="5.16.4"', 1,
     ).replace(
         'ETH0_RAW_MAC=$(cat /sys/class/net/eth0/address)',
-        f'ETH0_RAW_MAC="{mac}"', 1,
+        f'ETH0_RAW_MAC="{mac}"',
     ).replace(
-        'USER_HOME=/home/${USER_NAME}', 'USER_HOME="${TEST_HOME}"', 1,
+        'USER_HOME=/home/${USER_NAME}', 'USER_HOME="${TEST_HOME}"',
     ).replace(
         '        install_manual_ztp_helper\n',
         '        : # helper installation covered separately\n', 1,
@@ -172,6 +197,14 @@ def run_cumulus_mode_bootstrap(
     ).replace(
         '        install_time_sync_helper "${USER_NAME}"\n',
         '        : # helper installation covered separately\n', 1,
+    )
+    # NVOS uses the same canonical functions, with a different indentation.
+    if upgrade_enabled:
+        source = source.replace('ZTP_UPGRADE_ENABLED="false"', 'ZTP_UPGRADE_ENABLED="true"', 1)
+    # Installing privileged helpers is outside this hermetic device test.
+    source = re.sub(
+        r'(?m)^    install_(?:applied_config_helper|time_sync_helper|manual_ztp_helper).*$',
+        '    : # privileged helper installation covered separately', source,
     )
     source, network_replacements = re.subn(
         r'if ! select_ztp_network_path; then\n.*?\nfi\n\n'
@@ -199,6 +232,8 @@ def run_cumulus_mode_bootstrap(
         "MODE_BEHAVIOR": mode_behavior,
         "RELEASE_DIR": str(release_dir or ""),
         "TEST_HOME": str(home),
+        "TEST_STATE_DIR": str(state),
+        "OBSERVE_RECEIPT_GUARD": "1" if prior_applied is not None else "0",
     }
     result = run_bash(script, env=env)
     event_lines = (
@@ -227,6 +262,89 @@ def helper_source() -> str:
 
 
 class AppliedReceiptPersistenceTests(unittest.TestCase):
+    def test_upgrade_branch_fences_old_receipt_before_image_install_and_reboot(self):
+        for product in ("SN5600", "VX-test"):
+            with self.subTest(product=product), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                result, events, receipt = run_cumulus_mode_bootstrap(
+                    root, mode_behavior="replace", product=product,
+                    prior_applied=b"- set:\n    system:\n      hostname: leaf01\n",
+                    upgrade_enabled=True,
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual(1, sum(event.startswith("onie-install:") for event in events))
+                self.assertEqual(1, sum(event.startswith("reboot:") for event in events))
+                self.assertNotIn("guard:absent", events)
+                self.assertEqual(2, events.count("guard:present"))
+                self.assertFalse(any(event.startswith("nv:") for event in events))
+                self.assertEqual("2026-08-31T12:34:56+00:00", receipt["applied_at"])
+                self.assertEqual(b"schema=1\nstate=pending\n", (root / "state/.receipt-publication.pending").read_bytes())
+
+    def test_apply_attempt_revokes_old_receipt_before_early_persistence_failure(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            raw = b"- set:\n    system:\n      hostname: leaf01\n"
+            helper_tests = AppliedConfigHelperTests()
+            receipt, applied = helper_tests.prepare_state(root, raw)
+            original = receipt.read_bytes(), applied.read_bytes()
+            harness = library_harness(root, '''
+                begin_applied_config_attempt
+                persist_applied_receipt "$1" success dedicated replace 020000000001.yaml 02:00:00:00:00:01
+            ''')
+            result = run_bash(harness, root / "missing-source.yaml")
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual(original, (receipt.read_bytes(), applied.read_bytes()))
+            guard = root / "state/.receipt-publication.pending"
+            self.assertEqual(b"schema=1\nstate=pending\n", guard.read_bytes())
+            observed = run_bash(helper_tests.write_helper(root))
+            self.assertNotEqual(0, observed.returncode, "later failed attempt must revoke old success")
+            self.assertEqual("", observed.stdout)
+
+    def test_apply_attempt_success_clears_only_its_own_durable_hold(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            source = root / "new.yaml"
+            raw = b"- set:\n    system:\n      hostname: leaf01\n"
+            source.write_bytes(raw)
+            harness = library_harness(root, '''
+                begin_applied_config_attempt
+                persist_applied_receipt "$1" success dedicated replace 020000000001.yaml 02:00:00:00:00:01
+            ''')
+            result = run_bash(harness, source)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertFalse((root / "state/.receipt-publication.pending").exists())
+            observed = run_bash(AppliedConfigHelperTests().write_helper(root))
+            self.assertEqual(0, observed.returncode, observed.stderr)
+            self.assertTrue(observed.stdout.endswith("---\n" + raw.decode()))
+
+    def test_apply_attempt_cannot_adopt_rebound_or_preexisting_hold(self):
+        for phase in ("before-begin", "before-publish"):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as name:
+                root = Path(name)
+                raw = b"- set:\n    system:\n      hostname: leaf01\n"
+                receipt, applied = AppliedConfigHelperTests().prepare_state(root, raw)
+                original = receipt.read_bytes(), applied.read_bytes()
+                source = root / "new.yaml"
+                source.write_bytes(raw)
+                harness = library_harness(root, '''
+                    guard="${APPLIED_STATE_DIR}/.receipt-publication.pending"
+                    if [[ "$2" == before-begin ]]; then
+                        printf 'foreign HOLD\n' > "$guard"
+                        chmod 0600 "$guard"
+                        if begin_applied_config_attempt; then exit 90; fi
+                    else
+                        begin_applied_config_attempt
+                        mv "$guard" "${guard}.own"
+                        printf 'foreign HOLD\n' > "$guard"
+                        chmod 0600 "$guard"
+                        persist_applied_receipt "$1" success dedicated replace 020000000001.yaml 02:00:00:00:00:01
+                    fi
+                ''')
+                result = run_bash(harness, source, phase)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual(original, (receipt.read_bytes(), applied.read_bytes()))
+                self.assertEqual(b"foreign HOLD\n", (root / "state/.receipt-publication.pending").read_bytes())
+
     def test_canonical_template_is_bash_syntax_valid_and_uses_persistent_logs(self):
         result = subprocess.run(
             ["bash", "-n", str(TEMPLATE_PATH)], text=True,
@@ -369,7 +487,7 @@ class AppliedReceiptPersistenceTests(unittest.TestCase):
             """)
             env = {**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"}
             process = subprocess.Popen(
-                ["bash", str(harness), str(source)],
+                ["bash", "-x", str(harness), str(source)],
                 text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 env=env, start_new_session=True,
             )
@@ -428,8 +546,10 @@ class AppliedReceiptPersistenceTests(unittest.TestCase):
                 _, stderr = process.communicate(timeout=3)
             except subprocess.TimeoutExpired:
                 os.killpg(process.pid, signal.SIGKILL)
-                process.communicate()
-                self.fail("FIFO receipt replacement blocked applied receipt persistence")
+                _, stderr = process.communicate()
+                # Preserve the actual shell phase before temporary-dir cleanup;
+                # a timeout alone cannot distinguish startup from FIFO I/O.
+                self.fail("FIFO receipt replacement blocked applied receipt persistence; shell trace:\n" + stderr)
             self.assertEqual(0, process.returncode, stderr)
             self.assertEqual(previous_yaml, (state / "last-success.yaml").read_bytes())
             self.assertEqual(previous_receipt, (state / "receipt.env").read_bytes())
@@ -1145,6 +1265,140 @@ class AppliedConfigHelperTests(unittest.TestCase):
             denied = run_bash(helper, "unexpected")
             self.assertNotEqual(0, denied.returncode)
             self.assertIn("accepts no arguments", denied.stderr)
+
+    def test_helper_rejects_and_retains_any_uncertain_publication_guard(self):
+        for shape in ("regular", "mode", "symlink", "hardlink", "directory", "fifo"):
+            with self.subTest(shape=shape), tempfile.TemporaryDirectory() as name:
+                root = Path(name)
+                raw = b"- set:\n    system:\n      hostname: leaf01\n"
+                receipt, applied = self.prepare_state(root, raw)
+                original = receipt.read_bytes(), applied.read_bytes()
+                guard = root / "state/.receipt-publication.pending"
+                external = root / "foreign-guard"
+                external.write_bytes(b"foreign hold\n")
+                if shape in {"regular", "mode"}:
+                    guard.write_bytes(b"uncertain publication\n")
+                    guard.chmod(0o600 if shape == "regular" else 0o666)
+                elif shape == "symlink":
+                    guard.symlink_to(root / "absent-target")
+                elif shape == "hardlink":
+                    os.link(external, guard)
+                elif shape == "directory":
+                    guard.mkdir()
+                else:
+                    os.mkfifo(guard)
+                before = guard.lstat()
+                result = run_bash(self.write_helper(root))
+                self.assertNotEqual(0, result.returncode, "a visible success is not durable authority while HOLD exists")
+                self.assertEqual("", result.stdout)
+                self.assertEqual(original, (receipt.read_bytes(), applied.read_bytes()))
+                self.assertEqual((before.st_ino, before.st_mode), (guard.lstat().st_ino, guard.lstat().st_mode))
+                self.assertEqual(b"foreign hold\n", external.read_bytes())
+
+    def test_writer_guard_is_held_across_file_and_directory_sync(self):
+        program = TEMPLATE.split("<<'PY_GUARD'", 1)[1].split("\nPY_GUARD", 1)[0]
+        for shape in ("regular", "symlink", "hardlink", "mode"):
+            with self.subTest(shape=shape), tempfile.TemporaryDirectory() as name:
+                root = Path(name)
+                self.prepare_state(root, b"- set:\n    system:\n      hostname: leaf01\n")
+                state = root / "state"
+                guard = state / ".receipt-publication.pending"
+                external = root / "foreign-guard"
+                external.write_bytes(b"foreign hold\n")
+                external.chmod(0o600)
+                wrapper = '''
+import os, stat, sys
+from pathlib import Path
+state, external, shape, program = sys.argv[1:]
+guard = Path(state) / ".receipt-publication.pending"
+real_sync = os.fsync
+changed = False
+def mutate_after_sync(fd):
+    global changed
+    real_sync(fd)
+    if stat.S_ISREG(os.fstat(fd).st_mode) and not changed:
+        changed = True
+        if shape == "mode":
+            guard.chmod(0o666)
+        else:
+            guard.unlink()
+            if shape == "symlink":
+                guard.symlink_to(external)
+            elif shape == "hardlink":
+                os.link(external, guard)
+            else:
+                guard.write_bytes(b"foreign hold\\n")
+                guard.chmod(0o600)
+os.fsync = mutate_after_sync
+sys.argv = ["guard", state, "begin"]
+exec(compile(program, "actual-bootstrap-publication-guard", "exec"))
+'''
+                result = subprocess.run(
+                    [sys.executable, "-B", "-c", wrapper, str(state), str(external), shape, program],
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertNotEqual(0, result.returncode, "the writer cannot adopt a foreign guard as its own")
+                self.assertEqual("", result.stdout)
+                self.assertEqual(b"foreign hold\n", external.read_bytes())
+                self.assertTrue(guard.exists())
+                if shape == "mode":
+                    self.assertEqual(0o666, stat.S_IMODE(guard.stat().st_mode))
+                elif shape == "symlink":
+                    self.assertTrue(guard.is_symlink())
+                elif shape == "hardlink":
+                    self.assertEqual(external.stat().st_ino, guard.stat().st_ino)
+                else:
+                    self.assertEqual(b"foreign hold\n", guard.read_bytes())
+
+    def test_guard_completion_directory_fault_retains_hold_and_foreign_occupant(self):
+        program = TEMPLATE.split("<<'PY_GUARD'", 1)[1].split("\nPY_GUARD", 1)[0]
+        for foreign in (False, True):
+            with self.subTest(foreign=foreign), tempfile.TemporaryDirectory() as name:
+                root = Path(name)
+                self.prepare_state(root, b"- set:\n    system:\n      hostname: leaf01\n")
+                state = root / "state"
+                guard = state / ".receipt-publication.pending"
+                begin = subprocess.run(
+                    [sys.executable, "-B", "-c", program, str(state), "begin"],
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(0, begin.returncode, begin.stderr)
+                self.assertEqual(b"schema=1\nstate=pending\n", guard.read_bytes())
+                self.assertEqual(23, guard.stat().st_size, "fixed version-1 guard image, independently specified")
+                self.assertEqual(0o600, stat.S_IMODE(guard.stat().st_mode))
+                self.assertEqual(9, len(begin.stdout.strip().split(":")))
+                wrapper = '''
+import os, stat, sys
+from pathlib import Path
+state, token, foreign, program = sys.argv[1:]
+guard = Path(state) / ".receipt-publication.pending"
+real_sync = os.fsync
+changed = False
+def fail_cleanup_sync(fd):
+    global changed
+    if stat.S_ISDIR(os.fstat(fd).st_mode) and not changed:
+        changed = True
+        assert not guard.exists(), "fault must hit the actual guard removal"
+        if foreign == "yes":
+            guard.write_bytes(b"foreign cleanup hold\\n")
+            guard.chmod(0o600)
+        raise OSError("injected guard removal directory fsync failure")
+    real_sync(fd)
+os.fsync = fail_cleanup_sync
+sys.argv = ["guard", state, "finish", token]
+exec(compile(program, "actual-bootstrap-guard-completion", "exec"))
+'''
+                finish = subprocess.run(
+                    [sys.executable, "-B", "-c", wrapper, str(state), begin.stdout.strip(),
+                     "yes" if foreign else "no", program],
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertNotEqual(0, finish.returncode)
+                expected = b"foreign cleanup hold\n" if foreign else b"schema=1\nstate=pending\n"
+                self.assertEqual(expected, guard.read_bytes(), "retain HOLD; never overwrite foreign evidence")
+                denied = run_bash(self.write_helper(root))
+                self.assertNotEqual(0, denied.returncode)
+                self.assertEqual("", denied.stdout)
 
     def test_schema1_maximal_positive_receipt_and_degenerate_limit(self):
         with tempfile.TemporaryDirectory() as name:

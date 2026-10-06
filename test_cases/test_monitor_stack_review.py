@@ -1196,6 +1196,28 @@ class MonitorEvidenceAndModeContractTests(unittest.TestCase):
             ROOT / "DAY0-Prepare/12-ztp-monitor.py",
         )
 
+    def test_unresolved_publication_hold_vetoes_logged_apply_success_in_physical_order(self):
+        from test_cases.test_manual_applied_config import analyze_bootstrap_log_fixture
+        begin = "[ZTP] Applied-config attempt started; prior success is on HOLD\n"
+        saved = "[ZTP] Applied-config receipt saved: status=success, source=020000000001.yaml, sha256=" + "a" * 64 + "\n"
+        success = "[ZTP] Dedicated config: leaf.yaml apply and save complete\n"
+        complete = "[ZTP] Cumulus provision complete\n[ZTP] ZTP FINISH\n"
+        for label, log in (
+            ("new-hold-before-apply", begin + success + complete),
+            ("old-publication-before-new-hold", saved + begin + success + complete),
+            ("late-durability-failure", begin + success + saved + "[ZTP] WARN: Applied-config receipt is visible but directory fsync failed; durability is uncertain\n" + complete),
+            ("unowned-hold", success + "[ZTP] ERROR: Cannot durably revoke prior applied receipt; refusing NVUE configuration\n" + complete),
+            ("unknown-status-cannot-clear", begin + success + saved.replace("status=success", "status=unknown") + complete),
+            ("unsafe-source-cannot-clear", begin + success + saved.replace("source=020000000001.yaml", "source=../foreign.yaml") + complete),
+        ):
+            with self.subTest(label=label):
+                device = analyze_bootstrap_log_fixture(self.monitor, log)
+                self.assertEqual("warning", device["stages"]["config_apply"]["status"])
+                self.assertEqual("warning", device["stages"]["complete"]["status"])
+                self.assertIn("APPLIED_CONFIG_PUBLICATION_HOLD", [issue["code"] for issue in device["issues"]])
+        device = analyze_bootstrap_log_fixture(self.monitor, begin + success + saved + complete)
+        self.assertNotIn("APPLIED_CONFIG_PUBLICATION_HOLD", [issue["code"] for issue in device["issues"]])
+
     def test_tail_exact_boundary_and_truncation_metadata(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "access.log"

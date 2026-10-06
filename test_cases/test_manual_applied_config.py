@@ -12,6 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import tempfile
 import unittest
+import subprocess
 from unittest import mock
 import yaml
 
@@ -48,6 +49,204 @@ DEVICE = {
     "hostname": "leaf01", "type": "eth", "ip": "192.0.2.10",
     "mac_plain": "020000000001", "identity_macs": {"eth0": "020000000001"},
 }
+
+
+def analyze_bootstrap_log_fixture(monitor, log, device_type="eth"):
+    """Independent identity/clock fixture; expected stage values stay in tests."""
+    device = {
+        **DEVICE, "type": device_type, "ssh_ips": ["192.0.2.10"],
+        "ssh_interfaces": {"192.0.2.10": "eth0"},
+        "stages": {name: monitor.stage() for name in monitor.STAGE_NAMES},
+        "issues": [], "events": [],
+    }
+    monitor.analyze_switch(device, {
+        "kind": "ok", "observed_at": "2026-10-06T12:00:00+00:00",
+        "connected_ip": "192.0.2.10", "attempts": [],
+        "remote_hostname": "leaf01", "remote_eth0_mac": MAC,
+        "remote_eth1_mac": "", "remote_interface_macs": {"eth0": MAC},
+        "local_started_epoch": "1000", "local_finished_epoch": "1000",
+        "remote_time_start": "1000", "remote_time_end": "1000",
+        "boot_id": "fixture-boot", "boot_time": "1",
+        "ztp_log": log, "ifreload_log": "", "failed_yaml": "",
+        "stderr": "", "host_key_refreshed": False,
+    })
+    return device
+
+
+class BootstrapPublicationDurabilityWorkflowTests(unittest.TestCase):
+    def test_real_failed_receipt_publication_does_not_promote_monitor_stages(self):
+        from test_cases.test_ztp_applied_receipt import MAIN_MARKER, TEMPLATE, run_cumulus_mode_bootstrap
+        for product, device_type in (("SN5600", "eth"), ("Q3400", "ib"), ("N5200", "nvl")):
+            with self.subTest(product=product), tempfile.TemporaryDirectory() as directory:
+                source = TEMPLATE.replace(
+                    MAIN_MARKER,
+                    'stage_applied_source_bound() { return 86; }\n' + MAIN_MARKER,
+                    1,
+                )
+                result, events, _ = run_cumulus_mode_bootstrap(
+                    Path(directory), mode_behavior="replace", product=product,
+                    prior_applied=b"- set:\n    system:\n      hostname: leaf01\n",
+                    template_source=source,
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertTrue(any(event.startswith("nv:") for event in events))
+                self.assertIn("Could not stage applied-config YAML", result.stdout)
+                device = analyze_bootstrap_log_fixture(MONITOR, result.stdout, device_type)
+                self.assertEqual("warning", device["stages"]["config_apply"]["status"])
+                self.assertEqual("warning", device["stages"]["complete"]["status"])
+                self.assertIn("APPLIED_CONFIG_PUBLICATION_HOLD", [issue["code"] for issue in device["issues"]])
+
+    def test_real_upgrade_revokes_old_helper_trust_and_preserves_foreign_hold(self):
+        from test_cases.test_ztp_applied_receipt import (
+            AppliedConfigHelperTests, MAIN_MARKER, TEMPLATE, run_cumulus_mode_bootstrap,
+        )
+        for product in ("SN5600", "VX-test"):
+            for foreign_hold in (False, True):
+                with self.subTest(product=product, foreign_hold=foreign_hold), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    source = TEMPLATE
+                    if foreign_hold:
+                        source = source.replace(
+                            MAIN_MARKER,
+                            'printf "foreign HOLD\\n" > "${APPLIED_STATE_DIR}/.receipt-publication.pending"\n'
+                            'chmod 0600 "${APPLIED_STATE_DIR}/.receipt-publication.pending"\n' + MAIN_MARKER,
+                            1,
+                        )
+                    result, events, _ = run_cumulus_mode_bootstrap(
+                        root, mode_behavior="replace", product=product,
+                        prior_applied=b"- set:\n    system:\n      hostname: leaf01\n",
+                        upgrade_enabled=True, template_source=source,
+                    )
+                    if foreign_hold:
+                        self.assertNotEqual(0, result.returncode)
+                        self.assertFalse(any(event.startswith(("onie-install:", "reboot:", "nv:")) for event in events))
+                        self.assertEqual(b"foreign HOLD\n", (root / "state/.receipt-publication.pending").read_bytes())
+                    else:
+                        self.assertEqual(0, result.returncode, result.stderr)
+                        self.assertEqual(2, events.count("guard:present"))
+                        self.assertNotIn("guard:absent", events)
+                    helper = AppliedConfigHelperTests().write_helper(root)
+
+                    class LocalEvidenceClient:
+                        args = SimpleNamespace(command_timeout=10)
+
+                        def run(self, device, host, command, **kwargs):
+                            return subprocess.run(["sh", str(helper)], capture_output=True, text=True, check=False)
+
+                    evidence = MANUAL.collect_applied_config(LocalEvidenceClient(), DEVICE, "192.0.2.10")
+                    self.assertIs(False, evidence["trusted"], "upgrade must not borrow a prior configuration success")
+                    self.assertEqual({}, evidence["receipt"])
+
+    def test_real_device_branches_refuse_nv_mutation_when_prior_hold_is_unknown(self):
+        from test_cases.test_ztp_applied_receipt import MAIN_MARKER, TEMPLATE, run_cumulus_mode_bootstrap
+        for product in ("SN5600", "Q3400", "N5200"):
+            with self.subTest(product=product), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source = TEMPLATE.replace(
+                    MAIN_MARKER,
+                    'printf "foreign HOLD\\n" > "${APPLIED_STATE_DIR}/.receipt-publication.pending"\n'
+                    'chmod 0600 "${APPLIED_STATE_DIR}/.receipt-publication.pending"\n' + MAIN_MARKER,
+                    1,
+                )
+                result, events, _receipt = run_cumulus_mode_bootstrap(
+                    root, mode_behavior="replace", product=product,
+                    prior_applied=b"- set:\n    system:\n      hostname: leaf01\n",
+                    template_source=source,
+                )
+                self.assertNotEqual(0, result.returncode)
+                self.assertFalse(any(line.startswith("nv:") for line in events), "unknown prior HOLD must stop before any device mutation")
+                self.assertEqual(b"foreign HOLD\n", (root / "state/.receipt-publication.pending").read_bytes())
+
+    def test_real_cumulus_and_nvos_attempt_revoke_prior_success_before_nv_mutation(self):
+        from test_cases.test_ztp_applied_receipt import (
+            AppliedConfigHelperTests, MAIN_MARKER, TEMPLATE, run_cumulus_mode_bootstrap,
+        )
+        for product in ("SN5600", "Q3400", "N5200"):
+            with self.subTest(product=product), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                raw = b"- set:\n    system:\n      hostname: leaf01\n"
+                # Fault the actual early persistence boundary, after a new NV
+                # operation. The historical success has identical YAML bytes.
+                source = TEMPLATE.replace(
+                    MAIN_MARKER,
+                    'stage_applied_source_bound() { return 86; }\n' + MAIN_MARKER,
+                    1,
+                )
+                result, events, receipt = run_cumulus_mode_bootstrap(
+                    root, mode_behavior="replace", product=product,
+                    prior_applied=raw, template_source=source,
+                )
+                self.assertEqual(0, result.returncode, result.stderr + result.stdout)
+                mutations = [line for line in events if line.startswith("nv:")]
+                self.assertTrue(mutations, "must exercise the actual device config branch")
+                self.assertNotIn("guard:absent", events, "old success must be revoked before the first NV call")
+                self.assertEqual(len(mutations), events.count("guard:present"))
+                self.assertIn("Could not stage applied-config YAML", result.stdout)
+                self.assertEqual("2026-08-31T12:34:56+00:00", receipt["applied_at"])
+                self.assertIn(
+                    "ssh-ed25519 AAAATEST ztp-test",
+                    (root / "home/cumulus/.ssh/authorized_keys").read_text(),
+                    "all device families must use the hermetic home directory",
+                )
+                helper = AppliedConfigHelperTests().write_helper(root)
+
+                class LocalEvidenceClient:
+                    args = SimpleNamespace(command_timeout=10)
+
+                    def run(self, device, host, command, **kwargs):
+                        return subprocess.run(["sh", str(helper)], capture_output=True, text=True, check=False)
+
+                evidence = MANUAL.collect_applied_config(LocalEvidenceClient(), DEVICE, "192.0.2.10")
+                self.assertIs(False, evidence["trusted"], "historical matching bytes cannot mask a later failed attempt")
+                self.assertEqual({}, evidence["receipt"])
+                self.assertTrue((root / "state/.receipt-publication.pending").exists())
+
+    def test_real_bootstrap_late_directory_failure_cannot_be_trusted_by_manual_reader(self):
+        from test_cases.test_ztp_applied_receipt import (
+            AppliedConfigHelperTests, library_harness, run_bash,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw = b"- set:\n    system:\n      hostname: leaf01\n"
+            helper_tests = AppliedConfigHelperTests()
+            receipt, _applied = helper_tests.prepare_state(root, raw)
+            original = receipt.read_bytes()
+            source = root / "same-config.yaml"
+            source.write_bytes(raw)
+            harness = library_harness(root, '''
+                real_sync=$(declare -f fsync_applied_state)
+                eval "${real_sync/fsync_applied_state/fsync_applied_state_real}"
+                sync_calls=0
+                fsync_applied_state() {
+                    sync_calls=$((sync_calls + 1))
+                    if (( sync_calls == 3 )); then
+                        log "TEST_FAULT: final receipt directory fsync"
+                        return 86
+                    fi
+                    fsync_applied_state_real "$@"
+                }
+                persist_applied_receipt "$1" success dedicated replace 020000000001.yaml 02:00:00:00:00:01
+            ''')
+            written = run_bash(harness, source)
+            self.assertEqual(0, written.returncode, "receipt diagnostics remain nonfatal to bootstrap")
+            self.assertIn("TEST_FAULT", (root / "test.log").read_text())
+            self.assertNotEqual(original, receipt.read_bytes(), "fault must occur after actual receipt rename")
+            helper = helper_tests.write_helper(root)
+            observed = []
+
+            class LocalEvidenceClient:
+                args = SimpleNamespace(command_timeout=10)
+
+                def run(self, device, host, command, **kwargs):
+                    observed.append(command)
+                    self_result = subprocess.run(["sh", str(helper)], capture_output=True, text=True, check=False)
+                    return self_result
+
+            evidence = MANUAL.collect_applied_config(LocalEvidenceClient(), DEVICE, "192.0.2.10")
+            self.assertEqual([MANUAL.APPLIED_CONFIG_HELPER], observed)
+            self.assertIs(False, evidence["trusted"], "real writer/helper/manual boundary must refuse uncertain success")
+            self.assertEqual({}, evidence["receipt"])
+            self.assertTrue((root / "state/.receipt-publication.pending").exists())
 
 
 def completed(stdout="", returncode=0, stderr=""):

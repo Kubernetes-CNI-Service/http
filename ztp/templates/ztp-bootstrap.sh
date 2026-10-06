@@ -60,6 +60,8 @@ APPLIED_CONFIG_MAX_BYTES=$((8 * 1024 * 1024 - 8192))
 # name, two 64-byte hashes, bounded timestamp and fixed failed-mode name).
 # This is a finite safety budget, not a truncation target.
 APPLIED_RECEIPT_MAX_BYTES=1024
+APPLIED_ATTEMPT_STARTED=false
+APPLIED_ATTEMPT_GUARD=""
 ZTP_DHCP_STATE=""
 ZTP_INTERFACE=""
 ZTP_VRF=""
@@ -657,6 +659,8 @@ check_root_file() {
 state_uid=$(stat -c '%u' "${STATE_DIR}" 2>/dev/null) || fail "cannot stat state directory"
 state_mode=$(stat -c '%a' "${STATE_DIR}" 2>/dev/null) || fail "cannot stat state directory"
 [ "${state_uid}" = "0" ] && [ "${state_mode}" = "711" ] || fail "unsafe state directory owner or mode"
+[ ! -e "${STATE_DIR}/.receipt-publication.pending" ] &&
+    [ ! -L "${STATE_DIR}/.receipt-publication.pending" ] || fail "applied receipt publication is on HOLD"
 check_root_file "${RECEIPT_PATH}"
 check_root_file "${YAML_PATH}"
 receipt_payload=$(python3 - "${STATE_DIR}" "${MAX_RECEIPT_BYTES}" <<'PY_RECEIPT'
@@ -854,6 +858,15 @@ try:
             or stat.S_IMODE(directory.st_mode) != 0o711):
         raise SystemExit("unsafe applied evidence directory")
 
+    def refuse_hold():
+        try:
+            os.stat(".receipt-publication.pending", dir_fd=directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        raise SystemExit("applied receipt publication is on HOLD")
+
+    refuse_hold()
+
     def read_bound(name, maximum):
         descriptor = os.open(
             name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
@@ -900,6 +913,7 @@ try:
             current_dir.st_dev, current_dir.st_ino,
             current_dir.st_mode, current_dir.st_uid):
         raise SystemExit("applied evidence directory changed")
+    refuse_hold()
     sys.stdout.buffer.write(b"ZTP_APPLIED_CONFIG_V1\n" + receipt + b"---\n" + yaml_bytes)
 finally:
     os.close(directory_fd)
@@ -1031,6 +1045,107 @@ persist_failed_config() {
 # the fixed reader detects the old-receipt/new-YAML hash mismatch and fails
 # closed.  Persistence is diagnostic evidence only, so every local I/O failure
 # is downgraded to WARN and must not turn an already successful ZTP into failure.
+applied_receipt_publication_guard() {
+    python3 - "${APPLIED_STATE_DIR}" "$@" <<'PY_GUARD'
+import os
+import stat
+import sys
+
+state_dir, action, *arguments = sys.argv[1:]
+name = ".receipt-publication.pending"
+directory_fd = os.open(state_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+file_fd = None
+identity = lambda s: (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid,
+                      s.st_nlink, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+try:
+    directory = os.fstat(directory_fd)
+    if directory.st_uid != os.geteuid() or stat.S_IMODE(directory.st_mode) != 0o711:
+        raise SystemExit("unsafe applied receipt guard directory")
+
+    def validate_directory():
+        visible = os.stat(state_dir, follow_symlinks=False)
+        if (directory.st_dev, directory.st_ino, directory.st_mode, directory.st_uid) != (
+                visible.st_dev, visible.st_ino, visible.st_mode, visible.st_uid):
+            raise SystemExit("applied receipt guard directory rebound")
+
+    def create_hold():
+        descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                             0o600, dir_fd=directory_fd)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(b"schema=1\nstate=pending\n")
+            stream.flush()
+            held = os.fstat(stream.fileno())
+            os.fsync(stream.fileno())
+            if (not stat.S_ISREG(held.st_mode) or held.st_nlink != 1
+                    or held.st_uid != os.geteuid() or stat.S_IMODE(held.st_mode) != 0o600
+                    or identity(os.fstat(stream.fileno())) != identity(held)
+                    or identity(os.stat(name, dir_fd=directory_fd, follow_symlinks=False)) != identity(held)):
+                raise SystemExit("applied receipt guard rebound during file sync; retain HOLD")
+            os.fsync(directory_fd)
+            validate_directory()
+            if (identity(os.fstat(stream.fileno())) != identity(held)
+                    or identity(os.stat(name, dir_fd=directory_fd, follow_symlinks=False)) != identity(held)):
+                raise SystemExit("applied receipt guard rebound during directory sync; retain HOLD")
+            return held
+
+    validate_directory()
+    if action == "begin" and not arguments:
+        held = create_hold()
+        validate_directory()
+        print(":".join(map(str, identity(held))))
+    elif action in ("verify", "finish") and len(arguments) == 1:
+        expected = tuple(int(part) for part in arguments[0].split(":"))
+        if len(expected) != 9:
+            raise SystemExit("invalid applied receipt guard identity")
+        file_fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=directory_fd)
+        held = os.fstat(file_fd)
+        if (not stat.S_ISREG(held.st_mode) or held.st_nlink != 1
+                or held.st_uid != os.geteuid() or stat.S_IMODE(held.st_mode) != 0o600
+                or identity(held) != expected
+                or identity(os.stat(name, dir_fd=directory_fd, follow_symlinks=False)) != expected):
+            raise SystemExit("applied receipt guard changed; retain HOLD")
+        validate_directory()
+        if action == "verify":
+            raise SystemExit(0)
+        os.unlink(name, dir_fd=directory_fd)
+        try:
+            os.fsync(directory_fd)
+            validate_directory()
+        except BaseException:
+            try:
+                create_hold()
+            except FileExistsError:
+                pass  # Never overwrite a foreign controlled-name occupant.
+            raise
+    else:
+        raise SystemExit("invalid applied receipt guard operation")
+finally:
+    if file_fd is not None:
+        os.close(file_fd)
+    os.close(directory_fd)
+PY_GUARD
+}
+
+# Withdraw historical receipt trust before any NVUE config mutation. This is a
+# durable negative fence, not a transaction generation or rollback authority.
+# An existing/unknown HOLD must never be adopted or removed by a later run.
+begin_applied_config_attempt() {
+    if [[ "${APPLIED_ATTEMPT_STARTED}" == true ]]; then
+        log "[ZTP] ERROR: Applied-config attempt already started"
+        return 1
+    fi
+    APPLIED_ATTEMPT_STARTED=true
+    if [[ -L "${APPLIED_STATE_DIR}" ||
+          ( -e "${APPLIED_STATE_DIR}" && ! -d "${APPLIED_STATE_DIR}" ) ]] ||
+       ! mkdir -p -- "${APPLIED_STATE_DIR}" ||
+       ! chown root:root "${APPLIED_STATE_DIR}" || ! chmod 0711 "${APPLIED_STATE_DIR}" ||
+       ! APPLIED_ATTEMPT_GUARD=$(applied_receipt_publication_guard begin); then
+        log "[ZTP] ERROR: Cannot durably revoke prior applied receipt; refusing NVUE configuration"
+        return 1
+    fi
+    log "[ZTP] Applied-config attempt started; prior success is on HOLD"
+}
+
 fsync_applied_state() {
     python3 - "${APPLIED_STATE_DIR}" "$@" <<'PY'
 import os
@@ -1204,6 +1319,7 @@ persist_applied_receipt() {
     local source_size raw_sha256 copied_sha256 applied_at receipt_size
     local failed_size failed_raw_sha256 failed_copied_sha256=""
     local yaml_tmp="" receipt_tmp="" failed_tmp=""
+    local publication_guard=""
     local -a stage_paths=()
 
     cleanup_applied_receipt_temps() {
@@ -1390,6 +1506,19 @@ persist_applied_receipt() {
         log "[ZTP] WARN: Could not fsync staged applied-config evidence"
         return 0
     fi
+    if [[ "${APPLIED_ATTEMPT_STARTED}" == true ]]; then
+        publication_guard="${APPLIED_ATTEMPT_GUARD}"
+    elif ! publication_guard=$(applied_receipt_publication_guard begin); then
+        cleanup_applied_receipt_temps
+        log "[ZTP] WARN: Applied-config publication is on HOLD; refusing data/receipt promotion"
+        return 0
+    fi
+    if [[ -z "${publication_guard}" ]] ||
+       ! applied_receipt_publication_guard verify "${publication_guard}"; then
+        cleanup_applied_receipt_temps
+        log "[ZTP] WARN: Applied-config attempt HOLD changed; refusing data/receipt promotion"
+        return 0
+    fi
 
     # Promote data first and the receipt last.  The reader fails closed if an
     # interruption leaves a receipt/YAML pair with different hashes.
@@ -1422,6 +1551,11 @@ persist_applied_receipt() {
         log "[ZTP] WARN: Applied-config receipt is visible but directory fsync failed; durability is uncertain"
         return 0
     fi
+    if ! applied_receipt_publication_guard finish "${publication_guard}"; then
+        log "[ZTP] WARN: Applied-config guard completion failed; publication remains on HOLD"
+        return 0
+    fi
+    APPLIED_ATTEMPT_GUARD=""
     log "[ZTP] Applied-config receipt saved: status=${receipt_status}, source=${source_name}, sha256=${raw_sha256}"
     return 0
 }
@@ -1741,6 +1875,9 @@ if [[ "${PROD_NAME}" == ${EthSW} || "${PROD_NAME}" == ${EthVX} ]]; then
     log "[ZTP] BaseImg:${IMG_VER}, RunningVer:${RUN_VER}, Target:${TARGET_CL_VER}"
 
     if [[ "${RUN_VER}" != "${TARGET_CL_VER}" && "${ZTP_UPGRADE_ENABLED}" == "true" ]];then
+        if ! begin_applied_config_attempt; then
+            exit 1
+        fi
         log "[ZTP] Version mismatch, install image:${USE_IMG_URL}"
         ztp_net_exec onie-install -fa -i "${USE_IMG_URL}"
         log "[ZTP] Reboot into ONIE installation"
@@ -1754,6 +1891,9 @@ if [[ "${PROD_NAME}" == ${EthSW} || "${PROD_NAME}" == ${EthVX} ]]; then
         log "[ZTP] Download config by eth0 MAC"
         ETH0_RAW_MAC=$(cat /sys/class/net/eth0/address)
         ETH0_MAC=$(echo "${ETH0_RAW_MAC}" | tr -d ':')
+        if ! begin_applied_config_attempt; then
+            exit 1
+        fi
         MAC_CFG="${CFG_BASE_URL}/latest_yaml/${ETH0_MAC}.yaml"
         MAC_MODE="${CFG_BASE_URL}/latest_yaml/${ETH0_MAC}.mode"
         SPX_MARKER="${CFG_BASE_URL}/latest_yaml/${ETH0_MAC}.spx"
@@ -1943,6 +2083,9 @@ elif [[ "${PROD_NAME}" == ${IBSW} || "${PROD_NAME}" == ${NVLSW} ]]; then
 
     ETH0_RAW_MAC=$(cat /sys/class/net/eth0/address)
     ETH0_MAC=$(echo "${ETH0_RAW_MAC}" | tr -d ':')
+    if ! begin_applied_config_attempt; then
+        exit 1
+    fi
 
     MAC_CFG="${CFG_BASE_URL}/latest_yaml/${ETH0_MAC}.yaml"
     MAC_LOCAL="${TMP_DIR}/${MAC_CFG##*/}"
