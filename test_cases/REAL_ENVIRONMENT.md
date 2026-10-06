@@ -1715,6 +1715,8 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 - SETUP WAL 未识别合同的恢复写前拒绝：TEST direct 与真实 LOAD→SETUP 死亡→新 LOAD 冷恢复对有效 checksum 的未知写集/重复 JSON 先 RED 后 GREEN；schema2 reader 和登记入口只能接受已实现的闭合 envelope/body/row 字段，未知义务不能被忽略后退休。现场仍仅限本卡授权隔离 VM、完整 P/Q/A/B/WAL/receipt、可恢复卷快照、排他部署锁、明确停服及其它写者静默。原样封存 WAL/manifest/链接/目录身份、mode/mtime/ctime/摘要及物理操作顺序；在隔离副本中加入未知 body/envelope/row 字段或重复键，即使重新计算 checksum，也必须在第一恢复/登记写前 HOLD，原证据零删除、服务零启动。保留原缺失 Q parent 前像诊断；证据核验后仅恢复登记快照，不对 live 注入、不手改正式 ledger、不删除未知义务。此处只证明 reader 能力边界，不补齐全部共享写集、完整 DHCP 冷恢复、B 成功退休、旧 A 健康激活、Linux/断电或 DEV ACK；本卡继续 OPEN。
 
+- 实体 latest 冷恢复写前所有权复核候选：TEST direct 和真实 LOAD→SETUP 死亡→新 LOAD 对预检后同目标的新指针、自己的 unlink/父同步后换入的未知备份先 RED 后 GREEN；捕获前备份换绑补充 RED 要求持有原目录/release FD 再绑定 WAL 原 dev/ino。现场仍限本卡授权隔离 VM、完整 P/Q/A/B/WAL/receipt、已核原目录和匹配 release、可恢复卷快照、排他锁、明确停服及其它正常写者静默。独立记录源/备份/目标/父的名称及 FD dev/ino/mode/uid/gid/nlink/size/mtime/ctime、原链接文字、WAL/manifest/内容摘要、注入屏障、每次 unlink/rename/fsync/退出及物理顺序；分别在预检至捕获、源 unlink 前、unlink 后同步及 rename 前受控换绑。负例必须 HOLD、不消费未知对象、不退休原 WAL、不启动服务；若此前自己的 unlink 已发生，允许 latest 缺席但须如实记录并保留原目录，不假报完整恢复或零写入。正例独立核原目录 inode、P manifest/链接与同步顺序；断电须另授权见证。封存后只由负责人按核实隔离快照恢复，不对 live 注入、glob 清理或自动回 A。名称/持有 FD 复核不是原子 compare-and-unlink/rename，不证明全部子项内容、任意非合作写者/祖先免疫、完整写集、分组 DHCP 冷恢复、B 健康退休、旧 A 激活、Linux/断电或 DEV ACK，本卡继续 OPEN。
+
 ## TC-REAL-R22-C2-DESCRIPTION-PUBLISH-001 — c2 同名描述输出的故障窗口
 
 - Case ID：`TC-REAL-R22-C2-DESCRIPTION-PUBLISH-001`；类型：real-environment / transaction / crash-recovery；对应 R22 c2 对 `*_with_desc` 的既有同名输出替换。状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。自动化先决为 `test_cases.test_generation_input_binding_contract` 的二次读取、早返及 staging direct，`test_cases.test_generation_input_binding_workflow` 的 setup/load/c2 workflow，和当前候选正式 full/check；现有定向通过不证明进程死亡后的原子性。

@@ -1714,6 +1714,72 @@ finally:
                              (latest.stat().st_dev, latest.stat().st_ino))
             self.assertEqual(b"hostname: leaf\n", (latest / "leaf.yaml").read_bytes())
 
+    def test_real_setup_materialized_cold_recovery_preserves_backup_replaced_after_unlink(self):
+        with tempfile.TemporaryDirectory(prefix="r22-materialized-backup-owner-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, q, common, _p_only, _q_only, manifest, _before, _hook, _barrier, _home = fixture
+            output = q / "99-output-eth"
+            latest, release = output / "latest", output / "20261007_070000_combine"
+            for path in (latest, release):
+                path.mkdir(parents=True)
+                (path / ".published-complete").write_bytes(b"complete\n")
+                (path / "leaf.yaml").write_bytes(b"independent original leaf\n")
+            first = self._run_private_load_setup_switch(fixture, prepare_journal=True, kill_after_replace=latest)
+            self.assertEqual(23, first.returncode, first.stdout + first.stderr)
+            journal = root / "ztp/.setup-switch-journal.json"
+            evidence, manifest_bytes, mixed = journal.read_bytes(), manifest.read_bytes(), os.readlink(common)
+            row = json.loads(evidence)["body"]["directories"][0]
+            backup = Path(row["backup"])
+            original_inode = backup.lstat().st_ino
+            recovery = """
+import importlib.util, sys
+from pathlib import Path
+from types import SimpleNamespace
+root, latest, backup = map(Path, sys.argv[1:4])
+spec = importlib.util.spec_from_file_location('fresh_materialized_backup_owner_load', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+sync = load._fsync_parent_directory
+injected = []
+def replace_backup_after_unlink(path):
+    sync(path)
+    if Path(path) == latest.parent and not latest.is_symlink() and not latest.exists() and not injected:
+        backup.rename(backup.with_name('operator-retained-original'))
+        backup.mkdir()
+        (backup / 'unrelated.txt').write_bytes(b'DO NOT MOVE\\n')
+        injected.append(backup.stat().st_ino)
+load._fsync_parent_directory = replace_backup_after_unlink
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    try:
+        load.recover_setup_switch_journal(root / 'ztp/.setup-switch-journal.json',
+            deployment_lock_descriptor=descriptor, services_quiesced=True,
+            runtime_backend=SimpleNamespace(name='supervisor'))
+    except load.LoadError as error:
+        assert 'materialized' in str(error) and any(word in str(error) for word in ('owner', 'changed', 'identity')), str(error)
+        assert len(injected) == 1, 'injection boundary was not reached'
+        assert not latest.exists(), 'recovery moved an unknown backup into latest'
+        assert backup.stat().st_ino == injected[0], 'unknown backup was consumed'
+    else:
+        raise AssertionError('cold recovery accepted a replaced materialized backup')
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+            second = subprocess.run([sys.executable, "-B", "-c", recovery, str(root), str(latest), str(backup)],
+                                    cwd=root, capture_output=True, text=True, check=False, timeout=30)
+            self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+            self.assertFalse(os.path.lexists(latest))
+            self.assertEqual(b"DO NOT MOVE\n", (backup / "unrelated.txt").read_bytes())
+            retained = output / "operator-retained-original"
+            self.assertEqual(original_inode, retained.lstat().st_ino)
+            self.assertEqual(b"independent original leaf\n", (retained / "leaf.yaml").read_bytes())
+            self.assertEqual(evidence, journal.read_bytes())
+            self.assertEqual(manifest_bytes, manifest.read_bytes())
+            self.assertEqual(mixed, os.readlink(common))
+            self.assertFalse((root / "service-started").exists())
+
     def test_real_setup_wal_refuses_unowned_infra_log_receipt_before_q_link(self):
         """An existing receipt outside this WAL cannot be inferred as Q-owned."""
         with tempfile.TemporaryDirectory(prefix="r22-real-infra-hold-") as name:

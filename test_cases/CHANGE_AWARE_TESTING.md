@@ -220,6 +220,45 @@ infra logs、Q manifest intent 和冷恢复都使用该 decoder。未知版本�
 旧 A 显式健康激活。原 bootstrap15s 与 REQ19 probe10s 原因仍待核，正式重跑闸门未
 解除；approved ledger 不变，未形成当前树正式 proof。
 
+### R22 实体 latest 冷恢复写前所有权复核
+
+原恢复在预检后、实际 unlink/rename 前未重核源指针和备份所有权：同目标的新 symlink
+可能被删除，自己的 unlink/父同步之后换入的未知备份可能被搬到 latest，随后错误
+退休 WAL。独立 direct 与真实 LOAD→SETUP 死亡→新进程 LOAD 冷恢复三项先失败，
+原断言保留；这是真实恢复写入缺陷，不归为先前 bootstrap/REQ19 超时或环境问题。
+
+恢复持有原目录、匹配 release 和父目录的 NOFOLLOW FD；名称/FD 复核含 dev/ino、
+mode、uid/gid、nlink、size、mtime/ctime 及原始 symlink 文字，父身份核 dev/ino/mode/
+uid/gid。自己的合法变更之后更新对应期望；每次源删除、备份移动、恢复后及 WAL
+退休前再核。补充独立注入证明：第一次实现会在预检与 FD 捕获之间接受新备份，
+故捕获原目录和 release 必须再次绑定 WAL 保存的原 dev/ino 与目录类型。
+所有持有 FD 在外层 finally 关闭。原 schema2 字段集和 manifest 映射不变。
+
+证据均为 `outputs/test-diagnostics/` 内的有界 unittest 诊断，不是批准 runner：
+
+- `r22-materialized-write-owner-red.log`：3 tests / 3 FAIL / exit1，inode146532546、
+  size2946、SHA256 `fa62186de8440fb959315510b18b81d5f52129c56fab5c30ee8d55f6d167eae3`。
+- `r22-materialized-write-owner-green.log`：初次三项 OK / exit0，SHA256
+  `3bc94ed8c3c82a7afc9bb28b2777d4ef22fe220a9987d494a464986784e6dc9f`。
+- `r22-materialized-preflight-pin-red.log`：补充捕获前换绑 1 FAIL / exit1，
+  SHA256 `0366a7f1787955a5fbb8bce7fa215c226fc6f71d0f70d4df7d8c66f6a506bcfa`。
+- 绑定原 WAL 身份后，完整 LOAD 模块加六项真实正常/异常冷恢复 workflow 共
+  326 tests OK / 49.679 秒 / exit0，无新增 skip。日志
+  `r22-materialized-write-owner-regressions.log`，inode146544784、size104468、SHA256
+  `d76b122c526f7c788f3e8ff3cdfbb74967e34d867fcc2fa7b8bdc187ea7f4fa0`；已知
+  101348 字节前缀 SHA256
+  `90201a5073984abac2014e8b54c824aedd30e5822b6bbf36fe36516191c29674` 保持。
+  物理 Ran/OK/退出 footer 完整，实际 exec exit0；运行前后源码、测试、manifest、
+  ledger 和本地 runtime manifest 的 stat/摘要不变。
+
+发生在本算法自己的 unlink 后的换绑可使 latest 缺席；HOLD 不消费未知备份，也不
+继续改 P manifest/链接、退休 WAL 或启动服务，不冒称零先前写入或完整回滚。
+持有 FD 和复核不是原子 compare-and-unlink/rename，不证明所有子项内容、任意祖先/
+非合作写者免疫或跨断电。legacy comparison 完整写集、分组 DHCP 冷恢复、整个 B
+成功收口、旧 A 显式健康激活、Linux/断电及 DEV ACK 仍未闭。REAL_ENV 卡仍 OPEN；
+原 bootstrap15s/REQ19 probe10s 原因仍待核，正式 related/full 重跑闸门未解除，
+未更新批准 ledger、未形成当前树正式 proof。
+
 ### R22 related 的 bootstrap 超时诊断记录（未收口）
 
 代码候选 `01cf5bcd08758a26146dd1b857f291411ca55d3f` 的 related 原日志

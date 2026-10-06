@@ -3804,6 +3804,91 @@ os.kill(os.getpid(), signal.SIGKILL)
         self.assertFalse(os.path.lexists(journal))
         backend.start.assert_not_called()
 
+    def _assert_materialized_recovery_rechecks_owner(self, boundary):
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        output = state[1] / "99-output-eth"
+        latest, release = output / "latest", output / "20261007_070000_combine"
+        for path in (latest, release):
+            path.mkdir(parents=True)
+            (path / ".published-complete").write_bytes(b"complete\n")
+            (path / "leaf.yaml").write_bytes(b"independent original leaf\n")
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            backup = LOAD.register_setup_switch_materialized_directory(
+                journal, latest, release, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            )
+        latest.rename(backup)
+        latest.symlink_to(release.name)
+        evidence = journal.read_bytes()
+        original_link = latest.lstat()
+        retained = output / "operator-retained-original"
+        injected = []
+        sync, parent_check = LOAD._fsync_parent_directory, LOAD._require_setup_switch_q_parent_preimage
+        owner_read = LOAD._setup_switch_materialized_owner
+        checks = []
+
+        def after_source_unlink(path):
+            sync(path)
+            if boundary == "backup" and Path(path) == output and not os.path.lexists(latest) and not injected:
+                backup.rename(retained)
+                backup.mkdir()
+                (backup / "unrelated.txt").write_bytes(b"DO NOT MOVE\n")
+                injected.append(backup.lstat())
+
+        def after_preflight(body):
+            parent_check(body)
+            checks.append(True)
+            if boundary == "source" and len(checks) == 2:
+                latest.rename(retained)
+                latest.symlink_to(release.name)
+                injected.append(latest.lstat())
+
+        def replace_before_owner_pin(path):
+            if boundary == "preflight-backup" and path == backup and not injected:
+                backup.rename(retained)
+                backup.mkdir()
+                (backup / "unrelated.txt").write_bytes(b"DO NOT MOVE\n")
+                injected.append(backup.lstat())
+            return owner_read(path)
+
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "_fsync_parent_directory", side_effect=after_source_unlink), \
+                mock.patch.object(LOAD, "_setup_switch_materialized_owner", side_effect=replace_before_owner_pin), \
+                mock.patch.object(LOAD, "_require_setup_switch_q_parent_preimage", side_effect=after_preflight):
+            with self.assertRaisesRegex(LOAD.LoadError, "materialized.*(owner|changed|identity)"):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertEqual(1, len(injected), "test did not reach its intended ownership boundary")
+        if boundary in ("backup", "preflight-backup"):
+            if boundary == "backup":
+                self.assertFalse(os.path.lexists(latest))
+            else:
+                self.assertTrue(latest.is_symlink())
+                self.assertEqual(original_link.st_ino, latest.lstat().st_ino)
+            self.assertEqual(injected[0].st_ino, backup.lstat().st_ino)
+            self.assertEqual(b"DO NOT MOVE\n", (backup / "unrelated.txt").read_bytes())
+            self.assertEqual(b"independent original leaf\n", (retained / "leaf.yaml").read_bytes())
+        else:
+            self.assertTrue(latest.is_symlink())
+            self.assertEqual(injected[0].st_ino, latest.lstat().st_ino)
+            self.assertEqual(original_link.st_ino, retained.lstat().st_ino)
+            self.assertEqual(release.name, os.readlink(latest))
+        self.assertEqual(state[8], state[7].read_bytes())
+        self.assertEqual(evidence, journal.read_bytes())
+        self.assertEqual(state[9][state[2]], os.readlink(state[2]))
+        backend.start.assert_not_called()
+
+    def test_setup_materialized_recovery_rechecks_source_link_before_unlink(self) -> None:
+        self._assert_materialized_recovery_rechecks_owner("source")
+
+    def test_setup_materialized_recovery_rechecks_backup_before_rename(self) -> None:
+        self._assert_materialized_recovery_rechecks_owner("backup")
+
+    def test_setup_materialized_owner_pin_requires_original_wal_directory(self) -> None:
+        self._assert_materialized_recovery_rechecks_owner("preflight-backup")
+
     def test_setup_wal_refuses_unowned_materialized_backup_before_restoring_links(self) -> None:
         """A name collision must not make recovery overwrite unrelated bytes."""
         (

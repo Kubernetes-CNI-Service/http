@@ -6978,6 +6978,72 @@ def register_setup_switch_infra_log_tree(
     return backup
 
 
+def _setup_switch_materialized_owner(path: Path):
+    """Freeze a lexical owner, including ctime, without following a leaf link."""
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        return None
+    fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink",
+              "st_size", "st_mtime_ns", "st_ctime_ns")
+    raw = os.readlink(path) if stat.S_ISLNK(before.st_mode) else None
+    after = path.lstat()
+    if any(getattr(before, key) != getattr(after, key) for key in fields):
+        raise LoadError("materialized owner changed while reading")
+    return tuple(getattr(before, key) for key in fields), raw
+
+
+def _hold_setup_switch_materialized_owners(source, backup, target, has_backup, descriptors, row):
+    """Hold original directory inodes through restore; never adopt a new owner."""
+    names = {"source": source, "backup": backup, "target": target}
+    owners = {key: _setup_switch_materialized_owner(path) for key, path in names.items()}
+    original = owners["backup" if has_backup else "source"]
+    if (original is None or not stat.S_ISDIR(original[0][2])
+            or original[0][:2] != (row["source_dev"], row["source_ino"])
+            or owners["target"] is None or not stat.S_ISDIR(owners["target"][0][2])
+            or owners["target"][0][:2] != (row["target_dev"], row["target_ino"])):
+        raise LoadError("materialized recovery owner differs from original WAL identity; HOLD")
+    if has_backup and owners["source"] is not None and (
+            not stat.S_ISLNK(owners["source"][0][2])
+            or owners["source"][1] != os.path.relpath(target, source.parent)):
+        raise LoadError("materialized recovery source owner is not the WAL Q link; HOLD")
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    held = {}
+    for key in ("backup" if has_backup else "source", "target"):
+        descriptor = os.open(names[key], flags)
+        descriptors.append(descriptor)
+        held[key] = descriptor
+    parent = source.parent
+    parent_descriptor = os.open(parent, flags)
+    descriptors.append(parent_descriptor)
+    metadata = os.fstat(parent_descriptor)
+    parent_owner = (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_uid, metadata.st_gid)
+    state = {"names": names, "owners": owners, "held": held, "parent": parent,
+             "parent_descriptor": parent_descriptor, "parent_owner": parent_owner}
+    _require_setup_switch_materialized_owners(state)
+    return state
+
+
+def _require_setup_switch_materialized_owners(state):
+    try:
+        for key, path in state["names"].items():
+            if _setup_switch_materialized_owner(path) != state["owners"][key]:
+                raise ValueError(f"{key} name owner changed")
+        fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink",
+                  "st_size", "st_mtime_ns", "st_ctime_ns")
+        for key, descriptor in state["held"].items():
+            metadata = os.fstat(descriptor)
+            if (not stat.S_ISDIR(metadata.st_mode)
+                    or (tuple(getattr(metadata, field) for field in fields), None) != state["owners"][key]):
+                raise ValueError(f"{key} held owner changed")
+        for metadata in (state["parent"].lstat(), os.fstat(state["parent_descriptor"])):
+            if (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_uid,
+                    metadata.st_gid) != state["parent_owner"]:
+                raise ValueError("parent owner changed")
+    except (OSError, ValueError, LoadError) as exc:
+        raise LoadError(f"materialized recovery owner changed; HOLD: {exc}") from exc
+
+
 def _setup_switch_rename_directory_noreplace(source: Path, target: Path) -> None:
     """Restore a WAL-bound directory without overwriting an intervening name."""
     libc = ctypes.CDLL(None, use_errno=True)
@@ -7504,6 +7570,7 @@ def recover_setup_switch_journal(
         "st_mtime_ns", "st_ctime_ns",
     )
     descriptor = -1
+    materialized_descriptors = []
     try:
         parent_identity = _setup_switch_link_parent_identity(journal)
         try:
@@ -7549,8 +7616,11 @@ def recover_setup_switch_journal(
             inspect_only=inspect_only, expected_old_state=expected_old_state,
             expected_new_project=expected_new_project, retain_journal=retain_journal,
             after_p_restore=_after_p_restore,
+            materialized_descriptors=materialized_descriptors,
         )
     finally:
+        for held_descriptor in reversed(materialized_descriptors):
+            os.close(held_descriptor)
         if descriptor >= 0:
             os.close(descriptor)
 
@@ -7561,6 +7631,7 @@ def _recover_setup_switch_journal_snapshot(
     verify_only: bool, manifest_candidate: bytes | None,
     inspect_only: bool, expected_old_state: ActiveSetupState | None,
     expected_new_project: Path | None, retain_journal: bool,
+    materialized_descriptors: list[int],
     after_p_restore: Callable[[], None] | None = None,
 ) -> str:
     """Recover only from the immutable authority held by the guarded API."""
@@ -7689,6 +7760,7 @@ def _recover_setup_switch_journal_snapshot(
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
             raise LoadError(f"setup switch disk state is unknown: {path}: {exc}") from exc
     expected_directories = []
+    materialized_owners = {}
     directory_rows = body.get("directories", [])
     if (not isinstance(directory_rows, list)
             or len({row.get("path") for row in directory_rows}) != len(directory_rows)):
@@ -7730,6 +7802,9 @@ def _recover_setup_switch_journal_snapshot(
                         != (row["source_dev"], row["source_ino"])):
                     raise ValueError("materialized source identity changed")
             expected_directories.append((source, backup, has_backup))
+            materialized_owners[source] = _hold_setup_switch_materialized_owners(
+                source, backup, target, has_backup, materialized_descriptors, row,
+            )
         except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
             raise LoadError(f"setup switch materialized state is unknown: {exc}") from exc
     infra_rows = body.get("infra_logs", [])
@@ -7783,12 +7858,23 @@ def _recover_setup_switch_journal_snapshot(
             _atomic_restore_setup_link(path, row["before"])
     for source, backup, has_backup in expected_directories:
         require_journal_unchanged()
+        authority = materialized_owners[source]
+        _require_setup_switch_materialized_owners(authority)
         if has_backup:
             if os.path.islink(source):
                 source.unlink()
+                authority["owners"]["source"] = None
                 _fsync_parent_directory(source.parent)
+            _require_setup_switch_materialized_owners(authority)
             _setup_switch_rename_directory_noreplace(backup, source)
+            restored = _setup_switch_materialized_owner(source)
+            if restored is None or restored[0][:2] != authority["owners"]["backup"][0][:2]:
+                raise LoadError("materialized restored directory identity changed; HOLD")
+            authority["owners"]["source"] = restored
+            authority["owners"]["backup"] = None
+            authority["held"]["source"] = authority["held"].pop("backup")
             _fsync_parent_directory(source.parent)
+            _require_setup_switch_materialized_owners(authority)
     for path, before, after in expected_rows:
         require_journal_unchanged()
         if before is not None:
@@ -7816,6 +7902,8 @@ def _recover_setup_switch_journal_snapshot(
     verified = snapshot_active_setup_state(expected_project=state.project)
     if verified.manifest != state.manifest or verified.links != state.links:
         raise LoadError("setup switch P post-verify failed; journal retained")
+    for authority in materialized_owners.values():
+        _require_setup_switch_materialized_owners(authority)
     if any(os.readlink(path) != row["before"]
            for path, row in _setup_switch_q_local_link_states(body)):
         raise LoadError("setup switch Q-local latest post-verify failed; journal retained")
@@ -7832,6 +7920,7 @@ def _recover_setup_switch_journal_snapshot(
                 verify_only=True, manifest_candidate=None, inspect_only=False,
                 expected_old_state=expected_old_state,
                 expected_new_project=expected_new_project, retain_journal=False,
+                materialized_descriptors=materialized_descriptors,
         ) != "prepared-p":
             raise LoadError("post-runtime P recovery state is not exact; journal retained")
         require_journal_unchanged()

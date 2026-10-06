@@ -314,6 +314,14 @@ SETUP WAL 的 checksum 也不是“写集完整”证明：恢复、只读核验
 未知 envelope/body/row 字段及任何重复 JSON 键。只有当前 schema2 reader 已实现的
 闭合字段集可进入既有身份/前像/持有凭据核验；未来写集不能被忽略后还原 P 或退休 WAL。
 缺失 Q parent 前像仍须明确 HOLD；该 reader 闸门不提供 B 成功收口或旧 A 激活权限。
+实体 latest 冷恢复不能只在预检时核源/备份 inode：持有原目录、匹配 release 和父目录
+的 NOFOLLOW FD，捕获的原目录/release 必须重新绑定 WAL 中的 dev/ino；在删除 Q 指针、
+备份 rename、恢复后和 WAL 退休前复核名称/持有 FD 的身份与元数据（含 ctime），并核
+原始链接文字。自己的 unlink/rename 后只更新自己的已核状态。换绑须 HOLD，不能
+删除同目标但新 inode 的链接，也不能把未知备份搬入 latest。若换绑发生在自己的
+unlink 之后，latest 可暂时缺席；保留未知对象、原目录和 WAL，不假称完整恢复。
+这些检查不是原子 compare-and-unlink/rename，不证明全目录内容、任意非合作写者
+免疫、断电持久性、完整共享写集、B 成功收口或旧 A 健康激活。
 同一进程内再次用可见但未确认的父候选调用 DHCP 安装 API，必须在读入安装映射、
 创建事务、备份或安装之前 HOLD。原输入后来改变也不能许可第二次覆盖 B；第一次
 的 B/A 备份、原事务及 backup inode 保持不变。此内存候选入口闸门不是跨重启凭据，
