@@ -3332,6 +3332,115 @@ os.kill(os.getpid(), signal.SIGKILL)
         self.assertNotEqual(original_link, os.readlink(common))
         backend.start.assert_not_called()
 
+    def _prepare_infra_receipt_recovery_owner(self):
+        state = self._prepare_cross_project_setup_crash()
+        q, common, target, journal, descriptor, backend = state[1], state[2], state[5], state[10], state[11], state[12]
+        source = self.root.resolve() / "infra/logs"
+        source.mkdir(parents=True)
+        original = source.stat()
+        payload = b"independent P audit bytes\n"
+        (source / "audit.log").write_bytes(payload)
+        destination = q.resolve() / "99-output-infra"
+        destination.mkdir()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            backup = LOAD.register_setup_switch_infra_log_tree(
+                journal, source, destination, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            )
+        receipt = self.root.resolve() / "infra/.logs-migration.json"
+        receipt.write_text(json.dumps({
+            "schema_version": 1,
+            "source": {"path": str(source), "dev": original.st_dev, "ino": original.st_ino},
+            "destination": {"path": str(destination)}, "directories": [],
+            "entries": {"audit.log": {"size": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}},
+        }) + "\n", encoding="utf-8")
+        receipt.chmod(0o600)
+        os.link(source / "audit.log", destination / "audit.log")
+        source.rename(backup)
+        source.symlink_to(os.path.relpath(destination, source.parent))
+        common.unlink()
+        common.symlink_to(os.path.relpath(target, common.parent))
+        return state, source, destination, backup, receipt, payload
+
+    def _assert_infra_receipt_owner_change_is_held(self, kind):
+        state, source, destination, backup, receipt, payload = self._prepare_infra_receipt_recovery_owner()
+        common, manifest, journal, descriptor, backend = state[2], state[7], state[10], state[11], state[12]
+        original = receipt.read_bytes()
+        metadata = receipt.stat()
+        wal, mixed = journal.read_bytes(), os.readlink(common)
+        restore = LOAD._setup_switch_restore_infra_log_tree
+        retained = receipt.with_name("operator-retained-receipt.json")
+
+        def change_receipt(snapshot):
+            if kind == "replacement":
+                receipt.rename(retained)
+                receipt.write_bytes(original)
+                receipt.chmod(0o600)
+                self.assertNotEqual(metadata.st_ino, receipt.stat().st_ino)
+            else:
+                receipt.write_bytes(b"!" + original[1:])
+                receipt.write_bytes(original)
+                os.utime(receipt, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+                after = receipt.stat()
+                self.assertEqual((metadata.st_ino, metadata.st_size, metadata.st_mtime_ns),
+                                 (after.st_ino, after.st_size, after.st_mtime_ns))
+                self.assertNotEqual(metadata.st_ctime_ns, after.st_ctime_ns)
+            restore(snapshot)
+
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "_setup_switch_restore_infra_log_tree", side_effect=change_receipt):
+            with self.assertRaisesRegex(LOAD.LoadError, "infra log receipt changed"):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertEqual(original, receipt.read_bytes())
+        if kind == "replacement":
+            self.assertEqual(original, retained.read_bytes())
+        self.assertTrue(source.is_symlink())
+        self.assertEqual(payload, (backup / "audit.log").read_bytes())
+        self.assertEqual(payload, (destination / "audit.log").read_bytes())
+        self.assertEqual(mixed, os.readlink(common))
+        self.assertEqual(state[8], manifest.read_bytes())
+        self.assertEqual(wal, journal.read_bytes())
+        backend.start.assert_not_called()
+
+    def test_setup_infra_receipt_same_bytes_new_owner_is_not_recovery_authority(self) -> None:
+        self._assert_infra_receipt_owner_change_is_held("replacement")
+
+    def test_setup_infra_receipt_same_inode_aba_is_not_recovery_authority(self) -> None:
+        self._assert_infra_receipt_owner_change_is_held("aba")
+
+    def test_setup_infra_receipt_changed_after_source_restore_is_not_deleted(self) -> None:
+        state, source, destination, backup, receipt, payload = self._prepare_infra_receipt_recovery_owner()
+        journal, descriptor, backend = state[10:]
+        wal, original = journal.read_bytes(), receipt.read_bytes()
+        retained = receipt.with_name("operator-retained-receipt.json")
+        rename = LOAD._setup_switch_rename_directory_noreplace
+
+        def change_after_source_restore(old, new):
+            rename(old, new)
+            self.assertEqual(backup, old)
+            receipt.rename(retained)
+            receipt.write_bytes(b"independent replacement incident receipt\n")
+            receipt.chmod(0o600)
+
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "_setup_switch_rename_directory_noreplace", side_effect=change_after_source_restore):
+            with self.assertRaisesRegex(LOAD.LoadError, "infra log receipt changed"):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertEqual(b"independent replacement incident receipt\n", receipt.read_bytes())
+        self.assertEqual(original, retained.read_bytes())
+        self.assertEqual(payload, (source / "audit.log").read_bytes())
+        self.assertEqual(payload, (destination / "audit.log").read_bytes())
+        self.assertEqual(wal, journal.read_bytes())
+        self.assertFalse(source.is_symlink())
+        self.assertNotEqual(state[9][state[2]], os.readlink(state[2]))
+        backend.start.assert_not_called()
+
     def test_setup_wal_cold_restores_receipt_bound_real_infra_logs(self) -> None:
         """A Q log copy and pointer must not strand the original P-era inode."""
         (

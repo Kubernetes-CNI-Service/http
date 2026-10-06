@@ -219,6 +219,14 @@ schema1，不把旧凭据自动升级为链接授权。源别名、外部目标�
 direct 与真实 SETUP 公钥发布/manifest→LOAD receipt/restore API workflow 覆盖原链接保持；
 workflow 的制品是独立私有夹具，IB 发布保持原状，不证明完整跨项目 A 恢复或激活。
 
+R22 infra/logs 冷恢复不能只按预检时读取的 receipt 内容推定之后的删除权。
+预检须冻结 receipt 的物理父目录、dev/ino/mode/nlink/size/mtime/ctime 与完整字节，
+包括原本缺席的状态；每次恢复写入及退休 receipt 之前重新核验。相同字节新 inode、
+同 inode 改写后还原、恢复中途替换均须 HOLD，保留未知 receipt 与 WAL，不启动服务。
+漂移发生在源目录恢复之后时，已恢复的源和尚未清理的 Q 副本保持现场，不报完成。
+direct 与真实 LOAD→SETUP 强杀→新 LOAD workflow 覆盖该窗口；名称复核与 unlink
+不是原子 compare-and-unlink，正常窗口仍要求其它写者静默，不证明完整写集或断电。
+
 R22 P manifest 恢复同样须在持有的新文件 FD 上设置最终模式、写入完整字节并 fsync，
 之后才 replace 和同步父目录；不能先 fsync 后 chmod。文件同步失败须保留 Q manifest
 和原 WAL。真实 LOAD→SETUP 在 Q manifest 发布后死亡→新 LOAD 恢复同步失败→第三 LOAD

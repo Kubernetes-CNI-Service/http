@@ -1948,6 +1948,76 @@ finally:
                 self.assertFalse(journal.exists())
                 self.assertFalse((root / "service-started").exists())
 
+    def test_real_setup_infra_log_death_cold_recovery_preserves_replacement_receipt(self):
+        """A later same-byte receipt inode must not authorize or be deleted by recovery."""
+        with tempfile.TemporaryDirectory(prefix="r22-infra-receipt-owner-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, _q, common, _p_only, _q_only, manifest, _before, _hook, barrier, _home = fixture
+            source = root / "infra/logs"
+            source.mkdir()
+            payload = b"independent P-era incident evidence\n"
+            (source / "audit.log").write_bytes(payload)
+            first = self._run_private_load_setup_switch(
+                fixture, prepare_journal=True, first_link=source,
+            )
+            self.assertEqual(23, first.returncode, first.stdout + first.stderr)
+            self.assertTrue(barrier.is_file())
+            self.assertTrue(source.is_symlink())
+            receipt = root / "infra/.logs-migration.json"
+            original = receipt.read_bytes()
+            journal = root / "ztp/.setup-switch-journal.json"
+            evidence, mixed, q_manifest = journal.read_bytes(), os.readlink(common), manifest.read_bytes()
+            backup = source.resolve() / ".logs-migration-source"
+            copied = source.resolve() / "audit.log"
+            recovery = """
+import importlib.util, sys
+from pathlib import Path
+from types import SimpleNamespace
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('cold_infra_receipt_owner_load', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+receipt = root / 'infra/.logs-migration.json'
+restore = load._setup_switch_restore_infra_log_tree
+def replace_before_first_write(snapshot):
+    original, before = receipt.read_bytes(), receipt.stat()
+    receipt.rename(receipt.with_name('operator-retained-receipt.json'))
+    receipt.write_bytes(original)
+    receipt.chmod(0o600)
+    assert receipt.stat().st_ino != before.st_ino
+    restore(snapshot)
+load._setup_switch_restore_infra_log_tree = replace_before_first_write
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    try:
+        load.recover_setup_switch_journal(
+            root / 'ztp/.setup-switch-journal.json', deployment_lock_descriptor=descriptor,
+            services_quiesced=True, runtime_backend=SimpleNamespace(name='supervisor'),
+        )
+    except load.LoadError as error:
+        assert 'infra log receipt changed' in str(error), str(error)
+        print('R22_REPLACEMENT_INFRA_RECEIPT_HELD')
+    else:
+        raise AssertionError('cold recovery consumed replacement receipt ownership')
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+            second = subprocess.run([sys.executable, "-B", "-c", recovery, str(root)],
+                                    cwd=root, capture_output=True, text=True, check=False, timeout=30)
+            self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+            self.assertIn("R22_REPLACEMENT_INFRA_RECEIPT_HELD", second.stdout)
+            self.assertEqual(original, receipt.read_bytes())
+            self.assertEqual(original, receipt.with_name("operator-retained-receipt.json").read_bytes())
+            self.assertEqual(evidence, journal.read_bytes())
+            self.assertEqual(mixed, os.readlink(common))
+            self.assertEqual(q_manifest, manifest.read_bytes())
+            self.assertTrue(source.is_symlink())
+            self.assertEqual(payload, (backup / "audit.log").read_bytes())
+            self.assertEqual(payload, copied.read_bytes())
+            self.assertFalse((root / "service-started").exists())
+
     def test_real_setup_infra_log_pointer_death_cold_restores_real_directory(self):
         """LOAD→SETUP death after real log migration restores exact old bytes."""
         with tempfile.TemporaryDirectory(prefix="r22-real-infra-restore-") as name:

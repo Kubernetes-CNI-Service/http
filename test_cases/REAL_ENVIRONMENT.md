@@ -1684,6 +1684,9 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - P manifest 最终权限与恢复重入窄修：TEST direct 与真实 LOAD→SETUP 发布 Q manifest 后强杀→新 LOAD 文件同步故障→第三 LOAD 冷恢复，要求 P 的最终模式在同一新文件 FD 上先 fchmod、完整字节 fsync，再 replace 和父目录 fsync。同步失败保留 Q manifest 原字节与 WAL，第三进程须恢复原 P manifest 模式/链接并只在后核验后退休自有 WAL，不启动服务。真实重入暴露 Q 临时链接经共享 `eth.csv` 解析到已恢复 P 的缺陷；候选仅沿 WAL 精确登记的 Q alias 行证明末端 Q 权限，循环或未登记外部目标保持零恢复写入 HOLD，既有父身份、磁盘值、锁/停服、Q 父前像闸门不放宽。
   现场前置仍限本卡授权的隔离 VM、写者静默、排他锁、停服见证、完整 P/Q/WAL 与可恢复卷快照；分别在 fchmod、文件 fsync、manifest replace、父目录 fsync、WAL 收口之间注入同步错误/进程死亡/受控断电。记录暂存 FD/manifest/父目录身份、模式/摘要、各 Q alias 的原始字节和 WAL 行、前次恢复已还原的 P 名称及新进程验证时间线。未知状态不补造 WAL、不删除外来对象；证据封存后只恢复登记隔离快照，不注入 live。本机调用次序和 SIGKILL 不证明 Linux/断电持久性、完整共享写集或旧 A 显式健康激活，本卡继续 OPEN。
 
+- infra migration receipt 恢复期 authority 的窄修：原 preflight 到收尾之间只保留 receipt 内容而不保留文件身份，未知同名替换对象可能被消费/删除。TEST direct 的同字节新 inode、同 inode ABA、原目录恢复后替换，以及真实 LOAD→SETUP infra 指针发布后强杀→新 LOAD preflight 后替换均先 RED 后 GREEN。候选冻结物理父目录、dev/ino/mode/nlink/size/mtime_ns/ctime_ns 与完整字节/模式，在每次恢复写入前重核，包括原缺席状态。首写前漂移须零恢复写入；中途漂移须保持已恢复源、尚未清理 Q 副本、原 WAL 与替换 receipt，不启动服务、不报完成。
+  现场前置为本卡已授权隔离 VM、完整 P/Q/WAL/receipt 与可恢复卷快照、排他部署锁、明确停服及正常写者静默；分别在 receipt 读取、preflight 返回、源 rename、Q 副本清理和 receipt unlink 前由登记注入器受控换 inode/ABA。保存原/替换文件、源/备份/Q 副本和父目录身份、完整摘要及物理操作顺序、错误退出和停服见证；证据封存后仅按已辨认对象恢复隔离快照，不对 live 注入或清理未知对象。名称重核与 unlink 不是原子 compare-and-unlink，本地进程测试不证明任意非合作写者免疫、Linux/断电持久性、完整共享写集或旧 A 显式健康激活，本卡仍 OPEN。
+
 ## TC-REAL-R22-C2-DESCRIPTION-PUBLISH-001 — c2 同名描述输出的故障窗口
 
 - Case ID：`TC-REAL-R22-C2-DESCRIPTION-PUBLISH-001`；类型：real-environment / transaction / crash-recovery；对应 R22 c2 对 `*_with_desc` 的既有同名输出替换。状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。自动化先决为 `test_cases.test_generation_input_binding_contract` 的二次读取、早返及 staging direct，`test_cases.test_generation_input_binding_workflow` 的 setup/load/c2 workflow，和当前候选正式 full/check；现有定向通过不证明进程死亡后的原子性。

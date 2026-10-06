@@ -219,6 +219,38 @@ inode 144208691，size 616，SHA256
 后代状态仍 unknown，不能据此放行正式 related/full 或称 R22 恢复完成。approved ledger
 保持原字节，Linux/断电、完整写集、显式旧 A 健康激活及其它未闭项不变。
 
+### R22 infra migration receipt 的恢复期删除权候选
+
+原 preflight 校验 receipt 后只返回 has_receipt，恢复函数在收尾按路径 unlink。
+独立 direct 注入同字节新 inode、同 inode/尺寸/mtime 保持但 ctime 改变的 ABA，
+以及原日志目录 rename 恢复后替换 receipt；真实复制 LOAD→SETUP 在 infra 指针发布后
+强杀→新 LOAD preflight 后替换 receipt，四项原实现均 FAIL / exit1。
+首轮 workflow 的注入器错误地观察 replace，而该实体迁移实际使用 symlink；原日志
+`r22-infra-receipt-owner-red.log` 保留，不把夹具失败算作 workflow 缺陷见证。
+修正死亡观察点而未改生产代码或预期后的 `r22-infra-receipt-owner-red2.log`，
+inode 144386606，size 3812，SHA256
+`eec93871d440929d3314bb77a82beeabfd0e3b53a639df66096765143c2383f6`，
+4 tests / 4 FAIL / exit1（3.845 秒），物理退出标记与 exec exit1 一致。
+
+候选保留 receipt 原物理父目录、完整元数据身份及 reader 的字节/模式快照，
+在 preflight 后核、首写及每次 source/Q/receipt 名称变动之前重核；原缺席状态也须
+仍然缺席。首写前漂移零恢复写入，中途漂移保留已恢复源、Q 副本、替换凭据和 WAL，
+不启动服务。四项新增测试 GREEN / exit0（6.118 秒），日志
+`outputs/test-diagnostics/r22-infra-receipt-owner-green.log`，inode 144393520，size 814，
+SHA256 `995d85171f864e1ec2da3cac80d2ea08ebfabbf8f51e4224a81ed658689b6f00`。
+这些身份/字节检查不是原子 compare-and-unlink 或任意非合作同 UID 写者免疫。
+正式 related/full 仍被原 bootstrap 401 超时原因未收口门禁阻断；不能因局部 GREEN
+重跑正式 full、改 ledger 或声称完整 R22。现有 direct/workflow manifest 映射保留。
+
+四个完整 release/generation workflow/optimize/setup plan 模块 351 tests / OK / exit0
+（225.599 秒）；日志 `outputs/test-diagnostics/r22-infra-receipt-owner-modules.log`，
+inode 144398633，size 114677，SHA256
+`0e0bdc782714bd586f55ff65b57e09701148d7f76c82bf9be4d2459e1b0adbde`。
+读前后 dev/ino/size/mtime_ns/ctime_ns 一致；旧 96513 字节前缀 SHA256
+`7db8a6a06b65ca8f443cf8fcd2ea85f4896e91a2329479984eaecd235a0f24bf` 未变。
+物理 Ran/OK 在 `R22_INFRA_RECEIPT_OWNER_MODULES_EXIT=0` 之前，exec exit0 一致。
+批准 ledger 与 TEST 运行 manifest 原身份及摘要未变；此结果仅模块诊断，不是批准证明。
+
 ### R22 P manifest 模式持久化与 Q alias 恢复重入候选
 
 原 `_atomic_restore_setup_manifest` 在文件 fsync 后才 chmod，最终模式不在文件同步边界内。

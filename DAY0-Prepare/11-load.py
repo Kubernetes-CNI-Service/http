@@ -6935,6 +6935,38 @@ def _setup_switch_infra_file_signature(path: Path) -> tuple[os.stat_result, dict
         os.close(descriptor)
 
 
+def _setup_switch_infra_receipt_identity(receipt: Path):
+    """Bind receipt ownership, including same-inode write-and-restore changes."""
+    try:
+        metadata = receipt.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise LoadError("infra log receipt changed: not a single-link regular file")
+    return tuple(getattr(metadata, key) for key in (
+        "st_dev", "st_ino", "st_mode", "st_nlink", "st_size",
+        "st_mtime_ns", "st_ctime_ns",
+    ))
+
+
+def _setup_switch_require_infra_receipt(receipt: Path, authority) -> None:
+    """Recheck the preflight receipt (or its absence) before every recovery write."""
+    parent, identity, opened = authority
+    try:
+        if (parent != _setup_switch_link_parent_identity(receipt)
+                or identity != _setup_switch_infra_receipt_identity(receipt)):
+            raise ValueError("identity or parent differs from preflight")
+        current = _read_rollback_regular(
+            receipt, limit=_ROLLBACK_PAYLOAD_LIMIT, missing_ok=True,
+        )
+        if (current != opened
+                or identity != _setup_switch_infra_receipt_identity(receipt)
+                or parent != _setup_switch_link_parent_identity(receipt)):
+            raise ValueError("bytes, metadata or parent differs from preflight")
+    except (OSError, RuntimeError, ValueError, LoadError) as exc:
+        raise LoadError(f"infra log receipt changed: {exc}") from exc
+
+
 def _setup_switch_prepare_infra_log_recovery(row: dict[str, object], q_project: Path):
     """Validate the entire receipt-bound P directory and Q copy before writing."""
     if not isinstance(row, dict):
@@ -6976,9 +7008,15 @@ def _setup_switch_prepare_infra_log_recovery(row: dict[str, object], q_project: 
                     != (row["source_dev"], row["source_ino"])):
                 raise ValueError("infra log source identity changed")
             original_tree = source
+        receipt_parent = _setup_switch_link_parent_identity(receipt)
+        receipt_identity = _setup_switch_infra_receipt_identity(receipt)
         opened = _read_rollback_regular(
             receipt, limit=_ROLLBACK_PAYLOAD_LIMIT, missing_ok=True,
         )
+        receipt_authority = receipt_parent, receipt_identity, opened
+        if (opened is None) != (receipt_identity is None):
+            raise ValueError("infra log receipt changed while opening")
+        _setup_switch_require_infra_receipt(receipt, receipt_authority)
         if opened is None:
             if has_backup:
                 raise ValueError("infra log backup lacks its durable receipt")
@@ -7079,31 +7117,40 @@ def _setup_switch_prepare_infra_log_recovery(row: dict[str, object], q_project: 
                         raise ValueError("infra log Q directory changed type")
                 elif not stat.S_ISREG(metadata.st_mode):
                     raise ValueError("infra log Q file changed type")
-        return source, backup, destination, receipt, entries, directories, has_backup, opened is not None
+        _setup_switch_require_infra_receipt(receipt, receipt_authority)
+        return (source, backup, destination, receipt, entries, directories,
+                has_backup, opened is not None, receipt_authority)
     except (OSError, RuntimeError, TypeError, ValueError, KeyError, LoadError) as exc:
         raise LoadError(f"setup switch infra log state is unknown: {exc}") from exc
 
 
 def _setup_switch_restore_infra_log_tree(state) -> None:
-    source, backup, destination, receipt, entries, directories, has_backup, has_receipt = state
+    (source, backup, destination, receipt, entries, directories,
+     has_backup, has_receipt, receipt_authority) = state
+    _setup_switch_require_infra_receipt(receipt, receipt_authority)
     if has_backup:
         if os.path.islink(source):
+            _setup_switch_require_infra_receipt(receipt, receipt_authority)
             source.unlink()
             _fsync_parent_directory(source.parent)
+        _setup_switch_require_infra_receipt(receipt, receipt_authority)
         _setup_switch_rename_directory_noreplace(backup, source)
         _fsync_parent_directory(source.parent)
         _fsync_parent_directory(backup.parent)
     for name in sorted(entries):
         path = destination / name
         if os.path.lexists(path):
+            _setup_switch_require_infra_receipt(receipt, receipt_authority)
             path.unlink()
             _fsync_parent_directory(path.parent)
     for name in sorted(directories, key=lambda value: (-value.count(os.sep), value)):
         path = destination / name
         if os.path.lexists(path):
+            _setup_switch_require_infra_receipt(receipt, receipt_authority)
             path.rmdir()
             _fsync_parent_directory(path.parent)
     if has_receipt:
+        _setup_switch_require_infra_receipt(receipt, receipt_authority)
         receipt.unlink()
         _fsync_parent_directory(receipt.parent)
 
