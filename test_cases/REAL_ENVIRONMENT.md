@@ -1666,6 +1666,9 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 - 停服状态未知的本地恢复门禁候选：LOAD 原 Systemd 分支将缺失命令和查询非零一概当作无活跃服务，可能在管理器状态未知时错误授权 P 恢复。TEST direct 与真实 LOAD→SETUP 强杀→新 LOAD workflow 先 RED 后 GREEN；候选复用既有后端 active/inactive 合同，将未知 unit/manager 错误、异常退出和命令不可执行转换为 LoadError，在恢复首写前保留全部链接、manifest 与原 WAL，不发出 start/stop。现场须在已授权隔离 VM 中准备可恢复 P/Q 和完整 WAL，分别见证明确停止正例、服务仍活跃及管理器查询不可用负例，独立记录 systemctl 精确 argv/exit/stderr、实际服务进程/监听及 native monitor 状态、部署锁身份与恢复前后对象身份；不得因查询失败推定停服，也不得对 live 删除 systemctl 或停止管理器制造故障。封存证据后仅按已登记快照恢复隔离环境。本机模拟查询不证明 Linux 真停服、任意并发服务启动免疫、完整旧 A 激活或断电持久性；本卡继续 OPEN。
 
+- 旧 A runtime 阶段 WAL 保留的本地窄修：跨项目恢复原先在 P 链接/manifest 后核验后立即退休 WAL，后续 A runtime receipt 恢复失败或进程死亡便丢失持久恢复授权。TEST 的独立 direct 与真实复制 LOAD→SETUP→新 LOAD workflow 先 RED 后 GREEN；现在把原 WAL descriptor、身份和完整字节持有到 runtime 返回、锁与停服重核及 P/Q 全盘面和 Q 父前像再核之后，才可删除自有凭据。真实脚本 workflow 在 runtime 边界再次 SIGKILL，第二次新 LOAD 可重入；其成功 runtime 仅是边界见证替身，不是完整 A 制品恢复。另有真实 receipt 加载器拒绝缺失 receipt 的 direct，以及 runtime 失败、同字节新 inode WAL、runtime 后未知 P 对象的拒绝与原证据保留测试；不删除替换凭据或未知对象，不启动服务。
+  现场前置仍限本卡授权的可丢弃 VM、独占部署锁、明确停服与写者静默、完整真实 A 输入/运行计划/制品/receipt 前像和卷快照；在 P 后核验、runtime 首写、runtime 后核验和 WAL 退休边界分别注入异常、进程死亡及受控换绑，独立记录原 WAL descriptor/path dev/ino/ctime/完整 SHA、P/Q/父提交身份和事件物理顺序。缺失 receipt 不补造，未知对象不自动清理；只能由负责人核对登记清单后恢复隔离快照。本机进程测试不证明断电、Linux、完整 A 同代恢复或显式健康激活；完整共享写集、成功 B 收尾、main 显式恢复、DEV ACK 和本卡验收仍 OPEN。
+
 ## TC-REAL-R22-C2-DESCRIPTION-PUBLISH-001 — c2 同名描述输出的故障窗口
 
 - Case ID：`TC-REAL-R22-C2-DESCRIPTION-PUBLISH-001`；类型：real-environment / transaction / crash-recovery；对应 R22 c2 对 `*_with_desc` 的既有同名输出替换。状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。自动化先决为 `test_cases.test_generation_input_binding_contract` 的二次读取、早返及 staging direct，`test_cases.test_generation_input_binding_workflow` 的 setup/load/c2 workflow，和当前候选正式 full/check；现有定向通过不证明进程死亡后的原子性。

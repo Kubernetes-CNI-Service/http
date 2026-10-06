@@ -745,6 +745,8 @@ os.symlink = replace_at_setup_write
             )
             self.assertEqual(23, first.returncode, first.stdout + first.stderr)
             self.assertTrue(barrier.is_file())
+            journal = root / "ztp/.setup-switch-journal.json"
+            evidence = journal.read_bytes()
             recovery = """
 import importlib.util
 import json
@@ -766,10 +768,14 @@ context = load.CrossProjectRollbackContext(p, 'generations/aaaaaaaaaaaaaaaaaaaa'
                                           p / '99-output-ztp/rollback-receipts/aaaaaaaaaaaaaaaaaaaa', state)
 def runtime_phase(*args, **kwargs):
     assert not (root / 'ztp/optimize/q-sample').exists()
-    assert not wal.exists()
+    assert wal.is_file(), 'A runtime recovery must still hold the original WAL'
     assert (root / 'ztp/.setup_manifest').read_bytes() == state.manifest
     assert load.snapshot_active_setup_state(expected_project=p).links == state.links
     (root / 'runtime-phase-reached').write_bytes(b'after-durable-P-restore\\n')
+    if len(sys.argv) > 7:
+        import os
+        import signal
+        os.kill(os.getpid(), signal.SIGKILL)
 load.restore_runtime_rollback_receipt = runtime_phase
 descriptor = load.acquire_deployment_lock(exclusive=True)
 try:
@@ -783,13 +789,25 @@ finally:
             encoded = json.dumps({**before, "manifest": before["manifest"].decode()})
             second = subprocess.run(
                 [sys.executable, "-B", "-c", recovery, str(root), str(p), str(q),
-                 str(common), str(p_only), encoded],
+                 str(common), str(p_only), encoded, "kill-at-runtime"],
                 cwd=root, capture_output=True, text=True, check=False, timeout=30,
             )
-            self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+            self.assertEqual(-9, second.returncode, second.stdout + second.stderr)
             self.assertFalse(os.path.lexists(sample))
             self.assertEqual(before["manifest"], manifest.read_bytes())
             self.assertEqual(b"after-durable-P-restore\n", (root / "runtime-phase-reached").read_bytes())
+            journal = root / "ztp/.setup-switch-journal.json"
+            self.assertTrue(journal.is_file(), "death before A verification lost recovery authority")
+            self.assertEqual(evidence, journal.read_bytes())
+            third = subprocess.run(
+                [sys.executable, "-B", "-c", recovery, str(root), str(p), str(q),
+                 str(common), str(p_only), encoded],
+                cwd=root, capture_output=True, text=True, check=False, timeout=30,
+            )
+            self.assertEqual(0, third.returncode, third.stdout + third.stderr)
+            self.assertFalse(os.path.lexists(journal))
+            self.assertTrue(evidence, "failure WAL was empty")
+            self.assertEqual(before["manifest"], manifest.read_bytes())
             self.assertFalse((root / "service-started").exists())
 
     def test_real_setup_legacy_sample_comparison_holds_before_first_shared_write(self):

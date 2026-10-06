@@ -7047,6 +7047,7 @@ def recover_setup_switch_journal(
     expected_old_state: ActiveSetupState | None = None,
     expected_new_project: Path | None = None,
     retain_journal: bool = False,
+    _after_p_restore: Callable[[], None] | None = None,
 ) -> str:
     """Verify or restore P from a complete WAL and a known P/Q disk state.
 
@@ -7064,6 +7065,10 @@ def recover_setup_switch_journal(
         raise LoadError("setup switch WAL context requires both P state and Q project")
     if type(retain_journal) is not bool or (retain_journal and (verify_only or inspect_only)):
         raise LoadError("journal retention requires an unambiguous recovery mode")
+    if _after_p_restore is not None and (
+            not callable(_after_p_restore) or verify_only or inspect_only
+            or manifest_candidate is not None or retain_journal):
+        raise LoadError("post-P recovery phase requires a full guarded restore")
     if type(inspect_only) is not bool or (inspect_only and (verify_only or manifest_candidate is not None)):
         raise LoadError("journal inspection must be read-only and unambiguous")
     if manifest_candidate is not None and not verify_only:
@@ -7123,6 +7128,7 @@ def recover_setup_switch_journal(
             verify_only=verify_only, manifest_candidate=manifest_candidate,
             inspect_only=inspect_only, expected_old_state=expected_old_state,
             expected_new_project=expected_new_project, retain_journal=retain_journal,
+            after_p_restore=_after_p_restore,
         )
     finally:
         if descriptor >= 0:
@@ -7135,6 +7141,7 @@ def _recover_setup_switch_journal_snapshot(
     verify_only: bool, manifest_candidate: bytes | None,
     inspect_only: bool, expected_old_state: ActiveSetupState | None,
     expected_new_project: Path | None, retain_journal: bool,
+    after_p_restore: Callable[[], None] | None = None,
 ) -> str:
     """Recover only from the immutable authority held by the guarded API."""
     payload, _mode = opened
@@ -7393,6 +7400,21 @@ def _recover_setup_switch_journal_snapshot(
            for path, row in _setup_switch_q_local_link_states(body)):
         raise LoadError("setup switch Q-local latest post-verify failed; journal retained")
     require_journal_unchanged()
+    if after_p_restore is not None:
+        # Keep the original WAL descriptor, bytes and owner through A's runtime
+        # restore and postverification. Exception or death must not erase the
+        # only persistent P/Q recovery authority just because links are back.
+        after_p_restore()
+        require_journal_unchanged()
+        if _recover_setup_switch_journal_snapshot(
+                journal, opened=opened,
+                require_journal_unchanged=require_wal_unchanged,
+                verify_only=True, manifest_candidate=None, inspect_only=False,
+                expected_old_state=expected_old_state,
+                expected_new_project=expected_new_project, retain_journal=False,
+        ) != "prepared-p":
+            raise LoadError("post-runtime P recovery state is not exact; journal retained")
+        require_journal_unchanged()
     # A failed SETUP must not erase its durable authorization/incident
     # evidence merely because P is recoverable. Explicit recovery keeps the
     # default finalization behavior; automatic child failure recovery does not.
@@ -7412,10 +7434,24 @@ def restore_cross_project_rollback_context(
 
     The detached P link snapshot cannot describe a half-written Q manifest,
     newly created shared directories, or retained real-directory backups.
-    A pending WAL must be consumed by its guarded recovery API, not bypassed
-    by the older link-only in-memory restore.  This never activates services.
+    A pending WAL is held until both P and A runtime postverification finish;
+    it must not be consumed before the later runtime phase can still fail.
+    The older link-only restore cannot bypass it. This never activates services.
     """
     journal = _setup_switch_journal_path()
+    def restore_runtime_phase() -> None:
+        restore_runtime_rollback_receipt(
+            context.project, context.runtime_receipt,
+            expected_current=context.selector_target,
+            deployment_lock_descriptor=deployment_lock_descriptor,
+            services_quiesced=services_quiesced,
+            runtime_backend=runtime_backend,
+        )
+        _require_runtime_restore_guard(
+            deployment_lock_descriptor=deployment_lock_descriptor,
+            services_quiesced=services_quiesced, runtime_backend=runtime_backend,
+        )
+
     if os.path.lexists(journal):
         if context.project.resolve(strict=True) != context.setup_state.project.resolve(strict=True):
             raise LoadError("setup switch WAL context has inconsistent P projects")
@@ -7423,7 +7459,9 @@ def restore_cross_project_rollback_context(
             journal, deployment_lock_descriptor=deployment_lock_descriptor,
             services_quiesced=services_quiesced, runtime_backend=runtime_backend,
             expected_old_state=context.setup_state, expected_new_project=current_project,
+            _after_p_restore=restore_runtime_phase,
         )
+        return
     else:
         restore_active_setup_state(
             context.setup_state,
@@ -7432,13 +7470,7 @@ def restore_cross_project_rollback_context(
             services_quiesced=services_quiesced,
             runtime_backend=runtime_backend,
         )
-    restore_runtime_rollback_receipt(
-        context.project, context.runtime_receipt,
-        expected_current=context.selector_target,
-        deployment_lock_descriptor=deployment_lock_descriptor,
-        services_quiesced=services_quiesced,
-        runtime_backend=runtime_backend,
-    )
+    restore_runtime_phase()
 
 
 def restore_runtime_rollback_receipt(

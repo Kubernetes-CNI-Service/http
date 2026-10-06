@@ -352,6 +352,37 @@ SHA256 `ab9fac30fc9ac6828794369fe2bf519053639a0cfbe1009e305429e28c7bf431`。
 此窄修不是原 bootstrap 401 超时原因的解释；不凭局部 PASS 重跑 related/full 或改批准
 ledger。完整写集、B 成功收尾、main 显式恢复、完整旧 A 激活及 Linux/断电见证仍未关闭。
 
+### R22 旧 A runtime 恢复之前提前退休 WAL 的本地候选记录
+
+独立合同要求完整跨项目恢复未完成时保留持久授权，不能将 P 链接恢复视为 A runtime
+恢复完成。原实现先消费 WAL，再调用 runtime receipt API；失败或死亡会丢失凭据。
+旧 direct/workflow 中“runtime 之前 WAL 已不存在”的预期与该合同相冲突，本次改为更严的
+“原 WAL 字节仍在，完整后核验成功才退休”，保留原 P manifest、全部链接、目录清理和
+不启动服务的断言；没有放宽任何时限或删除负例。
+
+原实现 4 tests / 4 FAIL / exit1，日志
+`outputs/test-diagnostics/r22-runtime-wal-retention-red.log`，inode 143473797，size 4727，
+SHA256 `847778e3d7111a8bed92224566ffa48e57cfee1ddaa4a110735f7a303b2ec91d`。
+候选保持原 WAL descriptor 和完整身份验证跨过 runtime 回调，返回后重核锁/停服，
+以只读恢复验证重核完整 P/Q 和 Q 父前像，最后才能删除凭据。异常/死亡保留原字节；
+同字节换 inode 和 runtime 后未知 P 对象拒绝且不清理未知对象。
+
+direct 加入真实 receipt 加载器缺失负例；真实复制 LOAD→SETUP 强杀→新 LOAD 在 runtime
+边界再次强杀，再由第二个新 LOAD 重入成功。此 workflow 成功 runtime 是见证替身，
+不能称完整 A receipt/五 DHCP/YAML/运行计划恢复或健康激活通过。定向 6 tests / OK /
+exit0，日志 `outputs/test-diagnostics/r22-runtime-wal-retention-complete-green.log`，
+inode 143482436，size 1053，SHA256
+`bb32e5212029adffd88a2535d3bd80cec2eb9ed5c261041c827dbcfc0cb9d49d`。
+
+release、generation workflow、optimize、setup plan 四个完整模块 324 tests / OK /
+exit0（236.500 秒），日志 `outputs/test-diagnostics/r22-runtime-wal-retention-modules.log`，
+inode 143484649，size 107257，SHA256
+`538f7f73c6cc4729b4f68714dcf2517f06d284e71d80ce322587011a9af16756`。
+最终全日志读前后 stat/inode 一致，物理 `R22_RUNTIME_WAL_MODULES_EXIT=0` 与 exec exit0
+一致，TEST 运行 manifest 身份/摘要未变。沿用 LOAD direct 与真实多脚本 workflow 映射。
+此窄修不解释既有 bootstrap 401 超时根因；没有凭局部 PASS 重跑 related/full，也没有
+编辑 approved ledger。完整 A 激活、其余共享写集、成功 B 收尾和 REAL_ENV 仍未关闭。
+
 ## Full proof 性能诊断记录
 
 本节只记录测量方法与优化判定，不改变上面的测试和证明门禁。正式 full proof 仍须由

@@ -204,6 +204,13 @@ R22 停服恢复门禁必须使用服务后端的明确状态合同。Systemd �
 LOAD→SETUP 强杀→新 LOAD workflow 覆盖未知状态下 P/Q 链接、manifest 和 WAL 零恢复写入。
 本机注入的是查询边界，不是 Linux 实际停服或完整旧 A 安全激活见证。
 
+R22 跨项目恢复不能在 P 链接和 manifest 恢复后、旧 A runtime 恢复之前删除 WAL。
+原 WAL 的 descriptor、身份和完整字节须持有到 runtime 恢复返回，再复核停服/锁、
+P/Q 盘面及 Q 父提交前像，只有全部通过才退休凭据；异常或进程死亡保留 WAL。
+direct 覆盖真实 receipt 缺失、runtime 失败、同字节换 inode 和后核验 P 漂移；真实
+LOAD→SETUP→新 LOAD workflow 覆盖 runtime 边界再强杀及第二次新进程重入。
+该正例 runtime 使用边界见证替身，不证明完整 A 制品恢复或显式服务激活；服务保持停止。
+
 同一模块还覆盖端到端 deployment scope：默认 `all` 同时生成 Production/AIR；`prod` 只发布
 Production Cumulus/IB/NVL；`air` 只发布 AIR DHCP/YAML/release，并只临时渲染 AIR full profile
 实际引用的 Production 来源；单独指定 `mini` 会自动选择 AIR scope 和 `eth`，显式 `prod+mini`

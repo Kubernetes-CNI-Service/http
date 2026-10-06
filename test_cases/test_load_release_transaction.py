@@ -2230,9 +2230,11 @@ class ReleaseTransactionTests(unittest.TestCase):
             common.unlink()
             common.symlink_to(os.path.relpath(state[5], common.parent))
 
+            evidence = journal.read_bytes()
             def restore_runtime(*args, **kwargs):
                 self.assertFalse(os.path.lexists(directory), "runtime restore bypassed owned-directory WAL")
-                self.assertFalse(os.path.lexists(journal))
+                self.assertTrue(journal.is_file(), "runtime phase must retain recovery authority")
+                self.assertEqual(evidence, journal.read_bytes())
                 self.assertEqual(snapshot.manifest, state[7].read_bytes())
                 self.assertEqual(snapshot.links, {path: os.readlink(path) for path in snapshot.links})
 
@@ -2242,6 +2244,104 @@ class ReleaseTransactionTests(unittest.TestCase):
                     services_quiesced=True, runtime_backend=backend,
                 )
             runtime.assert_called_once()
+        self.assertFalse(os.path.lexists(journal), "verified complete restore must retire its own WAL")
+        backend.start.assert_not_called()
+
+    def test_cross_project_runtime_restore_failure_retains_original_wal(self) -> None:
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        p, q, common = state[:3]
+        snapshot = LOAD.snapshot_active_setup_state(expected_project=p)
+        context = LOAD.CrossProjectRollbackContext(
+            p, "generations/aaaaaaaaaaaaaaaaaaaa",
+            p / "99-output-ztp/rollback-receipts/aaaaaaaaaaaaaaaaaaaa", snapshot,
+        )
+        common.unlink()
+        common.symlink_to(os.path.relpath(state[5], common.parent))
+        evidence = journal.read_bytes()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "restore_runtime_rollback_receipt",
+                                  side_effect=LOAD.LoadError("A runtime postverify failed")):
+            with self.assertRaisesRegex(LOAD.LoadError, "A runtime postverify failed"):
+                LOAD.restore_cross_project_rollback_context(
+                    context, current_project=q, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertTrue(journal.is_file(), "P link restore must not erase a failed A recovery")
+        self.assertEqual(evidence, journal.read_bytes())
+        self.assertEqual(snapshot.manifest, state[7].read_bytes())
+        self.assertEqual(snapshot.links, {path: os.readlink(path) for path in snapshot.links})
+        backend.start.assert_not_called()
+
+    def test_cross_project_runtime_phase_wal_replacement_is_not_consumed(self) -> None:
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        p, q = state[:2]
+        snapshot = LOAD.snapshot_active_setup_state(expected_project=p)
+        context = LOAD.CrossProjectRollbackContext(
+            p, "generations/aaaaaaaaaaaaaaaaaaaa",
+            p / "99-output-ztp/rollback-receipts/aaaaaaaaaaaaaaaaaaaa", snapshot,
+        )
+        evidence = journal.read_bytes()
+        archived = journal.with_name("original-runtime-phase-wal")
+        def replace_wal(*args, **kwargs):
+            if journal.exists():
+                journal.rename(archived)
+            journal.write_bytes(evidence)
+            journal.chmod(0o600)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "restore_runtime_rollback_receipt", side_effect=replace_wal):
+            with self.assertRaisesRegex(LOAD.LoadError, "journal changed"):
+                LOAD.restore_cross_project_rollback_context(
+                    context, current_project=q, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertEqual(evidence, journal.read_bytes())
+        self.assertEqual(evidence, archived.read_bytes())
+        self.assertNotEqual(journal.stat().st_ino, archived.stat().st_ino)
+        backend.start.assert_not_called()
+
+    def test_cross_project_missing_real_a_receipt_retains_wal(self) -> None:
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        p, q, common = state[:3]
+        snapshot = LOAD.snapshot_active_setup_state(expected_project=p)
+        context = LOAD.CrossProjectRollbackContext(
+            p, "generations/aaaaaaaaaaaaaaaaaaaa",
+            p / "99-output-ztp/rollback-receipts/aaaaaaaaaaaaaaaaaaaa", snapshot,
+        )
+        common.unlink()
+        common.symlink_to(os.path.relpath(state[5], common.parent))
+        evidence = journal.read_bytes()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with self.assertRaisesRegex(LOAD.LoadError, "rollback receipt path"):
+                LOAD.restore_cross_project_rollback_context(
+                    context, current_project=q, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertEqual(evidence, journal.read_bytes())
+        self.assertEqual(snapshot.manifest, state[7].read_bytes())
+        self.assertEqual(snapshot.links, {path: os.readlink(path) for path in snapshot.links})
+        backend.start.assert_not_called()
+
+    def test_cross_project_runtime_phase_p_drift_retains_wal(self) -> None:
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        p, q, common = state[:3]
+        snapshot = LOAD.snapshot_active_setup_state(expected_project=p)
+        context = LOAD.CrossProjectRollbackContext(
+            p, "generations/aaaaaaaaaaaaaaaaaaaa",
+            p / "99-output-ztp/rollback-receipts/aaaaaaaaaaaaaaaaaaaa", snapshot,
+        )
+        evidence = journal.read_bytes()
+        def drift_p(*args, **kwargs):
+            common.unlink()
+            common.write_bytes(b"unknown post-runtime object\n")
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "restore_runtime_rollback_receipt", side_effect=drift_p):
+            with self.assertRaisesRegex(LOAD.LoadError, "disk state is unknown"):
+                LOAD.restore_cross_project_rollback_context(
+                    context, current_project=q, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertEqual(evidence, journal.read_bytes())
+        self.assertEqual(b"unknown post-runtime object\n", common.read_bytes())
         backend.start.assert_not_called()
 
     def test_cross_project_context_mode_mismatch_cannot_consume_pending_wal(self) -> None:
