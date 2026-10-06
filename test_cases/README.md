@@ -236,6 +236,11 @@ reader 在打开前拒绝非 regular leaf，以非阻塞/no-follow 打开，并�
 因此跨清理步骤绑定 dev/ino/mode/size/mtime 和完整摘要，不冒称整个恢复窗口的 ABA 免疫。
 嵌套重复硬链接正例必须仍完整恢复原 P inode；本地 workflow 不替代 Linux/断电或完整 R22。
 
+R22 Q parent 预像必须在首次内容读取前冻结完整文件身份或缺席状态，持有原 inode
+并在读取后同时验证名称、FD 和物理父目录。读取后插入的新文件、同字节换 inode
+不能成为稳定预像，也不能据此启动 SETUP 或发布 WAL。此门禁不意味着父 B 成功
+收口、旧 A 激活或整树正式 full 已完成。
+
 R22 infra/logs 源名称恢复不能只依赖最初的副本预检。预检冻结源名称的完整 inode/
 ctime/链接文字或缺席状态，每次 unlink 和 backup→source rename 前同时重核源名称、
 原备份和 Q 根身份；同目标文字新 inode 也不能继承删除权。自己的 unlink 将源预期

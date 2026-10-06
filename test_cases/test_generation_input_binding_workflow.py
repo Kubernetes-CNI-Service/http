@@ -1790,6 +1790,78 @@ finally:
                     self.assertFalse(journal.exists())
                     self.assertFalse((root / "service-started").exists())
 
+    def test_real_load_setup_rejects_q_parent_owner_changed_during_wal_freeze(self):
+        """LOAD must refuse before launching the real SETUP with an unstable Q preimage."""
+        with tempfile.TemporaryDirectory(prefix="r22-q-parent-freeze-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, p, q, common, p_only, q_only, manifest, before, _hook, _barrier, _home = fixture
+            parent = q / "99-output-ztp/current-release.json"
+            parent.parent.mkdir()
+            payload = b'{"release_id":"independent-Q-parent"}\n'
+            parent.write_bytes(payload)
+            operation = """
+import importlib.util, sys
+from pathlib import Path
+from types import SimpleNamespace
+root, p, q = map(Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location('q_parent_freeze_load', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+parent = q / '99-output-ztp/current-release.json'
+reader = load._read_rollback_regular
+mutated = False
+setup_invoked = False
+run = load.run
+def replace_after_read(path, **kwargs):
+    global mutated
+    result = reader(path, **kwargs)
+    if Path(path) == parent and not mutated:
+        mutated = True
+        parent.rename(parent.with_name('operator-retained-parent.json'))
+        parent.write_bytes(b'{"release_id":"independent-Q-parent"}\\n')
+    return result
+def observe_setup(command, **kwargs):
+    global setup_invoked
+    setup_invoked = True
+    return run(command, **kwargs)
+load._read_rollback_regular = replace_after_read
+load.run = observe_setup
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    try:
+        load.activate_project(
+            q, q / 'p2p.xlsx', strict=False, no_upgrade=True,
+            deployment_lock_descriptor=descriptor, host_role='workstation',
+            prepare_switch_wal=True, runtime_backend=SimpleNamespace(name='supervisor'),
+        )
+    except load.LoadError as error:
+        rejection = str(error)
+    else:
+        raise AssertionError('LOAD adopted the replacement Q parent')
+    assert mutated
+    assert not setup_invoked, 'unstable preimage must stop before SETUP'
+    assert 'Q parent' in rejection, rejection
+    assert not (root / 'ztp/.setup-switch-journal.json').exists(), 'unstable preimage must not publish a WAL'
+    print('R22_Q_PARENT_FREEZE_HELD')
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+            result = subprocess.run(
+                [sys.executable, "-B", "-c", operation, str(root), str(p), str(q)],
+                cwd=root, capture_output=True, text=True, check=False, timeout=30,
+            )
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn("R22_Q_PARENT_FREEZE_HELD", result.stdout)
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            self.assertEqual(before["common"], os.readlink(common))
+            self.assertEqual(before["p_only"], os.readlink(p_only))
+            self.assertFalse(os.path.lexists(q_only))
+            self.assertEqual(payload, parent.read_bytes())
+            self.assertEqual(payload, parent.with_name("operator-retained-parent.json").read_bytes())
+            self.assertFalse((root / "service-started").exists())
+
     def test_real_setup_then_parent_commit_cannot_cold_restore_p(self):
         """Actual Q parent replace must revoke the old P rollback authority."""
         with tempfile.TemporaryDirectory(prefix="r22-q-parent-commit-") as name:

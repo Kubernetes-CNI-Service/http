@@ -1693,6 +1693,8 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - infra/logs 源名称和 backup rename 写前身份窄修：原副本预检后插入的同文字新 inode 指针会被误删，源 unlink 后替换的备份会先搬进 P 才报身份错误。TEST direct 与真实 LOAD→SETUP 指针发布后死亡→新 LOAD 在源 unlink/父同步屏障替换 backup 的 workflow 均先 RED 后 GREEN。候选冻结源完整身份及原始链接文字/缺席，在 source unlink 与 backup rename 之前分别重核源名称、已登记原备份、Q 根和物理父目录；自己的 unlink 仅把预期转为缺席，自己的 rename 后只接受原目录 inode 再绑定名称。未知备份不得移入 P；中途漂移保持源缺席、未知 backup、封存原目录、Q 副本、原 WAL/receipt，不启动服务，须 HOLD 待人工核验。另有真实恢复 API 的 unlink 后同步失败→从缺席源重入正例，原目录 inode 与字节保持。
   现场前置仍限本卡授权隔离 VM、完整 P/Q/receipt/WAL 与可恢复卷快照、排他部署锁、停服见证及正常写者静默；分别在源名称最后复核、unlink、父 fsync、backup rename 前后和后核验屏障受控换指针/备份，记录原/未知/retained 名称及目录、源缺席窗口、dev/ino/mode/nlink/size/mtime/ctime、链接文字、摘要和物理时序。不要因为目录已在 P 就称恢复成功；未知状态只保留证据，经负责人核对后按登记快照恢复，禁止 live 注入或清理未知对象。本机 syscall 屏障及进程死亡不证明任意同 UID 非合作写者免疫、原子 compare-and-rename、Linux/断电、完整共享写集、旧 A 激活或 DEV ACK，本卡仍 OPEN。
 
+- Q parent 预像读前冻结窄修：TEST direct 和真实 LOAD→SETUP 门禁覆盖首次读取后同字节换 inode、原缺席后插入；必须在启动 SETUP 或发布 WAL 前 HOLD。现场仅限本卡授权隔离 VM、完整 P/Q 前像及可恢复卷快照、排他锁、停服及正常写者静默，分别在首次读、第二次读、名称/FD/父目录复核屏障受控替换 Q parent 或重绑父目录；独立封存原/替换 inode、字节/模式/摘要、缺席状态、mtime/ctime、物理时序、拒绝退出、WAL 未发布及服务未启动见证。保留未知对象，经负责人核验后仅恢复登记快照；禁止 live 注入或清理未知 parent。读前 FD/name 校验不是原子 compare-and-publish，不证明任意不合作同 UID 写者免疫、父 B 成功退休 WAL、Linux/断电、完整写集、旧 A 激活或 DEV ACK，本卡仍 OPEN。
+
 ## TC-REAL-R22-C2-DESCRIPTION-PUBLISH-001 — c2 同名描述输出的故障窗口
 
 - Case ID：`TC-REAL-R22-C2-DESCRIPTION-PUBLISH-001`；类型：real-environment / transaction / crash-recovery；对应 R22 c2 对 `*_with_desc` 的既有同名输出替换。状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。自动化先决为 `test_cases.test_generation_input_binding_contract` 的二次读取、早返及 staging direct，`test_cases.test_generation_input_binding_workflow` 的 setup/load/c2 workflow，和当前候选正式 full/check；现有定向通过不证明进程死亡后的原子性。

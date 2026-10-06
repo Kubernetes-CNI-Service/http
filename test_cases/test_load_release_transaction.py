@@ -4234,6 +4234,42 @@ os.kill(os.getpid(), signal.SIGKILL)
         self.assertFalse(journal.exists())
         backend.start.assert_not_called()
 
+    def _assert_q_parent_freeze_read_boundary_is_held(self, initially_present):
+        project = self.project.resolve(strict=True)
+        parent = project / "99-output-ztp/current-release.json"
+        parent.parent.mkdir(parents=True, exist_ok=True)
+        payload = b'{"release_id":"independent-Q-parent"}\n'
+        retained = parent.with_name("operator-retained-parent.json")
+        if initially_present:
+            parent.write_bytes(payload)
+        reader = LOAD._read_rollback_regular
+        mutated = False
+
+        def replace_after_first_read(path, **kwargs):
+            nonlocal mutated
+            result = reader(path, **kwargs)
+            if Path(path) == parent and not mutated:
+                mutated = True
+                if initially_present:
+                    parent.rename(retained)
+                parent.write_bytes(payload)
+            return result
+
+        with mock.patch.object(LOAD, "_read_rollback_regular", side_effect=replace_after_first_read):
+            with self.assertRaisesRegex(LOAD.LoadError, "Q parent.*unknown|parent.*changed"):
+                LOAD._setup_switch_q_parent_authority(project)
+        self.assertTrue(mutated)
+        self.assertEqual(payload, parent.read_bytes())
+        if initially_present:
+            self.assertEqual(payload, retained.read_bytes())
+            self.assertNotEqual(parent.stat().st_ino, retained.stat().st_ino)
+
+    def test_setup_q_parent_freeze_does_not_adopt_post_read_same_bytes_owner(self):
+        self._assert_q_parent_freeze_read_boundary_is_held(True)
+
+    def test_setup_q_parent_freeze_does_not_adopt_post_read_missing_to_present(self):
+        self._assert_q_parent_freeze_read_boundary_is_held(False)
+
     def test_setup_wal_q_parent_commit_fences_p_restore(self) -> None:
         (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
         common = state[2]

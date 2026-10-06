@@ -6111,23 +6111,51 @@ def _setup_switch_q_parent_authority(project: Path) -> dict[str, object]:
                     or path.parent.resolve(strict=True) != path.parent):
                 raise ValueError("parent output is not a canonical real directory")
             parent = _setup_switch_directory_identity(path.parent)
-        opened = _read_rollback_regular(path, missing_ok=True)
         file = None
-        if opened is not None:
-            before = path.lstat()
-            # Tie the payload and complete metadata to one stable read, not
-            # an earlier read followed by a later owner's same-name inode.
-            if _read_rollback_regular(path) != opened:
-                raise ValueError("parent bytes changed while freezing")
-            after = path.lstat()
-            fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_size",
-                      "st_mtime_ns", "st_ctime_ns")
-            if any(getattr(before, field) != getattr(after, field) for field in fields):
-                raise ValueError("parent identity changed while freezing")
-            file = {
-                "sha256": hashlib.sha256(opened[0]).hexdigest(), "mode": opened[1],
-                "identity": {field: getattr(before, field) for field in fields},
-            }
+        descriptor = -1
+        fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_size",
+                  "st_mtime_ns", "st_ctime_ns")
+        try:
+            try:
+                before = path.lstat()
+            except FileNotFoundError:
+                before = None
+            if before is not None:
+                if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                        or before.st_size < 0 or before.st_size > _ROLLBACK_PAYLOAD_LIMIT):
+                    raise ValueError("parent is not a bounded single-link file")
+                flags = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                         | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0))
+                descriptor = os.open(path, flags)
+                held = os.fstat(descriptor)
+                if any(getattr(before, field) != getattr(held, field) for field in fields):
+                    raise ValueError("parent identity changed while opening")
+            # Freeze identity/absence before the first read, and keep that
+            # inode alive. A later same-byte owner is not its continuation.
+            opened = _read_rollback_regular(path, missing_ok=True)
+            if before is None:
+                if opened is not None or os.path.lexists(path):
+                    raise ValueError("absent parent appeared while freezing")
+            else:
+                if opened is None or _read_rollback_regular(path) != opened:
+                    raise ValueError("parent bytes changed while freezing")
+                after, held = path.lstat(), os.fstat(descriptor)
+                if any(getattr(before, field) != getattr(after, field)
+                       or getattr(before, field) != getattr(held, field) for field in fields):
+                    raise ValueError("parent identity changed while freezing")
+                file = {
+                    "sha256": hashlib.sha256(opened[0]).hexdigest(), "mode": opened[1],
+                    "identity": {field: getattr(before, field) for field in fields},
+                }
+            current_parent = (
+                _setup_switch_directory_identity(path.parent)
+                if os.path.lexists(path.parent) else None
+            )
+            if parent != current_parent:
+                raise ValueError("parent output directory changed while freezing")
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
         return {"path": str(path), "parent": parent, "file": file}
     except (OSError, ValueError, RuntimeError, LoadError) as exc:
         raise LoadError(f"setup switch Q parent authority is unknown: {exc}") from exc

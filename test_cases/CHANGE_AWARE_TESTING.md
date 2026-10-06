@@ -219,6 +219,39 @@ inode 144208691，size 616，SHA256
 后代状态仍 unknown，不能据此放行正式 related/full 或称 R22 恢复完成。approved ledger
 保持原字节，Linux/断电、完整写集、显式旧 A 健康激活及其它未闭项不变。
 
+### R22 Q parent 预像读前身份冻结候选
+
+原 `_setup_switch_q_parent_authority` 先读取内容，再取身份；同字节新 inode 在首次
+读取之后替换名称会被接纳，原先缺席的名称在首次读取之后出现也会被记录成缺席。
+两个独立 direct 与真实 LOAD→SETUP 调用边界要求先拒绝、不发布 WAL、不启动 SETUP。
+首轮日志 `r22-q-parent-freeze-owner-red.log`（inode 144896156，size 18690，SHA256
+`64965dfadcb77c09a339d773936f31f82ec4b08163337824c5ee007d51c91913`）包含 direct
+私有路径的 macOS `/var` 别名错误，不能将这两项当实现 RED。仅将夹具项目路径
+规范到实际目录后，原实现 3 tests / 3 FAIL / exit1（4.379 秒）；两个 direct 不抛
+LoadError，workflow 实际继续启动 SETUP、发布 WAL。有效 RED 原日志
+`outputs/test-diagnostics/r22-q-parent-freeze-owner-red-canonical.log`，inode 144898485，
+size 17458，SHA256 `e1a7ea625342fe851dfae9f504ce18738c92e0ec06ef67ea31e7bcf009ec48a5`。
+原拒绝断言未放宽；SETUP 后续夹具错误不作为根因或通过证据。
+
+候选在首次读取之前冻结 parent 文件完整 dev/ino/mode/nlink/size/mtime/ctime 或缺席，
+有文件时先持有原 inode；读取后重核名称、held FD、摘要和父目录身份。未知新 owner
+不继承原预像，原缺席状态出现文件必须 HOLD；所有拒绝均保留原/替换对象，不启动
+服务。三项新负例及五项原有 parent 门禁/未提交恢复/真实 SETUP→parent commit
+正负例合计 8 tests / OK / exit0（6.693 秒）。日志
+`r22-q-parent-freeze-owner-green.log`，inode 144901979，size 1414，SHA256
+`b8c00e202472ea9ff27c2e5cbc22ca1f9483af169b54f336e10066ad5ee2b980`；上述日志读前后
+stat 稳定，完整物理收尾及实际 exec 退出码一致。manifest 的 LOAD direct 和真实
+generation-input-binding workflow 映射继续有效。两个完整 LOAD transaction 与
+generation-input-binding workflow 模块诊断为 345 tests / OK / exit0（202.339 秒），
+日志 `outputs/test-diagnostics/r22-q-parent-freeze-owner-modules.log`，inode 144908631，
+size 113310，SHA256 `606a0b901b113a587cf79cc731e650e314861a1c7bc1ca88dc59a819cee91ef5`。
+读前后 stat 一致，旧 98558 字节前缀 SHA256
+`f7b549eca914b3667dea721e0bb02240809e3c99ba3a7e6332916855f9e5f4f2` 未变。
+物理 Ran/OK 后有缓冲的测试夹具 stdout，最终退出标记与实际 exec exit0 一致；
+不是批准 runner，未更新 ledger。局部诊断不替代 related/full，
+原 bootstrap 15 秒和 REQ19 probe 10 秒未知原因门禁不变，未手改 approved ledger。
+父 B 成功收口、完整共享写集、显式旧 A 健康激活、Linux/断电和 DEV ACK 仍未闭。
+
 ### R22 infra/logs 源名称写前与备份恢复身份候选
 
 副本预检仍不能授权之后的源名称操作。原恢复在删除 Q 指针之后、backup rename
