@@ -477,7 +477,7 @@ class CurrentRoundCompletionTests(unittest.TestCase):
                 )
 
     def test_malformed_previous_reset_receipt_cannot_promote_or_handoff(self):
-        for index in ("invalid", True, 0, 2):
+        for index in ("invalid", True, 2):
             with self.subTest(index=index):
                 row = forged_previous_reset_receipt_device(index)
                 self.assertIs(row.get("round_authority_invalid"), True)

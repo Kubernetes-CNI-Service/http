@@ -3755,12 +3755,13 @@ def assign_ztp_rounds(
         previous_boot = str(previous.get("boot_id") or "")
         previous_reset_boot = str(previous.get("reset_boot_id_before") or "")
         complete = previous.get("stages", {}).get("complete", {})
+        # Index zero is an unfinished reset, not a completed prior receipt.
         invalid_complete_authority = (
             isinstance(complete, dict)
             and complete.get("status") == "success"
             and (
                 type(complete.get("success_index")) is not int
-                or complete["success_index"] != previous_round
+                or complete["success_index"] not in (0, previous_round)
             )
         )
         if invalid_complete_authority:
