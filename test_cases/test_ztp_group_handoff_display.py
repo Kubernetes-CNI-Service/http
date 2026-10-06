@@ -6,7 +6,9 @@ from __future__ import annotations
 import datetime as dt
 import importlib.util
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -51,6 +53,54 @@ EXPECTED_NINE_STAGES = (
 
 
 class CompletionDisplayParityTests(unittest.TestCase):
+    def test_real_info_collector_classifies_health_without_any_ztp_completion_or_config_receipt(self):
+        # Execute the complete production shell collector. Only hardware/system
+        # commands are private fixtures; no device/network/service is touched.
+        for kind, platform in (("eth", "SN5600"), ("ib", "Q3200"), ("nvl", "MNV72")):
+            for health, badge in (("OK", "h-ok"), ("Not OK", "h-err"), ("", "h-unk")):
+                with self.subTest(kind=kind, health=health), tempfile.TemporaryDirectory() as directory:
+                    project = Path(directory)
+                    commands, temporary = project / "bin", project / "tmp"
+                    commands.mkdir()
+                    temporary.mkdir()
+                    hostname = commands / "hostname"
+                    hostname.write_text("#!/bin/sh\nprintf 'Fixture-Switch01\\n'\n")
+                    hostname.chmod(0o700)
+                    nv = commands / "nv"
+                    nv.write_text(
+                        "#!/bin/sh\ncase \"$*\" in\n"
+                        "  'show platform') printf 'system-type    %s\\n' \"$TEST_F02_PLATFORM\" ;;\n"
+                        "  'show system health') if [ -n \"$TEST_F02_HEALTH\" ]; then printf 'status      %s\\n' \"$TEST_F02_HEALTH\"; fi ;;\n"
+                        "  *) : ;;\nesac\n"
+                    )
+                    nv.chmod(0o700)
+                    for name in ("timedatectl", "df", "free", "top", "uptime", "clagctl"):
+                        path = commands / name
+                        path.write_text("#!/bin/sh\nexit 0\n")
+                        path.chmod(0o700)
+                    environment = {**os.environ, "PATH": str(commands) + ":/usr/bin:/bin",
+                                   "TMPDIR": str(temporary), "TEST_F02_PLATFORM": platform,
+                                   "TEST_F02_HEALTH": health}
+                    collected = subprocess.run(["/bin/bash", str(ROOT / "ethernet/monitor/sw-info.sh")], cwd=project,
+                                               env=environment, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=8)
+                    self.assertEqual(0, collected.returncode, collected.stderr)
+                    raw = (project / "monitor/Fixture-Switch01.info").read_text()
+                    self.assertEqual(1, raw.count("# Execute Command: nv show system health"))
+                    self.assertIn("# Collect complete", raw)
+                    self.assertFalse((temporary / "sw-info.lock").exists())
+                    self.assertEqual([], list(temporary.iterdir()), "collector must clean its own temporary/lock files")
+                    info = HTML.parse_info_file("Fixture-Switch01", raw)
+                    self.assertEqual(health.lower() if health else "unknown", info["health"], raw)
+                    self.assertIn(f'h-badge {badge}', HTML.render_sw_list_row(info))
+                    incomplete = {"hostname": "Fixture-Switch01", "type": kind, "ztp_round": 1,
+                                  "config_method": "initial-setup" if kind == "ib" else "ztp",
+                                  "issues": [], "stages": {name: MONITOR.stage() for name in EXPECTED_NINE_STAGES}}
+                    MONITOR.finalize_device(incomplete)
+                    self.assertEqual("pending", incomplete["overall"])
+                    self.assertFalse(MONITOR.completion_handoff_device_complete(incomplete))
+                    self.assertFalse(HTML.ztp_completed(incomplete))
+                    self.assertFalse((project / "99-output-ztp").exists(), "health cannot mint a ZTP/config history")
+
     @staticmethod
     def complete_fixture():
         return {

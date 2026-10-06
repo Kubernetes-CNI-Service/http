@@ -465,6 +465,11 @@ monitor 的 DHCP 模式来自已核验的当前 parent release/global 绑定（l
 disabled。真实 load 发布 → monitor_once workflow 保留 enabled 正向 DHCPACK，并证明
 disabled 在旧日志/租约存在及完全缺失时均无需读取，也不改写原始来源文件。
 
+健康分类另有真实 `sw-info.sh → generate-monitor-html.py` workflow：在私有目录运行
+完整采集脚本，仅设备/系统命令为独立夹具。ETH/IB/NVL 各覆盖 OK、Not OK 和缺证据，
+一轮即得到对应健康/异常/未知页面分类；没有 ZTP 或配置收据仍可分类，但当前九阶段
+保持 pending，不产生配置历史，也不放行 HTML/机器 handoff。临时文件和锁须完全清理。
+
 九阶段历史不能把已有但不可读、非对象、非列表或重复大小写主机成员的快照当作空历史。
 `test_ztp_group_handoff.py` 独立验证负向历史权威跨轮保持及 JSON/CSV/Markdown 诊断；
 `test_ztp_group_handoff_display.py` 串联真实监控快照写入、下一轮读取与真实 HTML 判据，

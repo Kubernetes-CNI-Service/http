@@ -971,7 +971,8 @@
       "tests": [
         "test_cases.test_ops_deployment_review",
         "test_cases.test_project_contracts",
-        "test_cases.test_ib_analysis_domain"
+        "test_cases.test_ib_analysis_domain",
+        "test_cases.test_ztp_group_handoff_display"
       ]
     },
     {
@@ -2430,6 +2431,11 @@
       "id": "f02_release_mode_to_static_monitor",
       "members": ["DAY0-Prepare/11-load.py", "DAY0-Prepare/12-ztp-monitor.py", "ztp/dynamic_air_inventory.py"],
       "tests": ["test_cases.test_config_sync_authority_workflow", "test_cases.test_monitor_stack_review"]
+    },
+    {
+      "id": "f02_info_health_without_ztp_completion",
+      "members": ["ethernet/monitor/sw-info.sh", "infiniband/monitor/sw-info.sh", "nvlink/monitor/sw-info.sh", "monitor/generate-monitor-html.py", "DAY0-Prepare/12-ztp-monitor.py"],
+      "tests": ["test_cases.test_ztp_group_handoff_display"]
     },
     {
       "id": "ufm_readonly_discovery_from_inventory_and_leases",

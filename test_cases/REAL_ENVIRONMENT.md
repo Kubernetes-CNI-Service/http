@@ -249,6 +249,13 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-F02-6-001 — 当前轮九阶段证据与交接一致性
 
+- 独立健康分类：对分别受授权的 ETH/IB/NVL、没有本轮 ZTP 完成的合法监控目标，运行
+  已有信息采集 → 页面流程，核对新鲜 OK、Not OK 和缺健康证据各自显示健康/异常/未知；
+  九阶段未完成、配置收据缺失不能阻断该分类，也不能因此自动变成 overall success 或
+  触发 handoff。保留完整信息文件、采集身份/时间、页面和九阶段 report；失败后确认本案
+  临时锁清理，不清除历史来源。私有真实 shell workflow 已登记在
+  `test_ztp_group_handoff_display.py`；真机仍 NOT RUN，本条不授权采集或设备操作。
+
 - DHCP 模式跨真实 load/release → 监控轮次的静态路径：在单独授权的隔离部署机将当前
   parent release/global 置为 disabled，并保留旧租约/日志，再移走仅本案旧来源副本；两轮
   监控均不打开本地 DHCP 日志/租约，不查询 DHCP 服务，仍对同一静态设备做独立 SSH
