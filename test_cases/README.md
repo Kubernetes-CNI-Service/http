@@ -453,6 +453,12 @@ JSON、HTML 和机器判据保持一致，不降低既有 failed，不阻断独�
 来源变化属于独立快照状态，保存后不随输入对象变化；此必要条件不等于当前本地代次
 或本轮配置应用成功，bootstrap/initial-setup 的代次接入与 F02 整体仍 OPEN。
 
+来源否决不覆盖独立核验的当前 manual-config-sync：只有闭合且严格类型的本地代次
+成功投影，与本次自身 BatchMode 身份/live 摘要匹配时，保留 config_apply 成功；
+bootstrap 来源缺失仍否决九阶段 complete、HTML 与机器 handoff。缺失、畸形、旧代
+或漂移的手工来源不能借此豁免，既有 failed 也不降级。实际 writer → collector →
+monitor_once → JSON/HTML 场景在私有项目覆盖该边界，未连接设备，真机仍 NOT RUN。
+
 monitor inventory 逐设备物化并验证 `config_method`，与真实 load 的同一输入结果一致。
 重复方法列、显式空值、未知或设备不兼容执行者在监控/范围过滤前拒绝，错误带行号与
 主机；合法 server 声明验证后仍不进入 Switch Status，动态 AIR 使用受管默认值。

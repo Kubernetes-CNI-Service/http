@@ -3696,7 +3696,10 @@ def finalize_device(device: dict[str, Any]) -> None:
         }
     ]
     if not config_sync_authority.monitor_source_observation_allows_completion(device):
+        manual_apply_verified = config_sync_authority.monitor_current_config_sync_allows_application(device)
         for name in ("config_apply", "complete"):
+            if name == "config_apply" and manual_apply_verified:
+                continue
             if device["stages"][name]["status"] != "failed":
                 set_stage(device, name, "warning", "当前 bootstrap 来源未验证，不能复用旧配置完成证据")
         device["issues"].append({

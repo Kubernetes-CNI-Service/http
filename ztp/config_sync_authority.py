@@ -99,6 +99,13 @@ def monitor_observation_allows_completion(device):
         return False
     if "configuration_observation" not in device:
         return True
+    return monitor_live_observation_verified(device)
+
+
+def monitor_live_observation_verified(device):
+    """Require explicit own-session live evidence, independent of apply source."""
+    if "configuration_observation" not in device:
+        return False
     observed = device["configuration_observation"]
     fields = {"schema_version", "source", "batch_identity_verified", "hostname",
               "interface", "transport_ip", "mac_plain", "live_state_sha256", "reason"}
@@ -138,6 +145,35 @@ def monitor_observation_allows_completion(device):
         return False
     return (interface == observed["interface"]
             and mac.replace(":", "").lower() == observed["mac_plain"])
+
+
+def monitor_current_config_sync_allows_application(device):
+    """Read-only projection gate: manual application is never ZTP completion.
+
+    The writer/monitor reconciler supplies this projection only after checking
+    the captured local era and its secure current receipt. Finalization still
+    checks a closed projection against this observation's own live digest;
+    absent legacy evidence, truthy flags and another source cannot qualify.
+    """
+    current = device.get("configuration_authority")
+    fields = {"schema_version", "source", "observation_source", "state", "veto",
+              "generation", "source_identity", "live_state_sha256", "reason"}
+    if (not isinstance(current, dict) or set(current) != fields
+            or type(current["schema_version"]) is not int or current["schema_version"] != 1
+            or type(current["generation"]) is not int
+            or not 1 <= current["generation"] <= MAX_GENERATION
+            or current["veto"] is not False
+            or any(not isinstance(current[key], str) for key in fields - {
+                "schema_version", "generation", "veto"})
+            or current["source"] != "local_config_sync_authority"
+            or current["observation_source"] != "monitor_batchmode"
+            or current["state"] != "success" or current["reason"] != ""
+            or not NAMESPACE.fullmatch(current["source_identity"])
+            or any(int(part) > 2 ** 64 - 1 for part in current["source_identity"].split(":"))
+            or not DIGEST.fullmatch(current["live_state_sha256"])
+            or not monitor_live_observation_verified(device)):
+        return False
+    return current["live_state_sha256"] == device["configuration_observation"]["live_state_sha256"]
 
 
 # Closed bootstrap applied-input V1 response, including its header and YAML.

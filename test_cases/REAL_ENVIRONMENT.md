@@ -344,6 +344,10 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   config_apply，不借旧日志完成九阶段；保留 report/HTML/handoff 与 journal 前后证据。
   本地自动化为 `test_config_sync_authority_workflow.py`，含真实 monitor_once/report 写入；
   上述真机并发、持久化与显示联动仍 NOT RUN，测试注入只在私有副本，清理不触及线上状态。
+- 独立来源：bootstrap helper 缺失时，当前安全手工回执和该轮自身 BatchMode/live
+  一致仍可显示 config_apply；不得放行 complete/HTML/handoff。畸形代次、摘要漂移、
+  来源不匹配和非严格布尔仍拒绝，既有 failed 保留。私有实际 writer/collector/report
+  自动化已覆盖；真机 **NOT RUN**，沿用本卡授权、留证、清理和风险限制。
 - 分别注入交互密码认证、再认证失败、身份/路径变更、空 live-state、实际配置漂移、旧收据
   重放与收据摘要篡改；这些情况即使命令曾返回 0，worker 和页面也不得晋升成功。
 - 保存 result/summary、worker 状态、页面与归档的前后摘要及拒绝原因。只清理本案隔离

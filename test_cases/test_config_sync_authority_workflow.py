@@ -297,6 +297,51 @@ class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
             self.assertNotEqual("success", device["overall"])
             self.assertFalse(monitor.completion_handoff_device_complete(device))
 
+    def test_actual_missing_bootstrap_source_does_not_veto_verified_current_manual_sync(self):
+        from test_cases.module_loader import load_script
+        html = load_script("f02_manual_source_independence_html", ROOT / "monitor/generate-monitor-html.py")
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve()
+            monitor, receipt, _produced, _device, result = self.monitor_cycle_fixture(project)
+            authority = self.manual.config_sync_authority
+            root = receipt.parents[2]
+            original, current = receipt.read_bytes(), authority.read_current(root, "EXAMPLE-Leaf01")
+            (project / "02-devices_config.csv").write_text(
+                "hostname,type,template,eth0_ip,netmask,eth0_gw,eth0_mac,eth1_ip,netmask,eth1_gw,eth1_mac,lo_ip,config_method\n"
+                "EXAMPLE-Leaf01,eth,oob,192.0.2.10,24,192.0.2.1,02:00:00:00:00:01,,,,,,ztp\n", encoding="utf-8")
+            apache, dhcp, air = project / "apache.log", project / "dhcp.log", project / "air.json"
+            apache.write_text("")
+            dhcp.write_text("")
+            air.write_text('{"nodes": {}}')
+            args = monitor.parser().parse_args([str(project), "--output-dir", str(project / "reports"),
+                                               "--apache-log", str(apache), "--dhcp-log", str(dhcp)])
+            # Actual collector/decoder, not a synthetic positive trusted flag.
+            # No bootstrap source frame exists, while this SSH session supplies
+            # its own identity and the live bytes of the real manual receipt.
+            raw = ("__HOSTNAME_BEGIN__\nEXAMPLE-Leaf01\n__HOSTNAME_END__\n"
+                   "__ETH0_MAC_BEGIN__\n02:00:00:00:00:01\n__ETH0_MAC_END__\n"
+                   "__ETH1_MAC_BEGIN__\n\n__ETH1_MAC_END__\n"
+                   "__HTTP_MONITOR_LIVE_V1_BEGIN__\n" + result["live_config_observation"]["text"]
+                   + "\n__HTTP_MONITOR_LIVE_V1_END__=0\n")
+            with mock.patch.object(monitor, "load_release_identity", return_value={"release_id": "fixture", "generated_at": "2026-10-07T01:00:00+08:00", "dhcp_status": "enabled"}), \
+                    mock.patch.object(monitor, "service_runtime_backend", return_value=SimpleNamespace(name="systemd")), \
+                    mock.patch.object(monitor, "service_state", return_value={"active": "fixture", "enabled": "fixture", "error": ""}), \
+                    mock.patch.object(monitor, "ACTIVE_AIR_JSON", air), \
+                    mock.patch.object(monitor, "run_command", return_value={"returncode": 0, "stdout": raw, "stderr": ""}) as ssh:
+                run = monitor.monitor_once(args, project)
+            self.assertEqual(1, ssh.call_count)
+            self.assertIn("BatchMode=yes", ssh.call_args.args[0])
+            device = json.loads((run / "report.json").read_text())["devices"][0]
+            self.assertIs(False, device["configuration_source_observation"]["source_receipt_verified"])
+            self.assertEqual("success", device["configuration_authority"]["state"])
+            self.assertEqual("success", device["stages"]["config_apply"]["status"],
+                             "independent current manual receipt does not require bootstrap provenance")
+            self.assertNotEqual("success", device["stages"]["complete"]["status"])
+            self.assertFalse(monitor.completion_handoff_device_complete(device))
+            self.assertFalse(html.ztp_completed(device))
+            self.assertEqual(current, authority.read_current(root, "EXAMPLE-Leaf01"))
+            self.assertEqual(original, receipt.read_bytes())
+
     def test_new_generation_started_during_collection_cannot_be_revoked_by_an_old_observation(self):
         with tempfile.TemporaryDirectory() as directory:
             monitor, receipt, _produced, device, result = self.monitor_cycle_fixture(Path(directory).resolve())
@@ -442,6 +487,7 @@ class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
                     live = "- set: {}\n" if drift else result["live_config_observation"]["text"]
                     return {**result, "ztp_log": "", "ifreload_log": "", "failed_yaml": "", "stderr": "",
                             "attempts": [], "remote_eth1_mac": "", "host_key_commands": [],
+                            "applied_config_observation": {"trusted": False, "fingerprint": "", "reason": "missing", "receipt": {}, "raw_yaml": ""},
                             "live_config_observation": {"kind": "ok", "text": live, "sha256": hashlib.sha256(live.encode()).hexdigest()}}
                 with mock.patch.object(monitor, "load_release_identity", return_value={"release_id": "isolated-fixture", "generated_at": "2026-10-07T01:00:00+08:00", "dhcp_status": "enabled"}), \
                         mock.patch.object(monitor, "service_runtime_backend", return_value=SimpleNamespace(name="systemd")), \

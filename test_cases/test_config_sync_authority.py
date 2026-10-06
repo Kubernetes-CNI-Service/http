@@ -14,6 +14,42 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSyncAuthorityTests(unittest.TestCase):
+    def test_current_manual_application_requires_closed_authority_and_own_live_proof(self):
+        gate = getattr(self.authority, "monitor_current_config_sync_allows_application", None)
+        self.assertTrue(callable(gate), "manual application and bootstrap completion have independent sources")
+        observed = {"schema_version": 1, "source": "monitor_batchmode", "batch_identity_verified": True,
+                    "hostname": "leaf1", "interface": "eth0", "transport_ip": "192.0.2.1",
+                    "mac_plain": "001122334455", "live_state_sha256": "a" * 64, "reason": ""}
+        authority = {"schema_version": 1, "source": "local_config_sync_authority",
+                     "observation_source": "monitor_batchmode", "state": "success", "veto": False,
+                     "generation": 1, "source_identity": "123:456", "live_state_sha256": "a" * 64, "reason": ""}
+        device = {"hostname": "leaf1", "ip": "192.0.2.1", "mac_plain": "001122334455",
+                  "configuration_observation": observed, "configuration_authority": authority,
+                  "configuration_source_observation": None}
+        self.assertTrue(gate(device))
+        self.assertFalse(self.authority.monitor_observation_allows_completion(device))
+        for value in (None, {}, {**authority, "schema_version": True}, {**authority, "veto": 0},
+                      {**authority, "generation": True}, {**authority, "generation": 0},
+                      {**authority, "generation": 1.0}, {**authority, "generation": 9223372036854775808},
+                      {**authority, "source": "bootstrap"}, {**authority, "state": "pending"},
+                      {**authority, "source_identity": ""}, {**authority, "source_identity": "b" * 64},
+                      {**authority, "source_identity": "18446744073709551616:1"},
+                      {**authority, "live_state_sha256": "c" * 64},
+                      {**authority, "reason": "HOLD"}, {**authority, "extra": "not closed"}):
+            with self.subTest(authority=value):
+                device["configuration_authority"] = value
+                before = json.dumps(device, sort_keys=True)
+                self.assertFalse(gate(device))
+                self.assertEqual(before, json.dumps(device, sort_keys=True))
+        device["configuration_authority"] = authority
+        for value in (None, {}, {**observed, "hostname": "foreign"},
+                      {**observed, "batch_identity_verified": 1}, {**observed, "reason": "failed"}):
+            with self.subTest(observation=value):
+                device["configuration_observation"] = value
+                self.assertFalse(gate(device))
+        device.pop("configuration_observation")
+        self.assertFalse(gate(device), "legacy absence cannot authorize manual application")
+
     def test_source_decoder_rejects_malformed_mac_instead_of_stripping_foreign_characters(self):
         from test_cases.test_manual_applied_config import MonitorAppliedConfigObservationTests
         payload = MonitorAppliedConfigObservationTests.wire("- set: {}\n")
