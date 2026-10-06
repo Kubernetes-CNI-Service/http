@@ -984,6 +984,7 @@ class ReleaseTransactionTests(unittest.TestCase):
         failure_at: str = "dhcp",
         observe_template_mutation: bool = False,
         active_project_value: Path | None = None,
+        activation_calls: list[dict] | None = None,
     ):
         args = SimpleNamespace(
             skip_doca=False, download_doca=False, dry_run=False,
@@ -1053,7 +1054,13 @@ class ReleaseTransactionTests(unittest.TestCase):
                 LOAD, "confirm_ztp_monitor_start", return_value=False,
             ))
             stack.enter_context(mock.patch.object(LOAD, "quiesce_services", quiesce))
-            stack.enter_context(mock.patch.object(LOAD, "activate_project"))
+            stack.enter_context(mock.patch.object(
+                LOAD, "activate_project",
+                side_effect=(
+                    (lambda *_args, **kwargs: activation_calls.append(kwargs))
+                    if activation_calls is not None else None
+                ),
+            ))
             stack.enter_context(mock.patch.object(LOAD, "render_ztp_runtime"))
             stack.enter_context(mock.patch.object(
                 LOAD, "snapshot_ztp_prefix_publication",
@@ -1759,7 +1766,7 @@ class ReleaseTransactionTests(unittest.TestCase):
         manifest.write_text("".join(rows), encoding="utf-8")
         return manifest
 
-    def _prepare_cross_project_setup_crash(self):
+    def _prepare_cross_project_setup_crash(self, *, freeze_q_links=True):
         """Freeze P before a Q setup child can rewrite any managed link."""
         old_project = self.project.resolve()
         new_project = self.root / "DAY0-Prepare/new"
@@ -1791,7 +1798,11 @@ class ReleaseTransactionTests(unittest.TestCase):
         with mock.patch.object(LOAD, "active_managed_services", return_value=()):
             journal = LOAD.prepare_setup_switch_journal(
                 old_project, new_project,
-                expected_new_links={common: new_target, new_only: new_only_target},
+                expected_new_links=(
+                    {common: new_target, new_only: new_only_target}
+                    if freeze_q_links else {}
+                ),
+                allow_late_q_values=not freeze_q_links,
                 deployment_lock_descriptor=descriptor,
                 services_quiesced=True, runtime_backend=backend,
             )
@@ -1802,6 +1813,40 @@ class ReleaseTransactionTests(unittest.TestCase):
             new_target, new_only_target, manifest, old_manifest, old_links,
             journal, descriptor, backend,
         )
+
+    def test_setup_wal_can_freeze_existing_p_link_q_value_before_write(self) -> None:
+        """LOAD may freeze P first, then register a discovered Q value durably."""
+        (
+            _old_project, _new_project, common, _old_only, _new_only,
+            new_target, _new_only_target, manifest, old_manifest, old_links,
+            journal, descriptor, backend,
+        ) = self._prepare_cross_project_setup_crash(freeze_q_links=False)
+        original = json.loads(journal.read_bytes())
+        before_row = next(row for row in original["body"]["links"]
+                          if row["path"] == str(common))
+        self.assertEqual(old_links[common], before_row["before"])
+        self.assertIsNone(before_row["after"])
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.register_setup_switch_journal_link(
+                journal, common, new_target,
+                deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+                allow_existing_exact=True,
+            )
+        after_row = next(row for row in json.loads(journal.read_bytes())["body"]["links"]
+                         if row["path"] == str(common))
+        self.assertEqual(old_links[common], after_row["before"])
+        self.assertEqual(os.path.relpath(new_target, common.parent), after_row["after"])
+        common.unlink()
+        common.symlink_to(after_row["after"])
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            self.assertEqual("restored-p", LOAD.recover_setup_switch_journal(
+                journal, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            ))
+        self.assertEqual(old_manifest, manifest.read_bytes())
+        self.assertEqual(old_links, {path: os.readlink(path) for path in old_links})
+        backend.start.assert_not_called()
 
     def test_setup_child_sigkill_after_first_q_link_cold_recovers_p(self) -> None:
         """A dead setup child cannot strand P's manifest over a Q link."""
@@ -1941,6 +1986,156 @@ os.kill(os.getpid(), signal.SIGKILL)
         self.assertEqual(old_manifest, manifest.read_bytes())
         self.assertEqual(frozen_journal, journal.read_bytes())
         self.assertNotEqual(original_link, os.readlink(common))
+        backend.start.assert_not_called()
+
+    def test_setup_wal_cold_restores_receipt_bound_real_infra_logs(self) -> None:
+        """A Q log copy and pointer must not strand the original P-era inode."""
+        (
+            _old_project, new_project, common, _old_only, _new_only,
+            new_target, _new_only_target, manifest, old_manifest, old_links,
+            journal, descriptor, backend,
+        ) = self._prepare_cross_project_setup_crash()
+        source = self.root.resolve() / "infra/logs"
+        source.mkdir(parents=True)
+        original = source.stat()
+        payload = b"P-era audit bytes\n"
+        (source / "audit.log").write_bytes(payload)
+        destination = new_project.resolve() / "99-output-infra"
+        destination.mkdir()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            backup = LOAD.register_setup_switch_infra_log_tree(
+                journal, source, destination,
+                deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            )
+        self.assertFalse(os.path.lexists(backup))
+        frozen = journal.read_bytes()
+        self.assertEqual(1, len(json.loads(frozen)["body"]["infra_logs"]))
+        receipt = self.root.resolve() / "infra/.logs-migration.json"
+        receipt.write_text(json.dumps({
+            "schema_version": 1,
+            "source": {"path": str(source), "dev": original.st_dev,
+                       "ino": original.st_ino},
+            "destination": {"path": str(destination)},
+            "directories": [],
+            "entries": {"audit.log": {"size": len(payload),
+                                       "sha256": hashlib.sha256(payload).hexdigest()}},
+        }) + "\n", encoding="utf-8")
+        receipt.chmod(0o600)
+        os.link(source / "audit.log", destination / "audit.log")
+        source.rename(backup)
+        source.symlink_to(os.path.relpath(destination, source.parent))
+        common.unlink()
+        common.symlink_to(os.path.relpath(new_target, common.parent))
+
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            outcome = LOAD.recover_setup_switch_journal(
+                journal, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            )
+        self.assertEqual("restored-p", outcome)
+        self.assertEqual(old_manifest, manifest.read_bytes())
+        self.assertEqual(old_links, {path: os.readlink(path) for path in old_links})
+        self.assertEqual((original.st_dev, original.st_ino),
+                         (source.stat().st_dev, source.stat().st_ino))
+        self.assertFalse(source.is_symlink())
+        self.assertEqual(payload, (source / "audit.log").read_bytes())
+        self.assertFalse(os.path.lexists(destination / "audit.log"))
+        self.assertFalse(os.path.lexists(backup))
+        self.assertFalse(os.path.lexists(receipt))
+        self.assertFalse(os.path.lexists(journal))
+        backend.start.assert_not_called()
+
+    def test_setup_wal_infra_log_collision_holds_before_restoring_p_links(self) -> None:
+        """A receipt-bound backup name occupied by other bytes is HOLD."""
+        (
+            _old_project, new_project, common, _old_only, _new_only,
+            new_target, _new_only_target, manifest, old_manifest, old_links,
+            journal, descriptor, backend,
+        ) = self._prepare_cross_project_setup_crash()
+        source = self.root.resolve() / "infra/logs"
+        source.mkdir(parents=True)
+        (source / "audit.log").write_bytes(b"original\n")
+        destination = new_project.resolve() / "99-output-infra"
+        destination.mkdir()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            backup = LOAD.register_setup_switch_infra_log_tree(
+                journal, source, destination,
+                deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            )
+        backup.mkdir()
+        sentinel = backup / "unowned.log"
+        sentinel.write_bytes(b"DO NOT TOUCH\n")
+        frozen = journal.read_bytes()
+        common.unlink()
+        common.symlink_to(os.path.relpath(new_target, common.parent))
+
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with self.assertRaises(LOAD.LoadError):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertEqual(b"DO NOT TOUCH\n", sentinel.read_bytes())
+        self.assertEqual(b"original\n", (source / "audit.log").read_bytes())
+        self.assertEqual(new_target.resolve(), common.resolve())
+        self.assertEqual(old_manifest, manifest.read_bytes())
+        self.assertEqual(frozen, journal.read_bytes())
+        self.assertNotEqual(old_links[common], os.readlink(common))
+        backend.start.assert_not_called()
+
+    def test_setup_wal_infra_receipt_rejects_symlink_ancestor_before_p_restore(self) -> None:
+        """A receipt must not borrow a file through a symlinked log subdir."""
+        (
+            _old_project, new_project, common, _old_only, _new_only,
+            new_target, _new_only_target, manifest, old_manifest, old_links,
+            journal, descriptor, backend,
+        ) = self._prepare_cross_project_setup_crash()
+        source = self.root.resolve() / "infra/logs"
+        source.mkdir(parents=True)
+        outside = self.root.resolve() / "outside"
+        outside.mkdir()
+        stolen = outside / "stolen.log"
+        payload = b"outside bytes\n"
+        stolen.write_bytes(payload)
+        (source / "escape").symlink_to(outside, target_is_directory=True)
+        destination = new_project.resolve() / "99-output-infra"
+        destination.mkdir()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.register_setup_switch_infra_log_tree(
+                journal, source, destination,
+                deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            )
+        receipt = self.root.resolve() / "infra/.logs-migration.json"
+        receipt.write_text(json.dumps({
+            "schema_version": 1,
+            "source": {"path": str(source), "dev": source.stat().st_dev,
+                       "ino": source.stat().st_ino},
+            "destination": {"path": str(destination)},
+            "directories": [],
+            "entries": {"escape/stolen.log": {
+                "size": len(payload), "sha256": hashlib.sha256(payload).hexdigest(),
+            }},
+        }) + "\n", encoding="utf-8")
+        receipt.chmod(0o600)
+        frozen_receipt = receipt.read_bytes()
+        frozen_journal = journal.read_bytes()
+        common.unlink()
+        common.symlink_to(os.path.relpath(new_target, common.parent))
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with self.assertRaises(LOAD.LoadError):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertEqual(payload, stolen.read_bytes())
+        self.assertEqual(frozen_receipt, receipt.read_bytes())
+        self.assertEqual(frozen_journal, journal.read_bytes())
+        self.assertEqual(old_manifest, manifest.read_bytes())
+        self.assertEqual(new_target.resolve(), common.resolve())
+        self.assertNotEqual(old_links[common], os.readlink(common))
         backend.start.assert_not_called()
 
     def test_setup_wal_recovery_rejects_rebound_link_parent_before_writing(self) -> None:
@@ -4675,6 +4870,7 @@ os.kill(os.getpid(), signal.SIGKILL)
             setup_state=setup_state,
         )
         events: list[str] = []
+        activation_calls: list[dict] = []
 
         with mock.patch.object(
             LOAD, "active_project", return_value=active.resolve(),
@@ -4691,6 +4887,7 @@ os.kill(os.getpid(), signal.SIGKILL)
                 ValueError("injected cross-project generation failure"),
                 lifecycle_events=events,
                 active_project_value=active,
+                activation_calls=activation_calls,
             )[0]
 
         self.assertEqual(1, result)
@@ -4702,6 +4899,9 @@ os.kill(os.getpid(), signal.SIGKILL)
         self.assertEqual(91, restore_cross.call_args.kwargs["deployment_lock_descriptor"])
         self.assertTrue(restore_cross.call_args.kwargs["services_quiesced"])
         self.assertIn("restore-active-p", events)
+        self.assertEqual(1, len(activation_calls))
+        self.assertTrue(activation_calls[0]["prepare_switch_wal"])
+        self.assertEqual("supervisor", activation_calls[0]["runtime_backend"].name)
 
     def test_main_does_not_restore_receipt_when_failure_precedes_quiesce_and_mutation(self) -> None:
         receipt = self.project / "99-output-ztp/rollback-receipts/aaaaaaaaaaaaaaaaaaaa"

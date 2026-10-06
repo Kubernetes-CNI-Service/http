@@ -4514,6 +4514,25 @@ def _setup_impl(proj_dir, *, server_delegated=False):
         proj_dir, server_delegated=server_delegated,
     )
 
+    # Q-local preparation above creates the real output directory.  Before
+    # any shared-root writer below, add the preexisting real infra/logs name
+    # and REQ19's deterministic receipt/backup names to the P→Q WAL.
+    if _SETUP_SWITCH_WAL_CONTEXT is not None and not _DRY_RUN:
+        source = os.path.join(HTTP_BASE, INFRA_LOG_REL)
+        if os.path.lexists(source) and stat.S_ISDIR(os.lstat(source).st_mode):
+            load_api, descriptor = _SETUP_SWITCH_WAL_CONTEXT[:2]
+            try:
+                load_api["register_setup_switch_infra_log_tree"](
+                    Path(ZTP) / ".setup-switch-journal.json",
+                    Path(os.path.realpath(source)),
+                    Path(os.path.realpath(os.path.join(proj_dir, "99-output-infra"))),
+                    deployment_lock_descriptor=descriptor,
+                    services_quiesced=True,
+                    runtime_backend=load_api["service_runtime_backend"](),
+                )
+            except load_api["LoadError"] as exc:
+                raise ValueError(f"跨项目 setup 实体日志 WAL 登记失败：{exc}") from exc
+
     if not _DRY_RUN:
         _restore_pending_infra_log_backup(
             os.path.join(HTTP_BASE, INFRA_LOG_REL),
@@ -4690,8 +4709,8 @@ def _require_setup_switch_wal_prewrite(proj_dir, deployment_lock_descriptor):
             raise ValueError(f"跨项目 setup 实体目录 WAL 登记失败：{exc}") from exc
         materialized[os.path.realpath(latest)] = (os.path.realpath(target), str(backup))
     infra = plan["infra_logs"]
-    if infra["kind"] in ("real-directory", "unsafe") or infra["receipt_pending"]:
-        raise ValueError("跨项目 setup WAL 未覆盖 infra logs 实体目录或待恢复凭据")
+    if infra["kind"] == "unsafe" or infra["receipt_pending"]:
+        raise ValueError("跨项目 setup WAL 拒绝不安全 infra logs 或待恢复凭据")
     return load_api, deployment_lock_descriptor, frozen_p_links, materialized
 
 

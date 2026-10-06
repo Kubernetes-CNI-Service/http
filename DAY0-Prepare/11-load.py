@@ -3638,6 +3638,8 @@ def activate_project(
     host_role: str | None = None,
     switch_scope: str = "all",
     no_upgrade: bool = False,
+    prepare_switch_wal: bool = False,
+    runtime_backend: ServiceRuntimeBackend | None = None,
 ) -> None:
     host_role = resolve_host_role(host_role)
     current = active_project()
@@ -3648,6 +3650,16 @@ def activate_project(
         info(f"活动项目将从 {current.name} 切换到 {project.name}")
     else:
         info(f"当前没有有效活动项目；将激活 {project.name}")
+    if prepare_switch_wal and not dry_run and current is not None and current != project:
+        # The production LOAD owns the lock and has already quiesced services.
+        # Freeze every P name before SETUP can remove one.  Q values are
+        # discovered by SETUP and durably filled into their rows at write edge.
+        prepare_setup_switch_journal(
+            current, project, expected_new_links={},
+            allow_late_q_values=True,
+            deployment_lock_descriptor=deployment_lock_descriptor,
+            services_quiesced=True, runtime_backend=runtime_backend,
+        )
     command = [
         sys.executable, str(SETUP_SCRIPT), "-y", "--confirm-project-switch",
     ]
@@ -5925,6 +5937,7 @@ def _setup_switch_q_target(target: Path, project: Path) -> Path:
 def prepare_setup_switch_journal(
     old_project: Path, new_project: Path, *,
     expected_new_links: dict[Path, Path],
+    allow_late_q_values: bool = False,
     deployment_lock_descriptor: int | None,
     services_quiesced: bool,
     runtime_backend: ServiceRuntimeBackend | None,
@@ -5949,6 +5962,8 @@ def prepare_setup_switch_journal(
     _validate_setup_state_receipt(state)
     if not isinstance(expected_new_links, dict):
         raise LoadError("setup switch Q link inventory is invalid")
+    if not isinstance(allow_late_q_values, bool):
+        raise LoadError("setup switch late Q registration policy is invalid")
     q_links: dict[Path, str] = {}
     for raw_path, raw_target in expected_new_links.items():
         path = Path(raw_path)
@@ -5993,6 +6008,7 @@ def prepare_setup_switch_journal(
         "manifest": base64.b64encode(state.manifest).decode("ascii"),
         "manifest_sha256": hashlib.sha256(state.manifest).hexdigest(),
         "manifest_mode": state.manifest_mode, "links": rows,
+        "allow_late_q_values": allow_late_q_values,
     }
     body_bytes = _setup_switch_canonical_payload(body)
     envelope = {
@@ -6055,6 +6071,9 @@ def register_setup_switch_journal_link(
                 or hashlib.sha256(_setup_switch_canonical_payload(body)).hexdigest()
                 != envelope["sha256"]):
             raise ValueError("journal envelope is invalid")
+        late_q_values = body.get("allow_late_q_values", False)
+        if not isinstance(late_q_values, bool):
+            raise ValueError("journal late Q registration policy is invalid")
         root = body["root"]
         old = body["old_project"]
         new = body["new_project"]
@@ -6122,22 +6141,31 @@ def register_setup_switch_journal_link(
             raise ValueError("dynamic Q-only relative target is invalid")
         existing = next((row for row in rows if row["path"] == str(path)), None)
         if existing is not None:
-            if existing["after"] != after:
+            if existing["after"] == after:
+                return journal
+            if (not late_q_values or existing["after"] is not None
+                    or existing["before"] is None):
                 raise ValueError("existing Q link value differs from the writer")
-            return journal
-        if os.path.lexists(path):
-            raise ValueError("dynamic Q-only link is not a new absent path")
+            # A production LOAD can first durably freeze every P name without
+            # guessing Q's dynamic targets.  SETUP may fill a P row's one Q
+            # value, but only before writing that value.  The loop above has
+            # already proved the name is still exact P or absent after cleanup.
+            next_rows = [
+                dict(row, after=after) if row is existing else row
+                for row in rows
+            ]
+        else:
+            if os.path.lexists(path):
+                raise ValueError("dynamic Q-only link is not a new absent path")
+            next_rows = [*rows, {
+                "path": str(path), "parent": _setup_switch_link_parent_identity(path),
+                "before": None, "after": after,
+            }]
     except (KeyError, TypeError, ValueError, OSError, RuntimeError, binascii.Error,
             LoadError) as exc:
         raise LoadError(f"setup switch journal registration is invalid: {exc}") from exc
     next_body = dict(body)
-    next_body["links"] = sorted(
-        [*rows, {
-            "path": str(path), "parent": _setup_switch_link_parent_identity(path),
-            "before": None, "after": after,
-        }],
-        key=lambda row: row["path"],
-    )
+    next_body["links"] = sorted(next_rows, key=lambda row: row["path"])
     body_bytes = _setup_switch_canonical_payload(next_body)
     next_payload = _setup_switch_canonical_payload({
         "body": next_body, "sha256": hashlib.sha256(body_bytes).hexdigest(),
@@ -6284,6 +6312,108 @@ def register_setup_switch_materialized_directory(
     return backup
 
 
+def register_setup_switch_infra_log_tree(
+    journal: Path, source: Path, destination: Path, *,
+    deployment_lock_descriptor: int | None,
+    services_quiesced: bool,
+    runtime_backend: ServiceRuntimeBackend | None,
+) -> Path:
+    """Durably authorize one real infra/logs migration before its receipt/write.
+
+    The REQ19 writer retains its own receipt and backup.  The cross-project
+    journal additionally binds those names to P so a fresh LOAD can restore
+    the original directory before restoring P links after a killed SETUP.
+    """
+    _require_runtime_restore_guard(
+        deployment_lock_descriptor=deployment_lock_descriptor,
+        services_quiesced=services_quiesced,
+        runtime_backend=runtime_backend,
+    )
+    journal = Path(journal)
+    if journal != _setup_switch_journal_path():
+        raise LoadError("setup switch journal path is not the configured authority")
+    if recover_setup_switch_journal(
+        journal, deployment_lock_descriptor=deployment_lock_descriptor,
+        services_quiesced=services_quiesced, runtime_backend=runtime_backend,
+        verify_only=True,
+    ) != "prepared-p":
+        raise LoadError("setup switch infra registration lacks exact P state")
+    try:
+        before_name = journal.lstat()
+        opened = _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT)
+        if opened is None or opened[1] != 0o600:
+            raise ValueError("journal is absent or not private")
+        envelope = json.loads(opened[0])
+        body = envelope["body"]
+        if (not isinstance(body, dict) or body["schema_version"] != 2
+                or body["phase"] != "prepared"
+                or hashlib.sha256(_setup_switch_canonical_payload(body)).hexdigest()
+                != envelope["sha256"]):
+            raise ValueError("journal envelope is invalid")
+        q_project = Path(body["new_project"]["path"])
+        source, destination = Path(source), Path(destination)
+        expected_source = HTTP_ROOT.resolve(strict=True) / "infra/logs"
+        expected_destination = q_project / "99-output-infra"
+        if (source != expected_source or destination != expected_destination
+                or body["new_project"] != _setup_switch_directory_identity(q_project)
+                or not stat.S_ISDIR(source.lstat().st_mode)
+                or not stat.S_ISDIR(destination.lstat().st_mode)):
+            raise ValueError("real infra log source or Q destination is not canonical")
+        source_parent = _setup_switch_link_parent_identity(source)
+        destination_parent = _setup_switch_link_parent_identity(destination)
+        source_info, destination_info = source.lstat(), destination.lstat()
+        if source_info.st_dev != destination_info.st_dev:
+            raise ValueError("real infra logs cannot be hardlinked across devices")
+        backup = destination / ".logs-migration-source"
+        receipt = HTTP_ROOT.resolve(strict=True) / "infra/.logs-migration.json"
+        if os.path.lexists(backup) or os.path.lexists(receipt):
+            raise ValueError("real infra logs have a pending receipt or backup")
+        for entry in destination.iterdir():
+            if (entry.name != ".gitkeep"
+                    or not stat.S_ISREG(entry.lstat().st_mode)):
+                raise ValueError("Q infra log destination contains unowned content")
+        rows = body.get("infra_logs", [])
+        if not isinstance(rows, list) or rows:
+            raise ValueError("real infra log migration is already registered")
+        row = {
+            "source": str(source), "source_parent": source_parent,
+            "source_dev": source_info.st_dev, "source_ino": source_info.st_ino,
+            "destination": str(destination),
+            "destination_parent": destination_parent,
+            "destination_dev": destination_info.st_dev,
+            "destination_ino": destination_info.st_ino,
+            "backup": str(backup), "receipt": str(receipt),
+        }
+        next_body = dict(body, infra_logs=[row])
+        next_payload = _setup_switch_canonical_payload({
+            "body": next_body,
+            "sha256": hashlib.sha256(_setup_switch_canonical_payload(next_body)).hexdigest(),
+        }) + b"\n"
+        if len(next_payload) > _SETUP_SWITCH_JOURNAL_LIMIT:
+            raise ValueError("journal exceeds the bounded size limit")
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError, LoadError) as exc:
+        raise LoadError(f"setup switch infra registration is invalid: {exc}") from exc
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".setup-switch-journal.", dir=journal.parent,
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(next_payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        now = journal.lstat()
+        if any(getattr(before_name, name) != getattr(now, name) for name in (
+                "st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns")):
+            raise LoadError("setup switch journal changed before infra registration")
+        os.replace(temporary, journal)
+        _fsync_parent_directory(journal.parent)
+    finally:
+        if os.path.lexists(temporary):
+            temporary.unlink()
+    return backup
+
+
 def _setup_switch_rename_directory_noreplace(source: Path, target: Path) -> None:
     """Restore a WAL-bound directory without overwriting an intervening name."""
     libc = ctypes.CDLL(None, use_errno=True)
@@ -6308,6 +6438,199 @@ def _setup_switch_rename_directory_noreplace(source: Path, target: Path) -> None
         error = ctypes.get_errno()
         raise LoadError(f"materialized directory restore failed: {os.strerror(error)}")
 
+
+
+def _setup_switch_infra_file_signature(path: Path) -> tuple[os.stat_result, dict[str, object]]:
+    """Read a receipt-bound hardlink without following its final name."""
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError("infra log entry is not a regular file")
+        digest = hashlib.sha256()
+        while chunk := os.read(descriptor, 1024 * 1024):
+            digest.update(chunk)
+        after, named = os.fstat(descriptor), path.lstat()
+        identity = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns")
+        if any(getattr(before, key) != getattr(after, key)
+               or getattr(before, key) != getattr(named, key) for key in identity):
+            raise ValueError("infra log entry changed while reading")
+        return before, {"size": before.st_size, "sha256": digest.hexdigest()}
+    finally:
+        os.close(descriptor)
+
+
+def _setup_switch_prepare_infra_log_recovery(row: dict[str, object], q_project: Path):
+    """Validate the entire receipt-bound P directory and Q copy before writing."""
+    if not isinstance(row, dict):
+        raise LoadError("setup switch infra log row is not an object")
+    try:
+        source, destination = Path(row["source"]), Path(row["destination"])
+        backup, receipt = Path(row["backup"]), Path(row["receipt"])
+        if (source != HTTP_ROOT.resolve(strict=True) / "infra/logs"
+                or destination != q_project / "99-output-infra"
+                or backup != destination / ".logs-migration-source"
+                or receipt != HTTP_ROOT.resolve(strict=True) / "infra/.logs-migration.json"
+                or row["source_parent"] != _setup_switch_link_parent_identity(source)
+                or row["destination_parent"]
+                != _setup_switch_link_parent_identity(destination)):
+            raise ValueError("infra log WAL paths or parents changed")
+        destination_info = destination.lstat()
+        if (not stat.S_ISDIR(destination_info.st_mode)
+                or (destination_info.st_dev, destination_info.st_ino)
+                != (row["destination_dev"], row["destination_ino"])):
+            raise ValueError("infra log Q destination identity changed")
+        has_backup = os.path.lexists(backup)
+        if has_backup:
+            backup_info = backup.lstat()
+            if (not stat.S_ISDIR(backup_info.st_mode)
+                    or (backup_info.st_dev, backup_info.st_ino)
+                    != (row["source_dev"], row["source_ino"])):
+                raise ValueError("infra log backup identity changed")
+            if os.path.lexists(source):
+                source_info = source.lstat()
+                if (not stat.S_ISLNK(source_info.st_mode)
+                        or os.readlink(source)
+                        != os.path.relpath(destination, source.parent)):
+                    raise ValueError("infra log name is not its Q pointer")
+            original_tree = backup
+        else:
+            source_info = source.lstat()
+            if (not stat.S_ISDIR(source_info.st_mode)
+                    or (source_info.st_dev, source_info.st_ino)
+                    != (row["source_dev"], row["source_ino"])):
+                raise ValueError("infra log source identity changed")
+            original_tree = source
+        opened = _read_rollback_regular(
+            receipt, limit=_ROLLBACK_PAYLOAD_LIMIT, missing_ok=True,
+        )
+        if opened is None:
+            if has_backup:
+                raise ValueError("infra log backup lacks its durable receipt")
+            entries, directories = {}, ()
+        else:
+            if opened[1] != 0o600:
+                raise ValueError("infra log receipt is not private")
+            document = json.loads(opened[0])
+            if (not isinstance(document, dict)
+                    or document.get("schema_version") != 1
+                    or document.get("phase", "pending") != "pending"
+                    or document.get("source") != {
+                        "path": str(source), "dev": row["source_dev"],
+                        "ino": row["source_ino"],
+                    }
+                    or document.get("destination") != {"path": str(destination)}
+                    or not isinstance(document.get("entries"), dict)
+                    or not isinstance(document.get("directories"), list)):
+                raise ValueError("infra log receipt does not match the WAL")
+            entries = document["entries"]
+            directories = tuple(document["directories"])
+            if len(set(directories)) != len(directories):
+                raise ValueError("infra log receipt repeats a directory")
+        def safe_relative(value):
+            return (isinstance(value, str) and bool(value)
+                    and not os.path.isabs(value)
+                    and os.path.normpath(value) == value
+                    and all(part not in ("", ".", "..") for part in value.split(os.sep)))
+        if (any(not safe_relative(name) or name == ".gitkeep" for name in entries)
+                or any(not safe_relative(name) for name in directories)
+                or set(entries).intersection(directories)):
+            raise ValueError("infra log receipt has unsafe paths")
+        for name in (*tuple(entries), *directories):
+            parent = os.path.dirname(name)
+            while parent:
+                if parent not in directories:
+                    raise ValueError("infra log receipt omits a parent directory")
+                parent = os.path.dirname(parent)
+        if opened is not None:
+            observed_files, observed_directories = set(), set()
+            for current, subdirs, files in os.walk(original_tree, followlinks=False):
+                for name in (*subdirs, *files):
+                    path = Path(current) / name
+                    relative = os.path.relpath(path, original_tree)
+                    metadata = path.lstat()
+                    if stat.S_ISDIR(metadata.st_mode):
+                        observed_directories.add(relative)
+                    elif stat.S_ISREG(metadata.st_mode):
+                        observed_files.add(relative)
+                    else:
+                        raise ValueError("infra log source contains a special path")
+            if observed_files != set(entries) or observed_directories != set(directories):
+                raise ValueError("infra log source inventory changed after receipt")
+        for name in directories:
+            original_dir = original_tree / name
+            if not stat.S_ISDIR(original_dir.lstat().st_mode):
+                raise ValueError("infra log receipt source directory changed")
+            target_dir = destination / name
+            if os.path.lexists(target_dir) and not stat.S_ISDIR(target_dir.lstat().st_mode):
+                raise ValueError("infra log Q directory changed")
+        for name, expected in entries.items():
+            if (not isinstance(expected, dict)
+                    or not isinstance(expected.get("size"), int)
+                    or expected["size"] < 0
+                    or not isinstance(expected.get("sha256"), str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", expected["sha256"])):
+                raise ValueError("infra log receipt signature is invalid")
+            original_info, signature = _setup_switch_infra_file_signature(
+                original_tree / name,
+            )
+            if signature != expected:
+                raise ValueError("infra log original content changed")
+            target = destination / name
+            if os.path.lexists(target):
+                target_info, target_signature = _setup_switch_infra_file_signature(target)
+                if ((original_info.st_dev, original_info.st_ino)
+                        != (target_info.st_dev, target_info.st_ino)
+                        or target_signature != expected):
+                    raise ValueError("infra log Q hardlink changed")
+            elif has_backup and os.path.islink(source):
+                raise ValueError("published infra log pointer has a missing Q entry")
+        allowed = set(entries) | set(directories) | {".gitkeep"}
+        for current, subdirs, files in os.walk(destination, followlinks=False):
+            for name in (*tuple(subdirs), *files):
+                path = Path(current) / name
+                if path == backup:
+                    subdirs.remove(name)
+                    continue
+                relative = os.path.relpath(path, destination)
+                if relative not in allowed:
+                    raise ValueError("infra log Q destination has unowned content")
+                metadata = path.lstat()
+                if relative == ".gitkeep":
+                    if not stat.S_ISREG(metadata.st_mode):
+                        raise ValueError("infra log Q .gitkeep changed type")
+                elif relative in directories:
+                    if not stat.S_ISDIR(metadata.st_mode):
+                        raise ValueError("infra log Q directory changed type")
+                elif not stat.S_ISREG(metadata.st_mode):
+                    raise ValueError("infra log Q file changed type")
+        return source, backup, destination, receipt, entries, directories, has_backup, opened is not None
+    except (OSError, RuntimeError, TypeError, ValueError, KeyError, LoadError) as exc:
+        raise LoadError(f"setup switch infra log state is unknown: {exc}") from exc
+
+
+def _setup_switch_restore_infra_log_tree(state) -> None:
+    source, backup, destination, receipt, entries, directories, has_backup, has_receipt = state
+    if has_backup:
+        if os.path.islink(source):
+            source.unlink()
+            _fsync_parent_directory(source.parent)
+        _setup_switch_rename_directory_noreplace(backup, source)
+        _fsync_parent_directory(source.parent)
+        _fsync_parent_directory(backup.parent)
+    for name in sorted(entries):
+        path = destination / name
+        if os.path.lexists(path):
+            path.unlink()
+            _fsync_parent_directory(path.parent)
+    for name in sorted(directories, key=lambda value: (-value.count(os.sep), value)):
+        path = destination / name
+        if os.path.lexists(path):
+            path.rmdir()
+            _fsync_parent_directory(path.parent)
+    if has_receipt:
+        receipt.unlink()
+        _fsync_parent_directory(receipt.parent)
 
 
 def recover_setup_switch_journal(
@@ -6342,6 +6665,8 @@ def recover_setup_switch_journal(
                 != envelope["sha256"] or body["schema_version"] != 2
                 or body["phase"] != "prepared"):
             raise ValueError("journal envelope is invalid")
+        if not isinstance(body.get("allow_late_q_values", False), bool):
+            raise ValueError("journal late Q registration policy is invalid")
         old = body["old_project"]
         new = body["new_project"]
         if (body["root"] != _setup_switch_directory_identity(HTTP_ROOT)
@@ -6445,6 +6770,13 @@ def recover_setup_switch_journal(
             expected_directories.append((source, backup, has_backup))
         except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
             raise LoadError(f"setup switch materialized state is unknown: {exc}") from exc
+    infra_rows = body.get("infra_logs", [])
+    if not isinstance(infra_rows, list) or len(infra_rows) > 1:
+        raise LoadError("setup switch infra log inventory is invalid")
+    infra_state = (
+        _setup_switch_prepare_infra_log_recovery(infra_rows[0], q_project)
+        if infra_rows else None
+    )
     if verify_only:
         if any(
             (not path.is_symlink() or os.readlink(path) != before)
@@ -6454,7 +6786,11 @@ def recover_setup_switch_journal(
             raise LoadError("setup switch prewrite state is not exact P")
         if any(has_backup for _source, _backup, has_backup in expected_directories):
             raise LoadError("setup switch materialized prewrite state is not exact Q")
+        if infra_state is not None and (infra_state[6] or infra_state[7]):
+            raise LoadError("setup switch infra log prewrite state is not exact Q")
         return "prepared-p"
+    if infra_state is not None:
+        _setup_switch_restore_infra_log_tree(infra_state)
     for source, backup, has_backup in expected_directories:
         if has_backup:
             if os.path.islink(source):
@@ -10994,6 +11330,7 @@ def main(
     prefix_publication_snapshot: ZtpPrefixPublicationSnapshot | None = None
     dhcp_runtime_plan: DhcpRuntimePlan | None = None
     runtime_backend_instance: ServiceRuntimeBackend | None = None
+    active_before: Path | None = None
     http_service_available = False
     dhcp_service_available = False
     services_must_remain_stopped = False
@@ -11251,6 +11588,11 @@ def main(
             host_role=host_role,
             switch_scope=switch_scope,
             no_upgrade=args.no_upgrade,
+            prepare_switch_wal=(
+                local_services_supported and not args.dry_run
+                and active_before is not None and active_before != project
+            ),
+            runtime_backend=runtime_backend_instance,
         )
         if not args.dry_run and (project / "p2p.xlsx").is_symlink():
             selected_runtime_p2p = project / os.readlink(project / "p2p.xlsx")
