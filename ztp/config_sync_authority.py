@@ -93,7 +93,7 @@ def monitor_observation_allows_completion(device):
         ipaddress.ip_address(address)
     except ValueError:
         return False
-    candidates = device.get("candidate_identity") or {}
+    candidates = device.get("candidate_identity", {})
     if not isinstance(candidates, dict):
         return False
     if address in candidates:

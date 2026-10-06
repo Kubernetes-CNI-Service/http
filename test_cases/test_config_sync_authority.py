@@ -39,6 +39,23 @@ class ConfigSyncAuthorityTests(unittest.TestCase):
         self.assertTrue(gate(device))
         self.assertNotIn("configuration_observation", device)
 
+    def test_present_malformed_candidate_identity_is_not_absent_primary_identity(self):
+        observed = {"schema_version": 1, "source": "monitor_batchmode", "batch_identity_verified": True,
+                    "hostname": "leaf1", "interface": "eth0", "transport_ip": "192.0.2.1",
+                    "mac_plain": "001122334455", "live_state_sha256": "a" * 64, "reason": ""}
+        device = {"hostname": "leaf1", "ip": "192.0.2.1", "mac_plain": "001122334455",
+                  "configuration_observation": observed}
+        gate = self.authority.monitor_observation_allows_completion
+        self.assertTrue(gate(device))
+        for value in (False, None, 0, "", [], ()):
+            with self.subTest(candidate_identity=value):
+                device["candidate_identity"] = value
+                before = json.dumps(device, sort_keys=True)
+                self.assertFalse(gate(device), "unknown typed identity cannot silently become an absent mapping")
+                self.assertEqual(before, json.dumps(device, sort_keys=True))
+        device["candidate_identity"] = {}
+        self.assertTrue(gate(device), "explicit empty valid mapping still allows own primary endpoint")
+
     def bound_reader(self):
         reader = getattr(self.authority, "read_current_receipt", None)
         self.assertTrue(callable(reader), "observers must authenticate the current receipt under its local generation lock")

@@ -2579,7 +2579,7 @@ def bind_monitor_live_observation(
         ipaddress.ip_address(address)
     except ValueError:
         return rejected
-    candidates = device.get("candidate_identity") or {}
+    candidates = device.get("candidate_identity", {})
     if not isinstance(candidates, dict):
         return rejected
     if address in candidates:

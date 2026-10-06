@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import datetime as dt
 import copy
+import hashlib
 import importlib.util
 import json
 import os
@@ -236,6 +237,35 @@ class CompletionDisplayParityTests(unittest.TestCase):
                 self.assertEqual("success", row["overall"])
                 self.assertTrue(MONITOR.completion_handoff_device_complete(row))
                 self.assertTrue(HTML.ztp_completed(row))
+
+    def test_actual_analyzer_cannot_promote_a_falsy_malformed_identity_mapping(self):
+        text = "- set: {}\n"
+        result = {"kind": "ok", "returncode": 0, "batch_mode_verified": True, "identity_frame_valid": True,
+                  "connected_ip": "192.0.2.1", "remote_hostname": "Leaf01",
+                  "remote_eth0_mac": "00:11:22:33:44:55", "remote_eth1_mac": "",
+                  "ztp_log": "", "ifreload_log": "", "failed_yaml": "", "stderr": "",
+                  "attempts": [], "host_key_commands": [],
+                  "live_config_observation": {"kind": "ok", "text": text, "sha256": hashlib.sha256(text.encode()).hexdigest()}}
+        for mapping, valid in ((False, False), (None, False), (0, False), ("", False), ([], False), ({}, True)):
+            with self.subTest(mapping=mapping), tempfile.TemporaryDirectory() as directory:
+                row = self.complete_fixture()
+                row.update(candidate_identity=mapping, mac_plain="001122334455", events=[])
+                old = copy.deepcopy(row["stages"])
+                MONITOR.analyze_switch(row, result)
+                with self.subTest(mapping=mapping, phase="own-observation"):
+                    self.assertIs(valid, row["configuration_observation"]["batch_identity_verified"])
+                row.update(stages=old, issues=[], overall="success")
+                MONITOR.finalize_device(row)
+                report = {"project": "private-identity-fixture", "scope": "prod", "devices": [row], "services": {},
+                          "collection_errors": [], "generated_at": "2026-09-01T12:00:00+08:00", "since_minutes": 10}
+                snapshot = MONITOR.write_report(report, Path(directory), {})
+                persisted = json.loads((snapshot / "report.json").read_text())["devices"][0]
+                with self.subTest(mapping=mapping, phase="machine"):
+                    self.assertEqual(valid, MONITOR.completion_handoff_device_complete(persisted))
+                with self.subTest(mapping=mapping, phase="html"):
+                    self.assertEqual(valid, HTML.ztp_completed(persisted))
+                with self.subTest(mapping=mapping, phase="overall"):
+                    self.assertEqual(valid, persisted["overall"] == "success")
 
     def test_real_report_server_or_ufm_completion_claim_cannot_reach_machine_or_html_completion(self):
         for kind in ("server", "ufm"):
