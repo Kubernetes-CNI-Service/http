@@ -55,7 +55,7 @@ from ztp_service_runtime import (  # noqa: E402
     runtime_backend_from_environment,
     write_monitor_pid_record_locked,
 )
-from project_contract import safe_load_global_yaml
+from project_contract import resolve_device_config_method, safe_load_global_yaml
 
 
 ZTP_STATUS_DIR = HTTP_ROOT / "ztp" / "status"
@@ -387,14 +387,31 @@ def read_devices(
     # repeated SVI/EVPN field groups, so retain the positional row as well as the
     # conventional last-value mapping.
     merged_rows: dict[str, tuple[dict[str, str], list[str], list[str]]] = {}
+    configuration_methods: dict[str, str] = {}
     with csv_path.open(newline="", encoding="utf-8-sig") as handle:
         reader = csv.reader(handle)
         headers = next(reader, [])
-        for values in reader:
+        method_columns = [
+            index for index, name in enumerate(headers)
+            if name.strip().casefold() == "config_method"
+        ]
+        if len(method_columns) > 1:
+            raise ValueError("devices_config.csv config_method 列重复")
+        method_index = method_columns[0] if method_columns else None
+        for lineno, values in enumerate(reader, 2):
             padded = values + [""] * max(0, len(headers) - len(values))
             row = dict(zip(headers, padded))
             key = (row.get("hostname") or "").strip().casefold()
             if key:
+                kind = (row.get("type") or "").strip().casefold()
+                if kind != "eth_jump":
+                    declared = padded[method_index] if method_index is not None else None
+                    try:
+                        configuration_methods[key] = resolve_device_config_method(kind, declared)
+                    except ValueError as exc:
+                        raise ValueError(
+                            f"devices_config.csv 第 {lineno} 行 {row.get('hostname')!s} {exc}"
+                        ) from exc
                 merged_rows[key] = (row, headers, padded)
 
     devices: list[dict[str, Any]] = []
@@ -470,6 +487,8 @@ def read_devices(
         devices.append({
             "hostname": hostname,
             "type": device_type,
+            # Input declaration only, never an executed configuration receipt.
+            "config_method": configuration_methods[hostname.casefold()],
             "template": template,
             "ip": ip,
             "ssh_ips": ssh_ips,
@@ -555,6 +574,7 @@ def read_devices(
         devices.append({
             "hostname": runtime["hostname"],
             "type": "air",
+            "config_method": resolve_device_config_method("air"),
             "template": runtime.get("template", ""),
             "ip": ip,
             "ssh_ips": [ip] if ip else [],
@@ -3537,6 +3557,7 @@ def snapshot_device_state(report: dict[str, Any]) -> dict[str, Any]:
             "ip": device.get("ip", ""),
             "mac": device.get("mac", ""),
             "template": device.get("template", ""),
+            "config_method": device.get("config_method", ""),
             "dynamic_dhcp": bool(device.get("dynamic_dhcp")),
             "unbound_identity": bool(device.get("unbound_identity")),
             "managed_ztp": bool(device.get("managed_ztp")),

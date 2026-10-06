@@ -1222,6 +1222,77 @@ class ManualCommandHelpTests(unittest.TestCase):
         self.assertNotIn("--http-timeout", reset_help)
 
 
+class MonitorConfigMethodInventoryTests(unittest.TestCase):
+    HEADER = "hostname,type,template,eth0_ip,netmask,eth0_gw,eth0_mac,eth1_ip,netmask,eth1_gw,eth1_mac,lo_ip"
+
+    def inventory(self, root, entries, *, explicit=True):
+        lines = [self.HEADER + (",config_method" if explicit else "")]
+        for index, (name, kind, method) in enumerate(entries, 10):
+            row = [name, kind, "oob" if kind == "eth" else "NA", f"192.0.2.{index}", "24", "192.0.2.1", f"02:00:00:00:00:{index:02x}", "", "", "", "", ""]
+            if explicit:
+                row.append(method)
+            lines.append(",".join(row))
+        path = root / "02-devices_config.csv"
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return path
+
+    def test_monitor_materializes_legacy_defaults_without_a_configuration_receipt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.inventory(Path(directory), [("leaf01", "eth", ""), ("ib01", "ib", ""), ("nvl01", "nvl", ""), ("server01", "server", "")], explicit=False)
+            devices = MONITOR.read_devices(path, dhcp_leases=None)
+            self.assertEqual({"leaf01": "ztp", "ib01": "ztp", "nvl01": "ztp"}, {item["hostname"]: item.get("config_method") for item in devices})
+            self.assertTrue(all(item["stages"]["config_apply"]["status"] != "success" for item in devices))
+            self.assertNotIn("server01", {item["hostname"] for item in devices})
+
+    def test_load_and_monitor_keep_each_declared_method_bound_to_the_same_device(self):
+        from test_cases.module_loader import load_script
+        load = load_script("f02_monitor_method_load_workflow", ROOT / "DAY0-Prepare/11-load.py")
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.inventory(Path(directory), [("Leaf01", "eth", " ZTP "), ("IB01", "ib", "initial-setup"), ("server01", "server", "deploy_infra")])
+            declared = {}
+            self.assertEqual(frozenset({"eth", "ib", "server"}), load.load_device_types(path, schema_version=1, methods_out=declared))
+            devices = MONITOR.read_devices(path, dhcp_leases=None)
+            self.assertEqual({"leaf01": "ztp", "ib01": "initial-setup", "server01": "deploy_infra"}, declared)
+            self.assertEqual({"leaf01": "ztp", "ib01": "initial-setup"}, {item["hostname"].casefold(): item.get("config_method") for item in devices})
+
+    def test_incompatible_unknown_or_empty_method_fails_before_monitoring(self):
+        for kind, method in (("eth", "initial-setup"), ("nvl", "initial-setup"), ("ib", "unknown-executor"), ("ib", ""), ("server", "ztp")):
+            with self.subTest(kind=kind, method=method), tempfile.TemporaryDirectory() as directory:
+                path = self.inventory(Path(directory), [("bad01", kind, method)])
+                with self.assertRaisesRegex(ValueError, r"(?:第 )?2 行.*bad01.*config_method"):
+                    MONITOR.read_devices(path, dhcp_leases=None)
+
+    def test_duplicate_method_header_cannot_hide_an_invalid_declaration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "02-devices_config.csv"
+            path.write_text(self.HEADER + ",config_method,config_method\nleaf01,eth,NA,192.0.2.10,24,192.0.2.1,02:00:00:00:00:01,,,,,,initial-setup,ztp\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "config_method.*重复"):
+                MONITOR.read_devices(path, dhcp_leases=None)
+
+    def test_snapshot_state_distinguishes_method_changes_without_promoting_completion(self):
+        base = {"hostname": "ib01", "type": "ib", "config_method": "ztp", "stages": {}, "issues": [], "progress": {}}
+        first = MONITOR.snapshot_device_state({"devices": [base]})
+        second = MONITOR.snapshot_device_state({"devices": [{**base, "config_method": "initial-setup"}]})
+        self.assertNotEqual(first, second)
+
+    def test_dynamic_air_identity_gets_a_method_not_a_configuration_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.inventory(Path(directory), [("server01", "server", "deploy_infra")])
+            runtime = {"hostname": "AIR-dynamic01", "ip": "192.0.2.77", "mac": MAC, "mac_plain": "020000000001"}
+            with mock.patch.object(MONITOR, "dynamic_air_devices", return_value=[runtime]):
+                devices = MONITOR.read_devices(path, scope="air", dhcp_leases=None)
+            self.assertEqual(1, len(devices))
+            self.assertEqual("ztp", devices[0].get("config_method"))
+            self.assertNotEqual("success", devices[0]["stages"]["config_apply"]["status"])
+
+    def test_scope_filter_and_header_spelling_cannot_erase_method_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.inventory(Path(directory), [("bad01", "eth", "initial-setup")])
+            path.write_text(path.read_text().replace(",config_method\n", ", CONFIG_METHOD \n"), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "config_method"):
+                MONITOR.read_devices(path, scope="air", dhcp_leases=None)
+
+
 class MonitorLiveConfigTransportTests(unittest.TestCase):
     LIVE = "- set:\n    system:\n      hostname: leaf01\n\n"
 

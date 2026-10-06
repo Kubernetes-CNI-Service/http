@@ -434,6 +434,11 @@ worker 状态和旧回执不能复活成功。观察者使用持锁 compare-and-
 shell workflow 核对同一 live 文本。此字段只是传输观察，不是持久配置成功收据，
 也不是 generation 权威；九阶段晋升与当前本地代次的接入仍须完成，不能据此关闭 F02。
 
+monitor inventory 逐设备物化并验证 `config_method`，与真实 load 的同一输入结果一致。
+重复方法列、显式空值、未知或设备不兼容执行者在监控/范围过滤前拒绝，错误带行号与
+主机；合法 server 声明验证后仍不进入 Switch Status，动态 AIR 使用受管默认值。
+方法变化属于 snapshot 状态变化，但声明方法本身不证明任何配置已执行或完成。
+
 九阶段历史不能把已有但不可读、非对象、非列表或重复大小写主机成员的快照当作空历史。
 `test_ztp_group_handoff.py` 独立验证负向历史权威跨轮保持及 JSON/CSV/Markdown 诊断；
 `test_ztp_group_handoff_display.py` 串联真实监控快照写入、下一轮读取与真实 HTML 判据，
