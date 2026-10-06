@@ -651,6 +651,70 @@ finally:
             self.assertFalse((root / "ztp/.setup-switch-journal.json").exists())
             self.assertFalse((root / "service-started").exists())
 
+    def test_real_setup_new_sample_directory_cold_recovery_restores_absence(self):
+        """Sample's empty directory itself belongs to the crash rollback write set."""
+        with tempfile.TemporaryDirectory(prefix="r22-sample-dir-cold-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, _q, common, p_only, _q_only, manifest, before, _hook, barrier, _home = fixture
+            sample = root / "ztp/optimize/q-sample"
+            self.assertFalse(os.path.lexists(sample))
+            first = self._run_private_load_setup_switch(
+                fixture, prepare_journal=True, first_link_prefix=str(sample) + os.sep,
+            )
+            self.assertEqual(23, first.returncode, first.stdout + first.stderr)
+            self.assertTrue(barrier.is_file())
+            self.assertTrue(sample.is_dir())
+            recovery = """
+import importlib.util
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('fresh_sample_directory_recovery', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    assert load.recover_setup_switch_journal(
+        root / 'ztp/.setup-switch-journal.json', deployment_lock_descriptor=descriptor,
+        services_quiesced=True, runtime_backend=SimpleNamespace(name='supervisor'),
+    ) == 'restored-p'
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+            second = subprocess.run(
+                [sys.executable, "-B", "-c", recovery, str(root)], cwd=root,
+                capture_output=True, text=True, check=False, timeout=30,
+            )
+            self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+            self.assertFalse(os.path.lexists(sample), "sample mkdir survived durable cold rollback")
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            self.assertEqual(before["common"], os.readlink(common))
+            self.assertEqual(before["p_only"], os.readlink(p_only))
+            self.assertFalse((root / "ztp/.setup-switch-journal.json").exists())
+            self.assertFalse((root / "service-started").exists())
+
+    def test_real_setup_legacy_sample_comparison_holds_before_first_shared_write(self):
+        with tempfile.TemporaryDirectory(prefix="r22-sample-legacy-hold-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, _q, common, p_only, _q_only, manifest, before, _hook, barrier, _home = fixture
+            legacy = root / "ztp/optimize/q-sample/comparison"
+            legacy.mkdir(parents=True)
+            (legacy / "operator-report.csv").write_bytes(b"original comparison bytes\n")
+            identity = (legacy.stat().st_dev, legacy.stat().st_ino)
+            result = self._run_private_load_setup_switch(fixture, prepare_journal=True)
+            self.assertEqual(24, result.returncode, result.stdout + result.stderr)
+            self.assertRegex(result.stdout + result.stderr, "sample.*comparison|comparison.*WAL")
+            self.assertFalse(barrier.exists(), "uncovered comparison did not fence first Q link")
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            self.assertEqual(before["common"], os.readlink(common))
+            self.assertEqual(before["p_only"], os.readlink(p_only))
+            self.assertEqual(identity, (legacy.stat().st_dev, legacy.stat().st_ino))
+            self.assertEqual(b"original comparison bytes\n", (legacy / "operator-report.csv").read_bytes())
+            self.assertFalse((root / "service-started").exists())
+
     def test_real_setup_created_directory_recovery_death_resumes_in_fresh_load(self):
         """A second fresh LOAD must finish after recovery itself dies at rmdir."""
         with tempfile.TemporaryDirectory(prefix="r22-created-dir-reentry-") as name:

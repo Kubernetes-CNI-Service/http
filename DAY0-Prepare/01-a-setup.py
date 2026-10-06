@@ -1187,9 +1187,47 @@ def _process_latest_yaml(_proj_dir):
                 print(_c(GREEN, f"  [DEL] 无效发布链接 {os.path.relpath(stale, HTTP_BASE)}"))
 
 
+def _require_frozen_setup_cleanup_link(path, context, label):
+    """Authorize an unlink only from the exact frozen P row and parent."""
+    if context is None:
+        return
+    if len(context) != 4:
+        raise ValueError(f"{label}缺少完整 WAL 冻结状态")
+    load_api, _descriptor, frozen, _materialized = context
+    row = frozen.get(str(path))
+    if row is None:
+        raise ValueError(f"{label}路径缺少 WAL：{path}")
+    raw_target, parent = row
+    if (not os.path.islink(path) or os.readlink(path) != raw_target
+            or load_api["_setup_switch_link_parent_identity"](Path(path)) != parent):
+        raise ValueError(f"{label}状态偏离 WAL：{path}")
+
+
+def _require_sample_wal_surface(proj_dir, context):
+    """Fence uncovered sample mutations before local preparation/shared writes."""
+    if context is None or _DRY_RUN:
+        return
+    sample = sample_directory(os.path.join(ZTP, "optimize"), proj_dir)
+    if not os.path.lexists(sample):
+        return
+    if not stat.S_ISDIR(os.lstat(sample).st_mode):
+        raise ValueError(f"sample WAL 要求实际目录：{sample}")
+    legacy = sample / LINK_NAMES["comparison_output"]
+    if os.path.lexists(legacy) and not legacy.is_symlink():
+        # The old helper moves/deletes this shared real directory.  Until a
+        # complete source/destination migration record exists, neither empty
+        # nor populated legacy directories may be mutated by a project switch.
+        raise ValueError(f"sample comparison 实体迁移缺少 WAL，保持原对象：{legacy}")
+    targets = sample_link_targets(proj_dir)
+    for old in sample.iterdir():
+        if old.is_symlink() and (old.name not in targets or targets[old.name] is None):
+            _require_frozen_setup_cleanup_link(str(old), context, "sample 链接清理")
+
+
 def _process_optimize_sample(proj_dir):
     """Create <project>-sample and its managed comparison/input links."""
     sample = sample_directory(os.path.join(ZTP, "optimize"), proj_dir)
+    _require_sample_wal_surface(proj_dir, _SETUP_SWITCH_WAL_CONTEXT)
     prepare_comparison_output(
         sample,
         proj_dir,
@@ -1200,10 +1238,16 @@ def _process_optimize_sample(proj_dir):
         if not sample.is_dir():
             print(_c(CYAN, f"  [DRY] mkdir {os.path.relpath(sample, HTTP_BASE)}/"))
     else:
-        sample.mkdir(parents=True, exist_ok=True)
+        if _LINK_TRANSACTION is not None:
+            _LINK_TRANSACTION.ensure_directory(str(sample))
+        elif _SETUP_SWITCH_WAL_CONTEXT is not None:
+            raise ValueError("sample 共享目录创建缺少 WAL 事务")
+        else:
+            sample.mkdir(parents=True, exist_ok=True)
         managed_names = set(LINK_NAMES.values())
         for old in sample.iterdir():
             if old.is_symlink() and old.name not in managed_names:
+                _require_frozen_setup_cleanup_link(str(old), _SETUP_SWITCH_WAL_CONTEXT, "sample 链接清理")
                 old.unlink()
                 print(_c(GREEN, f"  [DEL] 旧 sample 链接 {old.name}"))
     for name, target in sample_link_targets(proj_dir).items():
@@ -1211,6 +1255,7 @@ def _process_optimize_sample(proj_dir):
         if target is None:
             print(_c(YELLOW, f"  [WARN] {name}: 当前项目没有可用目标"))
             if not _DRY_RUN and link.is_symlink():
+                _require_frozen_setup_cleanup_link(str(link), _SETUP_SWITCH_WAL_CONTEXT, "sample 链接清理")
                 link.unlink()
                 print(_c(GREEN, f"  [DEL] 失效 sample 链接 {name}"))
             continue
@@ -3364,18 +3409,7 @@ def _unsetup_previous(proj_dir):
     to_del = _previous_project_links_to_remove(proj_dir)
 
     def require_frozen_p_link(path):
-        if _SETUP_SWITCH_WAL_CONTEXT is None:
-            return
-        if len(_SETUP_SWITCH_WAL_CONTEXT) != 4:
-            raise ValueError("旧项目链接清理缺少完整 WAL 冻结状态")
-        load_api, _descriptor, frozen, _materialized = _SETUP_SWITCH_WAL_CONTEXT
-        row = frozen.get(path)
-        if row is None:
-            raise ValueError(f"旧项目链接清理路径缺少 WAL：{path}")
-        raw_target, parent = row
-        if (not os.path.islink(path) or os.readlink(path) != raw_target
-                or load_api["_setup_switch_link_parent_identity"](Path(path)) != parent):
-            raise ValueError(f"旧项目链接清理状态偏离 WAL：{path}")
+        _require_frozen_setup_cleanup_link(path, _SETUP_SWITCH_WAL_CONTEXT, "旧项目链接清理")
 
     # Cleanup takes a fresh dynamic inventory after the earlier WAL preflight.
     # Reject a P-looking link inserted in that interval before prompting or
@@ -4698,6 +4732,9 @@ def _require_setup_switch_wal_prewrite(proj_dir, deployment_lock_descriptor):
         str(path): (raw, load_api["_setup_switch_link_parent_identity"](path))
         for path, raw in old_state.links.items()
     }
+    _require_sample_wal_surface(
+        proj_dir, (load_api, deployment_lock_descriptor, frozen_p_links, {}),
+    )
     try:
         outcome = load_api["recover_setup_switch_journal"](
             Path(ZTP) / ".setup-switch-journal.json",

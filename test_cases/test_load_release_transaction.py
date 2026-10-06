@@ -1814,6 +1814,75 @@ class ReleaseTransactionTests(unittest.TestCase):
             journal, descriptor, backend,
         )
 
+    def test_setup_sample_directory_has_owned_wal_before_first_shared_link(self) -> None:
+        (*state, journal, descriptor, _backend) = self._prepare_cross_project_setup_crash(freeze_q_links=False)
+        project = state[1]
+        optimize = self.ztp / "optimize"
+        optimize.mkdir()
+        sample = optimize / "new-sample"
+        transaction = SETUP._SetupLinkTransaction([])
+        rename = SETUP._atomic_rename_noreplace
+        observed = []
+
+        def checked_install(source, destination):
+            self.assertEqual(str(sample), str(destination))
+            self.assertFalse(os.path.lexists(sample))
+            rows = json.loads(journal.read_bytes())["body"].get("created_directories", [])
+            row = next((item for item in rows if item["path"] == str(sample)), None)
+            self.assertIsNotNone(row, "sample mkdir bypassed durable ownership WAL")
+            metadata = Path(source).lstat()
+            self.assertEqual((metadata.st_dev, metadata.st_ino), (row["dev"], row["ino"]))
+            observed.append(True)
+            return rename(source, destination)
+
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.multiple(SETUP, HTTP_BASE=str(self.root), ZTP=str(self.ztp),
+                                    _DRY_RUN=False, _LINK_TRANSACTION=transaction,
+                                    _SETUP_SWITCH_WAL_CONTEXT=(vars(LOAD), descriptor)), \
+                mock.patch.object(SETUP, "_atomic_rename_noreplace", side_effect=checked_install):
+            SETUP._process_optimize_sample(str(project))
+        self.assertEqual([True], observed, "sample never used the owned-directory install edge")
+        self.assertTrue((sample / "01-global.yaml").is_symlink())
+
+    def test_setup_sample_unknown_cleanup_link_is_preserved_before_any_unlink(self) -> None:
+        (*state, journal, descriptor, _backend) = self._prepare_cross_project_setup_crash(freeze_q_links=False)
+        project, manifest = state[1], state[7]
+        sample = self.ztp / "optimize/new-sample"
+        sample.mkdir(parents=True)
+        unknown = sample / "unregistered.pub"
+        unknown.symlink_to("../../../DAY0-Prepare/demo/operator.pub")
+        original = os.readlink(unknown)
+        wal_bytes, manifest_bytes = journal.read_bytes(), manifest.read_bytes()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.multiple(SETUP, HTTP_BASE=str(self.root), ZTP=str(self.ztp),
+                                    _DRY_RUN=False, _LINK_TRANSACTION=SETUP._SetupLinkTransaction([]),
+                                    _SETUP_SWITCH_WAL_CONTEXT=(vars(LOAD), descriptor, {}, {})):
+            with self.assertRaisesRegex(ValueError, "sample.*WAL|WAL.*sample"):
+                SETUP._process_optimize_sample(str(project))
+        self.assertEqual(original, os.readlink(unknown))
+        self.assertEqual(wal_bytes, journal.read_bytes())
+        self.assertEqual(manifest_bytes, manifest.read_bytes())
+        self.assertFalse(os.path.lexists(sample / "01-global.yaml"))
+
+    def test_setup_sample_real_comparison_without_migration_wal_holds_unchanged(self) -> None:
+        (*state, journal, descriptor, _backend) = self._prepare_cross_project_setup_crash(freeze_q_links=False)
+        project = state[1]
+        legacy = self.ztp / "optimize/new-sample/comparison"
+        legacy.mkdir(parents=True)
+        (legacy / "operator-report.csv").write_bytes(b"original comparison bytes\n")
+        identity = (legacy.stat().st_dev, legacy.stat().st_ino)
+        wal_bytes = journal.read_bytes()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.multiple(SETUP, HTTP_BASE=str(self.root), ZTP=str(self.ztp),
+                                    _DRY_RUN=False, _LINK_TRANSACTION=SETUP._SetupLinkTransaction([]),
+                                    _SETUP_SWITCH_WAL_CONTEXT=(vars(LOAD), descriptor, {}, {})):
+            with self.assertRaisesRegex(ValueError, "sample.*comparison|comparison.*WAL"):
+                SETUP._process_optimize_sample(str(project))
+        self.assertEqual(identity, (legacy.stat().st_dev, legacy.stat().st_ino))
+        self.assertEqual(b"original comparison bytes\n", (legacy / "operator-report.csv").read_bytes())
+        self.assertEqual(wal_bytes, journal.read_bytes())
+        self.assertFalse(os.path.lexists(project / "99-output-ztp/optimize"))
+
     def test_setup_created_directory_is_journaled_before_shared_install(self) -> None:
         (*_state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
         directory = self.ztp / "config/new-key-root"
