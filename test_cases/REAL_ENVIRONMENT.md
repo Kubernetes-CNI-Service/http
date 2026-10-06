@@ -1672,6 +1672,9 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 恢复授权普通文件读取期间的 ABA 窄修：原 reader 只比较 dev/ino/mode/nlink/size/mtime，同 inode 写成 B 再恢复 A 字节及 mtime 可被接受。TEST direct 使用真实 A receipt 加载/恢复 API，在 immutable payload 读取后、后核验之前做 A→B→A；真实复制 LOAD→SETUP 强杀→新 LOAD workflow 在 P manifest 的相同读取窗口注入换代，均先 RED 后 GREEN。现在打开前/FD/名称后核验包括 ctime，必须首个恢复写入前拒绝，保留原 WAL、混合链接和 manifest 字节；既有稳定读取/恢复正例保留。
   现场只在本卡已授权隔离 VM、排他锁、明确停服、完整 A receipt/输入/制品与可恢复快照中，由登记注入器在精确读入屏障实施一次受控 ABA；其余写者保持静默。记录 FD/path dev/ino/size/mtime_ns/ctime_ns、实际 A/B/最终字节摘要、读入及拒绝事件、恢复前后全部受管对象与服务状态。ctime 变化须由独立观察确认，不能仅凭最终摘要声称中途稳定；不对 live 凭据注入，不改未知对象，证据封存后按清单恢复隔离快照。该读取窗口校验不证明任意非合作写者免疫、全流程 freeze、Linux/断电持久性或完整旧 A 激活；本卡仍 OPEN。
 
+- runtime 普通文件恢复的持久化窄修：独立 direct 与真实复制 LOAD→SETUP 强杀→新 LOAD workflow 证明原 writer 的 replace/unlink 后缺少父目录同步，可能在 runtime 名称未持久化时退休 WAL。候选在写 FD 上设最终模式、flush/fsync 内容后 replace，再 fsync 父目录；missing 前像即使重入时已缺席也须同步。父目录同步错误必须返回失败并保留原 WAL，后续新进程完成同步后方可收尾；服务保持停止。workflow 使用真实 runtime 文件 writer 与独立边界 receipt 替身，不证明完整 A 恢复或激活。
+  现场前置限本卡授权的隔离 VM、排他锁、明确停服、写者静默、完整真实 A receipt/输入/制品和可恢复卷快照；在最终文件模式/内容 fsync、replace/unlink 与父目录 fsync 之间分别注入同步错误、进程死亡和受控断电，包括上次 unlink 已完成但同步失败后的缺席重入。独立记录原 WAL/文件/父目录身份、摘要和事件物理顺序，并在新进程冷恢复后核对 A 内容/模式及 WAL 生命周期；不能以 API 调用观察替代断电持久性。只恢复已登记隔离快照，不修改 live 或未知对象；本卡与完整旧 A 健康激活仍 OPEN。
+
 ## TC-REAL-R22-C2-DESCRIPTION-PUBLISH-001 — c2 同名描述输出的故障窗口
 
 - Case ID：`TC-REAL-R22-C2-DESCRIPTION-PUBLISH-001`；类型：real-environment / transaction / crash-recovery；对应 R22 c2 对 `*_with_desc` 的既有同名输出替换。状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。自动化先决为 `test_cases.test_generation_input_binding_contract` 的二次读取、早返及 staging direct，`test_cases.test_generation_input_binding_workflow` 的 setup/load/c2 workflow，和当前候选正式 full/check；现有定向通过不证明进程死亡后的原子性。

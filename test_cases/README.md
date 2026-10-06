@@ -204,6 +204,12 @@ R22 停服恢复门禁必须使用服务后端的明确状态合同。Systemd �
 LOAD→SETUP 强杀→新 LOAD workflow 覆盖未知状态下 P/Q 链接、manifest 和 WAL 零恢复写入。
 本机注入的是查询边界，不是 Linux 实际停服或完整旧 A 安全激活见证。
 
+R22 runtime 普通文件恢复须在最终模式及文件内容 fsync 后 replace，再 fsync 父目录；
+missing 前像的 unlink 和已经缺席的重入也须同步父目录。同步失败不得报成功或退休 WAL。
+direct 覆盖实际模式/同步顺序和写入/删除同步异常；真实 LOAD→SETUP 强杀→新 LOAD
+workflow 使用实际 runtime 文件 writer 注入父目录同步错误，保留 WAL 后在新进程重入。
+其 runtime 仍是独立边界见证，不是完整 A receipt 恢复或服务激活；断电见证保持 OPEN。
+
 R22 跨项目恢复不能在 P 链接和 manifest 恢复后、旧 A runtime 恢复之前删除 WAL。
 原 WAL 的 descriptor、身份和完整字节须持有到 runtime 恢复返回，再复核停服/锁、
 P/Q 盘面及 Q 父提交前像，只有全部通过才退休凭据；异常或进程死亡保留 WAL。

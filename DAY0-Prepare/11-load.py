@@ -5487,6 +5487,9 @@ def _restore_receipt_file(
             if path.is_dir() and not path.is_symlink():
                 raise LoadError(f"rollback target became a directory: {path}")
             path.unlink()
+        # Even an already-absent name may be a retry after unlink succeeded
+        # but its directory sync failed. Do not retire the WAL before sync.
+        _fsync_parent_directory(path.parent)
         return
     if payload is None or hashlib.sha256(payload).hexdigest() != record["sha256"]:
         raise LoadError("rollback receipt payload changed before restore")
@@ -5494,12 +5497,13 @@ def _restore_receipt_file(
     try:
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(payload)
+            os.fchmod(stream.fileno(), int(record["mode"]))
             stream.flush()
             os.fsync(stream.fileno())
-        os.chmod(temporary, int(record["mode"]))
         if os.path.lexists(path) and path.is_dir() and not path.is_symlink():
             raise LoadError(f"rollback target became a directory: {path}")
         os.replace(temporary, path)
+        _fsync_parent_directory(path.parent)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)

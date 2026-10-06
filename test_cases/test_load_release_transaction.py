@@ -1489,6 +1489,53 @@ class ReleaseTransactionTests(unittest.TestCase):
         )
         return parent, generation, receipt
 
+    def test_runtime_receipt_restore_syncs_mode_and_parent_before_return(self) -> None:
+        target = self.root / "runtime-restore.pub"
+        payload = b"independent A runtime bytes\n"
+        record = {"state": "file", "sha256": hashlib.sha256(payload).hexdigest(), "mode": 0o640}
+        observed = []
+        real_fsync = os.fsync
+
+        def observe(descriptor):
+            metadata = os.fstat(descriptor)
+            if stat.S_ISREG(metadata.st_mode):
+                observed.append(("file", stat.S_IMODE(metadata.st_mode)))
+            elif (metadata.st_dev, metadata.st_ino) == (target.parent.stat().st_dev, target.parent.stat().st_ino):
+                observed.append(("parent", target.exists()))
+            return real_fsync(descriptor)
+
+        with mock.patch.object(LOAD.os, "fsync", side_effect=observe):
+            LOAD._restore_receipt_file(target, record, payload)
+        self.assertEqual([("file", 0o640), ("parent", True)], observed)
+        self.assertEqual(payload, target.read_bytes())
+        observed.clear()
+        with mock.patch.object(LOAD.os, "fsync", side_effect=observe):
+            LOAD._restore_receipt_file(target, {"state": "missing"}, None)
+        self.assertEqual([("parent", False)], observed)
+        observed.clear()
+        with mock.patch.object(LOAD.os, "fsync", side_effect=observe):
+            LOAD._restore_receipt_file(target, {"state": "missing"}, None)
+        self.assertEqual([("parent", False)], observed, "an absent-name retry still needs directory sync")
+
+    def test_runtime_receipt_restore_parent_sync_error_never_reports_success(self) -> None:
+        target = self.root / "runtime-sync-error.pub"
+        for state in ("file", "missing"):
+            with self.subTest(state=state):
+                target.write_bytes(b"partial B\n")
+                payload = b"A\n" if state == "file" else None
+                record = ({"state": "file", "sha256": hashlib.sha256(payload).hexdigest(), "mode": 0o644}
+                          if payload is not None else {"state": "missing"})
+                real_fsync = os.fsync
+
+                def reject_parent(descriptor):
+                    if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                        raise OSError("independent parent fsync fault")
+                    return real_fsync(descriptor)
+
+                with mock.patch.object(LOAD.os, "fsync", side_effect=reject_parent):
+                    with self.assertRaisesRegex(OSError, "parent fsync fault"):
+                        LOAD._restore_receipt_file(target, record, payload)
+
     def test_runtime_receipt_payload_same_inode_aba_is_rejected_before_restore(self) -> None:
         _parent, _generation, receipt = self._publish_a_with_runtime_rollback_receipt()
         payload = receipt / "files/ztp.json"

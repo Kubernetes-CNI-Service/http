@@ -878,6 +878,89 @@ finally:
             self.assertEqual(before["manifest"], manifest.read_bytes())
             self.assertFalse((root / "service-started").exists())
 
+    def test_real_setup_runtime_parent_sync_failure_retains_wal_until_fresh_retry(self):
+        """Real cold P recovery must not retire WAL after an unsynced runtime write."""
+        with tempfile.TemporaryDirectory(prefix="r22-runtime-parent-sync-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, p, q, common, p_only, _q_only, manifest, before, _hook, barrier, _home = fixture
+            first = self._run_private_load_setup_switch(fixture, prepare_journal=True)
+            self.assertEqual(23, first.returncode, first.stdout + first.stderr)
+            self.assertTrue(barrier.is_file())
+            journal = root / "ztp/.setup-switch-journal.json"
+            evidence = journal.read_bytes()
+            recovery = """
+import hashlib, importlib.util, json, os, stat, sys
+from pathlib import Path
+from types import SimpleNamespace
+root, p, q, common, p_only = map(Path, sys.argv[1:6])
+before = json.loads(sys.argv[6])
+spec = importlib.util.spec_from_file_location('fresh_runtime_sync_recovery', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+wal = root / 'ztp/.setup-switch-journal.json'
+body = json.loads(wal.read_bytes())['body']
+state = load.ActiveSetupState(p, before['manifest'].encode(), body['manifest_mode'],
+                             {common: before['common'], p_only: before['p_only']})
+context = load.CrossProjectRollbackContext(p, 'generations/aaaaaaaaaaaaaaaaaaaa',
+                                          p / '99-output-ztp/rollback-receipts/aaaaaaaaaaaaaaaaaaaa', state)
+target = root / 'ztp/runtime-durability-witness'
+payload = b'independent A runtime witness\\n'
+replaced = False
+real_replace, real_fsync = os.replace, os.fsync
+def replace(source, destination):
+    global replaced
+    result = real_replace(source, destination)
+    if Path(destination) == target:
+        replaced = True
+    return result
+def sync(fd):
+    metadata = os.fstat(fd)
+    parent = target.parent.stat()
+    if replaced and (metadata.st_dev, metadata.st_ino) == (parent.st_dev, parent.st_ino):
+        assert wal.is_file(), 'WAL retired before runtime parent synchronization'
+        if sys.argv[7] == 'fault':
+            raise OSError('runtime parent fsync fault')
+        (root / 'runtime-parent-synced').write_bytes(b'parent sync observed\\n')
+    return real_fsync(fd)
+def runtime_phase(*args, **kwargs):
+    assert wal.is_file()
+    os.replace, os.fsync = replace, sync
+    try:
+        load._restore_receipt_file(target, {'state': 'file', 'sha256': hashlib.sha256(payload).hexdigest(), 'mode': 0o600}, payload)
+    finally:
+        os.replace, os.fsync = real_replace, real_fsync
+load.restore_runtime_rollback_receipt = runtime_phase
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    try:
+        load.restore_cross_project_rollback_context(context, current_project=q,
+            deployment_lock_descriptor=descriptor, services_quiesced=True,
+            runtime_backend=SimpleNamespace(name='supervisor'))
+    except OSError as error:
+        assert 'runtime parent fsync fault' in str(error)
+        sys.exit(7)
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+            encoded = json.dumps({**before, "manifest": before["manifest"].decode()})
+            argv = [sys.executable, "-B", "-c", recovery, str(root), str(p), str(q),
+                    str(common), str(p_only), encoded]
+            failed = subprocess.run(argv + ["fault"], cwd=root, capture_output=True,
+                                    text=True, check=False, timeout=30)
+            self.assertEqual(7, failed.returncode, failed.stdout + failed.stderr)
+            self.assertEqual(evidence, journal.read_bytes())
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            self.assertFalse((root / "runtime-parent-synced").exists())
+            recovered = subprocess.run(argv + ["sync"], cwd=root, capture_output=True,
+                                       text=True, check=False, timeout=30)
+            self.assertEqual(0, recovered.returncode, recovered.stdout + recovered.stderr)
+            self.assertEqual(b"parent sync observed\n", (root / "runtime-parent-synced").read_bytes())
+            self.assertEqual(b"independent A runtime witness\n", (root / "ztp/runtime-durability-witness").read_bytes())
+            self.assertFalse(os.path.lexists(journal))
+            self.assertFalse((root / "service-started").exists())
+
     def test_real_setup_legacy_sample_comparison_holds_before_first_shared_write(self):
         with tempfile.TemporaryDirectory(prefix="r22-sample-legacy-hold-") as name:
             fixture = self._private_setup_switch_fixture(Path(name))

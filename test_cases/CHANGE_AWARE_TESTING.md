@@ -414,6 +414,36 @@ approved ledger 摘要未变，沿用 LOAD direct 与真实多脚本 workflow �
 此读取窗口窄修不解释 bootstrap 401 超时、不构成完整旧 A 激活或任意非合作写者免疫；
 没有据定向 PASS 重跑 related/full 或编辑 ledger，正式证明仍未取得。
 
+### R22 runtime 恢复文件的父目录持久化候选
+
+原 `_restore_receipt_file` 在文件 fsync 后才 chmod，replace/unlink 后未同步父目录；
+跨项目恢复可能在 runtime 名称尚未持久化时退休 WAL。独立 direct 与真实复制
+LOAD→SETUP 强杀→新 LOAD workflow 原实现 3 tests / 4 FAIL / exit1，日志
+`outputs/test-diagnostics/r22-runtime-parent-sync-red.log`，inode 143763027，size 3351，
+SHA256 `dc497f76a7c7550a26a15a54ff6cbad622534ff45dafbf8abacea8a2a7f65921`。
+另以独立 0640 模式（不同于 mkstemp 的 0600）验证模式同步次序，原实现 FAIL，日志
+`r22-runtime-parent-sync-mode-red.log`，SHA256
+`5a3fe5a08353d2c006c8d54422c73f3e186f0b913f9602438018249cf6383b3d`。
+
+候选在持有写 FD 时设最终模式，flush/fsync 后 replace 并同步父目录；missing 前像
+无论刚删除还是已缺席的重入，均须目录同步。同步错误继续抛出；真实跨脚本恢复保留
+原 WAL，新 LOAD 成功同步后才能收尾。首轮新增三项 GREEN，日志
+`r22-runtime-parent-sync-green.log`，inode 143765407，size 661，SHA256
+`f470f9f8bd2b35b6713cb4a630979597d16459ea34aed15bf75e49288364e297`。
+此 workflow 实际调用 runtime writer，但 receipt 层使用独立边界替身，不证明完整 A
+制品恢复/健康激活。没有因定向 PASS 重跑正式 related/full；bootstrap 401 原因门禁仍 OPEN，
+approved ledger 不手改，整树 proof 尚未取得。
+
+补充缺席重入正例后，四个完整 release/generation workflow/optimize/setup plan 模块
+329 tests / OK / exit0（216.257 秒）。日志
+`outputs/test-diagnostics/r22-runtime-parent-sync-modules.log`，inode 143768698，size 108327，
+SHA256 `8ae545c81dcce7d9a76b1200b946db738ce797e58a838b445ed6d96c895caa96`；
+读前后精确 stat 一致，已知 88736 字节前缀 SHA256
+`85e226e11b00e206d1b540ca829a353be25c8242b85715edc86d150261b18121` 未变，完整 Ran/OK
+在物理退出标记 `R22_RUNTIME_PARENT_SYNC_MODULES_EXIT=0` 之前，exec exit0 一致。
+LOAD 原 direct/workflow 映射有效；TEST 运行 manifest 与 approved ledger 摘要未变。
+以上仅独立模块回归，未进入正式 related/full，也未形成自动批准证明。
+
 ## Full proof 性能诊断记录
 
 本节只记录测量方法与优化判定，不改变上面的测试和证明门禁。正式 full proof 仍须由
