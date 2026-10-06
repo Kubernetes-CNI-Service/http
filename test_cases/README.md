@@ -450,6 +450,15 @@ eth1 时的零行空字段仍允许 eth0 证明，重复/多行身份拒绝。�
 摘要和读取后文件/父目录复核；旧代返回不可用，矛盾或不安全原像报错并保留，读取不会
 建立新 history。独立 16384 B 合法原始 wire 正例、16383 B 退化界及超限保留均有测试。
 
+monitor 在 SSH 采集之前读取本地 manual-config-sync 当前代次；采集后以自己的同会话
+身份/live 摘要核对唯一安全当前收据，并再次复核代次。当前匹配只能证明配置同步，
+不能借旧九阶段日志恢复本轮 complete/overall/handoff。live 漂移、缺失或不安全/歧义
+收据以持锁 compare-and-revoke 撤销精确旧代；并发新代、pending 写者和关闭采集不能
+被旧观察改写，既有 failed 阶段也不能降级成 warning。真实 `monitor_once → report.json`
+workflow 覆盖匹配、漂移与采集中换代，另外覆盖读取后换代与撤销边界的并发写者。
+此接入仅覆盖 manual-config-sync；bootstrap/initial-setup 当前轮权威及非 ZTP 健康
+分类仍须单独完成，F02 整体仍 OPEN，真实环境卡仍 NOT RUN。
+
 九阶段历史不能把已有但不可读、非对象、非列表或重复大小写主机成员的快照当作空历史。
 `test_ztp_group_handoff.py` 独立验证负向历史权威跨轮保持及 JSON/CSV/Markdown 诊断；
 `test_ztp_group_handoff_display.py` 串联真实监控快照写入、下一轮读取与真实 HTML 判据，

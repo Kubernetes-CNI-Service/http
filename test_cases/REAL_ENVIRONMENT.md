@@ -277,6 +277,13 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   选定管理接口 MAC 和当次 live digest；核对没有 eth1 的设备仍可按 eth0 取得观察，
   过渡 hostname、重复 frame 和错误接口不可取得配置证明。观察字段本身不是当前代次
   的持久成功收据，本卡仍为 NOT RUN，未授权真实设备操作。
+- 当前 manual-config-sync 消费端另外核对采集前本地 generation、唯一安全当前回执及
+  当次独立身份/live 摘要；在采集、读取回执后与 compare-and-revoke 边界分别启动新
+  pending 写者，旧观察不得撤销新代或显示旧成功。关闭采集和既有 pending 不改写写者
+  历史；漂移、缺回执、权限错误与重复当前回执须否决并保留原字节。匹配回执仅允许
+  config_apply，不借旧日志完成九阶段；保留 report/HTML/handoff 与 journal 前后证据。
+  本地自动化为 `test_config_sync_authority_workflow.py`，含真实 monitor_once/report 写入；
+  上述真机并发、持久化与显示联动仍 NOT RUN，测试注入只在私有副本，清理不触及线上状态。
 - 分别注入交互密码认证、再认证失败、身份/路径变更、空 live-state、实际配置漂移、旧收据
   重放与收据摘要篡改；这些情况即使命令曾返回 0，worker 和页面也不得晋升成功。
 - 保存 result/summary、worker 状态、页面与归档的前后摘要及拒绝原因。只清理本案隔离

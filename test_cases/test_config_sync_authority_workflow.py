@@ -24,6 +24,224 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
+    def monitor_cycle_fixture(self, project, *, live_text=None):
+        from test_cases.module_loader import load_script
+        monitor = load_script("f02_current_generation_monitor_workflow", ROOT / "DAY0-Prepare/12-ztp-monitor.py")
+        receipt, produced = self.published_receipt(project)
+        device = {"hostname": "EXAMPLE-Leaf01", "type": "eth", "ip": "192.0.2.10",
+                  "mac_plain": "020000000001", "ztp_round": 1,
+                  "stages": {name: monitor.stage("success", "old log", "2026-10-07T01:00:00+08:00", 1) for name in monitor.STAGE_NAMES},
+                  "issues": [], "events": []}
+        text = "- set:\n    system:\n      hostname: EXAMPLE-Leaf01\n" if live_text is None else live_text
+        result = {"kind": "ok", "returncode": 0, "batch_mode_verified": True,
+                  "identity_frame_valid": True, "connected_ip": "192.0.2.10",
+                  "remote_hostname": "EXAMPLE-Leaf01", "remote_eth0_mac": "02:00:00:00:00:01",
+                  "observed_at": "2026-10-07T01:00:05+08:00",
+                  "live_config_observation": {"kind": "ok", "text": text, "sha256": hashlib.sha256(text.encode()).hexdigest()}}
+        return monitor, receipt, produced, device, result
+
+    def current_monitor_gate(self, monitor):
+        gate = getattr(monitor, "apply_current_config_sync_authority", None)
+        self.assertTrue(callable(gate), "monitor must bind fresh observations to the captured local generation, not old logs")
+        return gate
+
+    def test_monitor_live_drift_revokes_current_writer_success_and_old_log_cannot_override_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            monitor, receipt, _produced, device, result = self.monitor_cycle_fixture(Path(directory).resolve(), live_text="- set: {}\n")
+            root = receipt.parents[2]
+            authority = self.manual.config_sync_authority
+            expected = authority.read_current(root, "EXAMPLE-Leaf01")
+            old = receipt.read_bytes()
+            self.current_monitor_gate(monitor)(device, result, root, expected)
+            self.assertEqual("warning", device["stages"]["config_apply"]["status"])
+            self.assertEqual("warning", device["stages"]["complete"]["status"])
+            self.assertEqual((1, "failed", True), tuple(authority.read_current(root, "EXAMPLE-Leaf01")[key] for key in ("generation", "state", "veto")))
+            self.assertEqual(old, receipt.read_bytes())
+            monitor.finalize_device(device)
+            self.assertNotEqual("success", device["overall"])
+            self.assertFalse(monitor.completion_handoff_device_complete(device))
+
+    def test_monitor_matches_current_receipt_but_cannot_borrow_old_nine_stage_completion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            monitor, receipt, produced, device, result = self.monitor_cycle_fixture(Path(directory).resolve())
+            root = receipt.parents[2]
+            expected = self.manual.config_sync_authority.read_current(root, "EXAMPLE-Leaf01")
+            self.current_monitor_gate(monitor)(device, result, root, expected)
+            self.assertEqual("success", device["stages"]["config_apply"]["status"])
+            current = device.get("configuration_authority", {})
+            self.assertEqual((1, expected["source_identity"], "success", False),
+                             tuple(current.get(key) for key in ("generation", "source_identity", "state", "veto")))
+            self.assertEqual(produced["live_state_sha256"], current.get("live_state_sha256"))
+            self.assertEqual("monitor_batchmode", current.get("observation_source"))
+            monitor.finalize_device(device)
+            self.assertNotEqual("success", device["overall"])
+            self.assertFalse(monitor.completion_handoff_device_complete(device))
+
+    def test_new_generation_started_during_collection_cannot_be_revoked_by_an_old_observation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            monitor, receipt, _produced, device, result = self.monitor_cycle_fixture(Path(directory).resolve())
+            root = receipt.parents[2]
+            authority = self.manual.config_sync_authority
+            expected = authority.read_current(root, "EXAMPLE-Leaf01")
+            new = authority.begin(root, "EXAMPLE-Leaf01", "op-2", "trigger-2", "manual_config_sync_cli")
+            self.current_monitor_gate(monitor)(device, result, root, expected)
+            self.assertEqual(new, authority.read_current(root, "EXAMPLE-Leaf01"))
+            self.assertNotEqual("success", device["stages"]["config_apply"]["status"])
+            self.assertNotEqual("success", device["stages"]["complete"]["status"])
+
+    def test_disabled_collection_is_unknown_and_cannot_mutate_the_writer_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            monitor, receipt, _produced, device, _result = self.monitor_cycle_fixture(Path(directory).resolve())
+            root = receipt.parents[2]
+            authority = self.manual.config_sync_authority
+            expected = authority.read_current(root, "EXAMPLE-Leaf01")
+            for kind in ("not-collected", "ssh_disabled"):
+                with self.subTest(kind=kind):
+                    self.current_monitor_gate(monitor)(device, {"kind": kind}, root, expected)
+                    self.assertEqual(expected, authority.read_current(root, "EXAMPLE-Leaf01"))
+                    self.assertNotEqual("success", device["stages"]["config_apply"]["status"])
+
+    def test_negative_current_generation_gate_preserves_explicit_stage_failures(self):
+        with tempfile.TemporaryDirectory() as directory:
+            monitor, receipt, _produced, device, result = self.monitor_cycle_fixture(Path(directory).resolve(), live_text="- set: {}\n")
+            root = receipt.parents[2]
+            expected = self.manual.config_sync_authority.read_current(root, "EXAMPLE-Leaf01")
+            device["stages"]["config_apply"] = monitor.stage("failed", "actual apply failed", result["observed_at"])
+            device["stages"]["complete"] = monitor.stage("failed", "actual completion failed", result["observed_at"])
+            self.current_monitor_gate(monitor)(device, result, root, expected)
+            self.assertEqual("failed", device["stages"]["config_apply"]["status"])
+            self.assertEqual("failed", device["stages"]["complete"]["status"])
+
+    def test_monitor_cannot_turn_an_inflight_pending_writer_into_a_failed_writer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            monitor, receipt, _produced, device, result = self.monitor_cycle_fixture(Path(directory).resolve())
+            root = receipt.parents[2]
+            authority = self.manual.config_sync_authority
+            pending = authority.begin(root, "EXAMPLE-Leaf01", "op-2", "trigger-2", "manual_config_sync_cli")
+            self.current_monitor_gate(monitor)(device, result, root, pending)
+            self.assertEqual(pending, authority.read_current(root, "EXAMPLE-Leaf01"))
+            self.assertNotEqual("success", device["stages"]["config_apply"]["status"])
+
+    def test_monitor_rejects_boolean_and_float_generation_without_mutating_current_history(self):
+        for generation in (True, 1.0):
+            with self.subTest(generation=generation), tempfile.TemporaryDirectory() as directory:
+                monitor, receipt, _produced, device, result = self.monitor_cycle_fixture(Path(directory).resolve())
+                root = receipt.parents[2]
+                authority = self.manual.config_sync_authority
+                current = authority.read_current(root, "EXAMPLE-Leaf01")
+                forged = {**current, "generation": generation}
+                self.current_monitor_gate(monitor)(device, result, root, forged)
+                self.assertEqual(current, authority.read_current(root, "EXAMPLE-Leaf01"))
+                self.assertIs(True, device["configuration_authority"]["veto"])
+                self.assertNotEqual("success", device["stages"]["config_apply"]["status"])
+
+    def test_monitor_rechecks_generation_after_secure_receipt_observation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            monitor, receipt, _produced, device, result = self.monitor_cycle_fixture(Path(directory).resolve())
+            root = receipt.parents[2]
+            authority = self.manual.config_sync_authority
+            expected = authority.read_current(root, "EXAMPLE-Leaf01")
+            real_read = authority.read_current_receipt
+            new = []
+            def read_then_change(*args, **kwargs):
+                answer = real_read(*args, **kwargs)
+                new.append(authority.begin(root, "EXAMPLE-Leaf01", "op-2", "trigger-2", "manual_config_sync_cli"))
+                return answer
+            with mock.patch.object(monitor.config_sync_authority, "read_current_receipt", side_effect=read_then_change):
+                self.current_monitor_gate(monitor)(device, result, root, expected)
+            self.assertEqual(new[0], authority.read_current(root, "EXAMPLE-Leaf01"))
+            self.assertIs(True, device["configuration_authority"]["veto"])
+            self.assertNotEqual("success", device["stages"]["config_apply"]["status"])
+
+    def test_monitor_compare_and_revoke_preserves_new_writer_started_at_revoke_boundary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            monitor, receipt, _produced, device, result = self.monitor_cycle_fixture(Path(directory).resolve(), live_text="- set: {}\n")
+            root = receipt.parents[2]
+            authority = self.manual.config_sync_authority
+            expected = authority.read_current(root, "EXAMPLE-Leaf01")
+            real_revoke = authority.revoke
+            new = []
+            def begin_then_revoke(*args, **kwargs):
+                self.assertEqual(expected, kwargs["expected"], "the exact captured era must be passed into lock-held CAS")
+                new.append(authority.begin(root, "EXAMPLE-Leaf01", "op-2", "trigger-2", "manual_config_sync_cli"))
+                return real_revoke(*args, **kwargs)
+            with mock.patch.object(monitor.config_sync_authority, "revoke", side_effect=begin_then_revoke):
+                self.current_monitor_gate(monitor)(device, result, root, expected)
+            self.assertEqual(new[0], authority.read_current(root, "EXAMPLE-Leaf01"))
+            self.assertIs(True, device["configuration_authority"]["veto"])
+
+    def test_monitor_missing_unsafe_or_ambiguous_current_receipt_cannot_borrow_old_log_success(self):
+        for damage in ("missing", "unsafe-mode", "ambiguous"):
+            with self.subTest(damage=damage), tempfile.TemporaryDirectory() as directory:
+                monitor, receipt, _produced, device, result = self.monitor_cycle_fixture(Path(directory).resolve())
+                root = receipt.parents[2]
+                authority = self.manual.config_sync_authority
+                expected = authority.read_current(root, "EXAMPLE-Leaf01")
+                original = receipt.read_bytes()
+                if damage == "missing":
+                    receipt.rename(receipt.with_name("retained-result.json"))
+                elif damage == "unsafe-mode":
+                    receipt.chmod(0o644)
+                else:
+                    duplicate = root / "second/EXAMPLE-Leaf01/result.json"
+                    duplicate.parent.mkdir(parents=True, mode=0o700)
+                    duplicate.write_bytes(original)
+                    duplicate.chmod(0o600)
+                self.current_monitor_gate(monitor)(device, result, root, expected)
+                self.assertIs(True, device["configuration_authority"]["veto"])
+                self.assertNotEqual("success", device["stages"]["config_apply"]["status"])
+                self.assertEqual("failed", authority.read_current(root, "EXAMPLE-Leaf01")["state"])
+                retained = receipt.with_name("retained-result.json") if damage == "missing" else receipt
+                self.assertEqual(original, retained.read_bytes())
+
+    def test_actual_monitor_once_captures_generation_before_collect_and_publishes_current_veto(self):
+        for drift, newer_during_collect in ((False, False), (True, False), (False, True)):
+            with self.subTest(drift=drift, newer=newer_during_collect), tempfile.TemporaryDirectory() as directory:
+                project = Path(directory).resolve()
+                monitor, receipt, _produced, _device, result = self.monitor_cycle_fixture(project)
+                authority = self.manual.config_sync_authority
+                root = receipt.parents[2]
+                original = receipt.read_bytes()
+                (project / "02-devices_config.csv").write_text(
+                    "hostname,type,template,eth0_ip,netmask,eth0_gw,eth0_mac,eth1_ip,netmask,eth1_gw,eth1_mac,lo_ip,config_method\n"
+                    "EXAMPLE-Leaf01,eth,oob,192.0.2.10,24,192.0.2.1,02:00:00:00:00:01,,,,,,ztp\n", encoding="utf-8")
+                apache, dhcp = project / "apache.log", project / "dhcp.log"
+                apache.write_text("")
+                dhcp.write_text("")
+                air = project / "air.json"
+                air.write_text('{"nodes": {}}', encoding="utf-8")
+                args = monitor.parser().parse_args([
+                    str(project), "--output-dir", str(project / "monitor-reports"),
+                    "--apache-log", str(apache), "--dhcp-log", str(dhcp),
+                ])
+                captured = []
+                def collect(*_args, **_kwargs):
+                    captured.append(authority.read_current(root, "EXAMPLE-Leaf01"))
+                    if newer_during_collect:
+                        authority.begin(root, "EXAMPLE-Leaf01", "op-2", "trigger-2", "manual_config_sync_cli")
+                    live = "- set: {}\n" if drift else result["live_config_observation"]["text"]
+                    return {**result, "ztp_log": "", "ifreload_log": "", "failed_yaml": "", "stderr": "",
+                            "attempts": [], "remote_eth1_mac": "", "host_key_commands": [],
+                            "live_config_observation": {"kind": "ok", "text": live, "sha256": hashlib.sha256(live.encode()).hexdigest()}}
+                with mock.patch.object(monitor, "load_release_identity", return_value={"release_id": "isolated-fixture", "generated_at": "2026-10-07T01:00:00+08:00"}), \
+                        mock.patch.object(monitor, "service_runtime_backend", return_value=SimpleNamespace(name="systemd")), \
+                        mock.patch.object(monitor, "service_state", return_value={"active": "fixture", "enabled": "fixture", "error": ""}), \
+                        mock.patch.object(monitor, "ACTIVE_AIR_JSON", air), \
+                        mock.patch.object(monitor, "collect_switch", side_effect=collect):
+                    run = monitor.monitor_once(args, project)
+                report = json.loads((run / "report.json").read_text())
+                self.assertEqual(1, len(captured), "one actual monitor collection, not a synthetic post-finalize call")
+                device = report["devices"][0]
+                record = device["configuration_authority"]
+                self.assertEqual(2 if newer_during_collect else 1, record["generation"])
+                self.assertIs(drift or newer_during_collect, record["veto"])
+                self.assertEqual("warning" if drift or newer_during_collect else "success", device["stages"]["config_apply"]["status"])
+                self.assertNotEqual("success", device["overall"])
+                self.assertFalse(monitor.completion_handoff_device_complete(device))
+                current = authority.read_current(root, "EXAMPLE-Leaf01")
+                self.assertEqual("pending" if newer_during_collect else "failed" if drift else "success", current["state"])
+                self.assertEqual(original, receipt.read_bytes())
+
     def test_real_writer_receipt_is_readable_only_in_its_current_local_generation(self):
         with tempfile.TemporaryDirectory() as directory:
             receipt, produced = self.published_receipt(Path(directory).resolve())

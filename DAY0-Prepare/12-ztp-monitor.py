@@ -56,6 +56,7 @@ from ztp_service_runtime import (  # noqa: E402
     write_monitor_pid_record_locked,
 )
 from project_contract import resolve_device_config_method, safe_load_global_yaml
+from ztp import config_sync_authority
 
 
 ZTP_STATUS_DIR = HTTP_ROOT / "ztp" / "status"
@@ -2624,6 +2625,103 @@ def bind_monitor_live_observation(
     }
 
 
+def apply_current_config_sync_authority(
+    device: dict[str, Any], result: dict[str, Any], root: Path,
+    expected: Optional[dict[str, Any]],
+) -> None:
+    """Reconcile an observation with a local era captured BEFORE collection.
+
+    A monitor can withdraw that exact era on a failed observation, never mint
+    one from reporter time or revoke a different writer's newer era. A config
+    sync receipt proves configuration only, not a new nine-stage ZTP completion.
+    """
+    hostname = str(device.get("hostname") or "")
+    fresh = bind_monitor_live_observation(device, result)
+    current = None
+    reason = "current-generation-not-verified"
+    receipt = None
+    matched = False
+    can_revoke = False
+    try:
+        current = config_sync_authority.read_current(root, hostname)
+        if current is None and expected is None:
+            # No config-sync history: do not fabricate a config-sync era for
+            # a bootstrap or initial-setup workflow.
+            return
+        if not isinstance(expected, dict) or current is None:
+            raise ValueError("configuration era was not captured before collection")
+        config_sync_authority.decode_journal(
+            config_sync_authority.wire(expected), current["source_identity"],
+        )
+        if current != expected:
+            raise ValueError("configuration era changed during collection")
+        if current["state"] != "success" or current["veto"] is not False:
+            raise ValueError("current configuration era is pending or vetoed")
+        can_revoke = result.get("kind") not in {"not-collected", "ssh_disabled"}
+        candidates = []
+        for path in root.glob("*/*/result.json"):
+            if path.parent.name.casefold() != hostname.casefold():
+                continue
+            candidate = config_sync_authority.read_current_receipt(root, hostname, path)
+            if candidate is not None:
+                candidates.append(candidate)
+                if len(candidates) > 1:
+                    break
+        if len(candidates) != 1:
+            raise ValueError("current receipt is missing or ambiguous")
+        receipt = candidates[0]
+        if (fresh["batch_identity_verified"] is not True
+                or receipt["type"] != str(device.get("type") or "").casefold()
+                or any(fresh[field] != receipt[field] for field in (
+                    "hostname", "interface", "transport_ip", "live_state_sha256",
+                ))):
+            raise ValueError("fresh BatchMode identity/live state disagrees with current receipt")
+        if config_sync_authority.read_current(root, hostname) != expected:
+            raise ValueError("configuration era changed after receipt observation")
+        matched = True
+        reason = ""
+    except (OSError, ValueError, TypeError, UnicodeError) as exc:
+        reason = str(exc)
+        if can_revoke:
+            try:
+                # Compare inside the actual single-writer lock; a different
+                # new era appearing here is retained and must not be revoked.
+                config_sync_authority.revoke(root, hostname, expected=expected)
+            except (OSError, ValueError, TypeError, UnicodeError) as revoke_error:
+                reason += "; revoke uncertain: " + str(revoke_error)
+    device["configuration_authority"] = {
+        "schema_version": 1, "source": "local_config_sync_authority",
+        "observation_source": "monitor_batchmode", "state": "success" if matched else "veto",
+        "veto": not matched, "generation": current["generation"] if current else 0,
+        "source_identity": current["source_identity"] if current else "",
+        "live_state_sha256": fresh["live_state_sha256"] if matched else "",
+        "reason": reason,
+    }
+    observed_at = str(result.get("observed_at") or device.get("observed_at") or "")
+    apply_status = (
+        "failed" if device["stages"]["config_apply"]["status"] == "failed"
+        else "success" if matched else "warning"
+    )
+    complete_status = (
+        "failed" if device["stages"]["complete"]["status"] == "failed" else "warning"
+    )
+    device["stages"]["config_apply"] = stage(
+        apply_status,
+        "当前本地配置代次与本次 BatchMode/live 观察一致" if matched else "当前配置代次不可晋升：" + reason,
+        observed_at, device.get("ztp_round", 0) if matched else 0,
+    )
+    # Even a matching replace-config receipt does not re-execute DHCP,
+    # bootstrap/version/key installation, or provide a new ZTP FINISH receipt.
+    device["stages"]["complete"] = stage(
+        complete_status, "配置同步收据不是本轮九阶段 ZTP 完成收据", observed_at,
+    )
+    device["issues"].append({
+        "code": "CONFIG_SYNC_NOT_ZTP_COMPLETION" if matched else "CONFIG_SYNC_CURRENT_VETO",
+        "severity": "warning", "message": device["stages"]["complete"]["detail"] if matched else reason,
+        "timestamp": observed_at,
+    })
+
+
 def probe_shared_address_identity(
     address: str, candidates: list[dict[str, Any]], timeout: int,
     identity: Optional[Path], known_hosts: Path,
@@ -3659,6 +3757,7 @@ def snapshot_device_state(report: dict[str, Any]) -> dict[str, Any]:
             "template": device.get("template", ""),
             "config_method": device.get("config_method", ""),
             "configuration_observation": device.get("configuration_observation", {}),
+            "configuration_authority": device.get("configuration_authority", {}),
             "dynamic_dhcp": bool(device.get("dynamic_dhcp")),
             "unbound_identity": bool(device.get("unbound_identity")),
             "managed_ztp": bool(device.get("managed_ztp")),
@@ -4712,6 +4811,17 @@ def monitor_once(args: argparse.Namespace, project: Path) -> Path:
         http_identity_claims=http_identity_claims,
     )
     switch_results: dict[str, dict[str, Any]] = {}
+    config_sync_root = project / "99-output-ztp/manual-config-sync"
+    config_sync_contexts: dict[str, Optional[dict[str, Any]]] = {}
+    for device in devices:
+        try:
+            config_sync_contexts[device["hostname"]] = config_sync_authority.read_current(
+                config_sync_root, device["hostname"],
+            )
+        except (OSError, ValueError) as exc:
+            # Retain the failure so a subsequent read cannot silently turn an
+            # unknown pre-collection boundary into a positive current era.
+            config_sync_contexts[device["hostname"]] = {"authority_error": str(exc)}
     if not args.no_ssh:
         collection_devices = devices_for_switch_collection(
             devices, active_owners, identity_devices=identity_devices,
@@ -4772,6 +4882,10 @@ def monitor_once(args: argparse.Namespace, project: Path) -> Path:
     )
     assign_stage_success_indices(devices, previous_report)
     for device in devices:
+        apply_current_config_sync_authority(
+            device, switch_results.get(device["hostname"], {"kind": "not-collected"}),
+            config_sync_root, config_sync_contexts.get(device["hostname"]),
+        )
         annotate_progress_stall(
             device, now=now_local(),
             threshold_minutes=getattr(
