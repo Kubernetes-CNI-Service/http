@@ -4052,19 +4052,42 @@ class _SetupLinkTransaction:
             return False
 
         parent = os.path.dirname(path)
-        os.makedirs(parent, exist_ok=True)
+        if _SETUP_SWITCH_WAL_CONTEXT is not None:
+            try:
+                parent_info = os.lstat(parent)
+            except OSError as exc:
+                raise ValueError(f"setup 共享目录父目录缺少 WAL 身份：{parent}") from exc
+            if not stat.S_ISDIR(parent_info.st_mode):
+                raise ValueError(f"setup 共享目录父目录不是实际目录：{parent}")
+        else:
+            os.makedirs(parent, exist_ok=True)
         temporary = tempfile.mkdtemp(
             prefix=f".{os.path.basename(path)}.setup-{os.getpid()}-", dir=parent,
         )
         created = os.lstat(temporary)
         installed = False
+        wal_registered = False
+        wal_registration_attempted = False
         try:
+            if _SETUP_SWITCH_WAL_CONTEXT is not None:
+                load_api, descriptor = _SETUP_SWITCH_WAL_CONTEXT[:2]
+                # Registration may replace its journal and then fail fsync.
+                # Keep the staged inode whenever persistence is uncertain.
+                wal_registration_attempted = True
+                load_api["register_setup_switch_created_directory"](
+                    Path(ZTP) / ".setup-switch-journal.json", Path(path), Path(temporary),
+                    deployment_lock_descriptor=descriptor, services_quiesced=True,
+                    runtime_backend=load_api["service_runtime_backend"](),
+                )
+                wal_registered = True
             try:
                 _atomic_rename_noreplace(temporary, path)
                 installed = True
             except OSError as exc:
                 if exc.errno != errno.EEXIST:
                     raise
+                if wal_registered:
+                    raise ValueError("setup 新建共享目录名称被占据；保留 WAL 与暂存 inode") from exc
                 metadata = os.lstat(path)
                 if not stat.S_ISDIR(metadata.st_mode):
                     raise ValueError(f"setup 管理目录在创建期间被非目录占用：{path}") from exc
@@ -4075,9 +4098,11 @@ class _SetupLinkTransaction:
                     or not stat.S_ISDIR(metadata.st_mode)):
                 raise ValueError(f"setup 新建目录在登记前身份发生变化：{path}")
             self.created_directories.append((path, created.st_dev, created.st_ino))
+            if wal_registered:
+                _fsync_directory(parent)
             return True
         finally:
-            if not installed and os.path.lexists(temporary):
+            if not installed and not wal_registration_attempted and os.path.lexists(temporary):
                 os.rmdir(temporary)
 
     def migrate_materialized_directory(self, path, target):

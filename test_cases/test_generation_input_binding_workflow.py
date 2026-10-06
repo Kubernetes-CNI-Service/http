@@ -607,6 +607,50 @@ finally:
             self.assertEqual(p / "01-global.yaml", common.resolve())
             self.assertFalse((root / "service-started").exists())
 
+    def test_real_setup_new_shared_key_directory_cold_recovery_restores_absence(self):
+        """A fresh LOAD must undo SETUP's owned shared directory after child death."""
+        with tempfile.TemporaryDirectory(prefix="r22-created-dir-cold-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, _q, _common, _p_only, _q_only, manifest, before, _hook, barrier, _home = fixture
+            key_root = root / "infiniband/publickey"
+            key_root.parent.mkdir(exist_ok=True)
+            self.assertFalse(os.path.lexists(key_root))
+            first = self._run_private_load_setup_switch(
+                fixture, prepare_journal=True, first_link_prefix=str(key_root) + os.sep,
+            )
+            self.assertEqual(23, first.returncode, first.stdout + first.stderr)
+            self.assertTrue(barrier.is_file())
+            self.assertTrue(key_root.is_dir())
+            recovery = """
+import importlib.util
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('fresh_created_dir_recovery', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    assert load.recover_setup_switch_journal(
+        root / 'ztp/.setup-switch-journal.json', deployment_lock_descriptor=descriptor,
+        services_quiesced=True, runtime_backend=SimpleNamespace(name='supervisor'),
+    ) == 'restored-p'
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+            second = subprocess.run(
+                [sys.executable, "-B", "-c", recovery, str(root)], cwd=root,
+                capture_output=True, text=True, check=False, timeout=30,
+            )
+            self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+            self.assertFalse(os.path.lexists(key_root), "SETUP-created shared directory survived cold rollback")
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            self.assertFalse((root / "ztp/.setup-switch-journal.json").exists())
+            self.assertFalse((root / "service-started").exists())
+
     def test_real_setup_death_pending_wal_blocks_new_load_before_template(self):
         """A real SETUP crash must fence a fresh LOAD before any new project writes."""
         with tempfile.TemporaryDirectory(prefix="r22-pending-wal-main-") as name:

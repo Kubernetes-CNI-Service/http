@@ -1814,6 +1814,203 @@ class ReleaseTransactionTests(unittest.TestCase):
             journal, descriptor, backend,
         )
 
+    def test_setup_created_directory_is_journaled_before_shared_install(self) -> None:
+        (*_state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        directory = self.ztp / "config/new-key-root"
+        transaction = SETUP._SetupLinkTransaction([])
+        rename = SETUP._atomic_rename_noreplace
+        observed = []
+
+        def checked_install(source, destination):
+            self.assertFalse(os.path.lexists(directory))
+            metadata = Path(source).lstat()
+            rows = json.loads(journal.read_bytes())["body"].get("created_directories", [])
+            row = next((item for item in rows if item["path"] == str(directory)), None)
+            self.assertIsNotNone(row, "shared directory has no durable pre-install WAL identity")
+            self.assertEqual(str(source), row["staged"])
+            self.assertEqual((metadata.st_dev, metadata.st_ino), (row["dev"], row["ino"]))
+            self.assertEqual(0o600, stat.S_IMODE(journal.stat().st_mode))
+            observed.append(True)
+            return rename(source, destination)
+
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(SETUP, "ZTP", str(self.ztp)), \
+                mock.patch.object(SETUP, "_SETUP_SWITCH_WAL_CONTEXT", (vars(LOAD), descriptor)), \
+                mock.patch.object(SETUP, "_atomic_rename_noreplace", side_effect=checked_install):
+            self.assertTrue(transaction.ensure_directory(str(directory)))
+        self.assertEqual([True], observed)
+        self.assertTrue(directory.is_dir())
+        backend.start.assert_not_called()
+
+    def test_setup_wal_cold_recovery_removes_owned_new_directory_not_just_links(self) -> None:
+        (*_state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        new_project = _state[1]
+        directory = self.ztp / "config/new-key-root"
+        link = directory / "operator.pub"
+        target = new_project / "operator.pub"
+        target.write_bytes(b"Q key fixture\n")
+        transaction = SETUP._SetupLinkTransaction([])
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(SETUP, "ZTP", str(self.ztp)), \
+                mock.patch.object(SETUP, "_SETUP_SWITCH_WAL_CONTEXT", (vars(LOAD), descriptor)):
+            self.assertTrue(transaction.ensure_directory(str(directory)))
+            LOAD.register_setup_switch_journal_link(
+                journal, link, target, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            )
+            link.symlink_to(os.path.relpath(target, link.parent))
+            self.assertEqual("restored-p", LOAD.recover_setup_switch_journal(
+                journal, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            ))
+        self.assertFalse(os.path.lexists(link))
+        self.assertFalse(os.path.lexists(directory), "cold recovery left an unrecorded shared directory")
+        backend.start.assert_not_called()
+
+    def test_setup_wal_unknown_new_directory_child_blocks_all_recovery_writes(self) -> None:
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        common, target, manifest, before_manifest = state[2], state[5], state[7], state[8]
+        directory = self.ztp / "config/new-key-root"
+        transaction = SETUP._SetupLinkTransaction([])
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(SETUP, "ZTP", str(self.ztp)), \
+                mock.patch.object(SETUP, "_SETUP_SWITCH_WAL_CONTEXT", (vars(LOAD), descriptor)):
+            transaction.ensure_directory(str(directory))
+            unowned = directory / "unowned-evidence"
+            unowned.write_bytes(b"do not delete or write P around me\n")
+            common.unlink()
+            common.symlink_to(os.path.relpath(target, common.parent))
+            mixed = os.readlink(common)
+            before_wal = journal.read_bytes()
+            with self.assertRaisesRegex(LOAD.LoadError, "created directory|unregistered"):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertEqual(mixed, os.readlink(common))
+        self.assertEqual(before_manifest, manifest.read_bytes())
+        self.assertEqual(before_wal, journal.read_bytes())
+        self.assertEqual(b"do not delete or write P around me\n", unowned.read_bytes())
+        backend.start.assert_not_called()
+
+    def test_setup_created_directory_preinstall_interruption_retains_owned_stage(self) -> None:
+        (*_state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        directory = self.ztp / "config/new-key-root"
+        transaction = SETUP._SetupLinkTransaction([])
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(SETUP, "ZTP", str(self.ztp)), \
+                mock.patch.object(SETUP, "_SETUP_SWITCH_WAL_CONTEXT", (vars(LOAD), descriptor)), \
+                mock.patch.object(SETUP, "_atomic_rename_noreplace", side_effect=RuntimeError("before shared install")):
+            with self.assertRaisesRegex(RuntimeError, "before shared install"):
+                transaction.ensure_directory(str(directory))
+            rows = json.loads(journal.read_bytes())["body"]["created_directories"]
+            self.assertEqual(1, len(rows))
+            staged = Path(rows[0]["staged"])
+            self.assertTrue(staged.is_dir(), "registered stage was discarded before cold recovery")
+            self.assertFalse(os.path.lexists(directory))
+            self.assertEqual("restored-p", LOAD.recover_setup_switch_journal(
+                journal, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            ))
+            self.assertFalse(os.path.lexists(staged))
+            self.assertFalse(os.path.lexists(directory))
+        backend.start.assert_not_called()
+
+    def test_setup_created_directory_install_collision_retains_both_evidence_names(self) -> None:
+        (*_state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        directory = self.ztp / "config/new-key-root"
+        transaction = SETUP._SetupLinkTransaction([])
+
+        def occupied_target(_source, destination):
+            Path(destination).mkdir()
+            (Path(destination) / "unowned").write_bytes(b"foreign occupant\n")
+            raise FileExistsError(17, "target inserted before rename")
+
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(SETUP, "ZTP", str(self.ztp)), \
+                mock.patch.object(SETUP, "_SETUP_SWITCH_WAL_CONTEXT", (vars(LOAD), descriptor)), \
+                mock.patch.object(SETUP, "_atomic_rename_noreplace", side_effect=occupied_target):
+            with self.assertRaisesRegex(ValueError, "WAL"):
+                transaction.ensure_directory(str(directory))
+            frozen = journal.read_bytes()
+            row = json.loads(frozen)["body"]["created_directories"][0]
+            self.assertTrue(Path(row["staged"]).is_dir())
+            with self.assertRaisesRegex(LOAD.LoadError, "created directory"):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertEqual(frozen, journal.read_bytes())
+        self.assertEqual(b"foreign occupant\n", (directory / "unowned").read_bytes())
+        backend.start.assert_not_called()
+
+    def test_setup_created_directory_inode_rebind_blocks_p_restore(self) -> None:
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        common, target = state[2], state[5]
+        directory = self.ztp / "config/new-key-root"
+        transaction = SETUP._SetupLinkTransaction([])
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(SETUP, "ZTP", str(self.ztp)), \
+                mock.patch.object(SETUP, "_SETUP_SWITCH_WAL_CONTEXT", (vars(LOAD), descriptor)):
+            transaction.ensure_directory(str(directory))
+            original = directory.with_name("saved-owned-directory")
+            directory.rename(original)
+            directory.mkdir()
+            common.unlink()
+            common.symlink_to(os.path.relpath(target, common.parent))
+            mixed = os.readlink(common)
+            frozen = journal.read_bytes()
+            foreign_inode = directory.stat().st_ino
+            with self.assertRaisesRegex(LOAD.LoadError, "created directory"):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertEqual(frozen, journal.read_bytes())
+        self.assertEqual(mixed, os.readlink(common))
+        self.assertEqual(foreign_inode, directory.stat().st_ino)
+        self.assertTrue(original.is_dir())
+        backend.start.assert_not_called()
+
+    def test_setup_created_directory_registration_fsync_failure_retains_stage(self) -> None:
+        (*_state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        directory = self.ztp / "config/new-key-root"
+        transaction = SETUP._SetupLinkTransaction([])
+        real_sync = LOAD._fsync_parent_directory
+
+        def fail_wal_parent(path):
+            if Path(path) == journal.parent:
+                raise OSError("WAL replace completed but directory fsync failed")
+            return real_sync(path)
+
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(SETUP, "ZTP", str(self.ztp)), \
+                mock.patch.object(SETUP, "_SETUP_SWITCH_WAL_CONTEXT", (vars(LOAD), descriptor)), \
+                mock.patch.object(LOAD, "_fsync_parent_directory", side_effect=fail_wal_parent):
+            with self.assertRaisesRegex(OSError, "fsync failed"):
+                transaction.ensure_directory(str(directory))
+        rows = json.loads(journal.read_bytes())["body"]["created_directories"]
+        self.assertEqual(1, len(rows))
+        staged = Path(rows[0]["staged"])
+        self.assertTrue(staged.is_dir(), "uncertain WAL persistence must not discard its staged inode")
+        self.assertFalse(os.path.lexists(directory))
+        backend.start.assert_not_called()
+
+    def test_setup_created_directory_missing_parent_fails_before_shared_mkdir(self) -> None:
+        (*_state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        parent = self.ztp / "config/unregistered-new-parent"
+        directory = parent / "keys"
+        frozen = journal.read_bytes()
+        transaction = SETUP._SetupLinkTransaction([])
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(SETUP, "ZTP", str(self.ztp)), \
+                mock.patch.object(SETUP, "_SETUP_SWITCH_WAL_CONTEXT", (vars(LOAD), descriptor)):
+            with self.assertRaisesRegex(ValueError, "parent|父目录"):
+                transaction.ensure_directory(str(directory))
+        self.assertFalse(os.path.lexists(parent), "unregistered ancestor mkdir escaped the WAL")
+        self.assertEqual(frozen, journal.read_bytes())
+        backend.start.assert_not_called()
+
     def test_setup_wal_can_freeze_existing_p_link_q_value_before_write(self) -> None:
         """LOAD may freeze P first, then register a discovered Q value durably."""
         (

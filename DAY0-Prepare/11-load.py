@@ -6224,6 +6224,138 @@ def register_setup_switch_journal_link(
     return journal
 
 
+def register_setup_switch_created_directory(
+    journal: Path, path: Path, staged: Path, *,
+    deployment_lock_descriptor: int | None,
+    services_quiesced: bool, runtime_backend: ServiceRuntimeBackend | None,
+) -> Path:
+    """Freeze an empty private directory's identity before shared installation.
+
+    The staged inode remains recovery evidence until the no-replace rename has
+    installed it.  Neither an existing target nor a different inode is owned.
+    """
+    journal, path, staged = map(Path, (journal, path, staged))
+    _require_runtime_restore_guard(
+        deployment_lock_descriptor=deployment_lock_descriptor,
+        services_quiesced=services_quiesced, runtime_backend=runtime_backend,
+    )
+    if journal != _setup_switch_journal_path():
+        raise LoadError("setup switch journal path is not the configured authority")
+    before = journal.lstat()
+    opened = _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT)
+    recover_setup_switch_journal(
+        journal, deployment_lock_descriptor=deployment_lock_descriptor,
+        services_quiesced=services_quiesced, runtime_backend=runtime_backend,
+        inspect_only=True,
+    )
+    body = dict(json.loads(opened[0])["body"])
+    try:
+        if "q_manifest_intent" in body:
+            raise ValueError("Q manifest intent already freezes the setup write set")
+        if (not path.is_absolute() or os.path.normpath(str(path)) != str(path)
+                or not staged.is_absolute() or os.path.normpath(str(staged)) != str(staged)
+                or staged.parent != path.parent
+                or not staged.name.startswith(f".{path.name}.setup-")):
+            raise ValueError("created directory names are not canonical")
+        path.parent.resolve(strict=True).relative_to(HTTP_ROOT.resolve(strict=True))
+        physical_path = path.parent.resolve(strict=True) / path.name
+        for project in (body["old_project"]["path"], body["new_project"]["path"]):
+            if os.path.commonpath((str(physical_path), project)) == project:
+                raise ValueError("created shared directory is inside a project")
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            raise ValueError("created directory target is already occupied")
+        metadata = staged.lstat()
+        if not stat.S_ISDIR(metadata.st_mode) or any(staged.iterdir()):
+            raise ValueError("staged created directory is not an empty real directory")
+        rows = body.get("created_directories", [])
+        if any(row["path"] == str(path) or row["staged"] == str(staged) for row in rows):
+            raise ValueError("created directory is already registered")
+        body["created_directories"] = [*rows, {
+            "path": str(path), "staged": str(staged),
+            "parent": _setup_switch_link_parent_identity(path),
+            "dev": metadata.st_dev, "ino": metadata.st_ino,
+            "mode": stat.S_IMODE(metadata.st_mode),
+        }]
+    except (KeyError, TypeError, ValueError, OSError, RuntimeError) as exc:
+        raise LoadError(f"setup switch created directory registration is invalid: {exc}") from exc
+    _fsync_parent_directory(staged)
+    _fsync_parent_directory(staged.parent)
+    payload = _setup_switch_canonical_payload({
+        "body": body,
+        "sha256": hashlib.sha256(_setup_switch_canonical_payload(body)).hexdigest(),
+    }) + b"\n"
+    if len(payload) > _SETUP_SWITCH_JOURNAL_LIMIT:
+        raise LoadError("setup switch journal exceeds the bounded size limit")
+    descriptor, name = tempfile.mkstemp(prefix=".setup-switch-journal.", dir=journal.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        now = journal.lstat()
+        if (any(getattr(before, key) != getattr(now, key) for key in (
+                "st_dev", "st_ino", "st_mode", "st_nlink", "st_size",
+                "st_mtime_ns", "st_ctime_ns"))
+                or _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT) != opened):
+            raise LoadError("setup switch journal changed before directory registration")
+        os.replace(temporary, journal)
+        _fsync_parent_directory(journal.parent)
+    finally:
+        if os.path.lexists(temporary):
+            temporary.unlink()
+    return journal
+
+
+def _setup_switch_created_directory_states(body):
+    """Prevalidate every new shared inode and child before any recovery write."""
+    try:
+        rows = body.get("created_directories", [])
+        if (not isinstance(rows, list)
+                or len({row["path"] for row in rows}) != len(rows)
+                or len({row["staged"] for row in rows}) != len(rows)):
+            raise ValueError("duplicate or invalid directory rows")
+        owned_children = {
+            Path(row["path"]) for row in body["links"]
+            if row["before"] is None and row["after"] is not None
+        } | {Path(row["path"]) for row in rows}
+        states = []
+        for row in rows:
+            path, staged = Path(row["path"]), Path(row["staged"])
+            if (not path.is_absolute() or os.path.normpath(str(path)) != str(path)
+                    or not staged.is_absolute() or os.path.normpath(str(staged)) != str(staged)
+                    or staged.parent != path.parent
+                    or not staged.name.startswith(f".{path.name}.setup-")
+                    or row["parent"] != _setup_switch_link_parent_identity(path)
+                    or any(type(row[key]) is not int for key in ("dev", "ino", "mode"))):
+                raise ValueError("created directory names or parent changed")
+            path.parent.resolve(strict=True).relative_to(HTTP_ROOT.resolve(strict=True))
+            present = []
+            for candidate in (path, staged):
+                try:
+                    metadata = candidate.lstat()
+                except FileNotFoundError:
+                    continue
+                if (not stat.S_ISDIR(metadata.st_mode)
+                        or (metadata.st_dev, metadata.st_ino, stat.S_IMODE(metadata.st_mode))
+                        != (row["dev"], row["ino"], row["mode"])):
+                    raise ValueError("created directory inode or mode changed")
+                children = set(candidate.iterdir())
+                if (candidate == staged and children) or children - owned_children:
+                    raise ValueError("created directory contains unregistered children")
+                present.append(candidate)
+            if len(present) > 1:
+                raise ValueError("created directory has conflicting stage and target")
+            states.append((path, staged, present[0] if present else None, row))
+        return states
+    except (KeyError, TypeError, ValueError, OSError, RuntimeError) as exc:
+        raise LoadError(f"setup switch created directory state is unknown: {exc}") from exc
+
+
 def register_setup_switch_materialized_directory(
     journal: Path, source: Path, target: Path, *,
     deployment_lock_descriptor: int | None,
@@ -6755,6 +6887,7 @@ def recover_setup_switch_journal(
     journal: Path, *, deployment_lock_descriptor: int | None,
     services_quiesced: bool, runtime_backend: ServiceRuntimeBackend | None,
     verify_only: bool = False, manifest_candidate: bytes | None = None,
+    inspect_only: bool = False,
 ) -> str:
     """Verify or restore P from a complete WAL and a known P/Q disk state.
 
@@ -6766,6 +6899,8 @@ def recover_setup_switch_journal(
         services_quiesced=services_quiesced,
         runtime_backend=runtime_backend,
     )
+    if type(inspect_only) is not bool or (inspect_only and (verify_only or manifest_candidate is not None)):
+        raise LoadError("journal inspection must be read-only and unambiguous")
     if manifest_candidate is not None and not verify_only:
         raise LoadError("manifest candidate verification is read-only")
     journal = Path(journal)
@@ -6911,8 +7046,13 @@ def recover_setup_switch_journal(
         _setup_switch_prepare_infra_log_recovery(infra_rows[0], q_project)
         if infra_rows else None
     )
+    created_directory_states = _setup_switch_created_directory_states(body)
+    if inspect_only:
+        return "prepared-known-disk-state"
     if verify_only:
         if manifest_candidate is not None:
+            if any(present != path for path, _staged, present, _row in created_directory_states):
+                raise LoadError("setup switch Q manifest lacks an installed created directory")
             candidate_paths = _setup_switch_q_manifest_paths(body, manifest_candidate)
             for path, _before, after in expected_rows:
                 if path in candidate_paths or os.path.lexists(path):
@@ -6931,6 +7071,8 @@ def recover_setup_switch_journal(
             raise LoadError("setup switch materialized prewrite state is not exact Q")
         if infra_state is not None and (infra_state[6] or infra_state[7]):
             raise LoadError("setup switch infra log prewrite state is not exact Q")
+        if any(present is not None for _path, _staged, present, _row in created_directory_states):
+            raise LoadError("setup switch created directory prewrite state is not exact P")
         return "prepared-p"
     if infra_state is not None:
         _setup_switch_restore_infra_log_tree(infra_state)
@@ -6950,6 +7092,16 @@ def recover_setup_switch_journal(
                 raise LoadError(f"setup switch Q-only link changed during recovery: {path}")
             path.unlink()
             _fsync_parent_directory(path.parent)
+    for _path, _staged, present, row in sorted(
+            created_directory_states, key=lambda state: len(state[0].parts), reverse=True):
+        if present is not None:
+            metadata = present.lstat()
+            if (not stat.S_ISDIR(metadata.st_mode)
+                    or (metadata.st_dev, metadata.st_ino, stat.S_IMODE(metadata.st_mode))
+                    != (row["dev"], row["ino"], row["mode"])):
+                raise LoadError("setup switch created directory changed during recovery")
+            present.rmdir()
+            _fsync_parent_directory(present.parent)
     if current_manifest != (state.manifest, state.manifest_mode):
         _atomic_restore_setup_manifest(state)
     verified = snapshot_active_setup_state(expected_project=state.project)
