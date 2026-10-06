@@ -3489,6 +3489,75 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertEqual(wal_bytes, journal.read_bytes())
         self.assertFalse(os.path.lexists(project / "99-output-ztp/optimize"))
 
+    def _assert_setup_registration_rejects_journal_write_aba(self, kind):
+        state = self._prepare_cross_project_setup_crash()
+        q, journal, descriptor, backend = state[1], state[10], state[11], state[12]
+        options = dict(deployment_lock_descriptor=descriptor,
+                       services_quiesced=True, runtime_backend=backend)
+        if kind == "link":
+            source = self.ztp / "config/cumulus/template/independent-new-link"
+            target = q / "01-global.yaml"
+            register = lambda: LOAD.register_setup_switch_journal_link(
+                journal, source, target, **options)
+        elif kind == "materialized":
+            source = q / "99-output-eth/latest"
+            target = source.parent / "independent-release"
+            for path in (source, target):
+                path.mkdir(parents=True)
+                (path / ".published-complete").write_bytes(b"independent complete\n")
+            register = lambda: LOAD.register_setup_switch_materialized_directory(
+                journal, source, target, **options)
+        else:
+            source, target = self.root.resolve() / "infra/logs", q.resolve() / "99-output-infra"
+            source.mkdir(parents=True)
+            target.mkdir()
+            register = lambda: LOAD.register_setup_switch_infra_log_tree(
+                journal, source, target, **options)
+        frozen, before = journal.read_bytes(), journal.stat()
+        real_sync, injected = os.fsync, []
+
+        def sync_and_change_history(fd):
+            result = real_sync(fd)
+            held = os.fstat(fd)
+            if not injected and stat.S_ISREG(held.st_mode) and any(
+                    item.name.startswith(".setup-switch-journal.")
+                    and item.name != journal.name and item.stat().st_ino == held.st_ino
+                    for item in journal.parent.iterdir()):
+                journal.write_bytes(b"!" + frozen[1:])
+                journal.write_bytes(frozen)
+                os.utime(journal, ns=(before.st_atime_ns, before.st_mtime_ns))
+                after = journal.stat()
+                self.assertEqual((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns),
+                                 (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns))
+                self.assertNotEqual(before.st_ctime_ns, after.st_ctime_ns)
+                injected.append(True)
+            return result
+
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD.os, "fsync", side_effect=sync_and_change_history):
+            with self.assertRaisesRegex(LOAD.LoadError, "journal changed before"):
+                register()
+        self.assertEqual([True], injected)
+        self.assertEqual(frozen, journal.read_bytes(), "registration consumed a changed WAL history")
+        self.assertEqual(before.st_ino, journal.stat().st_ino)
+        self.assertEqual(state[8], state[7].read_bytes())
+        self.assertEqual(state[9], {path: os.readlink(path) for path in state[9]})
+        if kind == "link":
+            self.assertFalse(os.path.lexists(source))
+        else:
+            self.assertTrue(source.is_dir())
+            self.assertTrue(target.is_dir())
+        backend.start.assert_not_called()
+
+    def test_setup_link_registration_rejects_journal_write_aba(self):
+        self._assert_setup_registration_rejects_journal_write_aba("link")
+
+    def test_setup_materialized_registration_rejects_journal_write_aba(self):
+        self._assert_setup_registration_rejects_journal_write_aba("materialized")
+
+    def test_setup_infra_registration_rejects_journal_write_aba(self):
+        self._assert_setup_registration_rejects_journal_write_aba("infra")
+
     def test_setup_created_directory_is_journaled_before_shared_install(self) -> None:
         (*_state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
         directory = self.ztp / "config/new-key-root"

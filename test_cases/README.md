@@ -186,6 +186,12 @@ direct 和真实 LOAD→SETUP 强杀→新 LOAD workflow 覆盖凭据读入后�
 这不构成对任意同 UID 非合作写者的原子 compare-and-unlink 承诺，仍须排他写者静默和
 REAL_ENV 见证，也不关闭完整共享写集、父 B 收口或旧 A 显式激活。
 
+SETUP 登记新链接、实体 latest 或 infra/logs 写集时，也必须在替换 WAL 前复核原凭据
+的 uid/gid、ctime 和有界读回字节/模式；同 inode 写后还原原长度、字节与 mtime 不得
+继续登记。direct 与真实 LOAD→SETUP 写前流程覆盖此 ABA，拒绝保留原 WAL inode、
+P manifest/链接及实体目录；候选临时 WAL 只清理自己的名字。该守卫不是原子
+compare-and-replace，仍要求排他锁及其它写者静默，不提供新写集、恢复或激活授权。
+
 Q 已有的 ETH/NVOS `latest` 软链接须在首次共享写入前单独记录原始链接文字、
 旧/新真实完成目录和父目录身份，不混入 P manifest，也不当作原本缺席的 Q-only 名称。
 SETUP 通过 Q 的物理父目录写入，稳定共享入口仍保留原有相对链接合同；替换后同步父目录。
@@ -256,7 +262,7 @@ Q manifest/链接/WAL 与 B，拒绝旧 P 回退。本机故障注入不证明�
 
 同一未确认 B 状态下，DHCP 事务的 finally 不得删除原 A backup 和 B staged 文件，
 也不得提示“手工删除”。必须保留原 0700 backup 目录及事务路径、报告 HOLD，等待
-人工核验实际 A/B；不能自动恢复 A。目录同步已确认的正常成功，以及父 replace
+人工核验实际 A/B；不能自动恢复 A。目录同步已确认且无未结清 SETUP WAL 的普通成功，以及父 replace
 之前拒绝并完整还原 A 的原路径，仍执行既有清理。direct 和真实 SETUP→LOAD
 安装算法 workflow 使用固定独立 A/B 字节，仅将 sudo/文件命令/dhcpd 替换为私有
 文件系统端口，不触碰 `/etc/dhcp`，不证明真实语法、root 权限或备份断电持久性。

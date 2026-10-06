@@ -1173,6 +1173,67 @@ finally:
             self.assertEqual(selector, os.readlink(project / "99-output-ztp/current"))
             self.assertFalse((root / "service-started").exists())
 
+    def test_real_setup_materialized_registration_rejects_wal_write_aba(self):
+        with tempfile.TemporaryDirectory(prefix="r22-registration-wal-aba-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, q, common, p_only, _q_only, manifest, before, hook, barrier, _home = fixture
+            output = q / "99-output-eth"
+            latest, release = output / "latest", output / "20261007_080000_combine"
+            for path in (latest, release):
+                path.mkdir(parents=True)
+                (path / ".published-complete").write_bytes(b"complete\n")
+                (path / "leaf.yaml").write_bytes(b"independent Q bytes\n")
+            original_latest = latest.stat().st_ino
+            addition = r'''
+import json
+import stat
+import sys
+original_fsync_for_wal_aba = os.fsync
+def inject_registration_wal_aba(fd):
+    result = original_fsync_for_wal_aba(fd)
+    root = Path(__file__).resolve().parent.parent
+    journal = root / 'ztp/.setup-switch-journal.json'
+    witness = root / 'registration-wal-aba.json'
+    held = os.fstat(fd)
+    if (Path(sys.argv[0]).name == '01-a-setup.py' and not witness.exists()
+            and journal.exists() and stat.S_ISREG(held.st_mode)
+            and any(item.name.startswith('.setup-switch-journal.')
+                    and item.name != journal.name and item.stat().st_ino == held.st_ino
+                    for item in journal.parent.iterdir())):
+        frozen, before = journal.read_bytes(), journal.stat()
+        journal.write_bytes(b'!' + frozen[1:])
+        journal.write_bytes(frozen)
+        os.utime(journal, ns=(before.st_atime_ns, before.st_mtime_ns))
+        after = journal.stat()
+        (root / 'registration-wal-before.bin').write_bytes(frozen)
+        witness.write_text(json.dumps({
+            'before': [before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns],
+            'after': [after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns],
+            'ctime_changed': before.st_ctime_ns != after.st_ctime_ns,
+        }))
+    return result
+os.fsync = inject_registration_wal_aba
+'''
+            site = hook / "sitecustomize.py"
+            site.write_text(site.read_text() + addition)
+            result = self._run_private_load_setup_switch(fixture, prepare_journal=True)
+            witness = json.loads((root / "registration-wal-aba.json").read_text())
+            self.assertEqual(witness["before"], witness["after"])
+            self.assertTrue(witness["ctime_changed"])
+            self.assertEqual(24, result.returncode, result.stdout + result.stderr)
+            self.assertIn("journal changed before directory registration", result.stdout + result.stderr)
+            self.assertFalse(barrier.exists(), "changed WAL history authorized a shared Q write")
+            journal = root / "ztp/.setup-switch-journal.json"
+            self.assertEqual((root / "registration-wal-before.bin").read_bytes(), journal.read_bytes())
+            self.assertEqual(witness["before"][1], journal.stat().st_ino)
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            self.assertEqual(before["common"], os.readlink(common))
+            self.assertEqual(before["p_only"], os.readlink(p_only))
+            self.assertEqual(original_latest, latest.stat().st_ino)
+            self.assertEqual(b"independent Q bytes\n", (latest / "leaf.yaml").read_bytes())
+            self.assertFalse(list(output.glob(".latest.setup-backup.*")))
+            self.assertFalse((root / "service-started").exists())
+
     def test_real_setup_legacy_sample_comparison_holds_before_first_shared_write(self):
         with tempfile.TemporaryDirectory(prefix="r22-sample-legacy-hold-") as name:
             fixture = self._private_setup_switch_fixture(Path(name))

@@ -1721,6 +1721,8 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 - parent-only 成功保留 DHCP A 凭据候选：TEST direct 与真实 SETUP→LOAD 四文件安装、parent replace/目录同步成功但整个 B 尚未接受的边界先 RED 后 GREEN；只要 SETUP WAL 名称仍被占据，不删除原 A backup、staged 或 `a-preimage.json`，无法核 WAL 缺席则 HOLD。现场仍仅限本卡授权隔离 VM、root、完整 P/Q/A/B/WAL/receipt、可恢复卷快照、排他部署锁、明确停服及其它正常写者静默。独立冻结 WAL/parent/四文件/A backup/record 的名称/FD 身份、模式/摘要，记录安装、语法检查、parent replace/fsync、report、代次指针、健康检查及清理物理顺序；在 parent 成功后的后续阶段受控失败/死亡，须保留 A/B/事务证据，不自动回 A、启动服务或删除未知对象，新 LOAD 仍被残留闸门阻断。另核无 SETUP WAL 的普通成功及已完整恢复 A 的前提交失败仍满足原清理合同；WAL 名称读取失败必须停止清理。封存后仅负责人按核实隔离快照恢复，禁止 live 注入、glob 清理、人工删 WAL/事务后重入。此窄修只阻止提前删除，WAL 缺席不是 B 健康证据，不实现完整 B finalizer/成功退休、跨重启 DHCP 全组恢复、旧 A 激活、Linux/断电或 DEV ACK；本卡继续 OPEN。
 
+- SETUP WAL 登记历史复核候选：TEST 三个 direct 及真实 LOAD→SETUP 实体 latest 写前流程在候选临时 WAL 同步后，对原凭据同 inode 改写、还原原字节/尺寸/mtime，要求登记拒绝并保留原 WAL inode、P manifest/链接及实体目录；临时候选只清理本次所建名字。现场仅限本卡授权隔离 VM、完整 P/Q/A/B/WAL/receipt 和可恢复卷快照、排他部署锁、服务停止及其它正常写者静默。独立记录原 WAL 的 dev/ino/uid/gid/mode/nlink/size/mtime/ctime、字节摘要、候选同步/原凭据再读/replace 的物理顺序；分别在链接、实体 latest、infra/logs 登记的写前屏障受控注入 ABA、不同字节或权限/所有者改变。负例须在下一共享写前 HOLD、不删除原凭据或启动服务；无注入正例继续登记并核冷恢复。封存后仅负责人按已核实隔离快照恢复，不对 live 注入、不删除 WAL 后重入、不自动回 A。本机 ctime 与读回守卫不是原子 compare-and-replace，不证明任意非合作写者免疫、完整写集、B 健康退休、旧 A 激活、Linux/断电或 DEV ACK，本卡仍 OPEN。
+
 ## TC-REAL-R22-C2-DESCRIPTION-PUBLISH-001 — c2 同名描述输出的故障窗口
 
 - Case ID：`TC-REAL-R22-C2-DESCRIPTION-PUBLISH-001`；类型：real-environment / transaction / crash-recovery；对应 R22 c2 对 `*_with_desc` 的既有同名输出替换。状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。自动化先决为 `test_cases.test_generation_input_binding_contract` 的二次读取、早返及 staging direct，`test_cases.test_generation_input_binding_workflow` 的 setup/load/c2 workflow，和当前候选正式 full/check；现有定向通过不证明进程死亡后的原子性。

@@ -176,6 +176,39 @@ full。失败、未知原因、日志缺失或中断仍保持无证明状态，�
    自动生成的 ledger 单独提交、干净树的 `--check --require-full` exit0 才算本地正式
    证明。局部回归和旧树证明不能代替它；本地 proof 不关闭独立 Linux/设备/断电见证卡。
 
+### R22 SETUP WAL 登记须拒绝同 inode 改写历史
+
+新链接、实体 latest、infra/logs 三个登记 API 在写入候选 WAL 并 fsync 后，原先只核
+原 WAL 的 dev/ino/mode/nlink/size/mtime。另一个写者将同 inode 改写后还原原字节、
+尺寸和 mtime 时，旧登记仍覆盖原凭据；真实 LOAD→SETUP 的实体 latest 流程继续到
+首个 Q 共享写入。独立 direct 三项和真实两脚本 workflow 要求在覆盖 WAL/下一共享
+写入前拒绝，保留原 inode、原字节、P manifest/链接、实体目录，不启动服务。
+
+首轮 RED 日志 `outputs/test-diagnostics/r22-registration-wal-history-red.log` 保留，
+inode146679632、size4758、SHA256
+`47785668d22dae0b26abc4978f7d1d1394e8d05d8c0e71e1db74e17e1c6d43f8`；其中 infra
+用例的目标临时路径未 resolve，先被已有规范路径门禁拒绝，不能列为该 ABA 缺陷证据。
+仅修正此夹具输入，不改断言后，四项均按目标缺陷 RED：4 FAIL / 4.844 秒 / exit1。
+日志 `r22-registration-wal-history-canonical-red.log`，inode146681705、size4083、
+SHA256 `f5be71a35ba904383518399e3443635ea53b371299de9b29f357bdd767b7ed38`。
+
+实现为三处原守卫补 uid/gid/ctime 及有界原字节/模式再读；不解析变化后的 WAL 来
+重新授予覆盖权，原正常登记及已有冷恢复合同不变。四项修后 OK / 3.105 秒 / exit0，
+日志 `r22-registration-wal-history-green.log`，inode146683802、size696、SHA256
+`c37962a988d5bfeb4ebb8220e3399c8d41a7cd1d74cf030e7c68c375a912be9f`。
+完整 LOAD 模块与七项真实新链接、实体 latest 正负例、infra/logs、Q manifest 及
+sample 冷恢复 workflow 共 333 tests OK / 53.675 秒 / exit0，无 skip。日志
+`r22-registration-wal-history-regressions.log`，inode146685791、size105980、SHA256
+`1e22fc29638d66f5111c28f6b2760624b2b69b235e3b9a54b4c82bf0bd1a70ec`；已知 85195
+字节前缀 SHA256 `5350e8cef78b1da55010ec1fd6fc51e978f19b806712e4090251bbf4ea79af5e`
+未变，日志前后 stat 一致，完整物理 Ran/OK/退出标记和实际 exec exit0 一致。
+源码/测试/manifest/ledger/runtime 原 stat/摘要保持；manifest 原 direct 与多脚本
+workflow 映射已核。这里是有界诊断回归，不是正式 related 或 full proof。
+
+这不提供原子 compare-and-replace、任意非合作写者免疫、新写集或旧 A 激活权限；
+仍要求排他锁及其它写者静默。完整 R22、REAL_ENV、原 bootstrap15s/REQ19 probe10s
+原因与正式重跑闸门仍 OPEN；未手改批准 ledger，未以局部 PASS 重跑 related/full。
+
 ### R22 SETUP WAL 未识别合同不得恢复、登记或退休
 
 WAL 的 checksum 只核字节，不证明当前 reader 理解全部写集。schema2 恢复曾忽略

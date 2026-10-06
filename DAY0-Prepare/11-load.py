@@ -6505,8 +6505,10 @@ def register_setup_switch_journal_link(
             stream.flush()
             os.fsync(stream.fileno())
         now = journal.lstat()
-        if any(getattr(before_name, name) != getattr(now, name) for name in (
-                "st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns")):
+        if (any(getattr(before_name, name) != getattr(now, name) for name in (
+                "st_dev", "st_ino", "st_mode", "st_nlink", "st_uid", "st_gid",
+                "st_size", "st_mtime_ns", "st_ctime_ns"))
+                or _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT) != opened):
             raise LoadError("setup switch journal changed before registration")
         os.replace(temporary, journal)
         _fsync_parent_directory(journal.parent)
@@ -6865,8 +6867,10 @@ def register_setup_switch_materialized_directory(
             stream.flush()
             os.fsync(stream.fileno())
         now = journal.lstat()
-        if any(getattr(before_name, name) != getattr(now, name) for name in (
-                "st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns")):
+        if (any(getattr(before_name, name) != getattr(now, name) for name in (
+                "st_dev", "st_ino", "st_mode", "st_nlink", "st_uid", "st_gid",
+                "st_size", "st_mtime_ns", "st_ctime_ns"))
+                or _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT) != opened):
             raise LoadError("setup switch journal changed before directory registration")
         os.replace(temporary, journal)
         _fsync_parent_directory(journal.parent)
@@ -6967,8 +6971,10 @@ def register_setup_switch_infra_log_tree(
             stream.flush()
             os.fsync(stream.fileno())
         now = journal.lstat()
-        if any(getattr(before_name, name) != getattr(now, name) for name in (
-                "st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns")):
+        if (any(getattr(before_name, name) != getattr(now, name) for name in (
+                "st_dev", "st_ino", "st_mode", "st_nlink", "st_uid", "st_gid",
+                "st_size", "st_mtime_ns", "st_ctime_ns"))
+                or _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT) != opened):
             raise LoadError("setup switch journal changed before infra registration")
         os.replace(temporary, journal)
         _fsync_parent_directory(journal.parent)
