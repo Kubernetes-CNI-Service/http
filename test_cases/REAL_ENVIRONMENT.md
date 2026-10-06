@@ -407,6 +407,24 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   helper 输出和恢复后前像；只恢复隔离设备快照。当前仅大小、fsync、硬链接和管理端
   闭合 schema 的本地切片已验证；generation/veto、回放／回滚拒绝及本卡真机步骤均保持 OPEN。
 
+## TC-REAL-F02-INITIAL-METHOD-001 — initial-setup 非交互配置观察
+
+- 状态：**NOT RUN / REAL_ENV REQUIRED**；本地 direct 为
+  `test_req10b_services_keys_contract.py`，真实脚本 workflow 为
+  `test_req10b_services_keys_workflow.py`。本地只在隔离目录执行替代 SSH 的真实 shell，
+  不连接真实设备；不证明生产主入口已接入方法生命周期，也不关闭 F02。
+- 前置：owner 精确授权的可恢复 IB 隔离设备、管理主机和输入项目；冻结 HEAD/tree、
+  CSV/P2P/global/cache/公钥摘要，管理私钥 owned 0600 single-link，固定 eth0 MAC/IP，
+  已授权的 initial-setup 操作。NVL 在支持合同建立前显式拒绝。
+- 正向：保留原独立密钥登录探针；再用 public-key-only BatchMode 的同一会话读取
+  hostname/eth0 MAC、`nv config show -o commands`、当前 authorized_keys。逐项核验
+  本设备 Day-0、DNS/NTP/timezone 和所需公钥，不凭交互日志或旧收据晋升。
+- 负向：独立制造一项配置/公钥漂移、会话失败、输入中途变化、管理密钥替换；
+  必须保持未知/失败并撤销同代当前成功，不补造 bootstrap/complete/handoff。
+  保存完整脱敏输出、退出码、当前代次与绑定摘要；私钥内容和密码不得进入证据。
+- 风险与清理：本观察只读，制造漂移及执行 initial-setup 写入属于另行授权的设备操作。
+  只恢复所批准隔离目标的配置/公钥前像；本地方法文件不能宣称抗整卷回滚。
+
 ## TC-REAL-MONITOR-INVENTORY-LINK-001 — Fresh load 重建采集清单入口
 
 - 前置条件：使用受控 upload overlay 得到不携带 setup-managed runtime links 的 fresh 管理服务器

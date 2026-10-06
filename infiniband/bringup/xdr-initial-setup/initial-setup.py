@@ -2707,6 +2707,186 @@ def verify_management_key_possession(target: Target, ib_user: str,
         raise SetupError("management public-key-only IPv4 SSH verification failed")
 
 
+INITIAL_OBSERVATION_MAX_BYTES = 8 * 1024 * 1024
+
+
+def _run_initial_observation(command, timeout, *, pass_fds=()):
+    """Drain both pipes within one finite byte/deadline budget; always reap."""
+    process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, pass_fds=pass_fds)
+    streams = {process.stdout.fileno(): bytearray(), process.stderr.fileno(): bytearray()}
+    buffers = dict(streams)
+    deadline, total = time.monotonic() + timeout, 0
+    try:
+        for descriptor in streams:
+            os.set_blocking(descriptor, False)
+        while streams:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SetupError("initial method observation deadline exceeded")
+            ready, _, _ = select.select(list(streams), [], [], min(remaining, 0.1))
+            for descriptor in ready:
+                chunk = os.read(descriptor, min(65536, INITIAL_OBSERVATION_MAX_BYTES - total + 1))
+                if not chunk:
+                    del streams[descriptor]
+                    continue
+                total += len(chunk)
+                if total > INITIAL_OBSERVATION_MAX_BYTES:
+                    raise SetupError("initial method combined output exceeds capture budget")
+                buffers[descriptor].extend(chunk)
+        result = process.wait(timeout=max(0.001, deadline - time.monotonic()))
+        return subprocess.CompletedProcess(command, result,
+            buffers[process.stdout.fileno()].decode("utf-8"),
+            buffers[process.stderr.fileno()].decode("utf-8"))
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+        process.stdout.close()
+        process.stderr.close()
+
+
+@contextmanager
+def _initial_observation_key(private_key):
+    """Hold a no-follow private identity through the whole BatchMode session."""
+    descriptors = []
+    path = Path(os.path.abspath(private_key))
+    try:
+        descriptor = os.open(path.anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        descriptors.append(descriptor)
+        for part in path.parts[1:-1]:
+            descriptor = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                 dir_fd=descriptor)
+            descriptors.append(descriptor)
+        parent = os.fstat(descriptor)
+        if parent.st_uid != os.geteuid() or parent.st_mode & 0o022:
+            raise SetupError("initial method private identity parent is not safely owned")
+        key_fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
+                         dir_fd=descriptor)
+        descriptors.append(key_fd)
+        before = os.fstat(key_fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid()
+                or before.st_mode & 0o777 != 0o600 or before.st_nlink != 1
+                or not 0 < before.st_size <= 1024 * 1024):
+            raise SetupError("initial method private identity is not a finite owned 0600 single-link file")
+        yield key_fd
+        # fstat includes nanosecond metadata; recheck the exact named identity too.
+        def identity(info):
+            return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_nlink,
+                    info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        if (identity(os.fstat(key_fd)) != identity(before)
+                or identity(os.stat(path, follow_symlinks=False)) != identity(before)):
+            raise SetupError("initial method private identity changed during observation")
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+def observe_managed_initial_configuration(
+    target: Target, ib_user: str, private_key: Path, timeout: int,
+    services: dict[str, object], keys: list[dict[str, str]],
+) -> dict[str, object]:
+    """Read-only own-session configuration proof, separate from key possession.
+
+    This standard-library-only leaf does not mint a local generation or write
+    receipts. A managed publisher must capture its pending boundary and input
+    before execution and recheck both after this observation. Interactive
+    Day-0/service/key logs never supply positive configuration evidence.
+    """
+    rejected = {"schema_version": 1, "hostname": target.ib.hostname,
+                "batch_identity_verified": False, "config_verified": False,
+                "interface": "eth0", "transport_ip": "", "mac_plain": "",
+                "live_state_sha256": "", "input_sha256": "", "observation_sha256": "",
+                "reason": "initial-current-configuration-not-verified"}
+    try:
+        device = target.ib
+        if device.dev_type != "ib" or not valid_ssh_user(ib_user):
+            raise SetupError("initial method executor/type incompatible")
+        login_ip = str(ipaddress.IPv4Address(device.login_ip))
+        expected_mac = normalize_mac(device.eth0_mac, field="initial method eth0 MAC")
+        if not expected_mac or not private_key.is_file() or private_key.is_symlink():
+            raise SetupError("initial method lacks bound MAC or management key")
+        if (type(timeout) is not int or not 1 <= timeout <= 600 or not isinstance(services, dict)
+                or set(services) != {"dns", "ntp", "timezone"}):
+            raise SetupError("initial method profile incomplete")
+        desired_service_commands(services, "")  # Typed profile validation, no I/O.
+        key_install_command(keys)  # Closed, fingerprint-checked public profile.
+        captured_services, captured_keys = copy.deepcopy(services), copy.deepcopy(keys)
+        expected = {"schema_version": 1, "type": "ib", "config_method": "initial-setup",
+                    "hostname": device.hostname, "eth0": device.eth0_prefix,
+                    "eth0_gateway": device.eth0_gateway, "eth1": device.eth1_prefix,
+                    "eth1_gateway": device.eth1_gateway, "eth0_mac": expected_mac,
+                    "dns": services["dns"], "ntp": services["ntp"], "timezone": services["timezone"],
+                    "key_fingerprints": sorted({entry["fingerprint"] for entry in keys})}
+        input_digest = hashlib.sha256(json.dumps(expected, sort_keys=True, separators=(",", ":"),
+                                                 ensure_ascii=False).encode()).hexdigest()
+        script = (
+            "set -eu; printf '__HTTP_INITIAL_METHOD_V1_IDENTITY_BEGIN__\\n'; "
+            "hostname; cat /sys/class/net/eth0/address; "
+            "printf '__HTTP_INITIAL_METHOD_V1_IDENTITY_END__\\n'; "
+            "printf '__HTTP_INITIAL_METHOD_V1_CONFIG_BEGIN__\\n'; "
+            "set +e; nv config show -o commands; rc=$?; set -e; "
+            "printf '__HTTP_INITIAL_METHOD_V1_CONFIG_END__=%s\\n' \"$rc\"; "
+            "printf '__HTTP_INITIAL_METHOD_V1_KEYS_BEGIN__\\n'; "
+            "test -n \"${HOME:-}\" && test ! -L \"$HOME/.ssh\" && "
+            "test ! -L \"$HOME/.ssh/authorized_keys\" && test -f \"$HOME/.ssh/authorized_keys\"; "
+            "set +e; cat \"$HOME/.ssh/authorized_keys\"; rc=$?; set -e; "
+            "printf '__HTTP_INITIAL_METHOD_V1_KEYS_END__=%s\\n' \"$rc\""
+        )
+        command = ["ssh", "-i", str(private_key), "-o", "BatchMode=yes",
+                   "-o", "PreferredAuthentications=publickey", "-o", "PasswordAuthentication=no",
+                   "-o", "KbdInteractiveAuthentication=no", "-o", "IdentitiesOnly=yes",
+                   "-o", f"ConnectTimeout={timeout}", "-o", "StrictHostKeyChecking=accept-new",
+                   "-o", "LogLevel=ERROR", f"{ib_user}@{login_ip}", shlex.join(["sh", "-c", script])]
+        with _initial_observation_key(private_key) as key_fd:
+            command[2] = "/dev/fd/" + str(key_fd)
+            result = _run_initial_observation(command, max(timeout * 2, 30), pass_fds=(key_fd,))
+        raw = result.stdout
+        if type(result.returncode) is not int or result.returncode != 0 or not isinstance(raw, str) or len(raw.encode()) > 8 * 1024 * 1024:
+            raise SetupError("initial method batch command failed or oversized")
+        lines = raw.splitlines(keepends=True)
+        frames, cursor = {}, 0
+        for label in ("IDENTITY", "CONFIG", "KEYS"):
+            begin = "__HTTP_INITIAL_METHOD_V1_" + label + "_BEGIN__"
+            end = "__HTTP_INITIAL_METHOD_V1_" + label + "_END__"
+            starts = [index for index, line in enumerate(lines) if line.rstrip("\r\n") == begin]
+            ends = [index for index, line in enumerate(lines) if line.rstrip("\r\n").startswith(end)]
+            if len(starts) != 1 or len(ends) != 1 or not cursor <= starts[0] < ends[0]:
+                raise SetupError("initial method framing missing, duplicated or out of order")
+            if lines[ends[0]].rstrip("\r\n") != end + ("" if label == "IDENTITY" else "=0"):
+                raise SetupError("initial method frame command did not succeed")
+            frames[label] = "".join(lines[starts[0] + 1:ends[0]])
+            cursor = ends[0] + 1
+        identity = frames["IDENTITY"].splitlines()
+        if (len(identity) != 2 or identity[0] != device.hostname
+                or normalize_mac(identity[1], field="observed eth0 MAC") != expected_mac):
+            raise SetupError("initial method own-session identity differs")
+        current = frames["CONFIG"]
+        if classify_auto_day0(device, parse_nvue_state(current)) != "complete":
+            raise SetupError("initial method current Day-0 fields are missing or conflicting")
+        if desired_service_commands(captured_services, current):
+            raise SetupError("initial method current services differ")
+        actual_keys = set()
+        for line in frames["KEYS"].splitlines():
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            tokens = shlex.split(line)
+            for index, token in enumerate(tokens[:-1]):
+                if re.fullmatch(r"(?:ssh-|ecdsa-|sk-)[A-Za-z0-9@._+-]+", token):
+                    actual_keys.add(_public_key_fingerprint(" ".join(tokens[index:index + 2])))
+                    break
+        if not set(expected["key_fingerprints"]).issubset(actual_keys):
+            raise SetupError("initial method current authorized keys differ")
+        if services != captured_services or keys != captured_keys:
+            raise SetupError("initial method expected profile changed during the session")
+        return {**rejected, "batch_identity_verified": True, "config_verified": True,
+                "transport_ip": login_ip, "mac_plain": expected_mac.replace(":", ""),
+                "live_state_sha256": hashlib.sha256(current.encode()).hexdigest(),
+                "input_sha256": input_digest, "observation_sha256": hashlib.sha256(raw.encode()).hexdigest(), "reason": ""}
+    except (SetupError, OSError, subprocess.TimeoutExpired, ValueError, TypeError, KeyError, UnicodeError):
+        return rejected
+
+
 def run_key_stage(target: Target, neighbor: Neighbor, eth_user: str,
                   eth_password: str, ib_user: str, timeout: int,
                   keys: list[dict[str, str]], *, local: bool,

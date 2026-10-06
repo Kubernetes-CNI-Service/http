@@ -124,6 +124,13 @@ timezone、key 等请求配置；配置或绑定漂移只发布 failed/veto，�
 single-link、有限读取及前后重绑定；Cumulus 与 NVOS 分别使用现有 eth/ib_nvl 输出。
 `test_manual_applied_config.py` direct 和 `test_config_sync_authority_workflow.py`
 真实 load → collect → method journal → report/HTML 流程覆盖这些正负例。
+initial-setup 另有标准库独立只读观察：同一 public-key-only BatchMode 会话读取
+hostname/eth0 MAC、当前 Day-0/services 和 authorized_keys，与调用前冻结的逐设备
+预期比较。管理私钥采用 owned 0600 single-link/no-follow held FD，观察后核验身份；
+stdout/stderr 共享 8 MiB 上限并受单一 deadline 约束，不在捕获结束后才限制大小。
+direct 覆盖漂移、冲突、期望中途修改、密钥替换和不安全文件；真实脚本 workflow
+执行 cache → batch shell → V2 generation/veto，下一轮缺失密钥必须撤销旧成功。
+现有 key-possession 的 `ssh true` 保持原合同，不作为配置证明。
 这不补造其他九阶段，也不代表 F02 整体验收；initial-setup 生产者接入与完整方法
 生命周期仍需继续实现、测试，真机保持 `REAL_ENVIRONMENT.md` 的 NOT RUN。
 

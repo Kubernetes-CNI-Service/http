@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 import base64
 import hashlib
+import json
 import os
 from pathlib import Path
 import struct
@@ -33,6 +34,115 @@ class Req10BServicesKeysContractTests(unittest.TestCase):
 
     def test_target_cache_version_is_four(self) -> None:
         self.assertEqual(4, self.initial.TARGET_CACHE_VERSION)
+
+    def test_f02_initial_method_compares_own_batch_identity_day0_services_and_keys(self):
+        observe = getattr(self.initial, "observe_managed_initial_configuration", None)
+        self.assertTrue(callable(observe), "key possession alone is not current method configuration proof")
+        device = self.initial.Device("IB01", "ib", "192.0.2.10", "192.0.2.10/24", "192.0.2.1",
+                                     "02:00:00:00:00:01", "", "")
+        transit = self.initial.Device("jump", "eth_jump", "192.0.2.2", "", "", "", "", "")
+        target = self.initial.Target(device, transit, "swp1", "eth0")
+        services = {"dns": ["192.0.2.53"], "ntp": ["time.example.test"], "timezone": "Etc/UTC"}
+        blob = (len(b"ssh-ed25519").to_bytes(4, "big") + b"ssh-ed25519" + (32).to_bytes(4, "big") + b"x" * 32)
+        key = "ssh-ed25519 " + base64.b64encode(blob).decode() + " independent-fixture"
+        fp = "SHA256:" + base64.b64encode(hashlib.sha256(blob).digest()).decode().rstrip("=")
+        keys = [{"name": "mgmt-server.pub", "line": key, "fingerprint": fp}]
+        current = ("nv set interface eth0 ipv4 address 192.0.2.10/24\n"
+                   "nv set interface eth0-1 ipv4 gateway 192.0.2.1\n"
+                   "nv set system hostname IB01\n"
+                   "nv set system dns server 192.0.2.53\n"
+                   "nv set system ntp server time.example.test\n"
+                   "nv set system date-time timezone Etc/UTC\n")
+        def framed(config=current, auth=key + "\n", host="IB01", mac="02:00:00:00:00:01", rc="0"):
+            return ("__HTTP_INITIAL_METHOD_V1_IDENTITY_BEGIN__\n" + host + "\n" + mac + "\n"
+                    "__HTTP_INITIAL_METHOD_V1_IDENTITY_END__\n"
+                    "__HTTP_INITIAL_METHOD_V1_CONFIG_BEGIN__\n" + config + "__HTTP_INITIAL_METHOD_V1_CONFIG_END__=" + rc + "\n"
+                    "__HTTP_INITIAL_METHOD_V1_KEYS_BEGIN__\n" + auth + "__HTTP_INITIAL_METHOD_V1_KEYS_END__=0\n")
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+                self.initial.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, framed(), "")):
+            private = Path(directory).resolve() / "management-key"
+            private.write_text("fixture-not-a-real-private-key")
+            private.chmod(0o600)
+            with mock.patch.object(self.initial, "_run_initial_observation", create=True, return_value=subprocess.CompletedProcess([], 0, framed(), "")) as transport:
+                proof = observe(target, "admin", private, 5, services, keys)
+            self.assertIs(True, proof["batch_identity_verified"])
+            self.assertIs(True, proof["config_verified"])
+            self.assertEqual("IB01", proof["hostname"])
+            self.assertEqual("020000000001", proof["mac_plain"])
+            self.assertEqual(hashlib.sha256(current.encode()).hexdigest(), proof["live_state_sha256"])
+            basis = {"schema_version": 1, "type": "ib", "config_method": "initial-setup", "hostname": "IB01",
+                     "eth0": "192.0.2.10/24", "eth0_gateway": "192.0.2.1", "eth1": "", "eth1_gateway": "",
+                     "eth0_mac": "02:00:00:00:00:01", "dns": ["192.0.2.53"], "ntp": ["time.example.test"],
+                     "timezone": "Etc/UTC", "key_fingerprints": [fp]}
+            self.assertEqual(hashlib.sha256(json.dumps(basis, sort_keys=True, separators=(",", ":"),
+                            ensure_ascii=False).encode()).hexdigest(), proof["input_sha256"])
+            self.assertNotIn("generation", proof)
+            self.assertNotIn("complete", proof)
+            self.assertEqual(1, transport.call_count, "identity, live state and keys must be one connection")
+            command = transport.call_args.args[0]
+            self.assertIn("BatchMode=yes", command)
+            self.assertIn("PasswordAuthentication=no", command)
+            self.assertIn("admin@192.0.2.10", command)
+            self.assertIn("nv config show -o commands", command[-1])
+            for output in (framed(config=current.replace("192.0.2.53", "192.0.2.54")),
+                           framed(config=current.replace("time.example.test", "other.example.test")),
+                           framed(config=current.replace("Etc/UTC", "Asia/Shanghai")),
+                           framed(config=current.replace("192.0.2.10/24", "192.0.2.11/24")),
+                           framed(auth=""), framed(host="foreign"), framed(mac="02:00:00:00:00:02"),
+                           framed(config=current + "nv set interface eth0 ipv4 address 192.0.2.99/24\n"),
+                           framed(rc="1"), framed() + framed(), "old interactive log: SUCCESS\n"):
+                with self.subTest(output=output[:90]), mock.patch.object(self.initial, "_run_initial_observation", create=True,
+                        return_value=subprocess.CompletedProcess([], 0, output, "")):
+                    self.assertIs(False, observe(target, "admin", private, 5, services, keys)["config_verified"])
+            with mock.patch.object(self.initial, "_run_initial_observation", create=True, return_value=subprocess.CompletedProcess([], True, framed(), "")):
+                self.assertIs(False, observe(target, "admin", private, 5, services, keys)["config_verified"])
+            def changed_key(*args, **kwargs):
+                private.write_text("different-key-during-observation")
+                return subprocess.CompletedProcess([], 0, framed(), "")
+            with mock.patch.object(self.initial, "_run_initial_observation", create=True, side_effect=changed_key):
+                self.assertIs(False, observe(target, "admin", private, 5, services, keys)["config_verified"],
+                              "a replaced or edited private identity must withdraw this observation")
+            private.chmod(0o644)
+            with mock.patch.object(self.initial, "_run_initial_observation", create=True) as unsafe_transport:
+                self.assertIs(False, observe(target, "admin", private, 5, services, keys)["config_verified"])
+            unsafe_transport.assert_not_called()
+            private.chmod(0o600)
+            with mock.patch.object(self.initial, "_run_initial_observation", return_value=subprocess.CompletedProcess([], 0, framed(), "")) as invalid_timeout:
+                self.assertIs(False, observe(target, "admin", private, 601, services, keys)["config_verified"])
+            invalid_timeout.assert_not_called()
+            for shape in ("symlink", "hardlink", "fifo"):
+                alternative = private.parent / shape
+                if shape == "symlink":
+                    alternative.symlink_to(private)
+                elif shape == "hardlink":
+                    os.link(private, alternative)
+                else:
+                    os.mkfifo(alternative, 0o600)
+                try:
+                    with mock.patch.object(self.initial, "_run_initial_observation") as unsafe_transport:
+                        self.assertIs(False, observe(target, "admin", alternative, 5, services, keys)["config_verified"])
+                    unsafe_transport.assert_not_called()
+                finally:
+                    alternative.unlink()
+            def changed_profile(*args, **kwargs):
+                services["dns"] = ["192.0.2.54"]
+                return subprocess.CompletedProcess([], 0, framed(config=current.replace("192.0.2.53", "192.0.2.54")), "")
+            with mock.patch.object(self.initial, "_run_initial_observation", create=True, side_effect=changed_profile):
+                self.assertIs(False, observe(target, "admin", private, 5, services, keys)["config_verified"],
+                              "changing the expected profile during the session cannot return an old input digest")
+
+    def test_f02_initial_observation_has_bounded_dual_pipe_capture(self):
+        capture = getattr(self.initial, "_run_initial_observation", None)
+        self.assertTrue(callable(capture), "post-hoc output length is not bounded capture")
+        result = capture([sys.executable, "-c", "import sys; print('literal-frame'); print('diagnostic', file=sys.stderr)"], 5)
+        self.assertEqual((0, "literal-frame\n", "diagnostic\n"), (result.returncode, result.stdout, result.stderr))
+        # Both streams share one budget, and the child must be reaped on overflow.
+        with mock.patch.object(self.initial, "INITIAL_OBSERVATION_MAX_BYTES", 1024):
+            for channel in ("stdout", "stderr"):
+                with self.subTest(channel=channel), self.assertRaises(self.initial.SetupError):
+                    capture([sys.executable, "-c", "import sys; sys." + channel + ".write('x'*2048)"], 5)
+        with self.assertRaises(self.initial.SetupError):
+            capture([sys.executable, "-c", "import time; time.sleep(10)"], 0.05)
 
     def test_public_key_profile_rejects_wire_valid_but_ssh_keygen_invalid_rsa(self) -> None:
         """B10-8 requires real ssh-keygen validation, not just SSH field framing."""

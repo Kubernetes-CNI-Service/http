@@ -98,6 +98,82 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
             cls.generator = load_script("req10b_services_keys_workflow_generator", GENERATOR)
         cls.loader = load_script("req10b_services_keys_workflow_loader", LOADER)
 
+    def test_f02_generated_profile_real_batch_shell_and_local_method_veto(self):
+        """Real cache -> stdlib executor/shell -> V2 writer, no SSH/device I/O."""
+        authority = load_script("f02_initial_shell_authority", ROOT / "ztp/config_sync_authority.py")
+        with tempfile.TemporaryDirectory(prefix="f02-initial-batch-") as directory:
+            root, tool, _, ib_csv, p2p, _, cache, laptop, management = self.fixture(directory)
+            root = root.resolve()
+            tool, ib_csv, p2p = tool.resolve(), ib_csv.resolve(), p2p.resolve()
+            cache = cache.parent.resolve() / cache.name
+            ib_csv.write_text(ib_csv.read_text().replace("203.0.113.1,,,,", "203.0.113.1,02:00:00:00:00:01,,,"))
+            self.assertEqual(0, self.run_initial(tool, ib_csv, p2p, cache, "--generate-json"))
+            candidate = self.initial.load_target_cache(cache, ib_csv, p2p, public_key_tool=tool)
+            self.assertIsNotNone(candidate)
+            target = candidate[1][0]
+            profile = json.loads(cache.read_text())
+            self.assertEqual(list(EXPECTED_IB["dns"]), profile["services"]["dns"])
+            state = (
+                "nv set interface eth0 ipv4 address 203.0.113.2/24\n"
+                "nv set interface eth0-1 ipv4 gateway 203.0.113.1\n"
+                "nv set system hostname EXAMPLE-IB01\n"
+                "nv set system dns server 203.0.113.53\n"
+                "nv set system ntp server ntp.ubuntu.com\n"
+                "nv set system ntp server time.ib.example.test\n"
+                "nv set system date-time timezone Asia/Taipei\n")
+            remote = root / "remote"
+            (remote / ".ssh").mkdir(parents=True)
+            (remote / ".ssh/authorized_keys").write_text(laptop + management)
+            (remote / "live.commands").write_text(state)
+            private = root / "management-key"
+            private.write_text("local fixture identity; never a real key")
+            private.chmod(0o600)
+            executables = root / "fixture-bin"
+            executables.mkdir()
+            programs = {
+                "ssh": "#!" + sys.executable + "\nimport os,shlex,subprocess,sys\n"
+                    "a=sys.argv[1:]\nassert 'BatchMode=yes' in a and 'PasswordAuthentication=no' in a\n"
+                    "assert a[-2]=='admin@203.0.113.2'\n"
+                    "assert open(a[a.index('-i')+1]).read()=='local fixture identity; never a real key'\n"
+                    "r=subprocess.run(shlex.split(a[-1]), pass_fds=())\nsys.exit(r.returncode)\n",
+                "hostname": "#!/bin/sh\nprintf 'EXAMPLE-IB01\\n'\n",
+                "cat": "#!/bin/sh\nif [ \"$1\" = /sys/class/net/eth0/address ]; then "
+                    "printf '02:00:00:00:00:01\\n'; else exec /bin/cat \"$@\"; fi\n",
+                "nv": "#!/bin/sh\n[ \"$*\" = 'config show -o commands' ] || exit 97\n"
+                    "exec /bin/cat \"$HOME/live.commands\"\n",
+            }
+            for name, source in programs.items():
+                path = executables / name
+                path.write_text(source)
+                path.chmod(0o700)
+            storage = root / "configuration-methods"
+            for cycle in (1, 2):
+                ticket = authority.begin_method(storage, target.ib.hostname, "initial-" + str(cycle),
+                                                "own-initial-" + str(cycle), "initial_setup_managed")
+                self.assertEqual("pending", authority.read_method_current(storage, target.ib.hostname)["state"])
+                if cycle == 2:
+                    (remote / ".ssh/authorized_keys").write_text(laptop)
+                with mock.patch.dict(os.environ, {"PATH": str(executables) + ":/usr/bin:/bin", "HOME": str(remote)}):
+                    observed = self.initial.observe_managed_initial_configuration(
+                        target, "admin", private, 5, profile["services"], profile["public_keys"])
+                self.assertIs(cycle == 1, observed["config_verified"],
+                              "installed-key presence is checked in the actual batch shell, not an old log")
+                result = {"schema_version": 2, "record_type": "configuration_method", "hostname": target.ib.hostname,
+                          "type": "ib", "config_method": "initial-setup", **{name: ticket[name] for name in (
+                            "generation", "source_identity", "operation_id", "trigger_id", "trigger_source")},
+                          "state": "success" if cycle == 1 else "failed", "reason": observed["reason"]}
+                if cycle == 1:
+                    result.update({name: observed[name] for name in ("batch_identity_verified", "config_verified",
+                        "interface", "transport_ip", "mac_plain", "live_state_sha256", "input_sha256")})
+                    result["source_receipt_sha256"] = observed["observation_sha256"]
+                    self.assertEqual(hashlib.sha256(state.encode()).hexdigest(), result["live_state_sha256"])
+                authority.finish_method(storage, ticket, result)
+                current = authority.read_method_current(storage, target.ib.hostname)
+                self.assertEqual((cycle, cycle != 1), (current["generation"], current["veto"]))
+                receipt = authority.read_method_receipt(storage, target.ib.hostname)
+                self.assertEqual(result if cycle == 1 else None, receipt)
+                self.assertNotIn("complete", result, "method proof never supplies missing bootstrap stages")
+
     def fixture(self, directory: str):
         root = Path(directory)
         tool = root / "infiniband/bringup/xdr-initial-setup"
