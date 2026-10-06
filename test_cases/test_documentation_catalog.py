@@ -107,7 +107,10 @@ def load_script():
     if spec is None or spec.loader is None:
         raise RuntimeError(f"cannot import {SCRIPT}")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # Match direct CLI's sibling-import scope without relying on a previous
+    # test having inserted tools into this process's global sys.path.
+    with mock.patch.object(sys, "path", [str(SCRIPT.parent), *sys.path]):
+        spec.loader.exec_module(module)
     return module
 
 
