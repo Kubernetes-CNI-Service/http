@@ -16,6 +16,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSyncAuthorityTests(unittest.TestCase):
+    def test_managed_initial_profile_root_is_the_explicit_project_not_loaded_code(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve()
+            cycle = self.authority.ManagedInitialMethodCycle(project, SimpleNamespace(__file__="/unrelated/repository/initial-setup.py"))
+            self.assertEqual(project / "infiniband/bringup/xdr-initial-setup", cycle.tool_input_root)
+            self.assertFalse(cycle.root.exists(), "binding an input root must not mint a method era")
+
     def test_managed_initial_cycle_strict_observation_and_late_failure_withdrawal(self):
         target = SimpleNamespace(ib=SimpleNamespace(hostname="IB01", dev_type="ib", login_ip="192.0.2.10", eth0_mac="02:00:00:00:00:01"))
         proof = {"schema_version": 1, "hostname": "IB01", "batch_identity_verified": True, "config_verified": True,

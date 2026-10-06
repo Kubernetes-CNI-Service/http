@@ -3114,7 +3114,8 @@ def main(*, method_cycle=None) -> int:
             "that file exposes all of those devices.  Edit CSV to correct "
             "bad MACs; the next round revalidates inputs."
         )
-    tool = Path(__file__).resolve().parent
+    tool = (method_cycle.tool_input_root if method_cycle is not None
+            else Path(__file__).resolve().parent)
     source_inputs_available = (
         args.execution_mode in {"management", "ethernet"}
         or (args.execution_mode == "auto" and (

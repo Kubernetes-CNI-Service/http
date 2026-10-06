@@ -96,6 +96,8 @@ class ManagedInitialMethodCycle:
         finally:
             os.close(descriptor)
         self.initial = initial
+        # Code is loaded from the repository; mutable profile inputs are not.
+        self.tool_input_root = self.project / "infiniband/bringup/xdr-initial-setup"
         self.root = self.project / "99-output-ztp/configuration-methods"
         self.tickets, self.finished = {}, set()
         self.targets = []

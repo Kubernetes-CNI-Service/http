@@ -134,6 +134,8 @@ direct 覆盖漂移、冲突、期望中途修改、密钥替换和不安全文�
 管理入口 `python3 ztp/config_sync_authority.py --project <project> -- <initial-setup arguments>`
 通过可选周期对象接入原 initial-setup main；显式 `--apply` 和逐 IB 的 `config_method=initial-setup`
 在 report/cache/authority 写入前验证，eth_jump 仅为 transport。项目输入必须位于显式项目内，
+代码从仓库加载，global/publickey 从该项目的 `infiniband/bringup/xdr-initial-setup` 读取，
+不能靠脚本 `__file__` 指向项目来隐式取得输入；真实管理 CLI 的四轮流程也覆盖此边界。
 由 owned/single-link/no-follow 有限读取绑定，重新验证 cache/parser 后再次核验输入与项目根。
 操作前 pending，完成后同会话观察及发布后重读；失败撤销自己的当前代次，不触碰新写者。
 默认单文件离线入口不依赖后端、不产生方法权威；REQ10B 密钥探针和 REQ10C 的 cron 条件不变。

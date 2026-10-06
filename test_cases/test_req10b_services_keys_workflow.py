@@ -233,7 +233,9 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                      "ntp": ["ntp.ubuntu.com", "time.ib.example.test"], "timezone": "Asia/Taipei",
                      "key_fingerprints": sorted([fingerprint(laptop), fingerprint(management)])}
             expected_input = hashlib.sha256(json.dumps(basis, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
-            for cycle in (1, 2, 3):
+            for cycle in (1, 2, 3, 4):
+                if cycle == 4:
+                    ib_csv.write_text(ib_csv.read_text().replace("203.0.113.3", "203.0.113.2"))
                 executor = cycle_type(root, self.initial)
                 def device_boundary(*args, **kwargs):
                     current = authority.read_method_current(storage, "EXAMPLE-IB01")
@@ -262,13 +264,14 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                     stack.enter_context(mock.patch.object(self.initial, "verify_management_key_possession"))
                     stack.enter_context(mock.patch.object(self.initial, "observe_managed_initial_configuration", side_effect=batch_observer))
                     result = self.run_initial(tool, ib_csv, p2p, cache, "--apply", "--yes", "--execution-mode", "management",
-                                              method_cycle=executor)
+                                              method_cycle=executor,
+                                              managed_entry=authority.managed_initial_main if cycle == 4 else None)
                 current = authority.read_method_current(storage, "EXAMPLE-IB01")
-                self.assertEqual((cycle, "success" if cycle == 1 else "failed", cycle != 1),
+                self.assertEqual((cycle, "success" if cycle in (1, 4) else "failed", cycle not in (1, 4)),
                                  tuple(current[name] for name in ("generation", "state", "veto")))
-                self.assertEqual(0 if cycle == 1 else 1, result)
+                self.assertEqual(0 if cycle in (1, 4) else 1, result)
                 receipt = authority.read_method_receipt(storage, "EXAMPLE-IB01")
-                self.assertEqual(cycle == 1, receipt is not None)
+                self.assertEqual(cycle in (1, 4), receipt is not None)
                 if receipt:
                     self.assertEqual("initial_setup_managed", receipt["trigger_source"])
                     self.assertNotIn("complete", receipt)
@@ -291,17 +294,38 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                 self.assertFalse((root / "99-output-ztp").exists())
 
     def run_initial(self, tool: Path, ib_csv: Path, p2p: Path,
-                    cache: Path, *extra: str, method_cycle=None) -> int:
+                    cache: Path, *extra: str, method_cycle=None, managed_entry=None) -> int:
         argv = [
             "initial-setup.py", "--ib-csv", str(ib_csv), "--p2p", str(p2p),
             "--target-cache", str(cache), "--report", str(cache.parent / "report.log"),
             "--snapshot-dir", str(cache.parent / "snapshots"), *extra,
         ]
-        with mock.patch.object(sys, "argv", argv), mock.patch.object(
-            self.initial, "__file__", str(tool / "initial-setup.py")
-        ), mock.patch.object(Path, "home", return_value=tool.parents[2]), \
-             redirect_stdout(io.StringIO()):
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(sys, "argv", argv))
+            if method_cycle is None:
+                stack.enter_context(mock.patch.object(self.initial, "__file__", str(tool / "initial-setup.py")))
+            else:
+                self.assertEqual(ROOT / "infiniband/bringup/xdr-initial-setup/initial-setup.py",
+                                 Path(self.initial.__file__), "managed entry executes repository code, not a project copy")
+            stack.enter_context(mock.patch.object(Path, "home", return_value=tool.parents[2]))
+            stack.enter_context(redirect_stdout(io.StringIO()))
+            if managed_entry is not None:
+                # Execute the real CLI loader and freshly loaded main. Replace
+                # ONLY device I/O boundaries, never __file__, profiles or main.
+                from importlib.machinery import SourceFileLoader
+                real_exec = SourceFileLoader.exec_module
+                def isolated_device_io(loader, module):
+                    real_exec(loader, module)
+                    if module.__name__ == "_http_managed_initial_setup":
+                        for name in ("local_ethernet_keys", "prompt_ethernet_passwords", "collect_ethernet_interfaces",
+                                     "collect_ethernet_network_tables", "save_ethernet_snapshot", "interface_status_line",
+                                     "interface_oper_status", "fdb_port_for_interface", "neighbor_for_port", "interface_vrf",
+                                     "run_on_ib", "verify_management_key_possession", "observe_managed_initial_configuration"):
+                            setattr(module, name, getattr(self.initial, name))
+                stack.enter_context(mock.patch.object(SourceFileLoader, "exec_module", isolated_device_io))
             try:
+                if managed_entry is not None:
+                    return managed_entry(["--project", str(tool.parents[2]), "--", *argv[1:]])
                 return self.initial.main() if method_cycle is None else self.initial.main(method_cycle=method_cycle)
             finally:
                 report = self.initial.REPORT_HANDLE
