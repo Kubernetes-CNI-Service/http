@@ -5890,6 +5890,27 @@ def _setup_switch_journal_path() -> Path:
     return MANIFEST.parent / ".setup-switch-journal.json"
 
 
+def require_no_pending_setup_switch_journal() -> None:
+    """Fence a new ordinary LOAD before project mutation, not recover a WAL.
+
+    Any occupied authority name, including malformed bytes or a dangling
+    symlink, is unresolved evidence. The caller must not delete it or infer
+    that either project committed. Production main checks under its lock.
+    """
+    journal = _setup_switch_journal_path()
+    try:
+        journal.lstat()
+    except FileNotFoundError:
+        return
+    # Do not use lexists(): it converts permission/type errors to False and
+    # would incorrectly authorize project writes with an unreadable WAL path.
+    raise LoadError(
+        f"pending setup switch WAL: {journal}; "
+        "保留原始凭据并完成独立恢复核验后再运行新 load；"
+        "不得删除 WAL、继续模板写入或自动启动旧 A"
+    )
+
+
 def _setup_switch_directory_identity(path: Path) -> dict[str, object]:
     try:
         canonical = path.resolve(strict=True)
@@ -11518,6 +11539,8 @@ def main(
                 )
         if not args.dry_run:
             deployment_lock_descriptor = acquire_deployment_lock(exclusive=True)
+            failure_phase = "未结清 setup WAL 前置闸门"
+            require_no_pending_setup_switch_journal()
         info(f"运行平台：{host_os}")
         if not local_services_supported:
             warn(

@@ -5030,6 +5030,77 @@ os.kill(os.getpid(), signal.SIGKILL)
         )
         restore.assert_not_called()
 
+    def test_main_pending_setup_wal_blocks_before_project_mutation(self) -> None:
+        journal = self.ztp / ".setup-switch-journal.json"
+        payload = b'{"incomplete-recovery-evidence":true}\n'
+        journal.write_bytes(payload)
+        args = LOAD.parse_args([
+            str(self.project), "--host-role=workstation", "--no-upgrade",
+        ])
+        release_lock = mock.Mock()
+        template = mock.Mock(side_effect=LOAD.LoadError("unsafe template edge reached"))
+        stderr = io.StringIO()
+        with mock.patch.object(LOAD, "parse_args", return_value=args), mock.patch.object(
+            LOAD, "runtime_os", return_value="Linux",
+        ), mock.patch.object(LOAD, "acquire_deployment_lock", return_value=91), mock.patch.object(
+            LOAD, "release_deployment_lock", release_lock,
+        ), mock.patch.object(LOAD, "resolve_project", return_value=self.project), mock.patch.object(
+            LOAD, "ensure_previous_generation_frozen", return_value=None,
+        ), mock.patch.object(LOAD, "MANIFEST", self.ztp / ".setup_manifest"), mock.patch.object(
+            LOAD, "initialize_from_template", template,
+        ), redirect_stderr(stderr):
+            self.assertEqual(1, LOAD.main([]))
+        template.assert_not_called()
+        self.assertIn("pending setup switch WAL", stderr.getvalue())
+        self.assertEqual(payload, journal.read_bytes())
+        release_lock.assert_called_once_with(91)
+
+    def test_pending_setup_wal_guard_preserves_every_occupied_authority_shape(self) -> None:
+        journal = self.ztp / ".setup-switch-journal.json"
+        with mock.patch.object(LOAD, "MANIFEST", self.ztp / ".setup_manifest"):
+            LOAD.require_no_pending_setup_switch_journal()
+            for shape in ("regular", "dangling-symlink", "fifo", "directory"):
+                with self.subTest(shape=shape):
+                    if shape == "regular":
+                        journal.write_bytes(b"partial journal evidence\n")
+                    elif shape == "dangling-symlink":
+                        journal.symlink_to("unowned-absent-journal-target")
+                    elif shape == "fifo":
+                        os.mkfifo(journal, 0o600)
+                    else:
+                        journal.mkdir()
+                    before = journal.lstat()
+                    try:
+                        with self.assertRaisesRegex(LOAD.LoadError, "pending setup switch WAL"):
+                            LOAD.require_no_pending_setup_switch_journal()
+                        after = journal.lstat()
+                        self.assertEqual(
+                            (before.st_dev, before.st_ino, before.st_mode, before.st_mtime_ns),
+                            (after.st_dev, after.st_ino, after.st_mode, after.st_mtime_ns),
+                        )
+                        if shape == "regular":
+                            self.assertEqual(b"partial journal evidence\n", journal.read_bytes())
+                        elif shape == "dangling-symlink":
+                            self.assertEqual("unowned-absent-journal-target", os.readlink(journal))
+                    finally:
+                        if shape == "directory":
+                            journal.rmdir()
+                        else:
+                            journal.unlink()
+
+    def test_pending_setup_wal_guard_does_not_treat_stat_errors_as_absence(self) -> None:
+        for error in (
+            PermissionError("WAL parent is unreadable"),
+            NotADirectoryError("WAL parent is an unexpected regular file"),
+        ):
+            with self.subTest(error=type(error).__name__), mock.patch.object(
+                LOAD, "MANIFEST", self.ztp / ".setup_manifest",
+            ), mock.patch.object(LOAD.os, "lstat", side_effect=error), mock.patch.object(
+                LOAD.Path, "lstat", side_effect=error,
+            ):
+                with self.assertRaises(type(error)):
+                    LOAD.require_no_pending_setup_switch_journal()
+
     def test_main_freezes_existing_a_before_any_template_mutation(self) -> None:
         events: list[str] = []
         with mock.patch.object(

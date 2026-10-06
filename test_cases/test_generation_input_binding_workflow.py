@@ -607,6 +607,55 @@ finally:
             self.assertEqual(p / "01-global.yaml", common.resolve())
             self.assertFalse((root / "service-started").exists())
 
+    def test_real_setup_death_pending_wal_blocks_new_load_before_template(self):
+        """A real SETUP crash must fence a fresh LOAD before any new project writes."""
+        with tempfile.TemporaryDirectory(prefix="r22-pending-wal-main-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, q, common, p_only, q_only, manifest, _before, _hook, barrier, home = fixture
+            first = self._run_private_load_setup_switch(fixture, prepare_journal=True)
+            self.assertEqual(23, first.returncode, first.stdout + first.stderr)
+            self.assertTrue(barrier.is_file())
+            journal = root / "ztp/.setup-switch-journal.json"
+            wal_bytes = journal.read_bytes()
+            manifest_bytes = manifest.read_bytes()
+            common_target = os.readlink(common)
+            driver = """
+import importlib.util
+import sys
+from pathlib import Path
+root, q = map(Path, sys.argv[1:3])
+spec = importlib.util.spec_from_file_location('fresh_pending_wal_main', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.runtime_os = lambda: 'Linux'
+original = load.initialize_from_template
+def observed_template(project, dry_run):
+    (root / 'unsafe-template-entry').write_bytes(b'new LOAD entered template mutation\\n')
+    return original(project, dry_run)
+load.initialize_from_template = observed_template
+raise SystemExit(load.main([str(q), '--host-role=workstation', '--no-upgrade']))
+"""
+            environment = dict(os.environ)
+            environment["HOME"] = str(home)
+            dependencies = [item for item in sys.path
+                            if item and item.endswith("site-packages") and Path(item).is_dir()]
+            environment["PYTHONPATH"] = os.pathsep.join(dependencies)
+            second = subprocess.run(
+                [sys.executable, "-B", "-c", driver, str(root), str(q)],
+                cwd=root, env=environment, capture_output=True, text=True,
+                check=False, timeout=30,
+            )
+            self.assertEqual(1, second.returncode, second.stdout + second.stderr)
+            self.assertFalse((root / "unsafe-template-entry").exists())
+            self.assertIn("pending setup switch WAL", second.stderr)
+            self.assertEqual(wal_bytes, journal.read_bytes())
+            self.assertEqual(manifest_bytes, manifest.read_bytes())
+            self.assertEqual(common_target, os.readlink(common))
+            self.assertFalse(os.path.lexists(p_only))
+            self.assertFalse(os.path.lexists(q_only))
+            self.assertFalse((root / "service-started").exists())
+
     def test_real_setup_wal_cold_recovery_rejects_rebound_link_parent(self):
         """A killed SETUP must not let fresh LOAD restore P into a new parent."""
         with tempfile.TemporaryDirectory(prefix="r22-parent-rebind-cold-") as name:
