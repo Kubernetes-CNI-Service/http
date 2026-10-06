@@ -249,6 +249,11 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-F02-6-001 — 当前轮九阶段证据与交接一致性
 
+- 离线静态入口：私有真实 load → release → validate_monitor_mode → monitor_once
+  已覆盖可信 disabled 无 DHCP 文件、传入但不读取的旧路径、enabled 正反例和入口后
+  release 模式切换。离线绝不访问设备或服务、不放行完成交接；该本地证据不等于
+  真机验收，真实目标仍 NOT RUN，也不因此取得文件移除、服务或设备权限。
+
 - 独立健康分类：对分别受授权的 ETH/IB/NVL、没有本轮 ZTP 完成的合法监控目标，运行
   已有信息采集 → 页面流程，核对新鲜 OK、Not OK 和缺健康证据各自显示健康/异常/未知；
   九阶段未完成、配置收据缺失不能阻断该分类，也不能因此自动变成 overall success 或

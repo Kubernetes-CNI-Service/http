@@ -464,6 +464,10 @@ monitor 的 DHCP 模式来自已核验的当前 parent release/global 绑定（l
 不创建本地 DHCP 归属或查询该服务状态；静态 SSH 与独立 Apache 证据继续，report 明示
 disabled。真实 load 发布 → monitor_once workflow 保留 enabled 正向 DHCPACK，并证明
 disabled 在旧日志/租约存在及完全缺失时均无需读取，也不改写原始来源文件。
+离线入口只在当前 parent release/global 通过同一完整身份校验后免除 disabled 的
+DHCP log/lease 参数和文件检查；enabled 或没有 mode 权威的旧诊断入口仍要求显式文件。
+损坏/悬空 release 不得回退，入口后 release 改变须在 inventory/DHCP 读取前拒绝。
+Apache/AIR、single-link 文件、独立输出及 no-SSH/no-watch/no-HTML/no-handoff 限制不放宽。
 
 健康分类另有真实 `sw-info.sh → generate-monitor-html.py` workflow：在私有目录运行
 完整采集脚本，仅设备/系统命令为独立夹具。ETH/IB/NVL 各覆盖 OK、Not OK 和缺证据，

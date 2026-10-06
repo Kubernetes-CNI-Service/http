@@ -4684,6 +4684,9 @@ def monitor_once(args: argparse.Namespace, project: Path) -> Path:
     offline = bool(getattr(args, "offline", False))
     runtime_backend = None if offline else service_runtime_backend()
     release = load_release_identity(project)
+    admitted_release = getattr(args, "_validated_offline_release_identity", None)
+    if offline and admitted_release is not None and release != admitted_release:
+        raise ValueError("--offline current release 在入口校验后发生变化")
     dhcp_status = release.get("dhcp_status")
     if type(dhcp_status) is not str or dhcp_status not in {"enabled", "disabled"}:
         raise ValueError("current release 缺少可信 DHCP 模式")
@@ -5874,14 +5877,31 @@ def validate_monitor_mode(args: argparse.Namespace, project: Path) -> None:
             args._validated_live_watch = True
         return
 
+    # Legacy inert evidence validation has no mode authority and therefore
+    # retains every explicit DHCP input. A present release must be verified;
+    # malformed or dangling release paths cannot downgrade to that legacy case.
+    release_path = project / "99-output-ztp/current-release.json"
+    admitted_release = None
+    try:
+        release_path.lstat()
+    except FileNotFoundError:
+        dhcp_enabled = True
+    except OSError as exc:
+        raise ValueError(f"--offline current release 无法检查: {release_path}: {exc}") from exc
+    else:
+        admitted_release = load_release_identity(project)
+        mode = admitted_release.get("dhcp_status")
+        if type(mode) is not str or mode not in {"enabled", "disabled"}:
+            raise ValueError("--offline current release 缺少可信 DHCP 模式")
+        dhcp_enabled = mode == "enabled"
+    evidence_paths = [("Apache log", args.apache_log), ("AIR JSON", args.air_json)]
+    required_options = [("--apache-log", args.apache_log),
+                        ("--air-json", args.air_json), ("--output-dir", args.output_dir)]
+    if dhcp_enabled:
+        evidence_paths += [("DHCP log", args.dhcp_log), ("DHCP leases", args.dhcp_leases)]
+        required_options += [("--dhcp-log", args.dhcp_log), ("--dhcp-leases", args.dhcp_leases)]
     missing = [
-        option for option, value in (
-            ("--apache-log", args.apache_log),
-            ("--dhcp-log", args.dhcp_log),
-            ("--dhcp-leases", args.dhcp_leases),
-            ("--air-json", args.air_json),
-            ("--output-dir", args.output_dir),
-        ) if value is None
+        option for option, value in required_options if value is None
     ]
     if missing or not args.no_ssh:
         detail = ", ".join(missing + ([] if args.no_ssh else ["--no-ssh"]))
@@ -5892,18 +5912,14 @@ def validate_monitor_mode(args: argparse.Namespace, project: Path) -> None:
     output = args.output_dir.expanduser().resolve(strict=False)
     if _path_within(output, live_root):
         raise ValueError("--offline 输出不得位于 live ztp/status 发布目录")
-    for label, path in (
-        ("Apache log", args.apache_log),
-        ("DHCP log", args.dhcp_log),
-        ("DHCP leases", args.dhcp_leases),
-        ("AIR JSON", args.air_json),
-    ):
+    for label, path in evidence_paths:
         try:
             metadata = path.lstat()
         except OSError as exc:
             raise ValueError(f"--offline {label} 无法读取: {path}: {exc}") from exc
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
             raise ValueError(f"--offline {label} 必须是 single-link 普通文件: {path}")
+    args._validated_offline_release_identity = admitted_release
 
 
 def resolve_project(value: str) -> Path:

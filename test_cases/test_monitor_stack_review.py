@@ -1379,6 +1379,30 @@ class MonitorEvidenceAndModeContractTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "一次性分析"):
                 self.monitor.validate_monitor_mode(live_action, project)
 
+    def test_offline_dhcp_exemption_requires_a_valid_current_release_and_keeps_no_live_contract(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            release = project / "99-output-ztp/current-release.json"
+            release.parent.mkdir()
+            release.write_text('{"dhcp_status":"disabled"}')
+            apache, air = project / "apache.log", project / "air.json"
+            apache.write_text("")
+            air.write_text('{"nodes": {}}')
+            arguments = [str(project), "--offline", "--no-ssh", "--apache-log", str(apache),
+                         "--air-json", str(air), "--output-dir", str(project / "reports")]
+            with self.assertRaisesRegex(ValueError, "current release.*schema"):
+                self.monitor.validate_monitor_mode(self.monitor.parser().parse_args(arguments), project)
+            # Even a trusted disabled release does not relax other inert-input
+            # and no-live-action requirements. The real binding has workflow coverage.
+            with mock.patch.object(self.monitor, "load_release_identity", return_value={"dhcp_status": "disabled"}):
+                for extra in (["--watch", "5"], ["--generate-html"], ["--collect-on-complete"]):
+                    with self.subTest(extra=extra), self.assertRaisesRegex(ValueError, "一次性分析"):
+                        self.monitor.validate_monitor_mode(self.monitor.parser().parse_args(arguments + extra), project)
+                missing_air = [item for item in arguments if item not in ("--air-json", str(air))]
+                with self.assertRaisesRegex(ValueError, "--air-json"):
+                    self.monitor.validate_monitor_mode(self.monitor.parser().parse_args(missing_air), project)
+            self.assertFalse((project / "reports").exists())
+
     def test_release_identity_is_bounded_and_project_bound(self):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory) / "sample"

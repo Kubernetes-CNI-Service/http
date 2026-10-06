@@ -24,6 +24,88 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
+    def test_disabled_offline_admission_cannot_be_reused_after_real_release_mode_changes(self):
+        from test_cases.module_loader import load_script
+        from test_cases import test_load_release_transaction as release_fixture
+        monitor = load_script("f02_offline_admission_release_race", ROOT / "DAY0-Prepare/12-ztp-monitor.py")
+        fixture = release_fixture.ReleaseTransactionTests("test_writes_parent_release_after_all_components_match")
+        fixture.setUp()
+        try:
+            project = fixture.project
+            fixture.global_file.write_text(fixture.global_file.read_text().replace("status: enabled", "status: disabled"))
+            disabled = release_fixture.LOAD.replace(fixture.inputs, settings=release_fixture.LOAD.replace(fixture.inputs.settings, dhcp_enabled=False))
+            release_fixture.LOAD.validate_and_publish_release(project, disabled, publish=True)
+            apache, air = project / "apache.log", project / "air.json"
+            apache.write_text("")
+            air.write_text('{"nodes": {}}')
+            args = monitor.parser().parse_args([str(project), "--offline", "--no-ssh", "--apache-log", str(apache),
+                                               "--air-json", str(air), "--output-dir", str(project / "reports")])
+            monitor.validate_monitor_mode(args, project)
+            fixture.global_file.write_text(fixture.global_file.read_text().replace("status: disabled", "status: enabled"))
+            release_fixture.LOAD.validate_and_publish_release(project, fixture.inputs, publish=True)
+            with mock.patch.object(monitor, "read_devices", side_effect=AssertionError("changed admission must fail before inventory")), \
+                    mock.patch.object(monitor, "collect_dhcp", side_effect=AssertionError("changed admission cannot fall back to local DHCP")):
+                with self.assertRaisesRegex(ValueError, "offline.*release.*变化"):
+                    monitor.monitor_once(args, project)
+            self.assertFalse((project / "reports").exists())
+        finally:
+            fixture.tearDown()
+
+    def test_real_release_disabled_offline_admission_needs_no_dhcp_files(self):
+        from test_cases.module_loader import load_script
+        from test_cases import test_load_release_transaction as release_fixture
+        monitor = load_script("f02_disabled_offline_admission", ROOT / "DAY0-Prepare/12-ztp-monitor.py")
+        for enabled, supplied in ((False, False), (False, True), (True, False), (True, True)):
+            with self.subTest(enabled=enabled, supplied=supplied):
+                fixture = release_fixture.ReleaseTransactionTests("test_writes_parent_release_after_all_components_match")
+                fixture.setUp()
+                try:
+                    project = fixture.project
+                    if not enabled:
+                        fixture.global_file.write_text(fixture.global_file.read_text().replace("status: enabled", "status: disabled"))
+                    inputs = release_fixture.LOAD.replace(fixture.inputs, settings=release_fixture.LOAD.replace(fixture.inputs.settings, dhcp_enabled=enabled))
+                    parent = release_fixture.LOAD.validate_and_publish_release(project, inputs, publish=True)
+                    self.assertEqual("enabled" if enabled else "disabled", parent["dhcp_status"])
+                    apache, air = project / "apache.log", project / "air.json"
+                    apache.write_text("")
+                    air.write_text('{"nodes": {}}')
+                    dhcp, leases = project / "unused-dhcp", project / "unused-leases"
+                    arguments = [str(project), "--offline", "--no-ssh", "--apache-log", str(apache),
+                                 "--air-json", str(air), "--output-dir", str(project / "offline-reports")]
+                    if supplied:
+                        # Disabled must not even stat provided stale DHCP paths.
+                        if enabled:
+                            dhcp.write_text("")
+                            leases.write_text("")
+                        arguments += ["--dhcp-log", str(dhcp), "--dhcp-leases", str(leases)]
+                    args = monitor.parser().parse_args(arguments)
+                    real_lstat = Path.lstat
+                    def lstat(path, *positional, **keyword):
+                        if not enabled:
+                            self.assertNotIn(path, (dhcp, leases), "disabled admission cannot inspect DHCP sources")
+                        return real_lstat(path, *positional, **keyword)
+                    with mock.patch.object(Path, "lstat", lstat):
+                        if enabled and not supplied:
+                            with self.assertRaisesRegex(ValueError, "--dhcp-log.*--dhcp-leases"):
+                                monitor.validate_monitor_mode(args, project)
+                            self.assertFalse((project / "offline-reports").exists())
+                            continue
+                        monitor.validate_monitor_mode(args, project)
+                        with mock.patch.object(monitor, "collect_dhcp", wraps=monitor.collect_dhcp) as collector, \
+                                mock.patch.object(monitor, "service_state", side_effect=AssertionError("offline cannot query services")), \
+                                mock.patch.object(monitor, "collect_switch", side_effect=AssertionError("offline cannot connect devices")):
+                            run = monitor.monitor_once(args, project)
+                    self.assertEqual(int(enabled), collector.call_count)
+                    report = json.loads((run / "report.json").read_text())
+                    self.assertEqual("enabled" if enabled else "disabled", report["dhcp_status"])
+                    self.assertNotEqual("success", report["devices"][0]["overall"])
+                    self.assertFalse(monitor.completion_handoff_device_complete(report["devices"][0]))
+                    if not enabled:
+                        self.assertFalse(dhcp.exists())
+                        self.assertFalse(leases.exists())
+                finally:
+                    fixture.tearDown()
+
     def test_monitor_rejects_missing_or_untyped_release_mode_before_inventory_or_report_io(self):
         from test_cases.module_loader import load_script
         monitor = load_script("f02_unbound_release_mode_monitor", ROOT / "DAY0-Prepare/12-ztp-monitor.py")
