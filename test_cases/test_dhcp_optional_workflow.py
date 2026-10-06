@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import shlex
 import shutil
+import stat
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -490,6 +491,10 @@ class DhcpOptionalWorkflowTests(unittest.TestCase):
                     if "-d" in command:
                         for target in command[command.index("--") + 1:]:
                             Path(target).mkdir(parents=True, exist_ok=True)
+                            Path(target).chmod(int(command[command.index("-m") + 1], 8))
+                            if Path(target).name == "backup":
+                                self.assertEqual(0o700, stat.S_IMODE(Path(target).stat().st_mode),
+                                                 "private install port must preserve root-only backup mode")
                     else:
                         shutil.copy2(command[-2], command[-1])
                     return

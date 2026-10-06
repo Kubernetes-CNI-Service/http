@@ -288,6 +288,12 @@ DHCP 首个 B install 前还必须核每个 A backup 与首次冻结预像的 le
 0700 backup/staged/事务作为未验证证据保留，磁盘前置闸门阻断新 LOAD。
 读回通过只验证当前字段集，不证明 backup 已持久化、完整 WAL/receipt、
 备份之后的非协作篡改免疫或服务可健康激活；其它写者静默仍是必要前提。
+后续写前同步候选要求通过上述读回之后，持有 NOFOLLOW runtime→transaction→
+backup 目录 FD，先同步所有原 regular backup 和 backup 目录，再同步 transaction
+及 runtime 目录。每步重核持有/名称身份、原 A 和 backup 字段集；任何失败在零 B
+install、零 parent 提交状态 HOLD，并保留未确认的事务。正例必须见证全部文件→
+backup→transaction→runtime 完成后才能首次安装 B。这里仍没有完整持久分组
+receipt/WAL、祖先原子比较、Linux 断电见证、B 成功退休或旧 A 显式健康激活。
 同一进程内再次用可见但未确认的父候选调用 DHCP 安装 API，必须在读入安装映射、
 创建事务、备份或安装之前 HOLD。原输入后来改变也不能许可第二次覆盖 B；第一次
 的 B/A 备份、原事务及 backup inode 保持不变。此内存候选入口闸门不是跨重启凭据，

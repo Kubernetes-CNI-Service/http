@@ -8325,6 +8325,66 @@ def _sync_verified_dhcp_a_restore(
         raise LoadError(f"DHCP A restore durability unconfirmed; HOLD: {exc}") from exc
 
 
+def _sync_verified_dhcp_a_backup(
+    runtime_directory: Path, backup_directory: Path,
+    original_states: dict[Path, dict[str, object]],
+) -> None:
+    """Persist verified A payloads and their names before the first B write.
+
+    This bounds cooperative identity drift, not a grouped recovery receipt,
+    ancestor compare-and-write or a power-loss witness.
+    """
+    descriptors = []
+    try:
+        transaction = backup_directory.parent
+        if (transaction.parent != runtime_directory
+                or not transaction.name.startswith(".load-dhcp-transaction-")
+                or backup_directory.name != "backup"
+                or any(path.parent != runtime_directory for path in original_states)):
+            raise LoadError("A backup ancestry is outside the DHCP transaction")
+        if any(not hasattr(os, flag) for flag in ("O_DIRECTORY", "O_NOFOLLOW")):
+            raise LoadError("A backup requires nofollow directory support")
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        for path in (runtime_directory, transaction, backup_directory):
+            before = path.lstat()
+            if not stat.S_ISDIR(before.st_mode):
+                raise LoadError("A backup ancestor is not a real directory")
+            if path == backup_directory and stat.S_IMODE(before.st_mode) != 0o700:
+                raise LoadError("A backup directory is not private")
+            identity = _management_directory_identity(before)
+            descriptor = (os.open(path, flags) if not descriptors else
+                          os.open(path.name, flags, dir_fd=descriptors[-1][1]))
+            descriptors.append((path, descriptor, identity))
+            if _management_directory_identity(os.fstat(descriptor)) != identity:
+                raise LoadError("A backup ancestor changed while opening")
+
+        def recheck() -> None:
+            for path, descriptor, identity in descriptors:
+                if (_management_directory_identity(os.fstat(descriptor)) != identity
+                        or _management_directory_identity(path.lstat()) != identity):
+                    raise LoadError("A backup ancestry changed during sync")
+            for original, expected in original_states.items():
+                if (_dhcp_restore_leaf_state(original) != expected
+                        or _dhcp_restore_leaf_state(backup_directory / original.name) != expected):
+                    raise LoadError("A or its backup preimage changed during sync")
+
+        recheck()
+        backup_states = {backup_directory / path.name: state
+                         for path, state in original_states.items()}
+        # The existing held-FD synchronizer persists regular payloads followed
+        # by the backup directory, including symlink/absent-name preimages.
+        _sync_verified_dhcp_a_restore(backup_directory, backup_states)
+        recheck()
+        for _path, descriptor, _identity in reversed(descriptors[:2]):
+            os.fsync(descriptor)  # transaction name, then runtime ancestry
+            recheck()
+    except (OSError, LoadError) as exc:
+        raise LoadError(f"DHCP A backup durability unconfirmed; HOLD: {exc}") from exc
+    finally:
+        for _path, descriptor, _identity in reversed(descriptors):
+            os.close(descriptor)
+
+
 def mount_and_test_dhcp(
     dry_run: bool = False,
     *,
@@ -8340,6 +8400,8 @@ def mount_and_test_dhcp(
     command exit0 also requires exact restored leaf/content/metadata checks
     before syncing restored files/names and deleting backups. This still does
     not prove a complete persistent recovery receipt or healthy activation.
+    A backups must also verify and sync their payloads and directory ancestry
+    before the first B write; an unconfirmed backup leaves original A intact.
     Once B is visible, unconfirmed parent directory durability instead keeps
     installed B and the root-only A backup together for manual HOLD review.
     """
@@ -8468,6 +8530,7 @@ def mount_and_test_dhcp(
                 raise LoadError(
                     f"DHCP A backup verification failed; HOLD: {destination.name}"
                 )
+        _sync_verified_dhcp_a_backup(dhcp_runtime_dir, backup_dir, original_states)
         backup_unconfirmed = False
 
         try:
@@ -8558,7 +8621,7 @@ def mount_and_test_dhcp(
             # complete rollback, activation nor power-loss durability.
             try:
                 warn(
-                    ("HOLD：DHCP 原 A 备份未验证；" if backup_unconfirmed
+                    ("HOLD：DHCP 原 A 备份校验/持久化未确认；" if backup_unconfirmed
                      else "HOLD：DHCP 旧文件恢复未完成；" if restore_incomplete
                      else "HOLD：B 已可见但目录持久化未确认；")
                     + f"保留 DHCP 事务及 root-only A 备份：{transaction_dir}；"

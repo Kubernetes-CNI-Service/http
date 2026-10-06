@@ -427,6 +427,60 @@ inode 146018409，size 117572，SHA256
 manifest 与运行态 setup manifest 未改。该诊断不是整个 generation workflow
 模块或正式 related/full，不是性能验收，源候选仍未批准，R22 整体继续 OPEN。
 
+### R22 DHCP 原 A backup 写前同步候选
+
+前一读回候选仍未在首次覆盖 A 前同步 backup payload 或目录链。独立 direct 与
+真实 SETUP→复制 LOAD 安装算法 workflow，对 backup regular、backup 目录、
+transaction 目录、runtime 目录的同步错误均要求零 B install、原 A 不变、parent
+未提交、0700 backup/staged/事务零清理并 HOLD；两个正向检查独立要求同步顺序。
+原实现完整 4 tests / 10 FAIL / exit1（21.781 秒），原日志
+`outputs/test-diagnostics/r22-dhcp-backup-sync-red.log`，inode 146183693，size 13646，
+SHA256 `b4d16ab29ac7dde63a4438159e117bf78a3953916d2ecc03112329640fdde1c8`。
+失败注入原来未被执行，因为实现缺少对应同步；成功顺序检查在首次 B install
+前同样失败。新正例在通过写前顺序后应正常提交 B，夹具增加该分支的成功状态分类；
+原拒绝/顺序断言不变。原日志完整保留，不把此分类补充称为生产修复。
+
+候选持有 NOFOLLOW runtime→transaction→backup 目录 FD、核备份目录 0700，
+复用 held-FD 文件同步和 leaf 后验证，先同步 regular backup 和 backup 目录，
+再同步 transaction、runtime；每步重核完整目录身份及原 A/backup 预像。
+任一错误均传播 `DHCP A backup durability unconfirmed; HOLD`，不覆盖 A、不
+提交 parent、不删除原证据。原链接和缺席由目录同步，健康成功和完整 A 恢复
+正例继续走原合同。新四项加原备份读回/恢复同步/旧形状三项共 7 tests / OK /
+exit0（21.437 秒），日志 `r22-dhcp-backup-sync-green.log`，inode 146199636，
+size 1656，SHA256
+`40878c3ebc24d9f68bac4eb0e7e0a5ff6d5f6c0091339283600f70cb34501249`。
+追加 direct 拒绝打开期间 runtime/transaction/backup 换绑、同步后备份漂移，
+保留未知对象并验证所有持有 FD 关闭；这些是补充负例，不冒称先 RED。
+
+LOAD direct 与 generation-input-binding 真实多脚本 workflow 映射继续有效，
+REAL_ENV 卡 OPEN。本地同步异常注入/返回成功不等于完整持久恢复 receipt/WAL、
+祖先原子比较、非协作写者免疫、Linux 断电、B 成功退休或旧 A 健康激活。
+原 bootstrap/REQ19 超时原因仍待核，本诊断 PASS 不解除 related/full 重跑闸门，
+不手改 ledger、套旧证明或称完整 R22 已正式验收。
+
+完整 LOAD transaction、完整 DHCP optional workflow 加十项明确选定的真实
+SETUP→LOAD workflow，首轮完整为 346 tests / 1 ERROR / exit1（122.041 秒），
+原日志 `outputs/test-diagnostics/r22-dhcp-backup-sync-load-workflows.log`，inode
+146222638，size 120257，SHA256
+`4a6d7a23cc5dba09726165a4c0d2d98a6b8311831e7f00ee11a848f962a06098`。
+运行中 111709 字节前缀 SHA256
+`d0a78008f1f7a948fffae251d6df55a05f58347aa45a4752725dbaac57525ee7`
+未变；物理第 1123 行 Ran、1125 行 FAILED、缓冲 stdout 后第 1210 行
+`R22_DHCP_BACKUP_SYNC_LOAD_WORKFLOWS_EXIT=1` 与 exec exit1 一致。
+唯一错误有明确原因：`test_air_scoped_setup_empty_hosts_cross_install_and_start_checks`
+的 `install -d -m 0700` 私有端口只调用默认 mkdir，没有应用 -m，backup 实际
+为 0755。生产原命令明确要求 0700，新写前门禁正确拒绝；不能称为环境超时。
+增加独立 backup=0700 夹具断言后，原端口单项 1 FAIL / exit1，日志
+`r22-dhcp-backup-sync-fixture-mode-red.log`，inode 146294205，size 4890，SHA256
+`d24584f3f2a2a48163d77f958fc672c1e3d2ea71f8931b91d3dbd78a1986dcf9`。
+仅补端口按原 install 的 -m 设置目录权限，原所有拒绝/回滚/启动断言、生产
+0700 门禁不变。受影响完整 DHCP optional workflow 模块 28 tests / OK / exit0
+（0.774 秒），日志 `r22-dhcp-backup-sync-fixture-mode-green.log`，inode 146295246，
+size 15458，SHA256
+`f86e8deec684daa0305ffbecde7031ba93ed3610d2eff508745320b66f338aaf`。
+按已定位的单一夹具原因复核整个受影响模块，不将首轮 346 项冒称全通过，也
+不以此启动正式 full。旧 bootstrap/REQ19 超时原因与正式 related/full 闸门仍未闭。
+
 ### R22 未结清 DHCP 事务的新进程写前闸门候选
 
 内存候选重入闸门不能保护新 LOAD。独立新候选 direct 和真实 SETUP→父 B

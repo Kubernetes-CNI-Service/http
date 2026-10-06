@@ -1995,6 +1995,16 @@ finally:
             reenter=False, outcomes=("backup-bytes", "backup-mode", "backup-link", "backup-read"),
         )
 
+    def test_real_setup_then_dhcp_a_backup_sync_failure_blocks_first_b_install(self):
+        self._real_setup_uncertain_parent_dhcp_evidence(
+            reenter=False, outcomes=("backup-file-sync", "backup-dir-sync", "backup-transaction-sync", "backup-runtime-sync"),
+        )
+
+    def test_real_setup_then_dhcp_a_backup_syncs_before_first_b_install(self):
+        self._real_setup_uncertain_parent_dhcp_evidence(
+            reenter=False, outcomes=("backup-sync-success",),
+        )
+
     def _real_setup_uncertain_parent_dhcp_evidence(
         self, *, reenter, cold=False, outcomes=("open", "fsync"),
     ):

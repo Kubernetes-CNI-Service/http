@@ -144,6 +144,8 @@ def assert_private_dhcp_transaction_retention(
     parent_identity = candidate.destination.parent.stat()
     real_open, real_sync = os.open, os.fsync
     injected, warnings, cleanup, restore_phase, sync_events, installed_b = [], [], [], [], [], []
+    backup_sync_events = []
+    backup_sync_faults = ("backup-file-sync", "backup-dir-sync", "backup-transaction-sync", "backup-runtime-sync")
 
     def private_destination(value):
         path = Path(value)
@@ -162,6 +164,9 @@ def assert_private_dhcp_transaction_retention(
                 target.mkdir(parents=True, exist_ok=True)
             else:
                 if target in mappings.values():
+                    if outcome == "backup-sync-success":
+                        assert backup_sync_events == [*names, "backup", "transaction", "runtime"], \
+                            "all A payloads and backup ancestry must sync before any B install"
                     installed_b.append(target)
                 if target.is_symlink():
                     target.unlink()
@@ -207,6 +212,22 @@ def assert_private_dhcp_transaction_retention(
 
     def sync_parent(descriptor):
         metadata = os.fstat(descriptor)
+        for transaction in live_dir.glob(".load-dhcp-transaction-*"):
+            backup = transaction / "backup"
+            paths = [(backup / name, name, "backup-file-sync") for name in names]
+            paths += [(backup, "backup", "backup-dir-sync"),
+                      (transaction, "transaction", "backup-transaction-sync"),
+                      (live_dir, "runtime", "backup-runtime-sync")]
+            if not installed_b:
+                for path, label, fault in paths:
+                    if not os.path.lexists(path) or path.is_symlink():
+                        continue
+                    target = path.lstat()
+                    if (metadata.st_dev, metadata.st_ino) == (target.st_dev, target.st_ino):
+                        backup_sync_events.append(label)
+                        if outcome == fault:
+                            injected.append(outcome)
+                            raise OSError("independent A backup durability fault: " + label)
         if restore_phase:
             if stat.S_ISDIR(metadata.st_mode):
                 target = live_dir.stat()
@@ -219,12 +240,12 @@ def assert_private_dhcp_transaction_retention(
                         target = path.lstat()
                         if (metadata.st_dev, metadata.st_ino) == (target.st_dev, target.st_ino):
                             sync_events.append(name)
-        if outcome == "restore-file-sync" and stat.S_ISREG(metadata.st_mode):
+        if outcome == "restore-file-sync" and restore_phase and stat.S_ISREG(metadata.st_mode):
             target = (live_dir / "dhcpd_eth.hosts").stat()
             if (metadata.st_dev, metadata.st_ino) == (target.st_dev, target.st_ino):
                 injected.append(outcome)
                 raise OSError("independent restored A file sync fault")
-        if outcome == "restore-dir-sync" and stat.S_ISDIR(metadata.st_mode):
+        if outcome == "restore-dir-sync" and restore_phase and stat.S_ISDIR(metadata.st_mode):
             target = live_dir.stat()
             if (metadata.st_dev, metadata.st_ino) == (target.st_dev, target.st_ino):
                 injected.append(outcome)
@@ -283,12 +304,14 @@ def assert_private_dhcp_transaction_retention(
                     assert "DHCP A restore durability unconfirmed" in str(exc), str(exc)
                 elif outcome in {"backup-bytes", "backup-mode", "backup-link", "backup-read"}:
                     assert "DHCP A backup verification failed" in str(exc), str(exc)
+                elif outcome in backup_sync_faults:
+                    assert "DHCP A backup durability unconfirmed" in str(exc), str(exc)
                 else:
                     raise
             else:
-                assert outcome == "success", "failure must propagate before service continuation"
+                assert outcome in {"success", "backup-sync-success"}, "failure must propagate before service continuation"
         transactions = list(live_dir.glob(".load-dhcp-transaction-*"))
-        if outcome in {"backup-bytes", "backup-mode", "backup-link", "backup-read"}:
+        if outcome in {"backup-bytes", "backup-mode", "backup-link", "backup-read", *backup_sync_faults}:
             assert injected == [outcome], injected
             assert installed_b == [], "bad A backup must reject before the first B install"
             assert not candidate.committed and not candidate.directory_synced
@@ -418,8 +441,8 @@ def assert_private_dhcp_transaction_retention(
         else:
             assert transactions == [], "normal success and precommit rollback still clean up"
             assert installed == (expected_a if outcome == "precommit" else expected_b)
-            assert candidate.committed == (outcome == "success")
-            assert candidate.directory_synced == (outcome == "success")
+            assert candidate.committed == (outcome in {"success", "backup-sync-success"})
+            assert candidate.directory_synced == (outcome in {"success", "backup-sync-success"})
             if outcome == "precommit":
                 assert not candidate.destination.exists()
                 assert sync_events == list(names) + ["directory"], sync_events
@@ -6537,6 +6560,91 @@ os.kill(os.getpid(), signal.SIGKILL)
                 root, project = Path(name), Path(name) / "project"
                 project.mkdir()
                 assert_private_dhcp_transaction_retention(LOAD, root, project, boundary)
+
+    def test_dhcp_a_backup_sync_failure_rejects_before_first_b_install(self) -> None:
+        for boundary in ("backup-file-sync", "backup-dir-sync", "backup-transaction-sync", "backup-runtime-sync"):
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as name:
+                root, project = Path(name), Path(name) / "project"
+                project.mkdir()
+                assert_private_dhcp_transaction_retention(LOAD, root, project, boundary)
+
+    def test_dhcp_a_backup_syncs_payloads_and_ancestry_before_b_install(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root, project = Path(name), Path(name) / "project"
+            project.mkdir()
+            assert_private_dhcp_transaction_retention(LOAD, root, project, "backup-sync-success")
+
+    def test_dhcp_a_backup_sync_rejects_rebound_ancestors_and_closes_fds(self) -> None:
+        for boundary in ("runtime", "transaction", "backup"):
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as name:
+                root = Path(name)
+                live = root / "runtime"
+                transaction = live / ".load-dhcp-transaction-independent"
+                backup = transaction / "backup"
+                backup.mkdir(parents=True, mode=0o700)
+                original = live / "dhcpd.conf"
+                original.write_bytes(b"independent original A\n")
+                shutil.copy2(original, backup / original.name)
+                metadata = original.stat()
+                expected = {"state": "file", "mode": stat.S_IMODE(metadata.st_mode),
+                            "uid": metadata.st_uid, "gid": metadata.st_gid,
+                            "mtime_ns": metadata.st_mtime_ns, "size": 23,
+                            "sha256": hashlib.sha256(b"independent original A\n").hexdigest()}
+                target = {"runtime": live, "transaction": transaction, "backup": backup}[boundary]
+                retained = target.with_name(target.name + "-retained")
+                real_open, opened, injected = os.open, [], []
+
+                def rebound_open(path, flags, *args, **kwargs):
+                    if not injected and ((boundary == "runtime" and Path(path) == target)
+                                         or (boundary != "runtime" and Path(path) == Path(target.name))):
+                        target.rename(retained)
+                        target.mkdir(mode=0o700)
+                        (target / "operator-sentinel").write_bytes(b"unknown replacement\n")
+                        injected.append(boundary)
+                    descriptor = real_open(path, flags, *args, **kwargs)
+                    opened.append(descriptor)
+                    return descriptor
+
+                with mock.patch.object(LOAD.os, "open", side_effect=rebound_open), \
+                        mock.patch.object(LOAD.os, "fsync") as sync:
+                    with self.assertRaisesRegex(LOAD.LoadError, "DHCP A backup durability unconfirmed"):
+                        LOAD._sync_verified_dhcp_a_backup(live, backup, {original: expected})
+                self.assertEqual([boundary], injected)
+                sync.assert_not_called()
+                self.assertEqual(b"unknown replacement\n", (target / "operator-sentinel").read_bytes())
+                for descriptor in opened:
+                    with self.assertRaises(OSError):
+                        os.fstat(descriptor)
+
+    def test_dhcp_a_backup_sync_rechecks_payload_after_runtime_directory_sync(self) -> None:
+        live = self.root / "private-backup-sync-runtime"
+        transaction = live / ".load-dhcp-transaction-independent"
+        backup = transaction / "backup"
+        backup.mkdir(parents=True, mode=0o700)
+        original = live / "dhcpd.conf"
+        original.write_bytes(b"independent original A\n")
+        target = backup / original.name
+        shutil.copy2(original, target)
+        metadata = original.stat()
+        expected = {"state": "file", "mode": stat.S_IMODE(metadata.st_mode),
+                    "uid": metadata.st_uid, "gid": metadata.st_gid,
+                    "mtime_ns": metadata.st_mtime_ns, "size": 23,
+                    "sha256": hashlib.sha256(b"independent original A\n").hexdigest()}
+        runtime_identity, real_sync, injected = live.stat(), os.fsync, []
+
+        def drift_after_sync(descriptor):
+            real_sync(descriptor)
+            held = os.fstat(descriptor)
+            if (held.st_dev, held.st_ino) == (runtime_identity.st_dev, runtime_identity.st_ino):
+                target.write_bytes(b"independent unknown backup drift\n")
+                injected.append("after-runtime-sync")
+
+        with mock.patch.object(LOAD.os, "fsync", side_effect=drift_after_sync):
+            with self.assertRaisesRegex(LOAD.LoadError, "DHCP A backup durability unconfirmed"):
+                LOAD._sync_verified_dhcp_a_backup(live, backup, {original: expected})
+        self.assertEqual(["after-runtime-sync"], injected)
+        self.assertEqual(b"independent original A\n", original.read_bytes())
+        self.assertEqual(b"independent unknown backup drift\n", target.read_bytes())
 
     def test_restored_dhcp_sync_rejects_directory_rebind_before_file_sync(self) -> None:
         live, retained = self.root / "private-restored-A", self.root / "retained-restored-A"
