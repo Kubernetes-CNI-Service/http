@@ -3056,6 +3056,8 @@ def main(*, method_cycle=None) -> int:
     )
     if method_cycle is not None:
         # Typed/executor admission must precede report/cache/authority writes.
+        method_cycle.admit_paths((ib_csv_path, p2p_path),
+                                 (args.target_cache, args.report, args.snapshot_dir))
         load_devices(ib_csv_path)
         with ib_csv_path.open(encoding="utf-8-sig", newline="") as stream:
             reader = csv.reader(stream)

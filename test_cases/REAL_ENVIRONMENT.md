@@ -421,6 +421,8 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   CSV/P2P/global/cache/公钥摘要，管理私钥 owned 0600 single-link，固定 eth0 MAC/IP，
   已授权的 initial-setup 操作；只通过显式项目的管理入口和逐 IB `config_method=initial-setup`
   获取 V2 方法权威，原单文件离线入口不提供该权威。NVL 在支持合同建立前显式拒绝。
+  非缺省布局须通过 `--tool-inputs` 显式绑定项目内 global/publickey 目录，留存目录身份、
+  原像与摘要；不执行其中的代码，外部或不安全目录在输出/设备操作前拒绝。
 - 正向：保留原独立密钥登录探针；再用 public-key-only BatchMode 的同一会话读取
   hostname/eth0 MAC、`nv config show -o commands`、当前 authorized_keys。逐项核验
   本设备 Day-0、DNS/NTP/timezone 和所需公钥，不凭交互日志或旧收据晋升。

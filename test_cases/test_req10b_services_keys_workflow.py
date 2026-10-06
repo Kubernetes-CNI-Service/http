@@ -328,10 +328,16 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                      "ntp": ["ntp.ubuntu.com", "time.ib.example.test"], "timezone": "Asia/Taipei",
                      "key_fingerprints": sorted([fingerprint(laptop), fingerprint(management)])}
             expected_input = hashlib.sha256(json.dumps(basis, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
-            for cycle in (1, 2, 3, 4):
+            for cycle in (1, 2, 3, 4, 5):
                 if cycle == 4:
                     ib_csv.write_text(ib_csv.read_text().replace("203.0.113.3", "203.0.113.2"))
                 executor = cycle_type(root, self.initial)
+                current_tool = tool
+                if cycle == 5:
+                    current_tool = root / "99-output-ib_nvl/bringup/xdr-initial-setup"
+                    current_tool.mkdir(parents=True)
+                    (current_tool / "01-global.yaml").symlink_to((tool / "01-global.yaml").resolve())
+                    (current_tool / "publickey").symlink_to((tool / "publickey").resolve())
                 def device_boundary(*args, **kwargs):
                     current = authority.read_method_current(storage, "EXAMPLE-IB01")
                     self.assertEqual((cycle, "pending", True), tuple(current[name] for name in ("generation", "state", "veto")))
@@ -358,18 +364,50 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                     stack.enter_context(mock.patch.object(self.initial, "run_on_ib", side_effect=device_boundary))
                     stack.enter_context(mock.patch.object(self.initial, "verify_management_key_possession"))
                     stack.enter_context(mock.patch.object(self.initial, "observe_managed_initial_configuration", side_effect=batch_observer))
-                    result = self.run_initial(tool, ib_csv, p2p, cache, "--apply", "--yes", "--execution-mode", "management",
+                    result = self.run_initial(current_tool, ib_csv, p2p, cache, "--apply", "--yes", "--execution-mode", "management",
                                               method_cycle=executor,
-                                              managed_entry=authority.managed_initial_main if cycle == 4 else None)
+                                              managed_entry=authority.managed_initial_main if cycle in (4, 5) else None,
+                                              managed_tool_inputs=current_tool if cycle == 5 else None)
                 current = authority.read_method_current(storage, "EXAMPLE-IB01")
-                self.assertEqual((cycle, "success" if cycle in (1, 4) else "failed", cycle not in (1, 4)),
+                self.assertEqual((cycle, "success" if cycle in (1, 4, 5) else "failed", cycle not in (1, 4, 5)),
                                  tuple(current[name] for name in ("generation", "state", "veto")))
-                self.assertEqual(0 if cycle in (1, 4) else 1, result)
+                self.assertEqual(0 if cycle in (1, 4, 5) else 1, result)
                 receipt = authority.read_method_receipt(storage, "EXAMPLE-IB01")
-                self.assertEqual(cycle in (1, 4), receipt is not None)
+                self.assertEqual(cycle in (1, 4, 5), receipt is not None)
                 if receipt:
                     self.assertEqual("initial_setup_managed", receipt["trigger_source"])
                     self.assertNotIn("complete", receipt)
+
+    def test_f02_managed_input_and_output_scope_is_checked_before_leaf_outputs(self):
+        authority = load_script("f02_managed_input_output_scope", ROOT / "ztp/config_sync_authority.py")
+        for case in ("csv", "p2p", "cache", "snapshot"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory).resolve()
+                root, tool, _, csv_path, p2p, _, cache, _, _ = self.fixture(str(base / "project"))
+                csv_path.write_text(csv_path.read_text().replace("eth1_gw\n", "eth1_gw,config_method\n")
+                    .replace("203.0.113.1,,,,\n", "203.0.113.1,,,,,initial-setup\n")
+                    .replace("192.0.2.10,,,,,,\n", "192.0.2.10,,,,,,,\n"))
+                foreign = base / "foreign"
+                foreign.mkdir()
+                if case == "csv":
+                    outside_csv = foreign / "ib.csv"
+                    outside_csv.write_bytes(csv_path.read_bytes())
+                    csv_path = outside_csv
+                if case == "p2p":
+                    outside_p2p = foreign / "p2p.dot"
+                    outside_p2p.write_bytes(p2p.read_bytes())
+                    p2p = outside_p2p
+                if case == "cache": cache = foreign / "out/targets.json"
+                extra = ["--snapshot-dir", str(foreign / "snapshots")] if case == "snapshot" else []
+                before = {str(path.relative_to(foreign)): path.read_bytes() for path in foreign.rglob("*") if path.is_file()}
+                cycle = authority.ManagedInitialMethodCycle(root.resolve(), self.initial)
+                with self.assertRaises((self.initial.SetupError, authority.AuthorityError, ValueError)), \
+                        mock.patch.object(self.initial, "local_ethernet_keys", return_value=set()):
+                    self.run_initial(tool, csv_path, p2p, cache, "--apply", "--yes", "--execution-mode", "management", *extra,
+                                     method_cycle=cycle)
+                self.assertFalse((root / "out").exists(), "reject before local report/cache publication")
+                self.assertFalse((root / "99-output-ztp").exists(), "reject before minting a method era")
+                self.assertEqual(before, {str(path.relative_to(foreign)): path.read_bytes() for path in foreign.rglob("*") if path.is_file()})
 
     def test_f02_managed_method_admission_rejects_before_outputs(self):
         authority = load_script("f02_managed_initial_admission", ROOT / "ztp/config_sync_authority.py")
@@ -389,7 +427,7 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                 self.assertFalse((root / "99-output-ztp").exists())
 
     def run_initial(self, tool: Path, ib_csv: Path, p2p: Path,
-                    cache: Path, *extra: str, method_cycle=None, managed_entry=None) -> int:
+                    cache: Path, *extra: str, method_cycle=None, managed_entry=None, managed_tool_inputs=None) -> int:
         argv = [
             "initial-setup.py", "--ib-csv", str(ib_csv), "--p2p", str(p2p),
             "--target-cache", str(cache), "--report", str(cache.parent / "report.log"),
@@ -402,7 +440,7 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
             else:
                 self.assertEqual(ROOT / "infiniband/bringup/xdr-initial-setup/initial-setup.py",
                                  Path(self.initial.__file__), "managed entry executes repository code, not a project copy")
-            stack.enter_context(mock.patch.object(Path, "home", return_value=tool.parents[2]))
+            stack.enter_context(mock.patch.object(Path, "home", return_value=method_cycle.project if method_cycle else tool.parents[2]))
             stack.enter_context(redirect_stdout(io.StringIO()))
             if managed_entry is not None:
                 # Execute the real CLI loader and freshly loaded main. Replace
@@ -420,7 +458,8 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                 stack.enter_context(mock.patch.object(SourceFileLoader, "exec_module", isolated_device_io))
             try:
                 if managed_entry is not None:
-                    return managed_entry(["--project", str(tool.parents[2]), "--", *argv[1:]])
+                    profile_args = ["--tool-inputs", str(managed_tool_inputs)] if managed_tool_inputs is not None else []
+                    return managed_entry(["--project", str(method_cycle.project), *profile_args, "--", *argv[1:]])
                 return self.initial.main() if method_cycle is None else self.initial.main(method_cycle=method_cycle)
             finally:
                 report = self.initial.REPORT_HANDLE

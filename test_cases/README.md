@@ -135,7 +135,13 @@ direct 覆盖漂移、冲突、期望中途修改、密钥替换和不安全文�
 通过可选周期对象接入原 initial-setup main；显式 `--apply` 和逐 IB 的 `config_method=initial-setup`
 在 report/cache/authority 写入前验证，eth_jump 仅为 transport。项目输入必须位于显式项目内，
 代码从仓库加载，global/publickey 从该项目的 `infiniband/bringup/xdr-initial-setup` 读取，
-不能靠脚本 `__file__` 指向项目来隐式取得输入；真实管理 CLI 的四轮流程也覆盖此边界。
+不能靠脚本 `__file__` 指向项目来隐式取得输入。管理 CLI 可用 `--tool-inputs <project-dir>`
+显式选择项目内的其他 global/publickey 布局（包括 `99-output-ib_nvl/bringup/xdr-initial-setup`）；
+该目录必须已存在且受当前 UID 所有、不可组/全局写入，外部目录或外链在 leaf 输出前拒绝。
+此选项只选择数据，不加载其中的代码。真实管理 CLI 的五轮流程覆盖缺省及显式布局。
+受管 leaf 在建立 report/cache/snapshot 或方法代次前，验证 CSV/P2P 的项目内有限输入像，
+并检查全部输出路径和现有父目录仍属于该显式项目；外部 CSV/P2P、cache/report 或 snapshot
+不得先落下输出再报错。该准入只用于显式方法周期，不改变单文件离线 leaf 的路径合同。
 由 owned/single-link/no-follow 有限读取绑定，重新验证 cache/parser 后再次核验输入与项目根。
 操作前 pending，完成后同会话观察及发布后重读；失败撤销自己的当前代次，不触碰新写者。
 默认单文件离线入口不依赖后端、不产生方法权威；REQ10B 密钥探针和 REQ10C 的 cron 条件不变。

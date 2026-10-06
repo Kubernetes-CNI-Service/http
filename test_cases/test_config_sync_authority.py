@@ -16,6 +16,45 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSyncAuthorityTests(unittest.TestCase):
+    def test_managed_initial_explicit_profile_root_is_owned_project_input_not_executable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            project = base / "project"
+            profile = project / "99-output-ib_nvl/bringup/xdr-initial-setup"
+            profile.mkdir(parents=True)
+            initial = SimpleNamespace(__file__="/foreign/code/initial-setup.py")
+            cycle = self.authority.ManagedInitialMethodCycle(project, initial, tool_input_root=profile)
+            self.assertEqual(profile, cycle.tool_input_root)
+            self.assertFalse(cycle.root.exists())
+            outside = base / "outside"
+            outside.mkdir()
+            unsafe = project / "unsafe-profile"
+            unsafe.mkdir(mode=0o777)
+            unsafe.chmod(0o777)
+            alias = project / "foreign-profile"
+            alias.symlink_to(outside)
+            for invalid in (outside, alias, unsafe, project / "missing"):
+                with self.subTest(invalid=invalid), self.assertRaises((self.authority.AuthorityError, OSError, ValueError)):
+                    self.authority.ManagedInitialMethodCycle(project, initial, tool_input_root=invalid)
+            self.assertFalse(cycle.root.exists(), "path admission must not publish any method era")
+
+    def test_managed_initial_cli_rejects_foreign_profile_before_leaf_outputs(self):
+        import io
+        import sys
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            project, foreign = base / "project", base / "foreign"
+            project.mkdir()
+            foreign.mkdir()
+            old_argv = list(sys.argv)
+            with mock.patch.object(sys, "stderr", io.StringIO()):
+                result = self.authority.managed_initial_main([
+                    "--project", str(project), "--tool-inputs", str(foreign), "--", "--apply", "--yes"])
+            self.assertEqual(2, result)
+            self.assertEqual([], list(project.iterdir()))
+            self.assertEqual([], list(foreign.iterdir()))
+            self.assertEqual(old_argv, sys.argv)
+
     def test_teardown_authenticates_all_histories_before_any_withdrawal(self):
         for fault in ("missing-lock", "missing-witness", "hold", "unsafe-journal"):
             with self.subTest(fault=fault):

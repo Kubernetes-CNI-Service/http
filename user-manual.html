@@ -7927,7 +7927,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <dt>使用场景：</dt><dd>上层入口需要路径校验、锁、解析、事务、状态投影或分析算法时调用。</dd>
             <dt>前置条件：</dt><dd>调用者已建立正确 root、权限、锁、输入身份和失败处理；不得绕过上层 preflight。</dd>
             <dt>语法/调用方式：</dt><dd>由上层 Python 模块导入 ztp/config_sync_authority.py 中的公开函数/类</dd>
-            <dt>主要参数：</dt><dd>无受支持的独立 CLI；源码中出现的内部选项包括 --project</dd>
+            <dt>主要参数：</dt><dd>无受支持的独立 CLI；源码中出现的内部选项包括 --project, --tool-inputs</dd>
             <dt>输入：</dt><dd>调用者已验证的数据结构、文件描述符或路径；具体 schema 由模块 direct 测试锁定。</dd>
             <dt>输出/状态：</dt><dd>返回值、受控异常或调用者事务内的状态变化；库自身不构成完整部署。</dd>
             <dt>成功判据：</dt><dd>调用者完成后置校验且整个上层事务提交；单个函数返回不等于部署成功。</dd>

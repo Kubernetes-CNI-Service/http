@@ -88,7 +88,7 @@ class ManagedInitialMethodCycle:
     Its default disconnected execution remains unchanged and supplies no V2
     method authority. Current inputs are re-observed before and after BatchMode.
     """
-    def __init__(self, project, initial):
+    def __init__(self, project, initial, *, tool_input_root=None):
         self.project = Path(project).resolve(strict=True)
         descriptor = _parent(self.project)
         try:
@@ -98,6 +98,12 @@ class ManagedInitialMethodCycle:
         self.initial = initial
         # Code is loaded from the repository; mutable profile inputs are not.
         self.tool_input_root = self.project / "infiniband/bringup/xdr-initial-setup"
+        if tool_input_root is not None:
+            candidate = Path(tool_input_root).resolve(strict=True)
+            candidate.relative_to(self.project)
+            descriptor = _parent(candidate)
+            os.close(descriptor)
+            self.tool_input_root = candidate
         self.root = self.project / "99-output-ztp/configuration-methods"
         self.tickets, self.finished = {}, set()
         self.targets = []
@@ -139,6 +145,27 @@ class ManagedInitialMethodCycle:
                 raise AuthorityError("managed initial project root changed")
         finally:
             os.close(descriptor)
+
+    def admit_paths(self, inputs, outputs):
+        """Validate the managed leaf's scope before it creates any output."""
+        self._check_project()
+        for path in inputs:
+            self._image(path)
+        for value in outputs:
+            path = Path(value).resolve()
+            path.relative_to(self.project)
+            ancestor = path
+            while not ancestor.exists():
+                ancestor = ancestor.parent
+            if ancestor.is_file():
+                image = ancestor.lstat()
+                if (not stat.S_ISREG(image.st_mode) or image.st_nlink != 1
+                        or image.st_uid != os.geteuid() or image.st_mode & 0o022):
+                    raise AuthorityError("unsafe managed initial output image")
+                ancestor = ancestor.parent
+            descriptor = _parent(ancestor)
+            os.close(descriptor)
+        self._check_project()
 
     def _inputs(self):
         self._check_project()
@@ -1536,6 +1563,7 @@ def managed_initial_main(argv=None):
     import sys
     parser = argparse.ArgumentParser(description="Managed initial-setup with causal local method receipts")
     parser.add_argument("--project", type=Path, required=True, help="explicit owned project containing all runtime inputs")
+    parser.add_argument("--tool-inputs", type=Path, help="explicit owned project directory containing global/publickey inputs; never executable code")
     parser.add_argument("initial_args", nargs=argparse.REMAINDER, help="after --, the original initial-setup arguments (requires --apply)")
     args = parser.parse_args(argv)
     source = Path(__file__).resolve().parent.parent / "infiniband/bringup/xdr-initial-setup/initial-setup.py"
@@ -1549,7 +1577,7 @@ def managed_initial_main(argv=None):
     cycle = None
     try:
         spec.loader.exec_module(initial)
-        cycle = ManagedInitialMethodCycle(args.project, initial)
+        cycle = ManagedInitialMethodCycle(args.project, initial, tool_input_root=args.tool_inputs)
         forwarded = args.initial_args[1:] if args.initial_args[:1] == ["--"] else args.initial_args
         sys.argv = [str(source), *forwarded]
         return initial.main(method_cycle=cycle)
