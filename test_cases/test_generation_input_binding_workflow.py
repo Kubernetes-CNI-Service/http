@@ -710,6 +710,74 @@ finally:
             self.assertEqual(b"PRESERVE-MATERIALIZED-LATEST\n", marker.read_bytes())
             self.assertTrue((root / "ztp/.setup-switch-journal.json").is_file())
 
+    def test_real_setup_materialized_latest_replace_cold_recovers_original_directory(self):
+        """LOAD→SETUP death after replacing latest must restore its real Q bytes."""
+        with tempfile.TemporaryDirectory(prefix="r22-real-latest-restore-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, q, common, p_only, q_only, manifest, before, _hook, barrier, _home = fixture
+            output = q / "99-output-eth"
+            latest = output / "latest"
+            release = output / "20261005_120000_combine"
+            for path in (latest, release):
+                path.mkdir(parents=True)
+                (path / ".published-complete").write_bytes(b"complete\n")
+                (path / "leaf.yaml").write_bytes(b"hostname: leaf\n")
+            original = latest.stat()
+            first = self._run_private_load_setup_switch(
+                fixture, prepare_journal=True, kill_after_replace=latest,
+            )
+            self.assertEqual(23, first.returncode, first.stdout + first.stderr)
+            self.assertTrue(barrier.is_file(), first.stdout + first.stderr)
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            self.assertTrue(latest.is_symlink())
+            journal = root / "ztp/.setup-switch-journal.json"
+            rows = json.loads(journal.read_bytes())["body"]["directories"]
+            self.assertEqual(1, len(rows))
+            backup = Path(rows[0]["backup"])
+            self.assertEqual((original.st_dev, original.st_ino),
+                             (backup.stat().st_dev, backup.stat().st_ino))
+
+            recovery = """
+import importlib.util
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location(
+    'fresh_materialized_switch_load', root / 'DAY0-Prepare/11-load.py',
+)
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    outcome = load.recover_setup_switch_journal(
+        root / 'ztp/.setup-switch-journal.json',
+        deployment_lock_descriptor=descriptor, services_quiesced=True,
+        runtime_backend=SimpleNamespace(name='supervisor'),
+    )
+    if outcome != 'restored-p':
+        raise SystemExit('unexpected outcome: ' + repr(outcome))
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+            second = subprocess.run(
+                [sys.executable, "-B", "-c", recovery, str(root)],
+                cwd=root, capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            self.assertEqual(before["common"], os.readlink(common))
+            self.assertEqual(before["p_only"], os.readlink(p_only))
+            self.assertFalse(os.path.lexists(q_only))
+            self.assertFalse(os.path.lexists(backup))
+            self.assertFalse(os.path.lexists(journal))
+            self.assertFalse(latest.is_symlink())
+            self.assertEqual((original.st_dev, original.st_ino),
+                             (latest.stat().st_dev, latest.stat().st_ino))
+            self.assertEqual(b"hostname: leaf\n", (latest / "leaf.yaml").read_bytes())
+
     def test_real_setup_wal_refuses_unjournaled_infra_log_directory_before_q_link(self):
         """A link-only WAL cannot authorize moving a real infra logs directory."""
         with tempfile.TemporaryDirectory(prefix="r22-real-infra-hold-") as name:

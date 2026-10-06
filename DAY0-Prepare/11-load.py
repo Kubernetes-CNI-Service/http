@@ -17,6 +17,7 @@ import argparse
 import base64
 import binascii
 import csv
+import ctypes
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -6164,6 +6165,151 @@ def register_setup_switch_journal_link(
     return journal
 
 
+def register_setup_switch_materialized_directory(
+    journal: Path, source: Path, target: Path, *,
+    deployment_lock_descriptor: int | None,
+    services_quiesced: bool,
+    runtime_backend: ServiceRuntimeBackend | None,
+) -> Path:
+    """Persist the exact backup name for a Q-local real latest before rename.
+
+    Registration alone changes no publication path.  The writer must use the
+    returned, initially absent backup name and must not invent another one.
+    """
+    _require_runtime_restore_guard(
+        deployment_lock_descriptor=deployment_lock_descriptor,
+        services_quiesced=services_quiesced,
+        runtime_backend=runtime_backend,
+    )
+    journal = Path(journal)
+    if journal != _setup_switch_journal_path():
+        raise LoadError("setup switch journal path is not the configured authority")
+    if recover_setup_switch_journal(
+        journal, deployment_lock_descriptor=deployment_lock_descriptor,
+        services_quiesced=services_quiesced, runtime_backend=runtime_backend,
+        verify_only=True,
+    ) != "prepared-p":
+        raise LoadError("setup switch materialized registration lacks exact P state")
+    try:
+        before_name = journal.lstat()
+        opened = _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT)
+        if opened is None or opened[1] != 0o600:
+            raise ValueError("journal is absent or not private")
+        payload, _mode = opened
+        envelope = json.loads(payload)
+        body = envelope["body"]
+        if (not isinstance(body, dict) or body["schema_version"] != 2
+                or body["phase"] != "prepared"
+                or hashlib.sha256(_setup_switch_canonical_payload(body)).hexdigest()
+                != envelope["sha256"]):
+            raise ValueError("journal envelope is invalid")
+        new = body["new_project"]
+        new_project = Path(new["path"])
+        if new != _setup_switch_directory_identity(new_project):
+            raise ValueError("Q project identity changed")
+        source = Path(source)
+        target = Path(target)
+        if (not source.is_absolute() or not target.is_absolute()
+                or os.path.normpath(str(source)) != str(source)
+                or os.path.normpath(str(target)) != str(target)
+                or source.name != "latest" or source.parent != target.parent
+                or source == target):
+            raise ValueError("materialized latest names are not canonical siblings")
+        source.parent.resolve(strict=True).relative_to(new_project)
+        parent = _setup_switch_link_parent_identity(source)
+        source_info, target_info = source.lstat(), target.lstat()
+        if (not stat.S_ISDIR(source_info.st_mode)
+                or not stat.S_ISDIR(target_info.st_mode)
+                or source_info.st_dev != target_info.st_dev):
+            raise ValueError("materialized latest and release must be real same-device directories")
+        marker = target / ".published-complete"
+        marker_info = marker.lstat()
+        if not stat.S_ISREG(marker_info.st_mode) or marker_info.st_nlink != 1:
+            raise ValueError("materialized latest release marker is unsafe")
+        existing = next(
+            (row for row in body.get("directories", []) if row["path"] == str(source)),
+            None,
+        )
+        if existing is not None:
+            expected = {
+                "path": str(source), "parent": parent, "target": str(target),
+                "source_dev": source_info.st_dev, "source_ino": source_info.st_ino,
+                "target_dev": target_info.st_dev, "target_ino": target_info.st_ino,
+            }
+            if any(existing.get(key) != value for key, value in expected.items()):
+                raise ValueError("materialized latest journal row changed")
+            backup = Path(existing["backup"])
+            if (backup.parent != source.parent
+                    or not backup.name.startswith(".latest.setup-switch-wal-")
+                    or os.path.lexists(backup)):
+                raise ValueError("materialized latest backup is not in prewrite state")
+            return backup
+        backup = source.with_name(f".latest.setup-switch-wal-{secrets.token_hex(16)}")
+        if os.path.lexists(backup):
+            raise ValueError("materialized latest backup name is occupied")
+        row = {
+            "path": str(source), "parent": parent, "backup": str(backup),
+            "target": str(target), "source_dev": source_info.st_dev,
+            "source_ino": source_info.st_ino, "target_dev": target_info.st_dev,
+            "target_ino": target_info.st_ino,
+        }
+        next_body = dict(body)
+        next_body["directories"] = [*body.get("directories", []), row]
+        next_payload = _setup_switch_canonical_payload({
+            "body": next_body,
+            "sha256": hashlib.sha256(_setup_switch_canonical_payload(next_body)).hexdigest(),
+        }) + b"\n"
+        if len(next_payload) > _SETUP_SWITCH_JOURNAL_LIMIT:
+            raise ValueError("journal exceeds the bounded size limit")
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError, LoadError) as exc:
+        raise LoadError(f"setup switch materialized registration is invalid: {exc}") from exc
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".setup-switch-journal.", dir=journal.parent,
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(next_payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        now = journal.lstat()
+        if any(getattr(before_name, name) != getattr(now, name) for name in (
+                "st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns")):
+            raise LoadError("setup switch journal changed before directory registration")
+        os.replace(temporary, journal)
+        _fsync_parent_directory(journal.parent)
+    finally:
+        if os.path.lexists(temporary):
+            temporary.unlink()
+    return backup
+
+
+def _setup_switch_rename_directory_noreplace(source: Path, target: Path) -> None:
+    """Restore a WAL-bound directory without overwriting an intervening name."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        rename = getattr(libc, "renamex_np", None)
+        if rename is None:
+            raise LoadError("atomic no-replace directory rename is unavailable")
+        rename.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint)
+        rename.restype = ctypes.c_int
+        result = rename(os.fsencode(source), os.fsencode(target), 0x00000004)
+    elif sys.platform.startswith("linux"):
+        rename = getattr(libc, "renameat2", None)
+        if rename is None:
+            raise LoadError("atomic no-replace directory rename is unavailable")
+        rename.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
+                           ctypes.c_char_p, ctypes.c_uint)
+        rename.restype = ctypes.c_int
+        result = rename(-100, os.fsencode(source), -100, os.fsencode(target), 1)
+    else:
+        raise LoadError("atomic no-replace directory rename is unavailable")
+    if result != 0:
+        error = ctypes.get_errno()
+        raise LoadError(f"materialized directory restore failed: {os.strerror(error)}")
+
+
+
 def recover_setup_switch_journal(
     journal: Path, *, deployment_lock_descriptor: int | None,
     services_quiesced: bool, runtime_backend: ServiceRuntimeBackend | None,
@@ -6255,6 +6401,50 @@ def recover_setup_switch_journal(
             expected_rows.append((path, before, after))
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
             raise LoadError(f"setup switch disk state is unknown: {path}: {exc}") from exc
+    expected_directories = []
+    directory_rows = body.get("directories", [])
+    if (not isinstance(directory_rows, list)
+            or len({row.get("path") for row in directory_rows}) != len(directory_rows)):
+        raise LoadError("setup switch materialized directory inventory is invalid")
+    for row in directory_rows:
+        try:
+            source = Path(row["path"])
+            backup = Path(row["backup"])
+            target = Path(row["target"])
+            if (not source.is_absolute() or os.path.normpath(str(source)) != str(source)
+                    or source.name != "latest" or backup.parent != source.parent
+                    or not backup.name.startswith(".latest.setup-switch-wal-")
+                    or target.parent != source.parent or target == source
+                    or row["parent"] != _setup_switch_link_parent_identity(source)):
+                raise ValueError("directory row names or parent are invalid")
+            source.parent.resolve(strict=True).relative_to(q_project)
+            target_info = target.lstat()
+            if (not stat.S_ISDIR(target_info.st_mode)
+                    or (target_info.st_dev, target_info.st_ino)
+                    != (row["target_dev"], row["target_ino"])):
+                raise ValueError("materialized release identity changed")
+            has_backup = os.path.lexists(backup)
+            if has_backup:
+                backup_info = backup.lstat()
+                if (not stat.S_ISDIR(backup_info.st_mode)
+                        or (backup_info.st_dev, backup_info.st_ino)
+                        != (row["source_dev"], row["source_ino"])):
+                    raise ValueError("materialized backup identity changed")
+                if os.path.lexists(source):
+                    source_info = source.lstat()
+                    if (not stat.S_ISLNK(source_info.st_mode)
+                            or os.readlink(source)
+                            != os.path.relpath(target, source.parent)):
+                        raise ValueError("materialized name is not its expected Q link")
+            else:
+                source_info = source.lstat()
+                if (not stat.S_ISDIR(source_info.st_mode)
+                        or (source_info.st_dev, source_info.st_ino)
+                        != (row["source_dev"], row["source_ino"])):
+                    raise ValueError("materialized source identity changed")
+            expected_directories.append((source, backup, has_backup))
+        except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
+            raise LoadError(f"setup switch materialized state is unknown: {exc}") from exc
     if verify_only:
         if any(
             (not path.is_symlink() or os.readlink(path) != before)
@@ -6262,7 +6452,16 @@ def recover_setup_switch_journal(
             for path, before, _after in expected_rows
         ):
             raise LoadError("setup switch prewrite state is not exact P")
+        if any(has_backup for _source, _backup, has_backup in expected_directories):
+            raise LoadError("setup switch materialized prewrite state is not exact Q")
         return "prepared-p"
+    for source, backup, has_backup in expected_directories:
+        if has_backup:
+            if os.path.islink(source):
+                source.unlink()
+                _fsync_parent_directory(source.parent)
+            _setup_switch_rename_directory_noreplace(backup, source)
+            _fsync_parent_directory(source.parent)
     for path, before, after in expected_rows:
         if before is not None:
             if not (path.is_symlink() and os.readlink(path) == before):

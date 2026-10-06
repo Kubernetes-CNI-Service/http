@@ -3365,9 +3365,9 @@ def _unsetup_previous(proj_dir):
     def require_frozen_p_link(path):
         if _SETUP_SWITCH_WAL_CONTEXT is None:
             return
-        if len(_SETUP_SWITCH_WAL_CONTEXT) != 3:
+        if len(_SETUP_SWITCH_WAL_CONTEXT) != 4:
             raise ValueError("旧项目链接清理缺少完整 WAL 冻结状态")
-        load_api, _descriptor, frozen = _SETUP_SWITCH_WAL_CONTEXT
+        load_api, _descriptor, frozen, _materialized = _SETUP_SWITCH_WAL_CONTEXT
         row = frozen.get(path)
         if row is None:
             raise ValueError(f"旧项目链接清理路径缺少 WAL：{path}")
@@ -3986,6 +3986,14 @@ def _bind_infra_logs(proj_dir):
     return "linked"
 
 
+def _fsync_directory(path):
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 class _SetupLinkTransaction:
     """Snapshot every managed link and restore the whole set on failure."""
 
@@ -4094,19 +4102,27 @@ class _SetupLinkTransaction:
             raise ValueError("materialized latest 在迁移前已与匹配发布目录不一致")
 
         backup = None
-        for index in range(1000):
-            suffix = "" if index == 0 else f"-{index}"
-            candidate = os.path.join(
-                os.path.dirname(path),
-                f".{os.path.basename(path)}.materialized-{os.getpid()}-{time.monotonic_ns()}{suffix}",
-            )
-            try:
-                _atomic_rename_noreplace(path, candidate)
-                backup = candidate
-                break
-            except OSError as exc:
-                if exc.errno != errno.EEXIST:
-                    raise
+        if _SETUP_SWITCH_WAL_CONTEXT is not None:
+            registered = _SETUP_SWITCH_WAL_CONTEXT[3].get(path)
+            if registered is None or registered[0] != os.path.realpath(target):
+                raise ValueError("materialized latest 写入缺少精确 WAL 备份登记")
+            backup = registered[1]
+            _atomic_rename_noreplace(path, backup)
+            _fsync_directory(os.path.dirname(path))
+        else:
+            for index in range(1000):
+                suffix = "" if index == 0 else f"-{index}"
+                candidate = os.path.join(
+                    os.path.dirname(path),
+                    f".{os.path.basename(path)}.materialized-{os.getpid()}-{time.monotonic_ns()}{suffix}",
+                )
+                try:
+                    _atomic_rename_noreplace(path, candidate)
+                    backup = candidate
+                    break
+                except OSError as exc:
+                    if exc.errno != errno.EEXIST:
+                        raise
         if backup is None:
             raise ValueError("materialized latest 迁移备份名称已全部被占用")
 
@@ -4129,6 +4145,8 @@ class _SetupLinkTransaction:
                 os.remove(temporary)
             os.symlink(rel_target, temporary)
             os.replace(temporary, path)
+            if _SETUP_SWITCH_WAL_CONTEXT is not None:
+                _fsync_directory(os.path.dirname(path))
         except BaseException:
             if os.path.lexists(temporary):
                 os.remove(temporary)
@@ -4646,17 +4664,35 @@ def _require_setup_switch_wal_prewrite(proj_dir, deployment_lock_descriptor):
     for link in _previous_project_links_to_remove(proj_dir):
         if old_state.links.get(Path(link)) != os.readlink(link):
             raise ValueError(f"跨项目 setup WAL 未覆盖旧链接清理：{link}")
-    # The current WAL protects symlink values only.  A real latest directory
-    # would be renamed into an in-memory backup whose name/identity is not in
-    # that WAL, so reject it before the first shared write.  The inventory is
-    # diagnostic and never grants publication authority (complete=False).
+    # Freeze each real Q-local latest migration, including its exact backup
+    # name, in the WAL before the first shared write.  This is only one part
+    # of the write set; the inventory remains diagnostic (complete=False).
     plan = inventory_setup_switch_shared_paths(str(old_state.project), proj_dir)
-    if plan["materialized_latest"]:
-        raise ValueError("跨项目 setup WAL 未覆盖 materialized latest 实体目录备份")
+    materialized = {}
+    for latest in plan["materialized_latest"]:
+        parent = os.path.dirname(latest)
+        candidates = [
+            *(_cumulus_publish_dirs(parent)), *(_nvos_publish_dirs(parent)),
+        ]
+        matches = [candidate for candidate in candidates
+                   if _directory_trees_identical(latest, candidate)]
+        if len(matches) != 1:
+            raise ValueError("跨项目 setup materialized latest 没有唯一完整发布目标")
+        target = matches[0]
+        try:
+            backup = load_api["register_setup_switch_materialized_directory"](
+                Path(ZTP) / ".setup-switch-journal.json", Path(latest), Path(target),
+                deployment_lock_descriptor=deployment_lock_descriptor,
+                services_quiesced=True,
+                runtime_backend=load_api["service_runtime_backend"](),
+            )
+        except load_api["LoadError"] as exc:
+            raise ValueError(f"跨项目 setup 实体目录 WAL 登记失败：{exc}") from exc
+        materialized[os.path.realpath(latest)] = (os.path.realpath(target), str(backup))
     infra = plan["infra_logs"]
     if infra["kind"] in ("real-directory", "unsafe") or infra["receipt_pending"]:
         raise ValueError("跨项目 setup WAL 未覆盖 infra logs 实体目录或待恢复凭据")
-    return load_api, deployment_lock_descriptor, frozen_p_links
+    return load_api, deployment_lock_descriptor, frozen_p_links, materialized
 
 
 def setup(proj_dir, *, server_delegated=False, deployment_lock_descriptor=None):

@@ -1846,6 +1846,103 @@ os.kill(os.getpid(), signal.SIGKILL)
         self.assertEqual(old_project, LOAD.active_project())
         backend.start.assert_not_called()
 
+    def test_setup_wal_cold_recovers_registered_materialized_latest_after_rename(self) -> None:
+        """A killed directory migration must leave a durable route back to Q's bytes."""
+        (
+            _old_project, new_project, _common, _old_only, _new_only,
+            _new_target, _new_only_target, manifest, old_manifest, old_links,
+            journal, descriptor, backend,
+        ) = self._prepare_cross_project_setup_crash()
+        output = new_project / "99-output-eth"
+        latest = output / "latest"
+        release = output / "20260910_103416_combine"
+        for path in (latest, release):
+            path.mkdir(parents=True)
+            (path / ".published-complete").write_bytes(b"complete\n")
+            (path / "leaf.yaml").write_bytes(b"hostname: leaf\n")
+        latest_before = latest.stat()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            backup = LOAD.register_setup_switch_materialized_directory(
+                journal, latest, release,
+                deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            )
+        self.assertFalse(os.path.lexists(backup))
+        frozen_journal = journal.read_bytes()
+        child = """
+import os
+from pathlib import Path
+import signal
+import sys
+source, backup = map(Path, sys.argv[1:3])
+os.rename(source, backup)
+os.kill(os.getpid(), signal.SIGKILL)
+"""
+        result = subprocess.run(
+            [sys.executable, "-B", "-c", child, str(latest), str(backup)],
+            cwd=self.root, capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(-signal.SIGKILL, result.returncode, result.stderr)
+        self.assertFalse(os.path.lexists(latest))
+        self.assertEqual(frozen_journal, journal.read_bytes())
+
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            outcome = LOAD.recover_setup_switch_journal(
+                journal, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            )
+        self.assertEqual("restored-p", outcome)
+        self.assertEqual(old_manifest, manifest.read_bytes())
+        self.assertEqual(old_links, {path: os.readlink(path) for path in old_links})
+        self.assertEqual(b"hostname: leaf\n", (latest / "leaf.yaml").read_bytes())
+        self.assertEqual(
+            (latest_before.st_dev, latest_before.st_ino),
+            (latest.stat().st_dev, latest.stat().st_ino),
+        )
+        self.assertFalse(os.path.lexists(backup))
+        self.assertFalse(os.path.lexists(journal))
+        backend.start.assert_not_called()
+
+    def test_setup_wal_refuses_unowned_materialized_backup_before_restoring_links(self) -> None:
+        """A name collision must not make recovery overwrite unrelated bytes."""
+        (
+            _old_project, new_project, common, _old_only, _new_only,
+            new_target, _new_only_target, manifest, old_manifest, old_links,
+            journal, descriptor, backend,
+        ) = self._prepare_cross_project_setup_crash()
+        output = new_project / "99-output-eth"
+        latest = output / "latest"
+        release = output / "20260910_103416_combine"
+        for path in (latest, release):
+            path.mkdir(parents=True)
+            (path / ".published-complete").write_bytes(b"complete\n")
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            backup = LOAD.register_setup_switch_materialized_directory(
+                journal, latest, release,
+                deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            )
+        backup.mkdir()
+        sentinel = backup / "unrelated.txt"
+        sentinel.write_bytes(b"DO NOT REMOVE\n")
+        original_link = os.readlink(common)
+        common.unlink()
+        common.symlink_to(os.path.relpath(new_target, common.parent))
+        frozen_journal = journal.read_bytes()
+
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with self.assertRaisesRegex(LOAD.LoadError, "materialized.*(identity|state)"):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertEqual(b"DO NOT REMOVE\n", sentinel.read_bytes())
+        self.assertEqual(new_target.resolve(), common.resolve())
+        self.assertEqual(old_manifest, manifest.read_bytes())
+        self.assertEqual(frozen_journal, journal.read_bytes())
+        self.assertNotEqual(original_link, os.readlink(common))
+        backend.start.assert_not_called()
+
     def test_setup_wal_recovery_rejects_rebound_link_parent_before_writing(self) -> None:
         """A journal for P's link must not restore into a replacement directory."""
         (
