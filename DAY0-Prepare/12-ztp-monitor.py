@@ -24,6 +24,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
@@ -55,7 +56,9 @@ from ztp_service_runtime import (  # noqa: E402
     runtime_backend_from_environment,
     write_monitor_pid_record_locked,
 )
-from project_contract import resolve_device_config_method, safe_load_global_yaml
+from project_contract import (resolve_device_config_method, safe_load_global_yaml,
+                              MacStringSafeLoader, GlobalSafeLoader)
+from ztp.nvue_normalizer import deep_merge_nvue, normalize_nvue_selectors
 from ztp import config_sync_authority
 
 
@@ -2701,6 +2704,308 @@ def bind_monitor_applied_source_observation(
             "source_fingerprint": checked["fingerprint"], "reason": ""}
 
 
+class _MethodNvueLoader(MacStringSafeLoader):
+    """Preserve MAC scalars and reject duplicate keys without global mutation."""
+
+
+_MethodNvueLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    GlobalSafeLoader.yaml_constructors[yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG],
+)
+
+
+def _method_nvue_state(text: str) -> dict[str, Any]:
+    if not isinstance(text, str) or not text.strip() or len(text.encode("utf-8")) > MAX_LIVE_CONFIG_BYTES:
+        raise ValueError("method NVUE input is missing or oversized")
+    blocks = []
+
+    def extract(value):
+        if isinstance(value, list):
+            for item in value:
+                extract(item)
+        elif isinstance(value, dict) and "set" in value:
+            if not isinstance(value["set"], dict) or not value["set"]:
+                raise ValueError("method NVUE set is empty or malformed")
+            blocks.append(value["set"])
+
+    for document in yaml.load_all(text, Loader=_MethodNvueLoader):
+        extract(document)
+    if not blocks:
+        raise ValueError("method NVUE has no effective set block")
+    merged = {}
+    for block in blocks:
+        merged = deep_merge_nvue(merged, block)
+    normalized = normalize_nvue_selectors(merged)
+    removed = object()
+
+    def observable(value, path=()):
+        # Password hashes are not observable from config show. Only that leaf
+        # and parents emptied solely by its removal are excluded; DNS, NTP,
+        # timezone, SSH keys and every other requested field remain checked.
+        if isinstance(value, dict):
+            result, dropped = {}, False
+            for key, child in value.items():
+                if key == "hashed-password" and len(path) == 4 and path[:3] == ("system", "aaa", "user"):
+                    dropped = True
+                    continue
+                filtered = observable(child, (*path, str(key)))
+                if filtered is removed:
+                    dropped = True
+                else:
+                    result[key] = filtered
+            return removed if dropped and not result else result
+        if isinstance(value, list):
+            return [observable(item, (*path, str(index))) for index, item in enumerate(value)]
+        if value is None or type(value) in {str, bool, int, float}:
+            return value
+        return str(value)
+
+    value = observable(normalized)
+    if value is removed or not value:
+        raise ValueError("method NVUE has no observable requested state")
+    json.dumps(value, allow_nan=False)
+    return value
+
+
+def _method_requested_state_matches(expected, current) -> bool:
+    """Check every requested field; extra live defaults are not an application."""
+    if isinstance(expected, dict):
+        return isinstance(current, dict) and all(
+            key in current and _method_requested_state_matches(value, current[key])
+            for key, value in expected.items()
+        )
+    if isinstance(expected, list):
+        return (isinstance(current, list) and len(expected) == len(current)
+                and all(_method_requested_state_matches(a, b) for a, b in zip(expected, current)))
+    return type(expected) is type(current) and expected == current
+
+
+def bind_monitor_method_configuration(
+    device: dict[str, Any], result: dict[str, Any], expected_text: str,
+) -> dict[str, Any]:
+    """Pure necessary proof: caller must bind expected input and local era.
+
+    No directory, generation, prior report, stage or wall-clock promotion is
+    performed. A valid helper is only provenance: this session's live values
+    must actually contain every observable field from the bound current input.
+    """
+    rejected = {"config_verified": False, "input_sha256": "", "live_state_sha256": "",
+                "source_receipt_sha256": "", "reason": "method-current-configuration-not-verified"}
+    if device.get("config_method") != "ztp":
+        return rejected
+    fresh = bind_monitor_live_observation(device, result)
+    source = bind_monitor_applied_source_observation(device, result)
+    if fresh["batch_identity_verified"] is not True or source["source_receipt_verified"] is not True:
+        return rejected
+    try:
+        expected_digest = hashlib.sha256(expected_text.encode("utf-8")).hexdigest()
+        if source["raw_sha256"] != expected_digest:
+            return {**rejected, "reason": "method-current-input-not-applied"}
+        expected = _method_nvue_state(expected_text)
+        current = _method_nvue_state(result["live_config_observation"]["text"])
+        if (expected.get("system", {}).get("hostname") != device.get("hostname")
+                or not _method_requested_state_matches(expected, current)):
+            return {**rejected, "reason": "method-current-live-configuration-drift"}
+    except (ValueError, TypeError, AttributeError, UnicodeError, RecursionError, yaml.YAMLError):
+        return {**rejected, "reason": "method-configuration-input-invalid-or-ambiguous"}
+    return {**rejected, "config_verified": True, "input_sha256": expected_digest,
+            "live_state_sha256": fresh["live_state_sha256"],
+            "source_receipt_sha256": source["source_fingerprint"], "reason": ""}
+
+
+def finish_monitor_method_cycle(
+    device: dict[str, Any], result: dict[str, Any], root: Path,
+    ticket: dict[str, Any], expected_text: str,
+) -> None:
+    """Finish only the local boundary captured before this collector session.
+
+    The caller must capture/recheck its current release-bound expected input.
+    This routine never obtains an era from reporter time or an old report.
+    Configuration success does not synthesize any other ZTP stage.
+    """
+    fresh = bind_monitor_live_observation(device, result)
+    source = bind_monitor_applied_source_observation(device, result)
+    device["configuration_observation"] = fresh
+    device["configuration_source_observation"] = source
+    compared = bind_monitor_method_configuration(device, result, expected_text)
+    matched = False
+    reason = compared["reason"]
+    try:
+        config_sync_authority.decode_method_journal(
+            config_sync_authority.wire(ticket), ticket["source_identity"],
+        )
+        if ticket["trigger_source"] != "ztp_monitor_cycle" or ticket["hostname"] != device["hostname"]:
+            raise ValueError("method collector ticket is not its own ZTP source")
+        receipt = {key: ticket[key] for key in (
+            "hostname", "generation", "source_identity", "operation_id", "trigger_id", "trigger_source")}
+        receipt.update(schema_version=2, record_type="configuration_method", type=device["type"],
+                       config_method=device["config_method"], state="failed", reason=reason)
+        if compared["config_verified"] is True:
+            receipt.update(state="success", batch_identity_verified=True, config_verified=True,
+                           interface=fresh["interface"], transport_ip=fresh["transport_ip"],
+                           mac_plain=fresh["mac_plain"], live_state_sha256=compared["live_state_sha256"],
+                           input_sha256=compared["input_sha256"], source_receipt_sha256=compared["source_receipt_sha256"])
+        config_sync_authority.finish_method(root, ticket, receipt)
+        # Secure post-publication reader checks the held current era and image;
+        # another writer's new boundary or any persistence fault cannot qualify.
+        current = config_sync_authority.read_method_receipt(root, device["hostname"])
+        if receipt["state"] == "success" and current != receipt:
+            raise ValueError("method receipt changed after publication")
+        device["configuration_method_authority"] = receipt
+        matched = config_sync_authority.monitor_method_observation_allows_completion(device)
+        if receipt["state"] == "success" and not matched:
+            raise ValueError("method receipt is not this observer's own current evidence")
+    except (OSError, ValueError, TypeError, KeyError, UnicodeError) as exc:
+        reason = str(exc)
+        device["configuration_method_authority"] = {"state": "veto", "reason": reason}
+        try:
+            config_sync_authority.revoke_method(root, device["hostname"], expected=ticket)
+        except (OSError, ValueError, TypeError, KeyError, UnicodeError):
+            pass  # Never repair uncertain storage or withdraw a different era.
+    observed_at = str(result.get("observed_at") or device.get("observed_at") or "")
+    if matched:
+        if device["stages"]["config_apply"]["status"] != "failed":
+            device["stages"]["config_apply"] = stage(
+                "success", "当前方法代次与本次身份/live 配置一致", observed_at, device.get("ztp_round", 0),
+            )
+    elif not config_sync_authority.monitor_current_config_sync_allows_application(device):
+        if device["stages"]["config_apply"]["status"] != "failed":
+            set_stage(device, "config_apply", "warning", "当前方法配置不可晋升：" + reason, observed_at)
+
+
+def _method_release_text(project: Path, relative: Path) -> str:
+    """Bounded held-descriptor read of an owned, immutable release member.
+
+    Published inputs may be 0644, unlike private receipts. Ancestors below
+    the resolved project must be non-link directories; leaves must be owned,
+    single-link regular files. NONBLOCK prevents a substituted FIFO hanging
+    the collector. Rebinding or an in-place edit rejects this observation.
+    """
+    if relative.is_absolute() or not relative.parts or any(p in {".", ".."} for p in relative.parts):
+        raise ValueError("method release path is not canonical")
+    descriptors, edges = [], []
+    identity = lambda s: (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_nlink, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+    try:
+        parent = os.open(project, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        descriptors.append(parent)
+        root_before = os.fstat(parent)
+        if root_before.st_uid != os.getuid() or root_before.st_mode & 0o022:
+            raise ValueError("method project root is not privately owned")
+        root_descriptor = parent
+        for part in relative.parts[:-1]:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+            descriptors.append(child)
+            before = os.fstat(child)
+            if before.st_uid != os.getuid() or before.st_mode & 0o022:
+                raise ValueError("method release ancestor is not privately owned")
+            edges.append((parent, part, child, identity(before)))
+            parent = child
+        name = relative.name
+        leaf = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent)
+        descriptors.append(leaf)
+        before = os.fstat(leaf)
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                or before.st_uid != os.getuid() or before.st_mode & 0o022
+                or not 0 < before.st_size <= MAX_LIVE_CONFIG_BYTES):
+            raise ValueError("method release member is unsafe or outside its byte bound")
+        chunks, remaining = [], before.st_size + 1
+        while remaining:
+            chunk = os.read(leaf, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        if (len(data) != before.st_size or identity(os.fstat(leaf)) != identity(before)
+                or identity(os.stat(name, dir_fd=parent, follow_symlinks=False)) != identity(before)):
+            raise ValueError("method release member changed during observation")
+        for ancestor, part, held, captured in edges:
+            if identity(os.fstat(held)) != captured or identity(os.stat(part, dir_fd=ancestor, follow_symlinks=False)) != captured:
+                raise ValueError("method release ancestor changed during observation")
+        if (identity(os.fstat(root_descriptor)) != identity(root_before)
+                or identity(os.stat(project, follow_symlinks=False)) != identity(root_before)):
+            raise ValueError("method project root changed during observation")
+        return data.decode("utf-8")
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+def capture_monitor_method_input(project: Path, device: dict[str, Any], release: dict[str, str]) -> dict[str, str]:
+    """Capture current parent -> child -> own YAML; never trust helper input.
+
+    Called before AND after the actual session. A generation can qualify only
+    when these exact bindings remain equal, including the current CSV and
+    global input, latest target, marker and child manifest.
+    """
+    project = project.resolve(strict=True)
+    parent_path = Path("99-output-ztp/current-release.json")
+    parent_text = _method_release_text(project, parent_path)
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate method release JSON key")
+            result[key] = value
+        return result
+
+    parent = json.loads(parent_text, object_pairs_hook=unique_object)
+    if load_release_identity(project) != release or parent.get("release_id") != release["release_id"]:
+        raise ValueError("method current parent identity changed")
+    for key, name in (("global", "01-global.yaml"), ("devices", "02-devices_config.csv")):
+        if hashlib.sha256(_method_release_text(project, Path(name)).encode()).hexdigest() != parent["inputs"].get(key):
+            raise ValueError("method current project input drift")
+    component_name, output_name = (("nvos", "99-output-ib_nvl") if device.get("type") in {"ib", "nvl"}
+                                   else ("cumulus", "99-output-eth"))
+    component = parent["components"].get(component_name)
+    if not isinstance(component, dict):
+        raise ValueError("method current child component missing")
+    relative = Path(component.get("release_dir") or "")
+    if (relative.is_absolute() or len(relative.parts) != 2 or relative.parts[0] != output_name
+            or any(p in {".", ".."} for p in relative.parts)):
+        raise ValueError("method child release path invalid")
+    latest = project / output_name / "latest"
+    target = latest.resolve(strict=True)
+    if target != project / relative:
+        raise ValueError("method child latest is not the current parent generation")
+    manifest_text = _method_release_text(project, relative / "release-manifest.json")
+    marker = _method_release_text(project, relative / ".published-complete")
+    if (hashlib.sha256(manifest_text.encode()).hexdigest() != component.get("manifest_sha256")
+            or hashlib.sha256(marker.encode()).hexdigest() != component.get("published_marker_sha256")):
+        raise ValueError("method child manifest/marker drift")
+    manifest = json.loads(manifest_text, object_pairs_hook=unique_object)
+    if manifest.get("release_id") != component.get("release_id"):
+        raise ValueError("method child release identity drift")
+    hostname = device["hostname"]
+    filename = hostname + ".yaml"
+    if Path(filename).name != filename:
+        raise ValueError("method hostname is not a single path component")
+    selected = []
+    for label, rows in (("child", manifest.get("devices")), ("parent", parent.get("inventory"))):
+        if not isinstance(rows, list):
+            raise ValueError("method release inventory missing")
+        matches = [row for row in rows if isinstance(row, dict) and row.get("hostname") == hostname]
+        if len(matches) != 1 or matches[0].get("type") != device["type"]:
+            raise ValueError("method release device binding ambiguous")
+        selected.append(matches[0])
+    child, inventory = selected
+    macs = device.get("identity_macs") or {"eth0": device.get("mac_plain") or ""}
+    for interface in ("eth0", "eth1"):
+        if normalize_mac(macs.get(interface) or "") != normalize_mac(inventory.get(interface + "_mac") or ""):
+            raise ValueError("method current inventory MAC differs")
+    if child.get("config") != filename:
+        raise ValueError("method current own YAML path differs")
+    text = _method_release_text(project, relative / filename)
+    digest = hashlib.sha256(text.encode()).hexdigest()
+    if digest != child.get("config_sha256"):
+        raise ValueError("method current own YAML hash differs")
+    if latest.resolve(strict=True) != target or _method_release_text(project, parent_path) != parent_text:
+        raise ValueError("method release binding changed during capture")
+    return {"text": text, "input_sha256": digest, "parent_sha256": hashlib.sha256(parent_text.encode()).hexdigest(),
+            "manifest_sha256": component["manifest_sha256"], "release_dir": str(relative)}
+
+
 def apply_current_config_sync_authority(
     device: dict[str, Any], result: dict[str, Any], root: Path,
     expected: Optional[dict[str, Any]],
@@ -3695,7 +4000,8 @@ def finalize_device(device: dict[str, Any]) -> None:
             "AUTHORITY_VETO_INVALID", "CURRENT_NINE_STAGE_PROOF_INCOMPLETE", "APPLIED_CONFIG_SOURCE_NOT_VERIFIED",
         }
     ]
-    if not config_sync_authority.monitor_source_observation_allows_completion(device):
+    if (not config_sync_authority.monitor_source_observation_allows_completion(device)
+            or not config_sync_authority.monitor_method_observation_allows_completion(device)):
         manual_apply_verified = config_sync_authority.monitor_current_config_sync_allows_application(device)
         for name in ("config_apply", "complete"):
             if name == "config_apply" and manual_apply_verified:
@@ -3865,6 +4171,7 @@ def snapshot_device_state(report: dict[str, Any]) -> dict[str, Any]:
             "configuration_observation": device.get("configuration_observation", {}),
             "configuration_source_observation": copy.deepcopy(device.get("configuration_source_observation", {})),
             "configuration_authority": device.get("configuration_authority", {}),
+            "configuration_method_authority": copy.deepcopy(device.get("configuration_method_authority", {})),
             "dynamic_dhcp": bool(device.get("dynamic_dhcp")),
             "unbound_identity": bool(device.get("unbound_identity")),
             "managed_ztp": bool(device.get("managed_ztp")),
@@ -4929,6 +5236,8 @@ def monitor_once(args: argparse.Namespace, project: Path) -> Path:
     switch_results: dict[str, dict[str, Any]] = {}
     config_sync_root = project / "99-output-ztp/manual-config-sync"
     config_sync_contexts: dict[str, Optional[dict[str, Any]]] = {}
+    method_root = project / "99-output-ztp/configuration-methods"
+    method_contexts: dict[str, dict[str, Any]] = {}
     for device in devices:
         try:
             config_sync_contexts[device["hostname"]] = config_sync_authority.read_current(
@@ -4977,6 +5286,22 @@ def monitor_once(args: argparse.Namespace, project: Path) -> Path:
             attribution_state_path, attribution_digests,
             list(attribution_by_address.values()),
         )
+        for device in collection_devices:
+            if device.get("config_method") != "ztp" or device.get("type") not in {"eth", "eth_spx", "spx", "air", "ib", "nvl"}:
+                continue
+            context: dict[str, Any] = {}
+            method_contexts[device["hostname"]] = context
+            try:
+                operation_id = "monitor-" + uuid.uuid4().hex
+                context["ticket"] = config_sync_authority.begin_method(
+                    method_root, device["hostname"], operation_id, device["hostname"] + ":" + operation_id,
+                    "ztp_monitor_cycle",
+                )
+                context["input"] = capture_monitor_method_input(project, device, release)
+            except (OSError, ValueError, TypeError, KeyError, UnicodeError) as exc:
+                context["error"] = str(exc)
+        # Every eligible device has its local pending boundary before ANY
+        # collector submission. Reporter time is never a generation authority.
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
             futures = {
                 pool.submit(collect_switch, device, args.ssh_timeout, args.identity,
@@ -5009,6 +5334,22 @@ def monitor_once(args: argparse.Namespace, project: Path) -> Path:
             device, switch_results.get(device["hostname"], {"kind": "not-collected"}),
             config_sync_root, config_sync_contexts.get(device["hostname"]),
         )
+        context = method_contexts.get(device["hostname"])
+        if context is not None:
+            expected_text = ""
+            try:
+                if "error" in context or "input" not in context:
+                    raise ValueError(context.get("error") or "method input capture missing")
+                if capture_monitor_method_input(project, device, release) != context["input"]:
+                    raise ValueError("method release input changed during collector session")
+                expected_text = context["input"]["text"]
+            except (OSError, ValueError, TypeError, KeyError, UnicodeError) as exc:
+                context["error"] = str(exc)
+            if "ticket" in context:
+                finish_monitor_method_cycle(device, switch_results.get(device["hostname"], {"kind": "not-collected"}),
+                                            method_root, context["ticket"], expected_text)
+            else:
+                device["configuration_method_authority"] = {"state": "veto", "reason": context.get("error", "boundary missing")}
         annotate_progress_stall(
             device, now=now_local(),
             threshold_minutes=getattr(

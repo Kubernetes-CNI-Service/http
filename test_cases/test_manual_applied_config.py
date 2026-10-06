@@ -1416,6 +1416,173 @@ class MonitorBoundLiveObservationTests(unittest.TestCase):
                 self.assertEqual("", proof["live_state_sha256"])
 
 
+class MonitorMethodConfigurationTests(unittest.TestCase):
+    EXPECTED = ("- set:\n    system:\n      hostname: leaf1\n      timezone: Asia/Shanghai\n"
+                "      dns:\n        server:\n          192.0.2.53: {}\n"
+                "      ntp:\n        server:\n          192.0.2.123: {}\n"
+                "      aaa:\n        user:\n          cumulus:\n            ssh-key: {fixture-key: {}}\n"
+                "    interface:\n      swp1:\n        bridge: {domain: {br_default: {vlan: {10: {}}}}}\n"
+                "      swp2:\n        bridge: {domain: {br_default: {vlan: {10: {}}}}}\n")
+
+    def setUp(self):
+        from test_cases.module_loader import load_script
+        self.monitor = load_script("f02_method_semantic_direct", ROOT / "DAY0-Prepare/12-ztp-monitor.py")
+        self.device = {"hostname": "leaf1", "type": "eth", "config_method": "ztp",
+                       "ip": "192.0.2.10", "mac_plain": "020000000001"}
+
+    def observed(self, text=None, source=None):
+        text = self.EXPECTED if text is None else text
+        source = self.EXPECTED if source is None else source
+        return {"kind": "ok", "returncode": 0, "batch_mode_verified": True, "identity_frame_valid": True,
+                "connected_ip": "192.0.2.10", "remote_hostname": "leaf1", "remote_eth0_mac": "02:00:00:00:00:01",
+                "live_config_observation": {"kind": "ok", "text": text, "sha256": hashlib.sha256(text.encode()).hexdigest()},
+                "applied_config_observation": MANUAL.config_sync_authority.decode_applied_config(
+                    0, protocol(source), "020000000001")}
+
+    def bind(self, result, expected=None):
+        function = getattr(self.monitor, "bind_monitor_method_configuration", None)
+        self.assertTrue(callable(function), "current values must be independently compared, not inferred from logs")
+        return function(self.device, result, self.EXPECTED if expected is None else expected)
+
+    def test_current_source_and_own_live_values_prove_configuration_not_nine_stages(self):
+        # Headers and compact interface selectors are display encodings only.
+        live = self.EXPECTED.replace("- set:", "- header: {model: fixture}\n- set:")
+        live = live.replace("      swp1:", "      swp1-2:")
+        live = live[:live.index("      swp2:")]
+        proof = self.bind(self.observed(live))
+        self.assertIs(True, proof["config_verified"])
+        self.assertEqual(hashlib.sha256(self.EXPECTED.encode()).hexdigest(), proof["input_sha256"])
+        self.assertEqual(hashlib.sha256(live.encode()).hexdigest(), proof["live_state_sha256"])
+        self.assertNotIn("generation", proof, "a pure comparison cannot mint a local boundary")
+        self.assertNotIn("complete", proof, "configuration is not nine-stage completion")
+
+    def test_unapplied_dns_ntp_timezone_key_and_source_cannot_borrow_success_log(self):
+        for before, after in (("192.0.2.53", "192.0.2.54"), ("192.0.2.123", "192.0.2.124"),
+                              ("Asia/Shanghai", "UTC"), ("fixture-key", "different-key"),
+                              ("hostname: leaf1", "hostname: other")):
+            with self.subTest(field=before):
+                result = self.observed(self.EXPECTED.replace(before, after))
+                result["ztp_log"] = "[ZTP] Applied dedicated config successfully\n[ZTP] ZTP FINISH\n"
+                self.assertIs(False, self.bind(result)["config_verified"])
+        self.assertIs(False, self.bind(self.observed(source=self.EXPECTED.replace("Asia/Shanghai", "UTC")))["config_verified"])
+        for updates in ({"batch_mode_verified": 1}, {"identity_frame_valid": True, "returncode": True},
+                        {"remote_eth0_mac": "02:00:00:00:00:02"}, {"applied_config_observation": None}):
+            with self.subTest(updates=updates):
+                self.assertIs(False, self.bind({**self.observed(), **updates})["config_verified"])
+
+    def test_ambiguous_or_empty_nvue_documents_fail_without_rewriting_expected_values(self):
+        for text in ("- set: {}\n", "- set:\n    system:\n      hostname: leaf1\n      hostname: other\n",
+                     "- set: &cycle\n    system: *cycle\n", "- set: {system: {hostname: leaf1, timezone: true}}\n"):
+            with self.subTest(text=text):
+                self.assertIs(False, self.bind(self.observed(text))["config_verified"])
+        self.assertIs(False, self.bind(self.observed(), expected="- set: {}\n")["config_verified"])
+
+
+class MonitorMethodReleaseInputTests(unittest.TestCase):
+    def setUp(self):
+        from test_cases import test_load_release_transaction as fixtures
+        self.fixture = fixtures.ReleaseTransactionTests("test_writes_parent_release_after_all_components_match")
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.tearDown)
+        self.project = self.fixture.project.resolve()
+        self.config = self.project / "99-output-eth/20260830_120000_combine/leaf01.yaml"
+        self.expected = MonitorMethodConfigurationTests.EXPECTED.replace("leaf1", "leaf01")
+        self.config.write_text(self.expected)
+        manifest = self.config.parent / "release-manifest.json"
+        payload = json.loads(manifest.read_text())
+        payload["devices"][0]["config_sha256"] = hashlib.sha256(self.expected.encode()).hexdigest()
+        manifest.write_text(json.dumps(payload))
+        fixtures.LOAD.validate_and_publish_release(self.project, self.fixture.inputs, publish=True)
+        self.device = {"hostname": "leaf01", "type": "eth", "config_method": "ztp",
+                       "identity_macs": {"eth0": "020000000001"}}
+        self.release = MONITOR.load_release_identity(self.project)
+
+    def test_own_current_release_input_and_nvos_output_are_accepted(self):
+        captured = MONITOR.capture_monitor_method_input(self.project, self.device, self.release)
+        self.assertEqual(self.expected, captured["text"])
+        self.assertEqual(hashlib.sha256(self.expected.encode()).hexdigest(), captured["input_sha256"])
+        # NVOS uses the existing ib_nvl output, not an invented nvos directory.
+        target = self.project / "99-output-ib_nvl"
+        (self.project / "99-output-eth").rename(target)
+        manifest_path = target / "20260830_120000_combine/release-manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["devices"][0]["type"] = "ib"
+        manifest_path.write_text(json.dumps(manifest))
+        parent_path = self.project / "99-output-ztp/current-release.json"
+        parent = json.loads(parent_path.read_text())
+        component = parent["components"].pop("cumulus")
+        component["release_dir"] = "99-output-ib_nvl/20260830_120000_combine"
+        component["manifest_sha256"] = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+        parent["components"]["nvos"] = component
+        parent["inventory"][0]["type"] = "ib"
+        basis = {key: parent[key] for key in ("project", "deployment_scope", "switch_scope", "inputs",
+                 "input_sources", "components", "inventory", "dhcp_status")}
+        parent["release_id"] = hashlib.sha256(json.dumps(basis, ensure_ascii=False, sort_keys=True,
+                                      separators=(",", ":")).encode()).hexdigest()[:20]
+        parent_path.write_text(json.dumps(parent))
+        device = {**self.device, "type": "ib"}
+        self.assertEqual(self.expected, MONITOR.capture_monitor_method_input(
+            self.project, device, MONITOR.load_release_identity(self.project))["text"])
+
+    def test_missing_drifted_foreign_or_unsafe_release_members_never_qualify(self):
+        original = self.config.read_bytes()
+        for label in ("drift", "symlink", "hardlink", "fifo", "writable", "missing"):
+            with self.subTest(label=label):
+                self.config.unlink()
+                alternative = self.config.parent / "unbound.yaml"
+                alternative.write_bytes(original)
+                if label == "drift":
+                    self.config.write_text(self.expected.replace("Asia/Shanghai", "UTC"))
+                elif label == "symlink":
+                    self.config.symlink_to(alternative.name)
+                elif label == "hardlink":
+                    os.link(alternative, self.config)
+                elif label == "fifo":
+                    os.mkfifo(self.config)
+                elif label == "writable":
+                    self.config.write_bytes(original)
+                    self.config.chmod(0o666)
+                with self.assertRaises((OSError, ValueError)):
+                    MONITOR.capture_monitor_method_input(self.project, self.device, self.release)
+                if self.config.exists():
+                    self.config.unlink()
+                alternative.unlink()
+                self.config.write_bytes(original)
+                self.config.chmod(0o644)
+        for device in ({**self.device, "hostname": "foreign"},
+                       {**self.device, "identity_macs": {"eth0": "020000000002"}},
+                       {**self.device, "type": "ib"}):
+            with self.subTest(device=device), self.assertRaises((OSError, ValueError)):
+                MONITOR.capture_monitor_method_input(self.project, device, self.release)
+        csv_path = self.project / "02-devices_config.csv"
+        csv_path.write_text(csv_path.read_text() + "\n")
+        with self.assertRaisesRegex(ValueError, "input drift"):
+            MONITOR.capture_monitor_method_input(self.project, self.device, self.release)
+
+    def test_writable_project_root_is_rejected(self):
+        relative = self.config.relative_to(self.project)
+        self.project.chmod(0o777)
+        with self.assertRaises((OSError, ValueError)):
+            MONITOR._method_release_text(self.project, relative)
+        self.project.chmod(0o755)
+
+    def test_held_project_root_rebinding_is_rejected(self):
+        relative = self.config.relative_to(self.project)
+        real_read = os.read
+        moved = self.project.with_name("old-project")
+        swapped = False
+        def replace_root(descriptor, size):
+            nonlocal swapped
+            data = real_read(descriptor, size)
+            if not swapped:
+                swapped = True
+                self.project.rename(moved)
+                self.project.mkdir()
+            return data
+        with mock.patch.object(MONITOR.os, "read", side_effect=replace_root), self.assertRaises((OSError, ValueError)):
+            MONITOR._method_release_text(self.project, relative)
+
+
 class MonitorAppliedConfigObservationTests(unittest.TestCase):
     RAW = "- set:\n    system:\n      hostname: leaf01\n\n"
 

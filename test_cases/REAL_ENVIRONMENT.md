@@ -7,8 +7,16 @@
   在目录、锁及 journal 写入前拒绝。核对 V2 本地 pending → success/failed、旧观察
   不能撤销新代、receipt/replaceable pair 回放拒绝、10 个 fsync 故障点的 pending/HOLD
   和原像保留；独立 2270/14134 B canonical 最大正例接受、16 KiB 有限 wire 上界及
-  任意低于正例的退化界不能通过 ACCEPTED。此项仅记录后端待验场景；生产方法接入
-  和完整消费者验收仍 OPEN，不将本机合成 writer/reader 当作真机完成。
+  任意低于正例的退化界不能通过 ACCEPTED。ZTP monitor 方法接入已补本地 direct 和
+  真实周期流程，但 initial-setup 接入与完整方法生命周期仍 OPEN，不将本机
+  合成 writer/reader 或 collector 边界 fixture 当作真机完成。
+- ZTP 方法周期补充（NOT RUN）：在另行授权的隔离项目/设备核对所有采集任务
+  提交前已持久发布本设备 pending/veto 严格整数代次；当前 parent、child
+  manifest/marker、global/CSV 和本设备 YAML 的哈希/身份在同一次非交互 BatchMode
+  采集前后仍相同。实际变更 DNS/NTP/timezone/key、替换当前发布 YAML 或 latest
+  后，旧日志/收据不得晋升 config_apply、overall 或 handoff。保存完整命令/退出码、
+  身份与受限 live/source 摘要、前后目录/文件身份及 journal/receipt 原像；恢复
+  隔离项目与设备配置并确认无残留写者。本卡仍 NOT RUN，不授权真实设备写入。
 
 - 类型：transaction / real-environment / isolated management filesystem；状态：**OPEN / NOT RUN**。本机先决为 `test_config_sync_authority.py` direct 与 `test_config_sync_authority_workflow.py` 的真实 manual writer → generation journal 流程；它们不证明真实设备、断电或整卷恢复。
 - 前置：另行授权的可恢复隔离管理 VM/卷、脱敏项目和唯一受管写者；冻结 HEAD/tree、源码/测试/manifest、Python/平台身份、文件系统、UID/mode 与输入 SHA。禁止使用 live/AIR/prod、实际设备或真实服务。独立 S5 后端按 owner 窄豁免保持 owner-waived，不计 PASS。

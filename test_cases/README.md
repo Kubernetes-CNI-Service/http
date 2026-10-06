@@ -116,8 +116,16 @@ fail closed，`--check --require-full`、`--list` 与 `--list-suites` 也不能�
 V2 最大合法 canonical 成功/失败夹具分别是独立推导的 2270/14134 B，有限 wire
 上界为 16 KiB；缩小到正例以下必须使 ACCEPTED 断言失败。真实 writer/reader →
 monitor JSON/HTML 负向流程确认该后端不能借旧九阶段或手工应用收据取得完成资格。
-这只是后端合同；bootstrap/initial-setup 生产者接入、自身新鲜配置比较和完整九阶段
-消费者验收仍未因此完成，真机保持 `REAL_ENVIRONMENT.md` 的 NOT RUN。
+ZTP monitor 的实际周期在 SSH 提交前铸造本地 pending 方法代次，采集后重新核验
+当前 parent → child manifest/marker → 本设备 YAML 与 global/CSV 输入绑定。
+同一 BatchMode 会话的身份、live digest 和闭合来源收据仍须逐项比较 DNS、NTP、
+timezone、key 等请求配置；配置或绑定漂移只发布 failed/veto，不能借旧成功日志晋升。
+读取器以 held descriptors 检查项目根/目录链与叶文件的 owner/mode/no-follow、
+single-link、有限读取及前后重绑定；Cumulus 与 NVOS 分别使用现有 eth/ib_nvl 输出。
+`test_manual_applied_config.py` direct 和 `test_config_sync_authority_workflow.py`
+真实 load → collect → method journal → report/HTML 流程覆盖这些正负例。
+这不补造其他九阶段，也不代表 F02 整体验收；initial-setup 生产者接入与完整方法
+生命周期仍需继续实现、测试，真机保持 `REAL_ENVIRONMENT.md` 的 NOT RUN。
 
 1. 功能或缺陷修复必须先在 `test_<area>.py` 中增加可稳定复现的案例，再修改实现。
 2. 单函数行为写 unit/contract case；跨文件提交与回滚写 transaction case；跨 DHCP、Apache、

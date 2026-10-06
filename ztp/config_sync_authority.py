@@ -114,11 +114,36 @@ def monitor_observation_allows_completion(device):
     on early failure. A structurally positive observation is only a necessary
     condition, not configuration application or generation authority.
     """
-    if not monitor_source_observation_allows_completion(device):
+    if (not monitor_source_observation_allows_completion(device)
+            or not monitor_method_observation_allows_completion(device)):
         return False
     if "configuration_observation" not in device:
         return True
     return monitor_live_observation_verified(device)
+
+
+def monitor_method_observation_allows_completion(device):
+    """Honor an explicit method-era veto without minting or borrowing history."""
+    if "configuration_method_authority" not in device:
+        return True
+    try:
+        receipt = decode_method_receipt(wire(device["configuration_method_authority"]))
+    except (AuthorityError, TypeError, UnicodeError):
+        return False
+    if (receipt["state"] != "success" or receipt["config_method"] != "ztp"
+            or receipt["trigger_source"] != "ztp_monitor_cycle"
+            or device.get("config_method") != receipt["config_method"]
+            or device.get("type") != receipt["type"]
+            or not monitor_live_observation_verified(device)
+            or not monitor_source_observation_allows_completion(device)):
+        return False
+    fresh = device["configuration_observation"]
+    source = device.get("configuration_source_observation")
+    return (isinstance(source, dict)
+            and all(receipt[field] == fresh[field] for field in (
+                "hostname", "interface", "transport_ip", "mac_plain", "live_state_sha256"))
+            and receipt["input_sha256"] == source.get("raw_sha256")
+            and receipt["source_receipt_sha256"] == source.get("source_fingerprint"))
 
 
 def monitor_live_observation_verified(device):

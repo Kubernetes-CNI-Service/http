@@ -24,6 +24,115 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
+    def test_monitor_once_mints_method_boundary_before_session_and_rechecks_current_release_input(self):
+        from test_cases.module_loader import load_script
+        from test_cases import test_load_release_transaction as fixture_module
+        from test_cases.test_manual_applied_config import MonitorMethodConfigurationTests, protocol
+        monitor = load_script("f02_method_release_current_cycle", ROOT / "DAY0-Prepare/12-ztp-monitor.py")
+        fixture = fixture_module.ReleaseTransactionTests("test_writes_parent_release_after_all_components_match")
+        fixture.setUp()
+        try:
+            project = fixture.project.resolve()
+            expected = MonitorMethodConfigurationTests.EXPECTED.replace("leaf1", "leaf01")
+            config = project / "99-output-eth/20260830_120000_combine/leaf01.yaml"
+            config.write_text(expected)
+            manifest_path = config.parent / "release-manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            manifest["devices"][0]["config_sha256"] = hashlib.sha256(expected.encode()).hexdigest()
+            manifest_path.write_text(json.dumps(manifest))
+            fixture_module.LOAD.validate_and_publish_release(project, fixture.inputs, publish=True)
+            apache, dhcp, air = project / "apache.log", project / "dhcp.log", project / "air.json"
+            apache.write_text("")
+            dhcp.write_text("")
+            air.write_text('{"nodes": {}}')
+            args = monitor.parser().parse_args([str(project), "--output-dir", str(project / "reports"),
+                                               "--apache-log", str(apache), "--dhcp-log", str(dhcp)])
+            root = project / "99-output-ztp/configuration-methods"
+            previous = []
+            for cycle in (1, 2, 3):
+                live = expected if cycle != 2 else expected.replace("192.0.2.53", "192.0.2.54")
+                raw = ("__HOSTNAME_BEGIN__\nleaf01\n__HOSTNAME_END__\n"
+                       "__ETH0_MAC_BEGIN__\n02:00:00:00:00:01\n__ETH0_MAC_END__\n"
+                       "__ETH1_MAC_BEGIN__\n\n__ETH1_MAC_END__\n"
+                       "__HTTP_MONITOR_LIVE_V1_BEGIN__\n" + live + "\n__HTTP_MONITOR_LIVE_V1_END__=0\n"
+                       "__HTTP_MONITOR_APPLIED_V1_BEGIN__\n" + protocol(expected) + "\n__HTTP_MONITOR_APPLIED_V1_END__=0\n")
+                def transport(command, **kwargs):
+                    self.assertIn("BatchMode=yes", command)
+                    boundary = monitor.config_sync_authority.read_method_current(root, "leaf01")
+                    self.assertIsNotNone(boundary, "local pending boundary MUST precede actual SSH")
+                    self.assertEqual((cycle, "pending", True), tuple(boundary[k] for k in ("generation", "state", "veto")))
+                    if cycle == 3:
+                        config.write_text(expected.replace("Asia/Shanghai", "UTC"))
+                    return {"returncode": 0, "stdout": raw, "stderr": ""}
+                with mock.patch.object(monitor, "service_runtime_backend", return_value=SimpleNamespace(name="systemd")), \
+                        mock.patch.object(monitor, "service_state", return_value={"active": "fixture", "enabled": "fixture", "error": ""}), \
+                        mock.patch.object(monitor, "ACTIVE_AIR_JSON", air), \
+                        mock.patch.object(monitor, "run_command", side_effect=transport):
+                    output = monitor.monitor_once(args, project)
+                device = json.loads((output / "report.json").read_text())["devices"][0]
+                current = monitor.config_sync_authority.read_method_current(root, "leaf01")
+                self.assertEqual((cycle, "success" if cycle == 1 else "failed", cycle != 1),
+                                 tuple(current[k] for k in ("generation", "state", "veto")))
+                self.assertEqual("success" if cycle == 1 else "failed", device["configuration_method_authority"]["state"])
+                self.assertEqual("success" if cycle == 1 else "warning", device["stages"]["config_apply"]["status"])
+                self.assertNotEqual("success", device["overall"], "configuration never fabricates missing bootstrap stages")
+                if cycle == 1:
+                    previous = monitor.snapshot_device_state({"devices": [device]})
+                    changed = json.loads(json.dumps(device))
+                    changed["configuration_method_authority"]["generation"] += 1
+                    self.assertNotEqual(previous, monitor.snapshot_device_state({"devices": [changed]}),
+                                        "method generations must be audit-visible even when stages do not change")
+        finally:
+            fixture.tearDown()
+
+    def test_current_method_comparison_publishes_own_era_then_drift_withdraws_it(self):
+        from test_cases.module_loader import load_script
+        from test_cases.test_manual_applied_config import MonitorMethodConfigurationTests, protocol
+        monitor = load_script("f02_method_semantic_writer_monitor", ROOT / "DAY0-Prepare/12-ztp-monitor.py")
+        html = load_script("f02_method_semantic_writer_html", ROOT / "monitor/generate-monitor-html.py")
+        authority = monitor.config_sync_authority
+        finish = getattr(monitor, "finish_monitor_method_cycle", None)
+        self.assertTrue(callable(finish), "the current comparison must finish its own pending local era")
+        expected = MonitorMethodConfigurationTests.EXPECTED
+        device = {"hostname": "leaf1", "type": "eth", "config_method": "ztp", "ip": "192.0.2.10",
+                  "ssh_user": "cumulus", "ssh_ips": ["192.0.2.10"],
+                  "mac": "02:00:00:00:00:01", "mac_plain": "020000000001", "ztp_round": 1,
+                  "issues": [], "events": [], "stages": {name: monitor.stage("success", "old log",
+                    "2026-09-01T12:00:00+08:00", 1) for name in monitor.STAGE_NAMES}}
+        raw = ("__HOSTNAME_BEGIN__\nleaf1\n__HOSTNAME_END__\n"
+               "__ETH0_MAC_BEGIN__\n02:00:00:00:00:01\n__ETH0_MAC_END__\n"
+               "__ETH1_MAC_BEGIN__\n\n__ETH1_MAC_END__\n"
+               "__HTTP_MONITOR_LIVE_V1_BEGIN__\n" + expected + "\n__HTTP_MONITOR_LIVE_V1_END__=0\n"
+               "__HTTP_MONITOR_APPLIED_V1_BEGIN__\n" + protocol(expected) + "\n__HTTP_MONITOR_APPLIED_V1_END__=0\n")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve() / "configuration-methods"
+            ticket = authority.begin_method(root, "leaf1", "cycle-1", "leaf1-cycle-1", "ztp_monitor_cycle")
+            with mock.patch.object(monitor, "run_command", return_value={"returncode": 0, "stdout": raw, "stderr": ""}) as transport:
+                result = monitor.collect_switch(device, 5, None, root.parent / "known-hosts")
+            self.assertEqual(1, transport.call_count)
+            self.assertIn("BatchMode=yes", transport.call_args.args[0])
+            finish(device, result, root, ticket, expected)
+            receipt = authority.read_method_receipt(root, "leaf1")
+            self.assertEqual("success", receipt["state"])
+            self.assertEqual(ticket["generation"], receipt["generation"])
+            self.assertEqual(hashlib.sha256(expected.encode()).hexdigest(), receipt["input_sha256"])
+            self.assertEqual(receipt, device["configuration_method_authority"])
+            old_image = (root / ".authority/leaf1.method.json").read_bytes()
+            second = authority.begin_method(root, "leaf1", "cycle-2", "leaf1-cycle-2", "ztp_monitor_cycle")
+            live = expected.replace("Asia/Shanghai", "UTC")
+            drift = {**result, "live_config_observation": {"kind": "ok", "text": live,
+                     "sha256": hashlib.sha256(live.encode()).hexdigest()}}
+            finish(device, drift, root, second, expected)
+            self.assertEqual((2, "failed", True), tuple(authority.read_method_current(root, "leaf1")[k]
+                              for k in ("generation", "state", "veto")))
+            self.assertIsNone(authority.read_method_receipt(root, "leaf1"))
+            self.assertFalse(authority.monitor_method_observation_allows_completion(device))
+            monitor.finalize_device(device)
+            self.assertNotEqual("success", device["stages"]["config_apply"]["status"])
+            self.assertFalse(monitor.completion_handoff_device_complete(device))
+            self.assertFalse(html.ztp_completed(device))
+            self.assertNotEqual(old_image, (root / ".authority/leaf1.method.json").read_bytes())
+
     def test_method_v2_backend_does_not_launder_nine_stage_or_manual_application_authority(self):
         from test_cases.module_loader import load_script
         from test_cases.test_config_sync_authority import ConfigSyncAuthorityTests
