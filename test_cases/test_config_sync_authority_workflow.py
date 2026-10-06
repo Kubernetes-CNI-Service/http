@@ -24,6 +24,41 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
+    def test_local_unsetup_withdraws_current_methods_before_detaching_project_links(self):
+        from test_cases.module_loader import load_script
+        from test_cases.test_config_sync_authority import ConfigSyncAuthorityTests
+        unsetup = load_script("f02_local_method_unsetup", ROOT / "DAY0-Prepare/02-unsetup.py")
+        authority = load_script("f02_local_method_unsetup_authority", ROOT / "ztp/config_sync_authority.py")
+        for case in ("success", "unsafe", "dry-run"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                workspace = Path(directory).resolve() / "http"
+                project = workspace / "DAY0-Prepare/demo"
+                project.mkdir(parents=True)
+                root = project / "99-output-ztp/configuration-methods"
+                ticket = authority.begin_method(root, "leaf1", "setup-cycle", "leaf1-cycle", "ztp_monitor_cycle")
+                authority.finish_method(root, ticket, ConfigSyncAuthorityTests.method_receipt_v2(ticket))
+                link = workspace / "current-project"
+                link.symlink_to(project)
+                manifest = workspace / "ztp/.setup_manifest"
+                manifest.parent.mkdir()
+                manifest.write_text("owned fixture manifest")
+                if case == "unsafe": (root / ".authority/leaf1.journal.json").chmod(0o644)
+                with mock.patch.object(unsetup, "HTTP_BASE", str(workspace)), mock.patch.object(unsetup, "HERE", str(project.parent)), \
+                        mock.patch.object(unsetup, "MANIFEST_FILE", str(manifest)), mock.patch.object(unsetup, "_AUTO_YES", True), \
+                        mock.patch.object(unsetup, "_DRY_RUN", case == "dry-run"), \
+                        mock.patch.object(unsetup, "_cleanup_req10c_auto_watch"), \
+                        mock.patch.object(unsetup, "_read_manifest", return_value=([str(link)], str(project))), \
+                        mock.patch.object(unsetup, "_known_ztp_project_links", return_value=[]), \
+                        mock.patch.object(unsetup, "_known_workspace_links", return_value=[]), \
+                        mock.patch.object(unsetup, "_project_monitor_csv_links", return_value=[]):
+                    result = unsetup._main_locked_impl(SimpleNamespace(project=str(project)))
+                self.assertEqual(1 if case == "unsafe" else 0, result)
+                self.assertEqual(case != "success", link.is_symlink())
+                self.assertEqual(case != "success", manifest.exists())
+                if case != "unsafe":
+                    current = authority.read_method_current(root, "leaf1")
+                    self.assertEqual((1, "failed" if case == "success" else "success"), (current["generation"], current["state"]))
+
     def test_initial_method_reader_latches_own_era_and_withdraws_drift_without_nine_stage_laundering(self):
         from test_cases.module_loader import load_script
         from test_cases.test_config_sync_authority import ConfigSyncAuthorityTests

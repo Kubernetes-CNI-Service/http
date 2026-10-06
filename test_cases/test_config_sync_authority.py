@@ -16,6 +16,91 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSyncAuthorityTests(unittest.TestCase):
+    def test_teardown_authenticates_all_histories_before_any_withdrawal(self):
+        for fault in ("missing-lock", "missing-witness", "hold", "unsafe-journal"):
+            with self.subTest(fault=fault):
+                root = self.root / fault
+                first = self.authority.begin_method(root, "leaf1", "first", "first-leaf1", "ztp_monitor_cycle")
+                self.authority.finish_method(root, first, self.method_receipt_v2(first))
+                second = self.authority.begin_method(root, "leaf2", "second", "second-leaf2", "ztp_monitor_cycle")
+                self.authority.finish_method(root, second, self.method_receipt_v2(second, hostname="leaf2"))
+                private = root / ".authority"
+                if fault == "missing-lock": (private / "leaf2.lock").unlink()
+                if fault == "missing-witness": (private / "leaf2.witness.json").unlink()
+                if fault == "hold": (private / "leaf2.pending").write_bytes(b"uncertain held transaction")
+                if fault == "unsafe-journal": (private / "leaf2.journal.json").chmod(0o644)
+                before = {path.name: path.read_bytes() for path in private.iterdir()}
+                with self.assertRaises(self.authority.AuthorityError):
+                    self.authority.withdraw_all(root, method=True)
+                self.assertEqual(before, {path.name: path.read_bytes() for path in private.iterdir()})
+                self.assertEqual("success", self.authority.read_method_current(root, "leaf1")["state"])
+
+    def test_teardown_preserves_new_writer_and_rejects_population_changes(self):
+        for case in ("new-writer", "new-host"):
+            with self.subTest(case=case):
+                root = self.root / case
+                ticket = self.authority.begin_method(root, "leaf1", "first", "first-leaf1", "ztp_monitor_cycle")
+                self.authority.finish_method(root, ticket, self.method_receipt_v2(ticket))
+                original = self.authority._current
+                inserted = []
+                def capture_then_writer(*args, **kwargs):
+                    current = original(*args, **kwargs)
+                    if not inserted:
+                        inserted.append(True)
+                        # This seam is after the read and before the next scope;
+                        # the separate writer runs when capture releases its lock.
+                    return current
+                original_scope = self.authority._scope
+                from contextlib import contextmanager
+                @contextmanager
+                def scope_then_writer(*args, **kwargs):
+                    with original_scope(*args, **kwargs) as value:
+                        yield value
+                    if len(inserted) == 1:
+                        inserted.append(True)
+                        self.authority.begin_method(root, "leaf1" if case == "new-writer" else "leaf2",
+                                                    "new", "new-own", "ztp_monitor_cycle")
+                with mock.patch.object(self.authority, "_current", side_effect=capture_then_writer), \
+                        mock.patch.object(self.authority, "_scope", side_effect=scope_then_writer):
+                    with self.assertRaises(self.authority.AuthorityError):
+                        self.authority.withdraw_all(root, method=True)
+                current = self.authority.read_method_current(root, "leaf1")
+                self.assertEqual((2, "pending") if case == "new-writer" else (1, "success"),
+                                 (current["generation"], current["state"]))
+                if case == "new-host":
+                    self.assertEqual("pending", self.authority.read_method_current(root, "leaf2")["state"])
+
+    def test_teardown_supports_hashed_hostname_without_deleting_old_receipts(self):
+        hostname = "L" * 240
+        ticket = self.authority.begin_method(self.root, hostname, "long", "long-own", "ztp_monitor_cycle")
+        self.authority.finish_method(self.root, ticket, self.method_receipt_v2(ticket, hostname=hostname))
+        receipts = {path: path.read_bytes() for path in self.root.rglob("*.json") if ".authority" not in path.parts}
+        self.assertEqual(1, self.authority.withdraw_all(self.root, method=True))
+        self.assertEqual("failed", self.authority.read_method_current(self.root, hostname)["state"])
+        self.assertEqual(receipts, {path: path.read_bytes() for path in receipts})
+
+    def test_project_teardown_withdraws_both_authority_formats_without_new_generations(self):
+        withdraw = getattr(self.authority, "withdraw_all", None)
+        self.assertTrue(callable(withdraw), "teardown must withdraw local authority, not just detach links")
+        absent = self.root / "absent"
+        self.assertEqual(0, withdraw(absent, method=True))
+        self.assertFalse(absent.exists())
+        for method in (False, True):
+            with self.subTest(method=method):
+                root = self.root / ("methods" if method else "manual")
+                begin = self.authority.begin_method if method else self.authority.begin
+                finish = self.authority.finish_method if method else self.authority.finish
+                read = self.authority.read_method_current if method else self.authority.read_current
+                ticket = begin(root, "leaf1", "teardown", "teardown-leaf1", "ztp_monitor_cycle" if method else "manual_config_sync_cli")
+                result = self.method_receipt_v2(ticket) if method else self.result(ticket)
+                finish(root, ticket, result)
+                self.assertEqual(1, withdraw(root, method=method))
+                self.assertEqual((1, "failed", True, ""), tuple(read(root, "leaf1")[name] for name in ("generation", "state", "veto", "receipt_sha256")))
+                with self.assertRaises(self.authority.AuthorityError): finish(root, ticket, result)
+                self.assertEqual(1, withdraw(root, method=method))
+                second = begin(root, "leaf1", "after-teardown", "new-leaf1", "ztp_monitor_cycle" if method else "manual_config_sync_cli")
+                self.assertEqual(2, second["generation"])
+
     def test_initial_monitor_profile_target_has_no_default_or_foreign_identity(self):
         reader = object.__new__(self.authority.InitialMethodMonitorInputs)
         reader.initial = SimpleNamespace(normalize_mac=lambda value, **kwargs: value.lower())

@@ -900,14 +900,15 @@ def _storage_key(hostname):
 
 
 @contextmanager
-def _scope(root, hostname, write=False):
+def _scope(root, hostname, write=False, *, create=None):
     if not isinstance(hostname, str) or not HOST.fullmatch(hostname):
         raise AuthorityError("unsafe authority hostname")
     root = Path(root)
-    root_fd = _parent(root, create=write)
+    creating = write and create is not False
+    root_fd = _parent(root, create=creating)
     private_fd = lock_fd = None
     try:
-        if write:
+        if creating:
             try:
                 os.mkdir(".authority", 0o700, dir_fd=root_fd)
                 os.fsync(root_fd)
@@ -920,7 +921,7 @@ def _scope(root, hostname, write=False):
         key = _storage_key(hostname)
         lock_fd = os.open(
             key + ".lock", os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK
-            | (os.O_CREAT if write else 0), 0o600, dir_fd=private_fd,
+            | (os.O_CREAT if creating else 0), 0o600, dir_fd=private_fd,
         )
         if not _private_regular(os.fstat(lock_fd)):
             raise AuthorityError("unsafe authority lock")
@@ -1043,6 +1044,89 @@ def read_current(root, hostname):
         return None
     except OSError as exc:
         raise AuthorityError("authority storage could not be authenticated") from exc
+
+
+def withdraw_all(root, *, method=False):
+    """Withdraw existing local eras during authorized teardown; never repair.
+
+    Capture/authenticate every history before withdrawing any. Concurrent new
+    writers or population changes fail closed. Earlier withdrawn generations
+    stay negative if teardown later aborts; no old success is restored.
+    """
+    root = Path(root)
+    try:
+        root_fd = _parent(root)
+    except FileNotFoundError:
+        return 0
+    private_fd = None
+    decoder = decode_method_journal if method else decode_journal
+    try:
+        try:
+            private_fd = os.open(".authority", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
+        except FileNotFoundError:
+            return 0
+        private = os.fstat(private_fd)
+        if private.st_uid != os.geteuid() or stat.S_IMODE(private.st_mode) != 0o700:
+            raise AuthorityError("unsafe teardown authority directory")
+        held = os.fstat(root_fd)
+        namespace = f"{held.st_dev}:{held.st_ino}"
+        names = sorted(os.listdir(private_fd))
+        keys = set()
+        for name in names:
+            for suffix in (".journal.json", ".witness.json", ".lock", ".pending"):
+                if name.endswith(suffix):
+                    keys.add(name[:-len(suffix)])
+                    break
+        captured = []
+        for key in sorted(keys):
+            raw = _read(private_fd, key + ".journal.json", JOURNAL_MAX_BYTES)
+            if raw is None:
+                # A just-created empty lock has no prior success. Any witness,
+                # initialized lock or hold without a journal is uncertainty.
+                lock = _read(private_fd, key + ".lock", WITNESS_MAX_BYTES, allow_empty=True)
+                if lock or any(key + suffix in names for suffix in (".witness.json", ".pending")):
+                    raise AuthorityError("incomplete teardown authority history")
+                continue
+            expected = decoder(raw, namespace)
+            if _storage_key(expected["hostname"]) != key:
+                raise AuthorityError("teardown authority key disagrees with hostname")
+            with _scope(root, expected["hostname"]) as (fd, own_key, own_namespace, validate, _advance):
+                current = _current(fd, own_key, own_namespace, decoder=decoder)
+                if current != expected:
+                    raise AuthorityError("teardown history changed during capture")
+                validate()
+            captured.append(expected)
+
+        def validate_population():
+            visible = _parent(root)
+            try:
+                current = os.fstat(visible)
+                named = os.stat(".authority", dir_fd=visible, follow_symlinks=False)
+                if ((held.st_dev, held.st_ino) != (current.st_dev, current.st_ino)
+                        or _identity(named)[:5] != _identity(private)[:5]
+                        or sorted(os.listdir(private_fd)) != names):
+                    raise AuthorityError("teardown authority population or namespace changed")
+            finally:
+                os.close(visible)
+        validate_population()
+        for expected in captured:
+            with _scope(root, expected["hostname"], write=True, create=False) as (fd, key, own_namespace, validate, advance):
+                validate_population()
+                current = _current(fd, key, own_namespace, decoder=decoder)
+                if current != expected:
+                    raise AuthorityError("teardown cannot withdraw a concurrent newer writer")
+                negative = {**current, "state": "failed", "veto": True, "receipt_sha256": ""}
+                if negative != current:
+                    _publish(fd, key, negative, validate, advance, decoder=decoder)
+                validate_population()
+        validate_population()
+        return len(captured)
+    except OSError as exc:
+        raise AuthorityError("teardown authority could not be authenticated") from exc
+    finally:
+        if private_fd is not None:
+            os.close(private_fd)
+        os.close(root_fd)
 
 
 def read_current_receipt(root, hostname, path):

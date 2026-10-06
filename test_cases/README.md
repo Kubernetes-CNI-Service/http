@@ -150,6 +150,11 @@ initial-setup 消费端原语 `apply_current_initial_method_authority` 只消费
 操作前捕获原本地代次，不创建新代次。坏 JSON、observer 错误、清单或配置中途变化均拒绝。
 真实本地 BatchMode shell → readonly 输入 → backend/monitor 流程另验证配置和密钥漂移，
 不把保存的报告作为观察传入；管理监控 main workflow 只替代设备 I/O 与 runtime/release 前提。
+项目 `02-unsetup.py` 在删除托管链接/清单前撤销现有 manual V1 和方法 V2 当前权威；
+先核验所有历史，不创建缺失目录/锁，不删除旧回执、不新建代次。历史不安全、HOLD、
+并发新写者或设备集合变化均拒绝；失败保留链接/清单，已撤销状态不恢复为旧成功。
+dry-run 不撤销。direct 与真实 backend → unsetup 流程采用本地临时项目，
+runtime/cron 清理前提被显式替代，未操作真实服务或 crontab。
 这不补造其他九阶段，也不代表 F02 整体验收；完整方法
 生命周期仍需继续实现、测试，真机保持 `REAL_ENVIRONMENT.md` 的 NOT RUN。
 

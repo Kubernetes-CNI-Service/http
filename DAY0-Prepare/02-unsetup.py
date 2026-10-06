@@ -26,6 +26,9 @@ MANIFEST_FILE = os.path.join(ZTP, ".setup_manifest")
 TOOLS_DIR     = os.path.join(HTTP_BASE, "tools")
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
+if HTTP_BASE not in sys.path:
+    sys.path.insert(0, HTTP_BASE)
+from ztp import config_sync_authority
 from deployment_lock import DeploymentLockError, deployment_lock
 from project_contract import infra_log_root_lock, managed_infra_log_project
 from ztp_service_runtime import RuntimeContractError, stop_native_ztp_monitors
@@ -376,6 +379,23 @@ def _restore_deleted_links(deleted):
     return failures
 
 
+def _withdraw_project_configuration_authorities(project, links=()):
+    if _DRY_RUN:
+        return
+    projects = {os.path.realpath(project)} if project else set()
+    for link in links:
+        target = os.path.realpath(link)
+        if _inside(target, HERE):
+            relative = os.path.relpath(target, HERE).split(os.sep)
+            if relative and relative[0] not in (".", "..", "template"):
+                projects.add(os.path.join(HERE, relative[0]))
+    for current in sorted(projects):
+        if not _inside(current, HERE) or current == os.path.realpath(HERE):
+            raise config_sync_authority.AuthorityError("teardown project authority is outside the project scope")
+        for relative, method in (("manual-config-sync", False), ("configuration-methods", True)):
+            config_sync_authority.withdraw_all(os.path.join(current, "99-output-ztp", relative), method=method)
+
+
 def _main_locked_impl(args):
     project_filter = _resolve_project(args.project) if args.project else None
     manifest, manifest_project = _read_manifest()
@@ -427,6 +447,11 @@ def _main_locked_impl(args):
         print(f"项目过滤：{project_filter}")
 
     if not links:
+        try:
+            _withdraw_project_configuration_authorities(active_project)
+        except (OSError, ValueError) as exc:
+            print(_c(RED, f"[ERROR] 配置权威撤销失败，保留项目清单：{exc}"))
+            return 1
         print(_c(YELLOW, "\n未找到任何由 setup 管理的软链接，无需操作。"))
         if (not _DRY_RUN and manifest is not None and manifest_matches_filter
                 and os.path.isfile(MANIFEST_FILE)):
@@ -448,6 +473,11 @@ def _main_locked_impl(args):
     deleted = []
     print()
     try:
+        try:
+            _withdraw_project_configuration_authorities(active_project, links)
+        except (OSError, ValueError) as exc:
+            print(_c(RED, f"[ERROR] 配置权威撤销失败，保留项目链接和清单：{exc}"))
+            return 1
         for path in links:
             rel_path = os.path.relpath(path, HTTP_BASE)
             target = os.readlink(path)
