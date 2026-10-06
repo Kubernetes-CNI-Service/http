@@ -1971,6 +1971,18 @@ finally:
             reenter=False, outcomes=("restore-return", "restore-raise"),
         )
 
+    def test_real_setup_then_silent_wrong_dhcp_a_restore_holds_evidence(self):
+        """Command exit0 cannot certify restored bytes, metadata or leaf type."""
+        self._real_setup_uncertain_parent_dhcp_evidence(
+            reenter=False, outcomes=("restore-bytes", "restore-mode", "restore-link"),
+        )
+
+    def test_real_setup_then_verified_dhcp_a_restore_preserves_old_leaf_shapes(self):
+        """An intact A link and originally absent leaf still restore and clean up."""
+        self._real_setup_uncertain_parent_dhcp_evidence(
+            reenter=False, outcomes=("precommit-shapes",),
+        )
+
     def _real_setup_uncertain_parent_dhcp_evidence(
         self, *, reenter, cold=False, outcomes=("open", "fsync"),
     ):

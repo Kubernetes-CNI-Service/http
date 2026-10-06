@@ -133,6 +133,12 @@ def assert_private_dhcp_transaction_retention(
     for source, destination in mappings.items():
         source.write_bytes(expected_b[source.name])
         destination.write_bytes(expected_a[destination.name])
+    if outcome == "precommit-shapes":
+        original_link_source = root / "independent-original-A-source"
+        original_link_source.write_bytes(expected_a["dhcpd_eth.hosts"])
+        (live_dir / "dhcpd_eth.hosts").unlink()
+        (live_dir / "dhcpd_eth.hosts").symlink_to("../independent-original-A-source")
+        (live_dir / "dhcpd_nvl.hosts").unlink()
     parent_payload = {"schema_version": 1, "release_id": "independent-B"}
     candidate = api.prepare_current_release(project, parent_payload)
     parent_identity = candidate.destination.parent.stat()
@@ -155,6 +161,8 @@ def assert_private_dhcp_transaction_retention(
             if "-d" in command:
                 target.mkdir(parents=True, exist_ok=True)
             else:
+                if target.is_symlink():
+                    target.unlink()
                 shutil.copy2(command[-2], target)
             target.chmod(mode)
         elif operation == "cp":
@@ -165,6 +173,16 @@ def assert_private_dhcp_transaction_retention(
                     raise OSError("independent A restore copy fault")
                 return SimpleNamespace(returncode=1)
             shutil.copy2(command[-2], target, follow_symlinks=False)
+            if (outcome in {"restore-bytes", "restore-mode", "restore-link"}
+                    and target == live_dir / "dhcpd_eth.hosts"):
+                injected.append(outcome)
+                if outcome == "restore-bytes":
+                    target.write_bytes(b"independent unaccepted restored bytes\n")
+                elif outcome == "restore-mode":
+                    target.chmod(0o600)
+                else:
+                    target.unlink()
+                    target.symlink_to("independent-absent-target")
         elif operation == "rm":
             cleanup.append(target)
             target.unlink(missing_ok=True)
@@ -191,7 +209,8 @@ def assert_private_dhcp_transaction_retention(
             raise OSError("independent DHCP parent directory open fault")
         return real_open(path, flags, *args, **kwargs)
 
-    if outcome in {"precommit", "restore-return", "restore-raise"}:
+    if outcome in {"precommit", "precommit-shapes", "restore-return", "restore-raise",
+                   "restore-bytes", "restore-mode", "restore-link"}:
         def fail_precommit():
             raise api.LoadError("independent precommit rejection")
         candidate.precommit_check = fail_precommit
@@ -208,18 +227,31 @@ def assert_private_dhcp_transaction_retention(
             except (api.LoadError, OSError) as exc:
                 if outcome in {"open", "fsync"}:
                     assert "持久化" in str(exc) and "未确认" in str(exc), str(exc)
-                elif outcome == "precommit":
+                elif outcome in {"precommit", "precommit-shapes"}:
                     assert "independent precommit rejection" in str(exc), str(exc)
                 elif outcome == "restore-return":
                     assert "旧文件未能自动恢复" in str(exc), str(exc)
                 elif outcome == "restore-raise":
                     assert "independent A restore copy fault" in str(exc), str(exc)
+                elif outcome in {"restore-bytes", "restore-mode", "restore-link"}:
+                    assert "DHCP A restore verification failed" in str(exc), str(exc)
                 else:
                     raise
             else:
                 assert outcome == "success", "failure must propagate before service continuation"
         transactions = list(live_dir.glob(".load-dhcp-transaction-*"))
-        if outcome in {"restore-return", "restore-raise"}:
+        if outcome == "precommit-shapes":
+            assert not candidate.committed and not candidate.directory_synced
+            assert not candidate.destination.exists()
+            assert transactions == [], "verified link/missing restore must keep normal cleanup"
+            assert os.readlink(live_dir / "dhcpd_eth.hosts") == "../independent-original-A-source"
+            assert original_link_source.read_bytes() == expected_a["dhcpd_eth.hosts"]
+            assert not os.path.lexists(live_dir / "dhcpd_nvl.hosts")
+            for name in ("dhcpd.conf", "dhcpd_ib.hosts"):
+                assert (live_dir / name).read_bytes() == expected_a[name]
+            return
+        if outcome in {"restore-return", "restore-raise", "restore-bytes",
+                       "restore-mode", "restore-link"}:
             assert injected == [outcome], injected
             assert not candidate.committed and not candidate.directory_synced
             assert not candidate.destination.exists()
@@ -229,7 +261,15 @@ def assert_private_dhcp_transaction_retention(
             assert stat.S_IMODE(backup.stat().st_mode) == 0o700
             assert {p.name: p.read_bytes() for p in backup.iterdir()} == expected_a
             assert {p.name for p in (transaction / "staged").iterdir()} == set(names)
-            assert not (live_dir / "dhcpd_eth.hosts").exists(), "fixture must reach partial restore"
+            fault_target = live_dir / "dhcpd_eth.hosts"
+            if outcome in {"restore-return", "restore-raise"}:
+                assert not fault_target.exists(), "fixture must reach partial restore"
+            elif outcome == "restore-bytes":
+                assert fault_target.read_bytes() == b"independent unaccepted restored bytes\n"
+            elif outcome == "restore-mode":
+                assert stat.S_IMODE(fault_target.lstat().st_mode) == 0o600
+            else:
+                assert os.readlink(fault_target) == "independent-absent-target"
             assert not any(path == transaction or transaction in path.parents for path in cleanup), \
                 "failed A restore must not delete transaction evidence"
             assert any("HOLD" in warning and str(transaction) in warning for warning in warnings)
@@ -6383,6 +6423,78 @@ os.kill(os.getpid(), signal.SIGKILL)
                 root, project = Path(name), Path(name) / "project"
                 project.mkdir()
                 assert_private_dhcp_transaction_retention(LOAD, root, project, boundary)
+
+    def test_successful_copy_with_wrong_a_state_retains_evidence(self) -> None:
+        for boundary in ("restore-bytes", "restore-mode", "restore-link"):
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as name:
+                root, project = Path(name), Path(name) / "project"
+                project.mkdir()
+                assert_private_dhcp_transaction_retention(LOAD, root, project, boundary)
+
+    def test_verified_dhcp_a_restore_preserves_old_link_and_missing_leaf(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root, project = Path(name), Path(name) / "project"
+            project.mkdir()
+            assert_private_dhcp_transaction_retention(LOAD, root, project, "precommit-shapes")
+
+    def test_dhcp_a_leaf_state_preserves_missing_regular_and_raw_link_contracts(self) -> None:
+        path = self.root / "private-a-leaf"
+        self.assertEqual({"state": "missing"}, LOAD._dhcp_restore_leaf_state(path))
+        payload = b"independent original A leaf\n"
+        timestamp = 1600000000123456789
+        path.write_bytes(payload)
+        path.chmod(0o640)
+        os.utime(path, ns=(timestamp, timestamp))
+        self.assertEqual({
+            "state": "file", "sha256": hashlib.sha256(payload).hexdigest(),
+            "size": len(payload), "mode": 0o640, "uid": os.getuid(),
+            "gid": os.getgid(), "mtime_ns": timestamp,
+        }, LOAD._dhcp_restore_leaf_state(path))
+        path.unlink()
+        path.symlink_to("independent-dangling-A-source")
+        with mock.patch.object(LOAD.os, "open", side_effect=AssertionError("must not follow A link")):
+            record = LOAD._dhcp_restore_leaf_state(path)
+        self.assertEqual("link", record["state"])
+        self.assertEqual("independent-dangling-A-source", record["target"])
+        self.assertEqual(os.getuid(), record["uid"])
+        self.assertEqual(os.getgid(), record["gid"])
+        self.assertNotIn("sha256", record)
+
+    def test_dhcp_a_leaf_state_rejects_unsupported_and_read_rebind_without_mutation(self) -> None:
+        path = self.root / "private-a-leaf"
+        for shape in ("directory", "fifo"):
+            with self.subTest(shape=shape):
+                if shape == "directory":
+                    path.mkdir()
+                else:
+                    os.mkfifo(path, 0o600)
+                before = path.lstat()
+                with self.assertRaisesRegex(LOAD.LoadError, "neither a regular file nor link"):
+                    LOAD._dhcp_restore_leaf_state(path)
+                self.assertEqual(before, path.lstat())
+                if shape == "directory":
+                    path.rmdir()
+                else:
+                    path.unlink()
+        path.write_bytes(b"independent original\n")
+        retained = path.with_name("independent-retained-original")
+        real_open = os.open
+        calls = []
+
+        def swapped_open(name, flags, *args, **kwargs):
+            if Path(name) == path:
+                calls.append(flags)
+                path.rename(retained)
+                path.write_bytes(b"independent replacement\n")
+            return real_open(name, flags, *args, **kwargs)
+
+        with mock.patch.object(LOAD.os, "open", side_effect=swapped_open), \
+                self.assertRaisesRegex(LOAD.LoadError, "changed while opening"):
+            LOAD._dhcp_restore_leaf_state(path)
+        self.assertEqual(1, len(calls))
+        self.assertTrue(calls[0] & os.O_NOFOLLOW)
+        self.assertEqual(b"independent original\n", retained.read_bytes())
+        self.assertEqual(b"independent replacement\n", path.read_bytes())
 
     def test_pending_dhcp_guard_preserves_every_occupied_evidence_shape(self) -> None:
         live = self.root / "private-dhcp-guard"

@@ -8222,6 +8222,57 @@ def require_no_pending_dhcp_transaction(runtime_directory: Path | None = None) -
             os.close(descriptor)
 
 
+def _dhcp_restore_leaf_state(path: Path) -> dict[str, object]:
+    """Read a stable A leaf without following links; not a durable receipt."""
+    descriptor = None
+    fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink",
+              "st_size", "st_mtime_ns", "st_ctime_ns")
+
+    def identity(metadata):
+        return tuple(getattr(metadata, field) for field in fields)
+
+    try:
+        try:
+            before = path.lstat()
+        except FileNotFoundError:
+            if os.path.lexists(path):
+                raise LoadError(f"DHCP A leaf changed during inspection: {path}")
+            return {"state": "missing"}
+        record = {
+            "mode": stat.S_IMODE(before.st_mode), "uid": before.st_uid,
+            "gid": before.st_gid, "mtime_ns": before.st_mtime_ns,
+        }
+        if stat.S_ISLNK(before.st_mode):
+            record.update(state="link", target=os.readlink(path))
+        elif stat.S_ISREG(before.st_mode):
+            if not hasattr(os, "O_NOFOLLOW"):
+                raise LoadError("DHCP A leaf requires nofollow read support")
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+            if identity(os.fstat(descriptor)) != identity(before):
+                raise LoadError(f"DHCP A leaf changed while opening: {path}")
+            digest, count, remaining = hashlib.sha256(), 0, before.st_size + 1
+            while remaining:
+                chunk = os.read(descriptor, min(1024 * 1024, remaining))
+                if not chunk:
+                    break
+                digest.update(chunk)
+                count += len(chunk)
+                remaining -= len(chunk)
+            if count != before.st_size or identity(os.fstat(descriptor)) != identity(before):
+                raise LoadError(f"DHCP A leaf changed while reading: {path}")
+            record.update(state="file", size=count, sha256=digest.hexdigest())
+        else:
+            raise LoadError(f"DHCP A leaf is neither a regular file nor link: {path}")
+        if identity(path.lstat()) != identity(before):
+            raise LoadError(f"DHCP A leaf changed after reading: {path}")
+        return record
+    except OSError as exc:
+        raise LoadError(f"DHCP A leaf cannot be safely inspected: {path}: {exc}") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
 def mount_and_test_dhcp(
     dry_run: bool = False,
     *,
@@ -8234,7 +8285,8 @@ def mount_and_test_dhcp(
     check.  If an install or the final syntax check fails, every previous
     destination (including a symlink) is restored before the error is raised.
     An incomplete restore instead retains its transaction and A evidence;
-    reported command failure is never permission to delete the only backups.
+    command exit0 also requires exact restored leaf/content/metadata checks
+    before deleting backups. These checks are not fsync or healthy activation.
     Once B is visible, unconfirmed parent directory durability instead keeps
     installed B and the root-only A backup together for manual HOLD review.
     """
@@ -8332,9 +8384,13 @@ def mount_and_test_dhcp(
         if parent_candidate is not None:
             recheck_prepared_dhcp_child(parent_candidate, mappings)
 
+        original_states = {
+            destination: _dhcp_restore_leaf_state(destination)
+            for destination in mappings.values()
+        }
         existed: dict[Path, bool] = {}
         for destination in mappings.values():
-            existed[destination] = os.path.lexists(destination)
+            existed[destination] = original_states[destination]["state"] != "missing"
             if existed[destination]:
                 run(
                     sudo_command(
@@ -8406,6 +8462,17 @@ def mount_and_test_dhcp(
                     "DHCP 安装失败，且以下旧文件未能自动恢复："
                     + ", ".join(restore_errors)
                 )
+            for destination, expected_state in original_states.items():
+                try:
+                    actual_state = _dhcp_restore_leaf_state(destination)
+                except LoadError as exc:
+                    raise LoadError(
+                        f"DHCP A restore verification failed; HOLD: {destination}: {exc}"
+                    ) from exc
+                if actual_state != expected_state:
+                    raise LoadError(
+                        f"DHCP A restore verification failed; HOLD: {destination}"
+                    )
             restore_incomplete = False
             raise
     finally:

@@ -267,6 +267,14 @@ finally 删除 A backup/staged/事务。恢复开始即进入“未完成”状�
 删除。新 LOAD 的残留事务闸门继续拒绝该部分 A/B 状态。direct 与真实 SETUP→LOAD
 私有文件端口 workflow 覆盖复制非零/异常和正常清理；这不证明完整恢复后校验、
 恢复目录 fsync、真实 root/服务或健康旧 A 激活。
+后续 A leaf 后验证候选进一步要求：首次备份之前独立冻结原缺席、regular 的
+字节 SHA/size/mode/uid/gid/mtime 或 symlink 的原始目标文字及叶元数据；regular
+读取持有 NOFOLLOW FD，读前后核名称/FD 完整身份（含 ctime）。全部恢复命令
+exit0 后逐项复核这些预像字段，读取失败、错误字节/权限/叶类型或原缺席未恢复
+仍 HOLD，保留 0700 A backup/staged/事务并阻断新 LOAD；只有该字段集全部相等
+才恢复原预提交失败清理。旧链接和缺席正例仍保留。此字段集不是 ACL/xattr、
+硬链接拓扑、目录祖先并发免疫、持久 receipt/WAL、恢复 fsync/断电或健康激活证明；
+排他锁与其它写者静默仍为前提，整体 R22 和正式 related/full 批准仍未闭。
 同一进程内再次用可见但未确认的父候选调用 DHCP 安装 API，必须在读入安装映射、
 创建事务、备份或安装之前 HOLD。原输入后来改变也不能许可第二次覆盖 B；第一次
 的 B/A 备份、原事务及 backup inode 保持不变。此内存候选入口闸门不是跨重启凭据，

@@ -288,6 +288,53 @@ SHA256 `cc7af3a4a21d1a0449536281b09f01e29f6a3086257e26cdbf44392e27a16a87`。
 证明，更不是旧 A 健康激活或 R22 整体验收。原 bootstrap/REQ19 超时原因仍待核，
 只做诊断回归，不因局部 PASS 盲跑 related/full，不手改 ledger，现场卡继续 OPEN。
 
+### R22 DHCP A 恢复命令 exit0 后仍须验证预像候选
+
+前一部分恢复保留候选只检查 rm/cp 退出码。新 independent direct 和真实
+SETUP→实际 LOAD 安装算法 workflow 在恢复 cp 返回 0 后分别注入错误字节、
+0644→0600 模式及 regular→悬空链接，原实现继续传播原预提交拒绝并清掉备份，
+没有恢复后验证。2 tests / 6 FAIL / exit1 的原日志
+`outputs/test-diagnostics/r22-dhcp-restore-postverify-red.log`，inode 145732513，
+size 8815，SHA256
+`da349b26e218b6440f9711b74579b989f924d1141745572f71dce695ba21d1c0`。
+
+候选在首次备份前冻结原 A 缺席/regular/原始 symlink 预像。regular 使用持有的
+NOFOLLOW FD 读取摘要/size，名称及 FD 的 dev/ino/mode/uid/gid/nlink/size/mtime/ctime
+读前后须一致；symlink 不跟随目标。恢复后逐项核 bytes/size/mode/uid/gid/mtime
+或原链接文字/叶元数据/缺席。错误或无法读取仍保留恢复未完成状态、原备份和事务，
+报告 HOLD 并由磁盘残留闸门拒绝新 LOAD；不以 inode/ctime 相等要求 cp 重建原 inode，
+也不把一组顺序读取当作原子比较。原正常健康成功和完整预提交回滚清理保留。
+
+新两项与原三项清理/部分失败合同共 5 tests / OK / exit0，完整 GREEN 日志
+`r22-dhcp-restore-postverify-green.log`，inode 145739341，size 1178，SHA256
+`25bd829b0bc748ec234e86b21bf914f24ad9c4155d137ad546e1e9763ae4737b`。
+缺席/regular/原始悬空链接、未知 directory/FIFO 及打开时名称换绑 direct 2 tests
+OK / exit0（leaf-boundaries 日志 SHA256
+`928bf0e1dbbb21a4958ad9319c44484017c2d871c994735579ae7b47901b27db`）；
+真实旧 A 链接与原缺席经完整恢复仍清理的 direct/workflow 2 tests OK / exit0
+（old-shapes 日志 SHA256
+`c895d04884b487ab8fafbdc188caf2e55da0b753582f26c666f5a231351a6976`）。
+日志均核完整物理 Ran/OK/FAILED/退出 footer、读前后 stat/inode/SHA 稳定及实际退出码。
+
+manifest 原 LOAD direct / generation-input-binding 真实多脚本 workflow 映射有效。
+文件命令、dhcpd 和服务为私有端口，不证明完整 root 入口、ACL/xattr/硬链接拓扑、
+目录祖先竞态免疫、持久 DHCP receipt、恢复 fsync/断电、B 成功 WAL 退休或旧 A
+显式健康激活；REAL_ENV 仍 OPEN。原 bootstrap/REQ19 超时原因待核，局部诊断 PASS
+不解除正式 related/full 重试闸门，不手改 ledger，不套上一候选的旧 proof。
+
+最终候选的完整 LOAD transaction、完整 DHCP optional workflow 模块，加六项
+明确选择的真实 SETUP→LOAD 恢复/保留/重入/冷拒绝 workflow 诊断为 334 tests /
+OK / exit0（65.544 秒），不是整个 generation-input-binding workflow 模块或正式
+related/full。完整日志 `outputs/test-diagnostics/r22-dhcp-restore-postverify-load-workflows.log`，
+inode 145750085，size 116568，SHA256
+`067e125c16832c419f8eaf98f024bba7714c5018bc4ca6a3f75f463722cce44d`。
+读前后 stat/inode 一致，运行中 64757 字节旧前缀 SHA256
+`85cffdd03ecc9405a57332f9b65152c4bbc0d83097946f744bc927206d6b43af` 未变；
+物理第 1085 行 Ran、1087 行 OK、原 fixture 缓冲 stdout 后第 1175 行完整
+`R22_DHCP_RESTORE_POSTVERIFY_LOAD_WORKFLOWS_EXIT=0` 与实际 exec exit0 一致。
+运行期间源码/测试/文档冻结，approved ledger、manifest 与运行态 setup manifest
+身份和字节均未改；该源候选仍未批准，不能写作 R22 正式 full 落地。
+
 ### R22 未结清 DHCP 事务的新进程写前闸门候选
 
 内存候选重入闸门不能保护新 LOAD。独立新候选 direct 和真实 SETUP→父 B
