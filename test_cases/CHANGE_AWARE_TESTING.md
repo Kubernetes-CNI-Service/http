@@ -322,6 +322,36 @@ SHA256 `ad9db3f930fec5b64294fb1204114d533eb5a61a0fa453f231537ea5c73f8ce2`。
 本候选未修原 bootstrap 超时原因，未以局部 PASS 重跑 related/full 或编辑 approved ledger；
 成功 B 的备份/receipt 收口、完整写集、main 显式恢复及旧 A 安全激活继续独立实现。
 
+### R22 Systemd 未知状态误授权 P 恢复的本地候选记录
+
+LOAD 原来独立调用 `systemctl is-active --quiet`，缺少命令直接返回空服务列表，任何
+非零返回也均被当作停止；其绕过了服务后端既有的明确 active/inactive/unknown 合同。
+独立 direct 与真实 LOAD→SETUP 强杀→新 LOAD 冷恢复证实错误/命令缺失仍可恢复 P。
+首次 direct 夹具遗漏 Linux 平台身份导致 Darwin role 错误，原日志
+`outputs/test-diagnostics/r22-service-unknown-red.log` 保留（SHA256
+`3555b83c858cc23efc933ffded8bea72ad726f5a6709194c7f74df6f57de2bc6`）；
+修正夹具平台身份、不修改实现/预期后，5 tests / 8 FAIL（含 subtest）/ exit 1，日志
+`outputs/test-diagnostics/r22-service-unknown-red-linux-fixture.log`，inode 143326043，
+size 5956，SHA256 `c76e6065189837149f7e95aaf4d0e8ade98bac174ed9401a1b38d5f259246869`。
+
+候选复用 `ServiceRuntimeBackend.is_active` 严格合同，将查询 OSError 转为 LoadError，
+未知状态在恢复首写前拒绝；既有 Systemd active/inactive 与 Supervisor 服务集合不变。
+5 tests / OK / exit 0，日志 `outputs/test-diagnostics/r22-service-unknown-green.log`，
+inode 143332957，size 874，SHA256
+`b2379c018ae60cae3690be5cf6f5cbd6de949260deae37dd931bcdb6b48d60d8`。
+真实 workflow 只用私有复制的 LOAD/SETUP 和注入查询边界，不调用实际 systemctl 或服务。
+
+release、generation workflow、optimize、setup plan、service runtime 和 SSH preparation
+六个完整模块 383 tests / OK / exit 0（240.335 秒），日志
+`outputs/test-diagnostics/r22-service-unknown-modules.log`，inode 143337208，size 117206，
+SHA256 `ab9fac30fc9ac6828794369fe2bf519053639a0cfbe1009e305429e28c7bf431`。
+读前后 stat/inode 稳定，旧 91184 字节前缀 SHA256
+`a2c3dd123dbabdf8339a41d7cd28d87790eceec4478d46970ec4009fbdb80ff6` 不变；物理
+`R22_SERVICE_UNKNOWN_MODULES_EXIT=0` 与 exec exit0 一致。TEST 运行 manifest 身份/摘要
+保持此次事前观察不变。沿用 LOAD direct 和真实多脚本 workflow 映射，REAL_ENV 仍 OPEN。
+此窄修不是原 bootstrap 401 超时原因的解释；不凭局部 PASS 重跑 related/full 或改批准
+ledger。完整写集、B 成功收尾、main 显式恢复、完整旧 A 激活及 Linux/断电见证仍未关闭。
+
 ## Full proof 性能诊断记录
 
 本节只记录测量方法与优化判定，不改变上面的测试和证明门禁。正式 full proof 仍须由

@@ -1664,6 +1664,8 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 - Q 父提交后的 P 恢复围栏候选：TEST 在 SETUP 首次共享写入前将 Q 的 `99-output-ztp/current-release.json` 缺席或普通单链接文件的摘要、模式、dev/ino/size/mtime_ns/ctime_ns 及已有父目录身份冻结到 WAL。direct 与真实 LOAD→SETUP 完成→新 LOAD 父文件原子提交→冷恢复 workflow 要求父提交已变化时保留精确 Q manifest、链接、父文件和 WAL，不恢复 P、不启动服务；同字节换 inode、同 inode 改写后复原 mtime、无父前像旧 WAL 均 HOLD。原有 Q 历史父文件未变时仍可恢复未提交切换；P 后核验时才出现 Q 提交也不得按旧授权删除 WAL。该 workflow 只验证真实 parent commit primitive 与恢复边界，父候选使用独立合成字节，不冒称完整 B 制品生成/验证或健康激活。现场须在本卡已授权隔离 VM 内冻结完整真实 A/B 输入与制品，分别保存提交前像、原子 replace/fsync 和故障屏障、Q/P/WAL 完整身份及时间线，使用快照恢复已辨认对象；正常窗口要求独立写者静默。缺前像不得事后补造授权；本地 ctime/进程测试不替代 Linux/断电见证。本卡仍 OPEN，父 B 成功后的安全收尾、main 显式恢复、完整旧 A 激活及 DEV ACK 未关闭。
 
+- 停服状态未知的本地恢复门禁候选：LOAD 原 Systemd 分支将缺失命令和查询非零一概当作无活跃服务，可能在管理器状态未知时错误授权 P 恢复。TEST direct 与真实 LOAD→SETUP 强杀→新 LOAD workflow 先 RED 后 GREEN；候选复用既有后端 active/inactive 合同，将未知 unit/manager 错误、异常退出和命令不可执行转换为 LoadError，在恢复首写前保留全部链接、manifest 与原 WAL，不发出 start/stop。现场须在已授权隔离 VM 中准备可恢复 P/Q 和完整 WAL，分别见证明确停止正例、服务仍活跃及管理器查询不可用负例，独立记录 systemctl 精确 argv/exit/stderr、实际服务进程/监听及 native monitor 状态、部署锁身份与恢复前后对象身份；不得因查询失败推定停服，也不得对 live 删除 systemctl 或停止管理器制造故障。封存证据后仅按已登记快照恢复隔离环境。本机模拟查询不证明 Linux 真停服、任意并发服务启动免疫、完整旧 A 激活或断电持久性；本卡继续 OPEN。
+
 ## TC-REAL-R22-C2-DESCRIPTION-PUBLISH-001 — c2 同名描述输出的故障窗口
 
 - Case ID：`TC-REAL-R22-C2-DESCRIPTION-PUBLISH-001`；类型：real-environment / transaction / crash-recovery；对应 R22 c2 对 `*_with_desc` 的既有同名输出替换。状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。自动化先决为 `test_cases.test_generation_input_binding_contract` 的二次读取、早返及 staging direct，`test_cases.test_generation_input_binding_workflow` 的 setup/load/c2 workflow，和当前候选正式 full/check；现有定向通过不证明进程死亡后的原子性。

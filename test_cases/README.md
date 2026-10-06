@@ -198,6 +198,12 @@ R22 的 P 恢复还须证明 Q 父提交仍为写前状态：WAL 冻结 Q 的 `c
 或同 inode 写后复原均阻断恢复，保留 WAL；缺前像的旧凭据不自动升级。
 这只是禁止提交后误回 P 的围栏，不是成功 B 的备份/receipt 收尾或旧 A 激活协议。
 
+R22 停服恢复门禁必须使用服务后端的明确状态合同。Systemd 查询不能把缺少 `systemctl`、
+未知 unit/manager 错误或任意非零退出一概解释为“服务已停止”；这些情况在首个恢复写入前
+拒绝并保留 WAL。direct 覆盖查询错误、命令缺失及既有 active/inactive 正例，真实
+LOAD→SETUP 强杀→新 LOAD workflow 覆盖未知状态下 P/Q 链接、manifest 和 WAL 零恢复写入。
+本机注入的是查询边界，不是 Linux 实际停服或完整旧 A 安全激活见证。
+
 同一模块还覆盖端到端 deployment scope：默认 `all` 同时生成 Production/AIR；`prod` 只发布
 Production Cumulus/IB/NVL；`air` 只发布 AIR DHCP/YAML/release，并只临时渲染 AIR full profile
 实际引用的 Production 来源；单独指定 `mini` 会自动选择 AIR scope 和 `eth`，显式 `prod+mini`

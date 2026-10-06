@@ -1825,6 +1825,77 @@ class ReleaseTransactionTests(unittest.TestCase):
         self._prepare_cross_project_setup_crash()
         self.assertEqual(str(self.ztp / ".setup_manifest"), SETUP.MANIFEST_FILE)
 
+    def test_systemd_service_query_unknown_is_not_stopped(self) -> None:
+        for status in (1, 4, 127, -9):
+            with self.subTest(status=status):
+                runner = mock.Mock(return_value=SimpleNamespace(
+                    returncode=status, stdout="", stderr="status unavailable",
+                ))
+                backend = LOAD.service_runtime_backend(
+                    {"HTTP_ZTP_RUNTIME_BACKEND": "systemd"}, command_runner=runner,
+                )
+                with mock.patch.object(LOAD, "runtime_os", return_value="Linux"), \
+                        mock.patch.object(LOAD.shutil, "which", return_value="/fixture/systemctl"), \
+                        mock.patch.object(LOAD, "_run_subprocess", runner):
+                    with self.assertRaisesRegex(LOAD.LoadError, "服务.*cannot determine"):
+                        LOAD.active_managed_services(backend, host_role="management-server")
+                self.assertEqual("is-active", runner.call_args.args[0][1])
+
+    def test_systemd_missing_command_is_not_stopped(self) -> None:
+        runner = mock.Mock(side_effect=FileNotFoundError("systemctl unavailable"))
+        backend = LOAD.service_runtime_backend(
+            {"HTTP_ZTP_RUNTIME_BACKEND": "systemd"}, command_runner=runner,
+        )
+        with mock.patch.object(LOAD, "runtime_os", return_value="Linux"), \
+                mock.patch.object(LOAD.shutil, "which", return_value=None), \
+                mock.patch.object(LOAD, "_run_subprocess", runner):
+            with self.assertRaisesRegex(LOAD.LoadError, "服务.*systemctl unavailable"):
+                LOAD.active_managed_services(backend, host_role="management-server")
+
+    def test_systemd_service_query_preserves_active_and_inactive_contract(self) -> None:
+        runner = mock.Mock(side_effect=[
+            SimpleNamespace(returncode=3, stdout="", stderr=""),
+            SimpleNamespace(returncode=0, stdout="", stderr=""),
+        ])
+        backend = LOAD.service_runtime_backend(
+            {"HTTP_ZTP_RUNTIME_BACKEND": "systemd"}, command_runner=runner,
+        )
+        with mock.patch.object(LOAD, "runtime_os", return_value="Linux"), \
+                mock.patch.object(LOAD.shutil, "which", return_value="/fixture/systemctl"), \
+                mock.patch.object(LOAD, "_run_subprocess", runner):
+            self.assertEqual(("apache2",), LOAD.active_managed_services(
+                backend, host_role="management-server",
+            ))
+        self.assertEqual(["isc-dhcp-server", "apache2"], [
+            call.args[0][-1] for call in runner.call_args_list
+        ])
+
+    def test_setup_recovery_unknown_systemd_state_is_zero_write(self) -> None:
+        (*state, journal, descriptor, _backend) = self._prepare_cross_project_setup_crash()
+        common = state[2]
+        common.unlink()
+        common.symlink_to(os.path.relpath(state[5], common.parent))
+        mixed = os.readlink(common)
+        evidence = journal.read_bytes()
+        runner = mock.Mock(side_effect=[
+            SimpleNamespace(returncode=3, stdout="", stderr=""),
+            SimpleNamespace(returncode=4, stdout="", stderr="manager unavailable"),
+        ])
+        backend = LOAD.service_runtime_backend(
+            {"HTTP_ZTP_RUNTIME_BACKEND": "systemd"}, command_runner=runner,
+        )
+        with mock.patch.object(LOAD, "runtime_os", return_value="Linux"), \
+                mock.patch.object(LOAD.shutil, "which", return_value="/fixture/systemctl"), \
+                mock.patch.object(LOAD, "_run_subprocess", runner):
+            with self.assertRaisesRegex(LOAD.LoadError, "服务.*cannot determine"):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertEqual(mixed, os.readlink(common))
+        self.assertEqual(state[8], state[7].read_bytes())
+        self.assertEqual(evidence, journal.read_bytes())
+
     def test_cross_project_crash_fixture_restores_load_root_after_cleanup(self) -> None:
         before = LOAD.ZTP_DIR
         nested = ReleaseTransactionTests("test_cross_project_crash_fixture_isolates_setup_manifest")

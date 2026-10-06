@@ -874,6 +874,70 @@ finally:
             self.assertFalse(os.path.lexists(journal))
             self.assertFalse((root / "service-started").exists())
 
+    def test_real_setup_death_unknown_systemd_state_blocks_cold_restore(self):
+        """Fresh LOAD must not infer stopped services from a failed status query."""
+        for mode in ("query-error", "missing-command"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory(prefix="r22-service-unknown-") as name:
+                fixture = self._private_setup_switch_fixture(Path(name))
+                root, _p, _q, common, p_only, q_only, manifest, _before, _hook, barrier, _home = fixture
+                first = self._run_private_load_setup_switch(fixture, prepare_journal=True)
+                self.assertEqual(23, first.returncode, first.stdout + first.stderr)
+                self.assertTrue(barrier.is_file())
+                journal = root / "ztp/.setup-switch-journal.json"
+                evidence = journal.read_bytes()
+                manifest_before = manifest.read_bytes()
+                links_before = {path: os.readlink(path) if path.is_symlink() else None
+                                for path in (common, p_only, q_only)}
+                recovery = """
+import importlib.util
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+root = Path(sys.argv[1])
+mode = sys.argv[2]
+spec = importlib.util.spec_from_file_location('fresh_unknown_service', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.runtime_os = lambda: 'Linux'
+load.shutil.which = lambda name: None if mode == 'missing-command' else '/fixture/systemctl'
+def query(command, **kwargs):
+    assert command[1] == 'is-active', command
+    with (root / 'service-queries').open('a') as stream:
+        stream.write(command[-1] + '\\n')
+    if mode == 'missing-command':
+        raise FileNotFoundError('systemctl unavailable')
+    return SimpleNamespace(returncode=4, stdout='', stderr='manager unavailable')
+load._run_subprocess = query
+backend = load.service_runtime_backend({'HTTP_ZTP_RUNTIME_BACKEND': 'systemd'}, command_runner=query)
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    try:
+        load.recover_setup_switch_journal(
+            root / 'ztp/.setup-switch-journal.json', deployment_lock_descriptor=descriptor,
+            services_quiesced=True, runtime_backend=backend,
+        )
+    except load.LoadError as exc:
+        assert '服务' in str(exc), str(exc)
+        print('R22_SERVICE_UNKNOWN_HOLD=' + str(exc))
+    else:
+        raise AssertionError('unknown service state authorized P rollback')
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+                second = subprocess.run(
+                    [sys.executable, "-B", "-c", recovery, str(root), mode], cwd=root,
+                    capture_output=True, text=True, check=False, timeout=30,
+                )
+                self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+                self.assertIn("R22_SERVICE_UNKNOWN_HOLD=", second.stdout)
+                self.assertEqual(b"isc-dhcp-server\n", (root / "service-queries").read_bytes())
+                self.assertEqual(evidence, journal.read_bytes())
+                self.assertEqual(manifest_before, manifest.read_bytes())
+                self.assertEqual(links_before, {path: os.readlink(path) if path.is_symlink() else None
+                                              for path in (common, p_only, q_only)})
+                self.assertFalse((root / "service-started").exists())
+
     def test_real_setup_death_pending_wal_blocks_new_load_before_template(self):
         """A real SETUP crash must fence a fresh LOAD before any new project writes."""
         with tempfile.TemporaryDirectory(prefix="r22-pending-wal-main-") as name:

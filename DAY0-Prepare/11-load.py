@@ -3822,7 +3822,7 @@ def _runtime_service_active(
 ) -> bool:
     try:
         return runtime_backend.is_active(service)
-    except RuntimeContractError as exc:
+    except (RuntimeContractError, OSError) as exc:
         raise LoadError(f"无法检查服务 {service}：{exc}") from exc
 
 
@@ -3850,23 +3850,13 @@ def active_managed_services(
     if host_role != "management-server":
         return ()
     backend = runtime_backend or service_runtime_backend()
-    if backend.name == "supervisor":
-        return tuple(
-            service for service in SUPERVISOR_QUIESCE_SERVICES
-            if _runtime_service_active(backend, service)
-        )
-    systemctl = shutil.which("systemctl")
-    if not systemctl:
-        return ()
-    active = []
-    for service in ("isc-dhcp-server", "apache2"):
-        result = _run_subprocess(
-            [systemctl, "is-active", "--quiet", service],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        if result.returncode == 0:
-            active.append(service)
-    return tuple(active)
+    services = (SUPERVISOR_QUIESCE_SERVICES if backend.name == "supervisor"
+                else ("isc-dhcp-server", "apache2"))
+    # Use the backend's explicit inactive result, not "any nonzero is stopped".
+    # A missing command or failed manager query is unknown, never authority to
+    # restore P or change links while services may still be running.
+    return tuple(service for service in services
+                 if _runtime_service_active(backend, service))
 
 
 def require_artifact_builder_services_inactive(
