@@ -853,9 +853,10 @@ def ztp_completed(device: dict) -> bool:
     progress = device.get("progress")
     if (device_type.startswith("pending_") or not isinstance(progress, dict)
             or progress.get("percent") != 100
-            or device.get("unbound_identity") or device.get("identity_pending")
-            or device.get("promotion_pending")
-            or device.get("round_authority_invalid")
+            or any(device.get(flag, False) is not False for flag in (
+                "unbound_identity", "identity_pending", "promotion_pending",
+                "round_authority_invalid",
+            ))
             or device.get("overall") not in {"success", "warning"}):
         return False
     current_round = device.get("ztp_round")

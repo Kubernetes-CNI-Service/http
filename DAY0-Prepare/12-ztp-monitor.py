@@ -3326,6 +3326,22 @@ def annotate_progress_stall(
 
 
 def finalize_device(device: dict[str, Any]) -> None:
+    invalid_vetoes = [
+        flag for flag in (
+            "round_authority_invalid", "unbound_identity",
+            "identity_pending", "promotion_pending",
+        )
+        if type(device.get(flag, False)) is not bool
+    ]
+    device["issues"][:] = [
+        issue for issue in device["issues"]
+        if not isinstance(issue, dict) or issue.get("code") != "AUTHORITY_VETO_INVALID"
+    ]
+    if invalid_vetoes:
+        device["issues"].append({
+            "code": "AUTHORITY_VETO_INVALID", "severity": "warning",
+            "message": "当前设备权威否决标志不是严格布尔值：" + ", ".join(invalid_vetoes),
+        })
     statuses = [device["stages"][name]["status"] for name in STAGE_NAMES]
     raw_round = device.get("ztp_round", 1)
     current_round = raw_round if type(raw_round) is int and raw_round >= 1 else 0
@@ -3352,7 +3368,10 @@ def finalize_device(device: dict[str, Any]) -> None:
         device["overall"] = "warning"
     elif (done == len(STAGE_NAMES)
           and device["stages"]["complete"]["status"] == "success"
-          and device.get("round_authority_invalid", False) is False
+          and all(device.get(flag, False) is False for flag in (
+              "round_authority_invalid", "unbound_identity",
+              "identity_pending", "promotion_pending",
+          ))
           and (device.get("manual_operation") != "reset"
                or device.get("reset_reboot_observed") is True)
           and stage_success_index("complete") == current_round):
@@ -3489,15 +3508,50 @@ def snapshot_device_state(report: dict[str, Any]) -> dict[str, Any]:
 
 
 def _previous_report(output_root: Path) -> Optional[dict[str, Any]]:
-    """Load the report currently referenced by latest, if it is valid."""
+    """Distinguish missing history from an existing, unreadable snapshot."""
     directory = _latest_snapshot_dir(output_root)
     if directory is None:
         return None
     try:
         report = json.loads((directory / "report.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return None
-    return report if isinstance(report, dict) else None
+        return {"devices": None}
+    return report if isinstance(report, dict) else {"devices": None}
+
+
+def _previous_cycle_devices(previous_report: object) -> tuple[dict[str, Any], bool]:
+    """Unknown/ambiguous history cannot silently mint a fresh first cycle."""
+    if previous_report is None:
+        return {}, True
+    if not isinstance(previous_report, dict):
+        return {}, False
+    items = previous_report.get("devices")
+    if not isinstance(items, list):
+        return {}, False
+    indexed = {}
+    for item in items:
+        if not isinstance(item, dict):
+            return {}, False
+        hostname = item.get("hostname")
+        if not isinstance(hostname, str) or not hostname.strip():
+            return {}, False
+        key = hostname.casefold()
+        if key in indexed:
+            return {}, False
+        indexed[key] = item
+    return indexed, True
+
+
+def _veto_previous_cycle_authority(device: dict[str, Any]) -> None:
+    device["round_authority_invalid"] = True
+    issues = device.setdefault("issues", [])
+    if not any(isinstance(issue, dict)
+               and issue.get("code") == "PREVIOUS_CYCLE_AUTHORITY_INVALID"
+               for issue in issues):
+        issues.append({
+            "code": "PREVIOUS_CYCLE_AUTHORITY_INVALID", "severity": "warning",
+            "message": "Previous cycle history is unreadable or ambiguous",
+        })
 
 
 def _latest_dhcp_cycle_marker(device: dict[str, Any]) -> str:
@@ -3690,14 +3744,13 @@ def assign_ztp_rounds(
     rebuild window, a DHCP interaction newer than the previous completion is
     enough to expose the next round without waiting for SSH.
     """
-    previous_devices = {
-        str(item.get("hostname") or "").casefold(): item
-        for item in (previous_report or {}).get("devices", [])
-        if isinstance(item, dict) and item.get("hostname")
-    }
-    previous_report_time = str((previous_report or {}).get("generated_at") or "")
+    previous_devices, history_valid = _previous_cycle_devices(previous_report)
+    previous_report_time = str(previous_report.get("generated_at") or "") \
+        if isinstance(previous_report, dict) else ""
     manual_markers = manual_markers or {}
     for device in devices:
+        if not history_valid:
+            _veto_previous_cycle_authority(device)
         hostname_key = str(device.get("hostname") or "").casefold()
         previous = previous_devices.get(hostname_key)
         marker = _latest_dhcp_cycle_marker(device)
@@ -3768,10 +3821,7 @@ def assign_ztp_rounds(
             or previous.get("round_authority_invalid", False) is not False
         )
         if invalid_round_authority:
-            device["round_authority_invalid"] = True
-            device.setdefault("issues", []).append(
-                "Previous ZTP generation authority is invalid"
-            )
+            _veto_previous_cycle_authority(device)
         previous_round = raw_previous_round if not invalid_round_authority else 1
         previous_marker = str(previous.get("cycle_marker") or "")
         previous_manual_marker = str(previous.get("manual_cycle_marker") or "")
@@ -3791,17 +3841,11 @@ def assign_ztp_rounds(
         previous_reset_boot = str(previous.get("reset_boot_id_before") or "")
         previous_stages = previous.get("stages", {})
         if not isinstance(previous_stages, dict):
-            device["round_authority_invalid"] = True
-            device.setdefault("issues", []).append(
-                "Previous ZTP stage container authority is invalid"
-            )
+            _veto_previous_cycle_authority(device)
             previous_stages = {}
         complete = previous_stages.get("complete", {})
         if not isinstance(complete, dict):
-            device["round_authority_invalid"] = True
-            device.setdefault("issues", []).append(
-                "Previous ZTP completion stage authority is invalid"
-            )
+            _veto_previous_cycle_authority(device)
             complete = {}
         # Index zero is an unfinished reset, not a completed prior receipt.
         invalid_complete_authority = (
@@ -3813,10 +3857,7 @@ def assign_ztp_rounds(
             )
         )
         if invalid_complete_authority:
-            device["round_authority_invalid"] = True
-            device.setdefault("issues", []).append(
-                "Previous ZTP completion receipt authority is invalid"
-            )
+            _veto_previous_cycle_authority(device)
         previous_complete = str(complete.get("timestamp") or "") if isinstance(complete, dict) else ""
         boot_cycle = bool(current_boot and previous_boot and current_boot != previous_boot)
         dhcp_cycle = False
@@ -4014,12 +4055,10 @@ def assign_stage_success_indices(
     devices: list[dict[str, Any]], previous_report: Optional[dict[str, Any]],
 ) -> None:
     """Carry stage success history and advance only stages proven this round."""
-    previous_devices = {
-        str(item.get("hostname") or "").casefold(): item
-        for item in (previous_report or {}).get("devices", [])
-        if isinstance(item, dict) and item.get("hostname")
-    }
+    previous_devices, history_valid = _previous_cycle_devices(previous_report)
     for device in devices:
+        if not history_valid:
+            _veto_previous_cycle_authority(device)
         previous = previous_devices.get(str(device.get("hostname") or "").casefold(), {})
         previous_stages = previous.get("stages", {}) if isinstance(previous, dict) else {}
         try:
@@ -4275,7 +4314,8 @@ def _snapshot_state_from_dir(directory: Optional[Path]) -> Optional[dict[str, An
         report = json.loads((directory / "report.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    return snapshot_device_state(report) if isinstance(report, dict) else None
+    _, history_valid = _previous_cycle_devices(report)
+    return snapshot_device_state(report) if history_valid and isinstance(report, dict) else None
 
 
 def _prune_snapshot_history(output_root: Path, keep: int = SNAPSHOT_RETENTION) -> list[Path]:
@@ -4664,10 +4704,10 @@ def completion_handoff_device_complete(device: Any) -> bool:
     if (device_type.startswith("pending_")
             or not isinstance(device.get("progress"), dict)
             or device["progress"].get("percent") != 100
-            or device.get("unbound_identity")
-            or device.get("identity_pending")
-            or device.get("promotion_pending")
-            or device.get("round_authority_invalid", False) is not False
+            or any(device.get(flag, False) is not False for flag in (
+                "round_authority_invalid", "unbound_identity",
+                "identity_pending", "promotion_pending",
+            ))
             or device.get("overall") not in {"success", "warning"}):
         return False
     try:

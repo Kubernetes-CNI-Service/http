@@ -387,6 +387,13 @@ casefold 冲突、非对象成员和完成结果集合不闭合均拒绝，不�
 不宣称抵御全部镜像或整卷回滚。worker/九阶段监控消费端尚未完成接入，F02 整体仍 OPEN；
 真机持久化卡 `TC-REAL-F02-LOCAL-GENERATION-001` 仍 NOT RUN。
 
+九阶段历史不能把已有但不可读、非对象、非列表或重复大小写主机成员的快照当作空历史。
+`test_ztp_group_handoff.py` 独立验证负向历史权威跨轮保持及 JSON/CSV/Markdown 诊断；
+`test_ztp_group_handoff_display.py` 串联真实监控快照写入、下一轮读取与真实 HTML 判据，
+证明历史损坏不能恢复“完成”。四个身份/晋升/轮次否决字段存在时必须是严格 boolean false；
+0、空字符串、null、数组和对象均不等价于没有否决，页面与机器交接遵守相同合同。
+这些本地证据不证明真实采集器已执行，也不关闭 F02 的配置同步消费端剩余工作。
+
 SSH 身份负例夹具执行真实生成的 askpass Python body 时绑定当前测试解释器，
 并以污染 PATH 的独立负例核验，不依赖 `/usr/bin/env` 选择其他 Python；原 2 秒限制与
 FIFO rebind 的原断言保持。其他 askpass 用例继续覆盖直接 executable/shebang 路径。

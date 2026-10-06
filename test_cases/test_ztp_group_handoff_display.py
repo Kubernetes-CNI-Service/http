@@ -51,6 +51,69 @@ EXPECTED_NINE_STAGES = (
 
 
 class CompletionDisplayParityTests(unittest.TestCase):
+    @staticmethod
+    def complete_fixture():
+        return {
+            "hostname": "Leaf01", "type": "eth", "ztp_round": 1,
+            "boot_id": "boot-Leaf01", "ip": "192.0.2.1",
+            "mac": "00:11:22:33:44:55", "overall": "success",
+            "progress": {"done": 9, "total": 9, "percent": 100},
+            "issues": [],
+            "stages": {
+                name: {"status": "success", "detail": "independent receipt",
+                       "timestamp": "2026-09-01T12:00:00+08:00",
+                       "success_index": 1}
+                for name in EXPECTED_NINE_STAGES
+            },
+        }
+
+    def test_html_rejects_nonboolean_false_authority_vetoes(self):
+        for flag in ("round_authority_invalid", "unbound_identity",
+                     "identity_pending", "promotion_pending"):
+            for value in (True, 0, "", None, [], {}):
+                with self.subTest(flag=flag, value=value):
+                    row = self.complete_fixture()
+                    row[flag] = value
+                    self.assertFalse(HTML.ztp_completed(row))
+                    self.assertFalse(MONITOR.completion_handoff_device_complete(row))
+            row = self.complete_fixture()
+            row[flag] = False
+            self.assertTrue(HTML.ztp_completed(row))
+            self.assertTrue(MONITOR.completion_handoff_device_complete(row))
+
+    def test_real_snapshot_history_veto_survives_html_and_next_monitor_cycle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            damaged = root / "20260901_115900"
+            damaged.mkdir()
+            original = b'{"devices":null}\n'
+            (damaged / "report.json").write_bytes(original)
+            (root / "latest").symlink_to(damaged.name)
+            for _ in range(2):
+                row = self.complete_fixture()
+                previous = MONITOR._previous_report(root)
+                MONITOR.assign_ztp_rounds([row], previous)
+                MONITOR.assign_stage_success_indices([row], previous)
+                MONITOR.finalize_device(row)
+                report = {
+                    "project": "private-fixture", "scope": "prod",
+                    "generated_at": "2026-09-01T12:00:00+08:00",
+                    "since_minutes": 10, "services": {}, "devices": [row],
+                    "collection_errors": [],
+                }
+                snapshot = MONITOR.write_report(report, root, {})
+                persisted = json.loads((snapshot / "report.json").read_text())
+                saved = persisted["devices"][0]
+                self.assertIs(saved["round_authority_invalid"], True)
+                self.assertFalse(HTML.ztp_completed(saved))
+                self.assertEqual({}, MONITOR.ready_completion_handoff_reports(persisted))
+                rendered = HTML.render_ztp_status_rows({
+                    "available": True, "devices": [saved],
+                })
+                self.assertIn("Leaf01", rendered)
+                self.assertIn("Previous cycle history", rendered)
+            self.assertEqual(original, (damaged / "report.json").read_bytes())
+
     def test_f02_collector_health_classifies_without_ztp_completion(self):
         unavailable = {"available": False, "error": "no ZTP report"}
         self.assertIn("no ZTP report", HTML.render_ztp_status_rows(unavailable))

@@ -232,7 +232,133 @@ def forged_previous_completion_container_device(complete: object = None) -> dict
     return row
 
 
+def invalid_previous_report_device(previous: object) -> dict:
+    """Unknown/conflicting stored history must not restart at a trusted round one."""
+    row = round_device("Leaf01", "eth", round_index=1)
+    MONITOR.assign_ztp_rounds([row], previous)
+    MONITOR.assign_stage_success_indices([row], previous)
+    MONITOR.finalize_device(row)
+    return row
+
+
 class CurrentRoundCompletionTests(unittest.TestCase):
+    def test_invalid_previous_report_is_not_fresh_generation_authority(self):
+        ambiguous = {"devices": [
+            {"hostname": "Leaf01", "ztp_round": 1},
+            {"hostname": "leaf01", "ztp_round": 2},
+        ]}
+        for previous in (0, [], "invalid", {}, {"devices": None},
+                         {"devices": {}}, {"devices": [None]},
+                         {"devices": [{"hostname": 123}]}, ambiguous):
+            with self.subTest(previous=previous):
+                row = invalid_previous_report_device(previous)
+                self.assertIs(row.get("round_authority_invalid"), True)
+                self.assertNotEqual("success", row["overall"])
+                self.assertEqual({}, MONITOR.ready_completion_handoff_reports(
+                    {"scope": "prod", "devices": [row]},
+                ))
+                self.assertTrue(any(
+                    isinstance(issue, dict)
+                    and issue.get("code") == "PREVIOUS_CYCLE_AUTHORITY_INVALID"
+                    for issue in row["issues"]
+                ))
+                next_row = invalid_previous_report_device({"devices": [row]})
+                self.assertIs(next_row.get("round_authority_invalid"), True)
+
+        for genesis in (None, {"devices": []}):
+            with self.subTest(genesis=genesis):
+                row = invalid_previous_report_device(genesis)
+                self.assertEqual("success", row["overall"])
+                self.assertEqual(["prod-ethernet"], list(
+                    MONITOR.ready_completion_handoff_reports(
+                        {"scope": "prod", "devices": [row]},
+                    ),
+                ))
+
+    def test_existing_unreadable_snapshot_is_not_missing_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot = root / "20260901_120000"
+            snapshot.mkdir()
+            (root / "latest").symlink_to(snapshot.name)
+            for raw in ("{broken", "[]", "0", "{}"):
+                with self.subTest(raw=raw):
+                    (snapshot / "report.json").write_text(raw, encoding="utf-8")
+                    loaded = MONITOR._previous_report(root)
+                    self.assertIsNotNone(loaded)
+                    row = invalid_previous_report_device(loaded)
+                    self.assertIs(row.get("round_authority_invalid"), True)
+                    self.assertEqual({}, MONITOR.ready_completion_handoff_reports(
+                        {"scope": "prod", "devices": [row]},
+                    ))
+            (snapshot / "report.json").unlink()
+            self.assertIsNotNone(MONITOR._previous_report(root))
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertIsNone(MONITOR._previous_report(Path(directory)))
+
+    def test_history_veto_is_rendered_and_survives_real_snapshot_roundtrip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            broken = root / "20260901_120000"
+            broken.mkdir()
+            broken_bytes = '{"devices":null}\n'
+            (broken / "report.json").write_text(broken_bytes, encoding="utf-8")
+            (root / "latest").symlink_to(broken.name)
+            row = invalid_previous_report_device(MONITOR._previous_report(root))
+            for poll in range(2):
+                row.update({"ip": "192.0.2.1", "mac": "00:11:22:33:44:55"})
+                report = {
+                    "project": "private-fixture", "generated_at": "2026-09-01T12:00:00+08:00",
+                    "since_minutes": 10, "services": {}, "devices": [row],
+                    "collection_errors": [],
+                }
+                snapshot = MONITOR.write_report(report, root, {})
+                self.assertIn("PREVIOUS_CYCLE_AUTHORITY_INVALID",
+                              (snapshot / "devices.csv").read_text(encoding="utf-8"))
+                self.assertIn("Previous cycle history",
+                              (snapshot / "report.md").read_text(encoding="utf-8"))
+                saved = MONITOR._previous_report(root)
+                self.assertIs(saved["devices"][0]["round_authority_invalid"], True)
+                row = invalid_previous_report_device(saved)
+                self.assertEqual({}, MONITOR.ready_completion_handoff_reports(
+                    {"scope": "prod", "devices": [row]},
+                ))
+            self.assertEqual(broken_bytes,
+                             (broken / "report.json").read_text(encoding="utf-8"))
+
+    def test_identity_veto_flags_require_explicit_boolean_false_when_present(self):
+        for flag in ("unbound_identity", "identity_pending", "promotion_pending"):
+            for value in (True, 0, "", None, [], {}):
+                with self.subTest(flag=flag, value=value):
+                    row = round_device("Leaf01", "eth")
+                    row[flag] = value
+                    MONITOR.finalize_device(row)
+                    self.assertNotEqual("success", row["overall"])
+                    if value is not True:
+                        diagnostics = [
+                            issue for issue in row["issues"]
+                            if issue.get("code") == "AUTHORITY_VETO_INVALID"
+                        ]
+                        self.assertEqual(1, len(diagnostics))
+                        self.assertIn(flag, diagnostics[0]["message"])
+                        MONITOR.finalize_device(row)
+                        self.assertEqual(1, sum(
+                            issue.get("code") == "AUTHORITY_VETO_INVALID"
+                            for issue in row["issues"]
+                        ))
+                    self.assertEqual({}, MONITOR.ready_completion_handoff_reports(
+                        {"scope": "prod", "devices": [row]},
+                    ))
+            row = round_device("Leaf01", "eth")
+            row[flag] = False
+            MONITOR.finalize_device(row)
+            self.assertEqual("success", row["overall"])
+            self.assertEqual(["prod-ethernet"], list(
+                MONITOR.ready_completion_handoff_reports(
+                    {"scope": "prod", "devices": [row]},
+                ),
+            ))
+
     def test_unapplied_config_and_missing_key_do_not_count_as_completed_stages(self):
         for stage_name, status in (
             ("config_apply", "skipped"),
@@ -642,6 +768,12 @@ class CurrentRoundGateWorkflowTests(unittest.TestCase):
             forged_stage["stages"]["config_apply"]["success_index"] = True
             forged_current_authority = round_device("Leaf01", "eth")
             forged_current_authority["round_authority_invalid"] = 0
+            malformed_identity_vetoes = []
+            for flag in ("unbound_identity", "identity_pending", "promotion_pending"):
+                row = round_device("Leaf01", "eth")
+                row[flag] = 0
+                MONITOR.finalize_device(row)
+                malformed_identity_vetoes.append(row)
 
             with mock.patch.dict(MONITOR.COLLECTOR_SCRIPTS, {"ethernet": collector}), \
                     mock.patch.object(MONITOR, "run_command", side_effect=external_collector), \
@@ -663,6 +795,7 @@ class CurrentRoundGateWorkflowTests(unittest.TestCase):
                     forged_round,
                     forged_stage,
                     forged_current_authority,
+                    *malformed_identity_vetoes,
                     forged_manual_boot_evidence_device(),
                     forged_reset_reboot_device(),
                     forged_future_previous_receipt_device(),
@@ -671,6 +804,7 @@ class CurrentRoundGateWorkflowTests(unittest.TestCase):
                     forged_previous_reset_receipt_device(),
                     forged_previous_stage_container_device(),
                     forged_previous_completion_container_device(),
+                    invalid_previous_report_device({"devices": {}}),
                 ):
                     handed_off, retries, retry_after = (
                         MONITOR.process_ready_completion_handoffs(
