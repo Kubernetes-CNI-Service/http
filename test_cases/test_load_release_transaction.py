@@ -164,6 +164,29 @@ def assert_private_dhcp_transaction_retention(
                 target.mkdir(parents=True, exist_ok=True)
             else:
                 if target in mappings.values():
+                    if outcome == "preimage-before-write":
+                        receipt = target.parent / next(iter(live_dir.glob(".load-dhcp-transaction-*"))).name / "a-preimage.json"
+                        assert receipt.is_file(), "persistent four-file A preimage must precede every B overwrite"
+                        assert stat.S_IMODE(receipt.stat().st_mode) == 0o600
+                        envelope = json.loads(receipt.read_bytes())
+                        body = envelope["body"]
+                        assert envelope["sha256"] == hashlib.sha256(
+                            json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+                        ).hexdigest()
+                        assert body["schema_version"] == 1 and body["phase"] == "prepared-a"
+                        assert body["runtime"]["path"] == str(live_dir)
+                        assert set(body["before"]) == set(names)
+                        for name in names:
+                            row = body["before"][name]
+                            assert row["state"] == "file" and row["mode"] == 0o644
+                            assert row["sha256"] == hashlib.sha256(expected_a[name]).hexdigest()
+                            assert row["size"] == len(expected_a[name])
+                        assert body["after_sha256"] == {
+                            name: hashlib.sha256(expected_b[name]).hexdigest() for name in names
+                        }
+                        assert body["parent"]["before"] == {"state": "missing"}
+                        assert body["parent"]["destination"] == str(candidate.destination)
+                        assert body["parent"]["candidate"]["release_id"] == "independent-B"
                     if outcome == "backup-sync-success":
                         assert backup_sync_events == [*names, "backup", "transaction", "runtime"], \
                             "all A payloads and backup ancestry must sync before any B install"
@@ -213,6 +236,12 @@ def assert_private_dhcp_transaction_retention(
     def sync_parent(descriptor):
         metadata = os.fstat(descriptor)
         for transaction in live_dir.glob(".load-dhcp-transaction-*"):
+            receipt = transaction / "a-preimage.json"
+            if outcome == "preimage-file-sync" and receipt.exists():
+                target = receipt.stat()
+                if (metadata.st_dev, metadata.st_ino) == (target.st_dev, target.st_ino):
+                    injected.append(outcome)
+                    raise OSError("independent A preimage receipt sync fault")
             backup = transaction / "backup"
             paths = [(backup / name, name, "backup-file-sync") for name in names]
             paths += [(backup, "backup", "backup-dir-sync"),
@@ -306,12 +335,14 @@ def assert_private_dhcp_transaction_retention(
                     assert "DHCP A backup verification failed" in str(exc), str(exc)
                 elif outcome in backup_sync_faults:
                     assert "DHCP A backup durability unconfirmed" in str(exc), str(exc)
+                elif outcome == "preimage-file-sync":
+                    assert "DHCP A preimage receipt" in str(exc) and "HOLD" in str(exc), str(exc)
                 else:
                     raise
             else:
-                assert outcome in {"success", "backup-sync-success"}, "failure must propagate before service continuation"
+                assert outcome in {"success", "backup-sync-success", "preimage-before-write"}, "failure must propagate before service continuation"
         transactions = list(live_dir.glob(".load-dhcp-transaction-*"))
-        if outcome in {"backup-bytes", "backup-mode", "backup-link", "backup-read", *backup_sync_faults}:
+        if outcome in {"backup-bytes", "backup-mode", "backup-link", "backup-read", "preimage-file-sync", *backup_sync_faults}:
             assert injected == [outcome], injected
             assert installed_b == [], "bad A backup must reject before the first B install"
             assert not candidate.committed and not candidate.directory_synced
@@ -441,8 +472,8 @@ def assert_private_dhcp_transaction_retention(
         else:
             assert transactions == [], "normal success and precommit rollback still clean up"
             assert installed == (expected_a if outcome == "precommit" else expected_b)
-            assert candidate.committed == (outcome in {"success", "backup-sync-success"})
-            assert candidate.directory_synced == (outcome in {"success", "backup-sync-success"})
+            assert candidate.committed == (outcome in {"success", "backup-sync-success", "preimage-before-write"})
+            assert candidate.directory_synced == (outcome in {"success", "backup-sync-success", "preimage-before-write"})
             if outcome == "precommit":
                 assert not candidate.destination.exists()
                 assert sync_events == list(names) + ["directory"], sync_events
@@ -6567,6 +6598,50 @@ os.kill(os.getpid(), signal.SIGKILL)
                 root, project = Path(name), Path(name) / "project"
                 project.mkdir()
                 assert_private_dhcp_transaction_retention(LOAD, root, project, boundary)
+
+    def test_dhcp_persistent_a_preimage_precedes_first_b_write(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root, project = Path(name), Path(name) / "project"
+            project.mkdir()
+            assert_private_dhcp_transaction_retention(LOAD, root, project, "preimage-before-write")
+
+    def test_dhcp_a_preimage_receipt_sync_failure_holds_original_a(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root, project = Path(name), Path(name) / "project"
+            project.mkdir()
+            assert_private_dhcp_transaction_retention(LOAD, root, project, "preimage-file-sync")
+
+    def test_dhcp_preimage_receipt_rejects_same_transaction_in_rebound_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            runtime = Path(name).resolve() / "runtime"
+            transaction = runtime / ".load-dhcp-transaction-independent"
+            backup = transaction / "backup"
+            backup.mkdir(parents=True, mode=0o700)
+            names = ("dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts")
+            states = {}
+            for leaf in names:
+                path = runtime / leaf
+                path.write_bytes(b"independent original A\n")
+                shutil.copy2(path, backup / leaf)
+                meta = path.stat()
+                states[path] = {"state": "file", "mode": stat.S_IMODE(meta.st_mode),
+                                "uid": meta.st_uid, "gid": meta.st_gid, "mtime_ns": meta.st_mtime_ns,
+                                "size": 23, "sha256": hashlib.sha256(b"independent original A\n").hexdigest()}
+            receipt = LOAD._prepare_dhcp_a_preimage_receipt(
+                runtime, transaction, states,
+                {leaf: hashlib.sha256(b"independent B\n").hexdigest() for leaf in names}, None,
+            )
+            held = runtime.with_name("held-original-runtime")
+            runtime.rename(held)
+            runtime.mkdir()
+            (held / transaction.name).rename(transaction)
+            # Moving its entire containing transaction leaves the receipt file
+            # untouched; neither bytes nor inode authorize a new runtime parent.
+            with self.assertRaisesRegex(LOAD.LoadError, "preimage.*HOLD"):
+                LOAD._verify_dhcp_a_preimage_receipt(receipt)
+            self.assertEqual(b"independent original A\n", (held / "dhcpd.conf").read_bytes())
+            self.assertEqual(b"independent original A\n", (transaction / "backup/dhcpd.conf").read_bytes())
+            self.assertEqual(receipt[1], (transaction / "a-preimage.json").read_bytes())
 
     def test_dhcp_a_backup_syncs_payloads_and_ancestry_before_b_install(self) -> None:
         with tempfile.TemporaryDirectory() as name:

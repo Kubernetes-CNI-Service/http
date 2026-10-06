@@ -8385,6 +8385,147 @@ def _sync_verified_dhcp_a_backup(
             os.close(descriptor)
 
 
+def _dhcp_a_preimage_receipt_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return tuple(getattr(metadata, field) for field in (
+        "st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink",
+        "st_size", "st_mtime_ns", "st_ctime_ns",
+    ))
+
+
+def _prepare_dhcp_a_preimage_receipt(
+    runtime_directory: Path, transaction: Path,
+    original_states: dict[Path, dict[str, object]],
+    after_sha256: dict[str, str], parent_candidate: PreparedParentRelease | None,
+) -> tuple[Path, bytes, tuple[int, ...]]:
+    """Persist a bounded four-file before-image before any B overwrite.
+
+    The following backup synchronizer persists its containing ancestry. This
+    record is evidence, not permission to restore A, retire a setup WAL or
+    activate services. A fresh process must still HOLD on the transaction.
+    """
+    descriptors = []
+    receipt_fd = None
+    try:
+        names = {"dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts"}
+        if (transaction.parent != runtime_directory
+                or not transaction.name.startswith(".load-dhcp-transaction-")
+                or {path.name for path in original_states} != names
+                or any(path.parent != runtime_directory for path in original_states)
+                or set(after_sha256) != names
+                or any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+                       for value in after_sha256.values())):
+            raise LoadError("four-file preimage inventory is invalid")
+        if any(not hasattr(os, flag) for flag in ("O_DIRECTORY", "O_NOFOLLOW")):
+            raise LoadError("preimage requires nofollow directory capability")
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+
+        def directory_identity(path, metadata):
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise LoadError("preimage ancestor is not a real directory")
+            return {"path": str(path), "dev": metadata.st_dev, "ino": metadata.st_ino,
+                    "mode": stat.S_IMODE(metadata.st_mode),
+                    "uid": metadata.st_uid, "gid": metadata.st_gid}
+
+        authorities = {}
+        for path in (runtime_directory, transaction, transaction / "backup"):
+            expected = directory_identity(path, path.lstat())
+            descriptor = (os.open(path, flags) if not descriptors else
+                          os.open(path.name, flags, dir_fd=descriptors[-1][1]))
+            descriptors.append((path, descriptor, expected))
+            if directory_identity(path, os.fstat(descriptor)) != expected:
+                raise LoadError("preimage ancestor changed while opening")
+            authorities[path] = expected
+        if authorities[transaction / "backup"]["mode"] != 0o700:
+            raise LoadError("preimage backup directory is not private")
+
+        def recheck():
+            for path, descriptor, expected in descriptors:
+                if (directory_identity(path, os.fstat(descriptor)) != expected
+                        or directory_identity(path, path.lstat()) != expected):
+                    raise LoadError("preimage ancestry changed")
+            for path, expected in original_states.items():
+                if (_dhcp_restore_leaf_state(path) != expected
+                        or _dhcp_restore_leaf_state(transaction / "backup" / path.name) != expected):
+                    raise LoadError("preimage or backup changed")
+
+        parent = None
+        if parent_candidate is not None:
+            candidate_bytes, _mode = _read_rollback_regular(parent_candidate.temporary)
+            parent = {
+                "destination": str(parent_candidate.destination),
+                "directory": directory_identity(parent_candidate.destination.parent,
+                                                parent_candidate.destination.parent.lstat()),
+                "before": _dhcp_restore_leaf_state(parent_candidate.destination),
+                "candidate": {"release_id": parent_candidate.release_id,
+                              "sha256": hashlib.sha256(candidate_bytes).hexdigest(),
+                              "size": len(candidate_bytes)},
+            }
+        body = {"schema_version": 1, "phase": "prepared-a",
+                "runtime": authorities[runtime_directory],
+                "transaction": authorities[transaction],
+                "backup": authorities[transaction / "backup"],
+                "before": {path.name: state for path, state in original_states.items()},
+                "after_sha256": dict(after_sha256), "parent": parent}
+        canonical = lambda value: json.dumps(
+            value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        ).encode("utf-8")
+        payload = canonical({"body": body, "sha256": hashlib.sha256(canonical(body)).hexdigest()}) + b"\n"
+        if len(payload) > _ROLLBACK_MARKER_LIMIT:
+            raise LoadError("preimage receipt exceeds bounded size")
+        recheck()
+        receipt = transaction / "a-preimage.json"
+        receipt_fd = os.open(
+            receipt.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+            | getattr(os, "O_CLOEXEC", 0), 0o600, dir_fd=descriptors[1][1],
+        )
+        os.fchmod(receipt_fd, 0o600)
+        pending = memoryview(payload)
+        while pending:
+            count = os.write(receipt_fd, pending)
+            if count <= 0:
+                raise LoadError("preimage receipt write made no progress")
+            pending = pending[count:]
+        os.fsync(receipt_fd)
+        expected_identity = _dhcp_a_preimage_receipt_identity(os.fstat(receipt_fd))
+        _verify_dhcp_a_preimage_receipt((receipt, payload, expected_identity))
+        recheck()
+        return receipt, payload, expected_identity
+    except (OSError, ValueError, LoadError) as exc:
+        raise LoadError(f"DHCP A preimage receipt unconfirmed; HOLD: {exc}") from exc
+    finally:
+        if receipt_fd is not None:
+            os.close(receipt_fd)
+        for _path, descriptor, _expected in reversed(descriptors):
+            os.close(descriptor)
+
+
+def _verify_dhcp_a_preimage_receipt(receipt_state, *, backup_required: bool = True) -> None:
+    """Check the original receipt authority before its authorized cleanup."""
+    path, payload, identity = receipt_state
+    try:
+        body = json.loads(payload)["body"]
+
+        def require_ancestry():
+            for role in ("runtime", "transaction", "backup") if backup_required else ("runtime", "transaction"):
+                expected = body[role]
+                directory = Path(expected["path"])
+                metadata = directory.lstat()
+                if (not stat.S_ISDIR(metadata.st_mode)
+                        or {"path": str(directory), "dev": metadata.st_dev, "ino": metadata.st_ino,
+                            "mode": stat.S_IMODE(metadata.st_mode),
+                            "uid": metadata.st_uid, "gid": metadata.st_gid} != expected):
+                    raise LoadError("preimage receipt ancestry changed")
+
+        require_ancestry()
+        if (_dhcp_a_preimage_receipt_identity(path.lstat()) != identity
+                or _read_rollback_regular(path, limit=_ROLLBACK_MARKER_LIMIT) != (payload, 0o600)
+                or _dhcp_a_preimage_receipt_identity(path.lstat()) != identity):
+            raise LoadError("preimage receipt identity or bytes changed")
+        require_ancestry()
+    except (OSError, LoadError) as exc:
+        raise LoadError(f"DHCP A preimage receipt changed; HOLD: {exc}") from exc
+
+
 def mount_and_test_dhcp(
     dry_run: bool = False,
     *,
@@ -8452,6 +8593,7 @@ def mount_and_test_dhcp(
     transaction_created = False
     backup_unconfirmed = False
     restore_incomplete = False
+    preimage_receipt = None
     build_workspace: tempfile.TemporaryDirectory[str] | None = None
     try:
         # Ubuntu's dhcpd AppArmor profile permits configuration reads below
@@ -8530,7 +8672,11 @@ def mount_and_test_dhcp(
                 raise LoadError(
                     f"DHCP A backup verification failed; HOLD: {destination.name}"
                 )
+        preimage_receipt = _prepare_dhcp_a_preimage_receipt(
+            dhcp_runtime_dir, transaction_dir, original_states, frozen_hashes, parent_candidate,
+        )
         _sync_verified_dhcp_a_backup(dhcp_runtime_dir, backup_dir, original_states)
+        _verify_dhcp_a_preimage_receipt(preimage_receipt)
         backup_unconfirmed = False
 
         try:
@@ -8630,6 +8776,10 @@ def mount_and_test_dhcp(
             except BrokenPipeError:
                 pass
         elif transaction_created:
+            # Never delete the backups when their new persisted authority was
+            # replaced or changed by an unknown writer after B installation.
+            if preimage_receipt is not None:
+                _verify_dhcp_a_preimage_receipt(preimage_receipt)
             cleanup_failed = False
             for directory in (staged_dir, backup_dir):
                 for name in mappings:
@@ -8638,11 +8788,19 @@ def mount_and_test_dhcp(
                         check=False,
                     )
                     cleanup_failed = cleanup_failed or result.returncode != 0
-            for directory in (backup_dir, staged_dir, transaction_dir):
+            for directory in (backup_dir, staged_dir):
                 result = _run_subprocess(
                     sudo_command("rmdir", "--", str(directory)), check=False,
                 )
                 cleanup_failed = cleanup_failed or result.returncode != 0
+            if not cleanup_failed and preimage_receipt is not None:
+                _verify_dhcp_a_preimage_receipt(preimage_receipt, backup_required=False)
+                preimage_receipt[0].unlink()
+                _fsync_parent_directory(transaction_dir)
+            result = _run_subprocess(
+                sudo_command("rmdir", "--", str(transaction_dir)), check=False,
+            )
+            cleanup_failed = cleanup_failed or result.returncode != 0
             if cleanup_failed:
                 warn(f"DHCP 事务目录清理失败，请手工删除：{transaction_dir}")
     ok("四个 DHCP 文件已事务式复制到 /etc/dhcp，dhcpd -t 检查通过；服务尚未启动")

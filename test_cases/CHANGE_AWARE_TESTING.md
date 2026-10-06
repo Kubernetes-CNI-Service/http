@@ -481,6 +481,51 @@ size 15458，SHA256
 按已定位的单一夹具原因复核整个受影响模块，不将首轮 346 项冒称全通过，也
 不以此启动正式 full。旧 bootstrap/REQ19 超时原因与正式 related/full 闸门仍未闭。
 
+### R22 DHCP 四文件持久写前凭据候选
+
+原 A 字段集只有进程内存，备份目录不能独立说明完整四文件前像、缺席项或拟提交 B。
+新增 direct 与真实 SETUP→复制的实际 LOAD 安装 API workflow，独立要求首条 B
+install 之前存在 0600/schema1/prepared-a 凭据，明确四个固定文件的 A 字节摘要、
+metadata、四个 B 摘要及 parent 前像/候选身份；另注入凭据文件 fsync 失败要求零 B
+写入、原 A 不变、0700 backup/事务保留。原实现 4 tests / 4 FAIL / exit1，完整日志
+`outputs/test-diagnostics/r22-dhcp-persistent-preimage-red.log`，inode 146360708，size 6645，
+SHA256 `eb7c507e0c632ca27c4149dc34df1e747eedb40be0bb2e7682952a1acbf2418c`。
+
+候选通过 held NOFOLLOW runtime→transaction→backup 目录链建立固定清单，
+O_EXCL 创建 `a-preimage.json`、fchmod0600、完整写入并 fsync 文件，重核原 A/backup
+及目录身份。随后原 backup 文件/目录链同步将凭据名称一并持久化，再核原 record
+身份/字节/ancestry 才允许 B 写入。清理前同样核原 record，不把未知同名凭据作为
+删除备份的权限。校验和是完整性绑定，不声称抵御可重写全部 authority 的同 UID 写者。
+
+初次追加“只移动 receipt 文件”的负例因原 file ctime 核验而已通过：日志名虽为
+`r22-dhcp-preimage-ancestry-red.log`，实际 1 OK / exit0，不能冒称 RED。进一步把
+runtime 原目录移走、创建未知同名 runtime，再把整个原事务移入，record 文件自身
+完全不变；原 leaf-only verifier 未拒绝，独立 direct 1 FAIL / exit1，日志
+`r22-dhcp-preimage-runtime-rebind-red.log`，inode 146374909，size 888，SHA256
+`385a31e4d092bcec765f4b1577b2542494b77783a07dfd75d281cc87009faaf9`。
+候选在 record 读取前后另核 runtime/transaction/backup 的 dev/ino/mode/uid/gid。
+新项加原 backup 同步/链接缺席恢复正例共 7 OK / exit0（9.879 秒），日志
+`r22-dhcp-persistent-preimage-regressions.log`，inode 146374975，size 1907，SHA256
+`4be9b51ef81fff6a6d1ba513756d12404807e2690754330bc453eeda103b2a48`。
+
+完整 LOAD transaction、完整 DHCP optional workflow 加四项明确选定的真实
+SETUP→LOAD workflow，完整 343 tests / OK / exit0（54.584 秒），日志
+`outputs/test-diagnostics/r22-dhcp-persistent-preimage-load-workflows.log`，inode
+146379441，size 118343，SHA256
+`9ff7bc096790813fbbd45515c179f8a3059278adf7195a5e7d904c26ad3d3c0d`。
+读前后 stat/inode 稳定，已记录 112117 字节旧前缀 SHA256
+`e6d413302a78ed84f6856dcfffffd4ca0a02a5b7acbf27f57bcd5bd81a63781a` 未变。
+物理第 1092 行 Ran、1094 行 OK、fixture 缓冲 stdout 后第 1186 行
+`R22_DHCP_PREIMAGE_LOAD_WORKFLOWS_EXIT=0` 与 exec exit0 相符；运行中源码/
+测试冻结，manifest、approved ledger 和运行态 setup manifest 身份/字节未改。
+既有 direct 与 generation-input-binding 多真实脚本 workflow 映射有效，REAL_ENV
+R22 卡继续 OPEN。本次不是整个 generation workflow、related 或正式 full。
+
+本凭据不提供冷恢复 API、A 服务启动权限、完整 P/Q/WAL/receipt 事务整合或 B
+健康成功退休；正常 DHCP mount 的既有成功清理边界也尚未扩展到整个 LOAD 成功。
+不能称完整 R22 已落地或本地正式验收。原 bootstrap/REQ19 超时原因仍待核，
+不因这些局部 PASS 放行 related/full，不手改 ledger 或套旧证明。
+
 ### R22 未结清 DHCP 事务的新进程写前闸门候选
 
 内存候选重入闸门不能保护新 LOAD。独立新候选 direct 和真实 SETUP→父 B

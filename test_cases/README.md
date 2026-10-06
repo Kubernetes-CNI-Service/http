@@ -294,6 +294,14 @@ backup 目录 FD，先同步所有原 regular backup 和 backup 目录，再同�
 install、零 parent 提交状态 HOLD，并保留未确认的事务。正例必须见证全部文件→
 backup→transaction→runtime 完成后才能首次安装 B。这里仍没有完整持久分组
 receipt/WAL、祖先原子比较、Linux 断电见证、B 成功退休或旧 A 显式健康激活。
+DHCP 安装另在第一次 B 覆盖前创建事务内独占、0600 的 `a-preimage.json`。
+其 schema1/prepared-a body 独立绑定四个原 A 的类型、内容摘要及元数据/原始链接/
+缺席、四个拟安装 B 摘要、runtime/transaction/backup 目录身份和父提交前像及
+候选摘要；body 校验和与完整 record 文件同步后，还必须完成上述备份/目录链同步。
+凭据创建、同步或后核验失败仍零 B 写入并保留原证据；清理前必须核原凭据身份、
+字节及目录 ancestry，不消费换绑对象。正常成功/完整 A 恢复才按既有合同清理。
+这是持久四文件写前证据，不是新进程恢复/激活权限：普通新 LOAD 仍 HOLD，
+完整 R22 分组恢复、B 健康成功收口、旧 A 显式激活和断电见证仍未完成。
 同一进程内再次用可见但未确认的父候选调用 DHCP 安装 API，必须在读入安装映射、
 创建事务、备份或安装之前 HOLD。原输入后来改变也不能许可第二次覆盖 B；第一次
 的 B/A 备份、原事务及 backup inode 保持不变。此内存候选入口闸门不是跨重启凭据，

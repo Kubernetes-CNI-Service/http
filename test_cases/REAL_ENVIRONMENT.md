@@ -1709,6 +1709,8 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 - DHCP 原 A backup 写前同步候选：在上项读回后，以 held NOFOLLOW runtime→transaction→backup 目录链持有/名称身份为界，要求 backup regular 文件→backup 目录→transaction 目录→runtime 目录全成功并重核原 A/backup 预像后才允许首个 B install。现场仍限本卡授权隔离 VM、root、完整 A/B/P/Q/parent/WAL/receipt、可恢复卷快照、排他锁、明确停服和其它写者静默；保存每个 FD/名称 dev/ino/mode/ctime/摘要、原 A、backup/staged、每次同步和首安装命令的物理顺序。分别在四处同步阶段注入失败、目录打开时换绑、同步后 payload 漂移，见证零 B 安装、原 A 不被该算法修改、原事务保留及新 LOAD HOLD。真实断电后状态须独立授权/核验，不把 fsync 返回成功或模拟异常当作掉电持久性证据。故障证据封存后仅由负责人按核实隔离快照恢复，禁止 live 注入、glob 删除未知事务和自动启动旧 A。本地不证明完整持久 grouped DHCP receipt/WAL、祖先原子比较/并发免疫、B 成功退休、完整 root 入口或旧 A 显式健康激活，本卡继续 OPEN。
 
+- DHCP 四文件持久写前凭据候选：事务内独占创建 0600 `a-preimage.json`，绑定固定四文件 A 字段集（含原链接/缺席）、B 摘要、runtime/transaction/backup 目录身份、parent 前像及候选摘要；文件同步和原 backup/目录链同步、完整后核验完成前不得首写 B。现场仍仅限本卡授权隔离 VM、root、完整 A/B/P/Q/WAL/receipt、可恢复卷快照、排他锁、明确停服及其它写者静默。保存原/现/备份 leaf 和目录 dev/ino/mode/uid/gid/mtime/ctime、完整 envelope 摘要、每个 fsync 与首安装/清理的物理时序；受控注入 record 创建/同步失败、同名文件替换和 runtime/transaction/backup 换绑，核零未经授权 B 写入或清理、原备份/未知对象保留、新 LOAD HOLD。另独立授权验证断电后 record/backup/name 的实际状态，不能以 fsync exit0 或私有异常注入代替。原样封存证据，经负责人核验后仅按登记快照恢复，不对 live 注入、不 glob 删除事务或自动启动 A。本地不证明完整分组冷恢复、全部共享写集、整个 LOAD 的 B 健康成功收口、旧 A 显式健康激活、root 完整入口或非协作写者免疫；本卡仍 OPEN。
+
 ## TC-REAL-R22-C2-DESCRIPTION-PUBLISH-001 — c2 同名描述输出的故障窗口
 
 - Case ID：`TC-REAL-R22-C2-DESCRIPTION-PUBLISH-001`；类型：real-environment / transaction / crash-recovery；对应 R22 c2 对 `*_with_desc` 的既有同名输出替换。状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。自动化先决为 `test_cases.test_generation_input_binding_contract` 的二次读取、早返及 staging direct，`test_cases.test_generation_input_binding_workflow` 的 setup/load/c2 workflow，和当前候选正式 full/check；现有定向通过不证明进程死亡后的原子性。

@@ -2005,6 +2005,16 @@ finally:
             reenter=False, outcomes=("backup-sync-success",),
         )
 
+    def test_real_setup_then_dhcp_persistent_a_preimage_precedes_b_write(self):
+        self._real_setup_uncertain_parent_dhcp_evidence(
+            reenter=False, outcomes=("preimage-before-write",),
+        )
+
+    def test_real_setup_then_dhcp_a_preimage_sync_failure_holds_original_a(self):
+        self._real_setup_uncertain_parent_dhcp_evidence(
+            reenter=False, outcomes=("preimage-file-sync",),
+        )
+
     def _real_setup_uncertain_parent_dhcp_evidence(
         self, *, reenter, cold=False, outcomes=("open", "fsync"),
     ):
