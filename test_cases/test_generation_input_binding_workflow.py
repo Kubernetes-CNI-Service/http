@@ -2085,6 +2085,79 @@ finally:
             self.assertTrue(source.is_symlink())
             self.assertFalse((root / "service-started").exists())
 
+    def test_real_setup_infra_log_death_cold_recovery_does_not_restore_replaced_backup(self):
+        """A backup replaced after the Q pointer unlink must stay outside P."""
+        with tempfile.TemporaryDirectory(prefix="r22-infra-backup-owner-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, _q, common, _p_only, _q_only, manifest, _before, _hook, barrier, _home = fixture
+            source = root / "infra/logs"
+            source.mkdir()
+            payload = b"independent original P log directory\n"
+            (source / "audit.log").write_bytes(payload)
+            first = self._run_private_load_setup_switch(fixture, prepare_journal=True, first_link=source)
+            self.assertEqual(23, first.returncode, first.stdout + first.stderr)
+            self.assertTrue(barrier.is_file())
+            destination = source.resolve()
+            backup = destination / ".logs-migration-source"
+            retained = destination.parent / "operator-retained-original-infra"
+            receipt, journal = root / "infra/.logs-migration.json", root / "ztp/.setup-switch-journal.json"
+            receipt_bytes, wal = receipt.read_bytes(), journal.read_bytes()
+            mixed, manifest_bytes = os.readlink(common), manifest.read_bytes()
+            recovery = """
+import importlib.util, os, sys
+from pathlib import Path
+from types import SimpleNamespace
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('cold_infra_backup_owner_load', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+source = root / 'infra/logs'
+destination = source.resolve()
+backup = destination / '.logs-migration-source'
+sync = load._fsync_parent_directory
+mutated = False
+def replace_after_unlink(parent):
+    global mutated
+    sync(parent)
+    if parent == source.parent and not os.path.lexists(source) and not mutated:
+        mutated = True
+        backup.rename(destination.parent / 'operator-retained-original-infra')
+        backup.mkdir()
+        (backup / 'audit.log').write_bytes(b'foreign replacement backup evidence\\n')
+load._fsync_parent_directory = replace_after_unlink
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    try:
+        load.recover_setup_switch_journal(
+            root / 'ztp/.setup-switch-journal.json', deployment_lock_descriptor=descriptor,
+            services_quiesced=True, runtime_backend=SimpleNamespace(name='supervisor'),
+        )
+    except load.LoadError as error:
+        assert 'infra log' in str(error) and 'changed' in str(error), str(error)
+        assert mutated
+        assert not os.path.lexists(source), 'replacement backup was moved into P'
+        print('R22_REPLACEMENT_INFRA_BACKUP_HELD')
+    else:
+        raise AssertionError('cold recovery accepted a replacement backup')
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+            second = subprocess.run([sys.executable, "-B", "-c", recovery, str(root)],
+                                    cwd=root, capture_output=True, text=True, check=False, timeout=30)
+            self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+            self.assertIn("R22_REPLACEMENT_INFRA_BACKUP_HELD", second.stdout)
+            self.assertFalse(os.path.lexists(source))
+            self.assertEqual(b"foreign replacement backup evidence\n", (backup / "audit.log").read_bytes())
+            self.assertEqual(payload, (retained / "audit.log").read_bytes())
+            self.assertEqual(payload, (destination / "audit.log").read_bytes())
+            self.assertEqual(receipt_bytes, receipt.read_bytes())
+            self.assertEqual(wal, journal.read_bytes())
+            self.assertEqual(mixed, os.readlink(common))
+            self.assertEqual(manifest_bytes, manifest.read_bytes())
+            self.assertFalse((root / "service-started").exists())
+
     def test_real_setup_infra_log_pointer_death_cold_restores_real_directory(self):
         """LOAD→SETUP death after real log migration restores exact old bytes."""
         with tempfile.TemporaryDirectory(prefix="r22-real-infra-restore-") as name:

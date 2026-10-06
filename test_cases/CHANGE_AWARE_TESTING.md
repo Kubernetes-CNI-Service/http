@@ -219,6 +219,70 @@ inode 144208691，size 616，SHA256
 后代状态仍 unknown，不能据此放行正式 related/full 或称 R22 恢复完成。approved ledger
 保持原字节，Linux/断电、完整写集、显式旧 A 健康激活及其它未闭项不变。
 
+### R22 infra/logs 源名称写前与备份恢复身份候选
+
+副本预检仍不能授权之后的源名称操作。原恢复在删除 Q 指针之后、backup rename
+之前未再次检查备份；未知替换备份被移入 P 后才在下一项 copy 检查时报错。
+两个 source pointer direct（同目标文字新 inode、外来目标）证明后插入的指针仍被误删；
+一个 direct 与真实 LOAD→SETUP infra 指针发布后死亡→新 LOAD 在 unlink/父目录同步
+屏障替换备份的 workflow，证明外来目录已搬入 P。四项原实现全部 FAIL / exit1
+（3.590 秒），原日志 `outputs/test-diagnostics/r22-infra-source-backup-owner-red.log`，
+inode 144719182，size 5490，SHA256
+`984851911d260b25f957da312c81710893772f41bd72b8c4377fb3a3d9255ec3`；
+读前后 stat 一致，物理退出标记与实际 exec exit1 一致。原失败断言保留。
+
+候选从已经验证的 source stat 冻结完整身份及链接原始文字（或缺席），在 source
+unlink 与 backup rename 之前分别重核 source、已登记备份、Q 根及其物理父目录。
+自己的 unlink 只将预期更新为缺席；自己的 rename 后仅接受已登记原目录身份，
+再绑定实际恢复后的完整名称身份。未知指针零恢复写入保留；unlink 后才发生的
+备份漂移保留未知备份、封存原目录、Q 副本、原 WAL 与 receipt，P 源保持缺席，
+明确 HOLD 而非先将未知目录写入 P 再报错，不启动服务。
+
+四项新增负例与嵌套 duplicate hardlink、原 direct/真实目录恢复正例 7 tests / OK /
+exit0（10.566 秒）；日志 `outputs/test-diagnostics/r22-infra-source-backup-owner-green.log`，
+inode 144721385，size 1382，SHA256
+`4cdc43bd89b371039d41ea939ea1d6f15fa36ef5baab41a8e8f376c3a986d8aa`。
+另补实际恢复 API 的 unlink 后父同步失败→重入正例 1 test / OK / exit0；日志
+`outputs/test-diagnostics/r22-infra-source-unlink-reentry-green.log`，inode 144726392，
+size 300，SHA256 `ff8ee1f61cee2b987231c2e3a876fcd7471bcf5123f0cab8750e76b9788a4225`。
+两份日志读前后精确 stat 一致且完整收尾与 exec exit0 一致。
+随后六个完整模块的诊断回归为 416 tests / 1 ERROR / exit1（291.583 秒），不是
+正式 related/full。原日志 `outputs/test-diagnostics/r22-infra-source-backup-owner-modules.log`，
+inode 144728681，size 125966，SHA256
+`bca4a5949c7e1f4f87ae9889fb955edc8c498f23bad07392745df79372bc282b`；
+读前后 stat 稳定，旧 98270 字节前缀 SHA256
+`898f7d760e65665cb2a39c4931923bd46075f6a76d54469cc42e6b2ca348226f` 未变。
+物理 Ran/FAILED 后有缓冲 stdout，最终退出标记与实际 exec exit1 一致。
+唯一 ERROR 是 REQ19 orphan receipt collector 的真实 `bash -s` 达到原 10 秒时限。
+静态核验该 fixture 应在 probe 开头检查 `.logs-migration.*`，由 Bash 内建命令报错退出，
+尚不进入外部命令、服务或网络分支；不调用本次修改的 LOAD 恢复函数。但原报告没有
+部分 stdout/stderr 或后代状态，临时目录已清理，不能由此确定启动、目录检查、退出
+回收或前序影响中的哪项造成超时；原因仍待核，不能笼统归为环境。
+
+保持 REQ19 contract→workflow 两模块前序、原输入/argv/10 秒与原断言，只在调用边界
+记录有界现场的小范围诊断为 52 tests / OK / exit0（5.774 秒）。日志
+`r22-req19-original-prefix-timeout-diagnostic.log`，inode 144881178，size 11496，SHA256
+`9e8f7e9e6d83ebc3cfaea2cbe104c713db80498a482f09a066ce4750c7da3826`。
+本次目标 probe 用 `/bin/bash`，没有 BASH_ENV/ENV 或导出函数，0.305 秒返回原拒绝
+exit1，原临时 receipt 前后身份未变；这些仅说明本次条件，不能证明失败时条件相同。
+未重跑六模块或正式 full。
+
+为避免下次再次丢失现场，REQ19 私有 probe 的 TimeoutExpired 现在保留原 cmd、
+timeout、output/stderr 属性及 cause，报告最多各 2048 bytes/characters 的输出尾部；
+阶段及未捕获的后代状态仍明确 unknown，不把观察不足包装成原因。两个独立诊断
+预期原先 2 FAIL / exit1，日志 `r22-req19-timeout-evidence-red.log`，inode 144884482，
+size 1663，SHA256 `d8578ae5a468c6bcd5ef5a008f34d2c2287c8b1caeb5d2d65d5dd78b6b07f99b`；
+增强后 2 OK / exit0，日志 `r22-req19-timeout-evidence-green.log`，inode 144884635，
+size 417，SHA256 `b6f710dbcd255626efebf6b3bdfe30c334c489def8b4b1644eb051541162341a`。
+对增强本身的 REQ19 两完整模块回归 54 OK / exit0（6.698 秒），日志
+`r22-req19-timeout-evidence-modules.log`，inode 144884795，size 8117，SHA256
+`44ab9689070c2002cfc37f444dff47ab859e184ce52cff7eb29444c8ce1d294e`。
+上述日志均读前后 stat 稳定、完整物理收尾与 exec exit 一致；增强不是超时原因修复，
+不更改原时限、拒绝断言、approved ledger，也不关闭原 416 项诊断失败或正式重跑闸门。
+本候选不宣称原子 compare-and-unlink/rename、任意非合作写者免疫、完整共享写集、
+父 B 成功收口、完整旧 A 激活或 Linux/断电。正式 related/full 的原 bootstrap
+原因未收口门禁不变；局部 PASS 不授权盲目重跑或手改批准 ledger。
+
 ### R22 infra/logs Q 副本清理所有权候选
 
 receipt 身份固定后，原 recovery 仍在一次 preflight 后按名字删除 Q 日志副本。

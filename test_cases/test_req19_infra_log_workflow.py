@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import ExitStack, redirect_stdout
 import fcntl
 import io
+import json
 import os
 from pathlib import Path
 import select
@@ -26,6 +27,31 @@ CHECK = load_script("req19_flow_check", ROOT / "infra/check_infra.py")
 MAPPING = ("infra/logs", "99-output-infra", "dir")
 
 
+class Req19ProbeTimeout(subprocess.TimeoutExpired):
+    """Retain the original failure and bounded private probe output after cleanup."""
+
+    def __init__(self, original: subprocess.TimeoutExpired):
+        super().__init__(
+            original.cmd, original.timeout, output=original.output, stderr=original.stderr,
+        )
+        def tail(value):
+            if value is None:
+                return ""
+            if isinstance(value, bytes):
+                return value[-2048:].decode("utf-8", errors="replace")
+            return value[-2048:]
+        self.req19_probe_diagnostics = {
+            "stdout_tail": tail(original.output), "stderr_tail": tail(original.stderr),
+            "stage": "unknown",
+            "descendant_state": "not captured by subprocess.run; unknown",
+        }
+
+    def __str__(self):
+        return super().__str__() + "; probe evidence=" + json.dumps(
+            self.req19_probe_diagnostics, ensure_ascii=False, sort_keys=True,
+        )
+
+
 def hermetic_probe(infra: Path, temporary: Path) -> str:
     """Execute check's real probe with networking/privileged commands stubbed."""
     fake_bin = temporary / "fake-bin"
@@ -42,13 +68,66 @@ def hermetic_probe(infra: Path, temporary: Path) -> str:
         path.chmod(0o700)
     env = os.environ.copy()
     env.update(INFRA_BASE=str(infra), PATH=f"{fake_bin}:{os.environ.get('PATH', '')}")
-    result = subprocess.run(
-        ["bash", "-s"], input=CHECK.remote_probe_script(), cwd=infra,
-        env=env, text=True, capture_output=True, check=True, timeout=10,
-    )
+    try:
+        result = subprocess.run(
+            ["bash", "-s"], input=CHECK.remote_probe_script(), cwd=infra,
+            env=env, text=True, capture_output=True, check=True, timeout=10,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise Req19ProbeTimeout(error) from error
     if "public.status=not_run" not in result.stdout:
         raise AssertionError("unexpected host/network probe branch")
     return result.stdout
+
+
+class Req19ProbeDiagnosticTests(unittest.TestCase):
+    def test_probe_timeout_preserves_original_failure_and_partial_evidence(self):
+        original = subprocess.TimeoutExpired(
+            ["bash", "-s"], 10, output=b"private probe stdout\n",
+            stderr=b"ERROR: infra log migration state is pending\n",
+        )
+        with tempfile.TemporaryDirectory(prefix="req19-probe-diagnostic-") as tmp:
+            infra = Path(tmp) / "infra"
+            infra.mkdir()
+            with mock.patch.object(subprocess, "run", side_effect=original) as run:
+                with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                    hermetic_probe(infra, Path(tmp))
+        error = caught.exception
+        self.assertEqual(["bash", "-s"], error.cmd)
+        self.assertEqual(10, error.timeout)
+        self.assertIs(original.output, error.output)
+        self.assertIs(original.stderr, error.stderr)
+        self.assertIs(original, error.__cause__)
+        self.assertIn("probe evidence=", str(error))
+        diagnostic = json.loads(str(error).split("probe evidence=", 1)[1])
+        self.assertEqual("private probe stdout\n", diagnostic["stdout_tail"])
+        self.assertEqual(
+            "ERROR: infra log migration state is pending\n", diagnostic["stderr_tail"],
+        )
+        self.assertEqual(10, run.call_args.kwargs["timeout"])
+        self.assertEqual(["bash", "-s"], run.call_args.args[0])
+        self.assertEqual(CHECK.remote_probe_script(), run.call_args.kwargs["input"])
+        self.assertTrue(run.call_args.kwargs["check"])
+        self.assertTrue(run.call_args.kwargs["capture_output"])
+
+    def test_probe_timeout_bounds_evidence_and_keeps_unknown_stage(self):
+        original = subprocess.TimeoutExpired(
+            ["bash", "-s"], 10, output=b"discarded-prefix" + b"x" * 9000,
+            stderr=None,
+        )
+        with tempfile.TemporaryDirectory(prefix="req19-probe-diagnostic-") as tmp:
+            infra = Path(tmp) / "infra"
+            infra.mkdir()
+            with mock.patch.object(subprocess, "run", side_effect=original):
+                with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                    hermetic_probe(infra, Path(tmp))
+        self.assertIn("probe evidence=", str(caught.exception))
+        diagnostic = json.loads(str(caught.exception).split("probe evidence=", 1)[1])
+        self.assertEqual("x" * 2048, diagnostic["stdout_tail"])
+        self.assertEqual("", diagnostic["stderr_tail"])
+        self.assertEqual("unknown", diagnostic["stage"])
+        self.assertEqual("not captured by subprocess.run; unknown", diagnostic["descendant_state"])
+        self.assertIsNone(caught.exception.stderr)
 
 
 class Req19InfraLogWorkflowTests(unittest.TestCase):

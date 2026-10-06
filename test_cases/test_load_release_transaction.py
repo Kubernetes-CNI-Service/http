@@ -3441,6 +3441,119 @@ os.kill(os.getpid(), signal.SIGKILL)
         self.assertNotEqual(state[9][state[2]], os.readlink(state[2]))
         backend.start.assert_not_called()
 
+    def _assert_infra_source_pointer_replacement_is_held(self, same_target):
+        state, source, destination, backup, receipt, payload = self._prepare_infra_receipt_recovery_owner()
+        journal, descriptor, backend = state[10:]
+        wal, receipt_bytes = journal.read_bytes(), receipt.read_bytes()
+        original = os.readlink(source)
+        retained = self.root / "operator-retained-infra-pointer"
+        check = LOAD._setup_switch_require_infra_copies
+        checks = 0
+
+        def change_after_first_restore_check(snapshot, **kwargs):
+            nonlocal checks
+            check(snapshot, **kwargs)
+            checks += 1
+            if checks == 2:
+                source.rename(retained)
+                source.symlink_to(original if same_target else "independent-operator-target")
+
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "_setup_switch_require_infra_copies", side_effect=change_after_first_restore_check):
+            with self.assertRaisesRegex(LOAD.LoadError, "infra log .*changed"):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertTrue(source.is_symlink())
+        self.assertEqual(original if same_target else "independent-operator-target", os.readlink(source))
+        self.assertEqual(original, os.readlink(retained))
+        self.assertEqual(payload, (backup / "audit.log").read_bytes())
+        self.assertEqual(payload, (destination / "audit.log").read_bytes())
+        self.assertEqual(receipt_bytes, receipt.read_bytes())
+        self.assertEqual(wal, journal.read_bytes())
+        self.assertEqual(state[8], state[7].read_bytes())
+        self.assertNotEqual(state[9][state[2]], os.readlink(state[2]))
+        backend.start.assert_not_called()
+
+    def test_setup_infra_source_pointer_new_same_target_owner_is_not_deleted(self):
+        self._assert_infra_source_pointer_replacement_is_held(True)
+
+    def test_setup_infra_source_pointer_foreign_owner_is_not_deleted(self):
+        self._assert_infra_source_pointer_replacement_is_held(False)
+
+    def test_setup_infra_backup_replaced_after_source_unlink_is_not_restored(self):
+        state, source, destination, backup, receipt, payload = self._prepare_infra_receipt_recovery_owner()
+        journal, descriptor, backend = state[10:]
+        wal, receipt_bytes = journal.read_bytes(), receipt.read_bytes()
+        retained = destination.parent / "operator-retained-original-infra"
+        sync = LOAD._fsync_parent_directory
+        mutated = False
+
+        def change_backup_after_unlink(parent):
+            nonlocal mutated
+            sync(parent)
+            if parent == source.parent and not os.path.lexists(source) and not mutated:
+                mutated = True
+                backup.rename(retained)
+                backup.mkdir()
+                (backup / "audit.log").write_bytes(b"foreign directory evidence\n")
+
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "_fsync_parent_directory", side_effect=change_backup_after_unlink):
+            with self.assertRaisesRegex(LOAD.LoadError, "infra log .*changed"):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertTrue(mutated)
+        self.assertFalse(os.path.lexists(source), "must not rename the replacement backup into P")
+        self.assertEqual(b"foreign directory evidence\n", (backup / "audit.log").read_bytes())
+        self.assertEqual(payload, (retained / "audit.log").read_bytes())
+        self.assertEqual(payload, (destination / "audit.log").read_bytes())
+        self.assertEqual(receipt_bytes, receipt.read_bytes())
+        self.assertEqual(wal, journal.read_bytes())
+        self.assertEqual(state[8], state[7].read_bytes())
+        self.assertNotEqual(state[9][state[2]], os.readlink(state[2]))
+        backend.start.assert_not_called()
+
+    def test_setup_infra_reentry_after_pointer_unlink_sync_failure_restores_original_inode(self):
+        state, source, destination, backup, receipt, payload = self._prepare_infra_receipt_recovery_owner()
+        journal, descriptor, backend = state[10:]
+        wal, receipt_bytes, original_inode = journal.read_bytes(), receipt.read_bytes(), backup.stat().st_ino
+        sync = LOAD._fsync_parent_directory
+
+        def fail_after_pointer_unlink(parent):
+            if parent == source.parent and not os.path.lexists(source):
+                raise OSError("injected source pointer directory sync failure")
+            sync(parent)
+
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "_fsync_parent_directory", side_effect=fail_after_pointer_unlink):
+            with self.assertRaisesRegex((OSError, LOAD.LoadError), "injected source pointer directory sync failure"):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertFalse(os.path.lexists(source))
+        self.assertEqual(original_inode, backup.stat().st_ino)
+        self.assertEqual(payload, (backup / "audit.log").read_bytes())
+        self.assertEqual(payload, (destination / "audit.log").read_bytes())
+        self.assertEqual(wal, journal.read_bytes())
+        self.assertEqual(receipt_bytes, receipt.read_bytes())
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.recover_setup_switch_journal(
+                journal, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            )
+        self.assertEqual(original_inode, source.stat().st_ino)
+        self.assertEqual(payload, (source / "audit.log").read_bytes())
+        self.assertEqual(state[8], state[7].read_bytes())
+        self.assertEqual(state[9][state[2]], os.readlink(state[2]))
+        self.assertFalse(receipt.exists())
+        self.assertFalse(journal.exists())
+        backend.start.assert_not_called()
+
     def _assert_infra_copy_replacement_is_held(self, after_source_restore):
         state, source, destination, backup, receipt, payload = self._prepare_infra_receipt_recovery_owner()
         journal, descriptor, backend = state[10:]

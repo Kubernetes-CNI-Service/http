@@ -236,6 +236,14 @@ reader 在打开前拒绝非 regular leaf，以非阻塞/no-follow 打开，并�
 因此跨清理步骤绑定 dev/ino/mode/size/mtime 和完整摘要，不冒称整个恢复窗口的 ABA 免疫。
 嵌套重复硬链接正例必须仍完整恢复原 P inode；本地 workflow 不替代 Linux/断电或完整 R22。
 
+R22 infra/logs 源名称恢复不能只依赖最初的副本预检。预检冻结源名称的完整 inode/
+ctime/链接文字或缺席状态，每次 unlink 和 backup→source rename 前同时重核源名称、
+原备份和 Q 根身份；同目标文字新 inode 也不能继承删除权。自己的 unlink 将源预期
+更新为缺席，rename 后只接受已登记原目录 inode，再绑定实际恢复后的名称身份。
+旧指针删除后才换绑的未知备份须留在 Q，P 源保持缺席、WAL/receipt 保留并 HOLD，
+不得先搬进 P 再报错；同步失败后从缺席源重入仍须恢复原 inode，不启动服务。
+这些检查仍不是原子 compare-and-rename，也不证明断电、完整写集或旧 A 激活。
+
 R22 P manifest 恢复同样须在持有的新文件 FD 上设置最终模式、写入完整字节并 fsync，
 之后才 replace 和同步父目录；不能先 fsync 后 chmod。文件同步失败须保留 Q manifest
 和原 WAL。真实 LOAD→SETUP 在 Q manifest 发布后死亡→新 LOAD 恢复同步失败→第三 LOAD

@@ -6981,6 +6981,24 @@ def _setup_switch_infra_file_owner(metadata):
     ))
 
 
+def _setup_switch_infra_source_owner_from_stat(metadata, raw_target):
+    if metadata is None:
+        return None
+    return (tuple(getattr(metadata, key) for key in (
+        "st_dev", "st_ino", "st_mode", "st_nlink", "st_size",
+        "st_mtime_ns", "st_ctime_ns",
+    )), raw_target)
+
+
+def _setup_switch_infra_source_owner(path: Path):
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return None
+    raw_target = os.readlink(path) if stat.S_ISLNK(metadata.st_mode) else None
+    return _setup_switch_infra_source_owner_from_stat(metadata, raw_target)
+
+
 def _setup_switch_infra_directory_owner(path: Path):
     try:
         metadata = path.lstat()
@@ -7000,6 +7018,8 @@ def _setup_switch_require_infra_copies(state, *, names=None, directory_names=Non
                 or authority["destination_parent"] != _setup_switch_link_parent_identity(destination)
                 or authority["destination"] != _setup_switch_infra_directory_owner(destination)):
             raise ValueError("root or parent identity differs from preflight")
+        if authority["source_name"] != _setup_switch_infra_source_owner(source):
+            raise ValueError("source name owner differs from preflight")
         original_tree = backup if os.path.lexists(backup) else source
         if authority["source"] != _setup_switch_infra_directory_owner(original_tree):
             raise ValueError("original directory identity differs from preflight")
@@ -7056,6 +7076,7 @@ def _setup_switch_prepare_infra_log_recovery(row: dict[str, object], q_project: 
                 != (row["destination_dev"], row["destination_ino"])):
             raise ValueError("infra log Q destination identity changed")
         has_backup = os.path.lexists(backup)
+        source_info = None
         if has_backup:
             backup_info = backup.lstat()
             if (not stat.S_ISDIR(backup_info.st_mode)
@@ -7201,6 +7222,10 @@ def _setup_switch_prepare_infra_log_recovery(row: dict[str, object], q_project: 
             "destination": (destination_info.st_dev, destination_info.st_ino,
                             destination_info.st_mode),
             "source_parent": row["source_parent"],
+            "source_name": _setup_switch_infra_source_owner_from_stat(
+                source_info, os.path.relpath(destination, source.parent)
+                if source_info is not None and stat.S_ISLNK(source_info.st_mode) else None,
+            ),
             "destination_parent": row["destination_parent"],
             "source_directories": source_directories,
             "copy_directories": copy_directories,
@@ -7222,10 +7247,17 @@ def _setup_switch_restore_infra_log_tree(state) -> None:
     if has_backup:
         if os.path.islink(source):
             _setup_switch_require_infra_receipt(receipt, receipt_authority)
+            _setup_switch_require_infra_copies(state, names=(), directory_names=())
             source.unlink()
+            tree_authority["source_name"] = None
             _fsync_parent_directory(source.parent)
         _setup_switch_require_infra_receipt(receipt, receipt_authority)
+        _setup_switch_require_infra_copies(state, names=(), directory_names=())
         _setup_switch_rename_directory_noreplace(backup, source)
+        restored = source.lstat()
+        if (restored.st_dev, restored.st_ino, restored.st_mode) != tree_authority["source"]:
+            raise LoadError("infra log restored source identity changed")
+        tree_authority["source_name"] = _setup_switch_infra_source_owner_from_stat(restored, None)
         _fsync_parent_directory(source.parent)
         _fsync_parent_directory(backup.parent)
     for name in sorted(entries):
