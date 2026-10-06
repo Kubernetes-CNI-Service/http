@@ -876,7 +876,7 @@
     "test_cases.test_monitor_failure_detail_workflow": "9036276b066256f239453a21d9d0690b90364dcdef4f32dec9214e777efad6c7",
     "test_cases.test_monitor_loopback_proxy": "5fcc2b5fc9e23025daa7731a3a66b7958f997ab6450fd444e0207b88235b4144",
     "test_cases.test_monitor_loopback_proxy_workflow": "dba9e29d6b117c2aa67b7e8bf1ee6066f5f4311f57c243414016ad1d19e534ce",
-    "test_cases.test_monitor_stack_review": "0eefc2aa453005634438b7c2b40c4fc9ab33d439fc4ad3785aeeda1992f62fbe",
+    "test_cases.test_monitor_stack_review": "685e577d7b5a690503b9003d68f5215aae95e7ae763ea92a5d57dbc429588226",
     "test_cases.test_monitor_writer_quiesce": "5efe4499c9ccb4f051d914a8584abcc0fc56023ac0bbc734c9c659a8967bed99",
     "test_cases.test_monitor_writer_quiesce_workflow": "90c51165076038c17908576ddb77ad0812c26d99fac644521e8649e346f6e291",
     "test_cases.test_nvue_normalizer": "6e22f0f89353d0042391330675e4cce387931e896f4b44f57911e2dccb85b230",
@@ -958,7 +958,7 @@
     "test_cases.test_ztp_monitor_watch_resilience": "eb4560793642f0849426950b011de2f8e558f1c58f09991374d98a0125d01844",
     "test_cases.test_ztp_monitor_watch_runtime_workflow": "4ff4fca5c9f1fcfbd154cb4d5bd77f97d5cc1a938776ffa6d187afdb4f76efb7",
     "test_cases.test_ztp_prefix_runtime_boundary": "76a0c556fe2d570b60241a6d43e34aa591787596833d5a894deef19f7853bf90",
-    "test_cases.test_ztp_release_core_review": "d6b9a83aa168cfe9ca2d10410a7403de32bc58c747f2d6f5b25b0fbaf25aea4d",
+    "test_cases.test_ztp_release_core_review": "835af8348ca7b1630dfbdb5060d3e6ca5e3b2909043fa34589277d0eae0b4a11",
     "test_cases.test_ztp_service_runtime": "71b09b6fe052323bfae6c0e6bd69b08fe0d0d8248ef1252b0d6c35b582f87871"
   }
 }
