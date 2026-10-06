@@ -14,6 +14,28 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSyncAuthorityTests(unittest.TestCase):
+    def test_applied_source_decoder_is_closed_read_only_and_shared_without_minting_an_era(self):
+        from test_cases.test_manual_applied_config import MonitorAppliedConfigObservationTests
+        raw = "- set:\n    system:\n      hostname: leaf01\n\n"
+        payload = MonitorAppliedConfigObservationTests.wire(raw)
+        prior = (self.root.stat().st_ino, self.root.stat().st_mtime_ns, list(self.root.iterdir()))
+        with mock.patch.object(self.authority.os, "open", side_effect=AssertionError("a provenance decoder must not write/read a generation")):
+            observed = self.authority.decode_applied_config(0, payload, "020000000001")
+        self.assertIs(True, observed["trusted"])
+        self.assertEqual(raw, observed["raw_yaml"])
+        self.assertEqual("dedicated", observed["receipt"]["source_kind"])
+        self.assertNotIn("generation", observed)
+        for code, text, mac in ((23, payload, "020000000001"),
+                               (0, payload, "020000000002"),
+                               (0, payload.replace("schema=1\n", "schema=1\nunknown=1\n"), "020000000001")):
+            with self.subTest(code=code, mac=mac):
+                rejected = self.authority.decode_applied_config(code, text, mac)
+                self.assertIs(False, rejected["trusted"])
+                self.assertEqual({}, rejected["receipt"])
+                self.assertEqual("", rejected["raw_yaml"])
+        self.assertEqual(prior, (self.root.stat().st_ino, self.root.stat().st_mtime_ns, list(self.root.iterdir())),
+                         "decoding must leave the pre-existing empty authority directory unchanged")
+
     def test_completion_observation_gate_is_read_only_and_requires_own_closed_identity(self):
         gate = getattr(self.authority, "monitor_observation_allows_completion", None)
         self.assertTrue(callable(gate), "both completion consumers must share the explicit-observation veto")

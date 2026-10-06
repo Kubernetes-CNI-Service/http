@@ -2350,6 +2350,13 @@ def correlate_server_events(devices: list[dict[str, Any]], dhcp_events: list[dic
 # a generation authority. Later stage promotion must bind current local era,
 # identity and expected configuration; log presence alone remains insufficient.
 MAX_LIVE_CONFIG_BYTES = 8 * 1024 * 1024
+MAX_APPLIED_CONFIG_BYTES = 8 * 1024 * 1024
+REMOTE_APPLIED_CONFIG_SCRIPT = r'''
+printf '__HTTP_MONITOR_APPLIED_V1_BEGIN__\n'
+sudo -n -- /usr/local/sbin/http-manual-ztp-applied-config 2>/dev/null
+applied_config_rc=$?
+printf '\n__HTTP_MONITOR_APPLIED_V1_END__=%s\n' "$applied_config_rc"
+'''
 REMOTE_LIVE_CONFIG_SCRIPT = r'''
 printf '__HTTP_MONITOR_LIVE_V1_BEGIN__\n'
 nv config show 2>/dev/null
@@ -2441,7 +2448,7 @@ if [ -z "$failed" ]; then failed="/tmp/ztp/__MAC_PLAIN__.yaml"; fi
 if [ ! -f "$failed" ]; then failed=$(ls -1t /tmp/ztp/*.yaml 2>/dev/null | head -n 1); fi
 if [ -n "$failed" ]; then printf '__FILE__=%s\n' "$failed"; cat "$failed"; fi
 printf '__FAILED_YAML_END__\n'
-''' + REMOTE_LIVE_CONFIG_SCRIPT + r'''
+''' + REMOTE_LIVE_CONFIG_SCRIPT + REMOTE_APPLIED_CONFIG_SCRIPT + r'''
 printf '__REMOTE_TIME_END_BEGIN__\n'
 date -u '+%s.%N' 2>/dev/null || date -u '+%s' 2>/dev/null || true
 printf '__REMOTE_TIME_END_END__\n'
@@ -2512,6 +2519,34 @@ def parse_live_config_observation(text: str) -> dict[str, str]:
     if not payload or not raw.strip() or len(payload) > MAX_LIVE_CONFIG_BYTES:
         return empty
     return {"kind": "ok", "text": raw, "sha256": hashlib.sha256(payload).hexdigest()}
+
+
+def parse_applied_config_observation(text: str, device: dict[str, Any]) -> dict[str, Any]:
+    """Read source provenance from this connection, not a completion receipt.
+
+    Decode through the same closed V1 contract as the manual reader. Failure
+    cannot borrow a prior connection's receipt or suppress independent live
+    collection. No writer, generation, remote operation or clock is minted.
+    """
+    rejected = config_sync_authority.decode_applied_config(1, "", device.get("mac_plain"))
+    begin = "__HTTP_MONITOR_APPLIED_V1_BEGIN__\n"
+    end = "\n__HTTP_MONITOR_APPLIED_V1_END__="
+    if (not isinstance(text, str) or text.count(begin) != 1 or text.count(end) != 1):
+        return {**rejected, "reason": "applied-config-frame-missing-or-ambiguous"}
+    head, _separator, rest = text.partition(begin)
+    if head and not head.endswith("\n"):
+        return {**rejected, "reason": "applied-config-frame-invalid"}
+    payload, _separator, tail = rest.partition(end)
+    status, separator, _remaining = tail.partition("\n")
+    if (not separator or not re.fullmatch(r"0|[1-9][0-9]{0,2}", status)
+            or int(status) > 255):
+        return {**rejected, "reason": "applied-config-frame-invalid"}
+    try:
+        return config_sync_authority.decode_applied_config(
+            int(status), payload, device.get("mac_plain"), max_bytes=MAX_APPLIED_CONFIG_BYTES,
+        )
+    except UnicodeError:
+        return {**rejected, "reason": "applied-config-frame-invalid-encoding"}
 
 
 def parse_remote_interface_macs(text: str) -> dict[str, str]:
@@ -2860,6 +2895,7 @@ def collect_switch(device: dict[str, Any], timeout: int, identity: Optional[Path
             "host_key_refreshed": False,
             "refreshed_host_key_targets": [], "host_key_commands": [],
             "live_config_observation": {"kind": "missing", "text": "", "sha256": ""},
+            "applied_config_observation": parse_applied_config_observation("", device),
         }
 
     def connect(host: str, remote_script: str = REMOTE_SCRIPT) -> dict[str, Any]:
@@ -2958,6 +2994,9 @@ def collect_switch(device: dict[str, Any], timeout: int, identity: Optional[Path
             parse_live_config_observation(result["stdout"])
             if result["returncode"] == 0
             else {"kind": "failed", "text": "", "sha256": ""}
+        ),
+        "applied_config_observation": parse_applied_config_observation(
+            result["stdout"] if result["returncode"] == 0 else "", device,
         ),
         "connected_ip": connected_ip,
         "attempt_errors": attempt_errors,

@@ -79,16 +79,9 @@ NVOS_ZTP_VALUES = {"yes", "no"}
 APPLIED_CONFIG_HELPER = (
     "sudo -n -- /usr/local/sbin/http-manual-ztp-applied-config"
 )
-APPLIED_CONFIG_MAGIC = "ZTP_APPLIED_CONFIG_V1"
+APPLIED_CONFIG_MAGIC = config_sync_authority.APPLIED_CONFIG_MAGIC
 TIME_SYNC_HELPER = "/usr/local/sbin/http-sync-management-time"
 MAX_APPLIED_CONFIG_BYTES = 8 * 1024 * 1024
-APPLIED_SOURCE_KINDS = {
-    "dedicated", "default", "fallback", "fallback_default",
-}
-APPLIED_MODES = {"replace", "patch"}
-SAFE_RECEIPT_KEY = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
-SAFE_RECEIPT_VALUE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9@%+,:._/-]{0,511}$")
-SAFE_SOURCE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$")
 ZTP_LOG_LINE = re.compile(
     r"^\[\d{4}-\d{2}-\d{2}(?:T|\s)[^\]\r\n]+\]\s.*$"
 )
@@ -1187,142 +1180,18 @@ def _raw_text_sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _applied_result_fingerprint(returncode: int, stdout: str) -> str:
-    digest = hashlib.sha256()
-    digest.update(str(returncode).encode("ascii", errors="strict"))
-    digest.update(b"\0")
-    digest.update(stdout.encode("utf-8"))
-    return digest.hexdigest()
-
-
-def _validate_applied_at(value: str) -> bool:
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return False
-    return parsed.tzinfo is not None
-
-
 def collect_applied_config(
     client: "SshClient", device: dict, host: str,
 ) -> dict:
-    """Read and validate the fixed, root-owned applied-config helper protocol.
-
-    Absence or corruption is returned as untrusted audit evidence.  The live
-    normalized ``nv config show`` comparison still proceeds; a receipt never
-    replaces or weakens the current-running-config check.
-    """
+    """Read fixed source provenance; the independent live check still proceeds."""
     result = client.run(
         device, host, APPLIED_CONFIG_HELPER,
         timeout=client.args.command_timeout,
     )
-    stdout = result.stdout or ""
-    fingerprint = _applied_result_fingerprint(result.returncode, stdout)
-
-    def unavailable(reason: str) -> dict:
-        return {
-            "trusted": False,
-            "fingerprint": fingerprint,
-            "reason": reason,
-            "receipt": {},
-            "raw_yaml": "",
-        }
-
-    if result.returncode:
-        return unavailable("设备尚无可读取的成功 ZTP 输入凭据")
-    encoded = stdout.encode("utf-8")
-    if len(encoded) > MAX_APPLIED_CONFIG_BYTES:
-        return unavailable(
-            f"设备 ZTP 输入凭据超过 {MAX_APPLIED_CONFIG_BYTES} bytes 安全上限"
-        )
-    separator = "\n---\n"
-    header, marker, raw_yaml = stdout.partition(separator)
-    lines = header.splitlines()
-    if not marker or not lines or lines[0] != APPLIED_CONFIG_MAGIC:
-        return unavailable("设备 ZTP 输入凭据协议头或分隔符无效")
-    if not raw_yaml:
-        return unavailable("设备 ZTP 输入凭据没有原始 YAML")
-    receipt = {}
-    for line in lines[1:]:
-        if not line or "=" not in line:
-            return unavailable("设备 ZTP receipt 含无效字段行")
-        key, value = line.split("=", 1)
-        value_is_safe = bool(SAFE_RECEIPT_VALUE.fullmatch(value)) or (
-            key == "failed_raw_sha256" and value == ""
-        )
-        if (
-            not SAFE_RECEIPT_KEY.fullmatch(key)
-            or key in receipt
-            or not value_is_safe
-        ):
-            return unavailable("设备 ZTP receipt 字段名、字段值或唯一性无效")
-        receipt[key] = value
-    required = {
-        "schema", "status", "source_kind", "apply_mode", "raw_sha256",
-        "source_name", "eth0_mac", "applied_at",
-    }
-    missing = sorted(required - set(receipt))
-    if missing:
-        return unavailable("设备 ZTP receipt 缺少字段: " + ", ".join(missing))
-    optional = {"failed_raw_sha256", "failed_source_name"}
-    unknown = sorted(set(receipt) - required - optional)
-    if unknown:
-        return unavailable("设备 ZTP receipt 含未知字段: " + ", ".join(unknown))
-    if receipt["schema"] != "1" or receipt["status"] != "success":
-        return unavailable("设备 ZTP receipt schema/status 不是成功的 V1 凭据")
-    if receipt["source_kind"] not in APPLIED_SOURCE_KINDS:
-        return unavailable("设备 ZTP receipt source_kind 无效")
-    if receipt["apply_mode"] not in APPLIED_MODES:
-        return unavailable("设备 ZTP receipt apply_mode 无效")
-    if (receipt["source_kind"], receipt["apply_mode"]) not in {
-        ("dedicated", "replace"), ("dedicated", "patch"),
-        ("default", "patch"), ("fallback", "patch"),
-        ("fallback_default", "patch"),
-    }:
-        return unavailable("设备 ZTP receipt 来源与应用模式不一致")
-    if receipt["source_kind"] == "fallback_default":
-        if "failed_raw_sha256" not in receipt:
-            return unavailable("设备 ZTP receipt 缺少失败专属来源摘要")
-    elif set(receipt) & optional:
-        return unavailable("设备 ZTP receipt 含非回退模式的失败来源字段")
-    if not SAFE_SOURCE_NAME.fullmatch(receipt["source_name"]):
-        return unavailable("设备 ZTP receipt source_name 不是安全文件名")
-    if not _validate_applied_at(receipt["applied_at"]):
-        return unavailable("设备 ZTP receipt applied_at 不是带时区时间")
-    raw_digest = _raw_text_sha256(raw_yaml)
-    if (
-        not re.fullmatch(r"[0-9a-f]{64}", receipt["raw_sha256"])
-        or raw_digest != receipt["raw_sha256"]
-    ):
-        return unavailable("设备 ZTP receipt 的 YAML SHA-256 校验失败")
-    failed_digest = receipt.get("failed_raw_sha256", "")
-    if "failed_raw_sha256" in receipt and not re.fullmatch(
-        r"[0-9a-f]{64}", failed_digest,
-    ):
-        return unavailable("设备 ZTP receipt failed_raw_sha256 无效")
-    expected_mac = normalize_mac(device.get("mac_plain") or "")
-    receipt_mac = normalize_mac(receipt["eth0_mac"])
-    if not expected_mac or receipt_mac != expected_mac:
-        return unavailable("设备 ZTP receipt 的 eth0 MAC 与清单身份不一致")
-    failed_source_name = receipt.get("failed_source_name")
-    if failed_source_name is not None and failed_source_name != (
-        expected_mac.replace(":", "") + ".mode"
-    ):
-        return unavailable("设备 ZTP receipt failed_source_name 与设备身份不一致")
-
-    stable_receipt = {key: receipt[key] for key in sorted(receipt)}
-    trusted_fingerprint = hashlib.sha256(
-        json.dumps(
-            stable_receipt, sort_keys=True, separators=(",", ":"),
-        ).encode("utf-8") + b"\0" + raw_digest.encode("ascii")
-    ).hexdigest()
-    return {
-        "trusted": True,
-        "fingerprint": trusted_fingerprint,
-        "reason": "",
-        "receipt": receipt,
-        "raw_yaml": raw_yaml,
-    }
+    return config_sync_authority.decode_applied_config(
+        result.returncode, result.stdout, device.get("mac_plain"),
+        max_bytes=MAX_APPLIED_CONFIG_BYTES,
+    )
 
 
 def _secure_text(path: Path, text: str) -> None:

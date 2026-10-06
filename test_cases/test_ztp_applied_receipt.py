@@ -536,9 +536,10 @@ class AppliedReceiptPersistenceTests(unittest.TestCase):
                     "$1" success dedicated replace next.yaml \
                     02:00:00:00:00:01
             """)
-            env = {**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"}
+            env = {**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                   "PS4": "+receipt-stage:${SECONDS}: "}
             process = subprocess.Popen(
-                ["bash", str(harness), str(source)],
+                ["bash", "-x", str(harness), str(source)],
                 text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 env=env, start_new_session=True,
             )

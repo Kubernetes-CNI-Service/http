@@ -249,6 +249,13 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-F02-6-001 — 当前轮九阶段证据与交接一致性
 
+- bootstrap 来源观察：私有真实固定 helper → 同一次完整 collector remote shell →
+  共享 V1 decoder 已覆盖成功和持久 HOLD，来源 YAML 与 live 观察互不替代。真机 **NOT RUN**。
+  精确授权后记录固定 noninteractive helper 命令、SSH 会话身份、helper/receipt/YAML
+  owner/mode/no-follow、原始响应与完整退出码、当前本地代次和 live 摘要；缺失/拒绝/HOLD
+  不得借旧来源晋升或阻断独立健康采集。清理只处理本案临时证据，不改历史成功文件或
+  他方 pending writer；风险是旧 bootstrap 来源被误作当前配置成功，本卡不授权设备操作。
+
 - 未采集当前轮：在精确授权后暂时禁用本案 SSH 采集或构造无采集资格的目标，保留旧
   九阶段成功快照；新报告须明示未验证的当前观察，overall/HTML/机器不得借旧阶段
   放行。恢复后仅凭实际同会话 BatchMode 身份和 live 证据再判定，保留旧快照及前后

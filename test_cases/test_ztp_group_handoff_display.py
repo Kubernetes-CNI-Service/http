@@ -82,9 +82,15 @@ class CompletionDisplayParityTests(unittest.TestCase):
                         path.chmod(0o700)
                     environment = {**os.environ, "PATH": str(commands) + ":/usr/bin:/bin",
                                    "TMPDIR": str(temporary), "TEST_F02_PLATFORM": platform,
-                                   "TEST_F02_HEALTH": health}
-                    collected = subprocess.run(["/bin/bash", str(ROOT / "ethernet/monitor/sw-info.sh")], cwd=project,
-                                               env=environment, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=8)
+                                   "TEST_F02_HEALTH": health, "PS4": "+info-stage:${SECONDS}: "}
+                    try:
+                        collected = subprocess.run(["/bin/bash", "-x", str(ROOT / "ethernet/monitor/sw-info.sh")], cwd=project,
+                                                   env=environment, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=8)
+                    except subprocess.TimeoutExpired as exc:
+                        # Only private hardware fixtures are traced. Keep the
+                        # original bound and retain the physical shell phase
+                        # before TemporaryDirectory removes its evidence.
+                        self.fail(f"private info collector exceeded its unchanged 8s bound; shell trace: {exc.stderr!r}")
                     self.assertEqual(0, collected.returncode, collected.stderr)
                     raw = (project / "monitor/Fixture-Switch01.info").read_text()
                     self.assertEqual(1, raw.count("# Execute Command: nv show system health"))

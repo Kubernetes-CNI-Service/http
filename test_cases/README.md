@@ -434,6 +434,16 @@ worker 状态和旧回执不能复活成功。观察者使用持锁 compare-and-
 shell workflow 核对同一 live 文本。此字段只是传输观察，不是持久配置成功收据，
 也不是 generation 权威；九阶段晋升与当前本地代次的接入仍须完成，不能据此关闭 F02。
 
+同一次实际 BatchMode remote script 还调用固定 `sudo -n --
+/usr/local/sbin/http-manual-ztp-applied-config`，用唯一闭合状态 frame 收集 bootstrap
+来源凭据。与 manual reader 共用无 I/O 的 V1 decoder：校验闭合字段、来源/模式、
+设备 eth0 身份与原始 YAML 摘要；缺失、HOLD、拒绝、歧义、截断和前一次失败连接均不能
+提供来源 YAML。完整协议响应独立固定 8 MiB 正例可接受，退化界和超限拒绝且不截断。
+私有真实 helper → 完整 collector remote shell → 共同 decoder workflow 验证两次单连接
+及 HOLD 原像保留，未连接真机或执行 sudo。这只是来源诊断，不铸造/复用本地代次，不将
+旧 applied_at 或 YAML 等同当前 live state，也不授权九阶段完成；bootstrap generation
+与 analyzer 的因果消费接入仍未完成，F02 整体 OPEN。
+
 monitor inventory 逐设备物化并验证 `config_method`，与真实 load 的同一输入结果一致。
 重复方法列、显式空值、未知或设备不兼容执行者在监控/范围过滤前拒绝，错误带行号与
 主机；合法 server 声明验证后仍不进入 Switch Status，动态 AIR 使用受管默认值。
