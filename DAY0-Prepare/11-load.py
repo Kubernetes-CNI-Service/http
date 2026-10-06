@@ -5920,9 +5920,12 @@ def _atomic_restore_setup_manifest(state: ActiveSetupState) -> None:
     try:
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(state.manifest)
+            # Persist the final P mode on the same held inode as its bytes.
+            # chmod after fsync leaves recovery metadata outside the durable
+            # file boundary even if the manifest name's parent is synced.
+            os.fchmod(stream.fileno(), state.manifest_mode)
             stream.flush()
             os.fsync(stream.fileno())
-        temporary.chmod(state.manifest_mode)
         os.replace(temporary, MANIFEST)
         parent_descriptor = os.open(MANIFEST.parent, os.O_RDONLY)
         try:
@@ -6070,6 +6073,32 @@ def _setup_switch_q_target(target: Path, project: Path) -> Path:
     if not _setup_link_target_allowed(resolved, project):
         raise ValueError("Q target escaped its authority")
     return raw
+
+
+def _setup_switch_recovery_q_target(target: Path, project: Path, rows) -> Path:
+    """Resolve exact WAL-owned Q aliases without consulting a restored P leaf.
+
+    A Q temporary link can point at another shared link. On recovery reentry
+    that shared name may already select P or be absent. Only exact registered
+    link names participate here; unregistered prefixes/targets still use the
+    normal strict Q authority check. Cycles and invalid raw values fail closed.
+    The caller validates every row's parent and actual P/Q state before writes.
+    """
+    aliases = {row["path"]: row for row in rows}
+    seen = set()
+    planned = target
+    while str(planned) in aliases:
+        if planned in seen:
+            raise ValueError("cyclic Q alias in setup switch WAL")
+        seen.add(planned)
+        raw = aliases[str(planned)]["after"]
+        if raw is None:
+            break
+        if (not isinstance(raw, str) or not raw or os.path.isabs(raw)
+                or os.path.normpath(raw) != raw):
+            raise ValueError("invalid Q alias in setup switch WAL")
+        planned = Path(os.path.normpath(str(planned.parent / raw)))
+    return _setup_switch_q_target(planned, project)
 
 
 def _setup_switch_q_parent_authority(project: Path) -> dict[str, object]:
@@ -7384,8 +7413,8 @@ def _recover_setup_switch_journal_snapshot(
                 if row["parent"] != _setup_switch_link_parent_identity(path):
                     raise ValueError("journal link parent identity changed")
             if after is not None:
-                _setup_switch_q_target(
-                    Path(os.path.normpath(str(path.parent / after))), q_project,
+                _setup_switch_recovery_q_target(
+                    Path(os.path.normpath(str(path.parent / after))), q_project, rows,
                 )
             if os.path.lexists(path):
                 metadata = path.lstat()

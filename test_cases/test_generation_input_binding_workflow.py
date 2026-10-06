@@ -879,6 +879,98 @@ finally:
             self.assertEqual(before["manifest"], manifest.read_bytes())
             self.assertFalse((root / "service-started").exists())
 
+    def test_real_setup_q_manifest_then_cold_restore_syncs_p_mode_and_retains_failed_wal(self):
+        """Real Q publication must restore durable P metadata before WAL retirement."""
+        with tempfile.TemporaryDirectory(prefix="r22-p-manifest-mode-sync-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, _q, common, p_only, q_only, manifest, before, _hook, barrier, _home = fixture
+            manifest.chmod(0o640)
+            for relative in (
+                "tools/lldp-analyze-tool/99-output-p2p",
+                "tools/lldp-analyze-tool/99-output-monitor",
+                "tools/ibdiagnet-analyze-tool/99-output-p2p",
+            ):
+                leaf = root / relative
+                if leaf.is_dir() and not leaf.is_symlink():
+                    shutil.rmtree(leaf)
+            first = self._run_private_load_setup_switch(
+                fixture, prepare_journal=False, auto_prepare_journal=True,
+                kill_after_replace=manifest,
+            )
+            self.assertEqual(23, first.returncode, first.stdout + first.stderr)
+            self.assertTrue(barrier.is_file())
+            q_manifest = manifest.read_bytes()
+            self.assertNotEqual(before["manifest"], q_manifest)
+            journal = root / "ztp/.setup-switch-journal.json"
+            evidence = journal.read_bytes()
+            recovery = """
+import importlib.util, os, stat, sys
+from pathlib import Path
+from types import SimpleNamespace
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('cold_p_manifest_sync_load', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+real_create, real_sync, real_replace = load.tempfile.mkstemp, os.fsync, os.replace
+held = {}
+events = []
+def create(*args, **kwargs):
+    descriptor, name = real_create(*args, **kwargs)
+    if kwargs.get('prefix', '').startswith('..setup_manifest.rollback.'):
+        held['fd'], held['path'] = descriptor, Path(name)
+    return descriptor, name
+def sync(descriptor):
+    metadata = os.fstat(descriptor)
+    if descriptor == held.get('fd') and stat.S_ISREG(metadata.st_mode):
+        assert stat.S_IMODE(metadata.st_mode) == 0o640, 'P final mode was not synchronized'
+        assert held['path'].read_bytes().startswith(b'# setup manifest')
+        if sys.argv[2] == 'fault':
+            raise OSError('independent P manifest file sync fault')
+        events.append('file-synced')
+    elif events == ['file-synced', 'replaced'] and stat.S_ISDIR(metadata.st_mode):
+        events.append('parent-synced')
+    return real_sync(descriptor)
+def replace(source, destination, *args, **kwargs):
+    if Path(destination) == root / 'ztp/.setup_manifest':
+        assert events == ['file-synced'], 'P manifest replace preceded final-mode file sync'
+        events.append('replaced')
+    return real_replace(source, destination, *args, **kwargs)
+load.tempfile.mkstemp, os.fsync, os.replace = create, sync, replace
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    try:
+        assert load.recover_setup_switch_journal(
+            root / 'ztp/.setup-switch-journal.json', deployment_lock_descriptor=descriptor,
+            services_quiesced=True, runtime_backend=SimpleNamespace(name='supervisor'),
+        ) == 'restored-p'
+    except OSError as error:
+        assert sys.argv[2] == 'fault' and 'manifest file sync fault' in str(error), str(error)
+        raise SystemExit(7)
+    assert events == ['file-synced', 'replaced', 'parent-synced'], events
+    print('P_MANIFEST_FINAL_MODE_SYNC_VERIFIED')
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+            argv = [sys.executable, "-B", "-c", recovery, str(root)]
+            failed = subprocess.run(argv + ["fault"], cwd=root, capture_output=True,
+                                    text=True, check=False, timeout=30)
+            self.assertEqual(7, failed.returncode, failed.stdout + failed.stderr)
+            self.assertEqual(evidence, journal.read_bytes())
+            self.assertEqual(q_manifest, manifest.read_bytes())
+            restored = subprocess.run(argv + ["sync"], cwd=root, capture_output=True,
+                                      text=True, check=False, timeout=30)
+            self.assertEqual(0, restored.returncode, restored.stdout + restored.stderr)
+            self.assertIn("P_MANIFEST_FINAL_MODE_SYNC_VERIFIED", restored.stdout)
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            self.assertEqual(0o640, stat.S_IMODE(manifest.stat().st_mode))
+            self.assertEqual(before["common"], os.readlink(common))
+            self.assertEqual(before["p_only"], os.readlink(p_only))
+            self.assertFalse(os.path.lexists(q_only))
+            self.assertFalse(os.path.lexists(journal))
+            self.assertFalse((root / "service-started").exists())
+
     def test_real_setup_runtime_parent_sync_failure_retains_wal_until_fresh_retry(self):
         """Real cold P recovery must not retire WAL after an unsynced runtime write."""
         with tempfile.TemporaryDirectory(prefix="r22-runtime-parent-sync-") as name:

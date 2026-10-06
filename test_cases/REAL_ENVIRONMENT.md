@@ -1681,6 +1681,9 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 旧 A runtime receipt 的受管公钥链接窄修：原 receipt 仅接受普通文件，真实 SETUP 发布到 CONFIG 的项目公钥相对软链接会在准备凭据时被拒绝。独立 direct 与真实 SETUP `_process_pubkeys`/manifest writer→LOAD active receipt/restore API workflow 先 RED 后 GREEN；schema2 link 记录保留原相对目标、普通源文件 dev/ino/mode/nlink/size/mtime/ctime、摘要和发布父目录身份，恢复后仍为原链接。旧 schema1 普通文件凭据继续验证，不隐式补造链接授权。外部目标、源自身软链接、源同 inode 写后复原、父目录换绑和 schema 降级负例均须拒绝，源/父漂移在首个 flat 恢复写前 HOLD，receipt 与无关对象保持原字节，不启动服务。
   现场前置仍为本卡授权隔离 VM、排他部署锁、明确停服和所有同 UID 写者静默、完整真实 A 项目输入/制品/运行计划及可恢复卷快照；分别在链接/源读取、凭据发布、首个 runtime 写、链接 replace/父目录同步和后核验边界记录身份、摘要、锁/停服见证和物理顺序，并注入受控错误/进程死亡/断电。准备时名称缺席/重现须拒绝在最终 receipt 发布之前，本机另有独立 RED→GREEN 断言，不能只看最终加载器报错。源输入已漂移时不得自动写回项目文件来凑 A，未知新增公钥对象的所有权收口仍需单独处理。保存证据后只按登记隔离快照清理恢复，禁止 live 注入。自动 workflow 使用独立生成制品、限定 manifest 清单和真实 API，IB 链接未被 Q 改动，不证明完整 SETUP 主流程、跨项目 runtime、Linux/断电或旧 A 显式健康激活；本卡仍 OPEN。
 
+- P manifest 最终权限与恢复重入窄修：TEST direct 与真实 LOAD→SETUP 发布 Q manifest 后强杀→新 LOAD 文件同步故障→第三 LOAD 冷恢复，要求 P 的最终模式在同一新文件 FD 上先 fchmod、完整字节 fsync，再 replace 和父目录 fsync。同步失败保留 Q manifest 原字节与 WAL，第三进程须恢复原 P manifest 模式/链接并只在后核验后退休自有 WAL，不启动服务。真实重入暴露 Q 临时链接经共享 `eth.csv` 解析到已恢复 P 的缺陷；候选仅沿 WAL 精确登记的 Q alias 行证明末端 Q 权限，循环或未登记外部目标保持零恢复写入 HOLD，既有父身份、磁盘值、锁/停服、Q 父前像闸门不放宽。
+  现场前置仍限本卡授权的隔离 VM、写者静默、排他锁、停服见证、完整 P/Q/WAL 与可恢复卷快照；分别在 fchmod、文件 fsync、manifest replace、父目录 fsync、WAL 收口之间注入同步错误/进程死亡/受控断电。记录暂存 FD/manifest/父目录身份、模式/摘要、各 Q alias 的原始字节和 WAL 行、前次恢复已还原的 P 名称及新进程验证时间线。未知状态不补造 WAL、不删除外来对象；证据封存后只恢复登记隔离快照，不注入 live。本机调用次序和 SIGKILL 不证明 Linux/断电持久性、完整共享写集或旧 A 显式健康激活，本卡继续 OPEN。
+
 ## TC-REAL-R22-C2-DESCRIPTION-PUBLISH-001 — c2 同名描述输出的故障窗口
 
 - Case ID：`TC-REAL-R22-C2-DESCRIPTION-PUBLISH-001`；类型：real-environment / transaction / crash-recovery；对应 R22 c2 对 `*_with_desc` 的既有同名输出替换。状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。自动化先决为 `test_cases.test_generation_input_binding_contract` 的二次读取、早返及 staging direct，`test_cases.test_generation_input_binding_workflow` 的 setup/load/c2 workflow，和当前候选正式 full/check；现有定向通过不证明进程死亡后的原子性。

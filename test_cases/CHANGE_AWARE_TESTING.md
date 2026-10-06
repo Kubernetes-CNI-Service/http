@@ -219,6 +219,47 @@ inode 144208691，size 616，SHA256
 后代状态仍 unknown，不能据此放行正式 related/full 或称 R22 恢复完成。approved ledger
 保持原字节，Linux/断电、完整写集、显式旧 A 健康激活及其它未闭项不变。
 
+### R22 P manifest 模式持久化与 Q alias 恢复重入候选
+
+原 `_atomic_restore_setup_manifest` 在文件 fsync 后才 chmod，最终模式不在文件同步边界内。
+两个独立 direct 和真实 LOAD→SETUP Q manifest 发布后死亡→新 LOAD 恢复 workflow
+保留字节/权限/同步次序预期，修复前完整 3 FAIL / exit1，原日志
+`outputs/test-diagnostics/r22-p-manifest-mode-sync-red2.log`，inode 144231980，size 5167，
+SHA256 `fc810f55b5e994d345c64056daedec08f64de564e0a654a1aff2a054316d8c98`。
+第一次 RED 的观察器暂存前缀漏了 manifest 本名已有的点，错误日志原样保留；先修
+观察器定位，再于未修生产实现时重新取得以上 RED，不借夹具问题改权限预期。
+
+仅修最终模式次序后，两个 direct OK，但真实 workflow 的第三进程重入 FAIL：
+`r22-p-manifest-mode-sync-green.log`（inode 144234110，size 2762，SHA256
+`653a74fc36cb3c7ad35703876c4a8d9b13281c54166dbe460004622fad92fd80`）。
+真实 Q 临时 `.eth.csv.tmp.*` 的 raw target 为另一条共享 `eth.csv`；失败恢复已经把该
+共享链接改回 P，重入按当前磁盘解析 Q target 被误拒绝。不是 bootstrap 超时或环境问题。
+补独立 positive 和 cyclic alias negative，原 resolver 为 1 ERROR / 1 FAIL / exit1，日志
+`r22-p-manifest-q-alias-red.log`，inode 144239960，size 3313，SHA256
+`43a4b983084cc6ba30926ebdf96f0e362333fef29956f4eabbfae02e12b760ad`。
+
+候选只在冷恢复预检中沿 WAL 精确登记的 Q alias 行解析最终目标；末端仍须原严格 Q
+权限检查，循环/外部目标拒绝，所有实际行的父身份、磁盘 P/Q 状态、锁/停服和 Q 父前像
+检查仍先于写入。manifest 在持有 FD 上 fchmod→flush/fsync→replace→parent fsync；
+文件同步故障保留 Q manifest 与原 WAL，再由全新进程完成 P 收口。五个原 RED 预期
+完整 OK / exit0，日志 `r22-p-manifest-mode-alias-green.log`，inode 144241580，size 940，
+SHA256 `6e1923deeece654e4b65929b3634d0bd9cb6d9e28cb117b891863dd14c43b38c`。
+另补未登记 foreign target 的零恢复写入负例。上述都是本地候选/诊断，不更新 approved
+ledger，不解除原 bootstrap 401 超时原因待核导致的正式 related/full 重跑闸门。
+完整共享写集、父 B 成功收口、旧 A 显式激活、Linux/断电见证仍 OPEN。
+
+同一候选按 `test_load_release_transaction` → `test_generation_input_binding_workflow` →
+`test_optimize_output_layout` → `test_setup_switch_plan_contract` 完整诊断回归，347 tests /
+226.059 秒 / OK / exit0，日志 `outputs/test-diagnostics/r22-p-manifest-mode-alias-modules.log`，
+inode 144243886，size 114001，SHA256
+`5fe9f2915591dcb9c992c177bd866fd792669b66c0232342ea1893620887e936`。
+前后 stat 一致，旧 101037 字节前缀 SHA256
+`81fbacb1534e4fe8a638f1413b7401a9a106b4f1be1cc5be283ef20a44e52f20` 未变；完整
+Ran/OK 在物理 `R22_P_MANIFEST_MODE_ALIAS_MODULES_EXIT=0` 之前，exec exit0 一致。
+包括 foreign target 负例；全部原断言保留。approved ledger 和 TEST 运行 manifest 的
+原 inode/摘要未变，原 related 3154 tests 失败日志完整摘要再次一致。这不是 runner
+related/full，不产生正式批准；当前精确树仍需先收口原 bootstrap 超时原因再放行正式测试。
+
 ### R22 SETUP 回滚与次级清理的本地候选记录
 
 SETUP 的进程内异常回滚原来按内存 `missing` 前像删除后来出现的同名链接，并在完整

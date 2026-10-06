@@ -2124,6 +2124,148 @@ class ReleaseTransactionTests(unittest.TestCase):
             journal, descriptor, backend,
         )
 
+    def test_setup_manifest_restore_syncs_final_mode_before_replace(self) -> None:
+        manifest = self.ztp / ".setup_manifest"
+        manifest.write_bytes(b"uncommitted Q manifest\n")
+        state = SimpleNamespace(manifest=b"independent P manifest\n", manifest_mode=0o640)
+        events = []
+        real_sync, real_replace = os.fsync, os.replace
+
+        def sync(descriptor):
+            metadata = os.fstat(descriptor)
+            if stat.S_ISREG(metadata.st_mode):
+                self.assertEqual(0o640, stat.S_IMODE(metadata.st_mode),
+                                 "final P permissions must precede file fsync")
+                events.append("file-synced")
+            else:
+                self.assertEqual(["file-synced", "replaced"], events)
+                events.append("parent-synced")
+            return real_sync(descriptor)
+
+        def replace(source, destination):
+            self.assertEqual(["file-synced"], events)
+            self.assertEqual(state.manifest, Path(source).read_bytes())
+            events.append("replaced")
+            return real_replace(source, destination)
+
+        with mock.patch.object(LOAD, "MANIFEST", manifest), \
+                mock.patch.object(LOAD.os, "fsync", side_effect=sync), \
+                mock.patch.object(LOAD.os, "replace", side_effect=replace):
+            LOAD._atomic_restore_setup_manifest(state)
+        self.assertEqual(["file-synced", "replaced", "parent-synced"], events)
+        self.assertEqual(state.manifest, manifest.read_bytes())
+        self.assertEqual(0o640, stat.S_IMODE(manifest.stat().st_mode))
+
+    def test_setup_manifest_file_sync_failure_preserves_q_before_replace(self) -> None:
+        manifest = self.ztp / ".setup_manifest"
+        evidence = b"Q manifest remains on sync failure\n"
+        manifest.write_bytes(evidence)
+        before = manifest.stat()
+        state = SimpleNamespace(manifest=b"independent P manifest\n", manifest_mode=0o640)
+
+        def reject_sync(descriptor):
+            metadata = os.fstat(descriptor)
+            self.assertTrue(stat.S_ISREG(metadata.st_mode))
+            self.assertEqual(0o640, stat.S_IMODE(metadata.st_mode))
+            raise OSError("independent final-mode file sync fault")
+
+        with mock.patch.object(LOAD, "MANIFEST", manifest), \
+                mock.patch.object(LOAD.os, "fsync", side_effect=reject_sync), \
+                mock.patch.object(LOAD.os, "replace", wraps=os.replace) as replace:
+            with self.assertRaisesRegex(OSError, "final-mode file sync fault"):
+                LOAD._atomic_restore_setup_manifest(state)
+            replace.assert_not_called()
+        self.assertEqual(evidence, manifest.read_bytes())
+        self.assertEqual((before.st_dev, before.st_ino),
+                         (manifest.stat().st_dev, manifest.stat().st_ino))
+        self.assertEqual([], list(manifest.parent.glob("..setup_manifest.rollback.*")))
+
+    def _prepare_setup_wal_q_alias_reentry(self):
+        state = self._prepare_cross_project_setup_crash()
+        common, new_target, journal, descriptor, backend = state[2], state[5], state[10], state[11], state[12]
+        common.unlink()
+        common.symlink_to(os.path.relpath(new_target, common.parent))
+        temporary = common.with_name("q-input.tmp")
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.register_setup_switch_journal_link(
+                journal, temporary, common,
+                deployment_lock_descriptor=descriptor, services_quiesced=True,
+                runtime_backend=backend,
+            )
+        row = next(row for row in json.loads(journal.read_bytes())["body"]["links"]
+                   if row["path"] == str(temporary))
+        self.assertEqual("01-global.yaml", row["after"])
+        temporary.symlink_to("01-global.yaml")
+        # The previous recovery removed its Q-only temporary link and restored
+        # the shared input to P, then died before manifest/WAL finalization.
+        temporary.unlink()
+        common.unlink()
+        common.symlink_to(state[9][common])
+        return state, temporary
+
+    def test_setup_wal_reentry_uses_frozen_q_alias_not_already_restored_p(self) -> None:
+        state, temporary = self._prepare_setup_wal_q_alias_reentry()
+        journal, descriptor, backend = state[10:]
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            self.assertEqual("restored-p", LOAD.recover_setup_switch_journal(
+                journal, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            ))
+        self.assertEqual(state[8], state[7].read_bytes())
+        self.assertEqual(state[9][state[2]], os.readlink(state[2]))
+        self.assertFalse(os.path.lexists(temporary))
+        self.assertFalse(os.path.lexists(journal))
+        backend.start.assert_not_called()
+
+    def test_setup_wal_reentry_rejects_cyclic_q_alias_before_any_p_write(self) -> None:
+        state, temporary = self._prepare_setup_wal_q_alias_reentry()
+        journal, descriptor, backend = state[10:]
+        envelope = json.loads(journal.read_bytes())
+        row = next(row for row in envelope["body"]["links"] if row["path"] == str(temporary))
+        row["after"] = "q-input.tmp"
+        envelope["sha256"] = hashlib.sha256(
+            LOAD._setup_switch_canonical_payload(envelope["body"]),
+        ).hexdigest()
+        journal.write_bytes(LOAD._setup_switch_canonical_payload(envelope) + b"\n")
+        evidence = journal.read_bytes()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "_atomic_restore_setup_link") as restore:
+            with self.assertRaisesRegex(LOAD.LoadError, "cyclic Q alias"):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+            restore.assert_not_called()
+        self.assertEqual(evidence, journal.read_bytes())
+        self.assertFalse(os.path.lexists(temporary))
+        backend.start.assert_not_called()
+
+    def test_setup_wal_reentry_rejects_unregistered_foreign_q_target(self) -> None:
+        state, temporary = self._prepare_setup_wal_q_alias_reentry()
+        journal, descriptor, backend = state[10:]
+        foreign = self.root / "operator-owned-input"
+        foreign.write_bytes(b"independent operator bytes\n")
+        envelope = json.loads(journal.read_bytes())
+        row = next(row for row in envelope["body"]["links"] if row["path"] == str(temporary))
+        row["after"] = os.path.relpath(foreign, temporary.parent)
+        envelope["sha256"] = hashlib.sha256(
+            LOAD._setup_switch_canonical_payload(envelope["body"]),
+        ).hexdigest()
+        journal.write_bytes(LOAD._setup_switch_canonical_payload(envelope) + b"\n")
+        evidence = journal.read_bytes()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "_atomic_restore_setup_link") as restore:
+            with self.assertRaisesRegex(LOAD.LoadError, "Q target escaped"):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+            restore.assert_not_called()
+        self.assertEqual(evidence, journal.read_bytes())
+        self.assertEqual(b"independent operator bytes\n", foreign.read_bytes())
+        self.assertFalse(os.path.lexists(temporary))
+        backend.start.assert_not_called()
+
     def test_cross_project_crash_fixture_isolates_setup_manifest(self) -> None:
         self._prepare_cross_project_setup_crash()
         self.assertEqual(str(self.ztp / ".setup_manifest"), SETUP.MANIFEST_FILE)

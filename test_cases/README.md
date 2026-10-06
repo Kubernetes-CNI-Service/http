@@ -219,6 +219,14 @@ schema1，不把旧凭据自动升级为链接授权。源别名、外部目标�
 direct 与真实 SETUP 公钥发布/manifest→LOAD receipt/restore API workflow 覆盖原链接保持；
 workflow 的制品是独立私有夹具，IB 发布保持原状，不证明完整跨项目 A 恢复或激活。
 
+R22 P manifest 恢复同样须在持有的新文件 FD 上设置最终模式、写入完整字节并 fsync，
+之后才 replace 和同步父目录；不能先 fsync 后 chmod。文件同步失败须保留 Q manifest
+和原 WAL。真实 LOAD→SETUP 在 Q manifest 发布后死亡→新 LOAD 恢复同步失败→第三 LOAD
+重入 workflow 覆盖该窗口，不启动服务。Q 临时链接的目标若为另一条已登记共享链接，
+恢复重入应沿 WAL 的精确 Q alias 行核验最终 Q 权限边界，不能把已恢复 P 的当前解析值
+当作原 Q 目标。循环、未登记外部目标、未知名称/父身份仍拒绝；不放宽原停服/锁/父提交
+或磁盘 P/Q 检查，不以此声称完整写集、旧 A 激活或断电验收。
+
 R22 runtime 普通文件恢复须在最终模式及文件内容 fsync 后 replace，再 fsync 父目录；
 missing 前像的 unlink 和已经缺席的重入也须同步父目录。同步失败不得报成功或退休 WAL。
 direct 覆盖实际模式/同步顺序和写入/删除同步异常；真实 LOAD→SETUP 强杀→新 LOAD
