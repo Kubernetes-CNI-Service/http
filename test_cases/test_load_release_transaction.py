@@ -1489,6 +1489,50 @@ class ReleaseTransactionTests(unittest.TestCase):
         )
         return parent, generation, receipt
 
+    def test_runtime_receipt_payload_same_inode_aba_is_rejected_before_restore(self) -> None:
+        _parent, _generation, receipt = self._publish_a_with_runtime_rollback_receipt()
+        payload = receipt / "files/ztp.json"
+        original = payload.stat()
+        evidence = payload.read_bytes()
+        live = self.ztp / "ztp.json"
+        live.write_bytes(b'{"release":"partial-B"}\n')
+        before = live.read_bytes()
+        real_read = os.read
+        observed = []
+
+        def mutate_after_read(descriptor, count):
+            result = real_read(descriptor, count)
+            opened = os.fstat(descriptor)
+            if not observed and (opened.st_dev, opened.st_ino) == (original.st_dev, original.st_ino):
+                observed.append(True)
+                payload.write_bytes(b"!" + evidence[1:])
+                payload.write_bytes(evidence)
+                os.utime(payload, ns=(original.st_atime_ns, original.st_mtime_ns))
+                changed = payload.stat()
+                self.assertEqual((original.st_ino, original.st_size, original.st_mtime_ns),
+                                 (changed.st_ino, changed.st_size, changed.st_mtime_ns))
+                self.assertNotEqual(original.st_ctime_ns, changed.st_ctime_ns)
+            return result
+
+        with mock.patch.object(LOAD, "DEPLOYMENT_LOCK", self.root / ".deployment.lock"), \
+                mock.patch.object(LOAD, "active_project", return_value=self.project.resolve()), \
+                mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            descriptor = LOAD.acquire_deployment_lock(exclusive=True)
+            try:
+                with mock.patch.object(LOAD.os, "read", side_effect=mutate_after_read):
+                    with self.assertRaisesRegex(LOAD.LoadError, "changed while reading"):
+                        LOAD.restore_runtime_rollback_receipt(
+                            self.project, receipt,
+                            expected_current=os.readlink(self.project / "99-output-ztp/current"),
+                            deployment_lock_descriptor=descriptor, services_quiesced=True,
+                            runtime_backend=SimpleNamespace(name="supervisor"),
+                        )
+            finally:
+                LOAD.release_deployment_lock(descriptor)
+        self.assertTrue(observed, "the actual immutable receipt payload was not read")
+        self.assertEqual(evidence, payload.read_bytes())
+        self.assertEqual(before, live.read_bytes(), "untrusted receipt authorized a restore write")
+
     def test_failed_b_generation_can_restore_and_verify_complete_a_runtime_receipt(self) -> None:
         _parent, generation, receipt = self._publish_a_with_runtime_rollback_receipt()
         selector = self.project / "99-output-ztp/current"

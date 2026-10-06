@@ -4959,7 +4959,11 @@ def _read_rollback_regular(
     try:
         descriptor = os.open(path, flags)
         opened = os.fstat(descriptor)
-        identity = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns")
+        # A same-inode writer can restore size, bytes and mtime after an ABA
+        # mutation. Such a read is not a stable recovery authority even when
+        # the returned bytes happen to match the final disk contents.
+        identity = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_size",
+                    "st_mtime_ns", "st_ctime_ns")
         if any(getattr(before, field) != getattr(opened, field) for field in identity):
             raise LoadError(f"rollback input changed while opening: {path}")
         chunks = []

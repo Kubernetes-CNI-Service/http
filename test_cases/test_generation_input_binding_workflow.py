@@ -495,6 +495,74 @@ finally:
             cwd=root, env=env, capture_output=True, text=True, check=False,
         )
 
+    def test_real_setup_then_fresh_load_rejects_manifest_read_aba(self):
+        """Cold recovery cannot authorize P writes from a read spanning A→B→A."""
+        with tempfile.TemporaryDirectory(prefix="r22-manifest-read-aba-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, q, common, _p_only, _q_only, manifest, _before, _hook, barrier, _home = fixture
+            first = self._run_private_load_setup_switch(fixture, prepare_journal=True)
+            self.assertEqual(23, first.returncode, first.stdout + first.stderr)
+            self.assertTrue(barrier.is_file())
+            mixed = os.readlink(common)
+            evidence = manifest.read_bytes()
+            journal = root / "ztp/.setup-switch-journal.json"
+            wal = journal.read_bytes()
+            reader = """
+import importlib.util
+import os
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+root, q = map(Path, sys.argv[1:3])
+spec = importlib.util.spec_from_file_location('fresh_manifest_aba_load', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+path = root / 'ztp/.setup_manifest'
+evidence = path.read_bytes()
+original = path.stat()
+real_read = os.read
+observed = []
+def read_with_aba(descriptor, count):
+    result = real_read(descriptor, count)
+    opened = os.fstat(descriptor)
+    if not observed and (opened.st_dev, opened.st_ino) == (original.st_dev, original.st_ino):
+        observed.append(True)
+        path.write_bytes(b'!' + evidence[1:])
+        path.write_bytes(evidence)
+        os.utime(path, ns=(original.st_atime_ns, original.st_mtime_ns))
+        changed = path.stat()
+        assert (changed.st_ino, changed.st_size, changed.st_mtime_ns) == (original.st_ino, original.st_size, original.st_mtime_ns)
+        assert changed.st_ctime_ns != original.st_ctime_ns
+    return result
+os.read = read_with_aba
+load.active_managed_services = lambda *args, **kwargs: ()
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    load.recover_setup_switch_journal(
+        root / 'ztp/.setup-switch-journal.json', deployment_lock_descriptor=descriptor,
+        services_quiesced=True, runtime_backend=SimpleNamespace(name='supervisor'),
+    )
+except load.LoadError as exc:
+    assert 'changed while reading' in str(exc), str(exc)
+    assert observed and path.read_bytes() == evidence
+    print('R22_MANIFEST_READ_ABA_REJECTED')
+else:
+    raise SystemExit('manifest read ABA was accepted')
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+            second = subprocess.run(
+                [sys.executable, "-B", "-c", reader, str(root), str(q)], cwd=root,
+                capture_output=True, text=True, check=False, timeout=30,
+            )
+            self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+            self.assertIn("R22_MANIFEST_READ_ABA_REJECTED", second.stdout)
+            self.assertEqual(evidence, manifest.read_bytes())
+            self.assertEqual(wal, journal.read_bytes())
+            self.assertEqual(mixed, os.readlink(common), "untrusted manifest authorized P writes")
+            self.assertFalse((root / "service-started").exists())
+
     def test_real_load_setup_child_sigkill_then_fresh_load_restores_p(self):
         """The real setup child dies after Q's first link, before Q manifest."""
         with tempfile.TemporaryDirectory(prefix="r22-real-setup-kill-") as name:

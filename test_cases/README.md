@@ -211,6 +211,12 @@ direct 覆盖真实 receipt 缺失、runtime 失败、同字节换 inode 和后�
 LOAD→SETUP→新 LOAD workflow 覆盖 runtime 边界再强杀及第二次新进程重入。
 该正例 runtime 使用边界见证替身，不证明完整 A 制品恢复或显式服务激活；服务保持停止。
 
+读取 R22 manifest、receipt 和回滚普通文件时，打开前、持有 FD 和读取后名称的身份须
+包括 ctime；同 inode 写入再复原字节/大小/mtime，仍不是稳定授权。direct 使用真实
+A receipt 加载与恢复 API，真实 LOAD→SETUP 强杀→新 LOAD workflow 在 manifest 读取
+期间注入 ABA，要求首个恢复写入前拒绝并保留 WAL/混合盘面。该校验仅覆盖读取窗口，
+不承诺任意非合作同 UID 写者免疫，也不代替完整旧 A 显式安全激活或 REAL_ENV 验收。
+
 同一模块还覆盖端到端 deployment scope：默认 `all` 同时生成 Production/AIR；`prod` 只发布
 Production Cumulus/IB/NVL；`air` 只发布 AIR DHCP/YAML/release，并只临时渲染 AIR full profile
 实际引用的 Production 来源；单独指定 `mini` 会自动选择 AIR scope 和 `eth`，显式 `prod+mini`

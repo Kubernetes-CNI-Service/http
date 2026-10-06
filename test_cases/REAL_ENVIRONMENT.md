@@ -1669,6 +1669,9 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 旧 A runtime 阶段 WAL 保留的本地窄修：跨项目恢复原先在 P 链接/manifest 后核验后立即退休 WAL，后续 A runtime receipt 恢复失败或进程死亡便丢失持久恢复授权。TEST 的独立 direct 与真实复制 LOAD→SETUP→新 LOAD workflow 先 RED 后 GREEN；现在把原 WAL descriptor、身份和完整字节持有到 runtime 返回、锁与停服重核及 P/Q 全盘面和 Q 父前像再核之后，才可删除自有凭据。真实脚本 workflow 在 runtime 边界再次 SIGKILL，第二次新 LOAD 可重入；其成功 runtime 仅是边界见证替身，不是完整 A 制品恢复。另有真实 receipt 加载器拒绝缺失 receipt 的 direct，以及 runtime 失败、同字节新 inode WAL、runtime 后未知 P 对象的拒绝与原证据保留测试；不删除替换凭据或未知对象，不启动服务。
   现场前置仍限本卡授权的可丢弃 VM、独占部署锁、明确停服与写者静默、完整真实 A 输入/运行计划/制品/receipt 前像和卷快照；在 P 后核验、runtime 首写、runtime 后核验和 WAL 退休边界分别注入异常、进程死亡及受控换绑，独立记录原 WAL descriptor/path dev/ino/ctime/完整 SHA、P/Q/父提交身份和事件物理顺序。缺失 receipt 不补造，未知对象不自动清理；只能由负责人核对登记清单后恢复隔离快照。本机进程测试不证明断电、Linux、完整 A 同代恢复或显式健康激活；完整共享写集、成功 B 收尾、main 显式恢复、DEV ACK 和本卡验收仍 OPEN。
 
+- 恢复授权普通文件读取期间的 ABA 窄修：原 reader 只比较 dev/ino/mode/nlink/size/mtime，同 inode 写成 B 再恢复 A 字节及 mtime 可被接受。TEST direct 使用真实 A receipt 加载/恢复 API，在 immutable payload 读取后、后核验之前做 A→B→A；真实复制 LOAD→SETUP 强杀→新 LOAD workflow 在 P manifest 的相同读取窗口注入换代，均先 RED 后 GREEN。现在打开前/FD/名称后核验包括 ctime，必须首个恢复写入前拒绝，保留原 WAL、混合链接和 manifest 字节；既有稳定读取/恢复正例保留。
+  现场只在本卡已授权隔离 VM、排他锁、明确停服、完整 A receipt/输入/制品与可恢复快照中，由登记注入器在精确读入屏障实施一次受控 ABA；其余写者保持静默。记录 FD/path dev/ino/size/mtime_ns/ctime_ns、实际 A/B/最终字节摘要、读入及拒绝事件、恢复前后全部受管对象与服务状态。ctime 变化须由独立观察确认，不能仅凭最终摘要声称中途稳定；不对 live 凭据注入，不改未知对象，证据封存后按清单恢复隔离快照。该读取窗口校验不证明任意非合作写者免疫、全流程 freeze、Linux/断电持久性或完整旧 A 激活；本卡仍 OPEN。
+
 ## TC-REAL-R22-C2-DESCRIPTION-PUBLISH-001 — c2 同名描述输出的故障窗口
 
 - Case ID：`TC-REAL-R22-C2-DESCRIPTION-PUBLISH-001`；类型：real-environment / transaction / crash-recovery；对应 R22 c2 对 `*_with_desc` 的既有同名输出替换。状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。自动化先决为 `test_cases.test_generation_input_binding_contract` 的二次读取、早返及 staging direct，`test_cases.test_generation_input_binding_workflow` 的 setup/load/c2 workflow，和当前候选正式 full/check；现有定向通过不证明进程死亡后的原子性。

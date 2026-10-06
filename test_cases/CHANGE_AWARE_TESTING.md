@@ -383,6 +383,37 @@ inode 143484649，size 107257，SHA256
 此窄修不解释既有 bootstrap 401 超时根因；没有凭局部 PASS 重跑 related/full，也没有
 编辑 approved ledger。完整 A 激活、其余共享写集、成功 B 收尾和 REAL_ENV 仍未关闭。
 
+### R22 恢复授权读取期间同 inode ABA 的本地候选记录
+
+`_read_rollback_regular` 原身份元组缺 ctime：读取期间同 inode 改写再恢复 A 字节、大小和
+mtime，最终摘要虽正确，仍可能接受跨换代读取为稳定授权。独立 direct 使用实际 A receipt
+加载/恢复 API；真实复制 LOAD→SETUP 强杀→新 LOAD workflow 检查 manifest 读取期间
+ABA 在首个 P 恢复写入前拒绝，保持原凭据和混合盘面，不以实现产物反向生成预期。
+
+首次 workflow 夹具尝试完整 SETUP 时先遇其未配齐输出前提，不能算 ABA 重现；保留
+`outputs/test-diagnostics/r22-authority-read-aba-red.log`（SHA256
+`7e3b206dfe70e4bdaaaae8bbcfff1177ae15e16c26ac251e052b8094063adbfc`）。
+在不改实现/预期的情况下改用既有真实首链写入强杀夹具，direct/workflow 均因原实现接受
+ABA 而 FAIL：2 tests / 2 FAIL / exit1，日志
+`outputs/test-diagnostics/r22-authority-read-aba-red-crash-fixture.log`，inode 143618306，
+size 2186，SHA256 `66e35a22dcb1e0e1b614c1a35f4842453bc71d940be786de942a52aaf0a1d175`。
+
+候选只将 ctime 加入打开前、FD 和读取后名称的身份比较；原大小/链接数限制、O_NOFOLLOW、
+模式和字节核验保留，拒绝在写前发生。新增负例及既有稳定恢复正例 4 tests / OK / exit0，
+日志 `outputs/test-diagnostics/r22-authority-read-aba-green.log`，inode 143620269，size 1431，
+SHA256 `eb26d7bb5bd10c547ba9e1708c834441023b2caa849b58642bd9aad169983668`。
+
+四个完整 release/generation workflow/optimize/setup plan 模块 326 tests / OK / exit0
+（215.760 秒），日志 `outputs/test-diagnostics/r22-authority-read-aba-modules.log`，
+inode 143624335，size 107801，SHA256
+`861fc3737e3832af65a64a903d5dc9351fc167e036ee3522ae5fc3d5bd0cadb4`；读前后精确 stat
+一致，旧 97206 字节前缀 SHA256
+`93aeb1f09b16ae840f7d5f9a47ad009922ad063cdfa6c7bca61872d903714f2d` 保持不变，物理
+`R22_AUTHORITY_READ_ABA_MODULES_EXIT=0` 与 exec exit0 一致。TEST 运行 manifest 和
+approved ledger 摘要未变，沿用 LOAD direct 与真实多脚本 workflow 映射，REAL_ENV 仍 OPEN。
+此读取窗口窄修不解释 bootstrap 401 超时、不构成完整旧 A 激活或任意非合作写者免疫；
+没有据定向 PASS 重跑 related/full 或编辑 ledger，正式证明仍未取得。
+
 ## Full proof 性能诊断记录
 
 本节只记录测量方法与优化判定，不改变上面的测试和证明门禁。正式 full proof 仍须由
