@@ -3754,7 +3754,20 @@ def assign_ztp_rounds(
         current_boot = str(device.get("boot_id") or "")
         previous_boot = str(previous.get("boot_id") or "")
         previous_reset_boot = str(previous.get("reset_boot_id_before") or "")
-        complete = previous.get("stages", {}).get("complete", {})
+        previous_stages = previous.get("stages", {})
+        if not isinstance(previous_stages, dict):
+            device["round_authority_invalid"] = True
+            device.setdefault("issues", []).append(
+                "Previous ZTP stage container authority is invalid"
+            )
+            previous_stages = {}
+        complete = previous_stages.get("complete", {})
+        if not isinstance(complete, dict):
+            device["round_authority_invalid"] = True
+            device.setdefault("issues", []).append(
+                "Previous ZTP completion stage authority is invalid"
+            )
+            complete = {}
         # Index zero is an unfinished reset, not a completed prior receipt.
         invalid_complete_authority = (
             isinstance(complete, dict)
