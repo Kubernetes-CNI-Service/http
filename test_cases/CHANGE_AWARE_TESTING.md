@@ -219,6 +219,47 @@ inode 144208691，size 616，SHA256
 后代状态仍 unknown，不能据此放行正式 related/full 或称 R22 恢复完成。approved ledger
 保持原字节，Linux/断电、完整写集、显式旧 A 健康激活及其它未闭项不变。
 
+### R22 infra/logs Q 副本清理所有权候选
+
+receipt 身份固定后，原 recovery 仍在一次 preflight 后按名字删除 Q 日志副本。
+两个 direct（首写前、原目录 rename 恢复后）与真实 LOAD→SETUP infra 指针发布后
+死亡→新 LOAD preflight 后替换同内容新 inode 的 Q 副本均 FAIL / exit1。
+原日志 `outputs/test-diagnostics/r22-infra-copy-owner-red.log`，inode 144534044，
+size 3009，SHA256 `1605d8fc16adaf13963b4ec2fa6fd31b93e6d7493f5f92c3640f9b640eab4b1b`，
+3 tests / 3 FAIL（4.900 秒），物理退出标记与实际 exec exit1 一致。
+
+候选冻结已经验证的 P 原目录与 Q 根身份、嵌套目录身份、原文件和 Q hardlink 的
+dev/ino/mode/size/mtime 与独立 receipt 摘要；首写前、每次清理前和 receipt 退休前重核。
+预检期间 root 换绑不得被后读的同名新 root 自动收编，两项独立负例先 FAIL 后修正。
+自己的清理仅将相应 Q 名称/目录的预期改为缺席，不删除后来的重现对象。
+漂移发生在源恢复后时保留已还原源、未清理副本、receipt 和 WAL，不报完成、不启动服务。
+
+reader 另有读取期 ABA 和打开 FIFO 前未拒绝的独立 RED；原断言及 15 秒 bootstrap
+时限均未改动。reader 现在先 lstat regular、非阻塞/no-follow 打开，在同次读取中比较
+打开前/FD/名称的 nlink/ctime。存活 P 文件的 nlink/ctime 会因清理自有 Q hardlink 变化，
+不能把它们作为跨清理阶段不变值；独立嵌套重复 hardlink 正例覆盖此区别。
+不以此声称任意非合作同 UID 写者免疫、全恢复窗口 ABA 冻结或原子 compare-and-unlink。
+
+新增八项与两个原有真实目录恢复正例 10 tests / OK / exit0（7.526 秒），日志
+`outputs/test-diagnostics/r22-infra-copy-owner-root-reader-green.log`，inode 144556123，
+size 1769，SHA256 `1e17a1570e3f41465451004fb20bb6598597a77cd5cfbe1126252fb7314ab095`。
+前后精确 stat 一致，物理完整 Ran/OK 和退出标记与 exec exit0 一致。
+既有 LOAD direct 与真实多脚本 workflow manifest 映射有效；正式 related/full
+仍被 bootstrap 401 原因未收口门禁阻断，不能从这些局部诊断生成批准 ledger。
+
+四个完整 release/generation workflow/optimize/setup plan 模块 359 tests / OK / exit0
+（271.827 秒）；日志 `outputs/test-diagnostics/r22-infra-copy-owner-modules.log`，
+inode 144567879，size 115863，SHA256
+`40f7487b8d5381bc683e6017ce7e2098acc8370ec82d568a9a404ab5535506ef`。
+读前后精确 stat 一致；旧 98601 字节前缀 SHA256
+`fd8773bf5567a418db668c16b0eb944c8f7a01b29b2d063fa19fea35dbf6fd62` 未变，
+完整 Ran/OK 位于物理 `R22_INFRA_COPY_OWNER_MODULES_EXIT=0` 之前，exec exit0 一致。
+另补查 REQ19 完整 direct/workflow 两模块 52 tests / OK / exit0（9.581 秒）；
+日志 `outputs/test-diagnostics/r22-infra-copy-owner-req19-modules.log`，inode 144706959，
+size 7839，SHA256 `1832cdefdacbb774066ca6fdfbc666d9352921c52c9bc6110acbc76c5509f218`，
+读前后 stat 一致且物理退出标记与 exec exit0 一致。批准 ledger 与运行 manifest
+保持原身份和摘要；两组均为诊断回归，不是正式 related/full proof 或整树批准。
+
 ### R22 infra migration receipt 的恢复期删除权候选
 
 原 preflight 校验 receipt 后只返回 has_receipt，恢复函数在收尾按路径 unlink。

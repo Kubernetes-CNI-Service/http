@@ -1687,6 +1687,9 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - infra migration receipt 恢复期 authority 的窄修：原 preflight 到收尾之间只保留 receipt 内容而不保留文件身份，未知同名替换对象可能被消费/删除。TEST direct 的同字节新 inode、同 inode ABA、原目录恢复后替换，以及真实 LOAD→SETUP infra 指针发布后强杀→新 LOAD preflight 后替换均先 RED 后 GREEN。候选冻结物理父目录、dev/ino/mode/nlink/size/mtime_ns/ctime_ns 与完整字节/模式，在每次恢复写入前重核，包括原缺席状态。首写前漂移须零恢复写入；中途漂移须保持已恢复源、尚未清理 Q 副本、原 WAL 与替换 receipt，不启动服务、不报完成。
   现场前置为本卡已授权隔离 VM、完整 P/Q/WAL/receipt 与可恢复卷快照、排他部署锁、明确停服及正常写者静默；分别在 receipt 读取、preflight 返回、源 rename、Q 副本清理和 receipt unlink 前由登记注入器受控换 inode/ABA。保存原/替换文件、源/备份/Q 副本和父目录身份、完整摘要及物理操作顺序、错误退出和停服见证；证据封存后仅按已辨认对象恢复隔离快照，不对 live 注入或清理未知对象。名称重核与 unlink 不是原子 compare-and-unlink，本地进程测试不证明任意非合作写者免疫、Linux/断电持久性、完整共享写集或旧 A 显式健康激活，本卡仍 OPEN。
 
+- infra/logs Q 副本清理所有权窄修：TEST direct 与真实 LOAD→SETUP infra 指针发布后死亡→新 LOAD preflight 后同字节新 inode 替换 Q 副本均先 RED 后 GREEN。候选冻结原目录/Q 根、嵌套目录及 P/Q 文件身份和独立 receipt 摘要，首写前、逐项清理前、receipt 退休前重核；同名替换、根目录在预检期间换绑、原缺席项后来出现均 HOLD。自己的硬链接清理仅把该项预期更新为缺席，不收编或删除未知对象；恢复中途漂移保留已还原源、剩余 Q 副本、receipt 和 WAL，不启动服务。reader 的读取内 ABA 与 FIFO 打开前拒绝另有 direct；嵌套重复 hardlink 正例保留。
+  现场仍限本卡授权隔离 VM、P/Q 完整前像及卷快照、独占锁、明确停服与正常写者静默；在初次 hash、preflight 返回、源 rename、每次副本 unlink/目录 rmdir 和 receipt 退休边界受控换 inode/目录根或注入读取内 ABA，独立记录全部源/目标/retained 对象及父目录身份、模式、摘要、链接数、mtime/ctime 与物理时序。未知状态不自动清理，封存证据后仅恢复登记快照，禁止 live 注入。自己的 hardlink unlink 会改变 P inode 的 nlink/ctime，读取内校验与跨步骤身份/摘要绑定须区分，不声称整个恢复期 ABA 免疫或原子 compare-and-unlink。本地进程测试不替代 Linux/断电、完整共享写集、父 B 成功收口、旧 A 激活或 DEV ACK，本卡继续 OPEN。
+
 ## TC-REAL-R22-C2-DESCRIPTION-PUBLISH-001 — c2 同名描述输出的故障窗口
 
 - Case ID：`TC-REAL-R22-C2-DESCRIPTION-PUBLISH-001`；类型：real-environment / transaction / crash-recovery；对应 R22 c2 对 `*_with_desc` 的既有同名输出替换。状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。自动化先决为 `test_cases.test_generation_input_binding_contract` 的二次读取、早返及 staging direct，`test_cases.test_generation_input_binding_workflow` 的 setup/load/c2 workflow，和当前候选正式 full/check；现有定向通过不证明进程死亡后的原子性。

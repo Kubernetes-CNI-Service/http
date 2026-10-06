@@ -2018,6 +2018,73 @@ finally:
             self.assertEqual(payload, copied.read_bytes())
             self.assertFalse((root / "service-started").exists())
 
+    def test_real_setup_infra_log_death_cold_recovery_preserves_replaced_q_copy(self):
+        """Only the receipt-bound original hardlink has Q cleanup authority."""
+        with tempfile.TemporaryDirectory(prefix="r22-infra-copy-owner-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, _q, common, _p_only, _q_only, manifest, _before, _hook, barrier, _home = fixture
+            source = root / "infra/logs"
+            source.mkdir()
+            payload = b"independent original infra audit evidence\n"
+            (source / "audit.log").write_bytes(payload)
+            first = self._run_private_load_setup_switch(fixture, prepare_journal=True, first_link=source)
+            self.assertEqual(23, first.returncode, first.stdout + first.stderr)
+            self.assertTrue(barrier.is_file())
+            self.assertTrue(source.is_symlink())
+            destination = source.resolve()
+            copy, backup = destination / "audit.log", destination / ".logs-migration-source"
+            receipt = root / "infra/.logs-migration.json"
+            journal = root / "ztp/.setup-switch-journal.json"
+            receipt_bytes, wal = receipt.read_bytes(), journal.read_bytes()
+            mixed, manifest_bytes = os.readlink(common), manifest.read_bytes()
+            recovery = """
+import importlib.util, sys
+from pathlib import Path
+from types import SimpleNamespace
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('cold_infra_copy_owner_load', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+copy = (root / 'infra/logs').resolve() / 'audit.log'
+restore = load._setup_switch_restore_infra_log_tree
+def replace_before_first_write(snapshot):
+    original, before = copy.read_bytes(), copy.stat()
+    copy.rename(copy.parent.parent / 'operator-retained-audit.log')
+    copy.write_bytes(original)
+    assert copy.stat().st_ino != before.st_ino
+    restore(snapshot)
+load._setup_switch_restore_infra_log_tree = replace_before_first_write
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    try:
+        load.recover_setup_switch_journal(
+            root / 'ztp/.setup-switch-journal.json', deployment_lock_descriptor=descriptor,
+            services_quiesced=True, runtime_backend=SimpleNamespace(name='supervisor'),
+        )
+    except load.LoadError as error:
+        assert 'infra log' in str(error) and 'changed' in str(error), str(error)
+        print('R22_REPLACEMENT_INFRA_COPY_HELD')
+    else:
+        raise AssertionError('cold recovery deleted a replacement Q log owner')
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+            second = subprocess.run([sys.executable, "-B", "-c", recovery, str(root)],
+                                    cwd=root, capture_output=True, text=True, check=False, timeout=30)
+            self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+            self.assertIn("R22_REPLACEMENT_INFRA_COPY_HELD", second.stdout)
+            self.assertEqual(payload, copy.read_bytes())
+            self.assertEqual(payload, (destination.parent / "operator-retained-audit.log").read_bytes())
+            self.assertEqual(payload, (backup / "audit.log").read_bytes())
+            self.assertEqual(receipt_bytes, receipt.read_bytes())
+            self.assertEqual(wal, journal.read_bytes())
+            self.assertEqual(mixed, os.readlink(common))
+            self.assertEqual(manifest_bytes, manifest.read_bytes())
+            self.assertTrue(source.is_symlink())
+            self.assertFalse((root / "service-started").exists())
+
     def test_real_setup_infra_log_pointer_death_cold_restores_real_directory(self):
         """LOAD→SETUP death after real log migration restores exact old bytes."""
         with tempfile.TemporaryDirectory(prefix="r22-real-infra-restore-") as name:

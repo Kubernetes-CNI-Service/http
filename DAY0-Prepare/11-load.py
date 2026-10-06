@@ -6917,7 +6917,11 @@ def _setup_switch_rename_directory_noreplace(source: Path, target: Path) -> None
 
 def _setup_switch_infra_file_signature(path: Path) -> tuple[os.stat_result, dict[str, object]]:
     """Read a receipt-bound hardlink without following its final name."""
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    named_before = path.lstat()
+    if not stat.S_ISREG(named_before.st_mode):
+        raise ValueError("infra log entry is not a regular file")
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                         | getattr(os, "O_NONBLOCK", 0))
     try:
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode):
@@ -6926,8 +6930,10 @@ def _setup_switch_infra_file_signature(path: Path) -> tuple[os.stat_result, dict
         while chunk := os.read(descriptor, 1024 * 1024):
             digest.update(chunk)
         after, named = os.fstat(descriptor), path.lstat()
-        identity = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns")
-        if any(getattr(before, key) != getattr(after, key)
+        identity = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_size",
+                    "st_mtime_ns", "st_ctime_ns")
+        if any(getattr(before, key) != getattr(named_before, key)
+               or getattr(before, key) != getattr(after, key)
                or getattr(before, key) != getattr(named, key) for key in identity):
             raise ValueError("infra log entry changed while reading")
         return before, {"size": before.st_size, "sha256": digest.hexdigest()}
@@ -6967,6 +6973,68 @@ def _setup_switch_require_infra_receipt(receipt: Path, authority) -> None:
         raise LoadError(f"infra log receipt changed: {exc}") from exc
 
 
+def _setup_switch_infra_file_owner(metadata):
+    # Retiring our Q hardlinks changes nlink/ctime on the surviving P inode.
+    # The reader still checks those fields within each individual read.
+    return tuple(getattr(metadata, key) for key in (
+        "st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns",
+    ))
+
+
+def _setup_switch_infra_directory_owner(path: Path):
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise LoadError(f"infra log directory changed: {path}")
+    return metadata.st_dev, metadata.st_ino, metadata.st_mode
+
+
+def _setup_switch_require_infra_copies(state, *, names=None, directory_names=None):
+    """Check frozen P inodes and Q cleanup owners without following aliases."""
+    source, backup, destination, _receipt, entries, directories = state[:6]
+    authority = state[9]
+    try:
+        if (authority["source_parent"] != _setup_switch_link_parent_identity(source)
+                or authority["destination_parent"] != _setup_switch_link_parent_identity(destination)
+                or authority["destination"] != _setup_switch_infra_directory_owner(destination)):
+            raise ValueError("root or parent identity differs from preflight")
+        original_tree = backup if os.path.lexists(backup) else source
+        if authority["source"] != _setup_switch_infra_directory_owner(original_tree):
+            raise ValueError("original directory identity differs from preflight")
+        checked_names = tuple(entries) if names is None else tuple(names)
+        checked_directories = set(directories if directory_names is None else directory_names)
+        for name in (*checked_names, *tuple(checked_directories)):
+            parent = os.path.dirname(name)
+            while parent:
+                checked_directories.add(parent)
+                parent = os.path.dirname(parent)
+        for name in checked_directories:
+            if (authority["source_directories"][name]
+                    != _setup_switch_infra_directory_owner(original_tree / name)
+                    or authority["copy_directories"][name]
+                    != _setup_switch_infra_directory_owner(destination / name)):
+                raise ValueError("nested directory owner differs from preflight")
+        for name in checked_names:
+            original_info, signature = _setup_switch_infra_file_signature(original_tree / name)
+            if (authority["source_files"][name] != _setup_switch_infra_file_owner(original_info)
+                    or signature != entries[name]):
+                raise ValueError("original log owner or bytes differ from preflight")
+            target = destination / name
+            expected = authority["copies"][name]
+            if expected is None:
+                if os.path.lexists(target):
+                    raise ValueError("an absent Q copy name gained a new owner")
+            else:
+                target_info, target_signature = _setup_switch_infra_file_signature(target)
+                if (expected != _setup_switch_infra_file_owner(target_info)
+                        or target_signature != entries[name]):
+                    raise ValueError("Q hardlink owner or bytes differ from preflight")
+    except (OSError, RuntimeError, ValueError, KeyError, LoadError) as exc:
+        raise LoadError(f"infra log copy changed: {exc}") from exc
+
+
 def _setup_switch_prepare_infra_log_recovery(row: dict[str, object], q_project: Path):
     """Validate the entire receipt-bound P directory and Q copy before writing."""
     if not isinstance(row, dict):
@@ -7001,6 +7069,7 @@ def _setup_switch_prepare_infra_log_recovery(row: dict[str, object], q_project: 
                         != os.path.relpath(destination, source.parent)):
                     raise ValueError("infra log name is not its Q pointer")
             original_tree = backup
+            original_tree_info = backup_info
         else:
             source_info = source.lstat()
             if (not stat.S_ISDIR(source_info.st_mode)
@@ -7008,6 +7077,7 @@ def _setup_switch_prepare_infra_log_recovery(row: dict[str, object], q_project: 
                     != (row["source_dev"], row["source_ino"])):
                 raise ValueError("infra log source identity changed")
             original_tree = source
+            original_tree_info = source_info
         receipt_parent = _setup_switch_link_parent_identity(receipt)
         receipt_identity = _setup_switch_infra_receipt_identity(receipt)
         opened = _read_rollback_regular(
@@ -7070,6 +7140,8 @@ def _setup_switch_prepare_infra_log_recovery(row: dict[str, object], q_project: 
                         raise ValueError("infra log source contains a special path")
             if observed_files != set(entries) or observed_directories != set(directories):
                 raise ValueError("infra log source inventory changed after receipt")
+        source_directories, copy_directories = {}, {}
+        source_files, copies = {}, {}
         for name in directories:
             original_dir = original_tree / name
             if not stat.S_ISDIR(original_dir.lstat().st_mode):
@@ -7077,6 +7149,8 @@ def _setup_switch_prepare_infra_log_recovery(row: dict[str, object], q_project: 
             target_dir = destination / name
             if os.path.lexists(target_dir) and not stat.S_ISDIR(target_dir.lstat().st_mode):
                 raise ValueError("infra log Q directory changed")
+            source_directories[name] = _setup_switch_infra_directory_owner(original_dir)
+            copy_directories[name] = _setup_switch_infra_directory_owner(target_dir)
         for name, expected in entries.items():
             if (not isinstance(expected, dict)
                     or not isinstance(expected.get("size"), int)
@@ -7089,6 +7163,8 @@ def _setup_switch_prepare_infra_log_recovery(row: dict[str, object], q_project: 
             )
             if signature != expected:
                 raise ValueError("infra log original content changed")
+            source_files[name] = _setup_switch_infra_file_owner(original_info)
+            copies[name] = None
             target = destination / name
             if os.path.lexists(target):
                 target_info, target_signature = _setup_switch_infra_file_signature(target)
@@ -7096,6 +7172,7 @@ def _setup_switch_prepare_infra_log_recovery(row: dict[str, object], q_project: 
                         != (target_info.st_dev, target_info.st_ino)
                         or target_signature != expected):
                     raise ValueError("infra log Q hardlink changed")
+                copies[name] = _setup_switch_infra_file_owner(target_info)
             elif has_backup and os.path.islink(source):
                 raise ValueError("published infra log pointer has a missing Q entry")
         allowed = set(entries) | set(directories) | {".gitkeep"}
@@ -7118,16 +7195,30 @@ def _setup_switch_prepare_infra_log_recovery(row: dict[str, object], q_project: 
                 elif not stat.S_ISREG(metadata.st_mode):
                     raise ValueError("infra log Q file changed type")
         _setup_switch_require_infra_receipt(receipt, receipt_authority)
-        return (source, backup, destination, receipt, entries, directories,
-                has_backup, opened is not None, receipt_authority)
+        tree_authority = {
+            "source": (original_tree_info.st_dev, original_tree_info.st_ino,
+                       original_tree_info.st_mode),
+            "destination": (destination_info.st_dev, destination_info.st_ino,
+                            destination_info.st_mode),
+            "source_parent": row["source_parent"],
+            "destination_parent": row["destination_parent"],
+            "source_directories": source_directories,
+            "copy_directories": copy_directories,
+            "source_files": source_files, "copies": copies,
+        }
+        state = (source, backup, destination, receipt, entries, directories,
+                 has_backup, opened is not None, receipt_authority, tree_authority)
+        _setup_switch_require_infra_copies(state)
+        return state
     except (OSError, RuntimeError, TypeError, ValueError, KeyError, LoadError) as exc:
         raise LoadError(f"setup switch infra log state is unknown: {exc}") from exc
 
 
 def _setup_switch_restore_infra_log_tree(state) -> None:
     (source, backup, destination, receipt, entries, directories,
-     has_backup, has_receipt, receipt_authority) = state
+     has_backup, has_receipt, receipt_authority, tree_authority) = state
     _setup_switch_require_infra_receipt(receipt, receipt_authority)
+    _setup_switch_require_infra_copies(state)
     if has_backup:
         if os.path.islink(source):
             _setup_switch_require_infra_receipt(receipt, receipt_authority)
@@ -7141,16 +7232,21 @@ def _setup_switch_restore_infra_log_tree(state) -> None:
         path = destination / name
         if os.path.lexists(path):
             _setup_switch_require_infra_receipt(receipt, receipt_authority)
+            _setup_switch_require_infra_copies(state, names=(name,), directory_names=())
             path.unlink()
+            tree_authority["copies"][name] = None
             _fsync_parent_directory(path.parent)
     for name in sorted(directories, key=lambda value: (-value.count(os.sep), value)):
         path = destination / name
         if os.path.lexists(path):
             _setup_switch_require_infra_receipt(receipt, receipt_authority)
+            _setup_switch_require_infra_copies(state, names=(), directory_names=(name,))
             path.rmdir()
+            tree_authority["copy_directories"][name] = None
             _fsync_parent_directory(path.parent)
     if has_receipt:
         _setup_switch_require_infra_receipt(receipt, receipt_authority)
+        _setup_switch_require_infra_copies(state)
         receipt.unlink()
         _fsync_parent_directory(receipt.parent)
 

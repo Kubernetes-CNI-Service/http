@@ -227,6 +227,15 @@ R22 infra/logs 冷恢复不能只按预检时读取的 receipt 内容推定之�
 direct 与真实 LOAD→SETUP 强杀→新 LOAD workflow 覆盖该窗口；名称复核与 unlink
 不是原子 compare-and-unlink，正常窗口仍要求其它写者静默，不证明完整写集或断电。
 
+R22 infra/logs 的 Q 清理同样须保留预检时的副本所有权，不能按文件名删除后来的对象。
+首写前核全部 P 原文件/Q 副本，逐项 unlink/rmdir 前重核文件身份、独立 receipt 摘要、
+原目录/Q 根及嵌套父目录身份；自己的删除只将该项的预期转为缺席，退休 receipt 前再核。
+同内容不同 inode 的副本及预检期间目录换绑必须 HOLD，保留替换对象和 WAL，不启动服务。
+reader 在打开前拒绝非 regular leaf，以非阻塞/no-follow 打开，并在同一次读取前/FD/名称
+后核验 nlink/ctime；读内 ABA 拒绝。自己的硬链接 unlink 会改变存活 P inode 的 nlink/ctime，
+因此跨清理步骤绑定 dev/ino/mode/size/mtime 和完整摘要，不冒称整个恢复窗口的 ABA 免疫。
+嵌套重复硬链接正例必须仍完整恢复原 P inode；本地 workflow 不替代 Linux/断电或完整 R22。
+
 R22 P manifest 恢复同样须在持有的新文件 FD 上设置最终模式、写入完整字节并 fsync，
 之后才 replace 和同步父目录；不能先 fsync 后 chmod。文件同步失败须保留 Q manifest
 和原 WAL。真实 LOAD→SETUP 在 Q manifest 发布后死亡→新 LOAD 恢复同步失败→第三 LOAD

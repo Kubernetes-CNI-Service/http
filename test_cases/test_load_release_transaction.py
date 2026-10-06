@@ -3441,6 +3441,162 @@ os.kill(os.getpid(), signal.SIGKILL)
         self.assertNotEqual(state[9][state[2]], os.readlink(state[2]))
         backend.start.assert_not_called()
 
+    def _assert_infra_copy_replacement_is_held(self, after_source_restore):
+        state, source, destination, backup, receipt, payload = self._prepare_infra_receipt_recovery_owner()
+        journal, descriptor, backend = state[10:]
+        wal, receipt_bytes = journal.read_bytes(), receipt.read_bytes()
+        copy = destination / "audit.log"
+        retained = destination.parent / "operator-retained-audit.log"
+        original_inode = copy.stat().st_ino
+        restore, rename = LOAD._setup_switch_restore_infra_log_tree, LOAD._setup_switch_rename_directory_noreplace
+
+        def replace_copy():
+            copy.rename(retained)
+            copy.write_bytes(payload)
+            self.assertNotEqual(original_inode, copy.stat().st_ino)
+
+        def before_first_write(snapshot):
+            replace_copy()
+            restore(snapshot)
+
+        def after_rename(old, new):
+            rename(old, new)
+            self.assertEqual(backup, old)
+            replace_copy()
+
+        name = "_setup_switch_rename_directory_noreplace" if after_source_restore else "_setup_switch_restore_infra_log_tree"
+        callback = after_rename if after_source_restore else before_first_write
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, name, side_effect=callback):
+            with self.assertRaisesRegex(LOAD.LoadError, "infra log .*changed"):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertEqual(payload, copy.read_bytes())
+        self.assertEqual(payload, retained.read_bytes())
+        self.assertEqual(payload, ((source if after_source_restore else backup) / "audit.log").read_bytes())
+        self.assertEqual(not after_source_restore, source.is_symlink())
+        self.assertEqual(receipt_bytes, receipt.read_bytes())
+        self.assertEqual(wal, journal.read_bytes())
+        self.assertNotEqual(state[9][state[2]], os.readlink(state[2]))
+        backend.start.assert_not_called()
+
+    def test_setup_infra_q_copy_new_inode_blocks_first_recovery_write(self):
+        self._assert_infra_copy_replacement_is_held(False)
+
+    def test_setup_infra_q_copy_replaced_after_source_restore_is_not_deleted(self):
+        self._assert_infra_copy_replacement_is_held(True)
+
+    def _assert_infra_root_rebind_during_preflight_is_held(self, destination_rebind):
+        state, source, destination, backup, receipt, payload = self._prepare_infra_receipt_recovery_owner()
+        row = json.loads(state[10].read_bytes())["body"]["infra_logs"][0]
+        signature = LOAD._setup_switch_infra_file_signature
+        retained = destination.parent / "operator-retained-infra-directory"
+        mutated = False
+
+        def change_root_after_hash(path):
+            nonlocal mutated
+            result = signature(path)
+            trigger = destination / "audit.log" if destination_rebind else backup / "audit.log"
+            if path == trigger and not mutated:
+                mutated = True
+                if destination_rebind:
+                    destination.rename(retained)
+                    destination.mkdir()
+                    (retained / ".logs-migration-source").rename(backup)
+                    os.link(retained / "audit.log", destination / "audit.log")
+                else:
+                    backup.rename(retained)
+                    backup.mkdir()
+                    os.link(retained / "audit.log", backup / "audit.log")
+            return result
+
+        wal, receipt_bytes = state[10].read_bytes(), receipt.read_bytes()
+        with mock.patch.object(LOAD, "_setup_switch_infra_file_signature", side_effect=change_root_after_hash):
+            with self.assertRaisesRegex(LOAD.LoadError, "infra log .*changed"):
+                LOAD._setup_switch_prepare_infra_log_recovery(row, state[1].resolve())
+        self.assertTrue(mutated)
+        self.assertTrue(source.is_symlink())
+        self.assertEqual(payload, (backup / "audit.log").read_bytes())
+        self.assertEqual(payload, (destination / "audit.log").read_bytes())
+        self.assertEqual(payload, (retained / "audit.log").read_bytes())
+        self.assertEqual(wal, state[10].read_bytes())
+        self.assertEqual(receipt_bytes, receipt.read_bytes())
+        state[12].start.assert_not_called()
+
+    def test_setup_infra_source_root_rebind_during_preflight_is_not_adopted(self):
+        self._assert_infra_root_rebind_during_preflight_is_held(False)
+
+    def test_setup_infra_q_root_rebind_during_preflight_is_not_adopted(self):
+        self._assert_infra_root_rebind_during_preflight_is_held(True)
+
+    def test_setup_infra_signature_same_inode_aba_is_rejected(self):
+        _state, _source, _destination, backup, _receipt, payload = self._prepare_infra_receipt_recovery_owner()
+        path = backup / "audit.log"
+        before, read = path.stat(), os.read
+        mutated = False
+
+        def replace_bytes(descriptor, size):
+            nonlocal mutated
+            data = read(descriptor, size)
+            if data and not mutated:
+                mutated = True
+                path.write_bytes(b"!" + payload[1:])
+                path.write_bytes(payload)
+                os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+                after = path.stat()
+                self.assertEqual((before.st_ino, before.st_size, before.st_mtime_ns),
+                                 (after.st_ino, after.st_size, after.st_mtime_ns))
+                self.assertNotEqual(before.st_ctime_ns, after.st_ctime_ns)
+            return data
+
+        with mock.patch.object(LOAD.os, "read", side_effect=replace_bytes):
+            with self.assertRaisesRegex(ValueError, "infra log entry changed while reading"):
+                LOAD._setup_switch_infra_file_signature(path)
+        self.assertTrue(mutated)
+        self.assertEqual(payload, path.read_bytes())
+
+    def test_setup_infra_signature_rejects_fifo_before_open(self):
+        path = self.root / "private-reader-fifo"
+        os.mkfifo(path)
+        with mock.patch.object(LOAD.os, "open", side_effect=AssertionError("must reject before opening FIFO")):
+            with self.assertRaisesRegex(ValueError, "infra log entry is not a regular file"):
+                LOAD._setup_switch_infra_file_signature(path)
+
+    def test_setup_infra_nested_duplicate_hardlinks_restore_without_false_aba(self):
+        state, source, destination, backup, receipt, payload = self._prepare_infra_receipt_recovery_owner()
+        original_inode = backup.stat().st_ino
+        (backup / "nested").mkdir()
+        (destination / "nested").mkdir()
+        os.link(backup / "audit.log", backup / "nested/sibling.log")
+        os.link(backup / "audit.log", destination / "nested/sibling.log")
+        document = json.loads(receipt.read_bytes())
+        document["directories"] = ["nested"]
+        document["entries"]["nested/sibling.log"] = {
+            "size": len(payload), "sha256": hashlib.sha256(payload).hexdigest(),
+        }
+        receipt.write_text(json.dumps(document) + "\n", encoding="utf-8")
+        journal, descriptor, backend = state[10:]
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.recover_setup_switch_journal(
+                journal, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            )
+        self.assertFalse(source.is_symlink())
+        self.assertEqual(original_inode, source.stat().st_ino)
+        self.assertEqual(payload, (source / "audit.log").read_bytes())
+        self.assertEqual(payload, (source / "nested/sibling.log").read_bytes())
+        self.assertEqual((source / "audit.log").stat().st_ino,
+                         (source / "nested/sibling.log").stat().st_ino)
+        self.assertFalse((destination / "audit.log").exists())
+        self.assertFalse((destination / "nested").exists())
+        self.assertFalse(receipt.exists())
+        self.assertFalse(journal.exists())
+        self.assertEqual(state[8], state[7].read_bytes())
+        self.assertEqual(state[9][state[2]], os.readlink(state[2]))
+        backend.start.assert_not_called()
+
     def test_setup_wal_cold_restores_receipt_bound_real_infra_logs(self) -> None:
         """A Q log copy and pointer must not strand the original P-era inode."""
         (
