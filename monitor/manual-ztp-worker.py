@@ -567,6 +567,30 @@ def latest_cli_operations():
     return operations
 
 
+def _config_sync_summary_members(summary):
+    """Validate complete host collections before accepting any member."""
+    targets, results = summary.get("targets"), summary.get("results")
+    if not isinstance(targets, list) or not isinstance(results, list):
+        return None
+    indexed_targets, indexed_results = {}, {}
+    for members, indexed in ((targets, indexed_targets), (results, indexed_results)):
+        for item in members:
+            if not isinstance(item, dict):
+                return None
+            hostname = item.get("hostname")
+            if not isinstance(hostname, str) or not SAFE_HOSTNAME.fullmatch(hostname):
+                return None
+            key = hostname.casefold()
+            if key in indexed:
+                return None
+            indexed[key] = item
+    if not set(indexed_results).issubset(indexed_targets):
+        return None
+    if summary.get("state") == "triggered" and set(indexed_results) != set(indexed_targets):
+        return None
+    return targets, indexed_results
+
+
 def accepted_result(
     trigger_id, *, hostname="", operation_id="", operation="", trigger_source="",
     exclude_paths=(), exclude_inodes=(),
@@ -611,10 +635,11 @@ def accepted_result(
                 summary.get("trigger_source") == trigger_source,
             )):
                 continue
-            targets = summary.get("targets")
-            results = summary.get("results")
-            if not isinstance(targets, list) or not isinstance(results, list):
+            members = _config_sync_summary_members(summary)
+            if members is None:
                 continue
+            targets, indexed_results = members
+            results = list(indexed_results.values())
             matching_targets = [
                 item for item in targets
                 if isinstance(item, dict)

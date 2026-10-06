@@ -284,6 +284,48 @@ class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
             self.assertTrue(receipt.is_symlink())
             self.assertEqual(b'{"foreign":true}\n', foreign.read_bytes())
 
+    def test_worker_validates_entire_summary_before_accepting_own_writer_receipt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve()
+            receipt, produced = self.published_receipt(project)
+            devices = project / "02-devices_config.csv"
+            devices.write_text("hostname,type\nEXAMPLE-Leaf01,eth\n", encoding="utf-8")
+            target = {"hostname": "EXAMPLE-Leaf01", "trigger_id": "trigger-1", "effective_operation": "replace-config", "generation": 1}
+            summary = {
+                "state": "triggered", "operation": "replace-config", "effective_operation": "replace-config",
+                "operation_id": "op-1", "trigger_source": "manual_config_sync_cli", "generation": 1,
+                "targets": [target], "results": [produced],
+            }
+            summary_path = receipt.parent.parent / "summary.json"
+
+            def accept():
+                return self.worker.accepted_result(
+                    "trigger-1", hostname="EXAMPLE-Leaf01", operation_id="op-1",
+                    operation="replace-config", trigger_source="manual_config_sync_cli",
+                )
+
+            with mock.patch.object(self.worker, "DEVICES_CSV", devices):
+                self.manual.atomic_json(summary_path, summary)
+                self.assertEqual(produced, accept())
+                other_target = {"hostname": "OTHER-Leaf02", "trigger_id": "other-trigger", "effective_operation": "replace-config", "generation": 1}
+                other_result = {"hostname": "OTHER-Leaf02", "trigger_id": "other-trigger", "state": "triggered"}
+                mutations = (
+                    {"targets": [target, other_target, {**other_target, "hostname": "other-leaf02"}], "results": [produced, other_result]},
+                    {"targets": [target, other_target], "results": [produced, other_result, {**other_result, "hostname": "other-leaf02"}]},
+                    {"results": [produced, other_result]},
+                    {"targets": [target, other_target]},
+                    {"targets": [target, "malformed-host-member"]},
+                    {"results": [produced, {"trigger_id": "no-hostname"}]},
+                )
+                for mutation in mutations:
+                    with self.subTest(mutation=mutation):
+                        self.manual.atomic_json(summary_path, {**summary, **mutation})
+                        before = summary_path.read_bytes()
+                        self.assertEqual({}, accept())
+                        self.assertEqual(before, summary_path.read_bytes(), "whole-summary reject-and-retain")
+                self.manual.atomic_json(summary_path, summary)
+                self.assertEqual(produced, accept())
+
 
 if __name__ == "__main__":
     unittest.main()

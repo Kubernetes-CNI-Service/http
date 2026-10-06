@@ -382,6 +382,8 @@ Production host-key mismatch 默认 fail closed，只有单台完整 hostname �
 最终目录同步期间的 journal/witness rebind 拒绝并保留外来对象。真实 worker 读取本代回执
 还须拒绝重复 JSON 成员、非当前 EUID、group/other 可写和 held read 后的路径/元数据替换，
 不得截断或清除拒绝证据。三份见证共享恢复域，
+消费回执之前还要完整校验 summary 全部 targets/results：未知主机、缺少或重复主机、
+casefold 冲突、非对象成员和完成结果集合不闭合均拒绝，不能只检查所选主机然后忽略其余错误。
 不宣称抵御全部镜像或整卷回滚。worker/九阶段监控消费端尚未完成接入，F02 整体仍 OPEN；
 真机持久化卡 `TC-REAL-F02-LOCAL-GENERATION-001` 仍 NOT RUN。
 
