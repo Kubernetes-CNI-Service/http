@@ -8183,6 +8183,8 @@ def mount_and_test_dhcp(
     copy rewrites only those three include statements for the first syntax
     check.  If an install or the final syntax check fails, every previous
     destination (including a symlink) is restored before the error is raised.
+    Once B is visible, unconfirmed parent directory durability instead keeps
+    installed B and the root-only A backup together for manual HOLD review.
     """
     mappings = dhcp_file_mappings(
         parent_candidate.dhcp_source_dir if parent_candidate is not None else None
@@ -8344,7 +8346,20 @@ def mount_and_test_dhcp(
     finally:
         if build_workspace is not None:
             build_workspace.cleanup()
-        if transaction_created:
+        if (transaction_created and parent_candidate is not None
+                and parent_candidate.committed and not parent_candidate.directory_synced):
+            # A is not automatically restored behind visible B, but neither
+            # may its recovery evidence be erased while B durability is unknown.
+            # Retention is not proof these copies survived a power failure.
+            try:
+                warn(
+                    "HOLD：B 已可见但目录持久化未确认；"
+                    f"保留 DHCP 事务及 root-only A 备份：{transaction_dir}；"
+                    "服务保持停止，须人工核验实际 A/B 状态，不自动回退或清理"
+                )
+            except BrokenPipeError:
+                pass
+        elif transaction_created:
             cleanup_failed = False
             for directory in (staged_dir, backup_dir):
                 for name in mappings:

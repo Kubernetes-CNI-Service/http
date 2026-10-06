@@ -1953,6 +1953,39 @@ finally:
             self.assertEqual(payload, parent.with_name("operator-retained-parent.json").read_bytes())
             self.assertFalse((root / "service-started").exists())
 
+    def test_real_setup_then_uncertain_parent_retains_dhcp_a_evidence(self):
+        """SETUP success must not license deleting A backups behind uncertain B."""
+        for boundary in ("open", "fsync"):
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as name:
+                fixture = self._private_setup_switch_fixture(Path(name))
+                root, _p, q, common, _p_only, _q_only, manifest, before, _hook, _barrier, _home = fixture
+                for relative in ("tools/lldp-analyze-tool/99-output-p2p",
+                                 "tools/lldp-analyze-tool/99-output-monitor",
+                                 "tools/ibdiagnet-analyze-tool/99-output-p2p"):
+                    path = root / relative
+                    if path.is_dir() and not path.is_symlink():
+                        shutil.rmtree(path)
+                first = self._run_private_load_setup_switch(
+                    fixture, prepare_journal=False, auto_prepare_journal=True,
+                    first_link=root / "never-created-link",
+                )
+                self.assertEqual(25, first.returncode, first.stdout + first.stderr)
+                q_manifest, q_link = manifest.read_bytes(), os.readlink(common)
+                self.assertNotEqual(before["manifest"], q_manifest)
+                journal = root / "ztp/.setup-switch-journal.json"
+                wal = journal.read_bytes()
+                api = load_script("r22_private_dhcp_retention_" + boundary,
+                                  root / "DAY0-Prepare/11-load.py")
+                descriptor = api.acquire_deployment_lock(exclusive=True)
+                try:
+                    RELEASE_FIXTURE.assert_private_dhcp_transaction_retention(api, root, q, boundary)
+                finally:
+                    api.release_deployment_lock(descriptor)
+                self.assertEqual(q_manifest, manifest.read_bytes())
+                self.assertEqual(q_link, os.readlink(common))
+                self.assertEqual(wal, journal.read_bytes())
+                self.assertFalse((root / "service-started").exists())
+
     def test_real_setup_parent_visible_sync_failure_stops_success_and_cold_p_rollback(self):
         """A visible B with unconfirmed directory durability is HOLD, not A rollback."""
         for boundary in ("open", "fsync"):

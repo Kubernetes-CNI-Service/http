@@ -254,6 +254,14 @@ workflow 覆盖两个同步故障边界；workflow 使用独立最小 B marker�
 Q manifest/链接/WAL 与 B，拒绝旧 P 回退。本机故障注入不证明断电持久性或父 B
 成功收口，显式旧 A 激活、完整写集和正式 full/check 仍须独立完成。
 
+同一未确认 B 状态下，DHCP 事务的 finally 不得删除原 A backup 和 B staged 文件，
+也不得提示“手工删除”。必须保留原 0700 backup 目录及事务路径、报告 HOLD，等待
+人工核验实际 A/B；不能自动恢复 A。目录同步已确认的正常成功，以及父 replace
+之前拒绝并完整还原 A 的原路径，仍执行既有清理。direct 和真实 SETUP→LOAD
+安装算法 workflow 使用固定独立 A/B 字节，仅将 sudo/文件命令/dhcpd 替换为私有
+文件系统端口，不触碰 `/etc/dhcp`，不证明真实语法、root 权限或备份断电持久性。
+保留的事务不是完整恢复凭据/WAL 自动登记，不能冒称完整旧 A 激活或 B 成功收口。
+
 R22 Q parent 预像必须在首次内容读取前冻结完整文件身份或缺席状态，持有原 inode
 并在读取后同时验证名称、FD 和物理父目录。读取后插入的新文件、同字节换 inode
 不能成为稳定预像，也不能据此启动 SETUP 或发布 WAL。此门禁不意味着父 B 成功

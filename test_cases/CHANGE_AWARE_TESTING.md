@@ -219,6 +219,42 @@ inode 144208691，size 616，SHA256
 后代状态仍 unknown，不能据此放行正式 related/full 或称 R22 恢复完成。approved ledger
 保持原字节，Linux/断电、完整写集、显式旧 A 健康激活及其它未闭项不变。
 
+### R22 未确认 B 时 DHCP A 备份保留候选
+
+父 B 目录 open/fsync 错误已传播 HOLD，但 `mount_and_test_dhcp` 的 finally
+仍删除 A backup、B staged 及事务目录。独立 direct 和真实 SETUP→实际 LOAD
+安装算法 workflow 要求可见 B/已安装 B 保留，原 A 固定字节备份及 0700 目录
+不清理，明确报告 HOLD 与事务路径；健康同步成功和 replace 前拒绝还原 A
+两个正向清理合同保留。原实现 4 tests / 4 FAIL / exit1（direct、workflow
+各有 open/fsync 两个失败 subtest，两个正常清理例通过）；完整 RED 日志
+`outputs/test-diagnostics/r22-dhcp-uncertain-evidence-red.log`，inode 145371162，
+size 4809，SHA256 `91c8e283aa156b2a083021da550a30aa785d91a5a7d4e8105e10633d9b192e1d`。
+候选只在 visible 且 directory_synced 未确认时保留事务，禁止自动回 A 和清理；
+其他原清理路径不变。四项新例加原 replace 失败回滚和 main 同步失败停服例
+6 tests / OK / exit0（8.946 秒），完整日志 `r22-dhcp-uncertain-evidence-green.log`，
+inode 145378400，size 2651，SHA256
+`a2c35b359ec51ac57aa9abf7bf760a506699fd7f57d2b4e33f1aa3b691b18f4b`，读前后 stat
+一致，完整 Ran/OK 与物理退出标记及实际 exec exit0 相符。
+
+workflow 执行实际 SETUP 子进程、copied LOAD 与排他部署锁，保持 Q manifest/
+链接/WAL 原字节；DHCP 命令和语法检查只以限制写入私有目录的端口替身运行，
+固定预期 A/B 字节独立于实现生成。它不是完整 root main、真实 dhcpd 验收或
+Linux/断电见证；保留文件也未证明全组 fsync、不是可自动恢复 receipt/WAL。
+manifest 原 LOAD direct 与 generation-input-binding 多脚本 workflow 映射有效，
+正式 related/full 原 unknown 超时门禁不解除，不手改 ledger；完整写集、旧 A
+显式激活、B 健康成功收口和 DEV ACK 仍 OPEN。
+
+两个完整 LOAD transaction / generation-input-binding workflow 模块及正常导入
+用例诊断 356 tests / OK / exit0（271.094 秒）；日志
+`outputs/test-diagnostics/r22-dhcp-uncertain-evidence-modules.log`，inode 145388345，
+size 116645，SHA256 `13899b433a7bc1aae156e950e96a328a59c5a4d5fb741228ff112fab497d0d6b`。
+读前后 stat 一致，100850 字节旧前缀 SHA256
+`7dabc2630e0bb770aae646fa6943a65be42efc73fb5754f480fa5d5ce2f91919` 保持不变；
+物理第 1108 行 Ran、1110 行 OK，原用例缓冲 stdout 后 1120 行
+`R22_DHCP_UNCERTAIN_EVIDENCE_MODULES_EXIT=0` 与实际 exec exit0 一致。
+运行期间源/测试未改，manifest、approved ledger、运行态 setup manifest 原字节
+未变。本结果仍只是局部模块诊断，不是批准 runner 或正式 full/check。
+
 ### R22 父 B 可见但目录同步失败的 HOLD 候选
 
 `commit_prepared_release` 原实现忽略 parent directory open 错误，并把 fsync

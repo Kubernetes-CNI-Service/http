@@ -115,6 +115,124 @@ def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def assert_private_dhcp_transaction_retention(api, root: Path, project: Path, outcome: str) -> None:
+    """Exercise real LOAD filesystem logic; never execute sudo, dhcpd or live writes."""
+    root = root.resolve()
+    source_dir, live_dir = project / "independent-dhcp-B", root / "private-etc-dhcp"
+    source_dir.mkdir()
+    live_dir.mkdir()
+    names = ("dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts")
+    expected_b = {name: f"independent-B:{name}\n".encode() for name in names}
+    expected_b["dhcpd.conf"] = b"# independent-B configuration\n" + b"".join(
+        f'include "/etc/dhcp/{name}";\n'.encode() for name in names[1:]
+    )
+    expected_a = {name: f"independent-A:{name}\n".encode() for name in names}
+    mappings = {source_dir / name: live_dir / name for name in names}
+    for source, destination in mappings.items():
+        source.write_bytes(expected_b[source.name])
+        destination.write_bytes(expected_a[destination.name])
+    parent_payload = {"schema_version": 1, "release_id": "independent-B"}
+    candidate = api.prepare_current_release(project, parent_payload)
+    parent_identity = candidate.destination.parent.stat()
+    real_open, real_sync = os.open, os.fsync
+    injected, warnings, cleanup = [], [], []
+
+    def private_destination(value):
+        path = Path(value)
+        path.parent.resolve().relative_to(root)
+        return path
+
+    def private_command(command, **_kwargs):
+        operation = command[0]
+        if operation == "dhcpd":
+            # This is a service/parser port, not a real dhcpd syntax witness.
+            return SimpleNamespace(returncode=0)
+        target = private_destination(command[-1])
+        if operation == "install":
+            mode = int(command[command.index("-m") + 1], 8)
+            if "-d" in command:
+                target.mkdir(parents=True, exist_ok=True)
+            else:
+                shutil.copy2(command[-2], target)
+            target.chmod(mode)
+        elif operation == "cp":
+            shutil.copy2(command[-2], target, follow_symlinks=False)
+        elif operation == "rm":
+            cleanup.append(target)
+            target.unlink(missing_ok=True)
+        elif operation == "rmdir":
+            cleanup.append(target)
+            target.rmdir()
+        else:
+            raise AssertionError("unexpected private command: " + repr(command))
+        return SimpleNamespace(returncode=0)
+
+    def sync_parent(descriptor):
+        metadata = os.fstat(descriptor)
+        if outcome == "fsync" and (metadata.st_dev, metadata.st_ino) == (
+            parent_identity.st_dev, parent_identity.st_ino,
+        ):
+            injected.append("fsync")
+            raise OSError("independent DHCP parent directory sync fault")
+        return real_sync(descriptor)
+
+    def open_parent(path, flags, *args, **kwargs):
+        if outcome == "open" and isinstance(path, (str, os.PathLike)) \
+                and Path(path) == candidate.destination.parent:
+            injected.append("open")
+            raise OSError("independent DHCP parent directory open fault")
+        return real_open(path, flags, *args, **kwargs)
+
+    if outcome == "precommit":
+        def fail_precommit():
+            raise api.LoadError("independent precommit rejection")
+        candidate.precommit_check = fail_precommit
+    try:
+        with mock.patch.object(api, "dhcp_file_mappings", return_value=mappings), \
+                mock.patch.object(api, "sudo_command", side_effect=lambda *args: list(args)), \
+                mock.patch.object(api, "run", side_effect=private_command), \
+                mock.patch.object(api, "_run_subprocess", side_effect=private_command), \
+                mock.patch.object(api, "warn", side_effect=warnings.append), \
+                mock.patch.object(api.os, "open", side_effect=open_parent), \
+                mock.patch.object(api.os, "fsync", side_effect=sync_parent):
+            try:
+                api.mount_and_test_dhcp(parent_candidate=candidate)
+            except api.LoadError as exc:
+                if outcome in {"open", "fsync"}:
+                    assert "持久化" in str(exc) and "未确认" in str(exc), str(exc)
+                elif outcome == "precommit":
+                    assert "independent precommit rejection" in str(exc), str(exc)
+                else:
+                    raise
+            else:
+                assert outcome == "success", "failure must propagate before service continuation"
+        transactions = list(live_dir.glob(".load-dhcp-transaction-*"))
+        installed = {name: (live_dir / name).read_bytes() for name in names}
+        if outcome in {"open", "fsync"}:
+            assert injected == [outcome], injected
+            assert candidate.committed and not candidate.directory_synced
+            assert json.loads(candidate.destination.read_text()) == parent_payload
+            assert installed == expected_b, "do not roll DHCP back behind visible B"
+            assert len(transactions) == 1, "unconfirmed B must retain the A transaction backup"
+            transaction = transactions[0]
+            backup = transaction / "backup"
+            assert stat.S_IMODE(backup.stat().st_mode) == 0o700
+            assert {p.name: p.read_bytes() for p in backup.iterdir()} == expected_a
+            assert {p.name for p in (transaction / "staged").iterdir()} == set(names)
+            assert not cleanup, "HOLD must not delete staged/backup evidence"
+            assert any("HOLD" in warning and str(transaction) in warning for warning in warnings)
+            assert not any("手工删除" in warning for warning in warnings)
+        else:
+            assert transactions == [], "normal success and precommit rollback still clean up"
+            assert installed == (expected_a if outcome == "precommit" else expected_b)
+            assert candidate.committed == (outcome == "success")
+            assert candidate.directory_synced == (outcome == "success")
+            if outcome == "precommit":
+                assert not candidate.destination.exists()
+    finally:
+        api.discard_prepared_release(candidate)
+
+
 def h19_mini_policy(*, unknown_role_action: str = "error") -> dict:
     """Independent, non-GB300 taxonomy for the real load-to-topology workflow."""
     return {
@@ -6094,6 +6212,28 @@ os.kill(os.getpid(), signal.SIGKILL)
                     LOAD.acquire_deployment_lock(exclusive=True)
             finally:
                 MANUAL.release_deployment_lock(manual_lock)
+
+    def test_visible_parent_sync_failure_retains_private_dhcp_transaction_evidence(self) -> None:
+        for boundary in ("open", "fsync"):
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as name:
+                root = Path(name)
+                project = root / "project"
+                project.mkdir()
+                assert_private_dhcp_transaction_retention(LOAD, root, project, boundary)
+
+    def test_confirmed_parent_success_cleans_private_dhcp_transaction(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            project = root / "project"
+            project.mkdir()
+            assert_private_dhcp_transaction_retention(LOAD, root, project, "success")
+
+    def test_precommit_rejection_restores_a_and_cleans_private_dhcp_transaction(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            project = root / "project"
+            project.mkdir()
+            assert_private_dhcp_transaction_retention(LOAD, root, project, "precommit")
 
     def test_parent_publish_failure_rolls_back_installed_dhcp_files(self) -> None:
         source_dir = self.root / "generated-dhcp"
