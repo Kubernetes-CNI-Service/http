@@ -1555,6 +1555,97 @@ finally:
             self.assertEqual(b"PRESERVE-MATERIALIZED-LATEST\n", marker.read_bytes())
             self.assertTrue((root / "ztp/.setup-switch-journal.json").is_file())
 
+    def _assert_materialized_temp_cold_recovery(self, foreign_owner):
+        with tempfile.TemporaryDirectory(prefix="r22-real-materialized-temp-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, q, common, p_only, q_only, manifest, before, _hook, barrier, _home = fixture
+            output = q / "99-output-eth"
+            latest, release = output / "latest", output / "20261007_010000_combine"
+            for path in (latest, release):
+                path.mkdir(parents=True)
+                (path / ".published-complete").write_bytes(b"complete\n")
+                (path / "leaf.yaml").write_bytes(b"hostname: independent-leaf\n")
+            original = latest.stat()
+            first = self._run_private_load_setup_switch(
+                fixture, prepare_journal=True,
+                first_link_prefix=str(output / ".latest.tmp."),
+            )
+            self.assertEqual(23, first.returncode, first.stdout + first.stderr)
+            temporary = Path(barrier.read_text().strip())
+            self.assertEqual(output, temporary.parent)
+            self.assertEqual(release.name, os.readlink(temporary))
+            self.assertFalse(os.path.lexists(latest))
+            journal = root / "ztp/.setup-switch-journal.json"
+            evidence = journal.read_bytes()
+            row = json.loads(evidence)["body"]["directories"][0]
+            backup = Path(row["backup"])
+            self.assertEqual((original.st_dev, original.st_ino),
+                             (backup.stat().st_dev, backup.stat().st_ino))
+            mixed = os.readlink(common)
+            if foreign_owner:
+                temporary.unlink()
+                temporary.write_bytes(b"UNRELATED RECOVERY OBJECT\n")
+            recovery = """
+import importlib.util
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('fresh_materialized_temp_load', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    try:
+        outcome = load.recover_setup_switch_journal(
+            root / 'ztp/.setup-switch-journal.json',
+            deployment_lock_descriptor=descriptor, services_quiesced=True,
+            runtime_backend=SimpleNamespace(name='supervisor'),
+        )
+    except load.LoadError as exc:
+        if sys.argv[2] != 'foreign' or 'disk state is unknown' not in str(exc):
+            raise
+        print('MATERIALIZED_TEMP_FOREIGN_OWNER_HELD')
+    else:
+        assert sys.argv[2] == 'owned', 'foreign temp must block all recovery writes'
+        assert outcome == 'restored-p', outcome
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+            second = subprocess.run(
+                [sys.executable, "-B", "-c", recovery, str(root),
+                 "foreign" if foreign_owner else "owned"],
+                cwd=root, capture_output=True, text=True, check=False, timeout=30,
+            )
+            self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            self.assertFalse((root / "service-started").exists())
+            if foreign_owner:
+                self.assertIn("MATERIALIZED_TEMP_FOREIGN_OWNER_HELD", second.stdout)
+                self.assertEqual(evidence, journal.read_bytes())
+                self.assertEqual(mixed, os.readlink(common))
+                self.assertFalse(os.path.lexists(latest))
+                self.assertEqual(b"UNRELATED RECOVERY OBJECT\n", temporary.read_bytes())
+                self.assertEqual((original.st_dev, original.st_ino),
+                                 (backup.stat().st_dev, backup.stat().st_ino))
+            else:
+                self.assertFalse(os.path.lexists(temporary), "WAL must consume its temp link")
+                self.assertFalse(os.path.lexists(backup))
+                self.assertFalse(os.path.lexists(journal))
+                self.assertEqual((original.st_dev, original.st_ino),
+                                 (latest.stat().st_dev, latest.stat().st_ino))
+                self.assertEqual(before["common"], os.readlink(common))
+                self.assertEqual(before["p_only"], os.readlink(p_only))
+                self.assertFalse(os.path.lexists(q_only))
+
+    def test_real_setup_materialized_temp_death_cold_recovers_original_and_removes_temp(self):
+        self._assert_materialized_temp_cold_recovery(False)
+
+    def test_real_setup_materialized_temp_death_foreign_owner_blocks_all_restore(self):
+        self._assert_materialized_temp_cold_recovery(True)
+
     def test_real_setup_materialized_latest_replace_cold_recovers_original_directory(self):
         """LOAD→SETUP death after replacing latest must restore its real Q bytes."""
         with tempfile.TemporaryDirectory(prefix="r22-real-latest-restore-") as name:

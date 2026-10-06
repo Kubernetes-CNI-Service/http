@@ -82,6 +82,66 @@ class SetupSwitchPlanContractTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def _materialized_temp_fixture(self):
+        output = self.q / "99-output-eth"
+        latest, release = output / "latest", output / "20261007_010000_combine"
+        for path in (latest, release):
+            path.mkdir(parents=True)
+            (path / ".published-complete").write_bytes(b"complete\n")
+            (path / "leaf.yaml").write_bytes(b"hostname: independent-leaf\n")
+        backup = output / ".latest.setup-switch-wal-independent"
+        temporary = output / f".latest.tmp.{os.getpid()}"
+        context = ({}, None, {}, {str(latest): (str(release), str(backup))})
+        return latest, release, backup, temporary, context
+
+    def test_materialized_temp_occupied_name_is_held_before_source_rename(self):
+        latest, release, backup, temporary, context = self._materialized_temp_fixture()
+        temporary.write_bytes(b"UNRELATED OPERATOR OBJECT\n")
+        original = latest.stat()
+        transaction = self.setup._SetupLinkTransaction((str(latest),))
+        with mock.patch.object(self.setup, "_SETUP_SWITCH_WAL_CONTEXT", context), \
+             mock.patch.object(self.setup, "_register_setup_switch_link_before_write") as register, \
+             redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(ValueError, "临时.*占用"):
+                transaction.migrate_materialized_directory(str(latest), str(release))
+        register.assert_not_called()
+        self.assertEqual(b"UNRELATED OPERATOR OBJECT\n", temporary.read_bytes())
+        self.assertEqual((original.st_dev, original.st_ino),
+                         (latest.stat().st_dev, latest.stat().st_ino))
+        self.assertFalse(os.path.lexists(backup))
+
+    def test_materialized_temp_collision_after_registration_retains_wal_evidence(self):
+        latest, release, backup, temporary, context = self._materialized_temp_fixture()
+        original = latest.stat()
+        transaction = self.setup._SetupLinkTransaction((str(latest),))
+        real_symlink = os.symlink
+        registered = []
+
+        def register(path, target):
+            self.assertEqual(str(temporary), path)
+            self.assertEqual(str(release), target)
+            self.assertEqual((original.st_dev, original.st_ino),
+                             (latest.stat().st_dev, latest.stat().st_ino))
+            self.assertFalse(os.path.lexists(backup), "intent must precede source rename")
+            registered.append(path)
+
+        def collide(source, destination, *args, **kwargs):
+            self.assertEqual(str(temporary), destination)
+            self.assertEqual([str(temporary)], registered)
+            temporary.write_bytes(b"LATE UNRELATED OBJECT\n")
+            return real_symlink(source, destination, *args, **kwargs)
+
+        with mock.patch.object(self.setup, "_SETUP_SWITCH_WAL_CONTEXT", context), \
+             mock.patch.object(self.setup, "_register_setup_switch_link_before_write", side_effect=register), \
+             mock.patch.object(self.setup.os, "symlink", side_effect=collide), \
+             redirect_stdout(io.StringIO()):
+            with self.assertRaises(FileExistsError):
+                transaction.migrate_materialized_directory(str(latest), str(release))
+        self.assertEqual(b"LATE UNRELATED OBJECT\n", temporary.read_bytes())
+        self.assertFalse(os.path.lexists(latest), "only guarded WAL recovery may restore")
+        self.assertEqual((original.st_dev, original.st_ino),
+                         (backup.stat().st_dev, backup.stat().st_ino))
+
     def test_inventory_reports_p_only_and_dynamic_q_only_without_writing(self) -> None:
         before = _tree_snapshot(self.root)
         expected_manifest = self.manifest.lstat()

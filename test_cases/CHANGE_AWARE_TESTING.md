@@ -219,6 +219,42 @@ inode 144208691，size 616，SHA256
 后代状态仍 unknown，不能据此放行正式 related/full 或称 R22 恢复完成。approved ledger
 保持原字节，Linux/断电、完整写集、显式旧 A 健康激活及其它未闭项不变。
 
+### R22 materialized latest 临时链接写集候选
+
+实体 latest 迁移原先未登记 `.latest.tmp.<PID>`，创建临时链接后死亡时冷恢复会
+还原原目录并退休 WAL，却遗留该链接；把临时名换成无关文件仍会执行恢复写入。
+原 writer 还会删除预占临时名。新增两个 SETUP direct 与真实 LOAD→SETUP 强杀→
+新 LOAD 冷恢复正/负 workflow 独立表达拒绝/恢复合同，原实现 4 tests / 4 FAIL /
+exit1（12.168 秒）。完整 RED 日志 `outputs/test-diagnostics/r22-materialized-temp-red.log`，
+inode 145048265，size 5209，SHA256
+`92517b4f464a08155e0e2bde3efb08253ccc901a5758e49965eb098d4baa671d`。
+前后 stat 一致，旧 647 字节前缀 SHA256
+`57fef2313dc2fe03c16f5eb0fb2e1377aec95f2e8ec2fddb73927c5661fe8d97` 未变；
+四项失败均是合同未满足，不是路径或依赖错误。
+
+候选在首次原目录 rename 前拒绝占用名并登记准确临时 Q 链接值；登记之后的碰撞
+也不得删除。WAL 上下文中的迁移异常只交外层完整恢复预检，保留所有证据，避免
+局部 cleanup 在未知状态下先还原源。原非 WAL 迁移合同保持。四项新例加原真实
+pointer replace 后死亡恢复正例 5 tests / OK / exit0（20.183 秒）；完整日志
+`r22-materialized-temp-green.log`，inode 145056776，size 1024，SHA256
+`8e94112f8f3692097c3397e598b6f5006fa3da439c4a23be48a57e813ab5ffb5`，读前后 stat
+一致、完整 Ran/OK 与物理退出标记/实际 exec exit0 一致。manifest 原 SETUP direct
+`day0_release_operations`、`generation_input_binding_setup_load_c2` workflow 映射有效。
+这不是批准 runner 或正式 proof；原 bootstrap 15 秒及 REQ19 probe 10 秒未知原因
+门禁不变，approved ledger 不手改。父 B 成功收口、完整写集、旧 A 显式安全激活、
+Linux/断电与 DEV ACK 仍未闭。
+
+三个完整 SETUP plan / LOAD transaction / generation-input-binding workflow 模块
+诊断为 363 tests / OK / exit0（286.807 秒）；完整日志
+`outputs/test-diagnostics/r22-materialized-temp-modules.log`，inode 145072681，size
+116625，SHA256 `f9bf785897ca55c705fe0c1eb23106641912a16c38e52b06e16d110d90a37e69`。
+读前后 stat 一致，旧 101311 字节前缀 SHA256
+`7535f9fad4c84c4561653029dcc8b3be4c68148a2e5017000c11c982bb0124c9` 未变；物理
+Ran/OK 后有缓冲夹具 stdout，末尾 `R22_MATERIALIZED_TEMP_MODULES_EXIT=0` 与实际
+exec exit0 一致。过程中一次日志 stat 改变的读取消推断，后续稳定快照再核；不把
+运行中的片段当证明。runtime `.setup_manifest` 与 approved ledger 前后原摘要
+不变。局部模块回归不清除原 unknown timeout、不授权盲重 related/full。
+
 ### R22 Q parent 预像读前身份冻结候选
 
 原 `_setup_switch_q_parent_authority` 先读取内容，再取身份；同字节新 inode 在首次

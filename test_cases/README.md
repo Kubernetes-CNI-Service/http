@@ -236,6 +236,14 @@ reader 在打开前拒绝非 regular leaf，以非阻塞/no-follow 打开，并�
 因此跨清理步骤绑定 dev/ino/mode/size/mtime 和完整摘要，不冒称整个恢复窗口的 ABA 免疫。
 嵌套重复硬链接正例必须仍完整恢复原 P inode；本地 workflow 不替代 Linux/断电或完整 R22。
 
+R22 实体 latest 迁移的 `.latest.tmp.<PID>` 也是独立 WAL 写集名称：必须在原目录
+rename 前登记原缺席及精确相对 Q 目标，已有名称一律保留并拒绝，不得先删除后登记。
+迁移中异常由外层完整 WAL preflight 决定恢复，不做绕过未知状态的局部 eager cleanup。
+临时链接创建后死亡须在新 LOAD 恢复原目录 inode 时消费自己的临时链接；换成无关对象
+必须在任何恢复写入前 HOLD、保留 WAL/备份/未知对象。当前实现只按登记的 P/Q 值及
+父身份核验，不宣称同值新 symlink owner 的原子比较/删除免疫。父 B 成功收口、完整
+写集与旧 A 显式激活仍需独立完成，局部诊断不是正式 full/check。
+
 R22 Q parent 预像必须在首次内容读取前冻结完整文件身份或缺席状态，持有原 inode
 并在读取后同时验证名称、FD 和物理父目录。读取后插入的新文件、同字节换 inode
 不能成为稳定预像，也不能据此启动 SETUP 或发布 WAL。此门禁不意味着父 B 成功

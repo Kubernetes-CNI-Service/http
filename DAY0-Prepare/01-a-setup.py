@@ -4181,6 +4181,18 @@ class _SetupLinkTransaction:
         if not _directory_trees_identical(path, target):
             raise ValueError("materialized latest 在迁移前已与匹配发布目录不一致")
 
+        rel_target = os.path.relpath(target, os.path.dirname(path))
+        temporary = os.path.join(
+            os.path.dirname(path), f".{os.path.basename(path)}.tmp.{os.getpid()}"
+        )
+        if _SETUP_SWITCH_WAL_CONTEXT is not None:
+            # This name is a real write surface too: death after symlink()
+            # must leave only a WAL-declared Q value, not an orphan that cold
+            # recovery ignores. Never adopt or remove a preexisting owner.
+            if os.path.lexists(temporary):
+                raise ValueError(f"materialized latest 临时位置已占用：{temporary}")
+            _register_setup_switch_link_before_write(temporary, target)
+
         backup = None
         if _SETUP_SWITCH_WAL_CONTEXT is not None:
             registered = _SETUP_SWITCH_WAL_CONTEXT[3].get(path)
@@ -4206,10 +4218,6 @@ class _SetupLinkTransaction:
         if backup is None:
             raise ValueError("materialized latest 迁移备份名称已全部被占用")
 
-        rel_target = os.path.relpath(target, os.path.dirname(path))
-        temporary = os.path.join(
-            os.path.dirname(path), f".{os.path.basename(path)}.tmp.{os.getpid()}"
-        )
         try:
             moved = os.lstat(backup)
             current_target = os.lstat(target)
@@ -4222,12 +4230,20 @@ class _SetupLinkTransaction:
                     or not _directory_trees_identical(backup, target)):
                 raise ValueError("匹配发布目录在 materialized latest 迁移期间发生变化")
             if os.path.lexists(temporary):
+                if _SETUP_SWITCH_WAL_CONTEXT is not None:
+                    raise ValueError(f"materialized latest 临时位置在登记后被占用：{temporary}")
                 os.remove(temporary)
             os.symlink(rel_target, temporary)
             os.replace(temporary, path)
             if _SETUP_SWITCH_WAL_CONTEXT is not None:
                 _fsync_directory(os.path.dirname(path))
         except BaseException:
+            if _SETUP_SWITCH_WAL_CONTEXT is not None:
+                # SETUP's outer guarded WAL rollback owns the entire mixed
+                # state. A collision or unknown object must block *all* its
+                # writes; eager per-name cleanup would erase incident bytes
+                # or restore this directory before that global preflight.
+                raise
             if os.path.lexists(temporary):
                 os.remove(temporary)
             if os.path.islink(path):

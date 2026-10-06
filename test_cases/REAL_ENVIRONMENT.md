@@ -1695,6 +1695,8 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 - Q parent 预像读前冻结窄修：TEST direct 和真实 LOAD→SETUP 门禁覆盖首次读取后同字节换 inode、原缺席后插入；必须在启动 SETUP 或发布 WAL 前 HOLD。现场仅限本卡授权隔离 VM、完整 P/Q 前像及可恢复卷快照、排他锁、停服及正常写者静默，分别在首次读、第二次读、名称/FD/父目录复核屏障受控替换 Q parent 或重绑父目录；独立封存原/替换 inode、字节/模式/摘要、缺席状态、mtime/ctime、物理时序、拒绝退出、WAL 未发布及服务未启动见证。保留未知对象，经负责人核验后仅恢复登记快照；禁止 live 注入或清理未知 parent。读前 FD/name 校验不是原子 compare-and-publish，不证明任意不合作同 UID 写者免疫、父 B 成功退休 WAL、Linux/断电、完整写集、旧 A 激活或 DEV ACK，本卡仍 OPEN。
 
+- materialized latest 临时链接写集窄修：TEST direct 及真实 LOAD→SETUP 创建 `.latest.tmp.<PID>` 后强杀→新 LOAD 冷恢复覆盖自己的临时链接清理和未知对象零写入拒绝，先 RED 后 GREEN。前置仍限本卡授权隔离 VM、完整 P/Q/WAL、原目录及匹配 release 和可恢复卷快照、排他锁、明确停服及正常写者静默。分别在临时名登记、原目录 rename/父同步、临时 symlink、指针 replace/父同步和恢复预检边界注入死亡/受控断电/无关对象占用，独立记录临时名、源/备份/目标/父目录 inode 与原始链接字节、WAL 摘要、退出/信号和物理时序；正例恢复原目录 inode、P 链接与 manifest 并清理登记临时链接，负例须零恢复写入并保留未知对象和所有凭据。封存证据后只按负责人核实的隔离快照恢复，禁止 live 注入或删除未知临时名；登记的相对值和父身份不是同值新 symlink inode 的原子 compare-and-unlink。本地测试不证明 Linux/断电持久性、完整写集、父 B 成功收口、旧 A 健康激活或 DEV ACK，本卡继续 OPEN。
+
 ## TC-REAL-R22-C2-DESCRIPTION-PUBLISH-001 — c2 同名描述输出的故障窗口
 
 - Case ID：`TC-REAL-R22-C2-DESCRIPTION-PUBLISH-001`；类型：real-environment / transaction / crash-recovery；对应 R22 c2 对 `*_with_desc` 的既有同名输出替换。状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。自动化先决为 `test_cases.test_generation_input_binding_contract` 的二次读取、早返及 staging direct，`test_cases.test_generation_input_binding_workflow` 的 setup/load/c2 workflow，和当前候选正式 full/check；现有定向通过不证明进程死亡后的原子性。
