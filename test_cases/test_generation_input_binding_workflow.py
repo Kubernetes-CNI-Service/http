@@ -651,6 +651,69 @@ finally:
             self.assertFalse((root / "ztp/.setup-switch-journal.json").exists())
             self.assertFalse((root / "service-started").exists())
 
+    def test_real_setup_created_directory_recovery_death_resumes_in_fresh_load(self):
+        """A second fresh LOAD must finish after recovery itself dies at rmdir."""
+        with tempfile.TemporaryDirectory(prefix="r22-created-dir-reentry-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, _q, _common, _p_only, _q_only, manifest, before, _hook, barrier, _home = fixture
+            key_root = root / "infiniband/publickey"
+            key_root.parent.mkdir(exist_ok=True)
+            self.assertFalse(os.path.lexists(key_root))
+            first = self._run_private_load_setup_switch(
+                fixture, prepare_journal=True, first_link_prefix=str(key_root) + os.sep,
+            )
+            self.assertEqual(23, first.returncode, first.stdout + first.stderr)
+            self.assertTrue(barrier.is_file())
+            self.assertTrue(key_root.is_dir())
+            recovery = """
+import importlib.util
+import os
+import signal
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('fresh_created_dir_reentry', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+if len(sys.argv) > 2:
+    real_rmdir = Path.rmdir
+    def interrupted_rmdir(path):
+        real_rmdir(path)
+        if path == root / 'infiniband/publickey':
+            (root / 'recovery-rmdir-barrier').write_bytes(b'owned-directory-removed\\n')
+            os.kill(os.getpid(), signal.SIGKILL)
+    Path.rmdir = interrupted_rmdir
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    assert load.recover_setup_switch_journal(
+        root / 'ztp/.setup-switch-journal.json', deployment_lock_descriptor=descriptor,
+        services_quiesced=True, runtime_backend=SimpleNamespace(name='supervisor'),
+    ) == 'restored-p'
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+            second = subprocess.run(
+                [sys.executable, "-B", "-c", recovery, str(root), "kill-after-rmdir"],
+                cwd=root, capture_output=True, text=True, check=False, timeout=30,
+            )
+            self.assertEqual(-9, second.returncode, second.stdout + second.stderr)
+            self.assertEqual(b"owned-directory-removed\n", (root / "recovery-rmdir-barrier").read_bytes())
+            self.assertFalse(os.path.lexists(key_root))
+            journal = root / "ztp/.setup-switch-journal.json"
+            self.assertTrue(journal.is_file())
+            third = subprocess.run(
+                [sys.executable, "-B", "-c", recovery, str(root)], cwd=root,
+                capture_output=True, text=True, check=False, timeout=30,
+            )
+            self.assertEqual(0, third.returncode, third.stdout + third.stderr)
+            self.assertFalse(os.path.lexists(key_root))
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            self.assertFalse(os.path.lexists(journal))
+            self.assertFalse((root / "service-started").exists())
+
     def test_real_setup_death_pending_wal_blocks_new_load_before_template(self):
         """A real SETUP crash must fence a fresh LOAD before any new project writes."""
         with tempfile.TemporaryDirectory(prefix="r22-pending-wal-main-") as name:

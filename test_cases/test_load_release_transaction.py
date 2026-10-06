@@ -1996,6 +1996,84 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertFalse(os.path.lexists(directory))
         backend.start.assert_not_called()
 
+    def test_setup_created_directory_recovery_resumes_after_owned_rmdir(self) -> None:
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        new_project = state[1]
+        directory = self.ztp / "config/new-key-root"
+        link = directory / "operator.pub"
+        target = new_project / "operator.pub"
+        target.write_bytes(b"Q key fixture\n")
+        transaction = SETUP._SetupLinkTransaction([])
+        real_sync = LOAD._fsync_parent_directory
+
+        def fail_after_rmdir(path):
+            if Path(path) == directory.parent and not os.path.lexists(directory):
+                raise OSError("interrupted after owned shared rmdir")
+            return real_sync(path)
+
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(SETUP, "ZTP", str(self.ztp)), \
+                mock.patch.object(SETUP, "_SETUP_SWITCH_WAL_CONTEXT", (vars(LOAD), descriptor)):
+            transaction.ensure_directory(str(directory))
+            LOAD.register_setup_switch_journal_link(
+                journal, link, target, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            )
+            link.symlink_to(os.path.relpath(target, link.parent))
+            frozen = journal.read_bytes()
+            with mock.patch.object(LOAD, "_fsync_parent_directory", side_effect=fail_after_rmdir):
+                with self.assertRaisesRegex(OSError, "after owned shared rmdir"):
+                    LOAD.recover_setup_switch_journal(
+                        journal, deployment_lock_descriptor=descriptor,
+                        services_quiesced=True, runtime_backend=backend,
+                    )
+            self.assertFalse(os.path.lexists(directory))
+            self.assertEqual(frozen, journal.read_bytes())
+            self.assertEqual("restored-p", LOAD.recover_setup_switch_journal(
+                journal, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            ))
+        self.assertFalse(os.path.lexists(directory))
+        self.assertFalse(os.path.lexists(journal))
+        backend.start.assert_not_called()
+
+    def test_setup_absent_created_directory_wrong_child_parent_blocks_all_p_writes(self) -> None:
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        new_project, common, new_target = state[1], state[2], state[5]
+        directory = self.ztp / "config/new-key-root"
+        link = directory / "operator.pub"
+        target = new_project / "operator.pub"
+        target.write_bytes(b"Q key fixture\n")
+        transaction = SETUP._SetupLinkTransaction([])
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(SETUP, "ZTP", str(self.ztp)), \
+                mock.patch.object(SETUP, "_SETUP_SWITCH_WAL_CONTEXT", (vars(LOAD), descriptor)):
+            transaction.ensure_directory(str(directory))
+            LOAD.register_setup_switch_journal_link(
+                journal, link, target, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            )
+            directory.rmdir()
+            envelope = json.loads(journal.read_bytes())
+            row = next(item for item in envelope["body"]["links"] if item["path"] == str(link))
+            row["parent"]["ino"] += 1
+            payload = json.dumps(envelope["body"], sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+            envelope["sha256"] = hashlib.sha256(payload).hexdigest()
+            journal.write_bytes(json.dumps(envelope, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii") + b"\n")
+            common.unlink()
+            common.symlink_to(os.path.relpath(new_target, common.parent))
+            mixed = os.readlink(common)
+            frozen = journal.read_bytes()
+            with self.assertRaisesRegex(LOAD.LoadError, "frozen Q-only parent"):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertEqual(mixed, os.readlink(common))
+        self.assertEqual(frozen, journal.read_bytes())
+        self.assertFalse(os.path.lexists(directory))
+        backend.start.assert_not_called()
+
     def test_setup_created_directory_missing_parent_fails_before_shared_mkdir(self) -> None:
         (*_state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
         parent = self.ztp / "config/unregistered-new-parent"

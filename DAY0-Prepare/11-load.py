@@ -6967,6 +6967,16 @@ def recover_setup_switch_journal(
         raise LoadError("setup switch manifest is not exact P; recovery is in-doubt")
     root_path = Path(body["root"]["path"])
     q_project = Path(new["path"])
+    # A previous recovery may have removed an owned Q-only directory and died
+    # before retiring the journal. Its child link rows remain valid absence
+    # evidence only when the exact created-directory row and surviving outer
+    # parent have already passed the full read-only preflight.
+    created_directory_states = _setup_switch_created_directory_states(body)
+    removed_created_parents = {
+        path: directory_row
+        for path, _staged, present, directory_row in created_directory_states
+        if present is None
+    }
     expected_rows = []
     for row in rows:
         try:
@@ -6980,9 +6990,24 @@ def recover_setup_switch_journal(
                         (not isinstance(after, str) or not after
                          or os.path.isabs(after) or os.path.normpath(after) != after))):
                 raise ValueError("invalid path or link value")
-            path.parent.resolve(strict=True).relative_to(root_path)
-            if row["parent"] != _setup_switch_link_parent_identity(path):
-                raise ValueError("journal link parent identity changed")
+            removed_parent = removed_created_parents.get(path.parent)
+            if removed_parent is not None:
+                expected_parent = {
+                    "path": str(Path(removed_parent["parent"]["path"]) / path.parent.name),
+                    "dev": removed_parent["dev"], "ino": removed_parent["ino"],
+                }
+                if before is not None or row["parent"] != expected_parent:
+                    raise ValueError("absent created directory is not the frozen Q-only parent")
+                try:
+                    path.lstat()
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise ValueError("removed created directory child is not absent")
+            else:
+                path.parent.resolve(strict=True).relative_to(root_path)
+                if row["parent"] != _setup_switch_link_parent_identity(path):
+                    raise ValueError("journal link parent identity changed")
             if after is not None:
                 _setup_switch_q_target(
                     Path(os.path.normpath(str(path.parent / after))), q_project,
@@ -7046,7 +7071,6 @@ def recover_setup_switch_journal(
         _setup_switch_prepare_infra_log_recovery(infra_rows[0], q_project)
         if infra_rows else None
     )
-    created_directory_states = _setup_switch_created_directory_states(body)
     if inspect_only:
         return "prepared-known-disk-state"
     if verify_only:
