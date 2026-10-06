@@ -1713,6 +1713,8 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 - DHCP 四文件盘上前像只读核验候选：显式 owner runtime/transaction/parent 名称确定读取范围；新进程核持有 NOFOLLOW 目录链、private/single-link record、schema/唯一 JSON 字段/checksum、固定四文件与 backup 闭合子项、A 前像、当前 runtime/parent 与 A/B 摘要及组内复核。现场仍限本卡授权隔离 VM、root、完整 P/Q/A/B/WAL/receipt、可恢复快照、排他部署锁、明确停服和其它写者静默。原样封存 record/backup/live/parent 的身份/元数据/摘要、只读调用与物理状态，受控注入错误清单、越界路径、checksum/权限错误、坏备份、未知 parent、额外 backup 子项及读取中换绑/ABA；必须 HOLD、零服务/恢复/清理命令、未知对象与原证据不变。正例含 A regular/link/missing、A parent 未提交和 B parent 仅可见；不可把 b-visible 视为目录已同步或健康，也不可将返回字典当成后续写授权。证据核验后仅恢复登记隔离快照，不对 live 注入/清理/激活。root 完整入口、全组冷恢复、B 健康成功收口、旧 A 显式激活、Linux/断电及 DEV ACK 仍未证明；本卡继续 OPEN。
 
+- SETUP WAL 未识别合同的恢复写前拒绝：TEST direct 与真实 LOAD→SETUP 死亡→新 LOAD 冷恢复对有效 checksum 的未知写集/重复 JSON 先 RED 后 GREEN；schema2 reader 和登记入口只能接受已实现的闭合 envelope/body/row 字段，未知义务不能被忽略后退休。现场仍仅限本卡授权隔离 VM、完整 P/Q/A/B/WAL/receipt、可恢复卷快照、排他部署锁、明确停服及其它写者静默。原样封存 WAL/manifest/链接/目录身份、mode/mtime/ctime/摘要及物理操作顺序；在隔离副本中加入未知 body/envelope/row 字段或重复键，即使重新计算 checksum，也必须在第一恢复/登记写前 HOLD，原证据零删除、服务零启动。保留原缺失 Q parent 前像诊断；证据核验后仅恢复登记快照，不对 live 注入、不手改正式 ledger、不删除未知义务。此处只证明 reader 能力边界，不补齐全部共享写集、完整 DHCP 冷恢复、B 成功退休、旧 A 健康激活、Linux/断电或 DEV ACK；本卡继续 OPEN。
+
 ## TC-REAL-R22-C2-DESCRIPTION-PUBLISH-001 — c2 同名描述输出的故障窗口
 
 - Case ID：`TC-REAL-R22-C2-DESCRIPTION-PUBLISH-001`；类型：real-environment / transaction / crash-recovery；对应 R22 c2 对 `*_with_desc` 的既有同名输出替换。状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。自动化先决为 `test_cases.test_generation_input_binding_contract` 的二次读取、早返及 staging direct，`test_cases.test_generation_input_binding_workflow` 的 setup/load/c2 workflow，和当前候选正式 full/check；现有定向通过不证明进程死亡后的原子性。

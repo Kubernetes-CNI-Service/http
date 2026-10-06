@@ -1737,6 +1737,62 @@ finally:
             self.assertEqual(b'{"unowned":true}\n', receipt.read_bytes())
             self.assertTrue((root / "ztp/.setup-switch-journal.json").is_file())
 
+    def test_real_setup_cold_recovery_preserves_unrecognized_wal_write_set(self):
+        """Real SETUP death must not let a fresh LOAD ignore an unsupported write set."""
+        with tempfile.TemporaryDirectory(prefix="r22-unknown-write-set-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, _q, common, p_only, q_only, manifest, _before, _hook, _barrier, _home = fixture
+            first = self._run_private_load_setup_switch(fixture, prepare_journal=True)
+            self.assertEqual(23, first.returncode, first.stdout + first.stderr)
+            journal = root / "ztp/.setup-switch-journal.json"
+            envelope = json.loads(journal.read_bytes())
+            envelope["body"]["unrecognized_shared_writes"] = [{"preimage": "do-not-retire"}]
+            canonical = json.dumps(envelope["body"], sort_keys=True, separators=(",", ":"),
+                                   ensure_ascii=True).encode("ascii")
+            envelope["sha256"] = hashlib.sha256(canonical).hexdigest()
+            journal.write_text(json.dumps(envelope, sort_keys=True) + "\n", encoding="ascii")
+            evidence = journal.read_bytes()
+            identity = journal.lstat()
+            mixed = {path: os.readlink(path) if path.is_symlink() else None
+                     for path in (common, p_only, q_only)}
+            manifest_bytes = manifest.read_bytes()
+            recovery = """
+import importlib.util
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('fresh_unknown_write_set_load', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    try:
+        load.recover_setup_switch_journal(
+            root / 'ztp/.setup-switch-journal.json', deployment_lock_descriptor=descriptor,
+            services_quiesced=True, runtime_backend=SimpleNamespace(name='supervisor'),
+        )
+    except load.LoadError as exc:
+        assert 'fields' in str(exc) or 'unknown' in str(exc), str(exc)
+    else:
+        raise AssertionError('recovery ignored an unsupported WAL write set')
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+            second = subprocess.run([sys.executable, "-B", "-c", recovery, str(root)],
+                                    cwd=root, capture_output=True, text=True, check=False, timeout=30)
+            self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+            self.assertEqual(manifest_bytes, manifest.read_bytes())
+            self.assertEqual(mixed, {path: os.readlink(path) if path.is_symlink() else None
+                                     for path in mixed})
+            self.assertEqual(evidence, journal.read_bytes())
+            now = journal.lstat()
+            self.assertEqual((identity.st_ino, identity.st_size, identity.st_mtime_ns, identity.st_ctime_ns),
+                             (now.st_ino, now.st_size, now.st_mtime_ns, now.st_ctime_ns))
+            self.assertFalse((root / "service-started").exists())
+
     def test_real_setup_cold_recovery_preserves_replacement_wal_at_retirement(self):
         """Real SETUP death and a fresh LOAD cannot retire a later WAL owner."""
         with tempfile.TemporaryDirectory(prefix="r22-wal-retirement-owner-") as name:

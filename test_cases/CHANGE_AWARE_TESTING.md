@@ -176,6 +176,50 @@ full。失败、未知原因、日志缺失或中断仍保持无证明状态，�
    自动生成的 ledger 单独提交、干净树的 `--check --require-full` exit0 才算本地正式
    证明。局部回归和旧树证明不能代替它；本地 proof 不关闭独立 Linux/设备/断电见证卡。
 
+### R22 SETUP WAL 未识别合同不得恢复、登记或退休
+
+WAL 的 checksum 只核字节，不证明当前 reader 理解全部写集。schema2 恢复曾忽略
+未知 body/envelope/链接字段和 JSON 重复字段，可能在未处理的新写集仍存在时还原 P、
+删除原 WAL。新增独立 direct 与真实 LOAD→SETUP 死亡→新 LOAD 冷恢复负例要求：即使
+checksum 正确也在任何恢复写入前拒绝，原混合 P/Q 链接、manifest、WAL inode/字节/
+mtime/ctime 保持不变，不启动服务。仅知 parent 的额外字段原先已被身份比较拒绝，
+该正向防御也保留，不将它列为新增缺陷。
+
+统一 decoder 对 envelope/body、全部已实现写集 row 和目录身份字段使用闭合字段集，
+所有 JSON 对象拒绝重复键；登记新链接、Q-local latest、创建目录、实体 latest、
+infra logs、Q manifest intent 和冷恢复都使用该 decoder。未知版本或义务不得靠忽略
+字段放行；增加写集必须同时明确 schema/reader/独立测试。保留原 Q parent 前像缺失
+的明确 HOLD 诊断，不把恢复 API 的只读核验结果当成服务激活权。
+
+证据均位于 `outputs/test-diagnostics/`，不是正式 related/full：
+
+- `r22-wal-contract-closed-fields-red.log`：2 tests / 7 FAIL / exit1，SHA256
+  `16f79528ba75ba38752816a0e504a587d2b389508bd39377360d8ae9982e3db9`。
+  第一项恢复错误地删除 WAL 后，矩阵重建文件权限成为 0644，后五项被 private-mode
+  闸门掩盖；保留原日志，夹具显式重建 0600，不修改原拒绝/状态断言。
+- `r22-wal-contract-closed-fields-corrected-red.log`：2 tests / 6 FAIL / exit1，
+  inode146483605、size4798、SHA256
+  `45debba28db493782f1e79ff6e17bb20911fa59ba3900d0329e17f99e8941f2d`。
+  原实现确实接受未知 body/envelope/link、重复 body/link，真实冷恢复也错误退休凭据。
+- 修后两个新增测试完整 OK/exit0，日志 `r22-wal-contract-closed-fields-green.log`，
+  SHA256 `8054fc8cc7a88965e461e72f43af781c4cababf4d116f051a73ffccf7f5312cd`。
+- 完整 LOAD 模块加八项真实正常/异常登记与冷恢复 workflow，共 325 tests / 1 FAIL /
+  exit1；日志 `r22-wal-contract-closed-fields-regressions.log`，inode146487601、size105804、
+  SHA256 `94260be6ea0e925885af08fe87b0c9544eb7e02d46611f4c9e33e493698ee6c8`。
+  旧 85126 字节前缀 SHA256
+  `612e9bc1e57653525dacc8eb3dd3a49ba09ef8e594a7996d44611915d5524c97` 保持。
+  唯一失败为新 reader 把缺失 Q parent 前像的明确诊断改成通用 fields 错误；原因已定位，
+  实现恢复原诊断，旧断言不变，不归为环境/超时，不盲目重跑完整 suite。
+- 受影响的缺失前像、未知合同、只读/登记入口和真实冷恢复四项完整 OK/exit0，日志
+  `r22-wal-contract-q-parent-diagnostic-fix.log`，inode146522223、size889、SHA256
+  `d51a8f82c93b5e1b9742076c1c85c4f20601590bd4df3aee152177ef68b5c5d2`。
+  不把该局部验证写成最终完整模块、related 或 full 通过。
+
+生产路径的既有 direct/workflow manifest 映射不变；REAL_ENV 的 R22 卡仍 OPEN。
+此修复不补齐 legacy comparison 写集、分组 DHCP 冷恢复、整个 LOAD 的 B 健康收口或
+旧 A 显式健康激活。原 bootstrap15s 与 REQ19 probe10s 原因仍待核，正式重跑闸门未
+解除；approved ledger 不变，未形成当前树正式 proof。
+
 ### R22 related 的 bootstrap 超时诊断记录（未收口）
 
 代码候选 `01cf5bcd08758a26146dd1b857f291411ca55d3f` 的 related 原日志

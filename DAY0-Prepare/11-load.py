@@ -6059,6 +6059,66 @@ def _setup_switch_canonical_payload(body: dict[str, object]) -> bytes:
     return json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
 
 
+def _decode_setup_switch_journal(payload: bytes) -> dict[str, object]:
+    """Do not recover/extend/retire a checksummed contract we cannot interpret.
+
+    A checksum detects changed bytes, not unsupported write obligations. New
+    inventory fields require an explicit schema/reader change and regression,
+    never silent JSON last-key-wins or ignored extension fields.
+    """
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate journal contract fields")
+            result[key] = value
+        return result
+
+    def exact_fields(value, expected, label):
+        if not isinstance(value, dict) or set(value) != expected:
+            raise ValueError(f"unknown or missing journal {label} fields")
+
+    envelope = json.loads(payload, object_pairs_hook=unique_object)
+    exact_fields(envelope, {"body", "sha256"}, "envelope")
+    body = envelope["body"]
+    required = {"schema_version", "phase", "root", "old_project", "new_project",
+                "manifest", "manifest_sha256", "manifest_mode", "links", "q_parent_preimage"}
+    optional = {"allow_late_q_values", "q_local_links", "created_directories",
+                "directories", "infra_logs", "q_manifest_intent"}
+    if isinstance(body, dict) and "q_parent_preimage" not in body:
+        raise ValueError("journal Q parent preimage is missing; HOLD")
+    if (not isinstance(body, dict) or not required <= set(body)
+            or set(body) - required - optional):
+        raise ValueError("unknown or missing journal write-set fields")
+    inventories = {
+        "links": {"path", "parent", "before", "after"},
+        "q_local_links": {"path", "parent", "before", "after", "before_target", "after_target"},
+        "created_directories": {"path", "staged", "parent", "dev", "ino", "mode"},
+        "directories": {"path", "parent", "backup", "target", "source_dev", "source_ino",
+                        "target_dev", "target_ino"},
+        "infra_logs": {"source", "source_parent", "source_dev", "source_ino", "destination",
+                       "destination_parent", "destination_dev", "destination_ino", "backup", "receipt"},
+    }
+    directory_fields = {"path", "dev", "ino"}
+    for key in ("root", "old_project", "new_project"):
+        exact_fields(body[key], directory_fields, key)
+    for inventory, fields in inventories.items():
+        rows = body.get(inventory, [])
+        if not isinstance(rows, list):
+            raise ValueError(f"unknown journal {inventory} inventory shape")
+        for row in rows:
+            exact_fields(row, fields, inventory)
+            for key in ("parent", "source_parent", "destination_parent", "before_target", "after_target"):
+                if key in row:
+                    exact_fields(row[key], directory_fields, key)
+    if "q_manifest_intent" in body:
+        exact_fields(body["q_manifest_intent"], {"bytes", "sha256", "mode", "parent"}, "Q manifest")
+        exact_fields(body["q_manifest_intent"]["parent"], directory_fields, "Q manifest parent")
+    # The existing recovery code separately checks schema, checksum, types,
+    # exact Q parent preimage, disk state and held authority before any write.
+    return envelope
+
+
 def _setup_switch_q_target(target: Path, project: Path) -> Path:
     """Validate a Q link target while preserving its final raw symlink leaf.
 
@@ -6307,7 +6367,7 @@ def register_setup_switch_journal_link(
         raise LoadError("setup switch journal is absent or not private")
     payload, _mode = opened
     try:
-        envelope = json.loads(payload)
+        envelope = _decode_setup_switch_journal(payload)
         body = envelope["body"]
         if (not isinstance(body, dict) or body["schema_version"] != 2
                 or body["phase"] != "prepared"
@@ -6515,7 +6575,7 @@ def register_setup_switch_q_local_latest(
     before_name = journal.lstat()
     opened = _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT)
     try:
-        envelope = json.loads(opened[0])
+        envelope = _decode_setup_switch_journal(opened[0])
         body = envelope["body"]
         if "q_manifest_intent" in body:
             raise ValueError("Q manifest intent is already frozen")
@@ -6589,7 +6649,7 @@ def register_setup_switch_created_directory(
         services_quiesced=services_quiesced, runtime_backend=runtime_backend,
         inspect_only=True,
     )
-    body = dict(json.loads(opened[0])["body"])
+    body = dict(_decode_setup_switch_journal(opened[0])["body"])
     try:
         if "q_manifest_intent" in body:
             raise ValueError("Q manifest intent already freezes the setup write set")
@@ -6728,7 +6788,7 @@ def register_setup_switch_materialized_directory(
         if opened is None or opened[1] != 0o600:
             raise ValueError("journal is absent or not private")
         payload, _mode = opened
-        envelope = json.loads(payload)
+        envelope = _decode_setup_switch_journal(payload)
         body = envelope["body"]
         if (not isinstance(body, dict) or body["schema_version"] != 2
                 or body["phase"] != "prepared"
@@ -6847,7 +6907,7 @@ def register_setup_switch_infra_log_tree(
         opened = _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT)
         if opened is None or opened[1] != 0o600:
             raise ValueError("journal is absent or not private")
-        envelope = json.loads(opened[0])
+        envelope = _decode_setup_switch_journal(opened[0])
         body = envelope["body"]
         if (not isinstance(body, dict) or body["schema_version"] != 2
                 or body["phase"] != "prepared"
@@ -7362,7 +7422,7 @@ def register_setup_switch_manifest(
         services_quiesced=services_quiesced, runtime_backend=runtime_backend,
         verify_only=True, manifest_candidate=candidate,
     )
-    envelope = json.loads(opened[0])
+    envelope = _decode_setup_switch_journal(opened[0])
     body = dict(envelope["body"])
     intent = {
         "bytes": base64.b64encode(candidate).decode("ascii"),
@@ -7506,7 +7566,7 @@ def _recover_setup_switch_journal_snapshot(
     """Recover only from the immutable authority held by the guarded API."""
     payload, _mode = opened
     try:
-        envelope = json.loads(payload)
+        envelope = _decode_setup_switch_journal(payload)
         body = envelope["body"]
         if (not isinstance(body, dict) or not isinstance(envelope["sha256"], str)
                 or hashlib.sha256(_setup_switch_canonical_payload(body)).hexdigest()

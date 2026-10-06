@@ -4399,6 +4399,88 @@ os.kill(os.getpid(), signal.SIGKILL)
         self.assertEqual(frozen_journal, journal.read_bytes())
         backend.start.assert_not_called()
 
+    def test_setup_wal_recovery_rejects_unrecognized_or_duplicate_contract_fields(self) -> None:
+        """A valid checksum cannot license retiring a write set we do not understand."""
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        original = json.loads(journal.read_bytes())
+        common, new_target = state[2], state[5]
+        cases = ("body", "envelope", "link", "parent", "duplicate-body", "duplicate-link")
+        for case in cases:
+            with self.subTest(case=case):
+                envelope = json.loads(json.dumps(original))
+                if case == "body":
+                    envelope["body"]["unrecognized_shared_writes"] = [{"path": "unhandled-A-evidence"}]
+                elif case == "envelope":
+                    envelope["unrecognized_recovery_contract"] = {"must_keep_wal": True}
+                elif case == "link":
+                    envelope["body"]["links"][0]["unrecognized_preimage"] = "must-not-ignore"
+                elif case == "parent":
+                    envelope["body"]["links"][0]["parent"]["unrecognized_owner"] = "must-not-ignore"
+                envelope["sha256"] = hashlib.sha256(
+                    LOAD._setup_switch_canonical_payload(envelope["body"]),
+                ).hexdigest()
+                payload = LOAD._setup_switch_canonical_payload(envelope) + b"\n"
+                if case == "duplicate-body":
+                    body_bytes = LOAD._setup_switch_canonical_payload(envelope["body"])
+                    payload = (b'{"body":{"unrecognized_shared_writes":[]},"body":'
+                               + body_bytes + b',"sha256":"' + envelope["sha256"].encode() + b'"}\n')
+                elif case == "duplicate-link":
+                    # Duplicate even identical values must be refused, not silently collapsed.
+                    value = json.dumps(envelope["body"]["links"][0]["path"]).encode()
+                    payload = payload.replace(b'"path":' + value,
+                                              b'"path":' + value + b',"path":' + value, 1)
+                journal.write_bytes(payload)
+                journal.chmod(0o600)
+                if common.is_symlink():
+                    common.unlink()
+                common.symlink_to(os.path.relpath(new_target, common.parent))
+                mixed = os.readlink(common)
+                identity = journal.lstat()
+                with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+                    with self.assertRaisesRegex(LOAD.LoadError, "unknown|fields|duplicate"):
+                        LOAD.recover_setup_switch_journal(
+                            journal, deployment_lock_descriptor=descriptor,
+                            services_quiesced=True, runtime_backend=backend,
+                        )
+                self.assertEqual(mixed, os.readlink(common))
+                self.assertEqual(state[8], state[7].read_bytes())
+                self.assertEqual(payload, journal.read_bytes())
+                now = journal.lstat()
+                self.assertEqual((identity.st_ino, identity.st_size, identity.st_mtime_ns,
+                                  identity.st_ctime_ns),
+                                 (now.st_ino, now.st_size, now.st_mtime_ns, now.st_ctime_ns))
+        backend.start.assert_not_called()
+
+    def test_setup_wal_unknown_write_set_blocks_inspection_prewrite_and_registration(self) -> None:
+        (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
+        envelope = json.loads(journal.read_bytes())
+        envelope["body"]["unrecognized_shared_writes"] = []
+        envelope["sha256"] = hashlib.sha256(
+            LOAD._setup_switch_canonical_payload(envelope["body"]),
+        ).hexdigest()
+        evidence = LOAD._setup_switch_canonical_payload(envelope) + b"\n"
+        journal.write_bytes(evidence)
+        identity = journal.lstat()
+        calls = (
+            lambda: LOAD.recover_setup_switch_journal(journal, verify_only=True,
+                deployment_lock_descriptor=descriptor, services_quiesced=True, runtime_backend=backend),
+            lambda: LOAD.recover_setup_switch_journal(journal, inspect_only=True,
+                deployment_lock_descriptor=descriptor, services_quiesced=True, runtime_backend=backend),
+            lambda: LOAD.register_setup_switch_journal_link(journal, state[2], state[5],
+                deployment_lock_descriptor=descriptor, services_quiesced=True, runtime_backend=backend),
+        )
+        for index, invoke in enumerate(calls):
+            with self.subTest(entrypoint=index), mock.patch.object(LOAD, "active_managed_services", return_value=()):
+                with self.assertRaisesRegex(LOAD.LoadError, "unknown.*fields"):
+                    invoke()
+                self.assertEqual(state[9][state[2]], os.readlink(state[2]))
+                self.assertEqual(state[8], state[7].read_bytes())
+                self.assertEqual(evidence, journal.read_bytes())
+                now = journal.lstat()
+                self.assertEqual((identity.st_ino, identity.st_mtime_ns, identity.st_ctime_ns),
+                                 (now.st_ino, now.st_mtime_ns, now.st_ctime_ns))
+        backend.start.assert_not_called()
+
     def test_setup_wal_recovery_rejects_legacy_rows_without_parent_identity(self) -> None:
         """An old link-only receipt cannot authorize writes after a cold restart."""
         (
