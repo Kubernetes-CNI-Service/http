@@ -266,6 +266,16 @@ Q manifest/链接/WAL 与 B，拒绝旧 P 回退。本机故障注入不证明�
 的 B/A 备份、原事务及 backup inode 保持不变。此内存候选入口闸门不是跨重启凭据，
 不声称所有新进程/孤儿事务识别或冷激活已完成。
 
+另有磁盘前置闸门：普通 management-server LOAD 在排他锁内、项目解析/模板/生成
+之前，以及非 dry-run DHCP 安装 API 在读源/创建事务之前，检查运行目录内任何
+`.load-dhcp-transaction-` 名称。目录、文件、悬空链接、FIFO 都是未结清证据，
+须 HOLD，不能因新进程的候选 flags 默认为 false 而继续覆盖 B 或备份 A。
+扫描持有 NOFOLLOW 目录 FD，并核读前后完整目录身份（含 ctime），至多 4096 项；
+目录错误、换绑、同 inode 名称集 ABA 或无法完成扫描均拒绝，不删除未知对象。
+真实 SETUP→未确认 B→新 Python LOAD 安装 API workflow 覆盖已保留事务的冷拒绝；
+服务/文件命令仍是私有端口，main 为受控 direct，不声称完整 root 入口、所有孤儿
+类型、WAL 成功退休、自动冷恢复或健康旧 A 激活；其它写者静默及排他锁仍是前提。
+
 R22 Q parent 预像必须在首次内容读取前冻结完整文件身份或缺席状态，持有原 inode
 并在读取后同时验证名称、FD 和物理父目录。读取后插入的新文件、同字节换 inode
 不能成为稳定预像，也不能据此启动 SETUP 或发布 WAL。此门禁不意味着父 B 成功

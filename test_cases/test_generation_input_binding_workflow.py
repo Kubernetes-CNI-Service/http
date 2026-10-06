@@ -1961,7 +1961,11 @@ finally:
         """An already-visible uncertain B cannot authorize a second installation."""
         self._real_setup_uncertain_parent_dhcp_evidence(reenter=True)
 
-    def _real_setup_uncertain_parent_dhcp_evidence(self, *, reenter):
+    def test_real_setup_then_uncertain_dhcp_transaction_fences_fresh_load_process(self):
+        """A new LOAD process must honor retained disk evidence, not candidate flags."""
+        self._real_setup_uncertain_parent_dhcp_evidence(reenter=False, cold=True)
+
+    def _real_setup_uncertain_parent_dhcp_evidence(self, *, reenter, cold=False):
         for boundary in ("open", "fsync"):
             with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as name:
                 fixture = self._private_setup_switch_fixture(Path(name))
@@ -1990,6 +1994,28 @@ finally:
                     )
                 finally:
                     api.release_deployment_lock(descriptor)
+                if cold:
+                    operation = """
+import sys
+from pathlib import Path
+root, q, test_root = map(Path, sys.argv[1:4])
+sys.path.insert(0, str(test_root))
+from test_cases.module_loader import load_script
+from test_cases.test_load_release_transaction import assert_private_dhcp_cold_pending_hold
+load = load_script('r22_cold_pending_dhcp_load', root / 'DAY0-Prepare/11-load.py')
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    assert_private_dhcp_cold_pending_hold(load, root, q)
+    print('R22_COLD_PENDING_DHCP_HELD')
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+                    second = subprocess.run(
+                        [sys.executable, "-B", "-c", operation, str(root), str(q), str(ROOT)],
+                        cwd=root, capture_output=True, text=True, check=False, timeout=30,
+                    )
+                    self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+                    self.assertIn("R22_COLD_PENDING_DHCP_HELD", second.stdout)
                 self.assertEqual(q_manifest, manifest.read_bytes())
                 self.assertEqual(q_link, os.readlink(common))
                 self.assertEqual(wal, journal.read_bytes())

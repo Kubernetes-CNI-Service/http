@@ -256,6 +256,46 @@ unknown 超时重试门禁不解除，不手改 ledger 或套用上一候选的�
 `R22_DHCP_UNCERTAIN_REENTRY_LOAD_WORKFLOWS_EXIT=0` 与实际 exec exit0 相符。
 运行期间源/测试冻结，approved ledger、manifest 和运行态 setup manifest 字节未变。
 
+### R22 未结清 DHCP 事务的新进程写前闸门候选
+
+内存候选重入闸门不能保护新 LOAD。独立新候选 direct 和真实 SETUP→父 B
+目录 open/fsync 失败→新 Python 进程导入复制的 LOAD 安装 API workflow，均在
+原实现越过残留事务后触发禁止 installer 的预期失败，分别各有两个 subtest。
+原 RED 日志 `outputs/test-diagnostics/r22-cold-pending-dhcp-red.log`，inode
+145585927，size 9115，SHA256
+`d35a0bb407fe291432aceef89de81d5a6b97f44697e02acbd7e74920d173c2dc`。
+其中 main 的首轮失败来自夹具未满足 Supervisor 固定 `/root/.ssh` 前提，不能算
+闸门缺陷证据；仅补齐该既有前提、实现未改时，main 独立 RED 证明项目解析仍被
+调用，完整日志 `r22-cold-pending-dhcp-main-red.log`，inode 145591000，size 1204，
+SHA256 `e1f615385a1fa10e40cabc44d2bb1cbee6169def5e23e5b7b69d049f40ec0802`。
+
+候选对运行目录的未知事务前缀做只读 NOFOLLOW held-dirfd 有界扫描。普通管理
+LOAD 在锁内、项目解析前拒绝，安装 API 在源验证/绑定或任何命令前再拒绝；不
+解析、删除或恢复未知凭据。文件/目录/悬空链接/FIFO 前缀都 HOLD；runtime 非目录、
+扫描错误/超过 4096 项、名称换绑或同 inode 名称集 ABA 均 fail closed。不存在或
+干净的真实目录允许原流程，不创建目录。原 A/B 固定独立字节、第一次事务及 backup
+完整身份保持；新候选不能替换 parent B，不执行新 installer 或 cleanup。
+
+三项缺陷案例和原正常成功/提交前失败清理正例共 5 tests / OK / exit0，日志
+`r22-cold-pending-dhcp-green.log`，inode 145596542，size 1203，SHA256
+`4ef94afb99d2ede68cac5558037ce1dca1dae2d19d276b5f53627e75c2836dfa`。
+五项额外拒绝/只读 direct / OK / exit0，日志 `r22-cold-pending-dhcp-guard-negatives.log`，
+inode 145604904，size 832，SHA256
+`e3cfe292bc748bc2a462f03023efc67de79b071dbd2d5eecb510511ee136b31a`。
+完整 LOAD 模块加四项相关真实 workflow 共 299 tests / OK / exit0（55.858 秒），
+日志 `r22-cold-pending-dhcp-load-workflows.log`，inode 145606399，size 100085，SHA256
+`792aa6ad463582cae7e0298dea6143c25ec1dfdb9d484031afec859f05679c69`；
+读前后 stat 一致，旧 96501 字节前缀 SHA256
+`70759ab782c8db30ded417b9b3c2af3624ceb19f3e95a63f38095279f8e257c4` 未变。
+物理第 943 行 Ran、945 行 OK、原缓冲 stdout 后第 978 行完整
+`R22_COLD_PENDING_DHCP_LOAD_WORKFLOWS_EXIT=0` 与实际 exec exit0 一致。
+源码/测试冻结，manifest、approved ledger 和运行态 setup manifest 未改。
+
+这不是正式 related/full：前述 bootstrap 15 秒及 REQ19 probe 10 秒原始原因仍待核，
+不能因这组局部 PASS 放行盲重跑。新进程只是拒绝已知命名前缀，不提供完整 DHCP
+receipt/WAL 冷恢复或原子 compare-and-write；仍要求正常写者静默。完整 root 入口、
+断电持久性、B 成功收口、旧 A 显式健康激活和 DEV ACK 未闭，REAL_ENV 卡继续 OPEN。
+
 ### R22 未确认 B 时 DHCP A 备份保留候选
 
 父 B 目录 open/fsync 错误已传播 HOLD，但 `mount_and_test_dhcp` 的 finally

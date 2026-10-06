@@ -8172,6 +8172,56 @@ def _rewrite_dhcp_staging_includes(text: str, staged_dir: Path) -> str:
     return text
 
 
+def require_no_pending_dhcp_transaction(runtime_directory: Path | None = None) -> None:
+    """Read-only fence for retained/unknown transactions; never recover or clean them.
+
+    Ordinary LOAD calls under its deployment lock, and the install API checks
+    again. Any occupied prefix is unresolved evidence, regardless of leaf type
+    or payload. A held, no-follow directory read must match the named identity.
+    """
+    if runtime_directory is None:
+        parents = {path.parent for path in dhcp_file_mappings().values()}
+        if len(parents) != 1:
+            raise LoadError("DHCP runtime directory authority is ambiguous; HOLD")
+        runtime_directory = next(iter(parents))
+    try:
+        before = runtime_directory.lstat()
+    except FileNotFoundError:
+        return  # Initial installation may create a genuinely absent directory.
+    except OSError as exc:
+        raise LoadError(f"DHCP runtime directory unreadable; HOLD: {runtime_directory}: {exc}") from exc
+    if not stat.S_ISDIR(before.st_mode):
+        raise LoadError(f"DHCP runtime directory is not a regular directory; HOLD: {runtime_directory}")
+    required = ("O_DIRECTORY", "O_NOFOLLOW", "O_CLOEXEC")
+    if any(not hasattr(os, name) for name in required):
+        raise LoadError("DHCP runtime directory requires no-follow directory capability; HOLD")
+    descriptor = None
+    try:
+        descriptor = os.open(
+            runtime_directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+        identity = _management_directory_identity(before)
+        if _management_directory_identity(os.fstat(descriptor)) != identity:
+            raise LoadError("DHCP runtime directory changed before scan; HOLD")
+        with os.scandir(descriptor) as entries:
+            for count, entry in enumerate(entries, 1):
+                if count > 4096:
+                    raise LoadError("DHCP runtime directory scan limit exceeded; HOLD")
+                if entry.name.startswith(".load-dhcp-transaction-"):
+                    raise LoadError(
+                        f"pending DHCP transaction: {runtime_directory / entry.name}; HOLD，"
+                        "保留 B/A 和原事务凭据，须人工核验；不得新安装、自动回退或清理"
+                    )
+        if (_management_directory_identity(os.fstat(descriptor)) != identity
+                or _management_directory_identity(runtime_directory.lstat()) != identity):
+            raise LoadError("DHCP runtime directory changed during scan; HOLD")
+    except OSError as exc:
+        raise LoadError(f"DHCP runtime directory scan failed; HOLD: {runtime_directory}: {exc}") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
 def mount_and_test_dhcp(
     dry_run: bool = False,
     *,
@@ -8195,6 +8245,12 @@ def mount_and_test_dhcp(
     mappings = dhcp_file_mappings(
         parent_candidate.dhcp_source_dir if parent_candidate is not None else None
     )
+    destination_parents = {destination.parent for destination in mappings.values()}
+    if len(destination_parents) != 1:
+        raise LoadError("四个 DHCP 运行文件必须位于同一目录，无法建立事务 staging")
+    dhcp_runtime_dir = next(iter(destination_parents))
+    if not dry_run:
+        require_no_pending_dhcp_transaction(dhcp_runtime_dir)
     validate_dhcp_output_sources(mappings)
     bind_empty_dhcp_to_prepared_parent(mappings, parent_candidate)
     if dry_run:
@@ -8212,10 +8268,6 @@ def mount_and_test_dhcp(
         )
         return
 
-    destination_parents = {destination.parent for destination in mappings.values()}
-    if len(destination_parents) != 1:
-        raise LoadError("四个 DHCP 运行文件必须位于同一目录，无法建立事务 staging")
-    dhcp_runtime_dir = next(iter(destination_parents))
     transaction_dir = dhcp_runtime_dir / (
         f".load-dhcp-transaction-{os.getpid()}-{secrets.token_hex(8)}"
     )
@@ -12427,6 +12479,9 @@ def main(
             deployment_lock_descriptor = acquire_deployment_lock(exclusive=True)
             failure_phase = "未结清 setup WAL 前置闸门"
             require_no_pending_setup_switch_journal()
+            if local_services_supported:
+                failure_phase = "未结清 DHCP 事务前置闸门"
+                require_no_pending_dhcp_transaction()
         info(f"运行平台：{host_os}")
         if not local_services_supported:
             warn(

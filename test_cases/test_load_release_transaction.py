@@ -268,6 +268,63 @@ def assert_private_dhcp_transaction_retention(
         api.discard_prepared_release(candidate)
 
 
+def assert_private_dhcp_cold_pending_hold(api, root: Path, project: Path) -> None:
+    """A fresh candidate has no memory of the first HOLD; disk evidence must fence it."""
+    source, live = project / "independent-dhcp-B", root / "private-etc-dhcp"
+    names = ("dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts")
+    expected_b = {name: f"independent-B:{name}\n".encode() for name in names}
+    expected_b["dhcpd.conf"] = b"# independent-B configuration\n" + b"".join(
+        f'include "/etc/dhcp/{name}";\n'.encode() for name in names[1:]
+    )
+    transactions = list(live.glob(".load-dhcp-transaction-*"))
+    assert len(transactions) == 1
+    transaction, = transactions
+    backup = transaction / "backup"
+    identities = [(path, path.lstat()) for path in (transaction, backup)]
+    for name in names:
+        (source / name).write_bytes(expected_b[name] + b"# independent-C input\n")
+    candidate = api.prepare_current_release(
+        project, {"schema_version": 1, "release_id": "independent-C"},
+    )
+    assert not candidate.committed and not candidate.directory_synced
+    commands = []
+
+    def forbidden(command, **kwargs):
+        commands.append(command)
+        raise AssertionError("new LOAD reached installer before pending evidence guard")
+
+    try:
+        with mock.patch.object(api, "dhcp_file_mappings", return_value={
+            source / name: live / name for name in names
+        }), mock.patch.object(api, "sudo_command", side_effect=lambda *args: list(args)), \
+                mock.patch.object(api, "run", side_effect=forbidden), \
+                mock.patch.object(api, "_run_subprocess", side_effect=forbidden):
+            try:
+                api.mount_and_test_dhcp(parent_candidate=candidate)
+            except api.LoadError as exc:
+                assert "pending DHCP transaction" in str(exc) and "HOLD" in str(exc), str(exc)
+            else:
+                raise AssertionError("fresh LOAD ignored retained DHCP transaction")
+        assert commands == [], "pending disk evidence must reject before all commands"
+        assert not candidate.committed and not candidate.directory_synced
+        assert json.loads(candidate.destination.read_text()) == {
+            "schema_version": 1, "release_id": "independent-B",
+        }
+        assert {name: (live / name).read_bytes() for name in names} == expected_b
+        assert {p.name: p.read_bytes() for p in backup.iterdir()} == {
+            name: f"independent-A:{name}\n".encode() for name in names
+        }
+        assert list(live.glob(".load-dhcp-transaction-*")) == transactions
+        for path, before in identities:
+            after = path.lstat()
+            assert (before.st_dev, before.st_ino, before.st_mode,
+                    before.st_mtime_ns, before.st_ctime_ns) == (
+                after.st_dev, after.st_ino, after.st_mode, after.st_mtime_ns, after.st_ctime_ns,
+            )
+    finally:
+        api.discard_prepared_release(candidate)
+
+
 def h19_mini_policy(*, unknown_role_action: str = "error") -> dict:
     """Independent, non-GB300 taxonomy for the real load-to-topology workflow."""
     return {
@@ -6273,12 +6330,121 @@ os.kill(os.getpid(), signal.SIGKILL)
             project.mkdir()
             assert_private_dhcp_transaction_retention(LOAD, root, project, "success")
 
+    def test_fresh_parent_candidate_holds_retained_dhcp_transaction_before_commands(self) -> None:
+        for boundary in ("open", "fsync"):
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as name:
+                root, project = Path(name), Path(name) / "project"
+                project.mkdir()
+                assert_private_dhcp_transaction_retention(LOAD, root, project, boundary)
+                assert_private_dhcp_cold_pending_hold(LOAD, root, project)
+
     def test_precommit_rejection_restores_a_and_cleans_private_dhcp_transaction(self) -> None:
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
             project = root / "project"
             project.mkdir()
             assert_private_dhcp_transaction_retention(LOAD, root, project, "precommit")
+
+    def test_pending_dhcp_guard_preserves_every_occupied_evidence_shape(self) -> None:
+        live = self.root / "private-dhcp-guard"
+        live.mkdir()
+        pending = live / ".load-dhcp-transaction-independent"
+        for shape in ("regular", "directory", "dangling-symlink", "fifo"):
+            with self.subTest(shape=shape):
+                if shape == "regular":
+                    pending.write_bytes(b"independent partial evidence\n")
+                elif shape == "directory":
+                    pending.mkdir()
+                elif shape == "dangling-symlink":
+                    pending.symlink_to("independent-absent-target")
+                else:
+                    os.mkfifo(pending, 0o600)
+                before = pending.lstat()
+                with self.assertRaisesRegex(LOAD.LoadError, "pending DHCP transaction.*HOLD"):
+                    LOAD.require_no_pending_dhcp_transaction(live)
+                after = pending.lstat()
+                fields = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")
+                self.assertEqual(tuple(getattr(before, f) for f in fields),
+                                 tuple(getattr(after, f) for f in fields))
+                if shape == "regular":
+                    self.assertEqual(b"independent partial evidence\n", pending.read_bytes())
+                if shape == "directory":
+                    pending.rmdir()
+                else:
+                    pending.unlink()
+
+    def test_pending_dhcp_guard_missing_and_clean_directory_are_read_only(self) -> None:
+        live = self.root / "private-dhcp-guard"
+        LOAD.require_no_pending_dhcp_transaction(live)
+        self.assertFalse(live.exists())
+        live.mkdir()
+        unrelated = live / "operator-retained-file"
+        unrelated.write_bytes(b"independent unrelated bytes\n")
+        before = unrelated.stat()
+        LOAD.require_no_pending_dhcp_transaction(live)
+        self.assertEqual(b"independent unrelated bytes\n", unrelated.read_bytes())
+        self.assertEqual(before, unrelated.stat())
+
+    def test_pending_dhcp_guard_refuses_unsafe_runtime_directory_shapes(self) -> None:
+        live, actual = self.root / "private-dhcp-guard", self.root / "actual-private-dhcp"
+        actual.mkdir()
+        for shape in ("regular", "symlink", "fifo"):
+            with self.subTest(shape=shape):
+                if shape == "regular":
+                    live.write_bytes(b"not a directory\n")
+                elif shape == "symlink":
+                    live.symlink_to(actual)
+                else:
+                    os.mkfifo(live, 0o600)
+                before = live.lstat()
+                with self.assertRaisesRegex(LOAD.LoadError, "not a regular directory.*HOLD"):
+                    LOAD.require_no_pending_dhcp_transaction(live)
+                self.assertEqual(before, live.lstat())
+                live.unlink()
+
+    def test_pending_dhcp_guard_scan_errors_and_limit_fail_closed(self) -> None:
+        live = self.root / "private-dhcp-guard"
+        live.mkdir()
+        before = live.stat()
+        with mock.patch.object(LOAD.os, "scandir", side_effect=PermissionError("independent refusal")):
+            with self.assertRaisesRegex(LOAD.LoadError, "scan failed.*HOLD"):
+                LOAD.require_no_pending_dhcp_transaction(live)
+        entries = mock.MagicMock()
+        entries.__enter__.return_value = iter(
+            SimpleNamespace(name=f"independent-name-{n}") for n in range(4097)
+        )
+        with mock.patch.object(LOAD.os, "scandir", return_value=entries):
+            with self.assertRaisesRegex(LOAD.LoadError, "scan limit exceeded.*HOLD"):
+                LOAD.require_no_pending_dhcp_transaction(live)
+        self.assertEqual(before, live.stat())
+
+    def test_pending_dhcp_guard_detects_directory_rebind_and_name_set_aba(self) -> None:
+        for mutation in ("rebind", "same-inode-aba"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as name:
+                root, live = Path(name), Path(name) / "private-dhcp"
+                live.mkdir()
+                before = live.stat()
+                real_scan = os.scandir
+
+                def scan_then_mutate(descriptor):
+                    entries = real_scan(descriptor)
+                    if mutation == "rebind":
+                        live.rename(root / "retained-original-directory")
+                        live.mkdir()
+                    else:
+                        inserted = live / "independent-late-name"
+                        inserted.write_bytes(b"independent transient evidence\n")
+                        inserted.unlink()
+                        os.utime(live, ns=(before.st_atime_ns, before.st_mtime_ns))
+                        self.assertNotEqual(before.st_ctime_ns, live.stat().st_ctime_ns)
+                    return entries
+
+                with mock.patch.object(LOAD.os, "scandir", side_effect=scan_then_mutate):
+                    with self.assertRaisesRegex(LOAD.LoadError, "changed during scan.*HOLD"):
+                        LOAD.require_no_pending_dhcp_transaction(live)
+                self.assertTrue(live.is_dir())
+                if mutation == "rebind":
+                    self.assertEqual(before.st_ino, (root / "retained-original-directory").stat().st_ino)
 
     def test_parent_publish_failure_rolls_back_installed_dhcp_files(self) -> None:
         source_dir = self.root / "generated-dhcp"
@@ -7403,6 +7569,38 @@ os.kill(os.getpid(), signal.SIGKILL)
         template.assert_not_called()
         self.assertIn("pending setup switch WAL", stderr.getvalue())
         self.assertEqual(payload, journal.read_bytes())
+        release_lock.assert_called_once_with(91)
+
+    def test_main_pending_dhcp_transaction_blocks_before_project_resolution(self) -> None:
+        live = self.root / "private-etc-dhcp"
+        live.mkdir()
+        pending = live / ".load-dhcp-transaction-independent-orphan"
+        payload = b"independent retained A/B evidence\n"
+        pending.write_bytes(payload)
+        before = pending.lstat()
+        args = LOAD.parse_args([
+            str(self.project), "--host-role=management-server", "--no-upgrade",
+            "--ssh-dir=/root/.ssh",
+        ])
+        resolve = mock.Mock(side_effect=LOAD.LoadError("unsafe project edge reached"))
+        release_lock, stderr = mock.Mock(), io.StringIO()
+        with mock.patch.object(LOAD, "parse_args", return_value=args), mock.patch.object(
+            LOAD, "runtime_os", return_value="Linux",
+        ), mock.patch.object(LOAD, "service_runtime_backend", return_value=SimpleNamespace(name="supervisor")), \
+                mock.patch.object(LOAD, "validate_runtime_options"), \
+                mock.patch.object(LOAD, "acquire_deployment_lock", return_value=91), \
+                mock.patch.object(LOAD, "release_deployment_lock", release_lock), \
+                mock.patch.object(LOAD, "MANIFEST", self.ztp / ".setup_manifest"), \
+                mock.patch.object(LOAD, "dhcp_file_mappings", return_value={self.project / "dhcpd.conf": live / "dhcpd.conf"}), \
+                mock.patch.object(LOAD, "resolve_project", resolve), redirect_stderr(stderr):
+            self.assertEqual(1, LOAD.main([]))
+        resolve.assert_not_called()
+        self.assertIn("pending DHCP transaction", stderr.getvalue())
+        self.assertIn("HOLD", stderr.getvalue())
+        self.assertEqual(payload, pending.read_bytes())
+        after = pending.lstat()
+        self.assertEqual((before.st_dev, before.st_ino, before.st_mode, before.st_mtime_ns, before.st_ctime_ns),
+                         (after.st_dev, after.st_ino, after.st_mode, after.st_mtime_ns, after.st_ctime_ns))
         release_lock.assert_called_once_with(91)
 
     def test_pending_setup_wal_guard_preserves_every_occupied_authority_shape(self) -> None:
