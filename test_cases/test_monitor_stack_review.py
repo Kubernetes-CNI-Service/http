@@ -5698,6 +5698,7 @@ print('{{"factory_records_active":true,"valid":true}}')
             "state": "triggered", "operation": "replace-config",
             "effective_operation": "replace-config",
             "trigger_source": "manual_config_sync_web",
+            "generation": 1, "source_identity": "1:2",
             "transport_ip": "192.0.2.10", "interface": "eth0",
             "command_started_at": "2026-10-03T10:00:00+08:00",
             "finished_at": "2026-10-03T10:00:02+08:00",

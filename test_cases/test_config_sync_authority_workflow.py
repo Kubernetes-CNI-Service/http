@@ -6,6 +6,7 @@ transitions execute their production implementations.
 """
 
 from contextlib import ExitStack
+from datetime import datetime
 import hashlib
 import importlib.util
 import io
@@ -38,7 +39,7 @@ class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
 
     def fixture(self, project):
         release = project / "release"
-        release.mkdir()
+        release.mkdir(exist_ok=True)
         marker = release / ".published-complete"
         marker.write_text("ok\n", encoding="utf-8")
         expected = release / "EXAMPLE-Leaf01.yaml"
@@ -357,6 +358,147 @@ class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
                 self.assertEqual({}, self.accept_own_writer())
             self.assertTrue(changed)
             self.assertEqual(produced, json.loads(receipt.read_text()))
+
+    def test_cli_import_uses_local_generation_not_reporter_wall_clock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve()
+            devices, receipt, previous, summary = self.worker_bundle(project)
+            root = receipt.parents[2]
+            # Old reporter wall time is deliberately much newer than the next
+            # causal era. Only the local single writer chooses the generation.
+            self.manual.atomic_json(receipt.parent.parent / "summary.json", {
+                **summary, "requested_at": "9999-01-01T00:00:00Z",
+                "generated_at": "9999-01-01T00:00:00Z",
+            })
+            client, prepared, _text = self.fixture(project)
+            ticket = self.manual.config_sync_authority.begin(
+                root, "EXAMPLE-Leaf01", "op-2", "trigger-2", "manual_config_sync_cli",
+            )
+            self.assertEqual(2, ticket["generation"])
+            with mock.patch.object(self.manual, "datetime") as clock:
+                clock.now.return_value = datetime.fromisoformat("2020-01-01T00:00:00+00:00")
+                current = self.run_writer(project, client, prepared, run="second", ticket=ticket)
+            self.manual.atomic_json(root / "second/summary.json", {
+                **summary, "generation": 2, "operation_id": "op-2",
+                "requested_at": "2020-01-01T00:00:00Z", "generated_at": "2020-01-01T00:00:00Z",
+                "targets": [{**summary["targets"][0], "generation": 2, "trigger_id": "trigger-2"}],
+                "results": [current],
+            })
+            with mock.patch.object(self.worker, "DEVICES_CSV", devices):
+                imported = self.worker.latest_cli_operations()["example-leaf01"]
+                self.assertEqual(("op-2", "trigger-2", 2, current["source_identity"]), (
+                    imported["operation_id"], imported["trigger_id"], imported.get("generation"),
+                    imported.get("source_identity"),
+                ))
+                self.assertTrue(self.worker.config_sync_promotion_ready(imported))
+                self.manual.config_sync_authority.revoke(root, "EXAMPLE-Leaf01")
+                revoked = self.worker.latest_cli_operations().get("example-leaf01", {})
+                self.assertFalse(self.worker.config_sync_promotion_ready(revoked))
+            self.assertEqual(previous, json.loads(receipt.read_text()))
+
+    def test_cli_import_cannot_launder_missing_tampered_or_ambiguous_receipt(self):
+        for defect in ("missing", "digest", "duplicate-summary", "unsafe-summary", "missing-authority"):
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as directory:
+                project = Path(directory).resolve()
+                devices, receipt, produced, summary = self.worker_bundle(project)
+                root = receipt.parents[2]
+                before = receipt.read_bytes()
+                with mock.patch.object(self.worker, "DEVICES_CSV", devices):
+                    self.assertTrue(self.worker.config_sync_promotion_ready(
+                        self.worker.latest_cli_operations()["example-leaf01"],
+                    ))
+                    if defect == "missing":
+                        receipt.rename(receipt.with_name("retained-receipt.json"))
+                    elif defect == "digest":
+                        mutant = {**produced, "live_state_sha256": "b" * 64}
+                        self.manual.atomic_json(receipt, mutant)
+                        self.manual.atomic_json(receipt.parent.parent / "summary.json", {**summary, "results": [mutant]})
+                    elif defect == "duplicate-summary":
+                        self.manual.atomic_json(root / "duplicate/summary.json", summary)
+                    elif defect == "unsafe-summary":
+                        (receipt.parent.parent / "summary.json").chmod(0o666)
+                    else:
+                        (root / ".authority").rename(root / "retained-authority")
+                    value = self.worker.latest_cli_operations().get("example-leaf01", {})
+                    self.assertFalse(self.worker.config_sync_promotion_ready(value))
+                if defect == "missing":
+                    self.assertEqual(before, receipt.with_name("retained-receipt.json").read_bytes())
+                elif defect != "digest":
+                    self.assertEqual(before, receipt.read_bytes())
+
+    def test_cli_import_selects_current_pending_era_without_reusing_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve()
+            devices, receipt, _produced, summary = self.worker_bundle(project)
+            root = receipt.parents[2]
+            self.manual.config_sync_authority.begin(
+                root, "EXAMPLE-Leaf01", "op-2", "trigger-2", "manual_config_sync_cli",
+            )
+            self.manual.atomic_json(root / "pending/summary.json", {
+                **summary, "generation": 2, "operation_id": "op-2", "state": "preflight",
+                "requested_at": "2020-01-01T00:00:00Z", "generated_at": "2020-01-01T00:00:00Z",
+                "targets": [{**summary["targets"][0], "generation": 2, "trigger_id": "trigger-2"}],
+                "results": [],
+            })
+            with mock.patch.object(self.worker, "DEVICES_CSV", devices):
+                value = self.worker.latest_cli_operations()["example-leaf01"]
+            self.assertEqual(("op-2", "trigger-2", 2, "running"), (
+                value["operation_id"], value["trigger_id"], value.get("generation"), value["state"],
+            ))
+            self.assertFalse(self.worker.config_sync_promotion_ready(value))
+
+    def test_promotion_requires_a_strict_bounded_generation_and_namespace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            receipt, produced = self.published_receipt(Path(directory).resolve())
+            self.assertTrue(self.worker.config_sync_promotion_ready(produced))
+            for field, value in (("generation", None), ("generation", True),
+                                 ("generation", 1.0), ("generation", 0),
+                                 ("generation", -1), ("generation", 2 ** 63),
+                                 ("source_identity", None), ("source_identity", ""),
+                                 ("source_identity", "-1:2"), ("source_identity", "1:2:3"),
+                                 ("source_identity", f"{2 ** 64}:2")):
+                with self.subTest(field=field, value=value):
+                    self.assertFalse(self.worker.config_sync_promotion_ready({**produced, field: value}))
+            self.assertEqual(produced, json.loads(receipt.read_text()))
+
+    def test_cli_import_rechecks_local_era_after_last_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve()
+            devices, receipt, _produced, _summary = self.worker_bundle(project)
+            original = self.worker.accepted_result
+            def advance_after_acceptance(*args, **kwargs):
+                value = original(*args, **kwargs)
+                self.assertTrue(value)
+                self.manual.config_sync_authority.begin(
+                    receipt.parents[2], "EXAMPLE-Leaf01", "op-2", "trigger-2", "manual_config_sync_cli",
+                )
+                return value
+            with mock.patch.object(self.worker, "DEVICES_CSV", devices), \
+                    mock.patch.object(self.worker, "accepted_result", side_effect=advance_after_acceptance):
+                self.assertEqual({}, self.worker.latest_cli_operations())
+
+    def test_cli_pending_import_does_not_cross_into_legacy_ztp_operation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve()
+            devices, receipt, _produced, summary = self.worker_bundle(project)
+            root = receipt.parents[2]
+            self.manual.config_sync_authority.begin(
+                root, "EXAMPLE-Leaf01", "op-2", "trigger-2", "manual_config_sync_cli",
+            )
+            pending = {
+                **summary, "generation": 2, "operation_id": "op-2", "state": "preflight",
+                "targets": [{**summary["targets"][0], "generation": 2, "trigger_id": "trigger-2"}],
+                "results": [],
+            }
+            path = root / "pending/summary.json"
+            with mock.patch.object(self.worker, "DEVICES_CSV", devices):
+                for defect in ("operation", "effective_operation", "target-effective"):
+                    with self.subTest(defect=defect):
+                        mutant = {**pending, defect: "ztp"} if defect != "target-effective" else {
+                            **pending, "targets": [{**pending["targets"][0], "effective_operation": "ztp"}],
+                        }
+                        self.manual.atomic_json(path, mutant)
+                        self.assertEqual({}, self.worker.latest_cli_operations())
 
     def test_real_worker_rejects_writer_receipt_with_unsafe_mode_or_foreign_owner(self):
         with tempfile.TemporaryDirectory() as directory:

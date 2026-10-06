@@ -488,12 +488,14 @@ def latest_device_state(hostname):
 
 
 def latest_cli_operations():
-    """Return the newest explicit CLI operation for each active-project host."""
+    """Import current config eras; retain legacy ZTP/reset time ordering."""
     try:
         project = DEVICES_CSV.resolve(strict=True).parent
     except OSError:
         return {}
     operations = {}
+    config_authorities = {}
+    ambiguous_config = set()
     paths = [
         (path, source, operation)
         for directory, source, operation in (
@@ -508,17 +510,29 @@ def latest_cli_operations():
     ]
     for path, expected_source, operation_name in paths:
         try:
-            summary = json.loads(path.read_text(encoding="utf-8"))
+            summary = (
+                _read_new_config_sync_receipt(path)
+                if operation_name == "replace-config"
+                else json.loads(path.read_text(encoding="utf-8"))
+            )
         except (OSError, json.JSONDecodeError):
             continue
         if not isinstance(summary, dict) or summary.get("trigger_source") != expected_source:
             continue
         requested_at = str(summary.get("requested_at") or summary.get("generated_at") or "")
-        results = {
-            str(item.get("hostname") or "").casefold(): item
-            for item in summary.get("results", []) if isinstance(item, dict)
-        }
-        for target in summary.get("targets", []):
+        if operation_name == "replace-config":
+            members = _config_sync_summary_members(summary)
+            if members is None:
+                print(f"[WARN] invalid config-sync summary: {path}", file=sys.stderr)
+                continue
+            targets, results = members
+        else:
+            targets = summary.get("targets", [])
+            results = {
+                str(item.get("hostname") or "").casefold(): item
+                for item in summary.get("results", []) if isinstance(item, dict)
+            }
+        for target in targets:
             if not isinstance(target, dict):
                 continue
             hostname = str(target.get("hostname") or "")
@@ -565,10 +579,52 @@ def latest_cli_operations():
                 "batch_identity_verified_at": result.get("batch_identity_verified_at"),
                 "live_state_sha256": result.get("live_state_sha256"),
                 "effective_operation": result.get("effective_operation"),
+                "generation": result.get("generation", target.get("generation")),
+                "source_identity": result.get("source_identity"),
             }
-            previous = operations.get(hostname.casefold())
+            key = hostname.casefold()
+            if operation_name == "replace-config":
+                authority = _current_config_sync_authority(project, hostname)
+                if not authority:
+                    print(f"[WARN] config-sync history unavailable: {hostname}", file=sys.stderr)
+                    continue
+                if (summary.get("operation") != "replace-config"
+                        or summary.get("effective_operation") != "replace-config"
+                        or target.get("effective_operation") != "replace-config"
+                        or operation["operation"] != "replace-config"
+                        or type(summary.get("generation")) is not int
+                        or summary["generation"] != authority["generation"]
+                        or type(target.get("generation")) is not int
+                        or target["generation"] != authority["generation"]
+                        or type(operation["generation"]) is not int
+                        or operation["generation"] != authority["generation"]
+                        or any(operation[field] != authority[field] for field in (
+                            "operation_id", "trigger_id", "trigger_source",
+                        ))):
+                    continue
+                if state == "triggered":
+                    accepted = accepted_result(
+                        operation["trigger_id"], hostname=hostname,
+                        operation_id=operation["operation_id"],
+                        operation="replace-config", trigger_source=expected_source,
+                    )
+                    if not accepted or accepted != result:
+                        continue
+                # A second matching observation is a conflict, not a reason to
+                # pick whichever reporter clock happens to be greater.
+                if key in config_authorities:
+                    ambiguous_config.add(key)
+                    operations.pop(key, None)
+                else:
+                    config_authorities[key] = (hostname, authority)
+                    operations[key] = operation
+                continue
+            previous = operations.get(key)
             if previous is None or _iso_time(operation["started_at"]) >= _iso_time(previous["started_at"]):
-                operations[hostname.casefold()] = operation
+                operations[key] = operation
+    for key, (hostname, authority) in config_authorities.items():
+        if key in ambiguous_config or _current_config_sync_authority(project, hostname) != authority:
+            operations.pop(key, None)
     return operations
 
 
@@ -703,6 +759,13 @@ def accepted_result(
 def config_sync_promotion_ready(receipt):
     """Require a post-apply BatchMode identity and live-state receipt."""
     if not isinstance(receipt, dict):
+        return False
+    namespace = receipt.get("source_identity")
+    if (type(receipt.get("generation")) is not int
+            or not 1 <= receipt["generation"] <= 2 ** 63 - 1
+            or not isinstance(namespace, str)
+            or not re.fullmatch(r"[0-9]{1,20}:[0-9]{1,20}", namespace)
+            or any(int(part) > 2 ** 64 - 1 for part in namespace.split(":"))):
         return False
     if (receipt.get("state") != "triggered"
             or receipt.get("operation") != "replace-config"

@@ -391,6 +391,10 @@ worker 的配置同步接纳还须绑定当前本地 success/veto、严格整数
 自身回执摘要；summary 和目标 generation 必须一致。读取所有回执和 summary 后再次核对
 当前代次，读取期间发生撤销或下一代 pending 时不能返回旧成功。缺失本地历史不由读者补造，
 拒绝时原始回执字节保留；真实 manual writer → worker workflow 覆盖这些边界。
+CLI 配置同步导入同样使用 held/no-follow summary 和本地代次，不用 reporter 墙钟在旧成功与
+新 pending/成功之间择优。缺失、摘要不符或多份冲突观察不能绕过回执接纳；导入结束再复核
+本地代次。配置同步的 generation/命名空间必须有严格类型及有限整数边界，不能混入旧 ZTP
+操作。旧 ZTP/reset 的时间排序不因这条配置同步合同改变。
 不宣称抵御全部镜像或整卷回滚。worker/九阶段监控消费端尚未完成接入，F02 整体仍 OPEN；
 真机持久化卡 `TC-REAL-F02-LOCAL-GENERATION-001` 仍 NOT RUN。
 
