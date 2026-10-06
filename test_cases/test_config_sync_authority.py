@@ -14,6 +14,31 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSyncAuthorityTests(unittest.TestCase):
+    def test_completion_observation_gate_is_read_only_and_requires_own_closed_identity(self):
+        gate = getattr(self.authority, "monitor_observation_allows_completion", None)
+        self.assertTrue(callable(gate), "both completion consumers must share the explicit-observation veto")
+        device = {"hostname": "leaf1", "ip": "192.0.2.1", "mac_plain": "001122334455"}
+        observed = {"schema_version": 1, "source": "monitor_batchmode",
+                    "batch_identity_verified": True, "hostname": "leaf1", "interface": "eth0",
+                    "transport_ip": "192.0.2.1", "mac_plain": "001122334455",
+                    "live_state_sha256": "a" * 64, "reason": ""}
+        device["configuration_observation"] = observed
+        before = json.dumps(device, sort_keys=True)
+        self.assertTrue(gate(device))
+        self.assertEqual(before, json.dumps(device, sort_keys=True))
+        for value in (None, {}, {**observed, "batch_identity_verified": 1},
+                      {**observed, "schema_version": True}, {**observed, "hostname": "foreign"},
+                      {**observed, "live_state_sha256": ""}, {**observed, "reason": "failed"}):
+            with self.subTest(value=value):
+                device["configuration_observation"] = value
+                before = json.dumps(device, sort_keys=True)
+                self.assertFalse(gate(device))
+                self.assertEqual(before, json.dumps(device, sort_keys=True))
+        # Legacy absent observations are not upgraded into a new receipt.
+        device.pop("configuration_observation")
+        self.assertTrue(gate(device))
+        self.assertNotIn("configuration_observation", device)
+
     def bound_reader(self):
         reader = getattr(self.authority, "read_current_receipt", None)
         self.assertTrue(callable(reader), "observers must authenticate the current receipt under its local generation lock")

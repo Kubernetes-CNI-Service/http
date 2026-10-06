@@ -249,6 +249,12 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-F02-6-001 — 当前轮九阶段证据与交接一致性
 
+- 显式新观察否决：独立 direct 与真实 analyzer → report → HTML/机器 workflow 覆盖
+  无手工配置 journal 的当前失败观察、闭合 schema、严格布尔、inventory 接口身份和
+  digest；旧九阶段成功不得掩盖失败，所选 eth1 正例保留。真机仍 NOT RUN，需精确
+  授权后保留实际 BatchMode 会话、原始 live 摘要与前后快照；不得据此铸造代次或应用
+  成功，也不得清除原负向历史。与本案有关临时对象按原取证/清理合同处理。
+
 - 类型资格：私有 direct 与真实报告写入 → HTML/机器判据 workflow 已证明 server/UFM、
   未知/空类型的九阶段成功声称不能成为 Switch/host 完成或类型组交接；六类已支持
   交换机正例保留。真实 server/UFM 部署属于既有独立合同，本地反例不取得远端权限，

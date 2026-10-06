@@ -61,6 +61,57 @@ class AuthorityError(ValueError):
     pass
 
 
+def monitor_observation_allows_completion(device):
+    """Honor an explicit fresh observation's veto; never mint a receipt.
+
+    Legacy snapshots without this field retain their separate nine-stage
+    contract. Every current analyze_switch result supplies the field, even
+    on early failure. A structurally positive observation is only a necessary
+    condition, not configuration application or generation authority.
+    """
+    if "configuration_observation" not in device:
+        return True
+    observed = device["configuration_observation"]
+    fields = {"schema_version", "source", "batch_identity_verified", "hostname",
+              "interface", "transport_ip", "mac_plain", "live_state_sha256", "reason"}
+    if (not isinstance(observed, dict) or set(observed) != fields
+            or type(observed["schema_version"]) is not int or observed["schema_version"] != 1
+            or observed["batch_identity_verified"] is not True
+            or any(not isinstance(observed[key], str) for key in fields - {
+                "schema_version", "batch_identity_verified"})):
+        return False
+    hostname = device.get("hostname")
+    if (observed["source"] != "monitor_batchmode" or observed["reason"] != ""
+            or not isinstance(hostname, str) or not HOST.fullmatch(hostname)
+            or observed["hostname"].casefold() != hostname.casefold()
+            or observed["interface"] not in {"eth0", "eth1"}
+            or not DIGEST.fullmatch(observed["live_state_sha256"])
+            or not re.fullmatch(r"[0-9a-f]{12}", observed["mac_plain"])):
+        return False
+    address = observed["transport_ip"]
+    try:
+        ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    candidates = device.get("candidate_identity") or {}
+    if not isinstance(candidates, dict):
+        return False
+    if address in candidates:
+        selected = candidates[address]
+        if not isinstance(selected, (list, tuple)) or len(selected) != 2:
+            return False
+        interface, mac = selected
+    elif address == device.get("ip"):
+        interface, mac = "eth0", device.get("mac_plain") or device.get("mac")
+    else:
+        return False
+    if (not isinstance(mac, str) or not re.fullmatch(
+            r"(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}|[0-9A-Fa-f]{12}", mac)):
+        return False
+    return (interface == observed["interface"]
+            and mac.replace(":", "").lower() == observed["mac_plain"])
+
+
 def wire(value):
     return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
 

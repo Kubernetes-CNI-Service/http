@@ -56,6 +56,7 @@ from project_contract import (
     MAX_CONTINUOUS_BACKUP_INTERVAL_MINUTES,
 )
 from ztp.dynamic_air_inventory import dynamic_air_devices
+from ztp.config_sync_authority import monitor_observation_allows_completion
 from tools.ufm_collection_pipeline import validated_receipts as validated_ufm_receipts
 from tools.ufm_collection_contract import CollectionError, collection_plan as ufm_collection_plan
 
@@ -852,6 +853,7 @@ def ztp_completed(device: dict) -> bool:
     device_type = str(device.get("type") or "").strip().casefold()
     progress = device.get("progress")
     if (device_type not in {"eth", "eth_spx", "spx", "air", "ib", "nvl"}
+            or not monitor_observation_allows_completion(device)
             or not isinstance(progress, dict)
             or progress.get("percent") != 100
             or any(device.get(flag, False) is not False for flag in (

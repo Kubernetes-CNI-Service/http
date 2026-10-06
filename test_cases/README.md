@@ -486,6 +486,12 @@ Apache/AIR、single-link 文件、独立输出及 no-SSH/no-watch/no-HTML/no-han
 机器/HTML 完成资格只接受当前受支持的 ETH/ETH_SPX/SPX/AIR/IB/NVL 类型；server/UFM、
 未知或空类型即使持有声称九阶段全部成功的旧快照，也不得取得 Switch/host 完成。
 真实报告写入 → HTML/机器判据正反例不改变 server/UFM 的独立部署合同。
+当前 analyzer 显式给出的 configuration_observation 必须通过共同的只读否决检查：
+闭合 v1 schema、严格 True 的 BatchMode 身份、当前 inventory 主机与所选接口/IP/MAC、
+合法同会话 live digest 及空否决原因。显式缺失成员、畸形或失败观察不能被旧九阶段
+成功记录掩盖；真实 analyzer → report → HTML/机器 workflow 保留此负向证据。
+旧快照不含该字段仍保留原九阶段合同；不因此获得新观察、应用收据或 generation，
+bootstrap/initial-setup 本地来源代次接入仍 OPEN。
 这些本地证据不证明真实采集器已执行，也不关闭 F02 的配置同步消费端剩余工作。
 
 SSH 身份负例夹具执行真实生成的 askpass Python body 时绑定当前测试解释器，

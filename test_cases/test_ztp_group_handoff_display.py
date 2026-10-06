@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import copy
 import importlib.util
 import json
 import os
@@ -130,6 +131,90 @@ class CompletionDisplayParityTests(unittest.TestCase):
             row[flag] = False
             self.assertTrue(HTML.ztp_completed(row))
             self.assertTrue(MONITOR.completion_handoff_device_complete(row))
+
+    @staticmethod
+    def fresh_observation_fixture():
+        return {"schema_version": 1, "source": "monitor_batchmode",
+                "batch_identity_verified": True, "hostname": "Leaf01",
+                "interface": "eth0", "transport_ip": "192.0.2.1",
+                "mac_plain": "001122334455", "live_state_sha256": "a" * 64,
+                "reason": ""}
+
+    def test_explicit_invalid_fresh_observation_vetoes_both_completion_consumers(self):
+        positive = self.fresh_observation_fixture()
+        negatives = [None, False, [], {}, *({**positive, **mutation} for mutation in (
+            {"schema_version": True}, {"schema_version": 2},
+            {"source": "manual_config_sync_cli"}, {"batch_identity_verified": 1},
+            {"batch_identity_verified": False}, {"hostname": "foreign"},
+            {"interface": "eth2"}, {"transport_ip": "192.0.2.99"},
+            {"mac_plain": "001122334466"}, {"live_state_sha256": ""},
+            {"live_state_sha256": "A" * 64}, {"reason": "identity-not-matched"},
+            {"old_receipt": True},
+        ))]
+        negatives.extend({key: value for key, value in positive.items() if key != omitted}
+                         for omitted in positive)
+        for observation in negatives:
+            for consumer, predicate in (("machine", MONITOR.completion_handoff_device_complete),
+                                        ("html", HTML.ztp_completed)):
+                with self.subTest(observation=observation, consumer=consumer):
+                    row = self.complete_fixture()
+                    row["configuration_observation"] = copy.deepcopy(observation)
+                    self.assertFalse(predicate(row), "old stage successes cannot hide explicit fresh negative evidence")
+            with self.subTest(observation=observation, consumer="overall"):
+                row = self.complete_fixture()
+                row["configuration_observation"] = copy.deepcopy(observation)
+                MONITOR.finalize_device(row)
+                self.assertNotEqual("success", row["overall"])
+        for secondary in (False, True):
+            row = self.complete_fixture()
+            row["configuration_observation"] = copy.deepcopy(positive)
+            if secondary:
+                row["candidate_identity"] = {"192.0.2.2": ["eth1", "001122334466"]}
+                row["configuration_observation"].update(interface="eth1", transport_ip="192.0.2.2", mac_plain="001122334466")
+            MONITOR.finalize_device(row)
+            self.assertEqual("success", row["overall"])
+            self.assertTrue(MONITOR.completion_handoff_device_complete(row))
+            self.assertTrue(HTML.ztp_completed(row))
+            with tempfile.TemporaryDirectory() as directory:
+                report = {"project": "private-positive-fixture", "scope": "prod", "devices": [row],
+                          "generated_at": "2026-09-01T12:00:00+08:00", "since_minutes": 10,
+                          "services": {}, "collection_errors": []}
+                snapshot = MONITOR.write_report(report, Path(directory), {})
+                saved = json.loads((snapshot / "report.json").read_text())["devices"][0]
+                self.assertTrue(MONITOR.completion_handoff_device_complete(saved))
+                self.assertTrue(HTML.ztp_completed(saved))
+
+    def test_actual_negative_observer_without_manual_journal_survives_report_html_boundary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            row = self.complete_fixture()
+            row.update(mac_plain="001122334455", events=[])
+            stale_stages = copy.deepcopy(row["stages"])
+            # Successful SSH/log input without same-session BatchMode/live proof.
+            # No configuration journal exists; its absence cannot erase this
+            # real analyzer's explicit new negative observation.
+            result = {"kind": "ok", "returncode": 0, "connected_ip": "192.0.2.1",
+                      "remote_hostname": "Leaf01", "remote_eth0_mac": "00:11:22:33:44:55",
+                      "remote_eth1_mac": "", "ztp_log": "", "ifreload_log": "",
+                      "failed_yaml": "", "stderr": "", "attempts": [], "host_key_commands": []}
+            MONITOR.analyze_switch(row, result)
+            self.assertIs(False, row["configuration_observation"]["batch_identity_verified"])
+            history = root / "absent-config-history"
+            history.mkdir(mode=0o700)
+            MONITOR.apply_current_config_sync_authority(row, result, history, None)
+            self.assertNotIn("configuration_authority", row)
+            row.update(stages=stale_stages, issues=[], overall="success")
+            MONITOR.finalize_device(row)
+            self.assertNotEqual("success", row["overall"])
+            report = {"project": "private-fixture", "scope": "prod", "devices": [row],
+                      "generated_at": "2026-09-01T12:00:00+08:00", "since_minutes": 10,
+                      "services": {}, "collection_errors": []}
+            snapshot = MONITOR.write_report(report, root / "reports", {})
+            saved = json.loads((snapshot / "report.json").read_text())["devices"][0]
+            self.assertFalse(MONITOR.completion_handoff_device_complete(saved))
+            self.assertFalse(HTML.ztp_completed(saved))
+            self.assertEqual({}, MONITOR.ready_completion_handoff_reports(report))
+            self.assertFalse(any(path.name.endswith(".json") for path in history.rglob("*")))
 
     def test_server_ufm_unknown_types_cannot_use_switch_completion_even_with_nine_successes(self):
         for kind in ("server", "ufm", "UFM", "server-ufm", "eth_jump", "future-switch", "", None):

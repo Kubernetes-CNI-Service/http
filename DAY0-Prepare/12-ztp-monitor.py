@@ -3663,7 +3663,7 @@ def finalize_device(device: dict[str, Any]) -> None:
         device["overall"] = "warning"
         device["issues"].append({
             "code": "CURRENT_NINE_STAGE_PROOF_INCOMPLETE", "severity": "warning",
-            "message": "当前轮九阶段证据不完整或时间不可比；总体成功与完成交接均不放行",
+            "message": "当前轮九阶段来源、新鲜身份/live 观察或可比时间证据不完整；总体成功与完成交接均不放行",
         })
 
 
@@ -5017,6 +5017,7 @@ def completion_handoff_device_complete(device: Any) -> bool:
     device_type = str(device.get("type") or "").strip().casefold()
     if (completion_handoff_group(device) is None
             or device_type.startswith("pending_")
+            or not config_sync_authority.monitor_observation_allows_completion(device)
             or not isinstance(device.get("progress"), dict)
             or device["progress"].get("percent") != 100
             or any(device.get(flag, False) is not False for flag in (
