@@ -28,6 +28,39 @@ from test_cases.test_issue_tracker_stage_l_consumer import ProdStageLFixture
 
 
 class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
+    def _exercise_timed_out_boot_probe(self, **options):
+        from test_cases.test_collection_cycle_persistence import WORKER
+
+        original_run = subprocess.run
+        original_is_file = Path.is_file
+        timed_out_probes = []
+
+        def bounded_probe(command, *args, **kwargs):
+            if command == ["/usr/sbin/sysctl", "-n", "kern.boottime"]:
+                timed_out_probes.append(command)
+                raise subprocess.TimeoutExpired(command, 2)
+            return original_run(command, *args, **kwargs)
+
+        def no_linux_boot_file(path):
+            return False if str(path) == "/proc/sys/kernel/random/boot_id" \
+                else original_is_file(path)
+
+        with mock.patch.object(WORKER.subprocess, "run", side_effect=bounded_probe), \
+                mock.patch.object(WORKER.Path, "is_file", autospec=True,
+                                  side_effect=no_linux_boot_file):
+            self._exercise_real_protected_three_panel_fixture(
+                skip_history=False, **options,
+            )
+        self.assertTrue(timed_out_probes, "the workflow must execute the injected fault")
+
+    def test_boot_probe_timeout_does_not_admit_n_two_local_c6(self):
+        self._exercise_timed_out_boot_probe(
+            automatic_first=True, automatic_not_due=True,
+        )
+
+    def test_boot_probe_timeout_does_not_auto_readmit_manual_receipt(self):
+        self._exercise_timed_out_boot_probe(replayed_auto=True)
+
     def test_real_nine_role_ib_and_eth_fourth_role_qualify_and_c5_reject_drift(self):
         self._exercise_real_protected_three_panel_fixture(skip_history=False)
 

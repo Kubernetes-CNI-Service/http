@@ -292,14 +292,17 @@ def _current_boot_identity() -> str:
     linux_boot = Path("/proc/sys/kernel/random/boot_id")
     if linux_boot.is_file():
         return linux_boot.read_text(encoding="ascii").strip()
-    result = subprocess.run(
-        ["/usr/sbin/sysctl", "-n", "kern.boottime"],
-        text=True,
-        capture_output=True,
-        timeout=2,
-        check=False,
-    )
-    if not result.returncode and result.stdout.strip():
+    try:
+        result = subprocess.run(
+            ["/usr/sbin/sysctl", "-n", "kern.boottime"],
+            text=True,
+            capture_output=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        result = None
+    if result is not None and not result.returncode and result.stdout.strip():
         return hashlib.sha256(result.stdout.strip().encode("utf-8")).hexdigest()
     # Sandboxed macOS can deny both sysctl and foreign-process inspection.
     # The wall-clock/monotonic delta is the boot epoch; minute quantisation

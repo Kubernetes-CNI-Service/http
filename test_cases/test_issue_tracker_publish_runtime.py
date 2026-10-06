@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import subprocess
 import unittest
 from unittest import mock
 from types import SimpleNamespace
@@ -11,6 +13,19 @@ from test_cases.test_issue_tracker_switch_runtime import RuntimeWorkerFixture
 
 
 class StageLRuntimeDirectTests(RuntimeWorkerFixture, unittest.TestCase):
+    def test_boot_identity_probe_timeout_uses_the_existing_denied_probe_contract(self):
+        from test_cases.test_collection_cycle_persistence import WORKER
+
+        expected = hashlib.sha256(b"boot-minute:100").hexdigest()
+        for failure in (subprocess.TimeoutExpired(["/usr/sbin/sysctl"], 2),
+                        OSError("sysctl unavailable")):
+            with self.subTest(failure=type(failure).__name__), \
+                    mock.patch.object(WORKER.Path, "is_file", return_value=False), \
+                    mock.patch.object(WORKER.subprocess, "run", side_effect=failure), \
+                    mock.patch.object(WORKER.time, "time", return_value=6060), \
+                    mock.patch.object(WORKER.time, "monotonic", return_value=60):
+                self.assertEqual(expected, WORKER._current_boot_identity())
+
     def test_manual_entry_refuses_prior_auto_admission_before_qualification(self):
         from monitor.issue_tracker_publish_runtime import (
             StageLHold, commit_qualified_prod_local,

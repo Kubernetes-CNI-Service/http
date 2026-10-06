@@ -701,6 +701,7 @@
         "monitor/*"
       ],
       "tests": [
+        "test_cases.test_issue_tracker_publish_runtime",
         "test_cases.test_collection_cycle_persistence",
         "test_cases.test_collection_cycle_worker_contract",
         "test_cases.test_collection_v2_emitter_contract",
