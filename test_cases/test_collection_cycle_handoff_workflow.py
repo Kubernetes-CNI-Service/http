@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import hashlib
 import fcntl
+from contextlib import redirect_stderr
+import io
 import json
 import errno
 import os
@@ -24,6 +26,7 @@ import tempfile
 import termios
 import time
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,6 +35,22 @@ RUN_TOKEN = "12345678123442348123456789abcdef"
 SEQUENCE = 7
 PROJECT_IDENTITY = "/project-fixture"
 PROJECT_KEY = hashlib.sha256(PROJECT_IDENTITY.encode("utf-8")).hexdigest()
+
+
+def run_workflow_process(argv, **kwargs):
+    """Retain private child phase output without swallowing/relaxing a timeout."""
+    try:
+        return subprocess.run(argv, **kwargs)
+    except subprocess.TimeoutExpired as exc:
+        for field in ("stdout", "stderr"):
+            data = getattr(exc, field) or ""
+            if isinstance(data, bytes):
+                data = data.decode("utf-8", errors="backslashreplace")
+            print(f"COLLECTION_WORKFLOW_TIMEOUT_{field.upper()}\n" + data,
+                  file=sys.stderr, flush=True)
+        raise
+
+
 EXPECTED_SLOTS = {
     "air": ("ethernet/air",),
     "prod": (
@@ -455,6 +474,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 
 root = Path(sys.argv[1]).resolve()
 scope = sys.argv[2]
@@ -467,6 +487,28 @@ if mode == "helper_failure":
     )
 sys.path.insert(0, str(root / "monitor"))
 worker = runpy.run_path(str(root / "monitor/switch-collection-worker.py"))
+original_interruptible = worker["run_interruptible"]
+def observed_interruptible(command, cwd, timeout, **kwargs):
+    started = time.monotonic()
+    phase = "plan" if "--emit-target-plan-fd" in command else "collect"
+    slot = Path(cwd).parent.name + "/" + ("air" if "--air" in command else "prod")
+    print("COLLECTION_PHASE_START " + json.dumps({
+        "phase": phase, "slot": slot, "timeout": timeout,
+    }), file=sys.stderr, flush=True)
+    try:
+        result = original_interruptible(command, cwd, timeout, **kwargs)
+    except BaseException as exc:
+        print("COLLECTION_PHASE_EXCEPTION " + json.dumps({
+            "phase": phase, "slot": slot, "elapsed": time.monotonic() - started,
+            "exception": type(exc).__name__,
+        }), file=sys.stderr, flush=True)
+        raise
+    print("COLLECTION_PHASE_END " + json.dumps({
+        "phase": phase, "slot": slot, "elapsed": time.monotonic() - started,
+        "returncode": result[0]["returncode"], "cancelled": result[1],
+    }), file=sys.stderr, flush=True)
+    return result
+original_interruptible.__globals__["run_interruptible"] = observed_interruptible
 required = ("run_collection_slots", "parse_collection_slot_result")
 missing = [name for name in required if not callable(worker.get(name))]
 if missing:
@@ -627,6 +669,42 @@ else:
 
 
 class CollectionCycleHandoffWorkflowTests(unittest.TestCase):
+    def test_fixture_child_python_is_bound_to_current_test_interpreter(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.make_layout(directory)
+            probe = subprocess.run(
+                ["/usr/bin/env", "python3", "-B", "-c",
+                 "import json,os,sys,shutil; a=os.stat(sys.executable); b=os.stat(shutil.which('python3')); "
+                 "print(json.dumps({'runtime':[a.st_dev,a.st_ino], 'launcher':[b.st_dev,b.st_ino]}))"],
+                env=self._fixture_environment(root), text=True,
+                capture_output=True, timeout=10, check=False,
+            )
+            self.assertEqual(0, probe.returncode, probe.stderr)
+            expected = os.stat(sys.executable)
+            identity = [expected.st_dev, expected.st_ino]
+            observed = json.loads(probe.stdout)
+            self.assertEqual(identity, observed["runtime"])
+            self.assertEqual(identity, observed["launcher"], "do not depend on a different platform launcher")
+
+    def test_workflow_timeout_preserves_phase_streams_and_original_exception(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.make_layout(directory)
+            error = subprocess.TimeoutExpired(
+                ["private-fixture"], 30,
+                output=b"child-started\n",
+                stderr=b'COLLECTION_PHASE_START {"phase":"collect","slot":"infiniband/prod"}\n',
+            )
+            diagnostics = io.StringIO()
+            with mock.patch.object(subprocess, "run", side_effect=error) as run, \
+                    redirect_stderr(diagnostics):
+                with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                    self.run_workflow(root, "all", "mixed_nonempty")
+            self.assertIs(error, caught.exception, "never replace or swallow the original timeout")
+            self.assertEqual(30, run.call_args.kwargs["timeout"])
+            self.assertIn("COLLECTION_WORKFLOW_TIMEOUT_STDOUT\nchild-started\n", diagnostics.getvalue())
+            self.assertIn('COLLECTION_PHASE_START {"phase":"collect","slot":"infiniband/prod"}', diagnostics.getvalue())
+            self.assertIn("COLLECTION_WORKFLOW_TIMEOUT_STDERR", diagnostics.getvalue())
+
     def test_real_cron_target_plan_phase_has_no_collection_side_effects(self):
         """Planning binds targets without opening SSH or producing archives."""
         with tempfile.TemporaryDirectory() as directory:
@@ -702,6 +780,9 @@ class CollectionCycleHandoffWorkflowTests(unittest.TestCase):
         air_json.write_text('{"nodes":{}}\n', encoding="utf-8")
         fixture_bin = root / "fixture-bin"
         fixture_bin.mkdir()
+        # The system launcher may happen to resolve the same framework today;
+        # bind the private fixture to the tested entry point explicitly.
+        (fixture_bin / "python3").symlink_to(sys.executable)
         (fixture_bin / "bash").write_text(BOUNDARY_BASH, encoding="utf-8")
         (fixture_bin / "bash").chmod(0o755)
         (root / "fixture-bash-env.sh").write_text(
@@ -744,7 +825,7 @@ class CollectionCycleHandoffWorkflowTests(unittest.TestCase):
     ) -> tuple[subprocess.CompletedProcess[str], dict | None, list[dict]]:
         trace = root / "fixture-trace.jsonl"
         trace.unlink(missing_ok=True)
-        completed = subprocess.run(
+        completed = run_workflow_process(
             [
                 sys.executable, "-B", "-c", BOOTSTRAP,
                 str(root), scope, mode, target, action,
