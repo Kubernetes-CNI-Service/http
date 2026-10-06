@@ -176,6 +176,25 @@ full。失败、未知原因、日志缺失或中断仍保持无证明状态，�
    自动生成的 ledger 单独提交、干净树的 `--check --require-full` exit0 才算本地正式
    证明。局部回归和旧树证明不能代替它；本地 proof 不关闭独立 Linux/设备/断电见证卡。
 
+### R22 related 的 bootstrap 超时诊断记录（未收口）
+
+代码候选 `01cf5bcd08758a26146dd1b857f291411ca55d3f` 的 related 原日志
+`outputs/test-diagnostics/r22-created-dir-reentry-related.log` 完整为 3154 tests、
+1 ERROR / 4 SKIP、exit 1（SHA256
+`6b232cabeeb43c9285eb793b357582f5dd3a489719937c0a55a38329db000cf2`）。
+错误是 bootstrap direct 的 401 subtest 达到原有 15 秒时限；原报告没有子进程部分输出、
+事件末尾或后代进程状态，私有临时目录已清理，故原始原因仍为**待核**，不得推断为 R22
+实现错误或已证实的环境竞争。
+
+诊断增强只在测试夹具保留有界 stdout/stderr 尾部及经前后身份校验的事件尾部，仍抛出
+`TimeoutExpired`，原 15 秒、原输出属性和认证断言不变；后代状态未捕获时明确记 unknown。
+两项独立诊断预期先 RED 后 GREEN。按原前序 entrypoint → Apache boundary → bootstrap
+direct → 真实 rendered workflow 的小范围复核，外加诊断预期，36 tests 完整 exit 0，日志
+`outputs/test-diagnostics/r22-related-bootstrap-original-prefix-diagnostic.log`（SHA256
+`98dab6d299d2f534dccbfb395a0de3c5558fc4cb81ee573e2f60766b8c2de7b7`）。
+该结果只说明本次小范围未重现，不解释原超时、不更新 approved ledger，也不满足下一次
+related/full 的原因收口或重跑闸门。R22 新修复与整树正式证明仍须分别如实报告。
+
 ## Full proof 性能诊断记录
 
 本节只记录测量方法与优化判定，不改变上面的测试和证明门禁。正式 full proof 仍须由
