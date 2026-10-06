@@ -456,7 +456,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
         <p>本目录由 <code>tools/update-user-manual.py</code> 从 Git tracked 与非忽略文件生成；每个受维护文件必须有独立说明。大量项目数据、镜像、缓存与运行输出按路径模式说明，不把二进制内容嵌入网页。</p>
         <!-- BEGIN GENERATED USER MANUAL FILE CATALOG -->
         <div class="catalog-summary">
-          <span><strong>519</strong> 个受维护文件</span>
+          <span><strong>522</strong> 个受维护文件</span>
           <span><strong>24</strong> 个根级分组</span>
           <span>清单范围：Git tracked + untracked/nonignored</span>
         </div>
@@ -687,7 +687,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </tbody></table></div>
         </details>
         <details id="v2-file-group-test-cases" data-nav-title="test_cases/ 文件" class="catalog-group">
-          <summary><code>test_cases/</code> — 226 个文件</summary>
+          <summary><code>test_cases/</code> — 228 个文件</summary>
           <div><table class="file-catalog"><thead><tr><th>文件</th><th>说明</th></tr></thead><tbody>
             <tr data-file-path="test_cases/CASE_TEMPLATE.md"><td><code>test_cases/CASE_TEMPLATE.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>新增真机/破坏性验证案例时必须填写的证据模板。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/CHANGE_AWARE_TESTING.md"><td><code>test_cases/CHANGE_AWARE_TESTING.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：脚本变更影响测试。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -726,6 +726,8 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="test_cases/test_collection_v2_emitter_contract.py"><td><code>test_cases/test_collection_v2_emitter_contract.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent direct contract for the private A4 collection-v2 publisher。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_collector_inventory_pubkey.py"><td><code>test_cases/test_collector_inventory_pubkey.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct contracts for collector inventory and management-key binding。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_collector_inventory_pubkey_workflow.py"><td><code>test_cases/test_collector_inventory_pubkey_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Scenario contract across all three published collector entrypoints。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_config_sync_authority.py"><td><code>test_cases/test_config_sync_authority.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent F02 local generation/veto contracts (no device operations)。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_config_sync_authority_workflow.py"><td><code>test_cases/test_config_sync_authority_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>F02 real manual writer -&gt; local generation journal, with isolated device I/O。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_continuous_interval_handoff_workflow.py"><td><code>test_cases/test_continuous_interval_handoff_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Real-subprocess handoff for the canonical continuous interval floor。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_control_auth.py"><td><code>test_cases/test_control_auth.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct contracts for the Monitor control-auth credential helper。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_cumulus_snippet_rendering.py"><td><code>test_cases/test_cumulus_snippet_rendering.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Cumulus ifupdown2 snippet rendering and runtime-compare contracts。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -1015,7 +1017,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </tbody></table></div>
         </details>
         <details id="v2-file-group-ztp" data-nav-title="ztp/ 文件" class="catalog-group">
-          <summary><code>ztp/</code> — 68 个文件</summary>
+          <summary><code>ztp/</code> — 69 个文件</summary>
           <div><table class="file-catalog"><thead><tr><th>文件</th><th>说明</th></tr></thead><tbody>
             <tr data-file-path="ztp/backup/README.md"><td><code>ztp/backup/README.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：交换机配置备份。 <strong>维护/生成责任：</strong>文档维护者随行为变更同步更新；生成索引不得手工改写生成块。</td></tr>
             <tr data-file-path="ztp/backup/permission-sweep.py"><td><code>ztp/backup/permission-sweep.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Inventory and narrowly tighten an existing managed backup tree。 <strong>维护/生成责任：</strong>项目输入由项目维护者编辑；发布链接、receipt、状态和输出只允许对应事务/worker 生成。</td></tr>
@@ -1072,6 +1074,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="ztp/config/nvos/template/P2P/p2p-to-validation.py"><td><code>ztp/config/nvos/template/P2P/p2p-to-validation.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Convert CL/CS link sheets in an XLSX workbook to a CVT workbook。 <strong>维护/生成责任：</strong>模板/示例维护者修改；真实项目和生成输出不得反向覆盖模板。</td></tr>
             <tr data-file-path="ztp/config/nvos/template/README.md"><td><code>ztp/config/nvos/template/README.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：NVOS 配置生成工作目录。 <strong>维护/生成责任：</strong>文档维护者随行为变更同步更新；生成索引不得手工改写生成块。</td></tr>
             <tr data-file-path="ztp/config/topology_rules.py"><td><code>ztp/config/topology_rules.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Shared, dependency-free inventory classification rules。 <strong>维护/生成责任：</strong>项目输入由项目维护者编辑；发布链接、receipt、状态和输出只允许对应事务/worker 生成。</td></tr>
+            <tr data-file-path="ztp/config_sync_authority.py"><td><code>ztp/config_sync_authority.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Local single-writer F02 generations; not an independent rollback backend。 <strong>维护/生成责任：</strong>项目输入由项目维护者编辑；发布链接、receipt、状态和输出只允许对应事务/worker 生成。</td></tr>
             <tr data-file-path="ztp/dhcp_runtime_inventory.py"><td><code>ztp/dhcp_runtime_inventory.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Build a read-only inventory of DHCP clients not yet bound to project MACs。 <strong>维护/生成责任：</strong>项目输入由项目维护者编辑；发布链接、receipt、状态和输出只允许对应事务/worker 生成。</td></tr>
             <tr data-file-path="ztp/dynamic_air_inventory.py"><td><code>ztp/dynamic_air_inventory.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Resolve AIR-only Cumulus nodes that receive dynamic DHCP addresses。 <strong>维护/生成责任：</strong>项目输入由项目维护者编辑；发布链接、receipt、状态和输出只允许对应事务/worker 生成。</td></tr>
             <tr data-file-path="ztp/environment_probe.py"><td><code>ztp/environment_probe.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Determine whether this collector currently reaches Production or AIR。 <strong>维护/生成责任：</strong>项目输入由项目维护者编辑；发布链接、receipt、状态和输出只允许对应事务/worker 生成。</td></tr>
@@ -1151,7 +1154,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
         <p>以下参考覆盖当前工作树中的每个 Python、Shell 与 CGI 文件，包括操作入口、内部库、worker、设备端脚本和开发测试。先看“是否直接运行”，再复制示例；内部组件不得脱离所属事务单独执行。</p>
         <!-- BEGIN GENERATED USER MANUAL SCRIPT REFERENCE -->
         <div class="catalog-summary">
-          <span><strong>382</strong> 个脚本型文件</span>
+          <span><strong>385</strong> 个脚本型文件</span>
           <span><strong>9</strong> 个功能分组</span>
           <span>每项均含运行、输入输出、示例与恢复合同</span>
         </div>
@@ -2350,7 +2353,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>readlink nvlink/monitor/sw-link.sh  # 预期解析到 ../../ethernet/monitor/sw-link.sh</code></pre></div>
         </details>
-        <h4 id="v2-script-group-test-cases" data-nav-title="test_cases/ 脚本">test_cases/ — 219 个脚本</h4>
+        <h4 id="v2-script-group-test-cases" data-nav-title="test_cases/ 脚本">test_cases/ — 221 个脚本</h4>
         <details data-script-reference="test_cases/__init__.py" class="script-reference">
           <summary><code>test_cases/__init__.py</code> — Canonical executable regression and integration test case package。</summary>
           <div class="script-body"><dl>
@@ -2908,6 +2911,42 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </dl>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_collector_inventory_pubkey_workflow</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_config_sync_authority.py" class="script-reference">
+          <summary><code>test_cases/test_config_sync_authority.py</code> — Independent F02 local generation/veto contracts (no device operations)。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Independent F02 local generation/veto contracts (no device operations)。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_config_sync_authority</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_config_sync_authority</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_config_sync_authority_workflow.py" class="script-reference">
+          <summary><code>test_cases/test_config_sync_authority_workflow.py</code> — F02 real manual writer -&gt; local generation journal, with isolated device I/O。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>F02 real manual writer -&gt; local generation journal, with isolated device I/O。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_config_sync_authority_workflow</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_config_sync_authority_workflow</code></pre></div>
         </details>
         <details data-script-reference="test_cases/test_continuous_interval_handoff_workflow.py" class="script-reference">
           <summary><code>test_cases/test_continuous_interval_handoff_workflow.py</code> — Real-subprocess handoff for the canonical continuous interval floor。</summary>
@@ -7680,7 +7719,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>rg -n &quot;ztp_service_runtime&quot; DAY0-Prepare infra monitor tools ztp  # 查找受支持调用者</code></pre></div>
         </details>
-        <h4 id="v2-script-group-ztp" data-nav-title="ztp/ 脚本">ztp/ — 20 个脚本</h4>
+        <h4 id="v2-script-group-ztp" data-nav-title="ztp/ 脚本">ztp/ — 21 个脚本</h4>
         <details data-script-reference="ztp/backup/permission-sweep.py" class="script-reference">
           <summary><code>ztp/backup/permission-sweep.py</code> — Inventory and narrowly tighten an existing managed backup tree。</summary>
           <div class="script-body"><dl>
@@ -7878,6 +7917,24 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </dl>
           <p><strong>示例：</strong></p>
           <pre><code>python3 -B -m py_compile ztp/config/topology_rules.py  # 仅语法验证；实际运行由上层流程负责</code></pre></div>
+        </details>
+        <details data-script-reference="ztp/config_sync_authority.py" class="script-reference">
+          <summary><code>ztp/config_sync_authority.py</code> — Local single-writer F02 generations; not an independent rollback backend。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Local single-writer F02 generations; not an independent rollback backend。</dd>
+            <dt>是否直接运行：</dt><dd>否；这是共享库/安全边界，由其列出的生产入口导入。</dd>
+            <dt>运行环境：</dt><dd>随所属 Native、Docker、打包、监控或分析流程运行，不单独取得运行权限。</dd>
+            <dt>使用场景：</dt><dd>上层入口需要路径校验、锁、解析、事务、状态投影或分析算法时调用。</dd>
+            <dt>前置条件：</dt><dd>调用者已建立正确 root、权限、锁、输入身份和失败处理；不得绕过上层 preflight。</dd>
+            <dt>语法/调用方式：</dt><dd>由上层 Python 模块导入 ztp/config_sync_authority.py 中的公开函数/类</dd>
+            <dt>主要参数：</dt><dd>无受支持的独立 CLI。</dd>
+            <dt>输入：</dt><dd>调用者已验证的数据结构、文件描述符或路径；具体 schema 由模块 direct 测试锁定。</dd>
+            <dt>输出/状态：</dt><dd>返回值、受控异常或调用者事务内的状态变化；库自身不构成完整部署。</dd>
+            <dt>成功判据：</dt><dd>调用者完成后置校验且整个上层事务提交；单个函数返回不等于部署成功。</dd>
+            <dt>失败恢复：</dt><dd>让异常向上层 fail closed；保留锁、marker 和原始输入证据，不在库外手工补写。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>rg -n &quot;config_sync_authority&quot; DAY0-Prepare infra monitor tools ztp  # 查找受支持调用者</code></pre></div>
         </details>
         <details data-script-reference="ztp/dhcp_runtime_inventory.py" class="script-reference">
           <summary><code>ztp/dhcp_runtime_inventory.py</code> — Build a read-only inventory of DHCP clients not yet bound to project MACs。</summary>

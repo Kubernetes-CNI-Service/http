@@ -724,6 +724,15 @@ class DocumentationCatalogTests(unittest.TestCase):
         self.assertIn("JSON", helper["outputs"])
         self.assertNotIn("-m unittest -v test_cases.validation_unittest", helper["example"])
 
+    def test_f02_generation_authority_is_a_library_not_an_operator_cli(self):
+        updater = load_path("manual_f02_generation_library", USER_MANUAL_SCRIPT)
+        profile = updater.script_profile(ROOT, "ztp/config_sync_authority.py")
+        self.assertTrue(profile["direct"].startswith("否"))
+        self.assertIn("共享库", profile["direct"])
+        self.assertIn("无受支持的独立 CLI", profile["parameters"])
+        self.assertIn("由上层 Python 模块导入", profile["syntax"])
+        self.assertNotIn("python3 -B ztp/config_sync_authority.py", profile["syntax"])
+
     def test_uninstalled_manual_channel_profiles_do_not_claim_runtime_authority(self):
         updater = load_path("manual_uninstalled_channel", USER_MANUAL_SCRIPT)
         channel = updater.script_profile(ROOT, "monitor/issue_tracker_manual_channel.py")

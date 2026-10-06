@@ -373,7 +373,7 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
             "_package_common.py", "deployment_lock.py", "deployment_prewrite_guard.py",
             "project_contract.py", "ztp_service_runtime.py", "switch_collection_gate.py",
             "dhcp_runtime_inventory.py", "dynamic_air_inventory.py", "environment_probe.py",
-            "nvue_normalizer.py",
+            "nvue_normalizer.py", "config_sync_authority.py",
         }
     )
     is_cgi = path.suffix.lower() == ".cgi"
