@@ -481,6 +481,9 @@ bootstrap 的专属 MAC YAML 获取：固定为 5 次重试、3 秒间隔、5 �
 只重试连接失败和 5xx。明确 404 才允许使用 default 并标记 degraded/source_kind=default；
 401/403、空 200、连接或 5xx 耗尽必须终止，且不能产生 NV 配置写入、成功回执、last-success
 或 authorized_keys。
+该 direct 的超时事件诊断通过持有 FD 的前后 dev/ino/mode/nlink/size/mtime/ctime 和
+当前名称身份检验有界尾部；同 inode ABA 也须标为不稳定、拒绝输出尾部。诊断增强不改变
+原 15 秒夹具时限或认证断言；小范围前序未重现不能当作历史 full/related 失败原因已收口。
 `test_ztp_http_identity_binding.py` 覆盖 OOB Leaf 通过前面板 transit
 端口取得 DHCP、再用 eth0 MAC 下载专属 YAML 时的 canonical 身份归属；404、歧义 MAC 和匿名
 别名不能冒充受管设备；已有 eth0 IP 时禁止 transit 回退，eth0 IP 为空时只有 canonical eth0

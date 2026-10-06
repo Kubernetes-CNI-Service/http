@@ -195,6 +195,30 @@ direct → 真实 rendered workflow 的小范围复核，外加诊断预期，36
 该结果只说明本次小范围未重现，不解释原超时、不更新 approved ledger，也不满足下一次
 related/full 的原因收口或重跑闸门。R22 新修复与整树正式证明仍须分别如实报告。
 
+后续诊断证据审阅发现 `_timeout_event_evidence` 原先只比 dev/ino/size/mtime，
+同 inode 写后恢复原 bytes/size/mtime 会被误报 stable。新增独立 direct 在实际读取 FD
+之后完成该 ABA，要求 stable=false、tail 为空且原事件文件内容保留；原 reader 1 FAIL /
+exit1，日志 `outputs/test-diagnostics/r22-bootstrap-events-ctime-red.log`，inode
+144208683，size 981，SHA256
+`259a6c5ff1164a9a7191a5b041be1a0d3388408429f6d2ea2ed4da1c19c23352`。
+修复仅给前后 FD/name 身份增加 mode/nlink/ctime，并在诊断中保留初读的 mtime/ctime；
+不稳定时仍不输出事件尾部。原 15 秒、超时输出属性、认证/重试断言和错误类型不变。
+三个诊断 direct 完整 OK / exit0，日志 `r22-bootstrap-events-ctime-green.log`，
+inode 144208691，size 616，SHA256
+`842a2f73eb91b7c028fc4d58e9d5d09a63b077e11cc503e81d9130d71d1b0ec8`。
+
+按原 entrypoint→Apache boundary→bootstrap direct→真实 LOAD 渲染 workflow 前序
+再次小范围复核，完整 37 tests / OK / exit0（58.763 秒），不是正式 related/full：
+`r22-bootstrap-events-ctime-prefix.log`，inode 144209228，size 6001，SHA256
+`608b068c3350e8f4734d86761d44f4a93df487d340a0fb88d083aee1c673b7cc`。
+读前后 stat 一致，旧 3668 字节前缀 SHA256
+`78329b66b76e4ad19da50b91d6cf8a8ac6b742c8164580b7232b9fafdb91c50b` 未变，
+完整 Ran/OK 在物理 `R22_BOOTSTRAP_EVENTS_CTIME_PREFIX_EXIT=0` 前，exec exit0 一致。
+原 3154 tests related 失败日志的 inode/完整 SHA256 再核一致，未改原日志和认证断言。
+该修复只消除诊断日志的假稳定风险；新复核未重现超时，不解释历史 401 的 15 秒超时，
+后代状态仍 unknown，不能据此放行正式 related/full 或称 R22 恢复完成。approved ledger
+保持原字节，Linux/断电、完整写集、显式旧 A 健康激活及其它未闭项不变。
+
 ### R22 SETUP 回滚与次级清理的本地候选记录
 
 SETUP 的进程内异常回滚原来按内存 `missing` 前像删除后来出现的同名链接，并在完整

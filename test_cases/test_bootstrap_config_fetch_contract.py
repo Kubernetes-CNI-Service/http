@@ -67,10 +67,14 @@ def _timeout_event_evidence(events: Path) -> dict:
             tail = os.read(fd, 8192)
             after = os.fstat(fd)
             named = events.lstat()
-            identity = lambda value: (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns)
+            identity = lambda value: (
+                value.st_dev, value.st_ino, value.st_mode, value.st_nlink,
+                value.st_size, value.st_mtime_ns, value.st_ctime_ns,
+            )
             stable = identity(before) == identity(after) == identity(named)
             return {
                 "stable": stable, "inode": before.st_ino, "size": before.st_size,
+                "mtime_ns": before.st_mtime_ns, "ctime_ns": before.st_ctime_ns,
                 "tail": tail.decode("utf-8", errors="replace") if stable else "",
             }
         finally:
@@ -369,6 +373,36 @@ def default_mutations(events: list[str]) -> list[str]:
 
 
 class BootstrapFetchHarnessDiagnosticsTests(unittest.TestCase):
+    def test_timeout_event_same_inode_aba_is_not_stable_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            events = Path(directory) / "events.log"
+            original = b"last-event:401\n"
+            events.write_bytes(original)
+            metadata = events.stat()
+            real_read = os.read
+            observed = []
+
+            def mutate_after_read(descriptor, count):
+                payload = real_read(descriptor, count)
+                opened = os.fstat(descriptor)
+                if not observed and (opened.st_dev, opened.st_ino) == (metadata.st_dev, metadata.st_ino):
+                    observed.append(True)
+                    events.write_bytes(b"last-event:403\n")
+                    events.write_bytes(original)
+                    os.utime(events, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+                    after = events.stat()
+                    self.assertEqual((metadata.st_ino, metadata.st_size, metadata.st_mtime_ns),
+                                     (after.st_ino, after.st_size, after.st_mtime_ns))
+                    self.assertNotEqual(metadata.st_ctime_ns, after.st_ctime_ns)
+                return payload
+
+            with mock.patch.object(os, "read", side_effect=mutate_after_read):
+                diagnostic = _timeout_event_evidence(events)
+            self.assertTrue(observed)
+            self.assertFalse(diagnostic["stable"], "same-inode ABA cannot be frozen failure evidence")
+            self.assertEqual("", diagnostic["tail"], "do not emit an untrusted event tail as evidence")
+            self.assertEqual(original, events.read_bytes())
+
     def test_timeout_keeps_fifteen_second_limit_and_original_partial_output(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
