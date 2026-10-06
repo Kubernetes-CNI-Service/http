@@ -526,6 +526,58 @@ R22 卡继续 OPEN。本次不是整个 generation workflow、related 或正式 
 不能称完整 R22 已落地或本地正式验收。原 bootstrap/REQ19 超时原因仍待核，
 不因这些局部 PASS 放行 related/full，不手改 ledger 或套旧证明。
 
+### R22 四文件盘上前像的新进程只读核验候选
+
+新增 independent direct 和真实 SETUP→DHCP parent 同步失败→新 Python 进程
+读取复制 LOAD API workflow，要求只从盘上核对四文件 A/backup、已可见 B 和
+parent，零外部命令、零恢复/清理/启动，保留全部原名称、身份及字节。原版本无
+该接口，3 tests / 2 FAIL / 7 ERROR / exit1（11.241 秒），日志
+`outputs/test-diagnostics/r22-dhcp-disk-preimage-inspection-red.log`，inode 146420402，
+size 9435，SHA256 `024485d157cdb634595c3b7fced4865ddef0e8767a4081800a7cd006fcd67998`。
+这是新增能力的 RED，不把缺接口错误描述为原流程已发生自动恢复或数据破坏。
+
+实现的 owner 显式输入决定可读路径，JSON/checksum 不可授予另一 runtime 或 parent
+路径读取权。held NOFOLLOW 目录链、同 owner/private/single-link 有界 record、唯一
+JSON keys/schema/phase/checksum、固定四文件及父候选字段均先核；读取所有 backup
+和 runtime/parent 后，再核组内 leaf identity/bytes 与 FD/名称，未知状态只 HOLD。
+parent B 摘要一致仅报告 b-visible，不称 directory_synced、健康或恢复/激活许可。
+
+首轮实现复核 3 tests / 1 ERROR / exit1，日志
+`r22-dhcp-disk-preimage-inspection-green.log`，inode 146425144，size 2064，SHA256
+`9069747a60c6acc19971744324a0b27b227824490c22f095bf196357b63d702b`。
+确切原因是 direct 夹具把原 preparation 的 /var 路径 resolve 为 /private/var，
+违反同一 literal parent 身份；workflow 的原路径正例已通过。只纠正夹具传入原
+project 路径，生产路径门禁不放宽；并为六个负例分别断言具体拒绝原因，防止一个
+前置错误掩盖全部负例。不将该日志名中的 green 冒称完整通过。
+
+追加独立“backup 内额外未知子项”要求保留该对象并 HOLD；新 reader 首版没有
+核闭合集，1 FAIL / exit1，日志 `r22-dhcp-disk-preimage-extra-backup-red.log`，
+inode 146429659，size 1169，SHA256
+`3b5cbf0f5af5b024fb9ee9ac6371ea0b77022901cd01abd69063f05502c2d612`。
+候选核 held backup 目录的完整名称集合，原 missing 对应缺席，不采纳未知子项。
+修正后的正例/六类拒绝/未知子项/fresh workflow 共 4 OK / exit0（11.422 秒），
+日志 `r22-dhcp-disk-preimage-inspection-corrected-green.log`，inode 146429740，
+size 738，SHA256 `340f7c8ca583ec1d62dbf92ef134c1bb9659ce275d4b8cc97c995149f82307c7`。
+原链接、原缺席与未提交 B parent 的补充正例 1 OK / exit0，日志
+`r22-dhcp-disk-preimage-old-shapes.log`，inode 146434295，size 275，SHA256
+`33193e402f04c382c2efb165e4852426a4cb0fe443cd6f15990551b09979bafc`。
+
+完整 LOAD transaction、完整 DHCP optional workflow 加四项明确选择的真实
+SETUP→LOAD workflow 完整 347 tests / OK / exit0（47.409 秒），日志
+`outputs/test-diagnostics/r22-dhcp-disk-preimage-load-workflows.log`，inode 146434376，
+size 118743，SHA256 `f02bcf13314234b44e2a4b1e46e6e1ac192e452452fe757705b18ba450cc5b32`。
+两次完整文件读取 stat/inode/全文件 SHA 稳定；物理第 1097 行 Ran、1099 行 OK，
+缓冲 stdout 后第 1189 行 `R22_DHCP_DISK_PREIMAGE_LOAD_WORKFLOWS_EXIT=0`
+与实际 exec exit0 一致。运行前后源码/测试/文档/manifest/approved ledger/
+运行态 setup manifest 的完整身份及字节保持。既有 direct、多真实脚本 workflow
+映射有效，REAL_ENV R22 卡仍 OPEN。
+
+返回只读字典不可用于后续写授权，API 关闭 FD 后不承诺状态冻结；本能力不执行
+全组恢复，不验证全套 release 健康或 root 完整入口，不关闭 Q/P/WAL/receipt
+整合、B 成功收口、旧 A 显式激活、Linux/断电或 DEV ACK。普通新 LOAD 仍须
+HOLD，原 bootstrap/REQ19 超时原因未知，局部 PASS 不解除 related/full 重跑闸门。
+本次没有正式 related/full，也没有自动批准 ledger 更新，不称 R22 全部正式落地。
+
 ### R22 未结清 DHCP 事务的新进程写前闸门候选
 
 内存候选重入闸门不能保护新 LOAD。独立新候选 direct 和真实 SETUP→父 B

@@ -302,6 +302,14 @@ DHCP 安装另在第一次 B 覆盖前创建事务内独占、0600 的 `a-preima
 字节及目录 ancestry，不消费换绑对象。正常成功/完整 A 恢复才按既有合同清理。
 这是持久四文件写前证据，不是新进程恢复/激活权限：普通新 LOAD 仍 HOLD，
 完整 R22 分组恢复、B 健康成功收口、旧 A 显式激活和断电见证仍未完成。
+`inspect_dhcp_a_preimage` 是显式只读 API：调用方给定原 runtime/transaction/parent
+名称，先核 NOFOLLOW 持有目录链、0600 同 owner 单链接有界凭据、唯一 JSON 字段及
+checksum，再核固定四文件清单、backup 子项和前像、当前 runtime/parent 与记录的
+A 或 B 是否相符，并重复核组内文件、持有 FD/名称身份。未知名称、内容、权限、
+schema 或变化均 HOLD。返回的 `a-visible`/`b-visible` 只是本次读取观察，B hash
+相符不证明目录已持久化、完整 release 健康、P/Q 恢复授权或可启动服务。
+API 不恢复、清理或执行服务命令；它返回后 FD 已关闭，调用者不得把返回字典当成
+后续写入的授权。普通 LOAD 的残留事务闸门不因只读核验成功而解除。
 同一进程内再次用可见但未确认的父候选调用 DHCP 安装 API，必须在读入安装映射、
 创建事务、备份或安装之前 HOLD。原输入后来改变也不能许可第二次覆盖 B；第一次
 的 B/A 备份、原事务及 backup inode 保持不变。此内存候选入口闸门不是跨重启凭据，

@@ -8526,6 +8526,177 @@ def _verify_dhcp_a_preimage_receipt(receipt_state, *, backup_required: bool = Tr
         raise LoadError(f"DHCP A preimage receipt changed; HOLD: {exc}") from exc
 
 
+def inspect_dhcp_a_preimage(
+    transaction: Path, *, runtime_directory: Path, parent_destination: Path,
+) -> dict[str, object]:
+    """Read retained disk evidence only; never authorize recovery/activation.
+
+    Owner-supplied names, not paths from JSON, define the inspection surface.
+    A visible matching B parent is reported without claiming its durability.
+    Ordinary LOAD's pending-transaction fence remains unchanged.
+    """
+    descriptors = []
+    try:
+        transaction, runtime_directory, parent_destination = map(
+            Path, (transaction, runtime_directory, parent_destination),
+        )
+        paths = (runtime_directory, transaction, transaction / "backup")
+        if (any(not path.is_absolute() or os.path.normpath(str(path)) != str(path)
+                for path in (*paths, parent_destination))
+                or transaction.parent != runtime_directory
+                or not transaction.name.startswith(".load-dhcp-transaction-")
+                or parent_destination.name != "current-release.json"
+                or parent_destination.parent.name != "99-output-ztp"):
+            raise LoadError("inspection owner names are invalid")
+        if any(not hasattr(os, flag) for flag in ("O_DIRECTORY", "O_NOFOLLOW")):
+            raise LoadError("inspection requires nofollow directory capability")
+        flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+
+        def directory_binding(path, metadata):
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise LoadError("inspection ancestor is not a real directory")
+            return {"path": str(path), "dev": metadata.st_dev, "ino": metadata.st_ino,
+                    "mode": stat.S_IMODE(metadata.st_mode), "uid": metadata.st_uid, "gid": metadata.st_gid}
+
+        for path in paths:
+            before = path.lstat()
+            descriptor = (os.open(path, flags | os.O_DIRECTORY) if not descriptors else
+                          os.open(path.name, flags | os.O_DIRECTORY, dir_fd=descriptors[-1][1]))
+            descriptors.append((path, descriptor, _dhcp_a_preimage_receipt_identity(before)))
+            if _dhcp_a_preimage_receipt_identity(os.fstat(descriptor)) != descriptors[-1][2]:
+                raise LoadError("inspection ancestor changed while opening")
+        if stat.S_IMODE(os.fstat(descriptors[-1][1]).st_mode) != 0o700:
+            raise LoadError("inspection backup is not private")
+        receipt = transaction / "a-preimage.json"
+        before = receipt.lstat()
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                or stat.S_IMODE(before.st_mode) != 0o600
+                or (before.st_uid, before.st_gid) != (
+                    os.fstat(descriptors[1][1]).st_uid, os.fstat(descriptors[1][1]).st_gid)):
+            raise LoadError("inspection receipt is not a private owned single-link file")
+        receipt_fd = os.open(receipt.name, flags, dir_fd=descriptors[1][1])
+        descriptors.append((receipt, receipt_fd, _dhcp_a_preimage_receipt_identity(before)))
+        if _dhcp_a_preimage_receipt_identity(os.fstat(receipt_fd)) != descriptors[-1][2]:
+            raise LoadError("inspection receipt changed while opening")
+        payload, _mode = _read_rollback_regular(receipt, limit=_ROLLBACK_MARKER_LIMIT)
+
+        def unique_object(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("duplicate inspection field")
+                result[key] = value
+            return result
+
+        envelope = json.loads(payload, object_pairs_hook=unique_object)
+        if not isinstance(envelope, dict) or set(envelope) != {"body", "sha256"}:
+            raise LoadError("inspection envelope fields are invalid")
+        body = envelope["body"]
+        canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        if (not isinstance(envelope["sha256"], str)
+                or not hmac.compare_digest(hashlib.sha256(canonical).hexdigest(), envelope["sha256"])):
+            raise LoadError("inspection checksum is invalid")
+        if (not isinstance(body, dict)
+                or set(body) != {"schema_version", "phase", "runtime", "transaction", "backup",
+                                 "before", "after_sha256", "parent"}
+                or type(body["schema_version"]) is not int or body["schema_version"] != 1
+                or body["phase"] != "prepared-a"):
+            raise LoadError("inspection schema/phase is invalid")
+        for role, (path, descriptor, _identity) in zip(("runtime", "transaction", "backup"), descriptors[:3]):
+            if body[role] != directory_binding(path, os.fstat(descriptor)):
+                raise LoadError("inspection directory authority differs from owner names")
+
+        def validate_leaf_state(row):
+            if not isinstance(row, dict):
+                raise LoadError("inspection A leaf record is invalid")
+            if row == {"state": "missing"}:
+                return
+            kind = row.get("state")
+            keys = {"state", "mode", "uid", "gid", "mtime_ns"}
+            keys |= {"size", "sha256"} if kind == "file" else {"target"}
+            if (kind not in {"file", "link"} or set(row) != keys
+                    or any(type(row[key]) is not int for key in ("mode", "uid", "gid", "mtime_ns"))
+                    or not 0 <= row["mode"] <= 0o7777 or row["uid"] < 0 or row["gid"] < 0
+                    or (kind == "file" and (type(row["size"]) is not int or row["size"] < 0
+                        or not isinstance(row["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", row["sha256"])))
+                    or (kind == "link" and (not isinstance(row["target"], str) or not row["target"]))):
+                raise LoadError("inspection A leaf fields are invalid")
+
+        names = {"dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts"}
+        if (not isinstance(body["before"], dict) or set(body["before"]) != names
+                or not isinstance(body["after_sha256"], dict) or set(body["after_sha256"]) != names
+                or any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+                       for value in body["after_sha256"].values())):
+            raise LoadError("inspection four-file inventory is invalid")
+        for row in body["before"].values():
+            validate_leaf_state(row)
+        expected_backup_names = {name for name, row in body["before"].items()
+                                 if row["state"] != "missing"}
+        if set(os.listdir(descriptors[2][1])) != expected_backup_names:
+            raise LoadError("inspection backup inventory contains missing or unregistered names")
+        parent = body["parent"]
+        if (not isinstance(parent, dict) or set(parent) != {"destination", "directory", "before", "candidate"}
+                or parent["destination"] != str(parent_destination)
+                or parent["directory"] != directory_binding(parent_destination.parent, parent_destination.parent.lstat())):
+            raise LoadError("inspection parent authority is invalid")
+        validate_leaf_state(parent["before"])
+        candidate = parent["candidate"]
+        if (not isinstance(candidate, dict) or set(candidate) != {"release_id", "sha256", "size"}
+                or not isinstance(candidate["release_id"], str) or not candidate["release_id"]
+                or type(candidate["size"]) is not int or not 0 <= candidate["size"] <= _ROLLBACK_PAYLOAD_LIMIT
+                or not isinstance(candidate["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", candidate["sha256"])):
+            raise LoadError("inspection parent candidate fields are invalid")
+        observed = {}
+
+        def observe(path):
+            metadata = path.lstat() if os.path.lexists(path) else None
+            if metadata is not None and metadata.st_size > _ROLLBACK_PAYLOAD_LIMIT:
+                raise LoadError("inspection leaf exceeds bounded size")
+            identity = _dhcp_a_preimage_receipt_identity(metadata) if metadata else None
+            state = _dhcp_restore_leaf_state(path)
+            after = path.lstat() if os.path.lexists(path) else None
+            if identity != (_dhcp_a_preimage_receipt_identity(after) if after else None):
+                raise LoadError("inspection leaf changed during snapshot")
+            observed[path] = (identity, state)
+            return state
+
+        runtime_visibility = {}
+        for name in sorted(names):
+            if observe(transaction / "backup" / name) != body["before"][name]:
+                raise LoadError("inspection backup differs from original A")
+            current = observe(runtime_directory / name)
+            if current == body["before"][name]:
+                runtime_visibility[name] = "a"
+            elif current.get("state") == "file" and current.get("sha256") == body["after_sha256"][name]:
+                runtime_visibility[name] = "b"
+            else:
+                raise LoadError("inspection runtime leaf is neither recorded A nor B")
+        current_parent = observe(parent_destination)
+        if current_parent == parent["before"]:
+            parent_visibility = "a-visible"
+        elif (current_parent.get("state") == "file"
+              and current_parent.get("size") == candidate["size"]
+              and current_parent.get("sha256") == candidate["sha256"]):
+            parent_visibility = "b-visible"
+        else:
+            raise LoadError("inspection parent is neither recorded preimage nor B candidate")
+        for path, (identity, state) in list(observed.items()):
+            if observe(path) != state or observed[path][0] != identity:
+                raise LoadError("inspection grouped leaf authority changed")
+        _verify_dhcp_a_preimage_receipt((receipt, payload, descriptors[-1][2]))
+        for path, descriptor, identity in descriptors:
+            if (_dhcp_a_preimage_receipt_identity(os.fstat(descriptor)) != identity
+                    or _dhcp_a_preimage_receipt_identity(path.lstat()) != identity):
+                raise LoadError("inspection held/name authority changed")
+        return {"body": body, "parent_visibility": parent_visibility,
+                "runtime_visibility": runtime_visibility}
+    except (OSError, ValueError, TypeError, KeyError, LoadError) as exc:
+        raise LoadError(f"DHCP A disk preimage inspection unconfirmed; HOLD: {exc}") from exc
+    finally:
+        for _path, descriptor, _identity in reversed(descriptors):
+            os.close(descriptor)
+
+
 def mount_and_test_dhcp(
     dry_run: bool = False,
     *,

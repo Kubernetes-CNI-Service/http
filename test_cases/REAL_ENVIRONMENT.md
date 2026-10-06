@@ -1711,6 +1711,8 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 - DHCP 四文件持久写前凭据候选：事务内独占创建 0600 `a-preimage.json`，绑定固定四文件 A 字段集（含原链接/缺席）、B 摘要、runtime/transaction/backup 目录身份、parent 前像及候选摘要；文件同步和原 backup/目录链同步、完整后核验完成前不得首写 B。现场仍仅限本卡授权隔离 VM、root、完整 A/B/P/Q/WAL/receipt、可恢复卷快照、排他锁、明确停服及其它写者静默。保存原/现/备份 leaf 和目录 dev/ino/mode/uid/gid/mtime/ctime、完整 envelope 摘要、每个 fsync 与首安装/清理的物理时序；受控注入 record 创建/同步失败、同名文件替换和 runtime/transaction/backup 换绑，核零未经授权 B 写入或清理、原备份/未知对象保留、新 LOAD HOLD。另独立授权验证断电后 record/backup/name 的实际状态，不能以 fsync exit0 或私有异常注入代替。原样封存证据，经负责人核验后仅按登记快照恢复，不对 live 注入、不 glob 删除事务或自动启动 A。本地不证明完整分组冷恢复、全部共享写集、整个 LOAD 的 B 健康成功收口、旧 A 显式健康激活、root 完整入口或非协作写者免疫；本卡仍 OPEN。
 
+- DHCP 四文件盘上前像只读核验候选：显式 owner runtime/transaction/parent 名称确定读取范围；新进程核持有 NOFOLLOW 目录链、private/single-link record、schema/唯一 JSON 字段/checksum、固定四文件与 backup 闭合子项、A 前像、当前 runtime/parent 与 A/B 摘要及组内复核。现场仍限本卡授权隔离 VM、root、完整 P/Q/A/B/WAL/receipt、可恢复快照、排他部署锁、明确停服和其它写者静默。原样封存 record/backup/live/parent 的身份/元数据/摘要、只读调用与物理状态，受控注入错误清单、越界路径、checksum/权限错误、坏备份、未知 parent、额外 backup 子项及读取中换绑/ABA；必须 HOLD、零服务/恢复/清理命令、未知对象与原证据不变。正例含 A regular/link/missing、A parent 未提交和 B parent 仅可见；不可把 b-visible 视为目录已同步或健康，也不可将返回字典当成后续写授权。证据核验后仅恢复登记隔离快照，不对 live 注入/清理/激活。root 完整入口、全组冷恢复、B 健康成功收口、旧 A 显式激活、Linux/断电及 DEV ACK 仍未证明；本卡继续 OPEN。
+
 ## TC-REAL-R22-C2-DESCRIPTION-PUBLISH-001 — c2 同名描述输出的故障窗口
 
 - Case ID：`TC-REAL-R22-C2-DESCRIPTION-PUBLISH-001`；类型：real-environment / transaction / crash-recovery；对应 R22 c2 对 `*_with_desc` 的既有同名输出替换。状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。自动化先决为 `test_cases.test_generation_input_binding_contract` 的二次读取、早返及 staging direct，`test_cases.test_generation_input_binding_workflow` 的 setup/load/c2 workflow，和当前候选正式 full/check；现有定向通过不证明进程死亡后的原子性。

@@ -481,7 +481,79 @@ def assert_private_dhcp_transaction_retention(
         api.discard_prepared_release(candidate)
 
 
-def assert_private_dhcp_cold_pending_hold(api, root: Path, project: Path) -> None:
+def assert_private_dhcp_preimage_disk_inspection(api, root: Path, project: Path, invalid=None) -> None:
+    """Inspect only retained private evidence; never restore or start services."""
+    live = root.resolve() / "private-etc-dhcp"
+    transaction, = live.glob(".load-dhcp-transaction-*")
+    receipt = transaction / "a-preimage.json"
+    # Preserve the literal parent name supplied to the original preparation;
+    # /var and /private/var aliases do not transfer pathname authority.
+    parent = project / "99-output-ztp/current-release.json"
+    names = ("dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts")
+    if invalid in {"inventory", "escaped-runtime", "checksum"}:
+        envelope = json.loads(receipt.read_bytes())
+        if invalid == "inventory":
+            del envelope["body"]["before"]["dhcpd_nvl.hosts"]
+        elif invalid == "escaped-runtime":
+            envelope["body"]["runtime"]["path"] = str(root.resolve() / "unknown-runtime")
+        else:
+            envelope["sha256"] = "0" * 64
+        if invalid != "checksum":
+            envelope["sha256"] = hashlib.sha256(json.dumps(
+                envelope["body"], sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+            ).encode()).hexdigest()
+        receipt.write_text(json.dumps(envelope) + "\n")
+    elif invalid == "backup":
+        (transaction / "backup/dhcpd_ib.hosts").write_bytes(b"unaccepted A backup\n")
+    elif invalid == "backup-extra":
+        (transaction / "backup/unknown-operator-file").write_bytes(b"unknown retained bytes\n")
+    elif invalid == "parent":
+        parent.write_bytes(b"unaccepted parent state\n")
+    elif invalid == "mode":
+        receipt.chmod(0o644)
+    observed = [live, transaction, transaction / "backup", receipt, parent]
+    observed += [live / name for name in names] + [transaction / "backup" / name for name in names]
+    if invalid == "backup-extra":
+        observed.append(transaction / "backup/unknown-operator-file")
+
+    def snapshot():
+        return {str(path): ((path.lstat().st_dev, path.lstat().st_ino, path.lstat().st_mode,
+                            path.lstat().st_uid, path.lstat().st_gid, path.lstat().st_nlink,
+                            path.lstat().st_size, path.lstat().st_mtime_ns, path.lstat().st_ctime_ns),
+                           path.read_bytes() if path.is_file() else None) for path in observed}
+
+    before = snapshot()
+    commands = []
+    def forbidden(*args, **kwargs):
+        commands.append(args)
+        raise AssertionError("disk inspection attempted an external write/service command")
+    with mock.patch.object(api, "run", side_effect=forbidden), \
+            mock.patch.object(api, "_run_subprocess", side_effect=forbidden):
+        if invalid:
+            try:
+                api.inspect_dhcp_a_preimage(transaction, runtime_directory=live, parent_destination=parent)
+            except api.LoadError as exc:
+                assert "HOLD" in str(exc), str(exc)
+                expected_error = {"inventory": "four-file inventory", "escaped-runtime": "directory authority",
+                                  "checksum": "checksum", "backup": "backup differs", "parent": "parent is neither",
+                                  "mode": "receipt is not", "backup-extra": "backup inventory"}[invalid]
+                assert expected_error in str(exc), str(exc)
+            else:
+                raise AssertionError("unknown disk preimage was accepted: " + invalid)
+        else:
+            result = api.inspect_dhcp_a_preimage(transaction, runtime_directory=live, parent_destination=parent)
+            assert result["parent_visibility"] == "b-visible", "visibility is not confirmed durability"
+            assert result["runtime_visibility"] == {name: "b" for name in names}
+            assert set(result["body"]["before"]) == set(names)
+            for name in names:
+                row = result["body"]["before"][name]
+                assert row["state"] == "file"
+                assert row["sha256"] == hashlib.sha256(f"independent-A:{name}\n".encode()).hexdigest()
+    assert not commands
+    assert before == snapshot(), "inspection changed retained A/B/receipt/name authority"
+
+
+def assert_private_dhcp_cold_pending_hold(api, root: Path, project: Path, *, inspect_preimage=False) -> None:
     """A fresh candidate has no memory of the first HOLD; disk evidence must fence it."""
     source, live = project / "independent-dhcp-B", root / "private-etc-dhcp"
     names = ("dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts")
@@ -494,6 +566,8 @@ def assert_private_dhcp_cold_pending_hold(api, root: Path, project: Path) -> Non
     transaction, = transactions
     backup = transaction / "backup"
     identities = [(path, path.lstat()) for path in (transaction, backup)]
+    if inspect_preimage:
+        assert_private_dhcp_preimage_disk_inspection(api, root, project)
     for name in names:
         (source / name).write_bytes(expected_b[name] + b"# independent-C input\n")
     candidate = api.prepare_current_release(
@@ -6604,6 +6678,76 @@ os.kill(os.getpid(), signal.SIGKILL)
             root, project = Path(name), Path(name) / "project"
             project.mkdir()
             assert_private_dhcp_transaction_retention(LOAD, root, project, "preimage-before-write")
+
+    def test_dhcp_disk_preimage_inspection_preserves_visible_b_and_a_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root, project = Path(name), Path(name) / "project"
+            project.mkdir()
+            assert_private_dhcp_transaction_retention(LOAD, root, project, "fsync")
+            assert_private_dhcp_preimage_disk_inspection(LOAD, root, project)
+
+    def test_dhcp_disk_preimage_inspection_rejects_unknown_authority(self) -> None:
+        for invalid in ("inventory", "escaped-runtime", "checksum", "backup", "parent", "mode"):
+            with self.subTest(invalid=invalid), tempfile.TemporaryDirectory() as name:
+                root, project = Path(name), Path(name) / "project"
+                project.mkdir()
+                assert_private_dhcp_transaction_retention(LOAD, root, project, "fsync")
+                assert_private_dhcp_preimage_disk_inspection(LOAD, root, project, invalid=invalid)
+
+    def test_dhcp_disk_preimage_inspection_rejects_unregistered_backup_child(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root, project = Path(name), Path(name) / "project"
+            project.mkdir()
+            assert_private_dhcp_transaction_retention(LOAD, root, project, "fsync")
+            assert_private_dhcp_preimage_disk_inspection(LOAD, root, project, invalid="backup-extra")
+
+    def test_dhcp_disk_preimage_inspection_preserves_link_missing_and_a_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name).resolve()
+            project, runtime = root / "project", root / "runtime"
+            project.mkdir()
+            transaction = runtime / ".load-dhcp-transaction-independent"
+            backup = transaction / "backup"
+            backup.mkdir(parents=True, mode=0o700)
+            names = ("dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts")
+            states = {}
+            for leaf in names:
+                path = runtime / leaf
+                if leaf == "dhcpd_nvl.hosts":
+                    states[path] = {"state": "missing"}
+                    continue
+                if leaf == "dhcpd_eth.hosts":
+                    path.symlink_to("independent-absent-A-target")
+                else:
+                    path.write_bytes(b"independent original A\n")
+                shutil.copy2(path, backup / leaf, follow_symlinks=False)
+                meta = path.lstat()
+                row = {"mode": stat.S_IMODE(meta.st_mode), "uid": meta.st_uid,
+                       "gid": meta.st_gid, "mtime_ns": meta.st_mtime_ns}
+                row.update({"state": "link", "target": "independent-absent-A-target"}
+                           if leaf == "dhcpd_eth.hosts" else
+                           {"state": "file", "size": 23,
+                            "sha256": hashlib.sha256(b"independent original A\n").hexdigest()})
+                states[path] = row
+            candidate = LOAD.prepare_current_release(project, {"schema_version": 1, "release_id": "independent-B"})
+            try:
+                LOAD._prepare_dhcp_a_preimage_receipt(
+                    runtime, transaction, states,
+                    {leaf: hashlib.sha256(b"independent B\n").hexdigest() for leaf in names}, candidate,
+                )
+                LOAD._sync_verified_dhcp_a_backup(runtime, backup, states)
+                result = LOAD.inspect_dhcp_a_preimage(
+                    transaction, runtime_directory=runtime, parent_destination=candidate.destination,
+                )
+                self.assertEqual("a-visible", result["parent_visibility"])
+                self.assertEqual({leaf: "a" for leaf in names}, result["runtime_visibility"])
+                self.assertEqual({path.name: row for path, row in states.items()}, result["body"]["before"])
+                self.assertEqual("independent-absent-A-target", os.readlink(runtime / "dhcpd_eth.hosts"))
+                self.assertFalse(os.path.lexists(runtime / "dhcpd_nvl.hosts"))
+                self.assertFalse(candidate.destination.exists())
+                self.assertTrue((transaction / "a-preimage.json").is_file())
+            finally:
+                LOAD.discard_prepared_release(candidate)
 
     def test_dhcp_a_preimage_receipt_sync_failure_holds_original_a(self) -> None:
         with tempfile.TemporaryDirectory() as name:

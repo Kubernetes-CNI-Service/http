@@ -1965,6 +1965,9 @@ finally:
         """A new LOAD process must honor retained disk evidence, not candidate flags."""
         self._real_setup_uncertain_parent_dhcp_evidence(reenter=False, cold=True)
 
+    def test_real_setup_then_fresh_load_inspects_disk_dhcp_preimage_without_activation(self):
+        self._real_setup_uncertain_parent_dhcp_evidence(reenter=False, cold=True, inspect_preimage=True)
+
     def test_real_setup_then_failed_dhcp_a_restore_preserves_transaction_evidence(self):
         """A partial precommit restore cannot erase the only intact A copies."""
         self._real_setup_uncertain_parent_dhcp_evidence(
@@ -2016,7 +2019,7 @@ finally:
         )
 
     def _real_setup_uncertain_parent_dhcp_evidence(
-        self, *, reenter, cold=False, outcomes=("open", "fsync"),
+        self, *, reenter, cold=False, inspect_preimage=False, outcomes=("open", "fsync"),
     ):
         for boundary in outcomes:
             with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as name:
@@ -2057,13 +2060,14 @@ from test_cases.test_load_release_transaction import assert_private_dhcp_cold_pe
 load = load_script('r22_cold_pending_dhcp_load', root / 'DAY0-Prepare/11-load.py')
 descriptor = load.acquire_deployment_lock(exclusive=True)
 try:
-    assert_private_dhcp_cold_pending_hold(load, root, q)
+    assert_private_dhcp_cold_pending_hold(load, root, q, inspect_preimage=(sys.argv[4] == 'inspect'))
     print('R22_COLD_PENDING_DHCP_HELD')
 finally:
     load.release_deployment_lock(descriptor)
 """
                     second = subprocess.run(
-                        [sys.executable, "-B", "-c", operation, str(root), str(q), str(ROOT)],
+                        [sys.executable, "-B", "-c", operation, str(root), str(q), str(ROOT),
+                         'inspect' if inspect_preimage else 'hold-only'],
                         cwd=root, capture_output=True, text=True, check=False, timeout=30,
                     )
                     self.assertEqual(0, second.returncode, second.stdout + second.stderr)
