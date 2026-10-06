@@ -5124,6 +5124,88 @@ def _describe_receipt_file(path: Path) -> dict[str, object]:
     }
 
 
+_RUNTIME_KEY_IDENTITY_FIELDS = (
+    "st_dev", "st_ino", "st_mode", "st_nlink", "st_size",
+    "st_mtime_ns", "st_ctime_ns",
+)
+
+
+def _runtime_key_identity(metadata: os.stat_result) -> dict[str, int]:
+    return {field: getattr(metadata, field) for field in _RUNTIME_KEY_IDENTITY_FIELDS}
+
+
+def _runtime_key_source(path: Path, project: Path, target: object) -> Path:
+    """Admit only SETUP's relative publication of this project's same-name key."""
+    if (not isinstance(target, str) or not target or os.path.isabs(target)
+            or os.path.normpath(target) != target or not path.name.endswith(".pub")):
+        raise LoadError("rollback public key source link is invalid")
+    source = project.resolve(strict=True) / path.name
+    lexical = Path(os.path.normpath(str(path.parent.resolve(strict=True) / target)))
+    if lexical != source:
+        raise LoadError("rollback public key source escaped its owning project")
+    return source
+
+
+def _read_runtime_key_source(source: Path) -> tuple[bytes, int, dict[str, int]]:
+    try:
+        before = source.lstat()
+        opened = _read_rollback_regular(source)
+        after = source.lstat()
+    except (OSError, LoadError) as exc:
+        raise LoadError(f"rollback public key source is unavailable or unsafe: {source}: {exc}") from exc
+    if opened is None or _runtime_key_identity(before) != _runtime_key_identity(after):
+        raise LoadError("rollback public key source changed while reading")
+    payload, mode = opened
+    if not payload:
+        raise LoadError("rollback public key source is empty")
+    return payload, mode, _runtime_key_identity(after)
+
+
+def _read_runtime_publickey(
+    path: Path, project: Path,
+) -> tuple[dict[str, object], bytes | None]:
+    """Keep managed links as links; never relax the ordinary nofollow reader."""
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        if os.path.lexists(path):
+            raise LoadError("rollback public key publication changed while opening")
+        return {"state": "missing"}, None
+    if not stat.S_ISLNK(before.st_mode):
+        opened = _read_rollback_regular(path)
+        assert opened is not None
+        payload, mode = opened
+        return {"state": "file", "sha256": hashlib.sha256(payload).hexdigest(), "mode": mode}, payload
+    try:
+        parent = _setup_switch_link_parent_identity(path)
+        target = os.readlink(path)
+        if before.st_nlink != 1:
+            raise LoadError("rollback public key publication is not a single link")
+        source = _runtime_key_source(path, project, target)
+        payload, mode, identity = _read_runtime_key_source(source)
+        if (_runtime_key_identity(before) != _runtime_key_identity(path.lstat())
+                or os.readlink(path) != target
+                or _setup_switch_link_parent_identity(path) != parent):
+            raise LoadError("rollback public key publication changed while reading")
+    except OSError as exc:
+        raise LoadError(f"rollback public key publication cannot be inspected: {exc}") from exc
+    return {
+        "state": "link", "sha256": hashlib.sha256(payload).hexdigest(), "mode": mode,
+        "target": target, "source_identity": identity, "parent_identity": parent,
+    }, payload
+
+
+def _validate_runtime_key_binding(path: Path, project: Path, record: dict[str, object]) -> None:
+    """Check original P source and directory authority before any flat restore."""
+    source = _runtime_key_source(path, project, record["target"])
+    payload, mode, identity = _read_runtime_key_source(source)
+    if (identity != record["source_identity"] or mode != record["mode"]
+            or hashlib.sha256(payload).hexdigest() != record["sha256"]):
+        raise LoadError("rollback public key source identity or payload changed")
+    if _setup_switch_link_parent_identity(path) != record["parent_identity"]:
+        raise LoadError("rollback public key parent identity changed")
+
+
 def _write_rollback_receipt_payload(path: Path, payload: bytes, mode: int) -> None:
     """Complete one private new receipt file before publishing its directory."""
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
@@ -5230,8 +5312,11 @@ def prepare_runtime_rollback_receipt(
         publickey_dir.relative_to(ZTP_DIR.resolve(strict=True))
         publickeys: dict[str, dict[str, object]] = {}
         for source in sorted(publickey_dir.glob("*.pub"), key=lambda item: item.name):
-            publickeys[source.name] = _snapshot_receipt_file(source, keys / source.name)
-        if not publickeys or any(record.get("state") != "file" for record in publickeys.values()):
+            record, payload = _read_runtime_publickey(source, canonical_project)
+            if payload is not None:
+                _write_rollback_receipt_payload(keys / source.name, payload, int(record["mode"]))
+            publickeys[source.name] = record
+        if not publickeys or any(record.get("state") not in {"file", "link"} for record in publickeys.values()):
             raise LoadError("A rollback receipt requires at least one published public key")
         yaml_latest: dict[str, dict[str, object]] = {}
         for relative in ("99-output-eth/latest", "99-output-ib_nvl/latest"):
@@ -5271,7 +5356,7 @@ def prepare_runtime_rollback_receipt(
                 )
             }
         receipt = {
-            "schema_version": 1,
+            "schema_version": (2 if any(record["state"] == "link" for record in publickeys.values()) else 1),
             "record_type": "http-ztp-runtime-rollback-receipt",
             "project": canonical_project.name,
             "release_id": release_id,
@@ -5353,7 +5438,9 @@ def _load_runtime_rollback_receipt(
         "yaml_latest", "prefix", "unchanged_authorities",
     }
     if (not isinstance(receipt, dict) or set(receipt) != required
-            or receipt.get("schema_version") != 1
+            or isinstance(receipt.get("schema_version"), bool)
+            or not isinstance(receipt.get("schema_version"), int)
+            or receipt.get("schema_version") not in (1, 2)
             or receipt.get("record_type") != "http-ztp-runtime-rollback-receipt"
             or receipt.get("project") != canonical_project.name
             or receipt.get("release_id") != relative.name
@@ -5370,7 +5457,7 @@ def _load_runtime_rollback_receipt(
         "files": {name for name, record in frozen.items()
                   if isinstance(record, dict) and record.get("state") == "file"},
         "publickeys": {name for name, record in keys.items()
-                       if isinstance(record, dict) and record.get("state") == "file"},
+                       if isinstance(record, dict) and record.get("state") in {"file", "link"}},
     }
     for directory, names in expected_payloads.items():
         actual = {entry.name for entry in (receipt_directory / directory).iterdir()}
@@ -5380,7 +5467,7 @@ def _load_runtime_rollback_receipt(
         for name, record in group.items():
             if (not isinstance(name, str) or Path(name).name != name
                     or not isinstance(record, dict)
-                    or record.get("state") not in {"file", "missing"}):
+                    or record.get("state") not in ({"file", "link"} if directory == "publickeys" else {"file", "missing"})):
                 raise LoadError("rollback receipt file record is incomplete")
             snapshot = receipt_directory / directory / name
             if record["state"] == "missing":
@@ -5391,7 +5478,27 @@ def _load_runtime_rollback_receipt(
             if opened is None:
                 raise LoadError("rollback receipt payload is absent")
             payload, payload_mode = opened
-            if (set(record) != {"state", "sha256", "mode"}
+            expected_fields = {"state", "sha256", "mode"}
+            if record["state"] == "link":
+                expected_fields |= {"target", "source_identity", "parent_identity"}
+                identity = record.get("source_identity")
+                parent = record.get("parent_identity")
+                if (receipt["schema_version"] != 2
+                        or not isinstance(identity, dict) or set(identity) != set(_RUNTIME_KEY_IDENTITY_FIELDS)
+                        or any(isinstance(value, bool) or not isinstance(value, int) for value in identity.values())
+                        or not stat.S_ISREG(identity["st_mode"]) or identity["st_nlink"] != 1
+                        or stat.S_IMODE(identity["st_mode"]) != record.get("mode")
+                        or not 0 < identity["st_size"] <= _ROLLBACK_PAYLOAD_LIMIT
+                        or not isinstance(parent, dict) or set(parent) != {"path", "dev", "ino"}
+                        or not isinstance(parent.get("path"), str)
+                        or any(isinstance(parent.get(field), bool) or not isinstance(parent.get(field), int)
+                               for field in ("dev", "ino"))):
+                    raise LoadError("rollback receipt public key binding is invalid")
+                key_path = ZTP_DIR / "config/publickey" / name
+                _runtime_key_source(key_path, canonical_project, record.get("target"))
+                if parent["path"] != str(key_path.parent.resolve(strict=True)):
+                    raise LoadError("rollback receipt public key parent path is invalid")
+            if (set(record) != expected_fields
                     or isinstance(record.get("mode"), bool)
                     or not isinstance(record.get("mode"), int)
                     or int(record["mode"]) < 0 or int(record["mode"]) > 0o777
@@ -5661,7 +5768,7 @@ def _verify_active_runtime_receipt(
     if actual_names != set(records):
         raise LoadError("existing rollback receipt public key set changed")
     for name, record in records.items():
-        if _describe_receipt_file(publickey_dir / name) != record:
+        if _read_runtime_publickey(publickey_dir / name, project)[0] != record:
             raise LoadError("existing rollback receipt public key changed")
     _verify_rollback_latest_state(project, receipt["yaml_latest"])
     prefix = receipt["prefix"]
@@ -7559,6 +7666,9 @@ def restore_runtime_rollback_receipt(
     publickey_dir = publickey_name.resolve(strict=True)
     publickey_dir.relative_to(ZTP_DIR.resolve(strict=True))
     key_records = receipt["publickeys"]
+    for name, record in key_records.items():
+        if record["state"] == "link":
+            _validate_runtime_key_binding(publickey_dir / name, canonical_project, record)
     for current in publickey_dir.glob("*.pub"):
         if current.is_dir() and not current.is_symlink():
             raise LoadError("rollback publickey target became a directory")
@@ -7594,9 +7704,13 @@ def restore_runtime_rollback_receipt(
             raise LoadError("rollback publickey target became a directory")
         path.unlink()
     for name, record in key_records.items():
-        _restore_receipt_file(
-            publickey_dir / name, record, payload_groups["publickeys"][name],
-        )
+        if record["state"] == "link":
+            _validate_runtime_key_binding(publickey_dir / name, canonical_project, record)
+            _atomic_restore_setup_link(publickey_dir / name, record["target"])
+        else:
+            _restore_receipt_file(
+                publickey_dir / name, record, payload_groups["publickeys"][name],
+            )
     restore_release_links({
         canonical_project / relative: (
             record.get("target") if record["state"] == "link" else None
@@ -7614,7 +7728,7 @@ def restore_runtime_rollback_receipt(
         if actual != record:
             raise LoadError(f"rollback post-verify failed for {name}; services remain stopped")
     for name, record in key_records.items():
-        if _describe_receipt_file(publickey_dir / name) != record:
+        if _read_runtime_publickey(publickey_dir / name, canonical_project)[0] != record:
             raise LoadError(f"rollback post-verify failed for public key {name}")
     if {path.name for path in publickey_dir.glob("*.pub")} != set(key_records):
         raise LoadError("rollback public key set post-verify failed")

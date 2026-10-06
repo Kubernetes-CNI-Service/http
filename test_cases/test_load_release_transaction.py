@@ -1488,6 +1488,152 @@ class ReleaseTransactionTests(unittest.TestCase):
                    if prepare_receipt else None)
         return parent, generation, receipt
 
+    def _publish_a_with_managed_key_receipt(self):
+        _parent, generation, _receipt = self._publish_a_with_runtime_rollback_receipt(prepare_receipt=False)
+        for name, payload in (("laptop.pub", b"A laptop key\n"), ("mgmt-server.pub", b"A management key\n")):
+            source = self.project / name
+            source.write_bytes(payload)
+            leaf = self.ztp / "config/publickey" / name
+            leaf.unlink()
+            leaf.symlink_to(os.path.relpath(source, leaf.parent))
+        return generation, LOAD.prepare_runtime_rollback_receipt(self.project, generation)
+
+    def test_runtime_receipt_preserves_managed_project_key_link_on_restore(self) -> None:
+        generation, receipt = self._publish_a_with_managed_key_receipt()
+        leaf = self.ztp / "config/publickey/laptop.pub"
+        target = os.readlink(leaf)
+        source = self.project / "laptop.pub"
+        identity = (source.stat().st_ino, source.read_bytes())
+        leaf.unlink()
+        leaf.write_bytes(b"partial B flat key\n")
+        with mock.patch.object(LOAD, "DEPLOYMENT_LOCK", self.root / ".deployment.lock"), \
+                mock.patch.object(LOAD, "active_project", return_value=self.project.resolve()), \
+                mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            descriptor = LOAD.acquire_deployment_lock(exclusive=True)
+            try:
+                LOAD.restore_runtime_rollback_receipt(self.project, receipt,
+                    expected_current=f"generations/{generation.name}", deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=SimpleNamespace(name="supervisor"))
+            finally:
+                LOAD.release_deployment_lock(descriptor)
+        self.assertTrue(leaf.is_symlink(), "runtime restore flattened SETUP's project key publication")
+        self.assertEqual(target, os.readlink(leaf))
+        self.assertEqual(identity, (source.stat().st_ino, source.read_bytes()))
+        self.assertEqual(b"A laptop key\n", (receipt / "publickeys/laptop.pub").read_bytes())
+
+    def test_runtime_managed_key_source_aba_holds_before_first_restore_write(self) -> None:
+        generation, receipt = self._publish_a_with_managed_key_receipt()
+        source = self.project / "laptop.pub"
+        original = source.stat()
+        source.write_bytes(b"B laptop key\n")
+        source.write_bytes(b"A laptop key\n")
+        os.utime(source, ns=(original.st_atime_ns, original.st_mtime_ns))
+        self.assertEqual(original.st_ino, source.stat().st_ino)
+        self.assertNotEqual(original.st_ctime_ns, source.stat().st_ctime_ns)
+        live = self.ztp / "ztp.json"
+        live.write_bytes(b"partial B must survive source drift\n")
+        evidence = (receipt / "receipt.json").read_bytes()
+        with mock.patch.object(LOAD, "DEPLOYMENT_LOCK", self.root / ".deployment.lock"), \
+                mock.patch.object(LOAD, "active_project", return_value=self.project.resolve()), \
+                mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            descriptor = LOAD.acquire_deployment_lock(exclusive=True)
+            try:
+                with self.assertRaisesRegex(LOAD.LoadError, "public key.*source|publickey.*source"):
+                    LOAD.restore_runtime_rollback_receipt(self.project, receipt,
+                        expected_current=f"generations/{generation.name}", deployment_lock_descriptor=descriptor,
+                        services_quiesced=True, runtime_backend=SimpleNamespace(name="supervisor"))
+            finally:
+                LOAD.release_deployment_lock(descriptor)
+        self.assertEqual(b"partial B must survive source drift\n", live.read_bytes())
+        self.assertEqual(evidence, (receipt / "receipt.json").read_bytes())
+
+    def test_runtime_receipt_refuses_key_link_outside_owning_project(self) -> None:
+        _parent, generation, _receipt = self._publish_a_with_runtime_rollback_receipt(prepare_receipt=False)
+        outside = self.root / "foreign.pub"
+        outside.write_bytes(b"operator-owned outside key\n")
+        leaf = self.ztp / "config/publickey/laptop.pub"
+        leaf.unlink()
+        leaf.symlink_to(os.path.relpath(outside, leaf.parent))
+        with self.assertRaises(LOAD.LoadError):
+            LOAD.prepare_runtime_rollback_receipt(self.project, generation)
+        self.assertEqual(b"operator-owned outside key\n", outside.read_bytes())
+        self.assertTrue(leaf.is_symlink())
+        self.assertFalse((self.project / "99-output-ztp/rollback-receipts" / generation.name).exists())
+
+    def test_runtime_receipt_refuses_managed_key_source_alias(self) -> None:
+        _parent, generation, _receipt = self._publish_a_with_runtime_rollback_receipt(prepare_receipt=False)
+        foreign = self.root / "operator-key.pub"
+        foreign.write_bytes(b"operator key must not become rollback authority\n")
+        source = self.project / "laptop.pub"
+        source.symlink_to(foreign)
+        leaf = self.ztp / "config/publickey/laptop.pub"
+        leaf.unlink()
+        leaf.symlink_to(os.path.relpath(source, leaf.parent))
+        with self.assertRaisesRegex(LOAD.LoadError, "public key source"):
+            LOAD.prepare_runtime_rollback_receipt(self.project, generation)
+        self.assertEqual(b"operator key must not become rollback authority\n", foreign.read_bytes())
+        self.assertTrue(source.is_symlink())
+        self.assertFalse((self.project / "99-output-ztp/rollback-receipts" / generation.name).exists())
+
+    def test_runtime_managed_key_parent_rebind_holds_before_flat_restore(self) -> None:
+        generation, receipt = self._publish_a_with_managed_key_receipt()
+        publickeys = self.ztp / "config/publickey"
+        original_identity = publickeys.stat().st_ino
+        publickeys.rename(publickeys.with_name("original-publickey"))
+        publickeys.mkdir()
+        (publickeys / "laptop.pub").write_bytes(b"unrelated replacement directory key\n")
+        self.assertNotEqual(original_identity, publickeys.stat().st_ino)
+        live = self.ztp / "ztp.json"
+        live.write_bytes(b"keep partial B before parent rejection\n")
+        evidence = (receipt / "receipt.json").read_bytes()
+        with mock.patch.object(LOAD, "DEPLOYMENT_LOCK", self.root / ".deployment.lock"), \
+                mock.patch.object(LOAD, "active_project", return_value=self.project.resolve()), \
+                mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            descriptor = LOAD.acquire_deployment_lock(exclusive=True)
+            try:
+                with self.assertRaisesRegex(LOAD.LoadError, "public key parent"):
+                    LOAD.restore_runtime_rollback_receipt(self.project, receipt,
+                        expected_current=f"generations/{generation.name}", deployment_lock_descriptor=descriptor,
+                        services_quiesced=True, runtime_backend=SimpleNamespace(name="supervisor"))
+            finally:
+                LOAD.release_deployment_lock(descriptor)
+        self.assertEqual(b"keep partial B before parent rejection\n", live.read_bytes())
+        self.assertEqual(b"unrelated replacement directory key\n", (publickeys / "laptop.pub").read_bytes())
+        self.assertEqual(evidence, (receipt / "receipt.json").read_bytes())
+
+    def test_runtime_managed_key_receipt_rejects_schema_downgrade(self) -> None:
+        _generation, receipt = self._publish_a_with_managed_key_receipt()
+        metadata = receipt / "receipt.json"
+        record = json.loads(metadata.read_text())
+        self.assertEqual(2, record["schema_version"])
+        record["schema_version"] = 1
+        metadata.write_text(json.dumps(record))
+        evidence = metadata.read_bytes()
+        with self.assertRaisesRegex(LOAD.LoadError, "public key binding"):
+            LOAD._load_runtime_rollback_receipt(self.project, receipt)
+        self.assertEqual(evidence, metadata.read_bytes())
+
+    def test_runtime_key_disappearance_race_never_publishes_incomplete_receipt(self) -> None:
+        _parent, generation, _receipt = self._publish_a_with_runtime_rollback_receipt(prepare_receipt=False)
+        leaf = self.ztp / "config/publickey/laptop.pub"
+        physical_leaf = leaf.resolve()
+        real_lstat = Path.lstat
+        raced = []
+
+        def replaced_after_missing(path, *args, **kwargs):
+            if path == physical_leaf and not raced:
+                raced.append(True)
+                raise FileNotFoundError("old key leaf disappeared before name was rebound")
+            return real_lstat(path, *args, **kwargs)
+
+        with mock.patch.object(LOAD.Path, "lstat", replaced_after_missing):
+            with self.assertRaises(LOAD.LoadError):
+                LOAD.prepare_runtime_rollback_receipt(self.project, generation)
+        self.assertTrue(raced)
+        self.assertEqual(b"A laptop key\n", leaf.read_bytes())
+        self.assertFalse((self.project / "99-output-ztp/rollback-receipts" / generation.name).exists(),
+                         "publication must not precede missing/rebound-key rejection")
+
     def test_runtime_receipt_snapshot_syncs_payload_and_final_mode(self) -> None:
         source = self.root / "A-input"
         source.write_bytes(b"independent frozen A bytes\n")

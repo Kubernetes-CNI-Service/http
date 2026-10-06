@@ -481,6 +481,66 @@ inode 143912122，size 109620，SHA256
 LOAD direct/workflow 原映射有效；TEST 运行 manifest 与 approved ledger 摘要未变。
 未以此独立模块回归更新批准证明，bootstrap 原因闸门与其余 R22 未闭项仍保持 OPEN。
 
+### R22 runtime receipt 的受管项目公钥链接候选
+
+真实 SETUP 的 `_process_pubkeys` 正常输出相对软链接，但 LOAD receipt 准备器使用
+普通文件 nofollow reader，导致合法 A 公钥发布无法准备恢复凭据。独立 direct 和真实
+SETUP 公钥发布/manifest writer→LOAD active receipt API 两项在原实现均 ERROR：
+`outputs/test-diagnostics/r22-managed-key-receipt-red.log`，inode 144045702，size 4374，
+SHA256 `801612050ef1bc629a4208db478c5531739d0a77f74f6ca08ef6267175bc647a`，
+物理 `R22_MANAGED_KEY_RECEIPT_RED_EXIT=1` 与 exec exit1 一致；两份 traceback 均为
+正常项目链接被 bounded single-link file 校验拒绝，不是夹具前提错误。
+
+候选保持普通文件 reader 不变，专用适配器只允许当前项目同名 `.pub` 的规范相对链接，
+其源须为非空、有界、单链接普通文件；schema2 冻结源的完整身份（含 ctime）、摘要、模式
+及发布父目录身份。恢复前验证全部源，替换后保留原相对链接并同步父目录，后核验仍比对
+源与父目录。schema1 的普通文件 receipt 继续支持，link 记录不得降级套用旧 schema。
+源同 inode ABA、父目录换绑在任何 flat 写入前拒绝，不写回已漂移项目输入、不修改凭据。
+外部目标、源别名和 schema 降级负例保持 fail closed。
+
+首批 direct/真实 workflow 四项 OK / exit0，日志 `r22-managed-key-receipt-green.log`，
+inode 144054967，size 2367，SHA256
+`08c64cf79001a15fc04e5c1c153e8ae00f05ce22a93b26e3b80ebe214420d9d1`。
+随后完整回归命令写错两个模块名：实际 release/generation workflow 完整模块的
+318 项均通过，另两个 `_FailedTest` 导入 ERROR，因此该命令仍为 320 tests /
+2 ERROR / exit1，不能报告为完整成功。原日志 `r22-managed-key-receipt-modules.log`，
+inode 144059445，size 110162，SHA256
+`6e1eaaa39d89f5973d8e1e37293b992b63b365caf7a69185e63f80cd94102038`；
+读前后 stat 一致，旧 106782 字节前缀 SHA256
+`7bb70a2df899f64a5ccc2f346f64d764040442b435db6a67fe1c8cb81f9383de` 未变，
+完整 FAILED 后物理 `R22_MANAGED_KEY_RECEIPT_MODULES_EXIT=1` 与 exec exit1 一致。
+两项 ERROR 明确是不存在的 `test_load_optimize_contract`/`test_setup_plan_contract`，
+核 `rg --files` 后只补跑正确的 `test_optimize_output_layout` 和
+`test_setup_switch_plan_contract`，未改变代码、测试、时限或断言，也未重复耗时核心模块。
+补跑完整 22 tests / OK / exit0，日志 `r22-managed-key-receipt-missing-modules.log`，
+inode 144161343，size 4055，SHA256
+`bbeedd3500513976af726a405781f8950424ec4e1f44bf6e89b24235df8a65c8`；
+旧 2476 字节前缀 SHA256 `64bf84c125006d33d27c2ccee8091a6f35c663e538c570c0159976ff22ae4ed5`
+未变，完整 OK 后物理退出标记为 0、exec exit0。四个实际模块分两份记录覆盖共 340 项，
+不合并为一次正式 runner/full 成功证明；首批七项新增预期均保留。
+
+随后审阅发现候选适配器自身的缺席/名称重现竞态：首次 lstat 缺席后，fallback 读到重现
+的普通文件，却只返回描述而没有 payload，可能先发布不完整 receipt 再被加载器拒绝。
+新增独立断言要求拒绝时最终 receipt 不存在，候选原行为 1 FAIL / exit1：
+`r22-managed-key-receipt-race-red.log`，inode 144190105，size 1159，SHA256
+`bc0d302e6bc5b9f688d659fa789cb289317500f37b5e3cd8ccf9cfb27c757dd8`。
+适配器改为名称重现立即拒绝；稳定缺席只返回 missing，由发布前的完整 key 集门禁拒绝，
+不从第二个读取拼接凭据。最终 ReleaseTransactionTests 完整 258 tests / OK / exit0，
+日志 `r22-managed-key-receipt-final-release-module.log`，inode 144190520，size 92267，
+SHA256 `73c08f3a2c1e47e5fa43e331258ed15a0e643963f3dc85798a9a69ea9e714bae`。
+同文件剩余 InfraNeutralFallbackWorkflowTests 与本次真实 SETUP 公钥→LOAD workflow
+共 2 tests / OK / exit0：`r22-managed-key-receipt-final-workflow.log`，inode 144199905，
+size 1519，SHA256 `1e7280fffae865268ce2350b3ec4fc54ebde18b9de65d34558f90085199c4e2d`。
+两份最终日志读前后 stat/SHA 稳定，完整 Ran/OK 在物理退出 0 标记之前，exec exit0；
+没有把修正前的四模块分组记录套用为最终源码的整组重跑证明。
+
+LOAD direct 与真实多脚本 workflow 原 manifest 映射有效。workflow 使用独立私有
+生成制品、实际公钥发布/manifest/receipt APIs，CONFIG 两链接被部分 B 替换后恢复，
+IB 两链接未改变；不冒称完整 SETUP/main、完整跨项目 A runtime 或显式激活。
+REAL_ENV 原 R22 卡继续 OPEN；同项目 mutable 源漂移和未知额外公钥所有权尚需另行收口。
+此前 bootstrap 401 超时仍原因待核，正式 related/full 重跑闸门未放行；本次模块回归
+没有修改 approved ledger，不构成当前精确树的 full/check proof。
+
 ## Full proof 性能诊断记录
 
 本节只记录测量方法与优化判定，不改变上面的测试和证明门禁。正式 full proof 仍须由

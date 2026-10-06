@@ -210,6 +210,15 @@ R22 旧 A runtime receipt 发布前须用独占创建的私有文件 FD 写入 p
 direct 与真实 SETUP manifest→LOAD active receipt API workflow 覆盖同步次序、payload/
 metadata 同步错误及私有 staging 清理；生成制品采用独立夹具，不证明完整 A 激活或断电。
 
+R22 receipt 必须兼容 SETUP 正常发布的项目公钥相对软链接，并恢复原链接而非摊平成
+普通文件。schema2 的 link 记录只允许当前项目同名 `.pub` 的单链接普通源文件，冻结
+源 dev/ino/mode/nlink/size/mtime/ctime、摘要和发布父目录身份；旧普通文件 receipt 仍为
+schema1，不把旧凭据自动升级为链接授权。源别名、外部目标、源 ABA 或父目录换绑须拒绝；
+恢复前先核全部 link 源，异常时不开始 flat runtime 写入、不改 receipt、不启动服务。
+准备时 key 名称缺席后重现须先拒绝，不能发布缺少 payload 的不完整 receipt。
+direct 与真实 SETUP 公钥发布/manifest→LOAD receipt/restore API workflow 覆盖原链接保持；
+workflow 的制品是独立私有夹具，IB 发布保持原状，不证明完整跨项目 A 恢复或激活。
+
 R22 runtime 普通文件恢复须在最终模式及文件内容 fsync 后 replace，再 fsync 父目录；
 missing 前像的 unlink 和已经缺席的重入也须同步父目录。同步失败不得报成功或退休 WAL。
 direct 覆盖实际模式/同步顺序和写入/删除同步异常；真实 LOAD→SETUP 强杀→新 LOAD

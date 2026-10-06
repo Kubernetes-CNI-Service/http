@@ -1030,6 +1030,57 @@ finally:
             self.assertEqual(expected, os.readlink(selector))
             self.assertFalse((root / "service-started").exists())
 
+    def test_real_setup_publickey_links_then_load_receipt_restores_exact_publication(self):
+        fixture = RELEASE_FIXTURE.ReleaseTransactionTests(
+            methodName="test_failed_b_generation_can_restore_and_verify_complete_a_runtime_receipt")
+        fixture.setUp()
+        self.addCleanup(fixture.tearDown)
+        api = RELEASE_FIXTURE.LOAD
+        root, project, ztp = fixture.root.resolve(), fixture.project.resolve(), fixture.ztp.resolve()
+        settings = yaml.safe_load(fixture.global_file.read_text())
+        settings["common"]["mgmt"]["http"]["http_root"] = str(root)
+        fixture.global_file.write_text(yaml.safe_dump(settings, sort_keys=False))
+        manifest = ztp / ".setup_manifest"
+        with mock.patch.multiple(api, HTTP_ROOT=root, MANIFEST=manifest,
+                                 DEPLOYMENT_LOCK=root / ".deployment.lock", ZTP_PREFIX_MARKER=root / ".prefix-marker"), \
+                mock.patch.multiple(SETUP, HTTP_BASE=str(root), ZTP=str(ztp), MANIFEST_FILE=str(manifest),
+                                    _DRY_RUN=False, _LINK_ERRORS=0, _LINK_TRANSACTION=None,
+                                    _SETUP_SWITCH_WAL_CONTEXT=None):
+            _parent, generation, _receipt = fixture._publish_a_with_runtime_rollback_receipt(prepare_receipt=False)
+            for name, payload in (("laptop.pub", b"A laptop key\n"), ("mgmt-server.pub", b"A management key\n")):
+                (project / name).write_bytes(payload)
+                (ztp / "config/publickey" / name).unlink()
+            SETUP._process_pubkeys(str(project))
+            keys = [root / base / name for base in ("ztp/config/publickey", "infiniband/publickey")
+                    for name in ("laptop.pub", "mgmt-server.pub")]
+            targets = {path: os.readlink(path) for path in keys}
+            with mock.patch.object(SETUP, "_collect_expected_links", return_value=list(map(str, keys))):
+                SETUP._write_manifest(str(project))
+            before = manifest.read_bytes()
+            selector = f"generations/{generation.name}"
+            receipt = api.prepare_active_runtime_rollback_receipt(project, selector)
+            self.assertIsNotNone(receipt)
+            live = ztp / "ztp.json"
+            live.write_bytes(b"partial B runtime\n")
+            for path in keys[:2]:
+                path.unlink()
+                path.write_bytes(b"partial B flat key\n")
+            with mock.patch.object(api, "active_managed_services", return_value=()):
+                descriptor = api.acquire_deployment_lock(exclusive=True)
+                try:
+                    api.restore_runtime_rollback_receipt(project, receipt, expected_current=selector,
+                        deployment_lock_descriptor=descriptor, services_quiesced=True,
+                        runtime_backend=SimpleNamespace(name="supervisor"))
+                finally:
+                    api.release_deployment_lock(descriptor)
+            self.assertEqual(before, manifest.read_bytes())
+            for path, target in targets.items():
+                self.assertTrue(path.is_symlink())
+                self.assertEqual(target, os.readlink(path))
+            self.assertEqual(b'{"release":"A"}\n', live.read_bytes())
+            self.assertEqual(selector, os.readlink(project / "99-output-ztp/current"))
+            self.assertFalse((root / "service-started").exists())
+
     def test_real_setup_legacy_sample_comparison_holds_before_first_shared_write(self):
         with tempfile.TemporaryDirectory(prefix="r22-sample-legacy-hold-") as name:
             fixture = self._private_setup_switch_fixture(Path(name))
