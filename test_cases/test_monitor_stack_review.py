@@ -1973,7 +1973,17 @@ class ControlPlaneTests(unittest.TestCase):
                                  result["trigger_id"], result["trigger_source"])
         self.assertEqual(1, ticket["generation"])
         namespace = f"{root.stat().st_dev}:{root.stat().st_ino}"
-        bound = {**result, "generation": 1, "source_identity": namespace,
+        bound = {
+                 "schema_version": 1, "type": "eth", "transport_ip": "192.0.2.10",
+                 "interface": "eth0",
+                 "action": "nv config replace <latest-hostname.yaml>; nv config apply -y; nv config save",
+                 "requested_operation": "replace-config",
+                 "started_at": "2026-10-07T01:00:00+08:00",
+                 "command_started_at": "2026-10-07T01:00:01+08:00",
+                 "batch_identity_verified_at": "2026-10-07T01:00:02+08:00",
+                 "finished_at": "2026-10-07T01:00:03+08:00",
+                 "command_ztp_log_sha256": "", "command_ztp_complete": False,
+                 **result, "generation": 1, "source_identity": namespace,
                  "batch_identity_verified": True, "live_state_sha256": "a" * 64}
         current = authority.finish(root, ticket, bound)
         self.assertEqual((1, "success", False), (current["generation"], current["state"], current["veto"]))

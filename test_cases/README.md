@@ -377,6 +377,12 @@ Production host-key mismatch 默认 fail closed，只有单台完整 hostname �
 
 `test_config_sync_authority.py` 的独立 v1 正例/边界覆盖本地严格递增整数代次、
 闭合 schema、owner/mode/no-follow、受控暂存、file/directory fsync、部分回放与持久 HOLD。
+配置同步 result v1 另有闭合的 23 个成功字段或 16 个失败字段；失败不携带成功证明。
+受管 writer 在 finish 前验证版本、类型、执行窗口、身份和诊断上界，worker 读取时同样校验。
+其独立最大 canonical 正例为 14331 B（1024 个最长 JSON 转义的诊断码点及最大合法身份），
+固定读取预算 16384 B；退化到正例长度减一须拒绝。超过原始文件预算的空白填充也拒绝并
+保留原字节，不以解析后的小对象掩盖超限；未知成员或无版本旧配置回执不能晋升。
+这条 schema 不改变 ZTP/reset 旧收据的读取合同，也不关闭 F02 其他消费端工作。
 `test_config_sync_authority_workflow.py` 执行真实 manual writer → journal/receipt：
 同会话身份和 live digest 只绑定自身代次；下一轮失败先撤销旧成功，preview 不改代次，
 最终目录同步期间的 journal/witness rebind 拒绝并保留外来对象。真实 worker 读取本代回执

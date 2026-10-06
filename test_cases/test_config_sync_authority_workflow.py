@@ -24,6 +24,43 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
+    def test_worker_receipt_wire_budget_rejects_and_retains_padding_without_truncation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve()
+            devices, receipt, produced, _summary = self.worker_bundle(project)
+            original = receipt.read_bytes()
+            with mock.patch.object(self.worker, "DEVICES_CSV", devices):
+                self.assertEqual(produced, self.accept_own_writer())
+                # JSON whitespace does not alter its journal digest, so only
+                # the raw-file versioned bound can reject this input.
+                oversized = b" " * 16384 + original
+                receipt.write_bytes(oversized)
+                self.assertEqual({}, self.accept_own_writer())
+                self.assertEqual(oversized, receipt.read_bytes())
+                receipt.write_bytes(original)
+                self.assertEqual(produced, self.accept_own_writer())
+
+    def test_real_writer_emits_closed_versioned_receipt_for_worker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve()
+            devices, receipt, produced, _summary = self.worker_bundle(project)
+            fields = {
+                "schema_version", "hostname", "type", "state", "transport_ip",
+                "interface", "action", "started_at", "command_started_at", "operation",
+                "effective_operation", "requested_operation", "operation_id", "trigger_source",
+                "trigger_id", "command_ztp_log_sha256", "command_ztp_complete",
+                "batch_identity_verified", "batch_identity_verified_at", "live_state_sha256",
+                "finished_at", "generation", "source_identity",
+            }
+            self.assertEqual(fields, set(produced))
+            self.assertEqual(1, produced["schema_version"])
+            self.assertEqual(produced, self.manual.config_sync_authority.decode_receipt(
+                self.manual.config_sync_authority.wire(produced),
+            ))
+            with mock.patch.object(self.worker, "DEVICES_CSV", devices):
+                self.assertEqual(produced, self.accept_own_writer())
+            self.assertEqual(produced, json.loads(receipt.read_text()))
+
     @classmethod
     def setUpClass(cls):
         spec = importlib.util.spec_from_file_location(

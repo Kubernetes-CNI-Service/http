@@ -2365,6 +2365,7 @@ def trigger_one(
             finally:
                 os.close(lock_descriptor)
     if authority_ticket is not None:
+        payload["schema_version"] = 1
         payload["generation"] = authority_ticket["generation"]
         payload["source_identity"] = authority_ticket["source_identity"]
     atomic_json(target_dir / "result.json", payload)

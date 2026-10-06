@@ -14,6 +14,77 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSyncAuthorityTests(unittest.TestCase):
+    @staticmethod
+    def receipt_v1(**updates):
+        value = {
+            "schema_version": 1, "hostname": "leaf1", "type": "eth",
+            "state": "triggered", "transport_ip": "192.0.2.10",
+            "interface": "eth0",
+            "action": "nv config replace <latest-hostname.yaml>; nv config apply -y; nv config save",
+            "started_at": "2026-10-07T01:00:00+08:00",
+            "command_started_at": "2026-10-07T01:00:01+08:00",
+            "operation": "replace-config", "effective_operation": "replace-config",
+            "requested_operation": "replace-config", "operation_id": "operation-1",
+            "trigger_source": "manual_config_sync_cli", "trigger_id": "trigger-1",
+            "command_ztp_log_sha256": "", "command_ztp_complete": False,
+            "batch_identity_verified": True,
+            "batch_identity_verified_at": "2026-10-07T01:00:02+08:00",
+            "live_state_sha256": "a" * 64,
+            "finished_at": "2026-10-07T01:00:03+08:00", "generation": 1,
+            "source_identity": "1:2",
+        }
+        return {**value, **updates}
+
+    def test_receipt_v1_has_independent_maximum_accepted_fixture_and_nondegenerate_bound(self):
+        value = self.receipt_v1(
+            hostname="h" * 253, type="eth_spx", state="failed", reason="\U0010ffff" * 1024,
+            transport_ip="ffff:ffff:ffff:ffff:ffff:ffff:255.255.255.255", interface="i" * 15,
+            started_at="9999-12-31T23:59:59.999999+00:00",
+            command_started_at="9999-12-31T23:59:59.999999+00:00",
+            batch_identity_verified_at="9999-12-31T23:59:59.999999+00:00",
+            finished_at="9999-12-31T23:59:59.999999+00:00",
+            operation_id="o" * 512, trigger_id="t" * 766,
+            command_ztp_log_sha256="a" * 64, batch_identity_verified=False,
+            generation=9223372036854775807,
+            source_identity="18446744073709551615:18446744073709551615",
+        )
+        # Failed receipts intentionally carry no successful observation fields.
+        for field in ("transport_ip", "interface", "action", "command_ztp_log_sha256",
+                      "command_ztp_complete", "batch_identity_verified",
+                      "batch_identity_verified_at", "live_state_sha256"):
+            value.pop(field)
+        raw = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+        # 16 fixed members; 1024 astral code points use 12 ASCII wire bytes
+        # each. The other maximal identities/timestamps contribute 2043 B.
+        self.assertEqual(14331, len(raw), "independent failed v1 field/escape maximum")
+        self.assertEqual(value, self.authority.decode_receipt(raw))
+        with mock.patch.object(self.authority, "RECEIPT_MAX_BYTES", len(raw) - 1):
+            with self.assertRaises(self.authority.AuthorityError):
+                self.authority.decode_receipt(raw)
+        over = {**value, "reason": "\U0010ffff" * 1025}
+        with self.assertRaises(self.authority.AuthorityError):
+            self.authority.decode_receipt(json.dumps(over).encode("ascii"))
+
+    def test_completion_receipt_requires_closed_version_and_strict_values_before_publish(self):
+        changes = (
+            {"schema_version": None}, {"schema_version": True}, {"schema_version": 2},
+            {"unexpected": "unreviewed"}, {"type": "server"}, {"generation": True},
+            {"batch_identity_verified": 1}, {"command_ztp_complete": 0},
+            {"reason": "x" * 1025}, {"interface": "i" * 16},
+            {"transport_ip": "not-an-IP"}, {"action": "unreviewed action"},
+            {"finished_at": "2026-10-07T01:00:00+08:00"},
+            {"source_identity": "18446744073709551616:1"},
+        )
+        for index, change in enumerate(changes):
+            with self.subTest(change=change):
+                root = self.root / str(index)
+                ticket = self.authority.begin(root, "leaf1", "operation-1", "trigger-1", "manual_config_sync_cli")
+                value = self.receipt_v1(source_identity=ticket["source_identity"])
+                value.update(change)
+                with self.assertRaises(self.authority.AuthorityError):
+                    self.authority.finish(root, ticket, value)
+                self.assertEqual(ticket, self.authority.read_current(root, "leaf1"))
+
     def setUp(self):
         spec = importlib.util.spec_from_file_location(
             "config_sync_authority_under_test", ROOT / "ztp/config_sync_authority.py",
@@ -32,14 +103,19 @@ class ConfigSyncAuthorityTests(unittest.TestCase):
 
     @staticmethod
     def result(ticket, state="triggered", wall_clock="2099-01-01T00:00:00+00:00"):
-        return {
-            "hostname": "leaf1", "operation_id": ticket["operation_id"],
-            "trigger_id": ticket["trigger_id"], "generation": ticket["generation"],
-            "source_identity": ticket["source_identity"],
-            "trigger_source": "manual_config_sync_cli", "state": state,
-            "batch_identity_verified": True, "live_state_sha256": "a" * 64,
-            "finished_at": wall_clock,
-        }
+        value = ConfigSyncAuthorityTests.receipt_v1(
+            operation_id=ticket["operation_id"], trigger_id=ticket["trigger_id"],
+            generation=ticket["generation"], source_identity=ticket["source_identity"],
+            state=state, started_at=wall_clock, command_started_at=wall_clock,
+            batch_identity_verified_at=wall_clock, finished_at=wall_clock,
+        )
+        if state == "failed":
+            for field in ("transport_ip", "interface", "action", "command_ztp_log_sha256",
+                          "command_ztp_complete", "batch_identity_verified",
+                          "batch_identity_verified_at", "live_state_sha256"):
+                value.pop(field)
+            value["reason"] = "fixture command failed"
+        return value
 
     def test_local_generations_increase_despite_reporter_clock_rollback(self):
         first = self.begin()

@@ -236,7 +236,7 @@ def _receipt_identity(value):
             value.st_ctime_ns, value.st_mode, value.st_uid, value.st_gid, value.st_nlink)
 
 
-def _read_new_config_sync_receipt(path, *, exclude_inodes=()):
+def _read_new_config_sync_receipt(path, *, exclude_inodes=(), max_bytes=QUEUE_MAX_BYTES):
     """Read a bounded CLI receipt on the same FD used for replay identity."""
     receipt_fd = None
     try:
@@ -245,12 +245,12 @@ def _read_new_config_sync_receipt(path, *, exclude_inodes=()):
         if (
             not stat.S_ISREG(identity.st_mode) or identity.st_nlink != 1
             or identity.st_uid != os.geteuid() or identity.st_mode & 0o022
-            or identity.st_size > QUEUE_MAX_BYTES
+            or identity.st_size > max_bytes
             or (identity.st_dev, identity.st_ino) in exclude_inodes
         ):
             return {}
         chunks = []
-        remaining = QUEUE_MAX_BYTES + 1
+        remaining = max_bytes + 1
         while remaining:
             chunk = os.read(receipt_fd, min(65536, remaining))
             if not chunk:
@@ -260,7 +260,7 @@ def _read_new_config_sync_receipt(path, *, exclude_inodes=()):
         raw = b"".join(chunks)
         after = os.fstat(receipt_fd)
         if (
-            len(raw) > QUEUE_MAX_BYTES or len(raw) != identity.st_size
+            len(raw) > max_bytes or len(raw) != identity.st_size
             or _receipt_identity(after) != _receipt_identity(identity)
             or _config_sync_file_identity(path) != (identity.st_dev, identity.st_ino)
             or _receipt_identity(Path(path).lstat()) != _receipt_identity(identity)
@@ -793,7 +793,12 @@ def accepted_result(
                 continue
             result = _read_new_config_sync_receipt(
                 path, exclude_inodes=exclude_inodes,
+                max_bytes=config_sync_authority.RECEIPT_MAX_BYTES,
             )
+            try:
+                result = config_sync_authority.decode_receipt(config_sync_authority.wire(result))
+            except (ValueError, TypeError, UnicodeError):
+                continue
             if (type(result.get("generation")) is not int
                     or result["generation"] != authority["generation"]
                     or result.get("source_identity") != authority["source_identity"]

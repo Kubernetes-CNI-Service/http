@@ -8,8 +8,10 @@ An interrupted publication leaves a persistent hold, not a previous success.
 """
 
 from contextlib import contextmanager
+from datetime import datetime
 import fcntl
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -25,6 +27,11 @@ import uuid
 # 2048-byte wire budget. Witness v1 is <512 bytes.
 JOURNAL_MAX_BYTES = 2048
 WITNESS_MAX_BYTES = 512
+# Receipt v1 has 16 failed / 23 successful fixed fields. Its independent
+# largest canonical image is 14331 B (1024 astral diagnostic code points,
+# maximal identities and timestamps); 16 KiB bounds both canonical and
+# indented writer images without truncating an input or a diagnostic.
+RECEIPT_MAX_BYTES = 16384
 MAX_GENERATION = 9223372036854775807
 HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,252}\Z")
 IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9:._-]{0,511}\Z")
@@ -36,6 +43,18 @@ JOURNAL_FIELDS = {
     "schema_version", "hostname", "generation", "operation_id", "trigger_id",
     "trigger_source", "source_identity", "state", "veto", "receipt_sha256",
 }
+RECEIPT_COMMON_FIELDS = {
+    "schema_version", "hostname", "type", "state", "started_at",
+    "command_started_at", "operation", "effective_operation", "requested_operation",
+    "operation_id", "trigger_source", "trigger_id", "finished_at", "generation",
+    "source_identity",
+}
+RECEIPT_SUCCESS_FIELDS = RECEIPT_COMMON_FIELDS | {
+    "transport_ip", "interface", "action", "command_ztp_log_sha256",
+    "command_ztp_complete", "batch_identity_verified", "batch_identity_verified_at",
+    "live_state_sha256",
+}
+RECEIPT_ACTION = "nv config replace <latest-hostname.yaml>; nv config apply -y; nv config save"
 
 
 class AuthorityError(ValueError):
@@ -66,6 +85,74 @@ def _decode(raw, limit):
         raise AuthorityError("invalid authority JSON") from exc
     if not isinstance(value, dict):
         raise AuthorityError("authority is not a closed object")
+    return value
+
+
+def decode_receipt(raw):
+    """Closed local completion v1; a failed receipt carries no success proof."""
+    value = _decode(raw, RECEIPT_MAX_BYTES)
+    success = value.get("state") == "triggered"
+    fields = RECEIPT_SUCCESS_FIELDS if success else RECEIPT_COMMON_FIELDS | {"reason"}
+    if (set(value) != fields or type(value["schema_version"]) is not int
+            or value["schema_version"] != 1
+            or value["state"] not in {"triggered", "failed"}
+            or type(value["generation"]) is not int
+            or not 1 <= value["generation"] <= MAX_GENERATION
+            or not isinstance(value["type"], str)
+            or value["type"] not in {"eth", "eth_spx", "spx", "air", "ib", "nvl"}
+            or value["trigger_source"] not in SOURCES):
+        raise AuthorityError("closed completion receipt schema mismatch")
+    for name, pattern in (("hostname", HOST), ("operation_id", IDENTIFIER),
+                          ("trigger_id", TRIGGER_IDENTIFIER), ("source_identity", NAMESPACE)):
+        if not isinstance(value[name], str) or not pattern.fullmatch(value[name]):
+            raise AuthorityError("invalid completion receipt identity")
+    if any(int(part) > 2 ** 64 - 1 for part in value["source_identity"].split(":")):
+        raise AuthorityError("completion receipt namespace exceeds uint64")
+    if any(value[name] != "replace-config" for name in (
+            "operation", "effective_operation", "requested_operation")):
+        raise AuthorityError("completion receipt operation mismatch")
+
+    def instant(name, *, empty=False):
+        text = value[name]
+        if text == "" and empty:
+            return None
+        if (not isinstance(text, str)
+                or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?[+-][0-9]{2}:[0-9]{2}", text)):
+            raise AuthorityError("invalid completion receipt timestamp")
+        try:
+            result = datetime.fromisoformat(text)
+            if result.utcoffset() is None:
+                raise ValueError("missing timezone")
+            return result
+        except ValueError as exc:
+            raise AuthorityError("invalid completion receipt timestamp") from exc
+
+    started = instant("started_at")
+    command = instant("command_started_at", empty=not success)
+    finished = instant("finished_at")
+    if started > finished or (command is not None and not started <= command <= finished):
+        raise AuthorityError("completion receipt execution window is inverted")
+    if not success:
+        if not isinstance(value["reason"], str) or len(value["reason"]) > 1024:
+            raise AuthorityError("completion receipt diagnostic exceeds v1 bound")
+        return value
+    observed = instant("batch_identity_verified_at")
+    if (value["batch_identity_verified"] is not True
+            or type(value["command_ztp_complete"]) is not bool
+            or not command <= observed <= finished
+            or value["action"] != RECEIPT_ACTION
+            or not isinstance(value["interface"], str)
+            or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,15}", value["interface"])
+            or not isinstance(value["transport_ip"], str) or len(value["transport_ip"]) > 45
+            or not isinstance(value["live_state_sha256"], str)
+            or not DIGEST.fullmatch(value["live_state_sha256"])
+            or not isinstance(value["command_ztp_log_sha256"], str)
+            or (value["command_ztp_log_sha256"] and not DIGEST.fullmatch(value["command_ztp_log_sha256"]))):
+        raise AuthorityError("invalid same-session completion proof")
+    try:
+        ipaddress.ip_address(value["transport_ip"])
+    except ValueError as exc:
+        raise AuthorityError("invalid completion receipt transport IP") from exc
     return value
 
 
@@ -486,6 +573,10 @@ def revoke(root, hostname, *, expected=None):
 def finish(root, ticket, result):
     if not isinstance(ticket, dict):
         raise AuthorityError("completion ticket is not a closed object")
+    try:
+        result = decode_receipt(wire(result))
+    except (TypeError, UnicodeError) as exc:
+        raise AuthorityError("completion receipt is not serializable") from exc
     with _scope(root, ticket.get("hostname"), write=True) as (descriptor, key, namespace, validate, advance):
         # Python considers True == 1 (and 1.0 == 1); dictionary equality is
         # not a schema/type check for an incoming completion ticket.
