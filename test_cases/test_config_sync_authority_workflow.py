@@ -24,6 +24,48 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
+    def test_same_connection_identity_mismatch_withdraws_previous_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve()
+            client, prepared, text = self.fixture(project)
+            authority = self.manual.config_sync_authority
+            root = project / "99-output-ztp/manual-config-sync"
+            first = authority.begin(root, "EXAMPLE-Leaf01", "op-1", "trigger-1", "manual_config_sync_cli")
+            previous = self.run_writer(project, client, prepared, run="first", ticket=first)
+            self.assertEqual("success", authority.read_current(root, "EXAMPLE-Leaf01")["state"])
+            second = authority.begin(root, "EXAMPLE-Leaf01", "op-2", "trigger-2", "manual_config_sync_cli")
+            client.run.side_effect = [
+                SimpleNamespace(returncode=0, stdout=text, stderr=""),
+                SimpleNamespace(returncode=0, stdout="saved\n", stderr=""),
+                SimpleNamespace(returncode=0, stdout="HTTP_CONFIG_SYNC_LIVE_V1\nEXAMPLE-Leaf01\n02:00:00:00:00:02\n" + text, stderr=""),
+            ]
+            rejected = self.run_writer(project, client, prepared, run="second", ticket=second)
+            self.assertEqual("failed", rejected["state"])
+            self.assertNotIn("live_state_sha256", rejected)
+            self.assertEqual(previous, json.loads((root / "first/EXAMPLE-Leaf01/result.json").read_text()))
+            current = authority.read_current(root, "EXAMPLE-Leaf01")
+            self.assertEqual((2, "failed", True), (current["generation"], current["state"], current["veto"]))
+
+    def test_separate_identity_check_cannot_authorize_an_unbound_live_state_read(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve()
+            client, prepared, text = self.fixture(project)
+            # The older two-SSH implementation accepts plain matching YAML
+            # even though that later connection supplied no hostname or MAC.
+            client.run.side_effect = [
+                SimpleNamespace(returncode=0, stdout=text, stderr=""),
+                SimpleNamespace(returncode=0, stdout="saved\n", stderr=""),
+                SimpleNamespace(returncode=0, stdout=text, stderr=""),
+            ]
+            authority = self.manual.config_sync_authority
+            root = project / "99-output-ztp/manual-config-sync"
+            ticket = authority.begin(root, "EXAMPLE-Leaf01", "op-1", "trigger-1", "manual_config_sync_cli")
+            result = self.run_writer(project, client, prepared, run="unbound", ticket=ticket)
+            self.assertEqual("failed", result["state"])
+            self.assertNotIn("live_state_sha256", result)
+            current = authority.read_current(root, "EXAMPLE-Leaf01")
+            self.assertEqual((1, "failed", True), (current["generation"], current["state"], current["veto"]))
+
     def test_real_writer_cannot_launder_an_unsafe_previous_receipt_into_success(self):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory).resolve()
@@ -147,7 +189,7 @@ class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
         client.run.side_effect = [
             SimpleNamespace(returncode=0, stdout=text, stderr=""),
             SimpleNamespace(returncode=0, stdout="saved\n", stderr=""),
-            SimpleNamespace(returncode=0, stdout=text, stderr=""),
+            SimpleNamespace(returncode=0, stdout="HTTP_CONFIG_SYNC_LIVE_V1\nEXAMPLE-Leaf01\n02:00:00:00:00:01\n" + text, stderr=""),
         ]
         return client, prepared, text
 
@@ -164,7 +206,7 @@ class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
                 self.manual, "evaluate_replace_config_guard", return_value={"allowed": True},
             ))
             return self.manual.trigger_one(
-                client, {"hostname": "EXAMPLE-Leaf01", "type": "eth"}, "",
+                client, {"hostname": "EXAMPLE-Leaf01", "type": "eth", "mac_plain": "020000000001"}, "",
                 project / "99-output-ztp/manual-config-sync" / run,
                 trigger_source="manual_config_sync_cli", trigger_id=ticket["trigger_id"],
                 operation="replace-config", operation_id=ticket["operation_id"],

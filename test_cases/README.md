@@ -398,6 +398,10 @@ worker 的调用参数也不得请求 group/other 可写的新状态，拒绝时
 消费回执之前还要完整校验 summary 全部 targets/results：未知主机、缺少或重复主机、
 casefold 冲突、非对象成员和完成结果集合不闭合均拒绝，不能只检查所选主机然后忽略其余错误。
 worker 的身份观察必须位于同一命令的开始与完成时间闭区间内，三者均须有时区；
+配置同步完成后的 hostname、所选 endpoint 的 MAC 与 live NVUE 文本由同一次 BatchMode
+SSH 读取；独立的旧身份探针不能给后一次仅含 YAML 的连接授权。真实 writer → journal
+拒绝缺失同连接身份或 MAC 已变化的 live-state，并撤销上一代成功；私有 shell 夹具验证
+身份读取和 `nv config show` 的物理顺序及非零退出，未连接真实交换机。
 结束时间缺失、倒序、无时区或身份观察晚于结束均不能晋升。真实 CLI 结果到后台导入
 保留原 `finished_at`，不能用后台更新时间伪造该执行窗口的结束边界。
 worker 的配置同步接纳还须绑定当前本地 success/veto、严格整数 generation、来源命名空间及

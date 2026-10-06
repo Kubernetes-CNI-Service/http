@@ -1222,6 +1222,91 @@ class ManualCommandHelpTests(unittest.TestCase):
         self.assertNotIn("--http-timeout", reset_help)
 
 
+class ConfigSyncSingleConnectionProofTests(unittest.TestCase):
+    LIVE = "- set:\n    system:\n      hostname: leaf01\n"
+
+    def observer(self):
+        observer = getattr(MANUAL, "collect_config_sync_live_state", None)
+        self.assertTrue(callable(observer), "identity and live state need one authenticated observation")
+        return observer
+
+    def test_identity_and_live_state_use_one_batch_connection_and_exact_raw_digest_input(self):
+        client = mock.Mock(args=SimpleNamespace(command_timeout=20, ssh_password=False))
+        client.run.return_value = completed("HTTP_CONFIG_SYNC_LIVE_V1\nleaf01\n" + MAC + "\n" + self.LIVE)
+        self.assertEqual(self.LIVE, self.observer()(client, DEVICE, "192.0.2.10", "eth0"))
+        self.assertEqual(1, client.run.call_count)
+        remote = client.run.call_args.args[2]
+        self.assertIn("hostname", remote)
+        self.assertIn("/sys/class/net/eth0/address", remote)
+        self.assertIn("nv config show", remote)
+        self.assertEqual(20, client.run.call_args.kwargs["timeout"])
+
+    def test_unbound_or_incomplete_same_connection_evidence_cannot_promote(self):
+        valid = "HTTP_CONFIG_SYNC_LIVE_V1\nleaf01\n" + MAC + "\n" + self.LIVE
+        for label, output, code, password, interface in (
+            ("old-separate-read", self.LIVE, 0, False, "eth0"),
+            ("foreign-host", valid.replace("\nleaf01\n", "\nforeign\n", 1), 0, False, "eth0"),
+            ("foreign-mac", valid.replace(MAC, "02:00:00:00:00:02"), 0, False, "eth0"),
+            ("malformed-mac", valid.replace(MAC, "junk" + MAC), 0, False, "eth0"),
+            ("empty-live-state", "HTTP_CONFIG_SYNC_LIVE_V1\nleaf01\n" + MAC + "\n", 0, False, "eth0"),
+            ("remote-failed", valid, 23, False, "eth0"),
+            ("interactive", valid, 0, True, "eth0"),
+            ("unsafe-interface", valid, 0, False, "eth0; touch forbidden"),
+        ):
+            with self.subTest(case=label):
+                client = mock.Mock(args=SimpleNamespace(command_timeout=20, ssh_password=password))
+                client.run.return_value = completed(output, returncode=code)
+                with self.assertRaises(MANUAL.ManualZtpError):
+                    self.observer()(client, DEVICE, "192.0.2.10", interface)
+                if password or ";" in interface:
+                    client.run.assert_not_called()
+
+    def test_selected_endpoint_identity_interface_is_not_assumed_to_be_eth0(self):
+        device = {**DEVICE, "candidate_identity": {"192.0.2.11|eth1": ("eth1", "020000000002")}}
+        client = mock.Mock(args=SimpleNamespace(command_timeout=20, ssh_password=False))
+        client.run.return_value = completed("HTTP_CONFIG_SYNC_LIVE_V1\nleaf01\n02:00:00:00:00:02\n" + self.LIVE)
+        self.assertEqual(self.LIVE, self.observer()(client, device, "192.0.2.11", "eth1"))
+        self.assertIn("/sys/class/net/eth1/address", client.run.call_args.args[2])
+        client.run.return_value = completed("HTTP_CONFIG_SYNC_LIVE_V1\nleaf01\n" + MAC + "\n" + self.LIVE)
+        with self.assertRaises(MANUAL.ManualZtpError):
+            self.observer()(client, device, "192.0.2.11", "eth1")
+
+    def test_remote_observation_executes_identity_then_live_state_in_one_private_shell(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            trace = root / "trace"
+            live = root / "live.yaml"
+            live.write_text(self.LIVE, encoding="utf-8")
+            bodies = {
+                "hostname": 'printf "hostname\\n" >> "$TRACE"\nprintf "leaf01\\n"\n',
+                "cat": 'test "$1" = /sys/class/net/eth0/address || exit 91\nprintf "mac\\n" >> "$TRACE"\nprintf "02:00:00:00:00:01\\n"\n',
+                "nv": 'test "$*" = "config show" || exit 92\nprintf "nv\\n" >> "$TRACE"\n/bin/cat "$LIVE"\nexit "$NV_EXIT"\n',
+            }
+            for name, body in bodies.items():
+                path = root / name
+                path.write_text("#!/bin/sh\n" + body, encoding="utf-8")
+                path.chmod(0o700)
+            for code in (0, 23):
+                with self.subTest(remote_exit=code):
+                    trace.unlink(missing_ok=True)
+                    def execute(_device, _host, command, *, timeout):
+                        return subprocess.run(
+                            ["/bin/sh", "-c", command], timeout=timeout,
+                            text=True, capture_output=True, check=False,
+                            env={"PATH": str(root) + ":/usr/bin:/bin", "TRACE": str(trace),
+                                 "LIVE": str(live), "NV_EXIT": str(code)},
+                        )
+                    client = mock.Mock(args=SimpleNamespace(command_timeout=20, ssh_password=False))
+                    client.run.side_effect = execute
+                    if code:
+                        with self.assertRaises(MANUAL.ManualZtpError):
+                            self.observer()(client, DEVICE, "192.0.2.10", "eth0")
+                    else:
+                        self.assertEqual(self.LIVE, self.observer()(client, DEVICE, "192.0.2.10", "eth0"))
+                    self.assertEqual(["hostname", "mac", "nv"], trace.read_text().splitlines())
+                    self.assertEqual(1, client.run.call_count)
+
+
 class ConfirmAppliedFingerprintTests(unittest.TestCase):
     def test_replace_config_rechecks_guard_and_uses_full_replace(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1248,7 +1333,7 @@ class ConfirmAppliedFingerprintTests(unittest.TestCase):
             client.args = SimpleNamespace(command_timeout=20, ssh_password=False)
             client.run.side_effect = [
                 completed(prior), completed(applied_output), completed("saved\n"),
-                completed(expected_text),
+                completed("HTTP_CONFIG_SYNC_LIVE_V1\nleaf01\n" + MAC + "\n" + expected_text),
             ]
             prepared = {
                 "published_marker": str(marker),
@@ -1299,7 +1384,8 @@ class ConfirmAppliedFingerprintTests(unittest.TestCase):
                     )
                     unsafe.run.side_effect = [
                         completed(prior), completed(applied_output),
-                        completed("saved\n"), completed(post_state),
+                        completed("saved\n"),
+                        completed("HTTP_CONFIG_SYNC_LIVE_V1\nleaf01\n" + MAC + "\n" + post_state),
                     ]
                     with mock.patch.object(
                         MANUAL, "connect_and_verify",

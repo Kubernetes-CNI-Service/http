@@ -6322,7 +6322,7 @@ print('{{"factory_records_active":true,"valid":true}}')
             client.run.side_effect = [
                 SimpleNamespace(returncode=0, stdout=prior, stderr=""),
                 SimpleNamespace(returncode=0, stdout="saved\n", stderr=""),
-                SimpleNamespace(returncode=0, stdout=expected_text, stderr=""),
+                SimpleNamespace(returncode=0, stdout="HTTP_CONFIG_SYNC_LIVE_V1\nEXAMPLE-Leaf01\n02:00:00:00:00:01\n" + expected_text, stderr=""),
             ]
             prepared = {
                 "published_marker": str(marker),
@@ -6358,7 +6358,7 @@ print('{{"factory_records_active":true,"valid":true}}')
                     self.manual, "evaluate_replace_config_guard", return_value={"allowed": True},
                 ):
                     produced = self.manual.trigger_one(
-                        client, {"hostname": "EXAMPLE-Leaf01", "type": "eth"},
+                        client, {"hostname": "EXAMPLE-Leaf01", "type": "eth", "mac_plain": "020000000001"},
                         "", run_dir, trigger_source="manual_config_sync_web",
                         trigger_id=request["trigger_id"], operation="replace-config",
                         operation_id=request["operation_id"], prepared=prepared,
@@ -6463,7 +6463,7 @@ print('{{"factory_records_active":true,"valid":true}}')
             client.run.side_effect = [
                 SimpleNamespace(returncode=0, stdout=prior, stderr=""),
                 SimpleNamespace(returncode=0, stdout="saved\n", stderr=""),
-                SimpleNamespace(returncode=0, stdout=expected_text, stderr=""),
+                SimpleNamespace(returncode=0, stdout="HTTP_CONFIG_SYNC_LIVE_V1\nEXAMPLE-Leaf01\n02:00:00:00:00:10\n" + expected_text, stderr=""),
             ]
             operation_id = "req-5-main-operation"
             trigger_id = "req-5-main-trigger"

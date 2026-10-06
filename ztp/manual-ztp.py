@@ -1954,6 +1954,54 @@ def connect_and_verify(client: SshClient, device: dict) -> tuple[str, str]:
     raise ManualZtpError(f"{device['hostname']} 身份校验失败: " + " | ".join(failures))
 
 
+def collect_config_sync_live_state(
+    client: SshClient, device: dict, host: str, interface: str,
+) -> str:
+    """Bind post-apply identity and live YAML to one BatchMode SSH result.
+
+    A separate successful identity probe cannot authorize a later connection.
+    This read-only observation neither mutates configuration nor retries on a
+    different endpoint. The returned text excludes only the protocol header;
+    its exact bytes remain the live-state digest input.
+    """
+    if getattr(client.args, "ssh_password", None) is not False:
+        raise ManualZtpError("同会话配置证明需要非交互 BatchMode 身份")
+    if not isinstance(interface, str) or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,14}", interface):
+        raise ManualZtpError("同会话配置证明的身份接口无效")
+    identity_interface, expected_mac = (
+        device.get("candidate_identity", {}).get(f"{host}|{interface}")
+        or ("eth0", str(device.get("mac_plain") or ""))
+    )
+    expected_mac = normalize_mac(expected_mac)
+    if (not isinstance(identity_interface, str)
+            or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,14}", identity_interface)
+            or not re.fullmatch(r"[0-9a-f]{12}", expected_mac)):
+        raise ManualZtpError("同会话配置证明缺少有效的设备 MAC/接口身份")
+    remote = (
+        "printf 'HTTP_CONFIG_SYNC_LIVE_V1\\n%s\\n%s\\n' \"$(hostname)\" "
+        f"\"$(cat /sys/class/net/{identity_interface}/address 2>/dev/null)\" "
+        "&& nv config show"
+    )
+    result = client.run(device, host, remote, timeout=client.args.command_timeout)
+    if result.returncode:
+        raise ManualZtpError("配置同步后同会话身份/live-state 读取失败")
+    output = result.stdout
+    if (not isinstance(output, str)
+            or len(output.encode("utf-8")) > MAX_APPLIED_CONFIG_BYTES):
+        raise ManualZtpError("配置同步后同会话观察格式或大小无效")
+    parts = output.split("\n", 3)
+    if len(parts) != 4 or parts[0] != "HTTP_CONFIG_SYNC_LIVE_V1":
+        raise ManualZtpError("配置同步后 live-state 缺少同连接身份证明")
+    hostname, mac, live_text = parts[1:]
+    if (hostname.casefold() != device["hostname"].casefold()
+            or not re.fullmatch(r"[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}", mac)
+            or normalize_mac(mac) != expected_mac):
+        raise ManualZtpError("配置同步后同连接设备身份已变更；不得晋升成功")
+    if not live_text.strip():
+        raise ManualZtpError("配置同步后同连接 live-state 为空；不得晋升成功")
+    return live_text
+
+
 def sync_management_time(
     client: SshClient, device: dict, host: str, interface: str,
 ) -> dict:
@@ -2369,19 +2417,9 @@ def trigger_one(
                     "配置已尝试执行，但缺少非交互 BatchMode 身份证明；"
                     "不得晋升配置同步成功"
                 )
-            verified_host, verified_interface = connect_and_verify(client, device)
-            if (verified_host, verified_interface) != (host, interface):
-                raise ManualZtpError("配置同步后设备身份/路径已变更；不得晋升成功")
-            live_state = client.run(
-                device, host, "nv config show", timeout=client.args.command_timeout,
-            )
-            if live_state.returncode or not live_state.stdout.strip():
-                raise ManualZtpError(
-                    "配置同步后未取得 live-state；不得晋升成功: "
-                    f"{live_state.stderr.strip() or 'empty nv config show'}"
-                )
+            live_state = collect_config_sync_live_state(client, device, host, interface)
             live_value, _live_json, _live_digest = runtime_comparable_nvue_config(
-                live_state.stdout, label=f"{device['hostname']} 同会话 live-state",
+                live_state, label=f"{device['hostname']} 同会话 live-state",
             )
             expected_value, _expected_json, _expected_digest = (
                 runtime_comparable_nvue_config(
@@ -2392,7 +2430,7 @@ def trigger_one(
                 raise ManualZtpError(
                     "配置同步后 live-state 与发布配置不一致；不得晋升成功"
                 )
-            live_state_sha256 = _raw_text_sha256(live_state.stdout)
+            live_state_sha256 = _raw_text_sha256(live_state)
             batch_identity_verified = True
             batch_identity_verified_at = datetime.now().astimezone().isoformat(
                 timespec="seconds"
