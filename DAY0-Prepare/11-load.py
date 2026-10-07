@@ -5207,6 +5207,19 @@ def _validate_runtime_key_binding(path: Path, project: Path, record: dict[str, o
         raise LoadError("rollback public key parent identity changed")
 
 
+def _require_runtime_publickey_parent(receipt: dict[str, object]) -> None:
+    """A legacy payload digest cannot authorize writes into a rebound directory."""
+    expected = receipt.get("publickey_parent")
+    if receipt.get("schema_version") != 3 or not isinstance(expected, dict):
+        raise LoadError("rollback public key parent identity is missing; preserve legacy receipt")
+    try:
+        actual = _setup_switch_link_parent_identity(ZTP_DIR / "config/publickey/.receipt-parent")
+    except (OSError, LoadError) as exc:
+        raise LoadError(f"rollback public key parent is unavailable or unsafe: {exc}") from exc
+    if actual != expected:
+        raise LoadError("rollback public key parent identity changed")
+
+
 def _write_rollback_receipt_payload(path: Path, payload: bytes, mode: int) -> None:
     """Complete one private new receipt file before publishing its directory."""
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
@@ -5294,7 +5307,8 @@ def prepare_runtime_rollback_receipt(
         if not stat.S_ISDIR(destination.lstat().st_mode):
             raise LoadError("existing A rollback receipt is not a directory")
         # A receipt is immutable. Reuse is allowed only after full validation.
-        _load_runtime_rollback_receipt(canonical_project, destination)
+        existing = _load_runtime_rollback_receipt(canonical_project, destination)
+        _require_runtime_publickey_parent(existing)
         return destination
     stage = Path(tempfile.mkdtemp(prefix=".rollback-receipt-", dir=receipts))
     try:
@@ -5311,6 +5325,7 @@ def prepare_runtime_rollback_receipt(
             raise LoadError("A rollback publickey directory is not canonical")
         publickey_dir = publickey_name.resolve(strict=True)
         publickey_dir.relative_to(ZTP_DIR.resolve(strict=True))
+        publickey_parent = _setup_switch_link_parent_identity(publickey_dir / ".receipt-parent")
         publickeys: dict[str, dict[str, object]] = {}
         for source in sorted(publickey_dir.glob("*.pub"), key=lambda item: item.name):
             record, payload = _read_runtime_publickey(source, canonical_project)
@@ -5357,7 +5372,7 @@ def prepare_runtime_rollback_receipt(
                 )
             }
         receipt = {
-            "schema_version": (2 if any(record["state"] == "link" for record in publickeys.values()) else 1),
+            "schema_version": 3,
             "record_type": "http-ztp-runtime-rollback-receipt",
             "project": canonical_project.name,
             "release_id": release_id,
@@ -5365,6 +5380,7 @@ def prepare_runtime_rollback_receipt(
             "dhcp_status": dhcp_status,
             "frozen_files": frozen_files,
             "publickeys": publickeys,
+            "publickey_parent": publickey_parent,
             "yaml_latest": yaml_latest,
             "prefix": {
                 "marker_b64": (
@@ -5376,6 +5392,7 @@ def prepare_runtime_rollback_receipt(
             "unchanged_authorities": unchanged,
         }
         receipt_path = stage / "receipt.json"
+        _require_runtime_publickey_parent(receipt)
         _write_rollback_receipt_payload(
             receipt_path,
             (json.dumps(receipt, ensure_ascii=True, indent=2, sort_keys=True) + "\n").encode("ascii"),
@@ -5396,7 +5413,7 @@ def prepare_runtime_rollback_receipt(
     finally:
         if stage.exists():
             shutil.rmtree(stage)
-    _load_runtime_rollback_receipt(canonical_project, destination)
+    _require_runtime_publickey_parent(_load_runtime_rollback_receipt(canonical_project, destination))
     return destination
 
 
@@ -5438,16 +5455,26 @@ def _load_runtime_rollback_receipt(
         "selector_target", "dhcp_status", "frozen_files", "publickeys",
         "yaml_latest", "prefix", "unchanged_authorities",
     }
+    if isinstance(receipt, dict) and receipt.get("schema_version") == 3:
+        required.add("publickey_parent")
     if (not isinstance(receipt, dict) or set(receipt) != required
             or isinstance(receipt.get("schema_version"), bool)
             or not isinstance(receipt.get("schema_version"), int)
-            or receipt.get("schema_version") not in (1, 2)
+            or receipt.get("schema_version") not in (1, 2, 3)
             or receipt.get("record_type") != "http-ztp-runtime-rollback-receipt"
             or receipt.get("project") != canonical_project.name
             or receipt.get("release_id") != relative.name
             or receipt.get("selector_target") != f"generations/{relative.name}"
             or receipt.get("dhcp_status") not in {"enabled", "disabled"}):
         raise LoadError("rollback receipt is incomplete or invalid")
+    if receipt["schema_version"] == 3:
+        parent = receipt["publickey_parent"]
+        if (not isinstance(parent, dict) or set(parent) != {"path", "dev", "ino"}
+                or not isinstance(parent.get("path"), str)
+                or parent["path"] != str((ZTP_DIR / "config/publickey").resolve(strict=True))
+                or any(type(parent.get(field)) is not int or parent[field] < 0
+                       for field in ("dev", "ino"))):
+            raise LoadError("rollback receipt publickey parent binding is invalid")
     frozen = receipt.get("frozen_files")
     keys = receipt.get("publickeys")
     if not isinstance(frozen, dict) or set(frozen) != set(_ROLLBACK_RUNTIME_FILES):
@@ -5484,7 +5511,7 @@ def _load_runtime_rollback_receipt(
                 expected_fields |= {"target", "source_identity", "parent_identity"}
                 identity = record.get("source_identity")
                 parent = record.get("parent_identity")
-                if (receipt["schema_version"] != 2
+                if (receipt["schema_version"] not in (2, 3)
                         or not isinstance(identity, dict) or set(identity) != set(_RUNTIME_KEY_IDENTITY_FIELDS)
                         or any(isinstance(value, bool) or not isinstance(value, int) for value in identity.values())
                         or not stat.S_ISREG(identity["st_mode"]) or identity["st_nlink"] != 1
@@ -5757,6 +5784,7 @@ def _verify_active_runtime_receipt(
     project: Path, receipt_directory: Path, receipt: dict[str, object],
 ) -> None:
     """Prove a reusable receipt still describes the active flat A exactly."""
+    _require_runtime_publickey_parent(receipt)
     _verify_rollback_authorities(project, receipt)
     for name, record in receipt["frozen_files"].items():
         if _describe_receipt_file(ZTP_DIR / name) != record:
@@ -8137,6 +8165,7 @@ def restore_runtime_rollback_receipt(
     canonical_project = project.resolve(strict=True)
     output = canonical_project / "99-output-ztp"
     receipt = _load_runtime_rollback_receipt(canonical_project, receipt_directory)
+    _require_runtime_publickey_parent(receipt)
     if active_project() != canonical_project:
         raise LoadError("runtime rollback project is not the active project")
     if expected_current != receipt["selector_target"]:
@@ -8211,16 +8240,19 @@ def restore_runtime_rollback_receipt(
             if payload_total > _ROLLBACK_TOTAL_LIMIT:
                 raise LoadError("rollback receipt payload set is oversized")
             payload_groups[group_name][name] = payload
+    _require_runtime_publickey_parent(receipt)
     for name, record in frozen.items():
         _restore_receipt_file(
             ZTP_DIR / name, record, payload_groups["files"][name],
         )
     for extra in set(path.name for path in publickey_dir.glob("*.pub")) - set(key_records):
+        _require_runtime_publickey_parent(receipt)
         path = publickey_dir / extra
         if path.is_dir() and not path.is_symlink():
             raise LoadError("rollback publickey target became a directory")
         path.unlink()
     for name, record in key_records.items():
+        _require_runtime_publickey_parent(receipt)
         if record["state"] == "link":
             _validate_runtime_key_binding(publickey_dir / name, canonical_project, record)
             _atomic_restore_setup_link(publickey_dir / name, record["target"])
@@ -8239,6 +8271,7 @@ def restore_runtime_rollback_receipt(
 
     # A multi-path restore is not an atomic selector switch.  Report success
     # only after every surface and the unchanged selector have been rechecked.
+    _require_runtime_publickey_parent(receipt)
     for name, record in frozen.items():
         path = ZTP_DIR / name
         actual = _describe_receipt_file(path)

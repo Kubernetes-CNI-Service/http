@@ -2216,12 +2216,137 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertEqual(b"unrelated replacement directory key\n", (publickeys / "laptop.pub").read_bytes())
         self.assertEqual(evidence, (receipt / "receipt.json").read_bytes())
 
+    def test_runtime_plain_key_parent_rebind_holds_before_any_restore_write(self) -> None:
+        _parent, generation, receipt = self._publish_a_with_runtime_rollback_receipt()
+        keys = self.ztp / "config/publickey"
+        original = keys.stat().st_ino
+        keys.rename(keys.with_name("original-publickey"))
+        keys.mkdir()
+        foreign = keys / "operator.pub"
+        foreign.write_bytes(b"unrelated directory must not become A restore authority\n")
+        self.assertNotEqual(original, keys.stat().st_ino)
+        live = self.ztp / "ztp.json"
+        live.write_bytes(b"partial B must survive parent rejection\n")
+        evidence = (receipt / "receipt.json").read_bytes()
+        with mock.patch.object(LOAD, "DEPLOYMENT_LOCK", self.root / ".deployment.lock"), \
+                mock.patch.object(LOAD, "active_project", return_value=self.project.resolve()), \
+                mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            descriptor = LOAD.acquire_deployment_lock(exclusive=True)
+            try:
+                with self.assertRaisesRegex(LOAD.LoadError, "publickey parent|public key parent"):
+                    LOAD.restore_runtime_rollback_receipt(self.project, receipt,
+                        expected_current=f"generations/{generation.name}", deployment_lock_descriptor=descriptor,
+                        services_quiesced=True, runtime_backend=SimpleNamespace(name="supervisor"))
+            finally:
+                LOAD.release_deployment_lock(descriptor)
+        self.assertEqual(b"partial B must survive parent rejection\n", live.read_bytes())
+        self.assertEqual(["operator.pub"], sorted(path.name for path in keys.iterdir()))
+        self.assertEqual(b"unrelated directory must not become A restore authority\n", foreign.read_bytes())
+        self.assertEqual(evidence, (receipt / "receipt.json").read_bytes())
+
+    def test_runtime_plain_key_receipt_freezes_parent_and_legacy_restore_holds(self) -> None:
+        _parent, generation, receipt = self._publish_a_with_runtime_rollback_receipt()
+        metadata = receipt / "receipt.json"
+        record = json.loads(metadata.read_text())
+        keys = (self.ztp / "config/publickey").resolve()
+        self.assertEqual(3, record["schema_version"])
+        self.assertEqual({"path": str(keys), "dev": keys.stat().st_dev, "ino": keys.stat().st_ino},
+                         record["publickey_parent"])
+        record["schema_version"] = 1
+        record.pop("publickey_parent")
+        metadata.write_text(json.dumps(record))
+        evidence = metadata.read_bytes()
+        live = self.ztp / "ztp.json"
+        live.write_bytes(b"legacy receipt does not license restore\n")
+        with mock.patch.object(LOAD, "DEPLOYMENT_LOCK", self.root / ".deployment.lock"), \
+                mock.patch.object(LOAD, "active_project", return_value=self.project.resolve()), \
+                mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            descriptor = LOAD.acquire_deployment_lock(exclusive=True)
+            try:
+                with self.assertRaisesRegex(LOAD.LoadError, "publickey parent|public key parent"):
+                    LOAD.restore_runtime_rollback_receipt(self.project, receipt,
+                        expected_current=f"generations/{generation.name}", deployment_lock_descriptor=descriptor,
+                        services_quiesced=True, runtime_backend=SimpleNamespace(name="supervisor"))
+            finally:
+                LOAD.release_deployment_lock(descriptor)
+        self.assertEqual(b"legacy receipt does not license restore\n", live.read_bytes())
+        self.assertEqual(evidence, metadata.read_bytes())
+
+    def test_runtime_plain_key_receipt_parent_reader_rejects_extended_or_invalid_identity(self) -> None:
+        _parent, _generation, receipt = self._publish_a_with_runtime_rollback_receipt()
+        metadata = receipt / "receipt.json"
+        original = json.loads(metadata.read_text())
+        live = self.ztp / "ztp.json"
+        live.write_bytes(b"reader cannot authorize a restore write\n")
+        for boundary in ("missing", "boolean", "extended"):
+            with self.subTest(boundary=boundary):
+                record = json.loads(json.dumps(original))
+                if boundary == "missing":
+                    record.pop("publickey_parent")
+                elif boundary == "boolean":
+                    record["publickey_parent"]["ino"] = True
+                else:
+                    record["publickey_parent"]["future_owner"] = "not authority"
+                metadata.write_text(json.dumps(record))
+                evidence = metadata.read_bytes()
+                with self.assertRaises(LOAD.LoadError):
+                    LOAD._load_runtime_rollback_receipt(self.project, receipt)
+                self.assertEqual(evidence, metadata.read_bytes())
+                self.assertEqual(b"reader cannot authorize a restore write\n", live.read_bytes())
+
+    def test_runtime_receipt_creation_parent_rebind_never_publishes_mixed_key_authority(self) -> None:
+        _parent, generation, _receipt = self._publish_a_with_runtime_rollback_receipt(prepare_receipt=False)
+        keys = self.ztp / "config/publickey"
+        payloads = {p.name: p.read_bytes() for p in keys.iterdir()}
+        real_write = LOAD._write_rollback_receipt_payload
+        injected = []
+
+        def rebind_after_payload(path, payload, mode):
+            result = real_write(path, payload, mode)
+            if path.parent.name == "publickeys" and not injected:
+                injected.append(True)
+                keys.rename(keys.with_name("original-publickey"))
+                keys.mkdir()
+                for name, content in payloads.items():
+                    (keys / name).write_bytes(content)
+            return result
+
+        with mock.patch.object(LOAD, "_write_rollback_receipt_payload", side_effect=rebind_after_payload):
+            with self.assertRaisesRegex(LOAD.LoadError, "public key parent"):
+                LOAD.prepare_runtime_rollback_receipt(self.project, generation)
+        self.assertTrue(injected)
+        self.assertEqual(payloads, {p.name: p.read_bytes() for p in keys.iterdir()})
+        self.assertFalse((self.project / "99-output-ztp/rollback-receipts" / generation.name).exists())
+
+    def test_runtime_plain_key_receipt_reuse_refuses_rebound_parent_or_legacy_evidence(self) -> None:
+        _parent, generation, receipt = self._publish_a_with_runtime_rollback_receipt()
+        metadata = receipt / "receipt.json"
+        original = metadata.read_bytes()
+        keys = self.ztp / "config/publickey"
+        payloads = {p.name: p.read_bytes() for p in keys.iterdir()}
+        keys.rename(keys.with_name("original-publickey"))
+        keys.mkdir()
+        for name, content in payloads.items():
+            (keys / name).write_bytes(content)
+        with self.assertRaisesRegex(LOAD.LoadError, "public key parent"):
+            LOAD.prepare_runtime_rollback_receipt(self.project, generation)
+        self.assertEqual(original, metadata.read_bytes())
+        record = json.loads(original)
+        record["schema_version"] = 1
+        record.pop("publickey_parent")
+        metadata.write_text(json.dumps(record))
+        evidence = metadata.read_bytes()
+        with self.assertRaisesRegex(LOAD.LoadError, "public key parent"):
+            LOAD.prepare_runtime_rollback_receipt(self.project, generation)
+        self.assertEqual(evidence, metadata.read_bytes())
+
     def test_runtime_managed_key_receipt_rejects_schema_downgrade(self) -> None:
         _generation, receipt = self._publish_a_with_managed_key_receipt()
         metadata = receipt / "receipt.json"
         record = json.loads(metadata.read_text())
-        self.assertEqual(2, record["schema_version"])
+        self.assertEqual(3, record["schema_version"])
         record["schema_version"] = 1
+        record.pop("publickey_parent")
         metadata.write_text(json.dumps(record))
         evidence = metadata.read_bytes()
         with self.assertRaisesRegex(LOAD.LoadError, "public key binding"):

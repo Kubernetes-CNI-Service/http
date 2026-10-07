@@ -1376,6 +1376,12 @@ finally:
             self.assertFalse((root / "service-started").exists())
 
     def test_real_setup_publickey_links_then_load_receipt_restores_exact_publication(self):
+        self._assert_real_setup_publickey_receipt_restore(rebind_plain_parent=False)
+
+    def test_real_setup_plain_keys_then_load_receipt_parent_rebind_holds_before_write(self):
+        self._assert_real_setup_publickey_receipt_restore(rebind_plain_parent=True)
+
+    def _assert_real_setup_publickey_receipt_restore(self, *, rebind_plain_parent):
         fixture = RELEASE_FIXTURE.ReleaseTransactionTests(
             methodName="test_failed_b_generation_can_restore_and_verify_complete_a_runtime_receipt")
         fixture.setUp()
@@ -1399,26 +1405,55 @@ finally:
             keys = [root / base / name for base in ("ztp/config/publickey", "infiniband/publickey")
                     for name in ("laptop.pub", "mgmt-server.pub")]
             targets = {path: os.readlink(path) for path in keys}
+            if rebind_plain_parent:
+                # Plain public keys are a supported receipt input, independent
+                # of SETUP's usual managed-link publication.
+                for path in keys[:2]:
+                    payload = path.read_bytes()
+                    path.unlink()
+                    path.write_bytes(payload)
             with mock.patch.object(SETUP, "_collect_expected_links", return_value=list(map(str, keys))):
                 SETUP._write_manifest(str(project))
             before = manifest.read_bytes()
             selector = f"generations/{generation.name}"
             receipt = api.prepare_active_runtime_rollback_receipt(project, selector)
             self.assertIsNotNone(receipt)
+            receipt_bytes = (receipt / "receipt.json").read_bytes()
             live = ztp / "ztp.json"
             live.write_bytes(b"partial B runtime\n")
             for path in keys[:2]:
                 path.unlink()
                 path.write_bytes(b"partial B flat key\n")
+            if rebind_plain_parent:
+                parent = ztp / "config/publickey"
+                original = parent.stat().st_ino
+                parent.rename(parent.with_name("original-publickey"))
+                parent.mkdir()
+                (parent / "operator.pub").write_bytes(b"unrelated replacement key\n")
+                self.assertNotEqual(original, parent.stat().st_ino)
             with mock.patch.object(api, "active_managed_services", return_value=()):
                 descriptor = api.acquire_deployment_lock(exclusive=True)
                 try:
-                    api.restore_runtime_rollback_receipt(project, receipt, expected_current=selector,
-                        deployment_lock_descriptor=descriptor, services_quiesced=True,
-                        runtime_backend=SimpleNamespace(name="supervisor"))
+                    def restore():
+                        api.restore_runtime_rollback_receipt(project, receipt, expected_current=selector,
+                            deployment_lock_descriptor=descriptor, services_quiesced=True,
+                            runtime_backend=SimpleNamespace(name="supervisor"))
+                    if rebind_plain_parent:
+                        with self.assertRaisesRegex(api.LoadError, "publickey parent|public key parent"):
+                            restore()
+                    else:
+                        restore()
                 finally:
                     api.release_deployment_lock(descriptor)
             self.assertEqual(before, manifest.read_bytes())
+            self.assertEqual(receipt_bytes, (receipt / "receipt.json").read_bytes())
+            if rebind_plain_parent:
+                self.assertEqual(b"partial B runtime\n", live.read_bytes())
+                self.assertEqual(["operator.pub"], sorted(path.name for path in parent.iterdir()))
+                self.assertEqual(b"unrelated replacement key\n", (parent / "operator.pub").read_bytes())
+                self.assertEqual(selector, os.readlink(project / "99-output-ztp/current"))
+                self.assertFalse((root / "service-started").exists())
+                return
             for path, target in targets.items():
                 self.assertTrue(path.is_symlink())
                 self.assertEqual(target, os.readlink(path))
