@@ -7735,7 +7735,22 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
                         path.unlink()
                 else:
                     os.replace(Path(row["stage"]["path"]), path)
-            _fsync_parent_directory(path.parent)
+            sync_parent = path.parent
+            while not os.path.lexists(sync_parent):
+                # Cold reentry after removing an originally absent Q-only
+                # parent syncs its surviving original ancestor. Never recreate
+                # that directory or treat arbitrary missing parents as owned.
+                removed = [row for name, _stage, present, row in
+                           _setup_switch_created_directory_states(body)
+                           if name == sync_parent and present is None]
+                if (row["before"] != {"state": "missing"} or row["stage"] is not None
+                        or len(removed) != 1):
+                    raise LoadError("A setup absent parent is not original removed Q owner; HOLD")
+                next_parent = Path(removed[0]["parent"]["path"])
+                if next_parent == sync_parent:
+                    raise LoadError("A setup removed parent ancestry is invalid; HOLD")
+                sync_parent = next_parent
+            _fsync_parent_directory(sync_parent)
             require_restored_publication()
         def restore_runtime_leaf(path, record, payload):
             path = Path(path).parent.resolve(strict=True) / Path(path).name
@@ -7757,10 +7772,34 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
         def require_setup_restored():
             if set(setup_states().values()) != {"after"}:
                 raise LoadError("A compensation setup completion is unconfirmed; HOLD")
+        def require_setup_image_owner(path, original):
+            # The only replacement owner accepted by A image qualification
+            # is this immutable plan's consumed stage, not a new same-target
+            # link observed at cold entry. Original image source stays strict.
+            require_restored_publication()
+            require_runtime_restored()
+            require_setup_restored()
+            physical = Path(path).parent.resolve(strict=True) / Path(path).name
+            matches = [row for name, row in plan["setup"].items()
+                       if Path(name).name == physical.name and row["parent"] == original["parent"]]
+            images = body.get("a_image_intent")
+            if (images is None or original not in [pair["published"] for pair in images["files"].values()]
+                    or len(matches) != 1 or "link_target" not in original):
+                raise LoadError("original A image setup stage qualification differs; HOLD")
+            row = matches[0]
+            stage = row["stage"]
+            current = _setup_switch_compensation_leaf(physical)
+            if (row["parent"] != original["parent"]
+                    or row["before"] != {"state": "link", "target": original["link_target"]}
+                    or stage is None or os.path.lexists(stage["path"])
+                    or not same_owner(current, stage["file"], renamed=True)):
+                raise LoadError("original A image setup stage owner differs; HOLD")
+            require_restored_publication()
         require_restored_publication()
         yield dict(journal=journal, opened=opened, require=require_restored_publication,
                    restore_runtime_leaf=restore_runtime_leaf, require_runtime_restored=require_runtime_restored,
-                   restore_setup_leaf=restore_setup_leaf, require_setup_restored=require_setup_restored)
+                   restore_setup_leaf=restore_setup_leaf, require_setup_restored=require_setup_restored,
+                   require_setup_image_owner=require_setup_image_owner)
     except (KeyError, TypeError, ValueError, RuntimeError, OSError) as exc:
         raise LoadError(f"A publication compensation unconfirmed; HOLD: {exc}") from exc
     finally:
@@ -8404,8 +8443,8 @@ def _setup_switch_capture_a_images(body):
             deployment_scope=inputs.deployment_scope, switch_scope=inputs.switch_scope)
         images = {}
         for kind, basename in expected.items():
-            candidates = [HTTP_ROOT.resolve(strict=True) / name for name in _image_filename_candidates(basename)
-                          if os.path.lexists(HTTP_ROOT / name)]
+            candidates = [IMAGE_DIR.resolve(strict=True) / name for name in _image_filename_candidates(basename)
+                          if os.path.lexists(IMAGE_DIR / name)]
             if len(candidates) != 1:
                 return None  # Do not choose between unqualified aliases.
             images[kind] = candidates[0]
@@ -8415,8 +8454,12 @@ def _setup_switch_capture_a_images(body):
 
 
 @contextmanager
-def _setup_switch_a_image_authority(body):
+def _setup_switch_a_image_authority(body, *, compensation=None):
     """Read-only original A qualification, not a disk restore or service start."""
+    if compensation is not None:
+        compensation["require"]()
+        if _setup_switch_prepared_registration_body(compensation["opened"]) != body:
+            raise LoadError("original A image body differs from held original WAL; HOLD")
     intent = body.get("a_image_intent")
     record = body.get("a_runtime")
     if (intent is None or not isinstance(record, dict)
@@ -8427,11 +8470,26 @@ def _setup_switch_a_image_authority(body):
     if intent["policy"] != policy:
         raise LoadError("original A image policy differs from original receipt; HOLD")
     images = {kind: Path(pair["source"]["path"]) for kind, pair in intent["files"].items()}
+    if any(source.parent != IMAGE_DIR.resolve(strict=True) for source in images.values()):
+        raise LoadError("original A image source is outside SETUP's original shared image root; HOLD")
     _setup_switch_runtime_context(body, require_original_yaml_owner=True)
-    with _setup_switch_b_image_authority(inputs, images, original_intent=intent) as image_authority:
+    def compensated():
+        if compensation is not None:
+            compensation["require"]()
+            compensation["require_runtime_restored"]()
+            compensation["require_setup_restored"]()
+    def published_owner(path, original):
+        compensated()
+        compensation["require_setup_image_owner"](path, original)
+        compensated()
+    compensated()
+    with _setup_switch_b_image_authority(inputs, images, original_intent=intent,
+            _published_owner=published_owner if compensation is not None else None) as image_authority:
         def authority():
+            compensated()
             _setup_switch_runtime_context(body, require_original_yaml_owner=True)
             image_authority()
+            compensated()
         authority()
         yield dict(inputs=inputs, images=images, policy=policy, require=authority)
 
@@ -15590,7 +15648,7 @@ def finish_setup_switch_b_service_gate(token, *, guard, inputs, images, confirme
 
 
 @contextmanager
-def _setup_switch_b_image_authority(inputs, images, *, original_intent):
+def _setup_switch_b_image_authority(inputs, images, *, original_intent, _published_owner=None):
     """Hold source and published image owners throughout one B health attempt."""
     if original_intent is not None and original_intent["policy"] == "disabled":
         expected = {}
@@ -15616,9 +15674,14 @@ def _setup_switch_b_image_authority(inputs, images, *, original_intent):
                 original = original_intent["files"][kind][label]
                 if label == "published" and "link_target" in original:
                     identity = _dhcp_a_preimage_receipt_identity(path.lstat())
+                    if original["identity"] != list(identity):
+                        if _published_owner is None:
+                            raise LoadError("B published image original link owner differs; HOLD")
+                        _published_owner(path, original)
                     if (not stat.S_ISLNK(path.lstat().st_mode) or path.lstat().st_nlink != 1
                             or original["path"] != str(path.parent.resolve(strict=True) / path.name)
-                            or original["parent"] != parent or original["identity"] != list(identity)
+                            or original["parent"] != parent
+                            or identity != _dhcp_a_preimage_receipt_identity(path.lstat())
                             or os.readlink(path) != original["link_target"]
                             or path.resolve(strict=True) != source.parent.resolve(strict=True) / source.name
                             or original["sha256"] != digests[0]):

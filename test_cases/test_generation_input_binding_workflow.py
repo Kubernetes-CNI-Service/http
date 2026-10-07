@@ -4994,14 +4994,19 @@ finally:
     def test_real_setup_committed_q_cold_rejects_same_byte_original_a_image(self):
         self._real_setup_committed_q_group_restore(a_image_fault=True)
 
+    def test_real_setup_committed_q_group_cold_qualifies_original_a_image_stage(self):
+        self._real_setup_committed_q_group_restore(a_image=True, setup_death=True)
+
     def _real_setup_committed_q_group_restore(self, *, dhcp=False, runtime_death=False,
                                              setup_death=False, foreign_setup=False,
-                                             q_local=False, q_fault=False, a_fault=None, a_image_fault=False):
+                                             q_local=False, q_fault=False, a_fault=None, a_image_fault=False,
+                                             a_image=False):
         fixture = RELEASE_FIXTURE.ReleaseTransactionTests()
         fixture.setUp()
         try:
             state, context = fixture._prepare_persisted_a_runtime_switch(
-                original_upgrade_policy="enabled" if a_image_fault else None, original_images=a_image_fault)
+                original_upgrade_policy="enabled" if a_image_fault or a_image else None,
+                original_images=a_image_fault or a_image)
             original_a_links = {context.project / name: (
                 (context.project / name).lstat().st_ino, (context.project / name).lstat().st_ctime_ns,
                 os.readlink(context.project / name))
@@ -5051,6 +5056,16 @@ try:
         load.service_runtime_backend = lambda: backend
         setup._SETUP_SWITCH_WAL_CONTEXT = (vars(load), fd)
         setup._register_setup_switch_link_before_write(str(common), str(q / '01-global.yaml'))
+        image_link = common.parents[3] / 'image/cumulus/cumulus-linux-5.12.0-mlx-amd64.bin'
+        if len(sys.argv) > 9 and sys.argv[9] == 'a-image':
+            setup._register_setup_switch_link_before_write(str(image_link), str(image_link.parents[3] / 'image' / image_link.name))
+        q_only_link = common.parents[3] / 'config/independent-q-only-parent/operator.pub'
+        if len(sys.argv) > 10 and sys.argv[10] == 'q-created':
+            setup._SetupLinkTransaction([]).ensure_directory(str(q_only_link.parent))
+            target = q / 'independent-q-operator.pub'
+            target.write_bytes(b'independent Q-only operator\n')
+            setup._register_setup_switch_link_before_write(str(q_only_link), str(target))
+            q_only_link.symlink_to(os.path.relpath(target, q_only_link.parent))
         common.unlink()
         common.symlink_to(os.path.relpath(q / '01-global.yaml', common.parent))
         # The other original P-only link is intentionally absent in Q.
@@ -5061,7 +5076,9 @@ try:
             if row['after'] is None and os.path.lexists(path):
                 path.unlink()
         (root / 'ztp/ztp-bootstrap_oob.sh').write_bytes(b'independent installed B runtime\n')
-        manifest = ('# setup manifest — proj: ' + str(q) + '\n' + str(common) + '\n').encode()
+        manifest = ('# setup manifest — proj: ' + str(q) + '\n' + str(common) + '\n'
+                    + (str(image_link) + '\n' if len(sys.argv) > 9 and sys.argv[9] == 'a-image' else '')
+                    + (str(q_only_link) + '\n' if len(sys.argv) > 10 and sys.argv[10] == 'q-created' else '')).encode()
         load.register_setup_switch_manifest(root / 'ztp/.setup-switch-journal.json', manifest,
                                            _publish_manifest=True, **guard)
         candidates = private_publication_candidates(load, q)
@@ -5141,7 +5158,21 @@ try:
         raise AssertionError('same-byte new original A image source must not be adopted')
     status = load.restore_setup_switch_a_disk(q, guard=guard, confirmed=True)
     assert status == 'restored-p-a-group-stopped-wal-retained', status
-    assert (root / 'ztp/ztp-bootstrap_oob.sh').read_bytes() == b'A oob bootstrap\n'
+    expected_bootstrap = (b'A oob bootstrap\nZTP_UPGRADE_ENABLED="true"\n'
+                          if sys.argv[5] == 'reader-a-image' else b'A oob bootstrap\n')
+    assert (root / 'ztp/ztp-bootstrap_oob.sh').read_bytes() == expected_bootstrap
+    if sys.argv[5] == 'reader-a-image':
+        import json
+        body = json.loads((root / 'ztp/.setup-switch-journal.json').read_bytes())['body']
+        with load._setup_switch_a_compensation_authority(q, guard=guard, confirmed=True,
+                restore_publication=False, complete_publication=True) as compensation:
+            with load._setup_switch_a_image_authority(body, compensation=compensation) as qualified:
+                assert qualified['policy'] == 'enabled'
+                assert qualified['images'] == {'eth': root / 'image/cumulus-linux-5.12.0-mlx-amd64.bin'}
+                assert qualified['inputs'].settings.versions['eth'] == '5.12.0'
+                qualified['require']()
+        print('R22_ORIGINAL_A_IMAGE_STAGE_QUALIFIED')
+        assert not os.path.lexists(root / 'ztp/config/independent-q-only-parent')
     if sys.argv[6] == 'dhcp':
         assert (runtime / 'dhcpd.conf').read_bytes() == b'independent-A:dhcpd.conf\n'
         assert (runtime / 'dhcpd_ib.hosts').read_bytes() == b'independent-A:dhcpd_ib.hosts\n'
@@ -5154,7 +5185,9 @@ finally:
             argv = [sys.executable, "-B", "-c", script, str(root), str(q), str(common), str(ROOT)]
             shape = "dhcp" if dhcp else "no-dhcp"
             original_p_target = context.setup_state.links[common]
-            writer = subprocess.run(argv + ["writer", shape, original_p_target, "q-local" if q_local else "no-q-local"],
+            writer = subprocess.run(argv + ["writer", shape, original_p_target, "q-local" if q_local else "no-q-local",
+                                           "a-image" if a_image or a_image_fault else "no-a-image",
+                                           "q-created" if a_image else "no-q-created"],
                                     capture_output=True, text=True, check=False, timeout=30)
             self.assertEqual(-signal.SIGKILL, writer.returncode, writer.stdout + writer.stderr)
             original_wal = (journal.lstat().st_ino, journal.read_bytes())
@@ -5165,7 +5198,7 @@ finally:
                 self.assertIn("R22_Q_COMPENSATED_NO_P_WRITE", compensation.stdout)
                 marker = journal.parent / ".setup-switch-a-restore.json"
                 original_plan = (marker.lstat().st_ino, marker.read_bytes())
-                source = (root / "cumulus-linux-5.12.0-mlx-amd64.bin" if a_image_fault
+                source = (root / "image/cumulus-linux-5.12.0-mlx-amd64.bin" if a_image_fault
                           else context.project / a_fault if a_fault else q / "01-global.yaml")
                 held = source.with_name("independent-original-cold-Q-input")
                 metadata = source.lstat()
@@ -5201,16 +5234,19 @@ finally:
                     self.assertEqual(original_p_target, os.readlink(common))
                 marker = journal.parent / ".setup-switch-a-restore.json"
                 before_reader_plan = (marker.lstat().st_ino, marker.read_bytes())
-            reader = subprocess.run(argv + ["reader", shape], capture_output=True, text=True, check=False, timeout=30)
+            reader_mode = "reader-a-image" if a_image else "reader"
+            reader = subprocess.run(argv + [reader_mode, shape], capture_output=True, text=True, check=False, timeout=30)
             self.assertEqual(0, reader.returncode, reader.stdout + reader.stderr)
             self.assertIn("R22_ORIGINAL_GROUP_RESTORED_STOPPED", reader.stdout)
+            if a_image:
+                self.assertIn("R22_ORIGINAL_A_IMAGE_STAGE_QUALIFIED", reader.stdout)
             self.assertEqual(context.setup_state.manifest, state[7].read_bytes())
             self.assertEqual(context.setup_state.links, {path: os.readlink(path) for path in context.setup_state.links})
             marker = journal.parent / ".setup-switch-a-restore.json"
             original_plan = (marker.lstat().st_ino, marker.read_bytes())
             if runtime_death or setup_death:
                 self.assertEqual(before_reader_plan, original_plan)
-            reader2 = subprocess.run(argv + ["reader", shape], capture_output=True, text=True, check=False, timeout=30)
+            reader2 = subprocess.run(argv + [reader_mode, shape], capture_output=True, text=True, check=False, timeout=30)
             self.assertEqual(0, reader2.returncode, reader2.stdout + reader2.stderr)
             self.assertEqual(original_wal, (journal.lstat().st_ino, journal.read_bytes()))
             self.assertEqual(original_plan, (marker.lstat().st_ino, marker.read_bytes()))

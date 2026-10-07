@@ -1,5 +1,51 @@
 # 脚本变更影响测试
 
+## 2026-10-08 R22 原 A 共享镜像源与补偿 stage 归属
+
+基于 `c9c25bc` 的续补，独立测试将真实镜像放在 SETUP 使用的共享 `image/` 根。
+旧捕获误查 HTTP 根，原 enabled intent 变为 None：1 FAIL / exit1，完整
+`r22-original-a-image-shared-path-red.log`（inode162093601 / size127794 /
+SHA256 `b1a305a934480edb1bd4f7e4ecf162ce79d311a104e232327725a9f4ab22bcfa`）。
+冷读也必须拒绝旧错误 root intent，不能因字节/owner 相符就扩大源根。
+
+原计划消费后的 published 镜像叶子可接受仅该计划登记的 stage inode，原源 owner
+始终严格；资格上下文先核 body 等于 held 原 WAL，再持续核 runtime/setup completion、
+原计划/原 source FD/name、相对叶子与源的对应关系。第三方同目标新链接必须 HOLD。
+不同 body 借用原 token 的负例 1 FAIL / exit1，完整
+`r22-original-a-image-borrowed-body-red.log`（inode162107619 / size128211 /
+SHA256 `ec0e8f6b4c5e38139fcb2a2c4eac1502b7c3c87074552cc663c8df1f88eea9c5`）。
+初步完整模块 625 OK / 254.348s / exit0，日志
+`r22-original-a-image-owned-stage-module-regression.log`（inode162108051 / size344597 /
+SHA256 `1a826f54cbe9dad0be4e561008e29f9a7f320425dc3f15aa5b821e1658541c68`），
+190478-byte 旧前缀 SHA256 `4cd50c5dd27c565e5a8466cf5f1389d604e8184bfb0b28bee43817919ba88d35`
+不变，物理 Ran1799→OK1801→actual1828→冻结一致1829→END1831=0。
+
+补充原 Q-only 父目录已移除的边界：不得遍历该无关消失父目录来查 image stage；
+恢复再重入时只按原 created-directory 缺席链同步幸存原祖先，不重建目录。
+真实 SETUP/LOAD 工作流加入 Q-only 目录与 P 恢复强杀，两次新进程冷读验证完整组与
+image stage 原 owner。重入 direct RED 1 ERROR / exit1，日志
+`r22-original-a-image-removed-q-parent-reentry-red.log`（inode162176928 / size130360 /
+SHA256 `392d4da311ecbd7d32d139217dc61898b61a38cc0986e7677c804403da7e7bd3`）。
+修正后的 direct/真实 workflow 3 OK / 23.787s / exit0，完整
+`r22-original-a-image-owned-namespace-green2.log`（inode162177846 / size129124 /
+SHA256 `f08e3eb66b6902ed8d814ba63cf112f20fe827cfe5f633af8e41251480815991`），
+物理 Ran10→OK12→actual28→冻结一致29→END31=0。期间所有初始 RED、路径别名
+夹具错误与中间失败日志保留，不弱化断言。最终追加模块回归仍单独登记；以上不是
+正式 related/full/check，不关闭显式 A 激活/归档或真实环境卡。
+
+最终补入不受支持 HTTP-root intent 的独立负例，RED 1 FAIL / 0.172s / exit1，
+`r22-original-a-image-legacy-root-red2.log`（inode162183727 / size127928 /
+SHA256 `e0189ced744d49bbe392dab7dfab1cded5527cebd324f9658810ad8551aceebf`）。
+当前最终源码/测试/manifest 冻结的完整模块回归为 **627 OK / 258.566s / exit0**；
+`outputs/test-diagnostics/r22-original-a-image-owned-namespace-final-module-regression.log`，
+inode162185506 / size346035 / SHA256
+`d5d302571281cb981bad2e93c6f59fc8e268cc6b0e7f76df6282586544d879f0`；
+277673-byte 旧前缀 SHA256 `bfa3e02cafaa89fea5c99521a5edb1372c240a569225695bb6f0b55160185ab4`
+不变，读取前后 inode/size/mtime/ctime 一致，物理 Ran1810→OK1812→actual1839→
+冻结一致1840→END1842=0。现有 `day0_release_operations` direct 与
+`generation_input_binding_setup_load_c2` 多真实脚本 workflow 映射保持。
+这是有界模块回归；批准 ledger 未被手改或生成，正式 related/full/check 仍待。
+
 ## 2026-10-08 R22 原 A 镜像首写前资格基础
 
 基于 `2c4ff01`；三个原 WAL 缺 disabled/enabled/unqualified 明确记录反例、缺原 A

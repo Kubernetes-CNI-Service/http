@@ -1067,9 +1067,11 @@ class ReleaseTransactionTests(unittest.TestCase):
     def _prepare_published_q_for_stopped_preflight(self, *, with_image=False, no_upgrade=False,
                                                   ztp_disabled=False, seed_q_publication=False,
                                                   publication_phase="published", partial_runtime=False,
-                                                  q_local=False):
+                                                  q_local=False, original_a_policy=None, original_a_images=False,
+                                                  q_created=False):
         state, context, guard = self._prepare_q_manifest_publication(seed_q_publication=seed_q_publication,
-                                                                   q_local=q_local)
+            q_local=q_local, original_a_policy=original_a_policy, original_a_images=original_a_images,
+            q_created=q_created)
         q = state[1]
         for name, source in (("01-global.yaml", self.inputs.global_file),
                              ("02-devices_config.csv", self.inputs.devices_file),
@@ -2132,8 +2134,10 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertEqual(token["payload"], state[-3].read_bytes())
         self.assertEqual(source.read_bytes(), held.read_bytes())
 
-    def _prepare_q_manifest_publication(self, *, seed_q_publication=False, q_local=False):
-        state, context = self._prepare_persisted_a_runtime_switch(seed_q_publication=seed_q_publication)
+    def _prepare_q_manifest_publication(self, *, seed_q_publication=False, q_local=False,
+                                        original_a_policy=None, original_a_images=False, q_created=False):
+        state, context = self._prepare_persisted_a_runtime_switch(seed_q_publication=seed_q_publication,
+            original_upgrade_policy=original_a_policy, original_images=original_a_images)
         journal, descriptor, backend = state[-3:]
         guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True, runtime_backend=backend)
         if q_local:
@@ -2145,8 +2149,21 @@ class ReleaseTransactionTests(unittest.TestCase):
         state[2].unlink()
         state[2].symlink_to(os.path.relpath(state[5], state[2].parent))
         state[3].unlink()
+        q_link = self.ztp / "config/independent-q-only-parent/operator.pub"
+        if q_created:
+            target = state[1] / "independent-q-operator.pub"
+            target.write_bytes(b"independent Q-only operator\n")
+            with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                    mock.patch.object(SETUP, "ZTP", str(self.ztp)), \
+                    mock.patch.object(SETUP, "_SETUP_SWITCH_WAL_CONTEXT", (vars(LOAD), descriptor)):
+                SETUP._SetupLinkTransaction([]).ensure_directory(str(q_link.parent))
+                LOAD.register_setup_switch_journal_link(journal, q_link, target, **guard)
+                q_link.symlink_to(os.path.relpath(target, q_link.parent))
         manifest = ("# setup manifest — proj: " + str(state[1].resolve()) + "\n"
-                    + str(state[2]) + "\n").encode()
+                    + str(state[2]) + "\n"
+                    + (str(q_link) + "\n" if q_created else "")
+                    + (str(self.ztp / "image/cumulus/cumulus-linux-5.12.0-mlx-amd64.bin") + "\n"
+                       if original_a_images else "")).encode()
         with mock.patch.object(LOAD, "active_managed_services", return_value=()):
             LOAD.register_setup_switch_manifest(journal, manifest, _publish_manifest=True, **guard)
         return state, context, guard
@@ -4855,7 +4872,7 @@ class ReleaseTransactionTests(unittest.TestCase):
         manifest.write_text("".join(rows), encoding="utf-8")
         return manifest
 
-    def _prepare_cross_project_setup_crash(self, *, freeze_q_links=True, q_parent_payload=None):
+    def _prepare_cross_project_setup_crash(self, *, freeze_q_links=True, q_parent_payload=None, extra_old_links=None):
         """Freeze P before a Q setup child can rewrite any managed link."""
         old_project = self.project.resolve()
         new_project = self.root / "DAY0-Prepare/new"
@@ -4874,10 +4891,10 @@ class ReleaseTransactionTests(unittest.TestCase):
         old_only = self.ztp / "status"
         new_only = self.ztp / "config/cumulus/template/new-only.csv"
         manifest = self._write_setup_manifest(
-            old_project, {common: self.global_file, old_only: old_status},
+            old_project, {common: self.global_file, old_only: old_status, **(extra_old_links or {})},
         )
         old_manifest = manifest.read_bytes()
-        old_links = {common: os.readlink(common), old_only: os.readlink(old_only)}
+        old_links = {path: os.readlink(path) for path in (common, old_only, *(extra_old_links or {}))}
         lock_path = self.root / ".deployment.lock"
         constants = mock.patch.multiple(
             LOAD, HTTP_ROOT=self.root, MANIFEST=manifest,
@@ -5681,7 +5698,8 @@ class ReleaseTransactionTests(unittest.TestCase):
         if original_images:
             document["switches"][0]["eth"]["version"] = "5.12.0"
             basename = "cumulus-linux-5.12.0-mlx-amd64.bin"
-            source = self.root / basename
+            source = self.root / "image" / basename
+            source.parent.mkdir(exist_ok=True)
             source.write_bytes(b"#!/bin/sh\n" + b"independent-original-A-image\n" * 45000)
             published = self.ztp / "image/cumulus" / basename
             published.parent.mkdir(parents=True)
@@ -5710,7 +5728,8 @@ class ReleaseTransactionTests(unittest.TestCase):
         else:
             _parent, generation, receipt = self._publish_a_with_runtime_rollback_receipt(
                 original_upgrade_policy=original_upgrade_policy)
-        state = self._prepare_cross_project_setup_crash()
+        extra_images = ({published: source} if original_images else {})
+        state = self._prepare_cross_project_setup_crash(extra_old_links=extra_images)
         p, q, common = state[:3]
         journal, descriptor, backend = state[-3:]
         # Replace only this fixture's untouched legacy WAL, before any Q write.
@@ -5733,7 +5752,7 @@ class ReleaseTransactionTests(unittest.TestCase):
         )
         with mock.patch.object(LOAD, "active_managed_services", return_value=()):
             LOAD.prepare_setup_switch_journal(
-                p, q, expected_new_links={common: state[5]},
+                p, q, expected_new_links={common: state[5], **extra_images},
                 deployment_lock_descriptor=descriptor, services_quiesced=True,
                 runtime_backend=backend, runtime_rollback_context=context,
             )
@@ -6207,7 +6226,7 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertIsInstance(record, dict, "original A images must be registered before Q's first write")
         self.assertEqual("enabled", record["policy"])
         self.assertEqual({"eth"}, set(record["files"]))
-        source = self.root.resolve() / "cumulus-linux-5.12.0-mlx-amd64.bin"
+        source = self.root.resolve() / "image/cumulus-linux-5.12.0-mlx-amd64.bin"
         published = self.ztp / "image/cumulus" / source.name
         self.assertEqual(str(source), record["files"]["eth"]["source"]["path"])
         self.assertEqual(source.lstat().st_ino, record["files"]["eth"]["source"]["identity"][1])
@@ -6228,7 +6247,7 @@ class ReleaseTransactionTests(unittest.TestCase):
         state, _context = self._prepare_persisted_a_runtime_switch(
             original_upgrade_policy="enabled", original_images=True)
         body = json.loads(state[-3].read_bytes())["body"]
-        source = self.root.resolve() / "cumulus-linux-5.12.0-mlx-amd64.bin"
+        source = self.root.resolve() / "image/cumulus-linux-5.12.0-mlx-amd64.bin"
         metadata, payload = source.lstat(), source.read_bytes()
         source.rename(source.with_name("independent-held-original-A-image"))
         source.write_bytes(payload)
@@ -6245,7 +6264,7 @@ class ReleaseTransactionTests(unittest.TestCase):
         state, context = self._prepare_persisted_a_runtime_switch(
             original_upgrade_policy="enabled", original_images=True)
         body = json.loads(state[-3].read_bytes())["body"]
-        source = self.root.resolve() / "cumulus-linux-5.12.0-mlx-amd64.bin"
+        source = self.root.resolve() / "image/cumulus-linux-5.12.0-mlx-amd64.bin"
         self.global_file.write_bytes(b"independent unreadable current P global\n")
         with LOAD._setup_switch_a_image_authority(body) as qualified:
             self.assertEqual("enabled", qualified["policy"])
@@ -6284,6 +6303,105 @@ class ReleaseTransactionTests(unittest.TestCase):
         evidence = journal.read_bytes()
         with self.assertRaisesRegex(LOAD.LoadError, "image.*owner.*HOLD"):
             LOAD._setup_switch_prepared_registration_body((evidence, 0o600))
+        self.assertEqual(evidence, journal.read_bytes())
+        state[-1].start.assert_not_called()
+
+    def test_original_a_image_qualification_accepts_only_consumed_original_group_stage(self):
+        self._qualified_original_a_image_stage()
+
+    def test_original_a_image_qualification_accepts_removed_unrelated_q_parent(self):
+        self._qualified_original_a_image_stage(q_created=True)
+
+    def _qualified_original_a_image_stage(self, *, q_created=False):
+        state, context, guard, token, _inputs = self._prepare_published_q_for_stopped_preflight(
+            original_a_policy="enabled", original_a_images=True, q_created=q_created)
+        journal = state[-3]
+        body = json.loads(journal.read_bytes())["body"]
+        published = self.ztp / "image/cumulus/cumulus-linux-5.12.0-mlx-amd64.bin"
+        original_image_inode = published.lstat().st_ino
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True)
+            if q_created:
+                self.assertFalse(os.path.lexists(self.ztp / "config/independent-q-only-parent"))
+                self.assertEqual("restored-p-a-group-stopped-wal-retained",
+                                 LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True))
+            plan_path = journal.parent / ".setup-switch-a-restore.json"
+            plan = json.loads(plan_path.read_bytes())
+            row = plan["setup"][str(published)]
+            self.assertNotEqual(original_image_inode, published.lstat().st_ino)
+            self.assertEqual(row["stage"]["file"]["identity"][1], published.lstat().st_ino)
+            self.assertFalse(os.path.lexists(row["stage"]["path"]))
+            evidence = (journal.read_bytes(), plan_path.read_bytes(), published.lstat().st_ino)
+            with LOAD._setup_switch_a_compensation_authority(state[1], guard=guard, confirmed=True,
+                    restore_publication=False, complete_publication=True) as compensation:
+                with LOAD._setup_switch_a_image_authority(body, compensation=compensation) as qualified:
+                    self.assertEqual("enabled", qualified["policy"])
+                    self.assertEqual({"eth": self.root.resolve() / "image" / published.name}, qualified["images"])
+                    self.assertEqual(context.project / "99-output-ztp" / context.selector_target / "inputs/global",
+                                     qualified["inputs"].global_file)
+                    qualified["require"]()
+            self.assertEqual(evidence, (journal.read_bytes(), plan_path.read_bytes(), published.lstat().st_ino))
+        LOAD.close_setup_switch_publication_bundle(token)
+        state[-1].start.assert_not_called()
+
+    def test_original_a_image_qualification_rejects_foreign_link_during_group_authority(self):
+        state, _context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(
+            original_a_policy="enabled", original_a_images=True)
+        journal = state[-3]
+        body = json.loads(journal.read_bytes())["body"]
+        published = self.ztp / "image/cumulus/cumulus-linux-5.12.0-mlx-amd64.bin"
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True)
+            plan_path = journal.parent / ".setup-switch-a-restore.json"
+            evidence = (journal.read_bytes(), plan_path.read_bytes())
+            with LOAD._setup_switch_a_compensation_authority(state[1], guard=guard, confirmed=True,
+                    restore_publication=False, complete_publication=True) as compensation:
+                with LOAD._setup_switch_a_image_authority(body, compensation=compensation) as qualified:
+                    target = os.readlink(published)
+                    held = published.with_name("independent-held-consumed-A-image-stage")
+                    published.rename(held)
+                    published.symlink_to(target)
+                    foreign = (published.lstat().st_ino, os.readlink(published))
+                    with self.assertRaisesRegex(LOAD.LoadError, "(image|setup).*(owner|link|source|authority).*HOLD"):
+                        qualified["require"]()
+            self.assertEqual(evidence, (journal.read_bytes(), plan_path.read_bytes()))
+            self.assertEqual(foreign, (published.lstat().st_ino, os.readlink(published)))
+        state[-1].start.assert_not_called()
+
+    def test_original_a_image_qualification_cannot_borrow_another_wal_body(self):
+        state, _context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(
+            original_a_policy="enabled", original_a_images=True)
+        journal = state[-3]
+        body = json.loads(journal.read_bytes())["body"]
+        body["new_project"] = dict(body["old_project"])
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True)
+            evidence = journal.read_bytes()
+            with LOAD._setup_switch_a_compensation_authority(state[1], guard=guard, confirmed=True,
+                    restore_publication=False, complete_publication=True) as compensation:
+                with self.assertRaisesRegex(LOAD.LoadError, "original A.*(WAL|body).*HOLD"):
+                    with LOAD._setup_switch_a_image_authority(body, compensation=compensation):
+                        self.fail("a different body cannot borrow the original compensation authority")
+            self.assertEqual(evidence, journal.read_bytes())
+        state[-1].start.assert_not_called()
+
+    def test_original_a_image_qualification_rejects_legacy_unsupported_root_source(self):
+        state, _context = self._prepare_persisted_a_runtime_switch(
+            original_upgrade_policy="enabled", original_images=True)
+        journal = state[-3]
+        body = json.loads(journal.read_bytes())["body"]
+        source = self.root.resolve() / "cumulus-linux-5.12.0-mlx-amd64.bin"
+        source.write_bytes((self.root / "image" / source.name).read_bytes())
+        published = self.ztp / "image/cumulus" / source.name
+        published.unlink()
+        published.symlink_to(os.path.relpath(source, published.parent.resolve(strict=True)))
+        # Represent the old registration's root-level intent explicitly;
+        # exact bytes/owners alone must not broaden SETUP's shared source root.
+        body["a_image_intent"] = LOAD._setup_publication_image_intent({"eth": source}, upgrade_enabled=True)
+        evidence = journal.read_bytes()
+        with self.assertRaisesRegex(LOAD.LoadError, "original A.*image.*(shared|source).*HOLD"):
+            with LOAD._setup_switch_a_image_authority(body):
+                self.fail("an unsupported HTTP-root image cannot become original A activation qualification")
         self.assertEqual(evidence, journal.read_bytes())
         state[-1].start.assert_not_called()
 
