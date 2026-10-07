@@ -8587,6 +8587,7 @@ def recover_setup_switch_journal(
     _after_p_restore: Callable[..., None] | None = None,
     restore_runtime_from_wal: bool = False,
     _expected_runtime_context: CrossProjectRollbackContext | None = None,
+    requested_new_project: Path | None = None,
 ) -> str:
     """Verify or restore P from a complete WAL and a known P/Q disk state.
 
@@ -8606,6 +8607,8 @@ def recover_setup_switch_journal(
         raise LoadError("disk-only A runtime recovery requires an explicit full restore")
     if (expected_old_state is None) != (expected_new_project is None):
         raise LoadError("setup switch WAL context requires both P state and Q project")
+    if requested_new_project is not None and not restore_runtime_from_wal:
+        raise LoadError("requested Q recovery binding requires explicit disk-only runtime restore")
     if type(retain_journal) is not bool or (retain_journal and (verify_only or inspect_only)):
         raise LoadError("journal retention requires an unambiguous recovery mode")
     if _after_p_restore is not None and (
@@ -8651,6 +8654,11 @@ def recover_setup_switch_journal(
             raise LoadError("setup switch journal mode is not private")
 
         def require_journal_unchanged() -> None:
+            if requested_new_project is not None:
+                # CLI recovery is not authority to reconcile a second live
+                # transaction. Check throughout P/A writes and WAL retirement,
+                # not merely once before reading the SETUP preimage.
+                require_no_pending_dhcp_transaction()
             try:
                 named = journal.lstat()
                 still_held = os.fstat(descriptor)
@@ -8676,6 +8684,7 @@ def recover_setup_switch_journal(
             materialized_descriptors=materialized_descriptors,
             restore_runtime_from_wal=restore_runtime_from_wal,
             expected_runtime_context=_expected_runtime_context,
+            requested_new_project=requested_new_project,
             runtime_restore_guard=dict(deployment_lock_descriptor=deployment_lock_descriptor,
                                        services_quiesced=services_quiesced, runtime_backend=runtime_backend),
         )
@@ -8696,6 +8705,7 @@ def _recover_setup_switch_journal_snapshot(
     after_p_restore: Callable[..., None] | None = None,
     restore_runtime_from_wal: bool = False,
     expected_runtime_context: CrossProjectRollbackContext | None = None,
+    requested_new_project: Path | None = None,
     runtime_restore_guard=None,
 ) -> str:
     """Recover only from the immutable authority held by the guarded API."""
@@ -8719,6 +8729,9 @@ def _recover_setup_switch_journal_snapshot(
                 or new != _setup_switch_directory_identity(Path(new["path"]))
                 or old == new):
             raise ValueError("journal directory identity changed")
+        if (requested_new_project is not None
+                and new != _setup_switch_directory_identity(Path(requested_new_project))):
+            raise ValueError("requested Q project differs from the original WAL")
         manifest_bytes = base64.b64decode(body["manifest"], validate=True)
         if hashlib.sha256(manifest_bytes).hexdigest() != body["manifest_sha256"]:
             raise ValueError("journal P manifest digest is invalid")
@@ -14209,6 +14222,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("project", help="DAY0-Prepare 下的部署项目目录或其绝对路径")
     parser.add_argument(
+        "--recover-setup-switch", action="store_true",
+        help=("显式恢复该 Q 项目未结清 SETUP WAL 中的旧 P/A；仅 Linux management-server，"
+              "必须预先停服，不生成配置、不启停服务、不处理已提交 B 或未结清 DHCP 事务"),
+    )
+    parser.add_argument(
         "--host-role", choices=("workstation", "management-server"),
         help="Linux 必须显式声明本机角色；Darwin 默认为 workstation",
     )
@@ -14335,12 +14353,64 @@ def dry_run_next_step(requested_argv: list[str]) -> str:
     )
 
 
+def _recover_setup_switch_entrypoint(args: argparse.Namespace) -> int:
+    """A separate operator recovery, never a regeneration or activation mode.
+
+    Backend state must already be stopped. This operation performs no service
+    mutations and obtains all P/A authority from the held original disk WAL;
+    the operator's project is only an additional exact Q identity constraint.
+    """
+    descriptor = None
+    try:
+        host_os = runtime_os()
+        if (host_os.casefold() != "linux"
+                or resolve_host_role(getattr(args, "host_role", None), host_os) != "management-server"):
+            raise LoadError("explicit SETUP recovery requires Linux --host-role management-server")
+        incompatible = (
+            "dry_run", "start_services", "start_ztp_monitor", "update_passwords",
+            "skip_generate", "skip_doca", "download_doca", "no_upgrade",
+            "p2p_legacy_columns", "validation_only",
+        )
+        if (any(getattr(args, name, False) for name in incompatible)
+                or any(getattr(args, name, None) is not None for name in ("import_configs", "p2p_file", "mini"))
+                or getattr(args, "deployment_scope", "all") != "all"
+                or getattr(args, "switch_scope", None) is not None
+                or getattr(args, "ztp_monitor_scope", "auto") != "auto"
+                or getattr(args, "ztp_monitor_interval", DEFAULT_ZTP_MONITOR_INTERVAL) != DEFAULT_ZTP_MONITOR_INTERVAL
+                or getattr(args, "ssh_dir", _default_ssh_dir()) != _default_ssh_dir()):
+            raise LoadError("--recover-setup-switch is recovery-only; generation/start/dry-run overrides are forbidden")
+        backend = service_runtime_backend()
+        descriptor = acquire_deployment_lock(exclusive=True)
+        project = resolve_project(args.project)
+        # No fixture/template creation: canonical Q/root identity and every
+        # held WAL/receipt obligation are independently verified by recovery.
+        _require_runtime_restore_guard(deployment_lock_descriptor=descriptor,
+                                       services_quiesced=True, runtime_backend=backend)
+        _require_no_pending_setup_manifest_stage()
+        require_no_pending_dhcp_transaction()
+        recover_setup_switch_journal(
+            _setup_switch_journal_path(), deployment_lock_descriptor=descriptor,
+            services_quiesced=True, runtime_backend=backend,
+            restore_runtime_from_wal=True, requested_new_project=project,
+        )
+        ok("显式 SETUP 冷恢复与 A runtime 核验完成；服务仍停止，未生成新配置或自动激活旧 A")
+        return 0
+    except (LoadError, OSError, ValueError, RuntimeContractError) as exc:
+        print(f"[HOLD] 显式 SETUP 恢复未完成；保留剩余凭据，不启停服务：{exc}", file=sys.stderr)
+        return 1
+    finally:
+        if descriptor is not None:
+            release_deployment_lock(descriptor)
+
+
 def main(
     argv: list[str] | None = None, *,
     import_started_at: datetime | None = None,
 ) -> int:
     requested_argv = list(sys.argv[1:] if argv is None else argv)
     args = parse_args(argv)
+    if getattr(args, "recover_setup_switch", False):
+        return _recover_setup_switch_entrypoint(args)
     import_selector = getattr(args, "import_configs", None)
     import_output_timestamp = (
         (import_started_at or datetime.now().astimezone()).strftime("%Y%m%d_%H%M%S")

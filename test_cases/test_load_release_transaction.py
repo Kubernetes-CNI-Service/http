@@ -4484,6 +4484,44 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertFalse(os.path.lexists(target))
         self.assertTrue(calls, "guarded absence must still require current authority")
 
+    def test_explicit_setup_recovery_has_a_distinct_cli_operation(self):
+        self.assertIn("--recover-setup-switch", LOAD._build_parser()._option_string_actions,
+                      "operator recovery must not require a private Python API or ordinary regeneration")
+
+    def test_explicit_setup_recovery_main_restores_a_without_generation_or_service_actions(self):
+        state, context = self._prepare_persisted_a_runtime_switch()
+        journal, descriptor, backend = state[-3:]
+        common = state[2]
+        common.unlink()
+        common.symlink_to(os.path.relpath(state[5], common.parent))
+        (self.ztp / "ztp-bootstrap_oob.sh").write_bytes(b"independent partial B runtime\n")
+        LOAD.release_deployment_lock(descriptor)
+        self._cleanups = [item for item in self._cleanups if item[0] != LOAD.release_deployment_lock]
+        args = LOAD._build_parser().parse_args([str(state[1]), "--host-role", "management-server"])
+        args.recover_setup_switch = True
+        output, errors = io.StringIO(), io.StringIO()
+        with ExitStack() as stack, redirect_stdout(output), redirect_stderr(errors):
+            stack.enter_context(mock.patch.object(LOAD, "parse_args", return_value=args))
+            stack.enter_context(mock.patch.object(LOAD, "runtime_os", return_value="Linux"))
+            stack.enter_context(mock.patch.object(LOAD, "HERE", self.root.resolve() / "DAY0-Prepare"))
+            stack.enter_context(mock.patch.object(LOAD, "service_runtime_backend", return_value=backend))
+            stack.enter_context(mock.patch.object(LOAD, "active_managed_services", return_value=()))
+            stack.enter_context(mock.patch.object(LOAD, "dhcp_file_mappings", return_value={
+                self.global_file: self.root / "isolated-etc-dhcp/dhcpd.conf"}))
+            forbidden = [stack.enter_context(mock.patch.object(LOAD, name)) for name in (
+                "initialize_from_template", "activate_project", "render_ztp_runtime",
+                "start_services", "quiesce_services", "validate_inputs", "prepare_pubkeys")]
+            result = LOAD.main([])
+            self.assertEqual(0, result, "explicit stopped recovery must use original disk WAL, not ordinary LOAD\n"
+                             + output.getvalue() + errors.getvalue())
+            for writer in forbidden:
+                writer.assert_not_called()
+        self.assertFalse(os.path.lexists(journal))
+        self.assertEqual(context.setup_state.manifest, state[7].read_bytes())
+        self.assertEqual(context.setup_state.links, {path: os.readlink(path) for path in context.setup_state.links})
+        self.assertEqual(b"A oob bootstrap\n", (self.ztp / "ztp-bootstrap_oob.sh").read_bytes())
+        backend.start.assert_not_called()
+
     def test_setup_wal_a_missing_yaml_restore_does_not_create_parent(self):
         state, context = self._prepare_persisted_a_runtime_switch()
         journal, descriptor, backend = state[-3:]
@@ -4502,6 +4540,76 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertEqual(context.setup_state.manifest, state[7].read_bytes())
         self.assertEqual(b"A oob bootstrap\n", (self.ztp / "ztp-bootstrap_oob.sh").read_bytes())
         backend.start.assert_not_called()
+
+    def test_explicit_setup_recovery_unsafe_modes_hold_before_any_restore_write(self):
+        enclosing_ztp = LOAD.ZTP_DIR
+        cases = {
+            "dry-run": ["--dry-run"], "start": ["--start-services"],
+            "import": ["--import-configs"], "scope": ["--air"],
+            "monitor": ["--start-ztp-monitor"], "password": ["--update-passwords"],
+            "running": [], "dhcp-pending": [], "late-dhcp": [], "missing-wal": [], "committed-b": [],
+        }
+        for reason, extra in cases.items():
+            with self.subTest(reason=reason):
+                fixture = ReleaseTransactionTests()
+                fixture.setUp()
+                try:
+                    state, _context = fixture._prepare_persisted_a_runtime_switch()
+                    journal, descriptor, backend = state[-3:]
+                    common = state[2]
+                    common.unlink()
+                    common.symlink_to(os.path.relpath(state[5], common.parent))
+                    runtime = fixture.ztp / "ztp-bootstrap_oob.sh"
+                    runtime.write_bytes(b"independent unaccepted B bytes\n")
+                    LOAD.release_deployment_lock(descriptor)
+                    fixture._cleanups = [item for item in fixture._cleanups
+                                         if item[0] != LOAD.release_deployment_lock]
+                    private_dhcp = fixture.root / "isolated-etc-dhcp"
+                    if reason == "dhcp-pending":
+                        (private_dhcp / ".load-dhcp-transaction-independent").mkdir(parents=True)
+                    if reason == "missing-wal":
+                        journal.unlink()
+                    if reason == "committed-b":
+                        parent = state[1] / "99-output-ztp/current-release.json"
+                        parent.parent.mkdir()
+                        parent.write_bytes(b'{"release_id":"independent-committed-B"}\n')
+                    before = (None if not journal.exists() else (journal.lstat().st_ino, journal.read_bytes()),
+                              common.lstat().st_ino, os.readlink(common), runtime.read_bytes(), state[7].read_bytes())
+                    args = LOAD._build_parser().parse_args([str(state[1]), "--host-role", "management-server",
+                                                           "--recover-setup-switch", *extra])
+                    errors = io.StringIO()
+                    with ExitStack() as stack, redirect_stdout(io.StringIO()), redirect_stderr(errors):
+                        stack.enter_context(mock.patch.object(LOAD, "parse_args", return_value=args))
+                        stack.enter_context(mock.patch.object(LOAD, "runtime_os", return_value="Linux"))
+                        stack.enter_context(mock.patch.object(LOAD, "HERE", fixture.root.resolve() / "DAY0-Prepare"))
+                        stack.enter_context(mock.patch.object(LOAD, "service_runtime_backend", return_value=backend))
+                        stack.enter_context(mock.patch.object(LOAD, "active_managed_services",
+                                                             return_value=("apache2",) if reason == "running" else ()))
+                        stack.enter_context(mock.patch.object(LOAD, "dhcp_file_mappings", return_value={
+                            fixture.global_file: private_dhcp / "dhcpd.conf"}))
+                        if reason == "late-dhcp":
+                            original = LOAD._setup_switch_created_directory_states
+                            def inject_dhcp_after_preflight(body):
+                                result = original(body)
+                                (private_dhcp / ".load-dhcp-transaction-independent").mkdir(parents=True, exist_ok=True)
+                                return result
+                            stack.enter_context(mock.patch.object(LOAD, "_setup_switch_created_directory_states",
+                                                                 side_effect=inject_dhcp_after_preflight))
+                        writers = [stack.enter_context(mock.patch.object(LOAD, name, wraps=getattr(LOAD, name)))
+                                   for name in ("_atomic_restore_setup_link", "_atomic_restore_setup_manifest",
+                                                "_restore_receipt_file", "start_services", "quiesce_services")]
+                        self.assertEqual(1, LOAD.main([]), errors.getvalue())
+                        self.assertIn("HOLD", errors.getvalue())
+                        for writer in writers:
+                            writer.assert_not_called()
+                    self.assertEqual(before, (None if not journal.exists() else (journal.lstat().st_ino, journal.read_bytes()),
+                                              common.lstat().st_ino, os.readlink(common), runtime.read_bytes(), state[7].read_bytes()))
+                    backend.start.assert_not_called()
+                finally:
+                    fixture.doCleanups()
+                    fixture.tearDown()
+                self.assertEqual(enclosing_ztp, LOAD.ZTP_DIR, "private subcase must restore the enclosing module state")
+                self.assertFalse(fixture.root.exists(), "private subcase must remove its own temporary directory")
 
     def test_guarded_link_restore_cannot_invent_absent_parent_authority(self):
         target = self.root / "independent-unbound-output/latest"

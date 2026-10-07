@@ -476,6 +476,15 @@ direct 与真实 SETUP 强杀→新 LOAD 覆盖冷入口换绑和 runtime 后核
 非 missing 链接遇缺席父目录必须 HOLD；已有真实父目录的 unlink/重入仍同步父目录。
 direct 与真实 SETUP 强杀→新 LOAD 覆盖此边界；无 authority 的旧入口不改变。
 这不补造原 missing 父目录的持久身份，也不完成 B 收口或旧 A 激活。
+Linux management-server 的显式 `11-load.py <Q项目> --host-role management-server
+--recover-setup-switch` 是独立冷恢复操作：必须已经停服，取得排他锁并将指定 Q 的物理身份
+与持有的原 WAL 比较；仅凭 WAL 恢复 P/A，不进入普通模板/生成/发布流程，不启停服务。
+生成、导入、启动、dry-run 等混合意图拒绝；`--skip-infra` 可保留，但此操作从不运行 infra。
+未结清 DHCP 事务在入口、恢复写前及 WAL 退休前均 HOLD；晚到时 A 可能已恢复，不能冒称零写。
+已提交 B、未知 Q、缺失/不完整 WAL、活跃/未知服务继续保留凭据。成功也只是停止状态的
+A 恢复，不是 B finalizer 或人工核验后的显式健康激活；真实 Linux/root/断电见证仍 OPEN。
+每个私有拒绝子场景还必须恢复外层模块路径并清理自己的临时目录；独立清理断言先 FAIL
+再补齐 teardown，避免诊断夹具污染后续用例，原业务断言及超时时限不变。
 missing 前像的 unlink 和已经缺席的重入也须同步父目录。同步失败不得报成功或退休 WAL。
 direct 覆盖实际模式/同步顺序和写入/删除同步异常；真实 LOAD→SETUP 强杀→新 LOAD
 workflow 使用实际 runtime 文件 writer 注入父目录同步错误，保留 WAL 后在新进程重入。

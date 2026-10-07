@@ -551,6 +551,21 @@ finally:
     def test_real_setup_death_missing_a_yaml_restore_does_not_create_parent(self):
         self._assert_real_persisted_a_runtime_switch(False, late_authority="missing-yaml-parent")
 
+    def test_real_setup_death_explicit_recovery_cli_restores_a_and_stays_stopped(self):
+        self._assert_real_persisted_a_runtime_switch(False, late_authority="explicit-recovery")
+
+    def test_real_setup_death_explicit_recovery_cli_wrong_q_holds_original_evidence(self):
+        self._assert_real_persisted_a_runtime_switch(False, late_authority="explicit-recovery:wrong-q")
+
+    def test_real_setup_death_explicit_recovery_cli_running_service_holds_original_evidence(self):
+        self._assert_real_persisted_a_runtime_switch(False, late_authority="explicit-recovery:running")
+
+    def test_real_setup_death_explicit_recovery_cli_committed_b_holds_original_evidence(self):
+        self._assert_real_persisted_a_runtime_switch(False, late_authority="explicit-recovery:committed-b")
+
+    def test_real_setup_death_explicit_recovery_cli_late_dhcp_retains_wal_after_a_restore(self):
+        self._assert_real_persisted_a_runtime_switch(False, late_authority="explicit-recovery:late-dhcp")
+
     def test_real_setup_death_yaml_parent_legacy_wal_holds_without_inventing_identity(self):
         self._assert_real_persisted_a_runtime_switch(False, late_authority="yaml-parent-rebind:legacy")
 
@@ -647,6 +662,61 @@ os.kill(os.getpid(), signal.SIGKILL)
             self.assertEqual(-9, first.returncode, first.stdout + first.stderr)
             evidence = journal.read_bytes()
             mixed = os.readlink(common)
+            if late_authority and late_authority.startswith("explicit-recovery"):
+                runtime_before = (root / "ztp/ztp-bootstrap_oob.sh").read_bytes()
+                recovery = r'''
+import importlib.util, sys
+from pathlib import Path
+from types import SimpleNamespace
+root, project = map(Path, sys.argv[1:3])
+spec = importlib.util.spec_from_file_location('explicit_recovery_cold_load', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+def forbidden(*args, **kwargs):
+    raise AssertionError('explicit recovery must not regenerate, stop or start services')
+load.runtime_os = lambda: 'Linux'
+load.active_managed_services = lambda *args, **kwargs: ('apache2',) if sys.argv[3] == 'explicit-recovery:running' else ()
+load.service_runtime_backend = lambda: SimpleNamespace(name='supervisor', start=forbidden, stop=forbidden)
+load.dhcp_file_mappings = lambda *args, **kwargs: {root / 'unused-source': root / 'isolated-etc-dhcp/dhcpd.conf'}
+if sys.argv[3] == 'explicit-recovery:late-dhcp':
+    original_restore = load.restore_runtime_rollback_receipt
+    def inject_after_runtime(*args, **kwargs):
+        result = original_restore(*args, **kwargs)
+        (root / 'isolated-etc-dhcp/.load-dhcp-transaction-independent').mkdir(parents=True)
+        return result
+    load.restore_runtime_rollback_receipt = inject_after_runtime
+for name in ('initialize_from_template', 'activate_project', 'render_ztp_runtime', 'start_services',
+             'quiesce_services', 'validate_inputs', 'prepare_pubkeys'):
+    setattr(load, name, forbidden)
+raise SystemExit(load.main([str(project), '--host-role', 'management-server', '--recover-setup-switch']))
+'''
+                wrong_q = late_authority.endswith(":wrong-q")
+                if late_authority.endswith(":committed-b"):
+                    parent = q / "99-output-ztp/current-release.json"
+                    parent.parent.mkdir()
+                    parent.write_bytes(b'{"release_id":"independent-committed-B"}\n')
+                holds = ":" in late_authority
+                result = subprocess.run([sys.executable, "-B", "-c", recovery, str(root), str(p if wrong_q else q), late_authority],
+                    capture_output=True, text=True, check=False, timeout=30)
+                self.assertEqual(1 if holds else 0, result.returncode, result.stdout + result.stderr)
+                if holds:
+                    self.assertEqual(evidence, journal.read_bytes())
+                    if late_authority.endswith(":late-dhcp"):
+                        self.assertEqual(context.setup_state.links, {path: os.readlink(path) for path in context.setup_state.links})
+                        self.assertEqual(b"A oob bootstrap\n", (root / "ztp/ztp-bootstrap_oob.sh").read_bytes())
+                        self.assertTrue((root / "isolated-etc-dhcp/.load-dhcp-transaction-independent").is_dir())
+                    else:
+                        self.assertEqual(mixed, os.readlink(common))
+                        self.assertEqual(runtime_before, (root / "ztp/ztp-bootstrap_oob.sh").read_bytes())
+                    self.assertIn("HOLD", result.stderr)
+                else:
+                    self.assertFalse(os.path.lexists(journal))
+                    self.assertEqual(context.setup_state.manifest, state[7].read_bytes())
+                    self.assertEqual(context.setup_state.links, {path: os.readlink(path) for path in context.setup_state.links})
+                    self.assertEqual(b"A oob bootstrap\n", (root / "ztp/ztp-bootstrap_oob.sh").read_bytes())
+                self.assertFalse((root / "service-started").exists())
+                return
             if late_authority == "missing-yaml-parent":
                 missing = p / "99-output-ib_nvl/latest"
                 self.assertFalse(os.path.lexists(missing.parent))
