@@ -9179,6 +9179,30 @@ os.kill(os.getpid(), signal.SIGKILL)
         self.assertEqual(a_conf, (generation_a / "dhcp/dhcpd.conf").read_bytes())
         self.assertEqual(a_conf, (flat / "dhcpd.conf").read_bytes())
 
+    def test_pinned_generation_final_payload_mode_precedes_file_sync(self) -> None:
+        LOAD.validate_and_publish_release(self.project, self.inputs)
+        parent_path = self.project / "99-output-ztp/current-release.json"
+        flat = self.ztp / "config/isc-dhcp-server"
+        synced_modes = []
+        real_sync = os.fsync
+
+        def observe_sync(descriptor):
+            metadata = os.fstat(descriptor)
+            if stat.S_ISREG(metadata.st_mode):
+                synced_modes.append(stat.S_IMODE(metadata.st_mode))
+            return real_sync(descriptor)
+
+        original_umask = os.umask(0o077)
+        try:
+            with mock.patch.object(LOAD.os, "fsync", side_effect=observe_sync):
+                generation = LOAD.stage_pinned_generation(self.project, parent_path, flat)
+        finally:
+            os.umask(original_umask)
+        self.assertGreater(len(synced_modes), 1, "real staged payloads were not synced")
+        self.assertEqual({0o644}, set(synced_modes), "final payload mode was set only after file sync")
+        self.assertFalse(os.path.lexists(self.project / "99-output-ztp/current"))
+        self.assertEqual(0o644, stat.S_IMODE((generation / "current-release.json").stat().st_mode))
+
     def test_pinned_generation_rejects_same_byte_symlink_replacement(self) -> None:
         LOAD.validate_and_publish_release(self.project, self.inputs)
         parent_path = self.project / "99-output-ztp/current-release.json"

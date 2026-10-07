@@ -4865,8 +4865,8 @@ def stage_pinned_generation(
             with target.open("xb") as stream:
                 stream.write(content)
                 stream.flush()
+                os.fchmod(stream.fileno(), 0o644)
                 os.fsync(stream.fileno())
-            target.chmod(0o644)
         directories = [stage / "inputs", stage]
         if (stage / "dhcp").exists():
             directories.insert(0, stage / "dhcp")

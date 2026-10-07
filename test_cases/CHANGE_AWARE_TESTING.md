@@ -153,6 +153,31 @@ proof。默认 push 只接受 release proof。owner 授权的 AIR/prod 验证可
 
 ## Full proof 失败后的诊断与重跑闸门
 
+### R22 封存 generation 最终权限须先于文件同步
+
+独立 direct 与真实私有 SETUP→LOAD→report/selector workflow 在 umask077 下，
+要求所有 payload FD 的最终0644权限先于文件 fsync；原实现先 fsync0600 后按路径
+chmod，两项有效 FAIL / exit1。RED 原日志
+`outputs/test-diagnostics/r22-generation-final-mode-red.log`，inode157676626、size129019、
+SHA256 `7cd222307629d802b86c429571f52b5d77ac35ee56f6ff2fb1f09b71dad2fd4e`。
+候选只在原 held stream FD 上 fchmod0644→fsync，保留 payload、子目录/代次目录同步、
+安装及 selector 顺序。两项 GREEN / exit0 原日志
+`outputs/test-diagnostics/r22-generation-final-mode-green.log`，inode157676780、size127777、
+SHA256 `4ee894d9f86b6bd6f868cc85cc0d5d4a8a048203385160cd7a6a14f9e6a2ad4c`。
+
+完整 LOAD、generation report direct 与 workflow 三模块495项 OK / exit0，原日志
+`outputs/test-diagnostics/r22-generation-final-mode-modules.log`，inode157676920、size282692、
+SHA256 `ce65f37f468402f5d64c42d86240ea759ee68ec632fd27f33353f8236b834658`；
+读前后 stat 相同，物理1381行 Ran 495 tests in 31.094s、1383行 OK、1402行
+ACTUAL_UNITTEST_EXIT=0、1403行 FROZEN_STATE_MATCH=True、1405行 DIAGNOSTIC_END=0，
+实际 exec exit0。现有 `generation_report_lifecycle` 仍覆盖真实 SETUP/LOAD/report 脚本，
+LOAD direct 映射不变；REAL_ENV 同卡补记授权隔离、持久性见证与清理风险。
+这只是最终权限的同步顺序，不闭合 generation/report 全写集 WAL、B finalizer、旧 A
+显式健康激活、非协作写者竞态或断电见证；不是 related 自动批准或正式 full/check，
+ledger 不手改，原 bootstrap/REQ19 根因和完整 R22 仍 OPEN。
+
+### 2026-10-07 单次完整诊断的同步遗漏与有界修复
+
 2026-10-07 owner 单独批准的一次完整诊断使用当前 `3123e81680bc959c4b714e5b869437622f8a5ba7`
 / tree `221d43c2a1c8ec37099ac43ae84e41d4b661aadc`，运行
 `python3 -B test_cases/run_related_tests.py --all --no-approve -v`。

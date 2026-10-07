@@ -14,8 +14,10 @@ import hashlib
 import inspect
 import io
 import json
+import os
 from pathlib import Path
 import shutil
+import stat
 import tempfile
 import textwrap
 from types import SimpleNamespace
@@ -160,6 +162,43 @@ class GenerationReportWorkflow(unittest.TestCase):
         candidate = LOAD.prepare_current_release(self.project, parent)
         self.assertFalse(candidate.committed)
         return parent, candidate
+
+    def test_real_setup_load_generation_syncs_final_mode_before_report_publication(self):
+        self.real_setup_publish()
+        parent, parent_candidate = self.real_load_prepare()
+        self.addCleanup(LOAD.discard_prepared_release, parent_candidate)
+        helper = report_helper()
+        report = helper.build_report(self.project, parent, published_dir=self.published)
+        report_candidate = helper.prepare_generation_report(self.project, report)
+        self.addCleanup(helper.discard_prepared_generation_report, report_candidate)
+        synced_modes = []
+        native_sync = os.fsync
+
+        def observe_sync(descriptor):
+            metadata = os.fstat(descriptor)
+            if stat.S_ISREG(metadata.st_mode):
+                synced_modes.append(stat.S_IMODE(metadata.st_mode))
+            return native_sync(descriptor)
+
+        original_umask = os.umask(0o077)
+        try:
+            with mock.patch.object(LOAD.os, "fsync", side_effect=observe_sync):
+                generation = LOAD.stage_pinned_generation(
+                    self.project, parent_candidate.temporary,
+                    self.ztp / "config/isc-dhcp-server",
+                )
+        finally:
+            os.umask(original_umask)
+        self.assertGreater(len(synced_modes), 1)
+        self.assertEqual({0o644}, set(synced_modes), "SETUP→LOAD generation published unsynced final mode")
+        self.assertFalse(os.path.lexists(self.project / "99-output-ztp/current"))
+        LOAD.commit_prepared_release(parent_candidate)
+        helper.commit_prepared_generation_report(report_candidate)
+        LOAD.commit_pinned_generation(self.project, generation, expected_current=None)
+        self.assertEqual(f"generations/{parent['release_id']}", os.readlink(self.project / "99-output-ztp/current"))
+        observed = helper.inspect_generation_report(self.project, published_dir=self.published)
+        self.assertEqual([LAPTOP_FINGERPRINT, MANAGEMENT_FINGERPRINT],
+                         [entry["fingerprint"] for entry in observed["public_keys"]])
 
     def test_real_load_main_stages_and_commits_report_in_safe_order(self):
         # The earlier workflow methods compose real functions, but this guard
