@@ -4473,6 +4473,44 @@ class ReleaseTransactionTests(unittest.TestCase):
     def test_runtime_yaml_parent_rebind_holds_after_runtime_verify(self):
         self._assert_runtime_yaml_parent_rebind_holds(True)
 
+    def test_guarded_missing_latest_restore_does_not_create_unowned_parent(self):
+        target = self.root / "independent-absent-output/latest"
+        calls = []
+        def authority():
+            calls.append("checked")
+        self.assertFalse(os.path.lexists(target.parent))
+        LOAD.restore_release_links({target: None}, require_authority=authority)
+        self.assertFalse(os.path.lexists(target.parent), "absence restore introduced an unjournaled directory")
+        self.assertFalse(os.path.lexists(target))
+        self.assertTrue(calls, "guarded absence must still require current authority")
+
+    def test_setup_wal_a_missing_yaml_restore_does_not_create_parent(self):
+        state, context = self._prepare_persisted_a_runtime_switch()
+        journal, descriptor, backend = state[-3:]
+        missing = context.project / "99-output-ib_nvl/latest"
+        self.assertFalse(os.path.lexists(missing.parent))
+        common = state[2]
+        common.unlink()
+        common.symlink_to(os.path.relpath(state[5], common.parent))
+        (self.ztp / "ztp-bootstrap_oob.sh").write_bytes(b"independent partial B runtime\n")
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.recover_setup_switch_journal(journal, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend, restore_runtime_from_wal=True)
+        self.assertFalse(os.path.lexists(missing.parent), "verified A recovery introduced an unjournaled directory")
+        self.assertFalse(os.path.lexists(missing))
+        self.assertFalse(os.path.lexists(journal))
+        self.assertEqual(context.setup_state.manifest, state[7].read_bytes())
+        self.assertEqual(b"A oob bootstrap\n", (self.ztp / "ztp-bootstrap_oob.sh").read_bytes())
+        backend.start.assert_not_called()
+
+    def test_guarded_link_restore_cannot_invent_absent_parent_authority(self):
+        target = self.root / "independent-unbound-output/latest"
+        self.assertFalse(os.path.lexists(target.parent))
+        with self.assertRaises(LOAD.LoadError):
+            LOAD.restore_release_links({target: "independent-release-a"}, require_authority=lambda: None)
+        self.assertFalse(os.path.lexists(target.parent), "HOLD must not leave a newly created unbound directory")
+        self.assertFalse(os.path.lexists(target))
+
     def test_runtime_yaml_parent_legacy_wal_holds_without_inventing_identity(self):
         state, _context = self._prepare_persisted_a_runtime_switch()
         journal, descriptor, backend = state[-3:]

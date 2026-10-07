@@ -548,6 +548,9 @@ finally:
     def test_real_setup_death_yaml_parent_rebind_holds_after_runtime_verify(self):
         self._assert_real_persisted_a_runtime_switch(False, late_authority="yaml-parent-rebind:late")
 
+    def test_real_setup_death_missing_a_yaml_restore_does_not_create_parent(self):
+        self._assert_real_persisted_a_runtime_switch(False, late_authority="missing-yaml-parent")
+
     def test_real_setup_death_yaml_parent_legacy_wal_holds_without_inventing_identity(self):
         self._assert_real_persisted_a_runtime_switch(False, late_authority="yaml-parent-rebind:legacy")
 
@@ -644,6 +647,39 @@ os.kill(os.getpid(), signal.SIGKILL)
             self.assertEqual(-9, first.returncode, first.stdout + first.stderr)
             evidence = journal.read_bytes()
             mixed = os.readlink(common)
+            if late_authority == "missing-yaml-parent":
+                missing = p / "99-output-ib_nvl/latest"
+                self.assertFalse(os.path.lexists(missing.parent))
+                recovery = r'''
+import importlib.util, sys
+from pathlib import Path
+from types import SimpleNamespace
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('missing_yaml_parent_cold_load', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+backend = SimpleNamespace(name='supervisor', start=lambda *args: (_ for _ in ()).throw(AssertionError('service start forbidden')))
+fd = load.acquire_deployment_lock(exclusive=True)
+try:
+    load.recover_setup_switch_journal(root / 'ztp/.setup-switch-journal.json',
+        deployment_lock_descriptor=fd, services_quiesced=True, runtime_backend=backend,
+        restore_runtime_from_wal=True)
+finally:
+    load.release_deployment_lock(fd)
+'''
+                result = subprocess.run([sys.executable, "-B", "-c", recovery, str(root)],
+                    capture_output=True, text=True, check=False, timeout=30)
+                self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                self.assertFalse(os.path.lexists(missing.parent), "cold recovery created an unjournaled A output directory")
+                self.assertFalse(os.path.lexists(missing))
+                self.assertFalse(os.path.lexists(journal))
+                self.assertEqual(context.setup_state.manifest, state[7].read_bytes())
+                self.assertEqual(context.setup_state.links, {path: os.readlink(path) for path in context.setup_state.links})
+                self.assertEqual(b"A oob bootstrap\n", (root / "ztp/ztp-bootstrap_oob.sh").read_bytes())
+                self.assertFalse((root / "service-started").exists())
+                return
             if late_authority and late_authority.startswith("yaml-parent-rebind:"):
                 phase = late_authority.split(":")[1]
                 latest = p / "99-output-eth/latest"

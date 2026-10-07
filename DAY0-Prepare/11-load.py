@@ -11747,8 +11747,32 @@ def restore_release_links(
         if require_authority is not None:
             require_authority()
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
             if require_authority is not None:
+                try:
+                    parent_metadata = path.parent.lstat()
+                except FileNotFoundError:
+                    if target is not None:
+                        raise LoadError(f"YAML restore parent has no creation authority: {path.parent}")
+                    # Restoring absence requires no namespace write. Do not
+                    # invent a directory outside the frozen WAL write set.
+                    # Bind the surviving immediate ancestor across the guard;
+                    # missing ancestors and final symlink ancestors HOLD.
+                    if not stat.S_ISDIR(path.parent.parent.lstat().st_mode):
+                        raise LoadError(f"YAML restore ancestor is not a real directory: {path.parent.parent}")
+                    ancestor_identity = _setup_switch_link_parent_identity(path.parent)
+                    require_authority()
+                    try:
+                        path.parent.lstat()
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        raise LoadError(f"YAML restore absent parent appeared: {path.parent}")
+                    if (not stat.S_ISDIR(path.parent.parent.lstat().st_mode)
+                            or _setup_switch_link_parent_identity(path.parent) != ancestor_identity):
+                        raise LoadError(f"YAML restore ancestor identity changed: {path.parent.parent}")
+                    continue
+                if not stat.S_ISDIR(parent_metadata.st_mode):
+                    raise LoadError(f"YAML restore parent is not a real directory: {path.parent}")
                 # The guarded runtime phase needs the helper's pre-replace
                 # recheck, parent sync and owned-stage cleanup on HOLD.
                 if target is None:
@@ -11760,6 +11784,7 @@ def restore_release_links(
                 else:
                     _atomic_restore_setup_link(path, target, require_authority=require_authority)
                 continue
+            path.parent.mkdir(parents=True, exist_ok=True)
             temporary = path.parent / f".{path.name}.rollback.{os.getpid()}"
             temporary.unlink(missing_ok=True)
             if target is None:

@@ -471,6 +471,11 @@ WAL 的 A runtime authority 另冻结已有 YAML link 的 canonical parent path/
 direct 与真实 SETUP 强杀→新 LOAD 覆盖冷入口换绑和 runtime 后核验后换绑；
 缺少此字段的旧 WAL 原字节保留并 HOLD，不从当前目录补造身份。
 此窄修不绑定原 missing latest 的目录创建义务、不替代其它父目录或完整 B 收口。
+受 authority 保护的 YAML 恢复不得为原 missing latest 创建没有 WAL 创建权限的父目录；
+父目录仍缺席时仅复核 authority 与现存真实祖先身份，保持缺席，不产生虚构的同步义务。
+非 missing 链接遇缺席父目录必须 HOLD；已有真实父目录的 unlink/重入仍同步父目录。
+direct 与真实 SETUP 强杀→新 LOAD 覆盖此边界；无 authority 的旧入口不改变。
+这不补造原 missing 父目录的持久身份，也不完成 B 收口或旧 A 激活。
 missing 前像的 unlink 和已经缺席的重入也须同步父目录。同步失败不得报成功或退休 WAL。
 direct 覆盖实际模式/同步顺序和写入/删除同步异常；真实 LOAD→SETUP 强杀→新 LOAD
 workflow 使用实际 runtime 文件 writer 注入父目录同步错误，保留 WAL 后在新进程重入。
