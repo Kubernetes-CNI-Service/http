@@ -564,7 +564,7 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
                 recovery = "未确认终止时 HOLD／升级处置，绝不解锁重发；不接受任意 PID 或启动命令，不清除外来进程。"
                 example = "python3 -B -m unittest -v test_cases.test_req7_attempt_supervision  # 仅开发测试"
             elif relative == "monitor/issue_tracker_sheets_read_plan.py":
-                scenario = "构造精确发现列、单行矩形、十四表身份、四张 tracker 表头及最多 5000 行 History A:E 的纯 Sheets GET 请求；不接收任意 A1 范围，不读取宽列或自动分页，矩形不证明完整尾边界。"
+                scenario = "构造含 Switch N／Cabling U 原始 Status 的精确发现列、单行矩形、十四表身份、四张 tracker 表头及最多 5000 行 History A:E 的纯 Sheets GET 请求；不接收任意 A1 范围，不读取宽列或自动分页，矩形不证明完整尾边界。"
                 inputs = "typed 目标绑定、私有 token、固定业务 sheet 名和有限行坐标；对象纪律不证明活的来源或准入。"
                 example = "python3 -B -m unittest -v test_cases.test_req7_sheets_read_plan  # 仅开发测试"
             elif relative == "monitor/issue_tracker_online_whitelist_read.py":
@@ -610,7 +610,7 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
                 recovery = "不完整、格式不符、前次 UNKNOWN 均 HOLD；不允许重发，不清除预留或证明 APPLIED。"
                 example = "python3 -B -m unittest -v test_cases.test_req7_mutation_rejection  # 仅开发测试"
             else:
-                scenario = "按精确目标、sheetId 和坐标解码 userEnteredValue；保留原类型，分别核十四表身份、四张 row-2 表头及有界 History A:E，回读矩形不是 COMPLETE。"
+                scenario = "按精确目标、sheetId 和坐标解码 userEnteredValue；按完整活动键和原始 Status 分类，精确 Closed 排除活动、重复活动键 CONFLICT、已有 NV ID 不改；有限窗口未匹配不是全表不存在或插入许可。分别核十四表身份、四张 row-2 表头及有界 History A:E，回读矩形不是 COMPLETE。"
                 inputs = "固定读取形状与完整有界 HTTP 200；不得用 formatted/effectiveValue 替代原值或用缺失 grid 制造空行。"
                 example = "python3 -B -m unittest -v test_cases.test_req7_sheets_read_decode  # 仅开发测试"
         if is_uninstalled:

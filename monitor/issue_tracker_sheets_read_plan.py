@@ -67,7 +67,9 @@ def prepare_sheets_read(binding, token, *, mode, sheet, first_row, last_row=None
             if (type(last_row) is not int or not first_row <= last_row <= maximum
                     or last_row - first_row + 1 > 5000):
                 raise SheetsReadHold()
-            columns = ("A", "F", "L") if sheet == "ETH&IB Switch" else ("A", "F", "G", "K", "L", "Q", "R")
+            # Status is part of active/Closed discovery, never inferred from
+            # the description, an absent grid or a formatted formula result.
+            columns = ("A", "F", "L", "N") if sheet == "ETH&IB Switch" else ("A", "F", "G", "K", "L", "Q", "R", "U")
             ranges = [quoted + "%s%d:%s%d" % (column, first_row, column, last_row) for column in columns]
         else:
             if last_row is not None and (type(last_row) is not int or last_row != first_row): raise SheetsReadHold()

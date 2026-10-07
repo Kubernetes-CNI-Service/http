@@ -71,7 +71,7 @@ class Req7SheetsReadPlanDirectTests(unittest.TestCase):
             plan = self.prepare(mode="discovery", sheet="ETH&IB Switch", first_row=3, last_row=5002)
         url = urlsplit(plan.path)
         self.assertEqual("/v4/spreadsheets/synthetic_spreadsheet_id_0001", url.path)
-        self.assertEqual({"ranges": ["'ETH&IB Switch'!A3:A5002", "'ETH&IB Switch'!F3:F5002", "'ETH&IB Switch'!L3:L5002"],
+        self.assertEqual({"ranges": ["'ETH&IB Switch'!A3:A5002", "'ETH&IB Switch'!F3:F5002", "'ETH&IB Switch'!L3:L5002", "'ETH&IB Switch'!N3:N5002"],
                           "includeGridData": ["true"],
                           "fields": ["spreadsheetId,sheets(properties(sheetId,title),data(startRow,startColumn,rowData(values(userEnteredValue))))"]},
                          parse_qs(url.query, strict_parsing=True))
@@ -82,12 +82,12 @@ class Req7SheetsReadPlanDirectTests(unittest.TestCase):
         self.assertNotIn("synthetic_spreadsheet_id_0001", repr(plan))
         with self.assertRaises(AttributeError): plan.path = "/foreign"
 
-    def test_cabling_discovery_is_seven_explicit_columns_not_a_wide_sheet_read(self):
+    def test_cabling_discovery_is_eight_explicit_columns_including_status_not_a_wide_sheet_read(self):
         for sheet in ("ETH Cabling", "IB Cabling"):
             with self.subTest(sheet=sheet):
                 plan = self.prepare(mode="discovery", sheet=sheet, first_row=3, last_row=9)
                 query = parse_qs(urlsplit(plan.path).query, strict_parsing=True)
-                self.assertEqual(["'%s'!%s3:%s9" % (sheet, column, column) for column in ("A", "F", "G", "K", "L", "Q", "R")], query["ranges"])
+                self.assertEqual(["'%s'!%s3:%s9" % (sheet, column, column) for column in ("A", "F", "G", "K", "L", "Q", "R", "U")], query["ranges"])
                 self.assertNotIn("effectiveValue", query["fields"][0]); self.assertNotIn("formattedValue", query["fields"][0])
                 self.assertNotIn("A:ZZ", plan.path)
 

@@ -231,11 +231,12 @@ class Req7SheetsReadDecodeDirectTests(unittest.TestCase):
                 {"startRow": 2, "startColumn": 11, "rowData": [{"values": [{"userEnteredValue": {"stringValue": "description"}}]}]},
                 {"startRow": 2, "startColumn": 0, "rowData": [{"values": [{"userEnteredValue": {"stringValue": "NV30017"}}]}]},
                 {"startRow": 2, "startColumn": 5, "rowData": [{"values": [{"userEnteredValue": {"stringValue": "host-1"}}]}]},
+                {"startRow": 2, "startColumn": 13, "rowData": [{"values": [{"userEnteredValue": {"stringValue": "New"}}]}]},
             ],
         }]}
         observed = self.module.decode_sheets_read(plan, response(document))
-        self.assertEqual(6, len(observed.cells))
-        self.assertEqual({(3, "A"), (3, "F"), (3, "L")}, {(row, column) for row, column, pairs in observed.cells if not pairs})
+        self.assertEqual(8, len(observed.cells))
+        self.assertEqual({(3, "A"), (3, "F"), (3, "L"), (3, "N")}, {(row, column) for row, column, pairs in observed.cells if not pairs})
         bad = deepcopy(document); bad["sheets"][0]["data"][2]["startColumn"] = 0
         with self.assertRaises(self.module.SheetsDecodeHold): self.module.decode_sheets_read(plan, response(bad))
 

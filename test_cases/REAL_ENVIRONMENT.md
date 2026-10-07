@@ -2076,6 +2076,15 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 证据：保存精确命令/退出码、完整物理顺序日志、前后 stat/inode/SHA、启动前 monotonic 时间、阶段耗时、持有锁的 FD/session 归属、截止期、TERM/KILL/reap/会话不存在和父死子存的独立见证。私有响应和诊断不进入公开日志；局部原生慢读 PASS 不代表整个 REQ7 或生产权限。
 - 故障注入、清理与风险：注入启动失败、DNS/慢读、pipe 关闭、监督器死亡和无法终止；保持原预算/行为断言。本地夹具已独立复现并修正已回收 leader 的同号存活 group 被误认为信号权限；首次检查之后、异常清理和 TERM/KILL 升级之前也必须重新确认活 leader 的 session/group 归属，不能把首次检查缓存为永久信号权限。真实 PID 重用仍 NOT RUN，必须验证不向该不确定 group 发信号、终止未确认保持 HOLD。实际临时 flock 的终止被拒工作流必须保持其他候选无法取得锁，直到本卡确证拥有的子进程完成清理。只终止本卡确证拥有的隔离会话，不能向外部 PID/group 发信号；清理不确定保持 HOLD，由授权责任人恢复隔离快照并重核锁。不得以 PID 重用、过期锁、超时宽限或重发来隐藏 UNKNOWN。
 
+## TC-REAL-REQ7-ACTIVE-CLOSED-DISCOVERY-001 — 完整活动键与原始 Closed 分类
+
+- Case ID：`TC-REAL-REQ7-ACTIVE-CLOSED-DISCOVERY-001`；类型：real-environment / read-only API / integration；对应 C-3/C-8。状态：**NOT RUN / REAL_ENV REQUIRED**。涉及 `monitor/issue_tracker_sheets_read_plan.py`、`monitor/issue_tracker_sheets_read_decode.py`、`monitor/issue_tracker_tls_inputs.py`；本地私有 loopback TLS 与原始 typed grid fixture 不证明部署环境、全表发现或 REQ7 整体完成。
+- 风险与目标：必须显式读取 Switch A/F/L/N 与 Cabling A/F/G/K/L/Q/R/U；Status 只有精确原始字面 `Closed` 才排除活动键。保留线上既有 NV ID；重复活动键 CONFLICT，原始 ID／身份／Status 公式、数字或布尔不可强制变为文本。有限窗口未匹配不是全表不存在或插入权限。
+- 前置条件：Stage L 本地 direct 和真实 read-plan → 原生 TLS → grid decoder workflow 全绿；另需 owner 的 Stage O 批准副本及只读许可、实际 Linux Python/SSL/CA 和 SDK 治理身份、14 表及精确表头、完整发现范围／真实尾边界的证据。本卡不授权联网、真实凭据读取、修改或在线启用。
+- 步骤与预期：在精确批准副本核全活动键、Closed 同键历史、不同 A 侧／issue type／Switch category+component、重复活动键和保留 ID；前后精确行矩形不得被此窗口观察替代。任一缺失／重复 grid、Status 非字面或不完整响应 HOLD；不自动分页、扩大范围、分配或覆盖 ID。
+- 证据：精确 HEAD/tree、Python/平台、manifest 与执行命令、完整日志／退出码；读日志前后 stat/inode、大小、旧前缀 SHA256、物理顺序和 END。真实响应须脱敏，不记录 bearer／凭据；记录实际范围、sheetId、窗口、Closed 分类及剩余未证完整性。
+- 清理与风险：仅测试自有私有 loopback server、临时 CA 和合成响应；确认 socket/thread/临时文件清理。真实 Stage O 卡仍 NOT RUN，不能用单个窗口零匹配、只读成功或本地 PASS 宣称普通发布证明或发送许可。
+
 ## TC-REAL-REQ7-GLOBAL-ATTEMPT-001 — 共享 UNKNOWN 屏障与全局意图计数
 
 - Case ID：`TC-REAL-REQ7-GLOBAL-ATTEMPT-001`；类型：durable / integration；对应 C-6/C-7/C-14/C-19。状态：**NOT RUN / REAL_ENV REQUIRED**。涉及 `monitor/issue_tracker_global_attempt_journal.py`、`monitor/issue_tracker_spreadsheet_owner.py`、`monitor/issue_tracker_send_intent.py`、`monitor/issue_tracker_local_commit.py`。本地合成 root 元数据、原生 fsync／NOREPLACE／独立进程及多脚本流程不是部署或 REQ7 整体证明。

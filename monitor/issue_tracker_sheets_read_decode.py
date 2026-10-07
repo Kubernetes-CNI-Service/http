@@ -21,6 +21,23 @@ class SheetsDecodeHold(ValueError):
     def __init__(self): super().__init__("req7_sheets_read_unproved")
 
 
+class OnlineActivityConflict(SheetsDecodeHold):
+    def __init__(self): ValueError.__init__(self, "req7_duplicate_active_key_conflict")
+
+
+@dataclass(frozen=True)
+class ObservedActivityWindow:
+    """Only matches in this finite window; an empty tuple is NOT absence proof."""
+    sheet_id: int
+    sheet_title: str
+    activity_key: tuple = field(repr=False)
+    active_rows: tuple = field(repr=False)
+    closed_rows: tuple = field(repr=False)
+    first_row_index: int
+    last_row_index: int
+    source_sha256: str
+
+
 @dataclass(frozen=True)
 class ObservedSheetsGrid:
     sheet_id: int
@@ -82,7 +99,7 @@ def _geometry(plan):
     match = re.fullmatch(r"/v4/spreadsheets/([A-Za-z0-9_-]{20,4096})", parsed.path)
     if parsed.scheme or parsed.netloc or parsed.fragment or match is None: raise SheetsDecodeHold()
     query = parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True)
-    if (len(query) not in (3, 5, 9) or query[:2] != [("includeGridData", "true"), ("fields", _FIELDS)]
+    if (len(query) not in (3, 6, 10) or query[:2] != [("includeGridData", "true"), ("fields", _FIELDS)]
             or any(key != "ranges" for key, value in query[2:])
             or plan.path != parsed.path + "?" + urlencode(query)):
         raise SheetsDecodeHold()
@@ -101,7 +118,7 @@ def _geometry(plan):
         first, start, last, end = geometries[0]
         if first != last or start != 0 or end != (20 if title == "ETH&IB Switch" else 28): raise SheetsDecodeHold()
     else:
-        columns = (0, 5, 11) if title == "ETH&IB Switch" else (0, 5, 6, 10, 11, 16, 17)
+        columns = (0, 5, 11, 13) if title == "ETH&IB Switch" else (0, 5, 6, 10, 11, 16, 17, 20)
         if (tuple(value[1] for value in geometries) != columns or any(value[1] != value[3] for value in geometries)
                 or len({(value[0], value[2]) for value in geometries}) != 1):
             raise SheetsDecodeHold()
@@ -172,6 +189,70 @@ def decode_sheets_read(plan, response):
         result = ObservedSheetsGrid(props["sheetId"], title, frozen, hashlib.sha256(source).hexdigest())
     except Exception:
         failed = True
+    if failed: raise SheetsDecodeHold()
+    return result
+
+
+def discover_activity_rows(plan, response, *, activity_key):
+    """Classify exact active/Closed matches from original discovery columns.
+
+    Row numbers locate necessary follow-up rectangles, not business identity.
+    Existing online IDs are returned untouched. This finite, non-atomic read
+    cannot prove no matching row elsewhere, choose an insertion, grant a permit
+    or resolve UNKNOWN. Full discovery coverage, format/enrollment continuity,
+    row ownership, exact pre/post rectangles and fresh admission remain gates.
+    """
+    failed = conflict = False
+    try:
+        _target, title, geometry = _geometry(plan)
+        if (len(geometry) <= 1 or type(activity_key) is not tuple or len(activity_key) != 4
+                or any(type(part) is not str or not 1 <= len(part) <= 255
+                       or any(ord(char) < 32 for char in part) for part in activity_key)):
+            raise SheetsDecodeHold()
+        for part in activity_key: part.encode("utf-8", "strict")
+        family = {"ETH&IB Switch": "switch", "ETH Cabling": "eth_cabling", "IB Cabling": "ib_cabling"}[title]
+        if activity_key[0] != family: raise SheetsDecodeHold()
+        if family != "switch" and activity_key[3] not in ("Link Down", "Mis-wiring"):
+            raise SheetsDecodeHold()
+        if family == "switch" and (any(re.fullmatch(r"[A-Za-z0-9_.-]+", part) is None for part in activity_key[1:3])
+                                    or re.fullmatch(r"[A-Za-z0-9_.:/-]+", activity_key[3]) is None):
+            raise SheetsDecodeHold()
+        observed = decode_sheets_read(plan, response)
+        rows = {}
+        for index, column, value in observed.cells: rows.setdefault(index, {})[column] = dict(value)
+        def text(cells, column):
+            value = cells[column]
+            if not value: return ""
+            if set(value) != {"stringValue"}: raise SheetsDecodeHold()
+            return value["stringValue"]
+        seen_ids = set(); active = []; closed = []
+        for index, cells in sorted(rows.items()):
+            identifier = text(cells, "A")
+            if identifier:
+                if re.fullmatch(r"NV[0-9]{5}", identifier) is None or identifier in seen_ids:
+                    raise SheetsDecodeHold()
+                seen_ids.add(identifier)
+            if family == "switch":
+                host, description, status = (text(cells, col) for col in ("F", "L", "N"))
+                occupied = bool(host or description)
+                matches = host == activity_key[1] and description.startswith(
+                    "[MONITOR][%s][%s]" % activity_key[2:])
+            else:
+                node, port, issue, status = (text(cells, col) for col in ("K", "L", "F", "U"))
+                occupied = bool(node or port or issue)
+                matches = (node, port, issue) == activity_key[1:]
+            if occupied and not identifier: raise SheetsDecodeHold()
+            if matches:
+                (closed if status == "Closed" else active).append((index, identifier))
+        if len(active) > 1: raise OnlineActivityConflict()
+        first = min(key[0] for key in geometry); last = max(value[0] for value in geometry.values())
+        result = ObservedActivityWindow(observed.sheet_id, title, activity_key, tuple(active), tuple(closed),
+                                        first, last, observed.source_sha256)
+    except OnlineActivityConflict:
+        conflict = True
+    except Exception:
+        failed = True
+    if conflict: raise OnlineActivityConflict()
     if failed: raise SheetsDecodeHold()
     return result
 

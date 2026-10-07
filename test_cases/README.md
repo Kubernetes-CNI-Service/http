@@ -853,6 +853,10 @@ P 阶段在绑定的 macOS CPython 3.9 环境中，把独立审定的依赖文�
 `test_req7_sheets_read_plan` / `test_req7_sheets_read_decode` 与
 `test_req7_online_whitelist_read` 固定精确列／坐标、十四表身份、四张 row-2 多行字面表头
 和完整有限 Whitelist；非原子 GET 不构成 enrollment、发送许可或完整格式快照。
+`test_req7_activity_discovery` 验证发现列必须包括 Switch N / Cabling U 原始 Status，
+按完整规范化活动键分类，仅精确字面 `Closed` 排除活动项；重复活动键 CONFLICT，
+不改线上已有 NV ID，不把公式／格式化值当字面。原生 TLS GET → 真实 planner / decoder
+流程仅产出有限窗口观察，空匹配不证明全表不存在、可新增、COMPLETE 或发送许可。
 `test_req7_mutation_rejection` 保留四类一致错误之外的 UNKNOWN，后续拒绝不能消除旧 UNKNOWN。
 `test_req7_attempt_journal` 在实际 C-6 owner 内测试不可覆盖字节、file/directory fsync、
 六次意图计数、真实子进程退出／重启、部分记录与外来对象拒绝。六次意图不证明真实尝试
