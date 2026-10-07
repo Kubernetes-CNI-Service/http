@@ -1634,6 +1634,20 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-R22-GENERATION-INPUT-ABA-001 — 跨进程输入换代与多输出一致性
 
+- generation report 暂存前像与清理补充：direct 覆盖 prepare 完成后的同 inode
+  改写、同字节写回并恢复 mtime，以及 held 输出目录打开后的晚改写，commit/discard
+  均须拒绝；真实私有 SETUP→LOAD→report prepare→commit 拒绝→finally discard
+  拒绝流程要求保留未知暂存 inode/字节，父 candidate 不变、parent/report/selector
+  均未发布。独立隔离反例两个方法八处 FAIL；原 commit 晚检查仅 dev/ino，原 cleanup
+  也仅 dev/ino，可发布或删除已改变的证据。候选绑定完成 prepare 时的九字段身份，
+  在 held 目录内重新读取 SHA 与身份后才允许 replace/unlink，正常自有 discard 保留。
+  现场仅限本卡另行授权的隔离 VM、精确版本、root-only 可恢复快照、排他锁与正常
+  写者静默；保存原/改变后候选完整 stat/SHA、prepare→改写/ABA→拒绝→保留的
+  顺序、父记录/selector 零发布盘点及完整 END/exit。封存后人工核验确切快照恢复，
+  不删未知文件解围。此检查不是非合作写者的原子 compare-and-unlink/replace，
+  不覆盖 prepare 未完成时的异常清理、完整持久 WAL、B finalizer、旧 A 激活或
+  Linux/root/断电见证；完整 R22 与正式 full/check 仍 OPEN。
+
 - generation report 原前像 ABA 补充：direct 在预备后同 inode 写入另一合法报告、
   同字节写回并恢复原 mtime，以及 commit 打开 held 输出目录后晚改写；真实私有
   SETUP→LOAD 父记录→report workflow 在 held 目录打开后注入合法报告改写。

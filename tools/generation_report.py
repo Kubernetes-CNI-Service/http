@@ -76,7 +76,7 @@ class PreparedGenerationReport:
     destination: Path
     temporary: Path
     directory_identity: tuple[int, int]
-    temporary_identity: tuple[int, int]
+    temporary_identity: tuple[int, ...]
     old_identity: tuple[int, ...] | None
     payload_sha256: str
 
@@ -420,7 +420,7 @@ def prepare_generation_report(
         return PreparedGenerationReport(
             destination=destination, temporary=output / temporary_name,
             directory_identity=directory_identity,
-            temporary_identity=_identity(observed), old_identity=old_identity,
+            temporary_identity=_report_preimage_identity(observed), old_identity=old_identity,
             payload_sha256=hashlib.sha256(payload).hexdigest(),
         )
     except BaseException:
@@ -458,8 +458,8 @@ def commit_prepared_generation_report(candidate: PreparedGenerationReport) -> Pa
     staged = _read_regular(candidate.temporary, REPORT_LIMIT)
     if staged is None or hashlib.sha256(staged).hexdigest() != candidate.payload_sha256:
         raise GenerationReportError("staged report changed")
-    if _identity(os.lstat(candidate.temporary)) != candidate.temporary_identity:
-        raise GenerationReportError("staged report inode changed")
+    if _report_preimage_identity(os.lstat(candidate.temporary)) != candidate.temporary_identity:
+        raise GenerationReportError("staged report identity changed")
     current_identity = _existing_report_identity(candidate.destination, project)
     if current_identity != candidate.old_identity:
         raise GenerationReportError("existing report changed before commit")
@@ -468,7 +468,7 @@ def commit_prepared_generation_report(candidate: PreparedGenerationReport) -> Pa
         staged_named = os.stat(
             candidate.temporary.name, dir_fd=descriptor, follow_symlinks=False,
         )
-        if (_identity(staged_named) != candidate.temporary_identity
+        if (_report_preimage_identity(staged_named) != candidate.temporary_identity
                 or not stat.S_ISREG(staged_named.st_mode)
                 or staged_named.st_nlink != 1):
             raise GenerationReportError("staged report changed before commit")
@@ -480,6 +480,7 @@ def commit_prepared_generation_report(candidate: PreparedGenerationReport) -> Pa
             old_identity = _report_preimage_identity(old_named)
         if old_identity != candidate.old_identity:
             raise GenerationReportError("existing report changed before commit")
+        _require_original_staged_report(candidate, descriptor)
         os.replace(
             candidate.temporary.name, REPORT_NAME,
             src_dir_fd=descriptor, dst_dir_fd=descriptor,
@@ -492,13 +493,28 @@ def commit_prepared_generation_report(candidate: PreparedGenerationReport) -> Pa
     return candidate.destination
 
 
+def _require_original_staged_report(
+    candidate: PreparedGenerationReport, directory_fd: int,
+) -> None:
+    """Recheck prepared bytes and full identity through the held parent.
+
+    This detects observed same-inode writes/metadata ABA; it does not make
+    the subsequent mutation atomic against noncooperating concurrent writers.
+    """
+    payload = _read_regular(candidate.temporary, REPORT_LIMIT, directory_fd=directory_fd)
+    named = os.stat(candidate.temporary.name, dir_fd=directory_fd, follow_symlinks=False)
+    if (payload is None or hashlib.sha256(payload).hexdigest() != candidate.payload_sha256
+            or _report_preimage_identity(named) != candidate.temporary_identity):
+        raise GenerationReportError("staged report changed; refusing publication or cleanup")
+
+
 def discard_prepared_generation_report(
     candidate: PreparedGenerationReport | None,
 ) -> bool:
     """Discard only the still-staged inode owned by this preparation attempt.
 
     The load caller may use this in its ``finally`` block.  It never removes
-    the final report or a name rebound to another inode.
+    the final report, a rebound name, or a same-inode changed candidate.
     """
     if candidate is None:
         return False
@@ -508,7 +524,7 @@ def discard_prepared_generation_report(
         named = os.lstat(candidate.temporary)
     except FileNotFoundError:
         return False
-    if (_identity(named) != candidate.temporary_identity
+    if (_report_preimage_identity(named) != candidate.temporary_identity
             or not stat.S_ISREG(named.st_mode) or named.st_nlink != 1):
         raise GenerationReportError("staged report name rebound; refusing cleanup")
     output = candidate.temporary.parent
@@ -517,10 +533,11 @@ def discard_prepared_generation_report(
         staged_named = os.stat(
             candidate.temporary.name, dir_fd=descriptor, follow_symlinks=False,
         )
-        if (_identity(staged_named) != candidate.temporary_identity
+        if (_report_preimage_identity(staged_named) != candidate.temporary_identity
                 or not stat.S_ISREG(staged_named.st_mode)
                 or staged_named.st_nlink != 1):
             raise GenerationReportError("staged report changed before cleanup")
+        _require_original_staged_report(candidate, descriptor)
         os.unlink(candidate.temporary.name, dir_fd=descriptor)
         if _identity(os.lstat(output)) != candidate.directory_identity:
             raise GenerationReportError("staged report directory rebound after cleanup")

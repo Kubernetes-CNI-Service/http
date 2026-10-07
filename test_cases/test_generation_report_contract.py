@@ -318,6 +318,58 @@ class GenerationReportContract(unittest.TestCase):
                 self.assertEqual(foreign, path.read_bytes())
                 self.assertTrue(candidate.temporary.is_file(), "rejected publication consumed its candidate")
 
+    def test_changed_staged_report_is_neither_published_nor_discarded(self):
+        helper = report_helper()
+        report = self.build()
+        control = helper.prepare_generation_report(self.project, report)
+        self.assertTrue(helper.discard_prepared_generation_report(control))
+        for action in ("commit", "discard"):
+            for mutation in ("content", "same-byte-aba"):
+                for boundary in ("before", "held-directory"):
+                    with self.subTest(action=action, mutation=mutation, boundary=boundary):
+                        # A failed negative case may actually publish corrupt bytes;
+                        # do not let it contaminate the next independent injection.
+                        project = self.root / f"{action}-{mutation}-{boundary}" / self.project.name
+                        output = project / "99-output-ztp"
+                        output.mkdir(parents=True)
+                        destination = output / "generation-report.json"
+                        candidate = helper.prepare_generation_report(project, report)
+                        path = candidate.temporary
+                        before = path.stat()
+                        foreign = (b"foreign staged report evidence must survive\n"
+                                   if mutation == "content" else path.read_bytes())
+                        injections = []
+                        native_open = helper._open_prepared_directory
+
+                        def mutate_staged():
+                            path.write_bytes(foreign)
+                            os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+                            injections.append(path.stat())
+
+                        def open_then_mutate(*args, **kwargs):
+                            descriptor = native_open(*args, **kwargs)
+                            mutate_staged()
+                            return descriptor
+
+                        operation = (helper.commit_prepared_generation_report if action == "commit"
+                                     else helper.discard_prepared_generation_report)
+                        if boundary == "held-directory":
+                            with mock.patch.object(helper, "_open_prepared_directory",
+                                                   side_effect=open_then_mutate):
+                                with self.assertRaises(helper.GenerationReportError):
+                                    operation(candidate)
+                        else:
+                            mutate_staged()
+                            with self.assertRaises(helper.GenerationReportError):
+                                operation(candidate)
+                        self.assertEqual(1, len(injections))
+                        self.assertEqual(before.st_ino, injections[0].st_ino)
+                        self.assertEqual(before.st_mtime_ns, injections[0].st_mtime_ns)
+                        self.assertNotEqual(before.st_ctime_ns, injections[0].st_ctime_ns)
+                        self.assertEqual(before.st_ino, path.stat().st_ino)
+                        self.assertEqual(foreign, path.read_bytes())
+                        self.assertFalse(destination.exists())
+
     def test_prepare_does_not_publish_and_failed_commit_preserves_old_record(self):
         helper, old = self.publish()
         path = self.output / "generation-report.json"

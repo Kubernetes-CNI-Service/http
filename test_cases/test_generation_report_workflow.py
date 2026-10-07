@@ -202,6 +202,31 @@ class GenerationReportWorkflow(unittest.TestCase):
         self.assertTrue(candidate.temporary.is_file())
         self.assertFalse(os.path.lexists(self.project / "99-output-ztp/current"))
 
+    def test_real_setup_load_rejected_staged_report_preserves_cleanup_evidence(self):
+        self.real_setup_publish()
+        parent, parent_candidate = self.real_load_prepare()
+        self.addCleanup(LOAD.discard_prepared_release, parent_candidate)
+        original_parent_candidate = parent_candidate.temporary.read_bytes()
+        helper = report_helper()
+        report = helper.build_report(self.project, parent, published_dir=self.published)
+        candidate = helper.prepare_generation_report(self.project, report)
+        path = candidate.temporary
+        before = path.stat()
+        foreign = b"unknown same-inode staged report; retain for inspection\n"
+        path.write_bytes(foreign)
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        with self.assertRaises(helper.GenerationReportError):
+            helper.commit_prepared_generation_report(candidate)
+        with self.assertRaises(helper.GenerationReportError):
+            helper.discard_prepared_generation_report(candidate)
+        self.assertEqual(before.st_ino, path.stat().st_ino)
+        self.assertEqual(foreign, path.read_bytes())
+        self.assertEqual(original_parent_candidate, parent_candidate.temporary.read_bytes())
+        self.assertFalse(parent_candidate.committed)
+        self.assertFalse(candidate.destination.exists())
+        self.assertFalse((self.project / "99-output-ztp/current-release.json").exists())
+        self.assertFalse(os.path.lexists(self.project / "99-output-ztp/current"))
+
     def test_real_setup_load_generation_rebound_stage_blocks_report_publication(self):
         self.real_setup_publish()
         parent, parent_candidate = self.real_load_prepare()

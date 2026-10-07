@@ -153,6 +153,39 @@ proof。默认 push 只接受 release proof。owner 授权的 AIR/prod 验证可
 
 ## Full proof 失败后的诊断与重跑闸门
 
+### R22 generation report 暂存前像改写不得发布或清理
+
+独立 direct 在完成 prepare 后注入同 inode 内容改写、同字节/恢复 mtime ABA，
+以及 held 目录打开后晚注入，分别检查 commit/discard；真实私有 SETUP→LOAD→
+report workflow 要求原 commit 拒绝后，cleanup 也必须 HOLD 并保留证据，父
+candidate 不变且 parent/report/selector 均未发布。首轮 direct 的有效发布失败
+污染了后续共用 fixture，原日志保留：`outputs/test-diagnostics/r22-report-stage-preimage-red.log`，
+inode157924532、size141710、SHA256
+`95375acd9e26292848e73cf859643004d917c99cb7ce3cc7a7f17a22107bbb8a`，2FAIL/6ERROR。
+每个负例改用独立私有输出目录，原实现两个方法八处有效 FAIL，无 ERROR；日志
+`outputs/test-diagnostics/r22-report-stage-preimage-isolated-red.log`，inode157924632、size132286、
+SHA256 `5ff36555bd9c657a532138e4327387db1b9759a8c9a5cfb65357c59f96b26f62`，
+物理72行 Ran 2、74行 FAILED(failures=8)、77行 ACTUAL_UNITTEST_EXIT=1、
+78行 FROZEN_STATE_MATCH=True、80行 DIAGNOSTIC_END=1，实际 exec exit1。
+
+候选将暂存身份绑定为 prepare 完成时的 dev/ino/mode/nlink/uid/gid/size/mtime_ns/ctime_ns，
+commit/discard 初检及 held 目录内最终核验都对照原身份与 SHA，再 replace/unlink；
+正常自有清理控制保留，wire schema/业务断言/原时限不变。targeted 两方法 OK，日志
+`outputs/test-diagnostics/r22-report-stage-preimage-green.log`，inode157933659、size127383、
+SHA256 `15cc94183f0017a16e3c9952f19def9f462f8e6fa3f37596824603693a94290b`，实际 exec exit0。
+完整 LOAD、report contract/workflow 三模块505项 OK，日志
+`outputs/test-diagnostics/r22-report-stage-preimage-modules.log`，inode157933768、size285545、
+SHA256 `3acf6a79854949dd6a749f59ae3389727bd32b64f65c4295102909126f8acdf0`；
+读前后 stat 身份稳定，已知181996字节旧前缀 SHA 不变，物理1395行 Ran 505 in
+44.163s、1397行 OK、1422行 ACTUAL_UNITTEST_EXIT=0、1423行 FROZEN_STATE_MATCH=True、
+1425行 DIAGNOSTIC_END=0，实际 exec exit0。
+
+manifest 既有 generation_report direct 与 generation_report_lifecycle 真实多脚本映射
+覆盖此窄修，REAL_ENV 同卡补前提、证据、清理与风险。不是 prepare 未完成时的清理
+修复，也不是非合作写者原子隔离、report 持久 WAL、B finalizer、旧 A 激活或完整
+R22。未运行正式 related/full、未改 ledger；原时限故障诊断与正式 full/check 仍 OPEN，
+不把本次 bounded PASS 当作正式 full 重跑权限。
+
 ### R22 generation report 原前像同 inode 改写与 ABA
 
 独立 direct 在 prepare 后覆盖同 inode 的合法旧报告、同字节写回并恢复原 mtime，
