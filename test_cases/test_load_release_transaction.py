@@ -4411,6 +4411,92 @@ class ReleaseTransactionTests(unittest.TestCase):
             with self.subTest(surface=surface):
                 self._assert_runtime_surface_orphan_holds(surface, True)
 
+    def _assert_runtime_yaml_parent_rebind_holds(self, late):
+        fixture = ReleaseTransactionTests()
+        fixture.setUp()
+        try:
+            state, context = fixture._prepare_persisted_a_runtime_switch()
+            journal, descriptor, backend = state[-3:]
+            common, runtime = state[2], fixture.ztp / "ztp-bootstrap_oob.sh"
+            common.unlink()
+            common.symlink_to(os.path.relpath(state[5], common.parent))
+            runtime.write_bytes(b"independent partial B runtime\n")
+            latest = context.project / "99-output-eth/latest"
+            parent, retained = latest.parent, fixture.root / "held-original-a-yaml-parent"
+            before_wal = (journal.lstat().st_ino, journal.read_bytes())
+            before_p = (common.lstat().st_ino, os.readlink(common), runtime.lstat().st_ino,
+                        runtime.read_bytes(), state[7].lstat().st_ino, state[7].read_bytes())
+            injected = []
+            def rebind():
+                owner, leaf = parent.lstat().st_ino, (latest.lstat().st_ino, os.readlink(latest))
+                parent.rename(retained)
+                parent.mkdir()
+                for child in retained.iterdir():
+                    child.rename(parent / child.name)
+                self.assertNotEqual(owner, parent.lstat().st_ino)
+                self.assertEqual(leaf, (latest.lstat().st_ino, os.readlink(latest)))
+                injected.append((parent.lstat().st_ino, leaf))
+            restore = LOAD.restore_runtime_rollback_receipt
+            def late_rebind(*args, **kwargs):
+                result = restore(*args, **kwargs)
+                rebind()
+                return result
+            if not late:
+                rebind()
+            with ExitStack() as stack:
+                stack.enter_context(mock.patch.object(LOAD, "active_managed_services", return_value=()))
+                link_restore = stack.enter_context(mock.patch.object(LOAD, "_atomic_restore_setup_link", wraps=LOAD._atomic_restore_setup_link))
+                if late:
+                    stack.enter_context(mock.patch.object(LOAD, "restore_runtime_rollback_receipt", side_effect=late_rebind))
+                with self.assertRaises(LOAD.LoadError):
+                    LOAD.recover_setup_switch_journal(journal, deployment_lock_descriptor=descriptor,
+                        services_quiesced=True, runtime_backend=backend, restore_runtime_from_wal=True)
+                if not late:
+                    link_restore.assert_not_called()
+            self.assertEqual(before_wal, (journal.lstat().st_ino, journal.read_bytes()))
+            self.assertEqual([(parent.lstat().st_ino, (latest.lstat().st_ino, os.readlink(latest)))], injected)
+            self.assertTrue(retained.is_dir())
+            if late:
+                self.assertEqual(b"A oob bootstrap\n", runtime.read_bytes())
+                self.assertEqual(context.setup_state.manifest, state[7].read_bytes())
+            else:
+                self.assertEqual(before_p, (common.lstat().st_ino, os.readlink(common), runtime.lstat().st_ino,
+                                 runtime.read_bytes(), state[7].lstat().st_ino, state[7].read_bytes()))
+            backend.start.assert_not_called()
+        finally:
+            fixture.doCleanups()
+            fixture.tearDown()
+
+    def test_runtime_yaml_parent_rebind_holds_before_p_write(self):
+        self._assert_runtime_yaml_parent_rebind_holds(False)
+
+    def test_runtime_yaml_parent_rebind_holds_after_runtime_verify(self):
+        self._assert_runtime_yaml_parent_rebind_holds(True)
+
+    def test_runtime_yaml_parent_legacy_wal_holds_without_inventing_identity(self):
+        state, _context = self._prepare_persisted_a_runtime_switch()
+        journal, descriptor, backend = state[-3:]
+        common, runtime = state[2], self.ztp / "ztp-bootstrap_oob.sh"
+        common.unlink()
+        common.symlink_to(os.path.relpath(state[5], common.parent))
+        runtime.write_bytes(b"independent partial B runtime\n")
+        envelope = json.loads(journal.read_bytes())
+        envelope["body"]["a_runtime"].pop("yaml_link_parents", None)
+        payload = json.dumps(envelope["body"], sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+        envelope["sha256"] = hashlib.sha256(payload).hexdigest()
+        journal.write_bytes(json.dumps(envelope, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode() + b"\n")
+        before = (journal.lstat().st_ino, journal.read_bytes(), common.lstat().st_ino, os.readlink(common),
+                  runtime.lstat().st_ino, runtime.read_bytes(), state[7].lstat().st_ino, state[7].read_bytes())
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "_atomic_restore_setup_link", wraps=LOAD._atomic_restore_setup_link) as writer:
+            with self.assertRaises(LOAD.LoadError):
+                LOAD.recover_setup_switch_journal(journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend, restore_runtime_from_wal=True)
+            writer.assert_not_called()
+        self.assertEqual(before, (journal.lstat().st_ino, journal.read_bytes(), common.lstat().st_ino, os.readlink(common),
+                                 runtime.lstat().st_ino, runtime.read_bytes(), state[7].lstat().st_ino, state[7].read_bytes()))
+        backend.start.assert_not_called()
+
     def test_setup_wal_replaced_a_receipt_holds_before_any_p_write(self):
         state, context = self._prepare_persisted_a_runtime_switch()
         common, journal, descriptor, backend = state[2], state[-3], state[-2], state[-1]

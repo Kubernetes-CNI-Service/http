@@ -6457,7 +6457,17 @@ def _decode_setup_switch_journal(payload: bytes) -> dict[str, object]:
     directory_fields = {"path", "dev", "ino"}
     if "a_runtime" in body:
         runtime = body["a_runtime"]
-        exact_fields(runtime, {"selector_target", "receipt_directory", "receipt_parent", "receipt_file"}, "A runtime")
+        exact_fields(runtime, {"selector_target", "receipt_directory", "receipt_parent", "receipt_file",
+                               "yaml_link_parents"}, "A runtime")
+        parents = runtime["yaml_link_parents"]
+        if (not isinstance(parents, dict) or set(parents) -
+                {"99-output-eth/latest", "99-output-ib_nvl/latest"}):
+            raise ValueError("unknown A YAML parent inventory")
+        for parent in parents.values():
+            exact_fields(parent, directory_fields, "A YAML parent")
+            if (not isinstance(parent["path"], str)
+                    or any(type(parent[field]) is not int or parent[field] < 0 for field in ("dev", "ino"))):
+                raise ValueError("invalid A YAML parent identity")
         for key in ("receipt_directory", "receipt_parent"):
             exact_fields(runtime[key], directory_fields, key)
         exact_fields(runtime["receipt_file"],
@@ -6724,6 +6734,27 @@ def prepare_setup_switch_journal(
     return journal
 
 
+def _setup_switch_a_yaml_link_parents(project, receipt):
+    """Freeze existing A link parents, not content-derived replacement owners.
+
+    Missing latest states have separate directory-creation obligations. They
+    are deliberately not promoted into persistent parent authority here.
+    """
+    # This per-write authority check compares namespace owners only. Full
+    # immutable YAML payload validation remains at preparation/recovery gates;
+    # do not re-read every child artifact twice at every runtime file write.
+    result = {}
+    for relative, row in receipt["yaml_latest"].items():
+        if row["state"] != "link":
+            continue
+        path = project / relative
+        identity = _setup_switch_link_parent_identity(path)
+        if identity["path"] != str(path.parent) or path.parent.is_symlink():
+            raise LoadError("A YAML link parent is not canonical; HOLD")
+        result[relative] = identity
+    return result
+
+
 def _setup_switch_runtime_authority(context, *, verify_active=False):
     """Freeze the exact A receipt owner, never infer A from a newest directory."""
     try:
@@ -6744,15 +6775,18 @@ def _setup_switch_runtime_authority(context, *, verify_active=False):
         receipt = _load_runtime_rollback_receipt(project, directory)
         if receipt["selector_target"] != selector:
             raise ValueError("A receipt selector differs")
+        yaml_link_parents = _setup_switch_a_yaml_link_parents(project, receipt)
         if verify_active:
             _verify_active_runtime_receipt(project, directory, receipt)
         fields = ("dev", "ino", "mode", "nlink", "size", "mtime_ns", "ctime_ns")
         if (any(getattr(before, "st_" + field) != getattr(path.lstat(), "st_" + field) for field in fields)
                 or opened != _read_rollback_regular(path, limit=_ROLLBACK_RECEIPT_LIMIT)
                 or directory_owner != _setup_switch_directory_identity(directory)
-                or parent_owner != _setup_switch_directory_identity(directory.parent)):
+                or parent_owner != _setup_switch_directory_identity(directory.parent)
+                or yaml_link_parents != _setup_switch_a_yaml_link_parents(project, receipt)):
             raise ValueError("A receipt changed while freezing")
-        return {"selector_target": selector, "receipt_directory": directory_owner,
+        return {"selector_target": selector, "yaml_link_parents": yaml_link_parents,
+                "receipt_directory": directory_owner,
                 "receipt_parent": parent_owner,
                 "receipt_file": {**{field: getattr(before, "st_" + field) for field in fields},
                                  "sha256": hashlib.sha256(opened[0]).hexdigest()}}

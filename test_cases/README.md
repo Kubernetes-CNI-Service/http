@@ -465,7 +465,12 @@ marker 拒绝 `.name.rollback.`。检查在首次 P/flat 写前及 runtime 后�
 先核祖先安全且不创建目录；其它未知状态 HOLD。direct 与真实 SETUP 强杀→新 LOAD
 覆盖七种名称/状态、原有悬空对象和后核验后晚到对象；晚到拒绝前允许已恢复 P/A，
 但原 WAL 及未知对象必须保留。此处不收编 receipt 外的 B 新 prefix、自动清理未知对象，
-也未关闭 parent 身份持久绑定、完整 root/B finalizer、旧 A 健康激活或原超时诊断闸门。
+也未关闭完整 parent 身份持久绑定、完整 root/B finalizer、旧 A 健康激活或原超时诊断闸门。
+WAL 的 A runtime authority 另冻结已有 YAML link 的 canonical parent path/dev/ino；
+首写前、每次权限复核及退休前比较原身份，而非只比较搬回同名位置的原叶子/内容。
+direct 与真实 SETUP 强杀→新 LOAD 覆盖冷入口换绑和 runtime 后核验后换绑；
+缺少此字段的旧 WAL 原字节保留并 HOLD，不从当前目录补造身份。
+此窄修不绑定原 missing latest 的目录创建义务、不替代其它父目录或完整 B 收口。
 missing 前像的 unlink 和已经缺席的重入也须同步父目录。同步失败不得报成功或退休 WAL。
 direct 覆盖实际模式/同步顺序和写入/删除同步异常；真实 LOAD→SETUP 强杀→新 LOAD
 workflow 使用实际 runtime 文件 writer 注入父目录同步错误，保留 WAL 后在新进程重入。

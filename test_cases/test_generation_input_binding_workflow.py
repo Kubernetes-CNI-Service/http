@@ -542,6 +542,15 @@ finally:
             with self.subTest(surface=surface):
                 self._assert_real_persisted_a_runtime_switch(False, late_authority="surface-orphan-" + surface + ":late")
 
+    def test_real_setup_death_yaml_parent_rebind_holds_before_p_write(self):
+        self._assert_real_persisted_a_runtime_switch(False, late_authority="yaml-parent-rebind:cold")
+
+    def test_real_setup_death_yaml_parent_rebind_holds_after_runtime_verify(self):
+        self._assert_real_persisted_a_runtime_switch(False, late_authority="yaml-parent-rebind:late")
+
+    def test_real_setup_death_yaml_parent_legacy_wal_holds_without_inventing_identity(self):
+        self._assert_real_persisted_a_runtime_switch(False, late_authority="yaml-parent-rebind:legacy")
+
     def test_real_setup_death_runtime_file_restore_preserves_foreign_stage(self):
         for kind in ("inode", "bytes", "hold"):
             with self.subTest(kind=kind):
@@ -635,6 +644,82 @@ os.kill(os.getpid(), signal.SIGKILL)
             self.assertEqual(-9, first.returncode, first.stdout + first.stderr)
             evidence = journal.read_bytes()
             mixed = os.readlink(common)
+            if late_authority and late_authority.startswith("yaml-parent-rebind:"):
+                phase = late_authority.split(":")[1]
+                latest = p / "99-output-eth/latest"
+                if phase == "legacy":
+                    envelope = json.loads(journal.read_bytes())
+                    envelope["body"]["a_runtime"].pop("yaml_link_parents", None)
+                    payload = json.dumps(envelope["body"], sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+                    envelope["sha256"] = hashlib.sha256(payload).hexdigest()
+                    journal.write_bytes(json.dumps(envelope, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode() + b"\n")
+                def snapshot(path):
+                    return (path.lstat().st_ino, os.readlink(path) if path.is_symlink() else path.read_bytes())
+                before_paths = [common, state[7], root / "ztp/ztp-bootstrap_oob.sh"]
+                before = [snapshot(path) for path in before_paths]
+                wal_before = snapshot(journal)
+                recovery = r'''
+import importlib.util, json, os, sys
+from pathlib import Path
+from types import SimpleNamespace
+root, latest, phase = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+spec = importlib.util.spec_from_file_location('yaml_parent_cold_load', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+def rebind():
+    parent, retained = latest.parent, root / 'held-original-a-yaml-parent'
+    owner, leaf = parent.lstat().st_ino, (latest.lstat().st_ino, os.readlink(latest))
+    parent.rename(retained)
+    parent.mkdir()
+    for child in retained.iterdir():
+        child.rename(parent / child.name)
+    assert owner != parent.lstat().st_ino
+    assert leaf == (latest.lstat().st_ino, os.readlink(latest))
+    (root / 'yaml-parent-injection.json').write_text(json.dumps({'parent': parent.lstat().st_ino, 'leaf': leaf}))
+if phase == 'cold':
+    rebind()
+elif phase == 'late':
+    restore = load.restore_runtime_rollback_receipt
+    def late_rebind(*args, **kwargs):
+        result = restore(*args, **kwargs)
+        rebind()
+        return result
+    load.restore_runtime_rollback_receipt = late_rebind
+backend = SimpleNamespace(name='supervisor', start=lambda *args: (_ for _ in ()).throw(AssertionError('service start forbidden')))
+fd = load.acquire_deployment_lock(exclusive=True)
+try:
+    try:
+        load.recover_setup_switch_journal(root / 'ztp/.setup-switch-journal.json',
+            deployment_lock_descriptor=fd, services_quiesced=True, runtime_backend=backend,
+            restore_runtime_from_wal=True)
+    except load.LoadError as exc:
+        print('EXPECTED YAML PARENT HOLD:', exc)
+        raise SystemExit(7)
+finally:
+    load.release_deployment_lock(fd)
+'''
+                result = subprocess.run([sys.executable, "-B", "-c", recovery, str(root), str(latest), phase],
+                    capture_output=True, text=True, check=False, timeout=30)
+                self.assertEqual(7, result.returncode, result.stdout + result.stderr)
+                self.assertEqual(wal_before, snapshot(journal))
+                if phase == "legacy":
+                    self.assertEqual(before, [snapshot(path) for path in before_paths])
+                    self.assertFalse((root / "yaml-parent-injection.json").exists())
+                    self.assertFalse((root / "held-original-a-yaml-parent").exists())
+                    return
+                held = json.loads((root / "yaml-parent-injection.json").read_text())
+                self.assertEqual(held["parent"], latest.parent.lstat().st_ino)
+                self.assertEqual(tuple(held["leaf"]), snapshot(latest))
+                self.assertTrue((root / "held-original-a-yaml-parent").is_dir())
+                if phase == "cold":
+                    self.assertEqual(before, [snapshot(path) for path in before_paths])
+                else:
+                    self.assertEqual(context.setup_state.manifest, state[7].read_bytes())
+                    self.assertEqual(b"A oob bootstrap\n", (root / "ztp/ztp-bootstrap_oob.sh").read_bytes())
+                self.assertFalse((root / "service-started").exists())
+                return
             if late_authority and late_authority.startswith("surface-orphan-"):
                 surface, phase = late_authority.removeprefix("surface-orphan-").split(":")
                 targets = {
