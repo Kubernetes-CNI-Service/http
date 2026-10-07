@@ -3983,6 +3983,9 @@ class ReleaseTransactionTests(unittest.TestCase):
                     fixture.doCleanups()
                     fixture.tearDown()
 
+    def test_setup_dhcp_group_recovery_malformed_binding_is_hold_not_raw_error(self):
+        self._setup_dhcp_group_restore_partial_b(fault="malformed-binding")
+
     def _setup_dhcp_group_restore_partial_b(self, *, cli=False, fault=None, shapes=False):
         state, _context = self._prepare_persisted_a_runtime_switch()
         journal, descriptor, backend = state[-3:]
@@ -4020,6 +4023,14 @@ class ReleaseTransactionTests(unittest.TestCase):
                         (runtime / ".dhcpd.conf.rollback-independent").write_bytes(b"independent stage\n")
                     elif fault == "parent-b-visible":
                         (state[1] / "99-output-ztp/current-release.json").write_bytes(b"independent B\n")
+                    elif fault == "malformed-binding":
+                        envelope = json.loads(journal.read_bytes())
+                        del envelope["body"]["dhcp_transaction"]["body"]["runtime"]
+                        envelope["sha256"] = hashlib.sha256(json.dumps(
+                            envelope["body"], sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+                        ).encode()).hexdigest()
+                        journal.write_text(json.dumps(envelope), encoding="utf-8")
+                        before = journal.read_bytes()
                     links_before = {path: os.readlink(path) for path in state[9]}
                     dhcp_before = {name: (runtime / name).read_bytes() for name in names}
                     with self.assertRaisesRegex(LOAD.LoadError, "HOLD"):

@@ -8794,9 +8794,15 @@ def _recover_setup_switch_journal_snapshot(
         # Grouped restoration/finalization must consume all four A files too.
         raise LoadError("SETUP/DHCP grouped recovery is unresolved; HOLD original WAL and backups")
     if "dhcp_transaction" in body:
-        group_token = _open_setup_switch_dhcp_group(
-            journal, body, opened, runtime_restore_guard, materialized_descriptors,
-        )
+        try:
+            group_token = _open_setup_switch_dhcp_group(
+                journal, body, opened, runtime_restore_guard, materialized_descriptors,
+            )
+        except (KeyError, TypeError, ValueError, OSError) as exc:
+            # A valid outer checksum is not a complete nested recovery
+            # contract. Reject before the first P/A mutation; never let a
+            # malformed binding escape the explicit CLI's HOLD boundary.
+            raise LoadError(f"setup DHCP group authority is invalid; HOLD: {exc}") from exc
         retain_journal = True
     if expected_runtime_context is not None and runtime_context is not None:
         if (expected_runtime_context.project.resolve(strict=True) != runtime_context.project

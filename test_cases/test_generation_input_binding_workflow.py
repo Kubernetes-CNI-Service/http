@@ -4773,6 +4773,9 @@ finally:
     def test_real_setup_then_dhcp_writer_death_cli_restores_link_and_missing_a(self):
         self._real_dhcp_writer_death_group_recovery(cli=True, shapes=True)
 
+    def test_real_setup_then_dhcp_writer_death_cli_holds_malformed_group_binding(self):
+        self._real_dhcp_writer_death_group_recovery(cli=True, fault="malformed-binding")
+
     def test_real_setup_then_dhcp_writer_death_group_recovery_holds_foreign_evidence(self):
         for fault in ("receipt-owner", "second-transaction", "restore-stage", "parent-b-visible"):
             with self.subTest(fault=fault):
@@ -4873,6 +4876,14 @@ finally:
             elif fault == "parent-b-visible":
                 candidate = root / "DAY0-Prepare" / q.name / "99-output-ztp/current-release.json"
                 candidate.write_bytes(b"independent committed B\n")
+            elif fault == "malformed-binding":
+                envelope = json.loads(journal.read_bytes())
+                del envelope["body"]["dhcp_transaction"]["body"]["runtime"]
+                envelope["sha256"] = hashlib.sha256(json.dumps(
+                    envelope["body"], sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+                ).encode()).hexdigest()
+                journal.write_text(json.dumps(envelope), encoding="utf-8")
+                before = journal.read_bytes()
             if fault is not None:
                 p_before = {path: os.readlink(path) for path in state[9]}
                 runtime_before = {path: path.read_bytes() for path in runtime.iterdir() if path.is_file()}

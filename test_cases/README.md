@@ -511,6 +511,9 @@ A runtime 及四个 DHCP 文件。逐次写前再核总 authority；原文件 mo
 未知第二事务、同字节外来 receipt、恢复暂存物、扫描时 runtime 目录换绑、Q parent 变化
 均 HOLD，不采用相似 payload 或前缀清理证据。direct 与真实 SETUP→DHCP 写后 SIGKILL→
 两次全新 LOAD API/显式 CLI 覆盖部分 B、链接/缺席恢复和拒绝边界。
+外层校验和正确但嵌套分组字段缺失/类型错误也须写前 HOLD；不能漏出原始 KeyError
+而逃出显式 CLI 的拒绝边界。direct 与真实写后 SIGKILL→新 CLI 的缺字段反例先失败
+再补异常归一，原 P/部分 B、WAL 和事务不变，仍无服务动作。
 这仍不是 Q 已提交后的 B 收口、完整共享写集、旧 A 显式健康激活、root/Linux/断电见证；
 原故障诊断闸门及正式 related/full/check 仍单独验收，不以局部 PASS 代替。
 
