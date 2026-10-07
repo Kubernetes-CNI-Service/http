@@ -880,7 +880,10 @@ def _process_pubkeys(proj_dir):
     for key_dir in _publickey_roots():
         if not _DRY_RUN:
             if _LINK_TRANSACTION is not None and _LINK_TRANSACTION.active:
-                _LINK_TRANSACTION.ensure_directory(key_dir)
+                # Public readers need normal umask permissions. With a WAL,
+                # inspect its original authority before the staged mkdir,
+                # rather than create a private mkdtemp inode first.
+                _LINK_TRANSACTION.ensure_directory(key_dir, stage_in_wal=True)
             else:
                 os.makedirs(key_dir, exist_ok=True)
         # Public-key links project only active keys. Remove obsolete links,
@@ -4139,6 +4142,11 @@ class _SetupLinkTransaction:
         destination used to be absent.
         """
         path = os.path.abspath(path)
+        # Every caller of these public roots must use pre-mkdir inspection,
+        # not only _process_pubkeys. Keep private staging for other paths.
+        stage_in_wal = stage_in_wal or os.path.realpath(path) in {
+            os.path.realpath(candidate) for candidate in _publickey_roots()
+        }
         if os.path.lexists(path):
             metadata = os.lstat(path)
             if not stat.S_ISDIR(metadata.st_mode):
@@ -4161,7 +4169,7 @@ class _SetupLinkTransaction:
             if deferred_stage:
                 created = None
             else:
-                # Public image directories retain os.makedirs' normal umask
+                # Public directories retain os.makedirs' normal umask
                 # permissions even when this setup has no cross-project WAL.
                 os.mkdir(temporary, mode=0o777)
                 created = os.lstat(temporary)

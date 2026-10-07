@@ -6929,6 +6929,18 @@ def _setup_switch_created_directory_states(body):
             if any(child.name.startswith(prefixes) and child not in known_stages
                    for child in parent.iterdir()):
                 raise ValueError("unregistered shared image stage; HOLD")
+        for parent in (image_parent / "config", Path(body["root"]["path"]) / "infiniband"):
+            if not os.path.lexists(parent):
+                continue
+            if (not stat.S_ISDIR(parent.lstat().st_mode)
+                    or parent.resolve(strict=True) != parent):
+                raise ValueError("publickey directory parent is not its real canonical directory")
+            # A mkdir can die before row publication. This reserved prefix
+            # is refusal evidence only: never adopt/remove an unknown owner
+            # or retire the incident WAL just because P links are recoverable.
+            if any(child.name.startswith(".publickey.setup-") and child not in known_stages
+                   for child in parent.iterdir()):
+                raise ValueError("unregistered shared publickey stage; HOLD")
         q_output = Path(body["new_project"]["path"]) / "99-output-ztp"
         try:
             output_metadata = q_output.lstat()

@@ -3962,6 +3962,97 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertFalse(os.path.lexists(journal))
         backend.start.assert_not_called()
 
+    def test_setup_publickey_directory_preserves_public_umask_permissions(self) -> None:
+        self._exercise_publickey_wal_permissions(0o022, 0o755)
+
+    def test_setup_publickey_wal_does_not_relax_restrictive_umask(self) -> None:
+        self._exercise_publickey_wal_permissions(0o077, 0o700)
+
+    def _exercise_publickey_wal_permissions(self, mask, mode):
+        state = self._prepare_cross_project_setup_crash(freeze_q_links=False)
+        q, journal, descriptor, backend = state[1], state[10], state[11], state[12]
+        (q / "operator.pub").write_bytes(b"independent Q public key\n")
+        parent = self.root / "infiniband"
+        parent.mkdir(exist_ok=True)
+        directory = parent / "publickey"
+        original_umask = os.umask(mask)
+        try:
+            with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                    mock.patch.multiple(SETUP, HTTP_BASE=str(self.root), ZTP=str(self.ztp),
+                                        _DRY_RUN=False, _AUTO_YES=True, _LINK_ERRORS=0,
+                                        _LINK_TRANSACTION=SETUP._SetupLinkTransaction([]),
+                                        _SETUP_SWITCH_WAL_CONTEXT=(vars(LOAD), descriptor)):
+                SETUP._process_pubkeys(str(q))
+                self.assertEqual(mode, stat.S_IMODE(directory.stat().st_mode),
+                                 "public-key readers need the original umask-governed directory")
+                self.assertEqual(b"independent Q public key\n", (directory / "operator.pub").read_bytes())
+                self.assertEqual("restored-p", LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                ))
+        finally:
+            os.umask(original_umask)
+        self.assertFalse(os.path.lexists(directory))
+        backend.start.assert_not_called()
+
+    def test_setup_publickey_unregistered_stage_holds_before_any_p_restore(self) -> None:
+        self._exercise_publickey_unregistered_stage("ztp/config")
+
+    def test_setup_infiniband_publickey_unregistered_stage_holds_before_any_p_restore(self) -> None:
+        self._exercise_publickey_unregistered_stage("infiniband")
+
+    def _exercise_publickey_unregistered_stage(self, relative):
+        # Independent incident inventory: a reserved name is refusal
+        # evidence, never permission to adopt/delete its contents.
+        state = self._prepare_cross_project_setup_crash()
+        common, q_target = state[2], state[5]
+        journal, descriptor, backend = state[10], state[11], state[12]
+        parent = self.root / relative
+        parent.mkdir(parents=True, exist_ok=True)
+        stage = parent / ".publickey.setup-independent-incident"
+        stage.mkdir()
+        sentinel = stage / "unknown.pub"
+        sentinel.write_bytes(b"independent unknown key evidence\n")
+        owner = stage.stat()
+        common.unlink()
+        common.symlink_to(os.path.relpath(q_target.resolve(), common.parent.resolve()))
+        held = os.readlink(common)
+        evidence = journal.read_bytes()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with self.assertRaisesRegex(LOAD.LoadError, "unregistered.*stage"):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertEqual(evidence, journal.read_bytes())
+        self.assertEqual(held, os.readlink(common))
+        self.assertEqual(owner.st_ino, stage.stat().st_ino)
+        self.assertEqual(b"independent unknown key evidence\n", sentinel.read_bytes())
+        backend.start.assert_not_called()
+
+    def test_setup_publickey_without_wal_preserves_public_umask_permissions(self) -> None:
+        self._exercise_publickey_without_wal_permissions(0o022, 0o755)
+
+    def test_setup_publickey_without_wal_does_not_relax_restrictive_umask(self) -> None:
+        self._exercise_publickey_without_wal_permissions(0o077, 0o700)
+
+    def _exercise_publickey_without_wal_permissions(self, mask, mode):
+        parent = self.root / "infiniband"
+        parent.mkdir(exist_ok=True)
+        key = self.project / "operator.pub"
+        key.write_bytes(b"independent public key\n")
+        original_umask = os.umask(mask)
+        try:
+            with mock.patch.multiple(SETUP, HTTP_BASE=str(self.root), ZTP=str(self.ztp),
+                                     _DRY_RUN=False, _AUTO_YES=True, _LINK_ERRORS=0,
+                                     _LINK_TRANSACTION=SETUP._SetupLinkTransaction([]),
+                                     _SETUP_SWITCH_WAL_CONTEXT=None):
+                SETUP._process_pubkeys(str(self.project))
+                for directory in (self.ztp / "config/publickey", parent / "publickey"):
+                    self.assertEqual(mode, stat.S_IMODE(directory.stat().st_mode))
+        finally:
+            os.umask(original_umask)
+
     def test_setup_shared_image_directories_cold_recovery_restores_absence(self) -> None:
         state = self._prepare_cross_project_setup_crash(freeze_q_links=False)
         journal, descriptor, backend = state[10], state[11], state[12]
@@ -4578,7 +4669,7 @@ class ReleaseTransactionTests(unittest.TestCase):
         parent.mkdir(exist_ok=True)
         directory = parent / "publickey"
         transaction = SETUP._SetupLinkTransaction([])
-        original_register = LOAD.register_setup_switch_created_directory
+        original_register = LOAD.stage_setup_switch_created_directory
         captured = {}
 
         def drift_after_registration(*args, **kwargs):
@@ -4601,9 +4692,10 @@ class ReleaseTransactionTests(unittest.TestCase):
             return result
 
         with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(SETUP, "HTTP_BASE", str(self.root)), \
                 mock.patch.object(SETUP, "ZTP", str(self.ztp)), \
                 mock.patch.object(SETUP, "_SETUP_SWITCH_WAL_CONTEXT", (vars(LOAD), descriptor)), \
-                mock.patch.object(LOAD, "register_setup_switch_created_directory",
+                mock.patch.object(LOAD, "stage_setup_switch_created_directory",
                                   side_effect=drift_after_registration), \
                 mock.patch.object(SETUP, "_atomic_rename_noreplace",
                                   wraps=SETUP._atomic_rename_noreplace) as install:
@@ -4677,6 +4769,7 @@ class ReleaseTransactionTests(unittest.TestCase):
                 injected.append(True)
 
         with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(SETUP, "HTTP_BASE", str(self.root)), \
                 mock.patch.object(SETUP, "ZTP", str(self.ztp)), \
                 mock.patch.object(SETUP, "_SETUP_SWITCH_WAL_CONTEXT", (vars(LOAD), descriptor)):
             transaction.ensure_directory(str(directory))

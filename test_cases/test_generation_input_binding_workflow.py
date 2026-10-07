@@ -870,6 +870,85 @@ finally:
     def test_real_setup_legacy_comparison_transfer_death_cold_restores_reports(self):
         self._exercise_real_comparison_transfer_death("pointer")
 
+    def test_real_setup_publickey_directory_death_preserves_public_mode_and_cold_absence(self):
+        self._exercise_publickey_directory_death(stage_death=False)
+
+    def test_real_setup_publickey_unregistered_stage_death_cold_holds(self):
+        self._exercise_publickey_directory_death(stage_death=True)
+
+    def _exercise_publickey_directory_death(self, *, stage_death):
+        with tempfile.TemporaryDirectory(prefix="r22-real-publickey-directory-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, q, common, _p_only, _q_only, manifest, before, hook, barrier, _home = fixture
+            parent = root / "infiniband"
+            parent.mkdir(exist_ok=True)
+            directory = parent / "publickey"
+            self.assertFalse(os.path.lexists(directory))
+            hook_file = hook / "sitecustomize.py"
+            hook_file.write_text(hook_file.read_text() + f"""
+os.umask(0o022)
+publickey_sync = os.fsync
+def kill_before_publickey_stage_row(fd):
+    stages = list(Path({str(parent)!r}).glob('.publickey.setup-*'))
+    if {stage_death!r} and any(stage.is_dir() for stage in stages):
+        Path(os.environ['HTTP_TEST_Q_LINK_BARRIER']).write_bytes(b'unregistered publickey stage observed\\n')
+        os.kill(os.getpid(), signal.SIGKILL)
+    return publickey_sync(fd)
+os.fsync = kill_before_publickey_stage_row
+""")
+            first = self._run_private_load_setup_switch(
+                fixture, prepare_journal=True, first_link=directory / "operator.pub",
+            )
+            self.assertEqual(23, first.returncode, first.stdout + first.stderr)
+            self.assertTrue(barrier.is_file())
+            journal = root / "ztp/.setup-switch-journal.json"
+            evidence = journal.read_bytes()
+            held_manifest, held_common = manifest.read_bytes(), os.readlink(common)
+            if stage_death:
+                stages = list(parent.glob(".publickey.setup-*"))
+                self.assertEqual(1, len(stages))
+                owner = stages[0].stat()
+                self.assertFalse(os.path.lexists(directory))
+                self.assertNotIn(str(directory), {row["path"] for row in
+                    json.loads(evidence)["body"].get("created_directories", [])})
+            else:
+                self.assertEqual(0o755, stat.S_IMODE(directory.stat().st_mode))
+                self.assertEqual((q / "operator.pub").read_bytes(), (directory / "operator.pub").read_bytes())
+            recovery = """
+import importlib.util, sys
+from pathlib import Path
+from types import SimpleNamespace
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('fresh_publickey_directory_load', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+fd = load.acquire_deployment_lock(exclusive=True)
+try:
+    assert load.recover_setup_switch_journal(root / 'ztp/.setup-switch-journal.json',
+        deployment_lock_descriptor=fd, services_quiesced=True,
+        runtime_backend=SimpleNamespace(name='supervisor')) == 'restored-p'
+finally:
+    load.release_deployment_lock(fd)
+"""
+            second = subprocess.run([sys.executable, "-B", "-c", recovery, str(root)],
+                                    cwd=root, capture_output=True, text=True, check=False, timeout=30)
+            if stage_death:
+                self.assertEqual(1, second.returncode, second.stdout + second.stderr)
+                self.assertIn("unregistered", second.stderr)
+                self.assertEqual(evidence, journal.read_bytes())
+                self.assertEqual(held_manifest, manifest.read_bytes())
+                self.assertEqual(held_common, os.readlink(common))
+                self.assertEqual(owner.st_ino, stages[0].stat().st_ino)
+            else:
+                self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+                self.assertEqual(before["manifest"], manifest.read_bytes())
+                self.assertEqual(before["common"], os.readlink(common))
+                self.assertFalse(os.path.lexists(journal))
+            self.assertFalse(os.path.lexists(directory))
+            self.assertFalse((root / "service-started").exists())
+
     def test_real_setup_shared_image_directory_death_cold_restores_absence(self):
         self._exercise_shared_image_directory_death(recovery_death=False)
 
