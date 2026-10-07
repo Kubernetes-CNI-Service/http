@@ -154,4 +154,3 @@ def read_prod_ib_per_key_source(store, *, http_root, settings, key, writer_token
         if isinstance(exc, IbPerKeySourceHold):
             raise
         raise IbPerKeySourceHold("IB per-key protected source is unsafe") from exc
-

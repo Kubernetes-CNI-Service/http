@@ -95,4 +95,3 @@ class CurrentCycleReceiptSnapshotWorkflowTests(ProdStageLFixture):
 
 if __name__ == "__main__":
     unittest.main()
-

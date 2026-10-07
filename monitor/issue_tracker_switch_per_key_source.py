@@ -142,4 +142,3 @@ def read_prod_switch_per_key_source(store, *, http_root, settings, key,
         if isinstance(exc, SwitchPerKeySourceHold):
             raise
         raise SwitchPerKeySourceHold("Switch per-key protected source is unsafe") from exc
-
