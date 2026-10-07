@@ -6,7 +6,9 @@ The root worker owns the trigger; this module never sends to Google.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+import hashlib
+import json
 import math
 import os
 from pathlib import Path
@@ -326,6 +328,91 @@ def _stage_l_per_key_panels(store, root, settings, cycles, token):
     return panels
 
 
+def _qualified_manual_fingerprint(qualified, settings, panel):
+    return {
+        "project_key": qualified.project_key, "scope": qualified.scope, "k": qualified.k,
+        "k_revision": settings.revision,
+        "latest_cycle_id": qualified.cycle_ids[-1] if qualified.cycle_ids else None,
+        "window_cycle_ids": qualified.cycle_ids,
+        "whitelist_sha256": qualified.whitelist_sha256,
+        "template_sha256": qualified.template_sha256,
+        "source_authority_sha256": qualified.source_authority_sha256,
+        "observations_sha256": qualified.observations_sha256,
+        "selected_decision_sha256": selected_panel_decision_sha256(qualified, panel),
+    }
+
+
+def _prepare_manual_snapshot(token, qualified, store, root, settings, snapshot, template, panel):
+    """Reopen sources and project a bound workbook under the caller's LK-P."""
+    from monitor.issue_tracker_local_workbook_commit import (
+        _latest_receipted_prod_xlsx, project_manual_panel_preview,
+    )
+    from monitor.issue_tracker_local_workbook import _read_bound_source
+    from monitor.issue_tracker_manifest import freeze_prod_stage_l_manifest
+    from monitor.issue_tracker_state_owner import require_current_k
+    from monitor.issue_tracker_stage_l_consumer import (
+        read_prod_stage_l_panel_source_files, validate_prod_stage_l_panel_source_files,
+    )
+
+    arguments = dict(http_root=root, settings=settings, whitelist_snapshot=snapshot,
+                     whitelist_path=template, writer_token=token)
+    sources = read_prod_stage_l_panel_source_files(qualified, store, panel=panel, **arguments)
+    _, manifest_id = freeze_prod_stage_l_manifest(
+        qualified, store, selected_panel=panel,
+        expected_template_sha256=snapshot.workbook_sha256,
+        metadata={"project_id": store.project_identity, "schema_version": 1,
+                  "producer_version": "stage-l-runtime-v1",
+                  "template_contract_version": "local-xlsx-v1",
+                  "template_sha256": snapshot.workbook_sha256}, **arguments,
+    )
+    prior = _latest_receipted_prod_xlsx(token, snapshot.workbook_sha256)
+    source = prior if prior is not None else _read_bound_source(template, snapshot)
+    detail = project_manual_panel_preview(source, qualified, panel, manifest_id)
+    public = {key: detail[key] for key in (
+        "qualified_operation_count", "whitelist_skip_count", "new_count", "update_count",
+        "skip_count", "row_digests")}
+    public["source_files"] = [{"path": item.path, "recorded_at_utc": item.recorded_at_utc,
+                               "sha256": item.sha256} for item in sources]
+    binding = {"manifest_id": manifest_id, "source_files": [asdict(item) for item in sources],
+               "detail": detail}
+    digest = hashlib.sha256(json.dumps(binding, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=False, allow_nan=False).encode("utf-8") + b"\n").hexdigest()
+    validate_prod_stage_l_panel_source_files(sources, qualified, store, panel=panel, **arguments)
+    require_current_k(token, Path(store.project_identity),
+                      Path(store.project_identity) / "99-output-monitor", settings)
+    if (read_whitelist_workbook(template) != snapshot
+            or _latest_receipted_prod_xlsx(token, snapshot.workbook_sha256) != prior
+            or (prior is None and _read_bound_source(template, snapshot) != source)):
+        raise StageLHold("manual preview workbook or policy changed before readback")
+    return public, digest
+
+
+def inspect_manual_stage_l_preview(store, *, panel, http_root, project, publication, template_path):
+    """Complete local-only worker snapshot; does not mint a token or mutate."""
+    from monitor.issue_tracker_manual_preview import ManualPreviewHold, _bound_status
+    from monitor.issue_tracker_stage_l_consumer import qualify_prod_stage_l
+
+    if type(panel) is not str or panel not in _PANELS:
+        raise ManualPreviewHold("manual preview panel is invalid")
+    root, project, publication, template = _paths(
+        store, http_root, project, publication, template_path)
+    if store.scope != "prod" or template != root / "monitor/Issue_Tracker_Template_v1.xlsx":
+        raise StageLHold("complete manual preview template or scope is unbound")
+    status = inspect_stage_l(store, http_root=root, project=project,
+                             publication=publication, template_path=template)
+    prior = _bound_status(status, panel)
+    with tracker_writer(project, publication) as token:
+        settings = current_k(token)
+        snapshot = read_whitelist_workbook(template)
+        qualified = qualify_prod_stage_l(store, http_root=root, settings=settings,
+            whitelist_snapshot=snapshot, whitelist_path=template, writer_token=token)
+        if prior != _qualified_manual_fingerprint(qualified, settings, panel):
+            raise ManualPreviewHold("manual source changed before complete preview")
+        public, digest = _prepare_manual_snapshot(
+            token, qualified, store, root, settings, snapshot, template, panel)
+    return {**status, "manual_preview": public, "manual_snapshot_sha256": digest}
+
+
 def inspect_stage_l(store, *, http_root, project, publication, template_path):
     """Expose pending/hold/qualified source state, never APPLIED or online GO."""
     from monitor.issue_tracker_admission import AdmissionTerminalOrphan
@@ -640,20 +727,11 @@ def commit_qualified_prod_local(
                 # This comparison remains inside LK-P and follows a fresh
                 # protected-source qualification.  A browser token alone can
                 # never authorize the subsequent C6 generation.
-                actual_preview = {
-                    "project_key": qualified.project_key,
-                    "scope": qualified.scope, "k": qualified.k,
-                    "k_revision": settings.revision,
-                    "latest_cycle_id": qualified.cycle_ids[-1]
-                    if qualified.cycle_ids else None,
-                    "window_cycle_ids": qualified.cycle_ids,
-                    "whitelist_sha256": qualified.whitelist_sha256,
-                    "template_sha256": qualified.template_sha256,
-                    "source_authority_sha256": qualified.source_authority_sha256,
-                    "observations_sha256": qualified.observations_sha256,
-                    "selected_decision_sha256": selected_panel_decision_sha256(
-                        qualified, selected_panel),
-                }
+                actual_preview = _qualified_manual_fingerprint(qualified, settings, selected_panel)
+                if "manual_snapshot_sha256" in expected_manual_preview:
+                    _, digest = _prepare_manual_snapshot(
+                        token, qualified, store, root, settings, snapshot, template, selected_panel)
+                    actual_preview["manual_snapshot_sha256"] = digest
                 if expected_manual_preview != actual_preview:
                     raise StageLHold("manual preview source changed before C6")
             metadata = {

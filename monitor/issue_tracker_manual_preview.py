@@ -71,6 +71,29 @@ def _bound_status(status, panel):
             or any(char not in "0123456789abcdef" for char in selected_digest)):
         raise ManualPreviewHold("selected C5 decision identity is incomplete")
     bound["selected_decision_sha256"] = selected_digest
+    if "manual_preview" in status or "manual_snapshot_sha256" in status:
+        detail = status.get("manual_preview")
+        keys = {"source_files", "qualified_operation_count", "whitelist_skip_count",
+                "new_count", "update_count", "skip_count", "row_digests"}
+        if (not _sha256_text(status.get("manual_snapshot_sha256"))
+                or type(detail) is not dict or set(detail) != keys
+                or any(type(detail[name]) is not int or detail[name] < 0
+                       for name in keys - {"source_files", "row_digests"})
+                or detail["new_count"] + detail["update_count"] > detail["qualified_operation_count"]
+                or detail["skip_count"] != detail["qualified_operation_count"]
+                - detail["new_count"] - detail["update_count"] + detail["whitelist_skip_count"]
+                or type(detail["row_digests"]) is not list
+                or len(detail["row_digests"]) != detail["qualified_operation_count"]
+                or any(not _sha256_text(item) for item in detail["row_digests"])
+                or type(detail["source_files"]) is not list or not detail["source_files"]):
+            raise ManualPreviewHold("complete manual preview detail is invalid")
+        for source in detail["source_files"]:
+            if (type(source) is not dict or set(source) != {"path", "recorded_at_utc", "sha256"}
+                    or type(source["path"]) is not str or not source["path"]
+                    or type(source["recorded_at_utc"]) is not str or not source["recorded_at_utc"]
+                    or not _sha256_text(source["sha256"])):
+                raise ManualPreviewHold("manual preview source file identity is invalid")
+        bound["manual_snapshot_sha256"] = status["manual_snapshot_sha256"]
     return bound
 
 
@@ -78,13 +101,18 @@ class ManualPreviewBroker:
     """One worker-lifetime token store; restart or expiry revokes previews."""
 
     def __init__(self, read_status, commit_local, *, clock=time.monotonic,
-                 read_settings=None, change_settings=None):
+                 read_settings=None, change_settings=None, read_panel_status=None):
         self._read_status = read_status
         self._commit_local = commit_local
         self._clock = clock
         self._pending = {}
         self._read_settings = read_settings
         self._change_settings = change_settings
+        self._read_panel_status = read_panel_status
+
+    def _status(self, panel):
+        return (self._read_panel_status(panel) if self._read_panel_status is not None
+                else self._read_status())
 
     @property
     def pending_count(self):
@@ -123,12 +151,12 @@ class ManualPreviewBroker:
         self._expire(now)
         if len(self._pending) >= _MAX_PENDING:
             raise ManualPreviewHold("manual preview capacity exhausted")
-        status = self._read_status()
+        status = self._status(panel)
         fingerprint = _bound_status(status, panel)
         token = secrets.token_urlsafe(32)
         self._pending[token] = (principal, panel, fingerprint,
                                 now + _TTL_SECONDS)
-        return {
+        result = {
             "token": token, "expires_in_seconds": _TTL_SECONDS,
             "panel": panel, "target_sheet": _SHEETS[panel],
             "source_authority_sha256": fingerprint["source_authority_sha256"],
@@ -139,6 +167,9 @@ class ManualPreviewBroker:
             "whitelist_skip_count": status["whitelist_skip_count"],
             "online": "disabled_no_send_authority",
         }
+        if "manual_preview" in status:
+            result.update(status["manual_preview"])
+        return result
 
     def confirm(self, principal, panel, token, *, confirmation):
         self._validate_request(principal, panel)
@@ -152,7 +183,7 @@ class ManualPreviewBroker:
         del self._pending[token]  # one-use before status refresh or C6 attempt
         if confirmation != "publish_local" or self._clock() >= entry[3]:
             raise ManualPreviewHold("manual second confirmation is absent or expired")
-        current = _bound_status(self._read_status(), panel)
+        current = _bound_status(self._status(panel), panel)
         if current != entry[2]:
             raise ManualPreviewHold("manual preview source changed; preview again")
         return self._commit_local(panel, current)
@@ -260,3 +291,20 @@ def make_protected_stage_l_broker(
 
     return ManualPreviewBroker(read_status, commit_local, clock=clock,
                                read_settings=read_settings, change_settings=change_settings)
+
+
+def make_complete_protected_stage_l_broker(store, *, http_root, project, publication,
+                                         template_path, boot_id, monotonic_ns=time.monotonic_ns,
+                                         clock=time.monotonic):
+    """Complete local-only candidate; no listener, route or online activation."""
+    from monitor.issue_tracker_publish_runtime import inspect_manual_stage_l_preview
+
+    broker = make_protected_stage_l_broker(
+        store, http_root=http_root, project=project, publication=publication,
+        template_path=template_path, boot_id=boot_id, monotonic_ns=monotonic_ns, clock=clock,
+    )
+    broker._read_panel_status = lambda panel: inspect_manual_stage_l_preview(
+        store, panel=panel, http_root=http_root, project=project,
+        publication=publication, template_path=template_path,
+    )
+    return broker

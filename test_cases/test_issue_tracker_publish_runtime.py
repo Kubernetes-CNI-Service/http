@@ -13,6 +13,24 @@ from test_cases.test_issue_tracker_switch_runtime import RuntimeWorkerFixture
 
 
 class StageLRuntimeDirectTests(RuntimeWorkerFixture, unittest.TestCase):
+    def test_complete_manual_snapshot_rejects_unknown_panel_before_source_or_lock(self):
+        from monitor.issue_tracker_publish_runtime import inspect_manual_stage_l_preview
+        from monitor.issue_tracker_manual_preview import ManualPreviewHold
+        with mock.patch("monitor.issue_tracker_publish_runtime._paths") as paths:
+            for panel in ("all", "switch status", True):
+                with self.subTest(panel=panel), self.assertRaises(ManualPreviewHold):
+                    inspect_manual_stage_l_preview(self.store, panel=panel, http_root=self.root,
+                        project=self.project, publication=self.publication, template_path=self.workbook)
+        paths.assert_not_called()
+
+    def test_complete_manual_snapshot_does_not_use_an_unbound_template_or_air_scope(self):
+        from monitor.issue_tracker_publish_runtime import StageLHold, inspect_manual_stage_l_preview
+        with mock.patch("monitor.issue_tracker_publish_runtime.inspect_stage_l") as inspect:
+            with self.assertRaises(StageLHold):
+                inspect_manual_stage_l_preview(self.store, panel="Switch Status", http_root=self.root,
+                    project=self.project, publication=self.publication, template_path=self.workbook)
+        inspect.assert_not_called()
+
     def test_worker_reads_post_commit_status_instead_of_pre_commit_counter(self):
         from monitor.issue_tracker_local_workbook_commit import CommittedProdWorkbook
         from test_cases.test_collection_cycle_persistence import WORKER

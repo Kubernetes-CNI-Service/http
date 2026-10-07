@@ -253,6 +253,21 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             skip_history=False, panel_counts_probe=True,
         )
 
+    def test_complete_manual_preview_binds_source_files_and_workbook_before_real_c6(self):
+        self._exercise_real_protected_three_panel_fixture(
+            skip_history=False, complete_preview_probe=True,
+        )
+
+    def test_complete_manual_preview_source_stat_race_before_c6_never_receipts(self):
+        self._exercise_real_protected_three_panel_fixture(
+            skip_history=False, complete_preview_probe=True, complete_preview_source_race=True,
+        )
+
+    def test_complete_manual_browser_confirm_crosses_real_cgi_queue_and_c6(self):
+        self._exercise_real_protected_three_panel_fixture(
+            skip_history=False, complete_preview_probe=True, complete_preview_cgi=True,
+        )
+
     def _verify_manual_queue_protected_commit(
         self, project, original_template, before_generations, qualified,
     ):
@@ -406,6 +421,9 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         source_identity_probe=False, two_cycle_changed_latest=False,
         settings_channel_probe=False, settings_channel_fault=False,
         panel_counts_probe=False,
+        complete_preview_probe=False,
+        complete_preview_source_race=False,
+        complete_preview_cgi=False,
     ):
         from monitor.collection_ib_producer import (
             IbProducerAuthoritySnapshot, parse_ib_producer_authority,
@@ -566,7 +584,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             )
             self.template = self.publication / "local.xlsx"
             self.template.write_bytes(fake_workbook(reserved_switch_rows=4))
-            if manual_channel_bridge:
+            if manual_channel_bridge or complete_preview_probe:
                 root_template = self.root / "monitor/Issue_Tracker_Template_v1.xlsx"
                 root_template.parent.mkdir(parents=True, exist_ok=True)
                 root_template.write_bytes(self.template.read_bytes())
@@ -633,6 +651,103 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             self.assertEqual(expected_panels,
                              {item.panel for item in qualified.candidates})
             self.assertEqual(expected_count, len(qualified.candidates))
+            if complete_preview_probe:
+                from monitor import issue_tracker_manual_preview as manual
+                from test_cases.test_issue_tracker_manual_ui import browser_settings_script
+                (project / "01-global.yaml").write_text(
+                    "schema_version: 2\ncommon:\n  mgmt:\n"
+                    "    issue-tracker:\n      status: disabled\n", encoding="utf-8")
+                broker = manual.make_complete_protected_stage_l_broker(
+                    self.store, http_root=self.root, project=project,
+                    publication=self.publication, template_path=self.template,
+                    boot_id="complete-preview-fixture", monotonic_ns=time.monotonic_ns,
+                    clock=lambda: 1000.0,
+                )
+                generated_confirm = {}
+                if complete_preview_cgi:
+                    from urllib.parse import urlencode
+                    from monitor.issue_tracker_manual_channel import DurableManualQueue, ManualQueueWorker
+                    from test_cases.test_issue_tracker_manual_ui_workflow import CGI, environ
+                    queue_root = project / ".tracker/complete-preview-queue"
+                    queue_root.mkdir(mode=0o700)
+                    queue = DurableManualQueue(queue_root, boot_id="complete-preview-fixture")
+                    worker = ManualQueueWorker(queue, broker)
+                    def cgi(body):
+                        def submit(request):
+                            job = queue.enqueue(request)
+                            done, result = worker.process_job(job)
+                            self.assertEqual(job, done)
+                            self.assertEqual("done", queue.status(job)["state"])
+                            return result
+                        return CGI.handle(environ(body), body, submit=submit)
+                previews = {}
+                for panel, count, files in (("Switch Status", 2, 2),
+                                            ("Eth Link Validation", 1, 1),
+                                            ("IB Link Validation", 1, 1)):
+                    if complete_preview_cgi:
+                        body = urlencode({"action": "preview", "panel": panel}).encode("ascii")
+                        status, preview = cgi(body)
+                        self.assertEqual("200 OK", status)
+                    else:
+                        preview = broker.preview("nvis", panel)
+                    previews[panel] = preview
+                    self.assertEqual((count, count, 0, 0), tuple(preview[key] for key in (
+                        "qualified_operation_count", "new_count", "update_count", "skip_count")))
+                    self.assertEqual(files, len(preview["source_files"]))
+                    self.assertEqual(count, len(preview["row_digests"]))
+                    for item in preview["source_files"]:
+                        self.assertEqual(hashlib.sha256((self.root / item["path"]).read_bytes()).hexdigest(),
+                                         item["sha256"])
+                    browser = browser_settings_script(
+                        "console.log(JSON.stringify({valid:validIssueTrackerPreview(" +
+                        json.dumps(preview) + "," + json.dumps(panel) + ")}));")
+                    self.assertEqual({"valid": True}, browser)
+                    if complete_preview_cgi:
+                        browser = browser_settings_script(
+                            "replies.push(" + json.dumps(preview) + ");\n"
+                            "await issueTrackerManualPreview(" + json.dumps(panel) + ");\n"
+                            "replies.push({local_applied:false});\n"
+                            "await issueTrackerManualConfirm();\n"
+                            "console.log(JSON.stringify({calls}));")
+                        self.assertEqual(body.decode("ascii"), browser["calls"][0]["body"])
+                        generated_confirm[panel] = browser["calls"][1]["body"].encode("ascii")
+                if complete_preview_source_race:
+                    real_commit = broker._commit_local
+                    def change_after_confirm_read(panel, fingerprint):
+                        path = artifacts["ethernet/prod"]["info"]
+                        stamp = path.stat().st_mtime_ns
+                        os.utime(path, ns=(stamp + 2_000_000_000, stamp + 2_000_000_000))
+                        return real_commit(panel, fingerprint)
+                    broker._commit_local = change_after_confirm_read
+                    with self.assertRaises(StageLHold):
+                        broker.confirm("nvis", "Switch Status", previews["Switch Status"]["token"],
+                                       confirmation="publish_local")
+                    self.assertFalse(any((project / ".tracker/generations").glob("*/RECEIPT")))
+                    with self.assertRaises(manual.ManualPreviewHold):
+                        broker.confirm("nvis", "Switch Status", previews["Switch Status"]["token"],
+                                       confirmation="publish_local")
+                    return
+                if complete_preview_cgi:
+                    status, committed = cgi(generated_confirm["Switch Status"])
+                    self.assertEqual("200 OK", status)
+                else:
+                    committed = broker.confirm("nvis", "Switch Status", previews["Switch Status"]["token"],
+                                               confirmation="publish_local")
+                self.assertTrue(committed["local_applied"])
+                receipts = tuple((project / ".tracker/generations").glob("*/RECEIPT"))
+                self.assertEqual(1, len(receipts))
+                # Even an untouched ETH source cannot reuse counts computed
+                # against the pre-Switch local workbook image.
+                if complete_preview_cgi:
+                    status, held = cgi(generated_confirm["Eth Link Validation"])
+                    self.assertEqual(("409 Conflict", {"error": "manual_hold"}), (status, held))
+                else:
+                    with self.assertRaises(manual.ManualPreviewHold):
+                        broker.confirm("nvis", "Eth Link Validation",
+                                       previews["Eth Link Validation"]["token"],
+                                       confirmation="publish_local")
+                self.assertEqual(receipts, tuple((project / ".tracker/generations").glob("*/RECEIPT")))
+                return
             if panel_counts_probe:
                 from monitor.issue_tracker_local_workbook_commit import (
                     project_manual_panel_image, project_manual_panel_preview,

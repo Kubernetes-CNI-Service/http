@@ -1599,6 +1599,7 @@
     {
       "id": "issue_tracker_manual_preview_to_stage_l_writer",
       "members": [
+        "monitor/generate-monitor-html.py",
         "monitor/issue-tracker-control.cgi",
         "monitor/issue_tracker_manual_channel.py",
         "monitor/issue_tracker_manual_preview.py",

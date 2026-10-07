@@ -28,6 +28,34 @@ def qualified_status():
 
 
 class ManualPreviewDirectTests(unittest.TestCase):
+    def test_complete_panel_snapshot_is_exact_and_revokes_after_workbook_drift(self):
+        from copy import deepcopy
+        status = qualified_status()
+        detail = {"source_files": [{"path": "private/completed-info.zip",
+                   "recorded_at_utc": "2026-10-07T00:00:00Z", "sha256": "a" * 64}],
+                  "qualified_operation_count": 1, "whitelist_skip_count": 0,
+                  "new_count": 1, "update_count": 0, "skip_count": 0,
+                  "row_digests": ["b" * 64]}
+        status.update(manual_preview=detail, manual_snapshot_sha256="c" * 64)
+        reader = mock.Mock(return_value=status)
+        broker = ManualPreviewBroker(self.reader, self.commit,
+            read_panel_status=reader, clock=lambda: self.now)
+        result = broker.preview("nvis", "Switch Status")
+        for key, value in detail.items():
+            self.assertEqual(value, result[key])
+        reader.assert_called_once_with("Switch Status")
+        self.reader.assert_not_called()
+        status["manual_snapshot_sha256"] = "d" * 64
+        with self.assertRaises(ManualPreviewHold):
+            broker.confirm("nvis", "Switch Status", result["token"], confirmation="publish_local")
+        self.commit.assert_not_called()
+        for bad in ({**detail, "new_count": True}, {**detail, "row_digests": []},
+                    {**detail, "source_files": []}, {**detail, "secret": "credential"},
+                    {**detail, "new_count": 2}):
+            reader.return_value = {**deepcopy(status), "manual_preview": bad}
+            with self.subTest(keys=tuple(bad)), self.assertRaises(ManualPreviewHold):
+                broker.preview("nvis", "Switch Status")
+
     def test_settings_without_trusted_worker_callbacks_fail_closed(self):
         for method in ("settings", "set_k"):
             self.assertTrue(callable(getattr(self.broker, method, None)),
