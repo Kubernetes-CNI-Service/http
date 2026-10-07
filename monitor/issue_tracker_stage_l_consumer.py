@@ -587,6 +587,7 @@ def inspect_prod_stage_l_composed_sources(
             store, http_root=root, settings=settings,
             whitelist_snapshot=whitelist_snapshot,
             whitelist_path=whitelist_path, writer_token=writer_token,
+            normalized_active_keys=True,
         )
         switch = switch_ib.switch_source
         if (switch_ib.qualified is not False
@@ -607,6 +608,7 @@ def inspect_prod_stage_l_composed_sources(
                 store, http_root=root, settings=settings,
                 whitelist_snapshot=whitelist_snapshot,
                 whitelist_path=whitelist_path, writer_token=writer_token,
+                normalized_active_keys=True,
             ) != eth_link):
             raise StageLConsumerHold("three source domains changed during read")
         return ProdStageLComposedSourceSnapshot(

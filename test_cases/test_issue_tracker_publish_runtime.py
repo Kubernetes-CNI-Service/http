@@ -13,6 +13,29 @@ from test_cases.test_issue_tracker_switch_runtime import RuntimeWorkerFixture
 
 
 class StageLRuntimeDirectTests(RuntimeWorkerFixture, unittest.TestCase):
+    def test_worker_reads_post_commit_status_instead_of_pre_commit_counter(self):
+        from monitor.issue_tracker_local_workbook_commit import CommittedProdWorkbook
+        from test_cases.test_collection_cycle_persistence import WORKER
+
+        before = {"state": "qualified", "completed_cycles": 2,
+                  "latest_cycle_id": "cycle-2", "cycle_summary": {"published": 0}}
+        after = {**before, "cycle_summary": {"published": 1}}
+        result = CommittedProdWorkbook(None,
+                                       SimpleNamespace(published_sha256="b" * 64), None)
+        store = SimpleNamespace(scope="prod", project_identity=self.project)
+        with (mock.patch("monitor.issue_tracker_publish_runtime.local_publish_interval",
+                         return_value=(1, "a" * 64)),
+              mock.patch("monitor.issue_tracker_publish_runtime.inspect_stage_l",
+                         side_effect=[before, after]) as inspect,
+              mock.patch("monitor.issue_tracker_publish_runtime.commit_qualified_prod_local",
+                         return_value=result),
+              mock.patch.object(WORKER, "_current_boot_identity", return_value="fixture"),
+              mock.patch.object(WORKER, "_write_status_file") as status):
+            self.assertIs(result, WORKER._publish_stage_l_local_after_completion(store))
+        self.assertEqual(2, inspect.call_count)
+        self.assertEqual("local_applied", status.call_args.args[2])
+        self.assertEqual(1, status.call_args.kwargs["cycle_summary"]["published"])
+
     def test_boot_identity_probe_timeout_uses_the_existing_denied_probe_contract(self):
         from test_cases.test_collection_cycle_persistence import WORKER
 

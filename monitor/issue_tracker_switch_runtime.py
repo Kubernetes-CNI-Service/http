@@ -131,6 +131,7 @@ class ProdEthActivityKWindow:
     template_sha256: str
     qualified: bool = False
     whitelist_skip_matches: tuple[tuple[tuple[str, str, str, str], str], ...] = ()
+    normalized_active_keys: bool = False
 
 
 @dataclass(frozen=True)
@@ -1156,10 +1157,43 @@ def validate_prod_eth_activity_cycle_source(
     return actual
 
 
+def _persistent_eth_active_links(cycles, sources, settings):
+    """Project latest values of K/K active keys, never publication authority."""
+    from monitor.issue_tracker_per_key_source import (
+        _key_for_link, reduce_eth_per_key_sources,
+    )
+
+    if (type(settings) is not KChainState or type(settings.k) is not int
+            or settings.k < 1 or type(cycles) is not tuple
+            or type(sources) is not tuple or len(sources) != settings.k
+            or len(cycles) != settings.k):
+        raise SwitchRuntimeHoldError("active-key ETH window is incomplete")
+    latest = {}
+    for link in sources[-1].links:
+        key = _key_for_link(link)
+        if key is None:
+            continue
+        if key in latest:
+            raise SwitchRuntimeHoldError("active-key ETH window has duplicate keys")
+        latest[key] = link
+    result = []
+    for key, link in sorted(latest.items()):
+        window = reduce_eth_per_key_sources(cycles, sources, settings, key)
+        if window.state == "source_window_complete" and window.observed == settings.k:
+            result.append(link)
+    # Even an empty current active set must validate all protected source
+    # identities/topology/row shapes; it cannot hide unknown or rebound input.
+    if not latest:
+        reduce_eth_per_key_sources(
+            cycles, sources, settings,
+            ("eth_cabling", "source-validation-probe", "probe", "Mis-wiring"))
+    return tuple(result)
+
+
 def read_prod_eth_activity_k_window(
     store, *, http_root: Path | str, settings: KChainState,
     whitelist_snapshot: WorkbookWhitelistSnapshot,
-    whitelist_path: Path | str, writer_token=None,
+    whitelist_path: Path | str, writer_token=None, normalized_active_keys=False,
 ) -> ProdEthActivityKWindow:
     """Bind one completed prod ETH per-value K source to durable K and W1.
 
@@ -1171,7 +1205,8 @@ def read_prod_eth_activity_k_window(
         if (not root.is_dir() or store.scope != "prod"
                 or Path(store.root_status_dir) != root / "monitor/status"
                 or not isinstance(settings, KChainState)
-                or not isinstance(whitelist_snapshot, WorkbookWhitelistSnapshot)):
+                or not isinstance(whitelist_snapshot, WorkbookWhitelistSnapshot)
+                or type(normalized_active_keys) is not bool):
             raise SwitchRuntimeHoldError("prod ETH K authority is unsupported")
         project = Path(store.project_identity)
         if not project.is_absolute() or project.is_symlink():
@@ -1197,9 +1232,12 @@ def read_prod_eth_activity_k_window(
         for source in sources:
             if source.derivation is None or source.qualified is not False:
                 raise SwitchRuntimeHoldError("prod ETH K lacks P2P derivation")
-            if topology is not None and source.derivation.source_sha256 != topology:
+            identity = ((source.derivation.source_sha256.get("topology"),
+                         source.derivation.edges) if normalized_active_keys
+                        else source.derivation.source_sha256)
+            if topology is not None and identity != topology:
                 raise SwitchRuntimeHoldError("prod ETH K topology changed")
-            topology = source.derivation.source_sha256
+            topology = identity
             switch = read_prod_switch_cycle_source(
                 store, http_root=root, sequence=source.sequence,
                 source_slot="ethernet/prod",
@@ -1216,6 +1254,8 @@ def read_prod_eth_activity_k_window(
                 raise SwitchRuntimeHoldError("prod ETH K has duplicate endpoints")
             current = set(source.links)
             persistent = current if persistent is None else persistent & current
+        if normalized_active_keys:
+            persistent = _persistent_eth_active_links(tail, sources, settings)
         candidates = tuple(sorted(persistent, key=lambda link: (
             link.device_a, link.interface_a, link.device_b, link.interface_b,
             link.status, link.observation_a.remote_host,
@@ -1259,6 +1299,7 @@ def read_prod_eth_activity_k_window(
             k_event_sha256=settings.event_sha256,
             whitelist_sha256=whitelist_snapshot.whitelist.sha256,
             template_sha256=whitelist_snapshot.workbook_sha256,
+            normalized_active_keys=normalized_active_keys,
         )
     except (OSError, TypeError, KeyError, AttributeError, RuntimeError,
             ValueError, CycleSourceHoldError) as exc:
@@ -1273,12 +1314,14 @@ def validate_prod_eth_activity_k_window(
     whitelist_path: Path | str, writer_token=None,
 ) -> ProdEthActivityKWindow:
     """Reread complete ETH K source at a future freeze boundary."""
-    if type(witness) is not ProdEthActivityKWindow or witness.qualified is not False:
+    if (type(witness) is not ProdEthActivityKWindow or witness.qualified is not False
+            or type(witness.normalized_active_keys) is not bool):
         raise SwitchRuntimeHoldError("prod ETH K witness has invalid authority")
     actual = read_prod_eth_activity_k_window(
         store, http_root=http_root, settings=settings,
         whitelist_snapshot=whitelist_snapshot,
         whitelist_path=whitelist_path, writer_token=writer_token,
+        normalized_active_keys=witness.normalized_active_keys,
     )
     if actual != witness:
         raise SwitchRuntimeHoldError("prod ETH K witness changed before freeze")

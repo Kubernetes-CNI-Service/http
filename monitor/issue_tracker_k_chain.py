@@ -47,6 +47,16 @@ class KWindow:
     required: int
 
 
+@dataclass(frozen=True)
+class PerKeyWindow:
+    """Offline observation projection, never source/publication authority."""
+
+    status: str
+    reason: str
+    observed: int
+    required: int
+
+
 def _canonical_line(value):
     return (json.dumps(value, ensure_ascii=False, sort_keys=True,
                        separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
@@ -219,3 +229,52 @@ def assess_k_window(cycles, settings):
     if any(not cycle.qualifying for cycle in tail):
         return KWindow("pending", "nonqualifying_cycle", sum(cycle.qualifying for cycle in tail), settings.k)
     return KWindow("history_sufficient", "activity_not_evaluated", settings.k, settings.k)
+
+
+def _normalized_observation_key(key):
+    # Internal panel keys include their domain. Switch producers use
+    # ("switch", hostname, category, component); manifests keep their own
+    # established three-part Switch identity unchanged.
+    return (type(key) is tuple and len(key) == 4
+            and all(type(part) is str and part and "\x00" not in part
+                    for part in key))
+
+
+def assess_per_key_window(cycles, active_keys_by_cycle, settings, key):
+    """Count one normalized key's consecutive active suffix, bounded by K.
+
+    The caller must independently prove source provenance, freshness and
+    topology comparability. Matching these cycle IDs is not that proof. This
+    pure projection never reads status, grants a permit or writes an issue.
+    """
+    if type(settings) is not KChainState or type(settings.k) is not int or settings.k < 1:
+        raise KChainHoldError("unverified K setting")
+    if not _normalized_observation_key(key):
+        raise KChainHoldError("invalid normalized activity key")
+    if (not isinstance(cycles, (tuple, list))
+            or any(not isinstance(cycle, CycleEvidence) for cycle in cycles)):
+        raise KChainHoldError("unverified cycle evidence")
+    tail = cycles[-settings.k:]
+    if any(cycle.qualifying is not True for cycle in tail):
+        raise KChainHoldError("nonqualifying cycle cannot count toward K")
+    # Retain the existing all-history identity, order and domain checks.
+    assess_k_window(cycles, settings)
+    if (type(active_keys_by_cycle) is not dict
+            or set(active_keys_by_cycle) != {cycle.cycle_id for cycle in cycles}):
+        raise KChainHoldError("per-key observations are not bound to exact cycles")
+    for observed in active_keys_by_cycle.values():
+        if (type(observed) is not frozenset
+                or any(not _normalized_observation_key(item) for item in observed)):
+            raise KChainHoldError("invalid per-cycle normalized observations")
+    consecutive = 0
+    for cycle in reversed(tail):
+        if key not in active_keys_by_cycle[cycle.cycle_id]:
+            break
+        consecutive += 1
+    if consecutive == settings.k:
+        return PerKeyWindow("qualified", "consecutive_active", consecutive, settings.k)
+    reason = ("cold_start" if not cycles else
+              "latest_absent" if consecutive == 0 else
+              "cold_start" if len(cycles) < settings.k else
+              "insufficient_consecutive")
+    return PerKeyWindow("pending", reason, consecutive, settings.k)

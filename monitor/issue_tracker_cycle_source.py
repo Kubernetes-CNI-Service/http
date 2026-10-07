@@ -20,6 +20,10 @@ class CycleSourceHoldError(ValueError):
     """A worker cycle chain is incomplete, corrupt, or not safely bound."""
 
 
+class CycleSequenceGap(CycleSourceHoldError):
+    """The allocated sequence witness names records missing from the archive."""
+
+
 @dataclass(frozen=True)
 class CycleEvidence:
     cycle_id: str
@@ -101,7 +105,7 @@ def read_completed_cycle_evidence(store):
                 raise CycleSourceHoldError("cycle records exist without witness")
             return ()
         if sorted(groups) != list(range(1, witness + 1)):
-            raise CycleSourceHoldError("cycle record sequence or witness gap")
+            raise CycleSequenceGap("cycle record sequence or witness gap")
         output = []
         tokens = set()
         ids = set()

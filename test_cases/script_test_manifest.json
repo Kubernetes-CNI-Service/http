@@ -208,6 +208,18 @@
         "test_cases.test_issue_tracker_cycle_source_workflow",
         "test_cases.test_issue_tracker_k_chain",
         "test_cases.test_issue_tracker_k_chain_workflow",
+        "test_cases.test_issue_tracker_per_key_status_contract",
+        "test_cases.test_issue_tracker_per_key_status_contract_workflow",
+        "test_cases.test_issue_tracker_per_key_source",
+        "test_cases.test_issue_tracker_per_key_source_workflow",
+        "test_cases.test_issue_tracker_switch_per_key_source",
+        "test_cases.test_issue_tracker_switch_per_key_source_workflow",
+        "test_cases.test_issue_tracker_ib_per_key_source",
+        "test_cases.test_issue_tracker_ib_per_key_source_workflow",
+        "test_cases.test_issue_tracker_receipt_snapshot",
+        "test_cases.test_issue_tracker_receipt_snapshot_workflow",
+        "test_cases.test_issue_tracker_stage_l_status_per_key_contract",
+        "test_cases.test_issue_tracker_stage_l_status_per_key_contract_workflow",
         "test_cases.test_issue_tracker_whitelist",
         "test_cases.test_issue_tracker_whitelist_workflow",
         "test_cases.test_issue_tracker_k_store",
@@ -425,6 +437,10 @@
     "monitor/issue_tracker_manifest.py": "monitor/issue_tracker_manifest.py",
     "monitor/issue_tracker_cycle_source.py": "monitor/issue_tracker_cycle_source.py",
     "monitor/issue_tracker_k_chain.py": "monitor/issue_tracker_k_chain.py",
+    "monitor/issue_tracker_per_key_source.py": "monitor/issue_tracker_per_key_source.py",
+    "monitor/issue_tracker_switch_per_key_source.py": "monitor/issue_tracker_switch_per_key_source.py",
+    "monitor/issue_tracker_ib_per_key_source.py": "monitor/issue_tracker_ib_per_key_source.py",
+    "monitor/issue_tracker_receipt_snapshot.py": "monitor/issue_tracker_receipt_snapshot.py",
     "monitor/issue_tracker_whitelist.py": "monitor/issue_tracker_whitelist.py",
     "monitor/issue_tracker_k_store.py": "monitor/issue_tracker_k_store.py",
     "monitor/issue_tracker_local_commit.py": "monitor/issue_tracker_local_commit.py",
@@ -1374,7 +1390,8 @@
         "monitor/issue_tracker_publish_runtime.py"
       ],
       "tests": [
-        "test_cases.test_issue_tracker_publish_runtime"
+        "test_cases.test_issue_tracker_publish_runtime",
+        "test_cases.test_issue_tracker_stage_l_status_per_key_contract"
       ]
     },
     {
@@ -1383,7 +1400,44 @@
         "monitor/issue_tracker_switch_runtime.py"
       ],
       "tests": [
-        "test_cases.test_issue_tracker_switch_runtime"
+        "test_cases.test_issue_tracker_switch_runtime",
+        "test_cases.test_issue_tracker_per_key_source"
+      ]
+    },
+    {
+      "id": "issue_tracker_eth_per_key_source",
+      "paths": [
+        "monitor/issue_tracker_per_key_source.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_per_key_source"
+      ]
+    },
+    {
+      "id": "issue_tracker_switch_per_key_source",
+      "paths": [
+        "monitor/issue_tracker_switch_per_key_source.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_switch_per_key_source"
+      ]
+    },
+    {
+      "id": "issue_tracker_ib_per_key_source",
+      "paths": [
+        "monitor/issue_tracker_ib_per_key_source.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_ib_per_key_source"
+      ]
+    },
+    {
+      "id": "issue_tracker_current_cycle_receipt_snapshot",
+      "paths": [
+        "monitor/issue_tracker_receipt_snapshot.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_receipt_snapshot"
       ]
     },
     {
@@ -1446,7 +1500,8 @@
         "monitor/issue_tracker_k_chain.py"
       ],
       "tests": [
-        "test_cases.test_issue_tracker_k_chain"
+        "test_cases.test_issue_tracker_k_chain",
+        "test_cases.test_issue_tracker_per_key_status_contract"
       ]
     },
     {
@@ -1455,7 +1510,8 @@
         "monitor/issue_tracker_cycle_source.py"
       ],
       "tests": [
-        "test_cases.test_issue_tracker_cycle_source"
+        "test_cases.test_issue_tracker_cycle_source",
+        "test_cases.test_issue_tracker_stage_l_status_per_key_contract"
       ]
     },
     {
@@ -1754,7 +1810,88 @@
         "monitor/switch-collection-worker.py"
       ],
       "tests": [
-        "test_cases.test_issue_tracker_k_chain_workflow"
+        "test_cases.test_issue_tracker_k_chain_workflow",
+        "test_cases.test_issue_tracker_per_key_status_contract_workflow"
+      ]
+    },
+    {
+      "id": "issue_tracker_eth_per_key_from_protected_collection",
+      "members": [
+        "monitor/issue_tracker_per_key_source.py",
+        "monitor/issue_tracker_k_chain.py",
+        "monitor/issue_tracker_switch_runtime.py",
+        "monitor/issue_tracker_cycle_source.py",
+        "monitor/collection_v2_emitter.py",
+        "monitor/switch-collection-worker.py",
+        "monitor/issue_tracker_state_owner.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_per_key_source_workflow"
+      ]
+    },
+    {
+      "id": "issue_tracker_switch_per_key_from_protected_collection",
+      "members": [
+        "monitor/issue_tracker_switch_per_key_source.py",
+        "monitor/issue_tracker_switch_info_source.py",
+        "monitor/issue_tracker_switch_runtime.py",
+        "monitor/issue_tracker_k_chain.py",
+        "monitor/issue_tracker_cycle_source.py",
+        "monitor/collection_v2_emitter.py",
+        "monitor/switch-collection-worker.py",
+        "monitor/issue_tracker_state_owner.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_switch_per_key_source_workflow"
+      ]
+    },
+    {
+      "id": "issue_tracker_ib_per_key_from_protected_collection",
+      "members": [
+        "monitor/issue_tracker_ib_per_key_source.py",
+        "monitor/issue_tracker_ib_runtime.py",
+        "monitor/collection_ib_producer.py",
+        "monitor/collection_ib_cycle_binding.py",
+        "monitor/issue_tracker_k_chain.py",
+        "monitor/issue_tracker_cycle_source.py",
+        "monitor/collection_v2_emitter.py",
+        "monitor/switch-collection-worker.py",
+        "monitor/issue_tracker_state_owner.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_ib_per_key_source_workflow"
+      ]
+    },
+    {
+      "id": "issue_tracker_receipt_snapshot_from_protected_local_publication",
+      "members": [
+        "monitor/issue_tracker_receipt_snapshot.py",
+        "monitor/issue_tracker_admission.py",
+        "monitor/issue_tracker_local_workbook_commit.py",
+        "monitor/issue_tracker_stage_l_consumer.py",
+        "monitor/issue_tracker_publish_runtime.py",
+        "monitor/issue_tracker_cycle_source.py",
+        "monitor/switch-collection-worker.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_receipt_snapshot_workflow"
+      ]
+    },
+    {
+      "id": "issue_tracker_per_key_status_from_protected_worker_sources",
+      "members": [
+        "monitor/issue_tracker_publish_runtime.py",
+        "monitor/issue_tracker_per_key_source.py",
+        "monitor/issue_tracker_switch_per_key_source.py",
+        "monitor/issue_tracker_ib_per_key_source.py",
+        "monitor/issue_tracker_receipt_snapshot.py",
+        "monitor/issue_tracker_stage_l_consumer.py",
+        "monitor/issue_tracker_state_owner.py",
+        "monitor/issue_tracker_local_workbook_commit.py",
+        "monitor/switch-collection-worker.py"
+      ],
+      "tests": [
+        "test_cases.test_issue_tracker_stage_l_status_per_key_contract_workflow"
       ]
     },
     {
@@ -1765,7 +1902,8 @@
         "monitor/issue_tracker_cycle_source.py"
       ],
       "tests": [
-        "test_cases.test_issue_tracker_cycle_source_workflow"
+        "test_cases.test_issue_tracker_cycle_source_workflow",
+        "test_cases.test_issue_tracker_stage_l_status_per_key_contract_workflow"
       ]
     },
     {

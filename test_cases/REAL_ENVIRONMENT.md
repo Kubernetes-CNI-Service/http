@@ -2008,6 +2008,15 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 回执负例补充：若 C6 回调返回的本地结果只有成功标志、缺失或篡改 generation/manifest/发布文件摘要、含在线成功状态或多余敏感字段，则 worker 对已 claim 的任务保持 `unknown_after_claim`，CGI 不向浏览器回显本地成功；须以受保护 C6 journal/RECEIPT 人工核对，不得按该请求自动重试。本机 direct/workflow 注入仅是先决证据，不替代真实 Apache/root 故障注入。
 - 证据、清理与风险：保存脱敏请求/响应、精确命令/退出码、所有 root/Apache 身份与权限、queue 记录/receipt 与工作簿前后 SHA、故障注入点、同 UID 写者静默及快照恢复核验；仅清理获准 VM 隔离产物并确认原状态。若 CGI 路由/worker/C5-C6 未接、任一真实权限或恢复证据缺失，此卡保持 BLOCKED/NOT RUN；本卡不授权生产发布或 Stage O。
 
+## TC-REAL-REQ7-PER-KEY-STATUS-001 — 逐键连续性与本周期本地回执状态
+
+- Case ID：`TC-REAL-REQ7-PER-KEY-STATUS-001`；类型：real-environment / protected-cycle / status / local-only；对应 REQ7 O-4、C-25；状态：**NOT RUN / REAL_ENV REQUIRED**。本地自动化覆盖 `test_issue_tracker_per_key_status_contract`、`test_issue_tracker_per_key_source`、`test_issue_tracker_switch_per_key_source`、`test_issue_tracker_ib_per_key_source`、`test_issue_tracker_receipt_snapshot`、`test_issue_tracker_stage_l_status_per_key_contract` 及其各自 workflow，和 `test_issue_tracker_publish_runtime` direct/workflow；本地结果不代表现场根保护、真实来源、生产 UI、Stage O 或整个 REQ7 已验收。
+- 目标与边界：逐键 K 连续性来自真实受保护 worker/emitter/IB producer 完成角色，而非调用方字典、全值相同、release ID 或历史归档数量。ETH 以实际期望 P2P 摘要和已验证边集为锚，IB 显式绑定期望拓扑摘要；同键实际对端或测量变化保留连续性但采用最新业务值，期望端点变化、重复键、非合格周期和漂移必须拒绝。qualified subset 不隐藏其他 pending 键，最新不 active 项不计入待发布故障。
+- 前置条件、权限与输入：另获 owner 对可丢弃隔离 Ubuntu VM、私有 0700 项目、模板和卷快照的精确授权；记录正式模板、K 事件链、W1、根/生产者身份、源码/测试/manifest/Python/平台与同树证明，确保唯一 LK-P writer 和外部同 UID 写者静默。没有授权不安装服务，不碰 AIR/prod/live/线上表、真实 crontab、SSH/UFM 或 root 身份。真机未执行不作为本地主树推进门槛，但本卡始终如实 NOT RUN。
+- 步骤与独立预期：在受保护 K 个连续成功且 fresh 的周期内，安排 A 键 K/K、B 键 1/K，再让同 A 键实际对端改变；A 的最新业务值进入来源集合、B 显示 pending、恢复项 observed=0。分别改变无关配置、真实期望 P2P 输入和 IB topology authority，验证前者不清零、后两者不可伪装为普通 cold start。删除隔离快照内一个完整旧周期的记录，状态明确 `archive_sequence_gap`，未知 published/skipped/pending 均为 null，不伪报 0；部分未终结或格式损坏仍 fail closed，不误报正常 cold start。
+- 回执与状态预期：执行真实 C5→C6→共享 admission 后立即读取 worker 落盘 JSON，当前周期 local SEND UNIT 的 published=1，而非沿用提交前的 0；下一周期无新回执时不得累计旧周期。RECEIPT 缺 admission、K/W1/模板/来源漂移、C6 之后身份变化均 HOLD，保留原证据，不回填凭证、不猜测计数；local_applied/本地计数绝不授予在线发送权。
+- 故障注入、证据与清理：保存脱敏命令/退出码、完整日志前后 stat/inode/大小/SHA/收尾、每周期来源/角色摘要、K/W1 身份、MANIFEST/INTENT/RECEIPT/admission、状态文件与工作簿前后摘要和独立预期。注入 late SHA、expected peer、重复键、周期缺口、不同 K、回执不一致和状态文件写入失败，核对无未授权代次或线上副作用。仅回滚本案隔离 VM/卷快照并验证前像；不删除或修补终态生产证据。任何现场来源或清理证据缺失保持 NOT RUN，本卡不替代三面板正式模板和 Stage O 的单独验收。
+
 ## TC-REAL-REQ7-STAGE-L-C5-C6-001 — 受保护三面板到正式工作簿本地凭证
 
 - Case ID：`TC-REAL-REQ7-STAGE-L-C5-C6-001`；类型：real-environment / protected-cycle / local-transaction；状态：**BLOCKED / NOT RUN / REAL_ENV REQUIRED**。本机自动化先决为 `test_cases.test_issue_tracker_ib_runtime`/`_workflow`、`test_cases.test_issue_tracker_switch_runtime`/`_workflow`、`test_cases.test_issue_tracker_stage_l_consumer`/`_workflow`、`test_cases.test_issue_tracker_manifest`/`_workflow`、`test_cases.test_issue_tracker_local_workbook`/`_workflow` 与 `test_cases.test_issue_tracker_local_workbook_commit`/`_workflow` 的 direct/workflow 全绿；只有同一逐字节候选的正式 Codex/Claude 两轮全量结果才可进入本卡。自动化正向夹具不等于远端真实来源、正式模板或线上写入。

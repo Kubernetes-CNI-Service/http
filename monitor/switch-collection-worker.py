@@ -985,9 +985,9 @@ def _publish_stage_l_local_after_completion(store):
             auto_admission=(policy_sha, interval, _current_boot_identity(),
                             time.monotonic_ns()),
         )
-        source["publish_every_cycles"] = interval
-        source["policy_sha256"] = policy_sha
         if isinstance(result, AutoLocalNotDue):
+            source["publish_every_cycles"] = interval
+            source["policy_sha256"] = policy_sha
             source["reason"] = result.reason
             source["local"] = "not_due"
             _write_status_file(
@@ -995,6 +995,23 @@ def _publish_stage_l_local_after_completion(store):
                 source.pop("state"), **source,
             )
             return None
+        # The pre-C6 snapshot cannot describe a just-created receipt. Reopen
+        # the protected source/admission chain rather than manufacture a count
+        # from the result object. A newer cycle or changed authority is HOLD.
+        refreshed = inspect_stage_l(
+            store, http_root=HTTP_ROOT, project=project,
+            publication=publication, template_path=template,
+        )
+        bindings = ("latest_cycle_id", "k", "k_revision", "template_sha256",
+                    "whitelist_sha256", "source_authority_sha256",
+                    "observations_sha256")
+        if (refreshed.get("state") != "qualified"
+                or any(refreshed.get(key) != source.get(key) for key in bindings)
+                or local_publish_interval(project) != (interval, policy_sha)):
+            raise StageLHold("local status authority changed after C6")
+        source = refreshed
+        source["publish_every_cycles"] = interval
+        source["policy_sha256"] = policy_sha
         if isinstance(result, CommittedProdWorkbook):
             state = "local_applied"
             source["local"] = "receipt"
