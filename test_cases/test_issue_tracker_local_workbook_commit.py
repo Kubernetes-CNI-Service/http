@@ -279,5 +279,60 @@ class LocalWorkbookCommitTests(unittest.TestCase):
                 self.assertFalse(receipt.exists())
 
 
+class ManualPanelPreviewProjectionTests(unittest.TestCase):
+    def test_preview_counts_are_classified_from_the_bound_workbook_not_upsert_flags(self):
+        from dataclasses import replace
+        from monitor import issue_tracker_local_workbook_commit as bridge
+        from test_cases.test_issue_tracker_manual_panel_workflow import full_qualified
+
+        qualified = full_qualified()
+        # No active business row: the first projection must be an insert.
+        source = fake_workbook(switch_rows=0, reserved_switch_rows=2)
+        preview = bridge.project_manual_panel_preview(source, qualified, "Switch Status", "a" * 64)
+        self.assertEqual((1, 1, 0, 1, 1), tuple(preview[key] for key in (
+            "qualified_operation_count", "new_count", "update_count", "skip_count",
+            "whitelist_skip_count")))
+        self.assertEqual(hashlib.sha256(source).hexdigest(), preview["workbook_source_sha256"])
+        image = bridge.project_manual_panel_image(source, qualified, "Switch Status", "a" * 64)
+        noop = bridge.project_manual_panel_preview(image, qualified, "Switch Status", "a" * 64)
+        self.assertEqual((0, 0, 2), tuple(noop[key] for key in (
+            "new_count", "update_count", "skip_count")))
+        changed = replace(qualified, candidates=(replace(qualified.candidates[0],
+            evidence_description="changed fan evidence"),) + qualified.candidates[1:])
+        update = bridge.project_manual_panel_preview(image, changed, "Switch Status", "b" * 64)
+        self.assertEqual((0, 1, 1), tuple(update[key] for key in (
+            "new_count", "update_count", "skip_count")))
+        self.assertEqual(1, len(preview["row_digests"]))
+        self.assertNotEqual(preview["row_digests"], update["row_digests"])
+        self.assertEqual(source, fake_workbook(switch_rows=0, reserved_switch_rows=2))
+
+    def test_preview_rejects_bad_workbook_panel_or_qualified_rows(self):
+        from dataclasses import replace
+        from monitor import issue_tracker_local_workbook_commit as bridge
+        from test_cases.test_issue_tracker_manual_panel_workflow import full_qualified
+
+        source = fake_workbook(reserved_switch_rows=2)
+        qualified = full_qualified()
+        for raw, value, panel in ((b"broken", qualified, "Switch Status"),
+                                 (source, qualified, "all"),
+                                 (source, replace(qualified, candidates=(qualified.candidates[0],) * 2),
+                                  "Switch Status")):
+            with self.subTest(panel=panel), self.assertRaises(ValueError):
+                bridge.project_manual_panel_preview(raw, value, panel, "a" * 64)
+
+    def test_preview_false_qualification_cannot_be_rendered_as_actionable_counts(self):
+        from dataclasses import replace
+        from monitor import issue_tracker_local_workbook_commit as bridge
+        from test_cases.test_issue_tracker_manual_panel_workflow import full_qualified
+
+        source = fake_workbook(switch_rows=0, reserved_switch_rows=2)
+        qualified = full_qualified()
+        for value in (replace(qualified, qualified=False),
+                      replace(qualified, scope="fixture"),
+                      replace(qualified, operations_json=b"[]")):
+            with self.subTest(value=value.scope), self.assertRaises(ValueError):
+                bridge.project_manual_panel_preview(source, value, "Switch Status", "a" * 64)
+
+
 if __name__ == "__main__":
     unittest.main()

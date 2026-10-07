@@ -7,9 +7,10 @@ failure may leave durable INTENT evidence; it never repairs or deletes it.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 import hashlib
 from io import BytesIO
+import json
 import os
 from pathlib import Path
 import zipfile
@@ -25,10 +26,13 @@ from monitor.issue_tracker_local_workbook import (
     project_cabling_workbook_image, project_switch_workbook_image,
     project_whitelist_skip_history_image,
     validate_operator_edited_workbook,
+    _bounded_projectable_archive, _validate_headers,
 )
 from monitor.issue_tracker_manifest import freeze_prod_stage_l_manifest
 from monitor.issue_tracker_state_owner import require_current_k
-from monitor.issue_tracker_whitelist_workbook import read_whitelist_workbook
+from monitor.issue_tracker_whitelist_workbook import (
+    _cell_text, _shared_strings, read_whitelist_workbook,
+)
 
 
 _MANUAL_PANEL_SHEETS = {
@@ -71,6 +75,70 @@ def _source_rows(qualified, *, selected_panel=None):
                 priority="P2", recorded_at_utc=candidate.recorded_at_utc,
             ))
     return tuple(cabling), tuple(switch)
+
+
+def project_manual_panel_preview(source, qualified, selected_panel, manifest_id):
+    """Pure one-panel counts/digests, never a complete or authorized preview.
+
+    Classify actual projected history, not C5's generic upsert intent. The
+    caller must still reopen protected source files and bind this workbook
+    source/image pair under LK-P before minting or accepting a preview token.
+    Skip count includes unchanged qualified rows and selected W1 exclusions;
+    whitelist_skip_count makes the latter independently visible.
+    """
+    from monitor.issue_tracker_stage_l_consumer import ProdStageLQualifiedSet
+    from monitor.issue_tracker_manifest import _runtime_skip, selected_panel_decision_sha256
+
+    if (type(qualified) is not ProdStageLQualifiedSet or qualified.qualified is not True
+            or qualified.scope != "prod" or qualified.mode != "prod-runtime-protected-v1"):
+        raise LocalCommitHold("manual preview requires a qualified source set")
+    # Candidate values are intentionally not permits (their flag remains
+    # false in real C5 output). Authority belongs to the requalified set;
+    # require its canonical operation-to-row binding, not individual flags.
+    selected_panel_decision_sha256(qualified, selected_panel)
+    # The existing projector validates the selected panel, source package,
+    # typed rows, formulas, duplicate keys and both nonselected sheets.
+    business_image = project_manual_panel_image(
+        source, replace(qualified, whitelist_skips=()), selected_panel, manifest_id)
+
+    def history(raw):
+        with zipfile.ZipFile(BytesIO(raw)) as archive:
+            _, names = _bounded_projectable_archive(archive)
+            paths = _sheet_paths(archive, names)
+            strings = _shared_strings(archive, names)
+            _, rows = _validate_headers(archive, names, paths, strings)["Update_History"]
+            return {number: tuple(_cell_text(cells.get(f"{column}{number}"), strings)
+                                  if cells.get(f"{column}{number}") is not None else ""
+                                  for column in "ABCDE")
+                    for number, (_, cells) in rows.items() if number > 2
+                    and any(_cell_text(cell, strings) for cell in cells.values())}
+
+    before, after = history(source), history(business_image)
+    if any(after.get(number) != values for number, values in before.items()):
+        raise LocalCommitHold("manual preview changed existing history")
+    appended = [after[number] for number in sorted(after.keys() - before.keys())]
+    target, family = _MANUAL_PANEL_SHEETS[selected_panel]
+    selected = tuple(sorted((item for item in qualified.candidates
+                             if item.panel == selected_panel), key=lambda item: item.activity_key))
+    if (len(appended) > len(selected) or any(row[1] != target
+            or row[2] not in ("Insert", "Update") for row in appended)):
+        raise LocalCommitHold("manual preview history differs from selected operations")
+    new_count = sum(row[2] == "Insert" for row in appended)
+    update_count = sum(row[2] == "Update" for row in appended)
+    skips = sum(_runtime_skip(item)["source"] == family for item in qualified.whitelist_skips)
+    source_sha = hashlib.sha256(source).hexdigest()
+    row_digests = [hashlib.sha256(json.dumps({
+        "manifest_id": manifest_id, "workbook_source_sha256": source_sha,
+        "candidate": asdict(item),
+    }, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        allow_nan=False).encode("utf-8") + b"\n").hexdigest() for item in selected]
+    image = project_manual_panel_image(source, qualified, selected_panel, manifest_id)
+    return {"qualified_operation_count": len(selected), "new_count": new_count,
+            "update_count": update_count,
+            "skip_count": len(selected) - new_count - update_count + skips,
+            "whitelist_skip_count": skips, "row_digests": row_digests,
+            "workbook_source_sha256": source_sha,
+            "workbook_image_sha256": hashlib.sha256(image).hexdigest()}
 
 
 def project_manual_panel_image(source, qualified, selected_panel, manifest_id):

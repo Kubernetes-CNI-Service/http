@@ -248,6 +248,11 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             skip_history=False, source_identity_probe=True,
         )
 
+    def test_real_protected_three_panel_preview_classifies_workbook_without_committing(self):
+        self._exercise_real_protected_three_panel_fixture(
+            skip_history=False, panel_counts_probe=True,
+        )
+
     def _verify_manual_queue_protected_commit(
         self, project, original_template, before_generations, qualified,
     ):
@@ -400,6 +405,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         selected_panel_empty=False, manual_channel_bridge=False,
         source_identity_probe=False, two_cycle_changed_latest=False,
         settings_channel_probe=False, settings_channel_fault=False,
+        panel_counts_probe=False,
     ):
         from monitor.collection_ib_producer import (
             IbProducerAuthoritySnapshot, parse_ib_producer_authority,
@@ -627,6 +633,36 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             self.assertEqual(expected_panels,
                              {item.panel for item in qualified.candidates})
             self.assertEqual(expected_count, len(qualified.candidates))
+            if panel_counts_probe:
+                from monitor.issue_tracker_local_workbook_commit import (
+                    project_manual_panel_image, project_manual_panel_preview,
+                )
+                source = self.template.read_bytes()
+                generation_root = project / ".tracker/generations"
+                before_generations = tuple(generation_root.iterdir())
+                for panel, count in (("Switch Status", 2),
+                                     ("Eth Link Validation", 1),
+                                     ("IB Link Validation", 1)):
+                    _, manifest_id = freeze_prod_stage_l_manifest(
+                        qualified, self.store, metadata={
+                            "project_id": str(project), "schema_version": 1,
+                            "producer_version": "stage-l-runtime-v1",
+                            "template_contract_version": "local-xlsx-v1",
+                            "template_sha256": self.snapshot.workbook_sha256,
+                        }, expected_template_sha256=self.snapshot.workbook_sha256,
+                        selected_panel=panel, **args,
+                    )
+                    preview = project_manual_panel_preview(source, qualified, panel, manifest_id)
+                    self.assertEqual((count, count, 0, 0), tuple(preview[key] for key in (
+                        "qualified_operation_count", "new_count", "update_count", "skip_count")))
+                    self.assertEqual(count, len(preview["row_digests"]))
+                    image = project_manual_panel_image(source, qualified, panel, manifest_id)
+                    noop = project_manual_panel_preview(image, qualified, panel, manifest_id)
+                    self.assertEqual((0, 0, count), tuple(noop[key] for key in (
+                        "new_count", "update_count", "skip_count")))
+                self.assertEqual(source, self.template.read_bytes())
+                self.assertEqual(before_generations, tuple(generation_root.iterdir()))
+                return
             if source_identity_probe:
                 from monitor.issue_tracker_stage_l_consumer import (
                     read_prod_stage_l_panel_source_files,

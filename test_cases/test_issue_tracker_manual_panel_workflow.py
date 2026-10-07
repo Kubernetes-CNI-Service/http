@@ -66,6 +66,24 @@ def full_qualified():
 
 
 class ManualPanelWorkflowTests(unittest.TestCase):
+    def test_each_panel_preview_projects_real_workbook_and_preserves_other_sheets(self):
+        from monitor.issue_tracker_local_workbook_commit import (
+            project_manual_panel_image, project_manual_panel_preview,
+        )
+        source = fake_workbook(switch_rows=0, reserved_switch_rows=2)
+        for panel in PANELS:
+            with self.subTest(panel=panel):
+                _, manifest_id = self._freeze(panel)
+                detail = project_manual_panel_preview(source, self.qualified, panel, manifest_id)
+                self.assertEqual((1, 1, 0, 1, 1), tuple(detail[key] for key in (
+                    "qualified_operation_count", "new_count", "update_count", "skip_count",
+                    "whitelist_skip_count")))
+                self.assertEqual(1, len(detail["row_digests"]))
+                image = project_manual_panel_image(source, self.qualified, panel, manifest_id)
+                noop = project_manual_panel_preview(image, self.qualified, panel, manifest_id)
+                self.assertEqual((0, 0, 2), tuple(noop[key] for key in (
+                    "new_count", "update_count", "skip_count")))
+
     def setUp(self):
         self.qualified = full_qualified()
         self.metadata = {
