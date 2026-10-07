@@ -905,8 +905,16 @@ COMPLETE、APPLIED、新鲜准入或 UNKNOWN 清除。未安装；真机卡 NOT 
 显式身份/Status 列与 GRID rowCount/columnCount 在同一个 GET 返回；仅容量 3..5002
 接受并完整覆盖到实际末行，溢出、缺 grid、错位和部分响应 HOLD，不分页、不截断。
 全部原始 A 列 NV ID（含 Closed 和无关活动键）参与最大值观察；两张 Cabling 取各自
-完整读的最大值，但没有分配或持久预留。真实 TLS 全键读 → 精确行矩形 → 字面 L-only
+完整读的最大值和原始 ID 集合，但本读取器没有分配或持久预留。真实 TLS 全键读 → 精确行矩形 → 字面 L-only
 encoder 验证既有线上 ID 不重写；仍不是新鲜准入、CAS、模板权威或发送许可。
+
+`test_cases.test_req7_nv_reservation` 将两张 Cabling 固定完整容量读取、原始 enrollment、
+实际 spreadsheet owner 和 C17 共享分配器串联，Closed／无关行 ID 参与最高值，
+下一 ID 严格高于两表；没有种子、跨表重复或编号耗尽时拒绝且不创建图像。
+ETH/IB RAW、原绑定和预留记录的十个图像屏障完成后才写 INITIALIZED；冷进程
+重新解码原像并保持同一编号，UNKNOWN 后不换号，既有全局 journal 阻止新预留。
+这是未安装的单个 pending 单元保守预留，不是完整跨单元结算、行容量／metadata
+预留、新鲜准入、来源鉴别、COMPLETE 或发送许可；真机卡 NOT RUN。
 
 `test_cases.test_req7_history_preread_journal` 在实际 spreadsheet owner 与已初始化
 且计数为 0 的全局 action/wire journal 内保存原始全尾响应、容量与

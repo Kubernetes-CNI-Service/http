@@ -25,6 +25,7 @@ SCRIPTS = {
     "monitor/issue_tracker_enrollment_journal.py": "test_cases.test_req7_enrollment_journal",
     "monitor/issue_tracker_history_preread_journal.py": "test_cases.test_req7_history_preread_journal",
     "monitor/issue_tracker_remote_history_match.py": "test_cases.test_req7_remote_history_match",
+    "monitor/issue_tracker_nv_reservation.py": "test_cases.test_req7_nv_reservation",
 }
 
 

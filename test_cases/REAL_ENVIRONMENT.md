@@ -2184,6 +2184,14 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 步骤与独立预期：完整 HTTP/REST JSON 同时匹配 INVALID_ARGUMENT/FAILED_PRECONDITION=400、PERMISSION_DENIED=403、NOT_FOUND=404 才作为明确拒绝；REST JSON code 是 HTTP 数字，不是 grpc code。断流、超时、401、429、5xx、非有限值、重复字段或不一致结果均 UNKNOWN。先前任何 UNKNOWN 必须跨全六次 durable 尝试保留，后续拒绝或成功 ACK 不自行解除；只有完整 journal、双 enrollment、History 与 fence 的相关证明才能解决。
 - 证据与清理：保留脱敏命令／退出码、当前 HEAD/tree/manifest/Python/SSL/CA、前后 stat/inode/大小/SHA、完整 END 与物理顺序、不可变发送字节摘要、原生同连接与 framing/截止期见证，以及跨重启的全尝试计数。清理只恢复授权隔离副本；不更改真实表、不移除未知 fence/预留、不向外部 PID 发信号、不打印错误正文或 token。缺实际相关证明保持 NOT RUN，不授予发布许可。
 
+## TC-REAL-REQ7-NV-RESERVATION-001 — 两张 Cabling 的共享持久编号
+
+- Case ID：`TC-REAL-REQ7-NV-RESERVATION-001`；类型：real-environment / durable transaction；对应 C-17/C-19。状态：**NOT RUN / REAL_ENV REQUIRED**。`monitor/issue_tracker_nv_reservation.py` 未安装；本地 direct、真实私有 TLS 双读取和冷进程重读只验证保守 pending 单元预留，不是 COMPLETE、来源鉴别、新鲜准入或发送权限。
+- 前置条件、权限：另获 owner 精确 Stage O 隔离副本与预置私有 root state 授权；完整模板、原始 enrollment、固定读取器、真实 spreadsheet owner、受审 launcher 和跨单元结算须先闭合；当前不会创建真实目录、凭据或远端数据。两份响应必须绑定原始表 ID、同一 spreadsheet、完整容量及原始 A 列，含 Closed 和无关活动行。
+- 步骤与独立预期：保留两份完整原始响应和 immutable generation/publish/目标表/活动键；下一 NV 严格高于两表原始最大值，模板下一号为 NV30017；原有 ID 不改写。十个图像持久屏障全部完成后才能写 INITIALIZED；模拟每个屏障失败、UNKNOWN、冷启动、改变绑定、跨表重复、空种子与 NV99999 耗尽，分别要求 HOLD／保留原号，不回填、重分配或清除。既有 global journal（包括 unattempted/partial）保守阻止新预留；未实现的跨单元结算不冒称通过。
+- 证据：精确 HEAD/tree/dirty/diff/manifest/Python/平台、执行命令与退出码、前后 stat/inode/大小/SHA256、完整 END 与物理顺序、两份 RAW 摘要、实际 owner/nonce 原绑定、每个屏障、冷进程和 UNKNOWN 原编号见证；不输出凭据或私有业务正文。
+- 清理与风险：只恢复另行授权的隔离副本，保留所有 UNKNOWN 原像／预留／fence；不删除真实 state、不向外部 PID 发信号、不安装或发布。真实断电、卷回滚、在线并发编辑与认证来源保持 NOT RUN。
+
 ## TC-REAL-REQ7-DURABLE-ATTEMPT-JOURNAL-001 — 意图先落盘与跨重启总计数
 
 - Case ID：`TC-REAL-REQ7-DURABLE-ATTEMPT-JOURNAL-001`；类型：real-environment / durable transaction；对应 C-6/C-14/C-19。状态：**NOT RUN / REAL_ENV REQUIRED**。`monitor/issue_tracker_attempt_journal.py` 是未安装的保守本地证据库；direct 与实际 C-6 owner → literal encoder → 意图 journal → 后续拒绝观察，以及真实私有子进程退出／重启 workflow，不证明实际断电或六次真实网络尝试上界。

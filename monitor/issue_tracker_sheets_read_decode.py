@@ -51,6 +51,7 @@ class ObservedActivitySheet:
     row_count: int
     maximum_nv_id: object
     source_sha256: str
+    nv_ids: tuple = field(repr=False)
 
 
 @dataclass(frozen=True)
@@ -277,7 +278,8 @@ def _classify_activity(observed, geometry, activity_key):
         if len(active) > 1: raise OnlineActivityConflict()
         first = min(key[0] for key in geometry); last = max(value[0] for value in geometry.values())
         result = (ObservedActivityWindow(observed.sheet_id, title, activity_key, tuple(active), tuple(closed),
-                                        first, last, observed.source_sha256), max((int(value[2:]) for value in seen_ids), default=None))
+                                        first, last, observed.source_sha256), max((int(value[2:]) for value in seen_ids), default=None),
+                  tuple(sorted(seen_ids)))
     except OnlineActivityConflict:
         conflict = True
     except Exception:
@@ -330,9 +332,9 @@ def discover_activity_sheet(plan, response, *, sheet_id, activity_key):
             raise SheetsDecodeHold()
         geometry = {key: (capacity['rowCount'] - 1, end) for key, (_last, end) in full_geometry.items()}
         cells = _decode_grid_cells(sheet['data'], geometry)
-        window, maximum = _classify_activity(ObservedSheetsGrid(sheet_id, title, cells, digest), geometry, activity_key)
+        window, maximum, identifiers = _classify_activity(ObservedSheetsGrid(sheet_id, title, cells, digest), geometry, activity_key)
         result = ObservedActivitySheet(sheet_id, title, activity_key, window.active_rows, window.closed_rows,
-            window.first_row_index, window.last_row_index, capacity['rowCount'], maximum, digest)
+            window.first_row_index, window.last_row_index, capacity['rowCount'], maximum, digest, identifiers)
     except OnlineActivityConflict: conflict = True
     except Exception: failed = True
     if conflict: raise OnlineActivityConflict()

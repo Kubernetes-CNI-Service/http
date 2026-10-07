@@ -59,6 +59,7 @@ REQ7_CONTROLLED_TRANSPORT_LIBRARIES = frozenset({
     "monitor/issue_tracker_enrollment_journal.py",
     "monitor/issue_tracker_history_preread_journal.py",
     "monitor/issue_tracker_remote_history_match.py",
+    "monitor/issue_tracker_nv_reservation.py",
 })
 
 RUNTIME_PATTERNS = (
@@ -580,6 +581,12 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
                 inputs = "ACTIVE 本地 writer token、单元标识和不超过 1 MiB 的冻结字节；它们不是合格 Sheets batch 或发送能力。"
                 recovery = "计数耗尽、部分／外来文件、字节变化或 fsync 失败均 HOLD，保留证据；无清理、重置或新单元接管。"
                 example = "python3 -B -m unittest -v test_cases.test_req7_attempt_journal  # 仅开发测试"
+            elif relative == "monitor/issue_tracker_nv_reservation.py":
+                scenario = "实际全表 owner 与原始 enrollment 内持久预留两张 Cabling 的共享 NV 编号；Closed／无关行参与最大值，原始编号不重写。"
+                inputs = "两份固定完整容量原始只读响应、同一 generation/publish/目标表和活动键；不接收调用方计数器、种子、路径或替换编号。"
+                outputs = "十个图像屏障后保存原 RAW／绑定／编号及 INITIALIZED，冷进程保持原预留；不是 COMPLETE 或在线发送许可。"
+                recovery = "空种子、重复、容量耗尽、部分屏障、原绑定漂移 HOLD；全局 journal 阻止新预留，UNKNOWN 不重分配；未安装，结算与实际 launcher 仍需集成。"
+                example = "python3 -B -m unittest -v test_cases.test_req7_nv_reservation  # 仅开发测试"
             elif relative == "monitor/issue_tracker_remote_history_match.py":
                 scenario = "实际全局 journal、发送前完整原像、两份原始 nonce、精确永久 fence、全部实际业务及审计 History 同时对账；typed 旧前缀与精确新尾保持不变。"
                 inputs = "ACTIVE 全表 owner、原 action/wire/nonce、固定完整 metadata 与全尾回应；结构对象不证明受保护来源、新鲜准入或发送许可。"
