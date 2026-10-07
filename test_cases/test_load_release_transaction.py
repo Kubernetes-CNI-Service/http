@@ -1190,10 +1190,11 @@ class ReleaseTransactionTests(unittest.TestCase):
                                                   ztp_disabled=False, seed_q_publication=False,
                                                   publication_phase="published", partial_runtime=False,
                                                   q_local=False, original_a_policy=None, original_a_images=False,
-                                                  q_created=False, dhcp=False, dhcp_metadata=False, prefix=False):
+                                                  q_created=False, dhcp=False, dhcp_metadata=False, prefix=False,
+                                                  managed_key=False):
         state, context, guard = self._prepare_q_manifest_publication(seed_q_publication=seed_q_publication,
             q_local=q_local, original_a_policy=original_a_policy, original_a_images=original_a_images,
-            q_created=q_created, prefix=prefix)
+            q_created=q_created, prefix=prefix, managed_key=managed_key)
         q = state[1]
         for name, source in (("01-global.yaml", self.inputs.global_file),
                              ("02-devices_config.csv", self.inputs.devices_file),
@@ -1822,6 +1823,95 @@ class ReleaseTransactionTests(unittest.TestCase):
                 (self.ztp / "ztp-bootstrap_oob.sh").read_bytes(), journal.read_bytes(),
                 unknown_leaf()))
         state[-1].start.assert_not_called()
+
+    def test_committed_q_group_managed_keys_share_one_original_restore_stage(self):
+        state, context, guard, token, _inputs = self._prepare_published_q_for_stopped_preflight(
+            managed_key=True, partial_runtime=True)
+        journal, q = state[-3], state[1]
+        original_wal = (journal.lstat().st_ino, journal.read_bytes())
+        sources = {context.project / name: (context.project / name).read_bytes()
+                   for name in ("laptop.pub", "mgmt-server.pub")}
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "_runtime_service_action") as service:
+            result = LOAD.restore_setup_switch_a_disk(q, guard=guard, confirmed=True)
+            self.assertEqual("restored-p-a-group-stopped-wal-retained", result)
+            marker = journal.parent / ".setup-switch-a-restore.json"
+            plan = json.loads(marker.read_bytes())
+            own = {}
+            for name in ("laptop.pub", "mgmt-server.pub"):
+                path = (self.ztp / "config/publickey" / name).parent.resolve() / name
+                row = plan["runtime"][str(path)]
+                self.assertNotIn(str(path), plan["setup"], "one name must not acquire two restore owners")
+                self.assertFalse(os.path.lexists(row["stage"]["path"]))
+                self.assertEqual(row["before"]["target"], os.readlink(path))
+                self.assertEqual(row["stage"]["file"]["identity"][:8],
+                                 list(LOAD._dhcp_a_preimage_receipt_identity(path.lstat()))[:8])
+                own[path] = (path.lstat().st_ino, os.readlink(path))
+            frozen_plan = (marker.lstat().st_ino, marker.read_bytes())
+            LOAD.close_setup_switch_publication_bundle(token)
+            self.assertEqual(result, LOAD.restore_setup_switch_a_disk(q, guard=guard, confirmed=True))
+            self.assertEqual(own, {path: (path.lstat().st_ino, os.readlink(path)) for path in own})
+            self.assertEqual(original_wal, (journal.lstat().st_ino, journal.read_bytes()))
+            self.assertEqual(frozen_plan, (marker.lstat().st_ino, marker.read_bytes()))
+            self.assertEqual(sources, {path: path.read_bytes() for path in sources})
+            service.assert_not_called()
+
+    def test_committed_q_group_managed_key_conflicting_preimages_hold_before_staging(self):
+        state, _context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(managed_key=True)
+        journal, q = state[-3], state[1]
+        envelope = json.loads(journal.read_bytes())
+        row = next(row for row in envelope["body"]["links"] if row["path"].endswith("/laptop.pub"))
+        row["before"] = os.path.relpath(state[0] / "mgmt-server.pub", Path(row["path"]).parent)
+        payload = LOAD._setup_switch_canonical_payload(envelope["body"])
+        envelope["sha256"] = hashlib.sha256(payload).hexdigest()
+        journal.write_bytes(LOAD._setup_switch_canonical_payload(envelope) + b"\n")
+        frozen = (journal.read_bytes(), state[7].read_bytes(), os.readlink(state[2]),
+                  (q / "99-output-ztp/current-release.json").read_bytes())
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with self.assertRaisesRegex(LOAD.LoadError, "public key.*(overlap|preimage).*HOLD"):
+                LOAD.restore_setup_switch_a_disk(q, guard=guard, confirmed=True)
+        self.assertEqual(frozen, (journal.read_bytes(), state[7].read_bytes(), os.readlink(state[2]),
+                                 (q / "99-output-ztp/current-release.json").read_bytes()))
+        self.assertFalse(os.path.lexists(journal.parent / ".setup-switch-a-restore.json"))
+        self.assertFalse(list(self.root.rglob(".r22-a-*")), "contradictory originals cannot license any stage")
+
+    def test_committed_q_group_managed_key_sync_failure_reenters_own_stage(self):
+        state, _context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(managed_key=True)
+        path = (self.ztp / "config/publickey/laptop.pub").parent.resolve() / "laptop.pub"
+        body = json.loads(state[-3].read_bytes())["body"]
+        target = next(row["before"] for row in body["links"] if row["path"] == str(path))
+        original_sync, reached = LOAD._fsync_parent_directory, []
+        def fail_after_key_rename(parent):
+            if Path(parent) == path.parent and os.readlink(path) == target and not reached:
+                reached.append(path.lstat().st_ino)
+                raise LOAD.LoadError("independent managed key directory sync failure")
+            return original_sync(parent)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with mock.patch.object(LOAD, "_fsync_parent_directory", side_effect=fail_after_key_rename):
+                with self.assertRaisesRegex(LOAD.LoadError, "independent managed key directory sync failure"):
+                    LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True)
+            self.assertEqual(1, len(reached))
+            self.assertEqual("restored-p-a-group-stopped-wal-retained",
+                             LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True))
+            self.assertEqual(reached[0], path.lstat().st_ino)
+
+    def test_committed_q_group_rejects_same_target_restored_managed_key_owner(self):
+        state, _context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(managed_key=True)
+        path = self.ztp / "config/publickey/laptop.pub"
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True)
+            marker = state[-3].parent / ".setup-switch-a-restore.json"
+            original = (state[-3].read_bytes(), marker.read_bytes(), state[7].read_bytes())
+            target = os.readlink(path)
+            held = path.with_name("independent-original-restored-key")
+            path.rename(held)
+            path.symlink_to(target)
+            self.assertNotEqual(held.lstat().st_ino, path.lstat().st_ino)
+            foreign = path.lstat().st_ino
+            with self.assertRaisesRegex(LOAD.LoadError, "runtime.*owner.*HOLD"):
+                LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True)
+            self.assertEqual(foreign, path.lstat().st_ino)
+            self.assertEqual(original, (state[-3].read_bytes(), marker.read_bytes(), state[7].read_bytes()))
 
     def test_committed_q_group_restore_missing_q_preimages_reenters_without_retirement(self):
         self._committed_q_group_restore(existing=False)
@@ -2696,9 +2786,11 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertEqual(source.read_bytes(), held.read_bytes())
 
     def _prepare_q_manifest_publication(self, *, seed_q_publication=False, q_local=False,
-                                        original_a_policy=None, original_a_images=False, q_created=False, prefix=False):
+                                        original_a_policy=None, original_a_images=False, q_created=False, prefix=False,
+                                        managed_key=False):
         state, context = self._prepare_persisted_a_runtime_switch(seed_q_publication=seed_q_publication,
-            original_upgrade_policy=original_a_policy, original_images=original_a_images, prefix=prefix)
+            original_upgrade_policy=original_a_policy, original_images=original_a_images, prefix=prefix,
+            managed_key=managed_key)
         journal, descriptor, backend = state[-3:]
         guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True, runtime_backend=backend)
         if q_local:
@@ -2710,6 +2802,13 @@ class ReleaseTransactionTests(unittest.TestCase):
         state[2].unlink()
         state[2].symlink_to(os.path.relpath(state[5], state[2].parent))
         state[3].unlink()
+        key_links = []
+        if managed_key:
+            for name in ("laptop.pub", "mgmt-server.pub"):
+                link = self.ztp / "config/publickey" / name
+                link.unlink()
+                link.symlink_to(os.path.relpath(state[1] / name, link.parent))
+                key_links.append(link)
         q_link = self.ztp / "config/independent-q-only-parent/operator.pub"
         if q_created:
             target = state[1] / "independent-q-operator.pub"
@@ -2722,6 +2821,7 @@ class ReleaseTransactionTests(unittest.TestCase):
                 q_link.symlink_to(os.path.relpath(target, q_link.parent))
         manifest = ("# setup manifest — proj: " + str(state[1].resolve()) + "\n"
                     + str(state[2]) + "\n"
+                    + "".join(str(path) + "\n" for path in key_links)
                     + (str(q_link) + "\n" if q_created else "")
                     + (str(self.ztp / "image/cumulus/cumulus-linux-5.12.0-mlx-amd64.bin") + "\n"
                        if original_a_images else "")).encode()
@@ -4577,7 +4677,7 @@ class ReleaseTransactionTests(unittest.TestCase):
             source.write_bytes(payload)
             leaf = self.ztp / "config/publickey" / name
             leaf.unlink()
-            leaf.symlink_to(os.path.relpath(source, leaf.parent))
+            leaf.symlink_to(os.path.relpath(source.resolve(), leaf.parent.resolve()))
         return generation, LOAD.prepare_runtime_rollback_receipt(self.project, generation)
 
     def test_runtime_receipt_preserves_managed_project_key_link_on_restore(self) -> None:
@@ -6251,9 +6351,10 @@ class ReleaseTransactionTests(unittest.TestCase):
     def _prepare_persisted_a_runtime_switch(self, *, managed_key=False, prefix=False,
                                           original_upgrade_policy=None, qualified_inputs=False,
                                           seed_q_publication=False, original_images=False):
-        if prefix:
+        if prefix or managed_key:
             # A marker is lexical as well as physical authority. Use the same
-            # canonical private deployment paths as the real cold LOAD child.
+            # canonical private deployment paths as the real cold LOAD child;
+            # managed key WAL row names must use those paths too.
             self.root, self.ztp = self.root.resolve(), self.ztp.resolve()
             namespace = mock.patch.object(LOAD, "ZTP_DIR", self.ztp)
             namespace.start()
@@ -6297,11 +6398,15 @@ class ReleaseTransactionTests(unittest.TestCase):
             _parent, generation, receipt = self._publish_a_with_runtime_rollback_receipt(
                 original_upgrade_policy=original_upgrade_policy)
         extra_images = ({published: source} if original_images else {})
-        state = self._prepare_cross_project_setup_crash(extra_old_links=extra_images)
+        extra_keys = ({self.ztp / "config/publickey" / name: self.project / name
+                       for name in ("laptop.pub", "mgmt-server.pub")} if managed_key else {})
+        state = self._prepare_cross_project_setup_crash(extra_old_links={**extra_images, **extra_keys})
         p, q, common = state[:3]
         journal, descriptor, backend = state[-3:]
         # Replace only this fixture's untouched legacy WAL, before any Q write.
         journal.unlink()
+        for link in extra_keys:
+            (q / link.name).write_bytes(("independent Q key: " + link.name + "\n").encode())
         if seed_q_publication:
             parent, report, prior_generation = private_publication_candidates(LOAD, q)
             LOAD.commit_prepared_release(parent)
@@ -6320,7 +6425,8 @@ class ReleaseTransactionTests(unittest.TestCase):
         )
         with mock.patch.object(LOAD, "active_managed_services", return_value=()):
             LOAD.prepare_setup_switch_journal(
-                p, q, expected_new_links={common: state[5], **extra_images},
+                p, q, expected_new_links={common: state[5], **extra_images,
+                                         **{path: q / path.name for path in extra_keys}},
                 deployment_lock_descriptor=descriptor, services_quiesced=True,
                 runtime_backend=backend, runtime_rollback_context=context,
             )

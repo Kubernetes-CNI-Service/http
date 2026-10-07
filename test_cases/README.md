@@ -451,6 +451,14 @@ flat runtime 已可能先被改写。direct 与真实 SETUP 强杀→新 LOAD �
 key 暂存的零 P/flat 写入，以及 runtime 后核验后晚到 key 暂存阻止 WAL 退休；正常
 managed key 恢复仍保持链接、原源文件和既存权力换绑断言。这只扩大已验证 receipt 的
 暂存名围栏，不完成 YAML/prefix 全写集、B finalizer、旧 A 健康激活或 root 入口验收。
+已提交 Q group 的真实 managed publickey 同时属于 SETUP 与 runtime 时，只由原
+receipt 的 runtime 行创建并消费一份恢复 stage。先比较独立 WAL/P before、原父与
+Q checkpoint；矛盾在任何 publication/runtime/setup stage 或磁盘补偿前 HOLD。
+SETUP 行委托同一 runtime stage，后续 runtime 恢复为自有 inode 重入，不重新复制。
+真实 SETUP 发布链接/manifest→Q 提交强杀→新 LOAD，以及 key rename 后同步前强杀
+→冷重入、同目标外来恢复 inode 负例覆盖此边界；原 P/Q 源与 WAL/plan 保留。
+Q 自建目录恢复后缺席仍按原创建资格核验，不因查找公钥重复强制创建/解析该目录。
+此磁盘恢复收口不代表真实 key/report 健康鉴定或原 A 服务激活，也不是正式 full proof。
 已提交 Q group 的原 A 未变 prefix 另按首写前 WAL 的父/九字段 owner、原 marker
 payload/raw target/缺席核验；不重建正确原对象，也不收编同内容新 inode。同步前后
 持续核原资格；legacy 缺清单保持缺资格。Q 改写 prefix 的完整候选/冷补偿登记仍待，

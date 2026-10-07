@@ -7252,11 +7252,29 @@ def _setup_switch_compensation_leaf(path):
     return _setup_publication_file(Path(path), executable_ok=True)
 
 
+def _setup_switch_compensation_runtime_records(body):
+    """Original receipt preimages, sharing exactly one stage per physical name."""
+    context = _setup_switch_runtime_context(body)
+    if context is None:
+        return {}
+    receipt = _load_runtime_rollback_receipt(context.project, context.runtime_receipt)
+    shared = body["publication_bundle"]["shared_setup"]["flat_runtime"]
+    records = {ZTP_DIR / name: (record, context.runtime_receipt / "files" / name)
+               for name, record in receipt["frozen_files"].items()}
+    for name in set(receipt["publickeys"]) | set(shared["publickeys"]):
+        records[ZTP_DIR / "config/publickey" / name] = (
+            receipt["publickeys"].get(name, {"state": "missing"}),
+            context.runtime_receipt / "publickeys" / name)
+    return {path.parent.resolve(strict=True) / path.name: row for path, row in records.items()}
+
+
 def _setup_switch_compensation_setup_records(body):
     """Independent P preimages and original registered Q checkpoints only."""
     shared = body["publication_bundle"]["shared_setup"]
     excluded = {row["source"] for row in body.get("comparison_transfers", [])}
     excluded.update(row["path"] for row in body.get("directories", []))
+    runtime = _setup_switch_compensation_runtime_records(body)
+    key_parent = (ZTP_DIR / "config/publickey").resolve(strict=True)
     records = {}
     for row in body["links"]:
         if row["path"] in excluded:
@@ -7267,6 +7285,22 @@ def _setup_switch_compensation_setup_records(body):
             checkpoint = {key: checkpoint[key] for key in ("identity", "target")}
         before = ({"state": "missing"} if row["before"] is None
                   else {"state": "link", "target": row["before"]})
+        # An originally Q-created parent can already be removed on cold
+        # reentry. Only the fixed public-key namespace needs this lookup;
+        # setup_states separately proves authorized parent absence.
+        physical = path.parent.resolve(strict=False) / path.name
+        if physical.parent == key_parent and physical in runtime:
+            record = runtime[physical][0]
+            expected_before = ({"state": "link", "target": record["target"]}
+                               if record["state"] == "link" else record)
+            bound = shared["flat_runtime"]["publickeys"].get(physical.name)
+            expected_checkpoint = (None if bound is None else
+                dict(identity=bound["identity"], target=bound["record"].get("target")))
+            if (before != expected_before or row["parent"] != _setup_switch_link_parent_identity(physical)
+                    or checkpoint != expected_checkpoint
+                    or bound is not None and bound["record"]["state"] != "link"):
+                raise LoadError("public key setup/runtime overlap preimage or checkpoint differs; HOLD")
+            continue  # The runtime row owns this P/Q name; never create a second stage.
         records[str(path)] = dict(before=before, checkpoint=checkpoint, parent=row["parent"])
     records[str(MANIFEST)] = dict(before={"state": "file", "mode": body["manifest_mode"],
         "sha256": body["manifest_sha256"], "payload": body["manifest"]},
@@ -7411,6 +7445,9 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
                 {Path(name)
                  for name in _setup_switch_compensation_setup_records(body)} if not restore_publication else ()))
         shared_authority()
+        # Reject contradictory overlapping originals before creating even a
+        # publication stage. No cold plan may silently deduplicate a conflict.
+        setup_records = _setup_switch_compensation_setup_records(body)
         if not os.path.lexists(marker):
             if not restore_publication:
                 raise LoadError("A group restoration requires original Q compensation plan; HOLD")
@@ -7455,15 +7492,7 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
                     plan["rows"][key] = dict(checkpoint=checkpoint, stage=stage)
                 context = _setup_switch_runtime_context(body)
                 if context is not None:
-                    receipt = _load_runtime_rollback_receipt(context.project, context.runtime_receipt)
-                    shared_runtime = bundle["shared_setup"]["flat_runtime"]
-                    records = {ZTP_DIR / name: (record, context.runtime_receipt / "files" / name)
-                               for name, record in receipt["frozen_files"].items()}
-                    key_root = ZTP_DIR / "config/publickey"
-                    for name in set(receipt["publickeys"]) | set(shared_runtime["publickeys"]):
-                        records[key_root / name] = (receipt["publickeys"].get(name, {"state": "missing"}),
-                                                   context.runtime_receipt / "publickeys" / name)
-                    records = {path.parent.resolve(strict=True) / path.name: value for path, value in records.items()}
+                    records = _setup_switch_compensation_runtime_records(body)
                     for directory in {path.parent for path in records}:
                         _require_no_pending_setup_stage(directory / ".a-plan-probe", ".r22-a-runtime-", "A runtime")
                     for destination, (record, source) in sorted(records.items()):
@@ -7904,6 +7933,14 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
         def restore_setup_leaf(path):
             path = Path(path)
             require_restored_publication()
+            physical = path.parent.resolve(strict=False) / path.name
+            runtime_row = plan["runtime"].get(str(physical))
+            if physical.parent == (ZTP_DIR / "config/publickey").resolve(strict=True) and runtime_row is not None:
+                # setup_records validated the independent WAL/receipt overlap
+                # before any staging. Consume and recheck that same runtime
+                # inode; the subsequent receipt restore is an owned no-op.
+                restore_runtime_leaf(physical, runtime_row["before"], None)
+                return
             row = plan["setup"].get(str(path))
             if row is None:
                 raise LoadError("A setup restore is not the original planned leaf; HOLD")

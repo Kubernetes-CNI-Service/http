@@ -1634,6 +1634,15 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-R22-GENERATION-INPUT-ABA-001 — 跨进程输入换代与多输出一致性
 
+- 2026-10-08 managed publickey 重叠恢复边界仍 OPEN：仅在本卡可丢弃隔离 VM、
+  原 P/Q 可恢复快照、停服/排他锁/其他写者静默条件下，见证 SETUP key/link manifest
+  与原 runtime receipt 同一物理名称只消费一份原 stage；记录原 P before/source、
+  Q checkpoint、parent/inode/ctime/target、WAL/plan 和同步顺序。矛盾须在首补偿前
+  HOLD；key rename 后同步前强杀→新 LOAD 保持原 stage inode，同目标外来 inode
+  不得认领；Q 自建父合法缺席不得重建。清理只恢复人工确认的本卡快照，保留未知
+  对象/原凭据，不在 live 注入。私有 direct/真实多脚本磁盘模拟不证明真实 key/report
+  健康鉴定、原 A 安全激活、root/Linux/断电/C2 或 DEV ACK，本卡仍 OPEN。
+
 本地原 A 未变 prefix 已增加首写前 marker/链接父与九字段 owner、原内容/缺席及
 group 同步前后核验；正确对象不重建，同内容换绑、Boolean/未知字段/legacy 缺
 资格拒绝。独立 direct 与真实 LOAD→SETUP→强杀→新 LOAD 是本地回归，不是本卡

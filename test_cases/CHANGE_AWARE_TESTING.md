@@ -1,5 +1,46 @@
 # 脚本变更影响测试
 
+## 2026-10-08 R22 managed publickey 的 SETUP/runtime 重叠恢复
+
+基于 `ee5b2e7`。独立 direct 与真实 SETUP 原写者→Q 提交强杀→新 LOAD 揭示：
+同一发布 key 被 SETUP 和 runtime 各创建一份恢复 stage；消费前者后，后者把它
+当作外来 owner，合法恢复失败。原 P/Q 目标、source 和断言不是从实现生成。
+前两轮私有 macOS 路径别名夹具错误日志保留；修正原源/父与 WAL 名称为物理路径，
+不放宽链接 source 归属。有效第三轮 11 tests / 4 FAIL / 3 ERROR / 47.742s / exit1，
+完整 `outputs/test-diagnostics/r22-managed-key-overlap-red3.log`，inode162804357 /
+size152140 / SHA256 `37b545c4343af914f8f039d81e66dae1c0b83755c9f387b0e79c5841299d8d68`；
+物理 Ran234→FAILED236→actual267→冻结一致268→END270=1。
+
+改为一份原 receipt runtime stage；独立 WAL 的 P before、父、Q checkpoint 必须
+匹配才可去重，矛盾在任何 stage/plan/补偿前 HOLD。SETUP 委托同一 stage，恢复后
+同目标新 inode 拒绝；rename 后父同步失败或真实强杀，新进程继续原消耗 inode。
+原 11 项组合 11 OK / 138.394s / exit0，完整 `r22-managed-key-overlap-green.log`，
+inode162813333 / size135059 / SHA256
+`16a4f9b282494c2e704dbb39717eeb7d78d022f80178b872dbc5c3d0a5bb0b2b`；
+物理 Ran18→OK20→actual59→冻结一致60→END62=0。
+
+旧真实 image/Q-created 冷重入组合另发现新增 strict 路径归一化错误要求已合法删除
+的 Q 父仍存在；原 5 项 1 FAIL / 40.732s / exit1，完整
+`r22-managed-key-removed-q-parent-regression.log`（inode162824570 / size135796 / SHA256
+`e3952ca9b36854e662d3b2292e0540fe0ed870f46470197829d5e10bd73b6630`）。
+仅固定 publickey 父需公钥资格；其它缺席父继续由原 created-directory 状态核验。
+修正后的 managed key/direct+真实 writer 强杀+原 prefix+原 A image/Q 自建目录+旧
+precommit managed key 组合 13 OK / 174.452s / exit0，完整
+`r22-managed-key-overlap-boundaries-green.log`，inode162828628 / size136216 / SHA256
+`92b9ff861c249b5bcc837dd7534884eab0863b9837bfeb1f8f5f9a5fbc842c1d`；
+物理 Ran20→OK22→actual66→冻结一致67→END69=0。以上完整日志读前后 stat/inode
+一致、实际退出已核。原时限、恢复/零服务/原凭据保留断言不变；模块与正式
+related/full/check 另记，ledger 不手改。
+三完整模块与 30 个真实 workflow 回归 668 OK / 961.275s / 实际 exit0，完整
+`outputs/test-diagnostics/r22-managed-key-overlap-module-regression.log`，inode162842781 /
+size369956 / SHA256 `6177bc6f47f26e31e4ce99d681373c294f81ba6ad29b514e4575fc25c4801607`。
+105011-byte 旧前缀 SHA256
+`14c98b8656b1b4d93bb98c451c2487e9c09305e56af966ea7b519d585bbc4827` 不变；
+物理 Ran1925→OK1927→actual1981→冻结一致1982→DIAGNOSTIC_END1984=0，
+完整读取前后 stat/inode 一致，原 exec 已退出。此模块回归不是正式 full proof；
+当前 ledger 未改，Q 改写 prefix 与原 A 显式健康激活仍需继续落地。
+这不是原 A 真实 key/report 健康激活、root/Linux/断电或 R22 整体验收。
+
 ## 2026-10-08 R22 原 A prefix 未变叶子资格
 
 基于 `ff0832a`。独立 direct 和真实 LOAD→SETUP→Q 提交强杀→新 LOAD 证明：

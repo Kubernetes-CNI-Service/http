@@ -5015,18 +5015,28 @@ finally:
     def test_real_setup_committed_q_legacy_dhcp_wal_cannot_mint_b_candidate_qualification(self):
         self._real_setup_committed_q_group_restore(dhcp=True, dhcp_legacy_fault=True)
 
+    def test_real_setup_committed_q_group_managed_key_overlap_uses_one_original_stage(self):
+        self._real_setup_committed_q_group_restore(managed_key=True)
+
+    def test_real_setup_committed_q_group_managed_key_rename_death_cold_reenters(self):
+        self._real_setup_committed_q_group_restore(managed_key=True, managed_key_death=True)
+
+    def test_real_setup_committed_q_group_rejects_same_target_restored_managed_key(self):
+        self._real_setup_committed_q_group_restore(managed_key=True, managed_key_fault=True)
+
     def _real_setup_committed_q_group_restore(self, *, dhcp=False, runtime_death=False,
                                              setup_death=False, foreign_setup=False,
                                              q_local=False, q_fault=False, a_fault=None, a_image_fault=False,
                                              a_image=False, dhcp_backup_fault=False, dhcp_live_fault=False,
                                              dhcp_death=False, dhcp_metadata=False, dhcp_b_fault=False,
-                                             dhcp_legacy_fault=False, prefix=False, prefix_fault=False):
+                                             dhcp_legacy_fault=False, prefix=False, prefix_fault=False,
+                                             managed_key=False, managed_key_death=False, managed_key_fault=False):
         fixture = RELEASE_FIXTURE.ReleaseTransactionTests()
         fixture.setUp()
         try:
             state, context = fixture._prepare_persisted_a_runtime_switch(
                 original_upgrade_policy="enabled" if a_image_fault or a_image else None,
-                original_images=a_image_fault or a_image, prefix=prefix or prefix_fault)
+                original_images=a_image_fault or a_image, prefix=prefix or prefix_fault, managed_key=managed_key)
             original_prefix = {path: (path.lstat().st_ino, path.lstat().st_ctime_ns)
                 for path in (fixture.root / ".ztp-prefix-publication.json", fixture.root / "r22-prefix")
                 if prefix or prefix_fault}
@@ -5079,6 +5089,14 @@ try:
         load.service_runtime_backend = lambda: backend
         setup._SETUP_SWITCH_WAL_CONTEXT = (vars(load), fd)
         setup._register_setup_switch_link_before_write(str(common), str(q / '01-global.yaml'))
+        key_links = []
+        if len(sys.argv) > 12 and sys.argv[12] == 'managed-key':
+            for name in ('laptop.pub', 'mgmt-server.pub'):
+                path = root / 'ztp/config/publickey' / name
+                setup._register_setup_switch_link_before_write(str(path), str(q / name))
+                path.unlink()
+                path.symlink_to(os.path.relpath(q / name, path.parent))
+                key_links.append(path)
         image_link = common.parents[3] / 'image/cumulus/cumulus-linux-5.12.0-mlx-amd64.bin'
         if len(sys.argv) > 9 and sys.argv[9] == 'a-image':
             setup._register_setup_switch_link_before_write(str(image_link), str(image_link.parents[3] / 'image' / image_link.name))
@@ -5100,6 +5118,7 @@ try:
                 path.unlink()
         (root / 'ztp/ztp-bootstrap_oob.sh').write_bytes(b'independent installed B runtime\n')
         manifest = ('# setup manifest — proj: ' + str(q) + '\n' + str(common) + '\n'
+                    + ''.join(str(path) + '\n' for path in key_links)
                     + (str(image_link) + '\n' if len(sys.argv) > 9 and sys.argv[9] == 'a-image' else '')
                     + (str(q_only_link) + '\n' if len(sys.argv) > 10 and sys.argv[10] == 'q-created' else '')).encode()
         load.register_setup_switch_manifest(root / 'ztp/.setup-switch-journal.json', manifest,
@@ -5140,6 +5159,22 @@ try:
                 os.kill(os.getpid(), signal.SIGKILL)
             return original_sync(path)
         load._fsync_parent_directory = kill_after_original_dhcp_stage_replace
+    if sys.argv[5] == 'kill-managed-key':
+        original_sync = load._fsync_parent_directory
+        def kill_after_original_managed_key_replace(path):
+            leaf = root / 'ztp/config/publickey/laptop.pub'
+            if Path(path) == leaf.parent and os.readlink(leaf) == sys.argv[7]:
+                os.kill(os.getpid(), signal.SIGKILL)
+            return original_sync(path)
+        load._fsync_parent_directory = kill_after_original_managed_key_replace
+    if sys.argv[5] == 'foreign-managed-key':
+        try:
+            load.restore_setup_switch_a_disk(q, guard=guard, confirmed=True)
+        except load.LoadError as exc:
+            assert 'runtime' in str(exc) and 'owner' in str(exc) and 'HOLD' in str(exc), str(exc)
+            print('R22_FOREIGN_RESTORED_MANAGED_KEY_REJECTED')
+            sys.exit(0)
+        raise AssertionError('same-target new restored key owner must not be adopted')
     if sys.argv[5] == 'kill-setup':
         original_sync = load._fsync_parent_directory
         def kill_after_original_p_link_replace(path):
@@ -5257,10 +5292,18 @@ finally:
             writer = subprocess.run(argv + ["writer", shape, original_p_target, "q-local" if q_local else "no-q-local",
                                            "a-image" if a_image or a_image_fault else "no-a-image",
                                            "q-created" if a_image else "no-q-created",
-                                           "a-metadata" if dhcp_metadata else "no-a-metadata"],
+                                           "a-metadata" if dhcp_metadata else "no-a-metadata",
+                                           "managed-key" if managed_key else "no-managed-key"],
                                     capture_output=True, text=True, check=False, timeout=30)
             self.assertEqual(-signal.SIGKILL, writer.returncode, writer.stdout + writer.stderr)
             original_wal = (journal.lstat().st_ino, journal.read_bytes())
+            if managed_key_death:
+                leaf = root / "ztp/config/publickey/laptop.pub"
+                target = next(raw for path, raw in context.setup_state.links.items() if path.name == "laptop.pub")
+                dying = subprocess.run(argv + ["kill-managed-key", shape, target], capture_output=True,
+                    text=True, check=False, timeout=30)
+                self.assertEqual(-signal.SIGKILL, dying.returncode, dying.stdout + dying.stderr)
+                own_key = (leaf.lstat().st_ino, os.readlink(leaf))
             if dhcp_b_fault or dhcp_legacy_fault:
                 path, held = root / "private-etc-dhcp/dhcpd.conf", root / "independent-held-installed-B-dhcp"
                 if dhcp_b_fault:
@@ -5355,8 +5398,33 @@ finally:
                 self.assertIn("R22_ORIGINAL_A_IMAGE_STAGE_QUALIFIED", reader.stdout)
             self.assertEqual(context.setup_state.manifest, state[7].read_bytes())
             self.assertEqual(context.setup_state.links, {path: os.readlink(path) for path in context.setup_state.links})
+            if managed_key:
+                plan = json.loads((journal.parent / ".setup-switch-a-restore.json").read_bytes())
+                for name in ("laptop.pub", "mgmt-server.pub"):
+                    leaf = root / "ztp/config/publickey" / name
+                    self.assertNotIn(str(leaf), plan["setup"])
+                    own = plan["runtime"][str(leaf)]["stage"]
+                    self.assertFalse(os.path.lexists(own["path"]))
+                    self.assertEqual(own["file"]["identity"][1], leaf.lstat().st_ino)
+                if managed_key_death:
+                    self.assertEqual(own_key, (leaf.with_name("laptop.pub").lstat().st_ino,
+                                              os.readlink(leaf.with_name("laptop.pub"))))
             marker = journal.parent / ".setup-switch-a-restore.json"
             original_plan = (marker.lstat().st_ino, marker.read_bytes())
+            if managed_key_fault:
+                leaf = root / "ztp/config/publickey/laptop.pub"
+                target = os.readlink(leaf)
+                leaf.rename(leaf.with_name("independent-original-restored-key"))
+                leaf.symlink_to(target)
+                frozen = (leaf.lstat().st_ino, os.readlink(leaf), state[7].read_bytes())
+                rejecting = subprocess.run(argv + ["foreign-managed-key", shape], capture_output=True,
+                    text=True, check=False, timeout=30)
+                self.assertEqual(0, rejecting.returncode, rejecting.stdout + rejecting.stderr)
+                self.assertIn("R22_FOREIGN_RESTORED_MANAGED_KEY_REJECTED", rejecting.stdout)
+                self.assertEqual(frozen, (leaf.lstat().st_ino, os.readlink(leaf), state[7].read_bytes()))
+                self.assertEqual(original_wal, (journal.lstat().st_ino, journal.read_bytes()))
+                self.assertEqual(original_plan, (marker.lstat().st_ino, marker.read_bytes()))
+                return
             if runtime_death or setup_death or dhcp_death:
                 self.assertEqual(before_reader_plan, original_plan)
             if dhcp_live_fault:
