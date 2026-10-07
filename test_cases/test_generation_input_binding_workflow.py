@@ -5024,13 +5024,23 @@ finally:
     def test_real_setup_committed_q_group_rejects_same_target_restored_managed_key(self):
         self._real_setup_committed_q_group_restore(managed_key=True, managed_key_fault=True)
 
+    def test_real_setup_changed_prefix_q_commit_kill_restores_original_a_owners(self):
+        self._real_setup_committed_q_group_restore(prefix=True, prefix_change=True)
+
+    def test_real_setup_changed_prefix_original_marker_rename_death_cold_reenters(self):
+        self._real_setup_committed_q_group_restore(prefix=True, prefix_change=True, prefix_death=True)
+
+    def test_real_setup_changed_nested_prefix_cold_restore_reenters_after_parent_removal(self):
+        self._real_setup_committed_q_group_restore(prefix=True, prefix_change="/q-nested/inner/ztp")
+
     def _real_setup_committed_q_group_restore(self, *, dhcp=False, runtime_death=False,
                                              setup_death=False, foreign_setup=False,
                                              q_local=False, q_fault=False, a_fault=None, a_image_fault=False,
                                              a_image=False, dhcp_backup_fault=False, dhcp_live_fault=False,
                                              dhcp_death=False, dhcp_metadata=False, dhcp_b_fault=False,
                                              dhcp_legacy_fault=False, prefix=False, prefix_fault=False,
-                                             managed_key=False, managed_key_death=False, managed_key_fault=False):
+                                             managed_key=False, managed_key_death=False, managed_key_fault=False,
+                                             prefix_change=False, prefix_death=False):
         fixture = RELEASE_FIXTURE.ReleaseTransactionTests()
         fixture.setUp()
         try:
@@ -5070,6 +5080,10 @@ def forbidden(*a, **kw):
 load.start_services = load.quiesce_services = load.generate_configs = forbidden
 try:
     if sys.argv[5] == 'writer':
+        prefix_change = len(sys.argv) > 13 and sys.argv[13].startswith('/')
+        if prefix_change:
+            settings = load.replace(load.load_global(load.active_project() / '01-global.yaml'), http_root=root, ztp_prefix=sys.argv[13])
+            load.prepare_setup_switch_prefix_transaction(settings, guard=guard)
         if len(sys.argv) > 8 and sys.argv[8] == 'q-local':
             output = q / '99-output-eth'
             output.mkdir()
@@ -5123,6 +5137,8 @@ try:
                     + (str(q_only_link) + '\n' if len(sys.argv) > 10 and sys.argv[10] == 'q-created' else '')).encode()
         load.register_setup_switch_manifest(root / 'ztp/.setup-switch-journal.json', manifest,
                                            _publish_manifest=True, **guard)
+        if prefix_change:
+            load.configure_ztp_prefix_publication(settings, setup_guard=guard)
         candidates = private_publication_candidates(load, q)
         token = load.register_setup_switch_publication_bundle(*candidates, guard=guard)
         if sys.argv[6] == 'dhcp':
@@ -5145,6 +5161,18 @@ try:
         names = ('dhcpd.conf', 'dhcpd_eth.hosts', 'dhcpd_ib.hosts', 'dhcpd_nvl.hosts')
         runtime = root / 'private-etc-dhcp'
         load.dhcp_file_mappings = lambda *a: {q / 'independent-dhcp-B' / n: runtime / n for n in names}
+    if sys.argv[5] == 'kill-prefix-restore':
+        import json
+        body = json.loads((root / 'ztp/.setup-switch-journal.json').read_bytes())['body']
+        owner = body['a_runtime']['prefix_owners']['marker']['leaf']['identity'][1]
+        original_sync = load._fsync_parent_directory
+        def kill_after_original_marker(path):
+            if os.path.lexists(load.ZTP_PREFIX_MARKER) and load.ZTP_PREFIX_MARKER.lstat().st_ino == owner:
+                os.kill(os.getpid(), signal.SIGKILL)
+            return original_sync(path)
+        load._fsync_parent_directory = kill_after_original_marker
+        load.restore_setup_switch_a_disk(q, guard=guard, confirmed=True)
+        raise AssertionError('original prefix rename boundary was not reached')
     if sys.argv[5] == 'kill-runtime':
         original_sync = load._fsync_parent_directory
         def kill_after_original_a_runtime_replace(path):
@@ -5293,10 +5321,17 @@ finally:
                                            "a-image" if a_image or a_image_fault else "no-a-image",
                                            "q-created" if a_image else "no-q-created",
                                            "a-metadata" if dhcp_metadata else "no-a-metadata",
-                                           "managed-key" if managed_key else "no-managed-key"],
+                                           "managed-key" if managed_key else "no-managed-key",
+                                           (prefix_change if isinstance(prefix_change, str) else "/q-prefix") if prefix_change else "unchanged-prefix"],
                                     capture_output=True, text=True, check=False, timeout=30)
             self.assertEqual(-signal.SIGKILL, writer.returncode, writer.stdout + writer.stderr)
             original_wal = (journal.lstat().st_ino, journal.read_bytes())
+            if prefix_death:
+                dying = subprocess.run(argv + ["kill-prefix-restore", shape], capture_output=True,
+                    text=True, check=False, timeout=30)
+                self.assertEqual(-signal.SIGKILL, dying.returncode, dying.stdout + dying.stderr)
+                self.assertEqual(original_prefix[root / ".ztp-prefix-publication.json"][0],
+                                 (root / ".ztp-prefix-publication.json").lstat().st_ino)
             if managed_key_death:
                 leaf = root / "ztp/config/publickey/laptop.pub"
                 target = next(raw for path, raw in context.setup_state.links.items() if path.name == "laptop.pub")
@@ -5450,8 +5485,15 @@ finally:
             self.assertEqual(original_plan, (marker.lstat().st_ino, marker.read_bytes()))
             self.assertEqual(original_a_links, {path: (path.lstat().st_ino, path.lstat().st_ctime_ns, os.readlink(path))
                                                 for path in original_a_links})
-            self.assertEqual(original_prefix, {path: (path.lstat().st_ino, path.lstat().st_ctime_ns)
-                                                for path in original_prefix})
+            if prefix_change:
+                self.assertEqual({path: values[0] for path, values in original_prefix.items()},
+                                 {path: path.lstat().st_ino for path in original_prefix})
+                self.assertFalse(os.path.lexists(root / "q-prefix"))
+                if isinstance(prefix_change, str):
+                    self.assertFalse(os.path.lexists(root / prefix_change.lstrip("/").split("/")[0]))
+            else:
+                self.assertEqual(original_prefix, {path: (path.lstat().st_ino, path.lstat().st_ctime_ns)
+                                                    for path in original_prefix})
             if q_local:
                 self.assertEqual("20261005_110000_combine", os.readlink(q / "99-output-eth/latest"))
                 self.assertEqual(b"hostname: original-Q\n", (q / "99-output-eth/20261005_110000_combine/leaf.yaml").read_bytes())

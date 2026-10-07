@@ -3644,6 +3644,7 @@ def activate_project(
     prepare_switch_wal: bool = False,
     runtime_backend: ServiceRuntimeBackend | None = None,
     runtime_rollback_context: CrossProjectRollbackContext | None = None,
+    prefix_settings: GlobalSettings | None = None,
 ) -> None:
     host_role = resolve_host_role(host_role)
     current = active_project()
@@ -3665,6 +3666,10 @@ def activate_project(
             services_quiesced=True, runtime_backend=runtime_backend,
             runtime_rollback_context=runtime_rollback_context,
         )
+        if prefix_settings is not None:
+            prepare_setup_switch_prefix_transaction(prefix_settings, guard=dict(
+                deployment_lock_descriptor=deployment_lock_descriptor, services_quiesced=True,
+                runtime_backend=runtime_backend))
     command = [
         sys.executable, str(SETUP_SCRIPT), "-y", "--confirm-project-switch",
     ]
@@ -4205,7 +4210,7 @@ def _restore_guarded_ztp_prefix_publication(
 
 
 def configure_ztp_prefix_publication(
-    settings: GlobalSettings, dry_run: bool = False,
+    settings: GlobalSettings, dry_run: bool = False, *, setup_guard=None,
 ) -> Path:
     """Atomically expose ZTP_DIR at the URL prefix declared in global.yaml.
 
@@ -4213,6 +4218,12 @@ def configure_ztp_prefix_publication(
     real files/directories and unrelated links fail closed. An internal error
     restores both the old link and marker before returning control to load.
     """
+    if not dry_run and os.path.lexists(_setup_switch_journal_path()):
+        if setup_guard is None:
+            raise LoadError("prefix writer requires original SETUP WAL authority; HOLD")
+        return _apply_setup_switch_prefix_transaction(settings, guard=setup_guard)
+    if setup_guard is not None and not dry_run:
+        raise LoadError("prefix SETUP WAL is missing; HOLD")
     destination = _ztp_prefix_publication_path(settings)
     previous = _managed_ztp_prefix_path()
     builtin = destination == ZTP_DIR
@@ -6452,6 +6463,8 @@ def require_no_pending_setup_switch_journal() -> None:
     """
     _require_setup_switch_wal_absent()
     _require_no_pending_setup_manifest_stage()
+    if any(HTTP_ROOT.glob(".r22-prefix-*")):
+        raise LoadError("prefix evidence has no current original WAL; HOLD")
 
 
 def _require_setup_switch_wal_absent() -> None:
@@ -6525,7 +6538,7 @@ def _decode_setup_switch_journal(payload: bytes) -> dict[str, object]:
                 "manifest", "manifest_sha256", "manifest_mode", "links", "q_parent_preimage"}
     optional = {"allow_late_q_values", "q_local_links", "created_directories", "q_created_directories",
                 "directories", "infra_logs", "q_manifest_intent", "comparison_transfers", "a_runtime",
-                "dhcp_transaction", "publication_bundle", "a_image_intent"}
+                "dhcp_transaction", "publication_bundle", "a_image_intent", "prefix_transaction"}
     if isinstance(body, dict) and "q_parent_preimage" not in body:
         raise ValueError("journal Q parent preimage is missing; HOLD")
     if (not isinstance(body, dict) or not required <= set(body)
@@ -6545,6 +6558,8 @@ def _decode_setup_switch_journal(payload: bytes) -> dict[str, object]:
     directory_fields = {"path", "dev", "ino"}
     if "publication_bundle" in body:
         _validate_setup_publication_bundle_shape(body["publication_bundle"])
+    if "prefix_transaction" in body:
+        _validate_setup_switch_prefix_transaction(body)
     if body.get("a_image_intent") is not None:
         _validate_setup_switch_image_intent(body["a_image_intent"])
     if "dhcp_transaction" in body:
@@ -7180,6 +7195,8 @@ def _require_setup_switch_publication_bundle(token, *, phase, require_guard):
                 raise LoadError("publication original P/Q/root directory identity changed; HOLD")
             _setup_switch_runtime_context(body)
         require_original_directories()
+        if "prefix_transaction" in body:
+            _require_setup_switch_prefix_published(body)
         if phase == "parent":
             _require_setup_switch_q_parent_preimage(body)
         _require_setup_publication_state(body, phase=phase)
@@ -8138,6 +8155,8 @@ def register_setup_switch_publication_bundle(parent_candidate, report_candidate,
         parent = _setup_switch_link_parent_identity(journal)
         if "publication_bundle" in body or "dhcp_transaction" in body or parent_candidate.committed:
             raise LoadError("publication registration requires original prewrite Q; HOLD")
+        if "prefix_transaction" in body:
+            _require_setup_switch_prefix_published(body)
         recover_setup_switch_journal(journal, inspect_only=True, **guard)
         project = parent_candidate.destination.parent.parent
         if body["new_project"] != _setup_switch_directory_identity(project):
@@ -8590,6 +8609,318 @@ def _setup_switch_a_prefix_owners(receipt):
     return result
 
 
+def _setup_switch_prefix_declared_rows(body, prefix, destination):
+    """Postimages derive from declared policy; preimages only from original A."""
+    original = body["a_runtime"]["prefix_owners"]
+    marker = original["marker"]["leaf"]
+    previous = None if marker is None else Path(json.loads(base64.b64decode(marker["payload"], validate=True))["path"])
+    desired = {}
+    if previous is not None and previous != destination:
+        if str(previous) not in original["links"]:
+            raise ValueError("prefix original previous link is not registered")
+        before = original["links"][str(previous)]["leaf"]
+        # Original absence is an unchanged obligation, not a removal write.
+        # Keep it in A inventory so a late foreign object still blocks progress.
+        if before is not None:
+            desired[previous] = (before, None)
+    if destination != ZTP_DIR and destination != previous:
+        desired[destination] = (None, dict(target=os.path.relpath(ZTP_DIR, destination.parent)))
+    if previous != destination and not (previous is None and destination == ZTP_DIR):
+        payload = (json.dumps(dict(schema_version=1, prefix=prefix, path=str(destination),
+                    target=str(ZTP_DIR)), ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode()
+        desired[ZTP_PREFIX_MARKER] = (marker, None if destination == ZTP_DIR else dict(
+            payload=base64.b64encode(payload).decode(), sha256=hashlib.sha256(payload).hexdigest(), mode=0o644))
+    return desired
+
+
+def _validate_setup_switch_prefix_transaction(body):
+    transaction = body["prefix_transaction"]
+    if (not isinstance(transaction, dict)
+            or set(transaction) != {"schema_version", "prefix", "destination", "root", "rows"}
+            or type(transaction["schema_version"]) is not int or transaction["schema_version"] != 1
+            or transaction["root"] != body["root"]
+            or _validate_ztp_prefix(transaction["prefix"]) != transaction["prefix"]
+            or transaction["destination"] != str(Path(body["root"]["path"]) / transaction["prefix"].lstrip("/"))
+            or not isinstance(transaction["rows"], list) or len(transaction["rows"]) > 3):
+        raise ValueError("invalid original prefix transaction")
+    expected = _setup_switch_prefix_declared_rows(body, transaction["prefix"], Path(transaction["destination"]))
+    if {row.get("path") for row in transaction["rows"] if isinstance(row, dict)} != {str(path) for path in expected}:
+        raise ValueError("prefix transaction lacks exact declared write set")
+    names = set()
+    marker_parent = body["a_runtime"]["prefix_owners"]["marker"]["parent"]
+    def validate_leaf(path, parent, leaf, *, link):
+        row = dict(path=path, parent=parent, leaf=leaf)
+        if link:
+            _validate_setup_switch_a_prefix_owners(dict(marker=dict(path=str(ZTP_PREFIX_MARKER),
+                parent=marker_parent, leaf=None), links={path: row}))
+        else:
+            _validate_setup_switch_a_prefix_owners(dict(marker=row, links={}))
+    for row in transaction["rows"]:
+        if not isinstance(row, dict) or set(row) != {"path", "parent", "before", "after", "candidate", "backup", "retained"}:
+            raise ValueError("invalid original prefix transaction row")
+        validate_leaf(row["path"], row["parent"], row["before"], link=row["path"] != str(ZTP_PREFIX_MARKER))
+        path = Path(row["path"])
+        path.relative_to(Path(body["root"]["path"]))
+        if (row["before"], row["after"]) != expected[path]:
+            raise ValueError("prefix preimage/postimage differs from independent original A/declaration")
+        original = body["a_runtime"]["prefix_owners"]
+        original_row = original["marker"] if path == ZTP_PREFIX_MARKER else original["links"].get(str(path))
+        if original_row is not None and row["parent"] != original_row["parent"]:
+            raise ValueError("prefix original parent differs from A inventory")
+        candidate = row["candidate"]
+        if not isinstance(candidate, dict) or set(candidate) != {"path", "leaf"}:
+            raise ValueError("invalid original prefix candidate")
+        for role, raw in (("candidate", candidate["path"]), ("backup", row["backup"]), ("retained", row["retained"])):
+            if (not isinstance(raw, str) or Path(raw).parent != Path(body["root"]["path"])
+                    or not Path(raw).name.startswith(".r22-prefix-" + role + "-") or raw in names):
+                raise ValueError("invalid original prefix evidence name")
+            names.add(raw)
+        if not isinstance(candidate["leaf"], dict):
+            raise ValueError("invalid prefix candidate leaf")
+        validate_leaf(candidate["path"], transaction["root"], candidate["leaf"], link="target" in candidate["leaf"])
+        after = row["after"]
+        if after is not None and after != {key: value for key, value in candidate["leaf"].items() if key != "identity"}:
+            raise ValueError("prefix candidate differs from independent declared postimage")
+        if after is None:
+            payload = b"R22 original prefix removal witness\n"
+            if {key: value for key, value in candidate["leaf"].items() if key != "identity"} != dict(
+                    payload=base64.b64encode(payload).decode(), sha256=hashlib.sha256(payload).hexdigest(), mode=0o600):
+                raise ValueError("prefix removal witness is not its original contract")
+    if len({row["path"] for row in transaction["rows"]}) != len(transaction["rows"]):
+        raise ValueError("duplicate prefix transaction destination")
+
+
+@contextmanager
+def _setup_switch_prefix_wal_authority(guard):
+    _require_runtime_restore_guard(**guard)
+    journal = _setup_switch_journal_path()
+    identity = _dhcp_a_preimage_receipt_identity(journal.lstat())
+    descriptor = os.open(journal, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        opened = _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT)
+        body = _setup_switch_prepared_registration_body(opened)
+        parent = _setup_switch_link_parent_identity(journal)
+        def require():
+            _require_runtime_restore_guard(**guard)
+            if (identity != _dhcp_a_preimage_receipt_identity(os.fstat(descriptor))
+                    or identity != _dhcp_a_preimage_receipt_identity(journal.lstat())
+                    or opened != _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT)
+                    or parent != _setup_switch_link_parent_identity(journal)
+                    or body["root"] != _setup_switch_directory_identity(HTTP_ROOT)
+                    or any(body[key] != _setup_switch_directory_identity(Path(body[key]["path"]))
+                           for key in ("old_project", "new_project"))):
+                raise LoadError("prefix original WAL/root/P/Q owner changed; HOLD")
+            _setup_switch_runtime_context(body)
+        require()
+        yield body, require
+    finally:
+        os.close(descriptor)
+
+
+def _setup_switch_prefix_states(body):
+    """Only original owners and witnessed no-replace consumption qualify."""
+    transaction = body["prefix_transaction"]
+    _validate_setup_switch_prefix_transaction(body)
+    states = []
+    evidence = {raw for row in transaction["rows"]
+                for raw in (row["candidate"]["path"], row["backup"], row["retained"])}
+    if any(str(path) not in evidence for path in HTTP_ROOT.glob(".r22-prefix-*")):
+        raise LoadError("prefix unregistered evidence name; HOLD")
+    def matches(current, expected, *, moved=False):
+        if current is None or expected is None:
+            return current is expected
+        return (set(current) == set(expected)
+                and {k: v for k, v in current.items() if k != "identity"} ==
+                    {k: v for k, v in expected.items() if k != "identity"}
+                and current["identity"][:8 if moved else 9] == expected["identity"][:8 if moved else 9])
+    original = body["a_runtime"]["prefix_owners"]
+    touched = {row["path"] for row in transaction["rows"]}
+    for row in [original["marker"], *original["links"].values()]:
+        if row["path"] in touched:
+            continue
+        path = Path(row["path"])
+        if row["leaf"] is not None and "directory" in row["leaf"]:
+            metadata = path.lstat()
+            current = dict(path=str(path), dev=metadata.st_dev, ino=metadata.st_ino,
+                           mode=metadata.st_mode, uid=metadata.st_uid, gid=metadata.st_gid)
+            valid = current == row["leaf"]["directory"]
+        else:
+            valid = matches(_setup_switch_compensation_leaf(path), row["leaf"])
+        if not valid or row["parent"] != _setup_switch_link_parent_identity(path):
+            raise LoadError("prefix unchanged original A owner changed; HOLD")
+    for row in transaction["rows"]:
+        path = Path(row["path"])
+        if path.parent.is_dir():
+            if row["parent"] != _setup_switch_link_parent_identity(path):
+                raise LoadError("prefix original parent owner changed; HOLD")
+        else:
+            created = {item["path"]: item for item in body.get("created_directories", [])}
+            if str(path.parent) not in created or os.path.lexists(path.parent):
+                raise LoadError("prefix original parent is unknown; HOLD")
+            _setup_switch_created_directory_states(body)
+        live = _setup_switch_compensation_leaf(path)
+        stage = _setup_switch_compensation_leaf(Path(row["candidate"]["path"]))
+        backup = _setup_switch_compensation_leaf(Path(row["backup"]))
+        retained = _setup_switch_compensation_leaf(Path(row["retained"]))
+        before, candidate = row["before"], row["candidate"]["leaf"]
+        if matches(live, before) and matches(stage, candidate) and backup is None and retained is None:
+            phase = "original"
+        elif live is None and matches(backup, before, moved=True) and matches(stage, candidate) and retained is None:
+            phase = "backed-up"
+        elif (row["after"] is not None and matches(live, candidate, moved=True) and stage is None
+              and matches(backup, before, moved=True) and retained is None):
+            phase = "installed"
+        elif (matches(live, before, moved=True) and backup is None and stage is None
+              and matches(retained, candidate, moved=True)):
+            phase = "restored"
+        elif (live is None and stage is None and matches(retained, candidate, moved=True)
+              and matches(backup, before, moved=True)):
+            phase = "retained"
+        else:
+            raise LoadError("prefix original candidate/backup/live owner changed; HOLD")
+        states.append((row, phase))
+    return states
+
+
+def prepare_setup_switch_prefix_transaction(settings, *, guard):
+    """Freeze candidates and original leaf backups before SETUP/Q publication."""
+    destination = _ztp_prefix_publication_path(settings)
+    with _setup_switch_prefix_wal_authority(guard) as (body, require):
+        if "q_manifest_intent" in body or "publication_bundle" in body or "prefix_transaction" in body:
+            raise LoadError("prefix preparation must precede Q manifest and first prefix write; HOLD")
+        _require_setup_switch_a_prefix_owners(body)
+        previous = _managed_ztp_prefix_path()
+        if destination != ZTP_DIR and os.path.lexists(destination) and previous != destination:
+            raise LoadError("prefix destination is occupied without original ownership; HOLD")
+        require()
+    cursor = HTTP_ROOT
+    for part in destination.relative_to(HTTP_ROOT).parts[:-1]:
+        cursor = cursor / part
+        if not os.path.lexists(cursor):
+            stage = cursor.parent / ("." + cursor.name + ".setup-" + uuid.uuid4().hex)
+            owner = stage_setup_switch_created_directory(_setup_switch_journal_path(), cursor, stage, **guard)
+            if (stage.lstat().st_dev, stage.lstat().st_ino) != (owner.st_dev, owner.st_ino):
+                raise LoadError("prefix parent stage changed; HOLD")
+            _setup_switch_rename_directory_noreplace(stage, cursor)
+            _fsync_parent_directory(cursor.parent)
+    with _setup_switch_prefix_wal_authority(guard) as (body, require):
+        _require_setup_switch_a_prefix_owners(body)
+        if any(HTTP_ROOT.glob(".r22-prefix-*")):
+            raise LoadError("prefix orphan evidence predates preparation; HOLD")
+        desired = _setup_switch_prefix_declared_rows(body, settings.ztp_prefix, destination)
+        rows = []
+        for path, (before, after) in sorted(desired.items()):
+            require()
+            if before != _setup_switch_compensation_leaf(path):
+                raise LoadError("prefix original leaf changed before candidate; HOLD")
+            candidate = HTTP_ROOT / (".r22-prefix-candidate-" + uuid.uuid4().hex)
+            if after is not None and "target" in after:
+                candidate.symlink_to(after["target"])
+            else:
+                payload = b"R22 original prefix removal witness\n" if after is None else base64.b64decode(after["payload"], validate=True)
+                fd = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                with os.fdopen(fd, "wb") as stream:
+                    os.fchmod(stream.fileno(), 0o600 if after is None else after["mode"])
+                    stream.write(payload); stream.flush()
+                    owner = _dhcp_a_preimage_receipt_identity(os.fstat(stream.fileno()))
+                    os.fsync(stream.fileno())
+                    if owner != _dhcp_a_preimage_receipt_identity(os.fstat(stream.fileno())) or owner != _dhcp_a_preimage_receipt_identity(candidate.lstat()):
+                        raise LoadError("prefix candidate changed during file sync; HOLD")
+            leaf = _setup_switch_compensation_leaf(candidate)
+            _fsync_parent_directory(HTTP_ROOT)
+            require()
+            if leaf != _setup_switch_compensation_leaf(candidate) or before != _setup_switch_compensation_leaf(path):
+                raise LoadError("prefix original leaf/candidate changed before registration; HOLD")
+            rows.append(dict(path=str(path), parent=_setup_switch_link_parent_identity(path), before=before,
+                after=after, candidate=dict(path=str(candidate), leaf=leaf),
+                backup=str(HTTP_ROOT / (".r22-prefix-backup-" + uuid.uuid4().hex)),
+                retained=str(HTTP_ROOT / (".r22-prefix-retained-" + uuid.uuid4().hex))))
+        body["prefix_transaction"] = dict(schema_version=1, prefix=settings.ztp_prefix,
+            destination=str(destination), root=body["root"], rows=rows)
+        _setup_switch_prefix_states(body)
+        payload = _setup_switch_canonical_payload(dict(body=body,
+            sha256=hashlib.sha256(_setup_switch_canonical_payload(body)).hexdigest())) + b"\n"
+        if len(payload) > _SETUP_SWITCH_JOURNAL_LIMIT:
+            raise LoadError("prefix WAL exceeds bounded size; HOLD")
+        journal = _setup_switch_journal_path()
+        fd, name = tempfile.mkstemp(prefix=".setup-switch-journal.", dir=journal.parent)
+        temporary = Path(name)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(payload); stream.flush()
+            owner = _dhcp_a_preimage_receipt_identity(os.fstat(stream.fileno()))
+            os.fsync(stream.fileno())
+            if owner != _dhcp_a_preimage_receipt_identity(os.fstat(stream.fileno())):
+                raise LoadError("prefix WAL stage changed at sync; HOLD")
+        require(); _setup_switch_prefix_states(body)
+        if owner != _dhcp_a_preimage_receipt_identity(temporary.lstat()) or _read_rollback_regular(temporary, limit=_SETUP_SWITCH_JOURNAL_LIMIT) != (payload, 0o600):
+            raise LoadError("prefix WAL stage changed before replace; HOLD")
+        os.replace(temporary, journal)
+        _fsync_parent_directory(journal.parent)
+    return journal
+
+
+def _apply_setup_switch_prefix_transaction(settings, *, guard):
+    with _setup_switch_prefix_wal_authority(guard) as (body, require):
+        transaction = body.get("prefix_transaction")
+        if transaction is None or transaction["prefix"] != settings.ztp_prefix or transaction["destination"] != str(_ztp_prefix_publication_path(settings)):
+            raise LoadError("prefix declared setting differs from original WAL; HOLD")
+        if "publication_bundle" in body:
+            raise LoadError("prefix writer cannot mutate registered Q publication; HOLD")
+        def check():
+            require()
+            return _setup_switch_prefix_states(body)
+        for row, _phase in check():
+            phase = next(phase for item, phase in check() if item is row)
+            if phase == "restored":
+                raise LoadError("prefix A-restored transaction cannot restart B; HOLD")
+            path = Path(row["path"])
+            if phase == "original" and row["before"] is not None:
+                _setup_switch_rename_directory_noreplace(path, Path(row["backup"]))
+                check(); _fsync_parent_directory(path.parent); _fsync_parent_directory(HTTP_ROOT); check()
+            phase = next(phase for item, phase in check() if item is row)
+            if phase in {"original", "backed-up"}:
+                target = Path(row["retained"]) if row["after"] is None else path
+                _setup_switch_rename_directory_noreplace(Path(row["candidate"]["path"]), target)
+                check(); _fsync_parent_directory(target.parent); _fsync_parent_directory(HTTP_ROOT); check()
+        _require_setup_switch_prefix_published(body)
+        return Path(transaction["destination"])
+
+
+def _require_setup_switch_prefix_published(body):
+    if any(phase != ("installed" if row["after"] is not None else "retained")
+           for row, phase in _setup_switch_prefix_states(body)):
+        raise LoadError("prefix B publication is incomplete; HOLD")
+
+
+def _restore_setup_switch_prefix_transaction(body, *, require_authority):
+    def check():
+        require_authority()
+        return _setup_switch_prefix_states(body)
+    for row, _phase in check():
+        phase = next(phase for item, phase in check() if item is row)
+        if phase in {"original", "restored"}:
+            _fsync_parent_directory(HTTP_ROOT)
+            _fsync_parent_directory(_setup_switch_prefix_sync_parent(body, row)); check()
+            continue
+        path, stage, retained = Path(row["path"]), Path(row["candidate"]["path"]), Path(row["retained"])
+        if phase in {"installed", "backed-up"}:
+            source = path if phase == "installed" else stage
+            _setup_switch_rename_directory_noreplace(source, retained)
+            check(); _fsync_parent_directory(source.parent); _fsync_parent_directory(HTTP_ROOT); check()
+        phase = next(phase for item, phase in check() if item is row)
+        if phase == "retained" and row["before"] is not None:
+            _setup_switch_rename_directory_noreplace(Path(row["backup"]), path)
+        _fsync_parent_directory(_setup_switch_prefix_sync_parent(body, row)); _fsync_parent_directory(HTTP_ROOT); check()
+
+
+def _setup_switch_prefix_sync_parent(body, row):
+    parent = Path(row["parent"]["path"])
+    if parent.is_dir():
+        return parent
+    created = next(item for item in body["created_directories"] if item["path"] == str(parent))
+    return _setup_switch_created_directory_sync_parent(body, created)
+
+
 def _require_setup_switch_a_prefix_owners(body):
     runtime = body.get("a_runtime")
     if runtime is None:
@@ -8599,6 +8930,11 @@ def _require_setup_switch_a_prefix_owners(body):
         raise LoadError("original A prefix owner qualification was not registered; HOLD")
     try:
         _validate_setup_switch_a_prefix_owners(inventory)
+        if "prefix_transaction" in body:
+            _setup_switch_prefix_states(body)
+            return
+        if any(HTTP_ROOT.glob(".r22-prefix-*")):
+            raise LoadError("prefix unregistered original evidence; HOLD")
         context = _setup_switch_runtime_context(body)
         receipt = _load_runtime_rollback_receipt(context.project, context.runtime_receipt)
         if _setup_switch_a_prefix_owners(receipt) != inventory:
@@ -9415,6 +9751,10 @@ def _setup_switch_created_directory_states(body):
             Path(row["path"]) for row in body["links"]
             if row["before"] is None and row["after"] is not None
         } | {Path(row["path"]) for row in rows}
+        if "prefix_transaction" in body:
+            _validate_setup_switch_prefix_transaction(body)
+            owned_children.update(Path(row["path"]) for row in body["prefix_transaction"]["rows"]
+                                  if row["before"] is None and row["after"] is not None)
         states = []
         absent_owners = {}
         for row in sorted(rows, key=lambda item: len(Path(item["path"]).parts)):
@@ -10786,6 +11126,11 @@ def _recover_setup_switch_journal_snapshot(
     except (KeyError, TypeError, ValueError, UnicodeError, binascii.Error, LoadError) as exc:
         raise LoadError(f"setup switch journal is invalid: {exc}") from exc
     runtime_context = _setup_switch_runtime_context(body, state)
+    if "prefix_transaction" in body:
+        _setup_switch_prefix_states(body)
+        # Prefix candidates, original backups and consumed witnesses still
+        # belong to this incident. Disk restoration alone cannot retire them.
+        retain_journal = True
     if "publication_bundle" in body:
         # Existing P/A readers have no authority to retire, discard or undo
         # this publication group, especially after visible Q parent commit.
@@ -10833,6 +11178,7 @@ def _recover_setup_switch_journal_snapshot(
                 _restore_file=a_compensation["restore_runtime_leaf"] if a_compensation is not None else None,
                 _original_yaml_owners=body["a_runtime"].get("yaml_link_owners") if a_compensation is not None else None,
                 _original_prefix_owners=body["a_runtime"].get("prefix_owners") if a_compensation is not None else None,
+                _prefix_transaction_body=body if "prefix_transaction" in body else None,
             )
             _require_runtime_restore_guard(**runtime_restore_guard)
 
@@ -10843,6 +11189,8 @@ def _recover_setup_switch_journal_snapshot(
 
     def require_journal_unchanged():
         require_wal_unchanged()
+        if "prefix_transaction" in body:
+            _setup_switch_prefix_states(body)
         if a_compensation is not None:
             a_compensation["require"]()
         else:
@@ -11126,6 +11474,8 @@ def _recover_setup_switch_journal_snapshot(
                 raise LoadError(f"setup switch Q-only link changed during recovery: {path}")
             path.unlink()
             _fsync_parent_directory(path.parent)
+    if "prefix_transaction" in body:
+        _restore_setup_switch_prefix_transaction(body, require_authority=require_journal_unchanged)
     for _path, _staged, present, row in sorted(
             created_directory_states, key=lambda state: len(state[0].parts), reverse=True):
         require_journal_unchanged()
@@ -11265,6 +11615,7 @@ def restore_runtime_rollback_receipt(
     _restore_file: Callable[..., None] | None = None,
     _original_yaml_owners=None,
     _original_prefix_owners=None,
+    _prefix_transaction_body=None,
 ) -> None:
     """Restore A after an uncommitted B generation failure, then verify all.
 
@@ -11401,7 +11752,12 @@ def restore_runtime_rollback_receipt(
                          for relative, owner in _original_yaml_owners.items()}
                         if _original_yaml_owners is not None else None), **authority_guard)
     if prefix_snapshot.links or prefix_snapshot.marker is not None:
-        if _original_prefix_owners is not None:
+        if _prefix_transaction_body is not None:
+            if any(phase not in {"original", "restored"} for _row, phase in _setup_switch_prefix_states(_prefix_transaction_body)):
+                raise LoadError("prefix original A restoration is incomplete; HOLD")
+            _restore_setup_switch_prefix_transaction(_prefix_transaction_body,
+                require_authority=_require_authority)
+        elif _original_prefix_owners is not None:
             # This qualified path is a no-op for original A owners. A changed
             # Q prefix needs a separately registered write/stage inventory;
             # content equality alone never licenses replacement or deletion.
@@ -16281,6 +16637,8 @@ def activate_setup_switch_b_publication(
     body = _setup_switch_prepared_registration_body((token["payload"], 0o600))
     if retire and body["publication_bundle"].get("image_intent") is None:
         raise LoadError("B retirement requires original image policy qualification; HOLD")
+    if retire and body.get("prefix_transaction", {}).get("rows"):
+        raise LoadError("prefix evidence requires explicit qualified retirement archive; HOLD")
     qualified = _setup_switch_b_preflight_inputs(body, inputs)
     selected_images = dict(images)
     with _setup_switch_b_image_authority(qualified, selected_images,
@@ -17981,6 +18339,7 @@ def main(
             ),
             runtime_backend=runtime_backend_instance,
             runtime_rollback_context=cross_project_rollback,
+            prefix_settings=inputs.settings if http_service_available else None,
         )
         if not args.dry_run and (project / "p2p.xlsx").is_symlink():
             selected_runtime_p2p = project / os.readlink(project / "p2p.xlsx")
@@ -17993,7 +18352,11 @@ def main(
                 prefix_publication_snapshot = snapshot_ztp_prefix_publication(
                     inputs.settings
                 )
-            configure_ztp_prefix_publication(inputs.settings, args.dry_run)
+            prefix_guard = (dict(deployment_lock_descriptor=deployment_lock_descriptor,
+                services_quiesced=True, runtime_backend=runtime_backend_instance)
+                if not args.dry_run and os.path.lexists(_setup_switch_journal_path()) else None)
+            configure_ztp_prefix_publication(inputs.settings, args.dry_run,
+                **(dict(setup_guard=prefix_guard) if prefix_guard is not None else {}))
         elif not local_services_supported:
             # A workstation preparation run renders artifacts for the remote
             # Linux management server.  Its declared http_root (normally
@@ -18333,7 +18696,8 @@ def main(
                 restore_release_links(release_link_snapshot)
             except (LoadError, OSError) as rollback_exc:
                 cleanup_errors.append(str(rollback_exc))
-        if prefix_publication_snapshot is not None and not release_committed and not publication_registration_attempted:
+        if (prefix_publication_snapshot is not None and not release_committed and not publication_registration_attempted
+                and not os.path.lexists(_setup_switch_journal_path())):
             try:
                 restore_ztp_prefix_publication(prefix_publication_snapshot)
             except (LoadError, OSError) as rollback_exc:

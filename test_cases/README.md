@@ -461,8 +461,16 @@ Q 自建目录恢复后缺席仍按原创建资格核验，不因查找公钥重
 此磁盘恢复收口不代表真实 key/report 健康鉴定或原 A 服务激活，也不是正式 full proof。
 已提交 Q group 的原 A 未变 prefix 另按首写前 WAL 的父/九字段 owner、原 marker
 payload/raw target/缺席核验；不重建正确原对象，也不收编同内容新 inode。同步前后
-持续核原资格；legacy 缺清单保持缺资格。Q 改写 prefix 的完整候选/冷补偿登记仍待，
-此窄收口不能冒称完整写集或允许原 A 服务激活。
+持续核原资格；legacy 缺清单保持缺资格。此窄收口不能冒称完整写集或允许原 A 服务激活。
+与未变清单不同，Q 改写 prefix 必须在 SETUP/Q manifest 前登记闭合的
+`prefix_transaction`：独立原 A 前像、声明的 B postimage、唯一候选/备份/消费见证及
+父目录；嵌套缺席父只通过原 created-directory WAL 安装。普通 prefix writer 有
+pending WAL 时不得回退 legacy 路径。安装/恢复均 no-replace；备份和候选的合法
+消耗只认原 inode/元数据/内容与互斥阶段见证，外来同目标/同字节对象 HOLD。
+prefix 恢复先于 Q 自建父删除，冷重入补齐同步，不重建正确原 A 对象。
+未提交 Q 的恢复也保留此 WAL/见证；B 发布校验持续核原备份。prefix 增量凭据的
+显式健康退休/归档仍待，旧 B 退休接口不得忽略这些义务；孤儿 prefix 凭据阻断新
+普通 LOAD。此边界不构成旧 A 健康激活、root/Linux/断电见证或整体验收。
 受 WAL authority 保护的 prefix 恢复另须拒绝旧 `.name.rollback.` 链接暂存，
 新链接复用已验证自有的随机暂存 writer；marker 保持 `.name.rollback.` 名称合同，
 复用持有 FD、fsync 前 mode/字节冻结及发布/清理前身份检查，外来暂存不发布、不删除。

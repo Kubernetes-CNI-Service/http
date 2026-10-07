@@ -1,5 +1,54 @@
 # 脚本变更影响测试
 
+## 2026-10-08 R22 Q 改写 prefix 的原 owner 事务与冷恢复
+
+基于 `ab36589`，首写前登记独立原 A prefix 前像、声明 B 后像、原候选/备份/消费
+见证和父目录；嵌套父通过原 created-directory WAL 安装。pending WAL 禁用 legacy
+prefix writer。备份不得以同内容新 inode 收编；原 before 必须与 A 原清单一致，
+不能仅靠重算 WAL 校验和替换资格。恢复先于 Q 自建父删除，保留 WAL 与消费见证；
+B bundle 校验原备份，旧 B 退休接口在显式 prefix 归档尚未实现时提前 HOLD。
+孤儿 prefix 凭据也阻断新普通 LOAD，不删除未知对象。原缺席旧链接属于未变义务，
+不生成没有实际写入的 removal 行；仍持续核原缺席，禁止晚到外来对象。
+
+所有日志均在 `outputs/test-diagnostics/`，原失败/断言保留。初轮 RED 的真实 workflow
+夹具误用未完成 Q global，及第一轮 GREEN 的同步异常类预期错误均单独保留，
+不称为产品根因；更正独立夹具/异常包装断言后继续验证。有效 old-writer/API RED
+`r22-changed-prefix-red2.log`：5 tests / 2 FAIL / 3 ERROR / exit1，inode162981325 /
+size134260 / SHA256 `85abcd11ecc18994b46ec9bb6d387b9fc633118cf8936eac5216fab9b363124f`。
+嵌套父原子恢复 RED `r22-changed-prefix-boundaries-red.log`：9 tests / 1 FAIL / 1 ERROR /
+exit1，inode162996916 / size138016 / SHA256
+`edeeba861687c03c6ce8e9500d8dab22fc760acec3e60df5ac00d9c53635a8af`；修正只认原
+prefix 行的父内子项，不放宽未知对象。伪造前像收编备份 RED
+`r22-changed-prefix-adopt-backup-red.log`：1 test / 1 FAIL / exit1，inode163003345 /
+size129837 / SHA256 `d2224aca10a49e52892bee6f45ffb779a3b2f0e9978a879f6fe1a8fe14d79a98`。
+入口 RED 的 orphan/B backup 两项为有效失败，第三项曾误传互斥 API 参数，不能用其
+证明首次 P 写缺陷；原 `r22-changed-prefix-entry-gates-red.log` 和未全通过 GREEN 保留。
+12 项正确调用组合随后通过；另原 WAL 被删除/旧退休忽略 prefix 的独立 RED
+`r22-changed-prefix-retention-red.log`：2 tests / 2 FAIL / exit1，inode163017953 /
+size129316 / SHA256 `1cac7c87c5a7604a4344c75c7796e5cd38ab31c5f146b8b2100542b4854c49f5`。
+
+修复后 11 direct + 3 真实 LOAD→SETUP→Q 提交强杀→新 LOAD 的组合 14 OK /
+135.915s / 实际 exit0，完整 `r22-changed-prefix-final-boundaries.log`，inode163018205 /
+size136806 / SHA256 `444dac2f9e9f8897ac526d552f1990ee0dcff0ca1b36c201f8070614a1e5144e`；
+物理 Ran21→OK23→actual67→冻结一致68→DIAGNOSTIC_END70=0。
+复核又发现原旧链接缺席的无效 removal 行导致 B 发布 HOLD；独立 RED
+`r22-changed-prefix-missing-link-red.log`：1 ERROR / 0.361s / exit1，inode163033393 /
+size128493 / SHA256 `0a6cfb99f4acfc39d65fe7cf80ef2b01ab38772256f520356a9275c8b915e16a`。
+只排除没有实际写入的行，原缺席清单仍核验；GREEN
+`r22-changed-prefix-missing-link-green.log`：1 OK / 0.770s / 实际 exit0，inode163033484 /
+size127555 / SHA256 `c4426c636a6faf72222e8c82c7f637ce8dfca02d64866dd3280cd8579d16fba4`；
+物理 Ran8→OK10→actual17→冻结一致18→END20=0。以上完整读取前后 stat/inode 一致，
+原 exec 均已退出。模块回归另记；ledger 未改，这不是 related/full proof，原 A
+真实 key/report 健康激活及 prefix 证据显式退休、root/Linux/断电/C2/DEV ACK 仍待。
+
+三完整模块与 33 个真实 workflow 回归 683 OK / 1125.812s / 实际 exit0，完整
+`outputs/test-diagnostics/r22-changed-prefix-module-regression.log`，inode163033614 /
+size379083 / SHA256 `2784b0c5aac7daa0d81999ab79a714dfa3c5bcd7e0afe9770ebe39e0a15f2a64`；
+已知 84704-byte 原前缀 SHA256
+`fc67aa5b6498bc9c0ead506ec98a439bd8f27e462b94457e394d0885ec138812` 不变。
+读前后 stat 一致，物理 Ran2013→OK2015→actual2043→冻结一致2044→END2046=0，
+原 exec 实际 exit0；未写 approved ledger，不作为 related/full proof。
+
 ## 2026-10-08 R22 managed publickey 的 SETUP/runtime 重叠恢复
 
 基于 `ee5b2e7`。独立 direct 与真实 SETUP 原写者→Q 提交强杀→新 LOAD 揭示：

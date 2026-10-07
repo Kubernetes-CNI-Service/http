@@ -1634,6 +1634,19 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-R22-GENERATION-INPUT-ABA-001 — 跨进程输入换代与多输出一致性
 
+- 2026-10-08 Q 改写 prefix 事务候选仍 OPEN：仅按本卡授权的隔离 VM、精确版本、
+  root-only 可恢复快照、排他部署锁、Apache/DHCP 已停与正常写者静默前提见证。
+  SETUP/Q manifest 前独立盘点原 A marker/链接父、原 inode/模式/内容、声明 B
+  URL path、候选/备份/消费见证和新增嵌套父 WAL。分别在原对象移至备份、B 候选
+  安装、原 marker 恢复 rename 后父同步前、Q 自建父删除后强杀，由新 LOAD
+  只续消费原凭据，补父同步并保留 WAL；不复制新对象冒充原 A。注入同字节新
+  备份并伪造 transaction.before、同目标新 B、未知候选、父换绑和额外字段，
+  必须在进一步 P/A 写前 HOLD、保留未知对象。B 发布校验不得忽略备份换绑；
+  未完成显式健康退休/归档时不得沿旧 B 退休路径放行，新 LOAD 也不得忽略孤儿
+  prefix 凭据。保存完整物理 END/exit、stat/inode/SHA 与每条 rename/fsync 时序。
+  清理仅人工恢复本卡已核快照；本地 direct/API 多脚本 SIGKILL 不证明真实 root
+  入口、Linux/断电/C2、旧 A 健康激活/退休或 DEV ACK，不在 live 注入。
+
 - 2026-10-08 managed publickey 重叠恢复边界仍 OPEN：仅在本卡可丢弃隔离 VM、
   原 P/Q 可恢复快照、停服/排他锁/其他写者静默条件下，见证 SETUP key/link manifest
   与原 runtime receipt 同一物理名称只消费一份原 stage；记录原 P before/source、
