@@ -1,5 +1,35 @@
 # 脚本变更影响测试
 
+## 2026-10-07 R22 显式 B 激活与原镜像 WAL 候选
+
+基于 `d79d9805a69b6540d37275a9eb1b6d98219ae421`，新增 B-only 激活 API，
+需要显式确认、原输入与共享发布组、真实 key/report 检验和停服预检。
+只启动重新推导出的 Apache/DHCP 集合；命令、文件身份或健康检查失败时确认停服，
+不自动回 A，不退休 WAL。源镜像及发布镜像的路径、父目录、九字段身份和 SHA
+在首发布写前记录到原 WAL，健康尝试持有其原 fd；不能用后来出现的同名、同字节
+对象补资格。原 no-upgrade policy 不查无用版本，未知旧镜像 intent 不是绕过检查权限。
+
+入口缺失 RED：`r22-publication-b-activation-red.log`，4 ERROR/exit1，
+SHA256 `8933ec8496f2df8d44ac19f864cbbcd44f8afb19e4eb20d24d9f675c16d22256`。
+漏镜像与晚改写 RED：`r22-publication-b-activation-image-red.log`，2 FAIL/exit1，
+SHA256 `1b9d558be2e946320a4937e514531db97d3c6e6fc889298123107e873f6fadd1`。
+原服务 OSError 被误分类与原镜像未入 WAL 的失败日志分别保留为
+`r22-publication-b-activation-cause-red.log`、`r22-publication-b-image-wal-red.log`；
+不是正式通过。11 项 direct/真实 LOAD→SETUP→冷续提交→B 激活或健康失败停服
+通过，日志 `r22-publication-b-activation-original-image-wal-green.log`，
+inode159167270/size132870，SHA256
+`9001fd565a3d9f2e3b07fff5698fed12201fb653052871199ab499daafc60899`。
+随后修正 disabled 原策略的无用输入访问，保留 `r22-original-no-upgrade-policy-red.log`
+和 `r22-original-no-upgrade-policy-green.log`，后者 1 OK/exit0。
+
+扩大回归 `outputs/test-diagnostics/r22-publication-b-activation-final-regression.log`：
+569 tests OK，111.409s，实际 exit0、冻结一致；物理 Ran1487/OK1489/
+actual1558/冻结1559/END1561。读取前后 stat 一致，完整原日志保留。
+这仅是有界回归，不是 runner related/full/check，批准 ledger 未手改。
+健康探针与服务边界使用隔离替身，实际生成报告、输入、镜像和发布流程执行；
+不声称真机 HTTP/root 服务或断电已验证。WAL 退休、操作员 B 激活入口及旧 A
+显式激活仍须继续实现；Linux/断电/DEV ACK 仍 OPEN。
+
 ## 2026-10-07 R22 原 Q 输入绑定与停服 B 预检候选
 
 基于 `72f98c7ff83c4e9637317d8abf9cb2f103fd1f2c`，新增

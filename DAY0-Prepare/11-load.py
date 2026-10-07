@@ -19,6 +19,7 @@ import binascii
 import csv
 import ctypes
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
 import fcntl
@@ -6072,6 +6073,21 @@ def _require_runtime_restore_guard(
     if (deployment_lock_descriptor is None or services_quiesced is not True
             or runtime_backend is None):
         raise LoadError("runtime rollback requires the deployment lock and quiesced services")
+    _require_runtime_lock_guard(deployment_lock_descriptor)
+    still_active = active_managed_services(
+        runtime_backend,
+        host_role="workstation" if runtime_os().casefold() == "darwin"
+        else "management-server",
+    )
+    if still_active:
+        raise LoadError(
+            "runtime rollback requires every managed service to be stopped: "
+            + ", ".join(still_active)
+        )
+
+
+def _require_runtime_lock_guard(deployment_lock_descriptor) -> None:
+    """Check the original exclusive lock independently of service phase."""
     try:
         descriptor_stat = os.fstat(deployment_lock_descriptor)
         lock_stat = DEPLOYMENT_LOCK.lstat()
@@ -6094,16 +6110,6 @@ def _require_runtime_restore_guard(
             raise LoadError("runtime rollback deployment lock is not held")
     finally:
         os.close(probe)
-    still_active = active_managed_services(
-        runtime_backend,
-        host_role="workstation" if runtime_os().casefold() == "darwin"
-        else "management-server",
-    )
-    if still_active:
-        raise LoadError(
-            "runtime rollback requires every managed service to be stopped: "
-            + ", ".join(still_active)
-        )
 
 
 def _atomic_restore_setup_link(
@@ -6611,8 +6617,29 @@ def _validate_setup_publication_bundle_shape(bundle):
 
     if not isinstance(bundle, dict) or set(bundle) not in (
             {"parent", "report", "generation", "selector"},
-            {"parent", "report", "generation", "selector", "shared_setup"}):
+            {"parent", "report", "generation", "selector", "shared_setup"},
+            {"parent", "report", "generation", "selector", "shared_setup", "image_intent"}):
         raise ValueError("unknown or missing publication bundle fields; HOLD")
+    if bundle.get("image_intent") is not None:
+        intent = bundle["image_intent"]
+        fields(intent, {"policy", "files"})
+        if (intent["policy"] not in {"enabled", "disabled"}
+                or not isinstance(intent["files"], dict)
+                or set(intent["files"]) - {"eth", "ib", "nvl"}
+                or intent["policy"] == "disabled" and intent["files"]):
+            raise ValueError("invalid publication image policy; HOLD")
+        for pair in intent["files"].values():
+            fields(pair, {"source", "published"})
+            for record in pair.values():
+                fields(record, {"path", "parent", "identity", "sha256", "size"})
+                fields(record["parent"], {"path", "dev", "ino"})
+                if (not isinstance(record["identity"], list) or len(record["identity"]) != 9
+                        or any(type(n) is not int or n < 0 for n in record["identity"])
+                        or not isinstance(record["path"], str) or not Path(record["path"]).is_absolute()
+                        or type(record["size"]) is not int or record["size"] <= 0
+                        or not isinstance(record["sha256"], str)
+                        or re.fullmatch(r"[0-9a-f]{64}", record["sha256"]) is None):
+                    raise ValueError("invalid publication image owner; HOLD")
     if bundle.get("shared_setup") is not None:
         shared_fields = {"manifest", "links", "q_local", "directories",
                          "comparison", "created", "infra", "flat_runtime"}
@@ -6851,6 +6878,7 @@ def _require_setup_publication_state(body, *, phase="parent"):
     """Authorize only the next declared write, not service start or retirement."""
     bundle = body["publication_bundle"]
     _validate_setup_publication_bundle_shape(bundle)
+    _require_setup_publication_images(bundle.get("image_intent"))
     if (bundle.get("shared_setup") is not None
             and _setup_switch_shared_publication_snapshot(body,
                 include_inputs="input_files" in bundle["shared_setup"]) != bundle["shared_setup"]):
@@ -6911,10 +6939,59 @@ def _require_setup_publication_state(body, *, phase="parent"):
             and _setup_switch_shared_publication_snapshot(body,
                 include_inputs="input_files" in bundle["shared_setup"]) != bundle["shared_setup"]):
         raise LoadError("publication shared Q authority changed during deep inspection; HOLD")
+    _require_setup_publication_images(bundle.get("image_intent"))
+
+
+def _require_setup_publication_images(intent):
+    if intent is None:
+        return
+    try:
+        for pair in intent["files"].values():
+            for record in pair.values():
+                path = Path(record["path"])
+                if (record["identity"] != list(_dhcp_a_preimage_receipt_identity(path.lstat()))
+                        or record["parent"] != _setup_switch_link_parent_identity(path)):
+                    raise LoadError("publication original image owner changed; HOLD")
+    except OSError as exc:
+        raise LoadError(f"publication original image unavailable; HOLD: {exc}") from exc
+
+
+def _setup_publication_image_intent(images, *, upgrade_enabled):
+    if type(upgrade_enabled) is not bool:
+        raise LoadError("publication image policy must be explicit boolean; HOLD")
+    if images is None:
+        return None  # Unknown legacy image write set cannot authorize image activation.
+    if set(images) - {"eth", "ib", "nvl"} or (not upgrade_enabled and images):
+        raise LoadError("publication image inventory/policy differs; HOLD")
+    records = {}
+    for kind, source in images.items():
+        pair = {}
+        published = ZTP_DIR / "image" / ("cumulus" if kind == "eth" else "nvos") / source.name
+        for label, path in (("source", source), ("published", published)):
+            path = path.parent.resolve(strict=True) / path.name
+            if not path.is_relative_to(HTTP_ROOT.resolve(strict=True)):
+                raise LoadError("publication image path is outside original HTTP root; HOLD")
+            parent = _setup_switch_link_parent_identity(path)
+            identity = list(_dhcp_a_preimage_receipt_identity(path.lstat()))
+            validate_image(path, source.name)
+            digest = _stable_regular_identity(path, "publication image")
+            if (identity != list(_dhcp_a_preimage_receipt_identity(path.lstat()))
+                    or parent != _setup_switch_link_parent_identity(path)):
+                raise LoadError("publication image changed during registration; HOLD")
+            pair[label] = dict(path=str(path), parent=parent, identity=identity, **digest)
+        if pair["source"]["sha256"] != pair["published"]["sha256"]:
+            raise LoadError("publication source/published image differs; HOLD")
+        records[kind] = pair
+    return dict(policy="enabled" if upgrade_enabled else "disabled", files=records)
 
 
 def require_setup_switch_publication_bundle(token, *, guard, phase="parent"):
-    _require_runtime_restore_guard(**guard)
+    return _require_setup_switch_publication_bundle(token, phase=phase,
+        require_guard=lambda: _require_runtime_restore_guard(**guard))
+
+
+def _require_setup_switch_publication_bundle(token, *, phase, require_guard):
+    require_guard()
     try:
         journal = token["journal"]
         def require_original_wal():
@@ -6963,7 +7040,7 @@ def require_setup_switch_publication_bundle(token, *, guard, phase="parent"):
                 raise LoadError("publication original DHCP receipt owner changed during inspection; HOLD")
         require_original_wal()
         require_original_directories()
-        _require_runtime_restore_guard(**guard)
+        require_guard()
     except (KeyError, TypeError, ValueError, OSError, RuntimeError) as exc:
         raise LoadError(f"publication authority invalid; HOLD: {exc}") from exc
 
@@ -7067,7 +7144,8 @@ def resume_setup_switch_publication_bundle(token, *, guard):
     return "published-stopped-wal-retained"
 
 
-def register_setup_switch_publication_bundle(parent_candidate, report_candidate, generation, *, guard):
+def register_setup_switch_publication_bundle(parent_candidate, report_candidate, generation, *, guard,
+                                           images=None, upgrade_enabled=True):
     """Fsync the complete prospective publication group before its first write."""
     _require_runtime_restore_guard(**guard)
     journal = _setup_switch_journal_path()
@@ -7115,6 +7193,8 @@ def register_setup_switch_publication_bundle(parent_candidate, report_candidate,
                       "staged": dict(selector_owner, path=str(selector_stage))})
         body["publication_bundle"]["shared_setup"] = (
             _setup_switch_shared_publication_snapshot(body) if "q_manifest_intent" in body else None)
+        body["publication_bundle"]["image_intent"] = _setup_publication_image_intent(
+            images, upgrade_enabled=upgrade_enabled)
 
         def require_original():
             _require_runtime_restore_guard(**guard)
@@ -14473,10 +14553,28 @@ def verify_apache_publication_boundary(*, dry_run: bool = False) -> None:
 def preflight_setup_switch_b_publication(
     token, *, guard, inputs: ProjectInputs, images: dict[str, Path],
     dhcp_runtime_plan: DhcpRuntimePlan | None = None,
+    _additional_authority=None,
 ) -> str:
     """Check original published B while stopped; never activate or retire its WAL."""
     require_setup_switch_publication_bundle(token, guard=guard, phase="published")
     body = _setup_switch_prepared_registration_body((token["payload"], 0o600))
+    qualified = _setup_switch_b_preflight_inputs(body, inputs)
+
+    def authority():
+        if _additional_authority is not None:
+            _additional_authority()
+        require_setup_switch_publication_bundle(token, guard=guard, phase="published")
+        if _additional_authority is not None:
+            _additional_authority()
+
+    authority()
+    preflight_services(qualified, images, dhcp_runtime_plan=dhcp_runtime_plan,
+                       runtime_backend=guard["runtime_backend"], require_authority=authority)
+    authority()
+    return "b-preflight-passed-still-stopped-wal-retained"
+
+
+def _setup_switch_b_preflight_inputs(body, inputs):
     shared = body["publication_bundle"].get("shared_setup")
     if shared is None or "input_files" not in shared:
         raise LoadError("B preflight requires original Q input-owner qualification; HOLD")
@@ -14495,23 +14593,162 @@ def preflight_setup_switch_b_publication(
             or inputs.switch_scope != parent["switch_scope"]):
         raise LoadError("B preflight scope differs from sealed parent; HOLD")
 
-    def authority():
-        require_setup_switch_publication_bundle(token, guard=guard, phase="published")
-
     # Cached settings/types supplied by a previous invocation cannot suppress
     # required checks. Reconstruct them from the original owner-bound sources.
     settings = apply_subnet_service_ips(load_global(inputs.global_file,
         switch_scope=parent["switch_scope"]), inputs.subnet_file)
     device_types = load_device_types(inputs.devices_file, settings.schema_version,
                                     switch_scope=parent["switch_scope"])
-    qualified = replace(inputs, settings=settings, device_types=device_types,
+    return replace(inputs, settings=settings, device_types=device_types,
         pubkeys=tuple(ZTP_DIR / "config/publickey" / name
                       for name in sorted(shared["flat_runtime"]["publickeys"])))
-    authority()
-    preflight_services(qualified, images, dhcp_runtime_plan=dhcp_runtime_plan,
-                       runtime_backend=guard["runtime_backend"], require_authority=authority)
-    authority()
-    return "b-preflight-passed-still-stopped-wal-retained"
+
+
+def activate_setup_switch_b_publication(
+    token, *, guard, inputs: ProjectInputs, images: dict[str, Path], confirmed=False,
+) -> str:
+    """Explicit B-only health attempt. Failure stops; A and WAL are never retired."""
+    if confirmed is not True:
+        raise LoadError("B activation requires explicit confirmation; HOLD")
+    require_setup_switch_publication_bundle(token, guard=guard, phase="published")
+    body = _setup_switch_prepared_registration_body((token["payload"], 0o600))
+    qualified = _setup_switch_b_preflight_inputs(body, inputs)
+    selected_images = dict(images)
+    with _setup_switch_b_image_authority(qualified, selected_images,
+            original_intent=body["publication_bundle"].get("image_intent")) as image_authority:
+        return _activate_setup_switch_b_publication(token, guard=guard, inputs=inputs,
+            images=selected_images, image_authority=image_authority)
+
+
+@contextmanager
+def _setup_switch_b_image_authority(inputs, images, *, original_intent):
+    """Hold source and published image owners throughout one B health attempt."""
+    if original_intent is not None and original_intent["policy"] == "disabled":
+        expected = {}
+    else:
+        expected = expected_images(inputs.settings, inputs.device_types,
+            deployment_scope=inputs.deployment_scope, switch_scope=inputs.switch_scope)
+    if set(images) != set(expected):
+        raise LoadError("B image inventory differs from original selected inputs; HOLD")
+    if expected and (original_intent is None or set(original_intent["files"]) != set(expected)):
+        raise LoadError("B original image WAL qualification is missing; HOLD")
+    held = []
+    yielded = False
+    try:
+        for kind, basename in expected.items():
+            source = images[kind]
+            published = ZTP_DIR / "image" / ("cumulus" if kind == "eth" else "nvos") / basename
+            digests = []
+            for label, path in (("source", source), ("published", published)):
+                parent = _setup_switch_link_parent_identity(path)
+                descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+                                     | getattr(os, "O_NONBLOCK", 0))
+                identity = _dhcp_a_preimage_receipt_identity(os.fstat(descriptor))
+                held.append((path, descriptor, identity, parent))
+                validate_image(path, basename)
+                digest = _stable_regular_identity(path, "B image")["sha256"]
+                digests.append(digest)
+                original = original_intent["files"][kind][label]
+                if (original["path"] != str(path.parent.resolve(strict=True) / path.name)
+                        or original["identity"] != list(identity) or original["sha256"] != digest):
+                    raise LoadError("B image differs from original prepublication WAL owner/bytes; HOLD")
+                if (identity != _dhcp_a_preimage_receipt_identity(os.fstat(descriptor))
+                        or identity != _dhcp_a_preimage_receipt_identity(path.lstat())
+                        or parent != _setup_switch_link_parent_identity(path)):
+                    raise LoadError("B image owner changed during qualification; HOLD")
+            if digests[0] != digests[1]:
+                raise LoadError("B published image bytes differ from selected source; HOLD")
+        def authority():
+            try:
+                for path, descriptor, identity, parent in held:
+                    if (identity != _dhcp_a_preimage_receipt_identity(os.fstat(descriptor))
+                            or identity != _dhcp_a_preimage_receipt_identity(path.lstat())
+                            or parent != _setup_switch_link_parent_identity(path)):
+                        raise LoadError("B image original owner or bytes changed; HOLD")
+            except OSError as exc:
+                raise LoadError(f"B image original authority unavailable; HOLD: {exc}") from exc
+        authority()
+        yielded = True
+        yield authority
+    except OSError as exc:
+        if yielded:
+            raise  # Preserve the service/planner/health failure's original cause.
+        raise LoadError(f"B image original authority unavailable; HOLD: {exc}") from exc
+    finally:
+        for _path, descriptor, _identity, _parent in held:
+            os.close(descriptor)
+
+
+def _activate_setup_switch_b_publication(token, *, guard, inputs, images, image_authority):
+    preflight_setup_switch_b_publication(token, guard=guard, inputs=inputs, images=images,
+                                       _additional_authority=image_authority)
+    body = _setup_switch_prepared_registration_body((token["payload"], 0o600))
+    qualified = _setup_switch_b_preflight_inputs(body, inputs)
+    backend = guard["runtime_backend"]
+    def stopped():
+        image_authority()
+        require_setup_switch_publication_bundle(token, guard=guard, phase="published")
+        image_authority()
+    stopped()
+    try:
+        generation_report.inspect_generation_report(Path(body["new_project"]["path"]),
+            published_dir=ZTP_DIR / "config/publickey")
+    except generation_report.GenerationReportError as exc:
+        raise LoadError(f"original B key/report content is not qualified; HOLD: {exc}") from exc
+    stopped()
+    plan = plan_local_dhcp_runtime(qualified)
+    stopped()
+    if backend.name == "supervisor":
+        http_required, dhcp_required = supervisor_service_availability(qualified, plan)
+    elif backend.name == "systemd":
+        http_required = bool(qualified.settings.http_enabled and
+                             (not qualified.settings.dhcp_enabled or plan.listener_names))
+        dhcp_required = bool(qualified.settings.dhcp_enabled and plan.listener_names)
+    else:
+        raise LoadError("B activation runtime backend is unknown; HOLD")
+    stopped()
+    selected = {name for required, name in ((http_required, "apache2"),
+                                            (dhcp_required, "isc-dhcp-server")) if required}
+    if not selected:
+        return "b-no-services-required-wal-retained"
+    if plan.endpoint_ips:
+        ensure_ztp_url_network_ready(qualified)
+        stopped()
+
+    def activation_guard():
+        _require_runtime_lock_guard(guard["deployment_lock_descriptor"])
+        current = set(active_managed_services(backend))
+        if not current <= selected:
+            raise LoadError("unexpected managed services during explicit B activation; HOLD")
+    def authority():
+        image_authority()
+        _require_setup_switch_publication_bundle(token, phase="published",
+                                                require_guard=activation_guard)
+        image_authority()
+    started = False
+    try:
+        for service in sorted(selected):
+            authority()
+            started = True  # Even a failing command may have partially started B.
+            _runtime_service_action(backend, "start", service)
+            authority()
+        if http_required:
+            authority()
+            verify_http_publication(qualified, images, False)
+            authority()
+        if set(active_managed_services(backend)) != selected:
+            raise LoadError("B selected services did not become healthy/active; HOLD")
+        authority()
+    except BaseException as exc:
+        if started:
+            try:
+                _require_runtime_lock_guard(guard["deployment_lock_descriptor"])
+                quiesce_services(False, dhcp_runtime_plan=plan, runtime_backend=backend)
+                _require_runtime_restore_guard(**guard)
+            except BaseException as stop_exc:
+                raise LoadError(f"B activation failed and stop is unconfirmed; HOLD original WAL: {exc}; {stop_exc}") from exc
+        raise
+    return "b-health-passed-wal-retained"
 
 
 def preflight_services(
@@ -16010,6 +16247,7 @@ def main(
                                      runtime_backend=runtime_backend_instance)
             publication_token = register_setup_switch_publication_bundle(
                 parent_candidate, report_candidate, pinned_generation_candidate, guard=publication_guard,
+                images=images, upgrade_enabled=not args.no_upgrade,
             )
         failure_phase = "统一 release 一致性与 DHCP 事务安装"
         if import_snapshot is not None:

@@ -1634,6 +1634,8 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-R22-GENERATION-INPUT-ABA-001 — 跨进程输入换代与多输出一致性
 
+- 2026-10-07 TEST B-only 激活候选：只有原共享发布组、原 Q 输入、原 key/report 与原镜像 WAL 身份均核验后，显式确认才允许尝试 B；命令或健康失败须确认全部受管服务停止，原 WAL/A receipt 不删，不自动启动 A。本地真实 LOAD→SETUP→冷进程续提交与 B 健康失败 workflow 已执行，但 Apache/DHCP/HTTP 探针使用隔离替身；569 项有界回归不是 full proof。现场仍需 Linux 隔离 VM/root-only 可恢复快照、排他锁及其他写者静默，保存镜像注册/父提交/启动/失败停服前后原 fd、名称、父目录、SHA、服务集合和完整 END/退出码；源或发布镜像换绑先 HOLD。未知原镜像 intent 不补办资格；原 no-upgrade 策略独立核验。清理仅恢复已确认隔离快照，保留原 WAL、镜像和 A receipt，不删除未知对象。显式操作员入口、成功退休、旧 A 显式安全激活、断电与 DEV ACK 仍 OPEN，本卡未关闭。
+
 - B 停服预检补充：新发布 WAL 增加原 Q 输入名称、别名/目标、父目录、九字段
   owner 与封存父记录 SHA 的绑定；旧缺少该绑定的 WAL 仍可停服续提交，但不能
   取得 B 预检资格。预检重新读取原 settings/device types，逐步骤前后核原组，

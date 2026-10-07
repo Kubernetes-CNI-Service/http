@@ -4776,11 +4776,28 @@ finally:
     def test_real_setup_publication_cold_stopped_b_preflight_late_input_drift_holds(self):
         self._real_setup_publication_writer_death("selector", b_preflight="late-input")
 
+    def test_real_setup_publication_cold_b_activation_retains_original_wal(self):
+        self._real_setup_publication_writer_death("selector", b_preflight="activate-pass")
+
+    def test_real_setup_publication_cold_b_health_failure_stops_without_a_restore(self):
+        self._real_setup_publication_writer_death("selector", b_preflight="activate-fail")
+
     def _real_setup_publication_writer_death(self, death_phase, *, resume_cli=False, late_fault=None,
                                             b_preflight=None):
         with tempfile.TemporaryDirectory(prefix="r22-publication-wal-") as name:
             fixture = self._private_setup_switch_fixture(Path(name))
             root, _p, q, _common, _p_only, _q_only, manifest, _before, *_rest = fixture
+            if b_preflight and b_preflight.startswith("activate-"):
+                from test_cases.test_ssh_key_preparation_contract import public_line
+                (q / "mgmt-server.pub").write_bytes(public_line("ssh-ed25519", 47, "management"))
+                document = yaml.safe_load((q / "01-global.yaml").read_text())
+                document["common"]["mgmt"]["http"].update(
+                    status="enabled", address="192.0.2.40", http_root=str(root))
+                document["switches"][0]["eth"]["version"] = "5.12.0"
+                (q / "01-global.yaml").write_text(yaml.safe_dump(document, sort_keys=False))
+                image = root / "ztp/image/cumulus/cumulus-linux-5.12.0-mlx-amd64.bin"
+                image.parent.mkdir(parents=True, exist_ok=True)
+                image.write_bytes(b"#!/bin/sh\n" + b"x" * 1048576)
             for relative in ("tools/lldp-analyze-tool/99-output-p2p",
                              "tools/lldp-analyze-tool/99-output-monitor",
                              "tools/ibdiagnet-analyze-tool/99-output-p2p"):
@@ -4792,6 +4809,10 @@ finally:
                 first_link=root / "never-created-link",
             )
             self.assertEqual(25, first.returncode, first.stdout + first.stderr)
+            if b_preflight and b_preflight.startswith("activate-"):
+                # The report fixture's two independent literal fingerprints
+                # correspond to these public wire bytes, not producer output.
+                (q / "laptop.pub").write_bytes(public_line("ssh-ed25519", 31, "laptop"))
             api = load_script("r22_publication_writer_probe", root / "DAY0-Prepare/11-load.py")
             self.assertTrue(callable(getattr(api, "register_setup_switch_publication_bundle", None)),
                             "real LOAD cannot register its publication group in the original SETUP WAL")
@@ -4810,7 +4831,10 @@ descriptor = api.acquire_deployment_lock(exclusive=True)
 guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True,
              runtime_backend=SimpleNamespace(name='supervisor'))
 candidates = private_publication_candidates(api, q)
-token = api.register_setup_switch_publication_bundle(*candidates, guard=guard)
+image_options = {}
+if sys.argv[5].startswith('activate-'):
+    image_options['images'] = {'eth': root / 'ztp/image/cumulus/cumulus-linux-5.12.0-mlx-amd64.bin'}
+token = api.register_setup_switch_publication_bundle(*candidates, guard=guard, **image_options)
 api.commit_prepared_release(candidates[0], require_authority=lambda:
     api.require_setup_switch_publication_bundle(token, guard=guard))
 if sys.argv[4] in ('report', 'selector'):
@@ -4824,7 +4848,7 @@ if sys.argv[4] == 'selector':
 os.kill(os.getpid(), signal.SIGKILL)
 '''
             child = subprocess.run([sys.executable, "-B", "-c", operation,
-                                    str(root), str(q), str(ROOT), death_phase], cwd=root,
+                                    str(root), str(q), str(ROOT), death_phase, b_preflight or "none"], cwd=root,
                                    capture_output=True, text=True, check=False, timeout=30)
             self.assertEqual(-signal.SIGKILL, child.returncode, child.stdout + child.stderr)
             journal = root / "ztp/.setup-switch-journal.json"
@@ -4888,7 +4912,53 @@ try:
     token = api.open_setup_switch_publication_bundle(q, guard=guard)
     before = token['phase']
     result = api.resume_setup_switch_publication_bundle(token, guard=guard)
-    if sys.argv[5] != 'none':
+    if sys.argv[5].startswith('activate-'):
+        parent = json.loads((q / '99-output-ztp/current-release.json').read_bytes())
+        paths = parent['input_paths']
+        inputs = api.ProjectInputs(global_file=q / paths['global'], devices_file=q / paths['devices'],
+            subnet_file=q / paths['subnet'], p2p_file=q / paths['p2p'], device_types=frozenset(),
+            pubkeys=(), settings=api.load_global(q / paths['global']))
+        active, actions = set(), []
+        api.active_managed_services = lambda *a, **kw: tuple(sorted(active))
+        api.plan_local_dhcp_runtime = lambda *a, **kw: SimpleNamespace(endpoint_ips=(), listener_names=())
+        api.validate_management_host = lambda *a, **kw: True
+        # External auth/Apache/live HTTP are hermetic; real report inspection,
+        # normal preflight, Q owner gates and real SETUP stay on this path.
+        api.verify_control_auth = lambda **kw: None
+        api.verify_apache_publication_boundary = lambda **kw: None
+        def command(argv, **kw):
+            assert argv[-2:] == ['apache2ctl', 'configtest'], argv
+        api.run = command
+        def service(backend, action, name, **kw):
+            assert action == 'start' and name == 'apache2', (action, name)
+            active.add(name)
+            actions.append((action, name))
+        api._runtime_service_action = service
+        def health(*a, **kw):
+            if sys.argv[5] == 'activate-fail':
+                raise api.LoadError('independent cold B health rejection')
+        api.verify_http_publication = health
+        def stop(*a, **kw):
+            active.clear()
+            actions.append(('stop', 'all'))
+        api.quiesce_services = stop
+        api.restore_cross_project_rollback_context = forbidden
+        original_wal = token['payload']
+        try:
+            image = root / 'ztp/image/cumulus/cumulus-linux-5.12.0-mlx-amd64.bin'
+            status = api.activate_setup_switch_b_publication(token, guard=guard, inputs=inputs,
+                images={'eth': image}, confirmed=True)
+        except api.LoadError as exc:
+            assert sys.argv[5] == 'activate-fail' and 'B health rejection' in str(exc), str(exc)
+            assert active == set() and actions == [('start', 'apache2'), ('stop', 'all')], actions
+            status = 'b-health-failed-stopped-wal-retained'
+        else:
+            assert sys.argv[5] == 'activate-pass', 'B failure was accepted'
+            assert active == {'apache2'} and actions == [('start', 'apache2')], actions
+            assert status == 'b-health-passed-wal-retained', status
+        assert original_wal == token['journal'].read_bytes()
+        print('R22_PREFLIGHT=' + status)
+    elif sys.argv[5] != 'none':
         parent = json.loads((q / '99-output-ztp/current-release.json').read_bytes())
         paths = parent['input_paths']
         inputs = api.ProjectInputs(global_file=q / paths['global'], devices_file=q / paths['devices'],
@@ -4942,8 +5012,11 @@ finally:
                 return
             self.assertEqual(0, recovered.returncode, recovered.stdout + recovered.stderr)
             if b_preflight:
-                self.assertIn("R22_PREFLIGHT=" + ("b-preflight-passed-still-stopped-wal-retained"
-                    if b_preflight == "pass" else "held-still-stopped-wal-retained"), recovered.stdout)
+                expected = {"pass": "b-preflight-passed-still-stopped-wal-retained",
+                    "late-input": "held-still-stopped-wal-retained",
+                    "activate-pass": "b-health-passed-wal-retained",
+                    "activate-fail": "b-health-failed-stopped-wal-retained"}[b_preflight]
+                self.assertIn("R22_PREFLIGHT=" + expected, recovered.stdout)
             payload = json.loads(next(line.split("=", 1)[1] for line in recovered.stdout.splitlines()
                                       if line.startswith("R22_RESUME=")))
             self.assertEqual({"before": {"parent": "report", "report": "selector", "selector": "published"}[death_phase],

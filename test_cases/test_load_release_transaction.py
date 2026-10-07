@@ -960,7 +960,7 @@ def private_publication_candidates(api, project):
 
 
 class ReleaseTransactionTests(unittest.TestCase):
-    def _prepare_published_q_for_stopped_preflight(self):
+    def _prepare_published_q_for_stopped_preflight(self, *, with_image=False):
         state, context, guard = self._prepare_q_manifest_publication()
         q = state[1]
         for name, source in (("01-global.yaml", self.inputs.global_file),
@@ -971,6 +971,8 @@ class ReleaseTransactionTests(unittest.TestCase):
         (q / "p2p.xlsx").symlink_to("p2p-original.xlsx")
         document = yaml.safe_load((q / "01-global.yaml").read_text())
         document["common"]["mgmt"]["dhcp-server"]["status"] = "disabled"
+        if with_image:
+            document["switches"][0]["eth"]["version"] = "5.12.0"
         (q / "01-global.yaml").write_text(yaml.safe_dump(document, sort_keys=False))
         (q / "02-dhcp-subnet_config.csv").write_text(
             "shared_network,subnet,netmask,range_start,range_end,routers,ztp_service_ip,cumulus_profile,nvos_ztp\n"
@@ -979,9 +981,18 @@ class ReleaseTransactionTests(unittest.TestCase):
             devices_file=q / "02-devices_config.csv", subnet_file=q / "02-dhcp-subnet_config.csv",
             p2p_file=q / "p2p-original.xlsx", settings=LOAD.load_global(q / "01-global.yaml"),
             source_identities=None)
+        image_options = {}
+        if with_image:
+            basename = "cumulus-linux-5.12.0-mlx-amd64.bin"
+            source = self.root / basename
+            source.write_bytes(b"#!/bin/sh\n" + b"x" * 1048576)
+            published = self.ztp / "image/cumulus" / basename
+            published.parent.mkdir(parents=True)
+            published.write_bytes(source.read_bytes())
+            image_options["images"] = {"eth": source}
         candidates = private_publication_candidates(LOAD, q)
         with mock.patch.object(LOAD, "active_managed_services", return_value=()):
-            token = LOAD.register_setup_switch_publication_bundle(*candidates, guard=guard)
+            token = LOAD.register_setup_switch_publication_bundle(*candidates, guard=guard, **image_options)
             self.addCleanup(LOAD.close_setup_switch_publication_bundle, token)
             LOAD.commit_prepared_release(candidates[0], require_authority=lambda:
                 LOAD.require_setup_switch_publication_bundle(token, guard=guard))
@@ -1077,6 +1088,185 @@ class ReleaseTransactionTests(unittest.TestCase):
             self.assertIs(fresh, availability.call_args.args[1])
             start.assert_not_called()
         self.assertEqual(token["payload"], state[-3].read_bytes())
+
+    def test_b_activation_requires_explicit_confirmation_before_any_action(self):
+        state, _context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "preflight_services") as preflight, \
+                mock.patch.object(LOAD, "_runtime_service_action") as action:
+            with self.assertRaisesRegex(LOAD.LoadError, "explicit|HOLD"):
+                LOAD.activate_setup_switch_b_publication(token, guard=guard, inputs=inputs, images={})
+            preflight.assert_not_called()
+            action.assert_not_called()
+        self.assertEqual(token["payload"], state[-3].read_bytes())
+
+    def test_original_no_upgrade_image_policy_does_not_require_a_version(self):
+        # The original persisted no-upgrade policy is authoritative; resolving
+        # an unused version must not reject a legitimate image-free B attempt.
+        inputs = SimpleNamespace()
+        with mock.patch.object(LOAD, "expected_images", side_effect=AssertionError("unused version lookup")) as expected:
+            with LOAD._setup_switch_b_image_authority(inputs, {},
+                    original_intent={"policy": "disabled", "files": {}}) as authority:
+                authority()
+            expected.assert_not_called()
+
+    def test_b_activation_health_failure_stops_and_keeps_original_wal(self):
+        state, _context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight()
+        active = set()
+        def service(_backend, action, name, **kwargs):
+            self.assertEqual("start", action)
+            active.add(name)
+        def stop(*args, **kwargs):
+            active.clear()
+        with mock.patch.object(LOAD, "active_managed_services", side_effect=lambda *a, **kw: tuple(sorted(active))), \
+                mock.patch.object(LOAD, "preflight_services"), \
+                mock.patch.object(LOAD.generation_report, "inspect_generation_report"), \
+                mock.patch.object(LOAD, "expected_images", return_value={}), \
+                mock.patch.object(LOAD, "plan_local_dhcp_runtime", return_value=SimpleNamespace(endpoint_ips=(), listener_names=())), \
+                mock.patch.object(LOAD, "supervisor_service_availability", return_value=(True, False)), \
+                mock.patch.object(LOAD, "_runtime_service_action", side_effect=service) as action, \
+                mock.patch.object(LOAD, "verify_http_publication", side_effect=LOAD.LoadError("independent B health rejection")), \
+                mock.patch.object(LOAD, "quiesce_services", side_effect=stop) as quiesce, \
+                mock.patch.object(LOAD, "restore_cross_project_rollback_context") as restore:
+            with self.assertRaisesRegex(LOAD.LoadError, "B health rejection"):
+                LOAD.activate_setup_switch_b_publication(token, guard=guard, inputs=inputs, images={}, confirmed=True)
+            action.assert_called_once()
+            quiesce.assert_called_once()
+            restore.assert_not_called()
+        self.assertEqual(set(), active)
+        self.assertEqual(token["payload"], state[-3].read_bytes())
+
+    def test_b_activation_late_input_drift_stops_before_health_probe(self):
+        state, _context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight()
+        active = set()
+        def service(_backend, action, name, **kwargs):
+            active.add(name)
+            inputs.devices_file.write_bytes(b"independent drift immediately after B start\n")
+        with mock.patch.object(LOAD, "active_managed_services", side_effect=lambda *a, **kw: tuple(sorted(active))), \
+                mock.patch.object(LOAD, "preflight_services"), \
+                mock.patch.object(LOAD.generation_report, "inspect_generation_report"), \
+                mock.patch.object(LOAD, "expected_images", return_value={}), \
+                mock.patch.object(LOAD, "plan_local_dhcp_runtime", return_value=SimpleNamespace(endpoint_ips=(), listener_names=())), \
+                mock.patch.object(LOAD, "supervisor_service_availability", return_value=(True, False)), \
+                mock.patch.object(LOAD, "_runtime_service_action", side_effect=service), \
+                mock.patch.object(LOAD, "verify_http_publication") as probe, \
+                mock.patch.object(LOAD, "quiesce_services", side_effect=lambda *a, **kw: active.clear()) as quiesce:
+            with self.assertRaisesRegex(LOAD.LoadError, "HOLD"):
+                LOAD.activate_setup_switch_b_publication(token, guard=guard, inputs=inputs, images={}, confirmed=True)
+            probe.assert_not_called()
+            quiesce.assert_called_once()
+        self.assertEqual(set(), active)
+        self.assertEqual(token["payload"], state[-3].read_bytes())
+
+    def test_b_activation_healthy_exact_group_still_retains_wal_and_a_evidence(self):
+        state, context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight()
+        active = set()
+        receipt_path = context.runtime_receipt / "receipt.json"
+        self.assertTrue(receipt_path.is_file())
+        receipt = receipt_path.read_bytes()
+        with mock.patch.object(LOAD, "active_managed_services", side_effect=lambda *a, **kw: tuple(sorted(active))), \
+                mock.patch.object(LOAD, "preflight_services"), \
+                mock.patch.object(LOAD.generation_report, "inspect_generation_report"), \
+                mock.patch.object(LOAD, "expected_images", return_value={}), \
+                mock.patch.object(LOAD, "plan_local_dhcp_runtime", return_value=SimpleNamespace(endpoint_ips=(), listener_names=())), \
+                mock.patch.object(LOAD, "supervisor_service_availability", return_value=(True, False)), \
+                mock.patch.object(LOAD, "_runtime_service_action", side_effect=lambda backend, action, name: active.add(name)), \
+                mock.patch.object(LOAD, "verify_http_publication") as probe, \
+                mock.patch.object(LOAD, "quiesce_services") as quiesce:
+            result = LOAD.activate_setup_switch_b_publication(token, guard=guard, inputs=inputs, images={}, confirmed=True)
+            self.assertEqual("b-health-passed-wal-retained", result)
+            probe.assert_called_once()
+            quiesce.assert_not_called()
+        self.assertEqual({"apache2"}, active)
+        self.assertEqual(token["payload"], state[-3].read_bytes())
+        self.assertEqual(receipt, receipt_path.read_bytes())
+
+    def test_b_activation_rejects_unqualified_key_report_before_any_start(self):
+        state, _context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "preflight_services"), \
+                mock.patch.object(LOAD, "expected_images", return_value={}), \
+                mock.patch.object(LOAD, "_runtime_service_action") as action:
+            with self.assertRaisesRegex(LOAD.LoadError, "key/report.*HOLD"):
+                LOAD.activate_setup_switch_b_publication(token, guard=guard, inputs=inputs, images={}, confirmed=True)
+            action.assert_not_called()
+        self.assertEqual(token["payload"], state[-3].read_bytes())
+
+    def test_b_activation_start_error_preserves_original_cause_and_stops(self):
+        state, _context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "preflight_services"), \
+                mock.patch.object(LOAD.generation_report, "inspect_generation_report"), \
+                mock.patch.object(LOAD, "expected_images", return_value={}), \
+                mock.patch.object(LOAD, "plan_local_dhcp_runtime", return_value=SimpleNamespace(endpoint_ips=(), listener_names=())), \
+                mock.patch.object(LOAD, "supervisor_service_availability", return_value=(True, False)), \
+                mock.patch.object(LOAD, "_runtime_service_action", side_effect=OSError("independent service spawn failure")), \
+                mock.patch.object(LOAD, "quiesce_services") as quiesce:
+            with self.assertRaisesRegex(OSError, "independent service spawn failure"):
+                LOAD.activate_setup_switch_b_publication(token, guard=guard, inputs=inputs, images={}, confirmed=True)
+            quiesce.assert_called_once()
+        self.assertEqual(token["payload"], state[-3].read_bytes())
+
+    def test_b_activation_cannot_omit_declared_image_checks(self):
+        state, _context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight(with_image=True)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "preflight_services"), \
+                mock.patch.object(LOAD.generation_report, "inspect_generation_report"), \
+                mock.patch.object(LOAD, "plan_local_dhcp_runtime", return_value=SimpleNamespace(endpoint_ips=(), listener_names=())), \
+                mock.patch.object(LOAD, "supervisor_service_availability", return_value=(True, False)), \
+                mock.patch.object(LOAD, "_runtime_service_action") as action, \
+                mock.patch.object(LOAD, "verify_http_publication"):
+            with self.assertRaisesRegex(LOAD.LoadError, "image.*HOLD"):
+                LOAD.activate_setup_switch_b_publication(token, guard=guard, inputs=inputs, images={}, confirmed=True)
+            action.assert_not_called()
+        self.assertEqual(token["payload"], state[-3].read_bytes())
+
+    def test_b_activation_late_published_image_drift_stops_before_health_probe(self):
+        state, _context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight(with_image=True)
+        basename = "cumulus-linux-5.12.0-mlx-amd64.bin"
+        source = self.root / basename
+        published = self.ztp / "image/cumulus" / basename
+        active = set()
+        def service(_backend, action, name, **kwargs):
+            active.add(name)
+            published.write_bytes(b"independent published image changed after start\n")
+        with mock.patch.object(LOAD, "active_managed_services", side_effect=lambda *a, **kw: tuple(sorted(active))), \
+                mock.patch.object(LOAD, "preflight_services"), \
+                mock.patch.object(LOAD.generation_report, "inspect_generation_report"), \
+                mock.patch.object(LOAD, "plan_local_dhcp_runtime", return_value=SimpleNamespace(endpoint_ips=(), listener_names=())), \
+                mock.patch.object(LOAD, "supervisor_service_availability", return_value=(True, False)), \
+                mock.patch.object(LOAD, "_runtime_service_action", side_effect=service), \
+                mock.patch.object(LOAD, "verify_http_publication") as probe, \
+                mock.patch.object(LOAD, "quiesce_services", side_effect=lambda *a, **kw: active.clear()) as quiesce:
+            with self.assertRaisesRegex(LOAD.LoadError, "image.*HOLD"):
+                LOAD.activate_setup_switch_b_publication(token, guard=guard, inputs=inputs,
+                    images={"eth": source}, confirmed=True)
+            probe.assert_not_called()
+            quiesce.assert_called_once()
+        self.assertEqual(set(), active)
+        self.assertEqual(token["payload"], state[-3].read_bytes())
+        self.assertEqual(b"independent published image changed after start\n", published.read_bytes())
+
+    def test_publication_wal_freezes_image_before_parent_and_cold_activation(self):
+        state, _context, guard, token, inputs = self._prepare_published_q_for_stopped_preflight(with_image=True)
+        intent = json.loads(token["payload"])["body"]["publication_bundle"]["image_intent"]
+        self.assertEqual("enabled", intent["policy"])
+        self.assertEqual({"eth"}, set(intent["files"]))
+        source = self.root / "cumulus-linux-5.12.0-mlx-amd64.bin"
+        held = source.with_name("independent-original-image")
+        source.rename(held)
+        source.write_bytes(held.read_bytes())
+        source.chmod(0o644)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "preflight_services") as preflight, \
+                mock.patch.object(LOAD, "_runtime_service_action") as start:
+            with self.assertRaisesRegex(LOAD.LoadError, "image.*HOLD"):
+                LOAD.activate_setup_switch_b_publication(token, guard=guard, inputs=inputs,
+                    images={"eth": source}, confirmed=True)
+            preflight.assert_not_called()
+            start.assert_not_called()
+        self.assertEqual(token["payload"], state[-3].read_bytes())
+        self.assertEqual(source.read_bytes(), held.read_bytes())
 
     def _prepare_q_manifest_publication(self):
         state, context = self._prepare_persisted_a_runtime_switch()
@@ -1447,8 +1637,9 @@ class ReleaseTransactionTests(unittest.TestCase):
             self.addCleanup(LOAD.close_setup_switch_publication_bundle, token)
             body = json.loads(journal.read_bytes())["body"]
             binding = body["publication_bundle"]
-            self.assertEqual({"parent", "report", "generation", "selector", "shared_setup"}, set(binding))
+            self.assertEqual({"parent", "report", "generation", "selector", "shared_setup", "image_intent"}, set(binding))
             self.assertIsNone(binding["shared_setup"], "a legacy WAL without Q intent must not acquire Q qualification")
+            self.assertIsNone(binding["image_intent"], "unbound legacy images must not acquire cold activation permission")
             for key, candidate in zip(("parent", "report"), candidates[:2]):
                 self.assertEqual(str(candidate.destination), binding[key]["destination"])
                 self.assertEqual(str(candidate.temporary), binding[key]["temporary"])
