@@ -287,7 +287,8 @@
         "test_cases.test_req7_mutation_rejection",
         "test_cases.test_req7_attempt_journal",
         "test_cases.test_req7_metadata_capacity",
-        "test_cases.test_req7_send_unit"
+        "test_cases.test_req7_send_unit",
+        "test_cases.test_req7_send_intent"
       ]
     },
     {
@@ -611,7 +612,8 @@
     "monitor/issue_tracker_mutation_rejection.py": "monitor/issue_tracker_mutation_rejection.py",
     "monitor/issue_tracker_attempt_journal.py": "monitor/issue_tracker_attempt_journal.py",
     "monitor/issue_tracker_metadata_capacity.py": "monitor/issue_tracker_metadata_capacity.py",
-    "monitor/issue_tracker_send_unit.py": "monitor/issue_tracker_send_unit.py"
+    "monitor/issue_tracker_send_unit.py": "monitor/issue_tracker_send_unit.py",
+    "monitor/issue_tracker_send_intent.py": "monitor/issue_tracker_send_intent.py"
   },
   "test_rules": [
     {
@@ -1738,6 +1740,11 @@
       "id": "issue_tracker_send_unit",
       "paths": ["monitor/issue_tracker_send_unit.py"],
       "tests": ["test_cases.test_req7_send_unit"]
+    },
+    {
+      "id": "issue_tracker_send_intent",
+      "paths": ["monitor/issue_tracker_send_intent.py"],
+      "tests": ["test_cases.test_req7_send_intent"]
     }
   ],
   "workflows": [
@@ -3181,6 +3188,11 @@
       "id": "req7_real_cell_composer_immutable_journal",
       "members": ["monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_online_cells.py", "monitor/issue_tracker_attempt_journal.py", "monitor/issue_tracker_local_commit.py", "monitor/issue_tracker_manifest.py"],
       "tests": ["test_cases.test_req7_send_unit"]
+    },
+    {
+      "id": "req7_compiled_action_wire_journal_cold_processes",
+      "members": ["monitor/issue_tracker_send_intent.py", "monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_attempt_journal.py", "monitor/issue_tracker_local_commit.py"],
+      "tests": ["test_cases.test_req7_send_intent"]
     }
   ],
   "path_rules": [

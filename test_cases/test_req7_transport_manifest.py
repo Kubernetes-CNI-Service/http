@@ -19,6 +19,7 @@ SCRIPTS = {
     "monitor/issue_tracker_attempt_journal.py": "test_cases.test_req7_attempt_journal",
     "monitor/issue_tracker_metadata_capacity.py": "test_cases.test_req7_metadata_capacity",
     "monitor/issue_tracker_send_unit.py": "test_cases.test_req7_send_unit",
+    "monitor/issue_tracker_send_intent.py": "test_cases.test_req7_send_intent",
 }
 
 

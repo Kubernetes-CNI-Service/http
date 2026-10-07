@@ -2076,6 +2076,15 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 证据：保存精确命令/退出码、完整物理顺序日志、前后 stat/inode/SHA、启动前 monotonic 时间、阶段耗时、持有锁的 FD/session 归属、截止期、TERM/KILL/reap/会话不存在和父死子存的独立见证。私有响应和诊断不进入公开日志；局部原生慢读 PASS 不代表整个 REQ7 或生产权限。
 - 故障注入、清理与风险：注入启动失败、DNS/慢读、pipe 关闭、监督器死亡和无法终止；保持原预算/行为断言。本地夹具已独立复现并修正已回收 leader 的同号存活 group 被误认为信号权限；首次检查之后、异常清理和 TERM/KILL 升级之前也必须重新确认活 leader 的 session/group 归属，不能把首次检查缓存为永久信号权限。真实 PID 重用仍 NOT RUN，必须验证不向该不确定 group 发信号、终止未确认保持 HOLD。实际临时 flock 的终止被拒工作流必须保持其他候选无法取得锁，直到本卡确证拥有的子进程完成清理。只终止本卡确证拥有的隔离会话，不能向外部 PID/group 发信号；清理不确定保持 HOLD，由授权责任人恢复隔离快照并重核锁。不得以 PID 重用、过期锁、超时宽限或重发来隐藏 UNKNOWN。
 
+## TC-REAL-REQ7-COMPILED-SEND-INTENT-001 — 非递归 action 与 wire 的持久化先后
+
+- Case ID：`TC-REAL-REQ7-COMPILED-SEND-INTENT-001`；类型：real-environment / durable transaction；对应 C-6/C-14/C-19。状态：**NOT RUN / REAL_ENV REQUIRED**。`monitor/issue_tracker_send_intent.py` 是未安装库；本地 direct 与真实 composer → C-6 owner → action/wire journal → 六个冷启动进程 workflow 不证明实际断电、在线发送或 COMPLETE。
+- 风险与目标：非递归 ACTION-PREIMAGE、action_digest 与 wire_sha256 必须先于任何 counted intent 完整落盘；不接受摘要一致作为来源权威，不把旧 opaque wire journal 补成新的 action 权威；部分／陌生记录、文件或目录位移、链接、权限或 fsync 不确定保持 HOLD。六次意图不证明真实尝试上界。
+- 前置条件、权限与输入：另获 owner 精确 Stage O 一次性副本及断电故障注入授权；在固定部署 Python/平台、已证 spreadsheet-wide OS owner、新鲜准入、固定单次消费 launcher 与不可变受管单元完成后执行。当前库使用项目 C-6 owner，不提供跨项目锁、凭据、发送能力或清理入口，本卡不授权在线操作。
+- 步骤与独立预期：先核真实受管单元，将 ACTION-PREIMAGE 和 explicit header 以 single-link 0600、目录 0700、held no-follow FD、atomic NOREPLACE、file/directory fsync 持久保存，再保存精确 wire，再记录每次 UNKNOWN；故障重启后计数和原像不重置。观察器不得制造、修复、回收记录；第七次、变字节、旧 store 或 unresolved 单元拒绝。必须由固定 launcher 另证一份新意图只消费一次，响应另经完整同连接关联和 COMPLETE 对账，不从本地文件存在推导发送许可。
+- 证据：保存精确 HEAD/tree/dirty/manifest/Python/平台、完整日志物理顺序及 END、前后 stat/inode/大小/SHA256、action/wire 摘要、每份 intent 与 barrier 顺序、真实调用次数和冷启动见证；私有 wire、nonce、表内容及凭据不公开。局部 PASS 不代表整个 REQ7 或普通发布证明。
+- 故障注入、清理与风险：仅获准副本或私有卷内注入 action/header/wire/count 各 barrier 失败、断电、命名空间位移和父进程退出；保留部分证据和 UNKNOWN，不补建 action、不删除真实 journal／fence／预留或解锁重发。只回收本卡确证拥有的测试进程和临时副本，实际断电／卷回滚及线上故障仍 NOT RUN。
+
 ## TC-REAL-REQ7-IMMUTABLE-SEND-UNIT-001 — 单表不可变 batch / History / 永久 fence
 
 - Case ID：`TC-REAL-REQ7-IMMUTABLE-SEND-UNIT-001`；类型：real-environment / transaction / C-19+C-25+C-26。状态：**NOT RUN / REAL_ENV REQUIRED**。`monitor/issue_tracker_send_unit.py` 是未安装的纯组合库；caller-supplied manifest、坐标、nonce 和 occupied IDs 只被绑定，不是发送许可或完整准入。

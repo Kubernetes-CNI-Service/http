@@ -53,6 +53,7 @@ REQ7_CONTROLLED_TRANSPORT_LIBRARIES = frozenset({
     "monitor/issue_tracker_attempt_journal.py",
     "monitor/issue_tracker_metadata_capacity.py",
     "monitor/issue_tracker_send_unit.py",
+    "monitor/issue_tracker_send_intent.py",
 })
 
 RUNTIME_PATTERNS = (
@@ -574,6 +575,11 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
                 inputs = "ACTIVE 本地 writer token、单元标识和不超过 1 MiB 的冻结字节；它们不是合格 Sheets batch 或发送能力。"
                 recovery = "计数耗尽、部分／外来文件、字节变化或 fsync 失败均 HOLD，保留证据；无清理、重置或新单元接管。"
                 example = "python3 -B -m unittest -v test_cases.test_req7_attempt_journal  # 仅开发测试"
+            elif relative == "monitor/issue_tracker_send_intent.py":
+                scenario = "在实际本地 owner 内先持久保存非递归 ACTION-PREIMAGE 和 action/wire 摘要，再保存不可变 wire，最后记录 UNKNOWN 意图。"
+                inputs = "ACTIVE C-6 token 与冻结单表组合；摘要一致不证明 protected 准入、跨项目 spreadsheet 锁或发送许可。"
+                recovery = "旧 wire store、部分记录、篡改、位移、fsync 失败或计数耗尽时 HOLD；保留原像，不补建、不修复、不重置 UNKNOWN。"
+                example = "python3 -B -m unittest -v test_cases.test_req7_send_intent  # 仅开发测试"
             elif relative == "monitor/issue_tracker_send_unit.py":
                 scenario = "冻结单表业务变更、全部对应 History 与一个永久 fence；非递归 action_digest 绑定完整 outcome 和审计集合。"
                 inputs = "同目标 family 的完整有序 manifest 操作与明确字面值／观察；身份、nonce、占用 ID 只被绑定，未证明准入。"

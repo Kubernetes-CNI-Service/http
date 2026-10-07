@@ -874,3 +874,11 @@ VISIBLE_ONLY_UNPROVED，因为别的 Cloud 项目的 PROJECT 元数据可能不�
 真实 cell encoder → composer → C-6 owner / immutable journal workflow 验证同字节六次意图
 和改变字节拒绝，不证明真实发送上界、nonce 权威、全表锁、新鲜准入或 COMPLETE。
 31-bit fence 投影可能碰撞，占用时 HOLD 不换 ID；库未安装，真机卡 NOT RUN。
+
+`test_cases.test_req7_send_intent` 将真实 composer → C-6 owner → 非递归
+ACTION-PREIMAGE/action_digest → immutable wire journal → 六个冷启动进程的意图计数
+串联验证。action 文件和摘要 header 必须先于 wire、wire 必须先于计数持久化；
+旧 opaque wire store 不能补建 action 权威，部分 barrier、链接、外来命名空间和位移
+拒绝且保留 UNKNOWN。库未安装，无重置、解锁、修复或发送能力；六次意图仍不证明
+真实尝试上界、spreadsheet-wide owner、新鲜准入或 COMPLETE，不代表 REQ7 整体完成。
+真实断电和在线关联部分见 `TC-REAL-REQ7-COMPILED-SEND-INTENT-001`，状态 NOT RUN。
