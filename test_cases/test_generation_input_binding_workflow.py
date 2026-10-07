@@ -3604,6 +3604,78 @@ finally:
             with self.subTest(kind=kind):
                 self._assert_real_setup_restore_stage_authority_holds("manifest", kind)
 
+    def test_real_setup_q_manifest_publication_stage_holds_without_eager_rollback(self):
+        for kind in ("wal", "q"):
+            with self.subTest(kind=kind):
+                with tempfile.TemporaryDirectory(prefix="r22-q-manifest-publish-stage-") as name:
+                    fixture = self._private_setup_switch_fixture(Path(name))
+                    root, _p, _q, common, _p_only, _q_only, manifest, before, hook, _barrier, _home = fixture
+                    for relative in (
+                        "tools/lldp-analyze-tool/99-output-p2p",
+                        "tools/lldp-analyze-tool/99-output-monitor",
+                        "tools/ibdiagnet-analyze-tool/99-output-p2p",
+                    ):
+                        leaf = root / relative
+                        if leaf.is_dir() and not leaf.is_symlink():
+                            shutil.rmtree(leaf)
+                    hook_file = hook / "sitecustomize.py"
+                    hook_file.write_text(hook_file.read_text() + f'''
+import json
+import stat
+root = Path({str(root)!r})
+manifest = root / 'ztp/.setup_manifest'
+kind = {kind!r}
+observed = root / 'q-manifest-stage-evidence.json'
+original_sync = os.fsync
+def drift_manifest_publication(fd):
+    result = original_sync(fd)
+    info = os.fstat(fd)
+    stages = (*manifest.parent.glob('.setup_manifest.*'),
+              *manifest.parent.glob('.' + manifest.name + '.rollback.*'))
+    if (not observed.exists() and stat.S_ISREG(info.st_mode)
+            and any(path.lstat().st_ino == info.st_ino for path in stages)):
+        journal = root / 'ztp/.setup-switch-journal.json'
+        body = json.loads(journal.read_bytes())['body']
+        common = root / 'ztp/config/cumulus/template/01-global.yaml'
+        evidence = {{'wal': journal.read_text(), 'manifest_ino': manifest.lstat().st_ino,
+                    'manifest': manifest.read_text(), 'common_ino': common.lstat().st_ino,
+                    'common': os.readlink(common)}}
+        if kind == 'wal':
+            journal.rename(root / 'held-original-publish-wal')
+            journal.write_text(evidence['wal'])
+            journal.chmod(0o600)
+            evidence['foreign_ino'] = journal.lstat().st_ino
+        else:
+            marker = Path(body['new_project']['path']) / '99-output-ztp/current-release.json'
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_bytes(b'independent Q parent appeared during publication\\n')
+            evidence['foreign_ino'] = marker.lstat().st_ino
+        observed.write_text(json.dumps(evidence))
+    return result
+os.fsync = drift_manifest_publication
+''', encoding="utf-8")
+                    result = self._run_private_load_setup_switch(
+                        fixture, prepare_journal=False, auto_prepare_journal=True,
+                        kill_after_replace=root / "never-replaced",
+                    )
+                    observed = root / "q-manifest-stage-evidence.json"
+                    self.assertTrue(observed.is_file(), result.stdout + result.stderr)
+                    evidence = json.loads(observed.read_text())
+                    self.assertEqual(24, result.returncode, result.stdout + result.stderr)
+                    self.assertEqual(before["manifest"], manifest.read_bytes())
+                    self.assertEqual(evidence["manifest_ino"], manifest.lstat().st_ino,
+                                     "publication or eager rollback replaced P manifest after HOLD")
+                    self.assertEqual((evidence["common_ino"], evidence["common"]),
+                                     (common.lstat().st_ino, os.readlink(common)),
+                                     "eager rollback consumed the changed total authority")
+                    journal = root / "ztp/.setup-switch-journal.json"
+                    self.assertEqual(evidence["wal"], journal.read_text())
+                    authority = (journal if kind == "wal" else fixture[2] / "99-output-ztp/current-release.json")
+                    self.assertEqual(evidence["foreign_ino"], authority.lstat().st_ino)
+                    self.assertFalse(list(manifest.parent.glob(".setup_manifest.*")))
+                    self.assertFalse(list(manifest.parent.glob(f".{manifest.name}.rollback.*")))
+                    self.assertFalse((root / "service-started").exists())
+
     def test_real_setup_q_manifest_commit_cold_recovers_p_and_original_logs(self):
         """Q manifest publication and successful SETUP must retain P recovery bytes."""
         for death_at_manifest in (True, False):

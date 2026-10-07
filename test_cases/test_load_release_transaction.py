@@ -3583,6 +3583,80 @@ class ReleaseTransactionTests(unittest.TestCase):
                     fixture.doCleanups()
                     fixture.tearDown()
 
+    def _assert_q_manifest_publication_stage_holds_authority(self, kind, *, boundary="manifest"):
+        state, context = self._prepare_persisted_a_runtime_switch()
+        _p, q, common = state[:3]
+        manifest, journal, descriptor, backend = state[7], *state[-3:]
+        common.unlink()
+        common.symlink_to(os.path.relpath(state[5], common.parent))
+        state[3].unlink()
+        before = (manifest.lstat().st_ino, manifest.read_bytes())
+        authority = (journal if kind == "wal" else context.runtime_receipt / "receipt.json"
+                     if kind == "a" else q / "99-output-ztp/current-release.json")
+        retained = self.root / "held-original-q-manifest-authority"
+        injected = []
+        sync = os.fsync
+
+        def drift_after_manifest_sync(fd):
+            result = sync(fd)
+            info = os.fstat(fd)
+            stages = (*manifest.parent.glob(".setup_manifest.*"),
+                      *manifest.parent.glob(f".{manifest.name}.rollback.*"))
+            manifest_stage = (boundary == "manifest" and stat.S_ISREG(info.st_mode)
+                              and any(path.lstat().st_ino == info.st_ino for path in stages))
+            wal_parent_stage = (boundary == "wal-parent" and stat.S_ISDIR(info.st_mode)
+                                and info.st_ino == journal.parent.stat().st_ino
+                                and "q_manifest_intent" in json.loads(journal.read_bytes())["body"])
+            if not injected and (manifest_stage or wal_parent_stage):
+                wal = journal.read_bytes()
+                if kind == "q":
+                    authority.parent.mkdir(parents=True, exist_ok=True)
+                    authority.write_bytes(b"independent Q parent appeared during publication\n")
+                else:
+                    original = authority.read_bytes()
+                    owner = authority.lstat().st_ino
+                    authority.rename(retained)
+                    authority.write_bytes(original)
+                    authority.chmod(0o600 if kind == "wal" else 0o644)
+                    self.assertNotEqual(owner, authority.lstat().st_ino)
+                injected.append((wal, authority.lstat().st_ino))
+            return result
+
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "service_runtime_backend", return_value=backend), \
+                mock.patch.object(SETUP, "ZTP", str(self.ztp)), \
+                mock.patch.object(SETUP, "_SETUP_SWITCH_WAL_CONTEXT", (vars(LOAD), descriptor)), \
+                mock.patch.object(SETUP, "_collect_expected_links", return_value=[str(common)]), \
+                mock.patch.object(os, "fsync", side_effect=drift_after_manifest_sync):
+            caught = None
+            try:
+                SETUP._write_manifest(str(q))
+            except ValueError as exc:
+                caught = exc
+        self.assertEqual(1, len(injected), "intended Q publication stage was not reached")
+        self.assertIsInstance(caught, ValueError, "authority drift must fail closed")
+        self.assertEqual(before, (manifest.lstat().st_ino, manifest.read_bytes()),
+                         "authority drift published Q over the original P manifest")
+        self.assertEqual(injected[0][0], journal.read_bytes())
+        self.assertEqual(injected[0][1], authority.lstat().st_ino)
+        self.assertFalse(list(manifest.parent.glob(".setup_manifest.*")))
+        self.assertFalse(list(manifest.parent.glob(f".{manifest.name}.rollback.*")))
+        backend.start.assert_not_called()
+
+    def test_q_manifest_publication_stage_holds_wal_a_and_q_authority(self):
+        for kind in ("wal", "a", "q"):
+            with self.subTest(kind=kind):
+                fixture = ReleaseTransactionTests()
+                fixture.setUp()
+                try:
+                    fixture._assert_q_manifest_publication_stage_holds_authority(kind)
+                finally:
+                    fixture.doCleanups()
+                    fixture.tearDown()
+
+    def test_q_manifest_publication_does_not_adopt_wal_replaced_at_intent_parent_sync(self):
+        self._assert_q_manifest_publication_stage_holds_authority("wal", boundary="wal-parent")
+
     def test_setup_wal_persists_exact_a_runtime_authority_before_q_write(self):
         state, context = self._prepare_persisted_a_runtime_switch()
         record = json.loads(state[-3].read_bytes())["body"]["a_runtime"]

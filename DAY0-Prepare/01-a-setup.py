@@ -146,6 +146,11 @@ _SETUP_SWITCH_WAL_CONTEXT = None  # 跨项目 setup 子进程的持锁 WAL 写�
 _INFRA_LOG_MIGRATION = None  # 待 manifest 成功后清理的原目录备份
 _CONFIRM_PROJECT_SWITCH = False  # 自动化对跨项目切换的独立显式确认
 
+
+class SetupSwitchAuthorityHold(ValueError):
+    """Preserve the mixed disk state; do not reopen a foreign WAL to roll back."""
+
+
 MANIFEST_FILE = os.path.join(ZTP, ".setup_manifest")  # setup 创建的链接清单
 MAX_DISCOVERY_METADATA_BYTES = 4 * 1024 * 1024
 OUTPUT_USAGE_WARNING_BYTES = 10 * 1024 * 1024 * 1024
@@ -5001,6 +5006,14 @@ def setup(proj_dir, *, server_delegated=False, deployment_lock_descriptor=None):
                         f"日志迁移临时凭据未结清：{preview}{extra}；请离线保全并核对后重试"
                     )
             return _setup_impl(proj_dir, server_delegated=server_delegated)
+        except SetupSwitchAuthorityHold:
+            # Publication lost its held total authority. Reopening the WAL
+            # in eager rollback could adopt a same-byte foreign replacement.
+            # Leave durable evidence/backups and all already-written Q paths
+            # for a separately verified recovery; clear only local objects.
+            _LINK_TRANSACTION = None
+            _INFRA_LOG_MIGRATION = None
+            raise
         except BaseException:
             if _SETUP_SWITCH_WAL_CONTEXT is None:
                 _rollback_infra_log_migration()
@@ -5030,9 +5043,12 @@ def _write_manifest(proj_dir):
                 Path(ZTP) / ".setup-switch-journal.json", payload,
                 deployment_lock_descriptor=lock_descriptor, services_quiesced=True,
                 runtime_backend=load_api["service_runtime_backend"](),
+                _publish_manifest=True,
             )
-        except load_api["LoadError"] as exc:
-            raise ValueError(f"setup manifest WAL 写前登记失败：{exc}") from exc
+        except (load_api["LoadError"], OSError, ValueError) as exc:
+            raise SetupSwitchAuthorityHold(f"setup manifest WAL 发布失败；停服 HOLD：{exc}") from exc
+        print(_c(CYAN, f"  [MANIFEST] 已写入 {MANIFEST_FILE}（{len(links)} 条实际链接）"))
+        return
     manifest_dir = os.path.dirname(MANIFEST_FILE)
     os.makedirs(manifest_dir, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(

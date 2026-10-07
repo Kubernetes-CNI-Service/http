@@ -8099,11 +8099,14 @@ def _setup_switch_q_manifest_paths(body, candidate: bytes) -> set[Path]:
 def register_setup_switch_manifest(
     journal: Path, candidate: bytes, *, deployment_lock_descriptor: int | None,
     services_quiesced: bool, runtime_backend: ServiceRuntimeBackend | None,
+    _publish_manifest: bool = False,
 ) -> Path:
     """Fsync the exact Q manifest intent before replacing the P authority.
 
     This authorizes recovery, not acceptance of B or service activation.
     """
+    if type(_publish_manifest) is not bool:
+        raise LoadError("setup switch manifest publication mode must be explicit")
     journal = Path(journal)
     _require_runtime_restore_guard(
         deployment_lock_descriptor=deployment_lock_descriptor,
@@ -8135,10 +8138,44 @@ def register_setup_switch_manifest(
     }) + b"\n"
     if len(payload) > _SETUP_SWITCH_JOURNAL_LIMIT:
         raise LoadError("setup switch journal exceeds the bounded size limit")
+    wal_parent = _setup_switch_link_parent_identity(journal) if _publish_manifest else None
     descriptor, name = tempfile.mkstemp(prefix=".setup-switch-journal.", dir=journal.parent)
     temporary = Path(name)
+    wal_descriptor = manifest_descriptor = -1
+    staging_opened = False
+    identity_fields = (
+        "st_dev", "st_ino", "st_mode", "st_nlink", "st_size",
+        "st_mtime_ns", "st_ctime_ns",
+    )
     try:
+        if _publish_manifest:
+            # Keep P's original inode alive across both intent registration
+            # and Q staging. A same-byte replacement is not this authority.
+            manifest_before = MANIFEST.lstat()
+            flags = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                     | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0))
+            manifest_descriptor = os.open(MANIFEST, flags)
+            manifest_opened = _read_rollback_regular(MANIFEST)
+            manifest_parent = _setup_switch_link_parent_identity(MANIFEST)
+
+            def require_original_manifest() -> None:
+                named, held = MANIFEST.lstat(), os.fstat(manifest_descriptor)
+                if (manifest_parent != _setup_switch_link_parent_identity(MANIFEST)
+                        or any(getattr(manifest_before, key) != getattr(named, key)
+                               or getattr(manifest_before, key) != getattr(held, key)
+                               for key in identity_fields)
+                        or _read_rollback_regular(MANIFEST) != manifest_opened):
+                    raise LoadError("setup switch P manifest changed before Q publication; HOLD")
+                after = MANIFEST.lstat()
+                if any(getattr(manifest_before, key) != getattr(after, key)
+                       for key in identity_fields):
+                    raise LoadError("setup switch P manifest changed while checking; HOLD")
+
+            require_original_manifest()
         with os.fdopen(descriptor, "wb") as stream:
+            staging_opened = True
+            if _publish_manifest:
+                wal_descriptor = os.dup(stream.fileno())
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
@@ -8151,9 +8188,64 @@ def register_setup_switch_manifest(
         # Staging/fsync is an intervening failure/race boundary. A same-byte
         # foreign receipt must not grant Q intent, even with an unchanged WAL.
         _setup_switch_runtime_context(body)
+        if _publish_manifest:
+            require_original_manifest()
+            _require_setup_switch_q_parent_preimage(body)
+            if wal_parent != _setup_switch_link_parent_identity(journal):
+                raise LoadError("setup switch journal parent changed before publication; HOLD")
         os.replace(temporary, journal)
+        if _publish_manifest:
+            # Freeze our still-held installed inode *before* the intervening
+            # parent fsync, never adopt whichever name exists afterwards.
+            wal_installed = os.fstat(wal_descriptor)
         _fsync_parent_directory(journal.parent)
+        if _publish_manifest:
+            def require_publication_authority() -> None:
+                try:
+                    def require_installed_wal() -> None:
+                        named, held = journal.lstat(), os.fstat(wal_descriptor)
+                        if (wal_parent != _setup_switch_link_parent_identity(journal)
+                                or any(getattr(wal_installed, key) != getattr(named, key)
+                                       or getattr(wal_installed, key) != getattr(held, key)
+                                       for key in identity_fields)
+                                or _read_rollback_regular(
+                                    journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT,
+                                ) != (payload, 0o600)):
+                            raise LoadError("setup switch installed journal changed; HOLD")
+                        after = journal.lstat()
+                        if any(getattr(wal_installed, key) != getattr(after, key)
+                               for key in identity_fields):
+                            raise LoadError("setup switch journal changed while checking; HOLD")
+
+                    require_installed_wal()
+                    require_original_manifest()
+                    _require_setup_switch_q_parent_preimage(body)
+                    _setup_switch_runtime_context(body)
+                    recover_setup_switch_journal(
+                        journal, deployment_lock_descriptor=deployment_lock_descriptor,
+                        services_quiesced=services_quiesced, runtime_backend=runtime_backend,
+                        verify_only=True, manifest_candidate=candidate,
+                    )
+                    # The read-only multi-surface preflight is itself an
+                    # intervening boundary, not permission to adopt drift.
+                    require_installed_wal()
+                    require_original_manifest()
+                    _require_setup_switch_q_parent_preimage(body)
+                    _setup_switch_runtime_context(body)
+                except (OSError, ValueError, RuntimeError) as exc:
+                    raise LoadError(f"setup switch Q manifest publication authority lost; HOLD: {exc}") from exc
+
+            _atomic_restore_setup_manifest(
+                ActiveSetupState(project=Path(body["new_project"]["path"]),
+                                 manifest=candidate, manifest_mode=0o644, links={}),
+                require_authority=require_publication_authority,
+            )
     finally:
+        if not staging_opened:
+            os.close(descriptor)
+        for held_descriptor in (manifest_descriptor, wal_descriptor):
+            if held_descriptor >= 0:
+                os.close(held_descriptor)
         if os.path.lexists(temporary):
             temporary.unlink()
     return journal
