@@ -5672,12 +5672,20 @@ class ReleaseTransactionTests(unittest.TestCase):
 
     def _prepare_persisted_a_runtime_switch(self, *, managed_key=False, prefix=False,
                                           original_upgrade_policy=None, qualified_inputs=False,
-                                          seed_q_publication=False):
+                                          seed_q_publication=False, original_images=False):
         private_root = mock.patch.object(LOAD, "HTTP_ROOT", self.root.resolve())
         private_root.start()
         self.addCleanup(private_root.stop)
         document = yaml.safe_load(self.global_file.read_text())
         document["common"]["mgmt"]["http"]["http_root"] = str(self.root.resolve())
+        if original_images:
+            document["switches"][0]["eth"]["version"] = "5.12.0"
+            basename = "cumulus-linux-5.12.0-mlx-amd64.bin"
+            source = self.root / basename
+            source.write_bytes(b"#!/bin/sh\n" + b"independent-original-A-image\n" * 45000)
+            published = self.ztp / "image/cumulus" / basename
+            published.parent.mkdir(parents=True)
+            published.symlink_to(os.path.relpath(source, published.parent))
         marker_patch = mock.patch.object(LOAD, "ZTP_PREFIX_MARKER", self.root / ".ztp-prefix-publication.json")
         marker_patch.start()
         self.addCleanup(marker_patch.stop)
@@ -6186,6 +6194,98 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertEqual(self.root.resolve(), inputs.settings.http_root)
         self.assertEqual(before, journal.read_bytes())
         backend.start.assert_not_called()
+
+    def test_setup_wal_binds_original_disabled_a_image_policy_before_q(self):
+        state, _context = self._prepare_persisted_a_runtime_switch(original_upgrade_policy="disabled")
+        self.assertEqual({"policy": "disabled", "files": {}},
+                         json.loads(state[-3].read_bytes())["body"].get("a_image_intent"))
+
+    def test_setup_wal_binds_original_enabled_a_image_owner_before_q(self):
+        state, _context = self._prepare_persisted_a_runtime_switch(
+            original_upgrade_policy="enabled", original_images=True)
+        record = json.loads(state[-3].read_bytes())["body"].get("a_image_intent")
+        self.assertIsInstance(record, dict, "original A images must be registered before Q's first write")
+        self.assertEqual("enabled", record["policy"])
+        self.assertEqual({"eth"}, set(record["files"]))
+        source = self.root.resolve() / "cumulus-linux-5.12.0-mlx-amd64.bin"
+        published = self.ztp / "image/cumulus" / source.name
+        self.assertEqual(str(source), record["files"]["eth"]["source"]["path"])
+        self.assertEqual(source.lstat().st_ino, record["files"]["eth"]["source"]["identity"][1])
+        self.assertEqual(sha256(source), record["files"]["eth"]["source"]["sha256"])
+        self.assertEqual(os.readlink(published), record["files"]["eth"]["published"]["link_target"])
+        state[-1].start.assert_not_called()
+
+    def test_setup_wal_unknown_original_a_image_policy_is_explicitly_unqualified(self):
+        state, _context = self._prepare_persisted_a_runtime_switch()
+        body = json.loads(state[-3].read_bytes())["body"]
+        self.assertIn("a_image_intent", body)
+        self.assertIsNone(body["a_image_intent"])
+        with self.assertRaisesRegex(LOAD.LoadError, "original A.*(image|qualification|policy).*HOLD"):
+            with LOAD._setup_switch_a_image_authority(body):
+                self.fail("unknown original policy cannot qualify A images")
+
+    def test_original_a_image_qualification_rejects_same_byte_new_source(self):
+        state, _context = self._prepare_persisted_a_runtime_switch(
+            original_upgrade_policy="enabled", original_images=True)
+        body = json.loads(state[-3].read_bytes())["body"]
+        source = self.root.resolve() / "cumulus-linux-5.12.0-mlx-amd64.bin"
+        metadata, payload = source.lstat(), source.read_bytes()
+        source.rename(source.with_name("independent-held-original-A-image"))
+        source.write_bytes(payload)
+        source.chmod(stat.S_IMODE(metadata.st_mode))
+        os.utime(source, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+        evidence = state[-3].read_bytes()
+        with self.assertRaisesRegex(LOAD.LoadError, "image.*(owner|bytes|authority).*HOLD"):
+            with LOAD._setup_switch_a_image_authority(body):
+                self.fail("same-byte new source cannot obtain A image qualification")
+        self.assertEqual(evidence, state[-3].read_bytes())
+        state[-1].start.assert_not_called()
+
+    def test_original_a_image_qualification_uses_sealed_selection_and_holds_owner(self):
+        state, context = self._prepare_persisted_a_runtime_switch(
+            original_upgrade_policy="enabled", original_images=True)
+        body = json.loads(state[-3].read_bytes())["body"]
+        source = self.root.resolve() / "cumulus-linux-5.12.0-mlx-amd64.bin"
+        self.global_file.write_bytes(b"independent unreadable current P global\n")
+        with LOAD._setup_switch_a_image_authority(body) as qualified:
+            self.assertEqual("enabled", qualified["policy"])
+            self.assertEqual({"eth": source}, qualified["images"])
+            self.assertEqual(context.project / "99-output-ztp" / context.selector_target / "inputs/global",
+                             qualified["inputs"].global_file)
+            self.assertEqual("5.12.0", qualified["inputs"].settings.versions["eth"])
+            qualified["require"]()
+            payload, metadata = source.read_bytes(), source.lstat()
+            source.rename(source.with_name("independent-source-rebound-during-A-qualification"))
+            source.write_bytes(payload)
+            source.chmod(stat.S_IMODE(metadata.st_mode))
+            os.utime(source, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+            with self.assertRaisesRegex(LOAD.LoadError, "image.*owner.*HOLD"):
+                qualified["require"]()
+        state[-1].start.assert_not_called()
+
+    def test_original_disabled_a_image_qualification_never_resolves_unused_version(self):
+        state, _context = self._prepare_persisted_a_runtime_switch(original_upgrade_policy="disabled")
+        body = json.loads(state[-3].read_bytes())["body"]
+        with mock.patch.object(LOAD, "expected_images", side_effect=AssertionError("unused image version lookup")):
+            with LOAD._setup_switch_a_image_authority(body) as qualified:
+                self.assertEqual({}, qualified["images"])
+                self.assertEqual("disabled", qualified["policy"])
+                qualified["require"]()
+        state[-1].start.assert_not_called()
+
+    def test_original_a_image_identity_boolean_holds_without_writing(self):
+        state, _context = self._prepare_persisted_a_runtime_switch(
+            original_upgrade_policy="enabled", original_images=True)
+        journal = state[-3]
+        envelope = json.loads(journal.read_bytes())
+        envelope["body"]["a_image_intent"]["files"]["eth"]["source"]["identity"][1] = True
+        envelope["sha256"] = hashlib.sha256(LOAD._setup_switch_canonical_payload(envelope["body"])).hexdigest()
+        journal.write_bytes(LOAD._setup_switch_canonical_payload(envelope) + b"\n")
+        evidence = journal.read_bytes()
+        with self.assertRaisesRegex(LOAD.LoadError, "image.*owner.*HOLD"):
+            LOAD._setup_switch_prepared_registration_body((evidence, 0o600))
+        self.assertEqual(evidence, journal.read_bytes())
+        state[-1].start.assert_not_called()
 
     def test_original_a_selection_keeps_explicit_enabled_policy(self):
         state, _context = self._prepare_persisted_a_runtime_switch(original_upgrade_policy="enabled")

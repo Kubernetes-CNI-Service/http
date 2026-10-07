@@ -6525,7 +6525,7 @@ def _decode_setup_switch_journal(payload: bytes) -> dict[str, object]:
                 "manifest", "manifest_sha256", "manifest_mode", "links", "q_parent_preimage"}
     optional = {"allow_late_q_values", "q_local_links", "created_directories", "q_created_directories",
                 "directories", "infra_logs", "q_manifest_intent", "comparison_transfers", "a_runtime",
-                "dhcp_transaction", "publication_bundle"}
+                "dhcp_transaction", "publication_bundle", "a_image_intent"}
     if isinstance(body, dict) and "q_parent_preimage" not in body:
         raise ValueError("journal Q parent preimage is missing; HOLD")
     if (not isinstance(body, dict) or not required <= set(body)
@@ -6545,6 +6545,8 @@ def _decode_setup_switch_journal(payload: bytes) -> dict[str, object]:
     directory_fields = {"path", "dev", "ino"}
     if "publication_bundle" in body:
         _validate_setup_publication_bundle_shape(body["publication_bundle"])
+    if body.get("a_image_intent") is not None:
+        _validate_setup_switch_image_intent(body["a_image_intent"])
     if "dhcp_transaction" in body:
         binding = body["dhcp_transaction"]
         exact_fields(binding, {"receipt", "identity", "sha256", "body", "staged"}, "DHCP transaction")
@@ -6692,6 +6694,38 @@ def _decode_setup_switch_journal(payload: bytes) -> dict[str, object]:
     return envelope
 
 
+def _validate_setup_switch_image_intent(intent):
+    """Closed original A/B image qualification; unknown None stays unqualified."""
+    def fields(value, expected):
+        if not isinstance(value, dict) or set(value) != expected:
+            raise ValueError("unknown or missing original image fields; HOLD")
+    fields(intent, {"policy", "files"})
+    if (intent["policy"] not in {"enabled", "disabled"} or not isinstance(intent["files"], dict)
+            or set(intent["files"]) - {"eth", "ib", "nvl"}
+            or intent["policy"] == "disabled" and intent["files"]):
+        raise ValueError("invalid original image policy; HOLD")
+    for pair in intent["files"].values():
+        fields(pair, {"source", "published"})
+        for label, record in pair.items():
+            expected = {"path", "parent", "identity", "sha256", "size"}
+            if isinstance(record, dict) and "link_target" in record:
+                expected.add("link_target")
+                target = record["link_target"]
+                if (label != "published" or not isinstance(target, str) or not target
+                        or len(target) > 4096 or os.path.isabs(target) or any(ord(ch) < 32 for ch in target)):
+                    raise ValueError("invalid original image link target; HOLD")
+            fields(record, expected)
+            fields(record["parent"], {"path", "dev", "ino"})
+            if (not isinstance(record["identity"], list) or len(record["identity"]) != 9
+                    or any(type(n) is not int or n < 0 for n in record["identity"])
+                    or not isinstance(record["path"], str) or not Path(record["path"]).is_absolute()
+                    or type(record["size"]) is not int or record["size"] <= 0
+                    or not isinstance(record["sha256"], str) or re.fullmatch(r"[0-9a-f]{64}", record["sha256"]) is None
+                    or not isinstance(record["parent"]["path"], str)
+                    or any(type(record["parent"][key]) is not int or record["parent"][key] < 0 for key in ("dev", "ino"))):
+                raise ValueError("invalid original image owner; HOLD")
+
+
 def _validate_setup_publication_bundle_shape(bundle):
     """Closed persisted parent/report/selector contract, never ignored fields."""
     def fields(value, expected):
@@ -6717,34 +6751,7 @@ def _validate_setup_publication_bundle_shape(bundle):
             {"parent", "report", "generation", "selector", "shared_setup", "image_intent"}):
         raise ValueError("unknown or missing publication bundle fields; HOLD")
     if bundle.get("image_intent") is not None:
-        intent = bundle["image_intent"]
-        fields(intent, {"policy", "files"})
-        if (intent["policy"] not in {"enabled", "disabled"}
-                or not isinstance(intent["files"], dict)
-                or set(intent["files"]) - {"eth", "ib", "nvl"}
-                or intent["policy"] == "disabled" and intent["files"]):
-            raise ValueError("invalid publication image policy; HOLD")
-        for pair in intent["files"].values():
-            fields(pair, {"source", "published"})
-            for label, record in pair.items():
-                record_fields = {"path", "parent", "identity", "sha256", "size"}
-                if isinstance(record, dict) and "link_target" in record:
-                    if label != "published":
-                        raise ValueError("publication source image cannot be a link; HOLD")
-                    record_fields.add("link_target")
-                    target = record["link_target"]
-                    if (not isinstance(target, str) or not target or len(target) > 4096
-                            or os.path.isabs(target) or any(ord(ch) < 32 for ch in target)):
-                        raise ValueError("invalid publication image link target; HOLD")
-                fields(record, record_fields)
-                fields(record["parent"], {"path", "dev", "ino"})
-                if (not isinstance(record["identity"], list) or len(record["identity"]) != 9
-                        or any(type(n) is not int or n < 0 for n in record["identity"])
-                        or not isinstance(record["path"], str) or not Path(record["path"]).is_absolute()
-                        or type(record["size"]) is not int or record["size"] <= 0
-                        or not isinstance(record["sha256"], str)
-                        or re.fullmatch(r"[0-9a-f]{64}", record["sha256"]) is None):
-                    raise ValueError("invalid publication image owner; HOLD")
+        _validate_setup_switch_image_intent(bundle["image_intent"])
     if bundle.get("shared_setup") is not None:
         shared_fields = {"manifest", "links", "q_local", "directories",
                          "comparison", "created", "infra", "flat_runtime"}
@@ -8154,6 +8161,7 @@ def prepare_setup_switch_journal(
                 or runtime_rollback_context.project.resolve(strict=True) != state.project):
             raise LoadError("A runtime context differs from exact P setup state")
         body["a_runtime"] = _setup_switch_runtime_authority(runtime_rollback_context, verify_active=True)
+        body["a_image_intent"] = _setup_switch_capture_a_images(body)
     body_bytes = _setup_switch_canonical_payload(body)
     envelope = {
         "body": body, "sha256": hashlib.sha256(body_bytes).hexdigest(),
@@ -8380,6 +8388,52 @@ def _setup_switch_a_operator_selection(body):
         return inputs, policies[0]
     except (OSError, UnicodeError, ValueError, TypeError, KeyError) as exc:
         raise LoadError(f"original A selection is invalid; HOLD: {exc}") from exc
+
+
+def _setup_switch_capture_a_images(body):
+    """Capture only before Q writes, never upgrade a legacy cold WAL.
+
+    Old minimal disk receipts may have no policy/version/image qualification.
+    Record that absence explicitly; it is not permission for A activation.
+    """
+    try:
+        inputs, policy = _setup_switch_a_operator_selection(body)
+        if policy == "disabled":
+            return _setup_publication_image_intent({}, upgrade_enabled=False)
+        expected = expected_images(inputs.settings, inputs.device_types,
+            deployment_scope=inputs.deployment_scope, switch_scope=inputs.switch_scope)
+        images = {}
+        for kind, basename in expected.items():
+            candidates = [HTTP_ROOT.resolve(strict=True) / name for name in _image_filename_candidates(basename)
+                          if os.path.lexists(HTTP_ROOT / name)]
+            if len(candidates) != 1:
+                return None  # Do not choose between unqualified aliases.
+            images[kind] = candidates[0]
+        return _setup_publication_image_intent(images, upgrade_enabled=True)
+    except (LoadError, OSError, ValueError):
+        return None  # Disk-only receipt; later explicit A health must HOLD.
+
+
+@contextmanager
+def _setup_switch_a_image_authority(body):
+    """Read-only original A qualification, not a disk restore or service start."""
+    intent = body.get("a_image_intent")
+    record = body.get("a_runtime")
+    if (intent is None or not isinstance(record, dict)
+            or not {"selector_owner", "yaml_link_owners", "generation", "receipt_inventory"} <= set(record)):
+        raise LoadError("original A image qualification is missing; HOLD")
+    _validate_setup_switch_image_intent(intent)
+    inputs, policy = _setup_switch_a_operator_selection(body)
+    if intent["policy"] != policy:
+        raise LoadError("original A image policy differs from original receipt; HOLD")
+    images = {kind: Path(pair["source"]["path"]) for kind, pair in intent["files"].items()}
+    _setup_switch_runtime_context(body, require_original_yaml_owner=True)
+    with _setup_switch_b_image_authority(inputs, images, original_intent=intent) as image_authority:
+        def authority():
+            _setup_switch_runtime_context(body, require_original_yaml_owner=True)
+            image_authority()
+        authority()
+        yield dict(inputs=inputs, images=images, policy=policy, require=authority)
 
 
 def register_setup_switch_journal_link(

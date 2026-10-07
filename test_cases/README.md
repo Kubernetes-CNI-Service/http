@@ -610,6 +610,12 @@ WAL 不在冷读中重新冻结当前数据作为原证据。
 legacy 缺叶子记录不可在冷恢复补登记为新的激活资格。此叶子合同不是原 A 镜像、健康
 激活/归档或正式 full/check 的完成证明。
 
+新 WAL 的原 A `a_image_intent` 在 Q 首写前登记明确 disabled 空清单或已资格化的
+原 enabled 镜像 owner/SHA/名称；未知原策略/版本/镜像状态明确不获资格（None）。
+只读 A 镜像核验取原 sealed inputs/receipt 策略与原 intent，不借当前 P/Q 或新参数
+改选；源 FD/name 与真实发布叶子持续核验，同字节新源也 HOLD。旧 disk-only 恢复不
+被升级为激活资格。自有补偿 image stage、A 显式健康激活/安全归档与正式 proof 仍待。
+
 同一模块还覆盖端到端 deployment scope：默认 `all` 同时生成 Production/AIR；`prod` 只发布
 Production Cumulus/IB/NVL；`air` 只发布 AIR DHCP/YAML/release，并只临时渲染 AIR full profile
 实际引用的 Production 来源；单独指定 `mini` 会自动选择 AIR scope 和 `eth`，显式 `prod+mini`

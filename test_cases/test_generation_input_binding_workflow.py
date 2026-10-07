@@ -4991,13 +4991,17 @@ finally:
     def test_real_setup_committed_q_group_cold_rejects_same_target_a_yaml_latest(self):
         self._real_setup_committed_q_group_restore(a_fault="99-output-eth/latest")
 
+    def test_real_setup_committed_q_cold_rejects_same_byte_original_a_image(self):
+        self._real_setup_committed_q_group_restore(a_image_fault=True)
+
     def _real_setup_committed_q_group_restore(self, *, dhcp=False, runtime_death=False,
                                              setup_death=False, foreign_setup=False,
-                                             q_local=False, q_fault=False, a_fault=None):
+                                             q_local=False, q_fault=False, a_fault=None, a_image_fault=False):
         fixture = RELEASE_FIXTURE.ReleaseTransactionTests()
         fixture.setUp()
         try:
-            state, context = fixture._prepare_persisted_a_runtime_switch()
+            state, context = fixture._prepare_persisted_a_runtime_switch(
+                original_upgrade_policy="enabled" if a_image_fault else None, original_images=a_image_fault)
             original_a_links = {context.project / name: (
                 (context.project / name).lstat().st_ino, (context.project / name).lstat().st_ctime_ns,
                 os.readlink(context.project / name))
@@ -5124,6 +5128,17 @@ try:
             print('R22_FOREIGN_A_LINK_REJECTED')
             sys.exit(0)
         raise AssertionError('same-target new original A link owner must not be adopted')
+    if sys.argv[5] == 'foreign-a-image':
+        import json
+        body = json.loads((root / 'ztp/.setup-switch-journal.json').read_bytes())['body']
+        try:
+            with load._setup_switch_a_image_authority(body):
+                pass
+        except load.LoadError as exc:
+            assert 'image' in str(exc) and ('owner' in str(exc) or 'bytes' in str(exc) or 'authority' in str(exc)) and 'HOLD' in str(exc), str(exc)
+            print('R22_FOREIGN_A_IMAGE_REJECTED')
+            sys.exit(0)
+        raise AssertionError('same-byte new original A image source must not be adopted')
     status = load.restore_setup_switch_a_disk(q, guard=guard, confirmed=True)
     assert status == 'restored-p-a-group-stopped-wal-retained', status
     assert (root / 'ztp/ztp-bootstrap_oob.sh').read_bytes() == b'A oob bootstrap\n'
@@ -5143,14 +5158,15 @@ finally:
                                     capture_output=True, text=True, check=False, timeout=30)
             self.assertEqual(-signal.SIGKILL, writer.returncode, writer.stdout + writer.stderr)
             original_wal = (journal.lstat().st_ino, journal.read_bytes())
-            if q_fault or a_fault:
+            if q_fault or a_fault or a_image_fault:
                 compensation = subprocess.run(argv + ["compensate-q", shape], capture_output=True,
                                               text=True, check=False, timeout=30)
                 self.assertEqual(0, compensation.returncode, compensation.stdout + compensation.stderr)
                 self.assertIn("R22_Q_COMPENSATED_NO_P_WRITE", compensation.stdout)
                 marker = journal.parent / ".setup-switch-a-restore.json"
                 original_plan = (marker.lstat().st_ino, marker.read_bytes())
-                source = context.project / a_fault if a_fault else q / "01-global.yaml"
+                source = (root / "cumulus-linux-5.12.0-mlx-amd64.bin" if a_image_fault
+                          else context.project / a_fault if a_fault else q / "01-global.yaml")
                 held = source.with_name("independent-original-cold-Q-input")
                 metadata = source.lstat()
                 payload = os.readlink(source) if a_fault else source.read_bytes()
@@ -5162,10 +5178,10 @@ finally:
                     source.chmod(stat.S_IMODE(metadata.st_mode))
                     os.utime(source, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
                 frozen = (source.lstat().st_ino, state[7].lstat().st_ino, state[7].read_bytes(), os.readlink(common))
-                rejecting = subprocess.run(argv + ["foreign-a-link" if a_fault else "foreign-q-input", shape], capture_output=True,
+                rejecting = subprocess.run(argv + ["foreign-a-image" if a_image_fault else "foreign-a-link" if a_fault else "foreign-q-input", shape], capture_output=True,
                                            text=True, check=False, timeout=30)
                 self.assertEqual(0, rejecting.returncode, rejecting.stdout + rejecting.stderr)
-                self.assertIn("R22_FOREIGN_A_LINK_REJECTED" if a_fault else "R22_FOREIGN_Q_INPUT_REJECTED", rejecting.stdout)
+                self.assertIn("R22_FOREIGN_A_IMAGE_REJECTED" if a_image_fault else "R22_FOREIGN_A_LINK_REJECTED" if a_fault else "R22_FOREIGN_Q_INPUT_REJECTED", rejecting.stdout)
                 self.assertEqual(frozen, (source.lstat().st_ino, state[7].lstat().st_ino, state[7].read_bytes(), os.readlink(common)))
                 self.assertEqual(original_plan, (marker.lstat().st_ino, marker.read_bytes()))
                 self.assertEqual(original_wal, (journal.lstat().st_ino, journal.read_bytes()))

@@ -1634,6 +1634,8 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-R22-GENERATION-INPUT-ABA-001 — 跨进程输入换代与多输出一致性
 
+- 2026-10-08 原 A 镜像资格基础：沿本卡既有隔离 VM/精确版本/可恢复快照、排他锁、停服和其它写者静默前提，在 Q 首写前独立记录 sealed A 输入/receipt 唯一升级策略、原版本/受支持 basename 或唯一 alias、源 FD/name/父目录/九字段 owner/SHA 和真实相对发布叶子。Q 提交强杀/补偿后新 LOAD 只读核原 intent；未知原策略/版本/镜像保持明确不获资格，不能从当前 P/Q 或新参数补办；同字节新源、上下文晚换绑须 HOLD，原 WAL/计划/未知对象保留。保存完整物理 END/exit 与检查顺序；清理只按本卡已核隔离快照人工恢复，不在 live 注入。此基础未覆盖自有 image stage 的补偿归属、A 显式健康激活/安全归档、root/Linux/断电/C2/DEV ACK，本卡仍 OPEN。
+
 - 2026-10-08 原 A selector/YAML latest 叶子资格：沿本卡原隔离 VM/可恢复快照、精确版本、排他锁、停服及写者静默前提，Q 首写前独立保存 A selector 父目录、九字段链接 owner/文字与 A latest 叶子；Q 提交强杀/补偿后，新 LOAD 必须拒绝同目标新 inode，正确原链接跨正常/强杀冷重入保持 inode/ctime，仅补父同步；同步时换绑必须 HOLD，原 WAL/计划和未知对象保留。保存 FD/name/parent/stat/SHA、写入/同步顺序和完整 END/exit；legacy 不用当前叶子补登记新激活资格。清理仅人工恢复本卡已核隔离快照，不在 live 注入；本地 direct/多脚本不证明原 A 镜像、显式健康激活/安全归档、root/Linux/断电/C2/DEV ACK，本卡仍 OPEN。
 
 - 2026-10-08 Q 证据续核与 Q-local latest owner 候选：在本卡既有隔离/快照/精确版本/排他锁/停服/写者静默前提下，首写前独立冻结 Q live inputs、sealed generation、Q-local latest before/after 完整树与链接 owner；补偿阶段持续核对。Q 提交强杀、Q-local/P 恢复再强杀后，新 LOAD 只消费原 stage 并补父同步；同字节新 Q input、克隆 generation、同目标新 latest、before/after payload 换绑均 HOLD，原 WAL/计划/旧新 target 与未知对象保留。保存 FD/name/parent/stat/SHA 和完整物理 END/exit，不用当前内容补登记 legacy 权限。清理仅人工恢复本卡已核隔离快照；本地 direct/多脚本不证明原 A 激活/健康退休、其它未覆盖共享面、root/Linux/断电/C2/DEV ACK，仍 OPEN，不在 live 注入。

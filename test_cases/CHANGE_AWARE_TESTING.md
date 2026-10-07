@@ -1,5 +1,34 @@
 # 脚本变更影响测试
 
+## 2026-10-08 R22 原 A 镜像首写前资格基础
+
+基于 `2c4ff01`；三个原 WAL 缺 disabled/enabled/unqualified 明确记录反例、缺原 A
+只读核验 API 与真实 LOAD→SETUP→Q 提交强杀→Q 补偿→新 LOAD 镜像源换绑反例：
+5 tests / 4 FAIL / 1 ERROR / 5.484s / exit1，原断言和完整日志保留。
+`r22-original-a-image-qualification-red.log`，inode162020304 / size141435 /
+SHA256 `9f2721c1aaefddb2d1868e06a85f653d819c9aa2a3e4dcdd5a1506b704204731`。
+
+新 WAL 的 `a_image_intent` 只在 Q 首写前记录：原 disabled 独立空 inventory；原
+enabled 输入/版本、唯一已选受支持 basename/alias、普通源与真实相对发布链接的
+parent/九字段 owner/SHA。未知原策略、版本或未能资格化的源/发布状态明确为 None，
+保留旧停服 disk-only 恢复，不在冷读补办激活权限。新增只读资格 API 必须使用原封存
+输入与 receipt 升级策略、原 selector/YAML owner、原 intent；源 FD/name 和 published
+owner 在整个核验上下文持续检查，不查当前 P/Q settings 来改选。此基础不启动服务，
+补偿计划自有 image stage、显式 A 健康激活/安全退休仍待。
+
+五项 direct/workflow GREEN：5 OK / 6.048s / exit0；
+`r22-original-a-image-qualification-green.log`，inode162023230 / size128950 /
+SHA256 `fd9533f156006390cc384277d8ae079645c110262180112ced8db31c39171580`。
+补充原 sealed selection、上下文中源 ABA、disabled 不解析无用版本与 Boolean identity
+负例后，完整模块回归 622 OK / 237.564s / exit0；日志
+`outputs/test-diagnostics/r22-original-a-image-qualification-module-regression.log`，
+inode162025323 / size342469 / SHA256
+`18e3f82e6dee97c863f6fbbf9ccbf6f347586d3cd0f78013e632f4f8eead4aa4`。
+旧 274206-byte 前缀 SHA256 `dc4914dc732ba8f6782575256a865f57ae40dac4ae028bd6837ed778875dcf5a`
+不变；前后 inode/size/mtime/ctime 一致，物理 Ran1781→OK1783→实际退出1810→
+冻结一致1811→END1813=0。现有 direct 与真实 SETUP/LOAD manifest 映射保留。
+这是有界回归，不是正式 related/full/check，不关闭 Linux/root/断电/C2/DEV ACK。
+
 ## 2026-10-08 R22 原 A selector/YAML latest 叶子资格
 
 基于 `4205737`，两项 direct 与两项真实 LOAD→SETUP→Q 提交强杀→Q 补偿→
