@@ -3787,11 +3787,11 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.addCleanup(private_root.stop)
         document = yaml.safe_load(self.global_file.read_text())
         document["common"]["mgmt"]["http"]["http_root"] = str(self.root.resolve())
+        marker_patch = mock.patch.object(LOAD, "ZTP_PREFIX_MARKER", self.root / ".ztp-prefix-publication.json")
+        marker_patch.start()
+        self.addCleanup(marker_patch.stop)
         if prefix:
             document["common"]["mgmt"]["ztp"]["ztp_url_prefix"] = "/r22-prefix"
-            marker_patch = mock.patch.object(LOAD, "ZTP_PREFIX_MARKER", self.root / ".ztp-prefix-publication.json")
-            marker_patch.start()
-            self.addCleanup(marker_patch.stop)
             (self.root / "r22-prefix").symlink_to("ztp")
             LOAD.ZTP_PREFIX_MARKER.write_text(json.dumps({
                 "schema_version": 1, "prefix": "/r22-prefix",
@@ -4338,6 +4338,78 @@ class ReleaseTransactionTests(unittest.TestCase):
         parent_sync.assert_called_once_with(marker.parent)
         self.assertEqual((b"independent A marker\n", 0o644),
                          (marker.read_bytes(), stat.S_IMODE(marker.stat().st_mode)))
+
+    def _assert_runtime_surface_orphan_holds(self, surface, late):
+        fixture = ReleaseTransactionTests()
+        fixture.setUp()
+        try:
+            state, context = fixture._prepare_persisted_a_runtime_switch(prefix=surface.startswith("prefix-"))
+            journal, descriptor, backend = state[-3:]
+            runtime = fixture.ztp / "ztp-bootstrap_oob.sh"
+            runtime.write_bytes(b"independent partial B runtime\n")
+            common = state[2]
+            common.unlink()
+            common.symlink_to(os.path.relpath(state[5], common.parent))
+            paths = {
+                "yaml-link": context.project / "99-output-eth/latest",
+                "yaml-missing": context.project / "99-output-ib_nvl/latest",
+                "yaml-link-old": context.project / "99-output-eth/latest",
+                "yaml-missing-old": context.project / "99-output-ib_nvl/latest",
+                "prefix-link-new": fixture.root / "r22-prefix",
+                "prefix-link-old": fixture.root / "r22-prefix",
+                "prefix-marker": LOAD.ZTP_PREFIX_MARKER,
+            }
+            target = paths[surface]
+            if surface.startswith("yaml-missing"):
+                target.parent.mkdir()
+            prefix = ".rollback." if surface in {"yaml-link-old", "yaml-missing-old", "prefix-link-old", "prefix-marker"} else ".setup-rollback."
+            orphan = target.parent / ("." + target.name + prefix + "independent-unknown")
+            before = (journal.lstat().st_ino, journal.read_bytes())
+            mixed = (common.lstat().st_ino, os.readlink(common), runtime.lstat().st_ino, runtime.read_bytes(),
+                     state[7].lstat().st_ino, state[7].read_bytes())
+            restore, injected = LOAD.restore_runtime_rollback_receipt, []
+            def late_orphan(*args, **kwargs):
+                result = restore(*args, **kwargs)
+                orphan.symlink_to("independent-missing-stage-evidence")
+                injected.append(orphan.lstat().st_ino)
+                return result
+            if not late:
+                orphan.symlink_to("independent-missing-stage-evidence")
+                injected.append(orphan.lstat().st_ino)
+            with ExitStack() as stack:
+                stack.enter_context(mock.patch.object(LOAD, "active_managed_services", return_value=()))
+                link_restore = stack.enter_context(mock.patch.object(LOAD, "_atomic_restore_setup_link", wraps=LOAD._atomic_restore_setup_link))
+                if late:
+                    stack.enter_context(mock.patch.object(LOAD, "restore_runtime_rollback_receipt", side_effect=late_orphan))
+                with self.assertRaises(LOAD.LoadError):
+                    LOAD.recover_setup_switch_journal(journal, deployment_lock_descriptor=descriptor,
+                        services_quiesced=True, runtime_backend=backend, restore_runtime_from_wal=True)
+                if not late:
+                    link_restore.assert_not_called()
+            self.assertEqual(before, (journal.lstat().st_ino, journal.read_bytes()))
+            self.assertEqual([orphan.lstat().st_ino], injected)
+            self.assertEqual("independent-missing-stage-evidence", os.readlink(orphan))
+            if late:
+                self.assertEqual(b"A oob bootstrap\n", runtime.read_bytes())
+                self.assertEqual(context.setup_state.manifest, state[7].read_bytes())
+                self.assertEqual(context.setup_state.links, {p: os.readlink(p) for p in context.setup_state.links})
+            else:
+                self.assertEqual(mixed, (common.lstat().st_ino, os.readlink(common), runtime.lstat().st_ino,
+                                 runtime.read_bytes(), state[7].lstat().st_ino, state[7].read_bytes()))
+            backend.start.assert_not_called()
+        finally:
+            fixture.doCleanups()
+            fixture.tearDown()
+
+    def test_runtime_surface_orphans_hold_before_p_write(self):
+        for surface in ("yaml-link", "yaml-missing", "yaml-link-old", "yaml-missing-old", "prefix-link-new", "prefix-link-old", "prefix-marker"):
+            with self.subTest(surface=surface):
+                self._assert_runtime_surface_orphan_holds(surface, False)
+
+    def test_runtime_surface_orphans_hold_wal_retirement_after_runtime_verify(self):
+        for surface in ("yaml-link", "yaml-missing", "yaml-link-old", "yaml-missing-old", "prefix-link-new", "prefix-link-old", "prefix-marker"):
+            with self.subTest(surface=surface):
+                self._assert_runtime_surface_orphan_holds(surface, True)
 
     def test_setup_wal_replaced_a_receipt_holds_before_any_p_write(self):
         state, context = self._prepare_persisted_a_runtime_switch()

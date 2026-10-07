@@ -456,8 +456,16 @@ managed key 恢复仍保持链接、原源文件和既存权力换绑断言。�
 复用持有 FD、fsync 前 mode/字节冻结及发布/清理前身份检查，外来暂存不发布、不删除。
 链接 replace/unlink、marker replace/unlink 与已缺席重入均须同步父目录，失败保留 WAL。
 direct 和真实 SETUP 强杀→新 LOAD 覆盖 marker 换绑及同步失败→第三 LOAD 重入。
-此分支不创建未绑定父目录；未带 authority 的旧入口未改变。尚未完成 prefix 在 P
-首写前/退休前的全部孤儿围栏、任意非合作写者免疫、完整 B finalizer 或旧 A 激活。
+此 writer 分支不创建未绑定父目录；未带 authority 的旧入口未改变。首次 P 写前/
+退休前还须下述已枚举名称围栏；它不提供非合作写者免疫、完整 B finalizer 或旧 A 激活。
+后续入口/退休围栏把已验证 A receipt 的 YAML latest 与有 prefix 恢复义务的名称
+纳入同一检查：YAML/prefix 链接同时拒绝 `.name.setup-rollback.` 与旧 `.name.rollback.`，
+marker 拒绝 `.name.rollback.`。检查在首次 P/flat 写前及 runtime 后核验/WAL 退休前执行，
+不等 writer 临时拒绝；即使目标已缺席仍检查存在的真实父目录。YAML 原缺席父目录
+先核祖先安全且不创建目录；其它未知状态 HOLD。direct 与真实 SETUP 强杀→新 LOAD
+覆盖七种名称/状态、原有悬空对象和后核验后晚到对象；晚到拒绝前允许已恢复 P/A，
+但原 WAL 及未知对象必须保留。此处不收编 receipt 外的 B 新 prefix、自动清理未知对象，
+也未关闭 parent 身份持久绑定、完整 root/B finalizer、旧 A 健康激活或原超时诊断闸门。
 missing 前像的 unlink 和已经缺席的重入也须同步父目录。同步失败不得报成功或退休 WAL。
 direct 覆盖实际模式/同步顺序和写入/删除同步异常；真实 LOAD→SETUP 强杀→新 LOAD
 workflow 使用实际 runtime 文件 writer 注入父目录同步错误，保留 WAL 后在新进程重入。

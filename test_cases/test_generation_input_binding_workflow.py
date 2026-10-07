@@ -532,6 +532,16 @@ finally:
     def test_real_setup_death_prefix_marker_sync_failure_retains_wal_until_retry(self):
         self._assert_real_persisted_a_runtime_switch(False, late_authority="prefix-sync")
 
+    def test_real_setup_death_runtime_surface_orphans_hold_before_p_write(self):
+        for surface in ("yaml-link", "yaml-missing", "yaml-link-old", "yaml-missing-old", "prefix-link-new", "prefix-link-old", "prefix-marker"):
+            with self.subTest(surface=surface):
+                self._assert_real_persisted_a_runtime_switch(False, late_authority="surface-orphan-" + surface + ":cold")
+
+    def test_real_setup_death_runtime_surface_orphans_hold_after_runtime_verify(self):
+        for surface in ("yaml-link", "yaml-missing", "yaml-link-old", "yaml-missing-old", "prefix-link-new", "prefix-link-old", "prefix-marker"):
+            with self.subTest(surface=surface):
+                self._assert_real_persisted_a_runtime_switch(False, late_authority="surface-orphan-" + surface + ":late")
+
     def test_real_setup_death_runtime_file_restore_preserves_foreign_stage(self):
         for kind in ("inode", "bytes", "hold"):
             with self.subTest(kind=kind):
@@ -542,7 +552,7 @@ finally:
         fixture.setUp()
         try:
             managed_key = bool(late_authority and late_authority.startswith("key-orphan-"))
-            prefix = bool(late_authority and late_authority.startswith("prefix-"))
+            prefix = bool(late_authority and late_authority.startswith(("prefix-", "surface-orphan-prefix-")))
             state, context = fixture._prepare_persisted_a_runtime_switch(managed_key=managed_key, prefix=prefix)
             prefix_before = ((fixture.root / ".ztp-prefix-publication.json").read_bytes()
                              if prefix else None)
@@ -600,7 +610,7 @@ if sys.argv[4] == 'late' and sys.argv[5].startswith('key-orphan-'):
 if sys.argv[4] == 'late':
     (root / 'ztp/ztp-bootstrap_oobofoob.sh').write_bytes(b'partial B runtime\\n')
     (root / 'ztp/ztp.json').write_bytes(b'partial B runtime\\n')
-    if sys.argv[5].startswith('prefix-'):
+    if sys.argv[5].startswith(('prefix-', 'surface-orphan-prefix-')):
         (root / '.ztp-prefix-publication.json').write_bytes(b'partial B prefix marker\\n')
     if sys.argv[5] == 'latest-sync':
         import json
@@ -625,6 +635,79 @@ os.kill(os.getpid(), signal.SIGKILL)
             self.assertEqual(-9, first.returncode, first.stdout + first.stderr)
             evidence = journal.read_bytes()
             mixed = os.readlink(common)
+            if late_authority and late_authority.startswith("surface-orphan-"):
+                surface, phase = late_authority.removeprefix("surface-orphan-").split(":")
+                targets = {
+                    "yaml-link": p / "99-output-eth/latest",
+                    "yaml-missing": p / "99-output-ib_nvl/latest",
+                    "yaml-link-old": p / "99-output-eth/latest",
+                    "yaml-missing-old": p / "99-output-ib_nvl/latest",
+                    "prefix-link-new": root / "r22-prefix", "prefix-link-old": root / "r22-prefix",
+                    "prefix-marker": root / ".ztp-prefix-publication.json",
+                }
+                target = targets[surface]
+                target.parent.mkdir(exist_ok=True)
+                stem = ".rollback." if surface in {"yaml-link-old", "yaml-missing-old", "prefix-link-old", "prefix-marker"} else ".setup-rollback."
+                orphan = target.parent / ("." + target.name + stem + "independent-orphan")
+                if phase == "cold":
+                    orphan.symlink_to("independent-surface-stage-evidence")
+                def snapshot(path):
+                    if not os.path.lexists(path):
+                        return None
+                    return (path.lstat().st_ino, os.readlink(path) if path.is_symlink() else path.read_bytes())
+                paths = [common, state[7], root / "ztp/ztp-bootstrap_oob.sh", target]
+                before = [snapshot(path) for path in paths]
+                wal_before = snapshot(journal)
+                orphan_before = snapshot(orphan)
+                recovery = r'''
+import importlib.util, json, os, sys
+from pathlib import Path
+from types import SimpleNamespace
+root, orphan, phase = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+spec = importlib.util.spec_from_file_location('surface_orphan_cold_load', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+if phase == 'late':
+    restore = load.restore_runtime_rollback_receipt
+    def late_orphan(*args, **kwargs):
+        result = restore(*args, **kwargs)
+        orphan.symlink_to('independent-surface-stage-evidence')
+        (root / 'surface-orphan-injection.json').write_text(json.dumps({'ino': orphan.lstat().st_ino}))
+        return result
+    load.restore_runtime_rollback_receipt = late_orphan
+backend = SimpleNamespace(name='supervisor', start=lambda *args: (_ for _ in ()).throw(AssertionError('service start forbidden')))
+fd = load.acquire_deployment_lock(exclusive=True)
+try:
+    try:
+        load.recover_setup_switch_journal(root / 'ztp/.setup-switch-journal.json',
+            deployment_lock_descriptor=fd, services_quiesced=True, runtime_backend=backend,
+            restore_runtime_from_wal=True)
+    except load.LoadError as exc:
+        print('EXPECTED SURFACE ORPHAN HOLD:', exc)
+        raise SystemExit(7)
+finally:
+    load.release_deployment_lock(fd)
+'''
+                result = subprocess.run([sys.executable, "-B", "-c", recovery, str(root), str(orphan), phase],
+                    capture_output=True, text=True, check=False, timeout=30)
+                self.assertEqual(7, result.returncode, result.stdout + result.stderr)
+                self.assertEqual(wal_before, snapshot(journal))
+                self.assertEqual("independent-surface-stage-evidence", os.readlink(orphan))
+                if phase == "cold":
+                    self.assertEqual(orphan_before, snapshot(orphan))
+                    self.assertEqual(before, [snapshot(path) for path in paths], "orphan detected after P/flat mutation")
+                else:
+                    held = json.loads((root / "surface-orphan-injection.json").read_text())
+                    self.assertEqual(held["ino"], orphan.lstat().st_ino)
+                    self.assertEqual(b"A oob bootstrap\n", (root / "ztp/ztp-bootstrap_oob.sh").read_bytes())
+                    if prefix:
+                        self.assertEqual(prefix_before, (root / ".ztp-prefix-publication.json").read_bytes())
+                    self.assertEqual(context.setup_state.manifest, state[7].read_bytes())
+                    self.assertEqual(context.setup_state.links, {path: os.readlink(path) for path in context.setup_state.links})
+                self.assertFalse((root / "service-started").exists())
+                return
             if prefix:
                 marker = root / ".ztp-prefix-publication.json"
                 marker_before = (marker.lstat().st_ino, marker.read_bytes())
