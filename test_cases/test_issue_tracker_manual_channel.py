@@ -37,6 +37,58 @@ def valid_env(body):
 
 
 class ManualChannelDirectTests(unittest.TestCase):
+    def test_authenticated_settings_forms_are_exact_typed_intents(self):
+        read = b"action=settings&panel=Switch+Status"
+        self.assertEqual({"action": "settings", "panel": "Switch Status",
+                          "principal": "nvis"}, validate_ingress(valid_env(read), read))
+        body = (b"action=set_k&panel=IB+Link+Validation&new_k=5000"
+                b"&expected_revision=12&request_id=" + b"a" * 32)
+        self.assertEqual({"action": "set_k", "panel": "IB Link Validation",
+                          "principal": "nvis", "new_k": 5000,
+                          "expected_revision": 12, "request_id": "a" * 32},
+                         validate_ingress(valid_env(body), body))
+
+    def test_settings_form_rejects_noncanonical_values_and_browser_authority(self):
+        base = (b"action=set_k&panel=Switch+Status&new_k=5"
+                b"&expected_revision=0&request_id=" + b"b" * 32)
+        for body in (
+            *(base.replace(b"new_k=5", b"new_k=" + value)
+              for value in (b"0", b"-1", b"true", b"5.0", b"05", b"%2B5", b"")),
+            base.replace(b"expected_revision=0", b"expected_revision=01"),
+            base.replace(b"request_id=" + b"b" * 32, b"request_id=bad/path"),
+            base + b"&actor=operator:root", base + b"&principal=cumulus",
+            base + b"&recorded_at=2026-01-01T00:00:00Z", base + b"&project=/tmp/x",
+            base + b"&new_k=6",
+        ):
+            with self.subTest(body=body), self.assertRaises(ManualChannelHold):
+                validate_ingress(valid_env(body), body)
+
+    def test_settings_socket_request_rejects_bool_and_untrusted_extra_fields(self):
+        from monitor.issue_tracker_manual_channel import _request
+        request = {"action": "set_k", "panel": "Switch Status", "principal": "nvis",
+                   "new_k": 5, "expected_revision": 0, "request_id": "c" * 32}
+        self.assertEqual(request, _request(request))
+        for altered in ({**request, "new_k": True},
+                        {**request, "expected_revision": False},
+                        {**request, "actor": "operator:root"},
+                        {**request, "request_id": "../outside"}):
+            with self.subTest(altered=altered), self.assertRaises(ManualChannelHold):
+                _request(altered)
+
+    def test_cgi_requires_exact_settings_receipt_not_success_flag(self):
+        body = b"action=settings&panel=Switch+Status"
+        valid = {"settings": "current", "k": 3, "revision": 0,
+                 "event_sha256": "d" * 64, "online": "disabled_no_send_authority"}
+        for result in ({"success": True}, {**valid, "k": True},
+                       {**valid, "credential": "secret"}, {**valid, "revision": -1},
+                       {**valid, "online": "sent"}, {**valid, "settings": "committed"}):
+            with self.subTest(result=result):
+                status, response = cgi.handle(valid_env(body), body, submit=lambda _: result)
+                self.assertEqual("503 Service Unavailable", status)
+                self.assertEqual({"error": "manual_worker_unavailable"}, response)
+        self.assertEqual(("200 OK", valid), cgi.handle(
+            valid_env(body), body, submit=lambda _: valid))
+
     def test_cgi_accepts_only_server_principal_and_one_panel_intent(self):
         body = b"action=preview&panel=Switch+Status"
         request = validate_ingress(valid_env(body), body)

@@ -45,19 +45,46 @@ def _canonical(value):
 
 
 def _request(value):
-    if type(value) is not dict or value.get("principal") not in _USERS:
+    if (type(value) is not dict or type(value.get("principal")) is not str
+            or value["principal"] not in _USERS):
         raise ManualChannelHold("manual principal is invalid")
     if type(value.get("panel")) is not str or value["panel"] not in _PANELS:
         raise ManualChannelHold("manual panel is invalid")
-    if value.get("action") == "preview" and set(value) == {
+    if value.get("action") in ("preview", "settings") and set(value) == {
             "action", "panel", "principal"}:
         return value
+    if value.get("action") == "set_k" and set(value) == {
+            "action", "panel", "principal", "new_k", "expected_revision", "request_id"}:
+        if (type(value["new_k"]) is int and value["new_k"] > 0
+                and type(value["expected_revision"]) is int and value["expected_revision"] >= 0
+                and type(value["request_id"]) is str and _JOB.fullmatch(value["request_id"])):
+            return value
     if value.get("action") == "confirm" and set(value) == {
             "action", "panel", "principal", "token", "confirmation"}:
         if (type(value["token"]) is str and _TOKEN.fullmatch(value["token"])
                 and value["confirmation"] == "publish_local"):
             return value
     raise ManualChannelHold("manual action is not one exact panel request")
+
+
+def require_settings_result(result, request):
+    """Never promote a flag or partial/secret-bearing settings reply to success."""
+    keys = {"settings", "k", "revision", "event_sha256", "online"}
+    change = request["action"] == "set_k"
+    if change:
+        keys.add("replay")
+    if (type(result) is not dict or set(result) != keys
+            or result["settings"] != ("committed" if change else "current")
+            or type(result["k"]) is not int or result["k"] < 1
+            or type(result["revision"]) is not int or result["revision"] < 0
+            or type(result["event_sha256"]) is not str
+            or _HEX.fullmatch(result["event_sha256"]) is None
+            or result["online"] != "disabled_no_send_authority"
+            or (change and (type(result["replay"]) is not bool
+                            or result["k"] != request["new_k"]
+                            or result["revision"] != request["expected_revision"] + 1))):
+        raise ManualChannelHold("manual settings result is not an exact durable receipt")
+    return result
 
 
 def require_local_result(result):
@@ -124,7 +151,7 @@ def validate_ingress(environ, body):
     try:
         text = body.decode("ascii", "strict")
         pairs = parse_qsl(text, keep_blank_values=True, strict_parsing=True,
-                          max_num_fields=4, encoding="utf-8", errors="strict")
+                          max_num_fields=5, encoding="utf-8", errors="strict")
     except (UnicodeError, ValueError) as exc:
         raise ManualChannelHold("manual form is invalid") from exc
     values = {}
@@ -132,6 +159,15 @@ def validate_ingress(environ, body):
         if key in values:
             raise ManualChannelHold("manual form contains duplicate fields")
         values[key] = value
+    if "principal" in values:
+        raise ManualChannelHold("browser cannot provide the authenticated principal")
+    if values.get("action") == "set_k":
+        for name, pattern in (("new_k", r"[1-9][0-9]*"),
+                              ("expected_revision", r"(?:0|[1-9][0-9]*)")):
+            raw = values.get(name, "")
+            if re.fullmatch(pattern, raw) is None:
+                raise ManualChannelHold("settings integer is not canonical")
+            values[name] = int(raw)
     return _request({**values, "principal": environ["REMOTE_USER"]})
 
 
@@ -337,6 +373,15 @@ class ManualQueueWorker:
         try:
             if request["action"] == "preview":
                 result = self.broker.preview(request["principal"], request["panel"])
+            elif request["action"] == "settings":
+                result = self.broker.settings(request["principal"], request["panel"])
+                require_settings_result(result, request)
+            elif request["action"] == "set_k":
+                result = self.broker.set_k(
+                    request["principal"], request["panel"], new_k=request["new_k"],
+                    expected_revision=request["expected_revision"], request_id=request["request_id"],
+                )
+                require_settings_result(result, request)
             else:
                 result = self.broker.confirm(
                     request["principal"], request["panel"], request["token"],

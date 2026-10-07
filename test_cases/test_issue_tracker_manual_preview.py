@@ -28,6 +28,18 @@ def qualified_status():
 
 
 class ManualPreviewDirectTests(unittest.TestCase):
+    def test_settings_without_trusted_worker_callbacks_fail_closed(self):
+        for method in ("settings", "set_k"):
+            self.assertTrue(callable(getattr(self.broker, method, None)),
+                            "trusted worker settings relay is missing")
+        with self.assertRaises(ManualPreviewHold):
+            self.broker.settings("nvis", "Switch Status")
+        with self.assertRaises(ManualPreviewHold):
+            self.broker.set_k("nvis", "Switch Status", new_k=5,
+                              expected_revision=2, request_id="a" * 32)
+        self.reader.assert_not_called()
+        self.commit.assert_not_called()
+
     def setUp(self):
         self.status = qualified_status()
         self.reader = mock.Mock(return_value=self.status)

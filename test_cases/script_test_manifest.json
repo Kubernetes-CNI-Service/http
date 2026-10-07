@@ -1597,8 +1597,11 @@
     {
       "id": "issue_tracker_manual_preview_to_stage_l_writer",
       "members": [
+        "monitor/issue-tracker-control.cgi",
         "monitor/issue_tracker_manual_channel.py",
         "monitor/issue_tracker_manual_preview.py",
+        "monitor/issue_tracker_state_owner.py",
+        "monitor/issue_tracker_k_store.py",
         "monitor/issue_tracker_manifest.py",
         "monitor/issue_tracker_publish_runtime.py",
         "monitor/issue_tracker_stage_l_consumer.py",

@@ -28,6 +28,10 @@ _OUTBOX_KEYS = {"schema_version", "revision", "event_sha256"}
 _MAX_DOC_BYTES = 16 * 1024
 
 
+class KChangeConflict(KChainHoldError):
+    """Validated prior state rejected a request before its first mutation."""
+
+
 @dataclass(frozen=True)
 class KStoreReceipt:
     revision: int
@@ -338,11 +342,11 @@ def apply_local_k_change(root, *, new_k, actor, recorded_at, request_id,
             })
             if row["request_id"] == request_id:
                 if row["payload_sha256"] != payload_digest or revision == 0:
-                    raise KChainHoldError("settings request ID reused with different payload")
+                    raise KChangeConflict("settings request ID reused with different payload")
                 return KStoreReceipt(revision, row["new_k"],
                                      hashlib.sha256(raw).hexdigest(), replay=True)
         if expected_revision != state.revision:
-            raise KChainHoldError("stale expected settings revision")
+            raise KChangeConflict("stale expected settings revision")
         revision = state.revision + 1
         event = _canonical_line({
             "schema_version": 1, "revision": revision, "type": "set_k",

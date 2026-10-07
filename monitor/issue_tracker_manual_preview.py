@@ -77,11 +77,14 @@ def _bound_status(status, panel):
 class ManualPreviewBroker:
     """One worker-lifetime token store; restart or expiry revokes previews."""
 
-    def __init__(self, read_status, commit_local, *, clock=time.monotonic):
+    def __init__(self, read_status, commit_local, *, clock=time.monotonic,
+                 read_settings=None, change_settings=None):
         self._read_status = read_status
         self._commit_local = commit_local
         self._clock = clock
         self._pending = {}
+        self._read_settings = read_settings
+        self._change_settings = change_settings
 
     @property
     def pending_count(self):
@@ -96,6 +99,23 @@ class ManualPreviewBroker:
         for key, entry in tuple(self._pending.items()):
             if now >= entry[3]:
                 del self._pending[key]
+
+    def settings(self, principal, panel):
+        self._validate_request(principal, panel)
+        if not callable(self._read_settings):
+            raise ManualPreviewHold("trusted settings reader is unavailable")
+        return self._read_settings()
+
+    def set_k(self, principal, panel, *, new_k, expected_revision, request_id):
+        self._validate_request(principal, panel)
+        if (not callable(self._change_settings) or type(new_k) is not int or new_k < 1
+                or type(expected_revision) is not int or expected_revision < 0
+                or type(request_id) is not str or re.fullmatch(r"[0-9a-f]{32}", request_id) is None):
+            raise ManualPreviewHold("trusted settings change request is invalid")
+        # A settings attempt invalidates previews even when the reply is lost.
+        # No request is allowed to silently reuse an old window/policy snapshot.
+        self._pending.clear()
+        return self._change_settings(principal, new_k, expected_revision, request_id)
 
     def preview(self, principal, panel):
         self._validate_request(principal, panel)
@@ -157,6 +177,41 @@ def make_protected_stage_l_broker(
     from monitor.issue_tracker_local_workbook_commit import (
         CommittedProdWorkbook, ProdWorkbookNoop,
     )
+    from datetime import datetime, timezone
+    from monitor.issue_tracker_k_store import KChangeConflict
+    from monitor.issue_tracker_state_owner import (
+        TrackerStateHold, current_k, set_k, tracker_writer,
+    )
+
+    def settings_owner():
+        runtime._paths(store, http_root, project, publication, template_path)
+        if store.scope != "prod":
+            raise ManualPreviewHold("settings relay is not bound to production scope")
+        return tracker_writer(project, publication)
+
+    def read_settings():
+        with settings_owner() as token:
+            state = current_k(token)
+            return {"settings": "current", "k": state.k, "revision": state.revision,
+                    "event_sha256": state.event_sha256, "online": "disabled_no_send_authority"}
+
+    def change_settings(principal, new_k, expected_revision, request_id):
+        try:
+            with settings_owner() as token:
+                receipt = set_k(
+                    token, new_k=new_k, actor="operator:" + principal,
+                    recorded_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    request_id=request_id, expected_revision=expected_revision,
+                )
+                return {"settings": "committed", "k": receipt.k, "revision": receipt.revision,
+                        "event_sha256": receipt.event_sha256, "replay": receipt.replay,
+                        "online": "disabled_no_send_authority"}
+        except TrackerStateHold as exc:
+            if isinstance(exc.__cause__, KChangeConflict):
+                raise ManualPreviewHold("settings request conflicts with committed state") from exc
+            # Unsafe state or incomplete barriers remain a claimed UNKNOWN;
+            # only a proved pre-mutation conflict may be a completed HOLD.
+            raise
 
     def read_status():
         return runtime.inspect_stage_l(
@@ -203,4 +258,5 @@ def make_protected_stage_l_broker(
         # Let the claimed queue record remain UNKNOWN for reconciliation.
         raise RuntimeError("protected local writer returned an unknown result")
 
-    return ManualPreviewBroker(read_status, commit_local, clock=clock)
+    return ManualPreviewBroker(read_status, commit_local, clock=clock,
+                               read_settings=read_settings, change_settings=change_settings)

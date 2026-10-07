@@ -18,6 +18,21 @@ T1 = "2026-09-25T00:01:00Z"
 
 
 class IssueTrackerKStoreTests(unittest.TestCase):
+    def test_request_conflict_is_distinct_from_unsafe_settings_authority(self):
+        from monitor import issue_tracker_k_store as store
+        conflict = getattr(store, "KChangeConflict", None)
+        self.assertIsNotNone(conflict, "safe request rejection needs a distinct type")
+        self.initialize()
+        self.change()
+        for arguments in ({"new_k": 6},
+                          {"request_id": "new-stale-request", "expected_revision": 0}):
+            with self.subTest(arguments=arguments), self.assertRaises(conflict):
+                self.change(**arguments)
+        (self.root / "settings/outbox/1.json").unlink()
+        with self.assertRaises(KChainHoldError) as raised:
+            self.change(request_id="unsafe-store", expected_revision=1)
+        self.assertNotIsInstance(raised.exception, conflict)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="tracker-k-store-")
         self.addCleanup(self.temp.cleanup)

@@ -69,6 +69,109 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             skip_history=False, two_cycle_changed_latest=True,
         )
 
+    def test_authenticated_k_relay_persists_replays_and_invalidates_real_preview(self):
+        self._exercise_real_protected_three_panel_fixture(
+            skip_history=False, settings_channel_probe=True,
+        )
+
+    def test_k_relay_interrupted_commit_retains_unknown_claim_not_success_or_retry(self):
+        self._exercise_real_protected_three_panel_fixture(
+            skip_history=False, settings_channel_fault=True,
+        )
+
+    def _verify_authenticated_settings_channel(self, project, *, fault=False):
+        from monitor.issue_tracker_manual_channel import DurableManualQueue, ManualQueueWorker
+        from monitor.issue_tracker_manual_preview import make_protected_stage_l_broker
+        from monitor.issue_tracker_state_owner import current_k, tracker_writer
+        from test_cases.test_issue_tracker_manual_channel import cgi, valid_env
+
+        root = project / ".tracker/manual-k-fixture"
+        root.mkdir(mode=0o700)
+        queue = DurableManualQueue(root, boot_id="settings-fixture")
+        broker = make_protected_stage_l_broker(
+            self.store, http_root=self.root, project=project,
+            publication=self.publication, template_path=self.template,
+            boot_id="settings-fixture", clock=lambda: 1000.0,
+        )
+        worker = ManualQueueWorker(queue, broker)
+        jobs = []
+
+        def submit(request):
+            job = queue.enqueue(request)
+            jobs.append(job)
+            claimed, result = worker.process_job(job)
+            self.assertEqual(job, claimed)
+            self.assertEqual("done", queue.status(job)["state"])
+            return result
+
+        body = b"action=settings&panel=Switch+Status"
+        status, initial = cgi.handle(valid_env(body), body, submit=submit)
+        self.assertEqual("200 OK", status)
+        self.assertEqual((1, 1), (initial["revision"], initial["k"]))
+        preview = broker.preview("nvis", "Switch Status")
+        generations = tuple((project / ".tracker/generations").iterdir())
+        template = self.template.read_bytes()
+        change = (b"action=set_k&panel=Eth+Link+Validation&new_k=5000"
+                  b"&expected_revision=1&request_id=" + b"d" * 32)
+        if fault:
+            # Failure after immutable event/outbox installation, before the
+            # current-pointer barrier: preserve the tail and this claimed job.
+            with mock.patch("monitor.issue_tracker_k_store._replace_current",
+                            side_effect=OSError("injected pointer barrier failure")):
+                status, result = cgi.handle(valid_env(change), change, submit=submit)
+            self.assertEqual(("503 Service Unavailable", {"error": "manual_worker_unavailable"}),
+                             (status, result))
+            self.assertEqual("unknown_after_claim", queue.status(jobs[-1])["state"])
+            self.assertTrue((project / ".tracker/settings/events/2.json").is_file())
+            self.assertTrue((project / ".tracker/settings/outbox/2.json").is_file())
+            status, result = cgi.handle(valid_env(body), body, submit=submit)
+            self.assertEqual("503 Service Unavailable", status)
+            self.assertEqual("unknown_after_claim", queue.status(jobs[-1])["state"])
+            self.assertEqual(generations, tuple((project / ".tracker/generations").iterdir()))
+            self.assertEqual(template, self.template.read_bytes())
+            return
+        status, result = cgi.handle(valid_env(change), change, submit=submit)
+        self.assertEqual("200 OK", status)
+        self.assertEqual(("committed", 2, 5000, False),
+                         (result["settings"], result["revision"], result["k"], result["replay"]))
+        event_path = project / ".tracker/settings/events/2.json"
+        event = json.loads(event_path.read_bytes())
+        self.assertEqual(("operator:nvis", 1, 5000, "d" * 32),
+                         (event["actor"], event["old_k"], event["new_k"], event["request_id"]))
+        self.assertEqual(hashlib.sha256(event_path.read_bytes()).hexdigest(), result["event_sha256"])
+        self.assertTrue((project / ".tracker/settings/outbox/2.json").is_file())
+        restart = make_protected_stage_l_broker(
+            self.store, http_root=self.root, project=project,
+            publication=self.publication, template_path=self.template,
+            boot_id="new-worker", clock=lambda: 1000.0,
+        )
+        self.assertEqual((2, 5000), (restart.settings("cumulus", "IB Link Validation")["revision"],
+                                     restart.settings("cumulus", "IB Link Validation")["k"]))
+        status, replay = cgi.handle(valid_env(change), change, submit=submit)
+        self.assertEqual("200 OK", status)
+        self.assertEqual({**result, "replay": True}, replay)
+        for altered, environment in (
+            (change.replace(b"new_k=5000", b"new_k=6"), None),
+            (change.replace(b"d" * 32, b"e" * 32), None),
+            (change, {**valid_env(change), "REMOTE_USER": "cumulus"}),
+        ):
+            status, refused = cgi.handle(environment or valid_env(altered), altered, submit=submit)
+            self.assertEqual(("409 Conflict", {"error": "manual_hold"}), (status, refused))
+        with tracker_writer(project, self.publication) as token:
+            self.assertEqual((2, 5000), (current_k(token).revision, current_k(token).k))
+        from monitor.issue_tracker_publish_runtime import inspect_stage_l
+        status = inspect_stage_l(self.store, http_root=self.root, project=project,
+                                 publication=self.publication, template_path=self.template)
+        self.assertEqual((2, 5000), (status["k_revision"], status["k"]))
+        self.assertEqual("pending", status["state"])
+        self.assertEqual("disabled_no_send_authority", status["online"])
+        from monitor.issue_tracker_manual_preview import ManualPreviewHold
+        with self.assertRaises(ManualPreviewHold):
+            broker.confirm("nvis", "Switch Status", preview["token"], confirmation="publish_local")
+        self.assertEqual(generations, tuple((project / ".tracker/generations").iterdir()))
+        self.assertEqual(template, self.template.read_bytes())
+
+
     def test_real_protected_eth_and_switch_skips_have_local_audit_history(self):
         self._exercise_real_protected_three_panel_fixture(skip_history=True)
 
@@ -296,6 +399,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         terminal_orphan_probe=False, selected_manual_panel=None,
         selected_panel_empty=False, manual_channel_bridge=False,
         source_identity_probe=False, two_cycle_changed_latest=False,
+        settings_channel_probe=False, settings_channel_fault=False,
     ):
         from monitor.collection_ib_producer import (
             IbProducerAuthoritySnapshot, parse_ib_producer_authority,
@@ -586,6 +690,9 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             self.assertEqual(0, stage_status["whitelist_skip_count"])
             self.assertEqual("disabled_no_send_authority", stage_status["online"])
             self.assertNotIn("receipt", stage_status)
+            if settings_channel_probe or settings_channel_fault:
+                self._verify_authenticated_settings_channel(project, fault=settings_channel_fault)
+                return
             protected_time = read_prod_ib_k_window(self.store, **args).recorded_at_utc
             self.assertTrue(protected_time)
             self.assertEqual(protected_time, qualified.recorded_at_utc)
