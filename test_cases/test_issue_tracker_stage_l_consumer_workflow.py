@@ -67,6 +67,9 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
     def test_real_protected_three_panel_sources_compile_literal_units_and_refuse_invented_values(self):
         self._exercise_real_protected_three_panel_fixture(skip_history=False, source_unit_probe=True)
 
+    def test_actual_protected_workbook_receipt_admission_bind_all_source_units_and_reject_drift(self):
+        self._exercise_real_protected_three_panel_fixture(skip_history=False, receipted_source_probe=True)
+
     def test_two_real_cycles_keep_keys_and_commit_latest_business_values(self):
         self._exercise_real_protected_three_panel_fixture(
             skip_history=False, two_cycle_changed_latest=True,
@@ -423,7 +426,7 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
         selected_panel_empty=False, manual_channel_bridge=False,
         source_identity_probe=False, two_cycle_changed_latest=False,
         settings_channel_probe=False, settings_channel_fault=False,
-        panel_counts_probe=False, source_unit_probe=False,
+        panel_counts_probe=False, source_unit_probe=False, receipted_source_probe=False,
         complete_preview_probe=False,
         complete_preview_source_race=False,
         complete_preview_cgi=False,
@@ -1401,6 +1404,92 @@ class ProdStageLConsumerWorkflowTests(ProdStageLFixture):
             self.assertEqual(digest, committed.receipt.manifest_id)
             self.assertEqual(hashlib.sha256(committed.prepared.xlsx_bytes).hexdigest(),
                              committed.receipt.published_sha256)
+            if receipted_source_probe:
+                import monitor.issue_tracker_send_unit as compiler
+                generation_id = committed.receipt.generation_id
+                original_publications = tuple(sorted(self.publication.iterdir()))
+                original_generations = tuple(sorted(generation_root.iterdir()))
+                receipt_path = generation_root / generation_id / 'RECEIPT'
+                receipt_bytes = receipt_path.read_bytes()
+                publication_path = self.publication / (generation_id + '.xlsx')
+                published_bytes = publication_path.read_bytes()
+                for sheet, family, sid in (('ETH&IB Switch', 'switch', 101), ('ETH Cabling', 'eth_cabling', 102),
+                                           ('IB Cabling', 'ib_cabling', 103)):
+                    candidates = tuple(item for item in qualified.candidates if item.activity_key[0] == family)
+                    self.assertTrue(candidates)
+                    placements = tuple({'operation_id': item.operation_id, 'action': 'update' if family == 'switch' else 'insert',
+                        'row_index': index + 2 if family == 'switch' else None, 'observed_values': {'L': {}} if family == 'switch' else None,
+                        'reserved_id': None if family == 'switch' else 'NV%05d' % (42001 + index)}
+                        for index, item in enumerate(candidates))
+                    options = dict(local_generation_id=generation_id,
+                        spreadsheet_id='synthetic_spreadsheet_id_0001', sheet=sheet, sheet_id=sid, history_sheet_id=105,
+                        target_nonce='c' * 64, history_nonce='d' * 64, preread_sha256='e' * 64,
+                        audits=(), occupied_metadata_ids=())
+                    with tracker_writer(project, self.publication) as token:
+                        def compile_unit(**changes):
+                            return compiler.freeze_receipted_prod_source_unit(qualified, self.store, metadata=metadata,
+                                expected_template_sha256=self.snapshot.workbook_sha256, placements=placements,
+                                writer_token=token, **args, **{**options, **changes})
+                        unit = compile_unit()
+                        action = json.loads(unit.action_preimage)
+                        self.assertEqual(generation_id, action['identity']['generation_id'])
+                        self.assertEqual(committed.receipt.published_sha256, action['identity']['publish_id'])
+                        self.assertEqual(committed.receipt.manifest_id, action['manifest_id'])
+                        with self.assertRaises(compiler.SendUnitHold): compile_unit(publish_id='f' * 64)
+                        with self.assertRaises(compiler.SendUnitHold):
+                            compile_unit(local_generation_id='gen-00000000000000000002-' + '1' * 32)
+                        if family == 'switch':
+                            forged = json.loads(receipt_bytes); forged['sequence'] = True
+                            receipt_path.write_bytes(json.dumps(forged).encode())
+                            bad_receipt = receipt_path.read_bytes()
+                            try:
+                                with self.assertRaises(compiler.SendUnitHold): compile_unit()
+                                self.assertEqual(bad_receipt, receipt_path.read_bytes())
+                            finally:
+                                receipt_path.write_bytes(receipt_bytes)
+                            admission_path = next((project / '.tracker/admissions').iterdir())
+                            admission_bytes = admission_path.read_bytes()
+                            try:
+                                admission_path.write_bytes(b'{}\n')
+                                with self.assertRaises(compiler.SendUnitHold): compile_unit()
+                                self.assertEqual(b'{}\n', admission_path.read_bytes())
+                            finally:
+                                admission_path.write_bytes(admission_bytes)
+                            real_compile = compiler.freeze_prod_source_unit
+                            def change_publication_after_freeze(*freeze_args, **freeze_options):
+                                result = real_compile(*freeze_args, **freeze_options)
+                                publication_path.write_bytes(b'changed after source unit freeze')
+                                return result
+                            try:
+                                with mock.patch.object(compiler, 'freeze_prod_source_unit', side_effect=change_publication_after_freeze):
+                                    with self.assertRaises(compiler.SendUnitHold): compile_unit()
+                                self.assertEqual(b'changed after source unit freeze', publication_path.read_bytes())
+                            finally:
+                                publication_path.write_bytes(published_bytes)
+                            preserved_receipt = project / 'preserved-original-receipt'
+                            def replace_receipt_inode_after_freeze(*freeze_args, **freeze_options):
+                                result = real_compile(*freeze_args, **freeze_options)
+                                receipt_path.rename(preserved_receipt)
+                                receipt_path.write_bytes(receipt_bytes)
+                                receipt_path.chmod(0o600)
+                                return result
+                            try:
+                                with mock.patch.object(compiler, 'freeze_prod_source_unit', side_effect=replace_receipt_inode_after_freeze):
+                                    with self.assertRaises(compiler.SendUnitHold): compile_unit()
+                                self.assertNotEqual(preserved_receipt.stat().st_ino, receipt_path.stat().st_ino)
+                                self.assertEqual(receipt_bytes, receipt_path.read_bytes())
+                            finally:
+                                if preserved_receipt.exists():
+                                    receipt_path.unlink()
+                                    preserved_receipt.rename(receipt_path)
+                self.assertEqual(original_publications, tuple(sorted(self.publication.iterdir())))
+                self.assertEqual(original_generations, tuple(sorted(generation_root.iterdir())))
+                self.assertEqual(original_template, self.template.read_bytes())
+                self.assertEqual(receipt_bytes, receipt_path.read_bytes())
+                self.assertEqual(published_bytes, publication_path.read_bytes())
+                self.assertFalse((project / '.tracker/remote-actions').exists())
+                self.assertFalse((project / '.tracker/remote-attempts').exists())
+                return
             if require_first_manual_admission:
                 self.assertTrue((project / ".tracker/admissions").is_dir())
                 admission_files = tuple(sorted(

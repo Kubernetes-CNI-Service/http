@@ -176,6 +176,92 @@ def freeze_prod_source_unit(qualified, store, *, http_root, settings,
     return result
 
 
+def _original_receipt_identity(qualified, store, generation_id, token, settings, snapshot, template_sha256):
+    """Observe original current-cycle C6 facts under LK-P and recovery barriers.
+
+    This does not issue eligibility, reconstruct/adopt a caller receipt or
+    create a generation. Shared admissions and every prior original XLSX must
+    already validate; a received name alone is never sufficient.
+    """
+    import os
+    from monitor import issue_tracker_local_commit as local
+    from monitor.issue_tracker_receipt_snapshot import read_current_cycle_local_receipts
+
+    observed = read_current_cycle_local_receipts(token, store,
+        expected_template_sha256=template_sha256, settings=settings,
+        whitelist_sha256=snapshot.whitelist.sha256, qualified_source=qualified)
+    if type(generation_id) is not str or generation_id not in observed.generation_ids: raise SendUnitHold()
+    owner = local._owner(token)
+    generations = local._directory(owner.root_fd, 'generations')
+    try:
+        directory = local._directory(generations, generation_id)
+        try:
+            def identity(info):
+                return (info.st_dev, info.st_ino, info.st_size)
+            def image(name, limit=local._MAX_DOC):
+                raw, info = local._read(directory, name, limit)
+                return raw, identity(info)
+            ancestors = tuple((info.st_dev, info.st_ino) for info in (os.fstat(generations), os.fstat(directory)))
+            if set(os.listdir(directory)) != {'STATE', 'MANIFEST', 'INTENT', 'RECEIPT'}: raise SendUnitHold()
+            state_raw, state_identity = image('STATE')
+            state = local._json(state_raw, {'schema_version', 'generation_id', 'sequence', 'manifest_id'})
+            receipt_raw, receipt_identity = image('RECEIPT')
+            manifest_raw, manifest_identity = image('MANIFEST', 1024 * 1024)
+            intent_raw, intent_identity = image('INTENT')
+            receipt = local._json(receipt_raw)
+            if (type(state['sequence']) is not int or state['sequence'] < 1
+                    or type(receipt.get('sequence')) is not int or receipt['sequence'] != state['sequence']
+                    or receipt.get('kind') != 'xlsx'): raise SendUnitHold()
+            generation = local.Generation(generation_id, state['sequence'], state['manifest_id'], token)
+            status = local.inspect_local_generation(owner.project, owner.publication, generation, token=token)
+            if status.status != 'RECEIPT-PRESENT-NOT-ELIGIBILITY': raise SendUnitHold()
+            if tuple(image(name, limit) for name, limit in (
+                    ('STATE', local._MAX_DOC), ('RECEIPT', local._MAX_DOC), ('MANIFEST', 1024 * 1024), ('INTENT', local._MAX_DOC))) != (
+                    (state_raw, state_identity), (receipt_raw, receipt_identity),
+                    (manifest_raw, manifest_identity), (intent_raw, intent_identity)):
+                raise SendUnitHold()
+            named = (os.stat('generations', dir_fd=owner.root_fd, follow_symlinks=False),
+                     os.stat(generation_id, dir_fd=generations, follow_symlinks=False))
+            if tuple((info.st_dev, info.st_ino) for info in named) != ancestors: raise SendUnitHold()
+            return (generation_id, _digest(receipt['published_sha256']), _digest(receipt['manifest_id']),
+                    ancestors, state_identity, receipt_identity, manifest_identity, intent_identity,
+                    hashlib.sha256(state_raw).hexdigest(), hashlib.sha256(receipt_raw).hexdigest(),
+                    hashlib.sha256(manifest_raw).hexdigest(), hashlib.sha256(intent_raw).hexdigest())
+        finally:
+            os.close(directory)
+    finally:
+        os.close(generations)
+
+
+def freeze_receipted_prod_source_unit(qualified, store, *, http_root, settings,
+                                     whitelist_snapshot, whitelist_path, metadata,
+                                     expected_template_sha256, local_generation_id,
+                                     placements, writer_token=None, **unit_binding):
+    """Bind actual C5 sources to an original admitted C6 workbook receipt.
+
+    Generation/publication cannot be supplied as substitutes. Coordinate,
+    preread, enrollment, reservations, fresh send admission and fixed launcher
+    remain separate obligations. No transport, intent, settlement or permit.
+    """
+    failed = False
+    try:
+        names = {'spreadsheet_id', 'sheet', 'sheet_id', 'history_sheet_id', 'target_nonce',
+                 'history_nonce', 'preread_sha256', 'audits', 'occupied_metadata_ids'}
+        if set(unit_binding) != names: raise SendUnitHold()
+        before = _original_receipt_identity(qualified, store, local_generation_id, writer_token,
+            settings, whitelist_snapshot, expected_template_sha256)
+        result = freeze_prod_source_unit(qualified, store, http_root=http_root, settings=settings,
+            whitelist_snapshot=whitelist_snapshot, whitelist_path=whitelist_path, metadata=metadata,
+            expected_template_sha256=expected_template_sha256, placements=placements, writer_token=writer_token,
+            generation_id=before[0], publish_id=before[1], **unit_binding)
+        if json.loads(result.action_preimage)['manifest_id'] != before[2]: raise SendUnitHold()
+        if _original_receipt_identity(qualified, store, local_generation_id, writer_token,
+                settings, whitelist_snapshot, expected_template_sha256) != before: raise SendUnitHold()
+    except Exception: failed = True
+    if failed: raise SendUnitHold()
+    return result
+
+
 def _freeze(manifest, manifest_id, generation_id, publish_id, spreadsheet_id,
             sheet, sheet_id, history_sheet_id, target_nonce, history_nonce,
             preread_sha256, business, audits, occupied_metadata_ids):

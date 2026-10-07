@@ -893,6 +893,15 @@ VISIBLE_ONLY_UNPROVED，因为别的 Cloud 项目的 PROJECT 元数据可能不�
 序号必须大于零；不把它改写为任意 64 位摘要。独立候选的摘要身份仍只用于纯组合测试。
 实际 local begin/INTENT/commit → composer → durable intent → 冷进程计数 workflow
 核原 generation／发布摘要与不变 wire；形状正确或 local receipt 均不是在线资格。
+`freeze_receipted_prod_source_unit` 进一步读取原始当前周期 C-6 工作簿 RECEIPT、
+共享准入链及全部原始 XLSX；在 owner 和恢复屏障下，manifest 必须与重新核验的
+受保护来源逐字节摘要一致，generation／发布摘要不接受 caller 替换。组批前后再次
+读取，receipt 序号类型、准入缺失、原文件替换均 HOLD 且不修复原证据。
+原始 generation 目录及 STATE／MANIFEST／INTENT／RECEIPT 的 dev/inode/大小前后
+必须一致；仅把 RECEIPT 改为同字节的新 inode 也拒绝，不能用重算摘要替代原始物理对象。
+真实 producer／资格／工作簿投影／C-6 commit／准入 → 原始 receipt → 三表冻结批次
+workflow 不新建 generation、remote intent 或网络调用；仍不是行身份、原始 nonce／
+preread／预留、新鲜发送准入、全表 owner、固定 launcher、COMPLETE 或 REQ7 整体通过。
 
 `test_cases.test_req7_send_intent` 将真实 composer → C-6 owner → 非递归
 ACTION-PREIMAGE/action_digest → immutable wire journal → 六个冷启动进程的意图计数

@@ -49,6 +49,19 @@ def inputs(count=2):
 class Req7SendUnitDirectTests(unittest.TestCase):
     def setUp(self): self.module = load()
 
+    def test_receipted_source_compiler_cannot_accept_caller_receipt_or_publication_claims(self):
+        self.assertTrue(hasattr(self.module, 'freeze_receipted_prod_source_unit'),
+                        'original C6 receipt and shared admission must bind the source unit')
+        bindings = inputs()
+        for field in ('manifest', 'manifest_id', 'business', 'generation_id', 'publish_id'): bindings.pop(field)
+        for claim in ({}, {'publish_id': 'f' * 64}, {'receipt': {'published_sha256': 'f' * 64}}):
+            with self.subTest(claim=claim), self.assertRaises(self.module.SendUnitHold) as caught:
+                self.module.freeze_receipted_prod_source_unit(object(), object(), http_root='/', settings=object(),
+                    whitelist_snapshot=object(), whitelist_path='/', metadata={}, expected_template_sha256='a' * 64,
+                    local_generation_id='gen-00000000000000000001-' + '1' * 32, placements=(),
+                    **bindings, **claim)
+            self.assertIsNone(caught.exception.__context__)
+
     def test_native_c6_generation_name_is_preserved_in_the_frozen_identity(self):
         args = inputs(); args['generation_id'] = 'gen-00000000000000000001-' + '7' * 32
         unit = self.module.freeze_send_unit(**args)
