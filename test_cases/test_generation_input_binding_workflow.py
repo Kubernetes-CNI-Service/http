@@ -862,6 +862,111 @@ finally:
             self.assertEqual(evidence, journal.read_bytes())
             self.assertFalse((root / "service-started").exists())
 
+    def test_real_setup_legacy_comparison_transfer_death_cold_restores_reports(self):
+        self._exercise_real_comparison_transfer_death("pointer")
+
+    def test_real_setup_legacy_comparison_transfer_rename_death_cold_restores_reports(self):
+        self._exercise_real_comparison_transfer_death("rename")
+
+    def test_real_setup_comparison_transfer_changed_reports_cold_holds(self):
+        self._exercise_real_comparison_transfer_death("pointer", mutation="report")
+
+    def test_real_setup_comparison_transfer_unknown_target_cold_holds(self):
+        self._exercise_real_comparison_transfer_death("pointer", mutation="target")
+
+    def _exercise_real_comparison_transfer_death(self, boundary, mutation=None):
+        with tempfile.TemporaryDirectory(prefix="r22-real-comparison-transfer-") as name:
+            fixture = self._private_setup_switch_fixture(Path(name))
+            root, _p, q, common, _p_only, _q_only, manifest, before, _hook, barrier, _home = fixture
+            source = root / "ztp/optimize/q-sample/comparison"
+            source.mkdir(parents=True)
+            report = b"independent original comparison report\n"
+            (source / "operator-report.csv").write_bytes(report)
+            original = source.stat()
+            (q / "99-output-ztp").mkdir(exist_ok=True)
+            destination = q / "99-output-ztp/optimize"
+            if boundary == "rename":
+                hook = fixture[8] / "sitecustomize.py"
+                hook.write_text(hook.read_text() + "\n" + f"""
+original_fsync = os.fsync
+def kill_after_comparison_rename(fd):
+    source = Path({str(source)!r})
+    destination = Path({str(destination)!r})
+    if (not os.path.lexists(source) and destination.is_dir()
+            and destination.stat().st_ino == {original.st_ino}):
+        Path(os.environ['HTTP_TEST_Q_LINK_BARRIER']).write_bytes(b'comparison rename observed\\n')
+        os.kill(os.getpid(), signal.SIGKILL)
+    return original_fsync(fd)
+os.fsync = kill_after_comparison_rename
+""")
+            first = self._run_private_load_setup_switch(
+                fixture, prepare_journal=True, first_link=root / "never-created-link",
+                kill_after_replace=source if boundary == "pointer" else root / "never-replaced",
+            )
+            self.assertEqual(23, first.returncode, first.stdout + first.stderr)
+            self.assertTrue(barrier.is_file())
+            if boundary == "pointer":
+                self.assertTrue(source.is_symlink())
+            else:
+                self.assertFalse(os.path.lexists(source))
+            self.assertEqual(original.st_ino, destination.stat().st_ino)
+            self.assertEqual(report, (destination / "operator-report.csv").read_bytes())
+            journal = root / "ztp/.setup-switch-journal.json"
+            evidence, q_common = journal.read_bytes(), os.readlink(common)
+            if mutation == "report":
+                (destination / "operator-report.csv").write_bytes(b"unknown changed report\n")
+            elif mutation == "target":
+                retained = destination.with_name("retained-comparison")
+                destination.rename(retained)
+                destination.mkdir()
+                (destination / "unknown.csv").write_bytes(b"unknown operator data\n")
+            recovery = """
+import importlib.util
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('fresh_comparison_transfer_load', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    assert load.recover_setup_switch_journal(
+        root / 'ztp/.setup-switch-journal.json', deployment_lock_descriptor=descriptor,
+        services_quiesced=True, runtime_backend=SimpleNamespace(name='supervisor'),
+    ) == 'restored-p'
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+            second = subprocess.run([sys.executable, "-B", "-c", recovery, str(root)],
+                                    cwd=root, capture_output=True, text=True, check=False, timeout=30)
+            if mutation is not None:
+                self.assertNotEqual(0, second.returncode, second.stdout + second.stderr)
+                self.assertIn("comparison transfer is unknown", second.stderr)
+                self.assertEqual(evidence, journal.read_bytes())
+                self.assertEqual(q_common, os.readlink(common), "HOLD changed a previously written Q link")
+                self.assertTrue(source.is_symlink())
+                if mutation == "report":
+                    self.assertEqual(b"unknown changed report\n", (destination / "operator-report.csv").read_bytes())
+                    self.assertEqual(original.st_ino, destination.stat().st_ino)
+                else:
+                    self.assertEqual(original.st_ino, retained.stat().st_ino)
+                    self.assertEqual(report, (retained / "operator-report.csv").read_bytes())
+                    self.assertEqual(b"unknown operator data\n", (destination / "unknown.csv").read_bytes())
+                self.assertFalse((root / "service-started").exists())
+                return
+            self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+            self.assertFalse(source.is_symlink())
+            self.assertEqual(original.st_ino, source.stat().st_ino)
+            self.assertEqual(report, (source / "operator-report.csv").read_bytes())
+            self.assertFalse(os.path.lexists(destination))
+            self.assertEqual(before["manifest"], manifest.read_bytes())
+            self.assertEqual(before["common"], os.readlink(common))
+            self.assertFalse((root / "ztp/.setup-switch-journal.json").exists())
+            self.assertFalse((root / "service-started").exists())
+
     def test_real_setup_new_sample_directory_cold_recovery_restores_absence(self):
         """Sample's empty directory itself belongs to the crash rollback write set."""
         with tempfile.TemporaryDirectory(prefix="r22-sample-dir-cold-") as name:

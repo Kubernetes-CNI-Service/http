@@ -1218,7 +1218,7 @@ def _remove_frozen_setup_cleanup_link(path, label):
         _fsync_directory(os.path.dirname(path))
 
 
-def _require_sample_wal_surface(proj_dir, context):
+def _require_sample_wal_surface(proj_dir, context, *, register_migration=False):
     """Fence uncovered sample mutations before local preparation/shared writes."""
     if context is None or _DRY_RUN:
         return
@@ -1229,10 +1229,18 @@ def _require_sample_wal_surface(proj_dir, context):
         raise ValueError(f"sample WAL 要求实际目录：{sample}")
     legacy = sample / LINK_NAMES["comparison_output"]
     if os.path.lexists(legacy) and not legacy.is_symlink():
-        # The old helper moves/deletes this shared real directory.  Until a
-        # complete source/destination migration record exists, neither empty
-        # nor populated legacy directories may be mutated by a project switch.
-        raise ValueError(f"sample comparison 实体迁移缺少 WAL，保持原对象：{legacy}")
+        load_api, descriptor = context[:2]
+        destination = Path(proj_dir).resolve(strict=True) / "99-output-ztp/optimize"
+        operation = ("register_setup_switch_comparison_transfer" if register_migration
+                     else "validate_setup_switch_comparison_transfer")
+        try:
+            load_api[operation](
+                Path(ZTP) / ".setup-switch-journal.json", legacy, destination,
+                deployment_lock_descriptor=descriptor, services_quiesced=True,
+                runtime_backend=load_api["service_runtime_backend"](),
+            )
+        except load_api["LoadError"] as exc:
+            raise ValueError(f"sample comparison 实体迁移缺少精确 WAL，保持原对象：{legacy}: {exc}") from exc
     targets = sample_link_targets(proj_dir)
     for old in sample.iterdir():
         if old.is_symlink() and (old.name not in targets or targets[old.name] is None):
@@ -1261,6 +1269,16 @@ def _process_optimize_sample(proj_dir):
         {"ensure_directory": ensure_wal_comparison}
         if _SETUP_SWITCH_WAL_CONTEXT is not None and not _DRY_RUN else {}
     )
+    legacy = sample / LINK_NAMES["comparison_output"]
+    if (_SETUP_SWITCH_WAL_CONTEXT is not None and not _DRY_RUN
+            and os.path.lexists(legacy) and not legacy.is_symlink()):
+        load_api, descriptor = _SETUP_SWITCH_WAL_CONTEXT[:2]
+        load_api["migrate_setup_switch_comparison_transfer"](
+            Path(ZTP) / ".setup-switch-journal.json", legacy,
+            Path(proj_dir).resolve(strict=True) / "99-output-ztp/optimize",
+            deployment_lock_descriptor=descriptor, services_quiesced=True,
+            runtime_backend=load_api["service_runtime_backend"](),
+        )
     prepare_comparison_output(
         sample,
         proj_dir,
@@ -4856,6 +4874,7 @@ def _require_setup_switch_wal_prewrite(proj_dir, deployment_lock_descriptor):
     }
     _require_sample_wal_surface(
         proj_dir, (load_api, deployment_lock_descriptor, frozen_p_links, {}),
+        register_migration=True,
     )
     try:
         outcome = load_api["recover_setup_switch_journal"](

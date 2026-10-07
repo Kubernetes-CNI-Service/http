@@ -3918,6 +3918,207 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertEqual(manifest_bytes, manifest.read_bytes())
         self.assertFalse(os.path.lexists(sample / "01-global.yaml"))
 
+    def test_setup_comparison_transfer_wal_restores_original_report_directory(self) -> None:
+        state = self._prepare_cross_project_setup_crash(freeze_q_links=False)
+        q, journal, descriptor, backend = state[1].resolve(), state[10], state[11], state[12]
+        source = self.ztp.resolve() / "optimize/new-sample/comparison"
+        source.mkdir(parents=True)
+        report = b"independent original comparison report\n"
+        (source / "operator-report.csv").write_bytes(report)
+        (q / "99-output-ztp").mkdir(exist_ok=True)
+        destination = q / "99-output-ztp/optimize"
+        original = source.stat()
+        register = getattr(LOAD, "register_setup_switch_comparison_transfer", None)
+        self.assertTrue(callable(register), "comparison transfer needs a durable write-set API")
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            register(journal, source, destination, deployment_lock_descriptor=descriptor,
+                     services_quiesced=True, runtime_backend=backend)
+            self.assertEqual(original.st_ino, source.stat().st_ino)
+            self.assertFalse(os.path.lexists(destination), "registration mutated Q output")
+            row = json.loads(journal.read_bytes())["body"]["comparison_transfers"][0]
+            self.assertEqual(str(source), row["source"])
+            self.assertEqual(str(destination), row["destination"])
+            self.assertEqual(original.st_ino, row["tree"][""]["ino"])
+            self.assertEqual(hashlib.sha256(report).hexdigest(), row["tree"]["operator-report.csv"]["sha256"])
+            LOAD.migrate_setup_switch_comparison_transfer(
+                journal, source, destination, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            )
+            self.assertFalse(os.path.lexists(source))
+            self.assertEqual(original.st_ino, destination.stat().st_ino)
+            LOAD.register_setup_switch_journal_link(
+                journal, source, destination, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            )
+            source.symlink_to(os.path.relpath(destination, source.parent))
+            self.assertEqual("restored-p", LOAD.recover_setup_switch_journal(
+                journal, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            ))
+        self.assertFalse(source.is_symlink())
+        self.assertEqual(original.st_ino, source.stat().st_ino)
+        self.assertEqual(report, (source / "operator-report.csv").read_bytes())
+        self.assertFalse(os.path.lexists(destination))
+        self.assertFalse(os.path.lexists(journal))
+        backend.start.assert_not_called()
+
+    def test_setup_comparison_transfer_changed_report_holds_before_move(self) -> None:
+        state = self._prepare_cross_project_setup_crash(freeze_q_links=False)
+        q, journal, descriptor, backend = state[1].resolve(), state[10], state[11], state[12]
+        source = self.ztp.resolve() / "optimize/new-sample/comparison"
+        source.mkdir(parents=True)
+        (source / "report.csv").write_bytes(b"independent frozen report\n")
+        (q / "99-output-ztp").mkdir(exist_ok=True)
+        destination = q / "99-output-ztp/optimize"
+        register = getattr(LOAD, "register_setup_switch_comparison_transfer", None)
+        self.assertTrue(callable(register), "comparison transfer needs a durable write-set API")
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            register(journal, source, destination, deployment_lock_descriptor=descriptor,
+                     services_quiesced=True, runtime_backend=backend)
+            evidence = journal.read_bytes()
+            (source / "report.csv").write_bytes(b"unknown changed report\n")
+            with self.assertRaises(LOAD.LoadError):
+                LOAD.migrate_setup_switch_comparison_transfer(
+                    journal, source, destination, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertEqual(b"unknown changed report\n", (source / "report.csv").read_bytes())
+        self.assertFalse(os.path.lexists(destination))
+        self.assertEqual(evidence, journal.read_bytes())
+        backend.start.assert_not_called()
+
+    def test_setup_comparison_transfer_unknown_destination_holds_before_move(self) -> None:
+        state = self._prepare_cross_project_setup_crash(freeze_q_links=False)
+        q, journal, descriptor, backend = state[1].resolve(), state[10], state[11], state[12]
+        source = self.ztp.resolve() / "optimize/new-sample/comparison"
+        source.mkdir(parents=True)
+        (source / "report.csv").write_bytes(b"frozen original report\n")
+        original = source.stat()
+        (q / "99-output-ztp").mkdir(exist_ok=True)
+        destination = q / "99-output-ztp/optimize"
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.register_setup_switch_comparison_transfer(
+                journal, source, destination, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            )
+            evidence = journal.read_bytes()
+            destination.mkdir()
+            (destination / "unknown.csv").write_bytes(b"unknown operator data\n")
+            for operation in (LOAD.migrate_setup_switch_comparison_transfer,
+                              lambda j, s, d, **options: LOAD.recover_setup_switch_journal(j, **options)):
+                with self.assertRaises(LOAD.LoadError):
+                    operation(journal, source, destination, deployment_lock_descriptor=descriptor,
+                              services_quiesced=True, runtime_backend=backend)
+        self.assertEqual(original.st_ino, source.stat().st_ino)
+        self.assertEqual(b"frozen original report\n", (source / "report.csv").read_bytes())
+        self.assertEqual(b"unknown operator data\n", (destination / "unknown.csv").read_bytes())
+        self.assertEqual(evidence, journal.read_bytes())
+        backend.start.assert_not_called()
+
+    def test_setup_comparison_transfer_parent_rebind_retains_source_inode(self) -> None:
+        state = self._prepare_cross_project_setup_crash(freeze_q_links=False)
+        q, journal, descriptor, backend = state[1].resolve(), state[10], state[11], state[12]
+        source = self.ztp.resolve() / "optimize/new-sample/comparison"
+        source.mkdir(parents=True)
+        (source / "report.csv").write_bytes(b"frozen original report\n")
+        original = source.stat()
+        (q / "99-output-ztp").mkdir(exist_ok=True)
+        destination = q / "99-output-ztp/optimize"
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.register_setup_switch_comparison_transfer(
+                journal, source, destination, deployment_lock_descriptor=descriptor,
+                services_quiesced=True, runtime_backend=backend,
+            )
+            evidence = journal.read_bytes()
+            retained = source.parent.with_name("retained-sample-parent")
+            source.parent.rename(retained)
+            source.parent.mkdir()
+            (retained / source.name).rename(source)
+            with self.assertRaises(LOAD.LoadError):
+                LOAD.migrate_setup_switch_comparison_transfer(
+                    journal, source, destination, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertEqual(original.st_ino, source.stat().st_ino)
+        self.assertEqual(evidence, journal.read_bytes())
+        self.assertFalse(os.path.lexists(destination))
+        self.assertTrue(retained.is_dir())
+        backend.start.assert_not_called()
+
+    def test_setup_comparison_transfer_report_changes_after_restore_retains_wal(self) -> None:
+        state = self._prepare_cross_project_setup_crash(freeze_q_links=False)
+        q, common, journal, descriptor, backend = state[1].resolve(), state[2], state[10], state[11], state[12]
+        source = self.ztp.resolve() / "optimize/new-sample/comparison"
+        source.mkdir(parents=True)
+        (source / "report.csv").write_bytes(b"frozen original report\n")
+        (q / "99-output-ztp").mkdir(exist_ok=True)
+        destination = q / "99-output-ztp/optimize"
+        guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True, runtime_backend=backend)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.register_setup_switch_comparison_transfer(journal, source, destination, **guard)
+            LOAD.migrate_setup_switch_comparison_transfer(journal, source, destination, **guard)
+            LOAD.register_setup_switch_journal_link(journal, source, destination, **guard)
+            source.symlink_to(os.path.relpath(destination, source.parent))
+            LOAD.register_setup_switch_journal_link(journal, common, q / "01-global.yaml",
+                                                    allow_existing_exact=True, **guard)
+            common.unlink()
+            common.symlink_to(os.path.relpath(q / "01-global.yaml", common.parent.resolve()))
+            evidence = journal.read_bytes()
+            restore = LOAD._atomic_restore_setup_link
+            observed = []
+            def mutate_after_p_link(path, target):
+                restore(path, target)
+                observed.append(path)
+                self.assertTrue(source.is_dir() and not source.is_symlink())
+                (source / "report.csv").write_bytes(b"unknown post-restore report\n")
+            with mock.patch.object(LOAD, "_atomic_restore_setup_link", side_effect=mutate_after_p_link):
+                with self.assertRaises(LOAD.LoadError):
+                    LOAD.recover_setup_switch_journal(journal, **guard)
+        self.assertTrue(observed)
+        self.assertEqual(b"unknown post-restore report\n", (source / "report.csv").read_bytes())
+        self.assertEqual(evidence, journal.read_bytes())
+        self.assertFalse(os.path.lexists(destination))
+        backend.start.assert_not_called()
+
+    def test_setup_comparison_transfer_registration_rejects_changed_wal_contract(self) -> None:
+        self._exercise_comparison_transfer_wal_change(register=True)
+
+    def test_setup_comparison_transfer_validation_rejects_changed_wal_contract(self) -> None:
+        self._exercise_comparison_transfer_wal_change(register=False)
+
+    def _exercise_comparison_transfer_wal_change(self, *, register):
+        state = self._prepare_cross_project_setup_crash(freeze_q_links=False)
+        q, journal, descriptor, backend = state[1].resolve(), state[10], state[11], state[12]
+        source = self.ztp.resolve() / "optimize/new-sample/comparison"
+        source.mkdir(parents=True)
+        (source / "report.csv").write_bytes(b"frozen original report\n")
+        (q / "99-output-ztp").mkdir(exist_ok=True)
+        destination = q / "99-output-ztp/optimize"
+        guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True, runtime_backend=backend)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            if not register:
+                LOAD.register_setup_switch_comparison_transfer(journal, source, destination, **guard)
+            recover = LOAD.recover_setup_switch_journal
+            evidence = []
+            def change_after_verified_wal(*args, **kwargs):
+                outcome = recover(*args, **kwargs)
+                envelope = json.loads(journal.read_bytes())
+                envelope["body"]["phase"] = "unknown-independent-phase"
+                changed = json.dumps(envelope, sort_keys=True).encode() + b"\n"
+                journal.write_bytes(changed)
+                evidence.append(changed)
+                return outcome
+            operation = (LOAD.register_setup_switch_comparison_transfer if register
+                         else LOAD.validate_setup_switch_comparison_transfer)
+            with mock.patch.object(LOAD, "recover_setup_switch_journal", side_effect=change_after_verified_wal):
+                with self.assertRaises(LOAD.LoadError):
+                    operation(journal, source, destination, **guard)
+        self.assertTrue(evidence)
+        self.assertEqual(evidence[-1], journal.read_bytes(), "unknown WAL must not be reauthorized")
+        self.assertEqual(b"frozen original report\n", (source / "report.csv").read_bytes())
+        self.assertFalse(os.path.lexists(destination))
+        backend.start.assert_not_called()
+
     def test_setup_sample_real_comparison_without_migration_wal_holds_unchanged(self) -> None:
         (*state, journal, descriptor, _backend) = self._prepare_cross_project_setup_crash(freeze_q_links=False)
         project = state[1]

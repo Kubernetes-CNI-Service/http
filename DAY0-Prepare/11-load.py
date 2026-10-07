@@ -6112,7 +6112,7 @@ def _decode_setup_switch_journal(payload: bytes) -> dict[str, object]:
     required = {"schema_version", "phase", "root", "old_project", "new_project",
                 "manifest", "manifest_sha256", "manifest_mode", "links", "q_parent_preimage"}
     optional = {"allow_late_q_values", "q_local_links", "created_directories", "q_created_directories",
-                "directories", "infra_logs", "q_manifest_intent"}
+                "directories", "infra_logs", "q_manifest_intent", "comparison_transfers"}
     if isinstance(body, dict) and "q_parent_preimage" not in body:
         raise ValueError("journal Q parent preimage is missing; HOLD")
     if (not isinstance(body, dict) or not required <= set(body)
@@ -6127,6 +6127,7 @@ def _decode_setup_switch_journal(payload: bytes) -> dict[str, object]:
                         "target_dev", "target_ino"},
         "infra_logs": {"source", "source_parent", "source_dev", "source_ino", "destination",
                        "destination_parent", "destination_dev", "destination_ino", "backup", "receipt"},
+        "comparison_transfers": {"source", "source_parent", "destination", "destination_parent", "tree"},
     }
     directory_fields = {"path", "dev", "ino"}
     for key in ("root", "old_project", "new_project"):
@@ -6140,6 +6141,21 @@ def _decode_setup_switch_journal(payload: bytes) -> dict[str, object]:
             for key in ("parent", "source_parent", "destination_parent", "before_target", "after_target"):
                 if key in row:
                     exact_fields(row[key], directory_fields, key)
+            if inventory == "comparison_transfers":
+                tree = row["tree"]
+                if not isinstance(tree, dict) or "" not in tree:
+                    raise ValueError("missing comparison tree inventory")
+                for relative, entry in tree.items():
+                    if (not isinstance(relative, str) or (relative and
+                            (os.path.isabs(relative) or os.path.normpath(relative) != relative
+                             or ".." in Path(relative).parts))):
+                        raise ValueError("invalid comparison tree name")
+                    fields = {"kind", "dev", "ino", "mode", "uid", "gid"}
+                    if isinstance(entry, dict) and entry.get("kind") == "file":
+                        fields |= {"size", "mtime_ns", "ctime_ns", "sha256"}
+                    elif not isinstance(entry, dict) or entry.get("kind") != "directory":
+                        raise ValueError("unsupported comparison tree entry")
+                    exact_fields(entry, fields, "comparison tree")
     if "q_manifest_intent" in body:
         exact_fields(body["q_manifest_intent"], {"bytes", "sha256", "mode", "parent"}, "Q manifest")
         exact_fields(body["q_manifest_intent"]["parent"], directory_fields, "Q manifest parent")
@@ -6939,6 +6955,234 @@ def _setup_switch_created_directory_states(body):
         return states
     except (KeyError, TypeError, ValueError, OSError, RuntimeError) as exc:
         raise LoadError(f"setup switch created directory state is unknown: {exc}") from exc
+
+
+def _setup_switch_comparison_tree(path: Path) -> dict[str, object]:
+    """Freeze a bounded regular-file tree via held, no-follow directory FDs.
+
+    Directory ctime is deliberately not a payload identity: our authorized
+    rename changes it. File ctime remains bound to reject write-and-restore.
+    Symlinks, special files and hardlinked reports are never transferable.
+    """
+    tree = {}
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    identity = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid")
+
+    def walk(parent_fd, name, relative):
+        named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        directory = stat.S_ISDIR(named.st_mode)
+        if not directory and (not stat.S_ISREG(named.st_mode) or named.st_nlink != 1):
+            raise ValueError("comparison entry is not a real directory/single-link regular file")
+        descriptor = os.open(name, flags | (getattr(os, "O_DIRECTORY", 0) if directory
+                                            else getattr(os, "O_NONBLOCK", 0)), dir_fd=parent_fd)
+        try:
+            before = os.fstat(descriptor)
+            fields = identity + ("st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+            if any(getattr(named, key) != getattr(before, key) for key in fields):
+                raise ValueError("comparison owner changed while opening")
+            entry = {"kind": "directory" if directory else "file",
+                     "dev": before.st_dev, "ino": before.st_ino, "mode": before.st_mode,
+                     "uid": before.st_uid, "gid": before.st_gid}
+            tree[relative] = entry
+            if len(tree) > 4096:
+                raise ValueError("comparison tree inventory exceeds bounded entry limit")
+            if directory:
+                names = sorted(os.listdir(descriptor))
+                for child in names:
+                    walk(descriptor, child, f"{relative}/{child}" if relative else child)
+                if sorted(os.listdir(descriptor)) != names:
+                    raise ValueError("comparison directory entries changed")
+            else:
+                digest = hashlib.sha256()
+                while chunk := os.read(descriptor, 1024 * 1024):
+                    digest.update(chunk)
+                entry.update(size=before.st_size, mtime_ns=before.st_mtime_ns,
+                             ctime_ns=before.st_ctime_ns, sha256=digest.hexdigest())
+            after = os.fstat(descriptor)
+            current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            if any(getattr(before, key) != getattr(after, key)
+                   or getattr(before, key) != getattr(current, key) for key in fields):
+                raise ValueError("comparison tree changed while freezing")
+        finally:
+            os.close(descriptor)
+
+    parent = os.open(path.parent, flags | getattr(os, "O_DIRECTORY", 0))
+    try:
+        walk(parent, path.name, "")
+    finally:
+        os.close(parent)
+    return tree
+
+
+def _setup_switch_comparison_transfer_states(body, held_descriptors=None):
+    """Preflight the entire transfer set without changing a namespace."""
+    rows = body.get("comparison_transfers", [])
+    if len(rows) > 1:
+        raise LoadError("comparison transfer inventory must name one Q sample")
+    states = []
+    q = Path(body["new_project"]["path"])
+    for row in rows:
+        try:
+            source, destination = Path(row["source"]), Path(row["destination"])
+            expected_source = Path(body["root"]["path"]) / "ztp/optimize" / f"{q.name}-sample/comparison"
+            if (source != expected_source or destination != q / "99-output-ztp/optimize"
+                    or row["source_parent"] != _setup_switch_link_parent_identity(source)
+                    or row["destination_parent"] != _setup_switch_link_parent_identity(destination)
+                    or source.parent.resolve(strict=True) != source.parent
+                    or destination.parent.resolve(strict=True) != destination.parent):
+                raise ValueError("comparison transfer names or parent identities changed")
+            if row["tree"][""].get("kind") != "directory":
+                raise ValueError("comparison transfer root is not a directory")
+            source_present, destination_present = os.path.lexists(source), os.path.lexists(destination)
+            if source_present and not source.is_symlink() and not destination_present:
+                if _setup_switch_comparison_tree(source) != row["tree"]:
+                    raise ValueError("original comparison tree changed")
+                phase = "original"
+            elif destination_present and (not source_present or source.is_symlink()):
+                if _setup_switch_comparison_tree(destination) != row["tree"]:
+                    raise ValueError("transferred comparison tree changed")
+                phase = "moved"
+                if source_present:
+                    info = source.lstat()
+                    if info.st_nlink != 1 or os.readlink(source) != os.path.relpath(destination, source.parent):
+                        raise ValueError("comparison pointer changed")
+                    phase = "linked"
+            else:
+                raise ValueError("comparison source/destination is not a known transfer state")
+            if held_descriptors is not None:
+                flags = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                         | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0))
+                owners = [(source.parent, row["source_parent"]),
+                          (destination.parent, row["destination_parent"]),
+                          (source if phase == "original" else destination, row["tree"][""])]
+                for path, owner in owners:
+                    descriptor = os.open(path, flags)
+                    held_descriptors.append(descriptor)
+                    info = os.fstat(descriptor)
+                    if (not stat.S_ISDIR(info.st_mode)
+                            or (info.st_dev, info.st_ino) != (owner["dev"], owner["ino"])):
+                        raise ValueError("comparison held owner differs from frozen inventory")
+            states.append((source, destination, phase, row))
+        except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
+            raise LoadError(f"setup switch comparison transfer is unknown: {exc}") from exc
+    return states
+
+
+def _setup_switch_comparison_body(opened):
+    """Revalidate the actual reread, not an earlier recovery call's bytes."""
+    try:
+        if opened is None or opened[1] != 0o600:
+            raise ValueError("comparison WAL is absent or not private")
+        envelope = _decode_setup_switch_journal(opened[0])
+        body = envelope["body"]
+        if (body["schema_version"] != 2 or body["phase"] != "prepared"
+                or hashlib.sha256(_setup_switch_canonical_payload(body)).hexdigest() != envelope["sha256"]):
+            raise ValueError("comparison WAL checksum/schema/phase is invalid")
+        return body
+    except (ValueError, TypeError, KeyError) as exc:
+        raise LoadError(f"comparison WAL contract changed: {exc}") from exc
+
+
+def register_setup_switch_comparison_transfer(
+    journal: Path, source: Path, destination: Path, *,
+    deployment_lock_descriptor: int | None, services_quiesced: bool,
+    runtime_backend: ServiceRuntimeBackend | None,
+) -> None:
+    """Register an existing legacy tree to an absent Q destination before writes."""
+    guard = dict(deployment_lock_descriptor=deployment_lock_descriptor,
+                 services_quiesced=services_quiesced, runtime_backend=runtime_backend)
+    _require_runtime_restore_guard(**guard)
+    if Path(journal) != _setup_switch_journal_path():
+        raise LoadError("comparison transfer journal is not the configured authority")
+    if recover_setup_switch_journal(journal, verify_only=True, **guard) != "prepared-p":
+        raise LoadError("comparison transfer registration requires exact P prewrite state")
+    try:
+        before = journal.lstat()
+        opened = _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT)
+        body = _setup_switch_comparison_body(opened)
+        source, destination = Path(source), Path(destination)
+        row = {"source": str(source), "source_parent": _setup_switch_link_parent_identity(source),
+               "destination": str(destination), "destination_parent": _setup_switch_link_parent_identity(destination),
+               "tree": _setup_switch_comparison_tree(source)}
+        if os.path.lexists(destination):
+            raise ValueError("comparison destination must be absent; merging is not authorized")
+        if body.get("comparison_transfers"):
+            if body["comparison_transfers"] != [row]:
+                raise ValueError("comparison transfer registration differs from frozen inventory")
+            return
+        next_body = dict(body, comparison_transfers=[row])
+        _setup_switch_comparison_transfer_states(next_body)
+        payload = _setup_switch_canonical_payload({"body": next_body,
+            "sha256": hashlib.sha256(_setup_switch_canonical_payload(next_body)).hexdigest()}) + b"\n"
+        if len(payload) > _SETUP_SWITCH_JOURNAL_LIMIT:
+            raise ValueError("comparison transfer journal exceeds bounded size")
+        descriptor, name = tempfile.mkstemp(prefix=".setup-switch-journal.", dir=journal.parent)
+        temporary = Path(name)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_uid", "st_gid",
+                      "st_size", "st_mtime_ns", "st_ctime_ns")
+            now = journal.lstat()
+            if (any(getattr(before, key) != getattr(now, key) for key in fields)
+                    or _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT) != opened):
+                raise ValueError("comparison WAL changed before registration")
+            _setup_switch_comparison_transfer_states(next_body)
+            os.replace(temporary, journal)
+            _fsync_parent_directory(journal.parent)
+        finally:
+            if os.path.lexists(temporary):
+                temporary.unlink()
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
+        raise LoadError(f"comparison transfer registration invalid: {exc}") from exc
+
+
+def validate_setup_switch_comparison_transfer(journal: Path, source: Path, destination: Path, **guard):
+    _require_runtime_restore_guard(**guard)
+    if Path(journal) != _setup_switch_journal_path():
+        raise LoadError("comparison transfer journal is not the configured authority")
+    recover_setup_switch_journal(journal, inspect_only=True, **guard)
+    opened = _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT)
+    body = _setup_switch_comparison_body(opened)
+    states = _setup_switch_comparison_transfer_states(body)
+    if len(states) != 1 or states[0][:2] != (Path(source), Path(destination)):
+        raise LoadError("sample comparison has no exact transfer WAL")
+    return body, states[0]
+
+
+def migrate_setup_switch_comparison_transfer(journal: Path, source: Path, destination: Path, **guard):
+    held = []
+    wal_fd = -1
+    try:
+        wal_fd = os.open(journal, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        original = os.fstat(wal_fd)
+        frozen = _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT)
+        body, transfer = validate_setup_switch_comparison_transfer(journal, source, destination, **guard)
+        if transfer[2] != "original":
+            raise LoadError("comparison transfer writer is not at its original preimage")
+        # Hold source and both parent inodes through the move/postverification.
+        _setup_switch_comparison_transfer_states(body, held)
+        current = journal.lstat()
+        fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_uid", "st_gid",
+                  "st_size", "st_mtime_ns", "st_ctime_ns")
+        if (any(getattr(original, key) != getattr(current, key) for key in fields)
+                or _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT) != frozen):
+            raise LoadError("comparison WAL changed before move")
+        _require_runtime_restore_guard(**guard)
+        _require_setup_switch_q_parent_preimage(body)
+        _setup_switch_comparison_transfer_states(body)
+        _setup_switch_rename_directory_noreplace(Path(source), Path(destination))
+        _fsync_parent_directory(Path(source).parent)
+        _fsync_parent_directory(Path(destination).parent)
+        if _setup_switch_comparison_transfer_states(body)[0][2] != "moved":
+            raise LoadError("comparison transfer postverify failed; WAL retained")
+    finally:
+        for descriptor in held:
+            os.close(descriptor)
+        if wal_fd >= 0:
+            os.close(wal_fd)
 
 
 def register_setup_switch_materialized_directory(
@@ -7899,6 +8143,9 @@ def _recover_setup_switch_journal_snapshot(
     # evidence only when the exact created-directory row and surviving outer
     # parent have already passed the full read-only preflight.
     created_directory_states = _setup_switch_created_directory_states(body)
+    comparison_states = _setup_switch_comparison_transfer_states(body, materialized_descriptors)
+    comparison_sources = {source: (destination, phase, row)
+                          for source, destination, phase, row in comparison_states}
     removed_created_parents = {
         path: directory_row
         for path, _staged, present, directory_row in created_directory_states
@@ -7935,6 +8182,15 @@ def _recover_setup_switch_journal_snapshot(
                 path.parent.resolve(strict=True).relative_to(root_path)
                 if row["parent"] != _setup_switch_link_parent_identity(path):
                     raise ValueError("journal link parent identity changed")
+            if path in comparison_sources:
+                destination, _phase, transfer_row = comparison_sources[path]
+                if (before is not None or after != os.path.relpath(destination, path.parent)
+                        or row["parent"] != transfer_row["source_parent"]):
+                    raise ValueError("comparison link row differs from transfer authority")
+                # The transfer state owns this name, including its original
+                # real directory on recovery reentry. Generic link cleanup
+                # must not consume the restored report directory.
+                continue
             if after is not None:
                 _setup_switch_recovery_q_target(
                     Path(os.path.normpath(str(path.parent / after))), q_project, rows,
@@ -8007,6 +8263,8 @@ def _recover_setup_switch_journal_snapshot(
         return "prepared-known-disk-state"
     if verify_only:
         if manifest_candidate is not None:
+            if any(phase != "linked" for _source, _destination, phase, _row in comparison_states):
+                raise LoadError("comparison transfer precommit is not exact Q")
             if any(os.readlink(path) != row["after"] for path, row in q_local_states):
                 raise LoadError("setup switch Q-local latest precommit is not exact Q")
             if any(present != path for path, _staged, present, _row in created_directory_states):
@@ -8022,6 +8280,8 @@ def _recover_setup_switch_journal_snapshot(
             return "prepared-q-manifest"
         if any(os.readlink(path) != row["before"] for path, row in q_local_states):
             raise LoadError("setup switch Q-local latest prewrite is not exact Q preimage")
+        if any(phase != "original" for _source, _destination, phase, _row in comparison_states):
+            raise LoadError("comparison transfer prewrite is not its exact original tree")
         if any(
             (not path.is_symlink() or os.readlink(path) != before)
             if before is not None else os.path.lexists(path)
@@ -8039,6 +8299,22 @@ def _recover_setup_switch_journal_snapshot(
     require_journal_unchanged()
     if infra_state is not None:
         _setup_switch_restore_infra_log_tree(infra_state)
+    for source, destination, _phase, _row in comparison_states:
+        require_journal_unchanged()
+        current = _setup_switch_comparison_transfer_states(body)[0]
+        if current[2] == "linked":
+            source.unlink()
+            _fsync_parent_directory(source.parent)
+        require_journal_unchanged()
+        current = _setup_switch_comparison_transfer_states(body)[0]
+        if current[2] == "moved":
+            _setup_switch_rename_directory_noreplace(destination, source)
+        # Known original state still owes both namespace syncs after an
+        # interrupted prior recovery. Reentry must not retire them unsynced.
+        if _setup_switch_comparison_transfer_states(body)[0][2] != "original":
+            raise LoadError("comparison restoration postverify failed; WAL retained")
+        _fsync_parent_directory(source.parent)
+        _fsync_parent_directory(destination.parent)
     for path, row in q_local_states:
         require_journal_unchanged()
         _setup_switch_q_local_link_states(body)
@@ -8105,6 +8381,9 @@ def _recover_setup_switch_journal_snapshot(
     if any(os.readlink(path) != row["before"]
            for path, row in _setup_switch_q_local_link_states(body)):
         raise LoadError("setup switch Q-local latest post-verify failed; journal retained")
+    if any(phase != "original" for _source, _destination, phase, _row
+           in _setup_switch_comparison_transfer_states(body)):
+        raise LoadError("comparison transfer P post-verify failed; journal retained")
     require_journal_unchanged()
     if after_p_restore is not None:
         # Keep the original WAL descriptor, bytes and owner through A's runtime
