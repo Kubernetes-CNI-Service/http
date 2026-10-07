@@ -1047,6 +1047,60 @@ finally:
             self.assertEqual(mixed, os.readlink(common), "untrusted manifest authorized P writes")
             self.assertFalse((root / "service-started").exists())
 
+    def test_real_setup_death_fresh_load_holds_unknown_manifest_stage(self):
+        for kind in ("file", "dangling-link"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory(prefix="r22-manifest-orphan-cold-") as name:
+                fixture = self._private_setup_switch_fixture(Path(name))
+                root, _p, _q, common, p_only, q_only, manifest, _before, _hook, barrier, _home = fixture
+                first = self._run_private_load_setup_switch(fixture, prepare_journal=True)
+                self.assertEqual(23, first.returncode, first.stdout + first.stderr)
+                self.assertEqual(b"first Q managed link written\n", barrier.read_bytes())
+                journal = root / "ztp/.setup-switch-journal.json"
+                orphan = manifest.parent / f".{manifest.name}.rollback.independent-orphan"
+                if kind == "file":
+                    orphan.write_bytes(b"unknown prior manifest stage\n")
+                else:
+                    orphan.symlink_to("independent-absent-operator-object")
+                before = (common.lstat().st_ino, os.readlink(common), manifest.lstat().st_ino,
+                          manifest.read_bytes(), journal.lstat().st_ino, journal.read_bytes(), orphan.lstat().st_ino)
+                recovery = """
+import importlib.util, sys
+from pathlib import Path
+from types import SimpleNamespace
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('fresh_manifest_orphan_load', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+descriptor = load.acquire_deployment_lock(exclusive=True)
+try:
+    try:
+        load.recover_setup_switch_journal(
+            root / 'ztp/.setup-switch-journal.json', deployment_lock_descriptor=descriptor,
+            services_quiesced=True, runtime_backend=SimpleNamespace(name='supervisor'))
+    except load.LoadError as exc:
+        print('EXPECTED ORPHAN HOLD:', exc)
+        raise SystemExit(7)
+finally:
+    load.release_deployment_lock(descriptor)
+"""
+                second = subprocess.run([sys.executable, "-B", "-c", recovery, str(root)],
+                                        cwd=root, capture_output=True, text=True, check=False)
+                self.assertEqual(before, (common.lstat().st_ino, os.readlink(common), manifest.lstat().st_ino,
+                                         manifest.read_bytes(), journal.lstat().st_ino if journal.exists() else None,
+                                         journal.read_bytes() if journal.exists() else None, orphan.lstat().st_ino),
+                                 "cold recovery must not mutate P/Q or retire WAL over an unknown stage")
+                self.assertEqual(7, second.returncode, second.stdout + second.stderr)
+                self.assertIn("manifest", second.stdout)
+                if kind == "file":
+                    self.assertEqual(b"unknown prior manifest stage\n", orphan.read_bytes())
+                else:
+                    self.assertEqual("independent-absent-operator-object", os.readlink(orphan))
+                self.assertFalse(os.path.lexists(p_only))
+                self.assertFalse(os.path.lexists(q_only))
+                self.assertFalse((root / "service-started").exists())
+
     def test_real_load_setup_child_sigkill_then_fresh_load_restores_p(self):
         """The real setup child dies after Q's first link, before Q manifest."""
         with tempfile.TemporaryDirectory(prefix="r22-real-setup-kill-") as name:

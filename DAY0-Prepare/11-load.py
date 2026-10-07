@@ -5974,6 +5974,7 @@ def _atomic_restore_setup_manifest(
 ) -> None:
     if require_authority is not None:
         require_authority()
+    _require_no_pending_setup_manifest_stage()
     parent_identity = _setup_switch_link_parent_identity(MANIFEST)
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{MANIFEST.name}.rollback.", dir=MANIFEST.parent,
@@ -6055,6 +6056,7 @@ def restore_active_setup_state(
         services_quiesced=services_quiesced,
         runtime_backend=runtime_backend,
     )
+    _require_no_pending_setup_manifest_stage()
     old_project = state.project.resolve(strict=True)
     target = current_project.resolve(strict=True)
     if target == old_project:
@@ -6111,6 +6113,42 @@ def _setup_switch_journal_path() -> Path:
     return MANIFEST.parent / ".setup-switch-journal.json"
 
 
+def _require_no_pending_setup_manifest_stage() -> None:
+    """An unbound manifest stage is evidence, never license to retire a WAL.
+
+    Do not follow entries or infer their owner from a prefix. The bounded scan
+    holds the physical parent; callers keep the deployment lock/writers quiet.
+    Read-only publication callbacks run while their own stage is held, so this
+    fence belongs at restore entry/retirement, not inside those callbacks.
+    """
+    descriptor = -1
+    try:
+        parent = _setup_switch_link_parent_identity(MANIFEST)
+        descriptor = os.open(parent["path"], os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                             | getattr(os, "O_NOFOLLOW", 0))
+        held = os.fstat(descriptor)
+        if (not stat.S_ISDIR(held.st_mode)
+                or (held.st_dev, held.st_ino) != (parent["dev"], parent["ino"])):
+            raise LoadError("setup manifest stage parent changed; HOLD")
+        prefix = f".{MANIFEST.name}.rollback."
+        with os.scandir(descriptor) as entries:
+            for count, entry in enumerate(entries, 1):
+                if count > 4096:
+                    raise LoadError("setup manifest stage inspection exceeded its bound; HOLD")
+                if entry.name.startswith(prefix):
+                    raise LoadError(f"pending setup manifest stage: {entry.name}; HOLD; preserve incident evidence")
+        after = os.fstat(descriptor)
+        if (parent != _setup_switch_link_parent_identity(MANIFEST)
+                or any(getattr(held, field) != getattr(after, field)
+                       for field in ("st_dev", "st_ino", "st_mtime_ns", "st_ctime_ns"))):
+            raise LoadError("setup manifest stage parent changed during inspection; HOLD")
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise LoadError(f"setup manifest stage inspection failed; HOLD: {exc}") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
 def require_no_pending_setup_switch_journal() -> None:
     """Fence a new ordinary LOAD before project mutation, not recover a WAL.
 
@@ -6122,6 +6160,7 @@ def require_no_pending_setup_switch_journal() -> None:
     try:
         journal.lstat()
     except FileNotFoundError:
+        _require_no_pending_setup_manifest_stage()
         return
     # Do not use lexists(): it converts permission/type errors to False and
     # would incorrectly authorize project writes with an unreadable WAL path.
@@ -8412,6 +8451,8 @@ def _recover_setup_switch_journal_snapshot(
     runtime_restore_guard=None,
 ) -> str:
     """Recover only from the immutable authority held by the guarded API."""
+    if not verify_only:
+        _require_no_pending_setup_manifest_stage()
     payload, _mode = opened
     try:
         envelope = _decode_setup_switch_journal(payload)
@@ -8778,6 +8819,8 @@ def _recover_setup_switch_journal_snapshot(
     # evidence merely because P is recoverable. Explicit recovery keeps the
     # default finalization behavior; automatic child failure recovery does not.
     if not retain_journal:
+        _require_no_pending_setup_manifest_stage()
+        require_journal_unchanged()
         journal.unlink()
         _fsync_parent_directory(journal.parent)
     return "restored-p"

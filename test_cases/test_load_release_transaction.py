@@ -2938,6 +2938,55 @@ class ReleaseTransactionTests(unittest.TestCase):
                     retained.unlink()
                 path.unlink()  # Only this test's independently identified injected object.
 
+    def test_setup_manifest_restore_holds_preexisting_orphan_stage(self):
+        manifest = self.ztp / ".setup_manifest"
+        manifest.write_bytes(b"independent Q manifest remains\n")
+        orphan = manifest.parent / f".{manifest.name}.rollback.independent-orphan"
+        orphan.write_bytes(b"unknown prior manifest stage\n")
+        before = (manifest.lstat().st_ino, manifest.read_bytes(), orphan.lstat().st_ino)
+        state = SimpleNamespace(manifest=b"independent P manifest\n", manifest_mode=0o640)
+        with mock.patch.object(LOAD, "MANIFEST", manifest), \
+                mock.patch.object(LOAD.os, "replace", wraps=os.replace) as replace:
+            with self.assertRaises(LOAD.LoadError):
+                LOAD._atomic_restore_setup_manifest(state)
+            replace.assert_not_called()
+        self.assertEqual(before, (manifest.lstat().st_ino, manifest.read_bytes(), orphan.lstat().st_ino))
+        self.assertEqual(b"unknown prior manifest stage\n", orphan.read_bytes())
+        self.assertEqual([orphan], list(manifest.parent.glob(f".{manifest.name}.rollback.*")))
+
+    def test_new_load_preflight_holds_manifest_orphan_without_wal(self):
+        manifest = self.ztp / ".setup_manifest"
+        orphan = manifest.parent / f".{manifest.name}.rollback.independent-orphan"
+        orphan.symlink_to("independent-absent-operator-object")
+        identity = orphan.lstat().st_ino
+        with mock.patch.object(LOAD, "MANIFEST", manifest):
+            self.assertFalse(os.path.lexists(LOAD._setup_switch_journal_path()))
+            with self.assertRaises(LOAD.LoadError):
+                LOAD.require_no_pending_setup_switch_journal()
+        self.assertEqual(identity, orphan.lstat().st_ino)
+        self.assertEqual("independent-absent-operator-object", os.readlink(orphan))
+
+    def test_setup_wal_cold_recovery_holds_manifest_orphan_before_any_write(self):
+        state = self._prepare_cross_project_setup_crash()
+        common, target, manifest, journal, descriptor, backend = state[2], state[5], state[7], state[10], state[11], state[12]
+        common.unlink()
+        common.symlink_to(os.path.relpath(target, common.parent))
+        orphan = manifest.parent / f".{manifest.name}.rollback.independent-orphan"
+        orphan.write_bytes(b"unknown prior manifest stage\n")
+        before = (common.lstat().st_ino, os.readlink(common), manifest.lstat().st_ino,
+                  manifest.read_bytes(), journal.lstat().st_ino, journal.read_bytes(), orphan.lstat().st_ino)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "_atomic_restore_setup_link", wraps=LOAD._atomic_restore_setup_link) as restore:
+            with self.assertRaises(LOAD.LoadError):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor, services_quiesced=True,
+                    runtime_backend=backend,
+                )
+            restore.assert_not_called()
+        self.assertEqual(before, (common.lstat().st_ino, os.readlink(common), manifest.lstat().st_ino,
+                                 manifest.read_bytes(), journal.lstat().st_ino, journal.read_bytes(), orphan.lstat().st_ino))
+        self.assertEqual(b"unknown prior manifest stage\n", orphan.read_bytes())
+
     def test_setup_manifest_file_sync_failure_preserves_q_before_replace(self) -> None:
         manifest = self.ztp / ".setup_manifest"
         evidence = b"Q manifest remains on sync failure\n"
