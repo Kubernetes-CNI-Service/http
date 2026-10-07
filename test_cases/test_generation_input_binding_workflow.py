@@ -4753,6 +4753,17 @@ finally:
             reenter=False, outcomes=("preimage-before-write",),
         )
 
+    def test_real_setup_then_load_binds_dhcp_preimage_before_b_install(self):
+        self._real_setup_uncertain_parent_dhcp_evidence(
+            reenter=False, bind_setup=True, outcomes=("bound-setup-before-write", "bound-setup-precommit"),
+        )
+
+    def test_real_setup_then_load_holds_replaced_grouped_dhcp_authorities(self):
+        self._real_setup_uncertain_parent_dhcp_evidence(
+            reenter=False, bind_setup=True,
+            outcomes=("bound-setup-register-wal", "bound-setup-register-receipt", "bound-setup-late-wal", "bound-setup-parent-wal"),
+        )
+
     def test_real_setup_then_dhcp_a_preimage_sync_failure_holds_original_a(self):
         self._real_setup_uncertain_parent_dhcp_evidence(
             reenter=False, outcomes=("preimage-file-sync",),
@@ -4760,7 +4771,7 @@ finally:
 
     def _real_setup_uncertain_parent_dhcp_evidence(
         self, *, reenter, cold=False, inspect_preimage=False, inspect_parent_rebind=False,
-        outcomes=("open", "fsync"),
+        outcomes=("open", "fsync"), bind_setup=False,
     ):
         for boundary in outcomes:
             with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as name:
@@ -4785,9 +4796,12 @@ finally:
                                   root / "DAY0-Prepare/11-load.py")
                 descriptor = api.acquire_deployment_lock(exclusive=True)
                 try:
-                    RELEASE_FIXTURE.assert_private_dhcp_transaction_retention(
-                        api, root, q, boundary, reenter=reenter,
-                    )
+                    guard = (dict(deployment_lock_descriptor=descriptor, services_quiesced=True,
+                                  runtime_backend=SimpleNamespace(name="supervisor")) if bind_setup else None)
+                    with mock.patch.object(api, "active_managed_services", return_value=()):
+                        RELEASE_FIXTURE.assert_private_dhcp_transaction_retention(
+                            api, root, q, boundary, reenter=reenter, setup_guard=guard,
+                        )
                 finally:
                     api.release_deployment_lock(descriptor)
                 if cold:
@@ -4816,7 +4830,12 @@ finally:
                     self.assertIn("R22_COLD_PENDING_DHCP_HELD", second.stdout)
                 self.assertEqual(q_manifest, manifest.read_bytes())
                 self.assertEqual(q_link, os.readlink(common))
-                self.assertEqual(wal, journal.read_bytes())
+                if bind_setup and boundary not in {"bound-setup-register-wal", "bound-setup-register-receipt"}:
+                    self.assertNotEqual(wal, journal.read_bytes())
+                    prior, current = json.loads(wal)["body"], json.loads(journal.read_bytes())["body"]
+                    self.assertEqual(prior, {k: v for k, v in current.items() if k != "dhcp_transaction"})
+                else:
+                    self.assertEqual(wal, journal.read_bytes())
                 self.assertFalse((root / "service-started").exists())
 
     def test_real_setup_parent_visible_sync_failure_stops_success_and_cold_p_rollback(self):

@@ -117,6 +117,7 @@ def sha256(path: Path) -> str:
 
 def assert_private_dhcp_transaction_retention(
     api, root: Path, project: Path, outcome: str, *, reenter: bool = False,
+    setup_guard=None,
 ) -> None:
     """Exercise real LOAD filesystem logic; never execute sudo, dhcpd or live writes."""
     root = root.resolve()
@@ -162,6 +163,22 @@ def assert_private_dhcp_transaction_retention(
     injected, warnings, cleanup, restore_phase, sync_events, installed_b = [], [], [], [], [], []
     backup_sync_events = []
     backup_sync_faults = ("backup-file-sync", "backup-dir-sync", "backup-transaction-sync", "backup-runtime-sync")
+    binding_faults = {"bound-setup-register-wal", "bound-setup-register-receipt", "bound-setup-late-wal",
+                      "bound-setup-parent-wal"}
+
+    def replace_bound_authority(path):
+        held = root / ("independent-original-" + path.name)
+        payload = path.read_bytes()
+        mode = stat.S_IMODE(path.lstat().st_mode)
+        original = path.lstat().st_ino
+        path.rename(held)
+        path.write_bytes(payload)
+        path.chmod(mode)
+        assert original != path.lstat().st_ino and path.read_bytes() == payload
+        injected.append(outcome)
+
+    if outcome == "bound-setup-parent-wal":
+        candidate.precommit_check = lambda: replace_bound_authority(setup_wal)
 
     def private_destination(value):
         path = Path(value)
@@ -180,6 +197,22 @@ def assert_private_dhcp_transaction_retention(
                 target.mkdir(parents=True, exist_ok=True)
             else:
                 if target in mappings.values():
+                    if outcome in {"bound-setup-before-write", "bound-setup-precommit"}:
+                        transaction, = live_dir.glob(".load-dhcp-transaction-*")
+                        receipt = transaction / "a-preimage.json"
+                        envelope = json.loads(setup_wal.read_bytes())
+                        binding = envelope["body"].get("dhcp_transaction")
+                        assert binding is not None, "original SETUP WAL must bind DHCP A before first B write"
+                        assert binding["receipt"] == str(receipt)
+                        assert binding["sha256"] == hashlib.sha256(receipt.read_bytes()).hexdigest()
+                        metadata = receipt.lstat()
+                        assert binding["identity"] == [getattr(metadata, field) for field in (
+                            "st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink",
+                            "st_size", "st_mtime_ns", "st_ctime_ns",
+                        )]
+                        assert binding["body"] == json.loads(receipt.read_bytes())["body"]
+                        for name in names:
+                            assert binding["body"]["before"][name]["sha256"] == hashlib.sha256(expected_a[name]).hexdigest()
                     if outcome == "preimage-before-write":
                         receipt = target.parent / next(iter(live_dir.glob(".load-dhcp-transaction-*"))).name / "a-preimage.json"
                         assert receipt.is_file(), "persistent four-file A preimage must precede every B overwrite"
@@ -211,6 +244,8 @@ def assert_private_dhcp_transaction_retention(
                     target.unlink()
                 shutil.copy2(command[-2], target)
             target.chmod(mode)
+            if outcome == "bound-setup-late-wal" and target == live_dir / "dhcpd.conf" and not injected:
+                replace_bound_authority(setup_wal)
         elif operation == "cp":
             if (outcome in {"restore-return", "restore-raise"}
                     and target == live_dir / "dhcpd_eth.hosts"):
@@ -251,6 +286,16 @@ def assert_private_dhcp_transaction_retention(
 
     def sync_parent(descriptor):
         metadata = os.fstat(descriptor)
+        if outcome in {"bound-setup-register-wal", "bound-setup-register-receipt"} and not injected:
+            for temporary in setup_wal.parent.glob(".setup-switch-journal.*"):
+                if temporary == setup_wal:
+                    continue
+                staged = temporary.lstat()
+                if (metadata.st_dev, metadata.st_ino) == (staged.st_dev, staged.st_ino):
+                    authority = (setup_wal if outcome == "bound-setup-register-wal" else
+                                 next(live_dir.glob(".load-dhcp-transaction-*")) / "a-preimage.json")
+                    replace_bound_authority(authority)
+                    break
         for transaction in live_dir.glob(".load-dhcp-transaction-*"):
             receipt = transaction / "a-preimage.json"
             if outcome == "preimage-file-sync" and receipt.exists():
@@ -317,7 +362,7 @@ def assert_private_dhcp_transaction_retention(
             raise OSError("independent DHCP parent directory open fault")
         return real_open(path, flags, *args, **kwargs)
 
-    if outcome in {"precommit", "precommit-shapes", "restore-return", "restore-raise",
+    if outcome in {"precommit", "precommit-shapes", "bound-setup-precommit", "restore-return", "restore-raise",
                    "restore-bytes", "restore-mode", "restore-link",
                    "restore-file-sync", "restore-dir-open", "restore-dir-sync"}:
         def fail_precommit():
@@ -334,11 +379,12 @@ def assert_private_dhcp_transaction_retention(
                 mock.patch.object(api.os, "open", side_effect=open_parent), \
                 mock.patch.object(api.os, "fsync", side_effect=sync_parent):
             try:
-                api.mount_and_test_dhcp(parent_candidate=candidate)
+                kwargs = {} if setup_guard is None else {"setup_switch_guard": setup_guard}
+                api.mount_and_test_dhcp(parent_candidate=candidate, **kwargs)
             except (api.LoadError, OSError) as exc:
                 if outcome in {"open", "fsync"}:
                     assert "持久化" in str(exc) and "未确认" in str(exc), str(exc)
-                elif outcome in {"precommit", "precommit-shapes"}:
+                elif outcome in {"precommit", "precommit-shapes", "bound-setup-precommit"}:
                     assert "independent precommit rejection" in str(exc), str(exc)
                 elif outcome == "restore-return":
                     assert "旧文件未能自动恢复" in str(exc), str(exc)
@@ -356,11 +402,44 @@ def assert_private_dhcp_transaction_retention(
                     assert "DHCP A preimage receipt" in str(exc) and "HOLD" in str(exc), str(exc)
                 elif outcome == "success-setup-wal-probe-error":
                     assert "cleanup cannot confirm SETUP WAL absence" in str(exc) and "HOLD" in str(exc), str(exc)
+                elif outcome in binding_faults:
+                    assert "HOLD" in str(exc) and ("WAL" in str(exc) or "receipt" in str(exc)), str(exc)
                 else:
                     raise
             else:
-                assert outcome in {"success", "backup-sync-success", "preimage-before-write", "success-setup-wal"}, "failure must propagate before service continuation"
+                assert outcome in {"success", "backup-sync-success", "preimage-before-write", "success-setup-wal", "bound-setup-before-write"}, "failure must propagate before service continuation"
         transactions = list(live_dir.glob(".load-dhcp-transaction-*"))
+        if outcome in binding_faults:
+            assert injected == [outcome], injected
+            transaction, = transactions
+            assert not candidate.committed and not candidate.directory_synced
+            assert not candidate.destination.exists()
+            assert {p.name: p.read_bytes() for p in (transaction / "backup").iterdir()} == expected_a
+            assert {name: (live_dir / name).read_bytes() for name in names} == {
+                name: (expected_b[name] if outcome == "bound-setup-parent-wal" or (
+                    outcome == "bound-setup-late-wal" and name == "dhcpd.conf") else expected_a[name])
+                for name in names
+            }
+            assert installed_b == (list(mappings.values()) if outcome == "bound-setup-parent-wal" else
+                                   [live_dir / "dhcpd.conf"] if outcome == "bound-setup-late-wal" else [])
+            assert not cleanup, "lost grouped authority must not trigger an eager A rollback or evidence deletion"
+            return
+        if outcome in {"bound-setup-before-write", "bound-setup-precommit"}:
+            transaction, = transactions
+            assert {p.name: p.read_bytes() for p in (transaction / "backup").iterdir()} == expected_a
+            assert set(p.name for p in (transaction / "staged").iterdir()) == set(names)
+            assert json.loads(setup_wal.read_bytes())["body"]["dhcp_transaction"]["receipt"] == str(transaction / "a-preimage.json")
+            assert setup_wal.read_bytes() != setup_wal_bytes
+            assert {name: (live_dir / name).read_bytes() for name in names} == (
+                expected_a if outcome == "bound-setup-precommit" else expected_b
+            )
+            assert candidate.committed == (outcome == "bound-setup-before-write")
+            assert candidate.directory_synced == candidate.committed
+            if not candidate.committed:
+                assert not candidate.destination.exists()
+            assert not any(path == transaction or transaction in path.parents for path in cleanup), \
+                "even successful A rollback cannot retire a still-bound grouped obligation"
+            return
         if outcome in {"backup-bytes", "backup-mode", "backup-link", "backup-read", "preimage-file-sync", *backup_sync_faults}:
             assert injected == [outcome], injected
             assert installed_b == [], "bad A backup must reject before the first B install"
@@ -3818,6 +3897,49 @@ class ReleaseTransactionTests(unittest.TestCase):
                 runtime_backend=backend, runtime_rollback_context=context,
             )
         return state, context
+
+    def test_setup_wal_binds_dhcp_preimage_before_first_b_install(self):
+        state, _context = self._prepare_persisted_a_runtime_switch()
+        _journal, descriptor, backend = state[-3:]
+        guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True,
+                     runtime_backend=backend)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            assert_private_dhcp_transaction_retention(
+                LOAD, self.root, state[1], "bound-setup-before-write", setup_guard=guard,
+            )
+
+    def test_setup_bound_dhcp_precommit_restore_retains_grouped_evidence(self):
+        state, _context = self._prepare_persisted_a_runtime_switch()
+        journal, descriptor, backend = state[-3:]
+        guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True,
+                     runtime_backend=backend)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            assert_private_dhcp_transaction_retention(
+                LOAD, self.root, state[1], "bound-setup-precommit", setup_guard=guard,
+            )
+            before = journal.read_bytes()
+            with self.assertRaisesRegex(LOAD.LoadError, "DHCP.*group|group.*DHCP"):
+                LOAD.recover_setup_switch_journal(journal, restore_runtime_from_wal=True, **guard)
+            self.assertEqual(before, journal.read_bytes())
+
+    def test_setup_dhcp_registration_rejects_same_bytes_foreign_wal_and_receipt(self):
+        for outcome in ("bound-setup-register-wal", "bound-setup-register-receipt", "bound-setup-late-wal", "bound-setup-parent-wal"):
+            with self.subTest(outcome=outcome):
+                fixture = ReleaseTransactionTests()
+                fixture.setUp()
+                try:
+                    state, _context = fixture._prepare_persisted_a_runtime_switch()
+                    _journal, descriptor, backend = state[-3:]
+                    guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True,
+                                 runtime_backend=backend)
+                    with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+                        assert_private_dhcp_transaction_retention(
+                            LOAD, fixture.root, state[1], outcome, setup_guard=guard,
+                        )
+                    backend.start.assert_not_called()
+                finally:
+                    fixture.doCleanups()
+                    fixture.tearDown()
 
     def _assert_setup_restore_stage_keeps_total_authority(self, kind, surface):
         state, context = self._prepare_persisted_a_runtime_switch()

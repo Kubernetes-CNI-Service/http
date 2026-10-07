@@ -490,6 +490,18 @@ direct 覆盖实际模式/同步顺序和写入/删除同步异常；真实 LOAD
 workflow 使用实际 runtime 文件 writer 注入父目录同步错误，保留 WAL 后在新进程重入。
 其 runtime 仍是独立边界见证，不是完整 A receipt 恢复或服务激活；断电见证保持 OPEN。
 
+跨项目正常 LOAD 的 DHCP 安装现将原四文件 A preimage（原 receipt 完整身份与摘要、
+runtime/transaction/backup、Q parent 前像和 B candidate）写入持有的原 SETUP WAL，
+文件及父目录同步成功后才允许首个 B 覆盖。每次后续 B 写与 parent 的最终 replace 前
+重新核原 WAL/receipt FD、目录和 A 备份；precommit 回调后的换绑不能发布 parent。
+登记失败或总权限丢失保持 HOLD，保留原备份及已合法写入的部分 B，不从外来同名
+WAL/receipt 取得自动回退权限。即使 A precommit 回退成功，也不清理仍被 WAL 引用的事务。
+旧 SETUP-only reader 遇 `dhcp_transaction` 明确拒绝恢复/退休，不会忽略这项新增义务。
+这一步是持久写集绑定，不是分组冷恢复、Q 提交后的 B finalizer 或旧 A 健康激活完成；
+legacy 无 A runtime 的 WAL 也不能因登记 DHCP 而升级为完整 A 恢复权限。
+direct 和真实私有 LOAD→SETUP→LOAD 覆盖写前登记、precommit 回退保留、登记/写后/最终
+parent 回调边界的同字节外来 WAL/receipt。root/Linux/断电及整树正式 proof 仍独立验收。
+
 R22 跨项目恢复不能在 P 链接和 manifest 恢复后、旧 A runtime 恢复之前删除 WAL。
 原 WAL 的 descriptor、身份和完整字节须持有到 runtime 恢复返回，再复核停服/锁、
 P/Q 盘面及 Q 父提交前像，只有全部通过才退休凭据；异常或进程死亡保留 WAL。

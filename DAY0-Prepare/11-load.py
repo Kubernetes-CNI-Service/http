@@ -6437,7 +6437,8 @@ def _decode_setup_switch_journal(payload: bytes) -> dict[str, object]:
     required = {"schema_version", "phase", "root", "old_project", "new_project",
                 "manifest", "manifest_sha256", "manifest_mode", "links", "q_parent_preimage"}
     optional = {"allow_late_q_values", "q_local_links", "created_directories", "q_created_directories",
-                "directories", "infra_logs", "q_manifest_intent", "comparison_transfers", "a_runtime"}
+                "directories", "infra_logs", "q_manifest_intent", "comparison_transfers", "a_runtime",
+                "dhcp_transaction"}
     if isinstance(body, dict) and "q_parent_preimage" not in body:
         raise ValueError("journal Q parent preimage is missing; HOLD")
     if (not isinstance(body, dict) or not required <= set(body)
@@ -6455,6 +6456,17 @@ def _decode_setup_switch_journal(payload: bytes) -> dict[str, object]:
         "comparison_transfers": {"source", "source_parent", "destination", "destination_parent", "tree"},
     }
     directory_fields = {"path", "dev", "ino"}
+    if "dhcp_transaction" in body:
+        binding = body["dhcp_transaction"]
+        exact_fields(binding, {"receipt", "identity", "sha256", "body", "staged"}, "DHCP transaction")
+        exact_fields(binding["staged"], directory_fields, "DHCP staged directory")
+        if (not isinstance(binding["receipt"], str) or not Path(binding["receipt"]).is_absolute()
+                or not isinstance(binding["identity"], list) or len(binding["identity"]) != 9
+                or any(type(value) is not int for value in binding["identity"])
+                or not isinstance(binding["body"], dict)
+                or not isinstance(binding["sha256"], str)
+                or not re.fullmatch(r"[0-9a-f]{64}", binding["sha256"])):
+            raise ValueError("invalid DHCP transaction binding")
     if "a_runtime" in body:
         runtime = body["a_runtime"]
         exact_fields(runtime, {"selector_target", "receipt_directory", "receipt_parent", "receipt_file",
@@ -8755,6 +8767,11 @@ def _recover_setup_switch_journal_snapshot(
     except (KeyError, TypeError, ValueError, UnicodeError, binascii.Error, LoadError) as exc:
         raise LoadError(f"setup switch journal is invalid: {exc}") from exc
     runtime_context = _setup_switch_runtime_context(body, state)
+    if "dhcp_transaction" in body:
+        # This original write obligation cannot be silently ignored by the
+        # legacy SETUP-only reader, including inspect/retire entry points.
+        # Grouped restoration/finalization must consume all four A files too.
+        raise LoadError("SETUP/DHCP grouped recovery is unresolved; HOLD original WAL and backups")
     if expected_runtime_context is not None and runtime_context is not None:
         if (expected_runtime_context.project.resolve(strict=True) != runtime_context.project
                 or expected_runtime_context.selector_target != runtime_context.selector_target
@@ -10056,10 +10073,157 @@ def inspect_dhcp_a_preimage(
             os.close(descriptor)
 
 
+def _register_setup_switch_dhcp_transaction(preimage, parent_candidate, guard):
+    """Fsync original SETUP -> DHCP ownership before any live B overwrite.
+
+    Return held original WAL/receipt descriptors. The caller must keep them
+    alive and revalidate the token at each B write and the parent commit.
+    A receipt discovered later on disk is not registration authority.
+    """
+    if (not isinstance(guard, dict) or set(guard) != {
+            "deployment_lock_descriptor", "services_quiesced", "runtime_backend"}
+            or parent_candidate is None or parent_candidate.committed):
+        raise LoadError("SETUP/DHCP binding requires explicit stopped-services guard and uncommitted Q")
+    _require_runtime_restore_guard(**guard)
+    journal = _setup_switch_journal_path()
+    flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
+    wal_fd = receipt_fd = staged_fd = -1
+    temporary = None
+    staged_identity = None
+    try:
+        before = _dhcp_a_preimage_receipt_identity(journal.lstat())
+        wal_fd = os.open(journal, flags)
+        opened = _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT)
+        body = dict(_setup_switch_prepared_registration_body(opened))
+        wal_parent = _setup_switch_link_parent_identity(journal)
+        if (not stat.S_ISREG(before[2]) or before[5] != 1
+                or before != _dhcp_a_preimage_receipt_identity(os.fstat(wal_fd))
+                or "dhcp_transaction" in body):
+            raise LoadError("SETUP/DHCP original WAL owner is unavailable or already bound; HOLD")
+        # No adoption of an independently created transaction, wrong Q or a
+        # SETUP snapshot with unresolved shared-name obligations.
+        # Validate A runtime when the original SETUP writer bound it. A legacy
+        # link-only WAL can record this new obligation but still cannot obtain
+        # complete A runtime restoration/activation permission from it.
+        _setup_switch_runtime_context(body)
+        recover_setup_switch_journal(journal, inspect_only=True, **guard)
+        receipt, payload, receipt_identity = preimage
+        receipt = Path(receipt)
+        receipt_fd = os.open(receipt, flags)
+        evidence = inspect_dhcp_a_preimage(
+            receipt.parent, runtime_directory=receipt.parent.parent,
+            parent_destination=parent_candidate.destination,
+        )
+        if (body["new_project"] != _setup_switch_directory_identity(parent_candidate.destination.parent.parent)
+                or evidence["parent_visibility"] != "a-visible"
+                or set(evidence["runtime_visibility"].values()) != {"a"}
+                or evidence["body"]["parent"]["candidate"] != {
+                    "release_id": parent_candidate.release_id,
+                    "sha256": _sha256_path(parent_candidate.temporary),
+                    "size": parent_candidate.temporary.stat().st_size}):
+            raise LoadError("SETUP/DHCP candidate is not the original stopped A / declared Q; HOLD")
+        staged = receipt.parent / "staged"
+        binding = {
+            "receipt": str(receipt), "identity": list(receipt_identity),
+            "sha256": hashlib.sha256(payload).hexdigest(), "body": evidence["body"],
+            "staged": _setup_switch_directory_identity(staged),
+        }
+
+        def require_original():
+            _require_runtime_restore_guard(**guard)
+            if (wal_parent != _setup_switch_link_parent_identity(journal)
+                    or before != _dhcp_a_preimage_receipt_identity(journal.lstat())
+                    or before != _dhcp_a_preimage_receipt_identity(os.fstat(wal_fd))
+                    or _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT) != opened):
+                raise LoadError("SETUP/DHCP original WAL changed before registration; HOLD")
+            _setup_switch_runtime_context(body)
+            _require_setup_switch_q_parent_preimage(body)
+            _verify_dhcp_a_preimage_receipt(preimage)
+            if receipt_identity != _dhcp_a_preimage_receipt_identity(os.fstat(receipt_fd)):
+                raise LoadError("SETUP/DHCP original receipt descriptor changed; HOLD")
+            current = inspect_dhcp_a_preimage(
+                receipt.parent, runtime_directory=receipt.parent.parent,
+                parent_destination=parent_candidate.destination,
+            )
+            if current != evidence or binding["staged"] != _setup_switch_directory_identity(staged):
+                raise LoadError("SETUP/DHCP original four-file evidence changed; HOLD")
+
+        require_original()
+        body["dhcp_transaction"] = binding
+        payload = _setup_switch_canonical_payload({
+            "body": body, "sha256": hashlib.sha256(_setup_switch_canonical_payload(body)).hexdigest(),
+        }) + b"\n"
+        if len(payload) > _SETUP_SWITCH_JOURNAL_LIMIT:
+            raise LoadError("SETUP/DHCP WAL exceeds bounded size; HOLD")
+        descriptor, name = tempfile.mkstemp(prefix=".setup-switch-journal.", dir=journal.parent)
+        temporary = Path(name)
+        with os.fdopen(descriptor, "wb") as stream:
+            staged_fd = os.dup(stream.fileno())
+            stream.write(payload)
+            stream.flush()
+            staged_identity = _dhcp_a_preimage_receipt_identity(os.fstat(staged_fd))
+            os.fsync(stream.fileno())
+        require_original()
+        if (staged_identity != _dhcp_a_preimage_receipt_identity(temporary.lstat())
+                or staged_identity != _dhcp_a_preimage_receipt_identity(os.fstat(staged_fd))
+                or _read_rollback_regular(temporary, limit=_SETUP_SWITCH_JOURNAL_LIMIT) != (payload, 0o600)):
+            raise LoadError("SETUP/DHCP WAL registration stage owner changed; HOLD")
+        os.replace(temporary, journal)
+        installed_identity = _dhcp_a_preimage_receipt_identity(os.fstat(staged_fd))
+        _fsync_parent_directory(journal.parent)
+        token = (journal, payload, installed_identity, wal_parent, staged_fd, preimage, receipt_fd)
+        _require_setup_switch_dhcp_transaction(token, guard)
+        receipt_fd = staged_fd = -1  # ownership transferred only on success
+        return token
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise LoadError(f"SETUP/DHCP persistent registration unconfirmed; HOLD: {exc}") from exc
+    finally:
+        # Do not delete a replaced or rewritten foreign staging name.
+        if temporary is not None and os.path.lexists(temporary):
+            if (staged_identity is not None
+                    and staged_identity == _dhcp_a_preimage_receipt_identity(temporary.lstat())):
+                temporary.unlink()
+        for descriptor in (wal_fd, receipt_fd, staged_fd):
+            if descriptor >= 0:
+                os.close(descriptor)
+
+
+def _require_setup_switch_dhcp_transaction(token, guard, *, inspect_runtime=True):
+    journal, payload, identity, parent, wal_fd, preimage, receipt_fd = token
+    _require_runtime_restore_guard(**guard)
+    if (parent != _setup_switch_link_parent_identity(journal)
+            or identity != _dhcp_a_preimage_receipt_identity(journal.lstat())
+            or identity != _dhcp_a_preimage_receipt_identity(os.fstat(wal_fd))
+            or _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT) != (payload, 0o600)):
+        raise LoadError("SETUP/DHCP registered WAL owner changed; HOLD")
+    body = _setup_switch_prepared_registration_body((payload, 0o600))
+    _require_setup_switch_q_parent_preimage(body)
+    _verify_dhcp_a_preimage_receipt(preimage)
+    if preimage[2] != _dhcp_a_preimage_receipt_identity(os.fstat(receipt_fd)):
+        raise LoadError("SETUP/DHCP registered receipt descriptor changed; HOLD")
+    binding = body["dhcp_transaction"]
+    if not inspect_runtime:
+        backup = preimage[0].parent / "backup"
+        before = binding["body"]["before"]
+        if (set(os.listdir(backup)) != {name for name, row in before.items() if row["state"] != "missing"}
+                or any(_dhcp_restore_leaf_state(backup / name) != row for name, row in before.items())
+                or binding["staged"] != _setup_switch_directory_identity(preimage[0].parent / "staged")):
+            raise LoadError("SETUP/DHCP grouped A restore evidence changed; HOLD")
+        return
+    evidence = inspect_dhcp_a_preimage(
+        preimage[0].parent, runtime_directory=preimage[0].parent.parent,
+        parent_destination=Path(binding["body"]["parent"]["destination"]),
+    )
+    if (evidence["body"] != binding["body"] or evidence["parent_visibility"] != "a-visible"
+            or binding["staged"] != _setup_switch_directory_identity(preimage[0].parent / "staged")):
+        raise LoadError("SETUP/DHCP registered evidence changed; HOLD")
+
+
 def mount_and_test_dhcp(
     dry_run: bool = False,
     *,
     parent_candidate: PreparedParentRelease | None = None,
+    setup_switch_guard=None,
 ) -> None:
     """Validate a staged DHCP set, then install all four files transactionally.
 
@@ -10127,6 +10291,8 @@ def mount_and_test_dhcp(
     backup_unconfirmed = False
     restore_incomplete = False
     preimage_receipt = None
+    setup_binding = None
+    setup_binding_attempted = False
     build_workspace: tempfile.TemporaryDirectory[str] | None = None
     try:
         # Ubuntu's dhcpd AppArmor profile permits configuration reads below
@@ -10211,9 +10377,16 @@ def mount_and_test_dhcp(
         _sync_verified_dhcp_a_backup(dhcp_runtime_dir, backup_dir, original_states)
         _verify_dhcp_a_preimage_receipt(preimage_receipt)
         backup_unconfirmed = False
+        if setup_switch_guard is not None:
+            setup_binding_attempted = True
+            setup_binding = _register_setup_switch_dhcp_transaction(
+                preimage_receipt, parent_candidate, setup_switch_guard,
+            )
 
         try:
             for source, destination in mappings.items():
+                if setup_binding is not None:
+                    _require_setup_switch_dhcp_transaction(setup_binding, setup_switch_guard)
                 # AppArmor resolves symlink targets and can deny HTTP-root
                 # paths.  The installed runtime artifact must be a regular
                 # file below /etc/dhcp. Install the same original bytes used
@@ -10236,11 +10409,16 @@ def mount_and_test_dhcp(
             build_workspace.cleanup()
             build_workspace = None
             if parent_candidate is not None:
+                if setup_binding is not None:
+                    _require_setup_switch_dhcp_transaction(setup_binding, setup_switch_guard)
                 # Keep the old DHCP files available until the only externally
                 # visible commit marker has been atomically replaced.  If the
                 # parent commit fails, this exception path restores all four
                 # installed files before load releases its deployment lock.
-                commit_prepared_release(parent_candidate)
+                commit_options = ({"require_authority": lambda: _require_setup_switch_dhcp_transaction(
+                    setup_binding, setup_switch_guard,
+                )} if setup_binding is not None else {})
+                commit_prepared_release(parent_candidate, **commit_options)
         except BaseException:
             if parent_candidate is not None and parent_candidate.committed:
                 # Directory fsync can fail after the atomic parent replace.
@@ -10248,12 +10426,18 @@ def mount_and_test_dhcp(
                 # the HOLD before any service start. Rolling DHCP back behind
                 # the new parent would create the inverse split-brain.
                 raise
+            if setup_binding is not None:
+                # A lost total authority cannot license eager rollback from
+                # whichever WAL/receipt now occupies the same disk name.
+                _require_setup_switch_dhcp_transaction(setup_binding, setup_switch_guard)
             # Set before any rollback command (or warning). Return-code failure,
             # exception, interruption or death cannot license A backup deletion.
             restore_incomplete = True
             warn("DHCP 安装或最终语法检查失败；正在恢复本次操作前的四个文件")
             restore_errors = []
             for destination in mappings.values():
+                if setup_binding is not None:
+                    _require_setup_switch_dhcp_transaction(setup_binding, setup_switch_guard)
                 result = _run_subprocess(
                     sudo_command("rm", "-f", "--", str(destination)), check=False,
                 )
@@ -10261,6 +10445,12 @@ def mount_and_test_dhcp(
                     restore_errors.append(str(destination))
                     continue
                 if existed[destination]:
+                    if setup_binding is not None:
+                        _require_setup_switch_dhcp_transaction(
+                            setup_binding, setup_switch_guard, inspect_runtime=False,
+                        )
+                        if os.path.lexists(destination):
+                            raise LoadError("SETUP/DHCP restore name reappeared after owned unlink; HOLD")
                     result = _run_subprocess(
                         sudo_command(
                             "cp", "-a", "--", str(backup_dir / destination.name),
@@ -10290,9 +10480,14 @@ def mount_and_test_dhcp(
             restore_incomplete = False
             raise
     finally:
+        if setup_binding is not None:
+            os.close(setup_binding[4])
+            os.close(setup_binding[6])
         if build_workspace is not None:
             build_workspace.cleanup()
-        setup_acceptance_pending = False
+        # Once registration has been attempted, even an ambiguous WAL fsync
+        # or a successful precommit A restore must retain this obligation.
+        setup_acceptance_pending = setup_binding_attempted
         if (transaction_created and parent_candidate is not None
                 and parent_candidate.committed and parent_candidate.directory_synced):
             try:
@@ -11614,7 +11809,7 @@ def _recheck_prepared_splitter_provenance(candidate: PreparedParentRelease) -> N
         raise LoadError("P2P splitter provenance 在 parent commit 前已变化")
 
 
-def commit_prepared_release(candidate: PreparedParentRelease) -> Path:
+def commit_prepared_release(candidate: PreparedParentRelease, *, require_authority=None) -> Path:
     """Commit an already-fsynced parent candidate with one atomic replace."""
     if candidate.committed:
         if not candidate.directory_synced:
@@ -11669,6 +11864,8 @@ def commit_prepared_release(candidate: PreparedParentRelease) -> Path:
         )
     if candidate.precommit_check is not None:
         candidate.precommit_check()
+    if require_authority is not None:
+        require_authority()
     os.replace(candidate.temporary, candidate.destination)
     candidate.committed = True
     # Visibility and confirmed persistence are distinct. A sync failure must
@@ -14895,8 +15092,13 @@ def main(
                 import_selection, import_snapshot, project / "02-devices_config.csv",
             )
         if local_services_supported and dhcp_service_available:
+            setup_dhcp_options = ({"setup_switch_guard": {
+                "deployment_lock_descriptor": deployment_lock_descriptor,
+                "services_quiesced": runtime_restore_safe,
+                "runtime_backend": runtime_backend_instance,
+            }} if cross_project_rollback is not None and not args.dry_run else {})
             mount_and_test_dhcp(
-                args.dry_run, parent_candidate=parent_candidate,
+                args.dry_run, parent_candidate=parent_candidate, **setup_dhcp_options,
             )
             release_committed = bool(
                 parent_candidate is not None and parent_candidate.committed
