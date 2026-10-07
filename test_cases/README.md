@@ -926,6 +926,15 @@ INITIALIZED 被一致重哈希，bool 或浮点数的 Python 相等别名仍 HOL
 global／enrollment／History 夹具的 canonical sys.modules 与父包别名同步，
 避免改变执行顺序后从旧包别名取得已撤销 owner 的 token registry；生产检查不放宽。
 
+`test_cases.test_req7_metadata_reservation` 串联固定真实私有 TLS metadata 读取、
+原始双 enrollment、实际全表 owner 与真实冻结 global action/wire，首个意图前
+持久预留该 batch 的永久 fence（不是调用方配额）。METADATA-RAW／HEADER／
+RESERVATION 的八个图像屏障完成后才能 INITIALIZED；冷进程及 UNKNOWN 保留
+原预算、原 fence，不重分配／采用已有 fence／回填部分图像。容量溢出、链接、
+重哈希替换 fence 或原绑定漂移 HOLD；token 不落盘。独立 spreadsheet／sheet
+字符池保留全部可见使用量，但其他 Cloud PROJECT 不可见，仍是
+VISIBLE_ONLY_UNPROVED，不是新鲜准入、COMPLETE、结算或发送许可；真机 NOT RUN。
+
 `test_cases.test_req7_history_preread_journal` 在实际 spreadsheet owner 与已初始化
 且计数为 0 的全局 action/wire journal 内保存原始全尾响应、容量与
 `history_last_row_before_send`。RAW/HEADER 的六个图像屏障后才能写 marker；

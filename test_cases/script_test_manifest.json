@@ -296,7 +296,8 @@
         "test_cases.test_req7_enrollment_journal",
         "test_cases.test_req7_history_preread_journal",
         "test_cases.test_req7_remote_history_match",
-        "test_cases.test_req7_nv_reservation"
+        "test_cases.test_req7_nv_reservation",
+        "test_cases.test_req7_metadata_reservation"
       ]
     },
     {
@@ -627,7 +628,8 @@
     "monitor/issue_tracker_enrollment_journal.py": "monitor/issue_tracker_enrollment_journal.py",
     "monitor/issue_tracker_history_preread_journal.py": "monitor/issue_tracker_history_preread_journal.py",
     "monitor/issue_tracker_remote_history_match.py": "monitor/issue_tracker_remote_history_match.py",
-    "monitor/issue_tracker_nv_reservation.py": "monitor/issue_tracker_nv_reservation.py"
+    "monitor/issue_tracker_nv_reservation.py": "monitor/issue_tracker_nv_reservation.py",
+    "monitor/issue_tracker_metadata_reservation.py": "monitor/issue_tracker_metadata_reservation.py"
   },
   "test_rules": [
     {
@@ -1799,6 +1801,11 @@
       "id": "req7_durable_nv_reservation",
       "paths": ["monitor/issue_tracker_nv_reservation.py", "monitor/issue_tracker_sheets_read_decode.py"],
       "tests": ["test_cases.test_req7_nv_reservation"]
+    },
+    {
+      "id": "req7_actual_unit_metadata_reservation",
+      "paths": ["monitor/issue_tracker_metadata_reservation.py"],
+      "tests": ["test_cases.test_req7_metadata_reservation"]
     }
   ],
   "workflows": [
@@ -3287,6 +3294,11 @@
       "id": "req7_native_both_cabling_durable_nv_cold_process",
       "members": ["monitor/issue_tracker_nv_reservation.py", "monitor/issue_tracker_online_nv_ids.py", "monitor/issue_tracker_enrollment_journal.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_tls_inputs.py", "monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_send_intent.py", "monitor/issue_tracker_online_cells.py"],
       "tests": ["test_cases.test_req7_nv_reservation"]
+    },
+    {
+      "id": "req7_native_metadata_actual_unit_durable_quota_cold_process",
+      "members": ["monitor/issue_tracker_metadata_reservation.py", "monitor/issue_tracker_metadata_capacity.py", "monitor/issue_tracker_global_attempt_journal.py", "monitor/issue_tracker_enrollment_journal.py", "monitor/issue_tracker_spreadsheet_owner.py", "monitor/issue_tracker_send_intent.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_tls_inputs.py"],
+      "tests": ["test_cases.test_req7_metadata_reservation"]
     }
   ],
   "path_rules": [

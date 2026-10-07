@@ -2196,6 +2196,14 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 两份 nonce 原绑定保持；混合 update 不触碰 A。缺项、换号、外来键／nonce、不同
 generation/publish 及 UNKNOWN 下改 action/wire 均 HOLD，不计作 COMPLETE 或线上通过。
 
+## TC-REAL-REQ7-METADATA-RESERVATION-001 — 原 batch 的永久 fence 持久预算
+
+- Case ID：`TC-REAL-REQ7-METADATA-RESERVATION-001`；类型：real-environment / durable transaction；对应 G-1/C-19。状态：**NOT RUN / REAL_ENV REQUIRED**。`monitor/issue_tracker_metadata_reservation.py` 未安装；本地 direct、真实私有 TLS 固定读取及冷进程只是原始可见字符池预算见证，不是 COMPLETE、在线准入或发送许可。
+- 前置条件：另获 owner 精确 Stage O 隔离副本授权；预置全表私有 state、原始全部模板 ID／双 enrollment、真实 owner 和 global action/wire，首个 intent 前完成固定完整 metadata 读取。源鉴别、新鲜准入、隐藏 PROJECT 使用量、行容量、受审 launcher 和跨单元结算须单独闭合；不创建真实目录、凭据或在线修改。
+- 步骤与独立预期：实际 immutable batch 的 fence ID/key/value/目标表确定唯一预留；两份 nonce 可见预算各为 86，z=1 为 2，sheet 与 spreadsheet 各自 30000 池。容量溢出、已存在同 ID（包括相同图像）、部分响应、原 nonce 错误、foreign target 必须在创建 state 前 HOLD；八个图像屏障全部完成后才写 INITIALIZED。部分屏障不采用，冷进程及 UNKNOWN 不换 fence、不回填／清理／释放配额。链接、marker 缺失、重哈希替换 reservation HOLD。
+- 证据：精确 HEAD/tree/dirty/diff/manifest/Python/平台、命令／退出码、前后 stat/inode/大小/SHA256、完整 END／物理顺序、固定 TLS 请求见证、原 RAW 摘要、原 action/wire／nonce、所有 fsync 屏障和冷进程 UNKNOWN；不输出 bearer 或业务正文。
+- 清理与风险：只恢复另获授权的隔离副本；保留 UNKNOWN 原像与预留／永久 fence，不删除未知 state、不向外部 PID 发信号、不安装／发布。真实断电、卷回滚、隐藏 PROJECT、在线并发修改仍 NOT RUN。
+
 ## TC-REAL-REQ7-DURABLE-ATTEMPT-JOURNAL-001 — 意图先落盘与跨重启总计数
 
 - Case ID：`TC-REAL-REQ7-DURABLE-ATTEMPT-JOURNAL-001`；类型：real-environment / durable transaction；对应 C-6/C-14/C-19。状态：**NOT RUN / REAL_ENV REQUIRED**。`monitor/issue_tracker_attempt_journal.py` 是未安装的保守本地证据库；direct 与实际 C-6 owner → literal encoder → 意图 journal → 后续拒绝观察，以及真实私有子进程退出／重启 workflow，不证明实际断电或六次真实网络尝试上界。
