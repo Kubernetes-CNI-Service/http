@@ -3432,6 +3432,234 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertFalse(os.path.lexists(journal), "verified complete restore must retire its own WAL")
         backend.start.assert_not_called()
 
+    def _prepare_persisted_a_runtime_switch(self):
+        private_root = mock.patch.object(LOAD, "HTTP_ROOT", self.root.resolve())
+        private_root.start()
+        self.addCleanup(private_root.stop)
+        document = yaml.safe_load(self.global_file.read_text())
+        document["common"]["mgmt"]["http"]["http_root"] = str(self.root.resolve())
+        self.global_file.write_text(yaml.safe_dump(document, sort_keys=False))
+        _parent, generation, receipt = self._publish_a_with_runtime_rollback_receipt()
+        state = self._prepare_cross_project_setup_crash()
+        p, q, common = state[:3]
+        journal, descriptor, backend = state[-3:]
+        # Replace only this fixture's untouched legacy WAL, before any Q write.
+        journal.unlink()
+        context = LOAD.CrossProjectRollbackContext(
+            p, "generations/" + generation.name, receipt.resolve(),
+            LOAD.snapshot_active_setup_state(expected_project=p),
+        )
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.prepare_setup_switch_journal(
+                p, q, expected_new_links={common: state[5]},
+                deployment_lock_descriptor=descriptor, services_quiesced=True,
+                runtime_backend=backend, runtime_rollback_context=context,
+            )
+        return state, context
+
+    def test_setup_wal_persists_exact_a_runtime_authority_before_q_write(self):
+        state, context = self._prepare_persisted_a_runtime_switch()
+        record = json.loads(state[-3].read_bytes())["body"]["a_runtime"]
+        self.assertEqual(context.selector_target, record["selector_target"])
+        self.assertEqual(str(context.runtime_receipt), record["receipt_directory"]["path"])
+        info = (context.runtime_receipt / "receipt.json").stat()
+        self.assertEqual(info.st_ino, record["receipt_file"]["ino"])
+        self.assertEqual(sha256(context.runtime_receipt / "receipt.json"), record["receipt_file"]["sha256"])
+        self.assertEqual(context.setup_state.manifest, state[7].read_bytes())
+        state[-1].start.assert_not_called()
+
+    def test_setup_wal_bare_recovery_cannot_retire_a_runtime_obligation(self):
+        state, _context = self._prepare_persisted_a_runtime_switch()
+        common, journal, descriptor, backend = state[2], state[-3], state[-2], state[-1]
+        common.unlink()
+        common.symlink_to(os.path.relpath(state[5], common.parent))
+        mixed, evidence = os.readlink(common), journal.read_bytes()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with self.assertRaisesRegex(LOAD.LoadError, "runtime.*recovery"):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertEqual(mixed, os.readlink(common), "runtime HOLD must precede P writes")
+        self.assertEqual(evidence, journal.read_bytes())
+        backend.start.assert_not_called()
+
+    def test_setup_wal_disk_only_runtime_restore_recovers_a_and_retires_last(self):
+        state, context = self._prepare_persisted_a_runtime_switch()
+        common, journal, descriptor, backend = state[2], state[-3], state[-2], state[-1]
+        common.unlink()
+        common.symlink_to(os.path.relpath(state[5], common.parent))
+        runtime = self.ztp / "ztp-bootstrap_oob.sh"
+        runtime.write_bytes(b"partial B runtime\n")
+        original_restore = LOAD.restore_runtime_rollback_receipt
+        seen = []
+
+        def observe(*args, **kwargs):
+            self.assertTrue(journal.is_file(), "A runtime must precede WAL retirement")
+            self.assertEqual(context.setup_state.links, {p: os.readlink(p) for p in context.setup_state.links})
+            seen.append(args)
+            return original_restore(*args, **kwargs)
+
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "restore_runtime_rollback_receipt", side_effect=observe):
+            result = LOAD.recover_setup_switch_journal(
+                journal, deployment_lock_descriptor=descriptor, services_quiesced=True,
+                runtime_backend=backend, restore_runtime_from_wal=True,
+            )
+        self.assertEqual("restored-p", result)
+        self.assertEqual([(context.project, context.runtime_receipt)], seen)
+        self.assertEqual(b"A oob bootstrap\n", runtime.read_bytes())
+        self.assertFalse(os.path.lexists(journal))
+        backend.start.assert_not_called()
+
+    def test_setup_wal_replaced_a_receipt_holds_before_any_p_write(self):
+        state, context = self._prepare_persisted_a_runtime_switch()
+        common, journal, descriptor, backend = state[2], state[-3], state[-2], state[-1]
+        common.unlink()
+        common.symlink_to(os.path.relpath(state[5], common.parent))
+        path = context.runtime_receipt / "receipt.json"
+        path.rename(path.with_suffix(".original"))
+        path.write_bytes(path.with_suffix(".original").read_bytes())
+        path.chmod(0o644)
+        # Keep the original alive, but remove the unrelated name from the
+        # closed receipt tree: same bytes/new owner still must HOLD.
+        path.with_suffix(".original").rename(self.root / "held-original-a-receipt")
+        mixed, evidence = os.readlink(common), journal.read_bytes()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with self.assertRaisesRegex(LOAD.LoadError, "runtime.*authority"):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor, services_quiesced=True,
+                    runtime_backend=backend, restore_runtime_from_wal=True,
+                )
+        self.assertEqual(mixed, os.readlink(common))
+        self.assertEqual(evidence, journal.read_bytes())
+        backend.start.assert_not_called()
+
+    def test_setup_wal_disk_runtime_recovery_refuses_legacy_without_receipt_binding(self):
+        state = self._prepare_cross_project_setup_crash()
+        journal, descriptor, backend = state[-3:]
+        evidence = journal.read_bytes()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with self.assertRaisesRegex(LOAD.LoadError, "runtime.*binding"):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor, services_quiesced=True,
+                    runtime_backend=backend, restore_runtime_from_wal=True,
+                )
+        self.assertEqual(evidence, journal.read_bytes())
+        backend.start.assert_not_called()
+
+    def test_setup_wal_a_runtime_owner_boolean_is_not_an_integer_authority(self):
+        state, _context = self._prepare_persisted_a_runtime_switch()
+        journal, descriptor, backend = state[-3:]
+        envelope = json.loads(journal.read_bytes())
+        envelope["body"]["a_runtime"]["receipt_file"]["nlink"] = True
+        envelope["sha256"] = hashlib.sha256(LOAD._setup_switch_canonical_payload(envelope["body"])).hexdigest()
+        journal.write_bytes(LOAD._setup_switch_canonical_payload(envelope) + b"\n")
+        evidence = journal.read_bytes()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with self.assertRaises(LOAD.LoadError):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor, services_quiesced=True,
+                    runtime_backend=backend, verify_only=True,
+                )
+        self.assertEqual(evidence, journal.read_bytes())
+        backend.start.assert_not_called()
+
+    def test_setup_wal_wrong_p_runtime_context_refuses_before_journal_publication(self):
+        state, context = self._prepare_persisted_a_runtime_switch()
+        journal, descriptor, backend = state[-3:]
+        journal.unlink()  # Only this fixture's untouched candidate WAL.
+        wrong = LOAD.CrossProjectRollbackContext(
+            state[1], context.selector_target, context.runtime_receipt, context.setup_state,
+        )
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with self.assertRaisesRegex(LOAD.LoadError, "exact P"):
+                LOAD.prepare_setup_switch_journal(
+                    state[0], state[1], expected_new_links={state[2]: state[5]},
+                    deployment_lock_descriptor=descriptor, services_quiesced=True,
+                    runtime_backend=backend, runtime_rollback_context=wrong,
+                )
+        self.assertFalse(os.path.lexists(journal))
+        self.assertEqual(context.setup_state.manifest, state[7].read_bytes())
+        backend.start.assert_not_called()
+
+    def test_setup_wal_a_runtime_failure_retains_original_authority_after_p_restore(self):
+        state, context = self._prepare_persisted_a_runtime_switch()
+        common, journal, descriptor, backend = state[2], state[-3], state[-2], state[-1]
+        common.unlink()
+        common.symlink_to(os.path.relpath(state[5], common.parent))
+        evidence = journal.read_bytes()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "restore_runtime_rollback_receipt",
+                                  side_effect=OSError("independent A runtime durability fault")):
+            with self.assertRaisesRegex(OSError, "runtime durability fault"):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor, services_quiesced=True,
+                    runtime_backend=backend, restore_runtime_from_wal=True,
+                )
+        self.assertEqual(evidence, journal.read_bytes())
+        self.assertEqual(context.setup_state.manifest, state[7].read_bytes())
+        self.assertEqual(context.setup_state.links, {p: os.readlink(p) for p in context.setup_state.links})
+        backend.start.assert_not_called()
+
+    def test_setup_wal_a_receipt_same_inode_aba_holds_before_p_restore(self):
+        state, context = self._prepare_persisted_a_runtime_switch()
+        common, journal, descriptor, backend = state[2], state[-3], state[-2], state[-1]
+        path = context.runtime_receipt / "receipt.json"
+        info, payload = path.stat(), path.read_bytes()
+        path.write_bytes(b"!" + payload[1:])
+        path.write_bytes(payload)
+        os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns))
+        self.assertEqual(info.st_ino, path.stat().st_ino)
+        self.assertNotEqual(info.st_ctime_ns, path.stat().st_ctime_ns)
+        common.unlink()
+        common.symlink_to(os.path.relpath(state[5], common.parent))
+        mixed, evidence = os.readlink(common), journal.read_bytes()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with self.assertRaisesRegex(LOAD.LoadError, "runtime.*authority"):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor, services_quiesced=True,
+                    runtime_backend=backend, restore_runtime_from_wal=True,
+                )
+        self.assertEqual(evidence, journal.read_bytes())
+        self.assertEqual(mixed, os.readlink(common))
+        backend.start.assert_not_called()
+
+    def test_setup_wal_a_runtime_unknown_field_preserves_uninterpreted_contract(self):
+        state, _context = self._prepare_persisted_a_runtime_switch()
+        journal, descriptor, backend = state[-3:]
+        envelope = json.loads(journal.read_bytes())
+        envelope["body"]["a_runtime"]["start_services"] = True
+        envelope["sha256"] = hashlib.sha256(LOAD._setup_switch_canonical_payload(envelope["body"])).hexdigest()
+        journal.write_bytes(LOAD._setup_switch_canonical_payload(envelope) + b"\n")
+        evidence = journal.read_bytes()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with self.assertRaisesRegex(LOAD.LoadError, "unknown.*A runtime"):
+                LOAD.recover_setup_switch_journal(
+                    journal, deployment_lock_descriptor=descriptor, services_quiesced=True,
+                    runtime_backend=backend, restore_runtime_from_wal=True,
+                )
+        self.assertEqual(evidence, journal.read_bytes())
+        backend.start.assert_not_called()
+
+    def test_setup_wal_q_link_registration_revalidates_a_receipt_before_extension(self):
+        state, context = self._prepare_persisted_a_runtime_switch()
+        journal, descriptor, backend = state[-3:]
+        path = context.runtime_receipt / "receipt.json"
+        path.rename(self.root / "held-original-a-receipt")
+        path.write_bytes((self.root / "held-original-a-receipt").read_bytes())
+        path.chmod(0o644)
+        evidence = journal.read_bytes()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with self.assertRaisesRegex(LOAD.LoadError, "runtime.*authority"):
+                LOAD.register_setup_switch_journal_link(
+                    journal, state[4], state[6], deployment_lock_descriptor=descriptor,
+                    services_quiesced=True, runtime_backend=backend,
+                )
+        self.assertEqual(evidence, journal.read_bytes(), "foreign A receipt authorized a new Q obligation")
+        self.assertFalse(os.path.lexists(state[4]))
+        backend.start.assert_not_called()
+
     def test_cross_project_runtime_restore_failure_retains_original_wal(self) -> None:
         (*state, journal, descriptor, backend) = self._prepare_cross_project_setup_crash()
         p, q, common = state[:3]
@@ -9622,6 +9850,7 @@ os.kill(os.getpid(), signal.SIGKILL)
         self.assertIn("restore-active-p", events)
         self.assertEqual(1, len(activation_calls))
         self.assertTrue(activation_calls[0]["prepare_switch_wal"])
+        self.assertIs(context, activation_calls[0]["runtime_rollback_context"])
         self.assertEqual("supervisor", activation_calls[0]["runtime_backend"].name)
 
     def test_main_does_not_restore_receipt_when_failure_precedes_quiesce_and_mutation(self) -> None:

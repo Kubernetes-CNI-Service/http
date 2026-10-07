@@ -3641,6 +3641,7 @@ def activate_project(
     no_upgrade: bool = False,
     prepare_switch_wal: bool = False,
     runtime_backend: ServiceRuntimeBackend | None = None,
+    runtime_rollback_context: CrossProjectRollbackContext | None = None,
 ) -> None:
     host_role = resolve_host_role(host_role)
     current = active_project()
@@ -3660,6 +3661,7 @@ def activate_project(
             allow_late_q_values=True,
             deployment_lock_descriptor=deployment_lock_descriptor,
             services_quiesced=True, runtime_backend=runtime_backend,
+            runtime_rollback_context=runtime_rollback_context,
         )
     command = [
         sys.executable, str(SETUP_SCRIPT), "-y", "--confirm-project-switch",
@@ -6112,7 +6114,7 @@ def _decode_setup_switch_journal(payload: bytes) -> dict[str, object]:
     required = {"schema_version", "phase", "root", "old_project", "new_project",
                 "manifest", "manifest_sha256", "manifest_mode", "links", "q_parent_preimage"}
     optional = {"allow_late_q_values", "q_local_links", "created_directories", "q_created_directories",
-                "directories", "infra_logs", "q_manifest_intent", "comparison_transfers"}
+                "directories", "infra_logs", "q_manifest_intent", "comparison_transfers", "a_runtime"}
     if isinstance(body, dict) and "q_parent_preimage" not in body:
         raise ValueError("journal Q parent preimage is missing; HOLD")
     if (not isinstance(body, dict) or not required <= set(body)
@@ -6130,6 +6132,17 @@ def _decode_setup_switch_journal(payload: bytes) -> dict[str, object]:
         "comparison_transfers": {"source", "source_parent", "destination", "destination_parent", "tree"},
     }
     directory_fields = {"path", "dev", "ino"}
+    if "a_runtime" in body:
+        runtime = body["a_runtime"]
+        exact_fields(runtime, {"selector_target", "receipt_directory", "receipt_parent", "receipt_file"}, "A runtime")
+        for key in ("receipt_directory", "receipt_parent"):
+            exact_fields(runtime[key], directory_fields, key)
+        exact_fields(runtime["receipt_file"],
+                     {"dev", "ino", "mode", "nlink", "size", "mtime_ns", "ctime_ns", "sha256"}, "A receipt file")
+        for key in ("receipt_directory", "receipt_parent", "receipt_file"):
+            for field, value in runtime[key].items():
+                if field not in {"path", "sha256"} and (type(value) is not int or value < 0):
+                    raise ValueError("A runtime owner must contain integer identity fields")
     for key in ("root", "old_project", "new_project"):
         exact_fields(body[key], directory_fields, key)
     for inventory, fields in inventories.items():
@@ -6287,6 +6300,7 @@ def prepare_setup_switch_journal(
     deployment_lock_descriptor: int | None,
     services_quiesced: bool,
     runtime_backend: ServiceRuntimeBackend | None,
+    runtime_rollback_context: CrossProjectRollbackContext | None = None,
 ) -> Path:
     """Durably freeze P and the permitted Q link values before setup's first write.
 
@@ -6357,6 +6371,11 @@ def prepare_setup_switch_journal(
         "allow_late_q_values": allow_late_q_values,
         "q_parent_preimage": _setup_switch_q_parent_authority(Path(new["path"])),
     }
+    if runtime_rollback_context is not None:
+        if (runtime_rollback_context.setup_state != state
+                or runtime_rollback_context.project.resolve(strict=True) != state.project):
+            raise LoadError("A runtime context differs from exact P setup state")
+        body["a_runtime"] = _setup_switch_runtime_authority(runtime_rollback_context, verify_active=True)
     body_bytes = _setup_switch_canonical_payload(body)
     envelope = {
         "body": body, "sha256": hashlib.sha256(body_bytes).hexdigest(),
@@ -6380,6 +6399,67 @@ def prepare_setup_switch_journal(
         # A potentially partial WAL is evidence, never silently removed.
         raise
     return journal
+
+
+def _setup_switch_runtime_authority(context, *, verify_active=False):
+    """Freeze the exact A receipt owner, never infer A from a newest directory."""
+    try:
+        project = context.project.resolve(strict=True)
+        selector = context.selector_target
+        if not isinstance(selector, str) or re.fullmatch(r"generations/[0-9a-f]{20}", selector) is None:
+            raise ValueError("A selector is invalid")
+        directory = project / "99-output-ztp/rollback-receipts" / selector.split("/")[1]
+        if context.runtime_receipt.resolve(strict=True) != directory:
+            raise ValueError("A receipt does not belong to the exact P generation")
+        directory_owner = _setup_switch_directory_identity(directory)
+        parent_owner = _setup_switch_directory_identity(directory.parent)
+        path = directory / "receipt.json"
+        before = path.lstat()
+        opened = _read_rollback_regular(path, limit=_ROLLBACK_RECEIPT_LIMIT)
+        if opened is None or opened[1] != 0o644:
+            raise ValueError("A receipt file lacks its published 0644 mode")
+        receipt = _load_runtime_rollback_receipt(project, directory)
+        if receipt["selector_target"] != selector:
+            raise ValueError("A receipt selector differs")
+        if verify_active:
+            _verify_active_runtime_receipt(project, directory, receipt)
+        fields = ("dev", "ino", "mode", "nlink", "size", "mtime_ns", "ctime_ns")
+        if (any(getattr(before, "st_" + field) != getattr(path.lstat(), "st_" + field) for field in fields)
+                or opened != _read_rollback_regular(path, limit=_ROLLBACK_RECEIPT_LIMIT)
+                or directory_owner != _setup_switch_directory_identity(directory)
+                or parent_owner != _setup_switch_directory_identity(directory.parent)):
+            raise ValueError("A receipt changed while freezing")
+        return {"selector_target": selector, "receipt_directory": directory_owner,
+                "receipt_parent": parent_owner,
+                "receipt_file": {**{field: getattr(before, "st_" + field) for field in fields},
+                                 "sha256": hashlib.sha256(opened[0]).hexdigest()}}
+    except (OSError, RuntimeError, ValueError, TypeError, KeyError, LoadError) as exc:
+        raise LoadError(f"setup switch A runtime authority is invalid: {exc}") from exc
+
+
+def _setup_switch_runtime_context(body, state=None):
+    record = body.get("a_runtime")
+    if record is None:
+        return None
+    try:
+        if state is None:
+            old = body["old_project"]
+            if (body["root"] != _setup_switch_directory_identity(HTTP_ROOT)
+                    or old != _setup_switch_directory_identity(Path(old["path"]))):
+                raise ValueError("A runtime P/root directory authority differs")
+            state = _validate_setup_state_receipt(ActiveSetupState(
+                Path(old["path"]), base64.b64decode(body["manifest"], validate=True),
+                body["manifest_mode"],
+                {Path(row["path"]): row["before"] for row in body["links"] if row["before"] is not None},
+            ))
+        context = CrossProjectRollbackContext(
+            state.project, record["selector_target"], Path(record["receipt_directory"]["path"]), state,
+        )
+        if _setup_switch_runtime_authority(context) != record:
+            raise ValueError("A receipt owner or bytes differ from WAL")
+        return context
+    except (OSError, ValueError, TypeError, KeyError, LoadError) as exc:
+        raise LoadError(f"setup switch A runtime authority changed; HOLD: {exc}") from exc
 
 
 def register_setup_switch_journal_link(
@@ -6440,12 +6520,13 @@ def register_setup_switch_journal_link(
         if (not isinstance(rows, list) or not rows
                 or len({row["path"] for row in rows}) != len(rows)):
             raise ValueError("journal link inventory is invalid")
-        _validate_setup_state_receipt(ActiveSetupState(
+        p_state = _validate_setup_state_receipt(ActiveSetupState(
             project=Path(old["path"]), manifest=old_manifest,
             manifest_mode=body["manifest_mode"],
             links={Path(row["path"]): row["before"] for row in rows
                    if row["before"] is not None},
         ))
+        _setup_switch_runtime_context(body, p_state)
         root_path = Path(root["path"])
         q_local_states = _setup_switch_q_local_link_states(body)
         for row in rows:
@@ -6555,6 +6636,7 @@ def register_setup_switch_journal_link(
                 "st_size", "st_mtime_ns", "st_ctime_ns"))
                 or _read_rollback_regular(journal, limit=_SETUP_SWITCH_JOURNAL_LIMIT) != opened):
             raise LoadError("setup switch journal changed before registration")
+        _setup_switch_runtime_context(next_body, p_state)
         os.replace(temporary, journal)
         _fsync_parent_directory(journal.parent)
     finally:
@@ -7163,6 +7245,7 @@ def _setup_switch_prepared_registration_body(opened):
         if (body["schema_version"] != 2 or body["phase"] != "prepared"
                 or hashlib.sha256(_setup_switch_canonical_payload(body)).hexdigest() != envelope["sha256"]):
             raise ValueError("registration WAL checksum/schema/phase is invalid")
+        _setup_switch_runtime_context(body)
         return body
     except (ValueError, TypeError, KeyError) as exc:
         raise LoadError(f"registration WAL contract changed: {exc}") from exc
@@ -8051,6 +8134,8 @@ def recover_setup_switch_journal(
     expected_new_project: Path | None = None,
     retain_journal: bool = False,
     _after_p_restore: Callable[[], None] | None = None,
+    restore_runtime_from_wal: bool = False,
+    _expected_runtime_context: CrossProjectRollbackContext | None = None,
 ) -> str:
     """Verify or restore P from a complete WAL and a known P/Q disk state.
 
@@ -8064,6 +8149,10 @@ def recover_setup_switch_journal(
         services_quiesced=services_quiesced,
         runtime_backend=runtime_backend,
     )
+    if type(restore_runtime_from_wal) is not bool or (restore_runtime_from_wal and (
+            verify_only or inspect_only or retain_journal or manifest_candidate is not None
+            or _after_p_restore is not None)):
+        raise LoadError("disk-only A runtime recovery requires an explicit full restore")
     if (expected_old_state is None) != (expected_new_project is None):
         raise LoadError("setup switch WAL context requires both P state and Q project")
     if type(retain_journal) is not bool or (retain_journal and (verify_only or inspect_only)):
@@ -8134,6 +8223,10 @@ def recover_setup_switch_journal(
             expected_new_project=expected_new_project, retain_journal=retain_journal,
             after_p_restore=_after_p_restore,
             materialized_descriptors=materialized_descriptors,
+            restore_runtime_from_wal=restore_runtime_from_wal,
+            expected_runtime_context=_expected_runtime_context,
+            runtime_restore_guard=dict(deployment_lock_descriptor=deployment_lock_descriptor,
+                                       services_quiesced=services_quiesced, runtime_backend=runtime_backend),
         )
     finally:
         for held_descriptor in reversed(materialized_descriptors):
@@ -8150,6 +8243,9 @@ def _recover_setup_switch_journal_snapshot(
     expected_new_project: Path | None, retain_journal: bool,
     materialized_descriptors: list[int],
     after_p_restore: Callable[[], None] | None = None,
+    restore_runtime_from_wal: bool = False,
+    expected_runtime_context: CrossProjectRollbackContext | None = None,
+    runtime_restore_guard=None,
 ) -> str:
     """Recover only from the immutable authority held by the guarded API."""
     payload, _mode = opened
@@ -8192,11 +8288,32 @@ def _recover_setup_switch_journal_snapshot(
             raise ValueError("journal link inventory is invalid")
     except (KeyError, TypeError, ValueError, UnicodeError, binascii.Error, LoadError) as exc:
         raise LoadError(f"setup switch journal is invalid: {exc}") from exc
+    runtime_context = _setup_switch_runtime_context(body, state)
+    if expected_runtime_context is not None and runtime_context is not None:
+        if (expected_runtime_context.project.resolve(strict=True) != runtime_context.project
+                or expected_runtime_context.selector_target != runtime_context.selector_target
+                or expected_runtime_context.runtime_receipt.resolve(strict=True) != runtime_context.runtime_receipt):
+            raise LoadError("setup switch A runtime authority differs from parent context; HOLD")
+    if restore_runtime_from_wal:
+        if runtime_context is None:
+            raise LoadError("setup switch A runtime binding is missing; HOLD")
+
+        def after_p_restore():
+            restore_runtime_rollback_receipt(
+                runtime_context.project, runtime_context.runtime_receipt,
+                expected_current=runtime_context.selector_target, **runtime_restore_guard,
+            )
+            _require_runtime_restore_guard(**runtime_restore_guard)
+
+    elif (runtime_context is not None and not verify_only and not inspect_only
+          and not retain_journal and after_p_restore is None):
+        raise LoadError("setup switch A runtime requires explicit complete recovery; HOLD")
     require_wal_unchanged = require_journal_unchanged
 
     def require_journal_unchanged():
         require_wal_unchanged()
         _require_setup_switch_q_parent_preimage(body)
+        _setup_switch_runtime_context(body, state)
 
     # A pending SETUP WAL is not authorization to roll P back after Q's
     # parent commit. Recheck this at every recovery mutation and retirement.
@@ -8529,6 +8646,7 @@ def restore_cross_project_rollback_context(
             services_quiesced=services_quiesced, runtime_backend=runtime_backend,
             expected_old_state=context.setup_state, expected_new_project=current_project,
             _after_p_restore=restore_runtime_phase,
+            _expected_runtime_context=context,
         )
         return
     else:
@@ -13961,6 +14079,7 @@ def main(
                 and active_before is not None and active_before != project
             ),
             runtime_backend=runtime_backend_instance,
+            runtime_rollback_context=cross_project_rollback,
         )
         if not args.dry_run and (project / "p2p.xlsx").is_symlink():
             selected_runtime_p2p = project / os.readlink(project / "p2p.xlsx")

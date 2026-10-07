@@ -276,6 +276,123 @@ def _write_same_inode(path: Path, data: bytes, original: os.stat_result) -> None
 class GenerationInputBindingWorkflowTests(unittest.TestCase):
     """LOAD's frozen A authority must survive a real downstream c2 read."""
 
+    def test_real_setup_death_disk_only_a_runtime_restore_uses_wal_not_argv_context(self):
+        self._assert_real_persisted_a_runtime_switch(False)
+
+    def test_real_setup_q_link_registration_holds_replaced_a_runtime_receipt(self):
+        self._assert_real_persisted_a_runtime_switch(True)
+
+    def _assert_real_persisted_a_runtime_switch(self, replace_a_receipt):
+        fixture = RELEASE_FIXTURE.ReleaseTransactionTests()
+        fixture.setUp()
+        try:
+            state, context = fixture._prepare_persisted_a_runtime_switch()
+            root = fixture.root.resolve()
+            p, q, common = state[:3]
+            journal, descriptor, _backend = state[-3:]
+            shutil.copytree(ROOT / "tools", root / "tools")
+            (root / "ztp/optimize").mkdir()
+            shutil.copy2(ROOT / "ztp/optimize/sample_links.py", root / "ztp/optimize/sample_links.py")
+            for name in ("11-load.py", "01-a-setup.py"):
+                shutil.copy2(ROOT / "DAY0-Prepare" / name, root / "DAY0-Prepare" / name)
+            # The next process acquires its own lock; no parent context or
+            # receipt path is serialized into its command line.
+            RELEASE_FIXTURE.LOAD.release_deployment_lock(descriptor)
+            fixture._cleanups = [item for item in fixture._cleanups
+                                 if item[0] != RELEASE_FIXTURE.LOAD.release_deployment_lock]
+            before_writer = journal.read_bytes()
+            writer = """
+import importlib.util, os, signal, sys
+from pathlib import Path
+from types import SimpleNamespace
+root, q, common = map(Path, sys.argv[1:4])
+def script(name):
+    spec = importlib.util.spec_from_file_location('persisted_' + name, root / 'DAY0-Prepare' / (name + '.py'))
+    api = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = api
+    spec.loader.exec_module(api)
+    return api
+load, setup = script('11-load'), script('01-a-setup')
+load.active_managed_services = lambda *args, **kwargs: ()
+load.service_runtime_backend = lambda: SimpleNamespace(name='supervisor')
+fd = load.acquire_deployment_lock(exclusive=True)
+setup._SETUP_SWITCH_WAL_CONTEXT = (vars(load), fd)
+if sys.argv[4] == 'replace':
+    import json
+    record = json.loads((root / 'ztp/.setup-switch-journal.json').read_bytes())['body']['a_runtime']
+    path = Path(record['receipt_directory']['path']) / 'receipt.json'
+    path.rename(root / 'held-original-a-receipt')
+    path.write_bytes((root / 'held-original-a-receipt').read_bytes())
+    path.chmod(0o644)
+try:
+    setup._register_setup_switch_link_before_write(str(common), str(q / '01-global.yaml'))
+except ValueError as exc:
+    assert sys.argv[4] == 'replace' and 'runtime' in str(exc), str(exc)
+    print('SETUP_REPLACED_A_RECEIPT_HELD')
+    load.release_deployment_lock(fd)
+    raise SystemExit(7)
+common.unlink()
+common.symlink_to(os.path.relpath(q / '01-global.yaml', common.parent))
+(root / 'ztp/ztp-bootstrap_oob.sh').write_bytes(b'partial B runtime\\n')
+os.kill(os.getpid(), signal.SIGKILL)
+"""
+            first = subprocess.run([sys.executable, "-B", "-c", writer, str(root), str(q), str(common),
+                                    "replace" if replace_a_receipt else "exact"],
+                                   capture_output=True, text=True, check=False, timeout=30)
+            if replace_a_receipt:
+                self.assertEqual(7, first.returncode, first.stdout + first.stderr)
+                self.assertIn("SETUP_REPLACED_A_RECEIPT_HELD", first.stdout)
+                self.assertEqual(before_writer, journal.read_bytes())
+                self.assertEqual(context.setup_state.links, {p: os.readlink(p) for p in context.setup_state.links})
+                self.assertEqual(b"A oob bootstrap\n", (root / "ztp/ztp-bootstrap_oob.sh").read_bytes())
+                return
+            self.assertEqual(-9, first.returncode, first.stdout + first.stderr)
+            evidence = journal.read_bytes()
+            mixed = os.readlink(common)
+            recovery = """
+import importlib.util, sys
+from pathlib import Path
+from types import SimpleNamespace
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('disk_only_runtime_load', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+backend = SimpleNamespace(name='supervisor', start=lambda *args: (_ for _ in ()).throw(AssertionError('service start forbidden')))
+fd = load.acquire_deployment_lock(exclusive=True)
+try:
+    try:
+        load.recover_setup_switch_journal(root / 'ztp/.setup-switch-journal.json',
+            deployment_lock_descriptor=fd, services_quiesced=True, runtime_backend=backend,
+            restore_runtime_from_wal=(sys.argv[2] == 'explicit'))
+    except load.LoadError as exc:
+        assert sys.argv[2] == 'bare' and 'runtime' in str(exc), str(exc)
+        print('BARE_RUNTIME_RECOVERY_HELD')
+    else:
+        assert sys.argv[2] == 'explicit'
+        print('DISK_ONLY_A_RUNTIME_RECOVERED')
+finally:
+    load.release_deployment_lock(fd)
+"""
+            held = subprocess.run([sys.executable, "-B", "-c", recovery, str(root), "bare"],
+                                  capture_output=True, text=True, check=False, timeout=30)
+            self.assertEqual(0, held.returncode, held.stdout + held.stderr)
+            self.assertIn("BARE_RUNTIME_RECOVERY_HELD", held.stdout)
+            self.assertEqual(evidence, journal.read_bytes())
+            self.assertEqual(mixed, os.readlink(common))
+            restored = subprocess.run([sys.executable, "-B", "-c", recovery, str(root), "explicit"],
+                                      capture_output=True, text=True, check=False, timeout=30)
+            self.assertEqual(0, restored.returncode, restored.stdout + restored.stderr)
+            self.assertIn("DISK_ONLY_A_RUNTIME_RECOVERED", restored.stdout)
+            self.assertFalse(os.path.lexists(journal))
+            self.assertEqual(context.setup_state.manifest, state[7].read_bytes())
+            self.assertEqual(context.setup_state.links, {path: os.readlink(path) for path in context.setup_state.links})
+            self.assertEqual(b"A oob bootstrap\n", (root / "ztp/ztp-bootstrap_oob.sh").read_bytes())
+        finally:
+            fixture.doCleanups()
+            fixture.tearDown()
+
     def _private_setup_switch_fixture(self, root: Path):
         """Copy the real LOAD/SETUP scripts into a disposable HTTP root."""
         root = root.resolve()
