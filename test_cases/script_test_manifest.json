@@ -1720,6 +1720,11 @@
       ]
     },
     {
+      "id": "issue_tracker_original_insertion_position",
+      "paths": ["monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_tls_inputs.py"],
+      "tests": ["test_cases.test_req7_activity_discovery"]
+    },
+    {
       "id": "issue_tracker_sheets_read_decode",
       "paths": [
         "monitor/issue_tracker_sheets_read_decode.py"
@@ -3279,6 +3284,11 @@
       "id": "req7_native_active_closed_discovery",
       "members": ["monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_tls_inputs.py", "monitor/issue_tracker_online_cells.py", "monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_manifest.py", "monitor/issue_tracker_local_workbook_commit.py", "monitor/issue_tracker_receipt_snapshot.py", "monitor/issue_tracker_admission.py", "monitor/issue_tracker_local_commit.py"],
       "tests": ["test_cases.test_req7_activity_discovery", "test_cases.test_issue_tracker_stage_l_consumer_workflow"]
+    },
+    {
+      "id": "req7_native_original_insertion_position",
+      "members": ["monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_tls_inputs.py", "monitor/issue_tracker_online_cells.py"],
+      "tests": ["test_cases.test_req7_activity_discovery"]
     },
     {
       "id": "req7_global_original_nonce_composer_action_journal",

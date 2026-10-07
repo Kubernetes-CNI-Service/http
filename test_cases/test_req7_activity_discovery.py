@@ -252,6 +252,162 @@ class Req7ActiveRowBindingDirectTests(unittest.TestCase):
         self.assertEqual({'boolValue': False}, values['O'])
 
 
+def insertion_document(sheet, rows, row_count=7):
+    # Independent explicit-column contract: every Cabling column contributes
+    # to its append tail; Switch ignores lookup-only columns when selecting.
+    columns = ('A', 'B', 'C', 'F', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U') if sheet == 'ETH&IB Switch' else (
+        'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', 'AA', 'AB', 'AC')
+    def number(letter):
+        result = 0
+        for char in letter: result = result * 26 + ord(char) - 64
+        return result - 1
+    value = sheet_document(sheet, [], row_count)
+    value['sheets'][0]['data'] = [{'startRow': 2, 'startColumn': number(letter), 'rowData': [
+        {'values': [{'userEnteredValue': row[letter]} if letter in row else {}]} for row in rows]}
+        for letter in reversed(columns)]
+    return value
+
+
+def reserved_switch_row(index):
+    row = {'A': literal('NV%05d' % (10001 + index - 2))}
+    for letter in ('D', 'E', 'G', 'H'): row[letter] = {'formulaValue': '=IFNA(VLOOKUP(F%d,Inventory!C:K,2,False),"")' % (index + 1)}
+    if index == 2: row['I'] = {'formulaValue': '=IFNA(VLOOKUP(F3,Inventory!C:K,7,False),"")'}
+    return row
+
+
+class Req7InsertionPositionDirectTests(unittest.TestCase):
+    setUp = Req7ActivityDiscoveryDirectTests.setUp
+
+    def observe(self, sheet, rows, *, exact=None, reserved=(), append_rows=1, capacity=7, occupancy=None, discovery=None, plan=None):
+        key = ('switch', 'switch-1', 'down', 'fabric') if sheet == 'ETH&IB Switch' else (
+            'eth_cabling' if sheet == 'ETH Cabling' else 'ib_cabling', 'switch-1', 'swp1', 'Link Down')
+        self.assertTrue(hasattr(self.planner, 'prepare_insertion_sheet_read'), 'original insertion occupancy plan missing')
+        self.assertTrue(hasattr(self.module, 'observe_insertion_position'), 'original insertion position proof missing')
+        options = {}
+        if exact is not None:
+            index = exact['sheets'][0]['data'][0]['startRow']
+            options = {'row_plan': self.planner.prepare_sheets_read(self.binding, self.token,
+                mode='row_rectangle', sheet=sheet, first_row=index + 1), 'row_response': grids.response(exact)}
+        return self.module.observe_insertion_position(
+            self.planner.prepare_activity_sheet_read(self.binding, self.token, sheet=sheet), grids.response(discovery or sheet_document(sheet, rows, capacity)),
+            plan or self.planner.prepare_insertion_sheet_read(self.binding, self.token, sheet=sheet),
+            grids.response(occupancy or insertion_document(sheet, rows, capacity)), sheet_id=17, activity_key=key,
+            reserved_row_indexes=reserved, append_rows=append_rows, **options)
+
+    def test_fixed_original_columns_and_capacity_no_arbitrary_window_or_wide_range(self):
+        self.assertTrue(hasattr(self.planner, 'prepare_insertion_sheet_read'), 'original insertion occupancy plan missing')
+        for sheet, columns in (('ETH&IB Switch', ('A','B','C','F','J','K','L','M','N','O','P','Q','R','S','T','U')),
+                               ('ETH Cabling', ('A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z','AA','AB','AC')),
+                               ('IB Cabling', ('A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z','AA','AB','AC'))):
+            plan = self.planner.prepare_insertion_sheet_read(self.binding, self.token, sheet=sheet)
+            self.assertEqual({'includeGridData': ['true'], 'fields': [CAPACITY_FIELDS],
+                'ranges': ["'%s'!%s3:%s5002" % (sheet, c, c) for c in columns]}, parse_qs(urlsplit(plan.path).query))
+            self.assertEqual(('GET', b'', 30.0), (plan.method, plan.body, plan.budget_seconds))
+            with self.assertRaises(TypeError): self.planner.prepare_insertion_sheet_read(self.binding, self.token, sheet=sheet, last_row=5)
+
+    def test_switch_selects_first_original_free_unreserved_row_and_keeps_formula_and_preset_id(self):
+        rows = [reserved_switch_row(i) for i in range(2, 7)]
+        rows[0]['M'] = {'numberValue': 0}; rows[1]['O'] = {'boolValue': False}
+        result = self.observe('ETH&IB Switch', rows, reserved=(4,), exact=exact_row_document('ETH&IB Switch', rows[3], 5))
+        self.assertEqual((5, 'NV10004', 7), (result.row_index, result.nv_id, result.row_count))
+        cells = {column: dict(value) for _index, column, value in result.cells}
+        self.assertEqual(rows[3]['D'], cells['D']); self.assertEqual({}, cells['I'])
+        first = self.observe('ETH&IB Switch', [reserved_switch_row(2)], capacity=3,
+            exact=exact_row_document('ETH&IB Switch', reserved_switch_row(2), 2))
+        self.assertEqual((2, 'NV10001'), (first.row_index, first.nv_id))
+        self.assertEqual({'formulaValue': '=IFNA(VLOOKUP(F3,Inventory!C:K,7,False),"")'},
+            {col: dict(value) for _, col, value in first.cells}['I'])
+        for name in ('complete', 'applied', 'mutation_permit', 'insert_allowed'): self.assertFalse(hasattr(result, name))
+
+    def test_every_switch_business_or_operator_column_occupies_row_even_explicit_empty_formula_zero_false(self):
+        for column in ('B','C','F','J','K','L','M','N','O','P','Q','R','S','T','U'):
+            for value in (literal(''), {'formulaValue': '=""'}, {'numberValue': 0}, {'boolValue': False}):
+                rows = [reserved_switch_row(2), reserved_switch_row(3)]
+                rows[0][column] = value
+                # F/L/N are key columns: non-literal values fail strict activity
+                # classification rather than being reinterpreted as empty.
+                with self.subTest(column=column, value=value):
+                    if column in ('F', 'L', 'N') and set(value) != {'stringValue'}:
+                        with self.assertRaises(self.module.SheetsDecodeHold): self.observe('ETH&IB Switch', rows,
+                            exact=exact_row_document('ETH&IB Switch', rows[1], 3))
+                    else:
+                        self.assertEqual(3, self.observe('ETH&IB Switch', rows,
+                            exact=exact_row_document('ETH&IB Switch', rows[1], 3)).row_index)
+
+    def test_switch_no_free_row_wrong_exact_row_lookup_or_id_drift_and_bad_reservation_fail_closed(self):
+        row = reserved_switch_row(3); rows = [reserved_switch_row(2), row]
+        for reserved in ((2,3), (True,), (2,2), (1,), (7,), [2]):
+            with self.subTest(reserved=reserved):
+                with self.assertRaises(self.module.SheetsDecodeHold): self.observe('ETH&IB Switch', rows, reserved=reserved,
+                    exact=exact_row_document('ETH&IB Switch', row, 3))
+        for column, value in (('A', literal('NV99999')), ('D', literal('lookup text')), ('E', {}), ('G', {'numberValue': 0}),
+                              ('H', {'boolValue': False}), ('I', {'formulaValue': '=not_original()'}), ('M', literal('operator'))):
+            exact_row = deepcopy(row); exact_row[column] = value
+            with self.subTest(column=column):
+                with self.assertRaises(self.module.SheetsDecodeHold) as caught: self.observe('ETH&IB Switch', rows,
+                    reserved=(2,), exact=exact_row_document('ETH&IB Switch', exact_row, 3))
+                self.assertIsNone(caught.exception.__context__)
+        with self.assertRaises(self.module.SheetsDecodeHold): self.observe('ETH&IB Switch', rows,
+            exact=exact_row_document('ETH&IB Switch', row, 3))
+        with self.assertRaises(self.module.SheetsDecodeHold): self.observe('ETH&IB Switch', rows)
+
+    def test_cabling_tail_includes_all_original_operator_tool_cells_gaps_and_exact_capacity(self):
+        for sheet in ('ETH Cabling', 'IB Cabling'):
+            for column in ('B','D','H','I','J','M','N','O','P','S','T','V','W','X','Y','Z','AA','AB','AC'):
+                for value in (literal(''), {'formulaValue': '=""'}, {'numberValue': 0}, {'boolValue': False}):
+                    rows = [{}, {}, {}, {}, {column: value}]
+                    with self.subTest(sheet=sheet, column=column, value=value):
+                        observed = self.observe(sheet, rows, capacity=8)
+                        self.assertEqual((6, 7, 8, None), (observed.last_data_row_index, observed.row_index, observed.row_count, observed.nv_id))
+                        with self.assertRaises(self.module.SheetsDecodeHold): self.observe(sheet, rows, capacity=7)
+            empty = self.observe(sheet, [], capacity=4, append_rows=2)
+            self.assertEqual((1, 2), (empty.last_data_row_index, empty.row_index))
+            with self.assertRaises(self.module.SheetsDecodeHold): self.observe(sheet, [], capacity=4, append_rows=3)
+            closed = cabling_row('NV40000', 'Closed')
+            self.assertEqual(3, self.observe(sheet, [closed], capacity=4).row_index)
+            with self.assertRaises(self.module.SheetsDecodeHold): self.observe(sheet, [cabling_row()], capacity=4)
+
+    def test_cross_read_drift_partial_duplicate_foreign_capacity_and_invalid_counts_cannot_select_insert(self):
+        rows = [reserved_switch_row(2)]
+        original = insertion_document('ETH&IB Switch', rows, 3)
+        mutations = []
+        for key, value in (('rowCount', 5003), ('rowCount', True), ('columnCount', 20)):
+            changed = deepcopy(original); changed['sheets'][0]['properties']['gridProperties'][key] = value; mutations.append(changed)
+        changed = deepcopy(original); changed['sheets'][0]['data'].pop(); mutations.append(changed)
+        changed = deepcopy(original); changed['sheets'][0]['data'].append(deepcopy(changed['sheets'][0]['data'][0])); mutations.append(changed)
+        changed = deepcopy(original); changed['spreadsheetId'] = 'foreign_spreadsheet_id_0002'; mutations.append(changed)
+        changed = deepcopy(original); changed['sheets'][0]['properties']['sheetId'] = 18; mutations.append(changed)
+        changed = deepcopy(original); changed['sheets'][0]['data'][-1]['rowData'][0]['values'][0] = {'userEnteredValue': literal('NV99999')}; mutations.append(changed)
+        for changed in mutations:
+            with self.assertRaises(self.module.SheetsDecodeHold): self.observe('ETH&IB Switch', rows, capacity=3,
+                occupancy=changed, exact=exact_row_document('ETH&IB Switch', rows[0], 2))
+        for count in (True, 0, -1, 1001, 1.0, '1'):
+            with self.assertRaises(self.module.SheetsDecodeHold): self.observe('ETH Cabling', [], append_rows=count)
+        plan = self.planner.prepare_insertion_sheet_read(self.binding, self.token, sheet='ETH Cabling')
+        for invalid in (replace(plan, path=plan.path.replace('5002','7')), replace(plan, host='foreign.invalid'),
+                        replace(plan, budget_seconds=60.0), replace(plan, method='POST')):
+            with self.assertRaises(self.module.SheetsDecodeHold): self.observe('ETH Cabling', [], plan=invalid)
+        for discovery in (sheet_document('ETH Cabling', [], 6), sheet_document('ETH Cabling', [cabling_row('NV40000'),cabling_row('NV40001')])):
+            with self.assertRaises(self.module.SheetsDecodeHold): self.observe('ETH Cabling', [], discovery=discovery)
+        for capacity in (3, 5002):
+            self.assertEqual(2, self.observe('ETH Cabling', [], capacity=capacity).row_index)
+        for sheet in ('ETH Cabling', 'IB Cabling'):
+            with self.assertRaises(self.module.SheetsDecodeHold): self.observe(sheet, [], reserved=(2,))
+
+    def test_governance_covers_each_real_insertion_script_direct_and_multiscript_workflow(self):
+        from pathlib import Path
+        root = Path(__file__).resolve().parents[1]
+        manifest = json.loads((root/'test_cases/script_test_manifest.json').read_text())
+        paths = {'monitor/issue_tracker_sheets_read_plan.py','monitor/issue_tracker_sheets_read_decode.py',
+                 'monitor/issue_tracker_tls_inputs.py','monitor/issue_tracker_online_cells.py'}
+        self.assertTrue(any(rule['id'] == 'req7_native_original_insertion_position' and paths <= set(rule['members'])
+            and 'test_cases.test_req7_activity_discovery' in rule['tests'] for rule in manifest['workflows']))
+        for path in paths - {'monitor/issue_tracker_online_cells.py'}:
+            self.assertTrue(any(path in rule['paths'] and 'test_cases.test_req7_activity_discovery' in rule['tests']
+                for rule in manifest['test_rules']))
+        self.assertIn('TC-REAL-REQ7-ACTIVE-CLOSED-DISCOVERY-001',(root/'test_cases/REAL_ENVIRONMENT.md').read_text())
+
+
 class Req7ActivitySheetDirectTests(unittest.TestCase):
     # Existing finite-window tests remain a separate contract. Only new cases
     # use the same-response capacity-clipped full-body plan below.
@@ -438,6 +594,47 @@ class Req7ActivityDiscoveryNativeWorkflowTests(unittest.TestCase):
         self.assertEqual([],errors); self.assertEqual(1,len(records)); self.assertEqual(b"",records[0][2])
         self.assertEqual(plan.path,records[0][0].decode().strip().split(" ")[1])
         self.assertEqual(((3,"NV30019"),),result.active_rows); self.assertEqual(((2,"NV30000"),),result.closed_rows)
+
+    def test_native_original_discovery_occupancy_and_switch_rectangle_bind_literal_insert_candidates(self):
+        from monitor.issue_tracker_online_cells import encode_tool_cells
+        planner, decoder, binding, token = self.native_inputs()
+        self.assertTrue(hasattr(self.module, 'NativeInsertionSheetReadUnit'), 'native insertion read unit missing')
+        for sheet in ('ETH&IB Switch', 'ETH Cabling', 'IB Cabling'):
+            rows = [reserved_switch_row(2), reserved_switch_row(3)] if sheet == 'ETH&IB Switch' else [cabling_row('NV40000', 'Closed'), {}, {'AB': {'boolValue': False}}]
+            key = ('switch','switch-1','down','fabric') if sheet == 'ETH&IB Switch' else (
+                'eth_cabling' if sheet == 'ETH Cabling' else 'ib_cabling','switch-1','swp1','Link Down')
+            discovery, _ = self.native_read(self.module.NativeActivitySheetReadUnit(binding, token, sheet=sheet), sheet_document(sheet, rows))
+            occupancy, request = self.native_read(self.module.NativeInsertionSheetReadUnit(binding, token, sheet=sheet), insertion_document(sheet, rows))
+            occupancy_plan = planner.prepare_insertion_sheet_read(binding, token, sheet=sheet)
+            self.assertEqual(occupancy_plan.path, request[0].decode().strip().split(' ')[1])
+            options = {}
+            if sheet == 'ETH&IB Switch':
+                exact, _ = self.native_read(self.module.NativeSheetsReadUnit(binding, token, mode='row_rectangle', sheet=sheet, first_row=4), exact_row_document(sheet, rows[1], 3))
+                options = {'row_plan': planner.prepare_sheets_read(binding, token, mode='row_rectangle', sheet=sheet, first_row=4), 'row_response': exact}
+            position = decoder.observe_insertion_position(planner.prepare_activity_sheet_read(binding, token, sheet=sheet), discovery,
+                occupancy_plan, occupancy, sheet_id=17, activity_key=key, reserved_row_indexes=(2,) if sheet == 'ETH&IB Switch' else (), append_rows=1, **options)
+            self.assertEqual(3 if sheet == 'ETH&IB Switch' else 5, position.row_index)
+            if sheet == 'ETH&IB Switch':
+                values = {'B':'ZTP Monitor','C':'ZTP Monitor','F':'switch-1','J':'2026-10-08T01:00:00Z','K':'High','L':'[MONITOR][down][fabric] literal','N':'New'}
+                candidate = encode_tool_cells(sheet, 17, 'insert', values, row_index=position.row_index)
+                requests = json.loads(candidate.requests_json)
+                self.assertEqual([1,5,9,13], [item['updateCells']['start']['columnIndex'] for item in requests])
+                self.assertEqual({3}, {item['updateCells']['start']['rowIndex'] for item in requests})
+                self.assertEqual(rows[1]['D'], {col:dict(value) for _,col,value in position.cells}['D'])
+                self.assertEqual('NV10002', position.nv_id)
+            else:
+                values = {'A':'NV40001','B':'ZTP Monitor','C':'ZTP Monitor','D':'2026-10-08T01:00:00Z','E':'ETH' if sheet == 'ETH Cabling' else 'IB',
+                    'F':'Link Down','G':'literal','K':'switch-1','L':'swp1','M':'','N':'',
+                    'Q':'switch-2','R':'swp2','S':'','T':'','U':'New'}
+                candidate = encode_tool_cells(sheet,17,'insert',values)
+                requests = json.loads(candidate.requests_json)
+                self.assertEqual({'appendCells'},set(requests[0])); self.assertEqual({'sheetId','rows','fields'},set(requests[0]['appendCells']))
+                self.assertEqual(17, requests[0]['appendCells']['sheetId'])
+                values = requests[0]['appendCells']['rows'][0]['values']
+                for index in (7,8,9,14,15): self.assertEqual({}, values[index])
+            for item in requests:
+                for cell in next(iter(item.values()))['rows'][0]['values']:
+                    if cell: self.assertEqual({'stringValue'},set(cell['userEnteredValue']))
 
     def test_governed_manifest_binds_real_discovery_flow_and_not_run_card(self):
         from pathlib import Path

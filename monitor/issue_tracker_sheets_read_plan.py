@@ -21,6 +21,11 @@ _WL_FIELDS = "spreadsheetId,sheets(properties(sheetId,title,gridProperties(rowCo
 _TEMPLATE_ID_FIELDS = "spreadsheetId,sheets(properties(sheetId,title))"
 _HISTORY_TAIL_FIELDS = "spreadsheetId,sheets(properties(sheetId,title,sheetType,gridProperties(rowCount,columnCount)),data(startRow,startColumn,rowData(values(userEnteredValue))))"
 _TEMPLATE_HEADER_RANGES = ("'ETH&IB Switch'!A2:U2", "'ETH Cabling'!A2:AC2", "'IB Cabling'!A2:AC2", "'Update_History'!A2:E2")
+_INSERT_COLUMNS = {
+    'ETH&IB Switch': ('A', 'B', 'C', 'F', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U'),
+    'ETH Cabling': tuple(chr(65 + index) for index in range(26)) + ('AA', 'AB', 'AC'),
+    'IB Cabling': tuple(chr(65 + index) for index in range(26)) + ('AA', 'AB', 'AC'),
+}
 
 
 class SheetsReadHold(ValueError):
@@ -174,3 +179,19 @@ def prepare_activity_sheet_read(binding, token, *, sheet):
     query[1] = ('fields', _HISTORY_TAIL_FIELDS)
     return PreparedSheetsRead(base.host, '/v4/spreadsheets/' + binding.spreadsheet_id + '?' + urlencode(query),
                               base.method, base.headers, base.body)
+
+
+def prepare_insertion_sheet_read(binding, token, *, sheet):
+    """Fixed explicit occupancy columns and original capacity in one GET.
+
+    Switch lookup-only columns are checked in a subsequent exact row, not
+    treated as occupation. ALL Cabling columns, including operator columns,
+    contribute to the original append tail. Bounded at 5002 rows/2 MiB; no
+    silent paging, arbitrary window, allocation, reservation or send authority.
+    """
+    base = prepare_sheets_read(binding, token, mode='discovery', sheet=sheet, first_row=3, last_row=5002)
+    query = [('includeGridData', 'true'), ('fields', _HISTORY_TAIL_FIELDS),
+             *(('ranges', "'%s'!%s3:%s5002" % (sheet, letter, letter)) for letter in _INSERT_COLUMNS[sheet])]
+    path = '/v4/spreadsheets/' + binding.spreadsheet_id + '?' + urlencode(query)
+    if len(path.encode('ascii')) > 16384: raise SheetsReadHold()
+    return PreparedSheetsRead(base.host, path, base.method, base.headers, base.body)

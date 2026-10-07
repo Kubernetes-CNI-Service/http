@@ -68,6 +68,22 @@ class ObservedActiveRow:
 
 
 @dataclass(frozen=True)
+class ObservedInsertionPosition:
+    """Original capacity/position observation, not reservation or send authority."""
+    sheet_id: int
+    sheet_title: str
+    activity_key: tuple = field(repr=False)
+    row_index: int
+    row_count: int
+    last_data_row_index: object
+    nv_id: object = field(repr=False)
+    cells: tuple = field(repr=False)
+    discovery_sha256: str
+    occupancy_sha256: str
+    row_sha256: object
+
+
+@dataclass(frozen=True)
 class ObservedSheetsGrid:
     sheet_id: int
     sheet_title: str
@@ -387,6 +403,98 @@ def observe_active_row(discovery_plan, discovery_response, row_plan, row_respons
             if position == index and observed.get((position, column)) != value: raise SheetsDecodeHold()
         result = ObservedActiveRow(discovery.sheet_id, title, activity_key, index, identifier,
             row.cells, discovery.source_sha256, row.source_sha256)
+    except OnlineActivityConflict: conflict = True
+    except Exception: failed = True
+    if conflict: raise OnlineActivityConflict()
+    if failed: raise SheetsDecodeHold()
+    return result
+
+
+def _insertion_sheet_image(plan, response, *, sheet_id, title, target):
+    from monitor.issue_tracker_sheets_read_plan import PreparedSheetsRead, _HISTORY_TAIL_FIELDS, _INSERT_COLUMNS
+    if (type(plan) is not PreparedSheetsRead or plan.host != 'sheets.googleapis.com'
+            or type(plan.path) is not str or len(plan.path) > 16384 or plan.method != 'GET'
+            or type(plan.body) is not bytes or plan.body != b''
+            or type(plan.budget_seconds) is not float or plan.budget_seconds != 30.0):
+        raise SheetsDecodeHold()
+    query = [('includeGridData', 'true'), ('fields', _HISTORY_TAIL_FIELDS),
+             *(('ranges', "'%s'!%s3:%s5002" % (title, letter, letter)) for letter in _INSERT_COLUMNS[title])]
+    if plan.path != '/v4/spreadsheets/' + target + '?' + urlencode(query): raise SheetsDecodeHold()
+    sheets, digest = _template_document(response, target)
+    if len(sheets) != 1: raise SheetsDecodeHold()
+    sheet = sheets[0]
+    if type(sheet) is not dict or set(sheet) != {'properties', 'data'}: raise SheetsDecodeHold()
+    props = sheet['properties']
+    if (type(props) is not dict or set(props) != {'sheetId', 'title', 'sheetType', 'gridProperties'}
+            or _template_property({key: props[key] for key in ('sheetId', 'title')}) != (title, sheet_id)
+            or type(props['sheetType']) is not str or props['sheetType'] != 'GRID'):
+        raise SheetsDecodeHold()
+    capacity = props['gridProperties']
+    if (type(capacity) is not dict or set(capacity) != {'rowCount', 'columnCount'}
+            or type(capacity['rowCount']) is not int or not 3 <= capacity['rowCount'] <= 5002
+            or type(capacity['columnCount']) is not int
+            or not (21 if title == 'ETH&IB Switch' else 29) <= capacity['columnCount'] <= 2147483647):
+        raise SheetsDecodeHold()
+    geometry = {(2, _column(letter)): (capacity['rowCount'] - 1, _column(letter)) for letter in _INSERT_COLUMNS[title]}
+    return _decode_grid_cells(sheet['data'], geometry), capacity['rowCount'], digest
+
+
+def observe_insertion_position(discovery_plan, discovery_response, occupancy_plan, occupancy_response, *,
+                               sheet_id, activity_key, reserved_row_indexes, append_rows,
+                               row_plan=None, row_response=None):
+    """Derive a necessary insertion position from ALL original typed occupation.
+
+    Full key discovery must prove no active match (Closed rows are not reused).
+    ALL common cells/capacity must agree across the two original read images.
+    Switch selects the first original blank F/B/C/J..U row outside the supplied
+    known reservations, then rechecks every occupancy column and original
+    preset ID/lookup formulas in its exact row. Cabling appends after EVERY
+    occupied column, including formula/explicit empty/0/False and operator
+    content, refusing insufficient original capacity. No arbitrary coordinate,
+    ID allocation, durable reservation authentication, CAS, live freshness or
+    send permission. A controlled original reservation journal remains needed.
+    """
+    failed = conflict = False
+    try:
+        discovery, original, target = _activity_sheet_image(discovery_plan, discovery_response,
+            sheet_id=sheet_id, activity_key=activity_key)
+        if discovery.active_rows: raise SheetsDecodeHold()
+        cells, capacity, digest = _insertion_sheet_image(occupancy_plan, occupancy_response,
+            sheet_id=sheet_id, title=discovery.sheet_title, target=target)
+        if (capacity != discovery.row_count or type(append_rows) is not int or not 1 <= append_rows <= 1000
+                or type(reserved_row_indexes) is not tuple
+                or any(type(index) is not int or not 2 <= index < capacity for index in reserved_row_indexes)
+                or len(set(reserved_row_indexes)) != len(reserved_row_indexes)):
+            raise SheetsDecodeHold()
+        observed = {(index, letter): value for index, letter, value in cells}
+        if any(observed.get((index, letter)) != value for index, letter, value in original): raise SheetsDecodeHold()
+        title = discovery.sheet_title; row_digest = identifier = last = None
+        if title == 'ETH&IB Switch':
+            if append_rows != 1 or row_plan is None or row_response is None: raise SheetsDecodeHold()
+            occupied_columns = ('B', 'C', 'F', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U')
+            reserved = set(reserved_row_indexes)
+            index = next((index for index in range(2, capacity) if index not in reserved
+                          and all(observed[(index, letter)] == () for letter in occupied_columns)), None)
+            if index is None: raise SheetsDecodeHold()
+            row_target, row_title, geometry = _geometry(row_plan)
+            if (row_target != target or row_title != title or geometry != {(index, 0): (index, 20)}): raise SheetsDecodeHold()
+            exact = decode_sheets_read(row_plan, row_response)
+            if exact.sheet_id != sheet_id: raise SheetsDecodeHold()
+            values = {letter: value for _position, letter, value in exact.cells}
+            if any(values[letter] != value for position, letter, value in cells if position == index): raise SheetsDecodeHold()
+            identifier = 'NV%05d' % (10001 + index - 2)
+            if (values['A'] != (('stringValue', identifier),)
+                    or any(len(values[letter]) != 1 or values[letter][0][0] != 'formulaValue' for letter in ('D', 'E', 'G', 'H'))
+                    or (index == 2 and (len(values['I']) != 1 or values['I'][0][0] != 'formulaValue'))
+                    or (index != 2 and values['I'] != ())): raise SheetsDecodeHold()
+            cells, row_digest = exact.cells, exact.source_sha256
+        else:
+            if reserved_row_indexes or row_plan is not None or row_response is not None: raise SheetsDecodeHold()
+            last = max((index for index, _letter, value in cells if value), default=1)
+            if last + append_rows >= capacity: raise SheetsDecodeHold()
+            index = last + 1
+        result = ObservedInsertionPosition(sheet_id, title, activity_key, index, capacity, last,
+            identifier, cells, discovery.source_sha256, digest, row_digest)
     except OnlineActivityConflict: conflict = True
     except Exception: failed = True
     if conflict: raise OnlineActivityConflict()

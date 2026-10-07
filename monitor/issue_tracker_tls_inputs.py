@@ -284,6 +284,20 @@ class NativeActivitySheetReadUnit:
         return _native_complete_read(self._prepared)
 
 
+class NativeInsertionSheetReadUnit:
+    """One fixed occupancy GET; no insertion, ID or reservation authority."""
+    def __init__(self, binding, token, *, sheet):
+        from monitor.issue_tracker_sheets_read_plan import prepare_insertion_sheet_read
+        self._prepared = prepare_insertion_sheet_read(binding, token, sheet=sheet)
+        self._called = False; self._lock = threading.Lock()
+
+    def send_once(self):
+        with self._lock:
+            used = self._called; self._called = True
+        if used: raise TlsInputHold()
+        return _native_complete_read(self._prepared)
+
+
 class NativeHistoryReadUnit:
     """One bounded five-column GET, uninstalled and without COMPLETE authority."""
     def __init__(self, binding, token, *, first_row, last_row):

@@ -941,6 +941,17 @@ before-image 直接派生，combined preread 摘要绑定原始读路径与原�
 durable 业务原像 journal、nonce／模板权威、新鲜准入、固定 launcher、COMPLETE，
 也不代表 REQ7 整体完成；真机卡保持 NOT RUN。
 
+`prepare_insertion_sheet_read` 与 `observe_insertion_position` 补充插入位置的必要
+观察：完整发现无活动键，原始容量及全部共有列在两次读之间一致；Switch 固定读
+A/B/C/F/J..U，选择首个 F/B/C/J..U 真正无 userEnteredValue 且不在已知预留集合的
+行，然后读取该精确 A:U 行，核原预置 NV10001..NV15000、D/E/G/H 公式及 I 第三行
+公式／以后空白。Cabling 固定逐列读取 A..AC，操作员列也参与最后占用行；公式、
+显式空字符串、数字 0、布尔 False 均占用，间隙不复用，全部追加行须在原始容量内。
+原生只读 TLS → 完整键／占用列／Switch 精确行 → literal updateCells 或 Cabling
+appendCells 的多脚本 workflow 不发 mutation，不改 lookup／参考／操作员列。
+已知预留集合不是原始 journal 权威，观察的容量／坐标不是 CAS 或新鲜发送许可；
+仍缺持久原像／预留与真实来源组批、发送和 COMPLETE 集成，不代表 REQ7 整体完成。
+
 `test_cases.test_req7_nv_reservation` 将两张 Cabling 固定完整容量读取、原始 enrollment、
 实际 spreadsheet owner 和 C17 共享分配器串联，Closed／无关行 ID 参与最高值，
 下一 ID 严格高于两表；没有种子、跨表重复或编号耗尽时拒绝且不创建图像。
