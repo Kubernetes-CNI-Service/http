@@ -31,7 +31,7 @@ class IbPerKeySourceWorkflowTests(unittest.TestCase):
     setUp = ProdCycleFixture.setUp
     _cycle = ProdCycleFixture._cycle
 
-    def _protected_cycle(self):
+    def _protected_cycle(self, *, changed_input=False):
         from monitor.collection_ib_producer import (
             IbProducerAuthoritySnapshot, parse_ib_producer_authority,
             produce_worker_ib_analysis,
@@ -125,7 +125,9 @@ class IbPerKeySourceWorkflowTests(unittest.TestCase):
                        side_effect=retrieved),
         )
         for patcher in patchers:
-            patcher.start()
+            started = patcher.start()
+            if patcher is patchers[2]:
+                trusted_authority = started
             self.addCleanup(patcher.stop)
         binding = produce_worker_ib_analysis(
             identity, project_root=project, http_root=self.root,
@@ -134,6 +136,46 @@ class IbPerKeySourceWorkflowTests(unittest.TestCase):
             runner=lambda _argv: self.fail("transport is supplied by fixture"),
         )
         self._cycle(ib_analysis=binding)
+        if changed_input:
+            # Independently change the selected workbook and regenerate the
+            # real CVT/provenance. Do not edit completed roles or patch readers.
+            with xlsxwriter.Workbook(str(selected)) as book:
+                sheet = book.add_worksheet("CL links")
+                for col, item in enumerate(("Name", "Port", "Name", "Port")):
+                    sheet.write(0, col, item)
+                for col, item in enumerate(("leaf01", "sw1p1", "other-server", "mlx5_0")):
+                    sheet.write(1, col, item)
+            converted = subprocess.run(
+                [sys.executable, "-B", str(converter), "--output", str(cvt),
+                 "--inventory", str(setup / "01-inventory.log"),
+                 "--port-map", str(setup / "02-port-mapping.log"),
+                 "--splitter", str(setup / "03-splitter.log")],
+                cwd=setup, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1",
+                                "XLSX_TO_CSV_BASE_DIR": str(setup)},
+                capture_output=True, text=True, timeout=60, check=False,
+            )
+            self.assertEqual(0, converted.returncode, converted.stdout + converted.stderr)
+            record.update({
+                "p2p_sha256": hashlib.sha256(selected.read_bytes()).hexdigest(),
+                "cvt_sha256": hashlib.sha256(cvt.read_bytes()).hexdigest(),
+                "cvt_provenance_sha256": hashlib.sha256(
+                    Path(f"{cvt}.provenance.json").read_bytes()).hexdigest(),
+            })
+            # Only the pre-existing external root authority seam is synthetic;
+            # both archives, analyses, attestations and completions are real.
+            trusted_authority.return_value = IbProducerAuthoritySnapshot(
+                parse_ib_producer_authority(
+                    record, project_key=identity["project_key"], project_root=project),
+                "b" * 64, (1, 2, 3),
+            )
+            from test_cases.test_collection_ib_cycle_binding_workflow import TOKEN_2
+            second = build_collection_cycle_identity(str(project), "prod", 2, TOKEN_2)
+            newer = produce_worker_ib_analysis(
+                second, project_root=project, http_root=self.root,
+                clock=lambda: dt.datetime(2026, 9, 26, 4, 21, tzinfo=dt.timezone.utc),
+                runner=lambda _argv: self.fail("transport is supplied by fixture"),
+            )
+            self._cycle(ib_analysis=newer)
         publication = project / "99-output-monitor"
         publication.mkdir()
         initialize_tracker_state(
@@ -141,6 +183,40 @@ class IbPerKeySourceWorkflowTests(unittest.TestCase):
             acquisition_id="req7-ib-per-key-fixture",
         )
         return project, publication, protected / f"{identity['cycle_id']}.json", identity
+
+    def test_real_ib_input_change_is_actionable_status_hold_not_missing_report(self):
+        from monitor.issue_tracker_publish_runtime import inspect_stage_l
+        from test_cases.test_issue_tracker_local_workbook import fake_workbook
+
+        project, publication, _attestation, _identity = self._protected_cycle(changed_input=True)
+        from monitor import issue_tracker_ib_runtime as runtime
+        changed = getattr(runtime, "IbRuntimeInputChanged", None)
+        self.assertIsNotNone(changed, "active CVT change must remain a typed refusal")
+        # The old expected_cvt role points to the now-replaced active CVT:
+        # it must stay refused, never be treated as a qualified old report.
+        with self.assertRaises(changed):
+            runtime.read_completed_ib_cycle_report(self.store, http_root=self.root, sequence=1)
+        read_completed_ib_cycle_report = runtime.read_completed_ib_cycle_report
+        second = read_completed_ib_cycle_report(self.store, http_root=self.root, sequence=2)
+        self.assertEqual(2, second.sequence)
+        self.assertEqual("other-server", second.rows[0].expected_endpoints[2])
+        template = publication / "local.xlsx"
+        template.write_bytes(fake_workbook())
+        before = template.read_bytes()
+        status = inspect_stage_l(self.store, http_root=self.root, project=project,
+                                 publication=publication, template_path=template)
+        panel = status["panels"]["IB Link Validation"]
+        self.assertEqual("hold", panel["state"])
+        self.assertEqual("source_authority_changed", panel["reason"])
+        self.assertEqual("unknown — source authority changed; confirm input change",
+                         panel["progress_text"])
+        self.assertEqual([], panel["per_key"])
+        self.assertEqual("hold", status["state"])
+        self.assertEqual(0, status["cycle_summary"]["published"])
+        self.assertFalse(status["cycle_summary"]["pending_count_complete"])
+        self.assertEqual("disabled_no_send_authority", status["online"])
+        self.assertEqual(before, template.read_bytes())
+        self.assertFalse(any((project / ".tracker/generations").glob("*/RECEIPT")))
 
     def test_real_nine_role_cycle_pending_then_attestation_drift_holds(self):
         project, publication, attestation, identity = self._protected_cycle()

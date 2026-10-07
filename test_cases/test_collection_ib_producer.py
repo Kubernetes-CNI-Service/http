@@ -58,6 +58,33 @@ def _record() -> dict:
 
 
 class IbProducerAuthorityDirectTests(unittest.TestCase):
+    def test_replayed_cvt_input_change_is_distinct_from_invalid_provenance(self):
+        from monitor import collection_ib_producer as producer
+        from tools.project_contract import build_collection_cycle_identity
+        changed = getattr(producer, "IbProducerInputChanged", None)
+        self.assertIsNotNone(changed, "changed active CVT needs an explicit HOLD type")
+        with tempfile.TemporaryDirectory(prefix="ib-active-input-change-") as directory:
+            root = Path(os.path.realpath(directory))
+            _record_value, selected, cvt = self._local_cvt_fixture(root)
+            identity = build_collection_cycle_identity(
+                str(selected.parent), "prod", 1, "12345678123442348123456789abcdef")
+            run_id = derive_ib_cycle_run_id(
+                identity, when=dt.datetime(2026, 9, 26, 4, 20, tzinfo=dt.timezone.utc))
+            relative = (f"DAY0-Prepare/fabric-a/99-output-ufm/runs/{run_id}/"
+                        f"EXAMPLE-UFM01/iblinkinfo_{run_id}.tar.gz")
+            binding = {"run_id": run_id, "node": "EXAMPLE-UFM01",
+                       "authority_sha256": "b" * 64,
+                       "expected_topology_sha256": "0" * 64,
+                       "roles": [{"role": role, "relative_path": relative,
+                                  "sha256": "a" * 64, "size_bytes": 1}
+                                 for role in producer.IB_ROLE_NAMES]}
+            with self.assertRaises(changed):
+                producer.validate_ib_role_binding(identity, binding, http_root=root)
+            sidecar_path(cvt).write_bytes(b"{}\n")
+            with self.assertRaises(IbProducerHold) as raised:
+                producer.validate_ib_role_binding(identity, binding, http_root=root)
+            self.assertNotIsInstance(raised.exception, changed)
+
     def test_protected_attestation_is_exact_no_overwrite_private_data(self) -> None:
         from monitor import collection_ib_producer as producer
 

@@ -31,6 +31,10 @@ class IbPerKeySourceHold(ValueError):
     """Protected IB source cannot support even local per-key progress."""
 
 
+class IbSourceAuthorityChanged(IbPerKeySourceHold):
+    """Validated completed sources disagree on expected input authority."""
+
+
 @dataclass(frozen=True)
 class IbPerKeySourceStatus:
     state: str
@@ -69,6 +73,7 @@ def reduce_ib_per_key_reports(cycles, reports, settings, key):
         report_hashes = set()
         expected_by_key = {}
         observed = {}
+        authority_changed = False
         for cycle, report in zip(cycles, reports):
             if (type(cycle) is not CycleEvidence or cycle.qualifying is not True
                     or type(report) is not IbBoundCycleReport
@@ -87,7 +92,7 @@ def reduce_ib_per_key_reports(cycles, reports, settings, key):
             # A lexical timestamp alone cannot establish a valid producer time.
             datetime.strptime(report.recorded_at_utc, "%Y-%m-%dT%H:%M:00Z")
             if topology is not None and report.expected_topology_sha256 != topology:
-                raise IbPerKeySourceHold("IB expected topology changed within K")
+                authority_changed = True
             topology = report.expected_topology_sha256
             report_hashes.add(report.report_sha256)
             # The established IB reducer validates literal row shape, issue
@@ -99,10 +104,15 @@ def reduce_ib_per_key_reports(cycles, reports, settings, key):
                 previous = expected_by_key.get(row_key)
                 if (previous is not None
                         and previous != row.expected_endpoints):
-                    raise IbPerKeySourceHold("IB expected peer changed within topology")
+                    authority_changed = True
                 expected_by_key[row_key] = row.expected_endpoints
                 keys.add(row_key)
             observed[cycle.cycle_id] = frozenset(keys)
+        # Validate every report first: malformed/rebound evidence must not be
+        # promoted to a verified input-change diagnosis merely because some
+        # other report also changed its expected topology or endpoint.
+        if authority_changed:
+            raise IbSourceAuthorityChanged("IB expected input changed within K")
         window = assess_per_key_window(cycles, observed, settings, key)
         return IbPerKeySourceStatus(
             state=("source_window_complete" if window.status == "qualified"

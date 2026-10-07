@@ -22,6 +22,10 @@ class IbRuntimeHoldError(ValueError):
     """The local IB report is absent, malformed, stale, or unbound."""
 
 
+class IbRuntimeInputChanged(IbRuntimeHoldError):
+    """An active input changed; the completed report remains refused."""
+
+
 @dataclass(frozen=True)
 class IbLocalReportWitness:
     report_path: str
@@ -280,8 +284,9 @@ def read_completed_ib_cycle_report(
     both sides of the read. A local report witness alone is never sufficient.
     """
     from monitor.collection_ib_cycle_binding import (
-        IbCycleRoleSource, inspect_completed_ib_cycle_roles,
+        IbCycleRoleHold, IbCycleRoleSource, inspect_completed_ib_cycle_roles,
     )
+    from monitor.collection_ib_producer import IbProducerInputChanged
     from monitor.issue_tracker_switch_runtime import _read_bound, _safe_child
 
     try:
@@ -328,6 +333,9 @@ def read_completed_ib_cycle_report(
     except (OSError, TypeError, AttributeError, RuntimeError, ValueError) as exc:
         if isinstance(exc, IbRuntimeHoldError):
             raise
+        if (isinstance(exc, IbCycleRoleHold)
+                and isinstance(exc.__cause__, IbProducerInputChanged)):
+            raise IbRuntimeInputChanged("IB active input changed; report refused") from exc
         raise IbRuntimeHoldError("IB completed report source is unsafe") from exc
 
 

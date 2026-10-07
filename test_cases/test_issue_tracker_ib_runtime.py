@@ -24,6 +24,24 @@ from ztp.config.ib_topology_provenance import (
 
 
 class IbRuntimeDirectTests(unittest.TestCase):
+    def test_completed_reader_preserves_only_typed_active_input_change(self):
+        from monitor import issue_tracker_ib_runtime as runtime
+        from monitor import collection_ib_producer as producer
+        from monitor.collection_ib_cycle_binding import IbCycleRoleHold
+        changed = getattr(runtime, "IbRuntimeInputChanged", None)
+        producer_changed = getattr(producer, "IbProducerInputChanged", None)
+        self.assertIsNotNone(changed)
+        self.assertIsNotNone(producer_changed)
+        for cause, expected in ((producer_changed("changed input"), changed),
+                                (producer.IbProducerHold("unsafe bytes"), IbRuntimeHoldError)):
+            wrapped = IbCycleRoleHold("unsafe completed role")
+            wrapped.__cause__ = cause
+            with mock.patch("monitor.collection_ib_cycle_binding.inspect_completed_ib_cycle_roles",
+                            side_effect=wrapped), self.assertRaises(expected) as raised:
+                read_completed_ib_cycle_report(object(), http_root=self.root, sequence=1)
+            if expected is IbRuntimeHoldError:
+                self.assertNotIsInstance(raised.exception, changed)
+
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory(prefix="req7-ib-report-")
         self.addCleanup(temporary.cleanup)

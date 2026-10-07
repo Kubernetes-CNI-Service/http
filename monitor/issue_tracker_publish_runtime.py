@@ -206,10 +206,10 @@ def _qualified_panel_status(panel, k):
 def _stage_l_per_key_panels(store, root, settings, cycles, token):
     """Local diagnostics only; every key comes from reopened protected roles."""
     from monitor.issue_tracker_ib_per_key_source import (
-        IbPerKeySourceHold, _row_key, read_prod_ib_per_key_source,
+        IbPerKeySourceHold, IbSourceAuthorityChanged, _row_key, read_prod_ib_per_key_source,
     )
     from monitor.issue_tracker_ib_runtime import (
-        IbRuntimeHoldError, read_completed_ib_cycle_report,
+        IbRuntimeHoldError, IbRuntimeInputChanged, read_completed_ib_cycle_report,
     )
     from monitor.issue_tracker_per_key_source import (
         EthSourceAuthorityChanged, PerKeySourceHold, _key_for_link,
@@ -315,6 +315,11 @@ def _stage_l_per_key_panels(store, root, settings, cycles, token):
                 writer_token=token,
             ),
         ))
+    except (IbSourceAuthorityChanged, IbRuntimeInputChanged):
+        panels["IB Link Validation"] = {
+            **held("source_authority_changed"),
+            "progress_text": "unknown — source authority changed; confirm input change",
+        }
     except (IbRuntimeHoldError, IbPerKeySourceHold, StageLHold):
         panels["IB Link Validation"] = held(
             "ib_report_not_bound_to_completed_cycle")

@@ -48,6 +48,13 @@ class IbProducerHold(ValueError):
     """A protected, exact project-bound IB producer authority is unavailable."""
 
 
+class IbProducerInputChanged(IbProducerHold):
+    """Valid active CVT provenance no longer matches a completed binding.
+
+    This remains a refusal, not a valid historical report or write authority.
+    """
+
+
 _AUTHORITY_DIR = Path("/var/lib/http-ztp-container/ib-producer-authority")
 _ATTESTATION_DIR = Path("/var/lib/http-ztp-container/ib-producer-attestations")
 _HEX = re.compile(r"[0-9a-f]{64}\Z")
@@ -595,10 +602,11 @@ def validate_ib_role_binding(
         p2p = cvt_record["sources"]["p2p"]
         if (p2p["path"] != str(fixed)
                 or p2p["resolved_path"] != str(selected)
-                or cvt_record["cvt_sha256"] != binding["expected_topology_sha256"]
                 or _link_identity(fixed) != outer
                 or _link_identity(project / "p2p.xlsx") != inner):
             raise IbProducerHold("IB replay CVT source differs from active selection")
+        if cvt_record["cvt_sha256"] != binding["expected_topology_sha256"]:
+            raise IbProducerInputChanged("IB active CVT differs from completed input")
         report_record = read_report_provenance(expected_paths[3])
         if (report_record["actual"]["resolved_path"] != str(expected_paths[1])
                 or report_record["cvt"]["resolved_path"] != str(cvt)

@@ -1852,6 +1852,7 @@
       "id": "issue_tracker_ib_per_key_from_protected_collection",
       "members": [
         "monitor/issue_tracker_ib_per_key_source.py",
+        "monitor/issue_tracker_publish_runtime.py",
         "monitor/issue_tracker_ib_runtime.py",
         "monitor/collection_ib_producer.py",
         "monitor/collection_ib_cycle_binding.py",

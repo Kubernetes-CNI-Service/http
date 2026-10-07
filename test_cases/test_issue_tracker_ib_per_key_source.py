@@ -49,6 +49,34 @@ def fixture():
 
 
 class IbPerKeySourceTests(unittest.TestCase):
+    def test_validated_input_change_has_distinct_actionable_hold(self):
+        SOURCE = source(self)
+        changed = getattr(SOURCE, "IbSourceAuthorityChanged", None)
+        self.assertIsNotNone(changed, "IB input changes must not look like missing evidence")
+        for newer in (
+            replace(self.reports[1], expected_topology_sha256="0" * 64),
+            replace(self.reports[1], rows=(replace(ROW_A, expected_endpoints=(
+                "leaf01", "sw1p1", "other-server", "mlx5_0")), ROW_B)),
+        ):
+            with self.subTest(newer=newer), self.assertRaises(changed):
+                SOURCE.reduce_ib_per_key_reports(
+                    self.cycles, (self.reports[0], newer), self.settings, KEY_A)
+
+    def test_invalid_or_rebound_changed_input_is_not_a_verified_authority_change(self):
+        SOURCE = source(self)
+        changed = getattr(SOURCE, "IbSourceAuthorityChanged", None)
+        self.assertIsNotNone(changed, "verified change classification is missing")
+        for newer in (
+            replace(self.reports[1], expected_topology_sha256="0" * 64,
+                    cycle_id="3" * 64),
+            replace(self.reports[1], expected_topology_sha256="0" * 64,
+                    rows=(ROW_A, ROW_A)),
+        ):
+            with self.subTest(newer=newer), self.assertRaises(SOURCE.IbPerKeySourceHold) as raised:
+                SOURCE.reduce_ib_per_key_reports(
+                    self.cycles, (self.reports[0], newer), self.settings, KEY_A)
+            self.assertNotIsInstance(raised.exception, changed)
+
     def setUp(self):
         self.settings = KChainState(1, 3, "9" * 64)
         self.cycles, self.reports = fixture()
