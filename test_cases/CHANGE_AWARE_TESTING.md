@@ -2,6 +2,40 @@
 
 ## 2026-10-07 R22 发布组 WAL 与停服冷续提交候选
 
+后续基于已提交 `79e21930a3b3ac6d9c4d0d579250107203f7cc79`，增加
+`--resume-setup-publication` Linux/stopped-only 显式入口、Q 共享发布组及 flat runtime
+原身份冻结。Q manifest、共享/Q-local latest、实体备份/target、comparison、created
+与 infra receipt/hardlink，以及 bootstrap/JSON、完整公钥集合、受管 prefix 均纳入
+首发布写前 WAL；深读前后重新核对。缺少 Q intent 的旧 WAL 明确保存
+`shared_setup: null`，不能据此取得完整 Q/B 资格。
+
+独立反例分别暴露同字节新 Q manifest、同目标新 link、深读后的晚 manifest 换绑及
+bootstrap 改写原来会被忽略：`r22-publication-shared-setup-red.log`（1 FAIL/1 ERROR，
+后者为缺少新增字段）、`r22-publication-shared-late-red.log`（1 FAIL）、
+`r22-publication-shared-flat-red.log`（1 FAIL），实际 exit1、冻结一致，原日志保留。
+对应 SHA256 分别为 `b7d9d2dddaab0fcece68f29debbdfd9cd36071e5bb005644a0ab27810586f719`、
+`cc1ebf700508c570ea5b28fa506fdd57de312f7cfc580ff2c0a8f868005b7278`、
+`0a0faf982afe65506c14f56c022f1cc49fdbb310b9c12b16c2d9a727160ab656`（均在既有诊断目录）。
+
+真实工作流首轮四处失败定位为：WAL 含已经消费且不在最终 manifest 的 Q-only
+临时链接，不能要求其仍存在。原日志 `r22-publication-shared-real-workflow.log`，
+SHA256 `ab5ad4a6f4ef7429fd52bc7730e078904a43203b8e2348d829db0e0b922c2091`。
+修正为冻结已消费 stage 的缺席义务，最终 manifest 必需名仍须存在、指向原 Q。
+随后四处真实 workflow OK/exit0，完整日志
+`r22-publication-shared-real-workflow-consumed-stage.log`，inode158712540/size127962，
+SHA256 `901d8d3ab7f59809b3e1c61bfb7b101293017dac95a99bd2c733a4040f65fd0e`。
+
+最后本地 549 项回归 548 PASS/1 FAIL，唯一失败为旧测试独立字面字段集尚未增加
+`shared_setup`；原断言没有删除，更新为明确五字段并独立要求旧 WAL 的该值为 null。
+原失败日志 `r22-publication-shared-cli-final-regression.log`，inode158749297/size298364，
+SHA256 `2d36d3fc3e8a8c15f5118b020ec3bd417464432672921fb01a1e622fce5ced08`。
+修订合同后，shared direct、真实强杀/新 CLI/晚换绑 workflows 与文档 catalog 共
+34 tests OK/exit0，43.242s；`r22-publication-shared-contract-workflow-repair.log`，
+inode158789316/size134306，SHA256
+`9f56001374f293b441e766e93e33dcaaafe71858ccc4cae4ee838a76704b8c05`。
+读前后 stat 一致、物理 Ran/OK/实际 exit/冻结一致/END 顺序完整。它不是全量 proof；
+批准 ledger 未手改，B health/退休与原 A 显式激活仍须继续实现。
+
 基于 TEST `4e138aa5492372bdc804d2594ae65286a5089bad` 的本地候选，为
 parent/report/generation/selector 统一登记首写前持久义务，原 DHCP receipt 与扩展
 WAL 的 FD 同时保持；main 登记失败不提前消费 report、不自动恢复 P/A、不删候选。

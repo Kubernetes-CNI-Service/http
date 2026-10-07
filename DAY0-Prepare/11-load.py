@@ -6609,7 +6609,14 @@ def _validate_setup_publication_bundle_shape(bundle):
         if len(payload) > _ROLLBACK_PAYLOAD_LIMIT or hashlib.sha256(payload).hexdigest() != value["sha256"]:
             raise ValueError("publication payload digest/bound differs; HOLD")
 
-    fields(bundle, {"parent", "report", "generation", "selector"})
+    if not isinstance(bundle, dict) or set(bundle) not in (
+            {"parent", "report", "generation", "selector"},
+            {"parent", "report", "generation", "selector", "shared_setup"}):
+        raise ValueError("unknown or missing publication bundle fields; HOLD")
+    if bundle.get("shared_setup") is not None:
+        fields(bundle["shared_setup"], {"manifest", "links", "q_local", "directories",
+                                       "comparison", "created", "infra", "flat_runtime"})
+        file_record(bundle["shared_setup"]["manifest"])
     for key in ("parent", "report"):
         row = bundle[key]
         fields(row, {"destination", "temporary", "parent", "candidate", "before"})
@@ -6634,7 +6641,7 @@ def _validate_setup_publication_bundle_shape(bundle):
             raise ValueError("invalid publication selector identity; HOLD")
 
 
-def _setup_publication_file(path, *, missing_ok=False):
+def _setup_publication_file(path, *, missing_ok=False, executable_ok=False):
     """Freeze one bounded no-follow file without adopting a read-time owner."""
     descriptor = -1
     try:
@@ -6648,7 +6655,7 @@ def _setup_publication_file(path, *, missing_ok=False):
         descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
                              | getattr(os, "O_NONBLOCK", 0))
         opened = _read_rollback_regular(path, limit=_ROLLBACK_PAYLOAD_LIMIT)
-        if (opened is None or opened[1] not in (0o600, 0o644)
+        if (opened is None or opened[1] not in ((0o600, 0o644, 0o755) if executable_ok else (0o600, 0o644))
                 or not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
                 or identity != _dhcp_a_preimage_receipt_identity(os.fstat(descriptor))
                 or identity != _dhcp_a_preimage_receipt_identity(path.lstat())):
@@ -6676,10 +6683,129 @@ def _setup_publication_selector(path):
     return {"identity": list(_dhcp_a_preimage_receipt_identity(before)), "target": target}
 
 
+def _setup_switch_shared_publication_snapshot(body):
+    """Freeze only an exact installed Q write set, never a known P/Q mixture.
+
+    This is a stopped disk contract, not service health or permission to retire
+    A evidence. Legacy WALs without Q intent cannot acquire this qualification.
+    """
+    try:
+        intent = body["q_manifest_intent"]
+        manifest = _setup_publication_file(MANIFEST)
+        payload = base64.b64decode(intent["bytes"], validate=True)
+        if (intent["parent"] != _setup_switch_link_parent_identity(MANIFEST)
+                or manifest["payload"] != intent["bytes"] or manifest["mode"] != intent["mode"]
+                or manifest["sha256"] != intent["sha256"]):
+            raise LoadError("publication shared manifest is not original installed Q; HOLD")
+        published_names = _setup_switch_q_manifest_paths(body, payload)
+        q = Path(body["new_project"]["path"])
+        def link(path, target):
+            parent = _setup_switch_link_parent_identity(path)
+            if target is None:
+                if os.path.lexists(path):
+                    raise LoadError("publication shared Q-only absence is occupied; HOLD")
+                return None
+            before = path.lstat()
+            if (not stat.S_ISLNK(before.st_mode) or before.st_nlink != 1
+                    or os.readlink(path) != target):
+                raise LoadError("publication shared pointer is not exact Q; HOLD")
+            identity = list(_dhcp_a_preimage_receipt_identity(before))
+            if (identity != list(_dhcp_a_preimage_receipt_identity(path.lstat()))
+                    or parent != _setup_switch_link_parent_identity(path)):
+                raise LoadError("publication shared pointer changed during inspection; HOLD")
+            return dict(parent=parent, identity=identity, target=target)
+        links = {}
+        for row in body["links"]:
+            path = Path(row["path"])
+            if row["parent"] != _setup_switch_link_parent_identity(path):
+                raise LoadError("publication shared pointer parent differs; HOLD")
+            # SETUP registers private link stages before their creation too.
+            # A consumed Q-only stage is absent and is not a final manifest
+            # name. Required published names must still select exact Q.
+            consumed_stage = (path not in published_names and row["before"] is None
+                              and not os.path.lexists(path))
+            links[str(path)] = link(path, None if consumed_stage else row["after"])
+        q_local = {}
+        for path, row in _setup_switch_q_local_link_states(body):
+            q_local[str(path)] = dict(link=link(path, row["after"]),
+                tree=_setup_switch_comparison_tree(path.parent / row["after"]))
+        comparison = {}
+        for source, destination, phase, row in _setup_switch_comparison_transfer_states(body):
+            if phase != "linked":
+                raise LoadError("publication comparison transfer is not installed Q; HOLD")
+            comparison[str(source)] = dict(link=link(source, os.path.relpath(destination, source.parent)),
+                tree=_setup_switch_comparison_tree(destination))
+        directories = {}
+        for row in body.get("directories", []):
+            source, backup, target = (Path(row[key]) for key in ("path", "backup", "target"))
+            if (row["parent"] != _setup_switch_link_parent_identity(source)
+                    or _setup_switch_directory_identity(backup) != {
+                        "path": str(backup), "dev": row["source_dev"], "ino": row["source_ino"]}
+                    or _setup_switch_directory_identity(target) != {
+                        "path": str(target), "dev": row["target_dev"], "ino": row["target_ino"]}):
+                raise LoadError("publication materialized latest backup/target differs; HOLD")
+            directories[str(source)] = dict(link=link(source, os.path.relpath(target, source.parent)),
+                backup=_setup_switch_comparison_tree(backup), target=_setup_switch_comparison_tree(target))
+        created = {}
+        for path, staged, present, row in _setup_switch_created_directory_states(body):
+            if present != path:
+                raise LoadError("publication created directory is not installed Q; HOLD")
+            created[str(path)] = _setup_switch_directory_identity(path)
+        infra = {}
+        for row in body.get("infra_logs", []):
+            state = _setup_switch_prepare_infra_log_recovery(row, q)
+            if not state[6] or not state[7]:
+                raise LoadError("publication infra logs have incomplete migration evidence; HOLD")
+            infra[row["source"]] = dict(link=link(state[0], os.path.relpath(state[2], state[0].parent)),
+                receipt=_setup_publication_file(state[3]), owners=state[9])
+        flat_files = {}
+        for name in _ROLLBACK_RUNTIME_FILES:
+            path = ZTP_DIR / name
+            flat_files[name] = dict(parent=_setup_switch_link_parent_identity(path),
+                file=_setup_publication_file(path, missing_ok=True, executable_ok=True))
+        key_directory = ZTP_DIR / "config/publickey"
+        if not key_directory.is_dir() or key_directory.is_symlink():
+            raise LoadError("publication flat public key parent is not canonical; HOLD")
+        key_parent = _setup_switch_directory_identity(key_directory)
+        names = sorted(path.name for path in key_directory.glob("*.pub"))
+        if not names or len(names) > 4096:
+            raise LoadError("publication flat public key inventory is empty or oversized; HOLD")
+        keys = {}
+        for name in names:
+            path = key_directory / name
+            before = list(_dhcp_a_preimage_receipt_identity(path.lstat()))
+            record, _payload = _read_runtime_publickey(path, q)
+            if (record["state"] == "missing"
+                    or before != list(_dhcp_a_preimage_receipt_identity(path.lstat()))):
+                raise LoadError("publication flat public key owner changed during inspection; HOLD")
+            keys[name] = dict(identity=before, record=record)
+        if (names != sorted(path.name for path in key_directory.glob("*.pub"))
+                or key_parent != _setup_switch_directory_identity(key_directory)):
+            raise LoadError("publication flat public key inventory changed during inspection; HOLD")
+        prefix_path = _managed_ztp_prefix_path()
+        prefix = dict(marker=_setup_publication_file(ZTP_PREFIX_MARKER, missing_ok=True),
+            parent=_setup_switch_link_parent_identity(ZTP_PREFIX_MARKER),
+            path=str(prefix_path) if prefix_path is not None else None,
+            link=link(prefix_path, os.readlink(prefix_path)) if prefix_path is not None else None)
+        flat_runtime = dict(files=flat_files, publickey_parent=key_parent, publickeys=keys, prefix=prefix)
+        if _setup_publication_file(MANIFEST) != manifest:
+            raise LoadError("publication shared manifest changed during inspection; HOLD")
+        result = dict(manifest=manifest, links=links, q_local=q_local, directories=directories,
+                      comparison=comparison, created=created, infra=infra, flat_runtime=flat_runtime)
+        # Normalize tuples from the existing held-owner inspectors before the
+        # first persistence, so cold JSON and same-invocation checks agree.
+        return json.loads(_setup_switch_canonical_payload(result))
+    except (OSError, KeyError, TypeError, ValueError, RuntimeError) as exc:
+        raise LoadError(f"publication shared Q write set is unknown; HOLD: {exc}") from exc
+
+
 def _require_setup_publication_state(body, *, phase="parent"):
     """Authorize only the next declared write, not service start or retirement."""
     bundle = body["publication_bundle"]
     _validate_setup_publication_bundle_shape(bundle)
+    if (bundle.get("shared_setup") is not None
+            and _setup_switch_shared_publication_snapshot(body) != bundle["shared_setup"]):
+        raise LoadError("publication original shared Q owners or bytes changed; HOLD")
     project = Path(body["new_project"]["path"])
     output = project / "99-output-ztp"
     if phase not in {"parent", "report", "selector", "published"}:
@@ -6732,6 +6858,9 @@ def _require_setup_publication_state(body, *, phase="parent"):
     elif (_setup_publication_selector(path) != selector["before"]
           or _setup_publication_selector(temporary) != {"identity": staged["identity"], "target": staged["target"]}):
         raise LoadError("publication staged selector/preimage changed; HOLD")
+    if (bundle.get("shared_setup") is not None
+            and _setup_switch_shared_publication_snapshot(body) != bundle["shared_setup"]):
+        raise LoadError("publication shared Q authority changed during deep inspection; HOLD")
 
 
 def require_setup_switch_publication_bundle(token, *, guard, phase="parent"):
@@ -6934,6 +7063,8 @@ def register_setup_switch_publication_bundle(parent_candidate, report_candidate,
             selector={"path": str(selector), "parent": _setup_switch_link_parent_identity(selector),
                       "before": _setup_publication_selector(selector), "after": "generations/" + generation.name,
                       "staged": dict(selector_owner, path=str(selector_stage))})
+        body["publication_bundle"]["shared_setup"] = (
+            _setup_switch_shared_publication_snapshot(body) if "q_manifest_intent" in body else None)
 
         def require_original():
             _require_runtime_restore_guard(**guard)
@@ -15076,6 +15207,11 @@ def _build_parser() -> argparse.ArgumentParser:
               "必须预先停服，不生成配置、不启停服务、不处理已提交 B 或未结清 DHCP 事务"),
     )
     parser.add_argument(
+        "--resume-setup-publication", action="store_true",
+        help=("显式续提交原 WAL 已可见 B 的 report/selector；仅 Linux management-server，"
+              "必须预先停服，不生成、不启停服务、不恢复 A、不退休 WAL"),
+    )
+    parser.add_argument(
         "--host-role", choices=("workstation", "management-server"),
         help="Linux 必须显式声明本机角色；Darwin 默认为 workstation",
     )
@@ -15210,7 +15346,11 @@ def _recover_setup_switch_entrypoint(args: argparse.Namespace) -> int:
     the operator's project is only an additional exact Q identity constraint.
     """
     descriptor = None
+    publication_token = None
+    resume_publication = bool(getattr(args, "resume_setup_publication", False))
     try:
+        if resume_publication and getattr(args, "recover_setup_switch", False):
+            raise LoadError("SETUP recovery and publication resume are distinct operations; HOLD")
         host_os = runtime_os()
         if (host_os.casefold() != "linux"
                 or resolve_host_role(getattr(args, "host_role", None), host_os) != "management-server"):
@@ -15236,6 +15376,16 @@ def _recover_setup_switch_entrypoint(args: argparse.Namespace) -> int:
         _require_runtime_restore_guard(deployment_lock_descriptor=descriptor,
                                        services_quiesced=True, runtime_backend=backend)
         _require_no_pending_setup_manifest_stage()
+        if resume_publication:
+            guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True,
+                         runtime_backend=backend)
+            publication_token = open_setup_switch_publication_bundle(project, guard=guard)
+            result = resume_setup_switch_publication_bundle(publication_token, guard=guard)
+            if result != "published-stopped-wal-retained":
+                raise LoadError("publication continuation lacks exact stopped postverification; HOLD")
+            ok("原 B report/selector 冷续提交完成；服务仍停止，未重新生成、未恢复 A")
+            info("原 WAL/事务保留；完整 B 健康验收与独立退休尚未完成，不放行普通 LOAD")
+            return 0
         result = recover_setup_switch_journal(
             _setup_switch_journal_path(), deployment_lock_descriptor=descriptor,
             services_quiesced=True, runtime_backend=backend,
@@ -15250,6 +15400,7 @@ def _recover_setup_switch_entrypoint(args: argparse.Namespace) -> int:
         print(f"[HOLD] 显式 SETUP 恢复未完成；保留剩余凭据，不启停服务：{exc}", file=sys.stderr)
         return 1
     finally:
+        close_setup_switch_publication_bundle(publication_token)
         if descriptor is not None:
             release_deployment_lock(descriptor)
 
@@ -15260,7 +15411,8 @@ def main(
 ) -> int:
     requested_argv = list(sys.argv[1:] if argv is None else argv)
     args = parse_args(argv)
-    if getattr(args, "recover_setup_switch", False):
+    if (getattr(args, "recover_setup_switch", False)
+            or getattr(args, "resume_setup_publication", False)):
         return _recover_setup_switch_entrypoint(args)
     import_selector = getattr(args, "import_configs", None)
     import_output_timestamp = (

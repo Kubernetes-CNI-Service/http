@@ -4762,7 +4762,15 @@ finally:
     def test_real_setup_publication_cold_resume_after_selector_writer_death(self):
         self._real_setup_publication_writer_death("selector")
 
-    def _real_setup_publication_writer_death(self, death_phase):
+    def test_real_setup_publication_cold_cli_resumes_without_regeneration(self):
+        self._real_setup_publication_writer_death("parent", resume_cli=True)
+
+    def test_real_setup_publication_cold_reader_holds_foreign_q_manifest_and_flat_runtime(self):
+        for fault in ("manifest-owner", "flat-runtime"):
+            with self.subTest(fault=fault):
+                self._real_setup_publication_writer_death("parent", late_fault=fault)
+
+    def _real_setup_publication_writer_death(self, death_phase, *, resume_cli=False, late_fault=None):
         with tempfile.TemporaryDirectory(prefix="r22-publication-wal-") as name:
             fixture = self._private_setup_switch_fixture(Path(name))
             root, _p, q, _common, _p_only, _q_only, manifest, _before, *_rest = fixture
@@ -4834,6 +4842,16 @@ os.kill(os.getpid(), signal.SIGKILL)
             self.assertEqual(parent_bytes, parent_path.read_bytes())
             self.assertEqual(q_manifest, manifest.read_bytes())
             self.assertFalse((root / "service-started").exists())
+            if late_fault == "manifest-owner":
+                held = manifest.with_name("independent-held-shared-manifest")
+                manifest.rename(held)
+                manifest.write_bytes(q_manifest)
+                manifest.chmod(0o644)
+                self.assertNotEqual(held.lstat().st_ino, manifest.lstat().st_ino)
+            elif late_fault == "flat-runtime":
+                runtime = root / "ztp/ztp-bootstrap_oob.sh"
+                runtime.write_bytes(b"independent unregistered bootstrap\n")
+                runtime.chmod(0o755)
             resume = r'''
 import json, sys
 from pathlib import Path
@@ -4846,6 +4864,15 @@ api.active_managed_services = lambda *args, **kwargs: ()
 def forbidden(*args, **kwargs):
     raise AssertionError('cold publication attempted generation or a service mutation')
 api.start_services = api.quiesce_services = api.generate_configs = forbidden
+if sys.argv[4] == 'cli':
+    api.runtime_os = lambda: 'Linux'
+    api.service_runtime_backend = lambda: SimpleNamespace(name='supervisor')
+    api.parse_args = lambda argv: api._build_parser().parse_args(argv)
+    status = api.main([str(q), '--host-role', 'management-server', '--resume-setup-publication'])
+    assert status == 0, 'explicit cold resume CLI did not complete'
+    print('R22_RESUME='+json.dumps(dict(before='report', after='published',
+                                     result='published-stopped-wal-retained')))
+    sys.exit(0)
 descriptor = api.acquire_deployment_lock(exclusive=True)
 token = None
 try:
@@ -4860,8 +4887,23 @@ finally:
     api.release_deployment_lock(descriptor)
 '''
             recovered = subprocess.run([sys.executable, "-B", "-c", resume,
-                                        str(root), str(q), str(ROOT)], cwd=root,
+                                        str(root), str(q), str(ROOT), "cli" if resume_cli else "api"], cwd=root,
                                        capture_output=True, text=True, check=False, timeout=30)
+            if late_fault is not None:
+                self.assertEqual(1, recovered.returncode, recovered.stdout + recovered.stderr)
+                self.assertIn("HOLD", recovered.stderr)
+                self.assertEqual(wal, journal.read_bytes())
+                self.assertEqual(parent_bytes, parent_path.read_bytes())
+                self.assertEqual(q_manifest, manifest.read_bytes())
+                self.assertTrue(Path(binding["report"]["temporary"]).is_file())
+                self.assertFalse(Path(binding["report"]["destination"]).exists())
+                self.assertFalse((q / "99-output-ztp/current").exists())
+                self.assertFalse((root / "service-started").exists())
+                if late_fault == "flat-runtime":
+                    self.assertEqual(b"independent unregistered bootstrap\n", runtime.read_bytes())
+                else:
+                    self.assertEqual(q_manifest, held.read_bytes())
+                return
             self.assertEqual(0, recovered.returncode, recovered.stdout + recovered.stderr)
             payload = json.loads(next(line.split("=", 1)[1] for line in recovered.stdout.splitlines()
                                       if line.startswith("R22_RESUME=")))

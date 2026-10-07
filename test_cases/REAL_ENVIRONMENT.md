@@ -1651,6 +1651,20 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   不代表完整共享写集验收、B health finalizer、旧 A 显式安全激活、Linux/root/
   断电或 DEV ACK 已闭；这些仍 OPEN，局部 PASS 不等于正式 full/check。
 
+- Q 完整共享发布前像补充：有 Q manifest intent 的发布 WAL 冻结原 manifest
+  full stat/字节、所有共享名及 Q-local latest、实体 latest 原备份/目标树、comparison
+  transfer、created-directory、infra/logs receipt 与 hardlink copy owner，以及三份 flat
+  bootstrap/JSON、完整 `.pub` 集合与受管 prefix。最终 manifest 的必需名不能缺失；
+  WAL 中不在最终 manifest、原本缺席且已经消费的 Q-only stage 仅作为缺席义务。
+  深层 generation 读取前后重核共享组，拒绝同字节新 manifest inode、同目标新链接、
+  late bootstrap/新增公钥。显式 `--resume-setup-publication` 只接受 Linux management
+  host、原 Q 与已停服环境；生成、启动、导入、scope override 或与 A 恢复混用均拒绝。
+  真机前置与清理沿用本卡：隔离环境、精确版本、排他锁、正常写者静默与确切
+  root-only 可恢复快照；新增证据为各共享树/receipt/flat 集合身份、SIGKILL→新 CLI
+  和各晚换绑负例物理顺序、保留对象盘点及完整 END/exit。失败保持停服，人工核验
+  后按确切快照恢复，不删除未知文件。风险仍包括跨 rename 非原子、断电持久化及
+  非合作写者 check/write 竞态；此磁盘前像冻结本身不是 B 内容健康验收或 A 激活。
+
 - generation report 暂存前像与清理补充：direct 覆盖 prepare 完成后的同 inode
   改写、同字节写回并恢复 mtime，以及 held 输出目录打开后的晚改写，commit/discard
   均须拒绝；真实私有 SETUP→LOAD→report prepare→commit 拒绝→finally discard

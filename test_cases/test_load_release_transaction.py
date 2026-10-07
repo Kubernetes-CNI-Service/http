@@ -960,6 +960,169 @@ def private_publication_candidates(api, project):
 
 
 class ReleaseTransactionTests(unittest.TestCase):
+    def _prepare_q_manifest_publication(self):
+        state, context = self._prepare_persisted_a_runtime_switch()
+        journal, descriptor, backend = state[-3:]
+        guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True, runtime_backend=backend)
+        state[2].unlink()
+        state[2].symlink_to(os.path.relpath(state[5], state[2].parent))
+        state[3].unlink()
+        manifest = ("# setup manifest — proj: " + str(state[1].resolve()) + "\n"
+                    + str(state[2]) + "\n").encode()
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.register_setup_switch_manifest(journal, manifest, _publish_manifest=True, **guard)
+        return state, context, guard
+
+    def test_publication_wal_freezes_original_q_manifest_and_shared_link_owners(self):
+        state, _context, guard = self._prepare_q_manifest_publication()
+        candidates = private_publication_candidates(LOAD, state[1])
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            token = LOAD.register_setup_switch_publication_bundle(*candidates, guard=guard)
+            self.addCleanup(LOAD.close_setup_switch_publication_bundle, token)
+            shared = json.loads(token["payload"])["body"]["publication_bundle"]["shared_setup"]
+            self.assertEqual(state[7].lstat().st_ino, shared["manifest"]["identity"][1])
+            self.assertEqual(state[2].lstat().st_ino, shared["links"][str(state[2])]["identity"][1])
+            self.assertEqual(os.readlink(state[2]), shared["links"][str(state[2])]["target"])
+            self.assertIsNone(shared["links"][str(state[3])])
+            original = state[7].read_bytes()
+            held = state[7].with_name("independent-held-q-manifest")
+            state[7].rename(held)
+            state[7].write_bytes(original)
+            state[7].chmod(0o644)
+            with self.assertRaisesRegex(LOAD.LoadError, "HOLD"):
+                LOAD.require_setup_switch_publication_bundle(token, guard=guard)
+            self.assertEqual(original, state[7].read_bytes())
+            self.assertTrue(candidates[0].temporary.is_file())
+            self.assertFalse(candidates[0].destination.exists())
+
+    def test_publication_guard_holds_same_target_foreign_q_link(self):
+        state, _context, guard = self._prepare_q_manifest_publication()
+        candidates = private_publication_candidates(LOAD, state[1])
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            token = LOAD.register_setup_switch_publication_bundle(*candidates, guard=guard)
+            self.addCleanup(LOAD.close_setup_switch_publication_bundle, token)
+            link = state[2]
+            target = os.readlink(link)
+            held = link.with_name("independent-held-q-link")
+            link.rename(held)
+            link.symlink_to(target)
+            with self.assertRaisesRegex(LOAD.LoadError, "HOLD"):
+                LOAD.require_setup_switch_publication_bundle(token, guard=guard)
+            self.assertEqual(target, os.readlink(link))
+            self.assertTrue(held.is_symlink())
+            self.assertTrue(candidates[0].temporary.is_file())
+            self.assertFalse(candidates[0].destination.exists())
+
+    def test_publication_guard_rechecks_q_manifest_after_generation_inspection(self):
+        state, _context, guard = self._prepare_q_manifest_publication()
+        candidates = private_publication_candidates(LOAD, state[1])
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            token = LOAD.register_setup_switch_publication_bundle(*candidates, guard=guard)
+            self.addCleanup(LOAD.close_setup_switch_publication_bundle, token)
+            tree = LOAD._setup_switch_comparison_tree
+            original = state[7].read_bytes()
+            changed = []
+            held = state[7].with_name("independent-held-late-q-manifest")
+            def replace_after_tree(path):
+                result = tree(path)
+                if not changed:
+                    state[7].rename(held)
+                    state[7].write_bytes(original)
+                    state[7].chmod(0o644)
+                    changed.append(state[7].stat().st_ino)
+                return result
+            with mock.patch.object(LOAD, "_setup_switch_comparison_tree", side_effect=replace_after_tree):
+                with self.assertRaisesRegex(LOAD.LoadError, "HOLD"):
+                    LOAD.require_setup_switch_publication_bundle(token, guard=guard)
+            self.assertEqual(original, state[7].read_bytes())
+            self.assertEqual(changed[0], state[7].stat().st_ino)
+            self.assertTrue(candidates[0].temporary.is_file())
+            self.assertFalse(candidates[0].destination.exists())
+
+    def test_publication_guard_holds_flat_bootstrap_after_shared_wal_registration(self):
+        state, _context, guard = self._prepare_q_manifest_publication()
+        candidates = private_publication_candidates(LOAD, state[1])
+        flat = self.ztp / "ztp-bootstrap_oob.sh"
+        flat.write_bytes(b"independent Q bootstrap prior to registration\n")
+        flat.chmod(0o755)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            token = LOAD.register_setup_switch_publication_bundle(*candidates, guard=guard)
+            self.addCleanup(LOAD.close_setup_switch_publication_bundle, token)
+            flat.write_bytes(b"independent foreign bootstrap after registration\n")
+            with self.assertRaisesRegex(LOAD.LoadError, "HOLD"):
+                LOAD.require_setup_switch_publication_bundle(token, guard=guard)
+            self.assertEqual(b"independent foreign bootstrap after registration\n", flat.read_bytes())
+            self.assertTrue(candidates[0].temporary.is_file())
+            self.assertFalse(candidates[0].destination.exists())
+
+    def test_publication_guard_rejects_added_public_key_after_wal_registration(self):
+        state, _context, guard = self._prepare_q_manifest_publication()
+        candidates = private_publication_candidates(LOAD, state[1])
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            token = LOAD.register_setup_switch_publication_bundle(*candidates, guard=guard)
+            self.addCleanup(LOAD.close_setup_switch_publication_bundle, token)
+            added = self.ztp / "config/publickey/independent-late.pub"
+            added.write_bytes(b"independent unknown published key\n")
+            owner = added.lstat().st_ino
+            with self.assertRaisesRegex(LOAD.LoadError, "HOLD"):
+                LOAD.require_setup_switch_publication_bundle(token, guard=guard)
+            self.assertEqual(owner, added.lstat().st_ino)
+            self.assertEqual(b"independent unknown published key\n", added.read_bytes())
+            self.assertTrue(candidates[0].temporary.is_file())
+            self.assertFalse(candidates[0].destination.exists())
+
+    def test_publication_resume_has_distinct_stopped_only_cli(self):
+        self.assertIn("--resume-setup-publication", LOAD._build_parser()._option_string_actions)
+
+    def test_publication_resume_cli_rejects_activation_generation_and_running_services(self):
+        for extra in (["--dry-run"], ["--start-services"], ["--import-configs"],
+                      ["--air"], ["--start-ztp-monitor"], ["--recover-setup-switch"], []):
+            with self.subTest(extra=extra), ExitStack() as stack, \
+                    redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                args = LOAD._build_parser().parse_args([str(self.project), "--host-role",
+                    "management-server", "--resume-setup-publication", *extra])
+                stack.enter_context(mock.patch.object(LOAD, "parse_args", return_value=args))
+                stack.enter_context(mock.patch.object(LOAD, "runtime_os", return_value="Linux"))
+                stack.enter_context(mock.patch.object(LOAD, "service_runtime_backend", return_value=mock.sentinel.backend))
+                stack.enter_context(mock.patch.object(LOAD, "resolve_project", return_value=self.project))
+                stack.enter_context(mock.patch.object(LOAD, "acquire_deployment_lock", return_value=37))
+                stack.enter_context(mock.patch.object(LOAD, "release_deployment_lock"))
+                stack.enter_context(mock.patch.object(LOAD, "_require_runtime_restore_guard",
+                    side_effect=LOAD.LoadError("managed service still running") if not extra else None))
+                opened = stack.enter_context(mock.patch.object(LOAD, "open_setup_switch_publication_bundle"))
+                resumed = stack.enter_context(mock.patch.object(LOAD, "resume_setup_switch_publication_bundle"))
+                self.assertEqual(1, LOAD.main([]))
+                opened.assert_not_called()
+                resumed.assert_not_called()
+
+    def test_publication_resume_cli_never_enters_ordinary_load_or_a_restore(self):
+        args = LOAD._build_parser().parse_args([str(self.project), "--host-role", "management-server"])
+        args.resume_setup_publication = True
+        with ExitStack() as stack, redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            stack.enter_context(mock.patch.object(LOAD, "parse_args", return_value=args))
+            stack.enter_context(mock.patch.object(LOAD, "runtime_os", return_value="Linux"))
+            stack.enter_context(mock.patch.object(LOAD, "service_runtime_backend", return_value=mock.sentinel.backend))
+            stack.enter_context(mock.patch.object(LOAD, "resolve_project", return_value=self.project))
+            stack.enter_context(mock.patch.object(LOAD, "acquire_deployment_lock", return_value=37))
+            release = stack.enter_context(mock.patch.object(LOAD, "release_deployment_lock"))
+            stack.enter_context(mock.patch.object(LOAD, "_require_runtime_restore_guard"))
+            stack.enter_context(mock.patch.object(LOAD, "_require_no_pending_setup_manifest_stage"))
+            opened = stack.enter_context(mock.patch.object(LOAD, "open_setup_switch_publication_bundle",
+                                                           return_value=mock.sentinel.token))
+            resumed = stack.enter_context(mock.patch.object(LOAD, "resume_setup_switch_publication_bundle",
+                return_value="published-stopped-wal-retained"))
+            closed = stack.enter_context(mock.patch.object(LOAD, "close_setup_switch_publication_bundle"))
+            forbidden = [stack.enter_context(mock.patch.object(LOAD, name)) for name in (
+                "initialize_from_template", "recover_setup_switch_journal", "generate_configs",
+                "start_services", "quiesce_services", "validate_inputs")]
+            self.assertEqual(0, LOAD.main([]))
+            opened.assert_called_once()
+            resumed.assert_called_once()
+            closed.assert_called_once_with(mock.sentinel.token)
+            release.assert_called_once_with(37)
+            for writer in forbidden:
+                writer.assert_not_called()
+
     def test_publication_cold_reader_rejects_foreign_original_candidates(self):
         state, _context = self._prepare_persisted_a_runtime_switch()
         journal, descriptor, backend = state[-3:]
@@ -1166,7 +1329,8 @@ class ReleaseTransactionTests(unittest.TestCase):
             self.addCleanup(LOAD.close_setup_switch_publication_bundle, token)
             body = json.loads(journal.read_bytes())["body"]
             binding = body["publication_bundle"]
-            self.assertEqual({"parent", "report", "generation", "selector"}, set(binding))
+            self.assertEqual({"parent", "report", "generation", "selector", "shared_setup"}, set(binding))
+            self.assertIsNone(binding["shared_setup"], "a legacy WAL without Q intent must not acquire Q qualification")
             for key, candidate in zip(("parent", "report"), candidates[:2]):
                 self.assertEqual(str(candidate.destination), binding[key]["destination"])
                 self.assertEqual(str(candidate.temporary), binding[key]["temporary"])
