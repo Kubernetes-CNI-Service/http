@@ -1538,6 +1538,39 @@ class ReleaseTransactionTests(unittest.TestCase):
                 LOAD.restore_setup_switch_q_publication(state[1], guard=guard, confirmed=True)
         self.assertEqual(frozen, (state[-3].read_bytes(), stage.lstat().st_ino, stage.read_bytes(), state[7].read_bytes()))
 
+    def test_committed_q_group_restore_rejects_same_target_restored_p_owner(self):
+        state, _context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(partial_runtime=True)
+        path = state[2]
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True)
+            held = path.with_name("independent-original-restored-P-link")
+            path.rename(held)
+            path.symlink_to(os.readlink(held))
+            self.assertNotEqual(path.lstat().st_ino, held.lstat().st_ino)
+            frozen = (state[-3].read_bytes(), state[7].lstat().st_ino, state[7].read_bytes(),
+                      path.lstat().st_ino, os.readlink(path))
+            with self.assertRaisesRegex(LOAD.LoadError, "setup.*owner.*HOLD"):
+                LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True)
+            self.assertEqual(frozen, (state[-3].read_bytes(), state[7].lstat().st_ino, state[7].read_bytes(),
+                                     path.lstat().st_ino, os.readlink(path)))
+
+    def test_committed_q_group_restore_rejects_same_byte_restored_p_manifest_owner(self):
+        state, _context, guard, _token, _inputs = self._prepare_published_q_for_stopped_preflight(partial_runtime=True)
+        path = state[7]
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True)
+            held = path.with_name("independent-original-restored-P-manifest")
+            metadata, payload = path.lstat(), path.read_bytes()
+            path.rename(held)
+            path.write_bytes(payload)
+            path.chmod(stat.S_IMODE(metadata.st_mode))
+            os.utime(path, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+            self.assertNotEqual(path.lstat().st_ino, held.lstat().st_ino)
+            frozen = (state[-3].read_bytes(), path.lstat().st_ino, path.read_bytes(), os.readlink(state[2]))
+            with self.assertRaisesRegex(LOAD.LoadError, "setup.*owner.*HOLD"):
+                LOAD.restore_setup_switch_a_disk(state[1], guard=guard, confirmed=True)
+            self.assertEqual(frozen, (state[-3].read_bytes(), path.lstat().st_ino, path.read_bytes(), os.readlink(state[2])))
+
     def test_original_no_upgrade_image_policy_does_not_require_a_version(self):
         # The original persisted no-upgrade policy is authoritative; resolving
         # an unused version must not reject a legitimate image-free B attempt.

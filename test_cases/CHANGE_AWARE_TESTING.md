@@ -1,5 +1,36 @@
 # 脚本变更影响测试
 
+## 2026-10-08 R22 共享 P 叶子持久 owner 候选
+
+基于 `80d5570`。两项独立反例确认恢复后同目标新 P 链接、同字节新 P manifest
+会被旧 group 冷重入接受：2 FAIL / 6.214s / exit1，原断言/日志保留。
+`r22-committed-q-group-p-owner-red.log` / inode161705851 / size129900 /
+SHA256 `07a49100dda21c7afdadb920024b5d5a43e4b289eb7f1573dee68f2aa9377e7b`。
+原补偿计划 schema-3 首个补偿写前冻结这些 P 暂存 inode 与原 Q checkpoint；
+冷重入仅接受原 checkpoint 或自己消耗的 stage，不用目标文字/字节收编第三方。
+实体目录迁移仍由原 WAL 的目录 owner 处理，不用叶子恢复覆盖实体。
+初候选日志 `r22-committed-q-group-p-owner-green.log`（错误复用 generation selector
+限定读取普通 P 链接）与 `r22-committed-q-group-p-owner-leaf-green.log`（macOS 别名
+造成自有 stage 被判未列入）均保留，不称 GREEN；修正通用链接稳定读取与物理父路径。
+
+两项 direct OK / 5.174s / exit0；15 项 direct 与真实 LOAD→SETUP→Q 提交→P 恢复
+强杀→新 LOAD 续接/同目标替换拒绝 OK / 82.962s / exit0。
+完整日志 `outputs/test-diagnostics/r22-committed-q-group-p-stage-workflow-regression.log`，
+inode161708659 / size137474 / SHA256
+`d86b1f8fb823a6db7774496cb5e11fea463c481acfb0b1fd373da94b63a1e5c8`；
+旧 67461-byte 前缀 SHA256 `e684cbdd1c7d80cdb1bc83d2666448342d307436d6af7b8283c0bf5618f57bd0`
+不变，前后 stat 一致，物理 Ran22→OK24→实际退出76→冻结一致77→END79=0。
+这是局部回归；原 A 镜像/激活/健康退休、其它共享面细化与正式 full/check 仍待。
+
+完整 LOAD/release、report direct/workflow 与原 B/Q/新增 group 多脚本模块回归：
+602 tests OK / 201.643s / exit0；日志
+`outputs/test-diagnostics/r22-committed-q-group-p-owner-full-module-regression.log`，
+inode161720204 / size333879 / SHA256
+`632c0ba25dbcc630b3a7d7152e1ebd2c17ff6ec4f84898f1cd7fd3e4a5cda4b9`。
+旧 90879-byte 前缀 SHA256 `11865a442687b5a5cecf1ad30b2dd5ad4f5077213f7e96030f71bd91858010e4`
+不变，前后 stat 一致；物理 Ran1731→OK1733→实际退出1750→冻结一致1751→END1753=0。
+这是有界模块回归，不更新自动 ledger，也不是干净精确树正式 full/check。
+
 ## 2026-10-08 R22 已提交 Q 的停服 P/A/DHCP 分组恢复候选
 
 基于 `4238a79`，未改原 WAL/bundle，也未开放旧 precommit 恢复闸门。原补偿计划

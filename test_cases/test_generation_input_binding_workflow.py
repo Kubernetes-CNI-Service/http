@@ -4973,7 +4973,14 @@ finally:
     def test_real_setup_committed_q_group_runtime_restore_death_reenters_original_stages(self):
         self._real_setup_committed_q_group_restore(dhcp=True, runtime_death=True)
 
-    def _real_setup_committed_q_group_restore(self, *, dhcp=False, runtime_death=False):
+    def test_real_setup_committed_q_group_p_restore_death_reenters_original_stages(self):
+        self._real_setup_committed_q_group_restore(setup_death=True)
+
+    def test_real_setup_committed_q_group_cold_rejects_foreign_p_owner(self):
+        self._real_setup_committed_q_group_restore(foreign_setup=True)
+
+    def _real_setup_committed_q_group_restore(self, *, dhcp=False, runtime_death=False,
+                                             setup_death=False, foreign_setup=False):
         fixture = RELEASE_FIXTURE.ReleaseTransactionTests()
         fixture.setUp()
         try:
@@ -5049,6 +5056,21 @@ try:
                 os.kill(os.getpid(), signal.SIGKILL)
             return original_sync(path)
         load._fsync_parent_directory = kill_after_original_a_runtime_replace
+    if sys.argv[5] == 'kill-setup':
+        original_sync = load._fsync_parent_directory
+        def kill_after_original_p_link_replace(path):
+            if common.is_symlink() and os.readlink(common) == sys.argv[7]:
+                os.kill(os.getpid(), signal.SIGKILL)
+            return original_sync(path)
+        load._fsync_parent_directory = kill_after_original_p_link_replace
+    if sys.argv[5] == 'foreign-setup':
+        try:
+            load.restore_setup_switch_a_disk(q, guard=guard, confirmed=True)
+        except load.LoadError as exc:
+            assert 'setup' in str(exc) and 'owner' in str(exc) and 'HOLD' in str(exc), str(exc)
+            print('R22_FOREIGN_P_OWNER_REJECTED')
+            sys.exit(0)
+        raise AssertionError('foreign same-target P owner must not be adopted')
     status = load.restore_setup_switch_a_disk(q, guard=guard, confirmed=True)
     assert status == 'restored-p-a-group-stopped-wal-retained', status
     assert (root / 'ztp/ztp-bootstrap_oob.sh').read_bytes() == b'A oob bootstrap\n'
@@ -5063,7 +5085,8 @@ finally:
 '''
             argv = [sys.executable, "-B", "-c", script, str(root), str(q), str(common), str(ROOT)]
             shape = "dhcp" if dhcp else "no-dhcp"
-            writer = subprocess.run(argv + ["writer", shape], capture_output=True, text=True, check=False, timeout=30)
+            original_p_target = context.setup_state.links[common]
+            writer = subprocess.run(argv + ["writer", shape, original_p_target], capture_output=True, text=True, check=False, timeout=30)
             self.assertEqual(-signal.SIGKILL, writer.returncode, writer.stdout + writer.stderr)
             original_wal = (journal.lstat().st_ino, journal.read_bytes())
             if dhcp:
@@ -5071,11 +5094,14 @@ finally:
                 original_receipt = (transaction.lstat().st_ino,
                                     (transaction / "a-preimage.json").lstat().st_ino,
                                     (transaction / "a-preimage.json").read_bytes())
-            if runtime_death:
-                dying = subprocess.run(argv + ["kill-runtime", shape], capture_output=True, text=True,
+            if runtime_death or setup_death:
+                dying = subprocess.run(argv + ["kill-runtime" if runtime_death else "kill-setup", shape, original_p_target], capture_output=True, text=True,
                                        check=False, timeout=30)
                 self.assertEqual(-signal.SIGKILL, dying.returncode, dying.stdout + dying.stderr)
-                self.assertEqual(b"A oob bootstrap\n", (root / "ztp/ztp-bootstrap_oob.sh").read_bytes())
+                if runtime_death:
+                    self.assertEqual(b"A oob bootstrap\n", (root / "ztp/ztp-bootstrap_oob.sh").read_bytes())
+                else:
+                    self.assertEqual(original_p_target, os.readlink(common))
                 marker = journal.parent / ".setup-switch-a-restore.json"
                 before_reader_plan = (marker.lstat().st_ino, marker.read_bytes())
             reader = subprocess.run(argv + ["reader", shape], capture_output=True, text=True, check=False, timeout=30)
@@ -5085,7 +5111,7 @@ finally:
             self.assertEqual(context.setup_state.links, {path: os.readlink(path) for path in context.setup_state.links})
             marker = journal.parent / ".setup-switch-a-restore.json"
             original_plan = (marker.lstat().st_ino, marker.read_bytes())
-            if runtime_death:
+            if runtime_death or setup_death:
                 self.assertEqual(before_reader_plan, original_plan)
             reader2 = subprocess.run(argv + ["reader", shape], capture_output=True, text=True, check=False, timeout=30)
             self.assertEqual(0, reader2.returncode, reader2.stdout + reader2.stderr)
@@ -5096,6 +5122,19 @@ finally:
                     (transaction / "a-preimage.json").lstat().st_ino, (transaction / "a-preimage.json").read_bytes()))
                 self.assertTrue((transaction / "backup/dhcpd.conf").is_file())
                 self.assertTrue((transaction / "staged/dhcpd.conf").is_file())
+            if foreign_setup:
+                held = common.with_name("independent-original-cold-P-link")
+                common.rename(held)
+                common.symlink_to(original_p_target)
+                self.assertNotEqual(held.lstat().st_ino, common.lstat().st_ino)
+                foreign = (common.lstat().st_ino, os.readlink(common), state[7].lstat().st_ino, state[7].read_bytes())
+                rejecting = subprocess.run(argv + ["foreign-setup", shape], capture_output=True, text=True,
+                                           check=False, timeout=30)
+                self.assertEqual(0, rejecting.returncode, rejecting.stdout + rejecting.stderr)
+                self.assertIn("R22_FOREIGN_P_OWNER_REJECTED", rejecting.stdout)
+                self.assertEqual(foreign, (common.lstat().st_ino, os.readlink(common), state[7].lstat().st_ino, state[7].read_bytes()))
+                self.assertEqual(original_wal, (journal.lstat().st_ino, journal.read_bytes()))
+                self.assertEqual(original_plan, (marker.lstat().st_ino, marker.read_bytes()))
         finally:
             fixture.doCleanups()
             fixture.tearDown()

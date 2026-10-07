@@ -7150,18 +7150,52 @@ def _setup_switch_compensation_leaf(path):
     if not os.path.lexists(path):
         return None
     if Path(path).is_symlink():
-        return _setup_publication_selector(Path(path))
+        before = Path(path).lstat()
+        target = os.readlink(path)
+        identity = list(_dhcp_a_preimage_receipt_identity(before))
+        if (not stat.S_ISLNK(before.st_mode) or before.st_nlink != 1
+                or identity != list(_dhcp_a_preimage_receipt_identity(Path(path).lstat()))
+                or target != os.readlink(path)):
+            raise LoadError("A compensation leaf link owner changed during read; HOLD")
+        return dict(identity=identity, target=target)
     return _setup_publication_file(Path(path), executable_ok=True)
 
 
+def _setup_switch_compensation_setup_records(body):
+    """Independent P preimages and original registered Q checkpoints only."""
+    shared = body["publication_bundle"]["shared_setup"]
+    excluded = {row["source"] for row in body.get("comparison_transfers", [])}
+    excluded.update(row["path"] for row in body.get("directories", []))
+    records = {}
+    for row in body["links"]:
+        if row["path"] in excluded:
+            continue  # These real directory transfers retain their own WAL owners.
+        path = Path(row["path"])
+        checkpoint = shared["links"][row["path"]]
+        if checkpoint is not None:
+            checkpoint = {key: checkpoint[key] for key in ("identity", "target")}
+        before = ({"state": "missing"} if row["before"] is None
+                  else {"state": "link", "target": row["before"]})
+        records[str(path)] = dict(before=before, checkpoint=checkpoint, parent=row["parent"])
+    records[str(MANIFEST)] = dict(before={"state": "file", "mode": body["manifest_mode"],
+        "sha256": body["manifest_sha256"], "payload": body["manifest"]},
+        checkpoint=shared["manifest"], parent=body["q_manifest_intent"]["parent"])
+    return records
+
+
 def _require_setup_switch_a_stage_inventory(plan, parents):
+    parents = {path.resolve(strict=True) if os.path.lexists(path) else path for path in parents}
     paths = [Path(row["stage"]["path"]) for row in plan["rows"].values() if row["stage"] is not None]
     paths += [Path(row["stage"]["path"]) for row in plan["runtime"].values() if row["stage"] is not None]
+    paths += [Path(row["stage"]["path"]) for row in plan["setup"].values() if row["stage"] is not None]
+    paths = [path.parent.resolve(strict=True) / path.name for path in paths]
     allowed = set(paths)
     if (any(not path.is_absolute() or path.parent not in parents for path in paths)
             or any(Path(name).parent not in parents for name in plan["runtime"])):
         raise LoadError("A compensation stage inventory escaped original parent set; HOLD")
     for parent in parents:
+        if not os.path.lexists(parent):
+            continue  # setup_states separately proves original created-parent absence.
         fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             owner = _dhcp_a_preimage_receipt_identity(os.fstat(fd))
@@ -7169,7 +7203,7 @@ def _require_setup_switch_a_stage_inventory(plan, parents):
                 for count, entry in enumerate(entries, 1):
                     if count > 4096:
                         raise LoadError("A compensation stage inventory exceeds bound; HOLD")
-                    if entry.name.startswith((".r22-a-restore-", ".r22-a-runtime-")) and parent / entry.name not in allowed:
+                    if entry.name.startswith((".r22-a-restore-", ".r22-a-runtime-", ".r22-a-setup-")) and parent / entry.name not in allowed:
                         raise LoadError("unplanned A compensation stage retained; HOLD")
             if (owner != _dhcp_a_preimage_receipt_identity(os.fstat(fd))
                     or owner != _dhcp_a_preimage_receipt_identity(parent.lstat())):
@@ -7210,6 +7244,7 @@ def restore_setup_switch_a_disk(project, *, guard, confirmed=False):
             recover_dhcp_group=True, _a_compensation=token)
         token["require"]()
         token["require_runtime_restored"]()
+        token["require_setup_restored"]()
         if result not in {"restored-p", "restored-p-a-dhcp-retained"}:
             raise LoadError("A group restoration did not verify complete stopped state; HOLD")
         return "restored-p-a-group-stopped-wal-retained"
@@ -7265,9 +7300,9 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
                 phase = original["phase"]
                 if phase == "parent":
                     raise LoadError("Q compensation requires original committed B parent; HOLD")
-                plan = dict(schema_version=2, journal=str(journal), parent=parent,
+                plan = dict(schema_version=3, journal=str(journal), parent=parent,
                     identity=list(wal_before), sha256=hashlib.sha256(opened[0]).hexdigest(),
-                    phase=phase, rows={}, runtime={})
+                    phase=phase, rows={}, runtime={}, setup={})
                 for key in ("parent", "report", "selector"):
                     row = bundle[key]
                     destination = Path(row["path"] if key == "selector" else row["destination"])
@@ -7339,6 +7374,33 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
                     for directory in {path.parent for path in records}:
                         _fsync_parent_directory(directory)
                 _fsync_parent_directory(Path(bundle["selector"]["path"]).parent)
+                setup_records = _setup_switch_compensation_setup_records(body)
+                for directory in {Path(name).parent for name in setup_records}:
+                    _require_no_pending_setup_stage(directory / ".a-plan-probe", ".r22-a-setup-", "A setup")
+                for name, original_row in setup_records.items():
+                    destination, record = Path(name), original_row["before"]
+                    stage = None
+                    if record["state"] != "missing":
+                        path = destination.parent / (".r22-a-setup-" + uuid.uuid4().hex)
+                        if record["state"] == "link":
+                            path.symlink_to(record["target"])
+                            owner = list(_dhcp_a_preimage_receipt_identity(path.lstat()))
+                        else:
+                            data = base64.b64decode(record["payload"], validate=True)
+                            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                            with os.fdopen(fd, "wb") as stream:
+                                os.fchmod(stream.fileno(), record["mode"])
+                                stream.write(data)
+                                stream.flush()
+                                owner = list(_dhcp_a_preimage_receipt_identity(os.fstat(stream.fileno())))
+                                os.fsync(stream.fileno())
+                                if owner != list(_dhcp_a_preimage_receipt_identity(os.fstat(stream.fileno()))):
+                                    raise LoadError("A setup stage owner changed at sync; HOLD")
+                        stage = dict(path=str(path), file=_setup_switch_compensation_leaf(path))
+                        if stage["file"]["identity"] != owner:
+                            raise LoadError("A setup stage original owner changed; HOLD")
+                        _fsync_parent_directory(path.parent)
+                    plan["setup"][name] = dict(original_row, stage=stage)
                 require_setup_switch_publication_bundle(original, guard=guard, phase=phase)
                 marker_fd = os.open(marker, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
                 # These six fields do not change when our payload is written.
@@ -7370,8 +7432,8 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
                     result[key] = value
                 return result
             plan = json.loads(payload, object_pairs_hook=unique)
-        if (set(plan) != {"schema_version", "journal", "parent", "identity", "sha256", "phase", "rows", "owner", "runtime"}
-                or type(plan["schema_version"]) is not int or plan["schema_version"] != 2
+        if (set(plan) != {"schema_version", "journal", "parent", "identity", "sha256", "phase", "rows", "owner", "runtime", "setup"}
+                or type(plan["schema_version"]) is not int or plan["schema_version"] != 3
                 or plan["journal"] != str(journal) or plan["parent"] != parent
                 or plan["identity"] != list(wal_before)
                 or plan["sha256"] != hashlib.sha256(opened[0]).hexdigest()
@@ -7391,7 +7453,8 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
                 raise LoadError("A compensation original plan owner changed; HOLD")
             _require_setup_switch_a_stage_inventory(plan, {
                 Path(bundle["selector"]["path"]).parent,
-                ZTP_DIR.resolve(strict=True), (ZTP_DIR / "config/publickey").resolve(strict=True)})
+                ZTP_DIR.resolve(strict=True), (ZTP_DIR / "config/publickey").resolve(strict=True),
+                *(Path(name).parent for name in _setup_switch_compensation_setup_records(body))})
         def same_owner(actual, expected, *, renamed=False):
             if actual is None or expected is None:
                 return actual is expected
@@ -7457,6 +7520,52 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
                     raise LoadError("A compensation runtime destination/stage owner changed; HOLD")
             marker_authority()
             return result
+        def setup_states():
+            marker_authority()
+            originals = _setup_switch_compensation_setup_records(body)
+            if not isinstance(plan["setup"], dict) or set(plan["setup"]) != set(originals):
+                raise LoadError("A compensation setup inventory differs from original WAL; HOLD")
+            result = {}
+            for name, original_row in originals.items():
+                path, row = Path(name), plan["setup"][name]
+                if (not isinstance(row, dict) or set(row) != {"before", "checkpoint", "parent", "stage"}
+                        or any(row[key] != original_row[key] for key in original_row)):
+                    raise LoadError("A compensation setup row differs from original P/Q; HOLD")
+                if not os.path.lexists(path.parent):
+                    removed = [r for p, _s, present, r in _setup_switch_created_directory_states(body)
+                               if p == path.parent and present is None]
+                    if len(removed) != 1 or row["before"] != {"state": "missing"} or row["stage"] is not None:
+                        raise LoadError("A compensation setup parent absence is unknown; HOLD")
+                    result[path] = "after"
+                    continue
+                if row["parent"] != _setup_switch_link_parent_identity(path):
+                    raise LoadError("A compensation setup parent owner differs; HOLD")
+                before, stage = row["before"], row["stage"]
+                after, staged = None, None
+                if before["state"] == "missing":
+                    if stage is not None:
+                        raise LoadError("A setup original absence has a stage; HOLD")
+                else:
+                    if not isinstance(stage, dict) or set(stage) != {"path", "file"}:
+                        raise LoadError("A setup stage missing; HOLD")
+                    source, after = Path(stage["path"]), stage["file"]
+                    if (source.parent != path.parent or re.fullmatch(r"\.r22-a-setup-[0-9a-f]{32}", source.name) is None
+                            or not isinstance(after, dict) or not isinstance(after.get("identity"), list)
+                            or len(after["identity"]) != 9 or any(type(v) is not int or v < 0 for v in after["identity"])
+                            or before["state"] == "link" and (set(after) != {"identity", "target"} or after["target"] != before["target"])
+                            or before["state"] == "file" and (set(after) != {"identity", "payload", "sha256", "mode"}
+                                or any(after[key] != before[key] for key in ("payload", "sha256", "mode")))):
+                        raise LoadError("A setup stage does not contain original P; HOLD")
+                    staged = _setup_switch_compensation_leaf(source)
+                current = _setup_switch_compensation_leaf(path)
+                if same_owner(current, after, renamed=True) and staged is None:
+                    result[path] = "after"
+                elif same_owner(current, row["checkpoint"]) and (stage is None or same_owner(staged, after)):
+                    result[path] = "before"
+                else:
+                    raise LoadError("A compensation setup destination/stage owner changed; HOLD")
+            marker_authority()
+            return result
         def states():
             marker_authority()
             result = {}
@@ -7518,6 +7627,7 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
                             include_inputs="input_files" in shared) != shared:
                         raise LoadError("partial Q compensation shared owner differs; HOLD")
                 runtime_states()
+                setup_states()
                 phases = states()
                 row = bundle[key]
                 destination = Path(row["path"] if key == "selector" else row["destination"])
@@ -7533,6 +7643,21 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
             if set(states().values()) != {"after"}:
                 raise LoadError("A compensation final publication state differs; HOLD")
             runtime_states()
+            setup_states()
+        def restore_setup_leaf(path):
+            path = Path(path)
+            require_restored_publication()
+            row = plan["setup"].get(str(path))
+            if row is None:
+                raise LoadError("A setup restore is not the original planned leaf; HOLD")
+            if setup_states()[path] == "before":
+                if row["stage"] is None:
+                    if os.path.lexists(path):
+                        path.unlink()
+                else:
+                    os.replace(Path(row["stage"]["path"]), path)
+            _fsync_parent_directory(path.parent)
+            require_restored_publication()
         def restore_runtime_leaf(path, record, payload):
             path = Path(path).parent.resolve(strict=True) / Path(path).name
             require_restored_publication()
@@ -7550,9 +7675,13 @@ def _setup_switch_a_compensation_authority(project, *, guard, confirmed,
         def require_runtime_restored():
             if set(runtime_states().values()) != {"after"}:
                 raise LoadError("A compensation runtime completion is unconfirmed; HOLD")
+        def require_setup_restored():
+            if set(setup_states().values()) != {"after"}:
+                raise LoadError("A compensation setup completion is unconfirmed; HOLD")
         require_restored_publication()
         yield dict(journal=journal, opened=opened, require=require_restored_publication,
-                   restore_runtime_leaf=restore_runtime_leaf, require_runtime_restored=require_runtime_restored)
+                   restore_runtime_leaf=restore_runtime_leaf, require_runtime_restored=require_runtime_restored,
+                   restore_setup_leaf=restore_setup_leaf, require_setup_restored=require_setup_restored)
     except (KeyError, TypeError, ValueError, RuntimeError, OSError) as exc:
         raise LoadError(f"A publication compensation unconfirmed; HOLD: {exc}") from exc
     finally:
@@ -10433,7 +10562,9 @@ def _recover_setup_switch_journal_snapshot(
             _require_setup_switch_materialized_owners(authority)
     for path, before, after in expected_rows:
         require_journal_unchanged()
-        if before is not None:
+        if a_compensation is not None:
+            a_compensation["restore_setup_leaf"](path)
+        elif before is not None:
             if not (path.is_symlink() and os.readlink(path) == before):
                 _atomic_restore_setup_link(
                     path, before, require_authority=require_journal_unchanged,
@@ -10462,7 +10593,9 @@ def _recover_setup_switch_journal_snapshot(
         # namespace sync. Known absence is still an outstanding durable write.
         # Recheck the surviving parent and sync it on every recovery entry.
         _fsync_parent_directory(_setup_switch_created_directory_sync_parent(body, row))
-    if current_manifest != (state.manifest, state.manifest_mode):
+    if a_compensation is not None:
+        a_compensation["restore_setup_leaf"](MANIFEST)
+    elif current_manifest != (state.manifest, state.manifest_mode):
         require_journal_unchanged()
         _atomic_restore_setup_manifest(state, require_authority=require_journal_unchanged)
     verified = snapshot_active_setup_state(expected_project=state.project)

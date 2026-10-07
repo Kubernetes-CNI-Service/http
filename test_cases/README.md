@@ -584,13 +584,19 @@ mode/uid/gid/mtime，rename 合法改变 inode/ctime；拒绝同字节新目标�
 
 显式 `restore_setup_switch_a_disk` 接入已提交 Q 的停服 P/A/DHCP 分组恢复。
 原 Q 发布计划与 WAL 必须持续持有；flat runtime/public key 的原 B checkpoint、
-原 A receipt 内容及恢复暂存 inode 在首个补偿写前写入同一 schema-2 计划。
+原 A receipt 内容及恢复暂存 inode 在首个补偿写前写入同一持久计划。
 冷重入只接受原 checkpoint 或计划自己的暂存 rename，未知内容、同字节新 inode、
 未知暂存保持 HOLD。部分 Q 补偿只能在共享 Q 仍精确未变时继续；P/A 恢复以后
 不能借普通 Q precommit reader 或重新登记原 WAL 解围。DHCP 四前像先恢复/同步，
 再恢复 A runtime，全部盘面后核验；所有计划/WAL/backup/receipt 仍保留，服务不启动。
 本地 SIGKILL 与私有服务端口不等于 Linux/断电或 root 见证；完整共享写集的
 更细 owner 资格、旧 A 显式健康激活/安全退休及精确树正式 full/check 继续单独验收。
+
+schema-3 另登记原 WAL 泛用共享 P 链接与 P manifest 的原 Q checkpoint 和原 P
+暂存 owner；冷重入拒绝同目标新 P 链接和同字节新 manifest，不因内容相同收编。
+恢复中强杀后仅消费原 stage 并补同步；未知 `.r22-a-setup-*` 原样保留/HOLD。
+实体 latest/comparison 目录仍走独立原 WAL 的目录 owner，不能用软链接叶子还原覆盖。
+这些本地多脚本用例仍不是旧 A 激活或正式 full/check 的完成证明。
 
 同一模块还覆盖端到端 deployment scope：默认 `all` 同时生成 Production/AIR；`prod` 只发布
 Production Cumulus/IB/NVL；`air` 只发布 AIR DHCP/YAML/release，并只临时渲染 AIR full profile
