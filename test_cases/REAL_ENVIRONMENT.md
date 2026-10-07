@@ -2112,6 +2112,15 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 证据：精确 HEAD/tree/dirty、命令/退出码、Python/平台与实际挂载、完整日志物理顺序/END、前后 stat/inode/大小/SHA256、实际两个项目 journal 和锁 FD/session 归属、父死子存、竞争拒绝及最后持有者退出后的恢复互斥；私有 ID 不公开。全局 UNKNOWN/FIFO、分配／预留与实际 M=6 单次 capability 另证，不因拿锁视为完成。
 - 清理与风险：只回收本卡确证自有的隔离子进程和经授权副本；不删除真实锁、journal、History、fence 或 outstanding reservation，不向不确定 PID/group 发信号；无法证明终止或共享命名空间时 HOLD。真实 root、容器和父死子存 Stage O 前提未执行，保持 NOT RUN。
 
+## TC-REAL-REQ7-HISTORY-PREREAD-JOURNAL-001 — 不可变发送前 History 原像
+
+- Case ID：`TC-REAL-REQ7-HISTORY-PREREAD-JOURNAL-001`；类型：durable / integration / real-environment；对应 C-6/C-19/C-26。状态：**NOT RUN / REAL_ENV REQUIRED**。涉及 `monitor/issue_tracker_history_preread_journal.py`、`monitor/issue_tracker_global_attempt_journal.py`、`monitor/issue_tracker_spreadsheet_owner.py`、`monitor/issue_tracker_sheets_read_plan.py`、`monitor/issue_tracker_sheets_read_decode.py`、`monitor/issue_tracker_tls_inputs.py`。本地合成 root 元数据、真实文件屏障和私有 TLS 不代表整个 REQ7 或部署身份。
+- 风险与目标：保留首个意图前完整 History 原始响应及 `history_last_row_before_send`，不能以 caller 行号或后来的尾替换。实际全局 journal 与 owner 必须成立，已有 ATTEMPT-1 时不能补建；六个图像屏障后才能写 INITIALIZED，缺 marker 与部分落盘永不采纳。
+- 前置条件与输入：另获 owner 精确 Stage O 副本只读授权、固定 root 目录预置与实际 Python/SSL/CA 身份；绑定不可变 unit/action/wire、目标 sheetId、策略与白名单、一次固定完整全尾 GET。容量超过 5002 或无法安全满足时保持 NOT RUN；本卡不授权凭据、部署或在线写入。
+- 步骤与独立预期：于实际全表 owner 内核全局计数 0 → 固定原生 TLS GET → typed 全尾解码 → 持久原始响应和 header → 图像屏障 → marker。真实冷进程必须重新解码同一原像并保持边界；原目标、unit、链或 header 漂移拒绝，重哈希的外来目标不能 retarget。该必要观察不是 COMPLETE，不清除 UNKNOWN 或预留。
+- 证据：精确 HEAD/tree/dirty、命令及退出码、Python/平台、完整日志及 END、前后 stat/inode/大小/SHA256、marker 的物理屏障顺序、原像摘要和尾边界。History/raw/token 私密，不公开；实际断电与部署身份仅由授权真机证据确认。
+- 故障注入与清理：缺失/截断 raw、链接/权限/位移、额外命名空间、六个屏障逐项失败、重哈希外来目标与 UNKNOWN 后补建均 HOLD；只回收确证自有临时目录和进程，不删除真实 journal、fence、nonce 或解锁重发。
+
 ## TC-REAL-REQ7-BOUNDED-HISTORY-READ-001 — 原始类型的有限 History 回读
 
 - Case ID：`TC-REAL-REQ7-BOUNDED-HISTORY-READ-001`；类型：real-environment / integration；对应 C-8/C-19/C-26。状态：**NOT RUN / REAL_ENV REQUIRED**。涉及 `monitor/issue_tracker_sheets_read_plan.py`、`monitor/issue_tracker_tls_inputs.py`、`monitor/issue_tracker_sheets_read_decode.py`；本地 direct 与原生私有 loopback TLS workflow 已覆盖类型、矩形和一次读取，不证明部署环境或整个 REQ7。

@@ -892,6 +892,14 @@ ACTION-PREIMAGE/action_digest → immutable wire journal → 六个冷启动进�
 真实尝试上界、spreadsheet-wide owner、新鲜准入或 COMPLETE，不代表 REQ7 整体完成。
 真实断电和在线关联部分见 `TC-REAL-REQ7-COMPILED-SEND-INTENT-001`，状态 NOT RUN。
 
+`test_cases.test_req7_history_preread_journal` 在实际 spreadsheet owner 与已初始化
+且计数为 0 的全局 action/wire journal 内保存原始全尾响应、容量与
+`history_last_row_before_send`。RAW/HEADER 的六个图像屏障后才能写 marker；
+部分创建不可补建，首次意图后不能创建或替换。实际冷进程重新读取并解码原像，
+原始目标、策略、白名单、unit/action/wire 必须保持绑定；连带重哈希的外来目标
+也拒绝。这不是远端来源鉴别、新鲜准入、网络许可或 COMPLETE；完整业务、审计、
+nonce/fence 对账和受审 launcher 仍需集成，未安装且真机卡 NOT RUN。
+
 `test_cases.test_req7_history_read` 验证固定 `Update_History` A:E 有界矩形
 （最多 5000 行、2 MiB 响应）的 planner → 实际自有 loopback TLS → typed decoder；
 仅在明确返回的同一 grid 内补空单元格，保留 formula/number/bool/string 的区别和
