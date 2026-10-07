@@ -4051,12 +4051,29 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
         self.assertEqual({
             # Governed identity/config authority readers.
             "_read_bounded_regular_text", "project_timezone", "read_devices",
+            # F02 re-observes the same parent/global/CSV bindings and the
+            # owned child manifest/marker/YAML; it adds no W-1 authority.
+            "_method_release_text",
             # Explicit observations / previous output; never source identity.
             "_previous_report", "_snapshot_state_from_dir",
             "latest_manual_trigger_markers", "read_tail",
             # Atomic report publication output (open is write-mode here).
             "write_report",
         }, filesystem_readers)
+        self.assertEqual(
+            ["capture_monitor_method_input"],
+            sorted(name for name in reachable
+                   if "_method_release_text" in graph.get(name, set())),
+        )
+        self.assertEqual(
+            ["monitor_once"],
+            sorted(name for name in reachable
+                   if "capture_monitor_method_input" in graph.get(name, set())),
+        )
+        self.assertEqual(2, sum(
+            called_name(call) == "capture_monitor_method_input"
+            for call in structural_calls(cycle)
+        ))
         self.assertEqual(
             [
                 "collection_attribution_input_digests",
