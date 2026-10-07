@@ -163,6 +163,37 @@ class GenerationReportWorkflow(unittest.TestCase):
         self.assertFalse(candidate.committed)
         return parent, candidate
 
+    def test_real_setup_load_report_selector_collision_preserves_foreign_evidence(self):
+        self.real_setup_publish()
+        parent, parent_candidate = self.real_load_prepare()
+        self.addCleanup(LOAD.discard_prepared_release, parent_candidate)
+        helper = report_helper()
+        report = helper.build_report(self.project, parent, published_dir=self.published)
+        report_candidate = helper.prepare_generation_report(self.project, report)
+        self.addCleanup(helper.discard_prepared_generation_report, report_candidate)
+        generation = LOAD.stage_pinned_generation(
+            self.project, parent_candidate.temporary,
+            self.ztp / "config/isc-dhcp-server",
+        )
+        LOAD.commit_prepared_release(parent_candidate)
+        helper.commit_prepared_generation_report(report_candidate)
+        output = self.project / "99-output-ztp"
+        foreign = output / (".current-" + "f" * 32)
+        foreign.write_bytes(b"independent workflow foreign evidence\n")
+        before = foreign.lstat()
+        report_bytes = (output / "generation-report.json").read_bytes()
+        with mock.patch.object(LOAD.secrets, "token_hex", return_value="f" * 32):
+            with self.assertRaises((OSError, LOAD.LoadError)):
+                LOAD.commit_pinned_generation(self.project, generation, expected_current=None)
+        self.assertTrue(os.path.lexists(foreign), "real LOAD cleanup removed unrelated evidence")
+        self.assertEqual(before.st_ino, foreign.lstat().st_ino)
+        self.assertEqual(b"independent workflow foreign evidence\n", foreign.read_bytes())
+        self.assertFalse(os.path.lexists(output / "current"))
+        self.assertEqual(report_bytes, (output / "generation-report.json").read_bytes())
+        observed = helper.inspect_generation_report(self.project, published_dir=self.published)
+        self.assertEqual([LAPTOP_FINGERPRINT, MANAGEMENT_FINGERPRINT],
+                         [entry["fingerprint"] for entry in observed["public_keys"]])
+
     def test_real_setup_load_generation_syncs_final_mode_before_report_publication(self):
         self.real_setup_publish()
         parent, parent_candidate = self.real_load_prepare()

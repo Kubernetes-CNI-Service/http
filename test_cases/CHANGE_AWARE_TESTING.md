@@ -153,6 +153,40 @@ proof。默认 push 只接受 release proof。owner 授权的 AIR/prod 验证可
 
 ## Full proof 失败后的诊断与重跑闸门
 
+### R22 generation selector 暂存对象的清理所有权
+
+独立 direct 要求随机暂存名先被外来常规文件/软链接占据时不删除，另在 selector
+replace 失败前移走自有链接并原名插入外来文件；真实私有 SETUP→LOAD→report→
+selector workflow 要求 report 原字节、外来 inode/字节与 selector 缺席保留。
+初轮 RED 的一个 direct 因 Darwin /var 与 /private/var 别名在注入器内提前拒绝，
+原日志 `outputs/test-diagnostics/r22-selector-temp-ownership-red.log`，inode157706681、
+size131759、SHA256 `a491856dda54ef36b1cb9595ae9aaa950e3c007ca265f820498537e98e74f2e1`
+保留，不算该注入的生产失败。夹具改为物理父路径后，原实现三个方法四处有效 FAIL，
+原日志 `outputs/test-diagnostics/r22-selector-temp-ownership-red-canonical.log`，
+inode157710120、size130784、SHA256
+`3f0106fb8ba593ce4aaa5aa1be441a8d9e048f244daa8dc47cd95aaa4bed2d12`，
+物理41行 Ran 3 tests、43行 FAILED(failures=4)、49行 ACTUAL_UNITTEST_EXIT=1、
+50行 FROZEN_STATE_MATCH=True、52行 DIAGNOSTIC_END=1，实际 exec exit1。
+
+候选去掉无条件 finally unlink；仅本次成功创建、类型/单链接/文字验证并记录身份的
+暂存链接，在清理时全部原身份与文字仍一致才 unlink。原断言不变，三个方法 GREEN：
+`outputs/test-diagnostics/r22-selector-temp-ownership-green.log`，inode157711209、
+size128148、SHA256 `3a092d41046c496b2313bf659ccdf626027796aef7fc07ac7da161ca303c0aa4`，
+物理10行 Ran 3 tests、12行 OK、18行 ACTUAL_UNITTEST_EXIT=0、19行
+FROZEN_STATE_MATCH=True、21行 DIAGNOSTIC_END=0，实际 exec exit0。
+
+完整 LOAD、generation report contract/workflow 三模块498项 OK / exit0，原日志
+`outputs/test-diagnostics/r22-selector-temp-ownership-modules.log`，inode157712266、
+size283742、SHA256 `98ba815ae48b8ef40eacfa72377255f1c6f4562d2fd75b12d108dfa27f86a47f`；
+读前后 dev/inode/size/mtime_ns/ctime_ns 稳定，物理1386行 Ran 498 tests in 29.574s、
+1388行 OK、1409行 ACTUAL_UNITTEST_EXIT=0、1410行 FROZEN_STATE_MATCH=True、
+1412行 DIAGNOSTIC_END=0，实际 exec exit0。首次全 stat 相等核验因读访问时间不一致
+停止，未据该次读取作结论；重新使用上述内容身份字段稳定核验后才确认此完整结果。
+现有 LOAD direct 与 `generation_report_lifecycle` 映射覆盖新增案例；REAL_ENV 同卡
+补前置、证据、清理与风险。不是任意非合作写者的原子 compare-and-unlink，也不关闭
+完整共享 WAL、B finalizer、旧 A 激活、原 bootstrap/REQ19 根因或正式 full/check。
+不运行自动批准、不手改 ledger，不以本次 bounded PASS 套用 full proof。
+
 ### R22 封存 generation 最终权限须先于文件同步
 
 独立 direct 与真实私有 SETUP→LOAD→report/selector workflow 在 umask077 下，

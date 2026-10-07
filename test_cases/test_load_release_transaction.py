@@ -9179,6 +9179,64 @@ os.kill(os.getpid(), signal.SIGKILL)
         self.assertEqual(a_conf, (generation_a / "dhcp/dhcpd.conf").read_bytes())
         self.assertEqual(a_conf, (flat / "dhcpd.conf").read_bytes())
 
+    def test_generation_selector_temp_collision_preserves_foreign_object(self) -> None:
+        LOAD.validate_and_publish_release(self.project, self.inputs)
+        output = self.project / "99-output-ztp"
+        generation = LOAD.stage_pinned_generation(
+            self.project, output / "current-release.json",
+            self.ztp / "config/isc-dhcp-server",
+        )
+        temporary = output / (".current-" + "d" * 32)
+        for kind in ("regular", "symlink"):
+            with self.subTest(kind=kind):
+                if kind == "regular":
+                    temporary.write_bytes(b"independent foreign selector evidence\n")
+                else:
+                    temporary.symlink_to("independent-foreign-target")
+                before = temporary.lstat()
+                with mock.patch.object(LOAD.secrets, "token_hex", return_value="d" * 32):
+                    with self.assertRaises((OSError, LOAD.LoadError)):
+                        LOAD.commit_pinned_generation(self.project, generation, expected_current=None)
+                self.assertTrue(os.path.lexists(temporary), "collision cleanup deleted a foreign object")
+                self.assertEqual((before.st_dev, before.st_ino),
+                                 (temporary.lstat().st_dev, temporary.lstat().st_ino))
+                if kind == "regular":
+                    self.assertEqual(b"independent foreign selector evidence\n", temporary.read_bytes())
+                else:
+                    self.assertEqual("independent-foreign-target", os.readlink(temporary))
+                self.assertFalse(os.path.lexists(output / "current"))
+                temporary.unlink()  # Only this test's independently created fixture.
+
+    def test_generation_selector_failed_replace_preserves_rebound_temp(self) -> None:
+        LOAD.validate_and_publish_release(self.project, self.inputs)
+        output = self.project.resolve(strict=True) / "99-output-ztp"
+        generation = LOAD.stage_pinned_generation(
+            self.project, output / "current-release.json",
+            self.ztp / "config/isc-dhcp-server",
+        )
+        temporary = output / (".current-" + "e" * 32)
+        original = output / "independent-held-selector"
+        foreign = []
+
+        def fail_after_rebind(source, destination):
+            self.assertEqual(temporary, Path(source))
+            self.assertEqual(output / "current", Path(destination))
+            temporary.rename(original)
+            temporary.write_bytes(b"independent late foreign evidence\n")
+            foreign.append(temporary.lstat().st_ino)
+            raise OSError("independent publication refused")
+
+        with mock.patch.object(LOAD.secrets, "token_hex", return_value="e" * 32), \
+                mock.patch.object(LOAD.os, "replace", side_effect=fail_after_rebind):
+            with self.assertRaises((OSError, LOAD.LoadError)):
+                LOAD.commit_pinned_generation(self.project, generation, expected_current=None)
+        self.assertEqual(1, len(foreign))
+        self.assertTrue(os.path.lexists(temporary), "finally deleted a rebound temporary name")
+        self.assertEqual(foreign[0], temporary.lstat().st_ino)
+        self.assertEqual(b"independent late foreign evidence\n", temporary.read_bytes())
+        self.assertEqual(f"generations/{generation.name}", os.readlink(original))
+        self.assertFalse(os.path.lexists(output / "current"))
+
     def test_pinned_generation_final_payload_mode_precedes_file_sync(self) -> None:
         LOAD.validate_and_publish_release(self.project, self.inputs)
         parent_path = self.project / "99-output-ztp/current-release.json"

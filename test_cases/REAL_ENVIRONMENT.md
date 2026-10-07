@@ -1634,6 +1634,19 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-R22-GENERATION-INPUT-ABA-001 — 跨进程输入换代与多输出一致性
 
+- generation selector 暂存清理所有权补充：独立 direct 覆盖预先占据随机暂存名的常规
+  文件/软链接，以及发布失败前将原自有链接移走、原名换为外来文件；真实私有
+  SETUP→LOAD→report 发布→selector 拒绝 workflow 要求外来 inode/字节、原 report
+  和 selector 缺席均保留。原 finally 无条件 unlink 删除外来对象，三个方法四处有效
+  FAIL；候选只清理本次成功创建并记录身份/原链接文字、且清理时仍一致的暂存链接。
+  初轮一个 direct 注入器混用 Darwin 路径别名，原日志保留；改用物理父路径后重新
+  RED，不修改原字节/inode/拒绝断言。现场仅限本卡另行授权的隔离副本、精确版本、
+  root-only 可恢复快照、持锁及正常写者静默；留存原/外来/移走对象身份、raw target、
+  report SHA、创建→换绑→拒绝→保留顺序及完整 END/exit。封存后按确切快照人工
+  恢复，不删未知对象解围。名称再核与 unlink 非原子 compare-and-unlink；该窄修
+  不关闭 selector/report 全 WAL、B finalizer、旧 A 激活或 Linux/断电/root 见证，
+  本卡和正式 full/check 仍 OPEN。
+
 - 封存 generation 权限同步补充：direct 与真实私有 SETUP→LOAD→report/selector workflow
   在 umask077 下观察 payload FD，独立要求最终0644先于逐文件 fsync；原路径先同步0600
   再按路径 chmod，两项有效 FAIL。候选在持有 FD 上 fchmod0644 后 fsync，再维持既有

@@ -4924,8 +4924,14 @@ def commit_pinned_generation(
         raise LoadError("generation selector changed before commit")
     target = f"generations/{generation.name}"
     temporary = output / f".current-{secrets.token_hex(16)}"
+    temporary_identity = None
     try:
         temporary.symlink_to(target)
+        temporary_identity = temporary.lstat()
+        if (not stat.S_ISLNK(temporary_identity.st_mode)
+                or temporary_identity.st_nlink != 1
+                or os.readlink(temporary) != target):
+            raise LoadError("generation selector temporary changed before commit")
         os.replace(temporary, selector)
         descriptor = os.open(output, os.O_RDONLY)
         try:
@@ -4933,7 +4939,19 @@ def commit_pinned_generation(
         finally:
             os.close(descriptor)
     finally:
-        temporary.unlink(missing_ok=True)
+        # A failed exclusive create grants no ownership of the colliding name.
+        # Likewise, a failed replace must not clean up a later foreign object.
+        if temporary_identity is not None:
+            try:
+                remaining = temporary.lstat()
+            except FileNotFoundError:
+                remaining = None
+            if (remaining is not None and stat.S_ISLNK(remaining.st_mode)
+                    and all(getattr(remaining, field) == getattr(temporary_identity, field)
+                            for field in ("st_dev", "st_ino", "st_mode", "st_nlink",
+                                          "st_mtime_ns", "st_ctime_ns"))
+                    and os.readlink(temporary) == target):
+                temporary.unlink()
 
 
 def ensure_previous_generation_frozen(project: Path) -> str | None:
