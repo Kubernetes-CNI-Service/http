@@ -124,3 +124,20 @@ def prepare_template_header_read(binding, token):
                        *(("ranges", value) for value in _TEMPLATE_HEADER_RANGES)])
     return PreparedSheetsRead(base.host, "/v4/spreadsheets/" + binding.spreadsheet_id + "?" + query,
                               base.method, base.headers, base.body)
+
+
+def prepare_history_read(binding, token, *, first_row, last_row):
+    """One fixed five-column finite rectangle, not complete History evidence.
+
+    The authenticated caller must separately prove the journal's before-row and
+    the current tail boundary. Never silently truncate/page a larger tail or
+    infer absent/duplicate unit rows from this partial observation alone.
+    """
+    base = prepare_sheets_read(binding, token, mode="row_rectangle", sheet="ETH&IB Switch", first_row=3)
+    if (type(first_row) is not int or type(last_row) is not int
+            or not 3 <= first_row <= last_row <= 2147483647 or last_row - first_row + 1 > 5000):
+        raise SheetsReadHold()
+    query = urlencode([("includeGridData", "true"), ("fields", _FIELDS),
+                       ("ranges", "'Update_History'!A%d:E%d" % (first_row, last_row))])
+    return PreparedSheetsRead(base.host, "/v4/spreadsheets/" + binding.spreadsheet_id + "?" + query,
+                              base.method, base.headers, base.body)

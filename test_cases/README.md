@@ -882,3 +882,10 @@ ACTION-PREIMAGE/action_digest → immutable wire journal → 六个冷启动进�
 拒绝且保留 UNKNOWN。库未安装，无重置、解锁、修复或发送能力；六次意图仍不证明
 真实尝试上界、spreadsheet-wide owner、新鲜准入或 COMPLETE，不代表 REQ7 整体完成。
 真实断电和在线关联部分见 `TC-REAL-REQ7-COMPILED-SEND-INTENT-001`，状态 NOT RUN。
+
+`test_cases.test_req7_history_read` 验证固定 `Update_History` A:E 有界矩形
+（最多 5000 行、2 MiB 响应）的 planner → 实际自有 loopback TLS → typed decoder；
+仅在明确返回的同一 grid 内补空单元格，保留 formula/number/bool/string 的区别和
+原字面值。拒绝错位、缺 grid、重复、额外列、非 200 和部分响应，不重发、不静默
+截断或分页。它不是完整 History 尾边界、缺行/重复行证明或 COMPLETE，不授予发送
+能力；nonce、fence、不可变 journal 与完整单元对账仍须另证。真机卡 NOT RUN。

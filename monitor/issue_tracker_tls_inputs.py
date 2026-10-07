@@ -270,6 +270,20 @@ class NativeSheetsReadUnit:
         return _native_complete_read(self._prepared)
 
 
+class NativeHistoryReadUnit:
+    """One bounded five-column GET, uninstalled and without COMPLETE authority."""
+    def __init__(self, binding, token, *, first_row, last_row):
+        from monitor.issue_tracker_sheets_read_plan import prepare_history_read
+        self._prepared = prepare_history_read(binding, token, first_row=first_row, last_row=last_row)
+        self._called = False; self._lock = threading.Lock()
+
+    def send_once(self):
+        with self._lock:
+            used = self._called; self._called = True
+        if used: raise TlsInputHold()
+        return _native_complete_read(self._prepared)
+
+
 class NativeOnlineWhitelistReadUnit:
     """Uninstalled fixed read, no activation, write, refresh or retry authority."""
     def __init__(self, binding, token):

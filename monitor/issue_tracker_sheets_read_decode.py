@@ -194,6 +194,68 @@ def _template_target(plan, *, headers):
     return match.group(1)
 
 
+def decode_history_read(plan, response, *, sheet_id):
+    """Strict typed five-column rectangle only, never COMPLETE or absence proof.
+
+    Empty rows/cells are projected only inside the one explicitly returned
+    grid. Numeric/formula/bool values remain distinct, not normalized into the
+    strings required by an eventual immutable unit/History reconciler.
+    """
+    from monitor.issue_tracker_sheets_read_plan import PreparedSheetsRead, _FIELDS
+    failed = False
+    try:
+        if (type(plan) is not PreparedSheetsRead or plan.host != "sheets.googleapis.com"
+                or type(plan.path) is not str or len(plan.path) > 16384 or plan.method != "GET"
+                or type(plan.body) is not bytes or plan.body != b""
+                or type(plan.budget_seconds) is not float or plan.budget_seconds != 30.0
+                or type(sheet_id) is not int or not 0 <= sheet_id <= 2147483647):
+            raise SheetsDecodeHold()
+        parsed = urlsplit(plan.path)
+        match = re.fullmatch(r"/v4/spreadsheets/([A-Za-z0-9_-]{20,4096})", parsed.path)
+        query = parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True)
+        if (parsed.scheme or parsed.netloc or parsed.fragment or match is None or len(query) != 3
+                or query[:2] != [("includeGridData", "true"), ("fields", _FIELDS)]
+                or query[2][0] != "ranges" or plan.path != parsed.path + "?" + urlencode(query)):
+            raise SheetsDecodeHold()
+        rectangle = re.fullmatch(r"'Update_History'!A([1-9][0-9]{0,9}):E([1-9][0-9]{0,9})", query[2][1])
+        if rectangle is None: raise SheetsDecodeHold()
+        first, last = map(int, rectangle.groups())
+        if not 3 <= first <= last <= 2147483647 or last - first + 1 > 5000: raise SheetsDecodeHold()
+        if (type(response.status) is not int or response.status != 200 or response.complete is not True
+                or type(response.data) is not bytes or not 1 <= len(response.data) <= 2 * 1024 * 1024):
+            raise SheetsDecodeHold()
+        document = json.loads(response.data.decode("utf-8", "strict"), object_pairs_hook=_pairs, parse_constant=_nonfinite)
+        if (type(document) is not dict or set(document) != {"spreadsheetId", "sheets"}
+                or document["spreadsheetId"] != match.group(1) or type(document["sheets"]) is not list
+                or len(document["sheets"]) != 1):
+            raise SheetsDecodeHold()
+        sheet = document["sheets"][0]
+        if type(sheet) is not dict or set(sheet) != {"properties", "data"}: raise SheetsDecodeHold()
+        if _template_property(sheet["properties"]) != ("Update_History", sheet_id): raise SheetsDecodeHold()
+        grids = sheet["data"]
+        if type(grids) is not list or len(grids) != 1: raise SheetsDecodeHold()
+        grid = grids[0]
+        if (type(grid) is not dict or not {"startRow"} <= set(grid) <= {"startRow", "startColumn", "rowData"}
+                or type(grid["startRow"]) is not int or grid["startRow"] != first - 1
+                or type(grid.get("startColumn", 0)) is not int or grid.get("startColumn", 0) != 0):
+            raise SheetsDecodeHold()
+        rows = grid.get("rowData", [])
+        if type(rows) is not list or len(rows) > last - first + 1: raise SheetsDecodeHold()
+        cells = []
+        for offset in range(last - first + 1):
+            row = rows[offset] if offset < len(rows) else {}
+            if type(row) is not dict or not set(row) <= {"values"}: raise SheetsDecodeHold()
+            values = row.get("values", [])
+            if type(values) is not list or len(values) > 5: raise SheetsDecodeHold()
+            for column in range(5):
+                cells.append((first - 1 + offset, "ABCDE"[column], _cell(values[column] if column < len(values) else {})))
+        result = ObservedSheetsGrid(sheet_id, "Update_History", tuple(cells), hashlib.sha256(response.data).hexdigest())
+    except Exception:
+        failed = True
+    if failed: raise SheetsDecodeHold()
+    return result
+
+
 def _template_document(response, target):
     status, complete, source = response.status, response.complete, response.data
     if (type(status) is not int or status != 200 or complete is not True

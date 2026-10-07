@@ -288,7 +288,8 @@
         "test_cases.test_req7_attempt_journal",
         "test_cases.test_req7_metadata_capacity",
         "test_cases.test_req7_send_unit",
-        "test_cases.test_req7_send_intent"
+        "test_cases.test_req7_send_intent",
+        "test_cases.test_req7_history_read"
       ]
     },
     {
@@ -1745,6 +1746,11 @@
       "id": "issue_tracker_send_intent",
       "paths": ["monitor/issue_tracker_send_intent.py"],
       "tests": ["test_cases.test_req7_send_intent"]
+    },
+    {
+      "id": "req7_bounded_history_read",
+      "paths": ["monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_tls_inputs.py"],
+      "tests": ["test_cases.test_req7_history_read"]
     }
   ],
   "workflows": [
@@ -3193,6 +3199,11 @@
       "id": "req7_compiled_action_wire_journal_cold_processes",
       "members": ["monitor/issue_tracker_send_intent.py", "monitor/issue_tracker_send_unit.py", "monitor/issue_tracker_attempt_journal.py", "monitor/issue_tracker_local_commit.py"],
       "tests": ["test_cases.test_req7_send_intent"]
+    },
+    {
+      "id": "req7_native_bounded_history_typed_read",
+      "members": ["monitor/issue_tracker_sheets_read_plan.py", "monitor/issue_tracker_sheets_read_decode.py", "monitor/issue_tracker_tls_inputs.py"],
+      "tests": ["test_cases.test_req7_history_read"]
     }
   ],
   "path_rules": [

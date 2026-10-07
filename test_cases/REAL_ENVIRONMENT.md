@@ -2076,6 +2076,15 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 证据：保存精确命令/退出码、完整物理顺序日志、前后 stat/inode/SHA、启动前 monotonic 时间、阶段耗时、持有锁的 FD/session 归属、截止期、TERM/KILL/reap/会话不存在和父死子存的独立见证。私有响应和诊断不进入公开日志；局部原生慢读 PASS 不代表整个 REQ7 或生产权限。
 - 故障注入、清理与风险：注入启动失败、DNS/慢读、pipe 关闭、监督器死亡和无法终止；保持原预算/行为断言。本地夹具已独立复现并修正已回收 leader 的同号存活 group 被误认为信号权限；首次检查之后、异常清理和 TERM/KILL 升级之前也必须重新确认活 leader 的 session/group 归属，不能把首次检查缓存为永久信号权限。真实 PID 重用仍 NOT RUN，必须验证不向该不确定 group 发信号、终止未确认保持 HOLD。实际临时 flock 的终止被拒工作流必须保持其他候选无法取得锁，直到本卡确证拥有的子进程完成清理。只终止本卡确证拥有的隔离会话，不能向外部 PID/group 发信号；清理不确定保持 HOLD，由授权责任人恢复隔离快照并重核锁。不得以 PID 重用、过期锁、超时宽限或重发来隐藏 UNKNOWN。
 
+## TC-REAL-REQ7-BOUNDED-HISTORY-READ-001 — 原始类型的有限 History 回读
+
+- Case ID：`TC-REAL-REQ7-BOUNDED-HISTORY-READ-001`；类型：real-environment / integration；对应 C-8/C-19/C-26。状态：**NOT RUN / REAL_ENV REQUIRED**。涉及 `monitor/issue_tracker_sheets_read_plan.py`、`monitor/issue_tracker_tls_inputs.py`、`monitor/issue_tracker_sheets_read_decode.py`；本地 direct 与原生私有 loopback TLS workflow 已覆盖类型、矩形和一次读取，不证明部署环境或整个 REQ7。
+- 风险与目标：只读 `Update_History` A:E 明确起止行，最多 5000 行及 2 MiB 响应；缺 grid、错位、额外列、非 200 或不完整回应拒绝；保留 `userEnteredValue` 的原始类型与字面值，不将数字、公式、格式化文字或规范化空白冒充五列 stringValue。该矩形观察不是 COMPLETE，不证明整个尾部完整或 unit 的缺行／重复行不存在。
+- 前置条件与输入：另获 owner 精确 Stage O 一次性副本只读权限；先绑定部署 Python/SSL/CA、固定 public SDK、目标 sheet ID、两个 enrollment nonce 与受管不可变 journal 的 before 行、完整当前尾边界。大于有限读取界限 HOLD，不截断，不现场放宽上界；本卡不授权实际凭据或出站。
+- 步骤与独立预期：由固定 launcher 和总预算监督读取已证边界，保存 typed 原像、单元所有实际业务行与全部审计行；比对 journal、完整 outcome mapping、action digest、nonce 和永久 fence 四要件。只因一个矩形一致、200 或 fence 存在不得推进 APPLIED。非 200 与第二次回调都不得额外联网。
+- 证据：保存精确 HEAD/tree/dirty、命令/退出码、完整物理顺序日志及 END、前后 stat/inode/大小/SHA256、矩形与完整尾边界来源、对应 sheetId 和响应 framing/总预算。私有行、token 和 nonce 不公开；无法安全取得前提保持 NOT RUN。
+- 故障注入与清理：仅在获准隔离副本注入 missing/duplicate grid、错 sheetId、数值／公式替换 string、部分响应及超界尾；只回收确证自有临时进程和副本，不删除真实 journal／History／fence 或解锁重发。真实编辑竞态、断线与部署监督仍须另证。
+
 ## TC-REAL-REQ7-COMPILED-SEND-INTENT-001 — 非递归 action 与 wire 的持久化先后
 
 - Case ID：`TC-REAL-REQ7-COMPILED-SEND-INTENT-001`；类型：real-environment / durable transaction；对应 C-6/C-14/C-19。状态：**NOT RUN / REAL_ENV REQUIRED**。`monitor/issue_tracker_send_intent.py` 是未安装库；本地 direct 与真实 composer → C-6 owner → action/wire journal → 六个冷启动进程 workflow 不证明实际断电、在线发送或 COMPLETE。
