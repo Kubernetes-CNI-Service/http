@@ -3512,6 +3512,187 @@ class ReleaseTransactionTests(unittest.TestCase):
         self.assertFalse(os.path.lexists(journal))
         backend.start.assert_not_called()
 
+    def _assert_a_runtime_late_authority_stops_writes(self, kind, boundary, memory=False):
+        state, context = self._prepare_persisted_a_runtime_switch()
+        journal, descriptor, backend = state[-3:]
+        common = state[2]
+        common.unlink()
+        common.symlink_to(os.path.relpath(state[5], common.parent))
+        paths = [self.ztp / name for name in ("ztp-bootstrap_oob.sh", "ztp-bootstrap_oobofoob.sh", "ztp.json")]
+        for path in paths:
+            path.write_bytes(b"partial B runtime\n")
+        authority = (journal if kind == "wal" else context.runtime_receipt / "receipt.json"
+                     if kind == "a" else state[1].resolve() / "99-output-ztp/current-release.json")
+        prior = authority.read_bytes() if kind != "q" else None
+        wal = journal.read_bytes()
+        injected = []
+        active = []
+        restore, fsync = LOAD._restore_receipt_file, os.fsync
+
+        def drift():
+            if injected:
+                return
+            if kind == "q":
+                authority.parent.mkdir(parents=True, exist_ok=True)
+                authority.write_bytes(b"independent Q commit marker\n")
+            else:
+                owner = authority.stat().st_ino
+                authority.rename(self.root / "held-original-a-runtime-authority")
+                authority.write_bytes(prior)
+                authority.chmod(0o600 if kind == "wal" else 0o644)
+                self.assertNotEqual(owner, authority.stat().st_ino)
+            injected.append(authority.stat().st_ino)
+
+        def restore_file(path, record, payload, **guard):
+            if path == paths[0]:
+                if boundary == "first-write":
+                    drift()
+                active.append(path)
+            try:
+                result = restore(path, record, payload, **guard)
+            finally:
+                active.clear()
+            if path == paths[0] and boundary == "after-first-write":
+                drift()
+            return result
+
+        def sync(fd):
+            result = fsync(fd)
+            if boundary == "stage-fsync" and active and stat.S_ISREG(os.fstat(fd).st_mode):
+                drift()
+            return result
+
+        expected = "journal changed" if kind == "wal" else "runtime.*authority" if kind == "a" else "Q parent changed"
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()), \
+                mock.patch.object(LOAD, "_restore_receipt_file", side_effect=restore_file), \
+                mock.patch.object(os, "fsync", side_effect=sync):
+            with self.assertRaisesRegex(LOAD.LoadError, expected):
+                if memory:
+                    LOAD.restore_cross_project_rollback_context(
+                        context, current_project=state[1], deployment_lock_descriptor=descriptor,
+                        services_quiesced=True, runtime_backend=backend,
+                    )
+                else:
+                    LOAD.recover_setup_switch_journal(
+                        journal, deployment_lock_descriptor=descriptor, services_quiesced=True,
+                        runtime_backend=backend, restore_runtime_from_wal=True,
+                    )
+        self.assertEqual(1, len(injected), "runtime authority injection was not reached")
+        self.assertEqual(b"A oob bootstrap\n" if boundary == "after-first-write" else b"partial B runtime\n", paths[0].read_bytes())
+        for path in paths[1:]:
+            self.assertEqual(b"partial B runtime\n", path.read_bytes(), "authority drift licensed a later runtime write")
+        self.assertEqual(wal, journal.read_bytes())
+        self.assertEqual(injected[0], authority.stat().st_ino)
+        self.assertEqual(prior if kind != "q" else b"independent Q commit marker\n", authority.read_bytes())
+        self.assertEqual(context.setup_state.manifest, state[7].read_bytes())
+        self.assertEqual(context.setup_state.links, {p: os.readlink(p) for p in context.setup_state.links})
+        self.assertFalse(list(self.ztp.glob(".*.rollback-*")), "owned runtime stage was not cleaned")
+        backend.start.assert_not_called()
+
+    def test_setup_wal_a_runtime_wal_drift_first_write_holds(self):
+        self._assert_a_runtime_late_authority_stops_writes("wal", "first-write")
+
+    def test_setup_wal_a_runtime_wal_drift_after_first_write_holds(self):
+        self._assert_a_runtime_late_authority_stops_writes("wal", "after-first-write")
+
+    def test_setup_wal_a_runtime_wal_drift_stage_fsync_holds(self):
+        self._assert_a_runtime_late_authority_stops_writes("wal", "stage-fsync")
+
+    def test_setup_wal_a_runtime_receipt_drift_first_write_holds(self):
+        self._assert_a_runtime_late_authority_stops_writes("a", "first-write")
+
+    def test_setup_wal_a_runtime_receipt_drift_after_first_write_holds(self):
+        self._assert_a_runtime_late_authority_stops_writes("a", "after-first-write")
+
+    def test_setup_wal_a_runtime_receipt_drift_stage_fsync_holds(self):
+        self._assert_a_runtime_late_authority_stops_writes("a", "stage-fsync")
+
+    def test_setup_wal_a_runtime_q_commit_first_write_holds(self):
+        self._assert_a_runtime_late_authority_stops_writes("q", "first-write")
+
+    def test_setup_wal_a_runtime_q_commit_after_first_write_holds(self):
+        self._assert_a_runtime_late_authority_stops_writes("q", "after-first-write")
+
+    def test_setup_wal_a_runtime_q_commit_stage_fsync_holds(self):
+        self._assert_a_runtime_late_authority_stops_writes("q", "stage-fsync")
+
+    def test_cross_project_a_runtime_wal_drift_after_first_write_holds(self):
+        self._assert_a_runtime_late_authority_stops_writes("wal", "after-first-write", memory=True)
+
+    def test_a_runtime_invalid_authority_guard_holds_before_restore(self):
+        state, context = self._prepare_persisted_a_runtime_switch()
+        before = (state[-3].read_bytes(), (self.ztp / "ztp-bootstrap_oob.sh").read_bytes())
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            with self.assertRaisesRegex(LOAD.LoadError, "authority guard is invalid"):
+                LOAD.restore_runtime_rollback_receipt(
+                    context.project, context.runtime_receipt, expected_current=context.selector_target,
+                    deployment_lock_descriptor=state[-2], services_quiesced=True,
+                    runtime_backend=state[-1], _require_authority=False,
+                )
+        self.assertEqual(before, (state[-3].read_bytes(), (self.ztp / "ztp-bootstrap_oob.sh").read_bytes()))
+        state[-1].start.assert_not_called()
+
+    def _assert_guarded_runtime_link_stage_is_not_published(self, latest):
+        path = self.root / "guarded-runtime-link"
+        path.symlink_to("independent-old-A")
+        owner = path.lstat().st_ino
+        hits = []
+
+        def guard():
+            if list(path.parent.glob(".guarded-runtime-link.setup-rollback.*")):
+                hits.append(True)
+                raise LOAD.LoadError("independent staged authority HOLD")
+
+        with self.assertRaisesRegex(LOAD.LoadError, "staged authority HOLD"):
+            if latest:
+                LOAD.restore_release_links({path: "independent-new-A"}, require_authority=guard)
+            else:
+                LOAD._atomic_restore_setup_link(path, "independent-new-A", require_authority=guard)
+        self.assertEqual([True], hits)
+        self.assertEqual(owner, path.lstat().st_ino)
+        self.assertEqual("independent-old-A", os.readlink(path))
+        self.assertFalse(list(path.parent.glob(".guarded-runtime-link.*rollback*")))
+
+    def test_a_runtime_publickey_link_guard_holds_after_stage(self):
+        self._assert_guarded_runtime_link_stage_is_not_published(False)
+
+    def test_a_runtime_latest_link_guard_holds_after_stage(self):
+        self._assert_guarded_runtime_link_stage_is_not_published(True)
+
+    def test_a_runtime_absent_latest_reentry_still_syncs_parent(self):
+        path = self.root / "guarded-missing-latest"
+        path.symlink_to("independent-B-target")
+        guard = lambda: None
+        with mock.patch.object(LOAD, "_fsync_parent_directory", side_effect=OSError("missing latest parent sync")):
+            with self.assertRaisesRegex(LOAD.LoadError, "missing latest parent sync"):
+                LOAD.restore_release_links({path: None}, require_authority=guard)
+        self.assertFalse(os.path.lexists(path))
+        with mock.patch.object(LOAD, "_fsync_parent_directory", wraps=LOAD._fsync_parent_directory) as sync:
+            LOAD.restore_release_links({path: None}, require_authority=guard)
+        sync.assert_called_once_with(path.parent)
+
+    def test_a_runtime_prefix_marker_guard_holds_after_stage_fsync(self):
+        marker = self.ztp / ".guarded-prefix"
+        marker.write_bytes(b"independent original marker\n")
+        owner = marker.stat().st_ino
+        hits = []
+
+        def guard():
+            if list(marker.parent.glob(f".{marker.name}.rollback.*")):
+                hits.append(True)
+                raise LOAD.LoadError("independent marker stage HOLD")
+
+        with mock.patch.object(LOAD, "ZTP_PREFIX_MARKER", marker):
+            with self.assertRaisesRegex(LOAD.LoadError, "marker stage HOLD"):
+                LOAD.restore_ztp_prefix_publication(
+                    LOAD.ZtpPrefixPublicationSnapshot(marker=b"independent restore marker\n", links={}),
+                    require_authority=guard,
+                )
+        self.assertEqual([True], hits)
+        self.assertEqual(owner, marker.stat().st_ino)
+        self.assertEqual(b"independent original marker\n", marker.read_bytes())
+        self.assertFalse(list(marker.parent.glob(f".{marker.name}.rollback.*")))
+
     def test_setup_wal_replaced_a_receipt_holds_before_any_p_write(self):
         state, context = self._prepare_persisted_a_runtime_switch()
         common, journal, descriptor, backend = state[2], state[-3], state[-2], state[-1]

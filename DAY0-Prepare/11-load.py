@@ -4068,10 +4068,13 @@ def snapshot_ztp_prefix_publication(
 
 def restore_ztp_prefix_publication(
     snapshot: ZtpPrefixPublicationSnapshot,
+    *, require_authority: Callable[[], None] | None = None,
 ) -> None:
     """Restore the prefix link/marker snapshot after a pre-commit failure."""
     errors = []
     for path, (kind, target) in snapshot.links.items():
+        if require_authority is not None:
+            require_authority()
         try:
             if kind == "other":
                 # configure rejects an existing real object before mutation.
@@ -4082,6 +4085,8 @@ def restore_ztp_prefix_publication(
                         raise LoadError(
                             f"拒绝删除已被外部改写的 prefix 链接：{path}"
                         )
+                    if require_authority is not None:
+                        require_authority()
                     path.unlink()
                 elif os.path.lexists(path):
                     raise LoadError(f"prefix 回滚目标已变成实际文件/目录：{path}")
@@ -4095,11 +4100,15 @@ def restore_ztp_prefix_publication(
             try:
                 temporary.unlink(missing_ok=True)
                 temporary.symlink_to(target)
+                if require_authority is not None:
+                    require_authority()
                 os.replace(temporary, path)
             finally:
                 temporary.unlink(missing_ok=True)
         except (LoadError, OSError) as exc:
             errors.append(f"{path}: {exc}")
+    if require_authority is not None:
+        require_authority()
     try:
         if snapshot.marker is None:
             if ZTP_PREFIX_MARKER.is_symlink():
@@ -4107,6 +4116,8 @@ def restore_ztp_prefix_publication(
             if os.path.lexists(ZTP_PREFIX_MARKER):
                 if not ZTP_PREFIX_MARKER.is_file():
                     raise LoadError("prefix marker 已变成非普通文件")
+                if require_authority is not None:
+                    require_authority()
                 ZTP_PREFIX_MARKER.unlink()
         else:
             if ZTP_PREFIX_MARKER.is_symlink():
@@ -4121,6 +4132,8 @@ def restore_ztp_prefix_publication(
                     stream.flush()
                     os.fsync(stream.fileno())
                 os.chmod(temporary, 0o644)
+                if require_authority is not None:
+                    require_authority()
                 os.replace(temporary, ZTP_PREFIX_MARKER)
             finally:
                 if os.path.exists(temporary):
@@ -5628,13 +5641,18 @@ def _load_runtime_rollback_receipt(
 
 def _restore_receipt_file(
     path: Path, record: dict[str, object], payload: bytes | None,
+    *, require_authority: Callable[[], None] | None = None,
 ) -> None:
+    if require_authority is not None:
+        require_authority()
     if record["state"] == "missing":
         if payload is not None:
             raise LoadError("rollback missing-file record has an unexpected payload")
         if os.path.lexists(path):
             if path.is_dir() and not path.is_symlink():
                 raise LoadError(f"rollback target became a directory: {path}")
+            if require_authority is not None:
+                require_authority()
             path.unlink()
         # Even an already-absent name may be a retry after unlink succeeded
         # but its directory sync failed. Do not retire the WAL before sync.
@@ -5651,6 +5669,8 @@ def _restore_receipt_file(
             os.fsync(stream.fileno())
         if os.path.lexists(path) and path.is_dir() and not path.is_symlink():
             raise LoadError(f"rollback target became a directory: {path}")
+        if require_authority is not None:
+            require_authority()
         os.replace(temporary, path)
         _fsync_parent_directory(path.parent)
     finally:
@@ -5930,12 +5950,18 @@ def _require_runtime_restore_guard(
         )
 
 
-def _atomic_restore_setup_link(path: Path, raw_target: str) -> None:
+def _atomic_restore_setup_link(
+    path: Path, raw_target: str, *, require_authority: Callable[[], None] | None = None,
+) -> None:
+    if require_authority is not None:
+        require_authority()
     temporary = path.parent / (
         f".{path.name}.setup-rollback.{os.getpid()}.{secrets.token_hex(8)}"
     )
     try:
         temporary.symlink_to(raw_target)
+        if require_authority is not None:
+            require_authority()
         os.replace(temporary, path)
         _fsync_parent_directory(path.parent)
     finally:
@@ -8135,7 +8161,7 @@ def recover_setup_switch_journal(
     expected_old_state: ActiveSetupState | None = None,
     expected_new_project: Path | None = None,
     retain_journal: bool = False,
-    _after_p_restore: Callable[[], None] | None = None,
+    _after_p_restore: Callable[..., None] | None = None,
     restore_runtime_from_wal: bool = False,
     _expected_runtime_context: CrossProjectRollbackContext | None = None,
 ) -> str:
@@ -8244,7 +8270,7 @@ def _recover_setup_switch_journal_snapshot(
     inspect_only: bool, expected_old_state: ActiveSetupState | None,
     expected_new_project: Path | None, retain_journal: bool,
     materialized_descriptors: list[int],
-    after_p_restore: Callable[[], None] | None = None,
+    after_p_restore: Callable[..., None] | None = None,
     restore_runtime_from_wal: bool = False,
     expected_runtime_context: CrossProjectRollbackContext | None = None,
     runtime_restore_guard=None,
@@ -8300,10 +8326,11 @@ def _recover_setup_switch_journal_snapshot(
         if runtime_context is None:
             raise LoadError("setup switch A runtime binding is missing; HOLD")
 
-        def after_p_restore():
+        def after_p_restore(*, require_authority):
             restore_runtime_rollback_receipt(
                 runtime_context.project, runtime_context.runtime_receipt,
                 expected_current=runtime_context.selector_target, **runtime_restore_guard,
+                _require_authority=require_authority,
             )
             _require_runtime_restore_guard(**runtime_restore_guard)
 
@@ -8595,7 +8622,7 @@ def _recover_setup_switch_journal_snapshot(
         # Keep the original WAL descriptor, bytes and owner through A's runtime
         # restore and postverification. Exception or death must not erase the
         # only persistent P/Q recovery authority just because links are back.
-        after_p_restore()
+        after_p_restore(require_authority=require_journal_unchanged)
         require_journal_unchanged()
         if _recover_setup_switch_journal_snapshot(
                 journal, opened=opened,
@@ -8631,13 +8658,15 @@ def restore_cross_project_rollback_context(
     The older link-only restore cannot bypass it. This never activates services.
     """
     journal = _setup_switch_journal_path()
-    def restore_runtime_phase() -> None:
+    def restore_runtime_phase(*, require_authority=None) -> None:
+        authority_guard = {"_require_authority": require_authority} if require_authority is not None else {}
         restore_runtime_rollback_receipt(
             context.project, context.runtime_receipt,
             expected_current=context.selector_target,
             deployment_lock_descriptor=deployment_lock_descriptor,
             services_quiesced=services_quiesced,
             runtime_backend=runtime_backend,
+            **authority_guard,
         )
         _require_runtime_restore_guard(
             deployment_lock_descriptor=deployment_lock_descriptor,
@@ -8671,6 +8700,7 @@ def restore_runtime_rollback_receipt(
     deployment_lock_descriptor: int | None,
     services_quiesced: bool,
     runtime_backend: ServiceRuntimeBackend | None,
+    _require_authority: Callable[[], None] | None = None,
 ) -> None:
     """Restore A after an uncommitted B generation failure, then verify all.
 
@@ -8683,6 +8713,11 @@ def restore_runtime_rollback_receipt(
         services_quiesced=services_quiesced,
         runtime_backend=runtime_backend,
     )
+    if _require_authority is not None and not callable(_require_authority):
+        raise LoadError("runtime recovery authority guard is invalid; HOLD")
+    authority_guard = {"require_authority": _require_authority} if _require_authority is not None else {}
+    if _require_authority is not None:
+        _require_authority()
     canonical_project = project.resolve(strict=True)
     output = canonical_project / "99-output-ztp"
     receipt = _load_runtime_rollback_receipt(canonical_project, receipt_directory)
@@ -8765,33 +8800,39 @@ def restore_runtime_rollback_receipt(
     for name, record in frozen.items():
         _restore_receipt_file(
             ZTP_DIR / name, record, payload_groups["files"][name],
+            **authority_guard,
         )
     for extra in set(path.name for path in publickey_dir.glob("*.pub")) - set(key_records):
         _require_runtime_publickey_parent(receipt)
         path = publickey_dir / extra
         if path.is_dir() and not path.is_symlink():
             raise LoadError("rollback publickey target became a directory")
+        if _require_authority is not None:
+            _require_authority()
         path.unlink()
     for name, record in key_records.items():
         _require_runtime_publickey_parent(receipt)
         if record["state"] == "link":
             _validate_runtime_key_binding(publickey_dir / name, canonical_project, record)
-            _atomic_restore_setup_link(publickey_dir / name, record["target"])
+            _atomic_restore_setup_link(publickey_dir / name, record["target"], **authority_guard)
         else:
             _restore_receipt_file(
                 publickey_dir / name, record, payload_groups["publickeys"][name],
+                **authority_guard,
             )
     restore_release_links({
         canonical_project / relative: (
             record.get("target") if record["state"] == "link" else None
         )
         for relative, record in latest_records.items()
-    })
+    }, **authority_guard)
     if prefix_snapshot.links or prefix_snapshot.marker is not None:
-        restore_ztp_prefix_publication(prefix_snapshot)
+        restore_ztp_prefix_publication(prefix_snapshot, **authority_guard)
 
     # A multi-path restore is not an atomic selector switch.  Report success
     # only after every surface and the unchanged selector have been rechecked.
+    if _require_authority is not None:
+        _require_authority()
     _require_runtime_publickey_parent(receipt)
     for name, record in frozen.items():
         path = ZTP_DIR / name
@@ -8812,6 +8853,8 @@ def restore_runtime_rollback_receipt(
             or any(getattr(selector_before, field) != getattr(selector_after, field)
                    for field in identity)):
         raise LoadError("rollback selector changed during A restore")
+    if _require_authority is not None:
+        _require_authority()
     ok(f"A runtime restore verified: {receipt['release_id']}")
 
 
@@ -11236,18 +11279,38 @@ def retire_unselected_release_links(
         path.unlink(missing_ok=True)
 
 
-def restore_release_links(snapshot: dict[Path, Optional[str]]) -> None:
+def restore_release_links(
+    snapshot: dict[Path, Optional[str]], *, require_authority: Callable[[], None] | None = None,
+) -> None:
     """Restore logical latest links after a pre-commit generation/install failure."""
     errors = []
     for path, target in snapshot.items():
+        if require_authority is not None:
+            require_authority()
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
+            if require_authority is not None:
+                # The guarded runtime phase needs the helper's pre-replace
+                # recheck, parent sync and owned-stage cleanup on HOLD.
+                if target is None:
+                    require_authority()
+                    path.unlink(missing_ok=True)
+                    # Absence can be reentry after a successful unlink and
+                    # interrupted sync, not permission to retire unsynced WAL.
+                    _fsync_parent_directory(path.parent)
+                else:
+                    _atomic_restore_setup_link(path, target, require_authority=require_authority)
+                continue
             temporary = path.parent / f".{path.name}.rollback.{os.getpid()}"
             temporary.unlink(missing_ok=True)
             if target is None:
+                if require_authority is not None:
+                    require_authority()
                 path.unlink(missing_ok=True)
                 continue
             temporary.symlink_to(target)
+            if require_authority is not None:
+                require_authority()
             os.replace(temporary, path)
         except OSError as exc:
             errors.append(f"{path}: {exc}")

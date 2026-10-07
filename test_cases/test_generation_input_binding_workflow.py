@@ -504,7 +504,19 @@ finally:
             fixture.doCleanups()
             fixture.tearDown()
 
-    def _assert_real_persisted_a_runtime_switch(self, replace_a_receipt):
+    def test_real_setup_death_disk_only_a_runtime_late_wal_stops_remaining_files(self):
+        self._assert_real_persisted_a_runtime_switch(False, late_authority="wal")
+
+    def test_real_setup_death_disk_only_a_runtime_late_receipt_stops_remaining_files(self):
+        self._assert_real_persisted_a_runtime_switch(False, late_authority="a")
+
+    def test_real_setup_death_disk_only_a_runtime_late_q_commit_stops_remaining_files(self):
+        self._assert_real_persisted_a_runtime_switch(False, late_authority="q")
+
+    def test_real_setup_death_disk_only_a_runtime_missing_latest_sync_retry_retains_wal(self):
+        self._assert_real_persisted_a_runtime_switch(False, late_authority="latest-sync")
+
+    def _assert_real_persisted_a_runtime_switch(self, replace_a_receipt, *, late_authority=None):
         fixture = RELEASE_FIXTURE.ReleaseTransactionTests()
         fixture.setUp()
         try:
@@ -556,10 +568,21 @@ except ValueError as exc:
 common.unlink()
 common.symlink_to(os.path.relpath(q / '01-global.yaml', common.parent))
 (root / 'ztp/ztp-bootstrap_oob.sh').write_bytes(b'partial B runtime\\n')
+if sys.argv[4] == 'late':
+    (root / 'ztp/ztp-bootstrap_oobofoob.sh').write_bytes(b'partial B runtime\\n')
+    (root / 'ztp/ztp.json').write_bytes(b'partial B runtime\\n')
+    if sys.argv[5] == 'latest-sync':
+        import json
+        p = Path(json.loads((root / 'ztp/.setup-switch-journal.json').read_bytes())['body']['old_project']['path'])
+        (p / '99-output-ib_nvl').mkdir()
+        (p / '99-output-ib_nvl/latest').symlink_to('independent-partial-B-target')
 os.kill(os.getpid(), signal.SIGKILL)
 """
-            first = subprocess.run([sys.executable, "-B", "-c", writer, str(root), str(q), str(common),
-                                    "replace" if replace_a_receipt else "exact"],
+            writer_command = [sys.executable, "-B", "-c", writer, str(root), str(q), str(common),
+                              "replace" if replace_a_receipt else "late" if late_authority else "exact"]
+            if late_authority:
+                writer_command.append(late_authority)
+            first = subprocess.run(writer_command,
                                    capture_output=True, text=True, check=False, timeout=30)
             if replace_a_receipt:
                 self.assertEqual(7, first.returncode, first.stdout + first.stderr)
@@ -571,6 +594,122 @@ os.kill(os.getpid(), signal.SIGKILL)
             self.assertEqual(-9, first.returncode, first.stdout + first.stderr)
             evidence = journal.read_bytes()
             mixed = os.readlink(common)
+            if late_authority == "latest-sync":
+                recovery = """
+import importlib.util, json, os, sys
+from pathlib import Path
+from types import SimpleNamespace
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('missing_latest_runtime_load', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+journal = root / 'ztp/.setup-switch-journal.json'
+body = json.loads(journal.read_bytes())['body']
+latest = Path(body['old_project']['path']) / '99-output-ib_nvl/latest'
+sync = load._fsync_parent_directory
+seen = []
+def missing_latest_parent_sync(parent):
+    if parent == latest.parent and not os.path.lexists(latest):
+        assert journal.is_file(), 'WAL retired before missing latest parent sync'
+        seen.append(True)
+        if sys.argv[2] == 'fault':
+            raise OSError('independent missing latest parent sync')
+    return sync(parent)
+load._fsync_parent_directory = missing_latest_parent_sync
+backend = SimpleNamespace(name='supervisor', start=lambda *args: (_ for _ in ()).throw(AssertionError('service start forbidden')))
+fd = load.acquire_deployment_lock(exclusive=True)
+try:
+    try:
+        load.recover_setup_switch_journal(journal, deployment_lock_descriptor=fd,
+            services_quiesced=True, runtime_backend=backend, restore_runtime_from_wal=True)
+    except load.LoadError as error:
+        assert sys.argv[2] == 'fault' and 'independent missing latest parent sync' in str(error), str(error)
+        assert seen and not os.path.lexists(latest)
+        raise SystemExit(7)
+    assert sys.argv[2] == 'retry' and seen, 'reentry failed to repay missing latest sync'
+    assert not journal.exists() and not os.path.lexists(latest)
+finally:
+    load.release_deployment_lock(fd)
+"""
+                for phase, code in (("fault", 7), ("retry", 0)):
+                    result = subprocess.run([sys.executable, "-B", "-c", recovery, str(root), phase],
+                                            capture_output=True, text=True, check=False, timeout=30)
+                    self.assertEqual(code, result.returncode, result.stdout + result.stderr)
+                    self.assertFalse(os.path.lexists(p / "99-output-ib_nvl/latest"))
+                    if phase == "fault":
+                        self.assertEqual(evidence, journal.read_bytes())
+                    else:
+                        self.assertFalse(os.path.lexists(journal))
+                    self.assertEqual(context.setup_state.manifest, state[7].read_bytes())
+                    self.assertEqual(context.setup_state.links, {path: os.readlink(path) for path in context.setup_state.links})
+                    self.assertFalse((root / "service-started").exists())
+                return
+            if late_authority:
+                recovery = """
+import importlib.util, json, sys
+from pathlib import Path
+from types import SimpleNamespace
+root = Path(sys.argv[1])
+kind = sys.argv[2]
+spec = importlib.util.spec_from_file_location('late_a_runtime_load', root / 'DAY0-Prepare/11-load.py')
+load = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = load
+spec.loader.exec_module(load)
+load.active_managed_services = lambda *args, **kwargs: ()
+journal = root / 'ztp/.setup-switch-journal.json'
+body = json.loads(journal.read_bytes())['body']
+authority = (journal if kind == 'wal' else Path(body['a_runtime']['receipt_directory']['path']) / 'receipt.json'
+             if kind == 'a' else Path(body['new_project']['path']) / '99-output-ztp/current-release.json')
+prior = authority.read_bytes() if kind != 'q' else None
+restore = load._restore_receipt_file
+injected = []
+def restore_then_drift(path, record, payload, **guard):
+    result = restore(path, record, payload, **guard)
+    if path.name == 'ztp-bootstrap_oob.sh' and not injected:
+        if kind == 'q':
+            authority.parent.mkdir(parents=True, exist_ok=True)
+            authority.write_bytes(b'independent Q commit marker\\n')
+        else:
+            owner = authority.stat().st_ino
+            authority.rename(root / 'held-original-a-runtime-authority')
+            authority.write_bytes(prior)
+            authority.chmod(0o600 if kind == 'wal' else 0o644)
+            assert owner != authority.stat().st_ino
+        injected.append(authority.stat().st_ino)
+    return result
+load._restore_receipt_file = restore_then_drift
+backend = SimpleNamespace(name='supervisor', start=lambda *args: (_ for _ in ()).throw(AssertionError('service start forbidden')))
+fd = load.acquire_deployment_lock(exclusive=True)
+try:
+    try:
+        load.recover_setup_switch_journal(journal, deployment_lock_descriptor=fd,
+            services_quiesced=True, runtime_backend=backend, restore_runtime_from_wal=True)
+    except load.LoadError as error:
+        expected = 'journal changed' if kind == 'wal' else 'runtime' if kind == 'a' else 'Q parent changed'
+        assert expected in str(error), str(error)
+        assert len(injected) == 1, 'runtime authority injection not reached'
+        assert (root / 'ztp/ztp-bootstrap_oobofoob.sh').read_bytes() == b'partial B runtime\\n', 'authority drift licensed later runtime write'
+        assert (root / 'ztp/ztp.json').read_bytes() == b'partial B runtime\\n', 'authority drift licensed later JSON write'
+        assert authority.stat().st_ino == injected[0]
+        assert authority.read_bytes() == (prior if kind != 'q' else b'independent Q commit marker\\n')
+        raise SystemExit(7)
+    raise AssertionError('A runtime accepted late authority drift')
+finally:
+    load.release_deployment_lock(fd)
+"""
+                held = subprocess.run([sys.executable, "-B", "-c", recovery, str(root), late_authority],
+                                      capture_output=True, text=True, check=False, timeout=30)
+                self.assertEqual(7, held.returncode, held.stdout + held.stderr)
+                self.assertEqual(evidence, journal.read_bytes())
+                self.assertEqual(context.setup_state.manifest, state[7].read_bytes())
+                self.assertEqual(context.setup_state.links, {path: os.readlink(path) for path in context.setup_state.links})
+                self.assertEqual(b"A oob bootstrap\n", (root / "ztp/ztp-bootstrap_oob.sh").read_bytes())
+                self.assertEqual(b"partial B runtime\n", (root / "ztp/ztp-bootstrap_oobofoob.sh").read_bytes())
+                self.assertEqual(b"partial B runtime\n", (root / "ztp/ztp.json").read_bytes())
+                self.assertFalse((root / "service-started").exists())
+                return
             recovery = """
 import importlib.util, sys
 from pathlib import Path
