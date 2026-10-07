@@ -117,7 +117,7 @@ def sha256(path: Path) -> str:
 
 def assert_private_dhcp_transaction_retention(
     api, root: Path, project: Path, outcome: str, *, reenter: bool = False,
-    setup_guard=None,
+    setup_guard=None, a_shapes=False,
 ) -> None:
     """Exercise real LOAD filesystem logic; never execute sudo, dhcpd or live writes."""
     root = root.resolve()
@@ -134,7 +134,7 @@ def assert_private_dhcp_transaction_retention(
     for source, destination in mappings.items():
         source.write_bytes(expected_b[source.name])
         destination.write_bytes(expected_a[destination.name])
-    if outcome == "precommit-shapes":
+    if outcome == "precommit-shapes" or a_shapes:
         original_link_source = root / "independent-original-A-source"
         original_link_source.write_bytes(expected_a["dhcpd_eth.hosts"])
         (live_dir / "dhcpd_eth.hosts").unlink()
@@ -197,7 +197,7 @@ def assert_private_dhcp_transaction_retention(
                 target.mkdir(parents=True, exist_ok=True)
             else:
                 if target in mappings.values():
-                    if outcome in {"bound-setup-before-write", "bound-setup-precommit"}:
+                    if outcome in {"bound-setup-before-write", "bound-setup-precommit", "bound-setup-kill-first", "bound-setup-kill-last"}:
                         transaction, = live_dir.glob(".load-dhcp-transaction-*")
                         receipt = transaction / "a-preimage.json"
                         envelope = json.loads(setup_wal.read_bytes())
@@ -212,7 +212,13 @@ def assert_private_dhcp_transaction_retention(
                         )]
                         assert binding["body"] == json.loads(receipt.read_bytes())["body"]
                         for name in names:
-                            assert binding["body"]["before"][name]["sha256"] == hashlib.sha256(expected_a[name]).hexdigest()
+                            if a_shapes and name == "dhcpd_eth.hosts":
+                                assert binding["body"]["before"][name]["state"] == "link"
+                                assert binding["body"]["before"][name]["target"] == "../independent-original-A-source"
+                            elif a_shapes and name == "dhcpd_nvl.hosts":
+                                assert binding["body"]["before"][name] == {"state": "missing"}
+                            else:
+                                assert binding["body"]["before"][name]["sha256"] == hashlib.sha256(expected_a[name]).hexdigest()
                     if outcome == "preimage-before-write":
                         receipt = target.parent / next(iter(live_dir.glob(".load-dhcp-transaction-*"))).name / "a-preimage.json"
                         assert receipt.is_file(), "persistent four-file A preimage must precede every B overwrite"
@@ -246,6 +252,10 @@ def assert_private_dhcp_transaction_retention(
             target.chmod(mode)
             if outcome == "bound-setup-late-wal" and target == live_dir / "dhcpd.conf" and not injected:
                 replace_bound_authority(setup_wal)
+            if outcome == "bound-setup-kill-first" and target == live_dir / "dhcpd.conf":
+                os.kill(os.getpid(), signal.SIGKILL)
+            if outcome == "bound-setup-kill-last" and target == live_dir / "dhcpd_nvl.hosts":
+                os.kill(os.getpid(), signal.SIGKILL)
         elif operation == "cp":
             if (outcome in {"restore-return", "restore-raise"}
                     and target == live_dir / "dhcpd_eth.hosts"):
@@ -426,13 +436,25 @@ def assert_private_dhcp_transaction_retention(
             return
         if outcome in {"bound-setup-before-write", "bound-setup-precommit"}:
             transaction, = transactions
-            assert {p.name: p.read_bytes() for p in (transaction / "backup").iterdir()} == expected_a
+            if a_shapes:
+                assert os.readlink(transaction / "backup/dhcpd_eth.hosts") == "../independent-original-A-source"
+                assert not os.path.lexists(transaction / "backup/dhcpd_nvl.hosts")
+                for name in ("dhcpd.conf", "dhcpd_ib.hosts"):
+                    assert (transaction / "backup" / name).read_bytes() == expected_a[name]
+            else:
+                assert {p.name: p.read_bytes() for p in (transaction / "backup").iterdir()} == expected_a
             assert set(p.name for p in (transaction / "staged").iterdir()) == set(names)
             assert json.loads(setup_wal.read_bytes())["body"]["dhcp_transaction"]["receipt"] == str(transaction / "a-preimage.json")
             assert setup_wal.read_bytes() != setup_wal_bytes
-            assert {name: (live_dir / name).read_bytes() for name in names} == (
-                expected_a if outcome == "bound-setup-precommit" else expected_b
-            )
+            if a_shapes and outcome == "bound-setup-precommit":
+                assert os.readlink(live_dir / "dhcpd_eth.hosts") == "../independent-original-A-source"
+                assert not os.path.lexists(live_dir / "dhcpd_nvl.hosts")
+                for name in ("dhcpd.conf", "dhcpd_ib.hosts"):
+                    assert (live_dir / name).read_bytes() == expected_a[name]
+            else:
+                assert {name: (live_dir / name).read_bytes() for name in names} == (
+                    expected_a if outcome == "bound-setup-precommit" else expected_b
+                )
             assert candidate.committed == (outcome == "bound-setup-before-write")
             assert candidate.directory_synced == candidate.committed
             if not candidate.committed:
@@ -3940,6 +3962,151 @@ class ReleaseTransactionTests(unittest.TestCase):
                 finally:
                     fixture.doCleanups()
                     fixture.tearDown()
+
+    def test_setup_dhcp_group_recovery_restores_partial_b_from_bound_preimage(self):
+        self._setup_dhcp_group_restore_partial_b()
+
+    def test_explicit_setup_recovery_main_restores_bound_dhcp_group_without_retiring_evidence(self):
+        self._setup_dhcp_group_restore_partial_b(cli=True)
+
+    def test_setup_dhcp_group_recovery_restores_original_link_and_missing_leaf(self):
+        self._setup_dhcp_group_restore_partial_b(shapes=True)
+
+    def test_setup_dhcp_group_recovery_rejects_foreign_evidence_before_p_write(self):
+        for fault in ("receipt-owner", "second-transaction", "restore-stage", "parent-b-visible"):
+            with self.subTest(fault=fault):
+                fixture = ReleaseTransactionTests()
+                fixture.setUp()
+                try:
+                    fixture._setup_dhcp_group_restore_partial_b(fault=fault)
+                finally:
+                    fixture.doCleanups()
+                    fixture.tearDown()
+
+    def _setup_dhcp_group_restore_partial_b(self, *, cli=False, fault=None, shapes=False):
+        state, _context = self._prepare_persisted_a_runtime_switch()
+        journal, descriptor, backend = state[-3:]
+        guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True,
+                     runtime_backend=backend)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            assert_private_dhcp_transaction_retention(
+                LOAD, self.root, state[1], "bound-setup-precommit", setup_guard=guard, a_shapes=shapes,
+            )
+            runtime = self.root.resolve() / "private-etc-dhcp"
+            names = ("dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts")
+            (runtime / "dhcpd.conf").write_bytes((state[1] / "independent-dhcp-B/dhcpd.conf").read_bytes())
+            if shapes:
+                for name in names[1:]:
+                    if os.path.lexists(runtime / name):
+                        (runtime / name).unlink()
+                    shutil.copy2(state[1] / "independent-dhcp-B" / name, runtime / name)
+            (self.ztp / "ztp-bootstrap_oob.sh").write_bytes(b"independent partial B runtime\n")
+            state[2].unlink()
+            state[2].symlink_to(os.path.relpath(state[5], state[2].parent))
+            before = journal.read_bytes()
+            with mock.patch.object(LOAD, "dhcp_file_mappings", return_value={
+                    state[1] / "independent-dhcp-B" / name: runtime / name for name in names}):
+                if fault is not None:
+                    transaction, = runtime.glob(".load-dhcp-transaction-*")
+                    if fault == "receipt-owner":
+                        receipt = transaction / "a-preimage.json"
+                        replacement = transaction / "independent-receipt"
+                        replacement.write_bytes(receipt.read_bytes())
+                        replacement.chmod(0o600)
+                        os.replace(replacement, receipt)
+                    elif fault == "second-transaction":
+                        (runtime / ".load-dhcp-transaction-independent").mkdir(mode=0o700)
+                    elif fault == "restore-stage":
+                        (runtime / ".dhcpd.conf.rollback-independent").write_bytes(b"independent stage\n")
+                    elif fault == "parent-b-visible":
+                        (state[1] / "99-output-ztp/current-release.json").write_bytes(b"independent B\n")
+                    links_before = {path: os.readlink(path) for path in state[9]}
+                    dhcp_before = {name: (runtime / name).read_bytes() for name in names}
+                    with self.assertRaisesRegex(LOAD.LoadError, "HOLD"):
+                        LOAD.recover_setup_switch_journal(
+                            journal, restore_runtime_from_wal=True, recover_dhcp_group=True,
+                            requested_new_project=state[1], **guard,
+                        )
+                    self.assertEqual(links_before, {path: os.readlink(path) for path in state[9]})
+                    self.assertEqual(dhcp_before, {name: (runtime / name).read_bytes() for name in names})
+                    self.assertEqual(b"independent partial B runtime\n",
+                                     (self.ztp / "ztp-bootstrap_oob.sh").read_bytes())
+                    self.assertEqual(before, journal.read_bytes())
+                    self.assertTrue((transaction / "a-preimage.json").is_file())
+                    backend.start.assert_not_called()
+                    return
+                if cli:
+                    LOAD.release_deployment_lock(descriptor)
+                    self._cleanups = [item for item in self._cleanups
+                                      if item[0] != LOAD.release_deployment_lock]
+                    with ExitStack() as stack:
+                        stack.enter_context(mock.patch.object(LOAD, "runtime_os", return_value="Linux"))
+                        stack.enter_context(mock.patch.object(LOAD, "HERE", self.root.resolve() / "DAY0-Prepare"))
+                        stack.enter_context(mock.patch.object(LOAD, "service_runtime_backend", return_value=backend))
+                        forbidden = [stack.enter_context(mock.patch.object(LOAD, name)) for name in (
+                            "initialize_from_template", "activate_project", "render_ztp_runtime",
+                            "start_services", "quiesce_services", "validate_inputs", "prepare_pubkeys")]
+                        result = LOAD.main([str(state[1]), "--host-role", "management-server",
+                                            "--recover-setup-switch"])
+                        self.assertEqual(0, result)
+                        for writer in forbidden:
+                            writer.assert_not_called()
+                else:
+                    result = LOAD.recover_setup_switch_journal(
+                        journal, restore_runtime_from_wal=True, recover_dhcp_group=True,
+                        requested_new_project=state[1], **guard,
+                    )
+                    self.assertEqual("restored-p-a-dhcp-retained", result)
+                self.assertEqual(state[8], state[7].read_bytes())
+                self.assertEqual(state[9], {path: os.readlink(path) for path in state[9]})
+                self.assertEqual(b"A oob bootstrap\n", (self.ztp / "ztp-bootstrap_oob.sh").read_bytes())
+                if shapes:
+                    self.assertEqual("../independent-original-A-source", os.readlink(runtime / "dhcpd_eth.hosts"))
+                    self.assertFalse(os.path.lexists(runtime / "dhcpd_nvl.hosts"))
+                    for name in ("dhcpd.conf", "dhcpd_ib.hosts"):
+                        self.assertEqual(f"independent-A:{name}\n".encode(), (runtime / name).read_bytes())
+                else:
+                    self.assertEqual({name: f"independent-A:{name}\n".encode() for name in names},
+                                     {name: (runtime / name).read_bytes() for name in names})
+                self.assertEqual(before, journal.read_bytes(), "stopped restoration does not retire activation evidence")
+                transaction, = runtime.glob(".load-dhcp-transaction-*")
+                self.assertTrue((transaction / "a-preimage.json").is_file())
+                if not cli:
+                    self.assertEqual(result, LOAD.recover_setup_switch_journal(
+                        journal, restore_runtime_from_wal=True, recover_dhcp_group=True,
+                        requested_new_project=state[1], **guard,
+                    ))
+            backend.start.assert_not_called()
+
+    def test_setup_dhcp_group_namespace_rejects_rebound_directory_during_scan(self):
+        state, _context = self._prepare_persisted_a_runtime_switch()
+        journal, descriptor, backend = state[-3:]
+        guard = dict(deployment_lock_descriptor=descriptor, services_quiesced=True,
+                     runtime_backend=backend)
+        with mock.patch.object(LOAD, "active_managed_services", return_value=()):
+            assert_private_dhcp_transaction_retention(
+                LOAD, self.root, state[1], "bound-setup-precommit", setup_guard=guard,
+            )
+        binding = json.loads(journal.read_bytes())["body"]["dhcp_transaction"]
+        runtime = self.root.resolve() / "private-etc-dhcp"
+        saved = runtime.with_name("independent-original-dhcp-owner")
+        original_scandir = os.scandir
+
+        def rebound_scan(path):
+            runtime.rename(saved)
+            runtime.mkdir(mode=0o700)
+            return original_scandir(path)
+
+        names = tuple(binding["body"]["before"])
+        with mock.patch.object(LOAD, "dhcp_file_mappings", return_value={
+                state[1] / "independent-dhcp-B" / name: runtime / name for name in names}), \
+                mock.patch.object(LOAD.os, "scandir", side_effect=rebound_scan):
+            with self.assertRaises(LOAD.LoadError):
+                LOAD._require_bound_dhcp_transaction_namespace(binding)
+        self.assertTrue(saved.is_dir())
+        self.assertTrue(runtime.is_dir())
+        self.assertEqual([], list(runtime.iterdir()), "foreign replacement must not be removed or adopted")
+        backend.start.assert_not_called()
 
     def _assert_setup_restore_stage_keeps_total_authority(self, kind, surface):
         state, context = self._prepare_persisted_a_runtime_switch()

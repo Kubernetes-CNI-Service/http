@@ -5700,6 +5700,7 @@ def _restore_receipt_file(
     path: Path, record: dict[str, object], payload: bytes | None,
     *, require_authority: Callable[[], None] | None = None,
     stage_prefix: str | None = None,
+    preserve_dhcp_metadata: bool = False,
 ) -> None:
     if stage_prefix is None:
         stage_prefix = f".{path.name}.rollback-"
@@ -5750,8 +5751,12 @@ def _restore_receipt_file(
         with os.fdopen(descriptor, "wb") as stream:
             held_descriptor = os.dup(stream.fileno())
             stream.write(payload)
+            if preserve_dhcp_metadata:
+                os.fchown(stream.fileno(), record["uid"], record["gid"])
             os.fchmod(stream.fileno(), int(record["mode"]))
             stream.flush()
+            if preserve_dhcp_metadata:
+                os.utime(stream.fileno(), ns=(record["mtime_ns"], record["mtime_ns"]))
             staged_identity = os.fstat(held_descriptor)
             os.fsync(stream.fileno())
         if os.path.lexists(path) and path.is_dir() and not path.is_symlink():
@@ -6051,6 +6056,7 @@ def _require_runtime_restore_guard(
 
 def _atomic_restore_setup_link(
     path: Path, raw_target: str, *, require_authority: Callable[[], None] | None = None,
+    dhcp_metadata=None,
 ) -> None:
     if require_authority is not None:
         require_authority()
@@ -6080,6 +6086,14 @@ def _atomic_restore_setup_link(
 
     try:
         temporary.symlink_to(raw_target)
+        if dhcp_metadata is not None:
+            os.lchown(temporary, dhcp_metadata["uid"], dhcp_metadata["gid"])
+            if stat.S_IMODE(temporary.lstat().st_mode) != dhcp_metadata["mode"]:
+                if not hasattr(os, "lchmod"):
+                    raise LoadError("DHCP A link mode cannot be restored; HOLD")
+                os.lchmod(temporary, dhcp_metadata["mode"])
+            os.utime(temporary, ns=(dhcp_metadata["mtime_ns"], dhcp_metadata["mtime_ns"]),
+                     follow_symlinks=False)
         named = temporary.lstat()
         if (not stat.S_ISLNK(named.st_mode) or named.st_nlink != 1
                 or os.readlink(temporary) != raw_target):
@@ -6635,7 +6649,7 @@ def _require_setup_switch_q_parent_preimage(body) -> None:
     # WAL. It must remain canonical and its commit marker must remain absent.
     if (before["path"] != current["path"] or before["file"] != current["file"]
             or (before["parent"] is not None and before["parent"] != current["parent"])):
-        raise LoadError("setup switch Q parent changed or committed; P rollback is blocked")
+        raise LoadError("setup switch Q parent changed or committed; P rollback is blocked; HOLD")
 
 
 def prepare_setup_switch_journal(
@@ -8600,6 +8614,7 @@ def recover_setup_switch_journal(
     restore_runtime_from_wal: bool = False,
     _expected_runtime_context: CrossProjectRollbackContext | None = None,
     requested_new_project: Path | None = None,
+    recover_dhcp_group: bool = False,
 ) -> str:
     """Verify or restore P from a complete WAL and a known P/Q disk state.
 
@@ -8613,6 +8628,9 @@ def recover_setup_switch_journal(
         services_quiesced=services_quiesced,
         runtime_backend=runtime_backend,
     )
+    if type(recover_dhcp_group) is not bool or (recover_dhcp_group and (
+            not restore_runtime_from_wal or requested_new_project is None)):
+        raise LoadError("DHCP group recovery requires explicit disk-only runtime restore and original Q")
     if type(restore_runtime_from_wal) is not bool or (restore_runtime_from_wal and (
             verify_only or inspect_only or retain_journal or manifest_candidate is not None
             or _after_p_restore is not None)):
@@ -8666,7 +8684,7 @@ def recover_setup_switch_journal(
             raise LoadError("setup switch journal mode is not private")
 
         def require_journal_unchanged() -> None:
-            if requested_new_project is not None:
+            if requested_new_project is not None and not recover_dhcp_group:
                 # CLI recovery is not authority to reconcile a second live
                 # transaction. Check throughout P/A writes and WAL retirement,
                 # not merely once before reading the SETUP preimage.
@@ -8697,6 +8715,7 @@ def recover_setup_switch_journal(
             restore_runtime_from_wal=restore_runtime_from_wal,
             expected_runtime_context=_expected_runtime_context,
             requested_new_project=requested_new_project,
+            recover_dhcp_group=recover_dhcp_group,
             runtime_restore_guard=dict(deployment_lock_descriptor=deployment_lock_descriptor,
                                        services_quiesced=services_quiesced, runtime_backend=runtime_backend),
         )
@@ -8719,6 +8738,7 @@ def _recover_setup_switch_journal_snapshot(
     expected_runtime_context: CrossProjectRollbackContext | None = None,
     requested_new_project: Path | None = None,
     runtime_restore_guard=None,
+    recover_dhcp_group=False,
 ) -> str:
     """Recover only from the immutable authority held by the guarded API."""
     if not verify_only:
@@ -8767,11 +8787,17 @@ def _recover_setup_switch_journal_snapshot(
     except (KeyError, TypeError, ValueError, UnicodeError, binascii.Error, LoadError) as exc:
         raise LoadError(f"setup switch journal is invalid: {exc}") from exc
     runtime_context = _setup_switch_runtime_context(body, state)
-    if "dhcp_transaction" in body:
+    group_token = None
+    if "dhcp_transaction" in body and not recover_dhcp_group:
         # This original write obligation cannot be silently ignored by the
         # legacy SETUP-only reader, including inspect/retire entry points.
         # Grouped restoration/finalization must consume all four A files too.
         raise LoadError("SETUP/DHCP grouped recovery is unresolved; HOLD original WAL and backups")
+    if "dhcp_transaction" in body:
+        group_token = _open_setup_switch_dhcp_group(
+            journal, body, opened, runtime_restore_guard, materialized_descriptors,
+        )
+        retain_journal = True
     if expected_runtime_context is not None and runtime_context is not None:
         if (expected_runtime_context.project.resolve(strict=True) != runtime_context.project
                 or expected_runtime_context.selector_target != runtime_context.selector_target
@@ -8798,10 +8824,17 @@ def _recover_setup_switch_journal_snapshot(
         require_wal_unchanged()
         _require_setup_switch_q_parent_preimage(body)
         _setup_switch_runtime_context(body, state)
+        if group_token is not None:
+            _require_bound_dhcp_transaction_namespace(body["dhcp_transaction"])
+            _require_setup_switch_dhcp_transaction(group_token, runtime_restore_guard)
+        elif recover_dhcp_group:
+            require_no_pending_dhcp_transaction()
 
     # A pending SETUP WAL is not authorization to roll P back after Q's
     # parent commit. Recheck this at every recovery mutation and retirement.
     require_journal_unchanged()
+    if group_token is not None:
+        _require_no_pending_dhcp_restore_stages(body["dhcp_transaction"])
     current_manifest = _read_rollback_regular(MANIFEST, limit=_SETUP_MANIFEST_LIMIT)
     q_manifest = None
     if "q_manifest_intent" in body:
@@ -9103,6 +9136,8 @@ def _recover_setup_switch_journal_snapshot(
         # restore and postverification. Exception or death must not erase the
         # only persistent P/Q recovery authority just because links are back.
         after_p_restore(require_authority=require_journal_unchanged)
+        if group_token is not None:
+            _restore_setup_switch_dhcp_group(group_token, runtime_restore_guard, require_journal_unchanged)
         require_journal_unchanged()
         if _recover_setup_switch_journal_snapshot(
                 journal, opened=opened,
@@ -9111,6 +9146,8 @@ def _recover_setup_switch_journal_snapshot(
                 expected_old_state=expected_old_state,
                 expected_new_project=expected_new_project, retain_journal=False,
                 materialized_descriptors=materialized_descriptors,
+                recover_dhcp_group=recover_dhcp_group,
+                runtime_restore_guard=runtime_restore_guard,
         ) != "prepared-p":
             raise LoadError("post-runtime P recovery state is not exact; journal retained")
         require_journal_unchanged()
@@ -9127,6 +9164,10 @@ def _recover_setup_switch_journal_snapshot(
         require_journal_unchanged()
         journal.unlink()
         _fsync_parent_directory(journal.parent)
+    if group_token is not None:
+        _require_no_pending_dhcp_restore_stages(body["dhcp_transaction"])
+        require_journal_unchanged()
+        return "restored-p-a-dhcp-retained"
     return "restored-p"
 
 
@@ -10071,6 +10112,109 @@ def inspect_dhcp_a_preimage(
     finally:
         for _path, descriptor, _identity in reversed(descriptors):
             os.close(descriptor)
+
+
+def _require_bound_dhcp_transaction_namespace(binding):
+    """Only the WAL-named original transaction can coexist with recovery."""
+    runtime = Path(binding["body"]["runtime"]["path"])
+    transaction = Path(binding["body"]["transaction"]["path"])
+    parents = {path.parent for path in dhcp_file_mappings().values()}
+    if parents != {runtime} or transaction.parent != runtime:
+        raise LoadError("DHCP group runtime differs from configured owner namespace; HOLD")
+    if any(not hasattr(os, name) for name in ("O_NOFOLLOW", "O_DIRECTORY")):
+        raise LoadError("DHCP group namespace requires nofollow directory capability; HOLD")
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0)
+    descriptor = -1
+    try:
+        before = runtime.lstat()
+        descriptor = os.open(runtime, flags)
+        held = os.fstat(descriptor)
+        expected = binding["body"]["runtime"]
+
+        def original_owner(metadata):
+            return (stat.S_ISDIR(metadata.st_mode)
+                    and {"path": str(runtime), "dev": metadata.st_dev, "ino": metadata.st_ino,
+                         "mode": stat.S_IMODE(metadata.st_mode), "uid": metadata.st_uid,
+                         "gid": metadata.st_gid} == expected)
+
+        if not original_owner(before) or not original_owner(held):
+            raise LoadError("DHCP group namespace original owner changed; HOLD")
+        with os.scandir(descriptor) as entries:
+            # Entries are never followed or deleted; a second name cannot be
+            # adopted merely because its payload claims the same A/B release.
+            for count, entry in enumerate(entries, 1):
+                if count > 4096:
+                    raise LoadError("DHCP group namespace exceeds scan bound; HOLD")
+                if entry.name.startswith(".load-dhcp-transaction-") and entry.name != transaction.name:
+                    raise LoadError("DHCP group has an unknown second transaction; HOLD")
+        after, named = os.fstat(descriptor), runtime.lstat()
+        if (not original_owner(after) or not original_owner(named)
+                or any(getattr(held, field) != getattr(after, field)
+                       or getattr(held, field) != getattr(named, field)
+                       for field in ("st_mtime_ns", "st_ctime_ns"))):
+            raise LoadError("DHCP group namespace changed during scan; HOLD")
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise LoadError(f"DHCP group namespace inspection failed; HOLD: {exc}") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _require_no_pending_dhcp_restore_stages(binding):
+    runtime = Path(binding["body"]["runtime"]["path"])
+    for name in binding["body"]["before"]:
+        path = runtime / name
+        _require_no_pending_setup_stage(path, f".{name}.rollback-", "DHCP file")
+        _require_no_pending_setup_link_stage(path)
+
+
+def _open_setup_switch_dhcp_group(journal, body, opened, guard, descriptors):
+    binding = body["dhcp_transaction"]
+    _require_bound_dhcp_transaction_namespace(binding)
+    receipt = Path(binding["receipt"])
+    transaction = Path(binding["body"]["transaction"]["path"])
+    parent = Path(binding["body"]["parent"]["destination"])
+    if (receipt != transaction / "a-preimage.json"
+            or _setup_switch_directory_identity(parent.parent.parent) != body["new_project"]
+            or parent.name != "current-release.json" or parent.parent.name != "99-output-ztp"):
+        raise LoadError("DHCP group original owner names differ; HOLD")
+    flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
+    wal_fd = os.open(journal, flags)
+    descriptors.append(wal_fd)
+    receipt_fd = os.open(receipt, flags)
+    descriptors.append(receipt_fd)
+    payload, mode = _read_rollback_regular(receipt, limit=_ROLLBACK_MARKER_LIMIT)
+    if (mode != 0o600 or list(_dhcp_a_preimage_receipt_identity(os.fstat(receipt_fd))) != binding["identity"]
+            or hashlib.sha256(payload).hexdigest() != binding["sha256"]
+            or json.loads(payload)["body"] != binding["body"]):
+        raise LoadError("DHCP group is not the WAL-bound original receipt; HOLD")
+    preimage = (receipt, payload, tuple(binding["identity"]))
+    token = (journal, opened[0], _dhcp_a_preimage_receipt_identity(os.fstat(wal_fd)),
+             _setup_switch_link_parent_identity(journal), wal_fd, preimage, receipt_fd)
+    _require_setup_switch_dhcp_transaction(token, guard)
+    return token
+
+
+def _restore_setup_switch_dhcp_group(token, guard, require_authority):
+    body = _setup_switch_prepared_registration_body((token[1], 0o600))["dhcp_transaction"]["body"]
+    runtime, backup = Path(body["runtime"]["path"]), Path(body["backup"]["path"])
+    states = {runtime / name: row for name, row in body["before"].items()}
+    for path, row in states.items():
+        require_authority()
+        if _dhcp_restore_leaf_state(path) == row:
+            continue
+        if row["state"] == "link":
+            _atomic_restore_setup_link(path, row["target"], require_authority=require_authority,
+                                       dhcp_metadata=row)
+        else:
+            payload = (_read_rollback_regular(backup / path.name)[0] if row["state"] == "file" else None)
+            _restore_receipt_file(path, row, payload, require_authority=require_authority,
+                                  preserve_dhcp_metadata=True)
+    require_authority()
+    _sync_verified_dhcp_a_restore(runtime, states)
+    require_authority()
+    _require_no_pending_dhcp_restore_stages(
+        _setup_switch_prepared_registration_body((token[1], 0o600))["dhcp_transaction"])
 
 
 def _register_setup_switch_dhcp_transaction(preimage, parent_candidate, guard):
@@ -14584,13 +14728,15 @@ def _recover_setup_switch_entrypoint(args: argparse.Namespace) -> int:
         _require_runtime_restore_guard(deployment_lock_descriptor=descriptor,
                                        services_quiesced=True, runtime_backend=backend)
         _require_no_pending_setup_manifest_stage()
-        require_no_pending_dhcp_transaction()
-        recover_setup_switch_journal(
+        result = recover_setup_switch_journal(
             _setup_switch_journal_path(), deployment_lock_descriptor=descriptor,
             services_quiesced=True, runtime_backend=backend,
             restore_runtime_from_wal=True, requested_new_project=project,
+            recover_dhcp_group=True,
         )
         ok("显式 SETUP 冷恢复与 A runtime 核验完成；服务仍停止，未生成新配置或自动激活旧 A")
+        if result == "restored-p-a-dhcp-retained":
+            info("原 WAL 绑定的四文件 DHCP 前像已核验恢复；保留 WAL/事务供显式激活与退休，不放行普通 LOAD")
         return 0
     except (LoadError, OSError, ValueError, RuntimeContractError) as exc:
         print(f"[HOLD] 显式 SETUP 恢复未完成；保留剩余凭据，不启停服务：{exc}", file=sys.stderr)

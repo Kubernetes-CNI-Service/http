@@ -4764,6 +4764,140 @@ finally:
             outcomes=("bound-setup-register-wal", "bound-setup-register-receipt", "bound-setup-late-wal", "bound-setup-parent-wal"),
         )
 
+    def test_real_setup_then_dhcp_writer_death_cold_group_recovery_restores_stopped_a(self):
+        self._real_dhcp_writer_death_group_recovery()
+
+    def test_real_setup_then_dhcp_writer_death_explicit_cli_recovers_group_twice(self):
+        self._real_dhcp_writer_death_group_recovery(cli=True)
+
+    def test_real_setup_then_dhcp_writer_death_cli_restores_link_and_missing_a(self):
+        self._real_dhcp_writer_death_group_recovery(cli=True, shapes=True)
+
+    def test_real_setup_then_dhcp_writer_death_group_recovery_holds_foreign_evidence(self):
+        for fault in ("receipt-owner", "second-transaction", "restore-stage", "parent-b-visible"):
+            with self.subTest(fault=fault):
+                self._real_dhcp_writer_death_group_recovery(fault=fault)
+
+    def _real_dhcp_writer_death_group_recovery(self, *, fault=None, cli=False, shapes=False):
+        fixture = RELEASE_FIXTURE.ReleaseTransactionTests()
+        fixture.setUp()
+        try:
+            state, _context = fixture._prepare_persisted_a_runtime_switch()
+            root = fixture.root.resolve()
+            p, q, common = state[:3]
+            journal, descriptor, _backend = state[-3:]
+            shutil.copytree(ROOT / "tools", root / "tools")
+            for name in ("11-load.py", "01-a-setup.py"):
+                shutil.copy2(ROOT / "DAY0-Prepare" / name, root / "DAY0-Prepare" / name)
+            RELEASE_FIXTURE.LOAD.release_deployment_lock(descriptor)
+            fixture._cleanups = [item for item in fixture._cleanups
+                                 if item[0] != RELEASE_FIXTURE.LOAD.release_deployment_lock]
+            operation = r'''
+import sys, os, importlib.util
+from pathlib import Path
+from types import SimpleNamespace
+root, q, common, test_root = map(Path, sys.argv[1:5])
+sys.path.insert(0, str(test_root))
+from test_cases.module_loader import load_script
+from test_cases.test_load_release_transaction import assert_private_dhcp_transaction_retention
+load = load_script('dhcp_group_cold_load', root / 'DAY0-Prepare/11-load.py')
+load.active_managed_services = lambda *a, **kw: ()
+backend = SimpleNamespace(name='supervisor')
+fd = load.acquire_deployment_lock(exclusive=True)
+guard = dict(deployment_lock_descriptor=fd, services_quiesced=True, runtime_backend=backend)
+try:
+    if sys.argv[5] == 'writer':
+        setup = load_script('dhcp_group_real_setup', root / 'DAY0-Prepare/01-a-setup.py')
+        load.service_runtime_backend = lambda: backend
+        setup._SETUP_SWITCH_WAL_CONTEXT = (vars(load), fd)
+        setup._register_setup_switch_link_before_write(str(common), str(q / '01-global.yaml'))
+        common.unlink()
+        common.symlink_to(os.path.relpath(q / '01-global.yaml', common.parent))
+        (root / 'ztp/ztp-bootstrap_oob.sh').write_bytes(b'independent partial B runtime\n')
+        shapes = sys.argv[6] == 'shapes'
+        assert_private_dhcp_transaction_retention(load, root, q,
+            'bound-setup-kill-last' if shapes else 'bound-setup-kill-first', setup_guard=guard, a_shapes=shapes)
+        raise AssertionError('writer did not die at real first B install')
+    names = ('dhcpd.conf', 'dhcpd_eth.hosts', 'dhcpd_ib.hosts', 'dhcpd_nvl.hosts')
+    runtime = root / 'private-etc-dhcp'
+    load.dhcp_file_mappings = lambda *a: {q / 'independent-dhcp-B' / n: runtime / n for n in names}
+    if sys.argv[5] == 'cli':
+        load.release_deployment_lock(fd)
+        fd = None
+        load.runtime_os = lambda: 'Linux'
+        load.service_runtime_backend = lambda: backend
+        def forbidden(*a, **kw):
+            raise AssertionError('cold recovery invoked generation or service action')
+        for name in ('initialize_from_template', 'activate_project', 'render_ztp_runtime',
+                     'start_services', 'quiesce_services', 'validate_inputs', 'prepare_pubkeys'):
+            setattr(load, name, forbidden)
+        result = load.main([str(q), '--host-role', 'management-server', '--recover-setup-switch'])
+        assert result == 0, result
+    else:
+        result = load.recover_setup_switch_journal(root / 'ztp/.setup-switch-journal.json',
+            restore_runtime_from_wal=True, recover_dhcp_group=True, requested_new_project=q, **guard)
+        assert result == 'restored-p-a-dhcp-retained', result
+    assert (root / 'ztp/ztp-bootstrap_oob.sh').read_bytes() == b'A oob bootstrap\n'
+    for n in names:
+        if sys.argv[6] == 'shapes' and n == 'dhcpd_eth.hosts':
+            assert os.readlink(runtime / n) == '../independent-original-A-source'
+        elif sys.argv[6] == 'shapes' and n == 'dhcpd_nvl.hosts':
+            assert not os.path.lexists(runtime / n)
+        else:
+            assert (runtime / n).read_bytes() == ('independent-A:' + n + '\n').encode()
+    print('R22_BOUND_DHCP_GROUP_RESTORED_STOPPED_A')
+finally:
+    if fd is not None:
+        load.release_deployment_lock(fd)
+'''
+            command = [sys.executable, "-B", "-c", operation, str(root), str(q), str(common), str(ROOT)]
+            shape_arg = "shapes" if shapes else "files"
+            writer = subprocess.run(command + ["writer", shape_arg], capture_output=True, text=True, timeout=30)
+            self.assertEqual(-9, writer.returncode, writer.stdout + writer.stderr)
+            before = journal.read_bytes()
+            self.assertNotEqual(state[9][common], os.readlink(common))
+            self.assertTrue((root / "private-etc-dhcp/dhcpd.conf").read_bytes().startswith(b"# independent-B"))
+            runtime = root / "private-etc-dhcp"
+            transaction, = runtime.glob(".load-dhcp-transaction-*")
+            if fault == "receipt-owner":
+                receipt = transaction / "a-preimage.json"
+                original = receipt.read_bytes()
+                replacement = transaction / "independent-receipt"
+                replacement.write_bytes(original)
+                replacement.chmod(0o600)
+                os.replace(replacement, receipt)
+            elif fault == "second-transaction":
+                (runtime / ".load-dhcp-transaction-independent").mkdir(mode=0o700)
+            elif fault == "restore-stage":
+                (runtime / ".dhcpd.conf.rollback-independent").write_bytes(b"independent stage\n")
+            elif fault == "parent-b-visible":
+                candidate = root / "DAY0-Prepare" / q.name / "99-output-ztp/current-release.json"
+                candidate.write_bytes(b"independent committed B\n")
+            if fault is not None:
+                p_before = {path: os.readlink(path) for path in state[9]}
+                runtime_before = {path: path.read_bytes() for path in runtime.iterdir() if path.is_file()}
+                bootstrap_before = (root / "ztp/ztp-bootstrap_oob.sh").read_bytes()
+                recovery = subprocess.run(command + ["cli" if cli else "recover", shape_arg], capture_output=True, text=True, timeout=30)
+                self.assertNotEqual(0, recovery.returncode, recovery.stdout + recovery.stderr)
+                self.assertIn("HOLD", recovery.stderr)
+                self.assertEqual(p_before, {path: os.readlink(path) for path in state[9]})
+                self.assertEqual(runtime_before, {path: path.read_bytes() for path in runtime.iterdir() if path.is_file()})
+                self.assertEqual(bootstrap_before, (root / "ztp/ztp-bootstrap_oob.sh").read_bytes())
+                self.assertEqual(before, journal.read_bytes())
+                self.assertTrue((transaction / "a-preimage.json").is_file())
+                self.assertFalse((root / "service-started").exists())
+                return
+            for _ in range(2):
+                recovery = subprocess.run(command + ["cli" if cli else "recover", shape_arg], capture_output=True, text=True, timeout=30)
+                self.assertEqual(0, recovery.returncode, recovery.stdout + recovery.stderr)
+                self.assertIn("R22_BOUND_DHCP_GROUP_RESTORED_STOPPED_A", recovery.stdout)
+                self.assertEqual(state[9], {path: os.readlink(path) for path in state[9]})
+                self.assertEqual(before, journal.read_bytes())
+            self.assertFalse((root / "service-started").exists())
+        finally:
+            fixture.doCleanups()
+            fixture.tearDown()
+
     def test_real_setup_then_dhcp_a_preimage_sync_failure_holds_original_a(self):
         self._real_setup_uncertain_parent_dhcp_evidence(
             reenter=False, outcomes=("preimage-file-sync",),

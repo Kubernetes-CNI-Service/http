@@ -480,7 +480,9 @@ Linux management-server 的显式 `11-load.py <Q项目> --host-role management-s
 --recover-setup-switch` 是独立冷恢复操作：必须已经停服，取得排他锁并将指定 Q 的物理身份
 与持有的原 WAL 比较；仅凭 WAL 恢复 P/A，不进入普通模板/生成/发布流程，不启停服务。
 生成、导入、启动、dry-run 等混合意图拒绝；`--skip-infra` 可保留，但此操作从不运行 infra。
-未结清 DHCP 事务在入口、恢复写前及 WAL 退休前均 HOLD；晚到时 A 可能已恢复，不能冒称零写。
+未被原 WAL 写前绑定的 DHCP 事务在入口及恢复写前均 HOLD；晚到时 A 可能已恢复，不能冒称零写。
+原 WAL 已绑定的唯一 DHCP 事务可由同一显式 CLI 分组恢复停止状态 A，但保留 WAL/事务，
+不据恢复成功许可普通 LOAD、证据退休或服务启动。
 已提交 B、未知 Q、缺失/不完整 WAL、活跃/未知服务继续保留凭据。成功也只是停止状态的
 A 恢复，不是 B finalizer 或人工核验后的显式健康激活；真实 Linux/root/断电见证仍 OPEN。
 每个私有拒绝子场景还必须恢复外层模块路径并清理自己的临时目录；独立清理断言先 FAIL
@@ -497,10 +499,20 @@ runtime/transaction/backup、Q parent 前像和 B candidate）写入持有的原
 登记失败或总权限丢失保持 HOLD，保留原备份及已合法写入的部分 B，不从外来同名
 WAL/receipt 取得自动回退权限。即使 A precommit 回退成功，也不清理仍被 WAL 引用的事务。
 旧 SETUP-only reader 遇 `dhcp_transaction` 明确拒绝恢复/退休，不会忽略这项新增义务。
-这一步是持久写集绑定，不是分组冷恢复、Q 提交后的 B finalizer 或旧 A 健康激活完成；
+写前绑定本身不是 Q 提交后的 B finalizer 或旧 A 健康激活完成；
 legacy 无 A runtime 的 WAL 也不能因登记 DHCP 而升级为完整 A 恢复权限。
 direct 和真实私有 LOAD→SETUP→LOAD 覆盖写前登记、precommit 回退保留、登记/写后/最终
 parent 回调边界的同字节外来 WAL/receipt。root/Linux/断电及整树正式 proof 仍独立验收。
+
+原 WAL 绑定的 DHCP 分组冷恢复须指定原 Q、持有排他锁且服务已停；完整检查原 receipt
+身份/摘要/前像、runtime/transaction/backup/staged 和未提交 Q parent 后，才恢复 P、
+A runtime 及四个 DHCP 文件。逐次写前再核总 authority；原文件 mode/uid/gid/mtime、
+链接及缺席状态验证同步后，返回 `restored-p-a-dhcp-retained`，保留原 WAL/全部事务凭据。
+未知第二事务、同字节外来 receipt、恢复暂存物、扫描时 runtime 目录换绑、Q parent 变化
+均 HOLD，不采用相似 payload 或前缀清理证据。direct 与真实 SETUP→DHCP 写后 SIGKILL→
+两次全新 LOAD API/显式 CLI 覆盖部分 B、链接/缺席恢复和拒绝边界。
+这仍不是 Q 已提交后的 B 收口、完整共享写集、旧 A 显式健康激活、root/Linux/断电见证；
+原故障诊断闸门及正式 related/full/check 仍单独验收，不以局部 PASS 代替。
 
 R22 跨项目恢复不能在 P 链接和 manifest 恢复后、旧 A runtime 恢复之前删除 WAL。
 原 WAL 的 descriptor、身份和完整字节须持有到 runtime 恢复返回，再复核停服/锁、
