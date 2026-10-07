@@ -37,6 +37,25 @@ def valid_env(body):
 
 
 class ManualChannelDirectTests(unittest.TestCase):
+    def test_decimal_settings_projection_preserves_large_integer_after_exact_worker_receipt(self):
+        body = b"action=settings&panel=Switch+Status"
+        environment = {**valid_env(body),
+                       "HTTP_ACCEPT": "application/vnd.http.issue-tracker.settings+json"}
+        native = {"settings": "current", "k": 9007199254740993,
+                  "revision": 9007199254740995, "event_sha256": "d" * 64,
+                  "online": "disabled_no_send_authority"}
+        expected = {"settings": "current", "k": "9007199254740993",
+                    "revision": "9007199254740995", "event_sha256": "d" * 64,
+                    "online": "disabled_no_send_authority"}
+        self.assertEqual(("200 OK", expected), cgi.handle(
+            environment, body, submit=lambda _: native))
+        # Negotiation changes representation, never the worker's typed
+        # contract: strings/flags/partial replies still cannot be receipts.
+        for invalid in (expected, {**native, "k": True}, {"success": True}):
+            with self.subTest(invalid=invalid):
+                self.assertEqual("503 Service Unavailable", cgi.handle(
+                    environment, body, submit=lambda _: invalid)[0])
+
     def test_authenticated_settings_forms_are_exact_typed_intents(self):
         read = b"action=settings&panel=Switch+Status"
         self.assertEqual({"action": "settings", "panel": "Switch Status",

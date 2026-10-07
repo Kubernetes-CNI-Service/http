@@ -2259,9 +2259,13 @@ def _issue_tracker_manual_controls(panel_id: str, panel: str) -> str:
         f'<button id="issue-tracker-{panel_id}-preview" type="button" '
         f'onclick="issueTrackerManualPreview(\'{panel}\')">发布到 Issue Tracker</button>'
         f'<label>合格窗口 K <input id="issue-tracker-{panel_id}-k" '
-        'type="number" min="1" value="3" disabled '
-        'title="服务端 K 设置尚未接入"></label>'
-        '<small>仅本地预览；Stage O 在线发布未启用；K 设置待接入</small>'
+        'type="text" inputmode="numeric" pattern="[1-9][0-9]*" value="" disabled '
+        'title="先查询受保护的 K 设置"></label>'
+        f'<button id="issue-tracker-{panel_id}-k-load" type="button" '
+        f'onclick="issueTrackerSettingsRead(\'{panel}\')">查询 K</button>'
+        f'<button id="issue-tracker-{panel_id}-k-save" type="button" disabled '
+        f'onclick="issueTrackerSettingsSave(\'{panel}\')">保存 K</button>'
+        '<small>仅本地预览；Stage O 在线发布未启用；K 尚未核验</small>'
         '</span>'
     )
 
@@ -2299,6 +2303,90 @@ const ISSUE_TRACKER_SHEETS = {
 let pendingIssueTrackerPreview = null;
 let issueTrackerRequestSequence = 0;
 let issueTrackerManualBusy = false;
+let issueTrackerSettings = null;
+const ISSUE_TRACKER_PANEL_IDS = {
+  'Switch Status': 'eth', 'Eth Link Validation': 'etop', 'IB Link Validation': 'itop',
+};
+
+function validIssueTrackerSettings(payload, state) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
+  const keys = ['settings', 'k', 'revision', 'event_sha256', 'online'];
+  if (state === 'committed') keys.push('replay');
+  return Object.keys(payload).length === keys.length
+    && keys.every(key => Object.prototype.hasOwnProperty.call(payload, key))
+    && payload.settings === state
+    && typeof payload.k === 'string' && /^[1-9][0-9]*$/.test(payload.k)
+    && typeof payload.revision === 'string' && /^(0|[1-9][0-9]*)$/.test(payload.revision)
+    && typeof payload.event_sha256 === 'string' && /^[0-9a-f]{64}$/.test(payload.event_sha256)
+    && payload.online === 'disabled_no_send_authority'
+    && (state !== 'committed' || typeof payload.replay === 'boolean');
+}
+
+function issueTrackerSettingsRender(receipt) {
+  issueTrackerSettings = receipt;
+  for (const id of Object.values(ISSUE_TRACKER_PANEL_IDS)) {
+    const input = document.getElementById(`issue-tracker-${id}-k`);
+    const save = document.getElementById(`issue-tracker-${id}-k-save`);
+    if (input) {input.value = receipt ? receipt.k : ''; input.disabled = !receipt;}
+    if (save) save.disabled = !receipt;
+  }
+}
+
+function issueTrackerSettingsNotice(panel, text) {
+  const notice = document.querySelector(
+    `.issue-tracker-manual[data-issue-tracker-panel="${panel}"] small`);
+  if (notice) notice.textContent = text;
+}
+
+async function issueTrackerSettingsRead(panel) {
+  if (!Object.prototype.hasOwnProperty.call(ISSUE_TRACKER_PANEL_IDS, panel)
+      || issueTrackerManualBusy) return;
+  issueTrackerManualCancel();
+  const sequence = issueTrackerRequestSequence;
+  issueTrackerSettingsRender(null);
+  issueTrackerManualBusy = true;
+  try {
+    const receipt = await issueTrackerManualPost(new URLSearchParams({action: 'settings', panel}));
+    if (sequence !== issueTrackerRequestSequence) return;
+    if (!validIssueTrackerSettings(receipt, 'current')) throw new Error('invalid settings');
+    issueTrackerSettingsRender(receipt);
+    issueTrackerSettingsNotice(panel, `K=${receipt.k}；版本=${receipt.revision}；在线发布未启用`);
+  } catch (_error) {
+    issueTrackerSettingsNotice(panel, 'K 状态未知；请检查受保护状态，勿重试写入');
+  } finally {issueTrackerManualBusy = false;}
+}
+
+async function issueTrackerSettingsSave(panel) {
+  if (!Object.prototype.hasOwnProperty.call(ISSUE_TRACKER_PANEL_IDS, panel)
+      || issueTrackerManualBusy || !issueTrackerSettings) return;
+  const newK = document.getElementById(`issue-tracker-${ISSUE_TRACKER_PANEL_IDS[panel]}-k`)?.value;
+  if (typeof newK !== 'string' || !/^[1-9][0-9]*$/.test(newK)) {
+    issueTrackerSettingsNotice(panel, 'K 必须为不带前导零的正整数');
+    return;
+  }
+  const prior = issueTrackerSettings;
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  const requestId = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+  issueTrackerManualCancel();
+  const sequence = issueTrackerRequestSequence;
+  // Consume the verified revision before sending. Lost replies never resend.
+  issueTrackerSettingsRender(null);
+  issueTrackerManualBusy = true;
+  try {
+    const receipt = await issueTrackerManualPost(new URLSearchParams({
+      action: 'set_k', panel, new_k: newK, expected_revision: prior.revision, request_id: requestId,
+    }));
+    if (sequence !== issueTrackerRequestSequence) return;
+    if (!validIssueTrackerSettings(receipt, 'committed') || receipt.k !== newK
+        || receipt.revision !== (BigInt(prior.revision) + 1n).toString())
+      throw new Error('unbound settings receipt');
+    issueTrackerSettingsRender(receipt);
+    issueTrackerSettingsNotice(panel, `K=${receipt.k} 已持久化；在线发布未启用`);
+  } catch (_error) {
+    issueTrackerSettingsNotice(panel, 'K 保存结果未知；请检查受保护状态，勿重试');
+  } finally {issueTrackerManualBusy = false;}
+}
 
 function validIssueTrackerPreview(payload, panel) {
   const hex = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
@@ -2348,6 +2436,7 @@ async function issueTrackerManualPost(body) {
     headers: {
       'Content-Type': 'application/x-www-form-urlencoded',
       'X-Requested-With': 'IssueTrackerManualControl',
+      'Accept': 'application/vnd.http.issue-tracker.settings+json',
     }, body,
   });
   const payload = await response.json();

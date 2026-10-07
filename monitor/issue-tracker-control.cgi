@@ -78,6 +78,10 @@ def handle(environ, body, *, submit=send_to_worker):
             require_settings_result(result, request)
         except ManualChannelHold:
             return "503 Service Unavailable", {"error": "manual_worker_unavailable"}
+        if environ.get("HTTP_ACCEPT") == "application/vnd.http.issue-tracker.settings+json":
+            # The worker contract remains exact integers. Browsers negotiate
+            # decimal strings so JSON parsing cannot round large K/revisions.
+            result = {**result, "k": str(result["k"]), "revision": str(result["revision"])}
     return "200 OK", result
 
 
